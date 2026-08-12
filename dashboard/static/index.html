@@ -1,0 +1,831 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Eshu">
+<meta name="theme-color" content="#101012">
+<link rel="manifest" href="/static/manifest.json">
+<link rel="apple-touch-icon" href="/static/eshu_logo.png">
+<title>Eshu Gateway Control Center</title>
+<link rel="icon" href="/static/eshu_logo.png" type="image/png">
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+  tailwind.config = {
+    theme: {
+      extend: {
+        colors: {
+          'eshu-bg': '#101012',
+          'eshu-surface': '#1a1a1d',
+          'eshu-hover': '#252529',
+          'eshu-border': '#333336',
+          'eshu-text': '#f1f1f1',
+          'eshu-muted': '#9ca3af',
+          'eshu-red': '#e63946',
+          'eshu-red-hover': '#b92b38',
+          'eshu-red-glow': 'rgba(230, 57, 70, 0.25)',
+          'eshu-green': '#4ade80',
+          'eshu-yellow': '#fbbf24',
+          'eshu-blue': '#60a5fa',
+        }
+      }
+    }
+  }
+</script>
+<link rel="stylesheet" href="/static/style.css">
+
+</head>
+<body>
+
+<!-- Toast -->
+<div id="toast" class="hidden fixed top-4 left-1/2 transform -translate-x-1/2 z-50 px-6 py-3 rounded-lg text-sm font-medium shadow-lg toast"></div>
+
+<!-- First-Run Setup Overlay -->
+<div id="setup-overlay" class="hidden login-overlay">
+  <div class="login-card">
+    <img src="/static/eshu_banner.png" alt="Eshu">
+    <h1 style="color:var(--text-main);">Welcome to Eshu</h1>
+    <p>First-run setup — create your dashboard password</p>
+    <div class="flex flex-col gap-3">
+      <input type="password" id="setup-password" placeholder="Password (min 4 chars)" class="text-center">
+      <input type="password" id="setup-password-confirm" placeholder="Confirm password" class="text-center" onkeydown="if(event.key==='Enter')doSetup()">
+      <button onclick="doSetup()" id="setup-btn" class="btn btn-approve w-full py-3">Set Password & Continue</button>
+      <p id="setup-error" class="hidden text-xs" style="color:var(--brand-red);"></p>
+    </div>
+    <p class="text-xs mt-4" style="color:var(--text-muted);">Or run <code style="color:var(--brand-red);">python set_password.py</code> on the server.</p>
+  </div>
+</div>
+
+<!-- Login Overlay -->
+<div id="login-overlay" class="hidden login-overlay">
+  <div class="login-card">
+    <img src="/static/eshu_banner.png" alt="Eshu">
+    <h1 style="color:var(--text-main);">Eshu Gateway</h1>
+    <p>Authentication Required</p>
+    <div class="flex flex-col gap-3">
+      <input type="password" id="login-password" placeholder="Dashboard password" class="text-center" onkeydown="if(event.key==='Enter')doLogin()">
+      <button onclick="doLogin()" id="login-btn" class="btn btn-approve w-full py-3">Log In</button>
+      <p id="login-error" class="hidden text-xs" style="color:var(--brand-red);">Invalid password. Please try again.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Sidebar ─────────────────────────────────────────────────── -->
+<aside class="sidebar" id="main-sidebar" style="display:none;">
+  <div class="sidebar-brand">
+    <div class="sidebar-brand-logo"><img src="/static/eshu_logo.png" alt="Eshu"></div>
+    <div class="sidebar-brand-text">
+      <div class="brand-name">Eshu</div>
+      <div class="brand-sub">Gateway</div>
+    </div>
+  </div>
+  <div class="nav-section">
+    <div class="nav-label">Navigation</div>
+    <button class="nav-item active" id="nav-home" onclick="switchView('home')">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+      <span>Dashboard</span>
+    </button>
+    <button class="nav-item" id="nav-gateways" onclick="switchView('gateways')">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="7" rx="1"/><rect x="2" y="14" width="20" height="7" rx="1"/><circle cx="6" cy="6.5" r="1.2" fill="currentColor" stroke="none"/><circle cx="6" cy="17.5" r="1.2" fill="currentColor" stroke="none"/></svg>
+      <span>Gateways</span>
+    </button>
+    <button class="nav-item" id="nav-windows" onclick="switchView('windows')">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+      <span>Windows</span>
+    </button>
+    <button class="nav-item" id="nav-stats" onclick="switchView('stats')">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="12" width="4" height="8" rx="1"/><rect x="10" y="7" width="4" height="13" rx="1"/><rect x="17" y="3" width="4" height="17" rx="1"/></svg>
+      <span>Statistics</span>
+    </button>
+  </div>
+  <div class="nav-section">
+    <div class="nav-label">Operations</div>
+    <button class="nav-item" id="nav-controls" onclick="switchView('controls')">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
+      <span>Controls</span>
+    </button>
+    <button class="nav-item" id="nav-fleet" onclick="switchView('fleet')">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+      <span>Fleet Run</span>
+    </button>
+  </div>
+  <div class="nav-spacer"></div>
+  <div class="sidebar-bottom">
+    <div class="sidebar-status user-pill" id="health-pill" title="Gateway health">
+      <div class="health-dot green" id="health-dot"></div>
+      <span class="sidebar-status-text">Gateway Health</span>
+    </div>
+    <button class="nav-item" id="nav-settings" onclick="switchView('settings')">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h0a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+      <span>Settings</span>
+    </button>
+    <button class="nav-item" id="nav-logs" onclick="switchView('logs')">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
+      <span>Logs</span>
+    </button>
+    <button class="nav-item nav-logout" id="nav-logout" onclick="doLogout()">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+      <span>Log Out</span>
+    </button>
+  </div>
+</aside>
+
+<!-- Main Content -->
+<div class="main-content" id="main-content" style="display:none;">
+  <div class="main-header">
+    <div class="flex items-center gap-2">
+      <h1>Eshu Gateway</h1>
+      <span class="version-badge" id="dashboard-version-label">...</span>
+    </div>
+  </div>
+
+  <!-- Override Mode Banner -->
+  <div id="override-banner" class="override-banner hidden">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+    <span id="override-banner-text" style="flex:1;">Override Mode active</span>
+    <button onclick="switchView('gateways')" class="btn btn-xs" style="background:rgba(255,255,255,0.15);color:white;border:1px solid rgba(255,255,255,0.2);">View Gateways</button>
+  </div>
+
+  <!-- Emergency Freeze Banner -->
+  <div id="freeze-banner" class="freeze-banner hidden">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+    <span id="freeze-banner-text" style="flex:1;">Fleet FROZEN — all commands rejected</span>
+    <button onclick="switchView('controls')" class="btn btn-xs" style="background:rgba(255,255,255,0.15);color:white;border:1px solid rgba(255,255,255,0.2);">Unfreeze</button>
+  </div>
+
+  <div class="main-body">
+    <!-- HOME VIEW — Dashboard -->
+    <div id="view-home" class="block w-full">
+      <!-- Pending JIT Widget -->
+      <div id="jit-pending-widget" class="widget glow">
+        <div class="widget-header">
+          ⚡ Pending Requests <span id="jit-pending-count" class="text-sm" style="color:var(--text-muted);">0 pending</span>
+          <span id="jit-new-badge" class="new-badge hidden">New</span>
+        </div>
+        <div id="jit-tickets"><p style="color:var(--text-muted);">No pending requests — all clear.</p></div>
+      </div>
+
+      <!-- Deny Blocklist Bar -->
+      <div id="deny-blacklist-bar" class="hidden deny-bar flex items-center justify-between px-4 py-3 mb-4 rounded-lg" style="background:var(--bg-surface);border:1px solid var(--border-color);">
+        <span id="deny-bar-text" class="text-sm" style="color:var(--text-muted);"></span>
+        <div class="flex gap-2">
+          <button onclick="handleDenyBlocklist()" class="btn btn-sm" style="background:var(--brand-red);color:white;">Yes, Blocklist & Push</button>
+          <button onclick="dismissDenyBar()" class="btn btn-deny btn-sm">Dismiss</button>
+        </div>
+      </div>
+
+      <!-- Stats Row -->
+      <div class="stat-row">
+        <div class="stat-card" onclick="toggleFilter('pending')" id="box-pending">
+          <span class="stat-value" style="color:var(--status-warning);" id="stat-pending">0</span>
+          <span class="stat-label">Expired</span>
+        </div>
+        <div class="stat-card" onclick="toggleFilter('approved')" id="box-approved">
+          <span class="stat-value" style="color:var(--status-success);" id="stat-approved">0</span>
+          <span class="stat-label">Approved</span>
+        </div>
+        <div class="stat-card" onclick="toggleFilter('auto-approved')" id="box-auto">
+          <span class="stat-value" style="color:var(--status-info);" id="stat-auto">0</span>
+          <span class="stat-label">Auto-Approved</span>
+        </div>
+        <div class="stat-card" onclick="toggleFilter('blocked')" id="box-blocked">
+          <span class="stat-value" style="color:#fb923c;" id="stat-blocked">0</span>
+          <span class="stat-label">Blocked</span>
+        </div>
+        <div class="stat-card" onclick="toggleFilter('denied')" id="box-denied">
+          <span class="stat-value" style="color:var(--brand-red);" id="stat-denied">0</span>
+          <span class="stat-label">Denied</span>
+        </div>
+      </div>
+
+      <!-- Request History Table -->
+      <div class="widget">
+        <div class="widget-header">
+          Historical Commands
+          <span id="filter-badge" class="hidden text-xs px-2.5 py-0.5 rounded-full font-medium" style="background:rgba(96,165,250,0.1);color:var(--status-info);border:1px solid rgba(96,165,250,0.2);"></span>
+          <div class="flex items-center gap-2">
+            <input type="text" id="request-search" placeholder="Search..." class="text-xs px-2 py-1 rounded-lg" style="background:var(--bg-card);border:1px solid var(--border-color);color:var(--text-primary);width:160px;" oninput="onRequestSearch()">
+            <button onclick="fetchRequests()" class="btn btn-muted btn-xs">↻ Refresh</button>
+            <div class="relative">
+              <button onclick="toggleDropdown()" id="purge-btn" class="btn btn-muted btn-xs flex items-center gap-1"><span>Clear History</span><svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg></button>
+              <div id="purge-dropdown" class="dropdown-menu widget" style="border-radius:10px;">
+                <button onclick="purgeHistory('30m')" class="block w-full text-left px-4 py-2 text-sm hover:brightness-125" style="color:var(--text-muted);">Older than 30 minutes</button>
+                <button onclick="purgeHistory('1h')" class="block w-full text-left px-4 py-2 text-sm hover:brightness-125" style="color:var(--text-muted);">Older than 1 hour</button>
+                <button onclick="purgeHistory('1d')" class="block w-full text-left px-4 py-2 text-sm hover:brightness-125" style="color:var(--text-muted);">Older than 1 day</button>
+                <button onclick="purgeHistory('2d')" class="block w-full text-left px-4 py-2 text-sm hover:brightness-125" style="color:var(--text-muted);">Older than 2 days</button>
+                <button onclick="purgeHistory('7d')" class="block w-full text-left px-4 py-2 text-sm hover:brightness-125" style="color:var(--text-muted);">Older than 7 days</button>
+                <div class="my-1" style="border-top:1px solid var(--border-color);"></div>
+                <button onclick="purgeHistory('all')" class="block w-full text-left px-4 py-2 text-sm font-medium" style="color:var(--brand-red);">Clear all history</button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>ID</th><th>Time</th><th>Host / Target IP</th><th>Command</th><th>Status</th><th class="text-right">Actions</th></tr></thead>
+            <tbody id="table-body"></tbody>
+          </table>
+        </div>
+        <div id="empty-state" class="hidden flex-col items-center justify-center py-12" style="color:var(--text-muted);"><p>No activity recorded yet.</p></div>
+      </div>
+    </div>
+
+    <!-- GATEWAYS VIEW — Enrollment + unified gateway table -->
+    <div id="view-gateways" class="hidden w-full">
+      <div class="widget">
+        <div class="widget-header">Gateway Enrollment</div>
+        <p class="text-sm mb-4" style="color:var(--text-muted);">Store SSH keys once, then generate a one-liner to install gateways on any new host.</p>
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-5">
+          <div class="p-4 rounded-lg" style="background:var(--bg-base);border:1px solid var(--border-color);">
+            <div class="flex justify-between items-center mb-3"><h3 class="text-sm font-semibold">SSH Public Keys</h3><button onclick="toggleKeyEdit()" id="edit-keys-btn" class="btn btn-muted btn-xs">Edit Keys</button></div>
+            <div id="keys-display">
+              <div class="text-xs mb-2"><span style="color:var(--text-muted);">Eshu Gateway Key</span><br><span style="color:var(--text-muted);font-size:11px;">What the AI agent uses — logs in as <code style="color:var(--text-muted);">eshu-gateway</code>; every command goes through approval.</span><br><code style="color:var(--text-main);" id="display-eshu-key">Not configured</code></div>
+            </div>
+            <div id="keys-edit" class="hidden space-y-3">
+              <input type="text" id="edit-eshu-key" placeholder="Paste the agent's public key (eshu_gateway.pub)...">
+              <div class="flex gap-2"><button onclick="saveKeys()" class="btn btn-sm" style="background:var(--status-success);color:var(--bg-base);">Save Keys</button><button onclick="toggleKeyEdit()" class="btn btn-muted btn-sm">Cancel</button></div>
+            </div>
+          </div>
+          <div class="p-4 rounded-lg" style="background:var(--bg-base);border:1px solid var(--border-color);">
+            <h3 class="text-sm font-semibold mb-2">Enrollment One-Liner</h3>
+            <p class="text-xs mb-2" style="color:var(--text-muted);">Override the dashboard URL gateways use (defaults to your browser's URL):</p>
+            <div class="flex gap-2 mb-3"><input type="text" id="enroll-base-url" placeholder="Auto-detected from browser..." oninput="updateEnrollCommand()"></div>
+            <p class="text-xs mb-2" style="color:var(--text-muted);">Generate a token, then run this command on any new host:</p>
+            <div class="flex gap-2 mb-3"><input type="text" id="enroll-command" readonly placeholder="Click 'Generate New Token' to get a one-liner..." value=""><button onclick="copyEnrollCommand()" id="copy-enroll-btn" class="btn btn-muted btn-sm" disabled>📋 Copy</button></div>
+            <button onclick="generateToken()" id="generate-token-btn" class="btn btn-sm" style="background:var(--brand-red);color:white;">Generate New Token</button>
+            <span id="token-countdown" class="hidden ml-3 text-xs font-mono"></span>
+          </div>
+        </div>
+      </div>
+      <div class="widget mt-5">
+        <div class="widget-header">Active Gateways</div>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Status</th><th>Gateway</th><th>IP</th><th>Enrolled</th><th>Policy</th><th>Health</th><th>Modes</th><th class="text-right">Actions</th></tr></thead>
+          <tbody id="gateways-table-body"><tr><td colspan="8" class="px-4 py-3" style="color:var(--text-muted);">Loading...</td></tr></tbody>
+        </table></div>
+      </div>
+    </div>
+
+    <!-- APPROVED WINDOWS VIEW -->
+    <div id="view-windows" class="hidden w-full">
+      <div class="widget">
+        <div class="widget-header"><span><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline-block;vertical-align:middle;margin-right:6px;flex-shrink:0;"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>Approved Windows</span>
+          <button onclick="openCreateWindowModal()" class="btn btn-sm" style="background:var(--brand-red);color:white;">+ Create Window</button>
+        </div>
+        <p class="text-xs mb-4" style="color:var(--text-muted);">Pre-approved time windows for cron/periodic commands. Give the token to your AI agent.</p>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>ID</th><th>Status</th><th>Label / Token</th><th>Gateway</th><th>Command</th><th>Schedule</th><th class="text-center">Execs</th><th class="text-right"></th></tr></thead>
+            <tbody id="windows-table-body"><tr><td colspan="8" class="px-4 py-3" style="color:var(--text-muted);">Loading...</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- STATISTICS VIEW -->
+    <div id="view-stats" class="hidden w-full">
+      <div class="flex items-center gap-3 mb-4">
+        <span style="color:var(--text-main);font-weight:600;">Command Statistics</span>
+        <select id="stats-days" onchange="fetchStatistics()" class="text-xs" style="width:130px;flex-shrink:0;background:var(--bg-surface);color:var(--text-main);border:1px solid var(--border-color);border-radius:6px;padding:4px 10px;">
+          <option value="7">7 days</option>
+          <option value="14" selected>14 days</option>
+          <option value="30">30 days</option>
+          <option value="90">90 days</option>
+          <option value="365">1 year</option>
+        </select>
+        <button onclick="fetchStatistics()" class="btn btn-muted btn-xs">Refresh</button>
+        <a href="/api/statistics/export?days=14&format=csv" class="btn btn-muted btn-xs" style="text-decoration:none;" download>CSV</a>
+      </div>
+      <div id="stats-summary-cards" class="grid grid-cols-4 gap-3 mb-5"></div>
+      <div class="widget mb-5" id="suggestions-widget">
+        <div class="widget-header">
+          Policy Suggestions
+          <span id="suggestions-summary" class="text-xs" style="color:var(--text-muted);"></span>
+          <div style="flex:1;"></div>
+          <button onclick="markSuggestionsSeen()" class="btn btn-muted btn-xs">Mark All Seen</button>
+          <button onclick="refreshSuggestions()" class="btn btn-muted btn-xs">Refresh</button>
+        </div>
+        <p class="text-xs mb-3" style="color:var(--text-muted);">Commands repeatedly approved via JIT that aren't yet allowlisted. Review periodically and allowlist the ones you trust to reduce JIT noise.</p>
+        <div id="suggestions-list"><p style="color:var(--text-muted);">Loading...</p></div>
+      </div>
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-5 items-stretch">
+        <div class="widget h-full">
+          <div class="widget-header">Denied Commands</div>
+          <p class="text-xs mb-2" style="color:var(--text-muted);">Most frequently denied commands — consider blocklist refinement</p>
+          <div id="stats-denied"><p style="color:var(--text-muted);">Loading...</p></div>
+        </div>
+        <div class="widget h-full">
+          <div class="widget-header">Command Categories</div>
+          <p class="text-xs mb-2" style="color:var(--text-muted);">Breakdown of gateway activity by category</p>
+          <div id="stats-categories"><p style="color:var(--text-muted);">Loading...</p></div>
+        </div>
+      </div>
+      <div class="widget mt-5">
+        <div class="widget-header">Gateway Summary</div>
+        <div id="stats-gateway-filters" class="flex flex-wrap items-center gap-2 mb-4"></div>
+        <div class="table-wrap"><table><thead><tr><th></th><th>Gateway</th><th>IP</th><th class="text-right">Total</th><th class="text-right">Auto</th><th class="text-right">JIT</th><th class="text-right">Blocked</th><th class="text-right">Denied</th><th class="text-right">Auto %</th></tr></thead><tbody id="stats-summary-body"><tr><td colspan="9" class="px-4 py-3" style="color:var(--text-muted);">Loading...</td></tr></tbody></table></div>
+      </div>
+      <div class="widget mt-5">
+        <div class="widget-header">Top 10 Commands</div>
+        <p class="text-xs mb-3" style="color:var(--text-muted);">Most frequent base commands (split on && / || / ; / |)</p>
+        <div class="table-wrap"><table>
+          <thead><tr><th class="w-8 text-center">#</th><th>Command</th><th class="w-24">Frequency</th><th class="text-right w-16">Count</th></tr></thead>
+          <tbody id="stats-topcmds-body"><tr><td colspan="4" class="px-4 py-3" style="color:var(--text-muted);">Loading...</td></tr></tbody>
+        </table></div>
+      </div>
+    </div>
+
+    <!-- CONTROLS VIEW — Policy · Freeze · Deployment -->
+    <div id="view-controls" class="hidden w-full">
+      <div class="grid grid-cols-1 lg:grid-cols-3 gap-5">
+        <div class="col-span-2 flex flex-col gap-5">
+          <!-- Global Central Policy -->
+          <div class="widget">
+            <div class="widget-header">
+              🛡️ Global Central Policy
+              <span style="color:var(--text-muted);font-size:12px;">Policy version: <span id="policy-version-label" class="font-mono">-</span></span>
+              <div class="flex items-center gap-2">
+                <button onclick="openModal('policy-changes-modal')" class="btn btn-muted btn-xs">View Policy Changes</button>
+                <button onclick="savePolicies()" id="save-policies-btn" class="btn btn-sm" style="background:var(--brand-red);color:white;">Save & Push Policies</button>
+              </div>
+            </div>
+            <p class="text-xs mb-4" style="color:var(--text-muted);">Gateways sync every 3s.</p>
+            <!-- Tester -->
+            <div class="p-3 rounded-lg mb-4" style="background:var(--bg-base);border:1px solid var(--border-color);">
+              <div class="flex items-center gap-2 mb-2">
+                <span class="text-sm font-semibold">🧪 Tester</span>
+                <input type="text" id="tester-input" placeholder="Paste command to test..." class="flex-1" onkeydown="if(event.key==='Enter') testPolicy()">
+                <button onclick="testPolicy()" class="btn btn-sm" style="background:var(--brand-red);color:white;">Test</button>
+                <button onclick="generateRegex()" class="btn btn-muted btn-sm">Regex</button>
+              </div>
+              <div id="tester-result" class="hidden text-xs p-3 rounded-lg border"></div>
+            </div>
+            <div class="flex flex-col gap-4">
+              <div><label class="text-xs mb-1 block" style="color:var(--text-muted);">Exact Allowlist</label><textarea id="policy-exact" class="min-h-[450px]" spellcheck="false" style="padding:16px 18px;"></textarea></div>
+              <div><label class="text-xs mb-1 block" style="color:var(--text-muted);">Regex Allowlist</label><textarea id="policy-regex-white" class="min-h-[450px]" spellcheck="false" style="padding:16px 18px;"></textarea></div>
+              <details class="mb-3" style="font-size:13px;">
+                <summary class="cursor-pointer" style="color:var(--status-warning);font-weight:600;">🛡️ Core Gateway Blocklist</summary>
+                <div class="mt-2 p-3 rounded-lg" style="background:var(--bg-base);border:1px solid var(--border-color);line-height:1.8;">
+                  <p class="mb-2" style="color:var(--text-muted);">These are permanently enforced at the gateway level (Stage&nbsp;1) and <strong>cannot be overridden</strong> by any allowlist policy.</p>
+                  <ul class="space-y-1" style="color:var(--text-muted);padding-left:0;list-style:none;">
+                    <li>💀 <strong>Recursive force delete:</strong> rm -rf, rm -fr, rm -r -f, /bin/rm -rf</li>
+                    <li>💾 <strong>Filesystem format:</strong> mkfs.*</li>
+                    <li>💿 <strong>Raw disk access:</strong> dd if=, dd of=, /bin/dd</li>
+                    <li>🔥 <strong>Firewall flush:</strong> iptables -F/-X/--flush, ip6tables -F/-X, nft flush</li>
+                    <li>⏻ <strong>Power control:</strong> reboot, shutdown, poweroff, halt, init 0/6, telinit 0/6, systemctl isolate/poweroff/halt, busybox reboot/poweroff/halt</li>
+                    <li>🕵️ <strong>Evasion:</strong> $(which *), `which *`</li>
+                  </ul>
+                </div>
+              </details>
+              <div><label class="text-xs mb-1 block" style="color:var(--text-muted);">Blocklist (Hard Block)</label><textarea id="policy-regex-black" class="min-h-[450px]" spellcheck="false" style="padding:16px 18px;"></textarea></div>
+            </div>
+          </div>
+        </div>
+        <div class="col-span-1 flex flex-col gap-5">
+          <!-- Emergency Freeze -->
+          <div class="widget">
+            <div class="widget-header">🚨 Emergency Freeze</div>
+            <div class="p-4 rounded-lg" style="background:var(--bg-base);border:1px solid var(--border-color);">
+              <p class="text-xs mb-4" style="color:var(--text-muted);">One button to make <strong>every gateway reject all commands</strong> — including whitelisted and approved-window commands — until unfrozen. Takes effect within 30s (next poll cycle).</p>
+              <div class="flex items-center gap-3 mb-4">
+                <span class="text-xs" style="color:var(--text-muted);">Fleet status:</span>
+                <span id="freeze-status-label" class="px-2.5 py-0.5 rounded-full text-xs font-semibold" style="background:var(--status-success);color:var(--bg-base);">Active — running normally</span>
+              </div>
+              <div class="flex gap-2">
+                <button onclick="triggerFreeze()" id="freeze-btn" class="btn btn-sm" style="background:var(--brand-red);color:white;">🧊 Freeze Fleet</button>
+                <button onclick="triggerUnfreeze()" id="unfreeze-btn" class="btn btn-sm hidden" style="background:var(--status-success);color:var(--bg-base);">Unfreeze Fleet</button>
+              </div>
+              <p id="freeze-timestamp" class="hidden mt-3 text-xs font-mono" style="color:var(--text-muted);"></p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- FLEET RUN VIEW -->
+    <div id="view-fleet" class="hidden w-full">
+      <div class="widget">
+        <div class="widget-header"><span><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline-block;vertical-align:middle;margin-right:6px;flex-shrink:0;"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>Fleet Run</span>
+          <button onclick="fetchFleetCommands()" class="btn btn-muted btn-xs">↻ Refresh</button>
+        </div>
+
+        <!-- Compose -->
+        <div class="p-4 rounded-lg" style="background:var(--bg-base);border:1px solid var(--border-color);">
+          <div class="flex items-start gap-3 flex-wrap">
+            <div class="flex-1 min-w-[220px]">
+              <label class="text-xs block mb-1" style="color:var(--text-muted);">Command</label>
+              <textarea id="fleet-cmd-input" class="w-full text-xs" rows="2" placeholder="Command to run on each selected gateway..." style="background:var(--bg-base);color:var(--text-main);border:1px solid var(--border-color);border-radius:6px;padding:8px 12px;"></textarea>
+            </div>
+            <div class="w-28">
+              <label class="text-xs block mb-1" style="color:var(--text-muted);">Timeout (s)</label>
+              <input type="number" id="fleet-timeout-input" value="180" min="1" max="3600" style="background:var(--bg-base);color:var(--text-main);border:1px solid var(--border-color);border-radius:6px;padding:6px 10px;width:100%;">
+            </div>
+            <div class="w-44">
+              <label class="text-xs block mb-1" style="color:var(--text-muted);">Reason (optional)</label>
+              <input type="text" id="fleet-reason-input" placeholder="Context" style="background:var(--bg-base);color:var(--text-main);border:1px solid var(--border-color);border-radius:6px;padding:6px 10px;width:100%;">
+            </div>
+            <div class="self-end">
+              <button onclick="addFleetToQueue()" id="fleet-add-btn" class="btn btn-sm" style="background:var(--brand-red);color:white;">+ Add to Queue</button>
+            </div>
+          </div>
+          <div class="flex items-center gap-2 mt-3 flex-wrap">
+            <span class="text-xs" style="color:var(--text-muted);">Targets:</span>
+            <span class="text-xs" style="color:var(--text-muted);cursor:pointer;" onclick="setFleetTargets(true)">All</span>
+            <span class="text-xs" style="color:var(--text-muted);cursor:pointer;" onclick="setFleetTargets(false)">None</span>
+          </div>
+          <div id="fleet-target-list" class="flex flex-wrap gap-1 mt-2"></div>
+        </div>
+
+        <!-- Queue + Dispatch -->
+        <div class="mt-4 p-4 rounded-lg" style="background:var(--bg-base);border:1px solid var(--border-color);">
+          <div class="flex items-center justify-between mb-2">
+            <h3 class="text-sm font-semibold">Dispatch queue</h3>
+            <button onclick="dispatchFleetQueue()" id="fleet-dispatch-btn" class="btn btn-sm" style="background:var(--status-success);color:var(--bg-base);">▶ Dispatch (0)</button>
+          </div>
+          <p class="text-xs mb-2" style="color:var(--text-muted);">Commands run one at a time per gateway, in dispatch order — combine steps with <code>&amp;&amp;</code> to run them together.</p>
+          <div id="fleet-queue-list"><p style="color:var(--text-muted);">Queue is empty — add a command above.</p></div>
+        </div>
+
+        <!-- History & results -->
+        <div class="mt-4 p-4 rounded-lg" style="background:var(--bg-base);border:1px solid var(--border-color);">
+          <h3 class="text-sm font-semibold mb-1">History &amp; results</h3>
+          <div id="fleet-results-list"><p style="color:var(--text-muted);">No fleet commands yet.</p></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- SETTINGS VIEW — Preferences (notifications, password, webhook) -->
+    <div id="view-settings" class="hidden w-full">
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-5">
+        <div class="flex flex-col gap-5">
+          <div class="widget">
+            <div class="widget-header">Notifications</div>
+            <div class="space-y-3">
+              <div class="flex items-center justify-between p-3 rounded-lg" style="background:var(--bg-base);">
+                <div><span class="text-sm">Notify on Blocked Commands</span><p class="text-xs" style="color:var(--text-muted);">Chime + browser notification when a command is blocked</p></div>
+                <button id="notify-blocked-toggle" onclick="toggleNotifyBlocked()" class="btn btn-xs" style="background:var(--bg-hover);color:var(--text-muted);">Off</button>
+              </div>
+              <div class="flex items-center justify-between p-3 rounded-lg" style="background:var(--bg-base);">
+                <div><span class="text-sm">Notify on JIT Requests</span><p class="text-xs" style="color:var(--text-muted);">Chime + browser notification for pending approvals</p></div>
+                <button id="notify-jit-toggle" onclick="toggleNotifyJIT()" class="btn btn-xs" style="background:var(--status-success);color:var(--bg-base);">On</button>
+              </div>
+              <div class="flex items-center justify-between p-3 rounded-lg" style="background:var(--bg-base);">
+                <div><span class="text-sm">Sound</span><p class="text-xs" style="color:var(--text-muted);">Play a chime for notification events</p></div>
+                <button id="sound-toggle" onclick="toggleSound()" class="btn btn-xs" style="background:var(--status-success);color:var(--bg-base);">On</button>
+              </div>
+              <div class="flex items-center justify-between p-3 rounded-lg" style="background:var(--bg-base);">
+                <div><span class="text-sm">Notify on Gateway Offline</span><p class="text-xs" style="color:var(--text-muted);">Chime + browser notification when a gateway goes offline</p></div>
+                <button id="notify-offline-toggle" onclick="toggleNotifyOffline()" class="btn btn-xs" style="background:var(--status-success);color:var(--bg-base);">On</button>
+              </div>
+              <div class="flex gap-2">
+                <button onclick="testSound()" class="btn btn-muted btn-xs">Test Sound</button>
+                <button onclick="testNotification()" class="btn btn-muted btn-xs">Test Notification</button>
+              </div>
+            </div>
+          </div>
+          <div class="widget">
+            <div class="widget-header">Dashboard Password</div>
+            <p class="text-xs mb-3" style="color:var(--text-muted);">Browser session cookies are used — AI agents on gateways cannot access the dashboard or approve their own JITs.</p>
+            <div id="password-status" class="mb-3 text-xs"></div>
+            <div class="flex flex-col gap-2">
+              <div class="flex gap-2">
+                <input type="password" id="new-password" placeholder="New password (min 4 chars)" class="flex-1">
+                <button onclick="setDashboardPassword()" class="btn btn-sm" style="background:var(--brand-red);color:white;">Set Password</button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="flex flex-col gap-5">
+          <div class="widget" id="external-notify-widget">
+            <div class="widget-header" style="margin-bottom:8px;">External Notifications</div>
+            <p class="text-xs mb-3" style="color:var(--text-muted);">Slack-compatible webhook — works with Slack, Discord, and Mattermost.</p>
+            <div class="mb-3">
+              <label class="text-xs block mb-1" style="color:var(--text-muted);">Webhook URL</label>
+              <input type="text" id="notify-webhook-url" placeholder="https://hooks.slack.com/services/..." class="w-full" oninput="onNotifyConfigChange()">
+            </div>
+            <div class="mb-3">
+              <label class="text-xs block mb-1" style="color:var(--text-muted);">Dashboard URL (for the link in notifications)</label>
+              <input type="text" id="notify-dashboard-url" placeholder="http://192.168.1.100:8000" class="w-full" oninput="onNotifyConfigChange()">
+            </div>
+            <div class="flex flex-wrap gap-3 mb-3">
+              <label class="flex items-center gap-2 cursor-pointer select-none text-xs"><input type="checkbox" id="notify-event-jit" checked onchange="onNotifyConfigChange()"> ⚡ JIT requests</label>
+              <label class="flex items-center gap-2 cursor-pointer select-none text-xs"><input type="checkbox" id="notify-event-window" checked onchange="onNotifyConfigChange()"> Window requests</label>
+              <label class="flex items-center gap-2 cursor-pointer select-none text-xs"><input type="checkbox" id="notify-event-blocked" onchange="onNotifyConfigChange()"> Blocked commands</label>
+              <label class="flex items-center gap-2 cursor-pointer select-none text-xs"><input type="checkbox" id="notify-event-offline" onchange="onNotifyConfigChange()"> 📡 Gateway offline</label>
+              <label class="flex items-center gap-2 cursor-pointer select-none text-xs"><input type="checkbox" id="notify-event-online" onchange="onNotifyConfigChange()"> 📡 Gateway online</label>
+            </div>
+            <div class="flex gap-2">
+              <button onclick="saveNotifyConfig()" class="btn btn-sm" style="background:var(--brand-red);color:white;">Save</button>
+              <button onclick="testNotify()" class="btn btn-muted btn-sm">Test</button>
+              <span id="notify-save-status" class="text-xs self-center" style="color:var(--text-muted);"></span>
+            </div>
+          </div>
+
+          <!-- Dev Tools (hidden unless enabled) -->
+          <div class="widget" id="dev-tools-widget">
+            <div class="widget-header">🧑‍💻 Development Tools</div>
+            <div class="flex items-center justify-between p-3 rounded-lg" style="background:var(--bg-base);">
+              <div><span class="text-sm">Show development tools</span><p class="text-xs" style="color:var(--text-muted);">Reveals the Build → Edge → Fleet deployment pipeline, dev gateways, and feature flags</p></div>
+              <button id="dev-tools-toggle" onclick="toggleDevTools()" class="btn btn-xs" style="background:var(--bg-hover);color:var(--text-muted);">Off</button>
+            </div>
+          </div>
+          <div class="widget hidden" id="dev-deployment-widget">
+            <div class="widget-header">🚀 Development & Deployment</div>
+            <div class="p-4 rounded-lg" style="background:var(--bg-base);border:1px solid var(--border-color);">
+              <p class="text-xs mb-3" style="color:var(--text-muted);">Build is the latest installer. Edge is the development channel for dev-mode gateways. Fleet is what production gateways are running.</p>
+
+              <!-- Gateway Management -->
+              <div class="text-xs mb-2" style="color:var(--text-muted);">
+                Build: <span id="golden-version-label" style="color:var(--text-main);font-weight:600;">unset</span>
+                &middot; Edge: <span id="edge-version-label" style="color:var(--text-main);font-weight:600;">not staged</span>
+                &middot; Fleet: <span id="fleet-version-label" style="color:var(--text-main);font-weight:600;">unset</span>
+              </div>
+              <div id="pipeline-banner" class="pipeline-banner hidden" style="padding:8px 12px;border-radius:6px;margin-bottom:6px;font-size:12px;font-weight:500;"></div>
+              <div class="flex flex-wrap gap-2 mb-4">
+                <button onclick="seedEdge()" id="seed-edge-btn" class="btn btn-sm" style="background:#374151;color:white;">Seed Edge</button>
+                <button onclick="pushToDev()" id="push-to-dev-btn" class="btn btn-sm" style="background:#4b5563;color:white;" disabled>Push to Dev Gateways</button>
+                <button onclick="promoteToGolden()" id="promote-golden-btn" class="btn btn-sm" style="background:#dc2626;color:white;" disabled>Deploy to Fleet</button>
+                <button onclick="rollbackGolden()" id="rollback-golden-btn" class="btn btn-sm" style="background:#78716c;color:white;" disabled>Rollback Fleet</button>
+              </div>
+
+              <div class="mb-4" style="border-top:1px solid var(--border-color);"></div>
+
+              <!-- Dev Gateways -->
+              <label class="text-xs block mb-2" style="color:var(--text-muted);">Dev Gateways</label>
+              <div id="dev-gateway-pills" class="flex flex-wrap gap-1 mb-2"></div>
+              <div class="flex gap-2">
+                <input type="text" id="dev-gateway-input" placeholder="Search gateway by hostname or IP..." class="flex-1 text-xs" onkeydown="if(event.key==='Enter')addDevGateway()" oninput="onDevGatewayInput()" autocomplete="off">
+                <button onclick="addDevGateway()" class="btn btn-xs" style="background:var(--brand-red);color:white;">Add</button>
+              </div>
+              <div id="dev-gateway-results" class="mt-1 max-h-32 overflow-y-auto"></div>
+
+              <div class="mb-4" style="border-top:1px solid var(--border-color);"></div>
+
+              <!-- Feature Flags -->
+              <label class="text-xs block mb-2" style="color:var(--text-muted);">Feature Flags</label>
+              <div id="feature-flags-list" class="space-y-2 mb-4">
+                <p style="color:var(--text-muted);">Loading...</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- LOGS VIEW — Audit Log -->
+    <div id="view-logs" class="hidden w-full">
+      <div class="widget">
+        <div class="widget-header">Audit Log <div class="flex items-center gap-2"><input type="text" id="audit-log-search" placeholder="Search..." class="text-xs px-2 py-1 rounded-lg" style="background:var(--bg-card);border:1px solid var(--border-color);color:var(--text-primary);width:160px;" oninput="onAuditLogSearch()"><span class="text-xs" style="color:var(--text-muted);" id="audit-log-count">0 events</span><button onclick="fetchAuditLog()" class="btn btn-muted btn-xs">&#x21bb;</button></div></div>
+        <div id="audit-log-list" class="space-y-2 pr-1"><p style="color:var(--text-muted);">Loading...</p></div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script src="/static/state.js"></script>
+<script src="/static/app.js"></script>
+
+<!-- Create / Edit Approved Window Modal -->
+<div id="create-window-modal" class="modal-overlay hidden">
+  <div class="widget w-full max-w-2xl max-h-[90vh] overflow-y-auto">
+    <div class="widget-header"><span id="win-modal-title">🪟 Create Approved Window</span> <button onclick="closeCreateWindowModal()" class="text-xl" style="color:var(--text-muted);cursor:pointer;background:none;border:none;">&times;</button></div>
+
+    <!-- Inline error -->
+    <div id="win-save-error" class="hidden win-error"></div>
+
+    <!-- 1. Type — always selectable -->
+    <div class="win-section">
+      <div class="win-section-label">1. Window Type</div>
+      <div class="win-radio-group">
+        <button class="win-radio-btn selected" id="win-type-recurring" onclick="setWinType('recurring')">🔄 Recurring</button>
+        <button class="win-radio-btn" id="win-type-single" onclick="setWinType('single')">⚡ Single Use</button>
+      </div>
+    </div>
+
+    <!-- 2. Gateway — custom pill dropdown -->
+    <div class="win-section">
+      <div class="win-section-label">2. Target Gateway</div>
+      <div class="gw-dropdown" id="gw-dropdown">
+        <div class="gw-dropdown-trigger" id="gw-dropdown-trigger" onclick="toggleGwDropdown()">
+          <div id="gw-dropdown-display" style="color:var(--text-muted);font-size:13px;">Select a gateway…</div>
+          <span class="gw-dropdown-caret" id="gw-dropdown-caret">▼</span>
+        </div>
+        <div class="gw-dropdown-menu" id="gw-dropdown-menu"></div>
+      </div>
+      <input type="hidden" id="win-gateway" value="" onchange="onWinGatewayChange()">
+    </div>
+
+    <!-- 3. Command (gateway-dependent) -->
+    <div id="win-src-section" class="win-section win-fade win-disabled">
+      <div class="win-section-label">3. Command</div>
+      <div class="win-radio-group">
+        <button class="win-radio-btn selected" id="win-src-new" onclick="setWinSource('new')">✏️ Command</button>
+        <button class="win-radio-btn" id="win-src-jit" onclick="setWinSource('jit')">🕐 Recent JIT</button>
+      </div>
+      <!-- New command input -->
+      <div id="win-cmd-input-wrap" class="win-fade" style="margin-top:0;">
+        <div class="flex gap-2"><input type="text" id="win-command" placeholder="e.g. docker logs -n 50 my-app" class="flex-1" style="padding:12px 14px;font-size:14px;font-family:monospace;" oninput="checkCommandReady();updateWinSummary()"><button onclick="copyToClipboard(document.getElementById('win-command').value)" class="btn btn-muted btn-xs" title="Copy command">📋</button><button onclick="testWinCommand()" class="btn btn-muted btn-xs">🧪 Test</button></div>
+        <div id="win-test-result" class="hidden mt-1"></div>
+        <div class="flex items-center gap-2 mt-2">
+          <span class="text-xs" style="color:var(--text-muted);flex-shrink:0;">Match:</span>
+          <span class="toggle-label" id="match-label-prefix">Prefix</span>
+          <div class="toggle-track on" id="win-match-toggle" onclick="toggleWinMatch()"><div class="toggle-knob"></div></div>
+          <span class="toggle-label" id="match-label-exact" style="color:var(--status-success);">Exact</span>
+        </div>
+        <p class="text-xs mt-1" style="color:var(--text-muted);opacity:0.7;">Exact matches the command character-for-character. Prefix matches any command that <em>starts with</em> this text.</p>
+      </div>
+      <!-- JIT list -->
+      <div id="win-jit-list-wrap" class="win-fade hidden-section">
+        <div class="win-recent-list mt-2" id="recent-jit-list"><p class="text-xs px-2 py-1" style="color:var(--text-muted);">Select a gateway first…</p></div>
+        <p class="text-xs mt-1" style="color:var(--text-muted);opacity:0.7;">Click a recent JIT to populate the command field.</p>
+      </div>
+    </div>
+
+    <!-- 4a. Recurring schedule fields -->
+    <div id="win-recurring-fields" class="win-fade">
+      <div class="win-section-label" style="margin-bottom:8px;">4. Schedule</div>
+      <div style="display:flex;gap:20px;flex-wrap:wrap;">
+        <div class="win-section" style="flex:1;min-width:200px;">
+          <div class="win-section-label">Execution Time (UTC)</div>
+          <div class="time-scroll-container">
+            <div class="time-scroll-wrap">
+              <div class="time-scroll-arrow" onclick="shiftTimeScroll('hours', -1)">▲</div>
+              <div class="time-scroll" id="time-scroll-hours" onscroll="onTimeScroll('hours')"></div>
+              <div class="time-scroll-arrow" onclick="shiftTimeScroll('hours', 1)">▼</div>
+            </div>
+            <span class="time-colon">:</span>
+            <div class="time-scroll-wrap">
+              <div class="time-scroll-arrow" onclick="shiftTimeScroll('mins', -1)">▲</div>
+              <div class="time-scroll" id="time-scroll-mins" onscroll="onTimeScroll('mins')"></div>
+              <div class="time-scroll-arrow" onclick="shiftTimeScroll('mins', 1)">▼</div>
+            </div>
+          </div>
+          <p id="win-next-run" class="text-xs mt-2" style="color:var(--status-info);min-height:1.25em;"></p>
+        </div>
+        <div style="flex:1;min-width:200px;">
+          <div class="win-section">
+            <div class="win-section-label">Days of Week <span class="text-xs" style="color:var(--text-muted);font-weight:400;">(none = every day)</span></div>
+            <div class="day-circles" id="day-circles-container"></div>
+          </div>
+          <div class="win-section">
+            <div class="win-section-label">Expiration</div>
+            <label class="flex items-center gap-2 cursor-pointer select-none" style="margin-bottom:8px;">
+              <input type="checkbox" id="win-never-expire" checked onchange="onWinNeverExpireChange()">
+              <span style="color:var(--text-main);font-size:12px;">Never expire</span>
+            </label>
+            <input type="date" id="win-expiry-date" class="flex-1" style="display:none;" onchange="updateWinSummary()">
+          </div>
+          <div class="win-section">
+            <div class="win-section-label">Max Executions <span class="text-xs" style="color:var(--text-muted);font-weight:400;">(1–5, per window)</span></div>
+            <input type="number" id="win-max-exec" value="1" min="1" max="5" class="w-24" oninput="onMaxExecInput();updateWinSummary()">
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 4b. Single-use fields -->
+    <div id="win-single-fields" class="win-fade hidden-section">
+      <div class="win-section-label">4. Schedule</div>
+      <div class="win-section">
+        <div class="win-section-label">Starts At (required) <span class="text-xs" style="color:var(--text-muted);font-weight:400;">(window becomes active at this time)</span></div>
+        <div class="flex gap-2 flex-wrap">
+          <input type="date" id="win-single-start-date" class="flex-1" style="min-width:140px;" onchange="updateWinSummary()">
+          <input type="time" id="win-single-start-time" class="flex-1" style="min-width:100px;" onchange="updateWinSummary()">
+        </div>
+        <p class="win-hint" id="win-single-start-hint">Times are local to your browser</p>
+      </div>
+      <div class="win-section">
+        <div class="win-section-label">Max Executions <span class="text-xs" style="color:var(--text-muted);font-weight:400;">(1–5, auto-disables when exhausted)</span></div>
+        <input type="number" id="win-max-exec-single" value="1" min="1" max="5" class="w-24" oninput="onMaxExecInput();updateWinSummary()">
+      </div>
+      <div class="win-section">
+        <div class="win-section-label">Expires At (optional) <span class="text-xs" style="color:var(--text-muted);font-weight:400;">(window closes at this time if unexpired)</span></div>
+        <div class="flex gap-2 flex-wrap">
+          <input type="date" id="win-single-expiry-date" class="flex-1" style="min-width:140px;" onchange="updateWinSummary()">
+          <input type="time" id="win-single-expiry-time" class="flex-1" style="min-width:100px;" onchange="updateWinSummary()">
+        </div>
+      </div>
+    </div>
+
+    <!-- 5. Label -->
+    <div id="win-label-section" class="win-section win-fade win-disabled">
+      <div class="win-section-label">5. Label</div>
+      <input type="text" id="win-label" placeholder="e.g. Nightly apt update" oninput="updateWinSummary()" disabled>
+      <p class="win-hint" id="win-label-hint">Select a gateway and type a command first</p>
+    </div>
+
+    <!-- Summary -->
+    <div id="win-summary-bar" class="win-summary hidden-section">💬 <span id="win-summary-text"></span></div>
+
+    <!-- Save -->
+    <button onclick="saveWindow()" id="save-window-btn" class="btn btn-sm w-full" style="background:var(--brand-red);color:white;">Create Window</button>
+
+    <!-- Token display (after save) -->
+    <div id="win-token-display" class="win-token-card" style="display:none;">
+      <p class="text-xs mb-2" style="color:var(--status-success);">✅ Token ready!</p>
+      <code id="win-token-value" class="text-base font-bold block mb-2" style="color:var(--text-main);font-family:monospace;"></code>
+      <p class="text-xs mb-2" style="color:var(--text-muted);">Usage:</p>
+      <code id="win-token-usage" class="text-xs block p-2 rounded" style="background:var(--bg-base);color:var(--text-muted);font-family:monospace;"></code>
+      <button onclick="copyToClipboard(document.getElementById('win-token-value').textContent)" class="btn btn-muted btn-xs mt-3">📋 Copy Token</button>
+    </div>
+  </div>
+</div>
+
+<!-- Custom Confirm Dialog -->
+<div id="custom-confirm-overlay" class="modal-overlay hidden">
+  <div class="widget max-w-md w-full" style="text-align:center;">
+    <p id="custom-confirm-msg" style="color:var(--text-main);font-size:14px;margin-bottom:20px;line-height:1.6;"></p>
+    <div class="flex justify-center gap-3">
+      <button onclick="_confirmResolve(false)" class="btn btn-muted btn-sm">Cancel</button>
+      <button onclick="_confirmResolve(true)" class="btn btn-sm" style="background:var(--brand-red);color:white;">Confirm</button>
+    </div>
+  </div>
+</div>
+
+<!-- Override Mode Modal -->
+<div id="override-modal" class="modal-overlay hidden" onclick="if(event.target===this)document.getElementById('override-modal').classList.add('hidden')">
+  <div class="widget max-w-md w-full">
+    <div class="widget-header">
+      <span>Override Mode</span>
+      <button onclick="document.getElementById('override-modal').classList.add('hidden')" style="color:var(--text-muted);font-size:20px;">&times;</button>
+    </div>
+    <div class="mb-4">
+      <label class="text-xs block mb-1" style="color:var(--text-muted);">Gateway</label>
+      <p id="override-modal-gateway" style="color:var(--text-main);font-weight:600;"></p>
+    </div>
+    <div class="mb-4">
+      <label class="text-xs block mb-1" style="color:var(--text-muted);">Duration</label>
+      <select id="override-modal-minutes" class="w-full text-xs" style="background:var(--bg-base);color:var(--text-main);border:1px solid var(--border-color);border-radius:6px;padding:8px 12px;">
+        <option value="15">15 minutes</option>
+        <option value="30" selected>30 minutes</option>
+        <option value="60">1 hour</option>
+        <option value="120">2 hours</option>
+        <option value="360">6 hours</option>
+        <option value="720">12 hours</option>
+        <option value="1440">24 hours</option>
+      </select>
+    </div>
+    <div class="mb-4">
+      <label class="text-xs block mb-1" style="color:var(--text-muted);">Reason (required)</label>
+      <textarea id="override-modal-reason" class="w-full text-xs" rows="3" placeholder="Why are you enabling Override Mode?" style="background:var(--bg-base);color:var(--text-main);border:1px solid var(--border-color);border-radius:6px;padding:8px 12px;resize:vertical;"></textarea>
+    </div>
+    <div class="flex justify-end gap-2">
+      <button onclick="document.getElementById('override-modal').classList.add('hidden')" class="btn btn-muted btn-sm">Cancel</button>
+      <button onclick="confirmOverride()" id="override-start-btn" class="btn btn-sm" style="background:#dc2626;color:white;">Start Override</button>
+    </div>
+  </div>
+</div>
+
+<!-- Uninstall Progress Modal -->
+<div id="uninstall-modal" class="modal-overlay hidden">
+  <div class="widget w-full max-w-md">
+    <div class="widget-header">
+      <span id="uninstall-modal-title">🗑 Uninstalling</span>
+      <button onclick="closeUninstallModal()" style="color:var(--text-muted);font-size:20px;">&times;</button>
+    </div>
+    <div class="mb-4">
+      <label class="text-xs block mb-1" style="color:var(--text-muted);">Gateway</label>
+      <p id="uninstall-modal-gateway" style="color:var(--text-main);font-weight:600;"></p>
+    </div>
+    <div class="mb-1">
+      <div class="uninstall-progress-bar"><div class="fill" id="uninstall-progress-fill" style="width:0%;"></div></div>
+    </div>
+    <p id="uninstall-modal-step" class="text-xs mt-2" style="color:var(--text-muted);">Starting…</p>
+    <p id="uninstall-modal-note" class="text-xs mt-2 hidden" style="color:var(--status-warning);"></p>
+  </div>
+</div>
+
+<!-- Window Usage History Modal -->
+<div id="window-history-overlay" class="modal-overlay hidden" onclick="if(event.target===this)closeModal('window-history-overlay')">
+  <div class="widget w-11/12 md:w-2/3 lg:w-1/2 max-h-3/4 flex flex-col" style="max-height:75vh;">
+    <div class="widget-header">📜 Window Usage History <button onclick="closeModal('window-history-overlay')" style="color:var(--text-muted);font-size:20px;">&times;</button></div>
+    <div id="window-history-content" class="flex-1 overflow-y-auto pr-2" style="min-height:100px;"><p style="color:var(--text-muted);">Loading...</p></div>
+  </div>
+</div>
+
+<!-- Policy Changes Modal -->
+<div id="policy-changes-modal" class="modal-overlay hidden">
+  <div class="widget w-11/12 md:w-2/3 lg:w-1/2 h-3/4 flex flex-col">
+    <div class="widget-header">Recent Policy Changes <button onclick="closeModal('policy-changes-modal')" style="color:var(--text-muted);font-size:20px;">&times;</button></div>
+    <div id="policy-changes-list" class="flex-1 overflow-y-auto pr-2"><p style="color:var(--text-muted);">Loading...</p></div>
+  </div>
+</div>
+
+<!-- Fleet Output Modal -->
+<div id="fleet-output-modal" class="modal-overlay hidden" onclick="if(event.target===this)closeFleetOutputModal()">
+  <div class="widget w-11/12 md:w-5/6 lg:w-3/4 flex flex-col" style="max-height:85vh;">
+    <div class="widget-header">
+      <span id="fleet-output-modal-title" class="flex-1 truncate" style="padding-right:8px;">Output</span>
+      <div class="flex items-center gap-2">
+        <button onclick="copyFleetOutputModal()" class="btn btn-muted btn-xs">📋 Copy</button>
+        <button onclick="closeFleetOutputModal()" style="color:var(--text-muted);font-size:20px;background:none;border:none;cursor:pointer;">&times;</button>
+      </div>
+    </div>
+    <pre id="fleet-output-modal-pre" class="fleet-out flex-1 overflow-auto p-3 rounded text-xs" style="background:var(--bg-base);color:var(--text-main);white-space:pre-wrap;min-height:120px;">Loading...</pre>
+  </div>
+</div>
+</body>
+</html>

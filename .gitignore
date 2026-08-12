@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.pyc
+venv/
+
+# SQLite database (runtime data, not source)
+*.db
+
+# Windows ADS metadata
+*:Zone.Identifier
+*&#x3A;Zone.Identifier
+*Zone.Identifier*
+
+# Legacy Hermes files (renamed to eshu_*)
+hermes_control_center_banner.png
+hermes_control_center_logo.png
+install_wsl_jit_dispatcher.sh.txt
+dashboard/static/v8-preview.html
+
+# Design notes / inspiration (not code)
+dashboard/inspiration*
+
+# Backup / copy directories
+eshu_gateway - Copy/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.dbtests/.venv/
+*.bak

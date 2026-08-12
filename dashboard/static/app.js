@@ -1,0 +1,3093 @@
+// State variables are in state.js — loaded first.
+// Constants and state declarations here are removed to avoid redeclaration.
+
+function deriveGatewayIdentity(hostname) {
+  if (!hostname) return { code: '??', color: GW_COLORS[0], label: 'Unknown' };
+  let hash = 0;
+  for (let i = 0; i < hostname.length; i++) { hash += hostname.charCodeAt(i); }
+  const idx = hash % 8;
+  const parts = hostname.split(/[-_.\s]+/).filter(p => p.length > 0);
+  let code = hostname.substring(0, 2).toUpperCase();
+  if (parts.length >= 2) { code = (parts[0].charAt(0) + parts[parts.length - 1].charAt(0)).toUpperCase(); }
+  return { code, color: GW_COLORS[idx], label: GW_LABELS[idx] };
+}
+
+function gwPill(hostname) {
+  const id = deriveGatewayIdentity(hostname);
+  return '<span class="gw-pill" style="background:' + id.color + ';" title="' + id.label + '">' + id.code + '</span>';
+}
+
+function devBadge(g) {
+  if (!g || (g.mode || 'prod') !== 'dev') return '';
+  return '<span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold uppercase ml-1" style="background:rgba(230,57,70,0.15);color:var(--brand-red);border:1px solid rgba(230,57,70,0.3);">DEV</span>';
+}
+
+// ── Sound ────────────────────────────────────────────────────────────────
+// State variables (_audioCtx, _knownOfflineIps, notifyJIT, etc.) are in state.js.
+
+function updateNotifyUI() {
+  const st = document.getElementById('sound-toggle');
+  const jt = document.getElementById('notify-jit-toggle');
+  const bt = document.getElementById('notify-blocked-toggle');
+  const ot = document.getElementById('notify-offline-toggle');
+  if (st) { st.textContent = notifySound ? 'On' : 'Off'; st.style.background = notifySound ? 'var(--status-success)' : 'var(--bg-hover)'; st.style.color = notifySound ? 'var(--bg-base)' : 'var(--text-muted)'; }
+  if (jt) { jt.textContent = notifyJIT ? 'On' : 'Off'; jt.style.background = notifyJIT ? 'var(--status-success)' : 'var(--bg-hover)'; jt.style.color = notifyJIT ? 'var(--bg-base)' : 'var(--text-muted)'; }
+  if (bt) { bt.textContent = notifyBlocked ? 'On' : 'Off'; bt.style.background = notifyBlocked ? 'var(--status-success)' : 'var(--bg-hover)'; bt.style.color = notifyBlocked ? 'var(--bg-base)' : 'var(--text-muted)'; }
+  if (ot) { ot.textContent = notifyOffline ? 'On' : 'Off'; ot.style.background = notifyOffline ? 'var(--status-success)' : 'var(--bg-hover)'; ot.style.color = notifyOffline ? 'var(--bg-base)' : 'var(--text-muted)'; }
+}
+function toggleNotifyJIT() { notifyJIT = !notifyJIT; localStorage.setItem('notifyJIT', notifyJIT); updateNotifyUI(); }
+function toggleNotifyBlocked() { notifyBlocked = !notifyBlocked; localStorage.setItem('notifyBlocked', notifyBlocked); updateNotifyUI(); }
+function toggleNotifyOffline() { notifyOffline = !notifyOffline; localStorage.setItem('notifyOffline', notifyOffline); updateNotifyUI(); }
+function toggleSound() { notifySound = !notifySound; soundMuted = !notifySound; localStorage.setItem('notifySound', notifySound); updateNotifyUI(); }
+
+function getAudioCtx() { if (!_audioCtx) { _audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } return _audioCtx; }
+function playJitChime(force) {
+  if (!force && !notifySound) return;
+  if (!force && soundMuted) return;
+  try {
+    const ctx = getAudioCtx();
+    const now = ctx.currentTime;
+    [587.33, 880.00].forEach(function(freq, i) {
+      const osc = ctx.createOscillator(), gain = ctx.createGain();
+      osc.type = 'sine'; osc.frequency.value = freq;
+      const startTime = now + i * 0.15;
+      gain.gain.setValueAtTime(0, startTime);
+      gain.gain.linearRampToValueAtTime(0.3, startTime + 0.04);
+      gain.gain.linearRampToValueAtTime(0.15, startTime + 0.1);
+      gain.gain.linearRampToValueAtTime(0, startTime + 0.35);
+      osc.connect(gain); gain.connect(ctx.destination);
+      osc.start(startTime); osc.stop(startTime + 0.35);
+    });
+  } catch(e) {}
+}
+function toggleMute() { soundMuted = !soundMuted; updateDropdownMuteLabel(); }
+function updateDropdownMuteLabel() {
+  const btn = document.getElementById('dd-mute-btn');
+  btn.innerHTML = soundMuted ? '🔇 Sound Off' : '🔔 Sound On';
+}
+function testSound() { playJitChime(true); showToast('🔊 Chime played', 'success'); }
+
+// ── Notifications ────────────────────────────────────────────────────────
+function requestNotifPermission() {
+  if (!('Notification' in window)) return;
+  if (Notification.permission === 'granted') { _notifPerm = 'granted'; return; }
+  if (Notification.permission === 'denied') { _notifPerm = 'denied'; return; }
+  document.addEventListener('click', function askOnce() {
+    Notification.requestPermission().then(function(perm) { _notifPerm = perm; });
+    document.removeEventListener('click', askOnce);
+  }, { once: true });
+}
+function testNotification() {
+  playJitChime(false);
+  if (_notifPerm === 'granted') {
+    new Notification('⚡ JIT Approval Required', { body: '🧪 Test notification — 1 command requires your approval', tag: 'eshu-jit-test', icon: '/static/eshu_logo.png' });
+    showToast('🧪 Test notification sent', 'success');
+  } else if (_notifPerm === 'denied') { showToast('⚠️ Browser notifications are blocked.', 'error'); }
+  else { showToast('⚠️ Click anywhere on the page to prompt notification permission.', 'error'); }
+}
+function notifyNewJIT(pendingCount) {
+  const now = Date.now();
+  if (now - lastJitNotifyTime < 5000) return;
+  lastJitNotifyTime = now;
+  playJitChime(false);
+  if (_notifPerm === 'granted') {
+    const n = new Notification('⚡ JIT Approval Required', { body: pendingCount === 1 ? '1 command requires your approval' : pendingCount + ' commands require your approval', tag: 'eshu-jit', icon: '/static/eshu_logo.png' });
+    n.onclick = function() { window.focus(); switchView('home'); n.close(); };
+  }
+}
+
+// ── Auth ─────────────────────────────────────────────────────────────────
+function hideAllOverlays() {
+  document.getElementById('setup-overlay').classList.add('hidden');
+  document.getElementById('login-overlay').classList.add('hidden');
+  document.getElementById('main-content').style.display = '';
+  document.getElementById('main-sidebar').style.display = '';
+}
+function showDashboard() { hideAllOverlays(); }
+function showSetup() {
+  document.getElementById('setup-overlay').classList.remove('hidden');
+  document.getElementById('login-overlay').classList.add('hidden');
+  document.getElementById('main-content').style.display = 'none';
+  document.getElementById('main-sidebar').style.display = 'none';
+  document.getElementById('setup-password').value = '';
+  document.getElementById('setup-password-confirm').value = '';
+  document.getElementById('setup-error').classList.add('hidden');
+  document.getElementById('setup-password').focus();
+}
+function showLogin() {
+  document.getElementById('setup-overlay').classList.add('hidden');
+  document.getElementById('login-overlay').classList.remove('hidden');
+  document.getElementById('main-content').style.display = 'none';
+  document.getElementById('main-sidebar').style.display = 'none';
+  document.getElementById('login-error').classList.add('hidden');
+  document.getElementById('login-password').value = '';
+  document.getElementById('login-password').focus();
+}
+async function checkAuth() {
+  try {
+    const res = await fetch('/api/auth/status'); const data = await res.json();
+    _passwordSet = data.password_set; _authChecked = true;
+    if (!_passwordSet) { showSetup(); return false; }
+    if (!data.authenticated) { showLogin(); return false; }
+    showDashboard(); return true;
+  } catch(e) { showDashboard(); _authChecked = true; return true; }
+}
+async function doSetup() {
+  const pw = document.getElementById('setup-password').value;
+  const pwConfirm = document.getElementById('setup-password-confirm').value;
+  const errEl = document.getElementById('setup-error'), btn = document.getElementById('setup-btn');
+  if (!pw || pw.length < 4) { errEl.textContent = 'Password must be at least 4 characters.'; errEl.classList.remove('hidden'); return; }
+  if (pw !== pwConfirm) { errEl.textContent = 'Passwords do not match.'; errEl.classList.remove('hidden'); return; }
+  btn.disabled = true; btn.textContent = 'Setting up...'; errEl.classList.add('hidden');
+  try {
+    const res = await fetch('/api/auth/set-password', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: pw }) });
+    if (res.ok) {
+      const loginRes = await fetch('/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: pw }) });
+      if (loginRes.ok) { showDashboard(); initDashboard(); return; }
+    }
+    const data = await res.json().catch(function() { return {}; });
+    errEl.textContent = data.detail || 'Failed to set password.'; errEl.classList.remove('hidden');
+  } catch(e) { errEl.textContent = 'Network error.'; errEl.classList.remove('hidden'); }
+  btn.disabled = false; btn.textContent = 'Set Password & Continue';
+}
+async function doLogin() {
+  const pw = document.getElementById('login-password').value;
+  const btn = document.getElementById('login-btn');
+  btn.disabled = true; btn.textContent = 'Logging in...';
+  try {
+    const res = await fetch('/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: pw }) });
+    if (res.ok) { showDashboard(); initDashboard(); }
+    else { document.getElementById('login-error').classList.remove('hidden'); }
+  } catch(e) { document.getElementById('login-error').classList.remove('hidden'); }
+  btn.disabled = false; btn.textContent = 'Log In';
+}
+async function doLogout() { await fetch('/api/auth/logout', { method: 'POST' }); showLogin(); }
+async function authFetch(url, options) {
+  options = options || {};
+  const res = await fetch(url, options);
+  if (res.status === 401) { await checkAuth(); if (!_authChecked || (_passwordSet && document.getElementById('login-overlay').classList.contains('hidden'))) throw new Error('Unauthorized'); return fetch(url, options); }
+  return res;
+}
+
+// ── Navigation ──────────────────────────────────────────────────────────
+async function switchView(target) {
+  var winModal = document.getElementById('create-window-modal');
+  if (winModal && !winModal.classList.contains('hidden') && typeof customConfirm === 'function') {
+    var ok = await customConfirm('You have unsaved changes in the Window editor. Leave anyway?');
+    if (!ok) return;
+    closeCreateWindowModal();
+  }
+  VIEWS.forEach(function(v) {
+    document.getElementById('view-' + v).classList.toggle('hidden', v !== target);
+    document.getElementById('view-' + v).classList.toggle('block', v === target);
+    var navBtn = document.getElementById('nav-' + v);
+    if (navBtn) navBtn.classList.toggle('active', v === target);
+  });
+  if (target === 'gateways') { fetchGateways(); fetchEnrollData(); }
+  if (target === 'windows') { fetchWindowsTable(); }
+  if (target === 'stats') { fetchStatistics(); fetchSuggestions(); }
+  if (target === 'controls') { fetchFreezeStatus(); fetchGateways(); fetchPolicies(); fetchPolicyChanges(); }
+  if (target === 'fleet') { fetchFleetCommands(); }
+  if (target === 'settings') { refreshPasswordUI(); fetchNotifyConfig(); fetchDevTools(); if (_devToolsEnabled) { fetchDevStatus(); fetchDevGateways(); fetchFeatureFlags(); } }
+  if (target === 'logs') { fetchAuditLog(); }
+}
+
+// ── Settings Dropdown ────────────────────────────────────────────────────
+// (sidebar-settings-dropdown removed — dead code cleaned)
+
+// ── Password Management ──────────────────────────────────────────────────
+async function refreshPasswordUI() {
+  const statusEl = document.getElementById('password-status');
+  try {
+    const res = await fetch('/api/auth/status'); const data = await res.json();
+    statusEl.innerHTML = data.password_set
+      ? '<span style="color:var(--status-success);">🔒 Password protection <strong>enabled</strong>.</span>'
+      : '<span style="color:var(--status-warning);">⚠️ No password set yet — complete setup to protect the dashboard.</span>';
+  } catch(e) {}
+}
+async function setDashboardPassword() {
+  const pw = document.getElementById('new-password').value.trim();
+  if (!pw || pw.length < 4) { showToast('Password must be at least 4 characters', 'error'); return; }
+  try {
+    const res = await authFetch('/api/auth/set-password', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: pw }) });
+    if (res.ok) { document.getElementById('new-password').value = ''; refreshPasswordUI(); showToast('✅ Password updated', 'success'); }
+    else { const data = await res.json().catch(function() { return {}; }); showToast('❌ ' + (data.detail || 'Failed'), 'error'); }
+  } catch(e) { showToast('❌ Failed: ' + e.message, 'error'); }
+}
+
+// ── Dev Tools ────────────────────────────────────────────────────────────
+let _devToolsEnabled = false;
+async function fetchDevTools() {
+  try {
+    const res = await authFetch('/api/settings/dev-tools');
+    if (!res.ok) return;
+    const data = await res.json();
+    _devToolsEnabled = !!data.enabled;
+    renderDevTools();
+  } catch(e) {}
+}
+function renderDevTools() {
+  const widget = document.getElementById('dev-deployment-widget');
+  const toggle = document.getElementById('dev-tools-toggle');
+  if (widget) widget.classList.toggle('hidden', !_devToolsEnabled);
+  if (toggle) {
+    toggle.textContent = _devToolsEnabled ? 'On' : 'Off';
+    toggle.style.background = _devToolsEnabled ? 'var(--status-success)' : 'var(--bg-hover)';
+    toggle.style.color = _devToolsEnabled ? 'var(--bg-base)' : 'var(--text-muted)';
+  }
+}
+async function toggleDevTools() {
+  _devToolsEnabled = !_devToolsEnabled;
+  try {
+    await authFetch('/api/settings/dev-tools', { method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({enabled: _devToolsEnabled}) });
+    renderDevTools();
+    if (_devToolsEnabled) { fetchDevStatus(); fetchDevGateways(); fetchFeatureFlags(); }
+    showToast(_devToolsEnabled ? '✅ Development tools enabled' : 'Development tools disabled', 'success');
+  } catch(e) {
+    _devToolsEnabled = !_devToolsEnabled;
+    showToast('❌ Failed to update setting', 'error');
+  }
+}
+
+// ── Dev Mode Features ────────────────────────────────────────────────
+async function fetchFeatureFlags() {
+  try {
+    const res = await fetch('/api/feature-flags'); const flags = await res.json();
+    const container = document.getElementById('feature-flags-list');
+    if (!container) return;
+    let html = '';
+    Object.entries(flags).forEach(function(e) {
+      var name = e[0], info = e[1], on = info.enabled, sc = info.scope || 'dev';
+      var state = 'off';
+      if (on && sc === 'dev') state = 'dev';
+      if (on && sc === 'prod') state = 'prod';
+      html += '<div class="flex items-center justify-between p-3 rounded-lg" style="background:var(--bg-base);border:1px solid var(--border-color);">' +
+        '<div><span class="text-sm" style="color:var(--text-main);">' + escapeHtml(name) + '</span><p class="text-xs" style="color:var(--text-muted);">' + escapeHtml(info.description) + '</p></div>' +
+        '<div class="flex rounded-lg" style="background:var(--bg-hover);border:1px solid var(--border-color);">' +
+          renderSeg('off', state, name) +
+          renderSeg('dev', state, name) +
+          renderSeg('prod', state, name) +
+        '</div></div>';
+    });
+    container.innerHTML = html || '<p style="color:var(--text-muted);">No feature flags configured.</p>';
+  } catch(e) {}
+}
+
+function renderSeg(val, current, name) {
+  var active = val === current;
+  var bg = active
+    ? (val === 'off' ? 'var(--bg-surface)' : val === 'dev' ? 'rgba(96,165,250,0.2)' : 'rgba(74,222,128,0.2)')
+    : 'transparent';
+  var color = active
+    ? (val === 'off' ? 'var(--text-muted)' : val === 'dev' ? 'var(--status-info)' : 'var(--status-success)')
+    : 'var(--text-muted)';
+  var label = val === 'off' ? 'Off' : val === 'dev' ? '🧪 Dev' : '🟢 Prod';
+  return '<button onclick="setFeatureFlagState(\'' + name + '\',\'' + val + '\')" class="px-2.5 py-1 text-xs font-medium rounded transition-colors" style="background:' + bg + ';color:' + color + ';' + (!active ? 'opacity:0.6;' : '') + '">' + label + '</button>';
+}
+
+async function setFeatureFlagState(name, state) {
+  try {
+    await authFetch('/api/feature-flags/' + name + '/state', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({state:state}) });
+    fetchFeatureFlags();
+    showToast('Feature "' + name + '" → ' + (state === 'off' ? 'Off' : state === 'dev' ? 'Dev' : 'Prod'), 'success');
+  } catch(e) { showToast('Failed to update feature state', 'error'); }
+}
+
+async function fetchDevGateways() {
+  try {
+    const res = await fetch('/api/dev-gateways'); _devGateways = await res.json();
+    renderDevGatewayPills();
+  } catch(e) {}
+}
+
+function renderDevGatewayPills() {
+  var pills = document.getElementById('dev-gateway-pills');
+  if (!pills) return;
+  pills.innerHTML = _devGateways.map(function(g) {
+    return '<span class="inline-flex items-center gap-1 px-2 py-1 rounded text-xs" style="background:rgba(230,57,70,0.1);border:1px solid rgba(230,57,70,0.3);color:var(--brand-red);">' +
+      escapeHtml(g.hostname||g.ip) + ' <span onclick="removeDevGateway(\'' + g.ip + '\')" class="cursor-pointer font-bold ml-1" title="Remove from dev">&times;</span></span>';
+  }).join('');
+}
+
+async function addDevGateway() {
+  var input = document.getElementById('dev-gateway-input');
+  var q = input.value.trim();
+  if (!q) return;
+  // Find matching gateway
+  if (!_allGateways.length) {
+    var r = await fetch('/api/gateways'); _allGateways = await r.json();
+  }
+  var match = _allGateways.find(function(g) { return g.ip === q || (g.hostname && g.hostname.toLowerCase().includes(q.toLowerCase())); });
+  if (!match) { showToast('Gateway not found: ' + q, 'error'); return; }
+  try {
+    await authFetch('/api/gateways/' + match.ip + '/mode', { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({mode:'dev'}) });
+    input.value = '';
+    fetchDevGateways();
+    showToast(match.hostname + ' set to dev mode', 'success');
+  } catch(e) { showToast('Failed to set dev mode', 'error'); }
+}
+
+async function removeDevGateway(ip) {
+  try {
+    await authFetch('/api/gateways/' + ip + '/mode', { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({mode:'prod'}) });
+    fetchDevGateways();
+    showToast('Gateway removed from dev mode', 'success');
+  } catch(e) { showToast('Failed', 'error'); }
+}
+
+async function pushDevGateways() {
+  if (!_devGateways.length) { showToast('No dev gateways selected', 'error'); return; }
+  var btn = document.getElementById('push-dev-btn');
+  btn.disabled = true; btn.textContent = 'Pushing...';
+  try {
+    var r = await authFetch('/api/dev-gateways/push', { method:'POST' });
+    var data = await r.json();
+    if (data.stale_gateways && data.stale_gateways.length > 0) {
+      showToast('⚠️ ' + data.stale_gateways.length + ' gateway(s) are on old versions: ' + data.stale_gateways.join(', ') + '. Run 🔄 Update Gateways first.', 'error');
+    } else {
+      showToast('✅ Dev update triggered for ' + (data.dev_gateway_count||0) + ' gateway(s)' + (data.dev_gateway_names ? ': ' + data.dev_gateway_names.join(', ') : ''), 'success');
+    }
+  } catch(e) { showToast('Failed to push', 'error'); }
+  btn.disabled = false; btn.textContent = '🚀 Push to Dev Gateways';
+}
+
+function onDevGatewayInput() {
+  var input = document.getElementById('dev-gateway-input');
+  var q = input.value.trim();
+  var results = document.getElementById('dev-gateway-results');
+  if (!q) { results.innerHTML = ''; return; }
+  var matches = _allGateways.filter(function(g) {
+    return g.ip === q || (g.hostname && g.hostname.toLowerCase().includes(q.toLowerCase()));
+  }).slice(0, 5);
+  results.innerHTML = matches.map(function(g) {
+    return '<div onclick="document.getElementById(\'dev-gateway-input\').value=\'' + g.hostname + '\';addDevGateway()" class="px-3 py-1.5 text-xs cursor-pointer hover:brightness-125 rounded" style="color:var(--text-main);">' +
+      gwPill(g.hostname) + ' ' + escapeHtml(g.hostname) + ' <span style="color:var(--text-muted);">(' + g.ip + ')</span></div>';
+  }).join('');
+}
+// ── Approved Windows ────────────────────────────────────────────────
+// State variables (let/const) are in state.js
+const DAY_NAMES = ['Mo','Tu','We','Th','Fr','Sa','Su'];
+const DAY_BITS  = [1, 2, 4, 8, 16, 32, 64];
+
+function winError(msg) {
+  var el = document.getElementById('win-save-error');
+  el.textContent = msg; el.classList.remove('hidden');
+}
+
+function winClearError() {
+  document.getElementById('win-save-error').classList.add('hidden');
+}
+
+function resetWinForm() {
+  _winEditId = null; _winSource = 'new'; _winType = 'recurring'; _winDays = 0;
+  _winNeverExpire = true; _winHour = 0; _winMin = 0; _winMatchType = 'exact'; _selectedJIT = [];
+  document.getElementById('win-modal-title').textContent = '🪟 Create Approved Window';
+  document.getElementById('save-window-btn').textContent = 'Create Window';
+  document.getElementById('win-command').value = '';
+  document.getElementById('win-label').value = '';
+  document.getElementById('win-max-exec').value = '1';
+  document.getElementById('win-max-exec-single').value = '1';
+  document.getElementById('win-single-start-date').value = '';
+  document.getElementById('win-single-start-time').value = '';
+  document.getElementById('win-single-expiry-date').value = '';
+  document.getElementById('win-single-expiry-time').value = '';
+  document.getElementById('win-expiry-date').value = '';
+  document.getElementById('win-expiry-date').style.display = 'none';
+  document.getElementById('win-never-expire').checked = true;
+  document.getElementById('win-token-display').classList.add('hidden');
+  winClearError();
+  document.getElementById('win-summary-bar').classList.add('hidden-section');
+  document.getElementById('win-summary-text').textContent = '';
+  // Disable dynamic sections
+  document.getElementById('win-src-section').classList.add('win-disabled');
+  document.getElementById('win-label-section').classList.add('win-disabled');
+  var lh = document.getElementById('win-label-hint'); if(lh) lh.textContent = 'Select a gateway and type a command first';
+  var li = document.getElementById('win-label'); if(li) li.disabled = true;
+  // Show recurring, hide single-use fields
+  document.getElementById('win-recurring-fields').classList.remove('hidden-section');
+  document.getElementById('win-single-fields').classList.add('hidden-section');
+  // Command source: New Command is default, JIT hidden until gateway selected
+  document.getElementById('win-src-new').classList.add('selected');
+  document.getElementById('win-src-jit').classList.remove('selected');
+  document.getElementById('win-cmd-input-wrap').classList.remove('hidden-section');
+  document.getElementById('win-jit-list-wrap').classList.add('hidden-section');
+  // Type: Recurring default
+  document.getElementById('win-type-recurring').classList.add('selected');
+  document.getElementById('win-type-single').classList.remove('selected');
+  setWinMatch('exact');
+  // Reset hidden gateway value
+  document.getElementById('win-gateway').value = '';
+  document.getElementById('gw-dropdown-display').textContent = 'Select a gateway…';
+  document.getElementById('gw-dropdown-display').style.color = 'var(--text-muted)';
+  renderDayCircles();
+  buildTimeScrolls();
+}
+
+function readSingleUseSchedule() {
+  var d = document.getElementById('win-single-start-date').value;
+  var t = document.getElementById('win-single-start-time').value;
+  if (!d || !t) throw new Error('Set a start date and time for the single-use window');
+  return { start: Math.floor(new Date(d + 'T' + t).getTime() / 1000), end: 4102444800 };
+}
+
+// ── Windows Table (redesigned) ────────────────────────────────────────
+
+function formatWinSchedule(w) {
+  // Coerce because legacy migrations may have created these columns as TEXT.
+  var dow = Number(w.days_of_week) || 0;
+  var et = Number(w.execution_time) || 0;
+  var ws = Number(w.window_start) || 0;
+  var exp = w.expires_at ? Number(w.expires_at) : 0;
+  var sched;
+  if (!dow && !et) {
+    if (ws) {
+      var d = new Date(ws * 1000);
+      sched = 'Once: ' + d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false });
+    } else {
+      sched = 'N/A';
+    }
+  } else {
+    var dayNames = [];
+    for (var i = 0; i < 7; i++) { if (dow & DAY_BITS[i]) dayNames.push(DAY_NAMES[i]); }
+    var days = dayNames.length ? dayNames.join(',') : 'Every day';
+    var h = String(Math.floor(et / 60)).padStart(2,'0');
+    var m = String(et % 60).padStart(2,'0');
+    sched = days + ' ' + h + ':' + m + ' UTC';
+  }
+  if (exp) {
+    var ed = new Date(exp * 1000);
+    var expStr = ed.toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false });
+    var past = Math.floor(Date.now() / 1000) > exp;
+    var color = past ? 'var(--brand-red)' : 'var(--status-warning)';
+    sched += '<br><span style="font-size:10px;opacity:0.85;color:' + color + ';">Expires: ' + expStr + (past ? ' (expired)' : '') + '</span>';
+  }
+  return sched;
+}
+
+function computeNextRun(daysOfWeek, execTimeMin) {
+  // Stored values are UTC; compute next occurrence as a UTC Date.
+  var now = new Date();
+  var utcDowIdx = (now.getUTCDay() + 6) % 7; // 0=Mon..6=Sun
+  var nowMin = now.getUTCHours() * 60 + now.getUTCMinutes();
+  var dow = Number(daysOfWeek) || 0;
+  var et = Number(execTimeMin) || 0;
+  for (var offset = 0; offset <= 7; offset++) {
+    var idx = (utcDowIdx + offset) % 7;
+    var bit = DAY_BITS[idx];
+    var matches = dow === 0 || (dow & bit);
+    var afterNow = offset === 0 ? et > nowMin : true;
+    if (matches && afterNow) {
+      var cand = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + offset, 0, et, 0, 0));
+      return cand;
+    }
+  }
+  return null;
+}
+
+function formatNextRun(date) {
+  if (!date || isNaN(date.getTime())) return '';
+  var now = new Date();
+  var totalMins = Math.max(0, Math.ceil((date - now) / 60000));
+  var hours = Math.floor(totalMins / 60);
+  var mins = totalMins % 60;
+  var countdown = hours > 0 ? hours + 'h ' + mins + 'm' : mins + 'm';
+  var day = date.toLocaleDateString(undefined, { weekday: 'short' });
+  var time = date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hour12: false });
+  return 'Next: ' + day + ' ' + time + ' (in ' + countdown + ')';
+}
+
+async function fetchWindowsTable() {
+  try {
+    var r = await fetch('/api/approved-windows'); var wins = await r.json();
+    var gwMap = {};
+    try { var gr = await fetch('/api/gateways'); (await gr.json()).forEach(function(g) { gwMap[g.ip] = g; }); } catch(e) {}
+    var tbody = document.getElementById('windows-table-body');
+    if (!tbody) return;
+    if (!wins.length) { tbody.innerHTML = '<tr><td colspan="8" class="px-4 py-3" style="color:var(--text-muted);">No approved windows created yet.</td></tr>'; return; }
+    var tableNow = Math.floor(Date.now() / 1000);
+    tbody.innerHTML = wins.map(function(w) {
+      var stat = w.enabled ? '<span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium cursor-pointer" style="background:rgba(74,222,128,0.1);color:var(--status-success);" onclick="toggleWindow(' + w.id + ',true)" title="Click to disable">🟢 On</span>' :
+        (w.status === 'pending_review' ? '<span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium" style="background:rgba(251,191,36,0.1);color:var(--status-warning);">⏳ Review</span>' :
+         (w.status === 'denied' ? '<span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium" style="background:rgba(230,57,70,0.08);color:#fb7185;">🚫 Denied</span>' :
+          '<span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium cursor-pointer" style="background:var(--bg-hover);color:var(--text-muted);" onclick="toggleWindow(' + w.id + ',false)" title="Click to enable">⏸️ Off</span>'));
+      var gw = gwMap[w.target_ip] || {};
+      var originBadge = (w.origin === 'ai')
+        ? '<span style="font-size:10px;color:var(--status-info);opacity:0.8;" title="Inbound — AI requested">🤖 AI</span> '
+        : '<span style="font-size:10px;color:var(--text-muted);opacity:0.6;" title="Outbound — operator created">👤 Human</span> ';
+      var labelHtml = originBadge + (w.label ? '<span style="color:var(--text-main);font-weight:500;">' + escapeHtml(w.label) + '</span><br>' : '') +
+        '<code class="text-xs font-mono" style="color:var(--text-muted);" title="' + (w.token||'') + '">' + (w.token||'').substring(0, 8) + '…</code>' +
+        ' <span onclick="copyToClipboard(\'' + (w.token||'') + '\')" class="cursor-pointer text-xs opacity-40 hover:opacity-100" title="Copy token">📋</span>';
+      var execInfo = w.execution_count + (w.max_executions > 0 ? '/' + w.max_executions : '/∞');
+      var lu = Number(w.last_used_at) || 0;
+      if (lu > 0) execInfo += '<br><span style="font-size:10px;opacity:0.7;">last ' + formatAgo(tableNow - lu) + '</span>';
+      var dowNum = Number(w.days_of_week) || 0, etNum = Number(w.execution_time) || 0;
+      var wsNum = Number(w.window_start) || 0;
+      var expTs = w.expires_at ? Number(w.expires_at) : 0;
+      var isExpired = expTs > 0 && expTs * 1000 < Date.now();
+      var nextRunStr = isExpired ? '' : (dowNum || etNum
+        ? formatNextRun(computeNextRun(dowNum, etNum))
+        : (wsNum && wsNum * 1000 > Date.now() ? formatNextRun(new Date(wsNum * 1000)) : ''));
+      return '<tr>' +
+        '<td style="font-size:11px;color:var(--text-muted);white-space:nowrap;" title="Numeric window ID — refer to it when coordinating with the agent">#' + w.id + '</td>' +
+        '<td>' + stat + '</td>' +
+        '<td>' + labelHtml + '</td>' +
+        '<td style="font-size:12px;">' + gwPill(gw.hostname||w.target_ip) + ' ' + escapeHtml(gw.hostname||w.target_ip) + '</td>' +
+        '<td><code class="text-xs px-1.5 py-0.5 rounded" style="background:var(--bg-base);color:var(--text-main);display:block;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + escapeHtml(w.command) + '">' + escapeHtml(w.match_type === 'prefix' ? w.command + '*' : w.command) + '</code></td>' +
+        '<td style="font-size:11px;color:var(--text-muted);">' + formatWinSchedule(w) + (nextRunStr ? '<br><span style="opacity:0.75;">' + nextRunStr + '</span>' : '') + '</td>' +
+        '<td class="text-center text-xs" style="color:var(--text-muted);">' + execInfo + '</td>' +
+        '<td class="text-right"><div class="flex items-center justify-end gap-1">' +
+          (w.status === 'pending_review'
+            ? '<button onclick="approveWindowReq(' + w.id + ')" class="btn btn-xs" style="background:var(--status-success);color:var(--bg-base);">✅ Approve</button>' +
+              '<button onclick="denyWindowReq(' + w.id + ')" class="btn btn-deny btn-xs">❌ Deny</button>'
+            : '<button onclick="openEditWindowModal(' + w.id + ')" class="btn btn-xs" style="background:var(--bg-hover);color:var(--text-muted);" title="Edit">✏️</button>' +
+              '<button onclick="showWindowHistory(' + w.id + ')" class="btn btn-xs" style="background:var(--bg-hover);color:var(--text-muted);" title="Usage history">📜</button>' +
+              '<button onclick="deleteWindow(' + w.id + ')" class="btn btn-deny btn-xs" title="Delete">🗑</button>') +
+        '</div></td>' +
+        '</tr>';
+    }).join('');
+  } catch(e) {}
+}
+
+// ── Gateway Dropdown ────────────────────────────────────────────────
+
+function toggleGwDropdown() {
+  _gwDropdownOpen = !_gwDropdownOpen;
+  var menu = document.getElementById('gw-dropdown-menu');
+  var caret = document.getElementById('gw-dropdown-caret');
+  var trigger = document.getElementById('gw-dropdown-trigger');
+  if (_gwDropdownOpen) {
+    menu.classList.add('show');
+    caret.classList.add('open');
+    trigger.classList.add('open');
+  } else {
+    menu.classList.remove('show');
+    caret.classList.remove('open');
+    trigger.classList.remove('open');
+  }
+}
+
+function selectGateway(ip) {
+  var gw = _winGateways.find(function(g) { return g.ip === ip; });
+  if (!gw) return;
+  document.getElementById('win-gateway').value = ip;
+  var display = document.getElementById('gw-dropdown-display');
+  display.innerHTML = gwPill(gw.hostname||gw.ip) + ' ' + escapeHtml(gw.hostname||gw.ip) + ' <span style="color:var(--text-muted);font-size:11px;">(' + ip + ')</span>';
+  display.style.color = 'var(--text-main)';
+  _gwDropdownOpen = false;
+  document.getElementById('gw-dropdown-menu').classList.remove('show');
+  document.getElementById('gw-dropdown-caret').classList.remove('open');
+  document.getElementById('gw-dropdown-trigger').classList.remove('open');
+  // Trigger the change
+  var evt = document.createEvent('HTMLEvents');
+  evt.initEvent('change', false, true);
+  document.getElementById('win-gateway').dispatchEvent(evt);
+}
+
+// Close dropdown when clicking outside
+document.addEventListener('click', function(e) {
+  var dd = document.getElementById('gw-dropdown');
+  if (dd && !dd.contains(e.target)) {
+    _gwDropdownOpen = false;
+    document.getElementById('gw-dropdown-menu').classList.remove('show');
+    document.getElementById('gw-dropdown-caret').classList.remove('open');
+    document.getElementById('gw-dropdown-trigger').classList.remove('open');
+  }
+});
+
+// ── Modal: Gateway change → reveal source ────────────────────────────
+
+async function onWinGatewayChange() {
+  var ip = document.getElementById('win-gateway').value;
+  var srcEl = document.getElementById('win-src-section');
+  if (!ip) { srcEl.classList.add('win-disabled'); return; }
+  srcEl.classList.remove('win-disabled');
+  // Load JIT data for this gateway
+  try {
+    var r = await fetch('/api/approved-windows/recent-jit?hours=6&ip=' + encodeURIComponent(ip));
+    _recentJITData = await r.json();
+  } catch(e) { _recentJITData = []; }
+  var list = document.getElementById('recent-jit-list');
+  if (!_recentJITData.length) { list.innerHTML = '<p class="text-xs px-2 py-1" style="color:var(--text-muted);">No recent JIT approvals for this gateway.</p>'; }
+  else {
+    list.innerHTML = _recentJITData.slice(0, 20).map(function(j, i) {
+      return '<div class="flex items-center gap-2 px-2 py-1 text-xs cursor-pointer rounded hover:brightness-125" style="color:var(--text-main);" onclick="selectJIT(' + i + ')" title="Click to fill command">' +
+        '<span style="font-size:12px;">↩</span>' +
+        gwPill(j.hostname||'') + ' ' + escapeHtml(j.hostname||j.target_ip) +
+        ' <code class="truncate" style="color:var(--text-muted);max-width:260px;" title="' + escapeHtml(j.command) + '">' + escapeHtml(j.command.substring(0, 60)) + '</code>' +
+        ' <span style="color:var(--text-muted);font-size:10px;">' + formatAgo(Date.now()/1000 - j.created_at) + '</span>' +
+      '</div>';
+    }).join('');
+  }
+  updateWinSummary();
+}
+
+// ── Modal: open / close ──────────────────────────────────────────────
+
+async function openCreateWindowModal() {
+  document.getElementById('create-window-modal').classList.remove('hidden');
+  resetWinForm();
+  try {
+    var r = await fetch('/api/gateways'); _winGateways = await r.json();
+    var menu = document.getElementById('gw-dropdown-menu');
+    if (!_winGateways.length) { menu.innerHTML = '<div class="p-3 text-xs" style="color:var(--text-muted);">No gateways registered.</div>'; }
+    else {
+      menu.innerHTML = _winGateways.map(function(g) {
+        return '<div class="gw-dropdown-item" onclick="selectGateway(\'' + g.ip + '\')">' + gwPill(g.hostname||g.ip) + ' ' + escapeHtml(g.hostname||g.ip) + ' <span style="color:var(--text-muted);font-size:11px;margin-left:auto;">' + g.ip + '</span></div>';
+      }).join('');
+    }
+  } catch(e) {}
+}
+
+async function openEditWindowModal(id) {
+  _winEditId = id;
+  document.getElementById('win-modal-title').textContent = '✏️ Edit Approved Window';
+  document.getElementById('save-window-btn').textContent = 'Save Changes';
+  winClearError();
+  document.getElementById('win-token-display').classList.add('hidden');
+  document.getElementById('create-window-modal').classList.remove('hidden');
+
+  try {
+    var gr = await fetch('/api/gateways'); _winGateways = await gr.json();
+    var menu = document.getElementById('gw-dropdown-menu');
+    menu.innerHTML = _winGateways.map(function(g) {
+      return '<div class="gw-dropdown-item" onclick="selectGateway(\'' + g.ip + '\')">' + gwPill(g.hostname||g.ip) + ' ' + escapeHtml(g.hostname||g.ip) + ' <span style="color:var(--text-muted);font-size:11px;margin-left:auto;">' + g.ip + '</span></div>';
+    }).join('');
+
+    var r = await fetch('/api/approved-windows/' + id);
+    if (!r.ok) throw new Error('not found');
+    var w = await r.json();
+
+    // Coerce numeric fields because legacy migrations may have stored them as TEXT.
+    var dowNum = Number(w.days_of_week) || 0;
+    var etNum = Number(w.execution_time) || 0;
+    var wsNum = Number(w.window_start) || 0;
+    var weNum = Number(w.window_end) || 0;
+    var expNum = w.expires_at ? Number(w.expires_at) : 0;
+
+    // Determine type: if it has schedule data it's recurring, otherwise single-use
+    var isRecurring = !!(dowNum || etNum);
+    _winType = isRecurring ? 'recurring' : 'single';
+    setWinType(_winType);
+
+    // Set the gateway
+    var gw = _winGateways.find(function(g) { return g.ip === w.target_ip; });
+    if (gw) selectGateway(gw.ip);
+    else { document.getElementById('win-gateway').value = w.target_ip; }
+
+    setWinSource('new');
+    document.getElementById('win-command').value = w.command || '';
+    document.getElementById('win-label').value = w.label || '';
+    _winMatchType = w.match_type || 'exact';
+    setWinMatch(_winMatchType);
+
+    // Enable sections
+    document.getElementById('win-src-section').classList.remove('win-disabled');
+    document.getElementById('win-label-section').classList.remove('win-disabled');
+    var lh2 = document.getElementById('win-label-hint'); if(lh2) lh2.textContent = '';
+    var li2 = document.getElementById('win-label'); if(li2) li2.disabled = false;
+
+    _winDays = dowNum;
+    _winHour = Math.floor(etNum / 60);
+    _winMin = etNum % 60;
+
+    var maxExec = Math.min(Math.max(w.max_executions || 1, 1), 5);
+    document.getElementById('win-max-exec').value = maxExec;
+    document.getElementById('win-max-exec-single').value = maxExec;
+
+    // Single-use start date/time
+    if (wsNum) {
+      var sd = new Date(wsNum * 1000);
+      document.getElementById('win-single-start-date').value =
+        sd.getFullYear() + '-' + String(sd.getMonth()+1).padStart(2,'0') + '-' + String(sd.getDate()).padStart(2,'0');
+      document.getElementById('win-single-start-time').value =
+        String(sd.getHours()).padStart(2,'0') + ':' + String(sd.getMinutes()).padStart(2,'0');
+    } else {
+      document.getElementById('win-single-start-date').value = '';
+      document.getElementById('win-single-start-time').value = '';
+    }
+
+    if (expNum) {
+      _winNeverExpire = false;
+      document.getElementById('win-never-expire').checked = false;
+      document.getElementById('win-expiry-date').style.display = 'block';
+      var ed = new Date(expNum * 1000).toISOString().slice(0, 10);
+      document.getElementById('win-expiry-date').value = ed;
+      if (!isRecurring) {
+        var edt = new Date(expNum * 1000);
+        document.getElementById('win-single-expiry-date').value =
+          edt.getFullYear() + '-' + String(edt.getMonth()+1).padStart(2,'0') + '-' + String(edt.getDate()).padStart(2,'0');
+        document.getElementById('win-single-expiry-time').value =
+          String(edt.getHours()).padStart(2,'0') + ':' + String(edt.getMinutes()).padStart(2,'0');
+      }
+    } else {
+      _winNeverExpire = true;
+      document.getElementById('win-never-expire').checked = true;
+      document.getElementById('win-expiry-date').style.display = 'none';
+      document.getElementById('win-expiry-date').value = '';
+    }
+
+    renderDayCircles();
+    buildTimeScrolls();
+    setTimeScroll(_winHour, _winMin);
+    updateWinSummary();
+    document.getElementById('win-summary-bar').classList.remove('hidden-section');
+  } catch(e) { winError('Failed to load window'); }
+}
+
+function closeCreateWindowModal() {
+  document.getElementById('create-window-modal').classList.add('hidden');
+  _winEditId = null;
+  // Close gw dropdown if open
+  _gwDropdownOpen = false;
+  var menu = document.getElementById('gw-dropdown-menu');
+  if (menu) menu.classList.remove('show');
+}
+
+// ── Source toggle ────────────────────────────────────────────────────
+
+function setWinSource(src) {
+  _winSource = src;
+  document.getElementById('win-src-new').classList.toggle('selected', src === 'new');
+  document.getElementById('win-src-jit').classList.toggle('selected', src === 'jit');
+  document.getElementById('win-cmd-input-wrap').classList.toggle('hidden-section', src !== 'new');
+  document.getElementById('win-jit-list-wrap').classList.toggle('hidden-section', src !== 'jit');
+  if (src === 'new') {
+    checkCommandReady();
+  } else {
+    // JIT mode: label disabled until a JIT is selected
+    document.getElementById('win-label-section').classList.add('win-disabled');
+    var lhs = document.getElementById('win-label-hint'); if(lhs) lhs.textContent = 'Select a JIT command from the list above';
+    var lis = document.getElementById('win-label'); if(lis) lis.disabled = true;
+  }
+  updateWinSummary();
+}
+
+// ── Match type toggle ────────────────────────────────────────────────
+
+function setWinMatch(type) {
+  _winMatchType = type;
+  var track = document.getElementById('win-match-toggle');
+  var labelL = document.getElementById('match-label-exact');
+  var labelR = document.getElementById('match-label-prefix');
+  if (type === 'exact') {
+    track.classList.add('on');
+    if(labelL) labelL.style.color = 'var(--status-success)';
+    if(labelR) labelR.style.color = 'var(--text-muted)';
+  } else {
+    track.classList.remove('on');
+    if(labelL) labelL.style.color = 'var(--text-muted)';
+    if(labelR) labelR.style.color = 'var(--status-success)';
+  }
+  updateWinSummary();
+}
+
+// ── Type toggle ──────────────────────────────────────────────────────
+
+function setWinType(type) {
+  _winType = type;
+  document.getElementById('win-type-recurring').classList.toggle('selected', type === 'recurring');
+  document.getElementById('win-type-single').classList.toggle('selected', type === 'single');
+  // Recurring shows schedule+expiry, single-use shows only max exec
+  document.getElementById('win-recurring-fields').classList.toggle('hidden-section', type !== 'recurring');
+  document.getElementById('win-single-fields').classList.toggle('hidden-section', type !== 'single');
+  updateWinSummary();
+}
+
+function checkCommandReady() {
+  var ip = document.getElementById('win-gateway').value;
+  var cmd = document.getElementById('win-command').value.trim();
+  var hasCmd = cmd.length > 0;
+  var ready = !!(ip && hasCmd);
+  var labelEl = document.getElementById('win-label-section');
+  var labelInput = document.getElementById('win-label');
+  if (ready) {
+    labelEl.classList.remove('win-disabled');
+    var lhc = document.getElementById('win-label-hint'); if(lhc) lhc.textContent = '';
+    if (labelInput) labelInput.disabled = false;
+  } else {
+    labelEl.classList.add('win-disabled');
+    var lhc2 = document.getElementById('win-label-hint'); if(lhc2) lhc2.textContent = _winSource === 'jit' ? 'Select a JIT command from the list above' : 'Type a command above';
+    if (labelInput) labelInput.disabled = true;
+  }
+}
+
+// ── Match toggle ────────────────────────────────────────────────────
+
+function toggleWinMatch() {
+  setWinMatch(_winMatchType === 'exact' ? 'prefix' : 'exact');
+}
+
+// ── JIT selection (click-to-fill, single command) ────────────────────
+
+function selectJIT(idx) {
+  var item = _recentJITData[idx];
+  if (!item) return;
+  document.getElementById('win-command').value = item.command;
+  // Switch to Command view so the user can see what was filled
+  setWinSource('new');
+  checkCommandReady();
+  updateWinSummary();
+}
+
+// ── Test command ─────────────────────────────────────────────────────
+
+async function testWinCommand() {
+  var cmd = document.getElementById('win-command').value.trim();
+  if (!cmd) return;
+  var rd = document.getElementById('win-test-result'); rd.classList.remove('hidden');
+  rd.innerHTML = '<span class="text-xs" style="color:var(--text-muted);">Testing...</span>';
+  try {
+    var r = await fetch('/api/policies/test?command=' + encodeURIComponent(cmd)); var data = await r.json();
+    var bg, border, text, icon, desc;
+    if (data.action === 'blocked') { bg='rgba(251,146,60,0.1)'; border='rgba(251,146,60,0.3)'; text='#fb923c'; icon='🛡️'; desc='This command is BLOCKED by policy — cannot create window.'; }
+    else if (data.action === 'auto_approved') { bg='rgba(74,222,128,0.1)'; border='rgba(74,222,128,0.3)'; text='var(--status-success)'; icon='✅'; desc='Already auto-approved — no window needed.'; }
+    else { bg='rgba(96,165,250,0.1)'; border='rgba(96,165,250,0.3)'; text='var(--status-info)'; icon='⏳'; desc='Would require JIT — a window will auto-approve this.'; }
+    rd.innerHTML = '<div class="p-2 rounded-lg border text-xs" style="background:' + bg + ';color:' + text + ';border-color:' + border + ';">' + icon + ' ' + desc + '</div>';
+  } catch(e) { rd.innerHTML = '<span class="text-xs" style="color:var(--text-muted);">Test failed</span>'; }
+}
+
+// ── Time scroll picker ───────────────────────────────────────────────
+
+function buildTimeScrolls() {
+  var hEl = document.getElementById('time-scroll-hours');
+  var mEl = document.getElementById('time-scroll-mins');
+  var hHtml = '', mHtml = '';
+  for (var i = 0; i < 24; i++) {
+    var v = String(i).padStart(2,'0');
+    hHtml += '<div class="time-digit' + (i === _winHour ? ' active' : '') + '" onclick="setTimeScroll(' + i + ',' + _winMin + ')">' + v + '</div>';
+  }
+  for (var i = 0; i < 60; i++) {
+    var v = String(i).padStart(2,'0');
+    mHtml += '<div class="time-digit' + (i === _winMin ? ' active' : '') + '" onclick="setTimeScroll(' + _winHour + ',' + i + ')">' + v + '</div>';
+  }
+  hEl.innerHTML = hHtml; mEl.innerHTML = mHtml;
+  hEl.scrollTop = _winHour * 40 - 30;
+  mEl.scrollTop = _winMin * 40 - 30;
+}
+
+function setTimeScroll(h, m) {
+  _winHour = h; _winMin = m;
+  buildTimeScrolls();
+  updateWinSummary();
+}
+
+function shiftTimeScroll(which, dir) {
+  if (which === 'hours') {
+    _winHour = (_winHour + dir + 24) % 24;
+  } else {
+    _winMin = (_winMin + dir + 60) % 60;
+  }
+  buildTimeScrolls();
+  updateWinSummary();
+}
+
+function onTimeScroll(which) {
+  var el = document.getElementById('time-scroll-' + which);
+  var idx = Math.round((el.scrollTop + 20) / 40);
+  if (which === 'hours') { _winHour = Math.max(0, Math.min(23, idx)); }
+  else { _winMin = Math.max(0, Math.min(59, idx)); }
+  buildTimeScrolls();
+  updateWinSummary();
+}
+
+// ── Day circles ──────────────────────────────────────────────────────
+
+function renderDayCircles() {
+  var container = document.getElementById('day-circles-container');
+  var html = '';
+  for (var i = 0; i < 7; i++) {
+    var on = _winDays & DAY_BITS[i];
+    html += '<div class="day-circle' + (on ? ' active' : '') + '" onclick="toggleDay(' + DAY_BITS[i] + ')">' + DAY_NAMES[i] + '</div>';
+  }
+  container.innerHTML = html;
+}
+
+function toggleDay(bit) {
+  _winDays ^= bit;
+  renderDayCircles();
+  updateWinSummary();
+}
+
+// ── Expiry checkbox ─────────────────────────────────────────────────
+
+function onWinNeverExpireChange() {
+  var cb = document.getElementById('win-never-expire');
+  _winNeverExpire = cb.checked;
+  var dateEl = document.getElementById('win-expiry-date');
+  if (_winNeverExpire) {
+    dateEl.style.display = 'none';
+    dateEl.value = '';
+  } else {
+    dateEl.style.display = 'block';
+  }
+  updateWinSummary();
+}
+
+// ── Max exec clamping ───────────────────────────────────────────
+
+function onMaxExecInput() {
+  var elR = document.getElementById('win-max-exec');
+  var elS = document.getElementById('win-max-exec-single');
+  if (elR) {
+    var v = parseInt(elR.value) || 1;
+    if (v < 1) elR.value = 1;
+    if (v > 5) elR.value = 5;
+  }
+  if (elS) {
+    var v2 = parseInt(elS.value) || 1;
+    if (v2 < 1) elS.value = 1;
+    if (v2 > 5) elS.value = 5;
+  }
+}
+
+// ── Summary bar ──────────────────────────────────────────────────────
+
+function updateWinSummary() {
+  var ip = document.getElementById('win-gateway').value;
+  var display = document.getElementById('gw-dropdown-display');
+  var gwName = display ? display.textContent.trim() : '';
+  var cmd = document.getElementById('win-command').value.trim();
+  var summaryEl = document.getElementById('win-summary-bar');
+  var textEl = document.getElementById('win-summary-text');
+
+  if (!ip) { summaryEl.classList.add('hidden-section'); return; }
+  summaryEl.classList.remove('hidden-section');
+
+  var parts = [];
+  var nextRunEl = document.getElementById('win-next-run');
+  if (_winType === 'single') {
+    var maxExec = parseInt(document.getElementById('win-max-exec-single').value) || 1;
+    parts.push('⚡ Single-use');
+    parts.push(maxExec + ' execution' + (maxExec !== 1 ? 's' : ''));
+    parts.push('auto-disables when exhausted');
+    if (nextRunEl) nextRunEl.textContent = '';
+    try {
+      var sched = readSingleUseSchedule();
+      if (sched.start) {
+        var sdate = new Date(sched.start * 1000);
+        var sstr = sdate.toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false });
+        parts.push('starts ' + sstr);
+        if (sched.start * 1000 > Date.now()) {
+          var countdown = formatNextRun(sdate);
+          if (countdown) parts.push(countdown);
+        }
+      }
+    } catch(e) { /* partial date/time typed; ignore for summary */ }
+    // Read optional expiry (date + time, local)
+    var seDateVal = document.getElementById('win-single-expiry-date').value;
+    var seTimeVal = document.getElementById('win-single-expiry-time').value;
+    if (seDateVal) {
+      var expLocal = new Date(seDateVal + (seTimeVal ? 'T' + seTimeVal : 'T00:00'));
+      parts.push('expires ' + expLocal.toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false }));
+    }
+  } else {
+    var hh = String(_winHour).padStart(2,'0');
+    var mm = String(_winMin).padStart(2,'0');
+    var dayList = [];
+    for (var i = 0; i < 7; i++) { if (_winDays & DAY_BITS[i]) dayList.push(DAY_NAMES[i]); }
+    var dayStr = dayList.length ? dayList.join(', ') : 'Every day';
+    parts.push('🔄 ' + dayStr + ' at ' + hh + ':' + mm + ' UTC');
+    parts.push(_winNeverExpire ? 'never expires' : (document.getElementById('win-expiry-date').value || 'expiry set'));
+    var maxExecR = parseInt(document.getElementById('win-max-exec').value) || 1;
+    parts.push(maxExecR + ' max exec' + (maxExecR !== 1 ? 's' : ''));
+    if (nextRunEl) nextRunEl.textContent = formatNextRun(computeNextRun(_winDays, _winHour * 60 + _winMin));
+  }
+  if (gwName) parts.push('on ' + gwName.replace(/\s+\([^)]+\)$/, ''));
+
+  textEl.textContent = parts.filter(Boolean).join(' · ');
+}
+
+// ── Save (create or edit) ────────────────────────────────────────────
+
+async function saveWindow() {
+  winClearError();
+  var gw = document.getElementById('win-gateway').value;
+  var cmd = document.getElementById('win-command').value.trim();
+  if (!gw) { winError('Select a target gateway'); return; }
+  if (!cmd) { winError('Enter or select a command'); return; }
+
+  if (_winType === 'recurring' && !_winNeverExpire && !document.getElementById('win-expiry-date').value) {
+    winError('Set an expiration date or uncheck Never expire'); return;
+  }
+
+  var label = document.getElementById('win-label').value.trim();
+  var body = { target_ip: gw, command: cmd, label: label, match_type: _winMatchType, window_start: 0, window_end: 0 };
+
+  // max_executions: use the appropriate field per type
+  if (_winType === 'single') {
+    var sched = readSingleUseSchedule();
+    body.window_start = sched.start;
+    body.window_end = sched.end;
+    var maxExecSingle = parseInt(document.getElementById('win-max-exec-single').value) || 1;
+    body.max_executions = Math.min(Math.max(maxExecSingle, 1), 5);
+    body.days_of_week = 0;
+    body.execution_time = 0;
+    var seDate = document.getElementById('win-single-expiry-date').value;
+    var seTime = document.getElementById('win-single-expiry-time').value;
+    body.expires_at = seDate ? Math.floor(new Date(seDate + (seTime ? 'T' + seTime : 'T00:00')).getTime() / 1000) : null;
+  } else {
+    var maxExecRecur = parseInt(document.getElementById('win-max-exec').value) || 1;
+    body.max_executions = Math.min(Math.max(maxExecRecur, 1), 5);
+    body.days_of_week = _winDays;
+    body.execution_time = _winHour * 60 + _winMin;
+    if (_winNeverExpire) {
+      body.expires_at = null;
+    } else {
+      var dateStr = document.getElementById('win-expiry-date').value;
+      body.expires_at = dateStr ? Math.floor(new Date(dateStr + 'T00:00:00Z').getTime() / 1000) : null;
+    }
+  }
+
+  var isEdit = _winEditId !== null;
+  var url = isEdit ? '/api/approved-windows/' + _winEditId : '/api/approved-windows';
+  var method = isEdit ? 'PUT' : 'POST';
+  if (isEdit) {
+    body = { command: cmd, label: label, match_type: _winMatchType };
+    if (_winType === 'single') {
+      var sched2 = readSingleUseSchedule();
+      body.window_start = sched2.start;
+      body.window_end = sched2.end;
+      var msEdit = parseInt(document.getElementById('win-max-exec-single').value) || 1;
+      body.max_executions = Math.min(Math.max(msEdit, 1), 5);
+      body.days_of_week = 0;
+      body.execution_time = 0;
+      var se2Date = document.getElementById('win-single-expiry-date').value;
+      var se2Time = document.getElementById('win-single-expiry-time').value;
+      body.expires_at = se2Date ? Math.floor(new Date(se2Date + (se2Time ? 'T' + se2Time : 'T00:00')).getTime() / 1000) : null;
+    } else {
+      var mrEdit = parseInt(document.getElementById('win-max-exec').value) || 1;
+      body.max_executions = Math.min(Math.max(mrEdit, 1), 5);
+      body.days_of_week = _winDays;
+      body.execution_time = _winHour * 60 + _winMin;
+      body.expires_at = _winNeverExpire ? null : (document.getElementById('win-expiry-date').value ? Math.floor(new Date(document.getElementById('win-expiry-date').value + 'T00:00:00Z').getTime() / 1000) : null);
+    }
+  }
+
+  try {
+    var r = await authFetch(url, { method: method, headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+    if (!r.ok) { var d = await r.json().catch(function(){return{};}); var msg = typeof d.detail === 'string' ? d.detail : (typeof d.detail === 'object' ? JSON.stringify(d.detail) : 'Save failed'); throw new Error(msg); }
+    var data = await r.json();
+    if (!isEdit) {
+      document.getElementById('win-token-display').classList.remove('hidden');
+      document.getElementById('win-token-value').textContent = data.token;
+      document.getElementById('win-token-usage').textContent = 'ESHU_WINDOW_TOKEN=' + data.token + ' ' + cmd;
+    }
+    closeCreateWindowModal();
+    showToast(isEdit ? '✅ Window updated' : '✅ Window created', 'success');
+    fetchWindowsTable();
+    if (!isEdit) _winEditId = data.id;
+    document.getElementById('save-window-btn').textContent = 'Save Changes';
+    document.getElementById('win-modal-title').textContent = '✏️ Edit Approved Window';
+  } catch(e) { winError(e.message); }
+}
+
+// ── Toggle / Delete ──────────────────────────────────────────────────
+
+async function toggleWindow(id, current) {
+  try {
+    await authFetch('/api/approved-windows/' + id + '/toggle', { method:'POST' });
+    showToast(current ? 'Window disabled' : 'Window enabled', 'success');
+    fetchWindowsTable();
+  } catch(e) { showToast('Failed', 'error'); }
+}
+
+async function deleteWindow(id) {
+  if (!(await customConfirm('Delete this approved window? This cannot be undone.'))) return;
+  try {
+    await authFetch('/api/approved-windows/' + id, { method:'DELETE' });
+    showToast('Window deleted', 'success');
+    fetchWindowsTable();
+  } catch(e) { showToast('Failed to delete', 'error'); }
+}
+
+async function showWindowHistory(windowId) {
+  var overlay = document.getElementById('window-history-overlay');
+  var content = document.getElementById('window-history-content');
+  content.innerHTML = '<p style="color:var(--text-muted);">Loading...</p>';
+  overlay.classList.remove('hidden');
+  try {
+    var r = await fetch('/api/approved-windows/' + windowId + '/executions');
+    var data = await r.json();
+    if (!data.length) {
+      content.innerHTML = '<p style="color:var(--text-muted);padding:20px 0;">No executions recorded for this window yet.</p>';
+    } else {
+      var now = Math.floor(Date.now() / 1000);
+      content.innerHTML = '<table><thead><tr><th>When</th><th>Command</th><th>Gateway</th></tr></thead><tbody>' +
+        data.map(function(e) {
+          var ago = formatAgo(now - Math.floor(e.executed_at || 0) || 0);
+          var ok = Number(e.success) !== 0;
+          var icon = ok ? '<span style="color:var(--status-success);">✅</span>' : '<span style="color:#fb923c;">❌</span>';
+          var reasonHtml = (!ok && e.reason) ? '<br><span style="font-size:10px;color:#fb923c;">' + escapeHtml(e.reason) + '</span>' : '';
+          return '<tr>' +
+            '<td style="font-size:11px;color:var(--text-muted);white-space:nowrap;">' + ago + '</td>' +
+            '<td><code class="text-xs" style="color:var(--text-main);">' + icon + ' ' + escapeHtml(e.command || '') + '</code>' + reasonHtml + '</td>' +
+            '<td style="font-size:11px;color:var(--text-muted);">' + escapeHtml(e.target_ip || '') + '</td></tr>';
+        }).join('') + '</tbody></table>';
+    }
+  } catch(e) {
+    content.innerHTML = '<p style="color:var(--brand-red);">Failed to load execution history.</p>';
+  }
+}
+
+// ── Init ─────────────────────────────────────────────────────────────────
+async function initDashboard() { fetchVersion(); fetchRequests(); fetchCmdDescs(); fetchSuggestions(); refreshPasswordUI(); fetchFreezeStatus(); fetchFleetCommands(); }
+
+// ── Requests ─────────────────────────────────────────────────────────────
+let _requestSearchQuery = '';
+function onRequestSearch() {
+  _requestSearchQuery = document.getElementById('request-search').value.trim();
+  fetchRequests();
+}
+async function fetchRequests() {
+  try {
+    let url = '/api/requests';
+    if (_requestSearchQuery) url += '?search=' + encodeURIComponent(_requestSearchQuery);
+    const res = await fetch(url);
+    if (res.status === 401) { await checkAuth(); return; }
+    const data = await res.json();
+    detectNewJITs(data);
+    requestsData = data;
+    // Also load AI-initiated window requests awaiting approval
+    try {
+      const wrRes = await fetch('/api/window-requests/pending');
+      _pendingWinReqs = wrRes.ok ? await wrRes.json() : [];
+    } catch(e) { _pendingWinReqs = []; }
+    detectNewWinReqs();
+    await refreshPolicyCache();
+    renderJitTickets(); renderTable(); updateStats();
+  } catch(err) {}
+}
+function detectNewJITs(newData) {
+  const currentPendingIds = new Set();
+  newData.forEach(function(r) { if (r.status === 'pending' && r.ttl > 0) currentPendingIds.add(r.id); });
+  const newIds = [];
+  currentPendingIds.forEach(function(id) { if (!_knownPendingIds.has(id)) newIds.push(id); });
+  _knownPendingIds = currentPendingIds;
+  if (newIds.length > 0) {
+    // Only notify for JIT if toggle is on
+    if (notifyJIT) {
+      notifyNewJIT(currentPendingIds.size);
+      var badge = document.getElementById('jit-new-badge');
+      if (badge) { badge.classList.remove('hidden'); setTimeout(function() { badge.classList.add('hidden'); }, 5000); }
+    }
+  }
+  // Check for new blocked commands (notifications when enabled)
+  if (notifyBlocked) {
+    var blockedData = newData.filter(function(r) { return r.status === 'blocked'; });
+    var newBlocked = blockedData.filter(function(r) { return !_knownBlockedIds.has(r.id); });
+    blockedData.forEach(function(r) { _knownBlockedIds.add(r.id); });
+    // Notify only for NEW blocked commands (dedup by ID)
+    if (newBlocked.length > 0) {
+      var lastBlocked = newBlocked[newBlocked.length - 1];
+      var now2 = Date.now();
+      if (now2 - lastJitNotifyTime > 5000) {
+        lastJitNotifyTime = now2;
+        playJitChime(false);
+        if (_notifPerm === 'granted') {
+          var nb = new Notification('🛑 Command Blocked', { body: 'Blocked: ' + (lastBlocked.command.length > 80 ? lastBlocked.command.substring(0,80) + '...' : lastBlocked.command), tag: 'eshu-blocked', icon: '/static/eshu_logo.png' });
+          nb.onclick = function() { window.focus(); switchView('home'); nb.close(); };
+        }
+      }
+    }
+  }
+}
+
+function detectNewWinReqs() {
+  var winReqs = _pendingWinReqs || [];
+  var currentIds = new Set();
+  winReqs.forEach(function(w) { currentIds.add(w.id); });
+  var newIds = [];
+  currentIds.forEach(function(id) { if (!_knownWinReqIds.has(id)) newIds.push(id); });
+  _knownWinReqIds = currentIds;
+  if (newIds.length > 0 && notifyJIT) {
+    var now = Date.now();
+    if (now - lastJitNotifyTime >= 5000) {
+      lastJitNotifyTime = now;
+      playJitChime(false);
+      var badge = document.getElementById('jit-new-badge');
+      if (badge) { badge.classList.remove('hidden'); setTimeout(function() { badge.classList.add('hidden'); }, 5000); }
+      if (_notifPerm === 'granted') {
+        var n = new Notification('Window Request', { body: winReqs.length === 1 ? '1 window request awaits review' : winReqs.length + ' window requests await review', tag: 'eshu-win-req', icon: '/static/eshu_logo.png' });
+        n.onclick = function() { window.focus(); switchView('home'); n.close(); };
+      }
+    }
+  }
+}
+
+// ── JIT Ticket Rendering ─────────────────────────────────────────────────
+function renderJitTickets() {
+  const pending = requestsData.filter(r => r.status === 'pending' && r.ttl > 0);
+  const winReqs = _pendingWinReqs || [];
+  const total = pending.length + winReqs.length;
+  document.getElementById('jit-pending-count').textContent = total + ' pending';
+  const widget = document.getElementById('jit-pending-widget');
+  if (total > 0) { widget.classList.add('glow'); } else { widget.classList.remove('glow'); }
+  const container = document.getElementById('jit-tickets');
+  if (total === 0) { container.innerHTML = '<p style="color:var(--text-muted);">No pending requests — all clear.</p>'; return; }
+
+  let html = '';
+  // Window requests (AI-initiated, operator must approve)
+  html += winReqs.map(function(w) {
+    return '<div class="jit-ticket">' +
+      '<div class="jit-ticket-left">' +
+        '<div class="jit-ticket-info">' +
+          '<div class="jit-cmd">' + escapeHtml(w.command) + '</div>' +
+          '<div class="jit-meta">#' + String(w.id).padStart(6,'0') + ' · Window request · ' + escapeHtml(w.target_ip) +
+            (w.label ? ' · ' + escapeHtml(w.label) : '') +
+            ' · ' + formatWinSchedule(w) + '</div>' +
+        '</div>' +
+      '</div>' +
+      '<div class="jit-actions">' +
+        '<button onclick="denyWindowReq(' + w.id + ')" class="btn btn-deny btn-sm">DENY</button>' +
+        '<button onclick="approveWindowReq(' + w.id + ')" class="btn btn-approve btn-sm">APPROVE</button>' +
+      '</div>' +
+    '</div>';
+  }).join('');
+
+  html += pending.map(function(r) {
+    const id = deriveGatewayIdentity(r.hostname || '');
+    return '<div class="jit-ticket">' +
+      '<div class="jit-ticket-left">' +
+        '<div class="jit-ticket-icon">⚠</div>' +
+        '<div class="jit-ticket-info">' +
+          '<div class="jit-cmd">' + escapeHtml(r.command) + '</div>' +
+          (describeCmd(r.command) ? '<div class="jit-desc">' + escapeHtml(describeCmd(r.command)) + '</div>' : '') +
+          '<div class="jit-meta">#' + String(r.id).padStart(6,'0') + ' · ' + gwPill(r.hostname||'N/A') + ' ' + escapeHtml(r.hostname||'N/A') + ' (' + escapeHtml(r.target_ip) + ')</div>' +
+          '<div class="jit-ttl"><span class="ttl-countdown" data-ttl="' + r.ttl + '">' + r.ttl + 's</span> remaining</div>' +
+        '</div>' +
+      '</div>' +
+      '<div class="jit-actions">' +
+        '<button onclick="handleAction(' + r.id + ',\'deny\')" class="btn btn-deny btn-sm">DENY</button>' +
+        '<button onclick="handleAction(' + r.id + ',\'approve\')" class="btn btn-approve btn-sm">APPROVE</button>' +
+      '</div>' +
+    '</div>';
+  }).join('');
+  container.innerHTML = html;
+}
+
+async function approveWindowReq(id) {
+  try {
+    const r = await authFetch('/api/window-requests/' + id + '/approve', { method: 'POST' });
+    if (r.status === 401) { await checkAuth(); return; }
+    if (!r.ok) throw new Error('Approve failed');
+    const data = await r.json();
+    if (data.token) copyToClipboard(data.token, true);
+    showToast('✅ Window approved — token copied', 'success');
+    fetchRequests(); fetchWindowsTable();
+  } catch(e) { showToast('❌ ' + (e.message || 'Failed to approve window'), 'error'); }
+}
+async function denyWindowReq(id) {
+  try {
+    const r = await authFetch('/api/window-requests/' + id + '/deny', { method: 'POST' });
+    if (r.status === 401) { await checkAuth(); return; }
+    if (!r.ok) throw new Error('Deny failed');
+    showToast('Window request denied', 'success');
+    fetchRequests();
+  } catch(e) { showToast('❌ Failed to deny window request', 'error'); }
+}
+
+// ── Deny with Blocklist ─────────────────────────────────────────────────
+async function handleAction(id, action) {
+  if (action === 'deny') {
+    const res = await authFetch('/api/deny/' + id, { method: 'POST' });
+    if (res.status === 401) { await checkAuth(); return; }
+    const req = requestsData.find(r => r.id === id);
+    if (req) { lastDeniedCmd = req.command; document.getElementById('deny-bar-text').textContent = 'Command denied: "' + req.command + '" — Add to blocklist?'; document.getElementById('deny-blacklist-bar').classList.remove('hidden'); }
+    fetchRequests();
+  } else {
+    const res = await authFetch('/api/' + action + '/' + id, { method: 'POST' });
+    if (res.status === 401) { await checkAuth(); return; }
+    fetchRequests();
+  }
+}
+async function handleDenyBlocklist() {
+  if (!lastDeniedCmd) return;
+  const rbTextarea = document.getElementById('policy-regex-black'), exTextarea = document.getElementById('policy-exact');
+  const currentBlocklist = rbTextarea.value.trim();
+  rbTextarea.value = currentBlocklist ? currentBlocklist + '\n' + lastDeniedCmd : lastDeniedCmd;
+  exTextarea.value = exTextarea.value.split('\n').filter(l => l.trim() !== lastDeniedCmd).join('\n');
+  await savePoliciesSilent();
+  const gwRes = await fetch('/api/gateways'); const gws = await gwRes.json();
+  showToast('✅ Blocklisted & pushed to ' + gws.length + ' gateway(s)', 'success');
+  dismissDenyBar();
+}
+function dismissDenyBar() { document.getElementById('deny-blacklist-bar').classList.add('hidden'); lastDeniedCmd = ''; }
+
+// ── Table ────────────────────────────────────────────────────────────────
+function escapeHtml(str) { if (!str) return ''; return str.replace(/&/g, '&').replace(/</g, '<').replace(/>/g, '>').replace(/"/g, '"').replace(/'/g, '&#039;'); }
+function formatTime(epoch) { return new Date(epoch * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }); }
+function formatDateTime(epoch) { return new Date(epoch * 1000).toLocaleString('en-US', { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' }); }
+function formatAgo(seconds) { if (seconds < 0) seconds = 0; if (seconds < 60) return seconds + 's ago'; if (seconds < 3600) return Math.floor(seconds / 60) + 'm ago'; if (seconds < 86400) return Math.floor(seconds / 3600) + 'h ago'; return Math.floor(seconds / 86400) + 'd ago'; }
+function formatLastSeen(seconds) { if (seconds < 0) seconds = 0; if (seconds < 15) return 'Connected'; if (seconds < 60) return seconds + 's ago'; if (seconds < 3600) return Math.floor(seconds / 60) + 'm ago'; if (seconds < 86400) return Math.floor(seconds / 3600) + 'h ago'; return Math.floor(seconds / 86400) + 'd ago'; }
+async function copyToClipboard(text, silent) {
+  try { await navigator.clipboard.writeText(text); }
+  catch(e) { const ta = document.createElement('textarea'); ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0'; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); document.body.removeChild(ta); }
+  if (!silent) showToast('📋 Copied', 'success');
+}
+
+function updateStats() {
+  let p=0, a=0, au=0, b=0, d=0;
+  requestsData.forEach(function(r) { if(r.status==='pending') p++; if(r.status==='approved'||r.status==='consumed') a++; if(r.status==='auto-approved') au++; if(r.status==='blocked'||r.status==='frozen') b++; if(r.status==='denied') d++; });
+  document.getElementById('stat-pending').innerText = p; document.getElementById('stat-approved').innerText = a;
+  document.getElementById('stat-auto').innerText = au; document.getElementById('stat-blocked').innerText = b;
+  document.getElementById('stat-denied').innerText = d;
+}
+function getFilteredData() {
+  if (!activeFilter) return requestsData;
+  if (activeFilter === 'approved') return requestsData.filter(r => r.status === 'approved' || r.status === 'consumed');
+  if (activeFilter === 'blocked') return requestsData.filter(r => r.status === 'blocked' || r.status === 'frozen');
+  return requestsData.filter(r => r.status === activeFilter);
+}
+function buildGapMap(filtered) {
+  const gapMap = new Map(); if (filtered.length < 2) return gapMap;
+  const sorted = [].concat(filtered).sort((a, b) => a.id - b.id);
+  for (let i = 0; i < sorted.length - 1; i++) {
+    const diff = sorted[i + 1].id - sorted[i].id;
+    if (diff > 1) {
+      const missing = [];
+      for (let g = sorted[i].id + 1; g < sorted[i + 1].id; g++) missing.push(g);
+      gapMap.set(sorted[i].id, missing); gapMap.set(sorted[i + 1].id, missing);
+    }
+  }
+  return gapMap;
+}
+function formatGapTooltip(missingIds) {
+  if (missingIds.length === 1) return 'Gap: #000' + missingIds[0] + ' is missing';
+  const first = missingIds[0], last = missingIds[missingIds.length - 1];
+  return 'Gap: #000' + first + '–#000' + last + ' (' + missingIds.length + ' missing)';
+}
+
+function toggleFilter(status) {
+  const boxMap = { 'pending': 'box-pending', 'approved': 'box-approved', 'auto-approved': 'box-auto', 'blocked': 'box-blocked', 'denied': 'box-denied' };
+  Object.values(boxMap).forEach(function(id) { document.getElementById(id).classList.remove('active-filter'); });
+  if (activeFilter === status) { activeFilter = null; document.getElementById('filter-badge').classList.add('hidden'); }
+  else { activeFilter = status; document.getElementById(boxMap[status]).classList.add('active-filter'); document.getElementById('filter-badge').classList.remove('hidden'); document.getElementById('filter-badge').textContent = 'Filtering: ' + status; }
+  renderTable();
+}
+
+async function refreshPolicyCache() {
+  try {
+    const res = await fetch('/api/policies'); const data = await res.json();
+    const exact = data.exact_whitelist || '', regexWhite = data.regex_whitelist || '', regexBlack = data.regex_blacklist || '';
+    policiesCache = { exactLines: exact.split('\n').filter(l => l.trim()), regexWhiteLines: regexWhite.split('\n').filter(l => l.trim()), regexBlackLines: regexBlack.split('\n').filter(l => l.trim()) };
+  } catch(e) { policiesCache = { exactLines: [], regexWhiteLines: [], regexBlackLines: [] }; }
+}
+function checkCommandMembership(cmd) {
+  if (!policiesCache.exactLines) return { inExact: false, inRegexWhite: false, inBlacklist: false };
+  const inExact = policiesCache.exactLines.includes(cmd);
+  let inRegexWhite = false;
+  for (let i = 0; i < policiesCache.regexWhiteLines.length; i++) { try { if (new RegExp(policiesCache.regexWhiteLines[i]).test(cmd)) { inRegexWhite = true; break; } } catch(e) {} }
+  let inBlacklist = false;
+  for (let i = 0; i < policiesCache.regexBlackLines.length; i++) { if (cmd.includes(policiesCache.regexBlackLines[i])) { inBlacklist = true; break; } }
+  return { inExact: inExact, inRegexWhite: inRegexWhite, inBlacklist: inBlacklist };
+}
+
+function renderTable() {
+  if (document.activeElement && document.activeElement.tagName === 'SELECT') return;
+  const tbody = document.getElementById('table-body'), emptyState = document.getElementById('empty-state');
+  let filtered = getFilteredData();
+  // Apply client-side queue clear filter
+  if (_queueClearBefore > 0) {
+    filtered = filtered.filter(function(r) { return r.created_at >= _queueClearBefore; });
+  }
+  if (filtered.length === 0) { tbody.innerHTML = ''; emptyState.classList.remove('hidden'); emptyState.classList.add('flex'); return; }
+  emptyState.classList.add('hidden'); emptyState.classList.remove('flex');
+  const gapMap = buildGapMap(filtered);
+  let html = '';
+  filtered.forEach(function(req) {
+    const isPP = req.status === 'pending' || req.status === 'approved', isExpired = isPP && req.ttl <= 0;
+    let badge = '';
+    if (isPP && !isExpired) {
+      badge = '<span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium" style="background:' + (req.status==='pending'?'rgba(251,191,36,0.1)':'rgba(74,222,128,0.1)') + ';color:' + (req.status==='pending'?'var(--status-warning)':'var(--status-success)') + ';border:1px solid ' + (req.status==='pending'?'rgba(251,191,36,0.2)':'rgba(74,222,128,0.2)') + ';"><span class="ttl-countdown font-mono w-8 text-center" data-ttl="' + req.ttl + '">' + req.ttl + 's</span> ' + req.status + '</span>';
+    } else if (isPP && isExpired) badge = '<span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium" style="background:var(--bg-hover);color:var(--text-muted);">Expired</span>';
+    else if (req.status === 'consumed') badge = '<span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium" style="background:rgba(74,222,128,0.1);color:var(--status-success);">Ticket Claimed</span>';
+    else if (req.status === 'blocked') badge = '<span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium" style="background:rgba(251,146,60,0.1);color:#fb923c;">Blocked</span>';
+    else if (req.status === 'denied') badge = '<span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium" style="background:rgba(230,57,70,0.1);color:var(--brand-red);">Denied</span>';
+    else if (req.status === 'auto-approved') badge = '<span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium" style="background:rgba(96,165,250,0.1);color:var(--status-info);">Auto-Approved</span>';
+    else if (req.status === 'window-approved') badge = '<span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium" style="background:rgba(96,165,250,0.08);color:var(--status-info);border:1px solid rgba(96,165,250,0.2);">Window</span>';
+    else if (req.status === 'window-rejected') badge = '<span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium" style="background:rgba(251,146,60,0.1);color:#fb923c;border:1px solid rgba(251,146,60,0.25);" title="' + escapeHtml(req.reason || '') + '">Window Rejected</span>';
+    else if (req.status === 'frozen') badge = '<span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium" style="background:rgba(127,29,29,0.2);color:#f87171;border:1px solid rgba(239,68,68,0.35);" title="Blocked by Emergency Freeze — all commands rejected while the fleet is frozen">Frozen</span>';
+    else if (req.status === 'fleet-run') badge = '<span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium" style="background:rgba(96,165,250,0.1);color:var(--status-info);border:1px solid rgba(96,165,250,0.25);" title="Dispatched via Fleet Run">⚡ Fleet Run</span>';
+    let actions = '<span style="color:var(--text-muted);">-</span>';
+    if (req.status === 'pending' && !isExpired) {
+      actions = '<button onclick="handleAction(' + req.id + ', \'approve\')" class="btn btn-approve btn-xs mr-1">Approve</button>' +
+        '<button onclick="handleAction(' + req.id + ', \'deny\')" class="btn btn-deny btn-xs">Deny</button>';
+    } else {
+      const mem = fetchPolicyMembership(req.command);
+      const inAnyAllowlist = mem.inExact || mem.inRegexWhite;
+      const disabledStyle = 'opacity:0.5;pointer-events:none;';
+
+      if (req.status === 'frozen') {
+        actions = '<span class="inline-flex items-center gap-1 text-xs px-2 py-1 rounded" style="background:rgba(127,29,29,0.12);color:#f87171;border:1px solid rgba(239,68,68,0.3);" title="Blocked by Emergency Freeze — the fleet is rejecting all commands until unfrozen.">' +
+          '🧊 Fleet Frozen</span>';
+      } else if (req.status === 'fleet-run') {
+        actions = '<span class="inline-flex items-center gap-1 text-xs px-2 py-1 rounded" style="background:rgba(96,165,250,0.08);color:var(--status-info);border:1px solid rgba(96,165,250,0.25);" title="Executed via Fleet Run — see the Fleet Run tab for per-gateway output.">' +
+          '⚡ Fleet Run</span>';
+      } else if (req.status === 'blocked' && isHardcoreBlocked(req.command)) {
+        actions = '<span class="inline-flex items-center gap-1 text-xs px-2 py-1 rounded" style="background:rgba(251,146,60,0.08);color:var(--status-warning);border:1px solid rgba(251,146,60,0.2);" title="This command is permanently blocked by the Core Gateway Blocklist (Stage 1). It cannot be allowlisted.">' +
+          '🛡️ Block by Core</span>';
+      } else {
+        actions = '<select onchange="handlePolicyAction(this,\'' + encodeURIComponent(req.command) + '\')" class="btn-muted" style="width:190px;padding:4px 8px;font-size:11px;">' +
+          '<option value="" disabled selected>⚙ Actions</option>' +
+          '<option value="exact_whitelist"' + (mem.inExact ? ' disabled style="'+disabledStyle+'"' : '') + '>' + (mem.inExact ? '✓ ' : '+ ') + 'AL Exact</option>' +
+          '<option value="regex_whitelist"' + (mem.inRegexWhite ? ' disabled style="'+disabledStyle+'"' : '') + '>' + (mem.inRegexWhite ? '✓ ' : '+ ') + 'AL Regex</option>' +
+          '<option value="regex_blacklist"' + (mem.inBlacklist ? ' disabled style="'+disabledStyle+'"' : '') + '>' + (mem.inBlacklist ? '✓ ' : '🚫 ') + 'Add to Blocklist</option>' +
+          (inAnyAllowlist ? '<option value="regex_whitelist_remove">🔄 Remove from Allowlist</option>' : '') +
+          (mem.inBlacklist ? '<option value="regex_blacklist_remove">🚫 Remove from Blocklist</option>' : '') +
+        '</select>';
+      }
+    }
+    const gap = gapMap.get(req.id);
+    const rowClass = gap ? 'gap-row' : '';
+    const idStyle = gap ? 'color:var(--status-warning);font-weight:700;' : 'color:var(--text-muted);';
+    const gapTitle = gap ? ' title="' + escapeHtml(formatGapTooltip(gap)) + '"' : '';
+    const idDisplay = gap ? '⚠ #' + String(req.id).padStart(6, '0') : '#' + String(req.id).padStart(6, '0');
+    const escapedCmd = escapeHtml(req.command);
+    const gwPillHtml = gwPill(req.hostname || 'N/A');
+    const riskHtml = (req.status === 'pending' && req.risk) ?
+      '<span class="flex-shrink-0" style="color:#fbbf24;cursor:help;" title="⚠ Risk: ' + escapeHtml(req.risk) + '">⚠</span>' : '';
+    html += '<tr class="' + rowClass + '">' +
+      '<td style="' + idStyle + ';font-family:monospace;font-size:12px;"' + gapTitle + '>' + idDisplay + '</td>' +
+      '<td style="color:var(--text-muted);font-size:12px;">' + formatTime(req.created_at) + '</td>' +
+      '<td style="color:var(--text-main);font-size:12px;">' + gwPillHtml + ' ' + escapeHtml(req.hostname || 'N/A') + ' (' + escapeHtml(req.target_ip) + ')</td>' +
+      '<td style="max-width:300px;"><div class="flex items-center gap-1">' + riskHtml + '<code class="flex-1 px-2 py-1 rounded font-mono text-xs block truncate" style="background:var(--bg-base);color:var(--text-main);" title="' + escapedCmd + '">' + escapedCmd + '</code><button class="js-copy-cmd flex-shrink-0 text-xs opacity-30 hover:opacity-80 px-1 py-0.5 rounded transition-opacity" data-cmd="' + encodeURIComponent(req.command) + '" style="color:var(--text-muted);" title="Copy">📋</button></div>' +
+        (function() {
+          var _desc = describeCmd(req.command);
+          if (!_desc) return '';
+          var _maxLen = 120;
+          if (_desc.length > _maxLen) {
+            var _short = _desc.substring(0, _maxLen) + '...';
+            return '<div style="font-size:10px;color:var(--text-muted);margin-top:1px;line-height:1.4;padding-left:4px;">' +
+              '<span id="desc-short-' + req.id + '">' + escapeHtml(_short) + ' <a href="#" onclick="toggleDesc(' + req.id + ');return false;" style="color:var(--status-info);">More</a></span>' +
+              '<span id="desc-full-' + req.id + '" style="display:none;">' +
+                '<a href="#" onclick="toggleDesc(' + req.id + ');return false;" style="color:var(--text-muted);">Less</a> ' + escapeHtml(_desc) +
+              '</span>' +
+              '</div>';
+          }
+          return '<div style="font-size:10px;color:var(--text-muted);margin-top:1px;line-height:1.4;padding-left:4px;">' + escapeHtml(_desc) + '</div>';
+        })() +
+        '</td>' +
+      '<td>' + badge + '</td>' +
+      '<td class="text-right">' + actions + '</td></tr>';
+  });
+  tbody.innerHTML = html;
+  restoreExpandedDescs();
+}
+
+function toggleDesc(id) {
+  var s = document.getElementById('desc-short-' + id);
+  var f = document.getElementById('desc-full-' + id);
+  if (!s || !f) return;
+  if (s.style.display === 'none') {
+    s.style.display = '';
+    f.style.display = 'none';
+    _expandedDescs.delete(id);
+  } else {
+    s.style.display = 'none';
+    f.style.display = '';
+    _expandedDescs.add(id);
+  }
+}
+
+function restoreExpandedDescs() {
+  _expandedDescs.forEach(function(id) {
+    var s = document.getElementById('desc-short-' + id);
+    var f = document.getElementById('desc-full-' + id);
+    if (s && f) { s.style.display = 'none'; f.style.display = ''; }
+  });
+  _expandedDescs.forEach(function(id) {
+    if (!document.getElementById('desc-short-' + id)) _expandedDescs.delete(id);
+  });
+}
+
+function decrementTimers() {
+  document.querySelectorAll('.ttl-countdown').forEach(function(el) {
+    let ttl = parseInt(el.getAttribute('data-ttl'));
+    if (ttl > 0) { ttl--; el.setAttribute('data-ttl', ttl); el.innerText = ttl + 's'; } else fetchRequests();
+  });
+  checkOverrideBanner();
+  tickGatewayTableCountdowns();
+}
+
+// ── Core Blocklist Client-Side Check (v15) ───────────────────────────────
+const HARDCORE_BLOCKED_PATTERNS = [
+  // Recursive force delete
+  'rm -rf', 'rm -fr', 'rm -r -f', 'rm -f -r', '/bin/rm -rf', '/bin/rm -fr',
+  // Filesystem format
+  'mkfs',
+  // Raw disk access
+  'dd if=', 'dd of=', '/bin/dd',
+  // Firewall flush
+  'iptables -F', 'iptables -X', 'iptables --flush', 'iptables --delete-chain',
+  'ip6tables -F', 'ip6tables -X', 'ip6tables --flush',
+  'nft flush',
+  // Power control
+  'reboot', 'shutdown', 'poweroff', 'halt',
+  'init 0', 'init 6', 'telinit 0', 'telinit 6',
+  'systemctl reboot', 'systemctl poweroff', 'systemctl halt',
+  'systemctl isolate reboot', 'systemctl isolate poweroff', 'systemctl isolate halt',
+  'busybox reboot', 'busybox poweroff', 'busybox halt', 'busybox shutdown',
+  // Evasion
+  '$(which', '`which'
+];
+
+function isHardcoreBlocked(cmd) {
+  if (!cmd) return false;
+  for (var i = 0; i < HARDCORE_BLOCKED_PATTERNS.length; i++) {
+    if (cmd.indexOf(HARDCORE_BLOCKED_PATTERNS[i]) !== -1) return true;
+  }
+  return false;
+}
+
+function fetchPolicyMembership(cmd) {
+  return checkCommandMembership(cmd);
+}
+
+function encodeCmd(cmd) {
+  return encodeURIComponent(cmd).replace(/'/g, '%27');
+}
+
+function addCommandToAllowlist(encodedCmd) {
+  addToPolicy(decodeURIComponent(encodedCmd), 'exact_whitelist');
+}
+
+async function dismissPolicyGap(encodedCmd) {
+  var cmd = decodeURIComponent(encodedCmd);
+  if (!(await customConfirm('Dismiss "' + cmd + '" from policy gaps? It will stop appearing here but can still be allowlisted from the policy editor.'))) return;
+  try {
+    var res = await authFetch('/api/policies/dismiss-gap', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({command: cmd})
+    });
+    if (res.ok) {
+      showToast('Dismissed "' + cmd.substring(0, 40) + '"', 'success');
+      fetchStatistics();
+      refreshSuggestions();
+    } else { showToast('Failed to dismiss', 'error'); }
+  } catch(e) { showToast('Error: ' + e.message, 'error'); }
+}
+
+// ── Suggestions (persistent policy gaps) ─────────────────────────────────
+var _suggestionsData = null;
+
+async function fetchSuggestions() {
+  try {
+    var res = await authFetch('/api/learning/gaps');
+    if (!res.ok) { if (res.status === 401) { checkAuth(); return; } }
+    _suggestionsData = await res.json();
+    renderSuggestions();
+  } catch(e) {}
+}
+
+async function refreshSuggestions() {
+  await authFetch('/api/learning/gaps/refresh', { method: 'POST' });
+  fetchSuggestions();
+}
+
+function suggestionAllowlist(encodedCmd) {
+  addToPolicy(decodeURIComponent(encodedCmd), 'exact_whitelist');
+  setTimeout(refreshSuggestions, 3500);
+}
+
+function renderSuggestions() {
+  var d = _suggestionsData;
+  var list = document.getElementById('suggestions-list');
+  var summary = document.getElementById('suggestions-summary');
+  if (!d) { list.innerHTML = '<p style="color:var(--text-muted);">Loading...</p>'; return; }
+  if (summary) {
+    var s = (d.updated_at ? new Date(d.updated_at * 1000).toLocaleTimeString() : '') +
+      ' · ' + d.total_gaps + ' gap(s)' +
+      (d.new_gaps > 0 ? ' · ' + d.new_gaps + ' new' : '');
+    summary.textContent = s;
+  }
+  if (!d.gateways || d.gateways.length === 0) {
+    list.innerHTML = '<p style="color:var(--text-muted);">No gaps found. All repeatedly-approved commands are allowlisted or dismissed.</p>';
+    return;
+  }
+  list.innerHTML = d.gateways.map(function(g) {
+    var rows = g.gaps.map(function(c) {
+      return '<div class="flex items-start gap-2 mb-2 pb-2" style="border-bottom:1px solid var(--border-color);font-size:11px;">' +
+        '<div style="flex:1;min-width:0;">' +
+          '<div class="flex items-center gap-2">' +
+            '<span style="font-family:monospace;color:var(--text-main);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + escapeHtml(c.command) + '</span>' +
+            (c.is_new ? '<span style="background:var(--brand-red);color:white;font-size:9px;padding:1px 5px;border-radius:8px;font-weight:700;flex-shrink:0;">NEW</span>' : '') +
+          '</div>' +
+          (c.description ? '<div style="color:var(--text-muted);margin-top:1px;">' + escapeHtml(c.description) + '</div>' : '') +
+          '<div style="color:var(--status-warning);margin-top:1px;">Approved ' + c.approved_count + 'x</div>' +
+        '</div>' +
+        '<div class="flex gap-1 mt-1" style="flex-shrink:0;">' +
+          '<button class="btn btn-xs" style="background:var(--status-success);color:white;padding:2px 8px;font-size:10px;" onclick="suggestionAllowlist(\'' + encodeCmd(c.command) + '\')">+ Allowlist</button>' +
+          '<button class="btn btn-xs" style="background:transparent;color:var(--text-muted);border:1px solid var(--border-color);padding:2px 8px;font-size:10px;" onclick="dismissPolicyGap(\'' + encodeCmd(c.command) + '\')">Dismiss</button>' +
+        '</div>' +
+        '</div>';
+    }).join('');
+    return '<div class="mb-4">' +
+      '<div class="flex items-center gap-2 mb-2" style="border-top:1px solid var(--border-color);padding-top:8px;">' +
+        gwPill(g.hostname) + ' <strong style="color:var(--text-main);">' + escapeHtml(g.hostname) + '</strong>' +
+        '<span style="color:var(--text-muted);font-size:10px;">(' + escapeHtml(g.ip) + ')</span>' +
+      '</div>' +
+      rows +
+      '</div>';
+  }).join('');
+}
+
+async function markSuggestionsSeen() {
+  try {
+    var res = await authFetch('/api/learning/gaps/mark-seen', { method: 'POST' });
+    if (res.ok) {
+      showToast('All suggestions marked as seen', 'success');
+      fetchSuggestions();
+    } else { showToast('Failed to mark seen', 'error'); }
+  } catch(e) { showToast('Error: ' + e.message, 'error'); }
+}
+
+// ── Policy Actions ───────────────────────────────────────────────────────
+async function savePoliciesSilent() {
+  const ex = document.getElementById('policy-exact').value, rw = document.getElementById('policy-regex-white').value, rb = document.getElementById('policy-regex-black').value;
+  await authFetch('/api/policies', { method: 'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({type:'exact_whitelist', content: ex}) });
+  await authFetch('/api/policies', { method: 'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({type:'regex_whitelist', content: rw}) });
+  await authFetch('/api/policies', { method: 'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({type:'regex_blacklist', content: rb}) });
+  await authFetch('/api/policies/commit', { method: 'POST' });
+  setTimeout(fetchGateways, 500);
+}
+async function addToPolicy(cmd, policyType) {
+  const labels = { exact_whitelist: 'Exact Allowlist', regex_whitelist: 'Regex Allowlist', regex_blacklist: 'Blocklist' };
+  if (policyType === 'regex_whitelist_remove') {
+    if (!(await customConfirm('Remove "' + cmd + '" from allowlists?'))) return;
+    const exTextarea = document.getElementById('policy-exact'), rwTextarea = document.getElementById('policy-regex-white');
+    exTextarea.value = exTextarea.value.split('\n').filter(l => l.trim() !== cmd && l !== cmd).join('\n');
+    rwTextarea.value = rwTextarea.value.split('\n').filter(l => l.trim() !== '^' + cmd.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$').join('\n');
+    await savePoliciesSilent(); await refreshPolicyCache();
+    const gwRes = await fetch('/api/gateways'); const gws = await gwRes.json();
+    showToast('✅ Removed from Allowlist & pushed to ' + gws.length + ' gateway(s)', 'success');
+    fetchPolicies(); fetchRequests(); return;
+  }
+  if (policyType === 'regex_blacklist_remove') {
+    if (!(await customConfirm('Remove "' + cmd + '" from blocklist?'))) return;
+    const rbTextarea = document.getElementById('policy-regex-black');
+    rbTextarea.value = rbTextarea.value.split('\n').filter(l => l.trim() !== cmd).join('\n');
+    await savePoliciesSilent(); await refreshPolicyCache();
+    const gwRes = await fetch('/api/gateways'); const gws = await gwRes.json();
+    showToast('✅ Removed from Blocklist', 'success');
+    fetchPolicies(); fetchRequests(); return;
+  }
+  if (!(await customConfirm('Add "' + cmd + '" to ' + labels[policyType] + '?'))) return;
+  await fetchPolicies();
+  const exTextarea = document.getElementById('policy-exact'), rwTextarea = document.getElementById('policy-regex-white'), rbTextarea = document.getElementById('policy-regex-black');
+  if (policyType === 'exact_whitelist') { exTextarea.value = exTextarea.value.trim() ? exTextarea.value.trim() + '\n' + cmd : cmd; rbTextarea.value = rbTextarea.value.split('\n').filter(l => l.trim() !== cmd).join('\n'); }
+  else if (policyType === 'regex_whitelist') { rwTextarea.value = rwTextarea.value.trim() ? rwTextarea.value.trim() + '\n' + '^' + cmd.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$' : '^' + cmd.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$'; rbTextarea.value = rbTextarea.value.split('\n').filter(l => l.trim() !== cmd).join('\n'); }
+  else if (policyType === 'regex_blacklist') { rbTextarea.value = rbTextarea.value.trim() ? rbTextarea.value.trim() + '\n' + cmd : cmd; exTextarea.value = exTextarea.value.split('\n').filter(l => l.trim() !== cmd).join('\n'); rwTextarea.value = rwTextarea.value.split('\n').filter(l => l.trim() !== cmd).join('\n'); }
+  await savePoliciesSilent(); await refreshPolicyCache();
+  const gwRes = await fetch('/api/gateways'); const gws = await gwRes.json();
+  showToast('✅ Added to ' + labels[policyType], 'success');
+  fetchPolicies(); fetchRequests();
+}
+function handlePolicyAction(selectEl, encodedCmd) { const action = selectEl.value; if (!action) return; addToPolicy(decodeURIComponent(encodedCmd), action); setTimeout(function() { selectEl.selectedIndex = 0; }, 0); }
+
+// ── Delegated copy handler for table command copy buttons ──────────────
+(function() {
+  function attachCopyHandler() {
+    var tableBody = document.getElementById('table-body');
+    if (tableBody) {
+      tableBody.addEventListener('click', function(e) {
+        var btn = e.target.closest('.js-copy-cmd');
+        if (!btn) return;
+        var cmd = decodeURIComponent(btn.getAttribute('data-cmd') || '');
+        if (cmd) copyToClipboard(cmd);
+      });
+    }
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', attachCopyHandler);
+  } else {
+    attachCopyHandler();
+  }
+})();
+
+// ── Gateways ─────────────────────────────────────────────────────────────
+var _gatewaysData = [];
+var _overrideExpiries = {}; // ip -> epoch seconds (client-side)
+var _uninstallingIps = {};  // ip -> true while an uninstall is in flight (row state)
+var _uninstallIp = null;    // ip currently being uninstalled (for the progress modal)
+var _cmdDescs = {}; // merged command descriptions for quick lookup
+
+function _describeSingle(cmd) {
+  if (!cmd || !_cmdDescs || Object.keys(_cmdDescs).length === 0) return '';
+  cmd = cmd.trim();
+  // Strip common prefixes so sudo chown -> chown, nice ionice -> ionice, etc.
+  var prefixes = ['sudo ', 'nice ', 'nohup ', 'ionice ', 'env ', 'time '];
+  for (var i = 0; i < prefixes.length; i++) {
+    if (cmd.indexOf(prefixes[i]) === 0) { cmd = cmd.slice(prefixes[i].length); break; }
+  }
+  var base = cmd.split(/\s+/)[0] || cmd;
+  // Suppress trivial commands entirely (echo, date, cd, etc.)
+  var trivial = { echo: 1, printf: 1, date: 1, whoami: 1, sleep: 1, yes: 1, 'true': 1, 'false': 1, env: 1, cd: 1 };
+  if (trivial[base]) return '';
+  // Longest-prefix match
+  var best = '';
+  for (var prefix in _cmdDescs) {
+    if (cmd.indexOf(prefix) === 0 && prefix.length > best.length) {
+      best = prefix;
+    }
+  }
+  if (best) return _cmdDescs[best];
+  // Fallback: find the static entry whose first word matches the base command
+  for (var p2 in _cmdDescs) {
+    if (p2.split(/\s+/)[0] === base && p2.length > best.length) {
+      best = p2;
+    }
+  }
+  return _cmdDescs[best] || '';
+}
+
+function describeCmd(cmd) {
+  if (!cmd || !_cmdDescs || Object.keys(_cmdDescs).length === 0) return '';
+  // For compound chains, describe each meaningful fragment and join them.
+  var parts = cmd.trim().split(/\s*(?:&&|\|\||;)\s*|\s*\|\s*/).filter(function(p) { return p.trim() !== ''; });
+  if (parts.length > 1) {
+    var descs = [];
+    for (var i = 0; i < parts.length; i++) {
+      var d = _describeSingle(parts[i]);
+      if (d) descs.push(d);
+    }
+    if (descs.length === 1) return descs[0];
+    if (descs.length > 1) return descs.join(' · ');
+    return '';
+  }
+  return _describeSingle(cmd);
+}
+
+async function fetchCmdDescs() {
+  try {
+    var res = await fetch('/api/cmd-descs');
+    var data = await res.json();
+    // Merge static + whatis into a single lookup dict
+    var merged = {};
+    if (data.static) { for (var k in data.static) { merged[k] = data.static[k]; } }
+    if (data.whatis) { for (var w in data.whatis) { if (!merged[w]) merged[w] = data.whatis[w]; } }
+    _cmdDescs = merged;
+  } catch(e) {}
+}
+
+async function fetchGateways() {
+  const res = await fetch('/api/gateways'); const data = await res.json();
+  _gatewaysData = data;
+  var clientNow = Math.floor(Date.now() / 1000);
+  data.forEach(function(g) {
+    if ((g.override_remaining || 0) > 0) {
+      _overrideExpiries[g.ip] = clientNow + g.override_remaining;
+    } else {
+      delete _overrideExpiries[g.ip];
+    }
+  });
+  const tbody = document.getElementById('gateways-table-body');
+  if (!tbody) return;
+  if (data.length === 0) { tbody.innerHTML = '<tr><td colspan="8" class="px-4 py-3" style="color:var(--text-muted);">No gateways registered.</td></tr>'; return; }
+  const now = Math.floor(Date.now() / 1000);
+  tbody.innerHTML = data.map(function(g) {
+    const diff = now - g.last_seen, isOnline = diff < 30;
+    const connDot = isOnline ? '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--status-success);margin-right:4px;vertical-align:middle;" title="Connected"></span>' : '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--text-muted);margin-right:4px;vertical-align:middle;" title="Disconnected"></span>';
+    const statusCell = connDot + (isOnline ? '<span style="color:var(--status-success);font-size:10px;">Connected</span>' : '<span style="color:var(--text-muted);font-size:10px;">Offline · ' + formatLastSeen(diff) + '</span>');
+    const pua = g.policy_updated_at || 0;
+    const syncCell = isOnline
+      ? (pua > 0 ? '<span style="color:var(--text-muted);font-size:10px;">✓ synced ' + formatAgo(now - pua) + '</span>' : '<span style="color:var(--text-muted);font-size:10px;">—</span>')
+      : '<span style="color:var(--text-muted);font-size:10px;">unknown</span>';
+    const healthCell = g.last_heartbeat > 0
+      ? '<span style="font-size:10px;color:var(--text-muted);white-space:nowrap;">' +
+          '<span style="color:' + (Number(g.heartbeat_poller_ok) ? 'var(--status-success)' : 'var(--brand-red)') + ';" title="Poller">⬤</span> ' +
+          '<span style="color:' + (Number(g.heartbeat_gateway_ok) ? 'var(--status-success)' : 'var(--brand-red)') + ';" title="Gateway">⬤</span> ' +
+          '<span style="color:' + (Number(g.heartbeat_can_reach) ? 'var(--status-success)' : 'var(--brand-red)') + ';" title="Reachable">⬤</span> ' +
+          '<span style="color:' + (g.has_token ? 'var(--status-success)' : 'var(--brand-red)') + ';" title="' + (g.has_token ? 'Token valid' : 'No API token — JIT delivery broken. Re-enroll this gateway.') + '">⬤</span> ' +
+          '(' + formatAgo(now - g.last_heartbeat) + ')' +
+        '</span>'
+      : '<span style="font-size:10px;color:var(--text-muted);">waiting…</span>';
+    var ztBadge = g.zero_trust
+      ? '<span class="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold" style="background:rgba(251,191,36,0.12);color:#fbbf24;border:1px solid rgba(251,191,36,0.3);margin-left:4px;vertical-align:middle;" title="Zero-Trust — every command requires JIT approval">🔒 ZT</span>'
+      : '';
+    var ztBtn = g.zero_trust
+      ? '<button onclick="toggleZeroTrust(\'' + g.ip + '\', false)" class="btn btn-xs" style="background:transparent;color:#fbbf24;border:1px solid rgba(251,191,36,0.35);padding:2px 8px;font-size:10px;" title="Zero-Trust ON — allowlisted commands go through JIT. Click to disable.">🔒 ZT</button>'
+      : '<button onclick="toggleZeroTrust(\'' + g.ip + '\', true)" class="btn btn-xs" style="background:transparent;color:var(--text-muted);border:1px solid var(--border-color);padding:2px 8px;font-size:10px;" title="Enable Zero-Trust — allowlisted commands must go through JIT">ZT</button>';
+    var overrideCell;
+    if (_uninstallingIps[g.ip]) {
+      overrideCell = '<span style="color:var(--status-warning);font-size:10px;">🗑 Uninstalling…</span>';
+    } else {
+      var overrideControl;
+      if ((g.override_remaining || 0) > 0) {
+        overrideControl = '<span class="override-badge active" data-ovr-ip="' + g.ip + '">Override</span>' +
+          '<button onclick="cancelOverride(\'' + g.ip + '\')" class="btn btn-xs" style="background:transparent;color:#ef4444;border:1px solid rgba(220,38,38,0.3);padding:2px 8px;font-size:10px;">Cancel</button>';
+      } else {
+        overrideControl = '<button onclick="openOverrideModal(\'' + g.ip + '\',\'' + g.hostname.replace(/'/g, "\\'") + '\')" class="btn btn-xs" style="background:rgba(239,68,68,0.08);color:#fb7185;border:1px solid rgba(239,68,68,0.3);padding:2px 8px;font-size:10px;" title="Override Mode — auto-approve all JIT for a set duration">Override</button>';
+      }
+      overrideCell = '<div class="flex items-center gap-2">' + overrideControl + ztBtn + '</div>';
+    }
+    return '<tr>' +
+      '<td class="px-4 py-2 whitespace-nowrap">' + statusCell + '</td>' +
+      '<td class="px-4 py-2" style="color:var(--text-main);white-space:nowrap;">' + gwPill(g.hostname) + ' ' + escapeHtml(g.hostname) + devBadge(g) + ztBadge + '</td>' +
+      '<td class="px-4 py-2" style="color:var(--text-muted);white-space:nowrap;">' + g.ip + '</td>' +
+      '<td class="px-4 py-2" style="color:var(--text-muted);white-space:nowrap;">' + (g.first_seen ? formatAgo(now - g.first_seen) : '—') + '</td>' +
+      '<td class="px-4 py-2">' + syncCell + '</td>' +
+      '<td class="px-4 py-2">' + healthCell + '</td>' +
+      '<td class="px-4 py-2">' + overrideCell + '</td>' +
+      '<td class="px-4 py-2 text-right whitespace-nowrap"><button onclick="handleUninstallGateway(\'' + g.ip + '\', \'' + g.hostname + '\')" class="btn btn-deny btn-xs">🗑 Uninstall</button></td>' +
+      '</tr>';
+  }).join('');
+  checkOverrideBanner();
+}
+
+async function toggleZeroTrust(ip, enabled) {
+  try {
+    var res = await authFetch('/api/gateways/' + encodeURIComponent(ip) + '/zero-trust', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({enabled: enabled})
+    });
+    var data = await res.json();
+    if (data.status === 'ok') {
+      showToast((enabled ? '🔒 Zero-Trust enabled on ' : 'Zero-Trust disabled on ') + ip + ' — allowlisted commands will ' + (enabled ? 'require JIT approval' : 'auto-run again') + '.', 'success');
+      fetchGateways();
+    } else { showToast('Failed: ' + (data.detail || 'unknown'), 'error'); }
+  } catch(e) { showToast('Error: ' + e.message, 'error'); }
+}
+
+// Live countdown for Override badges in the Gateways table (called every 1s).
+function tickGatewayTableCountdowns() {
+  var now = Math.floor(Date.now() / 1000);
+  document.querySelectorAll('#gateways-table-body [data-ovr-ip]').forEach(function(el) {
+    var exp = _overrideExpiries[el.getAttribute('data-ovr-ip')] || 0;
+    var rem = exp - now;
+    if (rem > 0) {
+      var mins = String(Math.floor(rem / 60)).padStart(2, '0');
+      var secs = String(rem % 60).padStart(2, '0');
+      el.textContent = 'Override ' + mins + ':' + secs;
+    } else {
+      el.textContent = 'Override';
+    }
+  });
+}
+
+// ── Override Mode ────────────────────────────────────────────────────────
+function checkOverrideBanner() {
+  var now = Math.floor(Date.now() / 1000);
+  var activeIps = Object.keys(_overrideExpiries).filter(function(ip) {
+    return _overrideExpiries[ip] > now;
+  });
+  var banner = document.getElementById('override-banner');
+  var bannerText = document.getElementById('override-banner-text');
+  if (activeIps.length === 0) {
+    banner.classList.add('hidden');
+    return;
+  }
+  banner.classList.remove('hidden');
+  var parts = [];
+  activeIps.forEach(function(ip) {
+    var remaining = _overrideExpiries[ip] - now;
+    var mins = Math.floor(remaining / 60);
+    var secs = remaining % 60;
+    var hostname = ip;
+    var gw = (_gatewaysData || []).find(function(g) { return g.ip === ip; });
+    if (gw) hostname = gw.hostname;
+    parts.push(hostname + ' (' + String(mins).padStart(2, '0') + ':' + String(secs).padStart(2, '0') + ')');
+  });
+  bannerText.textContent = 'Override Mode — ' + parts.join(', ');
+}
+
+function openOverrideModal(ip, hostname) {
+  document.getElementById('override-modal-gateway').textContent = hostname + ' (' + ip + ')';
+  document.getElementById('override-modal').dataset.ip = ip;
+  document.getElementById('override-modal-reason').value = '';
+  document.getElementById('override-modal').classList.remove('hidden');
+  document.getElementById('override-modal-reason').focus();
+}
+
+async function confirmOverride() {
+  var ip = document.getElementById('override-modal').dataset.ip;
+  var reason = document.getElementById('override-modal-reason').value.trim();
+  var minutes = parseInt(document.getElementById('override-modal-minutes').value);
+  if (!reason) { document.getElementById('override-modal-reason').focus(); return; }
+  if (!ip) return;
+  document.getElementById('override-modal').classList.add('hidden');
+  var btn = document.getElementById('override-start-btn');
+  btn.disabled = true; btn.textContent = 'Starting...';
+  try {
+    var res = await authFetch('/api/gateways/' + encodeURIComponent(ip) + '/override', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({minutes: minutes, reason: reason})
+    });
+    var data = await res.json();
+    if (data.status === 'ok') {
+      showToast('Override Mode enabled on ' + ip, 'success');
+      fetchGateways();
+    } else { showToast('Failed: ' + (data.detail || 'unknown'), 'error'); }
+  } catch(e) { showToast('Error: ' + e.message, 'error'); }
+  btn.disabled = false; btn.textContent = 'Start Override';
+}
+
+async function cancelOverride(ip) {
+  if (!(await customConfirm('Cancel Override Mode for this gateway? JIT requests will require manual approval again.'))) return;
+  try {
+    var res = await authFetch('/api/gateways/' + encodeURIComponent(ip) + '/override', { method: 'DELETE' });
+    var data = await res.json();
+    if (data.status === 'ok') {
+      showToast('Override cancelled for ' + ip, 'success');
+      fetchGateways();
+    } else { showToast('Failed: ' + (data.detail || 'unknown'), 'error'); }
+  } catch(e) { showToast('Error: ' + e.message, 'error'); }
+}
+
+// ── Emergency Freeze ─────────────────────────────────────────────────────
+async function fetchFreezeStatus() {
+  try {
+    const res = await fetch('/api/freeze/status');
+    if (res.status === 401) { await checkAuth(); return; }
+    const data = await res.json();
+    renderFreezeStatus(data);
+  } catch(e) {}
+}
+
+function renderFreezeStatus(data) {
+  var frozen = !!(data && data.frozen);
+  var banner = document.getElementById('freeze-banner');
+  var label = document.getElementById('freeze-status-label');
+  var freezeBtn = document.getElementById('freeze-btn');
+  var unfreezeBtn = document.getElementById('unfreeze-btn');
+  var tsEl = document.getElementById('freeze-timestamp');
+  if (banner) banner.classList.toggle('hidden', !frozen);
+  if (label) {
+    if (frozen) { label.textContent = 'FROZEN — all commands rejected'; label.style.background = 'var(--brand-red)'; label.style.color = 'white'; }
+    else { label.textContent = 'Active — running normally'; label.style.background = 'var(--status-success)'; label.style.color = 'var(--bg-base)'; }
+  }
+  if (freezeBtn) freezeBtn.classList.toggle('hidden', frozen);
+  if (unfreezeBtn) unfreezeBtn.classList.toggle('hidden', !frozen);
+  if (tsEl) {
+    if (frozen && data.triggered_at) {
+      tsEl.textContent = 'Frozen since ' + formatDateTime(data.triggered_at) + ' — takes effect within 30s (next poll cycle).';
+      tsEl.classList.remove('hidden');
+    } else { tsEl.classList.add('hidden'); }
+  }
+}
+
+async function triggerFreeze() {
+  if (!(await customConfirm('FREEZE THE ENTIRE FLEET?\n\nEvery gateway will reject ALL commands — including whitelisted and approved-window commands — until you unfreeze. This takes effect within 30s.\n\nContinue?'))) return;
+  var btn = document.getElementById('freeze-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Freezing...'; }
+  try {
+    var res = await authFetch('/api/freeze', { method: 'POST' });
+    var data = await res.json();
+    if (data.status === 'ok') {
+      showToast('Fleet FROZEN — all commands rejected within 30s', 'success');
+      fetchFreezeStatus();
+    } else { showToast('Failed: ' + (data.detail || 'unknown'), 'error'); }
+  } catch(e) { showToast('Error: ' + e.message, 'error'); }
+  if (btn) { btn.disabled = false; btn.textContent = '🧊 Freeze Fleet'; }
+}
+
+async function triggerUnfreeze() {
+  if (!(await customConfirm('Unfreeze the fleet?\n\nGateways will resume normal policy enforcement on their next poll cycle (within 30s).'))) return;
+  var btn = document.getElementById('unfreeze-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Unfreezing...'; }
+  try {
+    var res = await authFetch('/api/unfreeze', { method: 'POST' });
+    var data = await res.json();
+    if (data.status === 'ok') {
+      showToast('Fleet unfrozen — normal operation resumes', 'success');
+      fetchFreezeStatus();
+    } else { showToast('Failed: ' + (data.detail || 'unknown'), 'error'); }
+  } catch(e) { showToast('Error: ' + e.message, 'error'); }
+  if (btn) { btn.disabled = false; btn.textContent = 'Unfreeze Fleet'; }
+}
+
+// ── Fleet Run ────────────────────────────────────────────────────────────
+var _fleetSelected = new Set();
+var _fleetGateways = [];
+var _fleetQueue = [];
+
+async function fetchFleetCommands() {
+  try {
+    const res = await fetch('/api/fleet/commands');
+    if (res.status === 401) { await checkAuth(); return; }
+    const data = await res.json();
+    renderFleetRun(data || []);
+  } catch(e) {}
+  renderFleetTargetList();
+}
+
+function renderFleetTargetList() {
+  var list = document.getElementById('fleet-target-list');
+  if (!list) return;
+  if (!_allGateways.length) {
+    fetch('/api/gateways').then(function(r) { return r.json(); }).then(function(gws) {
+      _allGateways = gws || [];
+      _fleetGateways = _allGateways;
+      _fleetSelected.forEach(function(ip) { if (!_fleetGateways.some(function(g){return g.ip===ip;})) _fleetSelected.delete(ip); });
+      drawFleetTargets();
+    }).catch(function() { list.innerHTML = '<span class="text-xs" style="color:var(--text-muted);">Failed to load gateways.</span>'; });
+  } else {
+    _fleetGateways = _allGateways;
+    drawFleetTargets();
+  }
+}
+
+function drawFleetTargets() {
+  var list = document.getElementById('fleet-target-list');
+  if (!list) return;
+  if (!_fleetGateways.length) { list.innerHTML = '<span class="text-xs" style="color:var(--text-muted);">No gateways registered.</span>'; return; }
+  list.innerHTML = _fleetGateways.map(function(g) {
+    var checked = _fleetSelected.has(g.ip);
+    return '<label class="flex items-center gap-1 text-xs px-2 py-1 rounded cursor-pointer select-none" style="background:' + (checked ? 'rgba(230,57,70,0.12)' : 'var(--bg-hover)') + ';border:1px solid ' + (checked ? 'rgba(230,57,70,0.4)' : 'var(--border-color)') + ';">' +
+      '<input type="checkbox" ' + (checked ? 'checked' : '') + ' onchange="toggleFleetTarget(\'' + g.ip + '\')" style="accent-color:var(--brand-red);">' +
+      gwPill(g.hostname || g.ip) + ' ' + escapeHtml(g.hostname || g.ip) + ' <span class="text-xs" style="color:var(--text-muted);">' + g.ip + '</span></label>';
+  }).join('');
+}
+
+function toggleFleetTarget(ip) {
+  if (_fleetSelected.has(ip)) _fleetSelected.delete(ip); else _fleetSelected.add(ip);
+  drawFleetTargets();
+}
+
+function setFleetTargets(all) {
+  _fleetSelected = new Set(all ? _fleetGateways.map(function(g) { return g.ip; }) : []);
+  drawFleetTargets();
+}
+
+function addFleetToQueue() {
+  var cmd = document.getElementById('fleet-cmd-input').value.trim();
+  var reason = document.getElementById('fleet-reason-input').value.trim();
+  var timeout = parseInt(document.getElementById('fleet-timeout-input').value) || 180;
+  if (!cmd) { showToast('Enter a command', 'error'); return; }
+  if (_fleetSelected.size === 0) { showToast('Select at least one target gateway', 'error'); return; }
+  var idx = _fleetQueue.length;
+  _fleetQueue.push({command: cmd, targets: Array.from(_fleetSelected), reason: reason, timeout: timeout, risk: null, dry_run: null});
+  document.getElementById('fleet-cmd-input').value = '';
+  document.getElementById('fleet-reason-input').value = '';
+  renderFleetQueue();
+  checkFleetRisk(idx);
+}
+
+async function checkFleetRisk(idx) {
+  var d = _fleetQueue[idx];
+  if (!d) return;
+  try {
+    var tr = await fetch('/api/policies/test?command=' + encodeURIComponent(d.command));
+    var td = await tr.json();
+    if (_fleetQueue[idx] !== d) return; // row changed meanwhile
+    d.risk = td.risk || null;
+    d.dry_run = td.dry_run || null;
+    renderFleetQueue();
+  } catch(e) {}
+}
+
+function useFleetDryRun(idx) {
+  var d = _fleetQueue[idx];
+  if (!d || !d.dry_run) return;
+  d.command = d.dry_run;
+  d.risk = null;
+  d.dry_run = null;
+  renderFleetQueue();
+  checkFleetRisk(idx);
+}
+
+function removeFleetFromQueue(idx) {
+  _fleetQueue.splice(idx, 1);
+  renderFleetQueue();
+}
+
+function formatFleetTargets(ips) {
+  var out = [];
+  (ips || []).forEach(function(ip) {
+    var gw = (_fleetGateways || []).find(function(g) { return g.ip === ip; });
+    if (gw && gw.hostname && gw.hostname !== ip) {
+      out.push(escapeHtml(gw.hostname) + ' <span style="color:var(--text-muted);">(.' + ip.split('.').pop() + ')</span>');
+    } else {
+      out.push(escapeHtml(ip));
+    }
+  });
+  return out;
+}
+
+function renderFleetQueue() {
+  var list = document.getElementById('fleet-queue-list');
+  var btn = document.getElementById('fleet-dispatch-btn');
+  if (btn) btn.textContent = '▶ Dispatch (' + _fleetQueue.length + ')';
+  if (!list) return;
+  if (_fleetQueue.length === 0) {
+    list.innerHTML = '<p style="color:var(--text-muted);">Queue is empty — add a command above.</p>';
+    return;
+  }
+  list.innerHTML = _fleetQueue.map(function(d, i) {
+    var riskLine = d.risk ? '<div class="text-xs mt-0.5" style="color:#fbbf24;">⚠ ' + escapeHtml(d.risk) + '</div>' : '';
+    var dryLine = d.dry_run ? '<div class="text-xs mt-0.5" style="color:var(--status-info);">💡 Dry-run available: <code style="color:var(--text-main);">' + escapeHtml(d.dry_run) + '</code> <button onclick="useFleetDryRun(' + i + ')" class="btn btn-xs" style="background:transparent;color:var(--status-info);border:1px solid rgba(96,165,250,0.4);padding:1px 8px;font-size:10px;">Use</button></div>' : '';
+    return '<div class="px-2 py-1 rounded mb-1" style="background:var(--bg-hover);border:1px solid var(--border-color);">' +
+      '<div class="flex items-center gap-2">' +
+      '<code class="text-xs flex-1" style="color:var(--text-main);">' + escapeHtml(d.command) + '</code>' +
+      '<span class="text-xs" style="color:var(--text-muted);white-space:nowrap;">' + d.timeout + 's</span>' +
+      '<button onclick="removeFleetFromQueue(' + i + ')" class="btn btn-xs" style="background:transparent;color:var(--brand-red);border:1px solid rgba(230,57,70,0.4);padding:2px 8px;font-size:11px;">✕</button>' +
+      '</div>' +
+      '<div class="text-xs mt-0.5" style="color:var(--text-muted);">→ ' + formatFleetTargets(d.targets).join(', ') + '</div>' +
+      riskLine + dryLine +
+      '</div>';
+  }).join('');
+}
+
+async function dispatchFleetQueue() {
+  if (_fleetQueue.length === 0) { showToast('Queue is empty', 'error'); return; }
+  var dryCount = _fleetQueue.filter(function(d) { return !!d.dry_run; }).length;
+  var msg = 'Dispatch ' + _fleetQueue.length + ' command(s) to their target gateways?\n\nThis is the approval — they will run on each gateway\'s next poll cycle (≤30s).';
+  if (dryCount > 0) {
+    msg += '\n\n⚠ ' + dryCount + ' command(s) have a dry-run version available for safe testing — press Cancel to go back and upgrade them, or Continue to dispatch as-is.';
+  }
+  if (!(await customConfirm(msg))) return;
+
+  var hardBlocked = [], blacklistedIdx = {};
+  for (var i = 0; i < _fleetQueue.length; i++) {
+    if (isHardcoreBlocked(_fleetQueue[i].command)) { hardBlocked.push(_fleetQueue[i].command); continue; }
+    try {
+      var tr = await fetch('/api/policies/test?command=' + encodeURIComponent(_fleetQueue[i].command));
+      var td = await tr.json();
+      if (td.action === 'blocked') blacklistedIdx[i] = true;
+    } catch(e) {}
+  }
+  if (hardBlocked.length > 0) showToast('Hard-blocked, kept in queue: ' + hardBlocked.join('; '), 'error');
+  if (Object.keys(blacklistedIdx).length > 0) {
+    var ok = await customConfirm('⚠️ ' + Object.keys(blacklistedIdx).length + ' queued command(s) match the central blocklist. Dispatch them anyway with override?');
+    if (!ok) return;
+  }
+
+  var btn = document.getElementById('fleet-dispatch-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Dispatching...'; }
+  var dispatched = 0, keepIdx = {};
+  for (var j = 0; j < _fleetQueue.length; j++) {
+    var d = _fleetQueue[j];
+    if (isHardcoreBlocked(d.command)) { keepIdx[j] = true; continue; }
+    try {
+      var res = await authFetch('/api/fleet/commands', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({command: d.command, target_ips: d.targets, reason: d.reason, timeout: d.timeout, override: !!blacklistedIdx[j]})
+      });
+      var data = await res.json();
+      if (data.status === 'ok') dispatched++;
+      else { keepIdx[j] = true; showToast('Not dispatched: ' + (data.detail || 'unknown'), 'error'); }
+    } catch(e) { keepIdx[j] = true; }
+  }
+  _fleetQueue = _fleetQueue.filter(function(d, j) { return !!keepIdx[j]; });
+  if (btn) { btn.disabled = false; btn.textContent = '▶ Dispatch (' + _fleetQueue.length + ')'; }
+  renderFleetQueue();
+  fetchFleetCommands();
+  if (dispatched > 0) showToast('Dispatched ' + dispatched + ' command(s)', 'success');
+}
+
+var _fleetData = [];
+var _fleetRenderSig = null;
+
+function renderFleetRun(cmds) {
+  var resultsEl = document.getElementById('fleet-results-list');
+  if (!resultsEl) return;
+  _fleetData = cmds || [];
+  var sig = JSON.stringify(_fleetData.map(function(c) {
+    return [c.id, c.status, (c.results || []).map(function(r) { return [r.gateway_ip, r.status, r.exit_code, r.hostname, (r.output || '').length]; })];
+  }));
+  if (sig === _fleetRenderSig) return;
+  _fleetRenderSig = sig;
+  // Capture open output boxes + scroll positions before rewriting (scroll-stability)
+  var openOuts = [], preScrolls = {};
+  resultsEl.querySelectorAll('details[data-out]').forEach(function(d) { if (d.open) openOuts.push(d.getAttribute('data-out')); });
+  resultsEl.querySelectorAll('pre[data-out]').forEach(function(p) { preScrolls[p.getAttribute('data-out')] = p.scrollTop; });
+  if (cmds.length === 0) {
+    resultsEl.innerHTML = '<p style="color:var(--text-muted);">No fleet commands yet.</p>';
+    return;
+  }
+  resultsEl.innerHTML = cmds.map(function(c) {
+    var statusStyle = c.status === 'pending' ? 'background:rgba(251,191,36,0.1);color:var(--status-warning);' :
+                      c.status === 'approved' ? 'background:rgba(96,165,250,0.1);color:var(--status-info);' :
+                      c.status === 'denied' ? 'background:rgba(230,57,70,0.1);color:var(--brand-red);' :
+                      'background:rgba(74,222,128,0.1);color:var(--status-success);';
+    var resultRows = (c.results || []).map(function(r) {
+      var rStatus = r.status === 'success' ? 'background:rgba(74,222,128,0.1);color:var(--status-success);' :
+                    r.status === 'failed' ? 'background:rgba(230,57,70,0.1);color:var(--brand-red);' :
+                    r.status === 'timeout' ? 'background:rgba(251,146,60,0.1);color:#fb923c;' :
+                    r.status === 'skipped' ? 'background:var(--bg-hover);color:var(--text-muted);border:1px solid var(--border-color);' :
+                    'background:var(--bg-hover);color:var(--text-muted);';
+      var times = '';
+      if (r.status === 'queued') {
+        times = ' <span style="color:var(--text-muted);">[queued — waiting for poll]</span>';
+      } else if (r.status === 'skipped') {
+        times = ' <span style="color:var(--text-muted);">[skipped — cleared]</span>';
+      } else if (r.started_at) {
+        var fin = r.finished_at ? ' → ' + formatDateTime(r.finished_at) : ' → running';
+        times = ' <span style="color:var(--text-muted);">[' + formatDateTime(r.started_at) + fin + ']</span>';
+      }
+      var outId = c.id + '-' + r.gateway_ip;
+      var outHtml = '';
+      if (r.output) {
+        outHtml = '<details data-out="' + outId + '" class="mt-2" ontoggle="loadFleetOutputIfNeeded(' + c.id + ',\'' + r.gateway_ip + '\',this)"><summary class="text-xs cursor-pointer" style="color:var(--status-info);">Show output' + (r.has_more ? ' (full)' : '') + '</summary>' +
+          '<div class="mt-1 rounded" style="border:1px solid var(--border-color);">' +
+          '<div class="flex items-center justify-end gap-1 px-1 pt-1">' +
+          '<button onclick="copyFleetOutput(' + c.id + ',\'' + r.gateway_ip + '\')" class="btn btn-xs" style="background:var(--bg-hover);color:var(--text-muted);border:1px solid var(--border-color);padding:2px 8px;font-size:10px;">📋 Copy</button>' +
+          '<button onclick="openFleetOutputModal(' + c.id + ',\'' + r.gateway_ip + '\')" class="btn btn-xs" style="background:var(--bg-hover);color:var(--status-info);border:1px solid var(--border-color);padding:2px 8px;font-size:10px;">View full</button>' +
+          '</div>' +
+          '<pre data-out="' + outId + '" class="fleet-out p-2 rounded text-xs overflow-auto" style="background:var(--bg-base);color:var(--text-main);white-space:pre-wrap;max-height:240px;">' + escapeHtml(r.output) + '</pre>' +
+          '</div></details>';
+      }
+      var gName = r.hostname ? escapeHtml(r.hostname) : escapeHtml(r.gateway_ip);
+      var gIp = (r.hostname && r.hostname !== r.gateway_ip) ? ' <span style="color:var(--text-muted);">(' + escapeHtml(r.gateway_ip) + ')</span>' : '';
+      var clearBtn = (r.status === 'queued') ?
+        '<button onclick="clearFleetResult(' + c.id + ',\'' + r.gateway_ip + '\')" class="btn btn-xs" title="Clear this stuck gateway so its queue can move on (other results are kept)" style="background:transparent;color:var(--text-muted);border:1px solid var(--border-color);padding:1px 6px;font-size:10px;">✕</button>' : '';
+      return '<div class="mt-1 text-xs" style="color:var(--text-muted);">• <strong>' + gName + '</strong>' + gIp + ' ' +
+        '<span class="px-1.5 py-0.5 rounded" style="' + rStatus + '">' + r.status + '</span>' +
+        (r.exit_code != null && r.exit_code !== '' ? ' <span style="color:var(--text-muted);">exit ' + r.exit_code + '</span>' : '') +
+        times + clearBtn + outHtml + '</div>';
+    }).join('');
+    var runningRes = (c.results || []).filter(function(r) { return r.status === 'running' && r.started_at; });
+    var cdHtml;
+    if (c.status === 'approved' && runningRes.length > 0) {
+      var start = Math.min.apply(null, runningRes.map(function(r) { return r.started_at; }));
+      var deadline = start + c.timeout;
+      cdHtml = '<span class="text-xs fleet-countdown" style="color:var(--status-warning);white-space:nowrap;" data-deadline="' + deadline + '">⏳ counting…</span>';
+    } else {
+      cdHtml = '<span class="text-xs" style="color:var(--text-muted);white-space:nowrap;">👤 ' + c.timeout + 's timeout</span>';
+    }
+    return '<div class="p-3 rounded-lg border mb-2" style="background:var(--bg-base);border-color:var(--border-color);">' +
+      '<div class="flex items-center justify-between gap-2 flex-wrap">' +
+      '<div class="flex items-center gap-2 flex-wrap"><span class="text-xs font-mono" style="color:var(--text-muted);">#' + c.id + '</span>' +
+      '<code class="text-xs" style="color:var(--text-main);">' + escapeHtml(c.command) + '</code>' +
+      '<span class="px-2 py-0.5 rounded-full text-xs font-medium" style="' + statusStyle + '">' + c.status + '</span></div>' +
+      '<div class="flex items-center gap-2 flex-wrap">' + cdHtml + '</div></div>' +
+      '<div class="mt-1 text-xs" style="color:var(--text-muted);">sent ' + formatDateTime(c.created_at) + '</div>' +
+      '<div class="mt-1 text-xs" style="color:var(--text-muted);">→ ' + formatFleetTargets(c.target_ips || []).join(', ') + '</div>' +
+      (c.reason ? '<div class="text-xs" style="color:var(--text-muted);">Reason: ' + escapeHtml(c.reason) + '</div>' : '') +
+      (resultRows ? '<div class="mt-2 border-t" style="border-color:var(--border-color);padding-top:4px;">' + resultRows + '</div>' : '') +
+      '</div>';
+  }).join('');
+  openOuts.forEach(function(id) {
+    var d = resultsEl.querySelector('details[data-out="' + id + '"]');
+    if (d) d.open = true;
+  });
+  Object.keys(preScrolls).forEach(function(id) {
+    var p = resultsEl.querySelector('pre[data-out="' + id + '"]');
+    if (p) p.scrollTop = preScrolls[id];
+  });
+}
+
+async function copyFleetOutput(cmdId, ip) {
+  try {
+    var res = await fetch('/api/fleet/commands/' + cmdId + '/output/' + encodeURIComponent(ip));
+    if (res.status === 401) { await checkAuth(); return; }
+    var data = await res.json();
+    var text = data.output || '';
+    if (!text) { showToast('No output to copy', 'error'); return; }
+    await copyToClipboard(text, true);
+    showToast('📋 Output copied', 'success');
+  } catch(e) { showToast('Error: ' + e.message, 'error'); }
+}
+
+var _fleetModal = { cmdId: null, ip: null, output: '' };
+
+function _fleetModalEsc(e) {
+  if (e.key === 'Escape') closeFleetOutputModal();
+}
+
+async function openFleetOutputModal(cmdId, ip) {
+  var c = (_fleetData || []).find(function(x) { return x.id === cmdId; });
+  var r = c && (c.results || []).find(function(x) { return x.gateway_ip === ip; });
+  var label = (r && r.hostname && r.hostname !== ip ? r.hostname + ' (' + ip + ')' : ip);
+  var cmdTxt = c ? c.command : ('#' + cmdId);
+  if (cmdTxt.length > 80) cmdTxt = cmdTxt.substring(0, 80) + '…';
+  document.getElementById('fleet-output-modal-title').textContent = label + ' — ' + cmdTxt;
+  _fleetModal = { cmdId: cmdId, ip: ip, output: '' };
+  document.getElementById('fleet-output-modal-pre').textContent = 'Loading full output…';
+  document.getElementById('fleet-output-modal').classList.remove('hidden');
+  window.addEventListener('keydown', _fleetModalEsc);
+  await loadFleetFullOutputIntoModal(cmdId, ip);
+}
+
+async function loadFleetFullOutputIntoModal(cmdId, ip) {
+  try {
+    var res = await fetch('/api/fleet/commands/' + cmdId + '/output/' + encodeURIComponent(ip));
+    if (res.status === 401) { await checkAuth(); return; }
+    var data = await res.json();
+    var full = data.output || '';
+    _fleetModal.output = full;
+    document.getElementById('fleet-output-modal-pre').textContent = full || '(no output)';
+  } catch(e) {
+    document.getElementById('fleet-output-modal-pre').textContent = 'Failed to load output.';
+  }
+}
+
+function closeFleetOutputModal() {
+  document.getElementById('fleet-output-modal').classList.add('hidden');
+  window.removeEventListener('keydown', _fleetModalEsc);
+}
+
+async function copyFleetOutputModal() {
+  if (!_fleetModal.output && _fleetModal.cmdId != null) {
+    await loadFleetFullOutputIntoModal(_fleetModal.cmdId, _fleetModal.ip);
+  }
+  if (_fleetModal.output) {
+    await copyToClipboard(_fleetModal.output, true);
+    showToast('📋 Output copied', 'success');
+  } else {
+    showToast('No output to copy', 'error');
+  }
+}
+
+async function clearFleetResult(cmdId, ip) {
+  if (!(await customConfirm('Clear this gateway\'s stuck result for fleet #' + cmdId + '?\n\n' + ip + ' is marked queued (it never ran, e.g. the gateway is on an old poller). Clearing marks it skipped so this gateway\'s queue can move on — the command and the other gateways\' results are kept.'))) return;
+  try {
+    var res = await authFetch('/api/fleet/commands/' + cmdId + '/result/' + encodeURIComponent(ip), { method: 'DELETE' });
+    var data = await res.json();
+    if (data.status === 'ok') { showToast('Cleared ' + ip + ' for fleet #' + cmdId, 'success'); fetchFleetCommands(); }
+    else { showToast('Failed: ' + (data.detail || 'unknown'), 'error'); }
+  } catch(e) { showToast('Error: ' + e.message, 'error'); }
+}
+
+async function loadFleetOutputIfNeeded(cmdId, ip, detailsEl) {
+  if (!detailsEl.open || detailsEl.getAttribute('data-loaded') === '1') return;
+  detailsEl.setAttribute('data-loaded', '1');
+  var pre = detailsEl.querySelector('pre[data-out]');
+  try {
+    var res = await fetch('/api/fleet/commands/' + cmdId + '/output/' + encodeURIComponent(ip));
+    if (res.status === 401) { await checkAuth(); return; }
+    var data = await res.json();
+    var full = data.output || '';
+    if (pre) pre.textContent = full;
+    var c = (_fleetData || []).find(function(x) { return x.id === cmdId; });
+    if (c) {
+      var r = (c.results || []).find(function(x) { return x.gateway_ip === ip; });
+      if (r) { r.output = full; r.has_more = false; }
+    }
+  } catch(e) {
+    detailsEl.removeAttribute('data-loaded');
+    if (pre) pre.textContent = 'Failed to load output.';
+  }
+}
+
+function updateFleetCountdowns() {
+  var now = Math.floor(Date.now() / 1000);
+  document.querySelectorAll('.fleet-countdown[data-deadline]').forEach(function(el) {
+    var rem = parseInt(el.getAttribute('data-deadline')) - now;
+    if (rem <= 0) {
+      el.textContent = '⏳ timed out';
+      el.style.color = 'var(--brand-red)';
+      return;
+    }
+    if (rem >= 3600) {
+      var h = Math.floor(rem / 3600), m = Math.floor((rem % 3600) / 60);
+      el.textContent = '⏳ ' + h + 'h ' + m + 'm left';
+    } else {
+      var m2 = Math.floor(rem / 60), s = rem % 60;
+      el.textContent = '⏳ ' + m2 + ':' + String(s).padStart(2, '0') + ' left';
+    }
+  });
+}
+
+// ── Policies ─────────────────────────────────────────────────────────────
+async function fetchPolicies() {
+  const res = await fetch('/api/policies'); const data = await res.json();
+  document.getElementById('policy-exact').value = data.exact_whitelist || '';
+  document.getElementById('policy-regex-white').value = data.regex_whitelist || '';
+  document.getElementById('policy-regex-black').value = data.regex_blacklist || '';
+  document.getElementById('policy-version-label').textContent = 'v' + (data.policy_version || '?');
+}
+async function fetchPolicyChanges() {
+  const res = await fetch('/api/policy_changes'); const changes = await res.json();
+  const changesList = document.getElementById('policy-changes-list');
+  if (changes.length === 0) { changesList.innerHTML = '<p style="color:var(--text-muted);">No policy changes recorded.</p>'; return; }
+  changesList.innerHTML = changes.map(function(c) {
+    return '<div class="p-3 rounded-lg border mb-2" style="background:var(--bg-base);border-color:var(--border-color);">' +
+    '<div class="flex items-center justify-between"><p class="text-xs" style="color:var(--text-muted);">' + formatDateTime(c.timestamp) + ' - <span style="color:var(--text-main);">' + c.policy_type + '</span></p>' +
+    '<button class="btn btn-xs" style="background:transparent;color:var(--status-info);border:1px solid var(--border-color);padding:2px 8px;font-size:10px;flex-shrink:0;" onclick="rollbackPolicyChange(' + c.id + ')">Restore</button></div>' +
+    '<div class="mt-2 text-xs font-mono"><p style="color:var(--brand-red);">- ' + c.old_content.split('\n').filter(function(l){return l.trim()!=='';}).join('<br>- ') + '</p><p style="color:var(--status-success);">+ ' + c.new_content.split('\n').filter(function(l){return l.trim()!=='';}).join('<br>+ ') + '</p></div></div>';
+  }).join('');
+}
+async function savePolicies() {
+  const btn = document.getElementById('save-policies-btn'); btn.disabled = true; btn.textContent = 'Saving...';
+  await savePoliciesSilent();
+  btn.disabled = false; btn.textContent = 'Save & Push Policies';
+  showToast('✅ Policies saved & pushed', 'success');
+  setTimeout(fetchGateways, 4000);
+  if (!document.getElementById('policy-changes-modal').classList.contains('hidden')) fetchPolicyChanges();
+}
+
+async function rollbackPolicyChange(changeId) {
+  if (!(await customConfirm('Restore policy to the state before this change? This will overwrite the current policy and push to gateways.'))) return;
+  try {
+    const res = await authFetch('/api/policies/rollback/' + changeId, { method: 'POST' });
+    if (!res.ok) { showToast('Rollback failed', 'error'); return; }
+    const data = await res.json();
+    showToast('Policy ' + data.policy_type + ' restored', 'success');
+    fetchPolicies();
+    fetchPolicyChanges();
+    setTimeout(fetchGateways, 4000);
+    refreshSuggestions();
+  } catch(e) { showToast('Error: ' + e.message, 'error'); }
+}
+async function testPolicy() {
+  const cmd = document.getElementById('tester-input').value.trim(); if (!cmd) return;
+  const rd = document.getElementById('tester-result'); rd.innerHTML = '<span style="color:var(--text-muted);">Testing...</span>'; rd.classList.remove('hidden');
+  try {
+    const res = await fetch('/api/policies/test?command=' + encodeURIComponent(cmd)); const data = await res.json();
+    let bg, border, text, icon, desc;
+    if (data.action === 'blocked') { bg='rgba(251,146,60,0.1)'; border='rgba(251,146,60,0.3)'; text='#fb923c'; icon='🔴'; desc='Blocked: <code style="color:#fb923c;">' + (data.details[0] ? data.details[0].pattern : 'unknown') + '</code>'; }
+    else if (data.action === 'auto_approved') { bg='rgba(74,222,128,0.1)'; border='rgba(74,222,128,0.3)'; text='var(--status-success)'; icon='✅'; desc=(data.details[0] && data.details[0].type === 'exact_whitelist') ? 'Auto-Approved (Exact Allowlist)' : 'Auto-Approved: <code style="color:var(--status-success);">' + (data.details[0] ? data.details[0].pattern : '') + '</code>'; }
+    else { bg='rgba(251,191,36,0.1)'; border='rgba(251,191,36,0.3)'; text='var(--status-warning)'; icon='⏳'; desc='Would require JIT Approval'; }
+    rd.innerHTML = '<div class="p-2 rounded-lg border" style="background:' + bg + ';color:' + text + ';border-color:' + border + ';">' + icon + ' <strong>' + data.action.replace('_',' ').toUpperCase() + '</strong> — ' + desc + '</div>';
+  } catch(err) { rd.innerHTML = '<div class="p-2 rounded-lg border" style="background:var(--bg-base);color:var(--text-muted);">⚠️ ' + err.message + '</div>'; }
+}
+async function seedEdge() {
+  var confirmMsg = 'Seed Edge from current Build? This replaces any existing Edge installer.';
+  try {
+    var sr = await authFetch('/api/dev/status');
+    if (sr.ok) {
+      var sd = await sr.json();
+      if (sd.pipeline_state === 'dev_in_progress') {
+        confirmMsg = 'A previous dev push is active. Seed Edge will stop it and deploy the latest Build to dev gateways. Continue?';
+      }
+    }
+  } catch(e) {}
+  if (!(await customConfirm(confirmMsg))) return;
+  const btn = document.getElementById('seed-edge-btn'); btn.disabled = true; btn.textContent = 'Seeding...';
+  try {
+    const res = await authFetch('/api/dev/seed', { method: 'POST' });
+    const data = await res.json();
+    showToast('Edge seeded from Build ' + data.version, 'success');
+    fetchDevStatus();
+  } catch(err) { showToast('Failed to seed Edge: ' + err.message, 'error'); }
+  btn.disabled = false; btn.textContent = 'Seed Edge';
+}
+
+async function pushToDev() {
+  const devCount = typeof _devGateways !== 'undefined' ? _devGateways.length : 0;
+  if (devCount === 0) { showToast('No dev-mode gateways exist. Set a gateway to dev mode first.', 'error'); return; }
+  if (!(await customConfirm('Push Edge to ' + devCount + ' dev gateway(s)? Production gateways are not affected.'))) return;
+  const btn = document.getElementById('push-to-dev-btn'); btn.disabled = true; btn.textContent = 'Pushing...';
+  try {
+    const r = await authFetch('/api/dev-gateways/push', { method: 'POST' });
+    const data = await r.json();
+    showToast('Dev update triggered for ' + (data.dev_gateway_count||0) + ' gateway(s)', 'success');
+  } catch(e) { showToast('Failed to push', 'error'); }
+  btn.disabled = false; btn.textContent = 'Push to Dev Gateways';
+  fetchDevStatus();
+}
+
+async function promoteToGolden() {
+  if (!(await customConfirm('Deploy Edge to Fleet? All connected gateways will update within ~3 seconds.\n\nA backup of the current Build will be saved.'))) return;
+  const btn = document.getElementById('promote-golden-btn'); btn.disabled = true; btn.textContent = 'Deploying...';
+  try {
+    const res = await authFetch('/api/dev/promote', { method: 'POST' });
+    const data = await res.json();
+    showToast('Deployed ' + data.version + ' to ' + data.gateway_count + ' gateway(s)', 'success');
+    fetchDevStatus();
+  } catch(err) { showToast('Failed to deploy: ' + err.message, 'error'); }
+  btn.disabled = false; btn.textContent = 'Deploy to Fleet';
+  setTimeout(fetchGateways, 6000);
+}
+
+async function rollbackGolden() {
+  if (!(await customConfirm('Rollback Fleet to the previous version from backup?\n\nALL gateways will update within ~3 seconds.'))) return;
+  const btn = document.getElementById('rollback-golden-btn'); btn.disabled = true; btn.textContent = 'Rolling back...';
+  try {
+    const res = await authFetch('/api/dev/rollback', { method: 'POST' });
+    const data = await res.json();
+    showToast('Fleet rolled back to ' + data.version + ' for ' + data.gateway_count + ' gateway(s)', 'success');
+    fetchDevStatus();
+  } catch(err) { showToast('Failed to rollback: ' + err.message, 'error'); }
+  btn.disabled = false; btn.textContent = 'Rollback Fleet';
+  setTimeout(fetchGateways, 6000);
+}
+
+async function fetchDevStatus() {
+  try {
+    const res = await authFetch('/api/dev/status');
+    if (!res.ok) return;
+    const data = await res.json();
+    const goldenLabel = document.getElementById('golden-version-label');
+    const edgeLabel = document.getElementById('edge-version-label');
+    const fleetLabel = document.getElementById('fleet-version-label');
+    const seedBtn = document.getElementById('seed-edge-btn');
+    const pushBtn = document.getElementById('push-to-dev-btn');
+    const promoteBtn = document.getElementById('promote-golden-btn');
+    const rollbackBtn = document.getElementById('rollback-golden-btn');
+
+    if (goldenLabel) goldenLabel.innerHTML = (data.dashboard_version || 'unset') + (data.golden_hash ? ' <span style="font-family:monospace;font-size:10px;opacity:0.7;">(' + data.golden_hash + ')</span>' : '');
+    if (edgeLabel) edgeLabel.innerHTML = (data.edge_exists ? (data.dashboard_version || 'staged') : 'not staged') + (data.edge_hash ? ' <span style="font-family:monospace;font-size:10px;opacity:0.7;">(' + data.edge_hash + ')</span>' : '');
+    if (fleetLabel) fleetLabel.innerHTML = (data.dashboard_version || 'unset') + (data.deployed_hash ? ' <span style="font-family:monospace;font-size:10px;opacity:0.7;">(' + data.deployed_hash + ')</span>' : '');
+
+    // Button states
+    if (seedBtn) seedBtn.disabled = false;
+    if (pushBtn) pushBtn.disabled = !data.edge_exists || data.dev_gateway_count === 0;
+    if (promoteBtn) promoteBtn.disabled = !data.edge_exists;
+    if (rollbackBtn) rollbackBtn.disabled = !data.backup_exists;
+
+    const countLabel = document.getElementById('dev-gateway-count');
+    if (countLabel) countLabel.textContent = data.dev_gateway_count;
+
+    // Pipeline banner
+    const banner = document.getElementById('pipeline-banner');
+    if (banner && data.pipeline_state) {
+      banner.classList.remove('hidden', 'needs_seed', 'ready_for_dev', 'dev_in_progress', 'ready_for_promote');
+      if (data.pipeline_state === 'clear') {
+        banner.classList.add('hidden');
+      } else {
+        banner.classList.add(data.pipeline_state);
+        var nDev = data.dev_gateway_count, nAll = data.gateway_count || 1;
+        var msgs = {
+          needs_seed: '<strong>New Build available</strong> &mdash; Edge is stale. <button onclick="seedEdge()" style="text-decoration:underline;cursor:pointer;background:none;border:none;color:inherit;font-size:inherit;font-weight:600;padding:0;">Seed Edge &rarr;</button>',
+          ready_for_dev: '<strong>Edge ready</strong> &mdash; <button onclick="pushToDev()" style="text-decoration:underline;cursor:pointer;background:none;border:none;color:inherit;font-size:inherit;font-weight:600;padding:0;">Push to Dev Gateways &rarr;</button> (' + nDev + ' dev device' + (nDev !== 1 ? 's' : '') + ')',
+          dev_in_progress: '<strong>Dev push active</strong> &mdash; ' + nDev + ' dev gate' + (nDev !== 1 ? 'ways' : 'way') + ' updating. Verify, then Deploy to Fleet.',
+          ready_for_promote: '<strong>Dev verified</strong> &mdash; <button onclick="promoteToGolden()" style="text-decoration:underline;cursor:pointer;background:none;border:none;color:inherit;font-size:inherit;font-weight:600;padding:0;">Deploy to Fleet &rarr;</button> (' + nAll + ' gateway' + (nAll !== 1 ? 's' : '') + ')'
+        };
+        banner.innerHTML = msgs[data.pipeline_state] || '';
+      }
+    }
+  } catch(e) {}
+}
+
+function generateRegex() {
+  const cmd = document.getElementById('tester-input').value.trim(); if (!cmd) return;
+  const rd = document.getElementById('tester-result');
+  rd.innerHTML = '<div class="p-2 rounded-lg border font-mono text-xs" style="background:rgba(230,57,70,0.08);color:var(--text-main);border-color:var(--brand-red);"><p class="mb-1" style="color:var(--brand-red);">Generated Regex:</p><code>^' + cmd.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$</code><p class="mt-1" style="color:var(--text-muted);">Copy into Regex Allowlist.</p></div>';
+  rd.classList.remove('hidden');
+}
+
+// ── Enrollment ───────────────────────────────────────────────────────────
+let currentToken = '', tokenExpiryTime = 0, tokenTimer = null, tokenStatusPoller = null;
+function startTokenCountdown() {
+  if (tokenTimer) clearInterval(tokenTimer);
+  const el = document.getElementById('token-countdown');
+  tokenTimer = setInterval(function() {
+    const remaining = Math.ceil((tokenExpiryTime - Date.now() / 1000));
+    if (remaining <= 0) { el.textContent = '⏰ Token expired'; el.style.color = 'var(--brand-red)'; clearInterval(tokenTimer); tokenTimer = null; if (tokenStatusPoller) { clearInterval(tokenStatusPoller); tokenStatusPoller = null; } document.getElementById('enroll-command').value = ''; document.getElementById('copy-enroll-btn').disabled = true; currentToken = ''; }
+    else if (remaining <= 30) { el.textContent = '⏰ ' + remaining + 's remaining'; el.style.color = 'var(--status-warning)'; }
+    else { el.textContent = '⏱ ' + remaining + 's remaining'; el.style.color = 'var(--text-muted)'; }
+  }, 1000);
+}
+async function fetchEnrollData() {
+  const res = await fetch('/api/enroll/keys'); const keys = await res.json();
+  document.getElementById('display-eshu-key').textContent = keys.eshu_ssh_key ? keys.eshu_ssh_key.substring(0, 60) + '...' : 'Not configured';
+  document.getElementById('edit-eshu-key').value = keys.eshu_ssh_key || '';
+}
+function toggleKeyEdit() {
+  const d=document.getElementById('keys-display'), e=document.getElementById('keys-edit'), b=document.getElementById('edit-keys-btn');
+  if(e.classList.contains('hidden')){d.classList.add('hidden');e.classList.remove('hidden');b.textContent='Cancel';}
+  else{d.classList.remove('hidden');e.classList.add('hidden');b.textContent='Edit Keys';}
+}
+async function saveKeys() {
+  await authFetch('/api/enroll/keys', { method: 'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({eshu_key: document.getElementById('edit-eshu-key').value}) });
+  toggleKeyEdit(); fetchEnrollData(); showToast('✅ Keys saved', 'success');
+}
+function updateEnrollCommand() {
+  if (!currentToken) return;
+  const baseUrl = document.getElementById('enroll-base-url').value.trim() || window.location.origin;
+  document.getElementById('enroll-command').value = 'curl -s ' + baseUrl + '/api/enroll?token=' + currentToken + ' | bash';
+}
+async function generateToken() {
+  const btn = document.getElementById('generate-token-btn'); btn.disabled = true; btn.textContent = 'Generating...';
+  const res = await authFetch('/api/enroll/generate', { method: 'POST' }); const data = await res.json();
+  currentToken = data.token;
+  const baseUrl = document.getElementById('enroll-base-url').value.trim() || window.location.origin;
+  document.getElementById('enroll-command').value = 'curl -s ' + baseUrl + '/api/enroll?token=' + currentToken + ' | bash';
+  tokenExpiryTime = Date.now() / 1000 + 120;
+  document.getElementById('token-countdown').classList.remove('hidden');
+  document.getElementById('copy-enroll-btn').disabled = false;
+  startTokenCountdown();
+  startTokenStatusPolling();
+  btn.disabled = false; btn.textContent = 'Generate New Token';
+}
+
+function startTokenStatusPolling() {
+  if (tokenStatusPoller) clearInterval(tokenStatusPoller);
+  tokenStatusPoller = setInterval(async function() {
+    if (!currentToken) { clearInterval(tokenStatusPoller); return; }
+    try {
+      const res = await fetch('/api/enroll/token-status?token=' + currentToken + '&_=' + Date.now());
+      const data = await res.json();
+      if (data.used) {
+        if (tokenTimer) { clearInterval(tokenTimer); tokenTimer = null; }
+        clearInterval(tokenStatusPoller);
+        document.getElementById('enroll-command').value = '';
+        document.getElementById('copy-enroll-btn').disabled = true;
+        document.getElementById('token-countdown').textContent = '✅ Token consumed by gateway';
+        document.getElementById('token-countdown').style.color = 'var(--status-success)';
+        currentToken = '';
+      }
+    } catch(e) {}
+  }, 3000);
+}
+async function handleUninstallGateway(ip, hostname) {
+  if (!(await customConfirm('Permanently uninstall Eshu Gateway from ' + hostname + ' (' + ip + ')?\n\nThis will remove all Eshu components on next poll cycle.'))) return;
+  try {
+    const res = await authFetch('/api/gateways/' + ip + '/uninstall', { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) { showToast('❌ ' + (data.detail || 'Failed to trigger uninstall'), 'error'); return; }
+    showToast('✅ Uninstall triggered for ' + data.hostname, 'success');
+    _uninstallingIps[ip] = true;
+    fetchGateways();
+    openUninstallModal(ip, data.hostname || hostname);
+    pollUninstallProgress(ip);
+  }
+  catch(err) { showToast('❌ Failed', 'error'); }
+}
+
+// ── Uninstall Progress Modal ─────────────────────────────────────────────
+function openUninstallModal(ip, hostname) {
+  _uninstallIp = ip;
+  document.getElementById('uninstall-modal-gateway').textContent = hostname + ' (' + ip + ')';
+  document.getElementById('uninstall-progress-fill').style.width = '0%';
+  document.getElementById('uninstall-modal-step').textContent = 'Starting…';
+  var note = document.getElementById('uninstall-modal-note');
+  note.classList.add('hidden');
+  document.getElementById('uninstall-modal').classList.remove('hidden');
+}
+
+function closeUninstallModal() {
+  document.getElementById('uninstall-modal').classList.add('hidden');
+  if (_uninstallIp) { delete _uninstallingIps[_uninstallIp]; _uninstallIp = null; }
+  fetchGateways();
+}
+
+async function pollUninstallProgress(ip) {
+  const STEPS = ['started','stopping_poller','removing_binaries','removing_sudoers','removing_policies','removing_runtime','removing_user','cleaning_keys','deregistering','complete'];
+  const STEP_LABELS = { started:'Initiated', stopping_poller:'Stopping poller', removing_binaries:'Removing binaries', removing_sudoers:'Removing sudoers', removing_policies:'Removing policies', removing_runtime:'Removing runtime', removing_user:'Removing user', cleaning_keys:'Cleaning SSH', deregistering:'Deregistering', complete:'Complete' };
+  let currentStep = -1;
+  let stopped = false;
+  const finish = function() {
+    if (stopped) return;
+    stopped = true;
+    if (_uninstallIp !== ip) return;
+    document.getElementById('uninstall-progress-fill').style.width = '100%';
+    document.getElementById('uninstall-modal-step').textContent = '✅ Removed';
+    setTimeout(closeUninstallModal, 1800);
+  };
+  const tryFetch = async function() {
+    if (stopped) return;
+    if (_uninstallIp !== ip) { stopped = true; return; }
+    try {
+      const res = await fetch('/api/uninstall-progress/' + ip);
+      const data = await res.json();
+      if (stopped) return;
+      if (data.progress) {
+        // progress is stored as "step:message"
+        var step = String(data.progress).split(':')[0];
+        var stepIdx = STEPS.indexOf(step);
+        if (stepIdx > currentStep) currentStep = stepIdx;
+        var note = document.getElementById('uninstall-modal-note');
+        if (stepIdx === 0 && note && !note.classList.contains('hidden')) note.classList.add('hidden');
+        if (step === 'complete') { finish(); return; }
+        var pct = currentStep < 0 ? 0 : Math.min(100, Math.round((currentStep / (STEPS.length - 1)) * 100));
+        document.getElementById('uninstall-progress-fill').style.width = pct + '%';
+        document.getElementById('uninstall-modal-step').textContent = STEP_LABELS[step] || step;
+      } else {
+        // No progress yet — either the poller hasn't picked up the trigger
+        // (next poll ≤30s) or the gateway already deregistered. Keep polling.
+        var gw = (_gatewaysData || []).find(function(g) { return g.ip === ip; });
+        if (!gw) { finish(); return; }
+        var noteEl = document.getElementById('uninstall-modal-note');
+        noteEl.classList.remove('hidden');
+        noteEl.textContent = 'Waiting for the gateway to pick up the uninstall (next poll ≤30s)…';
+      }
+      setTimeout(tryFetch, 2000);
+    } catch(e) {
+      setTimeout(tryFetch, 2000);
+    }
+  };
+  tryFetch();
+}
+async function handleForceRemoveGateway(ip, hostname) {
+  if (!(await customConfirm('Force remove ' + hostname + ' (' + ip + ') from dashboard?\n\n⚠️ This only removes the dashboard record.'))) return;
+  try { const res = await authFetch('/api/gateways/' + ip, { method: 'DELETE' }); const data = await res.json(); showToast('🗑 ' + data.hostname + ' removed', 'success'); fetchGateways(); }
+  catch(err) { showToast('❌ Failed', 'error'); }
+}
+function copyEnrollCommand() { document.getElementById('enroll-command').select(); document.execCommand('copy'); showToast('✅ Copied', 'success'); }
+
+// ── Audit Log ────────────────────────────────────────────────────────────
+const AUDIT_ICONS = { enrolled: '✅', version_updated: '⬆️', disconnected: '⚠️', policy_committed: '🔄', update_triggered: '📡', uninstall_triggered: '🗑', uninstalled: '❌', password_changed: '🔐', password_cleared: '🔓', window_created: '🪟', window_modified: '✏️', window_deleted: '🗑️', window_toggled: '🔘', window_claimed: '🟢', dev_update_pushed: '🧪', gateway_mode_changed: '🔄' };
+const AUDIT_LABELS = { enrolled: 'enrolled', version_updated: 'updated', disconnected: 'disconnected', policy_committed: 'Policies committed', update_triggered: 'Update triggered', uninstall_triggered: 'Uninstall triggered', uninstalled: 'Uninstalled', password_changed: 'Password changed', password_cleared: 'Password removed', window_created: 'Window created', window_modified: 'Window updated', window_deleted: 'Window deleted', window_toggled: 'Window toggled', window_claimed: 'Window claimed', dev_update_pushed: 'Dev push', gateway_mode_changed: 'Gateway mode' };
+let _auditLogSearchQuery = '';
+function onAuditLogSearch() {
+  _auditLogSearchQuery = document.getElementById('audit-log-search').value.trim();
+  fetchAuditLog();
+}
+async function fetchAuditLog() {
+  try {
+    let url = '/api/audit_log';
+    if (_auditLogSearchQuery) url += '?search=' + encodeURIComponent(_auditLogSearchQuery);
+    const res = await fetch(url); const logs = await res.json();
+    document.getElementById('audit-log-count').textContent = logs.length + ' events';
+    const list = document.getElementById('audit-log-list');
+    if (logs.length === 0) { list.innerHTML = '<p style="color:var(--text-muted);">No events recorded yet.</p>'; return; }
+    list.innerHTML = logs.map(function(l) {
+      const icon = AUDIT_ICONS[l.event_type] || '📌', label = AUDIT_LABELS[l.event_type] || l.event_type;
+      const time = new Date(l.timestamp * 1000).toLocaleTimeString([], { hour:'2-digit', minute:'2-digit', second:'2-digit' });
+      const host = l.hostname ? ' ' + gwPill(l.hostname) + ' <strong style="color:var(--text-main);">' + l.hostname + '</strong>' + (l.gateway_ip ? ' ('+l.gateway_ip+')' : '') : '';
+      const detail = l.details ? '<span class="block text-xs mt-0.5" style="color:var(--text-muted);">' + l.details.replace(/</g,'<').replace(/>/g,'>') + '</span>' : '';
+      const borderColor = l.event_type === 'disconnected' ? 'var(--brand-red)' : l.event_type === 'version_updated' || l.event_type === 'password_changed' ? 'var(--status-success)' : 'var(--border-color)';
+      return '<div class="p-2 rounded-lg border text-xs" style="background:var(--bg-base);border-color:' + borderColor + ';">' +
+        '<span style="color:var(--text-muted);font-size:10px;">' + time + '</span> ' + icon + ' ' + label + host + detail + '</div>';
+    }).join('');
+  } catch(e) {}
+}
+
+// ── Notes ────────────────────────────────────────────────────────────────
+async function fetchNotes() { const res = await fetch('/api/notes'); const data = await res.json(); document.getElementById('notes-content').value = data.content || ''; }
+async function saveNotes() { await authFetch('/api/notes', { method: 'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({content: document.getElementById('notes-content').value}) }); showToast('✅ Notes saved', 'success'); }
+
+async function fetchNotifyConfig() {
+  try {
+    const r = await authFetch('/api/notify-config');
+    if (!r.ok) return;
+    const c = await r.json();
+    document.getElementById('notify-webhook-url').value = c.url || '';
+    document.getElementById('notify-dashboard-url').value = c.dashboard_url || '';
+    const events = (c.events || '').split(',').map(function(e){return e.trim();});
+    document.getElementById('notify-event-jit').checked = events.indexOf('jit') !== -1;
+    document.getElementById('notify-event-window').checked = events.indexOf('window') !== -1;
+    document.getElementById('notify-event-blocked').checked = events.indexOf('blocked') !== -1;
+    document.getElementById('notify-event-offline').checked = events.indexOf('offline') !== -1;
+    document.getElementById('notify-event-online').checked = events.indexOf('online') !== -1;
+  } catch(e) {}
+}
+function onNotifyConfigChange() {
+  document.getElementById('notify-save-status').textContent = '';
+}
+async function saveNotifyConfig() {
+  var url = document.getElementById('notify-webhook-url').value.trim();
+  var dashUrl = document.getElementById('notify-dashboard-url').value.trim();
+  var events = [];
+  if (document.getElementById('notify-event-jit').checked) events.push('jit');
+  if (document.getElementById('notify-event-window').checked) events.push('window');
+  if (document.getElementById('notify-event-blocked').checked) events.push('blocked');
+  if (document.getElementById('notify-event-offline').checked) events.push('offline');
+  if (document.getElementById('notify-event-online').checked) events.push('online');
+  try {
+    var r = await authFetch('/api/notify-config', { method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({url:url, events:events.join(','), dashboard_url:dashUrl}) });
+    if (!r.ok) { var d = await r.json().catch(function(){}); throw new Error((d && d.detail) || 'Save failed'); }
+    document.getElementById('notify-save-status').textContent = '✅ Saved';
+    showToast('✅ Notification config saved', 'success');
+  } catch(e) { showToast('❌ ' + e.message, 'error'); }
+}
+async function testNotify() {
+  try {
+    var r = await authFetch('/api/notify-test', { method:'POST' });
+    if (!r.ok) throw new Error('Test failed');
+    var d = await r.json();
+    showToast(d.delivered ? '🔊 Test notification delivered' : '❌ Test failed — webhook unreachable or no URL set', d.delivered ? 'success' : 'error');
+  } catch(e) { showToast('❌ Test failed — ' + e.message, 'error'); }
+}
+
+
+// ── Toast ────────────────────────────────────────────────────────────────
+function showToast(message, type) {
+  type = type || 'success';
+  const toast = document.getElementById('toast');
+  toast.textContent = message;
+  toast.className = 'fixed top-4 left-1/2 transform -translate-x-1/2 z-50 px-6 py-3 rounded-lg text-sm font-medium shadow-lg toast';
+  if (type === 'success') toast.className += ' bg-emerald-600 text-white';
+  else if (type === 'error') toast.className += ' bg-rose-600 text-white';
+  else toast.className += ' bg-slate-700 text-slate-200';
+  toast.classList.remove('hidden');
+  setTimeout(function() { toast.classList.add('hidden'); }, 3000);
+}
+
+// ── Dropdowns ────────────────────────────────────────────────────────────
+let _queueClearBefore = 0; // Timestamp — hide requests created before this time
+
+function toggleDropdown() { document.getElementById('purge-dropdown').classList.toggle('show'); }
+async function purgeHistory(period) {
+  document.getElementById('purge-dropdown').classList.remove('show');
+  const label = period === 'all' ? 'all time' : period;
+  if (!(await customConfirm('Clear the queue of requests older than ' + label + '?\n\n⚠ This hides them from the queue. Stats are preserved.'))) return;
+  const now = Math.floor(Date.now() / 1000);
+  const offsets = { '30m': 1800, '1h': 3600, '1d': 86400, '2d': 172800, '7d': 604800 };
+  if (period === 'all') _queueClearBefore = now;
+  else _queueClearBefore = now - (offsets[period] || 3600);
+  showToast('✅ Queue cleared — stats unchanged', 'success');
+  fetchRequests();
+}
+let _dbPurgeBefore = 0;
+async function purgeDatabase(period) {
+  const label = period === 'all' ? 'all time' : period;
+  if (!(await customConfirm('⚠ PERMANENTLY DELETE all requests older than ' + label + ' from the database?\n\nThis CANNOT be undone. Stats, charts, and top commands will be affected.'))) return;
+  await authFetch('/api/requests?older_than=' + period, { method: 'DELETE' });
+  _queueClearBefore = 0; // Reset client-side filter after DB purge
+  showToast('✅ Database purged (older than ' + label + ')', 'success');
+  fetchRequests();
+  if (document.getElementById('view-stats') && !document.getElementById('view-stats').classList.contains('hidden')) fetchStatistics();
+}
+document.addEventListener('click', function(e) { if (!e.target.closest('#purge-btn') && !e.target.closest('#purge-dropdown')) document.getElementById('purge-dropdown').classList.remove('show'); });
+
+// ── Custom Confirm Dialog ────────────────────────────────────────────────
+let _confirmResolve = null;
+function customConfirm(msg) {
+  return new Promise(function(resolve) {
+    _confirmResolve = function(result) {
+      document.getElementById('custom-confirm-overlay').classList.add('hidden');
+      resolve(result);
+    };
+    document.getElementById('custom-confirm-msg').innerText = msg;
+    document.getElementById('custom-confirm-overlay').classList.remove('hidden');
+  });
+}
+
+// ── Modals ───────────────────────────────────────────────────────────────
+function openModal(modalId) { document.getElementById(modalId).classList.remove('hidden'); fetchPolicyChanges(); }
+function closeModal(modalId) { document.getElementById(modalId).classList.add('hidden'); }
+
+// ── Statistics ────────────────────────────────────────────────────────
+let _statsData = null;
+let _selectedStatsGateways = new Set();
+
+async function fetchStatistics() {
+  try {
+    var daysEl = document.getElementById('stats-days');
+    var days = daysEl ? parseInt(daysEl.value) : 14;
+    var res = await fetch('/api/statistics?days=' + days + '&extended=1');
+    _statsData = await res.json();
+    // Default: all gateways selected
+    if (_selectedStatsGateways.size === 0 && _statsData.per_gateway.length > 0) {
+      _statsData.per_gateway.forEach(function(g) { _selectedStatsGateways.add(g.ip); });
+    }
+    renderStatistics();
+  } catch(e) {}
+}
+
+function toggleStatsGateway(ip) {
+  if (_selectedStatsGateways.has(ip)) {
+    _selectedStatsGateways.delete(ip);
+  } else {
+    _selectedStatsGateways.add(ip);
+  }
+  renderStatistics();
+}
+
+function renderStatistics() {
+  if (!_statsData) return;
+  var d = _statsData;
+
+  // Build gateway filter pills
+  var filterEl = document.getElementById('stats-gateway-filters');
+  var pillHtml = '';
+  d.per_gateway.forEach(function(g) {
+    var id = deriveGatewayIdentity(g.hostname || g.ip);
+    var selected = _selectedStatsGateways.has(g.ip);
+    pillHtml += '<span class="stats-gw-pill ' + (selected ? 'selected' : '') + '" onclick="toggleStatsGateway(\'' + g.ip + '\')" style="cursor:pointer;">' +
+      '<span class="stats-gw-dot" style="background:' + id.color + ';"></span>' +
+      escapeHtml(g.hostname || g.ip) + devBadge({mode: g.mode}) + ' <span style="font-size:10px;color:var(--text-muted);">' + g.total + '</span>' +
+      '</span>';
+  });
+  if (d.per_gateway.length > 0) {
+    pillHtml += '<span class="text-xs" style="color:var(--text-muted);cursor:pointer;margin-left:6px;" onclick="_selectedStatsGateways.clear();_statsData.per_gateway.forEach(function(g){_selectedStatsGateways.add(g.ip)});renderStatistics();">All</span>';
+    pillHtml += '<span class="text-xs" style="color:var(--text-muted);cursor:pointer;" onclick="_selectedStatsGateways.clear();renderStatistics();">None</span>';
+  }
+  filterEl.innerHTML = pillHtml;
+
+  // Render summary table
+  var filtered = d.per_gateway.filter(function(g) { return _selectedStatsGateways.has(g.ip); });
+  filtered.sort(function(a, b) { return b.total - a.total; });
+  var tbody = document.getElementById('stats-summary-body');
+  if (filtered.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="9" class="px-4 py-3" style="color:var(--text-muted);">No gateways selected.</td></tr>';
+  } else {
+    tbody.innerHTML = filtered.map(function(g) {
+      var id = deriveGatewayIdentity(g.hostname || g.ip);
+      var jitApproved = (g.total || 0) - (g.auto_approved || 0) - (g.blocked || 0) - (g.denied || 0);
+      var autoPct = g.total > 0 ? Math.round(((g.auto_approved || 0) + jitApproved) / g.total * 100) : 0;
+      return '<tr>' +
+        '<td>' + gwPill(g.hostname || g.ip) + '</td>' +
+        '<td style="color:var(--text-main);">' + escapeHtml(g.hostname || g.ip) + devBadge(g) + '</td>' +
+        '<td style="color:var(--text-muted);font-family:monospace;">' + escapeHtml(g.ip) + '</td>' +
+        '<td class="text-right" style="color:var(--text-main);font-weight:600;">' + (g.total || 0) + '</td>' +
+        '<td class="text-right" style="color:var(--status-info);">' + (g.auto_approved || 0) + '</td>' +
+        '<td class="text-right" style="color:var(--status-success);">' + jitApproved + '</td>' +
+        '<td class="text-right" style="color:#fb923c;">' + (g.blocked || 0) + '</td>' +
+        '<td class="text-right" style="color:var(--brand-red);">' + (g.denied || 0) + '</td>' +
+        '<td class="text-right"><span style="font-weight:600;color:' + (autoPct >= 80 ? 'var(--status-success)' : autoPct >= 50 ? 'var(--status-warning)' : 'var(--text-muted)') + ';">' + autoPct + '%</span></td>' +
+        '</tr>';
+    }).join('');
+  }
+
+  // Render top commands
+  var topCmdsBody = document.getElementById('stats-topcmds-body');
+  if (d.top_commands && d.top_commands.length > 0) {
+    var maxCount = d.top_commands[0].count;
+    topCmdsBody.innerHTML = d.top_commands.map(function(c, i) {
+      var pct = maxCount > 0 ? (c.count / maxCount) * 100 : 0;
+      return '<tr>' +
+        '<td class="text-center" style="font-size:11px;color:var(--text-muted);">' + (i + 1) + '</td>' +
+        '<td style="font-family:monospace;font-size:12px;color:var(--text-main);">' +
+          '<div class="flex items-center gap-2">' +
+            '<span style="flex:1;">' + escapeHtml(c.command) + '</span>' +
+            '<div style="width:120px;height:14px;background:var(--bg-base);border-radius:3px;overflow:hidden;flex-shrink:0;">' +
+              '<div style="width:' + pct + '%;height:100%;background:rgba(96,165,250,0.35);border-radius:3px;min-width:' + (pct > 0 ? '2px' : '0') + ';"></div>' +
+            '</div>' +
+          '</div>' +
+          (c.description ? '<div style="font-size:10px;color:var(--text-muted);margin-top:1px;line-height:1.4;">' + escapeHtml(c.description) + '</div>' : '') +
+        '</td>' +
+        '<td style="font-size:11px;color:var(--text-muted);">' + c.pct + '%</td>' +
+        '<td class="text-right" style="font-family:monospace;font-size:12px;color:var(--text-main);">' + c.count + '</td>' +
+        '</tr>';
+    }).join('');
+  } else {
+    topCmdsBody.innerHTML = '<tr><td colspan="4" class="px-4 py-3" style="color:var(--text-muted);">No command data available.</td></tr>';
+  }
+
+  // Summary cards at the top
+  var summaryEl = document.getElementById('stats-summary-cards');
+  var totalCmds = 0, totalJit = 0, pctSum = 0;
+  d.daily.forEach(function(day) { totalCmds += day.total; });
+  if (d.automation_trend && d.automation_trend.length > 0) {
+    d.automation_trend.forEach(function(a) { pctSum += a.automation_pct; });
+  }
+  var autoAvg = d.automation_trend && d.automation_trend.length > 0 ? Math.round(pctSum / d.automation_trend.length) : 0;
+  if (d.per_gateway) {
+    d.per_gateway.forEach(function(g) {
+      totalJit += (g.total || 0) - (g.auto_approved || 0) - (g.blocked || 0) - (g.denied || 0);
+    });
+  }
+  var gh = d.gateway_health || {};
+  summaryEl.innerHTML =
+    '<div class="stat-card"><div class="stat-value" style="color:var(--text-main);">' + totalCmds + '</div><div class="stat-label">Commands</div></div>' +
+    '<div class="stat-card"><div class="stat-value" style="color:' + (autoAvg >= 80 ? 'var(--status-success)' : autoAvg >= 50 ? 'var(--status-warning)' : 'var(--brand-red)') + ';">' + autoAvg + '%</div><div class="stat-label">Automation</div></div>' +
+    '<div class="stat-card"><div class="stat-value" style="color:' + ((gh.online_gateways || 0) === (gh.total_gateways || 0) ? 'var(--status-success)' : 'var(--status-warning)') + ';">' + (gh.online_gateways || 0) + ' / ' + (gh.total_gateways || 0) + '</div><div class="stat-label">Gateways Online</div></div>' +
+    '<div class="stat-card"><div class="stat-value" style="color:var(--status-info);">' + totalJit + '</div><div class="stat-label">JIT Approvals</div></div>';
+
+  // Denied commands
+  var deniedEl = document.getElementById('stats-denied');
+  if (d.top_denied && d.top_denied.length > 0) {
+    var maxDenied = d.top_denied[0].count;
+    deniedEl.innerHTML = d.top_denied.map(function(c, i) {
+      var pct = maxDenied > 0 ? (c.count / maxDenied) * 100 : 0;
+      return '<div class="flex items-center gap-2 mb-1" style="font-size:11px;">' +
+        '<span style="width:16px;text-align:right;color:var(--text-muted);flex-shrink:0;">' + (i + 1) + '</span>' +
+        '<div class="flex-1 flex items-center gap-2" style="min-width:0;">' +
+          '<span style="flex:1;font-family:monospace;color:var(--brand-red);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + escapeHtml(c.command) + '</span>' +
+          '<div style="width:80px;height:10px;background:var(--bg-base);border-radius:3px;overflow:hidden;flex-shrink:0;">' +
+            '<div style="width:' + pct + '%;height:100%;background:var(--brand-red);border-radius:3px;min-width:2px;"></div>' +
+          '</div>' +
+        '</div>' +
+        '<span style="width:20px;text-align:right;color:var(--text-muted);flex-shrink:0;">' + c.count + '</span>' +
+        '</div>';
+    }).join('');
+  } else {
+    deniedEl.innerHTML = '<p style="color:var(--text-muted);">No denied commands in this period.</p>';
+  }
+
+  // Command categories
+  var catEl = document.getElementById('stats-categories');
+  if (d.category_counts && d.category_counts.length > 0) {
+    var maxCat = d.category_counts[0].count;
+    catEl.innerHTML = d.category_counts.map(function(c) {
+      var pct = maxCat > 0 ? Math.round(c.count / maxCat * 100) : 0;
+      var catColors = {
+        'Storage & FS': '#60a5fa', 'System Services': '#34d399', 'Network': '#f472b6',
+        'Package Management': '#fbbf24', 'Containers': '#a78bfa', 'VMs': '#fb923c',
+        'Proxmox': '#f87171', 'Monitoring': '#2dd4bf', 'Databases': '#818cf8',
+        'Security': '#e879f9', 'Version Control': '#fca5a5', 'Scripting': '#6ee7b7',
+        'Task Scheduling': '#fde68a', 'System Info': '#93c5fd', 'System': '#fdba74',
+        'Editing': '#c4b5fd', 'Utilities': '#a7f3d0'
+      };
+      var color = catColors[c.category] || 'var(--text-muted)';
+      return '<div class="flex items-center gap-2 mb-1" style="font-size:11px;">' +
+        '<span style="width:12px;height:12px;border-radius:3px;background:' + color + ';flex-shrink:0;"></span>' +
+        '<span style="flex:1;color:var(--text-main);">' + c.category + '</span>' +
+        '<div style="width:80px;height:10px;background:var(--bg-base);border-radius:3px;overflow:hidden;flex-shrink:0;">' +
+          '<div style="width:' + pct + '%;height:100%;background:' + color + ';border-radius:3px;min-width:2px;"></div>' +
+        '</div>' +
+        '<span style="width:40px;text-align:right;color:var(--text-muted);flex-shrink:0;">' + c.pct + '%</span>' +
+        '</div>';
+    }).join('');
+  } else {
+    catEl.innerHTML = '<p style="color:var(--text-muted);">No category data available.</p>';
+  }
+}
+
+// ── Gateway Health Checker ────────────────────────────────────────────
+async function checkGatewayHealth() {
+  try {
+    const res = await fetch('/api/gateways'); const data = await res.json();
+    const now = Math.floor(Date.now() / 1000);
+    const staleCount = data.filter(function(g) { return (now - g.last_seen) > 120; }).length;
+    const noTokenCount = data.filter(function(g) { return !g.has_token; }).length;
+    const total = data.length;
+    const dot = document.getElementById('health-dot');
+    const pill = document.getElementById('health-pill');
+    if (!dot) return;
+    dot.classList.remove('green', 'orange', 'red');
+    if (staleCount === 0 && noTokenCount === 0) { dot.classList.add('green'); if (pill) pill.title = total + ' gateway(s) online — all healthy'; }
+    else if (staleCount <= 1 && noTokenCount <= 1) { dot.classList.add('orange'); if (pill) pill.title = (noTokenCount > 0 ? noTokenCount + ' gateway(s) missing API token. ' : '') + (staleCount > 0 ? staleCount + ' gateway offline. ' : '') + (total - staleCount) + ' online'; }
+    else { dot.classList.add('red'); if (pill) pill.title = (noTokenCount > 0 ? noTokenCount + ' gateway(s) missing API token. ' : '') + (staleCount + ' gateways offline — ') + (total - staleCount) + ' online'; }
+    // Detect offline/online transitions for notifications
+    var nextOffline = new Set();
+    data.forEach(function(g) {
+      var gateNow = now - Math.floor(g.last_seen);
+      if (gateNow > 120) nextOffline.add(g.ip);
+    });
+    // Newly offline
+    nextOffline.forEach(function(ip) {
+      if (!_knownOfflineIps.has(ip) && notifyOffline) {
+        playJitChime(false);
+        if (_notifPerm === 'granted') {
+          var n = new Notification('📡 Gateway Offline', { body: ip + ' has been unreachable for over 2 minutes', tag: 'eshu-offline', icon: '/static/eshu_logo.png' });
+          n.onclick = function() { window.focus(); n.close(); };
+        }
+      }
+    });
+    // Back online
+    _knownOfflineIps.forEach(function(ip) {
+      if (!nextOffline.has(ip)) {
+        /* gateway reconnected — could notify, but typically silent */
+      }
+    });
+    _knownOfflineIps = nextOffline;
+  } catch(e) {}
+}
+
+// ── Version ──────────────────────────────────────────────────────────────
+async function fetchVersion() {
+  try {
+    const res = await fetch('/api/version');
+    const data = await res.json();
+    var label = document.getElementById('dashboard-version-label');
+    label.textContent = data.version || '?';
+    if (data.dev_mode) {
+      label.innerHTML = (data.version || '?') + ' <span class="dev-badge">DEV</span>';
+    }
+    document.title = 'Eshu Gateway | ' + (data.version || 'v0.1.0') + ' Control Center';
+  } catch(e) {}
+}
+
+// ── Startup ──────────────────────────────────────────────────────────────
+requestNotifPermission();
+(async function() {
+  await checkAuth();
+  if (!document.getElementById('login-overlay').classList.contains('hidden')) { document.getElementById('login-password').focus(); }
+  else if (!document.getElementById('setup-overlay').classList.contains('hidden')) { document.getElementById('setup-password').focus(); }
+  else { initDashboard(); checkGatewayHealth(); }
+})();
+
+setInterval(function() {
+  if (!document.getElementById('login-overlay').classList.contains('hidden')) return;
+  if (!document.getElementById('setup-overlay').classList.contains('hidden')) return;
+  fetchRequests();
+}, 3000);
+setInterval(function() {
+  if (!document.getElementById('login-overlay').classList.contains('hidden')) return;
+  if (!document.getElementById('setup-overlay').classList.contains('hidden')) return;
+  if(document.getElementById('view-gateways').classList.contains('block')) fetchGateways();
+}, 5000);
+setInterval(decrementTimers, 1000);
+setInterval(updateFleetCountdowns, 1000);
+setInterval(function() {
+  if (!document.getElementById('login-overlay').classList.contains('hidden')) return;
+  if (!document.getElementById('setup-overlay').classList.contains('hidden')) return;
+  checkGatewayHealth();
+  fetchGateways();
+  fetchFreezeStatus();
+  fetchFleetCommands();
+}, 10000);
+setInterval(function() {
+  if (!document.getElementById('login-overlay').classList.contains('hidden')) return;
+  if (!document.getElementById('setup-overlay').classList.contains('hidden')) return;
+  if (document.getElementById('view-windows').classList.contains('block')) fetchWindowsTable();
+}, 30000);
