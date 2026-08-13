@@ -77,6 +77,47 @@ class TestPolicyTest:
         assert "in_exact_whitelist" in r.json()
 
 
+class TestBlocklistSubstringSemantics:
+
+    def _set_blocklist(self, auth_client, content):
+        auth_client.post("/api/policies", json={"type": "regex_blacklist", "content": content})
+        auth_client.post("/api/policies", json={"type": "regex_whitelist", "content": ""})
+        auth_client.post("/api/policies", json={"type": "exact_whitelist", "content": ""})
+
+    def test_blocklist_is_substring_match(self, auth_client):
+        # Mirrors the gateway: /etc/eshu-rblack.txt is a literal substring match.
+        self._set_blocklist(auth_client, "foo")
+        r = auth_client.get("/api/policies/test?command=xxfooYY")
+        assert r.status_code == 200
+        assert r.json()["action"] == "blocked"
+
+    def test_blocklist_anchor_is_stripped(self, auth_client):
+        # ^...$ anchors are stripped before the substring match, like the gateway.
+        self._set_blocklist(auth_client, "^foo$")
+        for cmd in ("foo", "xxfooYY"):
+            r = auth_client.get("/api/policies/test?command=" + cmd)
+            assert r.json()["action"] == "blocked"
+
+    def test_blocklist_metachars_are_literal(self, auth_client):
+        # "$(which " is invalid as regex but must still block as a substring,
+        # exactly as the gateway enforces it.
+        self._set_blocklist(auth_client, "$(which ")
+        r = auth_client.get("/api/policies/test", params={"command": "$(which python)"})
+        assert r.status_code == 200
+        assert r.json()["action"] == "blocked"
+
+    def test_blocklist_comment_lines_ignored(self, auth_client):
+        self._set_blocklist(auth_client, "# a comment\nfoo")
+        r = auth_client.get("/api/policies/test?command=bar foo baz")
+        assert r.json()["action"] == "blocked"
+
+    def test_check_membership_substring(self, auth_client):
+        self._set_blocklist(auth_client, "docker rm")
+        r = auth_client.get("/api/policies/check?command=docker rm -f")
+        assert r.status_code == 200
+        assert r.json()["in_regex_blacklist"] is True
+
+
 class TestTriggers:
 
     def test_update_version_set_and_get(self):

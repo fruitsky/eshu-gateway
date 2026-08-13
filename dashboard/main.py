@@ -74,7 +74,7 @@ from core.session import (
 )
 from core.rate_limit import _check_rate_limit
 from core.notify import send_notify
-from core.cmd_blocklist import hard_block_match
+from core.cmd_blocklist import hard_block_match, blocklist_substring_match
 from core.cmd_risk import get_cmd_risk, get_dry_run_suggestion
 from core.gateway_watch import (
     _check_gateway_transitions, _gateway_watch_loop,
@@ -579,14 +579,11 @@ def test_policy(command: str):
     }
     
     for pattern in regex_black_lines:
-        try:
-            if re.search(pattern, command):
-                result["matched"] = True
-                result["action"] = "blocked"
-                result["details"].append({"type": "regex_blacklist", "pattern": pattern, "match": True})
-                return result
-        except re.error:
-            result["details"].append({"type": "regex_blacklist", "pattern": pattern, "match": "invalid_regex"})
+        if blocklist_substring_match(pattern, command):
+            result["matched"] = True
+            result["action"] = "blocked"
+            result["details"].append({"type": "regex_blacklist", "pattern": pattern, "match": True})
+            return result
     
     if command in exact_lines:
         result["matched"] = True
@@ -633,12 +630,9 @@ def check_policy_membership(command: str, request: Request):
             pass
     
     for pattern in regex_black_lines:
-        try:
-            if re.search(pattern, command):
-                result["in_regex_blacklist"] = True
-                break
-        except re.error:
-            pass
+        if blocklist_substring_match(pattern, command):
+            result["in_regex_blacklist"] = True
+            break
     
     return result
 
@@ -753,17 +747,13 @@ def submit_fleet_command(payload: FleetCommandPayload, request: Request):
     if blocked:
         raise HTTPException(status_code=400, detail=f"Command hits the hardcoded catastrophic blocklist (pattern: {blocked}) — cannot be dispatched")
 
-    import re
     policies = get_policies()
     black_lines = [l for l in policies.get('regex_blacklist', '').split('\n') if l.strip()]
     blacklisted = None
     for pattern in black_lines:
-        try:
-            if re.search(pattern, command):
-                blacklisted = pattern
-                break
-        except re.error:
-            continue
+        if blocklist_substring_match(pattern, command):
+            blacklisted = pattern
+            break
     if blacklisted and not payload.override:
         raise HTTPException(status_code=400, detail=f"Command matches the policy blocklist (pattern: {blacklisted}). Set override=true to dispatch anyway.")
 

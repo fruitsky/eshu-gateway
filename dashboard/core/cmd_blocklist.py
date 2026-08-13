@@ -36,3 +36,19 @@ def hard_block_match(cmd: str):
         if pattern in cmd:
             return pattern
     return None
+
+
+def blocklist_substring_match(pattern: str, cmd: str) -> bool:
+    """Mirror the gateway's blocklist semantics: literal substring match with
+    optional leading '^' / trailing '$' anchors stripped, '#' comment lines
+    skipped. The gateway reads /etc/eshu-rblack.txt with
+    `[[ "$cmd" == *"$p"* ]]` after stripping anchors; the dashboard tester and
+    dispatch checks must agree with what the gateway actually enforces."""
+    p = (pattern or '').strip()
+    if not p or p.startswith('#'):
+        return False
+    if p.startswith('^'):
+        p = p[1:]
+    if p.endswith('$'):
+        p = p[:-1]
+    return p in cmd
