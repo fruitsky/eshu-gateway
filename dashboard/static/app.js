@@ -503,23 +503,23 @@ async function fetchWindowsTable() {
     try { var gr = await fetch('/api/gateways'); (await gr.json()).forEach(function(g) { gwMap[g.ip] = g; }); } catch(e) {}
     var tbody = document.getElementById('windows-table-body');
     if (!tbody) return;
-    if (!wins.length) { tbody.innerHTML = '<tr><td colspan="8" class="px-4 py-3" style="color:var(--text-muted);">No approved windows created yet.</td></tr>'; return; }
+    if (!wins.length) { tbody.innerHTML = '<tr><td colspan="8" class="px-4 py-3 text-muted">No approved windows created yet.</td></tr>'; return; }
     var tableNow = Math.floor(Date.now() / 1000);
     tbody.innerHTML = wins.map(function(w) {
-      var stat = w.enabled ? '<span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium cursor-pointer" style="background:rgba(74,222,128,0.1);color:var(--status-success);" onclick="toggleWindow(' + w.id + ',true)" title="Click to disable">🟢 On</span>' :
-        (w.status === 'pending_review' ? '<span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium" style="background:rgba(251,191,36,0.1);color:var(--status-warning);">⏳ Review</span>' :
-         (w.status === 'denied' ? '<span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium" style="background:rgba(230,57,70,0.08);color:#fb7185;">🚫 Denied</span>' :
-          '<span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium cursor-pointer" style="background:var(--bg-hover);color:var(--text-muted);" onclick="toggleWindow(' + w.id + ',false)" title="Click to enable">⏸️ Off</span>'));
+      var stat = w.enabled ? '<span class="badge badge-approved cursor-pointer" onclick="toggleWindow(' + w.id + ',true)" title="Click to disable">🟢 On</span>' :
+        (w.status === 'pending_review' ? '<span class="badge badge-pending">⏳ Review</span>' :
+         (w.status === 'denied' ? '<span class="badge badge-window-rejected">🚫 Denied</span>' :
+          '<span class="badge badge-expired cursor-pointer" onclick="toggleWindow(' + w.id + ',false)" title="Click to enable">⏸️ Off</span>'));
       var gw = gwMap[w.target_ip] || {};
       var originBadge = (w.origin === 'ai')
-        ? '<span style="font-size:10px;color:var(--status-info);opacity:0.8;" title="Inbound — AI requested">🤖 AI</span> '
-        : '<span style="font-size:10px;color:var(--text-muted);opacity:0.6;" title="Outbound — operator created">👤 Human</span> ';
-      var labelHtml = originBadge + (w.label ? '<span style="color:var(--text-main);font-weight:500;">' + escapeHtml(w.label) + '</span><br>' : '') +
-        '<code class="text-xs font-mono" style="color:var(--text-muted);" title="' + (w.token||'') + '">' + (w.token||'').substring(0, 8) + '…</code>' +
+        ? '<span class="origin-ai" title="Inbound — AI requested">🤖 AI</span> '
+        : '<span class="origin-human" title="Outbound — operator created">👤 Human</span> ';
+      var labelHtml = originBadge + (w.label ? '<span class="text-main font-medium">' + escapeHtml(w.label) + '</span><br>' : '') +
+        '<code class="text-xs font-mono text-muted" title="' + (w.token||'') + '">' + (w.token||'').substring(0, 8) + '…</code>' +
         ' <span onclick="copyToClipboard(\'' + (w.token||'') + '\')" class="cursor-pointer text-xs opacity-40 hover:opacity-100" title="Copy token">📋</span>';
       var execInfo = w.execution_count + (w.max_executions > 0 ? '/' + w.max_executions : '/∞');
       var lu = Number(w.last_used_at) || 0;
-      if (lu > 0) execInfo += '<br><span style="font-size:10px;opacity:0.7;">last ' + formatAgo(tableNow - lu) + '</span>';
+      if (lu > 0) execInfo += '<br><span class="text-xs text-muted">last ' + formatAgo(tableNow - lu) + '</span>';
       var dowNum = Number(w.days_of_week) || 0, etNum = Number(w.execution_time) || 0;
       var wsNum = Number(w.window_start) || 0;
       var expTs = w.expires_at ? Number(w.expires_at) : 0;
@@ -528,19 +528,19 @@ async function fetchWindowsTable() {
         ? formatNextRun(computeNextRun(dowNum, etNum))
         : (wsNum && wsNum * 1000 > Date.now() ? formatNextRun(new Date(wsNum * 1000)) : ''));
       return '<tr>' +
-        '<td style="font-size:11px;color:var(--text-muted);white-space:nowrap;" title="Numeric window ID — refer to it when coordinating with the agent">#' + w.id + '</td>' +
+        '<td class="text-xs text-muted whitespace-nowrap" title="Numeric window ID — refer to it when coordinating with the agent">#' + w.id + '</td>' +
         '<td>' + stat + '</td>' +
         '<td>' + labelHtml + '</td>' +
-        '<td style="font-size:12px;">' + gwPill(gw.hostname||w.target_ip) + ' ' + escapeHtml(gw.hostname||w.target_ip) + '</td>' +
-        '<td><code class="text-xs px-1.5 py-0.5 rounded" style="background:var(--bg-base);color:var(--text-main);display:block;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + escapeHtml(w.command) + '">' + escapeHtml(w.match_type === 'prefix' ? w.command + '*' : w.command) + '</code></td>' +
-        '<td style="font-size:11px;color:var(--text-muted);">' + formatWinSchedule(w) + (nextRunStr ? '<br><span style="opacity:0.75;">' + nextRunStr + '</span>' : '') + '</td>' +
-        '<td class="text-center text-xs" style="color:var(--text-muted);">' + execInfo + '</td>' +
+        '<td class="text-xs">' + gwPill(gw.hostname||w.target_ip) + ' ' + escapeHtml(gw.hostname||w.target_ip) + '</td>' +
+        '<td><code class="win-cmd-code" title="' + escapeHtml(w.command) + '">' + escapeHtml(w.match_type === 'prefix' ? w.command + '*' : w.command) + '</code></td>' +
+        '<td class="text-xs text-muted">' + formatWinSchedule(w) + (nextRunStr ? '<br>' + nextRunStr : '') + '</td>' +
+        '<td class="text-center text-xs text-muted">' + execInfo + '</td>' +
         '<td class="text-right"><div class="flex items-center justify-end gap-1">' +
           (w.status === 'pending_review'
-            ? '<button onclick="approveWindowReq(' + w.id + ')" class="btn btn-xs" style="background:var(--status-success);color:var(--bg-base);">✅ Approve</button>' +
+            ? '<button onclick="approveWindowReq(' + w.id + ')" class="btn btn-approve btn-xs">✅ Approve</button>' +
               '<button onclick="denyWindowReq(' + w.id + ')" class="btn btn-deny btn-xs">❌ Deny</button>'
-            : '<button onclick="openEditWindowModal(' + w.id + ')" class="btn btn-xs" style="background:var(--bg-hover);color:var(--text-muted);" title="Edit">✏️</button>' +
-              '<button onclick="showWindowHistory(' + w.id + ')" class="btn btn-xs" style="background:var(--bg-hover);color:var(--text-muted);" title="Usage history">📜</button>' +
+            : '<button onclick="openEditWindowModal(' + w.id + ')" class="btn btn-muted btn-xs" title="Edit">✏️</button>' +
+              '<button onclick="showWindowHistory(' + w.id + ')" class="btn btn-muted btn-xs" title="Usage history">📜</button>' +
               '<button onclick="deleteWindow(' + w.id + ')" class="btn btn-deny btn-xs" title="Delete">🗑</button>') +
         '</div></td>' +
         '</tr>';

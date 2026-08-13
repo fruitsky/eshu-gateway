@@ -252,14 +252,14 @@
     <!-- APPROVED WINDOWS VIEW -->
     <div id="view-windows" class="hidden w-full">
       <div class="widget">
-        <div class="widget-header"><span><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline-block;vertical-align:middle;margin-right:6px;flex-shrink:0;"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>Approved Windows</span>
-          <button onclick="openCreateWindowModal()" class="btn btn-sm" style="background:var(--brand-red);color:white;">+ Create Window</button>
+        <div class="widget-header"><span><svg class="icon-inline" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>Approved Windows</span>
+          <button onclick="openCreateWindowModal()" class="btn btn-sm">+ Create Window</button>
         </div>
-        <p class="text-xs mb-4" style="color:var(--text-muted);">Pre-approved time windows for cron/periodic commands. Give the token to your AI agent.</p>
+        <p class="text-xs mb-4 text-muted">Pre-approved time windows for cron/periodic commands. Give the token to your AI agent.</p>
         <div class="table-wrap">
           <table>
             <thead><tr><th>ID</th><th>Status</th><th>Label / Token</th><th>Gateway</th><th>Command</th><th>Schedule</th><th class="text-center">Execs</th><th class="text-right"></th></tr></thead>
-            <tbody id="windows-table-body"><tr><td colspan="8" class="px-4 py-3" style="color:var(--text-muted);">Loading...</td></tr></tbody>
+            <tbody id="windows-table-body"><tr><td colspan="8" class="px-4 py-3 text-muted">Loading...</td></tr></tbody>
           </table>
         </div>
       </div>
