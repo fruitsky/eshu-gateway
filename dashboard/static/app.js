@@ -1967,15 +1967,9 @@ function renderFreezeStatus(data) {
     } else { tsEl.classList.add('hidden'); }
   }
   if (pill) {
-    if (frozen) {
-      pill.style.background = 'var(--brand-red)'; pill.style.color = 'white';
-      if (pillDot) pillDot.style.background = 'white';
-      if (pillText) pillText.textContent = 'Frozen — tap to unfreeze';
-    } else {
-      pill.style.background = ''; pill.style.color = '';
-      if (pillDot) pillDot.style.background = 'var(--text-muted)';
-      if (pillText) pillText.textContent = 'Freeze';
-    }
+    pill.classList.toggle('freeze-on', !!frozen);
+    if (pillDot) pillDot.classList.toggle('on', !!frozen);
+    if (pillText) pillText.textContent = frozen ? 'Frozen — tap to unfreeze' : 'Freeze';
   }
 }
 

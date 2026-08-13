@@ -325,6 +325,11 @@
   .modal-close { color: var(--text-muted); cursor: pointer; background: none; border: none; font-size: 20px; line-height: 1; padding: 4px; }
   .font-normal { font-weight: 400; }
   .cmd-input { font-family: "Cascadia Code", "JetBrains Mono", Consolas, monospace; font-size: var(--text-base); }
+  .btn-on-banner { background: rgba(255,255,255,0.15); color: white; border: 1px solid rgba(255,255,255,0.2); }
+  .freeze-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--text-muted); margin-right: 4px; }
+  .freeze-dot.on { background: white; }
+  .sidebar-status.freeze-on { background: var(--brand-red); color: white; border-color: var(--brand-red); }
+  .sidebar-status.freeze-on .sidebar-status-text { color: white; }
   .toggle-btn { background: var(--bg-hover); color: var(--text-muted); border-radius: var(--radius-sm); padding: 3px 10px; font-size: 10px; font-weight: 600; cursor: pointer; font-family: inherit; }
   .toggle-btn.on { background: var(--status-success); color: var(--bg-base); }
   .fleet-input { background: var(--bg-base); color: var(--text-main); border: 1px solid var(--border-color); border-radius: var(--radius-sm); padding: 8px 12px; min-height: 0; width: 100%; font-size: var(--text-xs); }

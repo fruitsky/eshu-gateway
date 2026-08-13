@@ -23,15 +23,15 @@
 <div id="setup-overlay" class="hidden login-overlay">
   <div class="login-card">
     <img src="/static/eshu_banner.png" alt="Eshu">
-    <h1 style="color:var(--text-main);">Welcome to Eshu</h1>
+    <h1>Welcome to Eshu</h1>
     <p>First-run setup — create your dashboard password</p>
     <div class="flex flex-col gap-3">
       <input type="password" id="setup-password" placeholder="Password (min 4 chars)" class="text-center">
       <input type="password" id="setup-password-confirm" placeholder="Confirm password" class="text-center" onkeydown="if(event.key==='Enter')doSetup()">
       <button onclick="doSetup()" id="setup-btn" class="btn w-full py-3">Set Password & Continue</button>
-      <p id="setup-error" class="hidden text-xs" style="color:var(--brand-red);"></p>
+      <p id="setup-error" class="hidden text-xs text-danger"></p>
     </div>
-    <p class="text-xs mt-4" style="color:var(--text-muted);">Or run <code style="color:var(--brand-red);">python set_password.py</code> on the server.</p>
+    <p class="text-xs mt-4 text-muted">Or run <code class="text-danger">python set_password.py</code> on the server.</p>
   </div>
 </div>
 
@@ -39,12 +39,12 @@
 <div id="login-overlay" class="hidden login-overlay">
   <div class="login-card">
     <img src="/static/eshu_banner.png" alt="Eshu">
-    <h1 style="color:var(--text-main);">Eshu Gateway</h1>
+    <h1>Eshu Gateway</h1>
     <p>Authentication Required</p>
     <div class="flex flex-col gap-3">
       <input type="password" id="login-password" placeholder="Dashboard password" class="text-center" onkeydown="if(event.key==='Enter')doLogin()">
       <button onclick="doLogin()" id="login-btn" class="btn w-full py-3">Log In</button>
-      <p id="login-error" class="hidden text-xs" style="color:var(--brand-red);">Invalid password. Please try again.</p>
+      <p id="login-error" class="hidden text-xs text-danger">Invalid password. Please try again.</p>
     </div>
   </div>
 </div>
@@ -91,7 +91,7 @@
   <div class="nav-spacer"></div>
   <div class="sidebar-bottom">
     <div class="sidebar-status user-pill" id="freeze-pill" title="Emergency Freeze — reject all commands fleet-wide" onclick="toggleFreezeFromSidebar()" style="cursor:pointer;">
-      <span id="freeze-pill-dot" class="freeze-dot" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--text-muted);margin-right:4px;"></span>
+      <span id="freeze-pill-dot" class="freeze-dot"></span>
       <span class="sidebar-status-text" id="freeze-pill-text">Freeze</span>
     </div>
     <div class="sidebar-status user-pill" id="health-pill" title="Gateway health">
@@ -124,16 +124,16 @@
 
   <!-- Override Mode Banner -->
   <div id="override-banner" class="override-banner hidden">
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
-    <span id="override-banner-text" style="flex:1;">Override Mode active</span>
-    <button onclick="switchView('gateways')" class="btn btn-xs" style="background:rgba(255,255,255,0.15);color:white;border:1px solid rgba(255,255,255,0.2);">View Gateways</button>
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="flex-shrink-0"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+    <span id="override-banner-text" class="flex-1">Override Mode active</span>
+    <button onclick="switchView('gateways')" class="btn btn-xs btn-on-banner">View Gateways</button>
   </div>
 
   <!-- Emergency Freeze Banner -->
   <div id="freeze-banner" class="freeze-banner hidden">
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
-    <span id="freeze-banner-text" style="flex:1;">Fleet FROZEN — all commands rejected</span>
-    <button onclick="triggerUnfreeze()" class="btn btn-xs" style="background:rgba(255,255,255,0.15);color:white;border:1px solid rgba(255,255,255,0.2);">Unfreeze</button>
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="flex-shrink-0"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+    <span id="freeze-banner-text" class="flex-1">Fleet FROZEN — all commands rejected</span>
+    <button onclick="triggerUnfreeze()" class="btn btn-xs btn-on-banner">Unfreeze</button>
   </div>
 
   <div class="main-body">
