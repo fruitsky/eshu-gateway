@@ -201,8 +201,8 @@ async function refreshPasswordUI() {
   try {
     const res = await fetch('/api/auth/status'); const data = await res.json();
     statusEl.innerHTML = data.password_set
-      ? '<span style="color:var(--status-success);">🔒 Password protection <strong>enabled</strong>.</span>'
-      : '<span style="color:var(--status-warning);">⚠️ No password set yet — complete setup to protect the dashboard.</span>';
+      ? '<span class="text-success">🔒 Password protection <strong>enabled</strong>.</span>'
+      : '<span class="text-warning">⚠️ No password set yet — complete setup to protect the dashboard.</span>';
   } catch(e) {}
 }
 async function setDashboardPassword() {
@@ -454,7 +454,7 @@ function formatWinSchedule(w) {
     var expStr = ed.toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false });
     var past = Math.floor(Date.now() / 1000) > exp;
     var color = past ? 'var(--brand-red)' : 'var(--status-warning)';
-    sched += '<br><span style="font-size:10px;opacity:0.85;color:' + color + ';">Expires: ' + expStr + (past ? ' (expired)' : '') + '</span>';
+    sched += '<br><span class="win-expiry" style="color:' + color + ';">Expires: ' + expStr + (past ? ' (expired)' : '') + '</span>';
   }
   return sched;
 }
@@ -628,7 +628,7 @@ async function openCreateWindowModal() {
     if (!_winGateways.length) { menu.innerHTML = '<div class="p-3 text-xs text-muted">No gateways registered.</div>'; }
     else {
       menu.innerHTML = _winGateways.map(function(g) {
-        return '<div class="gw-dropdown-item" onclick="selectGateway(\'' + g.ip + '\')">' + gwPill(g.hostname||g.ip) + ' ' + escapeHtml(g.hostname||g.ip) + ' <span style="color:var(--text-muted);font-size:11px;margin-left:auto;">' + g.ip + '</span></div>';
+        return '<div class="gw-dropdown-item" onclick="selectGateway(\'' + g.ip + '\')">' + gwPill(g.hostname||g.ip) + ' ' + escapeHtml(g.hostname||g.ip) + ' <span class="gw-dropdown-ip">' + g.ip + '</span></div>';
       }).join('');
     }
   } catch(e) {}
@@ -646,7 +646,7 @@ async function openEditWindowModal(id) {
     var gr = await fetch('/api/gateways'); _winGateways = await gr.json();
     var menu = document.getElementById('gw-dropdown-menu');
     menu.innerHTML = _winGateways.map(function(g) {
-      return '<div class="gw-dropdown-item" onclick="selectGateway(\'' + g.ip + '\')">' + gwPill(g.hostname||g.ip) + ' ' + escapeHtml(g.hostname||g.ip) + ' <span style="color:var(--text-muted);font-size:11px;margin-left:auto;">' + g.ip + '</span></div>';
+      return '<div class="gw-dropdown-item" onclick="selectGateway(\'' + g.ip + '\')">' + gwPill(g.hostname||g.ip) + ' ' + escapeHtml(g.hostname||g.ip) + ' <span class="gw-dropdown-ip">' + g.ip + '</span></div>';
     }).join('');
 
     var r = await fetch('/api/approved-windows/' + id);
@@ -1219,7 +1219,7 @@ function renderJitTickets() {
   const widget = document.getElementById('jit-pending-widget');
   if (total > 0) { widget.classList.add('glow'); } else { widget.classList.remove('glow'); }
   const container = document.getElementById('jit-tickets');
-  if (total === 0) { container.innerHTML = '<p style="color:var(--text-muted);">No pending requests — all clear.</p>'; return; }
+  if (total === 0) { container.innerHTML = '<p class="text-muted">No pending requests — all clear.</p>'; return; }
 
   let html = '';
   // Window requests (AI-initiated, operator must approve)
@@ -2519,9 +2519,9 @@ async function fetchDevStatus() {
     const promoteBtn = document.getElementById('promote-golden-btn');
     const rollbackBtn = document.getElementById('rollback-golden-btn');
 
-    if (goldenLabel) goldenLabel.innerHTML = (data.dashboard_version || 'unset') + (data.golden_hash ? ' <span style="font-family:monospace;font-size:10px;opacity:0.7;">(' + data.golden_hash + ')</span>' : '');
-    if (edgeLabel) edgeLabel.innerHTML = (data.edge_exists ? (data.dashboard_version || 'staged') : 'not staged') + (data.edge_hash ? ' <span style="font-family:monospace;font-size:10px;opacity:0.7;">(' + data.edge_hash + ')</span>' : '');
-    if (fleetLabel) fleetLabel.innerHTML = (data.dashboard_version || 'unset') + (data.deployed_hash ? ' <span style="font-family:monospace;font-size:10px;opacity:0.7;">(' + data.deployed_hash + ')</span>' : '');
+    if (goldenLabel) goldenLabel.innerHTML = (data.dashboard_version || 'unset') + (data.golden_hash ? ' <span class="hash-tag">(' + data.golden_hash + ')</span>' : '');
+    if (edgeLabel) edgeLabel.innerHTML = (data.edge_exists ? (data.dashboard_version || 'staged') : 'not staged') + (data.edge_hash ? ' <span class="hash-tag">(' + data.edge_hash + ')</span>' : '');
+    if (fleetLabel) fleetLabel.innerHTML = (data.dashboard_version || 'unset') + (data.deployed_hash ? ' <span class="hash-tag">(' + data.deployed_hash + ')</span>' : '');
 
     // Button states
     if (seedBtn) seedBtn.disabled = false;
@@ -2542,10 +2542,10 @@ async function fetchDevStatus() {
         banner.classList.add(data.pipeline_state);
         var nDev = data.dev_gateway_count, nAll = data.gateway_count || 1;
         var msgs = {
-          needs_seed: '<strong>New Build available</strong> &mdash; Edge is stale. <button onclick="seedEdge()" style="text-decoration:underline;cursor:pointer;background:none;border:none;color:inherit;font-size:inherit;font-weight:600;padding:0;">Seed Edge &rarr;</button>',
-          ready_for_dev: '<strong>Edge ready</strong> &mdash; <button onclick="pushToDev()" style="text-decoration:underline;cursor:pointer;background:none;border:none;color:inherit;font-size:inherit;font-weight:600;padding:0;">Push to Dev Gateways &rarr;</button> (' + nDev + ' dev device' + (nDev !== 1 ? 's' : '') + ')',
+          needs_seed: '<strong>New Build available</strong> &mdash; Edge is stale. <button onclick="seedEdge()" class="link-btn">Seed Edge &rarr;</button>',
+          ready_for_dev: '<strong>Edge ready</strong> &mdash; <button onclick="pushToDev()" class="link-btn">Push to Dev Gateways &rarr;</button> (' + nDev + ' dev device' + (nDev !== 1 ? 's' : '') + ')',
           dev_in_progress: '<strong>Dev push active</strong> &mdash; ' + nDev + ' dev gate' + (nDev !== 1 ? 'ways' : 'way') + ' updating. Verify, then Deploy to Fleet.',
-          ready_for_promote: '<strong>Dev verified</strong> &mdash; <button onclick="promoteToGolden()" style="text-decoration:underline;cursor:pointer;background:none;border:none;color:inherit;font-size:inherit;font-weight:600;padding:0;">Deploy to Fleet &rarr;</button> (' + nAll + ' gateway' + (nAll !== 1 ? 's' : '') + ')'
+          ready_for_promote: '<strong>Dev verified</strong> &mdash; <button onclick="promoteToGolden()" class="link-btn">Deploy to Fleet &rarr;</button> (' + nAll + ' gateway' + (nAll !== 1 ? 's' : '') + ')'
         };
         banner.innerHTML = msgs[data.pipeline_state] || '';
       }
@@ -2969,7 +2969,7 @@ function renderStatistics() {
       var pct = maxDenied > 0 ? (c.count / maxDenied) * 100 : 0;
       return '<div class="flex items-center gap-2 mb-1 text-xs">' +
         '<span class="w-4 text-right text-muted flex-shrink-0">' + (i + 1) + '</span>' +
-        '<div class="flex-1 flex items-center gap-2" style="min-width:0;">' +
+        '<div class="flex-1 flex items-center gap-2 min-w-0">' +
           '<span class="flex-1 font-mono text-danger truncate">' + escapeHtml(c.command) + '</span>' +
           '<div class="bar-track sm"><div class="fill danger" style="width:' + pct + '%;"></div></div>' +
         '</div>' +

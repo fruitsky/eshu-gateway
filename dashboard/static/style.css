@@ -326,6 +326,10 @@
   .font-normal { font-weight: 400; }
   .cmd-input { font-family: "Cascadia Code", "JetBrains Mono", Consolas, monospace; font-size: var(--text-base); }
   .btn-on-banner { background: rgba(255,255,255,0.15); color: white; border: 1px solid rgba(255,255,255,0.2); }
+  .link-btn { text-decoration: underline; cursor: pointer; background: none; border: none; color: inherit; font-size: inherit; font-weight: 600; padding: 0; }
+  .hash-tag { font-family: monospace; font-size: 10px; opacity: 0.7; }
+  .gw-dropdown-ip { color: var(--text-muted); font-size: 11px; margin-left: auto; }
+  .win-expiry { font-size: 11px; opacity: 0.85; }
   .freeze-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--text-muted); margin-right: 4px; }
   .freeze-dot.on { background: white; }
   .sidebar-status.freeze-on { background: var(--brand-red); color: white; border-color: var(--brand-red); }
@@ -837,6 +841,7 @@
   .py-3 { padding-top: 12px; padding-bottom: 12px; }
   .py-12 { padding-top: 48px; padding-bottom: 48px; }
   .pt-1 { padding-top: 4px; }
+  .pt-2 { padding-top: 8px; }
   .pb-2 { padding-bottom: 8px; }
   .pr-1 { padding-right: 4px; }
   .pr-2 { padding-right: 8px; }
