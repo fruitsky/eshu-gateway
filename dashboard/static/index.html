@@ -11,29 +11,6 @@
 <link rel="apple-touch-icon" href="/static/eshu_logo.png">
 <title>Eshu Gateway Control Center</title>
 <link rel="icon" href="/static/eshu_logo.png" type="image/png">
-<script src="https://cdn.tailwindcss.com"></script>
-<script>
-  tailwind.config = {
-    theme: {
-      extend: {
-        colors: {
-          'eshu-bg': '#101012',
-          'eshu-surface': '#1a1a1d',
-          'eshu-hover': '#252529',
-          'eshu-border': '#333336',
-          'eshu-text': '#f1f1f1',
-          'eshu-muted': '#9ca3af',
-          'eshu-red': '#e63946',
-          'eshu-red-hover': '#b92b38',
-          'eshu-red-glow': 'rgba(230, 57, 70, 0.25)',
-          'eshu-green': '#4ade80',
-          'eshu-yellow': '#fbbf24',
-          'eshu-blue': '#60a5fa',
-        }
-      }
-    }
-  }
-</script>
 <link rel="stylesheet" href="/static/style.css">
 
 </head>
@@ -51,7 +28,7 @@
     <div class="flex flex-col gap-3">
       <input type="password" id="setup-password" placeholder="Password (min 4 chars)" class="text-center">
       <input type="password" id="setup-password-confirm" placeholder="Confirm password" class="text-center" onkeydown="if(event.key==='Enter')doSetup()">
-      <button onclick="doSetup()" id="setup-btn" class="btn btn-approve w-full py-3">Set Password & Continue</button>
+      <button onclick="doSetup()" id="setup-btn" class="btn w-full py-3">Set Password & Continue</button>
       <p id="setup-error" class="hidden text-xs" style="color:var(--brand-red);"></p>
     </div>
     <p class="text-xs mt-4" style="color:var(--text-muted);">Or run <code style="color:var(--brand-red);">python set_password.py</code> on the server.</p>
@@ -66,7 +43,7 @@
     <p>Authentication Required</p>
     <div class="flex flex-col gap-3">
       <input type="password" id="login-password" placeholder="Dashboard password" class="text-center" onkeydown="if(event.key==='Enter')doLogin()">
-      <button onclick="doLogin()" id="login-btn" class="btn btn-approve w-full py-3">Log In</button>
+      <button onclick="doLogin()" id="login-btn" class="btn w-full py-3">Log In</button>
       <p id="login-error" class="hidden text-xs" style="color:var(--brand-red);">Invalid password. Please try again.</p>
     </div>
   </div>
