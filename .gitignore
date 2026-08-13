@@ -22,6 +22,7 @@ dashboard/inspiration*
 
 # Backup / copy directories
 eshu_gateway - Copy/
+dashboard/static/eshu-gateway-install-backup.sh
 
 # IDE
 .vscode/

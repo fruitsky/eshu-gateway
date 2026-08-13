@@ -13,6 +13,7 @@ test → verify → merge to `master` → LXC pull flow.
 | ~~P1b~~ | ~~Fleet Run (Ansible-lite)~~ | **DONE** — shipped on `feat/fleet-run` | Medium |
 | ~~P2~~ | ~~"What could go wrong" Risk Hint~~ | **DONE** — shipped on `feat/risk-hint` (+ dry-run suggestions in Fleet Run) | Low |
 | **P3** | Approver Keyboard Shortcuts | QoL win for a single operator triaging bursts | Low |
+| **P4** | Editable Core Blocklist (safety net) | Human-only relaxation of the shipped Stage-1 patterns; seeded in the blocklist by default | Medium |
 
 ### Dropped / deferred
 
@@ -249,6 +250,53 @@ row** without needing to click buttons.
 |----------|----------------|
 | Key set | `A D J N P Esc`. |
 | Active scope | Global, but input-guarded. |
+
+---
+
+## P4 — Editable Core Blocklist (safety net)
+
+### What
+
+Let a human relax the gateway's hardcoded Stage-1 "core" blocklist (`rm -rf`,
+`mkfs.*`, `dd`, `iptables -F`, power control, `which`-evasion) from the
+dashboard — while keeping the safety net intact and self-protection non-negotiable.
+
+### Agreed design (from the UI-refresh design session)
+
+- **Model:** the core patterns become ordinary blocklist entries **seeded by
+  default on new installs**, shown with a 🛡️ shield badge. Editing a core entry
+  is identical to any blocklist entry; it's only special in the UI (shield +
+  warn-on-remove + audit + policy-change history). Core and user entries share
+  **offline stickiness** — `/etc/eshu-rblack.txt` is already a local file,
+  checked before allowlists, so an unreachable dashboard keeps the last-written
+  list.
+- **Carve-out (non-negotiable):** the **self-protection** patterns stay
+  hardcoded forever and are not withdrawable by the user —
+  `/usr/local/bin/eshu-*`, `/etc/eshu-*`, `/var/run/eshu.*`, `eshu.db*`,
+  `eshu.db-{journal,wal}`.
+- **Gateway script:** remove only the six command-safety patterns from the
+  hardcoded `case`; keep self-protection. Ships via the fleet deploy pipeline.
+- **Propagation:** core metadata lives in a static "core registry"; the
+  blocklist stays a flat string (no schema change). Removals/restores flow via
+  the normal 30s policy poll.
+- **Migration order (critical):** seed core patterns into existing blocklists
+  first → let the 30s sync land → then ship the new gateway script. Existing
+  gateways keep the hardcoded `case` as a safe overlap until the new installer
+  arrives, so no gateway ever runs with an empty net.
+- **UI:** shield badge on core rows; `×` on a core row triggers a loud danger
+  confirm + audit + policy-change history; removed cores show struck with a
+  "Restore" action, plus a "Restore core defaults" button.
+- **Access:** human-only (dashboard session) — never the gateway / AI agent.
+
+### Open decisions
+
+| Question | Recommendation |
+|----------|----------------|
+| Edit scope | Relax-only (disable shipped entries + restore defaults) vs also allow promoting custom patterns to "core" (Stage-1). |
+| Offline semantics | Keep hardcoded defaults as the offline fallback; dashboard applies `defaults + additions − removals`. |
+
+> ⚠️ This is a **backend + gateway-script + fleet-deploy** change (not a UI
+> change) — separate design session before any code, per the agreed plan.
 
 ---
 
