@@ -76,7 +76,7 @@ one **Gateways** tab. Fleet Run stays its own top-level tab.
 | **Gateways** | Full-width **Gateway Enrollment** (SSH keys, one-liner) + a **unified gateway table** (Status · Gateway · IP · Enrolled · Policy · Health · Override · Uninstall). All gateway data points in one place. |
 | Windows | Approved Windows (unchanged, stays its own top-level tab). |
 | Statistics | Stats & **Policy Suggestions** (per-gateway, NEW badges, Allowlist/Dismiss, Mark All Seen) — the read-only Policy Gaps widget was removed as redundant. |
-| **Controls** | **🛡️ Global Central Policy** (Tester + exact/regex allowlists + blocklist, Save & Push) · **🚨 Emergency Freeze** · **🚀 Development & Deployment** (Seed Edge / Push to Dev / Deploy to Fleet / Rollback, dev gateways, feature flags). Two-column layout — Policy left, Freeze + Deployment in the right rail. |
+| **Controls** | **🛡️ Global Central Policy** (Tester + exact/regex allowlists + blocklist, Save & Push) — full-width. **Emergency Freeze** lives in the sidebar (a persistent pill above Gateway Health); Development & Deployment moved to Settings behind the dev-tools toggle. |
 | Fleet Run | Queue + Dispatch + per-gateway results (unchanged, own tab). |
 | **Settings** | Notifications · External Notifications (webhook) · Dashboard Password. |
 | **Logs** | Audit Log + search. |
@@ -111,8 +111,9 @@ consolidation pass.
   atomically (tmp + mv, like the policy files).
 - Gateway (`eshu-gateway.sh`): new stage 0 before the blocklist — if
   `/etc/eshu-freeze` contains `1`, reject with a clear "fleet is frozen" message.
-- UI: red **Freeze / Unfreeze** control in the Controls tab + a persistent banner
-  (modeled on the existing override banner); poll `/api/freeze/status`.
+- UI: a **sidebar Freeze pill** (above Gateway Health) that turns red/"Frozen" when
+  active, plus a persistent banner (modeled on the override banner); poll
+  `/api/freeze/status`.
 
 ### Open decisions
 

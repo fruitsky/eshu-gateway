@@ -1953,6 +1953,9 @@ function renderFreezeStatus(data) {
   var freezeBtn = document.getElementById('freeze-btn');
   var unfreezeBtn = document.getElementById('unfreeze-btn');
   var tsEl = document.getElementById('freeze-timestamp');
+  var pill = document.getElementById('freeze-pill');
+  var pillDot = document.getElementById('freeze-pill-dot');
+  var pillText = document.getElementById('freeze-pill-text');
   if (banner) banner.classList.toggle('hidden', !frozen);
   if (label) {
     if (frozen) { label.textContent = 'FROZEN — all commands rejected'; label.style.background = 'var(--brand-red)'; label.style.color = 'white'; }
@@ -1966,6 +1969,22 @@ function renderFreezeStatus(data) {
       tsEl.classList.remove('hidden');
     } else { tsEl.classList.add('hidden'); }
   }
+  if (pill) {
+    if (frozen) {
+      pill.style.background = 'var(--brand-red)'; pill.style.color = 'white';
+      if (pillDot) pillDot.style.background = 'white';
+      if (pillText) pillText.textContent = 'Frozen — tap to unfreeze';
+    } else {
+      pill.style.background = ''; pill.style.color = '';
+      if (pillDot) pillDot.style.background = 'var(--text-muted)';
+      if (pillText) pillText.textContent = 'Freeze';
+    }
+  }
+}
+
+async function toggleFreezeFromSidebar() {
+  var frozen = !!(await fetch('/api/freeze/status').then(function(r){return r.json();}).catch(function(){return {};})).frozen;
+  if (frozen) { await triggerUnfreeze(); } else { await triggerFreeze(); }
 }
 
 async function triggerFreeze() {

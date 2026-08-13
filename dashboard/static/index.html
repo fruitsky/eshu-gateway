@@ -113,6 +113,10 @@
   </div>
   <div class="nav-spacer"></div>
   <div class="sidebar-bottom">
+    <div class="sidebar-status user-pill" id="freeze-pill" title="Emergency Freeze — reject all commands fleet-wide" onclick="toggleFreezeFromSidebar()" style="cursor:pointer;">
+      <span id="freeze-pill-dot" class="freeze-dot" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--text-muted);margin-right:4px;"></span>
+      <span class="sidebar-status-text" id="freeze-pill-text">Freeze</span>
+    </div>
     <div class="sidebar-status user-pill" id="health-pill" title="Gateway health">
       <div class="health-dot green" id="health-dot"></div>
       <span class="sidebar-status-text">Gateway Health</span>
@@ -152,7 +156,7 @@
   <div id="freeze-banner" class="freeze-banner hidden">
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
     <span id="freeze-banner-text" style="flex:1;">Fleet FROZEN — all commands rejected</span>
-    <button onclick="switchView('controls')" class="btn btn-xs" style="background:rgba(255,255,255,0.15);color:white;border:1px solid rgba(255,255,255,0.2);">Unfreeze</button>
+    <button onclick="triggerUnfreeze()" class="btn btn-xs" style="background:rgba(255,255,255,0.15);color:white;border:1px solid rgba(255,255,255,0.2);">Unfreeze</button>
   </div>
 
   <div class="main-body">
@@ -337,69 +341,47 @@
       </div>
     </div>
 
-    <!-- CONTROLS VIEW — Policy · Freeze · Deployment -->
+    <!-- CONTROLS VIEW — Policy -->
     <div id="view-controls" class="hidden w-full">
-      <div class="grid grid-cols-1 lg:grid-cols-3 gap-5">
-        <div class="col-span-2 flex flex-col gap-5">
-          <!-- Global Central Policy -->
-          <div class="widget">
-            <div class="widget-header">
-              🛡️ Global Central Policy
-              <span style="color:var(--text-muted);font-size:12px;">Policy version: <span id="policy-version-label" class="font-mono">-</span></span>
-              <div class="flex items-center gap-2">
-                <button onclick="openModal('policy-changes-modal')" class="btn btn-muted btn-xs">View Policy Changes</button>
-                <button onclick="savePolicies()" id="save-policies-btn" class="btn btn-sm" style="background:var(--brand-red);color:white;">Save & Push Policies</button>
-              </div>
-            </div>
-            <p class="text-xs mb-4" style="color:var(--text-muted);">Gateways sync every 3s.</p>
-            <!-- Tester -->
-            <div class="p-3 rounded-lg mb-4" style="background:var(--bg-base);border:1px solid var(--border-color);">
-              <div class="flex items-center gap-2 mb-2">
-                <span class="text-sm font-semibold">🧪 Tester</span>
-                <input type="text" id="tester-input" placeholder="Paste command to test..." class="flex-1" onkeydown="if(event.key==='Enter') testPolicy()">
-                <button onclick="testPolicy()" class="btn btn-sm" style="background:var(--brand-red);color:white;">Test</button>
-                <button onclick="generateRegex()" class="btn btn-muted btn-sm">Regex</button>
-              </div>
-              <div id="tester-result" class="hidden text-xs p-3 rounded-lg border"></div>
-            </div>
-            <div class="flex flex-col gap-4">
-              <div><label class="text-xs mb-1 block" style="color:var(--text-muted);">Exact Allowlist</label><textarea id="policy-exact" class="min-h-[450px]" spellcheck="false" style="padding:16px 18px;"></textarea></div>
-              <div><label class="text-xs mb-1 block" style="color:var(--text-muted);">Regex Allowlist</label><textarea id="policy-regex-white" class="min-h-[450px]" spellcheck="false" style="padding:16px 18px;"></textarea></div>
-              <details class="mb-3" style="font-size:13px;">
-                <summary class="cursor-pointer" style="color:var(--status-warning);font-weight:600;">🛡️ Core Gateway Blocklist</summary>
-                <div class="mt-2 p-3 rounded-lg" style="background:var(--bg-base);border:1px solid var(--border-color);line-height:1.8;">
-                  <p class="mb-2" style="color:var(--text-muted);">These are permanently enforced at the gateway level (Stage&nbsp;1) and <strong>cannot be overridden</strong> by any allowlist policy.</p>
-                  <ul class="space-y-1" style="color:var(--text-muted);padding-left:0;list-style:none;">
-                    <li>💀 <strong>Recursive force delete:</strong> rm -rf, rm -fr, rm -r -f, /bin/rm -rf</li>
-                    <li>💾 <strong>Filesystem format:</strong> mkfs.*</li>
-                    <li>💿 <strong>Raw disk access:</strong> dd if=, dd of=, /bin/dd</li>
-                    <li>🔥 <strong>Firewall flush:</strong> iptables -F/-X/--flush, ip6tables -F/-X, nft flush</li>
-                    <li>⏻ <strong>Power control:</strong> reboot, shutdown, poweroff, halt, init 0/6, telinit 0/6, systemctl isolate/poweroff/halt, busybox reboot/poweroff/halt</li>
-                    <li>🕵️ <strong>Evasion:</strong> $(which *), `which *`</li>
-                  </ul>
-                </div>
-              </details>
-              <div><label class="text-xs mb-1 block" style="color:var(--text-muted);">Blocklist (Hard Block)</label><textarea id="policy-regex-black" class="min-h-[450px]" spellcheck="false" style="padding:16px 18px;"></textarea></div>
-            </div>
+      <!-- Global Central Policy -->
+      <div class="widget">
+        <div class="widget-header">
+          🛡️ Global Central Policy
+          <span style="color:var(--text-muted);font-size:12px;">Policy version: <span id="policy-version-label" class="font-mono">-</span></span>
+          <div class="flex items-center gap-2">
+            <button onclick="openModal('policy-changes-modal')" class="btn btn-muted btn-xs">View Policy Changes</button>
+            <button onclick="savePolicies()" id="save-policies-btn" class="btn btn-sm" style="background:var(--brand-red);color:white;">Save & Push Policies</button>
           </div>
         </div>
-        <div class="col-span-1 flex flex-col gap-5">
-          <!-- Emergency Freeze -->
-          <div class="widget">
-            <div class="widget-header">🚨 Emergency Freeze</div>
-            <div class="p-4 rounded-lg" style="background:var(--bg-base);border:1px solid var(--border-color);">
-              <p class="text-xs mb-4" style="color:var(--text-muted);">One button to make <strong>every gateway reject all commands</strong> — including whitelisted and approved-window commands — until unfrozen. Takes effect within 30s (next poll cycle).</p>
-              <div class="flex items-center gap-3 mb-4">
-                <span class="text-xs" style="color:var(--text-muted);">Fleet status:</span>
-                <span id="freeze-status-label" class="px-2.5 py-0.5 rounded-full text-xs font-semibold" style="background:var(--status-success);color:var(--bg-base);">Active — running normally</span>
-              </div>
-              <div class="flex gap-2">
-                <button onclick="triggerFreeze()" id="freeze-btn" class="btn btn-sm" style="background:var(--brand-red);color:white;">🧊 Freeze Fleet</button>
-                <button onclick="triggerUnfreeze()" id="unfreeze-btn" class="btn btn-sm hidden" style="background:var(--status-success);color:var(--bg-base);">Unfreeze Fleet</button>
-              </div>
-              <p id="freeze-timestamp" class="hidden mt-3 text-xs font-mono" style="color:var(--text-muted);"></p>
-            </div>
+        <p class="text-xs mb-4" style="color:var(--text-muted);">Gateways sync every 3s.</p>
+        <!-- Tester -->
+        <div class="p-3 rounded-lg mb-4" style="background:var(--bg-base);border:1px solid var(--border-color);">
+          <div class="flex items-center gap-2 mb-2">
+            <span class="text-sm font-semibold">🧪 Tester</span>
+            <input type="text" id="tester-input" placeholder="Paste command to test..." class="flex-1" onkeydown="if(event.key==='Enter') testPolicy()">
+            <button onclick="testPolicy()" class="btn btn-sm" style="background:var(--brand-red);color:white;">Test</button>
+            <button onclick="generateRegex()" class="btn btn-muted btn-sm">Regex</button>
           </div>
+          <div id="tester-result" class="hidden text-xs p-3 rounded-lg border"></div>
+        </div>
+        <div class="flex flex-col gap-4">
+          <div><label class="text-xs mb-1 block" style="color:var(--text-muted);">Exact Allowlist</label><textarea id="policy-exact" class="min-h-[450px]" spellcheck="false" style="padding:16px 18px;"></textarea></div>
+          <div><label class="text-xs mb-1 block" style="color:var(--text-muted);">Regex Allowlist</label><textarea id="policy-regex-white" class="min-h-[450px]" spellcheck="false" style="padding:16px 18px;"></textarea></div>
+          <details class="mb-3" style="font-size:13px;">
+            <summary class="cursor-pointer" style="color:var(--status-warning);font-weight:600;">🛡️ Core Gateway Blocklist</summary>
+            <div class="mt-2 p-3 rounded-lg" style="background:var(--bg-base);border:1px solid var(--border-color);line-height:1.8;">
+              <p class="mb-2" style="color:var(--text-muted);">These are permanently enforced at the gateway level (Stage&nbsp;1) and <strong>cannot be overridden</strong> by any allowlist policy.</p>
+              <ul class="space-y-1" style="color:var(--text-muted);padding-left:0;list-style:none;">
+                <li>💀 <strong>Recursive force delete:</strong> rm -rf, rm -fr, rm -r -f, /bin/rm -rf</li>
+                <li>💾 <strong>Filesystem format:</strong> mkfs.*</li>
+                <li>💿 <strong>Raw disk access:</strong> dd if=, dd of=, /bin/dd</li>
+                <li>🔥 <strong>Firewall flush:</strong> iptables -F/-X/--flush, ip6tables -F/-X, nft flush</li>
+                <li>⏻ <strong>Power control:</strong> reboot, shutdown, poweroff, halt, init 0/6, telinit 0/6, systemctl isolate/poweroff/halt, busybox reboot/poweroff/halt</li>
+                <li>🕵️ <strong>Evasion:</strong> $(which *), `which *`</li>
+              </ul>
+            </div>
+          </details>
+          <div><label class="text-xs mb-1 block" style="color:var(--text-muted);">Blocklist (Hard Block)</label><textarea id="policy-regex-black" class="min-h-[450px]" spellcheck="false" style="padding:16px 18px;"></textarea></div>
         </div>
       </div>
     </div>
