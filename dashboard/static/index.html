@@ -422,21 +422,21 @@
           <div class="widget">
             <div class="widget-header">Notifications</div>
             <div class="space-y-3">
-              <div class="flex items-center justify-between p-3 rounded-lg" style="background:var(--bg-base);">
-                <div><span class="text-sm">Notify on Blocked Commands</span><p class="text-xs" style="color:var(--text-muted);">Chime + browser notification when a command is blocked</p></div>
-                <button id="notify-blocked-toggle" onclick="toggleNotifyBlocked()" class="btn btn-xs" style="background:var(--bg-hover);color:var(--text-muted);">Off</button>
+              <div class="setting-row">
+                <div><span class="text-sm">Notify on Blocked Commands</span><p class="text-xs text-muted">Chime + browser notification when a command is blocked</p></div>
+                <button id="notify-blocked-toggle" onclick="toggleNotifyBlocked()" class="toggle-btn">Off</button>
               </div>
-              <div class="flex items-center justify-between p-3 rounded-lg" style="background:var(--bg-base);">
-                <div><span class="text-sm">Notify on JIT Requests</span><p class="text-xs" style="color:var(--text-muted);">Chime + browser notification for pending approvals</p></div>
-                <button id="notify-jit-toggle" onclick="toggleNotifyJIT()" class="btn btn-xs" style="background:var(--status-success);color:var(--bg-base);">On</button>
+              <div class="setting-row">
+                <div><span class="text-sm">Notify on JIT Requests</span><p class="text-xs text-muted">Chime + browser notification for pending approvals</p></div>
+                <button id="notify-jit-toggle" onclick="toggleNotifyJIT()" class="toggle-btn">On</button>
               </div>
-              <div class="flex items-center justify-between p-3 rounded-lg" style="background:var(--bg-base);">
-                <div><span class="text-sm">Sound</span><p class="text-xs" style="color:var(--text-muted);">Play a chime for notification events</p></div>
-                <button id="sound-toggle" onclick="toggleSound()" class="btn btn-xs" style="background:var(--status-success);color:var(--bg-base);">On</button>
+              <div class="setting-row">
+                <div><span class="text-sm">Sound</span><p class="text-xs text-muted">Play a chime for notification events</p></div>
+                <button id="sound-toggle" onclick="toggleSound()" class="toggle-btn">On</button>
               </div>
-              <div class="flex items-center justify-between p-3 rounded-lg" style="background:var(--bg-base);">
-                <div><span class="text-sm">Notify on Gateway Offline</span><p class="text-xs" style="color:var(--text-muted);">Chime + browser notification when a gateway goes offline</p></div>
-                <button id="notify-offline-toggle" onclick="toggleNotifyOffline()" class="btn btn-xs" style="background:var(--status-success);color:var(--bg-base);">On</button>
+              <div class="setting-row">
+                <div><span class="text-sm">Notify on Gateway Offline</span><p class="text-xs text-muted">Chime + browser notification when a gateway goes offline</p></div>
+                <button id="notify-offline-toggle" onclick="toggleNotifyOffline()" class="toggle-btn">On</button>
               </div>
               <div class="flex gap-2">
                 <button onclick="testSound()" class="btn btn-muted btn-xs">Test Sound</button>
@@ -446,26 +446,26 @@
           </div>
           <div class="widget">
             <div class="widget-header">Dashboard Password</div>
-            <p class="text-xs mb-3" style="color:var(--text-muted);">Browser session cookies are used — AI agents on gateways cannot access the dashboard or approve their own JITs.</p>
+            <p class="text-xs mb-3 text-muted">Browser session cookies are used — AI agents on gateways cannot access the dashboard or approve their own JITs.</p>
             <div id="password-status" class="mb-3 text-xs"></div>
             <div class="flex flex-col gap-2">
               <div class="flex gap-2">
                 <input type="password" id="new-password" placeholder="New password (min 4 chars)" class="flex-1">
-                <button onclick="setDashboardPassword()" class="btn btn-sm" style="background:var(--brand-red);color:white;">Set Password</button>
+                <button onclick="setDashboardPassword()" class="btn btn-sm">Set Password</button>
               </div>
             </div>
           </div>
         </div>
         <div class="flex flex-col gap-5">
           <div class="widget" id="external-notify-widget">
-            <div class="widget-header" style="margin-bottom:8px;">External Notifications</div>
-            <p class="text-xs mb-3" style="color:var(--text-muted);">Slack-compatible webhook — works with Slack, Discord, and Mattermost.</p>
+            <div class="widget-header">External Notifications</div>
+            <p class="text-xs mb-3 text-muted">Slack-compatible webhook — works with Slack, Discord, and Mattermost.</p>
             <div class="mb-3">
-              <label class="text-xs block mb-1" style="color:var(--text-muted);">Webhook URL</label>
+              <label class="text-xs block mb-1 text-muted">Webhook URL</label>
               <input type="text" id="notify-webhook-url" placeholder="https://hooks.slack.com/services/..." class="w-full" oninput="onNotifyConfigChange()">
             </div>
             <div class="mb-3">
-              <label class="text-xs block mb-1" style="color:var(--text-muted);">Dashboard URL (for the link in notifications)</label>
+              <label class="text-xs block mb-1 text-muted">Dashboard URL (for the link in notifications)</label>
               <input type="text" id="notify-dashboard-url" placeholder="http://192.168.1.100:8000" class="w-full" oninput="onNotifyConfigChange()">
             </div>
             <div class="flex flex-wrap gap-3 mb-3">
@@ -476,56 +476,56 @@
               <label class="flex items-center gap-2 cursor-pointer select-none text-xs"><input type="checkbox" id="notify-event-online" onchange="onNotifyConfigChange()"> 📡 Gateway online</label>
             </div>
             <div class="flex gap-2">
-              <button onclick="saveNotifyConfig()" class="btn btn-sm" style="background:var(--brand-red);color:white;">Save</button>
+              <button onclick="saveNotifyConfig()" class="btn btn-sm">Save</button>
               <button onclick="testNotify()" class="btn btn-muted btn-sm">Test</button>
-              <span id="notify-save-status" class="text-xs self-center" style="color:var(--text-muted);"></span>
+              <span id="notify-save-status" class="text-xs self-center text-muted"></span>
             </div>
           </div>
 
           <!-- Dev Tools (hidden unless enabled) -->
           <div class="widget" id="dev-tools-widget">
             <div class="widget-header">🧑‍💻 Development Tools</div>
-            <div class="flex items-center justify-between p-3 rounded-lg" style="background:var(--bg-base);">
-              <div><span class="text-sm">Show development tools</span><p class="text-xs" style="color:var(--text-muted);">Reveals the Build → Edge → Fleet deployment pipeline, dev gateways, and feature flags</p></div>
-              <button id="dev-tools-toggle" onclick="toggleDevTools()" class="btn btn-xs" style="background:var(--bg-hover);color:var(--text-muted);">Off</button>
+            <div class="setting-row">
+              <div><span class="text-sm">Show development tools</span><p class="text-xs text-muted">Reveals the Build → Edge → Fleet deployment pipeline, dev gateways, and feature flags</p></div>
+              <button id="dev-tools-toggle" onclick="toggleDevTools()" class="toggle-btn">Off</button>
             </div>
           </div>
           <div class="widget hidden" id="dev-deployment-widget">
             <div class="widget-header">🚀 Development & Deployment</div>
-            <div class="p-4 rounded-lg" style="background:var(--bg-base);border:1px solid var(--border-color);">
-              <p class="text-xs mb-3" style="color:var(--text-muted);">Build is the latest installer. Edge is the development channel for dev-mode gateways. Fleet is what production gateways are running.</p>
+            <div class="panel">
+              <p class="text-xs mb-3 text-muted">Build is the latest installer. Edge is the development channel for dev-mode gateways. Fleet is what production gateways are running.</p>
 
               <!-- Gateway Management -->
-              <div class="text-xs mb-2" style="color:var(--text-muted);">
-                Build: <span id="golden-version-label" style="color:var(--text-main);font-weight:600;">unset</span>
-                &middot; Edge: <span id="edge-version-label" style="color:var(--text-main);font-weight:600;">not staged</span>
-                &middot; Fleet: <span id="fleet-version-label" style="color:var(--text-main);font-weight:600;">unset</span>
+              <div class="text-xs mb-2 text-muted">
+                Build: <span id="golden-version-label" class="text-main font-semibold">unset</span>
+                &middot; Edge: <span id="edge-version-label" class="text-main font-semibold">not staged</span>
+                &middot; Fleet: <span id="fleet-version-label" class="text-main font-semibold">unset</span>
               </div>
-              <div id="pipeline-banner" class="pipeline-banner hidden" style="padding:8px 12px;border-radius:6px;margin-bottom:6px;font-size:12px;font-weight:500;"></div>
+              <div id="pipeline-banner" class="pipeline-banner hidden"></div>
               <div class="flex flex-wrap gap-2 mb-4">
-                <button onclick="seedEdge()" id="seed-edge-btn" class="btn btn-sm" style="background:#374151;color:white;">Seed Edge</button>
-                <button onclick="pushToDev()" id="push-to-dev-btn" class="btn btn-sm" style="background:#4b5563;color:white;" disabled>Push to Dev Gateways</button>
-                <button onclick="promoteToGolden()" id="promote-golden-btn" class="btn btn-sm" style="background:#dc2626;color:white;" disabled>Deploy to Fleet</button>
-                <button onclick="rollbackGolden()" id="rollback-golden-btn" class="btn btn-sm" style="background:#78716c;color:white;" disabled>Rollback Fleet</button>
+                <button onclick="seedEdge()" id="seed-edge-btn" class="btn btn-sm btn-dev">Seed Edge</button>
+                <button onclick="pushToDev()" id="push-to-dev-btn" class="btn btn-sm btn-dev" disabled>Push to Dev Gateways</button>
+                <button onclick="promoteToGolden()" id="promote-golden-btn" class="btn btn-sm btn-danger" disabled>Deploy to Fleet</button>
+                <button onclick="rollbackGolden()" id="rollback-golden-btn" class="btn btn-sm btn-dev" disabled>Rollback Fleet</button>
               </div>
 
-              <div class="mb-4" style="border-top:1px solid var(--border-color);"></div>
+              <div class="mb-4 divider-top"></div>
 
               <!-- Dev Gateways -->
-              <label class="text-xs block mb-2" style="color:var(--text-muted);">Dev Gateways</label>
+              <label class="text-xs block mb-2 text-muted">Dev Gateways</label>
               <div id="dev-gateway-pills" class="flex flex-wrap gap-1 mb-2"></div>
               <div class="flex gap-2">
                 <input type="text" id="dev-gateway-input" placeholder="Search gateway by hostname or IP..." class="flex-1 text-xs" onkeydown="if(event.key==='Enter')addDevGateway()" oninput="onDevGatewayInput()" autocomplete="off">
-                <button onclick="addDevGateway()" class="btn btn-xs" style="background:var(--brand-red);color:white;">Add</button>
+                <button onclick="addDevGateway()" class="btn btn-xs">Add</button>
               </div>
               <div id="dev-gateway-results" class="mt-1 max-h-32 overflow-y-auto"></div>
 
-              <div class="mb-4" style="border-top:1px solid var(--border-color);"></div>
+              <div class="mb-4 divider-top"></div>
 
               <!-- Feature Flags -->
-              <label class="text-xs block mb-2" style="color:var(--text-muted);">Feature Flags</label>
+              <label class="text-xs block mb-2 text-muted">Feature Flags</label>
               <div id="feature-flags-list" class="space-y-2 mb-4">
-                <p style="color:var(--text-muted);">Loading...</p>
+                <p class="text-muted">Loading...</p>
               </div>
             </div>
           </div>

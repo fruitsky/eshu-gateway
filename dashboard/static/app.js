@@ -30,10 +30,10 @@ function updateNotifyUI() {
   const jt = document.getElementById('notify-jit-toggle');
   const bt = document.getElementById('notify-blocked-toggle');
   const ot = document.getElementById('notify-offline-toggle');
-  if (st) { st.textContent = notifySound ? 'On' : 'Off'; st.style.background = notifySound ? 'var(--status-success)' : 'var(--bg-hover)'; st.style.color = notifySound ? 'var(--bg-base)' : 'var(--text-muted)'; }
-  if (jt) { jt.textContent = notifyJIT ? 'On' : 'Off'; jt.style.background = notifyJIT ? 'var(--status-success)' : 'var(--bg-hover)'; jt.style.color = notifyJIT ? 'var(--bg-base)' : 'var(--text-muted)'; }
-  if (bt) { bt.textContent = notifyBlocked ? 'On' : 'Off'; bt.style.background = notifyBlocked ? 'var(--status-success)' : 'var(--bg-hover)'; bt.style.color = notifyBlocked ? 'var(--bg-base)' : 'var(--text-muted)'; }
-  if (ot) { ot.textContent = notifyOffline ? 'On' : 'Off'; ot.style.background = notifyOffline ? 'var(--status-success)' : 'var(--bg-hover)'; ot.style.color = notifyOffline ? 'var(--bg-base)' : 'var(--text-muted)'; }
+  if (st) { st.textContent = notifySound ? 'On' : 'Off'; st.classList.toggle('on', !!notifySound); }
+  if (jt) { jt.textContent = notifyJIT ? 'On' : 'Off'; jt.classList.toggle('on', !!notifyJIT); }
+  if (bt) { bt.textContent = notifyBlocked ? 'On' : 'Off'; bt.classList.toggle('on', !!notifyBlocked); }
+  if (ot) { ot.textContent = notifyOffline ? 'On' : 'Off'; ot.classList.toggle('on', !!notifyOffline); }
 }
 function toggleNotifyJIT() { notifyJIT = !notifyJIT; localStorage.setItem('notifyJIT', notifyJIT); updateNotifyUI(); }
 function toggleNotifyBlocked() { notifyBlocked = !notifyBlocked; localStorage.setItem('notifyBlocked', notifyBlocked); updateNotifyUI(); }
@@ -232,8 +232,7 @@ function renderDevTools() {
   if (widget) widget.classList.toggle('hidden', !_devToolsEnabled);
   if (toggle) {
     toggle.textContent = _devToolsEnabled ? 'On' : 'Off';
-    toggle.style.background = _devToolsEnabled ? 'var(--status-success)' : 'var(--bg-hover)';
-    toggle.style.color = _devToolsEnabled ? 'var(--bg-base)' : 'var(--text-muted)';
+    toggle.classList.toggle('on', !!_devToolsEnabled);
   }
 }
 async function toggleDevTools() {
@@ -261,28 +260,22 @@ async function fetchFeatureFlags() {
       var state = 'off';
       if (on && sc === 'dev') state = 'dev';
       if (on && sc === 'prod') state = 'prod';
-      html += '<div class="flex items-center justify-between p-3 rounded-lg" style="background:var(--bg-base);border:1px solid var(--border-color);">' +
-        '<div><span class="text-sm" style="color:var(--text-main);">' + escapeHtml(name) + '</span><p class="text-xs" style="color:var(--text-muted);">' + escapeHtml(info.description) + '</p></div>' +
-        '<div class="flex rounded-lg" style="background:var(--bg-hover);border:1px solid var(--border-color);">' +
+      html += '<div class="flag-row">' +
+        '<div><span class="text-sm text-main">' + escapeHtml(name) + '</span><p class="text-xs text-muted">' + escapeHtml(info.description) + '</p></div>' +
+        '<div class="seg-group">' +
           renderSeg('off', state, name) +
           renderSeg('dev', state, name) +
           renderSeg('prod', state, name) +
         '</div></div>';
     });
-    container.innerHTML = html || '<p style="color:var(--text-muted);">No feature flags configured.</p>';
+    container.innerHTML = html || '<p class="text-muted">No feature flags configured.</p>';
   } catch(e) {}
 }
 
 function renderSeg(val, current, name) {
   var active = val === current;
-  var bg = active
-    ? (val === 'off' ? 'var(--bg-surface)' : val === 'dev' ? 'rgba(96,165,250,0.2)' : 'rgba(74,222,128,0.2)')
-    : 'transparent';
-  var color = active
-    ? (val === 'off' ? 'var(--text-muted)' : val === 'dev' ? 'var(--status-info)' : 'var(--status-success)')
-    : 'var(--text-muted)';
   var label = val === 'off' ? 'Off' : val === 'dev' ? '🧪 Dev' : '🟢 Prod';
-  return '<button onclick="setFeatureFlagState(\'' + name + '\',\'' + val + '\')" class="px-2.5 py-1 text-xs font-medium rounded transition-colors" style="background:' + bg + ';color:' + color + ';' + (!active ? 'opacity:0.6;' : '') + '">' + label + '</button>';
+  return '<button onclick="setFeatureFlagState(\'' + name + '\',\'' + val + '\')" class="seg-btn' + (active ? ' active ' + val : '') + '">' + label + '</button>';
 }
 
 async function setFeatureFlagState(name, state) {
@@ -304,8 +297,8 @@ function renderDevGatewayPills() {
   var pills = document.getElementById('dev-gateway-pills');
   if (!pills) return;
   pills.innerHTML = _devGateways.map(function(g) {
-    return '<span class="inline-flex items-center gap-1 px-2 py-1 rounded text-xs" style="background:rgba(230,57,70,0.1);border:1px solid rgba(230,57,70,0.3);color:var(--brand-red);">' +
-      escapeHtml(g.hostname||g.ip) + ' <span onclick="removeDevGateway(\'' + g.ip + '\')" class="cursor-pointer font-bold ml-1" title="Remove from dev">&times;</span></span>';
+    return '<span class="dev-gw-pill">' +
+      escapeHtml(g.hostname||g.ip) + ' <span onclick="removeDevGateway(\'' + g.ip + '\')" class="remove" title="Remove from dev">&times;</span></span>';
   }).join('');
 }
 
@@ -360,8 +353,8 @@ function onDevGatewayInput() {
     return g.ip === q || (g.hostname && g.hostname.toLowerCase().includes(q.toLowerCase()));
   }).slice(0, 5);
   results.innerHTML = matches.map(function(g) {
-    return '<div onclick="document.getElementById(\'dev-gateway-input\').value=\'' + g.hostname + '\';addDevGateway()" class="px-3 py-1.5 text-xs cursor-pointer hover:brightness-125 rounded" style="color:var(--text-main);">' +
-      gwPill(g.hostname) + ' ' + escapeHtml(g.hostname) + ' <span style="color:var(--text-muted);">(' + g.ip + ')</span></div>';
+    return '<div onclick="document.getElementById(\'dev-gateway-input\').value=\'' + g.hostname + '\';addDevGateway()" class="search-result">' +
+      gwPill(g.hostname) + ' ' + escapeHtml(g.hostname) + ' <span class="text-muted">(' + g.ip + ')</span></div>';
   }).join('');
 }
 // ── Approved Windows ────────────────────────────────────────────────
