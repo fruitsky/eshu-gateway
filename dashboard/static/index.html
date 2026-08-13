@@ -324,31 +324,31 @@
       <div class="widget">
         <div class="widget-header">
           🛡️ Global Central Policy
-          <span style="color:var(--text-muted);font-size:12px;">Policy version: <span id="policy-version-label" class="font-mono">-</span></span>
+          <span class="text-xs text-muted">Policy version: <span id="policy-version-label" class="font-mono">-</span></span>
           <div class="flex items-center gap-2">
             <button onclick="openModal('policy-changes-modal')" class="btn btn-muted btn-xs">View Policy Changes</button>
-            <button onclick="savePolicies()" id="save-policies-btn" class="btn btn-sm" style="background:var(--brand-red);color:white;">Save & Push Policies</button>
+            <button onclick="savePolicies()" id="save-policies-btn" class="btn btn-sm">Save & Push Policies</button>
           </div>
         </div>
-        <p class="text-xs mb-4" style="color:var(--text-muted);">Gateways sync every 3s.</p>
+        <p class="text-xs mb-4 text-muted">Gateways sync every 3s.</p>
         <!-- Tester -->
-        <div class="p-3 rounded-lg mb-4" style="background:var(--bg-base);border:1px solid var(--border-color);">
+        <div class="panel mb-4">
           <div class="flex items-center gap-2 mb-2">
             <span class="text-sm font-semibold">🧪 Tester</span>
             <input type="text" id="tester-input" placeholder="Paste command to test..." class="flex-1" onkeydown="if(event.key==='Enter') testPolicy()">
-            <button onclick="testPolicy()" class="btn btn-sm" style="background:var(--brand-red);color:white;">Test</button>
+            <button onclick="testPolicy()" class="btn btn-sm">Test</button>
             <button onclick="generateRegex()" class="btn btn-muted btn-sm">Regex</button>
           </div>
           <div id="tester-result" class="hidden text-xs p-3 rounded-lg border"></div>
         </div>
         <div class="flex flex-col gap-4">
-          <div><label class="text-xs mb-1 block" style="color:var(--text-muted);">Exact Allowlist</label><textarea id="policy-exact" class="min-h-[450px]" spellcheck="false" style="padding:16px 18px;"></textarea></div>
-          <div><label class="text-xs mb-1 block" style="color:var(--text-muted);">Regex Allowlist</label><textarea id="policy-regex-white" class="min-h-[450px]" spellcheck="false" style="padding:16px 18px;"></textarea></div>
-          <details class="mb-3" style="font-size:13px;">
-            <summary class="cursor-pointer" style="color:var(--status-warning);font-weight:600;">🛡️ Core Gateway Blocklist</summary>
-            <div class="mt-2 p-3 rounded-lg" style="background:var(--bg-base);border:1px solid var(--border-color);line-height:1.8;">
-              <p class="mb-2" style="color:var(--text-muted);">These are permanently enforced at the gateway level (Stage&nbsp;1) and <strong>cannot be overridden</strong> by any allowlist policy.</p>
-              <ul class="space-y-1" style="color:var(--text-muted);padding-left:0;list-style:none;">
+          <div><label class="text-xs mb-1 block text-muted">Exact Allowlist</label><textarea id="policy-exact" class="min-h-[450px]" spellcheck="false"></textarea></div>
+          <div><label class="text-xs mb-1 block text-muted">Regex Allowlist</label><textarea id="policy-regex-white" class="min-h-[450px]" spellcheck="false"></textarea></div>
+          <details class="mb-3 text-sm">
+            <summary class="cursor-pointer text-warning font-semibold">🛡️ Core Gateway Blocklist</summary>
+            <div class="mt-2 panel blocklist-box">
+              <p class="mb-2 text-muted">These are permanently enforced at the gateway level (Stage&nbsp;1) and <strong>cannot be overridden</strong> by any allowlist policy.</p>
+              <ul class="space-y-1 text-muted">
                 <li>💀 <strong>Recursive force delete:</strong> rm -rf, rm -fr, rm -r -f, /bin/rm -rf</li>
                 <li>💾 <strong>Filesystem format:</strong> mkfs.*</li>
                 <li>💿 <strong>Raw disk access:</strong> dd if=, dd of=, /bin/dd</li>
@@ -358,7 +358,7 @@
               </ul>
             </div>
           </details>
-          <div><label class="text-xs mb-1 block" style="color:var(--text-muted);">Blocklist (Hard Block)</label><textarea id="policy-regex-black" class="min-h-[450px]" spellcheck="false" style="padding:16px 18px;"></textarea></div>
+          <div><label class="text-xs mb-1 block text-muted">Blocklist (Hard Block)</label><textarea id="policy-regex-black" class="min-h-[450px]" spellcheck="false"></textarea></div>
         </div>
       </div>
     </div>

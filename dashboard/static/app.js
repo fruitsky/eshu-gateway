@@ -2445,15 +2445,15 @@ async function rollbackPolicyChange(changeId) {
 }
 async function testPolicy() {
   const cmd = document.getElementById('tester-input').value.trim(); if (!cmd) return;
-  const rd = document.getElementById('tester-result'); rd.innerHTML = '<span style="color:var(--text-muted);">Testing...</span>'; rd.classList.remove('hidden');
+  const rd = document.getElementById('tester-result'); rd.innerHTML = '<span class="text-muted">Testing...</span>'; rd.classList.remove('hidden');
   try {
     const res = await fetch('/api/policies/test?command=' + encodeURIComponent(cmd)); const data = await res.json();
     let bg, border, text, icon, desc;
     if (data.action === 'blocked') { bg='rgba(251,146,60,0.1)'; border='rgba(251,146,60,0.3)'; text='#fb923c'; icon='🔴'; desc='Blocked: <code style="color:#fb923c;">' + (data.details[0] ? data.details[0].pattern : 'unknown') + '</code>'; }
     else if (data.action === 'auto_approved') { bg='rgba(74,222,128,0.1)'; border='rgba(74,222,128,0.3)'; text='var(--status-success)'; icon='✅'; desc=(data.details[0] && data.details[0].type === 'exact_whitelist') ? 'Auto-Approved (Exact Allowlist)' : 'Auto-Approved: <code style="color:var(--status-success);">' + (data.details[0] ? data.details[0].pattern : '') + '</code>'; }
     else { bg='rgba(251,191,36,0.1)'; border='rgba(251,191,36,0.3)'; text='var(--status-warning)'; icon='⏳'; desc='Would require JIT Approval'; }
-    rd.innerHTML = '<div class="p-2 rounded-lg border" style="background:' + bg + ';color:' + text + ';border-color:' + border + ';">' + icon + ' <strong>' + data.action.replace('_',' ').toUpperCase() + '</strong> — ' + desc + '</div>';
-  } catch(err) { rd.innerHTML = '<div class="p-2 rounded-lg border" style="background:var(--bg-base);color:var(--text-muted);">⚠️ ' + err.message + '</div>'; }
+    rd.innerHTML = '<div class="result-box" style="background:' + bg + ';color:' + text + ';border-color:' + border + ';">' + icon + ' <strong>' + data.action.replace('_',' ').toUpperCase() + '</strong> — ' + desc + '</div>';
+  } catch(err) { rd.innerHTML = '<div class="result-box" style="background:var(--bg-base);color:var(--text-muted);">⚠️ ' + err.message + '</div>'; }
 }
 async function seedEdge() {
   var confirmMsg = 'Seed Edge from current Build? This replaces any existing Edge installer.';
@@ -2567,7 +2567,7 @@ async function fetchDevStatus() {
 function generateRegex() {
   const cmd = document.getElementById('tester-input').value.trim(); if (!cmd) return;
   const rd = document.getElementById('tester-result');
-  rd.innerHTML = '<div class="p-2 rounded-lg border font-mono text-xs" style="background:rgba(230,57,70,0.08);color:var(--text-main);border-color:var(--brand-red);"><p class="mb-1" style="color:var(--brand-red);">Generated Regex:</p><code>^' + cmd.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$</code><p class="mt-1" style="color:var(--text-muted);">Copy into Regex Allowlist.</p></div>';
+  rd.innerHTML = '<div class="regex-box"><p class="mb-1 text-danger">Generated Regex:</p><code>^' + cmd.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$</code><p class="mt-1 text-muted">Copy into Regex Allowlist.</p></div>';
   rd.classList.remove('hidden');
 }
 
