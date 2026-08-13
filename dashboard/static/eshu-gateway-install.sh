@@ -486,75 +486,13 @@ if [ -f /etc/eshu-freeze ] && [ "$(cat /etc/eshu-freeze 2>/dev/null || echo '')"
 fi
 
 # ============================================================
-# 1. HARDCODED CATASTROPHIC BLOCKLIST (CANNOT BE DISABLED)
+# 1. HARDCODED CORE BLOCKLIST (NON-EDITABLE — SELF-PROTECTION + EVASION)
+#    Command-safety patterns (rm -rf, mkfs, dd, firewall flush, power) are
+#    shipped by default in the synced blocklist (/etc/eshu-rblack.txt) so a
+#    human can relax them from the dashboard. Only the patterns below protect
+#    Eshu itself and cannot be withdrawn.
 # ============================================================
 case "$cmd" in
-    *"rm -rf"*|*"rm  -rf"*|*"rm   -rf"*|*"rm -fr"*|*"rm -r -f"*|*"rm -f -r"*)
-        logger -t eshu-gateway "HARDCODED BLOCK: rm -rf variant detected in: $cmd"
-        log_auto_approve "$cmd" "blocked"
-        echo "[LOCKED] FATAL: Command contains destructive recursive force delete. Permanently blocked. [Gateway $GATEWAY_VERSION]"
-        exit 1
-        ;;
-    *"/bin/rm"*"-rf"*|*"/bin/rm"*"-fr"*)
-        logger -t eshu-gateway "HARDCODED BLOCK: /bin/rm -rf detected in: $cmd"
-        log_auto_approve "$cmd" "blocked"
-        echo "[LOCKED] FATAL: Command contains destructive recursive force delete (/bin/rm). Permanently blocked. [Gateway $GATEWAY_VERSION]"
-        exit 1
-        ;;
-    *"mkfs"*)
-        logger -t eshu-gateway "HARDCODED BLOCK: mkfs detected in: $cmd"
-        log_auto_approve "$cmd" "blocked"
-        echo "[LOCKED] FATAL: Command contains filesystem format operation (mkfs). Permanently blocked. [Gateway $GATEWAY_VERSION]"
-        exit 1
-        ;;
-    *"dd if="*|*"dd  if="*|*"dd of="*)
-        logger -t eshu-gateway "HARDCODED BLOCK: dd raw device access detected in: $cmd"
-        log_auto_approve "$cmd" "blocked"
-        echo "[LOCKED] FATAL: Command contains raw disk operation (dd). Permanently blocked. [Gateway $GATEWAY_VERSION]"
-        exit 1
-        ;;
-    *"/bin/dd "*)
-        logger -t eshu-gateway "HARDCODED BLOCK: /bin/dd detected in: $cmd"
-        log_auto_approve "$cmd" "blocked"
-        echo "[LOCKED] FATAL: Command contains raw disk operation (/bin/dd). Permanently blocked. [Gateway $GATEWAY_VERSION]"
-        exit 1
-        ;;
-    *"iptables -F"*|*"iptables --flush"*|*"iptables -X"*|*"iptables --delete-chain"*)
-        logger -t eshu-gateway "HARDCODED BLOCK: iptables manipulation detected in: $cmd"
-        log_auto_approve "$cmd" "blocked"
-        echo "[LOCKED] FATAL: Command manipulates firewall rules. Permanently blocked. [Gateway $GATEWAY_VERSION]"
-        exit 1
-        ;;
-    *"ip6tables -F"*|*"ip6tables --flush"*|*"ip6tables -X"*)
-        logger -t eshu-gateway "HARDCODED BLOCK: ip6tables manipulation detected in: $cmd"
-        log_auto_approve "$cmd" "blocked"
-        echo "[LOCKED] FATAL: Command manipulates IPv6 firewall rules. Permanently blocked. [Gateway $GATEWAY_VERSION]"
-        exit 1
-        ;;
-    *"nft flush"*)
-        logger -t eshu-gateway "HARDCODED BLOCK: nftables flush detected in: $cmd"
-        log_auto_approve "$cmd" "blocked"
-        echo "[LOCKED] FATAL: Command flushes nftables ruleset. Permanently blocked. [Gateway $GATEWAY_VERSION]"
-        exit 1
-        ;;
-    *"reboot"*|*"shutdown"*|*"poweroff"*|*"halt"*|*"init 0"*|*"init 6"*|*"telinit 0"*|*"telinit 6"*)
-        logger -t eshu-gateway "HARDCODED BLOCK: System power command: $cmd"
-        log_auto_approve "$cmd" "blocked"
-        echo "[LOCKED] FATAL: System power control commands are permanently blocked. [Gateway $GATEWAY_VERSION]"
-        exit 1
-        ;;
-    *"systemctl reboot"*|*"systemctl poweroff"*|*"systemctl halt"*|*"systemctl isolate reboot"*|*"systemctl isolate poweroff"*|*"systemctl isolate halt"*)
-        logger -t eshu-gateway "HARDCODED BLOCK: systemctl power command: $cmd"
-        log_auto_approve "$cmd" "blocked"
-        echo "[LOCKED] FATAL: System power control via systemctl is permanently blocked. [Gateway $GATEWAY_VERSION]"
-        exit 1
-        ;;
-    *"busybox reboot"*|*"busybox poweroff"*|*"busybox halt"*|*"busybox shutdown"*)
-        logger -t eshu-gateway "HARDCODED BLOCK: busybox power command: $cmd"
-        log_auto_approve "$cmd" "blocked"
-        echo "[LOCKED] FATAL: System power control via busybox is permanently blocked. [Gateway $GATEWAY_VERSION]"
-        exit 1
-        ;;
     *"/usr/local/bin/eshu-"*|*"/etc/eshu-"*|*"/var/run/eshu."*|*"eshu.db"*|*"eshu.db-journal"*|*"eshu.db-wal"*)
         logger -t eshu-gateway "HARDCODED BLOCK: Eshu self-access attempt: $cmd"
         log_auto_approve "$cmd" "blocked"
