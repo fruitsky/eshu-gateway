@@ -536,8 +536,8 @@
     <!-- LOGS VIEW — Audit Log -->
     <div id="view-logs" class="hidden w-full">
       <div class="widget">
-        <div class="widget-header">Audit Log <div class="flex items-center gap-2"><input type="text" id="audit-log-search" placeholder="Search..." class="text-xs px-2 py-1 rounded-lg" style="background:var(--bg-card);border:1px solid var(--border-color);color:var(--text-primary);width:160px;" oninput="onAuditLogSearch()"><span class="text-xs" style="color:var(--text-muted);" id="audit-log-count">0 events</span><button onclick="fetchAuditLog()" class="btn btn-muted btn-xs">&#x21bb;</button></div></div>
-        <div id="audit-log-list" class="space-y-2 pr-1"><p style="color:var(--text-muted);">Loading...</p></div>
+        <div class="widget-header">Audit Log <div class="flex items-center gap-2"><input type="text" id="audit-log-search" placeholder="Search..." class="text-xs w-40" oninput="onAuditLogSearch()"><span class="text-xs text-muted" id="audit-log-count">0 events</span><button onclick="fetchAuditLog()" class="btn btn-muted btn-xs">&#x21bb;</button></div></div>
+        <div id="audit-log-list" class="space-y-2 pr-1"><p class="text-muted">Loading...</p></div>
       </div>
     </div>
 

@@ -2728,15 +2728,15 @@ async function fetchAuditLog() {
     const res = await fetch(url); const logs = await res.json();
     document.getElementById('audit-log-count').textContent = logs.length + ' events';
     const list = document.getElementById('audit-log-list');
-    if (logs.length === 0) { list.innerHTML = '<p style="color:var(--text-muted);">No events recorded yet.</p>'; return; }
+    if (logs.length === 0) { list.innerHTML = '<p class="text-muted">No events recorded yet.</p>'; return; }
     list.innerHTML = logs.map(function(l) {
       const icon = AUDIT_ICONS[l.event_type] || '📌', label = AUDIT_LABELS[l.event_type] || l.event_type;
       const time = new Date(l.timestamp * 1000).toLocaleTimeString([], { hour:'2-digit', minute:'2-digit', second:'2-digit' });
-      const host = l.hostname ? ' ' + gwPill(l.hostname) + ' <strong style="color:var(--text-main);">' + l.hostname + '</strong>' + (l.gateway_ip ? ' ('+l.gateway_ip+')' : '') : '';
-      const detail = l.details ? '<span class="block text-xs mt-0.5" style="color:var(--text-muted);">' + l.details.replace(/</g,'<').replace(/>/g,'>') + '</span>' : '';
+      const host = l.hostname ? ' ' + gwPill(l.hostname) + ' <strong class="text-main">' + l.hostname + '</strong>' + (l.gateway_ip ? ' ('+l.gateway_ip+')' : '') : '';
+      const detail = l.details ? '<span class="block text-xs mt-0.5 text-muted">' + l.details.replace(/</g,'<').replace(/>/g,'>') + '</span>' : '';
       const borderColor = l.event_type === 'disconnected' ? 'var(--brand-red)' : l.event_type === 'version_updated' || l.event_type === 'password_changed' ? 'var(--status-success)' : 'var(--border-color)';
-      return '<div class="p-2 rounded-lg border text-xs" style="background:var(--bg-base);border-color:' + borderColor + ';">' +
-        '<span style="color:var(--text-muted);font-size:10px;">' + time + '</span> ' + icon + ' ' + label + host + detail + '</div>';
+      return '<div class="p-2 rounded-lg border text-xs bg-base" style="border-color:' + borderColor + ';">' +
+        '<span class="text-muted text-xs">' + time + '</span> ' + icon + ' ' + label + host + detail + '</div>';
     }).join('');
   } catch(e) {}
 }
