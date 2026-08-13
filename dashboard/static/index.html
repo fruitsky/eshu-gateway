@@ -142,17 +142,17 @@
       <!-- Pending JIT Widget -->
       <div id="jit-pending-widget" class="widget glow">
         <div class="widget-header">
-          ⚡ Pending Requests <span id="jit-pending-count" class="text-sm" style="color:var(--text-muted);">0 pending</span>
+          ⚡ Pending Requests <span id="jit-pending-count" class="text-sm text-muted">0 pending</span>
           <span id="jit-new-badge" class="new-badge hidden">New</span>
         </div>
-        <div id="jit-tickets"><p style="color:var(--text-muted);">No pending requests — all clear.</p></div>
+        <div id="jit-tickets"><p class="text-muted">No pending requests — all clear.</p></div>
       </div>
 
       <!-- Deny Blocklist Bar -->
-      <div id="deny-blacklist-bar" class="hidden deny-bar flex items-center justify-between px-4 py-3 mb-4 rounded-lg" style="background:var(--bg-surface);border:1px solid var(--border-color);">
-        <span id="deny-bar-text" class="text-sm" style="color:var(--text-muted);"></span>
+      <div id="deny-blacklist-bar" class="hidden deny-bar">
+        <span id="deny-bar-text" class="text-sm text-muted"></span>
         <div class="flex gap-2">
-          <button onclick="handleDenyBlocklist()" class="btn btn-sm" style="background:var(--brand-red);color:white;">Yes, Blocklist & Push</button>
+          <button onclick="handleDenyBlocklist()" class="btn btn-danger btn-sm">Yes, Blocklist & Push</button>
           <button onclick="dismissDenyBar()" class="btn btn-deny btn-sm">Dismiss</button>
         </div>
       </div>
@@ -160,23 +160,23 @@
       <!-- Stats Row -->
       <div class="stat-row">
         <div class="stat-card" onclick="toggleFilter('pending')" id="box-pending">
-          <span class="stat-value" style="color:var(--status-warning);" id="stat-pending">0</span>
+          <span class="stat-value stat-pending" id="stat-pending">0</span>
           <span class="stat-label">Expired</span>
         </div>
         <div class="stat-card" onclick="toggleFilter('approved')" id="box-approved">
-          <span class="stat-value" style="color:var(--status-success);" id="stat-approved">0</span>
+          <span class="stat-value stat-approved" id="stat-approved">0</span>
           <span class="stat-label">Approved</span>
         </div>
         <div class="stat-card" onclick="toggleFilter('auto-approved')" id="box-auto">
-          <span class="stat-value" style="color:var(--status-info);" id="stat-auto">0</span>
+          <span class="stat-value stat-auto" id="stat-auto">0</span>
           <span class="stat-label">Auto-Approved</span>
         </div>
         <div class="stat-card" onclick="toggleFilter('blocked')" id="box-blocked">
-          <span class="stat-value" style="color:#fb923c;" id="stat-blocked">0</span>
+          <span class="stat-value stat-blocked" id="stat-blocked">0</span>
           <span class="stat-label">Blocked</span>
         </div>
         <div class="stat-card" onclick="toggleFilter('denied')" id="box-denied">
-          <span class="stat-value" style="color:var(--brand-red);" id="stat-denied">0</span>
+          <span class="stat-value stat-denied" id="stat-denied">0</span>
           <span class="stat-label">Denied</span>
         </div>
       </div>
@@ -185,20 +185,20 @@
       <div class="widget">
         <div class="widget-header">
           Historical Commands
-          <span id="filter-badge" class="hidden text-xs px-2.5 py-0.5 rounded-full font-medium" style="background:rgba(96,165,250,0.1);color:var(--status-info);border:1px solid rgba(96,165,250,0.2);"></span>
+          <span id="filter-badge" class="hidden filter-badge"></span>
           <div class="flex items-center gap-2">
-            <input type="text" id="request-search" placeholder="Search..." class="text-xs px-2 py-1 rounded-lg" style="background:var(--bg-card);border:1px solid var(--border-color);color:var(--text-primary);width:160px;" oninput="onRequestSearch()">
+            <input type="text" id="request-search" placeholder="Search..." class="text-xs w-40" oninput="onRequestSearch()">
             <button onclick="fetchRequests()" class="btn btn-muted btn-xs">↻ Refresh</button>
             <div class="relative">
-              <button onclick="toggleDropdown()" id="purge-btn" class="btn btn-muted btn-xs flex items-center gap-1"><span>Clear History</span><svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg></button>
-              <div id="purge-dropdown" class="dropdown-menu widget" style="border-radius:10px;">
-                <button onclick="purgeHistory('30m')" class="block w-full text-left px-4 py-2 text-sm hover:brightness-125" style="color:var(--text-muted);">Older than 30 minutes</button>
-                <button onclick="purgeHistory('1h')" class="block w-full text-left px-4 py-2 text-sm hover:brightness-125" style="color:var(--text-muted);">Older than 1 hour</button>
-                <button onclick="purgeHistory('1d')" class="block w-full text-left px-4 py-2 text-sm hover:brightness-125" style="color:var(--text-muted);">Older than 1 day</button>
-                <button onclick="purgeHistory('2d')" class="block w-full text-left px-4 py-2 text-sm hover:brightness-125" style="color:var(--text-muted);">Older than 2 days</button>
-                <button onclick="purgeHistory('7d')" class="block w-full text-left px-4 py-2 text-sm hover:brightness-125" style="color:var(--text-muted);">Older than 7 days</button>
-                <div class="my-1" style="border-top:1px solid var(--border-color);"></div>
-                <button onclick="purgeHistory('all')" class="block w-full text-left px-4 py-2 text-sm font-medium" style="color:var(--brand-red);">Clear all history</button>
+              <button onclick="toggleDropdown()" id="purge-btn" class="btn btn-muted btn-xs"><span>Clear History</span><svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg></button>
+              <div id="purge-dropdown" class="dropdown-menu widget">
+                <button onclick="purgeHistory('30m')" class="dropdown-item">Older than 30 minutes</button>
+                <button onclick="purgeHistory('1h')" class="dropdown-item">Older than 1 hour</button>
+                <button onclick="purgeHistory('1d')" class="dropdown-item">Older than 1 day</button>
+                <button onclick="purgeHistory('2d')" class="dropdown-item">Older than 2 days</button>
+                <button onclick="purgeHistory('7d')" class="dropdown-item">Older than 7 days</button>
+                <div class="dropdown-divider"></div>
+                <button onclick="purgeHistory('all')" class="dropdown-item danger">Clear all history</button>
               </div>
             </div>
           </div>
@@ -209,7 +209,7 @@
             <tbody id="table-body"></tbody>
           </table>
         </div>
-        <div id="empty-state" class="hidden flex-col items-center justify-center py-12" style="color:var(--text-muted);"><p>No activity recorded yet.</p></div>
+        <div id="empty-state" class="hidden flex-col items-center justify-center py-12 text-muted"><p>No activity recorded yet.</p></div>
       </div>
     </div>
 

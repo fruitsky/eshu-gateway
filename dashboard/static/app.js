@@ -1398,17 +1398,17 @@ function renderTable() {
     const isPP = req.status === 'pending' || req.status === 'approved', isExpired = isPP && req.ttl <= 0;
     let badge = '';
     if (isPP && !isExpired) {
-      badge = '<span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium" style="background:' + (req.status==='pending'?'rgba(251,191,36,0.1)':'rgba(74,222,128,0.1)') + ';color:' + (req.status==='pending'?'var(--status-warning)':'var(--status-success)') + ';border:1px solid ' + (req.status==='pending'?'rgba(251,191,36,0.2)':'rgba(74,222,128,0.2)') + ';"><span class="ttl-countdown font-mono w-8 text-center" data-ttl="' + req.ttl + '">' + req.ttl + 's</span> ' + req.status + '</span>';
-    } else if (isPP && isExpired) badge = '<span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium" style="background:var(--bg-hover);color:var(--text-muted);">Expired</span>';
-    else if (req.status === 'consumed') badge = '<span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium" style="background:rgba(74,222,128,0.1);color:var(--status-success);">Ticket Claimed</span>';
-    else if (req.status === 'blocked') badge = '<span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium" style="background:rgba(251,146,60,0.1);color:#fb923c;">Blocked</span>';
-    else if (req.status === 'denied') badge = '<span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium" style="background:rgba(230,57,70,0.1);color:var(--brand-red);">Denied</span>';
-    else if (req.status === 'auto-approved') badge = '<span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium" style="background:rgba(96,165,250,0.1);color:var(--status-info);">Auto-Approved</span>';
-    else if (req.status === 'window-approved') badge = '<span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium" style="background:rgba(96,165,250,0.08);color:var(--status-info);border:1px solid rgba(96,165,250,0.2);">Window</span>';
-    else if (req.status === 'window-rejected') badge = '<span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium" style="background:rgba(251,146,60,0.1);color:#fb923c;border:1px solid rgba(251,146,60,0.25);" title="' + escapeHtml(req.reason || '') + '">Window Rejected</span>';
-    else if (req.status === 'frozen') badge = '<span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium" style="background:rgba(127,29,29,0.2);color:#f87171;border:1px solid rgba(239,68,68,0.35);" title="Blocked by Emergency Freeze — all commands rejected while the fleet is frozen">Frozen</span>';
-    else if (req.status === 'fleet-run') badge = '<span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium" style="background:rgba(96,165,250,0.1);color:var(--status-info);border:1px solid rgba(96,165,250,0.25);" title="Dispatched via Fleet Run">⚡ Fleet Run</span>';
-    let actions = '<span style="color:var(--text-muted);">-</span>';
+      badge = '<span class="badge badge-' + (req.status==='pending'?'pending':'approved') + '"><span class="ttl-countdown font-mono w-8 text-center" data-ttl="' + req.ttl + '">' + req.ttl + 's</span> ' + req.status + '</span>';
+    } else if (isPP && isExpired) badge = '<span class="badge badge-expired">Expired</span>';
+    else if (req.status === 'consumed') badge = '<span class="badge badge-consumed">Ticket Claimed</span>';
+    else if (req.status === 'blocked') badge = '<span class="badge badge-blocked">Blocked</span>';
+    else if (req.status === 'denied') badge = '<span class="badge badge-denied">Denied</span>';
+    else if (req.status === 'auto-approved') badge = '<span class="badge badge-auto">Auto-Approved</span>';
+    else if (req.status === 'window-approved') badge = '<span class="badge badge-window">Window</span>';
+    else if (req.status === 'window-rejected') badge = '<span class="badge badge-window-rejected" title="' + escapeHtml(req.reason || '') + '">Window Rejected</span>';
+    else if (req.status === 'frozen') badge = '<span class="badge badge-frozen" title="Blocked by Emergency Freeze — all commands rejected while the fleet is frozen">Frozen</span>';
+    else if (req.status === 'fleet-run') badge = '<span class="badge badge-fleet-run" title="Dispatched via Fleet Run">⚡ Fleet Run</span>';
+    let actions = '<span class="text-muted">-</span>';
     if (req.status === 'pending' && !isExpired) {
       actions = '<button onclick="handleAction(' + req.id + ', \'approve\')" class="btn btn-approve btn-xs mr-1">Approve</button>' +
         '<button onclick="handleAction(' + req.id + ', \'deny\')" class="btn btn-deny btn-xs">Deny</button>';
@@ -1418,16 +1418,16 @@ function renderTable() {
       const disabledStyle = 'opacity:0.5;pointer-events:none;';
 
       if (req.status === 'frozen') {
-        actions = '<span class="inline-flex items-center gap-1 text-xs px-2 py-1 rounded" style="background:rgba(127,29,29,0.12);color:#f87171;border:1px solid rgba(239,68,68,0.3);" title="Blocked by Emergency Freeze — the fleet is rejecting all commands until unfrozen.">' +
+        actions = '<span class="chip chip-frozen" title="Blocked by Emergency Freeze — the fleet is rejecting all commands until unfrozen.">' +
           '🧊 Fleet Frozen</span>';
       } else if (req.status === 'fleet-run') {
-        actions = '<span class="inline-flex items-center gap-1 text-xs px-2 py-1 rounded" style="background:rgba(96,165,250,0.08);color:var(--status-info);border:1px solid rgba(96,165,250,0.25);" title="Executed via Fleet Run — see the Fleet Run tab for per-gateway output.">' +
+        actions = '<span class="chip chip-fleet-run" title="Executed via Fleet Run — see the Fleet Run tab for per-gateway output.">' +
           '⚡ Fleet Run</span>';
       } else if (req.status === 'blocked' && isHardcoreBlocked(req.command)) {
-        actions = '<span class="inline-flex items-center gap-1 text-xs px-2 py-1 rounded" style="background:rgba(251,146,60,0.08);color:var(--status-warning);border:1px solid rgba(251,146,60,0.2);" title="This command is permanently blocked by the Core Gateway Blocklist (Stage 1). It cannot be allowlisted.">' +
+        actions = '<span class="chip chip-block-core" title="This command is permanently blocked by the Core Gateway Blocklist (Stage 1). It cannot be allowlisted.">' +
           '🛡️ Block by Core</span>';
       } else {
-        actions = '<select onchange="handlePolicyAction(this,\'' + encodeURIComponent(req.command) + '\')" class="btn-muted" style="width:190px;padding:4px 8px;font-size:11px;">' +
+        actions = '<select onchange="handlePolicyAction(this,\'' + encodeURIComponent(req.command) + '\')" class="btn-muted select-actions">' +
           '<option value="" disabled selected>⚙ Actions</option>' +
           '<option value="exact_whitelist"' + (mem.inExact ? ' disabled style="'+disabledStyle+'"' : '') + '>' + (mem.inExact ? '✓ ' : '+ ') + 'AL Exact</option>' +
           '<option value="regex_whitelist"' + (mem.inRegexWhite ? ' disabled style="'+disabledStyle+'"' : '') + '>' + (mem.inRegexWhite ? '✓ ' : '+ ') + 'AL Regex</option>' +
@@ -1439,32 +1439,32 @@ function renderTable() {
     }
     const gap = gapMap.get(req.id);
     const rowClass = gap ? 'gap-row' : '';
-    const idStyle = gap ? 'color:var(--status-warning);font-weight:700;' : 'color:var(--text-muted);';
+    const idClass = gap ? 'cell-id-warn' : 'cell-id';
     const gapTitle = gap ? ' title="' + escapeHtml(formatGapTooltip(gap)) + '"' : '';
     const idDisplay = gap ? '⚠ #' + String(req.id).padStart(6, '0') : '#' + String(req.id).padStart(6, '0');
     const escapedCmd = escapeHtml(req.command);
     const gwPillHtml = gwPill(req.hostname || 'N/A');
     const riskHtml = (req.status === 'pending' && req.risk) ?
-      '<span class="flex-shrink-0" style="color:#fbbf24;cursor:help;" title="⚠ Risk: ' + escapeHtml(req.risk) + '">⚠</span>' : '';
+      '<span class="flex-shrink-0 risk-flag" title="⚠ Risk: ' + escapeHtml(req.risk) + '">⚠</span>' : '';
     html += '<tr class="' + rowClass + '">' +
-      '<td style="' + idStyle + ';font-family:monospace;font-size:12px;"' + gapTitle + '>' + idDisplay + '</td>' +
-      '<td style="color:var(--text-muted);font-size:12px;">' + formatTime(req.created_at) + '</td>' +
-      '<td style="color:var(--text-main);font-size:12px;">' + gwPillHtml + ' ' + escapeHtml(req.hostname || 'N/A') + ' (' + escapeHtml(req.target_ip) + ')</td>' +
-      '<td style="max-width:300px;"><div class="flex items-center gap-1">' + riskHtml + '<code class="flex-1 px-2 py-1 rounded font-mono text-xs block truncate" style="background:var(--bg-base);color:var(--text-main);" title="' + escapedCmd + '">' + escapedCmd + '</code><button class="js-copy-cmd flex-shrink-0 text-xs opacity-30 hover:opacity-80 px-1 py-0.5 rounded transition-opacity" data-cmd="' + encodeURIComponent(req.command) + '" style="color:var(--text-muted);" title="Copy">📋</button></div>' +
+      '<td class="' + idClass + '"' + gapTitle + '>' + idDisplay + '</td>' +
+      '<td class="text-muted text-xs">' + formatTime(req.created_at) + '</td>' +
+      '<td>' + gwPillHtml + ' ' + escapeHtml(req.hostname || 'N/A') + ' (' + escapeHtml(req.target_ip) + ')</td>' +
+      '<td class="cell-cmd"><div class="flex items-center gap-1">' + riskHtml + '<code class="cmd-code" title="' + escapedCmd + '">' + escapedCmd + '</code><button class="js-copy-cmd flex-shrink-0 text-xs opacity-30 hover:opacity-80 px-1 py-0.5 rounded transition-opacity text-muted" data-cmd="' + encodeURIComponent(req.command) + '" title="Copy">📋</button></div>' +
         (function() {
           var _desc = describeCmd(req.command);
           if (!_desc) return '';
           var _maxLen = 120;
           if (_desc.length > _maxLen) {
             var _short = _desc.substring(0, _maxLen) + '...';
-            return '<div style="font-size:10px;color:var(--text-muted);margin-top:1px;line-height:1.4;padding-left:4px;">' +
-              '<span id="desc-short-' + req.id + '">' + escapeHtml(_short) + ' <a href="#" onclick="toggleDesc(' + req.id + ');return false;" style="color:var(--status-info);">More</a></span>' +
+            return '<div class="cmd-desc">' +
+              '<span id="desc-short-' + req.id + '">' + escapeHtml(_short) + ' <a href="#" onclick="toggleDesc(' + req.id + ');return false;" class="text-info">More</a></span>' +
               '<span id="desc-full-' + req.id + '" style="display:none;">' +
-                '<a href="#" onclick="toggleDesc(' + req.id + ');return false;" style="color:var(--text-muted);">Less</a> ' + escapeHtml(_desc) +
+                '<a href="#" onclick="toggleDesc(' + req.id + ');return false;" class="text-muted">Less</a> ' + escapeHtml(_desc) +
               '</span>' +
               '</div>';
           }
-          return '<div style="font-size:10px;color:var(--text-muted);margin-top:1px;line-height:1.4;padding-left:4px;">' + escapeHtml(_desc) + '</div>';
+          return '<div class="cmd-desc">' + escapeHtml(_desc) + '</div>';
         })() +
         '</td>' +
       '<td>' + badge + '</td>' +
