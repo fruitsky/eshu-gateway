@@ -385,6 +385,7 @@
               <div class="policy-add-row">
                 <input type="text" class="policy-add-input" id="policy-regex-black-add" placeholder="Add blocklist pattern…" onkeydown="if(event.key==='Enter')addPolicyEntry('regex_blacklist')">
                 <button class="btn btn-muted btn-xs" onclick="addPolicyEntry('regex_blacklist')">+ Add</button>
+                <button class="chip-btn" onclick="restoreCoreDefaults()" title="Re-add any shipped core safety-net patterns you removed">↺ Core defaults</button>
               </div>
             </div>
             <textarea id="policy-regex-black" class="hidden" spellcheck="false"></textarea>

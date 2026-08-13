@@ -1373,8 +1373,14 @@ async function refreshPolicyCache() {
   try {
     const res = await fetch('/api/policies'); const data = await res.json();
     const exact = data.exact_whitelist || '', regexWhite = data.regex_whitelist || '', regexBlack = data.regex_blacklist || '';
-    policiesCache = { exactLines: exact.split('\n').filter(l => l.trim()), regexWhiteLines: regexWhite.split('\n').filter(l => l.trim()), regexBlackLines: regexBlack.split('\n').filter(l => l.trim()) };
-  } catch(e) { policiesCache = { exactLines: [], regexWhiteLines: [], regexBlackLines: [] }; }
+    policiesCache = {
+      exactLines: exact.split('\n').filter(l => l.trim()),
+      regexWhiteLines: regexWhite.split('\n').filter(l => l.trim()),
+      regexBlackLines: regexBlack.split('\n').filter(l => l.trim()),
+      corePatterns: data.core_patterns || [],
+      hardPatterns: data.hard_patterns || [],
+    };
+  } catch(e) { policiesCache = { exactLines: [], regexWhiteLines: [], regexBlackLines: [], corePatterns: [], hardPatterns: [] }; }
 }
 function checkCommandMembership(cmd) {
   if (!policiesCache.exactLines) return { inExact: false, inRegexWhite: false, inBlacklist: false };
@@ -1513,33 +1519,23 @@ function decrementTimers() {
   tickGatewayTableCountdowns();
 }
 
-// ── Core Blocklist Client-Side Check (v15) ───────────────────────────────
-const HARDCORE_BLOCKED_PATTERNS = [
-  // Recursive force delete
-  'rm -rf', 'rm -fr', 'rm -r -f', 'rm -f -r', '/bin/rm -rf', '/bin/rm -fr',
-  // Filesystem format
-  'mkfs',
-  // Raw disk access
-  'dd if=', 'dd of=', '/bin/dd',
-  // Firewall flush
-  'iptables -F', 'iptables -X', 'iptables --flush', 'iptables --delete-chain',
-  'ip6tables -F', 'ip6tables -X', 'ip6tables --flush',
-  'nft flush',
-  // Power control
-  'reboot', 'shutdown', 'poweroff', 'halt',
-  'init 0', 'init 6', 'telinit 0', 'telinit 6',
-  'systemctl reboot', 'systemctl poweroff', 'systemctl halt',
-  'systemctl isolate reboot', 'systemctl isolate poweroff', 'systemctl isolate halt',
-  'busybox reboot', 'busybox poweroff', 'busybox halt', 'busybox shutdown',
-  // Evasion
-  '$(which', '`which'
-];
-
+// ── Core blocklist client-side check ────────────────────────────────────
+// Uses the registry fetched from /api/policies:
+//   core_patterns = editable shipped command-safety patterns (seeded blocklist)
+//   hard_patterns = non-editable self-protection + evasion patterns
+function coreBlockPatterns() { return (policiesCache && policiesCache.corePatterns) || []; }
+function hardBlockPatterns() { return (policiesCache && policiesCache.hardPatterns) || []; }
+function _matchAny(cmd, list) {
+  if (!cmd || !list) return null;
+  for (var i = 0; i < list.length; i++) { if (cmd.indexOf(list[i]) !== -1) return list[i]; }
+  return null;
+}
 function isHardcoreBlocked(cmd) {
-  if (!cmd) return false;
-  for (var i = 0; i < HARDCORE_BLOCKED_PATTERNS.length; i++) {
-    if (cmd.indexOf(HARDCORE_BLOCKED_PATTERNS[i]) !== -1) return true;
-  }
+  return !!( _matchAny(cmd, coreBlockPatterns()) || _matchAny(cmd, hardBlockPatterns()) );
+}
+function isCorePattern(line) {
+  var list = coreBlockPatterns();
+  for (var i = 0; i < list.length; i++) { if (list[i] === line) return true; }
   return false;
 }
 
@@ -2437,13 +2433,20 @@ function renderPolicyChips() {
     const seen = new Set();
     const lines = policyLines(type).filter(function(l){ if (seen.has(l)) return false; seen.add(l); return true; });
     setPolicyLines(type, lines);
-    if (lines.length === 0) {
-      container.innerHTML = '<span class="policy-empty text-muted">No entries yet.</span>';
-      return;
-    }
-    container.innerHTML = lines.map(function(line) {
-      return '<span class="policy-chip" title="' + line.replace(/"/g, '&quot;') + '"><code>' + escapeHtml(line) + '</code><button class="remove" data-line="' + encodeURIComponent(line) + '" title="Remove">&times;</button></span>';
+    let html = lines.map(function(line) {
+      const isCore = isCorePattern(line);
+      const shield = isCore ? '<span class="policy-shield" title="Shipped core block — relaxing this requires extra confirmation">🛡️</span> ' : '';
+      return '<span class="policy-chip' + (isCore ? ' core' : '') + '" title="' + line.replace(/"/g, '&quot;') + '">' + shield + '<code>' + escapeHtml(line) + '</code><button class="remove" data-line="' + encodeURIComponent(line) + '" data-core="' + (isCore ? '1' : '0') + '" title="Remove">&times;</button></span>';
     }).join('');
+    // Removed core patterns — shipped defaults no longer in the list: struck + Restore
+    if (type === 'regex_blacklist') {
+      const removed = coreBlockPatterns().filter(function(p){ return lines.indexOf(p) === -1; });
+      html += removed.map(function(p) {
+        return '<span class="policy-chip removed" title="' + p.replace(/"/g, '&quot;') + '"><span class="policy-shield">🛡️</span><code>' + escapeHtml(p) + '</code><button class="restore" data-line="' + encodeURIComponent(p) + '" title="Restore this core default">↺</button></span>';
+      }).join('');
+    }
+    if (!html) html = '<span class="policy-empty text-muted">No entries yet.</span>';
+    container.innerHTML = html;
   });
 }
 function addPolicyEntry(type) {
@@ -2458,15 +2461,43 @@ function addPolicyEntry(type) {
   input.value = '';
   renderPolicyChips();
 }
+function restoreCoreDefaults() {
+  const missing = coreBlockPatterns().filter(function(p){ return policyLines('regex_blacklist').indexOf(p) === -1; });
+  if (missing.length === 0) { showToast('All core defaults are present', 'info'); return; }
+  const lines = policyLines('regex_blacklist');
+  missing.forEach(function(p){ lines.push(p); });
+  setPolicyLines('regex_blacklist', lines);
+  renderPolicyChips();
+  showToast('Core defaults staged — press "Save & Push Policies" to apply', 'info');
+}
 document.addEventListener('click', function(e) {
+  const restoreBtn = e.target.closest('.policy-chip .restore');
+  if (restoreBtn) {
+    const editor = restoreBtn.closest('.policy-editor');
+    if (!editor) return;
+    const type = editor.getAttribute('data-policy');
+    const line = decodeURIComponent(restoreBtn.getAttribute('data-line'));
+    const lines = policyLines(type);
+    if (lines.indexOf(line) === -1) { lines.push(line); setPolicyLines(type, lines); }
+    renderPolicyChips();
+    return;
+  }
   const btn = e.target.closest('.policy-chip .remove');
   if (!btn) return;
   const editor = btn.closest('.policy-editor');
   if (!editor) return;
   const type = editor.getAttribute('data-policy');
   const line = decodeURIComponent(btn.getAttribute('data-line'));
-  setPolicyLines(type, policyLines(type).filter(function(l){ return l !== line; }));
-  renderPolicyChips();
+  const isCore = btn.getAttribute('data-core') === '1';
+  const doRemove = function() {
+    setPolicyLines(type, policyLines(type).filter(function(l){ return l !== line; }));
+    renderPolicyChips();
+  };
+  if (isCore) {
+    customConfirm('⚠️ Remove a shipped core block?\n\n"' + line + '" is a safety-net pattern that ships with Eshu by default. Removing it lets this kind of command reach JIT/approval.\n\nOnly continue if you are sure. Re-add it any time via "↺ Core defaults".').then(function(ok){ if (ok) doRemove(); });
+  } else {
+    doRemove();
+  }
 });
 
 async function fetchPolicies() {
@@ -2475,6 +2506,9 @@ async function fetchPolicies() {
   document.getElementById('policy-regex-white').value = data.regex_whitelist || '';
   document.getElementById('policy-regex-black').value = data.regex_blacklist || '';
   document.getElementById('policy-version-label').textContent = 'v' + (data.policy_version || '?');
+  policiesCache = policiesCache || {};
+  policiesCache.corePatterns = data.core_patterns || [];
+  policiesCache.hardPatterns = data.hard_patterns || [];
   renderPolicyChips();
 }
 async function fetchPolicyChanges() {

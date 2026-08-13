@@ -330,6 +330,15 @@
   }
   .policy-chip code { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .policy-chip:nth-child(even) { background: var(--bg-stripe); }
+  .policy-chip.core { border-color: rgba(230, 57, 70, 0.4); }
+  .policy-shield { flex-shrink: 0; }
+  .policy-chip .remove { cursor: pointer; color: var(--text-muted); font-weight: 700; padding: 0 2px; flex-shrink: 0; font-size: 13px; }
+  .policy-chip .remove:hover { color: var(--danger); }
+  .policy-chip.removed { background: var(--bg-base); }
+  .policy-chip.removed code { text-decoration: line-through; opacity: 0.6; }
+  .policy-chip.removed .policy-shield { opacity: 0.5; }
+  .policy-chip .restore { cursor: pointer; color: var(--status-info); font-weight: 700; padding: 0 2px; flex-shrink: 0; font-size: 13px; }
+  .policy-chip .restore:hover { color: var(--text-main); }
   .policy-chip .remove { cursor: pointer; color: var(--text-muted); font-weight: 700; padding: 0 2px; flex-shrink: 0; font-size: 13px; }
   .policy-chip .remove:hover { color: var(--danger); }
   .policy-empty { padding: 2px 4px; }
