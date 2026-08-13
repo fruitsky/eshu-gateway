@@ -127,7 +127,7 @@ consolidation pass.
 
 ## P1b — Fleet Run (Ansible-lite) ✅ DONE
 
-Shipped on `feat/fleet-run` (not yet merged). Queue commands in the dedicated
+Shipped on `feat/fleet-run`. Queue commands in the dedicated
 **Fleet Run** tab, then hit **Dispatch** — one approval sends everything to the
 selected gateways, with per-host results (printed output + exact run times).
 **v1 is user-only** (agent-origin submissions deferred).
@@ -193,7 +193,7 @@ Dashboard aggregates → per-gateway status + expandable output
 
 ## P2 — "What could go wrong" Risk Hint ✅ DONE
 
-Shipped on `feat/risk-hint` (not yet merged). Static, word-boundary-aware rule
+Shipped on `feat/risk-hint`. Static, word-boundary-aware rule
 map (`core/cmd_risk.py`) surfaces a one-line amber ⚠ risk hint — in the main
 queue for **pending** JIT rows (tooltip) and in the Fleet Run dispatch queue
 when a command is added. Also ships **dry-run suggestions**: when a known-safe

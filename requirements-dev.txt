@@ -1,0 +1,6 @@
+# Development / test dependencies.
+# Install alongside the runtime deps (dashboard/requirements.txt), then run pytest:
+#   pip install -r requirements-dev.txt
+#   pytest
+-r dashboard/requirements.txt
+-r tests/requirements-test.txt

@@ -77,7 +77,7 @@ Run `bash scripts/setup-git-hooks.sh` once. After that, `git commit` automatical
 - `python3 -m py_compile` on Python files
 - `node --check` on JS files
 
-### Pulling to the LXC
+### Pulling latest changes on the dashboard host
 
 The generated installers (`dashboard/static/eshu-gateway-install.sh` and
 `dashboard/static/dev/eshu-gateway-install.sh`) are git-tracked, and the
@@ -125,14 +125,18 @@ Fleet).
 Full test suite (289 tests, ~35s):
 
 ```bash
-bash tests/run.sh
+# Install runtime + test dependencies (fresh clone):
+pip install -r requirements-dev.txt
 
+bash tests/run.sh
 # Or directly:
 python3 -m pytest tests/ -v
 ```
 
-Tests use an ephemeral SQLite database — no production data is touched.
-Run this before deploying changes to the LXC server or merging to master.
+`requirements-dev.txt` (at the repo root) pulls in the runtime deps plus
+`pytest` + `httpx` — the test-suite dependencies. Tests use an ephemeral SQLite
+database — no production data is touched. Run this before deploying changes to
+the dashboard host or merging to master.
 
 ### What each test file checks
 
