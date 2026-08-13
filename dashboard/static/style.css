@@ -312,6 +312,33 @@
   .divider-bottom { border-bottom: 1px solid var(--border-color); }
   .divider-top { border-top: 1px solid var(--border-color); }
   .blocklist-box { line-height: 1.8; }
+
+  /* ── Policy chip editor ─────────────────────────────────── */
+  .policy-chips {
+    background: var(--bg-base); border: 1px solid var(--border-color);
+    border-radius: var(--radius); padding: var(--space-2);
+    min-height: 120px; max-height: 320px; overflow-y: auto;
+    display: flex; flex-wrap: wrap; gap: 6px; align-content: flex-start;
+  }
+  .policy-chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    background: var(--bg-hover); border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm); padding: 3px 8px;
+    font-size: var(--text-xs); font-family: monospace; color: var(--text-main);
+    max-width: 100%;
+  }
+  .policy-chip code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .policy-chip .remove { cursor: pointer; color: var(--text-muted); font-weight: 700; padding: 0 2px; flex-shrink: 0; font-size: 13px; }
+  .policy-chip .remove:hover { color: var(--danger); }
+  .policy-empty { padding: 2px 4px; }
+  .policy-add-row { display: flex; gap: 6px; margin-top: 6px; }
+  .policy-add-input {
+    flex: 1; background: var(--bg-base); border: 1px solid var(--border-color);
+    color: var(--text-main); padding: 6px 10px; border-radius: var(--radius-sm);
+    font-size: var(--text-xs); font-family: inherit; outline: none; width: 100%;
+  }
+  .policy-add-input:focus { border-color: var(--brand-red); box-shadow: 0 0 0 3px var(--focus-ring); }
+
   .setting-row { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); padding: var(--space-3); border-radius: var(--radius-lg); background: var(--bg-base); }
   .flag-row { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); padding: var(--space-3); border-radius: var(--radius-lg); background: var(--bg-base); border: 1px solid var(--border-color); }
   .seg-group { display: flex; border-radius: var(--radius-lg); background: var(--bg-hover); border: 1px solid var(--border-color); overflow: hidden; }

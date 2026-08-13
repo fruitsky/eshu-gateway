@@ -330,7 +330,7 @@
             <button onclick="savePolicies()" id="save-policies-btn" class="btn btn-sm">Save & Push Policies</button>
           </div>
         </div>
-        <p class="text-xs mb-4 text-muted">Gateways sync every 3s.</p>
+        <p class="text-xs mb-4 text-muted">Gateways sync every 30s.</p>
         <!-- Tester -->
         <div class="panel mb-4">
           <div class="flex items-center gap-2 mb-2">
@@ -342,8 +342,28 @@
           <div id="tester-result" class="hidden text-xs p-3 rounded-lg border"></div>
         </div>
         <div class="flex flex-col gap-4">
-          <div><label class="text-xs mb-1 block text-muted">Exact Allowlist</label><textarea id="policy-exact" class="min-h-[450px]" spellcheck="false"></textarea></div>
-          <div><label class="text-xs mb-1 block text-muted">Regex Allowlist</label><textarea id="policy-regex-white" class="min-h-[450px]" spellcheck="false"></textarea></div>
+          <div>
+            <label class="text-xs mb-1 block text-muted">Exact Allowlist</label>
+            <div class="policy-editor" data-policy="exact_whitelist">
+              <div class="policy-chips" id="policy-exact-chips"></div>
+              <div class="policy-add-row">
+                <input type="text" class="policy-add-input" id="policy-exact-add" placeholder="Add exact command…" onkeydown="if(event.key==='Enter')addPolicyEntry('exact_whitelist')">
+                <button class="btn btn-muted btn-xs" onclick="addPolicyEntry('exact_whitelist')">+ Add</button>
+              </div>
+            </div>
+            <textarea id="policy-exact" class="hidden" spellcheck="false"></textarea>
+          </div>
+          <div>
+            <label class="text-xs mb-1 block text-muted">Regex Allowlist</label>
+            <div class="policy-editor" data-policy="regex_whitelist">
+              <div class="policy-chips" id="policy-regex-white-chips"></div>
+              <div class="policy-add-row">
+                <input type="text" class="policy-add-input" id="policy-regex-white-add" placeholder="Add regex pattern…" onkeydown="if(event.key==='Enter')addPolicyEntry('regex_whitelist')">
+                <button class="btn btn-muted btn-xs" onclick="addPolicyEntry('regex_whitelist')">+ Add</button>
+              </div>
+            </div>
+            <textarea id="policy-regex-white" class="hidden" spellcheck="false"></textarea>
+          </div>
           <details class="mb-3 text-sm">
             <summary class="cursor-pointer text-warning font-semibold">🛡️ Core Gateway Blocklist</summary>
             <div class="mt-2 panel blocklist-box">
@@ -358,7 +378,17 @@
               </ul>
             </div>
           </details>
-          <div><label class="text-xs mb-1 block text-muted">Blocklist (Hard Block)</label><textarea id="policy-regex-black" class="min-h-[450px]" spellcheck="false"></textarea></div>
+          <div>
+            <label class="text-xs mb-1 block text-muted">Blocklist (Hard Block)</label>
+            <div class="policy-editor" data-policy="regex_blacklist">
+              <div class="policy-chips" id="policy-regex-black-chips"></div>
+              <div class="policy-add-row">
+                <input type="text" class="policy-add-input" id="policy-regex-black-add" placeholder="Add blocklist pattern…" onkeydown="if(event.key==='Enter')addPolicyEntry('regex_blacklist')">
+                <button class="btn btn-muted btn-xs" onclick="addPolicyEntry('regex_blacklist')">+ Add</button>
+              </div>
+            </div>
+            <textarea id="policy-regex-black" class="hidden" spellcheck="false"></textarea>
+          </div>
         </div>
       </div>
     </div>

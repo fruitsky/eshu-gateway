@@ -1302,6 +1302,7 @@ async function handleDenyBlocklist() {
   const currentBlocklist = rbTextarea.value.trim();
   rbTextarea.value = currentBlocklist ? currentBlocklist + '\n' + lastDeniedCmd : lastDeniedCmd;
   exTextarea.value = exTextarea.value.split('\n').filter(l => l.trim() !== lastDeniedCmd).join('\n');
+  renderPolicyChips();
   await savePoliciesSilent();
   const gwRes = await fetch('/api/gateways'); const gws = await gwRes.json();
   showToast('✅ Blocklisted & pushed to ' + gws.length + ' gateway(s)', 'success');
@@ -1668,6 +1669,11 @@ async function addToPolicy(cmd, policyType) {
     showToast('✅ Removed from Blocklist', 'success');
     fetchPolicies(); fetchRequests(); return;
   }
+  // Dedupe: skip if the target line is already present
+  const escapedRegex = '^' + cmd.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$';
+  if (policyType === 'exact_whitelist' && policyLines('exact_whitelist').indexOf(cmd) !== -1) { showToast('Already in Exact Allowlist', 'info'); return; }
+  if (policyType === 'regex_whitelist' && policyLines('regex_whitelist').indexOf(escapedRegex) !== -1) { showToast('Already in Regex Allowlist', 'info'); return; }
+  if (policyType === 'regex_blacklist' && policyLines('regex_blacklist').indexOf(cmd) !== -1) { showToast('Already in Blocklist', 'info'); return; }
   if (!(await customConfirm('Add "' + cmd + '" to ' + labels[policyType] + '?'))) return;
   await fetchPolicies();
   const exTextarea = document.getElementById('policy-exact'), rwTextarea = document.getElementById('policy-regex-white'), rbTextarea = document.getElementById('policy-regex-black');
@@ -2392,12 +2398,65 @@ function updateFleetCountdowns() {
 }
 
 // ── Policies ─────────────────────────────────────────────────────────────
+// ── Policy chip editor ────────────────────────────────────────────────
+const POLICY_IDS = { exact_whitelist: 'policy-exact', regex_whitelist: 'policy-regex-white', regex_blacklist: 'policy-regex-black' };
+const POLICY_ADD_INPUTS = { exact_whitelist: 'policy-exact-add', regex_whitelist: 'policy-regex-white-add', regex_blacklist: 'policy-regex-black-add' };
+const POLICY_LABELS = { exact_whitelist: 'Exact Allowlist', regex_whitelist: 'Regex Allowlist', regex_blacklist: 'Blocklist' };
+
+function policyLines(type) {
+  const ta = document.getElementById(POLICY_IDS[type]);
+  return (ta ? ta.value : '').split('\n').map(function(s){ return s.trim(); }).filter(Boolean);
+}
+function setPolicyLines(type, lines) {
+  const ta = document.getElementById(POLICY_IDS[type]);
+  if (ta) ta.value = lines.join('\n');
+}
+function renderPolicyChips() {
+  Object.keys(POLICY_IDS).forEach(function(type) {
+    const container = document.getElementById(POLICY_IDS[type] + '-chips');
+    if (!container) return;
+    const seen = new Set();
+    const lines = policyLines(type).filter(function(l){ if (seen.has(l)) return false; seen.add(l); return true; });
+    setPolicyLines(type, lines);
+    if (lines.length === 0) {
+      container.innerHTML = '<span class="policy-empty text-muted">No entries yet.</span>';
+      return;
+    }
+    container.innerHTML = lines.map(function(line) {
+      return '<span class="policy-chip" title="' + line.replace(/"/g, '&quot;') + '"><code>' + escapeHtml(line) + '</code><button class="remove" data-line="' + encodeURIComponent(line) + '" title="Remove">&times;</button></span>';
+    }).join('');
+  });
+}
+function addPolicyEntry(type) {
+  const input = document.getElementById(POLICY_ADD_INPUTS[type]);
+  if (!input) return;
+  const val = input.value.trim();
+  if (!val) return;
+  const lines = policyLines(type);
+  if (lines.indexOf(val) !== -1) { showToast('Already in ' + POLICY_LABELS[type], 'info'); return; }
+  lines.push(val);
+  setPolicyLines(type, lines);
+  input.value = '';
+  renderPolicyChips();
+}
+document.addEventListener('click', function(e) {
+  const btn = e.target.closest('.policy-chip .remove');
+  if (!btn) return;
+  const editor = btn.closest('.policy-editor');
+  if (!editor) return;
+  const type = editor.getAttribute('data-policy');
+  const line = decodeURIComponent(btn.getAttribute('data-line'));
+  setPolicyLines(type, policyLines(type).filter(function(l){ return l !== line; }));
+  renderPolicyChips();
+});
+
 async function fetchPolicies() {
   const res = await fetch('/api/policies'); const data = await res.json();
   document.getElementById('policy-exact').value = data.exact_whitelist || '';
   document.getElementById('policy-regex-white').value = data.regex_whitelist || '';
   document.getElementById('policy-regex-black').value = data.regex_blacklist || '';
   document.getElementById('policy-version-label').textContent = 'v' + (data.policy_version || '?');
+  renderPolicyChips();
 }
 async function fetchPolicyChanges() {
   const res = await fetch('/api/policy_changes'); const changes = await res.json();
@@ -2441,8 +2500,21 @@ async function testPolicy() {
     if (data.action === 'blocked') { bg='rgba(251,146,60,0.1)'; border='rgba(251,146,60,0.3)'; text='#fb923c'; icon='🔴'; desc='Blocked: <code style="color:#fb923c;">' + (data.details[0] ? data.details[0].pattern : 'unknown') + '</code>'; }
     else if (data.action === 'auto_approved') { bg='rgba(74,222,128,0.1)'; border='rgba(74,222,128,0.3)'; text='var(--status-success)'; icon='✅'; desc=(data.details[0] && data.details[0].type === 'exact_whitelist') ? 'Auto-Approved (Exact Allowlist)' : 'Auto-Approved: <code style="color:var(--status-success);">' + (data.details[0] ? data.details[0].pattern : '') + '</code>'; }
     else { bg='rgba(251,191,36,0.1)'; border='rgba(251,191,36,0.3)'; text='var(--status-warning)'; icon='⏳'; desc='Would require JIT Approval'; }
-    rd.innerHTML = '<div class="result-box" style="background:' + bg + ';color:' + text + ';border-color:' + border + ';">' + icon + ' <strong>' + data.action.replace('_',' ').toUpperCase() + '</strong> — ' + desc + '</div>';
+    rd.innerHTML = '<div class="result-box" style="background:' + bg + ';color:' + text + ';border-color:' + border + ';">' + icon + ' <strong>' + data.action.replace('_',' ').toUpperCase() + '</strong> — ' + desc + '</div>' + testerAddButtons(data.action, cmd);
   } catch(err) { rd.innerHTML = '<div class="result-box" style="background:var(--bg-base);color:var(--text-muted);">⚠️ ' + err.message + '</div>'; }
+}
+
+function testerAddButtons(action, cmd) {
+  const enc = encodeURIComponent(cmd);
+  if (action === 'blocked') {
+    return '<div class="flex gap-2 mt-2">' +
+      '<button class="chip-btn danger" onclick="addToPolicy(decodeURIComponent(\'' + enc + '\'), \'regex_blacklist\')">＋ Blocklist</button>' +
+      '</div>';
+  }
+  return '<div class="flex gap-2 mt-2">' +
+    '<button class="chip-btn" onclick="addToPolicy(decodeURIComponent(\'' + enc + '\'), \'exact_whitelist\')">＋ Exact</button>' +
+    '<button class="chip-btn info" onclick="addToPolicy(decodeURIComponent(\'' + enc + '\'), \'regex_whitelist\')">＋ Regex</button>' +
+    '</div>';
 }
 async function seedEdge() {
   var confirmMsg = 'Seed Edge from current Build? This replaces any existing Edge installer.';
