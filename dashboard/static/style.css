@@ -295,6 +295,20 @@
   .risk-flag { color: var(--status-warning); cursor: help; }
   .select-actions { width: 190px; padding: 4px 8px; font-size: 11px; }
 
+  /* ── Statistics bars / auto-pct ─────────────────────────── */
+  .bar-track { width: 120px; height: 14px; background: var(--bg-base); border-radius: 3px; overflow: hidden; flex-shrink: 0; }
+  .bar-track.sm { width: 80px; height: 10px; }
+  .bar-track .fill { height: 100%; background: rgba(96, 165, 250, 0.35); border-radius: 3px; min-width: 2px; }
+  .bar-track .fill.danger { background: var(--danger); }
+  .pct-high { color: var(--status-success); }
+  .pct-mid { color: var(--status-warning); }
+  .pct-low { color: var(--text-muted); }
+
+  /* ── Suggestions / misc ─────────────────────────────────── */
+  .new-tag { background: var(--brand-red); color: white; font-size: 9px; padding: 1px 5px; border-radius: 8px; font-weight: 700; flex-shrink: 0; }
+  .divider-bottom { border-bottom: 1px solid var(--border-color); }
+  .divider-top { border-top: 1px solid var(--border-color); }
+
   /* ── Gateway table ──────────────────────────────────────── */
   .conn-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; vertical-align: middle; }
   .conn-dot.on { background: var(--status-success); }
@@ -324,6 +338,7 @@
   /* ── Approved Windows table ─────────────────────────────── */
   .origin-ai { font-size: 11px; color: var(--status-info); opacity: 0.85; }
   .origin-human { font-size: 11px; color: var(--text-muted); opacity: 0.65; }
+  .stats-days { width: 130px; flex-shrink: 0; background: var(--bg-surface); color: var(--text-main); border: 1px solid var(--border-color); border-radius: var(--radius-sm); padding: 4px 10px; }
   .win-cmd-code {
     background: var(--bg-base); color: var(--text-main);
     display: block; max-width: 220px;
@@ -716,7 +731,10 @@
   .space-y-3 > * + * { margin-top: 12px; }
 
   .w-3 { width: 12px; }
+  .w-4 { width: 16px; }
+  .w-5 { width: 20px; }
   .w-8 { width: 32px; }
+  .w-10 { width: 40px; }
   .w-16 { width: 64px; }
   .w-24 { width: 96px; }
   .w-28 { width: 112px; }
@@ -728,6 +746,7 @@
   .h-full { height: 100%; }
   .h-3\/4 { height: 75%; }
   .min-w-\[220px\] { min-width: 220px; }
+  .min-w-0 { min-width: 0; }
   .min-h-\[450px\] { min-height: 450px; }
   .max-w-md { max-width: 448px; }
   .max-w-2xl { max-width: 672px; }

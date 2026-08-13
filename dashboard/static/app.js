@@ -1594,7 +1594,7 @@ function renderSuggestions() {
   var d = _suggestionsData;
   var list = document.getElementById('suggestions-list');
   var summary = document.getElementById('suggestions-summary');
-  if (!d) { list.innerHTML = '<p style="color:var(--text-muted);">Loading...</p>'; return; }
+  if (!d) { list.innerHTML = '<p class="text-muted">Loading...</p>'; return; }
   if (summary) {
     var s = (d.updated_at ? new Date(d.updated_at * 1000).toLocaleTimeString() : '') +
       ' · ' + d.total_gaps + ' gap(s)' +
@@ -1602,30 +1602,30 @@ function renderSuggestions() {
     summary.textContent = s;
   }
   if (!d.gateways || d.gateways.length === 0) {
-    list.innerHTML = '<p style="color:var(--text-muted);">No gaps found. All repeatedly-approved commands are allowlisted or dismissed.</p>';
+    list.innerHTML = '<p class="text-muted">No gaps found. All repeatedly-approved commands are allowlisted or dismissed.</p>';
     return;
   }
   list.innerHTML = d.gateways.map(function(g) {
     var rows = g.gaps.map(function(c) {
-      return '<div class="flex items-start gap-2 mb-2 pb-2" style="border-bottom:1px solid var(--border-color);font-size:11px;">' +
-        '<div style="flex:1;min-width:0;">' +
+      return '<div class="flex items-start gap-2 mb-2 pb-2 text-xs divider-bottom">' +
+        '<div class="flex-1 min-w-0">' +
           '<div class="flex items-center gap-2">' +
-            '<span style="font-family:monospace;color:var(--text-main);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + escapeHtml(c.command) + '</span>' +
-            (c.is_new ? '<span style="background:var(--brand-red);color:white;font-size:9px;padding:1px 5px;border-radius:8px;font-weight:700;flex-shrink:0;">NEW</span>' : '') +
+            '<span class="font-mono truncate">' + escapeHtml(c.command) + '</span>' +
+            (c.is_new ? '<span class="new-tag">NEW</span>' : '') +
           '</div>' +
-          (c.description ? '<div style="color:var(--text-muted);margin-top:1px;">' + escapeHtml(c.description) + '</div>' : '') +
-          '<div style="color:var(--status-warning);margin-top:1px;">Approved ' + c.approved_count + 'x</div>' +
+          (c.description ? '<div class="text-muted mt-1">' + escapeHtml(c.description) + '</div>' : '') +
+          '<div class="text-warning mt-1">Approved ' + c.approved_count + 'x</div>' +
         '</div>' +
-        '<div class="flex gap-1 mt-1" style="flex-shrink:0;">' +
-          '<button class="btn btn-xs" style="background:var(--status-success);color:white;padding:2px 8px;font-size:10px;" onclick="suggestionAllowlist(\'' + encodeCmd(c.command) + '\')">+ Allowlist</button>' +
-          '<button class="btn btn-xs" style="background:transparent;color:var(--text-muted);border:1px solid var(--border-color);padding:2px 8px;font-size:10px;" onclick="dismissPolicyGap(\'' + encodeCmd(c.command) + '\')">Dismiss</button>' +
+        '<div class="flex gap-1 mt-1 flex-shrink-0">' +
+          '<button class="btn btn-approve btn-xs" onclick="suggestionAllowlist(\'' + encodeCmd(c.command) + '\')">+ Allowlist</button>' +
+          '<button class="chip-btn" onclick="dismissPolicyGap(\'' + encodeCmd(c.command) + '\')">Dismiss</button>' +
         '</div>' +
         '</div>';
     }).join('');
     return '<div class="mb-4">' +
-      '<div class="flex items-center gap-2 mb-2" style="border-top:1px solid var(--border-color);padding-top:8px;">' +
-        gwPill(g.hostname) + ' <strong style="color:var(--text-main);">' + escapeHtml(g.hostname) + '</strong>' +
-        '<span style="color:var(--text-muted);font-size:10px;">(' + escapeHtml(g.ip) + ')</span>' +
+      '<div class="flex items-center gap-2 mb-2 divider-top pt-2">' +
+        gwPill(g.hostname) + ' <strong class="text-main">' + escapeHtml(g.hostname) + '</strong>' +
+        '<span class="text-xs text-muted">(' + escapeHtml(g.ip) + ')</span>' +
       '</div>' +
       rows +
       '</div>';
@@ -2891,14 +2891,14 @@ function renderStatistics() {
   d.per_gateway.forEach(function(g) {
     var id = deriveGatewayIdentity(g.hostname || g.ip);
     var selected = _selectedStatsGateways.has(g.ip);
-    pillHtml += '<span class="stats-gw-pill ' + (selected ? 'selected' : '') + '" onclick="toggleStatsGateway(\'' + g.ip + '\')" style="cursor:pointer;">' +
+    pillHtml += '<span class="stats-gw-pill ' + (selected ? 'selected' : '') + '" onclick="toggleStatsGateway(\'' + g.ip + '\')">' +
       '<span class="stats-gw-dot" style="background:' + id.color + ';"></span>' +
-      escapeHtml(g.hostname || g.ip) + devBadge({mode: g.mode}) + ' <span style="font-size:10px;color:var(--text-muted);">' + g.total + '</span>' +
+      escapeHtml(g.hostname || g.ip) + devBadge({mode: g.mode}) + ' <span class="text-xs text-muted">' + g.total + '</span>' +
       '</span>';
   });
   if (d.per_gateway.length > 0) {
-    pillHtml += '<span class="text-xs" style="color:var(--text-muted);cursor:pointer;margin-left:6px;" onclick="_selectedStatsGateways.clear();_statsData.per_gateway.forEach(function(g){_selectedStatsGateways.add(g.ip)});renderStatistics();">All</span>';
-    pillHtml += '<span class="text-xs" style="color:var(--text-muted);cursor:pointer;" onclick="_selectedStatsGateways.clear();renderStatistics();">None</span>';
+    pillHtml += '<span class="text-xs text-muted cursor-pointer ml-1" onclick="_selectedStatsGateways.clear();_statsData.per_gateway.forEach(function(g){_selectedStatsGateways.add(g.ip)});renderStatistics();">All</span>';
+    pillHtml += '<span class="text-xs text-muted cursor-pointer" onclick="_selectedStatsGateways.clear();renderStatistics();">None</span>';
   }
   filterEl.innerHTML = pillHtml;
 
@@ -2907,7 +2907,7 @@ function renderStatistics() {
   filtered.sort(function(a, b) { return b.total - a.total; });
   var tbody = document.getElementById('stats-summary-body');
   if (filtered.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="9" class="px-4 py-3" style="color:var(--text-muted);">No gateways selected.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="9" class="px-4 py-3 text-muted">No gateways selected.</td></tr>';
   } else {
     tbody.innerHTML = filtered.map(function(g) {
       var id = deriveGatewayIdentity(g.hostname || g.ip);
@@ -2915,14 +2915,14 @@ function renderStatistics() {
       var autoPct = g.total > 0 ? Math.round(((g.auto_approved || 0) + jitApproved) / g.total * 100) : 0;
       return '<tr>' +
         '<td>' + gwPill(g.hostname || g.ip) + '</td>' +
-        '<td style="color:var(--text-main);">' + escapeHtml(g.hostname || g.ip) + devBadge(g) + '</td>' +
-        '<td style="color:var(--text-muted);font-family:monospace;">' + escapeHtml(g.ip) + '</td>' +
-        '<td class="text-right" style="color:var(--text-main);font-weight:600;">' + (g.total || 0) + '</td>' +
-        '<td class="text-right" style="color:var(--status-info);">' + (g.auto_approved || 0) + '</td>' +
-        '<td class="text-right" style="color:var(--status-success);">' + jitApproved + '</td>' +
-        '<td class="text-right" style="color:#fb923c;">' + (g.blocked || 0) + '</td>' +
-        '<td class="text-right" style="color:var(--brand-red);">' + (g.denied || 0) + '</td>' +
-        '<td class="text-right"><span style="font-weight:600;color:' + (autoPct >= 80 ? 'var(--status-success)' : autoPct >= 50 ? 'var(--status-warning)' : 'var(--text-muted)') + ';">' + autoPct + '%</span></td>' +
+        '<td>' + escapeHtml(g.hostname || g.ip) + devBadge(g) + '</td>' +
+        '<td class="text-muted font-mono">' + escapeHtml(g.ip) + '</td>' +
+        '<td class="text-right font-semibold">' + (g.total || 0) + '</td>' +
+        '<td class="text-right text-info">' + (g.auto_approved || 0) + '</td>' +
+        '<td class="text-right text-success">' + jitApproved + '</td>' +
+        '<td class="text-right stat-blocked">' + (g.blocked || 0) + '</td>' +
+        '<td class="text-right text-danger">' + (g.denied || 0) + '</td>' +
+        '<td class="text-right"><span class="font-semibold ' + (autoPct >= 80 ? 'pct-high' : autoPct >= 50 ? 'pct-mid' : 'pct-low') + '">' + autoPct + '%</span></td>' +
         '</tr>';
     }).join('');
   }
@@ -2934,22 +2934,20 @@ function renderStatistics() {
     topCmdsBody.innerHTML = d.top_commands.map(function(c, i) {
       var pct = maxCount > 0 ? (c.count / maxCount) * 100 : 0;
       return '<tr>' +
-        '<td class="text-center" style="font-size:11px;color:var(--text-muted);">' + (i + 1) + '</td>' +
-        '<td style="font-family:monospace;font-size:12px;color:var(--text-main);">' +
+        '<td class="text-center text-xs text-muted">' + (i + 1) + '</td>' +
+        '<td class="font-mono text-xs">' +
           '<div class="flex items-center gap-2">' +
-            '<span style="flex:1;">' + escapeHtml(c.command) + '</span>' +
-            '<div style="width:120px;height:14px;background:var(--bg-base);border-radius:3px;overflow:hidden;flex-shrink:0;">' +
-              '<div style="width:' + pct + '%;height:100%;background:rgba(96,165,250,0.35);border-radius:3px;min-width:' + (pct > 0 ? '2px' : '0') + ';"></div>' +
-            '</div>' +
+            '<span class="flex-1">' + escapeHtml(c.command) + '</span>' +
+            '<div class="bar-track"><div class="fill" style="width:' + pct + '%;"></div></div>' +
           '</div>' +
-          (c.description ? '<div style="font-size:10px;color:var(--text-muted);margin-top:1px;line-height:1.4;">' + escapeHtml(c.description) + '</div>' : '') +
+          (c.description ? '<div class="cmd-desc">' + escapeHtml(c.description) + '</div>' : '') +
         '</td>' +
-        '<td style="font-size:11px;color:var(--text-muted);">' + c.pct + '%</td>' +
-        '<td class="text-right" style="font-family:monospace;font-size:12px;color:var(--text-main);">' + c.count + '</td>' +
+        '<td class="text-xs text-muted">' + c.pct + '%</td>' +
+        '<td class="text-right font-mono text-xs">' + c.count + '</td>' +
         '</tr>';
     }).join('');
   } else {
-    topCmdsBody.innerHTML = '<tr><td colspan="4" class="px-4 py-3" style="color:var(--text-muted);">No command data available.</td></tr>';
+    topCmdsBody.innerHTML = '<tr><td colspan="4" class="px-4 py-3 text-muted">No command data available.</td></tr>';
   }
 
   // Summary cards at the top
@@ -2966,11 +2964,13 @@ function renderStatistics() {
     });
   }
   var gh = d.gateway_health || {};
+  var autoCls = autoAvg >= 80 ? 'stat-approved' : autoAvg >= 50 ? 'stat-pending' : 'stat-denied';
+  var gwCls = (gh.online_gateways || 0) === (gh.total_gateways || 0) ? 'stat-approved' : 'stat-pending';
   summaryEl.innerHTML =
-    '<div class="stat-card"><div class="stat-value" style="color:var(--text-main);">' + totalCmds + '</div><div class="stat-label">Commands</div></div>' +
-    '<div class="stat-card"><div class="stat-value" style="color:' + (autoAvg >= 80 ? 'var(--status-success)' : autoAvg >= 50 ? 'var(--status-warning)' : 'var(--brand-red)') + ';">' + autoAvg + '%</div><div class="stat-label">Automation</div></div>' +
-    '<div class="stat-card"><div class="stat-value" style="color:' + ((gh.online_gateways || 0) === (gh.total_gateways || 0) ? 'var(--status-success)' : 'var(--status-warning)') + ';">' + (gh.online_gateways || 0) + ' / ' + (gh.total_gateways || 0) + '</div><div class="stat-label">Gateways Online</div></div>' +
-    '<div class="stat-card"><div class="stat-value" style="color:var(--status-info);">' + totalJit + '</div><div class="stat-label">JIT Approvals</div></div>';
+    '<div class="stat-card"><div class="stat-value text-main">' + totalCmds + '</div><div class="stat-label">Commands</div></div>' +
+    '<div class="stat-card"><div class="stat-value ' + autoCls + '">' + autoAvg + '%</div><div class="stat-label">Automation</div></div>' +
+    '<div class="stat-card"><div class="stat-value ' + gwCls + '">' + (gh.online_gateways || 0) + ' / ' + (gh.total_gateways || 0) + '</div><div class="stat-label">Gateways Online</div></div>' +
+    '<div class="stat-card"><div class="stat-value stat-auto">' + totalJit + '</div><div class="stat-label">JIT Approvals</div></div>';
 
   // Denied commands
   var deniedEl = document.getElementById('stats-denied');
@@ -2978,19 +2978,17 @@ function renderStatistics() {
     var maxDenied = d.top_denied[0].count;
     deniedEl.innerHTML = d.top_denied.map(function(c, i) {
       var pct = maxDenied > 0 ? (c.count / maxDenied) * 100 : 0;
-      return '<div class="flex items-center gap-2 mb-1" style="font-size:11px;">' +
-        '<span style="width:16px;text-align:right;color:var(--text-muted);flex-shrink:0;">' + (i + 1) + '</span>' +
+      return '<div class="flex items-center gap-2 mb-1 text-xs">' +
+        '<span class="w-4 text-right text-muted flex-shrink-0">' + (i + 1) + '</span>' +
         '<div class="flex-1 flex items-center gap-2" style="min-width:0;">' +
-          '<span style="flex:1;font-family:monospace;color:var(--brand-red);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + escapeHtml(c.command) + '</span>' +
-          '<div style="width:80px;height:10px;background:var(--bg-base);border-radius:3px;overflow:hidden;flex-shrink:0;">' +
-            '<div style="width:' + pct + '%;height:100%;background:var(--brand-red);border-radius:3px;min-width:2px;"></div>' +
-          '</div>' +
+          '<span class="flex-1 font-mono text-danger truncate">' + escapeHtml(c.command) + '</span>' +
+          '<div class="bar-track sm"><div class="fill danger" style="width:' + pct + '%;"></div></div>' +
         '</div>' +
-        '<span style="width:20px;text-align:right;color:var(--text-muted);flex-shrink:0;">' + c.count + '</span>' +
+        '<span class="w-5 text-right text-muted flex-shrink-0">' + c.count + '</span>' +
         '</div>';
     }).join('');
   } else {
-    deniedEl.innerHTML = '<p style="color:var(--text-muted);">No denied commands in this period.</p>';
+    deniedEl.innerHTML = '<p class="text-muted">No denied commands in this period.</p>';
   }
 
   // Command categories
@@ -3008,17 +3006,15 @@ function renderStatistics() {
         'Editing': '#c4b5fd', 'Utilities': '#a7f3d0'
       };
       var color = catColors[c.category] || 'var(--text-muted)';
-      return '<div class="flex items-center gap-2 mb-1" style="font-size:11px;">' +
-        '<span style="width:12px;height:12px;border-radius:3px;background:' + color + ';flex-shrink:0;"></span>' +
-        '<span style="flex:1;color:var(--text-main);">' + c.category + '</span>' +
-        '<div style="width:80px;height:10px;background:var(--bg-base);border-radius:3px;overflow:hidden;flex-shrink:0;">' +
-          '<div style="width:' + pct + '%;height:100%;background:' + color + ';border-radius:3px;min-width:2px;"></div>' +
-        '</div>' +
-        '<span style="width:40px;text-align:right;color:var(--text-muted);flex-shrink:0;">' + c.pct + '%</span>' +
+      return '<div class="flex items-center gap-2 mb-1 text-xs">' +
+        '<span class="inline-flex w-3 h-3 flex-shrink-0" style="background:' + color + ';border-radius:3px;"></span>' +
+        '<span class="flex-1">' + c.category + '</span>' +
+        '<div class="bar-track sm"><div class="fill" style="width:' + pct + '%;background:' + color + ';"></div></div>' +
+        '<span class="w-10 text-right text-muted flex-shrink-0">' + c.pct + '%</span>' +
         '</div>';
     }).join('');
   } else {
-    catEl.innerHTML = '<p style="color:var(--text-muted);">No category data available.</p>';
+    catEl.innerHTML = '<p class="text-muted">No category data available.</p>';
   }
 }
 

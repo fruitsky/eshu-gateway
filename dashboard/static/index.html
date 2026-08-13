@@ -268,8 +268,8 @@
     <!-- STATISTICS VIEW -->
     <div id="view-stats" class="hidden w-full">
       <div class="flex items-center gap-3 mb-4">
-        <span style="color:var(--text-main);font-weight:600;">Command Statistics</span>
-        <select id="stats-days" onchange="fetchStatistics()" class="text-xs" style="width:130px;flex-shrink:0;background:var(--bg-surface);color:var(--text-main);border:1px solid var(--border-color);border-radius:6px;padding:4px 10px;">
+        <span class="text-main font-semibold">Command Statistics</span>
+        <select id="stats-days" onchange="fetchStatistics()" class="text-xs stats-days">
           <option value="7">7 days</option>
           <option value="14" selected>14 days</option>
           <option value="30">30 days</option>
@@ -277,43 +277,43 @@
           <option value="365">1 year</option>
         </select>
         <button onclick="fetchStatistics()" class="btn btn-muted btn-xs">Refresh</button>
-        <a href="/api/statistics/export?days=14&format=csv" class="btn btn-muted btn-xs" style="text-decoration:none;" download>CSV</a>
+        <a href="/api/statistics/export?days=14&format=csv" class="btn btn-muted btn-xs" download>CSV</a>
       </div>
       <div id="stats-summary-cards" class="grid grid-cols-4 gap-3 mb-5"></div>
       <div class="widget mb-5" id="suggestions-widget">
         <div class="widget-header">
           Policy Suggestions
-          <span id="suggestions-summary" class="text-xs" style="color:var(--text-muted);"></span>
-          <div style="flex:1;"></div>
+          <span id="suggestions-summary" class="text-xs text-muted"></span>
+          <div class="flex-1"></div>
           <button onclick="markSuggestionsSeen()" class="btn btn-muted btn-xs">Mark All Seen</button>
           <button onclick="refreshSuggestions()" class="btn btn-muted btn-xs">Refresh</button>
         </div>
-        <p class="text-xs mb-3" style="color:var(--text-muted);">Commands repeatedly approved via JIT that aren't yet allowlisted. Review periodically and allowlist the ones you trust to reduce JIT noise.</p>
-        <div id="suggestions-list"><p style="color:var(--text-muted);">Loading...</p></div>
+        <p class="text-xs mb-3 text-muted">Commands repeatedly approved via JIT that aren't yet allowlisted. Review periodically and allowlist the ones you trust to reduce JIT noise.</p>
+        <div id="suggestions-list"><p class="text-muted">Loading...</p></div>
       </div>
       <div class="grid grid-cols-1 lg:grid-cols-2 gap-5 items-stretch">
         <div class="widget h-full">
           <div class="widget-header">Denied Commands</div>
-          <p class="text-xs mb-2" style="color:var(--text-muted);">Most frequently denied commands — consider blocklist refinement</p>
-          <div id="stats-denied"><p style="color:var(--text-muted);">Loading...</p></div>
+          <p class="text-xs mb-2 text-muted">Most frequently denied commands — consider blocklist refinement</p>
+          <div id="stats-denied"><p class="text-muted">Loading...</p></div>
         </div>
         <div class="widget h-full">
           <div class="widget-header">Command Categories</div>
-          <p class="text-xs mb-2" style="color:var(--text-muted);">Breakdown of gateway activity by category</p>
-          <div id="stats-categories"><p style="color:var(--text-muted);">Loading...</p></div>
+          <p class="text-xs mb-2 text-muted">Breakdown of gateway activity by category</p>
+          <div id="stats-categories"><p class="text-muted">Loading...</p></div>
         </div>
       </div>
       <div class="widget mt-5">
         <div class="widget-header">Gateway Summary</div>
         <div id="stats-gateway-filters" class="flex flex-wrap items-center gap-2 mb-4"></div>
-        <div class="table-wrap"><table><thead><tr><th></th><th>Gateway</th><th>IP</th><th class="text-right">Total</th><th class="text-right">Auto</th><th class="text-right">JIT</th><th class="text-right">Blocked</th><th class="text-right">Denied</th><th class="text-right">Auto %</th></tr></thead><tbody id="stats-summary-body"><tr><td colspan="9" class="px-4 py-3" style="color:var(--text-muted);">Loading...</td></tr></tbody></table></div>
+        <div class="table-wrap"><table><thead><tr><th></th><th>Gateway</th><th>IP</th><th class="text-right">Total</th><th class="text-right">Auto</th><th class="text-right">JIT</th><th class="text-right">Blocked</th><th class="text-right">Denied</th><th class="text-right">Auto %</th></tr></thead><tbody id="stats-summary-body"><tr><td colspan="9" class="px-4 py-3 text-muted">Loading...</td></tr></tbody></table></div>
       </div>
       <div class="widget mt-5">
         <div class="widget-header">Top 10 Commands</div>
-        <p class="text-xs mb-3" style="color:var(--text-muted);">Most frequent base commands (split on && / || / ; / |)</p>
+        <p class="text-xs mb-3 text-muted">Most frequent base commands (split on && / || / ; / |)</p>
         <div class="table-wrap"><table>
           <thead><tr><th class="w-8 text-center">#</th><th>Command</th><th class="w-24">Frequency</th><th class="text-right w-16">Count</th></tr></thead>
-          <tbody id="stats-topcmds-body"><tr><td colspan="4" class="px-4 py-3" style="color:var(--text-muted);">Loading...</td></tr></tbody>
+          <tbody id="stats-topcmds-body"><tr><td colspan="4" class="px-4 py-3 text-muted">Loading...</td></tr></tbody>
         </table></div>
       </div>
     </div>
