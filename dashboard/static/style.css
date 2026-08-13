@@ -295,7 +295,7 @@
   }
   .cmd-desc { font-size: 12px; color: var(--text-muted); margin-top: 1px; line-height: 1.4; padding-left: 4px; }
   .risk-flag { color: var(--status-warning); cursor: help; }
-  .select-actions { width: 190px; padding: 4px 8px; font-size: 11px; }
+  .select-actions { width: 190px; padding: 4px 8px; font-size: var(--text-xs); }
   .chip-actions { width: 190px; justify-content: center; }
 
   /* ── Statistics bars / auto-pct ─────────────────────────── */
