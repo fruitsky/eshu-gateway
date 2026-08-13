@@ -11,11 +11,12 @@
     --status-success: #4ade80;
     --status-warning: #fbbf24;
     --status-info: #60a5fa;
-    --accent-blue: #3b82f6;
-    --accent-blue-hover: #2563eb;
+    --primary: #f1f1f1;
+    --on-primary: #101012;
+    --primary-hover: #d4d4d8;
     --danger: #e63946;
     --danger-hover: #b92b38;
-    --focus-ring: rgba(96, 165, 250, 0.5);
+    --focus-ring: rgba(230, 57, 70, 0.5);
     --space-1: 4px;
     --space-2: 8px;
     --space-3: 12px;
@@ -213,15 +214,15 @@
   .btn {
     padding: 8px 18px; border-radius: var(--radius-sm); font-size: var(--text-sm); font-weight: 600;
     cursor: pointer; border: none; transition: all 0.2s; font-family: inherit;
-    background: var(--accent-blue); color: white; text-decoration: none;
+    background: var(--primary); color: var(--on-primary); text-decoration: none;
     display: inline-flex; align-items: center; justify-content: center; gap: 6px;
   }
-  .btn:hover { background: var(--accent-blue-hover); }
+  .btn:hover { background: var(--primary-hover); box-shadow: 0 0 12px rgba(241, 241, 241, 0.2); }
   .btn:disabled { opacity: 0.45; cursor: not-allowed; }
   .btn-approve { background: var(--status-success); color: var(--bg-base); }
   .btn-approve:hover { background: var(--status-success); box-shadow: 0 0 12px rgba(74, 222, 128, 0.4); }
-  .btn-danger { background: var(--danger); color: white; }
-  .btn-danger:hover { background: var(--danger-hover); box-shadow: 0 0 12px var(--brand-red-glow); }
+  .btn-danger { background: transparent; color: var(--danger); border: 1px solid var(--danger); }
+  .btn-danger:hover { background: rgba(230, 57, 70, 0.08); border-color: var(--danger-hover); color: var(--danger-hover); }
   .btn-deny { background: transparent; border: 1px solid var(--text-muted); color: var(--text-muted); }
   .btn-deny:hover { border-color: var(--text-main); color: var(--text-main); }
   .btn-muted { background: var(--bg-hover); border: 1px solid var(--border-color); color: var(--text-muted); }
@@ -430,7 +431,7 @@
     font-size: 13px; font-family: inherit; outline: none;
     transition: border-color 0.2s; width: 100%;
   }
-  input:focus, textarea:focus, select:focus { border-color: var(--accent-blue); box-shadow: 0 0 0 3px var(--focus-ring); }
+  input:focus, textarea:focus, select:focus { border-color: var(--brand-red); box-shadow: 0 0 0 3px var(--focus-ring); }
   textarea { font-family: "Cascadia Code", "JetBrains Mono", Consolas, monospace; font-size: 13px; resize: vertical; min-height: 200px; padding: 16px 18px; }
   select {
     appearance: none; -webkit-appearance: none;
