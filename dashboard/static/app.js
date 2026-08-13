@@ -19,7 +19,7 @@ function gwPill(hostname) {
 
 function devBadge(g) {
   if (!g || (g.mode || 'prod') !== 'dev') return '';
-  return '<span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold uppercase ml-1" style="background:rgba(230,57,70,0.15);color:var(--brand-red);border:1px solid rgba(230,57,70,0.3);">DEV</span>';
+  return '<span class="dev-pill">DEV</span>';
 }
 
 // ── Sound ────────────────────────────────────────────────────────────────
@@ -1783,49 +1783,50 @@ async function fetchGateways() {
   });
   const tbody = document.getElementById('gateways-table-body');
   if (!tbody) return;
-  if (data.length === 0) { tbody.innerHTML = '<tr><td colspan="8" class="px-4 py-3" style="color:var(--text-muted);">No gateways registered.</td></tr>'; return; }
+  if (data.length === 0) { tbody.innerHTML = '<tr><td colspan="8" class="px-4 py-3 text-muted">No gateways registered.</td></tr>'; return; }
   const now = Math.floor(Date.now() / 1000);
   tbody.innerHTML = data.map(function(g) {
     const diff = now - g.last_seen, isOnline = diff < 30;
-    const connDot = isOnline ? '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--status-success);margin-right:4px;vertical-align:middle;" title="Connected"></span>' : '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--text-muted);margin-right:4px;vertical-align:middle;" title="Disconnected"></span>';
-    const statusCell = connDot + (isOnline ? '<span style="color:var(--status-success);font-size:10px;">Connected</span>' : '<span style="color:var(--text-muted);font-size:10px;">Offline · ' + formatLastSeen(diff) + '</span>');
+    const connDot = isOnline ? '<span class="conn-dot on" title="Connected"></span>' : '<span class="conn-dot off" title="Disconnected"></span>';
+    const statusCell = connDot + (isOnline ? '<span class="text-success text-xs">Connected</span>' : '<span class="text-muted text-xs">Offline · ' + formatLastSeen(diff) + '</span>');
     const pua = g.policy_updated_at || 0;
     const syncCell = isOnline
-      ? (pua > 0 ? '<span style="color:var(--text-muted);font-size:10px;">✓ synced ' + formatAgo(now - pua) + '</span>' : '<span style="color:var(--text-muted);font-size:10px;">—</span>')
-      : '<span style="color:var(--text-muted);font-size:10px;">unknown</span>';
+      ? (pua > 0 ? '<span class="text-muted text-xs">✓ synced ' + formatAgo(now - pua) + '</span>' : '<span class="text-muted text-xs">—</span>')
+      : '<span class="text-muted text-xs">unknown</span>';
+    const hbDot = function(ok, title) { return '<span class="' + (ok ? 'text-success' : 'text-danger') + '" title="' + title + '">⬤</span> '; };
     const healthCell = g.last_heartbeat > 0
-      ? '<span style="font-size:10px;color:var(--text-muted);white-space:nowrap;">' +
-          '<span style="color:' + (Number(g.heartbeat_poller_ok) ? 'var(--status-success)' : 'var(--brand-red)') + ';" title="Poller">⬤</span> ' +
-          '<span style="color:' + (Number(g.heartbeat_gateway_ok) ? 'var(--status-success)' : 'var(--brand-red)') + ';" title="Gateway">⬤</span> ' +
-          '<span style="color:' + (Number(g.heartbeat_can_reach) ? 'var(--status-success)' : 'var(--brand-red)') + ';" title="Reachable">⬤</span> ' +
-          '<span style="color:' + (g.has_token ? 'var(--status-success)' : 'var(--brand-red)') + ';" title="' + (g.has_token ? 'Token valid' : 'No API token — JIT delivery broken. Re-enroll this gateway.') + '">⬤</span> ' +
+      ? '<span class="hb-status">' +
+          hbDot(Number(g.heartbeat_poller_ok), 'Poller') +
+          hbDot(Number(g.heartbeat_gateway_ok), 'Gateway') +
+          hbDot(Number(g.heartbeat_can_reach), 'Reachable') +
+          hbDot(g.has_token ? 1 : 0, g.has_token ? 'Token valid' : 'No API token — JIT delivery broken. Re-enroll this gateway.') +
           '(' + formatAgo(now - g.last_heartbeat) + ')' +
         '</span>'
-      : '<span style="font-size:10px;color:var(--text-muted);">waiting…</span>';
+      : '<span class="hb-status">waiting…</span>';
     var ztBadge = g.zero_trust
-      ? '<span class="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold" style="background:rgba(251,191,36,0.12);color:#fbbf24;border:1px solid rgba(251,191,36,0.3);margin-left:4px;vertical-align:middle;" title="Zero-Trust — every command requires JIT approval">🔒 ZT</span>'
+      ? '<span class="zt-badge" title="Zero-Trust — every command requires JIT approval">🔒 ZT</span>'
       : '';
     var ztBtn = g.zero_trust
-      ? '<button onclick="toggleZeroTrust(\'' + g.ip + '\', false)" class="btn btn-xs" style="background:transparent;color:#fbbf24;border:1px solid rgba(251,191,36,0.35);padding:2px 8px;font-size:10px;" title="Zero-Trust ON — allowlisted commands go through JIT. Click to disable.">🔒 ZT</button>'
-      : '<button onclick="toggleZeroTrust(\'' + g.ip + '\', true)" class="btn btn-xs" style="background:transparent;color:var(--text-muted);border:1px solid var(--border-color);padding:2px 8px;font-size:10px;" title="Enable Zero-Trust — allowlisted commands must go through JIT">ZT</button>';
+      ? '<button onclick="toggleZeroTrust(\'' + g.ip + '\', false)" class="chip-btn zt-on" title="Zero-Trust ON — allowlisted commands go through JIT. Click to disable.">🔒 ZT</button>'
+      : '<button onclick="toggleZeroTrust(\'' + g.ip + '\', true)" class="chip-btn" title="Enable Zero-Trust — allowlisted commands must go through JIT">ZT</button>';
     var overrideCell;
     if (_uninstallingIps[g.ip]) {
-      overrideCell = '<span style="color:var(--status-warning);font-size:10px;">🗑 Uninstalling…</span>';
+      overrideCell = '<span class="text-warning text-xs">🗑 Uninstalling…</span>';
     } else {
       var overrideControl;
       if ((g.override_remaining || 0) > 0) {
         overrideControl = '<span class="override-badge active" data-ovr-ip="' + g.ip + '">Override</span>' +
-          '<button onclick="cancelOverride(\'' + g.ip + '\')" class="btn btn-xs" style="background:transparent;color:#ef4444;border:1px solid rgba(220,38,38,0.3);padding:2px 8px;font-size:10px;">Cancel</button>';
+          '<button onclick="cancelOverride(\'' + g.ip + '\')" class="chip-btn danger">Cancel</button>';
       } else {
-        overrideControl = '<button onclick="openOverrideModal(\'' + g.ip + '\',\'' + g.hostname.replace(/'/g, "\\'") + '\')" class="btn btn-xs" style="background:rgba(239,68,68,0.08);color:#fb7185;border:1px solid rgba(239,68,68,0.3);padding:2px 8px;font-size:10px;" title="Override Mode — auto-approve all JIT for a set duration">Override</button>';
+        overrideControl = '<button onclick="openOverrideModal(\'' + g.ip + '\',\'' + g.hostname.replace(/'/g, "\\'") + '\')" class="chip-btn override" title="Override Mode — auto-approve all JIT for a set duration">Override</button>';
       }
       overrideCell = '<div class="flex items-center gap-2">' + overrideControl + ztBtn + '</div>';
     }
     return '<tr>' +
       '<td class="px-4 py-2 whitespace-nowrap">' + statusCell + '</td>' +
-      '<td class="px-4 py-2" style="color:var(--text-main);white-space:nowrap;">' + gwPill(g.hostname) + ' ' + escapeHtml(g.hostname) + devBadge(g) + ztBadge + '</td>' +
-      '<td class="px-4 py-2" style="color:var(--text-muted);white-space:nowrap;">' + g.ip + '</td>' +
-      '<td class="px-4 py-2" style="color:var(--text-muted);white-space:nowrap;">' + (g.first_seen ? formatAgo(now - g.first_seen) : '—') + '</td>' +
+      '<td class="px-4 py-2 whitespace-nowrap">' + gwPill(g.hostname) + ' ' + escapeHtml(g.hostname) + devBadge(g) + ztBadge + '</td>' +
+      '<td class="px-4 py-2 whitespace-nowrap text-muted">' + g.ip + '</td>' +
+      '<td class="px-4 py-2 whitespace-nowrap text-muted">' + (g.first_seen ? formatAgo(now - g.first_seen) : '—') + '</td>' +
       '<td class="px-4 py-2">' + syncCell + '</td>' +
       '<td class="px-4 py-2">' + healthCell + '</td>' +
       '<td class="px-4 py-2">' + overrideCell + '</td>' +

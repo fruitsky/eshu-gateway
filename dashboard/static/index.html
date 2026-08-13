@@ -217,25 +217,25 @@
     <div id="view-gateways" class="hidden w-full">
       <div class="widget">
         <div class="widget-header">Gateway Enrollment</div>
-        <p class="text-sm mb-4" style="color:var(--text-muted);">Store SSH keys once, then generate a one-liner to install gateways on any new host.</p>
+        <p class="text-sm mb-4 text-muted">Store SSH keys once, then generate a one-liner to install gateways on any new host.</p>
         <div class="grid grid-cols-1 lg:grid-cols-2 gap-5">
-          <div class="p-4 rounded-lg" style="background:var(--bg-base);border:1px solid var(--border-color);">
+          <div class="panel">
             <div class="flex justify-between items-center mb-3"><h3 class="text-sm font-semibold">SSH Public Keys</h3><button onclick="toggleKeyEdit()" id="edit-keys-btn" class="btn btn-muted btn-xs">Edit Keys</button></div>
             <div id="keys-display">
-              <div class="text-xs mb-2"><span style="color:var(--text-muted);">Eshu Gateway Key</span><br><span style="color:var(--text-muted);font-size:11px;">What the AI agent uses — logs in as <code style="color:var(--text-muted);">eshu-gateway</code>; every command goes through approval.</span><br><code style="color:var(--text-main);" id="display-eshu-key">Not configured</code></div>
+              <div class="text-xs mb-2"><span class="text-muted">Eshu Gateway Key</span><br><span class="text-xs text-muted">What the AI agent uses — logs in as <code class="text-muted">eshu-gateway</code>; every command goes through approval.</span><br><code class="text-main" id="display-eshu-key">Not configured</code></div>
             </div>
             <div id="keys-edit" class="hidden space-y-3">
               <input type="text" id="edit-eshu-key" placeholder="Paste the agent's public key (eshu_gateway.pub)...">
-              <div class="flex gap-2"><button onclick="saveKeys()" class="btn btn-sm" style="background:var(--status-success);color:var(--bg-base);">Save Keys</button><button onclick="toggleKeyEdit()" class="btn btn-muted btn-sm">Cancel</button></div>
+              <div class="flex gap-2"><button onclick="saveKeys()" class="btn btn-approve btn-sm">Save Keys</button><button onclick="toggleKeyEdit()" class="btn btn-muted btn-sm">Cancel</button></div>
             </div>
           </div>
-          <div class="p-4 rounded-lg" style="background:var(--bg-base);border:1px solid var(--border-color);">
+          <div class="panel">
             <h3 class="text-sm font-semibold mb-2">Enrollment One-Liner</h3>
-            <p class="text-xs mb-2" style="color:var(--text-muted);">Override the dashboard URL gateways use (defaults to your browser's URL):</p>
+            <p class="text-xs mb-2 text-muted">Override the dashboard URL gateways use (defaults to your browser's URL):</p>
             <div class="flex gap-2 mb-3"><input type="text" id="enroll-base-url" placeholder="Auto-detected from browser..." oninput="updateEnrollCommand()"></div>
-            <p class="text-xs mb-2" style="color:var(--text-muted);">Generate a token, then run this command on any new host:</p>
+            <p class="text-xs mb-2 text-muted">Generate a token, then run this command on any new host:</p>
             <div class="flex gap-2 mb-3"><input type="text" id="enroll-command" readonly placeholder="Click 'Generate New Token' to get a one-liner..." value=""><button onclick="copyEnrollCommand()" id="copy-enroll-btn" class="btn btn-muted btn-sm" disabled>📋 Copy</button></div>
-            <button onclick="generateToken()" id="generate-token-btn" class="btn btn-sm" style="background:var(--brand-red);color:white;">Generate New Token</button>
+            <button onclick="generateToken()" id="generate-token-btn" class="btn btn-sm">Generate New Token</button>
             <span id="token-countdown" class="hidden ml-3 text-xs font-mono"></span>
           </div>
         </div>
@@ -244,7 +244,7 @@
         <div class="widget-header">Active Gateways</div>
         <div class="table-wrap"><table>
           <thead><tr><th>Status</th><th>Gateway</th><th>IP</th><th>Enrolled</th><th>Policy</th><th>Health</th><th>Modes</th><th class="text-right">Actions</th></tr></thead>
-          <tbody id="gateways-table-body"><tr><td colspan="8" class="px-4 py-3" style="color:var(--text-muted);">Loading...</td></tr></tbody>
+          <tbody id="gateways-table-body"><tr><td colspan="8" class="px-4 py-3 text-muted">Loading...</td></tr></tbody>
         </table></div>
       </div>
     </div>
