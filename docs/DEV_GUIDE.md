@@ -122,7 +122,7 @@ Fleet).
 
 ### Running tests
 
-Full test suite (171 tests, ~20s):
+Full test suite (289 tests, ~35s):
 
 ```bash
 bash tests/run.sh
@@ -138,20 +138,27 @@ Run this before deploying changes to the LXC server or merging to master.
 
 | File | Tests | What it checks, in plain English |
 |------|-------|----------------------------------|
-| `test_db_requests.py` | 18 | Can we create, approve, and claim JIT requests? Does the poller sweep find them? |
-| `test_db_gateways.py` | 8 | Does registering a gateway preserve its API token? Can we look up a gateway by token? |
-| `test_db_windows.py` | 11 | Do approved windows get unique tokens? Does the execution counter work? Are expired windows rejected? |
-| `test_db_audit.py` | 4 | Can we record events and search them later? Are they newest-first? |
-| `test_api.py` | 20 | Does the full JIT flow work over HTTP? Auth, policies, windows — all public API endpoints. |
-| `test_golden.py` | 26 | Can we seed the development Edge installer from the Build? Does Deploy to Fleet back up the previous Build and deploy fleet-wide? Pipeline state detection + dev-gateways auth. |
-| `test_uninstall.py` | 14 | Does triggering an uninstall clean up the database? Can a gateway deregister itself? |
-| `test_enrollment.py` | 10 | Can we generate enrollment tokens? Do valid tokens produce a working install script? |
-| `test_policies.py` | 8 | Does saving a policy persist? Does committing bump the version number? |
-| `test_auth.py` | 5 | Can we change or remove the dashboard password? Does logout clear the session? |
-| `test_override.py` | 18 | Can we enable Override Mode on a gateway? Does it auto-approve JIT requests? Are audit events logged? |
-| `test_stats.py` | 10 | Does the extended statistics API return hourly heatmaps, automation trends, window summaries, and gateway health? |
-| `test_learning.py` | 13 | Does the background gap scanner find repeated JIT approvals? Are seen/new states tracked? |
-| `test_policy_rollback.py` | 6 | Can a policy be rolled back to a prior version from its change history? |
+| `test_api.py` | 30 | Full JIT flow over HTTP, auth, policies, windows, public + gated endpoints |
+| `test_auth.py` | 7 | Set/change the dashboard password, password is mandatory/non-removable, logout clears the session |
+| `test_cmd_risk.py` | 17 | "What could go wrong" risk hints + dry-run suggestions |
+| `test_db_audit.py` | 4 | Record events and search them later, newest-first |
+| `test_db_concurrency.py` | 2 | Concurrent DB writes never lock (regression for the "database is locked" outage) |
+| `test_db_gateways.py` | 10 | Register gateways, preserve API tokens, look up by token, deregister |
+| `test_db_requests.py` | 18 | Create, approve, and claim JIT requests; poller sweep |
+| `test_db_windows.py` | 11 | Unique window tokens, execution counter, expired windows rejected |
+| `test_enrollment.py` | 11 | Enrollment tokens, install-script generation, single-key flow |
+| `test_fleet.py` | 36 | Fleet Run compose/dispatch/results, gateways-by-token, fleet delivery |
+| `test_freeze.py` | 12 | Emergency Freeze trigger, poller rejects while frozen, unfreeze |
+| `test_golden.py` | 26 | Build → Edge → Fleet pipeline: seed/promote/rollback, hashes, dev-gateways auth |
+| `test_installer.py` | 5 | Installer template: scoped token sed, no approver key, arg shift |
+| `test_learning.py` | 13 | Background gap scanner finds repeated JIT approvals, new/seen states |
+| `test_override.py` | 18 | Override Mode auto-approves JIT, Zero-Trust exclusivity, audit events |
+| `test_policies.py` | 11 | Save/commit policies, `policies/test` action + FATAL tier, `policies/check` gated |
+| `test_policy_rollback.py` | 6 | Roll a policy back to a prior version from its change history |
+| `test_settings.py` | 16 | Dev-tools toggle, notify/webhook config, Discord format/UA, feature-flags gated |
+| `test_stats.py` | 10 | Extended statistics: heatmaps, automation trend, window summaries, gateway health |
+| `test_uninstall.py` | 14 | Trigger uninstall, cleanup DB, gateway self-deregistration |
+| `test_window_read.py` | 12 | Approved-window read endpoints, opaque retrieval keys, atomic consumption |
 
 Known/parked issues are tracked in [`docs/KNOWN_ISSUES.md`](KNOWN_ISSUES.md).
 Planned features and their priority are in [`docs/FEATURE_ROADMAP.md`](FEATURE_ROADMAP.md).
@@ -165,8 +172,11 @@ dashboard/eshu-poller.sh           # poller — syncs features.d + windows cache
 dashboard/eshu-logger.sh           # health heartbeat — independent
 dashboard/eshu-installer-template.sh  # installer template with markers
 dashboard/gen_installer.py         # generates self-contained installers
-dashboard/db/misc.py               # feature flag table + seeds
-dashboard/main.py                  # policy endpoint — flag gates
+dashboard/main.py                  # FastAPI app — all HTTP routes
+dashboard/database.py             # re-exports the db/ modules (single import surface)
+dashboard/core/                    # shared logic: session/auth, notify, risk, cmd_blocklist, utils
+dashboard/db/                      # data layer: one module per domain (requests, gateways, windows, fleet, ...)
+dashboard/static/                  # dashboard UI (index.html, app.js, style.css)
 dashboard/static/features/         # feature script files (served to gateways)
 scripts/pre-commit.sh              # syntax checks
 scripts/setup-git-hooks.sh         # one-time hook installer

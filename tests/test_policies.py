@@ -60,6 +60,22 @@ class TestPolicyTest:
         assert r.status_code == 200
         assert r.json().get("action") == "jit"
 
+    def test_policy_test_stays_public(self, client):
+        # Agent pre-flight must stay open (no session) so agents can check
+        # whether a command will auto-approve, hard-block, or need JIT.
+        r = client.get("/api/policies/test?command=uptime")
+        assert r.status_code == 200
+
+    def test_policy_check_requires_auth(self, client):
+        # /api/policies/check reveals allowlist/blocklist membership — the
+        # operator-only Tester uses it, so it must be session-gated.
+        assert client.get("/api/policies/check?command=uptime").status_code == 401
+
+    def test_policy_check_works_for_session(self, auth_client):
+        r = auth_client.get("/api/policies/check?command=uptime")
+        assert r.status_code == 200
+        assert "in_exact_whitelist" in r.json()
+
 
 class TestTriggers:
 

@@ -70,19 +70,36 @@ Example response:
 ```json
 {
     "command": "uptime",
-    "in_exact_whitelist": true,
-    "in_regex_whitelist": false,
-    "in_regex_blacklist": false
+    "matched": true,
+    "action": "auto_approved",
+    "details": [{"type": "exact_whitelist", "matched_line": "uptime", "match": true}],
+    "risk": null,
+    "dry_run": null
 }
 ```
 
-If whitelisted, the command passes stages 1-4 and is auto-approved. If not, it falls
-through to JIT (stage 5).
+`action` is one of:
+
+| `action` | Meaning |
+|----------|---------|
+| `auto_approved` | Whitelisted — will execute without operator approval |
+| `blocked` | Rejected — either the dashboard blocklist or the **hardcoded FATAL tier** (`tier: "fatal"`, e.g. `reboot`, `rm -rf`) |
+| `jit` | No rule matched — will require operator approval |
+
+Use this to pre-flight a command. `tier: "fatal"` means the gateway hard-blocks
+it and it can never run — don't attempt it. If whitelisted, the command passes
+stages 1-4 and is auto-approved. If not, it falls through to JIT (stage 5).
 
 > **Zero-Trust gateways:** on a gateway with **Zero-Trust** enabled (the operator marks
 > it in the dashboard), even *whitelisted* commands are **not** auto-approved — everything
 > routes to JIT, so expect an operator approval request instead of instant execution.
 > Approved-window tokens still auto-run (they were pre-approved by the operator).
+
+> **Policy membership check (`/api/policies/check`):** the operator's Tester uses a
+> separate endpoint to ask "is this command already in a policy list?" — it returns
+> `in_exact_whitelist` / `in_regex_whitelist` / `in_regex_blacklist` booleans. It is
+> **dashboard-session only** (not open to agents); use `/api/policies/test` above for
+> pre-flight.
 
 ---
 
@@ -292,11 +309,12 @@ Wait a few seconds and retry with exponential backoff.
 
 | Endpoint | Method | Purpose | Auth |
 |----------|--------|---------|------|
-| `/api/policies/test?command=` | GET | Check if command is whitelisted | Public |
+| `/api/policies/test?command=` | GET | Pre-flight a command — returns `action` (auto_approved / blocked / jit) + `tier` for the FATAL blocklist | Public |
 | `/api/window-requests` | POST | Submit window request | Public |
-| `/api/window-requests/{id}` | GET | Poll window request status + token (read-only) | Public |
+| `/api/window-requests/{retrieval_key}` | GET | Poll window request status + token (read-only) | Public |
 | `/api/approved-windows` | GET | List windows (full status; token omitted) | Public (read) |
-| `/api/approved-windows/{id}` | GET | Single window details + token (read-only) | Public (read) |
+| `/api/approved-windows/{retrieval_key}` | GET | Single window details + token (read-only) | Public (read) |
+| `/api/window-by-token/{token}` | GET | Parameters for an existing token (token is the auth) | Public |
 | `/api/docs/agent-windows` | GET | Alias for this manual (full guide incl. Approved Windows) | Public |
 | `/api/docs/agent-manual` | GET | This manual | Public |
 
@@ -317,7 +335,7 @@ COMMAND="docker system prune -f --volumes"
 # 1. Check if command is auto-approved
 echo "Checking if command is auto-approved..."
 RESULT=$(curl -s "$DASHBOARD/api/policies/test?command=$(echo "$COMMAND" | python3 -c "import urllib.parse; print(urllib.parse.quote(input()))")")
-if echo "$RESULT" | grep -q '"in_exact_whitelist": true'; then
+if echo "$RESULT" | grep -q '"action": "auto_approved"'; then
     echo "✅ Command is auto-approved — executing directly"
     ssh eshu-gateway@"$GATEWAY" "$COMMAND"
     exit $?

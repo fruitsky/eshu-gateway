@@ -606,8 +606,9 @@ def test_policy(command: str):
     return result
 
 @app.get("/api/policies/check")
-def check_policy_membership(command: str):
+def check_policy_membership(command: str, request: Request):
     """Check if a command is already in any policy list. Returns membership booleans."""
+    _check_session(request)
     import re
     policies = get_policies()
     exact_lines = [l for l in policies.get('exact_whitelist', '').split('\n') if l.strip()]
@@ -1553,7 +1554,8 @@ class FeatureFlagTogglePayload(BaseModel):
     enabled: bool
 
 @app.get("/api/feature-flags")
-def get_flags():
+def get_flags(request: Request):
+    _check_session(request)
     return get_feature_flags()
 
 @app.post("/api/feature-flags/{flag_name}/toggle")

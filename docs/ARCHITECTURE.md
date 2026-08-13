@@ -80,13 +80,14 @@ Every command passes through these stages in order:
 
 | Stage | Rule Set | Match → Action |
 |:-----:|----------|---------------|
+| **0** | **Emergency Freeze** (global circuit breaker) — when the operator freezes the fleet, every gateway rejects all commands until unfrozen | **FATAL — rejected while frozen** |
 | **1** | Hardcoded catastrophic blocklist (`rm -rf`, `mkfs`, `dd`, `iptables -F`, `reboot`, Eshu self-access, etc.) | **FATAL — blocked permanently** |
 | **2** | Dashboard-managed blacklist (`/etc/eshu-rblack.txt`) | **Blocked** |
 | **3** | Exact whitelist (`/etc/eshu-exact.txt`) | **Auto-approved** |
 | **4** | Regex whitelist (`/etc/eshu-rwhite.txt`) | **Auto-approved** |
 | **4.5** | Feature scripts (`/etc/eshu/features.d/*.sh`) — loaded by poller when feature flags are enabled | **Auto-approved by window token** |
 | **5** | Claim-and-burn lockbox (`/var/run/eshu.tickets`) | **Execute & consume ticket** |
-| **6** | JIT human approval (90s TTL) | **Execute on approval** |
+| **6** | JIT human approval (90s auto-poll) | **Execute on approval** |
 
 The hardcoded blocklist is baked into the gateway script and **cannot be
 changed from the dashboard** — even a compromised dashboard cannot unblock
@@ -129,7 +130,9 @@ Installed components:
 - **Updates:** Gateway updates flow through a **Build → Edge → Fleet** pipeline
   managed in the dashboard's Development & Deployment section. The current Build
   is the latest installer; Edge is the dev channel for dev-mode gateways; Deploy
-  to Fleet pushes it to all production gateways.
+  to Fleet pushes it to all production gateways. That section is hidden by
+  default behind the **"Show development tools"** toggle in Settings
+  (`dev_tools_enabled`), so non-dev operators don't see the pipeline.
 - **Uninstall:** Clicking the uninstall action spawns a transient `systemd-run`
   service on the gateway that cleans up all binaries, services, users, sudoers,
   and SSH keys — then deregisters from the dashboard with live progress

@@ -21,6 +21,18 @@ class TestDevToolsSetting:
         assert client.put("/api/settings/dev-tools", json={"enabled": True}).status_code == 401
 
 
+class TestFeatureFlagsAuth:
+
+    def test_feature_flags_list_requires_auth(self, client):
+        # Feature-flag names/descriptions are operator info — must be
+        # session-gated (not discoverable by unauthenticated agents).
+        assert client.get("/api/feature-flags").status_code == 401
+
+    def test_feature_flags_list_works_for_session(self, auth_client):
+        r = auth_client.get("/api/feature-flags")
+        assert r.status_code == 200
+
+
 class TestNotifyConfig:
 
     def test_get_notify_config_defaults(self, auth_client):
