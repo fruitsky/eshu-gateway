@@ -366,51 +366,51 @@
     <!-- FLEET RUN VIEW -->
     <div id="view-fleet" class="hidden w-full">
       <div class="widget">
-        <div class="widget-header"><span><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline-block;vertical-align:middle;margin-right:6px;flex-shrink:0;"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>Fleet Run</span>
+        <div class="widget-header"><span><svg class="icon-inline" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>Fleet Run</span>
           <button onclick="fetchFleetCommands()" class="btn btn-muted btn-xs">↻ Refresh</button>
         </div>
 
         <!-- Compose -->
-        <div class="p-4 rounded-lg" style="background:var(--bg-base);border:1px solid var(--border-color);">
+        <div class="panel">
           <div class="flex items-start gap-3 flex-wrap">
             <div class="flex-1 min-w-[220px]">
-              <label class="text-xs block mb-1" style="color:var(--text-muted);">Command</label>
-              <textarea id="fleet-cmd-input" class="w-full text-xs" rows="2" placeholder="Command to run on each selected gateway..." style="background:var(--bg-base);color:var(--text-main);border:1px solid var(--border-color);border-radius:6px;padding:8px 12px;"></textarea>
+              <label class="text-xs block mb-1 text-muted">Command</label>
+              <textarea id="fleet-cmd-input" class="fleet-input" rows="2" placeholder="Command to run on each selected gateway..."></textarea>
             </div>
             <div class="w-28">
-              <label class="text-xs block mb-1" style="color:var(--text-muted);">Timeout (s)</label>
-              <input type="number" id="fleet-timeout-input" value="180" min="1" max="3600" style="background:var(--bg-base);color:var(--text-main);border:1px solid var(--border-color);border-radius:6px;padding:6px 10px;width:100%;">
+              <label class="text-xs block mb-1 text-muted">Timeout (s)</label>
+              <input type="number" id="fleet-timeout-input" value="180" min="1" max="3600" class="fleet-input">
             </div>
             <div class="w-44">
-              <label class="text-xs block mb-1" style="color:var(--text-muted);">Reason (optional)</label>
-              <input type="text" id="fleet-reason-input" placeholder="Context" style="background:var(--bg-base);color:var(--text-main);border:1px solid var(--border-color);border-radius:6px;padding:6px 10px;width:100%;">
+              <label class="text-xs block mb-1 text-muted">Reason (optional)</label>
+              <input type="text" id="fleet-reason-input" placeholder="Context" class="fleet-input">
             </div>
             <div class="self-end">
-              <button onclick="addFleetToQueue()" id="fleet-add-btn" class="btn btn-sm" style="background:var(--brand-red);color:white;">+ Add to Queue</button>
+              <button onclick="addFleetToQueue()" id="fleet-add-btn" class="btn btn-sm">+ Add to Queue</button>
             </div>
           </div>
           <div class="flex items-center gap-2 mt-3 flex-wrap">
-            <span class="text-xs" style="color:var(--text-muted);">Targets:</span>
-            <span class="text-xs" style="color:var(--text-muted);cursor:pointer;" onclick="setFleetTargets(true)">All</span>
-            <span class="text-xs" style="color:var(--text-muted);cursor:pointer;" onclick="setFleetTargets(false)">None</span>
+            <span class="text-xs text-muted">Targets:</span>
+            <span class="text-xs text-muted cursor-pointer" onclick="setFleetTargets(true)">All</span>
+            <span class="text-xs text-muted cursor-pointer" onclick="setFleetTargets(false)">None</span>
           </div>
           <div id="fleet-target-list" class="flex flex-wrap gap-1 mt-2"></div>
         </div>
 
         <!-- Queue + Dispatch -->
-        <div class="mt-4 p-4 rounded-lg" style="background:var(--bg-base);border:1px solid var(--border-color);">
+        <div class="panel mt-4">
           <div class="flex items-center justify-between mb-2">
             <h3 class="text-sm font-semibold">Dispatch queue</h3>
-            <button onclick="dispatchFleetQueue()" id="fleet-dispatch-btn" class="btn btn-sm" style="background:var(--status-success);color:var(--bg-base);">▶ Dispatch (0)</button>
+            <button onclick="dispatchFleetQueue()" id="fleet-dispatch-btn" class="btn btn-approve btn-sm">▶ Dispatch (0)</button>
           </div>
-          <p class="text-xs mb-2" style="color:var(--text-muted);">Commands run one at a time per gateway, in dispatch order — combine steps with <code>&amp;&amp;</code> to run them together.</p>
-          <div id="fleet-queue-list"><p style="color:var(--text-muted);">Queue is empty — add a command above.</p></div>
+          <p class="text-xs mb-2 text-muted">Commands run one at a time per gateway, in dispatch order — combine steps with <code>&amp;&amp;</code> to run them together.</p>
+          <div id="fleet-queue-list"><p class="text-muted">Queue is empty — add a command above.</p></div>
         </div>
 
         <!-- History & results -->
-        <div class="mt-4 p-4 rounded-lg" style="background:var(--bg-base);border:1px solid var(--border-color);">
+        <div class="panel mt-4">
           <h3 class="text-sm font-semibold mb-1">History &amp; results</h3>
-          <div id="fleet-results-list"><p style="color:var(--text-muted);">No fleet commands yet.</p></div>
+          <div id="fleet-results-list"><p class="text-muted">No fleet commands yet.</p></div>
         </div>
       </div>
     </div>

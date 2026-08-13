@@ -2042,7 +2042,7 @@ function renderFleetTargetList() {
       _fleetGateways = _allGateways;
       _fleetSelected.forEach(function(ip) { if (!_fleetGateways.some(function(g){return g.ip===ip;})) _fleetSelected.delete(ip); });
       drawFleetTargets();
-    }).catch(function() { list.innerHTML = '<span class="text-xs" style="color:var(--text-muted);">Failed to load gateways.</span>'; });
+    }).catch(function() { list.innerHTML = '<span class="text-xs text-muted">Failed to load gateways.</span>'; });
   } else {
     _fleetGateways = _allGateways;
     drawFleetTargets();
@@ -2052,12 +2052,12 @@ function renderFleetTargetList() {
 function drawFleetTargets() {
   var list = document.getElementById('fleet-target-list');
   if (!list) return;
-  if (!_fleetGateways.length) { list.innerHTML = '<span class="text-xs" style="color:var(--text-muted);">No gateways registered.</span>'; return; }
+  if (!_fleetGateways.length) { list.innerHTML = '<span class="text-xs text-muted">No gateways registered.</span>'; return; }
   list.innerHTML = _fleetGateways.map(function(g) {
     var checked = _fleetSelected.has(g.ip);
-    return '<label class="flex items-center gap-1 text-xs px-2 py-1 rounded cursor-pointer select-none" style="background:' + (checked ? 'rgba(230,57,70,0.12)' : 'var(--bg-hover)') + ';border:1px solid ' + (checked ? 'rgba(230,57,70,0.4)' : 'var(--border-color)') + ';">' +
-      '<input type="checkbox" ' + (checked ? 'checked' : '') + ' onchange="toggleFleetTarget(\'' + g.ip + '\')" style="accent-color:var(--brand-red);">' +
-      gwPill(g.hostname || g.ip) + ' ' + escapeHtml(g.hostname || g.ip) + ' <span class="text-xs" style="color:var(--text-muted);">' + g.ip + '</span></label>';
+    return '<label class="target-chip' + (checked ? ' checked' : '') + '">' +
+      '<input type="checkbox" ' + (checked ? 'checked' : '') + ' onchange="toggleFleetTarget(\'' + g.ip + '\')">' +
+      gwPill(g.hostname || g.ip) + ' ' + escapeHtml(g.hostname || g.ip) + ' <span class="text-xs text-muted">' + g.ip + '</span></label>';
   }).join('');
 }
 
@@ -2118,7 +2118,7 @@ function formatFleetTargets(ips) {
   (ips || []).forEach(function(ip) {
     var gw = (_fleetGateways || []).find(function(g) { return g.ip === ip; });
     if (gw && gw.hostname && gw.hostname !== ip) {
-      out.push(escapeHtml(gw.hostname) + ' <span style="color:var(--text-muted);">(.' + ip.split('.').pop() + ')</span>');
+      out.push(escapeHtml(gw.hostname) + ' <span class="text-muted">(.' + ip.split('.').pop() + ')</span>');
     } else {
       out.push(escapeHtml(ip));
     }
@@ -2132,19 +2132,19 @@ function renderFleetQueue() {
   if (btn) btn.textContent = '▶ Dispatch (' + _fleetQueue.length + ')';
   if (!list) return;
   if (_fleetQueue.length === 0) {
-    list.innerHTML = '<p style="color:var(--text-muted);">Queue is empty — add a command above.</p>';
+    list.innerHTML = '<p class="text-muted">Queue is empty — add a command above.</p>';
     return;
   }
   list.innerHTML = _fleetQueue.map(function(d, i) {
-    var riskLine = d.risk ? '<div class="text-xs mt-0.5" style="color:#fbbf24;">⚠ ' + escapeHtml(d.risk) + '</div>' : '';
-    var dryLine = d.dry_run ? '<div class="text-xs mt-0.5" style="color:var(--status-info);">💡 Dry-run available: <code style="color:var(--text-main);">' + escapeHtml(d.dry_run) + '</code> <button onclick="useFleetDryRun(' + i + ')" class="btn btn-xs" style="background:transparent;color:var(--status-info);border:1px solid rgba(96,165,250,0.4);padding:1px 8px;font-size:10px;">Use</button></div>' : '';
-    return '<div class="px-2 py-1 rounded mb-1" style="background:var(--bg-hover);border:1px solid var(--border-color);">' +
+    var riskLine = d.risk ? '<div class="text-xs mt-0.5 text-warning">⚠ ' + escapeHtml(d.risk) + '</div>' : '';
+    var dryLine = d.dry_run ? '<div class="text-xs mt-0.5 text-info">💡 Dry-run available: <code class="text-main">' + escapeHtml(d.dry_run) + '</code> <button onclick="useFleetDryRun(' + i + ')" class="chip-btn info">Use</button></div>' : '';
+    return '<div class="queue-item">' +
       '<div class="flex items-center gap-2">' +
-      '<code class="text-xs flex-1" style="color:var(--text-main);">' + escapeHtml(d.command) + '</code>' +
-      '<span class="text-xs" style="color:var(--text-muted);white-space:nowrap;">' + d.timeout + 's</span>' +
-      '<button onclick="removeFleetFromQueue(' + i + ')" class="btn btn-xs" style="background:transparent;color:var(--brand-red);border:1px solid rgba(230,57,70,0.4);padding:2px 8px;font-size:11px;">✕</button>' +
+      '<code class="text-xs flex-1 text-main">' + escapeHtml(d.command) + '</code>' +
+      '<span class="text-xs text-muted whitespace-nowrap">' + d.timeout + 's</span>' +
+      '<button onclick="removeFleetFromQueue(' + i + ')" class="chip-btn danger">✕</button>' +
       '</div>' +
-      '<div class="text-xs mt-0.5" style="color:var(--text-muted);">→ ' + formatFleetTargets(d.targets).join(', ') + '</div>' +
+      '<div class="text-xs mt-0.5 text-muted">→ ' + formatFleetTargets(d.targets).join(', ') + '</div>' +
       riskLine + dryLine +
       '</div>';
   }).join('');
@@ -2215,48 +2215,47 @@ function renderFleetRun(cmds) {
   resultsEl.querySelectorAll('details[data-out]').forEach(function(d) { if (d.open) openOuts.push(d.getAttribute('data-out')); });
   resultsEl.querySelectorAll('pre[data-out]').forEach(function(p) { preScrolls[p.getAttribute('data-out')] = p.scrollTop; });
   if (cmds.length === 0) {
-    resultsEl.innerHTML = '<p style="color:var(--text-muted);">No fleet commands yet.</p>';
+    resultsEl.innerHTML = '<p class="text-muted">No fleet commands yet.</p>';
     return;
   }
   resultsEl.innerHTML = cmds.map(function(c) {
-    var statusStyle = c.status === 'pending' ? 'background:rgba(251,191,36,0.1);color:var(--status-warning);' :
-                      c.status === 'approved' ? 'background:rgba(96,165,250,0.1);color:var(--status-info);' :
-                      c.status === 'denied' ? 'background:rgba(230,57,70,0.1);color:var(--brand-red);' :
-                      'background:rgba(74,222,128,0.1);color:var(--status-success);';
+    var statusBadge = c.status === 'pending' ? 'badge-pending' :
+                      c.status === 'approved' ? 'badge-auto' :
+                      c.status === 'denied' ? 'badge-denied' :
+                      'badge-approved';
     var resultRows = (c.results || []).map(function(r) {
-      var rStatus = r.status === 'success' ? 'background:rgba(74,222,128,0.1);color:var(--status-success);' :
-                    r.status === 'failed' ? 'background:rgba(230,57,70,0.1);color:var(--brand-red);' :
-                    r.status === 'timeout' ? 'background:rgba(251,146,60,0.1);color:#fb923c;' :
-                    r.status === 'skipped' ? 'background:var(--bg-hover);color:var(--text-muted);border:1px solid var(--border-color);' :
-                    'background:var(--bg-hover);color:var(--text-muted);';
+      var rBadge = r.status === 'success' ? 'badge-approved' :
+                   r.status === 'failed' ? 'badge-denied' :
+                   r.status === 'timeout' ? 'badge-blocked' :
+                   'badge-expired';
       var times = '';
       if (r.status === 'queued') {
-        times = ' <span style="color:var(--text-muted);">[queued — waiting for poll]</span>';
+        times = ' <span class="text-muted">[queued — waiting for poll]</span>';
       } else if (r.status === 'skipped') {
-        times = ' <span style="color:var(--text-muted);">[skipped — cleared]</span>';
+        times = ' <span class="text-muted">[skipped — cleared]</span>';
       } else if (r.started_at) {
         var fin = r.finished_at ? ' → ' + formatDateTime(r.finished_at) : ' → running';
-        times = ' <span style="color:var(--text-muted);">[' + formatDateTime(r.started_at) + fin + ']</span>';
+        times = ' <span class="text-muted">[' + formatDateTime(r.started_at) + fin + ']</span>';
       }
       var outId = c.id + '-' + r.gateway_ip;
       var outHtml = '';
       if (r.output) {
-        outHtml = '<details data-out="' + outId + '" class="mt-2" ontoggle="loadFleetOutputIfNeeded(' + c.id + ',\'' + r.gateway_ip + '\',this)"><summary class="text-xs cursor-pointer" style="color:var(--status-info);">Show output' + (r.has_more ? ' (full)' : '') + '</summary>' +
-          '<div class="mt-1 rounded" style="border:1px solid var(--border-color);">' +
+        outHtml = '<details data-out="' + outId + '" class="mt-2" ontoggle="loadFleetOutputIfNeeded(' + c.id + ',\'' + r.gateway_ip + '\',this)"><summary class="text-xs cursor-pointer text-info">Show output' + (r.has_more ? ' (full)' : '') + '</summary>' +
+          '<div class="mt-1 rounded border">' +
           '<div class="flex items-center justify-end gap-1 px-1 pt-1">' +
-          '<button onclick="copyFleetOutput(' + c.id + ',\'' + r.gateway_ip + '\')" class="btn btn-xs" style="background:var(--bg-hover);color:var(--text-muted);border:1px solid var(--border-color);padding:2px 8px;font-size:10px;">📋 Copy</button>' +
-          '<button onclick="openFleetOutputModal(' + c.id + ',\'' + r.gateway_ip + '\')" class="btn btn-xs" style="background:var(--bg-hover);color:var(--status-info);border:1px solid var(--border-color);padding:2px 8px;font-size:10px;">View full</button>' +
+          '<button onclick="copyFleetOutput(' + c.id + ',\'' + r.gateway_ip + '\')" class="chip-btn">📋 Copy</button>' +
+          '<button onclick="openFleetOutputModal(' + c.id + ',\'' + r.gateway_ip + '\')" class="chip-btn info">View full</button>' +
           '</div>' +
-          '<pre data-out="' + outId + '" class="fleet-out p-2 rounded text-xs overflow-auto" style="background:var(--bg-base);color:var(--text-main);white-space:pre-wrap;max-height:240px;">' + escapeHtml(r.output) + '</pre>' +
+          '<pre data-out="' + outId + '" class="fleet-out fleet-pre overflow-auto text-xs">' + escapeHtml(r.output) + '</pre>' +
           '</div></details>';
       }
       var gName = r.hostname ? escapeHtml(r.hostname) : escapeHtml(r.gateway_ip);
-      var gIp = (r.hostname && r.hostname !== r.gateway_ip) ? ' <span style="color:var(--text-muted);">(' + escapeHtml(r.gateway_ip) + ')</span>' : '';
+      var gIp = (r.hostname && r.hostname !== r.gateway_ip) ? ' <span class="text-muted">(' + escapeHtml(r.gateway_ip) + ')</span>' : '';
       var clearBtn = (r.status === 'queued') ?
-        '<button onclick="clearFleetResult(' + c.id + ',\'' + r.gateway_ip + '\')" class="btn btn-xs" title="Clear this stuck gateway so its queue can move on (other results are kept)" style="background:transparent;color:var(--text-muted);border:1px solid var(--border-color);padding:1px 6px;font-size:10px;">✕</button>' : '';
-      return '<div class="mt-1 text-xs" style="color:var(--text-muted);">• <strong>' + gName + '</strong>' + gIp + ' ' +
-        '<span class="px-1.5 py-0.5 rounded" style="' + rStatus + '">' + r.status + '</span>' +
-        (r.exit_code != null && r.exit_code !== '' ? ' <span style="color:var(--text-muted);">exit ' + r.exit_code + '</span>' : '') +
+        '<button onclick="clearFleetResult(' + c.id + ',\'' + r.gateway_ip + '\')" class="chip-btn" title="Clear this stuck gateway so its queue can move on (other results are kept)">✕</button>' : '';
+      return '<div class="mt-1 text-xs text-muted">• <strong>' + gName + '</strong>' + gIp + ' ' +
+        '<span class="badge ' + rBadge + '">' + r.status + '</span>' +
+        (r.exit_code != null && r.exit_code !== '' ? ' <span class="text-muted">exit ' + r.exit_code + '</span>' : '') +
         times + clearBtn + outHtml + '</div>';
     }).join('');
     var runningRes = (c.results || []).filter(function(r) { return r.status === 'running' && r.started_at; });
@@ -2264,20 +2263,20 @@ function renderFleetRun(cmds) {
     if (c.status === 'approved' && runningRes.length > 0) {
       var start = Math.min.apply(null, runningRes.map(function(r) { return r.started_at; }));
       var deadline = start + c.timeout;
-      cdHtml = '<span class="text-xs fleet-countdown" style="color:var(--status-warning);white-space:nowrap;" data-deadline="' + deadline + '">⏳ counting…</span>';
+      cdHtml = '<span class="text-xs fleet-countdown text-warning whitespace-nowrap" data-deadline="' + deadline + '">⏳ counting…</span>';
     } else {
-      cdHtml = '<span class="text-xs" style="color:var(--text-muted);white-space:nowrap;">👤 ' + c.timeout + 's timeout</span>';
+      cdHtml = '<span class="text-xs text-muted whitespace-nowrap">👤 ' + c.timeout + 's timeout</span>';
     }
-    return '<div class="p-3 rounded-lg border mb-2" style="background:var(--bg-base);border-color:var(--border-color);">' +
+    return '<div class="p-3 rounded-lg border mb-2 bg-base">' +
       '<div class="flex items-center justify-between gap-2 flex-wrap">' +
-      '<div class="flex items-center gap-2 flex-wrap"><span class="text-xs font-mono" style="color:var(--text-muted);">#' + c.id + '</span>' +
-      '<code class="text-xs" style="color:var(--text-main);">' + escapeHtml(c.command) + '</code>' +
-      '<span class="px-2 py-0.5 rounded-full text-xs font-medium" style="' + statusStyle + '">' + c.status + '</span></div>' +
+      '<div class="flex items-center gap-2 flex-wrap"><span class="text-xs font-mono text-muted">#' + c.id + '</span>' +
+      '<code class="text-xs text-main">' + escapeHtml(c.command) + '</code>' +
+      '<span class="badge ' + statusBadge + '">' + c.status + '</span></div>' +
       '<div class="flex items-center gap-2 flex-wrap">' + cdHtml + '</div></div>' +
-      '<div class="mt-1 text-xs" style="color:var(--text-muted);">sent ' + formatDateTime(c.created_at) + '</div>' +
-      '<div class="mt-1 text-xs" style="color:var(--text-muted);">→ ' + formatFleetTargets(c.target_ips || []).join(', ') + '</div>' +
-      (c.reason ? '<div class="text-xs" style="color:var(--text-muted);">Reason: ' + escapeHtml(c.reason) + '</div>' : '') +
-      (resultRows ? '<div class="mt-2 border-t" style="border-color:var(--border-color);padding-top:4px;">' + resultRows + '</div>' : '') +
+      '<div class="mt-1 text-xs text-muted">sent ' + formatDateTime(c.created_at) + '</div>' +
+      '<div class="mt-1 text-xs text-muted">→ ' + formatFleetTargets(c.target_ips || []).join(', ') + '</div>' +
+      (c.reason ? '<div class="text-xs text-muted">Reason: ' + escapeHtml(c.reason) + '</div>' : '') +
+      (resultRows ? '<div class="mt-2 border-t pt-1">' + resultRows + '</div>' : '') +
       '</div>';
   }).join('');
   openOuts.forEach(function(id) {
