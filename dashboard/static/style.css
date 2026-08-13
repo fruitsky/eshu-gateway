@@ -2,6 +2,7 @@
     --bg-base: #101012;
     --bg-surface: #1a1a1d;
     --bg-hover: #252529;
+    --bg-stripe: #2c2c32;
     --border-color: #333336;
     --text-main: #f1f1f1;
     --text-muted: #a8b0bb;
@@ -328,6 +329,7 @@
     font-size: var(--text-xs); font-family: monospace; color: var(--text-main);
   }
   .policy-chip code { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .policy-chip:nth-child(even) { background: var(--bg-stripe); }
   .policy-chip .remove { cursor: pointer; color: var(--text-muted); font-weight: 700; padding: 0 2px; flex-shrink: 0; font-size: 13px; }
   .policy-chip .remove:hover { color: var(--danger); }
   .policy-empty { padding: 2px 4px; }
