@@ -17,7 +17,7 @@ from pydantic import BaseModel
 from database import (
     init_db, create_request, update_request_status, 
     update_ticket_consumed_by_ip, get_all_requests, get_pending_request_by_cmd,
-    get_request_status, get_ticket_by_request_id, delete_old_requests,
+    get_request_status, get_request_command, count_denied, get_ticket_by_request_id, delete_old_requests,
     register_gateway, get_gateways, update_gateway_last_seen,
     update_gateway_policy_version, update_gateway_policy_sync,
     update_gateway_last_updated, update_gateway_windows_count, update_gateway_heartbeat, deregister_gateway,
@@ -522,9 +522,11 @@ def approve_request(req_id: int, request: Request):
 @app.post("/api/deny/{req_id}")
 def deny_request(req_id: int, request: Request):
     _check_session(request)
+    command = get_request_command(req_id)
     update_request_status(req_id, "denied")
     record_audit_event('jit_denied', details=f'JIT #{req_id} denied')
-    return {"status": "ok"}
+    deny_count = count_denied(command) if command else 0
+    return {"status": "ok", "deny_count": deny_count, "command": command}
 
 @app.delete("/api/requests")
 def purge_requests(older_than: str = "1h", request: Request = None):

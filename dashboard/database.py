@@ -11,6 +11,8 @@ from db.requests import (
     get_all_requests,
     get_pending_request_by_cmd,
     get_request_status,
+    get_request_command,
+    count_denied,
     get_ticket_by_request_id,
     delete_old_requests,
     search_requests,

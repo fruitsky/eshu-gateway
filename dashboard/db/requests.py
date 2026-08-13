@@ -84,6 +84,20 @@ def get_request_status(req_id: int):
         row = cursor.fetchone()
         return row['status'] if row else None
 
+def get_request_command(req_id: int):
+    with db_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT command FROM requests WHERE id = ?', (req_id,))
+        row = cursor.fetchone()
+        return row['command'] if row else None
+
+def count_denied(command: str):
+    with db_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM requests WHERE command = ? AND status = 'denied'", (command,))
+        row = cursor.fetchone()
+        return row[0] if row else 0
+
 def get_ticket_by_request_id(req_id: int):
     with db_conn() as conn:
         cursor = conn.cursor()

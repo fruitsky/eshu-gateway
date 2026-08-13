@@ -1287,8 +1287,15 @@ async function handleAction(id, action) {
   if (action === 'deny') {
     const res = await authFetch('/api/deny/' + id, { method: 'POST' });
     if (res.status === 401) { await checkAuth(); return; }
+    let denyCount = 0, denyCmd = '';
+    try { const data = await res.json(); denyCount = data.deny_count || 0; denyCmd = data.command || ''; } catch(e) {}
     const req = requestsData.find(r => r.id === id);
-    if (req) { lastDeniedCmd = req.command; document.getElementById('deny-bar-text').textContent = 'Command denied: "' + req.command + '" — Add to blocklist?'; document.getElementById('deny-blacklist-bar').classList.remove('hidden'); }
+    const cmd = denyCmd || (req ? req.command : '');
+    if (cmd && denyCount === DENY_BLOCKLIST_PROMPT_THRESHOLD) {
+      lastDeniedCmd = cmd;
+      document.getElementById('deny-bar-text').textContent = 'Command denied: "' + cmd + '" — Add to blocklist?';
+      document.getElementById('deny-blacklist-bar').classList.remove('hidden');
+    }
     fetchRequests();
   } else {
     const res = await authFetch('/api/' + action + '/' + id, { method: 'POST' });
@@ -1587,6 +1594,11 @@ function suggestionAllowlist(encodedCmd) {
   setTimeout(refreshSuggestions, 3500);
 }
 
+function suggestionBlocklist(encodedCmd) {
+  addToPolicy(decodeURIComponent(encodedCmd), 'regex_blacklist');
+  setTimeout(refreshSuggestions, 3500);
+}
+
 function renderSuggestions() {
   var d = _suggestionsData;
   var list = document.getElementById('suggestions-list');
@@ -1599,11 +1611,18 @@ function renderSuggestions() {
     summary.textContent = s;
   }
   if (!d.gateways || d.gateways.length === 0) {
-    list.innerHTML = '<p class="text-muted">No gaps found. All repeatedly-approved commands are allowlisted or dismissed.</p>';
+    list.innerHTML = '<p class="text-muted">No suggestions — repeatedly-approved/denied commands are handled or dismissed.</p>';
     return;
   }
   list.innerHTML = d.gateways.map(function(g) {
     var rows = g.gaps.map(function(c) {
+      var isDeny = c.kind === 'deny';
+      var meta = isDeny
+        ? '<div class="text-danger mt-1">Denied ' + c.count + 'x</div>'
+        : '<div class="text-warning mt-1">Approved ' + c.count + 'x</div>';
+      var actionBtn = isDeny
+        ? '<button class="chip-btn danger" onclick="suggestionBlocklist(\'' + encodeCmd(c.command) + '\')">＋ Blocklist</button>'
+        : '<button class="btn btn-approve btn-xs" onclick="suggestionAllowlist(\'' + encodeCmd(c.command) + '\')">+ Allowlist</button>';
       return '<div class="flex items-start gap-2 mb-2 pb-2 text-xs divider-bottom">' +
         '<div class="flex-1 min-w-0">' +
           '<div class="flex items-center gap-2">' +
@@ -1611,10 +1630,10 @@ function renderSuggestions() {
             (c.is_new ? '<span class="new-tag">NEW</span>' : '') +
           '</div>' +
           (c.description ? '<div class="text-muted mt-1">' + escapeHtml(c.description) + '</div>' : '') +
-          '<div class="text-warning mt-1">Approved ' + c.approved_count + 'x</div>' +
+          meta +
         '</div>' +
         '<div class="flex gap-1 mt-1 flex-shrink-0">' +
-          '<button class="btn btn-approve btn-xs" onclick="suggestionAllowlist(\'' + encodeCmd(c.command) + '\')">+ Allowlist</button>' +
+          actionBtn +
           '<button class="chip-btn" onclick="dismissPolicyGap(\'' + encodeCmd(c.command) + '\')">Dismiss</button>' +
         '</div>' +
         '</div>';

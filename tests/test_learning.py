@@ -67,6 +67,39 @@ class TestLearningScanner:
         gaps = compute_gaps()
         assert gaps["total_gaps"] == 0
 
+    def test_finds_repeated_denials_as_blocklist_suggestions(self, temp_db):
+        register_gateway("10.0.0.1", "test-host", "v15.3")
+        from core.learning import MIN_DENIALS
+        for i in range(MIN_DENIALS):
+            create_request("10.0.0.1", "docker rm -f", status="denied")
+        from core.learning import compute_gaps
+        gaps = compute_gaps()
+        deny_gaps = [g for g in gaps["gateways"][0]["gaps"] if g["kind"] == "deny"]
+        assert len(deny_gaps) == 1
+        assert deny_gaps[0]["command"] == "docker rm -f"
+        assert deny_gaps[0]["count"] == MIN_DENIALS
+        assert deny_gaps[0]["is_new"] is True
+
+    def test_ignores_denials_below_threshold(self, temp_db):
+        register_gateway("10.0.0.1", "test-host", "v15.3")
+        from core.learning import MIN_DENIALS
+        for i in range(MIN_DENIALS - 1):
+            create_request("10.0.0.1", "kill -9 1", status="denied")
+        from core.learning import compute_gaps
+        gaps = compute_gaps()
+        assert gaps["total_gaps"] == 0
+
+    def test_ignores_blocklisted_denials(self, temp_db):
+        register_gateway("10.0.0.1", "test-host", "v15.3")
+        from core.learning import MIN_DENIALS
+        for i in range(MIN_DENIALS):
+            create_request("10.0.0.1", "docker rm -f", status="denied")
+        from db.policies import update_policy
+        update_policy("regex_blacklist", "docker rm -f")
+        from core.learning import compute_gaps
+        gaps = compute_gaps()
+        assert gaps["total_gaps"] == 0
+
     def test_mark_all_seen_dismisses_gaps(self, temp_db):
         register_gateway("10.0.0.1", "test-host", "v15.3")
         for i in range(4):

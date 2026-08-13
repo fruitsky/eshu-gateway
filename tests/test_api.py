@@ -49,9 +49,25 @@ class TestJitLifecycle:
 
         r = auth_client.post(f"/api/deny/{rid}")
         assert r.status_code == 200
+        data = r.json()
+        assert data["status"] == "ok"
+        assert data["command"] == "rm -rf /"
+        assert data["deny_count"] == 1
 
         r = auth_client.get(f"/api/request_status/{rid}", headers=gateway_headers)
         assert r.json()["status"] == "denied"
+
+    def test_deny_count_accumulates(self, auth_client, gateway_headers):
+        ids = []
+        for i in range(3):
+            ids.append(auth_client.post("/api/request", json={
+                "target_ip": "10.0.0.1",
+                "encoded_command": b64("systemctl restart bad-service")
+            }, headers=gateway_headers).json()["id"])
+        counts = []
+        for rid in ids:
+            counts.append(auth_client.post(f"/api/deny/{rid}").json()["deny_count"])
+        assert counts == [1, 2, 3]
 
     def test_request_status_no_token(self, client):
         from db.requests import create_request
