@@ -1414,13 +1414,13 @@ function renderTable() {
       const disabledStyle = 'opacity:0.5;pointer-events:none;';
 
       if (req.status === 'frozen') {
-        actions = '<span class="chip chip-frozen" title="Blocked by Emergency Freeze — the fleet is rejecting all commands until unfrozen.">' +
+        actions = '<span class="chip chip-actions chip-frozen" title="Blocked by Emergency Freeze — the fleet is rejecting all commands until unfrozen.">' +
           '🧊 Fleet Frozen</span>';
       } else if (req.status === 'fleet-run') {
-        actions = '<span class="chip chip-fleet-run" title="Executed via Fleet Run — see the Fleet Run tab for per-gateway output.">' +
+        actions = '<span class="chip chip-actions chip-fleet-run" title="Executed via Fleet Run — see the Fleet Run tab for per-gateway output.">' +
           '⚡ Fleet Run</span>';
       } else if (req.status === 'blocked' && isHardcoreBlocked(req.command)) {
-        actions = '<span class="chip chip-block-core" title="This command is permanently blocked by the Core Gateway Blocklist (Stage 1). It cannot be allowlisted.">' +
+        actions = '<span class="chip chip-actions chip-block-core" title="This command is permanently blocked by the Core Gateway Blocklist (Stage 1). It cannot be allowlisted.">' +
           '🛡️ Block by Core</span>';
       } else {
         actions = '<select onchange="handlePolicyAction(this,\'' + encodeURIComponent(req.command) + '\')" class="btn-muted select-actions">' +
