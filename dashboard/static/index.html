@@ -550,7 +550,7 @@
 <!-- Create / Edit Approved Window Modal -->
 <div id="create-window-modal" class="modal-overlay hidden">
   <div class="widget w-full max-w-2xl max-h-[90vh] overflow-y-auto">
-    <div class="widget-header"><span id="win-modal-title">🪟 Create Approved Window</span> <button onclick="closeCreateWindowModal()" class="text-xl" style="color:var(--text-muted);cursor:pointer;background:none;border:none;">&times;</button></div>
+    <div class="widget-header"><span id="win-modal-title">🪟 Create Approved Window</span> <button onclick="closeCreateWindowModal()" class="modal-close">&times;</button></div>
 
     <!-- Inline error -->
     <div id="win-save-error" class="hidden win-error"></div>
@@ -569,7 +569,7 @@
       <div class="win-section-label">2. Target Gateway</div>
       <div class="gw-dropdown" id="gw-dropdown">
         <div class="gw-dropdown-trigger" id="gw-dropdown-trigger" onclick="toggleGwDropdown()">
-          <div id="gw-dropdown-display" style="color:var(--text-muted);font-size:13px;">Select a gateway…</div>
+          <div id="gw-dropdown-display" class="text-sm text-muted">Select a gateway…</div>
           <span class="gw-dropdown-caret" id="gw-dropdown-caret">▼</span>
         </div>
         <div class="gw-dropdown-menu" id="gw-dropdown-menu"></div>
@@ -585,29 +585,29 @@
         <button class="win-radio-btn" id="win-src-jit" onclick="setWinSource('jit')">🕐 Recent JIT</button>
       </div>
       <!-- New command input -->
-      <div id="win-cmd-input-wrap" class="win-fade" style="margin-top:0;">
-        <div class="flex gap-2"><input type="text" id="win-command" placeholder="e.g. docker logs -n 50 my-app" class="flex-1" style="padding:12px 14px;font-size:14px;font-family:monospace;" oninput="checkCommandReady();updateWinSummary()"><button onclick="copyToClipboard(document.getElementById('win-command').value)" class="btn btn-muted btn-xs" title="Copy command">📋</button><button onclick="testWinCommand()" class="btn btn-muted btn-xs">🧪 Test</button></div>
+      <div id="win-cmd-input-wrap" class="win-fade">
+        <div class="flex gap-2"><input type="text" id="win-command" placeholder="e.g. docker logs -n 50 my-app" class="flex-1 cmd-input" oninput="checkCommandReady();updateWinSummary()"><button onclick="copyToClipboard(document.getElementById('win-command').value)" class="btn btn-muted btn-xs" title="Copy command">📋</button><button onclick="testWinCommand()" class="btn btn-muted btn-xs">🧪 Test</button></div>
         <div id="win-test-result" class="hidden mt-1"></div>
         <div class="flex items-center gap-2 mt-2">
-          <span class="text-xs" style="color:var(--text-muted);flex-shrink:0;">Match:</span>
+          <span class="text-xs text-muted flex-shrink-0">Match:</span>
           <span class="toggle-label" id="match-label-prefix">Prefix</span>
           <div class="toggle-track on" id="win-match-toggle" onclick="toggleWinMatch()"><div class="toggle-knob"></div></div>
-          <span class="toggle-label" id="match-label-exact" style="color:var(--status-success);">Exact</span>
+          <span class="toggle-label text-success" id="match-label-exact">Exact</span>
         </div>
-        <p class="text-xs mt-1" style="color:var(--text-muted);opacity:0.7;">Exact matches the command character-for-character. Prefix matches any command that <em>starts with</em> this text.</p>
+        <p class="text-xs mt-1 text-muted">Exact matches the command character-for-character. Prefix matches any command that <em>starts with</em> this text.</p>
       </div>
       <!-- JIT list -->
       <div id="win-jit-list-wrap" class="win-fade hidden-section">
-        <div class="win-recent-list mt-2" id="recent-jit-list"><p class="text-xs px-2 py-1" style="color:var(--text-muted);">Select a gateway first…</p></div>
-        <p class="text-xs mt-1" style="color:var(--text-muted);opacity:0.7;">Click a recent JIT to populate the command field.</p>
+        <div class="win-recent-list mt-2" id="recent-jit-list"><p class="text-xs px-2 py-1 text-muted">Select a gateway first…</p></div>
+        <p class="text-xs mt-1 text-muted">Click a recent JIT to populate the command field.</p>
       </div>
     </div>
 
     <!-- 4a. Recurring schedule fields -->
     <div id="win-recurring-fields" class="win-fade">
-      <div class="win-section-label" style="margin-bottom:8px;">4. Schedule</div>
-      <div style="display:flex;gap:20px;flex-wrap:wrap;">
-        <div class="win-section" style="flex:1;min-width:200px;">
+      <div class="win-section-label mb-2">4. Schedule</div>
+      <div class="flex flex-wrap gap-5">
+        <div class="win-section flex-1" style="min-width:200px;">
           <div class="win-section-label">Execution Time (UTC)</div>
           <div class="time-scroll-container">
             <div class="time-scroll-wrap">
@@ -622,23 +622,23 @@
               <div class="time-scroll-arrow" onclick="shiftTimeScroll('mins', 1)">▼</div>
             </div>
           </div>
-          <p id="win-next-run" class="text-xs mt-2" style="color:var(--status-info);min-height:1.25em;"></p>
+          <p id="win-next-run" class="text-xs mt-2 text-info" style="min-height:1.25em;"></p>
         </div>
-        <div style="flex:1;min-width:200px;">
+        <div class="flex-1" style="min-width:200px;">
           <div class="win-section">
-            <div class="win-section-label">Days of Week <span class="text-xs" style="color:var(--text-muted);font-weight:400;">(none = every day)</span></div>
+            <div class="win-section-label">Days of Week <span class="text-xs text-muted font-normal">(none = every day)</span></div>
             <div class="day-circles" id="day-circles-container"></div>
           </div>
           <div class="win-section">
             <div class="win-section-label">Expiration</div>
-            <label class="flex items-center gap-2 cursor-pointer select-none" style="margin-bottom:8px;">
+            <label class="flex items-center gap-2 cursor-pointer select-none mb-2">
               <input type="checkbox" id="win-never-expire" checked onchange="onWinNeverExpireChange()">
-              <span style="color:var(--text-main);font-size:12px;">Never expire</span>
+              <span class="text-xs">Never expire</span>
             </label>
             <input type="date" id="win-expiry-date" class="flex-1" style="display:none;" onchange="updateWinSummary()">
           </div>
           <div class="win-section">
-            <div class="win-section-label">Max Executions <span class="text-xs" style="color:var(--text-muted);font-weight:400;">(1–5, per window)</span></div>
+            <div class="win-section-label">Max Executions <span class="text-xs text-muted font-normal">(1–5, per window)</span></div>
             <input type="number" id="win-max-exec" value="1" min="1" max="5" class="w-24" oninput="onMaxExecInput();updateWinSummary()">
           </div>
         </div>
@@ -649,7 +649,7 @@
     <div id="win-single-fields" class="win-fade hidden-section">
       <div class="win-section-label">4. Schedule</div>
       <div class="win-section">
-        <div class="win-section-label">Starts At (required) <span class="text-xs" style="color:var(--text-muted);font-weight:400;">(window becomes active at this time)</span></div>
+        <div class="win-section-label">Starts At (required) <span class="text-xs text-muted font-normal">(window becomes active at this time)</span></div>
         <div class="flex gap-2 flex-wrap">
           <input type="date" id="win-single-start-date" class="flex-1" style="min-width:140px;" onchange="updateWinSummary()">
           <input type="time" id="win-single-start-time" class="flex-1" style="min-width:100px;" onchange="updateWinSummary()">
@@ -657,11 +657,11 @@
         <p class="win-hint" id="win-single-start-hint">Times are local to your browser</p>
       </div>
       <div class="win-section">
-        <div class="win-section-label">Max Executions <span class="text-xs" style="color:var(--text-muted);font-weight:400;">(1–5, auto-disables when exhausted)</span></div>
+        <div class="win-section-label">Max Executions <span class="text-xs text-muted font-normal">(1–5, auto-disables when exhausted)</span></div>
         <input type="number" id="win-max-exec-single" value="1" min="1" max="5" class="w-24" oninput="onMaxExecInput();updateWinSummary()">
       </div>
       <div class="win-section">
-        <div class="win-section-label">Expires At (optional) <span class="text-xs" style="color:var(--text-muted);font-weight:400;">(window closes at this time if unexpired)</span></div>
+        <div class="win-section-label">Expires At (optional) <span class="text-xs text-muted font-normal">(window closes at this time if unexpired)</span></div>
         <div class="flex gap-2 flex-wrap">
           <input type="date" id="win-single-expiry-date" class="flex-1" style="min-width:140px;" onchange="updateWinSummary()">
           <input type="time" id="win-single-expiry-time" class="flex-1" style="min-width:100px;" onchange="updateWinSummary()">
@@ -680,14 +680,14 @@
     <div id="win-summary-bar" class="win-summary hidden-section">💬 <span id="win-summary-text"></span></div>
 
     <!-- Save -->
-    <button onclick="saveWindow()" id="save-window-btn" class="btn btn-sm w-full" style="background:var(--brand-red);color:white;">Create Window</button>
+    <button onclick="saveWindow()" id="save-window-btn" class="btn btn-sm w-full">Create Window</button>
 
     <!-- Token display (after save) -->
     <div id="win-token-display" class="win-token-card" style="display:none;">
-      <p class="text-xs mb-2" style="color:var(--status-success);">✅ Token ready!</p>
-      <code id="win-token-value" class="text-base font-bold block mb-2" style="color:var(--text-main);font-family:monospace;"></code>
-      <p class="text-xs mb-2" style="color:var(--text-muted);">Usage:</p>
-      <code id="win-token-usage" class="text-xs block p-2 rounded" style="background:var(--bg-base);color:var(--text-muted);font-family:monospace;"></code>
+      <p class="text-xs mb-2 text-success">✅ Token ready!</p>
+      <code id="win-token-value" class="text-base font-bold block mb-2 font-mono"></code>
+      <p class="text-xs mb-2 text-muted">Usage:</p>
+      <code id="win-token-usage" class="text-xs block p-2 rounded bg-base text-muted font-mono"></code>
       <button onclick="copyToClipboard(document.getElementById('win-token-value').textContent)" class="btn btn-muted btn-xs mt-3">📋 Copy Token</button>
     </div>
   </div>
@@ -695,11 +695,11 @@
 
 <!-- Custom Confirm Dialog -->
 <div id="custom-confirm-overlay" class="modal-overlay hidden">
-  <div class="widget max-w-md w-full" style="text-align:center;">
-    <p id="custom-confirm-msg" style="color:var(--text-main);font-size:14px;margin-bottom:20px;line-height:1.6;"></p>
+  <div class="widget max-w-md w-full text-center">
+    <p id="custom-confirm-msg" class="text-main mb-5" style="line-height:1.6;"></p>
     <div class="flex justify-center gap-3">
       <button onclick="_confirmResolve(false)" class="btn btn-muted btn-sm">Cancel</button>
-      <button onclick="_confirmResolve(true)" class="btn btn-sm" style="background:var(--brand-red);color:white;">Confirm</button>
+      <button onclick="_confirmResolve(true)" class="btn btn-danger btn-sm">Confirm</button>
     </div>
   </div>
 </div>
@@ -709,15 +709,15 @@
   <div class="widget max-w-md w-full">
     <div class="widget-header">
       <span>Override Mode</span>
-      <button onclick="document.getElementById('override-modal').classList.add('hidden')" style="color:var(--text-muted);font-size:20px;">&times;</button>
+      <button onclick="document.getElementById('override-modal').classList.add('hidden')" class="modal-close">&times;</button>
     </div>
     <div class="mb-4">
-      <label class="text-xs block mb-1" style="color:var(--text-muted);">Gateway</label>
-      <p id="override-modal-gateway" style="color:var(--text-main);font-weight:600;"></p>
+      <label class="text-xs block mb-1 text-muted">Gateway</label>
+      <p id="override-modal-gateway" class="text-main font-semibold"></p>
     </div>
     <div class="mb-4">
-      <label class="text-xs block mb-1" style="color:var(--text-muted);">Duration</label>
-      <select id="override-modal-minutes" class="w-full text-xs" style="background:var(--bg-base);color:var(--text-main);border:1px solid var(--border-color);border-radius:6px;padding:8px 12px;">
+      <label class="text-xs block mb-1 text-muted">Duration</label>
+      <select id="override-modal-minutes" class="w-full text-xs">
         <option value="15">15 minutes</option>
         <option value="30" selected>30 minutes</option>
         <option value="60">1 hour</option>
@@ -728,12 +728,12 @@
       </select>
     </div>
     <div class="mb-4">
-      <label class="text-xs block mb-1" style="color:var(--text-muted);">Reason (required)</label>
-      <textarea id="override-modal-reason" class="w-full text-xs" rows="3" placeholder="Why are you enabling Override Mode?" style="background:var(--bg-base);color:var(--text-main);border:1px solid var(--border-color);border-radius:6px;padding:8px 12px;resize:vertical;"></textarea>
+      <label class="text-xs block mb-1 text-muted">Reason (required)</label>
+      <textarea id="override-modal-reason" class="fleet-input" rows="3" placeholder="Why are you enabling Override Mode?"></textarea>
     </div>
     <div class="flex justify-end gap-2">
       <button onclick="document.getElementById('override-modal').classList.add('hidden')" class="btn btn-muted btn-sm">Cancel</button>
-      <button onclick="confirmOverride()" id="override-start-btn" class="btn btn-sm" style="background:#dc2626;color:white;">Start Override</button>
+      <button onclick="confirmOverride()" id="override-start-btn" class="btn btn-danger btn-sm">Start Override</button>
     </div>
   </div>
 </div>
@@ -743,33 +743,33 @@
   <div class="widget w-full max-w-md">
     <div class="widget-header">
       <span id="uninstall-modal-title">🗑 Uninstalling</span>
-      <button onclick="closeUninstallModal()" style="color:var(--text-muted);font-size:20px;">&times;</button>
+      <button onclick="closeUninstallModal()" class="modal-close">&times;</button>
     </div>
     <div class="mb-4">
-      <label class="text-xs block mb-1" style="color:var(--text-muted);">Gateway</label>
-      <p id="uninstall-modal-gateway" style="color:var(--text-main);font-weight:600;"></p>
+      <label class="text-xs block mb-1 text-muted">Gateway</label>
+      <p id="uninstall-modal-gateway" class="text-main font-semibold"></p>
     </div>
     <div class="mb-1">
       <div class="uninstall-progress-bar"><div class="fill" id="uninstall-progress-fill" style="width:0%;"></div></div>
     </div>
-    <p id="uninstall-modal-step" class="text-xs mt-2" style="color:var(--text-muted);">Starting…</p>
-    <p id="uninstall-modal-note" class="text-xs mt-2 hidden" style="color:var(--status-warning);"></p>
+    <p id="uninstall-modal-step" class="text-xs mt-2 text-muted">Starting…</p>
+    <p id="uninstall-modal-note" class="text-xs mt-2 hidden text-warning"></p>
   </div>
 </div>
 
 <!-- Window Usage History Modal -->
 <div id="window-history-overlay" class="modal-overlay hidden" onclick="if(event.target===this)closeModal('window-history-overlay')">
   <div class="widget w-11/12 md:w-2/3 lg:w-1/2 max-h-3/4 flex flex-col" style="max-height:75vh;">
-    <div class="widget-header">📜 Window Usage History <button onclick="closeModal('window-history-overlay')" style="color:var(--text-muted);font-size:20px;">&times;</button></div>
-    <div id="window-history-content" class="flex-1 overflow-y-auto pr-2" style="min-height:100px;"><p style="color:var(--text-muted);">Loading...</p></div>
+    <div class="widget-header">📜 Window Usage History <button onclick="closeModal('window-history-overlay')" class="modal-close">&times;</button></div>
+    <div id="window-history-content" class="flex-1 overflow-y-auto pr-2" style="min-height:100px;"><p class="text-muted">Loading...</p></div>
   </div>
 </div>
 
 <!-- Policy Changes Modal -->
 <div id="policy-changes-modal" class="modal-overlay hidden">
   <div class="widget w-11/12 md:w-2/3 lg:w-1/2 h-3/4 flex flex-col">
-    <div class="widget-header">Recent Policy Changes <button onclick="closeModal('policy-changes-modal')" style="color:var(--text-muted);font-size:20px;">&times;</button></div>
-    <div id="policy-changes-list" class="flex-1 overflow-y-auto pr-2"><p style="color:var(--text-muted);">Loading...</p></div>
+    <div class="widget-header">Recent Policy Changes <button onclick="closeModal('policy-changes-modal')" class="modal-close">&times;</button></div>
+    <div id="policy-changes-list" class="flex-1 overflow-y-auto pr-2"><p class="text-muted">Loading...</p></div>
   </div>
 </div>
 
@@ -777,13 +777,13 @@
 <div id="fleet-output-modal" class="modal-overlay hidden" onclick="if(event.target===this)closeFleetOutputModal()">
   <div class="widget w-11/12 md:w-5/6 lg:w-3/4 flex flex-col" style="max-height:85vh;">
     <div class="widget-header">
-      <span id="fleet-output-modal-title" class="flex-1 truncate" style="padding-right:8px;">Output</span>
+      <span id="fleet-output-modal-title" class="flex-1 truncate pr-2">Output</span>
       <div class="flex items-center gap-2">
         <button onclick="copyFleetOutputModal()" class="btn btn-muted btn-xs">📋 Copy</button>
-        <button onclick="closeFleetOutputModal()" style="color:var(--text-muted);font-size:20px;background:none;border:none;cursor:pointer;">&times;</button>
+        <button onclick="closeFleetOutputModal()" class="modal-close">&times;</button>
       </div>
     </div>
-    <pre id="fleet-output-modal-pre" class="fleet-out flex-1 overflow-auto p-3 rounded text-xs" style="background:var(--bg-base);color:var(--text-main);white-space:pre-wrap;min-height:120px;">Loading...</pre>
+    <pre id="fleet-output-modal-pre" class="fleet-out flex-1 overflow-auto p-3 rounded text-xs bg-base" style="white-space:pre-wrap;min-height:120px;">Loading...</pre>
   </div>
 </div>
 </body>

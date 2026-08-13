@@ -322,6 +322,9 @@
   .dev-gw-pill .remove { cursor: pointer; font-weight: 700; margin-left: 4px; }
   .search-result { padding: 6px 12px; font-size: var(--text-xs); cursor: pointer; border-radius: var(--radius-sm); }
   .search-result:hover { filter: brightness(1.25); }
+  .modal-close { color: var(--text-muted); cursor: pointer; background: none; border: none; font-size: 20px; line-height: 1; padding: 4px; }
+  .font-normal { font-weight: 400; }
+  .cmd-input { font-family: "Cascadia Code", "JetBrains Mono", Consolas, monospace; font-size: var(--text-base); }
   .toggle-btn { background: var(--bg-hover); color: var(--text-muted); border-radius: var(--radius-sm); padding: 3px 10px; font-size: 10px; font-weight: 600; cursor: pointer; font-family: inherit; }
   .toggle-btn.on { background: var(--status-success); color: var(--bg-base); }
   .fleet-input { background: var(--bg-base); color: var(--text-main); border: 1px solid var(--border-color); border-radius: var(--radius-sm); padding: 8px 12px; min-height: 0; width: 100%; font-size: var(--text-xs); }
@@ -458,6 +461,9 @@
 
   /* ── Toast ──────────────────────────────────────────────── */
   .toast { animation: slideDown 0.3s ease, fadeOut 0.5s ease 2.5s forwards; }
+  .toast-success { background: #059669; color: white; }
+  .toast-error { background: #e11d48; color: white; }
+  .toast-info { background: #334155; color: #e2e8f0; }
   @keyframes slideDown { from{transform:translateY(-100%);opacity:0} to{transform:translateY(0);opacity:1} }
   @keyframes fadeOut { to{opacity:0} }
 

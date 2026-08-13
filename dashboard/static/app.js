@@ -410,8 +410,10 @@ function resetWinForm() {
   setWinMatch('exact');
   // Reset hidden gateway value
   document.getElementById('win-gateway').value = '';
-  document.getElementById('gw-dropdown-display').textContent = 'Select a gateway…';
-  document.getElementById('gw-dropdown-display').style.color = 'var(--text-muted)';
+  var dd = document.getElementById('gw-dropdown-display');
+  dd.textContent = 'Select a gateway…';
+  dd.classList.remove('text-main');
+  dd.classList.add('text-muted');
   renderDayCircles();
   buildTimeScrolls();
 }
@@ -564,8 +566,9 @@ function selectGateway(ip) {
   if (!gw) return;
   document.getElementById('win-gateway').value = ip;
   var display = document.getElementById('gw-dropdown-display');
-  display.innerHTML = gwPill(gw.hostname||gw.ip) + ' ' + escapeHtml(gw.hostname||gw.ip) + ' <span style="color:var(--text-muted);font-size:11px;">(' + ip + ')</span>';
-  display.style.color = 'var(--text-main)';
+  display.innerHTML = gwPill(gw.hostname||gw.ip) + ' ' + escapeHtml(gw.hostname||gw.ip) + ' <span class="text-xs text-muted">(' + ip + ')</span>';
+  display.classList.remove('text-muted');
+  display.classList.add('text-main');
   _gwDropdownOpen = false;
   document.getElementById('gw-dropdown-menu').classList.remove('show');
   document.getElementById('gw-dropdown-caret').classList.remove('open');
@@ -600,14 +603,14 @@ async function onWinGatewayChange() {
     _recentJITData = await r.json();
   } catch(e) { _recentJITData = []; }
   var list = document.getElementById('recent-jit-list');
-  if (!_recentJITData.length) { list.innerHTML = '<p class="text-xs px-2 py-1" style="color:var(--text-muted);">No recent JIT approvals for this gateway.</p>'; }
+  if (!_recentJITData.length) { list.innerHTML = '<p class="text-xs px-2 py-1 text-muted">No recent JIT approvals for this gateway.</p>'; }
   else {
     list.innerHTML = _recentJITData.slice(0, 20).map(function(j, i) {
-      return '<div class="flex items-center gap-2 px-2 py-1 text-xs cursor-pointer rounded hover:brightness-125" style="color:var(--text-main);" onclick="selectJIT(' + i + ')" title="Click to fill command">' +
-        '<span style="font-size:12px;">↩</span>' +
+      return '<div class="search-result flex items-center gap-2 text-xs" onclick="selectJIT(' + i + ')" title="Click to fill command">' +
+        '<span class="text-xs">↩</span>' +
         gwPill(j.hostname||'') + ' ' + escapeHtml(j.hostname||j.target_ip) +
-        ' <code class="truncate" style="color:var(--text-muted);max-width:260px;" title="' + escapeHtml(j.command) + '">' + escapeHtml(j.command.substring(0, 60)) + '</code>' +
-        ' <span style="color:var(--text-muted);font-size:10px;">' + formatAgo(Date.now()/1000 - j.created_at) + '</span>' +
+        ' <code class="truncate text-muted" style="max-width:260px;" title="' + escapeHtml(j.command) + '">' + escapeHtml(j.command.substring(0, 60)) + '</code>' +
+        ' <span class="text-xs text-muted">' + formatAgo(Date.now()/1000 - j.created_at) + '</span>' +
       '</div>';
     }).join('');
   }
@@ -622,7 +625,7 @@ async function openCreateWindowModal() {
   try {
     var r = await fetch('/api/gateways'); _winGateways = await r.json();
     var menu = document.getElementById('gw-dropdown-menu');
-    if (!_winGateways.length) { menu.innerHTML = '<div class="p-3 text-xs" style="color:var(--text-muted);">No gateways registered.</div>'; }
+    if (!_winGateways.length) { menu.innerHTML = '<div class="p-3 text-xs text-muted">No gateways registered.</div>'; }
     else {
       menu.innerHTML = _winGateways.map(function(g) {
         return '<div class="gw-dropdown-item" onclick="selectGateway(\'' + g.ip + '\')">' + gwPill(g.hostname||g.ip) + ' ' + escapeHtml(g.hostname||g.ip) + ' <span style="color:var(--text-muted);font-size:11px;margin-left:auto;">' + g.ip + '</span></div>';
@@ -828,15 +831,15 @@ async function testWinCommand() {
   var cmd = document.getElementById('win-command').value.trim();
   if (!cmd) return;
   var rd = document.getElementById('win-test-result'); rd.classList.remove('hidden');
-  rd.innerHTML = '<span class="text-xs" style="color:var(--text-muted);">Testing...</span>';
+  rd.innerHTML = '<span class="text-xs text-muted">Testing...</span>';
   try {
     var r = await fetch('/api/policies/test?command=' + encodeURIComponent(cmd)); var data = await r.json();
     var bg, border, text, icon, desc;
     if (data.action === 'blocked') { bg='rgba(251,146,60,0.1)'; border='rgba(251,146,60,0.3)'; text='#fb923c'; icon='🛡️'; desc='This command is BLOCKED by policy — cannot create window.'; }
     else if (data.action === 'auto_approved') { bg='rgba(74,222,128,0.1)'; border='rgba(74,222,128,0.3)'; text='var(--status-success)'; icon='✅'; desc='Already auto-approved — no window needed.'; }
     else { bg='rgba(96,165,250,0.1)'; border='rgba(96,165,250,0.3)'; text='var(--status-info)'; icon='⏳'; desc='Would require JIT — a window will auto-approve this.'; }
-    rd.innerHTML = '<div class="p-2 rounded-lg border text-xs" style="background:' + bg + ';color:' + text + ';border-color:' + border + ';">' + icon + ' ' + desc + '</div>';
-  } catch(e) { rd.innerHTML = '<span class="text-xs" style="color:var(--text-muted);">Test failed</span>'; }
+    rd.innerHTML = '<div class="result-box text-xs" style="background:' + bg + ';color:' + text + ';border-color:' + border + ';">' + icon + ' ' + desc + '</div>';
+  } catch(e) { rd.innerHTML = '<span class="text-xs text-muted">Test failed</span>'; }
 }
 
 // ── Time scroll picker ───────────────────────────────────────────────
@@ -1096,29 +1099,29 @@ async function deleteWindow(id) {
 async function showWindowHistory(windowId) {
   var overlay = document.getElementById('window-history-overlay');
   var content = document.getElementById('window-history-content');
-  content.innerHTML = '<p style="color:var(--text-muted);">Loading...</p>';
+  content.innerHTML = '<p class="text-muted">Loading...</p>';
   overlay.classList.remove('hidden');
   try {
     var r = await fetch('/api/approved-windows/' + windowId + '/executions');
     var data = await r.json();
     if (!data.length) {
-      content.innerHTML = '<p style="color:var(--text-muted);padding:20px 0;">No executions recorded for this window yet.</p>';
+      content.innerHTML = '<p class="text-muted" style="padding:20px 0;">No executions recorded for this window yet.</p>';
     } else {
       var now = Math.floor(Date.now() / 1000);
       content.innerHTML = '<table><thead><tr><th>When</th><th>Command</th><th>Gateway</th></tr></thead><tbody>' +
         data.map(function(e) {
           var ago = formatAgo(now - Math.floor(e.executed_at || 0) || 0);
           var ok = Number(e.success) !== 0;
-          var icon = ok ? '<span style="color:var(--status-success);">✅</span>' : '<span style="color:#fb923c;">❌</span>';
-          var reasonHtml = (!ok && e.reason) ? '<br><span style="font-size:10px;color:#fb923c;">' + escapeHtml(e.reason) + '</span>' : '';
+          var icon = ok ? '<span class="text-success">✅</span>' : '<span class="stat-blocked">❌</span>';
+          var reasonHtml = (!ok && e.reason) ? '<br><span class="text-xs stat-blocked">' + escapeHtml(e.reason) + '</span>' : '';
           return '<tr>' +
-            '<td style="font-size:11px;color:var(--text-muted);white-space:nowrap;">' + ago + '</td>' +
-            '<td><code class="text-xs" style="color:var(--text-main);">' + icon + ' ' + escapeHtml(e.command || '') + '</code>' + reasonHtml + '</td>' +
-            '<td style="font-size:11px;color:var(--text-muted);">' + escapeHtml(e.target_ip || '') + '</td></tr>';
+            '<td class="text-xs text-muted whitespace-nowrap">' + ago + '</td>' +
+            '<td><code class="text-xs">' + icon + ' ' + escapeHtml(e.command || '') + '</code>' + reasonHtml + '</td>' +
+            '<td class="text-xs text-muted">' + escapeHtml(e.target_ip || '') + '</td></tr>';
         }).join('') + '</tbody></table>';
     }
   } catch(e) {
-    content.innerHTML = '<p style="color:var(--brand-red);">Failed to load execution history.</p>';
+    content.innerHTML = '<p class="text-danger">Failed to load execution history.</p>';
   }
 }
 
@@ -2405,12 +2408,12 @@ async function fetchPolicies() {
 async function fetchPolicyChanges() {
   const res = await fetch('/api/policy_changes'); const changes = await res.json();
   const changesList = document.getElementById('policy-changes-list');
-  if (changes.length === 0) { changesList.innerHTML = '<p style="color:var(--text-muted);">No policy changes recorded.</p>'; return; }
+  if (changes.length === 0) { changesList.innerHTML = '<p class="text-muted">No policy changes recorded.</p>'; return; }
   changesList.innerHTML = changes.map(function(c) {
-    return '<div class="p-3 rounded-lg border mb-2" style="background:var(--bg-base);border-color:var(--border-color);">' +
-    '<div class="flex items-center justify-between"><p class="text-xs" style="color:var(--text-muted);">' + formatDateTime(c.timestamp) + ' - <span style="color:var(--text-main);">' + c.policy_type + '</span></p>' +
-    '<button class="btn btn-xs" style="background:transparent;color:var(--status-info);border:1px solid var(--border-color);padding:2px 8px;font-size:10px;flex-shrink:0;" onclick="rollbackPolicyChange(' + c.id + ')">Restore</button></div>' +
-    '<div class="mt-2 text-xs font-mono"><p style="color:var(--brand-red);">- ' + c.old_content.split('\n').filter(function(l){return l.trim()!=='';}).join('<br>- ') + '</p><p style="color:var(--status-success);">+ ' + c.new_content.split('\n').filter(function(l){return l.trim()!=='';}).join('<br>+ ') + '</p></div></div>';
+    return '<div class="p-3 rounded-lg border mb-2 bg-base">' +
+    '<div class="flex items-center justify-between"><p class="text-xs text-muted">' + formatDateTime(c.timestamp) + ' - <span class="text-main">' + c.policy_type + '</span></p>' +
+    '<button class="chip-btn info flex-shrink-0" onclick="rollbackPolicyChange(' + c.id + ')">Restore</button></div>' +
+    '<div class="mt-2 text-xs font-mono"><p class="text-danger">- ' + c.old_content.split('\n').filter(function(l){return l.trim()!=='';}).join('<br>- ') + '</p><p class="text-success">+ ' + c.new_content.split('\n').filter(function(l){return l.trim()!=='';}).join('<br>+ ') + '</p></div></div>';
   }).join('');
 }
 async function savePolicies() {
@@ -2795,9 +2798,9 @@ function showToast(message, type) {
   const toast = document.getElementById('toast');
   toast.textContent = message;
   toast.className = 'fixed top-4 left-1/2 transform -translate-x-1/2 z-50 px-6 py-3 rounded-lg text-sm font-medium shadow-lg toast';
-  if (type === 'success') toast.className += ' bg-emerald-600 text-white';
-  else if (type === 'error') toast.className += ' bg-rose-600 text-white';
-  else toast.className += ' bg-slate-700 text-slate-200';
+  if (type === 'success') toast.classList.add('toast-success');
+  else if (type === 'error') toast.classList.add('toast-error');
+  else toast.classList.add('toast-info');
   toast.classList.remove('hidden');
   setTimeout(function() { toast.classList.add('hidden'); }, 3000);
 }
