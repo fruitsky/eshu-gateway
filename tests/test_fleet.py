@@ -214,7 +214,8 @@ class TestFleetApi:
         assert r.status_code in (401, 403)
 
     def test_submit_hard_block_reject(self, auth_client):
-        r = self._submit(auth_client, command="rm -rf /tmp/x")
+        # Non-editable self-protection pattern stays a hard block
+        r = self._submit(auth_client, command="cat /etc/eshu-freeze")
         assert r.status_code == 400
         assert "blocklist" in r.json()["detail"].lower()
 

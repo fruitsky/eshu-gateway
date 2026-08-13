@@ -27,6 +27,7 @@ from database import (
     get_policy_updated_at, set_policy_updated_at,
     get_db,
     get_note, update_note, record_policy_change, get_policy_changes, get_policy_change,
+    seed_core_blocklist_if_needed,
     get_ssh_keys, save_ssh_keys,
     generate_enrollment_token, validate_enrollment_token,
     get_trigger_update_version, set_trigger_update_version,
@@ -74,7 +75,7 @@ from core.session import (
 )
 from core.rate_limit import _check_rate_limit
 from core.notify import send_notify
-from core.cmd_blocklist import hard_block_match, blocklist_substring_match
+from core.cmd_blocklist import hard_block_match, blocklist_substring_match, CORE_COMMAND_PATTERNS, HARD_PATTERNS
 from core.cmd_risk import get_cmd_risk, get_dry_run_suggestion
 from core.gateway_watch import (
     _check_gateway_transitions, _gateway_watch_loop,
@@ -126,6 +127,9 @@ def on_startup():
     # Migrate old Hermes database if present (MUST run before init_db, which creates eshu.db)
     _migrate_legacy_db()
     init_db()
+    # One-time seed: ship the command-safety core patterns into the blocklist
+    # (idempotent; existing installs gain the same defaults as fresh ones).
+    seed_core_blocklist_if_needed(CORE_COMMAND_PATTERNS)
     from core.cmd_descs import load_whatis_db
     load_whatis_db()
     pw = get_password_hash()
@@ -836,7 +840,29 @@ def list_policies():
     policies = get_policies()
     policies["policy_version"] = get_policy_version()
     policies["policy_updated_at"] = get_policy_updated_at()
+    # Core registry: which blocklist entries are "shipped core" (for the UI
+    # shield badge + warn-on-remove) and which patterns are non-editable.
+    policies["core_patterns"] = CORE_COMMAND_PATTERNS
+    policies["hard_patterns"] = HARD_PATTERNS
     return policies
+
+@app.post("/api/policies/restore-core")
+def restore_core_blocklist(request: Request):
+    """Re-add any missing shipped core patterns to the blocklist (a deliberate,
+    audited action). Removals persist until this is called."""
+    _check_session(request)
+    current = (get_policies().get('regex_blacklist') or '').split('\n')
+    current = [l for l in current if l.strip()]
+    existing = {l.strip() for l in current}
+    missing = [p for p in CORE_COMMAND_PATTERNS if p not in existing]
+    if missing:
+        old = (get_policies().get('regex_blacklist') or '')
+        new = '\n'.join(current + missing)
+        update_policy('regex_blacklist', new)
+        record_policy_change('regex_blacklist', old, new)
+        increment_policy_version()
+        set_policy_updated_at(int(time.time()))
+    return {"status": "ok", "restored": len(missing)}
 
 @app.get("/api/policy_changes")
 def list_policy_changes():

@@ -118,6 +118,78 @@ class TestBlocklistSubstringSemantics:
         assert r.json()["in_regex_blacklist"] is True
 
 
+class TestCoreBlocklist:
+
+    def test_seed_adds_core_patterns_once(self, temp_db):
+        from db.policies import seed_core_blocklist_if_needed
+        from core.cmd_blocklist import CORE_COMMAND_PATTERNS
+        seeded = seed_core_blocklist_if_needed(CORE_COMMAND_PATTERNS)
+        assert seeded is True
+        # Second call is a no-op (idempotent)
+        assert seed_core_blocklist_if_needed(CORE_COMMAND_PATTERNS) is False
+        from db.policies import get_policies
+        lines = [l.strip() for l in (get_policies().get('regex_blacklist') or '').split('\n') if l.strip()]
+        assert lines == CORE_COMMAND_PATTERNS
+
+    def test_seed_preserves_user_entries(self, temp_db):
+        from db.policies import update_policy, seed_core_blocklist_if_needed, get_policies
+        from core.cmd_blocklist import CORE_COMMAND_PATTERNS
+        update_policy('regex_blacklist', 'custom-rule-1')
+        seed_core_blocklist_if_needed(CORE_COMMAND_PATTERNS)
+        lines = [l.strip() for l in (get_policies().get('regex_blacklist') or '').split('\n') if l.strip()]
+        assert lines[0] == 'custom-rule-1'
+        for p in CORE_COMMAND_PATTERNS:
+            assert p in lines
+
+    def test_seeded_blocklist_blocks_core_commands(self, temp_db):
+        from db.policies import seed_core_blocklist_if_needed
+        from core.cmd_blocklist import CORE_COMMAND_PATTERNS
+        seed_core_blocklist_if_needed(CORE_COMMAND_PATTERNS)
+        from db.auth import set_password_hash
+        from core.utils import _hash_password
+        set_password_hash(_hash_password("test"))
+        from main import app
+        from fastapi.testclient import TestClient
+        with TestClient(app) as client:
+            client.post("/api/auth/login", json={"password": "test"})
+            for cmd in ("reboot", "rm -rf /tmp/x", "mkfs.ext4 /dev/sdb1"):
+                r = client.get("/api/policies/test", params={"command": cmd})
+                assert r.status_code == 200
+                d = r.json()
+                assert d["action"] == "blocked"
+                assert d.get("tier") != "fatal"  # now a normal blocklist block
+
+    def test_policies_expose_core_registry(self, auth_client):
+        r = auth_client.get("/api/policies")
+        assert r.status_code == 200
+        data = r.json()
+        assert "core_patterns" in data and "hard_patterns" in data
+        from core.cmd_blocklist import CORE_COMMAND_PATTERNS, HARD_PATTERNS
+        assert data["core_patterns"] == CORE_COMMAND_PATTERNS
+        assert data["hard_patterns"] == HARD_PATTERNS
+
+    def test_restore_core_re_adds_removed_patterns(self, auth_client):
+        from db.policies import seed_core_blocklist_if_needed
+        from core.cmd_blocklist import CORE_COMMAND_PATTERNS
+        seed_core_blocklist_if_needed(CORE_COMMAND_PATTERNS)
+        # Remove "reboot" from the blocklist (simulate a deliberate removal)
+        auth_client.post("/api/policies", json={
+            "type": "regex_blacklist",
+            "content": "\n".join(p for p in CORE_COMMAND_PATTERNS if p != "reboot")
+        })
+        r = auth_client.get("/api/policies/test?command=reboot")
+        assert r.json()["action"] == "jit"  # removed -> now allowed to reach JIT
+        # Restore defaults
+        r2 = auth_client.post("/api/policies/restore-core")
+        assert r2.status_code == 200
+        assert r2.json()["restored"] == 1
+        r3 = auth_client.get("/api/policies/test?command=reboot")
+        assert r3.json()["action"] == "blocked"
+
+    def test_restore_core_requires_auth(self, client):
+        assert client.post("/api/policies/restore-core").status_code == 401
+
+
 class TestTriggers:
 
     def test_update_version_set_and_get(self):

@@ -324,17 +324,17 @@ class TestPolicy:
         assert r.json().get("dev_installer_url") == "/static/dev/eshu-gateway-install.sh"
 
     def test_policy_test_surfaces_fatal_tier(self, auth_client):
-        # The gateway's hardcoded catastrophic blocklist (Stage 1) must be
+        # The non-editable core blocklist (self-protection + evasion) must be
         # surfaced by /api/policies/test so agent pre-flight isn't told "jit"
         # for a command that is actually a permanent hard block.
-        r = auth_client.get("/api/policies/test?command=reboot")
+        r = auth_client.get("/api/policies/test?command=cat /etc/eshu-freeze")
         assert r.status_code == 200
         data = r.json()
         assert data["action"] == "blocked"
         assert data["tier"] == "fatal"
         assert data["matched"] is True
 
-        r2 = auth_client.get("/api/policies/test?command=rm -rf /home/dragon/repos")
+        r2 = auth_client.get("/api/policies/test", params={"command": "$(which python)"})
         assert r2.status_code == 200
         assert r2.json()["action"] == "blocked"
         assert r2.json()["tier"] == "fatal"

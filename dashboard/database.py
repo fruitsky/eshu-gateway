@@ -67,6 +67,7 @@ from db.policies import (
     record_policy_change,
     get_policy_changes,
     get_policy_change,
+    seed_core_blocklist_if_needed,
 )
 
 from db.enrollment import (

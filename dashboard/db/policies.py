@@ -69,6 +69,36 @@ def set_policy_updated_at(ts: int):
         cursor.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('policy_updated_at', ?)", (str(ts),))
         conn.commit()
 
+def get_meta(key: str):
+    with db_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT value FROM meta WHERE key = ?', (key,))
+        row = cursor.fetchone()
+        return row['value'] if row else None
+
+def set_meta(key: str, value: str):
+    with db_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)', (key, value))
+        conn.commit()
+
+def seed_core_blocklist_if_needed(core_patterns):
+    """One-time migration: append any missing shipped core patterns to the
+    blocklist so existing installs gain the same defaults as fresh ones.
+    Idempotent via the 'core_blocklist_seeded' meta flag; never re-seeds, so a
+    human's deliberate removals persist."""
+    if get_meta('core_blocklist_seeded'):
+        return False
+    current = (get_policies().get('regex_blacklist') or '').split('\n')
+    current = [l for l in current if l.strip()]
+    existing = {l.strip() for l in current}
+    added = [p for p in core_patterns if p not in existing]
+    if added:
+        update_policy('regex_blacklist', '\n'.join(current + added))
+        set_policy_updated_at(int(time.time()))
+    set_meta('core_blocklist_seeded', '1')
+    return True
+
 def record_policy_change(policy_type: str, old_content: str, new_content: str):
     with db_conn() as conn:
         cursor = conn.cursor()
