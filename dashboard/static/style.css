@@ -317,17 +317,17 @@
   .policy-chips {
     background: var(--bg-base); border: 1px solid var(--border-color);
     border-radius: var(--radius); padding: var(--space-2);
-    min-height: 120px; max-height: 320px; overflow-y: auto;
-    display: flex; flex-wrap: wrap; gap: 6px; align-content: flex-start;
+    min-height: 120px; max-height: 400px; overflow-y: auto;
+    display: flex; flex-direction: column; gap: 6px;
   }
   .policy-chip {
-    display: inline-flex; align-items: center; gap: 6px;
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    width: 100%;
     background: var(--bg-hover); border: 1px solid var(--border-color);
-    border-radius: var(--radius-sm); padding: 3px 8px;
+    border-radius: var(--radius-sm); padding: 4px 10px;
     font-size: var(--text-xs); font-family: monospace; color: var(--text-main);
-    max-width: 100%;
   }
-  .policy-chip code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .policy-chip code { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .policy-chip .remove { cursor: pointer; color: var(--text-muted); font-weight: 700; padding: 0 2px; flex-shrink: 0; font-size: 13px; }
   .policy-chip .remove:hover { color: var(--danger); }
   .policy-empty { padding: 2px 4px; }
