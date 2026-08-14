@@ -190,6 +190,45 @@ class TestCoreBlocklist:
         assert client.post("/api/policies/restore-core").status_code == 401
 
 
+class TestPolicyPreview:
+
+    def test_preview_requires_auth(self, client):
+        assert client.post("/api/policies/preview", json={}).status_code == 401
+
+    def test_preview_detects_blocklist_flip(self, auth_client):
+        from db.requests import create_request
+        for i in range(3):
+            create_request("10.0.0.1", "docker ps", status="consumed")
+        create_request("10.0.0.1", "apt update", status="auto-approved")
+
+        r = auth_client.post("/api/policies/preview", json={
+            "exact_whitelist": "",
+            "regex_whitelist": "",
+            "regex_blacklist": "docker ps",
+            "days": 30,
+        })
+        assert r.status_code == 200
+        data = r.json()
+        flips = {f["command"]: f for f in data["flips"]}
+        assert "docker ps" in flips
+        assert flips["docker ps"]["before"] == "jit"
+        assert flips["docker ps"]["after"] == "blocked"
+        assert data["newly_blocked"] >= 1
+        assert data["changed"] >= 1
+
+    def test_preview_no_change(self, auth_client):
+        from db.requests import create_request
+        create_request("10.0.0.1", "uptime", status="consumed")
+        r = auth_client.post("/api/policies/preview", json={
+            "exact_whitelist": "",
+            "regex_whitelist": "",
+            "regex_blacklist": "",
+            "days": 30,
+        })
+        assert r.status_code == 200
+        assert r.json()["changed"] == 0
+
+
 class TestTriggers:
 
     def test_update_version_set_and_get(self):

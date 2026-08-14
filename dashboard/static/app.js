@@ -2523,6 +2523,72 @@ async function fetchPolicyChanges() {
     '<div class="mt-2 text-xs font-mono"><p class="text-danger">- ' + c.old_content.split('\n').filter(function(l){return l.trim()!=='';}).join('<br>- ') + '</p><p class="text-success">+ ' + c.new_content.split('\n').filter(function(l){return l.trim()!=='';}).join('<br>+ ') + '</p></div></div>';
   }).join('');
 }
+
+function closePolicyPreview() {
+  document.getElementById('policy-preview-modal').classList.add('hidden');
+}
+
+async function previewPolicyImpact() {
+  const modal = document.getElementById('policy-preview-modal');
+  const body = document.getElementById('policy-preview-body');
+  const daysEl = document.getElementById('preview-days');
+  const days = daysEl ? parseInt(daysEl.value) : 30;
+  modal.classList.remove('hidden');
+  body.innerHTML = '<p class="text-muted">Evaluating command history…</p>';
+  try {
+    const res = await authFetch('/api/policies/preview', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        exact_whitelist: document.getElementById('policy-exact').value || '',
+        regex_whitelist: document.getElementById('policy-regex-white').value || '',
+        regex_blacklist: document.getElementById('policy-regex-black').value || '',
+        days: days
+      })
+    });
+    if (res.status === 401) { await checkAuth(); return; }
+    if (!res.ok) throw new Error((await res.json().catch(function(){ return {}; })).detail || 'Preview failed');
+    renderPolicyPreview(await res.json());
+  } catch(e) {
+    body.innerHTML = '<p class="text-danger">Preview failed: ' + escapeHtml(e.message || e) + '</p>';
+  }
+}
+
+function renderPolicyPreview(data) {
+  const body = document.getElementById('policy-preview-body');
+  const actionBadge = function(a) {
+    if (a === 'blocked') return '<span class="badge badge-blocked">Blocked</span>';
+    if (a === 'auto_approved') return '<span class="badge badge-auto">Auto-Approved</span>';
+    return '<span class="badge badge-pending">JIT</span>';
+  };
+
+  let html = '<p class="text-muted mb-3">' + data.total + ' distinct command(s) in the last ' + data.window_days + ' days' +
+    (data.fatal_count ? ' · ' + data.fatal_count + ' permanently blocked (non-relaxable)' : '') + '.</p>';
+
+  if (data.changed === 0) {
+    html += '<p class="text-success">No commands would change behaviour under this staged policy.</p>';
+  } else {
+    html += '<div class="flex flex-wrap gap-2 mb-3">' +
+      '<span class="badge badge-blocked">' + data.newly_blocked + ' newly blocked</span>' +
+      '<span class="badge badge-approved">' + data.newly_allowed + ' newly allowed</span>' +
+      '<span class="badge badge-auto">' + data.newly_auto + ' → auto-approve</span>' +
+      '<span class="badge badge-pending">' + data.newly_jit + ' → JIT</span>' +
+      '</div>';
+
+    html += '<div class="space-y-2">' + data.flips.map(function(f) {
+      return '<div class="p-2 rounded-lg border bg-base">' +
+        '<div class="flex items-center gap-2 mb-1">' + actionBadge(f.before) + '<span class="text-muted">→</span>' + actionBadge(f.after) + '</div>' +
+        '<code class="font-mono text-xs block truncate" title="' + escapeHtml(f.command) + '">' + escapeHtml(f.command) + '</code>' +
+        '<div class="text-xs text-muted mt-1">' + escapeHtml(f.reason) + '</div>' +
+        '</div>';
+    }).join('') + '</div>';
+
+    if (data.flips.length < data.changed) {
+      html += '<p class="text-xs text-muted mt-2">…showing ' + data.flips.length + ' of ' + data.changed + ' changed commands.</p>';
+    }
+  }
+  body.innerHTML = html;
+}
 async function savePolicies() {
   const btn = document.getElementById('save-policies-btn'); btn.disabled = true; btn.textContent = 'Saving...';
   await savePoliciesSilent();

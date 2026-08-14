@@ -76,6 +76,7 @@ from core.session import (
 from core.rate_limit import _check_rate_limit
 from core.notify import send_notify
 from core.cmd_blocklist import hard_block_match, blocklist_substring_match, CORE_COMMAND_PATTERNS, HARD_PATTERNS
+from core.policy_eval import evaluate_policy_verdict
 from core.cmd_risk import get_cmd_risk, get_dry_run_suggestion
 from core.gateway_watch import (
     _check_gateway_transitions, _gateway_watch_loop,
@@ -282,6 +283,12 @@ class RegisterPayload(BaseModel):
 class PolicyPayload(BaseModel):
     type: str
     content: str
+
+class PolicyPreviewPayload(BaseModel):
+    exact_whitelist: str = ""
+    regex_whitelist: str = ""
+    regex_blacklist: str = ""
+    days: int = 30
 
 class NotePayload(BaseModel):
     content: str
@@ -551,61 +558,43 @@ def purge_requests(older_than: str = "1h", request: Request = None):
 
 @app.get("/api/policies/test")
 def test_policy(command: str):
-    import re
     policies = get_policies()
-    exact_lines = [l for l in policies.get('exact_whitelist', '').split('\n') if l.strip()]
-    regex_white_lines = [l for l in policies.get('regex_whitelist', '').split('\n') if l.strip()]
-    regex_black_lines = [l for l in policies.get('regex_blacklist', '').split('\n') if l.strip()]
+    v = evaluate_policy_verdict(
+        command,
+        policies.get('exact_whitelist', ''),
+        policies.get('regex_whitelist', ''),
+        policies.get('regex_blacklist', ''),
+    )
 
-    # Stage 1 (FATAL) mirrors the gateway's hardcoded catastrophic blocklist —
-    # must be surfaced before the dashboard regex policies so agent pre-flight
-    # isn't told "this will JIT" when it's actually a permanent hard block.
-    fatal = hard_block_match(command)
-    if fatal:
+    if v['tier'] == 'fatal':
         return {
             "command": command,
             "matched": True,
             "action": "blocked",
             "tier": "fatal",
-            "reason": f"Hardcoded catastrophic blocklist (pattern: {fatal})",
-            "details": [{"type": "hard_blocklist", "pattern": fatal, "match": True}],
+            "reason": v['reason'],
+            "details": [{"type": "hard_blocklist", "pattern": v['matched_pattern'], "match": True}],
             "risk": get_cmd_risk(command),
             "dry_run": get_dry_run_suggestion(command),
         }
-    
+
     result = {
         "command": command,
-        "matched": False,
-        "action": "jit",
+        "matched": v['action'] != 'jit',
+        "action": v['action'],
         "details": [],
         "risk": get_cmd_risk(command),
         "dry_run": get_dry_run_suggestion(command),
     }
-    
-    for pattern in regex_black_lines:
-        if blocklist_substring_match(pattern, command):
-            result["matched"] = True
-            result["action"] = "blocked"
-            result["details"].append({"type": "regex_blacklist", "pattern": pattern, "match": True})
-            return result
-    
-    if command in exact_lines:
-        result["matched"] = True
-        result["action"] = "auto_approved"
-        result["details"].append({"type": "exact_whitelist", "matched_line": command, "match": True})
-        return result
-    
-    for pattern in regex_white_lines:
-        try:
-            if re.search(pattern, command):
-                result["matched"] = True
-                result["action"] = "auto_approved"
-                result["details"].append({"type": "regex_whitelist", "pattern": pattern, "match": True})
-                return result
-        except re.error:
-            result["details"].append({"type": "regex_whitelist", "pattern": pattern, "match": "invalid_regex"})
-    
-    result["details"].append({"message": "No policy matched. Command would require JIT approval."})
+    if v['action'] == 'blocked':
+        result["details"].append({"type": "regex_blacklist", "pattern": v['matched_pattern'], "match": True})
+    elif v['action'] == 'auto_approved':
+        if v['detail_type'] == 'exact_whitelist':
+            result["details"].append({"type": "exact_whitelist", "matched_line": command, "match": True})
+        else:
+            result["details"].append({"type": "regex_whitelist", "pattern": v['matched_pattern'], "match": True})
+    else:
+        result["details"].append({"message": "No policy matched. Command would require JIT approval."})
     return result
 
 @app.get("/api/policies/check")
@@ -863,6 +852,61 @@ def restore_core_blocklist(request: Request):
         increment_policy_version()
         set_policy_updated_at(int(time.time()))
     return {"status": "ok", "restored": len(missing)}
+
+@app.post("/api/policies/preview")
+def preview_policy_impact(payload: PolicyPreviewPayload, request: Request):
+    """What-if: replay the last N days of distinct commands through a draft
+    policy and report how many would flip vs. the current committed policy."""
+    _check_session(request)
+    days = max(1, min(int(payload.days or 30), 365))
+    cutoff = int(time.time()) - days * 86400
+
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute('SELECT DISTINCT command FROM requests WHERE created_at >= ?', (cutoff,))
+    commands = [row['command'] for row in cursor.fetchall() if (row['command'] or '').strip()]
+    conn.close()
+    commands = commands[:2000]  # safety cap
+
+    cur = get_policies()
+    cur_exact, cur_rw, cur_rb = cur.get('exact_whitelist', ''), cur.get('regex_whitelist', ''), cur.get('regex_blacklist', '')
+
+    flips = []
+    newly_blocked = newly_allowed = newly_auto = newly_jit = fatal_count = 0
+    for cmd in commands:
+        before = evaluate_policy_verdict(cmd, cur_exact, cur_rw, cur_rb)
+        after = evaluate_policy_verdict(cmd, payload.exact_whitelist, payload.regex_whitelist, payload.regex_blacklist)
+        if after['tier'] == 'fatal':
+            fatal_count += 1
+            continue  # hard block — never affected by policy, never flips
+        if before['action'] == after['action']:
+            continue
+        if after['action'] == 'blocked':
+            newly_blocked += 1
+        else:
+            newly_allowed += 1
+            if after['action'] == 'auto_approved':
+                newly_auto += 1
+            else:
+                newly_jit += 1
+        flips.append({
+            "command": cmd,
+            "before": before['action'],
+            "after": after['action'],
+            "reason": after['reason'],
+        })
+
+    return {
+        "total": len(commands),
+        "window_days": days,
+        "fatal_count": fatal_count,
+        "changed": len(flips),
+        "newly_blocked": newly_blocked,
+        "newly_allowed": newly_allowed,
+        "newly_auto": newly_auto,
+        "newly_jit": newly_jit,
+        "flips": flips[:50],
+    }
 
 @app.get("/api/policy_changes")
 def list_policy_changes():
