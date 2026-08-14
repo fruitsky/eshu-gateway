@@ -1126,7 +1126,7 @@ async function showWindowHistory(windowId) {
 }
 
 // ── Init ─────────────────────────────────────────────────────────────────
-async function initDashboard() { fetchVersion(); fetchRequests(); fetchCmdDescs(); fetchSuggestions(); refreshPasswordUI(); fetchFreezeStatus(); fetchFleetCommands(); }
+async function initDashboard() { updateNotifyUI(); fetchVersion(); fetchRequests(); fetchCmdDescs(); fetchSuggestions(); refreshPasswordUI(); fetchFreezeStatus(); fetchFleetCommands(); }
 
 // ── Requests ─────────────────────────────────────────────────────────────
 let _requestSearchQuery = '';
@@ -1411,41 +1411,36 @@ function renderTable() {
       badge = '<span class="badge badge-' + (req.status==='pending'?'pending':'approved') + '"><span class="ttl-countdown font-mono w-8 text-center" data-ttl="' + req.ttl + '">' + req.ttl + 's</span> ' + req.status + '</span>';
     } else if (isPP && isExpired) badge = '<span class="badge badge-expired">Expired</span>';
     else if (req.status === 'consumed') badge = '<span class="badge badge-consumed">Ticket Claimed</span>';
-    else if (req.status === 'blocked') badge = '<span class="badge badge-blocked">Blocked</span>';
+    else if (req.status === 'blocked') {
+      badge = isHardcoreBlocked(req.command)
+        ? '<span class="badge badge-blocked" title="Blocked by a shipped Eshu safety pattern — manage in Controls → Blocklist">🛡️ Blocked</span>'
+        : '<span class="badge badge-blocked">Blocked</span>';
+    }
     else if (req.status === 'denied') badge = '<span class="badge badge-denied">Denied</span>';
     else if (req.status === 'auto-approved') badge = '<span class="badge badge-auto">Auto-Approved</span>';
     else if (req.status === 'window-approved') badge = '<span class="badge badge-window">Window</span>';
     else if (req.status === 'window-rejected') badge = '<span class="badge badge-window-rejected" title="' + escapeHtml(req.reason || '') + '">Window Rejected</span>';
     else if (req.status === 'frozen') badge = '<span class="badge badge-frozen" title="Blocked by Emergency Freeze — all commands rejected while the fleet is frozen">Frozen</span>';
     else if (req.status === 'fleet-run') badge = '<span class="badge badge-fleet-run" title="Dispatched via Fleet Run">⚡ Fleet Run</span>';
-    let actions = '<span class="text-muted">-</span>';
+    let actions = '<span class="text-muted">—</span>';
     if (req.status === 'pending' && !isExpired) {
       actions = '<button onclick="handleAction(' + req.id + ', \'approve\')" class="btn btn-approve btn-xs mr-1">Approve</button>' +
         '<button onclick="handleAction(' + req.id + ', \'deny\')" class="btn btn-deny btn-xs">Deny</button>';
+    } else if (req.status === 'frozen' || req.status === 'fleet-run' || (req.status === 'blocked' && isHardcoreBlocked(req.command))) {
+      actions = '<span class="text-muted">—</span>';
     } else {
       const mem = fetchPolicyMembership(req.command);
       const inAnyAllowlist = mem.inExact || mem.inRegexWhite;
       const disabledStyle = 'opacity:0.5;pointer-events:none;';
 
-      if (req.status === 'frozen') {
-        actions = '<span class="chip chip-actions chip-frozen" title="Blocked by Emergency Freeze — the fleet is rejecting all commands until unfrozen.">' +
-          '🧊 Fleet Frozen</span>';
-      } else if (req.status === 'fleet-run') {
-        actions = '<span class="chip chip-actions chip-fleet-run" title="Executed via Fleet Run — see the Fleet Run tab for per-gateway output.">' +
-          '⚡ Fleet Run</span>';
-      } else if (req.status === 'blocked' && isHardcoreBlocked(req.command)) {
-        actions = '<span class="chip chip-actions chip-block-core" title="This command is permanently blocked by the Core Gateway Blocklist (Stage 1). It cannot be allowlisted.">' +
-          '🛡️ Block by Core</span>';
-      } else {
-        actions = '<select onchange="handlePolicyAction(this,\'' + encodeURIComponent(req.command) + '\')" class="btn-muted select-actions">' +
-          '<option value="" disabled selected>⚙ Actions</option>' +
-          '<option value="exact_whitelist"' + (mem.inExact ? ' disabled style="'+disabledStyle+'"' : '') + '>' + (mem.inExact ? '✓ ' : '+ ') + 'AL Exact</option>' +
-          '<option value="regex_whitelist"' + (mem.inRegexWhite ? ' disabled style="'+disabledStyle+'"' : '') + '>' + (mem.inRegexWhite ? '✓ ' : '+ ') + 'AL Regex</option>' +
-          '<option value="regex_blacklist"' + (mem.inBlacklist ? ' disabled style="'+disabledStyle+'"' : '') + '>' + (mem.inBlacklist ? '✓ ' : '🚫 ') + 'Add to Blocklist</option>' +
-          (inAnyAllowlist ? '<option value="regex_whitelist_remove">🔄 Remove from Allowlist</option>' : '') +
-          (mem.inBlacklist ? '<option value="regex_blacklist_remove">🚫 Remove from Blocklist</option>' : '') +
-        '</select>';
-      }
+      actions = '<select onchange="handlePolicyAction(this,\'' + encodeURIComponent(req.command) + '\')" class="btn-muted select-actions">' +
+        '<option value="" disabled selected>⚙ Actions</option>' +
+        '<option value="exact_whitelist"' + (mem.inExact ? ' disabled style="'+disabledStyle+'"' : '') + '>' + (mem.inExact ? '✓ ' : '+ ') + 'AL Exact</option>' +
+        '<option value="regex_whitelist"' + (mem.inRegexWhite ? ' disabled style="'+disabledStyle+'"' : '') + '>' + (mem.inRegexWhite ? '✓ ' : '+ ') + 'AL Regex</option>' +
+        '<option value="regex_blacklist"' + (mem.inBlacklist ? ' disabled style="'+disabledStyle+'"' : '') + '>' + (mem.inBlacklist ? '✓ ' : '🚫 ') + 'Add to Blocklist</option>' +
+        (inAnyAllowlist ? '<option value="regex_whitelist_remove">🔄 Remove from Allowlist</option>' : '') +
+        (mem.inBlacklist ? '<option value="regex_blacklist_remove">🚫 Remove from Blocklist</option>' : '') +
+      '</select>';
     }
     const gap = gapMap.get(req.id);
     const rowClass = gap ? 'gap-row' : '';

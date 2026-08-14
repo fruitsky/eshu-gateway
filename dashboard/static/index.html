@@ -365,27 +365,26 @@
             <textarea id="policy-regex-white" class="hidden" spellcheck="false"></textarea>
           </div>
           <details class="mb-3 text-sm">
-            <summary class="cursor-pointer text-warning font-semibold">🛡️ Core Gateway Blocklist</summary>
+            <summary class="cursor-pointer text-warning font-semibold">🔒 Permanently blocked — self-protection &amp; evasion</summary>
             <div class="mt-2 panel blocklist-box">
-              <p class="mb-2 text-muted">These are permanently enforced at the gateway level (Stage&nbsp;1) and <strong>cannot be overridden</strong> by any allowlist policy.</p>
+              <p class="mb-2 text-muted">Hardcoded on every gateway and cannot be relaxed from the dashboard:</p>
               <ul class="space-y-1 text-muted">
-                <li>💀 <strong>Recursive force delete:</strong> rm -rf, rm -fr, rm -r -f, /bin/rm -rf</li>
-                <li>💾 <strong>Filesystem format:</strong> mkfs.*</li>
-                <li>💿 <strong>Raw disk access:</strong> dd if=, dd of=, /bin/dd</li>
-                <li>🔥 <strong>Firewall flush:</strong> iptables -F/-X/--flush, ip6tables -F/-X, nft flush</li>
-                <li>⏻ <strong>Power control:</strong> reboot, shutdown, poweroff, halt, init 0/6, telinit 0/6, systemctl isolate/poweroff/halt, busybox reboot/poweroff/halt</li>
-                <li>🕵️ <strong>Evasion:</strong> $(which *), `which *`</li>
+                <li>🛡️ <strong>Self-protection:</strong> /usr/local/bin/eshu-*, /etc/eshu-*, /var/run/eshu.*, eshu.db*</li>
+                <li>🕵️ <strong>Evasion:</strong> $(which …), `which …`</li>
               </ul>
+              <p class="mt-2 text-muted">The command-safety patterns (rm -rf, mkfs, dd, firewall flush, power) now live in the Blocklist below and can be relaxed — use “↺ Core defaults” to restore them.</p>
             </div>
           </details>
           <div>
-            <label class="text-xs mb-1 block text-muted">Blocklist (Hard Block)</label>
+            <div class="flex items-center justify-between mb-1">
+              <label class="text-xs block text-muted">Blocklist (Hard Block)</label>
+              <button class="chip-btn" onclick="restoreCoreDefaults()" title="Re-add any shipped core safety-net patterns you removed">↺ Core defaults</button>
+            </div>
             <div class="policy-editor" data-policy="regex_blacklist">
               <div class="policy-chips" id="policy-regex-black-chips"></div>
               <div class="policy-add-row">
                 <input type="text" class="policy-add-input" id="policy-regex-black-add" placeholder="Add blocklist pattern…" onkeydown="if(event.key==='Enter')addPolicyEntry('regex_blacklist')">
                 <button class="btn btn-muted btn-xs" onclick="addPolicyEntry('regex_blacklist')">+ Add</button>
-                <button class="chip-btn" onclick="restoreCoreDefaults()" title="Re-add any shipped core safety-net patterns you removed">↺ Core defaults</button>
               </div>
             </div>
             <textarea id="policy-regex-black" class="hidden" spellcheck="false"></textarea>
