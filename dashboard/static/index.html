@@ -327,7 +327,6 @@
           <span class="text-xs text-muted">Policy version: <span id="policy-version-label" class="font-mono">-</span></span>
           <div class="flex items-center gap-2">
             <button onclick="openModal('policy-changes-modal')" class="btn btn-muted btn-xs">View Policy Changes</button>
-            <button onclick="previewPolicyImpact()" class="btn btn-muted btn-xs" title="Replay recent command history against your staged (unsaved) policy to see what would change">↻ Preview Impact</button>
             <button onclick="savePolicies()" id="save-policies-btn" class="btn btn-sm">Save & Push Policies</button>
           </div>
         </div>
@@ -815,7 +814,8 @@
           <option value="30" selected>30 days</option>
           <option value="90">90 days</option>
         </select>
-        <button onclick="closePolicyPreview()" class="modal-close">&times;</button>
+        <button onclick="closePolicyPreview()" class="btn btn-muted btn-xs">Cancel</button>
+        <button onclick="confirmSavePolicies()" class="btn btn-xs">Save &amp; Push</button>
       </div>
     </div>
     <div id="policy-preview-body" class="flex-1 overflow-y-auto pr-2"><p class="text-muted">Evaluating…</p></div>

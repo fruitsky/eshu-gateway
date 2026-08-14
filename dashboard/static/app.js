@@ -2437,7 +2437,9 @@ function renderPolicyChips() {
     const seen = new Set();
     const lines = policyLines(type).filter(function(l){ if (seen.has(l)) return false; seen.add(l); return true; });
     setPolicyLines(type, lines);
-    let html = lines.map(function(line) {
+    // Display newest-first so a just-added entry appears at the top.
+    const displayLines = lines.slice().reverse();
+    let html = displayLines.map(function(line) {
       const isCore = isCorePattern(line);
       const shield = isCore ? '<span class="policy-shield" title="Shipped core block — relaxing this requires extra confirmation">🛡️</span> ' : '';
       return '<span class="policy-chip' + (isCore ? ' core' : '') + '" title="' + line.replace(/"/g, '&quot;') + '">' + shield + '<code>' + escapeHtml(line) + '</code><button class="remove" data-line="' + encodeURIComponent(line) + '" data-core="' + (isCore ? '1' : '0') + '" title="Remove">&times;</button></span>';
@@ -2593,6 +2595,11 @@ function renderPolicyPreview(data) {
   body.innerHTML = html;
 }
 async function savePolicies() {
+  previewPolicyImpact();
+}
+
+async function confirmSavePolicies() {
+  closePolicyPreview();
   const btn = document.getElementById('save-policies-btn'); btn.disabled = true; btn.textContent = 'Saving...';
   await savePoliciesSilent();
   btn.disabled = false; btn.textContent = 'Save & Push Policies';
@@ -2623,7 +2630,20 @@ async function testPolicy() {
     if (data.action === 'blocked') { bg='rgba(251,146,60,0.1)'; border='rgba(251,146,60,0.3)'; text='#fb923c'; icon='🔴'; desc='Blocked: <code style="color:#fb923c;">' + (data.details[0] ? data.details[0].pattern : 'unknown') + '</code>'; }
     else if (data.action === 'auto_approved') { bg='rgba(74,222,128,0.1)'; border='rgba(74,222,128,0.3)'; text='var(--status-success)'; icon='✅'; desc=(data.details[0] && data.details[0].type === 'exact_whitelist') ? 'Auto-Approved (Exact Allowlist)' : 'Auto-Approved: <code style="color:var(--status-success);">' + (data.details[0] ? data.details[0].pattern : '') + '</code>'; }
     else { bg='rgba(251,191,36,0.1)'; border='rgba(251,191,36,0.3)'; text='var(--status-warning)'; icon='⏳'; desc='Would require JIT Approval'; }
-    rd.innerHTML = '<div class="result-box" style="background:' + bg + ';color:' + text + ';border-color:' + border + ';">' + icon + ' <strong>' + data.action.replace('_',' ').toUpperCase() + '</strong> — ' + desc + '</div>' + testerAddButtons(data.action, cmd);
+    let memLine = '';
+    try {
+      const mc = await authFetch('/api/policies/check?command=' + encodeURIComponent(cmd));
+      if (mc.ok) {
+        const m = await mc.json();
+        const mark = function(flag, danger) {
+          return '<span class="' + (flag ? (danger ? 'text-danger' : 'text-success') : 'text-muted') + '">' + (flag ? '✓' : '—') + '</span>';
+        };
+        memLine = '<div class="text-xs mt-2 text-muted">In lists: Exact ' + mark(m.in_exact_whitelist, false) +
+          ' · Regex ' + mark(m.in_regex_whitelist, false) +
+          ' · Blocklist ' + mark(m.in_regex_blacklist, true) + '</div>';
+      }
+    } catch(e) {}
+    rd.innerHTML = '<div class="result-box" style="background:' + bg + ';color:' + text + ';border-color:' + border + ';">' + icon + ' <strong>' + data.action.replace('_',' ').toUpperCase() + '</strong> — ' + desc + '</div>' + memLine + testerAddButtons(data.action, cmd);
   } catch(err) { rd.innerHTML = '<div class="result-box" style="background:var(--bg-base);color:var(--text-muted);">⚠️ ' + err.message + '</div>'; }
 }
 
