@@ -238,6 +238,23 @@ class TestGatewayRegistration:
         assert data.get("override") is not True
         assert data.get("message") != "Auto-approved via Override Mode"
 
+    def test_override_auto_approved_request_is_marked(self, auth_client, gateway_headers):
+        # Override-auto-approved requests must carry reason="override" so the
+        # History table can show a distinct indicator.
+        auth_client.post("/api/gateways/10.0.0.1/override", json={"minutes": 30, "reason": "test"})
+        r = auth_client.post("/api/request", json={
+            "target_ip": "10.0.0.1",
+            "encoded_command": b64("docker ps")
+        }, headers=gateway_headers)
+        assert r.status_code == 200
+        assert r.json().get("override") is True
+
+        reqs = auth_client.get("/api/requests").json()
+        match = [x for x in reqs if x["command"] == "docker ps"]
+        assert len(match) >= 1
+        assert match[0]["status"] == "approved"
+        assert match[0]["reason"] == "override"
+
 
 class TestAuth:
 

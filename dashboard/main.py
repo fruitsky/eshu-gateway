@@ -354,7 +354,7 @@ def receive_request(payload: GatewayPayload, request: Request):
     # Override auto-approves JIT — but never on a Zero-Trust gateway (ZT wins:
     # every command must go through operator approval there).
     if row and row['override_until'] and row['override_until'] > now and not get_gateway_zero_trust(target_ip):
-        req_id = create_request(target_ip, cmd, status="approved")
+        req_id = create_request(target_ip, cmd, status="approved", reason="override")
         update_gateway_last_seen(target_ip)
         record_audit_event('jit_override_approved', target_ip, details=f'Override auto-approved JIT #{req_id}: {cmd[:80]} (reason: {row["override_reason"][:60]})')
         return {"status": "ok", "id": f"{req_id:06d}", "override": True, "message": "Auto-approved via Override Mode"}
