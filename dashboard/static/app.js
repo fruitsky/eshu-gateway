@@ -1411,23 +1411,26 @@ function renderTable() {
       badge = '<span class="badge badge-' + (req.status==='pending'?'pending':'approved') + '"><span class="ttl-countdown font-mono w-8 text-center" data-ttl="' + req.ttl + '">' + req.ttl + 's</span> ' + req.status + '</span>';
     } else if (isPP && isExpired) badge = '<span class="badge badge-expired">Expired</span>';
     else if (req.status === 'consumed') badge = '<span class="badge badge-consumed">Ticket Claimed</span>';
-    else if (req.status === 'blocked') {
-      badge = isHardcoreBlocked(req.command)
-        ? '<span class="badge badge-blocked" title="Blocked by a shipped Eshu safety pattern — manage in Controls → Blocklist">🛡️ Blocked</span>'
-        : '<span class="badge badge-blocked">Blocked</span>';
-    }
+    else if (req.status === 'blocked') badge = '<span class="badge badge-blocked">Blocked</span>';
     else if (req.status === 'denied') badge = '<span class="badge badge-denied">Denied</span>';
     else if (req.status === 'auto-approved') badge = '<span class="badge badge-auto">Auto-Approved</span>';
     else if (req.status === 'window-approved') badge = '<span class="badge badge-window">Window</span>';
     else if (req.status === 'window-rejected') badge = '<span class="badge badge-window-rejected" title="' + escapeHtml(req.reason || '') + '">Window Rejected</span>';
-    else if (req.status === 'frozen') badge = '<span class="badge badge-frozen" title="Blocked by Emergency Freeze — all commands rejected while the fleet is frozen">Frozen</span>';
-    else if (req.status === 'fleet-run') badge = '<span class="badge badge-fleet-run" title="Dispatched via Fleet Run">⚡ Fleet Run</span>';
+    else if (req.status === 'frozen') badge = '<span class="badge badge-blocked" title="Rejected while the fleet was frozen">Blocked</span>';
+    else if (req.status === 'fleet-run') badge = '<span class="badge badge-approved" title="Dispatched via Fleet Run">Approved</span>';
     let actions = '<span class="text-muted">—</span>';
     if (req.status === 'pending' && !isExpired) {
       actions = '<button onclick="handleAction(' + req.id + ', \'approve\')" class="btn btn-approve btn-xs mr-1">Approve</button>' +
         '<button onclick="handleAction(' + req.id + ', \'deny\')" class="btn btn-deny btn-xs">Deny</button>';
-    } else if (req.status === 'frozen' || req.status === 'fleet-run' || (req.status === 'blocked' && isHardcoreBlocked(req.command))) {
-      actions = '<span class="text-muted">—</span>';
+    } else if (req.status === 'frozen') {
+      actions = '<span class="chip chip-actions chip-frozen" title="Blocked by Emergency Freeze — the fleet is rejecting all commands until unfrozen.">' +
+        '🧊 Fleet Frozen</span>';
+    } else if (req.status === 'fleet-run') {
+      actions = '<span class="chip chip-actions chip-fleet-run" title="Executed via Fleet Run — see the Fleet Run tab for per-gateway output.">' +
+        '⚡ Fleet Run</span>';
+    } else if (req.status === 'blocked' && isHardcoreBlocked(req.command)) {
+      actions = '<span class="chip chip-actions chip-block-core" title="Blocked by a shipped Eshu safety pattern — manage in Controls → Blocklist">' +
+        '🛡️ Block by Core</span>';
     } else {
       const mem = fetchPolicyMembership(req.command);
       const inAnyAllowlist = mem.inExact || mem.inRegexWhite;
@@ -1612,8 +1615,8 @@ function renderSuggestions() {
         ? '<div class="text-danger mt-1">Denied ' + c.count + 'x</div>'
         : '<div class="text-warning mt-1">Approved ' + c.count + 'x</div>';
       var actionBtn = isDeny
-        ? '<button class="chip-btn danger" onclick="suggestionBlocklist(\'' + encodeCmd(c.command) + '\')">＋ Blocklist</button>'
-        : '<button class="btn btn-approve btn-xs" onclick="suggestionAllowlist(\'' + encodeCmd(c.command) + '\')">+ Allowlist</button>';
+        ? '<button class="btn btn-xs" onclick="suggestionBlocklist(\'' + encodeCmd(c.command) + '\')">＋ Blocklist</button>'
+        : '<button class="btn btn-xs" onclick="suggestionAllowlist(\'' + encodeCmd(c.command) + '\')">+ Allowlist</button>';
       return '<div class="flex items-start gap-2 mb-2 pb-2 text-xs divider-bottom">' +
         '<div class="flex-1 min-w-0">' +
           '<div class="flex items-center gap-2">' +
@@ -2556,12 +2559,12 @@ function testerAddButtons(action, cmd) {
   const enc = encodeURIComponent(cmd);
   if (action === 'blocked') {
     return '<div class="flex gap-2 mt-2">' +
-      '<button class="chip-btn danger" onclick="addToPolicy(decodeURIComponent(\'' + enc + '\'), \'regex_blacklist\')">＋ Blocklist</button>' +
+      '<button class="btn btn-xs" onclick="addToPolicy(decodeURIComponent(\'' + enc + '\'), \'regex_blacklist\')">＋ Blocklist</button>' +
       '</div>';
   }
   return '<div class="flex gap-2 mt-2">' +
-    '<button class="chip-btn" onclick="addToPolicy(decodeURIComponent(\'' + enc + '\'), \'exact_whitelist\')">＋ Exact</button>' +
-    '<button class="chip-btn info" onclick="addToPolicy(decodeURIComponent(\'' + enc + '\'), \'regex_whitelist\')">＋ Regex</button>' +
+    '<button class="btn btn-xs" onclick="addToPolicy(decodeURIComponent(\'' + enc + '\'), \'exact_whitelist\')">＋ Exact</button>' +
+    '<button class="btn btn-xs" onclick="addToPolicy(decodeURIComponent(\'' + enc + '\'), \'regex_whitelist\')">＋ Regex</button>' +
     '</div>';
 }
 async function seedEdge() {

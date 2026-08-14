@@ -271,8 +271,15 @@
   .badge-auto { background: rgba(96,165,250,0.1); color: var(--status-info); }
   .badge-window { background: rgba(96,165,250,0.08); color: var(--status-info); border: 1px solid rgba(96,165,250,0.2); }
   .badge-window-rejected { background: rgba(251,146,60,0.1); color: #fb923c; border: 1px solid rgba(251,146,60,0.25); }
-  .badge-frozen { background: rgba(127,29,29,0.2); color: #f87171; border: 1px solid rgba(239,68,68,0.35); }
-  .badge-fleet-run { background: rgba(96,165,250,0.1); color: var(--status-info); border: 1px solid rgba(96,165,250,0.25); }
+
+  /* ── Status chips (action cells) ────────────────────────── */
+  .chip {
+    display: inline-flex; align-items: center; gap: 4px;
+    font-size: var(--text-xs); padding: 4px 8px; border-radius: var(--radius-sm);
+  }
+  .chip-frozen { background: rgba(127,29,29,0.12); color: #f87171; border: 1px solid rgba(239,68,68,0.3); }
+  .chip-fleet-run { background: rgba(96,165,250,0.08); color: var(--status-info); border: 1px solid rgba(96,165,250,0.25); }
+  .chip-block-core { background: rgba(251,146,60,0.08); color: var(--status-warning); border: 1px solid rgba(251,146,60,0.2); }
 
   /* ── Table cell helpers ─────────────────────────────────── */
   .cell-id { font-family: monospace; font-size: 12px; color: var(--text-muted); }
@@ -288,6 +295,7 @@
   .cmd-desc { font-size: 12px; color: var(--text-muted); margin-top: 1px; line-height: 1.4; padding-left: 4px; }
   .risk-flag { color: var(--status-warning); cursor: help; }
   .select-actions { width: 190px; padding: 4px 8px; font-size: var(--text-xs); }
+  .chip-actions { width: 190px; justify-content: center; }
 
   /* ── Statistics bars / auto-pct ─────────────────────────── */
   .bar-track { width: 120px; height: 14px; background: var(--bg-base); border-radius: 3px; overflow: hidden; flex-shrink: 0; }
