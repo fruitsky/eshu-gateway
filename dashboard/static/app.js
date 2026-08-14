@@ -1250,6 +1250,7 @@ function renderJitTickets() {
           (describeCmd(r.command) ? '<div class="jit-desc">' + escapeHtml(describeCmd(r.command)) + '</div>' : '') +
           '<div class="jit-meta">#' + String(r.id).padStart(6,'0') + ' · ' + gwPill(r.hostname||'N/A') + ' ' + escapeHtml(r.hostname||'N/A') + ' (' + escapeHtml(r.target_ip) + ')</div>' +
           '<div class="jit-ttl"><span class="ttl-countdown" data-ttl="' + r.ttl + '">' + r.ttl + 's</span> remaining</div>' +
+          (r.anomaly ? '<div class="jit-anomaly">🆕 ' + escapeHtml(r.anomaly) + '</div>' : '') +
         '</div>' +
       '</div>' +
       '<div class="jit-actions">' +
@@ -1457,11 +1458,13 @@ function renderTable() {
     const gwPillHtml = gwPill(req.hostname || 'N/A');
     const riskHtml = (req.status === 'pending' && req.risk) ?
       '<span class="flex-shrink-0 risk-flag" title="⚠ Risk: ' + escapeHtml(req.risk) + '">⚠</span>' : '';
+    const anomalyHtml = (req.status === 'pending' && req.anomaly) ?
+      '<span class="flex-shrink-0 anomaly-flag" title="🆕 ' + escapeHtml(req.anomaly) + '">🆕</span>' : '';
     html += '<tr class="' + rowClass + '">' +
       '<td class="' + idClass + '"' + gapTitle + '>' + idDisplay + '</td>' +
       '<td class="text-muted text-xs">' + formatTime(req.created_at) + '</td>' +
       '<td>' + gwPillHtml + ' ' + escapeHtml(req.hostname || 'N/A') + ' (' + escapeHtml(req.target_ip) + ')</td>' +
-      '<td class="cell-cmd"><div class="flex items-center gap-1">' + riskHtml + '<code class="cmd-code" title="' + escapedCmd + '">' + escapedCmd + '</code><button class="js-copy-cmd flex-shrink-0 text-xs opacity-30 hover:opacity-80 px-1 py-0.5 rounded transition-opacity text-muted" data-cmd="' + encodeURIComponent(req.command) + '" title="Copy">📋</button></div>' +
+      '<td class="cell-cmd"><div class="flex items-center gap-1">' + riskHtml + anomalyHtml + '<code class="cmd-code" title="' + escapedCmd + '">' + escapedCmd + '</code><button class="js-copy-cmd flex-shrink-0 text-xs opacity-30 hover:opacity-80 px-1 py-0.5 rounded transition-opacity text-muted" data-cmd="' + encodeURIComponent(req.command) + '" title="Copy">📋</button></div>' +
         (function() {
           var _desc = describeCmd(req.command);
           if (!_desc) return '';

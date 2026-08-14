@@ -78,6 +78,7 @@ from core.notify import send_notify
 from core.cmd_blocklist import hard_block_match, blocklist_substring_match, CORE_COMMAND_PATTERNS, HARD_PATTERNS
 from core.policy_eval import evaluate_policy_verdict
 from core.cmd_risk import get_cmd_risk, get_dry_run_suggestion
+from core.cmd_profiles import get_anomaly, refresh_profiles, _profiles_loop
 from core.gateway_watch import (
     _check_gateway_transitions, _gateway_watch_loop,
     _stale_gateway_cleanup_loop, _fleet_cleanup_loop,
@@ -162,6 +163,10 @@ def on_startup():
     refresh_gaps()
     gaps_thread = threading.Thread(target=_gaps_loop, daemon=True)
     gaps_thread.start()
+    # Start background command-profile scanner (behavioural anomaly flags)
+    refresh_profiles()
+    profiles_thread = threading.Thread(target=_profiles_loop, daemon=True)
+    profiles_thread.start()
 
 
 def _migrate_legacy_db():
@@ -521,6 +526,8 @@ def list_requests(search: str = None):
             r['ttl'] = 0
         # Risk hint — pending-only so history stays clean
         r['risk'] = get_cmd_risk(r['command']) if r['status'] == 'pending' else None
+        # Behavioural anomaly — pending-only ("first time on this gateway")
+        r['anomaly'] = get_anomaly(r['target_ip'], r['command']) if r['status'] == 'pending' else None
     return reqs
 @app.post("/api/approve/{req_id}")
 def approve_request(req_id: int, request: Request):
