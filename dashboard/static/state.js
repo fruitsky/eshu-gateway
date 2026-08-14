@@ -1,5 +1,6 @@
 // ── State ────────────────────────────────────────────────────────────────
 let requestsData = [], activeFilter = null, lastDeniedCmd = '', policiesCache = {};
+let _committedPolicy = null; // {exact, regexWhite, regexBlack} snapshot for the unsaved-changes banner
 let _knownPendingIds = new Set();
 let _knownBlockedIds = new Set();
 let _knownWinReqIds = new Set();

@@ -1665,6 +1665,8 @@ async function savePoliciesSilent() {
   await authFetch('/api/policies', { method: 'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({type:'regex_whitelist', content: rw}) });
   await authFetch('/api/policies', { method: 'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({type:'regex_blacklist', content: rb}) });
   await authFetch('/api/policies/commit', { method: 'POST' });
+  _committedPolicy = { exact: ex, regexWhite: rw, regexBlack: rb };
+  updatePolicyDirtyIndicator();
   setTimeout(fetchGateways, 500);
 }
 async function addToPolicy(cmd, policyType) {
@@ -2430,6 +2432,21 @@ function setPolicyLines(type, lines) {
   const ta = document.getElementById(POLICY_IDS[type]);
   if (ta) ta.value = lines.join('\n');
 }
+function updatePolicyDirtyIndicator() {
+  const el = document.getElementById('policy-dirty-banner');
+  if (!el) return;
+  const cur = {
+    exact: document.getElementById('policy-exact').value || '',
+    regexWhite: document.getElementById('policy-regex-white').value || '',
+    regexBlack: document.getElementById('policy-regex-black').value || '',
+  };
+  const dirty = _committedPolicy && (
+    cur.exact !== _committedPolicy.exact ||
+    cur.regexWhite !== _committedPolicy.regexWhite ||
+    cur.regexBlack !== _committedPolicy.regexBlack
+  );
+  el.classList.toggle('hidden', !dirty);
+}
 function renderPolicyChips() {
   Object.keys(POLICY_IDS).forEach(function(type) {
     const container = document.getElementById(POLICY_IDS[type] + '-chips');
@@ -2454,6 +2471,7 @@ function renderPolicyChips() {
     if (!html) html = '<span class="policy-empty text-muted">No entries yet.</span>';
     container.innerHTML = html;
   });
+  updatePolicyDirtyIndicator();
 }
 function addPolicyEntry(type) {
   const input = document.getElementById(POLICY_ADD_INPUTS[type]);
@@ -2515,6 +2533,11 @@ async function fetchPolicies() {
   policiesCache = policiesCache || {};
   policiesCache.corePatterns = data.core_patterns || [];
   policiesCache.hardPatterns = data.hard_patterns || [];
+  _committedPolicy = {
+    exact: data.exact_whitelist || '',
+    regexWhite: data.regex_whitelist || '',
+    regexBlack: data.regex_blacklist || '',
+  };
   renderPolicyChips();
 }
 async function fetchPolicyChanges() {

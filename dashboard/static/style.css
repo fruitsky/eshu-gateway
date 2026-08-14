@@ -346,6 +346,11 @@
     font-size: var(--text-xs); font-family: inherit; outline: none; width: 100%;
   }
   .policy-add-input:focus { border-color: var(--brand-red); box-shadow: 0 0 0 3px var(--focus-ring); }
+  .policy-dirty-banner {
+    background: rgba(251, 191, 36, 0.1); border: 1px solid rgba(251, 191, 36, 0.3);
+    color: var(--status-warning); padding: 8px 12px; border-radius: var(--radius);
+    margin-bottom: 12px; font-size: 13px;
+  }
 
   .setting-row { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); padding: var(--space-3); border-radius: var(--radius-lg); background: var(--bg-base); }
   .flag-row { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); padding: var(--space-3); border-radius: var(--radius-lg); background: var(--bg-base); border: 1px solid var(--border-color); }
