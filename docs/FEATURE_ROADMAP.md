@@ -13,7 +13,7 @@ test → verify → merge to `master` → LXC pull flow.
 | ~~P1b~~ | ~~Fleet Run (Ansible-lite)~~ | **DONE** — shipped on `feat/fleet-run` | Medium |
 | ~~P2~~ | ~~"What could go wrong" Risk Hint~~ | **DONE** — shipped on `feat/risk-hint` (+ dry-run suggestions in Fleet Run) | Low |
 | **P3** | Approver Keyboard Shortcuts | QoL win for a single operator triaging bursts | Low |
-| **P4** | Editable Core Blocklist (safety net) | Human-only relaxation of the shipped Stage-1 patterns; seeded in the blocklist by default | Medium |
+| ~~P4~~ | ~~Editable Core Blocklist (safety net)~~ | **DONE** — shipped on `feat/core-blocklist-editable`, merged to master | Medium |
 
 ### Dropped / deferred
 
@@ -253,12 +253,18 @@ row** without needing to click buttons.
 
 ---
 
-## P4 — Editable Core Blocklist (safety net)
+## P4 — Editable Core Blocklist ✅ DONE
+
+Shipped on `feat/core-blocklist-editable` (merged to master, deployed to fleet).
+The command-safety patterns are seeded into the blocklist (relax-only, 🛡️-flagged,
+danger-confirm on remove, `↺ Core defaults` to restore); self-protection and
+`$(which`/`` `which `` evasion stay permanently hardcoded. Dashboard blocklist
+matching was aligned to the gateway's substring semantics as part of this.
 
 ### What
 
 Let a human relax the gateway's hardcoded Stage-1 "core" blocklist (`rm -rf`,
-`mkfs.*`, `dd`, `iptables -F`, power control, `which`-evasion) from the
+`mkfs.*`, `dd`, `iptables -F`, power control) from the
 dashboard — while keeping the safety net intact and self-protection non-negotiable.
 
 ### Agreed design (from the UI-refresh design session)
