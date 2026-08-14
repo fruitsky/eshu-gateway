@@ -57,7 +57,7 @@ only the dashboard UI after login.
 |--------|------|---------|------|
 | `GET` | `/api/requests` | List the last 200 requests (`?search=` filter) | Session |
 | `POST` | `/api/approve/{id}` | Approve a JIT request | Session |
-| `POST` | `/api/deny/{id}` | Deny a JIT request | Session |
+| `POST` | `/api/deny/{id}` | Deny a JIT request → returns `deny_count` (total denials of this command) + `command` | Session |
 | `DELETE` | `/api/requests?older_than=` | Purge request history (`30m`/`1h`/`1d`/`2d`/`7d`/`all`) | Session |
 | `GET` | `/api/gateways` | List registered gateways (incl. token status, policy sync, override state) | Session |
 | `POST` | `/api/gateways/{ip}/uninstall` | Trigger remote uninstall | Session |
@@ -74,10 +74,11 @@ only the dashboard UI after login.
 
 | Method | Path | Purpose | Auth |
 |--------|------|---------|------|
-| `GET/POST` | `/api/policies` | Read/write policy lists | Session |
+| `GET/POST` | `/api/policies` | Read/write policy lists; `GET` also returns `core_patterns` (shipped/editable) + `hard_patterns` (non-relaxable) | Session |
 | `POST` | `/api/policies/commit` | Bump the policy version (gateways pick it up on next poll) | Session |
 | `POST` | `/api/policies/trigger-update` | Force gateways to re-sync policies now | Session |
-| `GET` | `/api/policies/test?command=` | Pre-flight a command → `action` (`auto_approved`/`blocked`/`jit`) + `tier: "fatal"` for the hardcoded blocklist. **Public** so agents can pre-flight | Public |
+| `POST` | `/api/policies/restore-core` | Re-add any removed shipped core blocklist patterns (audited, bumps version) | Session |
+| `GET` | `/api/policies/test?command=` | Pre-flight a command → `action` (`auto_approved`/`blocked`/`jit`) + `tier: "fatal"` only for the non-relaxable self-protection / evasion patterns. **Public** so agents can pre-flight | Public |
 | `GET` | `/api/policies/check?command=` | Membership booleans (`in_exact_whitelist`, `in_regex_whitelist`, `in_regex_blacklist`) for the operator's Tester | Session |
 | `GET` | `/api/policy_changes` | Policy change history | Session |
 | `GET` | `/api/policies/rollback-status` | Is a rollback backup available + is a rollback triggered | Session |

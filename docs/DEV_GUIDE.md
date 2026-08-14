@@ -122,7 +122,7 @@ Fleet).
 
 ### Running tests
 
-Full test suite (289 tests, ~35s):
+Full test suite (305 tests, ~35s):
 
 ```bash
 # Install runtime + test dependencies (fresh clone):
@@ -142,7 +142,7 @@ the dashboard host or merging to master.
 
 | File | Tests | What it checks, in plain English |
 |------|-------|----------------------------------|
-| `test_api.py` | 30 | Full JIT flow over HTTP, auth, policies, windows, public + gated endpoints |
+| `test_api.py` | 32 | Full JIT flow over HTTP, auth, policies, windows, public + gated endpoints, override auto-approve marker |
 | `test_auth.py` | 7 | Set/change the dashboard password, password is mandatory/non-removable, logout clears the session |
 | `test_cmd_risk.py` | 17 | "What could go wrong" risk hints + dry-run suggestions |
 | `test_db_audit.py` | 4 | Record events and search them later, newest-first |
@@ -155,9 +155,9 @@ the dashboard host or merging to master.
 | `test_freeze.py` | 12 | Emergency Freeze trigger, poller rejects while frozen, unfreeze |
 | `test_golden.py` | 26 | Build → Edge → Fleet pipeline: seed/promote/rollback, hashes, dev-gateways auth |
 | `test_installer.py` | 5 | Installer template: scoped token sed, no approver key, arg shift |
-| `test_learning.py` | 13 | Background gap scanner finds repeated JIT approvals, new/seen states |
+| `test_learning.py` | 16 | Background gap scanner finds repeated JIT approvals + repeated denials, new/seen states |
 | `test_override.py` | 18 | Override Mode auto-approves JIT, Zero-Trust exclusivity, audit events |
-| `test_policies.py` | 11 | Save/commit policies, `policies/test` action + FATAL tier, `policies/check` gated |
+| `test_policies.py` | 22 | Save/commit policies, `policies/test` action + FATAL tier, `policies/check` gated, blocklist substring semantics, core-blocklist seeding/restore |
 | `test_policy_rollback.py` | 6 | Roll a policy back to a prior version from its change history |
 | `test_settings.py` | 16 | Dev-tools toggle, notify/webhook config, Discord format/UA, feature-flags gated |
 | `test_stats.py` | 10 | Extended statistics: heatmaps, automation trend, window summaries, gateway health |

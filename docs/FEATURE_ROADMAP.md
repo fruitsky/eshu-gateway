@@ -167,9 +167,9 @@ Dashboard aggregates → per-gateway status + expandable output
   (same pattern as the uninstaller) so long commands don't block the poll loop.
 - **Safety:**
   - Approval-time validation runs the command through the same policy test
-    logic — **hardcoded catastrophic blocklist** (`rm -rf`, `mkfs`, `dd`,
-    `iptables`, `reboot`, …) → **hard-reject at the dashboard**; regex-blacklist
-    matches → warn with override.
+    logic — non-relaxable self-protection/evasion → **hard-reject at the
+    dashboard**; blocklist matches (incl. shipped command-safety patterns) →
+    warn with override.
   - `timeout` wrapper (default 180s, per-command override).
   - Refuses to dispatch while the fleet is frozen.
   - Output truncated (1MB cap; list shows a preview, full output fetched on demand) per result.

@@ -83,12 +83,14 @@ Example response:
 | `action` | Meaning |
 |----------|---------|
 | `auto_approved` | Whitelisted — will execute without operator approval |
-| `blocked` | Rejected — either the dashboard blocklist or the **hardcoded FATAL tier** (`tier: "fatal"`, e.g. `reboot`, `rm -rf`) |
+| `blocked` | Rejected — either the dashboard blocklist (includes the shipped command-safety patterns) or the **hardcoded FATAL tier** (`tier: "fatal"` — Eshu self-protection / `$(which`-evasion, e.g. `cat /etc/eshu-freeze`) |
 | `jit` | No rule matched — will require operator approval |
 
 Use this to pre-flight a command. `tier: "fatal"` means the gateway hard-blocks
-it and it can never run — don't attempt it. If whitelisted, the command passes
-stages 1-4 and is auto-approved. If not, it falls through to JIT (stage 5).
+it and it can never run — don't attempt it. Commands like `rm -rf` and `reboot`
+are blocked too, but via the blocklist (which the operator can relax), so they
+report `action: "blocked"` without the fatal tier. If whitelisted, the command
+passes stages 1-4 and is auto-approved. If not, it falls through to JIT (stage 5).
 
 > **Zero-Trust gateways:** on a gateway with **Zero-Trust** enabled (the operator marks
 > it in the dashboard), even *whitelisted* commands are **not** auto-approved — everything
@@ -309,7 +311,7 @@ Wait a few seconds and retry with exponential backoff.
 
 | Endpoint | Method | Purpose | Auth |
 |----------|--------|---------|------|
-| `/api/policies/test?command=` | GET | Pre-flight a command — returns `action` (auto_approved / blocked / jit) + `tier` for the FATAL blocklist | Public |
+| `/api/policies/test?command=` | GET | Pre-flight a command — returns `action` (auto_approved / blocked / jit) + `tier: "fatal"` for the non-relaxable self-protection / evasion blocklist | Public |
 | `/api/window-requests` | POST | Submit window request | Public |
 | `/api/window-requests/{retrieval_key}` | GET | Poll window request status + token (read-only) | Public |
 | `/api/approved-windows` | GET | List windows (full status; token omitted) | Public (read) |

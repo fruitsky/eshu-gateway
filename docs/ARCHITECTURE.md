@@ -81,17 +81,20 @@ Every command passes through these stages in order:
 | Stage | Rule Set | Match → Action |
 |:-----:|----------|---------------|
 | **0** | **Emergency Freeze** (global circuit breaker) — when the operator freezes the fleet, every gateway rejects all commands until unfrozen | **FATAL — rejected while frozen** |
-| **1** | Hardcoded catastrophic blocklist (`rm -rf`, `mkfs`, `dd`, `iptables -F`, `reboot`, Eshu self-access, etc.) | **FATAL — blocked permanently** |
-| **2** | Dashboard-managed blacklist (`/etc/eshu-rblack.txt`) | **Blocked** |
+| **1** | Hardcoded core blocklist — **self-protection** (`/usr/local/bin/eshu-*`, `/etc/eshu-*`, `/var/run/eshu.*`, `eshu.db*`) and **evasion** (`$(which …)`, `` `which …` ``) | **FATAL — blocked permanently** |
+| **2** | Dashboard-managed blacklist (`/etc/eshu-rblack.txt`) — includes the shipped command-safety patterns (`rm -rf`, `mkfs`, `dd`, `iptables -F`, power control) by default, which the operator can relax | **Blocked** |
 | **3** | Exact whitelist (`/etc/eshu-exact.txt`) | **Auto-approved** |
 | **4** | Regex whitelist (`/etc/eshu-rwhite.txt`) | **Auto-approved** |
 | **4.5** | Feature scripts (`/etc/eshu/features.d/*.sh`) — loaded by poller when feature flags are enabled | **Auto-approved by window token** |
 | **5** | Claim-and-burn lockbox (`/var/run/eshu.tickets`) | **Execute & consume ticket** |
 | **6** | JIT human approval (90s auto-poll) | **Execute on approval** |
 
-The hardcoded blocklist is baked into the gateway script and **cannot be
-changed from the dashboard** — even a compromised dashboard cannot unblock
-catastrophic commands.
+The hardcoded core blocklist (Stage 1) is baked into the gateway script and
+protects Eshu itself — self-protection and command-substitution evasion **cannot
+be relaxed from the dashboard**, even by a compromised dashboard. The command-safety
+patterns (`rm -rf`, `mkfs`, `dd`, firewall flush, power control) live in the
+dashboard-managed blacklist instead, seeded by default but removable by the
+operator (with a confirmation + audit trail).
 
 ## Tech Stack
 
