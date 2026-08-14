@@ -1428,7 +1428,7 @@ function renderTable() {
     } else if (req.status === 'fleet-run') {
       actions = '<span class="chip chip-actions chip-fleet-run" title="Executed via Fleet Run — see the Fleet Run tab for per-gateway output.">' +
         '⚡ Fleet Run</span>';
-    } else if (req.status === 'approved' && !isExpired && req.reason === 'override') {
+    } else if (req.reason === 'override') {
       actions = '<span class="chip chip-actions chip-override" title="Auto-approved via Override Mode — every JIT is auto-approved while active">' +
         '🔓 Override</span>';
     } else if (req.status === 'blocked' && isHardcoreBlocked(req.command)) {
