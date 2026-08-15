@@ -1733,6 +1733,8 @@ var _gatewaysData = [];
 var _overrideExpiries = {}; // ip -> epoch seconds (client-side)
 var _uninstallingIps = {};  // ip -> true while an uninstall is in flight (row state)
 var _uninstallIp = null;    // ip currently being uninstalled (for the progress modal)
+let _removeIp = null;       // ip in the "Remove Gateway" modal
+let _removeHostname = null;
 var _cmdDescs = {}; // merged command descriptions for quick lookup
 
 function _describeSingle(cmd) {
@@ -1853,7 +1855,7 @@ async function fetchGateways() {
       '<td class="px-4 py-2">' + syncCell + '</td>' +
       '<td class="px-4 py-2">' + healthCell + '</td>' +
       '<td class="px-4 py-2">' + overrideCell + '</td>' +
-      '<td class="px-4 py-2 text-right whitespace-nowrap"><button onclick="handleUninstallGateway(\'' + g.ip + '\', \'' + g.hostname + '\')" class="btn btn-deny btn-xs">🗑 Uninstall</button></td>' +
+      '<td class="px-4 py-2 text-right whitespace-nowrap"><button onclick="openRemoveGatewayModal(\'' + g.ip + '\', \'' + g.hostname + '\', ' + isOnline + ')" class="btn btn-deny btn-xs">🗑 Remove</button></td>' +
       '</tr>';
   }).join('');
   checkOverrideBanner();
@@ -2862,8 +2864,28 @@ function startTokenStatusPolling() {
     } catch(e) {}
   }, 3000);
 }
-async function handleUninstallGateway(ip, hostname) {
-  if (!(await customConfirm('Permanently uninstall Eshu Gateway from ' + hostname + ' (' + ip + ')?\n\nThis will remove all Eshu components on next poll cycle.'))) return;
+function openRemoveGatewayModal(ip, hostname, isOnline) {
+  _removeIp = ip;
+  _removeHostname = hostname;
+  document.getElementById('remove-gateway-name').textContent = hostname + ' (' + ip + ')';
+  const statusEl = document.getElementById('remove-gateway-status');
+  statusEl.textContent = isOnline
+    ? 'This gateway is currently online.'
+    : 'This gateway is currently offline — if it will not come back, use “Force remove from dashboard”.';
+  statusEl.className = 'text-xs mb-3 ' + (isOnline ? 'text-success' : 'text-warning');
+  document.getElementById('remove-gateway-modal').classList.remove('hidden');
+}
+
+function closeRemoveGatewayModal() {
+  document.getElementById('remove-gateway-modal').classList.add('hidden');
+  _removeIp = null;
+  _removeHostname = null;
+}
+
+async function confirmRemoteUninstall() {
+  const ip = _removeIp, hostname = _removeHostname;
+  if (!ip) return;
+  closeRemoveGatewayModal();
   try {
     const res = await authFetch('/api/gateways/' + ip + '/uninstall', { method: 'POST' });
     const data = await res.json();
@@ -2942,8 +2964,14 @@ async function pollUninstallProgress(ip) {
   tryFetch();
 }
 async function handleForceRemoveGateway(ip, hostname) {
-  if (!(await customConfirm('Force remove ' + hostname + ' (' + ip + ') from dashboard?\n\n⚠️ This only removes the dashboard record.'))) return;
-  try { const res = await authFetch('/api/gateways/' + ip, { method: 'DELETE' }); const data = await res.json(); showToast('🗑 ' + data.hostname + ' removed', 'success'); fetchGateways(); }
+  if (!(await customConfirm('Force remove ' + hostname + ' (' + ip + ') from the dashboard?\n\n⚠️ This only deletes the dashboard record — it does NOT uninstall anything on the host.\n\nIf the gateway is still running, it will re-register on its next poll (~30s), so this may not be permanent. Use it only for decommissioned or never-completed hosts.'))) return;
+  try {
+    const res = await authFetch('/api/gateways/' + ip, { method: 'DELETE' });
+    const data = await res.json();
+    if (!res.ok) { showToast('❌ ' + (data.detail || 'Failed'), 'error'); return; }
+    showToast('🗑 ' + data.hostname + ' removed from dashboard', 'success');
+    if (_removeIp === ip) closeRemoveGatewayModal(); else fetchGateways();
+  }
   catch(err) { showToast('❌ Failed', 'error'); }
 }
 function copyEnrollCommand() { document.getElementById('enroll-command').select(); document.execCommand('copy'); showToast('✅ Copied', 'success'); }

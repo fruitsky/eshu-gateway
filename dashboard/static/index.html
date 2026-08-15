@@ -769,6 +769,30 @@
   </div>
 </div>
 
+<!-- Remove Gateway Modal (choose remote uninstall vs force-remove) -->
+<div id="remove-gateway-modal" class="modal-overlay hidden">
+  <div class="widget w-full max-w-md">
+    <div class="widget-header">
+      <span>Remove Gateway</span>
+      <button onclick="closeRemoveGatewayModal()" class="modal-close">&times;</button>
+    </div>
+    <p id="remove-gateway-name" class="text-main font-semibold mb-2"></p>
+    <p id="remove-gateway-status" class="text-xs mb-3 text-muted"></p>
+    <div class="mb-3">
+      <p class="text-sm mb-1"><strong>Uninstall remotely</strong></p>
+      <p class="text-xs text-muted mb-3">Runs Eshu's uninstaller on the host and deregisters it. Requires the gateway to be online with its poller running.</p>
+      <p class="text-sm mb-1"><strong>Force remove from dashboard</strong></p>
+      <p class="text-xs text-muted">Deletes only the dashboard record — for decommissioned or never-completed hosts.</p>
+      <p class="text-xs text-warning mt-2">⚠️ A still-running gateway will re-register on its next poll (~30s), so force-removing an operational gateway may not be permanent.</p>
+    </div>
+    <div class="flex justify-end gap-2">
+      <button onclick="closeRemoveGatewayModal()" class="btn btn-muted btn-sm">Cancel</button>
+      <button onclick="handleForceRemoveGateway(_removeIp, _removeHostname)" class="btn btn-danger btn-sm">Force remove from dashboard</button>
+      <button onclick="confirmRemoteUninstall()" class="btn btn-sm">Uninstall</button>
+    </div>
+  </div>
+</div>
+
 <!-- Uninstall Progress Modal -->
 <div id="uninstall-modal" class="modal-overlay hidden">
   <div class="widget w-full max-w-md">
