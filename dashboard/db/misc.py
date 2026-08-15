@@ -171,3 +171,19 @@ def set_seen_gaps(seen: dict):
         cursor.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('learning_seen_gaps', ?)",
                        (json.dumps(seen),))
         conn.commit()
+
+def get_mcp_allowed_hosts() -> str:
+    """Comma-separated Host allowlist for the MCP endpoint (DNS-rebinding
+    protection). Loopback hosts are always allowed regardless of this value."""
+    with db_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT value FROM meta WHERE key = 'mcp_allowed_hosts'")
+        row = cursor.fetchone()
+        return row['value'] if row else ''
+
+def set_mcp_allowed_hosts(value: str):
+    with db_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('mcp_allowed_hosts', ?)",
+                       (value,))
+        conn.commit()

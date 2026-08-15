@@ -7,6 +7,7 @@ immediately; mutating tools create a pending call and require operator approval.
 import re
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 from db.integrations import (
     get_enabled_tools,
@@ -23,6 +24,12 @@ _TYPE_MAP = {
 
 AGENT_LABEL = 'mcp'
 
+# DNS-rebinding protection is auto-enabled by FastMCP with a loopback-only
+# allowlist when host defaults to 127.0.0.1. We keep it on (defense in depth)
+# but expand the allowlist with the operator-configured hosts so the dashboard
+# is reachable at its real hostname(s)/IP(s) through a reverse proxy.
+_DEFAULT_ALLOWED_HOSTS = ['127.0.0.1:*', 'localhost:*', '[::1]:*']
+
 mcp = FastMCP(
     "Eshu",
     instructions=(
@@ -33,6 +40,10 @@ mcp = FastMCP(
     # Mounted into the dashboard app at /mcp; use "/" so the effective endpoint
     # is http://<dashboard>:8000/mcp rather than /mcp/mcp.
     streamable_http_path="/",
+    transport_security=TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=list(_DEFAULT_ALLOWED_HOSTS),
+    ),
 )
 
 _registered_names = set()
@@ -120,6 +131,36 @@ def refresh_mcp_tools():
             _registered_names.add(tool['name'])
         except Exception as e:
             print(f"[mcp] failed to register tool {tool['name']}: {e}", flush=True)
+
+
+def _expand_hosts(hosts: str) -> list:
+    """Expand a comma-separated host list into exact + port-wildcard entries.
+
+    The MCP DNS-rebinding check matches a bare host (e.g. a proxy Host header
+    without a port) by exact equality and a `host:*` entry by `host:` prefix,
+    so both forms are needed to cover access with and without a port."""
+    out = list(_DEFAULT_ALLOWED_HOSTS)
+    for h in (hosts or '').split(','):
+        h = h.strip()
+        if not h:
+            continue
+        out.append(h)
+        out.append(h + ':*')
+    seen = set()
+    deduped = []
+    for h in out:
+        if h not in seen:
+            seen.add(h)
+            deduped.append(h)
+    return deduped
+
+
+def refresh_mcp_allowed_hosts():
+    """Apply the configured allowed hosts to the MCP transport's DNS-rebinding
+    allowlist. The transport middleware holds a reference to this same settings
+    object, so mutating it takes effect on live requests — no restart needed."""
+    from db.misc import get_mcp_allowed_hosts
+    mcp.settings.transport_security.allowed_hosts = _expand_hosts(get_mcp_allowed_hosts())
 
 
 @mcp.tool()

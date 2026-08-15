@@ -110,3 +110,39 @@ class TestProxmoxSeed:
         assert r.status_code == 200
         tools = auth_client.get("/api/integrations/proxmox/tools").json()
         assert next(t for t in tools if t["id"] == tid)["enabled"] == 0
+
+
+class TestMcpSettings:
+
+    def test_get_default_is_empty(self, auth_client):
+        r = auth_client.get("/api/mcp-settings")
+        assert r.status_code == 200
+        assert r.json()["allowed_hosts"] == ""
+
+    def test_set_reflects_in_transport_allowlist(self, auth_client):
+        from db.misc import get_mcp_allowed_hosts
+        from core.mcp_server import mcp, refresh_mcp_allowed_hosts
+
+        r = auth_client.put("/api/mcp-settings", json={"allowed_hosts": "eshu.local.example.com, 192.168.1.114"})
+        assert r.status_code == 200
+        assert get_mcp_allowed_hosts() == "eshu.local.example.com, 192.168.1.114"
+
+        refresh_mcp_allowed_hosts()
+        hosts = mcp.settings.transport_security.allowed_hosts
+        # exact (no-port) form for the HTTPS/proxy host, wildcard for IP-with-port
+        assert "eshu.local.example.com" in hosts
+        assert "eshu.local.example.com:*" in hosts
+        assert "192.168.1.114:*" in hosts
+        # loopback defaults preserved
+        assert "127.0.0.1:*" in hosts
+        assert "localhost:*" in hosts
+
+    def test_clear_sets_empty(self, auth_client):
+        auth_client.put("/api/mcp-settings", json={"allowed_hosts": "example.com"})
+        r = auth_client.put("/api/mcp-settings", json={"allowed_hosts": ""})
+        assert r.status_code == 200
+        assert auth_client.get("/api/mcp-settings").json()["allowed_hosts"] == ""
+
+    def test_requires_session(self, client):
+        assert client.get("/api/mcp-settings").status_code == 401
+        assert client.put("/api/mcp-settings", json={"allowed_hosts": "x"}).status_code == 401

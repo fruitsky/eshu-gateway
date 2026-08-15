@@ -491,6 +491,16 @@
             <p class="text-xs mb-3 text-muted">Mutating calls an agent submitted that need operator approval before execution.</p>
             <div id="integration-pending-list"><p class="text-muted">Nothing pending.</p></div>
           </div>
+
+          <div class="widget">
+            <div class="widget-header">MCP Access</div>
+            <p class="text-xs mb-3 text-muted">Hosts allowed to reach the MCP endpoint (DNS-rebinding allowlist). Comma-separated — list the hostname/IP you reach the dashboard at (e.g. <code>eshu.local.example.com</code>). Loopback is always allowed.</p>
+            <div class="flex gap-2">
+              <input type="text" id="mcp-allowed-hosts" placeholder="eshu.local.example.com, 192.168.1.114" class="flex-1 text-xs" onkeydown="if(event.key==='Enter')saveMcpSettings()">
+              <button onclick="saveMcpSettings()" class="btn btn-sm">Save</button>
+            </div>
+            <div class="text-xs text-muted mt-1">Current: <span id="mcp-allowed-hosts-current">none (loopback only)</span></div>
+          </div>
         </div>
 
         <div class="flex flex-col gap-5">

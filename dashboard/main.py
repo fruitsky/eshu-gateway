@@ -34,6 +34,7 @@ from database import (
     get_deployed_golden_hash, set_deployed_golden_hash,
     get_dev_push_initiated, set_dev_push_initiated, clear_dev_push_initiated,
     dismiss_policy_gap,
+    get_mcp_allowed_hosts, set_mcp_allowed_hosts,
     get_trigger_rollback, set_trigger_rollback, clear_trigger_rollback,
     set_trigger_freeze, get_trigger_freeze, clear_trigger_freeze,
     record_audit_event, get_audit_log,
@@ -93,7 +94,7 @@ from core.gateway_watch import (
 from core.utils import DASHBOARD_VERSION, decode_cmd, _resolve_gateway_token, _hash_password, _verify_password
 from core.integration_auth import resolve_agent, resolve_agent_optional, extract_agent_token
 from core.integration_proxy import execute_integration_call
-from core.mcp_server import mcp as eshu_mcp, refresh_mcp_tools
+from core.mcp_server import mcp as eshu_mcp, refresh_mcp_tools, refresh_mcp_allowed_hosts
 from core.proxmox_seed import seed_proxmox_tools
 
 
@@ -190,6 +191,8 @@ def on_startup():
     profiles_thread.start()
     # Register the enabled integration tools as MCP tools
     refresh_mcp_tools()
+    # Apply the configured MCP allowed-hosts (DNS-rebinding allowlist)
+    refresh_mcp_allowed_hosts()
 
 
 _mcp_lifespan_ctx = None
@@ -2308,6 +2311,28 @@ def deny_integration_call(call_id: int, request: Request):
     record_audit_event("integration_call_denied",
                        details=f"Integration call #{call_id} ({call['integration']}.{call['tool']}) denied")
     return {"status": "ok", "id": call_id}
+
+
+class MCPSettingsPayload(BaseModel):
+    allowed_hosts: str = ''
+
+
+@app.get("/api/mcp-settings")
+def get_mcp_settings_endpoint(request: Request):
+    """The configured MCP Host allowlist (DNS-rebinding protection)."""
+    _check_session(request)
+    return {"allowed_hosts": get_mcp_allowed_hosts()}
+
+
+@app.put("/api/mcp-settings")
+def set_mcp_settings_endpoint(payload: MCPSettingsPayload, request: Request):
+    """Set the MCP Host allowlist. Applied live — no restart needed."""
+    _check_session(request)
+    set_mcp_allowed_hosts(payload.allowed_hosts.strip())
+    refresh_mcp_allowed_hosts()
+    record_audit_event("mcp_settings_updated",
+                       details=f"MCP allowed hosts updated to '{payload.allowed_hosts.strip()}'")
+    return {"status": "ok"}
 
 
 # ── Static Files ────────────────────────────────────────────────────────

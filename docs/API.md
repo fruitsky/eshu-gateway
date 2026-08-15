@@ -200,6 +200,10 @@ endpoint. Agents authenticate to the MCP surface with a bearer **agent token**.
 | Method | Path | Purpose | Auth |
 |--------|------|---------|------|
 | `POST/GET` | `/mcp` | MCP streamable-HTTP endpoint. Agents connect here with `Authorization: Bearer <agent-token>` | Agent token |
+| `GET` | `/api/mcp-settings` | Current MCP Host allowlist (DNS-rebinding protection) | Session |
+| `PUT` | `/api/mcp-settings` | Set the MCP Host allowlist (comma-separated; body `{"allowed_hosts": "..."}`). Applied live, no restart | Session |
+
+The MCP endpoint has DNS-rebinding protection on by default, so it only accepts requests whose `Host` header is in its allowlist. Loopback (`127.0.0.1`, `localhost`, `::1`) is always allowed; add the hostname/IP you reach the dashboard at (e.g. behind a reverse proxy) via **Integrations → MCP Access**. Each host is matched both exactly (no port) and with a `:*` port wildcard.
 
 Read-only tools forward immediately; mutating tools create a pending call and
 return `{"status": "pending", "id": N}` — the agent polls the `check_approval(id)`

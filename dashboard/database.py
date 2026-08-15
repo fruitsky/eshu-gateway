@@ -104,6 +104,8 @@ from db.misc import (
     get_dismissed_policy_gaps,
     get_seen_gaps,
     set_seen_gaps,
+    get_mcp_allowed_hosts,
+    set_mcp_allowed_hosts,
 )
 
 from db.windows import (

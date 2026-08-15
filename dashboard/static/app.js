@@ -3372,6 +3372,30 @@ async function fetchIntegrations() {
   fetchIntegrationList();
   fetchIntegrationPending();
   fetchIntegrationCalls();
+  fetchMcpSettings();
+}
+
+async function fetchMcpSettings() {
+  const input = document.getElementById('mcp-allowed-hosts');
+  const current = document.getElementById('mcp-allowed-hosts-current');
+  if (!input) return;
+  try {
+    const res = await authFetch('/api/mcp-settings');
+    if (!res.ok) return;
+    const data = await res.json();
+    input.value = data.allowed_hosts || '';
+    current.textContent = data.allowed_hosts || 'none (loopback only)';
+  } catch(e) {}
+}
+
+async function saveMcpSettings() {
+  const v = document.getElementById('mcp-allowed-hosts').value.trim();
+  try {
+    const res = await authFetch('/api/mcp-settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ allowed_hosts: v }) });
+    if (!res.ok) { const d = await res.json().catch(function() { return {}; }); showToast('❌ ' + (d.detail || 'Failed'), 'error'); return; }
+    fetchMcpSettings();
+    showToast('MCP access updated', 'success');
+  } catch(e) { showToast('❌ Failed: ' + e.message, 'error'); }
 }
 
 async function fetchAgentTokens() {
