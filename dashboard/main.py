@@ -2216,6 +2216,35 @@ def update_integration_endpoint(name: str, payload: IntegrationUpdatePayload, re
     return {"status": "ok"}
 
 
+@app.post("/api/integrations/{name}/test")
+def test_integration_endpoint(name: str, request: Request):
+    """Test a connection: run the first enabled read-only tool with no required
+    params and return status + a response preview. Surfaces wrong base URLs,
+    bad secrets, and TLS issues without involving the agent."""
+    _check_session(request)
+    integration = get_integration(name)
+    if not integration:
+        raise HTTPException(status_code=404, detail="Integration not found")
+    candidate = None
+    for tool in get_tools(integration['id']):
+        if not tool.get('enabled') or not tool.get('read_only'):
+            continue
+        if not any(p.get('required') for p in (tool.get('params') or [])):
+            candidate = tool
+            break
+    if not candidate:
+        raise HTTPException(status_code=400,
+                            detail="No enabled read-only tool with zero required params — seed the integration first")
+    result = execute_integration_call(integration, candidate, {}, agent='test')
+    return {
+        "status_code": result['status_code'],
+        "error": result['error'],
+        "tool": candidate['name'],
+        "preview": (result['body'] or '')[:500],
+        "truncated": result['truncated'],
+    }
+
+
 @app.delete("/api/integrations/{name}")
 def delete_integration_endpoint(name: str, request: Request):
     _check_session(request)

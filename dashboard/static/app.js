@@ -3366,6 +3366,8 @@ setInterval(function() {
 
 // ── Integrations & MCP ──────────────────────────────────────────────────
 let _selectedIntegration = null;
+let _editingIntegration = null;
+let _integrationsData = [];
 
 async function fetchIntegrations() {
   fetchAgentTokens();
@@ -3448,6 +3450,7 @@ async function fetchIntegrationList() {
     const res = await authFetch('/api/integrations');
     if (!res.ok) return;
     const ints = await res.json();
+    _integrationsData = ints;
     if (!ints.length) { el.innerHTML = '<p class="text-muted">No integrations yet.</p>'; return; }
     el.innerHTML = ints.map(function(i) {
       var active = i.enabled ? 'text-success' : 'text-muted';
@@ -3455,6 +3458,8 @@ async function fetchIntegrationList() {
         '<div class="flex items-center justify-between gap-2">' +
         '<button class="text-sm text-left ' + active + '" onclick="selectIntegration(\'' + esc(i.name) + '\')">' + esc(i.name) + '</button>' +
         '<div class="flex gap-1">' +
+        '<button onclick="editIntegration(\'' + esc(i.name) + '\')" class="btn btn-xs btn-muted" title="Edit base URL / secret">Edit</button>' +
+        '<button onclick="testIntegration(\'' + esc(i.name) + '\')" class="btn btn-xs btn-muted" title="Run a read call to verify the connection">Test</button>' +
         '<button onclick="seedProxmox(\'' + esc(i.name) + '\')" class="btn btn-xs btn-muted" title="Seed Proxmox tools">Seed</button>' +
         '<button onclick="deleteIntegration(\'' + esc(i.name) + '\')" class="btn btn-xs btn-muted">Delete</button></div></div>' +
         '<div class="text-xs text-muted">' + esc(i.base_url) + ' · auth: ' + esc(i.auth_type) + '</div></div>';
@@ -3462,27 +3467,83 @@ async function fetchIntegrationList() {
   } catch(e) {}
 }
 
+function resetIntegrationForm() {
+  _editingIntegration = null;
+  document.getElementById('int-name').disabled = false;
+  document.getElementById('int-name').value = '';
+  document.getElementById('int-base-url').value = '';
+  document.getElementById('int-auth-type').value = 'header';
+  document.getElementById('int-auth-header').value = '';
+  document.getElementById('int-secret').value = '';
+  document.getElementById('int-submit-btn').textContent = 'Add Integration';
+  document.getElementById('integration-test-result').classList.add('hidden');
+}
+
+function editIntegration(name) {
+  const i = _integrationsData.find(function(x) { return x.name === name; });
+  if (!i) return;
+  _editingIntegration = name;
+  document.getElementById('int-name').value = i.name;
+  document.getElementById('int-name').disabled = true;
+  document.getElementById('int-base-url').value = i.base_url || '';
+  document.getElementById('int-auth-type').value = i.auth_type || 'header';
+  document.getElementById('int-auth-header').value = i.auth_header_name || '';
+  document.getElementById('int-secret').value = '';
+  document.getElementById('int-submit-btn').textContent = 'Update Integration';
+  document.getElementById('integration-test-result').classList.add('hidden');
+}
+
 async function createIntegration() {
   const name = document.getElementById('int-name').value.trim();
   const baseUrl = document.getElementById('int-base-url').value.trim();
   if (!name || !baseUrl) { showToast('Name and base URL are required', 'error'); return; }
   const payload = {
-    name: name,
     base_url: baseUrl,
     auth_type: document.getElementById('int-auth-type').value,
     auth_header_name: document.getElementById('int-auth-header').value.trim(),
-    secret: document.getElementById('int-secret').value,
   };
+  const secret = document.getElementById('int-secret').value;
+  if (secret) payload.secret = secret;
+  if (_editingIntegration) {
+    try {
+      const res = await authFetch('/api/integrations/' + encodeURIComponent(_editingIntegration), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+      const data = await res.json();
+      if (!res.ok) { showToast('❌ ' + (data.detail || 'Failed'), 'error'); return; }
+      resetIntegrationForm();
+      fetchIntegrationList();
+      showToast('Integration updated', 'success');
+    } catch(e) { showToast('❌ Failed: ' + e.message, 'error'); }
+    return;
+  }
+  payload.name = name;
   try {
     const res = await authFetch('/api/integrations', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
     const data = await res.json();
     if (!res.ok) { showToast('❌ ' + (data.detail || 'Failed'), 'error'); return; }
-    document.getElementById('int-name').value = '';
-    document.getElementById('int-base-url').value = '';
-    document.getElementById('int-secret').value = '';
+    resetIntegrationForm();
     fetchIntegrationList();
     showToast('Integration added', 'success');
   } catch(e) { showToast('❌ Failed: ' + e.message, 'error'); }
+}
+
+async function testIntegration(name) {
+  const box = document.getElementById('integration-test-result');
+  if (!box) return;
+  box.classList.remove('hidden');
+  box.innerHTML = '<span class="text-muted">Testing ' + esc(name) + '…</span>';
+  try {
+    const res = await authFetch('/api/integrations/' + encodeURIComponent(name) + '/test', { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) { box.innerHTML = '<span class="text-danger">Test failed: ' + esc(data.detail || 'error') + '</span>'; return; }
+    var body = '';
+    if (data.error) {
+      body = '<span class="text-danger">Error: ' + esc(data.error) + '</span>';
+    } else {
+      body = 'HTTP ' + data.status_code + ' via ' + esc(data.tool) +
+        (data.truncated ? ' (truncated)' : '') + ' — <code>' + esc(data.preview) + '</code>';
+    }
+    box.innerHTML = body;
+  } catch(e) { box.innerHTML = '<span class="text-danger">Test failed: ' + esc(e.message) + '</span>'; }
 }
 
 async function deleteIntegration(name) {

@@ -36,6 +36,40 @@ class TestIntegrationCRUD:
         assert get_integration("proxmox")["secret"] == "SECRET"
         assert get_integration("proxmox")["base_url"] == "https://new.local/api2/json"
 
+    def test_update_can_change_secret(self, auth_client):
+        create_integration("proxmox", "https://pve.local/api2/json", "header", "OLD")
+        r = auth_client.put("/api/integrations/proxmox", json={"secret": "NEW"})
+        assert r.status_code == 200
+        assert get_integration("proxmox")["secret"] == "NEW"
+
+    def test_test_endpoint_runs_read_tool(self, auth_client, mock_upstream):
+        """POST /api/integrations/{name}/test runs the first enabled read-only
+        tool with no required params and reports the upstream result."""
+        create_integration("proxmox", mock_upstream["base_url"], "header",
+                           "PVEAPIToken=u!t=v", auth_header_name="Authorization")
+        auth_client.post("/api/integrations/proxmox/seed-proxmox")
+        r = auth_client.post("/api/integrations/proxmox/test")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["status_code"] == 200
+        assert data["error"] is None
+        assert data["tool"] in ("get_cluster_resources", "list_nodes")
+        assert '"ok"' in data["preview"]
+
+    def test_test_endpoint_requires_session(self, client):
+        create_integration("proxmox", "https://pve.local/api2/json", "none", "")
+        r = client.post("/api/integrations/proxmox/test")
+        assert r.status_code == 401
+
+    def test_test_endpoint_reports_connection_error(self, auth_client, mock_upstream):
+        # A base_url that refuses connections should surface as a clear error,
+        # not crash.
+        create_integration("proxmox", "http://127.0.0.1:1/api2/json", "none", "")
+        auth_client.post("/api/integrations/proxmox/seed-proxmox")
+        r = auth_client.post("/api/integrations/proxmox/test")
+        assert r.status_code == 200
+        assert r.json()["error"] is not None
+
     def test_delete_integration(self, auth_client):
         create_integration("proxmox", "https://pve.local/api2/json", "none", "")
         r = auth_client.delete("/api/integrations/proxmox")
