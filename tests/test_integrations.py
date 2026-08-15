@@ -146,3 +146,31 @@ class TestMcpSettings:
     def test_requires_session(self, client):
         assert client.get("/api/mcp-settings").status_code == 401
         assert client.put("/api/mcp-settings", json={"allowed_hosts": "x"}).status_code == 401
+
+
+class TestProxyScheme:
+
+    def test_mcp_redirect_uses_forwarded_proto(self, auth_client):
+        """The /mcp trailing-slash redirect must use the X-Forwarded-Proto
+        scheme so a proxy client (e.g. Hermes) keeps its Authorization header
+        on the follow-up request (a scheme change would drop it)."""
+        from db.agent_tokens import create_agent_token
+        token, _ = create_agent_token("hermes")
+        r = auth_client.get(
+            "/mcp",
+            headers={"Authorization": "Bearer " + token, "X-Forwarded-Proto": "https"},
+            follow_redirects=False,
+        )
+        assert r.status_code == 307
+        assert r.headers["location"].startswith("https://")
+
+    def test_mcp_redirect_defaults_to_http_without_forwarded_proto(self, auth_client):
+        from db.agent_tokens import create_agent_token
+        token, _ = create_agent_token("hermes")
+        r = auth_client.get(
+            "/mcp",
+            headers={"Authorization": "Bearer " + token},
+            follow_redirects=False,
+        )
+        assert r.status_code == 307
+        assert r.headers["location"].startswith("http://")

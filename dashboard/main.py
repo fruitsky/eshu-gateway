@@ -146,6 +146,18 @@ async def mcp_agent_auth_middleware(request: Request, call_next):
             return JSONResponse(status_code=401, content={"detail": "Invalid or missing agent token"})
     return await call_next(request)
 
+
+@app.middleware("http")
+async def proxy_scheme_middleware(request: Request, call_next):
+    """Honor X-Forwarded-Proto so the dashboard generates correct https://
+    URLs (e.g. the /mcp trailing-slash redirect) when running behind a
+    TLS-terminating reverse proxy like NPM. Without this, a client following
+    the redirect sees a scheme change and drops the Authorization header."""
+    proto = request.headers.get("X-Forwarded-Proto", "")
+    if proto in ("http", "https"):
+        request.scope["scheme"] = proto
+    return await call_next(request)
+
 @app.on_event("startup")
 def on_startup():
     # Migrate old Hermes database if present (MUST run before init_db, which creates eshu.db)
