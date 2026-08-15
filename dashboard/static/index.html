@@ -87,6 +87,10 @@
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
       <span>Fleet Run</span>
     </button>
+    <button class="nav-item" id="nav-integrations" onclick="switchView('integrations')">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
+      <span>Integrations</span>
+    </button>
   </div>
   <div class="nav-spacer"></div>
   <div class="sidebar-bottom">
@@ -442,6 +446,62 @@
         <div class="panel mt-4">
           <h3 class="text-sm font-semibold mb-1">History &amp; results</h3>
           <div id="fleet-results-list"><p class="text-muted">No fleet commands yet.</p></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- INTEGRATIONS VIEW — agent API gateway (MCP) -->
+    <div id="view-integrations" class="hidden w-full">
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-5">
+        <div class="flex flex-col gap-5">
+          <div class="widget">
+            <div class="widget-header">Agent Tokens</div>
+            <p class="text-xs mb-3 text-muted">Long-lived bearer tokens your agents present to the MCP endpoint (<code>/mcp</code>). Shown once on creation; only the hash is stored.</p>
+            <div class="flex gap-2 mb-3">
+              <input type="text" id="agent-token-name" placeholder="Agent name (e.g. hermes)" class="flex-1 text-xs" onkeydown="if(event.key==='Enter')createAgentToken()">
+              <button onclick="createAgentToken()" class="btn btn-sm">Create Token</button>
+            </div>
+            <div id="agent-token-result" class="hidden mb-3 p-2 rounded bg-green-900/20 border border-green-700/40 text-xs break-all"></div>
+            <div id="agent-token-list" class="space-y-2"><p class="text-muted">Loading...</p></div>
+          </div>
+
+          <div class="widget">
+            <div class="widget-header">Integrations</div>
+            <p class="text-xs mb-3 text-muted">Named upstream APIs. Credentials are stored server-side and never returned. Proxmox token auth uses <code>header</code> + <code>PVEAPIToken=user@realm!token=uuid</code>.</p>
+            <div class="space-y-2 mb-3">
+              <input type="text" id="int-name" placeholder="Name (e.g. proxmox)" class="w-full text-xs">
+              <input type="text" id="int-base-url" placeholder="Base URL (e.g. https://pve.local:8006/api2/json)" class="w-full text-xs">
+              <div class="flex gap-2">
+                <select id="int-auth-type" class="flex-1 text-xs">
+                  <option value="header">header (custom header)</option>
+                  <option value="bearer">bearer</option>
+                  <option value="basic">basic</option>
+                  <option value="none">none</option>
+                </select>
+                <input type="text" id="int-auth-header" placeholder="Header name (default Authorization)" class="flex-1 text-xs">
+              </div>
+              <input type="password" id="int-secret" placeholder="Secret / token" class="w-full text-xs">
+              <button onclick="createIntegration()" class="btn btn-sm">Add Integration</button>
+            </div>
+            <div id="integration-list" class="space-y-2"><p class="text-muted">No integrations yet.</p></div>
+          </div>
+
+          <div class="widget">
+            <div class="widget-header">Pending API Approvals</div>
+            <p class="text-xs mb-3 text-muted">Mutating calls an agent submitted that need operator approval before execution.</p>
+            <div id="integration-pending-list"><p class="text-muted">Nothing pending.</p></div>
+          </div>
+        </div>
+
+        <div class="flex flex-col gap-5">
+          <div class="widget">
+            <div class="widget-header">Tools <span class="text-xs text-muted">(select an integration to manage)</span></div>
+            <div id="integration-tools-list"><p class="text-muted">Select an integration to view its tools.</p></div>
+          </div>
+          <div class="widget">
+            <div class="widget-header">Recent Proxied Calls</div>
+            <div id="integration-calls-list" class="space-y-1 max-h-96 overflow-y-auto"><p class="text-muted">No calls yet.</p></div>
+          </div>
         </div>
       </div>
     </div>

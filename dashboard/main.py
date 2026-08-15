@@ -59,6 +59,12 @@ from database import (
     approve_fleet_command, upsert_fleet_result,
     get_fleet_result, get_fleet_results, get_injectable_fleet_cmd,
     delete_fleet_command,
+    create_integration, get_integrations, get_integration, get_integration_by_id,
+    update_integration, delete_integration,
+    create_tool, get_tools, get_tool, set_tool_enabled, delete_tool,
+    record_integration_call, get_integration_calls,
+    create_pending_call, get_pending_calls, get_pending_call, set_pending_call_status,
+    create_agent_token, get_agent_tokens, revoke_agent_token, delete_agent_token,
 )
 
 from schemas import (
@@ -85,6 +91,10 @@ from core.gateway_watch import (
     _disconnected_gateways, _offline_alerted, OFFLINE_THRESHOLD,
 )
 from core.utils import DASHBOARD_VERSION, decode_cmd, _resolve_gateway_token, _hash_password, _verify_password
+from core.integration_auth import resolve_agent, resolve_agent_optional, extract_agent_token
+from core.integration_proxy import execute_integration_call
+from core.mcp_server import mcp as eshu_mcp, refresh_mcp_tools
+from core.proxmox_seed import seed_proxmox_tools
 
 
 def _get_gateway_hostname(ip: str) -> str:
@@ -123,6 +133,17 @@ app = FastAPI(title="Eshu Gateway Dashboard v15.3")
 _last_enroll_log = {}
 _ENROLL_DEDUP_WINDOW = 5  # seconds
 _app = app  # keep reference for router includes
+
+
+@app.middleware("http")
+async def mcp_agent_auth_middleware(request: Request, call_next):
+    """Gate the /mcp surface behind a bearer agent token (mirrors the gateway
+    token pattern). Dashboard UI and gateway endpoints are unaffected."""
+    if request.url.path.startswith("/mcp"):
+        agent = resolve_agent_optional(request)
+        if agent is None:
+            return JSONResponse(status_code=401, content={"detail": "Invalid or missing agent token"})
+    return await call_next(request)
 
 @app.on_event("startup")
 def on_startup():
@@ -167,6 +188,28 @@ def on_startup():
     refresh_profiles()
     profiles_thread = threading.Thread(target=_profiles_loop, daemon=True)
     profiles_thread.start()
+    # Register the enabled integration tools as MCP tools
+    refresh_mcp_tools()
+
+
+_mcp_lifespan_ctx = None
+
+
+@app.on_event("startup")
+async def mcp_startup():
+    """Enter the MCP streamable-HTTP session manager's lifespan. Starlette does
+    not propagate a mounted sub-app's lifespan, so we drive it explicitly."""
+    global _mcp_lifespan_ctx
+    _mcp_lifespan_ctx = eshu_mcp.session_manager.run()
+    await _mcp_lifespan_ctx.__aenter__()
+
+
+@app.on_event("shutdown")
+async def mcp_shutdown():
+    global _mcp_lifespan_ctx
+    if _mcp_lifespan_ctx is not None:
+        await _mcp_lifespan_ctx.__aexit__(None, None, None)
+        _mcp_lifespan_ctx = None
 
 
 def _migrate_legacy_db():
@@ -2062,6 +2105,211 @@ def list_window_executions(window_id: str, request: Request):
         raise HTTPException(status_code=404, detail="Window not found")
     return get_window_executions(win['id'], limit=50)
 
+# ── Integrations & MCP (agent API gateway) ─────────────────────────────
+
+class IntegrationPayload(BaseModel):
+    name: str
+    base_url: str
+    auth_type: str = 'bearer'
+    auth_header_name: str = ''
+    secret: str = ''
+    enabled: bool = True
+
+class IntegrationUpdatePayload(BaseModel):
+    base_url: str = None
+    auth_type: str = None
+    auth_header_name: str = None
+    secret: str = None
+    enabled: bool = None
+
+class ToolPayload(BaseModel):
+    name: str
+    description: str = ''
+    method: str = 'GET'
+    path_template: str = ''
+    params: list = []
+    example: str = ''
+    read_only: bool = True
+
+class ToolTogglePayload(BaseModel):
+    enabled: bool = True
+
+class AgentTokenPayload(BaseModel):
+    name: str
+
+
+@app.post("/api/agents")
+def create_agent(payload: AgentTokenPayload, request: Request):
+    """Mint a new agent token (shown once). Agents present it as a bearer token
+    to /mcp. The dashboard stores only its SHA-256 hash."""
+    _check_session(request)
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Name is required")
+    token, agent_id = create_agent_token(name)
+    record_audit_event("agent_token_created", details=f"Agent token '{name}' created (id {agent_id})")
+    return {"status": "ok", "id": agent_id, "name": name, "token": token}
+
+
+@app.get("/api/agents")
+def list_agents(request: Request):
+    _check_session(request)
+    return get_agent_tokens()
+
+
+@app.delete("/api/agents/{agent_id}")
+def delete_agent(agent_id: int, request: Request):
+    _check_session(request)
+    if not delete_agent_token(agent_id):
+        raise HTTPException(status_code=404, detail="Agent token not found")
+    record_audit_event("agent_token_deleted", details=f"Agent token {agent_id} deleted")
+    return {"status": "ok"}
+
+
+@app.post("/api/integrations")
+def create_integration_endpoint(payload: IntegrationPayload, request: Request):
+    _check_session(request)
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Name is required")
+    if get_integration(name):
+        raise HTTPException(status_code=400, detail="Integration already exists")
+    if payload.auth_type not in ('none', 'bearer', 'basic', 'header'):
+        raise HTTPException(status_code=400, detail="Invalid auth_type")
+    create_integration(name, payload.base_url.strip(), payload.auth_type, payload.secret,
+                       payload.auth_header_name, payload.enabled)
+    record_audit_event("integration_created", details=f"Integration '{name}' created")
+    return {"status": "ok", "name": name}
+
+
+@app.get("/api/integrations")
+def list_integrations_endpoint(request: Request):
+    _check_session(request)
+    return get_integrations()
+
+
+@app.put("/api/integrations/{name}")
+def update_integration_endpoint(name: str, payload: IntegrationUpdatePayload, request: Request):
+    _check_session(request)
+    if not get_integration(name):
+        raise HTTPException(status_code=404, detail="Integration not found")
+    data = payload.model_dump(exclude_none=True)
+    if 'auth_type' in data and data['auth_type'] not in ('none', 'bearer', 'basic', 'header'):
+        raise HTTPException(status_code=400, detail="Invalid auth_type")
+    update_integration(name, **data)
+    record_audit_event("integration_updated", details=f"Integration '{name}' updated")
+    return {"status": "ok"}
+
+
+@app.delete("/api/integrations/{name}")
+def delete_integration_endpoint(name: str, request: Request):
+    _check_session(request)
+    if not delete_integration(name):
+        raise HTTPException(status_code=404, detail="Integration not found")
+    refresh_mcp_tools()
+    record_audit_event("integration_deleted", details=f"Integration '{name}' deleted")
+    return {"status": "ok"}
+
+
+@app.get("/api/integrations/{name}/tools")
+def list_tools_endpoint(name: str, request: Request):
+    _check_session(request)
+    integration = get_integration(name)
+    if not integration:
+        raise HTTPException(status_code=404, detail="Integration not found")
+    return get_tools(integration['id'])
+
+
+@app.post("/api/integrations/{name}/tools")
+def create_tool_endpoint(name: str, payload: ToolPayload, request: Request):
+    _check_session(request)
+    integration = get_integration(name)
+    if not integration:
+        raise HTTPException(status_code=404, detail="Integration not found")
+    tool_id = create_tool(integration['id'], payload.name, payload.description, payload.method,
+                          payload.path_template, payload.params, payload.example, payload.read_only)
+    refresh_mcp_tools()
+    record_audit_event("integration_tool_created", details=f"Tool '{name}.{payload.name}' created")
+    return {"status": "ok", "id": tool_id}
+
+
+@app.delete("/api/integrations/{name}/tools/{tool_id}")
+def delete_tool_endpoint(name: str, tool_id: int, request: Request):
+    _check_session(request)
+    if not delete_tool(tool_id):
+        raise HTTPException(status_code=404, detail="Tool not found")
+    refresh_mcp_tools()
+    record_audit_event("integration_tool_deleted", details=f"Tool id {tool_id} deleted from '{name}'")
+    return {"status": "ok"}
+
+
+@app.post("/api/integrations/{name}/tools/{tool_id}/toggle")
+def toggle_tool_endpoint(name: str, tool_id: int, payload: ToolTogglePayload, request: Request):
+    _check_session(request)
+    if not set_tool_enabled(tool_id, payload.enabled):
+        raise HTTPException(status_code=404, detail="Tool not found")
+    refresh_mcp_tools()
+    record_audit_event("integration_tool_toggled",
+                       details=f"Tool id {tool_id} {'enabled' if payload.enabled else 'disabled'}")
+    return {"status": "ok", "enabled": payload.enabled}
+
+
+@app.post("/api/integrations/{name}/seed-proxmox")
+def seed_proxmox_endpoint(name: str, request: Request):
+    """Populate an integration with the curated Proxmox seed catalog (idempotent)."""
+    _check_session(request)
+    integration = get_integration(name)
+    if not integration:
+        raise HTTPException(status_code=404, detail="Integration not found")
+    created, updated = seed_proxmox_tools(integration['id'])
+    refresh_mcp_tools()
+    record_audit_event("proxmox_seeded",
+                       details=f"Proxmox seed for '{name}': {created} created, {updated} updated")
+    return {"status": "ok", "created": created, "updated": updated}
+
+
+@app.get("/api/integration-calls")
+def list_integration_calls(request: Request):
+    _check_session(request)
+    return get_integration_calls(200)
+
+
+@app.get("/api/integration-calls/pending")
+def list_pending_integration_calls(request: Request):
+    _check_session(request)
+    return get_pending_calls()
+
+
+@app.post("/api/integration-calls/{call_id}/approve")
+def approve_integration_call(call_id: int, request: Request):
+    """Approve a pending mutating call and execute it against the integration."""
+    _check_session(request)
+    call = get_pending_call(call_id)
+    if not call or call['status'] != 'pending':
+        raise HTTPException(status_code=404, detail="Pending call not found")
+    integration = get_integration(call['integration'])
+    tool = get_tool(call['integration'], call['tool'])
+    if not integration or not tool:
+        raise HTTPException(status_code=404, detail="Integration or tool missing")
+    result = execute_integration_call(integration, tool, call['payload'], agent='operator')
+    set_pending_call_status(call_id, 'approved', json.dumps(result))
+    record_audit_event("integration_call_approved",
+                       details=f"Integration call #{call_id} ({call['integration']}.{call['tool']}) approved and executed")
+    return {"status": "ok", "id": call_id}
+
+
+@app.post("/api/integration-calls/{call_id}/deny")
+def deny_integration_call(call_id: int, request: Request):
+    _check_session(request)
+    call = get_pending_call(call_id)
+    if not call or call['status'] != 'pending':
+        raise HTTPException(status_code=404, detail="Pending call not found")
+    set_pending_call_status(call_id, 'denied', '')
+    record_audit_event("integration_call_denied",
+                       details=f"Integration call #{call_id} ({call['integration']}.{call['tool']}) denied")
+    return {"status": "ok", "id": call_id}
+
+
 # ── Static Files ────────────────────────────────────────────────────────
 
 static_dir = os.path.join(os.path.dirname(__file__), "static")
@@ -2083,6 +2331,11 @@ if os.path.exists(install_script_src):
         shutil.copy(install_script_src, dev_path)
 
 app.mount("/static", StaticFiles(directory=static_dir), name="static")
+
+# MCP surface — agents (Hermes) connect to http://<dashboard>:8000/mcp with a
+# bearer agent token. Mounted at module level; tools are (re)registered at
+# startup and after catalog changes via refresh_mcp_tools().
+app.mount("/mcp", eshu_mcp.streamable_http_app(), name="mcp")
 
 @app.get("/", response_class=HTMLResponse)
 def read_root():

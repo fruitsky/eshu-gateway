@@ -139,3 +139,34 @@ from db.fleet import (
     purge_old_fleet_commands,
     delete_fleet_command,
 )
+
+from db.integrations import (
+    create_integration,
+    get_integrations,
+    get_integration,
+    get_integration_by_id,
+    update_integration,
+    delete_integration,
+    create_tool,
+    get_tools,
+    get_enabled_tools,
+    get_tool,
+    set_tool_enabled,
+    update_tool,
+    delete_tool,
+    record_integration_call,
+    get_integration_calls,
+    create_pending_call,
+    get_pending_calls,
+    get_pending_call,
+    set_pending_call_status,
+)
+
+from db.agent_tokens import (
+    create_agent_token,
+    get_agent_tokens,
+    get_agent_by_token,
+    touch_agent_token,
+    revoke_agent_token,
+    delete_agent_token,
+)

@@ -188,6 +188,7 @@ async function switchView(target) {
   if (target === 'stats') { fetchStatistics(); fetchSuggestions(); }
   if (target === 'controls') { fetchFreezeStatus(); fetchGateways(); fetchPolicies(); fetchPolicyChanges(); }
   if (target === 'fleet') { fetchFleetCommands(); }
+  if (target === 'integrations') { fetchIntegrations(); }
   if (target === 'settings') { refreshPasswordUI(); fetchNotifyConfig(); fetchDevTools(); if (_devToolsEnabled) { fetchDevStatus(); fetchDevGateways(); fetchFeatureFlags(); } }
   if (target === 'logs') { fetchAuditLog(); }
 }
@@ -3362,3 +3363,221 @@ setInterval(function() {
   if (!document.getElementById('setup-overlay').classList.contains('hidden')) return;
   if (document.getElementById('view-windows').classList.contains('block')) fetchWindowsTable();
 }, 30000);
+
+// ── Integrations & MCP ──────────────────────────────────────────────────
+let _selectedIntegration = null;
+
+async function fetchIntegrations() {
+  fetchAgentTokens();
+  fetchIntegrationList();
+  fetchIntegrationPending();
+  fetchIntegrationCalls();
+}
+
+async function fetchAgentTokens() {
+  const el = document.getElementById('agent-token-list');
+  if (!el) return;
+  try {
+    const res = await authFetch('/api/agents');
+    if (!res.ok) return;
+    const agents = await res.json();
+    if (!agents.length) { el.innerHTML = '<p class="text-muted">No agent tokens yet.</p>'; return; }
+    el.innerHTML = agents.map(function(a) {
+      var used = a.last_used_at ? new Date(a.last_used_at * 1000).toLocaleString() : 'never';
+      return '<div class="flex items-center justify-between gap-2 p-2 rounded bg-black/20">' +
+        '<div><div class="text-sm">' + esc(a.name) + (a.revoked ? ' <span class="text-danger">(revoked)</span>' : '') + '</div>' +
+        '<div class="text-xs text-muted">last used: ' + used + '</div></div>' +
+        '<button onclick="deleteAgentToken(' + a.id + ')" class="btn btn-xs btn-muted">Delete</button></div>';
+    }).join('');
+  } catch(e) {}
+}
+
+async function createAgentToken() {
+  const name = document.getElementById('agent-token-name').value.trim();
+  if (!name) { showToast('Agent name is required', 'error'); return; }
+  try {
+    const res = await authFetch('/api/agents', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: name }) });
+    const data = await res.json();
+    if (!res.ok) { showToast('❌ ' + (data.detail || 'Failed'), 'error'); return; }
+    document.getElementById('agent-token-name').value = '';
+    const box = document.getElementById('agent-token-result');
+    box.classList.remove('hidden');
+    box.innerHTML = '<strong>' + esc(name) + ' token (copy now — shown once):</strong><br>' + esc(data.token);
+    fetchAgentTokens();
+    showToast('Agent token created', 'success');
+  } catch(e) { showToast('❌ Failed: ' + e.message, 'error'); }
+}
+
+async function deleteAgentToken(id) {
+  if (!(await customConfirm('Delete this agent token? The agent will lose access immediately.'))) return;
+  try {
+    await authFetch('/api/agents/' + id, { method: 'DELETE' });
+    fetchAgentTokens();
+  } catch(e) { showToast('❌ Failed: ' + e.message, 'error'); }
+}
+
+async function fetchIntegrationList() {
+  const el = document.getElementById('integration-list');
+  if (!el) return;
+  try {
+    const res = await authFetch('/api/integrations');
+    if (!res.ok) return;
+    const ints = await res.json();
+    if (!ints.length) { el.innerHTML = '<p class="text-muted">No integrations yet.</p>'; return; }
+    el.innerHTML = ints.map(function(i) {
+      var active = i.enabled ? 'text-success' : 'text-muted';
+      return '<div class="p-2 rounded bg-black/20">' +
+        '<div class="flex items-center justify-between gap-2">' +
+        '<button class="text-sm text-left ' + active + '" onclick="selectIntegration(\'' + esc(i.name) + '\')">' + esc(i.name) + '</button>' +
+        '<div class="flex gap-1">' +
+        '<button onclick="seedProxmox(\'' + esc(i.name) + '\')" class="btn btn-xs btn-muted" title="Seed Proxmox tools">Seed</button>' +
+        '<button onclick="deleteIntegration(\'' + esc(i.name) + '\')" class="btn btn-xs btn-muted">Delete</button></div></div>' +
+        '<div class="text-xs text-muted">' + esc(i.base_url) + ' · auth: ' + esc(i.auth_type) + '</div></div>';
+    }).join('');
+  } catch(e) {}
+}
+
+async function createIntegration() {
+  const name = document.getElementById('int-name').value.trim();
+  const baseUrl = document.getElementById('int-base-url').value.trim();
+  if (!name || !baseUrl) { showToast('Name and base URL are required', 'error'); return; }
+  const payload = {
+    name: name,
+    base_url: baseUrl,
+    auth_type: document.getElementById('int-auth-type').value,
+    auth_header_name: document.getElementById('int-auth-header').value.trim(),
+    secret: document.getElementById('int-secret').value,
+  };
+  try {
+    const res = await authFetch('/api/integrations', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    const data = await res.json();
+    if (!res.ok) { showToast('❌ ' + (data.detail || 'Failed'), 'error'); return; }
+    document.getElementById('int-name').value = '';
+    document.getElementById('int-base-url').value = '';
+    document.getElementById('int-secret').value = '';
+    fetchIntegrationList();
+    showToast('Integration added', 'success');
+  } catch(e) { showToast('❌ Failed: ' + e.message, 'error'); }
+}
+
+async function deleteIntegration(name) {
+  if (!(await customConfirm('Delete integration "' + name + '" and all its tools?'))) return;
+  try {
+    await authFetch('/api/integrations/' + encodeURIComponent(name), { method: 'DELETE' });
+    if (_selectedIntegration === name) _selectedIntegration = null;
+    fetchIntegrationList();
+    renderTools([]);
+  } catch(e) { showToast('❌ Failed: ' + e.message, 'error'); }
+}
+
+async function seedProxmox(name) {
+  try {
+    const res = await authFetch('/api/integrations/' + encodeURIComponent(name) + '/seed-proxmox', { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) { showToast('❌ ' + (data.detail || 'Failed'), 'error'); return; }
+    showToast('Seeded Proxmox tools (' + data.created + ' new, ' + data.updated + ' updated)', 'success');
+    if (_selectedIntegration === name) fetchTools(name);
+  } catch(e) { showToast('❌ Failed: ' + e.message, 'error'); }
+}
+
+async function selectIntegration(name) {
+  _selectedIntegration = name;
+  fetchTools(name);
+}
+
+async function fetchTools(name) {
+  try {
+    const res = await authFetch('/api/integrations/' + encodeURIComponent(name) + '/tools');
+    if (!res.ok) return;
+    renderTools(await res.json(), name);
+  } catch(e) {}
+}
+
+function renderTools(tools, name) {
+  const el = document.getElementById('integration-tools-list');
+  if (!el) return;
+  if (!name || !tools.length) { el.innerHTML = '<p class="text-muted">No tools for this integration.</p>'; return; }
+  el.innerHTML = '<div class="text-xs text-muted mb-2">Integration: <strong>' + esc(name) + '</strong></div>' + tools.map(function(t) {
+    var badge = t.read_only ? '<span class="text-success">read</span>' : '<span class="text-warning">mutating (approval)</span>';
+    return '<div class="flex items-center justify-between gap-2 p-2 rounded bg-black/20">' +
+      '<div class="flex-1"><div class="text-sm">' + esc(t.name) + ' <span class="text-xs">' + badge + ' · ' + esc(t.method) + '</span></div>' +
+      '<div class="text-xs text-muted">' + esc(t.description || '') + '</div></div>' +
+      '<button onclick="toggleTool(' + t.id + ', ' + (t.enabled ? 'false' : 'true') + ')" class="btn btn-xs ' + (t.enabled ? 'btn-muted' : '') + '">' + (t.enabled ? 'Disable' : 'Enable') + '</button>' +
+      '<button onclick="deleteTool(' + t.id + ')" class="btn btn-xs btn-muted">×</button></div>';
+  }).join('');
+}
+
+async function toggleTool(id, enabled) {
+  try {
+    const res = await authFetch('/api/integrations/' + encodeURIComponent(_selectedIntegration) + '/tools/' + id + '/toggle', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: enabled }) });
+    if (res.ok) fetchTools(_selectedIntegration);
+  } catch(e) {}
+}
+
+async function deleteTool(id) {
+  if (!(await customConfirm('Delete this tool?'))) return;
+  try {
+    await authFetch('/api/integrations/' + encodeURIComponent(_selectedIntegration) + '/tools/' + id, { method: 'DELETE' });
+    fetchTools(_selectedIntegration);
+  } catch(e) {}
+}
+
+async function fetchIntegrationPending() {
+  const el = document.getElementById('integration-pending-list');
+  if (!el) return;
+  try {
+    const res = await authFetch('/api/integration-calls/pending');
+    if (!res.ok) return;
+    const calls = await res.json();
+    if (!calls.length) { el.innerHTML = '<p class="text-muted">Nothing pending.</p>'; return; }
+    el.innerHTML = calls.map(function(c) {
+      var args = Object.keys(c.payload || {}).map(function(k) { return k + '=' + c.payload[k]; }).join(', ');
+      return '<div class="p-2 rounded bg-black/20 mb-2">' +
+        '<div class="text-sm">' + esc(c.integration) + '.' + esc(c.tool) + ' <span class="text-xs text-muted">#' + c.id + '</span></div>' +
+        '<div class="text-xs text-muted">' + esc(args || '') + '</div>' +
+        (c.reason ? '<div class="text-xs italic mt-1">"' + esc(c.reason) + '"</div>' : '') +
+        '<div class="flex gap-2 mt-2">' +
+        '<button onclick="approveIntegrationCall(' + c.id + ')" class="btn btn-xs">Approve</button>' +
+        '<button onclick="denyIntegrationCall(' + c.id + ')" class="btn btn-xs btn-muted">Deny</button></div></div>';
+    }).join('');
+  } catch(e) {}
+}
+
+async function approveIntegrationCall(id) {
+  try {
+    const res = await authFetch('/api/integration-calls/' + id + '/approve', { method: 'POST' });
+    if (res.ok) { fetchIntegrationPending(); fetchIntegrationCalls(); showToast('Approved and executed', 'success'); }
+  } catch(e) { showToast('❌ Failed: ' + e.message, 'error'); }
+}
+
+async function denyIntegrationCall(id) {
+  try {
+    const res = await authFetch('/api/integration-calls/' + id + '/deny', { method: 'POST' });
+    if (res.ok) { fetchIntegrationPending(); }
+  } catch(e) { showToast('❌ Failed: ' + e.message, 'error'); }
+}
+
+async function fetchIntegrationCalls() {
+  const el = document.getElementById('integration-calls-list');
+  if (!el) return;
+  try {
+    const res = await authFetch('/api/integration-calls');
+    if (!res.ok) return;
+    const calls = await res.json();
+    if (!calls.length) { el.innerHTML = '<p class="text-muted">No calls yet.</p>'; return; }
+    el.innerHTML = calls.map(function(c) {
+      var when = new Date(c.created_at * 1000).toLocaleString();
+      var outcome = c.outcome === 'ok' ? '' : ' <span class="text-danger">(' + esc(c.outcome) + ')</span>';
+      return '<div class="p-2 rounded bg-black/20 mb-1 text-xs">' +
+        '<span class="text-main">' + esc(c.integration) + (c.tool ? '.' + esc(c.tool) : '') + '</span> ' +
+        esc(c.method) + ' ' + esc(c.path) + ' · ' + (c.status_code || '—') + ' · ' + c.latency_ms + 'ms' + outcome +
+        '<span class="text-muted"> · ' + when + '</span></div>';
+    }).join('');
+  } catch(e) {}
+}
+
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, function(ch) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch];
+  });
+}

@@ -157,3 +157,50 @@ development tools" Settings toggle; not reachable by gateways or AI agents.
 | `GET` | `/api/statistics/export?days=14&format=csv` | Download stats as CSV (`format=json` for JSON) | Session |
 | `GET` | `/api/audit_log` | Audit log events (`?search=` filter) | Session |
 | `GET/POST` | `/api/notes` | Read/write admin notes | Session |
+
+## Integrations & MCP (agent API gateway)
+
+The gateway for agent HTTP calls to homelab APIs (Proxmox, Home Assistant, Omada,
+…). Credentials live server-side in the dashboard DB and are never returned by any
+endpoint. Agents authenticate to the MCP surface with a bearer **agent token**.
+
+### Agent tokens (dashboard authentication required)
+
+| Method | Path | Purpose | Auth |
+|--------|------|---------|------|
+| `POST` | `/api/agents` | Mint a new agent token (body `{"name": ...}`; the raw token is returned **once**, only its hash is stored) | Session |
+| `GET` | `/api/agents` | List agent tokens (no raw token) | Session |
+| `DELETE` | `/api/agents/{id}` | Revoke + delete an agent token | Session |
+
+### Integrations & tools (dashboard authentication required)
+
+| Method | Path | Purpose | Auth |
+|--------|------|---------|------|
+| `POST` | `/api/integrations` | Create an integration (`name, base_url, auth_type[none/bearer/basic/header], auth_header_name, secret`) | Session |
+| `GET` | `/api/integrations` | List integrations (**secret omitted**) | Session |
+| `PUT` | `/api/integrations/{name}` | Update an integration (`secret` omitted = leave unchanged) | Session |
+| `DELETE` | `/api/integrations/{name}` | Delete an integration + its tools | Session |
+| `GET` | `/api/integrations/{name}/tools` | List an integration's tools | Session |
+| `POST` | `/api/integrations/{name}/tools` | Add a tool (`name, description, method, path_template, params, example, read_only`) | Session |
+| `DELETE` | `/api/integrations/{name}/tools/{id}` | Delete a tool | Session |
+| `POST` | `/api/integrations/{name}/tools/{id}/toggle` | Enable/disable a tool (body `{"enabled": bool}`) | Session |
+| `POST` | `/api/integrations/{name}/seed-proxmox` | Populate with the curated Proxmox seed catalog (idempotent) | Session |
+
+### Approval queue & audit (dashboard authentication required)
+
+| Method | Path | Purpose | Auth |
+|--------|------|---------|------|
+| `GET` | `/api/integration-calls` | Recent proxied calls (audit) | Session |
+| `GET` | `/api/integration-calls/pending` | Pending mutating calls awaiting approval | Session |
+| `POST` | `/api/integration-calls/{id}/approve` | Approve a pending call and execute it | Session |
+| `POST` | `/api/integration-calls/{id}/deny` | Deny a pending call | Session |
+
+### MCP surface (agent token auth)
+
+| Method | Path | Purpose | Auth |
+|--------|------|---------|------|
+| `POST/GET` | `/mcp` | MCP streamable-HTTP endpoint. Agents connect here with `Authorization: Bearer <agent-token>` | Agent token |
+
+Read-only tools forward immediately; mutating tools create a pending call and
+return `{"status": "pending", "id": N}` — the agent polls the `check_approval(id)`
+MCP tool until the operator approves/denies it in the dashboard.

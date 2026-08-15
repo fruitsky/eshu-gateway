@@ -49,6 +49,8 @@ def init_db():
     from db.misc import init_misc_tables
     from db.windows import init_windows_tables
     from db.fleet import init_fleet_tables
+    from db.integrations import init_integrations_tables
+    from db.agent_tokens import init_agent_tokens_tables
 
     init_requests_tables(cursor)
     init_gateways_tables(cursor)
@@ -59,6 +61,8 @@ def init_db():
     init_misc_tables(cursor)
     init_windows_tables(cursor)
     init_fleet_tables(cursor)
+    init_integrations_tables(cursor)
+    init_agent_tokens_tables(cursor)
 
     conn.commit()
     conn.close()

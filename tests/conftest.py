@@ -54,3 +54,56 @@ def gateway_headers(client):
     })
     token = r.json()["gateway_token"]
     return {"X-Gateway-Token": token}
+
+
+@pytest.fixture
+def mock_upstream():
+    """A tiny threaded HTTP server that echoes back the method/path/auth header
+    of each request, used as the upstream for integration-proxy tests."""
+    import threading
+    import http.server
+    import json
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        requests = []
+
+        def _respond(self, method):
+            length = int(self.headers.get('Content-Length', 0) or 0)
+            body = self.rfile.read(length) if length else b''
+            rec = {
+                'method': method,
+                'path': self.path,
+                'authorization': self.headers.get('Authorization', ''),
+                'body': body.decode('utf-8', 'replace'),
+            }
+            type(self).requests.append(rec)
+            payload = json.dumps({'ok': True, 'request': rec}).encode('utf-8')
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def do_GET(self):
+            self._respond('GET')
+
+        def do_POST(self):
+            self._respond('POST')
+
+        def do_PUT(self):
+            self._respond('PUT')
+
+        def do_DELETE(self):
+            self._respond('DELETE')
+
+        def log_message(self, *args):
+            pass
+
+    _Handler.requests = []
+    server = http.server.HTTPServer(('127.0.0.1', 0), _Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://127.0.0.1:{server.server_address[1]}"
+    yield {'base_url': base_url, 'handler': _Handler, 'requests': _Handler.requests}
+    server.shutdown()
+    server.server_close()

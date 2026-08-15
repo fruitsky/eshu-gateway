@@ -1,3 +1,4 @@
 fastapi
 uvicorn
 pydantic
+mcp>=1.20.0,<2.0
