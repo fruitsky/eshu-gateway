@@ -2827,14 +2827,14 @@ async function saveKeys() {
 function updateEnrollCommand() {
   if (!currentToken) return;
   const baseUrl = document.getElementById('enroll-base-url').value.trim() || window.location.origin;
-  document.getElementById('enroll-command').value = 'curl -s ' + baseUrl + '/api/enroll?token=' + currentToken + ' | bash';
+  document.getElementById('enroll-command').value = 'curl -s "' + baseUrl + '/api/enroll?token=' + currentToken + '" | bash';
 }
 async function generateToken() {
   const btn = document.getElementById('generate-token-btn'); btn.disabled = true; btn.textContent = 'Generating...';
   const res = await authFetch('/api/enroll/generate', { method: 'POST' }); const data = await res.json();
   currentToken = data.token;
   const baseUrl = document.getElementById('enroll-base-url').value.trim() || window.location.origin;
-  document.getElementById('enroll-command').value = 'curl -s ' + baseUrl + '/api/enroll?token=' + currentToken + ' | bash';
+  document.getElementById('enroll-command').value = 'curl -s "' + baseUrl + '/api/enroll?token=' + currentToken + '" | bash';
   tokenExpiryTime = Date.now() / 1000 + 120;
   document.getElementById('token-countdown').classList.remove('hidden');
   document.getElementById('copy-enroll-btn').disabled = false;

@@ -97,8 +97,12 @@ Generate a one-time enrollment token in the dashboard, then run the one-liner
 **on the target host**:
 
 ```bash
-curl -s http://<dashboard-ip>:8000/api/enroll?token=<token> | bash
+curl -s "http://<dashboard-ip>:8000/api/enroll?token=<token>" | bash
 ```
+
+> The URL is quoted because zsh (TrueNAS SCALE's shell) glob-expands an
+> unquoted `?` and aborts with "no matches found". The dashboard's copy button
+> emits the quoted form; if you hand-type it, keep the quotes.
 
 That's it. The installer writes the agent key to `eshu-gateway`'s
 `authorized_keys` with a forced-command wrapper (so it can only run the policy
@@ -137,7 +141,7 @@ rule, and scripts in `/usr/local/bin` — so it requires **root + systemd**:
 | Platform | How to install |
 |----------|----------------|
 | Debian/Ubuntu & standard Linux | Run the one-liner as root, or prefix it with sudo: `curl -s … | sudo bash` |
-| **TrueNAS SCALE** (shell console) | Run the one-liner **directly** — the shell is already root and there is **no `sudo` binary**. Do *not* prefix `sudo`. |
+| **TrueNAS SCALE** (shell console) | Run the one-liner **directly** — the shell is already root and there is **no `sudo` binary**. Do *not* prefix `sudo`. Its shell is `zsh`, so keep the URL **quoted** (the dashboard's copy button already does this). |
 | Home Assistant OS & other rootless/immutable systems | **Not supported** — no root or systemd access; the installer refuses with a clear message. |
 
 If you run the one-liner as a non-root user, the installer prints the correct
