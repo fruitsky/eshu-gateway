@@ -55,7 +55,7 @@ only the dashboard UI after login.
 
 | Method | Path | Purpose | Auth |
 |--------|------|---------|------|
-| `GET` | `/api/requests` | List the last 200 requests (`?search=` filter) | Session |
+| `GET` | `/api/requests` | List the last 200 requests (`?search=` filter) — pending rows carry `risk` + `anomaly` hints | Session |
 | `POST` | `/api/approve/{id}` | Approve a JIT request | Session |
 | `POST` | `/api/deny/{id}` | Deny a JIT request → returns `deny_count` (total denials of this command) + `command` | Session |
 | `DELETE` | `/api/requests?older_than=` | Purge request history (`30m`/`1h`/`1d`/`2d`/`7d`/`all`) | Session |
@@ -78,6 +78,7 @@ only the dashboard UI after login.
 | `POST` | `/api/policies/commit` | Bump the policy version (gateways pick it up on next poll) | Session |
 | `POST` | `/api/policies/trigger-update` | Force gateways to re-sync policies now | Session |
 | `POST` | `/api/policies/restore-core` | Re-add any removed shipped core blocklist patterns (audited, bumps version) | Session |
+| `POST` | `/api/policies/preview` | What-if: replay the last N days of distinct commands against a draft policy and report flips (body: `{"exact_whitelist", "regex_whitelist", "regex_blacklist", "days"}`) | Session |
 | `GET` | `/api/policies/test?command=` | Pre-flight a command → `action` (`auto_approved`/`blocked`/`jit`) + `tier: "fatal"` only for the non-relaxable self-protection / evasion patterns. **Public** so agents can pre-flight | Public |
 | `GET` | `/api/policies/check?command=` | Membership booleans (`in_exact_whitelist`, `in_regex_whitelist`, `in_regex_blacklist`) for the operator's Tester | Session |
 | `GET` | `/api/policy_changes` | Policy change history | Session |

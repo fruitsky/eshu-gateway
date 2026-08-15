@@ -122,7 +122,7 @@ Fleet).
 
 ### Running tests
 
-Full test suite (305 tests, ~35s):
+Full test suite (315 tests, ~35s):
 
 ```bash
 # Install runtime + test dependencies (fresh clone):
@@ -142,6 +142,7 @@ the dashboard host or merging to master.
 
 | File | Tests | What it checks, in plain English |
 |------|-------|----------------------------------|
+| `test_anomaly.py` | 7 | Base-binary extraction, per-gateway "first time" anomaly flag, grace period, `/api/requests` anomaly field |
 | `test_api.py` | 32 | Full JIT flow over HTTP, auth, policies, windows, public + gated endpoints, override auto-approve marker |
 | `test_auth.py` | 7 | Set/change the dashboard password, password is mandatory/non-removable, logout clears the session |
 | `test_cmd_risk.py` | 17 | "What could go wrong" risk hints + dry-run suggestions |
@@ -178,7 +179,7 @@ dashboard/eshu-installer-template.sh  # installer template with markers
 dashboard/gen_installer.py         # generates self-contained installers
 dashboard/main.py                  # FastAPI app — all HTTP routes
 dashboard/database.py             # re-exports the db/ modules (single import surface)
-dashboard/core/                    # shared logic: session/auth, notify, risk, cmd_blocklist, utils
+dashboard/core/                    # shared logic: session/auth, notify, risk, cmd_blocklist, cmd_profiles, policy_eval, utils
 dashboard/db/                      # data layer: one module per domain (requests, gateways, windows, fleet, ...)
 dashboard/static/                  # dashboard UI (index.html, app.js, style.css)
 dashboard/static/features/         # feature script files (served to gateways)
