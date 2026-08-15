@@ -3426,7 +3426,8 @@ async function createAgentToken() {
     document.getElementById('agent-token-name').value = '';
     const box = document.getElementById('agent-token-result');
     box.classList.remove('hidden');
-    box.innerHTML = '<strong>' + esc(name) + ' token (copy now — shown once):</strong><br>' + esc(data.token);
+    box.innerHTML = '<strong>' + esc(name) + ' token (copy now — shown once):</strong><br>' + esc(data.token) +
+      '<br><span class="text-muted">Paste this raw token into your client (e.g. Hermes) as-is — it adds the <code>Bearer </code> prefix itself.</span>';
     fetchAgentTokens();
     showToast('Agent token created', 'success');
   } catch(e) { showToast('❌ Failed: ' + e.message, 'error'); }

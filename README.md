@@ -202,6 +202,7 @@ important.
 |-----|--------------|
 | [docs/AGENT_MANUAL.md](docs/AGENT_MANUAL.md) | The AI agent's manual: JIT requests, polling approvals, Approved Windows workflow |
 | [docs/API.md](docs/API.md) | Full API reference |
+| [docs/INTEGRATIONS.md](docs/INTEGRATIONS.md) | Integrations & MCP setup: expose homelab APIs to agents with audit + approval |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Deployment layout, policy pipeline, gateway lifecycle |
 | [docs/DEV_GUIDE.md](docs/DEV_GUIDE.md) | Developer workflow, feature flags, tests, file structure |
 | [CHANGELOG.md](CHANGELOG.md) | Version history with dates and details |

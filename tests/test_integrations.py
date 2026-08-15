@@ -148,6 +148,31 @@ class TestMcpSettings:
         assert client.put("/api/mcp-settings", json={"allowed_hosts": "x"}).status_code == 401
 
 
+class TestMcpToolNaming:
+
+    def test_tools_namespaced_by_integration(self, auth_client):
+        import asyncio
+        from core.mcp_server import mcp, refresh_mcp_tools
+        auth_client.post("/api/integrations", json={
+            "name": "proxmox", "base_url": "https://pve.local/api2/json",
+            "auth_type": "none", "secret": "",
+        })
+        auth_client.post("/api/integrations/proxmox/seed-proxmox")
+        refresh_mcp_tools()
+
+        async def _names():
+            tools = await mcp.list_tools()
+            return {t.name for t in tools}
+        names = asyncio.run(_names())
+
+        assert "proxmox_list_nodes" in names
+        assert "proxmox_start_vm" in names
+        assert "check_approval" in names
+        # Un-namespaced short names must not leak into the MCP surface
+        assert "list_nodes" not in names
+        assert "start_vm" not in names
+
+
 class TestProxyScheme:
 
     def test_mcp_redirect_uses_forwarded_proto(self, auth_client):

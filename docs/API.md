@@ -205,6 +205,9 @@ endpoint. Agents authenticate to the MCP surface with a bearer **agent token**.
 
 The MCP endpoint has DNS-rebinding protection on by default, so it only accepts requests whose `Host` header is in its allowlist. Loopback (`127.0.0.1`, `localhost`, `::1`) is always allowed; add the hostname/IP you reach the dashboard at (e.g. behind a reverse proxy) via **Integrations → MCP Access**. Each host is matched both exactly (no port) and with a `:*` port wildcard.
 
+For the full setup walkthrough (agent tokens, integrations, connecting Hermes, the
+`Authorization` header format, reverse-proxy notes) see [INTEGRATIONS.md](INTEGRATIONS.md).
+
 Read-only tools forward immediately; mutating tools create a pending call and
 return `{"status": "pending", "id": N}` — the agent polls the `check_approval(id)`
 MCP tool until the operator approves/denies it in the dashboard.
