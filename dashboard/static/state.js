@@ -24,6 +24,8 @@ let _authChecked = false, _passwordSet = false;
 let _allGateways = [], _devGateways = [];
 let _recentJITData = [], _selectedJIT = [];
 let _pendingWinReqs = [];
+let _pendingIntegrationCalls = [];
+let _knownIntegrationCallIds = new Set();
 let _winEditId = null;
 let _winSource = 'jit';
 let _winType = 'recurring';

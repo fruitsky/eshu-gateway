@@ -1150,6 +1150,12 @@ async function fetchRequests() {
       _pendingWinReqs = wrRes.ok ? await wrRes.json() : [];
     } catch(e) { _pendingWinReqs = []; }
     detectNewWinReqs();
+    // Also load pending integration (API) calls awaiting approval
+    try {
+      const icRes = await fetch('/api/integration-calls/pending');
+      _pendingIntegrationCalls = icRes.ok ? await icRes.json() : [];
+    } catch(e) { _pendingIntegrationCalls = []; }
+    detectNewIntegrationCalls();
     await refreshPolicyCache();
     renderJitTickets(); renderTable(); updateStats();
   } catch(err) {}
@@ -1211,11 +1217,34 @@ function detectNewWinReqs() {
   }
 }
 
+function detectNewIntegrationCalls() {
+  var calls = _pendingIntegrationCalls || [];
+  var currentIds = new Set();
+  calls.forEach(function(c) { currentIds.add(c.id); });
+  var newIds = [];
+  currentIds.forEach(function(id) { if (!_knownIntegrationCallIds.has(id)) newIds.push(id); });
+  _knownIntegrationCallIds = currentIds;
+  if (newIds.length > 0 && notifyJIT) {
+    var now = Date.now();
+    if (now - lastJitNotifyTime >= 5000) {
+      lastJitNotifyTime = now;
+      playJitChime(false);
+      var badge = document.getElementById('jit-new-badge');
+      if (badge) { badge.classList.remove('hidden'); setTimeout(function() { badge.classList.add('hidden'); }, 5000); }
+      if (_notifPerm === 'granted') {
+        var n = new Notification('API Approval Required', { body: calls.length === 1 ? '1 API call requires your approval' : calls.length + ' API calls require your approval', tag: 'eshu-api-call', icon: '/static/eshu_logo.png' });
+        n.onclick = function() { window.focus(); switchView('home'); n.close(); };
+      }
+    }
+  }
+}
+
 // ── JIT Ticket Rendering ─────────────────────────────────────────────────
 function renderJitTickets() {
   const pending = requestsData.filter(r => r.status === 'pending' && r.ttl > 0);
   const winReqs = _pendingWinReqs || [];
-  const total = pending.length + winReqs.length;
+  const integrationCalls = _pendingIntegrationCalls || [];
+  const total = pending.length + winReqs.length + integrationCalls.length;
   document.getElementById('jit-pending-count').textContent = total + ' pending';
   const widget = document.getElementById('jit-pending-widget');
   if (total > 0) { widget.classList.add('glow'); } else { widget.classList.remove('glow'); }
@@ -1223,6 +1252,25 @@ function renderJitTickets() {
   if (total === 0) { container.innerHTML = '<p class="text-muted">No pending requests — all clear.</p>'; return; }
 
   let html = '';
+  // Integration (API) calls awaiting operator approval
+  html += integrationCalls.map(function(c) {
+    var args = Object.keys(c.payload || {}).map(function(k) { return k + '=' + c.payload[k]; }).join(', ');
+    var meta = '#' + String(c.id).padStart(6,'0') + ' · API call · ' + (args ? escapeHtml(args) : 'no args');
+    if (c.reason) meta += ' · "' + escapeHtml(c.reason) + '"';
+    return '<div class="jit-ticket">' +
+      '<div class="jit-ticket-left">' +
+        '<div class="jit-ticket-info">' +
+          '<div class="jit-cmd">' + escapeHtml(c.integration) + ' · ' + escapeHtml(c.tool) + '</div>' +
+          '<div class="jit-meta">' + meta + '</div>' +
+        '</div>' +
+      '</div>' +
+      '<div class="jit-actions">' +
+        '<button onclick="denyIntegrationCall(' + c.id + ')" class="btn btn-deny btn-sm">DENY</button>' +
+        '<button onclick="approveIntegrationCall(' + c.id + ')" class="btn btn-approve btn-sm">APPROVE</button>' +
+      '</div>' +
+    '</div>';
+  }).join('');
+
   // Window requests (AI-initiated, operator must approve)
   html += winReqs.map(function(w) {
     return '<div class="jit-ticket">' +
@@ -3372,7 +3420,6 @@ let _integrationsData = [];
 async function fetchIntegrations() {
   fetchAgentTokens();
   fetchIntegrationList();
-  fetchIntegrationPending();
   fetchIntegrationCalls();
   fetchMcpSettings();
 }
@@ -3608,38 +3655,17 @@ async function deleteTool(id) {
   } catch(e) {}
 }
 
-async function fetchIntegrationPending() {
-  const el = document.getElementById('integration-pending-list');
-  if (!el) return;
-  try {
-    const res = await authFetch('/api/integration-calls/pending');
-    if (!res.ok) return;
-    const calls = await res.json();
-    if (!calls.length) { el.innerHTML = '<p class="text-muted">Nothing pending.</p>'; return; }
-    el.innerHTML = calls.map(function(c) {
-      var args = Object.keys(c.payload || {}).map(function(k) { return k + '=' + c.payload[k]; }).join(', ');
-      return '<div class="p-2 rounded bg-black/20 mb-2">' +
-        '<div class="text-sm">' + esc(c.integration) + '.' + esc(c.tool) + ' <span class="text-xs text-muted">#' + c.id + '</span></div>' +
-        '<div class="text-xs text-muted">' + esc(args || '') + '</div>' +
-        (c.reason ? '<div class="text-xs italic mt-1">"' + esc(c.reason) + '"</div>' : '') +
-        '<div class="flex gap-2 mt-2">' +
-        '<button onclick="approveIntegrationCall(' + c.id + ')" class="btn btn-xs">Approve</button>' +
-        '<button onclick="denyIntegrationCall(' + c.id + ')" class="btn btn-xs btn-muted">Deny</button></div></div>';
-    }).join('');
-  } catch(e) {}
-}
-
 async function approveIntegrationCall(id) {
   try {
     const res = await authFetch('/api/integration-calls/' + id + '/approve', { method: 'POST' });
-    if (res.ok) { fetchIntegrationPending(); fetchIntegrationCalls(); showToast('Approved and executed', 'success'); }
+    if (res.ok) { fetchRequests(); fetchIntegrationCalls(); showToast('Approved and executed', 'success'); }
   } catch(e) { showToast('❌ Failed: ' + e.message, 'error'); }
 }
 
 async function denyIntegrationCall(id) {
   try {
     const res = await authFetch('/api/integration-calls/' + id + '/deny', { method: 'POST' });
-    if (res.ok) { fetchIntegrationPending(); }
+    if (res.ok) { fetchRequests(); }
   } catch(e) { showToast('❌ Failed: ' + e.message, 'error'); }
 }
 
