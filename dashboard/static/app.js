@@ -1468,6 +1468,8 @@ function renderTable() {
     else if (req.status === 'window-rejected') badge = '<span class="badge badge-window-rejected" title="' + escapeHtml(req.reason || '') + '">Window Rejected</span>';
     else if (req.status === 'frozen') badge = '<span class="badge badge-blocked" title="Rejected while the fleet was frozen">Blocked</span>';
     else if (req.status === 'fleet-run') badge = '<span class="badge badge-approved" title="Dispatched via Fleet Run">Approved</span>';
+    else if (req.status === 'integration-approved') badge = '<span class="badge badge-approved" title="Executed via the API gateway">API Executed</span>';
+    else if (req.status === 'integration-denied') badge = '<span class="badge badge-denied" title="Denied via the API gateway">API Denied</span>';
     let actions = '<span class="text-muted">—</span>';
     if (req.status === 'pending' && !isExpired) {
       actions = '<button onclick="handleAction(' + req.id + ', \'approve\')" class="btn btn-approve btn-xs mr-1">Approve</button>' +
@@ -1478,6 +1480,8 @@ function renderTable() {
     } else if (req.status === 'fleet-run') {
       actions = '<span class="chip chip-actions chip-fleet-run" title="Executed via Fleet Run — see the Fleet Run tab for per-gateway output.">' +
         '⚡ Fleet Run</span>';
+    } else if (req.status === 'integration-approved' || req.status === 'integration-denied') {
+      actions = '<span class="chip chip-actions" title="API-gateway call — see Integrations for the full audit.">🔌 API</span>';
     } else if (req.reason === 'override') {
       actions = '<span class="chip chip-actions chip-override" title="Auto-approved via Override Mode — every JIT is auto-approved while active">' +
         '🔓 Override</span>';

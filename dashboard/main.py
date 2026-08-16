@@ -2324,6 +2324,19 @@ def list_pending_integration_calls(request: Request):
     return get_pending_calls()
 
 
+def _surface_integration_call(call, status: str):
+    """Insert a requests row so a resolved mutating API call appears in the main
+    dashboard history (mirrors the fleet-run pattern)."""
+    args = ', '.join(f"{k}={v}" for k, v in (call['payload'] or {}).items())
+    create_request(
+        target_ip=call['integration'],
+        command=f"{call['integration']}.{call['tool']}({args})",
+        status=status,
+        ttl=0,
+        reason=call['reason'],
+    )
+
+
 @app.post("/api/integration-calls/{call_id}/approve")
 def approve_integration_call(call_id: int, request: Request):
     """Approve a pending mutating call and execute it against the integration."""
@@ -2337,6 +2350,7 @@ def approve_integration_call(call_id: int, request: Request):
         raise HTTPException(status_code=404, detail="Integration or tool missing")
     result = execute_integration_call(integration, tool, call['payload'], agent='operator')
     set_pending_call_status(call_id, 'approved', json.dumps(result))
+    _surface_integration_call(call, 'integration-approved')
     record_audit_event("integration_call_approved",
                        details=f"Integration call #{call_id} ({call['integration']}.{call['tool']}) approved and executed")
     return {"status": "ok", "id": call_id}
@@ -2349,6 +2363,7 @@ def deny_integration_call(call_id: int, request: Request):
     if not call or call['status'] != 'pending':
         raise HTTPException(status_code=404, detail="Pending call not found")
     set_pending_call_status(call_id, 'denied', '')
+    _surface_integration_call(call, 'integration-denied')
     record_audit_event("integration_call_denied",
                        details=f"Integration call #{call_id} ({call['integration']}.{call['tool']}) denied")
     return {"status": "ok", "id": call_id}
