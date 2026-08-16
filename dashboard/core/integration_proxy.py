@@ -5,6 +5,7 @@ every forwarded call gets identical credential injection, SSRF guarding,
 truncation, and audit logging.
 """
 import base64
+import json
 import time
 import urllib.error
 import urllib.parse
@@ -77,6 +78,34 @@ def _guard_ssrf(base_url: str, path: str):
         raise ProxyError(403, "Blocked: target host does not match the configured integration")
 
 
+def _project_body(body: str, fields: list) -> str:
+    """Project a JSON response down to the listed top-level fields.
+
+    Descends into the common `{"data": ...}` API envelope (Proxmox, Home
+    Assistant, ...), then projects list items / a single object. Returns the
+    body unchanged if it isn't valid JSON or a shape we can project."""
+    if not fields:
+        return body
+    try:
+        data = json.loads(body)
+    except (ValueError, TypeError):
+        return body
+    # Unwrap the common {"data": <payload>} envelope.
+    if isinstance(data, dict) and isinstance(data.get('data'), (list, dict)):
+        data = data['data']
+    if isinstance(data, list):
+        projected = []
+        for item in data:
+            if isinstance(item, dict):
+                projected.append({k: item[k] for k in fields if k in item})
+            else:
+                projected.append(item)
+        return json.dumps(projected)
+    if isinstance(data, dict):
+        return json.dumps({k: data[k] for k in fields if k in data})
+    return body
+
+
 def execute_integration_call(integration: dict, tool: dict, args: dict, agent: str = '') -> dict:
     """Forward a call to the integration and return a JSON-safe result dict.
     Raises ProxyError for policy rejections (SSRF guard, etc.)."""
@@ -100,7 +129,6 @@ def execute_integration_call(integration: dict, tool: dict, args: dict, agent: s
     headers.setdefault('Accept', 'application/json')
     body_bytes = None
     if method in ('POST', 'PUT', 'PATCH') and body_params:
-        import json
         body_bytes = json.dumps(body_params).encode('utf-8')
         headers.setdefault('Content-Type', 'application/json')
 
@@ -133,6 +161,12 @@ def execute_integration_call(integration: dict, tool: dict, args: dict, agent: s
         outcome = 'error'
         error = f"{type(e).__name__}: {e}"
     latency_ms = int((time.time() - start) * 1000)
+
+    # Response projection (token efficiency): if the tool declares a `fields`
+    # list and the caller didn't ask for `full`, trim the body to those fields.
+    fields = tool.get('fields') or []
+    if outcome == 'ok' and fields and not (args or {}).get('full'):
+        body = _project_body(body, fields)
 
     record_integration_call(
         integration=integration.get('name', ''),

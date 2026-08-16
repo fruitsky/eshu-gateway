@@ -124,6 +124,15 @@ can't collide and ownership is obvious:
 | Omada | `omada_list_clients`, `omada_get_site_status` |
 | Home Assistant | `ha_call_service`, `ha_get_state` |
 
+## Response projection
+
+Read-only tools that return large payloads project the response down to a lean
+field set by default, so the agent doesn't pay context cost for fields it rarely
+needs (e.g. `proxmox_list_vms` returns only `vmid, name, status, type` instead
+of the full VM objects). Every projected tool exposes a **`full`** parameter —
+pass `full: true` to get the complete, unprojected upstream object. Projection is
+defined per tool as its `fields` list in the catalog.
+
 ## Adding more integrations
 
 Same flow each time: add the integration (name, base URL, auth) → add or seed its

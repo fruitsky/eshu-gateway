@@ -15,6 +15,7 @@ PROXMOX_SEED_TOOLS = [
         "method": "GET",
         "path_template": "/nodes",
         "params": [],
+        "fields": ["node", "status", "cpu", "maxcpu", "mem", "maxmem", "uptime"],
         "example": '[{"node": "pve", "status": "online", "cpu": 0.1, "maxcpu": 8, "mem": 5e9, "maxmem": 3.2e10}]',
         "read_only": True,
     },
@@ -26,6 +27,7 @@ PROXMOX_SEED_TOOLS = [
         "params": [
             {"name": "type", "type": "string", "description": "Filter by resource type: vm, storage, node, or sdn. Omit for all.", "required": False},
         ],
+        "fields": ["id", "type", "node", "status", "name", "vmid"],
         "example": '[{"id": "qemu/100", "type": "qemu", "node": "pve", "status": "running", "name": "my-vm"}]',
         "read_only": True,
     },
@@ -37,6 +39,7 @@ PROXMOX_SEED_TOOLS = [
         "params": [
             {"name": "node", "type": "string", "description": "Node name (from list_nodes).", "required": True},
         ],
+        "fields": ["vmid", "name", "status", "type"],
         "example": '[{"vmid": 100, "name": "my-vm", "status": "running", "cpus": 2, "mem": 2e9}]',
         "read_only": True,
     },
@@ -49,6 +52,7 @@ PROXMOX_SEED_TOOLS = [
             {"name": "node", "type": "string", "description": "Node name.", "required": True},
             {"name": "vmid", "type": "integer", "description": "VM id.", "required": True},
         ],
+        "fields": ["status", "qmpstatus", "uptime", "cpu", "cpus", "mem", "maxmem"],
         "example": '{"status": "running", "qmpstatus": "running", "uptime": 86400, "vmid": 100}',
         "read_only": True,
     },
@@ -61,6 +65,7 @@ PROXMOX_SEED_TOOLS = [
             {"name": "node", "type": "string", "description": "Node name.", "required": True},
             {"name": "vmid", "type": "integer", "description": "VM id.", "required": True},
         ],
+        "fields": ["name", "memory", "cores", "sockets", "ostype"],
         "example": '{"name": "my-vm", "memory": 2048, "cores": 2, "net0": "virtio=...", "scsi0": "local-lvm:vm-100-disk-0"}',
         "read_only": True,
     },
@@ -72,6 +77,7 @@ PROXMOX_SEED_TOOLS = [
         "params": [
             {"name": "node", "type": "string", "description": "Node name.", "required": True},
         ],
+        "fields": ["vmid", "name", "status", "type"],
         "example": '[{"vmid": 200, "name": "ct-nginx", "status": "running"}]',
         "read_only": True,
     },
@@ -84,6 +90,7 @@ PROXMOX_SEED_TOOLS = [
             {"name": "node", "type": "string", "description": "Node name.", "required": True},
             {"name": "vmid", "type": "integer", "description": "Container id.", "required": True},
         ],
+        "fields": ["status", "uptime", "cpu", "cpus", "mem", "maxmem"],
         "example": '{"status": "running", "uptime": 3600, "vmid": 200}',
         "read_only": True,
     },
@@ -95,6 +102,7 @@ PROXMOX_SEED_TOOLS = [
         "params": [
             {"name": "node", "type": "string", "description": "Node name.", "required": True},
         ],
+        "fields": ["storage", "type", "content", "active", "avail", "used", "total"],
         "example": '[{"storage": "local-lvm", "type": "lvmthin", "content": "images,rootdir"}]',
         "read_only": True,
     },
@@ -107,6 +115,7 @@ PROXMOX_SEED_TOOLS = [
             {"name": "node", "type": "string", "description": "Node name.", "required": True},
             {"name": "storage", "type": "string", "description": "Storage id (from list_storages).", "required": True},
         ],
+        "fields": ["volid", "size", "format", "content"],
         "example": '[{"volid": "local-lvm:vm-100-disk-0", "size": 3.2e10, "format": "raw"}]',
         "read_only": True,
     },
@@ -119,6 +128,7 @@ PROXMOX_SEED_TOOLS = [
             {"name": "userfilter", "type": "string", "description": "Filter tasks to a specific user.", "required": False},
             {"name": "limit", "type": "integer", "description": "Max number of tasks to return.", "required": False},
         ],
+        "fields": ["type", "status", "user", "node", "starttime", "endtime"],
         "example": '[{"upid": "UPID:pve:...", "type": "qmstart", "status": "OK", "starttime": 1710000000}]',
         "read_only": True,
     },
@@ -217,6 +227,7 @@ def seed_proxmox_tools(integration_id: int):
                 method=tool['method'],
                 path_template=tool['path_template'],
                 params=tool['params'],
+                fields=tool.get('fields'),
                 example=tool['example'],
                 read_only=tool['read_only'],
             )
@@ -231,6 +242,7 @@ def seed_proxmox_tools(integration_id: int):
                 tool['params'],
                 tool['example'],
                 read_only=tool['read_only'],
+                fields=tool.get('fields'),
             )
             created += 1
     return created, updated

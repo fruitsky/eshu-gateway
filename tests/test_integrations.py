@@ -1,3 +1,5 @@
+import json
+
 from db.integrations import (
     create_integration,
     get_integration,
@@ -54,7 +56,8 @@ class TestIntegrationCRUD:
         assert data["status_code"] == 200
         assert data["error"] is None
         assert data["tool"] in ("get_cluster_resources", "list_nodes")
-        assert '"ok"' in data["preview"]
+        # Preview is the (projected) upstream body — must parse as JSON.
+        json.loads(data["preview"])
 
     def test_test_endpoint_requires_session(self, client):
         create_integration("proxmox", "https://pve.local/api2/json", "none", "")

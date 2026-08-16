@@ -60,19 +60,29 @@ def _build_tool_fn(integration_name: str, tool: dict):
     """Generate a function with a typed signature matching the tool's params,
     so FastMCP exposes an accurate input schema to the model."""
     fn_name = _safe_ident(tool['name']) + '_' + str(tool['id'])
-    params = tool.get('params') or []
+    catalog_params = list(tool.get('params') or [])
+    fields = tool.get('fields') or []
+    mutating = not tool.get('read_only')
+
+    # Effective param list: catalog params + a synthetic `full` escape hatch
+    # for tools that project their response. `full` is kept out of the
+    # forwarded params below so it never reaches the upstream API.
+    effective_params = list(catalog_params)
+    if fields and not mutating:
+        effective_params.append({'name': 'full', 'type': 'boolean',
+                                 'description': 'Return the full, unprojected object.', 'required': False})
+
     sig_parts = []
-    param_names = []
-    for p in params:
+    arg_entries = []
+    for p in effective_params:
         name = _safe_ident(p['name'])
         ptype = _TYPE_MAP.get(p.get('type', 'string'), 'str')
         if p.get('required'):
             sig_parts.append(f"{name}: {ptype}")
         else:
             sig_parts.append(f"{name}: {ptype} = None")
-        param_names.append(name)
+        arg_entries.append((p['name'], name))
 
-    mutating = not tool.get('read_only')
     if mutating:
         sig_parts.append("reason: str")
     sig = ', '.join(sig_parts)
@@ -80,8 +90,9 @@ def _build_tool_fn(integration_name: str, tool: dict):
     # key = original param name (matches the _build_request lookup),
     # value = the function parameter variable carrying the actual argument.
     # e.g. {'node': node, 'vmid': vmid} — NOT the param-name string.
-    args_literal = '{' + ', '.join(f"{p['name']!r}: {n}" for p, n in zip(params, param_names)) + '}'
-    params_literal = repr(params)
+    args_literal = '{' + ', '.join(f"{orig!r}: {var}" for orig, var in arg_entries) + '}'
+    params_literal = repr(catalog_params)
+    fields_literal = repr(fields)
 
     src = [f"def {fn_name}({sig}):"]
     src.append("    import json as _json")
@@ -99,7 +110,7 @@ def _build_tool_fn(integration_name: str, tool: dict):
                     "'message': 'Awaiting operator approval. Call check_approval(" + str(tool['id']) + ") to poll.'})")
     else:
         src.append(f"    _tool = {{'name': {tool['name']!r}, 'enabled': True, 'method': {tool['method']!r}, "
-                   f"'path_template': {tool['path_template']!r}, 'params': {params_literal}}}")
+                   f"'path_template': {tool['path_template']!r}, 'params': {params_literal}, 'fields': {fields_literal}}}")
         src.append("    try:")
         src.append(f"        _res = _exec(_integration, _tool, _args, agent={AGENT_LABEL!r})")
         src.append("    except _PE as e:")

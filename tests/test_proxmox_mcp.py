@@ -170,3 +170,92 @@ class TestToolFnArgumentMarshalling:
         fn(node="pve", vmid=100, reason="test")
         pending = get_pending_calls()
         assert pending and pending[0]["payload"] == {"node": "pve", "vmid": 100}
+
+
+class _FakeResp:
+    def __init__(self, body, status=200):
+        self._body = body.encode()
+        self.status = status
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def read(self, n=-1):
+        return self._body
+
+
+def _patch_urlopen(monkeypatch, body):
+    monkeypatch.setattr("urllib.request.urlopen",
+                        lambda req, timeout=30: _FakeResp(body))
+
+
+def _proj_tool(name="list_vms", fields=None, params=None, path=None, tool_id=1):
+    return {
+        "id": tool_id,
+        "name": name,
+        "enabled": True,
+        "method": "GET",
+        "path_template": path or "/nodes/{node}/qemu",
+        "params": params or [{"name": "node", "type": "string", "required": True}],
+        "fields": fields or [],
+        "read_only": True,
+    }
+
+
+class TestProjection:
+    """Field projection trims list/dict JSON responses to the tool's `fields`
+    unless the caller passes `full=True`."""
+
+    def _integration(self):
+        create_integration("proxmox", "https://pve.local/api2/json", "none", "")
+        return get_integration("proxmox")
+
+    def test_list_projection(self, monkeypatch):
+        _patch_urlopen(monkeypatch,
+                       '{"data":[{"vmid":100,"name":"a","status":"running","cpus":4,"blockstat":"x"}]}')
+        res = execute_integration_call(self._integration(), _proj_tool(fields=["vmid", "name", "status"]),
+                                       {"node": "pve"}, agent="test")
+        data = json.loads(res["body"])
+        assert isinstance(data, list) and len(data) == 1
+        assert set(data[0].keys()) == {"vmid", "name", "status"}
+
+    def test_dict_projection(self, monkeypatch):
+        _patch_urlopen(monkeypatch,
+                       '{"data":{"status":"running","qmpstatus":"running","uptime":86400,"blockstat":"x"}}')
+        tool = _proj_tool(name="get_vm_status", path="/x", params=[],
+                          fields=["status", "qmpstatus", "uptime"])
+        res = execute_integration_call(self._integration(), tool, {}, agent="test")
+        data = json.loads(res["body"])
+        assert set(data.keys()) == {"status", "qmpstatus", "uptime"}
+
+    def test_full_returns_full_object(self, monkeypatch):
+        _patch_urlopen(monkeypatch,
+                       '{"data":[{"vmid":100,"name":"a","status":"running","cpus":4,"blockstat":"x"}]}')
+        res = execute_integration_call(self._integration(), _proj_tool(fields=["vmid"]),
+                                       {"node": "pve", "full": True}, agent="test")
+        data = json.loads(res["body"])
+        assert data["data"][0]["blockstat"] == "x"
+        assert data["data"][0]["cpus"] == 4
+
+    def test_no_fields_passthrough(self, monkeypatch):
+        _patch_urlopen(monkeypatch, '{"data":[{"vmid":1,"name":"a"}]}')
+        res = execute_integration_call(self._integration(), _proj_tool(fields=[]),
+                                       {"node": "pve"}, agent="test")
+        assert '"vmid"' in res["body"] and '"data"' in res["body"]
+
+    def test_non_json_passthrough(self, monkeypatch):
+        _patch_urlopen(monkeypatch, "not json at all")
+        res = execute_integration_call(self._integration(), _proj_tool(fields=["vmid"]),
+                                       {"node": "pve"}, agent="test")
+        assert res["body"] == "not json at all"
+
+    def test_full_param_only_in_signature_when_projected(self):
+        import inspect
+        from core.mcp_server import _build_tool_fn
+        with_fields = _build_tool_fn("proxmox", _proj_tool(fields=["vmid", "name"]))
+        no_fields = _build_tool_fn("proxmox", _proj_tool(fields=[]))
+        assert "full" in inspect.signature(with_fields).parameters
+        assert "full" not in inspect.signature(no_fields).parameters
