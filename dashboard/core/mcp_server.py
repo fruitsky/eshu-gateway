@@ -77,7 +77,10 @@ def _build_tool_fn(integration_name: str, tool: dict):
         sig_parts.append("reason: str")
     sig = ', '.join(sig_parts)
 
-    args_literal = repr({n: n for n in param_names})
+    # key = original param name (matches the _build_request lookup),
+    # value = the function parameter variable carrying the actual argument.
+    # e.g. {'node': node, 'vmid': vmid} — NOT the param-name string.
+    args_literal = '{' + ', '.join(f"{p['name']!r}: {n}" for p, n in zip(params, param_names)) + '}'
     params_literal = repr(params)
 
     src = [f"def {fn_name}({sig}):"]
