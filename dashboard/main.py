@@ -2316,7 +2316,7 @@ def seed_integration_endpoint(name: str, request: Request):
         created, updated = seed_ha_tools(integration['id'])
     else:
         raise HTTPException(status_code=400,
-                            detail=f"No seed catalog for integration type '{kind}' — set the Type in Edit first")
+                            detail=f"No seed catalog for this integration type ('{kind}') yet")
     refresh_mcp_tools()
     record_audit_event(f"{kind}_seeded",
                        details=f"{kind} seed for '{name}': {created} created, {updated} updated")

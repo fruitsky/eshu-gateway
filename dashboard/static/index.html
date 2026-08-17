@@ -468,17 +468,13 @@
 
           <div class="widget">
             <div class="widget-header">Integrations</div>
-            <p class="text-xs mb-3 text-muted">Named upstream APIs. Credentials are stored server-side and never returned. Proxmox token auth uses <code>header</code> + <code>PVEAPIToken=user@realm!token=uuid</code>.</p>
+            <p class="text-xs mb-3 text-muted">Named upstream APIs. Credentials are stored server-side and never returned.</p>
             <div class="space-y-2 mb-3">
               <input type="text" id="int-name" placeholder="Name (e.g. proxmox, ha)" class="w-full text-xs">
+              <select id="int-kind" class="w-full text-xs" onchange="onIntKindChange()"></select>
               <input type="text" id="int-base-url" placeholder="Base URL (e.g. https://pve.local:8006/api2/json, https://haos.local/api)" class="w-full text-xs">
-              <div class="flex gap-2">
-                <select id="int-kind" class="flex-1 text-xs">
-                  <option value="proxmox">Proxmox</option>
-                  <option value="ha">Home Assistant</option>
-                  <option value="omada">Omada</option>
-                  <option value="custom">Custom</option>
-                </select>
+              <div id="int-guidance" class="hidden p-2 rounded bg-black/20 text-xs text-muted"></div>
+              <div id="int-auth-fields" class="flex gap-2">
                 <select id="int-auth-type" class="flex-1 text-xs">
                   <option value="header">header (custom header)</option>
                   <option value="bearer">bearer</option>

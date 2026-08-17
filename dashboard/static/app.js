@@ -1481,7 +1481,7 @@ function renderTable() {
       actions = '<span class="chip chip-actions chip-fleet-run" title="Executed via Fleet Run — see the Fleet Run tab for per-gateway output.">' +
         '⚡ Fleet Run</span>';
     } else if (req.status === 'integration-approved' || req.status === 'integration-denied') {
-      actions = '<span class="chip chip-actions" title="API-gateway call — see Integrations for the full audit.">🔌 API</span>';
+      actions = '<span class="chip chip-actions chip-integration" title="API-gateway call — see Integrations for the full audit.">🔌 API</span>';
     } else if (req.reason === 'override') {
       actions = '<span class="chip chip-actions chip-override" title="Auto-approved via Override Mode — every JIT is auto-approved while active">' +
         '🔓 Override</span>';
@@ -1509,6 +1509,10 @@ function renderTable() {
     const idDisplay = gap ? '⚠ #' + String(req.id).padStart(6, '0') : '#' + String(req.id).padStart(6, '0');
     const escapedCmd = escapeHtml(req.command);
     const gwPillHtml = gwPill(req.hostname || 'N/A');
+    const isIntegration = req.status === 'integration-approved' || req.status === 'integration-denied';
+    const gatewayCell = isIntegration
+      ? '<span class="chip chip-integration" title="API integration">🔌 ' + escapeHtml(req.target_ip) + '</span>'
+      : gwPillHtml + ' ' + escapeHtml(req.hostname || 'N/A') + ' (' + escapeHtml(req.target_ip) + ')';
     const riskHtml = (req.status === 'pending' && req.risk) ?
       '<span class="flex-shrink-0 risk-flag" title="⚠ Risk: ' + escapeHtml(req.risk) + '">⚠</span>' : '';
     const anomalyHtml = (req.status === 'pending' && req.anomaly) ?
@@ -1516,7 +1520,7 @@ function renderTable() {
     html += '<tr class="' + rowClass + '">' +
       '<td class="' + idClass + '"' + gapTitle + '>' + idDisplay + '</td>' +
       '<td class="text-muted text-xs">' + formatTime(req.created_at) + '</td>' +
-      '<td>' + gwPillHtml + ' ' + escapeHtml(req.hostname || 'N/A') + ' (' + escapeHtml(req.target_ip) + ')</td>' +
+      '<td>' + gatewayCell + '</td>' +
       '<td class="cell-cmd"><div class="flex items-center gap-1">' + riskHtml + anomalyHtml + '<code class="cmd-code" title="' + escapedCmd + '">' + escapedCmd + '</code><button class="js-copy-cmd flex-shrink-0 text-xs opacity-30 hover:opacity-80 px-1 py-0.5 rounded transition-opacity text-muted" data-cmd="' + encodeURIComponent(req.command) + '" title="Copy">📋</button></div>' +
         (function() {
           var _desc = describeCmd(req.command);
@@ -3421,7 +3425,69 @@ let _selectedIntegration = null;
 let _editingIntegration = null;
 let _integrationsData = [];
 
+// Supported integration profiles: guidance + auth defaults + seed availability.
+// `auth_type` set → the auth-type/header fields are hidden and pre-filled.
+const INTEGRATION_PROFILES = {
+  proxmox:     { label: 'Proxmox VE',   seedable: true,
+                 auth_type: 'header', auth_header: 'Authorization',
+                 secret_hint: 'PVEAPIToken=user@realm!tokenid=uuid',
+                 guidance: 'PVE API token (custom scheme, not Bearer). Base URL ends in /api2/json.' },
+  ha:          { label: 'Home Assistant', seedable: true,
+                 auth_type: 'bearer', auth_header: '',
+                 secret_hint: 'Long-lived access token',
+                 guidance: 'Long-lived access token. Base URL is https://<ha>/api.' },
+  pulse:       { label: 'Pulse', seedable: false,
+                 auth_type: 'header', auth_header: 'X-API-Token',
+                 secret_hint: 'Pulse API token',
+                 guidance: 'Pulse (Proxmox monitoring). X-API-Token header; Bearer also accepted.' },
+  omada:       { label: 'Omada', seedable: false,
+                 guidance: 'OAuth2 client_credentials → Authorization: Access <token> (+ session/CSRF). Not yet supported — login flow needed.' },
+  uptime_kuma: { label: 'Uptime Kuma', seedable: false,
+                 guidance: 'Not yet supported — configure manually.' },
+  jellyfin:    { label: 'Jellyfin', seedable: false,
+                 auth_type: 'header', auth_header: 'X-Emby-Token',
+                 secret_hint: 'Jellyfin API key',
+                 guidance: 'API key via X-Emby-Token header.' },
+  truenas:     { label: 'TrueNAS', seedable: false,
+                 guidance: 'Not yet supported — configure manually.' },
+  custom:      { label: 'Custom', seedable: false,
+                 guidance: 'Configure the upstream API manually.' },
+};
+
+function populateKindSelect() {
+  const sel = document.getElementById('int-kind');
+  if (!sel) return;
+  sel.innerHTML = Object.keys(INTEGRATION_PROFILES).map(function(k) {
+    return '<option value="' + k + '">' + INTEGRATION_PROFILES[k].label + '</option>';
+  }).join('');
+  onIntKindChange();
+}
+
+function onIntKindChange() {
+  const kind = document.getElementById('int-kind').value;
+  const profile = INTEGRATION_PROFILES[kind];
+  if (!profile) return;
+  const guidance = document.getElementById('int-guidance');
+  const authFields = document.getElementById('int-auth-fields');
+  const authType = document.getElementById('int-auth-type');
+  const authHeader = document.getElementById('int-auth-header');
+  const secret = document.getElementById('int-secret');
+  if (guidance) {
+    guidance.textContent = profile.guidance || '';
+    guidance.classList.toggle('hidden', !profile.guidance);
+  }
+  if (profile.auth_type) {
+    if (authFields) authFields.classList.add('hidden');
+    if (authType) authType.value = profile.auth_type;
+    if (authHeader) authHeader.value = profile.auth_header || '';
+  } else {
+    if (authFields) authFields.classList.remove('hidden');
+  }
+  if (secret) secret.placeholder = profile.secret_hint || 'Secret / token';
+}
+
 async function fetchIntegrations() {
+  populateKindSelect();
   fetchAgentTokens();
   fetchIntegrationList();
   fetchIntegrationCalls();
@@ -3505,13 +3571,17 @@ async function fetchIntegrationList() {
     if (!ints.length) { el.innerHTML = '<p class="text-muted">No integrations yet.</p>'; return; }
     el.innerHTML = ints.map(function(i) {
       var active = i.enabled ? 'text-success' : 'text-muted';
+      var seedable = !!(INTEGRATION_PROFILES[i.kind] && INTEGRATION_PROFILES[i.kind].seedable);
+      var seedBtn = seedable
+        ? '<button onclick="seedTools(\'' + esc(i.name) + '\')" class="btn btn-xs btn-muted" title="Seed the seed catalog for this integration">Seed</button>'
+        : '';
       return '<div class="p-2 rounded bg-black/20">' +
         '<div class="flex items-center justify-between gap-2">' +
         '<button class="text-sm text-left ' + active + '" onclick="selectIntegration(\'' + esc(i.name) + '\')">' + esc(i.name) + '</button>' +
         '<div class="flex gap-1">' +
         '<button onclick="editIntegration(\'' + esc(i.name) + '\')" class="btn btn-xs btn-muted" title="Edit base URL / secret">Edit</button>' +
         '<button onclick="testIntegration(\'' + esc(i.name) + '\')" class="btn btn-xs btn-muted" title="Run a read call to verify the connection">Test</button>' +
-        '<button onclick="seedTools(\'' + esc(i.name) + '\')" class="btn btn-xs btn-muted" title="Seed the seed catalog for this integration">Seed</button>' +
+        seedBtn +
         '<button onclick="deleteIntegration(\'' + esc(i.name) + '\')" class="btn btn-xs btn-muted">Delete</button></div></div>' +
         '<div class="text-xs text-muted">' + esc(i.base_url) + ' · auth: ' + esc(i.auth_type) + '</div></div>';
     }).join('');
@@ -3524,24 +3594,28 @@ function resetIntegrationForm() {
   document.getElementById('int-name').value = '';
   document.getElementById('int-base-url').value = '';
   document.getElementById('int-kind').value = 'proxmox';
-  document.getElementById('int-auth-type').value = 'header';
-  document.getElementById('int-auth-header').value = '';
   document.getElementById('int-secret').value = '';
   document.getElementById('int-submit-btn').textContent = 'Add Integration';
   document.getElementById('integration-test-result').classList.add('hidden');
+  onIntKindChange();
 }
 
 function editIntegration(name) {
   const i = _integrationsData.find(function(x) { return x.name === name; });
   if (!i) return;
   _editingIntegration = name;
+  var kind = INTEGRATION_PROFILES[i.kind] ? i.kind : 'custom';
   document.getElementById('int-name').value = i.name;
   document.getElementById('int-name').disabled = true;
   document.getElementById('int-base-url').value = i.base_url || '';
-  document.getElementById('int-kind').value = i.kind || 'custom';
-  document.getElementById('int-auth-type').value = i.auth_type || 'header';
-  document.getElementById('int-auth-header').value = i.auth_header_name || '';
+  document.getElementById('int-kind').value = kind;
   document.getElementById('int-secret').value = '';
+  onIntKindChange();
+  // For profiles without a fixed auth, reflect the stored auth values.
+  if (!INTEGRATION_PROFILES[kind].auth_type) {
+    document.getElementById('int-auth-type').value = i.auth_type || 'bearer';
+    document.getElementById('int-auth-header').value = i.auth_header_name || '';
+  }
   document.getElementById('int-submit-btn').textContent = 'Update Integration';
   document.getElementById('integration-test-result').classList.add('hidden');
   // Bring the form into view and flash it so the "editing" state is obvious
