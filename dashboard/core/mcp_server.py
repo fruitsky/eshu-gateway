@@ -20,6 +20,7 @@ _TYPE_MAP = {
     'integer': 'int',
     'number': 'float',
     'boolean': 'bool',
+    'json': 'dict',
 }
 
 AGENT_LABEL = 'mcp'
@@ -84,7 +85,9 @@ def _build_tool_fn(integration_name: str, tool: dict):
         arg_entries.append((p['name'], name))
 
     if mutating:
-        sig_parts.append("reason: str")
+        # keyword-only so a required `reason` can follow optional params
+        # (e.g. call_service's optional `data`) without a Python SyntaxError.
+        sig_parts.append("*, reason: str")
     sig = ', '.join(sig_parts)
 
     # key = original param name (matches the _build_request lookup),

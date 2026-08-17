@@ -2129,6 +2129,7 @@ class IntegrationPayload(BaseModel):
     auth_header_name: str = ''
     secret: str = ''
     enabled: bool = True
+    kind: str = 'custom'
 
 class IntegrationUpdatePayload(BaseModel):
     base_url: str = None
@@ -2136,6 +2137,7 @@ class IntegrationUpdatePayload(BaseModel):
     auth_header_name: str = None
     secret: str = None
     enabled: bool = None
+    kind: str = None
 
 class ToolPayload(BaseModel):
     name: str
@@ -2192,8 +2194,8 @@ def create_integration_endpoint(payload: IntegrationPayload, request: Request):
     if payload.auth_type not in ('none', 'bearer', 'basic', 'header'):
         raise HTTPException(status_code=400, detail="Invalid auth_type")
     create_integration(name, payload.base_url.strip(), payload.auth_type, payload.secret,
-                       payload.auth_header_name, payload.enabled)
-    record_audit_event("integration_created", details=f"Integration '{name}' created")
+                       payload.auth_header_name, payload.enabled, payload.kind)
+    record_audit_event("integration_created", details=f"Integration '{name}' created (kind {payload.kind})")
     return {"status": "ok", "name": name}
 
 
@@ -2298,17 +2300,26 @@ def toggle_tool_endpoint(name: str, tool_id: int, payload: ToolTogglePayload, re
     return {"status": "ok", "enabled": payload.enabled}
 
 
-@app.post("/api/integrations/{name}/seed-proxmox")
-def seed_proxmox_endpoint(name: str, request: Request):
-    """Populate an integration with the curated Proxmox seed catalog (idempotent)."""
+@app.post("/api/integrations/{name}/seed")
+def seed_integration_endpoint(name: str, request: Request):
+    """Populate an integration with the curated seed catalog for its kind
+    (proxmox, ha, ...). Idempotent — re-seeding updates tools in place."""
     _check_session(request)
     integration = get_integration(name)
     if not integration:
         raise HTTPException(status_code=404, detail="Integration not found")
-    created, updated = seed_proxmox_tools(integration['id'])
+    kind = integration.get('kind') or 'custom'
+    if kind == 'proxmox':
+        created, updated = seed_proxmox_tools(integration['id'])
+    elif kind == 'ha':
+        from core.ha_seed import seed_ha_tools
+        created, updated = seed_ha_tools(integration['id'])
+    else:
+        raise HTTPException(status_code=400,
+                            detail=f"No seed catalog for integration type '{kind}' — set the Type in Edit first")
     refresh_mcp_tools()
-    record_audit_event("proxmox_seeded",
-                       details=f"Proxmox seed for '{name}': {created} created, {updated} updated")
+    record_audit_event(f"{kind}_seeded",
+                       details=f"{kind} seed for '{name}': {created} created, {updated} updated")
     return {"status": "ok", "created": created, "updated": updated}
 
 

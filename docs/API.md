@@ -184,7 +184,7 @@ endpoint. Agents authenticate to the MCP surface with a bearer **agent token**.
 | `POST` | `/api/integrations/{name}/tools` | Add a tool (`name, description, method, path_template, params, example, read_only`) | Session |
 | `DELETE` | `/api/integrations/{name}/tools/{id}` | Delete a tool | Session |
 | `POST` | `/api/integrations/{name}/tools/{id}/toggle` | Enable/disable a tool (body `{"enabled": bool}`) | Session |
-| `POST` | `/api/integrations/{name}/seed-proxmox` | Populate with the curated Proxmox seed catalog (idempotent) | Session |
+| `POST` | `/api/integrations/{name}/seed` | Populate with the curated seed catalog for the integration's type (idempotent) | Session |
 
 ### Approval queue & audit (dashboard authentication required)
 

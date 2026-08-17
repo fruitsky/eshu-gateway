@@ -13,11 +13,16 @@ def init_integrations_tables(cursor):
             auth_header_name TEXT NOT NULL DEFAULT '',
             secret TEXT NOT NULL DEFAULT '',
             enabled INTEGER NOT NULL DEFAULT 1,
+            kind TEXT NOT NULL DEFAULT 'custom',
             created_at INTEGER NOT NULL
         )
     ''')
     try:
         cursor.execute("ALTER TABLE integrations ADD COLUMN auth_header_name TEXT DEFAULT ''")
+    except Exception:
+        pass
+    try:
+        cursor.execute("ALTER TABLE integrations ADD COLUMN kind TEXT DEFAULT 'custom'")
     except Exception:
         pass
     cursor.execute('''
@@ -75,14 +80,15 @@ def init_integrations_tables(cursor):
 # ── Integrations ────────────────────────────────────────────────────────
 
 def create_integration(name: str, base_url: str, auth_type: str, secret: str,
-                       auth_header_name: str = '', enabled: bool = True) -> int:
+                       auth_header_name: str = '', enabled: bool = True,
+                       kind: str = 'custom') -> int:
     with db_conn() as conn:
         cursor = conn.cursor()
         now = int(time.time())
         cursor.execute('''
-            INSERT INTO integrations (name, base_url, auth_type, auth_header_name, secret, enabled, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        ''', (name, base_url, auth_type, auth_header_name, secret, 1 if enabled else 0, now))
+            INSERT INTO integrations (name, base_url, auth_type, auth_header_name, secret, enabled, kind, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (name, base_url, auth_type, auth_header_name, secret, 1 if enabled else 0, kind, now))
         conn.commit()
         return cursor.lastrowid
 
@@ -122,7 +128,7 @@ def get_integration_by_id(integration_id: int):
 
 def update_integration(name: str, base_url: str = None, auth_type: str = None,
                        secret: str = None, auth_header_name: str = None,
-                       enabled: bool = None) -> bool:
+                       enabled: bool = None, kind: str = None) -> bool:
     """Update an integration. `secret=None` means 'leave unchanged'."""
     current = get_integration(name)
     if not current:
@@ -132,12 +138,13 @@ def update_integration(name: str, base_url: str = None, auth_type: str = None,
     new_header = auth_header_name if auth_header_name is not None else current.get('auth_header_name', '')
     new_secret = secret if secret is not None else current['secret']
     new_enabled = (1 if enabled else 0) if enabled is not None else current['enabled']
+    new_kind = kind if kind is not None else current.get('kind', 'custom')
     with db_conn() as conn:
         cursor = conn.cursor()
         cursor.execute('''
-            UPDATE integrations SET base_url = ?, auth_type = ?, auth_header_name = ?, secret = ?, enabled = ?
+            UPDATE integrations SET base_url = ?, auth_type = ?, auth_header_name = ?, secret = ?, enabled = ?, kind = ?
             WHERE name = ?
-        ''', (new_base, new_auth, new_header, new_secret, new_enabled, name))
+        ''', (new_base, new_auth, new_header, new_secret, new_enabled, new_kind, name))
         conn.commit()
         return cursor.rowcount > 0
 

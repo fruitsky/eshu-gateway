@@ -3511,7 +3511,7 @@ async function fetchIntegrationList() {
         '<div class="flex gap-1">' +
         '<button onclick="editIntegration(\'' + esc(i.name) + '\')" class="btn btn-xs btn-muted" title="Edit base URL / secret">Edit</button>' +
         '<button onclick="testIntegration(\'' + esc(i.name) + '\')" class="btn btn-xs btn-muted" title="Run a read call to verify the connection">Test</button>' +
-        '<button onclick="seedProxmox(\'' + esc(i.name) + '\')" class="btn btn-xs btn-muted" title="Seed Proxmox tools">Seed</button>' +
+        '<button onclick="seedTools(\'' + esc(i.name) + '\')" class="btn btn-xs btn-muted" title="Seed the seed catalog for this integration">Seed</button>' +
         '<button onclick="deleteIntegration(\'' + esc(i.name) + '\')" class="btn btn-xs btn-muted">Delete</button></div></div>' +
         '<div class="text-xs text-muted">' + esc(i.base_url) + ' · auth: ' + esc(i.auth_type) + '</div></div>';
     }).join('');
@@ -3523,6 +3523,7 @@ function resetIntegrationForm() {
   document.getElementById('int-name').disabled = false;
   document.getElementById('int-name').value = '';
   document.getElementById('int-base-url').value = '';
+  document.getElementById('int-kind').value = 'proxmox';
   document.getElementById('int-auth-type').value = 'header';
   document.getElementById('int-auth-header').value = '';
   document.getElementById('int-secret').value = '';
@@ -3537,6 +3538,7 @@ function editIntegration(name) {
   document.getElementById('int-name').value = i.name;
   document.getElementById('int-name').disabled = true;
   document.getElementById('int-base-url').value = i.base_url || '';
+  document.getElementById('int-kind').value = i.kind || 'custom';
   document.getElementById('int-auth-type').value = i.auth_type || 'header';
   document.getElementById('int-auth-header').value = i.auth_header_name || '';
   document.getElementById('int-secret').value = '';
@@ -3550,6 +3552,7 @@ async function createIntegration() {
   if (!name || !baseUrl) { showToast('Name and base URL are required', 'error'); return; }
   const payload = {
     base_url: baseUrl,
+    kind: document.getElementById('int-kind').value,
     auth_type: document.getElementById('int-auth-type').value,
     auth_header_name: document.getElementById('int-auth-header').value.trim(),
   };
@@ -3607,12 +3610,12 @@ async function deleteIntegration(name) {
   } catch(e) { showToast('❌ Failed: ' + e.message, 'error'); }
 }
 
-async function seedProxmox(name) {
+async function seedTools(name) {
   try {
-    const res = await authFetch('/api/integrations/' + encodeURIComponent(name) + '/seed-proxmox', { method: 'POST' });
+    const res = await authFetch('/api/integrations/' + encodeURIComponent(name) + '/seed', { method: 'POST' });
     const data = await res.json();
     if (!res.ok) { showToast('❌ ' + (data.detail || 'Failed'), 'error'); return; }
-    showToast('Seeded Proxmox tools (' + data.created + ' new, ' + data.updated + ' updated)', 'success');
+    showToast('Seeded tools (' + data.created + ' new, ' + data.updated + ' updated)', 'success');
     if (_selectedIntegration === name) fetchTools(name);
   } catch(e) { showToast('❌ Failed: ' + e.message, 'error'); }
 }

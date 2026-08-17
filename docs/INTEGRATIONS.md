@@ -139,3 +139,14 @@ Same flow each time: add the integration (name, base URL, auth) → add or seed 
 tools → enable the subset → ensure its hostname is in **MCP Access** if needed.
 The catalog is per-integration and namespaced, so integrations are independent —
 no tool-name conflicts, no cross-talk.
+
+## Home Assistant
+
+- **Base URL**: `https://<ha-host>/api` (or `http://<ha-host>:8123/api`)
+- **Auth**: `bearer`, secret = a **long-lived access token** from your HA profile.
+- **Seed tools**: `ha_list_entities`, `ha_get_entity` (reads, auto-run, projected
+  to lean fields) and `ha_call_service` (mutating → operator approval). Pass
+  service data as a JSON object, e.g. `call_service(domain="light", service="turn_on", data={"entity_id": "light.living_room"})`.
+- **Behind a reverse proxy**: ensure it forwards the `Authorization` header, e.g.
+  NPM Advanced config `proxy_set_header Authorization $http_authorization;` —
+  otherwise HA returns 401 and the **Test** button will surface it.

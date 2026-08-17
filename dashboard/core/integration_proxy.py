@@ -48,6 +48,7 @@ def _build_request(tool: dict, args: dict):
     path = template
     query_params = {}
     body_params = {}
+    raw_body = None
     for p in tool.get('params') or []:
         name = p.get('name')
         val = args.get(name)
@@ -55,12 +56,14 @@ def _build_request(tool: dict, args: dict):
             continue
         if '{' + name + '}' in path:
             path = path.replace('{' + name + '}', urllib.parse.quote(str(val), safe=''))
+        elif p.get('type') == 'json':
+            raw_body = val
         elif method in ('POST', 'PUT', 'PATCH'):
             body_params[name] = val
         else:
             query_params[name] = val
     query_string = urllib.parse.urlencode(query_params)
-    return method, path, query_string, body_params
+    return method, path, query_string, body_params, raw_body
 
 
 def _guard_ssrf(base_url: str, path: str):
@@ -78,12 +81,32 @@ def _guard_ssrf(base_url: str, path: str):
         raise ProxyError(403, "Blocked: target host does not match the configured integration")
 
 
-def _project_body(body: str, fields: list) -> str:
-    """Project a JSON response down to the listed top-level fields.
+def _project_dict(data: dict, fields: list) -> dict:
+    """Project a single object to the listed fields. Fields may be dotted
+    paths (e.g. `attributes.friendly_name`); the output key is the last
+    segment (so `attributes.friendly_name` -> `friendly_name`)."""
+    out = {}
+    for f in fields:
+        parts = f.split('.')
+        cur = data
+        ok = True
+        for part in parts:
+            if isinstance(cur, dict) and part in cur:
+                cur = cur[part]
+            else:
+                ok = False
+                break
+        if ok:
+            out[parts[-1]] = cur
+    return out
 
-    Descends into the common `{"data": ...}` API envelope (Proxmox, Home
-    Assistant, ...), then projects list items / a single object. Returns the
-    body unchanged if it isn't valid JSON or a shape we can project."""
+
+def _project_body(body: str, fields: list) -> str:
+    """Project a JSON response down to the listed fields.
+
+    Descends into the common `{"data": ...}` API envelope (Proxmox), then
+    projects list items / a single object. Supports dotted field paths.
+    Returns the body unchanged if it isn't valid JSON or a shape we can project."""
     if not fields:
         return body
     try:
@@ -97,12 +120,12 @@ def _project_body(body: str, fields: list) -> str:
         projected = []
         for item in data:
             if isinstance(item, dict):
-                projected.append({k: item[k] for k in fields if k in item})
+                projected.append(_project_dict(item, fields))
             else:
                 projected.append(item)
         return json.dumps(projected)
     if isinstance(data, dict):
-        return json.dumps({k: data[k] for k in fields if k in data})
+        return json.dumps(_project_dict(data, fields))
     return body
 
 
@@ -117,7 +140,7 @@ def execute_integration_call(integration: dict, tool: dict, args: dict, agent: s
     if auth_type not in ALLOWED_AUTH_TYPES:
         raise ProxyError(500, f"Unsupported auth_type: {auth_type}")
 
-    method, path, query_string, body_params = _build_request(tool, args)
+    method, path, query_string, body_params, raw_body = _build_request(tool, args)
     base_url = (integration.get('base_url') or '').rstrip('/')
     _guard_ssrf(base_url, path)
 
@@ -128,9 +151,11 @@ def execute_integration_call(integration: dict, tool: dict, args: dict, agent: s
     headers = _auth_headers(integration)
     headers.setdefault('Accept', 'application/json')
     body_bytes = None
-    if method in ('POST', 'PUT', 'PATCH') and body_params:
-        body_bytes = json.dumps(body_params).encode('utf-8')
-        headers.setdefault('Content-Type', 'application/json')
+    if method in ('POST', 'PUT', 'PATCH'):
+        payload = raw_body if raw_body is not None else body_params
+        if payload:
+            body_bytes = json.dumps(payload).encode('utf-8')
+            headers.setdefault('Content-Type', 'application/json')
 
     start = time.time()
     outcome = 'ok'

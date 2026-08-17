@@ -48,8 +48,8 @@ class TestIntegrationCRUD:
         """POST /api/integrations/{name}/test runs the first enabled read-only
         tool with no required params and reports the upstream result."""
         create_integration("proxmox", mock_upstream["base_url"], "header",
-                           "PVEAPIToken=u!t=v", auth_header_name="Authorization")
-        auth_client.post("/api/integrations/proxmox/seed-proxmox")
+                           "PVEAPIToken=u!t=v", auth_header_name="Authorization", kind="proxmox")
+        auth_client.post("/api/integrations/proxmox/seed")
         r = auth_client.post("/api/integrations/proxmox/test")
         assert r.status_code == 200
         data = r.json()
@@ -67,8 +67,8 @@ class TestIntegrationCRUD:
     def test_test_endpoint_reports_connection_error(self, auth_client, mock_upstream):
         # A base_url that refuses connections should surface as a clear error,
         # not crash.
-        create_integration("proxmox", "http://127.0.0.1:1/api2/json", "none", "")
-        auth_client.post("/api/integrations/proxmox/seed-proxmox")
+        create_integration("proxmox", "http://127.0.0.1:1/api2/json", "none", "", kind="proxmox")
+        auth_client.post("/api/integrations/proxmox/seed")
         r = auth_client.post("/api/integrations/proxmox/test")
         assert r.status_code == 200
         assert r.json()["error"] is not None
@@ -120,8 +120,9 @@ class TestProxmoxSeed:
             "auth_type": "header",
             "auth_header_name": "Authorization",
             "secret": "tok",
+            "kind": "proxmox",
         })
-        r = auth_client.post("/api/integrations/proxmox/seed-proxmox")
+        r = auth_client.post("/api/integrations/proxmox/seed")
         assert r.status_code == 200
         data = r.json()
         assert data["created"] == 16
@@ -131,16 +132,16 @@ class TestProxmoxSeed:
         assert "list_vms" in names
         assert "start_vm" in names
         # Seeding again is idempotent (updates in place)
-        r2 = auth_client.post("/api/integrations/proxmox/seed-proxmox")
+        r2 = auth_client.post("/api/integrations/proxmox/seed")
         assert r2.json()["created"] == 0
         assert r2.json()["updated"] == 16
 
     def test_toggle_tool(self, auth_client):
         auth_client.post("/api/integrations", json={
             "name": "proxmox", "base_url": "https://pve.local/api2/json",
-            "auth_type": "none", "secret": "",
+            "auth_type": "none", "secret": "", "kind": "proxmox",
         })
-        auth_client.post("/api/integrations/proxmox/seed-proxmox")
+        auth_client.post("/api/integrations/proxmox/seed")
         tools = auth_client.get("/api/integrations/proxmox/tools").json()
         tid = next(t["id"] for t in tools if t["name"] == "list_vms")
         r = auth_client.post(f"/api/integrations/proxmox/tools/{tid}/toggle", json={"enabled": False})
@@ -192,9 +193,9 @@ class TestMcpToolNaming:
         from core.mcp_server import mcp, refresh_mcp_tools
         auth_client.post("/api/integrations", json={
             "name": "proxmox", "base_url": "https://pve.local/api2/json",
-            "auth_type": "none", "secret": "",
+            "auth_type": "none", "secret": "", "kind": "proxmox",
         })
-        auth_client.post("/api/integrations/proxmox/seed-proxmox")
+        auth_client.post("/api/integrations/proxmox/seed")
         refresh_mcp_tools()
 
         async def _names():
