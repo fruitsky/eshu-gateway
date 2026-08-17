@@ -3544,6 +3544,13 @@ function editIntegration(name) {
   document.getElementById('int-secret').value = '';
   document.getElementById('int-submit-btn').textContent = 'Update Integration';
   document.getElementById('integration-test-result').classList.add('hidden');
+  // Bring the form into view and flash it so the "editing" state is obvious
+  var formWidget = document.getElementById('int-base-url').closest('.widget');
+  if (formWidget) {
+    formWidget.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    formWidget.style.outline = '2px solid var(--accent, #ffd700)';
+    setTimeout(function() { formWidget.style.outline = ''; }, 1600);
+  }
 }
 
 async function createIntegration() {

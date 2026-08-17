@@ -45,6 +45,18 @@ def init_integrations_tables(cursor):
         cursor.execute("ALTER TABLE integration_tools ADD COLUMN fields TEXT DEFAULT '[]'")
     except Exception:
         pass
+    # One-time backfill: integrations seeded before the `kind` column existed
+    # defaulted to 'custom'. Infer 'proxmox' for any that already carry known
+    # Proxmox tool names, so existing installs don't need a manual Type edit.
+    cursor.execute('''
+        UPDATE integrations SET kind = 'proxmox'
+        WHERE kind = 'custom'
+          AND EXISTS (
+              SELECT 1 FROM integration_tools t
+              WHERE t.integration_id = integrations.id
+                AND t.name IN ('list_nodes', 'start_vm', 'get_cluster_resources')
+          )
+    ''')
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS integration_calls (
             id INTEGER PRIMARY KEY AUTOINCREMENT,

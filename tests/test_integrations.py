@@ -150,6 +150,28 @@ class TestProxmoxSeed:
         assert next(t for t in tools if t["id"] == tid)["enabled"] == 0
 
 
+class TestKindMigration:
+    """The one-time backfill infers 'proxmox' for integrations that predate the
+    kind column but already carry known Proxmox tool names."""
+
+    def test_backfills_proxmox_kind_from_tools(self, auth_client):
+        from db.integrations import create_tool, get_integration
+        from db.core import init_db
+        create_integration("proxmox", "https://pve.local/api2/json", "none", "")
+        assert get_integration("proxmox")["kind"] == "custom"
+        integration = get_integration("proxmox")
+        create_tool(integration["id"], "list_nodes", "List nodes", "GET", "/nodes", [], "", True)
+        init_db()  # re-run migrations, as on an existing install
+        assert get_integration("proxmox")["kind"] == "proxmox"
+
+    def test_custom_integration_not_backfilled(self, auth_client):
+        from db.integrations import get_integration
+        from db.core import init_db
+        create_integration("custom", "https://x.local/api", "none", "")
+        init_db()
+        assert get_integration("custom")["kind"] == "custom"
+
+
 class TestMcpSettings:
 
     def test_get_default_is_empty(self, auth_client):
