@@ -100,13 +100,20 @@ class TestHaSeed:
         })
         r = auth_client.post("/api/integrations/ha/seed")
         assert r.status_code == 200
-        assert r.json()["created"] == 3
+        assert r.json()["created"] == 8
         tools = auth_client.get("/api/integrations/ha/tools").json()
         names = {t["name"] for t in tools}
-        assert names == {"list_entities", "get_entity", "call_service"}
+        assert names == {"list_entities", "get_entity", "call_service",
+                         "list_services", "get_config", "get_history",
+                         "list_entity_registry", "list_device_registry"}
         cs = next(t for t in tools if t["name"] == "call_service")
         assert cs["read_only"] == 0
         assert next(p for p in cs["params"] if p["name"] == "data")["type"] == "json"
+        gh = next(t for t in tools if t["name"] == "get_history")
+        assert next(p for p in gh["params"] if p["name"] == "start")["required"]
+        er = next(t for t in tools if t["name"] == "list_entity_registry")
+        assert er["transport"] == "ws"
+        assert er["filter_fields"] == ["device_id"]
 
     def test_call_service_signature(self):
         import inspect
@@ -217,6 +224,58 @@ class TestHaSearchLimit:
         # non-list tool (get_entity) has no search/limit
         assert "search" not in props["ha_get_entity"]
         assert "limit" not in props["ha_get_entity"]
+
+
+class TestHaMoreReads:
+    """The Phase-0 REST read tools (services, config, history)."""
+
+    def _services_tool(self):
+        return {
+            "id": 1, "name": "list_services", "enabled": True, "method": "GET",
+            "path_template": "/services", "params": [], "fields": [], "read_only": True,
+        }
+
+    def _config_tool(self):
+        return {
+            "id": 2, "name": "get_config", "enabled": True, "method": "GET",
+            "path_template": "/config", "params": [],
+            "fields": ["location_name", "latitude", "time_zone"], "read_only": True,
+        }
+
+    def test_list_services_passthrough(self, monkeypatch):
+        from core.integration_proxy import execute_integration_call
+        create_integration("ha", "https://ha.local/api", "bearer", "tok", kind="ha")
+        body = '{"light": {"turn_on": {"name": "Turn On", "fields": {"entity_id": {"selector": {"entity": {}}}}}}}'
+        _patch_urlopen(monkeypatch, body)
+        res = execute_integration_call(get_integration("ha"), self._services_tool(), {}, agent="test")
+        assert res["body"] == body
+
+    def test_get_config_projects(self, monkeypatch):
+        from core.integration_proxy import execute_integration_call
+        create_integration("ha", "https://ha.local/api", "bearer", "tok", kind="ha")
+        body = json.dumps({"location_name": "Home", "latitude": 51.5, "longitude": -0.12,
+                           "time_zone": "Europe/London", "version": "2026.7.3"})
+        _patch_urlopen(monkeypatch, body)
+        res = execute_integration_call(get_integration("ha"), self._config_tool(), {}, agent="test")
+        assert json.loads(res["body"]) == {"location_name": "Home", "latitude": 51.5, "time_zone": "Europe/London"}
+
+    def test_get_history_path_and_query(self, mock_upstream):
+        from core.integration_proxy import execute_integration_call
+        create_integration("ha", mock_upstream["base_url"], "bearer", "tok", kind="ha")
+        tool = {
+            "id": 3, "name": "get_history", "enabled": True, "method": "GET",
+            "path_template": "/history/period/{start}", "params": [
+                {"name": "start", "type": "string", "required": True},
+                {"name": "filter_entity_id", "type": "string", "required": False},
+                {"name": "end_time", "type": "string", "required": False},
+            ], "fields": [], "read_only": True,
+        }
+        res = execute_integration_call(get_integration("ha"), tool, {
+            "start": "2026-08-18T00:00:00", "filter_entity_id": "sensor.x",
+            "end_time": "2026-08-18T01:00:00"}, agent="test")
+        assert res["status_code"] == 200
+        rec = mock_upstream["requests"][-1]
+        assert rec["path"] == "/history/period/2026-08-18T00%3A00%3A00?filter_entity_id=sensor.x&end_time=2026-08-18T01%3A00%3A00"
 
 
 class TestHaApproval:

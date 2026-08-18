@@ -42,6 +42,65 @@ HA_SEED_TOOLS = [
         "example": '[]',
         "read_only": False,
     },
+    {
+        "name": "list_services",
+        "description": "List every Home Assistant service with its field schema (names, types, required/optional). Use this to learn the exact fields a service accepts before calling it — e.g. browser_mod services. Returns the full schema map.",
+        "method": "GET",
+        "path_template": "/services",
+        "params": [],
+        "fields": [],
+        "example": '{"light": {"turn_on": {"name": "Turn On", "fields": {"entity_id": {"selector": {"entity": {}}}}}}}',
+        "read_only": True,
+    },
+    {
+        "name": "get_config",
+        "description": "Get the Home Assistant core configuration (location, units, timezone, version).",
+        "method": "GET",
+        "path_template": "/config",
+        "params": [],
+        "fields": ["location_name", "latitude", "longitude", "elevation", "unit_system", "time_zone", "version"],
+        "example": '{"location_name": "Home", "latitude": 51.5, "longitude": -0.12, "elevation": 20, "unit_system": {"length": "km"}, "time_zone": "Europe/London", "version": "2026.7.3"}',
+        "read_only": True,
+    },
+    {
+        "name": "get_history",
+        "description": "Get the recorded state history for an entity (or all entities) from a start time. Pass start as an ISO8601 datetime (e.g. 2026-08-18T00:00:00) and optionally filter_entity_id to one entity and end_time to bound the window. Returns the raw history (list of per-entity state lists).",
+        "method": "GET",
+        "path_template": "/history/period/{start}",
+        "params": [
+            {"name": "start", "type": "string", "description": "Start time, ISO8601 (e.g. 2026-08-18T00:00:00).", "required": True},
+            {"name": "filter_entity_id", "type": "string", "description": "Restrict to one entity (e.g. sensor.outside_temp).", "required": False},
+            {"name": "end_time", "type": "string", "description": "End time, ISO8601 (optional).", "required": False},
+        ],
+        "fields": [],
+        "example": '[[{"entity_id": "sensor.x", "state": "20", "last_changed": "2026-08-18T00:00:00"}]]',
+        "read_only": True,
+    },
+    {
+        "name": "list_entity_registry",
+        "description": "List the Home Assistant entity registry — ALL registered entities, including disabled/hidden ones that /api/states never shows. Use device_id to get every entity of one device (enabled and disabled), search to filter by entity_id substring, and limit to bound the result. disabled_by is null (omitted) for enabled entities, 'integration'/'user' for disabled. This is how to tell a disabled entity from one that was never created.",
+        "method": "GET",
+        "path_template": "config/entity_registry/list",
+        "params": [],
+        "fields": ["entity_id", "name", "platform", "disabled_by", "device_id", "config_entry_id", "area_id"],
+        "search_field": "entity_id",
+        "filter_fields": ["device_id"],
+        "transport": "ws",
+        "example": '[{"entity_id": "sensor.smoke_rssi", "name": "Smoke RSSI", "platform": "mqtt", "disabled_by": "integration", "device_id": "dev123", "config_entry_id": "ce1", "area_id": "a1"}]',
+        "read_only": True,
+    },
+    {
+        "name": "list_device_registry",
+        "description": "List the Home Assistant device registry — every device with manufacturer, model, identifiers (e.g. IEEE/Zigbee address), connections, and via_device_id (what it joins through, e.g. the coordinator). Use search to filter by device name substring and limit to bound the result.",
+        "method": "GET",
+        "path_template": "config/device_registry/list",
+        "params": [],
+        "fields": ["id", "name", "name_by_user", "manufacturer", "model", "identifiers", "connections", "via_device_id", "entry_type", "area_id"],
+        "search_field": "name",
+        "transport": "ws",
+        "example": '[{"id": "dev123", "name": "Smoke Detector", "manufacturer": "Tuya", "model": "_TZE284_gyzlwu5q TS0601", "identifiers": [["zigbee", "a4:c1:38:53:2b:6a:d6:5f"]], "via_device_id": "dev-coord"}]',
+        "read_only": True,
+    },
 ]
 
 
@@ -65,6 +124,8 @@ def seed_ha_tools(integration_id: int):
                 params=tool['params'],
                 fields=tool.get('fields'),
                 search_field=tool.get('search_field'),
+                filter_fields=tool.get('filter_fields'),
+                transport=tool.get('transport', 'http'),
                 example=tool['example'],
                 read_only=tool['read_only'],
             )
@@ -81,6 +142,8 @@ def seed_ha_tools(integration_id: int):
                 read_only=tool['read_only'],
                 fields=tool.get('fields'),
                 search_field=tool.get('search_field') or '',
+                filter_fields=tool.get('filter_fields'),
+                transport=tool.get('transport', 'http'),
             )
             created += 1
     return created, updated

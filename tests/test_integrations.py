@@ -184,7 +184,7 @@ class TestReseed:
         create_integration("custom", "https://x.local/api", "none", "")
         reseed_all_integrations()
         assert len(get_tools(1)) == 16  # proxmox
-        assert len(get_tools(2)) == 3   # ha
+        assert len(get_tools(2)) == 8   # ha
         assert get_tools(3) == []       # custom: no seed
 
     def test_reseed_updates_changed_fields(self):

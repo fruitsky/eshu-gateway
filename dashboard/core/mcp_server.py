@@ -64,11 +64,14 @@ def _build_tool_fn(integration_name: str, tool: dict):
     catalog_params = list(tool.get('params') or [])
     fields = tool.get('fields') or []
     search_field = tool.get('search_field') or ''
+    filter_fields = tool.get('filter_fields') or []
+    transport = tool.get('transport') or 'http'
     mutating = not tool.get('read_only')
 
     # Effective param list: catalog params + synthetic params that shape the
-    # response client-side (`full`, `search`, `limit`). They're kept out of the
-    # forwarded params below so they never reach the upstream API.
+    # response client-side (`full`, `search`, `limit`, and one exact-match
+    # param per `filter_fields` entry). They're kept out of the forwarded
+    # params below so they never reach the upstream API.
     effective_params = list(catalog_params)
     if fields and not mutating:
         effective_params.append({'name': 'full', 'type': 'boolean',
@@ -78,6 +81,10 @@ def _build_tool_fn(integration_name: str, tool: dict):
                                  'description': f'Substring filter on {search_field}.', 'required': False})
         effective_params.append({'name': 'limit', 'type': 'integer',
                                  'description': 'Max results (default 50).', 'required': False, 'default': 50})
+    if filter_fields and not mutating:
+        for f in filter_fields:
+            effective_params.append({'name': f, 'type': 'string',
+                                     'description': f'Exact match on the {f} field.', 'required': False})
 
     sig_parts = []
     arg_entries = []
@@ -108,7 +115,7 @@ def _build_tool_fn(integration_name: str, tool: dict):
     src = [f"def {fn_name}({sig}):"]
     src.append("    import json as _json")
     src.append("    from db.integrations import get_integration as _gi, create_pending_call as _cpc")
-    src.append("    from core.integration_proxy import execute_integration_call as _exec, ProxyError as _PE")
+    src.append("    from core.integration_proxy import execute_integration_call as _exec, ProxyError as _PE, _apply_shaping as _shape")
     src.append(f"    _args = {args_literal}")
     src.append(f"    _integration = _gi({integration_name!r})")
     if mutating:
@@ -120,16 +127,27 @@ def _build_tool_fn(integration_name: str, tool: dict):
         src.append("    return _json.dumps({'status': 'pending', 'id': _call_id, "
                     "'message': 'Awaiting operator approval. Call check_approval(" + str(tool['id']) + ") to poll.'})")
     else:
+        filter_literal = repr(filter_fields)
         src.append(f"    _tool = {{'name': {tool['name']!r}, 'enabled': True, 'method': {tool['method']!r}, "
                    f"'path_template': {tool['path_template']!r}, 'params': {params_literal}, "
-                   f"'fields': {fields_literal}, 'search_field': {search_field!r}}}")
-        src.append("    try:")
-        src.append(f"        _res = _exec(_integration, _tool, _args, agent={AGENT_LABEL!r})")
-        src.append("    except _PE as e:")
-        src.append("        return _json.dumps({'error': e.message, 'status_code': e.status_code})")
-        src.append("    if _res.get('error'):")
-        src.append("        return _json.dumps({'error': _res['error'], 'status_code': _res.get('status_code')})")
-        src.append("    return _res['body']")
+                   f"'fields': {fields_literal}, 'search_field': {search_field!r}, "
+                   f"'filter_fields': {filter_literal}, 'transport': {transport!r}}}")
+        if transport == 'ws':
+            src.append("    try:")
+            src.append("        from core.ha_ws import ha_ws_request as _ws")
+            src.append(f"        _res = _ws(_integration, {tool['path_template']!r}, {{}})")
+            src.append("        _body = _json.dumps(_res)")
+            src.append("    except _PE as e:")
+            src.append("        return _json.dumps({'error': e.message, 'status_code': e.status_code})")
+            src.append("    return _shape(_body, _tool, _args)")
+        else:
+            src.append("    try:")
+            src.append(f"        _res = _exec(_integration, _tool, _args, agent={AGENT_LABEL!r})")
+            src.append("    except _PE as e:")
+            src.append("        return _json.dumps({'error': e.message, 'status_code': e.status_code})")
+            src.append("    if _res.get('error'):")
+            src.append("        return _json.dumps({'error': _res['error'], 'status_code': _res.get('status_code')})")
+            src.append("    return _res['body']")
 
     ns = {}
     exec('\n'.join(src), ns)

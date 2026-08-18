@@ -66,6 +66,14 @@ def init_integrations_tables(cursor):
         cursor.execute("ALTER TABLE integration_tools ADD COLUMN search_field TEXT DEFAULT ''")
     except Exception:
         pass
+    try:
+        cursor.execute("ALTER TABLE integration_tools ADD COLUMN transport TEXT DEFAULT 'http'")
+    except Exception:
+        pass
+    try:
+        cursor.execute("ALTER TABLE integration_tools ADD COLUMN filter_fields TEXT DEFAULT '[]'")
+    except Exception:
+        pass
     # One-time backfill: integrations seeded before the `kind` column existed
     # defaulted to 'custom'. Infer 'proxmox' for any that already carry known
     # Proxmox tool names, so existing installs don't need a manual Type edit.
@@ -213,16 +221,18 @@ def delete_integration(name: str) -> bool:
 
 def create_tool(integration_id: int, name: str, description: str, method: str,
                 path_template: str, params, example: str, read_only: bool = True,
-                fields=None, search_field: str = '') -> int:
+                fields=None, search_field: str = '', transport: str = 'http',
+                filter_fields=None) -> int:
     with db_conn() as conn:
         cursor = conn.cursor()
         cursor.execute('''
             INSERT INTO integration_tools
-                (integration_id, name, description, method, path_template, params, fields, search_field, example, read_only, enabled)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                (integration_id, name, description, method, path_template, params, fields, search_field, example, read_only, enabled, transport, filter_fields)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
         ''', (integration_id, name, description, method, path_template,
               json.dumps(params or []), json.dumps(fields or []), search_field or '',
-              example, 1 if read_only else 0))
+              example, 1 if read_only else 0,
+              transport or 'http', json.dumps(filter_fields or [])))
         conn.commit()
         return cursor.lastrowid
 
@@ -246,6 +256,10 @@ def get_tools(integration_id: int = None):
                 item['fields'] = json.loads(item.get('fields') or '[]')
             except (ValueError, TypeError):
                 item['fields'] = []
+            try:
+                item['filter_fields'] = json.loads(item.get('filter_fields') or '[]')
+            except (ValueError, TypeError):
+                item['filter_fields'] = []
             out.append(item)
         return out
 
@@ -274,6 +288,10 @@ def get_tool(integration_name: str, tool_name: str):
             item['fields'] = json.loads(item.get('fields') or '[]')
         except (ValueError, TypeError):
             item['fields'] = []
+        try:
+            item['filter_fields'] = json.loads(item.get('filter_fields') or '[]')
+        except (ValueError, TypeError):
+            item['filter_fields'] = []
         item['integration'] = integration
         return item
 
@@ -287,7 +305,7 @@ def set_tool_enabled(tool_id: int, enabled: bool) -> bool:
 
 
 def update_tool(tool_id: int, **fields) -> bool:
-    allowed = {'name', 'description', 'method', 'path_template', 'params', 'fields', 'search_field', 'example', 'read_only', 'enabled'}
+    allowed = {'name', 'description', 'method', 'path_template', 'params', 'fields', 'search_field', 'example', 'read_only', 'enabled', 'transport', 'filter_fields'}
     updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
     if not updates:
         return False
@@ -295,6 +313,8 @@ def update_tool(tool_id: int, **fields) -> bool:
         updates['params'] = json.dumps(updates['params'])
     if 'fields' in updates:
         updates['fields'] = json.dumps(updates['fields'])
+    if 'filter_fields' in updates:
+        updates['filter_fields'] = json.dumps(updates['filter_fields'])
     if 'read_only' in updates:
         updates['read_only'] = 1 if updates['read_only'] else 0
     if 'enabled' in updates:

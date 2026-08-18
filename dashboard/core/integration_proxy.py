@@ -230,42 +230,53 @@ def _project_body(body: str, fields: list) -> str:
 
 
 def _apply_shaping(body: str, tool: dict, args: dict) -> str:
-    """Client-side response shaping: search filter + limit + field projection.
+    """Client-side response shaping: exact filters + search filter + limit +
+    field projection.
 
-    `full=true` skips all shaping. `search` filters a list by case-insensitive
-    substring on the tool's `search_field`; `limit` caps the list (default 50
-    via the synthetic param). Applied to the unwrapped data before projection."""
+    `full=true` skips all shaping. For each name in the tool's `filter_fields`,
+    an exact-match filter is applied against `args[name]`. `search` filters a
+    list by case-insensitive substring on the tool's `search_field`; `limit`
+    caps the list (default 50 via the synthetic param). Applied to the
+    unwrapped data before projection."""
     a = args or {}
     fields = tool.get('fields') or []
     search_field = tool.get('search_field') or ''
-    if a.get('full') or (not fields and not search_field):
+    filter_fields = tool.get('filter_fields') or []
+    if a.get('full') or (not fields and not search_field and not filter_fields):
         return body
     try:
         data = json.loads(body)
     except (ValueError, TypeError):
         return body
     data = _unwrap_envelope(data)
-    if search_field and isinstance(data, list):
-        search = a.get('search')
-        if search:
-            needle = str(search).lower()
-            data = [item for item in data
-                    if isinstance(item, dict)
-                    and needle in str(_extract(item, search_field)).lower()]
-        limit = a.get('limit')
-        if limit is not None:
-            try:
-                n = int(limit)
-                if n >= 0:
-                    data = data[:n]
-            except (TypeError, ValueError):
-                pass
+    if isinstance(data, list):
+        if filter_fields:
+            for f in filter_fields:
+                val = a.get(f)
+                if val is not None and val != '':
+                    data = [item for item in data
+                            if isinstance(item, dict) and _extract(item, f) == val]
+        if search_field:
+            search = a.get('search')
+            if search:
+                needle = str(search).lower()
+                data = [item for item in data
+                        if isinstance(item, dict)
+                        and needle in str(_extract(item, search_field)).lower()]
+            limit = a.get('limit')
+            if limit is not None:
+                try:
+                    n = int(limit)
+                    if n >= 0:
+                        data = data[:n]
+                except (TypeError, ValueError):
+                    pass
     if fields:
         if isinstance(data, list):
             return json.dumps([_project_dict(item, fields) if isinstance(item, dict) else item for item in data])
         if isinstance(data, dict):
             return json.dumps(_project_dict(data, fields))
-    if search_field:
+    if search_field or filter_fields:
         return json.dumps(data)
     return body
 
