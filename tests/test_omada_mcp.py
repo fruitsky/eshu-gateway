@@ -253,17 +253,22 @@ class TestOmadaSeed:
         })
         r = auth_client.post("/api/integrations/omada/seed")
         assert r.status_code == 200
-        assert r.json()["created"] == 10
+        assert r.json()["created"] == 9
         tools = auth_client.get("/api/integrations/omada/tools").json()
         names = {t["name"] for t in tools}
         assert names == {"list_sites", "get_site", "list_site_devices", "search_devices",
                          "list_site_clients", "get_client", "list_site_ssids",
-                         "list_site_alerts", "block_client", "reconnect_client"}
+                         "block_client", "reconnect_client"}
         bc = next(t for t in tools if t["name"] == "block_client")
         assert bc["read_only"] == 0
         ls = next(t for t in tools if t["name"] == "list_sites")
         assert ls["search_field"] == "name"
         assert "siteId" in ls["fields"]
+        # Grid endpoints need page/pageSize; the seed defaults them so calls
+        # (and the /test endpoint) work without the agent passing them.
+        params = {p["name"]: p for p in ls["params"]}
+        assert params["page"]["default"] == 1
+        assert params["pageSize"]["default"] == 50
 
     def test_tools_namespaced_by_kind(self, auth_client):
         import asyncio
@@ -302,6 +307,44 @@ class TestOmadaSeed:
         fn2 = _build_tool_fn("omada", get_site)
         params2 = list(inspect.signature(fn2).parameters)
         assert "search" not in params2 and "limit" not in params2
+
+
+class TestParamDefaults:
+    """`_build_request` falls back to a param's `default` when the agent omits
+    it, so required-query-param APIs (Omada Grid endpoints) work out of the box
+    and callers can still override."""
+
+    def test_missing_arg_uses_default(self):
+        from core.integration_proxy import _build_request
+        tool = {
+            "method": "GET", "path_template": "/sites", "params": [
+                {"name": "page", "type": "integer", "default": 1},
+                {"name": "pageSize", "type": "integer", "default": 50},
+            ],
+        }
+        _, _, qs, _, _ = _build_request(tool, {})
+        assert qs == "page=1&pageSize=50"
+
+    def test_explicit_arg_overrides_default(self):
+        from core.integration_proxy import _build_request
+        tool = {
+            "method": "GET", "path_template": "/sites", "params": [
+                {"name": "page", "type": "integer", "default": 1},
+                {"name": "pageSize", "type": "integer", "default": 50},
+            ],
+        }
+        _, _, qs, _, _ = _build_request(tool, {"page": 2, "pageSize": 10})
+        assert qs == "page=2&pageSize=10"
+
+    def test_no_default_omits_param(self):
+        from core.integration_proxy import _build_request
+        tool = {
+            "method": "GET", "path_template": "/sites", "params": [
+                {"name": "searchKey", "type": "string", "default": None},
+            ],
+        }
+        _, _, qs, _, _ = _build_request(tool, {})
+        assert qs == ""
 
 
 class TestTlsVerify:

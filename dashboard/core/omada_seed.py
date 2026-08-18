@@ -17,7 +17,10 @@ OMADA_SEED_TOOLS = [
         "description": "List all Omada sites and their summary (site id, name, region, timezone, scenario, type). Use search to filter by site name substring and limit to bound the result. Use this to discover siteId values.",
         "method": "GET",
         "path_template": "/sites",
-        "params": [],
+        "params": [
+            {"name": "page", "type": "integer", "description": "Page number (1-based).", "required": False, "default": 1},
+            {"name": "pageSize", "type": "integer", "description": "Results per page (max 100).", "required": False, "default": 50},
+        ],
         "fields": ["siteId", "name", "region", "timeZone", "scenario", "type"],
         "search_field": "name",
         "example": '[{"siteId": "640effd1b3f2ae5b912275ec", "name": "Home", "region": "Europe", "timeZone": "UTC", "scenario": "Home", "type": 0}]',
@@ -42,6 +45,8 @@ OMADA_SEED_TOOLS = [
         "path_template": "/sites/{siteId}/devices",
         "params": [
             {"name": "siteId", "type": "string", "description": "Site id (from list_sites).", "required": True},
+            {"name": "page", "type": "integer", "description": "Page number (1-based).", "required": False, "default": 1},
+            {"name": "pageSize", "type": "integer", "description": "Results per page (max 100).", "required": False, "default": 50},
         ],
         "fields": ["mac", "name", "type", "modelName", "ip", "status", "lastSeen", "cpuUtil", "memUtil", "sn", "uplinkDeviceName"],
         "search_field": "name",
@@ -67,6 +72,8 @@ OMADA_SEED_TOOLS = [
         "path_template": "/sites/{siteId}/clients",
         "params": [
             {"name": "siteId", "type": "string", "description": "Site id (from list_sites).", "required": True},
+            {"name": "page", "type": "integer", "description": "Page number (1-based).", "required": False, "default": 1},
+            {"name": "pageSize", "type": "integer", "description": "Results per page (max 100).", "required": False, "default": 50},
         ],
         "fields": ["id", "mac", "name", "hostName", "vendor", "deviceType", "ip", "ssid", "signalLevel", "wifiMode", "apName", "healthScore"],
         "search_field": "name",
@@ -93,23 +100,11 @@ OMADA_SEED_TOOLS = [
         "path_template": "/sites/{siteId}/wireless-network/ssids",
         "params": [
             {"name": "siteId", "type": "string", "description": "Site id (from list_sites).", "required": True},
+            {"name": "type", "type": "integer", "description": "Device type: 1=AP, 2=wireless router, 3=both.", "required": False, "default": 3},
         ],
         "fields": ["wlanId", "wlanName", "ssidList"],
         "search_field": "wlanName",
         "example": '[{"wlanId": "wlan1", "wlanName": "Main", "ssidList": [{"ssid": "Home-2.4G"}, {"ssid": "Home-5G"}]}]',
-        "read_only": True,
-    },
-    {
-        "name": "list_site_alerts",
-        "description": "List the recent alert logs for a site (module, content, time, severity). Use search to filter by alert content and limit to bound the result.",
-        "method": "GET",
-        "path_template": "/sites/{siteId}/logs/alerts",
-        "params": [
-            {"name": "siteId", "type": "string", "description": "Site id (from list_sites).", "required": True},
-        ],
-        "fields": ["id", "module", "content", "time", "level"],
-        "search_field": "content",
-        "example": '[{"id": "alert1", "module": "device", "content": "AP-Living went offline", "time": 1700000000000, "level": "error"}]',
         "read_only": True,
     },
     {

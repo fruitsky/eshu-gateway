@@ -134,6 +134,8 @@ def _build_request(tool: dict, args: dict):
     for p in tool.get('params') or []:
         name = p.get('name')
         val = args.get(name)
+        if val is None:
+            val = p.get('default')
         if val is None or val == '':
             continue
         if '{' + name + '}' in path:
