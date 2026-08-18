@@ -133,6 +133,14 @@ of the full VM objects). Every projected tool exposes a **`full`** parameter —
 pass `full: true` to get the complete, unprojected upstream object. Projection is
 defined per tool as its `fields` list in the catalog.
 
+## Search & limit on list tools
+
+List tools that declare a `search_field` also expose **`search`** (case-insensitive
+substring filter on that field) and **`limit`** (max results, default 50), so the
+agent can bound large lists client-side (e.g. `ha_list_entities(search="light")`
+returns only `light.*` entities). These are client-side shaping — they filter/trim
+the response in the proxy and are never forwarded upstream.
+
 ## Adding more integrations
 
 Same flow each time: add the integration (name, base URL, auth) → add or seed its

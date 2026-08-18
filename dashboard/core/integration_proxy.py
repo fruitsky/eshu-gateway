@@ -81,23 +81,26 @@ def _guard_ssrf(base_url: str, path: str):
         raise ProxyError(403, "Blocked: target host does not match the configured integration")
 
 
+def _extract(data, dotted: str):
+    """Extract a (possibly dotted) path from a dict, or None if missing."""
+    cur = data
+    for part in dotted.split('.'):
+        if isinstance(cur, dict) and part in cur:
+            cur = cur[part]
+        else:
+            return None
+    return cur
+
+
 def _project_dict(data: dict, fields: list) -> dict:
     """Project a single object to the listed fields. Fields may be dotted
     paths (e.g. `attributes.friendly_name`); the output key is the last
     segment (so `attributes.friendly_name` -> `friendly_name`)."""
     out = {}
     for f in fields:
-        parts = f.split('.')
-        cur = data
-        ok = True
-        for part in parts:
-            if isinstance(cur, dict) and part in cur:
-                cur = cur[part]
-            else:
-                ok = False
-                break
-        if ok:
-            out[parts[-1]] = cur
+        val = _extract(data, f)
+        if val is not None:
+            out[f.split('.')[-1]] = val
     return out
 
 
@@ -126,6 +129,49 @@ def _project_body(body: str, fields: list) -> str:
         return json.dumps(projected)
     if isinstance(data, dict):
         return json.dumps(_project_dict(data, fields))
+    return body
+
+
+def _apply_shaping(body: str, tool: dict, args: dict) -> str:
+    """Client-side response shaping: search filter + limit + field projection.
+
+    `full=true` skips all shaping. `search` filters a list by case-insensitive
+    substring on the tool's `search_field`; `limit` caps the list (default 50
+    via the synthetic param). Applied to the unwrapped data before projection."""
+    a = args or {}
+    fields = tool.get('fields') or []
+    search_field = tool.get('search_field') or ''
+    if a.get('full') or (not fields and not search_field):
+        return body
+    try:
+        data = json.loads(body)
+    except (ValueError, TypeError):
+        return body
+    # Unwrap the common {"data": <payload>} envelope.
+    if isinstance(data, dict) and isinstance(data.get('data'), (list, dict)):
+        data = data['data']
+    if search_field and isinstance(data, list):
+        search = a.get('search')
+        if search:
+            needle = str(search).lower()
+            data = [item for item in data
+                    if isinstance(item, dict)
+                    and needle in str(_extract(item, search_field)).lower()]
+        limit = a.get('limit')
+        if limit is not None:
+            try:
+                n = int(limit)
+                if n >= 0:
+                    data = data[:n]
+            except (TypeError, ValueError):
+                pass
+    if fields:
+        if isinstance(data, list):
+            return json.dumps([_project_dict(item, fields) if isinstance(item, dict) else item for item in data])
+        if isinstance(data, dict):
+            return json.dumps(_project_dict(data, fields))
+    if search_field:
+        return json.dumps(data)
     return body
 
 
@@ -187,11 +233,10 @@ def execute_integration_call(integration: dict, tool: dict, args: dict, agent: s
         error = f"{type(e).__name__}: {e}"
     latency_ms = int((time.time() - start) * 1000)
 
-    # Response projection (token efficiency): if the tool declares a `fields`
-    # list and the caller didn't ask for `full`, trim the body to those fields.
-    fields = tool.get('fields') or []
-    if outcome == 'ok' and fields and not (args or {}).get('full'):
-        body = _project_body(body, fields)
+    # Client-side response shaping (token efficiency): search filter + limit +
+    # field projection, unless the caller asked for `full`.
+    if outcome == 'ok':
+        body = _apply_shaping(body, tool, args)
 
     record_integration_call(
         integration=integration.get('name', ''),

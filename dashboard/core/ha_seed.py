@@ -8,11 +8,12 @@ Integrations UI's "Seed" action.
 HA_SEED_TOOLS = [
     {
         "name": "list_entities",
-        "description": "List all Home Assistant entities and their current state (entity_id, state, friendly name). Use this to discover entity ids.",
+        "description": "List all Home Assistant entities and their current state (entity_id, state, friendly name). Use search to filter by entity_id substring, and limit to bound the result. Use this to discover entity ids.",
         "method": "GET",
         "path_template": "/states",
         "params": [],
         "fields": ["entity_id", "state", "attributes.friendly_name"],
+        "search_field": "entity_id",
         "example": '[{"entity_id": "light.living_room", "state": "on", "friendly_name": "Living Room"}]',
         "read_only": True,
     },
@@ -63,6 +64,7 @@ def seed_ha_tools(integration_id: int):
                 path_template=tool['path_template'],
                 params=tool['params'],
                 fields=tool.get('fields'),
+                search_field=tool.get('search_field'),
                 example=tool['example'],
                 read_only=tool['read_only'],
             )
@@ -78,6 +80,7 @@ def seed_ha_tools(integration_id: int):
                 tool['example'],
                 read_only=tool['read_only'],
                 fields=tool.get('fields'),
+                search_field=tool.get('search_field') or '',
             )
             created += 1
     return created, updated

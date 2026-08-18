@@ -63,15 +63,21 @@ def _build_tool_fn(integration_name: str, tool: dict):
     fn_name = _safe_ident(tool['name']) + '_' + str(tool['id'])
     catalog_params = list(tool.get('params') or [])
     fields = tool.get('fields') or []
+    search_field = tool.get('search_field') or ''
     mutating = not tool.get('read_only')
 
-    # Effective param list: catalog params + a synthetic `full` escape hatch
-    # for tools that project their response. `full` is kept out of the
-    # forwarded params below so it never reaches the upstream API.
+    # Effective param list: catalog params + synthetic params that shape the
+    # response client-side (`full`, `search`, `limit`). They're kept out of the
+    # forwarded params below so they never reach the upstream API.
     effective_params = list(catalog_params)
     if fields and not mutating:
         effective_params.append({'name': 'full', 'type': 'boolean',
                                  'description': 'Return the full, unprojected object.', 'required': False})
+    if search_field and not mutating:
+        effective_params.append({'name': 'search', 'type': 'string',
+                                 'description': f'Substring filter on {search_field}.', 'required': False})
+        effective_params.append({'name': 'limit', 'type': 'integer',
+                                 'description': 'Max results (default 50).', 'required': False, 'default': 50})
 
     sig_parts = []
     arg_entries = []
@@ -80,6 +86,8 @@ def _build_tool_fn(integration_name: str, tool: dict):
         ptype = _TYPE_MAP.get(p.get('type', 'string'), 'str')
         if p.get('required'):
             sig_parts.append(f"{name}: {ptype}")
+        elif p.get('default') is not None:
+            sig_parts.append(f"{name}: {ptype} = {p['default']!r}")
         else:
             sig_parts.append(f"{name}: {ptype} = None")
         arg_entries.append((p['name'], name))
@@ -113,7 +121,8 @@ def _build_tool_fn(integration_name: str, tool: dict):
                     "'message': 'Awaiting operator approval. Call check_approval(" + str(tool['id']) + ") to poll.'})")
     else:
         src.append(f"    _tool = {{'name': {tool['name']!r}, 'enabled': True, 'method': {tool['method']!r}, "
-                   f"'path_template': {tool['path_template']!r}, 'params': {params_literal}, 'fields': {fields_literal}}}")
+                   f"'path_template': {tool['path_template']!r}, 'params': {params_literal}, "
+                   f"'fields': {fields_literal}, 'search_field': {search_field!r}}}")
         src.append("    try:")
         src.append(f"        _res = _exec(_integration, _tool, _args, agent={AGENT_LABEL!r})")
         src.append("    except _PE as e:")

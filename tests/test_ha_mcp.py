@@ -9,6 +9,26 @@ from db.integrations import (
 from core.integration_proxy import execute_integration_call
 
 
+class _FakeResp:
+    def __init__(self, body, status=200):
+        self._body = body.encode()
+        self.status = status
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def read(self, n=-1):
+        return self._body
+
+
+def _patch_urlopen(monkeypatch, body):
+    monkeypatch.setattr("urllib.request.urlopen",
+                        lambda req, timeout=30: _FakeResp(body))
+
+
 def _call_service_tool():
     return {
         "id": 1,
@@ -126,6 +146,77 @@ class TestHaSeed:
         assert "ha_get_entity" in names
         assert "ha_call_service" in names
         assert not any(" " in n for n in names)
+
+
+class TestHaSearchLimit:
+    """Client-side search/limit shaping on list tools with a search_field."""
+
+    def _tool(self):
+        return {
+            "id": 1, "name": "list_entities", "enabled": True, "method": "GET",
+            "path_template": "/states", "params": [],
+            "fields": ["entity_id", "state", "attributes.friendly_name"],
+            "search_field": "entity_id", "read_only": True,
+        }
+
+    def _entities(self):
+        return json.dumps([
+            {"entity_id": "light.a", "state": "on", "attributes": {"friendly_name": "A"}},
+            {"entity_id": "sensor.x", "state": "23", "attributes": {"friendly_name": "X"}},
+            {"entity_id": "light.b", "state": "off", "attributes": {"friendly_name": "B"}},
+            {"entity_id": "switch.y", "state": "on", "attributes": {"friendly_name": "Y"}},
+        ])
+
+    def test_search_filters_case_insensitive(self, monkeypatch):
+        from core.integration_proxy import execute_integration_call
+        create_integration("ha", "https://ha.local/api", "bearer", "tok", kind="ha")
+        integration = get_integration("ha")
+        _patch_urlopen(monkeypatch, self._entities())
+        res = execute_integration_call(integration, self._tool(),
+                                       {"search": "LIGHT", "limit": 50}, agent="test")
+        out = json.loads(res["body"])
+        assert [e["entity_id"] for e in out] == ["light.a", "light.b"]
+        assert out[0]["friendly_name"] == "A"  # projected
+
+    def test_limit_caps(self, monkeypatch):
+        from core.integration_proxy import execute_integration_call
+        create_integration("ha", "https://ha.local/api", "bearer", "tok", kind="ha")
+        integration = get_integration("ha")
+        _patch_urlopen(monkeypatch, self._entities())
+        res = execute_integration_call(integration, self._tool(), {"limit": 2}, agent="test")
+        assert len(json.loads(res["body"])) == 2
+
+    def test_search_limit_not_forwarded_upstream(self, mock_upstream):
+        from core.integration_proxy import execute_integration_call
+        create_integration("ha", mock_upstream["base_url"], "bearer", "tok", kind="ha")
+        integration = get_integration("ha")
+        res = execute_integration_call(integration, self._tool(),
+                                       {"search": "light", "limit": 50}, agent="test")
+        assert res["status_code"] == 200
+        rec = mock_upstream["requests"][-1]
+        assert rec["method"] == "GET"
+        assert rec["path"] == "/states"  # no ?search= / ?limit=
+
+    def test_schema_exposes_search_and_limit(self, auth_client):
+        import asyncio
+        from core.mcp_server import mcp, refresh_mcp_tools
+        auth_client.post("/api/integrations", json={
+            "name": "ha", "base_url": "https://ha.local/api",
+            "auth_type": "bearer", "secret": "tok", "kind": "ha",
+        })
+        auth_client.post("/api/integrations/ha/seed")
+        refresh_mcp_tools()
+
+        async def _go():
+            tools = await mcp.list_tools()
+            return {t.name: t.inputSchema.get("properties", {}) for t in tools}
+        props = asyncio.run(_go())
+
+        le = props["ha_list_entities"]
+        assert "search" in le and "limit" in le
+        # non-list tool (get_entity) has no search/limit
+        assert "search" not in props["ha_get_entity"]
+        assert "limit" not in props["ha_get_entity"]
 
 
 class TestHaApproval:
