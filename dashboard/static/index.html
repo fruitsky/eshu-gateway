@@ -479,9 +479,15 @@
                   <option value="header">header (custom header)</option>
                   <option value="bearer">bearer</option>
                   <option value="basic">basic</option>
+                  <option value="oauth2">oauth2 (client_credentials)</option>
                   <option value="none">none</option>
                 </select>
                 <input type="text" id="int-auth-header" placeholder="Header name (default Authorization)" class="flex-1 text-xs">
+              </div>
+              <div id="int-oauth-fields" class="hidden flex-col gap-2">
+                <input type="text" id="int-client-id" placeholder="Client ID (from the API portal)" class="w-full text-xs">
+                <input type="password" id="int-client-secret" placeholder="Client Secret" class="w-full text-xs">
+                <input type="text" id="int-token-url" placeholder="Token URL (e.g. https://omada:8043/openapi/authorize/token)" class="w-full text-xs">
               </div>
               <input type="password" id="int-secret" placeholder="Secret / token" class="w-full text-xs">
               <button id="int-submit-btn" onclick="createIntegration()" class="btn btn-sm">Add Integration</button>

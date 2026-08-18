@@ -3440,8 +3440,10 @@ const INTEGRATION_PROFILES = {
                  auth_type: 'header', auth_header: 'X-API-Token',
                  secret_hint: 'Pulse API token',
                  guidance: 'Pulse (Proxmox monitoring). X-API-Token header; Bearer also accepted.' },
-  omada:       { label: 'Omada', seedable: false,
-                 guidance: 'OAuth2 client_credentials → Authorization: Access <token> (+ session/CSRF). Not yet supported — login flow needed.' },
+  omada:       { label: 'Omada', seedable: true,
+                 auth_type: 'oauth2', auth_header: '',
+                 secret_hint: 'Client Secret',
+                 guidance: 'OAuth2 client_credentials → Authorization: AccessToken=<token>. Base URL ends in /openapi/v1/<omadacId>; Client ID/Secret from the Omada portal.' },
   uptime_kuma: { label: 'Uptime Kuma', seedable: false,
                  guidance: 'Not yet supported — configure manually.' },
   jellyfin:    { label: 'Jellyfin', seedable: false,
@@ -3469,13 +3471,17 @@ function onIntKindChange() {
   if (!profile) return;
   const guidance = document.getElementById('int-guidance');
   const authFields = document.getElementById('int-auth-fields');
+  const oauthFields = document.getElementById('int-oauth-fields');
   const authType = document.getElementById('int-auth-type');
   const authHeader = document.getElementById('int-auth-header');
   const secret = document.getElementById('int-secret');
+  const isOAuth2 = profile.auth_type === 'oauth2';
   if (guidance) {
     guidance.textContent = profile.guidance || '';
     guidance.classList.toggle('hidden', !profile.guidance);
   }
+  if (oauthFields) oauthFields.classList.toggle('hidden', !isOAuth2);
+  if (secret) secret.classList.toggle('hidden', isOAuth2);
   if (profile.auth_type) {
     if (authFields) authFields.classList.add('hidden');
     if (authType) authType.value = profile.auth_type;
@@ -3595,6 +3601,9 @@ function resetIntegrationForm() {
   document.getElementById('int-base-url').value = '';
   document.getElementById('int-kind').value = 'proxmox';
   document.getElementById('int-secret').value = '';
+  document.getElementById('int-client-id').value = '';
+  document.getElementById('int-client-secret').value = '';
+  document.getElementById('int-token-url').value = '';
   document.getElementById('int-submit-btn').textContent = 'Add Integration';
   document.getElementById('integration-test-result').classList.add('hidden');
   onIntKindChange();
@@ -3616,6 +3625,11 @@ function editIntegration(name) {
     document.getElementById('int-auth-type').value = i.auth_type || 'bearer';
     document.getElementById('int-auth-header').value = i.auth_header_name || '';
   }
+  // OAuth2 fields are never secrets in the list payload (client_secret is
+  // stripped), so client_id / token_url round-trip; the secret stays blank.
+  document.getElementById('int-client-id').value = i.client_id || '';
+  document.getElementById('int-client-secret').value = '';
+  document.getElementById('int-token-url').value = i.token_url || '';
   document.getElementById('int-submit-btn').textContent = 'Update Integration';
   document.getElementById('integration-test-result').classList.add('hidden');
   // Bring the form into view and flash it so the "editing" state is obvious
@@ -3639,6 +3653,12 @@ async function createIntegration() {
   };
   const secret = document.getElementById('int-secret').value;
   if (secret) payload.secret = secret;
+  const clientId = document.getElementById('int-client-id').value;
+  const clientSecret = document.getElementById('int-client-secret').value;
+  const tokenUrl = document.getElementById('int-token-url').value;
+  if (clientId) payload.client_id = clientId;
+  if (clientSecret) payload.client_secret = clientSecret;
+  if (tokenUrl) payload.token_url = tokenUrl;
   if (_editingIntegration) {
     try {
       const res = await authFetch('/api/integrations/' + encodeURIComponent(_editingIntegration), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });

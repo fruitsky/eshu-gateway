@@ -2131,6 +2131,9 @@ class IntegrationPayload(BaseModel):
     auth_type: str = 'bearer'
     auth_header_name: str = ''
     secret: str = ''
+    client_id: str = ''
+    client_secret: str = ''
+    token_url: str = ''
     enabled: bool = True
     kind: str = 'custom'
 
@@ -2139,6 +2142,9 @@ class IntegrationUpdatePayload(BaseModel):
     auth_type: str = None
     auth_header_name: str = None
     secret: str = None
+    client_id: str = None
+    client_secret: str = None
+    token_url: str = None
     enabled: bool = None
     kind: str = None
 
@@ -2194,10 +2200,11 @@ def create_integration_endpoint(payload: IntegrationPayload, request: Request):
         raise HTTPException(status_code=400, detail="Name is required")
     if get_integration(name):
         raise HTTPException(status_code=400, detail="Integration already exists")
-    if payload.auth_type not in ('none', 'bearer', 'basic', 'header'):
+    if payload.auth_type not in ('none', 'bearer', 'basic', 'header', 'oauth2'):
         raise HTTPException(status_code=400, detail="Invalid auth_type")
     create_integration(name, payload.base_url.strip(), payload.auth_type, payload.secret,
-                       payload.auth_header_name, payload.enabled, payload.kind)
+                       payload.auth_header_name, payload.enabled, payload.kind,
+                       payload.client_id, payload.client_secret, payload.token_url)
     record_audit_event("integration_created", details=f"Integration '{name}' created (kind {payload.kind})")
     return {"status": "ok", "name": name}
 
@@ -2214,7 +2221,7 @@ def update_integration_endpoint(name: str, payload: IntegrationUpdatePayload, re
     if not get_integration(name):
         raise HTTPException(status_code=404, detail="Integration not found")
     data = payload.model_dump(exclude_none=True)
-    if 'auth_type' in data and data['auth_type'] not in ('none', 'bearer', 'basic', 'header'):
+    if 'auth_type' in data and data['auth_type'] not in ('none', 'bearer', 'basic', 'header', 'oauth2'):
         raise HTTPException(status_code=400, detail="Invalid auth_type")
     update_integration(name, **data)
     record_audit_event("integration_updated", details=f"Integration '{name}' updated")

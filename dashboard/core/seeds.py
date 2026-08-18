@@ -8,10 +8,12 @@ code path.
 from db.integrations import get_integrations
 from core.proxmox_seed import seed_proxmox_tools
 from core.ha_seed import seed_ha_tools
+from core.omada_seed import seed_omada_tools
 
 SEEDERS = {
     'proxmox': seed_proxmox_tools,
     'ha': seed_ha_tools,
+    'omada': seed_omada_tools,
 }
 
 

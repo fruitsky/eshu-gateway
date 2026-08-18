@@ -25,6 +25,18 @@ def init_integrations_tables(cursor):
         cursor.execute("ALTER TABLE integrations ADD COLUMN kind TEXT DEFAULT 'custom'")
     except Exception:
         pass
+    try:
+        cursor.execute("ALTER TABLE integrations ADD COLUMN client_id TEXT DEFAULT ''")
+    except Exception:
+        pass
+    try:
+        cursor.execute("ALTER TABLE integrations ADD COLUMN client_secret TEXT DEFAULT ''")
+    except Exception:
+        pass
+    try:
+        cursor.execute("ALTER TABLE integrations ADD COLUMN token_url TEXT DEFAULT ''")
+    except Exception:
+        pass
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS integration_tools (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -98,21 +110,23 @@ def init_integrations_tables(cursor):
 
 def create_integration(name: str, base_url: str, auth_type: str, secret: str,
                        auth_header_name: str = '', enabled: bool = True,
-                       kind: str = 'custom') -> int:
+                       kind: str = 'custom', client_id: str = '',
+                       client_secret: str = '', token_url: str = '') -> int:
     with db_conn() as conn:
         cursor = conn.cursor()
         now = int(time.time())
         cursor.execute('''
-            INSERT INTO integrations (name, base_url, auth_type, auth_header_name, secret, enabled, kind, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (name, base_url, auth_type, auth_header_name, secret, 1 if enabled else 0, kind, now))
+            INSERT INTO integrations (name, base_url, auth_type, auth_header_name, secret, enabled, kind, created_at, client_id, client_secret, token_url)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (name, base_url, auth_type, auth_header_name, secret, 1 if enabled else 0, kind, now,
+              client_id, client_secret, token_url))
         conn.commit()
         return cursor.lastrowid
 
 
 def get_integrations(include_secret: bool = False):
-    """List integrations. Secret is server-side only — omitted unless the
-    caller explicitly opts in (internal proxy path)."""
+    """List integrations. Secret material is server-side only — omitted unless
+    the caller explicitly opts in (internal proxy path)."""
     with db_conn() as conn:
         cursor = conn.cursor()
         cursor.execute('SELECT * FROM integrations ORDER BY name ASC')
@@ -122,6 +136,7 @@ def get_integrations(include_secret: bool = False):
             item = dict(row)
             if not include_secret:
                 item.pop('secret', None)
+                item.pop('client_secret', None)
             out.append(item)
         return out
 
@@ -145,8 +160,10 @@ def get_integration_by_id(integration_id: int):
 
 def update_integration(name: str, base_url: str = None, auth_type: str = None,
                        secret: str = None, auth_header_name: str = None,
-                       enabled: bool = None, kind: str = None) -> bool:
-    """Update an integration. `secret=None` means 'leave unchanged'."""
+                       enabled: bool = None, kind: str = None,
+                       client_id: str = None, client_secret: str = None,
+                       token_url: str = None) -> bool:
+    """Update an integration. `secret=None`/`client_secret=None` mean 'leave unchanged'."""
     current = get_integration(name)
     if not current:
         return False
@@ -156,12 +173,17 @@ def update_integration(name: str, base_url: str = None, auth_type: str = None,
     new_secret = secret if secret is not None else current['secret']
     new_enabled = (1 if enabled else 0) if enabled is not None else current['enabled']
     new_kind = kind if kind is not None else current.get('kind', 'custom')
+    new_client_id = client_id if client_id is not None else current.get('client_id', '')
+    new_client_secret = client_secret if client_secret is not None else current.get('client_secret', '')
+    new_token_url = token_url if token_url is not None else current.get('token_url', '')
     with db_conn() as conn:
         cursor = conn.cursor()
         cursor.execute('''
-            UPDATE integrations SET base_url = ?, auth_type = ?, auth_header_name = ?, secret = ?, enabled = ?, kind = ?
+            UPDATE integrations SET base_url = ?, auth_type = ?, auth_header_name = ?, secret = ?,
+                enabled = ?, kind = ?, client_id = ?, client_secret = ?, token_url = ?
             WHERE name = ?
-        ''', (new_base, new_auth, new_header, new_secret, new_enabled, new_kind, name))
+        ''', (new_base, new_auth, new_header, new_secret, new_enabled, new_kind,
+              new_client_id, new_client_secret, new_token_url, name))
         conn.commit()
         return cursor.rowcount > 0
 

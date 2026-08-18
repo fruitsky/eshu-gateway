@@ -18,7 +18,12 @@ MAX_BODY_BYTES = 1048576
 PREVIEW_CHARS = 2000
 DEFAULT_TIMEOUT = 30
 
-ALLOWED_AUTH_TYPES = ('none', 'bearer', 'basic', 'header')
+ALLOWED_AUTH_TYPES = ('none', 'bearer', 'basic', 'header', 'oauth2')
+
+# In-memory OAuth2 access-token cache, keyed by integration name. Omada tokens
+# don't expire, so a fetched token is reused for the process lifetime unless an
+# upstream 401 forces a re-fetch.
+_oauth_tokens = {}
 
 
 class ProxyError(Exception):
@@ -26,6 +31,68 @@ class ProxyError(Exception):
         super().__init__(message)
         self.status_code = status_code
         self.message = message
+
+
+def _omadac_id(integration: dict) -> str:
+    """Omada embeds the controller/account id as the last path segment of the
+    base URL (e.g. .../openapi/v1/<omadacId>); the token exchange needs it too."""
+    base = (integration.get('base_url') or '').rstrip('/')
+    return base.rsplit('/', 1)[-1] if base else ''
+
+
+def _fetch_oauth2_token(integration: dict) -> str:
+    """Omada OAuth2 client_credentials token exchange.
+
+    POST <token_url>?grant_type=client_credentials with a JSON body of
+    {omadacId, client_id, client_secret}; the access token comes back under
+    `result.accessToken`. Tokens are cached (no TTL) and re-fetched only on an
+    upstream 401."""
+    token_url = (integration.get('token_url') or '').strip()
+    client_id = integration.get('client_id') or ''
+    client_secret = integration.get('client_secret') or ''
+    omadac_id = _omadac_id(integration)
+    if not token_url:
+        raise ProxyError(500, "OAuth2 integration is missing a token_url")
+    if not client_id or not client_secret:
+        raise ProxyError(500, "OAuth2 integration is missing client_id / client_secret")
+    if not omadac_id:
+        raise ProxyError(500, "OAuth2 integration base_url must end in the Omada account id")
+    parsed = urllib.parse.urlparse(token_url)
+    if parsed.scheme not in ('http', 'https'):
+        raise ProxyError(500, "OAuth2 token_url must be http(s)")
+    sep = '&' if '?' in token_url else '?'
+    url = f"{token_url}{sep}grant_type=client_credentials"
+    body = json.dumps({
+        'omadacId': omadac_id,
+        'client_id': client_id,
+        'client_secret': client_secret,
+    }).encode('utf-8')
+    req = urllib.request.Request(
+        url, data=body, method='POST',
+        headers={'Content-Type': 'application/json'})
+    try:
+        with urllib.request.urlopen(req, timeout=DEFAULT_TIMEOUT) as resp:
+            raw = resp.read(MAX_BODY_BYTES + 1)
+            payload = json.loads(raw.decode('utf-8', errors='replace'))
+    except urllib.error.HTTPError as e:
+        raise ProxyError(502, f"OAuth2 token endpoint returned HTTP {e.code}")
+    except urllib.error.URLError as e:
+        raise ProxyError(502, f"OAuth2 token endpoint unreachable: {e.reason}")
+    result = payload.get('result') or {}
+    token = result.get('accessToken')
+    if isinstance(token, str) and token:
+        return token
+    raise ProxyError(502, "OAuth2 token endpoint returned no accessToken")
+
+
+def _oauth2_headers(integration: dict) -> dict:
+    name = integration.get('name') or ''
+    token = _oauth_tokens.get(name)
+    if not token:
+        token = _fetch_oauth2_token(integration)
+        if name:
+            _oauth_tokens[name] = token
+    return {'Authorization': 'AccessToken=' + token}
 
 
 def _auth_headers(integration: dict) -> dict:
@@ -39,6 +106,8 @@ def _auth_headers(integration: dict) -> dict:
     elif auth_type == 'header' and secret:
         name = integration.get('auth_header_name') or 'Authorization'
         headers[name] = secret
+    elif auth_type == 'oauth2':
+        headers.update(_oauth2_headers(integration))
     return headers
 
 
@@ -104,11 +173,26 @@ def _project_dict(data: dict, fields: list) -> dict:
     return out
 
 
+def _unwrap_envelope(data):
+    """Descend through the common API envelopes. Proxmox/Omada wrap payloads in
+    `{"data": ...}` and Omada additionally in `{"result": ...}` (which itself
+    holds a `{"data": [...]}` grid). Unwrapping both lets projection/search/limit
+    shaping operate on the actual list/object regardless of wrapper."""
+    if not isinstance(data, dict):
+        return data
+    if isinstance(data.get('result'), (list, dict)):
+        data = data['result']
+    if isinstance(data, dict) and isinstance(data.get('data'), (list, dict)):
+        data = data['data']
+    return data
+
+
 def _project_body(body: str, fields: list) -> str:
     """Project a JSON response down to the listed fields.
 
-    Descends into the common `{"data": ...}` API envelope (Proxmox), then
-    projects list items / a single object. Supports dotted field paths.
+    Descends into the common `{"data": ...}` API envelope (Proxmox) and the
+    Omada `{"result": {"data": [...]}}` envelope, then projects list items /
+    a single object. Supports dotted field paths.
     Returns the body unchanged if it isn't valid JSON or a shape we can project."""
     if not fields:
         return body
@@ -116,9 +200,7 @@ def _project_body(body: str, fields: list) -> str:
         data = json.loads(body)
     except (ValueError, TypeError):
         return body
-    # Unwrap the common {"data": <payload>} envelope.
-    if isinstance(data, dict) and isinstance(data.get('data'), (list, dict)):
-        data = data['data']
+    data = _unwrap_envelope(data)
     if isinstance(data, list):
         projected = []
         for item in data:
@@ -147,9 +229,7 @@ def _apply_shaping(body: str, tool: dict, args: dict) -> str:
         data = json.loads(body)
     except (ValueError, TypeError):
         return body
-    # Unwrap the common {"data": <payload>} envelope.
-    if isinstance(data, dict) and isinstance(data.get('data'), (list, dict)):
-        data = data['data']
+    data = _unwrap_envelope(data)
     if search_field and isinstance(data, list):
         search = a.get('search')
         if search:
@@ -209,28 +289,42 @@ def execute_integration_call(integration: dict, tool: dict, args: dict, agent: s
     body = ''
     truncated = 0
     error = None
-    try:
-        req = urllib.request.Request(url, data=body_bytes, headers=headers, method=method)
-        with urllib.request.urlopen(req, timeout=DEFAULT_TIMEOUT) as resp:
-            status_code = resp.status
-            raw = resp.read(MAX_BODY_BYTES + 1)
-            if len(raw) > MAX_BODY_BYTES:
-                truncated = 1
-                raw = raw[:MAX_BODY_BYTES]
-            body = raw.decode('utf-8', errors='replace')
-    except urllib.error.HTTPError as e:
-        status_code = e.code
-        outcome = 'error'
+    attempt = 0
+    while True:
+        attempt += 1
         try:
-            body = e.read(MAX_BODY_BYTES).decode('utf-8', errors='replace')
-        except Exception:
-            body = ''
-    except urllib.error.URLError as e:
-        outcome = 'error'
-        error = str(e.reason)
-    except Exception as e:
-        outcome = 'error'
-        error = f"{type(e).__name__}: {e}"
+            req = urllib.request.Request(url, data=body_bytes, headers=headers, method=method)
+            with urllib.request.urlopen(req, timeout=DEFAULT_TIMEOUT) as resp:
+                status_code = resp.status
+                raw = resp.read(MAX_BODY_BYTES + 1)
+                if len(raw) > MAX_BODY_BYTES:
+                    truncated = 1
+                    raw = raw[:MAX_BODY_BYTES]
+                body = raw.decode('utf-8', errors='replace')
+            break
+        except urllib.error.HTTPError as e:
+            status_code = e.code
+            outcome = 'error'
+            try:
+                body = e.read(MAX_BODY_BYTES).decode('utf-8', errors='replace')
+            except Exception:
+                body = ''
+            # OAuth2: a 401 may mean the cached token was rejected. Clear the
+            # cache and retry once with a freshly-fetched token.
+            if (auth_type == 'oauth2' and e.code == 401 and attempt == 1
+                    and integration.get('name') in _oauth_tokens):
+                _oauth_tokens.pop(integration.get('name'), None)
+                headers = _auth_headers(integration)
+                continue
+            break
+        except urllib.error.URLError as e:
+            outcome = 'error'
+            error = str(e.reason)
+            break
+        except Exception as e:
+            outcome = 'error'
+            error = f"{type(e).__name__}: {e}"
+            break
     latency_ms = int((time.time() - start) * 1000)
 
     # Client-side response shaping (token efficiency): search filter + limit +
