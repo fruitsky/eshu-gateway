@@ -186,7 +186,7 @@ class _FakeResp:
 
 def _patch_urlopen(monkeypatch, body):
     monkeypatch.setattr("urllib.request.urlopen",
-                        lambda req, timeout=30: _FakeResp(body))
+                        lambda req, timeout=30, context=None: _FakeResp(body))
 
 
 def _omada_read_tool(name="list_sites", path="/sites", fields=None, search_field="name"):
@@ -302,3 +302,49 @@ class TestOmadaSeed:
         fn2 = _build_tool_fn("omada", get_site)
         params2 = list(inspect.signature(fn2).parameters)
         assert "search" not in params2 and "limit" not in params2
+
+
+class TestTlsVerify:
+    """The verify_tls toggle is available on every integration and controls
+    whether the proxy verifies the controller's TLS certificate."""
+
+    def test_ssl_context_defaults_to_verified(self):
+        from core.integration_proxy import _ssl_context
+        assert _ssl_context({"verify_tls": 1}) is None
+        assert _ssl_context({}) is None
+
+    def test_ssl_context_unverified_when_disabled(self):
+        import ssl
+        from core.integration_proxy import _ssl_context
+        ctx = _ssl_context({"verify_tls": 0})
+        assert ctx is not None
+        assert ctx.verify_mode == ssl.CERT_NONE
+
+    def test_verify_tls_roundtrip(self, auth_client):
+        auth_client.post("/api/integrations", json={
+            "name": "omada", "base_url": "https://omada.local:8043/openapi/v1/omadac-1",
+            "auth_type": "oauth2", "client_id": "cid", "client_secret": "csecret",
+            "token_url": "https://omada.local:8043/openapi/authorize/token",
+            "kind": "omada", "verify_tls": False,
+        })
+        ints = auth_client.get("/api/integrations").json()
+        row = next(i for i in ints if i["name"] == "omada")
+        assert row["verify_tls"] == 0
+        r = auth_client.put("/api/integrations/omada", json={"verify_tls": True})
+        assert r.status_code == 200
+        row = next(i for i in auth_client.get("/api/integrations").json() if i["name"] == "omada")
+        assert row["verify_tls"] == 1
+
+    def test_test_endpoint_returns_json_on_proxy_error(self, auth_client):
+        """An OAuth2 integration with no token_url raises ProxyError inside the
+        test endpoint — it must surface as JSON (not a non-JSON 500)."""
+        auth_client.post("/api/integrations", json={
+            "name": "broken", "base_url": "https://omada.local/openapi/v1/omadac-1",
+            "auth_type": "oauth2", "client_id": "cid", "client_secret": "csecret",
+            "kind": "omada",
+        })
+        auth_client.post("/api/integrations/broken/seed")
+        r = auth_client.post("/api/integrations/broken/test")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["error"] and "token_url" in data["error"]

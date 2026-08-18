@@ -93,7 +93,7 @@ from core.gateway_watch import (
 )
 from core.utils import DASHBOARD_VERSION, decode_cmd, _resolve_gateway_token, _hash_password, _verify_password
 from core.integration_auth import resolve_agent, resolve_agent_optional, extract_agent_token
-from core.integration_proxy import execute_integration_call
+from core.integration_proxy import execute_integration_call, ProxyError
 from core.mcp_server import mcp as eshu_mcp, refresh_mcp_tools, refresh_mcp_allowed_hosts
 from core.seeds import seed_for_kind, reseed_all_integrations
 
@@ -2134,6 +2134,7 @@ class IntegrationPayload(BaseModel):
     client_id: str = ''
     client_secret: str = ''
     token_url: str = ''
+    verify_tls: bool = True
     enabled: bool = True
     kind: str = 'custom'
 
@@ -2145,6 +2146,7 @@ class IntegrationUpdatePayload(BaseModel):
     client_id: str = None
     client_secret: str = None
     token_url: str = None
+    verify_tls: bool = None
     enabled: bool = None
     kind: str = None
 
@@ -2204,7 +2206,8 @@ def create_integration_endpoint(payload: IntegrationPayload, request: Request):
         raise HTTPException(status_code=400, detail="Invalid auth_type")
     create_integration(name, payload.base_url.strip(), payload.auth_type, payload.secret,
                        payload.auth_header_name, payload.enabled, payload.kind,
-                       payload.client_id, payload.client_secret, payload.token_url)
+                       payload.client_id, payload.client_secret, payload.token_url,
+                       payload.verify_tls)
     record_audit_event("integration_created", details=f"Integration '{name}' created (kind {payload.kind})")
     return {"status": "ok", "name": name}
 
@@ -2247,7 +2250,18 @@ def test_integration_endpoint(name: str, request: Request):
     if not candidate:
         raise HTTPException(status_code=400,
                             detail="No enabled read-only tool with zero required params — seed the integration first")
-    result = execute_integration_call(integration, candidate, {}, agent='test')
+    try:
+        result = execute_integration_call(integration, candidate, {}, agent='test')
+    except ProxyError as e:
+        # e.g. OAuth2 token fetch rejected the self-signed cert or credentials.
+        # Return the reason as JSON so the UI can show it instead of a 500.
+        return {
+            "status_code": e.status_code,
+            "error": e.message,
+            "tool": candidate['name'],
+            "preview": "",
+            "truncated": 0,
+        }
     return {
         "status_code": result['status_code'],
         "error": result['error'],
@@ -2366,7 +2380,10 @@ def approve_integration_call(call_id: int, request: Request):
     tool = get_tool(call['integration'], call['tool'])
     if not integration or not tool:
         raise HTTPException(status_code=404, detail="Integration or tool missing")
-    result = execute_integration_call(integration, tool, call['payload'], agent='operator')
+    try:
+        result = execute_integration_call(integration, tool, call['payload'], agent='operator')
+    except ProxyError as e:
+        result = {'error': e.message, 'status_code': e.status_code}
     set_pending_call_status(call_id, 'approved', json.dumps(result))
     _surface_integration_call(call, 'integration-approved')
     record_audit_event("integration_call_approved",

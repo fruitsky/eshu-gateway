@@ -3442,8 +3442,8 @@ const INTEGRATION_PROFILES = {
                  guidance: 'Pulse (Proxmox monitoring). X-API-Token header; Bearer also accepted.' },
   omada:       { label: 'Omada', seedable: true,
                  auth_type: 'oauth2', auth_header: '',
-                 secret_hint: 'Client Secret',
-                 guidance: 'OAuth2 client_credentials → Authorization: AccessToken=<token>. Base URL ends in /openapi/v1/<omadacId>; Client ID/Secret from the Omada portal.' },
+                 secret_hint: 'Client Secret', insecure_tls: true,
+                 guidance: 'OAuth2 client_credentials → Authorization: AccessToken=<token>. Base URL ends in /openapi/v1/<omadacId>; Client ID/Secret from the Omada portal. The controller uses a self-signed cert — TLS verification is skipped by default.' },
   uptime_kuma: { label: 'Uptime Kuma', seedable: false,
                  guidance: 'Not yet supported — configure manually.' },
   jellyfin:    { label: 'Jellyfin', seedable: false,
@@ -3475,6 +3475,7 @@ function onIntKindChange() {
   const authType = document.getElementById('int-auth-type');
   const authHeader = document.getElementById('int-auth-header');
   const secret = document.getElementById('int-secret');
+  const verifyTls = document.getElementById('int-verify-tls');
   const isOAuth2 = profile.auth_type === 'oauth2';
   if (guidance) {
     guidance.textContent = profile.guidance || '';
@@ -3482,6 +3483,7 @@ function onIntKindChange() {
   }
   if (oauthFields) oauthFields.classList.toggle('hidden', !isOAuth2);
   if (secret) secret.classList.toggle('hidden', isOAuth2);
+  if (verifyTls && !_editingIntegration) verifyTls.checked = !!profile.insecure_tls;
   if (profile.auth_type) {
     if (authFields) authFields.classList.add('hidden');
     if (authType) authType.value = profile.auth_type;
@@ -3630,6 +3632,8 @@ function editIntegration(name) {
   document.getElementById('int-client-id').value = i.client_id || '';
   document.getElementById('int-client-secret').value = '';
   document.getElementById('int-token-url').value = i.token_url || '';
+  var verifyTls = document.getElementById('int-verify-tls');
+  if (verifyTls) verifyTls.checked = i.verify_tls === 0 || i.verify_tls === false;
   document.getElementById('int-submit-btn').textContent = 'Update Integration';
   document.getElementById('integration-test-result').classList.add('hidden');
   // Bring the form into view and flash it so the "editing" state is obvious
@@ -3659,6 +3663,8 @@ async function createIntegration() {
   if (clientId) payload.client_id = clientId;
   if (clientSecret) payload.client_secret = clientSecret;
   if (tokenUrl) payload.token_url = tokenUrl;
+  const verifyTls = document.getElementById('int-verify-tls');
+  if (verifyTls) payload.verify_tls = !verifyTls.checked;
   if (_editingIntegration) {
     try {
       const res = await authFetch('/api/integrations/' + encodeURIComponent(_editingIntegration), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });

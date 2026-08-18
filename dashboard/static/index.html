@@ -490,6 +490,10 @@
                 <input type="text" id="int-token-url" placeholder="Token URL (e.g. https://omada:8043/openapi/authorize/token)" class="w-full text-xs">
               </div>
               <input type="password" id="int-secret" placeholder="Secret / token" class="w-full text-xs">
+              <label class="flex items-center gap-2 cursor-pointer select-none text-xs text-muted">
+                <input type="checkbox" id="int-verify-tls">
+                Skip TLS certificate verification (self-signed cert on the controller)
+              </label>
               <button id="int-submit-btn" onclick="createIntegration()" class="btn btn-sm">Add Integration</button>
             </div>
             <div id="integration-test-result" class="hidden mb-3 p-2 rounded bg-black/20 text-xs break-all"></div>

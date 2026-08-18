@@ -37,6 +37,10 @@ def init_integrations_tables(cursor):
         cursor.execute("ALTER TABLE integrations ADD COLUMN token_url TEXT DEFAULT ''")
     except Exception:
         pass
+    try:
+        cursor.execute("ALTER TABLE integrations ADD COLUMN verify_tls INTEGER DEFAULT 1")
+    except Exception:
+        pass
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS integration_tools (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -111,15 +115,16 @@ def init_integrations_tables(cursor):
 def create_integration(name: str, base_url: str, auth_type: str, secret: str,
                        auth_header_name: str = '', enabled: bool = True,
                        kind: str = 'custom', client_id: str = '',
-                       client_secret: str = '', token_url: str = '') -> int:
+                       client_secret: str = '', token_url: str = '',
+                       verify_tls: bool = True) -> int:
     with db_conn() as conn:
         cursor = conn.cursor()
         now = int(time.time())
         cursor.execute('''
-            INSERT INTO integrations (name, base_url, auth_type, auth_header_name, secret, enabled, kind, created_at, client_id, client_secret, token_url)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO integrations (name, base_url, auth_type, auth_header_name, secret, enabled, kind, created_at, client_id, client_secret, token_url, verify_tls)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (name, base_url, auth_type, auth_header_name, secret, 1 if enabled else 0, kind, now,
-              client_id, client_secret, token_url))
+              client_id, client_secret, token_url, 1 if verify_tls else 0))
         conn.commit()
         return cursor.lastrowid
 
@@ -162,7 +167,7 @@ def update_integration(name: str, base_url: str = None, auth_type: str = None,
                        secret: str = None, auth_header_name: str = None,
                        enabled: bool = None, kind: str = None,
                        client_id: str = None, client_secret: str = None,
-                       token_url: str = None) -> bool:
+                       token_url: str = None, verify_tls: bool = None) -> bool:
     """Update an integration. `secret=None`/`client_secret=None` mean 'leave unchanged'."""
     current = get_integration(name)
     if not current:
@@ -176,14 +181,15 @@ def update_integration(name: str, base_url: str = None, auth_type: str = None,
     new_client_id = client_id if client_id is not None else current.get('client_id', '')
     new_client_secret = client_secret if client_secret is not None else current.get('client_secret', '')
     new_token_url = token_url if token_url is not None else current.get('token_url', '')
+    new_verify_tls = (1 if verify_tls else 0) if verify_tls is not None else current.get('verify_tls', 1)
     with db_conn() as conn:
         cursor = conn.cursor()
         cursor.execute('''
             UPDATE integrations SET base_url = ?, auth_type = ?, auth_header_name = ?, secret = ?,
-                enabled = ?, kind = ?, client_id = ?, client_secret = ?, token_url = ?
+                enabled = ?, kind = ?, client_id = ?, client_secret = ?, token_url = ?, verify_tls = ?
             WHERE name = ?
         ''', (new_base, new_auth, new_header, new_secret, new_enabled, new_kind,
-              new_client_id, new_client_secret, new_token_url, name))
+              new_client_id, new_client_secret, new_token_url, new_verify_tls, name))
         conn.commit()
         return cursor.rowcount > 0
 

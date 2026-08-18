@@ -189,7 +189,7 @@ class _FakeResp:
 
 def _patch_urlopen(monkeypatch, body):
     monkeypatch.setattr("urllib.request.urlopen",
-                        lambda req, timeout=30: _FakeResp(body))
+                        lambda req, timeout=30, context=None: _FakeResp(body))
 
 
 def _proj_tool(name="list_vms", fields=None, params=None, path=None, tool_id=1):

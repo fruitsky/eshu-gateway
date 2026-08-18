@@ -6,6 +6,7 @@ truncation, and audit logging.
 """
 import base64
 import json
+import ssl
 import time
 import urllib.error
 import urllib.parse
@@ -24,6 +25,18 @@ ALLOWED_AUTH_TYPES = ('none', 'bearer', 'basic', 'header', 'oauth2')
 # don't expire, so a fetched token is reused for the process lifetime unless an
 # upstream 401 forces a re-fetch.
 _oauth_tokens = {}
+
+# Shared context for integrations that opt out of TLS verification (self-signed
+# certs, common on LAN controllers).
+_UNVERIFIED_CTX = ssl._create_unverified_context()
+
+
+def _ssl_context(integration: dict):
+    """Return a no-verify TLS context when the integration's `verify_tls` is
+    off; `None` (library default, verified) otherwise."""
+    if not integration.get('verify_tls', 1):
+        return _UNVERIFIED_CTX
+    return None
 
 
 class ProxyError(Exception):
@@ -71,7 +84,7 @@ def _fetch_oauth2_token(integration: dict) -> str:
         url, data=body, method='POST',
         headers={'Content-Type': 'application/json'})
     try:
-        with urllib.request.urlopen(req, timeout=DEFAULT_TIMEOUT) as resp:
+        with urllib.request.urlopen(req, timeout=DEFAULT_TIMEOUT, context=_ssl_context(integration)) as resp:
             raw = resp.read(MAX_BODY_BYTES + 1)
             payload = json.loads(raw.decode('utf-8', errors='replace'))
     except urllib.error.HTTPError as e:
@@ -294,7 +307,7 @@ def execute_integration_call(integration: dict, tool: dict, args: dict, agent: s
         attempt += 1
         try:
             req = urllib.request.Request(url, data=body_bytes, headers=headers, method=method)
-            with urllib.request.urlopen(req, timeout=DEFAULT_TIMEOUT) as resp:
+            with urllib.request.urlopen(req, timeout=DEFAULT_TIMEOUT, context=_ssl_context(integration)) as resp:
                 status_code = resp.status
                 raw = resp.read(MAX_BODY_BYTES + 1)
                 if len(raw) > MAX_BODY_BYTES:
