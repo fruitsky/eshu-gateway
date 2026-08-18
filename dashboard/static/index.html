@@ -494,6 +494,13 @@
                 <input type="checkbox" id="int-verify-tls">
                 Skip TLS certificate verification (self-signed cert on the controller)
               </label>
+              <label class="block text-xs text-muted">Gate mutating calls:
+                <select id="int-gate-mode" class="w-full text-xs">
+                  <option value="destructive">destructive — approve only deletes/removals/resets</option>
+                  <option value="all">all — approve every mutating call</option>
+                  <option value="none">none — auto-approve everything (audit only)</option>
+                </select>
+              </label>
               <button id="int-submit-btn" onclick="createIntegration()" class="btn btn-sm">Add Integration</button>
             </div>
             <div id="integration-test-result" class="hidden mb-3 p-2 rounded bg-black/20 text-xs break-all"></div>

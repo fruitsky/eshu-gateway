@@ -100,12 +100,13 @@ class TestHaSeed:
         })
         r = auth_client.post("/api/integrations/ha/seed")
         assert r.status_code == 200
-        assert r.json()["created"] == 8
+        assert r.json()["created"] == 12  # 8 curated + generic read/write/ws_read/ws_write
         tools = auth_client.get("/api/integrations/ha/tools").json()
         names = {t["name"] for t in tools}
         assert names == {"list_entities", "get_entity", "call_service",
                          "list_services", "get_config", "get_history",
-                         "list_entity_registry", "list_device_registry"}
+                         "list_entity_registry", "list_device_registry",
+                         "read", "write", "ws_read", "ws_write"}
         cs = next(t for t in tools if t["name"] == "call_service")
         assert cs["read_only"] == 0
         assert next(p for p in cs["params"] if p["name"] == "data")["type"] == "json"
@@ -130,7 +131,12 @@ class TestHaSeed:
             "auth_type": "none", "secret": "", "kind": "custom",
         })
         r = auth_client.post("/api/integrations/other/seed")
-        assert r.status_code == 400
+        # Every integration gets the generic passthrough floor, even with no
+        # curated catalog.
+        assert r.status_code == 200
+        assert r.json()["created"] == 2
+        tools = auth_client.get("/api/integrations/other/tools").json()
+        assert {"read", "write"} <= {t["name"] for t in tools}
 
     def test_tools_namespaced_by_kind(self, auth_client):
         """MCP tool names use the integration's kind (short slug), not the

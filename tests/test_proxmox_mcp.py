@@ -8,6 +8,7 @@ from db.integrations import (
     get_integration_calls,
     get_pending_call,
     get_pending_calls,
+    get_tool,
 )
 from db.agent_tokens import create_agent_token
 from core.integration_proxy import execute_integration_call, ProxyError
@@ -128,17 +129,20 @@ class TestApprovalFlow:
 
 class TestToolFnArgumentMarshalling:
     """Regression: the generated tool function must forward the actual argument
-    values (node='pve') to the proxy, not the parameter name string ('node')."""
+    values (node='pve') to the proxy, not the parameter name string ('node').
+    The generated fn now delegates to core.tool_runner.run_tool, which resolves
+    the tool from the DB — so these build the fn from a real DB tool row."""
+
+    def _seed_tool(self, integration, name, method, path, params, read_only=True):
+        create_tool(integration["id"], name, "desc", method, path, params, "", read_only=read_only)
+        return get_tool(integration["name"], name)
 
     def test_path_param_substituted_with_value(self, mock_upstream):
         from core.mcp_server import _build_tool_fn
         create_integration("proxmox", mock_upstream["base_url"], "none", "")
-        fn = _build_tool_fn("proxmox", {
-            "id": 1, "name": "list_vms", "method": "GET",
-            "path_template": "/nodes/{node}/qemu",
-            "params": [{"name": "node", "type": "string", "required": True}],
-            "read_only": True, "enabled": True,
-        })
+        tool = self._seed_tool(get_integration("proxmox"), "list_vms", "GET", "/nodes/{node}/qemu",
+                               [{"name": "node", "type": "string", "required": True}])
+        fn = _build_tool_fn("proxmox", tool)
         fn(node="pve")
         assert mock_upstream["requests"][-1]["path"] == "/nodes/pve/qemu"
         assert "/nodes/node/qemu" not in mock_upstream["requests"][-1]["path"]
@@ -146,27 +150,23 @@ class TestToolFnArgumentMarshalling:
     def test_query_param_substituted_with_value(self, mock_upstream):
         from core.mcp_server import _build_tool_fn
         create_integration("proxmox", mock_upstream["base_url"], "none", "")
-        fn = _build_tool_fn("proxmox", {
-            "id": 2, "name": "get_cluster_resources", "method": "GET",
-            "path_template": "/cluster/resources",
-            "params": [{"name": "type", "type": "string", "required": False}],
-            "read_only": True, "enabled": True,
-        })
+        tool = self._seed_tool(get_integration("proxmox"), "get_cluster_resources", "GET", "/cluster/resources",
+                               [{"name": "type", "type": "string", "required": False}])
+        fn = _build_tool_fn("proxmox", tool)
         fn(type="vm")
         assert mock_upstream["requests"][-1]["path"] == "/cluster/resources?type=vm"
 
     def test_mutating_tool_stores_real_args(self, mock_upstream, auth_client):
         from core.mcp_server import _build_tool_fn
-        create_integration("proxmox", mock_upstream["base_url"], "none", "")
-        fn = _build_tool_fn("proxmox", {
-            "id": 3, "name": "start_vm", "method": "POST",
-            "path_template": "/nodes/{node}/qemu/{vmid}/status/start",
-            "params": [
-                {"name": "node", "type": "string", "required": True},
-                {"name": "vmid", "type": "integer", "required": True},
-            ],
-            "read_only": False, "enabled": True,
-        })
+        # gate_mode 'all' keeps the mutating tool routing to the approval queue.
+        create_integration("proxmox", mock_upstream["base_url"], "none", "", gate_mode="all")
+        integration = get_integration("proxmox")
+        tool = self._seed_tool(integration, "start_vm", "POST",
+                               "/nodes/{node}/qemu/{vmid}/status/start",
+                               [{"name": "node", "type": "string", "required": True},
+                                {"name": "vmid", "type": "integer", "required": True}],
+                               read_only=False)
+        fn = _build_tool_fn("proxmox", tool)
         fn(node="pve", vmid=100, reason="test")
         pending = get_pending_calls()
         assert pending and pending[0]["payload"] == {"node": "pve", "vmid": 100}

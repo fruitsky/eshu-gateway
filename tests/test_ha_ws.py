@@ -108,34 +108,35 @@ class TestHaWsRequest:
 
 
 class TestHaWsTool:
-    """The generated MCP tool functions run WS commands and apply the same
-    client-side shaping as HTTP tools."""
+    """The generated MCP tool functions delegate to core.tool_runner.run_tool,
+    which resolves the tool from the DB — so these seed real DB tool rows and
+    apply the same client-side shaping as HTTP tools."""
 
-    def _entity_tool(self, tid=1):
-        return {
-            "id": tid, "name": "list_entity_registry", "enabled": True, "read_only": True,
-            "method": "GET", "path_template": "config/entity_registry/list", "params": [],
-            "fields": ["entity_id", "name", "disabled_by", "device_id"],
-            "search_field": "entity_id", "filter_fields": ["device_id"], "transport": "ws",
-        }
+    def _seed(self, ha_ws_server, name, fields, transport, filter_fields=None, search_field="", read_only=True, path_template=""):
+        from db.integrations import create_tool, get_tool
+        create_integration("ha", ha_ws_server["base_url"], "bearer", "tok", kind="ha")
+        integration = get_integration("ha")
+        create_tool(integration["id"], name, "desc", "GET", path_template, [],
+                    "", read_only=read_only, fields=fields, search_field=search_field,
+                    transport=transport, filter_fields=filter_fields)
+        return get_tool("ha", name)
 
     def test_registry_tool_with_device_filter(self, ha_ws_server):
         from core.mcp_server import _build_tool_fn
-        create_integration("ha", ha_ws_server["base_url"], "bearer", "tok", kind="ha")
-        fn = _build_tool_fn("ha", self._entity_tool())
+        tool = self._seed(ha_ws_server, "list_entity_registry",
+                          ["entity_id", "name", "disabled_by", "device_id"],
+                          "ws", filter_fields=["device_id"], search_field="entity_id",
+                          path_template="config/entity_registry/list")
+        fn = _build_tool_fn("ha", tool)
         out = json.loads(fn(device_id="dev-smoke"))
         assert [e["entity_id"] for e in out] == ["update.smoke_firmware", "sensor.smoke_rssi", "sensor.smoke_lqi"]
         assert out[1]["disabled_by"] == "integration"
 
     def test_device_registry_tool_search(self, ha_ws_server):
         from core.mcp_server import _build_tool_fn
-        create_integration("ha", ha_ws_server["base_url"], "bearer", "tok", kind="ha")
-        tool = {
-            "id": 2, "name": "list_device_registry", "enabled": True, "read_only": True,
-            "method": "GET", "path_template": "config/device_registry/list", "params": [],
-            "fields": ["id", "name", "model", "via_device_id"], "search_field": "name",
-            "filter_fields": [], "transport": "ws",
-        }
+        tool = self._seed(ha_ws_server, "list_device_registry",
+                          ["id", "name", "model", "via_device_id"], "ws", search_field="name",
+                          path_template="config/device_registry/list")
         fn = _build_tool_fn("ha", tool)
         out = json.loads(fn(search="smoke"))
         assert len(out) == 1
@@ -145,15 +146,23 @@ class TestHaWsTool:
     def test_ws_tool_signature_exposes_filter(self):
         import inspect
         from core.mcp_server import _build_tool_fn
-        fn = _build_tool_fn("ha", self._entity_tool())
+        fn = _build_tool_fn("ha", {
+            "id": 9, "name": "list_entity_registry", "enabled": True, "read_only": True,
+            "method": "GET", "path_template": "config/entity_registry/list", "params": [],
+            "fields": ["entity_id", "name", "disabled_by", "device_id"],
+            "search_field": "entity_id", "filter_fields": ["device_id"], "transport": "ws",
+        })
         params = list(inspect.signature(fn).parameters)
         assert "device_id" in params
         assert "search" in params and "limit" in params and "full" in params
 
     def test_full_skips_shaping(self, ha_ws_server):
         from core.mcp_server import _build_tool_fn
-        create_integration("ha", ha_ws_server["base_url"], "bearer", "tok", kind="ha")
-        fn = _build_tool_fn("ha", self._entity_tool())
+        tool = self._seed(ha_ws_server, "list_entity_registry",
+                          ["entity_id", "name", "disabled_by", "device_id"],
+                          "ws", filter_fields=["device_id"], search_field="entity_id",
+                          path_template="config/entity_registry/list")
+        fn = _build_tool_fn("ha", tool)
         out = json.loads(fn(full=True))
         assert len(out) == 3  # no device_id filter applied
 

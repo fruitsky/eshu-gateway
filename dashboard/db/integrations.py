@@ -14,7 +14,8 @@ def init_integrations_tables(cursor):
             secret TEXT NOT NULL DEFAULT '',
             enabled INTEGER NOT NULL DEFAULT 1,
             kind TEXT NOT NULL DEFAULT 'custom',
-            created_at INTEGER NOT NULL
+            created_at INTEGER NOT NULL,
+            gate_mode TEXT NOT NULL DEFAULT 'destructive'
         )
     ''')
     try:
@@ -41,6 +42,10 @@ def init_integrations_tables(cursor):
         cursor.execute("ALTER TABLE integrations ADD COLUMN verify_tls INTEGER DEFAULT 1")
     except Exception:
         pass
+    try:
+        cursor.execute("ALTER TABLE integrations ADD COLUMN gate_mode TEXT DEFAULT 'destructive'")
+    except Exception:
+        pass
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS integration_tools (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -55,6 +60,9 @@ def init_integrations_tables(cursor):
             example TEXT NOT NULL DEFAULT '',
             read_only INTEGER NOT NULL DEFAULT 1,
             enabled INTEGER NOT NULL DEFAULT 1,
+            transport TEXT NOT NULL DEFAULT 'http',
+            filter_fields TEXT NOT NULL DEFAULT '[]',
+            generic INTEGER NOT NULL DEFAULT 0,
             UNIQUE (integration_id, name)
         )
     ''')
@@ -72,6 +80,10 @@ def init_integrations_tables(cursor):
         pass
     try:
         cursor.execute("ALTER TABLE integration_tools ADD COLUMN filter_fields TEXT DEFAULT '[]'")
+    except Exception:
+        pass
+    try:
+        cursor.execute("ALTER TABLE integration_tools ADD COLUMN generic INTEGER DEFAULT 0")
     except Exception:
         pass
     # One-time backfill: integrations seeded before the `kind` column existed
@@ -124,15 +136,15 @@ def create_integration(name: str, base_url: str, auth_type: str, secret: str,
                        auth_header_name: str = '', enabled: bool = True,
                        kind: str = 'custom', client_id: str = '',
                        client_secret: str = '', token_url: str = '',
-                       verify_tls: bool = True) -> int:
+                       verify_tls: bool = True, gate_mode: str = 'destructive') -> int:
     with db_conn() as conn:
         cursor = conn.cursor()
         now = int(time.time())
         cursor.execute('''
-            INSERT INTO integrations (name, base_url, auth_type, auth_header_name, secret, enabled, kind, created_at, client_id, client_secret, token_url, verify_tls)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO integrations (name, base_url, auth_type, auth_header_name, secret, enabled, kind, created_at, client_id, client_secret, token_url, verify_tls, gate_mode)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (name, base_url, auth_type, auth_header_name, secret, 1 if enabled else 0, kind, now,
-              client_id, client_secret, token_url, 1 if verify_tls else 0))
+              client_id, client_secret, token_url, 1 if verify_tls else 0, gate_mode))
         conn.commit()
         return cursor.lastrowid
 
@@ -175,7 +187,8 @@ def update_integration(name: str, base_url: str = None, auth_type: str = None,
                        secret: str = None, auth_header_name: str = None,
                        enabled: bool = None, kind: str = None,
                        client_id: str = None, client_secret: str = None,
-                       token_url: str = None, verify_tls: bool = None) -> bool:
+                       token_url: str = None, verify_tls: bool = None,
+                       gate_mode: str = None) -> bool:
     """Update an integration. `secret=None`/`client_secret=None` mean 'leave unchanged'."""
     current = get_integration(name)
     if not current:
@@ -190,14 +203,15 @@ def update_integration(name: str, base_url: str = None, auth_type: str = None,
     new_client_secret = client_secret if client_secret is not None else current.get('client_secret', '')
     new_token_url = token_url if token_url is not None else current.get('token_url', '')
     new_verify_tls = (1 if verify_tls else 0) if verify_tls is not None else current.get('verify_tls', 1)
+    new_gate_mode = gate_mode if gate_mode is not None else current.get('gate_mode', 'destructive')
     with db_conn() as conn:
         cursor = conn.cursor()
         cursor.execute('''
             UPDATE integrations SET base_url = ?, auth_type = ?, auth_header_name = ?, secret = ?,
-                enabled = ?, kind = ?, client_id = ?, client_secret = ?, token_url = ?, verify_tls = ?
+                enabled = ?, kind = ?, client_id = ?, client_secret = ?, token_url = ?, verify_tls = ?, gate_mode = ?
             WHERE name = ?
         ''', (new_base, new_auth, new_header, new_secret, new_enabled, new_kind,
-              new_client_id, new_client_secret, new_token_url, new_verify_tls, name))
+              new_client_id, new_client_secret, new_token_url, new_verify_tls, new_gate_mode, name))
         conn.commit()
         return cursor.rowcount > 0
 
@@ -222,17 +236,17 @@ def delete_integration(name: str) -> bool:
 def create_tool(integration_id: int, name: str, description: str, method: str,
                 path_template: str, params, example: str, read_only: bool = True,
                 fields=None, search_field: str = '', transport: str = 'http',
-                filter_fields=None) -> int:
+                filter_fields=None, generic: bool = False) -> int:
     with db_conn() as conn:
         cursor = conn.cursor()
         cursor.execute('''
             INSERT INTO integration_tools
-                (integration_id, name, description, method, path_template, params, fields, search_field, example, read_only, enabled, transport, filter_fields)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+                (integration_id, name, description, method, path_template, params, fields, search_field, example, read_only, enabled, transport, filter_fields, generic)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
         ''', (integration_id, name, description, method, path_template,
               json.dumps(params or []), json.dumps(fields or []), search_field or '',
               example, 1 if read_only else 0,
-              transport or 'http', json.dumps(filter_fields or [])))
+              transport or 'http', json.dumps(filter_fields or []), 1 if generic else 0))
         conn.commit()
         return cursor.lastrowid
 
@@ -305,7 +319,7 @@ def set_tool_enabled(tool_id: int, enabled: bool) -> bool:
 
 
 def update_tool(tool_id: int, **fields) -> bool:
-    allowed = {'name', 'description', 'method', 'path_template', 'params', 'fields', 'search_field', 'example', 'read_only', 'enabled', 'transport', 'filter_fields'}
+    allowed = {'name', 'description', 'method', 'path_template', 'params', 'fields', 'search_field', 'example', 'read_only', 'enabled', 'transport', 'filter_fields', 'generic'}
     updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
     if not updates:
         return False
@@ -319,6 +333,8 @@ def update_tool(tool_id: int, **fields) -> bool:
         updates['read_only'] = 1 if updates['read_only'] else 0
     if 'enabled' in updates:
         updates['enabled'] = 1 if updates['enabled'] else 0
+    if 'generic' in updates:
+        updates['generic'] = 1 if updates['generic'] else 0
     assignments = ', '.join(f'{k} = ?' for k in updates)
     with db_conn() as conn:
         cursor = conn.cursor()

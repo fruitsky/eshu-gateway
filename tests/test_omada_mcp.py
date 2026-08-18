@@ -253,12 +253,12 @@ class TestOmadaSeed:
         })
         r = auth_client.post("/api/integrations/omada/seed")
         assert r.status_code == 200
-        assert r.json()["created"] == 9
+        assert r.json()["created"] == 11  # 9 curated + generic read/write
         tools = auth_client.get("/api/integrations/omada/tools").json()
         names = {t["name"] for t in tools}
         assert names == {"list_sites", "get_site", "list_site_devices", "search_devices",
                          "list_site_clients", "get_client", "list_site_ssids",
-                         "block_client", "reconnect_client"}
+                         "block_client", "reconnect_client", "read", "write"}
         bc = next(t for t in tools if t["name"] == "block_client")
         assert bc["read_only"] == 0
         ls = next(t for t in tools if t["name"] == "list_sites")

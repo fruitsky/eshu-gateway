@@ -3591,7 +3591,7 @@ async function fetchIntegrationList() {
         '<button onclick="testIntegration(\'' + esc(i.name) + '\')" class="btn btn-xs btn-muted" title="Run a read call to verify the connection">Test</button>' +
         seedBtn +
         '<button onclick="deleteIntegration(\'' + esc(i.name) + '\')" class="btn btn-xs btn-muted">Delete</button></div></div>' +
-        '<div class="text-xs text-muted">' + esc(i.base_url) + ' · auth: ' + esc(i.auth_type) + '</div></div>';
+        '<div class="text-xs text-muted">' + esc(i.base_url) + ' · auth: ' + esc(i.auth_type) + ' · gate: ' + esc(i.gate_mode || 'destructive') + '</div></div>';
     }).join('');
   } catch(e) {}
 }
@@ -3606,6 +3606,7 @@ function resetIntegrationForm() {
   document.getElementById('int-client-id').value = '';
   document.getElementById('int-client-secret').value = '';
   document.getElementById('int-token-url').value = '';
+  document.getElementById('int-gate-mode').value = 'destructive';
   document.getElementById('int-submit-btn').textContent = 'Add Integration';
   document.getElementById('integration-test-result').classList.add('hidden');
   onIntKindChange();
@@ -3634,6 +3635,8 @@ function editIntegration(name) {
   document.getElementById('int-token-url').value = i.token_url || '';
   var verifyTls = document.getElementById('int-verify-tls');
   if (verifyTls) verifyTls.checked = i.verify_tls === 0 || i.verify_tls === false;
+  var gateMode = document.getElementById('int-gate-mode');
+  if (gateMode) gateMode.value = i.gate_mode || 'destructive';
   document.getElementById('int-submit-btn').textContent = 'Update Integration';
   document.getElementById('integration-test-result').classList.add('hidden');
   // Bring the form into view and flash it so the "editing" state is obvious
@@ -3665,6 +3668,8 @@ async function createIntegration() {
   if (tokenUrl) payload.token_url = tokenUrl;
   const verifyTls = document.getElementById('int-verify-tls');
   if (verifyTls) payload.verify_tls = !verifyTls.checked;
+  const gateMode = document.getElementById('int-gate-mode');
+  if (gateMode) payload.gate_mode = gateMode.value;
   if (_editingIntegration) {
     try {
       const res = await authFetch('/api/integrations/' + encodeURIComponent(_editingIntegration), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });

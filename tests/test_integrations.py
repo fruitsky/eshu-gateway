@@ -125,16 +125,17 @@ class TestProxmoxSeed:
         r = auth_client.post("/api/integrations/proxmox/seed")
         assert r.status_code == 200
         data = r.json()
-        assert data["created"] == 16
+        assert data["created"] == 18  # 16 curated + generic read/write
         tools = auth_client.get("/api/integrations/proxmox/tools").json()
-        assert len(tools) == 16
+        assert len(tools) == 18
         names = {t["name"] for t in tools}
         assert "list_vms" in names
         assert "start_vm" in names
+        assert {"read", "write"} <= names
         # Seeding again is idempotent (updates in place)
         r2 = auth_client.post("/api/integrations/proxmox/seed")
         assert r2.json()["created"] == 0
-        assert r2.json()["updated"] == 16
+        assert r2.json()["updated"] == 18
 
     def test_toggle_tool(self, auth_client):
         auth_client.post("/api/integrations", json={
@@ -183,9 +184,9 @@ class TestReseed:
         create_integration("ha", "https://ha.local/api", "bearer", "tok", kind="ha")
         create_integration("custom", "https://x.local/api", "none", "")
         reseed_all_integrations()
-        assert len(get_tools(1)) == 16  # proxmox
-        assert len(get_tools(2)) == 8   # ha
-        assert get_tools(3) == []       # custom: no seed
+        assert len(get_tools(1)) == 18  # proxmox + generic read/write
+        assert len(get_tools(2)) == 12  # ha + generic read/write/ws_read/ws_write
+        assert {t["name"] for t in get_tools(3)} == {'read', 'write'}  # custom: generic floor only
 
     def test_reseed_updates_changed_fields(self):
         from core.seeds import reseed_all_integrations

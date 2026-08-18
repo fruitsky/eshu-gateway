@@ -14,10 +14,11 @@ bearer token (which is unrelated).
 """
 import json
 import ssl
+import time
 
 import websocket  # websocket-client
 
-from core.integration_proxy import ProxyError
+from core.integration_proxy import PREVIEW_CHARS, ProxyError
 
 READ_TIMEOUT = 30
 
@@ -75,3 +76,39 @@ def ha_ws_request(integration: dict, command: str, payload: dict) -> dict:
             return msg
     finally:
         ws.close()
+
+
+def execute_ws_call(integration: dict, command: str, payload=None,
+                    agent: str = '', tool_name: str = '') -> dict:
+    """Run one HA WS command with audit logging. Returns a result dict shaped
+    like the HTTP executors ({status_code, body, truncated, latency_ms, error}),
+    so callers (MCP tool runner / approval executor) handle it uniformly."""
+    from db.integrations import record_integration_call
+    start = time.time()
+    outcome = 'ok'
+    error = None
+    try:
+        result = ha_ws_request(integration, command, payload or {})
+        body = json.dumps(result)
+        status_code = 200
+    except ProxyError as e:
+        outcome = 'error'
+        error = e.message
+        status_code = e.status_code
+        body = ''
+    latency_ms = int((time.time() - start) * 1000)
+    record_integration_call(
+        integration=integration.get('name', ''),
+        tool=tool_name,
+        agent=agent,
+        method='WS',
+        path=command,
+        status_code=status_code,
+        latency_ms=latency_ms,
+        response_summary=(body or error or '')[:PREVIEW_CHARS],
+        response_bytes=len(body),
+        truncated=0,
+        outcome=outcome,
+    )
+    return {'status_code': status_code, 'body': body, 'truncated': 0,
+            'latency_ms': latency_ms, 'error': error}

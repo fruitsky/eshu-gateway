@@ -65,7 +65,6 @@ def _build_tool_fn(integration_name: str, tool: dict):
     fields = tool.get('fields') or []
     search_field = tool.get('search_field') or ''
     filter_fields = tool.get('filter_fields') or []
-    transport = tool.get('transport') or 'http'
     mutating = not tool.get('read_only')
 
     # Effective param list: catalog params + synthetic params that shape the
@@ -105,49 +104,17 @@ def _build_tool_fn(integration_name: str, tool: dict):
         sig_parts.append("*, reason: str")
     sig = ', '.join(sig_parts)
 
-    # key = original param name (matches the _build_request lookup),
+    # key = original param name (matches the args dict run_tool expects),
     # value = the function parameter variable carrying the actual argument.
     # e.g. {'node': node, 'vmid': vmid} — NOT the param-name string.
     args_literal = '{' + ', '.join(f"{orig!r}: {var}" for orig, var in arg_entries) + '}'
-    params_literal = repr(catalog_params)
-    fields_literal = repr(fields)
 
     src = [f"def {fn_name}({sig}):"]
-    src.append("    import json as _json")
-    src.append("    from db.integrations import get_integration as _gi, create_pending_call as _cpc")
-    src.append("    from core.integration_proxy import execute_integration_call as _exec, ProxyError as _PE, _apply_shaping as _shape")
-    src.append(f"    _args = {args_literal}")
-    src.append(f"    _integration = _gi({integration_name!r})")
+    src.append("    from core.tool_runner import run_tool as _rt")
     if mutating:
-        src.append(f"    _call_id = _cpc(_integration['name'], {tool['name']!r}, _args, reason)")
-        src.append("    from core.notify import send_notify as _sn")
-        notify_line = ("    _sn('jit', 'API Approval Required', "
-                       "'`%s` on %s: ' + (reason[:80]))" % (tool['name'], integration_name))
-        src.append(notify_line)
-        src.append("    return _json.dumps({'status': 'pending', 'id': _call_id, "
-                    "'message': 'Awaiting operator approval. Call check_approval(" + str(tool['id']) + ") to poll.'})")
+        src.append(f"    return _rt({integration_name!r}, {tool['name']!r}, {args_literal}, reason)")
     else:
-        filter_literal = repr(filter_fields)
-        src.append(f"    _tool = {{'name': {tool['name']!r}, 'enabled': True, 'method': {tool['method']!r}, "
-                   f"'path_template': {tool['path_template']!r}, 'params': {params_literal}, "
-                   f"'fields': {fields_literal}, 'search_field': {search_field!r}, "
-                   f"'filter_fields': {filter_literal}, 'transport': {transport!r}}}")
-        if transport == 'ws':
-            src.append("    try:")
-            src.append("        from core.ha_ws import ha_ws_request as _ws")
-            src.append(f"        _res = _ws(_integration, {tool['path_template']!r}, {{}})")
-            src.append("        _body = _json.dumps(_res)")
-            src.append("    except _PE as e:")
-            src.append("        return _json.dumps({'error': e.message, 'status_code': e.status_code})")
-            src.append("    return _shape(_body, _tool, _args)")
-        else:
-            src.append("    try:")
-            src.append(f"        _res = _exec(_integration, _tool, _args, agent={AGENT_LABEL!r})")
-            src.append("    except _PE as e:")
-            src.append("        return _json.dumps({'error': e.message, 'status_code': e.status_code})")
-            src.append("    if _res.get('error'):")
-            src.append("        return _json.dumps({'error': _res['error'], 'status_code': _res.get('status_code')})")
-            src.append("    return _res['body']")
+        src.append(f"    return _rt({integration_name!r}, {tool['name']!r}, {args_literal})")
 
     ns = {}
     exec('\n'.join(src), ns)

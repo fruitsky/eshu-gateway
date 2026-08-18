@@ -93,7 +93,8 @@ from core.gateway_watch import (
 )
 from core.utils import DASHBOARD_VERSION, decode_cmd, _resolve_gateway_token, _hash_password, _verify_password
 from core.integration_auth import resolve_agent, resolve_agent_optional, extract_agent_token
-from core.integration_proxy import execute_integration_call, ProxyError
+from core.integration_proxy import execute_integration_call, execute_generic_call, ProxyError
+from core.ha_ws import execute_ws_call
 from core.mcp_server import mcp as eshu_mcp, refresh_mcp_tools, refresh_mcp_allowed_hosts
 from core.seeds import seed_for_kind, reseed_all_integrations
 
@@ -2135,6 +2136,7 @@ class IntegrationPayload(BaseModel):
     client_secret: str = ''
     token_url: str = ''
     verify_tls: bool = True
+    gate_mode: str = 'destructive'
     enabled: bool = True
     kind: str = 'custom'
 
@@ -2147,6 +2149,7 @@ class IntegrationUpdatePayload(BaseModel):
     client_secret: str = None
     token_url: str = None
     verify_tls: bool = None
+    gate_mode: str = None
     enabled: bool = None
     kind: str = None
 
@@ -2207,7 +2210,7 @@ def create_integration_endpoint(payload: IntegrationPayload, request: Request):
     create_integration(name, payload.base_url.strip(), payload.auth_type, payload.secret,
                        payload.auth_header_name, payload.enabled, payload.kind,
                        payload.client_id, payload.client_secret, payload.token_url,
-                       payload.verify_tls)
+                       payload.verify_tls, payload.gate_mode)
     record_audit_event("integration_created", details=f"Integration '{name}' created (kind {payload.kind})")
     return {"status": "ok", "name": name}
 
@@ -2380,8 +2383,18 @@ def approve_integration_call(call_id: int, request: Request):
     tool = get_tool(call['integration'], call['tool'])
     if not integration or not tool:
         raise HTTPException(status_code=404, detail="Integration or tool missing")
+    payload = call['payload']
     try:
-        result = execute_integration_call(integration, tool, call['payload'], agent='operator')
+        if (tool.get('transport') or 'http') == 'ws':
+            result = execute_ws_call(
+                integration, payload.get('command') or tool.get('path_template'),
+                payload.get('payload'), agent='operator', tool_name=tool['name'])
+        elif tool.get('generic'):
+            result = execute_generic_call(integration, payload.get('method'), payload.get('path'),
+                                          payload.get('params'), payload.get('data'),
+                                          agent='operator', tool_name=tool['name'])
+        else:
+            result = execute_integration_call(integration, tool, payload, agent='operator')
     except ProxyError as e:
         result = {'error': e.message, 'status_code': e.status_code}
     set_pending_call_status(call_id, 'approved', json.dumps(result))

@@ -6,6 +6,7 @@ truncation, and audit logging.
 """
 import base64
 import json
+import re
 import ssl
 import time
 import urllib.error
@@ -20,6 +21,20 @@ PREVIEW_CHARS = 2000
 DEFAULT_TIMEOUT = 30
 
 ALLOWED_AUTH_TYPES = ('none', 'bearer', 'basic', 'header', 'oauth2')
+
+# Hard-to-undo mutations. Disruptive-but-reversible verbs (restart, reboot,
+# stop, toggle) are deliberately excluded so routine writes auto-run under the
+# 'destructive' gate mode. A single constant — trivial to tune per installation.
+DESTRUCTIVE_VERBS = ('delete', 'remove', 'purge', 'format', 'reset')
+_DESTRUCTIVE_RE = re.compile(r'\b(?:' + '|'.join(DESTRUCTIVE_VERBS) + r')\b', re.IGNORECASE)
+
+
+def is_destructive(method: str, path: str) -> bool:
+    """Classify a mutation as destructive: HTTP DELETE, or a destructive verb
+    appearing in the path / WS command string."""
+    if (method or '').upper() == 'DELETE':
+        return True
+    return bool(path and _DESTRUCTIVE_RE.search(path))
 
 # In-memory OAuth2 access-token cache, keyed by integration name. Omada tokens
 # don't expire, so a fetched token is reused for the process lifetime unless an
@@ -281,34 +296,10 @@ def _apply_shaping(body: str, tool: dict, args: dict) -> str:
     return body
 
 
-def execute_integration_call(integration: dict, tool: dict, args: dict, agent: str = '') -> dict:
-    """Forward a call to the integration and return a JSON-safe result dict.
-    Raises ProxyError for policy rejections (SSRF guard, etc.)."""
-    if not integration or not integration.get('enabled'):
-        raise ProxyError(404, "Integration not found or disabled")
-    if not tool or not tool.get('enabled'):
-        raise ProxyError(404, "Tool not found or disabled")
+def _http_roundtrip(integration: dict, url: str, body_bytes, headers: dict, method: str):
+    """Perform the HTTP request with the OAuth2 401-retry. Returns
+    (status_code, body, truncated, error, latency_ms, outcome)."""
     auth_type = (integration.get('auth_type') or 'none').lower()
-    if auth_type not in ALLOWED_AUTH_TYPES:
-        raise ProxyError(500, f"Unsupported auth_type: {auth_type}")
-
-    method, path, query_string, body_params, raw_body = _build_request(tool, args)
-    base_url = (integration.get('base_url') or '').rstrip('/')
-    _guard_ssrf(base_url, path)
-
-    url = base_url + '/' + path.lstrip('/')
-    if query_string:
-        url += '?' + query_string
-
-    headers = _auth_headers(integration)
-    headers.setdefault('Accept', 'application/json')
-    body_bytes = None
-    if method in ('POST', 'PUT', 'PATCH'):
-        payload = raw_body if raw_body is not None else body_params
-        if payload:
-            body_bytes = json.dumps(payload).encode('utf-8')
-            headers.setdefault('Content-Type', 'application/json')
-
     start = time.time()
     outcome = 'ok'
     status_code = None
@@ -352,6 +343,39 @@ def execute_integration_call(integration: dict, tool: dict, args: dict, agent: s
             error = f"{type(e).__name__}: {e}"
             break
     latency_ms = int((time.time() - start) * 1000)
+    return status_code, body, truncated, error, latency_ms, outcome
+
+
+def execute_integration_call(integration: dict, tool: dict, args: dict, agent: str = '') -> dict:
+    """Forward a call to the integration and return a JSON-safe result dict.
+    Raises ProxyError for policy rejections (SSRF guard, etc.)."""
+    if not integration or not integration.get('enabled'):
+        raise ProxyError(404, "Integration not found or disabled")
+    if not tool or not tool.get('enabled'):
+        raise ProxyError(404, "Tool not found or disabled")
+    auth_type = (integration.get('auth_type') or 'none').lower()
+    if auth_type not in ALLOWED_AUTH_TYPES:
+        raise ProxyError(500, f"Unsupported auth_type: {auth_type}")
+
+    method, path, query_string, body_params, raw_body = _build_request(tool, args)
+    base_url = (integration.get('base_url') or '').rstrip('/')
+    _guard_ssrf(base_url, path)
+
+    url = base_url + '/' + path.lstrip('/')
+    if query_string:
+        url += '?' + query_string
+
+    headers = _auth_headers(integration)
+    headers.setdefault('Accept', 'application/json')
+    body_bytes = None
+    if method in ('POST', 'PUT', 'PATCH'):
+        payload = raw_body if raw_body is not None else body_params
+        if payload:
+            body_bytes = json.dumps(payload).encode('utf-8')
+            headers.setdefault('Content-Type', 'application/json')
+
+    status_code, body, truncated, error, latency_ms, outcome = _http_roundtrip(
+        integration, url, body_bytes, headers, method)
 
     # Client-side response shaping (token efficiency): search filter + limit +
     # field projection, unless the caller asked for `full`.
@@ -361,6 +385,60 @@ def execute_integration_call(integration: dict, tool: dict, args: dict, agent: s
     record_integration_call(
         integration=integration.get('name', ''),
         tool=tool.get('name', ''),
+        agent=agent,
+        method=method,
+        path=path,
+        status_code=status_code,
+        latency_ms=latency_ms,
+        response_summary=(body or error or '')[:PREVIEW_CHARS],
+        response_bytes=len(body),
+        truncated=truncated,
+        outcome=outcome,
+    )
+
+    return {
+        'status_code': status_code,
+        'body': body,
+        'truncated': truncated,
+        'latency_ms': latency_ms,
+        'error': error,
+    }
+
+
+def execute_generic_call(integration: dict, method: str, path: str, params=None,
+                         data=None, agent: str = '', tool_name: str = '') -> dict:
+    """Call an arbitrary endpoint on the integration — the generic read/write
+    floor. method/path come from the agent; `params` becomes the query string,
+    `data` the JSON body. Credentials, TLS, SSRF guard, and audit all apply."""
+    if not integration or not integration.get('enabled'):
+        raise ProxyError(404, "Integration not found or disabled")
+    method = (method or 'GET').upper()
+    if method not in ('GET', 'POST', 'PUT', 'PATCH', 'DELETE'):
+        raise ProxyError(400, f"Unsupported method: {method}")
+    auth_type = (integration.get('auth_type') or 'none').lower()
+    if auth_type not in ALLOWED_AUTH_TYPES:
+        raise ProxyError(500, f"Unsupported auth_type: {auth_type}")
+
+    path = (path or '').lstrip('/')
+    base_url = (integration.get('base_url') or '').rstrip('/')
+    _guard_ssrf(base_url, path)
+    url = base_url + '/' + path
+    if params:
+        url += '?' + urllib.parse.urlencode(params)
+
+    headers = _auth_headers(integration)
+    headers.setdefault('Accept', 'application/json')
+    body_bytes = None
+    if method in ('POST', 'PUT', 'PATCH') and data:
+        body_bytes = json.dumps(data).encode('utf-8')
+        headers.setdefault('Content-Type', 'application/json')
+
+    status_code, body, truncated, error, latency_ms, outcome = _http_roundtrip(
+        integration, url, body_bytes, headers, method)
+
+    record_integration_call(
+        integration=integration.get('name', ''),
+        tool=tool_name,
         agent=agent,
         method=method,
         path=path,
