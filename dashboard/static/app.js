@@ -1511,7 +1511,7 @@ function renderTable() {
     const gwPillHtml = gwPill(req.hostname || 'N/A');
     const isIntegration = req.status === 'integration-approved' || req.status === 'integration-denied';
     const gatewayCell = isIntegration
-      ? '<span class="chip chip-integration" title="API integration">🔌 ' + escapeHtml(req.target_ip) + '</span>'
+      ? escapeHtml(req.target_ip)
       : gwPillHtml + ' ' + escapeHtml(req.hostname || 'N/A') + ' (' + escapeHtml(req.target_ip) + ')';
     const riskHtml = (req.status === 'pending' && req.risk) ?
       '<span class="flex-shrink-0 risk-flag" title="⚠ Risk: ' + escapeHtml(req.risk) + '">⚠</span>' : '';

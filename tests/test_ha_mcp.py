@@ -105,6 +105,28 @@ class TestHaSeed:
         r = auth_client.post("/api/integrations/other/seed")
         assert r.status_code == 400
 
+    def test_tools_namespaced_by_kind(self, auth_client):
+        """MCP tool names use the integration's kind (short slug), not the
+        display name — a space in the name must not leak into tool names."""
+        import asyncio
+        from core.mcp_server import mcp, refresh_mcp_tools
+        auth_client.post("/api/integrations", json={
+            "name": "Home Assistant", "base_url": "https://ha.local/api",
+            "auth_type": "bearer", "secret": "tok", "kind": "ha",
+        })
+        auth_client.post("/api/integrations/Home%20Assistant/seed")
+        refresh_mcp_tools()
+
+        async def _names():
+            tools = await mcp.list_tools()
+            return {t.name for t in tools}
+        names = asyncio.run(_names())
+
+        assert "ha_list_entities" in names
+        assert "ha_get_entity" in names
+        assert "ha_call_service" in names
+        assert not any(" " in n for n in names)
+
 
 class TestHaApproval:
 
