@@ -172,6 +172,49 @@ class TestKindMigration:
         assert get_integration("custom")["kind"] == "custom"
 
 
+class TestReseed:
+    """Automatic re-seed on startup applies each integration's seed catalog,
+    updates changed fields in place, and preserves enable/disable state."""
+
+    def test_reseed_creates_tools_for_known_kinds(self):
+        from core.seeds import reseed_all_integrations
+        from db.integrations import get_tools
+        create_integration("proxmox", "https://pve.local/api2/json", "none", "", kind="proxmox")
+        create_integration("ha", "https://ha.local/api", "bearer", "tok", kind="ha")
+        create_integration("custom", "https://x.local/api", "none", "")
+        reseed_all_integrations()
+        assert len(get_tools(1)) == 16  # proxmox
+        assert len(get_tools(2)) == 3   # ha
+        assert get_tools(3) == []       # custom: no seed
+
+    def test_reseed_updates_changed_fields(self):
+        from core.seeds import reseed_all_integrations
+        from db.integrations import get_tools, update_tool
+        create_integration("ha", "https://ha.local/api", "bearer", "tok", kind="ha")
+        reseed_all_integrations()
+        tools = get_tools(1)
+        le = next(t for t in tools if t["name"] == "list_entities")
+        assert le["search_field"] == "entity_id"
+        # Simulate a stale tool definition, then re-seed restores it
+        update_tool(le["id"], search_field="")
+        reseed_all_integrations()
+        tools = get_tools(1)
+        le = next(t for t in tools if t["name"] == "list_entities")
+        assert le["search_field"] == "entity_id"
+
+    def test_reseed_preserves_enabled_state(self):
+        from core.seeds import reseed_all_integrations
+        from db.integrations import get_tools, set_tool_enabled
+        create_integration("proxmox", "https://pve.local/api2/json", "none", "", kind="proxmox")
+        reseed_all_integrations()
+        tools = get_tools(1)
+        tid = next(t["id"] for t in tools if t["name"] == "start_vm")
+        set_tool_enabled(tid, False)
+        reseed_all_integrations()
+        tools = get_tools(1)
+        assert next(t for t in tools if t["id"] == tid)["enabled"] == 0
+
+
 class TestMcpSettings:
 
     def test_get_default_is_empty(self, auth_client):

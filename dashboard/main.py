@@ -95,7 +95,7 @@ from core.utils import DASHBOARD_VERSION, decode_cmd, _resolve_gateway_token, _h
 from core.integration_auth import resolve_agent, resolve_agent_optional, extract_agent_token
 from core.integration_proxy import execute_integration_call
 from core.mcp_server import mcp as eshu_mcp, refresh_mcp_tools, refresh_mcp_allowed_hosts
-from core.proxmox_seed import seed_proxmox_tools
+from core.seeds import seed_for_kind, reseed_all_integrations
 
 
 def _get_gateway_hostname(ip: str) -> str:
@@ -201,6 +201,9 @@ def on_startup():
     refresh_profiles()
     profiles_thread = threading.Thread(target=_profiles_loop, daemon=True)
     profiles_thread.start()
+    # Re-apply each integration's seed catalog so deployed catalog changes
+    # (new/changed tools) propagate without a manual re-seed.
+    reseed_all_integrations()
     # Register the enabled integration tools as MCP tools
     refresh_mcp_tools()
     # Apply the configured MCP allowed-hosts (DNS-rebinding allowlist)
@@ -2309,14 +2312,11 @@ def seed_integration_endpoint(name: str, request: Request):
     if not integration:
         raise HTTPException(status_code=404, detail="Integration not found")
     kind = integration.get('kind') or 'custom'
-    if kind == 'proxmox':
-        created, updated = seed_proxmox_tools(integration['id'])
-    elif kind == 'ha':
-        from core.ha_seed import seed_ha_tools
-        created, updated = seed_ha_tools(integration['id'])
-    else:
+    result = seed_for_kind(integration)
+    if result is None:
         raise HTTPException(status_code=400,
                             detail=f"No seed catalog for this integration type ('{kind}') yet")
+    created, updated = result
     refresh_mcp_tools()
     record_audit_event(f"{kind}_seeded",
                        details=f"{kind} seed for '{name}': {created} created, {updated} updated")
