@@ -3568,31 +3568,39 @@ async function deleteAgentToken(id) {
   } catch(e) { showToast('❌ Failed: ' + e.message, 'error'); }
 }
 
-async function fetchIntegrationList() {
+function renderIntegrationList() {
   const el = document.getElementById('integration-list');
   if (!el) return;
+  if (!_integrationsData.length) { el.innerHTML = '<p class="text-muted">No integrations yet.</p>'; return; }
+  el.innerHTML = _integrationsData.map(function(i) {
+    var selected = _selectedIntegration === i.name;
+    var active = i.enabled ? 'text-success' : 'text-muted';
+    var seedable = !!(INTEGRATION_PROFILES[i.kind] && INTEGRATION_PROFILES[i.kind].seedable);
+    var seedBtn = seedable
+      ? '<button onclick="seedTools(\'' + esc(i.name) + '\')" class="btn btn-xs btn-muted" title="Seed the seed catalog for this integration">Seed</button>'
+      : '';
+    var label = INTEGRATION_PROFILES[i.kind] ? INTEGRATION_PROFILES[i.kind].label : (i.kind || 'custom');
+    return '<div class="item-card selectable' + (selected ? ' selected' : '') + '" onclick="selectIntegration(\'' + esc(i.name) + '\')">' +
+      '<div class="flex items-center justify-between gap-2">' +
+      '<span class="text-sm font-semibold ' + active + '"><span class="' + (i.enabled ? 'dot-ok' : 'dot-off') + '"></span> ' + esc(i.name) + '</span>' +
+      '<span class="text-xs text-muted">' + esc(label) + '</span></div>' +
+      '<div class="text-xs text-muted mt-1">' + esc(i.base_url) + '</div>' +
+      '<div class="text-xs text-muted">auth: ' + esc(i.auth_type) + ' · gate: ' + esc(i.gate_mode || 'destructive') + '</div>' +
+      '<div class="flex flex-wrap gap-1 mt-2" onclick="event.stopPropagation()">' +
+      '<button onclick="editIntegration(\'' + esc(i.name) + '\')" class="btn btn-xs btn-muted" title="Edit base URL / secret">Edit</button>' +
+      '<button onclick="testIntegration(\'' + esc(i.name) + '\')" class="btn btn-xs btn-muted" title="Run a read call to verify the connection">Test</button>' +
+      seedBtn +
+      '<button onclick="deleteIntegration(\'' + esc(i.name) + '\')" class="btn btn-xs btn-muted">Delete</button>' +
+      '</div></div>';
+  }).join('');
+}
+
+async function fetchIntegrationList() {
   try {
     const res = await authFetch('/api/integrations');
     if (!res.ok) return;
-    const ints = await res.json();
-    _integrationsData = ints;
-    if (!ints.length) { el.innerHTML = '<p class="text-muted">No integrations yet.</p>'; return; }
-    el.innerHTML = ints.map(function(i) {
-      var active = i.enabled ? 'text-success' : 'text-muted';
-      var seedable = !!(INTEGRATION_PROFILES[i.kind] && INTEGRATION_PROFILES[i.kind].seedable);
-      var seedBtn = seedable
-        ? '<button onclick="seedTools(\'' + esc(i.name) + '\')" class="btn btn-xs btn-muted" title="Seed the seed catalog for this integration">Seed</button>'
-        : '';
-      return '<div class="p-2 rounded bg-black/20">' +
-        '<div class="flex items-center justify-between gap-2">' +
-        '<button class="text-sm text-left ' + active + '" onclick="selectIntegration(\'' + esc(i.name) + '\')">' + esc(i.name) + '</button>' +
-        '<div class="flex gap-1">' +
-        '<button onclick="editIntegration(\'' + esc(i.name) + '\')" class="btn btn-xs btn-muted" title="Edit base URL / secret">Edit</button>' +
-        '<button onclick="testIntegration(\'' + esc(i.name) + '\')" class="btn btn-xs btn-muted" title="Run a read call to verify the connection">Test</button>' +
-        seedBtn +
-        '<button onclick="deleteIntegration(\'' + esc(i.name) + '\')" class="btn btn-xs btn-muted">Delete</button></div></div>' +
-        '<div class="text-xs text-muted">' + esc(i.base_url) + ' · auth: ' + esc(i.auth_type) + ' · gate: ' + esc(i.gate_mode || 'destructive') + '</div></div>';
-    }).join('');
+    _integrationsData = await res.json();
+    renderIntegrationList();
   } catch(e) {}
 }
 
@@ -3734,6 +3742,7 @@ async function seedTools(name) {
 
 async function selectIntegration(name) {
   _selectedIntegration = name;
+  renderIntegrationList();
   fetchTools(name);
 }
 
@@ -3749,13 +3758,17 @@ function renderTools(tools, name) {
   const el = document.getElementById('integration-tools-list');
   if (!el) return;
   if (!name || !tools.length) { el.innerHTML = '<p class="text-muted">No tools for this integration.</p>'; return; }
-  el.innerHTML = '<div class="text-xs text-muted mb-2">Integration: <strong>' + esc(name) + '</strong></div>' + tools.map(function(t) {
+  el.innerHTML = tools.map(function(t) {
     var badge = t.read_only ? '<span class="text-success">read</span>' : '<span class="text-warning">mutating (approval)</span>';
-    return '<div class="flex items-center justify-between gap-2 p-2 rounded bg-black/20">' +
-      '<div class="flex-1"><div class="text-sm">' + esc(t.name) + ' <span class="text-xs">' + badge + ' · ' + esc(t.method) + '</span></div>' +
-      '<div class="text-xs text-muted">' + esc(t.description || '') + '</div></div>' +
+    return '<div class="item-card">' +
+      '<div class="flex items-center justify-between gap-2">' +
+      '<span class="text-sm font-semibold">' + esc(t.name) + '</span>' +
+      '<span class="text-xs">' + badge + ' · ' + esc(t.method) + '</span></div>' +
+      '<div class="text-xs text-muted mt-1">' + esc(t.description || '') + '</div>' +
+      '<div class="flex gap-1 mt-2">' +
       '<button onclick="toggleTool(' + t.id + ', ' + (t.enabled ? 'false' : 'true') + ')" class="btn btn-xs ' + (t.enabled ? 'btn-muted' : '') + '">' + (t.enabled ? 'Disable' : 'Enable') + '</button>' +
-      '<button onclick="deleteTool(' + t.id + ')" class="btn btn-xs btn-muted">×</button></div>';
+      '<button onclick="deleteTool(' + t.id + ')" class="btn btn-xs btn-muted">×</button>' +
+      '</div></div>';
   }).join('');
 }
 
