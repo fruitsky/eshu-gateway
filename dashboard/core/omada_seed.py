@@ -48,18 +48,20 @@ OMADA_SEED_TOOLS = [
             {"name": "page", "type": "integer", "description": "Page number (1-based).", "required": False, "default": 1},
             {"name": "pageSize", "type": "integer", "description": "Results per page (max 100).", "required": False, "default": 50},
         ],
-        "fields": ["mac", "name", "type", "modelName", "ip", "status", "lastSeen", "cpuUtil", "memUtil", "sn", "uplinkDeviceName"],
+        "fields": ["mac", "name", "type", "modelName", "ip", "status", "lastSeen", "cpuUtil", "memUtil", "sn", "uplinkDeviceName", "firmwareVersion", "uptime"],
         "search_field": "name",
         "example": '[{"mac": "70:B3:D5:AA:BB:CC", "name": "AP-Living", "type": "ap", "modelName": "EAP670", "ip": "192.168.1.50", "status": 1, "lastSeen": 1700000000000}]',
         "read_only": True,
     },
     {
         "name": "search_devices",
-        "description": "Globally search devices by keyword across all sites you have access to (returns matches with their site, model, status and MAC).",
+        "description": "Globally search devices by keyword across all sites you have access to (returns matches with their site, model, status and MAC). searchKey is required — provide a device name, model or MAC fragment.",
         "method": "GET",
         "path_template": "/devices",
         "params": [
-            {"name": "searchKey", "type": "string", "description": "Search keyword (device name, model or MAC fragment).", "required": False},
+            {"name": "searchKey", "type": "string", "description": "Search keyword (device name, model or MAC fragment).", "required": True},
+            {"name": "page", "type": "integer", "description": "Page number (1-based).", "required": False, "default": 1},
+            {"name": "pageSize", "type": "integer", "description": "Results per page (max 100).", "required": False, "default": 50},
         ],
         "fields": [],
         "example": '{"siteNames": {"640effd1b3f2ae5b912275ec": "Home"}, "devices": [{"mac": "70:B3:D5:AA:BB:CC", "name": "AP-Living", "site": "Home", "model": "EAP670", "type": "ap", "status": 1}]}',
@@ -67,11 +69,13 @@ OMADA_SEED_TOOLS = [
     },
     {
         "name": "list_site_clients",
-        "description": "List the connected clients on a site (MAC, name, vendor, IP, signal, WiFi SSID/AP). Use search to filter by client name substring and limit to bound the result. Use this to discover clientMac values.",
-        "method": "GET",
+        "description": "List the connected clients on a site (MAC, name, vendor, IP, signal, WiFi SSID/AP). Use searchKey for a server-side keyword match (MAC/name/vendor), search to filter by client name substring, and limit to bound the result. Use this to discover clientMac values. (v1 clients list is broken on v6.2 — this uses the v2 POST endpoint.)",
+        "method": "POST",
+        "version": "v2",
         "path_template": "/sites/{siteId}/clients",
         "params": [
             {"name": "siteId", "type": "string", "description": "Site id (from list_sites).", "required": True},
+            {"name": "searchKey", "type": "string", "description": "Server-side keyword match (MAC, name, vendor…).", "required": False},
             {"name": "page", "type": "integer", "description": "Page number (1-based).", "required": False, "default": 1},
             {"name": "pageSize", "type": "integer", "description": "Results per page (max 100).", "required": False, "default": 50},
         ],
@@ -89,8 +93,25 @@ OMADA_SEED_TOOLS = [
             {"name": "siteId", "type": "string", "description": "Site id (from list_sites).", "required": True},
             {"name": "clientMac", "type": "string", "description": "Client MAC address (from list_site_clients).", "required": True},
         ],
-        "fields": ["id", "mac", "name", "hostName", "vendor", "deviceType", "osName", "ip", "ssid", "signalLevel", "wifiMode", "apName", "apMac", "channel"],
-        "example": '{"id": "abc123", "mac": "AA:BB:CC:DD:EE:FF", "name": "Phone", "vendor": "Apple", "ip": "192.168.1.100", "ssid": "Home-5G", "signalLevel": -55, "apName": "AP-Living"}',
+        "fields": ["id", "mac", "name", "hostName", "vendor", "deviceCategory", "osName", "ip", "ssid", "signalLevel", "wifiMode", "apName", "apMac", "channel", "connectType", "vid", "networkName", "port", "switchName", "gatewayName", "uptime", "rxRate", "txRate"],
+        "example": '{"id": "abc123", "mac": "AA:BB:CC:DD:EE:FF", "name": "Phone", "vendor": "Apple", "ip": "192.168.1.100", "ssid": "Home-5G", "signalLevel": -55, "apName": "AP-Living", "connectType": "wireless", "vid": 1, "networkName": "LAN"}',
+        "read_only": True,
+    },
+    {
+        "name": "list_site_alerts",
+        "description": "List the alert logs for a site in a time window (module, content, time, severity). Provide timeStart and timeEnd as epoch milliseconds; use search to filter by alert content and limit to bound the result.",
+        "method": "GET",
+        "path_template": "/sites/{siteId}/logs/alerts",
+        "params": [
+            {"name": "siteId", "type": "string", "description": "Site id (from list_sites).", "required": True},
+            {"name": "filters.timeStart", "type": "integer", "description": "Start of the window, epoch milliseconds.", "required": True},
+            {"name": "filters.timeEnd", "type": "integer", "description": "End of the window, epoch milliseconds.", "required": True},
+            {"name": "page", "type": "integer", "description": "Page number (1-based).", "required": False, "default": 1},
+            {"name": "pageSize", "type": "integer", "description": "Results per page (max 100).", "required": False, "default": 50},
+        ],
+        "fields": ["id", "module", "content", "time", "level"],
+        "search_field": "content",
+        "example": '[{"id": "alert1", "module": "device", "content": "AP-Living went offline", "time": 1700000000000, "level": "error"}]',
         "read_only": True,
     },
     {
@@ -154,6 +175,7 @@ def seed_omada_tools(integration_id: int):
                 params=tool['params'],
                 fields=tool.get('fields'),
                 search_field=tool.get('search_field'),
+                version=tool.get('version', 'v1'),
                 example=tool['example'],
                 read_only=tool['read_only'],
             )
@@ -170,6 +192,7 @@ def seed_omada_tools(integration_id: int):
                 read_only=tool['read_only'],
                 fields=tool.get('fields'),
                 search_field=tool.get('search_field') or '',
+                version=tool.get('version', 'v1'),
             )
             created += 1
     return created, updated

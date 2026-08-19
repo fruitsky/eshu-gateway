@@ -3704,11 +3704,15 @@ async function testIntegration(name) {
   const box = document.getElementById('integration-test-result');
   if (!box) return;
   box.classList.remove('hidden');
-  box.innerHTML = '<span class="text-muted">Testing ' + esc(name) + '…</span>';
+  var close = '<button onclick="clearTestResult()" class="modal-close" title="Clear">×</button>';
+  function line(inner) {
+    return '<span class="flex items-center justify-between gap-2"><span class="min-w-0">' + inner + '</span>' + close + '</span>';
+  }
+  box.innerHTML = line('<span class="text-muted">Testing ' + esc(name) + '…</span>');
   try {
     const res = await authFetch('/api/integrations/' + encodeURIComponent(name) + '/test', { method: 'POST' });
     const data = await res.json();
-    if (!res.ok) { box.innerHTML = '<span class="text-danger">Test failed: ' + esc(data.detail || 'error') + '</span>'; return; }
+    if (!res.ok) { box.innerHTML = line('<span class="text-danger">Test failed: ' + esc(data.detail || 'error') + '</span>'); return; }
     var body = '';
     if (data.error) {
       body = '<span class="text-danger">Error: ' + esc(data.error) + '</span>';
@@ -3716,8 +3720,13 @@ async function testIntegration(name) {
       body = 'HTTP ' + data.status_code + ' via ' + esc(data.tool) +
         (data.truncated ? ' (truncated)' : '') + ' — <code>' + esc(data.preview) + '</code>';
     }
-    box.innerHTML = body;
-  } catch(e) { box.innerHTML = '<span class="text-danger">Test failed: ' + esc(e.message) + '</span>'; }
+    box.innerHTML = line(body);
+  } catch(e) { box.innerHTML = line('<span class="text-danger">Test failed: ' + esc(e.message) + '</span>'); }
+}
+
+function clearTestResult() {
+  var box = document.getElementById('integration-test-result');
+  if (box) box.classList.add('hidden');
 }
 
 async function deleteIntegration(name) {

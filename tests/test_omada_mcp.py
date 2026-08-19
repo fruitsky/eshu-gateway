@@ -253,12 +253,12 @@ class TestOmadaSeed:
         })
         r = auth_client.post("/api/integrations/omada/seed")
         assert r.status_code == 200
-        assert r.json()["created"] == 11  # 9 curated + generic read/write
+        assert r.json()["created"] == 12  # 10 curated + generic read/write
         tools = auth_client.get("/api/integrations/omada/tools").json()
         names = {t["name"] for t in tools}
         assert names == {"list_sites", "get_site", "list_site_devices", "search_devices",
                          "list_site_clients", "get_client", "list_site_ssids",
-                         "block_client", "reconnect_client", "read", "write"}
+                         "list_site_alerts", "block_client", "reconnect_client", "read", "write"}
         bc = next(t for t in tools if t["name"] == "block_client")
         assert bc["read_only"] == 0
         ls = next(t for t in tools if t["name"] == "list_sites")
@@ -269,6 +269,19 @@ class TestOmadaSeed:
         params = {p["name"]: p for p in ls["params"]}
         assert params["page"]["default"] == 1
         assert params["pageSize"]["default"] == 50
+        # Clients uses the working v2 POST endpoint (v1 GET is broken on v6.2)
+        lsc = next(t for t in tools if t["name"] == "list_site_clients")
+        assert lsc["method"] == "POST"
+        assert lsc["version"] == "v2"
+        # search_devices requires a keyword
+        sd = next(t for t in tools if t["name"] == "search_devices")
+        assert next(p for p in sd["params"] if p["name"] == "searchKey")["required"]
+        # get_client compact carries the diagnostic core
+        gc = next(t for t in tools if t["name"] == "get_client")
+        assert "deviceCategory" in gc["fields"] and "vid" in gc["fields"] and "uptime" in gc["fields"]
+        # device compact includes firmware/uptime
+        dev = next(t for t in tools if t["name"] == "list_site_devices")
+        assert "firmwareVersion" in dev["fields"] and "uptime" in dev["fields"]
 
     def test_tools_namespaced_by_kind(self, auth_client):
         import asyncio
@@ -391,3 +404,79 @@ class TestTlsVerify:
         assert r.status_code == 200
         data = r.json()
         assert data["error"] and "token_url" in data["error"]
+
+
+class TestOmadaErrorDiscipline:
+    """Non-zero errorCode envelopes must surface as errors, not be projected
+    to {} — the root cause of the broken clients/alerts tools."""
+
+    def test_upstream_error_detector(self):
+        from core.integration_proxy import _upstream_error
+        assert _upstream_error('{"errorCode": -1, "msg": "General error"}') == "Omada error -1: General error"
+        assert _upstream_error('{"errorCode": 0, "result": []}') is None
+        assert _upstream_error('{"errorCode": 0}') is None
+        assert _upstream_error('not json') is None
+
+    def test_projected_tool_surfaces_error_not_empty(self, monkeypatch):
+        from core.integration_proxy import execute_integration_call
+        create_integration("omada", "https://omada.local/openapi/v1/omadac-1", "none", "")
+        tool = {
+            "id": 1, "name": "list_site_clients", "enabled": True, "method": "POST",
+            "path_template": "/sites/{siteId}/clients",
+            "params": [{"name": "siteId", "type": "string", "required": True}],
+            "fields": ["id", "mac", "name"], "search_field": "name", "read_only": True,
+        }
+        _patch_urlopen(monkeypatch, '{"errorCode": -1, "msg": "General error"}')
+        res = execute_integration_call(get_integration("omada"), tool, {"siteId": "s1"}, agent="test")
+        assert res["error"] == "Omada error -1: General error"
+        assert res["body"] == ""
+
+    def test_success_still_shapes(self, monkeypatch):
+        from core.integration_proxy import execute_integration_call
+        create_integration("omada", "https://omada.local/openapi/v1/omadac-1", "none", "")
+        tool = {
+            "id": 1, "name": "list_site_clients", "enabled": True, "method": "POST",
+            "path_template": "/sites/{siteId}/clients",
+            "params": [{"name": "siteId", "type": "string", "required": True}],
+            "fields": ["id", "name"], "search_field": "name", "read_only": True,
+        }
+        body = '{"errorCode": 0, "result": {"data": [{"id": "a", "name": "X", "mac": "AA"}, {"id": "b", "name": "Y", "mac": "BB"}]}}'
+        _patch_urlopen(monkeypatch, body)
+        res = execute_integration_call(get_integration("omada"), tool, {"siteId": "s1"}, agent="test")
+        assert not res["error"]
+        assert json.loads(res["body"]) == [{"id": "a", "name": "X"}, {"id": "b", "name": "Y"}]
+
+
+class TestOmadaVersionSwap:
+    """version=v2 tools swap /openapi/v1/ for /openapi/v2/ in the URL base."""
+
+    def test_v2_tool_hits_v2_path(self, mock_upstream):
+        from core.integration_proxy import execute_integration_call
+        create_integration("omada", mock_upstream["base_url"] + "/openapi/v1/omadac-1", "none", "")
+        tool = {
+            "id": 1, "name": "list_site_clients", "enabled": True, "method": "POST",
+            "version": "v2", "path_template": "/sites/{siteId}/clients",
+            "params": [
+                {"name": "siteId", "type": "string", "required": True},
+                {"name": "page", "type": "integer", "default": 1},
+                {"name": "pageSize", "type": "integer", "default": 50},
+            ],
+            "fields": ["id", "name"], "read_only": True,
+        }
+        res = execute_integration_call(get_integration("omada"), tool, {"siteId": "s1"}, agent="test")
+        assert res["status_code"] == 200
+        rec = mock_upstream["requests"][-1]
+        assert rec["path"] == "/openapi/v2/omadac-1/sites/s1/clients"
+        assert rec["method"] == "POST"
+        assert json.loads(rec["body"]) == {"page": 1, "pageSize": 50}
+
+    def test_v1_tool_stays_on_v1(self, mock_upstream):
+        from core.integration_proxy import execute_integration_call
+        create_integration("omada", mock_upstream["base_url"] + "/openapi/v1/omadac-1", "none", "")
+        tool = {
+            "id": 2, "name": "list_sites", "enabled": True, "method": "GET",
+            "path_template": "/sites", "params": [], "fields": ["siteId"], "read_only": True,
+        }
+        execute_integration_call(get_integration("omada"), tool, {}, agent="test")
+        rec = mock_upstream["requests"][-1]
+        assert rec["path"] == "/openapi/v1/omadac-1/sites"

@@ -244,6 +244,22 @@ def _project_body(body: str, fields: list) -> str:
     return body
 
 
+def _upstream_error(body: str):
+    """Detect an Omada-style logical-error envelope (HTTP 200 with a non-zero
+    `errorCode`). Returns a clear message, or None for success/non-JSON bodies.
+    Projection would otherwise flatten these into `{}`, hiding the failure."""
+    try:
+        data = json.loads(body)
+    except (ValueError, TypeError):
+        return None
+    if isinstance(data, dict):
+        code = data.get('errorCode')
+        if code not in (None, 0, '0'):
+            msg = data.get('msg') or data.get('message') or ''
+            return f"Omada error {code}: {msg}".strip()
+    return None
+
+
 def _apply_shaping(body: str, tool: dict, args: dict) -> str:
     """Client-side response shaping: exact filters + search filter + limit +
     field projection.
@@ -359,6 +375,11 @@ def execute_integration_call(integration: dict, tool: dict, args: dict, agent: s
 
     method, path, query_string, body_params, raw_body = _build_request(tool, args)
     base_url = (integration.get('base_url') or '').rstrip('/')
+    # Omada v2 endpoints live under /openapi/v2/... while the integration's
+    # base URL is /openapi/v1/... — a tool flagged `version: v2` swaps the
+    # segment (the token exchange still reads the stored v1 base for omadacId).
+    if tool.get('version') == 'v2':
+        base_url = base_url.replace('/openapi/v1/', '/openapi/v2/')
     _guard_ssrf(base_url, path)
 
     url = base_url + '/' + path.lstrip('/')
@@ -377,10 +398,16 @@ def execute_integration_call(integration: dict, tool: dict, args: dict, agent: s
     status_code, body, truncated, error, latency_ms, outcome = _http_roundtrip(
         integration, url, body_bytes, headers, method)
 
-    # Client-side response shaping (token efficiency): search filter + limit +
-    # field projection, unless the caller asked for `full`.
+    # Surface upstream logical errors (Omada errorCode != 0) instead of
+    # projecting the error envelope down to {}.
     if outcome == 'ok':
-        body = _apply_shaping(body, tool, args)
+        up_err = _upstream_error(body)
+        if up_err:
+            outcome = 'error'
+            error = up_err
+            body = ''
+        else:
+            body = _apply_shaping(body, tool, args)
 
     record_integration_call(
         integration=integration.get('name', ''),
@@ -435,6 +462,13 @@ def execute_generic_call(integration: dict, method: str, path: str, params=None,
 
     status_code, body, truncated, error, latency_ms, outcome = _http_roundtrip(
         integration, url, body_bytes, headers, method)
+
+    if outcome == 'ok':
+        up_err = _upstream_error(body)
+        if up_err:
+            outcome = 'error'
+            error = up_err
+            body = ''
 
     record_integration_call(
         integration=integration.get('name', ''),

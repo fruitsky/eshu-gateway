@@ -63,6 +63,7 @@ def init_integrations_tables(cursor):
             transport TEXT NOT NULL DEFAULT 'http',
             filter_fields TEXT NOT NULL DEFAULT '[]',
             generic INTEGER NOT NULL DEFAULT 0,
+            version TEXT NOT NULL DEFAULT 'v1',
             UNIQUE (integration_id, name)
         )
     ''')
@@ -84,6 +85,10 @@ def init_integrations_tables(cursor):
         pass
     try:
         cursor.execute("ALTER TABLE integration_tools ADD COLUMN generic INTEGER DEFAULT 0")
+    except Exception:
+        pass
+    try:
+        cursor.execute("ALTER TABLE integration_tools ADD COLUMN version TEXT DEFAULT 'v1'")
     except Exception:
         pass
     # One-time backfill: integrations seeded before the `kind` column existed
@@ -236,17 +241,18 @@ def delete_integration(name: str) -> bool:
 def create_tool(integration_id: int, name: str, description: str, method: str,
                 path_template: str, params, example: str, read_only: bool = True,
                 fields=None, search_field: str = '', transport: str = 'http',
-                filter_fields=None, generic: bool = False) -> int:
+                filter_fields=None, generic: bool = False, version: str = 'v1') -> int:
     with db_conn() as conn:
         cursor = conn.cursor()
         cursor.execute('''
             INSERT INTO integration_tools
-                (integration_id, name, description, method, path_template, params, fields, search_field, example, read_only, enabled, transport, filter_fields, generic)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+                (integration_id, name, description, method, path_template, params, fields, search_field, example, read_only, enabled, transport, filter_fields, generic, version)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
         ''', (integration_id, name, description, method, path_template,
               json.dumps(params or []), json.dumps(fields or []), search_field or '',
               example, 1 if read_only else 0,
-              transport or 'http', json.dumps(filter_fields or []), 1 if generic else 0))
+              transport or 'http', json.dumps(filter_fields or []), 1 if generic else 0,
+              version or 'v1'))
         conn.commit()
         return cursor.lastrowid
 
@@ -319,7 +325,7 @@ def set_tool_enabled(tool_id: int, enabled: bool) -> bool:
 
 
 def update_tool(tool_id: int, **fields) -> bool:
-    allowed = {'name', 'description', 'method', 'path_template', 'params', 'fields', 'search_field', 'example', 'read_only', 'enabled', 'transport', 'filter_fields', 'generic'}
+    allowed = {'name', 'description', 'method', 'path_template', 'params', 'fields', 'search_field', 'example', 'read_only', 'enabled', 'transport', 'filter_fields', 'generic', 'version'}
     updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
     if not updates:
         return False
