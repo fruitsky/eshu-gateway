@@ -303,3 +303,27 @@ class TestProxyScheme:
         )
         assert r.status_code == 307
         assert r.headers["location"].startswith("http://")
+
+
+class TestIntegrationCallSearch:
+
+    def test_db_search_filters(self):
+        from db.integrations import get_integration_calls, record_integration_call
+        record_integration_call("proxmox", "list_nodes", "mcp", "GET", "/nodes", 200, 12, "ok", 10, 0, "ok")
+        record_integration_call("ha", "call_service", "mcp", "POST", "/services/light/turn_on", 200, 20, "ok", 12, 0, "ok")
+        assert len(get_integration_calls()) == 2
+        assert len(get_integration_calls(search="proxmox")) == 1
+        assert get_integration_calls(search="proxmox")[0]["integration"] == "proxmox"
+        assert get_integration_calls(search="turn_on")[0]["tool"] == "call_service"
+        assert get_integration_calls(search="POST")[0]["method"] == "POST"
+        assert get_integration_calls(search="nope") == []
+
+    def test_endpoint_search(self, auth_client):
+        from db.integrations import record_integration_call
+        record_integration_call("proxmox", "list_nodes", "mcp", "GET", "/nodes", 200, 12, "ok", 10, 0, "ok")
+        record_integration_call("ha", "list_entities", "mcp", "GET", "/states", 200, 5, "ok", 100, 0, "ok")
+        assert len(auth_client.get("/api/integration-calls").json()) == 2
+        r = auth_client.get("/api/integration-calls?search=ha")
+        assert r.status_code == 200
+        data = r.json()
+        assert len(data) == 1 and data[0]["integration"] == "ha"

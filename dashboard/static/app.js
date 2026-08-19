@@ -3788,21 +3788,50 @@ async function denyIntegrationCall(id) {
   } catch(e) { showToast('❌ Failed: ' + e.message, 'error'); }
 }
 
-async function fetchIntegrationCalls() {
-  const el = document.getElementById('integration-calls-list');
+let _callsSearchTimer = null;
+
+function onCallsSearch() {
+  clearTimeout(_callsSearchTimer);
+  _callsSearchTimer = setTimeout(function() {
+    var v = document.getElementById('calls-search');
+    fetchIntegrationCalls(v ? v.value.trim() : '');
+  }, 250);
+}
+
+function clearCallsSearch() {
+  var v = document.getElementById('calls-search');
+  if (v) v.value = '';
+  fetchIntegrationCalls('');
+}
+
+async function fetchIntegrationCalls(search) {
+  const el = document.getElementById('integration-calls-body');
   if (!el) return;
   try {
-    const res = await authFetch('/api/integration-calls');
+    var url = '/api/integration-calls';
+    if (search) url += '?search=' + encodeURIComponent(search);
+    const res = await authFetch(url);
     if (!res.ok) return;
     const calls = await res.json();
-    if (!calls.length) { el.innerHTML = '<p class="text-muted">No calls yet.</p>'; return; }
+    if (!calls.length) {
+      el.innerHTML = '<tr><td colspan="9" class="px-4 py-3 text-muted">No calls yet.</td></tr>';
+      return;
+    }
     el.innerHTML = calls.map(function(c) {
       var when = new Date(c.created_at * 1000).toLocaleString();
-      var outcome = c.outcome === 'ok' ? '' : ' <span class="text-danger">(' + esc(c.outcome) + ')</span>';
-      return '<div class="p-2 rounded bg-black/20 mb-1 text-xs">' +
-        '<span class="text-main">' + esc(c.integration) + (c.tool ? '.' + esc(c.tool) : '') + '</span> ' +
-        esc(c.method) + ' ' + esc(c.path) + ' · ' + (c.status_code || '—') + ' · ' + c.latency_ms + 'ms' + outcome +
-        '<span class="text-muted"> · ' + when + '</span></div>';
+      var ok = c.outcome === 'ok';
+      var cls = ok ? 'text-success' : 'text-danger';
+      return '<tr>' +
+        '<td class="text-muted">' + esc(when) + '</td>' +
+        '<td>' + esc(c.integration) + '</td>' +
+        '<td class="text-muted">' + esc(c.tool || '') + '</td>' +
+        '<td class="text-muted">' + esc(c.agent || '') + '</td>' +
+        '<td>' + esc(c.method) + '</td>' +
+        '<td class="text-muted break-all">' + esc(c.path) + '</td>' +
+        '<td class="' + cls + '">' + (c.status_code || '—') + '</td>' +
+        '<td class="text-right text-muted">' + (c.latency_ms == null ? '—' : c.latency_ms + 'ms') + '</td>' +
+        '<td class="' + cls + '">' + esc(c.outcome) + '</td>' +
+        '</tr>';
     }).join('');
   } catch(e) {}
 }

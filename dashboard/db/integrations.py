@@ -371,10 +371,24 @@ def record_integration_call(integration: str, tool: str, agent: str, method: str
         return cursor.lastrowid
 
 
-def get_integration_calls(limit: int = 200):
+def get_integration_calls(search: str = None, limit: int = 200):
+    """Recent proxied calls, newest first. `search` does a case-insensitive LIKE
+    across the readable columns plus the UTC datetime string (note: display uses
+    the browser's local time, so a date search matches the UTC value)."""
     with db_conn() as conn:
         cursor = conn.cursor()
-        cursor.execute('SELECT * FROM integration_calls ORDER BY id DESC LIMIT ?', (limit,))
+        if search:
+            needle = '%' + search + '%'
+            cursor.execute('''
+                SELECT * FROM integration_calls
+                WHERE integration LIKE ? OR tool LIKE ? OR agent LIKE ?
+                   OR method LIKE ? OR path LIKE ? OR outcome LIKE ?
+                   OR CAST(status_code AS TEXT) LIKE ?
+                   OR datetime(created_at, 'unixepoch') LIKE ?
+                ORDER BY id DESC LIMIT ?
+            ''', (needle, needle, needle, needle, needle, needle, needle, needle, limit))
+        else:
+            cursor.execute('SELECT * FROM integration_calls ORDER BY id DESC LIMIT ?', (limit,))
         return [dict(row) for row in cursor.fetchall()]
 
 

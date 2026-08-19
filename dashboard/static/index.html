@@ -455,18 +455,6 @@
       <div class="grid grid-cols-1 lg:grid-cols-2 gap-5">
         <div class="flex flex-col gap-5">
           <div class="widget">
-            <div class="widget-header">Agent Tokens</div>
-            <p class="text-xs mb-3 text-muted">Long-lived bearer tokens your agents present to the MCP endpoint (<code>/mcp</code>). Shown once on creation; only the hash is stored.</p>
-            <div class="flex gap-2 mb-1">
-              <input type="text" id="agent-token-name" placeholder="Agent name (e.g. hermes)" class="flex-1 text-xs" onkeydown="if(event.key==='Enter')createAgentToken()">
-              <button onclick="createAgentToken()" class="btn btn-sm">Create Token</button>
-            </div>
-            <p class="text-xs text-muted mb-3">When configuring your client, paste the <strong>raw token</strong> — clients like Hermes add the <code>Bearer </code> prefix themselves (adding it yourself causes 401s).</p>
-            <div id="agent-token-result" class="hidden mb-3 p-2 rounded bg-green-900/20 border border-green-700/40 text-xs break-all"></div>
-            <div id="agent-token-list" class="space-y-2"><p class="text-muted">Loading...</p></div>
-          </div>
-
-          <div class="widget">
             <div class="widget-header">Integrations</div>
             <p class="text-xs mb-3 text-muted">Named upstream APIs. Credentials are stored server-side and never returned.</p>
             <div class="space-y-2 mb-3">
@@ -508,6 +496,25 @@
           </div>
 
           <div class="widget">
+            <div class="widget-header">Tools <span class="text-xs text-muted">(select an integration to manage)</span></div>
+            <div id="integration-tools-list"><p class="text-muted">Select an integration to view its tools.</p></div>
+          </div>
+        </div>
+
+        <div class="flex flex-col gap-5">
+          <div class="widget">
+            <div class="widget-header">Agent Tokens</div>
+            <p class="text-xs mb-3 text-muted">Long-lived bearer tokens your agents present to the MCP endpoint (<code>/mcp</code>). Shown once on creation; only the hash is stored.</p>
+            <div class="flex gap-2 mb-1">
+              <input type="text" id="agent-token-name" placeholder="Agent name (e.g. hermes)" class="flex-1 text-xs" onkeydown="if(event.key==='Enter')createAgentToken()">
+              <button onclick="createAgentToken()" class="btn btn-sm">Create Token</button>
+            </div>
+            <p class="text-xs text-muted mb-3">When configuring your client, paste the <strong>raw token</strong> — clients like Hermes add the <code>Bearer </code> prefix themselves (adding it yourself causes 401s).</p>
+            <div id="agent-token-result" class="hidden mb-3 p-2 rounded bg-green-900/20 border border-green-700/40 text-xs break-all"></div>
+            <div id="agent-token-list" class="space-y-2"><p class="text-muted">Loading...</p></div>
+          </div>
+
+          <div class="widget">
             <div class="widget-header">MCP Access</div>
             <p class="text-xs mb-3 text-muted">Hosts allowed to reach the MCP endpoint (DNS-rebinding allowlist). Comma-separated — list the hostname/IP you reach the dashboard at (e.g. <code>eshu.local.example.com</code>). Loopback is always allowed. Required if you use a hostname or a reverse proxy.</p>
             <div class="flex gap-2">
@@ -517,16 +524,21 @@
             <div class="text-xs text-muted mt-1">Current: <span id="mcp-allowed-hosts-current">none (loopback only)</span></div>
           </div>
         </div>
+      </div>
 
-        <div class="flex flex-col gap-5">
-          <div class="widget">
-            <div class="widget-header">Tools <span class="text-xs text-muted">(select an integration to manage)</span></div>
-            <div id="integration-tools-list"><p class="text-muted">Select an integration to view its tools.</p></div>
-          </div>
-          <div class="widget">
-            <div class="widget-header">Recent Proxied Calls</div>
-            <div id="integration-calls-list" class="space-y-1 max-h-96 overflow-y-auto"><p class="text-muted">No calls yet.</p></div>
-          </div>
+      <div class="widget mt-5">
+        <div class="widget-header">Recent Proxied Calls</div>
+        <div class="flex gap-2 mb-2">
+          <input type="text" id="calls-search" placeholder="Search integration, tool, agent, method, path, status, outcome, date (UTC)…" class="flex-1 text-xs" oninput="onCallsSearch()">
+          <button onclick="clearCallsSearch()" class="btn btn-sm">Clear</button>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr>
+              <th>Time</th><th>Integration</th><th>Tool</th><th>Agent</th><th>Method</th><th>Path</th><th>Status</th><th class="text-right">Latency</th><th>Outcome</th>
+            </tr></thead>
+            <tbody id="integration-calls-body"><tr><td colspan="9" class="px-4 py-3 text-muted">Loading...</td></tr></tbody>
+          </table>
         </div>
       </div>
     </div>
