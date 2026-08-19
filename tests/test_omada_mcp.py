@@ -273,15 +273,24 @@ class TestOmadaSeed:
         lsc = next(t for t in tools if t["name"] == "list_site_clients")
         assert lsc["method"] == "POST"
         assert lsc["version"] == "v2"
-        # search_devices requires a keyword
+        # search_devices requires a keyword and strips the envelope
         sd = next(t for t in tools if t["name"] == "search_devices")
         assert next(p for p in sd["params"] if p["name"] == "searchKey")["required"]
-        # get_client compact carries the diagnostic core
+        assert sd["strip_envelope"] == 1
+        # get_client compact carries the diagnostic core + traffic
         gc = next(t for t in tools if t["name"] == "get_client")
         assert "deviceCategory" in gc["fields"] and "vid" in gc["fields"] and "uptime" in gc["fields"]
+        assert "trafficDown" in gc["fields"] and "trafficUp" in gc["fields"]
         # device compact includes firmware/uptime
         dev = next(t for t in tools if t["name"] == "list_site_devices")
         assert "firmwareVersion" in dev["fields"] and "uptime" in dev["fields"]
+        # clients compact includes traffic stats
+        assert "trafficDown" in lsc["fields"] and "trafficUp" in lsc["fields"]
+        # alerts params use clean names mapped to the dotted wire keys
+        la = next(t for t in tools if t["name"] == "list_site_alerts")
+        ap = {p["name"]: p for p in la["params"]}
+        assert "timeStart" in ap and "timeEnd" in ap
+        assert ap["timeStart"]["query_key"] == "filters.timeStart"
 
     def test_tools_namespaced_by_kind(self, auth_client):
         import asyncio
@@ -480,3 +489,42 @@ class TestOmadaVersionSwap:
         execute_integration_call(get_integration("omada"), tool, {}, agent="test")
         rec = mock_upstream["requests"][-1]
         assert rec["path"] == "/openapi/v1/omadac-1/sites"
+
+
+class TestQueryKeyAndStripEnvelope:
+
+    def test_build_request_uses_query_key(self):
+        from core.integration_proxy import _build_request
+        tool = {
+            "method": "GET", "path_template": "/sites/{siteId}/logs/alerts", "params": [
+                {"name": "siteId", "type": "string", "required": True},
+                {"name": "timeStart", "type": "integer", "query_key": "filters.timeStart", "required": True},
+                {"name": "timeEnd", "type": "integer", "query_key": "filters.timeEnd", "required": True},
+            ],
+        }
+        _, _, qs, _, _ = _build_request(tool, {"siteId": "s1", "timeStart": 1, "timeEnd": 2})
+        assert set(qs.split('&')) == {"filters.timeStart=1", "filters.timeEnd=2"}
+
+    def test_build_request_path_still_uses_name(self):
+        from core.integration_proxy import _build_request
+        tool = {
+            "method": "GET", "path_template": "/sites/{siteId}/clients", "params": [
+                {"name": "siteId", "type": "string", "required": True},
+            ],
+        }
+        _, path, _, _, _ = _build_request(tool, {"siteId": "s1"})
+        assert path == "/sites/s1/clients"
+
+    def test_strip_envelope_unwraps_passthrough(self):
+        from core.integration_proxy import _apply_shaping
+        body = ('{"errorCode": 0, "msg": "Success", "result": '
+                '{"siteNames": {"s1": "Home"}, "devices": [{"mac": "AA", "name": "AP"}]}}')
+        tool = {"fields": [], "search_field": "", "filter_fields": [], "strip_envelope": True}
+        out = json.loads(_apply_shaping(body, tool, {}))
+        assert out == {"siteNames": {"s1": "Home"}, "devices": [{"mac": "AA", "name": "AP"}]}
+
+    def test_no_strip_envelope_passthrough_stays_raw(self):
+        from core.integration_proxy import _apply_shaping
+        body = '{"errorCode": 0, "result": {"x": 1}}'
+        tool = {"fields": [], "search_field": "", "filter_fields": [], "strip_envelope": False}
+        assert _apply_shaping(body, tool, {}) == body

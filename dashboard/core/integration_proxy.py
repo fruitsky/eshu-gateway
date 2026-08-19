@@ -148,6 +148,9 @@ def _build_request(tool: dict, args: dict):
     raw_body = None
     for p in tool.get('params') or []:
         name = p.get('name')
+        # `query_key` lets the MCP-facing param name differ from the wire key
+        # (e.g. timeStart -> filters.timeStart). Path substitution uses `name`.
+        key = p.get('query_key') or name
         val = args.get(name)
         if val is None:
             val = p.get('default')
@@ -158,9 +161,9 @@ def _build_request(tool: dict, args: dict):
         elif p.get('type') == 'json':
             raw_body = val
         elif method in ('POST', 'PUT', 'PATCH'):
-            body_params[name] = val
+            body_params[key] = val
         else:
-            query_params[name] = val
+            query_params[key] = val
     query_string = urllib.parse.urlencode(query_params)
     return method, path, query_string, body_params, raw_body
 
@@ -268,12 +271,15 @@ def _apply_shaping(body: str, tool: dict, args: dict) -> str:
     an exact-match filter is applied against `args[name]`. `search` filters a
     list by case-insensitive substring on the tool's `search_field`; `limit`
     caps the list (default 50 via the synthetic param). Applied to the
-    unwrapped data before projection."""
+    unwrapped data before projection. `strip_envelope` unwraps the API envelope
+    (e.g. Omada's {errorCode,msg,result}) even when there is nothing to
+    project, so passthrough tools still drop the wrapper."""
     a = args or {}
     fields = tool.get('fields') or []
     search_field = tool.get('search_field') or ''
     filter_fields = tool.get('filter_fields') or []
-    if a.get('full') or (not fields and not search_field and not filter_fields):
+    strip_envelope = tool.get('strip_envelope')
+    if a.get('full') or (not fields and not search_field and not filter_fields and not strip_envelope):
         return body
     try:
         data = json.loads(body)
@@ -307,7 +313,7 @@ def _apply_shaping(body: str, tool: dict, args: dict) -> str:
             return json.dumps([_project_dict(item, fields) if isinstance(item, dict) else item for item in data])
         if isinstance(data, dict):
             return json.dumps(_project_dict(data, fields))
-    if search_field or filter_fields:
+    if search_field or filter_fields or strip_envelope:
         return json.dumps(data)
     return body
 

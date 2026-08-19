@@ -64,6 +64,7 @@ OMADA_SEED_TOOLS = [
             {"name": "pageSize", "type": "integer", "description": "Results per page (max 100).", "required": False, "default": 50},
         ],
         "fields": [],
+        "strip_envelope": True,
         "example": '{"siteNames": {"640effd1b3f2ae5b912275ec": "Home"}, "devices": [{"mac": "70:B3:D5:AA:BB:CC", "name": "AP-Living", "site": "Home", "model": "EAP670", "type": "ap", "status": 1}]}',
         "read_only": True,
     },
@@ -79,7 +80,7 @@ OMADA_SEED_TOOLS = [
             {"name": "page", "type": "integer", "description": "Page number (1-based).", "required": False, "default": 1},
             {"name": "pageSize", "type": "integer", "description": "Results per page (max 100).", "required": False, "default": 50},
         ],
-        "fields": ["id", "mac", "name", "hostName", "vendor", "deviceType", "ip", "ssid", "signalLevel", "wifiMode", "apName", "healthScore"],
+        "fields": ["id", "mac", "name", "hostName", "vendor", "deviceType", "ip", "ssid", "signalLevel", "wifiMode", "apName", "healthScore", "trafficDown", "trafficUp", "activity"],
         "search_field": "name",
         "example": '[{"id": "abc123", "mac": "AA:BB:CC:DD:EE:FF", "name": "Phone", "vendor": "Apple", "deviceType": 1, "ip": "192.168.1.100", "ssid": "Home-5G", "signalLevel": -55}]',
         "read_only": True,
@@ -93,7 +94,7 @@ OMADA_SEED_TOOLS = [
             {"name": "siteId", "type": "string", "description": "Site id (from list_sites).", "required": True},
             {"name": "clientMac", "type": "string", "description": "Client MAC address (from list_site_clients).", "required": True},
         ],
-        "fields": ["id", "mac", "name", "hostName", "vendor", "deviceCategory", "osName", "ip", "ssid", "signalLevel", "wifiMode", "apName", "apMac", "channel", "connectType", "vid", "networkName", "port", "switchName", "gatewayName", "uptime", "rxRate", "txRate"],
+        "fields": ["id", "mac", "name", "hostName", "vendor", "deviceCategory", "osName", "ip", "ssid", "signalLevel", "wifiMode", "apName", "apMac", "channel", "connectType", "vid", "networkName", "port", "switchName", "gatewayName", "uptime", "rxRate", "txRate", "trafficDown", "trafficUp", "activity"],
         "example": '{"id": "abc123", "mac": "AA:BB:CC:DD:EE:FF", "name": "Phone", "vendor": "Apple", "ip": "192.168.1.100", "ssid": "Home-5G", "signalLevel": -55, "apName": "AP-Living", "connectType": "wireless", "vid": 1, "networkName": "LAN"}',
         "read_only": True,
     },
@@ -104,8 +105,8 @@ OMADA_SEED_TOOLS = [
         "path_template": "/sites/{siteId}/logs/alerts",
         "params": [
             {"name": "siteId", "type": "string", "description": "Site id (from list_sites).", "required": True},
-            {"name": "filters.timeStart", "type": "integer", "description": "Start of the window, epoch milliseconds.", "required": True},
-            {"name": "filters.timeEnd", "type": "integer", "description": "End of the window, epoch milliseconds.", "required": True},
+            {"name": "timeStart", "type": "integer", "query_key": "filters.timeStart", "description": "Start of the window, epoch milliseconds.", "required": True},
+            {"name": "timeEnd", "type": "integer", "query_key": "filters.timeEnd", "description": "End of the window, epoch milliseconds.", "required": True},
             {"name": "page", "type": "integer", "description": "Page number (1-based).", "required": False, "default": 1},
             {"name": "pageSize", "type": "integer", "description": "Results per page (max 100).", "required": False, "default": 50},
         ],
@@ -176,6 +177,7 @@ def seed_omada_tools(integration_id: int):
                 fields=tool.get('fields'),
                 search_field=tool.get('search_field'),
                 version=tool.get('version', 'v1'),
+                strip_envelope=tool.get('strip_envelope'),
                 example=tool['example'],
                 read_only=tool['read_only'],
             )
@@ -193,6 +195,7 @@ def seed_omada_tools(integration_id: int):
                 fields=tool.get('fields'),
                 search_field=tool.get('search_field') or '',
                 version=tool.get('version', 'v1'),
+                strip_envelope=tool.get('strip_envelope'),
             )
             created += 1
     return created, updated
