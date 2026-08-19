@@ -528,9 +528,17 @@
 
       <div class="widget mt-5">
         <div class="widget-header">Recent Proxied Calls</div>
-        <div class="flex gap-2 mb-2">
-          <input type="text" id="calls-search" placeholder="Search integration, tool, agent, method, path, status, outcome, date (UTC)…" class="flex-1 text-xs" oninput="onCallsSearch()">
-          <button onclick="clearCallsSearch()" class="btn btn-sm">Clear</button>
+        <div class="flex flex-wrap items-center gap-2 mb-2">
+          <input type="text" id="calls-search" placeholder="Search text, or a date (e.g. 19/08/2026)…" class="flex-1 text-xs" oninput="onCallsSearch()">
+          <button onclick="clearCallsSearch()" class="btn btn-xs">Clear</button>
+          <button onclick="setCallsRange('today')" class="btn btn-xs" id="calls-btn-today">Today</button>
+          <button onclick="setCallsRange('yesterday')" class="btn btn-xs" id="calls-btn-yesterday">Yesterday</button>
+          <button onclick="setCallsRange('week')" class="btn btn-xs" id="calls-btn-week">Last week</button>
+          <select id="calls-page-size" class="text-xs" onchange="onCallsPageSize()">
+            <option value="20">20 / page</option>
+            <option value="50" selected>50 / page</option>
+            <option value="100">100 / page</option>
+          </select>
         </div>
         <div class="table-wrap">
           <table>
@@ -539,6 +547,14 @@
             </tr></thead>
             <tbody id="integration-calls-body"><tr><td colspan="9" class="px-4 py-3 text-muted">Loading...</td></tr></tbody>
           </table>
+        </div>
+        <div class="flex flex-wrap items-center justify-between gap-2 mt-2 text-xs text-muted">
+          <span id="calls-count">0 entries</span>
+          <div class="flex items-center gap-2">
+            <button onclick="callsPrevPage()" class="btn btn-xs" id="calls-prev">← Prev</button>
+            <span id="calls-page">Page 1</span>
+            <button onclick="callsNextPage()" class="btn btn-xs" id="calls-next">Next →</button>
+          </div>
         </div>
       </div>
     </div>

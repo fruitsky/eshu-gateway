@@ -56,7 +56,7 @@ class TestExecuteGenericCall:
         assert rec["method"] == "POST"
         assert json.loads(rec["body"]) == {"entity_id": "light.x"}
         assert rec["authorization"] == "Bearer tok"
-        calls = get_integration_calls()
+        calls = get_integration_calls()["rows"]
         assert calls[-1]["tool"] == "write"
         assert calls[-1]["method"] == "POST"
 

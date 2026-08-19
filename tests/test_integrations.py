@@ -311,19 +311,41 @@ class TestIntegrationCallSearch:
         from db.integrations import get_integration_calls, record_integration_call
         record_integration_call("proxmox", "list_nodes", "mcp", "GET", "/nodes", 200, 12, "ok", 10, 0, "ok")
         record_integration_call("ha", "call_service", "mcp", "POST", "/services/light/turn_on", 200, 20, "ok", 12, 0, "ok")
-        assert len(get_integration_calls()) == 2
-        assert len(get_integration_calls(search="proxmox")) == 1
-        assert get_integration_calls(search="proxmox")[0]["integration"] == "proxmox"
-        assert get_integration_calls(search="turn_on")[0]["tool"] == "call_service"
-        assert get_integration_calls(search="POST")[0]["method"] == "POST"
-        assert get_integration_calls(search="nope") == []
+        assert get_integration_calls()["total"] == 2
+        assert len(get_integration_calls()["rows"]) == 2
+        assert get_integration_calls(search="proxmox")["total"] == 1
+        assert get_integration_calls(search="proxmox")["rows"][0]["integration"] == "proxmox"
+        assert get_integration_calls(search="turn_on")["rows"][0]["tool"] == "call_service"
+        assert get_integration_calls(search="POST")["rows"][0]["method"] == "POST"
+        assert get_integration_calls(search="nope")["total"] == 0
+
+    def test_db_range_and_pagination(self):
+        import time
+        from db.core import db_conn
+        from db.integrations import get_integration_calls
+        base = int(time.time()) - 1000
+        with db_conn() as conn:
+            cur = conn.cursor()
+            for i, tool in enumerate(["a", "b", "c"]):
+                cur.execute('''
+                    INSERT INTO integration_calls
+                        (integration, tool, agent, method, path, status_code, latency_ms,
+                         response_summary, response_bytes, truncated, outcome, created_at)
+                    VALUES (?, ?, 'mcp', 'GET', '/1', 200, 1, 'ok', 1, 0, 'ok', ?)
+                ''', ('proxmox', tool, base + i))
+            conn.commit()
+        res = get_integration_calls(start=base, end=base + 1)
+        assert res["total"] == 1 and res["rows"][0]["tool"] == "a"
+        res = get_integration_calls(limit=2, offset=1)
+        assert res["total"] == 3 and len(res["rows"]) == 2
+        assert res["rows"][0]["tool"] == "b" and res["rows"][1]["tool"] == "a"
 
     def test_endpoint_search(self, auth_client):
         from db.integrations import record_integration_call
         record_integration_call("proxmox", "list_nodes", "mcp", "GET", "/nodes", 200, 12, "ok", 10, 0, "ok")
         record_integration_call("ha", "list_entities", "mcp", "GET", "/states", 200, 5, "ok", 100, 0, "ok")
-        assert len(auth_client.get("/api/integration-calls").json()) == 2
+        assert auth_client.get("/api/integration-calls").json()["total"] == 2
         r = auth_client.get("/api/integration-calls?search=ha")
         assert r.status_code == 200
         data = r.json()
-        assert len(data) == 1 and data[0]["integration"] == "ha"
+        assert data["total"] == 1 and data["rows"][0]["integration"] == "ha"

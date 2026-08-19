@@ -3789,50 +3789,138 @@ async function denyIntegrationCall(id) {
 }
 
 let _callsSearchTimer = null;
+let _callsPage = 1;
+let _callsPageSize = 50;
+let _callsSearch = '';
+let _callsStart = null;
+let _callsEnd = null;
+
+function _localMidnightSec(y, m, d) {
+  return Math.floor(new Date(y, m, d).getTime() / 1000);
+}
+
+function _callsDayRange(y, m, d) {
+  // [midnight, next midnight) in the browser's local timezone (DST-safe).
+  return { start: _localMidnightSec(y, m, d), end: _localMidnightSec(y, m, d + 1) };
+}
+
+function _parseCallsDate(str) {
+  // Interpret a date-only query as a single local day range; otherwise null.
+  var m;
+  if ((m = str.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/))) return _callsDayRange(+m[3], +m[2] - 1, +m[1]);
+  if ((m = str.match(/^(\d{4})\/(\d{1,2})\/(\d{1,2})$/))) return _callsDayRange(+m[1], +m[2] - 1, +m[3]);
+  if ((m = str.match(/^(\d{4})-(\d{2})-(\d{2})$/))) return _callsDayRange(+m[1], +m[2] - 1, +m[3]);
+  return null;
+}
+
+function setCallsRange(which) {
+  var now = new Date();
+  var range = null;
+  if (which === 'today') {
+    range = _callsDayRange(now.getFullYear(), now.getMonth(), now.getDate());
+  } else if (which === 'yesterday') {
+    var y = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+    range = _callsDayRange(y.getFullYear(), y.getMonth(), y.getDate());
+  } else if (which === 'week') {
+    var w = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 6);
+    range = { start: _localMidnightSec(w.getFullYear(), w.getMonth(), w.getDate()),
+              end: Math.floor(now.getTime() / 1000) };
+  }
+  _callsStart = range ? range.start : null;
+  _callsEnd = range ? range.end : null;
+  _callsSearch = '';
+  var box = document.getElementById('calls-search');
+  if (box) box.value = '';
+  _callsPage = 1;
+  fetchIntegrationCalls();
+}
 
 function onCallsSearch() {
   clearTimeout(_callsSearchTimer);
   _callsSearchTimer = setTimeout(function() {
-    var v = document.getElementById('calls-search');
-    fetchIntegrationCalls(v ? v.value.trim() : '');
+    var box = document.getElementById('calls-search');
+    var val = box ? box.value.trim() : '';
+    var range = _parseCallsDate(val);
+    if (range) {
+      _callsStart = range.start;
+      _callsEnd = range.end;
+      _callsSearch = '';
+    } else {
+      _callsStart = null;
+      _callsEnd = null;
+      _callsSearch = val;
+    }
+    _callsPage = 1;
+    fetchIntegrationCalls();
   }, 250);
 }
 
 function clearCallsSearch() {
-  var v = document.getElementById('calls-search');
-  if (v) v.value = '';
-  fetchIntegrationCalls('');
+  var box = document.getElementById('calls-search');
+  if (box) box.value = '';
+  _callsSearch = '';
+  _callsStart = null;
+  _callsEnd = null;
+  _callsPage = 1;
+  fetchIntegrationCalls();
 }
 
-async function fetchIntegrationCalls(search) {
+function onCallsPageSize() {
+  var sel = document.getElementById('calls-page-size');
+  _callsPageSize = parseInt(sel && sel.value, 10) || 50;
+  _callsPage = 1;
+  fetchIntegrationCalls();
+}
+
+function callsPrevPage() { if (_callsPage > 1) { _callsPage--; fetchIntegrationCalls(); } }
+function callsNextPage() { _callsPage++; fetchIntegrationCalls(); }
+
+async function fetchIntegrationCalls() {
   const el = document.getElementById('integration-calls-body');
   if (!el) return;
   try {
-    var url = '/api/integration-calls';
-    if (search) url += '?search=' + encodeURIComponent(search);
+    var params = [];
+    if (_callsSearch) params.push('search=' + encodeURIComponent(_callsSearch));
+    if (_callsStart != null) params.push('start=' + _callsStart);
+    if (_callsEnd != null) params.push('end=' + _callsEnd);
+    params.push('limit=' + _callsPageSize);
+    params.push('offset=' + ((_callsPage - 1) * _callsPageSize));
+    var url = '/api/integration-calls' + (params.length ? '?' + params.join('&') : '');
     const res = await authFetch(url);
     if (!res.ok) return;
-    const calls = await res.json();
+    const data = await res.json();
+    const calls = data.rows || [];
+    const total = data.total || 0;
     if (!calls.length) {
-      el.innerHTML = '<tr><td colspan="9" class="px-4 py-3 text-muted">No calls yet.</td></tr>';
-      return;
+      el.innerHTML = '<tr><td colspan="9" class="px-4 py-3 text-muted">No calls match.</td></tr>';
+    } else {
+      el.innerHTML = calls.map(function(c) {
+        var when = new Date(c.created_at * 1000).toLocaleString();
+        var ok = c.outcome === 'ok';
+        var cls = ok ? 'text-success' : 'text-danger';
+        return '<tr>' +
+          '<td class="text-muted">' + esc(when) + '</td>' +
+          '<td>' + esc(c.integration) + '</td>' +
+          '<td class="text-muted">' + esc(c.tool || '') + '</td>' +
+          '<td class="text-muted">' + esc(c.agent || '') + '</td>' +
+          '<td>' + esc(c.method) + '</td>' +
+          '<td class="text-muted break-all">' + esc(c.path) + '</td>' +
+          '<td class="' + cls + '">' + (c.status_code || '—') + '</td>' +
+          '<td class="text-right text-muted">' + (c.latency_ms == null ? '—' : c.latency_ms + 'ms') + '</td>' +
+          '<td class="' + cls + '">' + esc(c.outcome) + '</td>' +
+          '</tr>';
+      }).join('');
     }
-    el.innerHTML = calls.map(function(c) {
-      var when = new Date(c.created_at * 1000).toLocaleString();
-      var ok = c.outcome === 'ok';
-      var cls = ok ? 'text-success' : 'text-danger';
-      return '<tr>' +
-        '<td class="text-muted">' + esc(when) + '</td>' +
-        '<td>' + esc(c.integration) + '</td>' +
-        '<td class="text-muted">' + esc(c.tool || '') + '</td>' +
-        '<td class="text-muted">' + esc(c.agent || '') + '</td>' +
-        '<td>' + esc(c.method) + '</td>' +
-        '<td class="text-muted break-all">' + esc(c.path) + '</td>' +
-        '<td class="' + cls + '">' + (c.status_code || '—') + '</td>' +
-        '<td class="text-right text-muted">' + (c.latency_ms == null ? '—' : c.latency_ms + 'ms') + '</td>' +
-        '<td class="' + cls + '">' + esc(c.outcome) + '</td>' +
-        '</tr>';
-    }).join('');
+    var pages = Math.max(1, Math.ceil(total / _callsPageSize));
+    if (_callsPage > pages) _callsPage = pages;
+    var countEl = document.getElementById('calls-count');
+    var pageEl = document.getElementById('calls-page');
+    var prevEl = document.getElementById('calls-prev');
+    var nextEl = document.getElementById('calls-next');
+    if (countEl) countEl.textContent = total + ' entries';
+    if (pageEl) pageEl.textContent = 'Page ' + _callsPage + ' of ' + pages;
+    if (prevEl) prevEl.disabled = _callsPage <= 1;
+    if (nextEl) nextEl.disabled = _callsPage >= pages;
   } catch(e) {}
 }
 

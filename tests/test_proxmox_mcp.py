@@ -38,7 +38,7 @@ class TestProxyForwarding:
         assert mock_upstream["requests"][-1]["path"] == "/nodes"
         assert mock_upstream["requests"][-1]["authorization"] == "PVEAPIToken=u!t=v"
         # audit row recorded
-        calls = get_integration_calls()
+        calls = get_integration_calls()["rows"]
         assert len(calls) == 1
         assert calls[0]["integration"] == "proxmox"
         assert calls[0]["status_code"] == 200

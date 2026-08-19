@@ -371,25 +371,38 @@ def record_integration_call(integration: str, tool: str, agent: str, method: str
         return cursor.lastrowid
 
 
-def get_integration_calls(search: str = None, limit: int = 200):
-    """Recent proxied calls, newest first. `search` does a case-insensitive LIKE
-    across the readable columns plus the UTC datetime string (note: display uses
-    the browser's local time, so a date search matches the UTC value)."""
+def get_integration_calls(search: str = None, start: int = None, end: int = None,
+                          limit: int = 50, offset: int = 0):
+    """Paginated, filterable list of proxied calls, newest first.
+
+    `search` is a case-insensitive LIKE across the readable columns. `start`/`end`
+    are epoch-second bounds (inclusive start, exclusive end) — the frontend
+    computes these from the viewer's local-time day boundaries. Returns
+    `{"rows": [...], "total": N}` so the UI can paginate."""
+    where = []
+    params = []
+    if search:
+        needle = '%' + search + '%'
+        where.append('(integration LIKE ? OR tool LIKE ? OR agent LIKE ?'
+                     ' OR method LIKE ? OR path LIKE ? OR outcome LIKE ?'
+                     ' OR CAST(status_code AS TEXT) LIKE ?)')
+        params += [needle] * 7
+    if start is not None:
+        where.append('created_at >= ?')
+        params.append(start)
+    if end is not None:
+        where.append('created_at < ?')
+        params.append(end)
+    where_sql = ('WHERE ' + ' AND '.join(where)) if where else ''
     with db_conn() as conn:
         cursor = conn.cursor()
-        if search:
-            needle = '%' + search + '%'
-            cursor.execute('''
-                SELECT * FROM integration_calls
-                WHERE integration LIKE ? OR tool LIKE ? OR agent LIKE ?
-                   OR method LIKE ? OR path LIKE ? OR outcome LIKE ?
-                   OR CAST(status_code AS TEXT) LIKE ?
-                   OR datetime(created_at, 'unixepoch') LIKE ?
-                ORDER BY id DESC LIMIT ?
-            ''', (needle, needle, needle, needle, needle, needle, needle, needle, limit))
-        else:
-            cursor.execute('SELECT * FROM integration_calls ORDER BY id DESC LIMIT ?', (limit,))
-        return [dict(row) for row in cursor.fetchall()]
+        cursor.execute(f'SELECT COUNT(*) FROM integration_calls {where_sql}', params)
+        total = cursor.fetchone()[0]
+        cursor.execute(
+            f'SELECT * FROM integration_calls {where_sql} ORDER BY id DESC LIMIT ? OFFSET ?',
+            params + [limit, offset])
+        rows = [dict(row) for row in cursor.fetchall()]
+    return {'rows': rows, 'total': total}
 
 
 # ── Pending (approval) calls ────────────────────────────────────────────

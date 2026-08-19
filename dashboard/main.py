@@ -2348,9 +2348,10 @@ def seed_integration_endpoint(name: str, request: Request):
 
 
 @app.get("/api/integration-calls")
-def list_integration_calls(request: Request, search: str = None):
+def list_integration_calls(request: Request, search: str = None, start: int = None,
+                           end: int = None, limit: int = 50, offset: int = 0):
     _check_session(request)
-    return get_integration_calls(search=search, limit=200)
+    return get_integration_calls(search=search, start=start, end=end, limit=limit, offset=offset)
 
 
 @app.get("/api/integration-calls/pending")
