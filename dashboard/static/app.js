@@ -3741,6 +3741,13 @@ async function seedTools(name) {
 }
 
 async function selectIntegration(name) {
+  if (_selectedIntegration === name) {
+    _selectedIntegration = null;
+    renderIntegrationList();
+    var el = document.getElementById('integration-tools-list');
+    if (el) el.innerHTML = '<p class="text-muted">Select an integration to view its tools.</p>';
+    return;
+  }
   _selectedIntegration = name;
   renderIntegrationList();
   fetchTools(name);
