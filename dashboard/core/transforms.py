@@ -180,7 +180,8 @@ def _list_alerts(integration, tool, args, data):
     if needle:
         items = [x for x in items if isinstance(x, dict) and (
             needle in str(x.get('message') or '').lower()
-            or needle in str(x.get('resourceName') or '').lower())]
+            or needle in str(x.get('resourceName') or '').lower()
+            or needle in str(x.get('id') or '').lower())]
     keys = ('id', 'level', 'type', 'resourceId', 'resourceName', 'node',
             'message', 'value', 'threshold', 'startTime', 'lastSeen',
             'acknowledged')

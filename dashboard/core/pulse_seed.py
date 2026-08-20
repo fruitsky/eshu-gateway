@@ -57,13 +57,13 @@ PULSE_SEED_TOOLS = [
     },
     {
         "name": "list_alerts",
-        "description": "List active (default) or historical alerts. scope=history hits /alerts/history with limit; use search (message/resource substring) to narrow. Returns id, level, type, resource, node, message, value, threshold, timestamps, acknowledged.",
+        "description": "List active (default) or historical alerts. scope=history hits /alerts/history with limit; use search (substring over alert message, resource name, or alert id) to narrow. Returns id, level, type, resource, node, message, value, threshold, timestamps, acknowledged.",
         "method": "GET",
         "path_template": "/alerts/{scope}",
         "params": [
             {"name": "scope", "type": "string", "description": "active or history (default active).", "required": False, "default": "active"},
             {"name": "limit", "type": "integer", "description": "Max results (default 50).", "required": False, "default": 50},
-            {"name": "search", "type": "string", "description": "Substring filter on alert message / resource name.", "required": False, "local": True},
+            {"name": "search", "type": "string", "description": "Substring filter on alert message, resource name, or alert id.", "required": False, "local": True},
         ],
         "transform": "pulse_list_alerts",
         "example": '[{"id": "pve:pve:200-memory", "level": "warning", "type": "memory", "resourceName": "TrueNas-Scale", "message": "VM memory at 90.8%", "acknowledged": true}]',

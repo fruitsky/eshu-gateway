@@ -260,6 +260,14 @@ class TestPulseReads:
         assert len(out) == 1
         assert out[0]['id'] == 'pve:pve3:104-off'
 
+    def test_list_alerts_search_matches_id(self, pulse_upstream):
+        _make_pulse(pulse_upstream)
+        out = json.loads(run_tool('pulse', 'list_alerts', {'search': 'pve:pve3:104-off'}))
+        assert len(out) == 1
+        assert out[0]['id'] == 'pve:pve3:104-off'
+        out = json.loads(run_tool('pulse', 'list_alerts', {'search': '1ef948c6'}))
+        assert out == []
+
     def test_list_alerts_history(self, pulse_upstream):
         _make_pulse(pulse_upstream)
         out = json.loads(run_tool('pulse', 'list_alerts', {'scope': 'history', 'limit': 10}))
