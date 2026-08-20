@@ -2246,7 +2246,9 @@ def test_integration_endpoint(name: str, request: Request):
         raise HTTPException(status_code=404, detail="Integration not found")
     candidate = None
     for tool in get_tools(integration['id']):
-        if not tool.get('enabled') or not tool.get('read_only'):
+        # Skip not_implemented (v6 stub) tools — they only register so agents
+        # see the roadmap; their placeholder paths don't exist upstream.
+        if not tool.get('enabled') or not tool.get('read_only') or tool.get('not_implemented'):
             continue
         if not any(p.get('required') for p in (tool.get('params') or [])):
             candidate = tool

@@ -456,6 +456,8 @@ def execute_integration_call(integration: dict, tool: dict, args: dict, agent: s
         raise ProxyError(404, "Integration not found or disabled")
     if not tool or not tool.get('enabled'):
         raise ProxyError(404, "Tool not found or disabled")
+    if tool.get('not_implemented'):
+        raise ProxyError(501, f"Tool '{tool.get('name')}' is declared but not implemented yet")
     auth_type = (integration.get('auth_type') or 'none').lower()
     if auth_type not in ALLOWED_AUTH_TYPES:
         raise ProxyError(500, f"Unsupported auth_type: {auth_type}")

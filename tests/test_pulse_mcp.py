@@ -427,3 +427,14 @@ class TestPulseRedactionAndApprove:
         assert {'plan_action', 'set_operator_state'}.issubset(stubs)
         # read + write generic floor is present too
         assert 'read' in names and 'write' in names
+
+    def test_test_endpoint_skips_stubs(self, auth_client, pulse_upstream):
+        """The Test button must not pick a not_implemented stub (its placeholder
+        path 404s upstream) — it should land on a real read-only tool."""
+        _make_pulse(pulse_upstream)
+        r = auth_client.post('/api/integrations/pulse/test')
+        assert r.status_code == 200
+        body = r.json()
+        assert body['status_code'] == 200
+        assert body['tool'] != 'ack_finding'
+        assert body['tool'] in {'connection_health', 'health'}
