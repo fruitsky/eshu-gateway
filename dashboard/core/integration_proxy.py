@@ -301,6 +301,26 @@ def _project_body(body: str, fields: list) -> str:
     return body
 
 
+def merge_response_hint(tool: dict, body: str) -> str:
+    """Merge a tool's `response_hint` into an executed write's body so the
+    model gets a verification nudge (e.g. scan_library's 'confirm via
+    scheduled_tasks'). Applies to the body string; JSON bodies get a `hint`
+    key, otherwise the hint is wrapped alongside a content preview."""
+    hint = (tool or {}).get('response_hint')
+    if not hint:
+        return body
+    try:
+        data = json.loads(body) if body else {}
+        if isinstance(data, dict):
+            data['hint'] = hint
+            return json.dumps(data)
+    except (ValueError, TypeError):
+        pass
+    if body:
+        return json.dumps({'hint': hint, 'content': body[:500]})
+    return json.dumps({'hint': hint})
+
+
 def _upstream_error(body: str):
     """Detect a logical-error envelope in an HTTP-200 body: Omada's non-zero
     `errorCode`, or a Pulse-style `{"error": "<message>"}` dict. Returns a clear

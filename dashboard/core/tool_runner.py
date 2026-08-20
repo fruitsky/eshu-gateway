@@ -20,6 +20,7 @@ from core.integration_proxy import (
     execute_generic_call,
     execute_integration_call,
     is_destructive,
+    merge_response_hint,
 )
 from core.ha_ws import execute_ws_call
 
@@ -97,7 +98,7 @@ def run_tool(integration_name: str, tool_name: str, args: dict, reason: str = ''
         send_notify('jit', 'API Approval Required',
                     '`%s` on %s: ' % (tool_name, integration_name) + (reason or '')[:80])
         return json.dumps({'status': 'pending', 'id': call_id,
-                           'message': 'Awaiting operator approval. Call check_approval(%d) to poll.' % tool['id']})
+                           'message': 'Awaiting operator approval. Call check_approval(%d) to poll.' % call_id})
 
     try:
         res = _execute()
@@ -105,4 +106,4 @@ def run_tool(integration_name: str, tool_name: str, args: dict, reason: str = ''
         return _error(e.message, e.status_code)
     if res.get('error'):
         return json.dumps({'error': res['error'], 'status_code': res.get('status_code')})
-    return res['body']
+    return merge_response_hint(tool, res['body'])

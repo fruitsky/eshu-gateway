@@ -130,12 +130,11 @@ JELLYFIN_SEED_TOOLS = [
     },
     {
         "name": "get_log",
-        "description": "Read the tail of a log file (e.g. FFmpeg.Transcode, jellyfin). Returns {name, lines, content}; tailLines (default 200) and a ~100 KB cap keep the response bounded. path is optional and forwarded as the Path query param.",
+        "description": "Read the tail of a log file. name comes from jellyfin_logs (e.g. jellyfin20260820.log); the working route is GET /System/Logs/Log?name=<name> (the /System/Logs/{name} path form 404s). Returns {name, lines, content}; tailLines (default 200) and a ~100 KB cap keep the response bounded. 403 = no permission, 404 = unknown log name.",
         "method": "GET",
-        "path_template": "/System/Logs/{name}",
+        "path_template": "/System/Logs/Log",
         "params": [
             {"name": "name", "type": "string", "description": "Log file name (from jellyfin_logs).", "required": True},
-            {"name": "path", "type": "string", "description": "Optional full path of the log.", "required": False},
             {"name": "tailLines", "type": "integer", "description": "Last N lines to return (default 200).", "required": False, "default": 200, "local": True},
         ],
         "transform": "jellyfin_get_log",
@@ -163,6 +162,7 @@ JELLYFIN_SEED_TOOLS = [
         "method": "POST",
         "path_template": "/Library/Refresh",
         "path_variants": {"itemId": "/Items/{itemId}/Refresh"},
+        "response_hint": "Scan triggered. Verify via jellyfin_scheduled_tasks ('Scan Media Library' task) or jellyfin_activity_log — an item-scoped refresh is async and may not create a task entry.",
         "params": [
             {"name": "itemId", "type": "string", "description": "Optional library ItemId to scan (from jellyfin_libraries); omitted = full library scan.", "required": False},
             {"name": "replaceAllMetadata", "type": "boolean", "description": "Re-extract all metadata (I/O storm — default false).", "required": False, "default": False, "in_query": True},
@@ -248,6 +248,7 @@ def seed_jellyfin_tools(integration_id: int):
                 error_codes=tool.get('error_codes'),
                 always_gate=tool.get('always_gate'),
                 path_variants=tool.get('path_variants'),
+                response_hint=tool.get('response_hint'),
                 example=tool['example'],
                 read_only=tool['read_only'],
             )
@@ -268,6 +269,7 @@ def seed_jellyfin_tools(integration_id: int):
                 error_codes=tool.get('error_codes') or None,
                 always_gate=bool(tool.get('always_gate')),
                 path_variants=tool.get('path_variants') or None,
+                response_hint=tool.get('response_hint') or '',
             )
             created += 1
     return created, updated

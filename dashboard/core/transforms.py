@@ -523,8 +523,11 @@ def _jellyfin_users(integration, tool, args, data):
             continue
         if needle and needle not in str(x.get('Name') or '').lower():
             continue
-        out.append({'id': x.get('Id'), 'name': x.get('Name'),
-                    'isAdmin': x.get('IsAdministrator')})
+        row = {'id': x.get('Id'), 'name': x.get('Name')}
+        policy = x.get('Policy')
+        if isinstance(policy, dict) and policy.get('IsAdministrator') is not None:
+            row['isAdmin'] = policy['IsAdministrator']
+        out.append(row)
     return json.dumps(_slice(out, a.get('limit')))
 
 

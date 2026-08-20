@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 
 import pytest
 
-from db.integrations import create_integration, get_integration, get_tools
+from db.integrations import create_integration, get_integration, get_tools, get_pending_call
 from core.seeds import seed_for_kind
 from core.tool_runner import run_tool
 
@@ -113,7 +113,9 @@ def jellyfin_upstream():
             elif path == '/Users':
                 self._respond(200, [
                     {'Id': '07978d5c70ef493cbd24d62aafb4848f', 'Name': 'jellyfin',
-                     'IsAdministrator': True, 'IsHidden': False},
+                     'Policy': {'IsAdministrator': True, 'IsDisabled': False},
+                     'IsHidden': False},
+                    {'Id': 'guest', 'Name': 'guest'},
                 ])
             else:
                 self._respond(404, 'not found')
@@ -241,14 +243,18 @@ class TestJellyfinReads:
         assert log['lines'] == 10
         assert 'line 90' in log['content']
         assert 'line 0' not in log['content']
+        # the working route is /System/Logs/Log?name=... (path form 404s)
+        req = next(r for r in jellyfin_upstream['state']['requests'] if r['path'] == '/System/Logs/Log')
+        assert 'name=FFmpeg.Transcode' in req['query']
 
     def test_users(self, jellyfin_upstream):
         _make(jellyfin_upstream)
         out = json.loads(run_tool('jellyfin', 'users', {}))
-        u = out[0]
-        assert u['id'] == '07978d5c70ef493cbd24d62aafb4848f'
-        assert u['name'] == 'jellyfin'
-        assert u['isAdmin'] is True
+        admin = next(x for x in out if x['name'] == 'jellyfin')
+        assert admin['id'] == '07978d5c70ef493cbd24d62aafb4848f'
+        assert admin['isAdmin'] is True  # from Policy.IsAdministrator
+        guest = next(x for x in out if x['name'] == 'guest')
+        assert 'isAdmin' not in guest  # omitted, not null
 
     def test_api_key_header_sent(self, jellyfin_upstream):
         _make(jellyfin_upstream)
@@ -295,6 +301,8 @@ class TestJellyfinWrites:
                            ('stop_transcodes', {})]:
             out = json.loads(run_tool('jellyfin', tool, args, reason='test'))
             assert out['status'] == 'pending', tool
+            # the poll hint must reference the same id as the JSON body
+            assert f'check_approval({out["id"]})' in out['message']
 
     def test_scan_library_full_path_variant_and_query(self, auth_client, jellyfin_upstream):
         _make(jellyfin_upstream)
@@ -307,6 +315,10 @@ class TestJellyfinWrites:
                    if r['method'] == 'POST' and r['path'] == '/Items/e3d0a/Refresh')
         assert 'replaceAllMetadata=True' in req['query']
         assert 'replaceAllImages=False' in req['query']
+        # the approval result carries the verification hint via check_approval
+        result = json.loads(get_pending_call(out['id'])['result'])
+        body = json.loads(result['body'])
+        assert 'Scan triggered' in body['hint']
 
     def test_scan_library_defaults_full_refresh(self, auth_client, jellyfin_upstream):
         _make(jellyfin_upstream)
@@ -321,6 +333,16 @@ class TestJellyfinWrites:
         names = {t['name'] for t in get_tools(get_integration('jellyfin')['id'])}
         assert 'read' not in names and 'write' not in names
         assert 'system_info' in names and 'scan_library' in names
+
+    def test_merge_response_hint(self):
+        from core.integration_proxy import merge_response_hint
+        tool = {'response_hint': 'verify me'}
+        assert json.loads(merge_response_hint(tool, '{}'))['hint'] == 'verify me'
+        out = json.loads(merge_response_hint(tool, ''))
+        assert out['hint'] == 'verify me'
+        out = json.loads(merge_response_hint(tool, 'plain text'))
+        assert out['hint'] == 'verify me' and out['content'] == 'plain text'
+        assert merge_response_hint({}, '{"a":1}') == '{"a":1}'
 
     def test_seed_full_catalog(self, jellyfin_upstream):
         _make(jellyfin_upstream)
