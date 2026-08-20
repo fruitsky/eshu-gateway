@@ -19,6 +19,7 @@ import time
 import websocket  # websocket-client
 
 from core.integration_proxy import PREVIEW_CHARS, ProxyError
+from core.secret_scrub import scrub_body
 
 READ_TIMEOUT = 30
 
@@ -89,7 +90,7 @@ def execute_ws_call(integration: dict, command: str, payload=None,
     error = None
     try:
         result = ha_ws_request(integration, command, payload or {})
-        body = json.dumps(result)
+        body = scrub_body(json.dumps(result))
         status_code = 200
     except ProxyError as e:
         outcome = 'error'

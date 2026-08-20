@@ -94,6 +94,7 @@ from core.gateway_watch import (
 )
 from core.utils import DASHBOARD_VERSION, decode_cmd, _resolve_gateway_token, _hash_password, _verify_password
 from core.integration_auth import resolve_agent, resolve_agent_optional, extract_agent_token
+from core.secret_scrub import scrub_payload
 from core.integration_proxy import execute_integration_call, execute_generic_call, ProxyError
 from core.ha_ws import execute_ws_call
 from core.mcp_server import mcp as eshu_mcp, refresh_mcp_tools, refresh_mcp_allowed_hosts
@@ -2366,7 +2367,7 @@ def list_pending_integration_calls(request: Request):
     for call in calls:
         tool = get_tool(call['integration'], call['tool']) if call.get('integration') and call.get('tool') else None
         if tool:
-            call['payload'] = mask_sensitive_args(call['payload'], tool)
+            call['payload'] = scrub_payload(mask_sensitive_args(call['payload'], tool))
     return calls
 
 
@@ -2378,7 +2379,7 @@ def _surface_integration_call(call, status: str):
     payload = call['payload'] or {}
     tool = get_tool(call['integration'], call['tool']) if call.get('integration') and call.get('tool') else None
     if tool:
-        payload = mask_sensitive_args(payload, tool)
+        payload = scrub_payload(mask_sensitive_args(payload, tool))
     args = ', '.join(f"{k}={v}" for k, v in payload.items())
     create_request(
         target_ip=call['integration'],
