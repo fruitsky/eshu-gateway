@@ -36,10 +36,15 @@ def is_destructive(method: str, path: str) -> bool:
         return True
     return bool(path and _DESTRUCTIVE_RE.search(path))
 
-# In-memory OAuth2 access-token cache, keyed by integration name. Omada tokens
-# don't expire, so a fetched token is reused for the process lifetime unless an
-# upstream 401 forces a re-fetch.
+# In-memory OAuth2 access-token cache, keyed by integration name. Each entry is
+# {'token': str, 'expires_at': float|None} — Omada tokens carry an `expiresIn`
+# (2h), so the cache refreshes before expiry and re-auths on an upstream
+# -44112/-44113. `expires_at` None means the token doesn't expire.
 _oauth_tokens = {}
+
+# Refresh an OAuth2 token this many seconds before its nominal expiry so we
+# never ride the 2h cliff.
+OAUTH2_SAFETY_MARGIN = 60
 
 # Shared context for integrations that opt out of TLS verification (self-signed
 # certs, common on LAN controllers).
@@ -68,13 +73,14 @@ def _omadac_id(integration: dict) -> str:
     return base.rsplit('/', 1)[-1] if base else ''
 
 
-def _fetch_oauth2_token(integration: dict) -> str:
+def _fetch_oauth2_token(integration: dict):
     """Omada OAuth2 client_credentials token exchange.
 
     POST <token_url>?grant_type=client_credentials with a JSON body of
     {omadacId, client_id, client_secret}; the access token comes back under
-    `result.accessToken`. Tokens are cached (no TTL) and re-fetched only on an
-    upstream 401."""
+    `result.accessToken` with `result.expiresIn` (seconds). Returns
+    `(token, expires_in)`; `expires_in` is None when the response omits it
+    (treated as a non-expiring token)."""
     token_url = (integration.get('token_url') or '').strip()
     client_id = integration.get('client_id') or ''
     client_secret = integration.get('client_secret') or ''
@@ -108,18 +114,45 @@ def _fetch_oauth2_token(integration: dict) -> str:
         raise ProxyError(502, f"OAuth2 token endpoint unreachable: {e.reason}")
     result = payload.get('result') or {}
     token = result.get('accessToken')
-    if isinstance(token, str) and token:
-        return token
-    raise ProxyError(502, "OAuth2 token endpoint returned no accessToken")
+    if not (isinstance(token, str) and token):
+        raise ProxyError(502, "OAuth2 token endpoint returned no accessToken")
+    expires_in = None
+    try:
+        expires_in = int(result.get('expiresIn') or 0)
+    except (TypeError, ValueError):
+        expires_in = None
+    if expires_in is not None and expires_in <= 0:
+        expires_in = None
+    return token, expires_in
+
+
+def _oauth2_token_expired(body: str) -> bool:
+    """True if an upstream body is an Omada token-expiry error (-44112) or an
+    invalid-token error (-44113), meaning a fresh token should be fetched."""
+    try:
+        data = json.loads(body)
+    except (ValueError, TypeError):
+        return False
+    if isinstance(data, dict):
+        try:
+            return int(data.get('errorCode')) in (-44112, -44113)
+        except (TypeError, ValueError):
+            return False
+    return False
 
 
 def _oauth2_headers(integration: dict) -> dict:
     name = integration.get('name') or ''
-    token = _oauth_tokens.get(name)
-    if not token:
-        token = _fetch_oauth2_token(integration)
-        if name:
-            _oauth_tokens[name] = token
+    entry = _oauth_tokens.get(name)
+    now = time.time()
+    if entry and entry.get('expires_at') is not None and entry['expires_at'] > now:
+        return {'Authorization': 'AccessToken=' + entry['token']}
+    token, expires_in = _fetch_oauth2_token(integration)
+    expires_at = None
+    if expires_in is not None:
+        expires_at = now + max(0, expires_in - OAUTH2_SAFETY_MARGIN)
+    if name:
+        _oauth_tokens[name] = {'token': token, 'expires_at': expires_at}
     return {'Authorization': 'AccessToken=' + token}
 
 
@@ -340,6 +373,15 @@ def _http_roundtrip(integration: dict, url: str, body_bytes, headers: dict, meth
                     truncated = 1
                     raw = raw[:MAX_BODY_BYTES]
                 body = raw.decode('utf-8', errors='replace')
+            # OAuth2: a 200 can still carry a logical token-expiry error
+            # (Omada errorCode -44112/-44113). Clear the cache and retry once
+            # with a freshly-fetched token.
+            if (auth_type == 'oauth2' and attempt == 1
+                    and integration.get('name') in _oauth_tokens
+                    and _oauth2_token_expired(body)):
+                _oauth_tokens.pop(integration.get('name'), None)
+                headers = _auth_headers(integration)
+                continue
             break
         except urllib.error.HTTPError as e:
             status_code = e.code

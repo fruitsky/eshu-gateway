@@ -21,13 +21,16 @@ def _clear_oauth_cache():
 def omada_upstream():
     """Threaded upstream mimicking Omada's OAuth2 token exchange + an API
     endpoint. `/openapi/authorize/token` returns the next access token under
-    `result.accessToken`; `/sites` returns 401 on its first hit when
-    `fail_first_api` is set, then 200."""
+    `result.accessToken` (+ `expiresIn`); `/sites` returns 401 on its first
+    hit when `fail_first_api` is set, or a token-expired error (-44112) when
+    `expired_first` is set, then the normal list."""
     state = {
         'token_hits': 0,
         'api_hits': 0,
         'api_auth': '',
         'fail_first_api': False,
+        'expired_first': False,
+        'expires_in': 7200,
         'tokens': ['omada-token-1', 'omada-token-2'],
     }
 
@@ -48,7 +51,8 @@ def omada_upstream():
             if self._path() == '/openapi/authorize/token':
                 idx = min(state['token_hits'], len(state['tokens']) - 1)
                 state['token_hits'] += 1
-                self._respond(200, {'errorCode': 0, 'result': {'accessToken': state['tokens'][idx]}})
+                self._respond(200, {'errorCode': 0, 'result': {
+                    'accessToken': state['tokens'][idx], 'expiresIn': state['expires_in']}})
                 return
             self._respond(404, {'error': 'not found'})
 
@@ -58,6 +62,10 @@ def omada_upstream():
                 state['api_auth'] = self.headers.get('Authorization', '')
                 if state['fail_first_api'] and state['api_hits'] == 1:
                     self._respond(401, {'error': 'unauthorized'})
+                    return
+                if state['expired_first'] and state['api_hits'] == 1:
+                    self._respond(200, {'errorCode': -44112,
+                                        'msg': 'The access token has expired. Please re-initiate the refreshToken process to obtain the access token.'})
                     return
                 self._respond(200, [{'site': 'Home', 'id': 1}])
                 return
@@ -113,6 +121,25 @@ class TestOmadaOAuth2:
         assert res["status_code"] == 200
         assert omada_upstream["state"]["token_hits"] == 2
         assert omada_upstream["state"]["api_auth"] == "AccessToken=omada-token-2"
+
+    def test_expired_token_error_triggers_refetch(self, omada_upstream):
+        """Omada reports an expired access token as HTTP 200 with
+        errorCode -44112 — the proxy must re-auth and retry, not serve {}."""
+        omada_upstream["state"]["expired_first"] = True
+        res = execute_integration_call(
+            _omada_integration(omada_upstream), _list_sites_tool(), {}, agent="test")
+        assert res["status_code"] == 200
+        assert omada_upstream["state"]["token_hits"] == 2
+        assert omada_upstream["state"]["api_auth"] == "AccessToken=omada-token-2"
+
+    def test_expired_token_error_retry_reused_on_next_call(self, omada_upstream):
+        """After the retried re-auth, the fresh token is cached and reused."""
+        omada_upstream["state"]["expired_first"] = True
+        integration = _omada_integration(omada_upstream)
+        execute_integration_call(integration, _list_sites_tool(), {}, agent="test")
+        assert omada_upstream["state"]["token_hits"] == 2
+        execute_integration_call(integration, _list_sites_tool(), {}, agent="test")
+        assert omada_upstream["state"]["token_hits"] == 2  # no third fetch
 
     def test_missing_client_credentials(self, omada_upstream):
         create_integration("omada", omada_upstream["base_url"], "oauth2", "",
@@ -528,3 +555,35 @@ class TestQueryKeyAndStripEnvelope:
         body = '{"errorCode": 0, "result": {"x": 1}}'
         tool = {"fields": [], "search_field": "", "filter_fields": [], "strip_envelope": False}
         assert _apply_shaping(body, tool, {}) == body
+
+
+class TestOauth2TokenTtl:
+
+    def test_token_expired_detector(self):
+        from core.integration_proxy import _oauth2_token_expired
+        assert _oauth2_token_expired('{"errorCode": -44112, "msg": "expired"}') is True
+        assert _oauth2_token_expired('{"errorCode": -44113, "msg": "invalid"}') is True
+        assert _oauth2_token_expired('{"errorCode": 0, "result": []}') is False
+        assert _oauth2_token_expired('[1, 2]') is False
+        assert _oauth2_token_expired('not json') is False
+
+    def test_token_refetched_after_expiry(self, monkeypatch):
+        from core import integration_proxy
+        integration = {"name": "omada", "auth_type": "oauth2", "base_url": "https://x/openapi/v1/omadac-1"}
+        calls = iter([("tok-1", 1), ("tok-2", 1)])  # 1s → expires immediately
+        monkeypatch.setattr(integration_proxy, "_fetch_oauth2_token", lambda i: next(calls))
+        assert integration_proxy._oauth2_headers(integration) == {"Authorization": "AccessToken=tok-1"}
+        assert integration_proxy._oauth2_headers(integration) == {"Authorization": "AccessToken=tok-2"}
+
+    def test_token_reused_while_valid(self, monkeypatch):
+        from core import integration_proxy
+        integration = {"name": "omada", "auth_type": "oauth2", "base_url": "https://x/openapi/v1/omadac-1"}
+        count = {"n": 0}
+
+        def fake(i):
+            count["n"] += 1
+            return ("tok-long", 7200)
+        monkeypatch.setattr(integration_proxy, "_fetch_oauth2_token", fake)
+        assert integration_proxy._oauth2_headers(integration) == {"Authorization": "AccessToken=tok-long"}
+        assert integration_proxy._oauth2_headers(integration) == {"Authorization": "AccessToken=tok-long"}
+        assert count["n"] == 1
