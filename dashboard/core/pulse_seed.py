@@ -71,17 +71,17 @@ PULSE_SEED_TOOLS = [
     },
     {
         "name": "get_charts",
-        "description": "Get chart series for a time range. range is required (5m|15m|30m|1h|4h|12h|24h|7d). resource filters to one resource id; metric picks cpu|memory|disk|diskread|diskwrite|netin|netout (default all). Points are downsampled to at most maxPoints per metric (default 200).",
+        "description": "Get chart series for a time range. range is required (5m|15m|30m|1h|4h|12h|24h|7d). resource narrows to one resource id (returns {resource: {metric: {points}}}); without it all resources are returned downsampled. metric picks cpu|memory|disk|diskread|diskwrite|netin|netout (default all). Points are downsampled to at most maxPoints per metric (default 200) — the raw charts payload is never returned.",
         "method": "GET",
         "path_template": "/charts",
         "params": [
             {"name": "range", "type": "string", "description": "Time range: 5m, 15m, 30m, 1h, 4h, 12h, 24h or 7d.", "required": True},
-            {"name": "resource", "type": "string", "description": "Resource id to filter to (optional).", "required": False, "local": True},
+            {"name": "resource", "type": "string", "description": "Resource id to narrow to (optional).", "required": False, "local": True},
             {"name": "metric", "type": "string", "description": "One metric to return (cpu, memory, disk, diskread, diskwrite, netin, netout). Default all.", "required": False, "local": True},
             {"name": "maxPoints", "type": "integer", "description": "Max points per metric after downsampling (default 200).", "required": False, "default": 200, "local": True},
         ],
         "transform": "pulse_get_charts",
-        "example": '{"cpu": {"points": [{"t": 1724170000, "v": 3.2}]}}',
+        "example": '{"pve:pve3:104": {"cpu": {"points": [{"t": 1724170000, "v": 3.2}]}}}',
         "read_only": True,
     },
     {

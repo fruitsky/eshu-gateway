@@ -95,6 +95,26 @@ def _compact_resource(item: dict, full: bool) -> dict:
     return out
 
 
+def _epoch(value):
+    """Best-effort epoch-seconds sort key for mixed timestamp types (int/float
+    epoch, ISO-8601 strings). Non-numeric junk falls back to 0."""
+    if value is None:
+        return 0
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except (ValueError, TypeError):
+            pass
+        try:
+            from datetime import datetime
+            return datetime.fromisoformat(value).timestamp()
+        except (ValueError, TypeError):
+            return 0
+    return 0
+
+
 def _slice(items: list, limit):
     if limit is None:
         return items
@@ -191,6 +211,20 @@ def _downsample(points: list, max_points: int) -> list:
     return [p for i, p in enumerate(points) if i % step == 0]
 
 
+def _project_series(series: dict, metric: str, max_points: int) -> dict:
+    """Project one resource's series to the requested metric(s), downsampled
+    to max_points each. Returns {} when nothing matches."""
+    if metric:
+        keys = [metric] if metric in series else []
+    else:
+        keys = [k for k in ('cpu', 'disk', 'diskread', 'diskwrite',
+                            'memory', 'netin', 'netout') if k in series]
+    out = {}
+    for k in keys:
+        out[k] = {'points': _downsample(_metric_points(series, k), max_points)}
+    return out
+
+
 def _charts(integration, tool, args, data):
     a = args or {}
     rng = a.get('range')
@@ -219,33 +253,17 @@ def _charts(integration, tool, args, data):
             series = (data.get('data') or {}).get(resource)
         if not isinstance(series, dict):
             return json.dumps({})
-        if metric:
-            keys = [metric] if metric in series else []
-        else:
-            keys = [k for k in ('cpu', 'disk', 'diskread', 'diskwrite',
-                                'memory', 'netin', 'netout') if k in series]
-        out = {}
-        for k in keys:
-            out[k] = {'points': _downsample(_metric_points(series, k), max_points)}
-        return json.dumps(out)
+        return json.dumps({resource: _project_series(series, metric, max_points)})
 
-    # No resource filter: return one compact series per monitored resource,
+    # No resource filter: one compact series per monitored resource,
     # downsampled, so the response stays bounded instead of raw charts.
     out = {}
     for res_id, series in (data.get('data') or {}).items():
         if not isinstance(series, dict):
             continue
-        if metric:
-            keys = [metric] if metric in series else []
-        else:
-            keys = [k for k in ('cpu', 'disk', 'diskread', 'diskwrite',
-                                'memory', 'netin', 'netout') if k in series]
-        if not keys:
-            continue
-        res_out = {}
-        for k in keys:
-            res_out[k] = {'points': _downsample(_metric_points(series, k), max_points)}
-        out[res_id] = res_out
+        proj = _project_series(series, metric, max_points)
+        if proj:
+            out[res_id] = proj
     return json.dumps(out)
 
 
@@ -258,8 +276,11 @@ def _backups(integration, tool, args, data):
     for b in data.get('pbsBackups') or []:
         if not isinstance(b, dict):
             continue
+        vmid_val = b.get('vmid')
+        if vmid_val in (None, '', 0):
+            continue
         entries.append({
-            'vmid': b.get('vmid'), 'source': 'pbs', 'time': b.get('backupTime'),
+            'vmid': str(vmid_val), 'source': 'pbs', 'time': b.get('backupTime'),
             'size': b.get('size'), 'protected': b.get('protected'),
             'verified': b.get('verified'), 'datastore': b.get('datastore'),
             'status': 'ok',
@@ -267,14 +288,18 @@ def _backups(integration, tool, args, data):
     for t in data.get('backupTasks') or []:
         if not isinstance(t, dict):
             continue
+        vmid_val = t.get('vmid')
+        if vmid_val in (None, '', 0):
+            # Storage-level tasks (vmid 0) are not guest backups.
+            continue
         entries.append({
-            'vmid': t.get('vmid'), 'source': 'task', 'time': t.get('start'),
+            'vmid': str(vmid_val), 'source': 'task', 'time': t.get('start'),
             'size': None, 'protected': None, 'verified': None,
             'datastore': None, 'status': t.get('status'),
         })
     if vmid is not None:
-        entries = [e for e in entries if str(e.get('vmid')) == str(vmid)]
-    entries.sort(key=lambda e: e.get('time') or 0, reverse=True)
+        entries = [e for e in entries if e['vmid'] == str(vmid)]
+    entries.sort(key=lambda e: _epoch(e.get('time')), reverse=True)
     return json.dumps(_slice(entries, a.get('limit')))
 
 
@@ -354,7 +379,10 @@ def apply_transform(name: str, integration, tool: dict, args: dict, body: str):
     try:
         data = json.loads(body)
     except (ValueError, TypeError):
-        return body
+        # Never ship an unparseable blob (e.g. a truncated upstream body) —
+        # report it instead so the caller doesn't dump raw bytes to the model.
+        return _err('transform_parse_failed',
+                    'Upstream response could not be parsed as JSON')
     try:
         return fn(integration, tool, args or {}, data)
     except Exception as e:

@@ -101,10 +101,18 @@ def pulse_upstream():
                      'message': 'Disk full', 'value': 99.0, 'threshold': 95, 'acknowledged': False},
                 ])
             elif path == '/api/charts':
-                series = {'cpu': {'points': [{'t': 1700000000000 + i * 1000, 'v': i % 100} for i in range(1000)]}}
-                self._respond(200, {'data': {'pve:pve3:104': series}, 'hostData': {},
+                n_points = state.get('charts_points', 1000)
+                n_resources = state.get('charts_resources', 1)
+                series = {'cpu': {'points': [{'t': 1700000000000 + i * 1000, 'v': i % 100} for i in range(n_points)]}}
+                data = {}
+                for r in range(n_resources):
+                    data[f'pve:pve3:{104 + r}'] = dict(series)
+                self._respond(200, {'data': data, 'hostData': {},
                                     'nodeData': {}, 'stats': {}, 'timestamp': 1700000000000})
             elif path == '/api/backups/unified':
+                if state.get('backups_override'):
+                    self._respond(200, state['backups_override'])
+                    return
                 self._respond(200, {
                     'pbsBackups': [
                         {'vmid': 104, 'backupTime': 3000, 'size': 8589934592,
@@ -264,7 +272,7 @@ class TestPulseReads:
     def test_get_charts_downsample(self, pulse_upstream):
         _make_pulse(pulse_upstream)
         out = json.loads(run_tool('pulse', 'get_charts', {'range': '1h', 'resource': 'pve:pve3:104'}))
-        pts = out['cpu']['points']
+        pts = out['pve:pve3:104']['cpu']['points']
         assert len(pts) <= 200
         assert pts[0]['v'] is not None
 
@@ -276,16 +284,27 @@ class TestPulseReads:
     def test_get_charts_metric_filter(self, pulse_upstream):
         _make_pulse(pulse_upstream)
         out = json.loads(run_tool('pulse', 'get_charts', {'range': '24h', 'resource': 'pve:pve3:104', 'metric': 'cpu'}))
-        assert list(out.keys()) == ['cpu']
+        assert list(out.keys()) == ['pve:pve3:104']
+        assert list(out['pve:pve3:104'].keys()) == ['cpu']
         req = pulse_upstream['state']['requests'][0]
         assert 'range=24h' in req['full_path']
         assert 'maxPoints' not in req['full_path']
 
     def test_get_charts_all_resources(self, pulse_upstream):
         _make_pulse(pulse_upstream)
+        pulse_upstream['state']['charts_resources'] = 3
         out = json.loads(run_tool('pulse', 'get_charts', {'range': '7d'}))
-        assert 'pve:pve3:104' in out
+        assert 'pve:pve3:104' in out and 'pve:pve3:105' in out and 'pve:pve3:106' in out
         assert out['pve:pve3:104']['cpu']['points']
+
+    def test_get_charts_large_payload_not_truncated(self, pulse_upstream):
+        """A charts payload >1 MB (the old proxy cap) must still be downsampled
+        by the transform, never returned as a truncated raw blob."""
+        pulse_upstream['state']['charts_points'] = 40000  # ~1.4 MB JSON
+        _make_pulse(pulse_upstream)
+        out = json.loads(run_tool('pulse', 'get_charts', {'range': '1h', 'resource': 'pve:pve3:104', 'metric': 'cpu', 'maxPoints': 10}))
+        assert list(out.keys()) == ['pve:pve3:104']
+        assert len(out['pve:pve3:104']['cpu']['points']) <= 10
 
     def test_list_backups_merged(self, pulse_upstream):
         _make_pulse(pulse_upstream)
@@ -298,7 +317,32 @@ class TestPulseReads:
         _make_pulse(pulse_upstream)
         out = json.loads(run_tool('pulse', 'list_backups', {'vmid': 200}))
         assert len(out) == 1
-        assert out[0]['vmid'] == 200
+        assert out[0]['vmid'] == '200'
+
+    def test_list_backups_mixed_types(self, pulse_upstream):
+        """Real-world PBS carries string vmids/times and int vmids/times, plus
+        storage-level vmid:0 task entries. The merge must not crash, must
+        coerce vmid to a single type, and must skip vmid:0 tasks."""
+        pulse_upstream['state']['backups_override'] = {
+            'pbsBackups': [{'vmid': '113', 'backupTime': '2026-08-20T01:30:30Z',
+                            'size': 1, 'protected': True, 'verified': True,
+                            'datastore': 'd', 'files': []}],
+            'backupTasks': [
+                {'vmid': 113, 'start': 3000, 'end': 3100, 'status': 'success', 'duration': 100},
+                {'vmid': 0, 'start': 2000, 'end': 2100, 'status': 'success', 'duration': 100},
+            ],
+            'pveBackups': [], 'pmgBackups': [], 'storageBackups': [],
+            'guestSnapshots': [], 'backups': [],
+        }
+        _make_pulse(pulse_upstream)
+        out = json.loads(run_tool('pulse', 'list_backups', {}))
+        assert len(out) == 2  # storage-level task skipped
+        assert {x['vmid'] for x in out} == {'113'}
+        assert {x['source'] for x in out} == {'pbs', 'task'}
+        assert out[0]['source'] == 'pbs'  # ISO time sorts newest
+        assert out[0]['time'] == '2026-08-20T01:30:30Z'
+        out_f = json.loads(run_tool('pulse', 'list_backups', {'vmid': 113}))
+        assert len(out_f) == 2
 
     def test_list_storage(self, pulse_upstream):
         _make_pulse(pulse_upstream)

@@ -20,6 +20,11 @@ MAX_BODY_BYTES = 1048576
 PREVIEW_CHARS = 2000
 DEFAULT_TIMEOUT = 30
 
+# Response-transform tools (e.g. Pulse charts) read the FULL upstream body so
+# the transform can project/downsample before anything large is returned — the
+# 1 MB cap would otherwise truncate the JSON and defeat compact-by-default.
+TRANSFORM_MAX_BODY_BYTES = 32 * 1024 * 1024
+
 ALLOWED_AUTH_TYPES = ('none', 'bearer', 'basic', 'header', 'oauth2')
 
 # Hard-to-undo mutations. Disruptive-but-reversible verbs (restart, reboot,
@@ -390,9 +395,13 @@ def _apply_shaping(body: str, tool: dict, args: dict, integration: dict = None) 
     return body
 
 
-def _http_roundtrip(integration: dict, url: str, body_bytes, headers: dict, method: str):
+def _http_roundtrip(integration: dict, url: str, body_bytes, headers: dict, method: str,
+                    max_bytes: int = MAX_BODY_BYTES):
     """Perform the HTTP request with the OAuth2 401-retry. Returns
-    (status_code, body, truncated, error, latency_ms, outcome)."""
+    (status_code, body, truncated, error, latency_ms, outcome).
+
+    `max_bytes` caps the response read (defaults to MAX_BODY_BYTES); transform
+    tools pass TRANSFORM_MAX_BODY_BYTES so they can project large payloads."""
     auth_type = (integration.get('auth_type') or 'none').lower()
     start = time.time()
     outcome = 'ok'
@@ -407,10 +416,10 @@ def _http_roundtrip(integration: dict, url: str, body_bytes, headers: dict, meth
             req = urllib.request.Request(url, data=body_bytes, headers=headers, method=method)
             with urllib.request.urlopen(req, timeout=DEFAULT_TIMEOUT, context=_ssl_context(integration)) as resp:
                 status_code = resp.status
-                raw = resp.read(MAX_BODY_BYTES + 1)
-                if len(raw) > MAX_BODY_BYTES:
+                raw = resp.read(max_bytes + 1)
+                if len(raw) > max_bytes:
                     truncated = 1
-                    raw = raw[:MAX_BODY_BYTES]
+                    raw = raw[:max_bytes]
                 body = raw.decode('utf-8', errors='replace')
             # OAuth2: a 200 can still carry a logical token-expiry error
             # (Omada errorCode -44112/-44113). Clear the cache and retry once
@@ -426,7 +435,7 @@ def _http_roundtrip(integration: dict, url: str, body_bytes, headers: dict, meth
             status_code = e.code
             outcome = 'error'
             try:
-                body = e.read(MAX_BODY_BYTES).decode('utf-8', errors='replace')
+                body = e.read(max_bytes).decode('utf-8', errors='replace')
             except Exception:
                 body = ''
             # OAuth2: a 401 may mean the cached token was rejected. Clear the
@@ -484,8 +493,11 @@ def execute_integration_call(integration: dict, tool: dict, args: dict, agent: s
             body_bytes = json.dumps(payload).encode('utf-8')
             headers.setdefault('Content-Type', 'application/json')
 
+    # Transform tools read the full upstream body (see TRANSFORM_MAX_BODY_BYTES)
+    # so the registered transform can project large payloads compactly.
     status_code, body, truncated, error, latency_ms, outcome = _http_roundtrip(
-        integration, url, body_bytes, headers, method)
+        integration, url, body_bytes, headers, method,
+        max_bytes=TRANSFORM_MAX_BODY_BYTES if tool.get('transform') else MAX_BODY_BYTES)
 
     # Surface upstream logical errors (Omada errorCode != 0, Pulse {"error": ...})
     # instead of projecting the error envelope down to {}.
