@@ -87,7 +87,9 @@ def run_tool(integration_name: str, tool_name: str, args: dict, reason: str = ''
         path = tool.get('path_template') or ''
     destructive = is_destructive(method, path)
     gate_mode = (integration.get('gate_mode') or 'destructive').lower()
-    should_gate = gate_mode == 'all' or (gate_mode == 'destructive' and destructive)
+    should_gate = (gate_mode == 'all'
+                   or (gate_mode == 'destructive' and destructive)
+                   or bool(tool.get('always_gate')))
 
     if should_gate:
         call_id = create_pending_call(integration['name'], tool_name, args, reason)

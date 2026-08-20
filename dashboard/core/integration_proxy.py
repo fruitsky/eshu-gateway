@@ -5,6 +5,7 @@ every forwarded call gets identical credential injection, SSRF guarding,
 truncation, and audit logging.
 """
 import base64
+import http
 import json
 import re
 import ssl
@@ -182,6 +183,14 @@ def _build_request(tool: dict, args: dict):
     method = (tool.get('method') or 'GET').upper()
     template = tool.get('path_template') or ''
     path = template
+    # `path_variants`: {param: alternate_template} — when that param is present
+    # (and not consumed by path substitution on the default template), the
+    # alternate template is used. e.g. Jellyfin scan_library:
+    #   /Library/Refresh → /Items/{itemId}/Refresh when itemId is given.
+    for vkey, vtemplate in (tool.get('path_variants') or {}).items():
+        if args.get(vkey) is not None:
+            path = vtemplate
+            break
     query_params = {}
     body_params = {}
     raw_body = None
@@ -203,10 +212,12 @@ def _build_request(tool: dict, args: dict):
             path = path.replace('{' + name + '}', urllib.parse.quote(str(val), safe=''))
         elif p.get('type') == 'json':
             raw_body = val
-        elif method in ('POST', 'PUT', 'PATCH'):
-            body_params[key] = val
-        else:
+        # `in_query` forces a query-string param even on POST/PUT/PATCH (e.g.
+        # Jellyfin's POST /Library/Refresh?replaceAllMetadata=...).
+        elif p.get('in_query') or method not in ('POST', 'PUT', 'PATCH'):
             query_params[key] = val
+        else:
+            body_params[key] = val
     query_string = urllib.parse.urlencode(query_params)
     return method, path, query_string, body_params, raw_body
 
@@ -310,22 +321,39 @@ def _upstream_error(body: str):
     return None
 
 
-def _normalize_http_error(status_code: int, body: str):
-    """Build a stable `code: message` string from a non-2xx JSON error body.
+def _normalize_http_error(status_code: int, body: str, tool: dict = None):
+    """Build a stable `code: message` string from a non-2xx response.
 
-    Preserves the upstream's own code (e.g. Pulse's `missing_scope`) when
-    present; otherwise falls back to nothing so the caller keeps its prior
-    behavior. Returns None when the body has nothing JSON-ish to report."""
+    When the tool carries an `error_codes` map (e.g. Jellyfin: 401 ->
+    invalid_key), that provides the stable code and plain-text/empty bodies are
+    wrapped into a message instead of being passed through raw. Otherwise the
+    upstream's own code (e.g. Pulse's `missing_scope`) is preserved when
+    present. Returns None when there is nothing useful to report."""
     try:
         data = json.loads(body)
     except (ValueError, TypeError):
-        return None
-    if not isinstance(data, dict):
-        return None
-    code = data.get('code') or data.get('errorCode') or ''
-    msg = data.get('message') or data.get('msg') or ''
-    if not msg and isinstance(data.get('error'), str):
-        msg = data['error']
+        data = None
+    code = None
+    msg = None
+    if isinstance(data, dict):
+        code = data.get('code') or data.get('errorCode') or ''
+        msg = data.get('message') or data.get('msg') or ''
+        if not msg and isinstance(data.get('error'), str):
+            msg = data['error']
+        if isinstance(code, int):
+            code = str(code)
+    if not (code or msg) and tool:
+        err_map = tool.get('error_codes') or {}
+        if err_map:
+            code = err_map.get(str(status_code))
+    if not msg and data is None and body:
+        # Plain-text error body (Jellyfin often returns text or nothing).
+        msg = body[:300]
+    if not msg and code:
+        try:
+            msg = f"HTTP {status_code} {http.HTTPStatus(status_code).phrase}"
+        except (ValueError, AttributeError):
+            msg = f"HTTP {status_code}"
     if not (code or msg):
         return None
     if code:
@@ -511,7 +539,7 @@ def execute_integration_call(integration: dict, tool: dict, args: dict, agent: s
         else:
             body = _apply_shaping(body, tool, args, integration)
     else:
-        norm = _normalize_http_error(status_code, body)
+        norm = _normalize_http_error(status_code, body, tool)
         if norm:
             error = norm
 

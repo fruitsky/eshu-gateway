@@ -105,6 +105,18 @@ def init_integrations_tables(cursor):
         cursor.execute("ALTER TABLE integration_tools ADD COLUMN not_implemented INTEGER DEFAULT 0")
     except Exception:
         pass
+    try:
+        cursor.execute("ALTER TABLE integration_tools ADD COLUMN always_gate INTEGER DEFAULT 0")
+    except Exception:
+        pass
+    try:
+        cursor.execute("ALTER TABLE integration_tools ADD COLUMN error_codes TEXT DEFAULT '{}'")
+    except Exception:
+        pass
+    try:
+        cursor.execute("ALTER TABLE integration_tools ADD COLUMN path_variants TEXT DEFAULT '{}'")
+    except Exception:
+        pass
     # One-time backfill: integrations seeded before the `kind` column existed
     # defaulted to 'custom'. Infer 'proxmox' for any that already carry known
     # Proxmox tool names, so existing installs don't need a manual Type edit.
@@ -261,19 +273,22 @@ def create_tool(integration_id: int, name: str, description: str, method: str,
                 fields=None, search_field: str = '', transport: str = 'http',
                 filter_fields=None, generic: bool = False, version: str = 'v1',
                 strip_envelope: bool = False, transform: str = '',
-                not_implemented: bool = False) -> int:
+                not_implemented: bool = False, always_gate: bool = False,
+                error_codes: dict = None, path_variants: dict = None) -> int:
     with db_conn() as conn:
         cursor = conn.cursor()
         cursor.execute('''
             INSERT INTO integration_tools
-                (integration_id, name, description, method, path_template, params, fields, search_field, example, read_only, enabled, transport, filter_fields, generic, version, strip_envelope, transform, not_implemented)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)
+                (integration_id, name, description, method, path_template, params, fields, search_field, example, read_only, enabled, transport, filter_fields, generic, version, strip_envelope, transform, not_implemented, always_gate, error_codes, path_variants)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (integration_id, name, description, method, path_template,
               json.dumps(params or []), json.dumps(fields or []), search_field or '',
               example, 1 if read_only else 0,
               transport or 'http', json.dumps(filter_fields or []), 1 if generic else 0,
               version or 'v1', 1 if strip_envelope else 0,
-              transform or '', 1 if not_implemented else 0))
+              transform or '', 1 if not_implemented else 0,
+              1 if always_gate else 0, json.dumps(error_codes or {}),
+              json.dumps(path_variants or {})))
         conn.commit()
         return cursor.lastrowid
 
@@ -301,6 +316,14 @@ def get_tools(integration_id: int = None):
                 item['filter_fields'] = json.loads(item.get('filter_fields') or '[]')
             except (ValueError, TypeError):
                 item['filter_fields'] = []
+            try:
+                item['error_codes'] = json.loads(item.get('error_codes') or '{}')
+            except (ValueError, TypeError):
+                item['error_codes'] = {}
+            try:
+                item['path_variants'] = json.loads(item.get('path_variants') or '{}')
+            except (ValueError, TypeError):
+                item['path_variants'] = {}
             out.append(item)
         return out
 
@@ -333,6 +356,14 @@ def get_tool(integration_name: str, tool_name: str):
             item['filter_fields'] = json.loads(item.get('filter_fields') or '[]')
         except (ValueError, TypeError):
             item['filter_fields'] = []
+        try:
+            item['error_codes'] = json.loads(item.get('error_codes') or '{}')
+        except (ValueError, TypeError):
+            item['error_codes'] = {}
+        try:
+            item['path_variants'] = json.loads(item.get('path_variants') or '{}')
+        except (ValueError, TypeError):
+            item['path_variants'] = {}
         item['integration'] = integration
         return item
 
@@ -346,7 +377,7 @@ def set_tool_enabled(tool_id: int, enabled: bool) -> bool:
 
 
 def update_tool(tool_id: int, **fields) -> bool:
-    allowed = {'name', 'description', 'method', 'path_template', 'params', 'fields', 'search_field', 'example', 'read_only', 'enabled', 'transport', 'filter_fields', 'generic', 'version', 'strip_envelope', 'transform', 'not_implemented'}
+    allowed = {'name', 'description', 'method', 'path_template', 'params', 'fields', 'search_field', 'example', 'read_only', 'enabled', 'transport', 'filter_fields', 'generic', 'version', 'strip_envelope', 'transform', 'not_implemented', 'always_gate', 'error_codes', 'path_variants'}
     updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
     if not updates:
         return False
@@ -356,6 +387,10 @@ def update_tool(tool_id: int, **fields) -> bool:
         updates['fields'] = json.dumps(updates['fields'])
     if 'filter_fields' in updates:
         updates['filter_fields'] = json.dumps(updates['filter_fields'])
+    if 'error_codes' in updates:
+        updates['error_codes'] = json.dumps(updates['error_codes'] or {})
+    if 'path_variants' in updates:
+        updates['path_variants'] = json.dumps(updates['path_variants'] or {})
     if 'read_only' in updates:
         updates['read_only'] = 1 if updates['read_only'] else 0
     if 'enabled' in updates:
@@ -366,6 +401,8 @@ def update_tool(tool_id: int, **fields) -> bool:
         updates['strip_envelope'] = 1 if updates['strip_envelope'] else 0
     if 'not_implemented' in updates:
         updates['not_implemented'] = 1 if updates['not_implemented'] else 0
+    if 'always_gate' in updates:
+        updates['always_gate'] = 1 if updates['always_gate'] else 0
     if updates.get('transform') is not None:
         updates['transform'] = updates['transform'] or ''
     assignments = ', '.join(f'{k} = ?' for k in updates)

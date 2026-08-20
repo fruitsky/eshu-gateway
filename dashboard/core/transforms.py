@@ -357,6 +357,199 @@ def _list_nodes(integration, tool, args, data):
     return json.dumps(out)
 
 
+# ── Jellyfin transforms ─────────────────────────────────────────────────
+# The whole Jellyfin API is C#-serialized PascalCase; these map source keys to
+# the compact camelCase projections and unwrap the non-obvious shapes
+# (NowPlayingQueueFullItems[0], VirtualFolders-as-array, ...).
+
+def _sysinfo(item, full):
+    row = {
+        'version': item.get('Version'), 'serverName': item.get('ServerName'),
+        'os': item.get('OperatingSystem'), 'arch': item.get('SystemArchitecture'),
+        'cachePath': item.get('CachePath'), 'logPath': item.get('LogPath'),
+        'transcodePath': item.get('TranscodingTempPath'),
+        'webPath': item.get('WebPath'), 'id': item.get('Id'),
+    }
+    row = {k: v for k, v in row.items() if v is not None}
+    if full:
+        for k in ('VersionName', 'OperatingSystemDisplayName',
+                  'HasPendingRestart', 'SystemUpdateLevel'):
+            if item.get(k) is not None:
+                row[k[0].lower() + k[1:]] = item[k]
+    return row
+
+
+def _jellyfin_system_info(integration, tool, args, data):
+    if not isinstance(data, dict):
+        return json.dumps(data)
+    return json.dumps(_sysinfo(data, bool((args or {}).get('full'))))
+
+
+def _jellyfin_libraries(integration, tool, args, data):
+    a = args or {}
+    items = data if isinstance(data, list) else []
+    needle = str(a.get('search') or '').lower()
+    full = bool(a.get('full'))
+    out = []
+    for x in items:
+        if not isinstance(x, dict):
+            continue
+        if needle and needle not in str(x.get('Name') or '').lower():
+            continue
+        row = {'name': x.get('Name'), 'type': x.get('CollectionType'),
+               'locations': x.get('Locations') or [], 'itemId': x.get('ItemId')}
+        if full:
+            for k in ('Id', 'PrimaryImageItemId', 'ItemCount', 'ParentId',
+                      'RefreshStatus'):
+                if x.get(k) is not None:
+                    row[k[0].lower() + k[1:]] = x[k]
+        out.append(row)
+    return json.dumps(_slice(out, a.get('limit')))
+
+
+def _jellyfin_sessions(integration, tool, args, data):
+    a = args or {}
+    items = data if isinstance(data, list) else []
+    needle = str(a.get('search') or '').lower()
+    active_only = bool(a.get('activeOnly'))
+    out = []
+    for s in items:
+        if not isinstance(s, dict):
+            continue
+        if active_only and not s.get('IsActive'):
+            continue
+        if needle and needle not in str(s.get('DeviceName') or '').lower() \
+                and needle not in str(s.get('UserName') or '').lower():
+            continue
+        row = {
+            'deviceName': s.get('DeviceName'), 'client': s.get('Client'),
+            'version': s.get('ApplicationVersion'), 'userName': s.get('UserName'),
+            'isActive': s.get('IsActive'), 'lastActivity': s.get('LastActivityDate'),
+        }
+        queue = s.get('NowPlayingQueueFullItems') or []
+        if queue and isinstance(queue[0], dict):
+            item = queue[0]
+            row['nowPlaying'] = {'name': item.get('Name'), 'type': item.get('Type')}
+        ps = s.get('PlayState') or {}
+        if isinstance(ps, dict) and ps:
+            row['playState'] = {'isPaused': ps.get('IsPaused'),
+                                'repeatMode': ps.get('RepeatMode'),
+                                'playbackOrder': ps.get('PlaybackOrder')}
+        ti = s.get('TranscodingInfo')
+        if isinstance(ti, dict) and ti:
+            row['transcode'] = {'bitrate': ti.get('Bitrate'),
+                                'transcodeReasons': ti.get('TranscodeReasons'),
+                                'videoDirect': ti.get('IsVideoDirect'),
+                                'audioDirect': ti.get('IsAudioDirect')}
+        out.append({k: v for k, v in row.items() if v is not None})
+    return json.dumps(_slice(out, a.get('limit')))
+
+
+def _jellyfin_scheduled_tasks(integration, tool, args, data):
+    a = args or {}
+    items = data if isinstance(data, list) else []
+    needle = str(a.get('search') or '').lower()
+    category = a.get('category')
+    out = []
+    for x in items:
+        if not isinstance(x, dict):
+            continue
+        if category and x.get('Category') != category:
+            continue
+        if needle and needle not in str(x.get('Name') or '').lower():
+            continue
+        last = x.get('LastExecutionResult') or {}
+        row = {'id': x.get('Id'), 'name': x.get('Name'), 'state': x.get('State'),
+               'category': x.get('Category'),
+               'lastStatus': last.get('Status') if isinstance(last, dict) else None,
+               'lastProgress': last.get('Progress') if isinstance(last, dict) else None,
+               'lastEnd': last.get('EndTimeUtc') if isinstance(last, dict) else None}
+        out.append({k: v for k, v in row.items() if v is not None})
+    return json.dumps(_slice(out, a.get('limit')))
+
+
+def _jellyfin_plugins(integration, tool, args, data):
+    a = args or {}
+    items = data if isinstance(data, list) else []
+    needle = str(a.get('search') or '').lower()
+    out = []
+    for x in items:
+        if not isinstance(x, dict):
+            continue
+        if needle and needle not in str(x.get('Name') or '').lower():
+            continue
+        out.append({'name': x.get('Name'), 'version': x.get('Version'),
+                    'status': x.get('Status')})
+    return json.dumps(_slice(out, a.get('limit')))
+
+
+def _jellyfin_activity_log(integration, tool, args, data):
+    a = args or {}
+    if not isinstance(data, dict):
+        return json.dumps(data)
+    needle = str(a.get('search') or '').lower()
+    entries = []
+    for e in data.get('Items') or []:
+        if not isinstance(e, dict):
+            continue
+        if needle and needle not in str(e.get('Name') or '').lower():
+            continue
+        entries.append({'name': e.get('Name'), 'type': e.get('Type'),
+                        'date': e.get('Date'), 'severity': e.get('Severity')})
+    return json.dumps({'total': data.get('TotalRecordCount'), 'entries': entries})
+
+
+def _jellyfin_logs(integration, tool, args, data):
+    a = args or {}
+    items = data if isinstance(data, list) else []
+    needle = str(a.get('search') or '').lower()
+    out = []
+    for x in items:
+        if not isinstance(x, dict):
+            continue
+        if needle and needle not in str(x.get('Name') or '').lower():
+            continue
+        out.append({'name': x.get('Name'), 'size': x.get('Size')})
+    return json.dumps(_slice(out, a.get('limit')))
+
+
+def _jellyfin_users(integration, tool, args, data):
+    a = args or {}
+    items = data if isinstance(data, list) else []
+    needle = str(a.get('search') or '').lower()
+    out = []
+    for x in items:
+        if not isinstance(x, dict):
+            continue
+        if needle and needle not in str(x.get('Name') or '').lower():
+            continue
+        out.append({'id': x.get('Id'), 'name': x.get('Name'),
+                    'isAdmin': x.get('IsAdministrator')})
+    return json.dumps(_slice(out, a.get('limit')))
+
+
+_JELLYFIN_LOG_CAP = 100 * 1024
+
+
+def _jellyfin_get_log(integration, tool, args, raw_body):
+    """Raw-text transform: return the tail of a log file, capped in size."""
+    a = args or {}
+    try:
+        tail = int(a.get('tailLines') or 200)
+    except (TypeError, ValueError):
+        tail = 200
+    if tail <= 0:
+        tail = 0
+    lines = raw_body.splitlines()
+    if tail:
+        lines = lines[-tail:]
+    content = '\n'.join(lines)
+    if len(content) > _JELLYFIN_LOG_CAP:
+        content = content[-_JELLYFIN_LOG_CAP:]
+    return json.dumps({'name': a.get('name'), 'lines': len(lines),
+                       'content': content})
+
+
 TRANSFORMS = {
     'pulse_health': _health,
     'pulse_fleet_summary': _fleet_summary,
@@ -366,6 +559,19 @@ TRANSFORMS = {
     'pulse_list_backups': _backups,
     'pulse_list_storage': _list_storage,
     'pulse_list_nodes': _list_nodes,
+    'jellyfin_system_info': _jellyfin_system_info,
+    'jellyfin_libraries': _jellyfin_libraries,
+    'jellyfin_sessions': _jellyfin_sessions,
+    'jellyfin_scheduled_tasks': _jellyfin_scheduled_tasks,
+    'jellyfin_plugins': _jellyfin_plugins,
+    'jellyfin_activity_log': _jellyfin_activity_log,
+    'jellyfin_logs': _jellyfin_logs,
+    'jellyfin_users': _jellyfin_users,
+}
+
+# Transforms that consume the raw body as text (non-JSON endpoints).
+TRANSFORMS_RAW = {
+    'jellyfin_get_log': _jellyfin_get_log,
 }
 
 
@@ -374,6 +580,12 @@ def apply_transform(name: str, integration, tool: dict, args: dict, body: str):
 
     Returns the transformed JSON string, or None when `name` is not a known
     transform (the caller falls through to the standard shaping path)."""
+    raw_fn = TRANSFORMS_RAW.get(name)
+    if raw_fn:
+        try:
+            return raw_fn(integration, tool, args or {}, body)
+        except Exception as e:
+            return _err('transform_failed', f"{type(e).__name__}: {e}")
     fn = TRANSFORMS.get(name)
     if not fn:
         return None
