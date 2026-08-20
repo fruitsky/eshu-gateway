@@ -65,7 +65,7 @@ from database import (
     create_tool, get_tools, get_tool, set_tool_enabled, delete_tool,
     record_integration_call, get_integration_calls,
     create_pending_call, get_pending_calls, get_pending_call, set_pending_call_status,
-    mask_sensitive_args,
+    mask_sensitive_args, strip_resolved_payloads,
     create_agent_token, get_agent_tokens, revoke_agent_token, delete_agent_token,
 )
 
@@ -89,7 +89,7 @@ from core.cmd_risk import get_cmd_risk, get_dry_run_suggestion
 from core.cmd_profiles import get_anomaly, refresh_profiles, _profiles_loop
 from core.gateway_watch import (
     _check_gateway_transitions, _gateway_watch_loop,
-    _stale_gateway_cleanup_loop, _fleet_cleanup_loop,
+    _stale_gateway_cleanup_loop, _fleet_cleanup_loop, _integration_cleanup_loop,
     _disconnected_gateways, _offline_alerted, OFFLINE_THRESHOLD,
 )
 from core.utils import DASHBOARD_VERSION, decode_cmd, _resolve_gateway_token, _hash_password, _verify_password
@@ -186,6 +186,9 @@ def on_startup():
     # Start background fleet results retention cleanup
     fleet_cleanup_thread = threading.Thread(target=_fleet_cleanup_loop, daemon=True)
     fleet_cleanup_thread.start()
+    # Start background MCP audit/approval retention cleanup
+    integration_cleanup_thread = threading.Thread(target=_integration_cleanup_loop, daemon=True)
+    integration_cleanup_thread.start()
     # Initialize deployed golden hash on first run
     golden_path = os.path.join(static_dir, "eshu-gateway-install.sh")
     if os.path.exists(golden_path) and not get_deployed_golden_hash():
@@ -207,6 +210,9 @@ def on_startup():
     # Re-apply each integration's seed catalog so deployed catalog changes
     # (new/changed tools) propagate without a manual re-seed.
     reseed_all_integrations()
+    # One-off migration: strip raw credentials from resolved approval rows
+    # persisted by older versions (keeps SHA-256 fingerprints for audit).
+    strip_resolved_payloads()
     # Register the enabled integration tools as MCP tools
     refresh_mcp_tools()
     # Apply the configured MCP allowed-hosts (DNS-rebinding allowlist)

@@ -19,7 +19,7 @@ import time
 import websocket  # websocket-client
 
 from core.integration_proxy import PREVIEW_CHARS, ProxyError
-from core.secret_scrub import scrub_body
+from core.secret_scrub import scrub_body, scrub_string
 
 READ_TIMEOUT = 30
 
@@ -94,7 +94,7 @@ def execute_ws_call(integration: dict, command: str, payload=None,
         status_code = 200
     except ProxyError as e:
         outcome = 'error'
-        error = e.message
+        error = scrub_string(e.message)
         status_code = e.status_code
         body = ''
     latency_ms = int((time.time() - start) * 1000)

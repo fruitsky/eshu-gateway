@@ -1,6 +1,7 @@
 import json
 import time
 from db.core import db_conn
+from core.secret_scrub import scrub_payload, secret_hashes
 
 
 def init_integrations_tables(cursor):
@@ -146,6 +147,10 @@ def init_integrations_tables(cursor):
             resolved_at INTEGER NOT NULL DEFAULT 0
         )
     ''')
+    try:
+        cursor.execute("ALTER TABLE pending_integration_calls ADD COLUMN secret_hashes TEXT DEFAULT '{}'")
+    except Exception:
+        pass
 
 
 # ── Integrations ────────────────────────────────────────────────────────
@@ -462,6 +467,10 @@ def get_pending_calls(include_resolved: bool = False):
                 item['payload'] = json.loads(item['payload'] or '{}')
             except (ValueError, TypeError):
                 item['payload'] = {}
+            try:
+                item['secret_hashes'] = json.loads(item.get('secret_hashes') or '{}')
+            except (ValueError, TypeError):
+                item['secret_hashes'] = {}
             out.append(item)
         return out
 
@@ -478,19 +487,72 @@ def get_pending_call(call_id: int):
             item['payload'] = json.loads(item['payload'] or '{}')
         except (ValueError, TypeError):
             item['payload'] = {}
+        try:
+            item['secret_hashes'] = json.loads(item.get('secret_hashes') or '{}')
+        except (ValueError, TypeError):
+            item['secret_hashes'] = {}
         return item
 
 
 def set_pending_call_status(call_id: int, status: str, result: str = '') -> bool:
+    """Set a pending call's status. On resolution (approved/denied) any
+    secret-keyed values still in the stored payload are replaced with
+    '[redacted]' and their SHA-256 fingerprints moved to `secret_hashes`, so a
+    credential is never persisted beyond the submit→decide window. Rows already
+    processed (non-empty secret_hashes) are left alone, keeping the fingerprints
+    stable across re-runs (e.g. the startup migration)."""
+    current = get_pending_call(call_id)
+    if not current:
+        return False
+    now = int(time.time())
+    payload_json = None
+    hashes_json = None
+    if current.get('payload') and not current.get('secret_hashes'):
+        hashes = secret_hashes(current['payload'])
+        if hashes:
+            payload_json = json.dumps(scrub_payload(current['payload']))
+            hashes_json = json.dumps(hashes)
     with db_conn() as conn:
         cursor = conn.cursor()
-        now = int(time.time())
-        cursor.execute('''
-            UPDATE pending_integration_calls SET status = ?, result = ?, resolved_at = ?
-            WHERE id = ?
-        ''', (status, result, now, call_id))
+        if payload_json is None:
+            cursor.execute('''
+                UPDATE pending_integration_calls SET status = ?, result = ?, resolved_at = ?
+                WHERE id = ?
+            ''', (status, result, now, call_id))
+        else:
+            cursor.execute('''
+                UPDATE pending_integration_calls
+                SET status = ?, result = ?, resolved_at = ?, payload = ?, secret_hashes = ?
+                WHERE id = ?
+            ''', (status, result, now, payload_json, hashes_json, call_id))
         conn.commit()
         return cursor.rowcount > 0
+
+
+def strip_resolved_payloads() -> int:
+    """Startup migration: strip raw payloads (keeping SHA-256 fingerprints)
+    from any already-resolved pending call, so credentials persisted by older
+    versions are purged on the next deploy. Idempotent."""
+    resolved = [c for c in get_pending_calls(include_resolved=True)
+                if c['status'] in ('approved', 'denied') and c.get('payload')]
+    count = 0
+    for call in resolved:
+        if set_pending_call_status(call['id'], call['status'], call.get('result') or ''):
+            count += 1
+    return count
+
+
+def purge_old_integration_calls(cutoff_ts: int) -> int:
+    """Delete MCP audit + approval rows older than `cutoff_ts` (both stores).
+    Returns the total number of rows removed."""
+    with db_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM integration_calls WHERE created_at < ?', (cutoff_ts,))
+        n1 = cursor.rowcount
+        cursor.execute('DELETE FROM pending_integration_calls WHERE created_at < ?', (cutoff_ts,))
+        n2 = cursor.rowcount
+        conn.commit()
+        return n1 + n2
 
 
 def mask_sensitive_args(payload: dict, tool: dict) -> dict:

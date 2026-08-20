@@ -11,6 +11,7 @@ Deliberately conservative: a value is masked when its KEY names a secret field
 "long hex/base64 >= 16 chars" rule is deliberately NOT used — it would destroy
 legitimate UUIDs, site ids, and resource ids that these APIs are full of.
 """
+import hashlib
 import json
 import re
 
@@ -47,6 +48,35 @@ def _scrub_string(value: str) -> str:
     for pattern in _VALUE_PATTERNS:
         value = pattern.sub(MASK, value)
     return value
+
+
+def scrub_string(value: str) -> str:
+    """Public wrapper: mask high-confidence token patterns in a flat string
+    (e.g. an error message). Non-strings pass through unchanged."""
+    if isinstance(value, str):
+        return _scrub_string(value)
+    return value
+
+
+def secret_hashes(value, prefix: str = '') -> dict:
+    """Walk a payload and return {dotted.path: sha256-hex} for every leaf value
+    under a secret-named key. Used to fingerprint credentials in the audit
+    trail without retaining them."""
+    out = {}
+    if isinstance(value, dict):
+        for k, v in value.items():
+            path = f'{prefix}.{k}' if prefix else str(k)
+            if _is_secret_key(k):
+                if isinstance(v, str) and v:
+                    out[path] = hashlib.sha256(v.encode('utf-8')).hexdigest()
+                elif isinstance(v, (int, float, bool)) and v is not False and v != 0:
+                    out[path] = hashlib.sha256(str(v).encode('utf-8')).hexdigest()
+            else:
+                out.update(secret_hashes(v, path))
+    elif isinstance(value, list):
+        for i, v in enumerate(value):
+            out.update(secret_hashes(v, f'{prefix}[{i}]'))
+    return out
 
 
 def scrub_value(value):

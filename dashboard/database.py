@@ -163,6 +163,7 @@ from db.integrations import (
     get_pending_call,
     set_pending_call_status,
     mask_sensitive_args,
+    strip_resolved_payloads,
 )
 
 from db.agent_tokens import (

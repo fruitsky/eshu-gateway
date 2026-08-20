@@ -4,13 +4,18 @@ Covers the key-name/value-pattern scrubber, the Hermes-reported Omada SSID
 PSK leak through generic passthrough, audit-trail masking, and the
 false-positive regression (hex ids / UUIDs must survive).
 """
+import hashlib
 import http.server
 import json
 import threading
+import time
 
 import pytest
 
-from db.integrations import create_integration, get_integration, get_integration_calls, get_pending_call
+from db.integrations import (
+    create_integration, get_integration, get_integration_calls, get_pending_call,
+    get_pending_calls, purge_old_integration_calls, strip_resolved_payloads,
+)
 from core.seeds import seed_for_kind
 from core.tool_runner import run_tool
 from core.secret_scrub import scrub_body, scrub_payload, scrub_value
@@ -81,6 +86,8 @@ def secret_upstream():
                 self._respond(200, {'data': {'username': 'bob',
                                              'password': 'VirginPassword',
                                              'ip': '192.168.1.1'}})
+            elif '/fail' in self.path:
+                self._respond(500, {'message': 'auth failed: Bearer sekrettoken'})
             else:
                 self._respond(404, {'error': 'not found'})
 
@@ -167,3 +174,75 @@ class TestProxyScrub:
         payload = scrub_payload({'id': '1ef948c6', 'nested': {'uuid': 'x' * 32}})
         assert payload['id'] == '1ef948c6'
         assert payload['nested']['uuid'] == 'x' * 32
+
+
+class TestResolveStripping:
+    """Raw write payloads must never survive resolution; only SHA-256
+    fingerprints remain in the approval row."""
+
+    def test_approve_strips_payload_and_keeps_hash(self, auth_client, secret_upstream):
+        _make(secret_upstream, gate_mode='all')
+        out = json.loads(run_tool('testapi', 'write',
+                                  {'method': 'POST', 'path': 'wan',
+                                   'data': {'password': 'VirginPassword'}}, reason='t'))
+        call_id = out['id']
+        assert auth_client.post(f'/api/integration-calls/{call_id}/approve').status_code == 200
+        row = get_pending_call(call_id)
+        assert row['status'] == 'approved'
+        assert row['payload']['data']['password'] == '[redacted]'
+        assert 'VirginPassword' not in json.dumps(row['payload'])
+        assert row['secret_hashes'].get('data.password') == hashlib.sha256(b'VirginPassword').hexdigest()
+        # executed result is stored, and its response is scrubbed too
+        assert 'SecretValue' not in row['result']
+
+    def test_deny_strips_payload(self, auth_client, secret_upstream):
+        _make(secret_upstream, gate_mode='all')
+        out = json.loads(run_tool('testapi', 'write',
+                                  {'method': 'POST', 'path': 'wan',
+                                   'data': {'password': 'VirginPassword'}}, reason='t'))
+        call_id = out['id']
+        assert auth_client.post(f'/api/integration-calls/{call_id}/deny').status_code == 200
+        row = get_pending_call(call_id)
+        assert row['status'] == 'denied'
+        assert row['payload']['data']['password'] == '[redacted]'
+        assert 'VirginPassword' not in json.dumps(row['payload'])
+
+    def test_legacy_resolved_payload_stripped_on_migration(self):
+        """A resolved row with a raw payload (persisted by an older version)
+        loses its credential on the startup migration, keeping the hash. The
+        migration is idempotent — the fingerprint survives re-runs."""
+        from db.core import db_conn
+        with db_conn() as conn:
+            conn.cursor().execute(
+                "INSERT INTO pending_integration_calls (integration, tool, payload, status, created_at, secret_hashes) "
+                "VALUES ('legacy', 'write', ?, 'denied', 1, '{}')",
+                (json.dumps({'password': 'sekret'}),))
+            conn.commit()
+        assert strip_resolved_payloads() >= 1
+        rows = [c for c in get_pending_calls(include_resolved=True) if c['integration'] == 'legacy']
+        assert rows[0]['payload'] == {'password': '[redacted]'}
+        assert rows[0]['secret_hashes'].get('password') == hashlib.sha256(b'sekret').hexdigest()
+        strip_resolved_payloads()
+        rows2 = [c for c in get_pending_calls(include_resolved=True) if c['integration'] == 'legacy']
+        assert rows2[0]['secret_hashes'] == rows[0]['secret_hashes']
+
+    def test_purge_removes_both_stores(self):
+        from db.core import db_conn
+        with db_conn() as conn:
+            c = conn.cursor()
+            c.execute("INSERT INTO integration_calls (integration, tool, agent, method, path, status_code, latency_ms, response_summary, response_bytes, truncated, outcome, created_at) "
+                      "VALUES ('x', 'read', 'a', 'GET', '/x', 200, 1, 'ok', 2, 0, 'ok', 1)")
+            c.execute("INSERT INTO pending_integration_calls (integration, tool, payload, status, created_at) "
+                      "VALUES ('x', 'write', '{}', 'denied', 2)")
+            conn.commit()
+        assert purge_old_integration_calls(int(time.time()) + 1) == 2
+        assert get_integration_calls()['total'] == 0
+        assert get_pending_calls(include_resolved=True) == []
+
+    def test_error_string_scrubbed(self, secret_upstream):
+        """Upstream error messages are a separate sink — a Bearer-style token
+        echoed in an error body must not reach the model via `error`."""
+        _make(secret_upstream)
+        out = json.loads(run_tool('testapi', 'read', {'path': 'fail'}))
+        assert 'sekrettoken' not in json.dumps(out)
+        assert '[redacted]' in out.get('error', '')

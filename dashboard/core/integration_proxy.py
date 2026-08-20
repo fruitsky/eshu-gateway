@@ -14,7 +14,7 @@ import urllib.parse
 import urllib.request
 
 from db.integrations import record_integration_call
-from core.secret_scrub import scrub_body
+from core.secret_scrub import scrub_body, scrub_string
 
 # Reuse the fleet pattern: store up to 1 MB, keep a 2 KB preview for lists.
 MAX_BODY_BYTES = 1048576
@@ -518,6 +518,8 @@ def execute_integration_call(integration: dict, tool: dict, args: dict, agent: s
     # Always-on secret scrub: mask secret-named fields / header-style tokens in
     # the final output so neither the model nor the audit trail sees them.
     body = scrub_body(body)
+    if error:
+        error = scrub_string(error)
 
     record_integration_call(
         integration=integration.get('name', ''),
@@ -586,6 +588,8 @@ def execute_generic_call(integration: dict, method: str, path: str, params=None,
 
     # Always-on secret scrub (see execute_integration_call).
     body = scrub_body(body)
+    if error:
+        error = scrub_string(error)
 
     record_integration_call(
         integration=integration.get('name', ''),
