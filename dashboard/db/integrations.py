@@ -96,6 +96,14 @@ def init_integrations_tables(cursor):
         cursor.execute("ALTER TABLE integration_tools ADD COLUMN strip_envelope INTEGER DEFAULT 0")
     except Exception:
         pass
+    try:
+        cursor.execute("ALTER TABLE integration_tools ADD COLUMN transform TEXT DEFAULT ''")
+    except Exception:
+        pass
+    try:
+        cursor.execute("ALTER TABLE integration_tools ADD COLUMN not_implemented INTEGER DEFAULT 0")
+    except Exception:
+        pass
     # One-time backfill: integrations seeded before the `kind` column existed
     # defaulted to 'custom'. Infer 'proxmox' for any that already carry known
     # Proxmox tool names, so existing installs don't need a manual Type edit.
@@ -247,18 +255,20 @@ def create_tool(integration_id: int, name: str, description: str, method: str,
                 path_template: str, params, example: str, read_only: bool = True,
                 fields=None, search_field: str = '', transport: str = 'http',
                 filter_fields=None, generic: bool = False, version: str = 'v1',
-                strip_envelope: bool = False) -> int:
+                strip_envelope: bool = False, transform: str = '',
+                not_implemented: bool = False) -> int:
     with db_conn() as conn:
         cursor = conn.cursor()
         cursor.execute('''
             INSERT INTO integration_tools
-                (integration_id, name, description, method, path_template, params, fields, search_field, example, read_only, enabled, transport, filter_fields, generic, version, strip_envelope)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
+                (integration_id, name, description, method, path_template, params, fields, search_field, example, read_only, enabled, transport, filter_fields, generic, version, strip_envelope, transform, not_implemented)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)
         ''', (integration_id, name, description, method, path_template,
               json.dumps(params or []), json.dumps(fields or []), search_field or '',
               example, 1 if read_only else 0,
               transport or 'http', json.dumps(filter_fields or []), 1 if generic else 0,
-              version or 'v1', 1 if strip_envelope else 0))
+              version or 'v1', 1 if strip_envelope else 0,
+              transform or '', 1 if not_implemented else 0))
         conn.commit()
         return cursor.lastrowid
 
@@ -331,7 +341,7 @@ def set_tool_enabled(tool_id: int, enabled: bool) -> bool:
 
 
 def update_tool(tool_id: int, **fields) -> bool:
-    allowed = {'name', 'description', 'method', 'path_template', 'params', 'fields', 'search_field', 'example', 'read_only', 'enabled', 'transport', 'filter_fields', 'generic', 'version', 'strip_envelope'}
+    allowed = {'name', 'description', 'method', 'path_template', 'params', 'fields', 'search_field', 'example', 'read_only', 'enabled', 'transport', 'filter_fields', 'generic', 'version', 'strip_envelope', 'transform', 'not_implemented'}
     updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
     if not updates:
         return False
@@ -349,6 +359,10 @@ def update_tool(tool_id: int, **fields) -> bool:
         updates['generic'] = 1 if updates['generic'] else 0
     if 'strip_envelope' in updates:
         updates['strip_envelope'] = 1 if updates['strip_envelope'] else 0
+    if 'not_implemented' in updates:
+        updates['not_implemented'] = 1 if updates['not_implemented'] else 0
+    if updates.get('transform') is not None:
+        updates['transform'] = updates['transform'] or ''
     assignments = ', '.join(f'{k} = ?' for k in updates)
     with db_conn() as conn:
         cursor = conn.cursor()
@@ -477,3 +491,21 @@ def set_pending_call_status(call_id: int, status: str, result: str = '') -> bool
         ''', (status, result, now, call_id))
         conn.commit()
         return cursor.rowcount > 0
+
+
+def mask_sensitive_args(payload: dict, tool: dict) -> dict:
+    """Return a copy of a call payload with `redact`-flagged param values
+    replaced by '[redacted]'.
+
+    Used for audit/UI display (pending-call listings, dashboard history). The
+    stored payload is left intact so an approved call still executes with the
+    real arguments."""
+    redacted = {p['name'] for p in (tool.get('params') or [])
+                if isinstance(p, dict) and p.get('redact')}
+    if not redacted:
+        return payload
+    out = dict(payload)
+    for key in redacted:
+        if key in out and out[key]:
+            out[key] = '[redacted]'
+    return out

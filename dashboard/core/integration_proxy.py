@@ -180,6 +180,10 @@ def _build_request(tool: dict, args: dict):
     body_params = {}
     raw_body = None
     for p in tool.get('params') or []:
+        # `local` params are consumed by response transforms / shaping only and
+        # are never forwarded to the upstream API (e.g. charts maxPoints).
+        if p.get('local'):
+            continue
         name = p.get('name')
         # `query_key` lets the MCP-facing param name differ from the wire key
         # (e.g. timeStart -> filters.timeStart). Path substitution uses `name`.
@@ -281,9 +285,10 @@ def _project_body(body: str, fields: list) -> str:
 
 
 def _upstream_error(body: str):
-    """Detect an Omada-style logical-error envelope (HTTP 200 with a non-zero
-    `errorCode`). Returns a clear message, or None for success/non-JSON bodies.
-    Projection would otherwise flatten these into `{}`, hiding the failure."""
+    """Detect a logical-error envelope in an HTTP-200 body: Omada's non-zero
+    `errorCode`, or a Pulse-style `{"error": "<message>"}` dict. Returns a clear
+    message, or None for success/non-JSON bodies. Projection would otherwise
+    flatten these into `{}`, hiding the failure."""
     try:
         data = json.loads(body)
     except (ValueError, TypeError):
@@ -293,12 +298,38 @@ def _upstream_error(body: str):
         if code not in (None, 0, '0'):
             msg = data.get('msg') or data.get('message') or ''
             return f"Omada error {code}: {msg}".strip()
+        err = data.get('error')
+        if isinstance(err, str) and err:
+            return err
     return None
 
 
-def _apply_shaping(body: str, tool: dict, args: dict) -> str:
-    """Client-side response shaping: exact filters + search filter + limit +
-    field projection.
+def _normalize_http_error(status_code: int, body: str):
+    """Build a stable `code: message` string from a non-2xx JSON error body.
+
+    Preserves the upstream's own code (e.g. Pulse's `missing_scope`) when
+    present; otherwise falls back to nothing so the caller keeps its prior
+    behavior. Returns None when the body has nothing JSON-ish to report."""
+    try:
+        data = json.loads(body)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    code = data.get('code') or data.get('errorCode') or ''
+    msg = data.get('message') or data.get('msg') or ''
+    if not msg and isinstance(data.get('error'), str):
+        msg = data['error']
+    if not (code or msg):
+        return None
+    if code:
+        return f"{code}: {msg}".strip() if msg else str(code)
+    return str(msg)
+
+
+def _apply_shaping(body: str, tool: dict, args: dict, integration: dict = None) -> str:
+    """Client-side response shaping: transforms + exact filters + search filter
+    + limit + field projection.
 
     `full=true` skips all shaping. For each name in the tool's `filter_fields`,
     an exact-match filter is applied against `args[name]`. `search` filters a
@@ -308,6 +339,14 @@ def _apply_shaping(body: str, tool: dict, args: dict) -> str:
     (e.g. Omada's {errorCode,msg,result}) even when there is nothing to
     project, so passthrough tools still drop the wrapper."""
     a = args or {}
+    transform = tool.get('transform')
+    if transform:
+        # A registered transform owns the whole result (compact projection,
+        # downsample, merge, ...) — no further shaping applies.
+        from core import transforms
+        out = transforms.apply_transform(transform, integration, tool, a, body)
+        if out is not None:
+            return out
     fields = tool.get('fields') or []
     search_field = tool.get('search_field') or ''
     filter_fields = tool.get('filter_fields') or []
@@ -446,8 +485,8 @@ def execute_integration_call(integration: dict, tool: dict, args: dict, agent: s
     status_code, body, truncated, error, latency_ms, outcome = _http_roundtrip(
         integration, url, body_bytes, headers, method)
 
-    # Surface upstream logical errors (Omada errorCode != 0) instead of
-    # projecting the error envelope down to {}.
+    # Surface upstream logical errors (Omada errorCode != 0, Pulse {"error": ...})
+    # instead of projecting the error envelope down to {}.
     if outcome == 'ok':
         up_err = _upstream_error(body)
         if up_err:
@@ -455,7 +494,11 @@ def execute_integration_call(integration: dict, tool: dict, args: dict, agent: s
             error = up_err
             body = ''
         else:
-            body = _apply_shaping(body, tool, args)
+            body = _apply_shaping(body, tool, args, integration)
+    else:
+        norm = _normalize_http_error(status_code, body)
+        if norm:
+            error = norm
 
     record_integration_call(
         integration=integration.get('name', ''),
@@ -517,6 +560,10 @@ def execute_generic_call(integration: dict, method: str, path: str, params=None,
             outcome = 'error'
             error = up_err
             body = ''
+    else:
+        norm = _normalize_http_error(status_code, body)
+        if norm:
+            error = norm
 
     record_integration_call(
         integration=integration.get('name', ''),

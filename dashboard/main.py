@@ -65,6 +65,7 @@ from database import (
     create_tool, get_tools, get_tool, set_tool_enabled, delete_tool,
     record_integration_call, get_integration_calls,
     create_pending_call, get_pending_calls, get_pending_call, set_pending_call_status,
+    mask_sensitive_args,
     create_agent_token, get_agent_tokens, revoke_agent_token, delete_agent_token,
 )
 
@@ -2357,13 +2358,26 @@ def list_integration_calls(request: Request, search: str = None, start: int = No
 @app.get("/api/integration-calls/pending")
 def list_pending_integration_calls(request: Request):
     _check_session(request)
-    return get_pending_calls()
+    calls = get_pending_calls()
+    # Mask `redact`-flagged args (e.g. Pulse node passwords/tokens) so they
+    # never appear in the UI; the stored payload stays intact for execution.
+    for call in calls:
+        tool = get_tool(call['integration'], call['tool']) if call.get('integration') and call.get('tool') else None
+        if tool:
+            call['payload'] = mask_sensitive_args(call['payload'], tool)
+    return calls
 
 
 def _surface_integration_call(call, status: str):
     """Insert a requests row so a resolved mutating API call appears in the main
-    dashboard history (mirrors the fleet-run pattern)."""
-    args = ', '.join(f"{k}={v}" for k, v in (call['payload'] or {}).items())
+    dashboard history (mirrors the fleet-run pattern). `redact`-flagged args
+    (e.g. Pulse node passwords/tokens) are masked so they never reach the
+    history command string."""
+    payload = call['payload'] or {}
+    tool = get_tool(call['integration'], call['tool']) if call.get('integration') and call.get('tool') else None
+    if tool:
+        payload = mask_sensitive_args(payload, tool)
+    args = ', '.join(f"{k}={v}" for k, v in payload.items())
     create_request(
         target_ip=call['integration'],
         command=f"{call['integration']}.{call['tool']}({args})",

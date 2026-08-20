@@ -40,6 +40,11 @@ def run_tool(integration_name: str, tool_name: str, args: dict, reason: str = ''
         return _error("Tool not found or disabled", 404)
 
     args = args or {}
+    if tool.get('not_implemented'):
+        return json.dumps({'error': 'not_implemented',
+                           'message': f"{tool_name} is declared in the catalog "
+                                      "but not implemented yet",
+                           'status_code': 501})
     transport = tool.get('transport') or 'http'
     generic = bool(tool.get('generic'))
     mutating = not tool.get('read_only')
@@ -67,6 +72,10 @@ def run_tool(integration_name: str, tool_name: str, args: dict, reason: str = ''
             return _error(e.message, e.status_code)
         if res.get('error'):
             return json.dumps({'error': res['error'], 'status_code': res.get('status_code')})
+        if tool.get('transform'):
+            # execute_integration_call already ran the registered transform —
+            # shaping it again would double-apply (e.g. charts downsample).
+            return res['body']
         return _apply_shaping(res['body'], tool, args)
 
     # Mutating: consult the integration's gating policy.
