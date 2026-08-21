@@ -1537,6 +1537,9 @@ function renderTable() {
           }
           return '<div class="cmd-desc">' + escapeHtml(_desc) + '</div>';
         })() +
+        (isIntegration && req.reason
+          ? '<div class="cmd-desc cmd-reason">💬 ' + escapeHtml(req.reason) + '</div>'
+          : '') +
         '</td>' +
       '<td>' + badge + '</td>' +
       '<td class="text-right">' + actions + '</td></tr>';
