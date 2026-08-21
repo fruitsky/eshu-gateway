@@ -628,6 +628,196 @@ def _pihole_api_version(integration, tool, args, data):
     return json.dumps({'apiVersion': d.get('version')})
 
 
+# ── *arr transforms (Sonarr / Radarr) ──────────────────────────────────
+# Sonarr and Radarr share an API shape; the series/movie projections differ by
+# app. Lists are projected hard (raw /series and /movie are heavy); queue and
+# history are paginated and re-shaped to {total, records}.
+
+_ARR_SERIES_FIELDS = ('id', 'title', 'year', 'status', 'monitored',
+                      'qualityProfileId', 'path', 'tags')
+
+
+def _arr_item(x, fields, full):
+    row = {}
+    for k in fields:
+        if x.get(k) is not None:
+            row[k] = x[k]
+    return row
+
+
+def _arr_series(integration, tool, args, data):
+    a = args or {}
+    items = data if isinstance(data, list) else []
+    needle = str(a.get('search') or '').lower()
+    full = bool(a.get('full'))
+    out = []
+    for x in items:
+        if not isinstance(x, dict):
+            continue
+        if needle and needle not in str(x.get('title') or '').lower():
+            continue
+        row = _arr_item(x, _ARR_SERIES_FIELDS, full)
+        lang = x.get('language')
+        if isinstance(lang, dict) and lang.get('id') is not None:
+            row['language'] = lang
+        stats = x.get('statistics') or {}
+        if isinstance(stats, dict):
+            proj = {k: stats.get(k) for k in ('episodeFileCount', 'episodeCount', 'sizeOnDisk')}
+            row['statistics'] = {k: v for k, v in proj.items() if v is not None}
+        if full:
+            for k in ('overview', 'added', 'network'):
+                if x.get(k) is not None:
+                    row[k] = x[k]
+        out.append(row)
+    return json.dumps(_slice(out, a.get('limit')))
+
+
+def _arr_movies(integration, tool, args, data):
+    a = args or {}
+    items = data if isinstance(data, list) else []
+    needle = str(a.get('search') or '').lower()
+    full = bool(a.get('full'))
+    fields = ('id', 'title', 'year', 'status', 'monitored', 'qualityProfileId',
+              'hasFile', 'path', 'tags', 'sizeOnDisk')
+    out = []
+    for x in items:
+        if not isinstance(x, dict):
+            continue
+        if needle and needle not in str(x.get('title') or '').lower():
+            continue
+        row = _arr_item(x, fields, full)
+        if full:
+            for k in ('overview', 'added', 'runtime', 'originalLanguage'):
+                if x.get(k) is not None:
+                    row[k] = x[k]
+        out.append(row)
+    return json.dumps(_slice(out, a.get('limit')))
+
+
+def _arr_system_status(integration, tool, args, data):
+    if not isinstance(data, dict):
+        return json.dumps(data)
+    row = {k: data.get(k) for k in ('appName', 'version', 'branch', 'isDocker', 'startTime')}
+    return json.dumps({k: v for k, v in row.items() if v is not None})
+
+
+def _arr_paged(data, keys):
+    """Re-shape a paginated *arr response ({totalRecords, records[]}) into
+    {total, records:[projected]}."""
+    if not isinstance(data, dict):
+        return json.dumps(data)
+    records = []
+    for r in data.get('records') or []:
+        if not isinstance(r, dict):
+            continue
+        row = {k: r.get(k) for k in keys}
+        records.append({k: v for k, v in row.items() if v is not None})
+    return json.dumps({'total': data.get('totalRecords'), 'records': records})
+
+
+def _arr_queue(integration, tool, args, data):
+    return _arr_paged(data, ('id', 'title', 'status', 'trackedDownloadStatus',
+                             'errorMessage', 'sizeleft', 'timeleft'))
+
+
+def _arr_history(integration, tool, args, data):
+    def _row(r):
+        row = {}
+        for k in ('id', 'eventType', 'title', 'date'):
+            if r.get(k) is not None:
+                row[k] = r[k]
+        quality = r.get('quality') or {}
+        if isinstance(quality, dict):
+            q = quality.get('quality') or {}
+            if isinstance(q, dict) and q.get('name'):
+                row['quality'] = q['name']
+        indexer = r.get('indexer')
+        if isinstance(indexer, dict) and indexer.get('name'):
+            row['indexer'] = indexer['name']
+        elif isinstance(indexer, str) and indexer:
+            row['indexer'] = indexer
+        language = r.get('language')
+        if isinstance(language, dict) and language.get('name'):
+            row['language'] = language['name']
+        return row
+    if not isinstance(data, dict):
+        return json.dumps(data)
+    records = [_row(r) for r in data.get('records') or [] if isinstance(r, dict)]
+    return json.dumps({'total': data.get('totalRecords'), 'records': records})
+
+
+def _arr_quality_profiles(integration, tool, args, data):
+    items = data if isinstance(data, list) else []
+    out = []
+    for x in items:
+        if not isinstance(x, dict):
+            continue
+        row = {}
+        for k in ('id', 'name', 'cutoff'):
+            if x.get(k) is not None:
+                row[k] = x[k]
+        qitems = []
+        for qi in x.get('items') or []:
+            if not isinstance(qi, dict):
+                continue
+            q = qi.get('quality') or {}
+            qitems.append({'id': q.get('id') if isinstance(q, dict) else None,
+                           'name': q.get('name') if isinstance(q, dict) else None,
+                           'allowed': qi.get('allowed')})
+        row['items'] = qitems
+        if x.get('languageItems') is not None:
+            row['languageItems'] = x['languageItems']
+        out.append(row)
+    return json.dumps(out)
+
+
+def _arr_custom_formats(integration, tool, args, data):
+    a = args or {}
+    items = data if isinstance(data, list) else []
+    needle = str(a.get('search') or '').lower()
+    out = []
+    for x in items:
+        if not isinstance(x, dict):
+            continue
+        if needle and needle not in str(x.get('name') or '').lower():
+            continue
+        specs = []
+        for s in x.get('specifications') or []:
+            if not isinstance(s, dict):
+                continue
+            specs.append({'implementation': s.get('implementation'),
+                          'negate': s.get('negate')})
+        out.append({'id': x.get('id'), 'name': x.get('name'),
+                    'includeCustomFormatWhenRenaming': x.get('includeCustomFormatWhenRenaming'),
+                    'specifications': specs})
+    return json.dumps(_slice(out, a.get('limit')))
+
+
+def _arr_languages(integration, tool, args, data):
+    items = data if isinstance(data, list) else []
+    out = [{'id': x.get('id'), 'name': x.get('name')}
+           for x in items if isinstance(x, dict)]
+    return json.dumps(out)
+
+
+def _arr_rootfolders(integration, tool, args, data):
+    items = data if isinstance(data, list) else []
+    out = []
+    for x in items:
+        if not isinstance(x, dict):
+            continue
+        out.append({k: x.get(k) for k in ('id', 'path', 'accessible', 'freeSpace')
+                    if x.get(k) is not None})
+    return json.dumps(out)
+
+
+def _arr_command_status(integration, tool, args, data):
+    if not isinstance(data, dict):
+        return json.dumps(data)
+    row = {k: data.get(k) for k in ('id', 'name', 'status', 'started', 'ended', 'duration')}
+    return json.dumps({k: v for k, v in row.items() if v is not None})
+
+
 TRANSFORMS = {
     'pulse_health': _health,
     'pulse_fleet_summary': _fleet_summary,
@@ -648,6 +838,16 @@ TRANSFORMS = {
     'pihole_summary': _pihole_summary,
     'pihole_status': _pihole_status,
     'pihole_api_version': _pihole_api_version,
+    'arr_system_status': _arr_system_status,
+    'arr_series': _arr_series,
+    'arr_movies': _arr_movies,
+    'arr_queue': _arr_queue,
+    'arr_history': _arr_history,
+    'arr_quality_profiles': _arr_quality_profiles,
+    'arr_custom_formats': _arr_custom_formats,
+    'arr_languages': _arr_languages,
+    'arr_rootfolders': _arr_rootfolders,
+    'arr_command_status': _arr_command_status,
 }
 
 # Transforms that consume the raw body as text (non-JSON endpoints).

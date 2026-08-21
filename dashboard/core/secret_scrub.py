@@ -36,6 +36,8 @@ _VALUE_PATTERNS = [
     re.compile(r'eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}'),
     # query-param token (e.g. Pi-hole ?auth=<token>)
     re.compile(r'auth=[A-Za-z0-9._\-]+', re.IGNORECASE),
+    # API-key header (Sonarr/Radarr X-Api-Key, ...)
+    re.compile(r'X-Api-Key[:=]\s*\S+', re.IGNORECASE),
 ]
 
 MASK = '[redacted]'

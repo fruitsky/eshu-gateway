@@ -373,9 +373,16 @@ def _normalize_http_error(status_code: int, body: str, tool: dict = None):
         msg = data.get('message') or data.get('msg') or ''
         if not msg and isinstance(data.get('error'), str):
             msg = data['error']
+        if not msg and isinstance(data.get('detail'), str):
+            msg = data['detail']
+        if not msg and isinstance(data.get('title'), str):
+            msg = data['title']
         if isinstance(code, int):
             code = str(code)
-    if not (code or msg) and tool:
+    if not code and tool:
+        # Tool-level stable codes (e.g. *arr 401 -> invalid_key) apply whenever
+        # the upstream body carries no code of its own — even if it has a
+        # message (problem-details bodies often do).
         err_map = tool.get('error_codes') or {}
         if err_map:
             code = err_map.get(str(status_code))
@@ -551,7 +558,13 @@ def execute_integration_call(integration: dict, tool: dict, args: dict, agent: s
     headers.setdefault('Accept', 'application/json')
     body_bytes = None
     if method in ('POST', 'PUT', 'PATCH'):
-        payload = raw_body if raw_body is not None else body_params
+        # Mixing a json body param with plain body params merges them into one
+        # object ({**body, **params}), so an explicit flag (e.g. Sonarr
+        # searchForMissingEpisodes) always lands in the payload.
+        if raw_body is not None and isinstance(raw_body, dict) and body_params:
+            payload = {**raw_body, **body_params}
+        else:
+            payload = raw_body if raw_body is not None else body_params
         if payload:
             body_bytes = json.dumps(payload).encode('utf-8')
             headers.setdefault('Content-Type', 'application/json')
