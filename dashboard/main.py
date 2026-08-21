@@ -98,7 +98,7 @@ from core.secret_scrub import scrub_payload
 from core.integration_proxy import execute_integration_call, execute_generic_call, ProxyError, merge_response_hint
 from core.ha_ws import execute_ws_call
 from core.mcp_server import mcp as eshu_mcp, refresh_mcp_tools, refresh_mcp_allowed_hosts
-from core.seeds import seed_for_kind, reseed_all_integrations
+from core.seeds import seed_for_kind, reseed_all_integrations, seed_tool_names
 
 
 def _get_gateway_hostname(ip: str) -> str:
@@ -2300,7 +2300,11 @@ def list_tools_endpoint(name: str, request: Request):
     integration = get_integration(name)
     if not integration:
         raise HTTPException(status_code=404, detail="Integration not found")
-    return get_tools(integration['id'])
+    seeded_names = seed_tool_names(integration.get('kind') or 'custom')
+    tools = get_tools(integration['id'])
+    for tool in tools:
+        tool['seeded'] = tool['name'] in seeded_names
+    return tools
 
 
 @app.post("/api/integrations/{name}/tools")

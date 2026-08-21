@@ -7,6 +7,7 @@ from db.integrations import (
     get_tools,
 )
 from db.agent_tokens import get_agent_by_token, get_agent_tokens
+from core.seeds import seed_tool_names
 
 
 class TestIntegrationCRUD:
@@ -349,3 +350,71 @@ class TestIntegrationCallSearch:
         assert r.status_code == 200
         data = r.json()
         assert data["total"] == 1 and data["rows"][0]["integration"] == "ha"
+
+
+class TestSecretSuffix:
+
+    def test_list_exposes_suffix_not_secret(self, auth_client):
+        auth_client.post("/api/integrations", json={
+            "name": "pulse", "base_url": "http://x/api", "auth_type": "header",
+            "auth_header_name": "X-API-Token", "secret": "tok1234567890abcdef", "kind": "pulse",
+        })
+        row = next(x for x in auth_client.get("/api/integrations").json() if x["name"] == "pulse")
+        assert "secret" not in row
+        assert row["secret_suffix"] == "…cdef"
+
+    def test_empty_secret_empty_suffix(self, auth_client):
+        create_integration("nokeys", "http://x/api", "none", "")
+        row = next(x for x in auth_client.get("/api/integrations").json() if x["name"] == "nokeys")
+        assert row["secret_suffix"] == ""
+
+    def test_short_secret_shown_full(self, auth_client):
+        create_integration("short", "http://x/api", "none", "ab")
+        row = next(x for x in auth_client.get("/api/integrations").json() if x["name"] == "short")
+        assert row["secret_suffix"] == "ab"
+
+    def test_client_secret_suffix(self, auth_client):
+        auth_client.post("/api/integrations", json={
+            "name": "omada", "base_url": "https://x/openapi/v1/acct", "auth_type": "oauth2",
+            "client_id": "cid", "client_secret": "superSecretClient", "token_url": "https://x/token",
+        })
+        row = next(x for x in auth_client.get("/api/integrations").json() if x["name"] == "omada")
+        assert "client_secret" not in row
+        assert row["client_secret_suffix"] == "…ient"
+
+
+class TestSeedToolNames:
+
+    def test_pulse_includes_curated_and_generic(self):
+        names = seed_tool_names("pulse")
+        assert "health" in names and "read" in names and "write" in names
+
+    def test_jellyfin_excludes_generic(self):
+        names = seed_tool_names("jellyfin")
+        assert "system_info" in names
+        assert "read" not in names and "write" not in names
+
+    def test_ha_includes_ws_generic(self):
+        names = seed_tool_names("ha")
+        assert "ws_read" in names and "ws_write" in names
+
+    def test_unknown_kind_generic_only(self):
+        names = seed_tool_names("custom")
+        assert "read" in names and "write" in names
+
+
+class TestSeededAnnotation:
+
+    def test_tools_list_marks_seeded(self, auth_client):
+        auth_client.post("/api/integrations", json={
+            "name": "pulse", "base_url": "http://x/api", "auth_type": "none", "kind": "pulse",
+        })
+        assert auth_client.post("/api/integrations/pulse/seed").status_code == 200
+        auth_client.post("/api/integrations/pulse/tools", json={
+            "name": "my_custom", "method": "GET", "path_template": "/x", "read_only": True,
+        })
+        tools = auth_client.get("/api/integrations/pulse/tools").json()
+        by_name = {t["name"]: t for t in tools}
+        assert by_name["health"]["seeded"] is True
+        assert by_name["read"]["seeded"] is True
+        assert by_name["my_custom"]["seeded"] is False

@@ -8,12 +8,12 @@ tools (read/write, and WS tools for HA) so agents are never blocked by an
 un-curated endpoint.
 """
 from db.integrations import get_integrations
-from core.proxmox_seed import seed_proxmox_tools
-from core.ha_seed import seed_ha_tools
-from core.omada_seed import seed_omada_tools
-from core.pulse_seed import seed_pulse_tools
-from core.jellyfin_seed import seed_jellyfin_tools
-from core.generic_tools import seed_generic_tools
+from core.proxmox_seed import PROXMOX_SEED_TOOLS, seed_proxmox_tools
+from core.ha_seed import HA_SEED_TOOLS, seed_ha_tools
+from core.omada_seed import OMADA_SEED_TOOLS, seed_omada_tools
+from core.pulse_seed import PULSE_SEED_TOOLS, seed_pulse_tools
+from core.jellyfin_seed import JELLYFIN_SEED_TOOLS, seed_jellyfin_tools
+from core.generic_tools import generic_tools_for, seed_generic_tools
 
 SEEDERS = {
     'proxmox': seed_proxmox_tools,
@@ -23,10 +23,29 @@ SEEDERS = {
     'jellyfin': seed_jellyfin_tools,
 }
 
+_CATALOGS = {
+    'proxmox': PROXMOX_SEED_TOOLS,
+    'ha': HA_SEED_TOOLS,
+    'omada': OMADA_SEED_TOOLS,
+    'pulse': PULSE_SEED_TOOLS,
+    'jellyfin': JELLYFIN_SEED_TOOLS,
+}
+
 # Kinds that must NOT receive the generic read/write passthrough floor. Jellyfin
 # is fully curated because its API key is admin-level and cannot be scoped down
 # — a generic passthrough would undo the write gating.
 NO_GENERIC_KINDS = {'jellyfin'}
+
+
+def seed_tool_names(kind: str) -> set:
+    """Names of the tools that seeding would create/re-create for a kind —
+    the curated catalog plus the generic floor (where applicable). Used to flag
+    seed-managed tools in the UI so operators don't delete them expecting them
+    to stay gone (they reappear on the next reseed)."""
+    names = {t['name'] for t in _CATALOGS.get(kind or 'custom', [])}
+    if (kind or 'custom') not in NO_GENERIC_KINDS:
+        names.update(t['name'] for t in generic_tools_for(kind or 'custom'))
+    return names
 
 
 def seed_for_kind(integration):

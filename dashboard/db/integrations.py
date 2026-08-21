@@ -188,9 +188,20 @@ def create_integration(name: str, base_url: str, auth_type: str, secret: str,
         return cursor.lastrowid
 
 
+def _suffix(value, n: int = 4) -> str:
+    """Last `n` chars of a secret for audit/UI correlation, or '' if empty.
+    A short value is returned in full; otherwise it's ellipsis-prefixed."""
+    if not value:
+        return ''
+    value = str(value)
+    return value if len(value) <= n else '…' + value[-n:]
+
+
 def get_integrations(include_secret: bool = False):
     """List integrations. Secret material is server-side only — omitted unless
-    the caller explicitly opts in (internal proxy path)."""
+    the caller explicitly opts in (internal proxy path). When stripped, the last
+    few chars of the secrets are still exposed as `secret_suffix` /
+    `client_secret_suffix` so operators can correlate which key is configured."""
     with db_conn() as conn:
         cursor = conn.cursor()
         cursor.execute('SELECT * FROM integrations ORDER BY name ASC')
@@ -199,6 +210,8 @@ def get_integrations(include_secret: bool = False):
         for row in rows:
             item = dict(row)
             if not include_secret:
+                item['secret_suffix'] = _suffix(item.get('secret'))
+                item['client_secret_suffix'] = _suffix(item.get('client_secret'))
                 item.pop('secret', None)
                 item.pop('client_secret', None)
             out.append(item)

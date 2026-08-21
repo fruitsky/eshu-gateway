@@ -475,9 +475,11 @@
               <div id="int-oauth-fields" class="hidden flex-col gap-2">
                 <input type="text" id="int-client-id" placeholder="Client ID (from the API portal)" class="w-full text-xs">
                 <input type="password" id="int-client-secret" placeholder="Client Secret" class="w-full text-xs">
+                <div id="int-client-secret-suffix" class="hidden text-xs text-muted"></div>
                 <input type="text" id="int-token-url" placeholder="Token URL (e.g. https://omada:8043/openapi/authorize/token)" class="w-full text-xs">
               </div>
               <input type="password" id="int-secret" placeholder="Secret / token" class="w-full text-xs">
+              <div id="int-secret-suffix" class="hidden text-xs text-muted"></div>
               <label class="flex items-center gap-2 cursor-pointer select-none text-xs text-muted">
                 <input type="checkbox" id="int-verify-tls">
                 Skip TLS certificate verification (self-signed cert on the controller)

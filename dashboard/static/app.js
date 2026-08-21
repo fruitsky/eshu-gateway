@@ -3615,6 +3615,10 @@ function resetIntegrationForm() {
   document.getElementById('int-client-secret').value = '';
   document.getElementById('int-token-url').value = '';
   document.getElementById('int-gate-mode').value = 'destructive';
+  var secretHint = document.getElementById('int-secret-suffix');
+  if (secretHint) { secretHint.textContent = ''; secretHint.classList.add('hidden'); }
+  var clientSecretHint = document.getElementById('int-client-secret-suffix');
+  if (clientSecretHint) { clientSecretHint.textContent = ''; clientSecretHint.classList.add('hidden'); }
   document.getElementById('int-submit-btn').textContent = 'Add Integration';
   document.getElementById('integration-test-result').classList.add('hidden');
   onIntKindChange();
@@ -3645,6 +3649,16 @@ function editIntegration(name) {
   if (verifyTls) verifyTls.checked = i.verify_tls === 0 || i.verify_tls === false;
   var gateMode = document.getElementById('int-gate-mode');
   if (gateMode) gateMode.value = i.gate_mode || 'destructive';
+  var secretHint = document.getElementById('int-secret-suffix');
+  if (secretHint) {
+    secretHint.textContent = i.secret_suffix ? ('Key in use: ' + i.secret_suffix + ' — last 4 only; leave blank to keep current') : '';
+    secretHint.classList.toggle('hidden', !i.secret_suffix);
+  }
+  var clientSecretHint = document.getElementById('int-client-secret-suffix');
+  if (clientSecretHint) {
+    clientSecretHint.textContent = i.client_secret_suffix ? ('Client secret in use: ' + i.client_secret_suffix + ' — last 4 only; leave blank to keep current') : '';
+    clientSecretHint.classList.toggle('hidden', !i.client_secret_suffix);
+  }
   document.getElementById('int-submit-btn').textContent = 'Update Integration';
   document.getElementById('integration-test-result').classList.add('hidden');
   // Bring the form into view and flash it so the "editing" state is obvious
@@ -3783,7 +3797,7 @@ function renderTools(tools, name) {
       '<div class="text-xs text-muted mt-1">' + esc(t.description || '') + '</div>' +
       '<div class="flex gap-1 mt-2">' +
       '<button onclick="toggleTool(' + t.id + ', ' + (t.enabled ? 'false' : 'true') + ')" class="btn btn-xs ' + (t.enabled ? 'btn-muted' : '') + '">' + (t.enabled ? 'Disable' : 'Enable') + '</button>' +
-      '<button onclick="deleteTool(' + t.id + ')" class="btn btn-xs btn-muted">×</button>' +
+      '<button onclick="deleteTool(' + t.id + ', ' + (t.seeded ? 'true' : 'false') + ')" class="btn btn-xs btn-muted">×</button>' +
       '</div></div>';
   }).join('');
 }
@@ -3795,8 +3809,11 @@ async function toggleTool(id, enabled) {
   } catch(e) {}
 }
 
-async function deleteTool(id) {
-  if (!(await customConfirm('Delete this tool?'))) return;
+async function deleteTool(id, seeded) {
+  var msg = seeded
+    ? 'This tool is seed-managed (comes from the seed catalog) — it will be re-created, enabled, on the next reseed/restart. Use Disable to hide it from agents instead.\n\nDelete anyway?'
+    : 'Delete this tool?';
+  if (!(await customConfirm(msg))) return;
   try {
     await authFetch('/api/integrations/' + encodeURIComponent(_selectedIntegration) + '/tools/' + id, { method: 'DELETE' });
     fetchTools(_selectedIntegration);
