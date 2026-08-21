@@ -503,7 +503,9 @@
 
         <div class="flex flex-col gap-5">
           <div class="widget">
-            <div class="widget-header">Agent Tokens</div>
+            <div class="widget-header">Agent and MCP Access</div>
+            <p class="text-xs mb-3 text-muted">Who can reach the MCP endpoint (<code>/mcp</code>): agent bearer tokens for authentication, plus the DNS-rebinding allowlist of hosts.</p>
+            <div class="text-xs font-semibold uppercase tracking-wide text-muted mb-2">Agent Tokens</div>
             <p class="text-xs mb-3 text-muted">Long-lived bearer tokens your agents present to the MCP endpoint (<code>/mcp</code>). Shown once on creation; only the hash is stored.</p>
             <div class="flex gap-2 mb-1">
               <input type="text" id="agent-token-name" placeholder="Agent name (e.g. hermes)" class="flex-1 text-xs" onkeydown="if(event.key==='Enter')createAgentToken()">
@@ -512,10 +514,10 @@
             <p class="text-xs text-muted mb-3">When configuring your client, paste the <strong>raw token</strong> — clients like Hermes add the <code>Bearer </code> prefix themselves (adding it yourself causes 401s).</p>
             <div id="agent-token-result" class="hidden mb-3 p-2 rounded bg-green-900/20 border border-green-700/40 text-xs break-all"></div>
             <div id="agent-token-list" class="space-y-2"><p class="text-muted">Loading...</p></div>
-          </div>
 
-          <div class="widget">
-            <div class="widget-header">MCP Access</div>
+            <hr class="hr">
+
+            <div class="text-xs font-semibold uppercase tracking-wide text-muted mb-2">MCP Access</div>
             <p class="text-xs mb-3 text-muted">Hosts allowed to reach the MCP endpoint (DNS-rebinding allowlist). Comma-separated — list the hostname/IP you reach the dashboard at (e.g. <code>eshu.local.example.com</code>). Loopback is always allowed. Required if you use a hostname or a reverse proxy.</p>
             <div class="flex gap-2">
               <input type="text" id="mcp-allowed-hosts" placeholder="eshu.local.example.com, 192.168.1.114" class="flex-1 text-xs" onkeydown="if(event.key==='Enter')saveMcpSettings()">
