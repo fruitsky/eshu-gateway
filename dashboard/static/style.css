@@ -299,7 +299,6 @@
     background: var(--bg-base); color: var(--text-main);
   }
   .cmd-desc { font-size: 12px; color: var(--text-muted); margin-top: 1px; line-height: 1.4; padding-left: 4px; }
-  .cmd-reason { color: var(--accent, #ffd700); opacity: 0.9; }
   .risk-flag { color: var(--status-warning); cursor: help; }
   .anomaly-flag { color: var(--status-info); cursor: help; }
   .jit-anomaly { font-size: 12px; color: var(--status-info); margin-top: 3px; }
