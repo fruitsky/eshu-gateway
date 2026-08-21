@@ -42,10 +42,24 @@ _VALUE_PATTERNS = [
 
 MASK = '[redacted]'
 
+# Keys whose ENTIRE value is dropped from any dict (recursively). Prowlarr
+# indexer definitions carry real credentials in `fields[]` (API keys,
+# usernames, passwords per indexer); values vary per indexer so a value
+# heuristic can't be relied on — the field-name denylist is. Applies to
+# response bodies AND audit/approval payload display.
+_DROP_KEYS = ('fields',)
+
 
 def _is_secret_key(key: str) -> bool:
     k = str(key).lower()
     return k in _SECRET_KEYS or k.endswith(_SECRET_SUFFIXES)
+
+
+def _should_drop_key(key: str, value) -> bool:
+    """Drop a `_DROP_KEYS` entry only when it's a LIST. Prowlarr indexer
+    `fields` is a list of credential definitions ({name, value, ...}); Home
+    Assistant service-schema `fields` is a dict and must be preserved."""
+    return str(key).lower() in _DROP_KEYS and isinstance(value, list)
 
 
 def _scrub_string(value: str) -> str:
@@ -70,7 +84,13 @@ def secret_hashes(value, prefix: str = '') -> dict:
     if isinstance(value, dict):
         for k, v in value.items():
             path = f'{prefix}.{k}' if prefix else str(k)
-            if _is_secret_key(k):
+            if _should_drop_key(k, v):
+                # Dropped credentials (e.g. Prowlarr fields[]) leave a SHA-256
+                # fingerprint in the audit trail without being retained.
+                if v:
+                    out[path] = hashlib.sha256(
+                        json.dumps(v, sort_keys=True).encode('utf-8')).hexdigest()
+            elif _is_secret_key(k):
                 if isinstance(v, str) and v:
                     out[path] = hashlib.sha256(v.encode('utf-8')).hexdigest()
                 elif isinstance(v, (int, float, bool)) and v is not False and v != 0:
@@ -84,10 +104,15 @@ def secret_hashes(value, prefix: str = '') -> dict:
 
 
 def scrub_value(value):
-    """Recursively scrub a parsed JSON value (dict/list/scalar)."""
+    """Recursively scrub a parsed JSON value (dict/list/scalar). `_DROP_KEYS`
+    (e.g. Prowlarr `fields`, list-shaped) are removed entirely."""
     if isinstance(value, dict):
-        return {k: (MASK if _is_secret_key(k) else scrub_value(v))
-                for k, v in value.items()}
+        out = {}
+        for k, v in value.items():
+            if _should_drop_key(k, v):
+                continue
+            out[k] = MASK if _is_secret_key(k) else scrub_value(v)
+        return out
     if isinstance(value, list):
         return [scrub_value(v) for v in value]
     if isinstance(value, str):

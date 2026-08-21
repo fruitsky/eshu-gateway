@@ -818,6 +818,65 @@ def _arr_command_status(integration, tool, args, data):
     return json.dumps({k: v for k, v in row.items() if v is not None})
 
 
+# ── Prowlarr transforms ────────────────────────────────────────────────
+# The defining constraint: indexer definitions carry credentials in `fields[]`.
+# The projections below build output dicts field-by-field and NEVER include
+# `fields` (the scrubber's drop-list is the belt-and-braces layer).
+
+def _prowlarr_indexers(integration, tool, args, data):
+    a = args or {}
+    items = data if isinstance(data, list) else []
+    needle = str(a.get('search') or '').lower()
+    full = bool(a.get('full'))
+    base = ('id', 'name', 'protocol', 'enable', 'priority', 'indexerFeedType',
+            'sortOrder', 'implementation')
+    full_extra = ('description', 'tags', 'language')
+    out = []
+    for x in items:
+        if not isinstance(x, dict):
+            continue
+        if needle and needle not in str(x.get('name') or '').lower():
+            continue
+        row = {k: x.get(k) for k in base if x.get(k) is not None}
+        if full:
+            for k in full_extra:
+                if x.get(k) is not None:
+                    row[k] = x[k]
+        out.append(row)
+    return json.dumps(_slice(out, a.get('limit')))
+
+
+def _prowlarr_indexer_stats(integration, tool, args, data):
+    if not isinstance(data, dict):
+        return json.dumps(data)
+    rows = []
+    for x in data.get('indexers') or []:
+        if not isinstance(x, dict):
+            continue
+        row = {k: x.get(k) for k in ('indexerName', 'success', 'failures',
+                                     'totalQueries')}
+        rows.append({k: v for k, v in row.items() if v is not None})
+    return json.dumps({'total': len(rows), 'indexers': rows})
+
+
+def _prowlarr_indexer_status(integration, tool, args, data):
+    if isinstance(data, dict) and data.get('indexerStatus'):
+        items = data['indexerStatus']
+    elif isinstance(data, dict) and data.get('indexers'):
+        items = data['indexers']
+    else:
+        items = data if isinstance(data, list) else []
+    out = []
+    for x in items:
+        if not isinstance(x, dict):
+            continue
+        row = {k: x.get(k) for k in ('indexerId', 'indexerName', 'disabledTill',
+                                     'mostRecentFailure', 'escalation',
+                                     'attemptedQueries')}
+        out.append({k: v for k, v in row.items() if v is not None})
+    return json.dumps(out)
+
+
 TRANSFORMS = {
     'pulse_health': _health,
     'pulse_fleet_summary': _fleet_summary,
@@ -848,6 +907,10 @@ TRANSFORMS = {
     'arr_languages': _arr_languages,
     'arr_rootfolders': _arr_rootfolders,
     'arr_command_status': _arr_command_status,
+    'prowlarr_system_status': _arr_system_status,
+    'prowlarr_indexers': _prowlarr_indexers,
+    'prowlarr_indexer_stats': _prowlarr_indexer_stats,
+    'prowlarr_indexer_status': _prowlarr_indexer_status,
 }
 
 # Transforms that consume the raw body as text (non-JSON endpoints).

@@ -15,6 +15,7 @@ from core.pulse_seed import PULSE_SEED_TOOLS, seed_pulse_tools
 from core.jellyfin_seed import JELLYFIN_SEED_TOOLS, seed_jellyfin_tools
 from core.pihole_seed import PIHOLE_SEED_TOOLS, seed_pihole_tools
 from core.arr_seed import SONARR_SEED_TOOLS, RADARR_SEED_TOOLS, seed_sonarr_tools, seed_radarr_tools
+from core.prowlarr_seed import PROWLARR_SEED_TOOLS, seed_prowlarr_tools
 from core.generic_tools import generic_tools_for, seed_generic_tools
 
 SEEDERS = {
@@ -26,6 +27,7 @@ SEEDERS = {
     'pihole': seed_pihole_tools,
     'sonarr': seed_sonarr_tools,
     'radarr': seed_radarr_tools,
+    'prowlarr': seed_prowlarr_tools,
 }
 
 _CATALOGS = {
@@ -37,6 +39,7 @@ _CATALOGS = {
     'pihole': PIHOLE_SEED_TOOLS,
     'sonarr': SONARR_SEED_TOOLS,
     'radarr': RADARR_SEED_TOOLS,
+    'prowlarr': PROWLARR_SEED_TOOLS,
 }
 
 # Kinds that must NOT receive the generic read/write passthrough floor. Jellyfin
@@ -44,8 +47,9 @@ _CATALOGS = {
 # — a generic passthrough would undo the write gating. Pi-hole is fully curated
 # because toggling blocking is LAN-wide and the surface is tiny. Sonarr/Radarr
 # are fully curated because *arr writes can trigger torrent searches and file
-# deletions.
-NO_GENERIC_KINDS = {'jellyfin', 'pihole', 'sonarr', 'radarr'}
+# deletions. Prowlarr is fully curated because indexer definitions carry
+# credentials in fields[] and a generic read would expose them.
+NO_GENERIC_KINDS = {'jellyfin', 'pihole', 'sonarr', 'radarr', 'prowlarr'}
 
 
 def seed_tool_names(kind: str) -> set:
