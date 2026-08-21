@@ -454,8 +454,12 @@
     <div id="view-integrations" class="hidden w-full">
       <div class="grid grid-cols-1 lg:grid-cols-2 gap-5">
         <div class="flex flex-col gap-5">
-          <div class="widget">
-            <div class="widget-header">Add New Integration</div>
+          <div class="widget" id="int-form-widget">
+            <div class="widget-header">
+              <span id="int-form-title">Add New Integration</span>
+              <span id="int-edit-badge" class="badge-edit hidden">EDIT</span>
+            </div>
+            <hr class="hr">
             <p class="text-xs mb-3 text-muted">Named upstream APIs. Credentials are stored server-side and never returned.</p>
             <div class="space-y-2 mb-3">
               <input type="text" id="int-name" placeholder="Name (e.g. proxmox, ha)" class="w-full text-xs">
@@ -475,11 +479,9 @@
               <div id="int-oauth-fields" class="hidden flex-col gap-2">
                 <input type="text" id="int-client-id" placeholder="Client ID (from the API portal)" class="w-full text-xs">
                 <input type="password" id="int-client-secret" placeholder="Client Secret" class="w-full text-xs">
-                <div id="int-client-secret-suffix" class="hidden text-xs text-muted"></div>
                 <input type="text" id="int-token-url" placeholder="Token URL (e.g. https://omada:8043/openapi/authorize/token)" class="w-full text-xs">
               </div>
               <input type="password" id="int-secret" placeholder="Secret / token" class="w-full text-xs">
-              <div id="int-secret-suffix" class="hidden text-xs text-muted"></div>
               <label class="flex items-center gap-2 cursor-pointer select-none text-xs text-muted">
                 <input type="checkbox" id="int-verify-tls">
                 Skip TLS certificate verification (self-signed cert on the controller)
@@ -491,7 +493,10 @@
                   <option value="none">none — auto-approve everything (audit only)</option>
                 </select>
               </label>
-              <button id="int-submit-btn" onclick="createIntegration()" class="btn btn-sm">Add Integration</button>
+              <div class="flex gap-2">
+                <button id="int-submit-btn" onclick="createIntegration()" class="btn btn-sm">Add Integration</button>
+                <button id="int-cancel-btn" onclick="resetIntegrationForm()" class="btn btn-sm btn-muted hidden">Cancel edit</button>
+              </div>
             </div>
           </div>
         </div>

@@ -162,6 +162,10 @@
     border-color: var(--brand-red);
     box-shadow: 0 0 22px var(--brand-red-glow);
   }
+  .widget.editing {
+    border-color: var(--accent, #ffd700);
+    box-shadow: 0 0 14px rgba(255, 215, 0, 0.12);
+  }
   .widget-header {
     font-size: var(--text-md); font-weight: 600; color: var(--text-main);
     margin-bottom: var(--space-4);
@@ -170,6 +174,10 @@
   }
   .new-badge {
     background: var(--brand-red); color: white;
+    padding: 2px 10px; border-radius: 12px; font-size: 12px; font-weight: 600;
+  }
+  .badge-edit {
+    background: var(--accent, #ffd700); color: #111;
     padding: 2px 10px; border-radius: 12px; font-size: 12px; font-weight: 600;
   }
 

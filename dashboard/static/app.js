@@ -3492,6 +3492,8 @@ function onIntKindChange() {
     if (authFields) authFields.classList.remove('hidden');
   }
   if (secret) secret.placeholder = profile.secret_hint || 'Secret / token';
+  var clientSecret = document.getElementById('int-client-secret');
+  if (clientSecret) clientSecret.placeholder = 'Client Secret';
 }
 
 async function fetchIntegrations() {
@@ -3615,10 +3617,14 @@ function resetIntegrationForm() {
   document.getElementById('int-client-secret').value = '';
   document.getElementById('int-token-url').value = '';
   document.getElementById('int-gate-mode').value = 'destructive';
-  var secretHint = document.getElementById('int-secret-suffix');
-  if (secretHint) { secretHint.textContent = ''; secretHint.classList.add('hidden'); }
-  var clientSecretHint = document.getElementById('int-client-secret-suffix');
-  if (clientSecretHint) { clientSecretHint.textContent = ''; clientSecretHint.classList.add('hidden'); }
+  var title = document.getElementById('int-form-title');
+  if (title) title.textContent = 'Add New Integration';
+  var badge = document.getElementById('int-edit-badge');
+  if (badge) badge.classList.add('hidden');
+  var cancel = document.getElementById('int-cancel-btn');
+  if (cancel) cancel.classList.add('hidden');
+  var formWidget = document.getElementById('int-form-widget');
+  if (formWidget) formWidget.classList.remove('editing');
   document.getElementById('int-submit-btn').textContent = 'Add Integration';
   document.getElementById('integration-test-result').classList.add('hidden');
   onIntKindChange();
@@ -3649,24 +3655,30 @@ function editIntegration(name) {
   if (verifyTls) verifyTls.checked = i.verify_tls === 0 || i.verify_tls === false;
   var gateMode = document.getElementById('int-gate-mode');
   if (gateMode) gateMode.value = i.gate_mode || 'destructive';
-  var secretHint = document.getElementById('int-secret-suffix');
-  if (secretHint) {
-    secretHint.textContent = i.secret_suffix ? ('Key in use: ' + i.secret_suffix + ' — last 4 only; leave blank to keep current') : '';
-    secretHint.classList.toggle('hidden', !i.secret_suffix);
+  var secretInput = document.getElementById('int-secret');
+  if (secretInput && i.secret_suffix) {
+    secretInput.placeholder = 'Key in use: ' + i.secret_suffix + ' — last 4 only; leave blank to keep current';
   }
-  var clientSecretHint = document.getElementById('int-client-secret-suffix');
-  if (clientSecretHint) {
-    clientSecretHint.textContent = i.client_secret_suffix ? ('Client secret in use: ' + i.client_secret_suffix + ' — last 4 only; leave blank to keep current') : '';
-    clientSecretHint.classList.toggle('hidden', !i.client_secret_suffix);
+  var clientSecretInput = document.getElementById('int-client-secret');
+  if (clientSecretInput && i.client_secret_suffix) {
+    clientSecretInput.placeholder = 'Client secret in use: ' + i.client_secret_suffix + ' — last 4 only; leave blank to keep current';
   }
+  var title = document.getElementById('int-form-title');
+  if (title) title.textContent = 'Edit Integration: ' + i.name;
+  var badge = document.getElementById('int-edit-badge');
+  if (badge) badge.classList.remove('hidden');
+  var cancel = document.getElementById('int-cancel-btn');
+  if (cancel) cancel.classList.remove('hidden');
+  var formWidget = document.getElementById('int-form-widget');
+  if (formWidget) formWidget.classList.add('editing');
   document.getElementById('int-submit-btn').textContent = 'Update Integration';
   document.getElementById('integration-test-result').classList.add('hidden');
   // Bring the form into view and flash it so the "editing" state is obvious
-  var formWidget = document.getElementById('int-base-url').closest('.widget');
-  if (formWidget) {
-    formWidget.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    formWidget.style.outline = '2px solid var(--accent, #ffd700)';
-    setTimeout(function() { formWidget.style.outline = ''; }, 1600);
+  var flashWidget = document.getElementById('int-base-url').closest('.widget');
+  if (flashWidget) {
+    flashWidget.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    flashWidget.style.outline = '2px solid var(--accent, #ffd700)';
+    setTimeout(function() { flashWidget.style.outline = ''; }, 1600);
   }
 }
 
