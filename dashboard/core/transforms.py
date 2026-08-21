@@ -553,6 +553,81 @@ def _jellyfin_get_log(integration, tool, args, raw_body):
                        'content': content})
 
 
+# ── Pi-hole transforms ──────────────────────────────────────────────────
+# v5 /admin/api.php returns values as comma-formatted strings and answers with
+# [] (HTTP 200) when the token is wrong — both handled here.
+
+def _num(value):
+    """Parse a Pi-hole numeric value: strip commas, prefer int, fall back to
+    float, else pass the string through unchanged."""
+    if isinstance(value, (int, float)):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value.replace(',', ''))
+        except ValueError:
+            try:
+                return float(value.replace(',', ''))
+            except ValueError:
+                return value
+    return value
+
+
+def _pihole_dict(data):
+    """Pi-hole returns [] on a bad token — treat anything non-dict as an auth
+    failure so the stable invalid_token envelope is returned, not []."""
+    return data if isinstance(data, dict) else None
+
+
+def _pihole_summary(integration, tool, args, data):
+    d = _pihole_dict(data)
+    if d is None:
+        return _err('invalid_token',
+                    'Pi-hole returned an empty response — the API token is likely invalid')
+    full = bool((args or {}).get('full'))
+    row = {
+        'domainsBlocked': _num(d.get('domains_being_blocked')),
+        'queriesToday': _num(d.get('dns_queries_today')),
+        'adsBlockedToday': _num(d.get('ads_blocked_today')),
+        'adsPct': _num(d.get('ads_percentage_today')),
+        'queriesForwarded': _num(d.get('queries_forwarded')),
+        'queriesCached': _num(d.get('queries_cached')),
+        'clientsSeen': _num(d.get('unique_clients')),
+        'status': d.get('status'),
+        'privacyLevel': _num(d.get('privacy_level')),
+    }
+    row = {k: v for k, v in row.items() if v is not None}
+    if full:
+        for key, out in (('gravity_last_updated', 'gravityLastUpdated'),
+                         ('dns_queries_all_types', 'queriesAllTypes'),
+                         ('unique_domains', 'uniqueDomains')):
+            if d.get(key) is not None:
+                row[out] = _num(d[key])
+        replies = {}
+        for key, val in d.items():
+            if key.startswith('reply_') and val is not None:
+                replies[key[len('reply_'):]] = _num(val)
+        if replies:
+            row['replies'] = replies
+    return json.dumps(row)
+
+
+def _pihole_status(integration, tool, args, data):
+    d = _pihole_dict(data)
+    if d is None:
+        return _err('invalid_token',
+                    'Pi-hole returned an empty response — the API token is likely invalid')
+    return json.dumps({'status': d.get('status')})
+
+
+def _pihole_api_version(integration, tool, args, data):
+    d = _pihole_dict(data)
+    if d is None:
+        return _err('invalid_token',
+                    'Pi-hole returned an empty response — the API token is likely invalid')
+    return json.dumps({'apiVersion': d.get('version')})
+
+
 TRANSFORMS = {
     'pulse_health': _health,
     'pulse_fleet_summary': _fleet_summary,
@@ -570,6 +645,9 @@ TRANSFORMS = {
     'jellyfin_activity_log': _jellyfin_activity_log,
     'jellyfin_logs': _jellyfin_logs,
     'jellyfin_users': _jellyfin_users,
+    'pihole_summary': _pihole_summary,
+    'pihole_status': _pihole_status,
+    'pihole_api_version': _pihole_api_version,
 }
 
 # Transforms that consume the raw body as text (non-JSON endpoints).

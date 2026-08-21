@@ -27,7 +27,7 @@ DEFAULT_TIMEOUT = 30
 # 1 MB cap would otherwise truncate the JSON and defeat compact-by-default.
 TRANSFORM_MAX_BODY_BYTES = 32 * 1024 * 1024
 
-ALLOWED_AUTH_TYPES = ('none', 'bearer', 'basic', 'header', 'oauth2')
+ALLOWED_AUTH_TYPES = ('none', 'bearer', 'basic', 'header', 'oauth2', 'query_token')
 
 # Hard-to-undo mutations. Disruptive-but-reversible verbs (restart, reboot,
 # stop, toggle) are deliberately excluded so routine writes auto-run under the
@@ -177,6 +177,19 @@ def _auth_headers(integration: dict) -> dict:
     elif auth_type == 'oauth2':
         headers.update(_oauth2_headers(integration))
     return headers
+
+
+def _auth_query_url(url: str, integration: dict) -> str:
+    """Append a query-param auth token for `query_token` integrations (e.g.
+    Pi-hole: ?auth=<token>). The token never goes in a header; the audit trail
+    records only the path template, never this URL."""
+    if (integration.get('auth_type') or '').lower() != 'query_token':
+        return url
+    secret = integration.get('secret') or ''
+    if not secret:
+        return url
+    sep = '&' if '?' in url else '?'
+    return f"{url}{sep}auth={urllib.parse.quote(secret, safe='')}"
 
 
 def _build_request(tool: dict, args: dict):
@@ -532,6 +545,7 @@ def execute_integration_call(integration: dict, tool: dict, args: dict, agent: s
     url = base_url + '/' + path.lstrip('/')
     if query_string:
         url += '?' + query_string
+    url = _auth_query_url(url, integration)
 
     headers = _auth_headers(integration)
     headers.setdefault('Accept', 'application/json')
@@ -612,6 +626,7 @@ def execute_generic_call(integration: dict, method: str, path: str, params=None,
     url = base_url + '/' + path
     if params:
         url += '?' + urllib.parse.urlencode(params)
+    url = _auth_query_url(url, integration)
 
     headers = _auth_headers(integration)
     headers.setdefault('Accept', 'application/json')

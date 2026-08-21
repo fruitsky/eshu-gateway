@@ -138,9 +138,10 @@ class TestHaSeed:
         tools = auth_client.get("/api/integrations/other/tools").json()
         assert {"read", "write"} <= {t["name"] for t in tools}
 
-    def test_tools_namespaced_by_kind(self, auth_client):
-        """MCP tool names use the integration's kind (short slug), not the
-        display name — a space in the name must not leak into tool names."""
+    def test_tools_namespaced_by_name(self, auth_client):
+        """MCP tool names use the integration's name (clean lowercase slug), not
+        the kind — so multiple instances of one software get distinct tool sets.
+        A space in the name must not leak into tool names."""
         import asyncio
         from core.mcp_server import mcp, refresh_mcp_tools
         auth_client.post("/api/integrations", json={
@@ -155,9 +156,9 @@ class TestHaSeed:
             return {t.name for t in tools}
         names = asyncio.run(_names())
 
-        assert "ha_list_entities" in names
-        assert "ha_get_entity" in names
-        assert "ha_call_service" in names
+        assert "home_assistant_list_entities" in names
+        assert "home_assistant_get_entity" in names
+        assert "home_assistant_call_service" in names
         assert not any(" " in n for n in names)
 
 

@@ -34,6 +34,8 @@ _VALUE_PATTERNS = [
     re.compile(r'AccessToken=[A-Za-z0-9\-._~+/]+=*'),
     re.compile(r'PVEAPIToken=[^\s"]+'),
     re.compile(r'eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}'),
+    # query-param token (e.g. Pi-hole ?auth=<token>)
+    re.compile(r'auth=[A-Za-z0-9._\-]+', re.IGNORECASE),
 ]
 
 MASK = '[redacted]'

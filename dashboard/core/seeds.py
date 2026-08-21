@@ -13,6 +13,7 @@ from core.ha_seed import HA_SEED_TOOLS, seed_ha_tools
 from core.omada_seed import OMADA_SEED_TOOLS, seed_omada_tools
 from core.pulse_seed import PULSE_SEED_TOOLS, seed_pulse_tools
 from core.jellyfin_seed import JELLYFIN_SEED_TOOLS, seed_jellyfin_tools
+from core.pihole_seed import PIHOLE_SEED_TOOLS, seed_pihole_tools
 from core.generic_tools import generic_tools_for, seed_generic_tools
 
 SEEDERS = {
@@ -21,6 +22,7 @@ SEEDERS = {
     'omada': seed_omada_tools,
     'pulse': seed_pulse_tools,
     'jellyfin': seed_jellyfin_tools,
+    'pihole': seed_pihole_tools,
 }
 
 _CATALOGS = {
@@ -29,12 +31,14 @@ _CATALOGS = {
     'omada': OMADA_SEED_TOOLS,
     'pulse': PULSE_SEED_TOOLS,
     'jellyfin': JELLYFIN_SEED_TOOLS,
+    'pihole': PIHOLE_SEED_TOOLS,
 }
 
 # Kinds that must NOT receive the generic read/write passthrough floor. Jellyfin
 # is fully curated because its API key is admin-level and cannot be scoped down
-# — a generic passthrough would undo the write gating.
-NO_GENERIC_KINDS = {'jellyfin'}
+# — a generic passthrough would undo the write gating. Pi-hole is fully curated
+# because toggling blocking is LAN-wide and the surface is tiny.
+NO_GENERIC_KINDS = {'jellyfin', 'pihole'}
 
 
 def seed_tool_names(kind: str) -> set:

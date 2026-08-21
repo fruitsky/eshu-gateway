@@ -136,10 +136,11 @@ def refresh_mcp_tools():
         integration = get_integration_by_id(tool['integration_id'])
         if not integration or not integration.get('enabled'):
             continue
-        # Namespace the MCP-visible tool name by the integration's kind (a
-        # clean short slug) so tools from different services can't collide and
-        # ownership is obvious: proxmox_list_nodes, ha_list_entities, ...
-        ns = integration.get('kind') or _safe_ident(integration['name'])
+        # Namespace the MCP-visible tool name by the integration's name (a
+        # clean lowercase slug), so tools from different integrations can't
+        # collide even when several run the same software (e.g. pihole2_summary
+        # vs pihole3_summary) and ownership is obvious: proxmox_list_nodes, ...
+        ns = _safe_ident(integration['name']).lower()
         mcp_name = f"{ns}_{tool['name']}"
         try:
             fn = _build_tool_fn(integration['name'], tool)
