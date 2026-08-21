@@ -95,7 +95,7 @@ from core.gateway_watch import (
 from core.utils import DASHBOARD_VERSION, decode_cmd, _resolve_gateway_token, _hash_password, _verify_password
 from core.integration_auth import resolve_agent, resolve_agent_optional, extract_agent_token
 from core.secret_scrub import scrub_payload
-from core.integration_proxy import execute_integration_call, execute_generic_call, ProxyError, merge_response_hint
+from core.integration_proxy import execute_integration_call, execute_generic_call, ProxyError, merge_response_hint, ALLOWED_AUTH_TYPES
 from core.ha_ws import execute_ws_call
 from core.mcp_server import mcp as eshu_mcp, refresh_mcp_tools, refresh_mcp_allowed_hosts
 from core.seeds import seed_for_kind, reseed_all_integrations, seed_tool_names
@@ -2213,7 +2213,7 @@ def create_integration_endpoint(payload: IntegrationPayload, request: Request):
         raise HTTPException(status_code=400, detail="Name is required")
     if get_integration(name):
         raise HTTPException(status_code=400, detail="Integration already exists")
-    if payload.auth_type not in ('none', 'bearer', 'basic', 'header', 'oauth2'):
+    if payload.auth_type not in ALLOWED_AUTH_TYPES:
         raise HTTPException(status_code=400, detail="Invalid auth_type")
     create_integration(name, payload.base_url.strip(), payload.auth_type, payload.secret,
                        payload.auth_header_name, payload.enabled, payload.kind,
@@ -2235,7 +2235,7 @@ def update_integration_endpoint(name: str, payload: IntegrationUpdatePayload, re
     if not get_integration(name):
         raise HTTPException(status_code=404, detail="Integration not found")
     data = payload.model_dump(exclude_none=True)
-    if 'auth_type' in data and data['auth_type'] not in ('none', 'bearer', 'basic', 'header', 'oauth2'):
+    if 'auth_type' in data and data['auth_type'] not in ALLOWED_AUTH_TYPES:
         raise HTTPException(status_code=400, detail="Invalid auth_type")
     update_integration(name, **data)
     record_audit_event("integration_updated", details=f"Integration '{name}' updated")

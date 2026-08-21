@@ -176,6 +176,22 @@ class TestPiholeWrites:
         assert all(t['always_gate'] for t in writes)
 
 
+class TestPiholeApi:
+
+    def test_create_integration_accepts_query_token(self, auth_client):
+        """query_token must pass the create/update auth_type validation."""
+        r = auth_client.post("/api/integrations", json={
+            "name": "pihole2", "base_url": "http://x/admin", "auth_type": "query_token",
+            "secret": "big-token", "kind": "pihole",
+        })
+        assert r.status_code == 200
+        row = next(x for x in auth_client.get("/api/integrations").json() if x["name"] == "pihole2")
+        assert row["auth_type"] == "query_token"
+        # update path accepts it too (round-trip)
+        r = auth_client.put("/api/integrations/pihole2", json={"secret": "new-token"})
+        assert r.status_code == 200
+
+
 class TestMcpNamespace:
 
     def test_namespaced_by_integration_name(self, pihole_upstream):
