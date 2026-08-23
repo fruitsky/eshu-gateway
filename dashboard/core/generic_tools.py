@@ -12,8 +12,10 @@ def generic_tools_for(kind: str) -> list:
     read_desc = (
         "Call any read endpoint on this integration. `path` is relative to the "
         "integration's base URL (e.g. /states); `params` is an optional JSON "
-        "object of query parameters. GET only. Credentials are injected by Eshu; "
-        "every call is audited."
+        "object of query parameters. `method` is GET (default) or HEAD — HEAD "
+        "returns headers-only metadata ({status, content_length, content_type, "
+        "url}) with no body, e.g. to check a media file's size. Credentials are "
+        "injected by Eshu; every call is audited."
     )
     write_desc = (
         "Call any mutating endpoint on this integration. `method` is "
@@ -29,6 +31,7 @@ def generic_tools_for(kind: str) -> list:
             "method": "GET",
             "path_template": "",
             "params": [
+                {"name": "method", "type": "string", "description": "GET or HEAD (default GET). HEAD returns headers-only metadata with no body.", "required": False, "default": "GET"},
                 {"name": "path", "type": "string", "description": "Endpoint path relative to the base URL.", "required": True},
                 {"name": "params", "type": "json", "description": "Optional query parameters (JSON object).", "required": False},
             ],

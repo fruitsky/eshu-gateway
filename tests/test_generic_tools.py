@@ -1,4 +1,9 @@
+import http.server
 import json
+import threading
+from urllib.parse import urlparse
+
+import pytest
 
 from db.integrations import (
     create_integration,
@@ -10,6 +15,71 @@ from db.integrations import (
 )
 from core.integration_proxy import ProxyError, execute_generic_call, is_destructive
 from core.tool_runner import run_tool
+
+
+@pytest.fixture
+def head_upstream():
+    """Upstream that answers HEAD with headers only (no body); /missing 404s."""
+    state = {'requests': []}
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def _handle(self, want_body):
+            p = urlparse(self.path)
+            state['requests'].append((self.command, p.path))
+            if '/missing' in p.path:
+                self.send_response(404)
+                self.send_header('Content-Length', '0')
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header('Content-Type', 'video/mp4')
+            self.send_header('Content-Length', '12345678')
+            self.end_headers()
+            if want_body:
+                self.wfile.write(b'')
+
+        def do_HEAD(self):
+            self._handle(False)
+
+        def do_GET(self):
+            self._handle(True)
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.HTTPServer(('127.0.0.1', 0), _Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield {'base_url': f"http://127.0.0.1:{server.server_address[1]}", 'state': state}
+    server.shutdown()
+    server.server_close()
+
+
+class TestGenericReadHead:
+
+    def test_head_returns_metadata_no_body(self, head_upstream):
+        create_integration("api", head_upstream['base_url'], "none", "")
+        _seed_generic_tools(get_integration("api"))
+        out = json.loads(run_tool("api", "read", {"path": "/media/local/video.mp4", "method": "HEAD"}))
+        assert out['status'] == 200
+        assert out['content_length'] == '12345678'
+        assert out['content_type'] == 'video/mp4'
+        assert out['url'] == '/media/local/video.mp4'
+        assert head_upstream['state']['requests'][0][0] == 'HEAD'
+
+    def test_head_missing_not_found(self, head_upstream):
+        create_integration("api", head_upstream['base_url'], "none", "")
+        _seed_generic_tools(get_integration("api"))
+        out = json.loads(run_tool("api", "read", {"path": "/media/local/missing.mp4", "method": "HEAD"}))
+        assert out.get('error') == 'not_found'
+        assert out.get('status_code') == 404
+
+    def test_default_get_unchanged(self, mock_upstream):
+        create_integration("api", mock_upstream["base_url"], "none", "")
+        _seed_generic_tools(get_integration("api"))
+        out = json.loads(run_tool("api", "read", {"path": "/states"}))
+        assert out.get('ok') is True
+        assert mock_upstream["requests"][-1]["method"] == "GET"
 
 
 class TestIsDestructive:

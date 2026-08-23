@@ -467,10 +467,12 @@ def _apply_shaping(body: str, tool: dict, args: dict, integration: dict = None) 
 def _http_roundtrip(integration: dict, url: str, body_bytes, headers: dict, method: str,
                     max_bytes: int = MAX_BODY_BYTES):
     """Perform the HTTP request with the OAuth2 401-retry. Returns
-    (status_code, body, truncated, error, latency_ms, outcome).
+    (status_code, body, truncated, error, latency_ms, outcome, resp_headers).
 
     `max_bytes` caps the response read (defaults to MAX_BODY_BYTES); transform
-    tools pass TRANSFORM_MAX_BODY_BYTES so they can project large payloads."""
+    tools pass TRANSFORM_MAX_BODY_BYTES so they can project large payloads.
+    `resp_headers` is a small dict ({content-length, content-type}) from the
+    response on success — used for HEAD metadata — else None."""
     auth_type = (integration.get('auth_type') or 'none').lower()
     start = time.time()
     outcome = 'ok'
@@ -478,6 +480,7 @@ def _http_roundtrip(integration: dict, url: str, body_bytes, headers: dict, meth
     body = ''
     truncated = 0
     error = None
+    resp_headers = None
     attempt = 0
     while True:
         attempt += 1
@@ -485,6 +488,12 @@ def _http_roundtrip(integration: dict, url: str, body_bytes, headers: dict, meth
             req = urllib.request.Request(url, data=body_bytes, headers=headers, method=method)
             with urllib.request.urlopen(req, timeout=DEFAULT_TIMEOUT, context=_ssl_context(integration)) as resp:
                 status_code = resp.status
+                # Not every response object carries headers (test fakes) — guard.
+                headers_obj = getattr(resp, 'headers', None)
+                resp_headers = None
+                if headers_obj is not None:
+                    resp_headers = {'content-length': headers_obj.get('Content-Length'),
+                                    'content-type': headers_obj.get('Content-Type')}
                 raw = resp.read(max_bytes + 1)
                 if len(raw) > max_bytes:
                     truncated = 1
@@ -524,7 +533,7 @@ def _http_roundtrip(integration: dict, url: str, body_bytes, headers: dict, meth
             error = f"{type(e).__name__}: {e}"
             break
     latency_ms = int((time.time() - start) * 1000)
-    return status_code, body, truncated, error, latency_ms, outcome
+    return status_code, body, truncated, error, latency_ms, outcome, resp_headers
 
 
 def execute_integration_call(integration: dict, tool: dict, args: dict, agent: str = '') -> dict:
@@ -571,7 +580,7 @@ def execute_integration_call(integration: dict, tool: dict, args: dict, agent: s
 
     # Transform tools read the full upstream body (see TRANSFORM_MAX_BODY_BYTES)
     # so the registered transform can project large payloads compactly.
-    status_code, body, truncated, error, latency_ms, outcome = _http_roundtrip(
+    status_code, body, truncated, error, latency_ms, outcome, _resp_headers = _http_roundtrip(
         integration, url, body_bytes, headers, method,
         max_bytes=TRANSFORM_MAX_BODY_BYTES if tool.get('transform') else MAX_BODY_BYTES)
 
@@ -627,7 +636,7 @@ def execute_generic_call(integration: dict, method: str, path: str, params=None,
     if not integration or not integration.get('enabled'):
         raise ProxyError(404, "Integration not found or disabled")
     method = (method or 'GET').upper()
-    if method not in ('GET', 'POST', 'PUT', 'PATCH', 'DELETE'):
+    if method not in ('GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'):
         raise ProxyError(400, f"Unsupported method: {method}")
     auth_type = (integration.get('auth_type') or 'none').lower()
     if auth_type not in ALLOWED_AUTH_TYPES:
@@ -648,10 +657,20 @@ def execute_generic_call(integration: dict, method: str, path: str, params=None,
         body_bytes = json.dumps(data).encode('utf-8')
         headers.setdefault('Content-Type', 'application/json')
 
-    status_code, body, truncated, error, latency_ms, outcome = _http_roundtrip(
+    status_code, body, truncated, error, latency_ms, outcome, resp_headers = _http_roundtrip(
         integration, url, body_bytes, headers, method)
 
-    if outcome == 'ok':
+    if method == 'HEAD':
+        # Headers-only metadata — never pass a body through, and surface a
+        # stable error for missing resources (HEAD error bodies are empty).
+        if outcome == 'ok':
+            body = json.dumps({'status': status_code,
+                               'content_length': (resp_headers or {}).get('content-length'),
+                               'content_type': (resp_headers or {}).get('content-type'),
+                               'url': '/' + path})
+        elif not error:
+            error = 'not_found' if status_code == 404 else f'http_{status_code}'
+    elif outcome == 'ok':
         up_err = _upstream_error(body)
         if up_err:
             outcome = 'error'

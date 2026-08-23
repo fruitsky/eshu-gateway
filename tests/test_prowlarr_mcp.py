@@ -69,8 +69,8 @@ def prowlarr_upstream():
                 self._respond(200, _indexers())
             elif path == '/api/v1/indexerstats':
                 self._respond(200, {'indexers': [{'indexerName': 'Nyaa',
-                                                  'success': 100, 'failures': 2,
-                                                  'totalQueries': 102}]})
+                                                  'queryCount': 102, 'grabs': 12,
+                                                  'failures': 2}]})
             elif path == '/api/v1/indexerstatus':
                 self._respond(200, [{'indexerId': 1, 'indexerName': 'Nyaa',
                                      'disabledTill': '2026-08-21T12:00:00Z',
@@ -164,7 +164,12 @@ class TestProwlarrReads:
         _make(prowlarr_upstream)
         out = json.loads(run_tool('prowlarr', 'indexer_stats', {}))
         assert out['total'] == 1
-        assert out['indexers'][0]['success'] == 100 and out['indexers'][0]['failures'] == 2
+        row = out['indexers'][0]
+        # live API uses queryCount/grabs/failures — the superset projection
+        # surfaces whichever count names the build returns
+        assert row['queryCount'] == 102
+        assert row['grabs'] == 12
+        assert row['failures'] == 2
 
     def test_indexer_status(self, prowlarr_upstream):
         _make(prowlarr_upstream)

@@ -849,12 +849,16 @@ def _prowlarr_indexers(integration, tool, args, data):
 def _prowlarr_indexer_stats(integration, tool, args, data):
     if not isinstance(data, dict):
         return json.dumps(data)
+    # Superset projection with omit-missing: the live API's per-indexer field
+    # names vary across builds (queryCount/grabs/failures vs success/
+    # totalQueries) — map all candidates so the diagnostic counts always show.
+    keys = ('indexerName', 'queryCount', 'grabs', 'failures', 'success',
+            'totalQueries')
     rows = []
     for x in data.get('indexers') or []:
         if not isinstance(x, dict):
             continue
-        row = {k: x.get(k) for k in ('indexerName', 'success', 'failures',
-                                     'totalQueries')}
+        row = {k: x.get(k) for k in keys}
         rows.append({k: v for k, v in row.items() if v is not None})
     return json.dumps({'total': len(rows), 'indexers': rows})
 
