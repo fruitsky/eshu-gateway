@@ -100,7 +100,7 @@ def mock_upstream():
             pass
 
     _Handler.requests = []
-    server = http.server.HTTPServer(('127.0.0.1', 0), _Handler)
+    server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), _Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     base_url = f"http://127.0.0.1:{server.server_address[1]}"

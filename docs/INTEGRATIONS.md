@@ -113,16 +113,38 @@ tool — you don't call them by name; just ask in natural language
 only re-discovers on connect — run `/reload-mcp` in Hermes (or restart it) after
 changing tools.
 
+## Supported integrations
+
+Eshu ships **curated tool catalogs** for these kinds — seeded via **Integrations → Add Integration → Seed**, with auth details:
+
+| Kind | Auth type | Notes |
+|------|-----------|-------|
+| **Proxmox** | `header` (`Authorization: PVEAPIToken=…`) | reads + approval-gated VM lifecycle tools |
+| **Omada** | `oauth2` | client-credentials token exchange; auto re-auth on expiry |
+| **Home Assistant** | `bearer` (long-lived token) | `call_service` is mutating → approval |
+| **Pulse** | `bearer`/`header` | trends, backups (large payloads truncated to 1MB) |
+| **Jellyfin** | `header` (`X-Emby-Token`) | mutations always gated |
+| **Pi-hole** | `query_token` (`?auth=…`) | multi-instance via name-based namespacing |
+| **Sonarr** / **Radarr** | `header` (`X-Api-Key`) | parameterized *arr catalog; search flags guarded |
+| **Prowlarr** | `header` (`X-Api-Key`) | **read-only projection** — indexer `fields[]` credentials are never surfaced |
+
+Curated kinds are excluded from the generic floor (`NO_GENERIC_KINDS`). Any other integration type seeds a generic **`read`**/**`write`** pair that can call arbitrary REST endpoints on the base URL (read-only `read` auto-runs; `write` is gated). `read` accepts a `method` param — `HEAD` returns `{status, content_length, content_type, url}` metadata with no body (e.g. checking a media file's size without downloading it).
+
 ## Tool namespacing
 
-Every MCP tool is namespaced by its integration so tools from different services
-can't collide and ownership is obvious:
+Every MCP tool is namespaced by its **integration name** (sanitized to `[a-z0-9_]`) so tools from different services can't collide, ownership is obvious, and the same kind can be added multiple times (e.g. two Pi-hole instances) without conflict:
 
-| Integration | Example tools |
-|-------------|---------------|
-| Proxmox | `proxmox_list_nodes`, `proxmox_get_vm_status`, `proxmox_start_vm` |
-| Omada | `omada_list_clients`, `omada_get_site_status` |
-| Home Assistant | `ha_call_service`, `ha_get_state` |
+| Integration name | Example tools |
+|------------------|---------------|
+| `proxmox` | `proxmox_list_nodes`, `proxmox_get_vm_status`, `proxmox_start_vm` |
+| `omada` | `omada_list_sites`, `omada_search_devices`, `omada_block_client` |
+| `home-assistant` | `home_assistant_list_entities`, `home_assistant_call_service` |
+| `pihole-main` | `pihole_main_get_summary`, `pihole_main_get_top_clients` |
+| `jellyfin` | `jellyfin_get_media_items`, `jellyfin_scan_library` |
+| `sonarr` | `sonarr_get_series`, `sonarr_get_queue` |
+| `radarr` | `radarr_get_movies`, `radarr_get_missing_movies` |
+| `prowlarr` | `prowlarr_list_indexers`, `prowlarr_indexer_stats` |
+| `pulse` | `pulse_health`, `pulse_get_backups` |
 
 ## Response projection
 

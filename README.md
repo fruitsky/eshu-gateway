@@ -11,14 +11,23 @@
 
 # Eshu Gateway
 
-**Human-in-the-loop command access for AI agents.** Eshu intercepts SSH commands
-through a locked-down `eshu-gateway` user, runs them through a multi-layer policy
-engine, and — if no rule matches — requests Just-In-Time approval from a human
-operator. No VPN. No open ports. Just SSH + a polling control plane.
+**Human-in-the-loop access for AI agents.** Eshu sits between your AI agent and
+your infrastructure across **two surfaces**, both behind the same audit +
+approval gate:
+
+- **SSH commands** — intercepted through a locked-down `eshu-gateway` user, run
+  through a multi-layer policy engine, and — if no rule matches — routed to
+  Just-In-Time approval from a human operator. No VPN, no open ports: just SSH +
+  a polling control plane.
+- **Homelab APIs over MCP** — the same agent can call Proxmox, Omada, Home
+  Assistant, Pulse, Jellyfin, Pi-hole, Sonarr, Radarr and Prowlarr through
+  Eshu's MCP server, with server-side credential vaulting, per-call audit, and
+  approval-gated mutations.
 
 > Eshu is a vibe-coded hobby project built for homelabs and non-production
 > infrastructure. It's a practical tool for giving AI agents supervised SSH
-> access to your homelab Linux servers without handing over the keys.
+> access and supervised API access to your homelab without handing over the
+> keys.
 
 ```mermaid
 flowchart LR
@@ -45,6 +54,7 @@ flowchart LR
 ## Features
 
 - **Multi-Stage Policy Engine** — hardcoded catastrophic blocklist → blacklist → exact/regex whitelist → feature scripts → JIT human approval
+- **Integrations & MCP** — expose your homelab APIs to agents over MCP: server-side credential vaulting, per-call audit, and approval-gated mutations. Proxmox, Omada, Home Assistant, Pulse, Jellyfin, Pi-hole, Sonarr, Radarr, Prowlarr, plus generic read/write for any other REST API
 - **Approved Windows** — pre-approve recurring or single-use time windows for specific commands; agents can request them via API and the operator approves
 - **Just-In-Time Approval** — anything not explicitly allowed lands in the operator's queue for approve/deny, with desktop notifications
 - **Zero-Trust Gateways** — a per-gateway strictness tier: *nothing* auto-runs; every command needs operator approval
@@ -53,6 +63,45 @@ flowchart LR
 - **Live Dashboard** — real-time SPA: request queue, gateway health, policy editor, audit log, enrollment, statistics
 - **Self-Syncing Gateways** — nodes pull policies every 30s via a systemd poller; no inbound connectivity needed
 - **One-Liner Enrollment** — `curl | bash` deploys a gateway in seconds with SSH keys embedded
+
+---
+
+## Integrations & MCP
+
+Eshu doesn't just gate SSH — it's also an **API gateway for your homelab**. Add
+an integration (name, base URL, credentials), seed its curated tool catalog, and
+your agent calls the upstream API **through Eshu** instead of holding the raw
+keys. Same trust model as the SSH side: reads auto-run, **mutations need
+operator approval**.
+
+```mermaid
+flowchart LR
+    AI[🤖 AI Agent] -->|MCP /mcp| E[Eshu Dashboard]
+    E -->|read-only tool| API[Upstream API]
+    E -->|mutating tool| PEND[⏳ Needs Approval]
+    PEND --> HUMAN[👤 Human
+    Approve or Deny]
+    HUMAN --> API
+    API --> AI
+```
+
+**Supported kinds** — Proxmox · Omada · Home Assistant · Pulse · Jellyfin ·
+Pi-hole · Sonarr · Radarr · Prowlarr. Any other integration gets a **generic
+`read`/`write`** tool floor (including `HEAD` metadata reads) for arbitrary REST
+APIs.
+
+- **Credentials never leave Eshu.** Secrets live in the dashboard DB, are masked
+  in the UI (last-4 suffix), scrubbed from every response and error before the
+  agent sees them, and stripped from approval rows after resolve.
+- **Human-in-the-loop, same as SSH.** Read-only tools auto-run and are audited;
+  mutating tools land in a **Pending API Approvals** queue until the operator
+  approves or denies — the agent polls for the outcome.
+- **Agent tokens.** Long-lived bearer tokens for `/mcp`; only a SHA-256 hash is
+  stored, and a DNS-rebinding allowlist controls which `Host` headers are
+  accepted.
+
+Full setup guide (agent tokens, adding integrations, MCP Access, Hermes
+connect): **[docs/INTEGRATIONS.md](docs/INTEGRATIONS.md)**.
 
 ---
 
@@ -132,6 +181,21 @@ Host eshu-*
 
 The first non-allowlisted command will create a JIT request on the dashboard —
 approve or deny it from there.
+
+### 5. (Optional) Connect your APIs over MCP
+
+Give the agent the same supervised access to your homelab APIs:
+
+```bash
+hermes mcp add eshu-mcp --url https://<dashboard>/mcp --auth header
+# at the "API key / Bearer token" prompt, paste the RAW agent token (no "Bearer " prefix)
+```
+
+Add an integration in **Integrations → Add Integration** (e.g. Proxmox, Omada,
+Home Assistant), hit **Seed** to load its curated tools, and enable the subset
+you want. Read-only tools run immediately; mutating tools queue for your
+approval in **Integrations → Pending API Approvals**. See
+[docs/INTEGRATIONS.md](docs/INTEGRATIONS.md) for the full walkthrough.
 
 ### Supported platforms & installation
 
