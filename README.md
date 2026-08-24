@@ -76,7 +76,7 @@ operator approval**.
 
 ```mermaid
 flowchart LR
-    AI[🤖 AI Agent] -->|MCP /mcp| E[Eshu Dashboard]
+    AI[🤖 AI Agent] -->|MCP| E[Eshu Dashboard]
     E -->|read-only tool| API[Upstream API]
     E -->|mutating tool| PEND[⏳ Needs Approval]
     PEND --> HUMAN[👤 Human
