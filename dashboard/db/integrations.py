@@ -16,7 +16,8 @@ def init_integrations_tables(cursor):
             enabled INTEGER NOT NULL DEFAULT 1,
             kind TEXT NOT NULL DEFAULT 'custom',
             created_at INTEGER NOT NULL,
-            gate_mode TEXT NOT NULL DEFAULT 'destructive'
+            gate_mode TEXT NOT NULL DEFAULT 'destructive',
+            mcp_mode TEXT NOT NULL DEFAULT 'joined'
         )
     ''')
     try:
@@ -45,6 +46,10 @@ def init_integrations_tables(cursor):
         pass
     try:
         cursor.execute("ALTER TABLE integrations ADD COLUMN gate_mode TEXT DEFAULT 'destructive'")
+    except Exception:
+        pass
+    try:
+        cursor.execute("ALTER TABLE integrations ADD COLUMN mcp_mode TEXT DEFAULT 'joined'")
     except Exception:
         pass
     cursor.execute('''
@@ -175,15 +180,16 @@ def create_integration(name: str, base_url: str, auth_type: str, secret: str,
                        auth_header_name: str = '', enabled: bool = True,
                        kind: str = 'custom', client_id: str = '',
                        client_secret: str = '', token_url: str = '',
-                       verify_tls: bool = True, gate_mode: str = 'destructive') -> int:
+                       verify_tls: bool = True, gate_mode: str = 'destructive',
+                       mcp_mode: str = 'joined') -> int:
     with db_conn() as conn:
         cursor = conn.cursor()
         now = int(time.time())
         cursor.execute('''
-            INSERT INTO integrations (name, base_url, auth_type, auth_header_name, secret, enabled, kind, created_at, client_id, client_secret, token_url, verify_tls, gate_mode)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO integrations (name, base_url, auth_type, auth_header_name, secret, enabled, kind, created_at, client_id, client_secret, token_url, verify_tls, gate_mode, mcp_mode)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (name, base_url, auth_type, auth_header_name, secret, 1 if enabled else 0, kind, now,
-              client_id, client_secret, token_url, 1 if verify_tls else 0, gate_mode))
+              client_id, client_secret, token_url, 1 if verify_tls else 0, gate_mode, mcp_mode))
         conn.commit()
         return cursor.lastrowid
 
@@ -240,7 +246,7 @@ def update_integration(name: str, base_url: str = None, auth_type: str = None,
                        enabled: bool = None, kind: str = None,
                        client_id: str = None, client_secret: str = None,
                        token_url: str = None, verify_tls: bool = None,
-                       gate_mode: str = None) -> bool:
+                       gate_mode: str = None, mcp_mode: str = None) -> bool:
     """Update an integration. `secret=None`/`client_secret=None` mean 'leave unchanged'."""
     current = get_integration(name)
     if not current:
@@ -256,14 +262,15 @@ def update_integration(name: str, base_url: str = None, auth_type: str = None,
     new_token_url = token_url if token_url is not None else current.get('token_url', '')
     new_verify_tls = (1 if verify_tls else 0) if verify_tls is not None else current.get('verify_tls', 1)
     new_gate_mode = gate_mode if gate_mode is not None else current.get('gate_mode', 'destructive')
+    new_mcp_mode = mcp_mode if mcp_mode is not None else current.get('mcp_mode', 'joined')
     with db_conn() as conn:
         cursor = conn.cursor()
         cursor.execute('''
             UPDATE integrations SET base_url = ?, auth_type = ?, auth_header_name = ?, secret = ?,
-                enabled = ?, kind = ?, client_id = ?, client_secret = ?, token_url = ?, verify_tls = ?, gate_mode = ?
+                enabled = ?, kind = ?, client_id = ?, client_secret = ?, token_url = ?, verify_tls = ?, gate_mode = ?, mcp_mode = ?
             WHERE name = ?
         ''', (new_base, new_auth, new_header, new_secret, new_enabled, new_kind,
-              new_client_id, new_client_secret, new_token_url, new_verify_tls, new_gate_mode, name))
+              new_client_id, new_client_secret, new_token_url, new_verify_tls, new_gate_mode, new_mcp_mode, name))
         conn.commit()
         return cursor.rowcount > 0
 

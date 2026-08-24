@@ -56,6 +56,20 @@ _per_integration = {}
 _per_integration_apps = {}
 _per_integration_tools = {}
 
+# Integration `mcp_mode` values: where an integration's tools are served.
+#   'joined'     -> only on the shared /mcp (namespaced)        [default]
+#   'standalone' -> only on its own /mcp/<ns> endpoint (un-namespaced)
+#   'both'       -> on both surfaces
+MCP_MODES = {'joined', 'standalone', 'both'}
+
+
+def _on_shared(mcp_mode: str) -> bool:
+    return mcp_mode != 'standalone'
+
+
+def _on_standalone(mcp_mode: str) -> bool:
+    return mcp_mode in ('standalone', 'both')
+
 
 def _safe_ident(name: str) -> str:
     ident = re.sub(r'\W', '_', name)
@@ -178,9 +192,13 @@ def refresh_mcp_tools():
         if not integration.get('enabled'):
             continue
         ns = _safe_ident(integration['name']).lower()
+        mcp_mode = integration.get('mcp_mode') or 'joined'
         # Global /mcp surface keeps the namespaced names (backward compat).
-        for mcp_name in _register_tools(mcp, integration, namespaced=True):
-            _registered_names.add(mcp_name)
+        # `standalone` integrations are excluded from the shared surface — they
+        # live only on their own /mcp/<ns> endpoint.
+        if _on_shared(mcp_mode):
+            for mcp_name in _register_tools(mcp, integration, namespaced=True):
+                _registered_names.add(mcp_name)
         # Per-integration instances only get in-place tool updates here — the
         # instance/app/mount themselves are created once at startup.
         inst = _per_integration.get(ns)
@@ -199,6 +217,9 @@ def build_per_integration_mcp() -> dict:
     _per_integration_tools = {}
     for integration in get_integrations():
         if not integration.get('enabled'):
+            continue
+        mcp_mode = integration.get('mcp_mode') or 'joined'
+        if not _on_standalone(mcp_mode):
             continue
         ns = _safe_ident(integration['name']).lower()
         try:

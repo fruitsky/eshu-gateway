@@ -4,7 +4,7 @@ import threading
 
 import pytest
 
-from db.integrations import create_integration, get_integration
+from db.integrations import create_integration, create_tool, get_integration
 from core.integration_proxy import execute_integration_call, ProxyError
 
 
@@ -598,7 +598,7 @@ class TestPerIntegrationMcp:
     def _omada(self, auth_client):
         auth_client.post("/api/integrations", json={
             "name": "omada", "base_url": "https://omada.local:8043/openapi/v1/omadac-1",
-            "auth_type": "none", "secret": "", "kind": "omada",
+            "auth_type": "none", "secret": "", "kind": "omada", "mcp_mode": "standalone",
         })
         auth_client.post("/api/integrations/omada/seed")
 
@@ -608,7 +608,7 @@ class TestPerIntegrationMcp:
         # a second, unrelated integration so isolation is provable
         auth_client.post("/api/integrations", json={
             "name": "home-assistant", "base_url": "https://ha.local/api",
-            "auth_type": "bearer", "secret": "tok", "kind": "ha",
+            "auth_type": "bearer", "secret": "tok", "kind": "ha", "mcp_mode": "standalone",
         })
         auth_client.post("/api/integrations/home-assistant/seed")
         self._omada(auth_client)
@@ -659,3 +659,53 @@ class TestPerIntegrationMcp:
         names = asyncio.run(_names(ms._per_integration["omada"]))
         assert "block_client" not in names
         assert "list_sites" in names
+
+    def _mk(self, auth_client, name, mcp_mode):
+        auth_client.post("/api/integrations", json={
+            "name": name, "base_url": f"https://{name}.local/api",
+            "auth_type": "none", "secret": "", "kind": "custom", "mcp_mode": mcp_mode,
+        })
+        iid = get_integration(name)["id"]
+        create_tool(iid, "list", "List", "GET", "/", [], "{}", read_only=True)
+        create_tool(iid, "write", "Write", "POST", "/w", [], "{}", read_only=False)
+
+    def test_mcp_mode_controls_surfaces(self, auth_client):
+        """joined -> shared /mcp only; standalone -> own /mcp/<ns> only; both -> both."""
+        import asyncio
+        from core import mcp_server as ms
+        self._mk(auth_client, "joined_one", "joined")
+        self._mk(auth_client, "standalone_one", "standalone")
+        self._mk(auth_client, "both_one", "both")
+        ms.refresh_mcp_tools()
+        apps = ms.build_per_integration_mcp()
+
+        async def _names(inst):
+            return {t.name for t in await inst.list_tools()}
+
+        global_names = asyncio.run(_names(ms.mcp))
+        # joined: on shared, no own server
+        assert "joined_one_list" in global_names
+        assert "joined_one" not in apps
+        # standalone: NOT on shared, own un-namespaced server
+        assert not any(n.startswith("standalone_one_") for n in global_names)
+        assert "standalone_one" in apps
+        own = asyncio.run(_names(ms._per_integration["standalone_one"]))
+        assert {"list", "write", "check_approval"} == own
+        # both: on shared AND own server
+        assert "both_one_list" in global_names
+        assert "both_one" in apps
+
+    def test_mcp_mode_validation(self, auth_client):
+        r = auth_client.post("/api/integrations", json={
+            "name": "bad-mode", "base_url": "https://x.local/api",
+            "auth_type": "none", "mcp_mode": "bogus",
+        })
+        assert r.status_code == 400
+        # valid create then invalid update
+        self._mk(auth_client, "ok_mode", "joined")
+        r = auth_client.put("/api/integrations/ok_mode", json={"mcp_mode": "nope"})
+        assert r.status_code == 400
+        r = auth_client.put("/api/integrations/ok_mode", json={"mcp_mode": "standalone"})
+        assert r.status_code == 200
+        row = next(i for i in auth_client.get("/api/integrations").json() if i["name"] == "ok_mode")
+        assert row["mcp_mode"] == "standalone"

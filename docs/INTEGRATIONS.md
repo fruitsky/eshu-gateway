@@ -129,30 +129,49 @@ Three levers, in order of impact:
    The header shows an `enabled / total` count. Fewer enabled tools = less
    context, fewer wrong-tool-selection errors.
 
-2. **Mount per-integration MCP servers.** Eshu serves each enabled integration at
-   its own endpoint, `/mcp/<name>` (e.g. `/mcp/proxmox`, `/mcp/omada`), in
-   addition to the all-tools `/mcp`. Register only the servers a given workflow
-   needs in Hermes so each session loads just those tools:
+2. **Mount per-integration MCP servers (least-privilege scoping).** Each
+   integration has an **MCP surface** setting (Integrations → Add/Edit → *MCP
+   surface*):
+   - **Shared `/mcp`** (default) — tools served on the all-tools endpoint,
+     namespaced (`proxmox_list_nodes`).
+   - **Own endpoint `/mcp/<name>`** — tools served only at `/mcp/proxmox`
+     (un-namespaced, e.g. `list_nodes`), excluded from `/mcp`.
+   - **Both** — on both surfaces.
+
+   Set an integration to *own endpoint* when you want a session to reach it
+   **only** through its own server — e.g. a coding session shouldn't touch
+   Proxmox at all. Mount the per-integration server in Hermes:
 
    ```bash
    hermes mcp add eshu-proxmox --url https://<dashboard>/mcp/proxmox --auth header
-   hermes mcp add eshu-omada    --url https://<dashboard>/mcp/omada    --auth header
    ```
 
-   The all-tools `/mcp` remains available for convenience; prefer per-integration
-   servers once you're past a handful of integrations.
+   Changing an integration's MCP surface takes effect on the next dashboard
+   restart (the per-integration mounts are built at startup).
+
+   For pure context savings with Hermes, you normally **don't** need this — see
+   the client-side note below.
 
 3. **Compact tool descriptions.** Descriptions are the bulk of each tool's
    token cost. Eshu's curated catalogs keep them tight (safety/guardrail notes
    are preserved); a custom tool's `description` field is what you write, so keep
    it concise but disambiguating.
 
-> **Client-side note.** The largest context-saving feature in this space — the
-> tool-search / `defer_loading` pattern (Claude's "advanced tool use") — is
-> implemented on the **client/model side**, not by the MCP server. If your model
-> and client support it, enabling it in Hermes defers tool definitions until they
-> are searched for. Eshu's per-integration endpoints + enable/disable give you
-> the same "load only what you need" outcome today regardless of client support.
+> **Client-side note — the recommended context lever.** Hermes ships **Tool
+> Search** (opt-in), which defers MCP tool schemas until the model searches for
+> them — the model sees a searchable listing of tool names + short descriptions
+> instead of every full schema. Enable it in Hermes `config.yaml`:
+>
+> ```yaml
+> tools:
+>   tool_search:
+>     enabled: on          # or "auto"
+>     threshold_pct: 10    # listing budget as % of context
+> ```
+>
+> With Tool Search on the single `/mcp`, you get "load only what you need" with
+> one MCP server and no tool renames — per-integration endpoints are only needed
+> for least-privilege scoping, not for context.
 
 ## Supported integrations
 

@@ -3606,7 +3606,7 @@ function renderIntegrationList() {
       '<span class="text-sm font-semibold ' + active + '"><span class="' + (i.enabled ? 'dot-ok' : 'dot-off') + '"></span> ' + esc(i.name) + '</span>' +
       '<span class="text-xs text-muted">' + esc(label) + '</span></div>' +
       '<div class="text-xs text-muted mt-1">' + esc(i.base_url) + '</div>' +
-      '<div class="text-xs text-muted">auth: ' + esc(i.auth_type) + ' · gate: ' + esc(i.gate_mode || 'destructive') + '</div>' +
+      '<div class="text-xs text-muted">auth: ' + esc(i.auth_type) + ' · gate: ' + esc(i.gate_mode || 'destructive') + ' · mcp: ' + esc(i.mcp_mode || 'joined') + '</div>' +
       '<div class="flex flex-wrap gap-1 mt-2" onclick="event.stopPropagation()">' +
       '<button onclick="editIntegration(\'' + esc(i.name) + '\')" class="btn btn-xs btn-muted" title="Edit base URL / secret">Edit</button>' +
       '<button onclick="testIntegration(\'' + esc(i.name) + '\')" class="btn btn-xs btn-muted" title="Run a read call to verify the connection">Test</button>' +
@@ -3636,6 +3636,8 @@ function resetIntegrationForm() {
   document.getElementById('int-client-secret').value = '';
   document.getElementById('int-token-url').value = '';
   document.getElementById('int-gate-mode').value = 'destructive';
+  var mcpMode = document.getElementById('int-mcp-mode');
+  if (mcpMode) mcpMode.value = 'joined';
   var title = document.getElementById('int-form-title');
   if (title) title.textContent = 'Add New Integration';
   var badge = document.getElementById('int-edit-badge');
@@ -3674,6 +3676,8 @@ function editIntegration(name) {
   if (verifyTls) verifyTls.checked = i.verify_tls === 0 || i.verify_tls === false;
   var gateMode = document.getElementById('int-gate-mode');
   if (gateMode) gateMode.value = i.gate_mode || 'destructive';
+  var mcpMode = document.getElementById('int-mcp-mode');
+  if (mcpMode) mcpMode.value = i.mcp_mode || 'joined';
   var secretInput = document.getElementById('int-secret');
   if (secretInput && i.secret_suffix) {
     secretInput.placeholder = 'Key in use: ' + i.secret_suffix + ' — last 4 only; leave blank to keep current';
@@ -3723,6 +3727,8 @@ async function createIntegration() {
   if (verifyTls) payload.verify_tls = !verifyTls.checked;
   const gateMode = document.getElementById('int-gate-mode');
   if (gateMode) payload.gate_mode = gateMode.value;
+  const mcpMode = document.getElementById('int-mcp-mode');
+  if (mcpMode) payload.mcp_mode = mcpMode.value;
   if (_editingIntegration) {
     try {
       const res = await authFetch('/api/integrations/' + encodeURIComponent(_editingIntegration), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });

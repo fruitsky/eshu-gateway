@@ -103,6 +103,7 @@ from core.mcp_server import (
     refresh_mcp_allowed_hosts,
     build_per_integration_mcp,
     session_managers,
+    MCP_MODES,
 )
 from core.seeds import seed_for_kind, reseed_all_integrations, seed_tool_names
 
@@ -2168,6 +2169,7 @@ class IntegrationPayload(BaseModel):
     gate_mode: str = 'destructive'
     enabled: bool = True
     kind: str = 'custom'
+    mcp_mode: str = 'joined'
 
 class IntegrationUpdatePayload(BaseModel):
     base_url: str = None
@@ -2181,6 +2183,7 @@ class IntegrationUpdatePayload(BaseModel):
     gate_mode: str = None
     enabled: bool = None
     kind: str = None
+    mcp_mode: str = None
 
 class ToolPayload(BaseModel):
     name: str
@@ -2236,10 +2239,12 @@ def create_integration_endpoint(payload: IntegrationPayload, request: Request):
         raise HTTPException(status_code=400, detail="Integration already exists")
     if payload.auth_type not in ALLOWED_AUTH_TYPES:
         raise HTTPException(status_code=400, detail="Invalid auth_type")
+    if payload.mcp_mode not in MCP_MODES:
+        raise HTTPException(status_code=400, detail="Invalid mcp_mode")
     create_integration(name, payload.base_url.strip(), payload.auth_type, payload.secret,
                        payload.auth_header_name, payload.enabled, payload.kind,
                        payload.client_id, payload.client_secret, payload.token_url,
-                       payload.verify_tls, payload.gate_mode)
+                       payload.verify_tls, payload.gate_mode, payload.mcp_mode)
     record_audit_event("integration_created", details=f"Integration '{name}' created (kind {payload.kind})")
     return {"status": "ok", "name": name}
 
@@ -2258,6 +2263,8 @@ def update_integration_endpoint(name: str, payload: IntegrationUpdatePayload, re
     data = payload.model_dump(exclude_none=True)
     if 'auth_type' in data and data['auth_type'] not in ALLOWED_AUTH_TYPES:
         raise HTTPException(status_code=400, detail="Invalid auth_type")
+    if 'mcp_mode' in data and data['mcp_mode'] not in MCP_MODES:
+        raise HTTPException(status_code=400, detail="Invalid mcp_mode")
     update_integration(name, **data)
     record_audit_event("integration_updated", details=f"Integration '{name}' updated")
     return {"status": "ok"}

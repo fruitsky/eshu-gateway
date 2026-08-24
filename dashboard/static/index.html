@@ -494,6 +494,14 @@
                   <option value="none">none — auto-approve everything (audit only)</option>
                 </select>
               </label>
+              <label class="block text-xs text-muted">MCP surface:
+                <select id="int-mcp-mode" class="w-full text-xs">
+                  <option value="joined">Shared /mcp (default)</option>
+                  <option value="standalone">Own endpoint /mcp/&lt;name&gt;</option>
+                  <option value="both">Both</option>
+                </select>
+                <span class="block mt-1">Own endpoint exposes this integration separately at <code>/mcp/&lt;name&gt;</code> — mount it on its own in Hermes to scope a session to just these tools. Tool names differ (un-namespaced). Takes effect after restart.</span>
+              </label>
               <div class="flex gap-2">
                 <button id="int-submit-btn" onclick="createIntegration()" class="btn btn-sm">Add Integration</button>
                 <button id="int-cancel-btn" onclick="resetIntegrationForm()" class="btn btn-sm btn-muted hidden">Cancel edit</button>

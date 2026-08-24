@@ -5,6 +5,7 @@ from db.integrations import (
     get_integration,
     get_integrations,
     get_tools,
+    update_integration,
 )
 from db.agent_tokens import get_agent_by_token, get_agent_tokens
 from core.seeds import seed_tool_names
@@ -450,3 +451,23 @@ class TestBulkToggleTools:
     def test_bulk_unknown_integration_404(self, auth_client):
         r = auth_client.post("/api/integrations/nope/tools/bulk", json={"enabled": False})
         assert r.status_code == 404
+
+
+class TestMcpMode:
+
+    def test_defaults_to_joined(self, temp_db):
+        create_integration("x", "http://x/api", "none", "")
+        assert get_integration("x")["mcp_mode"] == "joined"
+
+    def test_create_roundtrip(self, temp_db):
+        create_integration("x", "http://x/api", "none", "", mcp_mode="standalone")
+        assert get_integration("x")["mcp_mode"] == "standalone"
+        row = next(i for i in get_integrations() if i["name"] == "x")
+        assert row["mcp_mode"] == "standalone"
+
+    def test_update_roundtrip(self, temp_db):
+        create_integration("x", "http://x/api", "none", "")
+        update_integration("x", mcp_mode="both")
+        assert get_integration("x")["mcp_mode"] == "both"
+        update_integration("x", mcp_mode="standalone")
+        assert get_integration("x")["mcp_mode"] == "standalone"
