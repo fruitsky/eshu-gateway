@@ -535,6 +535,12 @@
         <div id="integration-list" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3"><p class="text-muted">No integrations yet.</p></div>
         <div class="hr"></div>
         <div class="widget-header">Tools <span class="text-xs text-muted">(select an integration to manage)</span></div>
+        <div id="integration-tools-bar" class="hidden flex flex-wrap items-center gap-2 mb-2">
+          <span id="integration-tools-count" class="text-xs text-muted"></span>
+          <button onclick="bulkSetTools(true)" class="btn btn-xs">Enable all</button>
+          <button onclick="bulkSetTools(false)" class="btn btn-xs btn-muted">Disable all</button>
+          <span class="text-xs text-muted">Shown to agents via MCP; fewer tools = less context used.</span>
+        </div>
         <div id="integration-tools-list" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3"><p class="text-muted">Select an integration to view its tools.</p></div>
       </div>
 

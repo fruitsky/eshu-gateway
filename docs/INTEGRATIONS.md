@@ -113,6 +113,47 @@ tool — you don't call them by name; just ask in natural language
 only re-discovers on connect — run `/reload-mcp` in Hermes (or restart it) after
 changing tools.
 
+## Context & efficiency
+
+Every MCP tool you expose is loaded into the agent's context window at connect
+time (name + description + input schema). With a large catalog this can consume
+tens of thousands of tokens before the conversation even starts, which degrades
+reasoning and raises cost. The fix is to load **fewer, relevant tools** — not
+more.
+
+Three levers, in order of impact:
+
+1. **Enable only what you use (biggest win).** Disable the long tail of tools you
+   rarely call. In **Integrations → Tools** use **Disable all** to start from
+   zero, then enable the handful you actually use, or use the per-tool toggles.
+   The header shows an `enabled / total` count. Fewer enabled tools = less
+   context, fewer wrong-tool-selection errors.
+
+2. **Mount per-integration MCP servers.** Eshu serves each enabled integration at
+   its own endpoint, `/mcp/<name>` (e.g. `/mcp/proxmox`, `/mcp/omada`), in
+   addition to the all-tools `/mcp`. Register only the servers a given workflow
+   needs in Hermes so each session loads just those tools:
+
+   ```bash
+   hermes mcp add eshu-proxmox --url https://<dashboard>/mcp/proxmox --auth header
+   hermes mcp add eshu-omada    --url https://<dashboard>/mcp/omada    --auth header
+   ```
+
+   The all-tools `/mcp` remains available for convenience; prefer per-integration
+   servers once you're past a handful of integrations.
+
+3. **Compact tool descriptions.** Descriptions are the bulk of each tool's
+   token cost. Eshu's curated catalogs keep them tight (safety/guardrail notes
+   are preserved); a custom tool's `description` field is what you write, so keep
+   it concise but disambiguating.
+
+> **Client-side note.** The largest context-saving feature in this space — the
+> tool-search / `defer_loading` pattern (Claude's "advanced tool use") — is
+> implemented on the **client/model side**, not by the MCP server. If your model
+> and client support it, enabling it in Hermes defers tool definitions until they
+> are searched for. Eshu's per-integration endpoints + enable/disable give you
+> the same "load only what you need" outcome today regardless of client support.
+
 ## Supported integrations
 
 Eshu ships **curated tool catalogs** for these kinds — seeded via **Integrations → Add Integration → Seed**, with auth details:

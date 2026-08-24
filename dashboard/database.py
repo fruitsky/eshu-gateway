@@ -154,6 +154,7 @@ from db.integrations import (
     get_enabled_tools,
     get_tool,
     set_tool_enabled,
+    set_all_tools_enabled,
     update_tool,
     delete_tool,
     record_integration_call,

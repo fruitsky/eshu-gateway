@@ -32,7 +32,7 @@ PULSE_SEED_TOOLS = [
     },
     {
         "name": "fleet_summary",
-        "description": "List all monitored resources (containers, VMs, storage, hosts) with a compact per-resource projection (id, name, type, status, cpu/mem/disk percent, IPs, alerts). Use search (name/id substring) and limit to narrow. full=true adds node, OS name, uptime, last backup, tags and traffic.",
+        "description": "List all monitored resources (containers, VMs, storage, hosts) with a compact per-resource projection (id, name, type, status, cpu/mem/disk percent, IPs, alerts). Use search (name/id substring) and limit to narrow. full=true adds node, OS, uptime, last backup, tags, traffic.",
         "method": "GET",
         "path_template": "/resources",
         "params": [],
@@ -57,7 +57,7 @@ PULSE_SEED_TOOLS = [
     },
     {
         "name": "list_alerts",
-        "description": "List active (default) or historical alerts. scope=history hits /alerts/history with limit; use search (substring over alert message, resource name, or alert id) to narrow. Returns id, level, type, resource, node, message, value, threshold, timestamps, acknowledged.",
+        "description": "List active (default) or historical alerts (scope=history). Use search (substring over alert message, resource name, or id) to narrow. Returns id, level, type, resource, node, message, value, threshold, timestamps, acknowledged.",
         "method": "GET",
         "path_template": "/alerts/{scope}",
         "params": [
@@ -71,7 +71,7 @@ PULSE_SEED_TOOLS = [
     },
     {
         "name": "get_charts",
-        "description": "Get chart series for a time range. range is required (5m|15m|30m|1h|4h|12h|24h|7d). resource narrows to one resource id (returns {resource: {metric: {points}}}); without it all resources are returned downsampled. metric picks cpu|memory|disk|diskread|diskwrite|netin|netout (default all). Points are downsampled to at most maxPoints per metric (default 200) — the raw charts payload is never returned.",
+        "description": "Get chart series for a time range. range is required (5m|15m|30m|1h|4h|12h|24h|7d). resource narrows to one resource id; without it all resources are returned downsampled. metric picks cpu|memory|disk|diskread|diskwrite|netin|netout (default all). Points are downsampled to at most maxPoints per metric (default 200).",
         "method": "GET",
         "path_template": "/charts",
         "params": [
@@ -99,7 +99,7 @@ PULSE_SEED_TOOLS = [
     },
     {
         "name": "list_storage",
-        "description": "List monitored storage pools (type=storage resources) with used/total/free bytes and percent. Use search (name/id substring) and limit to narrow. Prefer this over the raw /api/storage endpoint (which 400s without an id).",
+        "description": "List monitored storage pools (type=storage resources) with used/total/free bytes and percent. Use search (name/id substring) and limit to narrow. Prefer over the raw /api/storage endpoint (400s without an id).",
         "method": "GET",
         "path_template": "/resources",
         "params": [],

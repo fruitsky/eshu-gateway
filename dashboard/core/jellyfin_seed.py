@@ -28,7 +28,7 @@ JELLYFIN_SEED_TOOLS = [
     # ── Read tools ──────────────────────────────────────────────────────
     {
         "name": "system_info",
-        "description": "Jellyfin server info (version, server name, OS, arch, cache/log/transcode/web paths, server id). The raw /System/Info is ~35 KB — this is projected to a compact shape. full=true adds version name, OS display name and pending-restart flags.",
+        "description": "Jellyfin server info (version, server name, OS, arch, cache/log/transcode/web paths, id). The raw /System/Info is ~35 KB — projected to a compact shape. full=true adds version name, OS display name and pending-restart flags.",
         "method": "GET",
         "path_template": "/System/Info",
         "params": [],
@@ -63,7 +63,7 @@ JELLYFIN_SEED_TOOLS = [
     },
     {
         "name": "sessions",
-        "description": "List active sessions (device, client, user, isActive, lastActivity) with compact now-playing from NowPlayingQueueFullItems[0], play state and transcode info. activeOnly=true filters to active sessions; search matches device or user name.",
+        "description": "List active sessions (device, client, user, isActive, lastActivity) with compact now-playing, play state and transcode info. activeOnly=true filters to active sessions; search matches device or user name.",
         "method": "GET",
         "path_template": "/Sessions",
         "params": [

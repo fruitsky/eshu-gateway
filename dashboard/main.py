@@ -62,7 +62,7 @@ from database import (
     delete_fleet_command,
     create_integration, get_integrations, get_integration, get_integration_by_id,
     update_integration, delete_integration,
-    create_tool, get_tools, get_tool, set_tool_enabled, delete_tool,
+    create_tool, get_tools, get_tool, set_tool_enabled, set_all_tools_enabled, delete_tool,
     record_integration_call, get_integration_calls,
     create_pending_call, get_pending_calls, get_pending_call, set_pending_call_status,
     mask_sensitive_args, strip_resolved_payloads,
@@ -97,7 +97,13 @@ from core.integration_auth import resolve_agent, resolve_agent_optional, extract
 from core.secret_scrub import scrub_payload
 from core.integration_proxy import execute_integration_call, execute_generic_call, ProxyError, merge_response_hint, ALLOWED_AUTH_TYPES
 from core.ha_ws import execute_ws_call
-from core.mcp_server import mcp as eshu_mcp, refresh_mcp_tools, refresh_mcp_allowed_hosts
+from core.mcp_server import (
+    mcp as eshu_mcp,
+    refresh_mcp_tools,
+    refresh_mcp_allowed_hosts,
+    build_per_integration_mcp,
+    session_managers,
+)
 from core.seeds import seed_for_kind, reseed_all_integrations, seed_tool_names
 
 
@@ -215,28 +221,43 @@ def on_startup():
     strip_resolved_payloads()
     # Register the enabled integration tools as MCP tools
     refresh_mcp_tools()
+    # Build a per-integration FastMCP server per enabled integration, mounted
+    # at /mcp/<ns> so a client can mount just the integrations it uses. These
+    # are inserted ahead of the catch-all /mcp mount so the more-specific
+    # per-integration routes win (Starlette routes are matched in order).
+    from starlette.routing import Mount
+    for ns, subapp in build_per_integration_mcp().items():
+        mcp_idx = next((i for i, r in enumerate(app.router.routes)
+                        if getattr(r, 'path', None) == '/mcp'), len(app.router.routes))
+        app.router.routes.insert(mcp_idx, Mount(f"/mcp/{ns}", subapp, name=f"mcp_{ns}"))
     # Apply the configured MCP allowed-hosts (DNS-rebinding allowlist)
     refresh_mcp_allowed_hosts()
 
 
-_mcp_lifespan_ctx = None
+_mcp_lifespan_ctxs = []
 
 
 @app.on_event("startup")
 async def mcp_startup():
-    """Enter the MCP streamable-HTTP session manager's lifespan. Starlette does
-    not propagate a mounted sub-app's lifespan, so we drive it explicitly."""
-    global _mcp_lifespan_ctx
-    _mcp_lifespan_ctx = eshu_mcp.session_manager.run()
-    await _mcp_lifespan_ctx.__aenter__()
+    """Enter each MCP streamable-HTTP session manager's lifespan (the global
+    /mcp server plus one per enabled integration). Starlette does not propagate
+    a mounted sub-app's lifespan, so we drive them all explicitly."""
+    global _mcp_lifespan_ctxs
+    for sm in session_managers():
+        ctx = sm.run()
+        await ctx.__aenter__()
+        _mcp_lifespan_ctxs.append(ctx)
 
 
 @app.on_event("shutdown")
 async def mcp_shutdown():
-    global _mcp_lifespan_ctx
-    if _mcp_lifespan_ctx is not None:
-        await _mcp_lifespan_ctx.__aexit__(None, None, None)
-        _mcp_lifespan_ctx = None
+    global _mcp_lifespan_ctxs
+    for ctx in reversed(_mcp_lifespan_ctxs):
+        try:
+            await ctx.__aexit__(None, None, None)
+        except Exception:
+            pass
+    _mcp_lifespan_ctxs = []
 
 
 def _migrate_legacy_db():
@@ -2339,6 +2360,21 @@ def toggle_tool_endpoint(name: str, tool_id: int, payload: ToolTogglePayload, re
     record_audit_event("integration_tool_toggled",
                        details=f"Tool id {tool_id} {'enabled' if payload.enabled else 'disabled'}")
     return {"status": "ok", "enabled": payload.enabled}
+
+
+@app.post("/api/integrations/{name}/tools/bulk")
+def bulk_toggle_tools_endpoint(name: str, payload: ToolTogglePayload, request: Request):
+    """Enable or disable every tool of an integration at once — the bulk lever
+    for trimming what an agent sees via MCP (fewer tools = less context)."""
+    _check_session(request)
+    integration = get_integration(name)
+    if not integration:
+        raise HTTPException(status_code=404, detail="Integration not found")
+    updated = set_all_tools_enabled(integration['id'], payload.enabled)
+    refresh_mcp_tools()
+    record_audit_event("integration_tools_bulk_toggled",
+                       details=f"All tools for '{name}' {'enabled' if payload.enabled else 'disabled'} ({updated})")
+    return {"status": "ok", "enabled": payload.enabled, "updated": updated}
 
 
 @app.post("/api/integrations/{name}/seed")

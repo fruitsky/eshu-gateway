@@ -3818,6 +3818,16 @@ async function fetchTools(name) {
 function renderTools(tools, name) {
   const el = document.getElementById('integration-tools-list');
   if (!el) return;
+  const bar = document.getElementById('integration-tools-bar');
+  const count = document.getElementById('integration-tools-count');
+  if (bar && count) {
+    if (!name || !tools.length) { bar.classList.add('hidden'); }
+    else {
+      bar.classList.remove('hidden');
+      const on = tools.filter(function(t){ return t.enabled; }).length;
+      count.textContent = on + ' / ' + tools.length + ' enabled';
+    }
+  }
   if (!name || !tools.length) { el.innerHTML = '<p class="text-muted">No tools for this integration.</p>'; return; }
   el.innerHTML = tools.map(function(t) {
     var badge = t.read_only ? '<span class="text-success">read</span>' : '<span class="text-warning">mutating (approval)</span>';
@@ -3831,6 +3841,17 @@ function renderTools(tools, name) {
       '<button onclick="deleteTool(' + t.id + ', ' + (t.seeded ? 'true' : 'false') + ')" class="btn btn-xs btn-muted">×</button>' +
       '</div></div>';
   }).join('');
+}
+
+async function bulkSetTools(enabled) {
+  if (!_selectedIntegration) return;
+  const label = enabled ? 'Enable' : 'Disable';
+  if (!(await customConfirm(label + ' all tools for ' + _selectedIntegration + '? They take effect for agents on the next /reload-mcp.'))) return;
+  try {
+    const res = await authFetch('/api/integrations/' + encodeURIComponent(_selectedIntegration) + '/tools/bulk', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: enabled }) });
+    if (res.ok) { fetchTools(_selectedIntegration); showToast(label + 'd all tools for ' + _selectedIntegration, 'success'); }
+    else showToast('❌ Failed to ' + label.toLowerCase() + ' tools', 'error');
+  } catch(e) { showToast('❌ Failed: ' + e.message, 'error'); }
 }
 
 async function toggleTool(id, enabled) {

@@ -11,7 +11,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 
 from db.integrations import (
     get_enabled_tools,
-    get_integration_by_id,
+    get_integrations,
     get_pending_call,
 )
 
@@ -49,12 +49,54 @@ mcp = FastMCP(
 
 _registered_names = set()
 
+# Per-integration MCP servers: ns -> FastMCP instance / its ASGI app / the set
+# of tool names it exposes. Built once at startup so the mount paths are stable;
+# `refresh_mcp_tools()` only adds/removes tools on the live instances.
+_per_integration = {}
+_per_integration_apps = {}
+_per_integration_tools = {}
+
 
 def _safe_ident(name: str) -> str:
     ident = re.sub(r'\W', '_', name)
     if not ident or ident[0].isdigit():
         ident = 'tool_' + ident
     return ident
+
+
+def _make_instance(name: str) -> FastMCP:
+    """A per-integration FastMCP server. Tools are un-namespaced (the endpoint
+    already scopes to one integration), and read-only tools run immediately
+    while mutating tools need operator approval (poll check_approval)."""
+    return FastMCP(
+        "Eshu:" + name,
+        instructions=(
+            f"Eshu gateway for the '{name}' homelab API. Read-only tools run "
+            "immediately; mutating tools create a request a human operator must "
+            "approve — poll check_approval(id) until it resolves."
+        ),
+        streamable_http_path="/",
+        transport_security=TransportSecuritySettings(
+            enable_dns_rebinding_protection=True,
+            allowed_hosts=list(_DEFAULT_ALLOWED_HOSTS),
+        ),
+    )
+
+
+def _register_tools(inst, integration, namespaced: bool) -> list:
+    """Register an integration's enabled tools on `inst`. Returns the list of
+    MCP-visible tool names registered (for later removal)."""
+    ns = _safe_ident(integration['name']).lower()
+    registered = []
+    for tool in get_enabled_tools(integration['id']):
+        mcp_name = f"{ns}_{tool['name']}" if namespaced else tool['name']
+        try:
+            fn = _build_tool_fn(integration['name'], tool)
+            inst.add_tool(fn, name=mcp_name, description=tool['description'])
+            registered.append(mcp_name)
+        except Exception as e:
+            print(f"[mcp] failed to register tool {mcp_name}: {e}", flush=True)
+    return registered
 
 
 def _build_tool_fn(integration_name: str, tool: dict):
@@ -132,22 +174,73 @@ def refresh_mcp_tools():
             pass
     _registered_names = set()
 
-    for tool in get_enabled_tools():
-        integration = get_integration_by_id(tool['integration_id'])
-        if not integration or not integration.get('enabled'):
+    for integration in get_integrations():
+        if not integration.get('enabled'):
             continue
-        # Namespace the MCP-visible tool name by the integration's name (a
-        # clean lowercase slug), so tools from different integrations can't
-        # collide even when several run the same software (e.g. pihole2_summary
-        # vs pihole3_summary) and ownership is obvious: proxmox_list_nodes, ...
         ns = _safe_ident(integration['name']).lower()
-        mcp_name = f"{ns}_{tool['name']}"
-        try:
-            fn = _build_tool_fn(integration['name'], tool)
-            mcp.add_tool(fn, name=mcp_name, description=tool['description'])
+        # Global /mcp surface keeps the namespaced names (backward compat).
+        for mcp_name in _register_tools(mcp, integration, namespaced=True):
             _registered_names.add(mcp_name)
+        # Per-integration instances only get in-place tool updates here — the
+        # instance/app/mount themselves are created once at startup.
+        inst = _per_integration.get(ns)
+        if inst is not None:
+            _refresh_single_instance(ns, integration)
+
+
+def build_per_integration_mcp() -> dict:
+    """Create a per-integration FastMCP instance + ASGI app for every enabled
+    integration. Called once at startup; returns {ns: app} so main.py can mount
+    each at /mcp/<ns> before the catch-all /mcp mount. The mounts are static —
+    later tool changes update the live instances in place via refresh_mcp_tools."""
+    global _per_integration, _per_integration_apps, _per_integration_tools
+    _per_integration = {}
+    _per_integration_apps = {}
+    _per_integration_tools = {}
+    for integration in get_integrations():
+        if not integration.get('enabled'):
+            continue
+        ns = _safe_ident(integration['name']).lower()
+        try:
+            inst = _make_instance(integration['name'])
+            _per_integration_tools[ns] = set(_register_tools(inst, integration, namespaced=False))
+            # approval polling is cross-cutting — present on every per-integration server
+            inst.add_tool(check_approval_fn(), name="check_approval",
+                          description=CHECK_APPROVAL_DESC)
+            _per_integration[ns] = inst
+            _per_integration_apps[ns] = inst.streamable_http_app()
         except Exception as e:
-            print(f"[mcp] failed to register tool {mcp_name}: {e}", flush=True)
+            print(f"[mcp] failed to build per-integration server for {ns}: {e}", flush=True)
+    return dict(_per_integration_apps)
+
+
+def _refresh_single_instance(ns: str, integration: dict):
+    """Re-register one per-integration instance's tools in place (no instance
+    recreation, so the mounted app and its session stay valid)."""
+    inst = _per_integration.get(ns)
+    if inst is None:
+        return
+    old = _per_integration_tools.get(ns, set())
+    for name in old:
+        try:
+            inst.remove_tool(name)
+        except Exception:
+            pass
+    fresh = set(_register_tools(inst, integration, namespaced=False))
+    inst.add_tool(check_approval_fn(), name="check_approval", description=CHECK_APPROVAL_DESC)
+    fresh.add("check_approval")
+    _per_integration_tools[ns] = fresh
+
+
+def session_managers():
+    """All FastMCP session managers (global + per-integration) whose lifespan
+    must be driven explicitly, because a mounted sub-app's lifespan is not
+    propagated by Starlette. Each instance's app is built at startup, so its
+    session manager is already created."""
+    managers = [mcp.session_manager]
+    for inst in _per_integration.values():
+        managers.append(inst.session_manager)
+    return managers
 
 
 def _expand_hosts(hosts: str) -> list:
@@ -177,19 +270,32 @@ def refresh_mcp_allowed_hosts():
     allowlist. The transport middleware holds a reference to this same settings
     object, so mutating it takes effect on live requests — no restart needed."""
     from db.misc import get_mcp_allowed_hosts
-    mcp.settings.transport_security.allowed_hosts = _expand_hosts(get_mcp_allowed_hosts())
+    hosts = _expand_hosts(get_mcp_allowed_hosts())
+    mcp.settings.transport_security.allowed_hosts = hosts
+    for inst in _per_integration.values():
+        inst.settings.transport_security.allowed_hosts = hosts
 
 
-@mcp.tool()
-def check_approval(call_id: int) -> str:
-    """Poll the status of a pending (mutating) integration call. Returns the
-    call's result once approved, a denial message if denied, or a pending note.
-    Pass the id returned by a mutating tool when it created the request."""
-    call = get_pending_call(call_id)
-    if not call:
-        return '{"error": "not found", "id": %d}' % call_id
-    if call['status'] == 'approved':
-        return call.get('result') or ''
-    if call['status'] == 'denied':
-        return '{"status": "denied", "message": "Operator denied the request"}'
-    return '{"status": "pending", "message": "Still awaiting operator approval"}'
+CHECK_APPROVAL_DESC = (
+    "Poll the status of a pending (mutating) integration call. Returns the "
+    "call's result once approved, a denial message if denied, or a pending "
+    "note. Pass the id returned by a mutating tool when it created the request."
+)
+
+
+def check_approval_fn():
+    """The approval-polling tool, registered on the global server and on every
+    per-integration server (approval is cross-cutting)."""
+    def _check_approval(call_id: int) -> str:
+        call = get_pending_call(call_id)
+        if not call:
+            return '{"error": "not found", "id": %d}' % call_id
+        if call['status'] == 'approved':
+            return call.get('result') or ''
+        if call['status'] == 'denied':
+            return '{"status": "denied", "message": "Operator denied the request"}'
+        return '{"status": "pending", "message": "Still awaiting operator approval"}'
+    return _check_approval
+
+
+mcp.add_tool(check_approval_fn(), name="check_approval", description=CHECK_APPROVAL_DESC)

@@ -394,6 +394,17 @@ def set_tool_enabled(tool_id: int, enabled: bool) -> bool:
         return cursor.rowcount > 0
 
 
+def set_all_tools_enabled(integration_id: int, enabled: bool) -> int:
+    """Enable/disable every tool for an integration. Returns the number of tools
+    updated. This is the bulk lever for trimming the MCP-visible tool set."""
+    with db_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute('UPDATE integration_tools SET enabled = ? WHERE integration_id = ?',
+                       (1 if enabled else 0, integration_id))
+        conn.commit()
+        return cursor.rowcount
+
+
 def update_tool(tool_id: int, **fields) -> bool:
     allowed = {'name', 'description', 'method', 'path_template', 'params', 'fields', 'search_field', 'example', 'read_only', 'enabled', 'transport', 'filter_fields', 'generic', 'version', 'strip_envelope', 'transform', 'not_implemented', 'always_gate', 'error_codes', 'path_variants', 'response_hint'}
     updates = {k: v for k, v in fields.items() if k in allowed and v is not None}

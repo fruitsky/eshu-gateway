@@ -44,7 +44,7 @@ HA_SEED_TOOLS = [
     },
     {
         "name": "list_services",
-        "description": "List every Home Assistant service with its field schema (names, types, required/optional). Use this to learn the exact fields a service accepts before calling it — e.g. browser_mod services. Returns the full schema map.",
+        "description": "List every Home Assistant service with its field schema (names, types, required/optional) — learn the exact fields a service accepts before calling it. Returns the full schema map.",
         "method": "GET",
         "path_template": "/services",
         "params": [],
@@ -64,7 +64,7 @@ HA_SEED_TOOLS = [
     },
     {
         "name": "get_history",
-        "description": "Get the recorded state history for an entity (or all entities) from a start time. Pass start as an ISO8601 datetime (e.g. 2026-08-18T00:00:00) and optionally filter_entity_id to one entity and end_time to bound the window. Returns the raw history (list of per-entity state lists).",
+        "description": "Get the recorded state history for an entity (or all) from a start time (ISO8601). filter_entity_id narrows to one entity; end_time bounds the window. Returns the raw history (list of per-entity state lists).",
         "method": "GET",
         "path_template": "/history/period/{start}",
         "params": [
@@ -78,7 +78,7 @@ HA_SEED_TOOLS = [
     },
     {
         "name": "list_entity_registry",
-        "description": "List the Home Assistant entity registry — ALL registered entities, including disabled/hidden ones that /api/states never shows. Use device_id to get every entity of one device (enabled and disabled), search to filter by entity_id substring, and limit to bound the result. disabled_by is null (omitted) for enabled entities, 'integration'/'user' for disabled. This is how to tell a disabled entity from one that was never created.",
+        "description": "List the Home Assistant entity registry — ALL registered entities, including disabled/hidden ones /api/states never shows. Use device_id to get every entity of one device, search to filter by entity_id substring, limit to bound. disabled_by (null/'integration'/'user') distinguishes a disabled entity from one never created.",
         "method": "GET",
         "path_template": "config/entity_registry/list",
         "params": [],
@@ -91,7 +91,7 @@ HA_SEED_TOOLS = [
     },
     {
         "name": "list_device_registry",
-        "description": "List the Home Assistant device registry — every device with manufacturer, model, identifiers (e.g. IEEE/Zigbee address), connections, and via_device_id (what it joins through, e.g. the coordinator). Use search to filter by device name substring and limit to bound the result.",
+        "description": "List the Home Assistant device registry — every device with manufacturer, model, identifiers, connections, and via_device_id (what it joins through). Use search to filter by device name substring, limit to bound.",
         "method": "GET",
         "path_template": "config/device_registry/list",
         "params": [],

@@ -587,3 +587,75 @@ class TestOauth2TokenTtl:
         assert integration_proxy._oauth2_headers(integration) == {"Authorization": "AccessToken=tok-long"}
         assert integration_proxy._oauth2_headers(integration) == {"Authorization": "AccessToken=tok-long"}
         assert count["n"] == 1
+
+
+class TestPerIntegrationMcp:
+    """Each enabled integration gets its own FastMCP server (mounted at
+    /mcp/<ns>) exposing only its tools + check_approval, un-namespaced — so a
+    client can mount just the integrations it uses instead of loading all tools
+    from the single /mcp surface."""
+
+    def _omada(self, auth_client):
+        auth_client.post("/api/integrations", json={
+            "name": "omada", "base_url": "https://omada.local:8043/openapi/v1/omadac-1",
+            "auth_type": "none", "secret": "", "kind": "omada",
+        })
+        auth_client.post("/api/integrations/omada/seed")
+
+    def test_per_integration_server_lists_only_its_tools(self, auth_client):
+        import asyncio
+        from core import mcp_server as ms
+        # a second, unrelated integration so isolation is provable
+        auth_client.post("/api/integrations", json={
+            "name": "home-assistant", "base_url": "https://ha.local/api",
+            "auth_type": "bearer", "secret": "tok", "kind": "ha",
+        })
+        auth_client.post("/api/integrations/home-assistant/seed")
+        self._omada(auth_client)
+        ms.refresh_mcp_tools()
+        apps = ms.build_per_integration_mcp()
+
+        assert "omada" in apps and "home_assistant" in apps
+
+        async def _names(inst):
+            return {t.name for t in await inst.list_tools()}
+
+        omada = asyncio.run(_names(ms._per_integration["omada"]))
+        assert "list_sites" in omada            # un-namespaced within its server
+        assert "block_client" in omada          # mutating tool present
+        assert "check_approval" in omada
+        assert not any(n.startswith("home_assistant_") or n.startswith("omada_")
+                       for n in omada)          # no cross-integration / no prefix
+
+        ha = asyncio.run(_names(ms._per_integration["home_assistant"]))
+        assert not any(n in ("list_sites", "block_client") for n in ha)  # no omada tools leak
+
+    def test_disabled_integration_excluded(self, auth_client):
+        import asyncio
+        from core import mcp_server as ms
+        auth_client.post("/api/integrations", json={
+            "name": "disabled-one", "base_url": "https://x.local/api",
+            "auth_type": "none", "secret": "", "kind": "custom",
+        })
+        auth_client.put("/api/integrations/disabled-one", json={"enabled": False})
+        ms.refresh_mcp_tools()
+        apps = ms.build_per_integration_mcp()
+        assert "disabled_one" not in apps
+
+    def test_tool_toggle_updates_per_integration_server(self, auth_client):
+        import asyncio
+        from core import mcp_server as ms
+        self._omada(auth_client)
+        ms.refresh_mcp_tools()
+        ms.build_per_integration_mcp()
+
+        tools = auth_client.get("/api/integrations/omada/tools").json()
+        bc = next(t for t in tools if t["name"] == "block_client")
+        auth_client.post(f"/api/integrations/omada/tools/{bc['id']}/toggle", json={"enabled": False})
+        ms.refresh_mcp_tools()
+
+        async def _names(inst):
+            return {t.name for t in await inst.list_tools()}
+        names = asyncio.run(_names(ms._per_integration["omada"]))
+        assert "block_client" not in names
+        assert "list_sites" in names

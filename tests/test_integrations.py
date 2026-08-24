@@ -418,3 +418,35 @@ class TestSeededAnnotation:
         assert by_name["health"]["seeded"] is True
         assert by_name["read"]["seeded"] is True
         assert by_name["my_custom"]["seeded"] is False
+
+
+class TestBulkToggleTools:
+
+    def _pulse(self, auth_client):
+        auth_client.post("/api/integrations", json={
+            "name": "pulse", "base_url": "http://x/api", "auth_type": "none", "kind": "pulse",
+        })
+        assert auth_client.post("/api/integrations/pulse/seed").status_code == 200
+
+    def test_disable_all_then_enable_all(self, auth_client):
+        self._pulse(auth_client)
+        tools = auth_client.get("/api/integrations/pulse/tools").json()
+        assert all(t["enabled"] for t in tools)
+
+        r = auth_client.post("/api/integrations/pulse/tools/bulk", json={"enabled": False})
+        assert r.status_code == 200 and r.json()["updated"] == len(tools)
+        tools = auth_client.get("/api/integrations/pulse/tools").json()
+        assert all(not t["enabled"] for t in tools)
+
+        r = auth_client.post("/api/integrations/pulse/tools/bulk", json={"enabled": True})
+        assert r.status_code == 200
+        tools = auth_client.get("/api/integrations/pulse/tools").json()
+        assert all(t["enabled"] for t in tools)
+
+    def test_bulk_requires_session(self, client):
+        r = client.post("/api/integrations/pulse/tools/bulk", json={"enabled": False})
+        assert r.status_code == 401
+
+    def test_bulk_unknown_integration_404(self, auth_client):
+        r = auth_client.post("/api/integrations/nope/tools/bulk", json={"enabled": False})
+        assert r.status_code == 404
