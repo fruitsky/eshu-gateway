@@ -33,6 +33,29 @@ def _proxy():
     return DEFAULT_TIMEOUT, MAX_BODY_BYTES, _ssl_context
 
 
+def _login_error(step: str, exc: Exception) -> ValueError:
+    """Turn a urllib error into an actionable message. SSL errors almost always
+    mean the URL scheme is https against NPM's plain-HTTP port 81; a 401 means
+    the identity/secret pair was rejected."""
+    import ssl
+    if isinstance(exc, urllib.error.HTTPError):
+        if exc.code == 401:
+            return ValueError(
+                f"session {step} returned HTTP 401 — NPM rejected the "
+                "identity/secret; check the NPM user's email (Client ID) and "
+                "password (Client Secret) match exactly")
+        return ValueError(f"session {step} returned HTTP {exc.code}")
+    if isinstance(exc, urllib.error.URLError):
+        reason = getattr(exc, 'reason', exc)
+        if isinstance(reason, ssl.SSLError):
+            return ValueError(
+                f"session {step} failed with an SSL error ({reason}) — check "
+                "the base/token URL uses http:// (NPM's port 81 is plain HTTP, "
+                "not HTTPS)")
+        return ValueError(f"session {step} unreachable: {reason}")
+    return ValueError(f"session {step} failed: {exc}")
+
+
 def _login(integration: dict):
     """POST the token URL with {identity, secret}; returns (jwt, expires_at)."""
     token_url = (integration.get('token_url') or '').strip()
@@ -51,9 +74,9 @@ def _login(integration: dict):
         with urllib.request.urlopen(req, timeout=timeout, context=ssl_ctx(integration)) as resp:
             payload = json.loads(resp.read(max_bytes + 1).decode('utf-8', 'replace'))
     except urllib.error.HTTPError as e:
-        raise ValueError(f"session login returned HTTP {e.code}")
+        raise _login_error('login', e)
     except urllib.error.URLError as e:
-        raise ValueError(f"session login unreachable: {e.reason}")
+        raise _login_error('login', e)
     jwt = payload.get('token')
     if not (isinstance(jwt, str) and jwt):
         raise ValueError("session login returned no token")
@@ -78,9 +101,9 @@ def _fetch_csrf(integration: dict, jwt: str) -> str:
         with urllib.request.urlopen(req, timeout=timeout, context=ssl_ctx(integration)) as resp:
             payload = json.loads(resp.read(max_bytes + 1).decode('utf-8', 'replace'))
     except urllib.error.HTTPError as e:
-        raise ValueError(f"session csrf fetch returned HTTP {e.code}")
+        raise _login_error('csrf fetch', e)
     except urllib.error.URLError as e:
-        raise ValueError(f"session csrf fetch unreachable: {e.reason}")
+        raise _login_error('csrf fetch', e)
     csrf = payload.get('token')
     if not (isinstance(csrf, str) and csrf):
         raise ValueError("session csrf fetch returned no token")

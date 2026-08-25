@@ -75,9 +75,24 @@ def seed_for_kind(integration):
     seeder = SEEDERS.get(integration.get('kind') or 'custom')
     curated = seeder(integration['id']) if seeder else (0, 0)
     if (integration.get('kind') or 'custom') in NO_GENERIC_KINDS:
+        _drop_stale_seed_tools(integration, seed_tool_names(integration.get('kind') or 'custom'))
         return curated
     generic = seed_generic_tools(integration['id'], integration.get('kind') or 'custom')
+    _drop_stale_seed_tools(integration, seed_tool_names(integration.get('kind') or 'custom'))
     return curated[0] + generic[0], curated[1] + generic[1]
+
+
+def _drop_stale_seed_tools(integration, expected_names: set):
+    """Delete tools that seeding used to create but which are no longer in the
+    catalog (e.g. an endpoint removed in a newer catalog version). Only touches
+    tools marked `seeded` — tools the operator created by hand are left alone."""
+    from db.integrations import get_tools, delete_tool
+    for tool in get_tools(integration['id']):
+        if tool['name'] in expected_names:
+            continue
+        if not tool.get('seeded'):
+            continue
+        delete_tool(tool['id'])
 
 
 def reseed_all_integrations():

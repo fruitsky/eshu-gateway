@@ -167,6 +167,22 @@ class TestSessionManager:
         out = json.loads(run_tool("npm", "proxy_hosts", {}))
         assert out.get("error")
 
+    def test_login_401_hints_credentials(self):
+        from core.session_auth import _login_error
+        import urllib.error
+        exc = urllib.error.HTTPError("http://x", 401, "Unauthorized", None, None)
+        err = _login_error("login", exc)
+        assert "401" in str(err)
+        assert "Client ID" in str(err) and "Client Secret" in str(err)
+
+    def test_ssl_error_hints_http(self):
+        from core.session_auth import _login_error
+        import ssl, urllib.error
+        exc = urllib.error.URLError(ssl.SSLError(1, "WRONG_VERSION_NUMBER"))
+        err = _login_error("login", exc)
+        assert "http://" in str(err)
+        assert "port 81" in str(err)
+
     def test_auth_type_accepted(self, auth_client):
         r = auth_client.post("/api/integrations", json={
             "name": "npm", "base_url": "http://192.168.1.242:81/api",
@@ -191,7 +207,7 @@ class TestNpmCatalog:
         tools = auth_client.get("/api/integrations/npm/tools").json()
         names = {t["name"] for t in tools}
         assert names == {"proxy_hosts", "proxy_host", "redirection_hosts", "streams",
-                         "custom_locations", "certificates", "nginx_status", "version",
+                         "certificates", "version",
                          "create_proxy_host", "update_proxy_host", "delete_proxy_host"}
         # no generic floor for npm
         assert "read" not in names and "write" not in names
@@ -253,3 +269,28 @@ class TestNpmGating:
         from db.integrations import get_pending_calls
         pending = get_pending_calls()
         assert any(p["tool"] == "delete_proxy_host" for p in pending)
+
+
+class TestStaleSeedCleanup:
+
+    def test_reseed_drops_removed_seed_tool_keeps_handmade(self, auth_client):
+        """When a tool is removed from the catalog, reseed deletes the stale
+        seed-managed tool but preserves operator-created tools."""
+        from db.integrations import create_tool, get_tools
+        from core.seeds import seed_for_kind
+        auth_client.post("/api/integrations", json={
+            "name": "npm", "base_url": "http://192.168.1.242:81/api",
+            "auth_type": "session", "client_id": "eshu@local.kenguelacloud.com",
+            "client_secret": "pw", "token_url": "http://192.168.1.242:81/api/tokens",
+            "kind": "npm",
+        })
+        auth_client.post("/api/integrations/npm/seed")
+        # simulate a tool that an older catalog seeded but the current one dropped
+        iid = get_integration("npm")["id"]
+        create_tool(iid, "custom_locations", "old", "GET", "/nginx/custom-locations",
+                    [], "{}", read_only=True, seeded=True)
+        create_tool(iid, "my_hand_tool", "mine", "GET", "/x", [], "{}", read_only=True)
+        seed_for_kind(get_integration("npm"))
+        names = {t["name"] for t in get_tools(iid)}
+        assert "custom_locations" not in names   # stale seed tool dropped
+        assert "my_hand_tool" in names           # hand-created preserved

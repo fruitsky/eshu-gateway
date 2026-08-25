@@ -230,6 +230,7 @@ def seed_proxmox_tools(integration_id: int):
                 fields=tool.get('fields'),
                 example=tool['example'],
                 read_only=tool['read_only'],
+                seeded=True,
             )
             updated += 1
         else:
@@ -243,6 +244,7 @@ def seed_proxmox_tools(integration_id: int):
                 tool['example'],
                 read_only=tool['read_only'],
                 fields=tool.get('fields'),
+                seeded=True,
             )
             created += 1
     return created, updated

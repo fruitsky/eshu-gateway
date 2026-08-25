@@ -116,6 +116,7 @@ def seed_pihole_tools(integration_id: int):
                 response_hint=tool.get('response_hint'),
                 example=tool['example'],
                 read_only=tool['read_only'],
+                seeded=True,
             )
             updated += 1
         else:
@@ -134,6 +135,7 @@ def seed_pihole_tools(integration_id: int):
                 always_gate=bool(tool.get('always_gate')),
                 path_variants=tool.get('path_variants') or None,
                 response_hint=tool.get('response_hint') or '',
+                seeded=True,
             )
             created += 1
     return created, updated

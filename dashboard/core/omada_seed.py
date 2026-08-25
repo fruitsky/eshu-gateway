@@ -180,6 +180,7 @@ def seed_omada_tools(integration_id: int):
                 strip_envelope=tool.get('strip_envelope'),
                 example=tool['example'],
                 read_only=tool['read_only'],
+                seeded=True,
             )
             updated += 1
         else:
@@ -196,6 +197,7 @@ def seed_omada_tools(integration_id: int):
                 search_field=tool.get('search_field') or '',
                 version=tool.get('version', 'v1'),
                 strip_envelope=tool.get('strip_envelope'),
+                seeded=True,
             )
             created += 1
     return created, updated

@@ -262,6 +262,7 @@ def _seed_arr(integration_id: int, kind: str):
                 always_gate=tool.get('always_gate'),
                 example=tool['example'],
                 read_only=tool['read_only'],
+                seeded=True,
             )
             updated += 1
         else:
@@ -279,6 +280,7 @@ def _seed_arr(integration_id: int, kind: str):
                 transform=tool.get('transform') or '',
                 error_codes=tool.get('error_codes') or None,
                 always_gate=bool(tool.get('always_gate')),
+                seeded=True,
             )
             created += 1
     return created, updated

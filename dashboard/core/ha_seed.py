@@ -128,6 +128,7 @@ def seed_ha_tools(integration_id: int):
                 transport=tool.get('transport', 'http'),
                 example=tool['example'],
                 read_only=tool['read_only'],
+                seeded=True,
             )
             updated += 1
         else:
@@ -144,6 +145,7 @@ def seed_ha_tools(integration_id: int):
                 search_field=tool.get('search_field') or '',
                 filter_fields=tool.get('filter_fields'),
                 transport=tool.get('transport', 'http'),
+                seeded=True,
             )
             created += 1
     return created, updated

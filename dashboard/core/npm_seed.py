@@ -65,47 +65,25 @@ NPM_SEED_TOOLS = [
     },
     {
         "name": "streams",
-        "description": "List NPM TCP/UDP streams (id, incoming host/port, forwarding host/port, enabled). Compact projection.",
+        "description": "List NPM TCP/UDP streams (id, incoming_port, forwarding host/port, tcp/udp forwarding flags). Compact projection.",
         "method": "GET",
         "path_template": "/nginx/streams",
         "params": [],
-        "fields": ["id", "incoming_port", "forwarding_host", "forwarding_port", "enabled"],
+        "fields": ["id", "incoming_port", "forwarding_host", "forwarding_port", "tcp_forwarding", "udp_forwarding"],
         "error_codes": NPM_ERROR_CODES,
-        "example": '[{"id": 1, "incoming_port": 8443, "forwarding_host": "192.168.1.108", "forwarding_port": 443, "enabled": true}]',
-        "read_only": True,
-    },
-    {
-        "name": "custom_locations",
-        "description": "List NPM custom locations (id, location path, forward host/port, enabled). Compact projection.",
-        "method": "GET",
-        "path_template": "/nginx/custom-locations",
-        "params": [],
-        "fields": ["id", "location", "forward_scheme", "forward_host", "forward_port", "enabled"],
-        "error_codes": NPM_ERROR_CODES,
-        "example": '[{"id": 1, "location": "/api", "forward_host": "192.168.1.100", "forward_port": 8080, "enabled": true}]',
+        "example": '[{"id": 1, "incoming_port": 3024, "forwarding_host": "192.168.1.107", "forwarding_port": 3024, "tcp_forwarding": 1, "udp_forwarding": 0}]',
         "read_only": True,
     },
     {
         "name": "certificates",
         "description": "List NPM SSL certificates (id, domains, provider, expires_on, valid) — for cert-expiry monitoring. Never request Let's Encrypt for internal .local domains (HTTP-01 cannot validate them); the wildcard *.local.kenguelacloud.com cert covers internal hosts.",
         "method": "GET",
-        "path_template": "/certificates",
+        "path_template": "/nginx/certificates",
         "params": [],
         "fields": ["id", "provider", "domain_names", "expires_on", "valid", "meta.letsencrypt_email"],
         "transform": "npm_certificates",
         "error_codes": NPM_ERROR_CODES,
         "example": '[{"id": 2, "provider": "other", "domain_names": ["*.local.kenguelacloud.com"], "expires_on": "2027-08-08", "valid": true}]',
-        "read_only": True,
-    },
-    {
-        "name": "nginx_status",
-        "description": "NPM nginx engine status: running, version and load. Use to confirm the proxy is up before diagnosing a 'host offline' report.",
-        "method": "GET",
-        "path_template": "/nginx/status",
-        "params": [],
-        "fields": ["running", "version", "load"],
-        "error_codes": NPM_ERROR_CODES,
-        "example": '{"running": true, "version": "1.27.3", "load": [1.0, 0.8, 0.6]}',
         "read_only": True,
     },
     {
@@ -190,6 +168,7 @@ def seed_npm_tools(integration_id: int):
                 response_hint=tool.get('response_hint'),
                 example=tool['example'],
                 read_only=tool['read_only'],
+                seeded=True,
             )
             updated += 1
         else:
@@ -207,6 +186,7 @@ def seed_npm_tools(integration_id: int):
                 error_codes=tool.get('error_codes') or None,
                 always_gate=bool(tool.get('always_gate')),
                 response_hint=tool.get('response_hint') or '',
+                seeded=True,
             )
             created += 1
     return created, updated

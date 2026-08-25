@@ -258,6 +258,7 @@ def seed_pulse_tools(integration_id: int):
                 not_implemented=tool.get('not_implemented'),
                 example=tool['example'],
                 read_only=tool['read_only'],
+                seeded=True,
             )
             updated += 1
         else:
@@ -274,6 +275,7 @@ def seed_pulse_tools(integration_id: int):
                 search_field=tool.get('search_field') or '',
                 transform=tool.get('transform') or '',
                 not_implemented=bool(tool.get('not_implemented')),
+                seeded=True,
             )
             created += 1
     return created, updated

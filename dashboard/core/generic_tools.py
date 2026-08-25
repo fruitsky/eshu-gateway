@@ -115,6 +115,7 @@ def seed_generic_tools(integration_id: int, kind: str):
                 transport=tool['transport'],
                 generic=True,
                 read_only=tool['read_only'],
+                seeded=True,
             )
             updated += 1
         else:
@@ -130,6 +131,7 @@ def seed_generic_tools(integration_id: int, kind: str):
                 fields=tool.get('fields'),
                 transport=tool['transport'],
                 generic=True,
+                seeded=True,
             )
             created += 1
     return created, updated
