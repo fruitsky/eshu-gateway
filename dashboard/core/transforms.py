@@ -849,17 +849,31 @@ def _prowlarr_indexers(integration, tool, args, data):
 def _prowlarr_indexer_stats(integration, tool, args, data):
     if not isinstance(data, dict):
         return json.dumps(data)
-    # Superset projection with omit-missing: the live API's per-indexer field
-    # names vary across builds (queryCount/grabs/failures vs success/
-    # totalQueries) — map all candidates so the diagnostic counts always show.
-    keys = ('indexerName', 'queryCount', 'grabs', 'failures', 'success',
-            'totalQueries')
+    # The live /api/v1/indexerstats returns per-indexer counts under
+    # numberOfQueries / numberOfGrabs / numberOfFailedQueries / etc. Map them
+    # into a compact diagnostic shape, with fallbacks for older build variants
+    # (queryCount/grabs/failures) so the "which indexer is flaky" counts always
+    # surface. indexerId keeps the row identifiable in logs.
+    keys = [
+        ('indexerName', 'indexerName'),
+        ('indexerId', 'indexerId'),
+        ('queryCount', 'numberOfQueries', 'queryCount'),
+        ('grabs', 'numberOfGrabs', 'grabs'),
+        ('failures', 'numberOfFailedQueries', 'failures', 'numberOfFailedGrabs'),
+        ('rssQueries', 'numberOfRssQueries'),
+    ]
     rows = []
     for x in data.get('indexers') or []:
         if not isinstance(x, dict):
             continue
-        row = {k: x.get(k) for k in keys}
-        rows.append({k: v for k, v in row.items() if v is not None})
+        row = {}
+        for out_key, *candidates in keys:
+            for c in candidates:
+                v = x.get(c)
+                if v is not None:
+                    row[out_key] = v
+                    break
+        rows.append(row)
     return json.dumps({'total': len(rows), 'indexers': rows})
 
 

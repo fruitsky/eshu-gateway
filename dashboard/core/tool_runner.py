@@ -62,7 +62,7 @@ def run_tool(integration_name: str, tool_name: str, args: dict, reason: str = ''
             return execute_generic_call(
                 integration, args.get('method'), args.get('path'),
                 args.get('params'), args.get('data'),
-                agent=AGENT_LABEL, tool_name=tool_name)
+                agent=AGENT_LABEL, tool_name=tool_name, root=bool(args.get('root')))
         return execute_integration_call(integration, tool, args, agent=AGENT_LABEL)
 
     # Read-only: always execute (auto-run + audit) and shape client-side.

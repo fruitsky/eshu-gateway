@@ -32,8 +32,9 @@ def generic_tools_for(kind: str) -> list:
             "path_template": "",
             "params": [
                 {"name": "method", "type": "string", "description": "GET or HEAD (default GET). HEAD returns headers-only metadata with no body.", "required": False, "default": "GET"},
-                {"name": "path", "type": "string", "description": "Endpoint path relative to the base URL.", "required": True},
+                {"name": "path", "type": "string", "description": "Endpoint path relative to the base URL (or to the host origin when root=true).", "required": True},
                 {"name": "params", "type": "json", "description": "Optional query parameters (JSON object).", "required": False},
+                {"name": "root", "type": "boolean", "description": "Resolve path against the host origin (scheme://host:port) instead of the integration's base URL — for resources served at the origin root (e.g. Home Assistant media at /media/local/<file>). Traversal is still blocked.", "required": False},
             ],
             "fields": [],
             "read_only": True,

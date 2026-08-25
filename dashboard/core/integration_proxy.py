@@ -629,10 +629,14 @@ def execute_integration_call(integration: dict, tool: dict, args: dict, agent: s
 
 
 def execute_generic_call(integration: dict, method: str, path: str, params=None,
-                         data=None, agent: str = '', tool_name: str = '') -> dict:
+                         data=None, agent: str = '', tool_name: str = '',
+                         root: bool = False) -> dict:
     """Call an arbitrary endpoint on the integration — the generic read/write
     floor. method/path come from the agent; `params` becomes the query string,
-    `data` the JSON body. Credentials, TLS, SSRF guard, and audit all apply."""
+    `data` the JSON body. `root=True` resolves `path` against the host origin
+    (scheme://host:port) instead of the integration's base URL — for resources
+    served at the root (e.g. HA media at /media/local/<file>) rather than under
+    a base path like /api. Credentials, TLS, SSRF guard, and audit all apply."""
     if not integration or not integration.get('enabled'):
         raise ProxyError(404, "Integration not found or disabled")
     method = (method or 'GET').upper()
@@ -644,8 +648,15 @@ def execute_generic_call(integration: dict, method: str, path: str, params=None,
 
     path = (path or '').lstrip('/')
     base_url = (integration.get('base_url') or '').rstrip('/')
-    _guard_ssrf(base_url, path)
-    url = base_url + '/' + path
+    if root:
+        # Same host, root of the origin — the SSRF guard still verifies netloc.
+        parsed = urllib.parse.urlparse(base_url)
+        origin = f"{parsed.scheme}://{parsed.netloc}"
+        _guard_ssrf(origin, path)
+        url = origin + '/' + path
+    else:
+        _guard_ssrf(base_url, path)
+        url = base_url + '/' + path
     if params:
         url += '?' + urllib.parse.urlencode(params)
     url = _auth_query_url(url, integration)

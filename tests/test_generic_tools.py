@@ -81,6 +81,33 @@ class TestGenericReadHead:
         assert out.get('ok') is True
         assert mock_upstream["requests"][-1]["method"] == "GET"
 
+    def test_root_resolves_origin_not_base(self, head_upstream):
+        """root=true must hit scheme://host:port/<path> even when the
+        integration's base_url carries a path (e.g. HA's /api), so
+        /media/local/<file> reaches the media root, not /api/media/..."""
+        create_integration("api", head_upstream['base_url'] + '/api', "none", "")
+        _seed_generic_tools(get_integration("api"))
+        out = json.loads(run_tool("api", "read", {"path": "/media/local/dishwasher.mp4", "method": "HEAD", "root": True}))
+        assert out['status'] == 200
+        assert out['content_length'] == '12345678'
+        assert out['content_type'] == 'video/mp4'
+        assert head_upstream['state']['requests'][-1][1] == '/media/local/dishwasher.mp4'
+
+    def test_root_without_base_path_unchanged(self, head_upstream):
+        """root=false (default) keeps base_url + path: /media/... -> /api/media/..."""
+        create_integration("api", head_upstream['base_url'] + '/api', "none", "")
+        _seed_generic_tools(get_integration("api"))
+        run_tool("api", "read", {"path": "/media/local/dishwasher.mp4", "method": "HEAD"})
+        assert head_upstream['state']['requests'][-1][1] == '/api/media/local/dishwasher.mp4'
+
+    def test_root_still_blocks_traversal(self, head_upstream):
+        """The SSRF/traversal guard applies to root-relative paths too."""
+        create_integration("api", head_upstream['base_url'] + '/api', "none", "")
+        _seed_generic_tools(get_integration("api"))
+        out = json.loads(run_tool("api", "read", {"path": "../../../etc/passwd", "method": "HEAD", "root": True}))
+        assert out.get('error')
+        assert out.get('status_code') == 403
+
 
 class TestIsDestructive:
 
