@@ -162,7 +162,7 @@ JELLYFIN_SEED_TOOLS = [
         "method": "POST",
         "path_template": "/Library/Refresh",
         "path_variants": {"itemId": "/Items/{itemId}/Refresh"},
-        "response_hint": "Scan triggered. Verify via jellyfin_scheduled_tasks ('Scan Media Library' task) or jellyfin_activity_log — an item-scoped refresh is async and may not create a task entry.",
+        "response_hint": "Scan triggered. An itemId-scoped refresh is SILENT — it may not appear in scheduled tasks or the activity log; verify via jellyfin_scheduled_tasks, jellyfin_activity_log, or item counts.",
         "params": [
             {"name": "itemId", "type": "string", "description": "Optional library ItemId to scan (from jellyfin_libraries); omitted = full library scan.", "required": False},
             {"name": "replaceAllMetadata", "type": "boolean", "description": "Re-extract all metadata (I/O storm — default false).", "required": False, "default": False, "in_query": True},

@@ -187,6 +187,7 @@ Eshu ships **curated tool catalogs** for these kinds — seeded via **Integratio
 | **Pi-hole** | `query_token` (`?auth=…`) | multi-instance via name-based namespacing |
 | **Sonarr** / **Radarr** | `header` (`X-Api-Key`) | parameterized *arr catalog; search flags guarded |
 | **Prowlarr** | `header` (`X-Api-Key`) | **read-only projection** — indexer `fields[]` credentials are never surfaced |
+| **Nginx Proxy Manager** | `session` (JWT + CSRF) | create a dedicated NPM admin user; Client ID = its email, Client Secret = its password, Token URL = `http://<ip>:81/api/tokens`. Base URL is `http://<ip>:81/api` (the admin port — never 443 for API calls). Fully curated; writes always approval-gated |
 
 Curated kinds are excluded from the generic floor (`NO_GENERIC_KINDS`). Any other integration type seeds a generic **`read`**/**`write`** pair that can call arbitrary REST endpoints on the base URL (read-only `read` auto-runs; `write` is gated). `read` accepts a `method` param — `HEAD` returns `{status, content_length, content_type, url}` metadata with no body (e.g. checking a media file's size without downloading it).
 

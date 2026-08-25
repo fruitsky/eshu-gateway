@@ -16,6 +16,7 @@ from core.jellyfin_seed import JELLYFIN_SEED_TOOLS, seed_jellyfin_tools
 from core.pihole_seed import PIHOLE_SEED_TOOLS, seed_pihole_tools
 from core.arr_seed import SONARR_SEED_TOOLS, RADARR_SEED_TOOLS, seed_sonarr_tools, seed_radarr_tools
 from core.prowlarr_seed import PROWLARR_SEED_TOOLS, seed_prowlarr_tools
+from core.npm_seed import NPM_SEED_TOOLS, seed_npm_tools
 from core.generic_tools import generic_tools_for, seed_generic_tools
 
 SEEDERS = {
@@ -28,6 +29,7 @@ SEEDERS = {
     'sonarr': seed_sonarr_tools,
     'radarr': seed_radarr_tools,
     'prowlarr': seed_prowlarr_tools,
+    'npm': seed_npm_tools,
 }
 
 _CATALOGS = {
@@ -40,6 +42,7 @@ _CATALOGS = {
     'sonarr': SONARR_SEED_TOOLS,
     'radarr': RADARR_SEED_TOOLS,
     'prowlarr': PROWLARR_SEED_TOOLS,
+    'npm': NPM_SEED_TOOLS,
 }
 
 # Kinds that must NOT receive the generic read/write passthrough floor. Jellyfin
@@ -48,8 +51,10 @@ _CATALOGS = {
 # because toggling blocking is LAN-wide and the surface is tiny. Sonarr/Radarr
 # are fully curated because *arr writes can trigger torrent searches and file
 # deletions. Prowlarr is fully curated because indexer definitions carry
-# credentials in fields[] and a generic read would expose them.
-NO_GENERIC_KINDS = {'jellyfin', 'pihole', 'sonarr', 'radarr', 'prowlarr'}
+# credentials in fields[] and a generic read would expose them. NPM is fully
+# curated because /api/settings may carry keys and a generic write would allow
+# arbitrary proxy-host mutations.
+NO_GENERIC_KINDS = {'jellyfin', 'pihole', 'sonarr', 'radarr', 'prowlarr', 'npm'}
 
 
 def seed_tool_names(kind: str) -> set:

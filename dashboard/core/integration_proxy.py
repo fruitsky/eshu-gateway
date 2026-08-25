@@ -16,6 +16,7 @@ import urllib.request
 
 from db.integrations import record_integration_call
 from core.secret_scrub import scrub_body, scrub_string
+from core.session_auth import session_headers as _session_headers, _sessions
 
 # Reuse the fleet pattern: store up to 1 MB, keep a 2 KB preview for lists.
 MAX_BODY_BYTES = 1048576
@@ -27,7 +28,7 @@ DEFAULT_TIMEOUT = 30
 # 1 MB cap would otherwise truncate the JSON and defeat compact-by-default.
 TRANSFORM_MAX_BODY_BYTES = 32 * 1024 * 1024
 
-ALLOWED_AUTH_TYPES = ('none', 'bearer', 'basic', 'header', 'oauth2', 'query_token')
+ALLOWED_AUTH_TYPES = ('none', 'bearer', 'basic', 'header', 'oauth2', 'query_token', 'session')
 
 # Hard-to-undo mutations. Disruptive-but-reversible verbs (restart, reboot,
 # stop, toggle) are deliberately excluded so routine writes auto-run under the
@@ -163,7 +164,7 @@ def _oauth2_headers(integration: dict) -> dict:
     return {'Authorization': 'AccessToken=' + token}
 
 
-def _auth_headers(integration: dict) -> dict:
+def _auth_headers(integration: dict, method: str = 'GET') -> dict:
     auth_type = (integration.get('auth_type') or 'none').lower()
     secret = integration.get('secret') or ''
     headers = {}
@@ -176,6 +177,11 @@ def _auth_headers(integration: dict) -> dict:
         headers[name] = secret
     elif auth_type == 'oauth2':
         headers.update(_oauth2_headers(integration))
+    elif auth_type == 'session':
+        try:
+            headers.update(_session_headers(integration, method or 'GET'))
+        except ValueError as e:
+            raise ProxyError(502, str(e))
     return headers
 
 
@@ -506,7 +512,7 @@ def _http_roundtrip(integration: dict, url: str, body_bytes, headers: dict, meth
                     and integration.get('name') in _oauth_tokens
                     and _oauth2_token_expired(body)):
                 _oauth_tokens.pop(integration.get('name'), None)
-                headers = _auth_headers(integration)
+                headers = _auth_headers(integration, method)
                 continue
             break
         except urllib.error.HTTPError as e:
@@ -521,7 +527,17 @@ def _http_roundtrip(integration: dict, url: str, body_bytes, headers: dict, meth
             if (auth_type == 'oauth2' and e.code == 401 and attempt == 1
                     and integration.get('name') in _oauth_tokens):
                 _oauth_tokens.pop(integration.get('name'), None)
-                headers = _auth_headers(integration)
+                headers = _auth_headers(integration, method)
+                continue
+            # Session (NPM): a 401 = expired/invalid JWT; a 403 on a mutation
+            # = stale CSRF. Re-login once and retry. A 403 that survives the
+            # fresh session is a server-side session/CSRF bug (csrf_failed) —
+            # the error_codes map on the tool surfaces it.
+            if (auth_type == 'session' and attempt == 1
+                    and (e.code == 401 or (e.code == 403 and method not in ('GET', 'HEAD')))
+                    and integration.get('name') in _sessions):
+                _sessions.pop(integration.get('name'), None)
+                headers = _auth_headers(integration, method)
                 continue
             break
         except urllib.error.URLError as e:
@@ -563,7 +579,7 @@ def execute_integration_call(integration: dict, tool: dict, args: dict, agent: s
         url += '?' + query_string
     url = _auth_query_url(url, integration)
 
-    headers = _auth_headers(integration)
+    headers = _auth_headers(integration, method)
     headers.setdefault('Accept', 'application/json')
     body_bytes = None
     if method in ('POST', 'PUT', 'PATCH'):
@@ -661,7 +677,7 @@ def execute_generic_call(integration: dict, method: str, path: str, params=None,
         url += '?' + urllib.parse.urlencode(params)
     url = _auth_query_url(url, integration)
 
-    headers = _auth_headers(integration)
+    headers = _auth_headers(integration, method)
     headers.setdefault('Accept', 'application/json')
     body_bytes = None
     if method in ('POST', 'PUT', 'PATCH') and data:

@@ -3469,6 +3469,10 @@ const INTEGRATION_PROFILES = {
                  auth_type: 'header', auth_header: 'X-Api-Key',
                  secret_hint: 'Prowlarr API key',
                  guidance: 'API key via X-Api-Key header. Base URL is http://<ip>:9696 (uses /api/v1). Fully curated — indexer credentials in fields[] are never returned or shown on approval cards; all writes are approval-gated.' },
+  npm:         { label: 'Nginx Proxy Manager', seedable: true,
+                 auth_type: 'session', auth_header: '',
+                 secret_hint: 'NPM user password',
+                 guidance: 'Session auth (JWT + CSRF). Create a dedicated NPM admin user; Client ID = its email, Client Secret = its password, Token URL = http://<ip>:81/api/tokens. Base URL is http://<ip>:81/api. Fully curated; all writes require approval.' },
   truenas:     { label: 'TrueNAS', seedable: false,
                  guidance: 'Not yet supported — configure manually.' },
   custom:      { label: 'Custom', seedable: false,
@@ -3495,7 +3499,7 @@ function onIntKindChange() {
   const authHeader = document.getElementById('int-auth-header');
   const secret = document.getElementById('int-secret');
   const verifyTls = document.getElementById('int-verify-tls');
-  const isOAuth2 = profile.auth_type === 'oauth2';
+  const isOAuth2 = profile.auth_type === 'oauth2' || profile.auth_type === 'session';
   if (guidance) {
     guidance.textContent = profile.guidance || '';
     guidance.classList.toggle('hidden', !profile.guidance);

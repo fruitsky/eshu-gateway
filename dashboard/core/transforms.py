@@ -895,6 +895,60 @@ def _prowlarr_indexer_status(integration, tool, args, data):
     return json.dumps(out)
 
 
+def _npm_proxy_hosts(integration, tool, args, data):
+    """Compact NPM proxy-host list. NPM returns the full object per host
+    (locations, advanced_config, access lists, meta) — project to the lean
+    diagnostic shape and honor search/limit/full. meta.nginx_online becomes
+    nginxOnline; a host with it false = config generation failed."""
+    if not isinstance(data, list):
+        return json.dumps(data)
+    needle = str((args or {}).get('search') or '').lower()
+    full = bool((args or {}).get('full'))
+    base = ('id', 'domain_names', 'forward_scheme', 'forward_host',
+            'forward_port', 'enabled', 'ssl_forced', 'certificate_id')
+    out = []
+    for x in data:
+        if not isinstance(x, dict):
+            continue
+        domains = x.get('domain_names') or []
+        if needle and not any(needle in str(d).lower() for d in domains):
+            continue
+        row = {k: x.get(k) for k in base if x.get(k) is not None}
+        meta = x.get('meta') or {}
+        if 'nginx_online' in meta:
+            row['nginxOnline'] = meta['nginx_online']
+        if full:
+            for k in ('locations', 'advanced_config', 'access_list_id'):
+                if x.get(k) is not None:
+                    row[k] = x[k]
+        out.append(row)
+    return json.dumps(_slice(out, (args or {}).get('limit')))
+
+
+def _npm_certificates(integration, tool, args, data):
+    if not isinstance(data, list):
+        return json.dumps(data)
+    out = []
+    for x in data:
+        if not isinstance(x, dict):
+            continue
+        row = {k: x.get(k) for k in ('id', 'provider', 'domain_names',
+                                     'expires_on', 'valid') if x.get(k) is not None}
+        out.append(row)
+    return json.dumps(_slice(out, (args or {}).get('limit')))
+
+
+def _npm_version(integration, tool, args, data):
+    if not isinstance(data, dict):
+        return json.dumps(data)
+    v = data.get('version') or {}
+    if isinstance(v, dict):
+        rev = '.'.join(str(v.get(k)) for k in ('major', 'minor', 'revision') if v.get(k) is not None)
+        if rev:
+            return json.dumps({'version': rev})
+    return json.dumps(data)
+
+
 TRANSFORMS = {
     'pulse_health': _health,
     'pulse_fleet_summary': _fleet_summary,
@@ -929,6 +983,9 @@ TRANSFORMS = {
     'prowlarr_indexers': _prowlarr_indexers,
     'prowlarr_indexer_stats': _prowlarr_indexer_stats,
     'prowlarr_indexer_status': _prowlarr_indexer_status,
+    'npm_proxy_hosts': _npm_proxy_hosts,
+    'npm_certificates': _npm_certificates,
+    'npm_version': _npm_version,
 }
 
 # Transforms that consume the raw body as text (non-JSON endpoints).
