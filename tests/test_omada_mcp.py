@@ -827,6 +827,11 @@ def omada_acl_upstream():
                 return
             if '/acls/osw-acls' in p:
                 state['list_qs'] = urlparse(self.path).query
+                # Omada rejects list GETs without page/pageSize (400) — the
+                # mock must enforce this so the pagination regression is caught.
+                if 'page' not in state['list_qs']:
+                    self._respond(400, {'error': 'Bad Request'})
+                    return
                 self._respond(200, {'errorCode': 0, 'result': {
                     'totalRows': len(state['acls']),
                     'data': [dict(a, index=i + 1) for i, a in enumerate(state['acls'])],
@@ -958,3 +963,35 @@ class TestOmadaAclFixes:
             "beforeRuleId": "R1", "reason": "test"}))
         assert out.get("status") == "pending"
         assert omada_acl_upstream["state"]["reorder_body"] is None
+
+    def test_acl_reorder_outer_fetch_paginated(self, omada_acl_upstream):
+        """Regression: the tool's outer path_template GET must carry
+        page/pageSize — Omada 400s bare list GETs, and the transform (which
+        does the real work) never ran without it."""
+        _omada_acl_integration(omada_acl_upstream)
+        from core.integration_proxy import execute_integration_call
+        tool = get_tool("omada", "acl_reorder")
+        res = execute_integration_call(get_integration("omada"), tool,
+                                       {"siteId": "S1", "aclType": "switch",
+                                        "ruleId": "R3", "beforeRuleId": "R1"},
+                                       agent="test")
+        body = json.loads(res["body"])
+        assert body.get("moved_rule"), f"reorder failed: {res['body'][:200]}"
+        # pagination was present (the mock 400s bare list GETs, so success
+        # proves the outer fetch carried page) — the recorded query is the
+        # internal reorder fetch (pageSize=200)
+        qs = omada_acl_upstream["state"]["list_qs"]
+        assert "page=1" in qs and "pageSize=200" in qs
+        # virtual params were NOT forwarded to the outer GET
+        assert "aclType" not in qs and "ruleId" not in qs and "beforeRuleId" not in qs
+
+    def test_pagination_qs_helper_keeps_explicit(self):
+        """The query-string pagination helper never overrides explicit params."""
+        from core.omada_utils import inject_omada_pagination_qs
+        out = inject_omada_pagination_qs("GET", "/sites/S1/acls/osw-acls",
+                                         "page=2&pageSize=25")
+        assert out == "page=2&pageSize=25"
+        out2 = inject_omada_pagination_qs("GET", "/sites/S1/acls/osw-acls", "")
+        assert out2 == "page=1&pageSize=50"
+        out3 = inject_omada_pagination_qs("GET", "/sites/S1/wireless-network/ssids", "")
+        assert out3 == ""

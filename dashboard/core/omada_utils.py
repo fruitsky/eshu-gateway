@@ -47,6 +47,23 @@ def inject_omada_pagination(method: str, path: str, params: dict) -> dict:
     return params
 
 
+def inject_omada_pagination_qs(method: str, path: str, query_string: str) -> str:
+    """Inject page/pageSize into an existing query string for a paginated Omada
+    GET, preserving the caller's explicit params. Used by the curated-tool path
+    (execute_integration_call), which builds the query string up-front."""
+    if (method or '').upper() != 'GET':
+        return query_string
+    p = path.rstrip('/')
+    if not any(p.endswith(s) for s in OMADA_PAGINATED_SUFFIXES):
+        return query_string
+    parsed = urllib.parse.parse_qsl(query_string) if query_string else []
+    keys = {k for k, _ in parsed}
+    if 'page' in keys or 'pageSize' in keys:
+        return query_string
+    parts = list(parsed) + [('page', '1'), ('pageSize', str(PAGE_SIZE))]
+    return urllib.parse.urlencode(parts)
+
+
 def _fetch_json(integration, path: str, params: dict = None):
     """Small GET against the integration's base URL. Raises on failure."""
     from core.integration_proxy import (
@@ -98,7 +115,7 @@ def reorder_acls(integration, site_id: str, acl_type: str, rule_id: str,
         raise ValueError("rule cannot be moved before itself")
     acl_path = '/acls/osw-acls' if acl_type == 'switch' else '/acls/osg-acls'
     listed = _fetch_json(integration, f"/sites/{site_id}{acl_path}",
-                         {'page': 1, 'pageSize': 50})
+                         {'page': 1, 'pageSize': 200})
     items = (listed.get('result') or {}).get('data') if isinstance(listed, dict) else None
     if not isinstance(items, list):
         raise ValueError("ACL list returned no data")

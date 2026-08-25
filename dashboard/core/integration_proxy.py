@@ -566,6 +566,12 @@ def execute_integration_call(integration: dict, tool: dict, args: dict, agent: s
         raise ProxyError(500, f"Unsupported auth_type: {auth_type}")
 
     method, path, query_string, body_params, raw_body = _build_request(tool, args)
+    # Omada list endpoints 400 without page/pageSize — inject defaults for the
+    # curated-tool path too (mirrors the generic-read handling), never
+    # overriding explicit params.
+    if (integration.get('kind') or '').lower() == 'omada':
+        from core.omada_utils import inject_omada_pagination_qs
+        query_string = inject_omada_pagination_qs(method, path, query_string)
     base_url = (integration.get('base_url') or '').rstrip('/')
     # Omada v2 endpoints live under /openapi/v2/... while the integration's
     # base URL is /openapi/v1/... — a tool flagged `version: v2` swaps the

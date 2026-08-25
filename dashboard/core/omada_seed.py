@@ -160,9 +160,9 @@ OMADA_SEED_TOOLS = [
         "path_template": "/sites/{siteId}/acls/osw-acls",
         "params": [
             {"name": "siteId", "type": "string", "description": "Site id (from list_sites).", "required": True},
-            {"name": "aclType", "type": "string", "description": "switch or gateway (osw-acls / osg-acls).", "required": True},
-            {"name": "ruleId", "type": "string", "description": "The ACL rule id to move.", "required": True},
-            {"name": "beforeRuleId", "type": "string", "description": "Move ruleId immediately before this ACL rule id.", "required": True},
+            {"name": "aclType", "type": "string", "description": "switch or gateway (osw-acls / osg-acls).", "required": True, "local": True},
+            {"name": "ruleId", "type": "string", "description": "The ACL rule id to move.", "required": True, "local": True},
+            {"name": "beforeRuleId", "type": "string", "description": "Move ruleId immediately before this ACL rule id.", "required": True, "local": True},
         ],
         "transform": "omada_acl_reorder",
         "example": '{"moved_rule": {"id": "6a86cc3477bfbd044e5f5dc0", "index": 1}, "order": [{"index": 1, "id": "6a86cc3477bfbd044e5f5dc0", "description": "Allow_Kindle2Main"}, {"index": 2, "id": "6a86cc3477bfbd044e5f5dc1", "description": "Block_IoT"}]}',
