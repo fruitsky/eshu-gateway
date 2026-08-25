@@ -131,6 +131,18 @@ def init_integrations_tables(cursor):
         cursor.execute("ALTER TABLE integration_tools ADD COLUMN seeded INTEGER DEFAULT 0")
     except Exception:
         pass
+    # Backfill: tools seeded before the `seeded` column existed carry the column
+    # default 0, so the stale-seed cleanup would skip them. Curated seed tools
+    # always set at least one of transform / error_codes / always_gate /
+    # response_hint / generic; hand-created tools (API create) set none — so
+    # those traits reliably identify pre-migration seed tools. Idempotent.
+    cursor.execute('''
+        UPDATE integration_tools SET seeded = 1
+        WHERE seeded = 0 AND (
+            transform != '' OR error_codes != '{}' OR always_gate = 1
+            OR response_hint != '' OR generic = 1
+        )
+    ''')
     # One-time backfill: integrations seeded before the `kind` column existed
     # defaulted to 'custom'. Infer 'proxmox' for any that already carry known
     # Proxmox tool names, so existing installs don't need a manual Type edit.

@@ -175,6 +175,34 @@ class TestKindMigration:
         assert get_integration("custom")["kind"] == "custom"
 
 
+class TestSeededBackfill:
+    """Pre-migration seed tools (seeded=0 but carrying curated-catalog traits)
+    are backfilled to seeded=1 so stale-seed cleanup can drop them; hand-created
+    tools (no traits) stay unseeded."""
+
+    def _tool_seeded(self, iid, name):
+        from db.integrations import get_tools
+        return next(t["seeded"] for t in get_tools(iid) if t["name"] == name)
+
+    def test_curated_trait_tool_backfilled(self, auth_client):
+        from db.integrations import create_tool
+        from db.core import init_db
+        iid = create_integration("x", "https://x/api", "none", "")
+        create_tool(iid, "stale", "old", "GET", "/x", [], "{}", read_only=True,
+                    error_codes={"404": "not_found"}, seeded=False)
+        assert self._tool_seeded(iid, "stale") == 0
+        init_db()  # re-run migrations, as on an existing install
+        assert self._tool_seeded(iid, "stale") == 1
+
+    def test_handmade_tool_not_backfilled(self, auth_client):
+        from db.integrations import create_tool
+        from db.core import init_db
+        iid = create_integration("y", "https://y/api", "none", "")
+        create_tool(iid, "handmade", "mine", "GET", "/y", [], "{}", read_only=True)
+        init_db()
+        assert self._tool_seeded(iid, "handmade") == 0
+
+
 class TestReseed:
     """Automatic re-seed on startup applies each integration's seed catalog,
     updates changed fields in place, and preserves enable/disable state."""
