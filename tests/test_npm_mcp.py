@@ -214,6 +214,9 @@ class TestNpmCatalog:
         # writes are always gated
         cp = next(t for t in tools if t["name"] == "create_proxy_host")
         assert cp["read_only"] == 0 and cp["always_gate"] == 1
+        # search_field is propagated so the MCP surface exposes search/limit
+        ph = next(t for t in tools if t["name"] == "proxy_hosts")
+        assert ph["search_field"] == "domain_names"
 
     def test_tools_namespaced_by_name(self, auth_client):
         import asyncio
@@ -232,6 +235,24 @@ class TestNpmCatalog:
         names = asyncio.run(_names())
         assert "npm_proxy_hosts" in names
         assert "npm_delete_proxy_host" in names
+
+    def test_proxy_hosts_mcp_signature_exposes_search(self, auth_client):
+        """Regression: the seeder dropped search_field, so the generated MCP
+        function lacked search/limit and Hermes's filter silently did nothing.
+        search_field propagation must surface both params."""
+        import inspect
+        from core.mcp_server import mcp as _mcp, refresh_mcp_tools
+        auth_client.post("/api/integrations", json={
+            "name": "npm", "base_url": "http://192.168.1.242:81/api",
+            "auth_type": "session", "client_id": "eshu@local.kenguelacloud.com",
+            "client_secret": "pw", "token_url": "http://192.168.1.242:81/api/tokens",
+            "kind": "npm",
+        })
+        auth_client.post("/api/integrations/npm/seed")
+        refresh_mcp_tools()
+        fn = _mcp._tool_manager._tools["npm_proxy_hosts"].fn
+        params = list(inspect.signature(fn).parameters)
+        assert "search" in params and "limit" in params
 
 
 class TestNpmTransforms:
