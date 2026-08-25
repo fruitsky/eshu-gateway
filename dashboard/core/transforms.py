@@ -949,6 +949,28 @@ def _npm_version(integration, tool, args, data):
     return json.dumps(data)
 
 
+def _omada_acl_reorder(integration, tool, args, data):
+    """Rebuild the full Omada ACL order server-side so agents express intent
+    ('move rule X before rule Y') instead of hand-building the modifyIndex map.
+    Errors map to stable `invalid_request` messages — never the raw -1001 body."""
+    from core.omada_utils import reorder_acls
+    a = args or {}
+    site_id = a.get('siteId')
+    acl_type = a.get('aclType')
+    rule_id = a.get('ruleId')
+    before_rule_id = a.get('beforeRuleId')
+    if not (site_id and acl_type and rule_id and before_rule_id):
+        return json.dumps({'error': 'invalid_request',
+                           'message': 'siteId, aclType, ruleId and beforeRuleId are required'})
+    try:
+        result = reorder_acls(integration, site_id, acl_type, rule_id, before_rule_id)
+    except ValueError as e:
+        return json.dumps({'error': 'invalid_request', 'message': str(e)})
+    except Exception as e:
+        return json.dumps({'error': 'invalid_request', 'message': f"{type(e).__name__}: {e}"})
+    return json.dumps(result)
+
+
 TRANSFORMS = {
     'pulse_health': _health,
     'pulse_fleet_summary': _fleet_summary,
@@ -986,6 +1008,7 @@ TRANSFORMS = {
     'npm_proxy_hosts': _npm_proxy_hosts,
     'npm_certificates': _npm_certificates,
     'npm_version': _npm_version,
+    'omada_acl_reorder': _omada_acl_reorder,
 }
 
 # Transforms that consume the raw body as text (non-JSON endpoints).

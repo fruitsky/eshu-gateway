@@ -180,7 +180,7 @@ Eshu ships **curated tool catalogs** for these kinds — seeded via **Integratio
 | Kind | Auth type | Notes |
 |------|-----------|-------|
 | **Proxmox** | `header` (`Authorization: PVEAPIToken=…`) | reads + approval-gated VM lifecycle tools |
-| **Omada** | `oauth2` | client-credentials token exchange; auto re-auth on expiry |
+| **Omada** | `oauth2` | client-credentials token exchange; auto re-auth on expiry. List reads auto-inject `page/pageSize`; ACL creates return the created rule's id; `acl_reorder` rebuilds the full rule map server-side (approval-gated) |
 | **Home Assistant** | `bearer` (long-lived token) | `call_service` is mutating → approval |
 | **Pulse** | `bearer`/`header` | trends, backups (large payloads truncated to 1MB) |
 | **Jellyfin** | `header` (`X-Emby-Token`) | mutations always gated |

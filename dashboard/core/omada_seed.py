@@ -153,6 +153,22 @@ OMADA_SEED_TOOLS = [
         "example": '[]',
         "read_only": False,
     },
+    {
+        "name": "acl_reorder",
+        "description": "Reorder Omada ACLs (first-match-wins, evaluated top-down). Move ruleId to the position immediately before beforeRuleId. The full rule map is rebuilt server-side — you only express intent; no need to transcribe all rule ids. aclType is switch (osw-acls) or gateway (osg-acls). REQUIRES OPERATOR APPROVAL.",
+        "method": "GET",
+        "path_template": "/sites/{siteId}/acls/osw-acls",
+        "params": [
+            {"name": "siteId", "type": "string", "description": "Site id (from list_sites).", "required": True},
+            {"name": "aclType", "type": "string", "description": "switch or gateway (osw-acls / osg-acls).", "required": True},
+            {"name": "ruleId", "type": "string", "description": "The ACL rule id to move.", "required": True},
+            {"name": "beforeRuleId", "type": "string", "description": "Move ruleId immediately before this ACL rule id.", "required": True},
+        ],
+        "transform": "omada_acl_reorder",
+        "example": '{"moved_rule": {"id": "6a86cc3477bfbd044e5f5dc0", "index": 1}, "order": [{"index": 1, "id": "6a86cc3477bfbd044e5f5dc0", "description": "Allow_Kindle2Main"}, {"index": 2, "id": "6a86cc3477bfbd044e5f5dc1", "description": "Block_IoT"}]}',
+        "read_only": False,
+        "always_gate": True,
+    },
 ]
 
 
@@ -178,6 +194,8 @@ def seed_omada_tools(integration_id: int):
                 search_field=tool.get('search_field'),
                 version=tool.get('version', 'v1'),
                 strip_envelope=tool.get('strip_envelope'),
+                transform=tool.get('transform'),
+                always_gate=bool(tool.get('always_gate')),
                 example=tool['example'],
                 read_only=tool['read_only'],
                 seeded=True,
@@ -197,6 +215,8 @@ def seed_omada_tools(integration_id: int):
                 search_field=tool.get('search_field') or '',
                 version=tool.get('version', 'v1'),
                 strip_envelope=tool.get('strip_envelope'),
+                transform=tool.get('transform') or '',
+                always_gate=bool(tool.get('always_gate')),
                 seeded=True,
             )
             created += 1

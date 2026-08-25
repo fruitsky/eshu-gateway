@@ -664,6 +664,13 @@ def execute_generic_call(integration: dict, method: str, path: str, params=None,
 
     path = (path or '').lstrip('/')
     base_url = (integration.get('base_url') or '').rstrip('/')
+    params = params or {}
+    # Omada list endpoints 400 without page/pageSize — inject defaults so the
+    # generic read works without the agent knowing the quirk. Explicit params
+    # are never overridden.
+    if (integration.get('kind') or '').lower() == 'omada':
+        from core.omada_utils import inject_omada_pagination
+        params = inject_omada_pagination(method, path, params)
     if root:
         # Same host, root of the origin — the SSRF guard still verifies netloc.
         parsed = urllib.parse.urlparse(base_url)
@@ -703,6 +710,13 @@ def execute_generic_call(integration: dict, method: str, path: str, params=None,
             outcome = 'error'
             error = up_err
             body = ''
+        elif ((integration.get('kind') or '').lower() == 'omada'
+              and method == 'POST'
+              and any(path.rstrip('/').endswith(s) for s in ('/acls/osw-acls', '/acls/osg-acls'))):
+            # ACL creates return no rule id — enrich the response with the
+            # created rule so the agent doesn't have to re-list and guess.
+            from core.omada_utils import enrich_acl_create
+            body = enrich_acl_create(integration, path, data or {}, body)
     else:
         norm = _normalize_http_error(status_code, body)
         if norm:

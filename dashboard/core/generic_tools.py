@@ -17,6 +17,10 @@ def generic_tools_for(kind: str) -> list:
         "url}) with no body, e.g. to check a media file's size. Credentials are "
         "injected by Eshu; every call is audited."
     )
+    if kind == 'omada':
+        read_desc += (" Omada list endpoints require page/pageSize — defaults "
+                      "(page=1, pageSize=50) are injected when omitted, so list "
+                      "reads work without passing them.")
     write_desc = (
         "Call any mutating endpoint on this integration. `method` is "
         "POST/PUT/PATCH/DELETE, `path` is relative to the base URL, `params` is "

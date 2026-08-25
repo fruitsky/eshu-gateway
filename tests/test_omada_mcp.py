@@ -1,11 +1,14 @@
 import http.server
 import json
 import threading
+from urllib.parse import urlparse
 
 import pytest
 
-from db.integrations import create_integration, create_tool, get_integration
+from db.integrations import create_integration, create_tool, get_integration, get_tool
 from core.integration_proxy import execute_integration_call, ProxyError
+from core.seeds import seed_for_kind
+from core.tool_runner import run_tool
 
 
 @pytest.fixture(autouse=True)
@@ -280,14 +283,20 @@ class TestOmadaSeed:
         })
         r = auth_client.post("/api/integrations/omada/seed")
         assert r.status_code == 200
-        assert r.json()["created"] == 12  # 10 curated + generic read/write
+        assert r.json()["created"] == 13  # 11 curated + generic read/write
         tools = auth_client.get("/api/integrations/omada/tools").json()
         names = {t["name"] for t in tools}
         assert names == {"list_sites", "get_site", "list_site_devices", "search_devices",
                          "list_site_clients", "get_client", "list_site_ssids",
-                         "list_site_alerts", "block_client", "reconnect_client", "read", "write"}
+                         "list_site_alerts", "block_client", "reconnect_client",
+                         "acl_reorder", "read", "write"}
         bc = next(t for t in tools if t["name"] == "block_client")
         assert bc["read_only"] == 0
+        # acl_reorder is gated unconditionally and registered as a transform
+        ar = next(t for t in tools if t["name"] == "acl_reorder")
+        assert ar["read_only"] == 0
+        assert ar["always_gate"] == 1
+        assert ar["transform"] == "omada_acl_reorder"
         ls = next(t for t in tools if t["name"] == "list_sites")
         assert ls["search_field"] == "name"
         assert "siteId" in ls["fields"]
@@ -759,3 +768,193 @@ class TestGenericReadRegisters:
         assert t is not None, "x_read not registered"
         params = list(inspect.signature(t.fn).parameters)
         assert params == ["path", "method", "params"], f"unexpected order: {params}"
+
+
+@pytest.fixture
+def omada_acl_upstream():
+    """Mock Omada with ACL list/create/modifyIndex + the OAuth2 token exchange.
+    Used to test pagination injection, create-enrichment, and acl_reorder."""
+    state = {
+        'acls': [
+            {'id': 'R1', 'index': 1, 'description': 'Allow_Kindle2Main', 'policy': 1, 'protocols': [6, 17]},
+            {'id': 'R2', 'index': 2, 'description': 'Block_IoT', 'policy': 0, 'protocols': [1]},
+            {'id': 'R3', 'index': 3, 'description': 'Allow_LAN', 'policy': 1, 'protocols': [6]},
+        ],
+        'reorder_body': None,
+        'list_qs': '',
+        'upstream_err': None,
+    }
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def _path(self):
+            return urlparse(self.path).path
+
+        def _respond(self, status, payload):
+            body = json.dumps(payload).encode('utf-8')
+            self.send_response(status)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_POST(self):
+            p = self._path()
+            if p.endswith('/authorize/token'):
+                self._respond(200, {'result': {'accessToken': 'tok-1', 'expiresIn': 7200}})
+                return
+            if p.endswith('/acls/modifyIndex'):
+                state['reorder_body'] = json.loads(
+                    self.rfile.read(int(self.headers.get('Content-Length', '0'))))
+                if state['upstream_err']:
+                    self._respond(200, {'errorCode': -1001, 'msg': state['upstream_err']})
+                else:
+                    self._respond(200, {'errorCode': 0, 'msg': 'Success.'})
+                return
+            if p.endswith('/acls/osw-acls'):
+                body = json.loads(self.rfile.read(int(self.headers.get('Content-Length', '0'))))
+                state['acls'].append({'id': 'R4', 'index': 4,
+                                      'description': body.get('description'),
+                                      'policy': body.get('policy'),
+                                      'protocols': body.get('protocols')})
+                self._respond(200, {'errorCode': 0, 'msg': 'Success.'})
+                return
+            self._respond(404, {'error': 'not found'})
+
+        def do_GET(self):
+            p = self._path()
+            if p.endswith('/authorize/token'):
+                self._respond(200, {'result': {'accessToken': 'tok-1'}})
+                return
+            if '/acls/osw-acls' in p:
+                state['list_qs'] = urlparse(self.path).query
+                self._respond(200, {'errorCode': 0, 'result': {
+                    'totalRows': len(state['acls']),
+                    'data': [dict(a, index=i + 1) for i, a in enumerate(state['acls'])],
+                }})
+                return
+            self._respond(404, {'error': 'not found'})
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), _Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield {'base_url': f"http://127.0.0.1:{server.server_address[1]}", 'state': state}
+    server.shutdown()
+    server.server_close()
+
+
+def _omada_acl_integration(upstream):
+    from core.integration_proxy import _oauth_tokens
+    _oauth_tokens.clear()
+    create_integration(
+        "omada", upstream['base_url'] + "/openapi/v1/omadac-1", "oauth2", "",
+        client_id="cid", client_secret="csecret",
+        token_url=upstream['base_url'] + "/openapi/authorize/token",
+        kind="omada")
+    seed_for_kind(get_integration("omada"))
+    return get_integration("omada")
+
+
+class TestOmadaAclFixes:
+
+    def test_read_injects_pagination(self, omada_acl_upstream):
+        _omada_acl_integration(omada_acl_upstream)
+        out = json.loads(run_tool("omada", "read", {"path": "/sites/S1/acls/osw-acls"}))
+        assert out.get("error") is None
+        assert omada_acl_upstream["state"]["list_qs"] == "page=1&pageSize=50"
+
+    def test_read_explicit_pagination_untouched(self, omada_acl_upstream):
+        _omada_acl_integration(omada_acl_upstream)
+        run_tool("omada", "read", {"path": "/sites/S1/acls/osw-acls",
+                                   "params": {"page": 3, "pageSize": 25}})
+        assert "page=3" in omada_acl_upstream["state"]["list_qs"]
+        assert "pageSize=25" in omada_acl_upstream["state"]["list_qs"]
+
+    def test_read_non_paginated_path_untouched(self, omada_acl_upstream):
+        _omada_acl_integration(omada_acl_upstream)
+        run_tool("omada", "read", {"path": "/sites/S1/wireless-network/ssids"})
+        assert omada_acl_upstream["state"]["list_qs"] == ""
+
+    def test_create_returns_created_rule(self, omada_acl_upstream):
+        _omada_acl_integration(omada_acl_upstream)
+        body = {"description": "TMP_Reorder_Test", "policy": 0, "protocols": [1],
+                "sourceType": 1, "destinationType": 0}
+        out = json.loads(run_tool("omada", "write", {
+            "method": "POST", "path": "/sites/S1/acls/osw-acls", "data": body}))
+        assert out.get("created_rule") == {"id": "R4", "index": 4}
+
+    def test_create_non_acl_untouched(self, omada_acl_upstream):
+        _omada_acl_integration(omada_acl_upstream)
+        out = json.loads(run_tool("omada", "write", {
+            "method": "POST", "path": "/sites/S1/clients/MAC/block", "data": {}}))
+        assert "created_rule" not in out
+
+    def test_acl_reorder_moves_rule_before(self, omada_acl_upstream):
+        _omada_acl_integration(omada_acl_upstream)
+        from core.integration_proxy import execute_integration_call
+        tool = get_tool("omada", "acl_reorder")
+        res = execute_integration_call(get_integration("omada"), tool,
+                                       {"siteId": "S1", "aclType": "switch",
+                                        "ruleId": "R3", "beforeRuleId": "R1"},
+                                       agent="test")
+        body = json.loads(res["body"])
+        assert body["moved_rule"] == {"id": "R3", "index": 1}
+        assert omada_acl_upstream["state"]["reorder_body"]["indexes"] == \
+            {"R3": 1, "R1": 2, "R2": 3}
+
+    def test_acl_reorder_self_move_invalid(self, omada_acl_upstream):
+        _omada_acl_integration(omada_acl_upstream)
+        from core.integration_proxy import execute_integration_call
+        tool = get_tool("omada", "acl_reorder")
+        res = execute_integration_call(get_integration("omada"), tool,
+                                       {"siteId": "S1", "aclType": "switch",
+                                        "ruleId": "R1", "beforeRuleId": "R1"},
+                                       agent="test")
+        assert "invalid_request" in res["body"]
+        assert "before itself" in res["body"]
+        assert omada_acl_upstream["state"]["reorder_body"] is None
+
+    def test_acl_reorder_bogus_rule_invalid(self, omada_acl_upstream):
+        _omada_acl_integration(omada_acl_upstream)
+        from core.integration_proxy import execute_integration_call
+        tool = get_tool("omada", "acl_reorder")
+        res = execute_integration_call(get_integration("omada"), tool,
+                                       {"siteId": "S1", "aclType": "switch",
+                                        "ruleId": "BOGUS", "beforeRuleId": "R1"},
+                                       agent="test")
+        assert "invalid_request" in res["body"]
+        assert "BOGUS" in res["body"]
+        assert omada_acl_upstream["state"]["reorder_body"] is None
+
+    def test_acl_reorder_upstream_error_mapped(self, omada_acl_upstream):
+        omada_acl_upstream["state"]["upstream_err"] = "Invalid request parameters"
+        _omada_acl_integration(omada_acl_upstream)
+        from core.integration_proxy import execute_integration_call
+        tool = get_tool("omada", "acl_reorder")
+        res = execute_integration_call(get_integration("omada"), tool,
+                                       {"siteId": "S1", "aclType": "switch",
+                                        "ruleId": "R3", "beforeRuleId": "R1"},
+                                       agent="test")
+        assert "invalid_request" in res["body"]
+        assert "Invalid request parameters" in res["body"]
+
+    def test_acl_reorder_bad_type_invalid(self, omada_acl_upstream):
+        _omada_acl_integration(omada_acl_upstream)
+        from core.integration_proxy import execute_integration_call
+        tool = get_tool("omada", "acl_reorder")
+        res = execute_integration_call(get_integration("omada"), tool,
+                                       {"siteId": "S1", "aclType": "bogus",
+                                        "ruleId": "R3", "beforeRuleId": "R1"},
+                                       agent="test")
+        assert "invalid_request" in res["body"]
+
+    def test_acl_reorder_gated(self, omada_acl_upstream):
+        """acl_reorder must route through the approval queue (always_gate)."""
+        _omada_acl_integration(omada_acl_upstream)
+        out = json.loads(run_tool("omada", "acl_reorder", {
+            "siteId": "S1", "aclType": "switch", "ruleId": "R3",
+            "beforeRuleId": "R1", "reason": "test"}))
+        assert out.get("status") == "pending"
+        assert omada_acl_upstream["state"]["reorder_body"] is None
