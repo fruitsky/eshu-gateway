@@ -154,6 +154,14 @@ def _build_tool_fn(integration_name: str, tool: dict):
             sig_parts.append(f"{name}: {ptype} = None")
         arg_entries.append((p['name'], name))
 
+    # Required params must precede optional ones in a Python `def` signature
+    # (a required param after a defaulted one is a SyntaxError). Reorder by
+    # that rule — safe because callers pass by keyword and FastMCP's input
+    # schema is keyed by name, so ordering never affects invocation.
+    required = [s for s in sig_parts if '=' not in s]
+    optional = [s for s in sig_parts if '=' in s]
+    sig_parts = required + optional
+
     if mutating:
         # keyword-only so a required `reason` can follow optional params
         # (e.g. call_service's optional `data`) without a Python SyntaxError.

@@ -709,3 +709,53 @@ class TestPerIntegrationMcp:
         assert r.status_code == 200
         row = next(i for i in auth_client.get("/api/integrations").json() if i["name"] == "ok_mode")
         assert row["mcp_mode"] == "standalone"
+
+
+class TestGenericReadRegisters:
+    """Regression: the generic `read` tool's params (method defaulted, path
+    required) must produce a valid signature so proxmox_read / omada_read /
+    home_assistant_read / pulse_read actually register on the MCP surface —
+    not silently fail with 'parameter without a default follows parameter
+    with a default' (which hid them from the live registry)."""
+
+    def _seed_kind(self, auth_client, name, kind):
+        auth_client.post("/api/integrations", json={
+            "name": name, "base_url": f"https://{name}.local/api",
+            "auth_type": "none", "secret": "", "kind": kind,
+        })
+        auth_client.post(f"/api/integrations/{name}/seed")
+
+    def test_generic_reads_register(self, auth_client):
+        import asyncio
+        from core import mcp_server as ms
+        for name, kind in [("proxmox", "proxmox"), ("omada", "omada"),
+                           ("home-assistant", "ha"), ("pulse", "pulse")]:
+            self._seed_kind(auth_client, name, kind)
+        ms.refresh_mcp_tools()
+
+        async def _names():
+            return {t.name for t in await ms.mcp.list_tools()}
+        names = asyncio.run(_names())
+
+        for n in ("proxmox_read", "omada_read", "home_assistant_read", "pulse_read",
+                  "proxmox_write", "pulse_write"):
+            assert n in names, f"{n} missing from MCP surface"
+
+    def test_generic_read_signature_valid(self, temp_db):
+        """The generated signature must put required params before defaulted ones."""
+        import inspect
+        from db.integrations import create_integration, create_tool
+        from core import mcp_server as ms
+        iid = create_integration("x", "http://x/api", "none", "")
+        create_tool(iid, "read", "Read", "GET", "", [
+            {"name": "method", "type": "string", "default": "GET", "required": False},
+            {"name": "path", "type": "string", "required": True},
+            {"name": "params", "type": "json", "required": False},
+        ], "{}", read_only=True, generic=True)
+        ms.refresh_mcp_tools()
+
+        reg = ms.mcp._tool_manager._tools
+        t = reg.get("x_read")
+        assert t is not None, "x_read not registered"
+        params = list(inspect.signature(t.fn).parameters)
+        assert params == ["path", "method", "params"], f"unexpected order: {params}"
