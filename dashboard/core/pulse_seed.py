@@ -1,4 +1,4 @@
-"""Curated seed catalog for Pulse (Proxmox monitoring, v5.1.36).
+"""Curated seed catalog for Pulse (Proxmox monitoring, v6.3.2).
 
 Auth is a simple `X-API-Token: <token>` header (Bearer also accepted) — the
 integration is created with `auth_type: header` / `auth_header_name:
@@ -27,7 +27,7 @@ PULSE_SEED_TOOLS = [
         "path_template": "/health",
         "params": [],
         "transform": "pulse_health",
-        "example": '{"status": "healthy", "uptime": 3171279.7, "version": "5.1.36", "channel": "stable", "deploymentType": "proxmoxve"}',
+        "example": '{"status": "healthy", "uptime": 3171279.7, "version": "6.3.2", "channel": "stable", "deploymentType": "proxmoxve"}',
         "read_only": True,
     },
     {
@@ -39,7 +39,7 @@ PULSE_SEED_TOOLS = [
         "fields": ["id", "name", "type", "status", "cpuPct", "memPct", "diskPct", "ip", "alerts"],
         "search_field": "name",
         "transform": "pulse_fleet_summary",
-        "example": '{"count": 12, "resources": [{"id": "pve:pve3:104", "name": "CloudFlare", "type": "container", "status": "stopped", "cpuPct": 0}]}',
+        "example": '{"count": 12, "resources": [{"id": "pve:pve3:104", "name": "CloudFlare", "type": "system-container", "status": "stopped", "cpuPct": 0}]}',
         "read_only": True,
     },
     {
@@ -52,7 +52,7 @@ PULSE_SEED_TOOLS = [
         ],
         "fields": ["id", "name", "type", "status", "osName", "ip", "alerts"],
         "transform": "pulse_get_resource",
-        "example": '{"id": "pve:pve3:104", "name": "CloudFlare", "type": "container", "status": "stopped", "osName": "Ubuntu", "ip": ["192.168.1.240"]}',
+        "example": '{"id": "pve:pve3:104", "name": "CloudFlare", "type": "system-container", "status": "stopped", "osName": "Ubuntu", "ip": ["192.168.1.240"]}',
         "read_only": True,
     },
     {
@@ -85,28 +85,15 @@ PULSE_SEED_TOOLS = [
         "read_only": True,
     },
     {
-        "name": "list_backups",
-        "description": "List backups merged from PBS backups and recent backup tasks, newest first. vmid filters to one guest; limit bounds the result. Returns vmid, source, time, size, protected, verified, datastore, status.",
-        "method": "GET",
-        "path_template": "/backups/unified",
-        "params": [
-            {"name": "vmid", "type": "integer", "description": "Guest VMID to filter to (optional).", "required": False, "local": True},
-            {"name": "limit", "type": "integer", "description": "Max results (default 50).", "required": False, "default": 50, "local": True},
-        ],
-        "transform": "pulse_list_backups",
-        "example": '[{"vmid": 104, "source": "pbs", "time": 1724170000, "size": 8589934592, "protected": true, "verified": true, "datastore": "backups", "status": "ok"}]',
-        "read_only": True,
-    },
-    {
         "name": "list_storage",
-        "description": "List monitored storage pools (type=storage resources) with used/total/free bytes and percent. Use search (name/id substring) and limit to narrow. Prefer over the raw /api/storage endpoint (400s without an id).",
+        "description": "List monitored storage pools (type=storage resources) with used/total/free bytes and percent. free is computed (total - used) because Pulse v6 no longer reports it. Use search (name/id substring) and limit to narrow. Prefer over the raw /api/storage endpoint (400s without an id).",
         "method": "GET",
         "path_template": "/resources",
         "params": [],
         "fields": ["id", "name", "status", "used", "free", "total", "pct"],
         "search_field": "name",
         "transform": "pulse_list_storage",
-        "example": '[{"id": "prox-cluster-cluster-pbs_backups", "name": "pbs_backups", "status": "online", "used": 1099511627776, "total": 4398046511104, "pct": 25}]',
+        "example": '[{"id": "prox-cluster-cluster-pbs_backups", "name": "pbs_backups", "status": "online", "used": 1099511627776, "free": 3298534883328, "total": 4398046511104, "pct": 25}]',
         "read_only": True,
     },
     {
@@ -127,29 +114,29 @@ PULSE_SEED_TOOLS = [
         "path_template": "/state",
         "params": [],
         "fields": ["connectionHealth"],
-        "example": '{"connectionHealth": {"pve": true}}',
+        "example": '{"connectionHealth": {"host-1ef948c6-c8e0-4298-8774-778e4cd4365f": true, "pve": true}}',
         "read_only": True,
     },
 
     # ── Write tools (gated per the integration's approval policy) ────────
     {
         "name": "acknowledge_alert",
-        "description": "Acknowledge a single alert by id. Requires operator approval per the integration's gating policy.",
+        "description": "Acknowledge a single alert by id (POST body: alertIdentifier). Requires operator approval per the integration's gating policy.",
         "method": "POST",
         "path_template": "/alerts/acknowledge",
         "params": [
-            {"name": "id", "type": "string", "description": "Alert id (from pulse_list_alerts).", "required": True},
+            {"name": "alertIdentifier", "type": "string", "description": "Alert id (from pulse_list_alerts).", "required": True},
         ],
         "example": '{"ok": true}',
         "read_only": False,
     },
     {
         "name": "acknowledge_alerts_bulk",
-        "description": "Acknowledge multiple alerts in one call. ids should be a JSON array of alert ids. Requires operator approval per the integration's gating policy.",
+        "description": "Acknowledge multiple alerts in one call. alertIdentifiers should be a JSON array of alert ids. Requires operator approval per the integration's gating policy.",
         "method": "POST",
         "path_template": "/alerts/bulk/acknowledge",
         "params": [
-            {"name": "ids", "type": "json", "description": "JSON array of alert ids to acknowledge.", "required": True},
+            {"name": "alertIdentifiers", "type": "json", "description": "JSON array of alert ids to acknowledge.", "required": True},
         ],
         "example": '{"ok": true}',
         "read_only": False,
@@ -199,7 +186,7 @@ PULSE_SEED_TOOLS = [
         "name": "test_node_connection",
         "description": "Test connectivity to a node config without persisting it. Credentials are redacted from audit output. Requires operator approval per the integration's gating policy.",
         "method": "POST",
-        "path_template": "/config/nodes/test-connection",
+        "path_template": "/config/nodes/test-config",
         "params": [
             {"name": "host", "type": "string", "description": "Node host URL.", "required": True},
             {"name": "type", "type": "string", "description": "Node type.", "required": False, "default": "pve"},
@@ -219,18 +206,21 @@ PULSE_SEED_TOOLS = [
         "read_only": False,
     },
 
-    # ── FUTURE (v6 upgrade markers — declared, not implemented) ──────────
-    {"name": "list_findings", "description": "[v6] List security/health findings. Not implemented yet — declared as a roadmap marker.", "method": "GET", "path_template": "/findings", "params": [], "example": "[]", "read_only": True, "not_implemented": True},
-    {"name": "ack_finding", "description": "[v6] Acknowledge a finding. Not implemented yet.", "method": "POST", "path_template": "/findings/ack", "params": [], "example": "{}", "read_only": True, "not_implemented": True},
-    {"name": "snooze_finding", "description": "[v6] Snooze a finding. Not implemented yet.", "method": "POST", "path_template": "/findings/snooze", "params": [], "example": "{}", "read_only": True, "not_implemented": True},
-    {"name": "dismiss_finding", "description": "[v6] Dismiss a finding. Not implemented yet.", "method": "POST", "path_template": "/findings/dismiss", "params": [], "example": "{}", "read_only": True, "not_implemented": True},
-    {"name": "resolve_finding", "description": "[v6] Resolve a finding. Not implemented yet.", "method": "POST", "path_template": "/findings/resolve", "params": [], "example": "{}", "read_only": True, "not_implemented": True},
+    # ── FUTURE (v6 manifest tools — declared, not implemented) ───────────
+    # Paths/methods mirror the v6 `/api/agent/capabilities` manifest (probed
+    # 2026-08-28): findings live under /api/ai/patrol, actions under
+    # /api/actions, operator-state under /api/resources/{resourceId}.
+    {"name": "list_findings", "description": "[v6] List security/health findings. Not implemented yet — declared as a roadmap marker.", "method": "GET", "path_template": "/ai/patrol/findings", "params": [], "example": "[]", "read_only": True, "not_implemented": True},
+    {"name": "ack_finding", "description": "[v6] Acknowledge a finding. Not implemented yet.", "method": "POST", "path_template": "/ai/patrol/acknowledge", "params": [], "example": "{}", "read_only": True, "not_implemented": True},
+    {"name": "snooze_finding", "description": "[v6] Snooze a finding. Not implemented yet.", "method": "POST", "path_template": "/ai/patrol/snooze", "params": [], "example": "{}", "read_only": True, "not_implemented": True},
+    {"name": "dismiss_finding", "description": "[v6] Dismiss a finding. Not implemented yet.", "method": "POST", "path_template": "/ai/patrol/dismiss", "params": [], "example": "{}", "read_only": True, "not_implemented": True},
+    {"name": "resolve_finding", "description": "[v6] Resolve a finding. Not implemented yet.", "method": "POST", "path_template": "/ai/patrol/resolve", "params": [], "example": "{}", "read_only": True, "not_implemented": True},
     {"name": "plan_action", "description": "[v6] Plan a remediation action. Not implemented yet.", "method": "POST", "path_template": "/actions/plan", "params": [], "example": "{}", "read_only": True, "not_implemented": True},
-    {"name": "decide_action", "description": "[v6] Decide on a proposed action. Not implemented yet.", "method": "POST", "path_template": "/actions/decide", "params": [], "example": "{}", "read_only": True, "not_implemented": True},
-    {"name": "execute_action", "description": "[v6] Execute a remediation action. Not implemented yet.", "method": "POST", "path_template": "/actions/execute", "params": [], "example": "{}", "read_only": True, "not_implemented": True},
-    {"name": "get_operator_state", "description": "[v6] Get operator state. Not implemented yet.", "method": "GET", "path_template": "/operator/state", "params": [], "example": "{}", "read_only": True, "not_implemented": True},
-    {"name": "set_operator_state", "description": "[v6] Set operator state. Not implemented yet.", "method": "POST", "path_template": "/operator/state", "params": [], "example": "{}", "read_only": True, "not_implemented": True},
-    {"name": "clear_operator_state", "description": "[v6] Clear operator state. Not implemented yet.", "method": "DELETE", "path_template": "/operator/state", "params": [], "example": "{}", "read_only": True, "not_implemented": True},
+    {"name": "decide_action", "description": "[v6] Decide on a proposed action. Not implemented yet.", "method": "POST", "path_template": "/actions/{actionId}/decision", "params": [{"name": "actionId", "type": "string", "description": "Action id (from plan_action).", "required": True}], "example": "{}", "read_only": True, "not_implemented": True},
+    {"name": "execute_action", "description": "[v6] Execute a remediation action. Not implemented yet.", "method": "POST", "path_template": "/actions/{actionId}/execute", "params": [{"name": "actionId", "type": "string", "description": "Action id (from plan_action).", "required": True}], "example": "{}", "read_only": True, "not_implemented": True},
+    {"name": "get_operator_state", "description": "[v6] Get operator state for a resource. Not implemented yet.", "method": "GET", "path_template": "/resources/{resourceId}/operator-state", "params": [{"name": "resourceId", "type": "string", "description": "Resource id (from pulse_fleet_summary).", "required": True}], "example": "{}", "read_only": True, "not_implemented": True},
+    {"name": "set_operator_state", "description": "[v6] Set operator state for a resource. Not implemented yet.", "method": "PUT", "path_template": "/resources/{resourceId}/operator-state", "params": [{"name": "resourceId", "type": "string", "description": "Resource id (from pulse_fleet_summary).", "required": True}], "example": "{}", "read_only": True, "not_implemented": True},
+    {"name": "clear_operator_state", "description": "[v6] Clear operator state for a resource. Not implemented yet.", "method": "DELETE", "path_template": "/resources/{resourceId}/operator-state", "params": [{"name": "resourceId", "type": "string", "description": "Resource id (from pulse_fleet_summary).", "required": True}], "example": "{}", "read_only": True, "not_implemented": True},
 ]
 
 

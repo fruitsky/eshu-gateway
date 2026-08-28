@@ -48,32 +48,59 @@ def _get_json(integration, path: str, params: dict = None):
     return json.loads(raw.decode('utf-8', errors='replace'))
 
 
+def _pulse_metric(metrics: dict, key: str) -> dict:
+    """Extract one metric entry from Pulse v6 `metrics` ({cpu,memory,disk,...}).
+    Each entry carries {value, used, total, percent, unit}; empty dict when
+    absent."""
+    if not isinstance(metrics, dict):
+        return {}
+    val = metrics.get(key)
+    return val if isinstance(val, dict) else {}
+
+
+def _pulse_bytes(val: dict, field: str):
+    """v6 metrics carry bytes under `used`/`total` (no `free`) — the caller
+    computes free as total - used."""
+    if not isinstance(val, dict):
+        return None
+    return val.get(field)
+
+
 def _compact_resource(item: dict, full: bool) -> dict:
-    """Compact projection of one Pulse resource entry."""
+    """Compact projection of one Pulse v6 resource entry.
+
+    v6 moves per-resource cpu/mem/disk under `metrics.{cpu,memory,disk}` with
+    `{value, used, total, percent, unit}` (no `free` — avail is total - used).
+    Platform identity lives in `identity`/`canonicalIdentity`/`proxmox` instead
+    of the old `platformData`."""
     out = {}
     for key in ('id', 'name', 'type', 'status'):
         if item.get(key) is not None:
             out[key] = item[key]
-    cpu = item.get('cpu') or {}
-    mem = item.get('memory') or {}
-    disk = item.get('disk') or {}
-    net = item.get('network') or {}
-    if cpu.get('current') is not None:
-        out['cpuPct'] = cpu['current']
-    if mem.get('current') is not None:
-        out['memPct'] = mem['current']
-    if mem.get('total') is not None:
-        out['memUsed'] = mem.get('used') or 0
-        out['memFree'] = mem.get('free') or 0
-        out['memTotal'] = mem['total']
-    if disk.get('current') is not None:
-        out['diskPct'] = disk['current']
-    if disk.get('total') is not None:
-        out['diskUsed'] = disk.get('used') or 0
-        out['diskFree'] = disk.get('free') or 0
-        out['diskTotal'] = disk['total']
-    pd = item.get('platformData') or {}
-    ips = pd.get('ipAddresses') or []
+    metrics = item.get('metrics') or {}
+    cpu = _pulse_metric(metrics, 'cpu')
+    mem = _pulse_metric(metrics, 'memory')
+    disk = _pulse_metric(metrics, 'disk')
+    if cpu.get('percent') is not None:
+        out['cpuPct'] = cpu['percent']
+    if mem.get('percent') is not None:
+        out['memPct'] = mem['percent']
+    mem_total = _pulse_bytes(mem, 'total')
+    mem_used = _pulse_bytes(mem, 'used')
+    if mem_total is not None:
+        out['memUsed'] = mem_used or 0
+        out['memFree'] = mem_total - (mem_used or 0)
+        out['memTotal'] = mem_total
+    if disk.get('percent') is not None:
+        out['diskPct'] = disk['percent']
+    disk_total = _pulse_bytes(disk, 'total')
+    disk_used = _pulse_bytes(disk, 'used')
+    if disk_total is not None:
+        out['diskUsed'] = disk_used or 0
+        out['diskFree'] = disk_total - (disk_used or 0)
+        out['diskTotal'] = disk_total
+    identity = item.get('identity') or {}
+    ips = identity.get('ipAddresses') or []
     if ips:
         out['ip'] = ips
     alerts = item.get('alerts') or []
@@ -83,13 +110,15 @@ def _compact_resource(item: dict, full: bool) -> dict:
              'message': a.get('message')}
             for a in alerts if isinstance(a, dict)]
     if full:
+        prox = item.get('proxmox') or {}
         extras = {
-            'node': pd.get('node'), 'osName': pd.get('osName'),
-            'uptime': item.get('uptime'), 'lastBackup': pd.get('lastBackup'),
-            'tags': item.get('tags'), 'vmid': pd.get('vmid'),
-            'cpus': pd.get('cpus'), 'template': pd.get('template'),
-            'trafficIn': net.get('rxBytes') or 0,
-            'trafficOut': net.get('txBytes') or 0,
+            'node': prox.get('nodeName'), 'osName': prox.get('osName'),
+            'uptime': prox.get('uptime'), 'lastBackup': prox.get('lastBackup'),
+            'tags': item.get('tags'), 'vmid': prox.get('vmid'),
+            'cpus': prox.get('cpus'), 'template': prox.get('template'),
+            'clusterName': prox.get('clusterName'),
+            'trafficIn': _pulse_bytes(_pulse_metric(metrics, 'netIn'), 'value') or 0,
+            'trafficOut': _pulse_bytes(_pulse_metric(metrics, 'netOut'), 'value') or 0,
         }
         out.update({k: v for k, v in extras.items() if v is not None})
     return out
@@ -149,11 +178,11 @@ def _health(integration, tool, args, data):
 def _fleet_summary(integration, tool, args, data):
     a = args or {}
     full = bool(a.get('full'))
-    if not isinstance(data, dict) or not isinstance(data.get('resources'), list):
+    if not isinstance(data, dict) or not isinstance(data.get('data'), list):
         return json.dumps(data)
     needle = str(a.get('search') or '').lower()
     out = []
-    for item in data['resources']:
+    for item in data['data']:
         if not isinstance(item, dict):
             continue
         if needle and needle not in str(item.get('name') or '').lower() \
@@ -161,14 +190,16 @@ def _fleet_summary(integration, tool, args, data):
             continue
         out.append(_compact_resource(item, full))
     result = {'count': len(out), 'resources': _slice(out, a.get('limit'))}
-    if full and isinstance(data.get('stats'), dict):
-        result['stats'] = data['stats']
+    if full and isinstance(data.get('aggregations'), dict):
+        result['aggregations'] = data['aggregations']
     return json.dumps(result)
 
 
 def _get_resource(integration, tool, args, data):
     if not isinstance(data, dict):
         return json.dumps(data)
+    # v6 returns the resource item directly (no `resource` wrapper, no
+    # envelope); v5 wrapped it in `resource` — tolerate either for safety.
     item = data.get('resource') if isinstance(data.get('resource'), dict) else data
     return json.dumps(_compact_resource(item, bool((args or {}).get('full'))))
 
@@ -268,46 +299,10 @@ def _charts(integration, tool, args, data):
     return json.dumps(out)
 
 
-def _backups(integration, tool, args, data):
-    a = args or {}
-    if not isinstance(data, dict):
-        return json.dumps(data)
-    vmid = a.get('vmid')
-    entries = []
-    for b in data.get('pbsBackups') or []:
-        if not isinstance(b, dict):
-            continue
-        vmid_val = b.get('vmid')
-        if vmid_val in (None, '', 0):
-            continue
-        entries.append({
-            'vmid': str(vmid_val), 'source': 'pbs', 'time': b.get('backupTime'),
-            'size': b.get('size'), 'protected': b.get('protected'),
-            'verified': b.get('verified'), 'datastore': b.get('datastore'),
-            'status': 'ok',
-        })
-    for t in data.get('backupTasks') or []:
-        if not isinstance(t, dict):
-            continue
-        vmid_val = t.get('vmid')
-        if vmid_val in (None, '', 0):
-            # Storage-level tasks (vmid 0) are not guest backups.
-            continue
-        entries.append({
-            'vmid': str(vmid_val), 'source': 'task', 'time': t.get('start'),
-            'size': None, 'protected': None, 'verified': None,
-            'datastore': None, 'status': t.get('status'),
-        })
-    if vmid is not None:
-        entries = [e for e in entries if e['vmid'] == str(vmid)]
-    entries.sort(key=lambda e: _epoch(e.get('time')), reverse=True)
-    return json.dumps(_slice(entries, a.get('limit')))
-
-
 def _list_storage(integration, tool, args, data):
     a = args or {}
     if isinstance(data, dict):
-        items = data.get('resources') or []
+        items = data.get('data') or data.get('resources') or []
     else:
         items = data if isinstance(data, list) else []
     needle = str(a.get('search') or '').lower()
@@ -318,14 +313,16 @@ def _list_storage(integration, tool, args, data):
         if needle and needle not in str(x.get('name') or '').lower() \
                 and needle not in str(x.get('id') or '').lower():
             continue
-        disk = x.get('disk') or {}
+        disk = _pulse_metric(x.get('metrics') or {}, 'disk')
         row = {'id': x.get('id'), 'name': x.get('name'),
                'status': x.get('status')}
-        if disk.get('total') is not None:
-            row['used'] = disk.get('used') or 0
-            row['free'] = disk.get('free') or 0
-            row['total'] = disk['total']
-            row['pct'] = disk.get('current')
+        total = _pulse_bytes(disk, 'total')
+        if total is not None:
+            used = _pulse_bytes(disk, 'used') or 0
+            row['used'] = used
+            row['free'] = total - used
+            row['total'] = total
+            row['pct'] = disk.get('percent')
         out.append(row)
     return json.dumps(_slice(out, a.get('limit')))
 
@@ -977,7 +974,6 @@ TRANSFORMS = {
     'pulse_get_resource': _get_resource,
     'pulse_list_alerts': _list_alerts,
     'pulse_get_charts': _charts,
-    'pulse_list_backups': _backups,
     'pulse_list_storage': _list_storage,
     'pulse_list_nodes': _list_nodes,
     'jellyfin_system_info': _jellyfin_system_info,

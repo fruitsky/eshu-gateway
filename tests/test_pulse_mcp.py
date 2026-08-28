@@ -2,7 +2,8 @@
 
 Covers the curated `pulse_*` seed catalog: compact response transforms,
 search/limit shaping, gating of write tools, error envelopes, v6 stubs, and
-credential redaction in the audit/UI paths.
+credential redaction in the audit/UI paths. The upstream mock mirrors Pulse
+v6.3.2 (metrics.{cpu,memory,disk}, data[] envelope, no /backups endpoint).
 """
 import http.server
 import json
@@ -24,16 +25,24 @@ def pulse_upstream():
     def _resource(res_id):
         return {
             'id': res_id, 'name': 'CloudFlare' if res_id.endswith('104') else 'Test-VM',
-            'type': 'container' if res_id.endswith('104') else 'vm', 'status': 'stopped',
-            'cpu': {'current': 3.5}, 'memory': {'current': 42, 'total': 536870912,
-                                               'used': 225485783, 'free': 311385129},
-            'disk': {'current': 25, 'total': 8589934592, 'used': 2147483648, 'free': 6442450944},
-            'network': {'rxBytes': 1024, 'txBytes': 2048}, 'uptime': 0, 'tags': ['240'],
+            'type': 'system-container' if res_id.endswith('104') else 'vm', 'status': 'stopped',
+            'metrics': {
+                'cpu': {'value': 3.5, 'percent': 3.5, 'unit': 'percent'},
+                'memory': {'value': 225485783, 'used': 225485783, 'total': 536870912,
+                           'percent': 42, 'unit': 'bytes'},
+                'disk': {'value': 2147483648, 'used': 2147483648, 'total': 8589934592,
+                         'percent': 25, 'unit': 'bytes'},
+                'netIn': {'value': 1024, 'unit': 'bytes/s'},
+                'netOut': {'value': 2048, 'unit': 'bytes/s'},
+            },
+            'identity': {'hostnames': ['CloudFlare'], 'ipAddresses': ['192.168.1.240']},
+            'canonicalIdentity': {'displayName': 'CloudFlare', 'hostname': 'CloudFlare'},
+            'proxmox': {'sourceId': res_id, 'nodeName': 'pve3', 'clusterName': 'prox-cluster',
+                        'instance': 'pve', 'vmid': 104 if res_id.endswith('104') else 200,
+                        'cpus': 2, 'osName': 'Ubuntu', 'uptime': 0,
+                        'lastBackup': '2026-08-20T01:30:30Z'},
             'alerts': [{'id': 'guest-powered-off-' + res_id, 'type': 'powered-off',
                         'level': 'warning', 'message': "Container is powered off"}],
-            'platformData': {'vmid': 104 if res_id.endswith('104') else 200, 'node': 'pve3',
-                             'instance': 'pve', 'type': 'lxc', 'osName': 'Ubuntu',
-                             'ipAddresses': ['192.168.1.240'], 'lastBackup': '2026-08-20T01:30:30Z'},
         }
 
     class _Handler(http.server.BaseHTTPRequestHandler):
@@ -63,17 +72,20 @@ def pulse_upstream():
                 self._respond(200, {'status': 'healthy', 'timestamp': 1787234977,
                                     'uptime': 3171279.7, 'proxyInstallScriptAvailable': True})
             elif path == '/api/version':
-                self._respond(200, {'version': '5.1.36', 'channel': 'stable',
+                self._respond(200, {'version': '6.3.2', 'channel': 'stable',
                                     'deploymentType': 'proxmoxve', 'containerized': True,
                                     'updateAvailable': False})
             elif path == '/api/resources':
                 resources = [_resource('pve:pve3:104'), _resource('pve:pve3:200')]
                 resources.append({'id': 'prox-cluster-cluster-pbs_backups', 'type': 'storage',
                                   'name': 'pbs_backups', 'status': 'online',
-                                  'disk': {'current': 25, 'total': 4398046511104,
-                                           'used': 1099511627776, 'free': 3298534883328}})
-                self._respond(200, {'count': len(resources), 'resources': resources,
-                                    'stats': {'totalResources': 3, 'byType': {'container': 1, 'vm': 1, 'storage': 1}}})
+                                  'metrics': {'disk': {'value': 1099511627776,
+                                                       'used': 1099511627776,
+                                                       'total': 4398046511104,
+                                                       'percent': 25, 'unit': 'bytes'}}})
+                self._respond(200, {'data': resources,
+                                    'aggregations': {'totalResources': 3, 'byType': {'system-container': 1, 'vm': 1, 'storage': 1}},
+                                    'meta': {}})
             elif path.startswith('/api/resources/'):
                 res_id = path.rsplit('/', 1)[-1]
                 if res_id in ('pve:pve3:104', 'pve:pve3:200'):
@@ -109,24 +121,6 @@ def pulse_upstream():
                     data[f'pve:pve3:{104 + r}'] = dict(series)
                 self._respond(200, {'data': data, 'hostData': {},
                                     'nodeData': {}, 'stats': {}, 'timestamp': 1700000000000})
-            elif path == '/api/backups/unified':
-                if state.get('backups_override'):
-                    self._respond(200, state['backups_override'])
-                    return
-                self._respond(200, {
-                    'pbsBackups': [
-                        {'vmid': 104, 'backupTime': 3000, 'size': 8589934592,
-                         'protected': True, 'verified': True, 'datastore': 'backups', 'files': []},
-                        {'vmid': 104, 'backupTime': 1000, 'size': 8589934592,
-                         'protected': True, 'verified': True, 'datastore': 'backups', 'files': []},
-                    ],
-                    'backupTasks': [
-                        {'vmid': 104, 'start': 2000, 'end': 2100, 'status': 'success', 'duration': 100},
-                        {'vmid': 200, 'start': 500, 'end': 600, 'status': 'failed', 'duration': 100},
-                    ],
-                    'pveBackups': [], 'pmgBackups': [], 'storageBackups': [],
-                    'guestSnapshots': [], 'backups': [],
-                })
             elif path == '/api/config/nodes':
                 self._respond(200, [{
                     'id': 'pve-0', 'type': 'pve', 'name': 'pve', 'host': 'https://192.168.1.215:8006',
@@ -137,8 +131,9 @@ def pulse_upstream():
                                           'Online': True, 'PulseReachable': True, 'PulseError': ''}],
                 }])
             elif path == '/api/state':
-                self._respond(200, {'connectionHealth': {'pve': True, 'pve3': False},
-                                    'vms': [{'id': 100}], 'hosts': [], 'stats': {}})
+                self._respond(200, {'connectionHealth': {'host-089e143c-77de-470a-bc05-b018397120e2': True,
+                                                         'pve': True, 'pbs-proxmox-backup-server': False},
+                                    'resources': [], 'stats': {}})
             elif path == '/api/discover':
                 self._respond(403, {'error': 'missing_scope', 'requiredScope': 'settings:write'})
             elif path == '/api/storage/':
@@ -193,7 +188,7 @@ class TestPulseReads:
         _make_pulse(pulse_upstream)
         out = json.loads(run_tool('pulse', 'health', {}))
         assert out['status'] == 'healthy'
-        assert out['version'] == '5.1.36'
+        assert out['version'] == '6.3.2'
         assert out['channel'] == 'stable'
         assert out['deploymentType'] == 'proxmoxve'
         assert 'proxyInstallScriptAvailable' not in out
@@ -208,11 +203,13 @@ class TestPulseReads:
         assert r['cpuPct'] == 3.5
         assert r['memPct'] == 42
         assert r['memTotal'] == 536870912
+        assert r['memFree'] == 536870912 - 225485783
         assert r['diskPct'] == 25
+        assert r['diskFree'] == 8589934592 - 2147483648
         assert r['ip'] == ['192.168.1.240']
         assert r['alerts'][0]['level'] == 'warning'
-        assert 'platformData' not in r
-        assert 'stats' not in out
+        assert 'proxmox' not in r
+        assert 'aggregations' not in out
 
     def test_fleet_summary_search_and_limit(self, pulse_upstream):
         _make_pulse(pulse_upstream)
@@ -225,8 +222,8 @@ class TestPulseReads:
     def test_fleet_summary_full(self, pulse_upstream):
         _make_pulse(pulse_upstream)
         out = json.loads(run_tool('pulse', 'fleet_summary', {'full': True}))
-        assert 'stats' in out
-        assert out['stats']['totalResources'] == 3
+        assert 'aggregations' in out
+        assert out['aggregations']['totalResources'] == 3
         r = next(x for x in out['resources'] if x['id'] == 'pve:pve3:104')
         assert r['osName'] == 'Ubuntu'
         assert r['node'] == 'pve3'
@@ -314,44 +311,6 @@ class TestPulseReads:
         assert list(out.keys()) == ['pve:pve3:104']
         assert len(out['pve:pve3:104']['cpu']['points']) <= 10
 
-    def test_list_backups_merged(self, pulse_upstream):
-        _make_pulse(pulse_upstream)
-        out = json.loads(run_tool('pulse', 'list_backups', {}))
-        assert len(out) == 4
-        assert out[0]['time'] == 3000  # newest first
-        assert {x['source'] for x in out} == {'pbs', 'task'}
-
-    def test_list_backups_vmid_filter(self, pulse_upstream):
-        _make_pulse(pulse_upstream)
-        out = json.loads(run_tool('pulse', 'list_backups', {'vmid': 200}))
-        assert len(out) == 1
-        assert out[0]['vmid'] == '200'
-
-    def test_list_backups_mixed_types(self, pulse_upstream):
-        """Real-world PBS carries string vmids/times and int vmids/times, plus
-        storage-level vmid:0 task entries. The merge must not crash, must
-        coerce vmid to a single type, and must skip vmid:0 tasks."""
-        pulse_upstream['state']['backups_override'] = {
-            'pbsBackups': [{'vmid': '113', 'backupTime': '2026-08-20T01:30:30Z',
-                            'size': 1, 'protected': True, 'verified': True,
-                            'datastore': 'd', 'files': []}],
-            'backupTasks': [
-                {'vmid': 113, 'start': 3000, 'end': 3100, 'status': 'success', 'duration': 100},
-                {'vmid': 0, 'start': 2000, 'end': 2100, 'status': 'success', 'duration': 100},
-            ],
-            'pveBackups': [], 'pmgBackups': [], 'storageBackups': [],
-            'guestSnapshots': [], 'backups': [],
-        }
-        _make_pulse(pulse_upstream)
-        out = json.loads(run_tool('pulse', 'list_backups', {}))
-        assert len(out) == 2  # storage-level task skipped
-        assert {x['vmid'] for x in out} == {'113'}
-        assert {x['source'] for x in out} == {'pbs', 'task'}
-        assert out[0]['source'] == 'pbs'  # ISO time sorts newest
-        assert out[0]['time'] == '2026-08-20T01:30:30Z'
-        out_f = json.loads(run_tool('pulse', 'list_backups', {'vmid': 113}))
-        assert len(out_f) == 2
-
     def test_list_storage(self, pulse_upstream):
         _make_pulse(pulse_upstream)
         out = json.loads(run_tool('pulse', 'list_storage', {}))
@@ -359,6 +318,7 @@ class TestPulseReads:
         s = out[0]
         assert s['id'] == 'prox-cluster-cluster-pbs_backups'
         assert s['total'] == 4398046511104
+        assert s['free'] == 4398046511104 - 1099511627776
         assert s['pct'] == 25
 
     def test_list_nodes_compact(self, pulse_upstream):
@@ -385,7 +345,8 @@ class TestPulseReads:
     def test_connection_health_projects_only_map(self, pulse_upstream):
         _make_pulse(pulse_upstream)
         out = json.loads(run_tool('pulse', 'connection_health', {}))
-        assert out == {'connectionHealth': {'pve': True, 'pve3': False}}
+        assert out == {'connectionHealth': {'host-089e143c-77de-470a-bc05-b018397120e2': True,
+                                            'pve': True, 'pbs-proxmox-backup-server': False}}
         assert pulse_upstream['state']['requests'][0]['path'] == '/api/state'
 
 
@@ -405,17 +366,17 @@ class TestPulseWrites:
         """Documented posture: non-destructive writes auto-run (audited) under
         the default 'destructive' gate mode — the operator's chosen policy."""
         _make_pulse(pulse_upstream, gate_mode='destructive')
-        out = json.loads(run_tool('pulse', 'acknowledge_alert', {'id': 'h1'}, reason='test'))
+        out = json.loads(run_tool('pulse', 'acknowledge_alert', {'alertIdentifier': 'h1'}, reason='test'))
         assert out.get('status') != 'pending'
         assert out.get('ok') is True
         req = pulse_upstream['state']['requests'][0]
         assert req['method'] == 'POST'
         assert req['path'] == '/api/alerts/acknowledge'
-        assert json.loads(req['body']) == {'id': 'h1'}
+        assert json.loads(req['body'])['alertIdentifier'] == 'h1'
 
     def test_bulk_acknowledge_array_body(self, pulse_upstream):
         _make_pulse(pulse_upstream, gate_mode='all')
-        out = json.loads(run_tool('pulse', 'acknowledge_alerts_bulk', {'ids': ['h1', 'h2']}, reason='test'))
+        out = json.loads(run_tool('pulse', 'acknowledge_alerts_bulk', {'alertIdentifiers': ['h1', 'h2']}, reason='test'))
         assert out['status'] == 'pending'
 
     def test_stub_returns_not_implemented(self, pulse_upstream):
@@ -469,16 +430,42 @@ class TestPulseRedactionAndApprove:
         tools = get_tools(get_integration('pulse')['id'])
         names = {t['name'] for t in tools}
         assert {'health', 'fleet_summary', 'get_resource', 'list_alerts',
-                'get_charts', 'list_backups', 'list_storage', 'list_nodes',
+                'get_charts', 'list_storage', 'list_nodes',
                 'connection_health'}.issubset(names)
         assert {'acknowledge_alert', 'acknowledge_alerts_bulk', 'add_node',
                 'update_node', 'remove_node', 'test_node_connection',
                 'discover'}.issubset(names)
+        # backups was retired on v6 (no /backups endpoint upstream)
+        assert 'list_backups' not in names
         assert 'list_findings' in names
         stubs = {t['name'] for t in tools if t.get('not_implemented')}
         assert {'plan_action', 'set_operator_state'}.issubset(stubs)
         # read + write generic floor is present too
         assert 'read' in names and 'write' in names
+
+    def test_v6_stub_paths_match_manifest(self, pulse_upstream):
+        """The v6 manifest declares real paths under /ai/patrol, /actions and
+        /resources/{resourceId}/operator-state — the declared stubs must point
+        there (not the old guessed paths), so a later implementation wires up
+        without touching the catalog."""
+        _make_pulse(pulse_upstream)
+        tools = {t['name']: t for t in get_tools(get_integration('pulse')['id'])}
+        assert tools['list_findings']['path_template'] == '/ai/patrol/findings'
+        assert tools['ack_finding']['path_template'] == '/ai/patrol/acknowledge'
+        assert tools['snooze_finding']['path_template'] == '/ai/patrol/snooze'
+        assert tools['dismiss_finding']['path_template'] == '/ai/patrol/dismiss'
+        assert tools['resolve_finding']['path_template'] == '/ai/patrol/resolve'
+        assert tools['decide_action']['path_template'] == '/actions/{actionId}/decision'
+        assert tools['execute_action']['path_template'] == '/actions/{actionId}/execute'
+        assert tools['get_operator_state']['path_template'] == '/resources/{resourceId}/operator-state'
+        assert tools['set_operator_state']['path_template'] == '/resources/{resourceId}/operator-state'
+        assert tools['set_operator_state']['method'] == 'PUT'
+        assert tools['clear_operator_state']['method'] == 'DELETE'
+        # operator-state + action tools carry their path-param in the schema
+        op = {p['name'] for p in (tools['get_operator_state'].get('params') or [])}
+        assert 'resourceId' in op
+        act = {p['name'] for p in (tools['decide_action'].get('params') or [])}
+        assert 'actionId' in act
 
     def test_test_endpoint_skips_stubs(self, auth_client, pulse_upstream):
         """The Test button must not pick a not_implemented stub (its placeholder
