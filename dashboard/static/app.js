@@ -86,24 +86,21 @@ function openContextPanel(reqId) {
       (req.label ? '<span class="ctx-meta-item">Label: ' + escapeHtml(req.label) + '</span>' : '');
   } else {
     document.getElementById('ctx-cmd').textContent = req.command || '';
-    document.getElementById('ctx-human').textContent = req.requested_by || req.agent_id || 'Unknown';
+    document.getElementById('ctx-human').textContent = describeCmd(req.command) || 'No description available';
+    var hostLabel = req.hostname || req.target_ip || 'Unknown host';
     document.getElementById('ctx-target').innerHTML =
-      '<span class="ctx-meta-item">Host: ' + escapeHtml(req.hostname || req.target_ip || '—') + '</span>' +
-      '<span class="ctx-meta-item">Gateway: ' + escapeHtml(req.gateway_ip || '—') + '</span>';
+      '<span class="ctx-meta-item">Host: ' + escapeHtml(hostLabel) + '</span>' +
+      (req.target_ip && req.target_ip !== hostLabel ? '<span class="ctx-meta-item">IP: ' + escapeHtml(req.target_ip) + '</span>' : '');
   }
   document.getElementById('ctx-status').textContent = req.status || '—';
-  document.getElementById('ctx-time').textContent = req.timestamp ? new Date(req.timestamp).toLocaleString() : '—';
+  document.getElementById('ctx-time').textContent = req.created_at ? formatTime(req.created_at) : '—';
 
   // Risk assessment
   var riskEl = document.getElementById('ctx-risk');
-  if (req.risk_hint || req.anomaly_flags) {
+  if (req.risk || req.anomaly) {
     var html = '';
-    if (req.risk_hint) html += '<div class="ctx-meta-item" style="color:var(--status-warning);margin-bottom:4px">⚠ ' + escapeHtml(req.risk_hint) + '</div>';
-    if (req.anomaly_flags && req.anomaly_flags.length) {
-      req.anomaly_flags.forEach(function(f) {
-        html += '<div class="ctx-meta-item" style="color:var(--danger)">⚡ ' + escapeHtml(f) + '</div>';
-      });
-    }
+    if (req.risk) html += '<div class="ctx-meta-item" style="color:var(--status-warning);margin-bottom:4px">⚠ ' + escapeHtml(req.risk) + '</div>';
+    if (req.anomaly) html += '<div class="ctx-meta-item" style="color:var(--danger)">⚡ ' + escapeHtml(req.anomaly) + '</div>';
     riskEl.innerHTML = html;
   } else {
     riskEl.innerHTML = '<span class="ctx-meta-item" style="color:var(--text-muted)">No flags</span>';
@@ -1491,18 +1488,23 @@ function renderJitTickets() {
       '</div>';
     } else {
       var r = item.data;
+      var human = describeCmd(r.command);
+      var hostLabel = r.hostname || r.target_ip || 'Unknown host';
+      var hostCell = r.hostname
+        ? gwPill(r.hostname) + ' ' + escapeHtml(r.hostname)
+        : escapeHtml(hostLabel);
       var riskHtml = '';
-      if (r.anomaly) riskHtml = '<div style="color:var(--status-warning);font-size:10px;margin-top:4px">\u26a0 ' + escapeHtml(r.anomaly) + '</div>';
+      if (r.risk) riskHtml += '<div style="color:var(--status-warning);font-size:10px;margin-top:4px">⚠ ' + escapeHtml(r.risk) + '</div>';
+      if (r.anomaly) riskHtml += '<div style="color:var(--danger);font-size:10px;margin-top:4px">⚡ ' + escapeHtml(r.anomaly) + '</div>';
       html += '<div class="jit-ticket' + (r.anomaly ? ' urgent' : '') + '" data-id="' + r.id + '" onclick="openContextPanel(\'' + r.id + '\')">' +
         '<div class="jit-check" onclick="event.stopPropagation();toggleBulkSelect(\'' + r.id + '\',event)"></div>' +
         '<div style="flex:1;min-width:0">' +
-          '<div class="jit-human">' + escapeHtml(r.requested_by || r.agent_id || 'Unknown') + '</div>' +
+          '<div class="jit-human">' + escapeHtml(human || 'Command request') + '</div>' +
           '<div class="jit-cmd-text">' + escapeHtml(r.command) + '</div>' +
-          (describeCmd(r.command) ? '<div style="font-size:11px;color:var(--text-muted);margin-bottom:4px">' + escapeHtml(describeCmd(r.command)) + '</div>' : '') +
           '<div class="jit-meta">' +
             '<span class="jit-meta-item">#' + String(r.id).padStart(6,'0') + '</span>' +
-            '<span class="jit-meta-item">' + gwPill(r.hostname||'N/A') + ' ' + escapeHtml(r.hostname||'N/A') + '</span>' +
-            '<span class="jit-meta-item">' + escapeHtml(r.target_ip) + '</span>' +
+            '<span class="jit-meta-item">' + hostCell + '</span>' +
+            (r.hostname && r.target_ip && r.target_ip !== r.hostname ? '<span class="jit-meta-item">' + escapeHtml(r.target_ip) + '</span>' : '') +
             '<span class="jit-ttl"><span class="ttl-countdown" data-ttl="' + r.ttl + '">' + r.ttl + 's</span></span>' +
           '</div>' +
           riskHtml +
