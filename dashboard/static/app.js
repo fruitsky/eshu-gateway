@@ -33,6 +33,7 @@ function toggleMobileSidebar() {
 var _ccSelectedId = null;
 var _ccFilter = 'all';
 var _ccSelectedIds = new Set();
+var _activeSessionSid = null;
 
 function openContextPanel(reqId) {
   var panel = document.getElementById('cc-context');
@@ -1653,7 +1654,7 @@ function renderRecentSessions() {
     var ago = formatAgo(now - s.latest);
     var count = s.requests.length;
 
-    return '<div class="recent-session-card" onclick="jumpToSession(\'' + escapeHtml(s.id) + '\')">' +
+    return '<div class="recent-session-card" onclick="openSessionModal(\'' + escapeHtml(s.id) + '\')">' +
       '<div class="rs-header">' +
         '<span class="rs-name">' + escapeHtml(displayName) + '</span>' +
         '<span class="rs-host">' + escapeHtml(host) + '</span>' +
@@ -1663,7 +1664,6 @@ function renderRecentSessions() {
       '<div class="rs-cmd">' + cmdPreview + '</div>' +
       '<div class="rs-footer">' +
         '<span class="rs-count">' + count + ' command' + (count > 1 ? 's' : '') + '</span>' +
-        '<button class="rs-edit-btn" onclick="event.stopPropagation();editSessionName(\'' + escapeHtml(s.id) + '\')" title="Name this session">Name</button>' +
       '</div>' +
     '</div>';
   }).join('');
@@ -1675,30 +1675,102 @@ function renderRecentSessions() {
 }
 
 function jumpToSession(sid) {
-  var el = document.querySelector('.jit-session[data-sid="' + sid + '"]');
-  if (el) {
-    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    el.classList.add('highlight');
-    setTimeout(function() { el.classList.remove('highlight'); }, 2000);
-  } else {
-    switchView('home');
-  }
+  openSessionModal(sid);
 }
 
-function editSessionName(sid) {
+function openSessionModal(sid) {
+  var modal = document.getElementById('session-modal');
+  var nameEl = document.getElementById('sm-name');
+  var descEl = document.getElementById('sm-desc');
+  var metaEl = document.getElementById('sm-meta');
+  var cmdsEl = document.getElementById('sm-commands');
+  if (!modal || !nameEl || !descEl || !metaEl || !cmdsEl) return;
+
+  // Gather all requests for this session
+  var allReqs = (requestsData || []).filter(function(r) {
+    return r.session_id === sid;
+  });
+  if (allReqs.length === 0) return;
+
+  // Load saved name/desc
   var names = JSON.parse(localStorage.getItem('eshu_session_names') || '{}');
   var meta = names[sid] || {};
-  var currentName = meta.name || '';
-  var currentDesc = meta.description || '';
-  var newName = prompt('Session name (max 40 chars):', currentName);
-  if (newName === null) return;
-  newName = newName.substring(0, 40).trim();
-  var newDesc = prompt('Description (max 100 chars, optional):', currentDesc);
-  if (newDesc === null) return;
-  newDesc = newDesc.substring(0, 100).trim();
-  names[sid] = { name: newName, description: newDesc };
-  localStorage.setItem('eshu_session_names', JSON.stringify(names));
-  renderJitTickets();
+
+  nameEl.textContent = meta.name || '';
+  descEl.textContent = meta.description || '';
+
+  var host = allReqs[0] ? (allReqs[0].hostname || allReqs[0].target_ip || '') : '';
+  var pending = allReqs.filter(function(r) { return r.status === 'pending'; }).length;
+  var approved = allReqs.filter(function(r) { return r.status === 'approved' || r.status === 'consumed'; }).length;
+  var auto = allReqs.filter(function(r) { return r.status === 'auto-approved'; }).length;
+  var blocked = allReqs.filter(function(r) { return r.status === 'blocked' || r.status === 'denied'; }).length;
+  metaEl.innerHTML = escapeHtml(host) + ' \u00b7 ' + allReqs.length + ' commands' +
+    (pending ? ' \u00b7 <span class="sm-pending">' + pending + ' pending</span>' : '') +
+    (approved ? ' \u00b7 <span class="sm-approved">' + approved + ' approved</span>' : '') +
+    (auto ? ' \u00b7 <span class="sm-auto">' + auto + ' auto</span>' : '') +
+    (blocked ? ' \u00b7 <span class="sm-blocked">' + blocked + ' blocked</span>' : '');
+
+  // Render all requests as cards — pending first, then by time
+  var sorted = allReqs.slice().sort(function(a, b) {
+    if (a.status === 'pending' && b.status !== 'pending') return -1;
+    if (b.status === 'pending' && a.status !== 'pending') return 1;
+    return (b.created_at || 0) - (a.created_at || 0);
+  });
+
+  cmdsEl.innerHTML = sorted.map(function(r) {
+    var statusClass = '', statusLabel = r.status;
+    if (r.status === 'pending') { statusClass = 'sm-st-pending'; statusLabel = 'pending'; }
+    else if (r.status === 'approved') { statusClass = 'sm-st-approved'; statusLabel = 'approved'; }
+    else if (r.status === 'consumed') { statusClass = 'sm-st-approved'; statusLabel = 'ran'; }
+    else if (r.status === 'auto-approved') { statusClass = 'sm-st-auto'; statusLabel = 'auto'; }
+    else if (r.status === 'blocked') { statusClass = 'sm-st-blocked'; statusLabel = 'blocked'; }
+    else if (r.status === 'denied') { statusClass = 'sm-st-blocked'; statusLabel = 'denied'; }
+    else if (r.status === 'frozen') { statusClass = 'sm-st-blocked'; statusLabel = 'frozen'; }
+    else if (r.status === 'override') { statusClass = 'sm-st-auto'; statusLabel = 'override'; }
+
+    var riskHtml = '';
+    if (r.risk) riskHtml = '<div class="sm-risk">' + escapeHtml(r.risk) + '</div>';
+
+    var actionsHtml = '';
+    if (r.status === 'pending' && r.ttl > 0) {
+      actionsHtml = '<div class="sm-actions">' +
+        '<button onclick="event.stopPropagation();handleAction(' + r.id + ',\'deny\')" class="btn btn-deny btn-xs">Deny</button>' +
+        '<button onclick="event.stopPropagation();handleAction(' + r.id + ',\'approve\')" class="btn btn-approve btn-xs">Approve</button>' +
+      '</div>';
+    }
+
+    return '<div class="sm-cmd-card' + (r.status === 'pending' ? ' sm-pending' : '') + '">' +
+      '<div class="sm-cmd-top">' +
+        '<span class="sm-status-badge ' + statusClass + '">' + statusLabel + '</span>' +
+        '<span class="sm-cmd-time">' + formatTime(r.created_at) + '</span>' +
+      '</div>' +
+      '<div class="sm-cmd-text">' + escapeHtml(r.command) + '</div>' +
+      riskHtml +
+      actionsHtml +
+    '</div>';
+  }).join('');
+
+  modal.classList.remove('hidden');
+  _activeSessionSid = sid;
+
+  // Save name/desc on blur
+  nameEl.onblur = function() {
+    var names = JSON.parse(localStorage.getItem('eshu_session_names') || '{}');
+    if (!names[sid]) names[sid] = {};
+    names[sid].name = nameEl.textContent.trim().substring(0, 40);
+    localStorage.setItem('eshu_session_names', JSON.stringify(names));
+    renderJitTickets();
+  };
+  descEl.onblur = function() {
+    var names = JSON.parse(localStorage.getItem('eshu_session_names') || '{}');
+    if (!names[sid]) names[sid] = {};
+    names[sid].description = descEl.textContent.trim().substring(0, 100);
+    localStorage.setItem('eshu_session_names', JSON.stringify(names));
+    renderJitTickets();
+  };
+  // Save on Enter (prevent newline)
+  nameEl.onkeydown = function(e) { if (e.key === 'Enter') { e.preventDefault(); nameEl.blur(); } };
+  descEl.onkeydown = function(e) { if (e.key === 'Enter') { e.preventDefault(); descEl.blur(); } };
 }
 
 function flashGlitch(text, danger) {
@@ -1917,7 +1989,7 @@ function renderSessionCard(s) {
       '<span class="jit-session-label">' + escapeHtml(displayName) + (meta.name ? ' <span class="jit-session-id">' + short + '</span>' : '') + '</span>' +
       (desc ? '<span class="jit-session-desc">' + escapeHtml(desc) + '</span>' : '') +
       '<span class="jit-session-meta">' + escapeHtml(host) + ' \u00b7 ' + items.length + ' command' + (items.length > 1 ? 's' : '') + ' \u00b7 ' + age + '</span>' +
-      '<button class="jit-session-name-btn" onclick="event.stopPropagation();editSessionName(\'' + escapeHtml(s.session_id) + '\')">Name</button>' +
+      '<button class="jit-session-name-btn" onclick="event.stopPropagation();openSessionModal(\'' + escapeHtml(s.session_id) + '\')">View</button>' +
     '</div>' +
     '<div class="jit-session-body">' + items.map(function(it){ return renderJitItem(it); }).join('') + historyHtml + '</div>' +
   '</div>';
@@ -1967,11 +2039,11 @@ async function handleAction(id, action) {
       document.getElementById('deny-bar-text').textContent = 'Command denied: "' + cmd + '" — Add to blocklist?';
       document.getElementById('deny-blacklist-bar').classList.remove('hidden');
     }
-    fetchRequests();
+    fetchRequests().then(function() { if (_activeSessionSid) openSessionModal(_activeSessionSid); });
   } else {
     const res = await authFetch('/api/' + action + '/' + id, { method: 'POST' });
     if (res.status === 401) { await checkAuth(); return; }
-    fetchRequests();
+    fetchRequests().then(function() { if (_activeSessionSid) openSessionModal(_activeSessionSid); });
   }
 }
 async function handleDenyBlocklist() {
@@ -3897,7 +3969,10 @@ function customConfirm(msg) {
 
 // ── Modals ───────────────────────────────────────────────────────────────
 function openModal(modalId) { document.getElementById(modalId).classList.remove('hidden'); fetchPolicyChanges(); }
-function closeModal(modalId) { document.getElementById(modalId).classList.add('hidden'); }
+function closeModal(modalId) {
+  document.getElementById(modalId).classList.add('hidden');
+  if (modalId === 'session-modal') _activeSessionSid = null;
+}
 
 // ── Statistics ────────────────────────────────────────────────────────
 let _statsData = null;

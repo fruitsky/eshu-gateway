@@ -1125,5 +1125,21 @@
     <pre id="fleet-output-modal-pre" class="fleet-out flex-1 overflow-auto p-3 rounded text-xs bg-base" style="white-space:pre-wrap;min-height:120px;">Loading...</pre>
   </div>
 </div>
+
+<!-- Session Detail Modal -->
+<div id="session-modal" class="modal-overlay hidden" onclick="if(event.target===this)closeModal('session-modal')">
+  <div class="session-modal-card">
+    <div class="session-modal-header">
+      <div class="session-modal-title-row">
+        <span class="session-modal-label">Session</span>
+        <button onclick="closeModal('session-modal')" class="modal-close">&times;</button>
+      </div>
+      <div class="session-modal-name" id="sm-name" contenteditable="true" spellcheck="false" data-placeholder="Session name"></div>
+      <div class="session-modal-desc" id="sm-desc" contenteditable="true" spellcheck="false" data-placeholder="Add a description..."></div>
+      <div class="session-modal-meta" id="sm-meta"></div>
+    </div>
+    <div class="session-modal-commands" id="sm-commands"></div>
+  </div>
+</div>
 </body>
 </html>
