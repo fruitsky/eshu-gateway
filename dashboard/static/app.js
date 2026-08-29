@@ -29,6 +29,156 @@ function toggleMobileSidebar() {
   sidebar.classList.toggle('open');
   overlay.classList.toggle('show');
 }
+// ── Command Center: Context Panel ────────────────────────────
+var _ccSelectedId = null;
+var _ccFilter = 'all';
+var _ccSelectedIds = new Set();
+
+function openContextPanel(reqId) {
+  var panel = document.getElementById('cc-context');
+  var empty = document.getElementById('cc-context-empty');
+  var content = document.getElementById('cc-context-content');
+  if (!panel || !empty || !content) return;
+  panel.classList.remove('collapsed');
+  _ccSelectedId = reqId;
+
+  // Highlight selected card
+  document.querySelectorAll('.jit-ticket').forEach(function(el) {
+    el.classList.toggle('selected', el.dataset.id === reqId);
+  });
+
+  // Find request data from the rendered tickets or fetch
+  var req = _lastRequests ? _lastRequests.find(function(r) { return r.id === reqId; }) : null;
+  if (!req) {
+    empty.classList.remove('hidden');
+    content.classList.add('hidden');
+    return;
+  }
+
+  empty.classList.add('hidden');
+  content.classList.remove('hidden');
+
+  document.getElementById('ctx-cmd').textContent = req.command || '';
+  document.getElementById('ctx-human').textContent = req.requested_by || req.agent_id || 'Unknown';
+  document.getElementById('ctx-target').innerHTML =
+    '<span class="ctx-meta-item">Host: ' + (req.hostname || req.target_ip || '—') + '</span>' +
+    '<span class="ctx-meta-item">Gateway: ' + (req.gateway_ip || '—') + '</span>';
+  document.getElementById('ctx-status').textContent = req.status || '—';
+  document.getElementById('ctx-time').textContent = req.timestamp ? new Date(req.timestamp).toLocaleString() : '—';
+
+  // Risk assessment
+  var riskEl = document.getElementById('ctx-risk');
+  if (req.risk_hint || req.anomaly_flags) {
+    var html = '';
+    if (req.risk_hint) html += '<div class="ctx-meta-item" style="color:var(--status-warning);margin-bottom:4px">⚠ ' + esc(req.risk_hint) + '</div>';
+    if (req.anomaly_flags && req.anomaly_flags.length) {
+      req.anomaly_flags.forEach(function(f) {
+        html += '<div class="ctx-meta-item" style="color:var(--danger)">⚡ ' + esc(f) + '</div>';
+      });
+    }
+    riskEl.innerHTML = html;
+  } else {
+    riskEl.innerHTML = '<span class="ctx-meta-item" style="color:var(--text-muted)">No flags</span>';
+  }
+
+  // Action buttons
+  var actionsEl = document.getElementById('ctx-actions');
+  var actionsHtml = '';
+  if (req.status === 'pending') {
+    actionsHtml = '<button onclick="approveRequest(\'' + req.id + '\')" class="btn btn-approve btn-sm" style="flex:1">Approve</button>' +
+      '<button onclick="denyRequest(\'' + req.id + '\')" class="btn btn-deny btn-sm" style="flex:1">Deny</button>';
+  } else {
+    actionsHtml = '<button onclick="closeContextPanel()" class="btn btn-muted btn-sm" style="flex:1">Close</button>';
+  }
+  actionsEl.innerHTML = actionsHtml;
+}
+
+function closeContextPanel() {
+  var panel = document.getElementById('cc-context');
+  if (panel) panel.classList.add('collapsed');
+  _ccSelectedId = null;
+  document.querySelectorAll('.jit-ticket.selected').forEach(function(el) {
+    el.classList.remove('selected');
+  });
+}
+
+// ── Command Center: Filter Tabs ──────────────────────────────
+function ccFilter(filter) {
+  _ccFilter = filter;
+  document.querySelectorAll('.cc-filter-tab').forEach(function(tab) {
+    tab.classList.remove('active');
+  });
+  event.target.closest('.cc-filter-tab').classList.add('active');
+  // Re-render tickets with filter
+  if (typeof renderJitTickets === 'function') renderJitTickets();
+}
+
+function updateFilterCounts(counts) {
+  var total = 0;
+  Object.keys(counts).forEach(function(k) { total += counts[k] || 0; });
+  var el = document.getElementById('cc-count-all');
+  if (el) el.textContent = total ? ' ' + total : '';
+  var map = { pending: 'cc-count-pending', approved: 'cc-count-approved', 'auto-approved': 'cc-count-auto', blocked: 'cc-count-blocked', denied: 'cc-count-denied' };
+  Object.keys(map).forEach(function(k) {
+    var e = document.getElementById(map[k]);
+    if (e) e.textContent = counts[k] ? ' ' + counts[k] : '';
+  });
+}
+
+// ── Command Center: Bulk Selection ────────────────────────────
+function toggleBulkSelect(reqId, ev) {
+  if (ev && ev.shiftKey && _ccLastClicked) {
+    // Range select
+    var tickets = Array.from(document.querySelectorAll('.jit-ticket'));
+    var from = tickets.findIndex(function(t) { return t.dataset.id === _ccLastClicked; });
+    var to = tickets.findIndex(function(t) { return t.dataset.id === reqId; });
+    if (from !== -1 && to !== -1) {
+      var start = Math.min(from, to), end = Math.max(from, to);
+      for (var i = start; i <= end; i++) {
+        _ccSelectedIds.add(tickets[i].dataset.id);
+        tickets[i].querySelector('.jit-check').classList.add('checked');
+      }
+    }
+  } else {
+    if (_ccSelectedIds.has(reqId)) {
+      _ccSelectedIds.delete(reqId);
+    } else {
+      _ccSelectedIds.add(reqId);
+    }
+  }
+  _ccLastClicked = reqId;
+  updateBulkBar();
+}
+
+function updateBulkBar() {
+  var bar = document.getElementById('cc-bulk-bar');
+  var count = document.getElementById('cc-bulk-count');
+  if (!bar || !count) return;
+  if (_ccSelectedIds.size > 0) {
+    bar.classList.add('visible');
+    count.textContent = _ccSelectedIds.size;
+  } else {
+    bar.classList.remove('visible');
+  }
+}
+
+function clearSelection() {
+  _ccSelectedIds.clear();
+  document.querySelectorAll('.jit-check.checked').forEach(function(el) { el.classList.remove('checked'); });
+  updateBulkBar();
+}
+
+function bulkApprove() {
+  _ccSelectedIds.forEach(function(id) { approveRequest(id); });
+  clearSelection();
+}
+
+function bulkDeny() {
+  _ccSelectedIds.forEach(function(id) { denyRequest(id); });
+  clearSelection();
+}
+
+var _ccLastClicked = null;
 // ── Sound ────────────────────────────────────────────────────────────────
 // State variables (_audioCtx, _knownOfflineIps, notifyJIT, etc.) are in state.js.
 

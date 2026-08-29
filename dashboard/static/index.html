@@ -145,79 +145,150 @@
   </div>
 
   <div class="main-body">
-    <!-- HOME VIEW — Dashboard -->
+    <!-- HOME VIEW — Command Center -->
     <div id="view-home" class="block w-full">
-      <!-- Pending JIT Widget -->
-      <div id="jit-pending-widget" class="widget glow">
-        <div class="widget-header">
-          ⚡ Pending Requests <span id="jit-pending-count" class="text-sm text-muted">0 pending</span>
-          <span id="jit-new-badge" class="new-badge hidden">New</span>
-        </div>
-        <div id="jit-tickets"><p class="text-muted">No pending requests — all clear.</p></div>
-      </div>
+      <div class="cc-layout">
+        <!-- Left: Feed -->
+        <div class="cc-feed">
+          <!-- Deny Blocklist Bar -->
+          <div id="deny-blacklist-bar" class="hidden deny-bar">
+            <span id="deny-bar-text" class="text-sm text-muted"></span>
+            <div class="flex gap-2">
+              <button onclick="handleDenyBlocklist()" class="btn btn-danger btn-sm">Yes, Blocklist & Push</button>
+              <button onclick="dismissDenyBar()" class="btn btn-deny btn-sm">Dismiss</button>
+            </div>
+          </div>
 
-      <!-- Deny Blocklist Bar -->
-      <div id="deny-blacklist-bar" class="hidden deny-bar">
-        <span id="deny-bar-text" class="text-sm text-muted"></span>
-        <div class="flex gap-2">
-          <button onclick="handleDenyBlocklist()" class="btn btn-danger btn-sm">Yes, Blocklist & Push</button>
-          <button onclick="dismissDenyBar()" class="btn btn-deny btn-sm">Dismiss</button>
-        </div>
-      </div>
+          <!-- Filter Tabs -->
+          <div class="cc-filter-bar">
+            <button class="cc-filter-tab active" onclick="ccFilter('all')">All<span class="cc-filter-count" id="cc-count-all">0</span></button>
+            <button class="cc-filter-tab" onclick="ccFilter('pending')">Pending<span class="cc-filter-count" id="cc-count-pending">0</span></button>
+            <button class="cc-filter-tab" onclick="ccFilter('approved')">Approved<span class="cc-filter-count" id="cc-count-approved">0</span></button>
+            <button class="cc-filter-tab" onclick="ccFilter('auto-approved')">Auto<span class="cc-filter-count" id="cc-count-auto">0</span></button>
+            <button class="cc-filter-tab" onclick="ccFilter('blocked')">Blocked<span class="cc-filter-count" id="cc-count-blocked">0</span></button>
+            <button class="cc-filter-tab" onclick="ccFilter('denied')">Denied<span class="cc-filter-count" id="cc-count-denied">0</span></button>
+          </div>
 
-      <!-- Stats Row -->
-      <div class="stat-row">
-        <div class="stat-card" onclick="toggleFilter('pending')" id="box-pending">
-          <span class="stat-value stat-pending" id="stat-pending">0</span>
-          <span class="stat-label">Expired</span>
-        </div>
-        <div class="stat-card" onclick="toggleFilter('approved')" id="box-approved">
-          <span class="stat-value stat-approved" id="stat-approved">0</span>
-          <span class="stat-label">Approved</span>
-        </div>
-        <div class="stat-card" onclick="toggleFilter('auto-approved')" id="box-auto">
-          <span class="stat-value stat-auto" id="stat-auto">0</span>
-          <span class="stat-label">Auto-Approved</span>
-        </div>
-        <div class="stat-card" onclick="toggleFilter('blocked')" id="box-blocked">
-          <span class="stat-value stat-blocked" id="stat-blocked">0</span>
-          <span class="stat-label">Blocked</span>
-        </div>
-        <div class="stat-card" onclick="toggleFilter('denied')" id="box-denied">
-          <span class="stat-value stat-denied" id="stat-denied">0</span>
-          <span class="stat-label">Denied</span>
-        </div>
-      </div>
+          <!-- Bulk Actions Bar -->
+          <div class="cc-bulk-bar" id="cc-bulk-bar">
+            <span class="cc-bulk-count" id="cc-bulk-count">0</span> selected
+            <button onclick="bulkApprove()" class="btn btn-approve btn-xs">Approve All</button>
+            <button onclick="bulkDeny()" class="btn btn-deny btn-xs">Deny All</button>
+            <button onclick="clearSelection()" class="btn btn-muted btn-xs">Clear</button>
+            <span class="cc-bulk-hint">Shift+click to select range</span>
+          </div>
 
-      <!-- Request History Table -->
-      <div class="widget">
-        <div class="widget-header">
-          Historical Commands
-          <span id="filter-badge" class="hidden filter-badge"></span>
-          <div class="flex items-center gap-2">
-            <input type="text" id="request-search" placeholder="Search..." class="text-xs w-40" oninput="onRequestSearch()">
-            <button onclick="fetchRequests()" class="btn btn-muted btn-xs">↻ Refresh</button>
-            <div class="relative">
-              <button onclick="toggleDropdown()" id="purge-btn" class="btn btn-muted btn-xs"><span>Clear History</span><svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg></button>
-              <div id="purge-dropdown" class="dropdown-menu widget">
-                <button onclick="purgeHistory('30m')" class="dropdown-item">Older than 30 minutes</button>
-                <button onclick="purgeHistory('1h')" class="dropdown-item">Older than 1 hour</button>
-                <button onclick="purgeHistory('1d')" class="dropdown-item">Older than 1 day</button>
-                <button onclick="purgeHistory('2d')" class="dropdown-item">Older than 2 days</button>
-                <button onclick="purgeHistory('7d')" class="dropdown-item">Older than 7 days</button>
-                <div class="dropdown-divider"></div>
-                <button onclick="purgeHistory('all')" class="dropdown-item danger">Clear all history</button>
+          <!-- Feed -->
+          <div class="cc-feed-scroll" id="cc-feed-scroll">
+            <!-- Stats Row -->
+            <div class="stat-row" style="margin-bottom:12px">
+              <div class="stat-card" onclick="toggleFilter('pending')" id="box-pending">
+                <span class="stat-value stat-pending" id="stat-pending">0</span>
+                <span class="stat-label">Expired</span>
               </div>
+              <div class="stat-card" onclick="toggleFilter('approved')" id="box-approved">
+                <span class="stat-value stat-approved" id="stat-approved">0</span>
+                <span class="stat-label">Approved</span>
+              </div>
+              <div class="stat-card" onclick="toggleFilter('auto-approved')" id="box-auto">
+                <span class="stat-value stat-auto" id="stat-auto">0</span>
+                <span class="stat-label">Auto-Approved</span>
+              </div>
+              <div class="stat-card" onclick="toggleFilter('blocked')" id="box-blocked">
+                <span class="stat-value stat-blocked" id="stat-blocked">0</span>
+                <span class="stat-label">Blocked</span>
+              </div>
+              <div class="stat-card" onclick="toggleFilter('denied')" id="box-denied">
+                <span class="stat-value stat-denied" id="stat-denied">0</span>
+                <span class="stat-label">Denied</span>
+              </div>
+            </div>
+
+            <!-- Pending JIT Widget -->
+            <div id="jit-pending-widget" class="widget glow">
+              <div class="widget-header">
+                <span style="display:flex;align-items:center;gap:8px">
+                  <span style="font-size:14px">&#9889;</span> Pending Requests
+                </span>
+                <span id="jit-pending-count" class="text-sm text-muted">0 pending</span>
+                <span id="jit-new-badge" class="new-badge hidden">New</span>
+              </div>
+              <div id="jit-tickets"><p class="text-muted">No pending requests — all clear.</p></div>
+            </div>
+
+            <!-- Request History Table (compact) -->
+            <div class="widget" id="home-history-widget">
+              <div class="widget-header">
+                Recent Activity
+                <span id="filter-badge" class="hidden filter-badge"></span>
+                <div class="flex items-center gap-2">
+                  <input type="text" id="request-search" placeholder="Search..." class="text-xs w-40" oninput="onRequestSearch()">
+                  <button onclick="fetchRequests()" class="btn btn-muted btn-xs">&#8635; Refresh</button>
+                  <div class="relative">
+                    <button onclick="toggleDropdown()" id="purge-btn" class="btn btn-muted btn-xs"><span>Clear</span> <svg width="10" height="10" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg></button>
+                    <div id="purge-dropdown" class="dropdown-menu widget">
+                      <button onclick="purgeHistory('30m')" class="dropdown-item">Older than 30 minutes</button>
+                      <button onclick="purgeHistory('1h')" class="dropdown-item">Older than 1 hour</button>
+                      <button onclick="purgeHistory('1d')" class="dropdown-item">Older than 1 day</button>
+                      <button onclick="purgeHistory('2d')" class="dropdown-item">Older than 2 days</button>
+                      <button onclick="purgeHistory('7d')" class="dropdown-item">Older than 7 days</button>
+                      <div class="dropdown-divider"></div>
+                      <button onclick="purgeHistory('all')" class="dropdown-item danger">Clear all history</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div class="table-wrap">
+                <table>
+                  <thead><tr><th>ID</th><th>Time</th><th>Host / Target IP</th><th>Command</th><th>Status</th><th class="text-right">Actions</th></tr></thead>
+                  <tbody id="table-body"></tbody>
+                </table>
+              </div>
+              <div id="empty-state" class="hidden flex-col items-center justify-center py-12 text-muted"><p>No activity recorded yet.</p></div>
             </div>
           </div>
         </div>
-        <div class="table-wrap">
-          <table>
-            <thead><tr><th>ID</th><th>Time</th><th>Host / Target IP</th><th>Command</th><th>Status</th><th class="text-right">Actions</th></tr></thead>
-            <tbody id="table-body"></tbody>
-          </table>
+
+        <!-- Right: Context Panel -->
+        <div class="cc-context collapsed" id="cc-context">
+          <div class="cc-context-header">
+            <span>Request Details</span>
+            <button onclick="closeContextPanel()" class="btn btn-muted btn-xs" style="padding:2px 6px">&times;</button>
+          </div>
+          <div class="cc-context-body" id="cc-context-body">
+            <div class="cc-context-empty" id="cc-context-empty">
+              <div class="cc-context-empty-icon">&#9889;</div>
+              <div>Select a request from the feed<br>to view details</div>
+            </div>
+            <div id="cc-context-content" class="hidden">
+              <div class="ctx-section">
+                <div class="ctx-label">Command</div>
+                <div class="ctx-cmd" id="ctx-cmd"></div>
+              </div>
+              <div class="ctx-section">
+                <div class="ctx-label">Requested By</div>
+                <div class="ctx-value" id="ctx-human"></div>
+              </div>
+              <div class="ctx-section">
+                <div class="ctx-label">Target</div>
+                <div class="ctx-meta" id="ctx-target"></div>
+              </div>
+              <div class="ctx-section">
+                <div class="ctx-label">Risk Assessment</div>
+                <div id="ctx-risk"></div>
+              </div>
+              <div class="ctx-section">
+                <div class="ctx-label">Status</div>
+                <div class="ctx-value" id="ctx-status"></div>
+              </div>
+              <div class="ctx-section">
+                <div class="ctx-label">Time</div>
+                <div class="ctx-value" id="ctx-time"></div>
+              </div>
+              <div class="ctx-actions" id="ctx-actions"></div>
+            </div>
+          </div>
         </div>
-        <div id="empty-state" class="hidden flex-col items-center justify-center py-12 text-muted"><p>No activity recorded yet.</p></div>
       </div>
     </div>
 
