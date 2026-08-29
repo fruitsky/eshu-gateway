@@ -1357,7 +1357,7 @@ async function fetchRequests() {
     } catch(e) { _pendingIntegrationCalls = []; }
     detectNewIntegrationCalls();
     await refreshPolicyCache();
-    renderJitTickets(); renderTable(); updateStats();
+    renderJitTickets(); renderTable(); updateStats(); renderFleetStrip();
   } catch(err) {}
 }
 function detectNewJITs(newData) {
@@ -1500,6 +1500,46 @@ function renderEmptyState() {
   '</div>';
 }
 
+function renderFleetStrip() {
+  var strip = document.getElementById('fleet-strip');
+  if (!strip) return;
+  var now = Math.floor(Date.now() / 1000);
+  var gws = (_gatewaysData || []).filter(function(g){ return g.hostname || g.ip; });
+  var pendingByIp = {};
+  (requestsData || []).forEach(function(r){
+    if (r.status === 'pending' && r.target_ip) pendingByIp[r.target_ip] = (pendingByIp[r.target_ip] || 0) + 1;
+  });
+  var chips = gws.map(function(g){
+    var isOnline = (now - (g.last_seen || 0)) < GATEWAY_DISCONNECTED_AFTER;
+    var count = pendingByIp[g.ip] || 0;
+    var label = escapeHtml(g.hostname || g.ip);
+    return '<div class="gw-chip" onclick="switchView(\'gateways\')" title="' + label + (count ? ' — ' + count + ' pending' : '') + '">' +
+      '<span class="dot ' + (isOnline ? 'online' : 'offline') + '"></span>' +
+      '<span class="name">' + label + '</span>' +
+      (count > 0 ? '<span class="count">' + count + '</span>' : '') +
+      '</div>';
+  }).join('');
+  strip.innerHTML = '<span class="fleet-label">Fleet</span>' + chips + (gws.length === 0 ? '<span class="fleet-label" style="opacity:0.5">no gateways</span>' : '');
+}
+
+function flashGlitch(text, danger) {
+  var glitch = document.getElementById('glitch');
+  if (!glitch) return;
+  glitch.textContent = text;
+  glitch.className = 'glitch show' + (danger ? ' danger' : '');
+  clearTimeout(flashGlitch._t);
+  flashGlitch._t = setTimeout(function(){ glitch.className = 'glitch'; }, 950);
+}
+
+document.addEventListener('keydown', function(e) {
+  if (e.key === 'f' || e.key === 'F') {
+    if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT')) return;
+    document.body.classList.toggle('focus');
+  } else if (e.key === 'Escape') {
+    document.body.classList.remove('focus');
+  }
+});
+
 function renderJitTickets() {
   var pending = requestsData.filter(function(r) { return r.status === 'pending' && r.ttl > 0; });
   var winReqs = _pendingWinReqs || [];
@@ -1599,6 +1639,7 @@ function renderJitTickets() {
   container.innerHTML = html;
 }
 async function approveWindowReq(id) {
+  flashGlitch('APPROVED \u25B8 WINDOW', false);
   try {
     const r = await authFetch('/api/window-requests/' + id + '/approve', { method: 'POST' });
     if (r.status === 401) { await checkAuth(); return; }
@@ -1610,6 +1651,7 @@ async function approveWindowReq(id) {
   } catch(e) { showToast('' + (e.message || 'Failed to approve window'), 'error'); }
 }
 async function denyWindowReq(id) {
+  flashGlitch('DENIED \u25B8 WINDOW', true);
   try {
     const r = await authFetch('/api/window-requests/' + id + '/deny', { method: 'POST' });
     if (r.status === 401) { await checkAuth(); return; }
@@ -1621,6 +1663,9 @@ async function denyWindowReq(id) {
 
 // ── Deny with Blocklist ─────────────────────────────────────────────────
 async function handleAction(id, action) {
+  var ghReq = requestsData.find(function(r){ return String(r.id) === String(id); });
+  var ghHost = ghReq ? (ghReq.hostname || ghReq.target_ip || '') : '';
+  flashGlitch((action === 'deny' ? 'DENIED' : 'APPROVED') + (ghHost ? ' \u25B8 ' + ghHost.toUpperCase() : ''), action === 'deny');
   if (action === 'deny') {
     const res = await authFetch('/api/deny/' + id, { method: 'POST' });
     if (res.status === 401) { await checkAuth(); return; }
@@ -2145,6 +2190,7 @@ async function fetchCmdDescs() {
 async function fetchGateways() {
   const res = await fetch('/api/gateways'); const data = await res.json();
   _gatewaysData = data;
+  renderFleetStrip();
   var clientNow = Math.floor(Date.now() / 1000);
   data.forEach(function(g) {
     if ((g.override_remaining || 0) > 0) {
@@ -4196,6 +4242,7 @@ async function deleteTool(id, seeded) {
 }
 
 async function approveIntegrationCall(id) {
+  flashGlitch('APPROVED \u25B8 API', false);
   try {
     const res = await authFetch('/api/integration-calls/' + id + '/approve', { method: 'POST' });
     if (res.ok) { fetchRequests(); fetchIntegrationCalls(); showToast('Approved and executed', 'success'); }
@@ -4203,6 +4250,7 @@ async function approveIntegrationCall(id) {
 }
 
 async function denyIntegrationCall(id) {
+  flashGlitch('DENIED \u25B8 API', true);
   try {
     const res = await authFetch('/api/integration-calls/' + id + '/deny', { method: 'POST' });
     if (res.ok) { fetchRequests(); }

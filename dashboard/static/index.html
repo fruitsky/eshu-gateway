@@ -19,6 +19,9 @@
 <!-- State-driven film grain overlay -->
 <div class="grain"></div>
 
+<!-- Phosphor glitch flash (approve/deny) -->
+<div class="glitch" id="glitch"></div>
+
 <!-- Toast -->
 <div id="toast" class="hidden fixed top-4 left-1/2 transform -translate-x-1/2 z-50 px-6 py-3 rounded-lg text-sm font-medium shadow-lg toast"></div>
 
@@ -157,6 +160,8 @@
       <div class="cc-layout">
         <!-- Left: Feed -->
         <div class="cc-feed">
+          <!-- Fleet presence strip -->
+          <div class="fleet-strip" id="fleet-strip"></div>
           <!-- Deny Blocklist Bar -->
           <div id="deny-blacklist-bar" class="hidden deny-bar">
             <span id="deny-bar-text" class="text-sm text-muted"></span>
