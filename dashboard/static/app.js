@@ -671,6 +671,42 @@ function formatWinSchedule(w) {
   return sched;
 }
 
+function winDowStrip(dow) {
+  var html = '<span class="dow-strip">';
+  for (var i = 0; i < 7; i++) {
+    html += '<span class="dow-day' + ((dow & DAY_BITS[i]) ? ' on' : '') + '" title="' + DAY_NAMES[i] + '">' + DAY_NAMES[i] + '</span>';
+  }
+  return html + '</span>';
+}
+
+function winScheduleCell(w) {
+  var dow = Number(w.days_of_week) || 0;
+  var et = Number(w.execution_time) || 0;
+  var ws = Number(w.window_start) || 0;
+  var html = '';
+  if (dow || et) {
+    html += winDowStrip(dow);
+    if (et) {
+      var h = String(Math.floor(et / 60)).padStart(2,'0');
+      var m = String(et % 60).padStart(2,'0');
+      html += '<br><span class="text-muted">' + h + ':' + m + ' UTC</span>';
+    }
+  } else if (ws) {
+    var d = new Date(ws * 1000);
+    html += 'Once: ' + d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false });
+  } else {
+    html += 'N/A';
+  }
+  var exp = w.expires_at ? Number(w.expires_at) : 0;
+  if (exp) {
+    var ed = new Date(exp * 1000);
+    var expStr = ed.toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false });
+    var past = Math.floor(Date.now() / 1000) > exp;
+    html += '<br><span class="win-expiry" style="color:' + (past ? 'var(--brand-red)' : 'var(--status-warning)') + ';">Expires: ' + expStr + (past ? ' (expired)' : '') + '</span>';
+  }
+  return html;
+}
+
 function computeNextRun(daysOfWeek, execTimeMin) {
   // Stored values are UTC; compute next occurrence as a UTC Date.
   var now = new Date();
@@ -740,7 +776,7 @@ async function fetchWindowsTable() {
         '<td>' + labelHtml + '</td>' +
         '<td class="text-xs">' + gwPill(gw.hostname||w.target_ip) + ' ' + escapeHtml(gw.hostname||w.target_ip) + '</td>' +
         '<td><code class="win-cmd-code" title="' + escapeHtml(w.command) + '">' + escapeHtml(w.match_type === 'prefix' ? w.command + '*' : w.command) + '</code></td>' +
-        '<td class="text-xs text-muted">' + formatWinSchedule(w) + (nextRunStr ? '<br>' + nextRunStr : '') + '</td>' +
+        '<td class="text-xs text-muted">' + winScheduleCell(w) + (nextRunStr ? '<br>' + nextRunStr : '') + '</td>' +
         '<td class="text-center text-xs text-muted">' + execInfo + '</td>' +
         '<td class="text-right"><div class="flex items-center justify-end gap-1">' +
           (w.status === 'pending_review'
@@ -2624,6 +2660,14 @@ async function dispatchFleetQueue() {
 var _fleetData = [];
 var _fleetRenderSig = null;
 
+function fleetDot(status) {
+  var cls = 'fleet-dot';
+  if (status === 'running' || status === 'queued') cls += ' running';
+  else if (status === 'success') cls += ' success';
+  else if (status === 'failed' || status === 'timeout') cls += ' fail';
+  return '<span class="' + cls + '"></span>';
+}
+
 function renderFleetRun(cmds) {
   var resultsEl = document.getElementById('fleet-results-list');
   if (!resultsEl) return;
@@ -2650,6 +2694,7 @@ function renderFleetRun(cmds) {
       var rBadge = r.status === 'success' ? 'badge-approved' :
                    r.status === 'failed' ? 'badge-denied' :
                    r.status === 'timeout' ? 'badge-blocked' :
+                   r.status === 'running' ? 'badge-pending' :
                    'badge-expired';
       var times = '';
       if (r.status === 'queued') {
@@ -2676,7 +2721,7 @@ function renderFleetRun(cmds) {
       var gIp = (r.hostname && r.hostname !== r.gateway_ip) ? ' <span class="text-muted">(' + escapeHtml(r.gateway_ip) + ')</span>' : '';
       var clearBtn = (r.status === 'queued') ?
         '<button onclick="clearFleetResult(' + c.id + ',\'' + r.gateway_ip + '\')" class="chip-btn" title="Clear this stuck gateway so its queue can move on (other results are kept)">✕</button>' : '';
-      return '<div class="mt-1 text-xs text-muted">• <strong>' + gName + '</strong>' + gIp + ' ' +
+      return '<div class="mt-1 text-xs text-muted">' + fleetDot(r.status) + ' <strong>' + gName + '</strong>' + gIp + ' ' +
         '<span class="badge ' + rBadge + '">' + r.status + '</span>' +
         (r.exit_code != null && r.exit_code !== '' ? ' <span class="text-muted">exit ' + r.exit_code + '</span>' : '') +
         times + clearBtn + outHtml + '</div>';
@@ -3055,10 +3100,10 @@ async function testPolicy() {
   const rd = document.getElementById('tester-result'); rd.innerHTML = '<span class="text-muted">Testing...</span>'; rd.classList.remove('hidden');
   try {
     const res = await fetch('/api/policies/test?command=' + encodeURIComponent(cmd)); const data = await res.json();
-    let bg, border, text, icon, desc;
-    if (data.action === 'blocked') { bg='rgba(251,146,60,0.1)'; border='rgba(251,146,60,0.3)'; text='#fb923c'; icon='!'; desc='Blocked: <code style="color:#fb923c;">' + (data.details[0] ? data.details[0].pattern : 'unknown') + '</code>'; }
-    else if (data.action === 'auto_approved') { bg='rgba(74,222,128,0.1)'; border='rgba(74,222,128,0.3)'; text='var(--status-success)'; icon=''; desc=(data.details[0] && data.details[0].type === 'exact_whitelist') ? 'Auto-Approved (Exact Allowlist)' : 'Auto-Approved: <code style="color:var(--status-success);">' + (data.details[0] ? data.details[0].pattern : '') + '</code>'; }
-    else { bg='rgba(251,191,36,0.1)'; border='rgba(251,191,36,0.3)'; text='var(--status-warning)'; icon=''; desc='Would require JIT Approval'; }
+    let badge, verdict, desc;
+    if (data.action === 'blocked') { badge='badge-blocked'; verdict='Blocked'; desc='Matched: <code class="text-main">' + (data.details[0] ? escapeHtml(data.details[0].pattern) : 'unknown') + '</code>'; }
+    else if (data.action === 'auto_approved') { badge='badge-approved'; verdict='Auto-Approved'; desc=(data.details[0] && data.details[0].type === 'exact_whitelist') ? 'Exact allowlist match' : 'Matched: <code class="text-main">' + (data.details[0] ? escapeHtml(data.details[0].pattern) : '') + '</code>'; }
+    else { badge='badge-pending'; verdict='JIT Required'; desc='No policy match — waits for operator approval'; }
     let memLine = '';
     try {
       const mc = await authFetch('/api/policies/check?command=' + encodeURIComponent(cmd));
@@ -3072,7 +3117,7 @@ async function testPolicy() {
           ' · Blocklist ' + mark(m.in_regex_blacklist, true) + '</div>';
       }
     } catch(e) {}
-    rd.innerHTML = '<div class="result-box" style="background:' + bg + ';color:' + text + ';border-color:' + border + ';">' + icon + ' <strong>' + data.action.replace('_',' ').toUpperCase() + '</strong> — ' + desc + '</div>' + memLine + testerAddButtons(data.action, cmd);
+    rd.innerHTML = '<div class="result-box"><span class="badge ' + badge + '">' + verdict + '</span> <span class="text-main">' + desc + '</span></div>' + memLine + testerAddButtons(data.action, cmd);
   } catch(err) { rd.innerHTML = '<div class="result-box" style="background:var(--bg-base);color:var(--text-muted);"> ' + err.message + '</div>'; }
 }
 
