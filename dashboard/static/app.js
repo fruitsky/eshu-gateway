@@ -22,6 +22,13 @@ function devBadge(g) {
   return '<span class="dev-pill">DEV</span>';
 }
 
+function toggleMobileSidebar() {
+  var sidebar = document.getElementById('main-sidebar');
+  var overlay = document.getElementById('sidebar-overlay');
+  if (!sidebar || !overlay) return;
+  sidebar.classList.toggle('open');
+  overlay.classList.toggle('show');
+}
 // ── Sound ────────────────────────────────────────────────────────────────
 // State variables (_audioCtx, _knownOfflineIps, notifyJIT, etc.) are in state.js.
 
