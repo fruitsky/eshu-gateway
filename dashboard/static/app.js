@@ -1617,10 +1617,15 @@ function renderJitTickets() {
   allItems.forEach(function(item) {
     if (item.type === 'ssh' && item.data.session_id && item.data.session_id !== 'unknown') {
       var sid = item.data.session_id;
-      if (!sessionMap[sid]) { sessionMap[sid] = { session_id: sid, items: [] }; sessionOrder.push(sid); }
+      if (!sessionMap[sid]) { sessionMap[sid] = { session_id: sid, items: [], history: [] }; sessionOrder.push(sid); }
       sessionMap[sid].items.push(item);
     } else {
       singles.push(item);
+    }
+  });
+  (requestsData || []).forEach(function(r) {
+    if (r.session_id && r.session_id !== 'unknown' && r.status !== 'pending' && sessionMap[r.session_id]) {
+      sessionMap[r.session_id].history.push(r);
     }
   });
 
@@ -1706,13 +1711,26 @@ function renderSessionCard(s) {
   var host = first.hostname || first.target_ip || 'host';
   var age = formatAgo(Math.floor(Date.now() / 1000) - (first.created_at || 0));
   var short = escapeHtml(s.session_id.substring(0, 8));
+  var historyHtml = '';
+  if (s.history && s.history.length) {
+    var lines = s.history.map(function(r) {
+      var dot = 'muted', label = String(r.status || '');
+      if (r.status === 'blocked' || r.status === 'denied') { dot = 'denied'; }
+      else if (r.status === 'auto-approved' || r.status === 'approved' || r.status === 'consumed' || r.status === 'override') { dot = 'approved'; if (r.status === 'auto-approved') label = 'auto'; else if (r.status === 'consumed') label = 'ran'; }
+      return '<div class="jit-history-item"><span class="jit-history-dot ' + dot + '"></span>' +
+        '<span class="jit-history-status">' + escapeHtml(label) + '</span>' +
+        '<span class="jit-history-cmd">' + escapeHtml(String(r.command || '')) + '</span>' +
+        '<span class="jit-history-time">' + formatTime(r.created_at) + '</span></div>';
+    }).join('');
+    historyHtml = '<div class="jit-history">' + lines + '</div>';
+  }
   return '<div class="jit-session open">' +
     '<div class="jit-session-header" onclick="toggleSession(this)">' +
       '<span class="jit-session-caret">&#9656;</span>' +
       '<span class="jit-session-label">Session <span class="jit-session-id">' + short + '</span></span>' +
       '<span class="jit-session-meta">' + escapeHtml(host) + ' \u00b7 ' + items.length + ' command' + (items.length > 1 ? 's' : '') + ' \u00b7 ' + age + '</span>' +
     '</div>' +
-    '<div class="jit-session-body">' + items.map(function(it){ return renderJitItem(it); }).join('') + '</div>' +
+    '<div class="jit-session-body">' + items.map(function(it){ return renderJitItem(it); }).join('') + historyHtml + '</div>' +
   '</div>';
 }
 

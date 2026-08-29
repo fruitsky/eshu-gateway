@@ -23,6 +23,27 @@ test → verify → merge to `master` → LXC pull flow.
 
 ---
 
+## Session Grouping (SSH) — in progress
+
+SSH-side plumbing shipped on `ui/amber-crt-redesign` (pending merge): the gateway
+parses `ESHU_SESSION_ID` / `ESHU_EXECUTION_ID` command-prefix keys (stripped before
+policy evaluation so classification is unchanged), the `requests` table stores
+them, and the dashboard groups pending requests into collapsible **Session** cards,
+showing the session's blocked / auto-approved history greyed out underneath. The
+agent manual documents the prefix convention.
+
+Follow-ups, in build order:
+
+- **Live activity awareness** — the radar caps at 8 gateways; expand it to the full
+  fleet and flash a gateway when a command executes on it (auto-approved, window,
+  override — the "silent" paths). Optional "electronics working" sound per
+  auto-approve and a distinct one per blocked command.
+- **MCP / API session ids** — carry `session_id`/`execution_id` as structured MCP
+  fields (not the SSH string-prefix trick) so API-tool calls group into the same
+  sessions.
+
+---
+
 ## Approved Windows decoupled from the feature system ✅ DONE
 
 Shipped on `feat/windows-core`. Approved Windows are now **core / always-on** —
