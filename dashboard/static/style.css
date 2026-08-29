@@ -1,23 +1,26 @@
 :root {
-    --bg-base: #101012;
-    --bg-surface: #1a1a1d;
-    --bg-hover: #252529;
-    --bg-stripe: #2c2c32;
-    --border-color: #333336;
-    --text-main: #f1f1f1;
-    --text-muted: #a8b0bb;
-    --brand-red: #e63946;
-    --brand-red-hover: #b92b38;
-    --brand-red-glow: rgba(230, 57, 70, 0.25);
-    --status-success: #4ade80;
-    --status-warning: #fbbf24;
-    --status-info: #60a5fa;
-    --primary: #f1f1f1;
-    --on-primary: #101012;
-    --primary-hover: #d4d4d8;
-    --danger: #e63946;
-    --danger-hover: #b92b38;
-    --focus-ring: rgba(230, 57, 70, 0.5);
+    --bg-base: #0f0d0a;
+    --bg-surface: #1a1714;
+    --bg-hover: #221f1a;
+    --bg-stripe: #2d2922;
+    --border-color: #2d2922;
+    --text-main: #f0e6d4;
+    --text-muted: #7a6d5e;
+    --brand-red: #f59e0b;
+    --brand-red-hover: #fbbf24;
+    --brand-red-glow: rgba(245, 158, 11, 0.2);
+    --accent: #f59e0b;
+    --accent-hover: #fbbf24;
+    --accent-glow: rgba(245, 158, 11, 0.2);
+    --status-success: #f59e0b;
+    --status-warning: #fb923c;
+    --status-info: #d97706;
+    --primary: #f59e0b;
+    --on-primary: #0f0d0a;
+    --primary-hover: #fbbf24;
+    --danger: #dc2626;
+    --danger-hover: #b91c1c;
+    --focus-ring: rgba(245, 158, 11, 0.5);
     --space-2: 8px;
     --space-3: 12px;
     --space-4: 16px;
@@ -27,16 +30,16 @@
     --text-sm: 13px;
     --text-base: 14px;
     --text-md: 16px;
-    --radius-sm: 6px;
-    --radius: 10px;
-    --radius-lg: 12px;
+    --radius-sm: 4px;
+    --radius: 6px;
+    --radius-lg: 8px;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   button { font-family: inherit; font-size: inherit; color: inherit; background: none; border: none; cursor: pointer; }
   img { display: block; max-width: 100%; }
   ul, ol { list-style: none; }
   body {
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    font-family: 'Space Grotesk', -apple-system, BlinkMacSystemFont, sans-serif;
     background-color: var(--bg-base);
     color: var(--text-main);
     display: flex;
@@ -139,9 +142,9 @@
   .stats-gw-pill.selected { color: var(--text-main); border-color: var(--brand-red); background: rgba(230,57,70,0.06); }
   .stats-gw-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
   .health-dot { width: 8px; height: 8px; border-radius: 50%; transition: all 0.3s ease; }
-  .health-dot.green { background: var(--status-success); box-shadow: 0 0 6px rgba(74,222,128,0.4); animation: healthPulseGreen 2.5s infinite; }
-  .health-dot.orange { background: #f59e0b; box-shadow: 0 0 8px rgba(245,158,11,0.5); animation: healthPulseOrange 1.5s infinite; }
-  .health-dot.red { background: var(--brand-red); box-shadow: 0 0 12px rgba(230,57,70,0.6); animation: healthPulseRed 1s infinite; }
+  .health-dot.green { background: var(--accent); box-shadow: 0 0 6px var(--accent-glow); animation: healthPulseGreen 2.5s infinite; }
+  .health-dot.orange { background: #fb923c; box-shadow: 0 0 8px rgba(245,158,11,0.5); animation: healthPulseOrange 1.5s infinite; }
+  .health-dot.red { background: var(--danger); box-shadow: 0 0 12px rgba(220,38,38,0.6); animation: healthPulseRed 1s infinite; }
   @keyframes healthPulseGreen { 0%,100%{opacity:0.7;transform:scale(1)}50%{opacity:1;transform:scale(1.25)}}
   @keyframes healthPulseOrange { 0%,100%{opacity:0.7;transform:scale(1)}50%{opacity:1;transform:scale(1.3)}}
   @keyframes healthPulseRed { 0%,100%{opacity:0.7;transform:scale(1)}50%{opacity:1;transform:scale(1.4)}}
