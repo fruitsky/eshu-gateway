@@ -99,8 +99,8 @@ function openContextPanel(reqId) {
   var riskEl = document.getElementById('ctx-risk');
   if (req.risk || req.anomaly) {
     var html = '';
-    if (req.risk) html += '<div class="ctx-meta-item" style="color:var(--status-warning);margin-bottom:4px">⚠ ' + escapeHtml(req.risk) + '</div>';
-    if (req.anomaly) html += '<div class="ctx-meta-item" style="color:var(--danger)">⚡ ' + escapeHtml(req.anomaly) + '</div>';
+    if (req.risk) html += '<div class="ctx-meta-item" style="color:var(--status-warning);margin-bottom:4px"> ' + escapeHtml(req.risk) + '</div>';
+    if (req.anomaly) html += '<div class="ctx-meta-item" style="color:var(--danger)"> ' + escapeHtml(req.anomaly) + '</div>';
     riskEl.innerHTML = html;
   } else {
     riskEl.innerHTML = '<span class="ctx-meta-item" style="color:var(--text-muted)">No flags</span>';
@@ -262,9 +262,9 @@ function playJitChime(force) {
 function toggleMute() { soundMuted = !soundMuted; updateDropdownMuteLabel(); }
 function updateDropdownMuteLabel() {
   const btn = document.getElementById('dd-mute-btn');
-  btn.innerHTML = soundMuted ? '🔇 Sound Off' : '🔔 Sound On';
+  btn.innerHTML = soundMuted ? 'Sound Off' : 'Sound On';
 }
-function testSound() { playJitChime(true); showToast('🔊 Chime played', 'success'); }
+function testSound() { playJitChime(true); showToast('Chime played', 'success'); }
 
 // ── Notifications ────────────────────────────────────────────────────────
 function requestNotifPermission() {
@@ -279,10 +279,10 @@ function requestNotifPermission() {
 function testNotification() {
   playJitChime(false);
   if (_notifPerm === 'granted') {
-    new Notification('⚡ JIT Approval Required', { body: '🧪 Test notification — 1 command requires your approval', tag: 'eshu-jit-test', icon: '/static/eshu_logo.png' });
-    showToast('🧪 Test notification sent', 'success');
-  } else if (_notifPerm === 'denied') { showToast('⚠️ Browser notifications are blocked.', 'error'); }
-  else { showToast('⚠️ Click anywhere on the page to prompt notification permission.', 'error'); }
+    new Notification('JIT Approval Required', { body: 'Test notification — 1 command requires your approval', tag: 'eshu-jit-test', icon: '/static/eshu_logo.png' });
+    showToast('Test notification sent', 'success');
+  } else if (_notifPerm === 'denied') { showToast('Browser notifications are blocked.', 'error'); }
+  else { showToast('Click anywhere on the page to prompt notification permission.', 'error'); }
 }
 function notifyNewJIT(pendingCount) {
   const now = Date.now();
@@ -290,7 +290,7 @@ function notifyNewJIT(pendingCount) {
   lastJitNotifyTime = now;
   playJitChime(false);
   if (_notifPerm === 'granted') {
-    const n = new Notification('⚡ JIT Approval Required', { body: pendingCount === 1 ? '1 command requires your approval' : pendingCount + ' commands require your approval', tag: 'eshu-jit', icon: '/static/eshu_logo.png' });
+    const n = new Notification('JIT Approval Required', { body: pendingCount === 1 ? '1 command requires your approval' : pendingCount + ' commands require your approval', tag: 'eshu-jit', icon: '/static/eshu_logo.png' });
     n.onclick = function() { window.focus(); switchView('home'); n.close(); };
   }
 }
@@ -402,8 +402,8 @@ async function refreshPasswordUI() {
   try {
     const res = await fetch('/api/auth/status'); const data = await res.json();
     statusEl.innerHTML = data.password_set
-      ? '<span class="text-success">🔒 Password protection <strong>enabled</strong>.</span>'
-      : '<span class="text-warning">⚠️ No password set yet — complete setup to protect the dashboard.</span>';
+      ? '<span class="text-success"> Password protection <strong>enabled</strong>.</span>'
+      : '<span class="text-warning"> No password set yet — complete setup to protect the dashboard.</span>';
   } catch(e) {}
 }
 async function setDashboardPassword() {
@@ -411,9 +411,9 @@ async function setDashboardPassword() {
   if (!pw || pw.length < 4) { showToast('Password must be at least 4 characters', 'error'); return; }
   try {
     const res = await authFetch('/api/auth/set-password', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: pw }) });
-    if (res.ok) { document.getElementById('new-password').value = ''; refreshPasswordUI(); showToast('✅ Password updated', 'success'); }
-    else { const data = await res.json().catch(function() { return {}; }); showToast('❌ ' + (data.detail || 'Failed'), 'error'); }
-  } catch(e) { showToast('❌ Failed: ' + e.message, 'error'); }
+    if (res.ok) { document.getElementById('new-password').value = ''; refreshPasswordUI(); showToast('Password updated', 'success'); }
+    else { const data = await res.json().catch(function() { return {}; }); showToast('' + (data.detail || 'Failed'), 'error'); }
+  } catch(e) { showToast('Failed: ' + e.message, 'error'); }
 }
 
 // ── Dev Tools ────────────────────────────────────────────────────────────
@@ -442,10 +442,10 @@ async function toggleDevTools() {
     await authFetch('/api/settings/dev-tools', { method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({enabled: _devToolsEnabled}) });
     renderDevTools();
     if (_devToolsEnabled) { fetchDevStatus(); fetchDevGateways(); fetchFeatureFlags(); }
-    showToast(_devToolsEnabled ? '✅ Development tools enabled' : 'Development tools disabled', 'success');
+    showToast(_devToolsEnabled ? 'Development tools enabled' : 'Development tools disabled', 'success');
   } catch(e) {
     _devToolsEnabled = !_devToolsEnabled;
-    showToast('❌ Failed to update setting', 'error');
+    showToast('Failed to update setting', 'error');
   }
 }
 
@@ -475,7 +475,7 @@ async function fetchFeatureFlags() {
 
 function renderSeg(val, current, name) {
   var active = val === current;
-  var label = val === 'off' ? 'Off' : val === 'dev' ? '🧪 Dev' : '🟢 Prod';
+  var label = val === 'off' ? 'Off' : val === 'dev' ? 'Dev' : 'Prod';
   return '<button onclick="setFeatureFlagState(\'' + name + '\',\'' + val + '\')" class="seg-btn' + (active ? ' active ' + val : '') + '">' + label + '</button>';
 }
 
@@ -537,12 +537,12 @@ async function pushDevGateways() {
     var r = await authFetch('/api/dev-gateways/push', { method:'POST' });
     var data = await r.json();
     if (data.stale_gateways && data.stale_gateways.length > 0) {
-      showToast('⚠️ ' + data.stale_gateways.length + ' gateway(s) are on old versions: ' + data.stale_gateways.join(', ') + '. Run 🔄 Update Gateways first.', 'error');
+      showToast('' + data.stale_gateways.length + ' gateway(s) are on old versions: ' + data.stale_gateways.join(', ') + '. Run Update Gateways first.', 'error');
     } else {
-      showToast('✅ Dev update triggered for ' + (data.dev_gateway_count||0) + ' gateway(s)' + (data.dev_gateway_names ? ': ' + data.dev_gateway_names.join(', ') : ''), 'success');
+      showToast('Dev update triggered for ' + (data.dev_gateway_count||0) + ' gateway(s)' + (data.dev_gateway_names ? ': ' + data.dev_gateway_names.join(', ') : ''), 'success');
     }
   } catch(e) { showToast('Failed to push', 'error'); }
-  btn.disabled = false; btn.textContent = '🚀 Push to Dev Gateways';
+  btn.disabled = false; btn.textContent = 'Push to Dev Gateways';
 }
 
 function onDevGatewayInput() {
@@ -575,7 +575,7 @@ function winClearError() {
 function resetWinForm() {
   _winEditId = null; _winSource = 'new'; _winType = 'recurring'; _winDays = 0;
   _winNeverExpire = true; _winHour = 0; _winMin = 0; _winMatchType = 'exact'; _selectedJIT = [];
-  document.getElementById('win-modal-title').textContent = '🪟 Create Approved Window';
+  document.getElementById('win-modal-title').textContent = 'Create Approved Window';
   document.getElementById('save-window-btn').textContent = 'Create Window';
   document.getElementById('win-command').value = '';
   document.getElementById('win-label').value = '';
@@ -702,17 +702,17 @@ async function fetchWindowsTable() {
     if (!wins.length) { tbody.innerHTML = '<tr><td colspan="8" class="px-4 py-3 text-muted">No approved windows created yet.</td></tr>'; return; }
     var tableNow = Math.floor(Date.now() / 1000);
     tbody.innerHTML = wins.map(function(w) {
-      var stat = w.enabled ? '<span class="badge badge-approved cursor-pointer" onclick="toggleWindow(' + w.id + ',true)" title="Click to disable">🟢 On</span>' :
-        (w.status === 'pending_review' ? '<span class="badge badge-pending">⏳ Review</span>' :
-         (w.status === 'denied' ? '<span class="badge badge-window-rejected">🚫 Denied</span>' :
-          '<span class="badge badge-expired cursor-pointer" onclick="toggleWindow(' + w.id + ',false)" title="Click to enable">⏸️ Off</span>'));
+      var stat = w.enabled ? '<span class="badge badge-approved cursor-pointer" onclick="toggleWindow(' + w.id + ',true)" title="Click to disable"> On</span>' :
+        (w.status === 'pending_review' ? '<span class="badge badge-pending"> Review</span>' :
+         (w.status === 'denied' ? '<span class="badge badge-window-rejected"> Denied</span>' :
+          '<span class="badge badge-expired cursor-pointer" onclick="toggleWindow(' + w.id + ',false)" title="Click to enable"> Off</span>'));
       var gw = gwMap[w.target_ip] || {};
       var originBadge = (w.origin === 'ai')
-        ? '<span class="origin-ai" title="Inbound — AI requested">🤖 AI</span> '
-        : '<span class="origin-human" title="Outbound — operator created">👤 Human</span> ';
+        ? '<span class="origin-ai" title="Inbound — AI requested">AI</span> '
+        : '<span class="origin-human" title="Outbound — operator created">Human</span> ';
       var labelHtml = originBadge + (w.label ? '<span class="text-main font-medium">' + escapeHtml(w.label) + '</span><br>' : '') +
         '<code class="text-xs font-mono text-muted" title="' + (w.token||'') + '">' + (w.token||'').substring(0, 8) + '…</code>' +
-        ' <span onclick="copyToClipboard(\'' + (w.token||'') + '\')" class="cursor-pointer text-xs opacity-40 hover:opacity-100" title="Copy token">📋</span>';
+        ' <span onclick="copyToClipboard(\'' + (w.token||'') + '\')" class="cursor-pointer text-xs opacity-40 hover:opacity-100" title="Copy token">Copy</span>';
       var execInfo = w.execution_count + (w.max_executions > 0 ? '/' + w.max_executions : '/∞');
       var lu = Number(w.last_used_at) || 0;
       if (lu > 0) execInfo += '<br><span class="text-xs text-muted">last ' + formatAgo(tableNow - lu) + '</span>';
@@ -733,11 +733,11 @@ async function fetchWindowsTable() {
         '<td class="text-center text-xs text-muted">' + execInfo + '</td>' +
         '<td class="text-right"><div class="flex items-center justify-end gap-1">' +
           (w.status === 'pending_review'
-            ? '<button onclick="approveWindowReq(' + w.id + ')" class="btn btn-approve btn-xs">✅ Approve</button>' +
-              '<button onclick="denyWindowReq(' + w.id + ')" class="btn btn-deny btn-xs">❌ Deny</button>'
-            : '<button onclick="openEditWindowModal(' + w.id + ')" class="btn btn-muted btn-xs" title="Edit">✏️</button>' +
-              '<button onclick="showWindowHistory(' + w.id + ')" class="btn btn-muted btn-xs" title="Usage history">📜</button>' +
-              '<button onclick="deleteWindow(' + w.id + ')" class="btn btn-deny btn-xs" title="Delete">🗑</button>') +
+            ? '<button onclick="approveWindowReq(' + w.id + ')" class="btn btn-approve btn-xs"> Approve</button>' +
+              '<button onclick="denyWindowReq(' + w.id + ')" class="btn btn-deny btn-xs"> Deny</button>'
+            : '<button onclick="openEditWindowModal(' + w.id + ')" class="btn btn-muted btn-xs" title="Edit">Edit</button>' +
+              '<button onclick="showWindowHistory(' + w.id + ')" class="btn btn-muted btn-xs" title="Usage history">History</button>' +
+              '<button onclick="deleteWindow(' + w.id + ')" class="btn btn-deny btn-xs" title="Delete">Delete</button>') +
         '</div></td>' +
         '</tr>';
     }).join('');
@@ -837,7 +837,7 @@ async function openCreateWindowModal() {
 
 async function openEditWindowModal(id) {
   _winEditId = id;
-  document.getElementById('win-modal-title').textContent = '✏️ Edit Approved Window';
+  document.getElementById('win-modal-title').textContent = 'Edit Approved Window';
   document.getElementById('save-window-btn').textContent = 'Save Changes';
   winClearError();
   document.getElementById('win-token-display').classList.add('hidden');
@@ -1036,9 +1036,9 @@ async function testWinCommand() {
   try {
     var r = await fetch('/api/policies/test?command=' + encodeURIComponent(cmd)); var data = await r.json();
     var bg, border, text, icon, desc;
-    if (data.action === 'blocked') { bg='rgba(251,146,60,0.1)'; border='rgba(251,146,60,0.3)'; text='#fb923c'; icon='🛡️'; desc='This command is BLOCKED by policy — cannot create window.'; }
-    else if (data.action === 'auto_approved') { bg='rgba(74,222,128,0.1)'; border='rgba(74,222,128,0.3)'; text='var(--status-success)'; icon='✅'; desc='Already auto-approved — no window needed.'; }
-    else { bg='rgba(96,165,250,0.1)'; border='rgba(96,165,250,0.3)'; text='var(--status-info)'; icon='⏳'; desc='Would require JIT — a window will auto-approve this.'; }
+    if (data.action === 'blocked') { bg='rgba(251,146,60,0.1)'; border='rgba(251,146,60,0.3)'; text='#fb923c'; icon=''; desc='This command is BLOCKED by policy — cannot create window.'; }
+    else if (data.action === 'auto_approved') { bg='rgba(74,222,128,0.1)'; border='rgba(74,222,128,0.3)'; text='var(--status-success)'; icon=''; desc='Already auto-approved — no window needed.'; }
+    else { bg='rgba(96,165,250,0.1)'; border='rgba(96,165,250,0.3)'; text='var(--status-info)'; icon=''; desc='Would require JIT — a window will auto-approve this.'; }
     rd.innerHTML = '<div class="result-box text-xs" style="background:' + bg + ';color:' + text + ';border-color:' + border + ';">' + icon + ' ' + desc + '</div>';
   } catch(e) { rd.innerHTML = '<span class="text-xs text-muted">Test failed</span>'; }
 }
@@ -1154,7 +1154,7 @@ function updateWinSummary() {
   var nextRunEl = document.getElementById('win-next-run');
   if (_winType === 'single') {
     var maxExec = parseInt(document.getElementById('win-max-exec-single').value) || 1;
-    parts.push('⚡ Single-use');
+    parts.push('Single-use');
     parts.push(maxExec + ' execution' + (maxExec !== 1 ? 's' : ''));
     parts.push('auto-disables when exhausted');
     if (nextRunEl) nextRunEl.textContent = '';
@@ -1183,7 +1183,7 @@ function updateWinSummary() {
     var dayList = [];
     for (var i = 0; i < 7; i++) { if (_winDays & DAY_BITS[i]) dayList.push(DAY_NAMES[i]); }
     var dayStr = dayList.length ? dayList.join(', ') : 'Every day';
-    parts.push('🔄 ' + dayStr + ' at ' + hh + ':' + mm + ' UTC');
+    parts.push(' ' + dayStr + ' at ' + hh + ':' + mm + ' UTC');
     parts.push(_winNeverExpire ? 'never expires' : (document.getElementById('win-expiry-date').value || 'expiry set'));
     var maxExecR = parseInt(document.getElementById('win-max-exec').value) || 1;
     parts.push(maxExecR + ' max exec' + (maxExecR !== 1 ? 's' : ''));
@@ -1270,11 +1270,11 @@ async function saveWindow() {
       document.getElementById('win-token-usage').textContent = 'ESHU_WINDOW_TOKEN=' + data.token + ' ' + cmd;
     }
     closeCreateWindowModal();
-    showToast(isEdit ? '✅ Window updated' : '✅ Window created', 'success');
+    showToast(isEdit ? 'Window updated' : 'Window created', 'success');
     fetchWindowsTable();
     if (!isEdit) _winEditId = data.id;
     document.getElementById('save-window-btn').textContent = 'Save Changes';
-    document.getElementById('win-modal-title').textContent = '✏️ Edit Approved Window';
+    document.getElementById('win-modal-title').textContent = 'Edit Approved Window';
   } catch(e) { winError(e.message); }
 }
 
@@ -1313,7 +1313,7 @@ async function showWindowHistory(windowId) {
         data.map(function(e) {
           var ago = formatAgo(now - Math.floor(e.executed_at || 0) || 0);
           var ok = Number(e.success) !== 0;
-          var icon = ok ? '<span class="text-success">✅</span>' : '<span class="stat-blocked">❌</span>';
+          var icon = ok ? '<span class="text-success">✓</span>' : '<span class="stat-blocked">✕</span>';
           var reasonHtml = (!ok && e.reason) ? '<br><span class="text-xs stat-blocked">' + escapeHtml(e.reason) + '</span>' : '';
           return '<tr>' +
             '<td class="text-xs text-muted whitespace-nowrap">' + ago + '</td>' +
@@ -1387,7 +1387,7 @@ function detectNewJITs(newData) {
         lastJitNotifyTime = now2;
         playJitChime(false);
         if (_notifPerm === 'granted') {
-          var nb = new Notification('🛑 Command Blocked', { body: 'Blocked: ' + (lastBlocked.command.length > 80 ? lastBlocked.command.substring(0,80) + '...' : lastBlocked.command), tag: 'eshu-blocked', icon: '/static/eshu_logo.png' });
+          var nb = new Notification('Command Blocked', { body: 'Blocked: ' + (lastBlocked.command.length > 80 ? lastBlocked.command.substring(0,80) + '...' : lastBlocked.command), tag: 'eshu-blocked', icon: '/static/eshu_logo.png' });
           nb.onclick = function() { window.focus(); switchView('home'); nb.close(); };
         }
       }
@@ -1506,8 +1506,8 @@ function renderJitTickets() {
         ? gwPill(r.hostname) + ' ' + escapeHtml(r.hostname)
         : escapeHtml(hostLabel);
       var riskHtml = '';
-      if (r.risk) riskHtml += '<div style="color:var(--status-warning);font-size:10px;margin-top:4px">⚠ ' + escapeHtml(r.risk) + '</div>';
-      if (r.anomaly) riskHtml += '<div style="color:var(--danger);font-size:10px;margin-top:4px">⚡ ' + escapeHtml(r.anomaly) + '</div>';
+      if (r.risk) riskHtml += '<div style="color:var(--status-warning);font-size:10px;margin-top:4px"> ' + escapeHtml(r.risk) + '</div>';
+      if (r.anomaly) riskHtml += '<div style="color:var(--danger);font-size:10px;margin-top:4px"> ' + escapeHtml(r.anomaly) + '</div>';
       html += '<div class="jit-ticket' + (r.anomaly ? ' urgent' : '') + '" data-id="' + r.id + '" onclick="openContextPanel(\'' + r.id + '\')">' +
         '<div class="jit-check" onclick="event.stopPropagation();toggleBulkSelect(\'' + r.id + '\',event)"></div>' +
         '<div style="flex:1;min-width:0">' +
@@ -1537,9 +1537,9 @@ async function approveWindowReq(id) {
     if (!r.ok) throw new Error('Approve failed');
     const data = await r.json();
     if (data.token) copyToClipboard(data.token, true);
-    showToast('✅ Window approved — token copied', 'success');
+    showToast('Window approved — token copied', 'success');
     fetchRequests(); fetchWindowsTable();
-  } catch(e) { showToast('❌ ' + (e.message || 'Failed to approve window'), 'error'); }
+  } catch(e) { showToast('' + (e.message || 'Failed to approve window'), 'error'); }
 }
 async function denyWindowReq(id) {
   try {
@@ -1548,7 +1548,7 @@ async function denyWindowReq(id) {
     if (!r.ok) throw new Error('Deny failed');
     showToast('Window request denied', 'success');
     fetchRequests();
-  } catch(e) { showToast('❌ Failed to deny window request', 'error'); }
+  } catch(e) { showToast('Failed to deny window request', 'error'); }
 }
 
 // ── Deny with Blocklist ─────────────────────────────────────────────────
@@ -1581,7 +1581,7 @@ async function handleDenyBlocklist() {
   renderPolicyChips();
   await savePoliciesSilent();
   const gwRes = await fetch('/api/gateways'); const gws = await gwRes.json();
-  showToast('✅ Blocklisted & pushed to ' + gws.length + ' gateway(s)', 'success');
+  showToast('Blocklisted & pushed to ' + gws.length + ' gateway(s)', 'success');
   dismissDenyBar();
 }
 function dismissDenyBar() { document.getElementById('deny-blacklist-bar').classList.add('hidden'); lastDeniedCmd = ''; }
@@ -1595,7 +1595,7 @@ function formatLastSeen(seconds) { if (seconds < 0) seconds = 0; if (seconds < 1
 async function copyToClipboard(text, silent) {
   try { await navigator.clipboard.writeText(text); }
   catch(e) { const ta = document.createElement('textarea'); ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0'; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); document.body.removeChild(ta); }
-  if (!silent) showToast('📋 Copied', 'success');
+  if (!silent) showToast('Copied', 'success');
 }
 
 function updateStats() {
@@ -1695,37 +1695,37 @@ function renderTable() {
         '<button onclick="handleAction(' + req.id + ', \'deny\')" class="btn btn-deny btn-xs">Deny</button>';
     } else if (req.status === 'frozen') {
       actions = '<span class="chip chip-actions chip-frozen" title="Blocked by Emergency Freeze — the fleet is rejecting all commands until unfrozen.">' +
-        '🧊 Fleet Frozen</span>';
+        'Frozen</span>';
     } else if (req.status === 'fleet-run') {
       actions = '<span class="chip chip-actions chip-fleet-run" title="Executed via Fleet Run — see the Fleet Run tab for per-gateway output.">' +
-        '⚡ Fleet Run</span>';
+        'Fleet Run</span>';
     } else if (req.status === 'integration-approved' || req.status === 'integration-denied') {
-      actions = '<span class="chip chip-actions chip-integration" title="API-gateway call — see Integrations for the full audit.">🔌 API</span>';
+      actions = '<span class="chip chip-actions chip-integration" title="API-gateway call — see Integrations for the full audit.">API</span>';
     } else if (req.reason === 'override') {
       actions = '<span class="chip chip-actions chip-override" title="Auto-approved via Override Mode — every JIT is auto-approved while active">' +
-        '🔓 Override</span>';
+        'Override</span>';
     } else if (req.status === 'blocked' && isHardcoreBlocked(req.command)) {
       actions = '<span class="chip chip-actions chip-block-core" title="Blocked by a shipped Eshu safety pattern — manage in Controls → Blocklist">' +
-        '🛡️ Block by Core</span>';
+        'Block by Core</span>';
     } else {
       const mem = fetchPolicyMembership(req.command);
       const inAnyAllowlist = mem.inExact || mem.inRegexWhite;
       const disabledStyle = 'opacity:0.5;pointer-events:none;';
 
       actions = '<select onchange="handlePolicyAction(this,\'' + encodeURIComponent(req.command) + '\')" class="btn-muted select-actions">' +
-        '<option value="" disabled selected>⚙ Actions</option>' +
+        '<option value="" disabled selected>Actions</option>' +
         '<option value="exact_whitelist"' + (mem.inExact ? ' disabled style="'+disabledStyle+'"' : '') + '>' + (mem.inExact ? '✓ ' : '+ ') + 'AL Exact</option>' +
         '<option value="regex_whitelist"' + (mem.inRegexWhite ? ' disabled style="'+disabledStyle+'"' : '') + '>' + (mem.inRegexWhite ? '✓ ' : '+ ') + 'AL Regex</option>' +
-        '<option value="regex_blacklist"' + (mem.inBlacklist ? ' disabled style="'+disabledStyle+'"' : '') + '>' + (mem.inBlacklist ? '✓ ' : '🚫 ') + 'Add to Blocklist</option>' +
-        (inAnyAllowlist ? '<option value="regex_whitelist_remove">🔄 Remove from Allowlist</option>' : '') +
-        (mem.inBlacklist ? '<option value="regex_blacklist_remove">🚫 Remove from Blocklist</option>' : '') +
+        '<option value="regex_blacklist"' + (mem.inBlacklist ? ' disabled style="'+disabledStyle+'"' : '') + '>' + (mem.inBlacklist ? '✓ ' : '+ ') + 'Add to Blocklist</option>' +
+        (inAnyAllowlist ? '<option value="regex_whitelist_remove">Remove from Allowlist</option>' : '') +
+        (mem.inBlacklist ? '<option value="regex_blacklist_remove">Remove from Blocklist</option>' : '') +
       '</select>';
     }
     const gap = gapMap.get(req.id);
     const rowClass = gap ? 'gap-row' : '';
     const idClass = gap ? 'cell-id-warn' : 'cell-id';
     const gapTitle = gap ? ' title="' + escapeHtml(formatGapTooltip(gap)) + '"' : '';
-    const idDisplay = gap ? '⚠ #' + String(req.id).padStart(6, '0') : '#' + String(req.id).padStart(6, '0');
+    const idDisplay = gap ? ' #' + String(req.id).padStart(6, '0') : '#' + String(req.id).padStart(6, '0');
     const escapedCmd = escapeHtml(req.command);
     const gwPillHtml = gwPill(req.hostname || 'N/A');
     const isIntegration = req.status === 'integration-approved' || req.status === 'integration-denied';
@@ -1733,14 +1733,14 @@ function renderTable() {
       ? escapeHtml(req.target_ip)
       : gwPillHtml + ' ' + escapeHtml(req.hostname || 'N/A') + ' (' + escapeHtml(req.target_ip) + ')';
     const riskHtml = (req.status === 'pending' && req.risk) ?
-      '<span class="flex-shrink-0 risk-flag" title="⚠ Risk: ' + escapeHtml(req.risk) + '">⚠</span>' : '';
+      '<span class="flex-shrink-0 risk-flag" title="Risk: ' + escapeHtml(req.risk) + '">!</span>' : '';
     const anomalyHtml = (req.status === 'pending' && req.anomaly) ?
-      '<span class="flex-shrink-0 anomaly-flag" title="🆕 ' + escapeHtml(req.anomaly) + '">🆕</span>' : '';
+      '<span class="flex-shrink-0 anomaly-flag" title="New: ' + escapeHtml(req.anomaly) + '">!</span>' : '';
     html += '<tr class="' + rowClass + '">' +
       '<td class="' + idClass + '"' + gapTitle + '>' + idDisplay + '</td>' +
       '<td class="text-muted text-xs">' + formatTime(req.created_at) + '</td>' +
       '<td>' + gatewayCell + '</td>' +
-      '<td class="cell-cmd"><div class="flex items-center gap-1">' + riskHtml + anomalyHtml + '<code class="cmd-code" title="' + escapedCmd + '">' + escapedCmd + '</code><button class="js-copy-cmd flex-shrink-0 text-xs opacity-30 hover:opacity-80 px-1 py-0.5 rounded transition-opacity text-muted" data-cmd="' + encodeURIComponent(req.command) + '" title="Copy">📋</button></div>' +
+      '<td class="cell-cmd"><div class="flex items-center gap-1">' + riskHtml + anomalyHtml + '<code class="cmd-code" title="' + escapedCmd + '">' + escapedCmd + '</code><button class="js-copy-cmd flex-shrink-0 text-xs opacity-30 hover:opacity-80 px-1 py-0.5 rounded transition-opacity text-muted" data-cmd="' + encodeURIComponent(req.command) + '" title="Copy"></button></div>' +
         (function() {
           var _desc = describeCmd(req.command);
           if (!_desc) return '';
@@ -1957,7 +1957,7 @@ async function addToPolicy(cmd, policyType) {
     rwTextarea.value = rwTextarea.value.split('\n').filter(l => l.trim() !== '^' + cmd.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$').join('\n');
     await savePoliciesSilent(); await refreshPolicyCache();
     const gwRes = await fetch('/api/gateways'); const gws = await gwRes.json();
-    showToast('✅ Removed from Allowlist & pushed to ' + gws.length + ' gateway(s)', 'success');
+    showToast('Removed from Allowlist & pushed to ' + gws.length + ' gateway(s)', 'success');
     fetchPolicies(); fetchRequests(); return;
   }
   if (policyType === 'regex_blacklist_remove') {
@@ -1966,7 +1966,7 @@ async function addToPolicy(cmd, policyType) {
     rbTextarea.value = rbTextarea.value.split('\n').filter(l => l.trim() !== cmd).join('\n');
     await savePoliciesSilent(); await refreshPolicyCache();
     const gwRes = await fetch('/api/gateways'); const gws = await gwRes.json();
-    showToast('✅ Removed from Blocklist', 'success');
+    showToast('Removed from Blocklist', 'success');
     fetchPolicies(); fetchRequests(); return;
   }
   // Dedupe: skip if the target line is already present
@@ -1982,7 +1982,7 @@ async function addToPolicy(cmd, policyType) {
   else if (policyType === 'regex_blacklist') { rbTextarea.value = rbTextarea.value.trim() ? rbTextarea.value.trim() + '\n' + cmd : cmd; exTextarea.value = exTextarea.value.split('\n').filter(l => l.trim() !== cmd).join('\n'); rwTextarea.value = rwTextarea.value.split('\n').filter(l => l.trim() !== cmd).join('\n'); }
   await savePoliciesSilent(); await refreshPolicyCache();
   const gwRes = await fetch('/api/gateways'); const gws = await gwRes.json();
-  showToast('✅ Added to ' + labels[policyType], 'success');
+  showToast('Added to ' + labels[policyType], 'success');
   fetchPolicies(); fetchRequests();
 }
 function handlePolicyAction(selectEl, encodedCmd) { const action = selectEl.value; if (!action) return; addToPolicy(decodeURIComponent(encodedCmd), action); setTimeout(function() { selectEl.selectedIndex = 0; }, 0); }
@@ -2108,14 +2108,14 @@ async function fetchGateways() {
         '</span>'
       : '<span class="hb-status">waiting…</span>';
     var ztBadge = g.zero_trust
-      ? '<span class="zt-badge" title="Zero-Trust — every command requires JIT approval">🔒 ZT</span>'
+      ? '<span class="zt-badge" title="Zero-Trust — every command requires JIT approval"> ZT</span>'
       : '';
     var ztBtn = g.zero_trust
-      ? '<button onclick="toggleZeroTrust(\'' + g.ip + '\', false)" class="chip-btn zt-on" title="Zero-Trust ON — allowlisted commands go through JIT. Click to disable.">🔒 ZT</button>'
+      ? '<button onclick="toggleZeroTrust(\'' + g.ip + '\', false)" class="chip-btn zt-on" title="Zero-Trust ON — allowlisted commands go through JIT. Click to disable."> ZT</button>'
       : '<button onclick="toggleZeroTrust(\'' + g.ip + '\', true)" class="chip-btn" title="Enable Zero-Trust — allowlisted commands must go through JIT">ZT</button>';
     var overrideCell;
     if (_uninstallingIps[g.ip]) {
-      overrideCell = '<span class="text-warning text-xs">🗑 Uninstalling…</span>';
+      overrideCell = '<span class="text-warning text-xs"> Uninstalling…</span>';
     } else {
       var overrideControl;
       if ((g.override_remaining || 0) > 0) {
@@ -2134,7 +2134,7 @@ async function fetchGateways() {
       '<td class="px-4 py-2">' + syncCell + '</td>' +
       '<td class="px-4 py-2">' + healthCell + '</td>' +
       '<td class="px-4 py-2">' + overrideCell + '</td>' +
-      '<td class="px-4 py-2 text-right whitespace-nowrap"><button onclick="openRemoveGatewayModal(\'' + g.ip + '\', \'' + g.hostname + '\', ' + isOnline + ')" class="btn btn-deny btn-xs">🗑 Remove</button></td>' +
+      '<td class="px-4 py-2 text-right whitespace-nowrap"><button onclick="openRemoveGatewayModal(\'' + g.ip + '\', \'' + g.hostname + '\', ' + isOnline + ')" class="btn btn-deny btn-xs"> Remove</button></td>' +
       '</tr>';
   }).join('');
   checkOverrideBanner();
@@ -2149,7 +2149,7 @@ async function toggleZeroTrust(ip, enabled) {
     });
     var data = await res.json();
     if (data.status === 'ok') {
-      showToast((enabled ? '🔒 Zero-Trust enabled on ' : 'Zero-Trust disabled on ') + ip + ' — allowlisted commands will ' + (enabled ? 'require JIT approval' : 'auto-run again') + '.', 'success');
+      showToast((enabled ? 'Zero-Trust enabled on ' : 'Zero-Trust disabled on ') + ip + ' — allowlisted commands will ' + (enabled ? 'require JIT approval' : 'auto-run again') + '.', 'success');
       fetchGateways();
     } else { showToast('Failed: ' + (data.detail || 'unknown'), 'error'); }
   } catch(e) { showToast('Error: ' + e.message, 'error'); }
@@ -2298,7 +2298,7 @@ async function triggerFreeze() {
       fetchFreezeStatus();
     } else { showToast('Failed: ' + (data.detail || 'unknown'), 'error'); }
   } catch(e) { showToast('Error: ' + e.message, 'error'); }
-  if (btn) { btn.disabled = false; btn.textContent = '🧊 Freeze Fleet'; }
+  if (btn) { btn.disabled = false; btn.textContent = 'Freeze Fleet'; }
 }
 
 async function triggerUnfreeze() {
@@ -2434,8 +2434,8 @@ function renderFleetQueue() {
     return;
   }
   list.innerHTML = _fleetQueue.map(function(d, i) {
-    var riskLine = d.risk ? '<div class="text-xs mt-0.5 text-warning">⚠ ' + escapeHtml(d.risk) + '</div>' : '';
-    var dryLine = d.dry_run ? '<div class="text-xs mt-0.5 text-info">💡 Dry-run available: <code class="text-main">' + escapeHtml(d.dry_run) + '</code> <button onclick="useFleetDryRun(' + i + ')" class="chip-btn info">Use</button></div>' : '';
+    var riskLine = d.risk ? '<div class="text-xs mt-0.5 text-warning"> ' + escapeHtml(d.risk) + '</div>' : '';
+    var dryLine = d.dry_run ? '<div class="text-xs mt-0.5 text-info"> Dry-run available: <code class="text-main">' + escapeHtml(d.dry_run) + '</code> <button onclick="useFleetDryRun(' + i + ')" class="chip-btn info">Use</button></div>' : '';
     return '<div class="queue-item">' +
       '<div class="flex items-center gap-2">' +
       '<code class="text-xs flex-1 text-main">' + escapeHtml(d.command) + '</code>' +
@@ -2453,7 +2453,7 @@ async function dispatchFleetQueue() {
   var dryCount = _fleetQueue.filter(function(d) { return !!d.dry_run; }).length;
   var msg = 'Dispatch ' + _fleetQueue.length + ' command(s) to their target gateways?\n\nThis is the approval — they will run on each gateway\'s next poll cycle (≤30s).';
   if (dryCount > 0) {
-    msg += '\n\n⚠ ' + dryCount + ' command(s) have a dry-run version available for safe testing — press Cancel to go back and upgrade them, or Continue to dispatch as-is.';
+    msg += '\n\n ' + dryCount + ' command(s) have a dry-run version available for safe testing — press Cancel to go back and upgrade them, or Continue to dispatch as-is.';
   }
   if (!(await customConfirm(msg))) return;
 
@@ -2468,7 +2468,7 @@ async function dispatchFleetQueue() {
   }
   if (hardBlocked.length > 0) showToast('Hard-blocked, kept in queue: ' + hardBlocked.join('; '), 'error');
   if (Object.keys(blacklistedIdx).length > 0) {
-    var ok = await customConfirm('⚠️ ' + Object.keys(blacklistedIdx).length + ' queued command(s) match the central blocklist. Dispatch them anyway with override?');
+    var ok = await customConfirm(' ' + Object.keys(blacklistedIdx).length + ' queued command(s) match the central blocklist. Dispatch them anyway with override?');
     if (!ok) return;
   }
 
@@ -2541,7 +2541,7 @@ function renderFleetRun(cmds) {
         outHtml = '<details data-out="' + outId + '" class="mt-2" ontoggle="loadFleetOutputIfNeeded(' + c.id + ',\'' + r.gateway_ip + '\',this)"><summary class="text-xs cursor-pointer text-info">Show output' + (r.has_more ? ' (full)' : '') + '</summary>' +
           '<div class="mt-1 rounded border">' +
           '<div class="flex items-center justify-end gap-1 px-1 pt-1">' +
-          '<button onclick="copyFleetOutput(' + c.id + ',\'' + r.gateway_ip + '\')" class="chip-btn">📋 Copy</button>' +
+          '<button onclick="copyFleetOutput(' + c.id + ',\'' + r.gateway_ip + '\')" class="chip-btn">Copy</button>' +
           '<button onclick="openFleetOutputModal(' + c.id + ',\'' + r.gateway_ip + '\')" class="chip-btn info">View full</button>' +
           '</div>' +
           '<pre data-out="' + outId + '" class="fleet-out fleet-pre overflow-auto text-xs">' + escapeHtml(r.output) + '</pre>' +
@@ -2561,9 +2561,9 @@ function renderFleetRun(cmds) {
     if (c.status === 'approved' && runningRes.length > 0) {
       var start = Math.min.apply(null, runningRes.map(function(r) { return r.started_at; }));
       var deadline = start + c.timeout;
-      cdHtml = '<span class="text-xs fleet-countdown text-warning whitespace-nowrap" data-deadline="' + deadline + '">⏳ counting…</span>';
+      cdHtml = '<span class="text-xs fleet-countdown text-warning whitespace-nowrap" data-deadline="' + deadline + '"> counting…</span>';
     } else {
-      cdHtml = '<span class="text-xs text-muted whitespace-nowrap">👤 ' + c.timeout + 's timeout</span>';
+      cdHtml = '<span class="text-xs text-muted whitespace-nowrap">' + c.timeout + 's timeout</span>';
     }
     return '<div class="p-3 rounded-lg border mb-2 bg-base">' +
       '<div class="flex items-center justify-between gap-2 flex-wrap">' +
@@ -2595,7 +2595,7 @@ async function copyFleetOutput(cmdId, ip) {
     var text = data.output || '';
     if (!text) { showToast('No output to copy', 'error'); return; }
     await copyToClipboard(text, true);
-    showToast('📋 Output copied', 'success');
+    showToast('Output copied', 'success');
   } catch(e) { showToast('Error: ' + e.message, 'error'); }
 }
 
@@ -2643,7 +2643,7 @@ async function copyFleetOutputModal() {
   }
   if (_fleetModal.output) {
     await copyToClipboard(_fleetModal.output, true);
-    showToast('📋 Output copied', 'success');
+    showToast('Output copied', 'success');
   } else {
     showToast('No output to copy', 'error');
   }
@@ -2685,16 +2685,16 @@ function updateFleetCountdowns() {
   document.querySelectorAll('.fleet-countdown[data-deadline]').forEach(function(el) {
     var rem = parseInt(el.getAttribute('data-deadline')) - now;
     if (rem <= 0) {
-      el.textContent = '⏳ timed out';
+      el.textContent = 'timed out';
       el.style.color = 'var(--brand-red)';
       return;
     }
     if (rem >= 3600) {
       var h = Math.floor(rem / 3600), m = Math.floor((rem % 3600) / 60);
-      el.textContent = '⏳ ' + h + 'h ' + m + 'm left';
+      el.textContent = ' ' + h + 'h ' + m + 'm left';
     } else {
       var m2 = Math.floor(rem / 60), s = rem % 60;
-      el.textContent = '⏳ ' + m2 + ':' + String(s).padStart(2, '0') + ' left';
+      el.textContent = ' ' + m2 + ':' + String(s).padStart(2, '0') + ' left';
     }
   });
 }
@@ -2739,14 +2739,14 @@ function renderPolicyChips() {
     const displayLines = lines.slice().reverse();
     let html = displayLines.map(function(line) {
       const isCore = isCorePattern(line);
-      const shield = isCore ? '<span class="policy-shield" title="Shipped core block — relaxing this requires extra confirmation">🛡️</span> ' : '';
+      const shield = '';
       return '<span class="policy-chip' + (isCore ? ' core' : '') + '" title="' + line.replace(/"/g, '&quot;') + '">' + shield + '<code>' + escapeHtml(line) + '</code><button class="remove" data-line="' + encodeURIComponent(line) + '" data-core="' + (isCore ? '1' : '0') + '" title="Remove">&times;</button></span>';
     }).join('');
     // Removed core patterns — shipped defaults no longer in the list: struck + Restore
     if (type === 'regex_blacklist') {
       const removed = coreBlockPatterns().filter(function(p){ return lines.indexOf(p) === -1; });
       html += removed.map(function(p) {
-        return '<span class="policy-chip removed" title="' + p.replace(/"/g, '&quot;') + '"><span class="policy-shield">🛡️</span><code>' + escapeHtml(p) + '</code><button class="restore" data-line="' + encodeURIComponent(p) + '" title="Restore this core default">↺</button></span>';
+        return '<span class="policy-chip removed" title="' + p.replace(/"/g, '&quot;') + '"><code>' + escapeHtml(p) + '</code><button class="restore" data-line="' + encodeURIComponent(p) + '" title="Restore this core default">Restore</button></span>';
       }).join('');
     }
     if (!html) html = '<span class="policy-empty text-muted">No entries yet.</span>';
@@ -2799,7 +2799,7 @@ document.addEventListener('click', function(e) {
     renderPolicyChips();
   };
   if (isCore) {
-    customConfirm('⚠️ Remove a shipped core block?\n\n"' + line + '" is a safety-net pattern that ships with Eshu by default. Removing it lets this kind of command reach JIT/approval.\n\nOnly continue if you are sure. Re-add it any time via "↺ Core defaults".').then(function(ok){ if (ok) doRemove(); });
+    customConfirm('Remove a shipped core block?\n\n"' + line + '" is a safety-net pattern that ships with Eshu by default. Removing it lets this kind of command reach JIT/approval.\n\nOnly continue if you are sure. Re-add it any time via "Core defaults".').then(function(ok){ if (ok) doRemove(); });
   } else {
     doRemove();
   }
@@ -2907,7 +2907,7 @@ async function confirmSavePolicies() {
   const btn = document.getElementById('save-policies-btn'); btn.disabled = true; btn.textContent = 'Saving...';
   await savePoliciesSilent();
   btn.disabled = false; btn.textContent = 'Save & Push Policies';
-  showToast('✅ Policies saved & pushed', 'success');
+  showToast('Policies saved & pushed', 'success');
   setTimeout(fetchGateways, 4000);
   if (!document.getElementById('policy-changes-modal').classList.contains('hidden')) fetchPolicyChanges();
 }
@@ -2931,9 +2931,9 @@ async function testPolicy() {
   try {
     const res = await fetch('/api/policies/test?command=' + encodeURIComponent(cmd)); const data = await res.json();
     let bg, border, text, icon, desc;
-    if (data.action === 'blocked') { bg='rgba(251,146,60,0.1)'; border='rgba(251,146,60,0.3)'; text='#fb923c'; icon='🔴'; desc='Blocked: <code style="color:#fb923c;">' + (data.details[0] ? data.details[0].pattern : 'unknown') + '</code>'; }
-    else if (data.action === 'auto_approved') { bg='rgba(74,222,128,0.1)'; border='rgba(74,222,128,0.3)'; text='var(--status-success)'; icon='✅'; desc=(data.details[0] && data.details[0].type === 'exact_whitelist') ? 'Auto-Approved (Exact Allowlist)' : 'Auto-Approved: <code style="color:var(--status-success);">' + (data.details[0] ? data.details[0].pattern : '') + '</code>'; }
-    else { bg='rgba(251,191,36,0.1)'; border='rgba(251,191,36,0.3)'; text='var(--status-warning)'; icon='⏳'; desc='Would require JIT Approval'; }
+    if (data.action === 'blocked') { bg='rgba(251,146,60,0.1)'; border='rgba(251,146,60,0.3)'; text='#fb923c'; icon='!'; desc='Blocked: <code style="color:#fb923c;">' + (data.details[0] ? data.details[0].pattern : 'unknown') + '</code>'; }
+    else if (data.action === 'auto_approved') { bg='rgba(74,222,128,0.1)'; border='rgba(74,222,128,0.3)'; text='var(--status-success)'; icon=''; desc=(data.details[0] && data.details[0].type === 'exact_whitelist') ? 'Auto-Approved (Exact Allowlist)' : 'Auto-Approved: <code style="color:var(--status-success);">' + (data.details[0] ? data.details[0].pattern : '') + '</code>'; }
+    else { bg='rgba(251,191,36,0.1)'; border='rgba(251,191,36,0.3)'; text='var(--status-warning)'; icon=''; desc='Would require JIT Approval'; }
     let memLine = '';
     try {
       const mc = await authFetch('/api/policies/check?command=' + encodeURIComponent(cmd));
@@ -2948,7 +2948,7 @@ async function testPolicy() {
       }
     } catch(e) {}
     rd.innerHTML = '<div class="result-box" style="background:' + bg + ';color:' + text + ';border-color:' + border + ';">' + icon + ' <strong>' + data.action.replace('_',' ').toUpperCase() + '</strong> — ' + desc + '</div>' + memLine + testerAddButtons(data.action, cmd);
-  } catch(err) { rd.innerHTML = '<div class="result-box" style="background:var(--bg-base);color:var(--text-muted);">⚠️ ' + err.message + '</div>'; }
+  } catch(err) { rd.innerHTML = '<div class="result-box" style="background:var(--bg-base);color:var(--text-muted);"> ' + err.message + '</div>'; }
 }
 
 function testerAddButtons(action, cmd) {
@@ -3086,9 +3086,9 @@ function startTokenCountdown() {
   const el = document.getElementById('token-countdown');
   tokenTimer = setInterval(function() {
     const remaining = Math.ceil((tokenExpiryTime - Date.now() / 1000));
-    if (remaining <= 0) { el.textContent = '⏰ Token expired'; el.style.color = 'var(--brand-red)'; clearInterval(tokenTimer); tokenTimer = null; if (tokenStatusPoller) { clearInterval(tokenStatusPoller); tokenStatusPoller = null; } document.getElementById('enroll-command').value = ''; document.getElementById('copy-enroll-btn').disabled = true; currentToken = ''; }
-    else if (remaining <= 30) { el.textContent = '⏰ ' + remaining + 's remaining'; el.style.color = 'var(--status-warning)'; }
-    else { el.textContent = '⏱ ' + remaining + 's remaining'; el.style.color = 'var(--text-muted)'; }
+    if (remaining <= 0) {       el.textContent = 'Token expired'; el.style.color = 'var(--brand-red)'; clearInterval(tokenTimer); tokenTimer = null; if (tokenStatusPoller) { clearInterval(tokenStatusPoller); tokenStatusPoller = null; } document.getElementById('enroll-command').value = ''; document.getElementById('copy-enroll-btn').disabled = true; currentToken = ''; }
+    else if (remaining <= 30) { el.textContent = ' ' + remaining + 's remaining'; el.style.color = 'var(--status-warning)'; }
+    else { el.textContent = ' ' + remaining + 's remaining'; el.style.color = 'var(--text-muted)'; }
   }, 1000);
 }
 async function fetchEnrollData() {
@@ -3103,7 +3103,7 @@ function toggleKeyEdit() {
 }
 async function saveKeys() {
   await authFetch('/api/enroll/keys', { method: 'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({eshu_key: document.getElementById('edit-eshu-key').value}) });
-  toggleKeyEdit(); fetchEnrollData(); showToast('✅ Keys saved', 'success');
+  toggleKeyEdit(); fetchEnrollData(); showToast('Keys saved', 'success');
 }
 function updateEnrollCommand() {
   if (!currentToken) return;
@@ -3136,7 +3136,7 @@ function startTokenStatusPolling() {
         clearInterval(tokenStatusPoller);
         document.getElementById('enroll-command').value = '';
         document.getElementById('copy-enroll-btn').disabled = true;
-        document.getElementById('token-countdown').textContent = '✅ Token consumed by gateway';
+        document.getElementById('token-countdown').textContent = 'Token consumed by gateway';
         document.getElementById('token-countdown').style.color = 'var(--status-success)';
         currentToken = '';
       }
@@ -3195,14 +3195,14 @@ async function confirmRemoteUninstall() {
   try {
     const res = await authFetch('/api/gateways/' + ip + '/uninstall', { method: 'POST' });
     const data = await res.json();
-    if (!res.ok) { showToast('❌ ' + (data.detail || 'Failed to trigger uninstall'), 'error'); return; }
-    showToast('✅ Uninstall triggered for ' + data.hostname, 'success');
+    if (!res.ok) { showToast('' + (data.detail || 'Failed to trigger uninstall'), 'error'); return; }
+    showToast('Uninstall triggered for ' + data.hostname, 'success');
     _uninstallingIps[ip] = true;
     fetchGateways();
     openUninstallModal(ip, data.hostname || hostname);
     pollUninstallProgress(ip);
   }
-  catch(err) { showToast('❌ Failed', 'error'); }
+  catch(err) { showToast('Failed', 'error'); }
 }
 
 // ── Uninstall Progress Modal ─────────────────────────────────────────────
@@ -3232,7 +3232,7 @@ async function pollUninstallProgress(ip) {
     stopped = true;
     if (_uninstallIp !== ip) return;
     document.getElementById('uninstall-progress-fill').style.width = '100%';
-    document.getElementById('uninstall-modal-step').textContent = '✅ Removed';
+    document.getElementById('uninstall-modal-step').textContent = 'Removed';
     setTimeout(closeUninstallModal, 1800);
   };
   const tryFetch = async function() {
@@ -3270,20 +3270,20 @@ async function pollUninstallProgress(ip) {
   tryFetch();
 }
 async function handleForceRemoveGateway(ip, hostname) {
-  if (!(await customConfirm('Force remove ' + hostname + ' (' + ip + ') from the dashboard?\n\n⚠️ This only deletes the dashboard record — it does NOT uninstall anything on the host.\n\nIf the gateway is still running, it will re-register on its next poll (~30s), so this may not be permanent. Use it only for decommissioned or never-completed hosts.'))) return;
+  if (!(await customConfirm('Force remove ' + hostname + ' (' + ip + ') from the dashboard?\n\n This only deletes the dashboard record — it does NOT uninstall anything on the host.\n\nIf the gateway is still running, it will re-register on its next poll (~30s), so this may not be permanent. Use it only for decommissioned or never-completed hosts.'))) return;
   try {
     const res = await authFetch('/api/gateways/' + ip, { method: 'DELETE' });
     const data = await res.json();
-    if (!res.ok) { showToast('❌ ' + (data.detail || 'Failed'), 'error'); return; }
-    showToast('🗑 ' + data.hostname + ' removed from dashboard', 'success');
+    if (!res.ok) { showToast('' + (data.detail || 'Failed'), 'error'); return; }
+    showToast('' + data.hostname + ' removed from dashboard', 'success');
     if (_removeIp === ip) closeRemoveGatewayModal(); else fetchGateways();
   }
-  catch(err) { showToast('❌ Failed', 'error'); }
+  catch(err) { showToast('Failed', 'error'); }
 }
-function copyEnrollCommand() { document.getElementById('enroll-command').select(); document.execCommand('copy'); showToast('✅ Copied', 'success'); }
+function copyEnrollCommand() { document.getElementById('enroll-command').select(); document.execCommand('copy'); showToast('Copied', 'success'); }
 
 // ── Audit Log ────────────────────────────────────────────────────────────
-const AUDIT_ICONS = { enrolled: '✅', version_updated: '⬆️', disconnected: '⚠️', policy_committed: '🔄', update_triggered: '📡', uninstall_triggered: '🗑', uninstalled: '❌', password_changed: '🔐', password_cleared: '🔓', window_created: '🪟', window_modified: '✏️', window_deleted: '🗑️', window_toggled: '🔘', window_claimed: '🟢', dev_update_pushed: '🧪', gateway_mode_changed: '🔄' };
+const AUDIT_ICONS = { enrolled: '✓', version_updated: '↑', disconnected: '!', policy_committed: '↻', update_triggered: '↻', uninstall_triggered: '✕', uninstalled: '✕', password_changed: '', password_cleared: '', window_created: '', window_modified: '', window_deleted: '', window_toggled: '', window_claimed: '', dev_update_pushed: '', gateway_mode_changed: '' };
 const AUDIT_LABELS = { enrolled: 'enrolled', version_updated: 'updated', disconnected: 'disconnected', policy_committed: 'Policies committed', update_triggered: 'Update triggered', uninstall_triggered: 'Uninstall triggered', uninstalled: 'Uninstalled', password_changed: 'Password changed', password_cleared: 'Password removed', window_created: 'Window created', window_modified: 'Window updated', window_deleted: 'Window deleted', window_toggled: 'Window toggled', window_claimed: 'Window claimed', dev_update_pushed: 'Dev push', gateway_mode_changed: 'Gateway mode' };
 let _auditLogSearchQuery = '';
 function onAuditLogSearch() {
@@ -3299,7 +3299,7 @@ async function fetchAuditLog() {
     const list = document.getElementById('audit-log-list');
     if (logs.length === 0) { list.innerHTML = '<p class="text-muted">No events recorded yet.</p>'; return; }
     list.innerHTML = logs.map(function(l) {
-      const icon = AUDIT_ICONS[l.event_type] || '📌', label = AUDIT_LABELS[l.event_type] || l.event_type;
+      const icon = AUDIT_ICONS[l.event_type] || '', label = AUDIT_LABELS[l.event_type] || l.event_type;
       const time = new Date(l.timestamp * 1000).toLocaleTimeString([], { hour:'2-digit', minute:'2-digit', second:'2-digit' });
       const host = l.hostname ? ' ' + gwPill(l.hostname) + ' <strong class="text-main">' + l.hostname + '</strong>' + (l.gateway_ip ? ' ('+l.gateway_ip+')' : '') : '';
       const detail = l.details ? '<span class="block text-xs mt-0.5 text-muted">' + l.details.replace(/</g,'<').replace(/>/g,'>') + '</span>' : '';
@@ -3312,7 +3312,7 @@ async function fetchAuditLog() {
 
 // ── Notes ────────────────────────────────────────────────────────────────
 async function fetchNotes() { const res = await fetch('/api/notes'); const data = await res.json(); document.getElementById('notes-content').value = data.content || ''; }
-async function saveNotes() { await authFetch('/api/notes', { method: 'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({content: document.getElementById('notes-content').value}) }); showToast('✅ Notes saved', 'success'); }
+async function saveNotes() { await authFetch('/api/notes', { method: 'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({content: document.getElementById('notes-content').value}) }); showToast('Notes saved', 'success'); }
 
 async function fetchNotifyConfig() {
   try {
@@ -3344,17 +3344,17 @@ async function saveNotifyConfig() {
   try {
     var r = await authFetch('/api/notify-config', { method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({url:url, events:events.join(','), dashboard_url:dashUrl}) });
     if (!r.ok) { var d = await r.json().catch(function(){}); throw new Error((d && d.detail) || 'Save failed'); }
-    document.getElementById('notify-save-status').textContent = '✅ Saved';
-    showToast('✅ Notification config saved', 'success');
-  } catch(e) { showToast('❌ ' + e.message, 'error'); }
+    document.getElementById('notify-save-status').textContent = 'Saved';
+    showToast('Notification config saved', 'success');
+  } catch(e) { showToast('' + e.message, 'error'); }
 }
 async function testNotify() {
   try {
     var r = await authFetch('/api/notify-test', { method:'POST' });
     if (!r.ok) throw new Error('Test failed');
     var d = await r.json();
-    showToast(d.delivered ? '🔊 Test notification delivered' : '❌ Test failed — webhook unreachable or no URL set', d.delivered ? 'success' : 'error');
-  } catch(e) { showToast('❌ Test failed — ' + e.message, 'error'); }
+    showToast(d.delivered ? 'Test notification delivered' : 'Test failed — webhook unreachable or no URL set', d.delivered ? 'success' : 'error');
+  } catch(e) { showToast('Test failed — ' + e.message, 'error'); }
 }
 
 
@@ -3378,21 +3378,21 @@ function toggleDropdown() { document.getElementById('purge-dropdown').classList.
 async function purgeHistory(period) {
   document.getElementById('purge-dropdown').classList.remove('show');
   const label = period === 'all' ? 'all time' : period;
-  if (!(await customConfirm('Clear the queue of requests older than ' + label + '?\n\n⚠ This hides them from the queue. Stats are preserved.'))) return;
+  if (!(await customConfirm('Clear the queue of requests older than ' + label + '?\n\n This hides them from the queue. Stats are preserved.'))) return;
   const now = Math.floor(Date.now() / 1000);
   const offsets = { '30m': 1800, '1h': 3600, '1d': 86400, '2d': 172800, '7d': 604800 };
   if (period === 'all') _queueClearBefore = now;
   else _queueClearBefore = now - (offsets[period] || 3600);
-  showToast('✅ Queue cleared — stats unchanged', 'success');
+  showToast('Queue cleared — stats unchanged', 'success');
   fetchRequests();
 }
 let _dbPurgeBefore = 0;
 async function purgeDatabase(period) {
   const label = period === 'all' ? 'all time' : period;
-  if (!(await customConfirm('⚠ PERMANENTLY DELETE all requests older than ' + label + ' from the database?\n\nThis CANNOT be undone. Stats, charts, and top commands will be affected.'))) return;
+      if (!(await customConfirm('PERMANENTLY DELETE all requests older than ' + label + ' from the database?\n\nThis CANNOT be undone. Stats, charts, and top commands will be affected.'))) return;
   await authFetch('/api/requests?older_than=' + period, { method: 'DELETE' });
   _queueClearBefore = 0; // Reset client-side filter after DB purge
-  showToast('✅ Database purged (older than ' + label + ')', 'success');
+  showToast('Database purged (older than ' + label + ')', 'success');
   fetchRequests();
   if (document.getElementById('view-stats') && !document.getElementById('view-stats').classList.contains('hidden')) fetchStatistics();
 }
@@ -3605,7 +3605,7 @@ async function checkGatewayHealth() {
       if (!_knownOfflineIps.has(ip) && notifyOffline) {
         playJitChime(false);
         if (_notifPerm === 'granted') {
-          var n = new Notification('📡 Gateway Offline', { body: ip + ' has been unreachable for over 2 minutes', tag: 'eshu-offline', icon: '/static/eshu_logo.png' });
+          var n = new Notification('Gateway Offline', { body: ip + ' has been unreachable for over 2 minutes', tag: 'eshu-offline', icon: '/static/eshu_logo.png' });
           n.onclick = function() { window.focus(); n.close(); };
         }
       }
@@ -3789,10 +3789,10 @@ async function saveMcpSettings() {
   const v = document.getElementById('mcp-allowed-hosts').value.trim();
   try {
     const res = await authFetch('/api/mcp-settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ allowed_hosts: v }) });
-    if (!res.ok) { const d = await res.json().catch(function() { return {}; }); showToast('❌ ' + (d.detail || 'Failed'), 'error'); return; }
+    if (!res.ok) { const d = await res.json().catch(function() { return {}; }); showToast('' + (d.detail || 'Failed'), 'error'); return; }
     fetchMcpSettings();
     showToast('MCP access updated', 'success');
-  } catch(e) { showToast('❌ Failed: ' + e.message, 'error'); }
+  } catch(e) { showToast('Failed: ' + e.message, 'error'); }
 }
 
 async function fetchAgentTokens() {
@@ -3819,7 +3819,7 @@ async function createAgentToken() {
   try {
     const res = await authFetch('/api/agents', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: name }) });
     const data = await res.json();
-    if (!res.ok) { showToast('❌ ' + (data.detail || 'Failed'), 'error'); return; }
+    if (!res.ok) { showToast('' + (data.detail || 'Failed'), 'error'); return; }
     document.getElementById('agent-token-name').value = '';
     const box = document.getElementById('agent-token-result');
     box.classList.remove('hidden');
@@ -3827,7 +3827,7 @@ async function createAgentToken() {
       '<br><span class="text-muted">Paste this raw token into your client (e.g. Hermes) as-is — it adds the <code>Bearer </code> prefix itself.</span>';
     fetchAgentTokens();
     showToast('Agent token created', 'success');
-  } catch(e) { showToast('❌ Failed: ' + e.message, 'error'); }
+  } catch(e) { showToast('Failed: ' + e.message, 'error'); }
 }
 
 async function deleteAgentToken(id) {
@@ -3835,7 +3835,7 @@ async function deleteAgentToken(id) {
   try {
     await authFetch('/api/agents/' + id, { method: 'DELETE' });
     fetchAgentTokens();
-  } catch(e) { showToast('❌ Failed: ' + e.message, 'error'); }
+  } catch(e) { showToast('Failed: ' + e.message, 'error'); }
 }
 
 function renderIntegrationList() {
@@ -3982,22 +3982,22 @@ async function createIntegration() {
     try {
       const res = await authFetch('/api/integrations/' + encodeURIComponent(_editingIntegration), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
       const data = await res.json();
-      if (!res.ok) { showToast('❌ ' + (data.detail || 'Failed'), 'error'); return; }
+      if (!res.ok) { showToast('' + (data.detail || 'Failed'), 'error'); return; }
       resetIntegrationForm();
       fetchIntegrationList();
       showToast('Integration updated', 'success');
-    } catch(e) { showToast('❌ Failed: ' + e.message, 'error'); }
+    } catch(e) { showToast('Failed: ' + e.message, 'error'); }
     return;
   }
   payload.name = name;
   try {
     const res = await authFetch('/api/integrations', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
     const data = await res.json();
-    if (!res.ok) { showToast('❌ ' + (data.detail || 'Failed'), 'error'); return; }
+    if (!res.ok) { showToast('' + (data.detail || 'Failed'), 'error'); return; }
     resetIntegrationForm();
     fetchIntegrationList();
     showToast('Integration added', 'success');
-  } catch(e) { showToast('❌ Failed: ' + e.message, 'error'); }
+  } catch(e) { showToast('Failed: ' + e.message, 'error'); }
 }
 
 async function testIntegration(name) {
@@ -4036,17 +4036,17 @@ async function deleteIntegration(name) {
     if (_selectedIntegration === name) _selectedIntegration = null;
     fetchIntegrationList();
     renderTools([]);
-  } catch(e) { showToast('❌ Failed: ' + e.message, 'error'); }
+  } catch(e) { showToast('Failed: ' + e.message, 'error'); }
 }
 
 async function seedTools(name) {
   try {
     const res = await authFetch('/api/integrations/' + encodeURIComponent(name) + '/seed', { method: 'POST' });
     const data = await res.json();
-    if (!res.ok) { showToast('❌ ' + (data.detail || 'Failed'), 'error'); return; }
+    if (!res.ok) { showToast('' + (data.detail || 'Failed'), 'error'); return; }
     showToast('Seeded tools (' + data.created + ' new, ' + data.updated + ' updated)', 'success');
     if (_selectedIntegration === name) fetchTools(name);
-  } catch(e) { showToast('❌ Failed: ' + e.message, 'error'); }
+  } catch(e) { showToast('Failed: ' + e.message, 'error'); }
 }
 
 async function selectIntegration(name) {
@@ -4105,8 +4105,8 @@ async function bulkSetTools(enabled) {
   try {
     const res = await authFetch('/api/integrations/' + encodeURIComponent(_selectedIntegration) + '/tools/bulk', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: enabled }) });
     if (res.ok) { fetchTools(_selectedIntegration); showToast(label + 'd all tools for ' + _selectedIntegration, 'success'); }
-    else showToast('❌ Failed to ' + label.toLowerCase() + ' tools', 'error');
-  } catch(e) { showToast('❌ Failed: ' + e.message, 'error'); }
+    else showToast('Failed to ' + label.toLowerCase() + ' tools', 'error');
+  } catch(e) { showToast('Failed: ' + e.message, 'error'); }
 }
 
 async function toggleTool(id, enabled) {
@@ -4131,14 +4131,14 @@ async function approveIntegrationCall(id) {
   try {
     const res = await authFetch('/api/integration-calls/' + id + '/approve', { method: 'POST' });
     if (res.ok) { fetchRequests(); fetchIntegrationCalls(); showToast('Approved and executed', 'success'); }
-  } catch(e) { showToast('❌ Failed: ' + e.message, 'error'); }
+  } catch(e) { showToast('Failed: ' + e.message, 'error'); }
 }
 
 async function denyIntegrationCall(id) {
   try {
     const res = await authFetch('/api/integration-calls/' + id + '/deny', { method: 'POST' });
     if (res.ok) { fetchRequests(); }
-  } catch(e) { showToast('❌ Failed: ' + e.message, 'error'); }
+  } catch(e) { showToast('Failed: ' + e.message, 'error'); }
 }
 
 let _callsSearchTimer = null;

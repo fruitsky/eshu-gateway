@@ -50,7 +50,7 @@
 </div>
 
 <!-- Mobile menu button -->
-<button class="mobile-menu-btn" id="mobile-menu-btn" onclick="toggleMobileSidebar()">☰</button>
+<button class="mobile-menu-btn" id="mobile-menu-btn" onclick="toggleMobileSidebar()"></button>
 <div class="sidebar-overlay" id="sidebar-overlay" onclick="toggleMobileSidebar()"></div>
 
 <!-- ── Sidebar ─────────────────────────────────────────────────── -->
@@ -237,6 +237,7 @@
 
     <!-- HISTORY VIEW — SSH Commands + Proxied Calls -->
     <div id="view-history" class="hidden w-full">
+      <div class="view-title" style="margin-bottom:16px">History</div>
       <div class="history-tabs">
         <button class="history-tab active" data-tab="ssh" onclick="switchHistoryTab('ssh')">SSH Commands</button>
         <button class="history-tab" data-tab="proxied" onclick="switchHistoryTab('proxied')">Proxied Calls</button>
@@ -315,9 +316,9 @@
               <option value="50" selected>50</option>
               <option value="100">100</option>
             </select>
-            <button onclick="callsPrevPage()" class="btn btn-xs" id="calls-prev">← Prev</button>
+            <button onclick="callsPrevPage()" class="btn btn-xs" id="calls-prev">Prev</button>
             <span id="calls-page" class="text-xs text-muted whitespace-nowrap">Page 1</span>
-            <button onclick="callsNextPage()" class="btn btn-xs" id="calls-next">Next →</button>
+            <button onclick="callsNextPage()" class="btn btn-xs" id="calls-next">Next</button>
             <span id="calls-count" class="text-xs text-muted whitespace-nowrap">0 entries</span>
           </div>
           <div class="table-wrap">
@@ -334,6 +335,7 @@
 
     <!-- GATEWAYS VIEW — Enrollment + unified gateway table -->
     <div id="view-gateways" class="hidden w-full">
+      <div class="view-title" style="margin-bottom:16px">Gateways</div>
       <div class="widget">
         <div class="widget-header">Gateway Enrollment</div>
         <p class="text-sm mb-4 text-muted">Store SSH keys once, then generate a one-liner to install gateways on any new host.</p>
@@ -353,7 +355,7 @@
             <p class="text-xs mb-2 text-muted">Override the dashboard URL gateways use (defaults to your browser's URL):</p>
             <div class="flex gap-2 mb-3"><input type="text" id="enroll-base-url" placeholder="Auto-detected from browser..." oninput="updateEnrollCommand()"></div>
             <p class="text-xs mb-2 text-muted">Generate a token, then run this command on any new host:</p>
-            <div class="flex gap-2 mb-3"><input type="text" id="enroll-command" readonly placeholder="Click 'Generate New Token' to get a one-liner..." value=""><button onclick="copyEnrollCommand()" id="copy-enroll-btn" class="btn btn-muted btn-sm" disabled>📋 Copy</button></div>
+            <div class="flex gap-2 mb-3"><input type="text" id="enroll-command" readonly placeholder="Click 'Generate New Token' to get a one-liner..." value=""><button onclick="copyEnrollCommand()" id="copy-enroll-btn" class="btn btn-muted btn-sm" disabled>Copy</button></div>
             <button onclick="generateToken()" id="generate-token-btn" class="btn btn-sm">Generate New Token</button>
             <span id="token-countdown" class="hidden ml-3 text-xs font-mono"></span>
           </div>
@@ -370,6 +372,7 @@
 
     <!-- APPROVED WINDOWS VIEW -->
     <div id="view-windows" class="hidden w-full">
+      <div class="view-title" style="margin-bottom:16px">Approved Windows</div>
       <div class="widget">
         <div class="widget-header"><span><svg class="icon-inline" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>Approved Windows</span>
           <button onclick="openCreateWindowModal()" class="btn btn-sm">+ Create Window</button>
@@ -439,10 +442,11 @@
 
     <!-- CONTROLS VIEW — Policy -->
     <div id="view-controls" class="hidden w-full">
+      <div class="view-title" style="margin-bottom:16px">Policies</div>
       <!-- Global Central Policy -->
       <div class="widget">
         <div class="widget-header">
-          🛡️ Global Central Policy
+          Global Central Policy
           <span class="text-xs text-muted">Policy version: <span id="policy-version-label" class="font-mono">-</span></span>
           <div class="flex items-center gap-2">
             <button onclick="openModal('policy-changes-modal')" class="btn btn-muted btn-xs">View Policy Changes</button>
@@ -450,11 +454,11 @@
           </div>
         </div>
         <p class="text-xs mb-4 text-muted">Gateways sync every 30s.</p>
-        <div id="policy-dirty-banner" class="policy-dirty-banner hidden">⚠ You have <strong>unsaved policy changes</strong> — press “Save &amp; Push Policies” to push them to gateways.</div>
+        <div id="policy-dirty-banner" class="policy-dirty-banner hidden">You have <strong>unsaved policy changes</strong> — press “Save &amp; Push Policies” to push them to gateways.</div>
         <!-- Tester -->
         <div class="panel mb-4">
           <div class="flex items-center gap-2 mb-2">
-            <span class="text-sm font-semibold">🧪 Tester</span>
+            <span class="text-sm font-semibold">Tester</span>
             <input type="text" id="tester-input" placeholder="Paste command to test..." class="flex-1" onkeydown="if(event.key==='Enter') testPolicy()">
             <button onclick="testPolicy()" class="btn btn-sm">Test</button>
             <button onclick="generateRegex()" class="btn btn-muted btn-sm">Regex</button>
@@ -485,20 +489,20 @@
             <textarea id="policy-regex-white" class="hidden" spellcheck="false"></textarea>
           </div>
           <details class="mb-3 text-sm">
-            <summary class="cursor-pointer text-warning font-semibold">🔒 Permanently blocked — self-protection &amp; evasion</summary>
+            <summary class="cursor-pointer text-warning font-semibold">Permanently blocked — self-protection &amp; evasion</summary>
             <div class="mt-2 panel blocklist-box">
               <p class="mb-2 text-muted">Hardcoded on every gateway and cannot be relaxed from the dashboard:</p>
               <ul class="space-y-1 text-muted">
-                <li>🛡️ <strong>Self-protection:</strong> /usr/local/bin/eshu-*, /etc/eshu-*, /var/run/eshu.*, eshu.db*</li>
-                <li>🕵️ <strong>Evasion:</strong> $(which …), `which …`</li>
+                <li><strong>Self-protection:</strong> /usr/local/bin/eshu-*, /etc/eshu-*, /var/run/eshu.*, eshu.db*</li>
+                <li><strong>Evasion:</strong> $(which …), `which …`</li>
               </ul>
-              <p class="mt-2 text-muted">The command-safety patterns (rm -rf, mkfs, dd, firewall flush, power) now live in the Blocklist below and can be relaxed — use “↺ Core defaults” to restore them.</p>
+              <p class="mt-2 text-muted">The command-safety patterns (rm -rf, mkfs, dd, firewall flush, power) now live in the Blocklist below and can be relaxed — use “Core defaults” to restore them.</p>
             </div>
           </details>
           <div>
             <div class="flex items-center justify-between mb-1">
               <label class="text-xs block text-muted">Blocklist (Hard Block)</label>
-              <button class="btn btn-xs" onclick="restoreCoreDefaults()" title="Re-add any shipped core safety-net patterns you removed">↺ Core defaults</button>
+              <button class="btn btn-xs" onclick="restoreCoreDefaults()" title="Re-add any shipped core safety-net patterns you removed">Core defaults</button>
             </div>
             <div class="policy-editor" data-policy="regex_blacklist">
               <div class="policy-chips" id="policy-regex-black-chips"></div>
@@ -515,9 +519,10 @@
 
     <!-- FLEET RUN VIEW -->
     <div id="view-fleet" class="hidden w-full">
+      <div class="view-title" style="margin-bottom:16px">Fleet Run</div>
       <div class="widget">
         <div class="widget-header"><span><svg class="icon-inline" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>Fleet Run</span>
-          <button onclick="fetchFleetCommands()" class="btn btn-muted btn-xs">↻ Refresh</button>
+          <button onclick="fetchFleetCommands()" class="btn btn-muted btn-xs">Refresh</button>
         </div>
 
         <!-- Compose -->
@@ -567,6 +572,7 @@
 
     <!-- INTEGRATIONS VIEW — agent API gateway (MCP) -->
     <div id="view-integrations" class="hidden w-full">
+      <div class="view-title" style="margin-bottom:16px">Integrations</div>
       <div class="grid grid-cols-1 lg:grid-cols-2 gap-5">
         <div class="flex flex-col gap-5">
           <div class="widget" id="int-form-widget">
@@ -671,6 +677,7 @@
 
     <!-- SETTINGS VIEW — Preferences (notifications, password, webhook) -->
     <div id="view-settings" class="hidden w-full">
+      <div class="view-title" style="margin-bottom:16px">Settings</div>
       <div class="grid grid-cols-1 lg:grid-cols-2 gap-5">
         <div class="flex flex-col gap-5">
           <div class="widget">
@@ -723,11 +730,11 @@
               <input type="text" id="notify-dashboard-url" placeholder="http://192.168.1.100:8000" class="w-full" oninput="onNotifyConfigChange()">
             </div>
             <div class="flex flex-wrap gap-3 mb-3">
-              <label class="flex items-center gap-2 cursor-pointer select-none text-xs"><input type="checkbox" id="notify-event-jit" checked onchange="onNotifyConfigChange()"> ⚡ JIT requests</label>
+              <label class="flex items-center gap-2 cursor-pointer select-none text-xs"><input type="checkbox" id="notify-event-jit" checked onchange="onNotifyConfigChange()"> JIT requests</label>
               <label class="flex items-center gap-2 cursor-pointer select-none text-xs"><input type="checkbox" id="notify-event-window" checked onchange="onNotifyConfigChange()"> Window requests</label>
               <label class="flex items-center gap-2 cursor-pointer select-none text-xs"><input type="checkbox" id="notify-event-blocked" onchange="onNotifyConfigChange()"> Blocked commands</label>
-              <label class="flex items-center gap-2 cursor-pointer select-none text-xs"><input type="checkbox" id="notify-event-offline" onchange="onNotifyConfigChange()"> 📡 Gateway offline</label>
-              <label class="flex items-center gap-2 cursor-pointer select-none text-xs"><input type="checkbox" id="notify-event-online" onchange="onNotifyConfigChange()"> 📡 Gateway online</label>
+              <label class="flex items-center gap-2 cursor-pointer select-none text-xs"><input type="checkbox" id="notify-event-offline" onchange="onNotifyConfigChange()"> Gateway offline</label>
+              <label class="flex items-center gap-2 cursor-pointer select-none text-xs"><input type="checkbox" id="notify-event-online" onchange="onNotifyConfigChange()"> Gateway online</label>
             </div>
             <div class="flex gap-2">
               <button onclick="saveNotifyConfig()" class="btn btn-sm">Save</button>
@@ -738,14 +745,14 @@
 
           <!-- Dev Tools (hidden unless enabled) -->
           <div class="widget" id="dev-tools-widget">
-            <div class="widget-header">🧑‍💻 Development Tools</div>
+            <div class="widget-header">Development Tools</div>
             <div class="setting-row">
               <div><span class="text-sm">Show development tools</span><p class="text-xs text-muted">Reveals the Build → Edge → Fleet deployment pipeline, dev gateways, and feature flags</p></div>
               <button id="dev-tools-toggle" onclick="toggleDevTools()" class="toggle-btn">Off</button>
             </div>
           </div>
           <div class="widget hidden" id="dev-deployment-widget">
-            <div class="widget-header">🚀 Development & Deployment</div>
+            <div class="widget-header">Development & Deployment</div>
             <div class="panel">
               <p class="text-xs mb-3 text-muted">Build is the latest installer. Edge is the development channel for dev-mode gateways. Fleet is what production gateways are running.</p>
 
@@ -789,6 +796,7 @@
 
     <!-- LOGS VIEW — Audit Log -->
     <div id="view-logs" class="hidden w-full">
+      <div class="view-title" style="margin-bottom:16px">Audit Logs</div>
       <div class="widget">
         <div class="widget-header">Audit Log <div class="flex items-center gap-2"><input type="text" id="audit-log-search" placeholder="Search..." class="text-xs w-40" oninput="onAuditLogSearch()"><span class="text-xs text-muted" id="audit-log-count">0 events</span><button onclick="fetchAuditLog()" class="btn btn-muted btn-xs">&#x21bb;</button></div></div>
         <div id="audit-log-list" class="space-y-2 pr-1"><p class="text-muted">Loading...</p></div>
@@ -804,7 +812,7 @@
 <!-- Create / Edit Approved Window Modal -->
 <div id="create-window-modal" class="modal-overlay hidden">
   <div class="widget w-full max-w-2xl max-h-[90vh] overflow-y-auto">
-    <div class="widget-header"><span id="win-modal-title">🪟 Create Approved Window</span> <button onclick="closeCreateWindowModal()" class="modal-close">&times;</button></div>
+    <div class="widget-header"><span id="win-modal-title">Create Approved Window</span> <button onclick="closeCreateWindowModal()" class="modal-close">&times;</button></div>
 
     <!-- Inline error -->
     <div id="win-save-error" class="hidden win-error"></div>
@@ -813,8 +821,8 @@
     <div class="win-section">
       <div class="win-section-label">1. Window Type</div>
       <div class="win-radio-group">
-        <button class="win-radio-btn selected" id="win-type-recurring" onclick="setWinType('recurring')">🔄 Recurring</button>
-        <button class="win-radio-btn" id="win-type-single" onclick="setWinType('single')">⚡ Single Use</button>
+        <button class="win-radio-btn selected" id="win-type-recurring" onclick="setWinType('recurring')">Recurring</button>
+        <button class="win-radio-btn" id="win-type-single" onclick="setWinType('single')">Single Use</button>
       </div>
     </div>
 
@@ -835,12 +843,12 @@
     <div id="win-src-section" class="win-section win-fade win-disabled">
       <div class="win-section-label">3. Command</div>
       <div class="win-radio-group">
-        <button class="win-radio-btn selected" id="win-src-new" onclick="setWinSource('new')">✏️ Command</button>
-        <button class="win-radio-btn" id="win-src-jit" onclick="setWinSource('jit')">🕐 Recent JIT</button>
+        <button class="win-radio-btn selected" id="win-src-new" onclick="setWinSource('new')">Command</button>
+        <button class="win-radio-btn" id="win-src-jit" onclick="setWinSource('jit')">Recent JIT</button>
       </div>
       <!-- New command input -->
       <div id="win-cmd-input-wrap" class="win-fade">
-        <div class="flex gap-2"><input type="text" id="win-command" placeholder="e.g. docker logs -n 50 my-app" class="flex-1 cmd-input" oninput="checkCommandReady();updateWinSummary()"><button onclick="copyToClipboard(document.getElementById('win-command').value)" class="btn btn-muted btn-xs" title="Copy command">📋</button><button onclick="testWinCommand()" class="btn btn-muted btn-xs">🧪 Test</button></div>
+        <div class="flex gap-2"><input type="text" id="win-command" placeholder="e.g. docker logs -n 50 my-app" class="flex-1 cmd-input" oninput="checkCommandReady();updateWinSummary()"><button onclick="copyToClipboard(document.getElementById('win-command').value)" class="btn btn-muted btn-xs" title="Copy command">Copy</button><button onclick="testWinCommand()" class="btn btn-muted btn-xs">Test</button></div>
         <div id="win-test-result" class="hidden mt-1"></div>
         <div class="flex items-center gap-2 mt-2">
           <span class="text-xs text-muted flex-shrink-0">Match:</span>
@@ -931,18 +939,18 @@
     </div>
 
     <!-- Summary -->
-    <div id="win-summary-bar" class="win-summary hidden-section">💬 <span id="win-summary-text"></span></div>
+    <div id="win-summary-bar" class="win-summary hidden-section"><span id="win-summary-text"></span></div>
 
     <!-- Save -->
     <button onclick="saveWindow()" id="save-window-btn" class="btn btn-sm w-full">Create Window</button>
 
     <!-- Token display (after save) -->
     <div id="win-token-display" class="win-token-card" style="display:none;">
-      <p class="text-xs mb-2 text-success">✅ Token ready!</p>
+      <p class="text-xs mb-2 text-success">Token ready!</p>
       <code id="win-token-value" class="text-base font-bold block mb-2 font-mono"></code>
       <p class="text-xs mb-2 text-muted">Usage:</p>
       <code id="win-token-usage" class="text-xs block p-2 rounded bg-base text-muted font-mono"></code>
-      <button onclick="copyToClipboard(document.getElementById('win-token-value').textContent)" class="btn btn-muted btn-xs mt-3">📋 Copy Token</button>
+      <button onclick="copyToClipboard(document.getElementById('win-token-value').textContent)" class="btn btn-muted btn-xs mt-3">Copy Token</button>
     </div>
   </div>
 </div>
@@ -996,7 +1004,7 @@
 <div id="remove-gateway-modal" class="modal-overlay hidden">
   <div class="widget w-full max-w-md">
     <div class="widget-header">
-      <span>⚠️ Remove Gateway</span>
+      <span>Remove Gateway</span>
       <button onclick="closeRemoveGatewayModal()" class="modal-close">&times;</button>
     </div>
     <p id="remove-gateway-name" class="text-main font-semibold mb-2"></p>
@@ -1005,7 +1013,7 @@
     <!-- Uninstall Confirmation (hidden by default) -->
     <div id="uninstall-confirm-section" class="hidden">
       <div class="panel mb-3" style="border-color: var(--danger); background: rgba(220,38,38,0.05);">
-        <p class="text-sm mb-2" style="color: var(--danger); font-weight: 600;">⚠️ This will permanently remove gateway control</p>
+        <p class="text-sm mb-2" style="color: var(--danger); font-weight: 600;">This will permanently remove gateway control</p>
         <p class="text-xs text-muted mb-3">The uninstall script will run on the remote host to remove all Eshu components. This action cannot be undone.</p>
         <label class="flex items-center gap-2 cursor-pointer select-none text-xs text-muted mb-3">
           <input type="checkbox" id="uninstall-confirm-check" onchange="validateUninstallConfirm()">
@@ -1023,7 +1031,7 @@
       <p class="text-xs text-muted mb-3">Runs Eshu's uninstaller on the host and deregisters it. Requires the gateway to be online with its poller running.</p>
       <p class="text-sm mb-1"><strong>Force remove from dashboard</strong></p>
       <p class="text-xs text-muted">Deletes only the dashboard record — for decommissioned or never-completed hosts.</p>
-      <p class="text-xs text-warning mt-2">⚠️ A still-running gateway will re-register on its next poll (~30s), so force-removing an operational gateway may not be permanent.</p>
+      <p class="text-xs text-warning mt-2">A still-running gateway will re-register on its next poll (~30s), so force-removing an operational gateway may not be permanent.</p>
     </div>
     <div class="flex justify-end gap-2">
       <button onclick="closeRemoveGatewayModal()" class="btn btn-muted btn-sm">Cancel</button>
@@ -1037,7 +1045,7 @@
 <div id="uninstall-modal" class="modal-overlay hidden">
   <div class="widget w-full max-w-md">
     <div class="widget-header">
-      <span id="uninstall-modal-title">🗑 Uninstalling</span>
+      <span id="uninstall-modal-title">Uninstalling</span>
       <button onclick="closeUninstallModal()" class="modal-close">&times;</button>
     </div>
     <div class="mb-4">
@@ -1055,7 +1063,7 @@
 <!-- Window Usage History Modal -->
 <div id="window-history-overlay" class="modal-overlay hidden" onclick="if(event.target===this)closeModal('window-history-overlay')">
   <div class="widget w-11/12 md:w-2/3 lg:w-1/2 max-h-3/4 flex flex-col" style="max-height:75vh;">
-    <div class="widget-header">📜 Window Usage History <button onclick="closeModal('window-history-overlay')" class="modal-close">&times;</button></div>
+    <div class="widget-header">Window Usage History <button onclick="closeModal('window-history-overlay')" class="modal-close">&times;</button></div>
     <div id="window-history-content" class="flex-1 overflow-y-auto pr-2" style="min-height:100px;"><p class="text-muted">Loading...</p></div>
   </div>
 </div>
@@ -1093,7 +1101,7 @@
     <div class="widget-header">
       <span id="fleet-output-modal-title" class="flex-1 truncate pr-2">Output</span>
       <div class="flex items-center gap-2">
-        <button onclick="copyFleetOutputModal()" class="btn btn-muted btn-xs">📋 Copy</button>
+        <button onclick="copyFleetOutputModal()" class="btn btn-muted btn-xs">Copy</button>
         <button onclick="closeFleetOutputModal()" class="modal-close">&times;</button>
       </div>
     </div>
