@@ -68,6 +68,10 @@
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
       <span>Dashboard</span>
     </button>
+    <button class="nav-item" id="nav-history" onclick="switchView('history')">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></svg>
+      <span>History</span>
+    </button>
     <button class="nav-item" id="nav-gateways" onclick="switchView('gateways')">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="7" rx="1"/><rect x="2" y="14" width="20" height="7" rx="1"/><circle cx="6" cy="6.5" r="1.2" fill="currentColor" stroke="none"/><circle cx="6" cy="17.5" r="1.2" fill="currentColor" stroke="none"/></svg>
       <span>Gateways</span>
@@ -170,30 +174,6 @@
 
           <!-- Feed -->
           <div class="cc-feed-scroll" id="cc-feed-scroll">
-            <!-- Stats Row -->
-            <div class="stat-row" style="margin-bottom:12px">
-              <div class="stat-card" onclick="toggleFilter('pending')" id="box-pending">
-                <span class="stat-value stat-pending" id="stat-pending">0</span>
-                <span class="stat-label">Expired</span>
-              </div>
-              <div class="stat-card" onclick="toggleFilter('approved')" id="box-approved">
-                <span class="stat-value stat-approved" id="stat-approved">0</span>
-                <span class="stat-label">Approved</span>
-              </div>
-              <div class="stat-card" onclick="toggleFilter('auto-approved')" id="box-auto">
-                <span class="stat-value stat-auto" id="stat-auto">0</span>
-                <span class="stat-label">Auto-Approved</span>
-              </div>
-              <div class="stat-card" onclick="toggleFilter('blocked')" id="box-blocked">
-                <span class="stat-value stat-blocked" id="stat-blocked">0</span>
-                <span class="stat-label">Blocked</span>
-              </div>
-              <div class="stat-card" onclick="toggleFilter('denied')" id="box-denied">
-                <span class="stat-value stat-denied" id="stat-denied">0</span>
-                <span class="stat-label">Denied</span>
-              </div>
-            </div>
-
             <!-- Pending JIT Widget -->
             <div id="jit-pending-widget" class="widget glow">
               <div class="widget-header">
@@ -206,35 +186,8 @@
               <div id="jit-tickets"><p class="text-muted">No pending requests — all clear.</p></div>
             </div>
 
-            <!-- Request History Table (compact) -->
-            <div class="widget" id="home-history-widget">
-              <div class="widget-header">
-                Recent Activity
-                <span id="filter-badge" class="hidden filter-badge"></span>
-                <div class="flex items-center gap-2">
-                  <input type="text" id="request-search" placeholder="Search..." class="text-xs w-40" oninput="onRequestSearch()">
-                  <button onclick="fetchRequests()" class="btn btn-muted btn-xs">&#8635; Refresh</button>
-                  <div class="relative">
-                    <button onclick="toggleDropdown()" id="purge-btn" class="btn btn-muted btn-xs"><span>Clear</span> <svg width="10" height="10" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg></button>
-                    <div id="purge-dropdown" class="dropdown-menu widget">
-                      <button onclick="purgeHistory('30m')" class="dropdown-item">Older than 30 minutes</button>
-                      <button onclick="purgeHistory('1h')" class="dropdown-item">Older than 1 hour</button>
-                      <button onclick="purgeHistory('1d')" class="dropdown-item">Older than 1 day</button>
-                      <button onclick="purgeHistory('2d')" class="dropdown-item">Older than 2 days</button>
-                      <button onclick="purgeHistory('7d')" class="dropdown-item">Older than 7 days</button>
-                      <div class="dropdown-divider"></div>
-                      <button onclick="purgeHistory('all')" class="dropdown-item danger">Clear all history</button>
-                    </div>
-                  </div>
-                </div>
-              </div>
-              <div class="table-wrap">
-                <table>
-                  <thead><tr><th>ID</th><th>Time</th><th>Host / Target IP</th><th>Command</th><th>Status</th><th class="text-right">Actions</th></tr></thead>
-                  <tbody id="table-body"></tbody>
-                </table>
-              </div>
-              <div id="empty-state" class="hidden flex-col items-center justify-center py-12 text-muted"><p>No activity recorded yet.</p></div>
+            <div style="margin-top:12px;text-align:center;">
+              <button onclick="switchView('history')" class="btn btn-muted btn-sm">View full history &rarr;</button>
             </div>
           </div>
         </div>
@@ -277,6 +230,103 @@
               </div>
               <div class="ctx-actions" id="ctx-actions"></div>
             </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- HISTORY VIEW — SSH Commands + Proxied Calls -->
+    <div id="view-history" class="hidden w-full">
+      <div class="history-tabs">
+        <button class="history-tab active" data-tab="ssh" onclick="switchHistoryTab('ssh')">SSH Commands</button>
+        <button class="history-tab" data-tab="proxied" onclick="switchHistoryTab('proxied')">Proxied Calls</button>
+      </div>
+
+      <!-- SSH Commands panel -->
+      <div id="history-ssh-panel">
+        <div class="stat-row" style="margin-bottom:12px">
+          <div class="stat-card" onclick="toggleFilter('pending')" id="box-pending">
+            <span class="stat-value stat-pending" id="stat-pending">0</span>
+            <span class="stat-label">Expired</span>
+          </div>
+          <div class="stat-card" onclick="toggleFilter('approved')" id="box-approved">
+            <span class="stat-value stat-approved" id="stat-approved">0</span>
+            <span class="stat-label">Approved</span>
+          </div>
+          <div class="stat-card" onclick="toggleFilter('auto-approved')" id="box-auto">
+            <span class="stat-value stat-auto" id="stat-auto">0</span>
+            <span class="stat-label">Auto-Approved</span>
+          </div>
+          <div class="stat-card" onclick="toggleFilter('blocked')" id="box-blocked">
+            <span class="stat-value stat-blocked" id="stat-blocked">0</span>
+            <span class="stat-label">Blocked</span>
+          </div>
+          <div class="stat-card" onclick="toggleFilter('denied')" id="box-denied">
+            <span class="stat-value stat-denied" id="stat-denied">0</span>
+            <span class="stat-label">Denied</span>
+          </div>
+        </div>
+
+        <div class="widget">
+          <div class="widget-header">
+            Command History
+            <span id="filter-badge" class="hidden filter-badge"></span>
+            <div class="flex items-center gap-2">
+              <input type="text" id="request-search" placeholder="Search..." class="text-xs w-40" oninput="onRequestSearch()">
+              <button onclick="fetchRequests()" class="btn btn-muted btn-xs">&#8635; Refresh</button>
+              <div class="relative">
+                <button onclick="toggleDropdown()" id="purge-btn" class="btn btn-muted btn-xs"><span>Clear</span> <svg width="10" height="10" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg></button>
+                <div id="purge-dropdown" class="dropdown-menu widget">
+                  <button onclick="purgeHistory('30m')" class="dropdown-item">Older than 30 minutes</button>
+                  <button onclick="purgeHistory('1h')" class="dropdown-item">Older than 1 hour</button>
+                  <button onclick="purgeHistory('1d')" class="dropdown-item">Older than 1 day</button>
+                  <button onclick="purgeHistory('2d')" class="dropdown-item">Older than 2 days</button>
+                  <button onclick="purgeHistory('7d')" class="dropdown-item">Older than 7 days</button>
+                  <div class="dropdown-divider"></div>
+                  <button onclick="purgeHistory('all')" class="dropdown-item danger">Clear all history</button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>ID</th><th>Time</th><th>Host / Target IP</th><th>Command</th><th>Status</th><th class="text-right">Actions</th></tr></thead>
+              <tbody id="table-body"></tbody>
+            </table>
+          </div>
+          <div id="empty-state" class="hidden flex-col items-center justify-center py-12 text-muted"><p>No activity recorded yet.</p></div>
+        </div>
+      </div>
+
+      <!-- Proxied Calls panel -->
+      <div id="history-proxied-panel" class="hidden">
+        <div class="widget">
+          <div class="widget-header">Proxied Calls</div>
+          <div class="flex flex-wrap items-center gap-2 mb-2">
+            <input type="text" id="calls-search" placeholder="Search text, or a date (e.g. 19/08/2026)…" class="flex-1 text-xs" oninput="onCallsSearch()">
+            <button onclick="clearCallsSearch()" class="btn btn-xs">Clear</button>
+            <button onclick="setCallsRange('today')" class="btn btn-xs" id="calls-btn-today">Today</button>
+            <button onclick="setCallsRange('yesterday')" class="btn btn-xs" id="calls-btn-yesterday">Yesterday</button>
+            <button onclick="setCallsRange('week')" class="btn btn-xs" id="calls-btn-week">Last week</button>
+          </div>
+          <div class="flex flex-wrap items-center gap-2 mb-2">
+            <select id="calls-page-size" class="text-xs w-24" title="Results per page" onchange="onCallsPageSize()">
+              <option value="20">20</option>
+              <option value="50" selected>50</option>
+              <option value="100">100</option>
+            </select>
+            <button onclick="callsPrevPage()" class="btn btn-xs" id="calls-prev">← Prev</button>
+            <span id="calls-page" class="text-xs text-muted whitespace-nowrap">Page 1</span>
+            <button onclick="callsNextPage()" class="btn btn-xs" id="calls-next">Next →</button>
+            <span id="calls-count" class="text-xs text-muted whitespace-nowrap">0 entries</span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr>
+                <th>Time</th><th>Integration</th><th>Tool</th><th>Agent</th><th>Method</th><th>Path</th><th>Status</th><th class="text-right">Latency</th><th>Outcome</th>
+              </tr></thead>
+              <tbody id="integration-calls-body"><tr><td colspan="9" class="px-4 py-3 text-muted">Loading...</td></tr></tbody>
+            </table>
           </div>
         </div>
       </div>
@@ -616,36 +666,6 @@
           <span class="text-xs text-muted">Shown to agents via MCP; fewer tools = less context used.</span>
         </div>
         <div id="integration-tools-list" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3"><p class="text-muted">Select an integration to view its tools.</p></div>
-      </div>
-
-      <div class="widget mt-5">
-        <div class="widget-header">Recent Proxied Calls</div>
-        <div class="flex flex-wrap items-center gap-2 mb-2">
-          <input type="text" id="calls-search" placeholder="Search text, or a date (e.g. 19/08/2026)…" class="flex-1 text-xs" oninput="onCallsSearch()">
-          <button onclick="clearCallsSearch()" class="btn btn-xs">Clear</button>
-          <button onclick="setCallsRange('today')" class="btn btn-xs" id="calls-btn-today">Today</button>
-          <button onclick="setCallsRange('yesterday')" class="btn btn-xs" id="calls-btn-yesterday">Yesterday</button>
-          <button onclick="setCallsRange('week')" class="btn btn-xs" id="calls-btn-week">Last week</button>
-        </div>
-        <div class="flex flex-wrap items-center gap-2 mb-2">
-          <select id="calls-page-size" class="text-xs w-24" title="Results per page" onchange="onCallsPageSize()">
-            <option value="20">20</option>
-            <option value="50" selected>50</option>
-            <option value="100">100</option>
-          </select>
-          <button onclick="callsPrevPage()" class="btn btn-xs" id="calls-prev">← Prev</button>
-          <span id="calls-page" class="text-xs text-muted whitespace-nowrap">Page 1</span>
-          <button onclick="callsNextPage()" class="btn btn-xs" id="calls-next">Next →</button>
-          <span id="calls-count" class="text-xs text-muted whitespace-nowrap">0 entries</span>
-        </div>
-        <div class="table-wrap">
-          <table>
-            <thead><tr>
-              <th>Time</th><th>Integration</th><th>Tool</th><th>Agent</th><th>Method</th><th>Path</th><th>Status</th><th class="text-right">Latency</th><th>Outcome</th>
-            </tr></thead>
-            <tbody id="integration-calls-body"><tr><td colspan="9" class="px-4 py-3 text-muted">Loading...</td></tr></tbody>
-          </table>
-        </div>
       </div>
     </div>
 

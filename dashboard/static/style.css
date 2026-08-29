@@ -202,6 +202,23 @@ button::-moz-focus-inner { border: 0; padding: 0; }
   .stat-card .stat-value { font-size: 26px; font-weight: 700; }
   .stat-card .stat-label { font-size: 12px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; }
 
+  /* ── History View tabs (SSH / Proxied) ────────────────────── */
+  .history-tabs {
+    display: flex; gap: 4px; margin-bottom: 16px;
+    border-bottom: 1px solid var(--border-color);
+  }
+  .history-tab {
+    padding: 8px 16px; font-size: 13px; font-weight: 600;
+    color: var(--text-muted); background: none; border: none; cursor: pointer;
+    border-bottom: 2px solid transparent; margin-bottom: -1px;
+    font-family: inherit; transition: color 0.15s, border-color 0.15s;
+  }
+  .history-tab:hover { color: var(--text-main); }
+  .history-tab.active {
+    color: var(--accent); border-bottom-color: var(--brand-red);
+    text-shadow: 0 0 12px var(--brand-red-glow);
+  }
+
   /* ── JIT Ticket ─────────────────────────────────────────── */
   .jit-ticket {
     display: flex; align-items: center; justify-content: space-between; gap: 16px;

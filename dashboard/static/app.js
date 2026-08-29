@@ -133,6 +133,17 @@ function closeContextPanel() {
   });
 }
 
+// ── History View: SSH / Proxied Tabs ─────────────────────────
+function switchHistoryTab(name) {
+  document.querySelectorAll('.history-tab').forEach(function(tab) {
+    tab.classList.toggle('active', tab.dataset.tab === name);
+  });
+  document.getElementById('history-ssh-panel').classList.toggle('hidden', name !== 'ssh');
+  document.getElementById('history-proxied-panel').classList.toggle('hidden', name !== 'proxied');
+  if (name === 'ssh') { fetchRequests(); }
+  else { fetchIntegrationCalls(); }
+}
+
 // ── Command Center: Filter Tabs ──────────────────────────────
 function ccFilter(filter) {
   _ccFilter = filter;
@@ -372,6 +383,7 @@ async function switchView(target) {
     if (navBtn) navBtn.classList.toggle('active', v === target);
   });
   if (target === 'gateways') { fetchGateways(); fetchEnrollData(); }
+  if (target === 'history') { fetchRequests(); fetchIntegrationCalls(); }
   if (target === 'windows') { fetchWindowsTable(); }
   if (target === 'stats') { fetchStatistics(); fetchSuggestions(); }
   if (target === 'controls') { fetchFreezeStatus(); fetchGateways(); fetchPolicies(); fetchPolicyChanges(); }
@@ -3757,7 +3769,6 @@ async function fetchIntegrations() {
   populateKindSelect();
   fetchAgentTokens();
   fetchIntegrationList();
-  fetchIntegrationCalls();
   fetchMcpSettings();
 }
 
