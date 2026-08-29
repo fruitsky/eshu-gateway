@@ -1327,7 +1327,7 @@ async function showWindowHistory(windowId) {
 }
 
 // ── Init ─────────────────────────────────────────────────────────────────
-async function initDashboard() { updateNotifyUI(); fetchVersion(); fetchRequests(); fetchCmdDescs(); fetchSuggestions(); refreshPasswordUI(); fetchFreezeStatus(); fetchFleetCommands(); }
+async function initDashboard() { updateNotifyUI(); fetchVersion(); fetchRequests(); fetchCmdDescs(); fetchSuggestions(); refreshPasswordUI(); fetchFreezeStatus(); fetchFleetCommands(); fetchGateways(); }
 
 // ── Requests ─────────────────────────────────────────────────────────────
 let _requestSearchQuery = '';
@@ -1440,6 +1440,50 @@ function detectNewIntegrationCalls() {
 }
 
 // ── JIT Ticket Rendering ─────────────────────────────────────────────────
+function renderEmptyState() {
+  var now = Math.floor(Date.now() / 1000);
+  var gws = (_gatewaysData || []).filter(function(g){ return g.hostname || g.ip; });
+  var totalGws = gws.length;
+  var online = gws.filter(function(g){ return (now - (g.last_seen || 0)) < 30; }).length;
+
+  var nodeHtml = '';
+  var n = Math.min(gws.length, 8);
+  for (var i = 0; i < n; i++) {
+    var g = gws[i];
+    var angle = (360 / n) * i - 90;
+    var rad = angle * Math.PI / 180;
+    var x = 50 + 40 * Math.cos(rad);
+    var y = 50 + 40 * Math.sin(rad);
+    var isOnline = (now - (g.last_seen || 0)) < 30;
+    var name = escapeHtml(g.hostname || g.ip || ('gw' + i));
+    nodeHtml += '<div class="cc-radar-node' + (isOnline ? '' : ' off') + '" style="left:' + x.toFixed(1) + '%;top:' + y.toFixed(1) + '%"><span class="n-dot"></span><span class="n-name">' + name + '</span></div>';
+  }
+
+  var recent = (requestsData || []).find(function(r){ return r.created_at; });
+  var lastAgo = recent ? formatAgo(now - recent.created_at) : '';
+
+  var tickerHtml = '';
+  var auto = (requestsData || []).filter(function(r){ return r.status === 'auto-approved'; }).slice(0, 8);
+  if (auto.length) {
+    var tickItems = auto.map(function(r){
+      return '<span class="cc-ticker-item"><span class="t">' + formatTime(r.created_at) + '</span> <span>' + escapeHtml(r.hostname || r.target_ip) + '</span> <span class="tag">auto</span> ' + escapeHtml(String(r.command || '').substring(0, 42)) + '</span>';
+    }).join('');
+    tickerHtml = '<div class="cc-ticker"><div class="cc-ticker-track">' + tickItems + tickItems + '</div></div>';
+  }
+
+  return '<div class="cc-empty">' +
+    '<div class="cc-radar">' +
+      '<div class="cc-radar-ring r1"></div><div class="cc-radar-ring r2"></div><div class="cc-radar-ring r3"></div>' +
+      '<div class="cc-radar-sweep"></div>' +
+      nodeHtml +
+      '<div class="cc-radar-core"><div class="big">' + online + '/' + totalGws + '</div><div class="lbl">gateways online</div></div>' +
+    '</div>' +
+    '<div class="cc-empty-headline">Fleet at ease</div>' +
+    '<div class="cc-empty-sub">No commands waiting for approval' + (lastAgo ? ' · last activity ' + lastAgo : '') + '</div>' +
+    tickerHtml +
+  '</div>';
+}
+
 function renderJitTickets() {
   var pending = requestsData.filter(function(r) { return r.status === 'pending' && r.ttl > 0; });
   var winReqs = _pendingWinReqs || [];
@@ -1454,9 +1498,10 @@ function renderJitTickets() {
   document.getElementById('jit-pending-count').textContent = total + ' pending';
   var widget = document.getElementById('jit-pending-widget');
   if (total > 0) { widget.classList.add('glow'); } else { widget.classList.remove('glow'); }
+  document.body.dataset.state = total > 0 ? 'decision' : 'rest';
 
   var container = document.getElementById('jit-tickets');
-  if (total === 0) { container.innerHTML = '<p class="text-muted" style="padding:20px;text-align:center">No pending requests \u2014 all clear.</p>'; return; }
+  if (total === 0) { container.innerHTML = renderEmptyState(); return; }
 
   var html = '';
   allItems.forEach(function(item) {

@@ -1392,6 +1392,51 @@ textarea { font-family: 'JetBrains Mono', monospace !important; }
     .lg\:w-3\/4 { width: 75%; }
   }
 
+  /* ── State-driven energy (living dashboard) ──────────────── */
+  :root { --energy: rgba(245,158,11,0.07); --energy-strong: rgba(245,158,11,0.14); --grain: 0.05; }
+  body[data-state="decision"] { --energy: rgba(245,158,11,0.15); --energy-strong: rgba(251,191,36,0.24); --grain: 0.09; }
+  body[data-state="alert"] { --energy: rgba(220,38,38,0.14); --energy-strong: rgba(220,38,38,0.22); --grain: 0.12; }
+  body {
+    background-color: var(--bg-base);
+    background-image:
+      radial-gradient(ellipse at 50% 22%, var(--energy-strong), transparent 62%),
+      radial-gradient(ellipse at 50% 100%, var(--energy), transparent 55%);
+    background-repeat: no-repeat;
+    background-attachment: fixed;
+  }
+  .grain {
+    position: fixed; inset: 0; pointer-events: none; z-index: 9996;
+    opacity: var(--grain); transition: opacity 1s ease;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.6'/%3E%3C/svg%3E");
+  }
+
+  /* ── Living empty state (radar + ticker) ─────────────────── */
+  .cc-empty { display: flex; flex-direction: column; align-items: center; gap: 16px; padding: 18px 16px 10px; }
+  .cc-radar { position: relative; width: 260px; height: 260px; flex-shrink: 0; animation: cc-breathe 5.5s ease-in-out infinite; }
+  .cc-radar-ring { position: absolute; border-radius: 50%; border: 1px solid rgba(245,158,11,0.14); }
+  .cc-radar-ring.r1 { inset: 0; }
+  .cc-radar-ring.r2 { inset: 16%; border-color: rgba(245,158,11,0.11); }
+  .cc-radar-ring.r3 { inset: 32%; border-color: rgba(245,158,11,0.09); }
+  .cc-radar-sweep { position: absolute; inset: 0; border-radius: 50%; background: conic-gradient(from 0deg, rgba(245,158,11,0.26), transparent 55deg, transparent 360deg); animation: cc-sweep 5.5s linear infinite; }
+  .cc-radar-node { position: absolute; transform: translate(-50%, -50%); display: flex; flex-direction: column; align-items: center; gap: 3px; }
+  .cc-radar-node .n-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--status-success); box-shadow: 0 0 10px var(--accent-glow); }
+  .cc-radar-node.off .n-dot { background: var(--text-muted); box-shadow: none; }
+  .cc-radar-node .n-name { font-family: 'JetBrains Mono', monospace; font-size: 8px; letter-spacing: 1px; text-transform: uppercase; color: var(--text-muted); }
+  .cc-radar-core { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); text-align: center; }
+  .cc-radar-core .big { font-family: 'JetBrains Mono', monospace; font-size: 26px; font-weight: 700; color: var(--accent); text-shadow: 0 0 20px var(--accent-glow); line-height: 1; }
+  .cc-radar-core .lbl { font-family: 'JetBrains Mono', monospace; font-size: 9px; letter-spacing: 2px; text-transform: uppercase; color: var(--text-muted); margin-top: 4px; }
+  .cc-empty-headline { font-family: 'JetBrains Mono', monospace; font-size: 15px; font-weight: 700; text-transform: uppercase; letter-spacing: 3px; color: var(--text-main); text-align: center; }
+  .cc-empty-sub { font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--text-muted); letter-spacing: 1px; text-align: center; }
+  .cc-ticker { width: 100%; overflow: hidden; border-top: 1px solid var(--border-color); padding-top: 12px; margin-top: 4px; }
+  .cc-ticker-track { display: flex; gap: 26px; width: max-content; animation: cc-ticker 42s linear infinite; }
+  .cc-ticker-item { display: flex; align-items: center; gap: 8px; font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--text-muted); opacity: 0.8; white-space: nowrap; }
+  .cc-ticker-item .t { color: var(--text-muted); }
+  .cc-ticker-item .tag { color: var(--accent); opacity: 0.8; }
+
+  @keyframes cc-sweep { to { transform: rotate(360deg); } }
+  @keyframes cc-breathe { 0%,100% { transform: scale(1); } 50% { transform: scale(1.02); } }
+  @keyframes cc-ticker { to { transform: translateX(-50%); } }
+
   /* ── Reduced motion ─────────────────────────────────────── */
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after {
