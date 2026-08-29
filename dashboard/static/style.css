@@ -199,7 +199,7 @@ button::-moz-focus-inner { border: 0; padding: 0; }
   .stat-card:hover { border-color: var(--text-muted); }
   .stat-card.active-filter { border-color: var(--brand-red); box-shadow: 0 0 14px var(--brand-red-glow); }
   .stat-card.active-filter::after { content: '✕'; position: absolute; top: 8px; right: 12px; font-size: 11px; color: var(--text-muted); }
-  .stat-card .stat-value { font-size: 26px; font-weight: 700; }
+  .stat-card .stat-value { font-size: 28px; font-weight: 700; }
   .stat-card .stat-label { font-size: 12px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; }
 
   /* ── History View tabs (SSH / Proxied) ────────────────────── */
@@ -1030,7 +1030,7 @@ button::-moz-focus-inner { border: 0; padding: 0; }
     .stat-row { flex-wrap: wrap; }
     .stat-card { flex: 1 1 calc(50% - 8px); min-width: 0; }
     .sidebar{width:56px;min-width:56px}
-    .sidebar-brand-text,.nav-item span:last-child,.nav-label,.sidebar-status-text{display:none}
+    .sidebar-brand-text,.nav-item span:last-child,.nav-label,.sidebar-status-text,.sidebar-health-text{display:none}
     .sidebar-brand{padding:14px 10px;justify-content:center}
     .nav-item{padding:10px;justify-content:center}
     .nav-item::before{display:none}
@@ -1146,11 +1146,32 @@ button::-moz-focus-inner { border: 0; padding: 0; }
 .nav-item { font-size: 12px !important; padding: 7px 10px !important; border-radius: 4px !important; gap: 8px !important; }
 .nav-item.active { box-shadow: inset 2px 0 0 var(--accent) !important; }
 
+/* Sidebar bottom: gateway health pill */
+.sidebar-health {
+  display: flex !important; align-items: center; gap: 8px;
+  padding: 8px 10px; border-radius: 6px;
+  background: rgba(255,255,255,0.02); border: 1px solid var(--border-color);
+  margin-bottom: 6px;
+}
+.sidebar-health-text { font-size: 11px; color: var(--text-muted); font-weight: 500; }
+
+/* Mobile menu button + overlay (unused in collapsed-sidebar layout) */
+.mobile-menu-btn { display: none !important; }
+.sidebar-overlay { display: none !important; }
+
 /* Widgets */
 .widget { border-radius: 6px !important; border-color: var(--border-color) !important; }
-.widget-header { font-family: 'JetBrains Mono', monospace !important; font-size: 14px !important; font-weight: 700 !important; text-transform: uppercase !important; letter-spacing: 1px !important; color: var(--accent) !important; text-shadow: 0 0 20px var(--accent-glow) !important; }
+.widget-header { font-family: 'JetBrains Mono', monospace !important; font-size: 12px !important; font-weight: 700 !important; text-transform: uppercase !important; letter-spacing: 1.5px !important; color: var(--accent) !important; text-shadow: 0 0 20px var(--accent-glow) !important; }
 .main-header h1 { font-family: 'JetBrains Mono', monospace !important; font-size: 16px !important; font-weight: 700 !important; text-transform: uppercase !important; letter-spacing: 1px !important; }
 .version-badge { font-family: 'JetBrains Mono', monospace !important; background: rgba(245,158,11,0.08) !important; color: var(--accent) !important; border: 1px solid rgba(245,158,11,0.2) !important; }
+
+/* Per-view page title */
+.view-title {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 18px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 2px;
+  color: var(--accent); text-shadow: 0 0 24px var(--accent-glow);
+}
 
 /* Stat Cards */
 .stat-card { border-radius: 6px !important; }
