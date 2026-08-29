@@ -13,8 +13,8 @@ function deriveGatewayIdentity(hostname) {
 }
 
 function gwPill(hostname) {
-  const id = deriveGatewayIdentity(hostname);
-  return '<span class="gw-pill" style="background:' + id.color + ';" title="' + id.label + '">' + id.code + '</span>';
+  // initials pills removed — gateways are shown by name only
+  return '';
 }
 
 function devBadge(g) {
@@ -3409,19 +3409,91 @@ async function fetchAuditLog() {
     let url = '/api/audit_log';
     if (_auditLogSearchQuery) url += '?search=' + encodeURIComponent(_auditLogSearchQuery);
     const res = await fetch(url); const logs = await res.json();
+    _auditLogs = logs;
     document.getElementById('audit-log-count').textContent = logs.length + ' events';
-    const list = document.getElementById('audit-log-list');
-    if (logs.length === 0) { list.innerHTML = '<p class="text-muted">No events recorded yet.</p>'; return; }
-    list.innerHTML = logs.map(function(l) {
-      const icon = AUDIT_ICONS[l.event_type] || '', label = AUDIT_LABELS[l.event_type] || l.event_type;
-      const time = new Date(l.timestamp * 1000).toLocaleTimeString([], { hour:'2-digit', minute:'2-digit', second:'2-digit' });
-      const host = l.hostname ? ' ' + gwPill(l.hostname) + ' <strong class="text-main">' + l.hostname + '</strong>' + (l.gateway_ip ? ' ('+l.gateway_ip+')' : '') : '';
-      const detail = l.details ? '<span class="block text-xs mt-0.5 text-muted">' + l.details.replace(/</g,'<').replace(/>/g,'>') + '</span>' : '';
-      const borderColor = l.event_type === 'disconnected' ? 'var(--brand-red)' : l.event_type === 'version_updated' || l.event_type === 'password_changed' ? 'var(--status-success)' : 'var(--border-color)';
-      return '<div class="p-2 rounded-lg border text-xs bg-base" style="border-color:' + borderColor + ';">' +
-        '<span class="text-muted text-xs">' + time + '</span> ' + icon + ' ' + label + host + detail + '</div>';
-    }).join('');
+    renderAuditFilters();
+    renderAuditLog();
   } catch(e) {}
+}
+
+var _auditLogs = [];
+var _auditFilter = 'all';
+
+function auditCategory(et) {
+  if (et.indexOf('jit_') === 0) return 'jit';
+  if (et.indexOf('policy_') === 0) return 'policy';
+  if (et.indexOf('window_') === 0) return 'windows';
+  if (et.indexOf('integration_') === 0 || et.indexOf('agent_token_') === 0) return 'integrations';
+  if (et.indexOf('fleet_') === 0 || et.indexOf('freeze_') === 0 || et.indexOf('override_') === 0) return 'fleet';
+  if (et.indexOf('zero_trust_') === 0 || ['enrolled','version_updated','disconnected','connected','uninstalled','uninstall_triggered','auto_deregistered','gateway_mode_changed'].indexOf(et) !== -1) return 'gateways';
+  return 'config';
+}
+
+function auditBadgeClass(et) {
+  if (['jit_approved','jit_override_approved','window_request_approved','integration_call_approved','enrolled','connected','integration_created','integration_updated','agent_token_created','fleet_dispatched'].indexOf(et) !== -1) return 'badge-approved';
+  if (['jit_denied','disconnected','uninstalled','auto_deregistered','window_request_denied','integration_call_denied','integration_deleted','agent_token_deleted'].indexOf(et) !== -1) return 'badge-denied';
+  return 'badge-info';
+}
+
+function renderAuditFilters() {
+  var bar = document.getElementById('audit-filter-bar');
+  if (!bar) return;
+  var cats = [['all','All'],['jit','JIT'],['policy','Policy'],['gateways','Gateways'],['fleet','Fleet'],['config','Config'],['windows','Windows'],['integrations','Integrations']];
+  var counts = {};
+  _auditLogs.forEach(function(l){ var c = auditCategory(l.event_type); counts[c] = (counts[c]||0)+1; });
+  bar.innerHTML = cats.map(function(c){
+    var id = c[0], label = c[1];
+    var count = id === 'all' ? _auditLogs.length : (counts[id]||0);
+    return '<button class="audit-filter-tab' + (_auditFilter === id ? ' active' : '') + '" onclick="toggleAuditFilter(\'' + id + '\')">' + label + (count ? ' <span class="audit-filter-count">' + count + '</span>' : '') + '</button>';
+  }).join('');
+}
+
+function toggleAuditFilter(cat) {
+  _auditFilter = cat;
+  renderAuditFilters();
+  renderAuditLog();
+}
+
+function toggleAuditDetail(id) {
+  var row = document.querySelector('.log-row[data-aid="' + id + '"]');
+  var detail = document.getElementById('audit-detail-' + id);
+  if (!row || !detail) return;
+  var expanded = row.classList.contains('expanded');
+  row.classList.toggle('expanded', !expanded);
+  detail.classList.toggle('visible', !expanded);
+}
+
+function renderAuditLog() {
+  var body = document.getElementById('audit-log-body');
+  if (!body) return;
+  var logs = _auditLogs.filter(function(l){ return _auditFilter === 'all' || auditCategory(l.event_type) === _auditFilter; });
+  if (logs.length === 0) { body.innerHTML = '<tr><td colspan="5" class="px-4 py-3 text-muted">No events recorded yet.</td></tr>'; return; }
+  body.innerHTML = logs.map(function(l, i) {
+    var id = l.id || i;
+    var label = AUDIT_LABELS[l.event_type] || String(l.event_type).replace(/_/g, ' ');
+    var badge = auditBadgeClass(l.event_type);
+    var d = new Date(l.timestamp * 1000);
+    var time = d.toLocaleTimeString([], { hour:'2-digit', minute:'2-digit', second:'2-digit' });
+    var date = d.toLocaleDateString([], { month:'short', day:'numeric' });
+    var gw = l.hostname || l.gateway_ip || '';
+    var details = l.details ? escapeHtml(String(l.details)) : '';
+    var row = '<tr class="log-row" data-aid="' + id + '" onclick="toggleAuditDetail(' + id + ')">' +
+      '<td><span class="log-expand">&#9656;</span></td>' +
+      '<td><div class="log-time">' + time + '</div><div class="log-date">' + date + '</div></td>' +
+      '<td><span class="badge ' + badge + '">' + escapeHtml(label) + '</span></td>' +
+      '<td class="log-details">' + (details || '<span class="text-muted">—</span>') + '</td>' +
+      '<td class="log-gw">' + (gw ? escapeHtml(gw) + (l.gateway_ip && l.hostname ? ' <span class="text-muted">' + escapeHtml(l.gateway_ip) + '</span>' : '') : '<span class="text-muted">—</span>') + '</td>' +
+      '</tr>';
+    var detailRow = '<tr class="log-detail-row" id="audit-detail-' + id + '"><td class="log-detail-cell" colspan="5">' +
+      '<div class="log-detail">' +
+        '<div class="detail-row"><span class="detail-label">Timestamp</span><span class="detail-value">' + escapeHtml(d.toLocaleString()) + '</span></div>' +
+        '<div class="detail-row"><span class="detail-label">Event</span><span class="detail-value">' + escapeHtml(label) + '</span></div>' +
+        (gw ? '<div class="detail-row"><span class="detail-label">Gateway</span><span class="detail-value">' + escapeHtml(gw) + (l.gateway_ip ? ' (' + escapeHtml(l.gateway_ip) + ')' : '') + '</span></div>' : '') +
+        (details ? '<div class="detail-cmd">' + details + '</div>' : '') +
+      '</div>' +
+      '</td></tr>';
+    return row + detailRow;
+  }).join('');
 }
 
 // ── Notes ────────────────────────────────────────────────────────────────
@@ -3582,14 +3654,13 @@ function renderStatistics() {
   filtered.sort(function(a, b) { return b.total - a.total; });
   var tbody = document.getElementById('stats-summary-body');
   if (filtered.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="9" class="px-4 py-3 text-muted">No gateways selected.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="8" class="px-4 py-3 text-muted">No gateways selected.</td></tr>';
   } else {
     tbody.innerHTML = filtered.map(function(g) {
       var id = deriveGatewayIdentity(g.hostname || g.ip);
       var jitApproved = (g.total || 0) - (g.auto_approved || 0) - (g.blocked || 0) - (g.denied || 0);
       var autoPct = g.total > 0 ? Math.round(((g.auto_approved || 0) + jitApproved) / g.total * 100) : 0;
       return '<tr>' +
-        '<td>' + gwPill(g.hostname || g.ip) + '</td>' +
         '<td>' + escapeHtml(g.hostname || g.ip) + devBadge(g) + '</td>' +
         '<td class="text-muted font-mono">' + escapeHtml(g.ip) + '</td>' +
         '<td class="text-right font-semibold">' + (g.total || 0) + '</td>' +
@@ -3698,16 +3769,6 @@ async function checkGatewayHealth() {
   try {
     const res = await fetch('/api/gateways'); const data = await res.json();
     const now = Math.floor(Date.now() / 1000);
-    const staleCount = data.filter(function(g) { return (now - g.last_seen) > 120; }).length;
-    const noTokenCount = data.filter(function(g) { return !g.has_token; }).length;
-    const total = data.length;
-    const dot = document.getElementById('health-dot');
-    const pill = document.getElementById('health-pill');
-    if (!dot) return;
-    dot.classList.remove('green', 'orange', 'red');
-    if (staleCount === 0 && noTokenCount === 0) { dot.classList.add('green'); if (pill) pill.title = total + ' gateway(s) online — all healthy'; }
-    else if (staleCount <= 1 && noTokenCount <= 1) { dot.classList.add('orange'); if (pill) pill.title = (noTokenCount > 0 ? noTokenCount + ' gateway(s) missing API token. ' : '') + (staleCount > 0 ? staleCount + ' gateway offline. ' : '') + (total - staleCount) + ' online'; }
-    else { dot.classList.add('red'); if (pill) pill.title = (noTokenCount > 0 ? noTokenCount + ' gateway(s) missing API token. ' : '') + (staleCount + ' gateways offline — ') + (total - staleCount) + ' online'; }
     // Detect offline/online transitions for notifications
     var nextOffline = new Set();
     data.forEach(function(g) {
@@ -3722,12 +3783,6 @@ async function checkGatewayHealth() {
           var n = new Notification('Gateway Offline', { body: ip + ' has been unreachable for over 2 minutes', tag: 'eshu-offline', icon: '/static/eshu_logo.png' });
           n.onclick = function() { window.focus(); n.close(); };
         }
-      }
-    });
-    // Back online
-    _knownOfflineIps.forEach(function(ip) {
-      if (!nextOffline.has(ip)) {
-        /* gateway reconnected — could notify, but typically silent */
       }
     });
     _knownOfflineIps = nextOffline;

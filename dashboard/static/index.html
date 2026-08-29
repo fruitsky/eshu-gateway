@@ -112,10 +112,6 @@
       <span id="freeze-pill-dot" class="freeze-dot"></span>
       <span class="sidebar-status-text" id="freeze-pill-text">Freeze</span>
     </div>
-    <div class="sidebar-health" id="health-pill" title="Gateway health">
-      <div class="health-dot green" id="health-dot"></div>
-      <span class="sidebar-health-text">Gateway Health</span>
-    </div>
     <button class="nav-item" id="nav-settings" onclick="switchView('settings')">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h0a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
       <span>Settings</span>
@@ -436,7 +432,7 @@
       <div class="widget mt-5">
         <div class="widget-header">Gateway Summary</div>
         <div id="stats-gateway-filters" class="flex flex-wrap items-center gap-2 mb-4"></div>
-        <div class="table-wrap"><table><thead><tr><th></th><th>Gateway</th><th>IP</th><th class="text-right">Total</th><th class="text-right">Auto</th><th class="text-right">JIT</th><th class="text-right">Blocked</th><th class="text-right">Denied</th><th class="text-right">Auto %</th></tr></thead><tbody id="stats-summary-body"><tr><td colspan="9" class="px-4 py-3 text-muted">Loading...</td></tr></tbody></table></div>
+        <div class="table-wrap"><table><thead><tr><th>Gateway</th><th>IP</th><th class="text-right">Total</th><th class="text-right">Auto</th><th class="text-right">JIT</th><th class="text-right">Blocked</th><th class="text-right">Denied</th><th class="text-right">Auto %</th></tr></thead><tbody id="stats-summary-body"><tr><td colspan="8" class="px-4 py-3 text-muted">Loading...</td></tr></tbody></table></div>
       </div>
       <div class="widget mt-5">
         <div class="widget-header">Top 10 Commands</div>
@@ -806,8 +802,21 @@
     <div id="view-logs" class="hidden w-full">
       <div class="view-title" style="margin-bottom:16px">Audit Logs</div>
       <div class="widget">
-        <div class="widget-header">Audit Log <div class="flex items-center gap-2"><input type="text" id="audit-log-search" placeholder="Search..." class="text-xs w-40" oninput="onAuditLogSearch()"><span class="text-xs text-muted" id="audit-log-count">0 events</span><button onclick="fetchAuditLog()" class="btn btn-muted btn-xs">&#x21bb;</button></div></div>
-        <div id="audit-log-list" class="space-y-2 pr-1"><p class="text-muted">Loading...</p></div>
+        <div class="widget-header">
+          Audit Log
+          <div class="flex items-center gap-2">
+            <input type="text" id="audit-log-search" placeholder="Search..." class="text-xs w-40" oninput="onAuditLogSearch()">
+            <span class="text-xs text-muted" id="audit-log-count">0 events</span>
+            <button onclick="fetchAuditLog()" class="btn btn-muted btn-xs">&#x21bb;</button>
+          </div>
+        </div>
+        <div class="audit-filter-bar" id="audit-filter-bar"></div>
+        <div class="table-wrap">
+          <table class="audit-table">
+            <thead><tr><th style="width:26px"></th><th>Time</th><th>Event</th><th>Details</th><th>Gateway</th></tr></thead>
+            <tbody id="audit-log-body"><tr><td colspan="5" class="px-4 py-3 text-muted">Loading...</td></tr></tbody>
+          </table>
+        </div>
       </div>
     </div>
 
