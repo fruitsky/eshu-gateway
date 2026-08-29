@@ -2931,8 +2931,16 @@ function openRemoveGatewayModal(ip, hostname, isOnline) {
   const statusEl = document.getElementById('remove-gateway-status');
   statusEl.textContent = isOnline
     ? 'This gateway is currently online.'
-    : 'This gateway is currently offline — if it will not come back, use “Force remove from dashboard”.';
+    : 'This gateway is currently offline — if it will not come back, use "Force remove from dashboard".';
   statusEl.className = 'text-xs mb-3 ' + (isOnline ? 'text-success' : 'text-warning');
+  var confirmSection = document.getElementById('uninstall-confirm-section');
+  if (confirmSection) confirmSection.classList.remove('hidden');
+  var confirmInput = document.getElementById('uninstall-confirm-input');
+  if (confirmInput) { confirmInput.value = ''; confirmInput.placeholder = hostname; }
+  var confirmCheck = document.getElementById('uninstall-confirm-check');
+  if (confirmCheck) confirmCheck.checked = false;
+  var confirmBtn = document.getElementById('uninstall-confirm-btn');
+  if (confirmBtn) confirmBtn.disabled = true;
   document.getElementById('remove-gateway-modal').classList.remove('hidden');
 }
 
@@ -2940,6 +2948,25 @@ function closeRemoveGatewayModal() {
   document.getElementById('remove-gateway-modal').classList.add('hidden');
   _removeIp = null;
   _removeHostname = null;
+  var confirmSection = document.getElementById('uninstall-confirm-section');
+  if (confirmSection) confirmSection.classList.add('hidden');
+  var confirmBtn = document.getElementById('uninstall-confirm-btn');
+  if (confirmBtn) confirmBtn.disabled = true;
+}
+
+function validateUninstallConfirm() {
+  var check = document.getElementById('uninstall-confirm-check');
+  var input = document.getElementById('uninstall-confirm-input');
+  var btn = document.getElementById('uninstall-confirm-btn');
+  if (!check || !input || !btn) return;
+  var checked = check.checked;
+  var textMatch = input.value.trim() === (_removeHostname || '');
+  btn.disabled = !(checked && textMatch);
+  if (input.value && !textMatch) {
+    input.style.borderColor = 'var(--danger)';
+  } else {
+    input.style.borderColor = '';
+  }
 }
 
 async function confirmRemoteUninstall() {

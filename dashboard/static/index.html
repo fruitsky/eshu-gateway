@@ -911,11 +911,28 @@
 <div id="remove-gateway-modal" class="modal-overlay hidden">
   <div class="widget w-full max-w-md">
     <div class="widget-header">
-      <span>Remove Gateway</span>
+      <span>⚠️ Remove Gateway</span>
       <button onclick="closeRemoveGatewayModal()" class="modal-close">&times;</button>
     </div>
     <p id="remove-gateway-name" class="text-main font-semibold mb-2"></p>
     <p id="remove-gateway-status" class="text-xs mb-3 text-muted"></p>
+
+    <!-- Uninstall Confirmation (hidden by default) -->
+    <div id="uninstall-confirm-section" class="hidden">
+      <div class="panel mb-3" style="border-color: var(--danger); background: rgba(220,38,38,0.05);">
+        <p class="text-sm mb-2" style="color: var(--danger); font-weight: 600;">⚠️ This will permanently remove gateway control</p>
+        <p class="text-xs text-muted mb-3">The uninstall script will run on the remote host to remove all Eshu components. This action cannot be undone.</p>
+        <label class="flex items-center gap-2 cursor-pointer select-none text-xs text-muted mb-3">
+          <input type="checkbox" id="uninstall-confirm-check" onchange="validateUninstallConfirm()">
+          I understand this will permanently remove this gateway
+        </label>
+        <div class="mb-3">
+          <label class="text-xs text-muted mb-1 block">Type the gateway name to confirm:</label>
+          <input type="text" id="uninstall-confirm-input" class="uninstall-confirm-input" placeholder="" oninput="validateUninstallConfirm()">
+        </div>
+      </div>
+    </div>
+
     <div class="mb-3">
       <p class="text-sm mb-1"><strong>Uninstall remotely</strong></p>
       <p class="text-xs text-muted mb-3">Runs Eshu's uninstaller on the host and deregisters it. Requires the gateway to be online with its poller running.</p>
@@ -926,7 +943,7 @@
     <div class="flex justify-end gap-2">
       <button onclick="closeRemoveGatewayModal()" class="btn btn-muted btn-sm">Cancel</button>
       <button onclick="handleForceRemoveGateway(_removeIp, _removeHostname)" class="btn btn-danger btn-sm">Force remove from dashboard</button>
-      <button onclick="confirmRemoteUninstall()" class="btn btn-sm">Uninstall</button>
+      <button id="uninstall-confirm-btn" onclick="confirmRemoteUninstall()" class="btn btn-sm" disabled>Uninstall</button>
     </div>
   </div>
 </div>
