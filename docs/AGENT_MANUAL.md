@@ -32,6 +32,34 @@ The script runs the command through a multi-stage policy pipeline:
 
 If a command passes a stage, it executes immediately. The pipeline stops on first match.
 
+### Session & execution IDs (grouping)
+
+To let the operator group related commands into a single **Session** in the
+dashboard, prefix the command with `ESHU_SESSION_ID=<id>` (and optionally an
+`ESHU_EXECUTION_ID=<id>` for per-run drill-down):
+
+```bash
+ssh eshu-gateway@<host> "ESHU_SESSION_ID=cf0f09869854 <command>"
+```
+
+- The prefix is **stripped before policy evaluation** — it never changes how a
+  command is classified (whitelist / JIT / FATAL).
+- Keys coexist and can be combined in any order, including with a window token:
+
+  ```bash
+  ssh eshu-gateway@<host> "ESHU_WINDOW_TOKEN=<token> ESHU_SESSION_ID=<id> <command>"
+  ```
+
+- `<id>` is an opaque `[A-Za-z0-9_-]{1,64}` string. Send `ESHU_SESSION_ID=unknown`
+  for context-less runs (e.g. fire-and-forget cron watchdogs) — those tickets
+  are kept but left ungrouped.
+- Commands that share the same `ESHU_SESSION_ID` are grouped into one
+  collapsible Session in the operator's queue.
+
+> **Subagents / cron:** resolve the id client-side before invoking ssh — e.g.
+> `ESHU_SESSION_ID="${PARENT_CHAT_ID:-${CRON_ORIGIN_CHAT_ID:-unknown}}"` so a
+> subagent inherits its parent's session and cron jobs fall back to `unknown`.
+
 ---
 
 ## 2. Command lifecycle
