@@ -1440,11 +1440,22 @@ function detectNewIntegrationCalls() {
 }
 
 // ── JIT Ticket Rendering ─────────────────────────────────────────────────
+var GATEWAY_DISCONNECTED_AFTER = 60; // seconds without contact before a gateway is reported disconnected
+
+function emptyStateSignature() {
+  var now = Math.floor(Date.now() / 1000);
+  return (_gatewaysData || []).map(function(g){
+    var stale = (now - (g.last_seen || 0)) >= GATEWAY_DISCONNECTED_AFTER;
+    return (g.hostname || g.ip) + ':' + (stale ? '0' : '1');
+  }).sort().join('|');
+}
+
 function renderEmptyState() {
   var now = Math.floor(Date.now() / 1000);
   var gws = (_gatewaysData || []).filter(function(g){ return g.hostname || g.ip; });
-  var totalGws = gws.length;
-  var online = gws.filter(function(g){ return (now - (g.last_seen || 0)) < 30; }).length;
+  var enrolled = gws.length;
+  var disconnected = gws.filter(function(g){ return (now - (g.last_seen || 0)) >= GATEWAY_DISCONNECTED_AFTER; }).length;
+  var online = enrolled - disconnected;
 
   var nodeHtml = '';
   var n = Math.min(gws.length, 8);
@@ -1454,7 +1465,7 @@ function renderEmptyState() {
     var rad = angle * Math.PI / 180;
     var x = 50 + 40 * Math.cos(rad);
     var y = 50 + 40 * Math.sin(rad);
-    var isOnline = (now - (g.last_seen || 0)) < 30;
+    var isOnline = (now - (g.last_seen || 0)) < GATEWAY_DISCONNECTED_AFTER;
     var name = escapeHtml(g.hostname || g.ip || ('gw' + i));
     nodeHtml += '<div class="cc-radar-node' + (isOnline ? '' : ' off') + '" style="left:' + x.toFixed(1) + '%;top:' + y.toFixed(1) + '%"><span class="n-dot"></span><span class="n-name">' + name + '</span></div>';
   }
@@ -1471,15 +1482,20 @@ function renderEmptyState() {
     tickerHtml = '<div class="cc-ticker"><div class="cc-ticker-track">' + tickItems + tickItems + '</div></div>';
   }
 
+  var subParts = ['No commands waiting for approval'];
+  if (disconnected > 0) subParts.push(disconnected + ' disconnected');
+  if (lastAgo) subParts.push('last activity ' + lastAgo);
+  var headline = disconnected > 0 ? 'Fleet degraded' : 'Fleet at ease';
+
   return '<div class="cc-empty">' +
     '<div class="cc-radar">' +
       '<div class="cc-radar-ring r1"></div><div class="cc-radar-ring r2"></div><div class="cc-radar-ring r3"></div>' +
       '<div class="cc-radar-sweep"></div>' +
       nodeHtml +
-      '<div class="cc-radar-core"><div class="big">' + online + '/' + totalGws + '</div><div class="lbl">gateways online</div></div>' +
+      '<div class="cc-radar-core"><div class="big">' + online + '/' + enrolled + '</div><div class="lbl">gateways online</div></div>' +
     '</div>' +
-    '<div class="cc-empty-headline">Fleet at ease</div>' +
-    '<div class="cc-empty-sub">No commands waiting for approval' + (lastAgo ? ' · last activity ' + lastAgo : '') + '</div>' +
+    '<div class="cc-empty-headline">' + headline + '</div>' +
+    '<div class="cc-empty-sub">' + subParts.join(' · ') + '</div>' +
     tickerHtml +
   '</div>';
 }
@@ -1497,11 +1513,18 @@ function renderJitTickets() {
   var total = allItems.length;
   document.getElementById('jit-pending-count').textContent = total + ' pending';
   var widget = document.getElementById('jit-pending-widget');
-  if (total > 0) { widget.classList.add('glow'); } else { widget.classList.remove('glow'); }
+  if (total > 0) { widget.classList.add('glow'); widget.classList.remove('flat'); } else { widget.classList.remove('glow'); widget.classList.add('flat'); }
   document.body.dataset.state = total > 0 ? 'decision' : 'rest';
 
   var container = document.getElementById('jit-tickets');
-  if (total === 0) { container.innerHTML = renderEmptyState(); return; }
+  if (total === 0) {
+    var sig = emptyStateSignature();
+    if (container.dataset.sig === sig && container.firstElementChild) return;
+    container.dataset.sig = sig;
+    container.innerHTML = renderEmptyState();
+    return;
+  }
+  container.dataset.sig = '';
 
   var html = '';
   allItems.forEach(function(item) {

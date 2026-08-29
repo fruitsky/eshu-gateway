@@ -1433,6 +1433,10 @@ textarea { font-family: 'JetBrains Mono', monospace !important; }
   .cc-ticker-item .t { color: var(--text-muted); }
   .cc-ticker-item .tag { color: var(--accent); opacity: 0.8; }
 
+  /* borderless empty-state — integrate radar into the page background */
+  .widget.flat { background: transparent !important; border: none !important; box-shadow: none !important; padding: 0 !important; margin-bottom: 0 !important; }
+  .widget.flat .widget-header { display: none !important; }
+
   @keyframes cc-sweep { to { transform: rotate(360deg); } }
   @keyframes cc-breathe { 0%,100% { transform: scale(1); } 50% { transform: scale(1.02); } }
   @keyframes cc-ticker { to { transform: translateX(-50%); } }
