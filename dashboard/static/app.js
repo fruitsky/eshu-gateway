@@ -182,10 +182,13 @@ function toggleBulkSelect(reqId, ev) {
       }
     }
   } else {
+    var checkEl = (ev && ev.currentTarget) ? ev.currentTarget : null;
     if (_ccSelectedIds.has(reqId)) {
       _ccSelectedIds.delete(reqId);
+      if (checkEl) checkEl.classList.remove('checked');
     } else {
       _ccSelectedIds.add(reqId);
+      if (checkEl) checkEl.classList.add('checked');
     }
   }
   _ccLastClicked = reqId;
@@ -211,12 +214,20 @@ function clearSelection() {
 }
 
 function bulkApprove() {
-  _ccSelectedIds.forEach(function(id) { approveRequest(id); });
+  _ccSelectedIds.forEach(function(id) {
+    if (id.indexOf('int-') === 0) { approveIntegrationCall(id.slice(4)); }
+    else if (id.indexOf('win-') === 0) { approveWindowReq(id.slice(4)); }
+    else { handleAction(id, 'approve'); }
+  });
   clearSelection();
 }
 
 function bulkDeny() {
-  _ccSelectedIds.forEach(function(id) { denyRequest(id); });
+  _ccSelectedIds.forEach(function(id) {
+    if (id.indexOf('int-') === 0) { denyIntegrationCall(id.slice(4)); }
+    else if (id.indexOf('win-') === 0) { denyWindowReq(id.slice(4)); }
+    else { handleAction(id, 'deny'); }
+  });
   clearSelection();
 }
 
