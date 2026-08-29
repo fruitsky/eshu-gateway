@@ -48,7 +48,21 @@ function openContextPanel(reqId) {
   });
 
   // Find request data from the rendered tickets or fetch
-  var req = _lastRequests ? _lastRequests.find(function(r) { return r.id === reqId; }) : null;
+  var req = null;
+  // Check SSH requests
+  if (typeof requestsData !== 'undefined') {
+    req = requestsData.find(function(r) { return String(r.id) === String(reqId); });
+  }
+  // Check window requests
+  if (!req && typeof _pendingWinReqs !== 'undefined') {
+    req = _pendingWinReqs.find(function(w) { return 'win-' + w.id === reqId; });
+    if (req) req._type = 'window';
+  }
+  // Check integration calls
+  if (!req && typeof _pendingIntegrationCalls !== 'undefined') {
+    req = _pendingIntegrationCalls.find(function(c) { return 'int-' + c.id === reqId; });
+    if (req) req._type = 'integration';
+  }
   if (!req) {
     empty.classList.remove('hidden');
     content.classList.add('hidden');
@@ -58,11 +72,25 @@ function openContextPanel(reqId) {
   empty.classList.add('hidden');
   content.classList.remove('hidden');
 
-  document.getElementById('ctx-cmd').textContent = req.command || '';
-  document.getElementById('ctx-human').textContent = req.requested_by || req.agent_id || 'Unknown';
-  document.getElementById('ctx-target').innerHTML =
-    '<span class="ctx-meta-item">Host: ' + (req.hostname || req.target_ip || '—') + '</span>' +
-    '<span class="ctx-meta-item">Gateway: ' + (req.gateway_ip || '—') + '</span>';
+  // Display different fields based on request type
+  if (req._type === 'integration') {
+    document.getElementById('ctx-cmd').textContent = req.integration + ' / ' + req.tool;
+    document.getElementById('ctx-human').textContent = req.reason || 'Integration call';
+    document.getElementById('ctx-target').innerHTML =
+      '<span class="ctx-meta-item">Integration: ' + escapeHtml(req.integration) + '</span>';
+  } else if (req._type === 'window') {
+    document.getElementById('ctx-cmd').textContent = req.command || '';
+    document.getElementById('ctx-human').textContent = 'Window request';
+    document.getElementById('ctx-target').innerHTML =
+      '<span class="ctx-meta-item">Target: ' + escapeHtml(req.target_ip || '—') + '</span>' +
+      (req.label ? '<span class="ctx-meta-item">Label: ' + escapeHtml(req.label) + '</span>' : '');
+  } else {
+    document.getElementById('ctx-cmd').textContent = req.command || '';
+    document.getElementById('ctx-human').textContent = req.requested_by || req.agent_id || 'Unknown';
+    document.getElementById('ctx-target').innerHTML =
+      '<span class="ctx-meta-item">Host: ' + escapeHtml(req.hostname || req.target_ip || '—') + '</span>' +
+      '<span class="ctx-meta-item">Gateway: ' + escapeHtml(req.gateway_ip || '—') + '</span>';
+  }
   document.getElementById('ctx-status').textContent = req.status || '—';
   document.getElementById('ctx-time').textContent = req.timestamp ? new Date(req.timestamp).toLocaleString() : '—';
 
@@ -70,10 +98,10 @@ function openContextPanel(reqId) {
   var riskEl = document.getElementById('ctx-risk');
   if (req.risk_hint || req.anomaly_flags) {
     var html = '';
-    if (req.risk_hint) html += '<div class="ctx-meta-item" style="color:var(--status-warning);margin-bottom:4px">⚠ ' + esc(req.risk_hint) + '</div>';
+    if (req.risk_hint) html += '<div class="ctx-meta-item" style="color:var(--status-warning);margin-bottom:4px">⚠ ' + escapeHtml(req.risk_hint) + '</div>';
     if (req.anomaly_flags && req.anomaly_flags.length) {
       req.anomaly_flags.forEach(function(f) {
-        html += '<div class="ctx-meta-item" style="color:var(--danger)">⚡ ' + esc(f) + '</div>';
+        html += '<div class="ctx-meta-item" style="color:var(--danger)">⚡ ' + escapeHtml(f) + '</div>';
       });
     }
     riskEl.innerHTML = html;
@@ -84,9 +112,15 @@ function openContextPanel(reqId) {
   // Action buttons
   var actionsEl = document.getElementById('ctx-actions');
   var actionsHtml = '';
-  if (req.status === 'pending') {
-    actionsHtml = '<button onclick="approveRequest(\'' + req.id + '\')" class="btn btn-approve btn-sm" style="flex:1">Approve</button>' +
-      '<button onclick="denyRequest(\'' + req.id + '\')" class="btn btn-deny btn-sm" style="flex:1">Deny</button>';
+  if (req.status === 'pending' || !req._type) {
+    actionsHtml = '<button onclick="handleAction(\'' + req.id + '\',\'approve\')" class="btn btn-approve btn-sm" style="flex:1">Approve</button>' +
+      '<button onclick="handleAction(\'' + req.id + '\',\'deny\')" class="btn btn-deny btn-sm" style="flex:1">Deny</button>';
+  } else if (req._type === 'window') {
+    actionsHtml = '<button onclick="approveWindowReq(' + req.id + ')" class="btn btn-approve btn-sm" style="flex:1">Approve</button>' +
+      '<button onclick="denyWindowReq(' + req.id + ')" class="btn btn-deny btn-sm" style="flex:1">Deny</button>';
+  } else if (req._type === 'integration') {
+    actionsHtml = '<button onclick="approveIntegrationCall(' + req.id + ')" class="btn btn-approve btn-sm" style="flex:1">Approve</button>' +
+      '<button onclick="denyIntegrationCall(' + req.id + ')" class="btn btn-deny btn-sm" style="flex:1">Deny</button>';
   } else {
     actionsHtml = '<button onclick="closeContextPanel()" class="btn btn-muted btn-sm" style="flex:1">Close</button>';
   }
@@ -1398,76 +1432,90 @@ function detectNewIntegrationCalls() {
 
 // ── JIT Ticket Rendering ─────────────────────────────────────────────────
 function renderJitTickets() {
-  const pending = requestsData.filter(r => r.status === 'pending' && r.ttl > 0);
-  const winReqs = _pendingWinReqs || [];
-  const integrationCalls = _pendingIntegrationCalls || [];
-  const total = pending.length + winReqs.length + integrationCalls.length;
+  var pending = requestsData.filter(function(r) { return r.status === 'pending' && r.ttl > 0; });
+  var winReqs = _pendingWinReqs || [];
+  var integrationCalls = _pendingIntegrationCalls || [];
+  var allItems = [];
+
+  integrationCalls.forEach(function(c) { allItems.push({ type: 'integration', data: c }); });
+  winReqs.forEach(function(w) { allItems.push({ type: 'window', data: w }); });
+  pending.forEach(function(r) { allItems.push({ type: 'ssh', data: r }); });
+
+  var total = allItems.length;
   document.getElementById('jit-pending-count').textContent = total + ' pending';
-  const widget = document.getElementById('jit-pending-widget');
+  var widget = document.getElementById('jit-pending-widget');
   if (total > 0) { widget.classList.add('glow'); } else { widget.classList.remove('glow'); }
-  const container = document.getElementById('jit-tickets');
-  if (total === 0) { container.innerHTML = '<p class="text-muted">No pending requests — all clear.</p>'; return; }
 
-  let html = '';
-  // Integration (API) calls awaiting operator approval
-  html += integrationCalls.map(function(c) {
-    var args = Object.keys(c.payload || {}).map(function(k) { return k + '=' + c.payload[k]; }).join(', ');
-    var meta = '#' + String(c.id).padStart(6,'0') + ' · API call · ' + (args ? escapeHtml(args) : 'no args');
-    if (c.reason) meta += ' · "' + escapeHtml(c.reason) + '"';
-    return '<div class="jit-ticket">' +
-      '<div class="jit-ticket-left">' +
-        '<div class="jit-ticket-info">' +
-          '<div class="jit-cmd">' + escapeHtml(c.integration) + ' · ' + escapeHtml(c.tool) + '</div>' +
-          '<div class="jit-meta">' + meta + '</div>' +
-        '</div>' +
-      '</div>' +
-      '<div class="jit-actions">' +
-        '<button onclick="denyIntegrationCall(' + c.id + ')" class="btn btn-deny btn-sm">DENY</button>' +
-        '<button onclick="approveIntegrationCall(' + c.id + ')" class="btn btn-approve btn-sm">APPROVE</button>' +
-      '</div>' +
-    '</div>';
-  }).join('');
+  var container = document.getElementById('jit-tickets');
+  if (total === 0) { container.innerHTML = '<p class="text-muted" style="padding:20px;text-align:center">No pending requests \u2014 all clear.</p>'; return; }
 
-  // Window requests (AI-initiated, operator must approve)
-  html += winReqs.map(function(w) {
-    return '<div class="jit-ticket">' +
-      '<div class="jit-ticket-left">' +
-        '<div class="jit-ticket-info">' +
-          '<div class="jit-cmd">' + escapeHtml(w.command) + '</div>' +
-          '<div class="jit-meta">#' + String(w.id).padStart(6,'0') + ' · Window request · ' + escapeHtml(w.target_ip) +
-            (w.label ? ' · ' + escapeHtml(w.label) : '') +
-            ' · ' + formatWinSchedule(w) + '</div>' +
+  var html = '';
+  allItems.forEach(function(item) {
+    if (item.type === 'integration') {
+      var c = item.data;
+      var args = Object.keys(c.payload || {}).map(function(k) { return k + '=' + c.payload[k]; }).join(', ');
+      html += '<div class="jit-ticket" data-id="int-' + c.id + '" onclick="openContextPanel(\'int-' + c.id + '\')">' +
+        '<div class="jit-check" onclick="event.stopPropagation();toggleBulkSelect(\'int-' + c.id + '\',event)"></div>' +
+        '<div style="flex:1;min-width:0">' +
+          '<div class="jit-human">' + escapeHtml(c.integration) + ' / ' + escapeHtml(c.tool) + '</div>' +
+          '<div class="jit-cmd-text">' + escapeHtml(c.integration) + ' ' + escapeHtml(c.tool) + (args ? '(' + escapeHtml(args) + ')' : '') + '</div>' +
+          '<div class="jit-meta">' +
+            '<span class="jit-meta-item">#' + String(c.id).padStart(6,'0') + '</span>' +
+            '<span class="jit-meta-item">API call</span>' +
+            (c.reason ? '<span class="jit-meta-item">\u201c' + escapeHtml(c.reason) + '\u201d</span>' : '') +
+          '</div>' +
         '</div>' +
-      '</div>' +
-      '<div class="jit-actions">' +
-        '<button onclick="denyWindowReq(' + w.id + ')" class="btn btn-deny btn-sm">DENY</button>' +
-        '<button onclick="approveWindowReq(' + w.id + ')" class="btn btn-approve btn-sm">APPROVE</button>' +
-      '</div>' +
-    '</div>';
-  }).join('');
-
-  html += pending.map(function(r) {
-    const id = deriveGatewayIdentity(r.hostname || '');
-    return '<div class="jit-ticket">' +
-      '<div class="jit-ticket-left">' +
-        '<div class="jit-ticket-icon">⚠</div>' +
-        '<div class="jit-ticket-info">' +
-          '<div class="jit-cmd">' + escapeHtml(r.command) + '</div>' +
-          (describeCmd(r.command) ? '<div class="jit-desc">' + escapeHtml(describeCmd(r.command)) + '</div>' : '') +
-          '<div class="jit-meta">#' + String(r.id).padStart(6,'0') + ' · ' + gwPill(r.hostname||'N/A') + ' ' + escapeHtml(r.hostname||'N/A') + ' (' + escapeHtml(r.target_ip) + ')</div>' +
-          '<div class="jit-ttl"><span class="ttl-countdown" data-ttl="' + r.ttl + '">' + r.ttl + 's</span> remaining</div>' +
-          (r.anomaly ? '<div class="jit-anomaly">🆕 ' + escapeHtml(r.anomaly) + '</div>' : '') +
+        '<div class="jit-actions">' +
+          '<button onclick="event.stopPropagation();denyIntegrationCall(' + c.id + ')" class="btn btn-deny btn-xs">Deny</button>' +
+          '<button onclick="event.stopPropagation();approveIntegrationCall(' + c.id + ')" class="btn btn-approve btn-xs">Approve</button>' +
         '</div>' +
-      '</div>' +
-      '<div class="jit-actions">' +
-        '<button onclick="handleAction(' + r.id + ',\'deny\')" class="btn btn-deny btn-sm">DENY</button>' +
-        '<button onclick="handleAction(' + r.id + ',\'approve\')" class="btn btn-approve btn-sm">APPROVE</button>' +
-      '</div>' +
-    '</div>';
-  }).join('');
+      '</div>';
+    } else if (item.type === 'window') {
+      var w = item.data;
+      html += '<div class="jit-ticket" data-id="win-' + w.id + '" onclick="openContextPanel(\'win-' + w.id + '\')">' +
+        '<div class="jit-check" onclick="event.stopPropagation();toggleBulkSelect(\'win-' + w.id + '\',event)"></div>' +
+        '<div style="flex:1;min-width:0">' +
+          '<div class="jit-human">Window request</div>' +
+          '<div class="jit-cmd-text">' + escapeHtml(w.command) + '</div>' +
+          '<div class="jit-meta">' +
+            '<span class="jit-meta-item">#' + String(w.id).padStart(6,'0') + '</span>' +
+            '<span class="jit-meta-item">' + escapeHtml(w.target_ip) + '</span>' +
+            (w.label ? '<span class="jit-meta-item">' + escapeHtml(w.label) + '</span>' : '') +
+            '<span class="jit-meta-item">' + formatWinSchedule(w) + '</span>' +
+          '</div>' +
+        '</div>' +
+        '<div class="jit-actions">' +
+          '<button onclick="event.stopPropagation();denyWindowReq(' + w.id + ')" class="btn btn-deny btn-xs">Deny</button>' +
+          '<button onclick="event.stopPropagation();approveWindowReq(' + w.id + ')" class="btn btn-approve btn-xs">Approve</button>' +
+        '</div>' +
+      '</div>';
+    } else {
+      var r = item.data;
+      var riskHtml = '';
+      if (r.anomaly) riskHtml = '<div style="color:var(--status-warning);font-size:10px;margin-top:4px">\u26a0 ' + escapeHtml(r.anomaly) + '</div>';
+      html += '<div class="jit-ticket' + (r.anomaly ? ' urgent' : '') + '" data-id="' + r.id + '" onclick="openContextPanel(\'' + r.id + '\')">' +
+        '<div class="jit-check" onclick="event.stopPropagation();toggleBulkSelect(\'' + r.id + '\',event)"></div>' +
+        '<div style="flex:1;min-width:0">' +
+          '<div class="jit-human">' + escapeHtml(r.requested_by || r.agent_id || 'Unknown') + '</div>' +
+          '<div class="jit-cmd-text">' + escapeHtml(r.command) + '</div>' +
+          (describeCmd(r.command) ? '<div style="font-size:11px;color:var(--text-muted);margin-bottom:4px">' + escapeHtml(describeCmd(r.command)) + '</div>' : '') +
+          '<div class="jit-meta">' +
+            '<span class="jit-meta-item">#' + String(r.id).padStart(6,'0') + '</span>' +
+            '<span class="jit-meta-item">' + gwPill(r.hostname||'N/A') + ' ' + escapeHtml(r.hostname||'N/A') + '</span>' +
+            '<span class="jit-meta-item">' + escapeHtml(r.target_ip) + '</span>' +
+            '<span class="jit-ttl"><span class="ttl-countdown" data-ttl="' + r.ttl + '">' + r.ttl + 's</span></span>' +
+          '</div>' +
+          riskHtml +
+        '</div>' +
+        '<div class="jit-actions">' +
+          '<button onclick="event.stopPropagation();handleAction(' + r.id + ',\'deny\')" class="btn btn-deny btn-xs">Deny</button>' +
+          '<button onclick="event.stopPropagation();handleAction(' + r.id + ',\'approve\')" class="btn btn-approve btn-xs">Approve</button>' +
+        '</div>' +
+      '</div>';
+    }
+  });
   container.innerHTML = html;
 }
-
 async function approveWindowReq(id) {
   try {
     const r = await authFetch('/api/window-requests/' + id + '/approve', { method: 'POST' });
