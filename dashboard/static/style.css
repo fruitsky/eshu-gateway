@@ -845,6 +845,48 @@ tbody tr:nth-child(even) { background: rgba(245,158,11,0.02) !important; }
 .btn-approve:hover { background: rgba(245,158,11,0.25) !important; box-shadow: 0 0 12px var(--accent-glow) !important; }
 .btn-primary { background: var(--accent) !important; color: var(--bg-base) !important; }
 .btn-primary:hover { background: var(--accent-hover) !important; box-shadow: 0 0 12px var(--accent-glow) !important; }
+
+/* Modals */
+.modal-overlay { background: rgba(15,13,10,0.9) !important; backdrop-filter: blur(4px); }
+.modal-card, .modal-content { background: var(--bg-surface) !important; border: 1px solid var(--border-color) !important; border-radius: 8px !important; box-shadow: 0 8px 32px rgba(0,0,0,0.5) !important; }
+.modal-header { font-family: 'JetBrains Mono', monospace !important; text-transform: uppercase !important; letter-spacing: 1px !important; }
+
+/* Forms */
+input[type="text"], input[type="password"], input[type="date"], input[type="time"], input[type="number"], textarea, select {
+  border-radius: 4px !important;
+  border-color: var(--border-color) !important;
+  font-family: 'JetBrains Mono', monospace !important;
+  font-size: 12px !important;
+}
+input:focus, textarea:focus, select:focus {
+  border-color: var(--accent) !important;
+  box-shadow: 0 0 0 3px var(--focus-ring) !important;
+}
+textarea { font-family: 'JetBrains Mono', monospace !important; }
+
+/* Login */
+.login-card { border-radius: 8px !important; border-color: var(--border-color) !important; background: var(--bg-surface) !important; }
+.login-card h1 { font-family: 'JetBrains Mono', monospace !important; text-transform: uppercase !important; letter-spacing: 1px !important; }
+
+/* Toast */
+.toast-success { background: #92400e !important; color: #fbbf24 !important; }
+.toast-error { background: #7f1d1d !important; color: #fca5a5 !important; }
+
+/* Dropdown */
+.dropdown-menu { background: var(--bg-surface) !important; border: 1px solid var(--border-color) !important; border-radius: 6px !important; }
+.dropdown-item { font-family: 'JetBrains Mono', monospace !important; font-size: 11px !important; }
+
+/* Gateway Pill */
+.gw-pill { font-family: 'JetBrains Mono', monospace !important; font-size: 8px !important; letter-spacing: 0.5px !important; }
+
+/* Policy chips */
+.policy-chip { font-family: 'JetBrains Mono', monospace !important; font-size: 11px !important; border-radius: 4px !important; }
+.policy-add-input { font-family: 'JetBrains Mono', monospace !important; font-size: 11px !important; border-radius: 4px !important; }
+
+/* Uninstall modal specific */
+.uninstall-warning { color: var(--danger); font-weight: 600; }
+.uninstall-confirm-input { border-color: var(--danger) !important; }
+.uninstall-confirm-input:focus { border-color: var(--danger) !important; box-shadow: 0 0 0 3px rgba(220,38,38,0.3) !important; }
 .hidden { display: none !important; }
   .block { display: block; }
   .inline-flex { display: inline-flex; }
