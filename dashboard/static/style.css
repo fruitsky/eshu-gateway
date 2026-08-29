@@ -1515,6 +1515,57 @@ textarea { font-family: 'JetBrains Mono', monospace !important; }
   .jit-history-cmd { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .jit-history-time { flex-shrink: 0; font-size: 9px; opacity: 0.8; }
 
+  /* ── Radar node flash (auto-approved / blocked) ──────────── */
+  .cc-radar-node { transition: filter 0.15s, transform 0.15s; }
+  .cc-radar-node.flash-auto {
+    filter: brightness(3) drop-shadow(0 0 14px rgba(245,158,11,0.9));
+    transform: translate(-50%, -50%) scale(1.6);
+    animation: cc-node-flash-auto 1.2s ease forwards;
+  }
+  .cc-radar-node.flash-blocked {
+    filter: brightness(3) drop-shadow(0 0 14px rgba(220,38,38,0.9));
+    transform: translate(-50%, -50%) scale(1.6);
+    animation: cc-node-flash-blocked 1.2s ease forwards;
+  }
+  @keyframes cc-node-flash-auto {
+    0% { filter: brightness(3) drop-shadow(0 0 14px rgba(245,158,11,0.9)); transform: translate(-50%,-50%) scale(1.6); }
+    100% { filter: brightness(1) drop-shadow(0 0 0 transparent); transform: translate(-50%,-50%) scale(1); }
+  }
+  @keyframes cc-node-flash-blocked {
+    0% { filter: brightness(3) drop-shadow(0 0 14px rgba(220,38,38,0.9)); transform: translate(-50%,-50%) scale(1.6); }
+    50% { filter: brightness(2) drop-shadow(0 0 8px rgba(220,38,38,0.5)); transform: translate(-50%,-50%) scale(1.2); }
+    100% { filter: brightness(1) drop-shadow(0 0 0 transparent); transform: translate(-50%,-50%) scale(1); }
+  }
+
+  /* ── Recent Sessions panel (below radar) ─────────────────── */
+  .cc-recent-sessions { width: 100%; max-width: 560px; margin-top: 8px; }
+  .cc-recent-sessions-header { font-family: 'JetBrains Mono', monospace; font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 2px; color: var(--text-muted); margin-bottom: 10px; text-align: center; }
+  .cc-recent-sessions-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 8px; max-height: 200px; overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--border-color) transparent; }
+  .recent-session-card { background: var(--bg-surface); border: 1px solid var(--border-color); border-radius: var(--radius); padding: 10px 12px; cursor: pointer; transition: border-color 0.15s, box-shadow 0.15s; }
+  .recent-session-card:hover { border-color: rgba(245,158,11,0.4); box-shadow: 0 0 12px var(--accent-glow); }
+  .rs-header { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+  .rs-name { font-family: 'JetBrains Mono', monospace; font-size: 11px; font-weight: 700; color: var(--accent); }
+  .rs-host { font-family: 'JetBrains Mono', monospace; font-size: 9px; color: var(--text-muted); background: var(--bg-base); padding: 1px 6px; border-radius: 3px; }
+  .rs-ago { margin-left: auto; font-family: 'JetBrains Mono', monospace; font-size: 9px; color: var(--text-muted); }
+  .rs-desc { font-family: 'Space Grotesk', sans-serif; font-size: 11px; color: var(--text-muted); margin-bottom: 4px; line-height: 1.3; }
+  .rs-cmd { font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--fg-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-bottom: 4px; }
+  .rs-footer { display: flex; align-items: center; justify-content: space-between; }
+  .rs-count { font-family: 'JetBrains Mono', monospace; font-size: 9px; color: var(--text-muted); }
+  .rs-edit-btn { font-family: 'JetBrains Mono', monospace; font-size: 9px; color: var(--text-muted); background: none; border: 1px solid var(--border-color); border-radius: 3px; padding: 2px 6px; cursor: pointer; transition: color 0.15s, border-color 0.15s; }
+  .rs-edit-btn:hover { color: var(--accent); border-color: rgba(245,158,11,0.4); }
+
+  /* Session name button in JIT session header */
+  .jit-session-name-btn { font-family: 'JetBrains Mono', monospace; font-size: 9px; color: var(--text-muted); background: none; border: 1px solid var(--border-color); border-radius: 3px; padding: 2px 6px; cursor: pointer; margin-left: auto; transition: color 0.15s, border-color 0.15s; flex-shrink: 0; }
+  .jit-session-name-btn:hover { color: var(--accent); border-color: rgba(245,158,11,0.4); }
+  .jit-session-desc { font-family: 'Space Grotesk', sans-serif; font-size: 10px; color: var(--text-muted); opacity: 0.8; flex-shrink: 0; }
+
+  /* Session highlight (jump-to animation) */
+  .jit-session.highlight { animation: cc-session-highlight 2s ease; }
+  @keyframes cc-session-highlight {
+    0% { box-shadow: 0 0 0 2px rgba(245,158,11,0.8); }
+    100% { box-shadow: 0 0 0 0 transparent; }
+  }
+
   @keyframes cc-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
   @keyframes cc-bar-grow { from { transform: scaleX(0); } to { transform: scaleX(1); } }
   @keyframes cc-glitch {

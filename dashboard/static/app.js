@@ -1421,6 +1421,16 @@ function detectNewJITs(newData) {
       if (badge) { badge.classList.remove('hidden'); setTimeout(function() { badge.classList.add('hidden'); }, 5000); }
     }
   }
+  // Detect new auto-approved commands → radar flash + sound
+  var autoData = newData.filter(function(r) { return r.status === 'auto-approved'; });
+  var newAuto = autoData.filter(function(r) { return !_knownAutoIds.has(r.id); });
+  autoData.forEach(function(r) { _knownAutoIds.add(r.id); });
+  if (newAuto.length > 0) {
+    var lastAuto = newAuto[newAuto.length - 1];
+    flashRadarNode(lastAuto.target_ip || lastAuto.hostname, 'auto');
+    playAutoChime();
+  }
+
   // Check for new blocked commands (notifications when enabled)
   if (notifyBlocked) {
     var blockedData = newData.filter(function(r) { return r.status === 'blocked'; });
@@ -1439,6 +1449,15 @@ function detectNewJITs(newData) {
         }
       }
     }
+  }
+  // Detect new blocked commands → radar flash + sound (always, regardless of notify toggle)
+  var allBlocked = newData.filter(function(r) { return r.status === 'blocked'; });
+  var newBlockedFlash = allBlocked.filter(function(r) { return !_knownBlockedFlashIds.has(r.id); });
+  newBlockedFlash.forEach(function(r) { _knownBlockedFlashIds.add(r.id); });
+  if (newBlockedFlash.length > 0) {
+    var lastB = newBlockedFlash[newBlockedFlash.length - 1];
+    flashRadarNode(lastB.target_ip || lastB.hostname, 'blocked');
+    playBlockedChime();
   }
 }
 
@@ -1491,10 +1510,34 @@ var GATEWAY_DISCONNECTED_AFTER = 60; // seconds without contact before a gateway
 
 function emptyStateSignature() {
   var now = Math.floor(Date.now() / 1000);
-  return (_gatewaysData || []).map(function(g){
+  var gwSig = (_gatewaysData || []).map(function(g){
     var stale = (now - (g.last_seen || 0)) >= GATEWAY_DISCONNECTED_AFTER;
     return (g.hostname || g.ip) + ':' + (stale ? '0' : '1');
   }).sort().join('|');
+  // Include session count so recent sessions panel re-renders
+  var sessionCount = 0;
+  (requestsData || []).forEach(function(r) { if (r.session_id && r.session_id !== 'unknown') sessionCount++; });
+  return gwSig + '@' + sessionCount;
+}
+
+// Distribute n gateways across concentric radar rings. Ring capacity grows
+// with radius (inner ring holds fewer, outer rings hold more) so nodes never
+// crowd. Returns [{ f: radiusFraction, count }].
+function radarRings(n) {
+  var rings = [];
+  var placed = 0, i = 0;
+  while (placed < n) {
+    var cap = 8 + i * 6;
+    var count = Math.min(cap, n - placed);
+    rings.push({ count: count });
+    placed += count;
+    i++;
+  }
+  var numRings = rings.length;
+  rings.forEach(function(ring, idx) {
+    ring.f = numRings === 1 ? 0.55 : 0.34 + (idx / (numRings - 1)) * (0.80 - 0.34);
+  });
+  return rings;
 }
 
 function renderEmptyState() {
@@ -1504,18 +1547,27 @@ function renderEmptyState() {
   var disconnected = gws.filter(function(g){ return (now - (g.last_seen || 0)) >= GATEWAY_DISCONNECTED_AFTER; }).length;
   var online = enrolled - disconnected;
 
+  var rings = radarRings(enrolled);
+  var radarSize = rings.length <= 1 ? 260 : rings.length === 2 ? 320 : rings.length === 3 ? 380 : 440;
   var nodeHtml = '';
-  var n = Math.min(gws.length, 8);
-  for (var i = 0; i < n; i++) {
-    var g = gws[i];
-    var angle = (360 / n) * i - 90;
-    var rad = angle * Math.PI / 180;
-    var x = 50 + 40 * Math.cos(rad);
-    var y = 50 + 40 * Math.sin(rad);
-    var isOnline = (now - (g.last_seen || 0)) < GATEWAY_DISCONNECTED_AFTER;
-    var name = escapeHtml(g.hostname || g.ip || ('gw' + i));
-    nodeHtml += '<div class="cc-radar-node' + (isOnline ? '' : ' off') + '" style="left:' + x.toFixed(1) + '%;top:' + y.toFixed(1) + '%"><span class="n-dot"></span><span class="n-name">' + name + '</span></div>';
-  }
+  var ringHtml = '';
+  var gi = 0;
+  rings.forEach(function(ring, ri) {
+    ringHtml += '<div class="cc-radar-ring" style="inset:' + (50 - 50 * ring.f).toFixed(1) + '%;border-color:rgba(245,158,11,' + (0.14 - ri * 0.03).toFixed(2) + ')"></div>';
+    var isOuter = ri === rings.length - 1;
+    for (var j = 0; j < ring.count; j++) {
+      var g = gws[gi++];
+      if (!g) break;
+      var angle = (360 / ring.count) * j - 90;
+      var rad = angle * Math.PI / 180;
+      var x = 50 + 50 * ring.f * Math.cos(rad);
+      var y = 50 + 50 * ring.f * Math.sin(rad);
+      var isOnline = (now - (g.last_seen || 0)) < GATEWAY_DISCONNECTED_AFTER;
+      var name = escapeHtml(g.hostname || g.ip || ('gw' + j));
+      var label = isOuter ? '<span class="n-name">' + name + '</span>' : '';
+      nodeHtml += '<div class="cc-radar-node' + (isOnline ? '' : ' off') + '" style="left:' + x.toFixed(1) + '%;top:' + y.toFixed(1) + '%" title="' + name + '"><span class="n-dot"></span>' + label + '</div>';
+    }
+  });
 
   var recent = (requestsData || []).find(function(r){ return r.created_at; });
   var lastAgo = recent ? formatAgo(now - recent.created_at) : '';
@@ -1534,9 +1586,12 @@ function renderEmptyState() {
   if (lastAgo) subParts.push('last activity ' + lastAgo);
   var headline = disconnected > 0 ? 'Fleet degraded' : 'Fleet at ease';
 
+  // Recent sessions panel (below radar)
+  var sessionsHtml = renderRecentSessions();
+
   return '<div class="cc-empty">' +
-    '<div class="cc-radar">' +
-      '<div class="cc-radar-ring r1"></div><div class="cc-radar-ring r2"></div><div class="cc-radar-ring r3"></div>' +
+    '<div class="cc-radar" style="width:' + radarSize + 'px;height:' + radarSize + 'px">' +
+      ringHtml +
       '<div class="cc-radar-sweep"></div>' +
       nodeHtml +
       '<div class="cc-radar-core"><div class="big">' + online + '/' + enrolled + '</div><div class="lbl">gateways online</div></div>' +
@@ -1544,6 +1599,7 @@ function renderEmptyState() {
     '<div class="cc-empty-headline">' + headline + '</div>' +
     '<div class="cc-empty-sub">' + subParts.join(' · ') + '</div>' +
     tickerHtml +
+    sessionsHtml +
   '</div>';
 }
 
@@ -1569,6 +1625,82 @@ function renderFleetStrip() {
   strip.innerHTML = '<span class="fleet-label">Fleet</span>' + chips + (gws.length === 0 ? '<span class="fleet-label" style="opacity:0.5">no gateways</span>' : '');
 }
 
+// ── Recent Sessions panel (below radar in empty state) ─────────────────
+function renderRecentSessions() {
+  var sessionMap = {};
+  (requestsData || []).forEach(function(r) {
+    var sid = r.session_id;
+    if (!sid || sid === 'unknown') return;
+    if (!sessionMap[sid]) sessionMap[sid] = { id: sid, requests: [], latest: 0 };
+    sessionMap[sid].requests.push(r);
+    if (r.created_at > sessionMap[sid].latest) sessionMap[sid].latest = r.created_at;
+  });
+  var sessions = Object.values(sessionMap);
+  if (sessions.length === 0) return '';
+  sessions.sort(function(a, b) { return b.latest - a.latest; });
+  sessions = sessions.slice(0, 6);
+
+  var names = JSON.parse(localStorage.getItem('eshu_session_names') || '{}');
+  var now = Math.floor(Date.now() / 1000);
+
+  var cards = sessions.map(function(s) {
+    var meta = names[s.id] || {};
+    var displayName = meta.name || s.id.substring(0, 8);
+    var desc = meta.description || '';
+    var host = s.requests[0] ? (s.requests[0].hostname || s.requests[0].target_ip || '') : '';
+    var lastCmd = s.requests[s.requests.length - 1];
+    var cmdPreview = lastCmd ? escapeHtml(String(lastCmd.command || '').substring(0, 50)) : '';
+    var ago = formatAgo(now - s.latest);
+    var count = s.requests.length;
+
+    return '<div class="recent-session-card" onclick="jumpToSession(\'' + escapeHtml(s.id) + '\')">' +
+      '<div class="rs-header">' +
+        '<span class="rs-name">' + escapeHtml(displayName) + '</span>' +
+        '<span class="rs-host">' + escapeHtml(host) + '</span>' +
+        '<span class="rs-ago">' + ago + '</span>' +
+      '</div>' +
+      (desc ? '<div class="rs-desc">' + escapeHtml(desc) + '</div>' : '') +
+      '<div class="rs-cmd">' + cmdPreview + '</div>' +
+      '<div class="rs-footer">' +
+        '<span class="rs-count">' + count + ' command' + (count > 1 ? 's' : '') + '</span>' +
+        '<button class="rs-edit-btn" onclick="event.stopPropagation();editSessionName(\'' + escapeHtml(s.id) + '\')" title="Name this session">Name</button>' +
+      '</div>' +
+    '</div>';
+  }).join('');
+
+  return '<div class="cc-recent-sessions">' +
+    '<div class="cc-recent-sessions-header">Recent Sessions</div>' +
+    '<div class="cc-recent-sessions-grid">' + cards + '</div>' +
+  '</div>';
+}
+
+function jumpToSession(sid) {
+  var el = document.querySelector('.jit-session[data-sid="' + sid + '"]');
+  if (el) {
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    el.classList.add('highlight');
+    setTimeout(function() { el.classList.remove('highlight'); }, 2000);
+  } else {
+    switchView('home');
+  }
+}
+
+function editSessionName(sid) {
+  var names = JSON.parse(localStorage.getItem('eshu_session_names') || '{}');
+  var meta = names[sid] || {};
+  var currentName = meta.name || '';
+  var currentDesc = meta.description || '';
+  var newName = prompt('Session name (max 40 chars):', currentName);
+  if (newName === null) return;
+  newName = newName.substring(0, 40).trim();
+  var newDesc = prompt('Description (max 100 chars, optional):', currentDesc);
+  if (newDesc === null) return;
+  newDesc = newDesc.substring(0, 100).trim();
+  names[sid] = { name: newName, description: newDesc };
+  localStorage.setItem('eshu_session_names', JSON.stringify(names));
+  renderJitTickets();
+}
+
 function flashGlitch(text, danger) {
   var glitch = document.getElementById('glitch');
   if (!glitch) return;
@@ -1576,6 +1708,57 @@ function flashGlitch(text, danger) {
   glitch.className = 'glitch show' + (danger ? ' danger' : '');
   clearTimeout(flashGlitch._t);
   flashGlitch._t = setTimeout(function(){ glitch.className = 'glitch'; }, 950);
+}
+
+// ── Radar node flash (auto-approved / blocked) ──────────────────────────
+function flashRadarNode(host, type) {
+  var nodes = document.querySelectorAll('.cc-radar-node');
+  nodes.forEach(function(node) {
+    var nameEl = node.querySelector('.n-name');
+    var title = node.getAttribute('title') || '';
+    if (title === host || (nameEl && nameEl.textContent === host)) {
+      node.classList.add('flash-' + type);
+      setTimeout(function() { node.classList.remove('flash-' + type); }, 1200);
+    }
+  });
+}
+
+// ── Sound effects (Web Audio API) ──────────────────────────────────────
+function playAutoChime() {
+  if (!notifySound || soundMuted) return;
+  try {
+    var ctx = getAudioCtx(), now = ctx.currentTime;
+    // ascending two-note chime — bright, positive
+    [784.00, 1174.66].forEach(function(freq, i) {
+      var osc = ctx.createOscillator(), gain = ctx.createGain();
+      osc.type = 'sine'; osc.frequency.value = freq;
+      var t = now + i * 0.12;
+      gain.gain.setValueAtTime(0, t);
+      gain.gain.linearRampToValueAtTime(0.18, t + 0.03);
+      gain.gain.linearRampToValueAtTime(0, t + 0.25);
+      osc.connect(gain); gain.connect(ctx.destination);
+      osc.start(t); osc.stop(t + 0.25);
+    });
+  } catch(e) {}
+}
+
+function playBlockedChime() {
+  if (!notifySound || soundMuted) return;
+  try {
+    var ctx = getAudioCtx(), now = ctx.currentTime;
+    // low descending two-note — harsh, alerting
+    [329.63, 220.00].forEach(function(freq, i) {
+      var osc = ctx.createOscillator(), gain = ctx.createGain();
+      osc.type = 'square'; osc.frequency.value = freq;
+      var t = now + i * 0.15;
+      gain.gain.setValueAtTime(0, t);
+      gain.gain.linearRampToValueAtTime(0.12, t + 0.02);
+      gain.gain.linearRampToValueAtTime(0.06, t + 0.08);
+      gain.gain.linearRampToValueAtTime(0, t + 0.35);
+      osc.connect(gain); gain.connect(ctx.destination);
+      osc.start(t); osc.stop(t + 0.35);
+    });
+  } catch(e) {}
 }
 
 document.addEventListener('keydown', function(e) {
@@ -1711,6 +1894,10 @@ function renderSessionCard(s) {
   var host = first.hostname || first.target_ip || 'host';
   var age = formatAgo(Math.floor(Date.now() / 1000) - (first.created_at || 0));
   var short = escapeHtml(s.session_id.substring(0, 8));
+  var names = JSON.parse(localStorage.getItem('eshu_session_names') || '{}');
+  var meta = names[s.session_id] || {};
+  var displayName = meta.name || short;
+  var desc = meta.description || '';
   var historyHtml = '';
   if (s.history && s.history.length) {
     var lines = s.history.map(function(r) {
@@ -1724,11 +1911,13 @@ function renderSessionCard(s) {
     }).join('');
     historyHtml = '<div class="jit-history">' + lines + '</div>';
   }
-  return '<div class="jit-session open">' +
+  return '<div class="jit-session open" data-sid="' + escapeHtml(s.session_id) + '">' +
     '<div class="jit-session-header" onclick="toggleSession(this)">' +
       '<span class="jit-session-caret">&#9656;</span>' +
-      '<span class="jit-session-label">Session <span class="jit-session-id">' + short + '</span></span>' +
+      '<span class="jit-session-label">' + escapeHtml(displayName) + (meta.name ? ' <span class="jit-session-id">' + short + '</span>' : '') + '</span>' +
+      (desc ? '<span class="jit-session-desc">' + escapeHtml(desc) + '</span>' : '') +
       '<span class="jit-session-meta">' + escapeHtml(host) + ' \u00b7 ' + items.length + ' command' + (items.length > 1 ? 's' : '') + ' \u00b7 ' + age + '</span>' +
+      '<button class="jit-session-name-btn" onclick="event.stopPropagation();editSessionName(\'' + escapeHtml(s.session_id) + '\')">Name</button>' +
     '</div>' +
     '<div class="jit-session-body">' + items.map(function(it){ return renderJitItem(it); }).join('') + historyHtml + '</div>' +
   '</div>';

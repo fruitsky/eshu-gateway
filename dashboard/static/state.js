@@ -3,6 +3,8 @@ let requestsData = [], activeFilter = null, lastDeniedCmd = '', policiesCache = 
 let _committedPolicy = null; // {exact, regexWhite, regexBlack} snapshot for the unsaved-changes banner
 let _knownPendingIds = new Set();
 let _knownBlockedIds = new Set();
+let _knownAutoIds = new Set();
+let _knownBlockedFlashIds = new Set();
 let _knownWinReqIds = new Set();
 let _expandedDescs = new Set();
 const VIEWS = ['home', 'history', 'gateways', 'windows', 'stats', 'controls', 'fleet', 'integrations', 'settings', 'logs'];
