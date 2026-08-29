@@ -371,6 +371,8 @@ class GatewayPayload(BaseModel):
     status: str = "pending"
     reason: str = ""
     token: str = ""
+    session_id: str = ""
+    execution_id: str = ""
 
 class RegisterPayload(BaseModel):
     ip: str
@@ -458,12 +460,12 @@ def receive_request(payload: GatewayPayload, request: Request):
     # Override auto-approves JIT — but never on a Zero-Trust gateway (ZT wins:
     # every command must go through operator approval there).
     if row and row['override_until'] and row['override_until'] > now and not get_gateway_zero_trust(target_ip):
-        req_id = create_request(target_ip, cmd, status="approved", reason="override")
+        req_id = create_request(target_ip, cmd, status="approved", reason="override", session_id=(payload.session_id or '')[:64], execution_id=(payload.execution_id or '')[:64])
         update_gateway_last_seen(target_ip)
         record_audit_event('jit_override_approved', target_ip, details=f'Override auto-approved JIT #{req_id}: {cmd[:80]} (reason: {row["override_reason"][:60]})')
         return {"status": "ok", "id": f"{req_id:06d}", "override": True, "message": "Auto-approved via Override Mode"}
 
-    req_id = create_request(target_ip, cmd, status="pending")
+    req_id = create_request(target_ip, cmd, status="pending", session_id=(payload.session_id or '')[:64], execution_id=(payload.execution_id or '')[:64])
     update_gateway_last_seen(target_ip)
     send_notify('jit', 'JIT Approval Required', f'`{cmd[:80]}` on {target_ip}')
     record_audit_event('jit_created', target_ip, details=f'JIT #{req_id}: {cmd[:80]}')
@@ -478,7 +480,7 @@ def receive_log(payload: GatewayPayload, request: Request):
         raise HTTPException(status_code=401, detail="Gateway token does not match self-reported target_ip")
 
     cmd = decode_cmd(payload.encoded_command)
-    create_request(target_ip, cmd, status=payload.status, ttl=0, reason=payload.reason)
+    create_request(target_ip, cmd, status=payload.status, ttl=0, reason=payload.reason, session_id=(payload.session_id or '')[:64], execution_id=(payload.execution_id or '')[:64])
     if payload.status == 'window-rejected' and payload.token:
         wins = get_approved_windows()
         target = next((w for w in wins if w['token'] == payload.token), None)

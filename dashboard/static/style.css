@@ -1493,6 +1493,18 @@ textarea { font-family: 'JetBrains Mono', monospace !important; }
   .fleet-dot.success { background: var(--status-success); box-shadow: 0 0 6px var(--accent-glow); }
   .fleet-dot.fail { background: var(--danger); }
 
+  /* Sessions (grouped SSH requests by session_id) */
+  .jit-session { border: 1px solid rgba(245,158,11,0.25); border-radius: var(--radius); margin-bottom: 8px; overflow: hidden; }
+  .jit-session-header { display: flex; align-items: center; gap: 10px; padding: 9px 12px; background: var(--accent-dim); cursor: pointer; }
+  .jit-session-caret { transition: transform 0.15s; color: var(--accent); font-size: 10px; }
+  .jit-session.open .jit-session-caret { transform: rotate(90deg); }
+  .jit-session-label { font-family: 'JetBrains Mono', monospace; font-size: 12px; font-weight: 700; color: var(--accent); }
+  .jit-session-id { font-weight: 400; opacity: 0.7; }
+  .jit-session-meta { margin-left: auto; font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--text-muted); }
+  .jit-session-body { padding: 8px; display: flex; flex-direction: column; gap: 8px; }
+  .jit-session:not(.open) .jit-session-body { display: none; }
+  .jit-session .jit-ticket { margin-bottom: 0; }
+
   @keyframes cc-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
   @keyframes cc-bar-grow { from { transform: scaleX(0); } to { transform: scaleX(1); } }
   @keyframes cc-glitch {

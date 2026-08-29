@@ -12,22 +12,22 @@ def init_requests_tables(cursor):
             expires_at INTEGER NOT NULL
         )
     ''')
-    # v15.5 migration: add reason column
-    for col, defval in [('reason', "''")]:
+    # Migrations: add optional columns over time (session_id groups SSH requests into sessions)
+    for col, defval in [('reason', "''"), ('session_id', "''"), ('execution_id', "''")]:
         try:
             cursor.execute(f"ALTER TABLE requests ADD COLUMN {col} TEXT DEFAULT {defval}")
         except Exception:
             pass
 
-def create_request(target_ip: str, command: str, status: str = 'pending', ttl: int = 90, reason: str = ''):
+def create_request(target_ip: str, command: str, status: str = 'pending', ttl: int = 90, reason: str = '', session_id: str = '', execution_id: str = ''):
     with db_conn() as conn:
         cursor = conn.cursor()
         created_at = int(time.time())
         expires_at = created_at + ttl
         cursor.execute('''
-            INSERT INTO requests (target_ip, command, status, created_at, expires_at, reason)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', (target_ip, command, status, created_at, expires_at, reason))
+            INSERT INTO requests (target_ip, command, status, created_at, expires_at, reason, session_id, execution_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (target_ip, command, status, created_at, expires_at, reason, session_id, execution_id))
         conn.commit()
         return cursor.lastrowid
 

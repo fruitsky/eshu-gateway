@@ -13,6 +13,8 @@ class GatewayPayload(BaseModel):
     status: str = "pending"
     reason: str = ""
     token: str = ""
+    session_id: str = ""
+    execution_id: str = ""
 
 class RegisterPayload(BaseModel):
     ip: str

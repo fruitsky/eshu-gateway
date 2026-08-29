@@ -30,7 +30,7 @@ log_auto_approve() {
   curl -m 2 -s -X POST "$DASHBOARD_URL/api/log" \
        -H "X-Gateway-Token: ${GATEWAY_TOKEN:-}" \
        -H "Content-Type: application/json" \
-       -d '{"target_ip":"'"$TARGET_IP"'","encoded_command":"'"$enc_cmd"'","status":"'"$status"'"}' >/dev/null 2>&1 &
+       -d '{"target_ip":"'"$TARGET_IP"'","encoded_command":"'"$enc_cmd"'","status":"'"$status"'","session_id":"'"${ESHU_SESSION_ID:-}"'","execution_id":"'"${ESHU_EXECUTION_ID:-}"'"}' >/dev/null 2>&1 &
 }
 
 log_window_reject() {
@@ -40,7 +40,7 @@ log_window_reject() {
   curl -m 2 -s -X POST "$DASHBOARD_URL/api/log" \
        -H "X-Gateway-Token: ${GATEWAY_TOKEN:-}" \
        -H "Content-Type: application/json" \
-       -d '{"target_ip":"'"$TARGET_IP"'","encoded_command":"'"$enc_cmd"'","status":"window-rejected","reason":"'"$reason"'","token":"'"$ESHU_WINDOW_TOKEN"'"}' >/dev/null 2>&1 &
+       -d '{"target_ip":"'"$TARGET_IP"'","encoded_command":"'"$enc_cmd"'","status":"window-rejected","reason":"'"$reason"'","token":"'"$ESHU_WINDOW_TOKEN"'","session_id":"'"${ESHU_SESSION_ID:-}"'","execution_id":"'"${ESHU_EXECUTION_ID:-}"'"}' >/dev/null 2>&1 &
 }
 
 run_sanitized() { "$@" 2>&1 | sanitize; exit $?; }
@@ -49,12 +49,16 @@ logger -t eshu-gateway "from=${SSH_CONNECTION:-unknown} cmd=${SSH_ORIGINAL_COMMA
 if [ -z "${SSH_ORIGINAL_COMMAND:-}" ]; then exit 1; fi
 cmd="$SSH_ORIGINAL_COMMAND"
 
-# Parse ESHU_WINDOW_TOKEN from command prefix (env var can't cross forced-command SSH)
-case "$cmd" in
-  ESHU_WINDOW_TOKEN=*' '*)
-    ESHU_WINDOW_TOKEN="${cmd%% *}"; ESHU_WINDOW_TOKEN="${ESHU_WINDOW_TOKEN#ESHU_WINDOW_TOKEN=}"
-    cmd="${cmd#* }" ;;
-esac
+# Parse ESHU_* metadata keys from the command prefix (env vars can't cross forced-command SSH).
+# Iterative so keys coexist, e.g. "ESHU_WINDOW_TOKEN=abc ESHU_SESSION_ID=def <command>".
+while :; do
+  case "$cmd" in
+    ESHU_WINDOW_TOKEN=*' '*) ESHU_WINDOW_TOKEN="${cmd%% *}"; ESHU_WINDOW_TOKEN="${ESHU_WINDOW_TOKEN#ESHU_WINDOW_TOKEN=}"; cmd="${cmd#* }" ;;
+    ESHU_SESSION_ID=*' '*)   ESHU_SESSION_ID="${cmd%% *}";   ESHU_SESSION_ID="${ESHU_SESSION_ID#ESHU_SESSION_ID=}";         cmd="${cmd#* }" ;;
+    ESHU_EXECUTION_ID=*' '*) ESHU_EXECUTION_ID="${cmd%% *}"; ESHU_EXECUTION_ID="${ESHU_EXECUTION_ID#ESHU_EXECUTION_ID=}";     cmd="${cmd#* }" ;;
+    *) break ;;
+  esac
+done
 
 # ============================================================
 # 0. EMERGENCY FREEZE (global circuit breaker — absolute)
@@ -187,7 +191,7 @@ enc_req=$(echo -n "$cmd" | base64 -w 0)
 RESPONSE=$(curl -m 3 -s -w "\n%{http_code}" -X POST "$DASHBOARD_URL/api/request" \
      -H "X-Gateway-Token: ${GATEWAY_TOKEN:-}" \
      -H "Content-Type: application/json" \
-     -d '{"target_ip":"'"$TARGET_IP"'","encoded_command":"'"$enc_req"'"}' 2>&1 || echo "CURL_FAILED")
+     -d '{"target_ip":"'"$TARGET_IP"'","encoded_command":"'"$enc_req"'","session_id":"'"${ESHU_SESSION_ID:-}"'","execution_id":"'"${ESHU_EXECUTION_ID:-}"'"}' 2>&1 || echo "CURL_FAILED")
 
 HTTP_STATUS=$(echo "$RESPONSE" | tail -n1)
 if [ "${HTTP_STATUS:-}" = "429" ]; then

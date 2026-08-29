@@ -1613,12 +1613,28 @@ function renderJitTickets() {
   }
   container.dataset.sig = '';
 
-  var html = '';
+  var sessionMap = {}, sessionOrder = [], singles = [];
   allItems.forEach(function(item) {
-    if (item.type === 'integration') {
+    if (item.type === 'ssh' && item.data.session_id && item.data.session_id !== 'unknown') {
+      var sid = item.data.session_id;
+      if (!sessionMap[sid]) { sessionMap[sid] = { session_id: sid, items: [] }; sessionOrder.push(sid); }
+      sessionMap[sid].items.push(item);
+    } else {
+      singles.push(item);
+    }
+  });
+
+  var html = '';
+  sessionOrder.forEach(function(sid) { html += renderSessionCard(sessionMap[sid]); });
+  singles.forEach(function(item) { html += renderJitItem(item); });
+  container.innerHTML = html;
+}
+
+function renderJitItem(item) {
+  if (item.type === 'integration') {
       var c = item.data;
       var args = Object.keys(c.payload || {}).map(function(k) { return k + '=' + c.payload[k]; }).join(', ');
-      html += '<div class="jit-ticket" data-id="int-' + c.id + '" onclick="openContextPanel(\'int-' + c.id + '\')">' +
+      return '<div class="jit-ticket" data-id="int-' + c.id + '" onclick="openContextPanel(\'int-' + c.id + '\')">' +
         '<div class="jit-check" onclick="event.stopPropagation();toggleBulkSelect(\'int-' + c.id + '\',event)"></div>' +
         '<div style="flex:1;min-width:0">' +
           '<div class="jit-human">' + escapeHtml(c.integration) + ' / ' + escapeHtml(c.tool) + '</div>' +
@@ -1636,7 +1652,7 @@ function renderJitTickets() {
       '</div>';
     } else if (item.type === 'window') {
       var w = item.data;
-      html += '<div class="jit-ticket" data-id="win-' + w.id + '" onclick="openContextPanel(\'win-' + w.id + '\')">' +
+      return '<div class="jit-ticket" data-id="win-' + w.id + '" onclick="openContextPanel(\'win-' + w.id + '\')">' +
         '<div class="jit-check" onclick="event.stopPropagation();toggleBulkSelect(\'win-' + w.id + '\',event)"></div>' +
         '<div style="flex:1;min-width:0">' +
           '<div class="jit-human">Window request</div>' +
@@ -1663,7 +1679,7 @@ function renderJitTickets() {
       var riskHtml = '';
       if (r.risk) riskHtml += '<div style="color:var(--status-warning);font-size:10px;margin-top:4px"> ' + escapeHtml(r.risk) + '</div>';
       if (r.anomaly) riskHtml += '<div style="color:var(--danger);font-size:10px;margin-top:4px"> ' + escapeHtml(r.anomaly) + '</div>';
-      html += '<div class="jit-ticket' + (r.anomaly ? ' urgent' : '') + '" data-id="' + r.id + '" onclick="openContextPanel(\'' + r.id + '\')">' +
+      return '<div class="jit-ticket' + (r.anomaly ? ' urgent' : '') + '" data-id="' + r.id + '" onclick="openContextPanel(\'' + r.id + '\')">' +
         '<div class="jit-check" onclick="event.stopPropagation();toggleBulkSelect(\'' + r.id + '\',event)"></div>' +
         '<div style="flex:1;min-width:0">' +
           '<div class="jit-human">' + escapeHtml(human || 'Command request') + '</div>' +
@@ -1682,8 +1698,27 @@ function renderJitTickets() {
         '</div>' +
       '</div>';
     }
-  });
-  container.innerHTML = html;
+}
+
+function renderSessionCard(s) {
+  var items = s.items;
+  var first = items[0].data;
+  var host = first.hostname || first.target_ip || 'host';
+  var age = formatAgo(Math.floor(Date.now() / 1000) - (first.created_at || 0));
+  var short = escapeHtml(s.session_id.substring(0, 8));
+  return '<div class="jit-session open">' +
+    '<div class="jit-session-header" onclick="toggleSession(this)">' +
+      '<span class="jit-session-caret">&#9656;</span>' +
+      '<span class="jit-session-label">Session <span class="jit-session-id">' + short + '</span></span>' +
+      '<span class="jit-session-meta">' + escapeHtml(host) + ' \u00b7 ' + items.length + ' command' + (items.length > 1 ? 's' : '') + ' \u00b7 ' + age + '</span>' +
+    '</div>' +
+    '<div class="jit-session-body">' + items.map(function(it){ return renderJitItem(it); }).join('') + '</div>' +
+  '</div>';
+}
+
+function toggleSession(el) {
+  var sess = el.closest('.jit-session');
+  if (sess) sess.classList.toggle('open');
 }
 async function approveWindowReq(id) {
   flashGlitch('APPROVED \u25B8 WINDOW', false);
