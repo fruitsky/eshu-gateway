@@ -197,7 +197,7 @@ button::-moz-focus-inner { border: 0; padding: 0; }
     position: relative;
   }
   .stat-card:hover { border-color: var(--text-muted); }
-  .stat-card.active-filter { border-color: var(--brand-red); }
+  .stat-card.active-filter { border-color: var(--brand-red); box-shadow: 0 0 14px var(--brand-red-glow); }
   .stat-card.active-filter::after { content: '✕'; position: absolute; top: 8px; right: 12px; font-size: 11px; color: var(--text-muted); }
   .stat-card .stat-value { font-size: 26px; font-weight: 700; }
   .stat-card .stat-label { font-size: 12px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; }
@@ -272,13 +272,13 @@ button::-moz-focus-inner { border: 0; padding: 0; }
     font-size: var(--text-xs); font-weight: 500; white-space: nowrap;
   }
   .badge-pending { background: rgba(251,191,36,0.1); color: var(--status-warning); border: 1px solid rgba(251,191,36,0.2); }
-  .badge-approved { background: rgba(74,222,128,0.1); color: var(--status-success); border: 1px solid rgba(74,222,128,0.2); }
+  .badge-approved { background: rgba(245,158,11,0.12); color: var(--status-success); border: 1px solid rgba(245,158,11,0.25); }
   .badge-expired { background: var(--bg-hover); color: var(--text-muted); }
-  .badge-consumed { background: rgba(74,222,128,0.1); color: var(--status-success); }
-  .badge-blocked { background: rgba(251,146,60,0.1); color: #fb923c; }
-  .badge-denied { background: rgba(230,57,70,0.1); color: var(--danger); }
-  .badge-auto { background: rgba(96,165,250,0.1); color: var(--status-info); }
-  .badge-window { background: rgba(96,165,250,0.08); color: var(--status-info); border: 1px solid rgba(96,165,250,0.2); }
+  .badge-consumed { background: rgba(245,158,11,0.12); color: var(--status-success); }
+  .badge-blocked { background: rgba(251,146,60,0.12); color: #fb923c; border: 1px solid rgba(251,146,60,0.25); }
+  .badge-denied { background: rgba(220,38,38,0.12); color: var(--danger); }
+  .badge-auto { background: rgba(217,119,6,0.12); color: var(--status-info); }
+  .badge-window { background: rgba(251,146,60,0.12); color: var(--status-info); border: 1px solid rgba(251,146,60,0.25); }
   .badge-window-rejected { background: rgba(251,146,60,0.1); color: #fb923c; border: 1px solid rgba(251,146,60,0.25); }
 
   /* ── Status chips (action cells) ────────────────────────── */
@@ -373,7 +373,7 @@ button::-moz-focus-inner { border: 0; padding: 0; }
   .seg-btn.active { opacity: 1; }
   .seg-btn.active.off { background: var(--bg-surface); color: var(--text-muted); }
   .seg-btn.active.dev { background: rgba(96, 165, 250, 0.2); color: var(--status-info); }
-  .seg-btn.active.prod { background: rgba(74, 222, 128, 0.2); color: var(--status-success); }
+  .seg-btn.active.prod { background: rgba(245, 158, 11, 0.18); color: var(--status-success); }
   .dev-gw-pill { display: inline-flex; align-items: center; gap: 4px; padding: 4px 8px; border-radius: var(--radius-sm); font-size: var(--text-xs); background: rgba(230, 57, 70, 0.1); border: 1px solid rgba(230, 57, 70, 0.3); color: var(--danger); }
   .dev-gw-pill .remove { cursor: pointer; font-weight: 700; margin-left: 4px; }
   .search-result { padding: 6px 12px; font-size: var(--text-xs); cursor: pointer; border-radius: var(--radius-sm); }
@@ -429,11 +429,11 @@ button::-moz-focus-inner { border: 0; padding: 0; }
   .chip-btn.zt-on { color: #fbbf24; border-color: rgba(251, 191, 36, 0.35); }
   .chip-btn.danger { color: var(--danger); border-color: rgba(220, 38, 38, 0.3); }
   .chip-btn.override { background: rgba(239, 68, 68, 0.08); color: #fb7185; border-color: rgba(239, 68, 68, 0.3); }
-  .chip-btn.info { color: var(--status-info); border-color: rgba(96, 165, 250, 0.4); }
+  .chip-btn.info { color: var(--status-info); border-color: rgba(251, 146, 60, 0.4); }
   .dev-pill {
     display: inline-flex; align-items: center; padding: 2px 6px; border-radius: var(--radius-sm);
     font-size: 10px; font-weight: 700; text-transform: uppercase; margin-left: 4px;
-    background: rgba(230, 57, 70, 0.15); color: var(--danger); border: 1px solid rgba(230, 57, 70, 0.3);
+    background: rgba(96, 165, 250, 0.12); color: #60a5fa; border: 1px solid rgba(96, 165, 250, 0.3);
   }
 
   /* ── Approved Windows table ─────────────────────────────── */
@@ -449,8 +449,8 @@ button::-moz-focus-inner { border: 0; padding: 0; }
 
   /* ── Filter badge ───────────────────────────────────────── */
   .filter-badge {
-    background: rgba(96, 165, 250, 0.1); color: var(--status-info);
-    border: 1px solid rgba(96, 165, 250, 0.2);
+    background: rgba(245, 158, 11, 0.12); color: #fbbf24;
+    border: 1px solid rgba(245, 158, 11, 0.25);
     font-size: var(--text-xs); font-weight: 500;
     padding: 2px 10px; border-radius: 9999px;
   }
@@ -512,8 +512,8 @@ button::-moz-focus-inner { border: 0; padding: 0; }
     padding: 2px 8px; border-radius: 3px; margin: 2px 0;
     font-size: 11px; font-family: monospace;
   }
-  .uninstall-step.done { background: rgba(74,222,128,0.08); color: var(--status-success); }
-  .uninstall-step.active { background: rgba(230,57,70,0.08); color: var(--brand-red); }
+  .uninstall-step.done { background: rgba(245,158,11,0.10); color: var(--status-success); }
+  .uninstall-step.active { background: rgba(245,158,11,0.10); color: #fbbf24; }
   .uninstall-step.pending { color: var(--text-muted); }
 
   /* ── Gateway Pill ───────────────────────────────────────── */
