@@ -1631,15 +1631,15 @@ function renderSparkline() {
   var barsHtml = bars.map(function(v){
     var h = max ? Math.max(6, Math.round(v / max * 100)) : 6;
     var op = 0.12 + (h/100)*0.55;
-    return '<div class="cc-spark-bar" style="height:'+h+'%;opacity:'+op.toFixed(2)+'"></div>'';
+    return '<div class="cc-spark-bar" style="height:'+h+'%;opacity:'+op.toFixed(2)+'"></div>';
   }).join('');
   var total = (requestsData || []).length;
   var auto = (requestsData || []).filter(function(r){ return r.status === 'auto-approved'; }).length;
   var pct = total ? Math.round(auto/total*100) : 0;
-  return '<div class="cc-spark-row">''+
-    '<div class="cc-spark-card"><div class="h">Command rhythm \u00b7 24h</div><div class="cc-spark-wrap">'+barsHtml+'</div></div>''+
-    '<div class="cc-spark-card"><div class="h">Today</div><div class="cc-spark-stats">'+total+' <span>commands</span></div><div class="cc-spark-sub">'+pct+'% automated \u00b7 ''+buckets.reduce(function(a,b){return a+b;},0)+'' in 24h</div></div>''+
-  ''</div>'';
+  return '<div class="cc-spark-row">'+
+    '<div class="cc-spark-card"><div class="h">Command rhythm \u00b7 24h</div><div class="cc-spark-wrap">'+barsHtml+'</div></div>'+
+    '<div class="cc-spark-card"><div class="h">Today</div><div class="cc-spark-stats">'+total+' <span>commands</span></div><div class="cc-spark-sub">'+pct+'% automated \u00b7 '+buckets.reduce(function(a,b){return a+b;},0)+' in 24h</div></div>'+
+  '</div>';
 }
 
 function renderFleetStrip() {
@@ -1694,7 +1694,7 @@ function renderRecentSessions() {
     var pending = s.requests.filter(function(r){ return r.status === 'pending'; }).length;
     var badge = pending ? '<span style="color:var(--status-warning);font-weight:700;">' + pending + ' pending</span> \u00b7 ' : '';
 
-    return '<div class="recent-session-card" onclick="openSessionModal('' + escapeHtml(s.id) + '')">' +
+    return '<div class="recent-session-card" onclick="openSessionModal(\'' + escapeHtml(s.id) + '\')">' +
       '<div class="rs-title"><span class="host">' + escapeHtml(host) + '</span> \u00b7 ' + escapeHtml(displayName) + ' <span style="color:var(--text-muted);font-weight:400;font-size:10px;">\u00b7 ' + escapeHtml(s.id.substring(0,6)) + '</span></div>' +
       '<div class="rs-cmd-block">' + cmdPreview + '</div>' +
       (desc ? '<div class="rs-desc">' + escapeHtml(desc) + '</div>' : '') +
