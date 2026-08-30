@@ -1405,7 +1405,7 @@ async function fetchRequests() {
     } catch(e) { _pendingIntegrationCalls = []; }
     detectNewIntegrationCalls();
     await refreshPolicyCache();
-    renderJitTickets(); renderTable(); updateStats(); renderFleetStrip();
+    renderJitTickets(); renderTable(); updateStats();
   } catch(err) {}
 }
 function detectNewJITs(newData) {
@@ -1644,28 +1644,6 @@ function renderSparkline() {
     '<div class="cc-spark-card"><div class="h">Command rhythm \u00b7 24h</div><div class="cc-spark-wrap">'+barsHtml+'</div></div>'+
     '<div class="cc-spark-card"><div class="h">Today</div><div class="cc-spark-stats">'+total+' <span>commands</span></div><div class="cc-spark-sub">'+pct+'% automated \u00b7 '+buckets.reduce(function(a,b){return a+b;},0)+' in 24h</div></div>'+
   '</div>';
-}
-
-function renderFleetStrip() {
-  var strip = document.getElementById('fleet-strip');
-  if (!strip) return;
-  var now = Math.floor(Date.now() / 1000);
-  var gws = (_gatewaysData || []).filter(function(g){ return g.hostname || g.ip; });
-  var pendingByIp = {};
-  (requestsData || []).forEach(function(r){
-    if (r.status === 'pending' && r.target_ip) pendingByIp[r.target_ip] = (pendingByIp[r.target_ip] || 0) + 1;
-  });
-  var chips = gws.map(function(g){
-    var isOnline = (now - (g.last_seen || 0)) < GATEWAY_DISCONNECTED_AFTER;
-    var count = pendingByIp[g.ip] || 0;
-    var label = escapeHtml(g.hostname || g.ip);
-    return '<div class="gw-chip" onclick="switchView(\'gateways\')" title="' + label + (count ? ' — ' + count + ' pending' : '') + '">' +
-      '<span class="dot ' + (isOnline ? 'online' : 'offline') + '"></span>' +
-      '<span class="name">' + label + '</span>' +
-      (count > 0 ? '<span class="count">' + count + '</span>' : '') +
-      '</div>';
-  }).join('');
-  strip.innerHTML = '<span class="fleet-label">Fleet</span>' + chips + (gws.length === 0 ? '<span class="fleet-label" style="opacity:0.5">no gateways</span>' : '');
 }
 
 // ── Recent Sessions panel (below radar in empty state) ─────────────────
@@ -2716,7 +2694,6 @@ async function fetchCmdDescs() {
 async function fetchGateways() {
   const res = await fetch('/api/gateways'); const data = await res.json();
   _gatewaysData = data;
-  renderFleetStrip();
   var clientNow = Math.floor(Date.now() / 1000);
   data.forEach(function(g) {
     if ((g.override_remaining || 0) > 0) {

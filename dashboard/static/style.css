@@ -54,10 +54,12 @@ button::-moz-focus-inner { border: 0; padding: 0; }
   /* ── Sidebar ────────────────────────────────────────────── */
   .sidebar{
     width:220px;min-width:220px;
-    background:var(--bg-base);
+    background:rgba(15,13,10,0.42);
+    backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);
     border-right:1px solid var(--border-color);
     display:flex;flex-direction:column;z-index:20;
     padding:0 0 16px 0;overflow:hidden;
+    transition:width .55s cubic-bezier(.4,0,.2,1),min-width .55s cubic-bezier(.4,0,.2,1),opacity .4s ease;
   }
   .sidebar-brand{
     display:flex;align-items:center;gap:10px;
@@ -732,6 +734,12 @@ button::-moz-focus-inner { border: 0; padding: 0; }
     height: calc(100vh - 120px);
     margin: 0 calc(var(--space-4) * -1);
     margin-top: calc(var(--space-4) * -1);
+    background:
+      radial-gradient(ellipse 90% 55% at 50% -6%, rgba(46,72,132,0.42), transparent 62%),
+      radial-gradient(ellipse 55% 40% at 40% 4%, rgba(30,50,96,0.32), transparent 70%),
+      linear-gradient(180deg, rgba(22,32,58,0.85) 0%, rgba(15,13,10,0) 52%),
+      radial-gradient(ellipse 85% 45% at 50% 108%, rgba(245,158,11,0.10), transparent 60%),
+      var(--bg-base);
   }
   .cc-feed {
     flex: 1;
@@ -1461,16 +1469,6 @@ textarea { font-family: 'JetBrains Mono', monospace !important; }
   .widget.flat { background: transparent !important; border: none !important; box-shadow: none !important; padding: 0 !important; margin-bottom: 0 !important; }
   .widget.flat .widget-header { display: none !important; }
 
-  /* ── Fleet presence strip ───────────────────────────────── */
-  .fleet-strip { display: flex; align-items: center; gap: 8px; padding: 10px 16px; border-bottom: 1px solid var(--border-color); flex-wrap: wrap; flex-shrink: 0; }
-  .fleet-label { font-family: 'JetBrains Mono', monospace; font-size: 9px; font-weight: 600; text-transform: uppercase; letter-spacing: 2px; color: var(--text-muted); opacity: 0.6; margin-right: 4px; }
-  .gw-chip { display: flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; background: var(--bg-surface); border: 1px solid var(--border-color); cursor: pointer; transition: all 0.15s; }
-  .gw-chip:hover { border-color: var(--text-muted); }
-  .gw-chip .dot { width: 7px; height: 7px; border-radius: 50%; }
-  .gw-chip .dot.online { background: var(--status-success); box-shadow: 0 0 6px var(--accent-glow); animation: cc-pulse 2.4s infinite; }
-  .gw-chip .dot.offline { background: var(--text-muted); }
-  .gw-chip .name { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-muted); }
-  .gw-chip .count { font-family: 'JetBrains Mono', monospace; font-size: 9px; font-weight: 700; color: var(--bg-base); background: var(--accent); border-radius: 999px; padding: 1px 6px; min-width: 16px; text-align: center; }
 
   /* ── Phosphor glitch flash (approve/deny) ────────────────── */
   .glitch { position: fixed; left: 50%; top: 42%; transform: translate(-50%, -50%); z-index: 10000; pointer-events: none; font-family: 'JetBrains Mono', monospace; font-size: 20px; font-weight: 700; letter-spacing: 2px; text-transform: uppercase; color: var(--accent); text-shadow: 0 0 12px var(--accent-glow); opacity: 0; }
@@ -1478,7 +1476,8 @@ textarea { font-family: 'JetBrains Mono', monospace !important; }
   .glitch.danger { color: var(--danger); text-shadow: 0 0 12px var(--danger-glow); }
 
   /* ── Focus mode (F to focus, Esc to exit) ────────────────── */
-  body.focus .sidebar, body.focus .main-header, body.focus .cc-context, body.focus .fleet-strip { opacity: 0.12; transition: opacity 0.4s ease; }
+  body.focus .sidebar { width: 0; min-width: 0; opacity: 0; border-right-color: transparent; pointer-events: none; }
+  body.focus .main-header, body.focus .cc-context { opacity: 0.12; transition: opacity 0.4s ease; }
   body.focus .grain { opacity: 0.3; }
 
   /* ── Audit Log table ─────────────────────────────────────── */
