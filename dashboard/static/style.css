@@ -1465,6 +1465,34 @@ textarea { font-family: 'JetBrains Mono', monospace !important; }
   .cc-spark-stats span { font-size: 10px; font-weight: 500; color: var(--text-muted); }
   .cc-spark-sub { font-family: ''JetBrains Mono'', monospace; font-size: 10px; color: var(--text-muted); margin-top: 4px; }
 
+  /* ── Constellation starfield (replaces radar) ─────────────── */
+  .starfield-wrap { position: relative; width: 100%; height: 52vh; min-height: 320px; overflow: hidden; }
+  .dust-layer { position: absolute; inset: 0; z-index: 1; }
+  .sky { position: absolute; inset: 0; z-index: 2; will-change: transform, opacity; }
+  .starfield-wrap svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+  .const-line { stroke: rgba(245,158,11,0.2); stroke-width: 0.35; vector-effect: non-scaling-stroke; }
+  .const-hit { stroke: transparent; stroke-width: 16; vector-effect: non-scaling-stroke; pointer-events: stroke; cursor: pointer; }
+  .const-group.active .const-line { stroke: rgba(245,158,11,0.55); stroke-width: 0.7; }
+  .const-legend { position: absolute; top: 14px; left: 0; right: 0; display: flex; justify-content: center; gap: 22px; z-index: 3; pointer-events: none; flex-wrap: wrap; }
+  .const-legend .cname { font-family: 'JetBrains Mono', monospace; font-size: 9px; letter-spacing: 2px; text-transform: uppercase; color: rgba(122,109,94,0.3); pointer-events: auto; cursor: pointer; transition: color .25s, opacity .25s; white-space: nowrap; }
+  .const-legend .cname:hover { color: rgba(122,109,94,0.55); }
+  .const-legend .cname.active { color: rgba(205,216,230,0.8); text-shadow: 0 0 12px rgba(205,216,230,0.4); }
+  .dust { position: absolute; width: 2px; height: 2px; border-radius: 50%; background: #cdd8e6; opacity: 0.3; }
+  .dust.b { width: 1px; height: 1px; opacity: 0.22; }
+  .gw-node { position: absolute; transform: translate(-50%,-50%); display: flex; flex-direction: column; align-items: center; gap: 4px; z-index: 5; cursor: pointer; transition: filter .2s; }
+  .gw-node .n-dot { position: relative; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 10px var(--accent-glow), 0 0 0 3px rgba(245,158,11,0.10); }
+  .gw-node .n-dot::after { content: ''; position: absolute; inset: -5px; border-radius: 50%; border: 1px solid rgba(245,158,11,0.5); opacity: 0; }
+  .gw-node .n-ini { font-family: 'JetBrains Mono', monospace; font-size: 8px; letter-spacing: 1px; text-transform: uppercase; color: var(--text-muted); background: rgba(8,12,20,0.72); padding: 1px 4px; border-radius: 3px; border: 1px solid rgba(255,255,255,0.06); line-height: 1.2; }
+  .gw-node.pending .n-dot { background: var(--status-warning); box-shadow: 0 0 10px rgba(251,146,60,0.55), 0 0 0 3px rgba(251,146,60,0.12); animation: cc-pulse 1.4s infinite; }
+  .gw-node.pending .n-ini { color: var(--status-warning); }
+  .gw-node.offline .n-dot { background: var(--text-muted); box-shadow: none; opacity: 0.45; }
+  .gw-node.offline .n-ini { color: var(--text-muted); opacity: 0.5; }
+  .field-star { position: absolute; transform: translate(-50%,-50%); width: 2px; height: 2px; border-radius: 50%; background: var(--text-muted); opacity: 0.4; z-index: 3; }
+  .int-star { position: absolute; transform: translate(-50%,-50%); border-radius: 50%; background: #cdd8e6; z-index: 4; cursor: pointer; transition: opacity .3s; }
+  .int-star::after { content: ''; position: absolute; inset: -5px; border-radius: 50%; border: 1px solid rgba(205,216,230,0.35); opacity: 0; }
+  .int-star.twinkle { animation: cc-twinkle 6s ease-in-out infinite; }
+  @keyframes cc-twinkle { 0%,100% { opacity: 0.3; } 50% { opacity: 0.7; } }
+
   /* borderless empty-state — integrate radar into the page background */
   .widget.flat { background: transparent !important; border: none !important; box-shadow: none !important; padding: 0 !important; margin-bottom: 0 !important; }
   .widget.flat .widget-header { display: none !important; }

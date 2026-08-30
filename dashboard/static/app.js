@@ -1521,26 +1521,124 @@ function emptyStateSignature() {
   return gwSig + '@' + sessionCount;
 }
 
-// Distribute n gateways across concentric radar rings. Ring capacity grows
-// with radius (inner ring holds fewer, outer rings hold more) so nodes never
-// crowd. Returns [{ f: radiusFraction, count }].
-function radarRings(n) {
-  var rings = [];
-  // Innermost band is reserved for the online/total core counter — no nodes.
-  rings.push({ count: 0 });
-  var placed = 0, i = 0;
-  while (placed < n) {
-    var cap = 8 + i * 6;
-    var count = Math.min(cap, n - placed);
-    rings.push({ count: count });
-    placed += count;
-    i++;
+// ── Constellation starfield (replaces the radar) ────────────────────────
+var CONSTELLATIONS = [
+  {name:'Orion', meaning:'the hunter', pts:[[.50,.06],[.43,.18],[.57,.18],[.46,.30],[.50,.32],[.54,.30],[.46,.52],[.56,.52]], lines:[[0,1],[0,2],[1,3],[2,5],[3,4],[4,5],[3,6],[5,7]]},
+  {name:'Ursa Major', meaning:'the great bear', pts:[[.30,.20],[.38,.16],[.46,.22],[.50,.32],[.46,.44],[.36,.54],[.26,.54]], lines:[[0,1],[1,2],[2,6],[6,0],[2,3],[3,4],[4,5],[5,6]]},
+  {name:'Cassiopeia', meaning:'the queen', pts:[[.30,.36],[.38,.28],[.48,.34],[.58,.28],[.66,.36]], lines:[[0,1],[1,2],[2,3],[3,4]]},
+  {name:'Cygnus', meaning:'the swan', pts:[[.50,.06],[.50,.18],[.50,.32],[.50,.46],[.42,.28],[.58,.28]], lines:[[0,1],[1,2],[2,3],[4,2],[2,5]]},
+  {name:'Lyra', meaning:'the lyre', pts:[[.58,.14],[.46,.30],[.52,.36],[.64,.36],[.58,.30]], lines:[[0,1],[1,2],[2,3],[3,4],[4,0],[0,2]]}
+];
+var LAYOUTS = 9, ASPECT = 0.62;
+var _layout = parseInt(sessionStorage.getItem('eshu_layout') || '-1', 10);
+if (isNaN(_layout) || _layout < 0 || _layout >= LAYOUTS) { _layout = Math.floor(Math.random() * LAYOUTS); sessionStorage.setItem('eshu_layout', _layout); }
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;var t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;};}
+function shuffleArr(a,R){for(var i=a.length-1;i>0;i--){var j=Math.floor(R()*(i+1));var t=a[i];a[i]=a[j];a[j]=t;}return a;}
+function fitSafe(pts,x0,x1,y0,y1){
+  var mnx=1e9,mxx=-1e9,mny=1e9,mxy=-1e9;
+  pts.forEach(function(p){mnx=Math.min(mnx,p.x);mxx=Math.max(mxx,p.x);mny=Math.min(mny,p.y);mxy=Math.max(mxy,p.y);});
+  if(mnx>=x0&&mxx<=x1&&mny>=y0&&mxy<=y1) return pts;
+  var s=Math.min((x1-x0)/Math.max(mxx-mnx,1),(y1-y0)/Math.max(mxy-mny,1));
+  var ncx=(x0+x1)/2, ncy=(y0+y1)/2, cxs=(mnx+mxx)/2, cys=(mny+mxy)/2;
+  return pts.map(function(p){return {x:ncx+(p.x-cxs)*s, y:ncy+(p.y-cys)*s};});
+}
+function gwIni(name){ name=String(name||'').toLowerCase().replace(/[^a-z0-9]/g,''); return name.substring(0,2).toUpperCase(); }
+
+function buildStaticSky(){
+  var layer=document.getElementById('dust-layer');
+  if(!layer || layer.dataset.built) return;
+  layer.dataset.built='1';
+  for(var i=0;i<130;i++){
+    var d=document.createElement('span');
+    d.className='dust'+(Math.random()>0.5?' b':'');
+    d.style.left=(Math.random()*100).toFixed(1)+'%'; d.style.top=(Math.random()*100).toFixed(1)+'%';
+    layer.appendChild(d);
   }
-  var numRings = rings.length;
-  rings.forEach(function(ring, idx) {
-    ring.f = numRings === 1 ? 0.55 : 0.34 + (idx / (numRings - 1)) * (0.80 - 0.34);
+  var ints=(_integrationsData||[]).filter(function(i){return i.enabled;});
+  ints.forEach(function(integration,idx){
+    var name=integration.name;
+    var h=_starHash(name);
+    var ang=(idx*360/Math.max(ints.length,1)+(h%28))*Math.PI/180;
+    var rad=41+(h%8);
+    var x=Math.max(7,Math.min(93,50+rad*Math.cos(ang))), y=Math.max(11,Math.min(89,50+rad*Math.sin(ang)*ASPECT));
+    var sz=2+(h%2);
+    var st=document.createElement('span');
+    st.className='int-star twinkle';
+    st.setAttribute('data-name',name); st.title=name;
+    st.style.left=x.toFixed(1)+'%'; st.style.top=y.toFixed(1)+'%';
+    st.style.width=sz+'px'; st.style.height=sz+'px';
+    st.style.boxShadow='0 0 6px '+sz+'px rgba(205,216,230,0.16)';
+    st.style.animationDelay='-'+(h%60)/10+'s';
+    layer.appendChild(st);
   });
-  return rings;
+}
+
+function placeGatewayNode(g,x,y,cls){
+  var sky=document.getElementById('sky');
+  if(!sky) return;
+  var n=document.createElement('div');
+  var name=g.hostname||g.ip||'gw';
+  n.className='gw-node '+(cls||'');
+  n.setAttribute('data-name',name); n.title=name;
+  n.style.left=x.toFixed(1)+'%'; n.style.top=y.toFixed(1)+'%';
+  n.innerHTML='<span class="n-dot"></span><span class="n-ini">'+gwIni(name)+'</span>';
+  sky.appendChild(n);
+}
+
+function buildStarfield(layoutIdx){
+  var sky=document.getElementById('sky');
+  var svg=document.getElementById('const-lines');
+  var legend=document.getElementById('const-legend');
+  if(!sky||!svg||!legend) return;
+  sky.querySelectorAll('.gw-node,.field-star').forEach(function(el){el.remove();});
+  svg.innerHTML='';
+  var R=mulberry32((layoutIdx+1)*2654435761);
+  var now=Math.floor(Date.now()/1000);
+  var gws=(_gatewaysData||[]).filter(function(g){return g.hostname||g.ip;});
+  var pendingSet={};
+  (requestsData||[]).forEach(function(r){ if(r.status==='pending'){ var k=r.hostname||r.target_ip; if(k) pendingSet[k]=true; } });
+  var N=gws.length;
+  var minStars=Math.max(16,N);
+  var shuffled=shuffleArr(CONSTELLATIONS.slice(), R);
+  var chosen=[], total=0;
+  for(var c=0;c<shuffled.length&&total<minStars;c++){ chosen.push(shuffled[c]); total+=shuffled[c].pts.length; }
+  var pts=[], groups=[];
+  chosen.forEach(function(cons){
+    var ang=(R()-0.5)*0.9, cos=Math.cos(ang), sin=Math.sin(ang);
+    var scale=0.62+R()*0.75;
+    var cx=0.16+R()*0.68, cy=0.20+R()*0.55;
+    var raw=cons.pts.map(function(p){
+      var dx=p[0]-0.5, dy=p[1]-0.5;
+      var rx=dx*cos-dy*sin, ry=dx*sin+dy*cos;
+      return {x:(cx+rx*scale)*100, y:(cy+ry*scale*ASPECT)*100};
+    });
+    var fp=fitSafe(raw, 9, 91, 13, 87);
+    var base=pts.length;
+    fp.forEach(function(p){ pts.push(p); });
+    var glines=cons.lines.map(function(ln){ var a=pts[base+ln[0]], b=pts[base+ln[1]]; return [a.x,a.y,b.x,b.y]; });
+    groups.push({name:cons.name, meaning:cons.meaning, lines:glines});
+  });
+  svg.innerHTML=groups.map(function(grp){
+    return '<g class="const-group" data-const="'+grp.name+'">'+grp.lines.map(function(l){
+      return '<line class="const-line" x1="'+l[0].toFixed(2)+'" y1="'+l[1].toFixed(2)+'" x2="'+l[2].toFixed(2)+'" y2="'+l[3].toFixed(2)+'"/>'
+        +'<line class="const-hit" x1="'+l[0].toFixed(2)+'" y1="'+l[1].toFixed(2)+'" x2="'+l[2].toFixed(2)+'" y2="'+l[3].toFixed(2)+'"/>';
+    }).join('')+'</g>';
+  }).join('');
+  legend.innerHTML=groups.slice().sort(function(a,b){return a.name<b.name?-1:1;}).map(function(grp){
+    return '<span class="cname" data-const="'+grp.name+'">'+grp.name.toUpperCase()+' · '+grp.meaning+'</span>';
+  }).join('');
+  var order=shuffleArr(pts.map(function(_,i){return i;}), R);
+  var used={};
+  order.forEach(function(pi,gi){
+    if(gi<N){
+      var g=gws[gi], p=pts[pi];
+      var isOnline=(now-(g.last_seen||0))<GATEWAY_DISCONNECTED_AFTER;
+      var cls=pendingSet[g.hostname||g.ip]?'pending':(isOnline?'':'offline');
+      placeGatewayNode(g, p.x, p.y, cls);
+      used[pi]=true;
+    }
+  });
+  pts.forEach(function(p,pi){ if(used[pi]) return; var s=document.createElement('span'); s.className='field-star'; s.style.left=p.x.toFixed(1)+'%'; s.style.top=p.y.toFixed(1)+'%'; sky.appendChild(s); });
 }
 
 function renderEmptyState() {
@@ -1549,31 +1647,6 @@ function renderEmptyState() {
   var enrolled = gws.length;
   var disconnected = gws.filter(function(g){ return (now - (g.last_seen || 0)) >= GATEWAY_DISCONNECTED_AFTER; }).length;
   var online = enrolled - disconnected;
-
-  var rings = radarRings(enrolled);
-  var radarSize = rings.length <= 1 ? 260 : rings.length === 2 ? 320 : rings.length === 3 ? 380 : 440;
-  var nodeHtml = '';
-  var ringHtml = '';
-  var gi = 0;
-  rings.forEach(function(ring, ri) {
-    ringHtml += '<div class="cc-radar-ring" style="inset:' + (50 - 50 * ring.f).toFixed(1) + '%;border-color:rgba(245,158,11,' + (0.14 - ri * 0.03).toFixed(2) + ')"></div>';
-    var isOuter = ri === rings.length - 1;
-    for (var j = 0; j < ring.count; j++) {
-      var g = gws[gi++];
-      if (!g) break;
-      var angle = (360 / ring.count) * j - 90;
-      var rad = angle * Math.PI / 180;
-      var innerF = ri === 0 ? 0 : rings[ri - 1].f;
-      var outerF = ring.f;
-      var midF = innerF + (outerF - innerF) * 0.58;
-      var x = 50 + 50 * midF * Math.cos(rad);
-      var y = 50 + 50 * midF * Math.sin(rad);
-      var isOnline = (now - (g.last_seen || 0)) < GATEWAY_DISCONNECTED_AFTER;
-      var name = escapeHtml(g.hostname || g.ip || ('gw' + j));
-      var label = isOuter ? '<span class="n-name">' + name + '</span>' : '';
-      nodeHtml += '<div class="cc-radar-node' + (isOnline ? '' : ' off') + '" style="left:' + x.toFixed(1) + '%;top:' + y.toFixed(1) + '%" title="' + name + '"><span class="n-dot"></span>' + label + '</div>';
-    }
-  });
 
   var recent = (requestsData || []).find(function(r){ return r.created_at; });
   var lastAgo = recent ? formatAgo(now - recent.created_at) : '';
@@ -1590,7 +1663,7 @@ function renderEmptyState() {
   var subParts = ['No commands waiting for approval'];
   if (disconnected > 0) subParts.push(disconnected + ' disconnected');
   if (lastAgo) subParts.push('last activity ' + lastAgo);
-  var headline = disconnected > 0 ? 'Fleet degraded' : 'Fleet at ease';
+  var headline = (disconnected > 0 ? 'Fleet degraded' : 'Fleet at ease') + ' \u00b7 ' + online + '/' + enrolled + ' online';
 
   var sparkHtml = renderSparkline();
 
@@ -1598,13 +1671,10 @@ function renderEmptyState() {
   var sessionsHtml = renderRecentSessions();
 
   return '<div class="cc-empty">' +
-    '<div class="cc-radar" style="width:' + radarSize + 'px;height:' + radarSize + 'px">' +
-      ringHtml +
-      '<div class="cc-radar-cross h"></div><div class="cc-radar-cross v"></div>' +
-      '<div class="cc-radar-tick n"></div><div class="cc-radar-tick s"></div><div class="cc-radar-tick e"></div><div class="cc-radar-tick w"></div>' +
-      '<div class="cc-radar-sweep"></div>' +
-      nodeHtml +
-      '<div class="cc-radar-core"><div class="big">' + online + '/' + enrolled + '</div><div class="lbl">gateways online</div></div>' +
+    '<div class="starfield-wrap">' +
+      '<div class="dust-layer" id="dust-layer"></div>' +
+      '<div class="sky" id="sky"><svg id="const-lines" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"></svg></div>' +
+      '<div class="const-legend" id="const-legend"></div>' +
     '</div>' +
     '<div class="cc-empty-headline">' + headline + '</div>' +
     '<div class="cc-empty-sub">' + subParts.join(' · ') + '</div>' +
@@ -2007,6 +2077,8 @@ function renderJitTickets() {
     if (container.dataset.sig === sig && container.firstElementChild) return;
     container.dataset.sig = sig;
     container.innerHTML = renderEmptyState();
+    buildStaticSky();
+    buildStarfield(_layout);
     return;
   }
   container.dataset.sig = '';
