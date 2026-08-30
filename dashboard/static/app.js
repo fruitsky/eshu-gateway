@@ -1579,9 +1579,9 @@ function placeGatewayNode(g,x,y,cls){
   var n=document.createElement('div');
   var name=g.hostname||g.ip||'gw';
   n.className='gw-node '+(cls||'');
-  n.setAttribute('data-name',name); n.title=name;
+  n.setAttribute('data-name',name); n.setAttribute('data-ip', g.ip||''); n.title=name;
   n.style.left=x.toFixed(1)+'%'; n.style.top=y.toFixed(1)+'%';
-  n.innerHTML='<span class="n-dot"></span><span class="n-ini">'+gwIni(name)+'</span>';
+  n.innerHTML='<span class="n-dot"></span><span class="n-ini">'+gwIni(name)+'</span>'+(cls==='overridden'?'<span class="n-ovr">OVR</span>':'');
   sky.appendChild(n);
 }
 
@@ -1590,6 +1590,8 @@ function buildStarfield(layoutIdx){
   var svg=document.getElementById('const-lines');
   var legend=document.getElementById('const-legend');
   if(!sky||!svg||!legend) return;
+  _activeConst=null;
+  if(_selGw) deselectGateway();
   sky.querySelectorAll('.gw-node,.field-star').forEach(function(el){el.remove();});
   svg.innerHTML='';
   var R=mulberry32((layoutIdx+1)*2654435761);
@@ -1633,12 +1635,80 @@ function buildStarfield(layoutIdx){
     if(gi<N){
       var g=gws[gi], p=pts[pi];
       var isOnline=(now-(g.last_seen||0))<GATEWAY_DISCONNECTED_AFTER;
-      var cls=pendingSet[g.hostname||g.ip]?'pending':(isOnline?'':'offline');
+      var isPending=!!pendingSet[g.hostname||g.ip];
+      var isOverridden=(g.override_remaining||0)>0;
+      var cls=isOverridden?'overridden':(isPending?'pending':(isOnline?'':'offline'));
       placeGatewayNode(g, p.x, p.y, cls);
       used[pi]=true;
     }
   });
   pts.forEach(function(p,pi){ if(used[pi]) return; var s=document.createElement('span'); s.className='field-star'; s.style.left=p.x.toFixed(1)+'%'; s.style.top=p.y.toFixed(1)+'%'; sky.appendChild(s); });
+}
+
+var _activeConst=null;
+function selectConstellation(name){
+  if(_activeConst===name) name=null;
+  _activeConst=name;
+  var legend=document.getElementById('const-legend');
+  var svg=document.getElementById('const-lines');
+  if(legend) legend.querySelectorAll('.cname').forEach(function(el){ el.classList.toggle('active', el.getAttribute('data-const')===name); });
+  if(svg) svg.querySelectorAll('.const-group').forEach(function(g){ g.classList.toggle('active', g.getAttribute('data-const')===name); });
+}
+
+var _selGw=null;
+function selectGwNode(node){
+  if(_selGw===node) return;
+  deselectGateway();
+  _selGw=node;
+  node.classList.add('selected');
+  var name=node.getAttribute('data-name')||'';
+  var el=document.getElementById('sel-hint-name');
+  if(el) el.textContent=name;
+  var hint=document.getElementById('sel-hint');
+  if(hint) hint.classList.add('show');
+}
+function deselectGateway(){
+  if(_selGw) _selGw.classList.remove('selected');
+  _selGw=null;
+  var hint=document.getElementById('sel-hint');
+  if(hint) hint.classList.remove('show');
+}
+function openOverride(){
+  if(!_selGw) return;
+  openOverrideModal(_selGw.getAttribute('data-ip'), _selGw.getAttribute('data-name'));
+}
+
+var FLY_DIRS=[
+  {out:'scale(1.55)', in:'scale(0.62)'},
+  {out:'translateX(-17%) scale(1.08)', in:'translateX(17%) scale(0.9)'},
+  {out:'translateX(17%) scale(1.08)', in:'translateX(-17%) scale(0.9)'},
+  {out:'translateY(17%) scale(1.08)', in:'translateY(-17%) scale(0.9)'},
+  {out:'translateY(-17%) scale(1.08)', in:'translateY(17%) scale(0.9)'},
+  {out:'translate(-13%,-13%) scale(1.12)', in:'translate(13%,13%) scale(0.88)'},
+  {out:'translate(13%,-13%) scale(1.12)', in:'translate(-13%,13%) scale(0.88)'}
+];
+function nextConstellation(){
+  var sky=document.getElementById('sky');
+  if(!sky) return;
+  var d=FLY_DIRS[Math.floor(Math.random()*FLY_DIRS.length)];
+  whoosh(true);
+  sky.style.transition='transform .7s cubic-bezier(.5,0,.75,.4), opacity .5s ease';
+  sky.style.transform=d.out;
+  sky.style.opacity='0';
+  clearTimeout(nextConstellation._t);
+  nextConstellation._t=setTimeout(function(){
+    _layout=(_layout+1)%LAYOUTS;
+    sessionStorage.setItem('eshu_layout',_layout);
+    buildStarfield(_layout);
+    sky.style.transition='none';
+    sky.style.transform=d.in;
+    sky.style.opacity='0';
+    void sky.offsetWidth;
+    sky.style.transition='transform 1.3s cubic-bezier(.16,1,.3,1), opacity .6s ease';
+    sky.style.transform='none';
+    sky.style.opacity='1';
+    whoosh(false);
+  },680);
 }
 
 function renderEmptyState() {
@@ -1902,13 +1972,10 @@ function flashGlitch(text, danger) {
   flashGlitch._t = setTimeout(function(){ glitch.className = 'glitch'; }, 950);
 }
 
-// ── Radar node flash (auto-approved / blocked) ──────────────────────────
+// ── Node flash (auto-approved / blocked) ───────────────────────────────
 function flashRadarNode(host, type) {
-  var nodes = document.querySelectorAll('.cc-radar-node');
-  nodes.forEach(function(node) {
-    var nameEl = node.querySelector('.n-name');
-    var title = node.getAttribute('title') || '';
-    if (title === host || (nameEl && nameEl.textContent === host)) {
+  document.querySelectorAll('.gw-node').forEach(function(node) {
+    if (node.getAttribute('data-name') === host || node.getAttribute('title') === host) {
       node.classList.add('flash-' + type);
       setTimeout(function() { node.classList.remove('flash-' + type); }, 1200);
     }
@@ -1981,6 +2048,30 @@ function playBlockedChime() {
   } catch(e) {}
 }
 
+function whoosh(up){
+  try{
+    var ctx=getAudioCtx(), now=ctx.currentTime, dur=up?0.7:1.05;
+    var len=Math.floor(ctx.sampleRate*dur);
+    var buf=ctx.createBuffer(1,len,ctx.sampleRate), d=buf.getChannelData(0);
+    for(var i=0;i<len;i++){ var env=Math.sin(Math.PI*i/len); d[i]=(Math.random()*2-1)*env*0.5; }
+    var src=ctx.createBufferSource(); src.buffer=buf;
+    var bp=ctx.createBiquadFilter(); bp.type='bandpass'; bp.Q.value=1.1;
+    if(up){ bp.frequency.setValueAtTime(300,now); bp.frequency.exponentialRampToValueAtTime(2600,now+dur); }
+    else { bp.frequency.setValueAtTime(2600,now); bp.frequency.exponentialRampToValueAtTime(260,now+dur); }
+    var g=ctx.createGain(); g.gain.value=0.07;
+    src.connect(bp); bp.connect(g); g.connect(ctx.destination);
+    src.start(now); src.stop(now+dur+0.05);
+    var bass=ctx.createOscillator(); bass.type='sine';
+    if(up){ bass.frequency.setValueAtTime(75,now); bass.frequency.exponentialRampToValueAtTime(55,now+dur); }
+    else { bass.frequency.setValueAtTime(55,now); bass.frequency.exponentialRampToValueAtTime(80,now+dur); }
+    var bg=ctx.createGain(); bg.gain.setValueAtTime(0,now);
+    bg.gain.linearRampToValueAtTime(0.07, now+dur*0.4);
+    bg.gain.linearRampToValueAtTime(0, now+dur);
+    bass.connect(bg); bg.connect(ctx.destination);
+    bass.start(now); bass.stop(now+dur+0.05);
+  }catch(e){}
+}
+
 // ── MCP starfield — faint integration "stars" behind the dashboard ─────
 function _starHash(s) {
   var h = 0;
@@ -2047,12 +2138,28 @@ async function pollMcpActivity() {
 }
 
 document.addEventListener('keydown', function(e) {
-  if (e.key === 'f' || e.key === 'F') {
-    if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT' || e.target.isContentEditable)) return;
-    document.body.classList.toggle('focus');
-  } else if (e.key === 'Escape') {
+  var typing = e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT' || e.target.isContentEditable);
+  if (e.key === 'f' || e.key === 'F') { if (typing) return; document.body.classList.toggle('focus'); }
+  else if (e.key === 'c' || e.key === 'C') { if (typing) return; nextConstellation(); }
+  else if (e.key === 'o' || e.key === 'O') { if (typing) return; openOverride(); }
+  else if (e.key === 'Escape') {
+    var om = document.getElementById('override-modal');
+    if (om && !om.classList.contains('hidden')) { om.classList.add('hidden'); }
+    else { deselectGateway(); }
     document.body.classList.remove('focus');
   }
+});
+
+document.addEventListener('click', function(e) {
+  var t = e.target;
+  if (!t || !t.closest) return;
+  var hit = t.closest('.const-hit');
+  if (hit) { var g = hit.closest('.const-group'); if (g) selectConstellation(g.getAttribute('data-const')); return; }
+  var nm = t.closest('.cname');
+  if (nm) { selectConstellation(nm.getAttribute('data-const')); return; }
+  var gn = t.closest('.gw-node');
+  if (gn) { selectGwNode(gn); return; }
+  if (t.closest('.starfield-wrap')) { deselectGateway(); }
 });
 
 function renderJitTickets() {
