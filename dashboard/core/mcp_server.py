@@ -128,6 +128,13 @@ def _build_tool_fn(integration_name: str, tool: dict):
     # param per `filter_fields` entry). They're kept out of the forwarded
     # params below so they never reach the upstream API.
     effective_params = list(catalog_params)
+    # Phase 2: session_id / execution_id are structured, optional MCP fields that
+    # group this call with related SSH commands in the dashboard. They are popped
+    # in run_tool and never forwarded to the upstream API.
+    effective_params.append({'name': 'session_id', 'type': 'string',
+                             'description': 'Optional conversation/session id to group this call with related SSH commands.', 'required': False})
+    effective_params.append({'name': 'execution_id', 'type': 'string',
+                             'description': 'Optional per-run execution id (e.g. which subagent ran this).', 'required': False})
     if fields and not mutating:
         effective_params.append({'name': 'full', 'type': 'boolean',
                                  'description': 'Return the full, unprojected object.', 'required': False})

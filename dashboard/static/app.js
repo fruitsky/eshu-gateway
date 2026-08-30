@@ -1375,7 +1375,7 @@ async function showWindowHistory(windowId) {
 }
 
 // ── Init ─────────────────────────────────────────────────────────────────
-async function initDashboard() { updateNotifyUI(); fetchVersion(); fetchRequests(); fetchCmdDescs(); fetchSuggestions(); refreshPasswordUI(); fetchFreezeStatus(); fetchFleetCommands(); fetchGateways(); }
+async function initDashboard() { updateNotifyUI(); fetchVersion(); fetchRequests(); fetchCmdDescs(); fetchSuggestions(); refreshPasswordUI(); fetchFreezeStatus(); fetchFleetCommands(); fetchGateways(); fetchIntegrations(); }
 
 // ── Requests ─────────────────────────────────────────────────────────────
 let _requestSearchQuery = '';
@@ -1845,20 +1845,48 @@ function flashRadarNode(host, type) {
 }
 
 // ── Sound effects (Web Audio API) ──────────────────────────────────────
+function _tone(ctx, freq, start, dur, type, peak) {
+  var osc = ctx.createOscillator(), gain = ctx.createGain();
+  osc.type = type || 'sine';
+  osc.frequency.value = freq;
+  gain.gain.setValueAtTime(0, start);
+  gain.gain.linearRampToValueAtTime(peak, start + 0.015);
+  gain.gain.exponentialRampToValueAtTime(0.0001, start + dur);
+  osc.connect(gain); gain.connect(ctx.destination);
+  osc.start(start); osc.stop(start + dur + 0.05);
+}
+
 function playAutoChime() {
   if (!notifySound || soundMuted) return;
+  var nowTs = Date.now();
+  if (nowTs - _lastAutoChimeAt < 1400) return;
+  _lastAutoChimeAt = nowTs;
   try {
     var ctx = getAudioCtx(), now = ctx.currentTime;
-    // ascending two-note chime — bright, positive
-    [784.00, 1174.66].forEach(function(freq, i) {
-      var osc = ctx.createOscillator(), gain = ctx.createGain();
-      osc.type = 'sine'; osc.frequency.value = freq;
-      var t = now + i * 0.12;
-      gain.gain.setValueAtTime(0, t);
-      gain.gain.linearRampToValueAtTime(0.18, t + 0.03);
-      gain.gain.linearRampToValueAtTime(0, t + 0.25);
-      osc.connect(gain); gain.connect(ctx.destination);
-      osc.start(t); osc.stop(t + 0.25);
+    // Rising pentatonic arpeggio + soft pad — a calm "fleet at work" motif (~2s).
+    var notes = [440.00, 523.25, 659.25, 783.99, 880.00, 1046.50];
+    var times = [0, 0.16, 0.32, 0.48, 0.66, 0.86];
+    notes.forEach(function(f, i) {
+      _tone(ctx, f, now + times[i], 0.5, 'triangle', 0.15);
+      _tone(ctx, f * 2, now + times[i], 0.32, 'sine', 0.05);
+    });
+    _tone(ctx, 110.00, now, 2.0, 'sine', 0.05);
+  } catch(e) {}
+}
+
+function playMcpChime() {
+  if (!notifySound || soundMuted) return;
+  var nowTs = Date.now();
+  if (nowTs - _lastMcpChimeAt < 1500) return;
+  _lastMcpChimeAt = nowTs;
+  try {
+    var ctx = getAudioCtx(), now = ctx.currentTime;
+    // Higher, airier twinkle — a distinct "sky" voice for MCP/API activity (~2s).
+    var notes = [1174.66, 1567.98, 1318.51, 1975.53, 1760.00];
+    var times = [0, 0.18, 0.36, 0.56, 0.78];
+    notes.forEach(function(f, i) {
+      _tone(ctx, f, now + times[i], 0.45, 'sine', 0.09);
+      _tone(ctx, f * 1.5, now + times[i], 0.28, 'sine', 0.035);
     });
   } catch(e) {}
 }
@@ -1879,6 +1907,71 @@ function playBlockedChime() {
       osc.connect(gain); gain.connect(ctx.destination);
       osc.start(t); osc.stop(t + 0.35);
     });
+  } catch(e) {}
+}
+
+// ── MCP starfield — faint integration "stars" behind the dashboard ─────
+function _starHash(s) {
+  var h = 0;
+  for (var i = 0; i < s.length; i++) { h = (h * 31 + s.charCodeAt(i)) >>> 0; }
+  return h;
+}
+function ensureMcpStarfield() {
+  var layer = document.getElementById('mcp-starfield');
+  if (layer) return layer;
+  layer = document.createElement('div');
+  layer.id = 'mcp-starfield';
+  layer.setAttribute('aria-hidden', 'true');
+  document.body.appendChild(layer);
+  return layer;
+}
+function syncMcpStars() {
+  var layer = ensureMcpStarfield();
+  var ints = (_integrationsData || []).filter(function(i) { return i.enabled; });
+  var key = ints.map(function(i) { return i.name; }).sort().join('|');
+  if (layer.dataset.key === key) return;
+  layer.dataset.key = key;
+  layer.innerHTML = ints.map(function(i) {
+    var h = _starHash(i.name);
+    var x = 5 + (h % 90);
+    var y = 9 + ((h >>> 8) % 83);
+    var size = 2 + (h % 3);
+    var delay = (h % 60) / 10;
+    return '<span class="mcp-star" data-name="' + esc(i.name) + '" title="' + esc(i.name) + '" style="left:' + x + '%;top:' + y + '%;width:' + size + 'px;height:' + size + 'px;animation-delay:-' + delay + 's"></span>';
+  }).join('');
+}
+function pulseMcpStar(name) {
+  document.querySelectorAll('.mcp-star').forEach(function(star) {
+    if (star.getAttribute('data-name') !== name) return;
+    star.classList.remove('pulse');
+    void star.offsetWidth;
+    star.classList.add('pulse');
+    setTimeout(function() { star.classList.remove('pulse'); }, 2500);
+  });
+}
+async function pollMcpActivity() {
+  try {
+    var res = await authFetch('/api/integration-calls?limit=25');
+    if (!res.ok) return;
+    var data = await res.json();
+    var rows = (data.rows || []).filter(function(c) { return (c.agent || '') !== 'operator'; });
+    if (!_mcpActivitySeeded) {
+      _mcpActivitySeeded = true;
+      var mx = 0;
+      rows.forEach(function(c) { if (c.id > mx) mx = c.id; });
+      _maxMcpCallId = mx;
+      return;
+    }
+    var fresh = rows.filter(function(c) { return c.id > _maxMcpCallId; });
+    if (fresh.length === 0) return;
+    fresh.forEach(function(c) { if (c.id > _maxMcpCallId) _maxMcpCallId = c.id; });
+    var seen = {};
+    fresh.forEach(function(c) {
+      if (!c.integration || seen[c.integration]) return;
+      seen[c.integration] = true;
+      pulseMcpStar(c.integration);
+    });
+    playMcpChime();
   } catch(e) {}
 }
 
@@ -4259,6 +4352,16 @@ setInterval(function() {
   if (!document.getElementById('setup-overlay').classList.contains('hidden')) return;
   if (document.getElementById('view-windows').classList.contains('block')) fetchWindowsTable();
 }, 30000);
+setInterval(function() {
+  if (!document.getElementById('login-overlay').classList.contains('hidden')) return;
+  if (!document.getElementById('setup-overlay').classList.contains('hidden')) return;
+  pollMcpActivity();
+}, 4000);
+setInterval(function() {
+  if (!document.getElementById('login-overlay').classList.contains('hidden')) return;
+  if (!document.getElementById('setup-overlay').classList.contains('hidden')) return;
+  syncMcpStars();
+}, 30000);
 
 // ── Integrations & MCP ──────────────────────────────────────────────────
 let _selectedIntegration = null;
@@ -4462,6 +4565,7 @@ async function fetchIntegrationList() {
     if (!res.ok) return;
     _integrationsData = await res.json();
     renderIntegrationList();
+    syncMcpStars();
   } catch(e) {}
 }
 

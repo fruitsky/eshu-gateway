@@ -169,6 +169,8 @@ def init_integrations_tables(cursor):
             response_bytes INTEGER NOT NULL DEFAULT 0,
             truncated INTEGER NOT NULL DEFAULT 0,
             outcome TEXT NOT NULL DEFAULT 'ok',
+            session_id TEXT NOT NULL DEFAULT '',
+            execution_id TEXT NOT NULL DEFAULT '',
             created_at INTEGER NOT NULL
         )
     ''')
@@ -182,13 +184,21 @@ def init_integrations_tables(cursor):
             status TEXT NOT NULL DEFAULT 'pending',
             result TEXT NOT NULL DEFAULT '',
             created_at INTEGER NOT NULL,
-            resolved_at INTEGER NOT NULL DEFAULT 0
+            resolved_at INTEGER NOT NULL DEFAULT 0,
+            session_id TEXT NOT NULL DEFAULT '',
+            execution_id TEXT NOT NULL DEFAULT ''
         )
     ''')
     try:
         cursor.execute("ALTER TABLE pending_integration_calls ADD COLUMN secret_hashes TEXT DEFAULT '{}'")
     except Exception:
         pass
+    for col in ('session_id', 'execution_id'):
+        for tbl in ('integration_calls', 'pending_integration_calls'):
+            try:
+                cursor.execute(f"ALTER TABLE {tbl} ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
+            except Exception:
+                pass
 
 
 # ── Integrations ────────────────────────────────────────────────────────
@@ -484,17 +494,20 @@ def delete_tool(tool_id: int) -> bool:
 
 def record_integration_call(integration: str, tool: str, agent: str, method: str,
                             path: str, status_code, latency_ms, response_summary: str,
-                            response_bytes: int, truncated: int, outcome: str = 'ok'):
+                            response_bytes: int, truncated: int, outcome: str = 'ok',
+                            session_id: str = '', execution_id: str = ''):
     with db_conn() as conn:
         cursor = conn.cursor()
         now = int(time.time())
         cursor.execute('''
             INSERT INTO integration_calls
                 (integration, tool, agent, method, path, status_code, latency_ms,
-                 response_summary, response_bytes, truncated, outcome, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 response_summary, response_bytes, truncated, outcome, session_id,
+                 execution_id, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (integration, tool, agent, method, path, status_code, latency_ms,
-              response_summary, response_bytes, truncated, outcome, now))
+              response_summary, response_bytes, truncated, outcome, session_id,
+              execution_id, now))
         conn.commit()
         return cursor.lastrowid
 
@@ -535,14 +548,15 @@ def get_integration_calls(search: str = None, start: int = None, end: int = None
 
 # ── Pending (approval) calls ────────────────────────────────────────────
 
-def create_pending_call(integration: str, tool: str, payload: dict, reason: str = '') -> int:
+def create_pending_call(integration: str, tool: str, payload: dict, reason: str = '',
+                        session_id: str = '', execution_id: str = '') -> int:
     with db_conn() as conn:
         cursor = conn.cursor()
         now = int(time.time())
         cursor.execute('''
-            INSERT INTO pending_integration_calls (integration, tool, payload, reason, status, created_at)
-            VALUES (?, ?, ?, ?, 'pending', ?)
-        ''', (integration, tool, json.dumps(payload or {}), reason, now))
+            INSERT INTO pending_integration_calls (integration, tool, payload, reason, status, session_id, execution_id, created_at)
+            VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)
+        ''', (integration, tool, json.dumps(payload or {}), reason, session_id, execution_id, now))
         conn.commit()
         return cursor.lastrowid
 

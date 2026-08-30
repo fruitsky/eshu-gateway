@@ -41,6 +41,11 @@ def run_tool(integration_name: str, tool_name: str, args: dict, reason: str = ''
         return _error("Tool not found or disabled", 404)
 
     args = args or {}
+    # Phase 2: MCP tool calls accept structured session_id / execution_id so the
+    # dashboard groups them with SSH commands from the same agent conversation.
+    # Popped here so they never reach the upstream API as forwarded params.
+    session_id = (args.pop('session_id', '') or '')[:64]
+    execution_id = (args.pop('execution_id', '') or '')[:64]
     if tool.get('not_implemented'):
         return json.dumps({'error': 'not_implemented',
                            'message': f"{tool_name} is declared in the catalog "
@@ -57,13 +62,16 @@ def run_tool(integration_name: str, tool_name: str, args: dict, reason: str = ''
             command = tool.get('path_template') or args.get('command') or ''
             payload = args.get('payload')
             return execute_ws_call(integration, command, payload,
-                                   agent=AGENT_LABEL, tool_name=tool_name)
+                                   agent=AGENT_LABEL, tool_name=tool_name,
+                                   session_id=session_id, execution_id=execution_id)
         if generic:
             return execute_generic_call(
                 integration, args.get('method'), args.get('path'),
                 args.get('params'), args.get('data'),
-                agent=AGENT_LABEL, tool_name=tool_name, root=bool(args.get('root')))
-        return execute_integration_call(integration, tool, args, agent=AGENT_LABEL)
+                agent=AGENT_LABEL, tool_name=tool_name, root=bool(args.get('root')),
+                session_id=session_id, execution_id=execution_id)
+        return execute_integration_call(integration, tool, args, agent=AGENT_LABEL,
+                                        session_id=session_id, execution_id=execution_id)
 
     # Read-only: always execute (auto-run + audit) and shape client-side.
     if not mutating:
@@ -93,7 +101,8 @@ def run_tool(integration_name: str, tool_name: str, args: dict, reason: str = ''
                    or bool(tool.get('always_gate')))
 
     if should_gate:
-        call_id = create_pending_call(integration['name'], tool_name, args, reason)
+        call_id = create_pending_call(integration['name'], tool_name, args, reason,
+                                      session_id=session_id, execution_id=execution_id)
         from core.notify import send_notify
         send_notify('jit', 'API Approval Required',
                     '`%s` on %s: ' % (tool_name, integration_name) + (reason or '')[:80])

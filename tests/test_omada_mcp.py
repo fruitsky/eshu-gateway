@@ -767,7 +767,9 @@ class TestGenericReadRegisters:
         t = reg.get("x_read")
         assert t is not None, "x_read not registered"
         params = list(inspect.signature(t.fn).parameters)
-        assert params == ["path", "method", "params"], f"unexpected order: {params}"
+        # session_id / execution_id are appended optional structured fields
+        # (Phase 2) so MCP calls group with SSH sessions in the dashboard.
+        assert params == ["path", "method", "params", "session_id", "execution_id"], f"unexpected order: {params}"
 
 
 @pytest.fixture

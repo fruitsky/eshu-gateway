@@ -115,6 +115,8 @@ button::-moz-focus-inner { border: 0; padding: 0; }
     display: flex;
     flex-direction: column;
     overflow: hidden;
+    position: relative;
+    z-index: 1;
   }
   .main-header {
     display: flex; justify-content: space-between; align-items: center;
@@ -1427,7 +1429,11 @@ textarea { font-family: 'JetBrains Mono', monospace !important; }
   .cc-radar-tick.s { bottom: 10%; left: 50%; transform: translateX(-50%) rotate(90deg); }
   .cc-radar-sweep { position: absolute; inset: 0; border-radius: 50%; background: conic-gradient(from 0deg, rgba(245,158,11,0.26), transparent 55deg, transparent 360deg); animation: cc-sweep 5.5s linear infinite; }
   .cc-radar-node { position: absolute; transform: translate(-50%, -50%); display: flex; flex-direction: column; align-items: center; gap: 3px; }
-  .cc-radar-node .n-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--status-success); box-shadow: 0 0 10px var(--accent-glow); }
+  .cc-radar-node .n-dot { position: relative; width: 8px; height: 8px; border-radius: 50%; background: var(--status-success); box-shadow: 0 0 10px var(--accent-glow); }
+  .cc-radar-node .n-dot::after { content: ''; position: absolute; inset: -4px; border-radius: 50%; border: 1px solid rgba(245,158,11,0.6); opacity: 0; }
+  .cc-radar-node.flash-auto .n-dot::after { animation: cc-node-ring 1.15s ease-out; }
+  .cc-radar-node.flash-blocked .n-dot::after { border-color: rgba(220,38,38,0.7); animation: cc-node-ring 1.15s ease-out; }
+  @keyframes cc-node-ring { 0% { opacity: 0.8; transform: scale(0.4); } 100% { opacity: 0; transform: scale(3.2); } }
   .cc-radar-node.off .n-dot { background: var(--text-muted); box-shadow: none; }
   .cc-radar-node .n-name { font-family: 'JetBrains Mono', monospace; font-size: 8px; letter-spacing: 1px; text-transform: uppercase; color: var(--text-muted); }
   .cc-radar-core { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); text-align: center; }
@@ -1753,6 +1759,16 @@ textarea { font-family: 'JetBrains Mono', monospace !important; }
   @keyframes cc-sweep { to { transform: rotate(360deg); } }
   @keyframes cc-breathe { 0%,100% { transform: scale(1); } 50% { transform: scale(1.02); } }
   @keyframes cc-ticker { to { transform: translateX(-50%); } }
+
+  /* ── MCP starfield — faint integration stars behind the dashboard ── */
+  #mcp-starfield { position: fixed; inset: 0; z-index: 0; pointer-events: none; overflow: hidden; }
+  .mcp-star { position: absolute; border-radius: 50%; background: #f0e6d4; opacity: 0.18; box-shadow: 0 0 6px 1px rgba(245,158,11,0.18); animation: mcp-twinkle 7s ease-in-out infinite; }
+  .mcp-star::after { content: ''; position: absolute; inset: -4px; border-radius: 50%; border: 1px solid rgba(245,158,11,0.55); opacity: 0; transform: scale(0.5); }
+  .mcp-star.pulse { animation: mcp-star-flash 2.4s ease-out; }
+  .mcp-star.pulse::after { animation: mcp-star-ring 2.4s ease-out; }
+  @keyframes mcp-twinkle { 0%, 100% { opacity: 0.12; } 50% { opacity: 0.3; } }
+  @keyframes mcp-star-flash { 0% { opacity: 0.95; transform: scale(1.5); } 100% { opacity: 0.18; transform: scale(1); } }
+  @keyframes mcp-star-ring { 0% { opacity: 0.8; transform: scale(0.5); } 100% { opacity: 0; transform: scale(3.2); } }
 
   /* ── Reduced motion ─────────────────────────────────────── */
   @media (prefers-reduced-motion: reduce) {

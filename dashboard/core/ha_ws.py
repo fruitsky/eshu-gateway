@@ -80,7 +80,8 @@ def ha_ws_request(integration: dict, command: str, payload: dict) -> dict:
 
 
 def execute_ws_call(integration: dict, command: str, payload=None,
-                    agent: str = '', tool_name: str = '') -> dict:
+                    agent: str = '', tool_name: str = '',
+                    session_id: str = '', execution_id: str = '') -> dict:
     """Run one HA WS command with audit logging. Returns a result dict shaped
     like the HTTP executors ({status_code, body, truncated, latency_ms, error}),
     so callers (MCP tool runner / approval executor) handle it uniformly."""
@@ -110,6 +111,8 @@ def execute_ws_call(integration: dict, command: str, payload=None,
         response_bytes=len(body),
         truncated=0,
         outcome=outcome,
+        session_id=session_id,
+        execution_id=execution_id,
     )
     return {'status_code': status_code, 'body': body, 'truncated': 0,
             'latency_ms': latency_ms, 'error': error}

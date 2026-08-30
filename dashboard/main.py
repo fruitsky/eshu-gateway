@@ -2442,6 +2442,8 @@ def _surface_integration_call(call, status: str):
         status=status,
         ttl=0,
         reason=call['reason'],
+        session_id=(call.get('session_id') or '')[:64],
+        execution_id=(call.get('execution_id') or '')[:64],
     )
 
 
