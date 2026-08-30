@@ -1433,6 +1433,16 @@ textarea { font-family: 'JetBrains Mono', monospace !important; }
   .cc-ticker-item .t { color: var(--text-muted); }
   .cc-ticker-item .tag { color: var(--accent); opacity: 0.8; }
 
+  /* command rhythm sparkline (empty state) */
+  .cc-spark-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; width: 100%; max-width: 560px; margin-top: 4px; }
+  .cc-spark-card { background: var(--bg-surface); border: 1px solid var(--border-color); border-radius: var(--radius); padding: 12px 14px; }
+  .cc-spark-card .h { font-family: ''JetBrains Mono'', monospace; font-size: 9px; font-weight: 600; text-transform: uppercase; letter-spacing: 2px; color: var(--text-muted); margin-bottom: 10px; }
+  .cc-spark-wrap { display: flex; align-items: flex-end; gap: 3px; height: 44px; }
+  .cc-spark-bar { flex: 1; background: linear-gradient(180deg, rgba(245,158,11,0.65), rgba(245,158,11,0.10)); border-radius: 2px 2px 0 0; min-width: 2px; }
+  .cc-spark-stats { font-family: ''JetBrains Mono'', monospace; font-size: 20px; font-weight: 700; color: var(--accent); line-height: 1; }
+  .cc-spark-stats span { font-size: 10px; font-weight: 500; color: var(--text-muted); }
+  .cc-spark-sub { font-family: ''JetBrains Mono'', monospace; font-size: 10px; color: var(--text-muted); margin-top: 4px; }
+
   /* borderless empty-state — integrate radar into the page background */
   .widget.flat { background: transparent !important; border: none !important; box-shadow: none !important; padding: 0 !important; margin-bottom: 0 !important; }
   .widget.flat .widget-header { display: none !important; }
@@ -1541,8 +1551,12 @@ textarea { font-family: 'JetBrains Mono', monospace !important; }
   .cc-recent-sessions { width: 100%; max-width: 560px; margin-top: 8px; }
   .cc-recent-sessions-header { font-family: 'JetBrains Mono', monospace; font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 2px; color: var(--text-muted); margin-bottom: 10px; text-align: center; }
   .cc-recent-sessions-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 8px; max-height: 200px; overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--border-color) transparent; }
-  .recent-session-card { background: var(--bg-surface); border: 1px solid var(--border-color); border-radius: var(--radius); padding: 10px 12px; cursor: pointer; transition: border-color 0.15s, box-shadow 0.15s; }
-  .recent-session-card:hover { border-color: rgba(245,158,11,0.4); box-shadow: 0 0 12px var(--accent-glow); }
+  .recent-session-card { background: var(--bg-surface); border: 1px solid var(--border-color); border-radius: var(--radius); padding: 12px 14px; cursor: pointer; transition: border-color 0.15s, box-shadow 0.15s; position: relative; display: flex; flex-direction: column; gap: 6px; border-left: 3px solid rgba(245,158,11,0.35); }
+  .recent-session-card:hover { border-color: rgba(245,158,11,0.5); box-shadow: 0 0 16px var(--accent-glow); background: var(--bg-surface); }
+  .recent-session-card .rs-title { font-family: 'JetBrains Mono', monospace; font-size: 12px; font-weight: 700; color: var(--text-main); display: flex; align-items: center; gap: 6px; }
+  .recent-session-card .rs-title .host { color: var(--accent); }
+  .recent-session-card .rs-cmd-block { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--fg-dim); background: var(--bg-base); border: 1px solid var(--border-color); border-radius: 4px; padding: 6px 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .recent-session-card .rs-meta { display: flex; align-items: center; gap: 10px; font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--text-muted); }
   .rs-header { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
   .rs-name { font-family: 'JetBrains Mono', monospace; font-size: 11px; font-weight: 700; color: var(--accent); }
   .rs-host { font-family: 'JetBrains Mono', monospace; font-size: 9px; color: var(--text-muted); background: var(--bg-base); padding: 1px 6px; border-radius: 3px; }

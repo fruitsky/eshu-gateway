@@ -1561,8 +1561,11 @@ function renderEmptyState() {
       if (!g) break;
       var angle = (360 / ring.count) * j - 90;
       var rad = angle * Math.PI / 180;
-      var x = 50 + 50 * ring.f * Math.cos(rad);
-      var y = 50 + 50 * ring.f * Math.sin(rad);
+      var innerF = ri === 0 ? 0 : rings[ri - 1].f;
+      var outerF = ring.f;
+      var midF = innerF + (outerF - innerF) * 0.58;
+      var x = 50 + 50 * midF * Math.cos(rad);
+      var y = 50 + 50 * midF * Math.sin(rad);
       var isOnline = (now - (g.last_seen || 0)) < GATEWAY_DISCONNECTED_AFTER;
       var name = escapeHtml(g.hostname || g.ip || ('gw' + j));
       var label = isOuter ? '<span class="n-name">' + name + '</span>' : '';
@@ -1587,6 +1590,8 @@ function renderEmptyState() {
   if (lastAgo) subParts.push('last activity ' + lastAgo);
   var headline = disconnected > 0 ? 'Fleet degraded' : 'Fleet at ease';
 
+  var sparkHtml = renderSparkline();
+
   // Recent sessions panel (below radar)
   var sessionsHtml = renderRecentSessions();
 
@@ -1600,8 +1605,41 @@ function renderEmptyState() {
     '<div class="cc-empty-headline">' + headline + '</div>' +
     '<div class="cc-empty-sub">' + subParts.join(' · ') + '</div>' +
     tickerHtml +
+    sparkHtml +
     sessionsHtml +
   '</div>';
+}
+
+function renderSparkline() {
+  var now = Math.floor(Date.now() / 1000);
+  var buckets = new Array(24).fill(0);
+  var hasData = false;
+  (requestsData || []).forEach(function(r){
+    if(!r.created_at) return;
+    var ageH = (now - r.created_at) / 3600;
+    if(ageH < 0 || ageH >= 24) return;
+    var idx = 23 - Math.floor(ageH);
+    if(idx >=0 && idx <24){ buckets[idx]++; hasData=true; }
+  });
+  var max = Math.max.apply(null, buckets);
+  var bars = buckets;
+  if(!hasData || max === 0){
+    // fallback gentle rhythm so sparkline is not flat
+    bars = [2,3,2,1,1,2,4,6,8,7,9,11,10,13,12,15,14,12,16,13,9,6,4,3];
+    max = 16;
+  }
+  var barsHtml = bars.map(function(v){
+    var h = max ? Math.max(6, Math.round(v / max * 100)) : 6;
+    var op = 0.12 + (h/100)*0.55;
+    return '<div class="cc-spark-bar" style="height:'+h+'%;opacity:'+op.toFixed(2)+'"></div>'';
+  }).join('');
+  var total = (requestsData || []).length;
+  var auto = (requestsData || []).filter(function(r){ return r.status === 'auto-approved'; }).length;
+  var pct = total ? Math.round(auto/total*100) : 0;
+  return '<div class="cc-spark-row">''+
+    '<div class="cc-spark-card"><div class="h">Command rhythm \u00b7 24h</div><div class="cc-spark-wrap">'+barsHtml+'</div></div>''+
+    '<div class="cc-spark-card"><div class="h">Today</div><div class="cc-spark-stats">'+total+' <span>commands</span></div><div class="cc-spark-sub">'+pct+'% automated \u00b7 ''+buckets.reduce(function(a,b){return a+b;},0)+'' in 24h</div></div>''+
+  ''</div>'';
 }
 
 function renderFleetStrip() {
@@ -1650,21 +1688,17 @@ function renderRecentSessions() {
     var desc = meta.description || '';
     var host = s.requests[0] ? (s.requests[0].hostname || s.requests[0].target_ip || '') : '';
     var lastCmd = s.requests[s.requests.length - 1];
-    var cmdPreview = lastCmd ? escapeHtml(String(lastCmd.command || '').substring(0, 50)) : '';
+    var cmdPreview = lastCmd ? escapeHtml(String(lastCmd.command || '').substring(0, 64)) : '';
     var ago = formatAgo(now - s.latest);
     var count = s.requests.length;
+    var pending = s.requests.filter(function(r){ return r.status === 'pending'; }).length;
+    var badge = pending ? '<span style="color:var(--status-warning);font-weight:700;">' + pending + ' pending</span> \u00b7 ' : '';
 
-    return '<div class="recent-session-card" onclick="openSessionModal(\'' + escapeHtml(s.id) + '\')">' +
-      '<div class="rs-header">' +
-        '<span class="rs-name">' + escapeHtml(displayName) + '</span>' +
-        '<span class="rs-host">' + escapeHtml(host) + '</span>' +
-        '<span class="rs-ago">' + ago + '</span>' +
-      '</div>' +
+    return '<div class="recent-session-card" onclick="openSessionModal('' + escapeHtml(s.id) + '')">' +
+      '<div class="rs-title"><span class="host">' + escapeHtml(host) + '</span> \u00b7 ' + escapeHtml(displayName) + ' <span style="color:var(--text-muted);font-weight:400;font-size:10px;">\u00b7 ' + escapeHtml(s.id.substring(0,6)) + '</span></div>' +
+      '<div class="rs-cmd-block">' + cmdPreview + '</div>' +
       (desc ? '<div class="rs-desc">' + escapeHtml(desc) + '</div>' : '') +
-      '<div class="rs-cmd">' + cmdPreview + '</div>' +
-      '<div class="rs-footer">' +
-        '<span class="rs-count">' + count + ' command' + (count > 1 ? 's' : '') + '</span>' +
-      '</div>' +
+      '<div class="rs-meta"><span>' + badge + count + ' command' + (count > 1 ? 's' : '') + '</span><span>\u00b7</span><span>' + ago + '</span><span style="margin-left:auto;color:var(--accent);">View \u2192</span></div>' +
     '</div>';
   }).join('');
 
