@@ -69,10 +69,9 @@
     </div>
   </div>
   <div class="nav-section">
-    <div class="nav-label">Navigation</div>
+    <div class="nav-label">Command</div>
     <button class="nav-item active" id="nav-home" onclick="switchView('home')">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
-      <span>Dashboard</span>
+      <span>Command Center</span>
     </button>
     <button class="nav-item" id="nav-history" onclick="switchView('history')">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></svg>
@@ -83,8 +82,7 @@
       <span>Gateways</span>
     </button>
     <button class="nav-item" id="nav-windows" onclick="switchView('windows')">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-      <span>Windows</span>
+      <span>Approved Windows</span>
     </button>
     <button class="nav-item" id="nav-stats" onclick="switchView('stats')">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="12" width="4" height="8" rx="1"/><rect x="10" y="7" width="4" height="13" rx="1"/><rect x="17" y="3" width="4" height="17" rx="1"/></svg>
@@ -92,7 +90,7 @@
     </button>
   </div>
   <div class="nav-section">
-    <div class="nav-label">Operations</div>
+    <div class="nav-label">Fleet</div>
     <button class="nav-item" id="nav-controls" onclick="switchView('controls')">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
       <span>Controls</span>
@@ -129,12 +127,6 @@
 
 <!-- Main Content -->
 <div class="main-content" id="main-content" style="display:none;">
-  <div class="main-header">
-    <div class="flex items-center gap-2">
-      <span class="version-badge" id="dashboard-version-label">...</span>
-    </div>
-  </div>
-
   <!-- Override Mode Banner -->
   <div id="override-banner" class="override-banner hidden">
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="flex-shrink-0"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>

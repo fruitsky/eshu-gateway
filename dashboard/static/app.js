@@ -4539,9 +4539,11 @@ async function fetchVersion() {
     const res = await fetch('/api/version');
     const data = await res.json();
     var label = document.getElementById('dashboard-version-label');
-    label.textContent = data.version || '?';
-    if (data.dev_mode) {
-      label.innerHTML = (data.version || '?') + ' <span class="dev-badge">DEV</span>';
+    if (label) {
+      label.textContent = data.version || '?';
+      if (data.dev_mode) {
+        label.innerHTML = (data.version || '?') + ' <span class="dev-badge">DEV</span>';
+      }
     }
     document.title = 'Eshu Gateway | ' + (data.version || 'v0.1.0') + ' Control Center';
   } catch(e) {}
