@@ -1417,6 +1417,14 @@ textarea { font-family: 'JetBrains Mono', monospace !important; }
   .cc-radar-ring.r1 { inset: 0; }
   .cc-radar-ring.r2 { inset: 16%; border-color: rgba(245,158,11,0.11); }
   .cc-radar-ring.r3 { inset: 32%; border-color: rgba(245,158,11,0.09); }
+  .cc-radar-cross { position: absolute; background: rgba(245,158,11,0.07); }
+  .cc-radar-cross.h { left: 10%; right: 10%; top: 50%; height: 1px; }
+  .cc-radar-cross.v { top: 10%; bottom: 10%; left: 50%; width: 1px; }
+  .cc-radar-tick { position: absolute; width: 6px; height: 1px; background: rgba(245,158,11,0.18); }
+  .cc-radar-tick.e { right: 10%; top: 50%; transform: translateY(-50%); }
+  .cc-radar-tick.w { left: 10%; top: 50%; transform: translateY(-50%); }
+  .cc-radar-tick.n { top: 10%; left: 50%; transform: translateX(-50%) rotate(90deg); }
+  .cc-radar-tick.s { bottom: 10%; left: 50%; transform: translateX(-50%) rotate(90deg); }
   .cc-radar-sweep { position: absolute; inset: 0; border-radius: 50%; background: conic-gradient(from 0deg, rgba(245,158,11,0.26), transparent 55deg, transparent 360deg); animation: cc-sweep 5.5s linear infinite; }
   .cc-radar-node { position: absolute; transform: translate(-50%, -50%); display: flex; flex-direction: column; align-items: center; gap: 3px; }
   .cc-radar-node .n-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--status-success); box-shadow: 0 0 10px var(--accent-glow); }
@@ -1724,6 +1732,12 @@ textarea { font-family: 'JetBrains Mono', monospace !important; }
     gap: 6px;
     margin-top: 8px;
   }
+
+  /* Session modal — command cards styled like JIT tickets */
+  .session-modal-commands .jit-ticket { background: var(--bg-base); margin-bottom: 0; cursor: default; }
+  .session-modal-commands .jit-ticket.sm-resolved { opacity: 0.6; }
+  .session-modal-commands .jit-ticket.sm-resolved:hover { opacity: 0.85; }
+  .session-modal-commands .jit-ticket.sm-pending { border-left: 3px solid var(--status-warning); }
 
   @keyframes cc-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
   @keyframes cc-bar-grow { from { transform: scaleX(0); } to { transform: scaleX(1); } }

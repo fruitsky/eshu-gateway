@@ -1526,6 +1526,8 @@ function emptyStateSignature() {
 // crowd. Returns [{ f: radiusFraction, count }].
 function radarRings(n) {
   var rings = [];
+  // Innermost band is reserved for the online/total core counter — no nodes.
+  rings.push({ count: 0 });
   var placed = 0, i = 0;
   while (placed < n) {
     var cap = 8 + i * 6;
@@ -1598,6 +1600,8 @@ function renderEmptyState() {
   return '<div class="cc-empty">' +
     '<div class="cc-radar" style="width:' + radarSize + 'px;height:' + radarSize + 'px">' +
       ringHtml +
+      '<div class="cc-radar-cross h"></div><div class="cc-radar-cross v"></div>' +
+      '<div class="cc-radar-tick n"></div><div class="cc-radar-tick s"></div><div class="cc-radar-tick e"></div><div class="cc-radar-tick w"></div>' +
       '<div class="cc-radar-sweep"></div>' +
       nodeHtml +
       '<div class="cc-radar-core"><div class="big">' + online + '/' + enrolled + '</div><div class="lbl">gateways online</div></div>' +
@@ -1752,6 +1756,7 @@ function openSessionModal(sid) {
   });
 
   cmdsEl.innerHTML = sorted.map(function(r) {
+    var isPending = r.status === 'pending' && r.ttl > 0;
     var statusClass = '', statusLabel = r.status;
     if (r.status === 'pending') { statusClass = 'sm-st-pending'; statusLabel = 'pending'; }
     else if (r.status === 'approved') { statusClass = 'sm-st-approved'; statusLabel = 'approved'; }
@@ -1762,24 +1767,34 @@ function openSessionModal(sid) {
     else if (r.status === 'frozen') { statusClass = 'sm-st-blocked'; statusLabel = 'frozen'; }
     else if (r.status === 'override') { statusClass = 'sm-st-auto'; statusLabel = 'override'; }
 
+    var human = describeCmd(r.command);
+    var host = r.hostname || r.target_ip || '';
+
     var riskHtml = '';
     if (r.risk) riskHtml = '<div class="sm-risk">' + escapeHtml(r.risk) + '</div>';
+    if (r.anomaly) riskHtml += '<div class="sm-risk" style="color:var(--danger)">' + escapeHtml(r.anomaly) + '</div>';
 
     var actionsHtml = '';
-    if (r.status === 'pending' && r.ttl > 0) {
-      actionsHtml = '<div class="sm-actions">' +
+    if (isPending) {
+      actionsHtml = '<div class="jit-actions">' +
         '<button onclick="event.stopPropagation();handleAction(' + r.id + ',\'deny\')" class="btn btn-deny btn-xs">Deny</button>' +
         '<button onclick="event.stopPropagation();handleAction(' + r.id + ',\'approve\')" class="btn btn-approve btn-xs">Approve</button>' +
       '</div>';
     }
 
-    return '<div class="sm-cmd-card' + (r.status === 'pending' ? ' sm-pending' : '') + '">' +
-      '<div class="sm-cmd-top">' +
-        '<span class="sm-status-badge ' + statusClass + '">' + statusLabel + '</span>' +
-        '<span class="sm-cmd-time">' + formatTime(r.created_at) + '</span>' +
+    return '<div class="jit-ticket sm-ticket' + (isPending ? ' sm-pending' : ' sm-resolved') + '">' +
+      '<div class="jit-check"' + (isPending ? '' : ' style="opacity:0"') + '></div>' +
+      '<div style="flex:1;min-width:0">' +
+        (human ? '<div class="jit-human">' + escapeHtml(human) + '</div>' : '') +
+        '<div class="jit-cmd-text">' + escapeHtml(r.command) + '</div>' +
+        '<div class="jit-meta">' +
+          (host ? '<span class="jit-meta-item">' + escapeHtml(host) + '</span>' : '') +
+          '<span class="jit-meta-item sm-status-badge ' + statusClass + '">' + statusLabel + '</span>' +
+          '<span class="jit-meta-item" style="margin-left:auto">' + formatTime(r.created_at) + '</span>' +
+          (isPending ? '<span class="jit-ttl"><span class="ttl-countdown" data-ttl="' + r.ttl + '">' + r.ttl + 's</span></span>' : '') +
+        '</div>' +
+        riskHtml +
       '</div>' +
-      '<div class="sm-cmd-text">' + escapeHtml(r.command) + '</div>' +
-      riskHtml +
       actionsHtml +
     '</div>';
   }).join('');
