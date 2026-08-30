@@ -32,6 +32,7 @@ let _maxMcpCallId = 0;
 let _mcpActivitySeeded = false;
 let _lastAutoChimeAt = 0;
 let _lastMcpChimeAt = 0;
+let _sessionNames = {};
 let _winEditId = null;
 let _winSource = 'jit';
 let _winType = 'recurring';

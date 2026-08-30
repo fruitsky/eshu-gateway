@@ -35,6 +35,7 @@ from database import (
     get_dev_push_initiated, set_dev_push_initiated, clear_dev_push_initiated,
     dismiss_policy_gap,
     get_mcp_allowed_hosts, set_mcp_allowed_hosts,
+    get_session_names, set_session_names,
     get_trigger_rollback, set_trigger_rollback, clear_trigger_rollback,
     set_trigger_freeze, get_trigger_freeze, clear_trigger_freeze,
     record_audit_event, get_audit_log,
@@ -2513,6 +2514,24 @@ def set_mcp_settings_endpoint(payload: MCPSettingsPayload, request: Request):
     refresh_mcp_allowed_hosts()
     record_audit_event("mcp_settings_updated",
                        details=f"MCP allowed hosts updated to '{payload.allowed_hosts.strip()}'")
+    return {"status": "ok"}
+
+
+class SessionNamesPayload(BaseModel):
+    names: dict = {}
+
+
+@app.get("/api/session-names")
+def get_session_names_endpoint(request: Request):
+    """Session names/descriptions persisted server-side (survive across browsers)."""
+    _check_session(request)
+    return get_session_names()
+
+
+@app.put("/api/session-names")
+def set_session_names_endpoint(payload: SessionNamesPayload, request: Request):
+    _check_session(request)
+    set_session_names(payload.names or {})
     return {"status": "ok"}
 
 

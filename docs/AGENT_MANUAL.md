@@ -60,6 +60,29 @@ ssh eshu-gateway@<host> "ESHU_SESSION_ID=cf0f09869854 <command>"
 > `ESHU_SESSION_ID="${PARENT_CHAT_ID:-${CRON_ORIGIN_CHAT_ID:-unknown}}"` so a
 > subagent inherits its parent's session and cron jobs fall back to `unknown`.
 
+### MCP calls (integrations) — session IDs
+
+Tool calls over MCP (the `Integrations` surface — Proxmox, Home Assistant, Omada,
+etc.) group with your SSH commands using the **same** session fields, but passed as
+**structured JSON arguments** instead of a command prefix:
+
+```json
+{
+  "tool": "proxmox_get_vm_status",
+  "session_id": "cf0f09869854",
+  "execution_id": "20260829_201145_02deab",
+  "arguments": { "node": "pve", "vmid": 109 }
+}
+```
+
+- `session_id` / `execution_id` are **optional**; omit them for context-less calls.
+- They never reach the upstream API — the dashboard uses them only to group the
+  call with SSH commands from the same conversation.
+- Reuse the same `<id>` across SSH **and** MCP calls in one conversation so they
+  collapse into a single Session.
+- Read-only tools run immediately; mutating tools return a pending `id` — poll
+  `check_approval(id)` until the operator approves or denies.
+
 ---
 
 ## 2. Command lifecycle
@@ -340,6 +363,7 @@ Wait a few seconds and retry with exponential backoff.
 | Endpoint | Method | Purpose | Auth |
 |----------|--------|---------|------|
 | `/api/policies/test?command=` | GET | Pre-flight a command — returns `action` (auto_approved / blocked / jit) + `tier: "fatal"` for the non-relaxable self-protection / evasion blocklist | Public |
+| `/mcp` | POST/GET | MCP streamable-HTTP endpoint — integration tool calls (auth: `Authorization: Bearer <agent-token>`; read-only auto-runs, mutations poll `check_approval`) | Agent token |
 | `/api/window-requests` | POST | Submit window request | Public |
 | `/api/window-requests/{retrieval_key}` | GET | Poll window request status + token (read-only) | Public |
 | `/api/approved-windows` | GET | List windows (full status; token omitted) | Public (read) |

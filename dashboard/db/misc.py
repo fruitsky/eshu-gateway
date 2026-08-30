@@ -187,3 +187,24 @@ def set_mcp_allowed_hosts(value: str):
         cursor.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('mcp_allowed_hosts', ?)",
                        (value,))
         conn.commit()
+
+def get_session_names() -> dict:
+    """Return {session_id: {name, description}} persisted server-side so session
+    names survive across browsers (previously localStorage-only)."""
+    with db_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT value FROM meta WHERE key = 'session_names'")
+        row = cursor.fetchone()
+        if not row or not row['value']:
+            return {}
+        try:
+            return json.loads(row['value'])
+        except Exception:
+            return {}
+
+def set_session_names(names: dict):
+    with db_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('session_names', ?)",
+                       (json.dumps(names or {}),))
+        conn.commit()

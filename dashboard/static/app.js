@@ -1375,7 +1375,7 @@ async function showWindowHistory(windowId) {
 }
 
 // ── Init ─────────────────────────────────────────────────────────────────
-async function initDashboard() { updateNotifyUI(); fetchVersion(); fetchRequests(); fetchCmdDescs(); fetchSuggestions(); refreshPasswordUI(); fetchFreezeStatus(); fetchFleetCommands(); fetchGateways(); fetchIntegrations(); }
+async function initDashboard() { updateNotifyUI(); fetchVersion(); fetchRequests(); fetchCmdDescs(); fetchSuggestions(); refreshPasswordUI(); fetchFreezeStatus(); fetchFleetCommands(); fetchGateways(); fetchIntegrations(); loadSessionNames(); }
 
 // ── Requests ─────────────────────────────────────────────────────────────
 let _requestSearchQuery = '';
@@ -1683,7 +1683,7 @@ function renderRecentSessions() {
   sessions.sort(function(a, b) { return b.latest - a.latest; });
   sessions = sessions.slice(0, 6);
 
-  var names = JSON.parse(localStorage.getItem('eshu_session_names') || '{}');
+  var names = _sessionNames || {};
   var now = Math.floor(Date.now() / 1000);
 
   var cards = sessions.map(function(s) {
@@ -1716,6 +1716,31 @@ function jumpToSession(sid) {
   openSessionModal(sid);
 }
 
+async function loadSessionNames() {
+  try {
+    var res = await authFetch('/api/session-names');
+    if (!res.ok) return;
+    var serverNames = await res.json();
+    var migrated = false;
+    try {
+      var legacy = JSON.parse(localStorage.getItem('eshu_session_names') || '{}');
+      if (legacy && Object.keys(legacy).length) {
+        for (var k in legacy) { if (!serverNames[k]) serverNames[k] = legacy[k]; }
+        localStorage.removeItem('eshu_session_names');
+        migrated = true;
+      }
+    } catch(e) {}
+    _sessionNames = serverNames || {};
+    if (migrated) saveSessionNames();
+    if (typeof renderJitTickets === 'function') renderJitTickets();
+  } catch(e) {}
+}
+async function saveSessionNames() {
+  try {
+    await authFetch('/api/session-names', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ names: _sessionNames || {} }) });
+  } catch(e) {}
+}
+
 function openSessionModal(sid) {
   var modal = document.getElementById('session-modal');
   var nameEl = document.getElementById('sm-name');
@@ -1731,7 +1756,7 @@ function openSessionModal(sid) {
   if (allReqs.length === 0) return;
 
   // Load saved name/desc
-  var names = JSON.parse(localStorage.getItem('eshu_session_names') || '{}');
+  var names = _sessionNames || {};
   var meta = names[sid] || {};
 
   nameEl.textContent = meta.name || '';
@@ -1802,19 +1827,17 @@ function openSessionModal(sid) {
   modal.classList.remove('hidden');
   _activeSessionSid = sid;
 
-  // Save name/desc on blur
+  // Save name/desc on blur (persisted server-side so it survives across browsers)
   nameEl.onblur = function() {
-    var names = JSON.parse(localStorage.getItem('eshu_session_names') || '{}');
-    if (!names[sid]) names[sid] = {};
-    names[sid].name = nameEl.textContent.trim().substring(0, 40);
-    localStorage.setItem('eshu_session_names', JSON.stringify(names));
+    if (!_sessionNames[sid]) _sessionNames[sid] = {};
+    _sessionNames[sid].name = nameEl.textContent.trim().substring(0, 40);
+    saveSessionNames();
     renderJitTickets();
   };
   descEl.onblur = function() {
-    var names = JSON.parse(localStorage.getItem('eshu_session_names') || '{}');
-    if (!names[sid]) names[sid] = {};
-    names[sid].description = descEl.textContent.trim().substring(0, 100);
-    localStorage.setItem('eshu_session_names', JSON.stringify(names));
+    if (!_sessionNames[sid]) _sessionNames[sid] = {};
+    _sessionNames[sid].description = descEl.textContent.trim().substring(0, 100);
+    saveSessionNames();
     renderJitTickets();
   };
   // Save on Enter (prevent newline)
@@ -1977,7 +2000,7 @@ async function pollMcpActivity() {
 
 document.addEventListener('keydown', function(e) {
   if (e.key === 'f' || e.key === 'F') {
-    if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT')) return;
+    if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT' || e.target.isContentEditable)) return;
     document.body.classList.toggle('focus');
   } else if (e.key === 'Escape') {
     document.body.classList.remove('focus');
@@ -2108,7 +2131,7 @@ function renderSessionCard(s) {
   var host = first.hostname || first.target_ip || 'host';
   var age = formatAgo(Math.floor(Date.now() / 1000) - (first.created_at || 0));
   var short = escapeHtml(s.session_id.substring(0, 8));
-  var names = JSON.parse(localStorage.getItem('eshu_session_names') || '{}');
+  var names = _sessionNames || {};
   var meta = names[s.session_id] || {};
   var displayName = meta.name || short;
   var desc = meta.description || '';
