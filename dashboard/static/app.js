@@ -1750,6 +1750,7 @@ function renderEmptyState(total) {
       '<div class="dust-layer" id="dust-layer"></div>' +
       '<div class="sky" id="sky"><svg id="const-lines" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"></svg></div>' +
       '<div class="const-legend" id="const-legend"></div>' +
+      '<div class="cc-legend"><span class="k">click</span> select · <span class="k">O</span> override · <span class="k">B</span> ambience · <span class="k">C</span> constellation · <span class="k">F</span> focus</div>' +
     '</div>' +
     '<div class="jit-deck' + (total > 0 ? ' show' : '') + '" id="jit-deck"><div class="jit-deck-scroll" id="jit-deck-scroll"></div></div>' +
     '<div class="cc-empty-headline">' + headline + '</div>' +
@@ -2097,6 +2098,29 @@ function whoosh(up){
   }catch(e){}
 }
 
+var _noise=null;
+function brownNoiseBuffer(ctx){
+  var size=ctx.sampleRate*3, buf=ctx.createBuffer(1,size,ctx.sampleRate), d=buf.getChannelData(0), last=0;
+  for(var i=0;i<size;i++){ var w=Math.random()*2-1; last=(last+0.02*w)/1.02; d[i]=last*3.5; }
+  return buf;
+}
+function startBrownNoise(){
+  var ctx=getAudioCtx(), src=ctx.createBufferSource(); src.buffer=brownNoiseBuffer(ctx); src.loop=true;
+  var lp=ctx.createBiquadFilter(); lp.type='lowpass'; lp.frequency.value=1100; lp.Q.value=0.5;
+  var g=ctx.createGain(); g.gain.value=0;
+  src.connect(lp); lp.connect(g); g.connect(ctx.destination); src.start();
+  g.gain.linearRampToValueAtTime(0.16, ctx.currentTime+2.5);
+  _noise={src:src,gain:g};
+}
+function stopBrownNoise(){
+  if(!_noise) return;
+  var g=_noise.gain, t=getAudioCtx().currentTime;
+  g.gain.cancelScheduledValues(t); g.gain.setValueAtTime(g.gain.value,t); g.gain.linearRampToValueAtTime(0,t+0.7);
+  var s=_noise.src; setTimeout(function(){ try{s.stop();}catch(e){} },750);
+  _noise=null;
+}
+function toggleBrownNoise(){ if(_noise){ stopBrownNoise(); showToast('Ambience off', 'success'); } else { startBrownNoise(); showToast('Ambience on', 'success'); } }
+
 // ── MCP starfield — faint integration "stars" behind the dashboard ─────
 function _starHash(s) {
   var h = 0;
@@ -2128,7 +2152,7 @@ function syncMcpStars() {
   }).join('');
 }
 function pulseMcpStar(name) {
-  document.querySelectorAll('.mcp-star').forEach(function(star) {
+  document.querySelectorAll('.mcp-star, .int-star').forEach(function(star) {
     if (star.getAttribute('data-name') !== name) return;
     star.classList.remove('pulse');
     void star.offsetWidth;
@@ -2167,6 +2191,7 @@ document.addEventListener('keydown', function(e) {
   if (e.key === 'f' || e.key === 'F') { if (typing) return; document.body.classList.toggle('focus'); }
   else if (e.key === 'c' || e.key === 'C') { if (typing) return; nextConstellation(); }
   else if (e.key === 'o' || e.key === 'O') { if (typing) return; openOverride(); }
+  else if (e.key === 'b' || e.key === 'B') { if (typing) return; toggleBrownNoise(); }
   else if (e.key === 'Escape') {
     var om = document.getElementById('override-modal');
     if (om && !om.classList.contains('hidden')) { om.classList.add('hidden'); }
@@ -2185,6 +2210,31 @@ document.addEventListener('click', function(e) {
   var gn = t.closest('.gw-node');
   if (gn) { selectGwNode(gn); return; }
   if (t.closest('.starfield-wrap')) { deselectGateway(); }
+});
+
+document.addEventListener('wheel', function(e) {
+  var sc = e.target && e.target.closest ? e.target.closest('.jit-deck-scroll') : null;
+  if (!sc || sc.scrollWidth <= sc.clientWidth + 1) return;
+  sc.scrollLeft += (e.deltaY || e.deltaX || 0);
+  e.preventDefault();
+}, { passive: false });
+
+document.addEventListener('mousedown', function(e) {
+  var sc = e.target && e.target.closest ? e.target.closest('.jit-deck-scroll') : null;
+  if (!sc) return;
+  var startX = e.pageX, startScroll = sc.scrollLeft;
+  function move(ev) {
+    var dx = ev.pageX - startX;
+    if (Math.abs(dx) > 3) sc.classList.add('dragging');
+    sc.scrollLeft = startScroll - dx;
+  }
+  function up() {
+    document.removeEventListener('mousemove', move);
+    document.removeEventListener('mouseup', up);
+    sc.classList.remove('dragging');
+  }
+  document.addEventListener('mousemove', move);
+  document.addEventListener('mouseup', up);
 });
 
 function renderJitTickets() {
