@@ -1711,7 +1711,8 @@ function nextConstellation(){
   },680);
 }
 
-function renderEmptyState() {
+function renderEmptyState(total) {
+  total = total || 0;
   var now = Math.floor(Date.now() / 1000);
   var gws = (_gatewaysData || []).filter(function(g){ return g.hostname || g.ip; });
   var enrolled = gws.length;
@@ -1730,15 +1731,19 @@ function renderEmptyState() {
     tickerHtml = '<div class="cc-ticker"><div class="cc-ticker-track">' + tickItems + tickItems + '</div></div>';
   }
 
-  var subParts = ['No commands waiting for approval'];
-  if (disconnected > 0) subParts.push(disconnected + ' disconnected');
-  if (lastAgo) subParts.push('last activity ' + lastAgo);
-  var headline = (disconnected > 0 ? 'Fleet degraded' : 'Fleet at ease') + ' \u00b7 ' + online + '/' + enrolled + ' online';
-
   var sparkHtml = renderSparkline();
-
-  // Recent sessions panel (below radar)
   var sessionsHtml = renderRecentSessions();
+
+  var headline, sub;
+  if (total > 0) {
+    headline = 'At the threshold \u00b7 ' + total + ' waiting';
+    sub = total + ' command' + (total > 1 ? 's' : '') + ' wait for your word';
+  } else {
+    headline = 'The way is open \u00b7 ' + online + '/' + enrolled + ' online';
+    sub = 'all clear';
+    if (disconnected > 0) sub += ' \u00b7 ' + disconnected + ' disconnected';
+    if (lastAgo) sub += ' \u00b7 last activity ' + lastAgo;
+  }
 
   return '<div class="cc-empty">' +
     '<div class="starfield-wrap">' +
@@ -1746,12 +1751,32 @@ function renderEmptyState() {
       '<div class="sky" id="sky"><svg id="const-lines" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"></svg></div>' +
       '<div class="const-legend" id="const-legend"></div>' +
     '</div>' +
+    '<div class="jit-deck' + (total > 0 ? ' show' : '') + '" id="jit-deck"><div class="jit-deck-scroll" id="jit-deck-scroll"></div></div>' +
     '<div class="cc-empty-headline">' + headline + '</div>' +
-    '<div class="cc-empty-sub">' + subParts.join(' · ') + '</div>' +
+    '<div class="cc-empty-sub">' + sub + '</div>' +
     tickerHtml +
     sparkHtml +
     sessionsHtml +
   '</div>';
+}
+
+function renderDeck(items) {
+  var sc = document.getElementById('jit-deck-scroll');
+  if (!sc) return;
+  sc.innerHTML = items.map(function(item) { return renderJitItem(item); }).join('');
+  sc.addEventListener('scroll', updateDeckFocus);
+  setTimeout(updateDeckFocus, 60);
+}
+function updateDeckFocus() {
+  var sc = document.getElementById('jit-deck-scroll');
+  if (!sc) return;
+  var center = sc.scrollLeft + sc.clientWidth / 2;
+  sc.querySelectorAll('.jit-ticket').forEach(function(card) {
+    var c = card.offsetLeft + card.offsetWidth / 2;
+    var d = Math.min(1, Math.abs(c - center) / (sc.clientWidth / 2 + 40));
+    card.style.opacity = (1 - d * 0.72).toFixed(2);
+    card.style.transform = 'translateY(' + (d * 16).toFixed(1) + 'px) scale(' + (1 - d * 0.05).toFixed(3) + ')';
+  });
 }
 
 function renderSparkline() {
@@ -2173,43 +2198,18 @@ function renderJitTickets() {
   pending.forEach(function(r) { allItems.push({ type: 'ssh', data: r }); });
 
   var total = allItems.length;
-  document.getElementById('jit-pending-count').textContent = total + ' pending';
-  var widget = document.getElementById('jit-pending-widget');
-  if (total > 0) { widget.classList.add('glow'); widget.classList.remove('flat'); } else { widget.classList.remove('glow'); widget.classList.add('flat'); }
   document.body.dataset.state = total > 0 ? 'decision' : 'rest';
+  var widget = document.getElementById('jit-pending-widget');
+  if (widget) { widget.classList.add('flat'); widget.classList.remove('glow'); }
 
   var container = document.getElementById('jit-tickets');
-  if (total === 0) {
-    var sig = emptyStateSignature();
-    if (container.dataset.sig === sig && container.firstElementChild) return;
-    container.dataset.sig = sig;
-    container.innerHTML = renderEmptyState();
-    buildStaticSky();
-    buildStarfield(_layout);
-    return;
-  }
-  container.dataset.sig = '';
-
-  var sessionMap = {}, sessionOrder = [], singles = [];
-  allItems.forEach(function(item) {
-    if (item.type === 'ssh' && item.data.session_id && item.data.session_id !== 'unknown') {
-      var sid = item.data.session_id;
-      if (!sessionMap[sid]) { sessionMap[sid] = { session_id: sid, items: [], history: [] }; sessionOrder.push(sid); }
-      sessionMap[sid].items.push(item);
-    } else {
-      singles.push(item);
-    }
-  });
-  (requestsData || []).forEach(function(r) {
-    if (r.session_id && r.session_id !== 'unknown' && r.status !== 'pending' && sessionMap[r.session_id]) {
-      sessionMap[r.session_id].history.push(r);
-    }
-  });
-
-  var html = '';
-  sessionOrder.forEach(function(sid) { html += renderSessionCard(sessionMap[sid]); });
-  singles.forEach(function(item) { html += renderJitItem(item); });
-  container.innerHTML = html;
+  var sig = emptyStateSignature() + '|' + total;
+  if (container.dataset.sig === sig && container.firstElementChild) return;
+  container.dataset.sig = sig;
+  container.innerHTML = renderEmptyState(total);
+  buildStaticSky();
+  buildStarfield(_layout);
+  if (total > 0) renderDeck(allItems);
 }
 
 function renderJitItem(item) {

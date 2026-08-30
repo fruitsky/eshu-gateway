@@ -1506,6 +1506,13 @@ textarea { font-family: 'JetBrains Mono', monospace !important; }
   .sel-hint .nm { color: var(--accent); }
   .sel-hint .kbd { font-size: 9px; font-weight: 700; color: var(--accent); background: var(--accent-dim); border: 1px solid rgba(245,158,11,0.25); border-radius: 3px; padding: 1px 5px; }
 
+  /* ── Floating JIT deck ── */
+  .jit-deck { display: none; width: 100%; max-width: 1040px; margin: 4px auto 0; }
+  .jit-deck.show { display: block; }
+  .jit-deck-scroll { display: flex; gap: 16px; overflow-x: auto; padding: 20px 28px 24px; scroll-snap-type: x proximity; perspective: 1200px; }
+  .jit-deck-scroll::-webkit-scrollbar { height: 0; }
+  .jit-deck .jit-ticket { flex: 0 0 360px; scroll-snap-align: center; margin-bottom: 0; transition: opacity .25s ease, transform .25s ease; }
+
   /* borderless empty-state — integrate radar into the page background */
   .widget.flat { background: transparent !important; border: none !important; box-shadow: none !important; padding: 0 !important; margin-bottom: 0 !important; }
   .widget.flat .widget-header { display: none !important; }
