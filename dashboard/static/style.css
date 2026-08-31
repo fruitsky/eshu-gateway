@@ -731,8 +731,8 @@ button::-moz-focus-inner { border: 0; padding: 0; }
   .cc-layout {
     display: flex;
     gap: 0;
-    height: calc(100vh - 56px);
-    margin: -28px -32px 0;
+    height: 100vh;
+    margin: -28px -32px;
     background:
       radial-gradient(ellipse 90% 55% at 50% -6%, rgba(46,72,132,0.42), transparent 62%),
       radial-gradient(ellipse 55% 40% at 40% 4%, rgba(30,50,96,0.32), transparent 70%),
@@ -1146,14 +1146,14 @@ button::-moz-focus-inner { border: 0; padding: 0; }
    -------------------------------------------------------------- */
 
 /* Sidebar */
-.sidebar { width: 200px !important; min-width: 200px !important; background: var(--bg-surface) !important; }
+.sidebar { background: rgba(15,13,10,0.42) !important; backdrop-filter: blur(12px) !important; -webkit-backdrop-filter: blur(12px) !important; }
 .sidebar-brand { padding: 16px 14px !important; border-bottom: 1px solid var(--border-color) !important; margin-bottom: 0 !important; }
 .sidebar-brand-logo { width: 30px !important; height: 30px !important; border-radius: 4px !important; border: 1px solid rgba(245,158,11,0.4) !important; box-shadow: 0 0 12px var(--accent-glow) !important; }
 .sidebar-brand-text .brand-name { font-family: 'JetBrains Mono', monospace !important; font-size: 13px !important; font-weight: 700 !important; letter-spacing: 1px !important; text-transform: uppercase !important; }
 .sidebar-brand-text .brand-sub { font-family: 'JetBrains Mono', monospace !important; font-size: 9px !important; letter-spacing: 2px !important; }
 .nav-label { font-family: 'JetBrains Mono', monospace !important; font-size: 9px !important; letter-spacing: 2px !important; opacity: 0.5 !important; }
 .nav-item { font-size: 12px !important; padding: 7px 10px !important; border-radius: 4px !important; gap: 8px !important; }
-.nav-item.active { box-shadow: inset 2px 0 0 var(--accent) !important; }
+.nav-item.active { box-shadow: none !important; }
 
 /* Sidebar bottom: gateway health pill */
 .sidebar-health {
