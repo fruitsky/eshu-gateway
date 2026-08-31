@@ -1656,11 +1656,14 @@ function selectConstellation(name){
 }
 
 var _selGw=null;
+function burstNode(node){ if(!node) return; node.classList.remove('burst'); void node.offsetWidth; node.classList.add('burst'); setTimeout(function(){ node.classList.remove('burst'); }, 1900); }
 function selectGwNode(node){
   if(_selGw===node) return;
   deselectGateway();
   _selGw=node;
   node.classList.add('selected');
+  burstNode(node);
+  playAutoChime();
   var name=node.getAttribute('data-name')||'';
   var el=document.getElementById('sel-hint-name');
   if(el) el.textContent=name;
