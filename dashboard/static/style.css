@@ -1165,17 +1165,22 @@ button::-moz-focus-inner { border: 0; padding: 0; }
 /* Mobile menu button (edge chevron) + overlay */
 .mobile-menu-btn {
   display: none;
-  position: fixed; top: 50%; left: 0; transform: translateY(-50%);
+  position: fixed; top: 0; bottom: 0; left: 0;
+  width: 28px;
   z-index: 102;
-  width: 22px; height: 46px; border-radius: 0 10px 10px 0;
-  background: rgba(15,13,10,0.45); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
-  border: 1px solid var(--border-color); border-left: none;
-  align-items: center; justify-content: center; cursor: pointer;
-  transition: left 0.25s ease;
+  background: transparent; border: none;
+  cursor: pointer;
 }
-.mobile-menu-btn::before { content: '\203A'; font-size: 22px; line-height: 1; color: var(--accent); opacity: 0.9; }
-.mobile-menu-btn.open { left: 220px; }
-.mobile-menu-btn.open::before { content: '\2039'; }
+.mobile-menu-btn::before {
+  content: '';
+  position: absolute; left: 3px; top: 0; bottom: 0;
+  width: 3px;
+  background: var(--accent);
+  box-shadow: 0 0 8px var(--accent-glow), 0 0 18px rgba(245,158,11,0.35);
+  animation: edge-pulse 2.6s ease-in-out infinite;
+}
+.mobile-menu-btn.open { opacity: 0; pointer-events: none; }
+@keyframes edge-pulse { 0%, 100% { opacity: 0.55; } 50% { opacity: 1; } }
 .sidebar-overlay { display: none; }
 .sidebar-overlay.show { display: block; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 99; }
 
