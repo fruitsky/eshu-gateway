@@ -1087,9 +1087,9 @@ async function testWinCommand() {
   try {
     var r = await fetch('/api/policies/test?command=' + encodeURIComponent(cmd)); var data = await r.json();
     var bg, border, text, icon, desc;
-    if (data.action === 'blocked') { bg='rgba(251,146,60,0.1)'; border='rgba(251,146,60,0.3)'; text='#fb923c'; icon=''; desc='This command is BLOCKED by policy — cannot create window.'; }
-    else if (data.action === 'auto_approved') { bg='rgba(74,222,128,0.1)'; border='rgba(74,222,128,0.3)'; text='var(--status-success)'; icon=''; desc='Already auto-approved — no window needed.'; }
-    else { bg='rgba(96,165,250,0.1)'; border='rgba(96,165,250,0.3)'; text='var(--status-info)'; icon=''; desc='Would require JIT — a window will auto-approve this.'; }
+    if (data.action === 'blocked') { bg='rgba(220,38,38,0.08)'; border='rgba(220,38,38,0.3)'; text='var(--danger)'; icon=''; desc='This command is BLOCKED by policy — cannot create window.'; }
+    else if (data.action === 'auto_approved') { bg='rgba(245,158,11,0.08)'; border='rgba(245,158,11,0.3)'; text='var(--accent)'; icon=''; desc='Already auto-approved — no window needed.'; }
+    else { bg='rgba(205,216,230,0.06)'; border='rgba(205,216,230,0.25)'; text='var(--ice)'; icon=''; desc='Would require JIT — a window will auto-approve this.'; }
     rd.innerHTML = '<div class="result-box text-xs" style="background:' + bg + ';color:' + text + ';border-color:' + border + ';">' + icon + ' ' + desc + '</div>';
   } catch(e) { rd.innerHTML = '<span class="text-xs text-muted">Test failed</span>'; }
 }
@@ -4578,12 +4578,12 @@ function renderStatistics() {
     catEl.innerHTML = d.category_counts.map(function(c) {
       var pct = maxCat > 0 ? Math.round(c.count / maxCat * 100) : 0;
       var catColors = {
-        'Storage & FS': '#60a5fa', 'System Services': '#34d399', 'Network': '#f472b6',
-        'Package Management': '#fbbf24', 'Containers': '#a78bfa', 'VMs': '#fb923c',
-        'Proxmox': '#f87171', 'Monitoring': '#2dd4bf', 'Databases': '#818cf8',
-        'Security': '#e879f9', 'Version Control': '#fca5a5', 'Scripting': '#6ee7b7',
-        'Task Scheduling': '#fde68a', 'System Info': '#93c5fd', 'System': '#fdba74',
-        'Editing': '#c4b5fd', 'Utilities': '#a7f3d0'
+        'Storage & FS': '#fbbf24', 'System Services': '#d97706', 'Network': '#cdd8e6',
+        'Package Management': '#f59e0b', 'Containers': '#eab308', 'VMs': '#b45309',
+        'Proxmox': '#f59e0b', 'Monitoring': '#fde68a', 'Databases': '#a89880',
+        'Security': '#dc2626', 'Version Control': '#cdd8e6', 'Scripting': '#fbbf24',
+        'Task Scheduling': '#7a6d5e', 'System Info': '#d6b98c', 'System': '#b45309',
+        'Editing': '#a89880', 'Utilities': '#7a6d5e'
       };
       var color = catColors[c.category] || 'var(--text-muted)';
       return '<div class="flex items-center gap-2 mb-1 text-xs">' +

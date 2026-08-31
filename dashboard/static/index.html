@@ -199,8 +199,12 @@
 
     <!-- HISTORY VIEW — SSH Commands + Proxied Calls -->
     <div id="view-history" class="hidden w-full">
-      <div class="view-title" style="margin-bottom:16px">History</div>
-      <div class="history-tabs">
+      <div class="view-head" data-od-id="history-head">
+        <div class="view-eyebrow"><span class="ey-acc">The Ledger</span> &middot; every crossing kept</div>
+        <div class="view-title">History</div>
+        <div class="view-legend">Approve, deny, and review the record &mdash; SSH commands and proxied calls, both sides of the threshold.</div>
+      </div>
+      <div class="history-tabs" data-od-id="history-tabs">
         <button class="history-tab active" data-tab="ssh" onclick="switchHistoryTab('ssh')">SSH Commands</button>
         <button class="history-tab" data-tab="proxied" onclick="switchHistoryTab('proxied')">Proxied Calls</button>
       </div>
@@ -230,15 +234,15 @@
           </div>
         </div>
 
-        <div class="widget">
+        <div class="widget" data-od-id="command-history-table">
           <div class="widget-header">
             Command History
             <span id="filter-badge" class="hidden filter-badge"></span>
             <div class="flex items-center gap-2">
               <input type="text" id="request-search" placeholder="Search..." class="text-xs w-40" oninput="onRequestSearch()">
-              <button onclick="fetchRequests()" class="btn btn-muted btn-xs">&#8635; Refresh</button>
+              <button onclick="fetchRequests()" class="btn btn-muted btn-xs" data-od-id="history-refresh">&#8635; Refresh</button>
               <div class="relative">
-                <button onclick="toggleDropdown()" id="purge-btn" class="btn btn-muted btn-xs"><span>Clear</span> <svg width="10" height="10" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg></button>
+                <button onclick="toggleDropdown()" id="purge-btn" class="btn btn-muted btn-xs" data-od-id="history-purge"><span>Clear</span> <svg width="10" height="10" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg></button>
                 <div id="purge-dropdown" class="dropdown-menu widget">
                   <button onclick="purgeHistory('30m')" class="dropdown-item">Older than 30 minutes</button>
                   <button onclick="purgeHistory('1h')" class="dropdown-item">Older than 1 hour</button>
@@ -263,7 +267,7 @@
 
       <!-- Proxied Calls panel -->
       <div id="history-proxied-panel" class="hidden">
-        <div class="widget">
+        <div class="widget" data-od-id="proxied-calls-table">
           <div class="widget-header">Proxied Calls</div>
           <div class="flex flex-wrap items-center gap-2 mb-2">
             <input type="text" id="calls-search" placeholder="Search text, or a date (e.g. 19/08/2026)…" class="flex-1 text-xs" oninput="onCallsSearch()">
@@ -297,8 +301,12 @@
 
     <!-- GATEWAYS VIEW — Enrollment + unified gateway table -->
     <div id="view-gateways" class="hidden w-full">
-      <div class="view-title" style="margin-bottom:16px">Gateways</div>
-      <div class="widget">
+      <div class="view-head" data-od-id="gateways-head">
+        <div class="view-eyebrow"><span class="ey-acc">The Nodes</span> &middot; each keeps the threshold</div>
+        <div class="view-title">Gateways</div>
+        <div class="view-legend">Enroll new hosts, watch their health, and where a node needs it, open an override.</div>
+      </div>
+      <div class="widget" data-od-id="gateway-enrollment">
         <div class="widget-header">Gateway Enrollment</div>
         <p class="text-sm mb-4 text-muted">Store SSH keys once, then generate a one-liner to install gateways on any new host.</p>
         <div class="grid grid-cols-1 lg:grid-cols-2 gap-5">
@@ -323,7 +331,7 @@
           </div>
         </div>
       </div>
-      <div class="widget mt-5">
+      <div class="widget mt-5" data-od-id="gateway-table">
         <div class="widget-header">Active Gateways</div>
         <div class="table-wrap"><table>
           <thead><tr><th>Status</th><th>Gateway</th><th>IP</th><th>Enrolled</th><th>Policy</th><th>Health</th><th>Modes</th><th class="text-right">Actions</th></tr></thead>
@@ -334,10 +342,14 @@
 
     <!-- APPROVED WINDOWS VIEW -->
     <div id="view-windows" class="hidden w-full">
-      <div class="view-title" style="margin-bottom:16px">Approved Windows</div>
-      <div class="widget">
+      <div class="view-head" data-od-id="windows-head">
+        <div class="view-eyebrow"><span class="ey-acc">The Agreed Hours</span> &middot; pre-opened thresholds</div>
+        <div class="view-title">Approved Windows</div>
+        <div class="view-legend">Trusted commands, on a schedule &mdash; the gate stands open for these alone, and only for as long as you say.</div>
+      </div>
+      <div class="widget" data-od-id="windows-table">
         <div class="widget-header"><span><svg class="icon-inline" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>Approved Windows</span>
-          <button onclick="openCreateWindowModal()" class="btn btn-sm">+ Create Window</button>
+          <button onclick="openCreateWindowModal()" class="btn btn-sm" data-od-id="window-create">+ Create Window</button>
         </div>
         <p class="text-xs mb-4 text-muted">Pre-approved time windows for cron/periodic commands. Give the token to your AI agent.</p>
         <div class="table-wrap">
@@ -351,20 +363,28 @@
 
     <!-- STATISTICS VIEW -->
     <div id="view-stats" class="hidden w-full">
-      <div class="flex items-center gap-3 mb-4">
-        <span class="view-title">Command Statistics</span>
-        <select id="stats-days" onchange="fetchStatistics()" class="text-xs stats-days">
-          <option value="7">7 days</option>
-          <option value="14" selected>14 days</option>
-          <option value="30">30 days</option>
-          <option value="90">90 days</option>
-          <option value="365">1 year</option>
-        </select>
-        <button onclick="fetchStatistics()" class="btn btn-muted btn-xs">Refresh</button>
-        <a href="/api/statistics/export?days=14&format=csv" class="btn btn-muted btn-xs" download>CSV</a>
+      <div class="view-head" data-od-id="stats-head">
+        <div class="view-head-row">
+          <div>
+            <div class="view-eyebrow"><span class="ey-acc">The Tally</span> &middot; patterns of the fleet</div>
+            <div class="view-title">Command Statistics</div>
+          </div>
+          <div class="view-controls">
+            <select id="stats-days" onchange="fetchStatistics()" class="text-xs stats-days">
+              <option value="7">7 days</option>
+              <option value="14" selected>14 days</option>
+              <option value="30">30 days</option>
+              <option value="90">90 days</option>
+              <option value="365">1 year</option>
+            </select>
+            <button onclick="fetchStatistics()" class="btn btn-muted btn-xs" data-od-id="stats-refresh">Refresh</button>
+            <a href="/api/statistics/export?days=14&format=csv" class="btn btn-muted btn-xs" download data-od-id="stats-export">CSV</a>
+          </div>
+        </div>
+        <div class="view-legend">What the fleet has done, in aggregate &mdash; rhythms, categories, and the commands that repeat.</div>
       </div>
-      <div id="stats-summary-cards" class="grid grid-cols-4 gap-3 mb-5"></div>
-      <div class="widget mb-5" id="suggestions-widget">
+      <div id="stats-summary-cards" class="grid grid-cols-4 gap-3 mb-5" data-od-id="stats-summary-cards"></div>
+      <div class="widget mb-5" id="suggestions-widget" data-od-id="suggestions-widget">
         <div class="widget-header">
           Policy Suggestions
           <span id="suggestions-summary" class="text-xs text-muted"></span>
@@ -376,23 +396,23 @@
         <div id="suggestions-list"><p class="text-muted">Loading...</p></div>
       </div>
       <div class="grid grid-cols-1 lg:grid-cols-2 gap-5 items-stretch">
-        <div class="widget h-full">
+        <div class="widget h-full" data-od-id="stats-denied-widget">
           <div class="widget-header">Denied Commands</div>
           <p class="text-xs mb-2 text-muted">Most frequently denied commands — consider blocklist refinement</p>
           <div id="stats-denied"><p class="text-muted">Loading...</p></div>
         </div>
-        <div class="widget h-full">
+        <div class="widget h-full" data-od-id="stats-categories-widget">
           <div class="widget-header">Command Categories</div>
           <p class="text-xs mb-2 text-muted">Breakdown of gateway activity by category</p>
           <div id="stats-categories"><p class="text-muted">Loading...</p></div>
         </div>
       </div>
-      <div class="widget mt-5">
+      <div class="widget mt-5" data-od-id="stats-gateway-summary">
         <div class="widget-header">Gateway Summary</div>
         <div id="stats-gateway-filters" class="flex flex-wrap items-center gap-2 mb-4"></div>
         <div class="table-wrap"><table><thead><tr><th>Gateway</th><th>IP</th><th class="text-right">Total</th><th class="text-right">Auto</th><th class="text-right">JIT</th><th class="text-right">Blocked</th><th class="text-right">Denied</th><th class="text-right">Auto %</th></tr></thead><tbody id="stats-summary-body"><tr><td colspan="8" class="px-4 py-3 text-muted">Loading...</td></tr></tbody></table></div>
       </div>
-      <div class="widget mt-5">
+      <div class="widget mt-5" data-od-id="stats-top-commands">
         <div class="widget-header">Top 10 Commands</div>
         <p class="text-xs mb-3 text-muted">Most frequent base commands (split on && / || / ; / |)</p>
         <div class="table-wrap"><table>
@@ -404,15 +424,19 @@
 
     <!-- CONTROLS VIEW — Policy -->
     <div id="view-controls" class="hidden w-full">
-      <div class="view-title" style="margin-bottom:16px">Policies</div>
+      <div class="view-head" data-od-id="policies-head">
+        <div class="view-eyebrow"><span class="ey-acc">The Law of the Threshold</span> &middot; what crosses without a word</div>
+        <div class="view-title">Policies</div>
+        <div class="view-legend">Set what is allowed outright, what is never allowed, and test each command before it is written.</div>
+      </div>
       <!-- Global Central Policy -->
-      <div class="widget">
+      <div class="widget" data-od-id="policy-editor">
         <div class="widget-header">
           Global Central Policy
           <span class="text-xs text-muted">Policy version: <span id="policy-version-label" class="font-mono">-</span></span>
           <div class="flex items-center gap-2">
             <button onclick="openModal('policy-changes-modal')" class="btn btn-muted btn-xs">View Policy Changes</button>
-            <button onclick="savePolicies()" id="save-policies-btn" class="btn btn-sm">Save & Push Policies</button>
+            <button onclick="savePolicies()" id="save-policies-btn" class="btn btn-sm" data-od-id="policy-save">Save & Push Policies</button>
           </div>
         </div>
         <p class="text-xs mb-4 text-muted">Gateways sync every 30s.</p>
@@ -481,8 +505,12 @@
 
     <!-- FLEET RUN VIEW -->
     <div id="view-fleet" class="hidden w-full">
-      <div class="view-title" style="margin-bottom:16px">Fleet Run</div>
-      <div class="widget">
+      <div class="view-head" data-od-id="fleet-head">
+        <div class="view-eyebrow"><span class="ey-acc">One Word, Many Ears</span> &middot; dispatched at once</div>
+        <div class="view-title">Fleet Run</div>
+        <div class="view-legend">Run a single command across many nodes at once, and read each one's answer from the queue.</div>
+      </div>
+      <div class="widget" data-od-id="fleet-run">
         <div class="widget-header"><span><svg class="icon-inline" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>Fleet Run</span>
           <button onclick="fetchFleetCommands()" class="btn btn-muted btn-xs">Refresh</button>
         </div>
@@ -503,7 +531,7 @@
               <input type="text" id="fleet-reason-input" placeholder="Context" class="fleet-input">
             </div>
             <div class="self-end">
-              <button onclick="addFleetToQueue()" id="fleet-add-btn" class="btn btn-sm">+ Add to Queue</button>
+              <button onclick="addFleetToQueue()" id="fleet-add-btn" class="btn btn-sm" data-od-id="fleet-add">+ Add to Queue</button>
             </div>
           </div>
           <div class="flex items-center gap-2 mt-3 flex-wrap">
@@ -518,7 +546,7 @@
         <div class="panel mt-4">
           <div class="flex items-center justify-between mb-2">
             <h3 class="text-sm font-semibold">Dispatch queue</h3>
-            <button onclick="dispatchFleetQueue()" id="fleet-dispatch-btn" class="btn btn-approve btn-sm">▶ Dispatch (0)</button>
+            <button onclick="dispatchFleetQueue()" id="fleet-dispatch-btn" class="btn btn-approve btn-sm" data-od-id="fleet-dispatch">▶ Dispatch (0)</button>
           </div>
           <p class="text-xs mb-2 text-muted">Commands run one at a time per gateway, in dispatch order — combine steps with <code>&amp;&amp;</code> to run them together.</p>
           <div id="fleet-queue-list"><p class="text-muted">Queue is empty — add a command above.</p></div>
@@ -534,7 +562,11 @@
 
     <!-- INTEGRATIONS VIEW — agent API gateway (MCP) -->
     <div id="view-integrations" class="hidden w-full">
-      <div class="view-title" style="margin-bottom:16px">Integrations</div>
+      <div class="view-head" data-od-id="integrations-head">
+        <div class="view-eyebrow"><span class="ey-acc">The Outer Sky</span> &middot; fainter stars, farther gates</div>
+        <div class="view-title">Integrations</div>
+        <div class="view-legend">External services reach in as cool stars &mdash; each with its own credentials, surface, and gate on mutating calls.</div>
+      </div>
       <div class="grid grid-cols-1 lg:grid-cols-2 gap-5">
         <div class="flex flex-col gap-5">
           <div class="widget" id="int-form-widget">
@@ -621,7 +653,7 @@
         </div>
       </div>
 
-      <div class="widget mt-5">
+      <div class="widget mt-5" data-od-id="integrations-list">
         <div class="widget-header">Integrations</div>
         <div id="integration-test-result" class="hidden mb-3 p-2 rounded bg-base text-xs"></div>
         <div id="integration-list" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3"><p class="text-muted">No integrations yet.</p></div>
@@ -639,7 +671,11 @@
 
     <!-- SETTINGS VIEW — Preferences (notifications, password, webhook) -->
     <div id="view-settings" class="hidden w-full">
-      <div class="view-title" style="margin-bottom:16px">Settings</div>
+      <div class="view-head" data-od-id="settings-head">
+        <div class="view-eyebrow"><span class="ey-acc">The Guardian's Preferences</span> &middot; how the threshold speaks</div>
+        <div class="view-title">Settings</div>
+        <div class="view-legend">Sound, notifications, and the keys to the dashboard &mdash; the voice of the guardian.</div>
+      </div>
       <div class="grid grid-cols-1 lg:grid-cols-2 gap-5">
         <div class="flex flex-col gap-5">
           <div class="widget">
@@ -758,8 +794,12 @@
 
     <!-- LOGS VIEW — Audit Log -->
     <div id="view-logs" class="hidden w-full">
-      <div class="view-title" style="margin-bottom:16px">Audit Logs</div>
-      <div class="widget">
+      <div class="view-head" data-od-id="logs-head">
+        <div class="view-eyebrow"><span class="ey-acc">The Marker Stones</span> &middot; the record of every step</div>
+        <div class="view-title">Audit Logs</div>
+        <div class="view-legend">A permanent record of every decision &mdash; approvals, denials, and the moments in between.</div>
+      </div>
+      <div class="widget" data-od-id="audit-log-table">
         <div class="widget-header">
           Audit Log
           <div class="flex items-center gap-2">
