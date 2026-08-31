@@ -25,9 +25,11 @@ function devBadge(g) {
 function toggleMobileSidebar() {
   var sidebar = document.getElementById('main-sidebar');
   var overlay = document.getElementById('sidebar-overlay');
+  var btn = document.getElementById('mobile-menu-btn');
   if (!sidebar || !overlay) return;
   sidebar.classList.toggle('open');
   overlay.classList.toggle('show');
+  if (btn) btn.classList.toggle('open', sidebar.classList.contains('open'));
 }
 // ── Command Center: Context Panel ────────────────────────────
 var _ccSelectedId = null;
