@@ -1792,7 +1792,7 @@ function renderEmptyState(total) {
     headline = 'At the threshold \u00b7 ' + total + ' waiting';
     sub = total + ' command' + (total > 1 ? 's' : '') + ' wait for your word';
   } else {
-    headline = 'The way is open \u00b7 ' + online + '/' + enrolled + ' online';
+    headline = 'Eshu \u00b7 The way is open \u00b7 ' + online + '/' + enrolled + ' gateways online';
     sub = 'all clear';
     if (disconnected > 0) sub += ' \u00b7 ' + disconnected + ' disconnected';
     if (lastAgo) sub += ' \u00b7 last activity ' + lastAgo;
