@@ -733,6 +733,7 @@ button::-moz-focus-inner { border: 0; padding: 0; }
     gap: 0;
     height: 100vh;
     margin: -28px -32px;
+    user-select: none; -webkit-user-select: none;
     background:
       radial-gradient(ellipse 90% 55% at 50% -6%, rgba(46,72,132,0.42), transparent 62%),
       radial-gradient(ellipse 55% 40% at 40% 4%, rgba(30,50,96,0.32), transparent 70%),

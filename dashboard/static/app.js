@@ -1605,6 +1605,7 @@ function buildStarfield(layoutIdx){
   var shuffled=shuffleArr(CONSTELLATIONS.slice(), R);
   var chosen=[], total=0;
   for(var c=0;c<shuffled.length&&total<minStars;c++){ chosen.push(shuffled[c]); total+=shuffled[c].pts.length; }
+  _activeConstellations = chosen.map(function(c){ return c.name; });
   var pts=[], groups=[], ptConst=[];
   chosen.forEach(function(cons){
     var ang=(R()-0.5)*0.9, cos=Math.cos(ang), sin=Math.sin(ang);
@@ -1684,6 +1685,14 @@ function playConstellationTune(constName){
       _tone(ctx, freq, now+i*0.13, 0.3, 'triangle', 0.12);
       _tone(ctx, freq*1.5, now+i*0.13, 0.2, 'sine', 0.04);
     });
+  }catch(e){}
+}
+function playApprovalPulse(){
+  if(!notifySound || soundMuted) return;
+  try{
+    var ctx=getAudioCtx(), now=ctx.currentTime;
+    _tone(ctx, 196.00, now, 0.6, 'sine', 0.09);
+    _tone(ctx, 293.66, now+0.16, 0.7, 'sine', 0.07);
   }catch(e){}
 }
 var _nodeClickTimes = {};
@@ -2148,6 +2157,33 @@ function brownNoiseBuffer(ctx){
   for(var i=0;i<size;i++){ var w=Math.random()*2-1; last=(last+0.02*w)/1.02; d[i]=last*3.5; }
   return buf;
 }
+var _activeConstellations = [];
+var _ambienceIndex = 0;
+var _ambienceTimer = null;
+function playAmbientTune(constName){
+  if(!notifySound || soundMuted) return;
+  var tune = CONST_TUNES[constName] || CONST_TUNES['Orion'];
+  try{
+    var ctx=getAudioCtx(), now=ctx.currentTime;
+    tune.forEach(function(freq, i){
+      _tone(ctx, freq, now+i*0.32, 0.5, 'sine', 0.05);
+      _tone(ctx, freq*1.5, now+i*0.32, 0.35, 'sine', 0.02);
+    });
+  }catch(e){}
+}
+function startAmbienceMedley(){
+  stopAmbienceMedley();
+  if(!_activeConstellations.length) return;
+  _ambienceIndex = 0;
+  playAmbientTune(_activeConstellations[0]);
+  _ambienceTimer = setInterval(function(){
+    _ambienceIndex = (_ambienceIndex + 1) % _activeConstellations.length;
+    playAmbientTune(_activeConstellations[_ambienceIndex]);
+  }, 10000);
+}
+function stopAmbienceMedley(){
+  if(_ambienceTimer){ clearInterval(_ambienceTimer); _ambienceTimer = null; }
+}
 function startBrownNoise(){
   var ctx=getAudioCtx(), src=ctx.createBufferSource(); src.buffer=brownNoiseBuffer(ctx); src.loop=true;
   var lp=ctx.createBiquadFilter(); lp.type='lowpass'; lp.frequency.value=1100; lp.Q.value=0.5;
@@ -2155,8 +2191,10 @@ function startBrownNoise(){
   src.connect(lp); lp.connect(g); g.connect(ctx.destination); src.start();
   g.gain.linearRampToValueAtTime(0.16, ctx.currentTime+2.5);
   _noise={src:src,gain:g};
+  startAmbienceMedley();
 }
 function stopBrownNoise(){
+  stopAmbienceMedley();
   if(!_noise) return;
   var g=_noise.gain, t=getAudioCtx().currentTime;
   g.gain.cancelScheduledValues(t); g.gain.setValueAtTime(g.gain.value,t); g.gain.linearRampToValueAtTime(0,t+0.7);
@@ -2424,7 +2462,7 @@ function toggleSession(el) {
   if (sess) sess.classList.toggle('open');
 }
 async function approveWindowReq(id) {
-  flashGlitch('APPROVED \u25B8 WINDOW', false);
+  playApprovalPulse();
   try {
     const r = await authFetch('/api/window-requests/' + id + '/approve', { method: 'POST' });
     if (r.status === 401) { await checkAuth(); return; }
@@ -2436,7 +2474,7 @@ async function approveWindowReq(id) {
   } catch(e) { showToast('' + (e.message || 'Failed to approve window'), 'error'); }
 }
 async function denyWindowReq(id) {
-  flashGlitch('DENIED \u25B8 WINDOW', true);
+  playApprovalPulse();
   try {
     const r = await authFetch('/api/window-requests/' + id + '/deny', { method: 'POST' });
     if (r.status === 401) { await checkAuth(); return; }
@@ -2448,9 +2486,7 @@ async function denyWindowReq(id) {
 
 // ── Deny with Blocklist ─────────────────────────────────────────────────
 async function handleAction(id, action) {
-  var ghReq = requestsData.find(function(r){ return String(r.id) === String(id); });
-  var ghHost = ghReq ? (ghReq.hostname || ghReq.target_ip || '') : '';
-  flashGlitch((action === 'deny' ? 'DENIED' : 'APPROVED') + (ghHost ? ' \u25B8 ' + ghHost.toUpperCase() : ''), action === 'deny');
+  playApprovalPulse();
   if (action === 'deny') {
     const res = await authFetch('/api/deny/' + id, { method: 'POST' });
     if (res.status === 401) { await checkAuth(); return; }
@@ -5106,7 +5142,7 @@ async function deleteTool(id, seeded) {
 }
 
 async function approveIntegrationCall(id) {
-  flashGlitch('APPROVED \u25B8 API', false);
+  playApprovalPulse();
   try {
     const res = await authFetch('/api/integration-calls/' + id + '/approve', { method: 'POST' });
     if (res.ok) { fetchRequests(); fetchIntegrationCalls(); showToast('Approved and executed', 'success'); }
@@ -5114,7 +5150,7 @@ async function approveIntegrationCall(id) {
 }
 
 async function denyIntegrationCall(id) {
-  flashGlitch('DENIED \u25B8 API', true);
+  playApprovalPulse();
   try {
     const res = await authFetch('/api/integration-calls/' + id + '/deny', { method: 'POST' });
     if (res.ok) { fetchRequests(); }
