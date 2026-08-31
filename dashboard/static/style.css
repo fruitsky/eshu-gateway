@@ -1407,11 +1407,6 @@ textarea { font-family: 'JetBrains Mono', monospace !important; }
   body[data-state="alert"] { --energy: rgba(220,38,38,0.14); --energy-strong: rgba(220,38,38,0.22); --grain: 0.12; }
   body {
     background-color: var(--bg-base);
-    background-image:
-      radial-gradient(ellipse at 50% 22%, var(--energy-strong), transparent 62%),
-      radial-gradient(ellipse at 50% 100%, var(--energy), transparent 55%);
-    background-repeat: no-repeat;
-    background-attachment: fixed;
   }
   .grain {
     position: fixed; inset: 0; pointer-events: none; z-index: 9996;
