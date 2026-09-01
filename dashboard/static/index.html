@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -199,10 +199,9 @@
 
     <!-- HISTORY VIEW — SSH Commands + Proxied Calls -->
     <div id="view-history" class="hidden w-full">
-      <div class="view-head" data-od-id="history-head">
-        <div class="view-eyebrow"><span class="ey-acc">The Ledger</span> &middot; every crossing kept</div>
-        <div class="view-title">History</div>
-        <div class="view-legend">Approve, deny, and review the record &mdash; SSH commands and proxied calls, both sides of the threshold.</div>
+      <div class="hud" data-od-id="history-hud">
+        <div class="hud-txt"><b>The ledger</b> &middot; every crossing kept</div>
+        <div class="hud-right"><span class="hud-sum"><span><span class="n">1,204</span> crossings this week</span></span></div>
       </div>
       <div class="history-tabs" data-od-id="history-tabs">
         <button class="history-tab active" data-tab="ssh" onclick="switchHistoryTab('ssh')">SSH Commands</button>
@@ -301,10 +300,9 @@
 
     <!-- GATEWAYS VIEW — Enrollment + unified gateway table -->
     <div id="view-gateways" class="hidden w-full">
-      <div class="view-head" data-od-id="gateways-head">
-        <div class="view-eyebrow"><span class="ey-acc">The Nodes</span> &middot; each keeps the threshold</div>
-        <div class="view-title">Gateways</div>
-        <div class="view-legend">Enroll new hosts, watch their health, and where a node needs it, open an override.</div>
+      <div class="hud" data-od-id="gateways-hud">
+        <div class="hud-txt"><b>The nodes</b> &middot; each keeps the threshold</div>
+        <div class="hud-right"><span class="hud-sum"><span><span class="n">15/16</span> online</span><span><span class="o">1</span> overriding</span><span><span class="p">0</span> pending</span></span></div>
       </div>
       <div class="widget" data-od-id="gateway-enrollment">
         <div class="widget-header">Gateway Enrollment</div>
@@ -342,10 +340,9 @@
 
     <!-- APPROVED WINDOWS VIEW -->
     <div id="view-windows" class="hidden w-full">
-      <div class="view-head" data-od-id="windows-head">
-        <div class="view-eyebrow"><span class="ey-acc">The Agreed Hours</span> &middot; pre-opened thresholds</div>
-        <div class="view-title">Approved Windows</div>
-        <div class="view-legend">Trusted commands, on a schedule &mdash; the gate stands open for these alone, and only for as long as you say.</div>
+      <div class="hud" data-od-id="windows-hud">
+        <div class="hud-txt"><b>The agreed hours</b> &middot; pre-opened thresholds</div>
+        <div class="hud-right"><span class="hud-sum"><span><span class="n">3</span> open</span><span>next <span class="n">03:00 UTC</span></span></span></div>
       </div>
       <div class="widget" data-od-id="windows-table">
         <div class="widget-header"><span><svg class="icon-inline" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>Approved Windows</span>
@@ -363,28 +360,63 @@
 
     <!-- STATISTICS VIEW -->
     <div id="view-stats" class="hidden w-full">
-      <div class="view-head" data-od-id="stats-head">
-        <div class="view-head-row">
-          <div>
-            <div class="view-eyebrow"><span class="ey-acc">The Tally</span> &middot; patterns of the fleet</div>
-            <div class="view-title">Command Statistics</div>
+      <div class="hud" data-od-id="stats-hud">
+        <div class="hud-txt"><b>The tally</b> &middot; patterns of the fleet</div>
+        <div class="hud-right">
+          <span class="hud-sum" id="stats-hud-sum"></span>
+          <select id="stats-days" onchange="fetchStatistics()" class="text-xs stats-days">
+            <option value="7">7 days</option>
+            <option value="14" selected>14 days</option>
+            <option value="30">30 days</option>
+            <option value="90">90 days</option>
+            <option value="365">1 year</option>
+          </select>
+          <button class="ghost-btn sm" onclick="fetchStatistics()" data-od-id="stats-refresh">Refresh</button>
+          <a href="/api/statistics/export?days=14&format=csv" class="ghost-btn sm" download data-od-id="stats-export">CSV</a>
+          <button class="ghost-btn sm" id="snd-btn-stats" title="Toggle sound">&#9835; sound</button>
+        </div>
+      </div>
+
+      <!-- Command rhythm -->
+      <div class="widget" data-od-id="command-rhythm">
+        <div class="widget-header">
+          <span>Command rhythm</span>
+          <span class="flex items-center gap-2"><span class="chip" id="rhythm-peak"></span><button class="play-btn" id="play-btn">&#9654; play the week</button></span>
+        </div>
+        <div class="chart-wrap" id="stats-chart-wrap"></div>
+        <div class="rhythm-foot" id="stats-rhythm-foot"></div>
+      </div>
+
+      <!-- KPI cards -->
+      <div id="stats-summary-cards" class="kpis" data-od-id="stats-summary-cards"></div>
+
+      <!-- The nodes -->
+      <div class="widget" data-od-id="gateway-nodes">
+        <div class="widget-header"><span>The nodes &middot; activity across the fleet</span><span class="chip" id="nodes-state">hover a node</span></div>
+        <div class="node-scatter" id="stats-nodes"></div>
+        <div class="scatter-legend"><span><span class="k">x</span> = commands &middot; <span class="k">y</span> = automation</span><span>amber = gateway &middot; <span class="ki">ice</span> = integration</span><span>each node has its own voice</span></div>
+      </div>
+
+      <!-- Top commands + categories + denied -->
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-5 items-stretch">
+        <div class="widget h-full" data-od-id="stats-top-commands">
+          <div class="widget-header">Top commands</div>
+          <div id="stats-topcmds"><p class="text-muted">Loading...</p></div>
+        </div>
+        <div class="flex flex-col gap-5">
+          <div class="widget h-full" data-od-id="stats-categories-widget">
+            <div class="widget-header">Command categories</div>
+            <div id="stats-categories"><p class="text-muted">Loading...</p></div>
           </div>
-          <div class="view-controls">
-            <select id="stats-days" onchange="fetchStatistics()" class="text-xs stats-days">
-              <option value="7">7 days</option>
-              <option value="14" selected>14 days</option>
-              <option value="30">30 days</option>
-              <option value="90">90 days</option>
-              <option value="365">1 year</option>
-            </select>
-            <button onclick="fetchStatistics()" class="btn btn-muted btn-xs" data-od-id="stats-refresh">Refresh</button>
-            <a href="/api/statistics/export?days=14&format=csv" class="btn btn-muted btn-xs" download data-od-id="stats-export">CSV</a>
+          <div class="widget h-full" data-od-id="stats-denied-widget">
+            <div class="widget-header">Denied commands</div>
+            <div id="stats-denied"><p class="text-muted">Loading...</p></div>
           </div>
         </div>
-        <div class="view-legend">What the fleet has done, in aggregate &mdash; rhythms, categories, and the commands that repeat.</div>
       </div>
-      <div id="stats-summary-cards" class="grid grid-cols-4 gap-3 mb-5" data-od-id="stats-summary-cards"></div>
-      <div class="widget mb-5" id="suggestions-widget" data-od-id="suggestions-widget">
+
+      <!-- Suggestions (kept) -->
+      <div class="widget" id="suggestions-widget" data-od-id="suggestions-widget">
         <div class="widget-header">
           Policy Suggestions
           <span id="suggestions-summary" class="text-xs text-muted"></span>
@@ -395,39 +427,12 @@
         <p class="text-xs mb-3 text-muted">Repeatedly approved (allowlist) and repeatedly denied (blocklist) commands. Review periodically and allowlist/block the ones you trust to reduce JIT noise.</p>
         <div id="suggestions-list"><p class="text-muted">Loading...</p></div>
       </div>
-      <div class="grid grid-cols-1 lg:grid-cols-2 gap-5 items-stretch">
-        <div class="widget h-full" data-od-id="stats-denied-widget">
-          <div class="widget-header">Denied Commands</div>
-          <p class="text-xs mb-2 text-muted">Most frequently denied commands — consider blocklist refinement</p>
-          <div id="stats-denied"><p class="text-muted">Loading...</p></div>
-        </div>
-        <div class="widget h-full" data-od-id="stats-categories-widget">
-          <div class="widget-header">Command Categories</div>
-          <p class="text-xs mb-2 text-muted">Breakdown of gateway activity by category</p>
-          <div id="stats-categories"><p class="text-muted">Loading...</p></div>
-        </div>
-      </div>
-      <div class="widget mt-5" data-od-id="stats-gateway-summary">
-        <div class="widget-header">Gateway Summary</div>
-        <div id="stats-gateway-filters" class="flex flex-wrap items-center gap-2 mb-4"></div>
-        <div class="table-wrap"><table><thead><tr><th>Gateway</th><th>IP</th><th class="text-right">Total</th><th class="text-right">Auto</th><th class="text-right">JIT</th><th class="text-right">Blocked</th><th class="text-right">Denied</th><th class="text-right">Auto %</th></tr></thead><tbody id="stats-summary-body"><tr><td colspan="8" class="px-4 py-3 text-muted">Loading...</td></tr></tbody></table></div>
-      </div>
-      <div class="widget mt-5" data-od-id="stats-top-commands">
-        <div class="widget-header">Top 10 Commands</div>
-        <p class="text-xs mb-3 text-muted">Most frequent base commands (split on && / || / ; / |)</p>
-        <div class="table-wrap"><table>
-          <thead><tr><th class="w-8 text-center">#</th><th>Command</th><th class="w-24">Frequency</th><th class="text-right w-16">Count</th></tr></thead>
-          <tbody id="stats-topcmds-body"><tr><td colspan="4" class="px-4 py-3 text-muted">Loading...</td></tr></tbody>
-        </table></div>
-      </div>
     </div>
 
     <!-- CONTROLS VIEW — Policy -->
     <div id="view-controls" class="hidden w-full">
-      <div class="view-head" data-od-id="policies-head">
-        <div class="view-eyebrow"><span class="ey-acc">The Law of the Threshold</span> &middot; what crosses without a word</div>
-        <div class="view-title">Policies</div>
-        <div class="view-legend">Set what is allowed outright, what is never allowed, and test each command before it is written.</div>
+      <div class="hud" data-od-id="policies-hud">
+        <div class="hud-txt"><b>The law of the threshold</b> &middot; what crosses without a word</div>
       </div>
       <!-- Global Central Policy -->
       <div class="widget" data-od-id="policy-editor">
@@ -505,67 +510,91 @@
 
     <!-- FLEET RUN VIEW -->
     <div id="view-fleet" class="hidden w-full">
-      <div class="view-head" data-od-id="fleet-head">
-        <div class="view-eyebrow"><span class="ey-acc">One Word, Many Ears</span> &middot; dispatched at once</div>
-        <div class="view-title">Fleet Run</div>
-        <div class="view-legend">Run a single command across many nodes at once, and read each one's answer from the queue.</div>
-      </div>
-      <div class="widget" data-od-id="fleet-run">
-        <div class="widget-header"><span><svg class="icon-inline" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>Fleet Run</span>
-          <button onclick="fetchFleetCommands()" class="btn btn-muted btn-xs">Refresh</button>
-        </div>
-
-        <!-- Compose -->
-        <div class="panel">
-          <div class="flex items-start gap-3 flex-wrap">
-            <div class="flex-1 min-w-[220px]">
-              <label class="text-xs block mb-1 text-muted">Command</label>
-              <textarea id="fleet-cmd-input" class="fleet-input" rows="2" placeholder="Command to run on each selected gateway..."></textarea>
-            </div>
-            <div class="w-28">
-              <label class="text-xs block mb-1 text-muted">Timeout (s)</label>
-              <input type="number" id="fleet-timeout-input" value="180" min="1" max="3600" class="fleet-input">
-            </div>
-            <div class="w-44">
-              <label class="text-xs block mb-1 text-muted">Reason (optional)</label>
-              <input type="text" id="fleet-reason-input" placeholder="Context" class="fleet-input">
-            </div>
-            <div class="self-end">
-              <button onclick="addFleetToQueue()" id="fleet-add-btn" class="btn btn-sm" data-od-id="fleet-add">+ Add to Queue</button>
-            </div>
-          </div>
-          <div class="flex items-center gap-2 mt-3 flex-wrap">
-            <span class="text-xs text-muted">Targets:</span>
-            <span class="text-xs text-muted cursor-pointer" onclick="setFleetTargets(true)">All</span>
-            <span class="text-xs text-muted cursor-pointer" onclick="setFleetTargets(false)">None</span>
-          </div>
-          <div id="fleet-target-list" class="flex flex-wrap gap-1 mt-2"></div>
-        </div>
-
-        <!-- Queue + Dispatch -->
-        <div class="panel mt-4">
-          <div class="flex items-center justify-between mb-2">
-            <h3 class="text-sm font-semibold">Dispatch queue</h3>
-            <button onclick="dispatchFleetQueue()" id="fleet-dispatch-btn" class="btn btn-approve btn-sm" data-od-id="fleet-dispatch">▶ Dispatch (0)</button>
-          </div>
-          <p class="text-xs mb-2 text-muted">Commands run one at a time per gateway, in dispatch order — combine steps with <code>&amp;&amp;</code> to run them together.</p>
-          <div id="fleet-queue-list"><p class="text-muted">Queue is empty — add a command above.</p></div>
-        </div>
-
-        <!-- History & results -->
-        <div class="panel mt-4">
-          <h3 class="text-sm font-semibold mb-1">History &amp; results</h3>
-          <div id="fleet-results-list"><p class="text-muted">No fleet commands yet.</p></div>
+      <div class="hud" data-od-id="fleet-hud">
+        <div class="hud-txt"><b>One word, many ears</b> &middot; dispatched at once</div>
+        <div class="hud-right">
+          <span class="hud-sum"><span><span class="n" id="fleet-node-count">0</span> nodes</span><span><span class="n" id="fleet-sel-count">0</span> targeted</span></span>
+          <button class="ghost-btn sm" id="snd-btn-fleet" title="Toggle sound">&#9835; sound</button>
         </div>
       </div>
+
+      <!-- Compose -->
+      <div class="widget" data-od-id="fleet-compose">
+        <div class="widget-header">Compose &middot; a broadcast to the fleet</div>
+        <div class="compose-row">
+          <textarea id="fleet-cmd-input" class="cmd-input" rows="2" placeholder="command to broadcast…  e.g. systemctl status nginx"></textarea>
+          <div class="opts">
+            <label>timeout (s)<input type="number" id="fleet-timeout-input" value="180" min="1" max="3600"></label>
+            <label>reason<input type="text" id="fleet-reason-input" placeholder="context…"></label>
+            <button onclick="addFleetToQueue()" id="fleet-add-btn" class="btn-stage" data-od-id="fleet-add">Stage &#9658;</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Targets -->
+      <div class="widget" data-od-id="fleet-targets">
+        <div class="widget-header"><span>Targets &middot; choose the ears</span><span class="chip" id="targ-count">0 selected</span></div>
+        <div class="target-masters">
+          <span class="tl">select</span>
+          <button class="chip-btn" id="all-online-btn">All online</button>
+          <button class="chip-btn" id="all-btn">All</button>
+          <button class="chip-btn" id="none-btn">None</button>
+        </div>
+        <div class="target-list" id="target-list"></div>
+      </div>
+
+      <!-- The fleet sky -->
+      <div class="widget" data-od-id="fleet-sky">
+        <div class="widget-header">
+          <span>The fleet &middot; watch the word travel</span>
+          <span class="flex items-center gap-2"><span class="chip" id="sky-state">listening</span><button onclick="dispatchFleetQueue()" id="fleet-dispatch-btn" class="btn-dispatch" data-od-id="fleet-dispatch" disabled>&#9654; Dispatch (0)</button></span>
+        </div>
+        <div class="fleet-sky" id="sky-field">
+          <svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+            <line class="scatter-line" x1="34" y1="26" x2="46" y2="18"/>
+            <line class="scatter-line" x1="46" y1="18" x2="58" y2="34"/>
+            <line class="scatter-line" x1="58" y1="34" x2="66" y2="24"/>
+            <line class="scatter-line" x1="34" y1="26" x2="30" y2="44"/>
+            <line class="scatter-line" x1="30" y1="44" x2="52" y2="52"/>
+            <line class="scatter-line" x1="52" y1="52" x2="42" y2="66"/>
+            <line class="scatter-line" x1="42" y1="66" x2="60" y2="70"/>
+            <line class="scatter-line" x1="52" y1="52" x2="72" y2="48"/>
+            <line class="scatter-line" x1="72" y1="48" x2="66" y2="24"/>
+          </svg>
+          <span class="field-star" style="left:14%;top:20%"></span>
+          <span class="field-star" style="left:22%;top:66%"></span>
+          <span class="field-star" style="left:38%;top:12%"></span>
+          <span class="field-star" style="left:50%;top:74%"></span>
+          <span class="field-star" style="left:64%;top:8%"></span>
+          <span class="field-star" style="left:76%;top:58%"></span>
+          <span class="field-star" style="left:88%;top:26%"></span>
+          <span class="field-star" style="left:10%;top:46%"></span>
+          <span class="field-star" style="left:90%;top:66%"></span>
+          <div class="ripple" id="ripple"></div>
+          <div class="nodes" id="nodes"></div>
+        </div>
+        <div class="sky-legend">selected nodes glow <span class="k">amber</span> &middot; dispatch and the word travels node to node, each answering in its own voice</div>
+      </div>
+
+      <!-- Queue -->
+      <div class="widget" data-od-id="fleet-queue">
+        <div class="widget-header">Dispatch queue</div>
+        <div id="fleet-queue-list"><p class="text-muted">Queue is empty — stage a command above.</p></div>
+      </div>
+
+      <!-- Results -->
+      <div class="widget" data-od-id="fleet-results">
+        <div class="widget-header">History &amp; results</div>
+        <div id="fleet-results-list"><p class="text-muted">No fleet commands yet.</p></div>
+      </div>
+
+      <div class="page-foot"><span class="k">F</span> focus &middot; <span class="k">M</span> mute &middot; stage, target, dispatch &middot; each node has its own voice</div>
     </div>
 
     <!-- INTEGRATIONS VIEW — agent API gateway (MCP) -->
     <div id="view-integrations" class="hidden w-full">
-      <div class="view-head" data-od-id="integrations-head">
-        <div class="view-eyebrow"><span class="ey-acc">The Outer Sky</span> &middot; fainter stars, farther gates</div>
-        <div class="view-title">Integrations</div>
-        <div class="view-legend">External services reach in as cool stars &mdash; each with its own credentials, surface, and gate on mutating calls.</div>
+      <div class="hud" data-od-id="integrations-hud">
+        <div class="hud-txt"><b>The outer sky</b> &middot; fainter stars, farther gates</div>
       </div>
       <div class="grid grid-cols-1 lg:grid-cols-2 gap-5">
         <div class="flex flex-col gap-5">
@@ -671,10 +700,8 @@
 
     <!-- SETTINGS VIEW — Preferences (notifications, password, webhook) -->
     <div id="view-settings" class="hidden w-full">
-      <div class="view-head" data-od-id="settings-head">
-        <div class="view-eyebrow"><span class="ey-acc">The Guardian's Preferences</span> &middot; how the threshold speaks</div>
-        <div class="view-title">Settings</div>
-        <div class="view-legend">Sound, notifications, and the keys to the dashboard &mdash; the voice of the guardian.</div>
+      <div class="hud" data-od-id="settings-hud">
+        <div class="hud-txt"><b>The guardian's preferences</b> &middot; how the threshold speaks</div>
       </div>
       <div class="grid grid-cols-1 lg:grid-cols-2 gap-5">
         <div class="flex flex-col gap-5">

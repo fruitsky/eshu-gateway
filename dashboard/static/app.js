@@ -13,8 +13,9 @@ function deriveGatewayIdentity(hostname) {
 }
 
 function gwPill(hostname) {
-  // initials pills removed — gateways are shown by name only
-  return '';
+  var ini = gwIni(hostname);
+  if (!ini) return '';
+  return '<span class="gw-pill">' + ini + '</span>';
 }
 
 function devBadge(g) {
@@ -3055,10 +3056,10 @@ async function fetchGateways() {
     } else {
       var overrideControl;
       if ((g.override_remaining || 0) > 0) {
-        overrideControl = '<span class="override-badge active" data-ovr-ip="' + g.ip + '">Override</span>' +
+        overrideControl = '<button class="chip-btn ovr-on" data-ovr-ip="' + g.ip + '" title="Override active — click to cancel">OVR 00:00</button>' +
           '<button onclick="cancelOverride(\'' + g.ip + '\')" class="chip-btn danger">Cancel</button>';
       } else {
-        overrideControl = '<button onclick="openOverrideModal(\'' + g.ip + '\',\'' + g.hostname.replace(/'/g, "\\'") + '\')" class="chip-btn override" title="Override Mode — auto-approve all JIT for a set duration">Override</button>';
+        overrideControl = '<button onclick="openOverrideModal(\'' + g.ip + '\',\'' + g.hostname.replace(/'/g, "\\'") + '\')" class="chip-btn ovr" title="Override Mode — auto-approve all JIT for a set duration">Override</button>';
       }
       overrideCell = '<div class="flex items-center gap-2">' + overrideControl + ztBtn + '</div>';
     }
@@ -3100,9 +3101,9 @@ function tickGatewayTableCountdowns() {
     if (rem > 0) {
       var mins = String(Math.floor(rem / 60)).padStart(2, '0');
       var secs = String(rem % 60).padStart(2, '0');
-      el.textContent = 'Override ' + mins + ':' + secs;
+      el.textContent = 'OVR ' + mins + ':' + secs;
     } else {
-      el.textContent = 'Override';
+      el.textContent = 'OVR';
     }
   });
 }
@@ -3268,7 +3269,7 @@ async function fetchFleetCommands() {
 }
 
 function renderFleetTargetList() {
-  var list = document.getElementById('fleet-target-list');
+  var list = document.getElementById('target-list');
   if (!list) return;
   if (!_allGateways.length) {
     fetch('/api/gateways').then(function(r) { return r.json(); }).then(function(gws) {
@@ -3283,16 +3284,171 @@ function renderFleetTargetList() {
   }
 }
 
+/* ── The broadcast voice — each node a soft ping with its own pitch ──
+   Command Center sings; Statistics chimes; the fleet answers. Sounds
+   live in the dispatch, never on hover or selection. */
+var _fleetActx = null, _fleetMuted = false, _fleetSoundInit = false;
+var _fleetScale = [146.83, 174.61, 196.00, 220.00, 261.63, 293.66, 349.23, 392.00, 440.00, 523.25];
+var _fleetNodeEls = {};
+function audioFleet() {
+  if (!_fleetActx) { _fleetActx = new (window.AudioContext || window.webkitAudioContext)(); }
+  if (_fleetActx.state === 'suspended') { _fleetActx.resume(); }
+  return _fleetActx;
+}
+function fleetNodePing(pitch) {
+  if (_fleetMuted) return;
+  try {
+    var ctx = audioFleet(), t0 = ctx.currentTime, f = _fleetScale[pitch % _fleetScale.length];
+    var o = ctx.createOscillator(); o.type = 'triangle'; o.frequency.value = f;
+    var o2 = ctx.createOscillator(); o2.type = 'sine'; o2.frequency.value = f * 2;
+    var g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t0); g.gain.linearRampToValueAtTime(0.045, t0 + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.75);
+    var g2 = ctx.createGain(); g2.gain.value = 0.35;
+    o.connect(g); o2.connect(g2); g2.connect(g); g.connect(ctx.destination);
+    o.start(t0); o2.start(t0); o.stop(t0 + 0.8); o2.stop(t0 + 0.8);
+  } catch (e) {}
+}
+function fleetBroadcastPulse() {
+  if (_fleetMuted) return;
+  try {
+    var ctx = audioFleet(), t0 = ctx.currentTime;
+    var o = ctx.createOscillator(); o.type = 'sine'; o.frequency.setValueAtTime(64, t0); o.frequency.exponentialRampToValueAtTime(42, t0 + 0.55);
+    var g = ctx.createGain(); g.gain.setValueAtTime(0.0001, t0); g.gain.linearRampToValueAtTime(0.13, t0 + 0.05); g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.65);
+    o.connect(g); g.connect(ctx.destination); o.start(t0); o.stop(t0 + 0.7);
+    var o2 = ctx.createOscillator(); o2.type = 'sine'; o2.frequency.value = 880;
+    var g2 = ctx.createGain(); g2.gain.setValueAtTime(0.0001, t0); g2.gain.linearRampToValueAtTime(0.02, t0 + 0.03); g2.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.4);
+    o2.connect(g2); g2.connect(ctx.destination); o2.start(t0); o2.stop(t0 + 0.45);
+  } catch (e) {}
+}
+function fleetFailThud() {
+  if (_fleetMuted) return;
+  try {
+    var ctx = audioFleet(), t0 = ctx.currentTime;
+    var o = ctx.createOscillator(); o.type = 'sine'; o.frequency.value = 96;
+    var g = ctx.createGain(); g.gain.setValueAtTime(0.0001, t0); g.gain.linearRampToValueAtTime(0.06, t0 + 0.015); g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.4);
+    o.connect(g); g.connect(ctx.destination); o.start(t0); o.stop(t0 + 0.45);
+  } catch (e) {}
+}
+function fleetReturnChord(failures) {
+  if (_fleetMuted) return;
+  try {
+    var ctx = audioFleet(), t0 = ctx.currentTime;
+    var notes = failures ? [146.83, 174.61, 220.00] : [146.83, 185.00, 220.00, 293.66];
+    notes.forEach(function (f) {
+      var o = ctx.createOscillator(); o.type = 'sine'; o.frequency.value = f;
+      var g = ctx.createGain(); g.gain.setValueAtTime(0.0001, t0); g.gain.linearRampToValueAtTime(0.04, t0 + 0.09); g.gain.exponentialRampToValueAtTime(0.0001, t0 + 2.0);
+      o.connect(g); g.connect(ctx.destination); o.start(t0); o.stop(t0 + 2.05);
+      var o2 = ctx.createOscillator(); o2.type = 'sine'; o2.frequency.value = f * 2;
+      var g2 = ctx.createGain(); g2.gain.setValueAtTime(0.0001, t0); g2.gain.linearRampToValueAtTime(0.012, t0 + 0.12); g2.gain.exponentialRampToValueAtTime(0.0001, t0 + 1.4);
+      o2.connect(g2); g2.connect(ctx.destination); o2.start(t0); o2.stop(t0 + 1.45);
+    });
+  } catch (e) {}
+}
+function fleetStageClick() {
+  if (_fleetMuted) return;
+  try {
+    var ctx = audioFleet(), t0 = ctx.currentTime;
+    var len = Math.floor(ctx.sampleRate * 0.04);
+    var buf = ctx.createBuffer(1, len, ctx.sampleRate), d = buf.getChannelData(0);
+    for (var i = 0; i < len; i++) { d[i] = (Math.random() * 2 - 1) * (1 - i / len); }
+    var src = ctx.createBufferSource(); src.buffer = buf;
+    var bp = ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 1400; bp.Q.value = 1.5;
+    var g = ctx.createGain(); g.gain.value = 0.09;
+    src.connect(bp); bp.connect(g); g.connect(ctx.destination); src.start(t0);
+  } catch (e) {}
+}
+function fleetLowClick() {
+  if (_fleetMuted) return;
+  try {
+    var ctx = audioFleet(), t0 = ctx.currentTime;
+    var o = ctx.createOscillator(); o.type = 'sine'; o.frequency.value = 160;
+    var g = ctx.createGain(); g.gain.setValueAtTime(0.0001, t0); g.gain.linearRampToValueAtTime(0.035, t0 + 0.005); g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.12);
+    o.connect(g); g.connect(ctx.destination); o.start(t0); o.stop(t0 + 0.14);
+  } catch (e) {}
+}
+var _fleetSkyPos = [
+  [34,26],[46,18],[58,34],[30,44],[52,52],[66,24],[18,58],[42,66],
+  [72,48],[26,76],[60,70],[48,82],[80,62],[12,34],[84,76],[70,86]
+];
+function initFleetSounds() {
+  if (_fleetSoundInit) return;
+  _fleetSoundInit = true;
+  document.addEventListener('pointerdown', function () { try { audioFleet(); } catch (e) {} }, { passive: true });
+  var snd = document.getElementById('snd-btn-fleet');
+  if (snd) {
+    snd.addEventListener('click', function () {
+      _fleetMuted = !_fleetMuted;
+      snd.textContent = _fleetMuted ? '&#10005; muted' : '&#9835; sound';
+      if (!_fleetMuted) fleetNodePing(3);
+    });
+  }
+  document.addEventListener('keydown', function (e) {
+    var t = e.target;
+    var typing = t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable);
+    if (typing) return;
+    if (e.key === 'm' || e.key === 'M') { if (snd) snd.click(); }
+    else if (e.key === 'f' || e.key === 'F') { document.body.classList.toggle('focus'); }
+  });
+}
+function buildFleetSky() {
+  var wrap = document.getElementById('nodes');
+  if (!wrap || wrap.dataset.built) return;
+  wrap.dataset.built = '1';
+  _fleetGateways.forEach(function (g, i) {
+    var n = document.createElement('div');
+    n.className = 'node' + (g.online === false ? ' off' : '');
+    n.style.left = _fleetSkyPos[i % _fleetSkyPos.length][0] + '%';
+    n.style.top = _fleetSkyPos[i % _fleetSkyPos.length][1] + '%';
+    n.setAttribute('data-ip', g.ip);
+    n.innerHTML = '<span class="nd"></span><span class="ni">' + gwIni(g.hostname || g.ip) + '</span>' +
+      '<span class="ntip"><b>' + escapeHtml(g.hostname || g.ip) + '</b> &middot; ' + g.ip + (g.online === false ? ' &middot; offline' : '') + '</span>';
+    wrap.appendChild(n);
+    _fleetNodeEls[g.ip] = n;
+  });
+  syncFleetTargets();
+}
+function syncFleetTargets() {
+  _fleetGateways.forEach(function (g) {
+    var el = _fleetNodeEls[g.ip];
+    if (el) el.classList.toggle('target', _fleetSelected.has(g.ip));
+  });
+  var c = document.getElementById('fleet-sel-count'); if (c) c.textContent = _fleetSelected.size;
+  var tc = document.getElementById('targ-count'); if (tc) tc.textContent = _fleetSelected.size + ' selected';
+}
 function drawFleetTargets() {
-  var list = document.getElementById('fleet-target-list');
+  var list = document.getElementById('target-list');
   if (!list) return;
-  if (!_fleetGateways.length) { list.innerHTML = '<span class="text-xs text-muted">No gateways registered.</span>'; return; }
-  list.innerHTML = _fleetGateways.map(function(g) {
+  if (!_fleetGateways.length) { list.innerHTML = '<p class="text-muted">No gateways registered.</p>'; return; }
+  initFleetSounds();
+  list.innerHTML = _fleetGateways.map(function (g) {
     var checked = _fleetSelected.has(g.ip);
-    return '<label class="target-chip' + (checked ? ' checked' : '') + '">' +
-      '<input type="checkbox" ' + (checked ? 'checked' : '') + ' onchange="toggleFleetTarget(\'' + g.ip + '\')">' +
-      gwPill(g.hostname || g.ip) + ' ' + escapeHtml(g.hostname || g.ip) + ' <span class="text-xs text-muted">' + g.ip + '</span></label>';
+    var online = g.online !== false;
+    return '<div class="trow' + (checked ? ' checked' : '') + (online ? '' : ' disabled') + '" data-ip="' + g.ip + '">' +
+      '<span class="tchk"></span>' + gwPill(g.hostname || g.ip) +
+      '<span class="tname">' + escapeHtml(g.hostname || g.ip) + '</span>' +
+      '<span class="tip">' + g.ip + '</span>' +
+      (online ? '' : '<span class="hint">offline</span>') + '</div>';
   }).join('');
+  list.querySelectorAll('.trow').forEach(function (row) {
+    row.addEventListener('click', function () {
+      var ip = row.getAttribute('data-ip');
+      var g = _fleetGateways.filter(function (x) { return x.ip === ip; })[0];
+      if (!g || g.online === false) return;
+      if (_fleetSelected.has(ip)) { _fleetSelected.delete(ip); row.classList.remove('checked'); }
+      else { _fleetSelected.add(ip); row.classList.add('checked'); }
+      syncFleetTargets();
+    });
+  });
+  buildFleetSky();
+  var onlineCount = _fleetGateways.filter(function (g) { return g.online !== false; }).length;
+  var nc = document.getElementById('fleet-node-count'); if (nc) nc.textContent = _fleetGateways.length;
+  if (!window._fleetChipsWired) {
+    window._fleetChipsWired = true;
+    document.getElementById('all-online-btn').addEventListener('click', function () { setFleetTargets(true); });
+    document.getElementById('all-btn').addEventListener('click', function () { setFleetTargets(true); });
+    document.getElementById('none-btn').addEventListener('click', function () { setFleetTargets(false); });
+  }
+  syncFleetTargets();
 }
 
 function toggleFleetTarget(ip) {
@@ -3301,7 +3457,7 @@ function toggleFleetTarget(ip) {
 }
 
 function setFleetTargets(all) {
-  _fleetSelected = new Set(all ? _fleetGateways.map(function(g) { return g.ip; }) : []);
+  _fleetSelected = new Set(all ? _fleetGateways.filter(function (g) { return g.online !== false; }).map(function (g) { return g.ip; }) : []);
   drawFleetTargets();
 }
 
@@ -3315,6 +3471,7 @@ function addFleetToQueue() {
   _fleetQueue.push({command: cmd, targets: Array.from(_fleetSelected), reason: reason, timeout: timeout, risk: null, dry_run: null});
   document.getElementById('fleet-cmd-input').value = '';
   document.getElementById('fleet-reason-input').value = '';
+  fleetStageClick();
   renderFleetQueue();
   checkFleetRisk(idx);
 }
@@ -3363,25 +3520,25 @@ function formatFleetTargets(ips) {
 function renderFleetQueue() {
   var list = document.getElementById('fleet-queue-list');
   var btn = document.getElementById('fleet-dispatch-btn');
-  if (btn) btn.textContent = '▶ Dispatch (' + _fleetQueue.length + ')';
+  if (btn) { btn.disabled = !_fleetQueue.length; btn.innerHTML = '&#9654; Dispatch (' + _fleetQueue.length + ')'; }
   if (!list) return;
   if (_fleetQueue.length === 0) {
-    list.innerHTML = '<p class="text-muted">Queue is empty — add a command above.</p>';
+    list.innerHTML = '<p class="text-muted">Queue is empty — stage a command above.</p>';
     return;
   }
   list.innerHTML = _fleetQueue.map(function(d, i) {
-    var riskLine = d.risk ? '<div class="text-xs mt-0.5 text-warning"> ' + escapeHtml(d.risk) + '</div>' : '';
-    var dryLine = d.dry_run ? '<div class="text-xs mt-0.5 text-info"> Dry-run available: <code class="text-main">' + escapeHtml(d.dry_run) + '</code> <button onclick="useFleetDryRun(' + i + ')" class="chip-btn info">Use</button></div>' : '';
-    return '<div class="queue-item">' +
-      '<div class="flex items-center gap-2">' +
-      '<code class="text-xs flex-1 text-main">' + escapeHtml(d.command) + '</code>' +
-      '<span class="text-xs text-muted whitespace-nowrap">' + d.timeout + 's</span>' +
-      '<button onclick="removeFleetFromQueue(' + i + ')" class="chip-btn danger">✕</button>' +
-      '</div>' +
-      '<div class="text-xs mt-0.5 text-muted">→ ' + formatFleetTargets(d.targets).join(', ') + '</div>' +
+    var riskLine = d.risk ? '<div class="text-xs mt-1" style="color:var(--info)">' + escapeHtml(d.risk) + '</div>' : '';
+    var dryLine = d.dry_run ? '<div class="text-xs mt-1" style="color:var(--ice)">dry-run: <code class="text-main">' + escapeHtml(d.dry_run) + '</code> <button onclick="useFleetDryRun(' + i + ')" class="chip-btn info">Use</button></div>' : '';
+    return '<div class="qitem"><span class="qidx">' + String(i + 1).padStart(2, '0') + '</span>' +
+      '<code>' + escapeHtml(d.command) + '</code>' +
+      '<span class="qmeta">' + d.targets.length + ' nodes · ' + d.timeout + 's</span>' +
+      '<button onclick="removeFleetFromQueue(' + i + ')" class="qx" title="remove">&#10005;</button>' +
       riskLine + dryLine +
       '</div>';
   }).join('');
+  list.querySelectorAll('.qx').forEach(function(b) {
+    b.addEventListener('click', function() { fleetLowClick(); });
+  });
 }
 
 async function dispatchFleetQueue() {
@@ -3408,6 +3565,25 @@ async function dispatchFleetQueue() {
     if (!ok) return;
   }
 
+  // Broadcast across the sky
+  var targetIps = {};
+  _fleetQueue.forEach(function(d) { (d.targets || []).forEach(function(ip) { targetIps[ip] = true; }); });
+  var skyState = document.getElementById('sky-state');
+  if (skyState) skyState.textContent = 'broadcasting…';
+  var rip = document.getElementById('ripple');
+  if (rip) { rip.classList.remove('go'); void rip.offsetWidth; rip.classList.add('go'); }
+  fleetBroadcastPulse();
+  Object.keys(targetIps).forEach(function(ip) {
+    var idx = _fleetGateways.findIndex(function(x) { return x.ip === ip; });
+    var g = idx >= 0 ? _fleetGateways[idx] : null;
+    var el = _fleetNodeEls[ip];
+    if (!el) return;
+    el.classList.remove('done', 'fail', 'target');
+    if (!g || g.online === false) return;
+    el.classList.add('running');
+    fleetNodePing(Math.max(0, idx) % 10);
+  });
+
   var btn = document.getElementById('fleet-dispatch-btn');
   if (btn) { btn.disabled = true; btn.textContent = 'Dispatching...'; }
   var dispatched = 0, keepIdx = {};
@@ -3426,7 +3602,9 @@ async function dispatchFleetQueue() {
     } catch(e) { keepIdx[j] = true; }
   }
   _fleetQueue = _fleetQueue.filter(function(d, j) { return !!keepIdx[j]; });
-  if (btn) { btn.disabled = false; btn.textContent = '▶ Dispatch (' + _fleetQueue.length + ')'; }
+  if (btn) { btn.disabled = false; btn.innerHTML = '&#9654; Dispatch (' + _fleetQueue.length + ')'; }
+  var skyState2 = document.getElementById('sky-state');
+  if (skyState2 && dispatched > 0) skyState2.textContent = 'awaiting poll';
   renderFleetQueue();
   fetchFleetCommands();
   if (dispatched > 0) showToast('Dispatched ' + dispatched + ' command(s)', 'success');
@@ -3436,10 +3614,11 @@ var _fleetData = [];
 var _fleetRenderSig = null;
 
 function fleetDot(status) {
-  var cls = 'fleet-dot';
+  var cls = 'fdot';
   if (status === 'running' || status === 'queued') cls += ' running';
-  else if (status === 'success') cls += ' success';
-  else if (status === 'failed' || status === 'timeout') cls += ' fail';
+  else if (status === 'success') cls += ' ok';
+  else if (status === 'failed' || status === 'timeout') cls += ' no';
+  else cls += ' skip';
   return '<span class="' + cls + '"></span>';
 }
 
@@ -3495,10 +3674,10 @@ function renderFleetRun(cmds) {
       var gName = r.hostname ? escapeHtml(r.hostname) : escapeHtml(r.gateway_ip);
       var gIp = (r.hostname && r.hostname !== r.gateway_ip) ? ' <span class="text-muted">(' + escapeHtml(r.gateway_ip) + ')</span>' : '';
       var clearBtn = (r.status === 'queued') ?
-        '<button onclick="clearFleetResult(' + c.id + ',\'' + r.gateway_ip + '\')" class="chip-btn" title="Clear this stuck gateway so its queue can move on (other results are kept)">✕</button>' : '';
-      return '<div class="mt-1 text-xs text-muted">' + fleetDot(r.status) + ' <strong>' + gName + '</strong>' + gIp + ' ' +
+        '<button onclick="clearFleetResult(' + c.id + ',\'' + r.gateway_ip + '\')" class="chip-btn" title="Clear this stuck gateway so its queue can move on (other results are kept)">&#10005;</button>' : '';
+      return '<div class="rt">' + fleetDot(r.status) + ' <strong>' + gName + '</strong>' + gIp + ' ' +
         '<span class="badge ' + rBadge + '">' + r.status + '</span>' +
-        (r.exit_code != null && r.exit_code !== '' ? ' <span class="text-muted">exit ' + r.exit_code + '</span>' : '') +
+        (r.exit_code != null && r.exit_code !== '' ? ' <span class="rms">exit ' + r.exit_code + '</span>' : '') +
         times + clearBtn + outHtml + '</div>';
     }).join('');
     var runningRes = (c.results || []).filter(function(r) { return r.status === 'running' && r.started_at; });
@@ -3510,16 +3689,16 @@ function renderFleetRun(cmds) {
     } else {
       cdHtml = '<span class="text-xs text-muted whitespace-nowrap">' + c.timeout + 's timeout</span>';
     }
-    return '<div class="p-3 rounded-lg border mb-2 bg-base">' +
-      '<div class="flex items-center justify-between gap-2 flex-wrap">' +
+    return '<div class="run">' +
+      '<div class="run-top">' +
       '<div class="flex items-center gap-2 flex-wrap"><span class="text-xs font-mono text-muted">#' + c.id + '</span>' +
-      '<code class="text-xs text-main">' + escapeHtml(c.command) + '</code>' +
+      '<code>' + escapeHtml(c.command) + '</code>' +
       '<span class="badge ' + statusBadge + '">' + c.status + '</span></div>' +
       '<div class="flex items-center gap-2 flex-wrap">' + cdHtml + '</div></div>' +
-      '<div class="mt-1 text-xs text-muted">sent ' + formatDateTime(c.created_at) + '</div>' +
-      '<div class="mt-1 text-xs text-muted">→ ' + formatFleetTargets(c.target_ips || []).join(', ') + '</div>' +
-      (c.reason ? '<div class="text-xs text-muted">Reason: ' + escapeHtml(c.reason) + '</div>' : '') +
-      (resultRows ? '<div class="mt-2 border-t pt-1">' + resultRows + '</div>' : '') +
+      '<div class="run-time">sent ' + formatDateTime(c.created_at) + '</div>' +
+      '<div class="run-time">&#8594; ' + formatFleetTargets(c.target_ips || []).join(', ') + '</div>' +
+      (c.reason ? '<div class="run-reason">reason &middot; ' + escapeHtml(c.reason) + '</div>' : '') +
+      (resultRows ? '<div class="run-targets">' + resultRows + '</div>' : '') +
       '</div>';
   }).join('');
   openOuts.forEach(function(id) {
@@ -3530,6 +3709,43 @@ function renderFleetRun(cmds) {
     var p = resultsEl.querySelector('pre[data-out="' + id + '"]');
     if (p) p.scrollTop = preScrolls[id];
   });
+  syncFleetSkyFromResults();
+}
+
+var _fleetChordPlayedId = 0;
+function syncFleetSkyFromResults() {
+  if (!_fleetData.length) return;
+  var latest = _fleetData[0];
+  var results = latest.results || [];
+  results.forEach(function(r) {
+    var el = _fleetNodeEls[r.gateway_ip];
+    if (!el) return;
+    el.classList.remove('running', 'done', 'fail');
+    if (r.status === 'success') el.classList.add('done');
+    else if (r.status === 'failed' || r.status === 'timeout') el.classList.add('fail');
+    else if (r.status === 'running' || r.status === 'queued') el.classList.add('running');
+  });
+  var st = document.getElementById('sky-state');
+  if (st && st.textContent === 'broadcasting…') st.textContent = 'awaiting poll';
+  var resolved = results.length > 0 && results.every(function(r) {
+    return r.status === 'success' || r.status === 'failed' || r.status === 'timeout' || r.status === 'skipped';
+  });
+  if (resolved && _fleetChordPlayedId !== latest.id) {
+    _fleetChordPlayedId = latest.id;
+    var anyFail = results.some(function(r) { return r.status === 'failed' || r.status === 'timeout'; });
+    fleetReturnChord(anyFail);
+    results.forEach(function(r) { var el = _fleetNodeEls[r.gateway_ip]; if (el) el.classList.add('burst'); });
+    var field = document.getElementById('sky-field');
+    if (field) { field.classList.remove('bright'); void field.offsetWidth; field.classList.add('bright'); }
+    setTimeout(function() {
+      Object.keys(_fleetNodeEls).forEach(function(ip) { _fleetNodeEls[ip].classList.remove('burst'); });
+      if (field) field.classList.remove('bright');
+    }, 1200);
+    if (st) st.textContent = anyFail ? 'failures returned' : 'all answered';
+    setTimeout(function() { if (st) st.textContent = 'listening'; }, 1900);
+  } else if (!resolved && st && st.textContent === 'listening') {
+    st.textContent = 'awaiting poll';
+  }
 }
 
 async function copyFleetOutput(cmdId, ip) {
@@ -3875,25 +4091,26 @@ async function testPolicy() {
   const rd = document.getElementById('tester-result'); rd.innerHTML = '<span class="text-muted">Testing...</span>'; rd.classList.remove('hidden');
   try {
     const res = await fetch('/api/policies/test?command=' + encodeURIComponent(cmd)); const data = await res.json();
-    let badge, verdict, desc;
-    if (data.action === 'blocked') { badge='badge-blocked'; verdict='Blocked'; desc='Matched: <code class="text-main">' + (data.details[0] ? escapeHtml(data.details[0].pattern) : 'unknown') + '</code>'; }
-    else if (data.action === 'auto_approved') { badge='badge-approved'; verdict='Auto-Approved'; desc=(data.details[0] && data.details[0].type === 'exact_whitelist') ? 'Exact allowlist match' : 'Matched: <code class="text-main">' + (data.details[0] ? escapeHtml(data.details[0].pattern) : '') + '</code>'; }
-    else { badge='badge-pending'; verdict='JIT Required'; desc='No policy match — waits for operator approval'; }
+    let vcls = 'verdict pending', vhtml = '';
+    if (data.action === 'blocked') {
+      vcls = 'verdict blocked'; vhtml = '<b>BLOCKED</b> — matches the blocklist. The gate stays closed.';
+    } else if (data.action === 'auto_approved') {
+      vcls = 'verdict approved'; vhtml = '<b>APPROVED</b> — crosses without a word.';
+    } else {
+      vcls = 'verdict pending'; vhtml = '<b>WOULD WAIT</b> — requires a human word at the threshold (JIT).';
+    }
     let memLine = '';
     try {
       const mc = await authFetch('/api/policies/check?command=' + encodeURIComponent(cmd));
       if (mc.ok) {
         const m = await mc.json();
-        const mark = function(flag, danger) {
-          return '<span class="' + (flag ? (danger ? 'text-danger' : 'text-success') : 'text-muted') + '">' + (flag ? '✓' : '—') + '</span>';
-        };
-        memLine = '<div class="text-xs mt-2 text-muted">In lists: Exact ' + mark(m.in_exact_whitelist, false) +
-          ' · Regex ' + mark(m.in_regex_whitelist, false) +
-          ' · Blocklist ' + mark(m.in_regex_blacklist, true) + '</div>';
+        memLine = '<div class="v-marks">exact <span class="' + (m.in_exact_whitelist ? 'y' : '') + '">' + (m.in_exact_whitelist ? '✓' : '—') + '</span>' +
+          ' &middot; regex <span class="' + (m.in_regex_whitelist ? 'y' : '') + '">' + (m.in_regex_whitelist ? '✓' : '—') + '</span>' +
+          ' &middot; blocklist <span class="' + (m.in_regex_blacklist ? 'n' : '') + '">' + (m.in_regex_blacklist ? '✕' : '—') + '</span></div>';
       }
     } catch(e) {}
-    rd.innerHTML = '<div class="result-box"><span class="badge ' + badge + '">' + verdict + '</span> <span class="text-main">' + desc + '</span></div>' + memLine + testerAddButtons(data.action, cmd);
-  } catch(err) { rd.innerHTML = '<div class="result-box" style="background:var(--bg-base);color:var(--text-muted);"> ' + err.message + '</div>'; }
+    rd.innerHTML = '<div class="' + vcls + '">' + vhtml + memLine + '</div>' + testerAddButtons(data.action, cmd);
+  } catch(err) { rd.innerHTML = '<div class="verdict blocked"> ' + err.message + '</div>'; }
 }
 
 function testerAddButtons(action, cmd) {
@@ -4462,140 +4679,307 @@ function toggleStatsGateway(ip) {
   renderStatistics();
 }
 
+/* ── The tally voice — bell-toned, distinct from the Command Center ──
+   D-major pentatonic glass bells. Sound lives in the data: hover the
+   rhythm chart to hear the week, or play it outright. */
+var _tallyActx = null, _tallyMuted = false, _tallyInitDone = false, _tallyTimers = [];
+var _tallyScale = [146.83, 164.81, 185.00, 220.00, 261.63, 293.66, 349.23, 392.00, 440.00, 493.88];
+function audioTally() {
+  if (!_tallyActx) { _tallyActx = new (window.AudioContext || window.webkitAudioContext)(); }
+  if (_tallyActx.state === 'suspended') { _tallyActx.resume(); }
+  return _tallyActx;
+}
+function tallyIdx(val, max) { var i = Math.round((val / max) * (_tallyScale.length - 1)); return Math.max(0, Math.min(_tallyScale.length - 1, i)); }
+function tallyTone(f0, spark, gain, dur) {
+  if (_tallyMuted) return;
+  try {
+    var ctx = audioTally(), t0 = ctx.currentTime;
+    gain = gain || 0.045; dur = dur || 1.0;
+    var g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t0); g.gain.linearRampToValueAtTime(gain, t0 + 0.012); g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    var o1 = ctx.createOscillator(); o1.type = 'sine'; o1.frequency.value = f0;
+    var o2 = ctx.createOscillator(); o2.type = 'sine'; o2.frequency.value = f0 * 2.756;
+    var g2 = ctx.createGain(); g2.gain.value = 0.35; o2.connect(g2); g2.connect(g);
+    var o3 = ctx.createOscillator(); o3.type = 'triangle'; o3.frequency.value = f0 * 0.5; o3.detune.value = 6;
+    var g3 = ctx.createGain(); g3.gain.value = 0.3; o3.connect(g3); g3.connect(g);
+    o1.connect(g); g.connect(ctx.destination);
+    o1.start(t0); o2.start(t0); o3.start(t0);
+    o1.stop(t0 + dur + 0.05); o2.stop(t0 + dur + 0.05); o3.stop(t0 + dur + 0.05);
+    if (spark) {
+      var s = ctx.createOscillator(); s.type = 'sine'; s.frequency.value = f0 * 4;
+      var sg = ctx.createGain(); sg.gain.setValueAtTime(0.0001, t0); sg.gain.linearRampToValueAtTime(gain * 0.6, t0 + 0.008); sg.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.5);
+      s.connect(sg); sg.connect(ctx.destination); s.start(t0); s.stop(t0 + 0.55);
+    }
+  } catch (e) {}
+}
+function tallyNodeTone(cmds, off) {
+  if (off) {
+    try { var ctx = audioTally(), t0 = ctx.currentTime; var o = ctx.createOscillator(); o.type = 'sine'; o.frequency.value = 110;
+      var g = ctx.createGain(); g.gain.setValueAtTime(0.0001, t0); g.gain.linearRampToValueAtTime(0.04, t0 + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.4);
+      o.connect(g); g.connect(ctx.destination); o.start(t0); o.stop(t0 + 0.45); } catch (e) {}
+    return;
+  }
+  tallyTone(_tallyScale[tallyIdx(cmds, 300)] / 2, cmds > 140, 0.045, 1.1);
+}
+function sparkBars(elId, series, warm) {
+  var el = document.getElementById(elId); if (!el) return;
+  var max = Math.max.apply(null, series.concat([1]));
+  el.innerHTML = series.map(function (v) {
+    var h = Math.max(8, Math.round(v / max * 100));
+    var c = warm ? 'linear-gradient(180deg,rgba(220,38,38,0.8),rgba(220,38,38,0.2))' : 'linear-gradient(180deg,rgba(245,158,11,0.9),rgba(245,158,11,0.2))';
+    return '<div class="sbar" style="height:' + h + '%;background:' + c + '"></div>';
+  }).join('');
+}
+function toggleTallyRhythm() {
+  var btn = document.getElementById('play-btn'); if (!btn) return;
+  if (_tallyTimers.length) {
+    _tallyTimers.forEach(clearTimeout); _tallyTimers = [];
+    btn.innerHTML = '&#9654; play the week'; btn.classList.remove('playing');
+    return;
+  }
+  var d = _statsData; if (!d) return;
+  var daily = (d.daily || []).filter(function (x) { return x && x.total != null; });
+  if (!daily.length) return;
+  var max = Math.max.apply(null, daily.map(function (x) { return x.total || 0; }).concat([1]));
+  btn.innerHTML = '&#9632; stop'; btn.classList.add('playing');
+  try {
+    var now = audioTally().currentTime;
+    daily.forEach(function (day, i) {
+      var ms = Math.max(0, (now + i * 0.26) - audioTally().currentTime) * 1000;
+      _tallyTimers.push(setTimeout(function () {
+        tallyTone(_tallyScale[tallyIdx(day.total || 0, max)], (day.total || 0) === max, 0.05, 1.2);
+      }, ms));
+    });
+    var end = Math.max(0, (now + daily.length * 0.26) - audioTally().currentTime) * 1000;
+    _tallyTimers.push(setTimeout(function () {
+      tallyTone(440, true, 0.055, 1.8); tallyTone(293.66, false, 0.04, 2.2);
+      btn.innerHTML = '&#9654; play the week'; btn.classList.remove('playing'); _tallyTimers = [];
+    }, end));
+  } catch (e) {}
+}
+function initTallyInteractions() {
+  if (_tallyInitDone) return;
+  _tallyInitDone = true;
+  document.addEventListener('pointerdown', function () { try { audioTally(); } catch (e) {} }, { passive: true });
+  var snd = document.getElementById('snd-btn-stats');
+  if (snd) {
+    snd.addEventListener('click', function () {
+      _tallyMuted = !_tallyMuted;
+      snd.textContent = _tallyMuted ? '&#10005; muted' : '&#9835; sound';
+      if (!_tallyMuted) tallyTone(_tallyScale[3], false, 0.04, 0.6);
+    });
+  }
+  var play = document.getElementById('play-btn');
+  if (play) play.addEventListener('click', toggleTallyRhythm);
+  document.addEventListener('keydown', function (e) {
+    var t = e.target;
+    var typing = t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable);
+    if (typing) return;
+    if (e.key === 'm' || e.key === 'M') { if (snd) snd.click(); }
+    else if (e.key === 'f' || e.key === 'F') { document.body.classList.toggle('focus'); }
+  });
+}
+
+function renderRhythm(d) {
+  var wrap = document.getElementById('stats-chart-wrap'); if (!wrap) return;
+  var daily = (d.daily || []).filter(function (x) { return x && x.total != null; });
+  var peakEl = document.getElementById('rhythm-peak');
+  if (!daily.length) { wrap.innerHTML = '<p class="text-muted" style="padding:20px">No daily data yet.</p>'; if (peakEl) peakEl.textContent = ''; return; }
+  var n = daily.length, max = Math.max.apply(null, daily.map(function (x) { return x.total || 0; }).concat([1]));
+  var total = 0; daily.forEach(function (x) { total += x.total || 0; });
+  if (peakEl) peakEl.textContent = 'peak ' + max + ' cmds';
+  var pts = daily.map(function (x, i) {
+    return [n > 1 ? 20 + i * (520 / (n - 1)) : 280, 165 - Math.round((x.total || 0) / max * 140)];
+  });
+  var line = 'M' + pts.map(function (p) { return p[0] + ',' + p[1]; }).join(' L');
+  var area = line + ' L540,175 L20,175 Z';
+  var peakI = 0; daily.forEach(function (x, i) { if ((x.total || 0) > (daily[peakI].total || 0)) peakI = i; });
+  var peakP = pts[peakI];
+  var gl = '<text class="grid-label" x="546" y="28" text-anchor="end">' + max + '</text>' +
+    '<text class="grid-label" x="546" y="103" text-anchor="end">' + Math.round(max / 2) + '</text>' +
+    '<text class="grid-label" x="546" y="178" text-anchor="end">0</text>';
+  var labelIdx = [];
+  if (n <= 8) { for (var i = 0; i < n; i++) labelIdx.push(i); }
+  else { labelIdx = [0, Math.floor((n - 1) / 3), Math.floor(2 * (n - 1) / 3), n - 1]; }
+  var ticks = '', labels = '';
+  daily.forEach(function (x, i) {
+    ticks += '<line class="day-tick" x1="' + pts[i][0] + '" y1="180" x2="' + pts[i][0] + '" y2="190"/>';
+    if (labelIdx.indexOf(i) >= 0) {
+      var lb = (x.date || x.day || ''); if (lb.indexOf('-') >= 0) { var pp = lb.split('-'); lb = pp[2] + '/' + pp[1]; }
+      labels += '<text class="day-label" x="' + pts[i][0] + '" y="203" text-anchor="middle">' + lb + '</text>';
+    }
+  });
+  var autoTxt = '—';
+  if (d.automation_trend && d.automation_trend.length) {
+    var psum = 0; d.automation_trend.forEach(function (a) { psum += a.automation_pct || 0; });
+    autoTxt = Math.round(psum / d.automation_trend.length) + '%';
+  }
+  wrap.innerHTML =
+    '<svg viewBox="0 0 560 300" preserveAspectRatio="none" aria-hidden="true">' +
+    '<defs><linearGradient id="areaGrad" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="rgba(245,158,11,0.30)"/><stop offset="55%" stop-color="rgba(245,158,11,0.08)"/><stop offset="100%" stop-color="rgba(245,158,11,0)"/></linearGradient></defs>' +
+    '<line class="grid-line" x1="20" y1="25" x2="540" y2="25"/><line class="grid-line" x1="20" y1="75" x2="540" y2="75"/><line class="grid-line" x1="20" y1="125" x2="540" y2="125"/><line class="grid-line" x1="20" y1="175" x2="540" y2="175"/>' + gl +
+    '<path class="area-fill" d="' + area + '"/><path class="rhythm-line" d="' + line + '"/>' + ticks + labels +
+    '<circle class="peak-dot" cx="' + peakP[0] + '" cy="' + peakP[1] + '" r="3.5"/><text class="peak-label" x="' + peakP[0] + '" y="12" text-anchor="middle">' + max + '</text>' +
+    '</svg>' +
+    '<div class="chart-overlay"><div class="chart-big">' + total + ' <span>commands</span></div><div class="chart-sub">' + n + '-day window &middot; automated ' + autoTxt + '</div></div>';
+  for (var i = 0; i < n; i++) {
+    (function (i) {
+      var col = document.createElement('div');
+      col.className = 'scrub-col';
+      col.style.left = Math.max(0, pts[i][0] - 10) + 'px';
+      col.style.width = '20px';
+      col.title = (daily[i].total || 0) + ' commands';
+      col.addEventListener('mouseenter', function () {
+        tallyTone(_tallyScale[tallyIdx(daily[i].total || 0, max)], i === peakI, 0.045, 1.0);
+      });
+      wrap.appendChild(col);
+    })(i);
+  }
+  var foot = document.getElementById('stats-rhythm-foot');
+  if (foot) {
+    var autoSeries = (d.automation_trend || []).map(function (a) { return a.automation_pct || 0; });
+    var auto = autoSeries.length ? Math.round(autoSeries.reduce(function (s, a) { return s + a; }, 0) / autoSeries.length) : 0;
+    var autoApproved = 0, jit = 0, blocked = 0, denied = 0;
+    (d.per_gateway || []).forEach(function (g) {
+      autoApproved += g.auto_approved || 0; jit += (g.total || 0) - (g.auto_approved || 0) - (g.blocked || 0) - (g.denied || 0);
+      blocked += g.blocked || 0; denied += g.denied || 0;
+    });
+    foot.innerHTML =
+      '<div class="rhythm-metric"><div class="lbl">Automation &middot; avg</div><div class="val"><b>' + auto + '%</b></div><div class="spark" id="rf-auto"></div></div>' +
+      '<div class="rhythm-metric"><div class="lbl">Auto-approved</div><div class="val">' + autoApproved + '</div><div class="spark" id="rf-auto2"></div></div>' +
+      '<div class="rhythm-metric"><div class="lbl">JIT &middot; human gate</div><div class="val">' + jit + '</div><div class="spark" id="rf-jit"></div></div>' +
+      '<div class="rhythm-metric"><div class="lbl">Blocked + denied</div><div class="val"><span style="color:var(--danger)">' + (blocked + denied) + '</span></div><div class="spark" id="rf-den"></div></div>';
+    sparkBars('rf-auto', autoSeries.length ? autoSeries : [0, 0, 0], false);
+    sparkBars('rf-auto2', autoSeries.length ? autoSeries : [0, 0, 0], false);
+    sparkBars('rf-jit', daily.map(function (x) { return x.total || 0; }), false);
+    sparkBars('rf-den', daily.map(function (x) { return x.total || 0; }), true);
+  }
+}
+
+function renderStatsKpis(d) {
+  var el = document.getElementById('stats-summary-cards'); if (!el) return;
+  var total = 0; (d.daily || []).forEach(function (x) { total += x.total || 0; });
+  var autoSeries = (d.automation_trend || []).map(function (a) { return a.automation_pct || 0; });
+  var auto = autoSeries.length ? Math.round(autoSeries.reduce(function (s, a) { return s + a; }, 0) / autoSeries.length) : 0;
+  var jit = 0; (d.per_gateway || []).forEach(function (g) { jit += (g.total || 0) - (g.auto_approved || 0) - (g.blocked || 0) - (g.denied || 0); });
+  var gh = d.gateway_health || {}; var on = gh.online_gateways || 0, tot = gh.total_gateways || 0;
+  var dots = ''; for (var i = 0; i < tot; i++) { dots += '<span class="d' + (i < on ? '' : ' off') + '"></span>'; }
+  el.innerHTML =
+    '<div class="kpi"><div class="kval">' + total + '</div><div class="klbl">Commands &middot; window</div><div class="spark" id="kp-cmds"></div></div>' +
+    '<div class="kpi"><div class="kval">' + auto + '%</div><div class="klbl">Automation avg</div><div class="spark" id="kp-auto"></div></div>' +
+    '<div class="kpi"><div class="kval plain">' + on + '<span style="font-size:12px;color:var(--muted)"> / ' + tot + '</span></div><div class="klbl">Gateways online</div><div class="gw-dots">' + dots + '</div></div>' +
+    '<div class="kpi"><div class="kval">' + jit + '</div><div class="klbl">JIT approvals</div><div class="spark" id="kp-jit"></div></div>';
+  var daily = (d.daily || []).map(function (x) { return x.total || 0; });
+  sparkBars('kp-cmds', daily, false);
+  sparkBars('kp-auto', autoSeries.length ? autoSeries : [0, 0, 0], false);
+  sparkBars('kp-jit', daily, false);
+  el.querySelectorAll('.kpi').forEach(function (k) {
+    k.addEventListener('mouseenter', function () { tallyTone(1975.53, false, 0.02, 0.3); });
+  });
+}
+
+function renderStatsNodes(d) {
+  var el = document.getElementById('stats-nodes'); if (!el) return;
+  var gws = (d.per_gateway || []).slice().sort(function (a, b) { return (b.total || 0) - (a.total || 0); });
+  var now = Math.floor(Date.now() / 1000);
+  if (!gws.length) { el.innerHTML = '<p class="text-muted">No gateway data.</p>'; return; }
+  var maxT = Math.max.apply(null, gws.map(function (g) { return g.total || 0; }).concat([1]));
+  var placed = gws.map(function (g, i) {
+    var x = 12 + ((g.total || 0) / maxT) * 76 + ((i % 3) * 4 - 4);
+    var jitA = (g.total || 0) - (g.auto_approved || 0) - (g.blocked || 0) - (g.denied || 0);
+    var autoPct = g.total > 0 ? Math.round(((g.auto_approved || 0) + jitA) / g.total * 100) : 0;
+    return { x: Math.max(8, Math.min(92, x)), y: 16 + ((100 - autoPct) / 100) * 68, auto: autoPct };
+  });
+  var lines = '';
+  for (var i = 0; i < Math.min(4, placed.length) - 1; i++) {
+    lines += '<line class="scatter-line" x1="' + placed[i].x + '" y1="' + placed[i].y + '" x2="' + placed[i + 1].x + '" y2="' + placed[i + 1].y + '"/>';
+  }
+  el.innerHTML = '<svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">' + lines + '</svg>' + gws.map(function (g, i) {
+    var p = placed[i];
+    var online = (now - (g.last_seen || 0)) < 120;
+    var jitA = (g.total || 0) - (g.auto_approved || 0) - (g.blocked || 0) - (g.denied || 0);
+    var autoPct = g.total > 0 ? Math.round(((g.auto_approved || 0) + jitA) / g.total * 100) : 0;
+    var cls = 'g-node' + (g.total >= maxT * 0.5 ? ' big' : (g.total <= maxT * 0.15 ? ' small' : '')) + (online ? '' : ' off') +
+      (_selectedStatsGateways.has(g.ip) ? '' : ' dim');
+    return '<div class="' + cls + '" style="left:' + p.x + '%;top:' + p.y + '%" data-cmds="' + (g.total || 0) + '" data-name="' + (g.hostname || g.ip) + '" onclick="toggleStatsGateway(\'' + g.ip + '\')">' +
+      '<span class="n-dot"></span><span class="n-ini">' + gwIni(g.hostname || g.ip) + '</span>' +
+      '<span class="tip"><b>' + escapeHtml(g.hostname || g.ip) + '</b><span><b>' + (g.total || 0) + '</b> commands</span><span><b>' + autoPct + '%</b> automated</span></span></div>';
+  }).join('');
+  el.querySelectorAll('.g-node').forEach(function (n) {
+    n.addEventListener('mouseenter', function () {
+      tallyNodeTone(parseInt(n.getAttribute('data-cmds') || '0', 10), n.classList.contains('off'));
+    });
+  });
+}
+
+function renderStatsTop(d) {
+  var el = document.getElementById('stats-topcmds'); if (!el) return;
+  var top = d.top_commands || [];
+  if (!top.length) { el.innerHTML = '<p class="text-muted">No command data available.</p>'; return; }
+  var max = Math.max.apply(null, top.map(function (c) { return c.count || 0; }).concat([1]));
+  el.innerHTML = top.slice(0, 10).map(function (c, i) {
+    var pct = max > 0 ? Math.round((c.count || 0) / max * 100) : 0;
+    return '<div class="cmd-row"><span class="cmd-rank">' + String(i + 1).padStart(2, '0') + '</span>' +
+      '<div class="cmd-main"><div class="cmd-name">' + escapeHtml(c.command) + '</div><div class="cmd-track"><div class="cmd-fill" style="width:' + pct + '%"></div></div></div>' +
+      '<span class="cmd-count">' + (c.count || 0) + '</span></div>';
+  }).join('');
+}
+
+function renderStatsCats(d) {
+  var el = document.getElementById('stats-categories'); if (!el) return;
+  var cats = d.category_counts || [];
+  if (!cats.length) { el.innerHTML = '<p class="text-muted">No category data available.</p>'; return; }
+  var max = Math.max.apply(null, cats.map(function (c) { return c.count || 0; }).concat([1]));
+  var catColors = {
+    'Storage & FS': '#fbbf24', 'System Services': '#d97706', 'Network': '#cdd8e6',
+    'Package Management': '#f59e0b', 'Containers': '#eab308', 'VMs': '#b45309',
+    'Proxmox': '#f59e0b', 'Monitoring': '#fde68a', 'Databases': '#a89880',
+    'Security': '#dc2626', 'Version Control': '#cdd8e6', 'Scripting': '#fbbf24',
+    'Task Scheduling': '#7a6d5e', 'System Info': '#d6b98c', 'System': '#b45309',
+    'Editing': '#a89880', 'Utilities': '#7a6d5e'
+  };
+  el.innerHTML = cats.map(function (c) {
+    var pct = max > 0 ? Math.round((c.count || 0) / max * 100) : 0;
+    var color = catColors[c.category] || 'var(--text-muted)';
+    return '<div class="cat-row"><span class="cat-swatch" style="background:' + color + '"></span>' +
+      '<span class="cat-name">' + escapeHtml(c.category) + '</span><div class="cat-track"><div class="cat-fill" style="width:' + pct + '%;background:' + color + '"></div></div>' +
+      '<span class="cat-pct">' + (c.pct != null ? c.pct : pct) + '%</span></div>';
+  }).join('');
+}
+
+function renderStatsDenied(d) {
+  var el = document.getElementById('stats-denied'); if (!el) return;
+  var den = d.top_denied || [];
+  if (!den.length) { el.innerHTML = '<p class="text-muted">No denied commands in this period.</p>'; return; }
+  var max = Math.max.apply(null, den.map(function (c) { return c.count || 0; }).concat([1]));
+  el.innerHTML = den.slice(0, 5).map(function (c, i) {
+    var pct = max > 0 ? Math.round((c.count || 0) / max * 100) : 0;
+    return '<div class="den-row"><span class="den-rank">' + (i + 1) + '</span><span class="den-cmd">' + escapeHtml(c.command) + '</span>' +
+      '<div class="den-track"><div class="den-fill" style="width:' + pct + '%"></div></div><span class="den-count">' + (c.count || 0) + '</span></div>';
+  }).join('');
+}
+
 function renderStatistics() {
   if (!_statsData) return;
   var d = _statsData;
-
-  // Build gateway filter pills
-  var filterEl = document.getElementById('stats-gateway-filters');
-  var pillHtml = '';
-  d.per_gateway.forEach(function(g) {
-    var id = deriveGatewayIdentity(g.hostname || g.ip);
-    var selected = _selectedStatsGateways.has(g.ip);
-    pillHtml += '<span class="stats-gw-pill ' + (selected ? 'selected' : '') + '" onclick="toggleStatsGateway(\'' + g.ip + '\')">' +
-      '<span class="stats-gw-dot" style="background:' + id.color + ';"></span>' +
-      escapeHtml(g.hostname || g.ip) + devBadge({mode: g.mode}) + ' <span class="text-xs text-muted">' + g.total + '</span>' +
-      '</span>';
-  });
-  if (d.per_gateway.length > 0) {
-    pillHtml += '<span class="text-xs text-muted cursor-pointer ml-1" onclick="_selectedStatsGateways.clear();_statsData.per_gateway.forEach(function(g){_selectedStatsGateways.add(g.ip)});renderStatistics();">All</span>';
-    pillHtml += '<span class="text-xs text-muted cursor-pointer" onclick="_selectedStatsGateways.clear();renderStatistics();">None</span>';
+  initTallyInteractions();
+  var hud = document.getElementById('stats-hud-sum');
+  if (hud) {
+    var tc = 0, jit = 0;
+    (d.daily || []).forEach(function (x) { tc += x.total || 0; });
+    var psum = 0, alen = (d.automation_trend || []).length;
+    (d.automation_trend || []).forEach(function (a) { psum += a.automation_pct || 0; });
+    var auto = alen ? Math.round(psum / alen) : 0;
+    (d.per_gateway || []).forEach(function (g) { jit += (g.total || 0) - (g.auto_approved || 0) - (g.blocked || 0) - (g.denied || 0); });
+    var gh = d.gateway_health || {};
+    hud.innerHTML = '<span><span class="n">' + tc + '</span> commands</span><span><span class="n">' + auto + '%</span> automated</span><span><span class="n">' + (gh.online_gateways || 0) + '/' + (gh.total_gateways || 0) + '</span> online</span><span><span class="n">' + jit + '</span> jit</span>';
   }
-  filterEl.innerHTML = pillHtml;
-
-  // Render summary table
-  var filtered = d.per_gateway.filter(function(g) { return _selectedStatsGateways.has(g.ip); });
-  filtered.sort(function(a, b) { return b.total - a.total; });
-  var tbody = document.getElementById('stats-summary-body');
-  if (filtered.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="8" class="px-4 py-3 text-muted">No gateways selected.</td></tr>';
-  } else {
-    tbody.innerHTML = filtered.map(function(g) {
-      var id = deriveGatewayIdentity(g.hostname || g.ip);
-      var jitApproved = (g.total || 0) - (g.auto_approved || 0) - (g.blocked || 0) - (g.denied || 0);
-      var autoPct = g.total > 0 ? Math.round(((g.auto_approved || 0) + jitApproved) / g.total * 100) : 0;
-      return '<tr>' +
-        '<td>' + escapeHtml(g.hostname || g.ip) + devBadge(g) + '</td>' +
-        '<td class="text-muted font-mono">' + escapeHtml(g.ip) + '</td>' +
-        '<td class="text-right font-semibold">' + (g.total || 0) + '</td>' +
-        '<td class="text-right text-info">' + (g.auto_approved || 0) + '</td>' +
-        '<td class="text-right text-success">' + jitApproved + '</td>' +
-        '<td class="text-right stat-blocked">' + (g.blocked || 0) + '</td>' +
-        '<td class="text-right text-danger">' + (g.denied || 0) + '</td>' +
-        '<td class="text-right"><span class="font-semibold ' + (autoPct >= 80 ? 'pct-high' : autoPct >= 50 ? 'pct-mid' : 'pct-low') + '">' + autoPct + '%</span></td>' +
-        '</tr>';
-    }).join('');
-  }
-
-  // Render top commands
-  var topCmdsBody = document.getElementById('stats-topcmds-body');
-  if (d.top_commands && d.top_commands.length > 0) {
-    var maxCount = d.top_commands[0].count;
-    topCmdsBody.innerHTML = d.top_commands.map(function(c, i) {
-      var pct = maxCount > 0 ? (c.count / maxCount) * 100 : 0;
-      return '<tr>' +
-        '<td class="text-center text-xs text-muted">' + (i + 1) + '</td>' +
-        '<td class="font-mono text-xs">' +
-          '<div class="flex items-center gap-2">' +
-            '<span class="flex-1">' + escapeHtml(c.command) + '</span>' +
-            '<div class="bar-track"><div class="fill" style="width:' + pct + '%;"></div></div>' +
-          '</div>' +
-          (c.description ? '<div class="cmd-desc">' + escapeHtml(c.description) + '</div>' : '') +
-        '</td>' +
-        '<td class="text-xs text-muted">' + c.pct + '%</td>' +
-        '<td class="text-right font-mono text-xs">' + c.count + '</td>' +
-        '</tr>';
-    }).join('');
-  } else {
-    topCmdsBody.innerHTML = '<tr><td colspan="4" class="px-4 py-3 text-muted">No command data available.</td></tr>';
-  }
-
-  // Summary cards at the top
-  var summaryEl = document.getElementById('stats-summary-cards');
-  var totalCmds = 0, totalJit = 0, pctSum = 0;
-  d.daily.forEach(function(day) { totalCmds += day.total; });
-  if (d.automation_trend && d.automation_trend.length > 0) {
-    d.automation_trend.forEach(function(a) { pctSum += a.automation_pct; });
-  }
-  var autoAvg = d.automation_trend && d.automation_trend.length > 0 ? Math.round(pctSum / d.automation_trend.length) : 0;
-  if (d.per_gateway) {
-    d.per_gateway.forEach(function(g) {
-      totalJit += (g.total || 0) - (g.auto_approved || 0) - (g.blocked || 0) - (g.denied || 0);
-    });
-  }
-  var gh = d.gateway_health || {};
-  var autoCls = autoAvg >= 80 ? 'stat-approved' : autoAvg >= 50 ? 'stat-pending' : 'stat-denied';
-  var gwCls = (gh.online_gateways || 0) === (gh.total_gateways || 0) ? 'stat-approved' : 'stat-pending';
-  summaryEl.innerHTML =
-    '<div class="stat-card"><div class="stat-value text-main">' + totalCmds + '</div><div class="stat-label">Commands</div></div>' +
-    '<div class="stat-card"><div class="stat-value ' + autoCls + '">' + autoAvg + '%</div><div class="stat-label">Automation</div></div>' +
-    '<div class="stat-card"><div class="stat-value ' + gwCls + '">' + (gh.online_gateways || 0) + ' / ' + (gh.total_gateways || 0) + '</div><div class="stat-label">Gateways Online</div></div>' +
-    '<div class="stat-card"><div class="stat-value stat-auto">' + totalJit + '</div><div class="stat-label">JIT Approvals</div></div>';
-
-  // Denied commands
-  var deniedEl = document.getElementById('stats-denied');
-  if (d.top_denied && d.top_denied.length > 0) {
-    var maxDenied = d.top_denied[0].count;
-    deniedEl.innerHTML = d.top_denied.map(function(c, i) {
-      var pct = maxDenied > 0 ? (c.count / maxDenied) * 100 : 0;
-      return '<div class="flex items-center gap-2 mb-1 text-xs">' +
-        '<span class="w-4 text-right text-muted flex-shrink-0">' + (i + 1) + '</span>' +
-        '<div class="flex-1 flex items-center gap-2 min-w-0">' +
-          '<span class="flex-1 font-mono text-danger truncate">' + escapeHtml(c.command) + '</span>' +
-          '<div class="bar-track sm"><div class="fill danger" style="width:' + pct + '%;"></div></div>' +
-        '</div>' +
-        '<span class="w-5 text-right text-muted flex-shrink-0">' + c.count + '</span>' +
-        '</div>';
-    }).join('');
-  } else {
-    deniedEl.innerHTML = '<p class="text-muted">No denied commands in this period.</p>';
-  }
-
-  // Command categories
-  var catEl = document.getElementById('stats-categories');
-  if (d.category_counts && d.category_counts.length > 0) {
-    var maxCat = d.category_counts[0].count;
-    catEl.innerHTML = d.category_counts.map(function(c) {
-      var pct = maxCat > 0 ? Math.round(c.count / maxCat * 100) : 0;
-      var catColors = {
-        'Storage & FS': '#fbbf24', 'System Services': '#d97706', 'Network': '#cdd8e6',
-        'Package Management': '#f59e0b', 'Containers': '#eab308', 'VMs': '#b45309',
-        'Proxmox': '#f59e0b', 'Monitoring': '#fde68a', 'Databases': '#a89880',
-        'Security': '#dc2626', 'Version Control': '#cdd8e6', 'Scripting': '#fbbf24',
-        'Task Scheduling': '#7a6d5e', 'System Info': '#d6b98c', 'System': '#b45309',
-        'Editing': '#a89880', 'Utilities': '#7a6d5e'
-      };
-      var color = catColors[c.category] || 'var(--text-muted)';
-      return '<div class="flex items-center gap-2 mb-1 text-xs">' +
-        '<span class="inline-flex w-3 h-3 flex-shrink-0" style="background:' + color + ';border-radius:3px;"></span>' +
-        '<span class="flex-1">' + c.category + '</span>' +
-        '<div class="bar-track sm"><div class="fill" style="width:' + pct + '%;background:' + color + ';"></div></div>' +
-        '<span class="w-10 text-right text-muted flex-shrink-0">' + c.pct + '%</span>' +
-        '</div>';
-    }).join('');
-  } else {
-    catEl.innerHTML = '<p class="text-muted">No category data available.</p>';
-  }
+  renderRhythm(d);
+  renderStatsKpis(d);
+  renderStatsNodes(d);
+  renderStatsTop(d);
+  renderStatsCats(d);
+  renderStatsDenied(d);
 }
 
 // ── Gateway Health Checker ────────────────────────────────────────────
@@ -4867,10 +5251,10 @@ function renderIntegrationList() {
     var label = INTEGRATION_PROFILES[i.kind] ? INTEGRATION_PROFILES[i.kind].label : (i.kind || 'custom');
     return '<div class="item-card selectable' + (selected ? ' selected' : '') + '" onclick="selectIntegration(\'' + esc(i.name) + '\')">' +
       '<div class="flex items-center justify-between gap-2">' +
-      '<span class="text-sm font-semibold ' + active + '"><span class="' + (i.enabled ? 'dot-ok' : 'dot-off') + '"></span> ' + esc(i.name) + '</span>' +
-      '<span class="text-xs text-muted">' + esc(label) + '</span></div>' +
-      '<div class="text-xs text-muted mt-1">' + esc(i.base_url) + '</div>' +
-      '<div class="text-xs text-muted">auth: ' + esc(i.auth_type) + ' · gate: ' + esc(i.gate_mode || 'destructive') + ' · mcp: ' + esc(i.mcp_mode || 'joined') + '</div>' +
+      '<span class="text-sm font-semibold ' + active + '"><span class="i-star' + (i.enabled ? '' : ' off') + '"></span> ' + esc(i.name) + '</span>' +
+      '<span class="i-kind">' + esc(label) + '</span></div>' +
+      '<div class="i-url">' + esc(i.base_url) + '</div>' +
+      '<div class="i-meta">auth: ' + esc(i.auth_type) + ' &middot; gate: ' + esc(i.gate_mode || 'destructive') + ' &middot; mcp: ' + esc(i.mcp_mode || 'joined') + '</div>' +
       '<div class="flex flex-wrap gap-1 mt-2" onclick="event.stopPropagation()">' +
       '<button onclick="editIntegration(\'' + esc(i.name) + '\')" class="btn btn-xs btn-muted" title="Edit base URL / secret">Edit</button>' +
       '<button onclick="testIntegration(\'' + esc(i.name) + '\')" class="btn btn-xs btn-muted" title="Run a read call to verify the connection">Test</button>' +
@@ -5101,16 +5485,12 @@ function renderTools(tools, name) {
   }
   if (!name || !tools.length) { el.innerHTML = '<p class="text-muted">No tools for this integration.</p>'; return; }
   el.innerHTML = tools.map(function(t) {
-    var badge = t.read_only ? '<span class="text-success">read</span>' : '<span class="text-warning">mutating (approval)</span>';
-    return '<div class="item-card">' +
-      '<div class="flex items-center justify-between gap-2">' +
-      '<span class="text-sm font-semibold">' + esc(t.name) + '</span>' +
-      '<span class="text-xs">' + badge + ' · ' + esc(t.method) + '</span></div>' +
-      '<div class="text-xs text-muted mt-1">' + esc(t.description || '') + '</div>' +
-      '<div class="flex gap-1 mt-2">' +
-      '<button onclick="toggleTool(' + t.id + ', ' + (t.enabled ? 'false' : 'true') + ')" class="btn btn-xs ' + (t.enabled ? 'btn-muted' : '') + '">' + (t.enabled ? 'Disable' : 'Enable') + '</button>' +
-      '<button onclick="deleteTool(' + t.id + ', ' + (t.seeded ? 'true' : 'false') + ')" class="btn btn-xs btn-muted">×</button>' +
-      '</div></div>';
+    var type = t.read_only ? 'read' : 'mut';
+    return '<div class="tool">' +
+      '<div class="t-top"><span class="t-name">' + esc(t.name) + '</span><span class="t-type ' + type + '">' + (t.read_only ? 'read' : 'mutating') + '</span></div>' +
+      '<div class="t-desc">' + esc(t.description || '') + '</div>' +
+      '<div class="t-foot"><span class="t-method">' + esc(t.method) + '</span>' +
+      '<button class="tgl' + (t.enabled ? ' on' : '') + '" onclick="toggleTool(' + t.id + ', ' + (t.enabled ? 'false' : 'true') + ')" title="Enable/Disable"></button></div></div>';
   }).join('');
 }
 
