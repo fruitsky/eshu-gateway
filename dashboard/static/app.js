@@ -3344,6 +3344,60 @@ function fleetReturnChord(failures) {
     });
   } catch (e) {}
 }
+function fleetVoice(freq, when, dur, gain) {
+  try {
+    var ctx = audioFleet();
+    var o = ctx.createOscillator(); o.type = 'triangle'; o.frequency.value = freq;
+    var o2 = ctx.createOscillator(); o2.type = 'sine'; o2.frequency.value = freq * 2;
+    var g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, when); g.gain.linearRampToValueAtTime(gain || 0.04, when + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, when + dur);
+    var g2 = ctx.createGain(); g2.gain.value = 0.3;
+    o.connect(g); o2.connect(g2); g2.connect(g); g.connect(ctx.destination);
+    o.start(when); o2.start(when); o.stop(when + dur + 0.05); o2.stop(when + dur + 0.05);
+  } catch (e) {}
+}
+function fleetBass(freq, when, dur, gain) {
+  try {
+    var ctx = audioFleet();
+    var o = ctx.createOscillator(); o.type = 'sine'; o.frequency.value = freq;
+    var g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, when); g.gain.linearRampToValueAtTime(gain || 0.05, when + 0.06); g.gain.exponentialRampToValueAtTime(0.0001, when + dur);
+    o.connect(g); g.connect(ctx.destination); o.start(when); o.stop(when + dur + 0.05);
+  } catch (e) {}
+}
+var _fleetAnthemScale = [146.83, 164.81, 185.00, 196.00, 220.00, 246.94, 277.18, 293.66, 329.63, 369.99, 392.00, 440.00, 493.88, 587.33];
+/* The return: one ascending step per gateway that answered, so the tune
+   grows with the fleet. One node echoes its own voice twice; two or more
+   climb into a phrase that finally melts into a held chord — major when
+   all clear, minor (with a low D) when a node failed. */
+function fleetReturnAnthem(finished, anyFail) {
+  if (soundMuted) return;
+  try {
+    var ctx = audioFleet(), t0 = ctx.currentTime;
+    var root = 146.83, sc = _fleetAnthemScale, n = finished.length;
+    if (n <= 0) return;
+    if (n === 1) {
+      var solo = finished[0].f || 220;
+      fleetVoice(solo, t0, 0.5, 0.05);
+      fleetVoice(solo, t0 + 0.18, 0.6, 0.05);
+      fleetBass(root, t0, 1.6, 0.05);
+      return;
+    }
+    var steps = Math.min(n, 12);
+    for (var i = 0; i < steps; i++) {
+      var oct = Math.floor(i / sc.length);
+      fleetVoice(sc[i % sc.length] * (oct >= 1 ? 2 : 1), t0 + i * 0.085, 0.5, 0.042);
+    }
+    var chordAt = t0 + steps * 0.085;
+    var voices = anyFail ? [146.83, 174.61, 220.00] : [146.83, 185.00, 220.00];
+    if (steps >= 5) voices.push(293.66);
+    if (steps >= 8) voices.push(440.00);
+    if (steps >= 11) voices.push(587.33);
+    voices.forEach(function (f) { fleetVoice(f, chordAt, 2.2, 0.032); });
+    fleetBass(root, t0, steps * 0.085 + 2.6, 0.05);
+    if (anyFail) fleetBass(73.42, chordAt, 2.0, 0.06);
+  } catch (e) {}
+}
 function fleetStageClick() {
   if (soundMuted) return;
   try {
@@ -3718,7 +3772,14 @@ function syncFleetSkyFromResults() {
   if (resolved && _fleetChordPlayedId !== latest.id) {
     _fleetChordPlayedId = latest.id;
     var anyFail = results.some(function(r) { return r.status === 'failed' || r.status === 'timeout'; });
-    fleetReturnChord(anyFail);
+    var finished = [];
+    results.forEach(function(r) {
+      if (r.status === 'success' || r.status === 'failed' || r.status === 'timeout') {
+        var idx = _fleetGateways.findIndex(function(x) { return x.ip === r.gateway_ip; });
+        finished.push({ f: _fleetScale[Math.max(0, idx % _fleetScale.length)] });
+      }
+    });
+    fleetReturnAnthem(finished, anyFail);
     results.forEach(function(r) { var el = _fleetNodeEls[r.gateway_ip]; if (el) el.classList.add('burst'); });
     var field = document.getElementById('sky-field');
     if (field) { field.classList.remove('bright'); void field.offsetWidth; field.classList.add('bright'); }
