@@ -3287,7 +3287,7 @@ function renderFleetTargetList() {
 /* ── The broadcast voice — each node a soft ping with its own pitch ──
    Command Center sings; Statistics chimes; the fleet answers. Sounds
    live in the dispatch, never on hover or selection. */
-var _fleetActx = null, _fleetMuted = false, _fleetSoundInit = false;
+var _fleetActx = null, _fleetSoundInit = false;
 var _fleetScale = [146.83, 174.61, 196.00, 220.00, 261.63, 293.66, 349.23, 392.00, 440.00, 523.25];
 var _fleetNodeEls = {};
 function audioFleet() {
@@ -3296,7 +3296,7 @@ function audioFleet() {
   return _fleetActx;
 }
 function fleetNodePing(pitch) {
-  if (_fleetMuted) return;
+  if (soundMuted) return;
   try {
     var ctx = audioFleet(), t0 = ctx.currentTime, f = _fleetScale[pitch % _fleetScale.length];
     var o = ctx.createOscillator(); o.type = 'triangle'; o.frequency.value = f;
@@ -3309,7 +3309,7 @@ function fleetNodePing(pitch) {
   } catch (e) {}
 }
 function fleetBroadcastPulse() {
-  if (_fleetMuted) return;
+  if (soundMuted) return;
   try {
     var ctx = audioFleet(), t0 = ctx.currentTime;
     var o = ctx.createOscillator(); o.type = 'sine'; o.frequency.setValueAtTime(64, t0); o.frequency.exponentialRampToValueAtTime(42, t0 + 0.55);
@@ -3321,7 +3321,7 @@ function fleetBroadcastPulse() {
   } catch (e) {}
 }
 function fleetFailThud() {
-  if (_fleetMuted) return;
+  if (soundMuted) return;
   try {
     var ctx = audioFleet(), t0 = ctx.currentTime;
     var o = ctx.createOscillator(); o.type = 'sine'; o.frequency.value = 96;
@@ -3330,7 +3330,7 @@ function fleetFailThud() {
   } catch (e) {}
 }
 function fleetReturnChord(failures) {
-  if (_fleetMuted) return;
+  if (soundMuted) return;
   try {
     var ctx = audioFleet(), t0 = ctx.currentTime;
     var notes = failures ? [146.83, 174.61, 220.00] : [146.83, 185.00, 220.00, 293.66];
@@ -3345,7 +3345,7 @@ function fleetReturnChord(failures) {
   } catch (e) {}
 }
 function fleetStageClick() {
-  if (_fleetMuted) return;
+  if (soundMuted) return;
   try {
     var ctx = audioFleet(), t0 = ctx.currentTime;
     var len = Math.floor(ctx.sampleRate * 0.04);
@@ -3358,7 +3358,7 @@ function fleetStageClick() {
   } catch (e) {}
 }
 function fleetLowClick() {
-  if (_fleetMuted) return;
+  if (soundMuted) return;
   try {
     var ctx = audioFleet(), t0 = ctx.currentTime;
     var o = ctx.createOscillator(); o.type = 'sine'; o.frequency.value = 160;
@@ -3374,21 +3374,6 @@ function initFleetSounds() {
   if (_fleetSoundInit) return;
   _fleetSoundInit = true;
   document.addEventListener('pointerdown', function () { try { audioFleet(); } catch (e) {} }, { passive: true });
-  var snd = document.getElementById('snd-btn-fleet');
-  if (snd) {
-    snd.addEventListener('click', function () {
-      _fleetMuted = !_fleetMuted;
-      snd.textContent = _fleetMuted ? '&#10005; muted' : '&#9835; sound';
-      if (!_fleetMuted) fleetNodePing(3);
-    });
-  }
-  document.addEventListener('keydown', function (e) {
-    var t = e.target;
-    var typing = t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable);
-    if (typing) return;
-    if (e.key === 'm' || e.key === 'M') { if (snd) snd.click(); }
-    else if (e.key === 'f' || e.key === 'F') { document.body.classList.toggle('focus'); }
-  });
 }
 function buildFleetSky() {
   var wrap = document.getElementById('nodes');
@@ -3424,7 +3409,7 @@ function drawFleetTargets() {
     var checked = _fleetSelected.has(g.ip);
     var online = g.online !== false;
     return '<div class="trow' + (checked ? ' checked' : '') + (online ? '' : ' disabled') + '" data-ip="' + g.ip + '">' +
-      '<span class="tchk"></span>' + gwPill(g.hostname || g.ip) +
+      '<span class="tchk"></span>' +
       '<span class="tname">' + escapeHtml(g.hostname || g.ip) + '</span>' +
       '<span class="tip">' + g.ip + '</span>' +
       (online ? '' : '<span class="hint">offline</span>') + '</div>';
@@ -4682,7 +4667,7 @@ function toggleStatsGateway(ip) {
 /* ── The tally voice — bell-toned, distinct from the Command Center ──
    D-major pentatonic glass bells. Sound lives in the data: hover the
    rhythm chart to hear the week, or play it outright. */
-var _tallyActx = null, _tallyMuted = false, _tallyInitDone = false, _tallyTimers = [];
+var _tallyActx = null, _tallyInitDone = false, _tallyTimers = [];
 var _tallyScale = [146.83, 164.81, 185.00, 220.00, 261.63, 293.66, 349.23, 392.00, 440.00, 493.88];
 function audioTally() {
   if (!_tallyActx) { _tallyActx = new (window.AudioContext || window.webkitAudioContext)(); }
@@ -4691,7 +4676,7 @@ function audioTally() {
 }
 function tallyIdx(val, max) { var i = Math.round((val / max) * (_tallyScale.length - 1)); return Math.max(0, Math.min(_tallyScale.length - 1, i)); }
 function tallyTone(f0, spark, gain, dur) {
-  if (_tallyMuted) return;
+  if (soundMuted) return;
   try {
     var ctx = audioTally(), t0 = ctx.currentTime;
     gain = gain || 0.045; dur = dur || 1.0;
@@ -4713,6 +4698,7 @@ function tallyTone(f0, spark, gain, dur) {
   } catch (e) {}
 }
 function tallyNodeTone(cmds, off) {
+  if (soundMuted) return;
   if (off) {
     try { var ctx = audioTally(), t0 = ctx.currentTime; var o = ctx.createOscillator(); o.type = 'sine'; o.frequency.value = 110;
       var g = ctx.createGain(); g.gain.setValueAtTime(0.0001, t0); g.gain.linearRampToValueAtTime(0.04, t0 + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.4);
@@ -4761,23 +4747,8 @@ function initTallyInteractions() {
   if (_tallyInitDone) return;
   _tallyInitDone = true;
   document.addEventListener('pointerdown', function () { try { audioTally(); } catch (e) {} }, { passive: true });
-  var snd = document.getElementById('snd-btn-stats');
-  if (snd) {
-    snd.addEventListener('click', function () {
-      _tallyMuted = !_tallyMuted;
-      snd.textContent = _tallyMuted ? '&#10005; muted' : '&#9835; sound';
-      if (!_tallyMuted) tallyTone(_tallyScale[3], false, 0.04, 0.6);
-    });
-  }
   var play = document.getElementById('play-btn');
   if (play) play.addEventListener('click', toggleTallyRhythm);
-  document.addEventListener('keydown', function (e) {
-    var t = e.target;
-    var typing = t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable);
-    if (typing) return;
-    if (e.key === 'm' || e.key === 'M') { if (snd) snd.click(); }
-    else if (e.key === 'f' || e.key === 'F') { document.body.classList.toggle('focus'); }
-  });
 }
 
 function renderRhythm(d) {
