@@ -507,86 +507,86 @@
       </div>
     </div>
 
-    <!-- FLEET RUN VIEW -->
+    <!-- FLEET RUN VIEW — solar broadcast console -->
     <div id="view-fleet" class="hidden w-full">
       <div class="hud" data-od-id="fleet-hud">
-        <div class="hud-txt"><b>One word, many ears</b> &middot; dispatched at once</div>
+        <div class="hud-txt"><b>The broadcast</b> &middot; compose, queue, then dispatch to every ear</div>
         <div class="hud-right">
-          <span class="hud-sum"><span><span class="n" id="fleet-node-count">0</span> nodes</span><span><span class="n" id="fleet-sel-count">0</span> targeted</span></span>
+          <span class="hud-sum"><span><span class="n" id="fleet-node-count">0</span> nodes</span><span><span class="n" id="fleet-on-count">0</span> listening</span><span><span class="n" id="fleet-sel-count">0</span> ears</span></span>
         </div>
       </div>
 
-      <!-- Compose -->
-      <div class="widget" data-od-id="fleet-compose">
-        <div class="widget-header">Compose &middot; a broadcast to the fleet</div>
-        <div class="compose-row">
-          <textarea id="fleet-cmd-input" class="cmd-input" rows="2" placeholder="command to broadcast…  e.g. systemctl status nginx"></textarea>
-          <div class="opts">
-            <label>timeout (s)<input type="number" id="fleet-timeout-input" value="180" min="1" max="3600"></label>
-            <label>reason<input type="text" id="fleet-reason-input" placeholder="context…"></label>
-            <button onclick="addFleetToQueue()" id="fleet-add-btn" class="btn-stage" data-od-id="fleet-add">Stage &#9658;</button>
+      <!-- COMPOSE (roomy strip) -->
+      <div class="orb-compose" data-od-id="fleet-compose">
+        <div class="orb-compose-row">
+          <span class="orb-prompt">&#187;</span>
+          <input type="text" id="fleet-cmd-input" class="orb-cmd" placeholder="broadcast a command — queue it, then dispatch to the ears…  e.g. systemctl status nginx" spellcheck="false">
+          <input type="number" id="fleet-timeout-input" class="orb-tmo" value="180" min="1" max="3600" title="timeout (s)">
+          <input type="text" id="fleet-reason-input" class="orb-reason" placeholder="reason (optional)" spellcheck="false">
+          <button onclick="addFleetToQueue()" id="fleet-add-btn" class="orb-queue-btn" data-od-id="fleet-add">+ Queue</button>
+        </div>
+        <div class="orb-echo" id="fleet-echo"></div>
+      </div>
+
+      <!-- CONSOLE -->
+      <div class="orb-console">
+        <!-- EARS roster -->
+        <aside class="orb-rail" data-od-id="fleet-roster">
+          <div class="orb-rail-head"><span>Ears</span><span class="orb-rail-cnt" id="targ-count">0 selected</span></div>
+          <div class="orb-masters">
+            <button class="orb-m-btn" id="all-online-btn">Online</button>
+            <button class="orb-m-btn" id="all-btn">All</button>
+            <button class="orb-m-btn" id="none-btn">None</button>
+          </div>
+          <div class="orb-roster" id="target-list"></div>
+        </aside>
+
+        <!-- SOLAR ORBIT -->
+        <section class="orb" data-od-id="fleet-orbit">
+          <div class="orb-status"><span>transmission <span class="orb-state" id="sky-state">idle</span></span><span>inner &middot; mid &middot; outer</span></div>
+          <div class="orb-stage">
+            <div class="orb-sq" id="sky-field">
+              <div class="orb-ring r1"><span class="orb-tick">inner</span></div>
+              <div class="orb-ring r2"><span class="orb-tick">mid</span></div>
+              <div class="orb-ring r3"><span class="orb-tick">outer</span></div>
+              <div class="orb-sun"></div>
+              <div class="orb-pulse" id="ripple"></div>
+              <div class="orb-nodes" id="nodes"></div>
+            </div>
+          </div>
+        </section>
+
+        <!-- QUEUE · TRANSMISSIONS · DISPATCH -->
+        <aside class="orb-rail orb-rail-r" data-od-id="fleet-log">
+          <div class="orb-rail-head"><span>Queue</span><span class="orb-rail-cnt" id="fleet-q-count">0</span></div>
+          <div class="orb-qlist" id="fleet-queue-list"><div class="orb-empty">empty — compose above and press Queue</div></div>
+
+          <div class="orb-rail-head orb-rail-sec"><span>Transmissions</span></div>
+          <div class="orb-txs" id="fleet-tx-list"><div class="orb-empty">the air is quiet —<br>dispatch a word to fill it</div></div>
+
+          <div class="orb-dispatch-foot">
+            <button onclick="dispatchFleetQueue()" id="fleet-dispatch-btn" class="orb-dispatch" data-od-id="fleet-dispatch" disabled>&#9654; Dispatch (0)</button>
+          </div>
+        </aside>
+      </div>
+
+      <!-- OUTPUT DECK -->
+      <section class="orb-deck" data-od-id="fleet-deck">
+        <div class="orb-deck-head" id="deck-head" style="display:none">
+          <span class="orb-deck-id" id="deck-id"></span>
+          <span class="orb-deck-cmd" id="deck-cmd"></span>
+          <span class="orb-deck-count" id="deck-count"></span>
+          <span class="orb-deck-verdict" id="deck-verdict"></span>
+        </div>
+        <div class="orb-deck-body" id="deck-body">
+          <div class="orb-deck-empty" id="deck-empty">
+            <span>&#10022;</span>
+            <div>dispatch a broadcast — or click a transmission —<br>and command output lands here, node by node, as they answer</div>
           </div>
         </div>
-      </div>
+      </section>
 
-      <!-- Targets -->
-      <div class="widget" data-od-id="fleet-targets">
-        <div class="widget-header"><span>Targets &middot; choose the ears</span><span class="chip" id="targ-count">0 selected</span></div>
-        <div class="target-masters">
-          <span class="tl">select</span>
-          <button class="chip-btn" id="all-online-btn">All online</button>
-          <button class="chip-btn" id="all-btn">All</button>
-          <button class="chip-btn" id="none-btn">None</button>
-        </div>
-        <div class="target-list" id="target-list"></div>
-      </div>
-
-      <!-- The fleet sky -->
-      <div class="widget" data-od-id="fleet-sky">
-        <div class="widget-header">
-          <span>The fleet &middot; watch the word travel</span>
-          <span class="flex items-center gap-2"><span class="chip" id="sky-state">listening</span><button onclick="dispatchFleetQueue()" id="fleet-dispatch-btn" class="btn-dispatch" data-od-id="fleet-dispatch" disabled>&#9654; Dispatch (0)</button></span>
-        </div>
-        <div class="fleet-sky" id="sky-field">
-          <svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
-            <line class="scatter-line" x1="34" y1="26" x2="46" y2="18"/>
-            <line class="scatter-line" x1="46" y1="18" x2="58" y2="34"/>
-            <line class="scatter-line" x1="58" y1="34" x2="66" y2="24"/>
-            <line class="scatter-line" x1="34" y1="26" x2="30" y2="44"/>
-            <line class="scatter-line" x1="30" y1="44" x2="52" y2="52"/>
-            <line class="scatter-line" x1="52" y1="52" x2="42" y2="66"/>
-            <line class="scatter-line" x1="42" y1="66" x2="60" y2="70"/>
-            <line class="scatter-line" x1="52" y1="52" x2="72" y2="48"/>
-            <line class="scatter-line" x1="72" y1="48" x2="66" y2="24"/>
-          </svg>
-          <span class="field-star" style="left:14%;top:20%"></span>
-          <span class="field-star" style="left:22%;top:66%"></span>
-          <span class="field-star" style="left:38%;top:12%"></span>
-          <span class="field-star" style="left:50%;top:74%"></span>
-          <span class="field-star" style="left:64%;top:8%"></span>
-          <span class="field-star" style="left:76%;top:58%"></span>
-          <span class="field-star" style="left:88%;top:26%"></span>
-          <span class="field-star" style="left:10%;top:46%"></span>
-          <span class="field-star" style="left:90%;top:66%"></span>
-          <div class="ripple" id="ripple"></div>
-          <div class="nodes" id="nodes"></div>
-        </div>
-        <div class="sky-legend">selected nodes glow <span class="k">amber</span> &middot; dispatch and the word travels node to node, each answering in its own voice</div>
-      </div>
-
-      <!-- Queue -->
-      <div class="widget" data-od-id="fleet-queue">
-        <div class="widget-header">Dispatch queue</div>
-        <div id="fleet-queue-list"><p class="text-muted">Queue is empty — stage a command above.</p></div>
-      </div>
-
-      <!-- Results -->
-      <div class="widget" data-od-id="fleet-results">
-        <div class="widget-header">History &amp; results</div>
-        <div id="fleet-results-list"><p class="text-muted">No fleet commands yet.</p></div>
-      </div>
-
-      <div class="page-foot"><span class="k">F</span> focus &middot; <span class="k">M</span> mute &middot; stage, target, dispatch &middot; each node has its own voice</div>
+      <div class="page-foot"><span class="k">F</span> focus &middot; <span class="k">M</span> mute &middot; queue first, then dispatch &middot; each node answers in its own voice</div>
     </div>
 
     <!-- INTEGRATIONS VIEW — agent API gateway (MCP) -->

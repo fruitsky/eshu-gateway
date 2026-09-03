@@ -3263,9 +3263,10 @@ async function fetchFleetCommands() {
     const res = await fetch('/api/fleet/commands');
     if (res.status === 401) { await checkAuth(); return; }
     const data = await res.json();
-    renderFleetRun(data || []);
+    _fleetData = data || [];
   } catch(e) {}
   renderFleetTargetList();
+  fleetConsoleUpdate();
 }
 
 function renderFleetTargetList() {
@@ -3429,21 +3430,28 @@ function initFleetSounds() {
   _fleetSoundInit = true;
   document.addEventListener('pointerdown', function () { try { audioFleet(); } catch (e) {} }, { passive: true });
 }
+function _gwOnline(g) { var now = Math.floor(Date.now() / 1000); return !!g && !((now - (g.last_seen || 0)) > 240); }
 function buildFleetSky() {
   var wrap = document.getElementById('nodes');
   if (!wrap || wrap.dataset.built) return;
   wrap.dataset.built = '1';
   _fleetGateways.forEach(function (g, i) {
+    var on = _gwOnline(g);
+    var r = i < 3 ? 20 : (i < 8 ? 33 : 46);
+    var slot = i < 3 ? i : (i < 8 ? i - 3 : i - 8);
+    var slots = r === 20 ? 3 : (r === 33 ? 5 : 8);
+    var a0 = (slot + 0.5) / slots * Math.PI * 2 + (r === 20 ? 0 : (r === 33 ? Math.PI / 6 : Math.PI / 3));
     var n = document.createElement('div');
-    n.className = 'node' + (g.online === false ? ' off' : '');
-    n.style.left = _fleetSkyPos[i % _fleetSkyPos.length][0] + '%';
-    n.style.top = _fleetSkyPos[i % _fleetSkyPos.length][1] + '%';
+    n.className = 'node' + (on ? '' : ' off');
+    n.style.left = '50%'; n.style.top = '50%';
     n.setAttribute('data-ip', g.ip);
+    n._o = { a0: a0, a: a0, r: r, speed: r === 20 ? 0.05 : (r === 33 ? 0.032 : 0.02), on: on };
     n.innerHTML = '<span class="nd"></span><span class="ni">' + gwIni(g.hostname || g.ip) + '</span>' +
-      '<span class="ntip"><b>' + escapeHtml(g.hostname || g.ip) + '</b> &middot; ' + g.ip + (g.online === false ? ' &middot; offline' : '') + '</span>';
+      '<span class="ntip"><b>' + escapeHtml(g.hostname || g.ip) + '</b> &middot; ' + g.ip + (on ? '' : ' &middot; offline') + '</span>';
     wrap.appendChild(n);
     _fleetNodeEls[g.ip] = n;
   });
+  fleetOrbitRun();
   syncFleetTargets();
 }
 function syncFleetTargets() {
@@ -3453,6 +3461,8 @@ function syncFleetTargets() {
   });
   var c = document.getElementById('fleet-sel-count'); if (c) c.textContent = _fleetSelected.size;
   var tc = document.getElementById('targ-count'); if (tc) tc.textContent = _fleetSelected.size + ' selected';
+  var oc = document.getElementById('fleet-on-count'); if (oc) oc.textContent = _fleetGateways.filter(_gwOnline).length;
+  var nn = document.getElementById('fleet-node-count'); if (nn) nn.textContent = _fleetGateways.length;
 }
 function drawFleetTargets() {
   var list = document.getElementById('target-list');
@@ -3559,6 +3569,8 @@ function formatFleetTargets(ips) {
 function renderFleetQueue() {
   var list = document.getElementById('fleet-queue-list');
   var btn = document.getElementById('fleet-dispatch-btn');
+  var qc = document.getElementById('fleet-q-count');
+  if (qc) qc.textContent = _fleetQueue.length;
   if (btn) { btn.disabled = !_fleetQueue.length; btn.innerHTML = '&#9654; Dispatch (' + _fleetQueue.length + ')'; }
   if (!list) return;
   if (_fleetQueue.length === 0) {
@@ -5712,3 +5724,217 @@ function esc(s) {
     return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch];
   });
 }
+
+/* ==============================================================
+   FLEET RUN — SOLAR BROADCAST CONSOLE
+   Orbits the gateways on rings around a dark core, maps real command
+   results onto the nodes, lists transmissions, and streams per-node
+   output in a bottom deck. Safety gates + API flow are untouched.
+   ============================================================== */
+var _orbRafOn = false, _orbSeenRun = {}, _fleetSelCmdId = null, _deckSig = '';
+function fleetOrbitRun() {
+  if (_orbRafOn) return;
+  _orbRafOn = true;
+  (function loop(ts) { fleetOrbitStep(ts); requestAnimationFrame(loop); })();
+}
+function fleetOrbitStep(ts) {
+  var wrap = document.getElementById('nodes');
+  if (!wrap) return;
+  Array.prototype.forEach.call(wrap.children, function (n) {
+    var o = n._o; if (!o || o.on === false) return;
+    o.a = o.a0 + ts * 0.001 * o.speed;
+    n.style.left = (50 + o.r * Math.cos(o.a)) + '%';
+    n.style.top = (50 + o.r * Math.sin(o.a)) + '%';
+  });
+}
+function orbName(h) { return h && String(h).indexOf('.') === -1 ? h : (h || '??'); }
+function orbGwByIp(ip) {
+  for (var i = 0; i < _fleetGateways.length; i++) if (_fleetGateways[i].ip === ip) return _fleetGateways[i];
+  return null;
+}
+function orbPitch(ip) {
+  var idx = -1;
+  for (var i = 0; i < _fleetGateways.length; i++) if (_fleetGateways[i].ip === ip) { idx = i; break; }
+  return idx < 0 ? 0 : idx % _fleetScale.length;
+}
+function fleetConsoleUpdate() {
+  renderFleetTxRail();
+  fleetAutoSelect();
+  renderFleetDeck();
+  orbReceiptPings();
+  syncFleetSkyFromResults();
+}
+function fleetAutoSelect() {
+  if (!_fleetData.length) { _fleetSelCmdId = null; return; }
+  if (_fleetSelCmdId != null && _fleetData.some(function (c) { return c.id === _fleetSelCmdId; })) return;
+  var pool = _fleetData.filter(function (c) { return c.status === 'approved' || (c.results && c.results.length); });
+  if (!pool.length) pool = _fleetData;
+  _fleetSelCmdId = pool[pool.length - 1].id;
+}
+
+/* transmissions rail */
+function orbCmdVerdict(c) {
+  var rs = c.results || [];
+  var term = rs.filter(function (r) { return ['success', 'failed', 'timeout', 'skipped'].indexOf(r.status) >= 0; });
+  var run = rs.filter(function (r) { return r.status === 'running' || r.status === 'queued'; });
+  if (c.status === 'denied') return { cls: 'den', label: 'denied' };
+  if (c.status === 'pending') return { cls: 'live', label: 'awaiting poll' };
+  if (c.status === 'approved' && !rs.length) return { cls: 'live', label: 'dispatched' };
+  if (run.length || term.length !== rs.length) return { cls: 'live', label: 'running ' + term.length + '/' + rs.length };
+  var bad = term.filter(function (r) { return r.status === 'failed' || r.status === 'timeout'; }).length;
+  if (bad === 0) return { cls: 'ok', label: 'all clear' };
+  return { cls: bad === term.length ? 'err' : 'part', label: bad === term.length ? 'failed' : 'partial · ' + bad };
+}
+function orbChip(r) {
+  var cls = r.status === 'success' ? 'ok' : ((r.status === 'failed' || r.status === 'timeout') ? 'bad' : 'wait');
+  return '<span class="orb-tx-n ' + cls + '"><span class="d"></span>' + escapeHtml(orbName(r.hostname || r.gateway_ip).slice(0, 2)) + '</span>';
+}
+function renderFleetTxRail() {
+  var wrap = document.getElementById('fleet-tx-list');
+  if (!wrap) return;
+  if (!_fleetData.length) { wrap.innerHTML = '<div class="orb-empty">the air is quiet —<br>dispatch a word to fill it</div>'; return; }
+  wrap.innerHTML = _fleetData.slice().reverse().slice(0, 12).map(function (c) {
+    var v = orbCmdVerdict(c);
+    var rs = c.results || [];
+    var chips = rs.length
+      ? rs.map(orbChip).join('')
+      : (c.target_ips || []).slice(0, 8).map(function (ip) {
+          var g = orbGwByIp(ip);
+          return '<span class="orb-tx-n wait"><span class="d"></span>' + escapeHtml((g && g.hostname ? g.hostname : ip).slice(0, 2)) + '</span>';
+        }).join('');
+    var sel = _fleetSelCmdId === c.id ? ' active' : '';
+    return '<div class="orb-tx' + sel + '" data-id="' + c.id + '">' +
+      '<div class="orb-tx-top"><span class="orb-tx-id">#' + c.id + '</span><span class="orb-tx-cmd">' + escapeHtml(c.command) + '</span><span class="orb-tx-v ' + v.cls + '">' + v.label + '</span></div>' +
+      '<div class="orb-tx-meta"><span>' + (c.created_at ? formatDateTime(c.created_at) : '') + '</span><span>' + (rs.length || (c.target_ips || []).length) + ' ears</span></div>' +
+      '<div class="orb-tx-nodes">' + chips + '</div></div>';
+  }).join('');
+  wrap.querySelectorAll('.orb-tx').forEach(function (t) {
+    t.addEventListener('click', function () {
+      _fleetSelCmdId = parseInt(t.getAttribute('data-id'), 10);
+      renderFleetDeck();
+      renderFleetTxRail();
+    });
+  });
+}
+
+/* output deck */
+function renderFleetDeck() {
+  var body = document.getElementById('deck-body'), head = document.getElementById('deck-head');
+  var empty = document.getElementById('deck-empty');
+  if (!body || !head) return;
+  var c = null;
+  if (_fleetSelCmdId != null) { for (var i = 0; i < _fleetData.length; i++) if (_fleetData[i].id === _fleetSelCmdId) { c = _fleetData[i]; break; } }
+  body.querySelectorAll('.orb-dn').forEach(function (n) { n.remove(); });
+  if (!c) {
+    if (empty) empty.style.display = '';
+    head.style.display = 'none';
+    return;
+  }
+  if (empty) empty.style.display = 'none';
+  head.style.display = 'flex';
+  document.getElementById('deck-id').textContent = '#' + c.id;
+  document.getElementById('deck-cmd').textContent = c.command;
+  var rs = c.results || [];
+  var entries = rs.length ? rs : (c.target_ips || []).map(function (ip) { var g = orbGwByIp(ip); return { gateway_ip: ip, hostname: g ? g.hostname : ip, status: 'queued' }; });
+  var sig = String(c.id) + ':' + entries.map(function (r) { return r.status || 'q'; }).join(',');
+  if (sig === _deckSig) { orbDeckRefresh(c, entries); return; }
+  _deckSig = sig;
+  entries.forEach(function (r) {
+    var ip = r.gateway_ip;
+    var row = document.createElement('div');
+    row.className = 'orb-dn wait';
+    row.innerHTML = '<div class="orb-dn-top"><span class="dot"></span><span class="orb-dn-name">' + escapeHtml(orbName(r.hostname || ip)) + '</span>' +
+      '<span class="orb-dn-st">listening…</span>' +
+      '<span class="orb-dn-ops"><button class="op copy" title="Copy output">&#10697;</button><button class="op full" title="Full output">full</button></span></div>' +
+      '<div class="orb-wait" data-role="wait">awaiting the wave…</div>' +
+      '<div class="orb-out-row"><button class="orb-dn-toggle">Show output <span class="car">&#8964;</span></button><pre class="orb-dn-out"></pre></div>';
+    body.appendChild(row);
+    row._info = { cmdId: c.id, ip: ip };
+    row.querySelector('.orb-dn-toggle').addEventListener('click', function (e) { e.stopPropagation(); orbOpenOut(row); });
+    row.querySelector('.op.copy').addEventListener('click', function (e) { e.stopPropagation(); orbCopy(row); });
+    row.querySelector('.op.full').addEventListener('click', function (e) { e.stopPropagation(); openFleetOutputModal(c.id, ip); });
+  });
+  orbDeckRefresh(c, entries);
+}
+function orbDeckRefresh(c, entries) {
+  var body = document.getElementById('deck-body');
+  var ok = 0, bad = 0, ans = 0, total = entries.length;
+  var rs = c.results || [];
+  body.querySelectorAll('.orb-dn').forEach(function (row) {
+    var key = row._info ? row._info.ip : null;
+    var r = null;
+    for (var i = 0; i < rs.length; i++) if (rs[i].gateway_ip === key) { r = rs[i]; break; }
+    var wait = row.querySelector('[data-role="wait"]'), st = row.querySelector('.orb-dn-st');
+    row.classList.remove('wait', 'run', 'ok', 'bad', 'resolved');
+    if (!r || r.status === 'queued' || r.status === '') {
+      row.classList.add('wait');
+      st.textContent = 'listening…'; if (wait) wait.textContent = 'awaiting the wave…';
+    } else if (r.status === 'running') {
+      row.classList.add('run');
+      st.textContent = 'running…'; if (wait) wait.textContent = 'wave received — running…';
+    } else if (r.status === 'success') {
+      row.classList.add('ok', 'resolved'); st.textContent = 'exit 0'; ans++; ok++;
+      if (wait) wait.textContent = '';
+    } else if (r.status === 'failed' || r.status === 'timeout') {
+      row.classList.add('bad', 'resolved'); st.textContent = r.status === 'timeout' ? 'timed out' : 'exit 1'; ans++; bad++;
+      if (wait) wait.textContent = '';
+    } else if (r.status === 'skipped') {
+      row.classList.add('resolved'); st.textContent = 'skipped'; ans++;
+      if (wait) wait.textContent = '';
+    }
+  });
+  document.getElementById('deck-count').innerHTML = '<b>' + ans + '</b> / ' + total + ' answered';
+  var v = document.getElementById('deck-verdict');
+  if (ans < total) { v.className = 'orb-deck-verdict live'; v.textContent = ans ? 'running · ' + ans + '/' + total : 'awaiting poll'; }
+  else if (bad > 0) { v.className = 'orb-deck-verdict ' + (bad === total ? 'err' : 'part'); v.textContent = bad === total ? 'failed' : 'partial · ' + bad; }
+  else { v.className = 'orb-deck-verdict ok'; v.textContent = 'all clear'; }
+}
+function orbOpenOut(row) {
+  var open = row.classList.contains('out-open');
+  row.classList.toggle('out-open', !open);
+  if (!open) {
+    var pre = row.querySelector('.orb-dn-out');
+    if (pre && !pre.dataset.loaded) orbLoadOut(row._info.cmdId, row._info.ip, pre);
+  }
+}
+function orbLoadOut(cmdId, ip, pre) {
+  pre.dataset.loaded = '1';
+  pre.textContent = 'loading output…';
+  fetch('/api/fleet/commands/' + cmdId + '/output/' + encodeURIComponent(ip)).then(function (r) { return r.json(); }).then(function (d) {
+    pre.textContent = d && d.output ? d.output : '(no output)';
+  }).catch(function () { pre.textContent = '(failed to load)'; });
+}
+function orbCopy(row) {
+  var pre = row.querySelector('.orb-dn-out');
+  var btn = row.querySelector('.op.copy');
+  var doCopy = function (txt) {
+    copyToClipboard(txt || '(no output)', true);
+    if (btn) { btn.textContent = 'copied'; btn.classList.add('copied'); setTimeout(function () { btn.textContent = '&#10697;'; btn.classList.remove('copied'); }, 1400); }
+  };
+  if (pre && pre.dataset.loaded) { doCopy(pre.textContent); }
+  else if (pre && row._info) { orbLoadOut(row._info.cmdId, row._info.ip, pre); setTimeout(function () { doCopy(pre.textContent); }, 400); }
+  else { doCopy(''); }
+}
+function orbReceiptPings() {
+  if (!_fleetData.length) return;
+  var c = _fleetData[0];
+  (c.results || []).forEach(function (r) {
+    var k = c.id + ':' + r.gateway_ip;
+    if ((r.status === 'running' || r.status === 'queued') && !_orbSeenRun[k]) {
+      _orbSeenRun[k] = true;
+      var el = _fleetNodeEls[r.gateway_ip];
+      if (el) { el.classList.add('receipt'); setTimeout(function () { if (el) el.classList.remove('receipt'); }, 950); }
+      fleetNodePing(orbPitch(r.gateway_ip));
+    } else if (r.status === 'success' || r.status === 'failed' || r.status === 'timeout' || r.status === 'skipped') {
+      delete _orbSeenRun[k];
+    }
+  });
+}
+var _orbBound = false;
+function orbBind() {
+  if (_orbBound) return;
+  _orbBound = true;
+  var inp = document.getElementById('fleet-cmd-input');
+  if (inp) inp.addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); addFleetToQueue(); } });
+}
+orbBind();
