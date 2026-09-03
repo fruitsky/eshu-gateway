@@ -5799,7 +5799,7 @@ function orbChip(r) {
 function renderFleetTxRail() {
   var wrap = document.getElementById('fleet-tx-list');
   if (!wrap) return;
-  if (!_fleetData.length) { wrap.innerHTML = '<div class="orb-empty">the air is quiet —<br>dispatch a word to fill it</div>'; return; }
+  if (!_fleetData.length) { wrap.innerHTML = '<div class="orb-empty">nothing broadcast yet —<br>queued commands land here once dispatched.<br>click a run to read its output below</div>'; return; }
   wrap.innerHTML = _fleetData.slice().reverse().slice(0, 12).map(function (c) {
     var v = orbCmdVerdict(c);
     var rs = c.results || [];
@@ -5824,19 +5824,26 @@ function renderFleetTxRail() {
   });
 }
 
+function orbFindCmd(id) {
+  if (id == null) return null;
+  for (var i = 0; i < _fleetData.length; i++) if (_fleetData[i].id === id) return _fleetData[i];
+  return null;
+}
 /* output deck */
 function renderFleetDeck() {
   var body = document.getElementById('deck-body'), head = document.getElementById('deck-head');
   var empty = document.getElementById('deck-empty');
   if (!body || !head) return;
-  var c = null;
-  if (_fleetSelCmdId != null) { for (var i = 0; i < _fleetData.length; i++) if (_fleetData[i].id === _fleetSelCmdId) { c = _fleetData[i]; break; } }
-  body.querySelectorAll('.orb-dn').forEach(function (n) { n.remove(); });
+  var c = orbFindCmd(_fleetSelCmdId);
+  if (!c && _fleetData.length) { fleetAutoSelect(); c = orbFindCmd(_fleetSelCmdId); }
   if (!c) {
+    body.querySelectorAll('.orb-dn').forEach(function (n) { n.remove(); });
     if (empty) empty.style.display = '';
     head.style.display = 'none';
+    _deckSig = '';
     return;
   }
+  body.querySelectorAll('.orb-dn').forEach(function (n) { n.remove(); });
   if (empty) empty.style.display = 'none';
   head.style.display = 'flex';
   document.getElementById('deck-id').textContent = '#' + c.id;
