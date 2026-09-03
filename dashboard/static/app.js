@@ -3636,29 +3636,36 @@ async function dispatchFleetQueue() {
   });
 
   var btn = document.getElementById('fleet-dispatch-btn');
-  if (btn) { btn.disabled = true; btn.textContent = 'Dispatching...'; }
-  var dispatched = 0, keepIdx = {};
-  for (var j = 0; j < _fleetQueue.length; j++) {
-    var d = _fleetQueue[j];
-    if (isHardcoreBlocked(d.command)) { keepIdx[j] = true; continue; }
-    try {
-      var res = await authFetch('/api/fleet/commands', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({command: d.command, target_ips: d.targets, reason: d.reason, timeout: d.timeout, override: !!blacklistedIdx[j]})
-      });
-      var data = await res.json();
-      if (data.status === 'ok') dispatched++;
-      else { keepIdx[j] = true; showToast('Not dispatched: ' + (data.detail || 'unknown'), 'error'); }
-    } catch(e) { keepIdx[j] = true; }
+  if (btn) { btn.disabled = true; btn.innerHTML = '&#9654; dispatching…'; }
+  var dispatched = 0, failed = 0, keepIdx = {};
+  try {
+    for (var j = 0; j < _fleetQueue.length; j++) {
+      var d = _fleetQueue[j];
+      if (isHardcoreBlocked(d.command)) { keepIdx[j] = true; failed++; continue; }
+      try {
+        var res = await authFetch('/api/fleet/commands', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({command: d.command, target_ips: d.targets, reason: d.reason, timeout: d.timeout, override: !!blacklistedIdx[j]})
+        });
+        var data = await res.json();
+        if (data.status === 'ok') dispatched++;
+        else { keepIdx[j] = true; failed++; showToast('Not dispatched: ' + (data.detail || 'unknown'), 'error'); }
+      } catch(e) { keepIdx[j] = true; failed++; showToast('Dispatch failed: ' + (e.message || 'network error'), 'error'); }
+    }
+  } finally {
+    _fleetQueue = _fleetQueue.filter(function(d, j) { return !!keepIdx[j]; });
+    if (btn) { btn.disabled = false; btn.innerHTML = '&#9654; Dispatch (' + _fleetQueue.length + ')'; }
+    var skyState2 = document.getElementById('sky-state');
+    if (skyState2 && dispatched > 0) skyState2.textContent = 'awaiting poll';
+    renderFleetQueue();
   }
-  _fleetQueue = _fleetQueue.filter(function(d, j) { return !!keepIdx[j]; });
-  if (btn) { btn.disabled = false; btn.innerHTML = '&#9654; Dispatch (' + _fleetQueue.length + ')'; }
-  var skyState2 = document.getElementById('sky-state');
-  if (skyState2 && dispatched > 0) skyState2.textContent = 'awaiting poll';
-  renderFleetQueue();
-  fetchFleetCommands();
-  if (dispatched > 0) showToast('Dispatched ' + dispatched + ' command(s)', 'success');
+  var echo = document.getElementById('fleet-echo');
+  if (echo) {
+    if (dispatched > 0) echo.textContent = 'dispatched ' + dispatched + (failed > 0 ? ' · kept ' + failed + ' in queue' : ' — watch the rings answer');
+    else if (failed > 0) echo.textContent = failed + ' command(s) not dispatched — see above';
+  }
+  if (dispatched > 0) { fetchFleetCommands(); showToast('Dispatched ' + dispatched + ' command(s)', 'success'); }
 }
 
 var _fleetData = [];
