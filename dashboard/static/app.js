@@ -5843,7 +5843,6 @@ function renderFleetDeck() {
     _deckSig = '';
     return;
   }
-  body.querySelectorAll('.orb-dn').forEach(function (n) { n.remove(); });
   if (empty) empty.style.display = 'none';
   head.style.display = 'flex';
   document.getElementById('deck-id').textContent = '#' + c.id;
@@ -5853,6 +5852,7 @@ function renderFleetDeck() {
   var sig = String(c.id) + ':' + entries.map(function (r) { return r.status || 'q'; }).join(',');
   if (sig === _deckSig) { orbDeckRefresh(c, entries); return; }
   _deckSig = sig;
+  body.querySelectorAll('.orb-dn').forEach(function (n) { n.remove(); });
   entries.forEach(function (r) {
     var ip = r.gateway_ip;
     var row = document.createElement('div');
