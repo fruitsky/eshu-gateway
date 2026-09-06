@@ -2758,6 +2758,10 @@ function renderTable() {
     const escapedCmd = escapeHtml(req.command);
     const gwPillHtml = gwPill(req.hostname || 'N/A');
     const isIntegration = req.status === 'integration-approved' || req.status === 'integration-denied';
+    const _sid = req.session_id || '';
+    const sCell = (_sid && _sid !== 'unknown')
+      ? '<button class="c-session" data-sid="' + escapeHtml(_sid) + '" title="Session ' + escapeHtml(_sid) + '">' + escapeHtml(((_sessionNames || {})[_sid] || {}).name || _sid.substring(0, 8)) + '</button>'
+      : '<span class="text-muted">—</span>';
     const gatewayCell = isIntegration
       ? escapeHtml(req.target_ip)
       : gwPillHtml + ' ' + escapeHtml(req.hostname || 'N/A') + ' (' + escapeHtml(req.target_ip) + ')';
@@ -2790,6 +2794,7 @@ function renderTable() {
           : '') +
         '</td>' +
       '<td>' + badge + '</td>' +
+      '<td>' + sCell + '</td>' +
       '<td class="text-right">' + actions + '</td></tr>';
   });
   tbody.innerHTML = html;
