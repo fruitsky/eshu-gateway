@@ -5045,7 +5045,7 @@ function renderStatsNodes(d) {
   }
   el.innerHTML = '<svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">' + lines + '</svg>' + gws.map(function (g, i) {
     var p = placed[i];
-    var online = (now - (g.last_seen || 0)) < 120;
+    var online = !g.last_seen || (now - g.last_seen) < 120;
     var jitA = (g.total || 0) - (g.auto_approved || 0) - (g.blocked || 0) - (g.denied || 0);
     var autoPct = g.total > 0 ? Math.round(((g.auto_approved || 0) + jitA) / g.total * 100) : 0;
     var cls = 'g-node' + (g.total >= maxT * 0.5 ? ' big' : (g.total <= maxT * 0.15 ? ' small' : '')) + (online ? '' : ' off') +
