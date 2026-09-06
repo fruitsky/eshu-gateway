@@ -2800,6 +2800,13 @@ input::placeholder, textarea::placeholder { color: rgba(122,109,94,0.55); }
 .sm-mcp-res.bad{color:#f87171}
 .sm-mcp-reason{font-size:9px;color:var(--muted);margin-top:3px}
 .sm-mcp-none{font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--muted);padding:4px 2px}
+.sm-mcp.ssh{border-left-color:rgba(245,158,11,0.4)}
+.sm-mcp.ssh.warn{border-left-color:var(--status-warning)}
+.sm-mcp.warn .mcp-dot{background:var(--status-warning);box-shadow:0 0 5px rgba(251,146,60,0.6);animation:livep 1.6s ease-in-out infinite}
+.sm-mcp-cmd{font-family:'JetBrains Mono',monospace;font-size:10.5px;color:var(--fg);background:rgba(15,13,10,0.55);border:1px solid rgba(45,41,34,0.55);border-radius:4px;padding:5px 8px;margin-top:4px;word-break:break-all;line-height:1.5}
+.sm-mcp-res.warn{color:var(--accent-hover)}
+.sm-ssh-actions{display:flex;align-items:center;gap:8px;margin-top:7px;flex-wrap:wrap}
+.sm-ssh-actions .sm-mcp-res{margin:0}
 
 @media(max-width:1100px){.orb-console{grid-template-columns:180px minmax(0,1fr) 230px}}
 @media(max-width:900px){.orb-console{grid-template-columns:1fr}.orb-rail{min-height:0;max-height:220px}.orb-rail-r{max-height:none}}

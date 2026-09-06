@@ -1899,7 +1899,11 @@ function renderRecentSessions() {
     var badge = pending ? '<span style="color:var(--status-warning);font-weight:700;">' + pending + ' pending</span> \u00b7 ' : '';
 
     return '<div class="recent-session-card" onclick="openSessionModal(\'' + escapeHtml(s.id) + '\')">' +
-      '<div class="rs-title"><span class="host">' + escapeHtml(host) + '</span> \u00b7 ' + escapeHtml(displayName) + ' <span style="color:var(--text-muted);font-weight:400;font-size:10px;">\u00b7 ' + escapeHtml(s.id.substring(0,6)) + '</span></div>' +
+      '<div class="rs-title"><span class="host">' + escapeHtml(host) + '</span> \u00b7 ' +
+        (meta.name
+          ? escapeHtml(meta.name) + ' <span style="color:var(--text-muted);font-weight:400;font-size:10px;">\u00b7 ' + escapeHtml(s.id.substring(0, 6)) + '</span>'
+          : '<span style="color:var(--text-muted);font-weight:400;font-size:10px;">#' + escapeHtml(s.id.substring(0, 8)) + '</span>') +
+      '</div>' +
       '<div class="rs-cmd-block">' + cmdPreview + '</div>' +
       (desc ? '<div class="rs-desc">' + escapeHtml(desc) + '</div>' : '') +
       '<div class="rs-meta"><span>' + badge + count + ' command' + (count > 1 ? 's' : '') + '</span><span>\u00b7</span><span>' + ago + '</span><span style="margin-left:auto;color:var(--accent);">View \u2192</span></div>' +
@@ -1944,15 +1948,18 @@ async function refreshRecentSessions() {
     var prev = lastLocal ? escapeHtml(String(lastLocal.command || '').substring(0, 60)) : '';
     var reqs = s.reqs || 0, mcps = s.mcps || 0;
     var kind = (reqs && mcps) ? 'mixed' : (mcps && !reqs) ? 'mcp-only' : 'ssh';
+    var hostTxt = reqs ? (s.host || 'ssh') : 'mcp';
+    var nameTxt = meta.name;
+    var idPart = nameTxt
+      ? escapeHtml(nameTxt) + ' <span style="color:var(--text-muted);font-weight:400;font-size:10px;">\u00b7 ' + escapeHtml(s.session_id.substring(0, 6)) + '</span>'
+      : '<span style="color:var(--text-muted);font-weight:400;font-size:10px;">#' + escapeHtml(s.session_id.substring(0, 8)) + '</span>';
     var kinds = [];
     if (reqs) kinds.push(reqs + ' cmd');
     if (mcps) kinds.push(mcps + ' mcp');
     var badge = pending ? '<span style="color:var(--status-warning);font-weight:700;">' + pending + ' pending</span> \u00b7 ' : '';
     return '<div class="recent-session-card" onclick="openSessionModal(\'' + escapeHtml(s.session_id) + '\')">' +
       '<div class="rs-title"><span class="rs-kind ' + kind + '">' + kind + '</span>' +
-      (host ? '<span class="host">' + escapeHtml(host) + '</span>' : '<span class="host" style="color:var(--muted)">mcp</span>') +
-      ' \u00b7 ' + escapeHtml(meta.name || s.session_id.substring(0, 8)) +
-      ' <span style="color:var(--text-muted);font-weight:400;font-size:10px;">\u00b7 ' + escapeHtml(s.session_id.substring(0, 6)) + '</span></div>' +
+      '<span class="host">' + escapeHtml(hostTxt) + '</span> \u00b7 ' + idPart + '</div>' +
       (prev ? '<div class="rs-cmd-block">' + prev + '</div>' : (mcps ? '<div class="rs-cmd-block" style="color:var(--ice)">MCP integration activity</div>' : '')) +
       (meta.description ? '<div class="rs-desc">' + escapeHtml(meta.description) + '</div>' : '') +
       '<div class="rs-meta"><span>' + badge + (kinds.join(' \u00b7 ') || 'activity') + '</span><span>\u00b7</span><span>' + formatAgo(now - (s.last_seen || now)) + '</span><span style="margin-left:auto;color:var(--accent);">View \u2192</span></div>' +
@@ -2058,44 +2065,38 @@ function openSessionModal(sid) {
 
   cmdsEl.innerHTML = sorted.map(function(r) {
     var isPending = r.status === 'pending' && r.ttl > 0;
-    var statusClass = '', statusLabel = r.status;
-    if (r.status === 'pending') { statusClass = 'sm-st-pending'; statusLabel = 'pending'; }
-    else if (r.status === 'approved') { statusClass = 'sm-st-approved'; statusLabel = 'approved'; }
-    else if (r.status === 'consumed') { statusClass = 'sm-st-approved'; statusLabel = 'ran'; }
-    else if (r.status === 'auto-approved') { statusClass = 'sm-st-auto'; statusLabel = 'auto'; }
-    else if (r.status === 'blocked') { statusClass = 'sm-st-blocked'; statusLabel = 'blocked'; }
-    else if (r.status === 'denied') { statusClass = 'sm-st-blocked'; statusLabel = 'denied'; }
-    else if (r.status === 'frozen') { statusClass = 'sm-st-blocked'; statusLabel = 'frozen'; }
-    else if (r.status === 'override') { statusClass = 'sm-st-auto'; statusLabel = 'override'; }
+    var statusLabel = r.status;
+    if (r.status === 'consumed') statusLabel = 'ran';
+    else if (r.status === 'auto-approved') statusLabel = 'auto';
+    else if (r.status === 'window-approved') statusLabel = 'window';
+    else if (r.status === 'integration-approved') statusLabel = 'api executed';
+    else if (r.status === 'integration-denied') statusLabel = 'api denied';
 
+    var stBad = ['blocked', 'denied', 'frozen', 'window-rejected', 'integration-denied'].indexOf(r.status) >= 0;
+    var resCls = stBad ? 'bad' : (isPending ? 'warn' : 'ok');
     var human = describeCmd(r.command);
     var host = r.hostname || r.target_ip || '';
 
     var riskHtml = '';
-    if (r.risk) riskHtml = '<div class="sm-risk">' + escapeHtml(r.risk) + '</div>';
-    if (r.anomaly) riskHtml += '<div class="sm-risk" style="color:var(--danger)">' + escapeHtml(r.anomaly) + '</div>';
+    if (r.risk) riskHtml = '<div class="sm-mcp-reason">' + escapeHtml(r.risk) + '</div>';
+    if (r.anomaly) riskHtml += '<div class="sm-mcp-reason" style="color:var(--danger)">' + escapeHtml(r.anomaly) + '</div>';
 
     var actionsHtml = '';
     if (isPending) {
-      actionsHtml = '<div class="jit-actions">' +
+      actionsHtml = '<div class="sm-ssh-actions">' +
+        '<span class="sm-mcp-res warn">ttl <span class="ttl-countdown" data-ttl="' + r.ttl + '">' + r.ttl + 's</span></span>' +
         '<button onclick="event.stopPropagation();handleAction(' + r.id + ',\'deny\')" class="btn btn-deny btn-xs">Deny</button>' +
         '<button onclick="event.stopPropagation();handleAction(' + r.id + ',\'approve\')" class="btn btn-approve btn-xs">Approve</button>' +
       '</div>';
     }
 
-    return '<div class="jit-ticket sm-ticket' + (isPending ? ' sm-pending' : ' sm-resolved') + '">' +
-      '<div class="jit-check"' + (isPending ? '' : ' style="opacity:0"') + '></div>' +
-      '<div style="flex:1;min-width:0">' +
-        (human ? '<div class="jit-human">' + escapeHtml(human) + '</div>' : '') +
-        '<div class="jit-cmd-text">' + escapeHtml(r.command) + '</div>' +
-        '<div class="jit-meta">' +
-          (host ? '<span class="jit-meta-item">' + escapeHtml(host) + '</span>' : '') +
-          '<span class="jit-meta-item sm-status-badge ' + statusClass + '">' + statusLabel + '</span>' +
-          '<span class="jit-meta-item" style="margin-left:auto">' + formatTime(r.created_at) + '</span>' +
-          (isPending ? '<span class="jit-ttl"><span class="ttl-countdown" data-ttl="' + r.ttl + '">' + r.ttl + 's</span></span>' : '') +
-        '</div>' +
-        riskHtml +
-      '</div>' +
+    return '<div class="sm-mcp ssh ' + (stBad ? 'bad' : (isPending ? 'warn' : '')) + '">' +
+      '<div class="sm-mcp-top"><span class="mcp-dot"></span><b>' + escapeHtml(host || 'Unknown host') + '</b>' +
+        (human ? '<span class="sm-mcp-ag">' + escapeHtml(human) + '</span>' : '') +
+        '<span class="sm-mcp-time">' + formatTime(r.created_at) + '</span></div>' +
+      '<div class="sm-mcp-cmd">' + escapeHtml(r.command) + '</div>' +
+      riskHtml +
+      '<div class="sm-mcp-res ' + resCls + '">#' + String(r.id).padStart(6, '0') + ' &middot; ' + escapeHtml(statusLabel) + '</div>' +
       actionsHtml +
     '</div>';
   }).join('');
