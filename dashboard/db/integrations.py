@@ -513,12 +513,13 @@ def record_integration_call(integration: str, tool: str, agent: str, method: str
 
 
 def get_integration_calls(search: str = None, start: int = None, end: int = None,
-                          limit: int = 50, offset: int = 0):
+                          limit: int = 50, offset: int = 0, session: str = None):
     """Paginated, filterable list of proxied calls, newest first.
 
     `search` is a case-insensitive LIKE across the readable columns. `start`/`end`
     are epoch-second bounds (inclusive start, exclusive end) — the frontend
-    computes these from the viewer's local-time day boundaries. Returns
+    computes these from the viewer's local-time day boundaries. `session`, when
+    given, narrows to a single exact session_id. Returns
     `{"rows": [...], "total": N}` so the UI can paginate."""
     where = []
     params = []
@@ -535,6 +536,9 @@ def get_integration_calls(search: str = None, start: int = None, end: int = None
     if end is not None:
         where.append('created_at < ?')
         params.append(end)
+    if session:
+        where.append('session_id = ?')
+        params.append(session)
     where_sql = ('WHERE ' + ' AND '.join(where)) if where else ''
     with db_conn() as conn:
         cursor = conn.cursor()
@@ -548,6 +552,54 @@ def get_integration_calls(search: str = None, start: int = None, end: int = None
 
 
 # ── Pending (approval) calls ────────────────────────────────────────────
+
+def list_recent_session_summaries(limit: int = 24):
+    """Merged recent sessions across SSH requests and MCP integration calls.
+
+    Returns newest-first summaries (by last activity) for every real session id,
+    with per-kind counts and the latest host / integration for labelling. The
+    ungrouped `unknown`/empty ids are excluded."""
+    limit = max(1, min(int(limit or 24), 100))
+    with db_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT session_id, MIN(created_at) AS first_seen, MAX(created_at) AS last_seen, "
+            "  SUM(kind='req') AS reqs, SUM(kind='mcp') AS mcps "
+            "FROM ("
+            "  SELECT session_id, created_at, 'req' AS kind FROM requests "
+            "   WHERE session_id IS NOT NULL AND session_id NOT IN ('','unknown') "
+            "  UNION ALL "
+            "  SELECT session_id, created_at, 'mcp' AS kind FROM integration_calls "
+            "   WHERE session_id IS NOT NULL AND session_id NOT IN ('','unknown')"
+            ") GROUP BY session_id ORDER BY last_seen DESC LIMIT ?",
+            (limit,))
+        rows = [dict(r) for r in cur.fetchall()]
+    if rows:
+        ids = [r['session_id'] for r in rows]
+        ph = ','.join('?' * len(ids))
+        latest = {}
+        with db_conn() as conn2:
+            cur2 = conn2.cursor()
+            cur2.execute(
+                "SELECT session_id, hostname FROM requests WHERE id IN "
+                "(SELECT MAX(id) FROM requests WHERE session_id IN (" + ph + ") GROUP BY session_id)",
+                ids)
+            for r in cur2.fetchall():
+                if r[0] and r[1]:
+                    latest.setdefault(r[0], {})['host'] = r[1]
+            cur2.execute(
+                "SELECT session_id, integration FROM integration_calls WHERE id IN "
+                "(SELECT MAX(id) FROM integration_calls WHERE session_id IN (" + ph + ") GROUP BY session_id)",
+                ids)
+            for r in cur2.fetchall():
+                if r[0] and r[1]:
+                    latest.setdefault(r[0], {})['integration'] = r[1]
+        for row in rows:
+            l = latest.get(row['session_id'], {})
+            row['host'] = l.get('host') or ''
+            row['integration'] = l.get('integration') or ''
+    return rows
+
 
 def create_pending_call(integration: str, tool: str, payload: dict, reason: str = '',
                         session_id: str = '', execution_id: str = '') -> int:

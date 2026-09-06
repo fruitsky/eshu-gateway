@@ -161,6 +161,7 @@ from db.integrations import (
     delete_tool,
     record_integration_call,
     get_integration_calls,
+    list_recent_session_summaries,
     create_pending_call,
     get_pending_calls,
     get_pending_call,

@@ -64,7 +64,7 @@ from database import (
     create_integration, get_integrations, get_integration, get_integration_by_id,
     update_integration, delete_integration,
     create_tool, get_tools, get_tool, set_tool_enabled, set_all_tools_enabled, delete_tool,
-    record_integration_call, get_integration_calls,
+    record_integration_call, get_integration_calls, list_recent_session_summaries,
     create_pending_call, get_pending_calls, get_pending_call, set_pending_call_status,
     mask_sensitive_args, strip_resolved_payloads,
     create_agent_token, get_agent_tokens, revoke_agent_token, delete_agent_token,
@@ -2409,9 +2409,18 @@ def seed_integration_endpoint(name: str, request: Request):
 
 @app.get("/api/integration-calls")
 def list_integration_calls(request: Request, search: str = None, start: int = None,
-                           end: int = None, limit: int = 50, offset: int = 0):
+                           end: int = None, limit: int = 50, offset: int = 0,
+                           session: str = None):
     _check_session(request)
-    return get_integration_calls(search=search, start=start, end=end, limit=limit, offset=offset)
+    return get_integration_calls(search=search, start=start, end=end,
+                                 limit=limit, offset=offset, session=session)
+
+
+@app.get("/api/sessions/recent")
+def session_recent_endpoint(request: Request, limit: int = 24):
+    """Newest session summaries merged across SSH requests and MCP calls."""
+    _check_session(request)
+    return {"sessions": list_recent_session_summaries(limit=min(limit or 24, 100))}
 
 
 @app.get("/api/integration-calls/pending")

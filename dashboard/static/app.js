@@ -1908,12 +1908,89 @@ function renderRecentSessions() {
 
   return '<div class="cc-recent-sessions">' +
     '<div class="cc-recent-sessions-header">Recent Sessions</div>' +
-    '<div class="cc-recent-sessions-grid">' + cards + '</div>' +
+    '<div class="cc-recent-sessions-grid" id="recent-sessions-grid">' + cards + '</div>' +
   '</div>';
+}
+
+/* Rebuild the Recent Sessions grid from the merged server summary so it also
+   surfaces MCP-only and mixed (SSH + MCP) sessions, with real per-kind counts. */
+async function refreshRecentSessions() {
+  var grid = document.getElementById('recent-sessions-grid');
+  if (!grid) return;
+  var summaries = [];
+  try {
+    var res = await authFetch('/api/sessions/recent?limit=6');
+    var d = await res.json();
+    summaries = d.sessions || [];
+  } catch (e) { return; }
+  grid = document.getElementById('recent-sessions-grid');
+  if (!grid) return;
+  var names = _sessionNames || {};
+  var now = Math.floor(Date.now() / 1000);
+  var reqMap = {};
+  (requestsData || []).forEach(function (r) {
+    var s = r.session_id;
+    if (!s || s === 'unknown') return;
+    if (!reqMap[s]) reqMap[s] = [];
+    reqMap[s].push(r);
+  });
+  if (!summaries.length) { grid.innerHTML = '<div style="font-family:var(--font-mono);font-size:10px;color:var(--muted);padding:6px 2px">no sessions yet</div>'; return; }
+  grid.innerHTML = summaries.map(function (s) {
+    var local = reqMap[s.session_id] || [];
+    var meta = names[s.session_id] || {};
+    var host = s.host || (local.length ? (local[0].hostname || local[0].target_ip || '') : '');
+    var pending = local.filter(function (r) { return r.status === 'pending'; }).length;
+    var lastLocal = local.length ? local[local.length - 1] : null;
+    var prev = lastLocal ? escapeHtml(String(lastLocal.command || '').substring(0, 60)) : '';
+    var reqs = s.reqs || 0, mcps = s.mcps || 0;
+    var kind = (reqs && mcps) ? 'mixed' : (mcps && !reqs) ? 'mcp-only' : 'ssh';
+    var kinds = [];
+    if (reqs) kinds.push(reqs + ' cmd');
+    if (mcps) kinds.push(mcps + ' mcp');
+    var badge = pending ? '<span style="color:var(--status-warning);font-weight:700;">' + pending + ' pending</span> \u00b7 ' : '';
+    return '<div class="recent-session-card" onclick="openSessionModal(\'' + escapeHtml(s.session_id) + '\')">' +
+      '<div class="rs-title"><span class="rs-kind ' + kind + '">' + kind + '</span>' +
+      (host ? '<span class="host">' + escapeHtml(host) + '</span>' : '<span class="host" style="color:var(--muted)">mcp</span>') +
+      ' \u00b7 ' + escapeHtml(meta.name || s.session_id.substring(0, 8)) +
+      ' <span style="color:var(--text-muted);font-weight:400;font-size:10px;">\u00b7 ' + escapeHtml(s.session_id.substring(0, 6)) + '</span></div>' +
+      (prev ? '<div class="rs-cmd-block">' + prev + '</div>' : (mcps ? '<div class="rs-cmd-block" style="color:var(--ice)">MCP integration activity</div>' : '')) +
+      (meta.description ? '<div class="rs-desc">' + escapeHtml(meta.description) + '</div>' : '') +
+      '<div class="rs-meta"><span>' + badge + (kinds.join(' \u00b7 ') || 'activity') + '</span><span>\u00b7</span><span>' + formatAgo(now - (s.last_seen || now)) + '</span><span style="margin-left:auto;color:var(--accent);">View \u2192</span></div>' +
+    '</div>';
+  }).join('');
 }
 
 function jumpToSession(sid) {
   openSessionModal(sid);
+}
+
+function smMcpCard(c) {
+  var ok = c.outcome === 'ok';
+  var when = c.created_at ? new Date(c.created_at * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
+  var head = (c.integration || '') + (c.tool ? ' / ' + c.tool : '');
+  var line = [];
+  if (c.method) line.push(c.method);
+  if (c.path) line.push(c.path);
+  var tail = [];
+  if (c.status_code != null) tail.push(String(c.status_code));
+  if (c.latency_ms != null) tail.push(c.latency_ms + 'ms');
+  tail.push(c.outcome || '—');
+  return '<div class="sm-mcp ' + (ok ? 'ok' : 'bad') + '">' +
+    '<div class="sm-mcp-top"><span class="mcp-dot"></span><b>' + escapeHtml(head) + '</b>' +
+    (c.agent ? '<span class="sm-mcp-ag">' + escapeHtml(c.agent) + '</span>' : '') +
+    (when ? '<span class="sm-mcp-time">' + escapeHtml(when) + '</span>' : '') + '</div>' +
+    (line.length ? '<div class="sm-mcp-meta">' + escapeHtml(line.join(' ')) + '</div>' : '') +
+    '<div class="sm-mcp-res ' + (ok ? 'ok' : 'bad') + '">' + escapeHtml(tail.join(' \u00b7 ')) + '</div>' +
+    (c.reason ? '<div class="sm-mcp-reason">' + escapeHtml(c.reason) + '</div>' : '') +
+  '</div>';
+}
+function fetchMcpForSession(sid, cb) {
+  try {
+    fetch('/api/integration-calls?session=' + encodeURIComponent(sid) + '&limit=100')
+      .then(function (r) { return r.json(); })
+      .then(function (d) { cb((d && d.rows) || [], (d && d.total || 0) > ((d && d.rows) || []).length); })
+      .catch(function () { cb([], false); });
+  } catch (e) { cb([], false); }
 }
 
 async function loadSessionNames() {
@@ -2026,6 +2103,17 @@ function openSessionModal(sid) {
   if (allReqs.length === 0) {
     cmdsEl.innerHTML = '<div style="font-family:var(--font-mono);font-size:11px;color:var(--muted);line-height:1.7;padding:10px 2px">This session came from <b style="color:var(--accent)">MCP integration calls</b> — they appear under <b style="color:var(--accent)">History &rarr; Proxied Calls</b>. Give it a name here so the conversation stays identifiable.</div>';
   }
+
+  var mcpSec = document.createElement('div');
+  mcpSec.className = 'sm-mcp-sec';
+  mcpSec.innerHTML = '<div class="sm-sec-label">MCP calls</div><div class="sm-mcp-list"><div class="sm-mcp-none">loading…</div></div>';
+  cmdsEl.appendChild(mcpSec);
+  var mcpList = mcpSec.querySelector('.sm-mcp-list');
+  fetchMcpForSession(sid, function (rows, capped) {
+    if (!document.body.contains(mcpSec)) return;
+    if (!rows.length) { mcpList.innerHTML = '<div class="sm-mcp-none">no MCP calls in this session</div>'; return; }
+    mcpList.innerHTML = rows.map(smMcpCard).join('') + (capped ? '<div class="sm-mcp-none">… older MCP calls not shown (see History &rarr; Proxied Calls)</div>' : '');
+  });
 
   modal.classList.remove('hidden');
   _activeSessionSid = sid;
@@ -2356,6 +2444,7 @@ function renderJitTickets() {
   buildStaticSky();
   buildStarfield(_layout);
   if (total > 0) renderDeck(allItems);
+  refreshRecentSessions();
 }
 
 function renderJitItem(item) {
