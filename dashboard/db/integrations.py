@@ -526,8 +526,9 @@ def get_integration_calls(search: str = None, start: int = None, end: int = None
         needle = '%' + search + '%'
         where.append('(integration LIKE ? OR tool LIKE ? OR agent LIKE ?'
                      ' OR method LIKE ? OR path LIKE ? OR outcome LIKE ?'
-                     ' OR CAST(status_code AS TEXT) LIKE ?)')
-        params += [needle] * 7
+                     ' OR CAST(status_code AS TEXT) LIKE ?'
+                     ' OR session_id LIKE ? OR execution_id LIKE ?)')
+        params += [needle] * 9
     if start is not None:
         where.append('created_at >= ?')
         params.append(start)

@@ -63,23 +63,57 @@ ssh eshu-gateway@<host> "ESHU_SESSION_ID=cf0f09869854 <command>"
 ### MCP calls (integrations) — session IDs
 
 Tool calls over MCP (the `Integrations` surface — Proxmox, Home Assistant, Omada,
-etc.) group with your SSH commands using the **same** session fields, but passed as
-**structured JSON arguments** instead of a command prefix:
+etc.) group with your SSH commands using the **same** session fields. Each Eshu
+tool's input schema exposes two optional parameters, `session_id` and
+`execution_id`; include them alongside the tool's real arguments:
 
 ```json
 {
-  "tool": "proxmox_get_vm_status",
-  "session_id": "cf0f09869854",
-  "execution_id": "20260829_201145_02deab",
-  "arguments": { "node": "pve", "vmid": 109 }
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tools/call",
+  "params": {
+    "name": "proxmox_get_vm_status",
+    "arguments": {
+      "node": "pve",
+      "vmid": 109,
+      "session_id": "cf0f09869854",
+      "execution_id": "20260829_201145_02deab"
+    }
+  }
 }
 ```
 
+Or over plain HTTP against the `/mcp` endpoint:
+
+```bash
+curl -s http://<dashboard>:8000/mcp \
+  -H "Authorization: Bearer $AGENT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+    "params": {
+      "name": "proxmox_get_vm_status",
+      "arguments": {
+        "node": "pve", "vmid": 109,
+        "session_id": "'"$SESSION_ID"'",
+        "execution_id": "'"$EXECUTION_ID"'"
+      }
+    }
+  }'
+```
+
+Rules:
+
 - `session_id` / `execution_id` are **optional**; omit them for context-less calls.
-- They never reach the upstream API — the dashboard uses them only to group the
-  call with SSH commands from the same conversation.
-- Reuse the same `<id>` across SSH **and** MCP calls in one conversation so they
-  collapse into a single Session.
+- They are accepted as **tool arguments** (snake_case names) because that is what
+  your client sends — the dashboard strips them before the call and they **never
+  reach the upstream API**.
+- `<id>` is the same opaque `[A-Za-z0-9_-]{1,64}` string you use in the SSH prefix.
+  Reuse the **same** `session_id` across SSH **and** MCP calls in one conversation
+  so they collapse into a single Session. Send `unknown` for fire-and-forget runs.
+- **Subagents:** resolve the id client-side first and pass it down — e.g. use your
+  parent conversation/chat id — so a subagent's MCP calls join the parent's Session.
 - Read-only tools run immediately; mutating tools return a pending `id` — poll
   `check_approval(id)` until the operator approves or denies.
 

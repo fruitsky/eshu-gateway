@@ -1953,7 +1953,6 @@ function openSessionModal(sid) {
   var allReqs = (requestsData || []).filter(function(r) {
     return r.session_id === sid;
   });
-  if (allReqs.length === 0) return;
 
   // Load saved name/desc
   var names = _sessionNames || {};
@@ -1967,7 +1966,7 @@ function openSessionModal(sid) {
   var approved = allReqs.filter(function(r) { return r.status === 'approved' || r.status === 'consumed'; }).length;
   var auto = allReqs.filter(function(r) { return r.status === 'auto-approved'; }).length;
   var blocked = allReqs.filter(function(r) { return r.status === 'blocked' || r.status === 'denied'; }).length;
-  metaEl.innerHTML = escapeHtml(host) + ' \u00b7 ' + allReqs.length + ' commands' +
+  metaEl.innerHTML = (allReqs.length ? escapeHtml(host) + ' \u00b7 ' : 'MCP session \u00b7 ') + allReqs.length + ' SSH commands' +
     (pending ? ' \u00b7 <span class="sm-pending">' + pending + ' pending</span>' : '') +
     (approved ? ' \u00b7 <span class="sm-approved">' + approved + ' approved</span>' : '') +
     (auto ? ' \u00b7 <span class="sm-auto">' + auto + ' auto</span>' : '') +
@@ -2023,6 +2022,10 @@ function openSessionModal(sid) {
       actionsHtml +
     '</div>';
   }).join('');
+
+  if (allReqs.length === 0) {
+    cmdsEl.innerHTML = '<div style="font-family:var(--font-mono);font-size:11px;color:var(--muted);line-height:1.7;padding:10px 2px">This session came from <b style="color:var(--accent)">MCP integration calls</b> — they appear under <b style="color:var(--accent)">History &rarr; Proxied Calls</b>. Give it a name here so the conversation stays identifiable.</div>';
+  }
 
   modal.classList.remove('hidden');
   _activeSessionSid = sid;
@@ -5694,12 +5697,17 @@ async function fetchIntegrationCalls() {
     const calls = data.rows || [];
     const total = data.total || 0;
     if (!calls.length) {
-      el.innerHTML = '<tr><td colspan="9" class="px-4 py-3 text-muted">No calls match.</td></tr>';
+      el.innerHTML = '<tr><td colspan="10" class="px-4 py-3 text-muted">No calls match.</td></tr>';
     } else {
+      var names = _sessionNames || {};
       el.innerHTML = calls.map(function(c) {
         var when = new Date(c.created_at * 1000).toLocaleString();
         var ok = c.outcome === 'ok';
         var cls = ok ? 'text-success' : 'text-danger';
+        var sid = c.session_id || '';
+        var sCell = (sid && sid !== 'unknown')
+          ? '<button class="c-session" data-sid="' + esc(sid) + '" title="Session ' + esc(sid) + (c.execution_id ? ' · exec ' + esc(c.execution_id) : '') + '">' + esc((names[sid] || {}).name || sid.slice(0, 8)) + '</button>'
+          : '<span class="text-muted">—</span>';
         return '<tr>' +
           '<td class="text-muted">' + esc(when) + '</td>' +
           '<td>' + esc(c.integration) + '</td>' +
@@ -5709,6 +5717,7 @@ async function fetchIntegrationCalls() {
           '<td class="text-muted break-all">' + esc(c.path) + '</td>' +
           '<td class="' + cls + '">' + (c.status_code || '—') + '</td>' +
           '<td class="text-right text-muted">' + (c.latency_ms == null ? '—' : c.latency_ms + 'ms') + '</td>' +
+          '<td>' + sCell + '</td>' +
           '<td class="' + cls + '">' + esc(c.outcome) + '</td>' +
           '</tr>';
       }).join('');
@@ -5952,3 +5961,11 @@ function orbBind() {
   if (inp) inp.addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); addFleetToQueue(); } });
 }
 orbBind();
+document.addEventListener('click', function (e) {
+  var t = e.target; if (!t || !t.closest) return;
+  var btn = t.closest('.c-session');
+  if (btn && typeof openSessionModal === 'function') {
+    var sid = btn.getAttribute('data-sid');
+    if (sid) openSessionModal(sid);
+  }
+});

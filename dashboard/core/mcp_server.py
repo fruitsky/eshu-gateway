@@ -36,7 +36,10 @@ mcp = FastMCP(
     instructions=(
         "Eshu gateway for your homelab APIs. Read-only tools run immediately; "
         "mutating tools (start/stop/reboot/etc.) create a request that a human "
-        "operator must approve — poll check_approval(id) until it resolves."
+        "operator must approve — poll check_approval(id) until it resolves. "
+        "Group calls into a Session by passing the same optional session_id "
+        "(and execution_id) as tool arguments that you use for SSH commands — "
+        "they are used only to group work and never reach the upstream API."
     ),
     # Mounted into the dashboard app at /mcp; use "/" so the effective endpoint
     # is http://<dashboard>:8000/mcp rather than /mcp/mcp.

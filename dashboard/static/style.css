@@ -2774,6 +2774,11 @@ input::placeholder, textarea::placeholder { color: rgba(122,109,94,0.55); }
 .orb-deck-empty > span{font-size:20px;color:var(--accent);text-shadow:0 0 14px var(--accent-glow)}
 .orb-deck-empty b{color:var(--accent)}
 
+/* proxied-call session chip (History → Proxied Calls) */
+.c-session{font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:600;letter-spacing:0.5px;color:var(--accent);background:rgba(245,158,11,0.07);border:1px solid rgba(245,158,11,0.28);border-radius:3px;padding:2px 7px;cursor:pointer;transition:all .12s;white-space:nowrap}
+.c-session:hover{color:var(--accent-hover);background:rgba(245,158,11,0.16);box-shadow:0 0 8px var(--accent-glow)}
+.c-session:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+
 @media(max-width:1100px){.orb-console{grid-template-columns:180px minmax(0,1fr) 230px}}
 @media(max-width:900px){.orb-console{grid-template-columns:1fr}.orb-rail{min-height:0;max-height:220px}.orb-rail-r{max-height:none}}
 @media(max-width:768px){.orb-cmd{min-width:160px}.orb-reason{display:none}.orb-sq{width:min(60vw,60vh)}}
