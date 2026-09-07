@@ -1656,9 +1656,8 @@ textarea { font-family: 'JetBrains Mono', monospace !important; }
   .cc-recent-sessions { width: 680px; max-width: 680px; margin: 8px auto 0; align-self: center; }
   .cc-recent-sessions-grid { width: 100%; }
   .cc-recent-sessions-header { font-family: 'JetBrains Mono', monospace; font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 2px; color: var(--text-muted); margin-bottom: 10px; text-align: center; }
-  .cc-recent-sessions-grid { display: flex; gap: 10px; overflow-x: auto; overflow-y: hidden; padding: 2px 14px 10px 2px; scrollbar-width: thin; scrollbar-color: rgba(245,158,11,0.35) transparent; cursor: grab; -webkit-overflow-scrolling: touch; }
-  .cc-recent-sessions-grid::-webkit-scrollbar { height: 8px; }
-  .cc-recent-sessions-grid::-webkit-scrollbar-thumb { background: rgba(245,158,11,0.35); border-radius: 8px; }
+  .cc-recent-sessions-grid { display: flex; gap: 10px; overflow-x: auto; overflow-y: hidden; padding: 2px 14px 10px 2px; scrollbar-width: none; cursor: grab; -webkit-overflow-scrolling: touch; -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 18px, #000 calc(100% - 74px), transparent 100%); mask-image: linear-gradient(90deg, transparent 0, #000 18px, #000 calc(100% - 74px), transparent 100%); }
+  .cc-recent-sessions-grid::-webkit-scrollbar { display: none; }
   .cc-recent-sessions-grid.dragging { cursor: grabbing; scroll-behavior: auto; }
   .recent-session-card { background: var(--bg-surface); border: 1px solid var(--border-color); border-radius: var(--radius); padding: 12px 13px; cursor: pointer; transition: border-color 0.15s, box-shadow 0.15s; position: relative; display: flex; flex-direction: column; gap: 6px; border-left: 3px solid rgba(245,158,11,0.35); min-width: 264px; max-width: 264px; flex: 0 0 264px; user-select: none; }
   .recent-session-card:hover { border-color: rgba(245,158,11,0.5); box-shadow: 0 0 16px var(--accent-glow); background: var(--bg-surface); }
