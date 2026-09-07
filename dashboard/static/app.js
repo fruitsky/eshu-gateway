@@ -1976,48 +1976,50 @@ function jumpToSession(sid) {
   openSessionModal(sid);
 }
 
-/* Horizontal carousel for the Recent Sessions strip: mouse-wheel scrolls
-   sideways and the cards can be grabbed and dragged (grab/palm), while
-   clicks on an individual card still open the session. */
-function enableSessionScroll() {
-  var grid = document.getElementById('recent-sessions-grid');
-  if (!grid || grid.dataset.scrollBound) return;
-  grid.dataset.scrollBound = '1';
-
-  grid.addEventListener('wheel', function(e) {
-    if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
-      e.preventDefault();
-      grid.scrollLeft += e.deltaY;
-    }
-  }, { passive: false });
-
-  var down = false, startX = 0, startLeft = 0, moved = false;
-  grid.addEventListener('pointerdown', function(e) {
-    down = true; moved = false;
-    startX = e.clientX; startLeft = grid.scrollLeft;
-    grid.classList.add('dragging');
-  });
-  grid.addEventListener('pointermove', function(e) {
-    if (!down) return;
-    var dx = e.clientX - startX;
-    if (Math.abs(dx) > 6) { moved = true; grid.scrollLeft = startLeft - dx; }
-  });
-  function endDrag() {
-    down = false;
-    grid.classList.remove('dragging');
+/* Horizontal carousel for the Recent Sessions strip. Delegated on the
+   document so it works regardless of when/whether the grid is re-rendered:
+   mouse-wheel scrolls sideways, cards can be grabbed and dragged, and a
+   real drag never opens the session as a click. */
+var _rsDrag = { down: false, moved: false, startX: 0, startLeft: 0, grid: null };
+function rsGridFrom(t) { return t && t.closest ? t.closest('.cc-recent-sessions-grid') : null; }
+document.addEventListener('wheel', function(e) {
+  var grid = rsGridFrom(e.target);
+  if (!grid || grid.scrollWidth <= grid.clientWidth) return;
+  if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
+    e.preventDefault();
+    grid.scrollLeft += e.deltaY;
   }
-  grid.addEventListener('pointerup', endDrag);
-  grid.addEventListener('pointercancel', endDrag);
-  grid.addEventListener('pointerleave', endDrag);
-  /* a real drag must not open the session as a click */
-  grid.addEventListener('click', function(e) {
-    if (moved) { e.stopPropagation(); e.preventDefault();
-      var card = e.target && e.target.closest ? e.target.closest('.recent-session-card') : null;
-      if (card) { card.style.transition = 'none'; card.style.filter = 'grayscale(1) brightness(0.6)';
-        setTimeout(function(){ card.style.transition = ''; card.style.filter = ''; }, 160); }
-    }
-  }, true);
+}, { passive: false });
+
+document.addEventListener('pointerdown', function(e) {
+  var grid = rsGridFrom(e.target);
+  if (!grid) return;
+  _rsDrag = { down: true, moved: false, startX: e.clientX, startLeft: grid.scrollLeft, grid: grid };
+  grid.classList.add('dragging');
+});
+document.addEventListener('pointermove', function(e) {
+  var g = _rsDrag;
+  if (!g || !g.down || !g.grid) return;
+  var dx = e.clientX - g.startX;
+  if (Math.abs(dx) > 6) { g.moved = true; g.grid.scrollLeft = g.startLeft - dx; }
+});
+function rsEndDrag() {
+  if (_rsDrag.grid) _rsDrag.grid.classList.remove('dragging');
+  _rsDrag.down = false;
 }
+document.addEventListener('pointerup', rsEndDrag);
+document.addEventListener('pointercancel', rsEndDrag);
+
+/* suppress the click (open session) when the pointer actually dragged */
+document.addEventListener('click', function(e) {
+  if (_rsDrag.moved) {
+    e.stopPropagation(); e.preventDefault();
+    _rsDrag.moved = false;
+  }
+}, true);
+
+/* no-op hook kept for call sites that previously wired the grid directly */
+function enableSessionScroll() {}
 function smMcpCard(c) {
   var ok = c.outcome === 'ok';
   var when = c.created_at ? new Date(c.created_at * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
