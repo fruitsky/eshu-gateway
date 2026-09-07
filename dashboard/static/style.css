@@ -2230,7 +2230,6 @@ input::placeholder, textarea::placeholder { color: rgba(122,109,94,0.55); }
   background:
     radial-gradient(ellipse 90% 55% at 50% -6%, rgba(46,72,132,0.5), transparent 62%),
     linear-gradient(180deg, rgba(22,32,58,0.9) 0%, rgba(15,13,10,0) 55%),
-    radial-gradient(ellipse 85% 45% at 50% 108%, rgba(245,158,11,0.12), transparent 60%),
     var(--bg-base);
 }
 .login-card {
