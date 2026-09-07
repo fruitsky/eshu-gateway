@@ -1895,8 +1895,10 @@ function renderRecentSessions() {
     var cmdPreview = lastCmd ? escapeHtml(String(lastCmd.command || '').substring(0, 64)) : '';
     var ago = formatAgo(now - s.latest);
     var count = s.requests.length;
-    var pending = s.requests.filter(function(r){ return r.status === 'pending'; }).length;
-    var badge = pending ? '<span style="color:var(--status-warning);font-weight:700;">' + pending + ' pending</span> \u00b7 ' : '';
+    var pending = s.requests.filter(function(r){ return r.status === 'pending' && r.ttl > 0; }).length;
+    var expired = s.requests.filter(function(r){ return r.status === 'pending' && !(r.ttl > 0); }).length;
+    var badge = (pending ? '<span style="color:var(--status-warning);font-weight:700;">' + pending + ' pending</span> \u00b7 ' : '') +
+                (expired ? '<span style="color:var(--text-muted);font-weight:700;">' + expired + ' expired</span> \u00b7 ' : '');
 
     return '<div class="recent-session-card" onclick="openSessionModal(\'' + escapeHtml(s.id) + '\')">' +
       '<div class="rs-title"><span class="host">' + escapeHtml(host) + '</span> \u00b7 ' +
@@ -1943,7 +1945,8 @@ async function refreshRecentSessions() {
     var local = reqMap[s.session_id] || [];
     var meta = names[s.session_id] || {};
     var host = s.host || (local.length ? (local[0].hostname || local[0].target_ip || '') : '');
-    var pending = local.filter(function (r) { return r.status === 'pending'; }).length;
+    var pending = local.filter(function (r) { return r.status === 'pending' && r.ttl > 0; }).length;
+    var expired = local.filter(function (r) { return r.status === 'pending' && !(r.ttl > 0); }).length;
     var lastLocal = local.length ? local[local.length - 1] : null;
     var prev = lastLocal ? escapeHtml(String(lastLocal.command || '').substring(0, 60)) : '';
     var reqs = s.reqs || 0, mcps = s.mcps || 0;
@@ -1956,7 +1959,8 @@ async function refreshRecentSessions() {
     var kinds = [];
     if (reqs) kinds.push(reqs + ' cmd');
     if (mcps) kinds.push(mcps + ' mcp');
-    var badge = pending ? '<span style="color:var(--status-warning);font-weight:700;">' + pending + ' pending</span> \u00b7 ' : '';
+    var badge = (pending ? '<span style="color:var(--status-warning);font-weight:700;">' + pending + ' pending</span> \u00b7 ' : '') +
+                (expired ? '<span style="color:var(--text-muted);font-weight:700;">' + expired + ' expired</span> \u00b7 ' : '');
     return '<div class="recent-session-card" onclick="openSessionModal(\'' + escapeHtml(s.session_id) + '\')">' +
       '<div class="rs-title"><span class="rs-kind ' + kind + '">' + kind + '</span>' +
       '<span class="host">' + escapeHtml(hostTxt) + '</span> \u00b7 ' + idPart + '</div>' +
@@ -1965,12 +1969,55 @@ async function refreshRecentSessions() {
       '<div class="rs-meta"><span>' + badge + (kinds.join(' \u00b7 ') || 'activity') + '</span><span>\u00b7</span><span>' + formatAgo(now - (s.last_seen || now)) + '</span><span style="margin-left:auto;color:var(--accent);">View \u2192</span></div>' +
     '</div>';
   }).join('');
+  enableSessionScroll();
 }
 
 function jumpToSession(sid) {
   openSessionModal(sid);
 }
 
+/* Horizontal carousel for the Recent Sessions strip: mouse-wheel scrolls
+   sideways and the cards can be grabbed and dragged (grab/palm), while
+   clicks on an individual card still open the session. */
+function enableSessionScroll() {
+  var grid = document.getElementById('recent-sessions-grid');
+  if (!grid || grid.dataset.scrollBound) return;
+  grid.dataset.scrollBound = '1';
+
+  grid.addEventListener('wheel', function(e) {
+    if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
+      e.preventDefault();
+      grid.scrollLeft += e.deltaY;
+    }
+  }, { passive: false });
+
+  var down = false, startX = 0, startLeft = 0, moved = false;
+  grid.addEventListener('pointerdown', function(e) {
+    down = true; moved = false;
+    startX = e.clientX; startLeft = grid.scrollLeft;
+    grid.classList.add('dragging');
+  });
+  grid.addEventListener('pointermove', function(e) {
+    if (!down) return;
+    var dx = e.clientX - startX;
+    if (Math.abs(dx) > 6) { moved = true; grid.scrollLeft = startLeft - dx; }
+  });
+  function endDrag() {
+    down = false;
+    grid.classList.remove('dragging');
+  }
+  grid.addEventListener('pointerup', endDrag);
+  grid.addEventListener('pointercancel', endDrag);
+  grid.addEventListener('pointerleave', endDrag);
+  /* a real drag must not open the session as a click */
+  grid.addEventListener('click', function(e) {
+    if (moved) { e.stopPropagation(); e.preventDefault();
+      var card = e.target && e.target.closest ? e.target.closest('.recent-session-card') : null;
+      if (card) { card.style.transition = 'none'; card.style.filter = 'grayscale(1) brightness(0.6)';
+        setTimeout(function(){ card.style.transition = ''; card.style.filter = ''; }, 160); }
+    }
+  }, true);
+}
 function smMcpCard(c) {
   var ok = c.outcome === 'ok';
   var when = c.created_at ? new Date(c.created_at * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
@@ -2046,12 +2093,14 @@ function openSessionModal(sid) {
   descEl.textContent = meta.description || '';
 
   var host = allReqs[0] ? (allReqs[0].hostname || allReqs[0].target_ip || '') : '';
-  var pending = allReqs.filter(function(r) { return r.status === 'pending'; }).length;
+  var pending = allReqs.filter(function(r) { return r.status === 'pending' && r.ttl > 0; }).length;
+  var expired = allReqs.filter(function(r) { return r.status === 'pending' && r.ttl <= 0; }).length;
   var approved = allReqs.filter(function(r) { return r.status === 'approved' || r.status === 'consumed'; }).length;
   var auto = allReqs.filter(function(r) { return r.status === 'auto-approved'; }).length;
   var blocked = allReqs.filter(function(r) { return r.status === 'blocked' || r.status === 'denied'; }).length;
   metaEl.innerHTML = (allReqs.length ? escapeHtml(host) + ' \u00b7 ' : 'MCP session \u00b7 ') + allReqs.length + ' SSH commands' +
     (pending ? ' \u00b7 <span class="sm-pending">' + pending + ' pending</span>' : '') +
+    (expired ? ' \u00b7 <span class="sm-muted">' + expired + ' expired</span>' : '') +
     (approved ? ' \u00b7 <span class="sm-approved">' + approved + ' approved</span>' : '') +
     (auto ? ' \u00b7 <span class="sm-auto">' + auto + ' auto</span>' : '') +
     (blocked ? ' \u00b7 <span class="sm-blocked">' + blocked + ' blocked</span>' : '');
