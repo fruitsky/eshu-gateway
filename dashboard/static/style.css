@@ -1653,10 +1653,10 @@ textarea { font-family: 'JetBrains Mono', monospace !important; }
   }
 
   /* ── Recent Sessions panel (below radar) ─────────────────── */
-  .cc-recent-sessions { width: 100%; max-width: 920px; margin-top: 8px; align-self: stretch; }
+  .cc-recent-sessions { width: 680px; max-width: 680px; margin: 8px auto 0; align-self: center; }
   .cc-recent-sessions-grid { width: 100%; }
   .cc-recent-sessions-header { font-family: 'JetBrains Mono', monospace; font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 2px; color: var(--text-muted); margin-bottom: 10px; text-align: center; }
-  .cc-recent-sessions-grid { display: flex; gap: 10px; overflow-x: auto; overflow-y: hidden; padding: 2px 2px 10px; scrollbar-width: thin; scrollbar-color: rgba(245,158,11,0.35) transparent; cursor: grab; -webkit-overflow-scrolling: touch; }
+  .cc-recent-sessions-grid { display: flex; gap: 10px; overflow-x: auto; overflow-y: hidden; padding: 2px 14px 10px 2px; scrollbar-width: thin; scrollbar-color: rgba(245,158,11,0.35) transparent; cursor: grab; -webkit-overflow-scrolling: touch; }
   .cc-recent-sessions-grid::-webkit-scrollbar { height: 8px; }
   .cc-recent-sessions-grid::-webkit-scrollbar-thumb { background: rgba(245,158,11,0.35); border-radius: 8px; }
   .cc-recent-sessions-grid.dragging { cursor: grabbing; scroll-behavior: auto; }
