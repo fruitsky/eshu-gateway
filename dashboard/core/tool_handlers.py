@@ -49,7 +49,7 @@ def _translate(msg: str) -> str:
     if 'unknown config specified: lovelace' in low:
         return 'ha_default_dashboard_untargetable'
     if 'unknown config specified' in low:
-        return 'ha_config_not_found'
+        return 'ha_dashboard_not_found'
     if 'no config found' in low:
         return 'ha_no_config'
     if 'unable to find dashboard' in low:
@@ -63,8 +63,19 @@ def _translate(msg: str) -> str:
 
 # ── Lovelace helpers ────────────────────────────────────────────────────
 
-def _list(integration, tool_name):
-    rows = ha_ws_exec(integration, f'{LOVELACE_DASHBOARDS}/list', {}, tool_name=tool_name)
+def _ws(integration, command, payload, name, ctx):
+    """Run one WS command carrying the caller's audit context (agent + session
+    grouping) so the inner handler rows are attributed exactly like the
+    REST/`mcp` path."""
+    ctx = ctx or {}
+    return ha_ws_exec(integration, command, payload,
+                      agent=ctx.get('agent', ''), tool_name=name,
+                      session_id=ctx.get('session_id', ''),
+                      execution_id=ctx.get('execution_id', ''))
+
+
+def _list(integration, tool_name, ctx=None):
+    rows = _ws(integration, f'{LOVELACE_DASHBOARDS}/list', {}, tool_name, ctx)
     return rows if isinstance(rows, list) else []
 
 
@@ -119,16 +130,22 @@ def _collect_targets(card):
     return out
 
 
-def _view_cards_count(v):
+def _flatten_cards(v):
+    """All cards in a view, supporting both ``views[].cards[]`` and the newer
+    ``views[].sections[].cards[]`` layout."""
     if not isinstance(v, dict):
-        return 0
+        return []
     if isinstance(v.get('cards'), list):
-        return len(v['cards'])
-    n = 0
+        return v['cards']
+    out = []
     for s in (v.get('sections') or []):
         if isinstance(s, dict) and isinstance(s.get('cards'), list):
-            n += len(s['cards'])
-    return n
+            out.extend(s['cards'])
+    return out
+
+
+def _view_cards_count(v):
+    return len(_flatten_cards(v))
 
 
 def _view_cards(v):
@@ -196,6 +213,9 @@ def _apply_ops(cfg, ops):
         if not isinstance(op, dict):
             raise ValueError('each op must be an object')
         kind = op.get('op')
+        if kind in ('append_card', 'set_card', 'delete_card') and not views:
+            raise ValueError("config has no views yet — use set_view with "
+                             "view='new' first")
         if kind == 'append_card':
             v = _op_view(views, op.get('view'))
             card = op.get('card')
@@ -251,27 +271,40 @@ def _diff(old, new):
         'changed': False,
     }
     for i in range(min(len(old_views), len(new_views))):
-        oc = _view_cards_count(old_views[i])
-        nc = _view_cards_count(new_views[i])
-        result['cards_added'] += max(0, nc - oc)
-        result['cards_removed'] += max(0, oc - nc)
+        ocards = _flatten_cards(old_views[i])
+        ncards = _flatten_cards(new_views[i])
+        result['cards_added'] += max(0, len(ncards) - len(ocards))
+        result['cards_removed'] += max(0, len(ocards) - len(ncards))
+        # Card-level changes are counted at aligned indices, so a pure append at
+        # the end is not also reported as a "changed" card (index shift).
+        for j in range(min(len(ocards), len(ncards))):
+            if _canon(ocards[j]) != _canon(ncards[j]):
+                result['cards_changed'] += 1
         if _canon(old_views[i]) != _canon(new_views[i]):
-            result['cards_changed'] += 1
             result['views_changed'].append(i)
     result['changed'] = bool(
         result['views_added'] or result['views_removed']
         or result['cards_added'] or result['cards_removed']
-        or result['cards_changed'] or _canon(old) != _canon(new))
+        or result['cards_changed'] or result['views_changed']
+        or _canon(old) != _canon(new))
     return result
 
 
+def _card_preview(card):
+    """First non-empty line of a content-bearing card (e.g. markdown), so
+    index-based edits are less error-prone than a bare `type`."""
+    content = card.get('content')
+    if not isinstance(content, str):
+        return ''
+    for line in content.splitlines():
+        line = line.strip()
+        if line:
+            return line[:80]
+    return ''
+
+
 def _summarize_view(i, v):
-    cards = v.get('cards')
-    if not isinstance(cards, list):
-        cards = []
-        for s in (v.get('sections') or []):
-            if isinstance(s, dict) and isinstance(s.get('cards'), list):
-                cards.extend(s['cards'])
+    cards = _flatten_cards(v)
     out = {'index': i, 'card_count': len(cards)}
     for k in ('path', 'title', 'icon'):
         if v.get(k) is not None:
@@ -290,6 +323,9 @@ def _summarize_view(i, v):
         entry = {'index': ci, 'type': c.get('type')}
         if c.get('title'):
             entry['title'] = c['title']
+        preview = _card_preview(c)
+        if preview:
+            entry['preview'] = preview
         targets = _collect_targets(c)
         if targets:
             entry['targets'] = targets
@@ -314,36 +350,50 @@ def _view_matches(i, v, sel):
 
 # ── Handlers ────────────────────────────────────────────────────────────
 
-def _h_dashboards(integration, tool, args):
+def _h_dashboards(integration, tool, args, ctx=None):
     name = tool.get('name', '')
-    rows = _list(integration, name)
+    rows = _list(integration, name, ctx)
     if args.get('full'):
         return json.dumps(rows)
     return json.dumps([_compact(d) for d in rows])
 
 
-def _h_dashboard(integration, tool, args):
+def _h_dashboard(integration, tool, args, ctx=None):
     name = tool.get('name', '')
     url_path = args.get('url_path')
     view_sel = args.get('view')
     full = bool(args.get('full'))
     max_bytes = args.get('max_bytes') or 20000
+    if url_path == 'lovelace':
+        return _err('ha_default_dashboard_untargetable',
+                    'Omit url_path to target the default dashboard (do not pass "lovelace").', 400)
+    dash = None
+    if url_path:
+        try:
+            dash = _find(_list(integration, name, ctx), url_path=url_path)
+        except ProxyError as e:
+            return _err(_translate(e.message), e.message, e.status_code)
+        if not dash:
+            return _err('ha_dashboard_not_found',
+                        'No dashboard with url_path %r; list with lovelace_dashboards'
+                        % url_path, 404)
     payload = {'url_path': url_path} if url_path else {}
     try:
-        cfg = ha_ws_exec(integration, LOVELACE_CONFIG, payload, tool_name=name)
+        cfg = _ws(integration, LOVELACE_CONFIG, payload, name, ctx)
     except ProxyError as e:
-        return _err(_translate(e.message), e.message, e.status_code)
+        low = (e.message or '').lower()
+        if 'no config found' in low:
+            # A dashboard that has never been saved is a legitimate empty
+            # dashboard — surface an empty summary, not an error.
+            cfg = {}
+        elif 'unknown config specified' in low:
+            return _err('ha_dashboard_not_found', e.message, 404)
+        else:
+            return _err(_translate(e.message), e.message, e.status_code)
     if not isinstance(cfg, dict):
         cfg = {}
-    dashboard_id = None
-    mode = None
-    try:
-        dash = _find(_list(integration, name), url_path=url_path) if url_path else None
-        if dash:
-            dashboard_id = dash.get('id')
-            mode = dash.get('mode')
-    except ProxyError:
-        pass
+    dashboard_id = dash.get('id') if dash else None
+    mode = dash.get('mode') if dash else None
     if full:
         raw = _canon(cfg)
         size = len(raw.encode('utf-8'))
@@ -368,7 +418,7 @@ def _h_dashboard(integration, tool, args):
     return json.dumps(summary)
 
 
-def _h_create_dashboard(integration, tool, args):
+def _h_create_dashboard(integration, tool, args, ctx=None):
     name = tool.get('name', '')
     title = args.get('title')
     url_path = args.get('url_path')
@@ -379,7 +429,7 @@ def _h_create_dashboard(integration, tool, args):
         return _err('ha_dashboard_url_invalid',
                     'url_path must contain a hyphen (-) (or pass allow_single_word: true)', 400)
     try:
-        rows = _list(integration, name)
+        rows = _list(integration, name, ctx)
     except ProxyError as e:
         return _err(_translate(e.message), e.message, e.status_code)
     existing = _find(rows, url_path=url_path)
@@ -395,7 +445,7 @@ def _h_create_dashboard(integration, tool, args):
     if allow_single_word:
         payload['allow_single_word'] = True
     try:
-        created = ha_ws_exec(integration, f'{LOVELACE_DASHBOARDS}/create', payload, tool_name=name)
+        created = _ws(integration, f'{LOVELACE_DASHBOARDS}/create', payload, name, ctx)
     except ProxyError as e:
         return _err(_translate(e.message), e.message, e.status_code)
     item = _compact(created)
@@ -403,21 +453,21 @@ def _h_create_dashboard(integration, tool, args):
         item['dashboard_id'] = created.get('id')
     verified = False
     try:
-        verified = _find(_list(integration, name), url_path=url_path) is not None
+        verified = _find(_list(integration, name, ctx), url_path=url_path) is not None
     except ProxyError:
         pass
     item['verified'] = verified
     return json.dumps(item)
 
 
-def _h_update_dashboard(integration, tool, args):
+def _h_update_dashboard(integration, tool, args, ctx=None):
     name = tool.get('name', '')
     dashboard_id = args.get('dashboard_id')
     url_path = args.get('url_path')
     if not dashboard_id and not url_path:
         return _err('invalid_request', 'pass dashboard_id or url_path', 400)
     try:
-        rows = _list(integration, name)
+        rows = _list(integration, name, ctx)
     except ProxyError as e:
         return _err(_translate(e.message), e.message, e.status_code)
     dash = _find(rows, dashboard_id=dashboard_id, url_path=url_path)
@@ -436,7 +486,7 @@ def _h_update_dashboard(integration, tool, args):
         return _err('invalid_request',
                     'nothing to update: pass title, icon, show_in_sidebar or require_admin', 400)
     try:
-        updated = ha_ws_exec(integration, f'{LOVELACE_DASHBOARDS}/update', payload, tool_name=name)
+        updated = _ws(integration, f'{LOVELACE_DASHBOARDS}/update', payload, name, ctx)
     except ProxyError as e:
         return _err(_translate(e.message), e.message, e.status_code)
     if isinstance(updated, dict) and updated.get('id'):
@@ -447,7 +497,7 @@ def _h_update_dashboard(integration, tool, args):
     return json.dumps(item)
 
 
-def _h_save_config(integration, tool, args):
+def _h_save_config(integration, tool, args, ctx=None):
     name = tool.get('name', '')
     url_path = args.get('url_path')
     ops = args.get('ops')
@@ -455,20 +505,38 @@ def _h_save_config(integration, tool, args):
     confirm = args.get('confirm')
     expect_hash = args.get('expect_hash')
     dry_run = bool(args.get('dry_run'))
+    if url_path == 'lovelace':
+        return _err('ha_default_dashboard_untargetable',
+                    'Omit url_path to target the default dashboard (do not pass "lovelace").', 400)
+    dash = None
+    if url_path:
+        # Resolve the dashboard BEFORE reading its config: an unknown url_path is
+        # a hard failure, whereas a known dashboard with no saved config yet is
+        # a legitimate empty dashboard.
+        try:
+            dash = _find(_list(integration, name, ctx), url_path=url_path)
+        except ProxyError as e:
+            return _err(_translate(e.message), e.message, e.status_code)
+        if not dash:
+            return _err('ha_dashboard_not_found',
+                        'No dashboard with url_path %r; list with lovelace_dashboards'
+                        % url_path, 404)
+        if dash.get('mode') == 'yaml':
+            return _err('ha_dashboard_yaml_readonly',
+                        'Dashboard %r is YAML-mode; edit its file instead' % url_path, 400)
     payload = {'url_path': url_path} if url_path else {}
     try:
-        cfg = ha_ws_exec(integration, LOVELACE_CONFIG, payload, tool_name=name)
+        cfg = _ws(integration, LOVELACE_CONFIG, payload, name, ctx)
     except ProxyError as e:
-        return _err(_translate(e.message), e.message, e.status_code)
+        low = (e.message or '').lower()
+        if 'no config found' in low:
+            cfg = {}  # never-saved dashboard -> start from an empty config
+        elif 'unknown config specified' in low:
+            return _err('ha_dashboard_not_found', e.message, 404)
+        else:
+            return _err(_translate(e.message), e.message, e.status_code)
     if not isinstance(cfg, dict):
         cfg = {}
-    try:
-        dash = _find(_list(integration, name), url_path=url_path) if url_path else None
-    except ProxyError:
-        dash = None
-    if dash and dash.get('mode') == 'yaml':
-        return _err('ha_dashboard_yaml_readonly',
-                    'Dashboard %r is YAML-mode; edit its file instead' % url_path, 400)
     if expect_hash and expect_hash != _hash(cfg):
         return _err('ha_config_changed',
                     'Live config hash does not match expect_hash; re-read before writing', 409)
@@ -501,12 +569,12 @@ def _h_save_config(integration, tool, args):
     if url_path:
         save_payload['url_path'] = url_path
     try:
-        ha_ws_exec(integration, f'{LOVELACE_CONFIG}/save', save_payload, tool_name=name)
+        _ws(integration, f'{LOVELACE_CONFIG}/save', save_payload, name, ctx)
     except ProxyError as e:
         return _err(_translate(e.message), e.message, e.status_code)
     verified = False
     try:
-        readback = ha_ws_exec(integration, LOVELACE_CONFIG, payload, tool_name=name)
+        readback = _ws(integration, LOVELACE_CONFIG, payload, name, ctx)
         verified = _canon(readback) == _canon(new_cfg)
     except ProxyError:
         pass
@@ -515,30 +583,41 @@ def _h_save_config(integration, tool, args):
                        'verified': verified})
 
 
-def _h_delete_dashboard(integration, tool, args):
+def _resolve_dashboard(integration, tool, args, ctx):
+    """Resolve and validate a delete target. Returns (dash, error_json); exactly
+    one is non-None. Split out so the gated-delete preflight can validate
+    without deleting."""
     name = tool.get('name', '')
     dashboard_id = args.get('dashboard_id')
     url_path = args.get('url_path')
     if not dashboard_id and not url_path:
-        return _err('invalid_request', 'pass dashboard_id or url_path', 400)
+        return None, _err('invalid_request', 'pass dashboard_id or url_path', 400)
     try:
-        rows = _list(integration, name)
+        rows = _list(integration, name, ctx)
     except ProxyError as e:
-        return _err(_translate(e.message), e.message, e.status_code)
+        return None, _err(_translate(e.message), e.message, e.status_code)
     dash = _find(rows, dashboard_id=dashboard_id, url_path=url_path)
     if not dash:
-        return _err('ha_dashboard_not_found',
-                    'No dashboard matches %s' % (dashboard_id or url_path), 404)
+        return None, _err('ha_dashboard_not_found',
+                          'No dashboard matches %s' % (dashboard_id or url_path), 404)
     if dash.get('mode') == 'yaml':
-        return _err('ha_dashboard_yaml_readonly',
-                    'Dashboard %r is YAML-mode (file-backed); remove it from configuration.yaml'
-                    % dash.get('url_path'), 400)
+        return None, _err('ha_dashboard_yaml_readonly',
+                          'Dashboard %r is YAML-mode (file-backed); remove it from configuration.yaml'
+                          % dash.get('url_path'), 400)
     if not dash.get('id'):
-        return _err('ha_dashboard_not_found',
-                    'Dashboard %r has no storage id' % dash.get('url_path'), 404)
+        return None, _err('ha_dashboard_not_found',
+                          'Dashboard %r has no storage id' % dash.get('url_path'), 404)
+    return dash, None
+
+
+def _h_delete_dashboard(integration, tool, args, ctx=None):
+    name = tool.get('name', '')
+    dash, err = _resolve_dashboard(integration, tool, args, ctx)
+    if err:
+        return err
     try:
-        ha_ws_exec(integration, f'{LOVELACE_DASHBOARDS}/delete',
-                   {'dashboard_id': dash.get('id')}, tool_name=name)
+        _ws(integration, f'{LOVELACE_DASHBOARDS}/delete',
+            {'dashboard_id': dash.get('id')}, name, ctx)
     except ProxyError as e:
         return _err(_translate(e.message), e.message, e.status_code)
     # Deleting a storage dashboard also removes its stored config (HA's
@@ -546,7 +625,7 @@ def _h_delete_dashboard(integration, tool, args):
     # store.async_remove), so no separate lovelace/config/delete is needed.
     verified = False
     try:
-        verified = _find(_list(integration, name), dashboard_id=dash.get('id')) is None
+        verified = _find(_list(integration, name, ctx), dashboard_id=dash.get('id')) is None
     except ProxyError:
         pass
     return json.dumps({'deleted': True, 'dashboard_id': dash.get('id'),
@@ -563,7 +642,38 @@ HANDLERS = {
 }
 
 
-def run_handler(name: str, integration: dict, tool: dict, args: dict) -> str:
+def _preflight_save_config(integration, tool, args, ctx):
+    """Read → patch → diff without writing. Returns an error JSON string when the
+    write could never succeed, so a doomed request is never queued for approval."""
+    probe = dict(args or {})
+    probe['dry_run'] = True
+    out = _h_save_config(integration, tool, probe, ctx)
+    try:
+        data = json.loads(out)
+    except (ValueError, TypeError):
+        return None
+    return out if isinstance(data, dict) and data.get('error') else None
+
+
+def _preflight_delete_dashboard(integration, tool, args, ctx):
+    _dash, err = _resolve_dashboard(integration, tool, args, ctx)
+    return err
+
+
+PREFLIGHT = {
+    'ha_lovelace_save_config': _preflight_save_config,
+    'ha_lovelace_delete_dashboard': _preflight_delete_dashboard,
+}
+
+
+def _ctx(agent, session_id, execution_id):
+    return {'agent': agent or '', 'session_id': session_id or '',
+            'execution_id': execution_id or ''}
+
+
+def run_handler(name: str, integration: dict, tool: dict, args: dict,
+                agent: str = '', session_id: str = '',
+                execution_id: str = '') -> str:
     """Run a registered handler and return its JSON string. ProxyError is
     translated to a stable tool error code; anything else surfaces as
     handler_failed."""
@@ -573,8 +683,25 @@ def run_handler(name: str, integration: dict, tool: dict, args: dict) -> str:
                            'message': "No handler registered for '%s'" % name,
                            'status_code': 500})
     try:
-        return fn(integration, tool, args or {})
+        return fn(integration, tool, args or {}, _ctx(agent, session_id, execution_id))
     except ProxyError as e:
         return _err(_translate(e.message), e.message, e.status_code)
     except Exception as e:  # noqa: BLE001 - never leak a traceback to the model
+        return _err('handler_failed', '%s: %s' % (type(e).__name__, e), 500)
+
+
+def run_preflight(name: str, integration: dict, tool: dict, args: dict,
+                  agent: str = '', session_id: str = '',
+                  execution_id: str = ''):
+    """Validate a gated handler write without writing. Returns an error JSON
+    string when the write cannot succeed, or None when it is viable. Handlers
+    without a registered preflight return None (no validation)."""
+    fn = PREFLIGHT.get(name)
+    if not fn:
+        return None
+    try:
+        return fn(integration, tool, args or {}, _ctx(agent, session_id, execution_id))
+    except ProxyError as e:
+        return _err(_translate(e.message), e.message, e.status_code)
+    except Exception as e:  # noqa: BLE001
         return _err('handler_failed', '%s: %s' % (type(e).__name__, e), 500)

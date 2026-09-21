@@ -2473,9 +2473,13 @@ def approve_integration_call(call_id: int, request: Request):
         if tool.get('handler'):
             # Curated multi-step handler — same code path as the immediate run,
             # so a tool behaves identically whether it auto-ran or was approved.
+            # Attribute to the operator while retaining the original session.
             from core.tool_handlers import run_handler
             result = {'status_code': 200,
-                      'body': run_handler(tool['handler'], integration, tool, payload),
+                      'body': run_handler(tool['handler'], integration, tool, payload,
+                                          agent='operator',
+                                          session_id=call.get('session_id') or '',
+                                          execution_id=call.get('execution_id') or ''),
                       'error': None, 'truncated': 0, 'latency_ms': 0}
         elif (tool.get('transport') or 'http') == 'ws':
             result = execute_ws_call(

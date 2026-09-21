@@ -60,7 +60,9 @@ def run_tool(integration_name: str, tool_name: str, args: dict, reason: str = ''
         if handler:
             # Curated multi-step handler — returns the final JSON string itself.
             from core.tool_handlers import run_handler
-            return run_handler(handler, integration, tool, args)
+            return run_handler(handler, integration, tool, args,
+                               agent=AGENT_LABEL, session_id=session_id,
+                               execution_id=execution_id)
         if transport == 'ws':
             # WS tools (curated registry tools or generic ws tools) run the
             # command from path_template / the command arg.
@@ -114,6 +116,16 @@ def run_tool(integration_name: str, tool_name: str, args: dict, reason: str = ''
         should_gate = False
 
     if should_gate:
+        if handler:
+            # Validate the write (read → patch → diff, no write) before queuing
+            # an approval, so an operator never spends an approval on a write
+            # that cannot succeed.
+            from core.tool_handlers import run_preflight
+            pre = run_preflight(handler, integration, tool, args,
+                                agent=AGENT_LABEL, session_id=session_id,
+                                execution_id=execution_id)
+            if pre is not None:
+                return pre
         call_id = create_pending_call(integration['name'], tool_name, args, reason,
                                       session_id=session_id, execution_id=execution_id)
         from core.notify import send_notify

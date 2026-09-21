@@ -115,11 +115,15 @@ def lovelace_server():
                             await ok(rid, state["configs"][None])
                         else:
                             await err(rid, "config_not_found", "No config found.")
-                    elif url_path not in state["configs"]:
+                    elif url_path in state["configs"]:
+                        await ok(rid, state["configs"][url_path])
+                    elif any(d.get("url_path") == url_path for d in state["dashboards"]):
+                        # Known dashboard that has never been saved -> HA's
+                        # StorageLovelaceConfig raises ConfigNotFound.
+                        await err(rid, "config_not_found", "No config found.")
+                    else:
                         await err(rid, "config_not_found",
                                   "Unknown config specified: %s" % url_path)
-                    else:
-                        await ok(rid, state["configs"][url_path])
                 elif typ == "lovelace/config/save":
                     state["configs"][msg.get("url_path")] = msg.get("config")
                     await ok(rid, None)
@@ -178,6 +182,8 @@ class TestLovelaceReads:
         assert view["card_count"] == 5
         assert view["cards"][0]["targets"] == ["thames_water:thameswater_consumption"]
         assert view["cards"][1]["targets"] == ["sensor.thames_water_meter"]
+        # markdown cards carry a first-line preview so index edits are unambiguous
+        assert view["cards"][4]["preview"] == "hello"
 
     def test_view_filter(self, lovelace_server):
         _seed(lovelace_server)
@@ -201,10 +207,16 @@ class TestLovelaceReads:
                                   {"url_path": "water-monitor", "full": True, "max_bytes": 10}))
         assert out["truncated"] is True and out["config"] is None
 
-    def test_default_no_config(self, lovelace_server):
+    def test_default_no_config_is_empty_summary(self, lovelace_server):
         _seed(lovelace_server)
         out = json.loads(run_tool("ha", "lovelace_dashboard", {}))
-        assert out["error"] == "ha_no_config"
+        assert "error" not in out
+        assert out["view_count"] == 0 and out["views"] == []
+
+    def test_unknown_url_path_is_dashboard_not_found(self, lovelace_server):
+        _seed(lovelace_server)
+        out = json.loads(run_tool("ha", "lovelace_dashboard", {"url_path": "nope-nope"}))
+        assert out["error"] == "ha_dashboard_not_found"
 
     def test_default_untargetable(self, lovelace_server):
         _seed(lovelace_server)
@@ -276,6 +288,8 @@ class TestLovelaceSaveConfig:
             "ops": [{"op": "append_card", "view": "water", "card": {"type": "markdown"}}]}))
         assert out["dry_run"] is True and out["changed"] is True
         assert out["diff"]["cards_added"] == 1
+        # a pure append at the end is not also reported as a changed card
+        assert out["diff"]["cards_changed"] == 0
         after = json.dumps(lovelace_server["state"]["configs"]["water-monitor"], sort_keys=True)
         assert before == after  # nothing written
 
@@ -341,6 +355,41 @@ class TestLovelaceSaveConfig:
             "ops": [{"op": "append_card", "view": "new", "card": {"type": "markdown"}}]}))
         assert out["error"] == "ha_dashboard_yaml_readonly"
 
+    def test_configless_dashboard_set_view_new(self, lovelace_server):
+        """Bug 1: a freshly created dashboard has no saved config yet — saving
+        must initialise it rather than failing with a hard error."""
+        _seed(lovelace_server)
+        run_tool("ha", "lovelace_create_dashboard",
+                 {"title": "Test", "url_path": "hermes-test"}, "make it")
+        tool = _tool("lovelace_save_config")
+        out = json.loads(run_handler("ha_lovelace_save_config", get_integration("ha"), tool, {
+            "url_path": "hermes-test",
+            "ops": [{"op": "set_view", "view": "new",
+                     "view_config": {"path": "main", "cards": [{"type": "markdown"}]}}]}))
+        assert out["verified"] is True
+        assert lovelace_server["state"]["configs"]["hermes-test"]["views"][0]["path"] == "main"
+
+    def test_configless_full_replace(self, lovelace_server):
+        _seed(lovelace_server)
+        run_tool("ha", "lovelace_create_dashboard",
+                 {"title": "Test", "url_path": "hermes-test"}, "make it")
+        tool = _tool("lovelace_save_config")
+        out = json.loads(run_handler("ha_lovelace_save_config", get_integration("ha"), tool, {
+            "url_path": "hermes-test", "config": {"views": [{"path": "main"}]},
+            "confirm": "replace"}))
+        assert out["verified"] is True
+
+    def test_configless_card_op_hints_set_view_new(self, lovelace_server):
+        _seed(lovelace_server)
+        run_tool("ha", "lovelace_create_dashboard",
+                 {"title": "Test", "url_path": "hermes-test"}, "make it")
+        tool = _tool("lovelace_save_config")
+        out = json.loads(run_handler("ha_lovelace_save_config", get_integration("ha"), tool, {
+            "url_path": "hermes-test",
+            "ops": [{"op": "append_card", "view": "main", "card": {"type": "markdown"}}]}))
+        assert out["error"] == "invalid_request"
+        assert "set_view" in out["message"]
+
 
 class TestLovelaceGating:
 
@@ -374,6 +423,70 @@ class TestLovelaceGating:
             "url_path": "water-monitor", "dry_run": True,
             "ops": [{"op": "append_card", "view": "water", "card": {"type": "markdown"}}]}))
         assert "status" not in out and out["dry_run"] is True
+
+    def test_invalid_gated_save_not_queued(self, lovelace_server):
+        """Second-order fix: a doomed write must not consume an approval."""
+        from db.integrations import get_pending_calls
+        _seed(lovelace_server)
+        before = len(get_pending_calls())
+        out = json.loads(run_tool("ha", "lovelace_save_config", {
+            "url_path": "water-monitor",
+            "ops": [{"op": "append_card", "view": "nope", "card": {"type": "markdown"}}]},
+            "edit"))
+        assert out["error"] == "invalid_request"
+        assert len(get_pending_calls()) == before
+
+    def test_unknown_gated_delete_not_queued(self, lovelace_server):
+        from db.integrations import get_pending_calls
+        _seed(lovelace_server)
+        before = len(get_pending_calls())
+        out = json.loads(run_tool("ha", "lovelace_delete_dashboard",
+                                  {"url_path": "nope-nope"}, "delete it"))
+        assert out["error"] == "ha_dashboard_not_found"
+        assert len(get_pending_calls()) == before
+
+
+class TestLovelaceAttribution:
+    """Regression 2: handler inner rows must carry the caller context exactly
+    like the REST/`mcp` path."""
+
+    def test_read_rows_carry_agent_and_session(self, lovelace_server):
+        from db.integrations import get_integration_calls
+        _seed(lovelace_server)
+        run_tool("ha", "lovelace_dashboards", {"session_id": "sess-attrib"})
+        rows = get_integration_calls(session="sess-attrib")["rows"]
+        assert rows
+        assert all(r["agent"] == "mcp" for r in rows)
+        assert all(r["session_id"] == "sess-attrib" for r in rows)
+        assert all(r["method"] == "WS" for r in rows)
+
+    def test_save_emits_multiple_attributed_rows(self, lovelace_server):
+        from db.integrations import get_integration_calls
+        _seed(lovelace_server)
+        tool = _tool("lovelace_save_config")
+        run_handler("ha_lovelace_save_config", get_integration("ha"), tool,
+                    {"url_path": "water-monitor",
+                     "ops": [{"op": "append_card", "view": "water",
+                              "card": {"type": "markdown"}}]},
+                    agent="mcp", session_id="sess-save", execution_id="exec-save")
+        rows = get_integration_calls(session="sess-save")["rows"]
+        assert len(rows) >= 3  # config read + save + read-back
+        assert all(r["agent"] == "mcp" for r in rows)
+        assert all(r["execution_id"] == "exec-save" for r in rows)
+
+    def test_approved_save_attributes_operator_and_session(self, lovelace_server, auth_client):
+        from db.integrations import create_pending_call, get_integration_calls
+        _seed(lovelace_server)
+        args = {"url_path": "water-monitor",
+                "ops": [{"op": "append_card", "view": "water",
+                         "card": {"type": "markdown", "content": "x"}}]}
+        call_id = create_pending_call("ha", "lovelace_save_config", args, "approve",
+                                      session_id="sess-appr", execution_id="exec-appr")
+        r = auth_client.post(f"/api/integration-calls/{call_id}/approve")
+        assert r.status_code == 200
+        rows = get_integration_calls(session="sess-appr")["rows"]
+        assert rows
+        assert all(r["agent"] == "operator" for r in rows)
 
 
 class TestLovelaceApproval:
