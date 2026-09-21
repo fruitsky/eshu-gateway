@@ -169,6 +169,51 @@ OMADA_SEED_TOOLS = [
         "read_only": False,
         "always_gate": True,
     },
+    {
+        "name": "list_groups",
+        "description": "List Omada profile groups for a site with their members (ip, mask, description) for IP / IP-Port groups. Resolve groupId + current membership here before add/remove. Use search (name/id substring) and type (0=IP, 1=IP-Port, 2=MAC, 3=IPv6, 5=Country, 7=Domain) to narrow.",
+        "method": "GET",
+        "path_template": "/sites/{siteId}/profiles/groups",
+        "params": [
+            {"name": "siteId", "type": "string", "description": "Site id (from list_sites).", "required": True},
+            {"name": "search", "type": "string", "description": "Substring filter on group name or id.", "required": False, "local": True},
+            {"name": "type", "type": "integer", "description": "Group type filter (0=IP, 1=IP-Port, 2=MAC, 3=IPv6, 5=Country, 7=Domain).", "required": False, "local": True},
+            {"name": "limit", "type": "integer", "description": "Max groups (default 50).", "required": False, "default": 50, "local": True},
+        ],
+        "transform": "omada_list_groups",
+        "example": '[{"groupId": "6a60dbc977bfbd044e48d0b0", "name": "HAOS-Clients", "type": 0, "count": 2, "members": [{"ip": "192.168.15.5", "mask": 32, "description": "Edgewood Frame"}, {"ip": "192.168.15.213", "mask": 32, "description": "Pixel 8 (Megan)"}]}]',
+        "read_only": True,
+    },
+    {
+        "name": "group_add_members",
+        "description": "Add one or more members to an Omada IP / IP-Port group. Safe path: the group is read first, existing members are preserved, then the merged list is PATCHed (a raw group PATCH REPLACES the whole ipList — this tool never drops members). groupType is derived from the group. REQUIRES OPERATOR APPROVAL.",
+        "method": "GET",
+        "path_template": "/sites/{siteId}/profiles/groups",
+        "params": [
+            {"name": "siteId", "type": "string", "description": "Site id (from list_sites).", "required": True},
+            {"name": "groupId", "type": "string", "description": "Target group id (from list_groups).", "required": True, "local": True},
+            {"name": "members", "type": "array", "description": "Members to add: a JSON array of {ip, mask?, description?} objects. mask defaults to 32.", "required": True, "local": True},
+        ],
+        "transform": "omada_group_add_members",
+        "example": '{"groupId": "6a60dbc977bfbd044e48d0b0", "name": "HAOS-Clients", "type": 0, "count": 3, "members": [{"ip": "192.168.15.5", "mask": 32, "description": "Edgewood Frame"}, {"ip": "192.168.15.213", "mask": 32, "description": "Pixel 8 (Megan)"}, {"ip": "192.168.15.250", "mask": 32, "description": "TMP-plan-test"}]}',
+        "read_only": False,
+        "always_gate": True,
+    },
+    {
+        "name": "group_remove_members",
+        "description": "Remove one or more members (by IP) from an Omada IP / IP-Port group. Safe path: the group is read first, only the listed IPs are removed, and the remaining members are preserved in the PATCHed list. groupType is derived from the group. REQUIRES OPERATOR APPROVAL.",
+        "method": "GET",
+        "path_template": "/sites/{siteId}/profiles/groups",
+        "params": [
+            {"name": "siteId", "type": "string", "description": "Site id (from list_sites).", "required": True},
+            {"name": "groupId", "type": "string", "description": "Target group id (from list_groups).", "required": True, "local": True},
+            {"name": "members", "type": "array", "description": "Members to remove: a JSON array of IP strings (e.g. [\"192.168.15.250\"]).", "required": True, "local": True},
+        ],
+        "transform": "omada_group_remove_members",
+        "example": '{"groupId": "6a60dbc977bfbd044e48d0b0", "name": "HAOS-Clients", "type": 0, "count": 2, "members": [{"ip": "192.168.15.5", "mask": 32, "description": "Edgewood Frame"}]}',
+        "read_only": False,
+        "always_gate": True,
+    },
 ]
 
 

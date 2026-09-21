@@ -82,8 +82,8 @@ def _fetch_json(integration, path: str, params: dict = None):
     return json.loads(raw.decode('utf-8', errors='replace'))
 
 
-def _post_json(integration, path: str, payload: dict):
-    """Small JSON POST against the integration's base URL. Raises on failure."""
+def _send_json(integration, path: str, payload: dict, method: str = 'POST'):
+    """Small JSON request against the integration's base URL. Raises on failure."""
     from core.integration_proxy import (
         DEFAULT_TIMEOUT, MAX_BODY_BYTES, _auth_headers, _guard_ssrf, _ssl_context,
     )
@@ -92,12 +92,22 @@ def _post_json(integration, path: str, payload: dict):
     _guard_ssrf(base_url, path)
     url = base_url + '/' + path
     req = urllib.request.Request(
-        url, data=json.dumps(payload).encode('utf-8'), method='POST',
+        url, data=json.dumps(payload).encode('utf-8'), method=(method or 'POST').upper(),
         headers={'Content-Type': 'application/json', **(_auth_headers(integration))})
     with urllib.request.urlopen(req, timeout=DEFAULT_TIMEOUT,
                                 context=_ssl_context(integration)) as resp:
         raw = resp.read(MAX_BODY_BYTES + 1)
     return json.loads(raw.decode('utf-8', errors='replace'))
+
+
+def _post_json(integration, path: str, payload: dict):
+    """Small JSON POST against the integration's base URL. Raises on failure."""
+    return _send_json(integration, path, payload, 'POST')
+
+
+def _patch_json(integration, path: str, payload: dict):
+    """Small JSON PATCH against the integration's base URL. Raises on failure."""
+    return _send_json(integration, path, payload, 'PATCH')
 
 
 def reorder_acls(integration, site_id: str, acl_type: str, rule_id: str,
@@ -204,3 +214,160 @@ def enrich_acl_create(integration, path: str, submitted: dict, body: str):
         data = {}
     data['created_rule'] = {'id': created.get('id'), 'index': created.get('index')}
     return json.dumps(data)
+
+
+# ── Profile-group membership ────────────────────────────────────────────
+#
+# Omada's group PATCH is a FULL `ipList` replace — omitting an existing member
+# silently drops it. These helpers implement the safe read → merge → PATCH →
+# re-read flow so agents express intent ("add these IPs") instead of
+# hand-building the whole member list.
+
+# Group types whose members live in `ipList` (0=IP, 1=IP-Port). Other types
+# (2=MAC, 3=IPv6, 5=Country, 7=Domain) carry a different shape and are out of
+# scope for the curated membership tools.
+IP_GROUP_TYPES = (0, 1)
+
+# Upstream Omada error code for "the number of IpGroups has reached the limit".
+OMADA_IP_GROUP_QUOTA = -33724
+
+
+def _omada_group_items(listed):
+    """Extract the group array from a /profiles/groups response. Unlike ACL
+    lists (which nest the array under `result.data`), the group list wraps the
+    array directly under `result`. Returns None when neither shape is present."""
+    if not isinstance(listed, dict):
+        return None
+    result = listed.get('result')
+    if isinstance(result, list):
+        return result
+    if isinstance(result, dict) and isinstance(result.get('data'), list):
+        return result['data']
+    return None
+
+
+def _group_projection(group: dict) -> dict:
+    """Compact projection of one Omada profile group. Members are included when
+    the group carries an `ipList` (IP / IP-Port types); other types report the
+    count only."""
+    out = {}
+    for key in ('groupId', 'name', 'type', 'count'):
+        if group.get(key) is not None:
+            out[key] = group[key]
+    if group.get('buildIn'):
+        out['buildIn'] = True
+    members = group.get('ipList')
+    if isinstance(members, list):
+        out['members'] = [
+            {k: v for k, v in (('ip', m.get('ip')), ('mask', m.get('mask')),
+                               ('description', m.get('description')))
+             if v is not None}
+            for m in members if isinstance(m, dict) and m.get('ip')
+        ]
+    return out
+
+
+def list_groups(integration, site_id: str):
+    """Fetch and project every profile group for a site. Raises ValueError on an
+    empty/unexpected response."""
+    listed = _fetch_json(integration, f"/sites/{site_id}/profiles/groups",
+                         {'page': 1, 'pageSize': 200})
+    items = _omada_group_items(listed)
+    if items is None:
+        raise ValueError("group list returned no data")
+    return [_group_projection(g) for g in items
+            if isinstance(g, dict) and g.get('groupId')]
+
+
+def _find_group(integration, site_id: str, group_id: str):
+    """Return the raw group dict for `group_id`, or None when not found."""
+    listed = _fetch_json(integration, f"/sites/{site_id}/profiles/groups",
+                         {'page': 1, 'pageSize': 200})
+    items = _omada_group_items(listed)
+    if items is None:
+        raise ValueError("group list returned no data")
+    for g in items:
+        if isinstance(g, dict) and g.get('groupId') == group_id:
+            return g
+    return None
+
+
+def _member_ip(entry):
+    """Normalize an add/remove entry to an (ip, mask, description) triple.
+    Accepts a dict ({ip, mask?, description?}) or a bare IP string."""
+    if isinstance(entry, dict):
+        ip = entry.get('ip')
+        if ip is None:
+            return None
+        return str(ip).strip(), entry.get('mask'), entry.get('description')
+    if isinstance(entry, str) and entry.strip():
+        return entry.strip(), None, None
+    return None
+
+
+def _upstream_group_error(resp) -> str:
+    """Readable message for a non-zero Omada errorCode, mapping the IP-group
+    quota to something an operator can act on."""
+    code = resp.get('errorCode')
+    msg = resp.get('msg') or f"errorCode {code}"
+    if code == OMADA_IP_GROUP_QUOTA:
+        return f"IP group quota reached upstream: {msg}"
+    return msg
+
+
+def update_group_members(integration, site_id: str, group_id: str,
+                         add=None, remove=None):
+    """Read → merge → PATCH a group's `ipList`, then re-read and return the
+    updated projection.
+
+    Omada's group PATCH replaces the WHOLE `ipList`, so this reads the current
+    members first, applies the caller's add/remove by IP (preserving every other
+    existing member and its description), and PATCHes the merged list. The
+    group's `type` is derived from the existing group — never caller-supplied —
+    and is used for the item route. Raises ValueError with a stable message on
+    invalid input or an upstream rejection."""
+    if not site_id or not group_id:
+        raise ValueError("siteId and groupId are required")
+    adds = [t for t in (_member_ip(m) for m in (add or [])) if t]
+    remove_ips = {t[0].lower() for t in (_member_ip(m) for m in (remove or [])) if t}
+    if not adds and not remove_ips:
+        raise ValueError("nothing to change: provide members to add or remove")
+
+    group = _find_group(integration, site_id, group_id)
+    if group is None:
+        raise ValueError(f"group not found: {group_id}")
+    gtype = group.get('type')
+    if gtype not in IP_GROUP_TYPES:
+        raise ValueError(
+            f"group type {gtype} is not an IP or IP-Port group; membership can "
+            "only be edited on type 0 (IP) or type 1 (IP-Port)")
+
+    by_ip = {}
+    for m in (group.get('ipList') or []):
+        if isinstance(m, dict) and m.get('ip'):
+            by_ip[str(m['ip']).strip().lower()] = dict(m)
+    for ip in remove_ips:
+        by_ip.pop(ip, None)
+    for ip, mask, description in adds:
+        key = ip.lower()
+        entry = {'ip': ip, 'mask': 32 if mask is None else mask}
+        if description is not None:
+            entry['description'] = description
+        elif by_ip.get(key, {}).get('description'):
+            entry['description'] = by_ip[key]['description']
+        by_ip[key] = entry
+
+    payload = {'name': group.get('name'), 'type': gtype,
+               'ipList': list(by_ip.values())}
+    resp = _patch_json(
+        integration, f"/sites/{site_id}/profiles/groups/{gtype}/{group_id}", payload)
+    if isinstance(resp, dict) and resp.get('errorCode') not in (0, None):
+        raise ValueError(f"update rejected upstream: {_upstream_group_error(resp)}")
+
+    updated = _find_group(integration, site_id, group_id)
+    if updated is None:
+        # Fall back to the merged view we just wrote (re-read raced or the
+        # controller lagged) rather than reporting failure.
+        updated = {**group, 'ipList': list(by_ip.values()),
+                   'count': len(by_ip)}
+    return _group_projection(updated)

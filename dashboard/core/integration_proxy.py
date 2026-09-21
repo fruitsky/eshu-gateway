@@ -229,7 +229,7 @@ def _build_request(tool: dict, args: dict):
             continue
         if '{' + name + '}' in path:
             path = path.replace('{' + name + '}', urllib.parse.quote(str(val), safe=''))
-        elif p.get('type') == 'json':
+        elif p.get('type') in ('json', 'array'):
             raw_body = val
         # `in_query` forces a query-string param even on POST/PUT/PATCH (e.g.
         # Jellyfin's POST /Library/Refresh?replaceAllMetadata=...).

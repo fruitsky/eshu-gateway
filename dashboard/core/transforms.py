@@ -968,6 +968,78 @@ def _omada_acl_reorder(integration, tool, args, data):
     return json.dumps(result)
 
 
+def _omada_list_groups(integration, tool, args, data):
+    """Curated read of Omada profile groups (compact, search/type/limit shaped)
+    so agents resolve groupId + current membership without raw envelopes."""
+    from core.omada_utils import list_groups
+    a = args or {}
+    site_id = a.get('siteId')
+    if not site_id:
+        return json.dumps({'error': 'invalid_request', 'message': 'siteId is required'})
+    try:
+        groups = list_groups(integration, site_id)
+    except ValueError as e:
+        return json.dumps({'error': 'invalid_request', 'message': str(e)})
+    except Exception as e:
+        return json.dumps({'error': 'invalid_request', 'message': f"{type(e).__name__}: {e}"})
+    needle = str(a.get('search') or '').lower()
+    if needle:
+        groups = [g for g in groups
+                  if needle in str(g.get('name') or '').lower()
+                  or needle in str(g.get('groupId') or '').lower()]
+    gtype = a.get('type')
+    if gtype is not None and gtype != '':
+        try:
+            gtype = int(gtype)
+        except (TypeError, ValueError):
+            return json.dumps({'error': 'invalid_request',
+                               'message': f"type must be an integer, got {a.get('type')!r}"})
+        groups = [g for g in groups if g.get('type') == gtype]
+    return json.dumps(_slice(groups, a.get('limit')))
+
+
+def _omada_group_members(integration, args, add):
+    """Shared driver for the add/remove membership tools. `add` selects the
+    direction; the merged-PATCH logic lives in core.omada_utils."""
+    from core.omada_utils import update_group_members
+    a = args or {}
+    site_id = a.get('siteId')
+    group_id = a.get('groupId')
+    members = a.get('members')
+    if not (site_id and group_id and members):
+        return json.dumps({'error': 'invalid_request',
+                           'message': 'siteId, groupId and members are required'})
+    if isinstance(members, str):
+        try:
+            members = json.loads(members)
+        except (ValueError, TypeError):
+            return json.dumps({'error': 'invalid_request',
+                               'message': 'members must be a JSON array'})
+    if not isinstance(members, list) or not members:
+        return json.dumps({'error': 'invalid_request',
+                           'message': 'members must be a non-empty array'})
+    try:
+        if add:
+            result = update_group_members(integration, site_id, group_id, add=members)
+        else:
+            result = update_group_members(integration, site_id, group_id, remove=members)
+    except ValueError as e:
+        return json.dumps({'error': 'invalid_request', 'message': str(e)})
+    except Exception as e:
+        return json.dumps({'error': 'invalid_request', 'message': f"{type(e).__name__}: {e}"})
+    return json.dumps(result)
+
+
+def _omada_group_add_members(integration, tool, args, data):
+    """Add members to an IP / IP-Port group via read → merge → PATCH → verify."""
+    return _omada_group_members(integration, args, add=True)
+
+
+def _omada_group_remove_members(integration, tool, args, data):
+    """Remove members (by IP) from an IP / IP-Port group, preserving the rest."""
+    return _omada_group_members(integration, args, add=False)
+
+
 TRANSFORMS = {
     'pulse_health': _health,
     'pulse_fleet_summary': _fleet_summary,
@@ -1005,6 +1077,9 @@ TRANSFORMS = {
     'npm_certificates': _npm_certificates,
     'npm_version': _npm_version,
     'omada_acl_reorder': _omada_acl_reorder,
+    'omada_list_groups': _omada_list_groups,
+    'omada_group_add_members': _omada_group_add_members,
+    'omada_group_remove_members': _omada_group_remove_members,
 }
 
 # Transforms that consume the raw body as text (non-JSON endpoints).

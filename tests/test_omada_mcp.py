@@ -283,13 +283,14 @@ class TestOmadaSeed:
         })
         r = auth_client.post("/api/integrations/omada/seed")
         assert r.status_code == 200
-        assert r.json()["created"] == 13  # 11 curated + generic read/write
+        assert r.json()["created"] == 16  # 14 curated + generic read/write
         tools = auth_client.get("/api/integrations/omada/tools").json()
         names = {t["name"] for t in tools}
         assert names == {"list_sites", "get_site", "list_site_devices", "search_devices",
                          "list_site_clients", "get_client", "list_site_ssids",
                          "list_site_alerts", "block_client", "reconnect_client",
-                         "acl_reorder", "read", "write"}
+                         "acl_reorder", "list_groups", "group_add_members",
+                         "group_remove_members", "read", "write"}
         bc = next(t for t in tools if t["name"] == "block_client")
         assert bc["read_only"] == 0
         # acl_reorder is gated unconditionally and registered as a transform
@@ -997,3 +998,277 @@ class TestOmadaAclFixes:
         assert out2 == "page=1&pageSize=50"
         out3 = inject_omada_pagination_qs("GET", "/sites/S1/wireless-network/ssids", "")
         assert out3 == ""
+
+
+@pytest.fixture
+def omada_group_upstream():
+    """Mock Omada with /profiles/groups list + PATCH, plus the OAuth2 exchange.
+    Enforces page/pageSize on list GETs (Omada 400s bare list GETs) and applies
+    a PATCHed ipList to the stored group so the transform's re-read reflects the
+    write."""
+    state = {
+        'groups': [
+            {'groupId': 'G1', 'name': 'HAOS-Clients', 'type': 0, 'count': 2,
+             'ipList': [{'ip': '192.168.15.5', 'mask': 32, 'description': 'Edgewood Frame'},
+                        {'ip': '192.168.15.213', 'mask': 32, 'description': 'Pixel 8 (Megan)'}]},
+            {'groupId': 'G2', 'name': 'MacGroup', 'type': 2, 'count': 1},
+            {'groupId': 'G0', 'name': 'IPGroup_Any', 'type': 0, 'count': 1,
+             'ipList': [{'ip': '0.0.0.0', 'mask': 0}]},
+        ],
+        'patch_body': None,
+        'patch_path': None,
+        'list_qs': '',
+        'patch_err': None,
+    }
+
+    def _groups_payload():
+        out = []
+        for g in state['groups']:
+            item = dict(g)
+            if 'ipList' in item:
+                item['count'] = len(item['ipList'])
+            out.append(item)
+        return {'errorCode': 0, 'msg': 'Success.', 'result': out}
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def _path(self):
+            return urlparse(self.path).path
+
+        def _respond(self, status, payload):
+            body = json.dumps(payload).encode('utf-8')
+            self.send_response(status)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_POST(self):
+            if self._path().endswith('/authorize/token'):
+                self._respond(200, {'result': {'accessToken': 'tok-1', 'expiresIn': 7200}})
+                return
+            self._respond(404, {'error': 'not found'})
+
+        def do_GET(self):
+            p = self._path()
+            if p.endswith('/authorize/token'):
+                self._respond(200, {'result': {'accessToken': 'tok-1'}})
+                return
+            if p.endswith('/profiles/groups'):
+                state['list_qs'] = urlparse(self.path).query
+                if 'page' not in state['list_qs']:
+                    self._respond(400, {'error': 'Bad Request'})
+                    return
+                self._respond(200, _groups_payload())
+                return
+            self._respond(404, {'error': 'not found'})
+
+        def do_PATCH(self):
+            p = self._path()
+            state['patch_path'] = p
+            state['patch_body'] = json.loads(
+                self.rfile.read(int(self.headers.get('Content-Length', '0'))))
+            if state['patch_err']:
+                self._respond(200, {'errorCode': state['patch_err'], 'msg': 'Rejected'})
+                return
+            gid = p.rsplit('/', 1)[-1]
+            for g in state['groups']:
+                if g['groupId'] == gid:
+                    g['name'] = state['patch_body'].get('name', g['name'])
+                    g['ipList'] = state['patch_body'].get('ipList', [])
+                    g['count'] = len(g['ipList'])
+            self._respond(200, {'errorCode': 0, 'msg': 'Success.'})
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), _Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield {'base_url': f"http://127.0.0.1:{server.server_address[1]}", 'state': state}
+    server.shutdown()
+    server.server_close()
+
+
+def _omada_group_integration(upstream, gate_mode='destructive'):
+    from core.integration_proxy import _oauth_tokens
+    _oauth_tokens.clear()
+    create_integration(
+        "omada", upstream['base_url'] + "/openapi/v1/omadac-1", "oauth2", "",
+        client_id="cid", client_secret="csecret",
+        token_url=upstream['base_url'] + "/openapi/authorize/token",
+        kind="omada", gate_mode=gate_mode)
+    seed_for_kind(get_integration("omada"))
+    return get_integration("omada")
+
+
+class TestOmadaGroupTools:
+
+    def test_seed_registers_group_tools(self, omada_group_upstream):
+        _omada_group_integration(omada_group_upstream)
+        from db.integrations import get_tools
+        tools = {t['name']: t for t in get_tools(get_integration('omada')['id'])}
+        assert {'list_groups', 'group_add_members', 'group_remove_members'}.issubset(tools)
+        assert tools['list_groups']['transform'] == 'omada_list_groups'
+        assert bool(tools['list_groups']['read_only']) is True
+        assert tools['group_add_members']['transform'] == 'omada_group_add_members'
+        assert tools['group_remove_members']['transform'] == 'omada_group_remove_members'
+        assert bool(tools['group_add_members']['always_gate']) is True
+        assert bool(tools['group_remove_members']['always_gate']) is True
+        assert bool(tools['group_add_members']['read_only']) is False
+
+    def test_members_param_is_array_in_signature(self, omada_group_upstream):
+        _omada_group_integration(omada_group_upstream)
+        import inspect
+        from core.mcp_server import _build_tool_fn
+        fn = _build_tool_fn("omada", get_tool("omada", "group_add_members"))
+        assert inspect.signature(fn).parameters['members'].annotation is list
+
+    def test_array_param_becomes_raw_body(self):
+        from core.integration_proxy import _build_request
+        tool = {"method": "POST", "path_template": "/x",
+                "params": [{"name": "items", "type": "array"}]}
+        _, _, _, _, raw_body = _build_request(tool, {"items": [1, 2]})
+        assert raw_body == [1, 2]
+
+    def test_list_groups_projects_members(self, omada_group_upstream):
+        _omada_group_integration(omada_group_upstream)
+        out = json.loads(run_tool("omada", "list_groups", {"siteId": "S1"}))
+        names = {g['name']: g for g in out}
+        assert 'HAOS-Clients' in names
+        g = names['HAOS-Clients']
+        assert g['type'] == 0 and g['count'] == 2
+        assert {m['ip'] for m in g['members']} == {'192.168.15.5', '192.168.15.213'}
+        assert g['members'][0]['description'] == 'Edgewood Frame'
+
+    def test_list_groups_non_ip_reports_count_only(self, omada_group_upstream):
+        _omada_group_integration(omada_group_upstream)
+        out = json.loads(run_tool("omada", "list_groups", {"siteId": "S1", "type": 2}))
+        assert [g['name'] for g in out] == ['MacGroup']
+        assert 'members' not in out[0]
+        assert out[0]['count'] == 1
+
+    def test_list_groups_search(self, omada_group_upstream):
+        _omada_group_integration(omada_group_upstream)
+        out = json.loads(run_tool("omada", "list_groups", {"siteId": "S1", "search": "haos"}))
+        assert [g['name'] for g in out] == ['HAOS-Clients']
+
+    def test_list_groups_limit(self, omada_group_upstream):
+        _omada_group_integration(omada_group_upstream)
+        out = json.loads(run_tool("omada", "list_groups", {"siteId": "S1", "limit": 1}))
+        assert len(out) == 1
+
+    def test_list_groups_fetch_is_paginated(self, omada_group_upstream):
+        """Omada 400s bare list GETs — the fetch must carry page/pageSize."""
+        _omada_group_integration(omada_group_upstream)
+        out = json.loads(run_tool("omada", "list_groups", {"siteId": "S1"}))
+        assert out, out
+        assert 'page=1' in omada_group_upstream['state']['list_qs']
+
+    def test_add_members_preserves_existing(self, omada_group_upstream):
+        _omada_group_integration(omada_group_upstream)
+        res = execute_integration_call(
+            get_integration("omada"), get_tool("omada", "group_add_members"),
+            {"siteId": "S1", "groupId": "G1",
+             "members": [{"ip": "192.168.15.250", "description": "TMP-plan-test"}]},
+            agent="test")
+        body = json.loads(res["body"])
+        assert body['count'] == 3
+        ips = {m['ip']: m for m in body['members']}
+        assert set(ips) == {'192.168.15.5', '192.168.15.213', '192.168.15.250'}
+        assert ips['192.168.15.5']['description'] == 'Edgewood Frame'
+        assert ips['192.168.15.250']['mask'] == 32
+        # the PATCH is a FULL ipList replace that includes the preserved members
+        pb = omada_group_upstream['state']['patch_body']
+        assert {m['ip'] for m in pb['ipList']} == \
+            {'192.168.15.5', '192.168.15.213', '192.168.15.250'}
+        assert pb['name'] == 'HAOS-Clients' and pb['type'] == 0
+        assert omada_group_upstream['state']['patch_path'].endswith('/profiles/groups/0/G1')
+
+    def test_add_members_dedupes_existing_ip(self, omada_group_upstream):
+        _omada_group_integration(omada_group_upstream)
+        res = execute_integration_call(
+            get_integration("omada"), get_tool("omada", "group_add_members"),
+            {"siteId": "S1", "groupId": "G1",
+             "members": [{"ip": "192.168.15.5", "description": "Dup"}]},
+            agent="test")
+        body = json.loads(res["body"])
+        assert body['count'] == 2
+
+    def test_remove_members_preserves_rest(self, omada_group_upstream):
+        _omada_group_integration(omada_group_upstream)
+        res = execute_integration_call(
+            get_integration("omada"), get_tool("omada", "group_remove_members"),
+            {"siteId": "S1", "groupId": "G1", "members": ["192.168.15.5"]},
+            agent="test")
+        body = json.loads(res["body"])
+        assert body['count'] == 1
+        assert [m['ip'] for m in body['members']] == ['192.168.15.213']
+
+    def test_remove_unknown_ip_is_idempotent(self, omada_group_upstream):
+        _omada_group_integration(omada_group_upstream)
+        res = execute_integration_call(
+            get_integration("omada"), get_tool("omada", "group_remove_members"),
+            {"siteId": "S1", "groupId": "G1", "members": ["10.0.0.9"]},
+            agent="test")
+        body = json.loads(res["body"])
+        assert body['count'] == 2
+
+    def test_add_rejects_non_ip_group_type(self, omada_group_upstream):
+        _omada_group_integration(omada_group_upstream)
+        res = execute_integration_call(
+            get_integration("omada"), get_tool("omada", "group_add_members"),
+            {"siteId": "S1", "groupId": "G2",
+             "members": [{"ip": "192.168.15.250"}]},
+            agent="test")
+        assert 'invalid_request' in res['body']
+        assert 'type 2' in res['body']
+        assert omada_group_upstream['state']['patch_body'] is None
+
+    def test_unknown_group_invalid(self, omada_group_upstream):
+        _omada_group_integration(omada_group_upstream)
+        res = execute_integration_call(
+            get_integration("omada"), get_tool("omada", "group_add_members"),
+            {"siteId": "S1", "groupId": "NOPE",
+             "members": [{"ip": "192.168.15.250"}]},
+            agent="test")
+        assert 'invalid_request' in res['body']
+        assert 'not found' in res['body']
+        assert omada_group_upstream['state']['patch_body'] is None
+
+    def test_quota_error_is_readable(self, omada_group_upstream):
+        omada_group_upstream['state']['patch_err'] = -33724
+        _omada_group_integration(omada_group_upstream)
+        res = execute_integration_call(
+            get_integration("omada"), get_tool("omada", "group_add_members"),
+            {"siteId": "S1", "groupId": "G1",
+             "members": [{"ip": "192.168.15.250"}]},
+            agent="test")
+        assert 'invalid_request' in res['body']
+        assert 'quota' in res['body'].lower()
+
+    def test_group_add_is_gated(self, omada_group_upstream):
+        _omada_group_integration(omada_group_upstream)
+        out = json.loads(run_tool("omada", "group_add_members", {
+            "siteId": "S1", "groupId": "G1",
+            "members": [{"ip": "192.168.15.250"}], "reason": "test"}))
+        assert out.get('status') == 'pending'
+        assert omada_group_upstream['state']['patch_body'] is None
+
+    def test_group_remove_is_gated(self, omada_group_upstream):
+        _omada_group_integration(omada_group_upstream)
+        out = json.loads(run_tool("omada", "group_remove_members", {
+            "siteId": "S1", "groupId": "G1",
+            "members": ["192.168.15.5"], "reason": "test"}))
+        assert out.get('status') == 'pending'
+        assert omada_group_upstream['state']['patch_body'] is None
+
+    def test_group_write_outer_fetch_paginated(self, omada_group_upstream):
+        """Regression: the declared outer GET must carry page/pageSize, or the
+        transform never runs (Omada 400s the bare list GET)."""
+        _omada_group_integration(omada_group_upstream)
+        execute_integration_call(
+            get_integration("omada"), get_tool("omada", "group_add_members"),
+            {"siteId": "S1", "groupId": "G1",
+             "members": [{"ip": "192.168.15.250"}]},
+            agent="test")
+        assert 'page=1' in omada_group_upstream['state']['list_qs']

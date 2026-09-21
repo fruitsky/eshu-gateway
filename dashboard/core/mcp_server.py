@@ -21,6 +21,7 @@ _TYPE_MAP = {
     'number': 'float',
     'boolean': 'bool',
     'json': 'dict',
+    'array': 'list',
 }
 
 AGENT_LABEL = 'mcp'
