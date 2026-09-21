@@ -116,3 +116,50 @@ def execute_ws_call(integration: dict, command: str, payload=None,
     )
     return {'status_code': status_code, 'body': body, 'truncated': 0,
             'latency_ms': latency_ms, 'error': error}
+
+
+def ha_ws_exec(integration: dict, command: str, payload=None, agent: str = '',
+               tool_name: str = '', session_id: str = '',
+               execution_id: str = ''):
+    """Run one HA WS command for a curated multi-step handler and return its
+    RAW (un-scrubbed) result.
+
+    Unlike ``execute_ws_call``, the returned result is NOT run through the
+    secret scrubber: handlers diff / hash / round-trip a dashboard config, and a
+    scrubbed ``[redacted]`` placeholder read back into a write would corrupt the
+    live config. The audit row still stores only a scrubbed summary. Raises
+    ProxyError so handlers can translate an upstream failure into a stable tool
+    error code."""
+    from db.integrations import record_integration_call
+    start = time.time()
+    try:
+        result = ha_ws_request(integration, command, payload or {})
+        body = json.dumps(result)
+        status_code = 200
+        error = None
+        outcome = 'ok'
+    except ProxyError as e:
+        result = None
+        body = ''
+        status_code = e.status_code
+        error = e.message
+        outcome = 'error'
+    latency_ms = int((time.time() - start) * 1000)
+    record_integration_call(
+        integration=integration.get('name', ''),
+        tool=tool_name,
+        agent=agent,
+        method='WS',
+        path=command,
+        status_code=status_code,
+        latency_ms=latency_ms,
+        response_summary=(scrub_string(body or error or ''))[:PREVIEW_CHARS],
+        response_bytes=len(body),
+        truncated=0,
+        outcome=outcome,
+        session_id=session_id,
+        execution_id=execution_id,
+    )
+    if outcome == 'error':
+        raise ProxyError(status_code, error)
+    return result

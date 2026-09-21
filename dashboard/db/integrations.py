@@ -128,19 +128,23 @@ def init_integrations_tables(cursor):
     except Exception:
         pass
     try:
+        cursor.execute("ALTER TABLE integration_tools ADD COLUMN handler TEXT DEFAULT ''")
+    except Exception:
+        pass
+    try:
         cursor.execute("ALTER TABLE integration_tools ADD COLUMN seeded INTEGER DEFAULT 0")
     except Exception:
         pass
     # Backfill: tools seeded before the `seeded` column existed carry the column
     # default 0, so the stale-seed cleanup would skip them. Curated seed tools
     # always set at least one of transform / error_codes / always_gate /
-    # response_hint / generic; hand-created tools (API create) set none — so
-    # those traits reliably identify pre-migration seed tools. Idempotent.
+    # response_hint / generic / handler; hand-created tools (API create) set none
+    # — so those traits reliably identify pre-migration seed tools. Idempotent.
     cursor.execute('''
         UPDATE integration_tools SET seeded = 1
         WHERE seeded = 0 AND (
             transform != '' OR error_codes != '{}' OR always_gate = 1
-            OR response_hint != '' OR generic = 1
+            OR response_hint != '' OR generic = 1 OR handler != ''
         )
     ''')
     # One-time backfill: integrations seeded before the `kind` column existed
@@ -326,13 +330,13 @@ def create_tool(integration_id: int, name: str, description: str, method: str,
                 strip_envelope: bool = False, transform: str = '',
                 not_implemented: bool = False, always_gate: bool = False,
                 error_codes: dict = None, path_variants: dict = None,
-                response_hint: str = '', seeded: bool = False) -> int:
+                response_hint: str = '', handler: str = '', seeded: bool = False) -> int:
     with db_conn() as conn:
         cursor = conn.cursor()
         cursor.execute('''
             INSERT INTO integration_tools
-                (integration_id, name, description, method, path_template, params, fields, search_field, example, read_only, enabled, transport, filter_fields, generic, version, strip_envelope, transform, not_implemented, always_gate, error_codes, path_variants, response_hint, seeded)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (integration_id, name, description, method, path_template, params, fields, search_field, example, read_only, enabled, transport, filter_fields, generic, version, strip_envelope, transform, not_implemented, always_gate, error_codes, path_variants, response_hint, handler, seeded)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (integration_id, name, description, method, path_template,
               json.dumps(params or []), json.dumps(fields or []), search_field or '',
               example, 1 if read_only else 0,
@@ -341,7 +345,7 @@ def create_tool(integration_id: int, name: str, description: str, method: str,
               transform or '', 1 if not_implemented else 0,
               1 if always_gate else 0, json.dumps(error_codes or {}),
               json.dumps(path_variants or {}), response_hint or '',
-              1 if seeded else 0))
+              handler or '', 1 if seeded else 0))
         conn.commit()
         return cursor.lastrowid
 
@@ -441,7 +445,7 @@ def set_all_tools_enabled(integration_id: int, enabled: bool) -> int:
 
 
 def update_tool(tool_id: int, **fields) -> bool:
-    allowed = {'name', 'description', 'method', 'path_template', 'params', 'fields', 'search_field', 'example', 'read_only', 'enabled', 'transport', 'filter_fields', 'generic', 'version', 'strip_envelope', 'transform', 'not_implemented', 'always_gate', 'error_codes', 'path_variants', 'response_hint', 'seeded'}
+    allowed = {'name', 'description', 'method', 'path_template', 'params', 'fields', 'search_field', 'example', 'read_only', 'enabled', 'transport', 'filter_fields', 'generic', 'version', 'strip_envelope', 'transform', 'not_implemented', 'always_gate', 'error_codes', 'path_variants', 'response_hint', 'handler', 'seeded'}
     updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
     if not updates:
         return False
@@ -473,6 +477,8 @@ def update_tool(tool_id: int, **fields) -> bool:
         updates['seeded'] = 1 if updates['seeded'] else 0
     if updates.get('transform') is not None:
         updates['transform'] = updates['transform'] or ''
+    if 'handler' in updates:
+        updates['handler'] = updates['handler'] or ''
     assignments = ', '.join(f'{k} = ?' for k in updates)
     with db_conn() as conn:
         cursor = conn.cursor()

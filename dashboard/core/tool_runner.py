@@ -54,8 +54,13 @@ def run_tool(integration_name: str, tool_name: str, args: dict, reason: str = ''
     transport = tool.get('transport') or 'http'
     generic = bool(tool.get('generic'))
     mutating = not tool.get('read_only')
+    handler = tool.get('handler') or ''
 
     def _execute():
+        if handler:
+            # Curated multi-step handler — returns the final JSON string itself.
+            from core.tool_handlers import run_handler
+            return run_handler(handler, integration, tool, args)
         if transport == 'ws':
             # WS tools (curated registry tools or generic ws tools) run the
             # command from path_template / the command arg.
@@ -79,16 +84,20 @@ def run_tool(integration_name: str, tool_name: str, args: dict, reason: str = ''
             res = _execute()
         except ProxyError as e:
             return _error(e.message, e.status_code)
+        if handler:
+            return res
         if res.get('error'):
             return json.dumps({'error': res['error'], 'status_code': res.get('status_code')})
-        if tool.get('transform'):
+        if tool.get('transform') and transport != 'ws':
             # execute_integration_call already ran the registered transform —
             # shaping it again would double-apply (e.g. charts downsample).
+            # WS tools do NOT run transforms in execute_ws_call, so they fall
+            # through to _apply_shaping below.
             return res['body']
-        return _apply_shaping(res['body'], tool, args)
+        return _apply_shaping(res['body'], tool, args, integration)
 
     # Mutating: consult the integration's gating policy.
-    if generic:
+    if generic and not handler:
         method = args.get('method') or 'POST'
         path = args.get('path') or args.get('command') or ''
     else:
@@ -99,6 +108,10 @@ def run_tool(integration_name: str, tool_name: str, args: dict, reason: str = ''
     should_gate = (gate_mode == 'all'
                    or (gate_mode == 'destructive' and destructive)
                    or bool(tool.get('always_gate')))
+    # A handler dry-run never writes upstream, so it runs pre-gate regardless
+    # of the tool's gating policy.
+    if handler and args.get('dry_run'):
+        should_gate = False
 
     if should_gate:
         call_id = create_pending_call(integration['name'], tool_name, args, reason,
@@ -113,6 +126,8 @@ def run_tool(integration_name: str, tool_name: str, args: dict, reason: str = ''
         res = _execute()
     except ProxyError as e:
         return _error(e.message, e.status_code)
+    if handler:
+        return res
     if res.get('error'):
         return json.dumps({'error': res['error'], 'status_code': res.get('status_code')})
     return merge_response_hint(tool, res['body'])

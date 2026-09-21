@@ -238,6 +238,30 @@ no tool-name conflicts, no cross-talk.
 - **Seed tools**: `ha_list_entities`, `ha_get_entity` (reads, auto-run, projected
   to lean fields) and `ha_call_service` (mutating → operator approval). Pass
   service data as a JSON object, e.g. `call_service(domain="light", service="turn_on", data={"entity_id": "light.living_room"})`.
+- **Lovelace dashboards**: six curated `lovelace_*` tools (namespaced by the
+  integration name, e.g. `home_assistant_lovelace_dashboard`) wrap the
+  WebSocket-only Lovelace surface (there is no REST API for it):
+  - `lovelace_dashboards` / `lovelace_dashboard` — reads. The single-dashboard
+    read is **summarised** by default (top-level keys + per-view cards with
+    best-effort entity/statistic targets); pass `full: true` for the verbatim
+    config, or `view: <index|path|title>` to narrow. Omit `url_path` for the
+    default dashboard (only if one has a saved config).
+  - `lovelace_create_dashboard` / `lovelace_update_dashboard` — metadata writes.
+    `url_path` must contain a hyphen unless `allow_single_word: true`; update
+    accepts `dashboard_id` **or** `url_path` (resolved server-side).
+  - `lovelace_save_config` — the safe edit path. Prefer `ops`
+    (`append_card`/`set_card`/`delete_card`/`set_view`/`delete_view`); the tool
+    reads → patches → diffs → writes → **re-reads to verify** (HA's raw
+    `lovelace/config/save` is a blind full replace with no locking). `dry_run:
+    true` returns the diff without writing and runs without approval;
+    `expect_hash` refuses a write if the live config changed; unknown top-level
+    keys (e.g. `kiosk_mode`) are preserved. **Gated** → operator approval.
+  - `lovelace_delete_dashboard` — storage-mode deletes; HA removes the stored
+    config too, so no orphan is left. YAML-mode dashboards are refused
+    (file-backed). **Gated** → operator approval.
+  - Gotchas encoded in the tools: all Lovelace commands are admin-only; the
+    update/delete key is `dashboard_id`, while config read/save use `url_path`;
+    YAML-mode dashboards are read-only.
 - **Behind a reverse proxy**: ensure it forwards the `Authorization` header, e.g.
   NPM Advanced config `proxy_set_header Authorization $http_authorization;` —
   otherwise HA returns 401 and the **Test** button will surface it.

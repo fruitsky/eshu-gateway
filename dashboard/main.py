@@ -2470,7 +2470,14 @@ def approve_integration_call(call_id: int, request: Request):
         raise HTTPException(status_code=404, detail="Integration or tool missing")
     payload = call['payload']
     try:
-        if (tool.get('transport') or 'http') == 'ws':
+        if tool.get('handler'):
+            # Curated multi-step handler — same code path as the immediate run,
+            # so a tool behaves identically whether it auto-ran or was approved.
+            from core.tool_handlers import run_handler
+            result = {'status_code': 200,
+                      'body': run_handler(tool['handler'], integration, tool, payload),
+                      'error': None, 'truncated': 0, 'latency_ms': 0}
+        elif (tool.get('transport') or 'http') == 'ws':
             result = execute_ws_call(
                 integration, payload.get('command') or tool.get('path_template'),
                 payload.get('payload'), agent='operator', tool_name=tool['name'])
