@@ -70,16 +70,30 @@ class TestEnrollmentScript:
         assert '"$(id -u)"' in r.text                # root branch present
         assert "command -v sudo" in r.text           # sudo branch present
         assert "requires root or sudo" in r.text     # clear no-root/no-sudo message
-        assert 'sudo bash /tmp/eshu-install.sh' in r.text  # sudo still used when available
+        assert "bash /tmp/eshu-install.sh" in r.text  # sudo still used when available
+        assert "ESHU_ENROLL_TOKEN=" in r.text         # enrollment token forwarded
         assert r.text.index('"$(id -u)"') < r.text.index("command -v sudo")  # root checked first
 
-    def test_script_consumes_token(self, client):
+    def test_serving_script_does_not_consume_token(self, client):
+        # The token is consumed at /api/register (the authoritative enrollment
+        # step), not when the bootstrap is served — so a slow install can finish.
         from db.enrollment import generate_enrollment_token, save_ssh_keys
         save_ssh_keys("eshu-key")
         token = generate_enrollment_token()
         client.get(f"/api/enroll?token={token}")
         r = client.get(f"/api/enroll/token-status?token={token}")
-        assert r.json()["used"] is True
+        assert r.json()["used"] is False
+
+    def test_register_consumes_token(self, client):
+        from db.enrollment import generate_enrollment_token, save_ssh_keys
+        save_ssh_keys("eshu-key")
+        token = generate_enrollment_token()
+        r = client.post("/api/register",
+                        json={"ip": "10.1.1.1", "hostname": "h", "version": "v15.3"},
+                        headers={"X-Enrollment-Token": token})
+        assert r.status_code == 200
+        st = client.get(f"/api/enroll/token-status?token={token}").json()
+        assert st["used"] is True
 
 
 class TestFetchKeysAPI:

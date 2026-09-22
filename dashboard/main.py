@@ -18,8 +18,8 @@ from database import (
     init_db, create_request, update_request_status, 
     update_ticket_consumed_by_ip, get_all_requests, get_pending_request_by_cmd,
     get_request_status, get_request_command, count_denied, get_ticket_by_request_id, delete_old_requests,
-    get_session_requests,
-    register_gateway, get_gateways, update_gateway_last_seen,
+    get_session_requests, get_request_target_ip,
+    register_gateway, get_gateways, get_gateway, update_gateway_last_seen,
     update_gateway_policy_version, update_gateway_policy_sync,
     update_gateway_last_updated, update_gateway_windows_count, update_gateway_heartbeat, deregister_gateway,
     set_trigger_uninstall, check_trigger_uninstall, clear_trigger_uninstall,
@@ -403,9 +403,67 @@ def decode_cmd(encoded: str) -> str:
     except Exception:
         return encoded
 
+
+def _require_gateway(request: Request, target_ip: str = None) -> str:
+    """Authenticate a gateway-facing request.
+
+    Accepts a valid ``X-Gateway-Token`` (which must match ``target_ip`` when
+    given) or an authenticated dashboard session. Returns the resolved gateway
+    IP; raises 401 otherwise. This is the shared gate for the policy/poll/ticket
+    endpoints so they are no longer readable by any host on the LAN."""
+    token_ip, _ = _resolve_gateway_token(request)  # raises 401 on an invalid token
+    if token_ip:
+        if target_ip and token_ip != target_ip:
+            raise HTTPException(status_code=401,
+                                detail="Gateway token does not match target_ip")
+        return token_ip
+    if _check_session_optional(request):
+        return target_ip or ''
+    raise HTTPException(status_code=401,
+                        detail="Authentication required — gateway token or dashboard session")
+
+
+def _require_request_access(request: Request, req_id: int) -> str:
+    """Authenticate access to a single JIT request/ticket. A gateway token grants
+    access only to requests owned by that gateway's IP; a dashboard session
+    grants full access. Raises 401/404 otherwise."""
+    token_ip, _ = _resolve_gateway_token(request)
+    if not token_ip and not _check_session_optional(request):
+        raise HTTPException(status_code=401,
+                            detail="Authentication required — gateway token or dashboard session")
+    if token_ip:
+        owner = get_request_target_ip(req_id)
+        if owner is not None and owner != token_ip:
+            raise HTTPException(status_code=404, detail="Request not found")
+    return token_ip or ''
+
 @app.post("/api/register")
 def register(payload: RegisterPayload, request: Request):
     _check_rate_limit(payload.ip)
+    # ── Authentication ──────────────────────────────────────────────────
+    # /api/register previously returned a valid gateway token to ANY caller for
+    # an arbitrary self-reported IP — a token oracle that also bypassed the
+    # policy endpoints' auth. Now:
+    #   * a registered gateway must present its own X-Gateway-Token (or a
+    #     dashboard session) to re-register; its token is never disclosed to an
+    #     unauthenticated caller;
+    #   * a brand-new IP must present a valid, single-use enrollment token
+    #     (X-Enrollment-Token), which is consumed here.
+    token_ip, _ = _resolve_gateway_token(request)  # raises 401 on an invalid token
+    session_ok = _check_session_optional(request)
+    if token_ip and token_ip != payload.ip:
+        raise HTTPException(status_code=401,
+                            detail="Gateway token does not match self-reported ip")
+    if not token_ip and not session_ok:
+        if get_gateway(payload.ip) is not None:
+            raise HTTPException(status_code=401,
+                                detail="Gateway token required to re-register a known gateway")
+        enroll = request.headers.get("X-Enrollment-Token", "").strip()
+        valid, msg = validate_enrollment_token(enroll) if enroll else (False, "Missing enrollment token")
+        if not valid:
+            raise HTTPException(status_code=401,
+                                detail=f"Enrollment token required for a new gateway: {msg}")
+
     # Detect enrollment vs version update vs heartbeat
     current_gws = {g['ip']: g for g in get_gateways()}
     existing = current_gws.get(payload.ip)
@@ -513,11 +571,7 @@ def receive_heartbeat(payload: HeartbeatPayload, request: Request):
 
 @app.get("/api/poll/{target_ip}")
 def poll_ticket(target_ip: str, request: Request, wc: int = None):
-    # Resolve canonical IP from gateway token (v15+ auth)
-    token_ip, _ = _resolve_gateway_token(request)
-    resolved_ip = token_ip if token_ip else target_ip
-    if token_ip and token_ip != target_ip:
-        raise HTTPException(status_code=401, detail="Gateway token does not match target_ip in URL")
+    resolved_ip = _require_gateway(request, target_ip)
 
     _check_rate_limit(resolved_ip)
     update_gateway_last_seen(resolved_ip)
@@ -538,11 +592,7 @@ def poll_ticket(target_ip: str, request: Request, wc: int = None):
 
 @app.get("/api/policy/{target_ip}")
 def fetch_policy(target_ip: str, request: Request):
-    # Resolve canonical IP from gateway token (v15+ auth)
-    token_ip, _ = _resolve_gateway_token(request)
-    resolved_ip = token_ip if token_ip else target_ip
-    if token_ip and token_ip != target_ip:
-        raise HTTPException(status_code=401, detail="Gateway token does not match target_ip in URL")
+    resolved_ip = _require_gateway(request, target_ip)
 
     update_gateway_last_seen(resolved_ip)
     update_gateway_policy_sync(resolved_ip)
@@ -587,7 +637,8 @@ def fetch_policy(target_ip: str, request: Request):
     return policies
 
 @app.get("/api/request_status/{req_id}")
-def check_request_status(req_id: int):
+def check_request_status(req_id: int, request: Request):
+    _require_request_access(request, req_id)
     status = get_request_status(req_id)
     if status is None:
         raise HTTPException(status_code=404, detail="Request not found")
@@ -597,8 +648,8 @@ def check_request_status(req_id: int):
 def claim_ticket_by_id(req_id: int, request: Request):
     """Direct ticket claim endpoint - gateway fetches approved ticket by request ID.
     Bypasses the per-IP poller pipeline for immediate JIT approval delivery.
-    v15+: Validates gateway token if present."""
-    _resolve_gateway_token(request)  # Optional validation (legacy gateways pass through)
+    Requires a gateway token (bound to the request's IP) or a dashboard session."""
+    _require_request_access(request, req_id)
     ticket = get_ticket_by_request_id(req_id)
     if ticket:
         record_audit_event('jit_consumed', details=f'JIT #{req_id} ticket claimed via /api/ticket')
@@ -1012,7 +1063,8 @@ def preview_policy_impact(payload: PolicyPreviewPayload, request: Request):
     }
 
 @app.get("/api/policy_changes")
-def list_policy_changes():
+def list_policy_changes(request: Request):
+    _check_session(request)
     return get_policy_changes()
 
 @app.post("/api/policies")
@@ -1376,7 +1428,9 @@ def save_enroll_keys(payload: SSHKeysPayload, request: Request):
 @app.post("/api/enroll/generate")
 def generate_token(request: Request):
     _check_session(request)
-    token = generate_enrollment_token()
+    # 30 min: the token is consumed at /api/register (after the install runs), so
+    # it must survive a slow install, not just the initial one-liner fetch.
+    token = generate_enrollment_token(1800)
     return {"token": token}
 
 @app.get("/api/enroll/token-status")
@@ -1394,7 +1448,10 @@ def check_token_status(token: str):
 
 @app.get("/api/enroll")
 def serve_enrollment_script(token: str, request: Request):
-    valid, expires_at = validate_enrollment_token(token)
+    # Peek (don't consume) — the token is consumed at /api/register, the
+    # authoritative enrollment step, so it survives the (potentially slow)
+    # install and is embedded below and forwarded to the installer.
+    valid, _msg = validate_enrollment_token(token, consume=False)
     if not valid:
         return PlainTextResponse(
             content="echo '❌ Invalid or expired enrollment token. Generate a new one in the dashboard.'; exit 1\n",
@@ -1425,6 +1482,7 @@ def serve_enrollment_script(token: str, request: Request):
         "echo ''",
         f"DASHBOARD_URL='{base_url}'",
         f"GATEWAY_KEY='{eshu_key}'",
+        f"ESHU_ENROLL_TOKEN='{token}'",
         f"SCRIPT_URL='{base_url}/static/eshu-gateway-install.sh'",
         "",
         "echo 'Downloading Eshu Gateway installer...'",
@@ -1444,9 +1502,9 @@ def serve_enrollment_script(token: str, request: Request):
         "# shell is root and has no sudo); otherwise elevate via sudo when present;",
         "# otherwise give a clear message instead of 'sudo: command not found'.",
         "if [ \"$(id -u)\" -eq 0 ]; then",
-        "  bash /tmp/eshu-install.sh --reinstall \"$GATEWAY_KEY\" \"$DASHBOARD_URL\"",
+        "  ESHU_ENROLL_TOKEN=\"$ESHU_ENROLL_TOKEN\" bash /tmp/eshu-install.sh --reinstall \"$GATEWAY_KEY\" \"$DASHBOARD_URL\"",
         "elif command -v sudo >/dev/null 2>&1; then",
-        "  sudo bash /tmp/eshu-install.sh --reinstall \"$GATEWAY_KEY\" \"$DASHBOARD_URL\"",
+        "  sudo ESHU_ENROLL_TOKEN=\"$ESHU_ENROLL_TOKEN\" bash /tmp/eshu-install.sh --reinstall \"$GATEWAY_KEY\" \"$DASHBOARD_URL\"",
         "else",
         "  echo ''",
         "  echo '❌ Eshu Gateway requires root or sudo to install — neither is available on this host.'",

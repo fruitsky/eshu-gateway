@@ -384,6 +384,8 @@ if [ "$mode" != "upgrade" ]; then
   echo "Registering Gateway with Dashboard..."
   REGISTER_RESPONSE=$(curl -m 3 -s -X POST "$DASHBOARD_URL/api/register" \
        -H "Content-Type: application/json" \
+       -H "X-Gateway-Token: ${GATEWAY_TOKEN:-}" \
+       -H "X-Enrollment-Token: ${ESHU_ENROLL_TOKEN:-}" \
        -d '{"ip":"'"$TARGET_IP"'","hostname":"'"$HOST_NAME"'","version":"'"$GATEWAY_VERSION"'"}')
   GATEWAY_TOKEN=$(echo "$REGISTER_RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); t=d.get('gateway_token'); print(t if t and t!='None' else '')" 2>/dev/null || echo "")
   if [ -n "$GATEWAY_TOKEN" ]; then
@@ -395,6 +397,8 @@ fi
 if [ "$mode" = "upgrade" ] && [ -n "$DASHBOARD_URL" ]; then
   REGISTER_RESPONSE=$(curl -m 3 -s -X POST "$DASHBOARD_URL/api/register" \
        -H "Content-Type: application/json" \
+       -H "X-Gateway-Token: ${GATEWAY_TOKEN:-}" \
+       -H "X-Enrollment-Token: ${ESHU_ENROLL_TOKEN:-}" \
        -d '{"ip":"'"$TARGET_IP"'","hostname":"'"$HOST_NAME"'","version":"'"$GATEWAY_VERSION"'"}')
   GATEWAY_TOKEN=$(echo "$REGISTER_RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); t=d.get('gateway_token'); print(t if t and t!='None' else '')" 2>/dev/null || echo "")
   if [ -n "$GATEWAY_TOKEN" ]; then
@@ -736,6 +740,8 @@ while true; do
       DASH_VER=$(curl -m 3 -s "$DASHBOARD_URL/api/version" 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('version',''))" 2>/dev/null || echo "")
       REG_RESP=$(curl -m 3 -s -X POST "$DASHBOARD_URL/api/register" \
            -H "Content-Type: application/json" \
+           -H "X-Gateway-Token: ${GATEWAY_TOKEN:-}" \
+           -H "X-Enrollment-Token: ${ESHU_ENROLL_TOKEN:-}" \
            -d '{"ip":"'"$TARGET_IP"'","hostname":"'"$HOST_NAME"'","version":"'"${DASH_VER:-unknown}"'"}' 2>/dev/null || echo "")
       NEW_TOKEN=$(echo "$REG_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('gateway_token',''))" 2>/dev/null || echo "")
       if [ -n "$NEW_TOKEN" ] && [ "$NEW_TOKEN" != "None" ]; then
@@ -879,6 +885,8 @@ with open('/etc/eshu-windows.txt.tmp', 'w') as f:
         NEW_VER=$(curl -m 3 -s "$DASHBOARD_URL/api/version" 2>/dev/null | python3 -c "import sys, json; print(json.load(sys.stdin).get('version','$DASH_VER'))" 2>/dev/null || echo "$DASH_VER")
         REG_RESP=$(curl -m 3 -s -X POST "$DASHBOARD_URL/api/register" \
              -H "Content-Type: application/json" \
+             -H "X-Gateway-Token: ${GATEWAY_TOKEN:-}" \
+             -H "X-Enrollment-Token: ${ESHU_ENROLL_TOKEN:-}" \
              -d '{"ip":"'"$TARGET_IP"'","hostname":"'"$HOST_NAME"'","version":"'"$NEW_VER"'"}' 2>/dev/null || echo "")
         NEW_TOKEN=$(echo "$REG_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('gateway_token',''))" 2>/dev/null || echo "")
         if [ -n "$NEW_TOKEN" ] && [ "$NEW_TOKEN" != "None" ]; then
@@ -927,6 +935,8 @@ with open('/etc/eshu-windows.txt.tmp', 'w') as f:
         NEW_VER=$(curl -m 3 -s "$DASHBOARD_URL/api/version" 2>/dev/null | python3 -c "import sys, json; print(json.load(sys.stdin).get('version','$DASH_VER'))" 2>/dev/null || echo "$DASH_VER")
         REG_RESP=$(curl -m 3 -s -X POST "$DASHBOARD_URL/api/register" \
              -H "Content-Type: application/json" \
+             -H "X-Gateway-Token: ${GATEWAY_TOKEN:-}" \
+             -H "X-Enrollment-Token: ${ESHU_ENROLL_TOKEN:-}" \
              -d '{"ip":"'"$TARGET_IP"'","hostname":"'"$HOST_NAME"'","version":"'"$NEW_VER"'"}' 2>/dev/null || echo "")
         NEW_TOKEN=$(echo "$REG_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('gateway_token',''))" 2>/dev/null || echo "")
         if [ -n "$NEW_TOKEN" ] && [ "$NEW_TOKEN" != "None" ]; then

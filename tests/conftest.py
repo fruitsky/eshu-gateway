@@ -46,14 +46,22 @@ def auth_client(client):
 
 
 @pytest.fixture
-def gateway_headers(client):
-    r = client.post("/api/register", json={
-        "ip": "10.0.0.1",
-        "hostname": "test-gateway",
-        "version": "v15.3"
-    })
-    token = r.json()["gateway_token"]
-    return {"X-Gateway-Token": token}
+def gateway_headers(temp_db):
+    """Seed gateway 10.0.0.1 with a token directly and return its auth header.
+
+    (No longer obtained via an unauthenticated POST /api/register, which now
+    requires either the gateway token or an enrollment token.)"""
+    from db.gateways import register_gateway, set_gateway_token
+    register_gateway("10.0.0.1", "test-gateway", "v15.3")
+    set_gateway_token("10.0.0.1", "testtoken-10-0-0-1")
+    return {"X-Gateway-Token": "testtoken-10-0-0-1"}
+
+
+@pytest.fixture
+def enrollment_token(temp_db):
+    """A valid, single-use enrollment token for /api/register."""
+    from db.enrollment import generate_enrollment_token
+    return generate_enrollment_token()
 
 
 @pytest.fixture

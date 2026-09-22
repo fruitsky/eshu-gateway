@@ -80,6 +80,14 @@ def get_gateways():
         rows = cursor.fetchall()
         return [dict(row) for row in rows]
 
+def get_gateway(ip: str):
+    """Return the gateway row for an IP, or None."""
+    with db_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM gateways WHERE ip = ?', (ip,))
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
 def update_gateway_last_seen(ip: str):
     with db_conn() as conn:
         cursor = conn.cursor()

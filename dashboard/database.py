@@ -17,11 +17,13 @@ from db.requests import (
     delete_old_requests,
     search_requests,
     get_session_requests,
+    get_request_target_ip,
 )
 
 from db.gateways import (
     register_gateway,
     get_gateways,
+    get_gateway,
     update_gateway_last_seen,
     update_gateway_policy_version,
     update_gateway_policy_sync,

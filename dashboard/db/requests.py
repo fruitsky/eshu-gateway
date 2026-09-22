@@ -92,6 +92,13 @@ def get_request_command(req_id: int):
         row = cursor.fetchone()
         return row['command'] if row else None
 
+def get_request_target_ip(req_id: int):
+    with db_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT target_ip FROM requests WHERE id = ?', (req_id,))
+        row = cursor.fetchone()
+        return row['target_ip'] if row else None
+
 def count_denied(command: str):
     with db_conn() as conn:
         cursor = conn.cursor()

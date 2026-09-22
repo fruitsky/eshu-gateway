@@ -69,20 +69,40 @@ class TestJitLifecycle:
             counts.append(auth_client.post(f"/api/deny/{rid}").json()["deny_count"])
         assert counts == [1, 2, 3]
 
-    def test_request_status_no_token(self, client):
+    def test_request_status_requires_auth(self, client):
         from db.requests import create_request
         rid = create_request("10.0.0.1", "uptime")
         r = client.get(f"/api/request_status/{rid}")
+        assert r.status_code == 401
+
+    def test_request_status_with_token(self, client, gateway_headers):
+        from db.requests import create_request
+        rid = create_request("10.0.0.1", "uptime")
+        r = client.get(f"/api/request_status/{rid}", headers=gateway_headers)
         assert r.status_code == 200
         assert r.json()["status"] == "pending"
 
-    def test_ticket_no_token(self, client):
+    def test_ticket_requires_auth(self, client):
         from db.requests import create_request, update_request_status
         rid = create_request("10.0.0.1", "uptime")
         update_request_status(rid, "approved")
         r = client.get(f"/api/ticket/{rid}")
+        assert r.status_code == 401
+
+    def test_ticket_with_token(self, client, gateway_headers):
+        from db.requests import create_request, update_request_status
+        rid = create_request("10.0.0.1", "uptime")
+        update_request_status(rid, "approved")
+        r = client.get(f"/api/ticket/{rid}", headers=gateway_headers)
         assert r.status_code == 200
         assert r.json()["ticket"] is not None
+
+    def test_ticket_bound_to_gateway_ip(self, client, gateway_headers):
+        from db.requests import create_request, update_request_status
+        rid = create_request("10.0.0.2", "uptime")  # owned by a different gateway
+        update_request_status(rid, "approved")
+        r = client.get(f"/api/ticket/{rid}", headers=gateway_headers)  # token is for 10.0.0.1
+        assert r.status_code == 404
 
     def test_request_status_404(self, auth_client, gateway_headers):
         r = auth_client.get("/api/request_status/99999", headers=gateway_headers)
@@ -112,53 +132,40 @@ class TestJitLifecycle:
 
 class TestGatewayRegistration:
 
-    def test_register_returns_token(self, client):
+    def test_new_ip_requires_enrollment_token(self, client):
         r = client.post("/api/register", json={
-            "ip": "10.0.0.5",
-            "hostname": "new-host",
-            "version": "v15.3"
-        })
+            "ip": "10.0.0.5", "hostname": "new-host", "version": "v15.3"})
+        assert r.status_code == 401
+        assert "gateway_token" not in r.json()
+
+    def test_new_ip_with_enrollment_token(self, client, enrollment_token):
+        r = client.post("/api/register", json={
+            "ip": "10.0.0.5", "hostname": "new-host", "version": "v15.3"},
+            headers={"X-Enrollment-Token": enrollment_token})
         assert r.status_code == 200
         token = r.json().get("gateway_token")
-        assert token and len(token) > 0
+        assert token and len(token) >= 32
 
-    def test_register_preserves_token(self, client):
-        r1 = client.post("/api/register", json={
-            "ip": "10.0.0.6",
-            "hostname": "persist-host",
-            "version": "v15.3"
-        })
-        token1 = r1.json()["gateway_token"]
-        r2 = client.post("/api/register", json={
-            "ip": "10.0.0.6",
-            "hostname": "persist-host",
-            "version": "v15.3"
-        })
-        assert r2.json()["gateway_token"] == token1
+    def test_enrollment_token_is_single_use(self, client, enrollment_token):
+        h = {"X-Enrollment-Token": enrollment_token}
+        r1 = client.post("/api/register", json={"ip": "10.0.0.5", "hostname": "h", "version": "v15.3"}, headers=h)
+        assert r1.status_code == 200
+        r2 = client.post("/api/register", json={"ip": "10.0.0.6", "hostname": "h2", "version": "v15.3"}, headers=h)
+        assert r2.status_code == 401
 
-    def test_register_repairs_literal_None_token(self, client):
-        # Regression: a stored literal 'None' token (v15.0 DEFAULT None schema
-        # bug) must be treated as "no token" — register must mint a real one
-        # instead of returning 'None' (which the installer rejects and the
-        # poller self-heal then floods on).
-        from db.gateways import set_gateway_token, get_gateway_token
-        set_gateway_token("10.0.0.9", "None")
+    def test_existing_ip_does_not_leak_token(self, client, gateway_headers):
+        # gateway 10.0.0.1 is seeded; an unauthenticated re-register must 401
+        # and must not disclose its token (the old token-oracle bug).
         r = client.post("/api/register", json={
-            "ip": "10.0.0.9",
-            "hostname": "none-token-host",
-            "version": "v15.3"
-        })
+            "ip": "10.0.0.1", "hostname": "x", "version": "v15.3"})
+        assert r.status_code == 401
+        assert "gateway_token" not in r.json()
+
+    def test_existing_ip_with_gateway_token(self, client, gateway_headers):
+        r = client.post("/api/register", json={
+            "ip": "10.0.0.1", "hostname": "x", "version": "v15.3"}, headers=gateway_headers)
         assert r.status_code == 200
-        token = r.json().get("gateway_token")
-        assert token and token != "None" and len(token) >= 32
-        # And it's persisted, so the next register returns the real token.
-        assert get_gateway_token("10.0.0.9") == token
-        r2 = client.post("/api/register", json={
-            "ip": "10.0.0.9",
-            "hostname": "none-token-host",
-            "version": "v15.3"
-        })
-        assert r2.json()["gateway_token"] == token
+        assert r.json()["gateway_token"] == "testtoken-10-0-0-1"
 
     def test_gateway_list_has_token_field(self, auth_client):
         client = auth_client
@@ -174,6 +181,20 @@ class TestGatewayRegistration:
         target = next(g for g in gws if g["ip"] == "10.0.0.7")
         assert target["has_token"] is True
         assert target["api_token"] == token
+
+    def test_register_repairs_literal_None_token(self, auth_client):
+        # Regression: a stored literal 'None' token (v15.0 DEFAULT None schema
+        # bug) must be treated as "no token" — register must mint a real one
+        # instead of returning 'None'.
+        from db.gateways import set_gateway_token, get_gateway_token, register_gateway
+        register_gateway("10.0.0.9", "none-token-host", "v15.3")
+        set_gateway_token("10.0.0.9", "None")
+        r = auth_client.post("/api/register", json={
+            "ip": "10.0.0.9", "hostname": "none-token-host", "version": "v15.3"})
+        assert r.status_code == 200
+        token = r.json().get("gateway_token")
+        assert token and token != "None" and len(token) >= 32
+        assert get_gateway_token("10.0.0.9") == token
 
     def test_zero_trust_toggle(self, auth_client):
         client = auth_client

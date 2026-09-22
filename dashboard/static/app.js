@@ -4176,7 +4176,7 @@ async function fetchPolicies() {
   renderPolicyChips();
 }
 async function fetchPolicyChanges() {
-  const res = await fetch('/api/policy_changes'); const changes = await res.json();
+  const res = await authFetch('/api/policy_changes'); const changes = await res.json();
   const changesList = document.getElementById('policy-changes-list');
   if (changes.length === 0) { changesList.innerHTML = '<p class="text-muted">No policy changes recorded.</p>'; return; }
   changesList.innerHTML = changes.map(function(c) {

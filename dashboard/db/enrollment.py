@@ -37,7 +37,11 @@ def generate_enrollment_token(ttl_seconds: int = 120):
         conn.commit()
         return token
 
-def validate_enrollment_token(token: str) -> tuple:
+def validate_enrollment_token(token: str, consume: bool = True) -> tuple:
+    """Validate an enrollment token. `consume=True` (default) marks it used so a
+    token is single-use; pass `consume=False` to peek (e.g. when serving the
+    bootstrap, so the token can be consumed at the authoritative step —
+    /api/register — that actually creates the gateway)."""
     with db_conn() as conn:
         cursor = conn.cursor()
         now = int(time.time())
@@ -49,6 +53,7 @@ def validate_enrollment_token(token: str) -> tuple:
             return (False, "Token already used")
         if now > row['expires_at']:
             return (False, "Token expired")
-        cursor.execute('UPDATE enrollment_tokens SET used = 1 WHERE token = ?', (token,))
-        conn.commit()
+        if consume:
+            cursor.execute('UPDATE enrollment_tokens SET used = 1 WHERE token = ?', (token,))
+            conn.commit()
         return (True, "OK")

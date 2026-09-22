@@ -196,11 +196,8 @@ class TestPipelineState:
         assert r.status_code == 200
         assert r.json()["version"] == "v0.1.0"
 
-    def test_version_endpoint_blocked_for_gateway_token(self, client):
-        r = client.post("/api/register", json={
-            "ip": "10.0.0.1", "hostname": "token-host", "version": "v0.1.0"})
-        token = r.json()["gateway_token"]
-        r = client.get("/api/version", headers={"X-Gateway-Token": token})
+    def test_version_endpoint_blocked_for_gateway_token(self, client, gateway_headers):
+        r = client.get("/api/version", headers=gateway_headers)
         assert r.status_code == 401
 
     def test_pipeline_state_needs_seed_when_edge_differs(self, auth_client):
