@@ -55,6 +55,10 @@ def run_tool(integration_name: str, tool_name: str, args: dict, reason: str = ''
     generic = bool(tool.get('generic'))
     mutating = not tool.get('read_only')
     handler = tool.get('handler') or ''
+    # Audit labels: an immediate mutating call ran without operator sign-off
+    # ("auto"); reads and handler dry-runs are not approval-relevant.
+    approval_label = 'auto' if (mutating and not args.get('dry_run')) else ''
+    exec_reason = reason if mutating else ''
 
     def _execute():
         if handler:
@@ -62,7 +66,8 @@ def run_tool(integration_name: str, tool_name: str, args: dict, reason: str = ''
             from core.tool_handlers import run_handler
             return run_handler(handler, integration, tool, args,
                                agent=AGENT_LABEL, session_id=session_id,
-                               execution_id=execution_id)
+                               execution_id=execution_id,
+                               reason=exec_reason, approval=approval_label)
         if transport == 'ws':
             # WS tools (curated registry tools or generic ws tools) run the
             # command from path_template / the command arg.
@@ -70,15 +75,18 @@ def run_tool(integration_name: str, tool_name: str, args: dict, reason: str = ''
             payload = args.get('payload')
             return execute_ws_call(integration, command, payload,
                                    agent=AGENT_LABEL, tool_name=tool_name,
-                                   session_id=session_id, execution_id=execution_id)
+                                   session_id=session_id, execution_id=execution_id,
+                                   reason=exec_reason, approval=approval_label)
         if generic:
             return execute_generic_call(
                 integration, args.get('method'), args.get('path'),
                 args.get('params'), args.get('data'),
                 agent=AGENT_LABEL, tool_name=tool_name, root=bool(args.get('root')),
-                session_id=session_id, execution_id=execution_id)
+                session_id=session_id, execution_id=execution_id,
+                reason=exec_reason, approval=approval_label)
         return execute_integration_call(integration, tool, args, agent=AGENT_LABEL,
-                                        session_id=session_id, execution_id=execution_id)
+                                        session_id=session_id, execution_id=execution_id,
+                                        reason=exec_reason, approval=approval_label)
 
     # Read-only: always execute (auto-run + audit) and shape client-side.
     if not mutating:

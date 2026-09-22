@@ -18,6 +18,7 @@ from database import (
     init_db, create_request, update_request_status, 
     update_ticket_consumed_by_ip, get_all_requests, get_pending_request_by_cmd,
     get_request_status, get_request_command, count_denied, get_ticket_by_request_id, delete_old_requests,
+    get_session_requests,
     register_gateway, get_gateways, update_gateway_last_seen,
     update_gateway_policy_version, update_gateway_policy_sync,
     update_gateway_last_updated, update_gateway_windows_count, update_gateway_heartbeat, deregister_gateway,
@@ -96,7 +97,7 @@ from core.gateway_watch import (
 from core.utils import DASHBOARD_VERSION, decode_cmd, _resolve_gateway_token, _hash_password, _verify_password
 from core.integration_auth import resolve_agent, resolve_agent_optional, extract_agent_token
 from core.secret_scrub import scrub_payload, scrub_string
-from core.integration_proxy import execute_integration_call, execute_generic_call, ProxyError, merge_response_hint, ALLOWED_AUTH_TYPES, PREVIEW_CHARS
+from core.integration_proxy import execute_integration_call, execute_generic_call, ProxyError, merge_response_hint, ALLOWED_AUTH_TYPES, PREVIEW_CHARS, safe_request_summary
 from core.ha_ws import execute_ws_call
 from core.mcp_server import (
     mcp as eshu_mcp,
@@ -2410,10 +2411,23 @@ def seed_integration_endpoint(name: str, request: Request):
 @app.get("/api/integration-calls")
 def list_integration_calls(request: Request, search: str = None, start: int = None,
                            end: int = None, limit: int = 50, offset: int = 0,
-                           session: str = None):
+                           session: str = None, approval: str = None):
     _check_session(request)
     return get_integration_calls(search=search, start=start, end=end,
-                                 limit=limit, offset=offset, session=session)
+                                 limit=limit, offset=offset, session=session,
+                                 approval=approval)
+
+
+@app.get("/api/sessions/{sid}/detail")
+def session_detail_endpoint(sid: str, request: Request):
+    """One-stop detail for a session: SSH commands + proxied API calls, each with
+    the AI's reason, masked request args, response summary, and the approval
+    decision. Backs the session modal."""
+    _check_session(request)
+    sid = (sid or '')[:64]
+    ssh = get_session_requests(sid)
+    mcp = get_integration_calls(session=sid, limit=500)['rows']
+    return {'session_id': sid, 'ssh': ssh, 'mcp': mcp}
 
 
 @app.get("/api/sessions/recent")
@@ -2467,6 +2481,10 @@ def _record_integration_denied(call):
         outcome='denied',
         session_id=(call.get('session_id') or '')[:64],
         execution_id=(call.get('execution_id') or '')[:64],
+        reason=reason,
+        request_summary=safe_request_summary(payload, tool),
+        approval='denied',
+        decided_at=int(time.time()),
     )
 
 
@@ -2482,6 +2500,7 @@ def approve_integration_call(call_id: int, request: Request):
     if not integration or not tool:
         raise HTTPException(status_code=404, detail="Integration or tool missing")
     payload = call['payload']
+    decided_at = int(time.time())
     try:
         if tool.get('handler'):
             # Curated multi-step handler — same code path as the immediate run,
@@ -2492,18 +2511,32 @@ def approve_integration_call(call_id: int, request: Request):
                       'body': run_handler(tool['handler'], integration, tool, payload,
                                           agent='operator',
                                           session_id=call.get('session_id') or '',
-                                          execution_id=call.get('execution_id') or ''),
+                                          execution_id=call.get('execution_id') or '',
+                                          reason=call.get('reason') or '',
+                                          approval='approved', decided_at=decided_at),
                       'error': None, 'truncated': 0, 'latency_ms': 0}
         elif (tool.get('transport') or 'http') == 'ws':
             result = execute_ws_call(
                 integration, payload.get('command') or tool.get('path_template'),
-                payload.get('payload'), agent='operator', tool_name=tool['name'])
+                payload.get('payload'), agent='operator', tool_name=tool['name'],
+                session_id=call.get('session_id') or '',
+                execution_id=call.get('execution_id') or '',
+                reason=call.get('reason') or '', approval='approved',
+                decided_at=decided_at)
         elif tool.get('generic'):
             result = execute_generic_call(integration, payload.get('method'), payload.get('path'),
                                           payload.get('params'), payload.get('data'),
-                                          agent='operator', tool_name=tool['name'])
+                                          agent='operator', tool_name=tool['name'],
+                                          session_id=call.get('session_id') or '',
+                                          execution_id=call.get('execution_id') or '',
+                                          reason=call.get('reason') or '',
+                                          approval='approved', decided_at=decided_at)
         else:
-            result = execute_integration_call(integration, tool, payload, agent='operator')
+            result = execute_integration_call(integration, tool, payload, agent='operator',
+                                              session_id=call.get('session_id') or '',
+                                              execution_id=call.get('execution_id') or '',
+                                              reason=call.get('reason') or '',
+                                              approval='approved', decided_at=decided_at)
     except ProxyError as e:
         result = {'error': e.message, 'status_code': e.status_code}
     if result.get('body') and tool.get('response_hint'):

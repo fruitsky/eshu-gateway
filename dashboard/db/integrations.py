@@ -203,6 +203,17 @@ def init_integrations_tables(cursor):
                 cursor.execute(f"ALTER TABLE {tbl} ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
             except Exception:
                 pass
+    # Richer call audit: the AI's `reason`, a masked request summary, and the
+    # approval decision (so Proxied Calls / the session view can show which
+    # calls needed operator sign-off and what the operator decided).
+    for col, ddl in (('reason', "TEXT NOT NULL DEFAULT ''"),
+                     ('request_summary', "TEXT NOT NULL DEFAULT ''"),
+                     ('approval', "TEXT NOT NULL DEFAULT ''"),
+                     ('decided_at', "INTEGER NOT NULL DEFAULT 0")):
+        try:
+            cursor.execute(f"ALTER TABLE integration_calls ADD COLUMN {col} {ddl}")
+        except Exception:
+            pass
 
 
 # ── Integrations ────────────────────────────────────────────────────────
@@ -501,7 +512,9 @@ def delete_tool(tool_id: int) -> bool:
 def record_integration_call(integration: str, tool: str, agent: str, method: str,
                             path: str, status_code, latency_ms, response_summary: str,
                             response_bytes: int, truncated: int, outcome: str = 'ok',
-                            session_id: str = '', execution_id: str = ''):
+                            session_id: str = '', execution_id: str = '',
+                            reason: str = '', request_summary: str = '',
+                            approval: str = '', decided_at: int = 0):
     with db_conn() as conn:
         cursor = conn.cursor()
         now = int(time.time())
@@ -509,23 +522,25 @@ def record_integration_call(integration: str, tool: str, agent: str, method: str
             INSERT INTO integration_calls
                 (integration, tool, agent, method, path, status_code, latency_ms,
                  response_summary, response_bytes, truncated, outcome, session_id,
-                 execution_id, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 execution_id, reason, request_summary, approval, decided_at, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (integration, tool, agent, method, path, status_code, latency_ms,
               response_summary, response_bytes, truncated, outcome, session_id,
-              execution_id, now))
+              execution_id, reason, request_summary, approval, decided_at or 0, now))
         conn.commit()
         return cursor.lastrowid
 
 
 def get_integration_calls(search: str = None, start: int = None, end: int = None,
-                          limit: int = 50, offset: int = 0, session: str = None):
+                          limit: int = 50, offset: int = 0, session: str = None,
+                          approval: str = None):
     """Paginated, filterable list of proxied calls, newest first.
 
     `search` is a case-insensitive LIKE across the readable columns. `start`/`end`
     are epoch-second bounds (inclusive start, exclusive end) — the frontend
     computes these from the viewer's local-time day boundaries. `session`, when
-    given, narrows to a single exact session_id. Returns
+    given, narrows to a single exact session_id. `approval` narrows to one
+    approval state ('approved'/'denied'/'auto'). Returns
     `{"rows": [...], "total": N}` so the UI can paginate."""
     where = []
     params = []
@@ -534,8 +549,9 @@ def get_integration_calls(search: str = None, start: int = None, end: int = None
         where.append('(integration LIKE ? OR tool LIKE ? OR agent LIKE ?'
                      ' OR method LIKE ? OR path LIKE ? OR outcome LIKE ?'
                      ' OR CAST(status_code AS TEXT) LIKE ?'
-                     ' OR session_id LIKE ? OR execution_id LIKE ?)')
-        params += [needle] * 9
+                     ' OR session_id LIKE ? OR execution_id LIKE ?'
+                     ' OR reason LIKE ? OR approval LIKE ?)')
+        params += [needle] * 11
     if start is not None:
         where.append('created_at >= ?')
         params.append(start)
@@ -545,6 +561,11 @@ def get_integration_calls(search: str = None, start: int = None, end: int = None
     if session:
         where.append('session_id = ?')
         params.append(session)
+    if approval == 'required':
+        where.append("approval IN ('approved', 'denied')")
+    elif approval:
+        where.append('approval = ?')
+        params.append(approval)
     where_sql = ('WHERE ' + ' AND '.join(where)) if where else ''
     with db_conn() as conn:
         cursor = conn.cursor()
@@ -588,7 +609,9 @@ def list_recent_session_summaries(limit: int = 24):
         with db_conn() as conn2:
             cur2 = conn2.cursor()
             cur2.execute(
-                "SELECT session_id, hostname FROM requests WHERE id IN "
+                "SELECT r.session_id, g.hostname FROM requests r "
+                "LEFT JOIN gateways g ON r.target_ip = g.ip "
+                "WHERE r.id IN "
                 "(SELECT MAX(id) FROM requests WHERE session_id IN (" + ph + ") GROUP BY session_id)",
                 ids)
             for r in cur2.fetchall():

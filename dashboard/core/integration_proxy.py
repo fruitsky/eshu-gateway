@@ -14,14 +14,32 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from db.integrations import record_integration_call
-from core.secret_scrub import scrub_body, scrub_string
+from db.integrations import record_integration_call, mask_sensitive_args
+from core.secret_scrub import scrub_body, scrub_string, scrub_payload
 from core.session_auth import session_headers as _session_headers, _sessions
 
 # Reuse the fleet pattern: store up to 1 MB, keep a 2 KB preview for lists.
 MAX_BODY_BYTES = 1048576
 PREVIEW_CHARS = 2000
 DEFAULT_TIMEOUT = 30
+
+# Audit `request_summary` cap — enough to explain a call, small enough that a
+# handler payload (e.g. a whole Lovelace config) can't bloat the audit row.
+REQUEST_SUMMARY_CHARS = 2000
+
+
+def safe_request_summary(payload, tool=None):
+    """Masked, scrubbed, size-capped JSON of a request payload for the audit
+    trail / session view. `redact`-flagged params and secret-named keys are
+    masked; the result is truncated so large payloads stay bounded."""
+    try:
+        masked = mask_sensitive_args(payload, tool) if tool else payload
+        s = json.dumps(scrub_payload(masked), default=str, ensure_ascii=False)
+    except Exception:
+        return ''
+    if len(s) > REQUEST_SUMMARY_CHARS:
+        return s[:REQUEST_SUMMARY_CHARS] + '\u2026[truncated]'
+    return s
 
 # Response-transform tools (e.g. Pulse charts) read the FULL upstream body so
 # the transform can project/downsample before anything large is returned — the
@@ -553,7 +571,9 @@ def _http_roundtrip(integration: dict, url: str, body_bytes, headers: dict, meth
 
 
 def execute_integration_call(integration: dict, tool: dict, args: dict, agent: str = '',
-                             session_id: str = '', execution_id: str = '') -> dict:
+                             session_id: str = '', execution_id: str = '',
+                             reason: str = '', approval: str = '',
+                             decided_at: int = 0) -> dict:
     """Forward a call to the integration and return a JSON-safe result dict.
     Raises ProxyError for policy rejections (SSRF guard, etc.)."""
     if not integration or not integration.get('enabled'):
@@ -642,6 +662,10 @@ def execute_integration_call(integration: dict, tool: dict, args: dict, agent: s
         outcome=outcome,
         session_id=session_id,
         execution_id=execution_id,
+        reason=reason,
+        request_summary=safe_request_summary(args, tool),
+        approval=approval,
+        decided_at=decided_at,
     )
 
     return {
@@ -656,7 +680,8 @@ def execute_integration_call(integration: dict, tool: dict, args: dict, agent: s
 def execute_generic_call(integration: dict, method: str, path: str, params=None,
                          data=None, agent: str = '', tool_name: str = '',
                          session_id: str = '', execution_id: str = '',
-                         root: bool = False) -> dict:
+                         root: bool = False, reason: str = '',
+                         approval: str = '', decided_at: int = 0) -> dict:
     """Call an arbitrary endpoint on the integration — the generic read/write
     floor. method/path come from the agent; `params` becomes the query string,
     `data` the JSON body. `root=True` resolves `path` against the host origin
@@ -751,6 +776,11 @@ def execute_generic_call(integration: dict, method: str, path: str, params=None,
         outcome=outcome,
         session_id=session_id,
         execution_id=execution_id,
+        reason=reason,
+        request_summary=safe_request_summary(
+            {'method': method, 'path': path, 'params': params, 'data': data}),
+        approval=approval,
+        decided_at=decided_at,
     )
 
     return {

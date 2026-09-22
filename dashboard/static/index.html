@@ -274,6 +274,13 @@
             <button onclick="setCallsRange('today')" class="btn btn-xs" id="calls-btn-today">Today</button>
             <button onclick="setCallsRange('yesterday')" class="btn btn-xs" id="calls-btn-yesterday">Yesterday</button>
             <button onclick="setCallsRange('week')" class="btn btn-xs" id="calls-btn-week">Last week</button>
+            <select id="calls-approval" class="text-xs w-40" title="Filter by approval state" onchange="onCallsApproval()">
+              <option value="">All calls</option>
+              <option value="required">Approval required</option>
+              <option value="approved">Approved by operator</option>
+              <option value="denied">Denied by operator</option>
+              <option value="auto">Auto (no approval)</option>
+            </select>
           </div>
           <div class="flex flex-wrap items-center gap-2 mb-2">
             <select id="calls-page-size" class="text-xs w-24" title="Results per page" onchange="onCallsPageSize()">
@@ -289,9 +296,9 @@
           <div class="table-wrap">
             <table>
               <thead><tr>
-                <th>Time</th><th>Integration</th><th>Tool</th><th>Agent</th><th>Method</th><th>Path</th><th>Status</th><th class="text-right">Latency</th><th>Session</th><th>Outcome</th>
+                <th>Time</th><th>Integration</th><th>Tool</th><th>Agent</th><th>Method</th><th>Path</th><th>Status</th><th class="text-right">Latency</th><th>Session</th><th>Approval</th><th>Outcome</th>
               </tr></thead>
-              <tbody id="integration-calls-body"><tr><td colspan="10" class="px-4 py-3 text-muted">Loading...</td></tr></tbody>
+              <tbody id="integration-calls-body"><tr><td colspan="11" class="px-4 py-3 text-muted">Loading...</td></tr></tbody>
             </table>
           </div>
         </div>

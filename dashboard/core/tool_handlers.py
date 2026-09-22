@@ -65,13 +65,16 @@ def _translate(msg: str) -> str:
 
 def _ws(integration, command, payload, name, ctx):
     """Run one WS command carrying the caller's audit context (agent + session
-    grouping) so the inner handler rows are attributed exactly like the
-    REST/`mcp` path."""
+    grouping + reason/approval) so the inner handler rows are attributed exactly
+    like the REST/`mcp` path."""
     ctx = ctx or {}
     return ha_ws_exec(integration, command, payload,
                       agent=ctx.get('agent', ''), tool_name=name,
                       session_id=ctx.get('session_id', ''),
-                      execution_id=ctx.get('execution_id', ''))
+                      execution_id=ctx.get('execution_id', ''),
+                      reason=ctx.get('reason', ''),
+                      approval=ctx.get('approval', ''),
+                      decided_at=ctx.get('decided_at', 0))
 
 
 def _list(integration, tool_name, ctx=None):
@@ -666,14 +669,16 @@ PREFLIGHT = {
 }
 
 
-def _ctx(agent, session_id, execution_id):
+def _ctx(agent, session_id, execution_id, reason='', approval='', decided_at=0):
     return {'agent': agent or '', 'session_id': session_id or '',
-            'execution_id': execution_id or ''}
+            'execution_id': execution_id or '', 'reason': reason or '',
+            'approval': approval or '', 'decided_at': decided_at or 0}
 
 
 def run_handler(name: str, integration: dict, tool: dict, args: dict,
                 agent: str = '', session_id: str = '',
-                execution_id: str = '') -> str:
+                execution_id: str = '', reason: str = '',
+                approval: str = '', decided_at: int = 0) -> str:
     """Run a registered handler and return its JSON string. ProxyError is
     translated to a stable tool error code; anything else surfaces as
     handler_failed."""
@@ -683,7 +688,8 @@ def run_handler(name: str, integration: dict, tool: dict, args: dict,
                            'message': "No handler registered for '%s'" % name,
                            'status_code': 500})
     try:
-        return fn(integration, tool, args or {}, _ctx(agent, session_id, execution_id))
+        return fn(integration, tool, args or {},
+                  _ctx(agent, session_id, execution_id, reason, approval, decided_at))
     except ProxyError as e:
         return _err(_translate(e.message), e.message, e.status_code)
     except Exception as e:  # noqa: BLE001 - never leak a traceback to the model
@@ -692,7 +698,8 @@ def run_handler(name: str, integration: dict, tool: dict, args: dict,
 
 def run_preflight(name: str, integration: dict, tool: dict, args: dict,
                   agent: str = '', session_id: str = '',
-                  execution_id: str = ''):
+                  execution_id: str = '', reason: str = '',
+                  approval: str = '', decided_at: int = 0):
     """Validate a gated handler write without writing. Returns an error JSON
     string when the write cannot succeed, or None when it is viable. Handlers
     without a registered preflight return None (no validation)."""
@@ -700,7 +707,8 @@ def run_preflight(name: str, integration: dict, tool: dict, args: dict,
     if not fn:
         return None
     try:
-        return fn(integration, tool, args or {}, _ctx(agent, session_id, execution_id))
+        return fn(integration, tool, args or {},
+                  _ctx(agent, session_id, execution_id, reason, approval, decided_at))
     except ProxyError as e:
         return _err(_translate(e.message), e.message, e.status_code)
     except Exception as e:  # noqa: BLE001

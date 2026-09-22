@@ -132,3 +132,21 @@ def search_requests(query: str, limit: int = 200):
         ''', (pattern, pattern, pattern, pattern, limit))
         rows = cursor.fetchall()
         return [dict(row) for row in rows]
+
+
+def get_session_requests(session_id: str, limit: int = 500):
+    """All SSH requests for one session (oldest first), with the gateway
+    hostname joined. Excludes the legacy API-surfaced statuses. Backs the
+    session-detail view."""
+    with db_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT r.*, g.hostname
+            FROM requests r
+            LEFT JOIN gateways g ON r.target_ip = g.ip
+            WHERE r.session_id = ?
+              AND r.status NOT IN ('integration-approved', 'integration-denied')
+            ORDER BY r.id ASC LIMIT ?
+        ''', (session_id, limit))
+        rows = cursor.fetchall()
+        return [dict(row) for row in rows]

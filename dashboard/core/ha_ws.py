@@ -18,7 +18,7 @@ import time
 
 import websocket  # websocket-client
 
-from core.integration_proxy import PREVIEW_CHARS, ProxyError
+from core.integration_proxy import PREVIEW_CHARS, ProxyError, safe_request_summary
 from core.secret_scrub import scrub_body, scrub_string
 
 READ_TIMEOUT = 30
@@ -81,7 +81,9 @@ def ha_ws_request(integration: dict, command: str, payload: dict) -> dict:
 
 def execute_ws_call(integration: dict, command: str, payload=None,
                     agent: str = '', tool_name: str = '',
-                    session_id: str = '', execution_id: str = '') -> dict:
+                    session_id: str = '', execution_id: str = '',
+                    reason: str = '', approval: str = '',
+                    decided_at: int = 0) -> dict:
     """Run one HA WS command with audit logging. Returns a result dict shaped
     like the HTTP executors ({status_code, body, truncated, latency_ms, error}),
     so callers (MCP tool runner / approval executor) handle it uniformly."""
@@ -113,6 +115,10 @@ def execute_ws_call(integration: dict, command: str, payload=None,
         outcome=outcome,
         session_id=session_id,
         execution_id=execution_id,
+        reason=reason,
+        request_summary=safe_request_summary({'command': command, 'payload': payload}),
+        approval=approval,
+        decided_at=decided_at,
     )
     return {'status_code': status_code, 'body': body, 'truncated': 0,
             'latency_ms': latency_ms, 'error': error}
@@ -120,7 +126,8 @@ def execute_ws_call(integration: dict, command: str, payload=None,
 
 def ha_ws_exec(integration: dict, command: str, payload=None, agent: str = '',
                tool_name: str = '', session_id: str = '',
-               execution_id: str = ''):
+               execution_id: str = '', reason: str = '', approval: str = '',
+               decided_at: int = 0):
     """Run one HA WS command for a curated multi-step handler and return its
     RAW (un-scrubbed) result.
 
@@ -159,6 +166,10 @@ def ha_ws_exec(integration: dict, command: str, payload=None, agent: str = '',
         outcome=outcome,
         session_id=session_id,
         execution_id=execution_id,
+        reason=reason,
+        request_summary=safe_request_summary({'command': command, 'payload': payload}),
+        approval=approval,
+        decided_at=decided_at,
     )
     if outcome == 'error':
         raise ProxyError(status_code, error)

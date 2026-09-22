@@ -1928,7 +1928,7 @@ async function refreshRecentSessions() {
     var res = await authFetch('/api/sessions/recent?limit=6');
     var d = await res.json();
     summaries = d.sessions || [];
-  } catch (e) { return; }
+  } catch (e) { console.warn('recent sessions fetch failed', e); return; }
   grid = document.getElementById('recent-sessions-grid');
   if (!grid) return;
   var names = _sessionNames || {};
@@ -2020,33 +2020,58 @@ document.addEventListener('click', function(e) {
 
 /* no-op hook kept for call sites that previously wired the grid directly */
 function enableSessionScroll() {}
-function smMcpCard(c) {
-  var ok = c.outcome === 'ok';
-  var when = c.created_at ? new Date(c.created_at * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
-  var head = (c.integration || '') + (c.tool ? ' / ' + c.tool : '');
-  var line = [];
-  if (c.method) line.push(c.method);
-  if (c.path) line.push(c.path);
-  var tail = [];
-  if (c.status_code != null) tail.push(String(c.status_code));
-  if (c.latency_ms != null) tail.push(c.latency_ms + 'ms');
-  tail.push(c.outcome || '—');
-  return '<div class="sm-mcp ' + (ok ? 'ok' : 'bad') + '">' +
-    '<div class="sm-mcp-top"><span class="mcp-dot"></span><b>' + escapeHtml(head) + '</b>' +
-    (c.agent ? '<span class="sm-mcp-ag">' + escapeHtml(c.agent) + '</span>' : '') +
-    (when ? '<span class="sm-mcp-time">' + escapeHtml(when) + '</span>' : '') + '</div>' +
-    (line.length ? '<div class="sm-mcp-meta">' + escapeHtml(line.join(' ')) + '</div>' : '') +
-    '<div class="sm-mcp-res ' + (ok ? 'ok' : 'bad') + '">' + escapeHtml(tail.join(' \u00b7 ')) + '</div>' +
-    (c.reason ? '<div class="sm-mcp-reason">' + escapeHtml(c.reason) + '</div>' : '') +
-  '</div>';
+function smFmtTime(ts) {
+  if (!ts) return '';
+  return new Date(ts * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
-function fetchMcpForSession(sid, cb) {
-  try {
-    fetch('/api/integration-calls?session=' + encodeURIComponent(sid) + '&limit=100')
-      .then(function (r) { return r.json(); })
-      .then(function (d) { cb((d && d.rows) || [], (d && d.total || 0) > ((d && d.rows) || []).length); })
-      .catch(function () { cb([], false); });
-  } catch (e) { cb([], false); }
+
+function smMcpDetailCard(c) {
+  var ok = c.outcome === 'ok';
+  var head = (c.integration || '') + (c.tool ? ' / ' + c.tool : '');
+  var meta = [];
+  if (c.method) meta.push(c.method);
+  if (c.path) meta.push(c.path);
+  if (c.status_code != null) meta.push('status ' + c.status_code);
+  if (c.latency_ms != null) meta.push(c.latency_ms + 'ms');
+  if (c.response_bytes) meta.push(c.response_bytes + 'B' + (c.truncated ? ' (truncated)' : ''));
+  return '<div class="sm-call ' + (ok ? 'ok' : 'bad') + '">' +
+    '<div class="sm-call-top"><span class="mcp-dot"></span><b>' + escapeHtml(head) + '</b>' +
+      '<span class="sm-call-kind mcp">MCP</span>' +
+      (c.agent ? '<span class="sm-mcp-ag">' + escapeHtml(c.agent) + '</span>' : '') +
+      (c.approval ? approvalBadge(c.approval) : '') +
+      '<span class="sm-mcp-time">' + escapeHtml(smFmtTime(c.created_at)) + '</span></div>' +
+    (meta.length ? '<div class="sm-mcp-meta">' + escapeHtml(meta.join(' \u00b7 ')) + '</div>' : '') +
+    (c.execution_id ? '<div class="sm-mcp-meta">exec ' + escapeHtml(c.execution_id) +
+      (c.decided_at ? ' \u00b7 decided ' + escapeHtml(smFmtTime(c.decided_at)) : '') + '</div>' : '') +
+    (c.reason ? '<div class="sm-call-label">Reason</div><div class="sm-call-reason">' + escapeHtml(c.reason) + '</div>' : '') +
+    (c.request_summary ? '<div class="sm-call-label">Request</div><pre class="sm-call-json">' + escapeHtml(c.request_summary) + '</pre>' : '') +
+    (c.response_summary ? '<div class="sm-call-label">Response</div><pre class="sm-call-json">' + escapeHtml(c.response_summary) + '</pre>' : '') +
+    '</div>';
+}
+
+function smSshDetailCard(r) {
+  var stBad = ['blocked', 'denied', 'frozen', 'window-rejected'].indexOf(r.status) >= 0;
+  var isPending = r.status === 'pending' && r.ttl > 0;
+  var host = r.hostname || r.target_ip || '';
+  var meta = [];
+  if (r.target_ip) meta.push(r.target_ip);
+  if (r.status) meta.push(r.status);
+  if (isPending) meta.push(r.ttl + 's ttl');
+  return '<div class="sm-call ssh ' + (stBad ? 'bad' : (isPending ? 'warn' : 'ok')) + '">' +
+    '<div class="sm-call-top"><span class="mcp-dot"></span><b>' + escapeHtml(host || 'Unknown host') + '</b>' +
+      '<span class="sm-call-kind ssh">SSH</span>' +
+      '<span class="sm-mcp-time">' + escapeHtml(smFmtTime(r.created_at)) + '</span></div>' +
+    '<pre class="sm-call-json cmd">' + escapeHtml(r.command || '') + '</pre>' +
+    (r.risk ? '<div class="sm-call-reason">\u26a0 ' + escapeHtml(r.risk) + '</div>' : '') +
+    (r.anomaly ? '<div class="sm-call-reason" style="color:var(--danger)">\u2605 ' + escapeHtml(r.anomaly) + '</div>' : '') +
+    (meta.length ? '<div class="sm-mcp-meta">' + escapeHtml(meta.join(' \u00b7 ')) + '</div>' : '') +
+    (r.execution_id ? '<div class="sm-mcp-meta">exec ' + escapeHtml(r.execution_id) + '</div>' : '') +
+    (r.reason ? '<div class="sm-call-label">Reason</div><div class="sm-call-reason">' + escapeHtml(r.reason) + '</div>' : '') +
+    (isPending ? '<div class="sm-ssh-actions">' +
+        '<button onclick="event.stopPropagation();handleAction(' + r.id + ',\'deny\')" class="btn btn-deny btn-xs">Deny</button>' +
+        '<button onclick="event.stopPropagation();handleAction(' + r.id + ',\'approve\')" class="btn btn-approve btn-xs">Approve</button>' +
+      '</div>' : '') +
+    '</div>';
 }
 
 async function loadSessionNames() {
@@ -2074,7 +2099,7 @@ async function saveSessionNames() {
   } catch(e) {}
 }
 
-function openSessionModal(sid) {
+async function openSessionModal(sid) {
   var modal = document.getElementById('session-modal');
   var nameEl = document.getElementById('sm-name');
   var descEl = document.getElementById('sm-desc');
@@ -2082,91 +2107,57 @@ function openSessionModal(sid) {
   var cmdsEl = document.getElementById('sm-commands');
   if (!modal || !nameEl || !descEl || !metaEl || !cmdsEl) return;
 
-  // Gather all requests for this session
-  var allReqs = (requestsData || []).filter(function(r) {
-    return r.session_id === sid;
-  });
-
   // Load saved name/desc
   var names = _sessionNames || {};
   var meta = names[sid] || {};
-
   nameEl.textContent = meta.name || '';
   descEl.textContent = meta.description || '';
-
-  var host = allReqs[0] ? (allReqs[0].hostname || allReqs[0].target_ip || '') : '';
-  var pending = allReqs.filter(function(r) { return r.status === 'pending' && r.ttl > 0; }).length;
-  var expired = allReqs.filter(function(r) { return r.status === 'pending' && r.ttl <= 0; }).length;
-  var approved = allReqs.filter(function(r) { return r.status === 'approved' || r.status === 'consumed'; }).length;
-  var auto = allReqs.filter(function(r) { return r.status === 'auto-approved'; }).length;
-  var blocked = allReqs.filter(function(r) { return r.status === 'blocked' || r.status === 'denied'; }).length;
-  metaEl.innerHTML = (allReqs.length ? escapeHtml(host) + ' \u00b7 ' : 'MCP session \u00b7 ') + allReqs.length + ' SSH commands' +
-    (pending ? ' \u00b7 <span class="sm-pending">' + pending + ' pending</span>' : '') +
-    (expired ? ' \u00b7 <span class="sm-muted">' + expired + ' expired</span>' : '') +
-    (approved ? ' \u00b7 <span class="sm-approved">' + approved + ' approved</span>' : '') +
-    (auto ? ' \u00b7 <span class="sm-auto">' + auto + ' auto</span>' : '') +
-    (blocked ? ' \u00b7 <span class="sm-blocked">' + blocked + ' blocked</span>' : '');
-
-  // Render all requests as cards — pending first, then by time
-  var sorted = allReqs.slice().sort(function(a, b) {
-    if (a.status === 'pending' && b.status !== 'pending') return -1;
-    if (b.status === 'pending' && a.status !== 'pending') return 1;
-    return (b.created_at || 0) - (a.created_at || 0);
-  });
-
-  cmdsEl.innerHTML = sorted.map(function(r) {
-    var isPending = r.status === 'pending' && r.ttl > 0;
-    var statusLabel = r.status;
-    if (r.status === 'consumed') statusLabel = 'ran';
-    else if (r.status === 'auto-approved') statusLabel = 'auto';
-    else if (r.status === 'window-approved') statusLabel = 'window';
-
-    var stBad = ['blocked', 'denied', 'frozen', 'window-rejected'].indexOf(r.status) >= 0;
-    var resCls = stBad ? 'bad' : (isPending ? 'warn' : 'ok');
-    var human = describeCmd(r.command);
-    var host = r.hostname || r.target_ip || '';
-
-    var riskHtml = '';
-    if (r.risk) riskHtml = '<div class="sm-mcp-reason">' + escapeHtml(r.risk) + '</div>';
-    if (r.anomaly) riskHtml += '<div class="sm-mcp-reason" style="color:var(--danger)">' + escapeHtml(r.anomaly) + '</div>';
-
-    var actionsHtml = '';
-    if (isPending) {
-      actionsHtml = '<div class="sm-ssh-actions">' +
-        '<span class="sm-mcp-res warn">ttl <span class="ttl-countdown" data-ttl="' + r.ttl + '">' + r.ttl + 's</span></span>' +
-        '<button onclick="event.stopPropagation();handleAction(' + r.id + ',\'deny\')" class="btn btn-deny btn-xs">Deny</button>' +
-        '<button onclick="event.stopPropagation();handleAction(' + r.id + ',\'approve\')" class="btn btn-approve btn-xs">Approve</button>' +
-      '</div>';
-    }
-
-    return '<div class="sm-mcp ssh ' + (stBad ? 'bad' : (isPending ? 'warn' : '')) + '">' +
-      '<div class="sm-mcp-top"><span class="mcp-dot"></span><b>' + escapeHtml(host || 'Unknown host') + '</b>' +
-        (human ? '<span class="sm-mcp-ag">' + escapeHtml(human) + '</span>' : '') +
-        '<span class="sm-mcp-time">' + formatTime(r.created_at) + '</span></div>' +
-      '<div class="sm-mcp-cmd">' + escapeHtml(r.command) + '</div>' +
-      riskHtml +
-      '<div class="sm-mcp-res ' + resCls + '">#' + String(r.id).padStart(6, '0') + ' &middot; ' + escapeHtml(statusLabel) + '</div>' +
-      actionsHtml +
-    '</div>';
-  }).join('');
-
-  if (allReqs.length === 0) {
-    cmdsEl.innerHTML = '<div style="font-family:var(--font-mono);font-size:11px;color:var(--muted);line-height:1.7;padding:10px 2px">This session came from <b style="color:var(--accent)">MCP integration calls</b> — they appear under <b style="color:var(--accent)">History &rarr; Proxied Calls</b>. Give it a name here so the conversation stays identifiable.</div>';
-  }
-
-  var mcpSec = document.createElement('div');
-  mcpSec.className = 'sm-mcp-sec';
-  mcpSec.innerHTML = '<div class="sm-sec-label">MCP calls</div><div class="sm-mcp-list"><div class="sm-mcp-none">loading…</div></div>';
-  cmdsEl.appendChild(mcpSec);
-  var mcpList = mcpSec.querySelector('.sm-mcp-list');
-  fetchMcpForSession(sid, function (rows, capped) {
-    if (!document.body.contains(mcpSec)) return;
-    if (!rows.length) { mcpList.innerHTML = '<div class="sm-mcp-none">no MCP calls in this session</div>'; return; }
-    mcpList.innerHTML = rows.map(smMcpCard).join('') + (capped ? '<div class="sm-mcp-none">… older MCP calls not shown (see History &rarr; Proxied Calls)</div>' : '');
-  });
-
+  metaEl.innerHTML = '<span class="sm-muted">loading\u2026</span>';
+  cmdsEl.innerHTML = '<div class="sm-mcp-none">loading session\u2026</div>';
   modal.classList.remove('hidden');
   _activeSessionSid = sid;
+
+  // One-stop detail: SSH commands + proxied API calls (reason, masked args,
+  // response summary, approval decision) in a single request.
+  var detail = { ssh: [], mcp: [] };
+  try {
+    var res = await authFetch('/api/sessions/' + encodeURIComponent(sid) + '/detail');
+    if (res.ok) detail = await res.json();
+  } catch (e) { /* leave empty */ }
+  if (_activeSessionSid !== sid) return;  // a different session was opened meanwhile
+
+  var ssh = detail.ssh || [];
+  var mcp = detail.mcp || [];
+
+  // Enrich SSH rows with the risk/anomaly hints computed client-side for
+  // pending requests (the detail endpoint doesn't recompute them).
+  var reqById = {};
+  (requestsData || []).forEach(function (r) { reqById[r.id] = r; });
+  ssh.forEach(function (r) { var lr = reqById[r.id]; if (lr) { r.risk = lr.risk; r.anomaly = lr.anomaly; } });
+
+  var host = ssh.length ? (ssh[0].hostname || ssh[0].target_ip || '') : '';
+  var pending = ssh.filter(function (r) { return r.status === 'pending' && r.ttl > 0; }).length;
+  var approved = mcp.filter(function (c) { return c.approval === 'approved'; }).length;
+  var denied = mcp.filter(function (c) { return c.approval === 'denied'; }).length;
+  var auto = mcp.filter(function (c) { return c.approval === 'auto'; }).length;
+  var bits = [];
+  if (host) bits.push(escapeHtml(host));
+  bits.push(ssh.length + ' SSH');
+  bits.push(mcp.length + ' MCP');
+  if (pending) bits.push('<span class="sm-pending">' + pending + ' pending</span>');
+  if (approved) bits.push('<span class="sm-approved">' + approved + ' approved</span>');
+  if (denied) bits.push('<span class="sm-blocked">' + denied + ' denied</span>');
+  if (auto) bits.push('<span class="sm-muted">' + auto + ' auto</span>');
+  metaEl.innerHTML = bits.join(' \u00b7 ');
+
+  // Unified, chronological timeline.
+  var items = [];
+  ssh.forEach(function (r) { items.push({ ts: r.created_at || 0, html: smSshDetailCard(r) }); });
+  mcp.forEach(function (c) { items.push({ ts: c.created_at || 0, html: smMcpDetailCard(c) }); });
+  items.sort(function (a, b) { return a.ts - b.ts; });
+  cmdsEl.innerHTML = items.length
+    ? items.map(function (i) { return i.html; }).join('')
+    : '<div class="sm-mcp-none">No activity recorded for this session.</div>';
 
   // Save name/desc on blur (persisted server-side so it survives across browsers)
   nameEl.onblur = function() {
@@ -5733,6 +5724,14 @@ let _callsPageSize = 50;
 let _callsSearch = '';
 let _callsStart = null;
 let _callsEnd = null;
+let _callsApproval = '';
+
+function approvalBadge(a) {
+  if (a === 'approved') return '<span class="approval-badge approved" title="Required operator approval — you approved it">Approved</span>';
+  if (a === 'denied') return '<span class="approval-badge denied" title="Required operator approval — you denied it">Denied</span>';
+  if (a === 'auto') return '<span class="approval-badge auto" title="Mutating call that ran without operator approval">Auto</span>';
+  return '<span class="text-muted">—</span>';
+}
 
 function _localMidnightSec(y, m, d) {
   return Math.floor(new Date(y, m, d).getTime() / 1000);
@@ -5811,6 +5810,13 @@ function onCallsPageSize() {
   fetchIntegrationCalls();
 }
 
+function onCallsApproval() {
+  var sel = document.getElementById('calls-approval');
+  _callsApproval = (sel && sel.value) || '';
+  _callsPage = 1;
+  fetchIntegrationCalls();
+}
+
 function callsPrevPage() { if (_callsPage > 1) { _callsPage--; fetchIntegrationCalls(); } }
 function callsNextPage() { _callsPage++; fetchIntegrationCalls(); }
 
@@ -5822,6 +5828,7 @@ async function fetchIntegrationCalls() {
     if (_callsSearch) params.push('search=' + encodeURIComponent(_callsSearch));
     if (_callsStart != null) params.push('start=' + _callsStart);
     if (_callsEnd != null) params.push('end=' + _callsEnd);
+    if (_callsApproval) params.push('approval=' + encodeURIComponent(_callsApproval));
     params.push('limit=' + _callsPageSize);
     params.push('offset=' + ((_callsPage - 1) * _callsPageSize));
     var url = '/api/integration-calls' + (params.length ? '?' + params.join('&') : '');
@@ -5831,7 +5838,7 @@ async function fetchIntegrationCalls() {
     const calls = data.rows || [];
     const total = data.total || 0;
     if (!calls.length) {
-      el.innerHTML = '<tr><td colspan="10" class="px-4 py-3 text-muted">No calls match.</td></tr>';
+      el.innerHTML = '<tr><td colspan="11" class="px-4 py-3 text-muted">No calls match.</td></tr>';
     } else {
       var names = _sessionNames || {};
       el.innerHTML = calls.map(function(c) {
@@ -5845,13 +5852,14 @@ async function fetchIntegrationCalls() {
         return '<tr>' +
           '<td class="text-muted">' + esc(when) + '</td>' +
           '<td>' + esc(c.integration) + '</td>' +
-          '<td class="text-muted">' + esc(c.tool || '') + '</td>' +
+          '<td class="text-muted" title="' + esc(c.reason || '') + '">' + esc(c.tool || '') + '</td>' +
           '<td class="text-muted">' + esc(c.agent || '') + '</td>' +
           '<td>' + esc(c.method) + '</td>' +
           '<td class="text-muted break-all">' + esc(c.path) + '</td>' +
           '<td class="' + cls + '">' + (c.status_code || '—') + '</td>' +
           '<td class="text-right text-muted">' + (c.latency_ms == null ? '—' : c.latency_ms + 'ms') + '</td>' +
           '<td>' + sCell + '</td>' +
+          '<td>' + approvalBadge(c.approval) + '</td>' +
           '<td class="' + cls + '">' + esc(c.outcome) + '</td>' +
           '</tr>';
       }).join('');

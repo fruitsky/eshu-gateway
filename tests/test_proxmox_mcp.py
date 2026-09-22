@@ -286,8 +286,13 @@ class TestResolvedCallHistory:
                     if x["status"] in ("integration-approved", "integration-denied")]
         # The executed call is in the integration audit log (Proxied Calls).
         calls = get_integration_calls()["rows"]
-        assert any(c["integration"] == "proxmox" and c["tool"] == "start_vm"
-                   and c["outcome"] == "ok" for c in calls)
+        row = next(c for c in calls
+                   if c["integration"] == "proxmox" and c["tool"] == "start_vm")
+        assert row["outcome"] == "ok"
+        assert row["approval"] == "approved"
+        assert row["agent"] == "operator"
+        assert row["decided_at"] > 0
+        assert row["reason"] == "test reason"
 
     def test_deny_records_denied_audit_row_not_ssh_row(self, auth_client):
         from db.requests import get_all_requests
@@ -301,5 +306,6 @@ class TestResolvedCallHistory:
         assert len(denied) == 1
         assert denied[0]["integration"] == "proxmox"
         assert denied[0]["tool"] == "start_vm"
+        assert denied[0]["approval"] == "denied"
         assert "test" in (denied[0]["response_summary"] or "")
 

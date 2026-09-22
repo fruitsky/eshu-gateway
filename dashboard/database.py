@@ -16,6 +16,7 @@ from db.requests import (
     get_ticket_by_request_id,
     delete_old_requests,
     search_requests,
+    get_session_requests,
 )
 
 from db.gateways import (
