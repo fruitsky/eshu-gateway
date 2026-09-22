@@ -261,11 +261,13 @@ class TestProjection:
         assert "full" not in inspect.signature(no_fields).parameters
 
 
-class TestHistorySurface:
-    """Resolved mutating API calls surface as rows in the main dashboard history
-    (the `requests` table), mirroring the fleet-run pattern."""
+class TestResolvedCallHistory:
+    """Resolved mutating API calls live only in the integration audit log
+    (History → Proxied Calls); they are NOT surfaced into the SSH history
+    (`requests`). A denied call never executes, so the deny endpoint records a
+    `denied` audit row itself."""
 
-    def test_approve_surfaces_in_history(self, mock_upstream, auth_client):
+    def test_approve_records_executed_call_not_ssh_row(self, mock_upstream, auth_client):
         from db.requests import get_all_requests
         create_integration("proxmox", mock_upstream["base_url"], "none", "")
         integration = get_integration("proxmox")
@@ -279,18 +281,25 @@ class TestHistorySurface:
                                       {"node": "pve", "vmid": 100}, "test reason")
         r = auth_client.post(f"/api/integration-calls/{call_id}/approve")
         assert r.status_code == 200
-        rows = get_all_requests()
-        match = [x for x in rows if x["status"] == "integration-approved"]
-        assert len(match) == 1
-        assert match[0]["target_ip"] == "proxmox"
-        assert match[0]["command"] == "proxmox.start_vm(node=pve, vmid=100)"
-        assert match[0]["reason"] == "test reason"
+        # No SSH-history row for API calls.
+        assert not [x for x in get_all_requests()
+                    if x["status"] in ("integration-approved", "integration-denied")]
+        # The executed call is in the integration audit log (Proxied Calls).
+        calls = get_integration_calls()["rows"]
+        assert any(c["integration"] == "proxmox" and c["tool"] == "start_vm"
+                   and c["outcome"] == "ok" for c in calls)
 
-    def test_deny_surfaces_in_history(self, auth_client):
+    def test_deny_records_denied_audit_row_not_ssh_row(self, auth_client):
         from db.requests import get_all_requests
         create_integration("proxmox", "http://localhost:1/api2/json", "none", "")
         call_id = create_pending_call("proxmox", "start_vm", {"vmid": 100}, "test")
         r = auth_client.post(f"/api/integration-calls/{call_id}/deny")
         assert r.status_code == 200
-        rows = get_all_requests()
-        assert any(x["status"] == "integration-denied" for x in rows)
+        assert not [x for x in get_all_requests()
+                    if x["status"] in ("integration-approved", "integration-denied")]
+        denied = [c for c in get_integration_calls()["rows"] if c["outcome"] == "denied"]
+        assert len(denied) == 1
+        assert denied[0]["integration"] == "proxmox"
+        assert denied[0]["tool"] == "start_vm"
+        assert "test" in (denied[0]["response_summary"] or "")
+

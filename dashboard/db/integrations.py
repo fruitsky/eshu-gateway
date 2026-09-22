@@ -574,6 +574,7 @@ def list_recent_session_summaries(limit: int = 24):
             "FROM ("
             "  SELECT session_id, created_at, 'req' AS kind FROM requests "
             "   WHERE session_id IS NOT NULL AND session_id NOT IN ('','unknown') "
+            "     AND status NOT IN ('integration-approved','integration-denied') "
             "  UNION ALL "
             "  SELECT session_id, created_at, 'mcp' AS kind FROM integration_calls "
             "   WHERE session_id IS NOT NULL AND session_id NOT IN ('','unknown')"

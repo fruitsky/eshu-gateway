@@ -409,7 +409,7 @@ class TestPulseRedactionAndApprove:
         # real credential.
         assert get_pending_call(call_id)['payload']['password'] == 'sekret'
 
-    def test_approve_executes_and_history_redacted(self, auth_client, pulse_upstream):
+    def test_approve_executes_and_not_in_ssh_history(self, auth_client, pulse_upstream):
         _make_pulse(pulse_upstream, gate_mode='all')
         out = json.loads(run_tool('pulse', 'add_node',
                                   {'host': 'https://192.168.1.9:8006', 'password': 'sekret'},
@@ -420,10 +420,13 @@ class TestPulseRedactionAndApprove:
         req = next(x for x in pulse_upstream['state']['requests']
                    if x['method'] == 'POST' and x['path'] == '/api/config/nodes')
         assert 'sekret' in req['body']  # executed with the real credential
+        # API calls are no longer surfaced into the SSH history tab.
         reqs = auth_client.get('/api/requests').json()
-        row = next(x for x in reqs if 'add_node' in x['command'])
-        assert '[redacted]' in row['command']
-        assert 'sekret' not in row['command']
+        assert not any('add_node' in x['command'] for x in reqs)
+        # The audit row lives under Proxied Calls and never carries the credential.
+        calls = auth_client.get('/api/integration-calls').json()['rows']
+        row = next(x for x in calls if x['tool'] == 'add_node')
+        assert 'sekret' not in json.dumps(row)
 
     def test_seed_creates_full_catalog(self, pulse_upstream):
         _make_pulse(pulse_upstream)

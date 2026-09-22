@@ -2120,10 +2120,8 @@ function openSessionModal(sid) {
     if (r.status === 'consumed') statusLabel = 'ran';
     else if (r.status === 'auto-approved') statusLabel = 'auto';
     else if (r.status === 'window-approved') statusLabel = 'window';
-    else if (r.status === 'integration-approved') statusLabel = 'api executed';
-    else if (r.status === 'integration-denied') statusLabel = 'api denied';
 
-    var stBad = ['blocked', 'denied', 'frozen', 'window-rejected', 'integration-denied'].indexOf(r.status) >= 0;
+    var stBad = ['blocked', 'denied', 'frozen', 'window-rejected'].indexOf(r.status) >= 0;
     var resCls = stBad ? 'bad' : (isPending ? 'warn' : 'ok');
     var human = describeCmd(r.command);
     var host = r.hostname || r.target_ip || '';
@@ -2768,8 +2766,6 @@ function renderTable() {
     else if (req.status === 'window-rejected') badge = '<span class="badge badge-window-rejected" title="' + escapeHtml(req.reason || '') + '">Window Rejected</span>';
     else if (req.status === 'frozen') badge = '<span class="badge badge-blocked" title="Rejected while the fleet was frozen">Blocked</span>';
     else if (req.status === 'fleet-run') badge = '<span class="badge badge-approved" title="Dispatched via Fleet Run">Approved</span>';
-    else if (req.status === 'integration-approved') badge = '<span class="badge badge-approved" title="Executed via the API gateway">API Executed</span>';
-    else if (req.status === 'integration-denied') badge = '<span class="badge badge-denied" title="Denied via the API gateway">API Denied</span>';
     let actions = '<span class="text-muted">—</span>';
     if (req.status === 'pending' && !isExpired) {
       actions = '<button onclick="handleAction(' + req.id + ', \'approve\')" class="btn btn-approve btn-xs mr-1">Approve</button>' +
@@ -2780,8 +2776,6 @@ function renderTable() {
     } else if (req.status === 'fleet-run') {
       actions = '<span class="chip chip-actions chip-fleet-run" title="Executed via Fleet Run — see the Fleet Run tab for per-gateway output.">' +
         'Fleet Run</span>';
-    } else if (req.status === 'integration-approved' || req.status === 'integration-denied') {
-      actions = '<span class="chip chip-actions chip-integration" title="API-gateway call — see Integrations for the full audit.">API</span>';
     } else if (req.reason === 'override') {
       actions = '<span class="chip chip-actions chip-override" title="Auto-approved via Override Mode — every JIT is auto-approved while active">' +
         'Override</span>';
@@ -2809,14 +2803,11 @@ function renderTable() {
     const idDisplay = gap ? ' #' + String(req.id).padStart(6, '0') : '#' + String(req.id).padStart(6, '0');
     const escapedCmd = escapeHtml(req.command);
     const gwPillHtml = gwPill(req.hostname || 'N/A');
-    const isIntegration = req.status === 'integration-approved' || req.status === 'integration-denied';
     const _sid = req.session_id || '';
     const sCell = (_sid && _sid !== 'unknown')
       ? '<button class="c-session" data-sid="' + escapeHtml(_sid) + '" title="Session ' + escapeHtml(_sid) + '">' + escapeHtml(((_sessionNames || {})[_sid] || {}).name || _sid.substring(0, 8)) + '</button>'
       : '<span class="text-muted">—</span>';
-    const gatewayCell = isIntegration
-      ? escapeHtml(req.target_ip)
-      : gwPillHtml + ' ' + escapeHtml(req.hostname || 'N/A') + ' (' + escapeHtml(req.target_ip) + ')';
+    const gatewayCell = gwPillHtml + ' ' + escapeHtml(req.hostname || 'N/A') + ' (' + escapeHtml(req.target_ip) + ')';
     const riskHtml = (req.status === 'pending' && req.risk) ?
       '<span class="flex-shrink-0 risk-flag" title="Risk: ' + escapeHtml(req.risk) + '">!</span>' : '';
     const anomalyHtml = (req.status === 'pending' && req.anomaly) ?
@@ -2841,9 +2832,6 @@ function renderTable() {
           }
           return '<div class="cmd-desc">' + escapeHtml(_desc) + '</div>';
         })() +
-        (isIntegration && req.reason
-          ? '<div class="cmd-desc cmd-reason">' + escapeHtml(req.reason) + '</div>'
-          : '') +
         '</td>' +
       '<td>' + badge + '</td>' +
       '<td>' + sCell + '</td>' +

@@ -63,6 +63,7 @@ def get_all_requests():
             SELECT r.*, g.hostname
             FROM requests r
             LEFT JOIN gateways g ON r.target_ip = g.ip
+            WHERE r.status NOT IN ('integration-approved', 'integration-denied')
             ORDER BY r.id DESC LIMIT 200
         ''')
         rows = cursor.fetchall()
@@ -125,7 +126,8 @@ def search_requests(query: str, limit: int = 200):
             SELECT r.*, g.hostname
             FROM requests r
             LEFT JOIN gateways g ON r.target_ip = g.ip
-            WHERE r.command LIKE ? OR r.target_ip LIKE ? OR r.status LIKE ? OR g.hostname LIKE ?
+            WHERE (r.command LIKE ? OR r.target_ip LIKE ? OR r.status LIKE ? OR g.hostname LIKE ?)
+              AND r.status NOT IN ('integration-approved', 'integration-denied')
             ORDER BY r.id DESC LIMIT ?
         ''', (pattern, pattern, pattern, pattern, limit))
         rows = cursor.fetchall()

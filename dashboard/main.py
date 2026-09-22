@@ -95,8 +95,8 @@ from core.gateway_watch import (
 )
 from core.utils import DASHBOARD_VERSION, decode_cmd, _resolve_gateway_token, _hash_password, _verify_password
 from core.integration_auth import resolve_agent, resolve_agent_optional, extract_agent_token
-from core.secret_scrub import scrub_payload
-from core.integration_proxy import execute_integration_call, execute_generic_call, ProxyError, merge_response_hint, ALLOWED_AUTH_TYPES
+from core.secret_scrub import scrub_payload, scrub_string
+from core.integration_proxy import execute_integration_call, execute_generic_call, ProxyError, merge_response_hint, ALLOWED_AUTH_TYPES, PREVIEW_CHARS
 from core.ha_ws import execute_ws_call
 from core.mcp_server import (
     mcp as eshu_mcp,
@@ -2436,22 +2436,35 @@ def list_pending_integration_calls(request: Request):
     return calls
 
 
-def _surface_integration_call(call, status: str):
-    """Insert a requests row so a resolved mutating API call appears in the main
-    dashboard history (mirrors the fleet-run pattern). `redact`-flagged args
-    (e.g. Pulse node passwords/tokens) are masked so they never reach the
-    history command string."""
-    payload = call['payload'] or {}
-    tool = get_tool(call['integration'], call['tool']) if call.get('integration') and call.get('tool') else None
-    if tool:
-        payload = scrub_payload(mask_sensitive_args(payload, tool))
-    args = ', '.join(f"{k}={v}" for k, v in payload.items())
-    create_request(
-        target_ip=call['integration'],
-        command=f"{call['integration']}.{call['tool']}({args})",
-        status=status,
-        ttl=0,
-        reason=call['reason'],
+def _record_integration_denied(call):
+    """Record a denied mutating API call in the integration audit log so the
+    decision is visible under History → Proxied Calls.
+
+    Denied calls never execute, so no executor writes an audit row for them.
+    Approved/executed calls are already recorded by their executor (with
+    agent='operator'), so only denials need this. The SSH History tab no longer
+    carries API calls — it is SSH-only."""
+    integration_name = call.get('integration') or ''
+    tool_name = call.get('tool') or ''
+    tool = get_tool(integration_name, tool_name) if integration_name and tool_name else None
+    payload = call.get('payload') or {}
+    method = (tool or {}).get('method') or 'POST'
+    if (tool or {}).get('transport') == 'ws':
+        method = 'WS'
+    path = payload.get('command') or (tool or {}).get('path_template') or tool_name
+    reason = scrub_string(call.get('reason') or '')
+    record_integration_call(
+        integration=integration_name,
+        tool=tool_name,
+        agent='operator',
+        method=method,
+        path=path,
+        status_code=0,
+        latency_ms=0,
+        response_summary=('Denied by operator' + (': ' + reason if reason else ''))[:PREVIEW_CHARS],
+        response_bytes=0,
+        truncated=0,
+        outcome='denied',
         session_id=(call.get('session_id') or '')[:64],
         execution_id=(call.get('execution_id') or '')[:64],
     )
@@ -2496,7 +2509,6 @@ def approve_integration_call(call_id: int, request: Request):
     if result.get('body') and tool.get('response_hint'):
         result['body'] = merge_response_hint(tool, result['body'])
     set_pending_call_status(call_id, 'approved', json.dumps(result))
-    _surface_integration_call(call, 'integration-approved')
     record_audit_event("integration_call_approved",
                        details=f"Integration call #{call_id} ({call['integration']}.{call['tool']}) approved and executed")
     return {"status": "ok", "id": call_id}
@@ -2509,7 +2521,7 @@ def deny_integration_call(call_id: int, request: Request):
     if not call or call['status'] != 'pending':
         raise HTTPException(status_code=404, detail="Pending call not found")
     set_pending_call_status(call_id, 'denied', '')
-    _surface_integration_call(call, 'integration-denied')
+    _record_integration_denied(call)
     record_audit_event("integration_call_denied",
                        details=f"Integration call #{call_id} ({call['integration']}.{call['tool']}) denied")
     return {"status": "ok", "id": call_id}
