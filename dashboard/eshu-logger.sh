@@ -3,7 +3,9 @@
 # Reads DASHBOARD_URL from /etc/eshu/dashboard_url.
 # Reports gateway health to the dashboard via POST /api/gateway-heartbeat.
 # Intentionally simple: no sed replacements, no template variables.
-# Survives all gateway/poller script updates.
+# Survives all gateway/poller script updates. The gateway API token is read from
+# the gateway script at runtime (not templated in) so it always tracks the
+# current token without coupling this file to installer substitutions.
 
 set -eo pipefail
 
@@ -20,6 +22,9 @@ INTERVAL=30
 while true; do
     POLLER_OK=0; GATEWAY_OK=0; CAN_REACH=0
 
+    # Read the current gateway API token each cycle (tracks self-heal/updates).
+    GATEWAY_TOKEN=$(grep -oP '^GATEWAY_TOKEN="\K[^"]+' /usr/local/bin/eshu-gateway.sh 2>/dev/null || true)
+
     systemctl is-active --quiet eshu-poller.service 2>/dev/null && POLLER_OK=1
     [ -f /usr/local/bin/eshu-gateway.sh ] && bash -n /usr/local/bin/eshu-gateway.sh >/dev/null 2>&1 && GATEWAY_OK=1
     curl -m 5 -s "$DASHBOARD_URL/api/version" >/dev/null 2>&1 && CAN_REACH=1
@@ -28,6 +33,7 @@ while true; do
 
     curl -m 5 -s -X POST "$DASHBOARD_URL/api/gateway-heartbeat" \
         -H "Content-Type: application/json" \
+        -H "X-Gateway-Token: ${GATEWAY_TOKEN:-}" \
         -d "{\"ip\":\"$TARGET_IP\",\"hostname\":\"$HOST_NAME\",\"poller_ok\":$POLLER_OK,\"gateway_ok\":$GATEWAY_OK,\"can_reach\":$CAN_REACH}" \
         >/dev/null 2>&1 || true
 

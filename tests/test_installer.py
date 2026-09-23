@@ -1,10 +1,9 @@
 """Regression tests for the gateway installer template.
 
 The write_poller/write_gateway `__GATEWAY_TOKEN__` substitution must be scoped to
-the header assignment ONLY. A global (`g`-flag) replace rewrites the poller's
-self-heal placeholder check — `[ "$GATEWAY_TOKEN" = "__GATEWAY_TOKEN__" ]` — into
-`[ = "<real-token>" ]` (always true), which made every gateway re-register with
-the dashboard every poll cycle (the '/api/register' audit flood).
+the header assignment ONLY (the poller/gateway headers each carry exactly one
+placeholder). Token self-heal was removed from the poller — recovery from a lost
+token is now re-enrollment — so nothing else depends on the placeholder.
 """
 import os
 import re
@@ -17,16 +16,37 @@ def _read(path):
         return f.read()
 
 
-def test_poller_self_heal_placeholder_survives_write_poller_sed():
+def test_write_poller_sed_is_scoped_to_header_assignment():
     poller = _read("dashboard/eshu-poller.sh")
     # Apply the exact (fixed) write_poller sed: header assignment line only.
     fixed = re.sub(r'^GATEWAY_TOKEN="__GATEWAY_TOKEN__"',
                    'GATEWAY_TOKEN="tok123"', poller, flags=re.M)
-    # Header replaced with the token...
+    # Header replaced with the token, and the placeholder is fully consumed.
     assert 'GATEWAY_TOKEN="tok123"' in fixed
-    # ...and the self-heal condition's placeholder survives (fires only when empty).
-    assert '[ "$GATEWAY_TOKEN" = "__GATEWAY_TOKEN__" ]' in fixed
-    assert fixed.count("__GATEWAY_TOKEN__") == 1
+    assert "__GATEWAY_TOKEN__" not in fixed
+    # The dead self-heal block is gone (recovery is re-enrollment now).
+    assert "self_heal" not in poller
+    assert 'GATEWAY_TOKEN" = "__GATEWAY_TOKEN__"' not in poller
+
+
+def test_logger_heartbeat_sends_gateway_token():
+    logger = _read("dashboard/eshu-logger.sh")
+    # The heartbeat authenticates with the gateway token, read at runtime from
+    # the gateway script (never templated into the logger).
+    assert "X-Gateway-Token" in logger
+    assert "eshu-gateway.sh" in logger
+    assert "__GATEWAY_TOKEN__" not in logger
+
+
+def test_uninstall_report_sends_gateway_token():
+    template = _read("dashboard/eshu-installer-template.sh")
+    # Token is read from the existing gateway script before it is removed.
+    assert "grep -oP '^GATEWAY_TOKEN=\"\\K[^\"]+'" in template
+    # The uninstall _report() authenticates its progress posts.
+    m = re.search(r'# Helper: report progress to dashboard\n\s*_report\(\) \{(.*?)\n  \}',
+                  template, re.S)
+    assert m, "uninstall _report() not found"
+    assert "X-Gateway-Token" in m.group(1)
 
 
 def test_template_has_no_global_token_sed():

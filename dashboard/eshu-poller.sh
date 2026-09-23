@@ -18,30 +18,6 @@ if [ -f /var/run/eshu.tickets ]; then
 fi
 
 while true; do
-  # Self-heal: if token is missing, register with dashboard to obtain one.
-  # Cooldown-gated (60s) instead of once-per-boot: a gateway whose token went
-  # missing (e.g. re-enrolled on an un-rebooted host) can always recover.
-  if { [ -z "$GATEWAY_TOKEN" ] || [ "$GATEWAY_TOKEN" = "__GATEWAY_TOKEN__" ]; }; then
-    NEXT_HEAL=$(cat /var/run/eshu.self_heal_ts 2>/dev/null || echo "0")
-    if [ ! -f /var/run/eshu.self_heal_done ] || [ "${NEXT_HEAL:-0}" -lt "$(date +%s)" ]; then
-      DASH_VER=$(curl -m 3 -s "$DASHBOARD_URL/api/version" 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('version',''))" 2>/dev/null || echo "")
-      REG_RESP=$(curl -m 3 -s -X POST "$DASHBOARD_URL/api/register" \
-           -H "Content-Type: application/json" \
-           -H "X-Gateway-Token: ${GATEWAY_TOKEN:-}" \
-           -H "X-Enrollment-Token: ${ESHU_ENROLL_TOKEN:-}" \
-           -d '{"ip":"'"$TARGET_IP"'","hostname":"'"$HOST_NAME"'","version":"'"${DASH_VER:-unknown}"'"}' 2>/dev/null || echo "")
-      NEW_TOKEN=$(echo "$REG_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('gateway_token',''))" 2>/dev/null || echo "")
-      if [ -n "$NEW_TOKEN" ] && [ "$NEW_TOKEN" != "None" ]; then
-        sed -i "s|^GATEWAY_TOKEN=.*|GATEWAY_TOKEN=\"$NEW_TOKEN\"|" /usr/local/bin/eshu-poller.sh
-        sed -i "s|^GATEWAY_TOKEN=.*|GATEWAY_TOKEN=\"$NEW_TOKEN\"|" /usr/local/bin/eshu-gateway.sh
-        GATEWAY_TOKEN="$NEW_TOKEN"
-        touch /var/run/eshu.self_heal_done
-        echo "$(( $(date +%s) + 60 ))" > /var/run/eshu.self_heal_ts
-        logger -t eshu-poller "Self-healed: obtained new GATEWAY_TOKEN from dashboard"
-      fi
-    fi
-  fi
-
   # Clean expired lockbox tickets (older than 90s)
   if [ -f /var/run/eshu.tickets ] && [ -s /var/run/eshu.tickets ]; then
     NOW=$(date +%s)

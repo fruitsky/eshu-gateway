@@ -67,6 +67,9 @@ if [ "$UNINSTALL" = "yes" ]; then
   if [ -z "$DASHBOARD_URL" ] && [ -f /usr/local/bin/eshu-gateway.sh ]; then
     DASHBOARD_URL=$(grep -oP 'DASHBOARD_URL="\K[^"]+' /usr/local/bin/eshu-gateway.sh 2>/dev/null || true)
   fi
+  # Extract the gateway API token so the uninstall progress reports authenticate.
+  # The gateway script is removed later in this branch, so read it now.
+  GATEWAY_TOKEN=$(grep -oP '^GATEWAY_TOKEN="\K[^"]+' /usr/local/bin/eshu-gateway.sh 2>/dev/null || true)
   TARGET_IP=$(hostname -I | awk '{print $1}')
   
   echo "🗑 Eshu Gateway Uninstaller"
@@ -98,6 +101,7 @@ if [ "$UNINSTALL" = "yes" ]; then
     if [ -n "$DASHBOARD_URL" ]; then
       curl -m 3 -s -X POST "$DASHBOARD_URL/api/uninstall-progress" \
         -H "Content-Type: application/json" \
+        -H "X-Gateway-Token: ${GATEWAY_TOKEN:-}" \
         -d "{\"ip\":\"$TARGET_IP\",\"step\":\"$step\",\"message\":\"$message\"}" >/dev/null 2>&1 || true
     fi
   }
@@ -346,13 +350,6 @@ fi
 
 if [ "$mode" != "upgrade" ] && [ "$user_exists" = "no" ]; then useradd -m -s /bin/bash "$USER"; fi
 
-# Fresh install/reinstall: clear stale token self-heal guards so a gateway on a
-# long-lived host (un-rebooted since a previous install) can self-heal a missing
-# token instead of being permanently stuck (marker is once-per-boot in /var/run).
-if [ "$mode" != "upgrade" ]; then
-  rm -f /var/run/eshu.self_heal_done /var/run/eshu.self_heal_ts
-fi
-
 TARGET_IP=$(hostname -I | awk '{print $1}')
 HOST_NAME=$(hostname)
 
@@ -427,10 +424,8 @@ GWEOF
   sed -i "s|__TARGET_IP__|$TARGET_IP|g" "$GATEWAY"
   sed -i "s|__DASHBOARD_URL__|$DASHBOARD_URL|g" "$GATEWAY"
   sed -i "s|__GATEWAY_VERSION__|$GATEWAY_VERSION|g" "$GATEWAY"
-  # Scope the token replacement to the header assignment ONLY — a global replace
-  # would also rewrite the self-heal placeholder check `[ "$GATEWAY_TOKEN" =
-  # "__GATEWAY_TOKEN__" ]` into `[ = "<real-token>" ]` (always true), making every
-  # gateway re-register every poll cycle.
+  # Scope the token replacement to the header assignment ONLY — an unanchored or
+  # global replace could corrupt other lines that reference GATEWAY_TOKEN.
   sed -i "s|^GATEWAY_TOKEN=\"__GATEWAY_TOKEN__\"|GATEWAY_TOKEN=\"${GATEWAY_TOKEN:-}\"|" "$GATEWAY"
 
   # Validate syntax before deploying — prevent broken templates from reaching gateways
@@ -462,10 +457,8 @@ POLLEREOF
   sed -i "s|__DASHBOARD_URL__|$DASHBOARD_URL|g" "$POLLER_SCRIPT"
   sed -i "s|__TARGET_IP__|$TARGET_IP|g" "$POLLER_SCRIPT"
   sed -i "s|__HOST_NAME__|$HOST_NAME|g" "$POLLER_SCRIPT"
-  # Scope the token replacement to the header assignment ONLY — a global replace
-  # would also rewrite the self-heal placeholder check `[ "$GATEWAY_TOKEN" =
-  # "__GATEWAY_TOKEN__" ]` into `[ = "<real-token>" ]` (always true), making every
-  # gateway re-register every poll cycle.
+  # Scope the token replacement to the header assignment ONLY — an unanchored or
+  # global replace could corrupt other lines that reference GATEWAY_TOKEN.
   sed -i "s|^GATEWAY_TOKEN=\"__GATEWAY_TOKEN__\"|GATEWAY_TOKEN=\"${GATEWAY_TOKEN:-}\"|" "$POLLER_SCRIPT"
   chmod 700 "$POLLER_SCRIPT"
 
