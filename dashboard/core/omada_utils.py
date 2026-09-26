@@ -476,6 +476,97 @@ def _has(needle: str, *values) -> bool:
     return needle in hay
 
 
+def _truncated(returned: int, total_matched: int, collection_rows, filtered: bool) -> bool:
+    """True when the response omits rows the query could have returned.
+
+    `truncated` means response truncation (paging / limit), not "a filter was
+    applied": a filtered call that returns every match is NOT truncated. When a
+    filter/search is active the query's universe is `total_matched`; with no
+    filter it is the whole collection (so a short server page still reads as
+    incomplete)."""
+    if filtered:
+        return returned < total_matched
+    return returned < (collection_rows if collection_rows is not None else total_matched)
+
+
+def _result_or_raw(body):
+    """Unwrap an Omada `{errorCode, msg, result}` envelope to its `result`, or
+    return the value unchanged when it isn't an envelope."""
+    if isinstance(body, dict) and 'result' in body:
+        return body['result']
+    return body
+
+
+def _extras_error(body):
+    """Readable message for a logical error inside a 200-body extras response,
+    else None. Keeps the raw envelope from leaking into `extras`."""
+    if isinstance(body, dict):
+        code = body.get('errorCode')
+        if code not in (None, 0, '0'):
+            return 'Omada error %s: %s' % (code, body.get('msg') or '')
+    return None
+
+
+# Omada returns -1505 ("no permission") for both a nonexistent siteId and a
+# site the API account can't access. Classify it against the account's own site
+# list so an unknown id doesn't read as a permissions problem. Cached briefly,
+# keyed by base URL, because the check costs one upstream call.
+_SITE_ID_RE = re.compile(r'/sites/([^/?]+)')
+_site_cache = {}
+
+
+def _known_site_ids(integration):
+    base = (integration.get('base_url') or '').rstrip('/')
+    now = time.time()
+    hit = _site_cache.get(base)
+    if hit and now - hit[0] < 60:
+        return hit[1]
+    try:
+        body = _fetch_json(integration, '/sites', {'page': 1, 'pageSize': 200})
+        rows, _ = _result_grid(body)
+        ids = {s.get('siteId') or s.get('id') for s in (rows or [])
+               if isinstance(s, dict)}
+        ids.discard(None)
+    except Exception:
+        return None
+    _site_cache[base] = (now, ids)
+    return ids
+
+
+def classify_omada_error(integration, path: str, body):
+    """Classify an Omada -1505 error into a typed error dict:
+    `unknown_site` (id not visible to this account) vs `permission_denied`
+    (id exists but the resource is not permitted). Returns None for anything
+    that isn't -1505. The distinction is best-effort: `list_sites` only shows
+    accessible sites, so "absent" means unknown *or* inaccessible."""
+    if not isinstance(body, (str, bytes, dict)):
+        return None
+    try:
+        data = json.loads(body) if isinstance(body, (str, bytes)) else body
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(data, dict) or data.get('errorCode') != -1505:
+        return None
+    m = _SITE_ID_RE.search(path or '')
+    site_id = m.group(1) if m else ''
+    upstream = 'Omada error -1505' + (': ' + str(data['msg']) if data.get('msg') else '')
+    ids = _known_site_ids(integration)
+    if ids is None:
+        return {'code': 'unknown_site',
+                'message': 'siteId %r could not be resolved (site list unavailable); '
+                           'verify it with list_sites.' % site_id,
+                'upstream': upstream}
+    if site_id and site_id not in ids:
+        return {'code': 'unknown_site',
+                'message': 'no site with id %r is visible to this account; '
+                           'verify it with list_sites.' % site_id,
+                'upstream': upstream}
+    return {'code': 'permission_denied',
+            'message': 'site %r exists but this account lacks permission for the '
+                       'requested resource.' % site_id,
+            'upstream': upstream}
+
+
 # ── T1: known clients (all, including offline) ──────────────────────────
 
 _KNOWN_CLIENT_FIELDS = (
@@ -532,8 +623,10 @@ def list_known_clients(integration, site_id: str, search: str = '',
     for c in _paginate(matched, page, page_size):
         out.append({k: c.get(k) for k in _KNOWN_CLIENT_FIELDS
                     if c.get(k) is not None})
-    return {'totalRows': total, 'matched': len(matched),
-            'returned': len(out), 'truncated': len(out) < total,
+    filtered = bool(needle) or active is not None or wireless is not None
+    return {'collectionRows': total, 'totalMatched': len(matched),
+            'returned': len(out),
+            'truncated': _truncated(len(out), len(matched), total, filtered),
             'rows': out}
 
 
@@ -555,8 +648,8 @@ def list_networks(integration, site_id: str):
             'domain': n.get('domain'), 'primary': n.get('primary'),
         }.items() if v is not None})
     total = total if total is not None else len(out)
-    return {'totalRows': total, 'returned': len(out),
-            'truncated': len(out) < total, 'rows': out}
+    return {'collectionRows': total, 'totalMatched': len(out),
+            'returned': len(out), 'truncated': False, 'rows': out}
 
 
 # ── T3: ACLs (both layers, evaluation order, resolved names) ────────────
@@ -642,7 +735,8 @@ def list_acls(integration, site_id: str, layer: str = 'both'):
                 {k: v for k, v in r.items() if k != 'index'}) for r in rows},
             'hash': _canonical_hash([(r.get('index'), r.get('id')) for r in rows]),
         }
-    return {'totalRows': count, 'returned': count, 'truncated': False,
+    return {'collectionRows': count, 'totalMatched': count,
+            'returned': count, 'truncated': False,
             'layers': layers, 'normalized': normalized}
 
 
@@ -674,8 +768,10 @@ def list_dhcp_reservations(integration, site_id: str, search: str = '',
             'exportToIpMacBinding': u.get('exportToIpMacBinding'),
         }.items() if v is not None})
     total = total if total is not None else len(rows)
-    return {'totalRows': total, 'matched': len(matched),
-            'returned': len(out), 'truncated': len(out) < total,
+    filtered = bool(needle)
+    return {'collectionRows': total, 'totalMatched': len(matched),
+            'returned': len(out),
+            'truncated': _truncated(len(out), len(matched), total, filtered),
             'rows': out}
 
 
@@ -707,11 +803,21 @@ def get_device(integration, site_id: str, device_mac: str, full: bool = False):
         extras = {}
         try:
             if dtype == 'ap':
-                extras['radios'] = _fetch_json(
+                raw = _fetch_json(
                     integration, f"/sites/{site_id}/aps/{dev.get('mac')}/radios")
+                err = _extras_error(raw)
+                if err:
+                    extras['error'] = err
+                else:
+                    extras['radios'] = _result_or_raw(raw)
             elif dtype == 'gateway':
-                extras['wanStatus'] = _fetch_json(
+                raw = _fetch_json(
                     integration, f"/sites/{site_id}/gateways/{dev.get('mac')}/wan-status")
+                err = _extras_error(raw)
+                if err:
+                    extras['error'] = err
+                else:
+                    extras['wanStatus'] = _result_or_raw(raw)
         except Exception as e:  # extras are best-effort — never fail the read
             extras['error'] = '%s: %s' % (type(e).__name__, e)
         row['extras'] = extras
@@ -760,12 +866,14 @@ def list_client_events(integration, site_id: str, client_mac: str = '',
                     'clientMac': m.group(1) if m else None,
                     'content': e.get('content')})
     total = total if total is not None else scanned
-    return {'totalRows': total, 'scanned': scanned, 'matched': matched,
-            'returned': len(out),
-            'truncated': bool(scanned < total or len(out) < matched),
+    filtered = bool(want)
+    return {'collectionRows': total, 'scanned': scanned,
+            'totalMatched': matched, 'returned': len(out),
+            'truncated': _truncated(len(out), matched, total, filtered),
+            'scanCapped': scanned < total,
             'window': {'timeStart': time_start, 'timeEnd': time_end},
             'retention_note': ('Omada event logs are window-limited; if no '
                                'events match, widen timeStart/timeEnd. The scan '
                                'is capped at %d events — narrow the window if '
-                               'scanned < totalRows.' % max_events),
+                               'scanCapped is true.' % max_events),
             'rows': out}

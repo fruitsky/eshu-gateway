@@ -71,7 +71,7 @@ OMADA_SEED_TOOLS = [
     },
     {
         "name": "list_site_clients",
-        "description": "List the connected clients on a site (MAC, name, vendor, IP, signal, WiFi SSID/AP). Use searchKey for a server-side keyword match (MAC/name/vendor), search to filter by client name substring, and limit to bound the result. Use this to discover clientMac values. (v1 clients list is broken on v6.2 — this uses the v2 POST endpoint.)",
+        "description": "List the currently-connected clients on a site (MAC, name, vendor, IP, signal, WiFi SSID/AP). Returns only associated clients — for ALL clients including offline/blocked use list_known_clients, which enumerates the full known set (this tool is how a disconnected device gets missed). Use searchKey for a server-side keyword match (MAC/name/vendor), search to filter by client name substring, and limit to bound the result. Rows carry collectionRows/totalMatched/returned/truncated. (v1 clients list is broken on v6.2 — this uses the v2 POST endpoint.)",
         "method": "POST",
         "version": "v2",
         "path_template": "/sites/{siteId}/clients",
@@ -83,7 +83,8 @@ OMADA_SEED_TOOLS = [
         ],
         "fields": ["id", "mac", "name", "hostName", "vendor", "deviceType", "ip", "ssid", "signalLevel", "wifiMode", "apName", "healthScore", "trafficDown", "trafficUp", "activity"],
         "search_field": "name",
-        "example": '[{"id": "abc123", "mac": "AA:BB:CC:DD:EE:FF", "name": "Phone", "vendor": "Apple", "deviceType": 1, "ip": "192.168.1.100", "ssid": "Home-5G", "signalLevel": -55}]',
+        "totals": True,
+        "example": '{"collectionRows": 92, "totalMatched": 35, "returned": 35, "truncated": false, "rows": [{"id": "abc123", "mac": "AA:BB:CC:DD:EE:FF", "name": "Phone", "vendor": "Apple", "deviceType": 1, "ip": "192.168.1.100", "ssid": "Home-5G", "signalLevel": -55}]}',
         "read_only": True,
     },
     {
@@ -101,7 +102,7 @@ OMADA_SEED_TOOLS = [
     },
     {
         "name": "list_known_clients",
-        "description": "List ALL clients the controller knows — online AND offline/blocked (v2 client query with scope=0), with presence facts (active, lastSeen) and address facts (ip, VLAN/network). Use this instead of list_site_clients when a device may be disconnected: the associated-clients list cannot enumerate offline clients. search matches name, hostName, MAC, vendor and device type (case-insensitive); active/wireless narrow to online/offline and WiFi/wired. Rows are sorted active first, then lastSeen desc, and carry totalRows/returned/truncated so a filtered or paged view is never mistaken for the whole set. Fixed-address flag (useFixedAddr) lives in get_client and list_dhcp_reservations. Read-only (un-gated).",
+        "description": "List ALL clients the controller knows — online AND offline/blocked (v2 client query with scope=0), with presence facts (active, lastSeen) and address facts (ip, VLAN/network). Use this instead of list_site_clients when a device may be disconnected: the associated-clients list cannot enumerate offline clients. search matches name, hostName, MAC, vendor and device type (case-insensitive); active/wireless narrow to online/offline and WiFi/wired. Rows are sorted active first, then lastSeen desc. The envelope reports collectionRows (the full known set), totalMatched (rows matching search/active/wireless) and truncated — which is true only when the response itself was cut short (paging/limit), never merely because a filter was applied. Fixed-address flag (useFixedAddr) lives in get_client and list_dhcp_reservations. Read-only (un-gated).",
         "method": "POST",
         "version": "v2",
         "path_template": "/sites/{siteId}/clients",
@@ -115,19 +116,19 @@ OMADA_SEED_TOOLS = [
             {"name": "scope", "type": "integer", "description": "Client scope passed to the API. Leave at the default 0 (all: online + offline + blocked).", "required": False, "default": 0},
         ],
         "transform": "omada_list_known_clients",
-        "example": '{"totalRows": 92, "matched": 92, "returned": 2, "truncated": true, "rows": [{"mac": "6E-39-40-84-35-5F", "name": "Ellen\'s iPad", "active": false, "lastSeen": 1771768986768, "ip": "192.168.20.3", "wireless": true, "ssid": "torquoise", "apName": "House-AP-EAP225 v5"}]}',
+        "example": '{"collectionRows": 92, "totalMatched": 2, "returned": 2, "truncated": false, "rows": [{"mac": "6E-39-40-84-35-5F", "name": "Ellen\'s iPad", "active": false, "lastSeen": 1771768986768, "ip": "192.168.20.3", "wireless": true, "ssid": "torquoise", "apName": "House-AP-EAP225 v5"}]}',
         "read_only": True,
     },
     {
         "name": "list_networks",
-        "description": "List the site's LAN networks, resolving network id ↔ name ↔ VLAN id ↔ subnet/gateway (plus DHCP enable, gateway and domain). Use this to name the network behind a client's netId or IP — e.g. which network owns 192.168.20.0/24 and its VLAN. Returns totalRows/returned/truncated. Read-only (un-gated).",
+        "description": "List the site's LAN networks, resolving network id ↔ name ↔ VLAN id ↔ subnet/gateway (plus DHCP enable, gateway and domain). Use this to name the network behind a client's netId or IP — e.g. which network owns 192.168.20.0/24 and its VLAN. Returns collectionRows/totalMatched/returned/truncated. Read-only (un-gated).",
         "method": "GET",
         "path_template": "/sites/{siteId}/lan-networks",
         "params": [
             {"name": "siteId", "type": "string", "description": "Site id (from list_sites).", "required": True},
         ],
         "transform": "omada_list_networks",
-        "example": '{"totalRows": 7, "returned": 7, "truncated": false, "rows": [{"id": "64285b28c2a55c6ded3026a4", "name": "20-Guest_VLAN", "vid": 20, "subnet": "192.168.20.254/24", "purpose": 1, "dhcpEnabled": true, "gateway": "192.168.20.254"}]}',
+        "example": '{"collectionRows": 7, "totalMatched": 7, "returned": 7, "truncated": false, "rows": [{"id": "64285b28c2a55c6ded3026a4", "name": "20-Guest_VLAN", "vid": 20, "subnet": "192.168.20.254/24", "purpose": 1, "dhcpEnabled": true, "gateway": "192.168.20.254"}]}',
         "read_only": True,
     },
     {
@@ -140,12 +141,12 @@ OMADA_SEED_TOOLS = [
             {"name": "layer", "type": "string", "description": "gateway, switch or both (default both).", "required": False, "local": True},
         ],
         "transform": "omada_list_acls",
-        "example": '{"totalRows": 45, "returned": 45, "truncated": false, "layers": {"gateway": [{"index": 1, "id": "6a86cc3477bfbd044e5f5db8", "name": "Allow_Kindle2Main", "action": "allow", "srcType": "ip-group", "src": ["Kindle"], "dstType": "network", "dst": ["1-Main_LAN(Default)"], "protocols": [6, 17]}]}, "normalized": {"gateway": {"order": ["6a86cc3477bfbd044e5f5db8"], "hash": "…"}}}',
+        "example": '{"collectionRows": 45, "totalMatched": 45, "returned": 45, "truncated": false, "layers": {"gateway": [{"index": 1, "id": "6a86cc3477bfbd044e5f5db8", "name": "Allow_Kindle2Main", "action": "allow", "srcType": "ip-group", "src": ["Kindle"], "dstType": "network", "dst": ["1-Main_LAN(Default)"], "protocols": [6, 17]}]}, "normalized": {"gateway": {"order": ["6a86cc3477bfbd044e5f5db8"], "hash": "…"}}}',
         "read_only": True,
     },
     {
         "name": "list_dhcp_reservations",
-        "description": "List the controller's DHCP user/binding table: MAC ↔ IP ↔ network ↔ name, including offline fixed-address entries (this is where a fixed-address client such as DESKTOP-FOCJDJ4 → 192.168.20.1 lives). search matches MAC, IP, name and network name — so an IP or MAC lookup works, not only hostname. Rows carry type (0=infrastructure AP/switch, 1=client), showingType, server and netName. Returns totalRows/returned/truncated. Read-only (un-gated).",
+        "description": "List the controller's DHCP user/binding table: MAC ↔ IP ↔ network ↔ name, including offline fixed-address entries (this is where a fixed-address client such as DESKTOP-FOCJDJ4 → 192.168.20.1 lives). search matches MAC, IP, name and network name — so an IP or MAC lookup works, not only hostname. Rows carry type (0=infrastructure AP/switch, 1=client), showingType, server and netName. Returns collectionRows/totalMatched/returned/truncated. Read-only (un-gated).",
         "method": "GET",
         "path_template": "/sites/{siteId}/setting/service/dhcp",
         "params": [
@@ -155,7 +156,7 @@ OMADA_SEED_TOOLS = [
             {"name": "pageSize", "type": "integer", "description": "Rows per page (default 50, max 500).", "required": False, "default": 50, "local": True},
         ],
         "transform": "omada_list_dhcp_reservations",
-        "example": '{"totalRows": 116, "matched": 1, "returned": 1, "truncated": false, "rows": [{"mac": "4C-D5-77-7B-13-7D", "ip": "192.168.20.1", "name": "DESKTOP-FOCJDJ4", "netName": "20-Guest_VLAN", "serverName": "Router-ER605 v2.0", "type": 1, "showingType": "Computer"}]}',
+        "example": '{"collectionRows": 58, "totalMatched": 1, "returned": 1, "truncated": false, "rows": [{"mac": "4C-D5-77-7B-13-7D", "ip": "192.168.20.1", "name": "DESKTOP-FOCJDJ4", "netName": "20-Guest_VLAN", "serverName": "Router-ER605 v2.0", "type": 1, "showingType": "Computer"}]}',
         "read_only": True,
     },
     {
@@ -174,7 +175,7 @@ OMADA_SEED_TOOLS = [
     },
     {
         "name": "list_client_events",
-        "description": "List site event-log entries (connect/disconnect and similar) in a time window, optionally narrowed to one client MAC. Omada has no server-side client filter, so clientMac is matched against the event content — and the log is window-limited, so if nothing matches, widen timeStart/timeEnd. timeStart/timeEnd are epoch milliseconds. The scan is capped (~5000 events), so a busy window reports scanned < totalRows and truncated=true; narrow the window to see everything. Returns totalRows/scanned/matched/returned/truncated plus the window and a retention note. Read-only (un-gated).",
+        "description": "List site event-log entries (connect/disconnect and similar) in a time window, optionally narrowed to one client MAC. Omada has no server-side client filter, so clientMac is matched against the event content — and the log is window-limited, so if nothing matches, widen timeStart/timeEnd. timeStart/timeEnd are epoch milliseconds. The scan is capped (~5000 events), so a busy window sets scanCapped=true (scanned < collectionRows) — narrow the window to see everything. Returns collectionRows/scanned/totalMatched/returned/truncated plus the window and a retention note; truncated is true only when the response itself was cut short. Read-only (un-gated).",
         "method": "GET",
         "path_template": "/sites/{siteId}/logs/events",
         "params": [
@@ -187,7 +188,7 @@ OMADA_SEED_TOOLS = [
             {"name": "pageSize", "type": "integer", "description": "Rows per page (default 50).", "required": False, "default": 50},
         ],
         "transform": "omada_list_client_events",
-        "example": '{"totalRows": 4286, "matched": 1, "returned": 1, "truncated": false, "window": {"timeStart": 1789847046000, "timeEnd": 1790451846000}, "rows": [{"id": "6ab81dda77bfbd044e95601b", "time": 1790451159330, "module": "Client", "key": "L_C_CONN", "clientMac": "BC-24-11-6B-B1-41", "content": "[client:BC-24-11-6B-B1-41] went online on [switch:7C-F1-7E-8A-81-1D] on 1-Main_LAN network."}]}',
+        "example": '{"collectionRows": 4286, "scanned": 4286, "totalMatched": 1, "returned": 1, "truncated": false, "scanCapped": false, "window": {"timeStart": 1789847046000, "timeEnd": 1790451846000}, "rows": [{"id": "6ab81dda77bfbd044e95601b", "time": 1790451159330, "module": "Client", "key": "L_C_CONN", "clientMac": "BC-24-11-6B-B1-41", "content": "[client:BC-24-11-6B-B1-41] went online on [switch:7C-F1-7E-8A-81-1D] on 1-Main_LAN network."}]}',
         "read_only": True,
     },
     {

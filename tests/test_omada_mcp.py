@@ -1423,8 +1423,17 @@ def omada_read_upstream():
             if p.endswith('/authorize/token'):
                 self._respond(200, {'result': {'accessToken': 'tok-1'}})
                 return
+            if p.endswith('/sites'):
+                # Site inventory for the -1505 classifier.
+                self._grid([{'siteId': 'S1', 'name': 'Home'},
+                            {'siteId': 'S2', 'name': 'Office'}])
+                return
             if p.endswith('/lan-networks'):
                 state['lan_qs'] = q
+                # Only S1 is permitted; S2 exists but is denied; NOPE is unknown.
+                if '/sites/S1/' not in p:
+                    self._respond(200, {'errorCode': -1505, 'msg': 'No permission.'})
+                    return
                 if 'page' not in q:
                     self._respond(400, {'error': 'Bad Request'})
                     return
@@ -1442,11 +1451,19 @@ def omada_read_upstream():
             if p.endswith('/setting/service/dhcp'):
                 self._grid(_READ_DHCP)
                 return
+            if p.endswith('/radios'):
+                self._respond(200, {'errorCode': 0, 'result': [
+                    {'radioId': 0, 'band': '2.4G', 'channel': 6, 'txPower': 20}]})
+                return
+            if p.endswith('/wan-status'):
+                self._respond(200, {'errorCode': 0, 'result': [
+                    {'port': 1, 'status': 'connected', 'ip': '203.0.113.5'}]})
+                return
             if p.endswith('/devices/all'):
                 self._respond(200, {'errorCode': 0, 'result': _READ_DEVICES})
                 return
             if p.endswith('/devices'):
-                self._grid(_READ_DEVICES, 5)
+                self._grid(_READ_DEVICES)
                 return
             if p.endswith('/logs/events'):
                 state['events_qs'] = q
@@ -1485,8 +1502,10 @@ class TestOmadaReadCompleteness:
     def test_list_known_clients_includes_offline_and_envelope(self, omada_read_upstream):
         _omada_read_integration(omada_read_upstream)
         out = json.loads(run_tool("omada", "list_known_clients", {"siteId": "S1"}))
-        assert set(out) >= {"totalRows", "matched", "returned", "truncated", "rows"}
-        assert out["totalRows"] == _READ_CLIENTS_TOTAL
+        assert set(out) >= {"collectionRows", "totalMatched", "returned", "truncated", "rows"}
+        assert out["collectionRows"] == _READ_CLIENTS_TOTAL
+        assert out["totalMatched"] == len(_READ_CLIENTS)
+        # No filter, but the response is a page of the collection -> truncated.
         assert out["truncated"] is True
         by_mac = {r["mac"]: r for r in out["rows"]}
         for mac in ("6E-39-40-84-35-5F", "DA-F7-86-8C-C6-BE",
@@ -1500,10 +1519,14 @@ class TestOmadaReadCompleteness:
         _omada_read_integration(omada_read_upstream)
         out = json.loads(run_tool("omada", "list_known_clients",
                                   {"siteId": "S1", "search": "ellen"}))
-        assert out["matched"] == 2
+        assert out["totalMatched"] == 2
+        assert out["returned"] == 2
+        # A filtered call that returns every match is complete -> not truncated.
+        assert out["truncated"] is False
+        assert out["collectionRows"] == _READ_CLIENTS_TOTAL
         out2 = json.loads(run_tool("omada", "list_known_clients",
                                    {"siteId": "S1", "search": "surfaceLaptop"}))
-        assert out2["matched"] == 1  # hostName match, case-insensitive
+        assert out2["totalMatched"] == 1  # hostName match, case-insensitive
 
     def test_list_known_clients_uses_v2_scope_all(self, omada_read_upstream):
         _omada_read_integration(omada_read_upstream)
@@ -1516,7 +1539,7 @@ class TestOmadaReadCompleteness:
         out = json.loads(run_tool("omada", "list_known_clients",
                                   {"siteId": "S1", "active": True}))
         assert all(r["active"] is True for r in out["rows"])
-        assert out["matched"] == 1
+        assert out["totalMatched"] == 1 and out["truncated"] is False
 
     def test_list_networks_names_guest_vlan(self, omada_read_upstream):
         _omada_read_integration(omada_read_upstream)
@@ -1543,10 +1566,11 @@ class TestOmadaReadCompleteness:
         _omada_read_integration(omada_read_upstream)
         out = json.loads(run_tool("omada", "list_dhcp_reservations",
                                   {"siteId": "S1", "search": "192.168.20.1"}))
-        assert out["matched"] == 1 and out["rows"][0]["mac"] == "4C-D5-77-7B-13-7D"
+        assert out["totalMatched"] == 1 and out["rows"][0]["mac"] == "4C-D5-77-7B-13-7D"
+        assert out["truncated"] is False
         out2 = json.loads(run_tool("omada", "list_dhcp_reservations",
                                    {"siteId": "S1", "search": "4c-d5-77-7b-13-7d"}))
-        assert out2["matched"] == 1 and out2["rows"][0]["ip"] == "192.168.20.1"
+        assert out2["totalMatched"] == 1 and out2["rows"][0]["ip"] == "192.168.20.1"
         assert out2["rows"][0]["netName"] == "20-Guest_VLAN"
 
     def test_get_device_detail_and_full_extras(self, omada_read_upstream):
@@ -1557,7 +1581,16 @@ class TestOmadaReadCompleteness:
         out_full = json.loads(run_tool("omada", "get_device",
                                        {"siteId": "S1", "deviceMac": "9C-A2-F4-40-14-86",
                                         "full": True}))
-        assert "extras" in out_full
+        # extras must be the unwrapped result, not the {errorCode,msg,result}
+        # envelope the upstream returns.
+        wan = out_full["extras"]["wanStatus"]
+        assert isinstance(wan, list) and "errorCode" not in wan[0]
+        ap_full = json.loads(run_tool("omada", "get_device",
+                                      {"siteId": "S1", "deviceMac": "AC-15-A2-4A-6B-FA",
+                                       "full": True}))
+        radios = ap_full["extras"]["radios"]
+        assert isinstance(radios, list) and radios[0]["channel"] == 6
+        assert "errorCode" not in radios[0]
 
     def test_get_device_not_found_typed_error(self, omada_read_upstream):
         _omada_read_integration(omada_read_upstream)
@@ -1570,7 +1603,8 @@ class TestOmadaReadCompleteness:
         out = json.loads(run_tool("omada", "list_client_events",
                                   {"siteId": "S1", "timeStart": 1789000000000,
                                    "timeEnd": 1791000000000, "clientMac": "4C-D5-77-7B-13-7D"}))
-        assert out["matched"] == 1
+        assert out["totalMatched"] == 1
+        assert out["truncated"] is False and out["scanCapped"] is False
         assert out["rows"][0]["clientMac"] == "4C-D5-77-7B-13-7D"
         assert out["rows"][0]["key"] == "L_C_DISCONN"
         assert "timeStart" in out["window"] and out["retention_note"]
@@ -1588,9 +1622,34 @@ class TestOmadaReadCompleteness:
     def test_list_site_devices_totals_envelope(self, omada_read_upstream):
         _omada_read_integration(omada_read_upstream)
         out = json.loads(run_tool("omada", "list_site_devices", {"siteId": "S1"}))
-        assert set(out) >= {"totalRows", "returned", "truncated", "rows"}
-        assert out["totalRows"] == 5 and out["returned"] == 2
-        assert out["truncated"] is True
+        assert set(out) >= {"collectionRows", "totalMatched", "returned", "truncated", "rows"}
+        assert out["collectionRows"] == 2 and out["returned"] == 2
+        assert out["truncated"] is False
+        limited = json.loads(run_tool("omada", "list_site_devices",
+                                      {"siteId": "S1", "limit": 1}))
+        assert limited["returned"] == 1 and limited["totalMatched"] == 2
+        assert limited["truncated"] is True
+
+    def test_unknown_site_is_not_reported_as_permission_denied(self, omada_read_upstream):
+        _omada_read_integration(omada_read_upstream)
+        out = json.loads(run_tool("omada", "list_networks", {"siteId": "NOPE"}))
+        assert out["status_code"] != 200
+        assert out["error"]["code"] == "unknown_site"
+        assert "NOPE" in out["error"]["message"]
+
+    def test_known_site_denied_is_permission_denied(self, omada_read_upstream):
+        _omada_read_integration(omada_read_upstream)
+        out = json.loads(run_tool("omada", "list_networks", {"siteId": "S2"}))
+        assert out["status_code"] != 200
+        assert out["error"]["code"] == "permission_denied"
+
+    def test_list_site_clients_points_at_known_clients_and_envelopes(self, omada_read_upstream):
+        _omada_read_integration(omada_read_upstream)
+        tool = get_tool("omada", "list_site_clients")
+        assert "list_known_clients" in tool["description"]
+        assert tool.get("totals") == 1
+        out = json.loads(run_tool("omada", "list_site_clients", {"siteId": "S1"}))
+        assert set(out) >= {"collectionRows", "totalMatched", "returned", "truncated", "rows"}
 
 
 @pytest.fixture

@@ -76,21 +76,32 @@ if [ ! -f "$UNIT_FILE" ]; then
 [Unit]
 Description=Eshu Gateway Dashboard
 After=network.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
 User=$SERVICE_USER
 WorkingDirectory=$DASH_DIR
 ExecStart=$DASH_DIR/venv/bin/python3 -m uvicorn main:app --host 0.0.0.0 --port $PORT
-Restart=on-failure
+Restart=always
 RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
 EOF
 else
-  echo "♻️   Systemd unit already exists — updating port and paths"
-  sudo sed -i "s|^ExecStart=.*|ExecStart=$DASH_DIR/venv/bin/python3 -m uvicorn main:app --host 0.0.0.0 --port $PORT|" "$UNIT_FILE"
+  echo "♻️   Systemd unit already exists — updating port, paths and restart policy"
+  # Reconcile the restart policy too: an older unit created with
+  # `Restart=on-failure` would NOT come back after a clean SIGTERM (uvicorn
+  # exits 0), which breaks the no-sudo deploy path.
+  sudo sed -i \
+    -e "s|^ExecStart=.*|ExecStart=$DASH_DIR/venv/bin/python3 -m uvicorn main:app --host 0.0.0.0 --port $PORT|" \
+    -e "s|^Restart=.*|Restart=always|" \
+    -e "s|^RestartSec=.*|RestartSec=5|" "$UNIT_FILE"
+  # `StartLimitIntervalSec=0` disables the start-rate limiter so a crash loop
+  # keeps retrying instead of parking the unit in `failed`. Insert once.
+  grep -q '^StartLimitIntervalSec=' "$UNIT_FILE" || \
+    sudo sed -i "/^After=network.target/a StartLimitIntervalSec=0" "$UNIT_FILE"
 fi
 
 sudo systemctl daemon-reload

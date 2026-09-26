@@ -425,6 +425,33 @@ def _normalize_http_error(status_code: int, body: str, tool: dict = None):
     return str(msg)
 
 
+def _classify_upstream_error(integration, path, body):
+    """Typed error object for a known upstream failure (currently Omada -1505,
+    unknown site vs no permission), or None. Never raises."""
+    if (integration.get('kind') or '').lower() != 'omada':
+        return None
+    try:
+        from core.omada_utils import classify_omada_error
+        return classify_omada_error(integration, path, body)
+    except Exception:
+        return None
+
+
+def _totals_envelope(rows: list, total, matched, filtered: bool) -> dict:
+    """Opt-in completeness envelope (tool `totals: true`).
+
+    `collectionRows` is the whole collection (upstream total), `totalMatched` is
+    the size of the query's own universe (post-filter, pre-limit), and
+    `truncated` means the response omitted rows the query could have returned —
+    NOT merely that a filter was applied. A filtered call that returns every
+    match is not truncated."""
+    m = matched if matched is not None else len(rows)
+    universe = total if total is not None else m
+    truncated = (len(rows) < m) if filtered else (len(rows) < universe)
+    return {'collectionRows': universe, 'totalMatched': m,
+            'returned': len(rows), 'truncated': truncated, 'rows': rows}
+
+
 def _apply_shaping(body: str, tool: dict, args: dict, integration: dict = None) -> str:
     """Client-side response shaping: transforms + exact filters + search filter
     + limit + field projection.
@@ -445,7 +472,7 @@ def _apply_shaping(body: str, tool: dict, args: dict, integration: dict = None) 
     except (ValueError, TypeError):
         _pre = None
     if (isinstance(_pre, dict)
-            and {'totalRows', 'returned', 'truncated', 'rows'} <= set(_pre)):
+            and {'collectionRows', 'totalMatched', 'returned', 'truncated', 'rows'} <= set(_pre)):
         return body
     transform = tool.get('transform')
     if transform:
@@ -474,6 +501,8 @@ def _apply_shaping(body: str, tool: dict, args: dict, integration: dict = None) 
         if isinstance(_res, dict) and isinstance(_res.get('totalRows'), int):
             total = _res['totalRows']
     data = _unwrap_envelope(data)
+    matched = None
+    filtered = False
     if isinstance(data, list):
         if filter_fields:
             for f in filter_fields:
@@ -481,6 +510,10 @@ def _apply_shaping(body: str, tool: dict, args: dict, integration: dict = None) 
                 if val is not None and val != '':
                     data = [item for item in data
                             if isinstance(item, dict) and _extract(item, f) == val]
+                    filtered = True
+        # `matched` is the post-filter/pre-limit count: the size of the query's
+        # own universe. `truncated` is measured against it when a filter ran.
+        matched = len(data)
         if search_field:
             search = a.get('search')
             if search:
@@ -488,6 +521,8 @@ def _apply_shaping(body: str, tool: dict, args: dict, integration: dict = None) 
                 data = [item for item in data
                         if isinstance(item, dict)
                         and needle in str(_extract(item, search_field)).lower()]
+                filtered = True
+            matched = len(data)
             limit = a.get('limit')
             if limit is not None:
                 try:
@@ -500,20 +535,12 @@ def _apply_shaping(body: str, tool: dict, args: dict, integration: dict = None) 
         if isinstance(data, list):
             rows = [_project_dict(item, fields) if isinstance(item, dict) else item for item in data]
             if tool.get('totals') and not a.get('full'):
-                return json.dumps({
-                    'totalRows': total if total is not None else len(rows),
-                    'returned': len(rows),
-                    'truncated': bool(total is not None and len(rows) < total),
-                    'rows': rows})
+                return json.dumps(_totals_envelope(rows, total, matched, filtered))
             return json.dumps(rows)
         if isinstance(data, dict):
             return json.dumps(_project_dict(data, fields))
     if tool.get('totals') and isinstance(data, list) and not a.get('full'):
-        return json.dumps({
-            'totalRows': total if total is not None else len(data),
-            'returned': len(data),
-            'truncated': bool(total is not None and len(data) < total),
-            'rows': data})
+        return json.dumps(_totals_envelope(data, total, matched, filtered))
     if search_field or filter_fields or strip_envelope:
         return json.dumps(data)
     return body
@@ -660,11 +687,13 @@ def execute_integration_call(integration: dict, tool: dict, args: dict, agent: s
 
     # Surface upstream logical errors (Omada errorCode != 0, Pulse {"error": ...})
     # instead of projecting the error envelope down to {}.
+    error_obj = None
     if outcome == 'ok':
         up_err = _upstream_error(body)
         if up_err:
             outcome = 'error'
             error = up_err
+            error_obj = _classify_upstream_error(integration, path, body)
             body = ''
         else:
             body = _apply_shaping(body, tool, args, integration)
@@ -672,6 +701,7 @@ def execute_integration_call(integration: dict, tool: dict, args: dict, agent: s
         norm = _normalize_http_error(status_code, body, tool)
         if norm:
             error = norm
+            error_obj = _classify_upstream_error(integration, path, body)
 
     # Always-on secret scrub: mask secret-named fields / header-style tokens in
     # the final output so neither the model nor the audit trail sees them.
@@ -705,6 +735,7 @@ def execute_integration_call(integration: dict, tool: dict, args: dict, agent: s
         'truncated': truncated,
         'latency_ms': latency_ms,
         'error': error,
+        'error_obj': error_obj,
     }
 
 
@@ -760,6 +791,7 @@ def execute_generic_call(integration: dict, method: str, path: str, params=None,
     status_code, body, truncated, error, latency_ms, outcome, resp_headers = _http_roundtrip(
         integration, url, body_bytes, headers, method)
 
+    error_obj = None
     if method == 'HEAD':
         # Headers-only metadata — never pass a body through, and surface a
         # stable error for missing resources (HEAD error bodies are empty).
@@ -775,6 +807,7 @@ def execute_generic_call(integration: dict, method: str, path: str, params=None,
         if up_err:
             outcome = 'error'
             error = up_err
+            error_obj = _classify_upstream_error(integration, path, body)
             body = ''
         elif ((integration.get('kind') or '').lower() == 'omada'
               and method == 'POST'
@@ -787,6 +820,7 @@ def execute_generic_call(integration: dict, method: str, path: str, params=None,
         norm = _normalize_http_error(status_code, body)
         if norm:
             error = norm
+            error_obj = _classify_upstream_error(integration, path, body)
 
     # Always-on secret scrub (see execute_integration_call).
     body = scrub_body(body)
@@ -820,4 +854,5 @@ def execute_generic_call(integration: dict, method: str, path: str, params=None,
         'truncated': truncated,
         'latency_ms': latency_ms,
         'error': error,
+        'error_obj': error_obj,
     }

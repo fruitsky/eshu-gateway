@@ -34,11 +34,14 @@ def _error(msg, status_code=500):
 def _result_error(res: dict) -> str:
     """Surface an upstream failure with a non-2xx status. Omada (and others)
     return logical errors inside an HTTP 200 body; reporting `status_code: 200`
-    for a failure is misleading, so normalise any 2xx/missing code to 502."""
+    for a failure is misleading, so normalise any 2xx/missing code to 502.
+    A typed `error_obj` (e.g. Omada unknown_site vs permission_denied) is
+    preferred over the flat string when present."""
     status = res.get('status_code')
     if not isinstance(status, int) or 200 <= status < 300:
         status = 502
-    return json.dumps({'error': res['error'], 'status_code': status})
+    return json.dumps({'error': res.get('error_obj') or res['error'],
+                       'status_code': status})
 
 
 def run_tool(integration_name: str, tool_name: str, args: dict, reason: str = '') -> str:

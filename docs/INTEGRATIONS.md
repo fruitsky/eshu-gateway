@@ -228,15 +228,20 @@ the response in the proxy and are never forwarded upstream.
 
 List tools that opt in with `totals: true` (the Omada read tools, e.g.
 `omada_list_site_devices`) wrap their result as
-`{"totalRows": N, "returned": M, "truncated": bool, "rows": [...]}` so a filtered
-or paged view is never mistaken for the whole set. `totalRows` is the upstream
-grid total (captured before projection); `truncated` is true when the returned
-rows are fewer than that total. The Omada transform-backed reads
+`{"collectionRows": N, "totalMatched": M, "returned": K, "truncated": bool, "rows": [...]}`
+so a filtered or paged view is never mistaken for the whole set.
+`collectionRows` is the whole collection (upstream grid total, captured before
+projection); `totalMatched` is the size of the query's own universe
+(post-filter/search, pre-limit); `truncated` is true **only when the response
+omitted rows the query could have returned** (paging/limit) — a filtered call
+that returns every match is not truncated. The Omada transform-backed reads
 (`list_known_clients`, `list_networks`, `list_acls`, `list_dhcp_reservations`,
-`list_client_events`) emit the same envelope plus a `matched` count, and their
-errors are typed as `{"error": {"code", "message", "upstream"?}}`. Upstream
-logical errors (e.g. Omada `errorCode -1` inside an HTTP 200 body) are reported
-with a non-2xx `status_code`, never 200.
+`list_client_events`) emit the same envelope; `list_client_events` also reports
+`scanned` and `scanCapped` because its scan is capped. Errors are typed as
+`{"error": {"code", "message", "upstream"?}}`; an Omada `-1505` on a site-scoped
+call is classified as `unknown_site` vs `permission_denied`. Upstream logical
+errors (e.g. Omada `errorCode -1` inside an HTTP 200 body) are reported with a
+non-2xx `status_code`, never 200.
 
 ## Adding more integrations
 
