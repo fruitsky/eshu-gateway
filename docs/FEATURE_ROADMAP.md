@@ -23,6 +23,34 @@ test → verify → merge to `master` → LXC pull flow.
 
 ---
 
+## Omada read completeness ✅ DONE (2026-09-26)
+
+Motivated by an incident where the associated-clients-only list looked exhaustive:
+`omada_list_site_clients` returned 35 named clients while the controller knew 92,
+and disconnected devices were invisible. The MCP is now the complete Omada read path:
+
+- **`omada_list_known_clients`** — every client the controller knows (v2 clients
+  query `scope=0`: online + offline + blocked), with `active`/`lastSeen`/`ip`/VLAN,
+  search over name + hostName + MAC + vendor + device type, sorted active-first.
+- **`omada_list_networks`** — id ↔ name ↔ VLAN ↔ subnet/gateway.
+- **`omada_list_acls`** — gateway + switch layers in evaluation order, source/dest
+  resolved to network/group names, plus a normalized hash block for diffing.
+- **`omada_list_dhcp_reservations`** — the DHCP user/binding table (MAC ↔ IP ↔
+  network ↔ name), searchable by IP or MAC.
+- **`omada_get_device`** (+ `full` per-type extras) and `totals` on
+  `omada_list_site_devices`.
+- **`omada_list_client_events`** — connect/disconnect log for a window, optionally
+  narrowed to one client MAC.
+- **`omada_get_client`** now returns `active`/`lastSeen`/`wireless`/`ipSetting`
+  without needing `full`.
+- Cross-cutting: opt-in `{totalRows, returned, truncated, rows}` envelopes, typed
+  `{"error": {code, message, upstream}}` errors, and upstream logical errors never
+  reported with `status_code: 200`.
+
+Endpoints verified live against controller 6.2.0.17 (`/v3/api-docs` + read-only probes).
+
+---
+
 ## Session Grouping (SSH) — in progress
 
 SSH-side plumbing shipped on `ui/amber-crt-redesign` (pending merge): the gateway

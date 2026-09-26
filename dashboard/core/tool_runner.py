@@ -31,6 +31,16 @@ def _error(msg, status_code=500):
     return json.dumps({'error': msg, 'status_code': status_code})
 
 
+def _result_error(res: dict) -> str:
+    """Surface an upstream failure with a non-2xx status. Omada (and others)
+    return logical errors inside an HTTP 200 body; reporting `status_code: 200`
+    for a failure is misleading, so normalise any 2xx/missing code to 502."""
+    status = res.get('status_code')
+    if not isinstance(status, int) or 200 <= status < 300:
+        status = 502
+    return json.dumps({'error': res['error'], 'status_code': status})
+
+
 def run_tool(integration_name: str, tool_name: str, args: dict, reason: str = '') -> str:
     """Execute (or gate) one MCP tool call and return the JSON string for the model."""
     integration = get_integration(integration_name)
@@ -97,7 +107,7 @@ def run_tool(integration_name: str, tool_name: str, args: dict, reason: str = ''
         if handler:
             return res
         if res.get('error'):
-            return json.dumps({'error': res['error'], 'status_code': res.get('status_code')})
+            return _result_error(res)
         if tool.get('transform') and transport != 'ws':
             # execute_integration_call already ran the registered transform —
             # shaping it again would double-apply (e.g. charts downsample).
@@ -149,5 +159,5 @@ def run_tool(integration_name: str, tool_name: str, args: dict, reason: str = ''
     if handler:
         return res
     if res.get('error'):
-        return json.dumps({'error': res['error'], 'status_code': res.get('status_code')})
+        return _result_error(res)
     return merge_response_hint(tool, res['body'])

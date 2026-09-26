@@ -283,11 +283,13 @@ class TestOmadaSeed:
         })
         r = auth_client.post("/api/integrations/omada/seed")
         assert r.status_code == 200
-        assert r.json()["created"] == 16  # 14 curated + generic read/write
+        assert r.json()["created"] == 22  # 20 curated + generic read/write
         tools = auth_client.get("/api/integrations/omada/tools").json()
         names = {t["name"] for t in tools}
         assert names == {"list_sites", "get_site", "list_site_devices", "search_devices",
-                         "list_site_clients", "get_client", "list_site_ssids",
+                         "list_site_clients", "list_known_clients", "get_client",
+                         "list_networks", "list_acls", "list_dhcp_reservations",
+                         "get_device", "list_client_events", "list_site_ssids",
                          "list_site_alerts", "block_client", "reconnect_client",
                          "acl_reorder", "list_groups", "group_add_members",
                          "group_remove_members", "read", "write"}
@@ -314,13 +316,33 @@ class TestOmadaSeed:
         sd = next(t for t in tools if t["name"] == "search_devices")
         assert next(p for p in sd["params"] if p["name"] == "searchKey")["required"]
         assert sd["strip_envelope"] == 1
-        # get_client compact carries the diagnostic core + traffic
+        # get_client compact carries the diagnostic core + traffic, and the
+        # presence/address facts must be present WITHOUT requiring full=true
         gc = next(t for t in tools if t["name"] == "get_client")
         assert "deviceCategory" in gc["fields"] and "vid" in gc["fields"] and "uptime" in gc["fields"]
         assert "trafficDown" in gc["fields"] and "trafficUp" in gc["fields"]
-        # device compact includes firmware/uptime
+        for f in ("active", "lastSeen", "wireless", "ipSetting"):
+            assert f in gc["fields"]
+        # device compact includes firmware/uptime and reports totals
         dev = next(t for t in tools if t["name"] == "list_site_devices")
         assert "firmwareVersion" in dev["fields"] and "uptime" in dev["fields"]
+        assert dev["totals"] == 1
+        # read-completeness tools: read-only + transform-backed
+        for nm, tr in (("list_known_clients", "omada_list_known_clients"),
+                       ("list_networks", "omada_list_networks"),
+                       ("list_acls", "omada_list_acls"),
+                       ("list_dhcp_reservations", "omada_list_dhcp_reservations"),
+                       ("get_device", "omada_get_device"),
+                       ("list_client_events", "omada_list_client_events")):
+            t = next(x for x in tools if x["name"] == nm)
+            assert t["read_only"] == 1
+            assert t["transform"] == tr
+        # known clients is the v2 all-clients query (scope=0)
+        lkc = next(t for t in tools if t["name"] == "list_known_clients")
+        assert lkc["method"] == "POST" and lkc["version"] == "v2"
+        lkp = {p["name"]: p for p in lkc["params"]}
+        assert lkp["scope"]["default"] == 0
+        assert lkp["search"]["local"] and lkp["active"]["local"] and lkp["wireless"]["local"]
         # clients compact includes traffic stats
         assert "trafficDown" in lsc["fields"] and "trafficUp" in lsc["fields"]
         # alerts params use clean names mapped to the dotted wire keys
@@ -1272,3 +1294,366 @@ class TestOmadaGroupTools:
              "members": [{"ip": "192.168.15.250"}]},
             agent="test")
         assert 'page=1' in omada_group_upstream['state']['list_qs']
+
+
+# ── Read completeness (T1–T7): known clients, networks, ACLs, DHCP, devices,
+#    events. Shapes mirror live probes against controller 6.2.0.17. ──────────
+
+_READ_CLIENTS = [
+    {'mac': '84-B1-E2-67-F3-24', 'name': 'Surface Laptop 7', 'hostName': 'SurfaceLaptop',
+     'vendor': 'Unknown', 'deviceType': 'pc', 'deviceCategory': 'computer', 'wireless': True,
+     'active': True, 'lastSeen': 1790000000000, 'ip': '192.168.15.215', 'vid': 15,
+     'ssid': 'torquoise', 'apName': 'House-AP-EAP225 v5', 'connectDevType': 'ap',
+     'blocked': False, 'guest': False},
+    {'mac': '6E-39-40-84-35-5F', 'name': "Ellen's iPad", 'hostName': 'iPad',
+     'vendor': 'Unknown', 'deviceType': 'Tablet', 'deviceCategory': 'Mobile', 'wireless': True,
+     'active': False, 'lastSeen': 1771768986768, 'ip': '192.168.20.3', 'vid': 20,
+     'ssid': 'torquoise', 'apName': 'House-AP-EAP225 v5', 'connectDevType': 'ap'},
+    {'mac': 'DA-F7-86-8C-C6-BE', 'name': "Ellen's iPhone", 'hostName': 'iPhone',
+     'vendor': 'Unknown', 'deviceType': 'iPhone', 'deviceCategory': 'Mobile', 'wireless': True,
+     'active': False, 'lastSeen': 1786297195989, 'ip': '192.168.20.2', 'vid': 20},
+    {'mac': 'E6-21-93-E2-D4-9B', 'name': 'Tracey-s-S24', 'hostName': 'Tracey-s-S24',
+     'vendor': 'Unknown', 'deviceType': 'android', 'deviceCategory': 'Mobile', 'wireless': True,
+     'active': False, 'lastSeen': 1782074928189, 'ip': '192.168.20.2', 'vid': 20},
+    {'mac': '4C-D5-77-7B-13-7D', 'name': 'DESKTOP-FOCJDJ4', 'hostName': 'DESKTOP-FOCJDJ4',
+     'vendor': 'Unknown', 'deviceType': 'pc', 'deviceCategory': 'computer', 'wireless': True,
+     'active': False, 'lastSeen': 1776354579166, 'ip': '192.168.20.1', 'vid': 20},
+]
+_READ_CLIENTS_TOTAL = 40
+
+_READ_NETWORKS = [
+    {'id': 'N1', 'name': '1-Main_LAN(Default)', 'vlan': 1, 'gatewaySubnet': '192.168.1.254/24',
+     'purpose': 1, 'dhcpSettingsVO': {'enable': True, 'gateway': '192.168.1.254'}, 'domain': 'lan'},
+    {'id': '64285b28c2a55c6ded3026a4', 'name': '20-Guest_VLAN', 'vlan': 20,
+     'gatewaySubnet': '192.168.20.254/24', 'purpose': 1,
+     'dhcpSettingsVO': {'enable': True, 'gateway': '192.168.20.254'}},
+    {'id': 'N15', 'name': '15-Home_Lan', 'vlan': 15, 'gatewaySubnet': '192.168.15.254/24', 'purpose': 1},
+]
+_READ_GROUPS = [
+    {'groupId': 'G-KINDLE', 'name': 'Kindle', 'type': 0, 'count': 1,
+     'ipList': [{'ip': '192.168.15.50', 'mask': 32}]},
+]
+_READ_OSG = [
+    {'id': 'R1', 'index': 1, 'description': 'Allow_Kindle2Main', 'policy': 1, 'protocols': [6, 17],
+     'sourceType': 1, 'sourceIds': ['G-KINDLE'], 'destinationType': 0,
+     'destinationIds': ['N1']},
+    {'id': 'R2', 'index': 2, 'description': 'Deny_LAN_Aqua', 'policy': 0, 'protocols': [6],
+     'sourceType': 0, 'sourceIds': ['N1'], 'destinationType': 0,
+     'destinationIds': ['64285b28c2a55c6ded3026a4']},
+]
+_READ_OSW = [
+    {'id': 'S1', 'index': 1, 'description': 'Allow_Kindle2Main', 'policy': 1, 'protocols': [6],
+     'sourceType': 1, 'sourceIds': ['G-KINDLE'], 'destinationType': 0, 'destinationIds': ['N1']},
+    {'id': 'S2', 'index': 18, 'description': 'DENY_aqua_iot_to-all', 'policy': 0, 'protocols': [6],
+     'sourceType': 0, 'sourceIds': ['64285b28c2a55c6ded3026a4'], 'destinationType': 0,
+     'destinationIds': []},
+]
+_READ_DHCP = [
+    {'id': 'D1', 'mac': '4C-D5-77-7B-13-7D', 'ip': '192.168.20.1', 'name': 'DESKTOP-FOCJDJ4',
+     'clientName': 'DESKTOP-FOCJDJ4', 'netId': '64285b28c2a55c6ded3026a4',
+     'netName': '20-Guest_VLAN', 'serverName': 'Router-ER605 v2.0', 'serverMac': '9C-A2-F4-40-14-86',
+     'serverType': 'gateway', 'type': 1, 'showingType': 'Computer', 'status': True, 'abnormal': 0},
+    {'id': 'D2', 'mac': 'AC-15-A2-4A-6B-FA', 'ip': '192.168.1.233', 'name': 'House-AP-EAP225 v5',
+     'netId': 'N1', 'netName': '1-Main_LAN(Default)', 'serverName': 'Router-ER605 v2.0',
+     'type': 0, 'showingType': 'ap', 'status': True},
+]
+_READ_DEVICES = [
+    {'mac': '9C-A2-F4-40-14-86', 'name': 'Router-ER605 v2.0', 'type': 'gateway',
+     'model': 'ER605 v2.0', 'modelName': 'ER605 v2.0', 'ip': '192.168.1.1',
+     'firmwareVersion': '2.3.2 Build 20251029 Rel.12727', 'status': 1, 'uptime': '16day(s) 17h',
+     'cpuUtil': 3, 'memUtil': 41, 'active': True},
+    {'mac': 'AC-15-A2-4A-6B-FA', 'name': 'House-AP-EAP225 v5', 'type': 'ap',
+     'model': 'EAP225 v5.0', 'ip': '192.168.1.233', 'firmwareVersion': '1.3.1', 'status': 1,
+     'uptime': '24day(s) 20h', 'active': True},
+]
+_READ_EVENTS = [
+    {'id': 'E1', 'key': 'L_C_CONN', 'module': 'Client', 'time': 1790451159330,
+     'content': '[client:BC-24-11-6B-B1-41] went online on [switch:7C-F1-7E-8A-81-1D] on 1-Main_LAN network.'},
+    {'id': 'E2', 'key': 'L_C_DISCONN', 'module': 'Client', 'time': 1790450000000,
+     'content': '[client:4C-D5-77-7B-13-7D] went offline on [ap:AC-15-A2-4A-6B-FA].'},
+]
+_READ_DETAIL = {
+    'id': 'x', 'mac': '4C-D5-77-7B-13-7D', 'name': 'DESKTOP-FOCJDJ4',
+    'hostName': 'DESKTOP-FOCJDJ4', 'vendor': 'Unknown', 'deviceType': 'pc',
+    'deviceCategory': 'computer', 'ip': None, 'wireless': True, 'active': False,
+    'lastSeen': 1776354579166,
+    'ipSetting': {'useFixedAddr': True, 'netId': '64285b28c2a55c6ded3026a4',
+                  'ip': '192.168.20.1', 'serverType': 'gateway',
+                  'serverMac': '9C-A2-F4-40-14-86'},
+}
+
+
+@pytest.fixture
+def omada_read_upstream():
+    """Mock Omada serving the read-completeness endpoints with live-like shapes."""
+    state = {'v2_path': '', 'v2_body': None, 'lan_qs': '', 'events_qs': ''}
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def _path(self):
+            return urlparse(self.path).path
+
+        def _respond(self, status, payload):
+            body = json.dumps(payload).encode('utf-8')
+            self.send_response(status)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _grid(self, data, total=None):
+            self._respond(200, {'errorCode': 0, 'msg': 'Success.', 'result': {
+                'totalRows': len(data) if total is None else total,
+                'currentPage': 1, 'currentSize': len(data), 'data': data}})
+
+        def do_POST(self):
+            p = self._path()
+            if p.endswith('/authorize/token'):
+                self._respond(200, {'result': {'accessToken': 'tok-1', 'expiresIn': 7200}})
+                return
+            if '/clients' in p:
+                state['v2_path'] = p
+                state['v2_body'] = json.loads(
+                    self.rfile.read(int(self.headers.get('Content-Length', '0'))) or b'{}')
+                self._grid(_READ_CLIENTS, _READ_CLIENTS_TOTAL)
+                return
+            self._respond(404, {'error': 'not found'})
+
+        def do_GET(self):
+            p, q = self._path(), urlparse(self.path).query
+            if p.endswith('/authorize/token'):
+                self._respond(200, {'result': {'accessToken': 'tok-1'}})
+                return
+            if p.endswith('/lan-networks'):
+                state['lan_qs'] = q
+                if 'page' not in q:
+                    self._respond(400, {'error': 'Bad Request'})
+                    return
+                self._grid(_READ_NETWORKS)
+                return
+            if p.endswith('/profiles/groups'):
+                self._respond(200, {'errorCode': 0, 'result': _READ_GROUPS})
+                return
+            if p.endswith('/acls/osg-acls'):
+                self._grid(_READ_OSG)
+                return
+            if p.endswith('/acls/osw-acls'):
+                self._grid(_READ_OSW)
+                return
+            if p.endswith('/setting/service/dhcp'):
+                self._grid(_READ_DHCP)
+                return
+            if p.endswith('/devices/all'):
+                self._respond(200, {'errorCode': 0, 'result': _READ_DEVICES})
+                return
+            if p.endswith('/devices'):
+                self._grid(_READ_DEVICES, 5)
+                return
+            if p.endswith('/logs/events'):
+                state['events_qs'] = q
+                self._grid(_READ_EVENTS)
+                return
+            if p.endswith('/clients/4C-D5-77-7B-13-7D'):
+                self._respond(200, {'errorCode': 0, 'result': _READ_DETAIL})
+                return
+            self._respond(404, {'error': 'not found'})
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), _Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield {'base_url': f"http://127.0.0.1:{server.server_address[1]}", 'state': state}
+    server.shutdown()
+    server.server_close()
+
+
+def _omada_read_integration(upstream):
+    from core.integration_proxy import _oauth_tokens
+    _oauth_tokens.clear()
+    create_integration(
+        "omada", upstream['base_url'] + "/openapi/v1/omadac-1", "oauth2", "",
+        client_id="cid", client_secret="csecret",
+        token_url=upstream['base_url'] + "/openapi/authorize/token",
+        kind="omada")
+    seed_for_kind(get_integration("omada"))
+    return get_integration("omada")
+
+
+class TestOmadaReadCompleteness:
+
+    def test_list_known_clients_includes_offline_and_envelope(self, omada_read_upstream):
+        _omada_read_integration(omada_read_upstream)
+        out = json.loads(run_tool("omada", "list_known_clients", {"siteId": "S1"}))
+        assert set(out) >= {"totalRows", "matched", "returned", "truncated", "rows"}
+        assert out["totalRows"] == _READ_CLIENTS_TOTAL
+        assert out["truncated"] is True
+        by_mac = {r["mac"]: r for r in out["rows"]}
+        for mac in ("6E-39-40-84-35-5F", "DA-F7-86-8C-C6-BE",
+                    "E6-21-93-E2-D4-9B", "4C-D5-77-7B-13-7D"):
+            assert mac in by_mac
+            assert by_mac[mac]["active"] is False
+        assert by_mac["4C-D5-77-7B-13-7D"]["ip"] == "192.168.20.1"
+        assert by_mac["6E-39-40-84-35-5F"]["lastSeen"] == 1771768986768
+
+    def test_list_known_clients_search_over_name_and_hostname(self, omada_read_upstream):
+        _omada_read_integration(omada_read_upstream)
+        out = json.loads(run_tool("omada", "list_known_clients",
+                                  {"siteId": "S1", "search": "ellen"}))
+        assert out["matched"] == 2
+        out2 = json.loads(run_tool("omada", "list_known_clients",
+                                   {"siteId": "S1", "search": "surfaceLaptop"}))
+        assert out2["matched"] == 1  # hostName match, case-insensitive
+
+    def test_list_known_clients_uses_v2_scope_all(self, omada_read_upstream):
+        _omada_read_integration(omada_read_upstream)
+        run_tool("omada", "list_known_clients", {"siteId": "S1"})
+        assert "/openapi/v2/" in omada_read_upstream["state"]["v2_path"]
+        assert omada_read_upstream["state"]["v2_body"].get("scope") == 0
+
+    def test_list_known_clients_active_filter(self, omada_read_upstream):
+        _omada_read_integration(omada_read_upstream)
+        out = json.loads(run_tool("omada", "list_known_clients",
+                                  {"siteId": "S1", "active": True}))
+        assert all(r["active"] is True for r in out["rows"])
+        assert out["matched"] == 1
+
+    def test_list_networks_names_guest_vlan(self, omada_read_upstream):
+        _omada_read_integration(omada_read_upstream)
+        out = json.loads(run_tool("omada", "list_networks", {"siteId": "S1"}))
+        row = next(r for r in out["rows"] if r["id"] == "64285b28c2a55c6ded3026a4")
+        assert row["name"] == "20-Guest_VLAN" and row["vid"] == 20
+        assert row["subnet"] == "192.168.20.254/24"
+
+    def test_list_acls_both_layers_resolved_and_normalized(self, omada_read_upstream):
+        _omada_read_integration(omada_read_upstream)
+        out = json.loads(run_tool("omada", "list_acls", {"siteId": "S1"}))
+        assert set(out["layers"]) == {"gateway", "switch"}
+        g = out["layers"]["gateway"]
+        first = g[0]
+        assert first["index"] == 1 and first["action"] == "allow"
+        assert first["src"] == ["Kindle"]  # type 1 (IP group) resolved
+        deny = next(r for r in g if r["name"] == "Deny_LAN_Aqua")
+        assert deny["action"] == "deny"
+        assert deny["dst"] == ["20-Guest_VLAN"]  # type 0 (network) resolved
+        assert out["normalized"]["gateway"]["order"][0] == "R1"
+        assert out["normalized"]["switch"]["hash"]
+
+    def test_list_dhcp_search_by_ip_and_mac(self, omada_read_upstream):
+        _omada_read_integration(omada_read_upstream)
+        out = json.loads(run_tool("omada", "list_dhcp_reservations",
+                                  {"siteId": "S1", "search": "192.168.20.1"}))
+        assert out["matched"] == 1 and out["rows"][0]["mac"] == "4C-D5-77-7B-13-7D"
+        out2 = json.loads(run_tool("omada", "list_dhcp_reservations",
+                                   {"siteId": "S1", "search": "4c-d5-77-7b-13-7d"}))
+        assert out2["matched"] == 1 and out2["rows"][0]["ip"] == "192.168.20.1"
+        assert out2["rows"][0]["netName"] == "20-Guest_VLAN"
+
+    def test_get_device_detail_and_full_extras(self, omada_read_upstream):
+        _omada_read_integration(omada_read_upstream)
+        out = json.loads(run_tool("omada", "get_device",
+                                  {"siteId": "S1", "deviceMac": "9C-A2-F4-40-14-86"}))
+        assert out["name"] == "Router-ER605 v2.0" and out["firmwareVersion"].startswith("2.3.2")
+        out_full = json.loads(run_tool("omada", "get_device",
+                                       {"siteId": "S1", "deviceMac": "9C-A2-F4-40-14-86",
+                                        "full": True}))
+        assert "extras" in out_full
+
+    def test_get_device_not_found_typed_error(self, omada_read_upstream):
+        _omada_read_integration(omada_read_upstream)
+        out = json.loads(run_tool("omada", "get_device",
+                                  {"siteId": "S1", "deviceMac": "00-00-00-00-00-00"}))
+        assert out["error"]["code"] == "invalid_request"
+
+    def test_list_client_events_client_filter_and_window(self, omada_read_upstream):
+        _omada_read_integration(omada_read_upstream)
+        out = json.loads(run_tool("omada", "list_client_events",
+                                  {"siteId": "S1", "timeStart": 1789000000000,
+                                   "timeEnd": 1791000000000, "clientMac": "4C-D5-77-7B-13-7D"}))
+        assert out["matched"] == 1
+        assert out["rows"][0]["clientMac"] == "4C-D5-77-7B-13-7D"
+        assert out["rows"][0]["key"] == "L_C_DISCONN"
+        assert "timeStart" in out["window"] and out["retention_note"]
+        assert "filters.timeStart" in omada_read_upstream["state"]["events_qs"]
+
+    def test_get_client_presence_fields_without_full(self, omada_read_upstream):
+        _omada_read_integration(omada_read_upstream)
+        out = json.loads(run_tool("omada", "get_client",
+                                  {"siteId": "S1", "clientMac": "4C-D5-77-7B-13-7D"}))
+        assert out["active"] is False and out["wireless"] is True
+        assert out["lastSeen"] == 1776354579166
+        assert out["ipSetting"]["useFixedAddr"] is True
+        assert out["ipSetting"]["ip"] == "192.168.20.1"
+
+    def test_list_site_devices_totals_envelope(self, omada_read_upstream):
+        _omada_read_integration(omada_read_upstream)
+        out = json.loads(run_tool("omada", "list_site_devices", {"siteId": "S1"}))
+        assert set(out) >= {"totalRows", "returned", "truncated", "rows"}
+        assert out["totalRows"] == 5 and out["returned"] == 2
+        assert out["truncated"] is True
+
+
+@pytest.fixture
+def omada_error_upstream():
+    """OAuth2 token exchange succeeds; the API returns a logical error inside an
+    HTTP 200 body (Omada errorCode -1), the classic 200-on-failure trap."""
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def _respond(self, status, payload):
+            body = json.dumps(payload).encode('utf-8')
+            self.send_response(status)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_POST(self):
+            if urlparse(self.path).path.endswith('/authorize/token'):
+                self._respond(200, {'result': {'accessToken': 'tok-1', 'expiresIn': 7200}})
+                return
+            self._respond(404, {'error': 'not found'})
+
+        def do_GET(self):
+            if urlparse(self.path).path.endswith('/authorize/token'):
+                self._respond(200, {'result': {'accessToken': 'tok-1'}})
+                return
+            self._respond(200, {'errorCode': -1, 'msg': 'General error.'})
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), _Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield {'base_url': f"http://127.0.0.1:{server.server_address[1]}"}
+    server.shutdown()
+    server.server_close()
+
+
+def test_upstream_logical_error_never_reports_200(omada_error_upstream):
+    from core.integration_proxy import _oauth_tokens
+    _oauth_tokens.clear()
+    create_integration(
+        "omada", omada_error_upstream['base_url'] + "/openapi/v1/omadac-1", "oauth2", "",
+        client_id="cid", client_secret="csecret",
+        token_url=omada_error_upstream['base_url'] + "/openapi/authorize/token",
+        kind="omada")
+    seed_for_kind(get_integration("omada"))
+    out = json.loads(run_tool("omada", "list_sites", {"siteId": "S1"}))
+    assert out["status_code"] != 200
+    assert "Omada error -1" in out["error"]
+
+
+def test_new_tool_stamps_session_id_in_audit(omada_read_upstream):
+    """§5.6 regression: a newly added tool must forward session_id/execution_id
+    into the audit row (agent + session grouping), not record empty values."""
+    from db.integrations import get_integration_calls
+    _omada_read_integration(omada_read_upstream)
+    run_tool("omada", "list_networks",
+             {"siteId": "S1", "session_id": "sess-abc", "execution_id": "exec-7"})
+    calls = get_integration_calls(session="sess-abc")
+    assert calls["total"] >= 1
+    row = calls["rows"][0]
+    assert row["tool"] == "list_networks"
+    assert row["session_id"] == "sess-abc"
+    assert row["execution_id"] == "exec-7"
+    assert row["agent"] == "mcp"

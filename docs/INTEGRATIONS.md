@@ -180,7 +180,7 @@ Eshu ships **curated tool catalogs** for these kinds — seeded via **Integratio
 | Kind | Auth type | Notes |
 |------|-----------|-------|
 | **Proxmox** | `header` (`Authorization: PVEAPIToken=…`) | reads + approval-gated VM lifecycle tools |
-| **Omada** | `oauth2` | client-credentials token exchange; auto re-auth on expiry. List reads auto-inject `page/pageSize`; ACL creates return the created rule's id; `acl_reorder` rebuilds the full rule map server-side (approval-gated) |
+| **Omada** | `oauth2` | client-credentials token exchange; auto re-auth on expiry. List reads auto-inject `page/pageSize`; ACL creates return the created rule's id; `acl_reorder` rebuilds the full rule map server-side (approval-gated). Read completeness: `list_known_clients` enumerates **all** clients (online + offline, v2 `scope=0`), `list_networks`, `list_acls`, `list_dhcp_reservations`, `get_device` and `list_client_events` close the read side, and the list tools report `totalRows`/`returned`/`truncated` |
 | **Home Assistant** | `bearer` (long-lived token) | `call_service` is mutating → approval |
 | **Pulse** | `bearer`/`header` | trends, backups (large payloads truncated to 1MB) |
 | **Jellyfin** | `header` (`X-Emby-Token`) | mutations always gated |
@@ -198,7 +198,7 @@ Every MCP tool is namespaced by its **integration name** (sanitized to `[a-z0-9_
 | Integration name | Example tools |
 |------------------|---------------|
 | `proxmox` | `proxmox_list_nodes`, `proxmox_get_vm_status`, `proxmox_start_vm` |
-| `omada` | `omada_list_sites`, `omada_search_devices`, `omada_block_client` |
+| `omada` | `omada_list_sites`, `omada_list_known_clients`, `omada_get_client`, `omada_list_acls`, `omada_block_client` |
 | `home-assistant` | `home_assistant_list_entities`, `home_assistant_call_service` |
 | `pihole-main` | `pihole_main_get_summary`, `pihole_main_get_top_clients` |
 | `jellyfin` | `jellyfin_get_media_items`, `jellyfin_scan_library` |
@@ -223,6 +223,20 @@ substring filter on that field) and **`limit`** (max results, default 50), so th
 agent can bound large lists client-side (e.g. `ha_list_entities(search="light")`
 returns only `light.*` entities). These are client-side shaping — they filter/trim
 the response in the proxy and are never forwarded upstream.
+
+## List completeness (totals + truncation)
+
+List tools that opt in with `totals: true` (the Omada read tools, e.g.
+`omada_list_site_devices`) wrap their result as
+`{"totalRows": N, "returned": M, "truncated": bool, "rows": [...]}` so a filtered
+or paged view is never mistaken for the whole set. `totalRows` is the upstream
+grid total (captured before projection); `truncated` is true when the returned
+rows are fewer than that total. The Omada transform-backed reads
+(`list_known_clients`, `list_networks`, `list_acls`, `list_dhcp_reservations`,
+`list_client_events`) emit the same envelope plus a `matched` count, and their
+errors are typed as `{"error": {"code", "message", "upstream"?}}`. Upstream
+logical errors (e.g. Omada `errorCode -1` inside an HTTP 200 body) are reported
+with a non-2xx `status_code`, never 200.
 
 ## Adding more integrations
 

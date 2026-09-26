@@ -437,6 +437,16 @@ def _apply_shaping(body: str, tool: dict, args: dict, integration: dict = None) 
     (e.g. Omada's {errorCode,msg,result}) even when there is nothing to
     project, so passthrough tools still drop the wrapper."""
     a = args or {}
+    # Curated HTTP tools are shaped here and then again by run_tool; plain
+    # projection is idempotent, but the opt-in totals envelope is not — detect
+    # an already-shaped envelope and pass it through unchanged.
+    try:
+        _pre = json.loads(body)
+    except (ValueError, TypeError):
+        _pre = None
+    if (isinstance(_pre, dict)
+            and {'totalRows', 'returned', 'truncated', 'rows'} <= set(_pre)):
+        return body
     transform = tool.get('transform')
     if transform:
         # A registered transform owns the whole result (compact projection,
@@ -455,6 +465,14 @@ def _apply_shaping(body: str, tool: dict, args: dict, integration: dict = None) 
         data = json.loads(body)
     except (ValueError, TypeError):
         return body
+    # Opt-in completeness envelope (tool `totals: true`): capture the upstream
+    # grid totalRows before unwrapping so the result can report whether it is
+    # the whole set. Without this a filtered/paged list looks exhaustive.
+    total = None
+    if isinstance(data, dict):
+        _res = data.get('result')
+        if isinstance(_res, dict) and isinstance(_res.get('totalRows'), int):
+            total = _res['totalRows']
     data = _unwrap_envelope(data)
     if isinstance(data, list):
         if filter_fields:
@@ -480,9 +498,22 @@ def _apply_shaping(body: str, tool: dict, args: dict, integration: dict = None) 
                     pass
     if fields:
         if isinstance(data, list):
-            return json.dumps([_project_dict(item, fields) if isinstance(item, dict) else item for item in data])
+            rows = [_project_dict(item, fields) if isinstance(item, dict) else item for item in data]
+            if tool.get('totals') and not a.get('full'):
+                return json.dumps({
+                    'totalRows': total if total is not None else len(rows),
+                    'returned': len(rows),
+                    'truncated': bool(total is not None and len(rows) < total),
+                    'rows': rows})
+            return json.dumps(rows)
         if isinstance(data, dict):
             return json.dumps(_project_dict(data, fields))
+    if tool.get('totals') and isinstance(data, list) and not a.get('full'):
+        return json.dumps({
+            'totalRows': total if total is not None else len(data),
+            'returned': len(data),
+            'truncated': bool(total is not None and len(data) < total),
+            'rows': data})
     if search_field or filter_fields or strip_envelope:
         return json.dumps(data)
     return body

@@ -1040,6 +1040,79 @@ def _omada_group_remove_members(integration, tool, args, data):
     return _omada_group_members(integration, args, add=False)
 
 
+def _omada_read(fn, integration, args):
+    """Shared driver for the curated Omada read tools: call `fn(integration,
+    site_id, **kwargs)` and map ValueError to a typed `invalid_request`, any
+    other failure to `upstream_error`. Never returns a bare {}."""
+    from core.omada_utils import omada_error
+    a = args or {}
+    site_id = a.get('siteId')
+    if not site_id:
+        return omada_error('invalid_request', 'siteId is required')
+    try:
+        return json.dumps(fn(integration, site_id, **a))
+    except ValueError as e:
+        return omada_error('invalid_request', str(e))
+    except Exception as e:  # noqa: BLE001 - never leak a traceback to the model
+        return omada_error('upstream_error', '%s: %s' % (type(e).__name__, e))
+
+
+def _omada_list_known_clients(integration, tool, args, data):
+    """T1: enumerate all known clients (online + offline + blocked)."""
+    from core.omada_utils import list_known_clients
+    a = args or {}
+    return _omada_read(lambda i, s, **kw: list_known_clients(
+        i, s, search=kw.get('search', ''), active=kw.get('active'),
+        wireless=kw.get('wireless'), page=kw.get('page', 1),
+        page_size=kw.get('pageSize', 50)), integration, a)
+
+
+def _omada_list_networks(integration, tool, args, data):
+    """T2: LAN network inventory (id ↔ name ↔ VLAN ↔ subnet)."""
+    from core.omada_utils import list_networks
+    return _omada_read(lambda i, s, **kw: list_networks(i, s), integration, args or {})
+
+
+def _omada_list_acls(integration, tool, args, data):
+    """T3: gateway + switch ACLs in evaluation order, resolved, with a
+    normalized diff block."""
+    from core.omada_utils import list_acls
+    a = args or {}
+    return _omada_read(lambda i, s, **kw: list_acls(
+        i, s, layer=kw.get('layer', 'both')), integration, a)
+
+
+def _omada_list_dhcp_reservations(integration, tool, args, data):
+    """T4: the DHCP user/binding table (MAC ↔ IP ↔ network ↔ name)."""
+    from core.omada_utils import list_dhcp_reservations
+    a = args or {}
+    return _omada_read(lambda i, s, **kw: list_dhcp_reservations(
+        i, s, search=kw.get('search', ''), page=kw.get('page', 1),
+        page_size=kw.get('pageSize', 50)), integration, a)
+
+
+def _omada_get_device(integration, tool, args, data):
+    """T5: one device's detail by MAC (from /devices/all)."""
+    from core.omada_utils import get_device
+    a = args or {}
+    device_mac = a.get('deviceMac')
+    if not device_mac:
+        from core.omada_utils import omada_error
+        return omada_error('invalid_request', 'deviceMac is required')
+    return _omada_read(lambda i, s, **kw: get_device(
+        i, s, device_mac, full=bool(kw.get('full'))), integration, a)
+
+
+def _omada_list_client_events(integration, tool, args, data):
+    """T6: connect/disconnect event log, optionally narrowed to one MAC."""
+    from core.omada_utils import list_client_events
+    a = args or {}
+    return _omada_read(lambda i, s, **kw: list_client_events(
+        i, s, client_mac=kw.get('clientMac', ''), module=kw.get('module', 'Client'),
+        time_start=kw.get('timeStart'), time_end=kw.get('timeEnd'),
+        page=kw.get('page', 1), page_size=kw.get('pageSize', 50)), integration, a)
+
+
 TRANSFORMS = {
     'pulse_health': _health,
     'pulse_fleet_summary': _fleet_summary,
@@ -1080,6 +1153,12 @@ TRANSFORMS = {
     'omada_list_groups': _omada_list_groups,
     'omada_group_add_members': _omada_group_add_members,
     'omada_group_remove_members': _omada_group_remove_members,
+    'omada_list_known_clients': _omada_list_known_clients,
+    'omada_list_networks': _omada_list_networks,
+    'omada_list_acls': _omada_list_acls,
+    'omada_list_dhcp_reservations': _omada_list_dhcp_reservations,
+    'omada_get_device': _omada_get_device,
+    'omada_list_client_events': _omada_list_client_events,
 }
 
 # Transforms that consume the raw body as text (non-JSON endpoints).
