@@ -92,7 +92,8 @@ from core.cmd_profiles import get_anomaly, refresh_profiles, _profiles_loop
 from core.gateway_watch import (
     _check_gateway_transitions, _gateway_watch_loop,
     _stale_gateway_cleanup_loop, _fleet_cleanup_loop, _integration_cleanup_loop,
-    _disconnected_gateways, _offline_alerted, OFFLINE_THRESHOLD,
+    _disconnected_gateways, _offline_alerted, OFFLINE_THRESHOLD, DISCONNECTED_AFTER,
+    UPDATE_ACTIVE_WINDOW,
 )
 from core.utils import DASHBOARD_VERSION, decode_cmd, _resolve_gateway_token, _hash_password, _verify_password
 from core.integration_auth import resolve_agent, resolve_agent_optional, extract_agent_token
@@ -786,11 +787,24 @@ def list_gateways(request: Request):
     pua = get_policy_updated_at()
     now = int(time.time())
     _check_gateway_transitions(now)
+    # Most recent fleet/dev update trigger — an offline gateway shortly after a
+    # trigger is "updating" (installing + restarting services), not dead.
+    def _as_int(v):
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return 0
+    update_ts = max(_as_int(get_trigger_update_version()), _as_int(get_trigger_dev_update()))
+    update_recent = update_ts > 0 and (now - update_ts) <= UPDATE_ACTIVE_WINDOW
     for g in gateways:
         g['current_policy_version'] = pv
         g['policy_updated_at'] = pua
         g['policy_synced'] = g.get('policy_version', 0) >= pv
         g['has_token'] = bool(g.get('api_token'))
+        g['last_seen_ago'] = max(0, now - (g.get('last_seen') or 0))
+        g['online'] = g['last_seen_ago'] <= DISCONNECTED_AFTER
+        g['update_trigger_ts'] = update_ts
+        g['updating'] = (not g['online']) and update_recent
         override_until = g.get('override_until', 0) or 0
         g['override_remaining'] = max(0, override_until - now)
     return gateways
@@ -1691,7 +1705,7 @@ def get_statistics(request: Request, days: int = 14, gateway_ip: str = None, gat
         total_gws = cursor.fetchone()['total']
         cursor.execute('SELECT COUNT(*) AS cnt FROM gateways WHERE api_token IS NOT NULL AND api_token != \'\'')
         token_count = cursor.fetchone()['cnt']
-        cursor.execute('SELECT COUNT(*) AS cnt FROM gateways WHERE ? - last_seen < 120', (now,))
+        cursor.execute('SELECT COUNT(*) AS cnt FROM gateways WHERE ? - last_seen < ?', (now, DISCONNECTED_AFTER))
         online_count = cursor.fetchone()['cnt']
         result['gateway_health'] = {
             'version_distribution': version_dist,

@@ -2333,6 +2333,7 @@ input::placeholder, textarea::placeholder { color: rgba(122,109,94,0.55); }
 .g-node.big .n-ini{font-size:9px}
 .g-node.small .n-dot{width:5px;height:5px;box-shadow:0 0 6px rgba(245,158,11,0.35)}
 .g-node.off .n-dot{background:var(--muted);box-shadow:none;opacity:0.45}
+.g-node.updating .n-dot{background:var(--status-warning);box-shadow:0 0 10px var(--status-warning);animation:cc-pulse 1.6s infinite}
 .g-node .n-ini{font-family:'JetBrains Mono',monospace;font-size:8px;letter-spacing:1px;color:var(--fg-dim);background:rgba(8,12,20,0.72);padding:1px 4px;border-radius:3px;border:1px solid rgba(255,255,255,0.06);line-height:1.2}
 .g-node:hover .n-ini{color:var(--accent);border-color:rgba(245,158,11,0.4)}
 .g-node .tip{position:absolute;bottom:calc(100% + 12px);left:50%;transform:translateX(-50%);background:rgba(26,23,20,0.96);border:1px solid rgba(245,158,11,0.3);border-radius:var(--radius-sm);padding:8px 11px;font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--fg);white-space:nowrap;opacity:0;pointer-events:none;transition:opacity .15s;box-shadow:0 6px 22px rgba(0,0,0,0.55);z-index:5;display:flex;flex-direction:column;gap:3px;min-width:130px}

@@ -7,15 +7,28 @@ from core.notify import send_notify
 
 _disconnected_gateways = set()
 _offline_alerted = set()
+# Single source of truth for "online": a gateway is considered disconnected once
+# it has not been heard from for DISCONNECTED_AFTER seconds. The poller and the
+# logger each report every 30s, so a 30s threshold flapped on normal jitter; this
+# allows several missed cycles. `/api/gateways` exposes the derived `online` bool
+# so the UI never has to re-derive it (or depend on the client clock).
+DISCONNECTED_AFTER = 120
+# Webhook/notification threshold (kept looser than the UI disconnect state).
 OFFLINE_THRESHOLD = 300
+# After a fleet/dev update is triggered, a gateway that stops reporting is almost
+# certainly installing + restarting its services rather than dead. Within this
+# window after the trigger, an offline gateway is reported as `updating` (the UI
+# shows "Updating…" instead of "Offline"). Heuristic — per-gateway completion is
+# not reliably observable.
+UPDATE_ACTIVE_WINDOW = 600
 
 def _check_gateway_transitions(now: int):
     gateways = get_gateways()
     for g in gateways:
-        if now - g['last_seen'] > 30 and g['ip'] not in _disconnected_gateways:
+        if now - g['last_seen'] > DISCONNECTED_AFTER and g['ip'] not in _disconnected_gateways:
             record_audit_event("disconnected", g['ip'], g.get('hostname'), f"Last seen {now - g['last_seen']}s ago")
             _disconnected_gateways.add(g['ip'])
-        elif now - g['last_seen'] <= 30 and g['ip'] in _disconnected_gateways:
+        elif now - g['last_seen'] <= DISCONNECTED_AFTER and g['ip'] in _disconnected_gateways:
             _disconnected_gateways.discard(g['ip'])
             record_audit_event("connected", g['ip'], g.get('hostname'), "Reconnected")
         if now - g['last_seen'] > OFFLINE_THRESHOLD and g['ip'] not in _offline_alerted:

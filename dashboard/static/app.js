@@ -1511,12 +1511,20 @@ function detectNewIntegrationCalls() {
 }
 
 // ── JIT Ticket Rendering ─────────────────────────────────────────────────
-var GATEWAY_DISCONNECTED_AFTER = 60; // seconds without contact before a gateway is reported disconnected
+// Single source of truth (mirrors core/gateway_watch.DISCONNECTED_AFTER).
+// `/api/gateways` returns a derived `online` bool; gwIsOnline() prefers it so the
+// UI never depends on the client clock. Fallback recomputes from last_seen.
+var GATEWAY_OFFLINE_AFTER = 120; // seconds without contact before a gateway is reported offline
+function gwIsOnline(g) {
+  if (!g) return false;
+  if (typeof g.online === 'boolean') return g.online;
+  return (Math.floor(Date.now() / 1000) - (g.last_seen || 0)) < GATEWAY_OFFLINE_AFTER;
+}
 
 function emptyStateSignature() {
   var now = Math.floor(Date.now() / 1000);
   var gwSig = (_gatewaysData || []).map(function(g){
-    var stale = (now - (g.last_seen || 0)) >= GATEWAY_DISCONNECTED_AFTER;
+    var stale = !gwIsOnline(g);
     return (g.hostname || g.ip) + ':' + (stale ? '0' : '1');
   }).sort().join('|');
   // Include session count so recent sessions panel re-renders
@@ -1639,10 +1647,10 @@ function buildStarfield(layoutIdx){
   order.forEach(function(pi,gi){
     if(gi<N){
       var g=gws[gi], p=pts[pi];
-      var isOnline=(now-(g.last_seen||0))<GATEWAY_DISCONNECTED_AFTER;
+      var isOnline=gwIsOnline(g);
       var isPending=!!pendingSet[g.hostname||g.ip];
       var isOverridden=(g.override_remaining||0)>0;
-      var cls=isOverridden?'overridden':(isPending?'pending':(isOnline?'':'offline'));
+      var cls=isOverridden?'overridden':(isPending?'pending':(isOnline?'':(g.updating?'updating':'offline')));
       placeGatewayNode(g, p.x, p.y, cls, ptConst[pi]);
       used[pi]=true;
     }
@@ -1772,7 +1780,7 @@ function renderEmptyState(total) {
   var now = Math.floor(Date.now() / 1000);
   var gws = (_gatewaysData || []).filter(function(g){ return g.hostname || g.ip; });
   var enrolled = gws.length;
-  var disconnected = gws.filter(function(g){ return (now - (g.last_seen || 0)) >= GATEWAY_DISCONNECTED_AFTER; }).length;
+  var disconnected = gws.filter(function(g){ return !gwIsOnline(g) && !g.updating; }).length;
   var online = enrolled - disconnected;
 
   var recent = (requestsData || []).find(function(r){ return r.created_at; });
@@ -3155,13 +3163,19 @@ async function fetchGateways() {
   if (data.length === 0) { tbody.innerHTML = '<tr><td colspan="8" class="px-4 py-3 text-muted">No gateways registered.</td></tr>'; return; }
   const now = Math.floor(Date.now() / 1000);
   tbody.innerHTML = data.map(function(g) {
-    const diff = now - g.last_seen, isOnline = diff < 30;
-    const connDot = isOnline ? '<span class="conn-dot on" title="Connected"></span>' : '<span class="conn-dot off" title="Disconnected"></span>';
-    const statusCell = connDot + (isOnline ? '<span class="text-success text-xs">Connected</span>' : '<span class="text-muted text-xs">Offline · ' + formatLastSeen(diff) + '</span>');
+    const diff = now - g.last_seen, isOnline = gwIsOnline(g);
+    const updating = !!g.updating;
+    const connDot = isOnline
+      ? '<span class="conn-dot on" title="Connected"></span>'
+      : (updating ? '<span class="conn-dot on" title="Updating"></span>' : '<span class="conn-dot off" title="Disconnected"></span>');
+    const statusCell = connDot + (isOnline
+      ? '<span class="text-success text-xs">Connected</span>'
+      : (updating ? '<span class="text-warning text-xs">Updating\u2026</span>'
+                  : '<span class="text-muted text-xs">Offline \u00b7 ' + formatLastSeen(diff) + '</span>'));
     const pua = g.policy_updated_at || 0;
     const syncCell = isOnline
       ? (pua > 0 ? '<span class="text-muted text-xs">✓ synced ' + formatAgo(now - pua) + '</span>' : '<span class="text-muted text-xs">—</span>')
-      : '<span class="text-muted text-xs">unknown</span>';
+      : (updating ? '<span class="text-muted text-xs">updating…</span>' : '<span class="text-muted text-xs">unknown</span>');
     const hbDot = function(ok, title) { return '<span class="' + (ok ? 'text-success' : 'text-danger') + '" title="' + title + '">⬤</span> '; };
     const healthCell = g.last_heartbeat > 0
       ? '<span class="hb-status">' +
@@ -3558,7 +3572,7 @@ function initFleetSounds() {
   _fleetSoundInit = true;
   document.addEventListener('pointerdown', function () { try { audioFleet(); } catch (e) {} }, { passive: true });
 }
-function _gwOnline(g) { var now = Math.floor(Date.now() / 1000); return !!g && !((now - (g.last_seen || 0)) > 240); }
+function _gwOnline(g) { return gwIsOnline(g); }
 function buildFleetSky() {
   var wrap = document.getElementById('nodes');
   if (!wrap || wrap.dataset.built) return;
@@ -4385,6 +4399,10 @@ async function fetchDevStatus() {
     const res = await authFetch('/api/dev/status');
     if (!res.ok) return;
     const data = await res.json();
+    // Keep the dev-gateway pills in sync with the server on every status render;
+    // otherwise the panel shows a stale/empty list until a gateway is added or
+    // removed by hand.
+    fetchDevGateways();
     const goldenLabel = document.getElementById('golden-version-label');
     const edgeLabel = document.getElementById('edge-version-label');
     const fleetLabel = document.getElementById('fleet-version-label');
@@ -5075,7 +5093,7 @@ function renderStatsNodes(d) {
   }
   el.innerHTML = '<svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">' + lines + '</svg>' + gws.map(function (g, i) {
     var p = placed[i];
-    var online = !g.last_seen || (now - g.last_seen) < 120;
+    var online = !g.last_seen || gwIsOnline(g);
     var jitA = (g.total || 0) - (g.auto_approved || 0) - (g.blocked || 0) - (g.denied || 0);
     var autoPct = g.total > 0 ? Math.round(((g.auto_approved || 0) + jitA) / g.total * 100) : 0;
     var cls = 'g-node' + (g.total >= maxT * 0.5 ? ' big' : (g.total <= maxT * 0.15 ? ' small' : '')) + (online ? '' : ' off') +
@@ -5165,12 +5183,11 @@ function renderStatistics() {
 async function checkGatewayHealth() {
   try {
     const res = await fetch('/api/gateways'); const data = await res.json();
-    const now = Math.floor(Date.now() / 1000);
-    // Detect offline/online transitions for notifications
+    // Detect offline transitions for notifications (uses the server-derived
+    // `online`, i.e. the same DISCONNECTED_AFTER definition as the table).
     var nextOffline = new Set();
     data.forEach(function(g) {
-      var gateNow = now - Math.floor(g.last_seen);
-      if (gateNow > 120) nextOffline.add(g.ip);
+      if (!gwIsOnline(g) && !g.updating) nextOffline.add(g.ip);
     });
     // Newly offline
     nextOffline.forEach(function(ip) {
