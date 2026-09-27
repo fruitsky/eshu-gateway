@@ -108,17 +108,21 @@ terse "run as root":
 All probes are `if`/`command -v` guarded so `set -euo pipefail` never aborts on
 a non-root environment.
 
-### Token self-heal
+### Token recovery
 
-The poller self-heals a missing `GATEWAY_TOKEN` by re-registering with the
-dashboard. It is **cooldown-gated (60s)** rather than once-per-boot so a
-gateway that loses its token (e.g. re-enrolled on an un-rebooted host) can
-always recover — the old once-per-boot marker (`/var/run/eshu.self_heal_done`)
-was never cleared on reinstall, leaving such gateways permanently token-less.
-The installer clears the guard files (`self_heal_done`, `self_heal_ts`) on
-install/reinstall, and the uninstaller removes them too. The poller change
-ships to gateways via the deploy pipeline (Seed Edge → Push to Dev → Deploy to
-Fleet).
+Gateways authenticate to the dashboard with a per-gateway API token
+(`X-Gateway-Token`). A token is minted at enrollment and embedded in the
+gateway/poller scripts; it is never disclosed to an unauthenticated caller.
+
+The old poller self-heal (re-registering token-less to obtain a token) was
+**removed**: it was an insecure path that returned a token for a self-reported
+IP to anyone on the LAN. If a gateway loses its token, the recovery path is to
+**re-enroll** it — run the enrollment one-liner again from the dashboard
+(Enrollment → copy command), which mints a fresh token.
+
+`eshu-logger.sh` reads the token from `/usr/local/bin/eshu-gateway.sh` at
+runtime (it is never templated into the logger), so the heartbeat keeps working
+across script updates.
 
 ### Running tests
 

@@ -16,19 +16,19 @@ only the dashboard UI after login.
 |--------|------|---------|------|
 | `GET` | `/api/version` | Product version (e.g. `v0.1.0`, `dev_mode` on non-master branches). **Blocked for gateway-token callers** — dashboard UI and gateways (no token header) only | Public |
 | `GET` | `/api/cmd-descs` | Static + `whatis` command description dictionary for the UI | Public |
-| `POST` | `/api/register` | Register/update a gateway, mint/return its API token | Public |
-| `POST` | `/api/request` | Submit a JIT approval request | Public |
-| `POST` | `/api/log` | Log auto-approved/blocked events from the gateway | Public |
-| `POST` | `/api/gateway-heartbeat` | Health heartbeat from `eshu-logger` (poller/gateway/reachability flags) | Public |
+| `POST` | `/api/register` | Register/update a gateway, mint/return its API token. Re-register needs the gateway's token/session; a **new** IP needs a single-use enrollment token (`X-Enrollment-Token`) | Gateway / Enrollment |
+| `POST` | `/api/request` | Submit a JIT approval request | Gateway |
+| `POST` | `/api/log` | Log auto-approved/blocked events from the gateway | Gateway |
+| `POST` | `/api/gateway-heartbeat` | Health heartbeat from `eshu-logger` (poller/gateway/reachability flags) | Gateway |
 | `GET` | `/api/poll/{ip}` | Poll for approved JIT tickets | Gateway |
 | `GET` | `/api/policy/{ip}` | Fetch policies + trigger flags + windows for a gateway | Gateway |
 | `GET` | `/api/ticket/{id}` | Direct ticket claim by request ID | Gateway |
-| `GET` | `/api/request_status/{id}` | Check JIT request status | Public |
+| `GET` | `/api/request_status/{id}` | Check JIT request status | Gateway |
 | `GET` | `/api/gateway-script` | Raw golden installer (UTF-8) | Public |
 | `GET` | `/api/gateway-script-rollback` | Previous golden installer (for rollback) | Public |
 | `POST` | `/api/approved-windows/execute/{token}` | Increment usage on a valid window token (called by gateway) | Gateway |
-| `POST` | `/api/uninstall-started/{ip}` | Poller confirmation that the transient uninstall service launched (clears the re-spawn trigger) | Public |
-| `POST` | `/api/uninstall-progress` | Progress updates from the uninstall service | Public |
+| `POST` | `/api/uninstall-started/{ip}` | Poller confirmation that the transient uninstall service launched (clears the re-spawn trigger) | Gateway |
+| `POST` | `/api/uninstall-progress` | Progress updates from the uninstall service | Gateway |
 | `GET` | `/api/docs/agent-windows` | Alias for the AI agent manual | Public |
 | `GET` | `/api/docs/agent-manual` | Full AI agent manual (gateway interaction + Approved Windows) | Public |
 

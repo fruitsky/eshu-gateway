@@ -96,8 +96,8 @@ class TestStatsExtended:
         assert "windows_summary" not in data
         assert "gateway_health" not in data
 
-    def test_extended_empty_database(self, client):
-        r = client.get("/api/statistics?days=7&extended=1")
+    def test_extended_empty_database(self, auth_client):
+        r = auth_client.get("/api/statistics?days=7&extended=1")
         assert r.status_code == 200
         data = r.json()
         assert len(data["hourly_heatmap"]) == 24

@@ -500,12 +500,8 @@ def register(payload: RegisterPayload, request: Request):
 
 @app.post("/api/request")
 def receive_request(payload: GatewayPayload, request: Request):
-    # Resolve canonical IP from gateway token (v15+ auth)
-    token_ip, _ = _resolve_gateway_token(request)
-    target_ip = token_ip if token_ip else payload.target_ip
-    # If token present, validate self-reported IP matches token's canonical IP
-    if token_ip and token_ip != payload.target_ip:
-        raise HTTPException(status_code=401, detail="Gateway token does not match self-reported target_ip")
+    # Authenticated gateway (X-Gateway-Token bound to its IP) or dashboard session.
+    target_ip = _require_gateway(request, payload.target_ip)
 
     _check_rate_limit(target_ip)
     cmd = decode_cmd(payload.encoded_command)
@@ -533,11 +529,8 @@ def receive_request(payload: GatewayPayload, request: Request):
 
 @app.post("/api/log")
 def receive_log(payload: GatewayPayload, request: Request):
-    # Resolve canonical IP from gateway token (v15+ auth)
-    token_ip, _ = _resolve_gateway_token(request)
-    target_ip = token_ip if token_ip else payload.target_ip
-    if token_ip and token_ip != payload.target_ip:
-        raise HTTPException(status_code=401, detail="Gateway token does not match self-reported target_ip")
+    # Authenticated gateway (X-Gateway-Token bound to its IP) or dashboard session.
+    target_ip = _require_gateway(request, payload.target_ip)
 
     cmd = decode_cmd(payload.encoded_command)
     create_request(target_ip, cmd, status=payload.status, ttl=0, reason=payload.reason, session_id=(payload.session_id or '')[:64], execution_id=(payload.execution_id or '')[:64])
@@ -562,6 +555,7 @@ class HeartbeatPayload(BaseModel):
 @app.post("/api/gateway-heartbeat")
 def receive_heartbeat(payload: HeartbeatPayload, request: Request):
     """Called by eshu-logger.service every 30s to report gateway health."""
+    _require_gateway(request, payload.ip)
     _check_rate_limit(payload.ip)
     update_gateway_last_seen(payload.ip)
     update_gateway_heartbeat(payload.ip, payload.hostname,
@@ -659,7 +653,8 @@ def claim_ticket_by_id(req_id: int, request: Request):
 # ── Dashboard Endpoints (AUTH PROTECTED — sensitive operations) ─────────
 
 @app.get("/api/requests")
-def list_requests(search: str = None):
+def list_requests(request: Request, search: str = None):
+    _check_session(request)
     if search:
         reqs = search_requests(search)
     else:
@@ -979,7 +974,8 @@ def submit_fleet_result(cmd_id: int, payload: FleetResultPayload, request: Reque
     return {"status": "ok"}
 
 @app.get("/api/policies")
-def list_policies():
+def list_policies(request: Request):
+    _check_session(request)
     policies = get_policies()
     policies["policy_version"] = get_policy_version()
     policies["policy_updated_at"] = get_policy_updated_at()
@@ -1299,9 +1295,10 @@ class UninstallProgressPayload(BaseModel):
     message: str = ""
 
 @app.post("/api/uninstall-progress")
-def uninstall_progress(payload: UninstallProgressPayload):
+def uninstall_progress(payload: UninstallProgressPayload, request: Request):
     """Receive progress updates from the gateway uninstall script.
     Called by the transient eshu-uninstall systemd service as it works through cleanup steps."""
+    _require_gateway(request, payload.ip)
     set_uninstall_progress(payload.ip, payload.step, payload.message)
     if payload.step == "complete":
         clear_trigger_uninstall(payload.ip)
@@ -1315,15 +1312,17 @@ def uninstall_progress(payload: UninstallProgressPayload):
     return {"status": "ok"}
 
 @app.post("/api/uninstall-started/{ip}")
-def uninstall_started(ip: str):
+def uninstall_started(ip: str, request: Request):
     """Called by the poller after launching the transient uninstall service.
     Clears the trigger so the restarted poller doesn't re-spawn duplicate uninstalls."""
+    _require_gateway(request, ip)
     clear_trigger_uninstall(ip)
     return {"status": "ok"}
 
 @app.get("/api/uninstall-progress/{ip}")
-def get_uninstall_progress_for_ip(ip: str):
+def get_uninstall_progress_for_ip(ip: str, request: Request):
     """Fetch current uninstall progress for a gateway. Used by the dashboard UI."""
+    _check_session(request)
     progress = get_uninstall_progress(ip)
     if progress:
         return {"ip": ip, "progress": progress}
@@ -1406,7 +1405,8 @@ def serve_agent_manual():
 
 # --- Audit Log ---
 @app.get("/api/audit_log")
-def fetch_audit_log(search: str = None):
+def fetch_audit_log(request: Request, search: str = None):
+    _check_session(request)
     if search:
         logs = search_audit_log(search)
     else:
@@ -1534,10 +1534,11 @@ def serve_enrollment_script(token: str, request: Request):
 # ── Statistics ──────────────────────────────────────────────────────────
 
 @app.get("/api/statistics")
-def get_statistics(days: int = 14, gateway_ip: str = None, gateway_ips: str = None, extended: bool = False):
+def get_statistics(request: Request, days: int = 14, gateway_ip: str = None, gateway_ips: str = None, extended: bool = False):
     """Return per-gateway and daily command statistics for the dashboard chart.
     If gateway_ips is provided (comma-separated), filter all queries to those IPs.
     If extended=true, include hourly heatmap, automation trend, window stats, and gateway health."""
+    _check_session(request)
     from db.core import get_db as _get_db
     conn = _get_db()
     cursor = conn.cursor()
@@ -1729,8 +1730,9 @@ def get_statistics(days: int = 14, gateway_ip: str = None, gateway_ips: str = No
 
 
 @app.get("/api/statistics/export")
-def export_statistics(days: int = 14, format: str = "csv"):
+def export_statistics(request: Request, days: int = 14, format: str = "csv"):
     """Export daily statistics as CSV or JSON for external analysis."""
+    _check_session(request)
     import csv as _csv, io as _io
     cutoff = int(time.time()) - (days * 86400)
     from db.core import get_db as _get_db
@@ -1762,7 +1764,8 @@ def export_statistics(days: int = 14, format: str = "csv"):
 
 # --- Notes ---
 @app.get("/api/notes")
-def fetch_note():
+def fetch_note(request: Request):
+    _check_session(request)
     return {"content": get_note()}
 
 @app.post("/api/notes")

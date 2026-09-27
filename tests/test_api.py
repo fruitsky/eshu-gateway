@@ -108,7 +108,7 @@ class TestJitLifecycle:
         r = auth_client.get("/api/request_status/99999", headers=gateway_headers)
         assert r.status_code == 404
 
-    def test_window_rejected_creates_single_ticket(self, client, gateway_headers):
+    def test_window_rejected_creates_single_ticket(self, client, auth_client, gateway_headers):
         # A rejected window attempt must create exactly ONE request
         # (window-rejected) and must NOT also create a JIT ticket.
         import base64
@@ -121,7 +121,7 @@ class TestJitLifecycle:
             "token": "tok123"
         }, headers=gateway_headers)
         assert r.status_code == 200
-        reqs = client.get("/api/requests").json()
+        reqs = auth_client.get("/api/requests").json()
         wr = [x for x in reqs if x["status"] == "window-rejected"]
         assert len(wr) == 1
         assert wr[0]["command"] == "hostname"
