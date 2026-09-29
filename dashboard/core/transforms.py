@@ -724,7 +724,7 @@ def _arr_history(integration, tool, args, data):
     def _row(r):
         row = {}
         for k in ('id', 'eventType', 'date', 'seriesId', 'movieId',
-                  'episodeIds', 'sourceTitle', 'title'):
+                  'episodeId', 'sourceTitle', 'title'):
             if r.get(k) is not None:
                 row[k] = r[k]
         quality = r.get('quality') or {}

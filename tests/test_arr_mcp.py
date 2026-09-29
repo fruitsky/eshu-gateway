@@ -84,15 +84,25 @@ def arr_upstream():
                      'trackedDownloadStatus': 'ok', 'errorMessage': None,
                      'sizeleft': 100, 'timeleft': '00:01:00'}]})
             elif path == '/api/v3/history':
-                self._respond(200, {'totalRecords': 1, 'records': [
-                    {'id': 1, 'eventType': 'grabbed', 'title': '',
-                     'seriesId': 88, 'episodeIds': [3746],
-                     'sourceTitle': 'Show S01E10 Outside with Audio Description 1080p-Kitsune',
-                     'date': '2026-08-21T10:00:00Z',
-                     'quality': {'quality': {'id': 1, 'name': 'HDTV-720p'}},
-                     'indexer': {'id': 1, 'name': 'Nyaa'},
-                     'language': {'id': 18, 'name': 'Portuguese (PT)'},
-                     'data': {'droppedPath': '/media/x.mkv'}}]})
+                # History event ids are SINGULAR on the wire (verified live):
+                # Sonarr v4 -> episodeId (int); Radarr v6 -> movieId (int).
+                if self._key() == 'radarr-key':
+                    rec = {'id': 2, 'eventType': 'downloadFolderImported', 'title': '',
+                           'movieId': 86,
+                           'sourceTitle': 'Backrooms 2026 Repack Hybrid 1080p-HiDt',
+                           'date': '2026-08-26T20:57:00Z',
+                           'quality': {'quality': {'id': 3, 'name': 'Bluray-1080p'}},
+                           'data': {'droppedPath': '/media/movies/x.mkv'}}
+                else:
+                    rec = {'id': 1, 'eventType': 'grabbed', 'title': '',
+                           'seriesId': 88, 'episodeId': 3746,
+                           'sourceTitle': 'Show S01E10 Outside with Audio Description 1080p-Kitsune',
+                           'date': '2026-08-21T10:00:00Z',
+                           'quality': {'quality': {'id': 1, 'name': 'HDTV-720p'}},
+                           'indexer': {'id': 1, 'name': 'Nyaa'},
+                           'language': {'id': 18, 'name': 'Portuguese (PT)'},
+                           'data': {'droppedPath': '/media/x.mkv'}}
+                self._respond(200, {'totalRecords': 1, 'records': [rec]})
             elif path == '/api/v3/qualityprofile':
                 self._respond(200, [{'id': 1, 'name': 'HD-1080p', 'cutoff': 3,
                                      'items': [{'quality': {'id': 1, 'name': 'HDTV-720p'},
@@ -305,11 +315,21 @@ class TestArrReads:
         _make('sonarr', 'sonarr-key', 'sonarr', arr_upstream)
         rec = json.loads(run_tool('sonarr', 'history', {}))['records'][0]
         assert rec['seriesId'] == 88
-        assert rec['episodeIds'] == [3746]
+        assert rec['episodeId'] == 3746          # singular, from the raw API
+        assert 'episodeIds' not in rec            # the plural name never existed
+        assert 'movieId' not in rec
         assert rec['sourceTitle'].endswith('Kitsune')
         assert 'data' not in rec
         full = json.loads(run_tool('sonarr', 'history', {'full': True}))['records'][0]
         assert full['data']['droppedPath'] == '/media/x.mkv'
+        assert full['episodeId'] == 3746
+
+    def test_radarr_history_movieid(self, arr_upstream):
+        _make('radarr', 'radarr-key', 'radarr', arr_upstream)
+        rec = json.loads(run_tool('radarr', 'history', {}))['records'][0]
+        assert rec['movieId'] == 86
+        assert 'episodeId' not in rec
+        assert rec['sourceTitle'].endswith('HiDt')
 
     def test_quality_profiles_format_items(self, arr_upstream):
         _make('sonarr', 'sonarr-key', 'sonarr', arr_upstream)

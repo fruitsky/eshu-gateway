@@ -39,6 +39,33 @@ def _build_catalog(kind: str) -> list:
     singular = 'series' if sonarr else 'movie'
     plural = 'series' if sonarr else 'movies'
 
+    # History event ids are SINGULAR on the wire: Sonarr v4 uses `episodeId`
+    # (int), Radarr v6 uses `movieId` (int). (The command tool uses the plural
+    # `episodeIds` array — that is a different payload; do not conflate them.)
+    history_desc = (
+        "Recent history events (paginated). total + records with id, eventType "
+        "(grabbed/imported/deleted/failed), "
+        + ("seriesId, episodeId, sourceTitle, title, date, quality, indexer, "
+           "language. grabbed/imported rows carry sourceTitle (the release "
+           "title) and episodeId — use these to prove WHICH episode an event "
+           "was for and what release it actually was. full=true adds the raw "
+           "data blob."
+           if sonarr else
+           "movieId, sourceTitle, title, date, quality, indexer, language. "
+           "grabbed/imported rows carry sourceTitle (the release title) and "
+           "movieId — use these to prove WHICH movie an event was for and what "
+           "release it actually was. full=true adds the raw data blob.")
+    )
+    history_example = (
+        '{"total": 1, "records": [{"id": 1, "eventType": "grabbed", "seriesId": 88, '
+        '"episodeId": 3746, "sourceTitle": "Show S01E10 ...", "quality": "WEBDL-1080p", '
+        '"indexer": "TorrentDay"}]}'
+        if sonarr else
+        '{"total": 1, "records": [{"id": 1, "eventType": "grabbed", "movieId": 86, '
+        '"sourceTitle": "Movie 2026 ...", "quality": "Bluray-1080p", '
+        '"indexer": "TorrentDay"}]}'
+    )
+
     # ── Read tools ──────────────────────────────────────────────────────
     reads = [
         {
@@ -81,7 +108,7 @@ def _build_catalog(kind: str) -> list:
         },
         {
             "name": "history",
-            "description": "Recent history events (paginated). total + records with id, eventType (grabbed/imported/deleted/failed), seriesId/movieId, episodeIds, sourceTitle, title, date, quality, indexer, language. grabbed rows carry sourceTitle (the release title) and episodeIds — use these to prove WHICH episode a grab was for and what release it actually was. full=true adds the raw data blob.",
+            "description": history_desc,
             "method": "GET",
             "path_template": "/api/v3/history",
             "params": [
@@ -93,7 +120,7 @@ def _build_catalog(kind: str) -> list:
             ],
             "transform": "arr_history",
             "error_codes": ARR_ERROR_CODES,
-            "example": '{"total": 1, "records": [{"id": 1, "eventType": "grabbed", "seriesId": 88, "episodeIds": [3746], "sourceTitle": "Show S01E10 ...", "quality": "WEBDL-1080p", "indexer": "TorrentDay"}]}',
+            "example": history_example,
             "read_only": True,
         },
         {
