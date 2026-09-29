@@ -48,6 +48,30 @@ TRANSFORM_MAX_BODY_BYTES = 32 * 1024 * 1024
 
 ALLOWED_AUTH_TYPES = ('none', 'bearer', 'basic', 'header', 'oauth2', 'query_token', 'session')
 
+# *arr-family integrations store the ORIGIN as base_url (their curated
+# path_templates already carry the API prefix), unlike Proxmox/Omada whose
+# base_url includes it. The generic passthrough is documented as "relative to
+# the API root", so the prefix is applied here when the caller omits it. `root`
+# resolves against the origin instead and bypasses the prefix (as before).
+_KIND_API_PREFIX = {
+    'sonarr': '/api/v3',
+    'radarr': '/api/v3',
+    'prowlarr': '/api/v1',
+    'bazarr': '/api',
+}
+
+
+def _apply_api_prefix(kind: str, path: str) -> str:
+    """Prepend the integration's API prefix to a generic-call path that does not
+    already carry one. A path already starting with `api/` is left alone."""
+    prefix = _KIND_API_PREFIX.get((kind or '').lower())
+    if not prefix:
+        return path
+    if path == 'api' or path.startswith('api/'):
+        return path
+    return prefix.lstrip('/') + '/' + path
+
+
 # Hard-to-undo mutations. Disruptive-but-reversible verbs (restart, reboot,
 # stop, toggle) are deliberately excluded so routine writes auto-run under the
 # 'destructive' gate mode. A single constant — trivial to tune per installation.
@@ -547,14 +571,17 @@ def _apply_shaping(body: str, tool: dict, args: dict, integration: dict = None) 
 
 
 def _http_roundtrip(integration: dict, url: str, body_bytes, headers: dict, method: str,
-                    max_bytes: int = MAX_BODY_BYTES):
+                    max_bytes: int = MAX_BODY_BYTES, timeout: int = None):
     """Perform the HTTP request with the OAuth2 401-retry. Returns
     (status_code, body, truncated, error, latency_ms, outcome, resp_headers).
 
     `max_bytes` caps the response read (defaults to MAX_BODY_BYTES); transform
     tools pass TRANSFORM_MAX_BODY_BYTES so they can project large payloads.
+    `timeout` overrides DEFAULT_TIMEOUT for slow upstreams (e.g. Sonarr/Radarr
+    release search, which round-trips indexers for up to ~60s).
     `resp_headers` is a small dict ({content-length, content-type}) from the
     response on success — used for HEAD metadata — else None."""
+    timeout = timeout or DEFAULT_TIMEOUT
     auth_type = (integration.get('auth_type') or 'none').lower()
     start = time.time()
     outcome = 'ok'
@@ -568,7 +595,7 @@ def _http_roundtrip(integration: dict, url: str, body_bytes, headers: dict, meth
         attempt += 1
         try:
             req = urllib.request.Request(url, data=body_bytes, headers=headers, method=method)
-            with urllib.request.urlopen(req, timeout=DEFAULT_TIMEOUT, context=_ssl_context(integration)) as resp:
+            with urllib.request.urlopen(req, timeout=timeout, context=_ssl_context(integration)) as resp:
                 status_code = resp.status
                 # Not every response object carries headers (test fakes) — guard.
                 headers_obj = getattr(resp, 'headers', None)
@@ -683,7 +710,8 @@ def execute_integration_call(integration: dict, tool: dict, args: dict, agent: s
     # so the registered transform can project large payloads compactly.
     status_code, body, truncated, error, latency_ms, outcome, _resp_headers = _http_roundtrip(
         integration, url, body_bytes, headers, method,
-        max_bytes=TRANSFORM_MAX_BODY_BYTES if tool.get('transform') else MAX_BODY_BYTES)
+        max_bytes=TRANSFORM_MAX_BODY_BYTES if tool.get('transform') else MAX_BODY_BYTES,
+        timeout=tool.get('timeout') or None)
 
     # Surface upstream logical errors (Omada errorCode != 0, Pulse {"error": ...})
     # instead of projecting the error envelope down to {}.
@@ -775,6 +803,9 @@ def execute_generic_call(integration: dict, method: str, path: str, params=None,
         _guard_ssrf(origin, path)
         url = origin + '/' + path
     else:
+        # *arr-family apps expose their API under a fixed prefix the caller
+        # doesn't have to know (the curated tools bake it into path_template).
+        path = _apply_api_prefix(integration.get('kind'), path)
         _guard_ssrf(base_url, path)
         url = base_url + '/' + path
     if params:

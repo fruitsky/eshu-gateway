@@ -718,9 +718,13 @@ def _arr_queue(integration, tool, args, data):
 
 
 def _arr_history(integration, tool, args, data):
+    a = args or {}
+    full = bool(a.get('full'))
+
     def _row(r):
         row = {}
-        for k in ('id', 'eventType', 'title', 'date'):
+        for k in ('id', 'eventType', 'date', 'seriesId', 'movieId',
+                  'episodeIds', 'sourceTitle', 'title'):
             if r.get(k) is not None:
                 row[k] = r[k]
         quality = r.get('quality') or {}
@@ -736,11 +740,119 @@ def _arr_history(integration, tool, args, data):
         language = r.get('language')
         if isinstance(language, dict) and language.get('name'):
             row['language'] = language['name']
+        if full and r.get('data') is not None:
+            row['data'] = r['data']
         return row
     if not isinstance(data, dict):
         return json.dumps(data)
     records = [_row(r) for r in data.get('records') or [] if isinstance(r, dict)]
     return json.dumps({'total': data.get('totalRecords'), 'records': records})
+
+
+def _arr_episodes(integration, tool, args, data):
+    a = args or {}
+    items = data if isinstance(data, list) else []
+    needle = str(a.get('search') or '').lower()
+    fields = ('id', 'seasonNumber', 'episodeNumber', 'title', 'airDate',
+              'episodeFileId', 'hasFile', 'monitored')
+    out = []
+    for x in items:
+        if not isinstance(x, dict):
+            continue
+        if needle and needle not in str(x.get('title') or '').lower():
+            continue
+        out.append({k: x.get(k) for k in fields if x.get(k) is not None})
+    return json.dumps(_slice(out, a.get('limit')))
+
+
+def _arr_file_row(x, full):
+    """Shared projection for Sonarr /episodefile and Radarr /moviefile — both
+    carry the same `mediaInfo` block (the AD-vs-normal discriminator)."""
+    row = {}
+    for k in ('id', 'seriesId', 'movieId', 'seasonNumber', 'relativePath',
+              'sceneName', 'releaseGroup', 'customFormatScore'):
+        if x.get(k) is not None:
+            row[k] = x[k]
+    langs = x.get('languages')
+    if isinstance(langs, list):
+        row['languages'] = [l.get('name') for l in langs
+                            if isinstance(l, dict) and l.get('name')]
+    q = x.get('quality') or {}
+    if isinstance(q, dict):
+        qq = q.get('quality') or {}
+        if isinstance(qq, dict) and qq.get('name'):
+            row['quality'] = qq['name']
+        rev = q.get('revision')
+        if isinstance(rev, dict) and rev.get('isRepack'):
+            row['isRepack'] = True
+    cfs = x.get('customFormats')
+    if isinstance(cfs, list):
+        row['customFormats'] = [c.get('name') for c in cfs
+                                if isinstance(c, dict) and c.get('name')]
+    mi = x.get('mediaInfo')
+    if isinstance(mi, dict):
+        keys = ('audioBitrate', 'audioChannels', 'audioCodec', 'audioLanguages',
+                'audioStreamCount', 'videoCodec', 'resolution', 'runTime',
+                'subtitles')
+        proj = {k: mi.get(k) for k in keys if mi.get(k) is not None}
+        if proj:
+            row['mediaInfo'] = proj
+    if full:
+        for k in ('size', 'dateAdded', 'path'):
+            if x.get(k) is not None:
+                row[k] = x[k]
+    return row
+
+
+def _arr_files(integration, tool, args, data):
+    a = args or {}
+    items = data if isinstance(data, list) else []
+    needle = str(a.get('search') or '').lower()
+    full = bool(a.get('full'))
+    out = []
+    for x in items:
+        if not isinstance(x, dict):
+            continue
+        if needle and needle not in str(x.get('sceneName') or '').lower():
+            continue
+        out.append(_arr_file_row(x, full))
+    return json.dumps(_slice(out, a.get('limit')))
+
+
+def _arr_release_search(integration, tool, args, data):
+    a = args or {}
+    items = data if isinstance(data, list) else []
+    needle = str(a.get('search') or '').lower()
+    out = []
+    for x in items:
+        if not isinstance(x, dict):
+            continue
+        title = x.get('title')
+        if needle and needle not in str(title or '').lower():
+            continue
+        row = {}
+        if title is not None:
+            row['title'] = title
+        if x.get('size') is not None:
+            row['size'] = x['size']
+        q = x.get('quality') or {}
+        if isinstance(q, dict):
+            qq = q.get('quality') if isinstance(q.get('quality'), dict) else q
+            if qq.get('name'):
+                row['quality'] = qq['name']
+        idx = x.get('indexer')
+        if isinstance(idx, dict) and idx.get('name'):
+            row['indexer'] = idx['name']
+        elif isinstance(idx, str) and idx:
+            row['indexer'] = idx
+        for k in ('seeders', 'leechers', 'customFormatScore', 'rejected'):
+            if x.get(k) is not None:
+                row[k] = x[k]
+        rej = x.get('rejections')
+        if isinstance(rej, list):
+            row['rejections'] = rej
+        out.append(row)
+    return json.dumps(_slice(out, a.get('limit') or 50))
 
 
 def _arr_quality_profiles(integration, tool, args, data):
@@ -750,7 +862,8 @@ def _arr_quality_profiles(integration, tool, args, data):
         if not isinstance(x, dict):
             continue
         row = {}
-        for k in ('id', 'name', 'cutoff'):
+        for k in ('id', 'name', 'cutoff', 'minFormatScore', 'cutoffFormatScore',
+                  'minUpgradeFormatScore', 'upgradeAllowed'):
             if x.get(k) is not None:
                 row[k] = x[k]
         qitems = []
@@ -762,6 +875,16 @@ def _arr_quality_profiles(integration, tool, args, data):
                            'name': q.get('name') if isinstance(q, dict) else None,
                            'allowed': qi.get('allowed')})
         row['items'] = qitems
+        # formatItems is the Custom Format -> score matrix (e.g. a blocked CF at
+        # -10000). Always included: it is small and it is the whole point of the
+        # profile-score workflow.
+        fitems = []
+        for fi in x.get('formatItems') or []:
+            if not isinstance(fi, dict):
+                continue
+            fitems.append({'format': fi.get('format'), 'name': fi.get('name'),
+                           'score': fi.get('score')})
+        row['formatItems'] = fitems
         if x.get('languageItems') is not None:
             row['languageItems'] = x['languageItems']
         out.append(row)
@@ -772,6 +895,7 @@ def _arr_custom_formats(integration, tool, args, data):
     a = args or {}
     items = data if isinstance(data, list) else []
     needle = str(a.get('search') or '').lower()
+    full = bool(a.get('full'))
     out = []
     for x in items:
         if not isinstance(x, dict):
@@ -782,8 +906,22 @@ def _arr_custom_formats(integration, tool, args, data):
         for s in x.get('specifications') or []:
             if not isinstance(s, dict):
                 continue
-            specs.append({'implementation': s.get('implementation'),
-                          'negate': s.get('negate')})
+            spec = {'implementation': s.get('implementation'),
+                    'negate': s.get('negate')}
+            if full:
+                if s.get('required') is not None:
+                    spec['required'] = s['required']
+                # fields is an ARRAY of {order, name, value, ...} in v4 — the
+                # regex values live here. Off by default to keep list calls lean.
+                flds = s.get('fields')
+                if isinstance(flds, list):
+                    spec['fields'] = [
+                        {k: f.get(k) for k in ('order', 'name', 'label', 'value', 'type')
+                         if f.get(k) is not None}
+                        for f in flds if isinstance(f, dict)]
+                elif isinstance(flds, dict):
+                    spec['fields'] = flds
+            specs.append(spec)
         out.append({'id': x.get('id'), 'name': x.get('name'),
                     'includeCustomFormatWhenRenaming': x.get('includeCustomFormatWhenRenaming'),
                     'specifications': specs})
@@ -813,6 +951,66 @@ def _arr_command_status(integration, tool, args, data):
         return json.dumps(data)
     row = {k: data.get(k) for k in ('id', 'name', 'status', 'started', 'ended', 'duration')}
     return json.dumps({k: v for k, v in row.items() if v is not None})
+
+
+# ── Bazarr transforms ──────────────────────────────────────────────────
+# Bazarr wraps list responses in {data:[...], total:N} (Flask-RESTX marshal
+# envelope='data'); the helpers below unwrap it. Endpoint shapes verified
+# against the v1.5.5 source (see core/bazarr_seed.py).
+
+def _bzr_unwrap(data):
+    if isinstance(data, dict) and isinstance(data.get('data'), list):
+        return data['data'], data.get('total')
+    if isinstance(data, list):
+        return data, None
+    return [], None
+
+
+def _bazarr_status(integration, tool, args, data):
+    if isinstance(data, dict) and isinstance(data.get('data'), dict):
+        return json.dumps(data['data'])
+    return json.dumps(data)
+
+
+def _bazarr_series(integration, tool, args, data):
+    a = args or {}
+    items, _total = _bzr_unwrap(data)
+    needle = str(a.get('search') or '').lower()
+    fields = ('sonarrSeriesId', 'title', 'profileId', 'path',
+              'episodeFileCount', 'episodeMissingCount')
+    out = []
+    for x in items:
+        if not isinstance(x, dict):
+            continue
+        if needle and needle not in str(x.get('title') or '').lower():
+            continue
+        row = {k: x.get(k) for k in fields if x.get(k) is not None}
+        if not row:
+            row = x
+        out.append(row)
+    return json.dumps(_slice(out, a.get('limit')))
+
+
+def _bazarr_episodes(integration, tool, args, data):
+    items, _total = _bzr_unwrap(data)
+    fields = ('sonarrSeriesId', 'sonarrEpisodeId', 'season', 'episode', 'title',
+              'monitored', 'path', 'missing_subtitles', 'subtitles',
+              'audio_language')
+    out = []
+    for x in items:
+        if not isinstance(x, dict):
+            continue
+        row = {k: x.get(k) for k in fields if x.get(k) is not None}
+        out.append(row or x)
+    return json.dumps(out)
+
+
+def _bazarr_history(integration, tool, args, data):
+    a = args or {}
+    items, total = _bzr_unwrap(data)
+    rows = _slice([x for x in items if isinstance(x, dict)], a.get('limit'))
+    return json.dumps({'total': total if total is not None else len(items),
+                       'records': rows})
 
 
 # ── Prowlarr transforms ────────────────────────────────────────────────
@@ -1137,11 +1335,19 @@ TRANSFORMS = {
     'arr_movies': _arr_movies,
     'arr_queue': _arr_queue,
     'arr_history': _arr_history,
+    'arr_episodes': _arr_episodes,
+    'arr_episode_files': _arr_files,
+    'arr_movie_files': _arr_files,
+    'arr_release_search': _arr_release_search,
     'arr_quality_profiles': _arr_quality_profiles,
     'arr_custom_formats': _arr_custom_formats,
     'arr_languages': _arr_languages,
     'arr_rootfolders': _arr_rootfolders,
     'arr_command_status': _arr_command_status,
+    'bazarr_status': _bazarr_status,
+    'bazarr_series': _bazarr_series,
+    'bazarr_episodes': _bazarr_episodes,
+    'bazarr_history': _bazarr_history,
     'prowlarr_system_status': _arr_system_status,
     'prowlarr_indexers': _prowlarr_indexers,
     'prowlarr_indexer_stats': _prowlarr_indexer_stats,

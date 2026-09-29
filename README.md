@@ -5,7 +5,7 @@
 <p align="center">
   <a href="https://github.com/fruitsky/eshu-gateway"><img src="https://img.shields.io/badge/version-v0.1.0-FFD700?style=flat-square" alt="Version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="License"></a>
-  <a href="#"><img src="https://img.shields.io/badge/python-3.7+-blue?style=flat-square&logo=python" alt="Python"></a>
+  <a href="#"><img src="https://img.shields.io/badge/python-3.10+-blue?style=flat-square&logo=python" alt="Python"></a>
   <a href="#"><img src="https://img.shields.io/badge/gateway-bash-4EAA25?style=flat-square&logo=gnu-bash" alt="Bash"></a>
 </p>
 
@@ -20,9 +20,9 @@ approval gate:
   Just-In-Time approval from a human operator. No VPN, no open ports: just SSH +
   a polling control plane.
 - **Homelab APIs over MCP** — the same agent can call Proxmox, Omada, Home
-  Assistant, Pulse, Jellyfin, Pi-hole, Sonarr, Radarr and Prowlarr through
-  Eshu's MCP server, with server-side credential vaulting, per-call audit, and
-  approval-gated mutations.
+  Assistant, Pulse, Jellyfin, Pi-hole, Sonarr, Radarr, Prowlarr and Bazarr
+  through Eshu's MCP server, with server-side credential vaulting, per-call
+  audit, and approval-gated mutations.
 
 > Eshu is a vibe-coded hobby project built for homelabs and non-production
 > infrastructure. It's a practical tool for giving AI agents supervised SSH
@@ -54,7 +54,7 @@ flowchart LR
 ## Features
 
 - **Multi-Stage Policy Engine** — hardcoded catastrophic blocklist → blacklist → exact/regex whitelist → feature scripts → JIT human approval
-- **Integrations & MCP** — expose your homelab APIs to agents over MCP: server-side credential vaulting, per-call audit, and approval-gated mutations. Proxmox, Omada, Home Assistant, Pulse, Jellyfin, Pi-hole, Sonarr, Radarr, Prowlarr, plus generic read/write for any other REST API
+- **Integrations & MCP** — expose your homelab APIs to agents over MCP: server-side credential vaulting, per-call audit, and approval-gated mutations. Proxmox, Omada, Home Assistant, Pulse, Jellyfin, Pi-hole, Sonarr, Radarr, Prowlarr, Bazarr, plus generic read/write (and read-only where writes are sensitive) for any other REST API
 - **Approved Windows** — pre-approve recurring or single-use time windows for specific commands; agents can request them via API and the operator approves
 - **Just-In-Time Approval** — anything not explicitly allowed lands in the operator's queue for approve/deny, with desktop notifications
 - **Zero-Trust Gateways** — a per-gateway strictness tier: *nothing* auto-runs; every command needs operator approval
@@ -86,9 +86,10 @@ flowchart LR
 ```
 
 **Supported kinds** — Proxmox · Omada · Home Assistant · Pulse · Jellyfin ·
-Pi-hole · Sonarr · Radarr · Prowlarr. Any other integration gets a **generic
-`read`/`write`** tool floor (including `HEAD` metadata reads) for arbitrary REST
-APIs.
+Pi-hole · Sonarr · Radarr · Prowlarr · Bazarr. Any other integration gets a
+**generic `read`/`write`** tool floor (including `HEAD` metadata reads) for
+arbitrary REST APIs; the *arr family gets a generic **read** only (writes stay
+on the curated, guardrailed catalog).
 
 - **Credentials never leave Eshu.** Secrets live in the dashboard DB, are masked
   in the UI (last-4 suffix), scrubbed from every response and error before the
@@ -116,10 +117,11 @@ sudo bash bootstrap.sh
 ```
 
 The bootstrap script creates a Python venv, installs dependencies, writes a
-systemd unit, and starts the dashboard on port **8000**. On first launch you'll
-be prompted to set a dashboard password (required — it protects all sensitive
-endpoints). Change it anytime in Settings → Dashboard Password, or via
-`python3 dashboard/set_password.py` on the dashboard host.
+systemd unit, and starts the dashboard on port **8000**. It requires **Python
+3.10 or newer** (the MCP dependency does not support older interpreters). On
+first launch you'll be prompted to set a dashboard password (required — it
+protects all sensitive endpoints). Change it anytime in Settings → Dashboard
+Password, or via `python3 dashboard/set_password.py` on the dashboard host.
 
 ### 2. Create and register the agent's SSH key
 
@@ -215,10 +217,37 @@ command for your system instead of failing silently.
 
 Eshu is designed for a **private network**. The dashboard and the enrollment
 one-liner speak plain HTTP, so beyond your homelab you should put the dashboard
-behind a reverse proxy with TLS and/or a firewall. For extra lock-down, the
-agent key accepts an optional source-IP restriction — set `ALLOWED_SSH_FROM`
+behind a reverse proxy with TLS and/or a firewall. The dashboard honors
+`X-Forwarded-Proto`, so when a proxy terminates TLS the session cookie is
+issued with the `Secure` flag automatically. For extra lock-down, the agent key
+accepts an optional source-IP restriction — set `ALLOWED_SSH_FROM`
 (e.g. `192.168.1.50`) when enrolling so the agent can only connect from that
 address.
+
+Minimal **Caddy** (automatic HTTPS):
+
+```caddyfile
+eshu.example.com {
+    reverse_proxy 192.168.1.114:8000
+}
+```
+
+Minimal **nginx**:
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name eshu.example.com;
+    ssl_certificate     /etc/ssl/certs/eshu.crt;
+    ssl_certificate_key /etc/ssl/private/eshu.key;
+
+    location / {
+        proxy_pass http://192.168.1.114:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
 
 ---
 

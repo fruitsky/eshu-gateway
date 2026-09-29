@@ -85,11 +85,14 @@ def arr_upstream():
                      'sizeleft': 100, 'timeleft': '00:01:00'}]})
             elif path == '/api/v3/history':
                 self._respond(200, {'totalRecords': 1, 'records': [
-                    {'id': 1, 'eventType': 'grabbed', 'title': 'Show S01E01',
+                    {'id': 1, 'eventType': 'grabbed', 'title': '',
+                     'seriesId': 88, 'episodeIds': [3746],
+                     'sourceTitle': 'Show S01E10 Outside with Audio Description 1080p-Kitsune',
                      'date': '2026-08-21T10:00:00Z',
                      'quality': {'quality': {'id': 1, 'name': 'HDTV-720p'}},
                      'indexer': {'id': 1, 'name': 'Nyaa'},
-                     'language': {'id': 18, 'name': 'Portuguese (PT)'}}]})
+                     'language': {'id': 18, 'name': 'Portuguese (PT)'},
+                     'data': {'droppedPath': '/media/x.mkv'}}]})
             elif path == '/api/v3/qualityprofile':
                 self._respond(200, [{'id': 1, 'name': 'HD-1080p', 'cutoff': 3,
                                      'items': [{'quality': {'id': 1, 'name': 'HDTV-720p'},
@@ -106,6 +109,54 @@ def arr_upstream():
             elif path == '/api/v3/rootfolder':
                 self._respond(200, [{'id': 1, 'path': '/media/series',
                                      'accessible': True, 'freeSpace': 1099511627776}])
+            elif path == '/api/v3/episode':
+                self._respond(200, [
+                    {'id': 3746, 'seasonNumber': 1, 'episodeNumber': 10,
+                     'title': 'Outside', 'episodeFileId': 1551, 'hasFile': True,
+                     'monitored': True, 'airDate': '2025-01-10'},
+                    {'id': 3745, 'seasonNumber': 1, 'episodeNumber': 9,
+                     'title': 'The Getaway', 'episodeFileId': 1550, 'hasFile': True,
+                     'monitored': True}])
+            elif path == '/api/v3/episodefile':
+                self._respond(200, [
+                    {'id': 1551, 'seriesId': 88, 'seasonNumber': 1,
+                     'relativePath': 'Season 1/Silo - S01E10 - Outside.mkv',
+                     'sceneName': 'Silo S01E10 Outside with Audio Description 1080p ATVP WEB-DL DDP5 1 Atmos H 264-Kitsune',
+                     'releaseGroup': 'Kitsune',
+                     'languages': [{'id': 1, 'name': 'English'}],
+                     'quality': {'quality': {'id': 3, 'name': 'WEBDL-1080p'},
+                                 'revision': {'version': 1, 'real': 0, 'isRepack': False}},
+                     'customFormats': [{'id': 34, 'name': 'WEB Tier 01'}],
+                     'customFormatScore': 0,
+                     'mediaInfo': {'audioBitrate': 768000, 'audioChannels': 5.1,
+                                   'audioCodec': 'EAC3 Atmos', 'audioStreamCount': 1,
+                                   'videoCodec': 'h264', 'resolution': '1920x960',
+                                   'runTime': '44:21', 'subtitles': ''},
+                     'size': 3660000000, 'dateAdded': '2026-09-05T00:00:00Z',
+                     'path': '/media/series/Silo/Season 1/Silo - S01E10.mkv'}])
+            elif path == '/api/v3/moviefile':
+                self._respond(200, [
+                    {'id': 7, 'movieId': 7,
+                     'relativePath': 'Jaws.1975.mkv', 'sceneName': 'Jaws.1975.1080p-NTb',
+                     'releaseGroup': 'NTb',
+                     'languages': [{'id': 1, 'name': 'English'}],
+                     'quality': {'quality': {'id': 3, 'name': 'WEBDL-1080p'}},
+                     'customFormats': [], 'customFormatScore': 0,
+                     'mediaInfo': {'audioStreamCount': 1, 'subtitles': 'en'},
+                     'size': 2097152}])
+            elif path == '/api/v3/release':
+                self._respond(200, [
+                    {'title': 'Silo S01E10 Outside 1080p ATVP WEB-DL DDP5 1 H 264-NTb',
+                     'size': 3660000000,
+                     'quality': {'quality': {'name': 'WEBDL-1080p'}},
+                     'indexer': 'TorrentDay (Prowlarr)', 'seeders': 41,
+                     'customFormatScore': 0, 'rejected': False, 'rejections': []},
+                    {'title': 'Silo S01E10 Outside with Audio Description 1080p-Kitsune',
+                     'size': 3000000000,
+                     'quality': {'quality': {'name': 'WEBDL-1080p'}},
+                     'indexer': 'The Pirate Bay (Prowlarr)', 'seeders': 3,
+                     'customFormatScore': -10000, 'rejected': True,
+                     'rejections': ['Existing file on disk has a equal or higher Custom Format score: -10000']}])
             elif path.startswith('/api/v3/command/'):
                 self._respond(200, {'id': int(path.rsplit('/', 1)[-1]),
                                     'name': 'RefreshSeries', 'status': 'completed',
@@ -217,10 +268,65 @@ class TestArrReads:
         req = arr_upstream['state']['requests'][0]
         assert req['path'] == '/api/v3/command/42'
 
+    def test_episodes_projection(self, arr_upstream):
+        _make('sonarr', 'sonarr-key', 'sonarr', arr_upstream)
+        out = json.loads(run_tool('sonarr', 'episodes', {'seriesId': 88}))
+        assert out[0]['id'] == 3746 and out[0]['episodeFileId'] == 1551
+        req = next(r for r in arr_upstream['state']['requests'] if r['path'] == '/api/v3/episode')
+        assert 'seriesId=88' in req['query']
+
+    def test_episode_files_media_info(self, arr_upstream):
+        _make('sonarr', 'sonarr-key', 'sonarr', arr_upstream)
+        out = json.loads(run_tool('sonarr', 'episode_files', {'seriesId': 88}))
+        f = out[0]
+        assert f['sceneName'].endswith('Kitsune')
+        assert f['mediaInfo']['audioStreamCount'] == 1
+        assert f['customFormats'] == ['WEB Tier 01']
+        assert 'size' not in f  # full adds size/path/dateAdded
+        full = json.loads(run_tool('sonarr', 'episode_files', {'seriesId': 88, 'full': True}))
+        assert full[0]['size'] == 3660000000
+
+    def test_release_search_rejections(self, arr_upstream):
+        _make('sonarr', 'sonarr-key', 'sonarr', arr_upstream)
+        out = json.loads(run_tool('sonarr', 'release_search', {'episodeId': 3746}))
+        assert out[0]['rejected'] is False
+        assert out[1]['rejected'] is True and out[1]['rejections']
+        req = next(r for r in arr_upstream['state']['requests'] if r['path'] == '/api/v3/release')
+        assert 'episodeId=3746' in req['query']
+
+    def test_generic_read_prefix(self, arr_upstream):
+        _make('sonarr', 'sonarr-key', 'sonarr', arr_upstream)
+        out = json.loads(run_tool('sonarr', 'read',
+                                  {'path': '/episodefile', 'params': {'seriesId': 88}}))
+        assert out[0]['sceneName'].endswith('Kitsune')
+        assert any(r['path'] == '/api/v3/episodefile' for r in arr_upstream['state']['requests'])
+
+    def test_history_grabbed_fields(self, arr_upstream):
+        _make('sonarr', 'sonarr-key', 'sonarr', arr_upstream)
+        rec = json.loads(run_tool('sonarr', 'history', {}))['records'][0]
+        assert rec['seriesId'] == 88
+        assert rec['episodeIds'] == [3746]
+        assert rec['sourceTitle'].endswith('Kitsune')
+        assert 'data' not in rec
+        full = json.loads(run_tool('sonarr', 'history', {'full': True}))['records'][0]
+        assert full['data']['droppedPath'] == '/media/x.mkv'
+
+    def test_quality_profiles_format_items(self, arr_upstream):
+        _make('sonarr', 'sonarr-key', 'sonarr', arr_upstream)
+        qp = json.loads(run_tool('sonarr', 'quality_profiles', {}))
+        assert qp[0]['items'][0]['allowed'] is True
+
     def test_invalid_key(self, arr_upstream):
         _make('bad', 'nope', 'sonarr', arr_upstream)
         out = json.loads(run_tool('bad', 'system_status', {}))
         assert 'invalid_key' in out.get('error', '')
+
+    def test_radarr_has_movie_files_not_episodes(self, arr_upstream):
+        _make('radarr', 'radarr-key', 'radarr', arr_upstream)
+        names = {t['name'] for t in get_tools(get_integration('radarr')['id'])}
+        assert 'movie_files' in names and 'episodes' not in names
+        out = json.loads(run_tool('radarr', 'movie_files', {'movieId': 7}))
+        assert out[0]['sceneName'].endswith('NTb')
 
 
 class TestArrWrites:
@@ -295,17 +401,54 @@ class TestArrWrites:
         assert 'removeFromClient=True' in req['query']
         assert 'blocklist=False' in req['query']
 
-    def test_no_generic_floor_and_full_catalog(self, arr_upstream):
+    def test_custom_format_create_normalizes_v4_fields(self, auth_client, arr_upstream):
+        _make('sonarr', 'sonarr-key', 'sonarr', arr_upstream)
+        out = json.loads(run_tool('sonarr', 'custom_format_create', {
+            'name': 'Audio Description',
+            'specifications': [{'implementation': 'ReleaseTitleSpecification',
+                                'fields': {'value': r'\bAudio Description\b'}}],
+        }, reason='block AD'))
+        assert out['status'] == 'pending'
+        assert auth_client.post(f'/api/integration-calls/{out["id"]}/approve').status_code == 200
+        req = next(r for r in arr_upstream['state']['requests']
+                   if r['method'] == 'POST' and r['path'] == '/api/v3/customformat')
+        body = json.loads(req['body'])
+        assert body['name'] == 'Audio Description'
+        fields = body['specifications'][0]['fields']
+        assert isinstance(fields, list) and fields[0]['name'] == 'value'
+        assert fields[0]['value'] == r'\bAudio Description\b'
+
+    def test_quality_profile_update_full_body(self, auth_client, arr_upstream):
+        _make('sonarr', 'sonarr-key', 'sonarr', arr_upstream)
+        out = json.loads(run_tool('sonarr', 'quality_profile_update',
+                                  {'id': 4, 'body': {'id': 4, 'name': 'HD-1080p',
+                                   'formatItems': [{'format': 43, 'score': -10000}]}},
+                                  reason='score AD -10000'))
+        assert out['status'] == 'pending'
+        assert auth_client.post(f'/api/integration-calls/{out["id"]}/approve').status_code == 200
+        req = next(r for r in arr_upstream['state']['requests']
+                   if r['method'] == 'PUT' and r['path'] == '/api/v3/qualityprofile/4')
+        assert json.loads(req['body'])['formatItems'][0]['score'] == -10000
+
+    def test_read_floor_but_no_generic_write_and_full_catalog(self, arr_upstream):
         _make('sonarr', 'sonarr-key', 'sonarr', arr_upstream)
         names = {t['name'] for t in get_tools(get_integration('sonarr')['id'])}
-        assert 'read' not in names and 'write' not in names
+        # Generic READ is now seeded so un-curated endpoints are reachable, but
+        # the generic WRITE stays absent (un-curated *arr writes are unsafe).
+        assert 'read' in names and 'write' not in names
         assert {'system_status', 'series', 'queue', 'history', 'quality_profiles',
                 'custom_formats', 'languages', 'rootfolders', 'command_status',
+                'episodes', 'episode_files', 'release_search',
                 'add_series', 'update_series', 'command', 'remove_from_queue',
-                'delete_series'} <= names
+                'delete_series', 'custom_format_create', 'custom_format_update',
+                'quality_profile_update'} <= names
         writes = [t for t in get_tools(get_integration('sonarr')['id']) if not t['read_only']]
-        assert len(writes) == 5
+        assert len(writes) == 8
         assert all(t['always_gate'] for t in writes)
+        # release_search carries a 120s per-tool timeout (indexer round-trips)
+        release = next(t for t in get_tools(get_integration('sonarr')['id'])
+                       if t['name'] == 'release_search')
+        assert release['timeout'] == 120
 
     def test_mcp_namespace_distinct_per_app(self, arr_upstream):
         _make('sonarr', 'sonarr-key', 'sonarr', arr_upstream)

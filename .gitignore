@@ -8,7 +8,6 @@ venv/
 
 # Windows ADS metadata
 *:Zone.Identifier
-*&#x3A;Zone.Identifier
 *Zone.Identifier*
 
 # Legacy Hermes files (renamed to eshu_*)

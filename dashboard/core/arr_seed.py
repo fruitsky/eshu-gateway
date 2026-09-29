@@ -81,16 +81,19 @@ def _build_catalog(kind: str) -> list:
         },
         {
             "name": "history",
-            "description": "Recent history events (paginated). total + records with id, eventType (grabbed/imported/deleted/failed), title, date, quality, indexer, language.",
+            "description": "Recent history events (paginated). total + records with id, eventType (grabbed/imported/deleted/failed), seriesId/movieId, episodeIds, sourceTitle, title, date, quality, indexer, language. grabbed rows carry sourceTitle (the release title) and episodeIds — use these to prove WHICH episode a grab was for and what release it actually was. full=true adds the raw data blob.",
             "method": "GET",
             "path_template": "/api/v3/history",
             "params": [
                 {"name": "page", "type": "integer", "description": "Page (1-based).", "required": False, "default": 1},
                 {"name": "pageSize", "type": "integer", "description": "Page size (max 100).", "required": False, "default": 20},
+                {"name": "seriesId" if sonarr else "movieId", "type": "integer",
+                 "description": ("Filter to one series." if sonarr else "Filter to one movie."), "required": False},
+                {"name": "full", "type": "boolean", "description": "Include the raw per-record data blob.", "required": False, "local": True},
             ],
             "transform": "arr_history",
             "error_codes": ARR_ERROR_CODES,
-            "example": '{"total": 1, "records": [{"id": 1, "eventType": "grabbed", "title": "Show S01E01", "quality": "HDTV-720p", "indexer": "Nyaa"}]}',
+            "example": '{"total": 1, "records": [{"id": 1, "eventType": "grabbed", "seriesId": 88, "episodeIds": [3746], "sourceTitle": "Show S01E10 ...", "quality": "WEBDL-1080p", "indexer": "TorrentDay"}]}',
             "read_only": True,
         },
         {
@@ -106,10 +109,12 @@ def _build_catalog(kind: str) -> list:
         },
         {
             "name": "custom_formats",
-            "description": "Custom formats (id, name, includeCustomFormatWhenRenaming, specifications: implementation + negate). Use search by name.",
+            "description": "Custom formats (id, name, includeCustomFormatWhenRenaming, specifications: implementation + negate). Use search by name. full=true adds each specification's `fields` (the regex values — an array of {name, value} in v4).",
             "method": "GET",
             "path_template": "/api/v3/customformat",
-            "params": [],
+            "params": [
+                {"name": "full", "type": "boolean", "description": "Include specification fields (regex values).", "required": False, "local": True},
+            ],
             "search_field": "name",
             "transform": "arr_custom_formats",
             "error_codes": ARR_ERROR_CODES,
@@ -152,6 +157,71 @@ def _build_catalog(kind: str) -> list:
             "read_only": True,
         },
     ]
+
+    # Per-episode / per-movie enriched reads (the incident's missing surface).
+    if sonarr:
+        reads.append({
+            "name": "episodes",
+            "description": "List episodes for a series (id, seasonNumber, episodeNumber, title, episodeFileId, hasFile, monitored, airDate). `search` filters on title, `limit` caps the list.",
+            "method": "GET",
+            "path_template": "/api/v3/episode",
+            "params": [
+                {"name": "seriesId", "type": "integer", "description": "Series id (from the series tool).", "required": True},
+                {"name": "seasonNumber", "type": "integer", "description": "Optional season filter.", "required": False},
+            ],
+            "search_field": "title",
+            "transform": "arr_episodes",
+            "error_codes": ARR_ERROR_CODES,
+            "example": '[{"id": 3746, "seasonNumber": 1, "episodeNumber": 10, "title": "Outside", "hasFile": true, "episodeFileId": 1551}]',
+            "read_only": True,
+        })
+        reads.append({
+            "name": "episode_files",
+            "description": "Episode files for a series with per-file media info — sceneName, releaseGroup, languages, quality, customFormats + customFormatScore, and mediaInfo (audioCodec, audioStreamCount, subtitles, resolution, runTime). This is the file that distinguishes an Audio-Description rip from a normal one. `search` filters sceneName; `full` adds size/path/dateAdded.",
+            "method": "GET",
+            "path_template": "/api/v3/episodefile",
+            "params": [
+                {"name": "seriesId", "type": "integer", "description": "Series id (from the series tool).", "required": True},
+            ],
+            "fields": ["id", "sceneName"],
+            "search_field": "sceneName",
+            "transform": "arr_episode_files",
+            "error_codes": ARR_ERROR_CODES,
+            "example": '[{"id": 1551, "sceneName": "Silo S01E10 ... Audio Description ...", "releaseGroup": "Kitsune", "customFormatScore": 0, "mediaInfo": {"audioStreamCount": 1, "subtitles": ""}}]',
+            "read_only": True,
+        })
+    else:
+        reads.append({
+            "name": "movie_files",
+            "description": "Movie files for a movie with per-file media info — sceneName, releaseGroup, languages, quality, customFormats + customFormatScore, and mediaInfo (audioCodec, audioStreamCount, subtitles, resolution, runTime). `search` filters sceneName; `full` adds size/path/dateAdded.",
+            "method": "GET",
+            "path_template": "/api/v3/moviefile",
+            "params": [
+                {"name": "movieId", "type": "integer", "description": "Movie id (from the movies tool).", "required": True},
+            ],
+            "fields": ["id", "sceneName"],
+            "search_field": "sceneName",
+            "transform": "arr_movie_files",
+            "error_codes": ARR_ERROR_CODES,
+            "example": '[{"id": 7, "sceneName": "Jaws.1975.1080p...", "releaseGroup": "NTb", "customFormatScore": 0, "mediaInfo": {"audioStreamCount": 1}}]',
+            "read_only": True,
+        })
+    reads.append({
+        "name": "release_search",
+        "description": "⚠️ SLOW — triggers live indexer queries and can take up to ~60s. Search indexers for releases for ONE episode/movie. Returns per release: title, size, quality, indexer, seeders, customFormatScore, rejected, and rejections. The rejections are the definitive \"why didn't it grab/upgrade\" evidence (e.g. \"Existing file on disk has a equal or higher Custom Format score\"). READ-ONLY: does NOT grab. Do not call in a tight loop.",
+        "method": "GET",
+        "path_template": "/api/v3/release",
+        "params": [
+            {"name": "episodeId" if sonarr else "movieId", "type": "integer",
+             "description": ("Episode id to search for." if sonarr else "Movie id to search for."), "required": True},
+        ],
+        "search_field": "title",
+        "transform": "arr_release_search",
+        "error_codes": ARR_ERROR_CODES,
+        "timeout": 120,
+        "example": '[{"title": "Show S01E10 1080p WEBDL-NTb", "size": 3660000000, "quality": "WEBDL-1080p", "indexer": "TorrentDay", "seeders": 41, "customFormatScore": 0, "rejected": false, "rejections": []}]',
+        "read_only": True,
+    })
 
     # ── Write tools (always approval-gated) ─────────────────────────────
     writes = [
@@ -226,6 +296,50 @@ def _build_catalog(kind: str) -> list:
             "example": '{}',
             "read_only": False,
         },
+        {
+            "name": "custom_format_create",
+            "description": "Create a Custom Format. `specifications` is a list of spec objects ({implementation, negate?, required?, fields}). `fields` may be given as the older flat {name: value} dict or the v4 array form — the server NORMALISES it to the v4 array shape ([{order, name, value}]) that Sonarr v4 / Radarr v5 require (a flat dict makes them 400). Typical use: create the AD/blocked CF here, then score it at -10000 via quality_profile_update. REQUIRES OPERATOR APPROVAL.",
+            "method": "POST",
+            "path_template": "/api/v3/customformat",
+            "params": [
+                {"name": "name", "type": "string", "description": "Custom format name.", "required": True},
+                {"name": "includeCustomFormatWhenRenaming", "type": "boolean", "description": "Include the CF in rename tokens (default false).", "required": False, "default": False},
+                {"name": "specifications", "type": "array", "description": "List of specification objects: implementation, negate, required, fields (dict or list).", "required": True},
+            ],
+            "handler": "arr_custom_format_create",
+            "always_gate": True,
+            "error_codes": ARR_ERROR_CODES,
+            "example": '{"name": "Audio Description", "specifications": [{"implementation": "ReleaseTitleSpecification", "fields": {"value": "\\\\bAudio Description\\\\b"}}]}',
+            "read_only": False,
+        },
+        {
+            "name": "custom_format_update",
+            "description": "Update a Custom Format by id. `body` must be the FULL CF object (GET it via the read passthrough, mutate, PUT) — partial PUTs 400. REQUIRES OPERATOR APPROVAL.",
+            "method": "PUT",
+            "path_template": "/api/v3/customformat/{id}",
+            "params": [
+                {"name": "id", "type": "integer", "description": "Custom format id (from the custom_formats list).", "required": True},
+                {"name": "body", "type": "json", "description": "Full CF object to PUT (GET-current -> mutate -> PUT).", "required": True},
+            ],
+            "always_gate": True,
+            "error_codes": ARR_ERROR_CODES,
+            "example": '{}',
+            "read_only": False,
+        },
+        {
+            "name": "quality_profile_update",
+            "description": "Update a quality profile by id. `body` must be the FULL profile object (GET one via the read passthrough first, mutate, PUT) — partial PUTs 400. Set formatItems[].score to -10000 to block a Custom Format (releases matching it then score below minFormatScore and are never grabbed; an on-disk file re-scored to -10000 makes normal releases a strict upgrade). REQUIRES OPERATOR APPROVAL.",
+            "method": "PUT",
+            "path_template": "/api/v3/qualityprofile/{id}",
+            "params": [
+                {"name": "id", "type": "integer", "description": "Quality profile id.", "required": True},
+                {"name": "body", "type": "json", "description": "Full quality profile object to PUT (GET-current -> mutate -> PUT).", "required": True},
+            ],
+            "always_gate": True,
+            "error_codes": ARR_ERROR_CODES,
+            "example": '{}',
+            "read_only": False,
+        },
     ]
 
     return reads + writes
@@ -260,8 +374,10 @@ def _seed_arr(integration_id: int, kind: str):
                 transform=tool.get('transform'),
                 error_codes=tool.get('error_codes'),
                 always_gate=tool.get('always_gate'),
+                handler=tool.get('handler') or '',
                 example=tool['example'],
                 read_only=tool['read_only'],
+                timeout=tool.get('timeout') or 0,
                 seeded=True,
             )
             updated += 1
@@ -280,6 +396,8 @@ def _seed_arr(integration_id: int, kind: str):
                 transform=tool.get('transform') or '',
                 error_codes=tool.get('error_codes') or None,
                 always_gate=bool(tool.get('always_gate')),
+                handler=tool.get('handler') or '',
+                timeout=tool.get('timeout') or 0,
                 seeded=True,
             )
             created += 1

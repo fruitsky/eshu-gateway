@@ -140,7 +140,12 @@ def _is_dev_mode() -> bool:
     return False
 
 
-app = FastAPI(title="Eshu Gateway Dashboard v15.3")
+app = FastAPI(
+    title="Eshu Gateway Dashboard v15.3",
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+)
 
 # Track last audit-log timestamp per IP+version to suppress duplicate registrations
 # Key: "ip:version", Value: timestamp of last logged enrollment
@@ -305,6 +310,9 @@ def auth_status(request: Request):
 @app.post("/api/auth/login")
 def auth_login(payload: LoginPayload, response: Response, request: Request):
     """Authenticate with the dashboard password. Sets session cookie on success."""
+    _check_rate_limit(
+        request.client.host if request.client else "127.0.0.1", kind="login"
+    )
     if not _is_password_protected():
         return {"status": "ok", "message": "No password configured — access granted"}
     password = payload.password.strip()
@@ -2614,8 +2622,11 @@ def approve_integration_call(call_id: int, request: Request):
                                               approval='approved', decided_at=decided_at)
     except ProxyError as e:
         result = {'error': e.message, 'status_code': e.status_code}
-    if result.get('body') and tool.get('response_hint'):
-        result['body'] = merge_response_hint(tool, result['body'])
+    if tool.get('response_hint'):
+        # Merge even for an empty body (e.g. a 204 response) so an approved
+        # write still carries its verification nudge — matches the immediate
+        # run_tool path, which merges unconditionally.
+        result['body'] = merge_response_hint(tool, result.get('body') or '')
     set_pending_call_status(call_id, 'approved', json.dumps(result))
     record_audit_event("integration_call_approved",
                        details=f"Integration call #{call_id} ({call['integration']}.{call['tool']}) approved and executed")

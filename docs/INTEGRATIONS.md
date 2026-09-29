@@ -185,11 +185,12 @@ Eshu ships **curated tool catalogs** for these kinds — seeded via **Integratio
 | **Pulse** | `bearer`/`header` | trends, backups (large payloads truncated to 1MB) |
 | **Jellyfin** | `header` (`X-Emby-Token`) | mutations always gated |
 | **Pi-hole** | `query_token` (`?auth=…`) | multi-instance via name-based namespacing |
-| **Sonarr** / **Radarr** | `header` (`X-Api-Key`) | parameterized *arr catalog; search flags guarded |
-| **Prowlarr** | `header` (`X-Api-Key`) | **read-only projection** — indexer `fields[]` credentials are never surfaced |
+| **Sonarr** / **Radarr** | `header` (`X-Api-Key`) | parameterized *arr catalog; search flags guarded. Incidents: `episodes`, `episode_files`/`movie_files` (per-file `mediaInfo`), `release_search` (per-release CF score + rejections), `quality_profiles` (CF→score `formatItems`), `custom_formats` (`full` shows the regex `fields`). Gated writes: `custom_format_create` / `custom_format_update` / `quality_profile_update`. Also a generic **read-only** `read` passthrough (paths relative to `/api/v3`); no generic write |
+| **Prowlarr** | `header` (`X-Api-Key`) | **read-only projection** — indexer `fields[]` credentials are never surfaced (the generic read is safe because the scrubber drops list-shaped `fields`). Gated `search` (live Torznab query). Generic read-only `read` (relative to `/api/v1`); no generic write |
+| **Bazarr** | `header` (`X-API-KEY`) | subtitle management. Base URL is the origin, e.g. `http://<ip>:6767` (API under `/api/...`). Reads: `series`, `episodes`, `history`, `system_status`. Gated write: `search_subtitles` (`PATCH /api/series` action=`search-missing`). Generic `read`/`write` (relative to `/api`); the generic write is **always** approval-gated |
 | **Nginx Proxy Manager** | `session` (JWT + CSRF) | create a dedicated NPM admin user; Client ID = its email, Client Secret = its password, Token URL = `http://<ip>:81/api/tokens`. Base URL is `http://<ip>:81/api` (the admin port — never 443 for API calls). Fully curated; writes always approval-gated |
 
-Curated kinds are excluded from the generic floor (`NO_GENERIC_KINDS`). Any other integration type seeds a generic **`read`**/**`write`** pair that can call arbitrary REST endpoints on the base URL (read-only `read` auto-runs; `write` is gated). `read` accepts a `method` param — `HEAD` returns `{status, content_length, content_type, url}` metadata with no body (e.g. checking a media file's size without downloading it).
+Curated kinds are excluded from the generic floor (`NO_GENERIC_KINDS`: Jellyfin, Pi-hole, NPM). Any other integration type seeds a generic **`read`**/**`write`** pair that can call arbitrary REST endpoints on the base URL (read-only `read` auto-runs; `write` is gated). `read` accepts a `method` param — `HEAD` returns `{status, content_length, content_type, url}` metadata with no body (e.g. checking a media file's size without downloading it). Two refinements: kinds whose app exposes the API under a fixed prefix (Sonarr/Radarr `/api/v3`, Prowlarr `/api/v1`, Bazarr `/api`) get that prefix injected, so agents pass paths relative to the API root; and kinds in `READ_ONLY_GENERIC_KINDS` (Sonarr/Radarr/Prowlarr) get the generic **read only** — an un-curated *arr write can trigger torrent searches or delete media, so writes stay on the curated, guardrailed catalog.
 
 ## Tool namespacing
 
@@ -202,9 +203,10 @@ Every MCP tool is namespaced by its **integration name** (sanitized to `[a-z0-9_
 | `home-assistant` | `home_assistant_list_entities`, `home_assistant_call_service` |
 | `pihole-main` | `pihole_main_get_summary`, `pihole_main_get_top_clients` |
 | `jellyfin` | `jellyfin_get_media_items`, `jellyfin_scan_library` |
-| `sonarr` | `sonarr_get_series`, `sonarr_get_queue` |
-| `radarr` | `radarr_get_movies`, `radarr_get_missing_movies` |
-| `prowlarr` | `prowlarr_list_indexers`, `prowlarr_indexer_stats` |
+| `sonarr` | `sonarr_series`, `sonarr_episode_files`, `sonarr_release_search`, `sonarr_read` |
+| `radarr` | `radarr_movies`, `radarr_movie_files`, `radarr_read` |
+| `prowlarr` | `prowlarr_indexers`, `prowlarr_indexer_stats`, `prowlarr_search` |
+| `bazarr` | `bazarr_series`, `bazarr_episodes`, `bazarr_search_subtitles`, `bazarr_read` |
 | `pulse` | `pulse_health`, `pulse_get_backups` |
 
 ## Response projection

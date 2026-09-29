@@ -22,7 +22,7 @@ import hashlib
 import json
 
 from core.ha_ws import ha_ws_exec
-from core.integration_proxy import ProxyError
+from core.integration_proxy import ProxyError, execute_generic_call
 
 LOVELACE_DASHBOARDS = 'lovelace/dashboards'
 LOVELACE_CONFIG = 'lovelace/config'
@@ -635,6 +635,83 @@ def _h_delete_dashboard(integration, tool, args, ctx=None):
                        'url_path': dash.get('url_path'), 'verified': verified})
 
 
+# ── *arr (Sonarr/Radarr) handler helpers ────────────────────────────────
+
+def _arr_http(integration, method, path, data, name, ctx):
+    """One raw HTTP call for an *arr handler, carrying the caller's audit
+    context. `path` is relative to the integration's API root (the kind->prefix
+    map in integration_proxy injects /api/v3). Raises ProxyError on any
+    non-2xx / upstream-reported error so run_handler returns a stable code."""
+    ctx = ctx or {}
+    res = execute_generic_call(
+        integration, method, path, data=data,
+        agent=ctx.get('agent', ''), tool_name=name,
+        session_id=ctx.get('session_id', ''),
+        execution_id=ctx.get('execution_id', ''),
+        reason=ctx.get('reason', ''),
+        approval=ctx.get('approval', ''),
+        decided_at=ctx.get('decided_at', 0))
+    if res.get('error'):
+        raise ProxyError(res.get('status_code') or 502, str(res['error']))
+    return res.get('body') or ''
+
+
+def _normalize_cf_specs(specs):
+    """Normalise custom-format specifications to the Sonarr v4 / Radarr v5 shape.
+
+    v4 requires `fields` to be an ARRAY of {name, value, ...}; the common v3 /
+    TRaSH-style example gives a flat {name: value} dict, which Sonarr rejects
+    with `$.specifications[0].fields could not be converted`. Accept both and
+    always emit the array form."""
+    out = []
+    for s in specs or []:
+        if not isinstance(s, dict):
+            continue
+        spec = dict(s)
+        spec['negate'] = bool(s.get('negate', False))
+        if 'required' in s:
+            spec['required'] = bool(s.get('required'))
+        flds = s.get('fields')
+        norm = []
+        if isinstance(flds, dict):
+            for i, (k, v) in enumerate(flds.items()):
+                norm.append({'order': i, 'name': k, 'value': v})
+        elif isinstance(flds, list):
+            for i, f in enumerate(flds):
+                if isinstance(f, dict):
+                    nf = dict(f)
+                    nf.setdefault('order', i)
+                    nf.setdefault('name', 'value')
+                    norm.append(nf)
+        spec['fields'] = norm
+        out.append(spec)
+    return out
+
+
+def _h_arr_custom_format_create(integration, tool, args, ctx):
+    """Build the Custom Format body server-side (accepting a flat `fields` dict)
+    and POST it. Exposed as sonarr_custom_format_create / radarr_custom_format_create."""
+    a = args or {}
+    name = a.get('name')
+    if not name:
+        return _err('invalid_request', 'name is required', 400)
+    specs = a.get('specifications')
+    if not isinstance(specs, list) or not specs:
+        return _err('invalid_request', 'specifications must be a non-empty list', 400)
+    body = {
+        'name': name,
+        'includeCustomFormatWhenRenaming': bool(a.get('includeCustomFormatWhenRenaming', False)),
+        'specifications': _normalize_cf_specs(specs),
+    }
+    tool_name = (tool or {}).get('name') or 'custom_format_create'
+    out = _arr_http(integration, 'POST', 'customformat', body, tool_name, ctx)
+    try:
+        created = json.loads(out)
+    except (ValueError, TypeError):
+        created = out
+    return json.dumps({'status': 'created', 'custom_format': created})
+
+
 HANDLERS = {
     'ha_lovelace_dashboards': _h_dashboards,
     'ha_lovelace_dashboard': _h_dashboard,
@@ -642,6 +719,7 @@ HANDLERS = {
     'ha_lovelace_update_dashboard': _h_update_dashboard,
     'ha_lovelace_save_config': _h_save_config,
     'ha_lovelace_delete_dashboard': _h_delete_dashboard,
+    'arr_custom_format_create': _h_arr_custom_format_create,
 }
 
 

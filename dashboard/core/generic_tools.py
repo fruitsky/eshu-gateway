@@ -8,7 +8,31 @@ show up in the Tools UI, are audited, and route through the gating policy.
 """
 
 
+# Kind -> API prefix the server injects for generic calls, so the agent writes
+# paths relative to the API root (/episodefile) rather than the origin. Kept in
+# sync with core.integration_proxy._KIND_API_PREFIX.
+_API_PREFIX = {
+    'sonarr': '/api/v3',
+    'radarr': '/api/v3',
+    'prowlarr': '/api/v1',
+    'bazarr': '/api',
+}
+
+# Kinds that get ONLY the generic read passthrough. Their writes stay fully
+# curated because an un-curated *arr write can trigger torrent searches or
+# delete media from disk. (The generic `write` is still gated, but it bypasses
+# the curated guardrails — default-off search flags, full-object PUTs — so it
+# is not seeded for these kinds.)
+READ_ONLY_GENERIC_KINDS = {'sonarr', 'radarr', 'prowlarr'}
+
+# Kinds whose generic `write` must ALWAYS be approval-gated regardless of the
+# integration's gate_mode (e.g. Bazarr, where any write can trigger subtitle
+# downloads/searches).
+ALWAYS_GATE_GENERIC_WRITE_KINDS = {'bazarr'}
+
+
 def generic_tools_for(kind: str) -> list:
+    prefix = _API_PREFIX.get(kind or '')
     read_desc = (
         "Call any read endpoint on this integration. `path` is relative to the "
         "integration's base URL (e.g. /states); `params` is an optional JSON "
@@ -17,6 +41,10 @@ def generic_tools_for(kind: str) -> list:
         "url}) with no body, e.g. to check a media file's size. Credentials are "
         "injected by Eshu; every call is audited."
     )
+    if prefix:
+        read_desc += (
+            f" This integration's API lives under {prefix}: pass paths relative "
+            f"to that root (e.g. /episodefile), not the full {prefix} path.")
     if kind == 'omada':
         read_desc += (" Omada list endpoints require page/pageSize — defaults "
                       "(page=1, pageSize=50) are injected when omitted, so list "
@@ -60,8 +88,11 @@ def generic_tools_for(kind: str) -> list:
             "read_only": False,
             "transport": "http",
             "generic": True,
+            "always_gate": kind in ALWAYS_GATE_GENERIC_WRITE_KINDS,
         },
     ]
+    if kind in READ_ONLY_GENERIC_KINDS:
+        tools = [t for t in tools if t['name'] == 'read']
     if kind == 'ha':
         tools.extend([
             {
@@ -118,6 +149,7 @@ def seed_generic_tools(integration_id: int, kind: str):
                 filter_fields=None,
                 transport=tool['transport'],
                 generic=True,
+                always_gate=tool.get('always_gate'),
                 read_only=tool['read_only'],
                 seeded=True,
             )
@@ -135,6 +167,7 @@ def seed_generic_tools(integration_id: int, kind: str):
                 fields=tool.get('fields'),
                 transport=tool['transport'],
                 generic=True,
+                always_gate=bool(tool.get('always_gate')),
                 seeded=True,
             )
             created += 1

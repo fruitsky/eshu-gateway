@@ -248,16 +248,28 @@ class TestProwlarrWrites:
         result = json.loads(get_pending_call(out['id'])['result'])
         assert 'Sonarr AND Radarr' in json.loads(result['body'])['hint']
 
-    def test_no_generic_floor_and_catalog(self, prowlarr_upstream):
+    def test_read_floor_but_no_generic_write_and_catalog(self, prowlarr_upstream):
         _make(prowlarr_upstream)
         names = {t['name'] for t in get_tools(get_integration('prowlarr')['id'])}
-        assert 'read' not in names and 'write' not in names
+        assert 'read' in names and 'write' not in names
         assert {'system_status', 'indexers', 'indexer_stats', 'indexer_status',
                 'add_indexer', 'update_indexer', 'delete_indexer',
-                'sync_indexers'} <= names
+                'sync_indexers', 'search'} <= names
         writes = [t for t in get_tools(get_integration('prowlarr')['id']) if not t['read_only']]
-        assert len(writes) == 4
+        assert len(writes) == 5
         assert all(t['always_gate'] for t in writes)
+
+    def test_search_gated_and_body_merge(self, auth_client, prowlarr_upstream):
+        _make(prowlarr_upstream)
+        out = json.loads(run_tool('prowlarr', 'search',
+                                  {'query': 'Silo S01E10', 'body': {'indexerIds': [1]}},
+                                  reason='prowlarr AD probe'))
+        assert out['status'] == 'pending'
+        assert auth_client.post(f'/api/integration-calls/{out["id"]}/approve').status_code == 200
+        req = next(r for r in prowlarr_upstream['state']['requests']
+                   if r['method'] == 'POST' and r['path'] == '/api/v1/search')
+        body = json.loads(req['body'])
+        assert body['query'] == 'Silo S01E10' and body['indexerIds'] == [1]
 
     def test_mcp_namespace(self, prowlarr_upstream):
         _make(prowlarr_upstream)

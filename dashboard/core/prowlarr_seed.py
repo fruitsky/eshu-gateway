@@ -126,6 +126,21 @@ PROWLARR_SEED_TOOLS = [
         "example": '{}',
         "read_only": False,
     },
+    {
+        "name": "search",
+        "description": "⚠️ SLOW and indexer-hitting: run a live Torznab search across indexers (POST /api/v1/search). `query` is required; pass `body` for extra fields such as {\"indexerIds\": [1,2], \"categories\": [5000]}. This is a Prowlarr-level search — it queries indexers directly and returns raw releases (no per-release Custom Format score; use the Sonarr/Radarr release_search for that). REQUIRES OPERATOR APPROVAL.",
+        "method": "POST",
+        "path_template": "/api/v1/search",
+        "params": [
+            {"name": "query", "type": "string", "description": "Search query.", "required": True},
+            {"name": "body", "type": "json", "description": "Optional extra body fields (e.g. indexerIds[], categories[]).", "required": False},
+        ],
+        "always_gate": True,
+        "error_codes": PROWLARR_ERROR_CODES,
+        "timeout": 120,
+        "example": '{"query": "Silo S01E10"}',
+        "read_only": False,
+    },
 ]
 
 
@@ -155,6 +170,7 @@ def seed_prowlarr_tools(integration_id: int):
                 response_hint=tool.get('response_hint'),
                 example=tool['example'],
                 read_only=tool['read_only'],
+                timeout=tool.get('timeout') or 0,
                 seeded=True,
             )
             updated += 1
@@ -174,6 +190,7 @@ def seed_prowlarr_tools(integration_id: int):
                 error_codes=tool.get('error_codes') or None,
                 always_gate=bool(tool.get('always_gate')),
                 response_hint=tool.get('response_hint') or '',
+                timeout=tool.get('timeout') or 0,
                 seeded=True,
             )
             created += 1
