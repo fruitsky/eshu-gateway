@@ -712,6 +712,48 @@ def _h_arr_custom_format_create(integration, tool, args, ctx):
     return json.dumps({'status': 'created', 'custom_format': created})
 
 
+_ARR_QUALITY_DEF_FIELDS = ('minSize', 'maxSize', 'preferredSize')
+
+
+def _h_arr_quality_definition_update(integration, tool, args, ctx):
+    """Read-full → merge sizes → PUT → read back. The *arr quality definition
+    PUT is a full-object write, and the app exposes native per-quality size
+    limits in MB/minute — this is the merge+verify path so an agent never has to
+    fetch and hand-edit the whole object."""
+    a = args or {}
+    qid = a.get('id')
+    if qid is None:
+        return _err('invalid_request', 'id is required', 400)
+    name = (tool or {}).get('name') or 'quality_definition_update'
+    path = 'qualitydefinition/%s' % qid
+    try:
+        current = json.loads(_arr_http(integration, 'GET', path, None, name, ctx) or '{}')
+    except (ValueError, TypeError):
+        return _err('invalid_response', 'could not read quality definition %s' % qid, 502)
+    if not isinstance(current, dict):
+        return _err('not_found', 'quality definition %s not found' % qid, 404)
+
+    before = {k: current.get(k) for k in _ARR_QUALITY_DEF_FIELDS}
+    applied = {k: a.get(k) for k in _ARR_QUALITY_DEF_FIELDS if a.get(k) is not None}
+    if not applied:
+        return json.dumps({'status': 'noop', 'id': qid,
+                           'message': 'No size fields provided; nothing written.',
+                           'before': before})
+    current.update(applied)
+    _arr_http(integration, 'PUT', path, current, name, ctx)
+
+    after = {}
+    try:
+        obj2 = json.loads(_arr_http(integration, 'GET', path, None, name, ctx) or '{}')
+        if isinstance(obj2, dict):
+            after = {k: obj2.get(k) for k in _ARR_QUALITY_DEF_FIELDS}
+    except (ValueError, TypeError):
+        after = {}
+    verified = bool(after) and all(after.get(k) == v for k, v in applied.items())
+    return json.dumps({'status': 'updated', 'id': qid, 'applied': applied,
+                       'before': before, 'after': after, 'verified': verified})
+
+
 HANDLERS = {
     'ha_lovelace_dashboards': _h_dashboards,
     'ha_lovelace_dashboard': _h_dashboard,
@@ -720,6 +762,7 @@ HANDLERS = {
     'ha_lovelace_save_config': _h_save_config,
     'ha_lovelace_delete_dashboard': _h_delete_dashboard,
     'arr_custom_format_create': _h_arr_custom_format_create,
+    'arr_quality_definition_update': _h_arr_quality_definition_update,
 }
 
 
@@ -741,9 +784,23 @@ def _preflight_delete_dashboard(integration, tool, args, ctx):
     return err
 
 
+def _preflight_quality_definition_update(integration, tool, args, ctx):
+    """Validate the target id exists (read-only) before queuing an approval."""
+    a = args or {}
+    if a.get('id') is None:
+        return _err('invalid_request', 'id is required', 400)
+    name = (tool or {}).get('name') or 'quality_definition_update'
+    try:
+        _arr_http(integration, 'GET', 'qualitydefinition/%s' % a['id'], None, name, ctx)
+    except ProxyError as e:
+        return _err('arr_error', e.message, e.status_code)
+    return None
+
+
 PREFLIGHT = {
     'ha_lovelace_save_config': _preflight_save_config,
     'ha_lovelace_delete_dashboard': _preflight_delete_dashboard,
+    'arr_quality_definition_update': _preflight_quality_definition_update,
 }
 
 

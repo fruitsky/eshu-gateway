@@ -98,7 +98,7 @@ from core.gateway_watch import (
 from core.utils import DASHBOARD_VERSION, decode_cmd, _resolve_gateway_token, _hash_password, _verify_password
 from core.integration_auth import resolve_agent, resolve_agent_optional, extract_agent_token
 from core.secret_scrub import scrub_payload, scrub_string
-from core.integration_proxy import execute_integration_call, execute_generic_call, ProxyError, merge_response_hint, ALLOWED_AUTH_TYPES, PREVIEW_CHARS, safe_request_summary
+from core.integration_proxy import execute_integration_call, execute_generic_call, generic_write_envelope, ProxyError, merge_response_hint, ALLOWED_AUTH_TYPES, PREVIEW_CHARS, safe_request_summary
 from core.ha_ws import execute_ws_call
 from core.mcp_server import (
     mcp as eshu_mcp,
@@ -2607,13 +2607,35 @@ def approve_integration_call(call_id: int, request: Request):
                 reason=call.get('reason') or '', approval='approved',
                 decided_at=decided_at)
         elif tool.get('generic'):
-            result = execute_generic_call(integration, payload.get('method'), payload.get('path'),
+            method = payload.get('method') or 'POST'
+            path = payload.get('path') or ''
+            result = execute_generic_call(integration, method, path,
                                           payload.get('params'), payload.get('data'),
                                           agent='operator', tool_name=tool['name'],
                                           session_id=call.get('session_id') or '',
                                           execution_id=call.get('execution_id') or '',
                                           reason=call.get('reason') or '',
                                           approval='approved', decided_at=decided_at)
+            if not result.get('error'):
+                verified = None
+                vpath = payload.get('verify_path')
+                if vpath and isinstance(result.get('status_code'), int) \
+                        and 200 <= result['status_code'] < 300:
+                    try:
+                        vres = execute_generic_call(
+                            integration, 'GET', vpath, payload.get('verify_params'),
+                            agent='operator', tool_name=tool['name'] + ':verify',
+                            session_id=call.get('session_id') or '',
+                            execution_id=call.get('execution_id') or '',
+                            reason=call.get('reason') or '', approval='approved',
+                            decided_at=decided_at)
+                        verified = {'status_code': vres.get('status_code'),
+                                    'body': vres.get('body') or '',
+                                    'error': vres.get('error')}
+                    except ProxyError as e:
+                        verified = {'error': e.message, 'status_code': e.status_code}
+                result['body'] = generic_write_envelope(
+                    result, method, path, payload.get('data'), verified=verified)
         else:
             result = execute_integration_call(integration, tool, payload, agent='operator',
                                               session_id=call.get('session_id') or '',

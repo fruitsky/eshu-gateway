@@ -367,6 +367,23 @@ def _build_catalog(kind: str) -> list:
             "example": '{}',
             "read_only": False,
         },
+        {
+            "name": "quality_definition_update",
+            "description": "Set the native per-quality size limits (PUT /qualitydefinition/{id}). `minSize`/`maxSize`/`preferredSize` are in MB per MINUTE (the app's own lever for oversized files — no Custom Format size hack required). The handler reads the current definition, merges the provided fields, PUTs the full object, then reads back to confirm. Omitted fields are left unchanged; this is a merge, not a replace. REQUIRES OPERATOR APPROVAL.",
+            "method": "PUT",
+            "path_template": "/api/v3/qualitydefinition/{id}",
+            "params": [
+                {"name": "id", "type": "integer", "description": "Quality id (read the list via the read passthrough: GET /qualitydefinition).", "required": True},
+                {"name": "minSize", "type": "number", "description": "Minimum size in MB/minute.", "required": False},
+                {"name": "maxSize", "type": "number", "description": "Maximum size in MB/minute.", "required": False},
+                {"name": "preferredSize", "type": "number", "description": "Preferred size in MB/minute.", "required": False},
+            ],
+            "handler": "arr_quality_definition_update",
+            "always_gate": True,
+            "error_codes": ARR_ERROR_CODES,
+            "example": '{"id": 3, "maxSize": 100.0}',
+            "read_only": False,
+        },
     ]
 
     return reads + writes

@@ -19,12 +19,32 @@ from core.integration_proxy import (
     _apply_shaping,
     execute_generic_call,
     execute_integration_call,
+    generic_write_envelope,
     is_destructive,
     merge_response_hint,
 )
 from core.ha_ws import execute_ws_call
 
 AGENT_LABEL = 'mcp'
+
+
+def _run_write_verify(integration, args, res, tool_name, session_id, execution_id):
+    """Optional post-write read-back: when the generic write tool was given a
+    `verify_path` and the write returned 2xx, GET that path and return the
+    result (or an error) so the caller sees evidence, not just a status."""
+    vpath = (args or {}).get('verify_path')
+    status = res.get('status_code')
+    if not vpath or not (isinstance(status, int) and 200 <= status < 300):
+        return None
+    try:
+        vres = execute_generic_call(
+            integration, 'GET', vpath, (args or {}).get('verify_params'),
+            agent=AGENT_LABEL, tool_name=tool_name + ':verify',
+            session_id=session_id, execution_id=execution_id)
+    except ProxyError as e:
+        return {'error': e.message, 'status_code': e.status_code}
+    return {'status_code': vres.get('status_code'), 'body': vres.get('body') or '',
+            'error': vres.get('error')}
 
 
 def _error(msg, status_code=500):
@@ -163,4 +183,12 @@ def run_tool(integration_name: str, tool_name: str, args: dict, reason: str = ''
         return res
     if res.get('error'):
         return _result_error(res)
+    if generic:
+        # Never report a bare 2xx/204 as success: return the response plus the
+        # request shape, flag an empty body as unverified, and attach the
+        # optional read-back.
+        verified = _run_write_verify(integration, args, res, tool_name,
+                                     session_id, execution_id)
+        return generic_write_envelope(res, method, path, args.get('data'),
+                                      verified=verified)
     return merge_response_hint(tool, res['body'])

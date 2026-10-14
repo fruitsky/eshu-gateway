@@ -48,20 +48,21 @@ _CATALOGS = {
     'npm': NPM_SEED_TOOLS,
 }
 
-# Kinds that must NOT receive the generic read/write passthrough floor. Jellyfin
-# is fully curated because its API key is admin-level and cannot be scoped down
-# — a generic passthrough would undo the write gating. Pi-hole is fully curated
-# because toggling blocking is LAN-wide and the surface is tiny. NPM is fully
-# curated because /api/settings may carry keys and a generic write would allow
-# arbitrary proxy-host mutations.
+# Kinds that must NOT receive the generic read/write passthrough floor at all.
+# Pi-hole is fully curated because toggling blocking is LAN-wide and the surface
+# is tiny. NPM is fully curated because /api/settings may carry keys and a
+# generic write would allow arbitrary proxy-host mutations.
 #
-# Sonarr/Radarr/Prowlarr are NOT here: they get the generic READ passthrough so
-# un-curated endpoints (e.g. /episodefile, /release) are reachable, but they are
-# listed in `READ_ONLY_GENERIC_KINDS` so they never receive the generic WRITE
-# (an un-curated *arr write can trigger torrent searches or delete media; the
-# curated writes carry the guardrails). Prowlarr's generic read is safe because
-# the always-on scrubber drops list-shaped `fields[]` (indexer credentials).
-NO_GENERIC_KINDS = {'jellyfin', 'pihole', 'npm'}
+# Sonarr/Radarr/Prowlarr/Jellyfin are NOT here: they get the generic READ
+# passthrough so un-curated endpoints are reachable (e.g. *arr /episodefile,
+# /release; Jellyfin /System/Configuration/encoding, /Items?fields=MediaStreams),
+# but they are listed in `READ_ONLY_GENERIC_KINDS` so they never receive the
+# generic WRITE. That is the whole safety argument: Jellyfin's key is
+# admin-level and cannot be scoped down, and an un-curated *arr write can
+# trigger torrent searches or delete media — so reads are open, writes stay on
+# the curated guardrailed catalog. Prowlarr's generic read is safe because the
+# always-on scrubber drops list-shaped `fields[]` (indexer credentials).
+NO_GENERIC_KINDS = {'pihole', 'npm'}
 
 
 def seed_tool_names(kind: str) -> set:

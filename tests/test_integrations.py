@@ -418,10 +418,10 @@ class TestSeedToolNames:
         names = seed_tool_names("pulse")
         assert "health" in names and "read" in names and "write" in names
 
-    def test_jellyfin_excludes_generic(self):
+    def test_jellyfin_read_only_generic(self):
         names = seed_tool_names("jellyfin")
         assert "system_info" in names
-        assert "read" not in names and "write" not in names
+        assert "read" in names and "write" not in names
 
     def test_ha_includes_ws_generic(self):
         names = seed_tool_names("ha")

@@ -913,13 +913,14 @@ class TestOmadaAclFixes:
                 "sourceType": 1, "destinationType": 0}
         out = json.loads(run_tool("omada", "write", {
             "method": "POST", "path": "/sites/S1/acls/osw-acls", "data": body}))
-        assert out.get("created_rule") == {"id": "R4", "index": 4}
+        # Generic writes return the evidence envelope; the body is under response_body.
+        assert json.loads(out["response_body"]).get("created_rule") == {"id": "R4", "index": 4}
 
     def test_create_non_acl_untouched(self, omada_acl_upstream):
         _omada_acl_integration(omada_acl_upstream)
         out = json.loads(run_tool("omada", "write", {
             "method": "POST", "path": "/sites/S1/clients/MAC/block", "data": {}}))
-        assert "created_rule" not in out
+        assert "created_rule" not in json.dumps(out)
 
     def test_acl_reorder_moves_rule_before(self, omada_acl_upstream):
         _omada_acl_integration(omada_acl_upstream)

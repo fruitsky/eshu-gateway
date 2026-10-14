@@ -117,6 +117,15 @@ def jellyfin_upstream():
                      'IsHidden': False},
                     {'Id': 'guest', 'Name': 'guest'},
                 ])
+            elif path == '/System/Configuration/encoding':
+                self._respond(200, {'EnableThrottling': False,
+                                    'AllowOnTheFlySubtitleExtraction': True})
+            elif path == '/Items':
+                self._respond(200, {'Items': [
+                    {'Id': 'x', 'Name': 'Sword Princess',
+                     'MediaSources': [{'MediaStreams': [
+                         {'Type': 'Subtitle', 'Codec': 'ass'},
+                         {'Type': 'Subtitle', 'Codec': 'srt'}]}]}]})
             else:
                 self._respond(404, 'not found')
 
@@ -328,11 +337,25 @@ class TestJellyfinWrites:
                    if r['method'] == 'POST' and r['path'] == '/Library/Refresh')
         assert 'replaceAllMetadata=False' in req['query']
 
-    def test_no_generic_passthrough(self, jellyfin_upstream):
+    def test_read_floor_but_no_generic_write(self, jellyfin_upstream):
         _make(jellyfin_upstream)
         names = {t['name'] for t in get_tools(get_integration('jellyfin')['id'])}
-        assert 'read' not in names and 'write' not in names
+        # Generic READ now closes the un-curated read gaps (encoding config,
+        # /Items MediaStreams); the generic WRITE stays absent (admin key).
+        assert 'read' in names and 'write' not in names
         assert 'system_info' in names and 'scan_library' in names
+
+    def test_generic_read_reaches_uncurated_endpoints(self, jellyfin_upstream):
+        _make(jellyfin_upstream)
+        enc = json.loads(run_tool('jellyfin', 'read',
+                                  {'path': '/System/Configuration/encoding'}))
+        assert enc['AllowOnTheFlySubtitleExtraction'] is True
+        items = json.loads(run_tool('jellyfin', 'read',
+                                    {'path': '/Items', 'params': {
+                                        'recursive': True, 'includeItemTypes': 'Episode',
+                                        'fields': 'MediaStreams'}}))
+        codecs = [s['Codec'] for s in items['Items'][0]['MediaSources'][0]['MediaStreams']]
+        assert codecs == ['ass', 'srt']
 
     def test_merge_response_hint(self):
         from core.integration_proxy import merge_response_hint

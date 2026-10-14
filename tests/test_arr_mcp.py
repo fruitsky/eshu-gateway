@@ -22,6 +22,9 @@ def arr_upstream():
     """Threaded upstream mimicking an *arr /api/v3 app. Routes by X-Api-Key
     header; unknown keys get the 401 problem-details."""
     state = {'requests': []}
+    # Stateful quality definitions so the read-back verify reflects the PUT.
+    qdef = {3: {'id': 3, 'quality': {'id': 3, 'name': 'WEBDL-1080p'},
+                'minSize': None, 'maxSize': None, 'preferredSize': None}}
 
     def _sonarr_series():
         return [{'id': 5, 'title': 'Bluey', 'year': 2018, 'status': 'continuing',
@@ -167,6 +170,9 @@ def arr_upstream():
                      'indexer': 'The Pirate Bay (Prowlarr)', 'seeders': 3,
                      'customFormatScore': -10000, 'rejected': True,
                      'rejections': ['Existing file on disk has a equal or higher Custom Format score: -10000']}])
+            elif path.startswith('/api/v3/qualitydefinition/'):
+                qid = int(path.rsplit('/', 1)[-1])
+                self._respond(200, qdef.get(qid, {'id': qid}))
             elif path.startswith('/api/v3/command/'):
                 self._respond(200, {'id': int(path.rsplit('/', 1)[-1]),
                                     'name': 'RefreshSeries', 'status': 'completed',
@@ -179,8 +185,19 @@ def arr_upstream():
             self._respond(201, {'id': 99})
 
         def do_PUT(self):
-            self._record('PUT', self._body())
-            self._respond(200, {})
+            body = self._body()
+            self._record('PUT', body)
+            path = urlparse(self.path).path
+            if path.startswith('/api/v3/qualitydefinition/'):
+                qid = int(path.rsplit('/', 1)[-1])
+                try:
+                    data = json.loads(body or '{}')
+                except ValueError:
+                    data = {}
+                qdef[qid] = data
+                self._respond(200, data)
+            else:
+                self._respond(200, {})
 
         def do_DELETE(self):
             self._record('DELETE')
@@ -450,6 +467,24 @@ class TestArrWrites:
                    if r['method'] == 'PUT' and r['path'] == '/api/v3/qualityprofile/4')
         assert json.loads(req['body'])['formatItems'][0]['score'] == -10000
 
+    def test_quality_definition_update_merges_and_verifies(self, auth_client, arr_upstream):
+        _make('sonarr', 'sonarr-key', 'sonarr', arr_upstream)
+        out = json.loads(run_tool('sonarr', 'quality_definition_update',
+                                  {'id': 3, 'maxSize': 100.0}, reason='cap oversized 1080p'))
+        assert out['status'] == 'pending'
+        assert auth_client.post(f'/api/integration-calls/{out["id"]}/approve').status_code == 200
+        body = json.loads(json.loads(get_pending_call(out['id'])['result'])['body'])
+        assert body['status'] == 'updated'
+        assert body['applied'] == {'maxSize': 100.0}
+        assert body['before']['maxSize'] is None
+        assert body['after']['maxSize'] == 100.0
+        assert body['verified'] is True
+        req = next(r for r in arr_upstream['state']['requests']
+                   if r['method'] == 'PUT' and r['path'] == '/api/v3/qualitydefinition/3')
+        sent = json.loads(req['body'])
+        # full-object PUT: the untouched quality metadata is preserved
+        assert sent['quality']['name'] == 'WEBDL-1080p' and sent['maxSize'] == 100.0
+
     def test_read_floor_but_no_generic_write_and_full_catalog(self, arr_upstream):
         _make('sonarr', 'sonarr-key', 'sonarr', arr_upstream)
         names = {t['name'] for t in get_tools(get_integration('sonarr')['id'])}
@@ -461,9 +496,9 @@ class TestArrWrites:
                 'episodes', 'episode_files', 'release_search',
                 'add_series', 'update_series', 'command', 'remove_from_queue',
                 'delete_series', 'custom_format_create', 'custom_format_update',
-                'quality_profile_update'} <= names
+                'quality_profile_update', 'quality_definition_update'} <= names
         writes = [t for t in get_tools(get_integration('sonarr')['id']) if not t['read_only']]
-        assert len(writes) == 8
+        assert len(writes) == 9
         assert all(t['always_gate'] for t in writes)
         # release_search carries a 120s per-tool timeout (indexer round-trips)
         release = next(t for t in get_tools(get_integration('sonarr')['id'])

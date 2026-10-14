@@ -23,7 +23,7 @@ _API_PREFIX = {
 # delete media from disk. (The generic `write` is still gated, but it bypasses
 # the curated guardrails — default-off search flags, full-object PUTs — so it
 # is not seeded for these kinds.)
-READ_ONLY_GENERIC_KINDS = {'sonarr', 'radarr', 'prowlarr'}
+READ_ONLY_GENERIC_KINDS = {'sonarr', 'radarr', 'prowlarr', 'jellyfin'}
 
 # Kinds whose generic `write` must ALWAYS be approval-gated regardless of the
 # integration's gate_mode (e.g. Bazarr, where any write can trigger subtitle
@@ -52,9 +52,13 @@ def generic_tools_for(kind: str) -> list:
     write_desc = (
         "Call any mutating endpoint on this integration. `method` is "
         "POST/PUT/PATCH/DELETE, `path` is relative to the base URL, `params` is "
-        "an optional query-parameter object, `data` is an optional JSON body. "
-        "Credentials are injected by Eshu; every call is audited, and the call "
-        "is gated per this integration's approval policy."
+        "an optional query-parameter object, `data` is an optional body object "
+        "(sent as JSON, or form-encoded for integrations that require it, e.g. "
+        "Bazarr /system/*). Credentials are injected by Eshu; every call is "
+        "audited, and the call is gated per this integration's approval policy. "
+        "⚠️ A 2xx with an EMPTY response body is NOT proof the change was "
+        "applied — read the target value back. Pass `verify_path` to have the "
+        "server GET that path after a successful write and return it."
     )
     tools = [
         {
@@ -82,7 +86,8 @@ def generic_tools_for(kind: str) -> list:
                 {"name": "method", "type": "string", "description": "HTTP method: POST, PUT, PATCH or DELETE.", "required": True, "default": "POST"},
                 {"name": "path", "type": "string", "description": "Endpoint path relative to the base URL.", "required": True},
                 {"name": "params", "type": "json", "description": "Optional query parameters (JSON object).", "required": False},
-                {"name": "data", "type": "json", "description": "Optional request body (JSON object).", "required": False},
+                {"name": "data", "type": "json", "description": "Optional request body (JSON object; form-encoded when the integration requires it).", "required": False},
+                {"name": "verify_path", "type": "string", "description": "Optional path relative to the base URL that the server GETs after a successful write and returns as `verify` — the evidence the change stuck.", "required": False},
             ],
             "fields": [],
             "read_only": False,

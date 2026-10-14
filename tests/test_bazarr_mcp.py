@@ -59,6 +59,7 @@ def bazarr_upstream():
             state['requests'].append({
                 'method': method, 'path': p.path, 'query': parse_qs(p.query),
                 'key': self._key(), 'body': body.decode('utf-8', 'replace'),
+                'ctype': self.headers.get('Content-Type', ''),
             })
 
         def _respond(self, status, payload=None):
@@ -98,7 +99,11 @@ def bazarr_upstream():
 
         def do_POST(self):
             self._record('POST', self._body())
-            self._respond(201, {'id': 1})
+            path = urlparse(self.path).path
+            if path == '/api/system/settings':
+                self._respond(204)          # Bazarr settings writes return 204
+            else:
+                self._respond(201, {'id': 1})
 
         def log_message(self, *args):
             pass
@@ -170,6 +175,24 @@ class TestBazarrWrites:
         assert body['seriesid'] == 88 and body['action'] == 'search-missing'
         result = json.loads(get_pending_call(out['id'])['result'])
         assert 'hint' in json.loads(result['body'])
+
+    def test_generic_write_form_encodes_settings(self, bazarr_upstream):
+        # Bazarr /system/* reads request.form only — JSON would silently no-op.
+        # The generic write must form-encode, lowercase booleans, and pass
+        # literal strings through unchanged (so a capitalised "False" still
+        # reaches Bazarr and 406s there, proving the casting guard).
+        _make(bazarr_upstream)
+        from core.integration_proxy import execute_generic_call
+        res = execute_generic_call(
+            get_integration('bazarr'), 'POST', '/system/settings',
+            data={'settings-sonarr-only_monitored': False, 'x': 5, 'name': 'False'})
+        assert res['status_code'] == 204
+        req = next(r for r in bazarr_upstream['state']['requests']
+                   if r['method'] == 'POST' and r['path'] == '/api/system/settings')
+        assert req['ctype'] == 'application/x-www-form-urlencoded'
+        assert 'settings-sonarr-only_monitored=false' in req['body']
+        assert 'x=5' in req['body']
+        assert 'name=False' in req['body']
 
     def test_generic_read_prefix(self, bazarr_upstream):
         _make(bazarr_upstream)

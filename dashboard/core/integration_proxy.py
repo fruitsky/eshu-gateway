@@ -72,6 +72,77 @@ def _apply_api_prefix(kind: str, path: str) -> str:
     return prefix.lstrip('/') + '/' + path
 
 
+# Kinds whose mutating endpoints expect `application/x-www-form-urlencoded`
+# rather than JSON. Bazarr's `save_settings` (and the /system/* family) reads
+# `request.form` ONLY — a JSON body leaves it empty, the write silently no-ops
+# and still returns 204. Keyed by kind -> path fragments.
+_FORM_ENCODE_PATHS = {'bazarr': ('/system/',)}
+
+
+def _body_encoding_for(integration: dict, path: str) -> str:
+    """'form' when this kind/path wants form-encoding, else 'json'."""
+    kind = (integration.get('kind') or '').lower()
+    p = '/' + (path or '').lstrip('/')
+    for frag in _FORM_ENCODE_PATHS.get(kind, ()):
+        if frag in p:
+            return 'form'
+    return 'json'
+
+
+def _form_value(value):
+    if isinstance(value, bool):
+        # Bazarr (dynaconf bool) requires lowercase literals; 'False' fails 406.
+        return 'true' if value else 'false'
+    if value is None:
+        return ''
+    return str(value)
+
+
+def _form_encode(data) -> str:
+    """urlencode a body dict, preserving list values as repeated keys."""
+    if not isinstance(data, dict):
+        return urllib.parse.urlencode({'_': _form_value(data)})
+    norm = {}
+    for k, v in data.items():
+        if v is None:
+            continue
+        if isinstance(v, (list, tuple)):
+            norm[k] = [_form_value(x) for x in v]
+        else:
+            norm[k] = _form_value(v)
+    return urllib.parse.urlencode(norm, doseq=True)
+
+
+def generic_write_envelope(res: dict, method: str, path: str, data=None,
+                           verified=None) -> str:
+    """Structured result for a generic write.
+
+    A 2xx with an EMPTY body is not proof the change was applied (Bazarr's
+    silent no-op returned exactly `204 + ""`), so it is flagged `verified:false`
+    rather than reported as success. `sent_body_keys` carries keys only — never
+    values — so credentials in the request body are not echoed. When a
+    `verify_path` was supplied, its read-back is attached as `verify`."""
+    status = res.get('status_code')
+    ok = isinstance(status, int) and 200 <= status < 300
+    body = res.get('body') or ''
+    env = {
+        'status': status,
+        'method': method,
+        'path': path,
+        'content_type': res.get('content_type'),
+        'sent_body_keys': (sorted(data.keys()) if isinstance(data, dict)
+                           else (['<list>'] if isinstance(data, (list, tuple)) else [])),
+        'response_body': body,
+    }
+    if ok and not body:
+        env['verified'] = False
+        env['note'] = ("2xx with an empty body is NOT proof the change was "
+                       "applied; read the target value back to confirm.")
+    if verified is not None:
+        env['verify'] = verified
+    return json.dumps(env)
+
+
 # Hard-to-undo mutations. Disruptive-but-reversible verbs (restart, reboot,
 # stop, toggle) are deliberately excluded so routine writes auto-run under the
 # 'destructive' gate mode. A single constant — trivial to tune per installation.
@@ -815,9 +886,15 @@ def execute_generic_call(integration: dict, method: str, path: str, params=None,
     headers = _auth_headers(integration, method)
     headers.setdefault('Accept', 'application/json')
     body_bytes = None
+    content_type = None
     if method in ('POST', 'PUT', 'PATCH') and data:
-        body_bytes = json.dumps(data).encode('utf-8')
-        headers.setdefault('Content-Type', 'application/json')
+        if _body_encoding_for(integration, path) == 'form':
+            body_bytes = _form_encode(data).encode('utf-8')
+            content_type = 'application/x-www-form-urlencoded'
+        else:
+            body_bytes = json.dumps(data).encode('utf-8')
+            content_type = 'application/json'
+        headers.setdefault('Content-Type', content_type)
 
     status_code, body, truncated, error, latency_ms, outcome, resp_headers = _http_roundtrip(
         integration, url, body_bytes, headers, method)
@@ -886,4 +963,5 @@ def execute_generic_call(integration: dict, method: str, path: str, params=None,
         'latency_ms': latency_ms,
         'error': error,
         'error_obj': error_obj,
+        'content_type': content_type,
     }

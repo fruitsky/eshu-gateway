@@ -139,8 +139,12 @@ class TestProxyScrub:
         out = json.loads(run_tool('testapi', 'write',
                                   {'method': 'POST', 'path': 'wan',
                                    'data': {'password': 'VirginPassword'}}, reason='test'))
-        assert out['ok'] is True
-        assert out['echo_password'] == '[redacted]'
+        # Generic writes return the evidence envelope; the scrubbed upstream
+        # body lives under response_body, and only the request KEY name is echoed.
+        assert out['sent_body_keys'] == ['password']
+        payload = json.loads(out['response_body'])
+        assert payload['ok'] is True
+        assert payload['echo_password'] == '[redacted]'
         rows = get_integration_calls()['rows']
         row = next(r for r in rows if r['tool'] == 'write')
         assert 'SecretValue' not in row['response_summary']
@@ -246,3 +250,21 @@ class TestResolveStripping:
         out = json.loads(run_tool('testapi', 'read', {'path': 'fail'}))
         assert 'sekrettoken' not in json.dumps(out)
         assert '[redacted]' in out.get('error', '')
+
+
+def test_apikey_in_url_value_masked():
+    """The *arr history `data.downloadUrl` embeds the Prowlarr key as
+    `?apikey=<32hex>`. It must be redacted in the string value (the key-name
+    rules never see it) — AC for the 2026-10-14 leak finding."""
+    from core.secret_scrub import scrub_body
+    body = ('{"data": {"downloadUrl": "http://prowlarr:9696/download?apikey='
+            'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6&t=1", '
+            '"nzbInfoUrl": "http://x/nzb?apikey=deadbeefdeadbeef&z=2", '
+            '"guid": "http://x/guid?password=hunter2&u=bob"}}')
+    out = scrub_body(body)
+    assert 'apikey=' not in out
+    assert 'password=' not in out
+    assert 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6' not in out
+    assert 'deadbeefdeadbeef' not in out
+    assert 'hunter2' not in out
+    assert '[redacted]' in out

@@ -210,7 +210,12 @@ class TestRunToolGating:
         _seed_generic_tools(get_integration("api"))
         out = json.loads(run_tool("api", "write", {"method": "POST", "path": "/things",
                                                    "data": {"x": 1}}, "do it"))
-        assert "status" not in out
+        # Auto-run writes now return the evidence envelope (status + body), not
+        # the raw body; a pending gate would instead be {"status": "pending"}.
+        assert out["status"] == 200
+        assert out["method"] == "POST" and out["path"] == "/things"
+        assert out["sent_body_keys"] == ["x"]
+        assert json.loads(out["response_body"])["ok"] is True
         assert mock_upstream["requests"][-1]["method"] == "POST"
         assert mock_upstream["requests"][-1]["path"] == "/things"
 
@@ -225,7 +230,7 @@ class TestRunToolGating:
         create_integration("api", mock_upstream["base_url"], "none", "", gate_mode="none")
         _seed_generic_tools(get_integration("api"))
         out = json.loads(run_tool("api", "write", {"method": "DELETE", "path": "/things/1"}, "delete it"))
-        assert "status" not in out
+        assert out["status"] == 200 and out["method"] == "DELETE"
         assert mock_upstream["requests"][-1]["method"] == "DELETE"
 
     def test_generic_read_runs(self, auth_client, mock_upstream):
@@ -254,6 +259,71 @@ class TestGenericApproval:
         assert rec["method"] == "POST"
         assert rec["path"] == "/things"
         assert json.loads(rec["body"]) == {"x": 1}
+
+
+@pytest.fixture
+def empty_write_upstream():
+    """POST /settings -> 204 (empty body); GET /settings -> the current value."""
+    state = {'requests': []}
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def _rec(self):
+            length = int(self.headers.get('Content-Length', 0) or 0)
+            body = self.rfile.read(length) if length else b''
+            state['requests'].append({'method': self.command,
+                                      'path': urlparse(self.path).path,
+                                      'ctype': self.headers.get('Content-Type', ''),
+                                      'body': body.decode('utf-8', 'replace')})
+
+        def do_POST(self):
+            self._rec()
+            self.send_response(204)
+            self.send_header('Content-Length', '0')
+            self.end_headers()
+
+        def do_GET(self):
+            self._rec()
+            payload = json.dumps({'only_monitored': False}).encode('utf-8')
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), _Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    yield {'base_url': f"http://127.0.0.1:{server.server_address[1]}", 'state': state}
+    server.shutdown()
+    server.server_close()
+
+
+class TestWriteEnvelope:
+    """A 2xx with an empty body must never read as success (the Bazarr silent
+    no-op), and verify_path turns write-then-read into one call."""
+
+    def test_empty_2xx_flagged_unverified(self, auth_client, empty_write_upstream):
+        create_integration("api", empty_write_upstream['base_url'], "none", "")
+        _seed_generic_tools(get_integration("api"))
+        out = json.loads(run_tool("api", "write",
+                                  {"method": "POST", "path": "/settings", "data": {"a": 1}}, "set"))
+        assert out["status"] == 204
+        assert out["verified"] is False
+        assert "NOT proof" in out["note"]
+        assert out["response_body"] == ""
+        assert out["sent_body_keys"] == ["a"]
+
+    def test_verify_path_returns_readback(self, auth_client, empty_write_upstream):
+        create_integration("api", empty_write_upstream['base_url'], "none", "")
+        _seed_generic_tools(get_integration("api"))
+        out = json.loads(run_tool("api", "write",
+                                  {"method": "POST", "path": "/settings",
+                                   "data": {"only_monitored": False},
+                                   "verify_path": "/settings"}, "set and verify"))
+        assert out["verify"]["status_code"] == 200
+        assert json.loads(out["verify"]["body"])["only_monitored"] is False
 
 
 class TestGateModeRoundTrip:

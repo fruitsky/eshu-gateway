@@ -38,6 +38,13 @@ _VALUE_PATTERNS = [
     re.compile(r'auth=[A-Za-z0-9._\-]+', re.IGNORECASE),
     # API-key header (Sonarr/Radarr X-Api-Key, ...)
     re.compile(r'X-Api-Key[:=]\s*\S+', re.IGNORECASE),
+    # query-param API key embedded in a URL string VALUE (e.g. Sonarr/Radarr
+    # history data.downloadUrl -> Prowlarr `/download?apikey=<32hex>&...`).
+    # This is a value pattern (not a key-name rule), so it fires on the string
+    # content of `downloadUrl` / `nzbInfoUrl` / `guid` wherever they appear.
+    re.compile(r'api_?key=[^&\s"\'<>]+', re.IGNORECASE),
+    # query-param password.
+    re.compile(r'password=[^&\s"\'<>]+', re.IGNORECASE),
 ]
 
 MASK = '[redacted]'
