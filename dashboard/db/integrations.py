@@ -184,6 +184,7 @@ def init_integrations_tables(cursor):
             outcome TEXT NOT NULL DEFAULT 'ok',
             session_id TEXT NOT NULL DEFAULT '',
             execution_id TEXT NOT NULL DEFAULT '',
+            decided_by TEXT NOT NULL DEFAULT '',
             created_at INTEGER NOT NULL
         )
     ''')
@@ -199,7 +200,8 @@ def init_integrations_tables(cursor):
             created_at INTEGER NOT NULL,
             resolved_at INTEGER NOT NULL DEFAULT 0,
             session_id TEXT NOT NULL DEFAULT '',
-            execution_id TEXT NOT NULL DEFAULT ''
+            execution_id TEXT NOT NULL DEFAULT '',
+            agent TEXT NOT NULL DEFAULT ''
         )
     ''')
     try:
@@ -212,6 +214,14 @@ def init_integrations_tables(cursor):
                 cursor.execute(f"ALTER TABLE {tbl} ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
             except Exception:
                 pass
+    # Caller attribution: the pending row remembers who queued it, and the
+    # resolved row records both the caller and the human who approved/denied.
+    for tbl, col in (('pending_integration_calls', 'agent'),
+                     ('integration_calls', 'decided_by')):
+        try:
+            cursor.execute(f"ALTER TABLE {tbl} ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
+        except Exception:
+            pass
     # Richer call audit: the AI's `reason`, a masked request summary, and the
     # approval decision (so Proxied Calls / the session view can show which
     # calls needed operator sign-off and what the operator decided).
@@ -529,7 +539,8 @@ def record_integration_call(integration: str, tool: str, agent: str, method: str
                             response_bytes: int, truncated: int, outcome: str = 'ok',
                             session_id: str = '', execution_id: str = '',
                             reason: str = '', request_summary: str = '',
-                            approval: str = '', decided_at: int = 0):
+                            approval: str = '', decided_at: int = 0,
+                            decided_by: str = ''):
     with db_conn() as conn:
         cursor = conn.cursor()
         now = int(time.time())
@@ -537,11 +548,13 @@ def record_integration_call(integration: str, tool: str, agent: str, method: str
             INSERT INTO integration_calls
                 (integration, tool, agent, method, path, status_code, latency_ms,
                  response_summary, response_bytes, truncated, outcome, session_id,
-                 execution_id, reason, request_summary, approval, decided_at, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 execution_id, reason, request_summary, approval, decided_at,
+                 decided_by, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (integration, tool, agent, method, path, status_code, latency_ms,
               response_summary, response_bytes, truncated, outcome, session_id,
-              execution_id, reason, request_summary, approval, decided_at or 0, now))
+              execution_id, reason, request_summary, approval, decided_at or 0,
+              decided_by, now))
         conn.commit()
         return cursor.lastrowid
 
@@ -565,8 +578,8 @@ def get_integration_calls(search: str = None, start: int = None, end: int = None
                      ' OR method LIKE ? OR path LIKE ? OR outcome LIKE ?'
                      ' OR CAST(status_code AS TEXT) LIKE ?'
                      ' OR session_id LIKE ? OR execution_id LIKE ?'
-                     ' OR reason LIKE ? OR approval LIKE ?)')
-        params += [needle] * 11
+                     ' OR reason LIKE ? OR approval LIKE ? OR decided_by LIKE ?)')
+        params += [needle] * 12
     if start is not None:
         where.append('created_at >= ?')
         params.append(start)
@@ -647,14 +660,18 @@ def list_recent_session_summaries(limit: int = 24):
 
 
 def create_pending_call(integration: str, tool: str, payload: dict, reason: str = '',
-                        session_id: str = '', execution_id: str = '') -> int:
+                        session_id: str = '', execution_id: str = '',
+                        agent: str = '') -> int:
     with db_conn() as conn:
         cursor = conn.cursor()
         now = int(time.time())
         cursor.execute('''
-            INSERT INTO pending_integration_calls (integration, tool, payload, reason, status, session_id, execution_id, created_at)
-            VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)
-        ''', (integration, tool, json.dumps(payload or {}), reason, session_id, execution_id, now))
+            INSERT INTO pending_integration_calls
+                (integration, tool, payload, reason, status, session_id,
+                 execution_id, agent, created_at)
+            VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?)
+        ''', (integration, tool, json.dumps(payload or {}), reason, session_id,
+              execution_id, agent, now))
         conn.commit()
         return cursor.lastrowid
 

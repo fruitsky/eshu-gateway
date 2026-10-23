@@ -4,16 +4,26 @@ Tools are registered dynamically from the `integration_tools` table so the MCP
 surface stays in sync with the operator's catalog. Read-only tools forward
 immediately; mutating tools create a pending call and require operator approval.
 """
+import json
 import re
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 
+from db.audit import record_audit_event
 from db.integrations import (
     get_enabled_tools,
     get_integrations,
     get_pending_call,
 )
+from core.agent_context import (
+    current_agent_name,
+    get_current_agent,
+    reset_current_agent,
+    set_current_agent,
+)
+from core.agent_policy import visible_tool_allowed
 
 _TYPE_MAP = {
     'string': 'str',
@@ -32,7 +42,78 @@ AGENT_LABEL = 'mcp'
 # is reachable at its real hostname(s)/IP(s) through a reverse proxy.
 _DEFAULT_ALLOWED_HOSTS = ['127.0.0.1:*', 'localhost:*', '[::1]:*']
 
-mcp = FastMCP(
+# Tools that are not integration calls and must remain reachable so an agent
+# can poll its own approvals. They are always scoped to the caller.
+_ALWAYS_ALLOWED = {'check_approval'}
+
+
+class EshuFastMCP(FastMCP):
+    """FastMCP with per-agent tool visibility and call-time enforcement.
+
+    The HTTP middleware authenticates the bearer token and stores the resolved
+    agent on ``request.state.agent``. `list_tools` filters the registered
+    catalog for that agent, and `call_tool` binds the agent to a ContextVar so
+    `run_tool` can enforce argument policy and attribute the audit row.
+
+    Filtering the list is a UX/context-saving measure; the call-time policy in
+    `run_tool` is the security boundary (a client may call a hidden tool by
+    name).
+    """
+
+    _eshu_namespace = None
+
+    def _request_agent(self):
+        request = None
+        try:
+            ctx = self.get_context()
+            request = ctx.request_context.request if ctx.request_context else None
+        except Exception:
+            request = None
+        agent = getattr(getattr(request, 'state', None), 'agent', None)
+        return agent or get_current_agent()
+
+    def _effective_name(self, name: str) -> str:
+        if self._eshu_namespace:
+            return f"{self._eshu_namespace}_{name}"
+        return name
+
+    async def list_tools(self):
+        tools = await super().list_tools()
+        agent = self._request_agent()
+        if not agent:
+            return tools
+        if ((agent.get('policy') or {}).get('tools_mode') or 'all') != 'allowlist':
+            return tools
+        visible = []
+        for tool in tools:
+            if tool.name in _ALWAYS_ALLOWED:
+                visible.append(tool)
+            elif visible_tool_allowed(agent, self._effective_name(tool.name)):
+                visible.append(tool)
+        return visible
+
+    async def call_tool(self, name: str, arguments: dict):
+        agent = self._request_agent()
+        token = set_current_agent(agent)
+        try:
+            if agent and name not in _ALWAYS_ALLOWED:
+                effective = self._effective_name(name)
+                if not visible_tool_allowed(agent, effective):
+                    reason = f"tool '{effective}' is not in this agent's allowlist"
+                    record_audit_event(
+                        'mcp_policy_denied', details=reason,
+                        actor=agent.get('name') or '')
+                    raise ToolError(json.dumps({
+                        'error': 'forbidden',
+                        'reason': reason,
+                        'policy': agent.get('name') or '',
+                    }))
+            return await super().call_tool(name, arguments)
+        finally:
+            reset_current_agent(token)
+
+
+mcp = EshuFastMCP(
     "Eshu",
     instructions=(
         "Eshu gateway for your homelab APIs. Read-only tools run immediately; "
@@ -82,11 +163,11 @@ def _safe_ident(name: str) -> str:
     return ident
 
 
-def _make_instance(name: str) -> FastMCP:
+def _make_instance(name: str) -> EshuFastMCP:
     """A per-integration FastMCP server. Tools are un-namespaced (the endpoint
     already scopes to one integration), and read-only tools run immediately
     while mutating tools need operator approval (poll check_approval)."""
-    return FastMCP(
+    inst = EshuFastMCP(
         "Eshu:" + name,
         instructions=(
             f"Eshu gateway for the '{name}' homelab API. Read-only tools run "
@@ -99,6 +180,8 @@ def _make_instance(name: str) -> FastMCP:
             allowed_hosts=list(_DEFAULT_ALLOWED_HOSTS),
         ),
     )
+    inst._eshu_namespace = _safe_ident(name).lower()
+    return inst
 
 
 def _register_tools(inst, integration, namespaced: bool) -> list:
@@ -329,6 +412,11 @@ def check_approval_fn():
     def _check_approval(call_id: int) -> str:
         call = get_pending_call(call_id)
         if not call:
+            return '{"error": "not found", "id": %d}' % call_id
+        owner = (call.get('agent') or '').strip()
+        caller = current_agent_name()
+        if owner and caller and owner != caller:
+            # Do not reveal another agent's approval id/result.
             return '{"error": "not found", "id": %d}' % call_id
         if call['status'] == 'approved':
             return call.get('result') or ''

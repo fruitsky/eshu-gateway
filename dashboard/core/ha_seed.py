@@ -31,7 +31,7 @@ HA_SEED_TOOLS = [
     },
     {
         "name": "call_service",
-        "description": "Call a Home Assistant service (e.g. light.turn_on, light.turn_off, climate.set_temperature, switch.toggle). Pass service data as a JSON object. REQUIRES OPERATOR APPROVAL.",
+        "description": "Call a Home Assistant service (e.g. light.turn_on, light.turn_off, climate.set_temperature, switch.toggle). Pass service data as a JSON object. REQUIRES OPERATOR APPROVAL unless the calling agent has an explicit ungated policy (the operator may scope an agent to household domains).",
         "method": "POST",
         "path_template": "/services/{domain}/{service}",
         "params": [
@@ -41,6 +41,7 @@ HA_SEED_TOOLS = [
         ],
         "example": '[]',
         "read_only": False,
+        "always_gate": True,
     },
     {
         "name": "list_services",
@@ -134,7 +135,7 @@ HA_SEED_TOOLS = [
     },
     {
         "name": "lovelace_create_dashboard",
-        "description": "Create a storage-mode Lovelace dashboard. url_path must contain a hyphen (-) unless allow_single_word is true. Pre-flights the existing dashboards and returns ha_dashboard_url_exists with the existing dashboard_id instead of failing upstream; returns the created item (incl. dashboard_id) and verifies it appears in the list.",
+        "description": "Create a storage-mode Lovelace dashboard. url_path must contain a hyphen (-) unless allow_single_word is true. Pre-flights the existing dashboards and returns ha_dashboard_url_exists with the existing dashboard_id instead of failing upstream; returns the created item (incl. dashboard_id) and verifies it appears in the list. REQUIRES OPERATOR APPROVAL.",
         "method": "POST",
         "path_template": "",
         "transport": "ws",
@@ -150,10 +151,11 @@ HA_SEED_TOOLS = [
         "fields": [],
         "example": '{"dashboard_id": "water_monitor", "url_path": "water-monitor", "title": "Water", "icon": "mdi:water", "mode": "storage", "show_in_sidebar": true, "require_admin": false, "verified": true}',
         "read_only": False,
+        "always_gate": True,
     },
     {
         "name": "lovelace_update_dashboard",
-        "description": "Update a Lovelace dashboard's metadata (title, icon, show_in_sidebar, require_admin). Identify it by dashboard_id OR url_path (the url_path -> dashboard_id mapping is resolved server-side). YAML-mode dashboards are refused. Returns the updated item.",
+        "description": "Update a Lovelace dashboard's metadata (title, icon, show_in_sidebar, require_admin). Identify it by dashboard_id OR url_path (the url_path -> dashboard_id mapping is resolved server-side). YAML-mode dashboards are refused. Returns the updated item. REQUIRES OPERATOR APPROVAL.",
         "method": "POST",
         "path_template": "",
         "transport": "ws",
@@ -169,6 +171,7 @@ HA_SEED_TOOLS = [
         "fields": [],
         "example": '{"dashboard_id": "water_monitor", "url_path": "water-monitor", "title": "Water usage", "mode": "storage"}',
         "read_only": False,
+        "always_gate": True,
     },
     {
         "name": "lovelace_save_config",

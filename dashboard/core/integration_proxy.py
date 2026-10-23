@@ -729,7 +729,7 @@ def _http_roundtrip(integration: dict, url: str, body_bytes, headers: dict, meth
 def execute_integration_call(integration: dict, tool: dict, args: dict, agent: str = '',
                              session_id: str = '', execution_id: str = '',
                              reason: str = '', approval: str = '',
-                             decided_at: int = 0) -> dict:
+                             decided_at: int = 0, decided_by: str = '') -> dict:
     """Forward a call to the integration and return a JSON-safe result dict.
     Raises ProxyError for policy rejections (SSRF guard, etc.)."""
     if not integration or not integration.get('enabled'):
@@ -826,6 +826,7 @@ def execute_integration_call(integration: dict, tool: dict, args: dict, agent: s
         request_summary=safe_request_summary(args, tool),
         approval=approval,
         decided_at=decided_at,
+        decided_by=decided_by,
     )
 
     return {
@@ -842,7 +843,8 @@ def execute_generic_call(integration: dict, method: str, path: str, params=None,
                          data=None, agent: str = '', tool_name: str = '',
                          session_id: str = '', execution_id: str = '',
                          root: bool = False, reason: str = '',
-                         approval: str = '', decided_at: int = 0) -> dict:
+                         approval: str = '', decided_at: int = 0,
+                         decided_by: str = '') -> dict:
     """Call an arbitrary endpoint on the integration — the generic read/write
     floor. method/path come from the agent; `params` becomes the query string,
     `data` the JSON body. `root=True` resolves `path` against the host origin
@@ -954,6 +956,7 @@ def execute_generic_call(integration: dict, method: str, path: str, params=None,
             {'method': method, 'path': path, 'params': params, 'data': data}),
         approval=approval,
         decided_at=decided_at,
+        decided_by=decided_by,
     )
 
     return {

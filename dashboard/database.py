@@ -176,7 +176,9 @@ from db.integrations import (
 from db.agent_tokens import (
     create_agent_token,
     get_agent_tokens,
+    get_agent,
     get_agent_by_token,
+    get_agent_by_name,
     touch_agent_token,
     revoke_agent_token,
     delete_agent_token,

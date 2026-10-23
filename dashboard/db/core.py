@@ -51,6 +51,7 @@ def init_db():
     from db.fleet import init_fleet_tables
     from db.integrations import init_integrations_tables
     from db.agent_tokens import init_agent_tokens_tables
+    from db.agent_policies import init_agent_policies_tables
 
     init_requests_tables(cursor)
     init_gateways_tables(cursor)
@@ -63,6 +64,7 @@ def init_db():
     init_fleet_tables(cursor)
     init_integrations_tables(cursor)
     init_agent_tokens_tables(cursor)
+    init_agent_policies_tables(cursor)
 
     conn.commit()
     conn.close()

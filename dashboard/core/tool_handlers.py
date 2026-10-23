@@ -74,7 +74,8 @@ def _ws(integration, command, payload, name, ctx):
                       execution_id=ctx.get('execution_id', ''),
                       reason=ctx.get('reason', ''),
                       approval=ctx.get('approval', ''),
-                      decided_at=ctx.get('decided_at', 0))
+                      decided_at=ctx.get('decided_at', 0),
+                      decided_by=ctx.get('decided_by', ''))
 
 
 def _list(integration, tool_name, ctx=None):
@@ -650,7 +651,8 @@ def _arr_http(integration, method, path, data, name, ctx):
         execution_id=ctx.get('execution_id', ''),
         reason=ctx.get('reason', ''),
         approval=ctx.get('approval', ''),
-        decided_at=ctx.get('decided_at', 0))
+        decided_at=ctx.get('decided_at', 0),
+        decided_by=ctx.get('decided_by', ''))
     if res.get('error'):
         raise ProxyError(res.get('status_code') or 502, str(res['error']))
     return res.get('body') or ''
@@ -804,16 +806,19 @@ PREFLIGHT = {
 }
 
 
-def _ctx(agent, session_id, execution_id, reason='', approval='', decided_at=0):
+def _ctx(agent, session_id, execution_id, reason='', approval='', decided_at=0,
+         decided_by=''):
     return {'agent': agent or '', 'session_id': session_id or '',
             'execution_id': execution_id or '', 'reason': reason or '',
-            'approval': approval or '', 'decided_at': decided_at or 0}
+            'approval': approval or '', 'decided_at': decided_at or 0,
+            'decided_by': decided_by or ''}
 
 
 def run_handler(name: str, integration: dict, tool: dict, args: dict,
                 agent: str = '', session_id: str = '',
                 execution_id: str = '', reason: str = '',
-                approval: str = '', decided_at: int = 0) -> str:
+                approval: str = '', decided_at: int = 0,
+                decided_by: str = '') -> str:
     """Run a registered handler and return its JSON string. ProxyError is
     translated to a stable tool error code; anything else surfaces as
     handler_failed."""
@@ -824,7 +829,8 @@ def run_handler(name: str, integration: dict, tool: dict, args: dict,
                            'status_code': 500})
     try:
         return fn(integration, tool, args or {},
-                  _ctx(agent, session_id, execution_id, reason, approval, decided_at))
+                  _ctx(agent, session_id, execution_id, reason, approval,
+                       decided_at, decided_by))
     except ProxyError as e:
         return _err(_translate(e.message), e.message, e.status_code)
     except Exception as e:  # noqa: BLE001 - never leak a traceback to the model
@@ -834,7 +840,8 @@ def run_handler(name: str, integration: dict, tool: dict, args: dict,
 def run_preflight(name: str, integration: dict, tool: dict, args: dict,
                   agent: str = '', session_id: str = '',
                   execution_id: str = '', reason: str = '',
-                  approval: str = '', decided_at: int = 0):
+                  approval: str = '', decided_at: int = 0,
+                  decided_by: str = ''):
     """Validate a gated handler write without writing. Returns an error JSON
     string when the write cannot succeed, or None when it is viable. Handlers
     without a registered preflight return None (no validation)."""
@@ -843,7 +850,8 @@ def run_preflight(name: str, integration: dict, tool: dict, args: dict,
         return None
     try:
         return fn(integration, tool, args or {},
-                  _ctx(agent, session_id, execution_id, reason, approval, decided_at))
+                  _ctx(agent, session_id, execution_id, reason, approval,
+                       decided_at, decided_by))
     except ProxyError as e:
         return _err(_translate(e.message), e.message, e.status_code)
     except Exception as e:  # noqa: BLE001

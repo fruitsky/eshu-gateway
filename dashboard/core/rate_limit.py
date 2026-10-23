@@ -44,3 +44,27 @@ def _check_rate_limit(ip: str, kind: str = "general"):
         raise HTTPException(status_code=429, detail="Too many requests. Slow down.")
     bucket.append(now)
     _rate_limit_buckets[key] = bucket
+
+
+def check_agent_rate_limit(agent_id, max_hits, window: int = 60) -> bool:
+    """Per-agent bucket. Returns False when the agent is over its limit.
+
+    Middleware uses the boolean form (raising HTTPException from middleware
+    bypasses FastAPI's handlers), while callers that want a 429 can raise.
+    """
+    try:
+        agent_id = int(agent_id)
+        max_hits = int(max_hits)
+    except (TypeError, ValueError):
+        return True
+    if max_hits <= 0:
+        return True
+    now = time.time()
+    _sweep(now, window)
+    key = ("agent", agent_id)
+    bucket = [t for t in _rate_limit_buckets.get(key, []) if now - t < window]
+    if len(bucket) >= max_hits:
+        return False
+    bucket.append(now)
+    _rate_limit_buckets[key] = bucket
+    return True

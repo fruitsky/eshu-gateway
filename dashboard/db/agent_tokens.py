@@ -23,10 +23,13 @@ def _hash_token(raw_token: str) -> str:
 
 def create_agent_token(name: str):
     """Mint a new agent token. The raw token is returned exactly once; only its
-    SHA-256 hash is persisted."""
+    SHA-256 hash is persisted. Names are unique so audit rows are unambiguous."""
     raw = secrets.token_hex(32)
     with db_conn() as conn:
         cursor = conn.cursor()
+        cursor.execute('SELECT id FROM agent_tokens WHERE name = ?', (name,))
+        if cursor.fetchone():
+            raise ValueError(f"An agent named '{name}' already exists")
         now = int(time.time())
         cursor.execute('''
             INSERT INTO agent_tokens (name, token_hash, created_at)
@@ -54,6 +57,24 @@ def get_agent_by_token(raw_token: str):
         return dict(row) if row else None
 
 
+def get_agent_by_name(name: str):
+    if not name:
+        return None
+    with db_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM agent_tokens WHERE name = ?', (name,))
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+
+def get_agent(agent_id: int):
+    with db_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM agent_tokens WHERE id = ?', (agent_id,))
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+
 def touch_agent_token(agent_id: int):
     with db_conn() as conn:
         cursor = conn.cursor()
@@ -73,5 +94,7 @@ def delete_agent_token(agent_id: int) -> bool:
     with db_conn() as conn:
         cursor = conn.cursor()
         cursor.execute('DELETE FROM agent_tokens WHERE id = ?', (agent_id,))
+        deleted = cursor.rowcount > 0
+        cursor.execute('DELETE FROM agent_policies WHERE agent_id = ?', (agent_id,))
         conn.commit()
-        return cursor.rowcount > 0
+        return deleted

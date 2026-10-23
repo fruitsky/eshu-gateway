@@ -228,37 +228,47 @@ class TestLovelaceCreateUpdateDelete:
 
     def test_create_hyphen_refused(self, lovelace_server):
         _seed(lovelace_server)
-        out = json.loads(run_tool("ha", "lovelace_create_dashboard",
-                                  {"title": "T", "url_path": "hermestest"}, "make it"))
+        out = json.loads(run_handler("ha_lovelace_create_dashboard",
+                                     get_integration("ha"),
+                                     _tool("lovelace_create_dashboard"),
+                                     {"title": "T", "url_path": "hermestest"}))
         assert out["error"] == "ha_dashboard_url_invalid"
 
     def test_create_duplicate(self, lovelace_server):
         _seed(lovelace_server)
-        out = json.loads(run_tool("ha", "lovelace_create_dashboard",
-                                  {"title": "T", "url_path": "water-monitor"}, "make it"))
+        out = json.loads(run_handler("ha_lovelace_create_dashboard",
+                                     get_integration("ha"),
+                                     _tool("lovelace_create_dashboard"),
+                                     {"title": "T", "url_path": "water-monitor"}))
         assert out["error"] == "ha_dashboard_url_exists"
         assert "water_monitor" in out["message"]
 
     def test_create_success_verified(self, lovelace_server):
         _seed(lovelace_server)
-        out = json.loads(run_tool("ha", "lovelace_create_dashboard",
-                                  {"title": "Test", "url_path": "hermes-test",
-                                   "icon": "mdi:test-tube"}, "make it"))
+        out = json.loads(run_handler("ha_lovelace_create_dashboard",
+                                     get_integration("ha"),
+                                     _tool("lovelace_create_dashboard"),
+                                     {"title": "Test", "url_path": "hermes-test",
+                                      "icon": "mdi:test-tube"}))
         assert out["dashboard_id"] == "hermes_test"
         assert out["verified"] is True
         assert any(d["url_path"] == "hermes-test" for d in lovelace_server["state"]["dashboards"])
 
     def test_update_by_url_path_resolves_id(self, lovelace_server):
         _seed(lovelace_server)
-        out = json.loads(run_tool("ha", "lovelace_update_dashboard",
-                                  {"url_path": "water-monitor", "title": "Water usage"}, "rename"))
+        out = json.loads(run_handler("ha_lovelace_update_dashboard",
+                                     get_integration("ha"),
+                                     _tool("lovelace_update_dashboard"),
+                                     {"url_path": "water-monitor", "title": "Water usage"}))
         assert out["dashboard_id"] == "water_monitor"
         assert out["title"] == "Water usage"
 
     def test_update_yaml_refused(self, lovelace_server):
         _seed(lovelace_server)
-        out = json.loads(run_tool("ha", "lovelace_update_dashboard",
-                                  {"url_path": "dwains-dashboard", "title": "x"}, "rename"))
+        out = json.loads(run_handler("ha_lovelace_update_dashboard",
+                                     get_integration("ha"),
+                                     _tool("lovelace_update_dashboard"),
+                                     {"url_path": "dwains-dashboard", "title": "x"}))
         assert out["error"] == "ha_dashboard_yaml_readonly"
 
     def test_delete_removes_dashboard_and_config(self, lovelace_server):
@@ -359,8 +369,9 @@ class TestLovelaceSaveConfig:
         """Bug 1: a freshly created dashboard has no saved config yet — saving
         must initialise it rather than failing with a hard error."""
         _seed(lovelace_server)
-        run_tool("ha", "lovelace_create_dashboard",
-                 {"title": "Test", "url_path": "hermes-test"}, "make it")
+        run_handler("ha_lovelace_create_dashboard", get_integration("ha"),
+                    _tool("lovelace_create_dashboard"),
+                    {"title": "Test", "url_path": "hermes-test"})
         tool = _tool("lovelace_save_config")
         out = json.loads(run_handler("ha_lovelace_save_config", get_integration("ha"), tool, {
             "url_path": "hermes-test",
@@ -371,8 +382,9 @@ class TestLovelaceSaveConfig:
 
     def test_configless_full_replace(self, lovelace_server):
         _seed(lovelace_server)
-        run_tool("ha", "lovelace_create_dashboard",
-                 {"title": "Test", "url_path": "hermes-test"}, "make it")
+        run_handler("ha_lovelace_create_dashboard", get_integration("ha"),
+                    _tool("lovelace_create_dashboard"),
+                    {"title": "Test", "url_path": "hermes-test"})
         tool = _tool("lovelace_save_config")
         out = json.loads(run_handler("ha_lovelace_save_config", get_integration("ha"), tool, {
             "url_path": "hermes-test", "config": {"views": [{"path": "main"}]},
@@ -381,8 +393,9 @@ class TestLovelaceSaveConfig:
 
     def test_configless_card_op_hints_set_view_new(self, lovelace_server):
         _seed(lovelace_server)
-        run_tool("ha", "lovelace_create_dashboard",
-                 {"title": "Test", "url_path": "hermes-test"}, "make it")
+        run_handler("ha_lovelace_create_dashboard", get_integration("ha"),
+                    _tool("lovelace_create_dashboard"),
+                    {"title": "Test", "url_path": "hermes-test"})
         tool = _tool("lovelace_save_config")
         out = json.loads(run_handler("ha_lovelace_save_config", get_integration("ha"), tool, {
             "url_path": "hermes-test",
@@ -409,6 +422,20 @@ class TestLovelaceGating:
             "url_path": "water-monitor",
             "ops": [{"op": "append_card", "view": "water", "card": {"type": "markdown"}}]},
             "please edit"))
+        assert out["status"] == "pending" and "id" in out
+
+    def test_create_is_gated(self, lovelace_server):
+        _seed(lovelace_server)
+        out = json.loads(run_tool("ha", "lovelace_create_dashboard",
+                                  {"title": "Test", "url_path": "hermes-test"},
+                                  "make it"))
+        assert out["status"] == "pending" and "id" in out
+
+    def test_update_is_gated(self, lovelace_server):
+        _seed(lovelace_server)
+        out = json.loads(run_tool("ha", "lovelace_update_dashboard",
+                                  {"url_path": "water-monitor", "title": "Water usage"},
+                                  "rename"))
         assert out["status"] == "pending" and "id" in out
 
     def test_delete_is_gated(self, lovelace_server):

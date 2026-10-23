@@ -2508,6 +2508,7 @@ function renderJitItem(item) {
           '<div class="jit-meta">' +
             '<span class="jit-meta-item">#' + String(c.id).padStart(6,'0') + '</span>' +
             '<span class="jit-meta-item">API call</span>' +
+            (c.agent ? '<span class="jit-meta-item">agent ' + escapeHtml(c.agent) + '</span>' : '') +
             (c.reason ? '<span class="jit-meta-item">\u201c' + escapeHtml(c.reason) + '\u201d</span>' : '') +
           '</div>' +
         '</div>' +
@@ -4657,7 +4658,7 @@ function copyEnrollCommand() { document.getElementById('enroll-command').select(
 
 // ── Audit Log ────────────────────────────────────────────────────────────
 const AUDIT_ICONS = { enrolled: '✓', version_updated: '↑', disconnected: '!', policy_committed: '↻', update_triggered: '↻', uninstall_triggered: '✕', uninstalled: '✕', password_changed: '', password_cleared: '', window_created: '', window_modified: '', window_deleted: '', window_toggled: '', window_claimed: '', dev_update_pushed: '', gateway_mode_changed: '' };
-const AUDIT_LABELS = { enrolled: 'enrolled', version_updated: 'updated', disconnected: 'disconnected', policy_committed: 'Policies committed', update_triggered: 'Update triggered', uninstall_triggered: 'Uninstall triggered', uninstalled: 'Uninstalled', password_changed: 'Password changed', password_cleared: 'Password removed', window_created: 'Window created', window_modified: 'Window updated', window_deleted: 'Window deleted', window_toggled: 'Window toggled', window_claimed: 'Window claimed', dev_update_pushed: 'Dev push', gateway_mode_changed: 'Gateway mode' };
+const AUDIT_LABELS = { enrolled: 'enrolled', version_updated: 'updated', disconnected: 'disconnected', policy_committed: 'Policies committed', update_triggered: 'Update triggered', uninstall_triggered: 'Uninstall triggered', uninstalled: 'Uninstalled', password_changed: 'Password changed', password_cleared: 'Password removed', window_created: 'Window created', window_modified: 'Window updated', window_deleted: 'Window deleted', window_toggled: 'Window toggled', window_claimed: 'Window claimed', dev_update_pushed: 'Dev push', gateway_mode_changed: 'Gateway mode', agent_policy_updated: 'Agent policy updated', agent_token_revoked: 'Agent token revoked', mcp_policy_denied: 'MCP policy denied' };
 let _auditLogSearchQuery = '';
 function onAuditLogSearch() {
   _auditLogSearchQuery = document.getElementById('audit-log-search').value.trim();
@@ -4682,7 +4683,7 @@ function auditCategory(et) {
   if (et.indexOf('jit_') === 0) return 'jit';
   if (et.indexOf('policy_') === 0) return 'policy';
   if (et.indexOf('window_') === 0) return 'windows';
-  if (et.indexOf('integration_') === 0 || et.indexOf('agent_token_') === 0) return 'integrations';
+  if (et.indexOf('integration_') === 0 || et.indexOf('agent_token_') === 0 || et.indexOf('agent_policy_') === 0 || et.indexOf('mcp_policy_') === 0) return 'integrations';
   if (et.indexOf('fleet_') === 0 || et.indexOf('freeze_') === 0 || et.indexOf('override_') === 0) return 'fleet';
   if (et.indexOf('zero_trust_') === 0 || ['enrolled','version_updated','disconnected','connected','uninstalled','uninstall_triggered','auto_deregistered','gateway_mode_changed'].indexOf(et) !== -1) return 'gateways';
   return 'config';
@@ -4690,7 +4691,7 @@ function auditCategory(et) {
 
 function auditBadgeClass(et) {
   if (['jit_approved','jit_override_approved','window_request_approved','integration_call_approved','enrolled','connected','integration_created','integration_updated','agent_token_created','fleet_dispatched'].indexOf(et) !== -1) return 'badge-approved';
-  if (['jit_denied','disconnected','uninstalled','auto_deregistered','window_request_denied','integration_call_denied','integration_deleted','agent_token_deleted'].indexOf(et) !== -1) return 'badge-denied';
+  if (['jit_denied','disconnected','uninstalled','auto_deregistered','window_request_denied','integration_call_denied','integration_deleted','agent_token_deleted','agent_token_revoked','mcp_policy_denied'].indexOf(et) !== -1) return 'badge-denied';
   return 'badge-info';
 }
 
@@ -4747,6 +4748,7 @@ function renderAuditLog() {
       '<div class="log-detail">' +
         '<div class="detail-row"><span class="detail-label">Timestamp</span><span class="detail-value">' + escapeHtml(d.toLocaleString()) + '</span></div>' +
         '<div class="detail-row"><span class="detail-label">Event</span><span class="detail-value">' + escapeHtml(label) + '</span></div>' +
+        (l.actor ? '<div class="detail-row"><span class="detail-label">Actor</span><span class="detail-value">' + escapeHtml(l.actor) + '</span></div>' : '') +
         (gw ? '<div class="detail-row"><span class="detail-label">Gateway</span><span class="detail-value">' + escapeHtml(gw) + (l.gateway_ip ? ' (' + escapeHtml(l.gateway_ip) + ')' : '') + '</span></div>' : '') +
         (details ? '<div class="detail-cmd">' + details + '</div>' : '') +
       '</div>' +
@@ -5394,6 +5396,10 @@ async function saveMcpSettings() {
   } catch(e) { showToast('Failed: ' + e.message, 'error'); }
 }
 
+var _agentsData = [];
+var _agentPolicy = null;
+var _agentPolicyTools = [];
+
 async function fetchAgentTokens() {
   const el = document.getElementById('agent-token-list');
   if (!el) return;
@@ -5401,15 +5407,158 @@ async function fetchAgentTokens() {
     const res = await authFetch('/api/agents');
     if (!res.ok) return;
     const agents = await res.json();
+    _agentsData = agents;
     if (!agents.length) { el.innerHTML = '<p class="text-muted">No agent tokens yet.</p>'; return; }
     el.innerHTML = agents.map(function(a) {
       var used = a.last_used_at ? new Date(a.last_used_at * 1000).toLocaleString() : 'never';
+      var p = a.policy || {};
+      var summary = p.tools_mode === 'allowlist'
+        ? ((p.tools || []).length + ' allowed tool' + ((p.tools || []).length === 1 ? '' : 's'))
+        : 'all tools';
+      if (p.rate_limit_per_min) summary += ' · ' + p.rate_limit_per_min + '/min';
       return '<div class="flex items-center justify-between gap-2 p-2 rounded bg-black/20">' +
         '<div><div class="text-sm">' + esc(a.name) + (a.revoked ? ' <span class="text-danger">(revoked)</span>' : '') + '</div>' +
-        '<div class="text-xs text-muted">last used: ' + used + '</div></div>' +
-        '<button onclick="deleteAgentToken(' + a.id + ')" class="btn btn-xs btn-muted">Delete</button></div>';
+        '<div class="text-xs text-muted">last used: ' + used + ' · ' + esc(summary) + '</div></div>' +
+        '<div class="flex items-center gap-1">' +
+        '<button onclick="openAgentPolicy(' + a.id + ')" class="btn btn-xs">Policy</button>' +
+        (a.revoked ? '' : '<button onclick="revokeAgentToken(' + a.id + ')" class="btn btn-xs btn-muted">Revoke</button>') +
+        '<button onclick="deleteAgentToken(' + a.id + ')" class="btn btn-xs btn-muted">Delete</button></div></div>';
     }).join('');
   } catch(e) {}
+}
+
+async function openAgentPolicy(id) {
+  const agent = (_agentsData || []).find(function(a) { return a.id === id; });
+  if (!agent) return;
+  try {
+    const [pRes, tRes] = await Promise.all([
+      authFetch('/api/agents/' + id + '/policy'),
+      authFetch('/api/agents/' + id + '/available-tools')
+    ]);
+    if (!pRes.ok || !tRes.ok) { showToast('Failed to load agent policy', 'error'); return; }
+    _agentPolicy = await pRes.json();
+    const tools = await tRes.json();
+    _agentPolicyTools = tools.integrations || [];
+    renderAgentPolicy(agent);
+    document.getElementById('agent-policy-modal').classList.remove('hidden');
+  } catch(e) { showToast('Failed: ' + e.message, 'error'); }
+}
+
+function closeAgentPolicyModal() {
+  document.getElementById('agent-policy-modal').classList.add('hidden');
+}
+
+function _splitList(value) {
+  return (value || '').split(',').map(function(s) { return s.trim(); }).filter(Boolean);
+}
+
+function renderAgentPolicy(agent) {
+  const p = _agentPolicy || {};
+  document.getElementById('agent-policy-title').textContent = 'Agent Policy — ' + (agent.name || '');
+  const mode = p.tools_mode === 'allowlist' ? 'allowlist' : 'all';
+  document.querySelectorAll('input[name="agent-tools-mode"]').forEach(function(r) {
+    r.checked = (r.value === mode);
+  });
+
+  const selected = new Set(p.tools || []);
+  const groups = _agentPolicyTools.map(function(group) {
+    const rows = (group.tools || []).map(function(t) {
+      const checked = selected.has(t.name);
+      return '<label class="flex items-start gap-2 py-0.5">' +
+        '<input type="checkbox" data-tool="' + esc(t.name) + '" ' + (checked ? 'checked' : '') + ' ' +
+        (mode === 'all' ? 'disabled' : '') + '>' +
+        '<span><code>' + esc(t.name) + '</code>' +
+        (t.read_only ? ' <span class="text-muted">(read)</span>' : ' <span class="text-warning">(write)</span>') + '</span></label>';
+    }).join('');
+    return '<div class="mb-2"><div class="text-xs font-semibold text-main mb-1">' + esc(group.integration) + '</div>' + rows + '</div>';
+  }).join('');
+  document.getElementById('agent-policy-tools').innerHTML = groups || '<p class="text-muted">No integrations.</p>';
+
+  const ha = (p.arg_policy || {})['home_assistant_call_service'] || {};
+  document.getElementById('agent-ha-domain-allow').value = (ha.domain_allow || []).join(', ');
+  document.getElementById('agent-ha-domain-deny').value = (ha.domain_deny || []).join(', ');
+  document.getElementById('agent-ha-service-deny').value = (ha.service_deny || []).join(', ');
+  document.getElementById('agent-ha-approval').value = (p.approval || {})['home_assistant_call_service'] || 'inherit';
+  document.getElementById('agent-rate-limit').value = p.rate_limit_per_min || 0;
+  document.getElementById('agent-policy-json').value = JSON.stringify({
+    arg_policy: p.arg_policy || {},
+    approval: p.approval || {}
+  }, null, 2);
+}
+
+function setAgentToolsMode(mode) {
+  document.querySelectorAll('#agent-policy-tools input[type="checkbox"]').forEach(function(cb) {
+    cb.disabled = (mode === 'all');
+  });
+}
+
+function collectAgentPolicy() {
+  const modeEl = document.querySelector('input[name="agent-tools-mode"]:checked');
+  const mode = modeEl ? modeEl.value : 'all';
+  const tools = [];
+  if (mode === 'allowlist') {
+    document.querySelectorAll('#agent-policy-tools input[data-tool]:checked').forEach(function(cb) {
+      tools.push(cb.getAttribute('data-tool'));
+    });
+  }
+  let advanced;
+  try {
+    advanced = JSON.parse(document.getElementById('agent-policy-json').value || '{}');
+  } catch(e) {
+    showToast('Advanced JSON is invalid: ' + e.message, 'error');
+    return null;
+  }
+  const argPolicy = Object.assign({}, advanced.arg_policy || {});
+  const approval = Object.assign({}, advanced.approval || {});
+
+  const ha = Object.assign({}, argPolicy['home_assistant_call_service'] || {});
+  const allow = _splitList(document.getElementById('agent-ha-domain-allow').value);
+  const deny = _splitList(document.getElementById('agent-ha-domain-deny').value);
+  const serviceDeny = _splitList(document.getElementById('agent-ha-service-deny').value);
+  if (allow.length) ha.domain_allow = allow; else delete ha.domain_allow;
+  if (deny.length) ha.domain_deny = deny; else delete ha.domain_deny;
+  if (serviceDeny.length) ha.service_deny = serviceDeny; else delete ha.service_deny;
+  if (Object.keys(ha).length) argPolicy['home_assistant_call_service'] = ha;
+  else delete argPolicy['home_assistant_call_service'];
+
+  const haApproval = document.getElementById('agent-ha-approval').value;
+  if (haApproval && haApproval !== 'inherit') approval['home_assistant_call_service'] = haApproval;
+  else delete approval['home_assistant_call_service'];
+
+  const rate = parseInt(document.getElementById('agent-rate-limit').value || '0', 10);
+  return {
+    tools_mode: mode,
+    tools: tools,
+    arg_policy: argPolicy,
+    approval: approval,
+    rate_limit_per_min: isNaN(rate) ? 0 : rate
+  };
+}
+
+async function saveAgentPolicy() {
+  if (!_agentPolicy || !_agentPolicy.agent_id) { showToast('No agent selected', 'error'); return; }
+  const payload = collectAgentPolicy();
+  if (!payload) return;
+  try {
+    const res = await authFetch('/api/agents/' + _agentPolicy.agent_id + '/policy', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
+    });
+    const data = await res.json().catch(function() { return {}; });
+    if (!res.ok) { showToast('' + (data.detail || 'Failed'), 'error'); return; }
+    showToast('Agent policy saved', 'success');
+    closeAgentPolicyModal();
+    fetchAgentTokens();
+  } catch(e) { showToast('Failed: ' + e.message, 'error'); }
+}
+
+async function revokeAgentToken(id) {
+  if (!(await customConfirm('Revoke this agent token? It stops working immediately; the row is kept for audit.'))) return;
+  try {
+    const res = await authFetch('/api/agents/' + id + '/revoke', { method: 'POST' });
+    if (!res.ok) { showToast('Failed to revoke', 'error'); return; }
+    showToast('Agent token revoked', 'success');
+    fetchAgentTokens();
+  } catch(e) { showToast('Failed: ' + e.message, 'error'); }
 }
 
 async function createAgentToken() {

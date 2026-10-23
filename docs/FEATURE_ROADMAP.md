@@ -14,12 +14,13 @@ test → verify → merge to `master` → LXC pull flow.
 | ~~P2~~ | ~~"What could go wrong" Risk Hint~~ | **DONE** — shipped on `feat/risk-hint` (+ dry-run suggestions in Fleet Run) | Low |
 | **P3** | Approver Keyboard Shortcuts | QoL win for a single operator triaging bursts | Low |
 | ~~P4~~ | ~~Editable Core Blocklist (safety net)~~ | **DONE** — shipped on `feat/core-blocklist-editable`, merged to master | Medium |
+| ~~P5~~ | ~~Per-agent identity & accountability~~ | **DONE** — per-agent MCP tool/argument policies, approval classes, rate limits, and caller attribution | Medium |
 
 ### Dropped / deferred
 
 - **Natural Language Policy Editor** — dropped (low value for a single operator; grammar complexity not worth it).
 - **Fleet health scorecard** — dropped (all gateways are usually healthy; per-gateway pills already exist).
-- **Deferred ideas (future consideration):** per-agent identity & accountability, Telegram/phone approval, scheduled freeze, command timeline, time-to-approval stats, weekly activity digest, blocked-attempt alerting thresholds, cron/timer job visibility.
+- **Deferred ideas (future consideration):** Telegram/phone approval, scheduled freeze, command timeline, time-to-approval stats, weekly activity digest, blocked-attempt alerting thresholds, cron/timer job visibility.
 
 ---
 

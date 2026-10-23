@@ -9,18 +9,24 @@ def init_audit_tables(cursor):
             timestamp INTEGER NOT NULL,
             gateway_ip TEXT,
             hostname TEXT,
-            details TEXT
+            details TEXT,
+            actor TEXT NOT NULL DEFAULT ''
         )
     ''')
+    try:
+        cursor.execute("ALTER TABLE audit_log ADD COLUMN actor TEXT NOT NULL DEFAULT ''")
+    except Exception:
+        pass
 
-def record_audit_event(event_type: str, gateway_ip: str = None, hostname: str = None, details: str = None):
+def record_audit_event(event_type: str, gateway_ip: str = None, hostname: str = None,
+                       details: str = None, actor: str = ''):
     with db_conn() as conn:
         cursor = conn.cursor()
         now = int(time.time())
         cursor.execute('''
-            INSERT INTO audit_log (event_type, timestamp, gateway_ip, hostname, details)
-            VALUES (?, ?, ?, ?, ?)
-        ''', (event_type, now, gateway_ip, hostname, details))
+            INSERT INTO audit_log (event_type, timestamp, gateway_ip, hostname, details, actor)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (event_type, now, gateway_ip, hostname, details, actor or ''))
         conn.commit()
 
 def get_audit_log(limit: int = 200):
@@ -36,8 +42,9 @@ def search_audit_log(query: str, limit: int = 200):
         pattern = f"%{query}%"
         cursor.execute('''
             SELECT * FROM audit_log
-            WHERE event_type LIKE ? OR gateway_ip LIKE ? OR hostname LIKE ? OR details LIKE ?
+            WHERE event_type LIKE ? OR gateway_ip LIKE ? OR hostname LIKE ?
+               OR details LIKE ? OR actor LIKE ?
             ORDER BY timestamp DESC LIMIT ?
-        ''', (pattern, pattern, pattern, pattern, limit))
+        ''', (pattern, pattern, pattern, pattern, pattern, limit))
         rows = cursor.fetchall()
         return [dict(row) for row in rows]

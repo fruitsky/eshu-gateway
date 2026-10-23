@@ -26,9 +26,10 @@ _API_PREFIX = {
 READ_ONLY_GENERIC_KINDS = {'sonarr', 'radarr', 'prowlarr', 'jellyfin'}
 
 # Kinds whose generic `write` must ALWAYS be approval-gated regardless of the
-# integration's gate_mode (e.g. Bazarr, where any write can trigger subtitle
-# downloads/searches).
-ALWAYS_GATE_GENERIC_WRITE_KINDS = {'bazarr'}
+# integration's gate_mode. Bazarr: any write can trigger subtitle
+# downloads/searches. Home Assistant: the generic write is an escape hatch to
+# every admin endpoint (config/registry/restart), so it must never auto-run.
+ALWAYS_GATE_GENERIC_WRITE_KINDS = {'bazarr', 'ha'}
 
 
 def generic_tools_for(kind: str) -> list:
@@ -127,6 +128,7 @@ def generic_tools_for(kind: str) -> list:
                 "read_only": False,
                 "transport": "ws",
                 "generic": True,
+                "always_gate": True,
             },
         ])
     return tools

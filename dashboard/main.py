@@ -68,7 +68,11 @@ from database import (
     record_integration_call, get_integration_calls, list_recent_session_summaries,
     create_pending_call, get_pending_calls, get_pending_call, set_pending_call_status,
     mask_sensitive_args, strip_resolved_payloads,
-    create_agent_token, get_agent_tokens, revoke_agent_token, delete_agent_token,
+    create_agent_token, get_agent_tokens, get_agent, get_agent_by_name,
+    revoke_agent_token, delete_agent_token,
+)
+from db.agent_policies import (
+    get_agent_policy, set_agent_policy, get_agent_policies_map,
 )
 
 from schemas import (
@@ -83,7 +87,8 @@ from core.session import (
     SESSION_KEY, SESSION_TTL, _make_session_token, _verify_session_token,
     _check_session, _check_session_optional, _is_password_protected,
 )
-from core.rate_limit import _check_rate_limit
+from core.rate_limit import _check_rate_limit, check_agent_rate_limit
+from core.agent_policy import evaluate_call, rate_limit_for, safe_ident
 from core.notify import send_notify
 from core.cmd_blocklist import hard_block_match, blocklist_substring_match, CORE_COMMAND_PATTERNS, HARD_PATTERNS
 from core.policy_eval import evaluate_policy_verdict
@@ -157,11 +162,21 @@ _app = app  # keep reference for router includes
 @app.middleware("http")
 async def mcp_agent_auth_middleware(request: Request, call_next):
     """Gate the /mcp surface behind a bearer agent token (mirrors the gateway
-    token pattern). Dashboard UI and gateway endpoints are unaffected."""
+    token pattern). Dashboard UI and gateway endpoints are unaffected.
+
+    The resolved agent (with its policy) is stored on request.state so the
+    FastMCP wrapper can filter tools/list and bind the caller for tool calls.
+    """
     if request.url.path.startswith("/mcp"):
         agent = resolve_agent_optional(request)
         if agent is None:
             return JSONResponse(status_code=401, content={"detail": "Invalid or missing agent token"})
+        request.state.agent = agent
+        limit = rate_limit_for(agent)
+        if limit and not check_agent_rate_limit(agent['id'], limit):
+            return JSONResponse(
+                status_code=429,
+                content={"detail": "Rate limit exceeded for this agent"})
     return await call_next(request)
 
 
@@ -2288,6 +2303,14 @@ class AgentTokenPayload(BaseModel):
     name: str
 
 
+class AgentPolicyPayload(BaseModel):
+    tools_mode: str = 'all'
+    tools: list = []
+    arg_policy: dict = {}
+    approval: dict = {}
+    rate_limit_per_min: int = 0
+
+
 @app.post("/api/agents")
 def create_agent(payload: AgentTokenPayload, request: Request):
     """Mint a new agent token (shown once). Agents present it as a bearer token
@@ -2296,15 +2319,98 @@ def create_agent(payload: AgentTokenPayload, request: Request):
     name = payload.name.strip()
     if not name:
         raise HTTPException(status_code=400, detail="Name is required")
-    token, agent_id = create_agent_token(name)
-    record_audit_event("agent_token_created", details=f"Agent token '{name}' created (id {agent_id})")
+    try:
+        token, agent_id = create_agent_token(name)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    record_audit_event("agent_token_created",
+                       details=f"Agent token '{name}' created (id {agent_id})")
     return {"status": "ok", "id": agent_id, "name": name, "token": token}
 
 
 @app.get("/api/agents")
 def list_agents(request: Request):
     _check_session(request)
-    return get_agent_tokens()
+    agents = get_agent_tokens()
+    policies = get_agent_policies_map()
+    for agent in agents:
+        agent['policy'] = policies.get(agent['id']) or get_agent_policy(agent['id'])
+    return agents
+
+
+@app.get("/api/agents/{agent_id}/policy")
+def get_agent_policy_endpoint(agent_id: int, request: Request):
+    _check_session(request)
+    if not get_agent(agent_id):
+        raise HTTPException(status_code=404, detail="Agent token not found")
+    return get_agent_policy(agent_id)
+
+
+@app.put("/api/agents/{agent_id}/policy")
+def set_agent_policy_endpoint(agent_id: int, payload: AgentPolicyPayload,
+                              request: Request):
+    """Replace one agent's MCP policy. Absent/unchanged policies keep the
+    historical admin behaviour (all tools, inherit approval, no limit)."""
+    _check_session(request)
+    agent = get_agent(agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent token not found")
+    try:
+        policy = set_agent_policy(
+            agent_id,
+            tools_mode=payload.tools_mode,
+            tools=payload.tools,
+            arg_policy=payload.arg_policy,
+            approval=payload.approval,
+            rate_limit_per_min=payload.rate_limit_per_min,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    record_audit_event(
+        "agent_policy_updated",
+        details=f"Policy for agent '{agent['name']}' updated "
+                f"(tools_mode={policy['tools_mode']}, "
+                f"rate_limit={policy['rate_limit_per_min']})")
+    return policy
+
+
+@app.get("/api/agents/{agent_id}/available-tools")
+def available_agent_tools(agent_id: int, request: Request):
+    """The catalog the policy editor renders, grouped by integration. Names are
+    the namespaced MCP names (the same keys stored in a policy allowlist)."""
+    _check_session(request)
+    if not get_agent(agent_id):
+        raise HTTPException(status_code=404, detail="Agent token not found")
+    out = []
+    for integration in get_integrations():
+        if not integration.get('enabled'):
+            continue
+        ns = safe_ident(integration['name']).lower()
+        tools = []
+        for tool in get_tools(integration['id']):
+            tools.append({
+                'name': f"{ns}_{tool['name']}",
+                'tool': tool['name'],
+                'description': tool.get('description') or '',
+                'read_only': bool(tool.get('read_only')),
+                'enabled': bool(tool.get('enabled')),
+            })
+        out.append({
+            'integration': integration['name'],
+            'kind': integration.get('kind') or 'custom',
+            'tools': tools,
+        })
+    return {'integrations': out}
+
+
+@app.post("/api/agents/{agent_id}/revoke")
+def revoke_agent(agent_id: int, request: Request):
+    _check_session(request)
+    if not revoke_agent_token(agent_id):
+        raise HTTPException(status_code=404, detail="Agent token not found")
+    record_audit_event("agent_token_revoked",
+                       details=f"Agent token {agent_id} revoked")
+    return {"status": "ok", "revoked": True}
 
 
 @app.delete("/api/agents/{agent_id}")
@@ -2533,14 +2639,26 @@ def list_pending_integration_calls(request: Request):
     return calls
 
 
+def _caller_agent(call):
+    """Resolve the agent that queued a pending call, with its current policy."""
+    name = (call.get('agent') or '').strip()
+    if not name or name in ('mcp', 'operator'):
+        return None
+    agent = get_agent_by_name(name)
+    if not agent:
+        return None
+    agent['policy'] = get_agent_policy(agent['id'])
+    return agent
+
+
 def _record_integration_denied(call):
     """Record a denied mutating API call in the integration audit log so the
     decision is visible under History → Proxied Calls.
 
     Denied calls never execute, so no executor writes an audit row for them.
-    Approved/executed calls are already recorded by their executor (with
-    agent='operator'), so only denials need this. The SSH History tab no longer
-    carries API calls — it is SSH-only."""
+    The row keeps the original caller identity; `decided_by` records the
+    operator decision. The SSH History tab no longer carries API calls — it is
+    SSH-only."""
     integration_name = call.get('integration') or ''
     tool_name = call.get('tool') or ''
     tool = get_tool(integration_name, tool_name) if integration_name and tool_name else None
@@ -2550,10 +2668,11 @@ def _record_integration_denied(call):
         method = 'WS'
     path = payload.get('command') or (tool or {}).get('path_template') or tool_name
     reason = scrub_string(call.get('reason') or '')
+    caller = (call.get('agent') or '').strip() or 'operator'
     record_integration_call(
         integration=integration_name,
         tool=tool_name,
-        agent='operator',
+        agent=caller,
         method=method,
         path=path,
         status_code=0,
@@ -2568,12 +2687,18 @@ def _record_integration_denied(call):
         request_summary=safe_request_summary(payload, tool),
         approval='denied',
         decided_at=int(time.time()),
+        decided_by='operator',
     )
 
 
 @app.post("/api/integration-calls/{call_id}/approve")
 def approve_integration_call(call_id: int, request: Request):
-    """Approve a pending mutating call and execute it against the integration."""
+    """Approve a pending mutating call and execute it against the integration.
+
+    The original caller identity is preserved on the audit row. Before running,
+    the caller's current policy is re-evaluated: a queued call cannot execute
+    after the agent was revoked or its policy was tightened.
+    """
     _check_session(request)
     call = get_pending_call(call_id)
     if not call or call['status'] != 'pending':
@@ -2584,38 +2709,70 @@ def approve_integration_call(call_id: int, request: Request):
         raise HTTPException(status_code=404, detail="Integration or tool missing")
     payload = call['payload']
     decided_at = int(time.time())
+
+    caller = _caller_agent(call)
+    raw_caller = (call.get('agent') or '').strip()
+    caller_name = (caller or {}).get('name') or raw_caller or 'operator'
+    # Legacy/internal rows ('', 'mcp', 'operator') keep the pre-policy path.
+    if raw_caller and raw_caller not in ('mcp', 'operator'):
+        if not caller or caller.get('revoked'):
+            set_pending_call_status(call_id, 'denied', '')
+            _record_integration_denied(call)
+            record_audit_event(
+                "integration_call_denied",
+                details=f"Integration call #{call_id} ({call['integration']}.{call['tool']}) "
+                        f"denied: caller '{raw_caller}' is revoked or unknown",
+                actor='operator')
+            return {"status": "denied", "id": call_id,
+                    "reason": "Caller agent is revoked or unknown"}
+        allowed, reason = evaluate_call(
+            caller, integration['name'], tool['name'], payload,
+            tool=tool, integration=integration)
+        if not allowed:
+            set_pending_call_status(call_id, 'denied', '')
+            _record_integration_denied(call)
+            record_audit_event(
+                "integration_call_denied",
+                details=f"Integration call #{call_id} ({call['integration']}.{call['tool']}) "
+                        f"denied by policy: {reason}",
+                actor='operator')
+            return {"status": "denied", "id": call_id, "reason": reason}
+
     try:
         if tool.get('handler'):
             # Curated multi-step handler — same code path as the immediate run,
             # so a tool behaves identically whether it auto-ran or was approved.
-            # Attribute to the operator while retaining the original session.
+            # Keep the original caller as the actor; record the operator as the
+            # decision-maker.
             from core.tool_handlers import run_handler
             result = {'status_code': 200,
                       'body': run_handler(tool['handler'], integration, tool, payload,
-                                          agent='operator',
+                                          agent=caller_name,
                                           session_id=call.get('session_id') or '',
                                           execution_id=call.get('execution_id') or '',
                                           reason=call.get('reason') or '',
-                                          approval='approved', decided_at=decided_at),
+                                          approval='approved', decided_at=decided_at,
+                                          decided_by='operator'),
                       'error': None, 'truncated': 0, 'latency_ms': 0}
         elif (tool.get('transport') or 'http') == 'ws':
             result = execute_ws_call(
                 integration, payload.get('command') or tool.get('path_template'),
-                payload.get('payload'), agent='operator', tool_name=tool['name'],
+                payload.get('payload'), agent=caller_name, tool_name=tool['name'],
                 session_id=call.get('session_id') or '',
                 execution_id=call.get('execution_id') or '',
                 reason=call.get('reason') or '', approval='approved',
-                decided_at=decided_at)
+                decided_at=decided_at, decided_by='operator')
         elif tool.get('generic'):
             method = payload.get('method') or 'POST'
             path = payload.get('path') or ''
             result = execute_generic_call(integration, method, path,
                                           payload.get('params'), payload.get('data'),
-                                          agent='operator', tool_name=tool['name'],
+                                          agent=caller_name, tool_name=tool['name'],
                                           session_id=call.get('session_id') or '',
                                           execution_id=call.get('execution_id') or '',
                                           reason=call.get('reason') or '',
-                                          approval='approved', decided_at=decided_at)
+                                          approval='approved', decided_at=decided_at,
+                                          decided_by='operator')
             if not result.get('error'):
                 verified = None
                 vpath = payload.get('verify_path')
@@ -2624,11 +2781,11 @@ def approve_integration_call(call_id: int, request: Request):
                     try:
                         vres = execute_generic_call(
                             integration, 'GET', vpath, payload.get('verify_params'),
-                            agent='operator', tool_name=tool['name'] + ':verify',
+                            agent=caller_name, tool_name=tool['name'] + ':verify',
                             session_id=call.get('session_id') or '',
                             execution_id=call.get('execution_id') or '',
                             reason=call.get('reason') or '', approval='approved',
-                            decided_at=decided_at)
+                            decided_at=decided_at, decided_by='operator')
                         verified = {'status_code': vres.get('status_code'),
                                     'body': vres.get('body') or '',
                                     'error': vres.get('error')}
@@ -2637,11 +2794,13 @@ def approve_integration_call(call_id: int, request: Request):
                 result['body'] = generic_write_envelope(
                     result, method, path, payload.get('data'), verified=verified)
         else:
-            result = execute_integration_call(integration, tool, payload, agent='operator',
+            result = execute_integration_call(integration, tool, payload,
+                                              agent=caller_name,
                                               session_id=call.get('session_id') or '',
                                               execution_id=call.get('execution_id') or '',
                                               reason=call.get('reason') or '',
-                                              approval='approved', decided_at=decided_at)
+                                              approval='approved', decided_at=decided_at,
+                                              decided_by='operator')
     except ProxyError as e:
         result = {'error': e.message, 'status_code': e.status_code}
     if tool.get('response_hint'):
@@ -2650,8 +2809,11 @@ def approve_integration_call(call_id: int, request: Request):
         # run_tool path, which merges unconditionally.
         result['body'] = merge_response_hint(tool, result.get('body') or '')
     set_pending_call_status(call_id, 'approved', json.dumps(result))
-    record_audit_event("integration_call_approved",
-                       details=f"Integration call #{call_id} ({call['integration']}.{call['tool']}) approved and executed")
+    record_audit_event(
+        "integration_call_approved",
+        details=f"Integration call #{call_id} ({call['integration']}.{call['tool']}) "
+                f"for agent '{caller_name}' approved and executed",
+        actor='operator')
     return {"status": "ok", "id": call_id}
 
 
@@ -2663,8 +2825,10 @@ def deny_integration_call(call_id: int, request: Request):
         raise HTTPException(status_code=404, detail="Pending call not found")
     set_pending_call_status(call_id, 'denied', '')
     _record_integration_denied(call)
-    record_audit_event("integration_call_denied",
-                       details=f"Integration call #{call_id} ({call['integration']}.{call['tool']}) denied")
+    record_audit_event(
+        "integration_call_denied",
+        details=f"Integration call #{call_id} ({call['integration']}.{call['tool']}) denied",
+        actor='operator')
     return {"status": "ok", "id": call_id}
 
 
