@@ -350,7 +350,10 @@ def _build_request(tool: dict, args: dict):
             query_params[key] = val
         else:
             body_params[key] = val
-    query_string = urllib.parse.urlencode(query_params)
+    # Use %20 for spaces (not '+'). Seerr rejects '+' in validated query
+    # params, and %20 is accepted by every upstream we target.
+    query_string = urllib.parse.urlencode(
+        query_params, quote_via=urllib.parse.quote)
     return method, path, query_string, body_params, raw_body
 
 
@@ -882,7 +885,8 @@ def execute_generic_call(integration: dict, method: str, path: str, params=None,
         _guard_ssrf(base_url, path)
         url = base_url + '/' + path
     if params:
-        url += '?' + urllib.parse.urlencode(params)
+        url += '?' + urllib.parse.urlencode(
+            params, quote_via=urllib.parse.quote)
     url = _auth_query_url(url, integration)
 
     headers = _auth_headers(integration, method)

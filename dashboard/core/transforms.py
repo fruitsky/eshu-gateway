@@ -1079,7 +1079,8 @@ def _seerr_search(integration, tool, args, data):
             seasons = _seerr_seasons(media.get('seasons'))
             if seasons:
                 row['seasons'] = seasons
-        out.append({k: v for k, v in row.items() if v is not None})
+        out.append({k: v for k, v in row.items()
+                    if v is not None or k == 'mediaStatus'})
     payload = {
         'page': data.get('page'),
         'totalPages': data.get('totalPages'),
@@ -1103,13 +1104,32 @@ def _seerr_movie(integration, tool, args, data):
         'runtime': data.get('runtime'),
         'mediaStatus': media.get('status'),
     }
-    return json.dumps({k: v for k, v in row.items() if v is not None})
+    return json.dumps({k: v for k, v in row.items()
+                       if v is not None or k == 'mediaStatus'})
 
 
 def _seerr_tv(integration, tool, args, data):
     if not isinstance(data, dict):
         return json.dumps(data)
     media = data.get('mediaInfo') if isinstance(data.get('mediaInfo'), dict) else {}
+    # Seerr puts the availability status per season under mediaInfo.seasons;
+    # the top-level seasons[] only carries title/episodeCount metadata.
+    status_by_num = {}
+    for s in media.get('seasons') or []:
+        if isinstance(s, dict) and s.get('seasonNumber') is not None:
+            status_by_num[s['seasonNumber']] = s.get('status')
+    seasons = []
+    for s in data.get('seasons') or []:
+        if not isinstance(s, dict):
+            continue
+        season_media = s.get('mediaInfo') if isinstance(s.get('mediaInfo'), dict) else {}
+        row = {
+            'seasonNumber': s.get('seasonNumber'),
+            'episodeCount': s.get('episodeCount'),
+            'status': status_by_num.get(s.get('seasonNumber'),
+                                        season_media.get('status', s.get('status'))),
+        }
+        seasons.append({k: v for k, v in row.items() if v is not None})
     row = {
         'id': data.get('id'),
         'name': data.get('name'),
@@ -1118,9 +1138,10 @@ def _seerr_tv(integration, tool, args, data):
         'status': data.get('status'),
         'overview': (data.get('overview') or '')[:400] or None,
         'mediaStatus': media.get('status'),
-        'seasons': _seerr_seasons(data.get('seasons')),
+        'seasons': seasons,
     }
-    return json.dumps({k: v for k, v in row.items() if v is not None})
+    return json.dumps({k: v for k, v in row.items()
+                       if v is not None or k == 'mediaStatus'})
 
 
 def _seerr_requests(integration, tool, args, data):
