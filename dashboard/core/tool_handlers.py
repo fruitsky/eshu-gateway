@@ -756,6 +756,59 @@ def _h_arr_quality_definition_update(integration, tool, args, ctx):
                        'before': before, 'after': after, 'verified': verified})
 
 
+def _h_seerr_request_create(integration, tool, args, ctx):
+    """Create a Seerr request with a deliberately small, safe body.
+
+    The main Seerr API key is admin-level, so Seerr auto-approves the request.
+    We never accept is4k/userId/ignoreQuota/rootFolder/profileId/serverId from
+    the model — Seerr's own defaults apply.
+    """
+    a = args or {}
+    media_type = str(a.get('mediaType') or '').strip().lower()
+    if media_type not in ('movie', 'tv'):
+        return _err('invalid_request', "mediaType must be 'movie' or 'tv'", 400)
+    try:
+        media_id = int(a.get('mediaId'))
+    except (TypeError, ValueError):
+        return _err('invalid_request', 'mediaId must be an integer TMDB id', 400)
+    body = {'mediaType': media_type, 'mediaId': media_id}
+    if media_type == 'tv':
+        seasons = a.get('seasons')
+        if seasons in (None, '', []):
+            body['seasons'] = 'all'
+        elif str(seasons).lower() == 'all':
+            body['seasons'] = 'all'
+        elif isinstance(seasons, (list, tuple)):
+            try:
+                body['seasons'] = [int(s) for s in seasons]
+            except (TypeError, ValueError):
+                return _err('invalid_request',
+                            'seasons must be a list of integers or omitted', 400)
+        else:
+            return _err('invalid_request',
+                        'seasons must be a list of integers or omitted', 400)
+
+    res = execute_generic_call(
+        integration, 'POST', '/request', data=body,
+        agent=ctx.get('agent', ''), tool_name='request_create',
+        session_id=ctx.get('session_id', ''),
+        execution_id=ctx.get('execution_id', ''),
+        reason=ctx.get('reason', ''), approval=ctx.get('approval', ''),
+        decided_at=ctx.get('decided_at', 0),
+        decided_by=ctx.get('decided_by', ''))
+    if res.get('error'):
+        raise ProxyError(res.get('status_code') or 502, str(res['error']))
+    raw = res.get('body') or ''
+    try:
+        from core.transforms import apply_transform
+        shaped = apply_transform('seerr_request', integration, tool, args, raw)
+        if shaped is not None:
+            return shaped
+    except Exception:
+        pass
+    return raw
+
+
 HANDLERS = {
     'ha_lovelace_dashboards': _h_dashboards,
     'ha_lovelace_dashboard': _h_dashboard,
@@ -765,6 +818,7 @@ HANDLERS = {
     'ha_lovelace_delete_dashboard': _h_delete_dashboard,
     'arr_custom_format_create': _h_arr_custom_format_create,
     'arr_quality_definition_update': _h_arr_quality_definition_update,
+    'seerr_request_create': _h_seerr_request_create,
 }
 
 

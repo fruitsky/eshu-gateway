@@ -953,6 +953,193 @@ def _arr_command_status(integration, tool, args, data):
     return json.dumps({k: v for k, v in row.items() if v is not None})
 
 
+def _arr_wanted_missing(integration, tool, args, data):
+    """Compact projection of the *arr /wanted/missing view.
+
+    Sonarr records carry seriesId/seasonNumber/episodeNumber and a nested
+    `series` object; Radarr records carry year/hasFile/status. Both are
+    reduced to the fields a media-manager agent actually needs, and the
+    optional `search` filter matches episode title + parent series title.
+    """
+    a = args or {}
+    if isinstance(data, dict):
+        records = data.get('records') or data.get('items') or []
+        total = data.get('totalRecords', data.get('total', len(records)))
+        page = data.get('page')
+        page_size = data.get('pageSize')
+    elif isinstance(data, list):
+        records, total, page, page_size = data, len(data), 1, len(data)
+    else:
+        records, total, page, page_size = [], 0, None, None
+    needle = str(a.get('search') or '').lower()
+    out = []
+    for x in records:
+        if not isinstance(x, dict):
+            continue
+        series = x.get('series') if isinstance(x.get('series'), dict) else {}
+        if x.get('seriesId') is not None or series:
+            row = {
+                'id': x.get('id'),
+                'seriesId': x.get('seriesId'),
+                'seriesTitle': series.get('title'),
+                'seasonNumber': x.get('seasonNumber'),
+                'episodeNumber': x.get('episodeNumber'),
+                'title': x.get('title'),
+                'airDate': x.get('airDate'),
+                'monitored': x.get('monitored'),
+                'hasFile': x.get('hasFile'),
+            }
+        else:
+            row = {k: x.get(k) for k in (
+                'id', 'title', 'year', 'monitored', 'hasFile', 'status',
+                'sizeOnDisk')}
+        row = {k: v for k, v in row.items() if v is not None}
+        hay = (str(row.get('title') or '') + ' '
+               + str(row.get('seriesTitle') or '')).lower()
+        if needle and needle not in hay:
+            continue
+        out.append(row)
+    payload = {'totalRecords': total, 'returned': len(out), 'records': out}
+    if page is not None:
+        payload['page'] = page
+    if page_size is not None:
+        payload['pageSize'] = page_size
+    return json.dumps(payload)
+
+
+# ── Seerr transforms ──────────────────────────────────────────────────
+# Seerr is the request layer in front of Sonarr/Radarr. These projections keep
+# the model's context small: search results, details, and request rows only.
+
+def _seerr_year(value):
+    text = str(value or '')
+    return text[:4] if len(text) >= 4 and text[:4].isdigit() else None
+
+
+def _seerr_user_name(user):
+    if not isinstance(user, dict):
+        return None
+    return (user.get('displayName') or user.get('username')
+            or user.get('email') or None)
+
+
+def _seerr_seasons(value):
+    out = []
+    for s in value or []:
+        if not isinstance(s, dict):
+            continue
+        media = s.get('mediaInfo') if isinstance(s.get('mediaInfo'), dict) else {}
+        row = {
+            'seasonNumber': s.get('seasonNumber'),
+            'episodeCount': s.get('episodeCount'),
+            'status': media.get('status', s.get('status')),
+        }
+        out.append({k: v for k, v in row.items() if v is not None})
+    return out
+
+
+def _seerr_media(row):
+    media = row.get('media') if isinstance(row.get('media'), dict) else {}
+    out = {
+        'id': row.get('id'),
+        'status': row.get('status'),
+        'mediaType': media.get('mediaType'),
+        'tmdbId': media.get('tmdbId'),
+        'tvdbId': media.get('tvdbId'),
+        'mediaStatus': media.get('status'),
+        'requestedBy': _seerr_user_name(row.get('requestedBy')),
+        'createdAt': row.get('createdAt'),
+    }
+    seasons = _seerr_seasons(media.get('seasons') or row.get('seasons'))
+    if seasons:
+        out['seasons'] = seasons
+    return {k: v for k, v in out.items() if v is not None}
+
+
+def _seerr_search(integration, tool, args, data):
+    if not isinstance(data, dict):
+        return json.dumps(data)
+    out = []
+    for x in data.get('results') or []:
+        if not isinstance(x, dict):
+            continue
+        media_type = x.get('mediaType')
+        if media_type not in ('movie', 'tv'):
+            continue
+        media = x.get('mediaInfo') if isinstance(x.get('mediaInfo'), dict) else {}
+        row = {
+            'id': x.get('id'),
+            'mediaType': media_type,
+            'title': x.get('title') or x.get('name'),
+            'year': _seerr_year(x.get('releaseDate') or x.get('firstAirDate')),
+            'overview': (x.get('overview') or '')[:200] or None,
+            'mediaStatus': media.get('status'),
+        }
+        if media_type == 'tv':
+            seasons = _seerr_seasons(media.get('seasons'))
+            if seasons:
+                row['seasons'] = seasons
+        out.append({k: v for k, v in row.items() if v is not None})
+    payload = {
+        'page': data.get('page'),
+        'totalPages': data.get('totalPages'),
+        'totalResults': data.get('totalResults'),
+        'results': out,
+    }
+    return json.dumps({k: v for k, v in payload.items() if v is not None})
+
+
+def _seerr_movie(integration, tool, args, data):
+    if not isinstance(data, dict):
+        return json.dumps(data)
+    media = data.get('mediaInfo') if isinstance(data.get('mediaInfo'), dict) else {}
+    row = {
+        'id': data.get('id'),
+        'title': data.get('title'),
+        'releaseDate': data.get('releaseDate'),
+        'year': _seerr_year(data.get('releaseDate')),
+        'status': data.get('status'),
+        'overview': (data.get('overview') or '')[:400] or None,
+        'runtime': data.get('runtime'),
+        'mediaStatus': media.get('status'),
+    }
+    return json.dumps({k: v for k, v in row.items() if v is not None})
+
+
+def _seerr_tv(integration, tool, args, data):
+    if not isinstance(data, dict):
+        return json.dumps(data)
+    media = data.get('mediaInfo') if isinstance(data.get('mediaInfo'), dict) else {}
+    row = {
+        'id': data.get('id'),
+        'name': data.get('name'),
+        'firstAirDate': data.get('firstAirDate'),
+        'year': _seerr_year(data.get('firstAirDate')),
+        'status': data.get('status'),
+        'overview': (data.get('overview') or '')[:400] or None,
+        'mediaStatus': media.get('status'),
+        'seasons': _seerr_seasons(data.get('seasons')),
+    }
+    return json.dumps({k: v for k, v in row.items() if v is not None})
+
+
+def _seerr_requests(integration, tool, args, data):
+    if not isinstance(data, dict):
+        return json.dumps(data)
+    payload = {
+        'pageInfo': data.get('pageInfo'),
+        'results': [_seerr_media(r) for r in data.get('results') or []
+                    if isinstance(r, dict)],
+    }
+    return json.dumps({k: v for k, v in payload.items() if v is not None})
+
+
+def _seerr_request(integration, tool, args, data):
+    if not isinstance(data, dict):
+        return json.dumps(data)
+    return json.dumps(_seerr_media(data))
+
+
 # ── Bazarr transforms ──────────────────────────────────────────────────
 # Bazarr wraps list responses in {data:[...], total:N} (Flask-RESTX marshal
 # envelope='data'); the helpers below unwrap it. Endpoint shapes verified
@@ -1344,6 +1531,12 @@ TRANSFORMS = {
     'arr_languages': _arr_languages,
     'arr_rootfolders': _arr_rootfolders,
     'arr_command_status': _arr_command_status,
+    'arr_wanted_missing': _arr_wanted_missing,
+    'seerr_search': _seerr_search,
+    'seerr_movie': _seerr_movie,
+    'seerr_tv': _seerr_tv,
+    'seerr_requests': _seerr_requests,
+    'seerr_request': _seerr_request,
     'bazarr_status': _bazarr_status,
     'bazarr_series': _bazarr_series,
     'bazarr_episodes': _bazarr_episodes,

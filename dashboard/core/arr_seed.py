@@ -250,6 +250,54 @@ def _build_catalog(kind: str) -> list:
         "read_only": True,
     })
 
+    # The *arr "wanted/missing" view — the direct answer to "what is still to
+    # download?". Sonarr returns episodes (with the parent series nested);
+    # Radarr returns movies. Both are read-only and never trigger a search.
+    wanted_params = [
+        {"name": "page", "type": "integer",
+         "description": "Page (1-based).", "required": False, "default": 1},
+        {"name": "pageSize", "type": "integer",
+         "description": "Page size (max 100).", "required": False, "default": 20},
+        {"name": "monitored", "type": "boolean",
+         "description": "Only monitored items (default true).", "required": False, "default": True},
+    ]
+    if sonarr:
+        wanted_params.append(
+            {"name": "includeSeries", "type": "boolean",
+             "description": "Include the parent series title (default true).",
+             "required": False, "default": True})
+    reads.append({
+        "name": "wanted_missing",
+        "description": (
+            "List monitored episodes that are missing a file (the Sonarr "
+            "'wanted/missing' view). Returns totalRecords + compact records "
+            "with seriesId, seriesTitle, seasonNumber, episodeNumber, title, "
+            "airDate, monitored and hasFile. Use this to answer 'what is still "
+            "to download?'. READ-ONLY: does not trigger a search."
+            if sonarr else
+            "List monitored movies that are missing a file (the Radarr "
+            "'wanted/missing' view). Returns totalRecords + compact records "
+            "with id, title, year, monitored, hasFile, status and sizeOnDisk. "
+            "Use this to answer 'what movies are still to download?'. "
+            "READ-ONLY: does not trigger a search."),
+        "method": "GET",
+        "path_template": "/api/v3/wanted/missing",
+        "params": wanted_params,
+        "search_field": "title",
+        "transform": "arr_wanted_missing",
+        "error_codes": ARR_ERROR_CODES,
+        "example": (
+            '{"totalRecords": 1, "records": [{"id": 3746, "seriesId": 5, '
+            '"seriesTitle": "Bluey", "seasonNumber": 1, "episodeNumber": 10, '
+            '"title": "Outside", "airDate": "2026-01-01T00:00:00Z", '
+            '"monitored": true, "hasFile": false}]}'
+            if sonarr else
+            '{"totalRecords": 1, "records": [{"id": 86, "title": "Movie", '
+            '"year": 2026, "monitored": true, "hasFile": false, '
+            '"status": "released"}]}'),
+        "read_only": True,
+    })
+
     # ── Write tools (always approval-gated) ─────────────────────────────
     writes = [
         {

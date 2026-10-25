@@ -86,6 +86,23 @@ def arr_upstream():
                     {'id': 10, 'title': 'Show S01E01', 'status': 'downloading',
                      'trackedDownloadStatus': 'ok', 'errorMessage': None,
                      'sizeleft': 100, 'timeleft': '00:01:00'}]})
+            elif path == '/api/v3/wanted/missing':
+                if key == 'sonarr-key':
+                    self._respond(200, {
+                        'page': 1, 'pageSize': 20, 'totalRecords': 1,
+                        'records': [{
+                            'id': 3746, 'seriesId': 5,
+                            'series': {'id': 5, 'title': 'Bluey'},
+                            'seasonNumber': 1, 'episodeNumber': 10,
+                            'title': 'Outside', 'airDate': '2026-01-01T00:00:00Z',
+                            'monitored': True, 'hasFile': False}]})
+                else:
+                    self._respond(200, {
+                        'page': 1, 'pageSize': 20, 'totalRecords': 1,
+                        'records': [{
+                            'id': 86, 'title': 'Backrooms', 'year': 2026,
+                            'monitored': True, 'hasFile': False,
+                            'status': 'released', 'sizeOnDisk': 0}]})
             elif path == '/api/v3/history':
                 # History event ids are SINGULAR on the wire (verified live):
                 # Sonarr v4 -> episodeId (int); Radarr v6 -> movieId (int).
@@ -258,6 +275,32 @@ class TestArrReads:
         m = out[0]
         assert m['title'] == 'Jaws' and m['hasFile'] is True
         assert m['sizeOnDisk'] == 2097152
+
+    def test_wanted_missing_sonarr_projection(self, arr_upstream):
+        _make('sonarr', 'sonarr-key', 'sonarr', arr_upstream)
+        out = json.loads(run_tool('sonarr', 'wanted_missing', {}))
+        assert out['totalRecords'] == 1 and out['returned'] == 1
+        rec = out['records'][0]
+        assert rec['seriesTitle'] == 'Bluey'
+        assert rec['seasonNumber'] == 1 and rec['episodeNumber'] == 10
+        assert rec['hasFile'] is False and rec['monitored'] is True
+        assert any(r['path'] == '/api/v3/wanted/missing'
+                   for r in arr_upstream['state']['requests'])
+
+    def test_wanted_missing_radarr_projection(self, arr_upstream):
+        _make('radarr', 'radarr-key', 'radarr', arr_upstream)
+        out = json.loads(run_tool('radarr', 'wanted_missing', {}))
+        assert out['totalRecords'] == 1
+        rec = out['records'][0]
+        assert rec['title'] == 'Backrooms' and rec['hasFile'] is False
+        assert rec['status'] == 'released'
+
+    def test_wanted_missing_search_filter(self, arr_upstream):
+        _make('sonarr', 'sonarr-key', 'sonarr', arr_upstream)
+        assert len(json.loads(run_tool('sonarr', 'wanted_missing',
+                                       {'search': 'bluey'}))['records']) == 1
+        assert json.loads(run_tool('sonarr', 'wanted_missing',
+                                   {'search': 'jaws'}))['records'] == []
 
     def test_queue_paginated(self, arr_upstream):
         _make('sonarr', 'sonarr-key', 'sonarr', arr_upstream)
