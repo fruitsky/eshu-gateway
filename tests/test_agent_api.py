@@ -70,20 +70,17 @@ class TestAgentApi:
             follow_redirects=False,
         ).status_code == 307
 
-    def test_rate_limit_is_per_agent(self, auth_client):
+    def test_rate_limit_never_breaks_connect(self, auth_client):
+        """The per-agent limit is enforced on tool calls, never on /mcp
+        handshake/list traffic (a 429 there parks the MCP client)."""
         household = _create(auth_client, 'household')
-        admin = _create(auth_client, 'hermes-admin')
         agent_id = household['id']
         auth_client.put(f'/api/agents/{agent_id}/policy',
-                        json={'tools_mode': 'all', 'rate_limit_per_min': 2})
+                        json={'tools_mode': 'all', 'rate_limit_per_min': 1})
         h = {'Authorization': 'Bearer ' + household['token']}
-        a = {'Authorization': 'Bearer ' + admin['token']}
-        assert auth_client.get('/mcp', headers=h, follow_redirects=False).status_code != 429
-        assert auth_client.get('/mcp', headers=h, follow_redirects=False).status_code != 429
-        assert auth_client.get('/mcp', headers=h, follow_redirects=False).status_code == 429
-        # Admin is unlimited.
         for _ in range(4):
-            assert auth_client.get('/mcp', headers=a, follow_redirects=False).status_code != 429
+            r = auth_client.get('/mcp', headers=h, follow_redirects=False)
+            assert r.status_code == 307
 
     def test_last_used_is_tracked(self, auth_client):
         created = _create(auth_client, 'household')

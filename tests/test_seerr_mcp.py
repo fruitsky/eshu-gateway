@@ -81,9 +81,11 @@ def seerr_upstream():
                     'id': 33050, 'name': 'Pioneer One',
                     'firstAirDate': '2010-06-16', 'status': 'Ended',
                     'overview': 'A Cold War relic returns.',
-                    'mediaInfo': {'status': 2},
-                    'seasons': [{'seasonNumber': 1, 'episodeCount': 6,
-                                 'mediaInfo': {'status': 5}}]})
+                    'mediaInfo': {
+                        'status': 3, 'seasons': [],
+                        'requests': [{'seasons': [
+                            {'seasonNumber': 1, 'status': 2}]}]},
+                    'seasons': [{'seasonNumber': 1, 'episodeCount': 6}]})
             elif path == '/api/v1/request':
                 self._respond(200, {
                     'pageInfo': {'pages': 1, 'pageSize': 20,
@@ -187,7 +189,22 @@ class TestSeerrReads:
         _make(seerr_upstream)
         out = json.loads(run_tool('seerr', 'tv', {'tvId': 33050}))
         assert out['name'] == 'Pioneer One'
+        # Processing show: mediaInfo.seasons is empty; the request row carries
+        # the season's request state.
+        assert out['seasons'][0]['requestStatus'] == 2
+        assert 'status' not in out['seasons'][0]
+
+    def test_tv_season_media_status(self):
+        from core.transforms import _seerr_tv
+        data = {
+            'id': 1, 'name': 'Silo',
+            'mediaInfo': {'status': 4, 'seasons': [
+                {'seasonNumber': 1, 'status': 5}]},
+            'seasons': [{'seasonNumber': 1, 'episodeCount': 10}],
+        }
+        out = json.loads(_seerr_tv(None, None, {}, data))
         assert out['seasons'][0]['status'] == 5
+        assert 'requestStatus' not in out['seasons'][0]
 
     def test_requests_projection(self, seerr_upstream):
         _make(seerr_upstream)

@@ -999,7 +999,14 @@ def _arr_wanted_missing(integration, tool, args, data):
         if needle and needle not in hay:
             continue
         out.append(row)
-    payload = {'totalRecords': total, 'returned': len(out), 'records': out}
+    payload = {'returned': len(out), 'records': out}
+    if needle:
+        # The synthetic `search` filter is applied locally, so the upstream
+        # total is the library-wide count, not the filtered count.
+        payload['totalRecords'] = len(out)
+        payload['libraryTotalRecords'] = total
+    else:
+        payload['totalRecords'] = total
     if page is not None:
         payload['page'] = page
     if page_size is not None:
@@ -1118,6 +1125,14 @@ def _seerr_tv(integration, tool, args, data):
     for s in media.get('seasons') or []:
         if isinstance(s, dict) and s.get('seasonNumber') is not None:
             status_by_num[s['seasonNumber']] = s.get('status')
+    # A processing show often has mediaInfo.seasons == [] while the request
+    # rows still carry the season's request state (1 pending, 2 approved, ...).
+    request_status_by_num = {}
+    for req in media.get('requests') or []:
+        for s in (req or {}).get('seasons') or []:
+            if not isinstance(s, dict) or s.get('seasonNumber') is None:
+                continue
+            request_status_by_num.setdefault(s['seasonNumber'], s.get('status'))
     seasons = []
     for s in data.get('seasons') or []:
         if not isinstance(s, dict):
@@ -1128,6 +1143,7 @@ def _seerr_tv(integration, tool, args, data):
             'episodeCount': s.get('episodeCount'),
             'status': status_by_num.get(s.get('seasonNumber'),
                                         season_media.get('status', s.get('status'))),
+            'requestStatus': request_status_by_num.get(s.get('seasonNumber')),
         }
         seasons.append({k: v for k, v in row.items() if v is not None})
     row = {

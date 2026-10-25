@@ -23,7 +23,8 @@ from core.agent_context import (
     reset_current_agent,
     set_current_agent,
 )
-from core.agent_policy import visible_tool_allowed
+from core.agent_policy import rate_limit_for, visible_tool_allowed
+from core.rate_limit import check_agent_rate_limit_status
 
 _TYPE_MAP = {
     'string': 'str',
@@ -108,6 +109,22 @@ class EshuFastMCP(FastMCP):
                         'reason': reason,
                         'policy': agent.get('name') or '',
                     }))
+            if agent:
+                limit = rate_limit_for(agent)
+                if limit:
+                    allowed, retry_after = check_agent_rate_limit_status(
+                        agent['id'], limit)
+                    if not allowed:
+                        reason = (f"rate limit {limit}/min exceeded; "
+                                  f"retry in {retry_after}s")
+                        record_audit_event(
+                            'mcp_rate_limited', details=reason,
+                            actor=agent.get('name') or '')
+                        raise ToolError(json.dumps({
+                            'error': 'rate_limited',
+                            'message': reason,
+                            'retry_after': retry_after,
+                        }))
             return await super().call_tool(name, arguments)
         finally:
             reset_current_agent(token)

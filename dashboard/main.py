@@ -87,8 +87,8 @@ from core.session import (
     SESSION_KEY, SESSION_TTL, _make_session_token, _verify_session_token,
     _check_session, _check_session_optional, _is_password_protected,
 )
-from core.rate_limit import _check_rate_limit, check_agent_rate_limit
-from core.agent_policy import evaluate_call, rate_limit_for, safe_ident
+from core.rate_limit import _check_rate_limit
+from core.agent_policy import evaluate_call, safe_ident
 from core.notify import send_notify
 from core.cmd_blocklist import hard_block_match, blocklist_substring_match, CORE_COMMAND_PATTERNS, HARD_PATTERNS
 from core.policy_eval import evaluate_policy_verdict
@@ -172,11 +172,6 @@ async def mcp_agent_auth_middleware(request: Request, call_next):
         if agent is None:
             return JSONResponse(status_code=401, content={"detail": "Invalid or missing agent token"})
         request.state.agent = agent
-        limit = rate_limit_for(agent)
-        if limit and not check_agent_rate_limit(agent['id'], limit):
-            return JSONResponse(
-                status_code=429,
-                content={"detail": "Rate limit exceeded for this agent"})
     return await call_next(request)
 
 

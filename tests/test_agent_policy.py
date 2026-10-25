@@ -298,3 +298,21 @@ class TestAttributionAndRevocation:
         assert auth_client.post(f'/api/agents/{agent_id}/revoke').status_code == 200
         r = auth_client.get('/mcp', headers={'Authorization': 'Bearer ' + raw})
         assert r.status_code == 401
+
+
+class TestRateLimit:
+    def test_call_tool_returns_explicit_rate_limited(self):
+        agent = _agent('limited', tools_mode='all', rate_limit_per_min=1)
+        with acting_as(agent):
+            asyncio.run(eshu_mcp.call_tool('check_approval', {'call_id': 999}))
+            with pytest.raises(ToolError) as exc:
+                asyncio.run(eshu_mcp.call_tool('check_approval', {'call_id': 999}))
+        payload = json.loads(str(exc.value))
+        assert payload['error'] == 'rate_limited'
+        assert payload['retry_after'] >= 1
+
+    def test_list_tools_is_not_rate_limited(self):
+        agent = _agent('limited-list', tools_mode='all', rate_limit_per_min=1)
+        with acting_as(agent):
+            asyncio.run(eshu_mcp.list_tools())
+            asyncio.run(eshu_mcp.list_tools())

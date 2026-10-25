@@ -302,6 +302,22 @@ class TestArrReads:
         assert json.loads(run_tool('sonarr', 'wanted_missing',
                                    {'search': 'jaws'}))['records'] == []
 
+    def test_wanted_missing_filtered_total(self):
+        from core.transforms import _arr_wanted_missing
+        data = {'totalRecords': 14, 'records': [
+            {'id': 1, 'seriesId': 93, 'series': {'title': 'Pioneer One'},
+             'seasonNumber': 1, 'episodeNumber': 1, 'title': 'Earthfall',
+             'monitored': True, 'hasFile': False},
+            {'id': 2, 'seriesId': 90, 'series': {'title': 'Ruido'},
+             'seasonNumber': 1, 'episodeNumber': 1, 'title': 'TBA',
+             'monitored': True, 'hasFile': False},
+        ]}
+        out = json.loads(_arr_wanted_missing(
+            None, None, {'search': 'Pioneer One'}, data))
+        assert out['totalRecords'] == 1
+        assert out['libraryTotalRecords'] == 14
+        assert out['returned'] == 1
+
     def test_queue_paginated(self, arr_upstream):
         _make('sonarr', 'sonarr-key', 'sonarr', arr_upstream)
         out = json.loads(run_tool('sonarr', 'queue', {}))
