@@ -273,22 +273,27 @@ def _build_catalog(kind: str) -> list:
             "'wanted/missing' view). Returns totalRecords + compact records "
             "with seriesId, seriesTitle, seasonNumber, episodeNumber, title, "
             "airDate, monitored and hasFile. Use this to answer 'what is still "
-            "to download?'. When `search` is used, `totalRecords` is the "
-            "filtered count and `libraryTotalRecords` is the library-wide "
-            "count. READ-ONLY: does not trigger a search."
+            "to download?'. With `search`, `totalRecords` is the filtered "
+            "count and `libraryTotalRecords` is the library-wide count; "
+            "without `search`, `totalRecords` is the library total and "
+            "`libraryTotalRecords` is absent. READ-ONLY: does not trigger a "
+            "search."
             if sonarr else
             "List monitored movies that are missing a file (the Radarr "
             "'wanted/missing' view). Returns totalRecords + compact records "
             "with id, title, year, monitored, hasFile, status and sizeOnDisk. "
-            "Use this to answer 'what movies are still to download?'. When "
-            "`search` is used, `totalRecords` is the filtered count and "
-            "`libraryTotalRecords` is the library-wide count. READ-ONLY: "
-            "does not trigger a search."),
+            "Use this to answer 'what movies are still to download?'. With "
+            "`search`, `totalRecords` is the filtered count and "
+            "`libraryTotalRecords` is the library-wide count; without "
+            "`search`, `totalRecords` is the library total and "
+            "`libraryTotalRecords` is absent. READ-ONLY: does not trigger a "
+            "search."),
         "method": "GET",
         "path_template": "/api/v3/wanted/missing",
         "params": wanted_params,
         "search_field": "title",
         "transform": "arr_wanted_missing",
+        "handler": "arr_wanted_missing",
         "error_codes": ARR_ERROR_CODES,
         "example": (
             '{"totalRecords": 1, "records": [{"id": 3746, "seriesId": 5, '

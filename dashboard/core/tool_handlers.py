@@ -22,7 +22,9 @@ import hashlib
 import json
 
 from core.ha_ws import ha_ws_exec
-from core.integration_proxy import ProxyError, execute_generic_call
+from core.integration_proxy import (
+    ProxyError, execute_generic_call, execute_integration_call,
+)
 
 LOVELACE_DASHBOARDS = 'lovelace/dashboards'
 LOVELACE_CONFIG = 'lovelace/config'
@@ -756,6 +758,56 @@ def _h_arr_quality_definition_update(integration, tool, args, ctx):
                        'before': before, 'after': after, 'verified': verified})
 
 
+def _h_arr_wanted_missing(integration, tool, args, ctx):
+    """Read the *arr wanted/missing view with an optional title filter.
+
+    The synthetic `search` filter runs locally, so filtering only the caller's
+    current page misses matches on later pages (the 2026-10-25 regression).
+    When `search` is present we fetch the full wanted/missing set (it is small)
+    and filter that, preserving the caller's page/pageSize in the response.
+    """
+    a = dict(args or {})
+    search = str(a.pop('search', '') or '').strip()
+    if (integration.get('kind') or '').lower() == 'sonarr':
+        a['includeSeries'] = True
+    if search:
+        a['page'] = 1
+        a['pageSize'] = 1000
+
+    probe = dict(tool)
+    probe['transform'] = ''
+    res = execute_integration_call(
+        integration, probe, a,
+        agent=ctx.get('agent', ''), session_id=ctx.get('session_id', ''),
+        execution_id=ctx.get('execution_id', ''),
+        reason=ctx.get('reason', ''), approval=ctx.get('approval', ''),
+        decided_at=ctx.get('decided_at', 0),
+        decided_by=ctx.get('decided_by', ''))
+    if res.get('error'):
+        raise ProxyError(res.get('status_code') or 502, str(res['error']))
+    raw = res.get('body') or ''
+    from core.transforms import apply_transform
+    shaped = apply_transform(
+        'arr_wanted_missing', integration, tool,
+        {'search': search} if search else {}, raw)
+    if shaped is None:
+        return raw
+    if not search:
+        return shaped
+    try:
+        payload = json.loads(shaped)
+    except (TypeError, ValueError):
+        return shaped
+    payload['page'] = args.get('page', 1)
+    payload['pageSize'] = args.get('pageSize', 20)
+    library_total = payload.get('libraryTotalRecords')
+    if isinstance(library_total, int):
+        payload['scanned'] = min(library_total, 1000)
+        if library_total > 1000:
+            payload['scanCapped'] = True
+    return json.dumps(payload)
+
+
 def _h_seerr_request_create(integration, tool, args, ctx):
     """Create a Seerr request with a deliberately small, safe body.
 
@@ -819,6 +871,7 @@ HANDLERS = {
     'arr_custom_format_create': _h_arr_custom_format_create,
     'arr_quality_definition_update': _h_arr_quality_definition_update,
     'seerr_request_create': _h_seerr_request_create,
+    'arr_wanted_missing': _h_arr_wanted_missing,
 }
 
 

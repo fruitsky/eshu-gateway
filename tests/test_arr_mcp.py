@@ -41,6 +41,40 @@ def arr_upstream():
                  'path': '/media/movies/Jaws', 'tags': [], 'sizeOnDisk': 2097152,
                  'overview': 'Shark.'}]
 
+    def _sonarr_wanted_full():
+        recs = []
+        for i in range(6):
+            recs.append({
+                'id': 3949 + i, 'seriesId': 93,
+                'series': {'id': 93, 'title': 'Pioneer One'},
+                'seasonNumber': 1, 'episodeNumber': i + 1,
+                'title': 'Episode %d' % (i + 1),
+                'airDate': '2010-06-16T00:00:00Z',
+                'monitored': True, 'hasFile': False})
+        recs.append({
+            'id': 4000, 'seriesId': 90,
+            'series': {'id': 90, 'title': 'Ruído'},
+            'seasonNumber': 1, 'episodeNumber': 1, 'title': 'TBA',
+            'airDate': '2026-01-01T00:00:00Z',
+            'monitored': True, 'hasFile': False})
+        recs.append({
+            'id': 3746, 'seriesId': 5,
+            'series': {'id': 5, 'title': 'Bluey'},
+            'seasonNumber': 1, 'episodeNumber': 10, 'title': 'Outside',
+            'airDate': '2026-01-01T00:00:00Z',
+            'monitored': True, 'hasFile': False})
+        return recs
+
+    def _radarr_wanted_full():
+        return [
+            {'id': 86, 'title': 'Backrooms', 'year': 2026,
+             'monitored': True, 'hasFile': False,
+             'status': 'released', 'sizeOnDisk': 0},
+            {'id': 99, 'title': 'Big Buck Bunny', 'year': 2008,
+             'monitored': True, 'hasFile': False,
+             'status': 'released', 'sizeOnDisk': 0},
+        ]
+
     class _Handler(http.server.BaseHTTPRequestHandler):
         def _key(self):
             return self.headers.get('X-Api-Key', '')
@@ -87,22 +121,42 @@ def arr_upstream():
                      'trackedDownloadStatus': 'ok', 'errorMessage': None,
                      'sizeleft': 100, 'timeleft': '00:01:00'}]})
             elif path == '/api/v3/wanted/missing':
+                qs = parse_qs(urlparse(self.path).query)
+                try:
+                    page_size = int((qs.get('pageSize') or ['20'])[0])
+                except (TypeError, ValueError):
+                    page_size = 20
                 if key == 'sonarr-key':
-                    self._respond(200, {
-                        'page': 1, 'pageSize': 20, 'totalRecords': 1,
-                        'records': [{
-                            'id': 3746, 'seriesId': 5,
-                            'series': {'id': 5, 'title': 'Bluey'},
-                            'seasonNumber': 1, 'episodeNumber': 10,
-                            'title': 'Outside', 'airDate': '2026-01-01T00:00:00Z',
-                            'monitored': True, 'hasFile': False}]})
+                    if page_size >= 1000:
+                        self._respond(200, {
+                            'page': 1, 'pageSize': page_size,
+                            'totalRecords': 14,
+                            'records': _sonarr_wanted_full()})
+                    else:
+                        self._respond(200, {
+                            'page': 1, 'pageSize': page_size,
+                            'totalRecords': 1,
+                            'records': [{
+                                'id': 3746, 'seriesId': 5,
+                                'series': {'id': 5, 'title': 'Bluey'},
+                                'seasonNumber': 1, 'episodeNumber': 10,
+                                'title': 'Outside',
+                                'airDate': '2026-01-01T00:00:00Z',
+                                'monitored': True, 'hasFile': False}]})
                 else:
-                    self._respond(200, {
-                        'page': 1, 'pageSize': 20, 'totalRecords': 1,
-                        'records': [{
-                            'id': 86, 'title': 'Backrooms', 'year': 2026,
-                            'monitored': True, 'hasFile': False,
-                            'status': 'released', 'sizeOnDisk': 0}]})
+                    if page_size >= 1000:
+                        self._respond(200, {
+                            'page': 1, 'pageSize': page_size,
+                            'totalRecords': 8,
+                            'records': _radarr_wanted_full()})
+                    else:
+                        self._respond(200, {
+                            'page': 1, 'pageSize': page_size,
+                            'totalRecords': 1,
+                            'records': [{
+                                'id': 86, 'title': 'Backrooms', 'year': 2026,
+                                'monitored': True, 'hasFile': False,
+                                'status': 'released', 'sizeOnDisk': 0}]})
             elif path == '/api/v3/history':
                 # History event ids are SINGULAR on the wire (verified live):
                 # Sonarr v4 -> episodeId (int); Radarr v6 -> movieId (int).
@@ -301,6 +355,53 @@ class TestArrReads:
                                        {'search': 'bluey'}))['records']) == 1
         assert json.loads(run_tool('sonarr', 'wanted_missing',
                                    {'search': 'jaws'}))['records'] == []
+
+    def test_wanted_missing_search_scans_all_pages(self, arr_upstream):
+        _make('sonarr', 'sonarr-key', 'sonarr', arr_upstream)
+        out = json.loads(run_tool('sonarr', 'wanted_missing', {
+            'search': 'Pioneer One', 'pageSize': 5}))
+        assert out['returned'] == 6
+        assert out['totalRecords'] == 6
+        assert out['libraryTotalRecords'] == 14
+        assert out['page'] == 1 and out['pageSize'] == 5
+        assert all(r['seriesTitle'] == 'Pioneer One' for r in out['records'])
+        assert any(r['path'] == '/api/v3/wanted/missing'
+                   and 'pageSize=1000' in r['query']
+                   for r in arr_upstream['state']['requests'])
+
+    def test_radarr_wanted_missing_search_scans_all_pages(self, arr_upstream):
+        _make('radarr', 'radarr-key', 'radarr', arr_upstream)
+        out = json.loads(run_tool('radarr', 'wanted_missing', {
+            'search': 'Big Buck Bunny', 'pageSize': 5}))
+        assert out['returned'] == 1
+        assert out['records'][0]['title'] == 'Big Buck Bunny'
+        assert out['totalRecords'] == 1
+        assert out['libraryTotalRecords'] == 8
+        assert out['page'] == 1 and out['pageSize'] == 5
+
+    def test_wanted_missing_scan_capped(self, monkeypatch):
+        from core import tool_handlers
+        def fake_execute(integration, tool, args, **kwargs):
+            return {
+                'body': json.dumps({
+                    'totalRecords': 1500, 'page': 1, 'pageSize': 1000,
+                    'records': [{
+                        'id': 1, 'seriesId': 93,
+                        'series': {'id': 93, 'title': 'Pioneer One'},
+                        'seasonNumber': 1, 'episodeNumber': 1,
+                        'title': 'Earthfall', 'monitored': True,
+                        'hasFile': False}]}),
+                'error': None, 'status_code': 200}
+        monkeypatch.setattr(tool_handlers, 'execute_integration_call',
+                            fake_execute)
+        out = json.loads(tool_handlers.run_handler(
+            'arr_wanted_missing',
+            {'kind': 'sonarr', 'name': 'sonarr'},
+            {'name': 'wanted_missing'},
+            {'search': 'Pioneer One', 'pageSize': 5}))
+        assert out['libraryTotalRecords'] == 1500
+        assert out['scanned'] == 1000
+        assert out['scanCapped'] is True
 
     def test_wanted_missing_filtered_total(self):
         from core.transforms import _arr_wanted_missing

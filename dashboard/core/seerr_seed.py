@@ -56,7 +56,7 @@ SEERR_SEED_TOOLS = [
     },
     {
         "name": "tv",
-        "description": "Get full Seerr details for one TV show, including mediaInfo.status and per-season status (1 unknown, 2 pending, 3 processing, 4 partially available, 5 available, 6 deleted).",
+        "description": "Get full Seerr details for one TV show, including mediaInfo.status and per-season request state (`requestStatus`). A per-season media `status` is included only when Seerr has season-level media data; for a processing show, expect `requestStatus` only.",
         "method": "GET",
         "path_template": "/tv/{tvId}",
         "params": [
