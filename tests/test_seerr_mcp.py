@@ -169,6 +169,14 @@ class TestSeerrReads:
         assert tv['mediaType'] == 'tv'
         assert tv['seasons'][0]['seasonNumber'] == 1
 
+    def test_search_query_uses_percent_encoding(self, seerr_upstream):
+        _make(seerr_upstream)
+        run_tool('seerr', 'search', {'query': 'Big Buck Bunny'})
+        req = next(r for r in seerr_upstream['state']['requests']
+                   if r['path'] == '/api/v1/search')
+        assert 'Big%20Buck%20Bunny' in req['query']
+        assert '+' not in req['query']
+
     def test_movie_details(self, seerr_upstream):
         _make(seerr_upstream)
         out = json.loads(run_tool('seerr', 'movie', {'movieId': 10378}))
