@@ -5330,6 +5330,11 @@ const INTEGRATION_PROFILES = {
                  guidance: 'Session auth (JWT + CSRF). Create a dedicated NPM admin user; Client ID = its email, Client Secret = its password, Token URL = http://<ip>:81/api/tokens. Base URL is http://<ip>:81/api. Fully curated; all writes require approval.' },
   truenas:     { label: 'TrueNAS', seedable: false,
                  guidance: 'Not yet supported — configure manually.' },
+  webfetch:    { label: 'Web fetch', seedable: true,
+                 auth_type: 'none', auth_header: '', no_secret: true,
+                 no_base_url: true, no_tls_toggle: true, no_gate: true,
+                 no_test: true, name_hint: 'web',
+                 guidance: 'Mediated outbound fetch for the household principal. No upstream base URL or credential. Name it "web" so the MCP tool is web_fetch_url; then Seed it, enable it, and set the URL allowlist in the Web Fetch Allowlist panel below. Fail-closed: an empty allowlist denies every fetch.' },
   custom:      { label: 'Custom', seedable: false,
                  guidance: 'Configure the upstream API manually.' },
 };
@@ -5354,13 +5359,30 @@ function onIntKindChange() {
   const authHeader = document.getElementById('int-auth-header');
   const secret = document.getElementById('int-secret');
   const verifyTls = document.getElementById('int-verify-tls');
+  const verifyRow = verifyTls ? verifyTls.closest('label') : null;
+  const gateMode = document.getElementById('int-gate-mode');
+  const gateRow = gateMode ? gateMode.closest('label') : null;
+  const baseUrl = document.getElementById('int-base-url');
+  const nameInput = document.getElementById('int-name');
   const isOAuth2 = profile.auth_type === 'oauth2' || profile.auth_type === 'session';
   if (guidance) {
     guidance.textContent = profile.guidance || '';
     guidance.classList.toggle('hidden', !profile.guidance);
   }
   if (oauthFields) oauthFields.classList.toggle('hidden', !isOAuth2);
-  if (secret) secret.classList.toggle('hidden', isOAuth2);
+  if (baseUrl) {
+    const noBase = !!profile.no_base_url;
+    baseUrl.classList.toggle('hidden', noBase);
+    baseUrl.disabled = noBase;
+    if (noBase) baseUrl.value = 'https://invalid.local';
+    else if (baseUrl.value === 'https://invalid.local') baseUrl.value = '';
+  }
+  if (profile.name_hint && !_editingIntegration && nameInput && !nameInput.value.trim()) {
+    nameInput.value = profile.name_hint;
+  }
+  if (secret) secret.classList.toggle('hidden', isOAuth2 || !!profile.no_secret);
+  if (verifyRow) verifyRow.classList.toggle('hidden', !!profile.no_tls_toggle);
+  if (gateRow) gateRow.classList.toggle('hidden', !!profile.no_gate);
   if (verifyTls && !_editingIntegration) verifyTls.checked = !!profile.insecure_tls;
   if (profile.auth_type) {
     if (authFields) authFields.classList.add('hidden');
@@ -5379,6 +5401,8 @@ async function fetchIntegrations() {
   fetchAgentTokens();
   fetchIntegrationList();
   fetchMcpSettings();
+  await fetchWebFetchPolicies();
+  loadWebFetchPolicy();
 }
 
 async function fetchMcpSettings() {
@@ -5407,6 +5431,127 @@ async function saveMcpSettings() {
 var _agentsData = [];
 var _agentPolicy = null;
 var _agentPolicyTools = [];
+var _webFetchPolicies = [];
+
+function _wfSplit(value) {
+  return (value || '').split(/[\n,]+/).map(function(s) { return s.trim(); }).filter(Boolean);
+}
+
+async function fetchWebFetchPolicies() {
+  try {
+    const res = await authFetch('/api/web-fetch-policies');
+    if (!res.ok) return;
+    const data = await res.json();
+    _webFetchPolicies = data.policies || [];
+    refreshWebFetchPrincipals();
+  } catch(e) {}
+}
+
+function refreshWebFetchPrincipals() {
+  const sel = document.getElementById('wf-principal');
+  if (!sel) return;
+  const names = new Set(['household']);
+  (_agentsData || []).forEach(function(a) { if (a.name) names.add(a.name); });
+  (_webFetchPolicies || []).forEach(function(p) { if (p.principal) names.add(p.principal); });
+  const current = sel.value || 'household';
+  sel.innerHTML = Array.from(names).sort().map(function(n) {
+    return '<option value="' + esc(n) + '">' + esc(n) + '</option>';
+  }).join('');
+  sel.value = names.has(current) ? current : 'household';
+}
+
+async function loadWebFetchPolicy() {
+  const sel = document.getElementById('wf-principal');
+  const principal = sel ? sel.value : 'household';
+  const status = document.getElementById('wf-policy-status');
+  try {
+    const res = await authFetch('/api/web-fetch-policies/' + encodeURIComponent(principal));
+    if (res.status === 404) {
+      document.getElementById('wf-enabled').checked = false;
+      document.getElementById('wf-allow').value = '';
+      document.getElementById('wf-deny').value = '';
+      if (status) status.textContent = 'No policy yet — save one to enable.';
+    } else if (res.ok) {
+      const p = await res.json();
+      document.getElementById('wf-enabled').checked = !!p.enabled;
+      document.getElementById('wf-allow').value = (p.allow || []).join('\n');
+      document.getElementById('wf-deny').value = (p.deny || []).join('\n');
+      if (status) status.textContent = 'Loaded.';
+    } else {
+      if (status) status.textContent = 'Load failed.';
+    }
+    loadWebFetchStats(principal);
+  } catch(e) {
+    if (status) status.textContent = 'Load failed: ' + e.message;
+  }
+}
+
+async function loadWebFetchStats(principal) {
+  const el = document.getElementById('wf-stats');
+  if (!el) return;
+  try {
+    const res = await authFetch('/api/web-fetch-stats' + (principal ? '?principal=' + encodeURIComponent(principal) : ''));
+    if (!res.ok) { el.textContent = ''; return; }
+    const s = await res.json();
+    const c = s.counters || {};
+    el.textContent = 'Attempts: ' + (s.total || 0) +
+      ' · ok ' + (c.fetch_ok || 0) +
+      ' · allowlist ' + (c.fetch_denied_allowlist || 0) +
+      ' · ssrf ' + (c.fetch_denied_ssrf || 0) +
+      ' · redirect ' + (c.fetch_denied_redirect || 0) +
+      ' · upstream ' + (c.fetch_error_upstream || 0) +
+      ' · rate ' + (c.fetch_rate_limited || 0);
+  } catch(e) { el.textContent = ''; }
+}
+
+async function saveWebFetchPolicy() {
+  const principal = document.getElementById('wf-principal').value || 'household';
+  const enabled = document.getElementById('wf-enabled').checked;
+  const allow = _wfSplit(document.getElementById('wf-allow').value);
+  const deny = _wfSplit(document.getElementById('wf-deny').value);
+  const status = document.getElementById('wf-policy-status');
+  try {
+    const res = await authFetch('/api/web-fetch-policies/' + encodeURIComponent(principal), {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: enabled, allow: allow, deny: deny })
+    });
+    const data = await res.json().catch(function() { return {}; });
+    if (!res.ok) {
+      if (status) status.textContent = 'Save failed: ' + (data.detail || 'error');
+      showToast('Save failed: ' + (data.detail || 'error'), 'error');
+      return;
+    }
+    _webFetchPolicies = _webFetchPolicies.filter(function(p) { return p.principal !== data.principal; });
+    _webFetchPolicies.push(data);
+    if (status) status.textContent = 'Saved.';
+    showToast('Web fetch policy saved', 'success');
+    if (enabled && !allow.length) {
+      showToast('Enabled with an empty allowlist — every fetch will be denied', 'error');
+    }
+    loadWebFetchStats(principal);
+    refreshWebFetchPrincipals();
+  } catch(e) {
+    if (status) status.textContent = 'Save failed: ' + e.message;
+  }
+}
+
+async function deleteWebFetchPolicy() {
+  const principal = document.getElementById('wf-principal').value || 'household';
+  if (!(await customConfirm('Delete the web-fetch policy for "' + principal + '"?'))) return;
+  try {
+    const res = await authFetch('/api/web-fetch-policies/' + encodeURIComponent(principal), { method: 'DELETE' });
+    if (!res.ok && res.status !== 404) { showToast('Delete failed', 'error'); return; }
+    _webFetchPolicies = _webFetchPolicies.filter(function(p) { return p.principal !== principal; });
+    document.getElementById('wf-enabled').checked = false;
+    document.getElementById('wf-allow').value = '';
+    document.getElementById('wf-deny').value = '';
+    const status = document.getElementById('wf-policy-status');
+    if (status) status.textContent = 'Deleted.';
+    refreshWebFetchPrincipals();
+    loadWebFetchStats(principal);
+  } catch(e) { showToast('Delete failed: ' + e.message, 'error'); }
+}
 
 async function fetchAgentTokens() {
   const el = document.getElementById('agent-token-list');
@@ -5416,6 +5561,7 @@ async function fetchAgentTokens() {
     if (!res.ok) return;
     const agents = await res.json();
     _agentsData = agents;
+    refreshWebFetchPrincipals();
     if (!agents.length) { el.innerHTML = '<p class="text-muted">No agent tokens yet.</p>'; return; }
     el.innerHTML = agents.map(function(a) {
       var used = a.last_used_at ? new Date(a.last_used_at * 1000).toLocaleString() : 'never';
@@ -5601,20 +5747,26 @@ function renderIntegrationList() {
   el.innerHTML = _integrationsData.map(function(i) {
     var selected = _selectedIntegration === i.name;
     var active = i.enabled ? 'text-success' : 'text-muted';
-    var seedable = !!(INTEGRATION_PROFILES[i.kind] && INTEGRATION_PROFILES[i.kind].seedable);
+    var profile = INTEGRATION_PROFILES[i.kind] || {};
+    var seedable = !!profile.seedable;
     var seedBtn = seedable
       ? '<button onclick="seedTools(\'' + esc(i.name) + '\')" class="btn btn-xs btn-muted" title="Seed the seed catalog for this integration">Seed</button>'
       : '';
-    var label = INTEGRATION_PROFILES[i.kind] ? INTEGRATION_PROFILES[i.kind].label : (i.kind || 'custom');
+    var label = profile.label || i.kind || 'custom';
+    var urlLabel = profile.no_base_url ? 'mediated fetch (no base URL)' : i.base_url;
+    var testBtn = profile.no_test
+      ? ''
+      : '<button onclick="testIntegration(\'' + esc(i.name) + '\')" class="btn btn-xs btn-muted" title="Run a read call to verify the connection">Test</button>';
+    var gateLabel = profile.no_gate ? 'n/a' : (i.gate_mode || 'destructive');
     return '<div class="item-card selectable' + (selected ? ' selected' : '') + '" onclick="selectIntegration(\'' + esc(i.name) + '\')">' +
       '<div class="flex items-center justify-between gap-2">' +
       '<span class="text-sm font-semibold ' + active + '"><span class="i-star' + (i.enabled ? '' : ' off') + '"></span> ' + esc(i.name) + '</span>' +
       '<span class="i-kind">' + esc(label) + '</span></div>' +
-      '<div class="i-url">' + esc(i.base_url) + '</div>' +
-      '<div class="i-meta">auth: ' + esc(i.auth_type) + ' &middot; gate: ' + esc(i.gate_mode || 'destructive') + ' &middot; mcp: ' + esc(i.mcp_mode || 'joined') + '</div>' +
+      '<div class="i-url">' + esc(urlLabel) + '</div>' +
+      '<div class="i-meta">auth: ' + esc(i.auth_type) + ' &middot; gate: ' + esc(gateLabel) + ' &middot; mcp: ' + esc(i.mcp_mode || 'joined') + '</div>' +
       '<div class="flex flex-wrap gap-1 mt-2" onclick="event.stopPropagation()">' +
       '<button onclick="editIntegration(\'' + esc(i.name) + '\')" class="btn btn-xs btn-muted" title="Edit base URL / secret">Edit</button>' +
-      '<button onclick="testIntegration(\'' + esc(i.name) + '\')" class="btn btn-xs btn-muted" title="Run a read call to verify the connection">Test</button>' +
+      testBtn +
       seedBtn +
       '<button onclick="deleteIntegration(\'' + esc(i.name) + '\')" class="btn btn-xs btn-muted">Delete</button>' +
       '</div></div>';
@@ -5712,17 +5864,26 @@ function editIntegration(name) {
 }
 
 async function createIntegration() {
+  const kind = document.getElementById('int-kind').value;
+  const profile = INTEGRATION_PROFILES[kind] || {};
   const name = document.getElementById('int-name').value.trim();
   const baseUrl = document.getElementById('int-base-url').value.trim();
-  if (!name || !baseUrl) { showToast('Name and base URL are required', 'error'); return; }
+  const needsBase = !profile.no_base_url;
+  if (!name || (needsBase && !baseUrl)) {
+    showToast(needsBase ? 'Name and base URL are required' : 'Name is required', 'error');
+    return;
+  }
   const payload = {
-    base_url: baseUrl,
-    kind: document.getElementById('int-kind').value,
-    auth_type: document.getElementById('int-auth-type').value,
-    auth_header_name: document.getElementById('int-auth-header').value.trim(),
+    base_url: needsBase ? baseUrl : 'https://invalid.local',
+    kind: kind,
+    auth_type: profile.auth_type || document.getElementById('int-auth-type').value,
+    auth_header_name: profile.auth_type
+      ? (profile.auth_header || '')
+      : document.getElementById('int-auth-header').value.trim(),
   };
+  if (kind === 'webfetch') payload.retention_days = 90;
   const secret = document.getElementById('int-secret').value;
-  if (secret) payload.secret = secret;
+  if (secret && !profile.no_secret) payload.secret = secret;
   const clientId = document.getElementById('int-client-id').value;
   const clientSecret = document.getElementById('int-client-secret').value;
   const tokenUrl = document.getElementById('int-token-url').value;
@@ -5730,9 +5891,9 @@ async function createIntegration() {
   if (clientSecret) payload.client_secret = clientSecret;
   if (tokenUrl) payload.token_url = tokenUrl;
   const verifyTls = document.getElementById('int-verify-tls');
-  if (verifyTls) payload.verify_tls = !verifyTls.checked;
+  if (verifyTls && !profile.no_tls_toggle) payload.verify_tls = !verifyTls.checked;
   const gateMode = document.getElementById('int-gate-mode');
-  if (gateMode) payload.gate_mode = gateMode.value;
+  if (gateMode && !profile.no_gate) payload.gate_mode = gateMode.value;
   const mcpMode = document.getElementById('int-mcp-mode');
   if (mcpMode) payload.mcp_mode = mcpMode.value;
   if (_editingIntegration) {

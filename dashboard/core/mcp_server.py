@@ -23,7 +23,7 @@ from core.agent_context import (
     reset_current_agent,
     set_current_agent,
 )
-from core.agent_policy import rate_limit_for, visible_tool_allowed
+from core.agent_policy import principal_allowed, rate_limit_for, visible_tool_allowed
 from core.rate_limit import check_agent_rate_limit_status
 
 _TYPE_MAP = {
@@ -83,12 +83,13 @@ class EshuFastMCP(FastMCP):
         agent = self._request_agent()
         if not agent:
             return tools
-        if ((agent.get('policy') or {}).get('tools_mode') or 'all') != 'allowlist':
-            return tools
+        principal_map = getattr(self, '_principal_allow', {}) or {}
         visible = []
         for tool in tools:
             if tool.name in _ALWAYS_ALLOWED:
                 visible.append(tool)
+            elif not principal_allowed(agent, principal_map.get(tool.name)):
+                continue
             elif visible_tool_allowed(agent, self._effective_name(tool.name)):
                 visible.append(tool)
         return visible
@@ -150,6 +151,10 @@ mcp = EshuFastMCP(
 )
 
 _registered_names = set()
+# mcp_name -> list of allowed agent/principal names (empty = unrestricted).
+# Kept on each FastMCP instance so list_tools can hide principal-restricted
+# tools; the call-time check in evaluate_call is the actual security boundary.
+mcp._principal_allow = {}
 
 # Per-integration MCP servers: ns -> FastMCP instance / its ASGI app / the set
 # of tool names it exposes. Built once at startup so the mount paths are stable;
@@ -198,6 +203,7 @@ def _make_instance(name: str) -> EshuFastMCP:
         ),
     )
     inst._eshu_namespace = _safe_ident(name).lower()
+    inst._principal_allow = {}
     return inst
 
 
@@ -205,12 +211,20 @@ def _register_tools(inst, integration, namespaced: bool) -> list:
     """Register an integration's enabled tools on `inst`. Returns the list of
     MCP-visible tool names registered (for later removal)."""
     ns = _safe_ident(integration['name']).lower()
+    principal_map = getattr(inst, '_principal_allow', None)
+    if principal_map is None:
+        inst._principal_allow = {}
+        principal_map = inst._principal_allow
     registered = []
     for tool in get_enabled_tools(integration['id']):
         mcp_name = f"{ns}_{tool['name']}" if namespaced else tool['name']
         try:
             fn = _build_tool_fn(integration['name'], tool)
             inst.add_tool(fn, name=mcp_name, description=tool['description'])
+            allowed = tool.get('principal_allow') or []
+            if isinstance(allowed, str):
+                allowed = [allowed]
+            principal_map[mcp_name] = list(allowed)
             registered.append(mcp_name)
         except Exception as e:
             print(f"[mcp] failed to register tool {mcp_name}: {e}", flush=True)
@@ -306,6 +320,7 @@ def refresh_mcp_tools():
         except Exception:
             pass
     _registered_names = set()
+    mcp._principal_allow = {}
 
     for integration in get_integrations():
         if not integration.get('enabled'):
@@ -366,6 +381,7 @@ def _refresh_single_instance(ns: str, integration: dict):
             inst.remove_tool(name)
         except Exception:
             pass
+    inst._principal_allow = {}
     fresh = set(_register_tools(inst, integration, namespaced=False))
     inst.add_tool(check_approval_fn(), name="check_approval", description=CHECK_APPROVAL_DESC)
     fresh.add("check_approval")

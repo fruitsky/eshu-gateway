@@ -52,6 +52,10 @@ def init_integrations_tables(cursor):
         cursor.execute("ALTER TABLE integrations ADD COLUMN mcp_mode TEXT DEFAULT 'joined'")
     except Exception:
         pass
+    try:
+        cursor.execute("ALTER TABLE integrations ADD COLUMN retention_days INTEGER NOT NULL DEFAULT 30")
+    except Exception:
+        pass
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS integration_tools (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -144,6 +148,11 @@ def init_integrations_tables(cursor):
         cursor.execute("ALTER TABLE integration_tools ADD COLUMN timeout INTEGER DEFAULT 0")
     except Exception:
         pass
+    # Per-tool caller restriction: JSON list of agent names. Empty = unrestricted.
+    try:
+        cursor.execute("ALTER TABLE integration_tools ADD COLUMN principal_allow TEXT NOT NULL DEFAULT '[]'")
+    except Exception:
+        pass
     # Backfill: tools seeded before the `seeded` column existed carry the column
     # default 0, so the stale-seed cleanup would skip them. Curated seed tools
     # always set at least one of transform / error_codes / always_gate /
@@ -228,7 +237,12 @@ def init_integrations_tables(cursor):
     for col, ddl in (('reason', "TEXT NOT NULL DEFAULT ''"),
                      ('request_summary', "TEXT NOT NULL DEFAULT ''"),
                      ('approval', "TEXT NOT NULL DEFAULT ''"),
-                     ('decided_at', "INTEGER NOT NULL DEFAULT 0")):
+                     ('decided_at', "INTEGER NOT NULL DEFAULT 0"),
+                     # Mediated web fetch: destination + resolution + stable code.
+                     ('host', "TEXT NOT NULL DEFAULT ''"),
+                     ('resolved_ips', "TEXT NOT NULL DEFAULT ''"),
+                     ('reason_code', "TEXT NOT NULL DEFAULT ''"),
+                     ('final_url', "TEXT NOT NULL DEFAULT ''")):
         try:
             cursor.execute(f"ALTER TABLE integration_calls ADD COLUMN {col} {ddl}")
         except Exception:
@@ -242,15 +256,16 @@ def create_integration(name: str, base_url: str, auth_type: str, secret: str,
                        kind: str = 'custom', client_id: str = '',
                        client_secret: str = '', token_url: str = '',
                        verify_tls: bool = True, gate_mode: str = 'destructive',
-                       mcp_mode: str = 'joined') -> int:
+                       mcp_mode: str = 'joined', retention_days: int = 30) -> int:
     with db_conn() as conn:
         cursor = conn.cursor()
         now = int(time.time())
         cursor.execute('''
-            INSERT INTO integrations (name, base_url, auth_type, auth_header_name, secret, enabled, kind, created_at, client_id, client_secret, token_url, verify_tls, gate_mode, mcp_mode)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO integrations (name, base_url, auth_type, auth_header_name, secret, enabled, kind, created_at, client_id, client_secret, token_url, verify_tls, gate_mode, mcp_mode, retention_days)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (name, base_url, auth_type, auth_header_name, secret, 1 if enabled else 0, kind, now,
-              client_id, client_secret, token_url, 1 if verify_tls else 0, gate_mode, mcp_mode))
+              client_id, client_secret, token_url, 1 if verify_tls else 0, gate_mode, mcp_mode,
+              max(1, int(retention_days or 30))))
         conn.commit()
         return cursor.lastrowid
 
@@ -307,7 +322,8 @@ def update_integration(name: str, base_url: str = None, auth_type: str = None,
                        enabled: bool = None, kind: str = None,
                        client_id: str = None, client_secret: str = None,
                        token_url: str = None, verify_tls: bool = None,
-                       gate_mode: str = None, mcp_mode: str = None) -> bool:
+                       gate_mode: str = None, mcp_mode: str = None,
+                       retention_days: int = None) -> bool:
     """Update an integration. `secret=None`/`client_secret=None` mean 'leave unchanged'."""
     current = get_integration(name)
     if not current:
@@ -324,14 +340,17 @@ def update_integration(name: str, base_url: str = None, auth_type: str = None,
     new_verify_tls = (1 if verify_tls else 0) if verify_tls is not None else current.get('verify_tls', 1)
     new_gate_mode = gate_mode if gate_mode is not None else current.get('gate_mode', 'destructive')
     new_mcp_mode = mcp_mode if mcp_mode is not None else current.get('mcp_mode', 'joined')
+    new_retention = (max(1, int(retention_days)) if retention_days is not None
+                     else max(1, int(current.get('retention_days') or 30)))
     with db_conn() as conn:
         cursor = conn.cursor()
         cursor.execute('''
             UPDATE integrations SET base_url = ?, auth_type = ?, auth_header_name = ?, secret = ?,
-                enabled = ?, kind = ?, client_id = ?, client_secret = ?, token_url = ?, verify_tls = ?, gate_mode = ?, mcp_mode = ?
+                enabled = ?, kind = ?, client_id = ?, client_secret = ?, token_url = ?, verify_tls = ?, gate_mode = ?, mcp_mode = ?, retention_days = ?
             WHERE name = ?
         ''', (new_base, new_auth, new_header, new_secret, new_enabled, new_kind,
-              new_client_id, new_client_secret, new_token_url, new_verify_tls, new_gate_mode, new_mcp_mode, name))
+              new_client_id, new_client_secret, new_token_url, new_verify_tls, new_gate_mode,
+              new_mcp_mode, new_retention, name))
         conn.commit()
         return cursor.rowcount > 0
 
@@ -361,13 +380,14 @@ def create_tool(integration_id: int, name: str, description: str, method: str,
                 not_implemented: bool = False, always_gate: bool = False,
                 error_codes: dict = None, path_variants: dict = None,
                 response_hint: str = '', handler: str = '', totals: bool = False,
-                seeded: bool = False, timeout: int = 0) -> int:
+                seeded: bool = False, timeout: int = 0,
+                principal_allow=None) -> int:
     with db_conn() as conn:
         cursor = conn.cursor()
         cursor.execute('''
             INSERT INTO integration_tools
-                (integration_id, name, description, method, path_template, params, fields, search_field, example, read_only, enabled, transport, filter_fields, generic, version, strip_envelope, transform, not_implemented, always_gate, error_codes, path_variants, response_hint, handler, totals, seeded, timeout)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (integration_id, name, description, method, path_template, params, fields, search_field, example, read_only, enabled, transport, filter_fields, generic, version, strip_envelope, transform, not_implemented, always_gate, error_codes, path_variants, response_hint, handler, totals, seeded, timeout, principal_allow)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (integration_id, name, description, method, path_template,
               json.dumps(params or []), json.dumps(fields or []), search_field or '',
               example, 1 if read_only else 0,
@@ -377,7 +397,7 @@ def create_tool(integration_id: int, name: str, description: str, method: str,
               1 if always_gate else 0, json.dumps(error_codes or {}),
               json.dumps(path_variants or {}), response_hint or '',
               handler or '', 1 if totals else 0, 1 if seeded else 0,
-              int(timeout or 0)))
+              int(timeout or 0), json.dumps(principal_allow or [])))
         conn.commit()
         return cursor.lastrowid
 
@@ -413,6 +433,10 @@ def get_tools(integration_id: int = None):
                 item['path_variants'] = json.loads(item.get('path_variants') or '{}')
             except (ValueError, TypeError):
                 item['path_variants'] = {}
+            try:
+                item['principal_allow'] = json.loads(item.get('principal_allow') or '[]')
+            except (ValueError, TypeError):
+                item['principal_allow'] = []
             out.append(item)
         return out
 
@@ -453,6 +477,10 @@ def get_tool(integration_name: str, tool_name: str):
             item['path_variants'] = json.loads(item.get('path_variants') or '{}')
         except (ValueError, TypeError):
             item['path_variants'] = {}
+        try:
+            item['principal_allow'] = json.loads(item.get('principal_allow') or '[]')
+        except (ValueError, TypeError):
+            item['principal_allow'] = []
         item['integration'] = integration
         return item
 
@@ -477,7 +505,7 @@ def set_all_tools_enabled(integration_id: int, enabled: bool) -> int:
 
 
 def update_tool(tool_id: int, **fields) -> bool:
-    allowed = {'name', 'description', 'method', 'path_template', 'params', 'fields', 'search_field', 'example', 'read_only', 'enabled', 'transport', 'filter_fields', 'generic', 'version', 'strip_envelope', 'transform', 'not_implemented', 'always_gate', 'error_codes', 'path_variants', 'response_hint', 'handler', 'totals', 'seeded', 'timeout'}
+    allowed = {'name', 'description', 'method', 'path_template', 'params', 'fields', 'search_field', 'example', 'read_only', 'enabled', 'transport', 'filter_fields', 'generic', 'version', 'strip_envelope', 'transform', 'not_implemented', 'always_gate', 'error_codes', 'path_variants', 'response_hint', 'handler', 'totals', 'seeded', 'timeout', 'principal_allow'}
     updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
     if not updates:
         return False
@@ -491,6 +519,8 @@ def update_tool(tool_id: int, **fields) -> bool:
         updates['error_codes'] = json.dumps(updates['error_codes'] or {})
     if 'path_variants' in updates:
         updates['path_variants'] = json.dumps(updates['path_variants'] or {})
+    if 'principal_allow' in updates:
+        updates['principal_allow'] = json.dumps(updates['principal_allow'] or [])
     if 'response_hint' in updates:
         updates['response_hint'] = updates['response_hint'] or ''
     if 'read_only' in updates:
@@ -540,7 +570,9 @@ def record_integration_call(integration: str, tool: str, agent: str, method: str
                             session_id: str = '', execution_id: str = '',
                             reason: str = '', request_summary: str = '',
                             approval: str = '', decided_at: int = 0,
-                            decided_by: str = ''):
+                            decided_by: str = '', host: str = '',
+                            resolved_ips: str = '', reason_code: str = '',
+                            final_url: str = ''):
     with db_conn() as conn:
         cursor = conn.cursor()
         now = int(time.time())
@@ -549,12 +581,13 @@ def record_integration_call(integration: str, tool: str, agent: str, method: str
                 (integration, tool, agent, method, path, status_code, latency_ms,
                  response_summary, response_bytes, truncated, outcome, session_id,
                  execution_id, reason, request_summary, approval, decided_at,
-                 decided_by, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 decided_by, host, resolved_ips, reason_code, final_url, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (integration, tool, agent, method, path, status_code, latency_ms,
               response_summary, response_bytes, truncated, outcome, session_id,
               execution_id, reason, request_summary, approval, decided_at or 0,
-              decided_by, now))
+              decided_by, host or '', resolved_ips or '', reason_code or '',
+              final_url or '', now))
         conn.commit()
         return cursor.lastrowid
 
@@ -774,6 +807,34 @@ def purge_old_integration_calls(cutoff_ts: int) -> int:
         cursor.execute('DELETE FROM integration_calls WHERE created_at < ?', (cutoff_ts,))
         n1 = cursor.rowcount
         cursor.execute('DELETE FROM pending_integration_calls WHERE created_at < ?', (cutoff_ts,))
+        n2 = cursor.rowcount
+        conn.commit()
+        return n1 + n2
+
+
+def purge_old_integration_calls_by_retention(now_ts: int) -> int:
+    """Delete audit/approval rows using each integration's `retention_days`.
+
+    The mediated web fetch keeps its forensic trail for 90 days; every other
+    integration defaults to 30. Pending approvals always use 30 days so a
+    never-resolved credential-bearing payload does not outlive the old window.
+    Returns the total number of rows removed. Idempotent."""
+    pending_cutoff = int(now_ts) - (30 * 86400)
+    with db_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            DELETE FROM integration_calls
+            WHERE created_at < ? - (
+                COALESCE(
+                    (SELECT retention_days FROM integrations
+                      WHERE name = integration_calls.integration),
+                    30
+                ) * 86400
+            )
+        ''', (int(now_ts),))
+        n1 = cursor.rowcount
+        cursor.execute('DELETE FROM pending_integration_calls WHERE created_at < ?',
+                       (pending_cutoff,))
         n2 = cursor.rowcount
         conn.commit()
         return n1 + n2

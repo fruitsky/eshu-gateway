@@ -74,6 +74,10 @@ from database import (
 from db.agent_policies import (
     get_agent_policy, set_agent_policy, get_agent_policies_map,
 )
+from db.web_fetch import (
+    delete_web_fetch_policy, get_web_fetch_policies, get_web_fetch_policy,
+    get_web_fetch_stats, set_web_fetch_policy,
+)
 
 from schemas import (
     LoginPayload, SetPasswordPayload, GatewayPayload, RegisterPayload,
@@ -191,6 +195,12 @@ def on_startup():
     # Migrate old Hermes database if present (MUST run before init_db, which creates eshu.db)
     _migrate_legacy_db()
     init_db()
+    # Fail-closed config check: an enabled web-fetch policy with no allow
+    # entries denies everything, so say so loudly at startup.
+    for _wf in get_web_fetch_policies():
+        if _wf['enabled'] and not _wf['allow']:
+            print(f"[web_fetch] warning: principal '{_wf['principal']}' is enabled "
+                  "with an empty allowlist; every fetch will be denied", flush=True)
     # One-time seed: ship the command-safety core patterns into the blocklist
     # (idempotent; existing installs gain the same defaults as fresh ones).
     seed_core_blocklist_if_needed(CORE_COMMAND_PATTERNS)
@@ -2267,6 +2277,7 @@ class IntegrationPayload(BaseModel):
     enabled: bool = True
     kind: str = 'custom'
     mcp_mode: str = 'joined'
+    retention_days: int = 30
 
 class IntegrationUpdatePayload(BaseModel):
     base_url: str = None
@@ -2281,6 +2292,7 @@ class IntegrationUpdatePayload(BaseModel):
     enabled: bool = None
     kind: str = None
     mcp_mode: str = None
+    retention_days: int = None
 
 class ToolPayload(BaseModel):
     name: str
@@ -2290,6 +2302,7 @@ class ToolPayload(BaseModel):
     params: list = []
     example: str = ''
     read_only: bool = True
+    principal_allow: list = []
 
 class ToolTogglePayload(BaseModel):
     enabled: bool = True
@@ -2304,6 +2317,12 @@ class AgentPolicyPayload(BaseModel):
     arg_policy: dict = {}
     approval: dict = {}
     rate_limit_per_min: int = 0
+
+
+class WebFetchPolicyPayload(BaseModel):
+    enabled: bool = False
+    allow: list = []
+    deny: list = []
 
 
 @app.post("/api/agents")
@@ -2389,6 +2408,7 @@ def available_agent_tools(agent_id: int, request: Request):
                 'description': tool.get('description') or '',
                 'read_only': bool(tool.get('read_only')),
                 'enabled': bool(tool.get('enabled')),
+                'principal_allow': tool.get('principal_allow') or [],
             })
         out.append({
             'integration': integration['name'],
@@ -2396,6 +2416,59 @@ def available_agent_tools(agent_id: int, request: Request):
             'tools': tools,
         })
     return {'integrations': out}
+
+
+@app.get("/api/web-fetch-policies")
+def list_web_fetch_policies_endpoint(request: Request):
+    """Per-principal URL allowlists for the mediated web fetch tool."""
+    _check_session(request)
+    return {'policies': get_web_fetch_policies()}
+
+
+@app.get("/api/web-fetch-policies/{principal}")
+def get_web_fetch_policy_endpoint(principal: str, request: Request):
+    _check_session(request)
+    policy = get_web_fetch_policy(principal)
+    if not policy:
+        raise HTTPException(status_code=404, detail="Web fetch policy not found")
+    return policy
+
+
+@app.put("/api/web-fetch-policies/{principal}")
+def set_web_fetch_policy_endpoint(principal: str, payload: WebFetchPolicyPayload,
+                                  request: Request):
+    _check_session(request)
+    try:
+        policy = set_web_fetch_policy(
+            principal, enabled=payload.enabled, allow=payload.allow, deny=payload.deny)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if policy['enabled'] and not policy['allow']:
+        print(f"[web_fetch] warning: principal '{principal}' enabled with an empty "
+              "allowlist; every fetch will be denied", flush=True)
+    record_audit_event(
+        "web_fetch_policy_updated",
+        details=(f"Web fetch policy for '{principal}' updated "
+                 f"(enabled={policy['enabled']}, allow={len(policy['allow'])}, "
+                 f"deny={len(policy['deny'])})"))
+    return policy
+
+
+@app.delete("/api/web-fetch-policies/{principal}")
+def delete_web_fetch_policy_endpoint(principal: str, request: Request):
+    _check_session(request)
+    if not delete_web_fetch_policy(principal):
+        raise HTTPException(status_code=404, detail="Web fetch policy not found")
+    record_audit_event("web_fetch_policy_deleted",
+                       details=f"Web fetch policy for '{principal}' deleted")
+    return {"status": "ok"}
+
+
+@app.get("/api/web-fetch-stats")
+def web_fetch_stats_endpoint(request: Request, principal: str = None):
+    """Audit-derived counters for the mediated fetch (optionally per principal)."""
+    _check_session(request)
+    return get_web_fetch_stats(principal)
 
 
 @app.post("/api/agents/{agent_id}/revoke")
@@ -2432,7 +2505,9 @@ def create_integration_endpoint(payload: IntegrationPayload, request: Request):
     create_integration(name, payload.base_url.strip(), payload.auth_type, payload.secret,
                        payload.auth_header_name, payload.enabled, payload.kind,
                        payload.client_id, payload.client_secret, payload.token_url,
-                       payload.verify_tls, payload.gate_mode, payload.mcp_mode)
+                       payload.verify_tls, payload.gate_mode, payload.mcp_mode,
+                       payload.retention_days)
+    refresh_mcp_tools()
     record_audit_event("integration_created", details=f"Integration '{name}' created (kind {payload.kind})")
     return {"status": "ok", "name": name}
 
@@ -2454,6 +2529,7 @@ def update_integration_endpoint(name: str, payload: IntegrationUpdatePayload, re
     if 'mcp_mode' in data and data['mcp_mode'] not in MCP_MODES:
         raise HTTPException(status_code=400, detail="Invalid mcp_mode")
     update_integration(name, **data)
+    refresh_mcp_tools()
     record_audit_event("integration_updated", details=f"Integration '{name}' updated")
     return {"status": "ok"}
 
@@ -2530,7 +2606,8 @@ def create_tool_endpoint(name: str, payload: ToolPayload, request: Request):
     if not integration:
         raise HTTPException(status_code=404, detail="Integration not found")
     tool_id = create_tool(integration['id'], payload.name, payload.description, payload.method,
-                          payload.path_template, payload.params, payload.example, payload.read_only)
+                          payload.path_template, payload.params, payload.example, payload.read_only,
+                          principal_allow=payload.principal_allow)
     refresh_mcp_tools()
     record_audit_event("integration_tool_created", details=f"Tool '{name}.{payload.name}' created")
     return {"status": "ok", "id": tool_id}

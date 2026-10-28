@@ -2,7 +2,7 @@ import time
 from db.audit import record_audit_event
 from db.gateways import get_gateways, deregister_gateway, clear_trigger_uninstall
 from db.fleet import purge_old_fleet_commands
-from db.integrations import purge_old_integration_calls
+from db.integrations import purge_old_integration_calls_by_retention
 from core.notify import send_notify
 
 _disconnected_gateways = set()
@@ -87,20 +87,19 @@ def _fleet_cleanup_loop():
             pass
 
 
-_INTEGRATION_RETENTION_DAYS = 30
 _INTEGRATION_CLEANUP_INTERVAL = 3600
 
 def _integration_cleanup_loop():
-    """Background thread: purge MCP audit + approval rows older than the
-    retention window (30 days). Raw approval payloads are already stripped on
-    resolve (SHA-256 fingerprints kept); this bounds the lifetime of
-    never-resolved rows' credentials to the window too. Audit events remain."""
+    """Background thread: purge MCP audit + approval rows using per-integration
+    retention (default 30 days; the mediated web fetch keeps 90). Raw approval
+    payloads are already stripped on resolve (SHA-256 fingerprints kept); this
+    bounds the lifetime of never-resolved rows' credentials too. Audit events
+    remain."""
     while True:
         time.sleep(_INTEGRATION_CLEANUP_INTERVAL)
         try:
-            cutoff = int(time.time()) - (_INTEGRATION_RETENTION_DAYS * 86400)
-            removed = purge_old_integration_calls(cutoff)
+            removed = purge_old_integration_calls_by_retention(int(time.time()))
             if removed > 0:
-                record_audit_event("integration_purged", details=f"Auto-purged {removed} MCP audit/approval row(s) older than {_INTEGRATION_RETENTION_DAYS} days")
+                record_audit_event("integration_purged", details=f"Auto-purged {removed} MCP audit/approval row(s) past their per-integration retention")
         except Exception:
             pass

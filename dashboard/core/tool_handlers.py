@@ -20,6 +20,7 @@ read→write→read-back round trip never reintroduces a scrubbed placeholder.
 import copy
 import hashlib
 import json
+import time
 
 from core.ha_ws import ha_ws_exec
 from core.integration_proxy import (
@@ -861,6 +862,112 @@ def _h_seerr_request_create(integration, tool, args, ctx):
     return raw
 
 
+def _web_fetch_request_summary(host, path, max_chars, parsed):
+    """Audit-safe request shape: never store query values (they may carry
+    household data) or a full URL."""
+    payload = {'host': host or '', 'path': path or '', 'max_chars': max_chars,
+               'query_present': bool(getattr(parsed, 'query', ''))}
+    return json.dumps(payload, separators=(',', ':'))
+
+
+def _h_web_fetch(integration, tool, args, ctx):
+    """Mediated outbound fetch. The allow/deny check runs before DNS; SSRF,
+    redirects, size and content-type enforcement live in core.web_fetch."""
+    from core.web_fetch import WebFetchError, build_envelope, clamp_max_chars, fetch
+    from core.web_fetch_limit import acquire, release
+    from core.web_fetch_policy import UrlError, parse_url
+    from db.integrations import record_integration_call
+    from db.web_fetch import get_web_fetch_policy
+
+    ctx = ctx or {}
+    args = args or {}
+    principal = ctx.get('agent') or ''
+    integration_name = (integration or {}).get('name') or 'web'
+    url = args.get('url') or ''
+    max_chars = clamp_max_chars(args.get('max_chars'))
+    started = time.time()
+
+    try:
+        requested = parse_url(url)
+    except UrlError:
+        requested = None
+
+    def audit(outcome, code, *, host='', path='', status=None, raw_bytes=0,
+              truncated=False, resolved_ips=None, final_url='', reason=''):
+        record_integration_call(
+            integration=integration_name, tool='fetch_url', agent=principal,
+            method='GET',
+            path=(host + (path or '')) if host else '',
+            status_code=status,
+            latency_ms=int((time.time() - started) * 1000),
+            response_summary=reason,
+            response_bytes=raw_bytes,
+            truncated=1 if truncated else 0,
+            outcome=outcome,
+            session_id=ctx.get('session_id', ''),
+            execution_id=ctx.get('execution_id', ''),
+            reason=ctx.get('reason', ''),
+            request_summary=_web_fetch_request_summary(host, path, max_chars, requested),
+            host=host,
+            resolved_ips=','.join(resolved_ips or []),
+            reason_code=code,
+            final_url=final_url,
+        )
+
+    def deny(code, reason, *, retryable=False, retry_after=0, host='', path='',
+             resolved_ips=None):
+        err = WebFetchError(code, reason, retryable=retryable,
+                            retry_after=retry_after, resolved_ips=resolved_ips)
+        audit('denied' if err.is_final else 'error', code, host=host, path=path,
+              resolved_ips=resolved_ips, reason=reason)
+        return err.to_json()
+
+    if not principal:
+        return deny('principal_not_allowed', 'caller has no principal name')
+
+    policy = get_web_fetch_policy(principal) or {
+        'principal': principal, 'enabled': False, 'allow': [], 'deny': []}
+
+    sem, limit = acquire(principal)
+    if limit:
+        reason = ('rate limit exceeded, retry in %ds' % limit.retry_after
+                  if limit.code == 'rate_limited' else 'too many concurrent fetches')
+        return deny(limit.code, reason, retryable=True,
+                    retry_after=limit.retry_after,
+                    host=getattr(requested, 'host', ''),
+                    path=getattr(requested, 'path', ''))
+    try:
+        result = fetch(url, policy, max_chars)
+    except WebFetchError as e:
+        outcome = 'denied' if e.is_final else 'error'
+        audit(outcome, e.code, host=e.host or getattr(requested, 'host', ''),
+              path=getattr(requested, 'path', ''), status=e.status,
+              resolved_ips=e.resolved_ips, final_url=e.final_url,
+              reason=e.reason)
+        return e.to_json()
+    except Exception as e:  # noqa: BLE001 - never leak a traceback to the model
+        audit('error', 'handler_failed',
+              host=getattr(requested, 'host', ''),
+              path=getattr(requested, 'path', ''),
+              reason=f'{type(e).__name__}: {e}')
+        return json.dumps({'error': 'error', 'code': 'handler_failed',
+                           'reason': f'{type(e).__name__}: {e}',
+                           'retryable': False})
+    finally:
+        release(principal, sem)
+
+    try:
+        final = parse_url(result.final_url)
+        host, path = final.host, final.path
+    except UrlError:
+        host, path = getattr(requested, 'host', ''), getattr(requested, 'path', '')
+    audit('ok', 'ok', host=host, path=path, status=result.status,
+          raw_bytes=result.raw_bytes, truncated=result.truncated,
+          resolved_ips=result.resolved_ips, final_url=result.final_url,
+          reason=f'fetched {len(result.text)} chars from {host}')
+    return build_envelope(result)
+
+
 HANDLERS = {
     'ha_lovelace_dashboards': _h_dashboards,
     'ha_lovelace_dashboard': _h_dashboard,
@@ -872,6 +979,7 @@ HANDLERS = {
     'arr_quality_definition_update': _h_arr_quality_definition_update,
     'seerr_request_create': _h_seerr_request_create,
     'arr_wanted_missing': _h_arr_wanted_missing,
+    'web_fetch': _h_web_fetch,
 }
 
 

@@ -176,15 +176,30 @@ endpoint. Agents authenticate to the MCP surface with a bearer **agent token**.
 
 | Method | Path | Purpose | Auth |
 |--------|------|---------|------|
-| `POST` | `/api/integrations` | Create an integration (`name, base_url, auth_type[none/bearer/basic/header], auth_header_name, secret`) | Session |
+| `POST` | `/api/integrations` | Create an integration (`name, base_url, auth_type[none/bearer/basic/header], auth_header_name, secret`; optional `kind`, `mcp_mode`, `gate_mode`, `retention_days`) | Session |
 | `GET` | `/api/integrations` | List integrations (**secret omitted**) | Session |
 | `PUT` | `/api/integrations/{name}` | Update an integration (`secret` omitted = leave unchanged) | Session |
 | `DELETE` | `/api/integrations/{name}` | Delete an integration + its tools | Session |
 | `GET` | `/api/integrations/{name}/tools` | List an integration's tools | Session |
-| `POST` | `/api/integrations/{name}/tools` | Add a tool (`name, description, method, path_template, params, example, read_only`) | Session |
+| `POST` | `/api/integrations/{name}/tools` | Add a tool (`name, description, method, path_template, params, example, read_only`; optional `principal_allow` list of agent names) | Session |
 | `DELETE` | `/api/integrations/{name}/tools/{id}` | Delete a tool | Session |
 | `POST` | `/api/integrations/{name}/tools/{id}/toggle` | Enable/disable a tool (body `{"enabled": bool}`) | Session |
 | `POST` | `/api/integrations/{name}/seed` | Populate with the curated seed catalog for the integration's type (idempotent) | Session |
+
+### Mediated web fetch policy (dashboard authentication required)
+
+Per-principal URL allowlists for `web_fetch_url`. Matching is label-boundary
+suffix based; deny is evaluated first; an empty allowlist denies everything.
+`allow`/`deny` entries are validated (no wildcards, paths, ports, userinfo, IP
+literals, or single-label hosts) and normalised to lowercase.
+
+| Method | Path | Purpose | Auth |
+|--------|------|---------|------|
+| `GET` | `/api/web-fetch-policies` | List every principal's policy | Session |
+| `GET` | `/api/web-fetch-policies/{principal}` | One policy (404 if unset) | Session |
+| `PUT` | `/api/web-fetch-policies/{principal}` | Replace a policy (`{"enabled": bool, "allow": [...], "deny": [...]}`) | Session |
+| `DELETE` | `/api/web-fetch-policies/{principal}` | Delete a policy | Session |
+| `GET` | `/api/web-fetch-stats?principal=` | Audit-derived counters (`fetch_ok`, `fetch_denied_allowlist`, `fetch_denied_ssrf`, `fetch_denied_redirect`, `fetch_error_upstream`, `fetch_rate_limited`) and raw `by_code` counts | Session |
 
 ### Approval queue & audit (dashboard authentication required)
 

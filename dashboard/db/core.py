@@ -52,6 +52,7 @@ def init_db():
     from db.integrations import init_integrations_tables
     from db.agent_tokens import init_agent_tokens_tables
     from db.agent_policies import init_agent_policies_tables
+    from db.web_fetch import init_web_fetch_tables
 
     init_requests_tables(cursor)
     init_gateways_tables(cursor)
@@ -65,6 +66,7 @@ def init_db():
     init_integrations_tables(cursor)
     init_agent_tokens_tables(cursor)
     init_agent_policies_tables(cursor)
+    init_web_fetch_tables(cursor)
 
     conn.commit()
     conn.close()

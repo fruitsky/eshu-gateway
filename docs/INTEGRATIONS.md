@@ -113,6 +113,94 @@ tool — you don't call them by name; just ask in natural language
 only re-discovers on connect — run `/reload-mcp` in Hermes (or restart it) after
 changing tools.
 
+## Mediated web fetch (`web_fetch_url`)
+
+The household agent can read links without giving it raw `web_extract` access.
+`web_fetch_url` asks Eshu to fetch a URL; Eshu decides whether the destination is
+permitted and makes the request from the dashboard host.
+
+- **Principal:** the tool is seeded with `principal_allow: ["household"]`. The
+  call-time gate in `evaluate_call` refuses every other agent (including an admin
+  token), even if the caller knows the tool name. The name is hidden from other
+  agents' `tools/list` too. Re-seeding refreshes this restriction, so expose the
+  tool to another principal by changing the seed, not just the DB.
+- **Grouping:** pass the usual optional `session_id`/`execution_id` arguments to
+  attach the fetch to the same dashboard session as the agent's HA calls.
+- **No generic passthrough:** `webfetch` is in `NO_GENERIC_KINDS`, so the
+  integration does not inherit `read`/`write` against a placeholder base URL.
+- **Per-principal allowlist:** stored in `web_fetch_policies`, keyed by agent
+  *name* (not token id), so it survives token rotation. Deny is evaluated first;
+  an empty allowlist denies everything (fail closed). Matching is label-boundary
+  suffix based: `bromley.gov.uk` matches `www.bromley.gov.uk`, never
+  `evilbromley.gov.uk` or `bromley.gov.uk.attacker.tld`.
+- **Enforcement:** allow/deny is checked before DNS. Every resolved A/AAAA must
+  be globally routable (no private, loopback, link-local, CGNAT, IPv4-mapped
+  private, or metadata addresses). The connection is pinned to the validated IP
+  with TLS SNI/cert verification against the original hostname. Redirects are
+  manual (max 3), re-validated per hop, and `https`→`http` is refused.
+- **Limits:** text only (`text/html`, `application/xhtml+xml`, `text/plain`,
+  `text/markdown`, `text/calendar`); 2 MB raw cap; 5 s connect / 10 s total;
+  20 fetches/minute and 200/hour per principal; 3 concurrent. PDFs/images are
+  refused in v1. This limiter is separate from the MCP-wide per-agent
+  `rate_limit_per_min`; leave that unset or above 20 so the fetch-specific
+  message is the one the agent sees.
+- **Output:** a `<untrusted_tool_result source="web_fetch_url">` envelope so the
+  agent treats the page as data. Failures are `{"error":"forbidden"|"error",
+  "code":"…","reason":"…","retryable":…}`; `forbidden` is final.
+- **Audit:** one `integration_calls` row per attempt (`host`, `resolved_ips`,
+  `reason_code`, `final_url`, status, bytes, latency), grouped by `session_id`.
+  Bodies and query values are never stored. The web integration keeps 90 days of
+  audit rows (others default to 30).
+
+### Deploying it
+
+**UI path:** Integrations → Kind **Web fetch** → name it `web` → **Add
+Integration** → **Seed** → enable it. Then use the **Web Fetch Allowlist** panel
+(under the integration form) to select principal `household`, tick **Enabled**,
+paste the allow/deny domains (one per line), and **Save Policy**. The panel reads
+and writes `/api/web-fetch-policies`; no base URL or credential is needed.
+
+**API path (scripted):** create the integration disabled, seed it, enable it, and
+set the allowlist:
+
+```bash
+# 1. Create (kind webfetch -> no generic tools). base_url is unused by the tool.
+curl -s -X POST http://<dashboard>:8000/api/integrations \
+  -b 'eshu_session=<session-cookie>' -H 'Content-Type: application/json' \
+  -d '{"name":"web","base_url":"https://invalid.local","auth_type":"none","kind":"webfetch","enabled":false,"mcp_mode":"joined","retention_days":90}'
+
+# 2. Seed the single fetch_url tool (principal_allow=["household"]).
+curl -s -X POST http://<dashboard>:8000/api/integrations/web/seed \
+  -b 'eshu_session=<session-cookie>'
+
+# 3. Enable the integration and the tool in the UI, or:
+curl -s -X PUT http://<dashboard>:8000/api/integrations/web \
+  -b 'eshu_session=<session-cookie>' -H 'Content-Type: application/json' \
+  -d '{"enabled":true}'
+
+# 4. Set the URL policy (hot reload — no restart).
+curl -s -X PUT http://<dashboard>:8000/api/web-fetch-policies/household \
+  -b 'eshu_session=<session-cookie>' -H 'Content-Type: application/json' \
+  -d '{"enabled":true,
+       "allow":["bromley.gov.uk","gov.uk","tesco.com","sainsburys.co.uk","ocado.com"],
+       "deny":["reddit.com","google.com","facebook.com","instagram.com"]}'
+
+# 5. Add web_fetch_url to the household agent's tool allowlist (policy editor).
+```
+
+Once the integration is enabled, `web_fetch_url` is registered on `/mcp`
+immediately (`refresh_mcp_tools` runs after the API calls). No gateway restart is
+needed; the MCP client still re-discovers tools on connect, so run `/reload-mcp`
+(or restart Hermes) after enabling it.
+
+> The fetch runs on the **Eshu host**, so its DNS queries appear in that host's
+> resolver log, not the agent container's. Confirm the dashboard host uses the
+> Pi-hole resolvers before using "no query in Pi-hole" as the S1 oracle.
+
+**Rollback:** set the policy `enabled:false`, disable the integration/tool, or
+remove `web_fetch_url` from the household allowlist. All fail closed; no agent
+change is needed.
+
 ## Context & efficiency
 
 Every MCP tool you expose is loaded into the agent's context window at connect
@@ -189,8 +277,9 @@ Eshu ships **curated tool catalogs** for these kinds — seeded via **Integratio
 | **Prowlarr** | `header` (`X-Api-Key`) | **read-only projection** — indexer `fields[]` credentials are never surfaced (the generic read is safe because the scrubber drops list-shaped `fields`). Gated `search` (live Torznab query). Generic read-only `read` (relative to `/api/v1`); no generic write |
 | **Bazarr** | `header` (`X-API-KEY`) | subtitle management. Base URL is the origin, e.g. `http://<ip>:6767` (API under `/api/...`). Reads: `series`, `episodes`, `history`, `system_status`. Gated write: `search_subtitles` (`PATCH /api/series` action=`search-missing`). Generic `read`/`write` (relative to `/api`); the generic write is **always** approval-gated and `/system/*` writes are form-encoded (Bazarr reads `request.form` only) |
 | **Nginx Proxy Manager** | `session` (JWT + CSRF) | create a dedicated NPM admin user; Client ID = its email, Client Secret = its password, Token URL = `http://<ip>:81/api/tokens`. Base URL is `http://<ip>:81/api` (the admin port — never 443 for API calls). Fully curated; writes always approval-gated |
+| **Web fetch** (`webfetch`) | n/a | mediated outbound `web_fetch_url` (see above); no base URL, no generic floor; household principal only |
 
-Curated kinds are excluded from the generic floor (`NO_GENERIC_KINDS`: Pi-hole, NPM). Any other integration type seeds a generic **`read`**/**`write`** pair that can call arbitrary REST endpoints on the base URL (read-only `read` auto-runs; `write` is gated). `read` accepts a `method` param — `HEAD` returns `{status, content_length, content_type, url}` metadata with no body (e.g. checking a media file's size without downloading it). Three refinements: kinds whose app exposes the API under a fixed prefix (Sonarr/Radarr `/api/v3`, Prowlarr `/api/v1`, Bazarr `/api`) get that prefix injected, so agents pass paths relative to the API root; kinds in `READ_ONLY_GENERIC_KINDS` (Sonarr/Radarr/Prowlarr/Jellyfin) get the generic **read only** (an un-curated *arr write can trigger torrent searches or delete media; Jellyfin's key is admin-level), so writes stay on the curated, guardrailed catalog; and form-encoded apps (Bazarr `/system/*`) get an `application/x-www-form-urlencoded` body. All generic **writes** return an evidence envelope (`{status, method, path, content_type, sent_body_keys, response_body}`, with `verified:false` + a note when a 2xx body is empty) and accept `verify_path` for a post-write read-back.
+Curated kinds are excluded from the generic floor (`NO_GENERIC_KINDS`: Pi-hole, NPM, Seerr, web fetch). Any other integration type seeds a generic **`read`**/**`write`** pair that can call arbitrary REST endpoints on the base URL (read-only `read` auto-runs; `write` is gated). `read` accepts a `method` param — `HEAD` returns `{status, content_length, content_type, url}` metadata with no body (e.g. checking a media file's size without downloading it). Three refinements: kinds whose app exposes the API under a fixed prefix (Sonarr/Radarr `/api/v3`, Prowlarr `/api/v1`, Bazarr `/api`) get that prefix injected, so agents pass paths relative to the API root; kinds in `READ_ONLY_GENERIC_KINDS` (Sonarr/Radarr/Prowlarr/Jellyfin) get the generic **read only** (an un-curated *arr write can trigger torrent searches or delete media; Jellyfin's key is admin-level), so writes stay on the curated, guardrailed catalog; and form-encoded apps (Bazarr `/system/*`) get an `application/x-www-form-urlencoded` body. All generic **writes** return an evidence envelope (`{status, method, path, content_type, sent_body_keys, response_body}`, with `verified:false` + a note when a 2xx body is empty) and accept `verify_path` for a post-write read-back.
 
 ## Tool namespacing
 

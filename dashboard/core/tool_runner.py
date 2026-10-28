@@ -86,6 +86,28 @@ def _deny(agent_name, integration, tool, tool_name, args, session_id,
     method, path = _request_shape(
         tool, args, tool.get('transport') or 'http', bool(tool.get('generic')),
         tool.get('handler') or '')
+    audit_host = ''
+    reason_code = 'policy_denied'
+    if tool.get('handler') == 'web_fetch':
+        # Never persist the requested URL's query values: they may carry
+        # household data. Host + path is enough to explain the denial.
+        try:
+            from core.web_fetch_policy import parse_url
+            parsed = parse_url((args or {}).get('url') or '')
+            audit_host = parsed.host
+            path = parsed.host + parsed.path
+            request_summary = json.dumps(
+                {'host': parsed.host, 'path': parsed.path,
+                 'query_present': bool(parsed.query)},
+                separators=(',', ':'))
+        except Exception:
+            request_summary = '{}'
+        if 'principal' in (reason or ''):
+            reason_code = 'principal_not_allowed'
+        elif 'allowlist' in (reason or ''):
+            reason_code = 'tool_not_allowed'
+    else:
+        request_summary = safe_request_summary(args, tool)
     summary = 'Denied by agent policy: ' + reason
     record_audit_event(
         'mcp_policy_denied',
@@ -106,8 +128,10 @@ def _deny(agent_name, integration, tool, tool_name, args, session_id,
         session_id=session_id,
         execution_id=execution_id,
         reason=reason,
-        request_summary=safe_request_summary(args, tool),
+        request_summary=request_summary,
         approval='denied',
+        host=audit_host,
+        reason_code=reason_code,
     )
     return json.dumps({
         'error': 'forbidden',

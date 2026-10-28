@@ -62,6 +62,19 @@ def _lookup(mapping, namespaced, integration_name):
     return None
 
 
+def principal_allowed(agent, allowed):
+    """Per-tool caller restriction. An empty list means unrestricted; a
+    non-empty list requires the caller's agent name to match exactly
+    (case-insensitive). Unknown callers fail closed."""
+    if isinstance(allowed, str):
+        allowed = [allowed]
+    allowed = [str(p).strip().lower() for p in (allowed or []) if str(p).strip()]
+    if not allowed:
+        return True
+    name = str((agent or {}).get('name') or '').strip().lower()
+    return bool(name) and name in allowed
+
+
 def visible_tool_allowed(agent, effective_name):
     """Allowlist check for an already-namespaced MCP-visible tool name."""
     policy = (agent or {}).get('policy') or {}
@@ -183,7 +196,9 @@ def _evaluate_ws(rules, args, tool=None):
 
 def evaluate_call(agent, integration_name, tool_name, args, tool=None,
                   integration=None):
-    """Return (allowed, reason) for a full call: tool then argument rules."""
+    """Return (allowed, reason) for a full call: caller, tool, then arguments."""
+    if tool is not None and not principal_allowed(agent, tool.get('principal_allow')):
+        return False, 'tool is not available to this principal'
     allowed, reason = tool_allowed(agent, integration_name, tool_name)
     if not allowed:
         return allowed, reason

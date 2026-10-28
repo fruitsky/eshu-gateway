@@ -12,6 +12,7 @@ sys.path.insert(0, _dashboard_dir)
 def temp_db():
     import db.core as db_core
     import core.rate_limit
+    import core.web_fetch_limit
     from core.agent_context import set_current_agent
     fd, path = tempfile.mkstemp(suffix=".db")
     os.close(fd)
@@ -20,9 +21,11 @@ def temp_db():
     from db.core import init_db
     init_db()
     core.rate_limit._rate_limit_buckets.clear()
+    core.web_fetch_limit.reset()
     set_current_agent(None)
     yield
     core.rate_limit._rate_limit_buckets.clear()
+    core.web_fetch_limit.reset()
     set_current_agent(None)
     db_core.DB_PATH = old_path
     try:
