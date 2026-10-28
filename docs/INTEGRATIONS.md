@@ -210,6 +210,28 @@ needed; the MCP client still re-discovers tools on connect, so run `/reload-mcp`
 remove `web_fetch_url` from the household allowlist. All fail closed; no agent
 change is needed.
 
+### Verification / acceptance
+
+Live checks are limited to states production can safely produce. **Do not add
+test-only domains (`httpbin.org`, `lvh.me`, `localtest.me`, …) to a production
+allowlist.** T4/T5 are unit-level by design.
+
+| Criterion | Level | Evidence |
+|-----------|-------|----------|
+| T4 — private/reserved resolved address (incl. mixed answers) | unit | `tests/test_web_fetch.py::TestResolvePublic::test_private_addresses_rejected`, `test_mixed_answer_rejected`; stubbed resolver, no live allowlist entry |
+| S1 — denied host produces no DNS query | unit | `TestPolicyBeforeDns::test_denied_host_never_resolves` |
+| T5 — redirect to a non-allowlisted host | unit | `TestFetch::test_redirect_to_non_allowlisted_host` (local test server 302s to `evil.example`) |
+| T5 — `https`→`http` redirect downgrade | unit | `TestFetch::test_redirect_downgrade` |
+| T5 — redirect target passes allowlist but resolves private | unit | `TestFetch::test_redirect_to_allowlisted_host_that_resolves_private` |
+| T5 — redirect hop cap | unit | `TestFetch::test_too_many_redirects` |
+| T5 — live redirect following (same host) | live smoke | `http://bromley.gov.uk` → 301 → `https://www.bromley.gov.uk`, `final_url` reported; proves redirect following, not off-list denial |
+| T1/T2/T3/T6–T13 | live + unit | as specified; T4/T5 live variants are replaced by the unit checks above |
+
+A live off-list-redirect test would require an allowlisted site to redirect to a
+third party. None of the current entries do; if one starts to, the tool denies at
+that hop (`redirect_not_allowed`). Re-probe periodically or trust the unit tests;
+do not manufacture the condition with a production allowlist entry.
+
 ## Context & efficiency
 
 Every MCP tool you expose is loaded into the agent's context window at connect

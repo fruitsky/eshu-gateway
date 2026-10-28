@@ -84,6 +84,10 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             self._redirect('/ok')
         elif path == '/redirect-external':
             self._redirect('http://evil.example/')
+        elif path == '/redirect-private':
+            self._redirect('http://private.example/')
+        elif path == '/loop':
+            self._redirect('/loop')
         else:
             self._send(404, 'text/plain', b'nope')
 
@@ -234,6 +238,42 @@ class TestFetch:
         with pytest.raises(WebFetchError) as exc:
             fetch(f'https://test.local:{test_port}/start', _policy(['test.local']))
         assert exc.value.code == 'redirect_not_allowed'
+
+    def test_redirect_to_allowlisted_host_that_resolves_private(
+            self, test_port, monkeypatch):
+        """The redirect target passes the allowlist but must still pass the
+        hop-level SSRF resolver check."""
+        import core.web_fetch as wf
+
+        real_resolve = wf.resolve_public
+        real_getaddrinfo = socket.getaddrinfo
+
+        def fake_resolve(host, port):
+            if host == 'test.local':
+                # Bypass validation only for the local test server; the
+                # redirect target below goes through the real resolver.
+                return [(socket.AF_INET, '127.0.0.1')]
+            return real_resolve(host, port)
+
+        def fake_getaddrinfo(host, port, *args, **kwargs):
+            if host == 'private.example':
+                return [(socket.AF_INET, socket.SOCK_STREAM, 6, '',
+                         ('127.0.0.1', port))]
+            if host == '127.0.0.1':
+                return real_getaddrinfo(host, port, *args, **kwargs)
+            raise AssertionError('unexpected DNS for ' + host)
+
+        monkeypatch.setattr(wf, 'resolve_public', fake_resolve)
+        monkeypatch.setattr(socket, 'getaddrinfo', fake_getaddrinfo)
+        with pytest.raises(WebFetchError) as exc:
+            fetch(_url(test_port, '/redirect-private'),
+                  _policy(['test.local', 'private.example']))
+        assert exc.value.code == 'private_address'
+
+    def test_too_many_redirects(self, test_port, loopback_dns):
+        with pytest.raises(WebFetchError) as exc:
+            fetch(_url(test_port, '/loop'), _policy(['test.local']))
+        assert exc.value.code == 'too_many_redirects'
 
 
 class TestPolicyBeforeDns:
