@@ -119,21 +119,24 @@ The household agent can read links without giving it raw `web_extract` access.
 `web_fetch_url` asks Eshu to fetch a URL; Eshu decides whether the destination is
 permitted and makes the request from the dashboard host.
 
-- **Principal:** the tool is seeded with `principal_allow: ["household"]`. The
-  call-time gate in `evaluate_call` refuses every other agent (including an admin
-  token), even if the caller knows the tool name. The name is hidden from other
-  agents' `tools/list` too. Re-seeding refreshes this restriction, so expose the
-  tool to another principal by changing the seed, not just the DB.
+- **Principal:** the tool's caller gate is synced from the enabled per-agent
+  policies in `web_fetch_policies`. An agent with an enabled policy is allowed
+  (and, in allowlist tool mode, `web_fetch_url` is added to its tool allowlist);
+  every other agent is refused and does not see the tool. With no enabled
+  policy the tool falls back to the inert `household` placeholder name.
 - **Grouping:** pass the usual optional `session_id`/`execution_id` arguments to
   attach the fetch to the same dashboard session as the agent's HA calls.
 - **No generic passthrough:** `webfetch` is in `NO_GENERIC_KINDS`, so the
   integration does not inherit `read`/`write` against a placeholder base URL.
-- **Per-principal allowlist:** stored in `web_fetch_policies`, keyed by agent
-  *name* (not token id), so it survives token rotation. Deny is evaluated first;
-  an empty allowlist denies everything (fail closed). Matching is label-boundary
-  suffix based: `bromley.gov.uk` matches `www.bromley.gov.uk`, never
-  `evilbromley.gov.uk` or `bromley.gov.uk.attacker.tld`.
-- **Enforcement:** allow/deny is checked before DNS. Every resolved A/AAAA must
+- **Per-agent allowlist:** stored in `web_fetch_policies`, keyed by agent
+  *name* (not token id), so it survives token rotation. The UI is **allowlist
+  only**: a host must match an entry; everything else is blocked, and an empty
+  allowlist denies every fetch. Matching is label-boundary suffix based:
+  `bromley.gov.uk` matches `www.bromley.gov.uk`, never `evilbromley.gov.uk` or
+  `bromley.gov.uk.attacker.tld`. An optional `deny` override remains available
+  in the API (evaluated first) for carving a specific host out of a broad allow
+  entry; it is not required and is hidden from the UI.
+- **Enforcement:** the allowlist is checked before DNS. Every resolved A/AAAA must
   be globally routable (no private, loopback, link-local, CGNAT, IPv4-mapped
   private, or metadata addresses). The connection is pinned to the validated IP
   with TLS SNI/cert verification against the original hostname. Redirects are
@@ -143,7 +146,8 @@ permitted and makes the request from the dashboard host.
   20 fetches/minute and 200/hour per principal; 3 concurrent. PDFs/images are
   refused in v1. This limiter is separate from the MCP-wide per-agent
   `rate_limit_per_min`; leave that unset or above 20 so the fetch-specific
-  message is the one the agent sees.
+  message is the one the agent sees. The household token is configured at
+  60/min so browsing does not compete with its Home Assistant calls.
 - **Output:** a `<untrusted_tool_result source="web_fetch_url">` envelope so the
   agent treats the page as data. Failures are `{"error":"forbidden"|"error",
   "code":"…","reason":"…","retryable":…}`; `forbidden` is final.
@@ -155,13 +159,15 @@ permitted and makes the request from the dashboard host.
 ### Deploying it
 
 **UI path:** Integrations → Kind **Web fetch** → name it `web` → **Add
-Integration** → **Seed** → enable it. Then use the **Web Fetch Allowlist** panel
-(under the integration form) to select principal `household`, tick **Enabled**,
-paste the allow/deny domains (one per line), and **Save Policy**. The panel reads
-and writes `/api/web-fetch-policies`; no base URL or credential is needed.
+Integration** → **Seed** → enable it. Then open **Controls → Web Fetch
+Allowlist**, select the household agent token (e.g. `rowana-household`), tick
+**Enabled**, paste the allowed domains (one per line), and **Save Policy**.
+Saving an enabled policy also adds `web_fetch_url` to that agent's tool
+allowlist when the agent is in allowlist mode. The panel reads and writes
+`/api/web-fetch-policies`; no base URL or credential is needed.
 
 **API path (scripted):** create the integration disabled, seed it, enable it, and
-set the allowlist:
+set the allowlist (the same caller sync runs after these calls):
 
 ```bash
 # 1. Create (kind webfetch -> no generic tools). base_url is unused by the tool.
@@ -169,7 +175,7 @@ curl -s -X POST http://<dashboard>:8000/api/integrations \
   -b 'eshu_session=<session-cookie>' -H 'Content-Type: application/json' \
   -d '{"name":"web","base_url":"https://invalid.local","auth_type":"none","kind":"webfetch","enabled":false,"mcp_mode":"joined","retention_days":90}'
 
-# 2. Seed the single fetch_url tool (principal_allow=["household"]).
+# 2. Seed the single fetch_url tool (caller list comes from enabled policies).
 curl -s -X POST http://<dashboard>:8000/api/integrations/web/seed \
   -b 'eshu_session=<session-cookie>'
 
@@ -178,14 +184,15 @@ curl -s -X PUT http://<dashboard>:8000/api/integrations/web \
   -b 'eshu_session=<session-cookie>' -H 'Content-Type: application/json' \
   -d '{"enabled":true}'
 
-# 4. Set the URL policy (hot reload — no restart).
-curl -s -X PUT http://<dashboard>:8000/api/web-fetch-policies/household \
+# 4. Set the allowlist for the household agent token (hot reload — no restart).
+#    This also grants web_fetch_url to that agent. `deny` is an optional
+#    advanced API-only carve-out; it is not required.
+curl -s -X PUT http://<dashboard>:8000/api/web-fetch-policies/rowana-household \
   -b 'eshu_session=<session-cookie>' -H 'Content-Type: application/json' \
   -d '{"enabled":true,
-       "allow":["bromley.gov.uk","gov.uk","tesco.com","sainsburys.co.uk","ocado.com"],
-       "deny":["reddit.com","google.com","facebook.com","instagram.com"]}'
+       "allow":["bromley.gov.uk","gov.uk","tesco.com","sainsburys.co.uk","ocado.com"]}'
 
-# 5. Add web_fetch_url to the household agent's tool allowlist (policy editor).
+# 5. Reload the MCP client's tool list (e.g. /reload-mcp in Hermes).
 ```
 
 Once the integration is enabled, `web_fetch_url` is registered on `/mcp`

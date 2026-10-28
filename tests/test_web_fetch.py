@@ -15,7 +15,7 @@ from core.mcp_server import mcp as eshu_mcp, refresh_mcp_tools
 from core.tool_runner import run_tool
 from core.web_fetch import WebFetchError, build_envelope, fetch, resolve_public
 from core.web_fetch_limit import acquire, release, reset as reset_limits
-from db.agent_policies import get_agent_policy
+from db.agent_policies import get_agent_policy, set_agent_policy
 from db.agent_tokens import create_agent_token, get_agent_by_token
 from db.core import db_conn
 from db.integrations import (
@@ -465,6 +465,61 @@ class TestStats:
         assert stats['counters']['fetch_ok'] == 1
         assert stats['counters']['fetch_denied_allowlist'] == 1
         assert stats['by_code']['host_not_allowed'] == 1
+
+
+class TestAccessSync:
+    def _setup(self):
+        create_integration('web', 'https://invalid.local', 'none', '',
+                           kind='webfetch', enabled=True, retention_days=90)
+        seed_for_kind(get_integration('web'))
+        _raw, agent_id = create_agent_token('rowana-household')
+        set_agent_policy(agent_id, tools_mode='allowlist',
+                         tools=['home_assistant_list_entities'],
+                         arg_policy={}, approval={}, rate_limit_per_min=20)
+        refresh_mcp_tools()
+        return agent_id
+
+    def test_policy_save_grants_tool_and_tool_allowlist(self, auth_client):
+        agent_id = self._setup()
+        r = auth_client.put('/api/web-fetch-policies/rowana-household',
+                            json={'enabled': True, 'allow': ['gov.uk']})
+        assert r.status_code == 200, r.text
+        assert get_tool('web', 'fetch_url')['principal_allow'] == ['rowana-household']
+        policy = get_agent_policy(agent_id)
+        assert 'web_fetch_url' in policy['tools']
+        assert policy['rate_limit_per_min'] == 20
+
+    def test_policy_disable_and_delete_revoke(self, auth_client):
+        agent_id = self._setup()
+        auth_client.put('/api/web-fetch-policies/rowana-household',
+                        json={'enabled': True, 'allow': ['gov.uk']})
+        r = auth_client.put('/api/web-fetch-policies/rowana-household',
+                            json={'enabled': False, 'allow': ['gov.uk']})
+        assert r.status_code == 200, r.text
+        assert get_tool('web', 'fetch_url')['principal_allow'] == ['household']
+        assert 'web_fetch_url' not in get_agent_policy(agent_id)['tools']
+
+        auth_client.put('/api/web-fetch-policies/rowana-household',
+                        json={'enabled': True, 'allow': ['gov.uk']})
+        assert auth_client.delete('/api/web-fetch-policies/rowana-household').status_code == 200
+        assert get_tool('web', 'fetch_url')['principal_allow'] == ['household']
+        assert 'web_fetch_url' not in get_agent_policy(agent_id)['tools']
+
+    def test_seed_after_policy_uses_enabled_callers(self, auth_client):
+        create_integration('web', 'https://invalid.local', 'none', '',
+                           kind='webfetch', enabled=True, retention_days=90)
+        _raw, agent_id = create_agent_token('rowana-household')
+        set_agent_policy(agent_id, tools_mode='allowlist',
+                         tools=['home_assistant_list_entities'],
+                         arg_policy={}, approval={}, rate_limit_per_min=20)
+        r = auth_client.put('/api/web-fetch-policies/rowana-household',
+                            json={'enabled': True, 'allow': ['gov.uk']})
+        assert r.status_code == 200, r.text
+        # The policy exists but the tool does not yet; the sync still adds the
+        # tool key to the agent's allowlist.
+        assert 'web_fetch_url' in get_agent_policy(agent_id)['tools']
+        seed_for_kind(get_integration('web'))
+        assert get_tool('web', 'fetch_url')['principal_allow'] == ['rowana-household']
 
 
 class TestPolicyApi:

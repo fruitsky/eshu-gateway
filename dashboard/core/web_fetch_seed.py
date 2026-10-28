@@ -38,7 +38,11 @@ def seed_web_fetch_tools(integration_id: int):
     operator's enabled toggle; the caller restriction is a security default and
     is refreshed on every seed."""
     from db.integrations import create_tool, get_tools, update_tool
+    from db.web_fetch import web_fetch_callers
 
+    # The per-agent URL policy is the source of truth for who can call the
+    # tool. Before any policy exists, fall back to the documented placeholder.
+    callers = web_fetch_callers() or ['household']
     existing = {t['name']: t for t in get_tools(integration_id)}
     created = 0
     updated = 0
@@ -60,7 +64,7 @@ def seed_web_fetch_tools(integration_id: int):
                 read_only=tool['read_only'],
                 seeded=True,
                 handler=tool['handler'],
-                principal_allow=tool['principal_allow'],
+                principal_allow=callers,
             )
             updated += 1
         else:
@@ -79,7 +83,7 @@ def seed_web_fetch_tools(integration_id: int):
                 always_gate=False,
                 seeded=True,
                 handler=tool['handler'],
-                principal_allow=tool['principal_allow'],
+                principal_allow=callers,
             )
             created += 1
     return created, updated

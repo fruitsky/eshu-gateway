@@ -512,6 +512,28 @@
           </div>
         </div>
       </div>
+
+      <div class="widget mt-5" id="wf-policy-widget">
+        <div class="widget-header">Web Fetch Allowlist</div>
+        <p class="text-xs mb-3 text-muted">Per-agent allowlist for <code>web_fetch_url</code>. <strong>Everything not listed is blocked</strong>; an empty allowlist denies every fetch. Domains only — no wildcards, paths, ports, userinfo, or IP literals. Saving an enabled policy also grants <code>web_fetch_url</code> to this agent.</p>
+        <div class="flex flex-wrap gap-2 mb-2 items-center">
+          <label class="text-xs text-muted">Agent token:</label>
+          <select id="wf-principal" class="flex-1 text-xs" onchange="loadWebFetchPolicy()"></select>
+          <button onclick="loadWebFetchPolicy()" class="btn btn-sm btn-muted">Reload</button>
+        </div>
+        <label class="flex items-center gap-2 cursor-pointer select-none text-xs text-muted mb-2">
+          <input type="checkbox" id="wf-enabled"> Enabled
+        </label>
+        <label class="block text-xs text-muted mb-1">Allowed domains (one per line)</label>
+        <textarea id="wf-allow" rows="5" class="w-full text-xs" placeholder="bromley.gov.uk&#10;gov.uk&#10;tesco.com&#10;sainsburys.co.uk&#10;ocado.com"></textarea>
+        <div class="flex flex-wrap items-center gap-2 mt-2">
+          <button onclick="saveWebFetchPolicy()" class="btn btn-sm">Save Policy</button>
+          <button onclick="deleteWebFetchPolicy()" class="btn btn-sm btn-muted">Delete</button>
+          <span id="wf-policy-status" class="text-xs text-muted"></span>
+        </div>
+        <div id="wf-stats" class="text-xs text-muted mt-2"></div>
+        <p class="text-xs text-muted mt-2">This is separate from the SSH command policy above; Save Policy applies immediately to MCP, not to gateway policy sync.</p>
+      </div>
     </div>
 
     <!-- FLEET RUN VIEW — solar broadcast console -->
@@ -657,28 +679,6 @@
                 <button id="int-cancel-btn" onclick="resetIntegrationForm()" class="btn btn-sm btn-muted hidden">Cancel edit</button>
               </div>
             </div>
-          </div>
-
-          <div class="widget" id="wf-policy-widget">
-            <div class="widget-header">Web Fetch Allowlist</div>
-            <p class="text-xs mb-3 text-muted">Per-principal URL policy for <code>web_fetch_url</code>. Deny wins; an empty allowlist denies every fetch. Domains only — no wildcards, paths, ports, userinfo, or IP literals.</p>
-            <div class="flex gap-2 mb-2">
-              <select id="wf-principal" class="flex-1 text-xs" onchange="loadWebFetchPolicy()"></select>
-              <button onclick="loadWebFetchPolicy()" class="btn btn-sm btn-muted">Reload</button>
-            </div>
-            <label class="flex items-center gap-2 cursor-pointer select-none text-xs text-muted mb-2">
-              <input type="checkbox" id="wf-enabled"> Enabled
-            </label>
-            <label class="block text-xs text-muted mb-1">Allow (one domain per line)</label>
-            <textarea id="wf-allow" rows="4" class="w-full text-xs" placeholder="bromley.gov.uk&#10;gov.uk&#10;tesco.com"></textarea>
-            <label class="block text-xs text-muted mt-2 mb-1">Deny (one domain per line)</label>
-            <textarea id="wf-deny" rows="3" class="w-full text-xs" placeholder="reddit.com&#10;google.com"></textarea>
-            <div class="flex flex-wrap items-center gap-2 mt-2">
-              <button onclick="saveWebFetchPolicy()" class="btn btn-sm">Save Policy</button>
-              <button onclick="deleteWebFetchPolicy()" class="btn btn-sm btn-muted">Delete</button>
-              <span id="wf-policy-status" class="text-xs text-muted"></span>
-            </div>
-            <div id="wf-stats" class="text-xs text-muted mt-2"></div>
           </div>
         </div>
 
@@ -871,7 +871,7 @@
 </div>
 
 <script src="/static/state.js?v=4f542da"></script>
-<script src="/static/app.js?v=a36ab89"></script>
+<script src="/static/app.js?v=27944b9"></script>
 
 <!-- Create / Edit Approved Window Modal -->
 <div id="create-window-modal" class="modal-overlay hidden">

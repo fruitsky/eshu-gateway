@@ -402,7 +402,7 @@ async function switchView(target) {
   if (target === 'history') { fetchRequests(); fetchIntegrationCalls(); }
   if (target === 'windows') { fetchWindowsTable(); }
   if (target === 'stats') { fetchStatistics(); fetchSuggestions(); }
-  if (target === 'controls') { fetchFreezeStatus(); fetchGateways(); fetchPolicies(); fetchPolicyChanges(); }
+  if (target === 'controls') { fetchFreezeStatus(); fetchGateways(); fetchPolicies(); fetchPolicyChanges(); initWebFetchPolicyPanel(); }
   if (target === 'fleet') { fetchFleetCommands(); }
   if (target === 'integrations') { fetchIntegrations(); }
   if (target === 'settings') { refreshPasswordUI(); fetchNotifyConfig(); fetchDevTools(); if (_devToolsEnabled) { fetchDevStatus(); fetchDevGateways(); fetchFeatureFlags(); } }
@@ -5334,7 +5334,7 @@ const INTEGRATION_PROFILES = {
                  auth_type: 'none', auth_header: '', no_secret: true,
                  no_base_url: true, no_tls_toggle: true, no_gate: true,
                  no_test: true, name_hint: 'web',
-                 guidance: 'Mediated outbound fetch for the household principal. No upstream base URL or credential. Name it "web" so the MCP tool is web_fetch_url; then Seed it, enable it, and set the URL allowlist in the Web Fetch Allowlist panel below. Fail-closed: an empty allowlist denies every fetch.' },
+                 guidance: 'Mediated outbound fetch for the household agent. No upstream base URL or credential. Name it "web" so the MCP tool is web_fetch_url; then Seed it, enable it, and configure the per-agent URL allowlist in Controls → Web Fetch Allowlist. Fail-closed: an empty allowlist denies every fetch.' },
   custom:      { label: 'Custom', seedable: false,
                  guidance: 'Configure the upstream API manually.' },
 };
@@ -5401,8 +5401,6 @@ async function fetchIntegrations() {
   fetchAgentTokens();
   fetchIntegrationList();
   fetchMcpSettings();
-  await fetchWebFetchPolicies();
-  loadWebFetchPolicy();
 }
 
 async function fetchMcpSettings() {
@@ -5432,9 +5430,16 @@ var _agentsData = [];
 var _agentPolicy = null;
 var _agentPolicyTools = [];
 var _webFetchPolicies = [];
+var _wfDeny = [];
 
 function _wfSplit(value) {
   return (value || '').split(/[\n,]+/).map(function(s) { return s.trim(); }).filter(Boolean);
+}
+
+async function initWebFetchPolicyPanel() {
+  await fetchAgentTokens();
+  await fetchWebFetchPolicies();
+  loadWebFetchPolicy();
 }
 
 async function fetchWebFetchPolicies() {
@@ -5450,32 +5455,39 @@ async function fetchWebFetchPolicies() {
 function refreshWebFetchPrincipals() {
   const sel = document.getElementById('wf-principal');
   if (!sel) return;
-  const names = new Set(['household']);
+  const names = new Set();
   (_agentsData || []).forEach(function(a) { if (a.name) names.add(a.name); });
   (_webFetchPolicies || []).forEach(function(p) { if (p.principal) names.add(p.principal); });
-  const current = sel.value || 'household';
-  sel.innerHTML = Array.from(names).sort().map(function(n) {
+  if (!names.size) names.add('household');
+  const options = Array.from(names).sort();
+  const current = sel.value;
+  const preferred = options.find(function(n) { return /household/i.test(n); }) || options[0] || 'household';
+  sel.innerHTML = options.map(function(n) {
     return '<option value="' + esc(n) + '">' + esc(n) + '</option>';
   }).join('');
-  sel.value = names.has(current) ? current : 'household';
+  sel.value = names.has(current) ? current : preferred;
 }
 
 async function loadWebFetchPolicy() {
   const sel = document.getElementById('wf-principal');
-  const principal = sel ? sel.value : 'household';
+  const principal = sel ? sel.value : '';
   const status = document.getElementById('wf-policy-status');
+  if (!principal) {
+    if (status) status.textContent = 'Create an agent token in Integrations first.';
+    return;
+  }
   try {
     const res = await authFetch('/api/web-fetch-policies/' + encodeURIComponent(principal));
     if (res.status === 404) {
+      _wfDeny = [];
       document.getElementById('wf-enabled').checked = false;
       document.getElementById('wf-allow').value = '';
-      document.getElementById('wf-deny').value = '';
       if (status) status.textContent = 'No policy yet — save one to enable.';
     } else if (res.ok) {
       const p = await res.json();
+      _wfDeny = p.deny || [];
       document.getElementById('wf-enabled').checked = !!p.enabled;
       document.getElementById('wf-allow').value = (p.allow || []).join('\n');
-      document.getElementById('wf-deny').value = (p.deny || []).join('\n');
       if (status) status.textContent = 'Loaded.';
     } else {
       if (status) status.textContent = 'Load failed.';
@@ -5505,16 +5517,16 @@ async function loadWebFetchStats(principal) {
 }
 
 async function saveWebFetchPolicy() {
-  const principal = document.getElementById('wf-principal').value || 'household';
+  const principal = document.getElementById('wf-principal').value || '';
+  if (!principal) { showToast('Select an agent token first', 'error'); return; }
   const enabled = document.getElementById('wf-enabled').checked;
   const allow = _wfSplit(document.getElementById('wf-allow').value);
-  const deny = _wfSplit(document.getElementById('wf-deny').value);
   const status = document.getElementById('wf-policy-status');
   try {
     const res = await authFetch('/api/web-fetch-policies/' + encodeURIComponent(principal), {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ enabled: enabled, allow: allow, deny: deny })
+      body: JSON.stringify({ enabled: enabled, allow: allow, deny: _wfDeny })
     });
     const data = await res.json().catch(function() { return {}; });
     if (!res.ok) {
@@ -5531,25 +5543,28 @@ async function saveWebFetchPolicy() {
     }
     loadWebFetchStats(principal);
     refreshWebFetchPrincipals();
+    fetchAgentTokens();
   } catch(e) {
     if (status) status.textContent = 'Save failed: ' + e.message;
   }
 }
 
 async function deleteWebFetchPolicy() {
-  const principal = document.getElementById('wf-principal').value || 'household';
+  const principal = document.getElementById('wf-principal').value || '';
+  if (!principal) { showToast('Select an agent token first', 'error'); return; }
   if (!(await customConfirm('Delete the web-fetch policy for "' + principal + '"?'))) return;
   try {
     const res = await authFetch('/api/web-fetch-policies/' + encodeURIComponent(principal), { method: 'DELETE' });
     if (!res.ok && res.status !== 404) { showToast('Delete failed', 'error'); return; }
     _webFetchPolicies = _webFetchPolicies.filter(function(p) { return p.principal !== principal; });
+    _wfDeny = [];
     document.getElementById('wf-enabled').checked = false;
     document.getElementById('wf-allow').value = '';
-    document.getElementById('wf-deny').value = '';
     const status = document.getElementById('wf-policy-status');
     if (status) status.textContent = 'Deleted.';
     refreshWebFetchPrincipals();
     loadWebFetchStats(principal);
+    fetchAgentTokens();
   } catch(e) { showToast('Delete failed: ' + e.message, 'error'); }
 }
 

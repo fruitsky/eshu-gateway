@@ -188,16 +188,20 @@ endpoint. Agents authenticate to the MCP surface with a bearer **agent token**.
 
 ### Mediated web fetch policy (dashboard authentication required)
 
-Per-principal URL allowlists for `web_fetch_url`. Matching is label-boundary
-suffix based; deny is evaluated first; an empty allowlist denies everything.
-`allow`/`deny` entries are validated (no wildcards, paths, ports, userinfo, IP
-literals, or single-label hosts) and normalised to lowercase.
+Per-agent URL allowlists for `web_fetch_url`. The dashboard UI is **allowlist
+only**: a host must match an entry; everything else is blocked, and an empty
+allowlist denies everything. `deny` is an optional advanced override (evaluated
+first) for carving a specific host out of a broad allow entry; it is not exposed
+in the UI. `allow`/`deny` entries are validated (no wildcards, paths, ports,
+userinfo, IP literals, or single-label hosts) and normalised to lowercase.
+Saving an enabled policy also syncs the tool's caller gate and adds
+`web_fetch_url` to that agent's tool allowlist (when in allowlist mode).
 
 | Method | Path | Purpose | Auth |
 |--------|------|---------|------|
 | `GET` | `/api/web-fetch-policies` | List every principal's policy | Session |
 | `GET` | `/api/web-fetch-policies/{principal}` | One policy (404 if unset) | Session |
-| `PUT` | `/api/web-fetch-policies/{principal}` | Replace a policy (`{"enabled": bool, "allow": [...], "deny": [...]}`) | Session |
+| `PUT` | `/api/web-fetch-policies/{principal}` | Replace a policy (`{"enabled": bool, "allow": [...]}`; optional `deny`) | Session |
 | `DELETE` | `/api/web-fetch-policies/{principal}` | Delete a policy | Session |
 | `GET` | `/api/web-fetch-stats?principal=` | Audit-derived counters (`fetch_ok`, `fetch_denied_allowlist`, `fetch_denied_ssrf`, `fetch_denied_redirect`, `fetch_error_upstream`, `fetch_rate_limited`) and raw `by_code` counts | Session |
 

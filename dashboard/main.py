@@ -245,6 +245,9 @@ def on_startup():
     # Re-apply each integration's seed catalog so deployed catalog changes
     # (new/changed tools) propagate without a manual re-seed.
     reseed_all_integrations()
+    # Keep the web-fetch caller gate and agent tool allowlists aligned with the
+    # enabled per-agent URL policies (idempotent; no token = fail closed).
+    _sync_web_fetch_access(refresh=False)
     # One-off migration: strip raw credentials from resolved approval rows
     # persisted by older versions (keeps SHA-256 fingerprints for audit).
     strip_resolved_payloads()
@@ -2360,6 +2363,69 @@ def get_agent_policy_endpoint(agent_id: int, request: Request):
     return get_agent_policy(agent_id)
 
 
+def _web_fetch_tool_keys():
+    """Policy keys for the mediated fetch tool, including the documented
+    default (`web_fetch_url`) for an integration that has not been created yet."""
+    keys = {'web_fetch_url'}
+    for integration in get_integrations():
+        if (integration.get('kind') or '').lower() == 'webfetch':
+            keys.add(f"{safe_ident(integration['name']).lower()}_fetch_url")
+    return sorted(keys)
+
+
+def _sync_web_fetch_access(refresh: bool = True):
+    """Make enabled web-fetch policies the single source of truth.
+
+    Updates the tool's `principal_allow` gate and (for agents in allowlist
+    mode) adds/removes `web_fetch_url` from their tool allowlist. This is what
+    lets the Controls panel grant access without a second manual list."""
+    from db.integrations import update_tool
+    from db.web_fetch import web_fetch_callers
+
+    callers = web_fetch_callers()
+    principal_allow = callers or ['household']
+    tool_keys = _web_fetch_tool_keys()
+
+    for integration in get_integrations():
+        if (integration.get('kind') or '').lower() != 'webfetch':
+            continue
+        for tool in get_tools(integration['id']):
+            if tool.get('handler') != 'web_fetch':
+                continue
+            if (tool.get('principal_allow') or []) != principal_allow:
+                update_tool(tool['id'], principal_allow=principal_allow)
+
+    allowed = {c.lower() for c in callers}
+    for agent in get_agent_tokens():
+        policy = get_agent_policy(agent['id'])
+        if (policy.get('tools_mode') or 'all') != 'allowlist':
+            continue
+        tools = list(policy.get('tools') or [])
+        current = {t.lower() for t in tools}
+        desired = set(current)
+        name = (agent.get('name') or '').lower()
+        if name in allowed:
+            desired.update(k.lower() for k in tool_keys)
+        else:
+            desired.difference_update(k.lower() for k in tool_keys)
+        if desired != current:
+            set_agent_policy(
+                agent['id'],
+                tools_mode='allowlist',
+                tools=sorted(desired),
+                arg_policy=policy.get('arg_policy') or {},
+                approval=policy.get('approval') or {},
+                rate_limit_per_min=policy.get('rate_limit_per_min') or 0,
+            )
+            record_audit_event(
+                'agent_policy_updated',
+                details=(f"Web fetch access "
+                         f"{'granted' if name in allowed else 'revoked'} "
+                         f"for agent '{agent.get('name')}'"))
+    if refresh:
+        refresh_mcp_tools()
+
+
 @app.put("/api/agents/{agent_id}/policy")
 def set_agent_policy_endpoint(agent_id: int, payload: AgentPolicyPayload,
                               request: Request):
@@ -2385,7 +2451,8 @@ def set_agent_policy_endpoint(agent_id: int, payload: AgentPolicyPayload,
         details=f"Policy for agent '{agent['name']}' updated "
                 f"(tools_mode={policy['tools_mode']}, "
                 f"rate_limit={policy['rate_limit_per_min']})")
-    return policy
+    _sync_web_fetch_access()
+    return get_agent_policy(agent_id)
 
 
 @app.get("/api/agents/{agent_id}/available-tools")
@@ -2451,6 +2518,7 @@ def set_web_fetch_policy_endpoint(principal: str, payload: WebFetchPolicyPayload
         details=(f"Web fetch policy for '{principal}' updated "
                  f"(enabled={policy['enabled']}, allow={len(policy['allow'])}, "
                  f"deny={len(policy['deny'])})"))
+    _sync_web_fetch_access()
     return policy
 
 
@@ -2461,6 +2529,7 @@ def delete_web_fetch_policy_endpoint(principal: str, request: Request):
         raise HTTPException(status_code=404, detail="Web fetch policy not found")
     record_audit_event("web_fetch_policy_deleted",
                        details=f"Web fetch policy for '{principal}' deleted")
+    _sync_web_fetch_access()
     return {"status": "ok"}
 
 
@@ -2663,7 +2732,10 @@ def seed_integration_endpoint(name: str, request: Request):
         raise HTTPException(status_code=400,
                             detail=f"No seed catalog for this integration type ('{kind}') yet")
     created, updated = result
-    refresh_mcp_tools()
+    if kind == 'webfetch':
+        _sync_web_fetch_access()
+    else:
+        refresh_mcp_tools()
     record_audit_event(f"{kind}_seeded",
                        details=f"{kind} seed for '{name}': {created} created, {updated} updated")
     return {"status": "ok", "created": created, "updated": updated}

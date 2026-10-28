@@ -60,6 +60,11 @@ def get_web_fetch_policies():
         return [_row_to_policy(row) for row in cursor.fetchall()]
 
 
+def web_fetch_callers():
+    """Principals with an enabled web-fetch policy (the tool's caller allowlist)."""
+    return [p['principal'] for p in get_web_fetch_policies() if p['enabled']]
+
+
 def set_web_fetch_policy(principal: str, enabled: bool = False, allow=None,
                          deny=None):
     """Validate + persist one principal's policy. Raises ValueError on bad input."""
