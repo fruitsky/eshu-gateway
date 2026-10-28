@@ -141,8 +141,10 @@ permitted and makes the request from the dashboard host.
   domains (entries also match their subdomains). Allowlist-related refusals
   (`host_not_allowed`, `host_denied`, `redirect_not_allowed`, `disabled`) include
   `allowed_domains` — and `enabled:false` when disabled — so the agent corrects
-  itself even if its cached tool schema is stale. **Do not duplicate the
-  allowlist in an agent skill/persona; the live policy is the source.**
+  itself even if its cached tool schema is stale. The description refreshes on
+  the next MCP `tools/list` (reconnect or `/reload-mcp`); refusals read the live
+  policy immediately. **Do not duplicate the allowlist in an agent
+  skill/persona; the live policy is the source.**
 - **Enforcement:** the allowlist is checked before DNS. Every resolved A/AAAA must
   be globally routable (no private, loopback, link-local, CGNAT, IPv4-mapped
   private, or metadata addresses). The connection is pinned to the validated IP
