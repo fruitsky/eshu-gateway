@@ -17,6 +17,7 @@ from db.integrations import (
     get_integrations,
     get_pending_call,
 )
+from db.web_fetch import get_web_fetch_policy
 from core.agent_context import (
     current_agent_name,
     get_current_agent,
@@ -46,6 +47,19 @@ _DEFAULT_ALLOWED_HOSTS = ['127.0.0.1:*', 'localhost:*', '[::1]:*']
 # Tools that are not integration calls and must remain reachable so an agent
 # can poll its own approvals. They are always scoped to the caller.
 _ALWAYS_ALLOWED = {'check_approval'}
+
+
+def _describe_web_fetch(base: str, policy: dict) -> str:
+    """Append the caller's live allowlist to the tool description. This keeps
+    the agent-facing list generated from the same policy the handler enforces."""
+    allow = list((policy or {}).get('allow') or [])
+    if allow:
+        allowed = ', '.join(allow)
+        suffix = (f'Allowed domains for this agent: {allowed}. '
+                  'Entries also match their subdomains; any other host is refused.')
+    else:
+        suffix = 'Allowed domains for this agent: none — every fetch will be refused.'
+    return ((base or '').rstrip() + '\n\n' + suffix).strip()
 
 
 class EshuFastMCP(FastMCP):
@@ -84,14 +98,25 @@ class EshuFastMCP(FastMCP):
         if not agent:
             return tools
         principal_map = getattr(self, '_principal_allow', {}) or {}
+        web_fetch_tools = getattr(self, '_web_fetch_tools', set()) or set()
         visible = []
         for tool in tools:
             if tool.name in _ALWAYS_ALLOWED:
                 visible.append(tool)
-            elif not principal_allowed(agent, principal_map.get(tool.name)):
                 continue
-            elif visible_tool_allowed(agent, self._effective_name(tool.name)):
-                visible.append(tool)
+            if not principal_allowed(agent, principal_map.get(tool.name)):
+                continue
+            if not visible_tool_allowed(agent, self._effective_name(tool.name)):
+                continue
+            if tool.name in web_fetch_tools:
+                # The allowlist is per agent and can change; generate the
+                # description from the same live policy the handler enforces.
+                policy = get_web_fetch_policy((agent or {}).get('name') or '')
+                if not policy or not policy.get('enabled'):
+                    continue
+                tool = tool.model_copy(
+                    update={'description': _describe_web_fetch(tool.description, policy)})
+            visible.append(tool)
         return visible
 
     async def call_tool(self, name: str, arguments: dict):
@@ -155,6 +180,7 @@ _registered_names = set()
 # Kept on each FastMCP instance so list_tools can hide principal-restricted
 # tools; the call-time check in evaluate_call is the actual security boundary.
 mcp._principal_allow = {}
+mcp._web_fetch_tools = set()
 
 # Per-integration MCP servers: ns -> FastMCP instance / its ASGI app / the set
 # of tool names it exposes. Built once at startup so the mount paths are stable;
@@ -204,6 +230,7 @@ def _make_instance(name: str) -> EshuFastMCP:
     )
     inst._eshu_namespace = _safe_ident(name).lower()
     inst._principal_allow = {}
+    inst._web_fetch_tools = set()
     return inst
 
 
@@ -215,6 +242,10 @@ def _register_tools(inst, integration, namespaced: bool) -> list:
     if principal_map is None:
         inst._principal_allow = {}
         principal_map = inst._principal_allow
+    web_fetch_tools = getattr(inst, '_web_fetch_tools', None)
+    if web_fetch_tools is None:
+        inst._web_fetch_tools = set()
+        web_fetch_tools = inst._web_fetch_tools
     registered = []
     for tool in get_enabled_tools(integration['id']):
         mcp_name = f"{ns}_{tool['name']}" if namespaced else tool['name']
@@ -225,6 +256,8 @@ def _register_tools(inst, integration, namespaced: bool) -> list:
             if isinstance(allowed, str):
                 allowed = [allowed]
             principal_map[mcp_name] = list(allowed)
+            if tool.get('handler') == 'web_fetch':
+                web_fetch_tools.add(mcp_name)
             registered.append(mcp_name)
         except Exception as e:
             print(f"[mcp] failed to register tool {mcp_name}: {e}", flush=True)
@@ -321,6 +354,7 @@ def refresh_mcp_tools():
             pass
     _registered_names = set()
     mcp._principal_allow = {}
+    mcp._web_fetch_tools = set()
 
     for integration in get_integrations():
         if not integration.get('enabled'):
@@ -382,6 +416,7 @@ def _refresh_single_instance(ns: str, integration: dict):
         except Exception:
             pass
     inst._principal_allow = {}
+    inst._web_fetch_tools = set()
     fresh = set(_register_tools(inst, integration, namespaced=False))
     inst.add_tool(check_approval_fn(), name="check_approval", description=CHECK_APPROVAL_DESC)
     fresh.add("check_approval")

@@ -372,6 +372,27 @@ class TestPrincipalGate:
                 'web_fetch_url', {'url': _url(test_port, '/ok')}))
         assert '<untrusted_tool_result' in _text(res)['text']
 
+    def test_tool_description_includes_live_allowlist(self):
+        agent = _web_agent(allow=['test.local', 'gov.uk'])
+        with _acting_as(agent):
+            tools = {t.name: t for t in asyncio.run(eshu_mcp.list_tools())}
+        desc = tools['web_fetch_url'].description
+        assert 'Allowed domains for this agent:' in desc
+        assert 'test.local' in desc and 'gov.uk' in desc
+        assert 'any other host is refused' in desc.lower()
+
+    def test_tool_description_empty_allowlist(self):
+        agent = _web_agent(allow=[])
+        with _acting_as(agent):
+            tools = {t.name: t for t in asyncio.run(eshu_mcp.list_tools())}
+        assert 'none — every fetch will be refused' in tools['web_fetch_url'].description
+
+    def test_tool_hidden_when_policy_disabled(self):
+        agent = _web_agent(allow=['test.local'], enabled=False)
+        with _acting_as(agent):
+            names = {t.name for t in asyncio.run(eshu_mcp.list_tools())}
+        assert 'web_fetch_url' not in names
+
 
 class TestHandler:
     def test_success_audit_and_session_grouping(self, test_port, loopback_dns):
@@ -417,10 +438,27 @@ class TestHandler:
                 'url': _url(test_port, '/ok')}))
         assert out['error'] == 'forbidden'
         assert out['code'] == 'host_not_allowed'
+        assert out['allowed_domains'] == ['allowed.example']
         row = get_integration_calls(limit=1)['rows'][0]
         assert row['outcome'] == 'denied'
         assert row['reason_code'] == 'host_not_allowed'
         assert row['resolved_ips'] == ''
+
+    def test_host_denied_refusal_includes_allowlist(self, test_port):
+        agent = _web_agent(allow=['test.local'], deny=['test.local'])
+        with _acting_as(agent):
+            out = json.loads(run_tool('web', 'fetch_url', {
+                'url': _url(test_port, '/ok')}))
+        assert out['code'] == 'host_denied'
+        assert out['allowed_domains'] == ['test.local']
+
+    def test_redirect_refusal_includes_allowlist(self, test_port, loopback_dns):
+        agent = _web_agent(allow=['test.local'])
+        with _acting_as(agent):
+            out = json.loads(run_tool('web', 'fetch_url', {
+                'url': _url(test_port, '/redirect-external')}))
+        assert out['code'] == 'redirect_not_allowed'
+        assert out['allowed_domains'] == ['test.local']
 
     @pytest.mark.parametrize('enabled,allow,code', [
         (True, [], 'host_not_allowed'),
@@ -433,6 +471,9 @@ class TestHandler:
                 'url': _url(test_port, '/ok')}))
         assert out['error'] == 'forbidden'
         assert out['code'] == code
+        assert out['allowed_domains'] == []
+        if not enabled:
+            assert out['enabled'] is False
 
     def test_rate_limit(self, test_port, loopback_dns):
         agent = _web_agent(allow=['test.local'])

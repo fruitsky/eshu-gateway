@@ -136,6 +136,13 @@ permitted and makes the request from the dashboard host.
   `bromley.gov.uk.attacker.tld`. An optional `deny` override remains available
   in the API (evaluated first) for carving a specific host out of a broad allow
   entry; it is not required and is hidden from the UI.
+- **Self-describing allowlist:** the `web_fetch_url` MCP description is
+  generated per agent from the live policy and lists that agent's allowed
+  domains (entries also match their subdomains). Allowlist-related refusals
+  (`host_not_allowed`, `host_denied`, `redirect_not_allowed`, `disabled`) include
+  `allowed_domains` — and `enabled:false` when disabled — so the agent corrects
+  itself even if its cached tool schema is stale. **Do not duplicate the
+  allowlist in an agent skill/persona; the live policy is the source.**
 - **Enforcement:** the allowlist is checked before DNS. Every resolved A/AAAA must
   be globally routable (no private, loopback, link-local, CGNAT, IPv4-mapped
   private, or metadata addresses). The connection is pinned to the validated IP
@@ -152,7 +159,8 @@ permitted and makes the request from the dashboard host.
   60/min so browsing does not compete with its Home Assistant calls.
 - **Output:** a `<untrusted_tool_result source="web_fetch_url">` envelope so the
   agent treats the page as data. Failures are `{"error":"forbidden"|"error",
-  "code":"…","reason":"…","retryable":…}`; `forbidden` is final.
+  "code":"…","reason":"…","retryable":…}`; `forbidden` is final. Allowlist
+  refusals also carry `allowed_domains` so the agent can pick a permitted host.
 - **Audit:** one `integration_calls` row per attempt (`host`, `resolved_ips`,
   `reason_code`, `final_url`, status, bytes, latency), grouped by `session_id`.
   Bodies and query values are never stored. The web integration keeps 90 days of
@@ -169,7 +177,8 @@ allowlist when the agent is in allowlist mode. The panel reads and writes
 `/api/web-fetch-policies`; no base URL or credential is needed.
 
 **API path (scripted):** create the integration disabled, seed it, enable it, and
-set the allowlist (the same caller sync runs after these calls):
+set the allowlist (the same caller sync runs after these calls). The domain list
+below is illustrative; the live policy in Controls is authoritative.
 
 ```bash
 # 1. Create (kind webfetch -> no generic tools). base_url is unused by the tool.

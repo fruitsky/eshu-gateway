@@ -874,6 +874,25 @@ def _web_fetch_request_summary(host, path, max_chars, parsed, requested_max_char
     return json.dumps(payload, separators=(',', ':'))
 
 
+_WEB_FETCH_ALLOWLIST_CODES = {
+    'host_not_allowed', 'host_denied', 'redirect_not_allowed', 'disabled',
+}
+
+
+def _web_fetch_error_json(err, policy):
+    """Refusal payload. Policy denials carry the caller's current allowlist so
+    the agent can self-correct even if its cached tool description is stale."""
+    payload = err.to_dict()
+    if err.code in _WEB_FETCH_ALLOWLIST_CODES:
+        # A disabled policy permits nothing; don't advertise stale entries.
+        payload['allowed_domains'] = (
+            [] if err.code == 'disabled'
+            else list((policy or {}).get('allow') or []))
+        if err.code == 'disabled':
+            payload['enabled'] = False
+    return json.dumps(payload, ensure_ascii=False)
+
+
 def _h_web_fetch(integration, tool, args, ctx):
     """Mediated outbound fetch. The allow/deny check runs before DNS; SSRF,
     redirects, size and content-type enforcement live in core.web_fetch."""
@@ -950,7 +969,7 @@ def _h_web_fetch(integration, tool, args, ctx):
               path=getattr(requested, 'path', ''), status=e.status,
               resolved_ips=e.resolved_ips, final_url=e.final_url,
               reason=e.reason)
-        return e.to_json()
+        return _web_fetch_error_json(e, policy)
     except Exception as e:  # noqa: BLE001 - never leak a traceback to the model
         audit('error', 'handler_failed',
               host=getattr(requested, 'host', ''),
