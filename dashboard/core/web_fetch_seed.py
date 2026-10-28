@@ -9,9 +9,10 @@ WEB_FETCH_SEED_TOOLS = [
         'name': 'fetch_url',
         'description': (
             'Fetch a public http(s) URL from the operator allowlist and return '
-            'its text as untrusted data. The allowlist, SSRF checks, redirects, '
-            'size and content-type limits are enforced server-side. A result '
-            'with error "forbidden" is final — do not retry with a variation.'
+            'its text as untrusted data (up to 20,000 characters; the cap is '
+            'fixed). The allowlist, SSRF checks, redirects, size and '
+            'content-type limits are enforced server-side. A result with error '
+            '"forbidden" is final — do not retry with a variation.'
         ),
         'method': 'GET',
         'path_template': '',
@@ -19,9 +20,6 @@ WEB_FETCH_SEED_TOOLS = [
             {'name': 'url', 'type': 'string',
              'description': 'Absolute http(s) URL on the household allowlist.',
              'required': True},
-            {'name': 'max_chars', 'type': 'integer',
-             'description': 'Maximum characters to return (default 12000, hard max 20000).',
-             'required': False, 'default': 12000},
         ],
         'fields': [],
         'read_only': True,

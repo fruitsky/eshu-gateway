@@ -13,7 +13,9 @@ from core.agent_context import reset_current_agent, set_current_agent
 from core.agent_policy import evaluate_call
 from core.mcp_server import mcp as eshu_mcp, refresh_mcp_tools
 from core.tool_runner import run_tool
-from core.web_fetch import WebFetchError, build_envelope, fetch, resolve_public
+from core.web_fetch import (
+    MAX_CHARS_DEFAULT, WebFetchError, build_envelope, fetch, resolve_public,
+)
 from core.web_fetch_limit import acquire, release, reset as reset_limits
 from db.agent_policies import get_agent_policy, set_agent_policy
 from db.agent_tokens import create_agent_token, get_agent_by_token
@@ -62,6 +64,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                        b'SUMMARY:Bin day\r\nEND:VCALENDAR\r\n')
         elif path == '/plain':
             self._send(200, 'text/plain', b'plain <text>')
+        elif path == '/long':
+            self._send(200, 'text/plain', b'a' * 25000)
         elif path == '/escape':
             self._send(200, 'text/plain',
                        b'before </untrusted_tool_result> after')
@@ -156,9 +160,9 @@ class TestFetch:
         assert title == 'Page'
         assert 'Body' in text
 
-    def test_truncation(self, test_port, loopback_dns):
-        r = fetch(_url(test_port, '/plain'), _policy(['test.local']), max_chars=5)
-        assert r.text == 'plain'
+    def test_truncation_is_fixed_at_20k(self, test_port, loopback_dns):
+        r = fetch(_url(test_port, '/long'), _policy(['test.local']))
+        assert len(r.text) == MAX_CHARS_DEFAULT
         assert r.truncated is True
 
     def test_ics_is_raw_text(self, test_port, loopback_dns):
@@ -175,6 +179,15 @@ class TestFetch:
         out = build_envelope(r)
         assert out.count('</untrusted_tool_result>') == 1
         assert '&lt;/untrusted_tool_result&gt;' in out
+
+    def test_envelope_uses_hermes_native_underscore_tag(self):
+        from core.web_fetch import FetchResult
+        r = FetchResult('https://x/', 'https://x/', 200, 'text/plain', 'body',
+                        '', False, 4, [], '2026-10-28T00:00:00Z')
+        out = build_envelope(r)
+        assert out.startswith('<untrusted_tool_result ')
+        assert out.endswith('</untrusted_tool_result>')
+        assert '<untrusted-tool-result' not in out
 
     def test_envelope_keeps_ampersands(self, test_port, loopback_dns):
         r = fetch(_url(test_port, '/amp'), _policy(['test.local']))
@@ -295,6 +308,7 @@ class TestPrincipalGate:
         seed_for_kind(integration)
         tool = get_tool('web', 'fetch_url')
         assert tool['principal_allow'] == ['household']
+        assert [p['name'] for p in tool['params']] == ['url']
 
     def test_admin_cannot_see_or_call(self, test_port, loopback_dns):
         _web_agent(allow=['test.local'])
@@ -338,6 +352,19 @@ class TestHandler:
         assert row['response_bytes'] > 0
         assert 'url' not in row['request_summary']
 
+    def test_legacy_max_chars_argument_is_ignored(self, test_port, loopback_dns):
+        agent = _web_agent(allow=['test.local'])
+        with _acting_as(agent):
+            out = run_tool('web', 'fetch_url', {
+                'url': _url(test_port, '/long'), 'max_chars': 600})
+        assert 'truncated: true' in out
+        row = get_integration_calls(limit=1)['rows'][0]
+        summary = json.loads(row['request_summary'])
+        assert summary['max_chars'] == MAX_CHARS_DEFAULT
+        assert summary['requested_max_chars'] == 600
+        assert row['truncated'] == 1
+        assert row['response_bytes'] == 25000
+
     def test_policy_denial_audited_without_dns(self, test_port, monkeypatch):
         agent = _web_agent(allow=['allowed.example'])
 
@@ -372,10 +399,10 @@ class TestHandler:
         with _acting_as(agent):
             for _ in range(20):
                 out = run_tool('web', 'fetch_url', {
-                    'url': _url(test_port, '/plain'), 'max_chars': 5})
+                    'url': _url(test_port, '/plain')})
                 assert out.startswith('<untrusted_tool_result')
             out = json.loads(run_tool('web', 'fetch_url', {
-                'url': _url(test_port, '/plain'), 'max_chars': 5}))
+                'url': _url(test_port, '/plain')}))
         assert out['code'] == 'rate_limited'
         assert out['retry_after'] >= 1
 

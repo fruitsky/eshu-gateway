@@ -35,8 +35,7 @@ MAX_BODY_BYTES = 2 * 1024 * 1024
 CONNECT_TIMEOUT = 5
 TOTAL_TIMEOUT = 10
 MAX_REDIRECTS = 3
-MAX_CHARS_DEFAULT = 12000
-MAX_CHARS_CAP = 20000
+MAX_CHARS_DEFAULT = 20000
 
 USER_AGENT = 'EshuGateway/1.0 (+homelab fetch tool; https://kenguelacloud.com)'
 ACCEPT = ('text/html,application/xhtml+xml,text/plain,text/markdown,'
@@ -111,16 +110,6 @@ class FetchResult:
     raw_bytes: int
     resolved_ips: list = field(default_factory=list)
     fetched_at: str = ''
-
-
-def clamp_max_chars(value) -> int:
-    try:
-        value = int(value)
-    except (TypeError, ValueError):
-        return MAX_CHARS_DEFAULT
-    if value <= 0:
-        return MAX_CHARS_DEFAULT
-    return min(value, MAX_CHARS_CAP)
 
 
 def _now_iso() -> str:
@@ -382,9 +371,14 @@ def _html_to_text(decoded: str):
     return body, title
 
 
-def fetch(url: str, policy: dict, max_chars=None) -> FetchResult:
-    """Fetch one allowlisted URL and return extracted text. Raises WebFetchError."""
-    max_chars = clamp_max_chars(max_chars)
+def fetch(url: str, policy: dict) -> FetchResult:
+    """Fetch one allowlisted URL and return extracted text. Raises WebFetchError.
+
+    The output cap is fixed at 20,000 characters. It is deliberately not a
+    caller-selectable parameter: a small cap produces useless slices of long
+    council/school pages (and the agent has chosen one in practice).
+    """
+    max_chars = MAX_CHARS_DEFAULT
     deadline = time.monotonic() + TOTAL_TIMEOUT
     requested = url
     current = url

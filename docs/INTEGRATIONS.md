@@ -142,7 +142,9 @@ permitted and makes the request from the dashboard host.
   with TLS SNI/cert verification against the original hostname. Redirects are
   manual (max 3), re-validated per hop, and `https`→`http` is refused.
 - **Limits:** text only (`text/html`, `application/xhtml+xml`, `text/plain`,
-  `text/markdown`, `text/calendar`); 2 MB raw cap; 5 s connect / 10 s total;
+  `text/markdown`, `text/calendar`); the returned text is capped at a fixed
+  **20,000 characters** (not caller-selectable, so an agent cannot request a
+  uselessly short slice); 2 MB raw cap; 5 s connect / 10 s total;
   20 fetches/minute and 200/hour per principal; 3 concurrent. PDFs/images are
   refused in v1. This limiter is separate from the MCP-wide per-agent
   `rate_limit_per_min`; leave that unset or above 20 so the fetch-specific

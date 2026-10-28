@@ -862,18 +862,22 @@ def _h_seerr_request_create(integration, tool, args, ctx):
     return raw
 
 
-def _web_fetch_request_summary(host, path, max_chars, parsed):
+def _web_fetch_request_summary(host, path, max_chars, parsed, requested_max_chars=None):
     """Audit-safe request shape: never store query values (they may carry
     household data) or a full URL."""
     payload = {'host': host or '', 'path': path or '', 'max_chars': max_chars,
                'query_present': bool(getattr(parsed, 'query', ''))}
+    if requested_max_chars is not None:
+        # A legacy client may still send the removed max_chars argument; keep
+        # it in the audit trail so a short result is explainable.
+        payload['requested_max_chars'] = requested_max_chars
     return json.dumps(payload, separators=(',', ':'))
 
 
 def _h_web_fetch(integration, tool, args, ctx):
     """Mediated outbound fetch. The allow/deny check runs before DNS; SSRF,
     redirects, size and content-type enforcement live in core.web_fetch."""
-    from core.web_fetch import WebFetchError, build_envelope, clamp_max_chars, fetch
+    from core.web_fetch import MAX_CHARS_DEFAULT, WebFetchError, build_envelope, fetch
     from core.web_fetch_limit import acquire, release
     from core.web_fetch_policy import UrlError, parse_url
     from db.integrations import record_integration_call
@@ -884,7 +888,8 @@ def _h_web_fetch(integration, tool, args, ctx):
     principal = ctx.get('agent') or ''
     integration_name = (integration or {}).get('name') or 'web'
     url = args.get('url') or ''
-    max_chars = clamp_max_chars(args.get('max_chars'))
+    requested_max_chars = args.get('max_chars')
+    max_chars = MAX_CHARS_DEFAULT
     started = time.time()
 
     try:
@@ -907,7 +912,8 @@ def _h_web_fetch(integration, tool, args, ctx):
             session_id=ctx.get('session_id', ''),
             execution_id=ctx.get('execution_id', ''),
             reason=ctx.get('reason', ''),
-            request_summary=_web_fetch_request_summary(host, path, max_chars, requested),
+            request_summary=_web_fetch_request_summary(
+                host, path, max_chars, requested, requested_max_chars),
             host=host,
             resolved_ips=','.join(resolved_ips or []),
             reason_code=code,
@@ -937,7 +943,7 @@ def _h_web_fetch(integration, tool, args, ctx):
                     host=getattr(requested, 'host', ''),
                     path=getattr(requested, 'path', ''))
     try:
-        result = fetch(url, policy, max_chars)
+        result = fetch(url, policy)
     except WebFetchError as e:
         outcome = 'denied' if e.is_final else 'error'
         audit(outcome, e.code, host=e.host or getattr(requested, 'host', ''),
