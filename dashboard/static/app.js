@@ -747,6 +747,7 @@ function formatNextRun(date) {
 async function fetchWindowsTable() {
   try {
     var r = await fetch('/api/approved-windows'); var wins = await r.json();
+    updateHudSummaries({ windows: wins });
     var gwMap = {};
     try { var gr = await fetch('/api/gateways'); (await gr.json()).forEach(function(g) { gwMap[g.ip] = g; }); } catch(e) {}
     var tbody = document.getElementById('windows-table-body');
@@ -1387,6 +1388,50 @@ function onRequestSearch() {
   _requestSearchQuery = document.getElementById('request-search').value.trim();
   fetchRequests();
 }
+/* The page headers used to print invented telemetry: "1,204 crossings this
+   week", "15/16 online · 1 overriding · 0 pending", "3 open · next 03:00 UTC".
+   Those were literals in index.html, never written by any code path — on a real
+   dataset they claimed 0 pending while five requests were waiting. Every summary
+   now comes from the data already in memory, and says nothing when it has none. */
+function updateHudSummaries(opts) {
+  opts = opts || {};
+  var now = Math.floor(Date.now() / 1000);
+  var reqs = (typeof requestsData !== 'undefined' && requestsData) || [];
+
+  var hist = document.getElementById('history-hud-sum');
+  if (hist) {
+    var week = reqs.filter(function(r){ return r.created_at && (now - r.created_at) <= 7*86400 && (now - r.created_at) >= 0; }).length;
+    hist.innerHTML = '<span><span class="n">' + week.toLocaleString() + '</span> crossing' + (week === 1 ? '' : 's') + ' this week</span>';
+  }
+
+  var gws = _gatewaysData || _allGateways || [];
+  var gwEl = document.getElementById('gateways-hud-sum');
+  if (gwEl && gws.length) {
+    var online = gws.filter(function(g){ return gwIsOnline(g); }).length;
+    var ovr = gws.filter(function(g){ return (g.override_remaining || 0) > 0; }).length;
+    var pend = reqs.filter(function(r){ return r.status === 'pending'; }).length;
+    gwEl.innerHTML = '<span><span class="n">' + online + '/' + gws.length + '</span> online</span>' +
+      (ovr ? '<span><span class="o">' + ovr + '</span> overriding</span>' : '') +
+      '<span><span class="p">' + pend + '</span> pending</span>';
+  }
+
+  var winEl = document.getElementById('windows-hud-sum');
+  var wins = opts.windows || window._windowsCache;
+  if (winEl && wins) {
+    window._windowsCache = wins;
+    var open = wins.filter(function(w){ return w.enabled; }).length;
+    var next = null;
+    wins.forEach(function(w){
+      if (!w.enabled) return;
+      var d = (Number(w.days_of_week) || Number(w.execution_time)) ? computeNextRun(Number(w.days_of_week)||0, Number(w.execution_time)||0)
+              : (Number(w.window_start) && Number(w.window_start)*1000 > Date.now() ? new Date(Number(w.window_start)*1000) : null);
+      if (d && (!next || d < next)) next = d;
+    });
+    winEl.innerHTML = '<span><span class="n">' + open + '</span> open</span>' +
+      (next ? '<span>next <span class="n">' + formatNextRun(next) + '</span></span>' : '');
+  }
+}
+
 async function fetchRequests() {
   try {
     let url = '/api/requests';
@@ -1396,6 +1441,7 @@ async function fetchRequests() {
     const data = await res.json();
     detectNewJITs(data);
     requestsData = data;
+    updateHudSummaries();
     // Also load AI-initiated window requests awaiting approval
     try {
       const wrRes = await fetch('/api/window-requests/pending');
@@ -1534,12 +1580,30 @@ function emptyStateSignature() {
 }
 
 // ── Constellation starfield (replaces the radar) ────────────────────────
+/* Star charts, not doodles.
+   Coordinates are projected from real equatorial positions (RA hours, Dec degrees):
+   x = -RA·15·cos(dec), y = dec (north up), then uniformly normalised so the longer
+   side is 1. `w`/`h` keep the true width:height ratio of each figure, which is what
+   the renderer needs to draw it without stretching. Shapes that were eyeballed
+   before (and then squashed by ASPECT and rotated at random) now read as their
+   names: Orion with a level belt, Cassiopeia's W, the Northern Cross, Vega's
+   parallelogram, the Big Dipper. */
 var CONSTELLATIONS = [
-  {name:'Orion', meaning:'the hunter', pts:[[.50,.06],[.43,.18],[.57,.18],[.46,.30],[.50,.32],[.54,.30],[.46,.52],[.56,.52]], lines:[[0,1],[0,2],[1,3],[2,5],[3,4],[4,5],[3,6],[5,7]]},
-  {name:'Ursa Major', meaning:'the great bear', pts:[[.30,.20],[.38,.16],[.46,.22],[.50,.32],[.46,.44],[.36,.54],[.26,.54]], lines:[[0,1],[1,2],[2,6],[6,0],[2,3],[3,4],[4,5],[5,6]]},
-  {name:'Cassiopeia', meaning:'the queen', pts:[[.30,.36],[.38,.28],[.48,.34],[.58,.28],[.66,.36]], lines:[[0,1],[1,2],[2,3],[3,4]]},
-  {name:'Cygnus', meaning:'the swan', pts:[[.50,.06],[.50,.18],[.50,.32],[.50,.46],[.42,.28],[.58,.28]], lines:[[0,1],[1,2],[2,3],[4,2],[2,5]]},
-  {name:'Lyra', meaning:'the lyre', pts:[[.58,.14],[.46,.30],[.52,.36],[.64,.36],[.58,.30]], lines:[[0,1],[1,2],[2,3],[3,4],[4,0],[0,2]]}
+  {name:'Orion', meaning:'the hunter', w:0.518, h:1.000,
+   pts:[[0.000,0.129],[0.383,0.183],[0.184,0.606],[0.241,0.568],[0.295,0.522],[0.094,1.000],[0.518,0.925],[0.256,0.000]],
+   lines:[[0,1],[0,2],[1,4],[2,3],[3,4],[2,5],[4,6],[7,0],[7,1]]},
+  {name:'Ursa Major', meaning:'the great bear', w:1.000, h:0.531,
+   pts:[[0.989,0.000],[1.000,0.229],[0.686,0.344],[0.556,0.202],[0.323,0.247],[0.142,0.292],[0.000,0.531]],
+   lines:[[0,1],[1,2],[2,3],[3,0],[3,4],[4,5],[5,6]]},
+  {name:'Cassiopeia', meaning:'the queen', w:1.000, h:0.544,
+   pts:[[1.000,0.344],[0.702,0.544],[0.548,0.225],[0.272,0.262],[0.000,0.000]],
+   lines:[[0,1],[1,2],[2,3],[3,4]]},
+  {name:'Cygnus', meaning:'the swan', w:0.852, h:1.000,
+   pts:[[0.054,0.000],[0.271,0.290],[0.852,1.000],[0.000,0.653],[0.691,0.009]],
+   lines:[[0,1],[1,2],[1,3],[1,4]]},
+  {name:'Lyra', meaning:'the lyre', w:0.732, h:1.000,
+   pts:[[0.732,0.000],[0.471,0.193],[0.148,0.309],[0.295,0.889],[0.000,1.000]],
+   lines:[[0,1],[0,2],[1,2],[2,4],[4,3],[3,1]]}
 ];
 var LAYOUTS = 9, ASPECT = 0.62;
 var _layout = parseInt(sessionStorage.getItem('eshu_layout') || '-1', 10);
@@ -1550,7 +1614,11 @@ function fitSafe(pts,x0,x1,y0,y1){
   var mnx=1e9,mxx=-1e9,mny=1e9,mxy=-1e9;
   pts.forEach(function(p){mnx=Math.min(mnx,p.x);mxx=Math.max(mxx,p.x);mny=Math.min(mny,p.y);mxy=Math.max(mxy,p.y);});
   if(mnx>=x0&&mxx<=x1&&mny>=y0&&mxy<=y1) return pts;
-  var s=Math.min((x1-x0)/Math.max(mxx-mnx,1),(y1-y0)/Math.max(mxy-mny,1));
+  /* Shrink to fit if the figure is too big — never stretch it to fill the box.
+     The old version used a plain fit-to-bounds ratio, which upscaled any figure
+     that merely sat too low, so a 561px constellation was drawn at 776px and
+     ended up wider than the canvas. */
+  var s=Math.min(1, Math.min((x1-x0)/Math.max(mxx-mnx,1),(y1-y0)/Math.max(mxy-mny,1)));
   var ncx=(x0+x1)/2, ncy=(y0+y1)/2, cxs=(mnx+mxx)/2, cys=(mny+mxy)/2;
   return pts.map(function(p){return {x:ncx+(p.x-cxs)*s, y:ncy+(p.y-cys)*s};});
 }
@@ -1612,22 +1680,39 @@ function buildStarfield(layoutIdx){
   var pendingSet={};
   (requestsData||[]).forEach(function(r){ if(r.status==='pending'){ var k=r.hostname||r.target_ip; if(k) pendingSet[k]=true; } });
   var N=gws.length;
-  var minStars=Math.max(16,N);
-  var shuffled=shuffleArr(CONSTELLATIONS.slice(), R);
-  var chosen=[], total=0;
-  for(var c=0;c<shuffled.length&&total<minStars;c++){ chosen.push(shuffled[c]); total+=shuffled[c].pts.length; }
+  /* The fleet is *one* constellation, not a sky full of them.
+     Pick the smallest figure that can hold every gateway, so the chart has a
+     name and a shape a person can actually recognise — 6 nodes → the Big
+     Dipper. Extra figures only appear once the fleet outgrows the sky. */
+  var sorted=CONSTELLATIONS.slice().sort(function(a,b){return a.pts.length-b.pts.length;});
+  var chosen=[], capacity=0, fit=null;
+  for(var c=0;c<sorted.length;c++){ if(sorted[c].pts.length>=N){ fit=sorted[c]; break; } }
+  if(fit){ chosen=[fit]; }
+  else {
+    for(var d=sorted.length-1;d>=0;d--){ chosen.push(sorted[d]); capacity+=sorted[d].pts.length; if(capacity>=N) break; }
+  }
+  // shuffle only the order of multi-figure sets so layouts vary between visits
+  if(chosen.length>1) chosen=shuffleArr(chosen, R);
   _activeConstellations = chosen.map(function(c){ return c.name; });
+  /* Work in pixels: the sky is ~2.6:1, so anything expressed as raw percentages
+     gets squashed vertically by 2.6 and no longer looks like a constellation. */
+  var W=sky.clientWidth||1200, H=sky.clientHeight||520;
+  svg.setAttribute('viewBox','0 0 '+W+' '+H);
   var pts=[], groups=[], ptConst=[];
-  chosen.forEach(function(cons){
-    var ang=(R()-0.5)*0.9, cos=Math.cos(ang), sin=Math.sin(ang);
-    var scale=0.62+R()*0.75;
-    var cx=0.16+R()*0.68, cy=0.20+R()*0.55;
-    var raw=cons.pts.map(function(p){
-      var dx=p[0]-0.5, dy=p[1]-0.5;
-      var rx=dx*cos-dy*sin, ry=dx*sin+dy*cos;
-      return {x:(cx+rx*scale)*100, y:(cy+ry*scale*ASPECT)*100};
-    });
-    var fp=fitSafe(raw, 9, 91, 13, 87);
+  /* One column per figure — overlapping constellations produce a web of
+     crossing lines that reads as no constellation at all. */
+  var slotW=(W-88)/Math.max(chosen.length,1);
+  chosen.forEach(function(cons,idx){
+    var s=chosen.length===1
+      ? Math.min((W*0.46)/cons.w,(H*0.82)/cons.h)
+      : Math.min((slotW*0.72)/cons.w,(H*0.46)/cons.h);
+    var hw=cons.w*s/2, hh=cons.h*s/2;
+    var cx=44+slotW*(idx+0.5)+(R()-0.5)*slotW*0.08;
+    var cy=H*0.48+(R()-0.5)*H*0.10;
+    cx=Math.min(Math.max(cx,44+hw),Math.max(44+hw,W-44-hw));
+    cy=Math.min(Math.max(cy,26+hh),Math.max(26+hh,H-30-hh));
+    var raw=cons.pts.map(function(p){ return {x:cx+(p[0]-0.5)*s, y:cy+(p[1]-0.5)*s}; });
+    var fp=fitSafe(raw, 44, W-44, 26, H-30);
     var base=pts.length;
     fp.forEach(function(p){ pts.push(p); ptConst.push(cons.name); });
     var glines=cons.lines.map(function(ln){ var a=pts[base+ln[0]], b=pts[base+ln[1]]; return [a.x,a.y,b.x,b.y]; });
@@ -1651,14 +1736,23 @@ function buildStarfield(layoutIdx){
       var isPending=!!pendingSet[g.hostname||g.ip];
       var isOverridden=(g.override_remaining||0)>0;
       var cls=isOverridden?'overridden':(isPending?'pending':(isOnline?'':(g.updating?'updating':'offline')));
-      placeGatewayNode(g, p.x, p.y, cls, ptConst[pi]);
+      placeGatewayNode(g, p.x/W*100, p.y/H*100, cls, ptConst[pi]);
       used[pi]=true;
     }
   });
-  pts.forEach(function(p,pi){ if(used[pi]) return; var s=document.createElement('span'); s.className='field-star'; s.style.left=p.x.toFixed(1)+'%'; s.style.top=p.y.toFixed(1)+'%'; sky.appendChild(s); });
+  pts.forEach(function(p,pi){ if(used[pi]) return; var s=document.createElement('span'); s.className='field-star'; s.style.left=(p.x/W*100).toFixed(2)+'%'; s.style.top=(p.y/H*100).toFixed(2)+'%'; sky.appendChild(s); });
 }
 
 var _activeConst=null;
+/* The constellation is laid out in pixels, so a viewport change needs a redraw
+   or the figures stretch. Debounced; cheap (no network, ~20 elements). */
+var _skyResizeT=null;
+window.addEventListener('resize', function(){
+  clearTimeout(_skyResizeT);
+  _skyResizeT=setTimeout(function(){
+    if(document.getElementById('sky')) buildStarfield(_layout);
+  }, 250);
+});
 function selectConstellation(name){
   if(_activeConst===name) name=null;
   _activeConst=name;
@@ -1835,12 +1929,14 @@ function renderDeck(items) {
 function updateDeckFocus() {
   var sc = document.getElementById('jit-deck-scroll');
   if (!sc) return;
-  var center = sc.scrollLeft + sc.clientWidth / 2;
+  /* A queue is not a carousel. This used to fade every off-centre card to 28%
+     opacity and push it 16px down — the deck was the main reason the Command
+     Center read as "washed out", and it dimmed the very cards that still
+     needed a decision. Cards now stay at full contrast; scroll position is
+     carried by the scrollbar and the snap, not by opacity. */
   sc.querySelectorAll('.jit-ticket').forEach(function(card) {
-    var c = card.offsetLeft + card.offsetWidth / 2;
-    var d = Math.min(1, Math.abs(c - center) / (sc.clientWidth / 2 + 40));
-    card.style.opacity = (1 - d * 0.72).toFixed(2);
-    card.style.transform = 'translateY(' + (d * 16).toFixed(1) + 'px) scale(' + (1 - d * 0.05).toFixed(3) + ')';
+    if (card.style.opacity) card.style.opacity = '';
+    if (card.style.transform) card.style.transform = '';
   });
 }
 
@@ -2548,7 +2644,7 @@ function renderJitItem(item) {
       if (r.anomaly) riskHtml += '<div style="color:var(--danger);font-size:10px;margin-top:4px"> ' + escapeHtml(r.anomaly) + '</div>';
       return '<div class="jit-ticket' + (r.anomaly ? ' urgent' : '') + '" data-id="' + r.id + '" onclick="openContextPanel(\'' + r.id + '\')">' +
         '<div class="jit-check" onclick="event.stopPropagation();toggleBulkSelect(\'' + r.id + '\',event)"></div>' +
-        '<div style="flex:1;min-width:0">' +
+        '<div class="jit-body" style="min-width:0">' +
           '<div class="jit-human">' + escapeHtml(human || 'Command request') + '</div>' +
           '<div class="jit-cmd-text">' + escapeHtml(r.command) + '</div>' +
           '<div class="jit-meta">' +
@@ -2870,7 +2966,10 @@ function restoreExpandedDescs() {
 function decrementTimers() {
   document.querySelectorAll('.ttl-countdown').forEach(function(el) {
     let ttl = parseInt(el.getAttribute('data-ttl'));
-    if (ttl > 0) { ttl--; el.setAttribute('data-ttl', ttl); el.innerText = ttl + 's'; } else fetchRequests();
+    if (ttl > 0) { ttl--; el.setAttribute('data-ttl', ttl); el.innerText = ttl + 's'; }
+    else fetchRequests();
+    // red is for the last stretch, not for the whole life of the request
+    el.classList.toggle('urgent-ttl', ttl > 0 && ttl <= 15);
   });
   checkOverrideBanner();
   tickGatewayTableCountdowns();
@@ -3151,6 +3250,7 @@ async function fetchCmdDescs() {
 async function fetchGateways() {
   const res = await fetch('/api/gateways'); const data = await res.json();
   _gatewaysData = data;
+  updateHudSummaries();
   var clientNow = Math.floor(Date.now() / 1000);
   data.forEach(function(g) {
     if ((g.override_remaining || 0) > 0) {
@@ -3617,9 +3717,14 @@ function drawFleetTargets() {
     var online = g.online !== false;
     return '<div class="trow' + (checked ? ' checked' : '') + (online ? '' : ' disabled') + '" data-ip="' + g.ip + '">' +
       '<span class="tchk"></span>' +
-      '<span class="tname">' + escapeHtml(g.hostname || g.ip) + '</span>' +
-      '<span class="tip">' + g.ip + '</span>' +
-      (online ? '' : '<span class="hint">offline</span>') + '</div>';
+      /* hostname first, IP beneath it: the rail is 240px wide and the IP used to
+         win the space fight, clipping every hostname down to one letter. */
+      '<span class="tsum"><span class="trow-name">' +
+        '<span class="nm tname">' + escapeHtml(g.hostname || g.ip) + '</span>' +
+        (online ? '' : '<em class="off">offline</em>') +
+      '</span>' +
+      '<span class="tip">' + g.ip + '</span></span>' +
+      '</div>';
   }).join('');
   list.querySelectorAll('.trow').forEach(function (row) {
     row.addEventListener('click', function () {
@@ -4737,6 +4842,9 @@ function renderAuditLog() {
     var date = d.toLocaleDateString([], { month:'short', day:'numeric' });
     var gw = l.hostname || l.gateway_ip || '';
     var details = l.details ? escapeHtml(String(l.details)) : '';
+    /* Audit rows said "Last seen 691233s ago" while every other screen said
+       "8d ago" for the same fact. One phrasing, everywhere. */
+    details = details.replace(/Last seen (\d+)s ago/, function(_, n){ return 'Last seen ' + formatAgo(parseInt(n, 10)); });
     var row = '<tr class="log-row" data-aid="' + id + '" onclick="toggleAuditDetail(' + id + ')">' +
       '<td><span class="log-expand">&#9656;</span></td>' +
       '<td><div class="log-time">' + time + '</div><div class="log-date">' + date + '</div></td>' +
