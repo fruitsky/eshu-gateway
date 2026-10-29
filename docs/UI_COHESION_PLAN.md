@@ -209,18 +209,46 @@ what you open the page for — starts below the fold on smaller laptops.
 
 ### P2 — system and craft
 
-**2.8 The stylesheet is two stylesheets**
+**2.8 The stylesheet is two stylesheets** — ✅ mostly shipped
 
-2,849 lines: 1,159 of base rules, then a 1,690-line override layer (59% of the
-file) carrying **136 `!important`**. `.widget-header` alone accumulates seven.
-Consequences show up as 119 distinct paddings, 28 radii and 196 rgba values.
+Was: 1,159 lines of base rules plus a 1,690-line override layer (59% of the
+file) carrying **136 `!important` occurrences across 60 rules**. Three
+generations of the same selector were held in line only by the flag —
+`.widget` was defined three times, `.login-card` three times, the form
+controls three times, `thead th` three times.
 
-- Do (in stages, view by view): fold the override layer into the base rules,
-  delete the dead generations (`.cc-radar*` ~20 rules with no markup,
-  `.view-title` styled and unused), then re-introduce the token scale
-  (`--space-*` is used 7 times, `--text-*` 21 times, against 200+ literals).
-- Target: < 10 `!important`, one 8px grid, three radii, one amber alpha ramp.
-- Done: `grep -c '!important' style.css` under 10 and no visual diff.
+Done on this branch, by measurement rather than by eye:
+
+1. A **computed-style snapshot harness** (`/tmp/opencode/pw/snapshot.py`)
+   records 30 computed properties for every element on all 10 views plus the
+   login screen, at 1440×900 and 390×844 (2,200–3,150 elements per view). Dust
+   stars are seeded so the diff is deterministic.
+2. An **`!important` audit** flips each flag off in the live CSSOM and re-reads
+   computed styles, classifying every rule as *load-bearing* or *safe*.
+3. Safe flags removed; load-bearing conflicts resolved properly — merged into a
+   single declaration, out-specified (`.select-actions.btn-muted`, `.panel
+   .uninstall-confirm-input`, `.widget.dropdown-menu`), or moved after the rule
+   they were shadowing.
+
+Result: **3 `!important` rules remain, each deliberate and commented** —
+`.hidden` (utility), `tbody tr:nth-child(even)` (zebra must beat row states),
+and the `prefers-reduced-motion` reset.
+
+The refactor is verifiably pixel-equivalent: 0 computed-style diffs on desktop,
+and on mobile only two *intended* restorations — the tables render at the
+11px the 480px breakpoint always asked for (a global `13px !important` was
+overriding it), and the uninstall confirmation field finally shows the
+`--danger` border its rule always intended (it lost to a more specific
+`input[type=text]` rule).
+
+Still open here:
+
+- 119 distinct paddings, 28 radii, 196 rgba values — the token scale exists
+  (`--space-*`, `--text-*`) but is used sparingly. Next step is replacing
+  literals with tokens view by view, again snapshot-verified.
+- Dead generations: `.cc-radar*` (~20 rules, no markup since the constellation
+  replaced the radar), `.view-title` / `.view-head*` / `.view-eyebrow`
+  (styled, never emitted), `.jit-ticket-*` from the old ticket layout.
 
 **2.9 Glow inflation**
 
@@ -242,11 +270,17 @@ needs a human" channel is spent on the logo.
   state transition. Keep `prefers-reduced-motion` (already global).
 - Done: at most one animated element when nothing is pending.
 
-**2.11 Naming drift in the tokens**
+**2.11 Naming drift in the tokens** — ✅ shipped
 
-`--brand-red: #f59e0b` (no red anywhere), `--ice` used for star colour,
-`--primary` = accent, `--status-success` now aliases `--state-approved`.
-Rename to roles before the next layer lands.
+Was: `--brand-red: #f59e0b` (no red anywhere), `--primary` and `--accent` were
+the same colour declared twice, `--fg`/`--text-main` and `--bg`/`--bg-base` were
+duplicate pairs, `--ice` was the star colour, `--on-primary` was just the page
+background.
+
+Now: `--accent` / `--accent-hover` / `--accent-glow`, `--text-main` /
+`--text-dim` / `--text-muted` / `--text-faint`, `--star`, and the state ramp
+`--state-pending|approved|auto|blocked|denied`. The aliases are gone; 0 uses of
+the old names remain. Snapshot-verified no-op.
 
 **2.12 Accessibility** — 🟡 partially shipped
 
@@ -289,6 +323,30 @@ horizontal scroll with no affordance, and `Freeze` sits below the fold.
 ---
 
 ## 3. How this was verified
+
+### Computed-style regression harness
+
+For CSS-only work, screenshots are too coarse and eyeballing is not evidence.
+`snapshot.py` walks every element on every view and records 30 computed
+properties (colour, border, font, spacing, size, transform, shadow, opacity),
+keyed by a DOM path; `diffsnap.py` reports any element/property that moved.
+`Math.random` is seeded before load so the procedural starfield is identical
+between runs.
+
+Method for any no-visual-change refactor:
+
+```
+python3 snapshot.py baseline.json          # before
+# …edit the CSS…
+python3 snapshot.py after.json
+python3 diffsnap.py baseline.json after.json   # expect TOTAL PROPERTY DIFFS: 0
+```
+
+For `!important` work specifically, `audit_important.py` toggles each flag off
+in the live CSSOM and checks whether any computed value moves — that is what
+separates "load-bearing" from "someone was afraid of the cascade".
+
+
 
 ```
 # throwaway copy, never the repo DB
