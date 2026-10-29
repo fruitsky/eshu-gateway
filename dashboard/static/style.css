@@ -1634,27 +1634,7 @@ textarea { font-family: 'JetBrains Mono', monospace; }
   .jit-history-cmd { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .jit-history-time { flex-shrink: 0; font-size: 11px; opacity: 0.8; }
 
-  /* ── Radar node flash (auto-approved / blocked) ──────────── */
-  .cc-radar-node { transition: filter 0.15s, transform 0.15s; }
-  .cc-radar-node.flash-auto {
-    filter: brightness(3) drop-shadow(0 0 14px rgba(245,158,11,0.9));
-    transform: translate(-50%, -50%) scale(1.6);
-    animation: cc-node-flash-auto 1.2s ease forwards;
-  }
-  .cc-radar-node.flash-blocked {
-    filter: brightness(3) drop-shadow(0 0 14px rgba(220,38,38,0.9));
-    transform: translate(-50%, -50%) scale(1.6);
-    animation: cc-node-flash-blocked 1.2s ease forwards;
-  }
-  @keyframes cc-node-flash-auto {
-    0% { filter: brightness(3) drop-shadow(0 0 14px rgba(245,158,11,0.9)); transform: translate(-50%,-50%) scale(1.6); }
-    100% { filter: brightness(1) drop-shadow(0 0 0 transparent); transform: translate(-50%,-50%) scale(1); }
-  }
-  @keyframes cc-node-flash-blocked {
-    0% { filter: brightness(3) drop-shadow(0 0 14px rgba(220,38,38,0.9)); transform: translate(-50%,-50%) scale(1.6); }
-    50% { filter: brightness(2) drop-shadow(0 0 8px rgba(220,38,38,0.5)); transform: translate(-50%,-50%) scale(1.2); }
-    100% { filter: brightness(1) drop-shadow(0 0 0 transparent); transform: translate(-50%,-50%) scale(1); }
-  }
+
 
   /* ── Recent Sessions panel (below radar) ─────────────────── */
   .cc-recent-sessions { width: 680px; max-width: 680px; margin: 8px auto 0; align-self: center; }
