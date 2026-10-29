@@ -65,12 +65,20 @@ fi
 # "active": with Restart=always, systemd reports active again before uvicorn
 # has bound the socket, so a single check ~1s in reported owner=none on every
 # deploy even though the service came up fine a moment later.
+state="$(systemctl is-active "$SERVICE" || true)"
+new="$(mainpid)"
+owner="$(port_owner)"
 for _ in $(seq 1 20); do
   sleep 1
-  state="$(systemctl is-active "$SERVICE")"
+  state="$(systemctl is-active "$SERVICE" || true)"
   new="$(mainpid)"
   owner="$(port_owner)"
-  [ "$state" = "active" ] && [ -n "$owner" ] && [ "$owner" != "0" ] && [ "$owner" = "$new" ] && break
+  # An `if`, not `[ … ] && break`: under `set -e` a short-circuiting AND-list is
+  # the loop body's last command, so the loop exits on the first "not yet"
+  # instead of retrying.
+  if [ "$state" = "active" ] && [ -n "$owner" ] && [ "$owner" != "0" ] && [ "$owner" = "$new" ]; then
+    break
+  fi
 done
 
 echo "unit: $state   MainPID: $new   :$PORT owner: ${owner:-none}"
