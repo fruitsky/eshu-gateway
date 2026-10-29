@@ -117,22 +117,24 @@ it's done.
 
 ### P0 — trust and comprehension
 
-**2.1 Gateway health is colour-only and unlabelled**
+**2.1 Gateway health is colour-only and unlabelled** — ✅ shipped
 
-Three or four dots per row, red/green, `title` absent, no legend anywhere.
-Colour-blind operators and anyone new to the screen cannot decode them.
+Was: four identical `⬤` glyphs per row, green or red, meaning carried only by
+colour and a `title` tooltip, with no legend on the page.
 
-- Do: a legend in the widget header (● poller · ● gateway · ● reachability),
-  plus `aria-label`/`title` per dot and a text summary in the expanded row.
-- Done: every dot has a text equivalent; the legend is visible without hover.
+Now: **filled `●` = ok, hollow `○` = failed** (shape carries the answer,
+colour reinforces it), each dot has `role="img"` + `aria-label`, the row
+carries a summary (`Health: poller ok, gateway ok, reachability failed, token
+ok`), and the column header spells out the order: `poller · gateway · reach ·
+token`.
 
-**2.2 The `!` glyph before a command**
+**2.2 The `!` glyph before a command** — ✅ shipped
 
-History rows prefix some commands with `!` and nothing explains it. Either it
-means something (anomaly? blocklisted?) or it is decoration.
+Was: *two different facts* — a risk note and "first time this gateway runs X" —
+rendered as the same `!`, told apart only by hovering.
 
-- Do: replace with a labelled chip (`anomaly` / `risky`) or remove.
-- Done: no unexplained glyphs in the table.
+Now: risk keeps `!` (`aria-label="Risk: …"`), the anomaly is a small `new`
+chip, and both are announced.
 
 **2.3 Audit log is a wall of red**
 
@@ -250,25 +252,30 @@ Still open here:
   replaced the radar), `.view-title` / `.view-head*` / `.view-eyebrow`
   (styled, never emitted), `.jit-ticket-*` from the old ticket layout.
 
-**2.9 Glow inflation**
+**2.9 Glow inflation** — ✅ shipped
 
-Amber glow on hover of every button, stat card, widget header (`text-shadow:
-0 0 20px`), page title (`0 0 24px`) and the selected ticket. When everything
-glows, glow stops meaning "act here".
+Was: amber bloom on hover of every button, stat card and session card, plus
+`text-shadow` on every heading, KPI number, HUD line and the login title —
+18 text-shadow declarations across the stylesheet.
 
-- Do: glow for the selected ticket and the freeze/alert state only; hover =
-  border-colour shift.
-- Done: two glowing elements max on any screen.
+Now: **no text glow anywhere.** Glow is reserved for things that emit light in
+the metaphor — constellation stars and nodes, the freeze/override banners, the
+transient approve/deny flash — and hover/selection is carried by border colour.
+1,137 box/text-shadow declarations removed across the 12 rendered states
+(snapshot-verified: 0 non-shadow computed changes).
 
-**2.10 Motion has no signal value**
+**2.10 Motion has no signal value** — ✅ shipped
 
-39 `@keyframes`, six or more infinite ambient pulses (three health pulses, the
-sidebar edge, TTL, override), a 42s ticker, a radar sweep. The eye's "something
-needs a human" channel is spent on the logo.
+Was: ambient infinite pulses on health dots, connection dots, fleet run dots,
+status dots, the mobile-menu edge, plus a radar sweep and a 42s ticker. On an
+idle screen roughly a dozen things moved.
 
-- Do: pulse only for pending requests and freeze; everything else one 120ms
-  state transition. Keep `prefers-reduced-motion` (already global).
-- Done: at most one animated element when nothing is pending.
+Now, infinite motion is limited to signals that need a human or are content:
+**a pending request's node pulses**, the TTL goes red and pulses only in its
+final 15s, freeze/override banners pulse, a progress bar animates while work is
+in flight, the ticker scrolls (it is content), stars twinkle. Static presence
+(green health dot, connected dot, running dot) no longer beats.
+`prefers-reduced-motion` still wins globally.
 
 **2.11 Naming drift in the tokens** — ✅ shipped
 
@@ -282,16 +289,22 @@ Now: `--accent` / `--accent-hover` / `--accent-glow`, `--text-main` /
 `--state-pending|approved|auto|blocked|denied`. The aliases are gone; 0 uses of
 the old names remain. Snapshot-verified no-op.
 
-**2.12 Accessibility** — 🟡 partially shipped
+**2.12 Accessibility** — ✅ shipped for the interactive surface
 
 Zero `aria-*` attributes in 1,269 lines of markup. `.stat-card` (the History
 filters) and `.gw-node` (the constellation nodes) are `<div onclick>` — not
 focusable, not announced. Keyboard hints exist (`F`, `O`, `C`) but the queue
 itself was mouse-only.
 
-Done with 2.4: queue rows are `role="button" tabindex="0"`, Enter/Space opens
-them, and `↑`/`↓`/`j`/`k` + `Enter` drive the queue. Still open: everything
-else listed above.
+Shipped: `.stat-card` filters and `.gw-node` nodes are `role="button"
+tabindex="0"` with Enter/Space and `aria-label`/`aria-pressed`; the bulk-select
+square is a real `<button role="checkbox" aria-checked>`; nav items carry
+`aria-current="page"`; the content area is a `<main>` landmark; icon-only
+buttons (`×`, `↻`, mobile menu) are labelled; the toast is
+`role="status" aria-live="polite"`.
+
+Still open: `aria-expanded` on the request panel and session cards, and a
+proper focus trap in modals (Escape closes, but Tab can leave the dialog).
 
 - Do: `role="button" tabindex="0"` + Enter/Space on clickable divs; `aria-label`
   on icon-only buttons (`×`, `↻`); `aria-live="polite"` on the pending count.
@@ -307,6 +320,12 @@ horizontal scroll with no affordance, and `Freeze` sits below the fold.
   or a horizontal-scroll shadow, Freeze pinned in the header.
 
 **2.14 Small things worth a sweep**
+
+- `GET /api/web-fetch-policies/household` returns 404 when no policy exists
+  yet, and the Controls view logs a console error on every visit. The UI
+  already handles it (`No policy yet — save one to enable`); the endpoint could
+  return an empty policy instead, or the client could stop treating an expected
+  miss as an error.
 
 - Login: visible banding in the sky gradient (add a noise/dither layer or a
   smoother ramp), and the logo's red art is the only red in the product before

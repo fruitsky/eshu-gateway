@@ -26,7 +26,7 @@
 <div class="glitch" id="glitch"></div>
 
 <!-- Toast -->
-<div id="toast" class="hidden fixed top-4 left-1/2 transform -translate-x-1/2 z-50 px-6 py-3 rounded-lg text-sm font-medium shadow-lg toast"></div>
+<div id="toast" role="status" aria-live="polite" class="hidden fixed top-4 left-1/2 transform -translate-x-1/2 z-50 px-6 py-3 rounded-lg text-sm font-medium shadow-lg toast"></div>
 
 <!-- First-Run Setup Overlay -->
 <div id="setup-overlay" class="hidden login-overlay">
@@ -59,11 +59,11 @@
 </div>
 
 <!-- Mobile menu button -->
-<button class="mobile-menu-btn" id="mobile-menu-btn" onclick="toggleMobileSidebar()"></button>
+<button class="mobile-menu-btn" id="mobile-menu-btn" onclick="toggleMobileSidebar()" aria-label="Toggle navigation"></button>
 <div class="sidebar-overlay" id="sidebar-overlay" onclick="toggleMobileSidebar()"></div>
 
 <!-- ── Sidebar ─────────────────────────────────────────────────── -->
-<aside class="sidebar" id="main-sidebar" style="display:none;">
+<aside class="sidebar" id="main-sidebar" style="display:none;" aria-label="Sections">
   <div class="sidebar-brand">
     <div class="sidebar-brand-logo"><img src="/static/eshu_logo.png" alt="Eshu"></div>
     <div class="sidebar-brand-text">
@@ -102,7 +102,7 @@
 </aside>
 
 <!-- Main Content -->
-<div class="main-content" id="main-content" style="display:none;">
+<main class="main-content" id="main-content" style="display:none;" aria-label="Dashboard">
   <!-- Override Mode Banner -->
   <div id="override-banner" class="override-banner hidden">
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="flex-shrink-0"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
@@ -161,7 +161,7 @@
         <div class="cc-context collapsed" id="cc-context">
           <div class="cc-context-header">
             <span>Request Details</span>
-            <button onclick="closeContextPanel()" class="btn btn-muted btn-xs" style="padding:2px 6px">&times;</button>
+            <button onclick="closeContextPanel()" class="btn btn-muted btn-xs" style="padding:2px 6px" aria-label="Close request details">&times;</button>
           </div>
           <div class="cc-context-body" id="cc-context-body">
             <div class="cc-context-empty" id="cc-context-empty">
@@ -214,23 +214,23 @@
       <!-- SSH Commands panel -->
       <div id="history-ssh-panel">
         <div class="stat-row" style="margin-bottom:12px">
-          <div class="stat-card" onclick="toggleFilter('pending')" id="box-pending">
+          <div class="stat-card" role="button" tabindex="0" aria-pressed="false" aria-label="Expired: filter the table" onclick="toggleFilter('pending')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleFilter('pending');}" id="box-pending">
             <span class="stat-value stat-pending" id="stat-pending">0</span>
             <span class="stat-label">Expired</span>
           </div>
-          <div class="stat-card" onclick="toggleFilter('approved')" id="box-approved">
+          <div class="stat-card" role="button" tabindex="0" aria-pressed="false" aria-label="Approved: filter the table" onclick="toggleFilter('approved')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleFilter('approved');}" id="box-approved">
             <span class="stat-value stat-approved" id="stat-approved">0</span>
             <span class="stat-label">Approved</span>
           </div>
-          <div class="stat-card" onclick="toggleFilter('auto-approved')" id="box-auto">
+          <div class="stat-card" role="button" tabindex="0" aria-pressed="false" aria-label="Auto-Approved: filter the table" onclick="toggleFilter('auto-approved')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleFilter('auto-approved');}" id="box-auto">
             <span class="stat-value stat-auto" id="stat-auto">0</span>
             <span class="stat-label">Auto-Approved</span>
           </div>
-          <div class="stat-card" onclick="toggleFilter('blocked')" id="box-blocked">
+          <div class="stat-card" role="button" tabindex="0" aria-pressed="false" aria-label="Blocked: filter the table" onclick="toggleFilter('blocked')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleFilter('blocked');}" id="box-blocked">
             <span class="stat-value stat-blocked" id="stat-blocked">0</span>
             <span class="stat-label">Blocked</span>
           </div>
-          <div class="stat-card" onclick="toggleFilter('denied')" id="box-denied">
+          <div class="stat-card" role="button" tabindex="0" aria-pressed="false" aria-label="Denied: filter the table" onclick="toggleFilter('denied')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleFilter('denied');}" id="box-denied">
             <span class="stat-value stat-denied" id="stat-denied">0</span>
             <span class="stat-label">Denied</span>
           </div>
@@ -342,7 +342,7 @@
       <div class="widget mt-5" data-od-id="gateway-table">
         <div class="widget-header">Active Gateways</div>
         <div class="table-wrap"><table>
-          <thead><tr><th>Status</th><th>Gateway</th><th>IP</th><th>Enrolled</th><th>Policy</th><th>Health</th><th>Modes</th><th class="text-right">Actions</th></tr></thead>
+          <thead><tr><th>Status</th><th>Gateway</th><th>IP</th><th>Enrolled</th><th>Policy</th><th>Health<span class="th-key">poller · gateway · reach · token</span></th><th>Modes</th><th class="text-right">Actions</th></tr></thead>
           <tbody id="gateways-table-body"><tr><td colspan="8" class="px-4 py-3 text-muted">Loading...</td></tr></tbody>
         </table></div>
       </div>
@@ -857,7 +857,7 @@
           <div class="flex items-center gap-2">
             <input type="text" id="audit-log-search" placeholder="Search..." class="text-xs w-40" oninput="onAuditLogSearch()">
             <span class="text-xs text-muted" id="audit-log-count">0 events</span>
-            <button onclick="fetchAuditLog()" class="btn btn-muted btn-xs">&#x21bb;</button>
+            <button onclick="fetchAuditLog()" class="btn btn-muted btn-xs" aria-label="Refresh audit log">&#x21bb;</button>
           </div>
         </div>
         <div class="audit-filter-bar" id="audit-filter-bar"></div>
@@ -871,7 +871,7 @@
     </div>
 
   </div>
-</div>
+</main>
 
 <script src="/static/state.js?v=ui1"></script>
 <script src="/static/app.js?v=ui1"></script>
@@ -879,7 +879,7 @@
 <!-- Create / Edit Approved Window Modal -->
 <div id="create-window-modal" class="modal-overlay hidden">
   <div class="widget w-full max-w-2xl max-h-[90vh] overflow-y-auto">
-    <div class="widget-header"><span id="win-modal-title">Create Approved Window</span> <button onclick="closeCreateWindowModal()" class="modal-close">&times;</button></div>
+    <div class="widget-header"><span id="win-modal-title">Create Approved Window</span> <button onclick="closeCreateWindowModal()" class="modal-close" aria-label="Close">&times;</button></div>
 
     <!-- Inline error -->
     <div id="win-save-error" class="hidden win-error"></div>
@@ -1038,7 +1038,7 @@
   <div class="widget max-w-md w-full">
     <div class="widget-header">
       <span>Override Mode</span>
-      <button onclick="document.getElementById('override-modal').classList.add('hidden')" class="modal-close">&times;</button>
+      <button onclick="document.getElementById('override-modal').classList.add('hidden')" class="modal-close" aria-label="Close">&times;</button>
     </div>
     <div class="mb-4">
       <label class="text-xs block mb-1 text-muted">Gateway</label>
@@ -1072,7 +1072,7 @@
   <div class="widget w-full max-w-md">
     <div class="widget-header">
       <span>Remove Gateway</span>
-      <button onclick="closeRemoveGatewayModal()" class="modal-close">&times;</button>
+      <button onclick="closeRemoveGatewayModal()" class="modal-close" aria-label="Close">&times;</button>
     </div>
     <p id="remove-gateway-name" class="text-main font-semibold mb-2"></p>
     <p id="remove-gateway-status" class="text-xs mb-3 text-muted"></p>
@@ -1113,7 +1113,7 @@
   <div class="widget w-full max-w-md">
     <div class="widget-header">
       <span id="uninstall-modal-title">Uninstalling</span>
-      <button onclick="closeUninstallModal()" class="modal-close">&times;</button>
+      <button onclick="closeUninstallModal()" class="modal-close" aria-label="Close">&times;</button>
     </div>
     <div class="mb-4">
       <label class="text-xs block mb-1 text-muted">Gateway</label>
@@ -1130,7 +1130,7 @@
 <!-- Window Usage History Modal -->
 <div id="window-history-overlay" class="modal-overlay hidden" onclick="if(event.target===this)closeModal('window-history-overlay')">
   <div class="widget w-11/12 md:w-2/3 lg:w-1/2 max-h-3/4 flex flex-col" style="max-height:75vh;">
-    <div class="widget-header">Window Usage History <button onclick="closeModal('window-history-overlay')" class="modal-close">&times;</button></div>
+    <div class="widget-header">Window Usage History <button onclick="closeModal('window-history-overlay')" class="modal-close" aria-label="Close">&times;</button></div>
     <div id="window-history-content" class="flex-1 overflow-y-auto pr-2" style="min-height:100px;"><p class="text-muted">Loading...</p></div>
   </div>
 </div>
@@ -1138,7 +1138,7 @@
 <!-- Policy Changes Modal -->
 <div id="policy-changes-modal" class="modal-overlay hidden">
   <div class="widget w-11/12 md:w-2/3 lg:w-1/2 h-3/4 flex flex-col">
-    <div class="widget-header">Recent Policy Changes <button onclick="closeModal('policy-changes-modal')" class="modal-close">&times;</button></div>
+    <div class="widget-header">Recent Policy Changes <button onclick="closeModal('policy-changes-modal')" class="modal-close" aria-label="Close">&times;</button></div>
     <div id="policy-changes-list" class="flex-1 overflow-y-auto pr-2"><p class="text-muted">Loading...</p></div>
   </div>
 </div>
@@ -1167,7 +1167,7 @@
   <div class="widget w-11/12 md:w-3/4 lg:w-2/3" style="max-height:90vh;overflow:auto;">
     <div class="widget-header">
       <span id="agent-policy-title">Agent Policy</span>
-      <button onclick="closeAgentPolicyModal()" class="modal-close">&times;</button>
+      <button onclick="closeAgentPolicyModal()" class="modal-close" aria-label="Close">&times;</button>
     </div>
     <div class="text-xs text-muted mb-3">
       Deny-by-default: an allowlisted agent can only call the checked tools. Argument rules are enforced
@@ -1230,7 +1230,7 @@
       <span id="fleet-output-modal-title" class="flex-1 truncate pr-2">Output</span>
       <div class="flex items-center gap-2">
         <button onclick="copyFleetOutputModal()" class="btn btn-muted btn-xs">Copy</button>
-        <button onclick="closeFleetOutputModal()" class="modal-close">&times;</button>
+        <button onclick="closeFleetOutputModal()" class="modal-close" aria-label="Close">&times;</button>
       </div>
     </div>
     <pre id="fleet-output-modal-pre" class="fleet-out flex-1 overflow-auto p-3 rounded text-xs bg-base" style="white-space:pre-wrap;min-height:120px;">Loading...</pre>
@@ -1243,7 +1243,7 @@
     <div class="session-modal-header">
       <div class="session-modal-title-row">
         <span class="session-modal-label">Session</span>
-        <button onclick="closeModal('session-modal')" class="modal-close">&times;</button>
+        <button onclick="closeModal('session-modal')" class="modal-close" aria-label="Close">&times;</button>
       </div>
       <div class="session-modal-name" id="sm-name" contenteditable="true" spellcheck="false" data-placeholder="Session name"></div>
       <div class="session-modal-desc" id="sm-desc" contenteditable="true" spellcheck="false" data-placeholder="Add a description..."></div>

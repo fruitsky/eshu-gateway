@@ -188,17 +188,18 @@ function toggleBulkSelect(reqId, ev) {
       var start = Math.min(from, to), end = Math.max(from, to);
       for (var i = start; i <= end; i++) {
         _ccSelectedIds.add(tickets[i].dataset.id);
-        tickets[i].querySelector('.jit-check').classList.add('checked');
+        var cb = tickets[i].querySelector('.jit-check');
+        if (cb) { cb.classList.add('checked'); cb.setAttribute('aria-checked', 'true'); }
       }
     }
   } else {
     var checkEl = (ev && ev.currentTarget) ? ev.currentTarget : null;
     if (_ccSelectedIds.has(reqId)) {
       _ccSelectedIds.delete(reqId);
-      if (checkEl) checkEl.classList.remove('checked');
+      if (checkEl) { checkEl.classList.remove('checked'); checkEl.setAttribute('aria-checked', 'false'); }
     } else {
       _ccSelectedIds.add(reqId);
-      if (checkEl) checkEl.classList.add('checked');
+      if (checkEl) { checkEl.classList.add('checked'); checkEl.setAttribute('aria-checked', 'true'); }
     }
   }
   _ccLastClicked = reqId;
@@ -391,6 +392,13 @@ async function authFetch(url, options) {
 }
 
 // ── Navigation ──────────────────────────────────────────────────────────
+function syncNavAria() {
+  document.querySelectorAll('.nav-item').forEach(function(el) {
+    var on = el.classList.contains('active');
+    if (on) el.setAttribute('aria-current', 'page'); else el.removeAttribute('aria-current');
+  });
+}
+
 async function switchView(target) {
   var winModal = document.getElementById('create-window-modal');
   if (winModal && !winModal.classList.contains('hidden') && typeof customConfirm === 'function') {
@@ -404,6 +412,7 @@ async function switchView(target) {
     var navBtn = document.getElementById('nav-' + v);
     if (navBtn) navBtn.classList.toggle('active', v === target);
   });
+  syncNavAria();
   if (target === 'gateways') { fetchGateways(); fetchEnrollData(); }
   if (target === 'history') { fetchRequests(); fetchIntegrationCalls(); }
   if (target === 'windows') { fetchWindowsTable(); }
@@ -1666,6 +1675,14 @@ function placeGatewayNode(g,x,y,cls,constName){
   var name=g.hostname||g.ip||'gw';
   n.className='gw-node '+(cls||'');
   n.setAttribute('data-name',name); n.setAttribute('data-ip', g.ip||''); n.setAttribute('data-const', constName||''); n.title=name;
+  /* the constellation is the fleet map: every node must be reachable and
+     announced, not just clickable */
+  n.setAttribute('role','button');
+  n.setAttribute('tabindex','0');
+  n.setAttribute('aria-label', name + ' \u2014 ' + (cls || 'online') + (g.ip ? ' (' + g.ip + ')' : ''));
+  n.addEventListener('keydown', function(ev){
+    if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); handleNodeClick(n); }
+  });
   n.style.left=x.toFixed(1)+'%'; n.style.top=y.toFixed(1)+'%';
   n.innerHTML='<span class="n-dot"></span><span class="n-ini">'+gwIni(name)+'</span>'+(cls==='overridden'?'<span class="n-ovr">OVR</span>':'');
   sky.appendChild(n);
@@ -2003,7 +2020,7 @@ function renderQueue(items) {
     return '<div class="ccq-row" role="button" tabindex="0" data-queue-id="' + m.domId + '" ' +
         'onclick="openContextPanel(\'' + m.domId + '\')" ' +
         'onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();openContextPanel(\'' + m.domId + '\');}">' +
-      '<span class="ccq-chk jit-check" onclick="event.stopPropagation();toggleBulkSelect(\'' + m.domId + '\',event)"></span>' +
+      '<button type="button" class="ccq-chk jit-check" role="checkbox" aria-checked="false" aria-label="Select request" onclick="event.stopPropagation();toggleBulkSelect(\'' + m.domId + '\',event)"></button>' +
       '<span class="ccq-main">' +
         '<span class="ccq-human">' + escapeHtml(m.human) + '</span>' +
         '<code class="ccq-cmd" title="' + escapeHtml(m.cmd) + '">' + escapeHtml(m.cmd) + '</code>' +
@@ -2681,7 +2698,7 @@ function renderJitItem(item) {
       var c = item.data;
       var args = Object.keys(c.payload || {}).map(function(k) { return k + '=' + c.payload[k]; }).join(', ');
       return '<div class="jit-ticket" data-id="int-' + c.id + '" onclick="openContextPanel(\'int-' + c.id + '\')">' +
-        '<div class="jit-check" onclick="event.stopPropagation();toggleBulkSelect(\'int-' + c.id + '\',event)"></div>' +
+        '<button type="button" class="jit-check" role="checkbox" aria-checked="false" aria-label="Select request" onclick="event.stopPropagation();toggleBulkSelect(\'int-' + c.id + '\',event)"></button>' +
         '<div style="flex:1;min-width:0">' +
           '<div class="jit-human">' + escapeHtml(c.integration) + ' / ' + escapeHtml(c.tool) + '</div>' +
           '<div class="jit-cmd-text">' + escapeHtml(c.integration) + ' ' + escapeHtml(c.tool) + (args ? '(' + escapeHtml(args) + ')' : '') + '</div>' +
@@ -2700,7 +2717,7 @@ function renderJitItem(item) {
     } else if (item.type === 'window') {
       var w = item.data;
       return '<div class="jit-ticket" data-id="win-' + w.id + '" onclick="openContextPanel(\'win-' + w.id + '\')">' +
-        '<div class="jit-check" onclick="event.stopPropagation();toggleBulkSelect(\'win-' + w.id + '\',event)"></div>' +
+        '<button type="button" class="jit-check" role="checkbox" aria-checked="false" aria-label="Select request" onclick="event.stopPropagation();toggleBulkSelect(\'win-' + w.id + '\',event)"></button>' +
         '<div style="flex:1;min-width:0">' +
           '<div class="jit-human">Window request</div>' +
           '<div class="jit-cmd-text">' + escapeHtml(w.command) + '</div>' +
@@ -2727,7 +2744,7 @@ function renderJitItem(item) {
       if (r.risk) riskHtml += '<div style="color:var(--status-warning);font-size:11px;margin-top:4px"> ' + escapeHtml(r.risk) + '</div>';
       if (r.anomaly) riskHtml += '<div style="color:var(--danger);font-size:11px;margin-top:4px"> ' + escapeHtml(r.anomaly) + '</div>';
       return '<div class="jit-ticket' + (r.anomaly ? ' urgent' : '') + '" data-id="' + r.id + '" onclick="openContextPanel(\'' + r.id + '\')">' +
-        '<div class="jit-check" onclick="event.stopPropagation();toggleBulkSelect(\'' + r.id + '\',event)"></div>' +
+        '<button type="button" class="jit-check" role="checkbox" aria-checked="false" aria-label="Select request" onclick="event.stopPropagation();toggleBulkSelect(\'' + r.id + '\',event)"></button>' +
         '<div class="jit-body" style="min-width:0">' +
           '<div class="jit-human">' + escapeHtml(human || 'Command request') + '</div>' +
           '<div class="jit-cmd-text">' + escapeHtml(r.command) + '</div>' +
@@ -2891,9 +2908,13 @@ function formatGapTooltip(missingIds) {
 
 function toggleFilter(status) {
   const boxMap = { 'pending': 'box-pending', 'approved': 'box-approved', 'auto-approved': 'box-auto', 'blocked': 'box-blocked', 'denied': 'box-denied' };
-  Object.values(boxMap).forEach(function(id) { document.getElementById(id).classList.remove('active-filter'); });
+  Object.values(boxMap).forEach(function(id) {
+    var el = document.getElementById(id);
+    el.classList.remove('active-filter');
+    el.setAttribute('aria-pressed', 'false');
+  });
   if (activeFilter === status) { activeFilter = null; document.getElementById('filter-badge').classList.add('hidden'); }
-  else { activeFilter = status; document.getElementById(boxMap[status]).classList.add('active-filter'); document.getElementById('filter-badge').classList.remove('hidden'); document.getElementById('filter-badge').textContent = 'Filtering: ' + status; }
+  else { activeFilter = status; document.getElementById(boxMap[status]).classList.add('active-filter'); document.getElementById(boxMap[status]).setAttribute('aria-pressed', 'true'); document.getElementById('filter-badge').classList.remove('hidden'); document.getElementById('filter-badge').textContent = 'Filtering: ' + status; }
   renderTable();
 }
 
@@ -2988,10 +3009,12 @@ function renderTable() {
       ? '<button class="c-session" data-sid="' + escapeHtml(_sid) + '" title="Session ' + escapeHtml(_sid) + '">' + escapeHtml(((_sessionNames || {})[_sid] || {}).name || _sid.substring(0, 8)) + '</button>'
       : '<span class="text-muted">—</span>';
     const gatewayCell = gwPillHtml + ' ' + escapeHtml(req.hostname || 'N/A') + ' (' + escapeHtml(req.target_ip) + ')';
+    /* Two different facts used to share the glyph "!", so the only way to tell
+       a risk flag from "first time this host runs X" was to hover it. */
     const riskHtml = (req.status === 'pending' && req.risk) ?
-      '<span class="flex-shrink-0 risk-flag" title="Risk: ' + escapeHtml(req.risk) + '">!</span>' : '';
+      '<span class="flex-shrink-0 risk-flag" role="img" aria-label="Risk: ' + escapeHtml(req.risk) + '" title="Risk: ' + escapeHtml(req.risk) + '">!</span>' : '';
     const anomalyHtml = (req.status === 'pending' && req.anomaly) ?
-      '<span class="flex-shrink-0 anomaly-flag" title="New: ' + escapeHtml(req.anomaly) + '">!</span>' : '';
+      '<span class="flex-shrink-0 anomaly-flag" role="img" aria-label="New: ' + escapeHtml(req.anomaly) + '" title="New behaviour: ' + escapeHtml(req.anomaly) + '">new</span>' : '';
     html += '<tr class="' + rowClass + '">' +
       '<td class="' + idClass + '"' + gapTitle + '>' + idDisplay + '</td>' +
       '<td class="text-muted text-xs">' + formatTime(req.created_at) + '</td>' +
@@ -3361,14 +3384,25 @@ async function fetchGateways() {
     const syncCell = isOnline
       ? (pua > 0 ? '<span class="text-muted text-xs">✓ synced ' + formatAgo(now - pua) + '</span>' : '<span class="text-muted text-xs">—</span>')
       : (updating ? '<span class="text-muted text-xs">updating…</span>' : '<span class="text-muted text-xs">unknown</span>');
-    const hbDot = function(ok, title) { return '<span class="' + (ok ? 'text-success' : 'text-danger') + '" title="' + title + '">⬤</span> '; };
+    /* Health used to be four identical dots distinguished only by colour.
+       Filled vs hollow reads without colour, and each dot carries a label. */
+    const hbDot = function(ok, title) {
+      const state = ok ? 'ok' : 'fail';
+      return '<span class="hb-dot ' + state + '" role="img" aria-label="' + title + ': ' + (ok ? 'ok' : 'failed') + '" title="' + title + ': ' + (ok ? 'ok' : 'failed') + '">' + (ok ? '●' : '○') + '</span>';
+    };
+    const hbBits = [
+      'poller ' + (Number(g.heartbeat_poller_ok) ? 'ok' : 'failed'),
+      'gateway ' + (Number(g.heartbeat_gateway_ok) ? 'ok' : 'failed'),
+      'reachability ' + (Number(g.heartbeat_can_reach) ? 'ok' : 'failed'),
+      'token ' + (g.has_token ? 'ok' : 'missing')
+    ].join(', ');
     const healthCell = g.last_heartbeat > 0
-      ? '<span class="hb-status">' +
+      ? '<span class="hb-status" aria-label="Health: ' + hbBits + '">' +
           hbDot(Number(g.heartbeat_poller_ok), 'Poller') +
           hbDot(Number(g.heartbeat_gateway_ok), 'Gateway') +
           hbDot(Number(g.heartbeat_can_reach), 'Reachable') +
           hbDot(g.has_token ? 1 : 0, g.has_token ? 'Token valid' : 'No API token — JIT delivery broken. Re-enroll this gateway.') +
-          '(' + formatAgo(now - g.last_heartbeat) + ')' +
+          '<span class="hb-age">' + formatAgo(now - g.last_heartbeat) + '</span>' +
         '</span>'
       : '<span class="hb-status">waiting…</span>';
     var ztBadge = g.zero_trust
