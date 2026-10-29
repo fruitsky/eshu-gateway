@@ -90,7 +90,13 @@ function openContextPanel(reqId) {
       (req.label ? '<span class="ctx-meta-item">Label: ' + escapeHtml(req.label) + '</span>' : '');
   } else {
     document.getElementById('ctx-cmd').textContent = req.command || '';
-    document.getElementById('ctx-human').textContent = describeCmd(req.command) || 'No description available';
+    /* "What it does" is the whole reason this panel exists. It used to print
+       "No description available" for any command outside the description map,
+       while the card beside it already carried an impact line — so fall back
+       through: plain description -> risk line -> an honest sentence. */
+    var whatItDoes = describeCmd(req.command) || req.risk || '';
+    if (!whatItDoes) whatItDoes = 'No plain-language description for this command — read it as written.';
+    document.getElementById('ctx-human').textContent = whatItDoes;
     var hostLabel = req.hostname || req.target_ip || 'Unknown host';
     document.getElementById('ctx-target').innerHTML =
       '<span class="ctx-meta-item">Host: ' + escapeHtml(hostLabel) + '</span>' +
@@ -1710,9 +1716,9 @@ function buildStarfield(layoutIdx){
     var cx=44+slotW*(idx+0.5)+(R()-0.5)*slotW*0.08;
     var cy=H*0.48+(R()-0.5)*H*0.10;
     cx=Math.min(Math.max(cx,44+hw),Math.max(44+hw,W-44-hw));
-    cy=Math.min(Math.max(cy,26+hh),Math.max(26+hh,H-30-hh));
+    cy=Math.min(Math.max(cy,44+hh),Math.max(44+hh,H-54-hh));  /* keep the foot of the chart clear of the key line */
     var raw=cons.pts.map(function(p){ return {x:cx+(p[0]-0.5)*s, y:cy+(p[1]-0.5)*s}; });
-    var fp=fitSafe(raw, 44, W-44, 26, H-30);
+    var fp=fitSafe(raw, 44, W-44, 44, H-54);
     var base=pts.length;
     fp.forEach(function(p){ pts.push(p); ptConst.push(cons.name); });
     var glines=cons.lines.map(function(ln){ var a=pts[base+ln[0]], b=pts[base+ln[1]]; return [a.x,a.y,b.x,b.y]; });
@@ -1908,9 +1914,9 @@ function renderEmptyState(total) {
       '<div class="dust-layer" id="dust-layer"></div>' +
       '<div class="sky" id="sky"><svg id="const-lines" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"></svg></div>' +
       '<div class="const-legend" id="const-legend"></div>' +
-      '<div class="cc-legend"><span class="k">click</span> select · <span class="k">O</span> override · <span class="k">B</span> ambience · <span class="k">C</span> constellation · <span class="k">M</span> mute · <span class="k">F</span> focus</div>' +
+      '<div class="cc-legend"><span class="k">↑↓</span> move · <span class="k">enter</span> open · <span class="k">O</span> override · <span class="k">B</span> ambience · <span class="k">C</span> constellation · <span class="k">M</span> mute · <span class="k">F</span> focus</div>' +
     '</div>' +
-    '<div class="jit-deck' + (total > 0 ? ' show' : '') + '" id="jit-deck"><div class="jit-deck-scroll" id="jit-deck-scroll"></div></div>' +
+    '<div class="cc-queue' + (total > 0 ? ' show' : '') + '" id="cc-queue"></div>' +
     '<div class="cc-empty-headline">' + headline + '</div>' +
     '<div class="cc-empty-sub">' + sub + '</div>' +
     tickerHtml +
@@ -1919,25 +1925,123 @@ function renderEmptyState(total) {
   '</div>';
 }
 
-function renderDeck(items) {
-  var sc = document.getElementById('jit-deck-scroll');
-  if (!sc) return;
-  sc.innerHTML = items.map(function(item) { return renderJitItem(item); }).join('');
-  sc.addEventListener('scroll', updateDeckFocus);
-  setTimeout(updateDeckFocus, 60);
+/* ── The pending queue ──────────────────────────────────────────────────
+   One decision in full, the rest of the queue in plain sight beneath it.
+   The previous shape was a horizontal carousel: 5 pending requests rendered
+   3.4 cards in a 1040px window with the scrollbar hidden, so the 4th and 5th
+   were unreachable unless you guessed that a queue scrolls sideways.
+
+   Priority is honest: an anomalous command first, then whichever request
+   expires soonest, then the oldest. Same order for the hero and the list. */
+var _queueCursor = 0;
+
+function queueModel(item) {
+  var d = item.data;
+  if (item.type === 'integration') {
+    var args = Object.keys(d.payload || {}).map(function(k){ return k + '=' + d.payload[k]; }).join(', ');
+    return {
+      domId: 'int-' + d.id, ttl: Infinity, createdAt: d.created_at || 0, urgent: false,
+      human: d.integration + ' / ' + d.tool,
+      cmd: args ? args : '(no arguments)',
+      host: 'API call', id: d.id,
+      approve: 'approveIntegrationCall(' + d.id + ')',
+      deny: 'denyIntegrationCall(' + d.id + ')',
+      report: !!(d.reason)
+    };
+  }
+  if (item.type === 'window') {
+    return {
+      domId: 'win-' + d.id, ttl: Infinity, createdAt: d.created_at || 0, urgent: false,
+      human: 'Window request', cmd: d.command,
+      host: d.target_ip + (d.label ? ' \u00b7 ' + d.label : ''),
+      id: d.id,
+      approve: 'approveWindowReq(' + d.id + ')',
+      deny: 'denyWindowReq(' + d.id + ')',
+      report: false
+    };
+  }
+  return {
+    domId: String(d.id), ttl: (d.ttl || 0) > 0 ? d.ttl : Infinity,
+    createdAt: d.created_at || 0, urgent: !!d.anomaly,
+    human: describeCmd(d.command) || 'Command request',
+    cmd: d.command,
+    host: (d.hostname || d.target_ip || 'unknown host') + (d.hostname && d.target_ip ? ' \u00b7 ' + d.target_ip : ''),
+    id: d.id,
+    approve: 'handleAction(' + d.id + ',\'approve\')',
+    deny: 'handleAction(' + d.id + ',\'deny\')',
+    report: !!(d.risk || d.anomaly)
+  };
 }
-function updateDeckFocus() {
-  var sc = document.getElementById('jit-deck-scroll');
-  if (!sc) return;
-  /* A queue is not a carousel. This used to fade every off-centre card to 28%
-     opacity and push it 16px down — the deck was the main reason the Command
-     Center read as "washed out", and it dimmed the very cards that still
-     needed a decision. Cards now stay at full contrast; scroll position is
-     carried by the scrollbar and the snap, not by opacity. */
-  sc.querySelectorAll('.jit-ticket').forEach(function(card) {
-    if (card.style.opacity) card.style.opacity = '';
-    if (card.style.transform) card.style.transform = '';
+
+function queueSort(models) {
+  return models.sort(function(a, b) {
+    if (a.urgent !== b.urgent) return a.urgent ? -1 : 1;
+    if (a.ttl !== b.ttl) return a.ttl - b.ttl;
+    return a.createdAt - b.createdAt;
   });
+}
+
+function renderQueue(items) {
+  var q = document.getElementById('cc-queue');
+  if (!q) return;
+  var models = queueSort(items.map(queueModel));
+  if (!models.length) { q.innerHTML = ''; return; }
+
+  var hero = models[0];
+  var rest = models.slice(1);
+
+  /* The hero keeps the full card markup (command block, risk line, TTL,
+     Approve/Deny) so it behaves exactly like the tickets it replaced. */
+  var heroItem = items.filter(function(it){ return queueModel(it).domId === hero.domId; })[0];
+  var heroHtml = '<div class="ccq-hero' + (hero.urgent ? ' urgent' : '') + '" data-queue-id="' + hero.domId + '">' +
+      (models.length > 1 ? '<div class="ccq-hero-label"><span class="ccq-rank">Next</span>' +
+        '<span class="ccq-more">' + (models.length - 1) + ' more waiting below</span></div>' : '') +
+      renderJitItem(heroItem) +
+    '</div>';
+
+  var rowsHtml = rest.map(function(m, i) {
+    return '<div class="ccq-row" role="button" tabindex="0" data-queue-id="' + m.domId + '" ' +
+        'onclick="openContextPanel(\'' + m.domId + '\')" ' +
+        'onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();openContextPanel(\'' + m.domId + '\');}">' +
+      '<span class="ccq-chk jit-check" onclick="event.stopPropagation();toggleBulkSelect(\'' + m.domId + '\',event)"></span>' +
+      '<span class="ccq-main">' +
+        '<span class="ccq-human">' + escapeHtml(m.human) + '</span>' +
+        '<code class="ccq-cmd" title="' + escapeHtml(m.cmd) + '">' + escapeHtml(m.cmd) + '</code>' +
+      '</span>' +
+      '<span class="ccq-host">' + escapeHtml(m.host) + '</span>' +
+      (m.ttl !== Infinity ? '<span class="ccq-ttl"><span class="ttl-countdown" data-ttl="' + m.ttl + '">' + m.ttl + 's</span></span>' : '') +
+      '<span class="ccq-acts" onclick="event.stopPropagation()">' +
+        '<button class="btn btn-deny btn-xs" onclick="' + m.deny + '">Deny</button>' +
+        '<button class="btn btn-approve btn-xs" onclick="' + m.approve + '">Approve</button>' +
+      '</span>' +
+    '</div>';
+  }).join('');
+
+  q.innerHTML = heroHtml + (rowsHtml ? '<div class="ccq-rest">' + rowsHtml + '</div>' : '');
+  _queueCursor = 0;
+  applyQueueCursor();
+}
+
+function queueNodes() {
+  var q = document.getElementById('cc-queue');
+  return q ? Array.prototype.slice.call(q.querySelectorAll('.ccq-hero, .ccq-row')) : [];
+}
+function applyQueueCursor() {
+  queueNodes().forEach(function(el, i) { el.classList.toggle('is-cursor', i === _queueCursor); });
+}
+function moveQueueCursor(delta) {
+  var nodes = queueNodes();
+  if (!nodes.length) return;
+  _queueCursor = Math.max(0, Math.min(nodes.length - 1, _queueCursor + delta));
+  applyQueueCursor();
+  if (nodes[_queueCursor].scrollIntoView) nodes[_queueCursor].scrollIntoView({ block: 'nearest' });
+}
+function openQueueCursor() {
+  var nodes = queueNodes();
+  var el = nodes[_queueCursor];
+  if (!el) return;
+  var id = el.getAttribute('data-queue-id') || (el.querySelector('.jit-ticket') || {}).getAttribute && el.querySelector('.jit-ticket').getAttribute('data-id');
+  if (id) openContextPanel(id);
 }
 
 function renderSparkline() {
@@ -2515,11 +2619,15 @@ function setSidebarCollapsed(collapsed){
 }
 document.addEventListener('keydown', function(e) {
   var typing = e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT' || e.target.isContentEditable);
+  var onControl = e.target && (e.target.tagName === 'BUTTON' || e.target.tagName === 'A');
   if (e.key === 'f' || e.key === 'F') { if (typing) return; document.body.classList.toggle('focus'); setSidebarCollapsed(document.body.classList.contains('focus')); }
   else if (e.key === 'c' || e.key === 'C') { if (typing) return; nextConstellation(); }
   else if (e.key === 'o' || e.key === 'O') { if (typing) return; openOverride(); }
   else if (e.key === 'b' || e.key === 'B') { if (typing) return; toggleBrownNoise(); }
   else if (e.key === 'm' || e.key === 'M') { if (typing) return; toggleMute(); }
+  else if (e.key === 'ArrowDown' || e.key === 'j') { if (typing || onControl) return; moveQueueCursor(1); e.preventDefault(); }
+  else if (e.key === 'ArrowUp' || e.key === 'k') { if (typing || onControl) return; moveQueueCursor(-1); e.preventDefault(); }
+  else if (e.key === 'Enter') { if (typing || onControl) return; openQueueCursor(); }
   else if (e.key === 'Escape') {
     var om = document.getElementById('override-modal');
     if (om && !om.classList.contains('hidden')) { om.classList.add('hidden'); }
@@ -2541,30 +2649,6 @@ document.addEventListener('click', function(e) {
   if (t.closest('.starfield-wrap')) { deselectGateway(); }
 });
 
-document.addEventListener('wheel', function(e) {
-  var sc = e.target && e.target.closest ? e.target.closest('.jit-deck-scroll') : null;
-  if (!sc || sc.scrollWidth <= sc.clientWidth + 1) return;
-  sc.scrollLeft += (e.deltaY || e.deltaX || 0);
-  e.preventDefault();
-}, { passive: false });
-
-document.addEventListener('mousedown', function(e) {
-  var sc = e.target && e.target.closest ? e.target.closest('.jit-deck-scroll') : null;
-  if (!sc) return;
-  var startX = e.pageX, startScroll = sc.scrollLeft;
-  function move(ev) {
-    var dx = ev.pageX - startX;
-    if (Math.abs(dx) > 3) sc.classList.add('dragging');
-    sc.scrollLeft = startScroll - dx;
-  }
-  function up() {
-    document.removeEventListener('mousemove', move);
-    document.removeEventListener('mouseup', up);
-    sc.classList.remove('dragging');
-  }
-  document.addEventListener('mousemove', move);
-  document.addEventListener('mouseup', up);
-});
 
 function renderJitTickets() {
   var pending = requestsData.filter(function(r) { return r.status === 'pending' && r.ttl > 0; });
@@ -2588,7 +2672,7 @@ function renderJitTickets() {
   container.innerHTML = renderEmptyState(total);
   buildStaticSky();
   buildStarfield(_layout);
-  if (total > 0) renderDeck(allItems);
+  if (total > 0) renderQueue(allItems);
   refreshRecentSessions();
 }
 

@@ -977,8 +977,6 @@ button::-moz-focus-inner { border: 0; padding: 0; }
      bottom edge so every Approve button lines up down the deck. */
   .jit-body { flex: 1 1 auto; display: flex; flex-direction: column; min-width: 0; }
   .jit-body .jit-actions, .jit-actions { flex-shrink: 0; }
-  .jit-deck .jit-ticket { align-items: stretch; }
-  .jit-deck .jit-ticket .jit-actions { align-self: flex-end; margin-top: auto; }
 
   /* JIT checkbox */
   .jit-check {
@@ -1093,7 +1091,6 @@ button::-moz-focus-inner { border: 0; padding: 0; }
     .sidebar { display: none !important; }
     .mobile-nav { display: flex !important; }
     .starfield-wrap { height: 40vh; min-height: 240px; }
-    .jit-deck .jit-ticket { flex: 0 0 300px; }
     .cc-empty { padding: 0 0 72px; }
     .main-body { padding: 16px; }
     .main-header { padding: 12px 16px; flex-wrap: wrap; gap: 8px; }
@@ -1590,18 +1587,37 @@ textarea { font-family: 'JetBrains Mono', monospace !important; }
   .sel-hint .nm { color: var(--accent); }
   .sel-hint .kbd { font-size: 11px; font-weight: 700; color: var(--accent); background: var(--accent-dim); border: 1px solid rgba(245,158,11,0.25); border-radius: 3px; padding: 1px 5px; }
 
-  /* ── Floating JIT deck ── */
-  .jit-deck { display: none; width: 100%; max-width: 1040px; margin: 4px auto 0; }
-  .jit-deck.show { display: block; }
-  .jit-deck-scroll { display: flex; align-items: stretch; gap: 14px; overflow-x: auto; padding: 18px 28px 10px; scroll-snap-type: x mandatory; cursor: grab; scrollbar-width: thin; scrollbar-color: var(--border-color) transparent; }
-  .jit-deck-scroll::-webkit-scrollbar { height: 8px; }
-  .jit-deck-scroll::-webkit-scrollbar-track { background: transparent; }
-  .jit-deck-scroll::-webkit-scrollbar-thumb { background: #3a342b; border-radius: 4px; }
-  .jit-deck-scroll::-webkit-scrollbar-thumb:hover { background: #4b4438; }
-  .jit-deck-scroll.dragging { cursor: grabbing; }
-  /* Equal cards, aligned actions: the Approve button must sit at the same
-     height on every card in the queue. */
-  .jit-deck .jit-ticket { flex: 0 0 360px; height: 226px; overflow: hidden; scroll-snap-align: start; margin-bottom: 0; }
+  /* ── The pending queue: one decision in full, the rest in plain sight ── */
+  .cc-queue { display: none; width: 100%; max-width: 1040px; margin: 4px auto 0; }
+  .cc-queue.show { display: block; }
+  .ccq-hero { border-radius: 8px; }
+  .ccq-hero .jit-ticket { margin-bottom: 0; align-items: stretch; }
+  .ccq-hero .jit-ticket .jit-actions { align-self: flex-end; margin-top: auto; }
+  .ccq-hero-label {
+    display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
+    font-family: 'JetBrains Mono', monospace; font-size: 11px; letter-spacing: 1.4px;
+    text-transform: uppercase; color: var(--text-muted); margin: 0 2px 8px;
+  }
+  .ccq-rank { color: var(--accent); font-weight: 700; }
+  .ccq-rest {
+    display: flex; flex-direction: column; margin-top: 10px;
+    border: 1px solid var(--border-color); border-radius: 8px; overflow: hidden;
+    background: rgba(26,23,20,0.35);
+  }
+  .ccq-row {
+    display: grid; grid-template-columns: 16px minmax(0,1.7fr) minmax(0,1fr) auto auto;
+    column-gap: 14px; align-items: center; padding: 8px 12px; cursor: pointer;
+    border-bottom: 1px solid rgba(45,41,34,0.65); transition: background-color .12s;
+  }
+  .ccq-row:last-child { border-bottom: none; }
+  .ccq-row:hover { background: var(--bg-hover); }
+  .ccq-row.is-cursor, .ccq-hero.is-cursor { outline: 1px solid rgba(245,158,11,0.55); outline-offset: 2px; }
+  .ccq-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .ccq-human { font-size: 12px; color: var(--accent); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ccq-cmd { font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--text-main); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ccq-host, .ccq-ttl { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ccq-acts { display: flex; gap: 6px; }
+  .ccq-empty { padding: 14px; color: var(--text-muted); font-size: 12px; }
 
   /* borderless empty-state — integrate radar into the page background */
   .widget.flat { background: transparent !important; border: none !important; box-shadow: none !important; padding: 0 !important; margin-bottom: 0 !important; }
@@ -2913,4 +2929,15 @@ input::placeholder, textarea::placeholder { color: #9c8e7a; }
 @media (max-width: 768px) {
   .cc-legend { display: none; }
   .starfield-wrap { height: 210px; }
+}
+
+/* Queue at narrow widths: the host column is the first thing to go. */
+@media (max-width: 1100px) {
+  .ccq-row { grid-template-columns: 16px minmax(0,1fr) auto auto; }
+  .ccq-host { display: none; }
+}
+@media (max-width: 768px) {
+  .ccq-row { grid-template-columns: 16px minmax(0,1fr) auto; row-gap: 6px; }
+  .ccq-ttl { display: none; }
+  .ccq-hero .jit-ticket { min-height: 0; }
 }

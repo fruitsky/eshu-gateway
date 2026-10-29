@@ -146,29 +146,36 @@ and the pulse animation ran on all of them.
 
 ### P1 — information architecture
 
-**2.4 The pending queue hides its own length** *(the big one)*
+**2.4 The pending queue hides its own length** — ✅ shipped
 
-`.jit-deck-scroll` is a horizontal carousel with a hidden scrollbar. With five
-pending requests, 3.4 fit in 1040px and the 4th is simply sliced off. Approving
-five requests means discovering a scroll gesture. The app also ships
-`bulkApprove`/`bulkDeny` in a bar that is easy to miss.
+Was: `.jit-deck-scroll`, a horizontal carousel with the scrollbar deliberately
+hidden (`scrollbar-width: none`, `::-webkit-scrollbar { height: 0 }`,
+`perspective: 1200px`). With five pending requests, 3.4 cards fit in 1040px and
+the 4th was sliced off; approving requests 4 and 5 meant guessing that a queue
+scrolls sideways.
 
-Options (needs a decision):
+Now: **hero + list** (option B). The top-priority request gets the full card —
+command block, TTL, plain-language impact, Approve/Deny — and the rest are
+compact rows with description, command, host, TTL and inline actions. All of
+them are visible at 1440×900 with five pending. Priority is honest rather than
+insertion order: an anomalous command first, then whichever expires soonest,
+then the oldest.
 
-- **A. Vertical queue.** One column, fixed height, dense rows — scan all five at
-  once, `j/k` + `a/d`, bulk actions at the top. Costs the "deck" drama.
-- **B. Deck for one, list for the rest.** Hero card for the top-priority request
-  (with the full command and the risk line), the remaining N as compact rows
-  below it. Keeps the ceremony, removes the hidden work.
-- **C. Keep the deck, add pagination.** `1 of 5` + arrows + keyboard. Cheapest,
-  still hides the set.
+Keyboard: `↑`/`↓` (or `j`/`k`) moves a cursor through the queue, `Enter` opens
+that request's detail panel. Rows are `role="button" tabindex="0"` with
+Enter/Space handlers, so the queue is reachable without a mouse.
 
-Recommendation: **B**. It preserves the concept where it earns its keep (one
-decision at a time for the *current* request) and gives the operator the
-queue view they need.
+Remaining in this area:
 
-- Done: with 6 pending at 1440×900, all 6 are visible or countable without a
-  scroll gesture, and the 6th is reachable by keyboard.
+- The bulk-selection bar (`Approve All` / `Deny All`) still lives above the
+  fold in `#cc-bulk-bar` and only appears once something is ticked — it should
+  be visible in the queue header ("4 more waiting · select all").
+- `a`/`d` single-key approve/deny was deliberately **not** added: a keystroke
+  that executes an SSH command is too easy to fire by accident. If it is ever
+  wanted, make it opt-in per session.
+- At 768px the rows lose the host and TTL columns; the command is ellipsised to
+  ~30 characters. Consider a stacked mobile row (description, then command on
+  its own line, actions right) rather than truncation.
 
 **2.5 Statistics repeats itself three times**
 
@@ -241,12 +248,16 @@ needs a human" channel is spent on the logo.
 `--primary` = accent, `--status-success` now aliases `--state-approved`.
 Rename to roles before the next layer lands.
 
-**2.12 Accessibility**
+**2.12 Accessibility** — 🟡 partially shipped
 
 Zero `aria-*` attributes in 1,269 lines of markup. `.stat-card` (the History
 filters) and `.gw-node` (the constellation nodes) are `<div onclick>` — not
 focusable, not announced. Keyboard hints exist (`F`, `O`, `C`) but the queue
-itself is mouse-only.
+itself was mouse-only.
+
+Done with 2.4: queue rows are `role="button" tabindex="0"`, Enter/Space opens
+them, and `↑`/`↓`/`j`/`k` + `Enter` drive the queue. Still open: everything
+else listed above.
 
 - Do: `role="button" tabindex="0"` + Enter/Space on clickable divs; `aria-label`
   on icon-only buttons (`×`, `↻`); `aria-live="polite"` on the pending count.
@@ -301,9 +312,9 @@ it survives `prefers-reduced-motion` and a keyboard-only pass.
 
 ## 4. Suggested order
 
-1. 2.4 queue IA (decide A/B/C first — it changes the most markup)
+1. ~~2.4 queue IA~~ — shipped on this branch (hero + list, keyboard)
 2. 2.11 token rename + 2.8 CSS consolidation (do together, before more rules)
-3. 2.12 accessibility (cheap, and it constrains 2.4)
+3. 2.12 accessibility (the rest: stat-card filters, gateway nodes, aria labels)
 4. 2.9 / 2.10 glow + motion budget
 5. 2.1 / 2.3 meaning of colour (health dots, log badges)
 6. 2.5 / 2.6 / 2.7 page-level density
