@@ -1268,7 +1268,7 @@ button::-moz-focus-inner { border: 0; padding: 0; }
 .stat-card .stat-label { font-family: 'JetBrains Mono', monospace !important; font-size: 11px !important; letter-spacing: 0.5px !important; }
 
 /* Tables */
-table { font-family: 'JetBrains Mono', monospace !important; font-size: 12px !important; }
+table { font-family: 'JetBrains Mono', monospace !important; font-size: 13px !important; }
 thead th { font-family: 'JetBrains Mono', monospace !important; font-size: 11px !important; letter-spacing: 1px !important; }
 tbody tr:nth-child(even) { background: rgba(245,158,11,0.02) !important; }
 

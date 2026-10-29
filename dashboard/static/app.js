@@ -2007,8 +2007,8 @@ function renderRecentSessions() {
     return '<div class="recent-session-card" onclick="openSessionModal(\'' + escapeHtml(s.id) + '\')">' +
       '<div class="rs-title"><span class="host">' + escapeHtml(host) + '</span> \u00b7 ' +
         (meta.name
-          ? escapeHtml(meta.name) + ' <span style="color:var(--text-muted);font-weight:400;font-size:10px;">\u00b7 ' + escapeHtml(s.id.substring(0, 6)) + '</span>'
-          : '<span style="color:var(--text-muted);font-weight:400;font-size:10px;">#' + escapeHtml(s.id.substring(0, 8)) + '</span>') +
+          ? escapeHtml(meta.name) + ' <span style="color:var(--text-muted);font-weight:400;font-size:11px;">\u00b7 ' + escapeHtml(s.id.substring(0, 6)) + '</span>'
+          : '<span style="color:var(--text-muted);font-weight:400;font-size:11px;">#' + escapeHtml(s.id.substring(0, 8)) + '</span>') +
       '</div>' +
       '<div class="rs-cmd-block">' + cmdPreview + '</div>' +
       (desc ? '<div class="rs-desc">' + escapeHtml(desc) + '</div>' : '') +
@@ -2044,7 +2044,7 @@ async function refreshRecentSessions() {
     if (!reqMap[s]) reqMap[s] = [];
     reqMap[s].push(r);
   });
-  if (!summaries.length) { grid.innerHTML = '<div style="font-family:var(--font-mono);font-size:10px;color:var(--muted);padding:6px 2px">no sessions yet</div>'; return; }
+  if (!summaries.length) { grid.innerHTML = '<div style="font-family:var(--font-mono);font-size:11px;color:var(--muted);padding:6px 2px">no sessions yet</div>'; return; }
   grid.innerHTML = summaries.map(function (s) {
     var local = reqMap[s.session_id] || [];
     var meta = names[s.session_id] || {};
@@ -2058,8 +2058,8 @@ async function refreshRecentSessions() {
     var hostTxt = reqs ? (s.host || 'ssh') : 'mcp';
     var nameTxt = meta.name;
     var idPart = nameTxt
-      ? escapeHtml(nameTxt) + ' <span style="color:var(--text-muted);font-weight:400;font-size:10px;">\u00b7 ' + escapeHtml(s.session_id.substring(0, 6)) + '</span>'
-      : '<span style="color:var(--text-muted);font-weight:400;font-size:10px;">#' + escapeHtml(s.session_id.substring(0, 8)) + '</span>';
+      ? escapeHtml(nameTxt) + ' <span style="color:var(--text-muted);font-weight:400;font-size:11px;">\u00b7 ' + escapeHtml(s.session_id.substring(0, 6)) + '</span>'
+      : '<span style="color:var(--text-muted);font-weight:400;font-size:11px;">#' + escapeHtml(s.session_id.substring(0, 8)) + '</span>';
     var kinds = [];
     if (reqs) kinds.push(reqs + ' cmd');
     if (mcps) kinds.push(mcps + ' mcp');
@@ -2640,8 +2640,8 @@ function renderJitItem(item) {
         ? gwPill(r.hostname) + ' ' + escapeHtml(r.hostname)
         : escapeHtml(hostLabel);
       var riskHtml = '';
-      if (r.risk) riskHtml += '<div style="color:var(--status-warning);font-size:10px;margin-top:4px"> ' + escapeHtml(r.risk) + '</div>';
-      if (r.anomaly) riskHtml += '<div style="color:var(--danger);font-size:10px;margin-top:4px"> ' + escapeHtml(r.anomaly) + '</div>';
+      if (r.risk) riskHtml += '<div style="color:var(--status-warning);font-size:11px;margin-top:4px"> ' + escapeHtml(r.risk) + '</div>';
+      if (r.anomaly) riskHtml += '<div style="color:var(--danger);font-size:11px;margin-top:4px"> ' + escapeHtml(r.anomaly) + '</div>';
       return '<div class="jit-ticket' + (r.anomaly ? ' urgent' : '') + '" data-id="' + r.id + '" onclick="openContextPanel(\'' + r.id + '\')">' +
         '<div class="jit-check" onclick="event.stopPropagation();toggleBulkSelect(\'' + r.id + '\',event)"></div>' +
         '<div class="jit-body" style="min-width:0">' +
