@@ -31,3 +31,7 @@ dashboard/static/eshu-gateway-install-backup.sh
 .DS_Store
 Thumbs.dbtests/.venv/
 *.bak
+
+# SQLite write-ahead log sidecars (runtime data)
+*.db-shm
+*.db-wal
