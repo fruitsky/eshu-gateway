@@ -18,8 +18,17 @@ cd "$(dirname "$0")/.."
 
 if [ "${1:-}" != "--no-pull" ]; then
   echo "== git pull --ff-only =="
+  # A pull can replace this very file. Bash reads scripts incrementally, so the
+  # remaining lines would be read from shifted offsets (which silently ran the
+  # *old* verification block after an update). Re-exec when the helper changed.
+  before="$(sha1sum "$0" 2>/dev/null | cut -d' ' -f1 || true)"
   git pull --ff-only
   git checkout -- dashboard/static/ 2>/dev/null || true
+  after="$(sha1sum "$0" 2>/dev/null | cut -d' ' -f1 || true)"
+  if [ -n "$before" ] && [ "$before" != "$after" ]; then
+    echo "== deploy helper updated — re-executing the new version =="
+    exec bash "$0" --no-pull
+  fi
 fi
 
 mainpid() { systemctl show -p MainPID --value "$SERVICE" 2>/dev/null || echo 0; }
