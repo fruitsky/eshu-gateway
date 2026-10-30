@@ -250,13 +250,6 @@ button::-moz-focus-inner { border: 0; padding: 0; }
     flex-wrap: wrap;
   }
   .jit-ticket:last-child { margin-bottom: 0; }
-  .jit-ticket-left { display: flex; align-items: center; gap: 14px; min-width: 0; flex: 1; }
-  .jit-ticket-icon { font-size: 20px; color: var(--status-warning); flex-shrink: 0; }
-  .jit-ticket-info { min-width: 0; }
-  .jit-ticket-info .jit-cmd { font-family: "Cascadia Code", "JetBrains Mono", Consolas, monospace; font-size: 13px; color: var(--text-main); word-break: break-all; }
-  .jit-ticket-info .jit-meta { font-size: 12px; color: var(--text-muted); margin-top: 3px; }
-  .jit-ticket-info .jit-desc { font-size: 12px; color: var(--text-muted); margin-top: 1px; line-height: 1.4; opacity: 0.8; }
-  .jit-ticket-info .jit-ttl { font-size: 11px; color: var(--status-warning); }
   .jit-actions { display: flex; gap: 10px; flex-shrink: 0; }
 
   /* ── Buttons ────────────────────────────────────────────── */
@@ -1197,13 +1190,6 @@ button::-moz-focus-inner { border: 0; padding: 0; }
 .nav-item.active { box-shadow: none; }
 
 /* Sidebar bottom: gateway health pill */
-.sidebar-health {
-  display: flex; align-items: center; gap: 8px;
-  padding: 8px 10px; border-radius: 6px;
-  background: rgba(255,255,255,0.02); border: 1px solid var(--border-color);
-  margin-bottom: 6px;
-}
-.sidebar-health-text { font-size: 11px; color: var(--text-muted); font-weight: 500; }
 
 /* Mobile menu button (edge chevron) + overlay */
 .mobile-menu-btn {
@@ -1241,14 +1227,6 @@ button::-moz-focus-inner { border: 0; padding: 0; }
 .widget-header { font-family: 'JetBrains Mono', monospace; font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 1.5px; color: var(--accent); }
 .main-header h1 { font-family: 'JetBrains Mono', monospace; font-size: 16px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; }
 .version-badge { font-family: 'JetBrains Mono', monospace; background: rgba(245,158,11,0.08); color: var(--accent); border: 1px solid rgba(245,158,11,0.2); }
-
-/* Per-view page title */
-.view-title {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 18px; font-weight: 700;
-  text-transform: uppercase; letter-spacing: 2px;
-  color: var(--accent);
-}
 
 /* Stat Cards */
 .stat-card { border-radius: 6px; }
@@ -1775,16 +1753,6 @@ textarea { font-family: 'JetBrains Mono', monospace; }
     scrollbar-color: var(--border-color) transparent;
   }
 
-  .sm-cmd-card {
-    background: var(--bg-base);
-    border: 1px solid var(--border-color);
-    border-radius: var(--radius);
-    padding: 10px 12px;
-    transition: border-color 0.12s;
-  }
-  .sm-cmd-card.sm-pending {
-    border-left: 3px solid var(--status-warning);
-  }
   .sm-cmd-top {
     display: flex;
     align-items: center;
@@ -1926,53 +1894,6 @@ textarea { font-family: 'JetBrains Mono', monospace; }
 .main-body > #view-logs {
   position: relative;
   z-index: 1;
-}
-
-/* ── Page header (eyebrow / title / legend) ─────────────── */
-.view-head { margin-bottom: 22px; max-width: 900px; }
-.view-head-row {
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: 16px;
-  flex-wrap: wrap;
-}
-.view-eyebrow {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 3px;
-  text-transform: uppercase;
-  color: #a89880;
-  margin-bottom: 7px;
-}
-.view-eyebrow .ey-acc { color: rgba(245,158,11,0.75); }
-.view-title {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 20px;
-  font-weight: 700;
-  letter-spacing: 2.5px;
-  text-transform: uppercase;
-  color: var(--accent);
-
-  line-height: 1.1;
-}
-.view-legend {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 11px;
-  letter-spacing: 0.4px;
-  line-height: 1.7;
-  color: #a89880;
-  margin-top: 8px;
-  max-width: 720px;
-}
-.view-legend b { color: var(--text-dim); font-weight: 600; }
-.view-controls {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-  padding-bottom: 2px;
 }
 
 /* ── Glass surfaces ─────────────────────────────────────── */
@@ -2275,10 +2196,6 @@ input::placeholder, textarea::placeholder { color: #9c8e7a; }
 
 /* ── Mobile refinements ─────────────────────────────────── */
 @media (max-width: 768px) {
-  .view-head { margin-bottom: 16px; }
-  .view-eyebrow { font-size: 11px; letter-spacing: 2.5px; }
-  .view-title { font-size: 16px; letter-spacing: 2px; }
-  .view-legend { font-size: 11px; }
   .btn { min-height: 44px; }
   .btn-sm { min-height: 40px; }
   .stat-card .stat-value { font-size: 20px; }
