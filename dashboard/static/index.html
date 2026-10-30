@@ -400,6 +400,24 @@
       <!-- KPI cards -->
       <div id="stats-summary-cards" class="kpis" data-od-id="stats-summary-cards"></div>
 
+      <!-- Fleet hygiene -->
+      <div class="widget" data-od-id="fleet-hygiene">
+        <div class="widget-header">
+          <span>Fleet hygiene</span>
+          <span class="chip" id="hygiene-flag"></span>
+        </div>
+        <div class="hygiene-row" id="stats-hygiene"></div>
+      </div>
+
+      <!-- When the fleet works -->
+      <div class="widget" data-od-id="weekly-heatmap">
+        <div class="widget-header">
+          <span>When the fleet works</span>
+          <span class="chip" id="heat-peak"></span>
+        </div>
+        <div class="heat-wrap" id="stats-heatmap"></div>
+      </div>
+
       <!-- The nodes -->
       <div class="widget" data-od-id="gateway-nodes">
         <div class="widget-header"><span>The nodes &middot; activity across the fleet</span><span class="chip" id="nodes-state">hover a node</span></div>

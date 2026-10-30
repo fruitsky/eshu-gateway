@@ -234,7 +234,33 @@ Offline nodes used to sit unpositioned at the centre of the dial (they never
 run through the animation loop); they now take their slot on the ring at build
 time.
 
-### 1.12 Smaller repairs
+### 1.12 Statistics: two new datasets, and a grid you can read
+
+The page measured the past; it did not tell you *when* the fleet works or
+whether the fleet is consistent. Two additions, both from data the API already
+had but nothing rendered:
+
+- **"When the fleet works"** — a 7×24 weekday × hour grid. The endpoint has
+  returned `hourly_heatmap` for a while and no widget used it; a flat 24-bucket
+  histogram cannot answer "is this a nightly-cron fleet or a workday fleet?".
+  The grid uses a five-step amber ramp, hour labels every three hours, a
+  weekday column, a hover title per cell ("Tue 14:00 — 12 commands"), a
+  `peak FRI 08:00 · 8 cmds` chip and the window total. It also looks like the
+  rest of the product: a field of stars whose brightness is activity.
+- **"Fleet hygiene"** — three facts that need a person: version spread
+  (`v15.4 ×2 · v15.2 ×1 · v15.1 ×1`, "3 releases behind the newest"), token
+  coverage (a gateway without a token silently cannot receive JIT), and
+  approved windows that have never executed. Each turns amber when it needs
+  attention, and the header chip counts the problems ("3 to look at").
+- **Top commands now show their spread** — `hostname · 2 hosts`. A command
+  spreading across the fleet is a different signal from one host hammering it,
+  and the API now computes it in the same pass that splits shell chaining.
+
+The backend additions: `weekly_heatmap` (7×24, Monday-first, from
+`strftime('%w','%H')`), `busiest` (the hottest cell, for the chip), and
+`hosts` per top command. Existing keys are untouched.
+
+### 1.13 Smaller repairs
 
 - Fleet roster: hostnames were clipped to one letter (`h…`, twice) because the
   IP won the width fight. Hostname + state on line 1, IP on line 2.

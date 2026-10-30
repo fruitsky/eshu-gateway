@@ -5445,6 +5445,99 @@ function renderStatsKpis(d) {
   });
 }
 
+/* ── When the fleet works ────────────────────────────────────────────────
+   A weekday × hour grid. The API has returned hourly buckets for a while and
+   nothing used them; a 7×24 grid answers a question a line chart cannot —
+   "is this a nightly cron fleet or a workday fleet?" — and it reads like the
+   star grid the rest of the product is built on. */
+var _HEAT_DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+
+function heatLevel(v, max) {
+  if (!v || !max) return 0;
+  var r = v / max;
+  if (r > 0.66) return 4;
+  if (r > 0.4) return 3;
+  if (r > 0.18) return 2;
+  return 1;
+}
+
+/* ── Fleet hygiene ───────────────────────────────────────────────────────
+   Three facts that need a person, from data the API already returns but
+   nothing displayed: are the gateways on the same version, do they all have
+   a token (without one, JIT delivery is silently broken), and are the
+   pre-approved windows actually used. */
+function renderStatsHygiene(d) {
+  var el = document.getElementById('stats-hygiene');
+  var flag = document.getElementById('hygiene-flag');
+  if (!el) return;
+  var gh = d.gateway_health || {};
+  var versions = gh.version_distribution || [];
+  var total = gh.total_gateways || 0;
+  var coverage = gh.token_coverage;
+  var wins = d.windows_summary || {};
+
+  var versionItems = versions.slice(0, 3).map(function (v) {
+    return '<b>' + escapeHtml(String(v.version || '?')) + '</b> \u00d7' + v.count;
+  }).join(' \u00b7 ');
+  var versionNote = versions.length > 1 ? (versions.length - 1) + ' release' + (versions.length > 2 ? 's' : '') + ' behind the newest' : 'single release';
+  var tokNote = coverage == null ? '\u2014' : (coverage >= 100 ? 'every gateway can receive JIT' : 'gateways without a token cannot receive JIT');
+  var winNote = wins.unused ? 'never executed' : 'all have been used';
+
+  function item(label, value, note, warn) {
+    return '<div class="hygiene-item' + (warn ? ' warn' : '') + '">' +
+      '<div class="hy-lbl">' + label + '</div>' +
+      '<div class="hy-val">' + value + '</div>' +
+      '<div class="hy-note">' + note + '</div></div>';
+  }
+
+  el.innerHTML =
+    item('Versions', versionItems || '\u2014', versionNote, versions.length > 1) +
+    item('Token coverage', (coverage == null ? '\u2014' : coverage + '%'), tokNote, coverage != null && coverage < 100) +
+    item('Approved windows', String(wins.total || 0), (wins.unused || 0) + ' ' + (wins.unused === 1 ? 'window' : 'windows') + ' ' + winNote, !!wins.unused);
+
+  var issues = (versions.length > 1 ? 1 : 0) + (coverage != null && coverage < 100 ? 1 : 0) + (wins.unused ? 1 : 0);
+  if (flag) flag.textContent = issues ? issues + ' to look at' : 'all consistent';
+}
+
+function renderStatsHeatmap(d) {
+  var el = document.getElementById('stats-heatmap');
+  var peakEl = document.getElementById('heat-peak');
+  if (!el) return;
+  var grid = d.weekly_heatmap || [];
+  if (!grid.length || !grid.some(function (row) { return row.some(function (v) { return v > 0; }); })) {
+    el.innerHTML = '<p class="text-muted" style="padding:14px 2px">No activity in this window yet.</p>';
+    if (peakEl) peakEl.textContent = '';
+    return;
+  }
+  var max = 0, total = 0;
+  grid.forEach(function (row) { row.forEach(function (v) { max = Math.max(max, v); total += v; }); });
+
+  var head = '<div class="heat-row heat-head"><span class="heat-day"></span>';
+  for (var h = 0; h < 24; h++) {
+    head += '<span class="heat-hour">' + (h % 3 === 0 ? String(h).padStart(2, '0') : '') + '</span>';
+  }
+  head += '</div>';
+
+  var body = grid.map(function (row, di) {
+    var cells = row.map(function (v, hi) {
+      var lvl = heatLevel(v, max);
+      return '<span class="heat-cell l' + lvl + '" data-day="' + _HEAT_DAYS[di] + '" data-hour="' + hi + '"' +
+        ' title="' + _HEAT_DAYS[di] + ' ' + String(hi).padStart(2, '0') + ':00 — ' + v + ' command' + (v === 1 ? '' : 's') + '"></span>';
+    }).join('');
+    return '<div class="heat-row"><span class="heat-day">' + _HEAT_DAYS[di] + '</span>' + cells + '</div>';
+  }).join('');
+
+  el.innerHTML = head + body +
+    '<div class="heat-foot"><span>' + total.toLocaleString() + ' commands in this window</span>' +
+      '<span class="heat-key"><span class="heat-cell l1"></span><span class="heat-cell l2"></span><span class="heat-cell l3"></span><span class="heat-cell l4"></span> busier</span>' +
+    '</div>';
+
+  if (peakEl && d.busiest && d.busiest.count) {
+    peakEl.textContent = 'peak ' + _HEAT_DAYS[d.busiest.dow] + ' ' +
+      String(d.busiest.hour).padStart(2, '0') + ':00 · ' + d.busiest.count + ' cmds';
+  } else if (peakEl) { peakEl.textContent = ''; }
+}
+
 function renderStatsNodes(d) {
   var el = document.getElementById('stats-nodes'); if (!el) return;
   var gws = (d.per_gateway || []).slice();
@@ -5533,7 +5626,9 @@ function renderStatsTop(d) {
   el.innerHTML = top.slice(0, 10).map(function (c, i) {
     var pct = max > 0 ? Math.round((c.count || 0) / max * 100) : 0;
     return '<div class="cmd-row"><span class="cmd-rank">' + String(i + 1).padStart(2, '0') + '</span>' +
-      '<div class="cmd-main"><div class="cmd-name">' + escapeHtml(c.command) + '</div><div class="cmd-track"><div class="cmd-fill" style="width:' + pct + '%"></div></div></div>' +
+      '<div class="cmd-main"><div class="cmd-name">' + escapeHtml(c.command) +
+        (c.hosts > 1 ? ' <span class="cmd-hosts">' + c.hosts + ' hosts</span>' : '') +
+        '</div><div class="cmd-track"><div class="cmd-fill" style="width:' + pct + '%"></div></div></div>' +
       '<span class="cmd-count">' + (c.count || 0) + '</span></div>';
   }).join('');
 }
@@ -5578,6 +5673,8 @@ function renderStatistics() {
   initTallyInteractions();
   renderRhythm(d);
   renderStatsKpis(d);
+  renderStatsHygiene(d);
+  renderStatsHeatmap(d);
   renderStatsNodes(d);
   renderStatsTop(d);
   renderStatsCats(d);

@@ -1646,13 +1646,16 @@ def get_statistics(request: Request, days: int = 14, gateway_ip: str = None, gat
         else:
             filled.append({"date": d, "total": 0, "auto_approved": 0, "jit_approved": 0, "blocked": 0, "denied": 0})
 
-    # Top commands — split on shell chaining operators
-    cursor.execute(f'SELECT command FROM requests WHERE created_at >= ?{ip_filter}', (cutoff,) + ip_params)
-    all_cmds = [r[0] for r in cursor.fetchall() if r[0]]
+    # Top commands — split on shell chaining operators.
+    # Also count how many distinct gateways ran each one: a command spreading
+    # across hosts is a different signal from one host hammering it.
+    cursor.execute(f'SELECT command, target_ip FROM requests WHERE created_at >= ?{ip_filter}', (cutoff,) + ip_params)
+    rows = [(r[0], r[1]) for r in cursor.fetchall() if r[0]]
     import re as _re
     cmd_counts = {}
+    cmd_hosts = {}
     total_cmds = 0
-    for c in all_cmds:
+    for c, ip in rows:
         parts = _re.split(r'\s*(?:&&|\|\||;|\|)\s*', c)
         for p in parts:
             p = p.strip()
@@ -1660,7 +1663,11 @@ def get_statistics(request: Request, days: int = 14, gateway_ip: str = None, gat
                 continue
             total_cmds += 1
             cmd_counts[p] = cmd_counts.get(p, 0) + 1
-    top_commands = sorted([{"command": k, "count": v, "pct": round(v / total_cmds * 100, 1) if total_cmds > 0 else 0} for k, v in cmd_counts.items()], key=lambda x: x['count'], reverse=True)[:10]
+            cmd_hosts.setdefault(p, set()).add(ip)
+    top_commands = sorted([{"command": k, "count": v,
+                            "hosts": len(cmd_hosts.get(k, ())),
+                            "pct": round(v / total_cmds * 100, 1) if total_cmds > 0 else 0}
+                           for k, v in cmd_counts.items()], key=lambda x: x['count'], reverse=True)[:10]
 
     # Enrich top commands with descriptions if extended
     if extended:
@@ -1682,6 +1689,28 @@ def get_statistics(request: Request, days: int = 14, gateway_ip: str = None, gat
         ''', (cutoff,) + ip_params)
         hourly_data = {r['hour']: r['count'] for r in cursor.fetchall()}
         result['hourly_heatmap'] = [hourly_data.get(h, 0) for h in range(24)]
+
+        # Weekday × hour grid (Monday first) — "when does the fleet work?".
+        # strftime('%w') is 0=Sunday, so rotate to a Mon-first week.
+        cursor.execute(f'''
+            SELECT CAST(strftime('%w', created_at, 'unixepoch') AS INTEGER) AS dow,
+                   CAST(strftime('%H', created_at, 'unixepoch') AS INTEGER) AS hour,
+                   COUNT(*) AS count
+            FROM requests
+            WHERE created_at >= ?{ip_filter} AND status != 'window-rejected'
+            GROUP BY dow, hour
+        ''', (cutoff,) + ip_params)
+        grid = [[0] * 24 for _ in range(7)]
+        for r in cursor.fetchall():
+            row = (r['dow'] + 6) % 7          # 0 = Monday
+            grid[row][r['hour']] = r['count']
+        result['weekly_heatmap'] = grid
+        peak = {'dow': None, 'hour': None, 'count': 0}
+        for ri, row in enumerate(grid):
+            for hi, v in enumerate(row):
+                if v > peak['count']:
+                    peak = {'dow': ri, 'hour': hi, 'count': v}
+        result['busiest'] = peak
 
         # Automation trend — add approved/executed counts to daily data
         cursor.execute(f'''
@@ -1759,7 +1788,7 @@ def get_statistics(request: Request, days: int = 14, gateway_ip: str = None, gat
         # Command categories
         from core.cmd_categories import categorize_command
         cat_counts = {}
-        for c in all_cmds:
+        for c, _ip in rows:
             cat = categorize_command(c)
             cat_counts[cat] = cat_counts.get(cat, 0) + 1
         total_categorized = sum(cat_counts.values()) or 1
