@@ -5548,7 +5548,8 @@ function renderStatsHeatmap(d) {
   var body = grid.map(function (row, di) {
     var cells = row.map(function (v, hi) {
       var lvl = heatLevel(v, max);
-      return '<span class="heat-cell l' + lvl + '" data-day="' + _HEAT_DAYS[di] + '" data-hour="' + hi + '"' +
+      var peak = d.busiest && d.busiest.count && d.busiest.dow === di && d.busiest.hour === hi;
+      return '<span class="heat-cell l' + lvl + (peak ? ' peak' : '') + '" data-day="' + _HEAT_DAYS[di] + '" data-hour="' + hi + '"' +
         ' title="' + _HEAT_DAYS[di] + ' ' + String(hi).padStart(2, '0') + ':00 — ' + v + ' command' + (v === 1 ? '' : 's') + '"></span>';
     }).join('');
     return '<div class="heat-row"><span class="heat-day">' + _HEAT_DAYS[di] + '</span>' + cells + '</div>';

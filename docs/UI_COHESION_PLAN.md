@@ -275,7 +275,36 @@ The backend additions: `weekly_heatmap` (7×24, Monday-first, from
   leaving the table. Nine columns now fit because the table's cell padding was
   tightened for this view.
 
-### 1.14 Smaller repairs
+### 1.14 Pilot: "ink and signal" on Statistics
+
+Borrowed from [sora-to-ki](https://github.com/koimsurai/sora-to-ki) — the
+principles, not the assets (their code is AGPL, their content all rights
+reserved). Their system is three materials: **black is the paper, white is the
+ink, amber is the signal — ever on one point, never a fill.**
+
+Eshu spends amber on about ten different roles, which is why nothing stands
+out. This pilot applies the discipline to **one page only** (everything is
+scoped to `#view-stats` and reverts in one block):
+
+- **A display serif** (Instrument Serif, OFL, 21 KB, regular + italic) for the
+  page word, the 44 and the KPI values. Numbers in a ledger deserve a ledger
+  face; it is the single change that stops the page reading as a dark admin
+  theme.
+- **KPI cards → corner brackets.** Four hairline L-marks at the cell corners
+  instead of a filled card. Cheap, instrument-like, and it disappears when the
+  number isn't interesting.
+- **Sections are rules and air**, not filled panels: `border-top` and 34px of
+  margin, no background, no radius.
+- **Headings go to ink.** Amber is no longer a heading colour.
+- **The heat grid is ink; one cell is the signal.** The busiest hour is the only
+  amber cell in the grid — the rule made literal.
+- **Chips are ink outlines**, except the one that is a signal (the hygiene
+  count), which keeps the amber.
+
+Result: the only amber left on the page is *live data* — the chart, the fleet
+nodes, the peak cell, the alert count. Nothing in the chrome is amber.
+
+### 1.15 Smaller repairs
 
 - Fleet roster: hostnames were clipped to one letter (`h…`, twice) because the
   IP won the width fight. Hostname + state on line 1, IP on line 2.
