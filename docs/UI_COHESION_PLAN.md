@@ -328,7 +328,25 @@ The same ink-and-signal language, now on the screen people actually live in
   borderless card read as a stray pen mark; the hero now carries an `ANOMALY`
   chip beside the command's plain-language line.
 
-### 1.16 Smaller repairs
+### 1.16 Pilot 3: the table screens
+
+History and Gateways were the last two "panel" screens. Both now follow the
+same rules (scoped to `#view-history` / `#view-gateways`):
+
+- **Sections are rules.** The Command History panel and the Active Gateways
+  panel lose their fill, border and radius; a hairline and 30px of air separate
+  them. Gateway enrollment became a hairline `<details>` section rather than a
+  card above the table.
+- **The five states keep their colours**, because on this page colour *is* the
+  meaning — but the numbers are now 34px Instrument Serif inside corner
+  brackets, so the row reads as an instrument panel rather than five boxes.
+- **Tables are hairlines.** No sticky header fill (the blurred
+  `rgba(15,13,10,0.72)` band is gone), no zebra striping, no row shadows —
+  header rule, row rules, and a 3% ink hover.
+- On a phone the five states go two-up again (a 26px gap would push each card
+  to full width and make the row 500px tall).
+
+### 1.17 Smaller repairs
 
 - Fleet roster: hostnames were clipped to one letter (`h…`, twice) because the
   IP won the width fight. Hostname + state on line 1, IP on line 2.
