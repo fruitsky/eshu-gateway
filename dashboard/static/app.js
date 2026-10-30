@@ -4913,9 +4913,17 @@ function auditCategory(et) {
 }
 
 function auditBadgeClass(et) {
-  if (['jit_approved','jit_override_approved','window_request_approved','integration_call_approved','enrolled','connected','integration_created','integration_updated','agent_token_created','fleet_dispatched'].indexOf(et) !== -1) return 'badge-approved';
-  if (['jit_denied','disconnected','uninstalled','auto_deregistered','window_request_denied','integration_call_denied','integration_deleted','agent_token_deleted','agent_token_revoked','mcp_policy_denied'].indexOf(et) !== -1) return 'badge-denied';
-  return 'badge-info';
+  /* Severity decides the colour, not the event family. Before this, every
+     gateway disconnect painted a red row, so a normal overnight log looked
+     like an incident. */
+  // a human or policy refused something
+  if (['jit_denied','window_request_denied','integration_call_denied','mcp_policy_denied','command_blocked'].indexOf(et) !== -1) return 'badge-denied';
+  // a person or the policy cleared something
+  if (['jit_approved','jit_override_approved','window_request_approved','integration_call_approved','window_claimed'].indexOf(et) !== -1) return 'badge-approved';
+  // irreversible / destructive
+  if (['uninstalled','uninstall_triggered','auto_deregistered','integration_deleted','agent_token_deleted','agent_token_revoked'].indexOf(et) !== -1) return 'badge-blocked';
+  // ordinary state change or configuration edit — a fact, not an alarm
+  return 'badge-neutral';
 }
 
 function renderAuditFilters() {
@@ -5260,44 +5268,28 @@ function renderRhythm(d) {
       wrap.appendChild(col);
     })(i);
   }
-  var foot = document.getElementById('stats-rhythm-foot');
-  if (foot) {
-    var autoSeries = (d.automation_trend || []).map(function (a) { return a.automation_pct || 0; });
-    var auto = autoSeries.length ? Math.round(autoSeries.reduce(function (s, a) { return s + a; }, 0) / autoSeries.length) : 0;
-    var autoApproved = 0, jit = 0, blocked = 0, denied = 0;
-    (d.per_gateway || []).forEach(function (g) {
-      autoApproved += g.auto_approved || 0; jit += (g.total || 0) - (g.auto_approved || 0) - (g.blocked || 0) - (g.denied || 0);
-      blocked += g.blocked || 0; denied += g.denied || 0;
-    });
-    foot.innerHTML =
-      '<div class="rhythm-metric"><div class="lbl">Automation &middot; avg</div><div class="val"><b>' + auto + '%</b></div><div class="spark" id="rf-auto"></div></div>' +
-      '<div class="rhythm-metric"><div class="lbl">Auto-approved</div><div class="val">' + autoApproved + '</div><div class="spark" id="rf-auto2"></div></div>' +
-      '<div class="rhythm-metric"><div class="lbl">JIT &middot; human gate</div><div class="val">' + jit + '</div><div class="spark" id="rf-jit"></div></div>' +
-      '<div class="rhythm-metric"><div class="lbl">Blocked + denied</div><div class="val"><span style="color:var(--danger)">' + (blocked + denied) + '</span></div><div class="spark" id="rf-den"></div></div>';
-    sparkBars('rf-auto', autoSeries.length ? autoSeries : [0, 0, 0], false);
-    sparkBars('rf-auto2', autoSeries.length ? autoSeries : [0, 0, 0], false);
-    sparkBars('rf-jit', daily.map(function (x) { return x.total || 0; }), false);
-    sparkBars('rf-den', daily.map(function (x) { return x.total || 0; }), true);
-  }
 }
 
 function renderStatsKpis(d) {
   var el = document.getElementById('stats-summary-cards'); if (!el) return;
-  var total = 0; (d.daily || []).forEach(function (x) { total += x.total || 0; });
-  var autoSeries = (d.automation_trend || []).map(function (a) { return a.automation_pct || 0; });
-  var auto = autoSeries.length ? Math.round(autoSeries.reduce(function (s, a) { return s + a; }, 0) / autoSeries.length) : 0;
-  var jit = 0; (d.per_gateway || []).forEach(function (g) { jit += (g.total || 0) - (g.auto_approved || 0) - (g.blocked || 0) - (g.denied || 0); });
-  var gh = d.gateway_health || {}; var on = gh.online_gateways || 0, tot = gh.total_gateways || 0;
-  var dots = ''; for (var i = 0; i < tot; i++) { dots += '<span class="d' + (i < on ? '' : ' off') + '"></span>'; }
+  /* The chart above already prints the command total and the automation rate.
+     These four cards carry the facts it does not: who decided what. */
+  var auto = 0, jit = 0, blocked = 0, denied = 0;
+  (d.per_gateway || []).forEach(function (g) {
+    auto += g.auto_approved || 0;
+    blocked += g.blocked || 0;
+    denied += g.denied || 0;
+    jit += (g.total || 0) - (g.auto_approved || 0) - (g.blocked || 0) - (g.denied || 0);
+  });
+  var gh = d.gateway_health || {};
+  var on = gh.online_gateways || 0, tot = gh.total_gateways || 0;
+  var dots = '';
+  for (var i = 0; i < tot; i++) dots += '<span class="d' + (i < on ? '' : ' off') + '"></span>';
   el.innerHTML =
-    '<div class="kpi"><div class="kval">' + total + '</div><div class="klbl">Commands &middot; window</div><div class="spark" id="kp-cmds"></div></div>' +
-    '<div class="kpi"><div class="kval">' + auto + '%</div><div class="klbl">Automation avg</div><div class="spark" id="kp-auto"></div></div>' +
-    '<div class="kpi"><div class="kval plain">' + on + '<span style="font-size:12px;color:var(--muted)"> / ' + tot + '</span></div><div class="klbl">Gateways online</div><div class="gw-dots">' + dots + '</div></div>' +
-    '<div class="kpi"><div class="kval">' + jit + '</div><div class="klbl">JIT approvals</div><div class="spark" id="kp-jit"></div></div>';
-  var daily = (d.daily || []).map(function (x) { return x.total || 0; });
-  sparkBars('kp-cmds', daily, false);
-  sparkBars('kp-auto', autoSeries.length ? autoSeries : [0, 0, 0], false);
-  sparkBars('kp-jit', daily, false);
+    '<div class="kpi kpi-approved"><div class="kval">' + auto + '</div><div class="klbl">Auto-approved by policy</div></div>' +
+    '<div class="kpi kpi-pending"><div class="kval">' + jit + '</div><div class="klbl">Cleared by a human</div></div>' +
+    '<div class="kpi kpi-blocked"><div class="kval">' + (blocked + denied) + '</div><div class="klbl">Refused &middot; ' + blocked + ' policy / ' + denied + ' human</div></div>' +
+    '<div class="kpi"><div class="kval plain">' + on + '<span class="kpi-sub"> / ' + tot + '</span></div><div class="klbl">Gateways online</div><div class="gw-dots">' + dots + '</div></div>';
   el.querySelectorAll('.kpi').forEach(function (k) {
     k.addEventListener('mouseenter', function () { tallyTone(1975.53, false, 0.02, 0.3); });
   });
@@ -5388,17 +5380,6 @@ function renderStatistics() {
   if (!_statsData) return;
   var d = _statsData;
   initTallyInteractions();
-  var hud = document.getElementById('stats-hud-sum');
-  if (hud) {
-    var tc = 0, jit = 0;
-    (d.daily || []).forEach(function (x) { tc += x.total || 0; });
-    var psum = 0, alen = (d.automation_trend || []).length;
-    (d.automation_trend || []).forEach(function (a) { psum += a.automation_pct || 0; });
-    var auto = alen ? Math.round(psum / alen) : 0;
-    (d.per_gateway || []).forEach(function (g) { jit += (g.total || 0) - (g.auto_approved || 0) - (g.blocked || 0) - (g.denied || 0); });
-    var gh = d.gateway_health || {};
-    hud.innerHTML = '<span><span class="n">' + tc + '</span> commands</span><span><span class="n">' + auto + '%</span> automated</span><span><span class="n">' + (gh.online_gateways || 0) + '/' + (gh.total_gateways || 0) + '</span> online</span><span><span class="n">' + jit + '</span> jit</span>';
-  }
   renderRhythm(d);
   renderStatsKpis(d);
   renderStatsNodes(d);

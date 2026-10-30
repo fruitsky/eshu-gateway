@@ -136,15 +136,19 @@ rendered as the same `!`, told apart only by hovering.
 Now: risk keeps `!` (`aria-label="Risk: …"`), the anomaly is a small `new`
 chip, and both are announced.
 
-**2.3 Audit log is a wall of red**
+**2.3 Audit log is a wall of red** — ✅ shipped
 
-Six of seven rows are `DISCONNECTED` in `--state-denied`, so "red" no longer
-marks an exception. Same for the gateways table where every row said `offline`
-and the pulse animation ran on all of them.
+Was: `disconnected` mapped to `badge-denied`, so a routine overnight log was
+eleven red rows; red marked "a gateway went to sleep", not "something is
+wrong". The badge family was also internally inconsistent (`.badge-approved`
+was an amber tint with green text, `.badge-auto` an amber tint with blue text,
+`.badge-info` defined twice with orange and then ice).
 
-- Do: event badges get category colours (state change = neutral, policy
-  decision = state colour, failure = red); severity, not event type, drives hue.
-- Done: a normal day's log is mostly neutral.
+Now: **severity decides the colour.** Refusals (`jit_denied`,
+`*_denied`, `mcp_policy_denied`) are red; approvals green; irreversible actions
+(uninstalled, deregistered, token revoked) orange; everything else — connects,
+disconnects, enrollments, config edits — is neutral. Each badge's tint, text
+and border share one base colour.
 
 ### P1 — information architecture
 
@@ -179,17 +183,18 @@ Remaining in this area:
   ~30 characters. Consider a stacked mobile row (description, then command on
   its own line, actions right) rather than truncation.
 
-**2.5 Statistics repeats itself three times**
+**2.5 Statistics repeats itself three times** — ✅ shipped
 
-The same numbers appear in the chart header (`34 commands · automated 27%`), in
-the chart body, and again in the KPI cards below (`34 COMMANDS · WINDOW`,
-`27% AUTOMATION AVG`). Four mini bar charts with no axis or labels sit under
-the chart as ornament.
+Was: `34 commands` in the page HUD, again as the chart's hero number, again in
+a KPI card; `27%` twice; plus four spark-panels under the chart whose bars had
+no axis, no period and no relation to the number above them (the "Auto-approved
+9" panel plotted the automation *rate*).
 
-- Do: one summary line, chart, then the KPI cards — delete the duplicated
-  hero numbers; either label the sparkbars with a period and a total or remove
-  them.
-- Done: each number appears once.
+Now: the HUD carries no numbers, the chart owns the total + window + automation
+rate, and the four cards carry the facts the chart does not — **9 auto-approved
+by policy · 15 cleared by a human · 10 refused (6 policy / 4 human) · 0/5
+gateways online** — coloured in the same language as History. The spark panels
+are gone; each number appears once.
 
 **2.6 Controls is a 1,100px-wide list of one-line rules**
 
@@ -242,6 +247,17 @@ and on mobile only two *intended* restorations — the tables render at the
 overriding it), and the uninstall confirmation field finally shows the
 `--danger` border its rule always intended (it lost to a more specific
 `input[type=text]` rule).
+
+**Undefined tokens (found during this pass).** Four custom properties were used
+161 times and never defined anywhere in the project: `--border` (82 uses),
+`--muted` (69), `--info` (7), `--border-subtle` (3). Every
+`border: 1px solid var(--border)` was therefore **invalid at computed-value
+time and silently dropped**, and every `color: var(--muted)` fell back to
+`inherit` — which is why some panels had borders and others did not, with no
+rule explaining the difference. They now exist as aliases
+(`--border` → `--border-color`, `--muted` → `--text-muted`, `--info` →
+`--state-auto`), which restores ~160 declarations. `todo: fold the aliases into
+direct token names once the usage sites are touched`.
 
 Still open here:
 
