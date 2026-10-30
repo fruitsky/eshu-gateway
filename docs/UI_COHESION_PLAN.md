@@ -124,6 +124,21 @@ The constellation itself stays unique to Command Center, because there it is
 *not* decoration: it is the fleet map — one figure, one star per gateway. That
 hierarchy is the point: the sky is everywhere, the map is where the fleet is.
 
+**The fleet is in every header.** Each page's sky band carries the same
+constellation the Command Center draws at full size — 150×40, the same figure,
+the same stars — with one amber dot per online gateway and a hollow dot per
+offline one. It is not decoration: it says *which figure the fleet forms* and
+*how much of it is up*, from any page. It rides with the eyebrow text rather
+than the right-hand controls, because that cluster grows per page (Statistics
+has a selector plus two buttons) and a map that moves around is worse than no
+map. It redraws only when the fleet's shape or health changes.
+
+This also exposed a real bug in the main sky: every figure was centred on
+`(0.5, 0.5)` of its normalised box rather than on its own bounding box
+(`w/2, h/2`), so a wide-but-short figure like Cassiopeia sat noticeably above
+where it was meant to be. Both the big chart and the mini-map are centred on
+their own extents now.
+
 Rejected on the way: a star glyph before every section title (it becomes a flex
 item in `.widget-header` and re-centres the title — visible in the screenshots
 of that attempt), and per-page constellations (kitsch, and they would compete

@@ -1399,7 +1399,23 @@ async function showWindowHistory(windowId) {
 }
 
 // ── Init ─────────────────────────────────────────────────────────────────
-async function initDashboard() { updateNotifyUI(); fetchVersion(); fetchRequests(); fetchCmdDescs(); fetchSuggestions(); refreshPasswordUI(); fetchFreezeStatus(); fetchFleetCommands(); fetchGateways(); fetchIntegrations(); loadSessionNames(); }
+function ensureHudSky() {
+  document.querySelectorAll('.hud').forEach(function (hud) {
+    if (hud.querySelector('.hud-sky')) return;
+    var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('class', 'hud-sky');
+    svg.setAttribute('viewBox', '0 0 150 40');
+    svg.setAttribute('role', 'img');
+    /* Ride with the eyebrow, not the controls: the right-hand cluster grows
+       and wraps per page (Statistics has a selector plus two buttons), and a
+       map that moves around is worse than no map. */
+    var txt = hud.querySelector('.hud-txt');
+    if (txt) txt.appendChild(svg); else hud.appendChild(svg);
+  });
+  renderHudSky();
+}
+
+async function initDashboard() { ensureHudSky(); updateNotifyUI(); fetchVersion(); fetchRequests(); fetchCmdDescs(); fetchSuggestions(); refreshPasswordUI(); fetchFreezeStatus(); fetchFleetCommands(); fetchGateways(); fetchIntegrations(); loadSessionNames(); }
 
 // ── Requests ─────────────────────────────────────────────────────────────
 let _requestSearchQuery = '';
@@ -1461,6 +1477,7 @@ async function fetchRequests() {
     detectNewJITs(data);
     requestsData = data;
     updateHudSummaries();
+  renderHudSky();
     // Also load AI-initiated window requests awaiting approval
     try {
       const wrRes = await fetch('/api/window-requests/pending');
@@ -1692,6 +1709,64 @@ function placeGatewayNode(g,x,y,cls,constName){
   sky.appendChild(n);
 }
 
+/* Pick the figure(s) that hold the fleet: the smallest constellation with at
+   least N stars, else the biggest ones added until every gateway has a star.
+   Used by the Command Center sky and by the mini-map in every page header. */
+function pickConstellations(n) {
+  var sorted=CONSTELLATIONS.slice().sort(function(a,b){return a.pts.length-b.pts.length;});
+  for (var c=0;c<sorted.length;c++) { if (sorted[c].pts.length>=n) return [sorted[c]]; }
+  var out=[], cap=0;
+  for (var d=sorted.length-1;d>=0;d--) { out.push(sorted[d]); cap+=sorted[d].pts.length; if (cap>=n) break; }
+  return out;
+}
+
+/* ── The fleet, in every page header ─────────────────────────────────────
+   The same figure the Command Center draws at full size, at 150x46, on every
+   inner page. It is not decoration: the dots are the gateways (amber online,
+   muted offline) laid on the same constellation, so the header tells you the
+   shape and health of the fleet from wherever you are. */
+var _hudSkySig = '';
+function renderHudSky() {
+  var hosts = document.querySelectorAll('.hud-sky');
+  if (!hosts.length) return;
+  var gws = (_gatewaysData || []).filter(function (g) { return g.hostname || g.ip; });
+  var chosen = pickConstellations(Math.max(gws.length, 1));
+  // cheap signature: this runs on every poll, so skip the DOM work when the
+  // fleet has not changed shape or health
+  var sig = chosen.map(function (c) { return c.name; }).join('+') + '|' +
+    gws.map(function (g) { return g.ip + (gwIsOnline(g) ? '1' : '0'); }).join(',');
+  if (sig === _hudSkySig) return;
+  _hudSkySig = sig;
+  var W = 150, H = 40, PAD = 5;
+  var slotW = (W - PAD * 2) / Math.max(chosen.length, 1);
+  var svg = '', pts = [];
+  chosen.forEach(function (cons, idx) {
+    var s = Math.min((slotW * 0.86) / cons.w, (H - PAD * 2) / cons.h);
+    var cx = PAD + slotW * (idx + 0.5), cy = H / 2;
+    var p = cons.pts.map(function (q) { return [cx + (q[0] - cons.w / 2) * s, cy + (q[1] - cons.h / 2) * s]; });
+    cons.lines.forEach(function (l) {
+      svg += '<line x1="' + p[l[0]][0].toFixed(1) + '" y1="' + p[l[0]][1].toFixed(1) +
+             '" x2="' + p[l[1]][0].toFixed(1) + '" y2="' + p[l[1]][1].toFixed(1) + '"/>';
+    });
+    p.forEach(function (q) { pts.push({ x: q[0], y: q[1] }); });
+  });
+  // figure stars
+  pts.forEach(function (q) {
+    svg += '<circle class="ms" cx="' + q.x.toFixed(1) + '" cy="' + q.y.toFixed(1) + '" r="1"/>';
+  });
+  // gateways sit on the first N stars
+  gws.slice(0, pts.length).forEach(function (g, i) {
+    var q = pts[i];
+    var online = !g.last_seen || gwIsOnline(g);
+    svg += '<circle class="' + (online ? 'mg on' : 'mg off') + '" cx="' + q.x.toFixed(1) + '" cy="' + q.y.toFixed(1) + '" r="2"/>';
+  });
+  hosts.forEach(function (h) {
+    h.innerHTML = svg;
+    h.setAttribute('aria-label', 'Fleet: ' + chosen.map(function (c) { return c.name + ', ' + c.meaning; }).join(' and ') +
+      ' — ' + gws.length + ' gateway' + (gws.length === 1 ? '' : 's'));
+  });
+}
+
 function buildStarfield(layoutIdx){
   var sky=document.getElementById('sky');
   var svg=document.getElementById('const-lines');
@@ -1707,17 +1782,7 @@ function buildStarfield(layoutIdx){
   var pendingSet={};
   (requestsData||[]).forEach(function(r){ if(r.status==='pending'){ var k=r.hostname||r.target_ip; if(k) pendingSet[k]=true; } });
   var N=gws.length;
-  /* The fleet is *one* constellation, not a sky full of them.
-     Pick the smallest figure that can hold every gateway, so the chart has a
-     name and a shape a person can actually recognise — 6 nodes → the Big
-     Dipper. Extra figures only appear once the fleet outgrows the sky. */
-  var sorted=CONSTELLATIONS.slice().sort(function(a,b){return a.pts.length-b.pts.length;});
-  var chosen=[], capacity=0, fit=null;
-  for(var c=0;c<sorted.length;c++){ if(sorted[c].pts.length>=N){ fit=sorted[c]; break; } }
-  if(fit){ chosen=[fit]; }
-  else {
-    for(var d=sorted.length-1;d>=0;d--){ chosen.push(sorted[d]); capacity+=sorted[d].pts.length; if(capacity>=N) break; }
-  }
+  var chosen=pickConstellations(N);
   // shuffle only the order of multi-figure sets so layouts vary between visits
   if(chosen.length>1) chosen=shuffleArr(chosen, R);
   _activeConstellations = chosen.map(function(c){ return c.name; });
@@ -1738,7 +1803,7 @@ function buildStarfield(layoutIdx){
     var cy=H*0.48+(R()-0.5)*H*0.10;
     cx=Math.min(Math.max(cx,44+hw),Math.max(44+hw,W-44-hw));
     cy=Math.min(Math.max(cy,44+hh),Math.max(44+hh,H-54-hh));  /* keep the foot of the chart clear of the key line */
-    var raw=cons.pts.map(function(p){ return {x:cx+(p[0]-0.5)*s, y:cy+(p[1]-0.5)*s}; });
+    var raw=cons.pts.map(function(p){ return {x:cx+(p[0]-cons.w/2)*s, y:cy+(p[1]-cons.h/2)*s}; });
     var fp=fitSafe(raw, 44, W-44, 44, H-54);
     var base=pts.length;
     fp.forEach(function(p){ pts.push(p); ptConst.push(cons.name); });
@@ -3413,6 +3478,7 @@ async function fetchGateways() {
   const res = await fetch('/api/gateways'); const data = await res.json();
   _gatewaysData = data;
   updateHudSummaries();
+  renderHudSky();
   var clientNow = Math.floor(Date.now() / 1000);
   data.forEach(function(g) {
     if ((g.override_remaining || 0) > 0) {

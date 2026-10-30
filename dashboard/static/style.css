@@ -2262,7 +2262,7 @@ input::placeholder, textarea::placeholder { color: #9c8e7a; }
   content:''; position:absolute; left:18px; right:18px; bottom:0; height:1px;
   background:linear-gradient(90deg, transparent, rgba(245,158,11,0.22) 18%, rgba(245,158,11,0.22) 82%, transparent);
 }
-.hud-txt{font-family:'JetBrains Mono',monospace;font-size: 11px;letter-spacing:2px;text-transform:uppercase;color:#a89880;display:flex;align-items:center;gap:10px}
+.hud-txt{font-family:'JetBrains Mono',monospace;font-size: 11px;letter-spacing:2px;text-transform:uppercase;color:#a89880;display:flex;align-items:center;gap:10px;flex:1 1 auto;min-width:0}
 .hud-txt b{color:var(--accent);font-weight:700;}
 .hud-right{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .hud-sum{display:flex;gap:14px;font-family:'JetBrains Mono',monospace;font-size: 11px;letter-spacing:1px;color:#a89880;flex-wrap:wrap}
@@ -2975,3 +2975,17 @@ input::placeholder, textarea::placeholder { color: #9c8e7a; }
    the brand so the rail reads as a place rather than a floating list. */
 .sidebar { border-right: 1px solid rgba(245,158,11,0.09); }
 .sidebar-brand { border-bottom: 1px solid rgba(245,158,11,0.06); }
+
+/* ── The fleet, in the header of every inner page ────────────────────────── */
+.hud-sky {
+  flex: 0 0 156px;
+  height: 40px;
+  margin: 0 0 0 6px;
+  opacity: 0.95;
+  overflow: visible;
+}
+.hud-sky line { stroke: rgba(245,158,11,0.45); stroke-width: 0.7; }
+.hud-sky circle.ms { fill: rgba(205,216,230,0.55); }
+.hud-sky circle.mg.on { fill: var(--accent); filter: drop-shadow(0 0 3px rgba(245,158,11,0.65)); }
+.hud-sky circle.mg.off { fill: none; stroke: rgba(156,142,122,0.75); stroke-width: 1.2; }
+@media (max-width: 1180px) { .hud-sky { display: none; } }
