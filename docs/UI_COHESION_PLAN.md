@@ -218,23 +218,28 @@ refused instead of printing one misleading "automated" figure. The arbitrary
 connector lines between the four busiest nodes are gone — they implied a trend
 that did not exist. Nodes are `role="button" tabindex="0"` with Enter/Space.
 
-**2.6 Controls is a 1,100px-wide list of one-line rules**
+**2.6 Controls is a 1,100px-wide list of one-line rules** — ✅ shipped
 
-Thirteen allowlist rows, each a full-width bar with a `×` at the far right,
-~450px tall for 13 short strings. The `×` is ~1,000px from the text it deletes.
+Was: 13 allowlist rows, each a full-width bar with a `×` at the far right —
+~450px of height for 13 short strings, and the delete control ~1,000px from the
+text it deletes (the classic Fitts-law failure).
 
-- Do: two-column denser grid or a grouped list; move the destructive control
-  next to the row content; add a count per section.
-- Done: a 20-rule policy fits on one screen.
+Now: chips size to their command and wrap into rows, so the `×` sits next to
+the text it removes and the same policy takes about a third of the height —
+20+ rules fit where 13 used to sprawl. Commands longer than 46 characters still
+ellipsis with the full value in the `title`.
 
-**2.7 Gateways: enrollment owns the top of the page**
+**2.7 Gateways: enrollment owns the top of the page** — ✅ shipped
 
-The keys + one-liner card takes ~40% of the viewport; the actual fleet table —
-what you open the page for — starts below the fold on smaller laptops.
+Was: the SSH keys + one-liner card took ~40% of the viewport, so the fleet
+table — the reason you open the page — started at y≈530 and fell below the fold
+on a laptop.
 
-- Do: collapse enrollment into a `<details>` / modal opened by an "Add gateway"
-  button; the table becomes the page.
-- Done: the fleet table starts within the first 300px.
+Now: enrollment is a `<details>` that is closed by default, with the hint "Add a
+host · SSH keys & one-liner" in its summary. The table starts at ~160px and the
+whole fleet is visible without scrolling. Nothing was moved out of the DOM, so
+every handler (copy one-liner, generate token, edit keys) still works — open the
+panel to use them.
 
 ### P2 — system and craft
 

@@ -314,8 +314,11 @@
         <div class="hud-txt"><b>The nodes</b> &middot; each keeps the threshold</div>
         <div class="hud-right"><span class="hud-sum" id="gateways-hud-sum"><span><span class="n">&mdash;</span> online</span></span></div>
       </div>
-      <div class="widget" data-od-id="gateway-enrollment">
-        <div class="widget-header">Gateway Enrollment</div>
+      <details class="widget enroll-panel" data-od-id="gateway-enrollment">
+        <summary class="widget-header enroll-summary">
+          <span>Gateway Enrollment</span>
+          <span class="enroll-hint" id="enroll-hint">Add a host &middot; SSH keys &amp; one-liner</span>
+        </summary>
         <p class="text-sm mb-4 text-muted">Store SSH keys once, then generate a one-liner to install gateways on any new host.</p>
         <div class="grid grid-cols-1 lg:grid-cols-2 gap-5">
           <div class="panel">
@@ -338,7 +341,7 @@
             <span id="token-countdown" class="hidden ml-3 text-xs font-mono"></span>
           </div>
         </div>
-      </div>
+      </details>
       <div class="widget mt-5" data-od-id="gateway-table">
         <div class="widget-header">Active Gateways</div>
         <div class="table-wrap"><table>

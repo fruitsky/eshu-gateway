@@ -379,15 +379,19 @@ button::-moz-focus-inner { border: 0; padding: 0; }
     background: var(--bg-base); border: 1px solid var(--border-color);
     border-radius: var(--radius); padding: var(--space-2);
     min-height: 120px; max-height: 400px; overflow-y: auto;
-    display: flex; flex-direction: column; gap: 6px;
+    /* Chips size to their command instead of spanning the full 1,100px row:
+       the delete control sits next to the text it deletes, and 13 rules fit in
+       a third of the height. */
+    display: flex; flex-direction: row; flex-wrap: wrap; align-content: flex-start; gap: 6px;
   }
   .policy-chip {
-    display: flex; align-items: center; justify-content: space-between; gap: 8px;
-    width: 100%;
+    display: inline-flex; align-items: center; gap: 8px;
+    width: auto; max-width: 100%;
     background: var(--bg-hover); border: 1px solid var(--border-color);
-    border-radius: var(--radius-sm); padding: 4px 10px;
+    border-radius: var(--radius-sm); padding: 4px 6px 4px 10px;
     font-size: var(--text-xs); font-family: monospace; color: var(--text-main);
   }
+  .policy-chip code { max-width: 46ch; }
   .policy-chip code { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .policy-chip:nth-child(even) { background: var(--bg-stripe); }
   .policy-chip.core { border-color: rgba(245, 158, 11, 0.4); }
@@ -2941,3 +2945,19 @@ input::placeholder, textarea::placeholder { color: #9c8e7a; }
   white-space: nowrap;
 }
 .hb-age { margin-left: 6px; color: var(--text-muted); }
+
+/* Gateways: enrollment is a setup task, not the page. Folded away, the fleet
+   table is what you see on arrival. */
+.enroll-panel { padding: 0; }
+.enroll-summary {
+  cursor: pointer; list-style: none;
+  display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
+  padding: 16px 24px; margin: 0;
+}
+.enroll-summary::-webkit-details-marker { display: none; }
+.enroll-summary::after { content: '▾'; color: var(--text-muted); margin-left: 6px; }
+.enroll-panel[open] .enroll-summary::after { content: '▴'; }
+.enroll-panel[open] .enroll-summary { border-bottom: 1px solid var(--border-color); margin-bottom: 16px; }
+.enroll-hint { font-family: 'JetBrains Mono', monospace; font-size: 11px; letter-spacing: 1px; text-transform: none; color: var(--text-muted); font-weight: 400; }
+.enroll-panel > p, .enroll-panel > .grid { margin-left: 24px; margin-right: 24px; }
+.enroll-panel > .grid { margin-bottom: 20px; }
