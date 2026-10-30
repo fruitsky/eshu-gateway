@@ -1680,6 +1680,40 @@ function fitSafe(pts,x0,x1,y0,y1){
 }
 function gwIni(name){ name=String(name||'').toLowerCase().replace(/[^a-z0-9]/g,''); return name.substring(0,2).toUpperCase(); }
 
+/* The sky has depth: the dust drifts a few pixels against the pointer while the
+   nodes and their lines stay exactly where the data put them. */
+var _skyParallaxBound = false;
+function initSkyParallax(){
+  if (_skyParallaxBound) return;
+  _skyParallaxBound = true;
+  if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  /* Bound on the document: the Command Center re-renders its own markup on
+     every poll, so a listener on .starfield-wrap would be left on a detached
+     node after the first refresh. */
+  var raf = null, tx = 0, ty = 0;
+  function apply(){
+    raf = null;
+    var dust = document.getElementById('dust-layer');
+    if (dust) dust.style.transform = 'translate3d(' + (tx * 9).toFixed(1) + 'px,' + (ty * 6).toFixed(1) + 'px,0)';
+  }
+  document.addEventListener('mousemove', function(e){
+    var wrap = e.target && e.target.closest ? e.target.closest('.starfield-wrap') : null;
+    if (!wrap) return;
+    var r = wrap.getBoundingClientRect();
+    tx = ((e.clientX - r.left) / r.width - 0.5) * 2;
+    ty = ((e.clientY - r.top) / r.height - 0.5) * 2;
+    if (!raf) raf = requestAnimationFrame(apply);
+  });
+  document.addEventListener('mouseout', function(e){
+    var wrap = e.target && e.target.closest ? e.target.closest('.starfield-wrap') : null;
+    if (!wrap) return;
+    var to = e.relatedTarget;
+    if (to && wrap.contains(to)) return;
+    var dust = document.getElementById('dust-layer');
+    if (dust) dust.style.transform = '';
+  });
+}
+
 function buildStaticSky(){
   var layer=document.getElementById('dust-layer');
   if(!layer || layer.dataset.built) return;
@@ -1688,6 +1722,9 @@ function buildStaticSky(){
     var d=document.createElement('span');
     d.className='dust'+(Math.random()>0.5?' b':'');
     d.style.left=(Math.random()*100).toFixed(1)+'%'; d.style.top=(Math.random()*100).toFixed(1)+'%';
+    /* each grain breathes on its own clock, so the field never pulses in step */
+    d.style.animationDuration=(7+Math.random()*9).toFixed(1)+'s';
+    d.style.animationDelay='-'+(Math.random()*12).toFixed(1)+'s';
     layer.appendChild(d);
   }
   var ints=(_integrationsData||[]).filter(function(i){return i.enabled;});
@@ -1901,7 +1938,9 @@ function buildStarfield(layoutIdx){
       used[pi]=true;
     }
   });
-  pts.forEach(function(p,pi){ if(used[pi]) return; var s=document.createElement('span'); s.className='field-star'; s.style.left=(p.x/W*100).toFixed(2)+'%'; s.style.top=(p.y/H*100).toFixed(2)+'%'; sky.appendChild(s); });
+  pts.forEach(function(p,pi){ if(used[pi]) return; var s=document.createElement('span'); s.className='field-star'; s.style.left=(p.x/W*100).toFixed(2)+'%'; s.style.top=(p.y/H*100).toFixed(2)+'%';
+    s.style.animationDuration=(6+Math.random()*7).toFixed(1)+'s'; s.style.animationDelay='-'+(Math.random()*9).toFixed(1)+'s';
+    sky.appendChild(s); });
 }
 
 var _activeConst=null;
@@ -2250,18 +2289,10 @@ function renderAttention() {
   var items = attentionItems();
   var gws = (_gatewaysData || []).filter(function (g) { return g.hostname || g.ip; });
   var online = gws.filter(gwIsOnline).length;
-  if (!items.length) {
-    /* Nothing to do: instead of a sentence that repeats what the headline
-       already says, show the fleet itself — one dot per gateway, eight to a
-       row, and a slow wave crossing them while no one is waiting. */
-    var pending = (requestsData || []).filter(function (r) { return r.status === 'pending' && r.ttl > 0; }).length;
-    var dots = gws.map(function (g, i) {
-      return '<span class="fd' + (gwIsOnline(g) ? ' on' : ' off') + '" style="--i:' + i + '"' +
-        ' title="' + escapeHtml(g.hostname || g.ip) + (gwIsOnline(g) ? ' · online' : ' · offline') + '"></span>';
-    }).join('');
-    return '<div class="fleet-dots' + (pending ? '' : ' flowing') + '" role="img" aria-label="' +
-      online + ' of ' + gws.length + ' gateways online' + (pending ? '' : ', all quiet') + '">' + dots + '</div>';
-  }
+  /* Nothing to do means nothing to show: the constellation above already draws
+     one star per gateway with the same information, and a second, smaller copy
+     of a fact is decoration. */
+  if (!items.length) return '';
   return '<div class="cc-attention">' +
     '<div class="att-head"><span>Needs attention</span><span class="att-count">' + items.length + '</span></div>' +
     items.map(function (it) {
@@ -2899,6 +2930,7 @@ function renderJitTickets() {
   container.innerHTML = renderEmptyState(total);
   buildStaticSky();
   buildStarfield(_layout);
+  initSkyParallax();
   if (total > 0) renderQueue(allItems);
   refreshRecentSessions();
 }

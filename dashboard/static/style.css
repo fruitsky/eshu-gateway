@@ -3744,28 +3744,15 @@ input::placeholder, textarea::placeholder { color: #9c8e7a; }
   .hud-sky { display: none; }
 }
 
-/* ── The fleet at rest ─────────────────────────────────────────────────────
-   One dot per gateway, eight to a row. When nothing is waiting they carry a
-   slow wave — the fleet is breathing, not asking. */
-.fleet-dots {
-  display: grid;
-  grid-template-columns: repeat(8, 9px);
-  justify-content: center;
-  gap: 10px;
-  margin: 26px auto 10px;
-}
-.fd {
-  width: 9px; height: 9px; border-radius: 50%;
-  background: transparent; border: 1px solid var(--rule);
-}
-.fd.on { background: var(--accent); border-color: var(--accent); opacity: 0.85; }
-.fd.off { border-color: var(--rule); opacity: 0.5; }
-.fleet-dots.flowing .fd.on { animation: fleet-flow 4.2s ease-in-out infinite; animation-delay: calc(var(--i) * 110ms); }
-@keyframes fleet-flow {
-  0%, 100% { opacity: 0.4; transform: scale(1); }
-  45%      { opacity: 1;   transform: scale(1.35); box-shadow: 0 0 8px rgba(245,158,11,0.55); }
-}
-@media (max-width: 480px) {
-  .fleet-dots { grid-template-columns: repeat(8, 7px); gap: 7px; }
-  .fd { width: 7px; height: 7px; }
-}
+
+/* ── A living sky ─────────────────────────────────────────────────────────
+   Atmosphere, not signal: the dust breathes on its own clock and drifts a few
+   pixels against the pointer. The nodes and their lines never move — those are
+   data. prefers-reduced-motion turns all of it off. */
+.dust-layer { will-change: transform; transition: transform .45s cubic-bezier(.22,1,.36,1); }
+.dust { animation-name: dust-twinkle; animation-timing-function: ease-in-out; animation-iteration-count: infinite; }
+.dust.b { animation-name: dust-twinkle-soft; }
+@keyframes dust-twinkle { 0%, 100% { opacity: 0.16; } 50% { opacity: 0.42; } }
+@keyframes dust-twinkle-soft { 0%, 100% { opacity: 0.10; } 50% { opacity: 0.30; } }
+.field-star { animation-name: star-breathe; animation-timing-function: ease-in-out; animation-iteration-count: infinite; }
+@keyframes star-breathe { 0%, 100% { opacity: 0.45; } 50% { opacity: 0.85; } }

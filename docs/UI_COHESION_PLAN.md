@@ -401,15 +401,30 @@ Three follow-ups on the Command Center:
 - **The headline came down to 30px.** At 38 it competed with the ledger below
   it.
 - **"All clear" is gone.** It repeated what the headline already said (the
-  gateway count) and the word was the only green text on the page. In its place,
-  when nothing is waiting: **one dot per gateway, eight to a row** — amber for
-  online, hollow for offline — carrying a slow wave (110ms stagger, 4.2s cycle)
-  so the fleet reads as *breathing* rather than *idle*. The sub-line now says
-  only what the dots cannot: who is down, and when anything last happened.
+  gateway count) and the word was the only green text on the page. The sub-line
+  now says only what nothing else does: who is down, and when anything last
+  happened.
+- **The dot grid that replaced it was also removed.** It was a second, smaller
+  rendering of exactly what the constellation already draws — one mark per
+  gateway, amber online, hollow offline — which is the same redundancy as the
+  old text. When there is nothing to do, the attention slot renders nothing at
+  all.
 - **Override and freeze banners are ink strips**, not red slabs: hairline
   borders, mono uppercase status, a single pulsing signal dot (amber for
   override, red for freeze), and an ink-outlined action. The old gradient +
   white bold + full-banner pulse fought everything around it.
+
+**Life went into the sky instead of new chrome:**
+
+- **The dust breathes**, each grain on its own clock (7–16s, random phase), so
+  the field never pulses in step.
+- **The constellation's own faint stars** breathe too (6–13s), which makes the
+  figure feel inhabited rather than printed.
+- **A pointer parallax on the dust only** — ±9px horizontal, ±6px vertical,
+  rAF-throttled, bound at document level (the Command Center re-renders on every
+  poll, so a listener on the element would be orphaned after one refresh). The
+  nodes and their lines never move: those are data, not atmosphere.
+- All of it is off under `prefers-reduced-motion`.
 
 **Ambience (`B`) got more to listen to.** The bed now breathes — a 0.04Hz LFO
 sweeps the low-pass cutoff ±380Hz — and every 7–15s a sparse high shimmer plays
