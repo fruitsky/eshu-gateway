@@ -42,6 +42,17 @@ check "dev-install"    bash -n dashboard/static/dev/eshu-gateway-install.sh
 check "main.py"        python3 -m py_compile dashboard/main.py
 check "database.py"    python3 -m py_compile dashboard/database.py
 
+# Design tokens (style.css): undefined custom properties, type below 11px,
+# and the !important budget. Output is shown only when it fails.
+echo -n "  ui tokens... "
+if ui_out=$(python3 scripts/ui_check.py 2>&1); then
+  echo "OK"
+else
+  echo "FAIL"
+  echo "$ui_out" | sed 's/^/    /'
+  errors=$((errors+1))
+fi
+
 echo ""
 if [ "$errors" -eq 0 ]; then
   echo "✅ All checks passed"

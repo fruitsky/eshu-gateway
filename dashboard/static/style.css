@@ -3126,7 +3126,7 @@ input::placeholder, textarea::placeholder { color: #9c8e7a; }
 .heat-row { display: grid; grid-template-columns: 34px repeat(24, minmax(0, 1fr)); gap: 2px; margin-bottom: 2px; }
 .heat-head { margin-bottom: 6px; }
 .heat-hour {
-  font-family: 'JetBrains Mono', monospace; font-size: 10px; letter-spacing: .5px;
+  font-family: 'JetBrains Mono', monospace; font-size: 11px; letter-spacing: .5px;
   color: var(--text-faint); text-align: left; line-height: 1;
 }
 .heat-day {
@@ -3157,7 +3157,7 @@ input::placeholder, textarea::placeholder { color: #9c8e7a; }
 @media (max-width: 900px) {
   .heat-row { grid-template-columns: 24px repeat(24, minmax(0, 1fr)); }
   .heat-cell { height: 10px; }
-  .heat-day { font-size: 10px; }
+  .heat-day { font-size: 11px; }
 }
 
 /* ── Fleet hygiene strip ─────────────────────────────────────────────────── */
@@ -3210,7 +3210,8 @@ input::placeholder, textarea::placeholder { color: #9c8e7a; }
 
 /* Gateways carries nine columns now; tighter cells keep the Actions column
    inside the panel instead of behind a horizontal scroll. */
-#view-gateways table th, #view-gateways table td { padding-left: 10px !important; padding-right: 10px !important; }
+#view-gateways table th.px-4, #view-gateways table td.px-4,
+#view-gateways table th, #view-gateways table td { padding-left: 10px; padding-right: 10px; }
 
 /* ==============================================================
    PILOT — "ink and signal" on Statistics
@@ -3455,7 +3456,7 @@ input::placeholder, textarea::placeholder { color: #9c8e7a; }
 #view-home .jit-ticket.urgent .jit-human::after {
   content: 'anomaly';
   font-family: 'JetBrains Mono', monospace;
-  font-size: 10px; letter-spacing: 1px; text-transform: uppercase;
+  font-size: 11px; letter-spacing: 1px; text-transform: uppercase;
   color: var(--state-pending); border: 1px solid rgba(251,191,36,0.35);
   border-radius: 2px; padding: 0 4px; margin-left: 8px;
 }
@@ -3550,3 +3551,69 @@ input::placeholder, textarea::placeholder { color: #9c8e7a; }
   #view-history .stat-card { padding: 10px 12px 12px; }
   #view-history .stat-card .stat-value { font-size: 28px; }
 }
+
+/* ==============================================================
+   PILOT (4) — the rail
+   The sidebar is the last piece of chrome on every screen. It keeps the sky
+   (it is the one surface that would otherwise be plain paper) but loses the
+   frosted glass, the filled active pill and the square bullets.
+   ============================================================== */
+
+/* Black is the paper: the rail is opaque, and the stars in it are deliberate. */
+.sidebar {
+  background: var(--bg-base);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  border-right: 1px solid var(--rule-weak);
+}
+.sidebar::before { opacity: 0.75; }
+
+/* The wordmark takes the display face, like every page title. */
+.sidebar-brand-text .brand-name {
+  font-family: var(--serif);
+  font-size: 19px;
+  font-weight: 400;
+  letter-spacing: 0.2px;
+  text-transform: none;
+}
+.sidebar-brand-text .brand-sub {
+  font-size: 11px;
+  letter-spacing: 2.2px;
+  color: var(--text-faint);
+}
+.sidebar-brand { border-bottom: none; }
+.sidebar-brand-logo { border-radius: 2px; }
+
+/* Section labels become ledger rules: a word, then a hairline to the edge. */
+.nav-label {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 11px; letter-spacing: 2px; opacity: 1;
+  color: var(--text-faint); padding: 14px 8px 6px;
+}
+.nav-label::after {
+  content: ''; flex: 1; height: 1px; background: var(--rule-weak);
+}
+
+/* Items: ink, round bullets, amber only on where you are. */
+.nav-item {
+  color: var(--text-muted);
+  font-size: 12.5px;
+  font-weight: 400;
+  border-radius: 2px;
+  padding: 6px 10px;
+  letter-spacing: 0.1px;
+}
+.nav-item:hover { color: var(--text-main); background: rgba(240, 230, 212, 0.04); }
+.nav-item.active { color: var(--text-main); background: transparent; font-weight: 500; }
+.nav-item::before { width: 3px; height: 3px; border-radius: 50%; background: var(--rule); }
+.nav-item.active::before { background: var(--accent); box-shadow: 0 0 6px rgba(245, 158, 11, 0.5); }
+
+/* Footer controls: hairline rows, not pills. */
+.sidebar-status {
+  background: transparent;
+  border: 1px solid var(--rule-weak);
+  border-radius: 2px;
+  margin-bottom: 10px;
+}
+.sidebar-status.freeze-on { border-color: rgba(248, 113, 113, 0.45); background: rgba(248, 113, 113, 0.06); }
+.nav-item.nav-logout { border-radius: 2px; }

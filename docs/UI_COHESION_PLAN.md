@@ -346,7 +346,34 @@ same rules (scoped to `#view-history` / `#view-gateways`):
 - On a phone the five states go two-up again (a 26px gap would push each card
   to full width and make the row 500px tall).
 
-### 1.17 Smaller repairs
+### 1.17 Pilot 4: the rail, and a gate for the discipline
+
+**The sidebar** is the last piece of chrome on every screen. It keeps the sky —
+it is the one surface that would otherwise be plain paper — but loses the three
+things the language forbids: the frosted glass (opaque `--bg-base` now, so the
+stars in it are deliberate rather than whatever is scrolling behind), the
+filled amber active pill (where you are is an amber dot and ink text), and the
+square bullets (3px round dots, muted until active). Section labels became
+ledger rules — the word, then a hairline to the edge — and the wordmark moved
+to the display serif at 19px.
+
+**`scripts/ui_check.py`** turns the rules into a pre-commit gate:
+
+| Check | Level |
+|---|---|
+| every `var(--x)` used is defined | fail |
+| no `font-size` below 11px | fail |
+| `!important` budget (6; the reduced-motion reset excluded) | fail |
+| literal hex colours outside `:root` | warn |
+| how much amber the stylesheet spends | info |
+
+It immediately found five 10px labels I had just written and two `!important`
+paddings in the Gateways table that did not need to be there (an id selector
+already outranked the utility class). Both are fixed; the stylesheet is back to
+**2 `!important`**, both documented, and 0 sub-11px text. It runs in
+`scripts/pre-commit.sh` as `ui tokens`, and prints its findings only on failure.
+
+### 1.18 Smaller repairs
 
 - Fleet roster: hostnames were clipped to one letter (`h…`, twice) because the
   IP won the width fight. Hostname + state on line 1, IP on line 2.
