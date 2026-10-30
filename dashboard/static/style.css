@@ -3052,3 +3052,71 @@ input::placeholder, textarea::placeholder { color: #9c8e7a; }
   25%  { r: 3.6;  opacity: 1; filter: drop-shadow(0 0 6px rgba(245,158,11,0.9)); }
   100% { r: 2;    opacity: 1; filter: none; }
 }
+
+/* ==============================================================
+   Fleet Run — broadcast board
+   Compose once at the top, pick ears on the left, read the answers on the
+   right. The orbit is reduced to a live dial in the broadcasts header: it
+   still shows which nodes are answering (the pings are real), but it no
+   longer owns 900px that held one node.
+   ============================================================== */
+.fleet-board {
+  display: grid;
+  grid-template-columns: 320px minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+.fleet-panel {
+  background: rgba(26, 23, 20, 0.55);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  position: relative;
+  min-width: 0;
+}
+.fp-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 12px 14px; border-bottom: 1px solid var(--border-color);
+  font-family: 'JetBrains Mono', monospace; font-size: 11px; font-weight: 700;
+  letter-spacing: 1.6px; text-transform: uppercase; color: var(--text-muted);
+  min-height: 52px;
+}
+.fp-count { color: var(--accent); font-weight: 500; letter-spacing: 1px; }
+.fp-live { display: flex; align-items: center; gap: 10px; }
+.orb-state { color: var(--text-dim); letter-spacing: 1px; }
+.orb-dial {
+  position: relative; width: 44px; height: 44px; display: block; flex-shrink: 0;
+  border-radius: 50%;
+}
+.orb-dial .orb-ring { left: 50%; top: 50%; transform: translate(-50%,-50%); border: 1px solid rgba(245,158,11,0.18); }
+.orb-dial .orb-ring.r1 { width: 100%; height: 100%; }
+.orb-dial .orb-ring.r2 { width: 66%; height: 66%; }
+.orb-dial .orb-ring.r3 { width: 34%; height: 34%; border-color: rgba(245,158,11,0.1); }
+.orb-dial .orb-sun { width: 5px; height: 5px; box-shadow: none; background: var(--accent); opacity: 0.55; }
+.orb-dial .orb-nodes { position: absolute; inset: 0; }
+.orb-dial .node .nd { width: 4px; height: 4px; }
+.orb-dial .node .ni { display: none; }
+.orb-dial .node .ntip { display: none; }
+.orb-dial .orb-pulse { position: absolute; inset: 0; border-radius: 50%; }
+
+.fleet-targets { display: flex; flex-direction: column; }
+.fleet-targets .orb-masters { padding: 10px 12px 4px; display: flex; gap: 6px; }
+.fleet-targets .orb-roster { flex: 1; overflow-y: auto; max-height: 46vh; padding: 6px 12px 10px; }
+.fp-foot { padding: 10px 12px; border-top: 1px solid var(--border-color); }
+.fp-foot .orb-dispatch { width: 100%; }
+
+.fleet-log { display: flex; flex-direction: column; }
+.fleet-queue-head {
+  display: flex; align-items: baseline; justify-content: space-between;
+  padding: 10px 14px 4px;
+  font-family: 'JetBrains Mono', monospace; font-size: 11px; letter-spacing: 1.4px;
+  text-transform: uppercase; color: var(--text-muted);
+}
+.fleet-queue { padding: 0 14px 8px; display: flex; flex-wrap: wrap; gap: 6px; }
+.fleet-tx { padding: 8px 14px; display: flex; flex-direction: column; gap: 6px; max-height: 42vh; overflow-y: auto; }
+.fleet-deck { border-top: 1px solid var(--border-color); margin-top: 4px; }
+.fleet-deck .orb-deck-body { max-height: 34vh; overflow-y: auto; }
+
+@media (max-width: 1100px) {
+  .fleet-board { grid-template-columns: 1fr; }
+  .fleet-targets .orb-roster { max-height: 220px; }
+}

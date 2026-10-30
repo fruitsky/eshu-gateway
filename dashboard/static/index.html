@@ -561,63 +561,63 @@
         <div class="orb-echo" id="fleet-echo"></div>
       </div>
 
-      <!-- CONSOLE -->
-      <div class="orb-console">
-        <!-- EARS roster -->
-        <aside class="orb-rail" data-od-id="fleet-roster">
-          <div class="orb-rail-head"><span>Ears</span><span class="orb-rail-cnt" id="targ-count">0 selected</span></div>
+      <!-- BOARD: targets on the left, transmissions + output on the right -->
+      <div class="fleet-board">
+        <aside class="fleet-panel fleet-targets" data-od-id="fleet-roster">
+          <div class="fp-head">
+            <span>Targets</span>
+            <span class="fp-count" id="targ-count">0 selected</span>
+          </div>
           <div class="orb-masters">
             <button class="orb-m-btn" id="all-online-btn">Online</button>
             <button class="orb-m-btn" id="all-btn">All</button>
             <button class="orb-m-btn" id="none-btn">None</button>
           </div>
           <div class="orb-roster" id="target-list"></div>
-        </aside>
-
-        <!-- SOLAR ORBIT -->
-        <section class="orb" data-od-id="fleet-orbit">
-          <div class="orb-status"><span>transmission <span class="orb-state" id="sky-state">idle</span></span><span>inner &middot; mid &middot; outer</span></div>
-          <div class="orb-stage">
-            <div class="orb-sq" id="sky-field">
-              <div class="orb-ring r1"><span class="orb-tick">inner</span></div>
-              <div class="orb-ring r2"><span class="orb-tick">mid</span></div>
-              <div class="orb-ring r3"><span class="orb-tick">outer</span></div>
-              <div class="orb-sun"></div>
-              <div class="orb-pulse" id="ripple"></div>
-              <div class="orb-nodes" id="nodes"></div>
-            </div>
-          </div>
-        </section>
-
-        <!-- QUEUE · TRANSMISSIONS · DISPATCH -->
-        <aside class="orb-rail orb-rail-r" data-od-id="fleet-log">
-          <div class="orb-rail-head"><span>Queue</span><span class="orb-rail-cnt" id="fleet-q-count">0</span></div>
-          <div class="orb-qlist" id="fleet-queue-list"><div class="orb-empty">empty — compose above and press Queue</div></div>
-
-          <div class="orb-rail-head orb-rail-sec"><span>Broadcasts</span><span class="orb-rail-sub">past runs</span></div>
-          <div class="orb-txs" id="fleet-tx-list"><div class="orb-empty">nothing broadcast yet —<br>queued commands land here once dispatched.<br>click a run to read its output below</div></div>
-
-          <div class="orb-dispatch-foot">
+          <div class="fp-foot">
             <button onclick="dispatchFleetQueue()" id="fleet-dispatch-btn" class="orb-dispatch" data-od-id="fleet-dispatch" disabled>&#9654; Dispatch (0)</button>
           </div>
         </aside>
-      </div>
 
-      <!-- OUTPUT DECK -->
-      <section class="orb-deck" data-od-id="fleet-deck">
-        <div class="orb-deck-head" id="deck-head" style="display:none">
-          <span class="orb-deck-id" id="deck-id"></span>
-          <span class="orb-deck-cmd" id="deck-cmd"></span>
-          <span class="orb-deck-count" id="deck-count"></span>
-          <span class="orb-deck-verdict" id="deck-verdict"></span>
-        </div>
-        <div class="orb-deck-body" id="deck-body">
-          <div class="orb-deck-empty" id="deck-empty">
-            <span>&#10022;</span>
-            <div>dispatch a broadcast — or click a transmission —<br>and command output lands here, node by node, as they answer</div>
+        <section class="fleet-panel fleet-log" data-od-id="fleet-log">
+          <div class="fp-head">
+            <span>Broadcasts</span>
+            <span class="fp-live">
+              <span class="orb-state" id="sky-state">idle</span>
+              <span class="orb-dial" id="sky-field">
+                <span class="orb-ring r1"></span>
+                <span class="orb-ring r2"></span>
+                <span class="orb-ring r3"></span>
+                <span class="orb-sun"></span>
+                <span class="orb-pulse" id="ripple"></span>
+                <span class="orb-nodes" id="nodes"></span>
+              </span>
+            </span>
           </div>
-        </div>
-      </section>
+
+          <div class="fleet-queue-head">
+            <span>Queue</span>
+            <span class="fp-count" id="fleet-q-count">0</span>
+          </div>
+          <div class="fleet-queue" id="fleet-queue-list"><div class="orb-empty">empty — compose above and press Queue</div></div>
+
+          <div class="fleet-tx" id="fleet-tx-list"><div class="orb-empty">nothing broadcast yet — queued commands land here once dispatched.</div></div>
+
+          <section class="fleet-deck" data-od-id="fleet-deck">
+            <div class="orb-deck-head" id="deck-head" style="display:none">
+              <span class="orb-deck-id" id="deck-id"></span>
+              <span class="orb-deck-cmd" id="deck-cmd"></span>
+              <span class="orb-deck-count" id="deck-count"></span>
+              <span class="orb-deck-verdict" id="deck-verdict"></span>
+            </div>
+            <div class="orb-deck-body" id="deck-body">
+              <div class="orb-deck-empty" id="deck-empty">
+                <div>select a broadcast to read its output, node by node, as they answer</div>
+              </div>
+            </div>
+          </section>
+        </section>
+      </div>
 
       <div class="page-foot"><span class="k">F</span> focus &middot; <span class="k">M</span> mute &middot; queue first, then dispatch &middot; each node answers in its own voice</div>
     </div>

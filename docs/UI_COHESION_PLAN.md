@@ -203,7 +203,38 @@ The header map also became live and useful:
 - **Clicking it opens Gateways** (it carries a tooltip saying so).
 - Offline gateways are hollow, online ones filled amber.
 
-### 1.11 Smaller repairs
+### 1.11 Fleet Run is a broadcast board
+
+The old screen was a 900px solar-system orbit holding **one node**, flanked by
+two narrow rails, with the answers in a separate deck below the fold. The
+orbit was beautiful and carried no information; the split put "what I selected"
+and "what came back" a screen apart.
+
+It is now a board:
+
+- **Compose** stays where it was (a command, a timeout, a reason, + Queue) —
+  it was already the clearest part of the page.
+- **Targets** on the left: the roster with Online / All / None, and the
+  **Dispatch (N)** button at the foot of the panel — the action sits with the
+  selection it acts on, instead of in the far-right rail.
+- **Queue** at the top of the right column, as inline chips (`01 systemctl
+  status nginx · 5 nodes · 180s · ×`).
+- **Broadcasts** below it: one row per run with its verdict (`ALL CLEAR`,
+  `RUNNING 2/3`, `PARTIAL`, `DENIED`) and per-ear chips that colour as they
+  answer.
+- **Output** directly under the list, for the selected run: per-host rows with
+  exit code and a collapsible full output.
+- **The orbit became a 44px dial** in the broadcasts header. It still animates
+  the same nodes and still pings each time a result lands — the sound design
+  survives — but it now reads as "what is the fleet doing right now" instead of
+  occupying half the page. Its state label shows the selected run's verdict
+  (`idle`, `running 2/3`, `all clear`, `denied`), colour-coded.
+
+Offline nodes used to sit unpositioned at the centre of the dial (they never
+run through the animation loop); they now take their slot on the ring at build
+time.
+
+### 1.12 Smaller repairs
 
 - Fleet roster: hostnames were clipped to one letter (`h…`, twice) because the
   IP won the width fight. Hostname + state on line 1, IP on line 2.

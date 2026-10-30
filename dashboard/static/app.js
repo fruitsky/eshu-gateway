@@ -3951,7 +3951,10 @@ function buildFleetSky() {
     var a0 = (slot + 0.5) / slots * Math.PI * 2 + (r === 20 ? 0 : (r === 33 ? Math.PI / 6 : Math.PI / 3));
     var n = document.createElement('div');
     n.className = 'node' + (on ? '' : ' off');
-    n.style.left = '50%'; n.style.top = '50%';
+    /* offline nodes never animate, so without an initial position they all
+       stacked on the sun in the middle of the dial */
+    n.style.left = (50 + r * Math.cos(a0)) + '%';
+    n.style.top = (50 + r * Math.sin(a0)) + '%';
     n.setAttribute('data-ip', g.ip);
     n._o = { a0: a0, a: a0, r: r, speed: r === 20 ? 0.05 : (r === 33 ? 0.032 : 0.02), on: on };
     n.innerHTML = '<span class="nd"></span><span class="ni">' + gwIni(g.hostname || g.ip) + '</span>' +
@@ -6679,6 +6682,7 @@ function orbPitch(ip) {
 function fleetConsoleUpdate() {
   renderFleetTxRail();
   fleetAutoSelect();
+  syncFleetDialState();
   renderFleetDeck();
   orbReceiptPings();
   syncFleetSkyFromResults();
@@ -6689,6 +6693,24 @@ function fleetAutoSelect() {
   var pool = _fleetData.filter(function (c) { return c.status === 'approved' || (c.results && c.results.length); });
   if (!pool.length) pool = _fleetData;
   _fleetSelCmdId = pool[pool.length - 1].id;
+}
+
+/* the header dial says what the fleet is doing right now */
+function syncFleetDialState() {
+  var el = document.getElementById('sky-state');
+  if (!el) return;
+  var live = null;
+  (_fleetData || []).forEach(function (c) {
+    var v = orbCmdVerdict(c);
+    if (v.cls === 'live') live = v;
+  });
+  var sel = orbFindCmd(_fleetSelCmdId);
+  var v = sel ? orbCmdVerdict(sel) : (live || null);
+  el.textContent = v ? v.label : 'idle';
+  el.style.color = v && v.cls === 'err' ? 'var(--state-denied)'
+    : v && v.cls === 'part' ? 'var(--state-blocked)'
+    : v && v.cls === 'ok' ? 'var(--state-approved)'
+    : v ? 'var(--state-pending)' : '';
 }
 
 /* transmissions rail */
@@ -6724,7 +6746,8 @@ function renderFleetTxRail() {
     var sel = _fleetSelCmdId === c.id ? ' active' : '';
     return '<div class="orb-tx' + sel + '" data-id="' + c.id + '">' +
       '<div class="orb-tx-top"><span class="orb-tx-id">#' + c.id + '</span><span class="orb-tx-cmd">' + escapeHtml(c.command) + '</span><span class="orb-tx-v ' + v.cls + '">' + v.label + '</span></div>' +
-      '<div class="orb-tx-meta"><span>' + (c.created_at ? formatDateTime(c.created_at) : '') + '</span><span>' + (rs.length || (c.target_ips || []).length) + ' ears</span></div>' +
+      '<div class="orb-tx-meta"><span>' + (c.created_at ? formatDateTime(c.created_at) : '') + '</span><span>' +
+        (function (n) { return n + ' ear' + (n === 1 ? '' : 's'); })(rs.length || (c.target_ips || []).length) + '</span></div>' +
       '<div class="orb-tx-nodes">' + chips + '</div></div>';
   }).join('');
   wrap.querySelectorAll('.orb-tx').forEach(function (t) {
