@@ -3211,3 +3211,131 @@ input::placeholder, textarea::placeholder { color: #9c8e7a; }
 /* Gateways carries nine columns now; tighter cells keep the Actions column
    inside the panel instead of behind a horizontal scroll. */
 #view-gateways table th, #view-gateways table td { padding-left: 10px !important; padding-right: 10px !important; }
+
+/* ==============================================================
+   PILOT — "ink and signal" on Statistics
+   Borrowed principles (not assets) from sora-to-ki's three materials:
+   black is the paper, white is the ink, amber is the signal and only ever
+   marks one thing. Everything here is scoped to #view-stats so it can be
+   compared against the other pages and reverted in one block.
+   ============================================================== */
+:root {
+  --serif: 'Instrument Serif', 'Iowan Old Style', Georgia, serif;
+  --rule: rgba(240, 230, 212, 0.22);
+  --rule-weak: rgba(240, 230, 212, 0.12);
+}
+
+/* Page title: one serif word, ink not amber, with the rest as a quiet line. */
+#view-stats .hud-txt { letter-spacing: 1.5px; }
+#view-stats .hud-txt b {
+  font-family: var(--serif);
+  font-weight: 400;
+  font-size: 26px;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--text-main);
+  margin-right: 2px;
+}
+#view-stats .hud-txt { font-size: 11px; color: var(--text-muted); }
+
+/* Panels become rules and air, not filled cards. */
+#view-stats .widget {
+  background: transparent;
+  border: none;
+  border-top: 1px solid var(--rule);
+  border-radius: 0;
+  padding: 18px 0 4px;
+  margin-bottom: 34px;
+}
+#view-stats .widget::before { display: none; }   /* the shared horizon hairline */
+
+/* Section headers: ink. Amber is not a heading colour. */
+#view-stats .widget-header { color: var(--text-main); text-shadow: none; }
+
+/* The number the page is about, in the ledger face. */
+#view-stats .chart-big {
+  font-family: var(--serif);
+  font-weight: 400;
+  font-size: 64px;
+  letter-spacing: -0.5px;
+  color: var(--text-main);
+}
+#view-stats .chart-big span {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-left: 6px;
+}
+#view-stats .chart-sub {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  letter-spacing: .5px;
+  color: var(--text-muted);
+}
+
+/* KPI cells: four hairlines at the corners instead of a filled card. Amber
+   is spent only on the one number that is a signal (refused, when non-zero). */
+#view-stats .kpis { gap: 28px; }
+#view-stats .kpi {
+  background:
+    linear-gradient(var(--rule)) 0 0 / 12px 1px no-repeat,
+    linear-gradient(var(--rule)) 0 0 / 1px 12px no-repeat,
+    linear-gradient(var(--rule)) 100% 0 / 12px 1px no-repeat,
+    linear-gradient(var(--rule)) 100% 0 / 1px 12px no-repeat,
+    linear-gradient(var(--rule)) 0 100% / 12px 1px no-repeat,
+    linear-gradient(var(--rule)) 0 100% / 1px 12px no-repeat,
+    linear-gradient(var(--rule)) 100% 100% / 12px 1px no-repeat,
+    linear-gradient(var(--rule)) 100% 100% / 1px 12px no-repeat;
+  border: none;
+  border-radius: 0;
+  padding: 14px 18px 16px;
+  cursor: default;
+}
+#view-stats .kpi::before { display: none; }
+#view-stats .kpi:hover { background-color: transparent; }
+#view-stats .kpi .kval {
+  font-family: var(--serif);
+  font-weight: 400;
+  font-size: 40px;
+  letter-spacing: -0.5px;
+  color: var(--text-main);
+}
+#view-stats .kpi .kval .kpi-sub { font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--text-faint); }
+#view-stats .kpi .klbl { color: var(--text-muted); letter-spacing: 1.2px; }
+#view-stats .kpi-approved .kval,
+#view-stats .kpi-pending .kval { color: var(--text-main); }
+#view-stats .kpi-blocked .kval { color: var(--text-main); }
+#view-stats .kpi-blocked.signal .kval { color: var(--accent); }
+
+/* Hygiene values are numbers too. */
+#view-stats .hy-val { font-family: var(--serif); font-weight: 400; font-size: 20px; letter-spacing: 0; }
+#view-stats .hy-val b { font-family: 'JetBrains Mono', monospace; font-size: 12px; font-weight: 600; color: var(--text-main); letter-spacing: 0; }
+#view-stats .hygiene-item.warn .hy-val { color: var(--accent); }
+
+/* Chips carry information, not emphasis: ink outline. The one chip that is a
+   signal — the hygiene count — keeps the amber. */
+#view-stats .chip {
+  color: var(--text-muted);
+  border-color: var(--rule);
+  background: transparent;
+  letter-spacing: 1.2px;
+}
+#view-stats #hygiene-flag { color: var(--accent); border-color: rgba(245,158,11,0.35); }
+#view-stats .play-btn { color: var(--text-muted); border-color: var(--rule); }
+#view-stats .play-btn:hover { color: var(--text-main); border-color: var(--rule); }
+
+/* The heat grid is ink; one cell — the busiest — is the signal. */
+#view-stats .heat-cell { background: rgba(240, 230, 212, 0.05); }
+#view-stats .heat-cell.l1 { background: rgba(240, 230, 212, 0.14); }
+#view-stats .heat-cell.l2 { background: rgba(240, 230, 212, 0.28); }
+#view-stats .heat-cell.l3 { background: rgba(240, 230, 212, 0.46); }
+#view-stats .heat-cell.l4 { background: rgba(240, 230, 212, 0.68); }
+#view-stats .heat-cell.peak { background: var(--accent); }
+#view-stats .heat-cell:hover { outline-color: var(--rule); }
+
+/* Table-ish lists keep mono; only their headings lose the amber. */
+#view-stats .cmd-name { color: var(--text-main); }
+#view-stats .cmd-fill { background: rgba(240, 230, 212, 0.5); }
+#view-stats .kpi .kval { font-variant-numeric: lining-nums; }
