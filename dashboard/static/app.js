@@ -134,6 +134,12 @@ function openContextPanel(reqId) {
   actionsEl.innerHTML = actionsHtml;
 }
 
+/* When the panel is showing the request you just approved or denied, the
+   panel has nothing left to say — close it. */
+function closePanelIfShowing(id) {
+  if (String(_ccSelectedId) === String(id)) closeContextPanel();
+}
+
 function closeContextPanel() {
   var panel = document.getElementById('cc-context');
   if (panel) panel.classList.add('collapsed');
@@ -1728,6 +1734,7 @@ function placeGatewayNode(g,x,y,cls,constName){
    for the fleet, and the choice is remembered — the header map and the big
    sky always show the same one, so changing it is visible everywhere. */
 var _fleetFigure = localStorage.getItem('eshu_figure') || '';
+var _figureOffset = 0;
 
 function figureChoices(n) {
   return CONSTELLATIONS.filter(function (c) { return c.pts.length >= n; })
@@ -1740,28 +1747,44 @@ function pickConstellations(n) {
     var chosen = choices.filter(function (c) { return c.name === _fleetFigure; });
     if (chosen.length) return [chosen[0]];
   }
-  if (choices.length) return [choices[0]];
+  if (choices.length) return [choices[(_figureOffset + choices.length) % choices.length]];
+  /* The fleet is bigger than any single figure (16 gateways, 8 stars max):
+     combine the largest ones, starting from a rotating offset so pressing C
+     still changes what is drawn. */
   var sorted = CONSTELLATIONS.slice().sort(function (a, b) { return a.pts.length - b.pts.length; });
   var out = [], cap = 0;
-  for (var d = sorted.length - 1; d >= 0; d--) { out.push(sorted[d]); cap += sorted[d].pts.length; if (cap >= n) break; }
+  for (var i = 0; i < sorted.length && cap < n; i++) {
+    var idx = (sorted.length - 1 - ((_figureOffset + i) % sorted.length) + sorted.length) % sorted.length;
+    out.push(sorted[idx]);
+    cap += sorted[idx].pts.length;
+  }
   return out;
 }
 
 function cycleFleetFigure() {
   var n = Math.max(1, (_gatewaysData || []).filter(function (g) { return g.hostname || g.ip; }).length);
   var names = figureChoices(n).map(function (c) { return c.name; });
-  if (!names.length) return;
   /* Advance from what is actually on screen, not from the stored preference:
      "Auto" resolves to the smallest figure, so starting the cycle at "Auto"
      would make the first press appear to do nothing. */
-  var cur = pickConstellations(n)[0].name;
-  var next = names[(names.indexOf(cur) + 1) % names.length];
-  _fleetFigure = next;
-  localStorage.setItem('eshu_figure', _fleetFigure);
+  if (names.length > 1) {
+    var cur = pickConstellations(n)[0].name;
+    _fleetFigure = names[(names.indexOf(cur) + 1) % names.length];
+    localStorage.setItem('eshu_figure', _fleetFigure);
+  } else {
+    /* no single figure can hold this fleet — cycle the arrangement instead,
+       otherwise the key animates and nothing changes */
+    _fleetFigure = '';
+    localStorage.removeItem('eshu_figure');
+    _figureOffset = (_figureOffset + 1) % CONSTELLATIONS.length;
+    /* and shift the arrangement, so even a one-figure fleet visibly changes */
+    _layout = (_layout + 1) % LAYOUTS;
+    sessionStorage.setItem('eshu_layout', _layout);
+  }
   _hudSkySig = '';
   renderHudSky();
   if (document.getElementById('sky')) buildStarfield(_layout);
-  if (typeof playConstellationTune === 'function') playConstellationTune(next);
+  if (typeof playConstellationTune === 'function') playConstellationTune(pickConstellations(n)[0].name);
 }
 
 /* ── The fleet, in every page header ─────────────────────────────────────
@@ -2999,6 +3022,7 @@ async function approveWindowReq(id) {
     const data = await r.json();
     if (data.token) copyToClipboard(data.token, true);
     showToast('Window approved — token copied', 'success');
+    closePanelIfShowing('win-' + id);
     fetchRequests(); fetchWindowsTable();
   } catch(e) { showToast('' + (e.message || 'Failed to approve window'), 'error'); }
 }
@@ -3009,6 +3033,7 @@ async function denyWindowReq(id) {
     if (r.status === 401) { await checkAuth(); return; }
     if (!r.ok) throw new Error('Deny failed');
     showToast('Window request denied', 'success');
+    closePanelIfShowing('win-' + id);
     fetchRequests();
   } catch(e) { showToast('Failed to deny window request', 'error'); }
 }
@@ -3028,10 +3053,12 @@ async function handleAction(id, action) {
       document.getElementById('deny-bar-text').textContent = 'Command denied: "' + cmd + '" — Add to blocklist?';
       document.getElementById('deny-blacklist-bar').classList.remove('hidden');
     }
+    closePanelIfShowing(id);
     fetchRequests().then(function() { if (_activeSessionSid) openSessionModal(_activeSessionSid); });
   } else {
     const res = await authFetch('/api/' + action + '/' + id, { method: 'POST' });
     if (res.status === 401) { await checkAuth(); return; }
+    closePanelIfShowing(id);
     fetchRequests().then(function() { if (_activeSessionSid) openSessionModal(_activeSessionSid); });
   }
 }
@@ -6667,7 +6694,7 @@ async function approveIntegrationCall(id) {
   playApprovalPulse();
   try {
     const res = await authFetch('/api/integration-calls/' + id + '/approve', { method: 'POST' });
-    if (res.ok) { fetchRequests(); fetchIntegrationCalls(); showToast('Approved and executed', 'success'); }
+    if (res.ok) { closePanelIfShowing('int-' + id); fetchRequests(); fetchIntegrationCalls(); showToast('Approved and executed', 'success'); }
   } catch(e) { showToast('Failed: ' + e.message, 'error'); }
 }
 
@@ -6675,7 +6702,7 @@ async function denyIntegrationCall(id) {
   playApprovalPulse();
   try {
     const res = await authFetch('/api/integration-calls/' + id + '/deny', { method: 'POST' });
-    if (res.ok) { fetchRequests(); }
+    if (res.ok) { closePanelIfShowing('int-' + id); fetchRequests(); }
   } catch(e) { showToast('Failed: ' + e.message, 'error'); }
 }
 
