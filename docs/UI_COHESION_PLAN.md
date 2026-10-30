@@ -167,7 +167,43 @@ The carousel's drag-and-wheel handlers, its `.rs-*` card CSS and
 `renderRecentSessions()` are deleted; `/api/sessions/recent` is now read once
 for the table (limit 12) rather than twice.
 
-### 1.9 Smaller repairs
+### 1.9 The Command Center now says something you have to act on
+
+The two cards under the headline — "Command rhythm · 24h" and "Today" — were
+unlabelled sparkbars and a count that Statistics already owned. They are
+replaced by **Needs attention**, a panel that only speaks when there is
+something to do:
+
+- *5 of 5 gateways offline · oldest 3d ago* → Gateways
+- *5 requests waiting over 10 min · longest 4h ago* → back to the queue
+- *9 commands refused in the last hour* → History
+
+Each row is a button with a severity dot (red / amber / orange), the detail in
+mono, and where it takes you. When nothing is wrong it renders one quiet line —
+"All clear · 6 of 6 gateways online · nothing waiting too long" — which is the
+answer to the question an operator actually opens this page with. Thresholds:
+gateway offline, a pending request older than 10 minutes, three or more
+refusals in the last hour.
+
+### 1.10 The constellation is now yours, and it travels
+
+**`C` used to re-roll the layout** — same figure, new random positions — so the
+header map never changed and the key felt broken. It now cycles **which figure
+the fleet takes**, through every constellation big enough to hold the fleet
+(5 gateways → Cassiopeia, Cygnus, Lyra, Ursa Major, Orion). The choice is stored
+in `localStorage`, applied to the Command Center sky *and* to every page header,
+and announced with the existing constellation chime. The legend and the header
+map always agree.
+
+The header map also became live and useful:
+
+- **A new pending request pulses that gateway's star** in every page header —
+  the sky is the same sky, so a request arriving is visible from Logs or
+  Settings without navigating back.
+- **Clicking it opens Gateways** (it carries a tooltip saying so).
+- Offline gateways are hollow, online ones filled amber.
+
+### 1.11 Smaller repairs
 
 - Fleet roster: hostnames were clipped to one letter (`h…`, twice) because the
   IP won the width fight. Hostname + state on line 1, IP on line 2.

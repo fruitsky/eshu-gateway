@@ -1476,14 +1476,36 @@ textarea { font-family: 'JetBrains Mono', monospace; }
   .cc-ticker-item .tag { color: var(--accent); opacity: 0.8; }
 
   /* command rhythm sparkline (empty state) */
-  .cc-spark-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; width: 100%; max-width: 1040px; margin-top: 6px; }
-  .cc-spark-card { background: var(--bg-surface); border: 1px solid var(--border-color); border-radius: var(--radius); padding: 12px 14px; }
-  .cc-spark-card .h { font-family: 'JetBrains Mono', monospace; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 2px; color: var(--text-muted); margin-bottom: 10px; }
-  .cc-spark-wrap { display: flex; align-items: flex-end; gap: 3px; height: 44px; }
-  .cc-spark-bar { flex: 1; background: linear-gradient(180deg, rgba(245,158,11,0.65), rgba(245,158,11,0.10)); border-radius: 2px 2px 0 0; min-width: 2px; }
-  .cc-spark-stats { font-family: 'JetBrains Mono', monospace; font-size: 20px; font-weight: 700; color: var(--accent); line-height: 1; }
-  .cc-spark-stats span { font-size: 11px; font-weight: 500; color: var(--text-muted); }
-  .cc-spark-sub { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-muted); margin-top: 4px; }
+  /* Needs attention — the only panel on this screen that says something has
+     to be done. Empty means one quiet line, not an empty card. */
+  .cc-attention { width: 100%; max-width: 1040px; margin-top: 10px; }
+  .att-head {
+    display: flex; align-items: baseline; justify-content: space-between;
+    font-family: 'JetBrains Mono', monospace; font-size: 11px; font-weight: 700;
+    letter-spacing: 1.6px; text-transform: uppercase; color: var(--text-muted);
+    margin-bottom: 8px; padding: 0 2px;
+  }
+  .att-count { color: var(--text-faint); font-weight: 400; }
+  .att-row {
+    display: grid; grid-template-columns: 8px auto 1fr auto; column-gap: 12px; align-items: baseline;
+    width: 100%; text-align: left; padding: 9px 12px; margin-bottom: 6px;
+    background: rgba(26,23,20,0.45); border: 1px solid var(--border-color); border-radius: 6px;
+    color: var(--text-main); cursor: pointer; transition: border-color .12s, background-color .12s;
+  }
+  .att-row:hover { background: rgba(26,23,20,0.7); border-color: rgba(245,158,11,0.35); }
+  .att-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--text-muted); align-self: center; }
+  .att-row.warn .att-dot { background: var(--state-pending); box-shadow: 0 0 6px rgba(251,191,36,0.4); }
+  .att-row.bad .att-dot { background: var(--state-denied); box-shadow: 0 0 6px rgba(248,113,113,0.45); }
+  .att-row.info .att-dot { background: var(--state-blocked); }
+  .att-text { font-size: 13px; }
+  .att-detail { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-muted); }
+  .att-cta { font-family: 'JetBrains Mono', monospace; font-size: 11px; letter-spacing: .5px; color: var(--accent); }
+  .cc-attention.quiet {
+    display: flex; align-items: baseline; gap: 10px; padding: 9px 12px;
+    border: 1px dashed var(--border-color); border-radius: 6px;
+  }
+  .att-ok { font-family: 'JetBrains Mono', monospace; font-size: 11px; letter-spacing: 1.2px; text-transform: uppercase; color: var(--state-approved); }
+  .att-quiet-note { font-size: 12px; color: var(--text-muted); }
 
   /* ── Constellation starfield (replaces radar) ─────────────── */
   .starfield-wrap { position: relative; width: 100%; height: clamp(240px, 34vh, 380px); overflow: hidden; }
@@ -3019,4 +3041,14 @@ input::placeholder, textarea::placeholder { color: #9c8e7a; }
   .sess-table th:nth-child(2), .sess-table td:nth-child(2),
   .sess-table th:nth-child(4), .sess-table td:nth-child(4) { display: none; }
   .sess-desc { display: none; }
+}
+
+/* The header map is live: a new pending request pulses its gateway's star, and
+   the whole map is a shortcut to the fleet. */
+.hud-sky { pointer-events: auto; cursor: pointer; }
+.hud-sky circle.mg.pulse { animation: hud-star-pulse 2.2s ease-out; }
+@keyframes hud-star-pulse {
+  0%   { r: 2;    opacity: 1; }
+  25%  { r: 3.6;  opacity: 1; filter: drop-shadow(0 0 6px rgba(245,158,11,0.9)); }
+  100% { r: 2;    opacity: 1; filter: none; }
 }

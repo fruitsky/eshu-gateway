@@ -1399,11 +1399,23 @@ async function showWindowHistory(windowId) {
 }
 
 // ── Init ─────────────────────────────────────────────────────────────────
+function pulseHudSky(key) {
+  if (!key) return;
+  document.querySelectorAll('.hud-sky circle.mg').forEach(function (c) {
+    if (c.getAttribute('data-node') !== key) return;
+    c.classList.remove('pulse');
+    void c.getBoundingClientRect();
+    c.classList.add('pulse');
+    setTimeout(function () { c.classList.remove('pulse'); }, 2400);
+  });
+}
+
 function ensureHudSky() {
   document.querySelectorAll('.hud').forEach(function (hud) {
     if (hud.querySelector('.hud-sky')) return;
     var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
     svg.setAttribute('class', 'hud-sky');
+    svg.addEventListener('click', function () { switchView('gateways'); });
     svg.setAttribute('viewBox', '0 0 150 40');
     svg.setAttribute('role', 'img');
     /* Fixed slot on the right edge of the band. Inline next to the eyebrow it
@@ -1499,6 +1511,10 @@ function detectNewJITs(newData) {
   currentPendingIds.forEach(function(id) { if (!_knownPendingIds.has(id)) newIds.push(id); });
   _knownPendingIds = currentPendingIds;
   if (newIds.length > 0) {
+    // the header map is the same sky: let the host's star pulse there too
+    newData.forEach(function (r) {
+      if (newIds.indexOf(r.id) !== -1) pulseHudSky(r.target_ip || r.hostname);
+    });
     // Only notify for JIT if toggle is on
     if (notifyJIT) {
       notifyNewJIT(currentPendingIds.size);
@@ -1707,15 +1723,45 @@ function placeGatewayNode(g,x,y,cls,constName){
   sky.appendChild(n);
 }
 
-/* Pick the figure(s) that hold the fleet: the smallest constellation with at
-   least N stars, else the biggest ones added until every gateway has a star.
-   Used by the Command Center sky and by the mini-map in every page header. */
+/* Which figure the fleet takes. By default: the smallest constellation that
+   can hold every gateway. Pressing C cycles through every figure big enough
+   for the fleet, and the choice is remembered — the header map and the big
+   sky always show the same one, so changing it is visible everywhere. */
+var _fleetFigure = localStorage.getItem('eshu_figure') || '';
+
+function figureChoices(n) {
+  return CONSTELLATIONS.filter(function (c) { return c.pts.length >= n; })
+    .sort(function (a, b) { return a.pts.length - b.pts.length; });
+}
+
 function pickConstellations(n) {
-  var sorted=CONSTELLATIONS.slice().sort(function(a,b){return a.pts.length-b.pts.length;});
-  for (var c=0;c<sorted.length;c++) { if (sorted[c].pts.length>=n) return [sorted[c]]; }
-  var out=[], cap=0;
-  for (var d=sorted.length-1;d>=0;d--) { out.push(sorted[d]); cap+=sorted[d].pts.length; if (cap>=n) break; }
+  var choices = figureChoices(n);
+  if (_fleetFigure) {
+    var chosen = choices.filter(function (c) { return c.name === _fleetFigure; });
+    if (chosen.length) return [chosen[0]];
+  }
+  if (choices.length) return [choices[0]];
+  var sorted = CONSTELLATIONS.slice().sort(function (a, b) { return a.pts.length - b.pts.length; });
+  var out = [], cap = 0;
+  for (var d = sorted.length - 1; d >= 0; d--) { out.push(sorted[d]); cap += sorted[d].pts.length; if (cap >= n) break; }
   return out;
+}
+
+function cycleFleetFigure() {
+  var n = Math.max(1, (_gatewaysData || []).filter(function (g) { return g.hostname || g.ip; }).length);
+  var names = figureChoices(n).map(function (c) { return c.name; });
+  if (!names.length) return;
+  /* Advance from what is actually on screen, not from the stored preference:
+     "Auto" resolves to the smallest figure, so starting the cycle at "Auto"
+     would make the first press appear to do nothing. */
+  var cur = pickConstellations(n)[0].name;
+  var next = names[(names.indexOf(cur) + 1) % names.length];
+  _fleetFigure = next;
+  localStorage.setItem('eshu_figure', _fleetFigure);
+  _hudSkySig = '';
+  renderHudSky();
+  if (document.getElementById('sky')) buildStarfield(_layout);
+  if (typeof playConstellationTune === 'function') playConstellationTune(next);
 }
 
 /* ── The fleet, in every page header ─────────────────────────────────────
@@ -1756,12 +1802,14 @@ function renderHudSky() {
   gws.slice(0, pts.length).forEach(function (g, i) {
     var q = pts[i];
     var online = !g.last_seen || gwIsOnline(g);
-    svg += '<circle class="' + (online ? 'mg on' : 'mg off') + '" cx="' + q.x.toFixed(1) + '" cy="' + q.y.toFixed(1) + '" r="2"/>';
+    svg += '<circle class="' + (online ? 'mg on' : 'mg off') + '" data-node="' + escapeHtml(g.ip || g.hostname || '') + '"' +
+           ' cx="' + q.x.toFixed(1) + '" cy="' + q.y.toFixed(1) + '" r="2"/>';
   });
   hosts.forEach(function (h) {
     h.innerHTML = svg;
     h.setAttribute('aria-label', 'Fleet: ' + chosen.map(function (c) { return c.name + ', ' + c.meaning; }).join(' and ') +
       ' — ' + gws.length + ' gateway' + (gws.length === 1 ? '' : 's'));
+    h.setAttribute('title', 'Fleet constellation — click to open Gateways');
   });
 }
 
@@ -1945,9 +1993,7 @@ function nextConstellation(){
   sky.style.opacity='0';
   clearTimeout(nextConstellation._t);
   nextConstellation._t=setTimeout(function(){
-    _layout=(_layout+1)%LAYOUTS;
-    sessionStorage.setItem('eshu_layout',_layout);
-    buildStarfield(_layout);
+    cycleFleetFigure();
     sky.style.transition='none';
     sky.style.transform=d.in;
     sky.style.opacity='0';
@@ -1979,7 +2025,7 @@ function renderEmptyState(total) {
     tickerHtml = '<div class="cc-ticker"><div class="cc-ticker-track">' + tickItems + tickItems + '</div></div>';
   }
 
-  var sparkHtml = renderSparkline();
+  var attentionHtml = renderAttention();
   var sessionsHtml = '<div class="cc-sessions-host" id="cc-sessions-host"></div>';
 
   var headline, sub;
@@ -2004,7 +2050,7 @@ function renderEmptyState(total) {
     '<div class="cc-empty-headline">' + headline + '</div>' +
     '<div class="cc-empty-sub">' + sub + '</div>' +
     tickerHtml +
-    sparkHtml +
+    attentionHtml +
     sessionsHtml +
   '</div>';
 }
@@ -2128,35 +2174,73 @@ function openQueueCursor() {
   if (id) openContextPanel(id);
 }
 
-function renderSparkline() {
+/* ── Needs attention ─────────────────────────────────────────────────────
+   Replaces the "Command rhythm / Today" cards, which restated numbers that
+   Statistics already owns and never told you anything you had to act on.
+   This panel only appears with something to say: stale gateways, requests
+   that have been waiting too long, or a burst of refusals. When there is
+   nothing wrong it says so in one quiet line — which is itself the answer
+   to "is anything broken right now?". */
+function attentionItems() {
   var now = Math.floor(Date.now() / 1000);
-  var buckets = new Array(24).fill(0);
-  var hasData = false;
-  (requestsData || []).forEach(function(r){
-    if(!r.created_at) return;
-    var ageH = (now - r.created_at) / 3600;
-    if(ageH < 0 || ageH >= 24) return;
-    var idx = 23 - Math.floor(ageH);
-    if(idx >=0 && idx <24){ buckets[idx]++; hasData=true; }
-  });
-  var max = Math.max.apply(null, buckets);
-  var bars = buckets;
-  if(!hasData || max === 0){
-    // fallback gentle rhythm so sparkline is not flat
-    bars = [2,3,2,1,1,2,4,6,8,7,9,11,10,13,12,15,14,12,16,13,9,6,4,3];
-    max = 16;
+  var items = [];
+  var gws = (_gatewaysData || []).filter(function (g) { return g.hostname || g.ip; });
+  var offline = gws.filter(function (g) { return !gwIsOnline(g) && !g.updating; });
+  if (offline.length) {
+    var oldest = Math.min.apply(null, offline.map(function (g) { return g.last_seen || now; }));
+    items.push({
+      tone: offline.length === gws.length ? 'bad' : 'warn',
+      text: offline.length + ' of ' + gws.length + ' gateways offline',
+      detail: 'oldest ' + formatAgo(now - oldest),
+      action: "switchView('gateways')", cta: 'Gateways'
+    });
   }
-  var barsHtml = bars.map(function(v){
-    var h = max ? Math.max(6, Math.round(v / max * 100)) : 6;
-    var op = 0.12 + (h/100)*0.55;
-    return '<div class="cc-spark-bar" style="height:'+h+'%;opacity:'+op.toFixed(2)+'"></div>';
-  }).join('');
-  var total = (requestsData || []).length;
-  var auto = (requestsData || []).filter(function(r){ return r.status === 'auto-approved'; }).length;
-  var pct = total ? Math.round(auto/total*100) : 0;
-  return '<div class="cc-spark-row">'+
-    '<div class="cc-spark-card"><div class="h">Command rhythm \u00b7 24h</div><div class="cc-spark-wrap">'+barsHtml+'</div></div>'+
-    '<div class="cc-spark-card"><div class="h">Today</div><div class="cc-spark-stats">'+total+' <span>commands</span></div><div class="cc-spark-sub">'+pct+'% automated \u00b7 '+buckets.reduce(function(a,b){return a+b;},0)+' in 24h</div></div>'+
+  var stale = (requestsData || []).filter(function (r) {
+    return r.status === 'pending' && r.ttl > 0 && (now - (r.created_at || now)) > 600;
+  });
+  if (stale.length) {
+    var wait = Math.max.apply(null, stale.map(function (r) { return now - (r.created_at || now); }));
+    items.push({
+      tone: 'warn',
+      text: stale.length + ' request' + (stale.length === 1 ? '' : 's') + ' waiting over 10 min',
+      detail: 'longest ' + formatAgo(wait),
+      action: "document.querySelector('.cc-feed-scroll').scrollTop=0", cta: 'Review'
+    });
+  }
+  var refusals = (requestsData || []).filter(function (r) {
+    return (r.status === 'blocked' || r.status === 'denied') && (now - (r.created_at || 0)) < 3600;
+  });
+  if (refusals.length >= 3) {
+    items.push({
+      tone: 'info',
+      text: refusals.length + ' commands refused in the last hour',
+      detail: 'policy or operator',
+      action: "switchView('history')", cta: 'History'
+    });
+  }
+  return items;
+}
+
+function renderAttention() {
+  var items = attentionItems();
+  var gws = (_gatewaysData || []).filter(function (g) { return g.hostname || g.ip; });
+  var online = gws.filter(gwIsOnline).length;
+  if (!items.length) {
+    return '<div class="cc-attention quiet">' +
+      '<span class="att-ok">All clear</span>' +
+      '<span class="att-quiet-note">' + online + ' of ' + gws.length + ' gateways online · nothing waiting too long</span>' +
+    '</div>';
+  }
+  return '<div class="cc-attention">' +
+    '<div class="att-head"><span>Needs attention</span><span class="att-count">' + items.length + '</span></div>' +
+    items.map(function (it) {
+      return '<button class="att-row ' + it.tone + '" onclick="' + it.action + '">' +
+        '<span class="att-dot"></span>' +
+        '<span class="att-text">' + escapeHtml(it.text) + '</span>' +
+        '<span class="att-detail">' + escapeHtml(it.detail) + '</span>' +
+        '<span class="att-cta">' + it.cta + ' \u2192</span>' +
+      '</button>';
+    }).join('') +
   '</div>';
 }
 
