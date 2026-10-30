@@ -29,6 +29,10 @@ ROOT = Path(__file__).resolve().parent.parent
 CSS = ROOT / "dashboard" / "static" / "style.css"
 IMPORTANT_BUDGET = 6
 
+# Custom properties set from JavaScript on the element itself (inline
+# `style="--i:3"`), not declared in the stylesheet.
+ALLOW_INLINE = {"--i"}
+
 
 def strip_comments(css: str) -> str:
     return re.sub(r"/\*.*?\*/", "", css, flags=re.S)
@@ -46,7 +50,7 @@ def main() -> int:
     # 1. every custom property used must exist
     defined = set(re.findall(r"(--[a-z0-9-]+)\s*:", css))
     used = set(re.findall(r"var\(\s*(--[a-z0-9-]+)", css))
-    missing = sorted(used - defined)
+    missing = sorted(used - defined - ALLOW_INLINE)
     if missing:
         counts = {m: len(re.findall(r"var\(\s*" + re.escape(m) + r"\b", css)) for m in missing}
         detail = ", ".join(f"{m} (x{n})" for m, n in counts.items())

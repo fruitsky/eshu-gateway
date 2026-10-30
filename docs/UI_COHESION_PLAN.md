@@ -394,7 +394,30 @@ Both are lists at heart, so they moved fully to hairlines (scoped to
 With this, **no amber is spent on chrome in Integrations at all** — the only
 colour on the page is the enabled dot (green) and the health dot (red/amber).
 
-### 1.19 Smaller repairs
+### 1.19 The fleet at rest, quieter banners, a richer ambience
+
+Three follow-ups on the Command Center:
+
+- **The headline came down to 30px.** At 38 it competed with the ledger below
+  it.
+- **"All clear" is gone.** It repeated what the headline already said (the
+  gateway count) and the word was the only green text on the page. In its place,
+  when nothing is waiting: **one dot per gateway, eight to a row** — amber for
+  online, hollow for offline — carrying a slow wave (110ms stagger, 4.2s cycle)
+  so the fleet reads as *breathing* rather than *idle*. The sub-line now says
+  only what the dots cannot: who is down, and when anything last happened.
+- **Override and freeze banners are ink strips**, not red slabs: hairline
+  borders, mono uppercase status, a single pulsing signal dot (amber for
+  override, red for freeze), and an ink-outlined action. The old gradient +
+  white bold + full-banner pulse fought everything around it.
+
+**Ambience (`B`) got more to listen to.** The bed now breathes — a 0.04Hz LFO
+sweeps the low-pass cutoff ±380Hz — and every 7–15s a sparse high shimmer plays
+one or two long, very quiet notes from a pentatonic set above it, like a star
+catching the light. The constellation medley is shuffled per session and spaced
+9–17s instead of a fixed 10s metronome.
+
+### 1.20 Smaller repairs
 
 - Fleet roster: hostnames were clipped to one letter (`h…`, twice) because the
   IP won the width fight. Hostname + state on line 1, IP on line 2.

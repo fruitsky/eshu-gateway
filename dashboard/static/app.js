@@ -2034,8 +2034,10 @@ function renderEmptyState(total) {
     sub = total + ' command' + (total > 1 ? 's' : '') + ' wait for your word';
   } else {
     headline = 'Eshu \u00b7 The way is open \u00b7 ' + online + '/' + enrolled + ' gateways online';
-    sub = 'all clear';
-    if (disconnected > 0) sub += ' \u00b7 ' + disconnected + ' disconnected';
+    /* "all clear" said the same thing twice: the headline already reports the
+       fleet, and the dot grid below shows it. Keep only what is not visible
+       elsewhere — who is down, and when anything last happened. */
+    sub = disconnected > 0 ? disconnected + ' disconnected' : 'every gateway answering';
     if (lastAgo) sub += ' \u00b7 last activity ' + lastAgo;
   }
 
@@ -2226,10 +2228,16 @@ function renderAttention() {
   var gws = (_gatewaysData || []).filter(function (g) { return g.hostname || g.ip; });
   var online = gws.filter(gwIsOnline).length;
   if (!items.length) {
-    return '<div class="cc-attention quiet">' +
-      '<span class="att-ok">All clear</span>' +
-      '<span class="att-quiet-note">' + online + ' of ' + gws.length + ' gateways online · nothing waiting too long</span>' +
-    '</div>';
+    /* Nothing to do: instead of a sentence that repeats what the headline
+       already says, show the fleet itself — one dot per gateway, eight to a
+       row, and a slow wave crossing them while no one is waiting. */
+    var pending = (requestsData || []).filter(function (r) { return r.status === 'pending' && r.ttl > 0; }).length;
+    var dots = gws.map(function (g, i) {
+      return '<span class="fd' + (gwIsOnline(g) ? ' on' : ' off') + '" style="--i:' + i + '"' +
+        ' title="' + escapeHtml(g.hostname || g.ip) + (gwIsOnline(g) ? ' · online' : ' · offline') + '"></span>';
+    }).join('');
+    return '<div class="fleet-dots' + (pending ? '' : ' flowing') + '" role="img" aria-label="' +
+      online + ' of ' + gws.length + ' gateways online' + (pending ? '' : ', all quiet') + '">' + dots + '</div>';
   }
   return '<div class="cc-attention">' +
     '<div class="att-head"><span>Needs attention</span><span class="att-count">' + items.length + '</span></div>' +
@@ -2622,32 +2630,71 @@ function playAmbientTune(constName){
 }
 function startAmbienceMedley(){
   stopAmbienceMedley();
-  if(!_activeConstellations.length) return;
-  _ambienceIndex = 0;
-  playAmbientTune(_activeConstellations[0]);
-  _ambienceTimer = setInterval(function(){
-    _ambienceIndex = (_ambienceIndex + 1) % _activeConstellations.length;
-    playAmbientTune(_activeConstellations[_ambienceIndex]);
-  }, 10000);
+  var order = [];                       // every figure once, in random order
+  for (var i = 0; i < _activeConstellations.length; i++) order.push(_activeConstellations[i]);
+  for (var j = order.length - 1; j > 0; j--) {
+    var k = Math.floor(Math.random() * (j + 1));
+    var tmp = order[j]; order[j] = order[k]; order[k] = tmp;
+  }
+  if (!order.length) return;
+  var step = 0;
+  playAmbientTune(order[0]);
+  (function next() {
+    // 9–17s, so the medley never lands on a metronome
+    _ambienceTimer = setTimeout(function () {
+      if (!_noise) return;              // ambience stopped while waiting
+      step = (step + 1) % order.length;
+      playAmbientTune(order[step]);
+      next();
+    }, 9000 + Math.random() * 8000);
+  })();
+}
+
+/* Sparse high notes over the bed, like a star catching the light: long decay,
+   very quiet, one or two at a time, 7–15s apart. */
+var _ambienceShimmer = null;
+var _SHIMMER_NOTES = [1046.5, 1174.7, 1318.5, 1568.0, 1760.0, 2093.0, 2349.3];
+function scheduleAmbienceShimmer(){
+  clearTimeout(_ambienceShimmer);
+  _ambienceShimmer = setTimeout(function () {
+    if (!_noise) return;
+    try {
+      var ctx = getAudioCtx(), now = ctx.currentTime;
+      var n = 1 + Math.floor(Math.random() * 2);
+      for (var i = 0; i < n; i++) {
+        var f = _SHIMMER_NOTES[Math.floor(Math.random() * _SHIMMER_NOTES.length)];
+        _tone(ctx, f, now + i * 0.22, 2.4, 'sine', 0.014);
+        _tone(ctx, f * 2, now + i * 0.22, 1.2, 'sine', 0.004);
+      }
+    } catch (e) {}
+    scheduleAmbienceShimmer();
+  }, 7000 + Math.random() * 8000);
 }
 function stopAmbienceMedley(){
-  if(_ambienceTimer){ clearInterval(_ambienceTimer); _ambienceTimer = null; }
+  if(_ambienceTimer){ clearTimeout(_ambienceTimer); _ambienceTimer = null; }
+  if(_ambienceShimmer){ clearTimeout(_ambienceShimmer); _ambienceShimmer = null; }
 }
 function startBrownNoise(){
   var ctx=getAudioCtx(), src=ctx.createBufferSource(); src.buffer=brownNoiseBuffer(ctx); src.loop=true;
   var lp=ctx.createBiquadFilter(); lp.type='lowpass'; lp.frequency.value=1100; lp.Q.value=0.5;
   var g=ctx.createGain(); g.gain.value=0;
   src.connect(lp); lp.connect(g); g.connect(ctx.destination); src.start();
+  /* a very slow LFO on the cutoff: the bed breathes instead of sitting still */
+  var lfo=ctx.createOscillator(); lfo.type='sine'; lfo.frequency.value=0.04;
+  var lfoGain=ctx.createGain(); lfoGain.gain.value=380;
+  lfo.connect(lfoGain); lfoGain.connect(lp.frequency); lfo.start();
   g.gain.linearRampToValueAtTime(0.16, ctx.currentTime+2.5);
-  _noise={src:src,gain:g};
+  _noise={src:src,gain:g,lfo:lfo};
   startAmbienceMedley();
+  scheduleAmbienceShimmer();
 }
 function stopBrownNoise(){
   stopAmbienceMedley();
   if(!_noise) return;
   var g=_noise.gain, t=getAudioCtx().currentTime;
   g.gain.cancelScheduledValues(t); g.gain.setValueAtTime(g.gain.value,t); g.gain.linearRampToValueAtTime(0,t+0.7);
-  var s=_noise.src; setTimeout(function(){ try{s.stop();}catch(e){} },750);
+  var s=_noise.src, lfo=_noise.lfo;
+  setTimeout(function(){ try{s.stop();}catch(e){} try{ if(lfo) lfo.stop(); }catch(e){} },750);
   _noise=null;
 }
 function toggleBrownNoise(){ if(_noise){ stopBrownNoise(); showToast('Ambience off', 'success'); } else { startBrownNoise(); showToast('Ambience on', 'success'); } }
