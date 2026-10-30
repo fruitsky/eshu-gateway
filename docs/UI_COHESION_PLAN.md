@@ -432,7 +432,23 @@ one or two long, very quiet notes from a pentatonic set above it, like a star
 catching the light. The constellation medley is shuffled per session and spaced
 9–17s instead of a fixed 10s metronome.
 
-### 1.20 Smaller repairs
+### 1.20 Pilot 6: Fleet Run — the last screen
+
+The board was redesigned earlier in the session (results beside the compose
+strip, the orbit reduced to a dial); this pass brings it into the language:
+
+- Compose is a hairline strip, not a filled panel.
+- **Tar&middot;gets and Broadcasts are hairline sections**, their rows separated by
+  `--rule-weak`, roster selection a 5% ink wash.
+- **Dispatch and Queue are ink at full strength** — the page's two primary
+  actions. Everything else (Online/All/None, the remove `×`) is an ink outline.
+- Broadcast rows carry a 2px amber inset when selected; the verdict chips keep
+  their state colours (`PARTIAL`, `FAILURES RETURNED`).
+- The output deck loses its glass: no backdrop blur, no fill, just a rule.
+- **The dial is the only live ornament left** — its amber sun and the orbiting
+  nodes are the one place colour animates on this page.
+
+### 1.21 Smaller repairs
 
 - Fleet roster: hostnames were clipped to one letter (`h…`, twice) because the
   IP won the width fight. Hostname + state on line 1, IP on line 2.
