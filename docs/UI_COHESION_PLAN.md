@@ -353,22 +353,33 @@ proper focus trap in modals (Escape closes, but Tab can leave the dialog).
   on icon-only buttons (`×`, `↻`); `aria-live="polite"` on the pending count.
 - Done: keyboard-only walkthrough of approve → deny → filter works.
 
-**2.13 Mobile**
+**2.13 Mobile** — ✅ shipped
 
-The sky is now a 210px band and the keyboard legend is hidden under 768px, but:
-the bottom nav still scrolls sideways and clips ("Approved W…"), tables rely on
-horizontal scroll with no affordance, and `Freeze` sits below the fold.
+Was: an 11-item bottom bar that scrolled sideways and clipped mid-word
+("Approved W…"), no current-page indicator, tables that cut off a column with
+no cue, and `Freeze` — the one control you might need in a hurry — buried at the
+bottom of the drawer.
 
-- Do: 4 primary nav items on mobile (rest behind "More"), card-style table rows
-  or a horizontal-scroll shadow, Freeze pinned in the header.
+Now: **Home · History · Stats · Fleet · Freeze · More** fits 390px without
+scrolling, the current page is underlined, `Freeze` is one tap away and mirrors
+its state (`Frozen` + red), `More` opens the full drawer, content carries
+`padding-bottom` so the fixed bar never covers the last row, and scrollable
+tables fade their right edge instead of slicing a column.
 
-**2.14 Small things worth a sweep**
+**2.14 Small things worth a sweep** — 🟡 mostly shipped
 
-- `GET /api/web-fetch-policies/household` returns 404 when no policy exists
-  yet, and the Controls view logs a console error on every visit. The UI
-  already handles it (`No policy yet — save one to enable`); the endpoint could
-  return an empty policy instead, or the client could stop treating an expected
-  miss as an error.
+- **`/api/web-fetch-policies/{principal}` 404 on every Controls visit** — fixed
+  client-side. The 404 is deliberate (a test pins it: a principal with no policy
+  is a 404, not an empty policy), so the client now reads the list endpoint and
+  picks its principal out of the result: one request instead of a guaranteed
+  404, and no console error.
+- **Modal focus trap** — shipped. Every `.modal-overlay` is observed for class
+  changes; on open it gets `role="dialog"`, `aria-modal="true"` and an
+  `aria-label` from its header, focus moves to the first field, Tab/Shift-Tab
+  cycle inside, and focus returns to the opener on close.
+- Still open: `aria-expanded` on the request panel, and a copy audit of the HUD
+  strings (the old legend had `THE SHAW` for `THE SWAN`, long gone, but the
+  strings are hand-written in a few places).
 
 - Login: visible banding in the sky gradient (add a noise/dither layer or a
   smoother ramp), and the logo's red art is the only red in the product before

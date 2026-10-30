@@ -413,6 +413,10 @@ async function switchView(target) {
     if (navBtn) navBtn.classList.toggle('active', v === target);
   });
   syncNavAria();
+  document.querySelectorAll('#mobile-nav button[data-view]').forEach(function(b) {
+    if (b.getAttribute('data-view') === target) b.setAttribute('aria-current', 'page');
+    else b.removeAttribute('aria-current');
+  });
   if (target === 'gateways') { fetchGateways(); fetchEnrollData(); }
   if (target === 'history') { fetchRequests(); fetchIntegrationCalls(); }
   if (target === 'windows') { fetchWindowsTable(); }
@@ -685,7 +689,7 @@ function formatWinSchedule(w) {
     var ed = new Date(exp * 1000);
     var expStr = ed.toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false });
     var past = Math.floor(Date.now() / 1000) > exp;
-    var color = past ? 'var(--brand-red)' : 'var(--status-warning)';
+    var color = past ? 'var(--state-denied)' : 'var(--state-pending)';
     sched += '<br><span class="win-expiry" style="color:' + color + ';">Expires: ' + expStr + (past ? ' (expired)' : '') + '</span>';
   }
   return sched;
@@ -722,7 +726,7 @@ function winScheduleCell(w) {
     var ed = new Date(exp * 1000);
     var expStr = ed.toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false });
     var past = Math.floor(Date.now() / 1000) > exp;
-    html += '<br><span class="win-expiry" style="color:' + (past ? 'var(--brand-red)' : 'var(--status-warning)') + ';">Expires: ' + expStr + (past ? ' (expired)' : '') + '</span>';
+    html += '<br><span class="win-expiry" style="color:' + (past ? 'var(--state-denied)' : 'var(--state-pending)') + ';">Expires: ' + expStr + (past ? ' (expired)' : '') + '</span>';
   }
   return html;
 }
@@ -2634,6 +2638,57 @@ function setSidebarCollapsed(collapsed){
   if (collapsed) { sb.style.width = '0px'; sb.style.minWidth = '0px'; }
   else { sb.style.width = ''; sb.style.minWidth = ''; }
 }
+/* ── Dialogs: keep Tab inside, restore focus on close ────────────────────
+   Every modal is a div toggled by a class, so the trap watches the open state
+   rather than hooking each opener. */
+var _modalOpener = null;
+function _visibleModal() {
+  var list = document.querySelectorAll('.modal-overlay:not(.hidden)');
+  return list.length ? list[list.length - 1] : null;
+}
+document.addEventListener('keydown', function (e) {
+  if (e.key !== 'Tab') return;
+  var m = _visibleModal();
+  if (!m) return;
+  var f = Array.prototype.filter.call(
+    m.querySelectorAll('a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])'),
+    function (el) { return el.offsetParent !== null; });
+  if (!f.length) return;
+  var first = f[0], last = f[f.length - 1], active = document.activeElement;
+  if (!m.contains(active)) { e.preventDefault(); first.focus(); return; }
+  if (e.shiftKey && active === first) { e.preventDefault(); last.focus(); }
+  else if (!e.shiftKey && active === last) { e.preventDefault(); first.focus(); }
+});
+(function () {
+  /* Observe the whole body: modals are toggled by class from many places, and
+     some are created after load, so per-element observers missed them. */
+  var obs = new MutationObserver(function (records) {
+    var touched = records.some(function (r) {
+      return r.type === 'attributes' && r.target.classList && r.target.classList.contains('modal-overlay');
+    });
+    if (!touched) return;
+    var open = _visibleModal();
+    if (open) {
+      if (!open.hasAttribute('role')) open.setAttribute('role', 'dialog');
+      open.setAttribute('aria-modal', 'true');
+      if (!open.hasAttribute('aria-label')) {
+        var h = open.querySelector('.widget-header, .modal-header, h2, h3');
+        if (h) open.setAttribute('aria-label', h.textContent.replace(/[\u00d7\u2715\u2716]/g, '').trim().replace(/\s+/g, ' ').slice(0, 60));
+      }
+      if (!_modalOpener) {
+        _modalOpener = document.activeElement;
+        var firstField = open.querySelector('input:not([type=hidden]):not([disabled]), select:not([disabled]), textarea:not([disabled])');
+        if (firstField && document.activeElement === document.body) firstField.focus();
+      }
+    } else if (_modalOpener) {
+      var back = _modalOpener;
+      _modalOpener = null;
+      if (back && back.focus && document.contains(back)) back.focus();
+    }
+  });
+  obs.observe(document.body, { attributes: true, attributeFilter: ['class'], subtree: true });
+})();
+
 document.addEventListener('keydown', function(e) {
   var typing = e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT' || e.target.isContentEditable);
   var onControl = e.target && (e.target.tagName === 'BUTTON' || e.target.tagName === 'A');
@@ -3561,8 +3616,8 @@ function renderFreezeStatus(data) {
   var pillText = document.getElementById('freeze-pill-text');
   if (banner) banner.classList.toggle('hidden', !frozen);
   if (label) {
-    if (frozen) { label.textContent = 'FROZEN — all commands rejected'; label.style.background = 'var(--brand-red)'; label.style.color = 'white'; }
-    else { label.textContent = 'Active — running normally'; label.style.background = 'var(--status-success)'; label.style.color = 'var(--bg-base)'; }
+    if (frozen) { label.textContent = 'FROZEN — all commands rejected'; label.style.background = 'var(--state-denied)'; label.style.color = 'white'; }
+    else { label.textContent = 'Active — running normally'; label.style.background = 'var(--state-approved)'; label.style.color = 'var(--bg-base)'; }
   }
   if (freezeBtn) freezeBtn.classList.toggle('hidden', frozen);
   if (unfreezeBtn) unfreezeBtn.classList.toggle('hidden', !frozen);
@@ -3576,6 +3631,12 @@ function renderFreezeStatus(data) {
     pill.classList.toggle('freeze-on', !!frozen);
     if (pillDot) pillDot.classList.toggle('on', !!frozen);
     if (pillText) pillText.textContent = frozen ? 'Frozen — tap to unfreeze' : 'Freeze';
+  }
+  var mf = document.getElementById('mnav-freeze');
+  if (mf) {
+    mf.classList.toggle('is-frozen', !!frozen);
+    mf.textContent = frozen ? 'Frozen' : 'Freeze';
+    mf.setAttribute('aria-pressed', frozen ? 'true' : 'false');
   }
 }
 
@@ -4278,7 +4339,7 @@ function updateFleetCountdowns() {
     var rem = parseInt(el.getAttribute('data-deadline')) - now;
     if (rem <= 0) {
       el.textContent = 'timed out';
-      el.style.color = 'var(--brand-red)';
+      el.style.color = 'var(--state-denied)';
       return;
     }
     if (rem >= 3600) {
@@ -4683,7 +4744,7 @@ function startTokenCountdown() {
   const el = document.getElementById('token-countdown');
   tokenTimer = setInterval(function() {
     const remaining = Math.ceil((tokenExpiryTime - Date.now() / 1000));
-    if (remaining <= 0) {       el.textContent = 'Token expired'; el.style.color = 'var(--brand-red)'; clearInterval(tokenTimer); tokenTimer = null; if (tokenStatusPoller) { clearInterval(tokenStatusPoller); tokenStatusPoller = null; } document.getElementById('enroll-command').value = ''; document.getElementById('copy-enroll-btn').disabled = true; currentToken = ''; }
+    if (remaining <= 0) {       el.textContent = 'Token expired'; el.style.color = 'var(--state-denied)'; clearInterval(tokenTimer); tokenTimer = null; if (tokenStatusPoller) { clearInterval(tokenStatusPoller); tokenStatusPoller = null; } document.getElementById('enroll-command').value = ''; document.getElementById('copy-enroll-btn').disabled = true; currentToken = ''; }
     else if (remaining <= 30) { el.textContent = ' ' + remaining + 's remaining'; el.style.color = 'var(--status-warning)'; }
     else { el.textContent = ' ' + remaining + 's remaining'; el.style.color = 'var(--text-muted)'; }
   }, 1000);
@@ -5730,18 +5791,25 @@ async function loadWebFetchPolicy() {
     return;
   }
   try {
-    const res = await authFetch('/api/web-fetch-policies/' + encodeURIComponent(principal));
-    if (res.status === 404) {
-      _wfDeny = [];
-      document.getElementById('wf-enabled').checked = false;
-      document.getElementById('wf-allow').value = '';
-      if (status) status.textContent = 'No policy yet — save one to enable.';
-    } else if (res.ok) {
-      const p = await res.json();
-      _wfDeny = p.deny || [];
-      document.getElementById('wf-enabled').checked = !!p.enabled;
-      document.getElementById('wf-allow').value = (p.allow || []).join('\n');
-      if (status) status.textContent = 'Loaded.';
+    /* Read the whole list and pick our principal out of it. Asking for
+       /api/web-fetch-policies/<principal> returns 404 when the agent simply has
+       no policy yet — a normal state, but it logged a console error on every
+       visit to Controls. The list endpoint always answers 200. */
+    const res = await authFetch('/api/web-fetch-policies');
+    if (res.ok) {
+      const all = (await res.json()).policies || [];
+      const p = all.filter(function (x) { return x.principal === principal; })[0];
+      if (!p) {
+        _wfDeny = [];
+        document.getElementById('wf-enabled').checked = false;
+        document.getElementById('wf-allow').value = '';
+        if (status) status.textContent = 'No policy yet — save one to enable.';
+      } else {
+        _wfDeny = p.deny || [];
+        document.getElementById('wf-enabled').checked = !!p.enabled;
+        document.getElementById('wf-allow').value = (p.allow || []).join('\n');
+        if (status) status.textContent = 'Loaded.';
+      }
     } else {
       if (status) status.textContent = 'Load failed.';
     }

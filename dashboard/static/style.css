@@ -2961,3 +2961,30 @@ input::placeholder, textarea::placeholder { color: #9c8e7a; }
 .enroll-hint { font-family: 'JetBrains Mono', monospace; font-size: 11px; letter-spacing: 1px; text-transform: none; color: var(--text-muted); font-weight: 400; }
 .enroll-panel > p, .enroll-panel > .grid { margin-left: 24px; margin-right: 24px; }
 .enroll-panel > .grid { margin-bottom: 20px; }
+
+/* Mobile nav: four destinations + freeze + menu, with a current-page state. */
+.mobile-nav { gap: 14px; align-items: center; padding: 8px 14px; }
+.mobile-nav button { font-size: 11px; letter-spacing: 0.5px; }
+.mobile-nav button[aria-current="page"] { color: var(--accent); }
+.mobile-nav button[aria-current="page"]::after {
+  content: ''; display: block; height: 2px; margin-top: 3px;
+  background: var(--accent); border-radius: 1px;
+}
+.mobile-nav .mnav-freeze { color: var(--state-blocked); }
+.mobile-nav .mnav-freeze.is-frozen { color: var(--state-denied); font-weight: 700; }
+.mobile-nav .mnav-more { margin-left: auto; color: var(--text-muted); }
+
+/* Horizontal scroll affordance: fade the right edge instead of clipping a
+   table mid-column with no cue that more exists. */
+@media (max-width: 900px) {
+  .table-wrap {
+    -webkit-mask-image: linear-gradient(90deg, #000 0, #000 calc(100% - 26px), transparent 100%);
+    mask-image: linear-gradient(90deg, #000 0, #000 calc(100% - 26px), transparent 100%);
+    -webkit-overflow-scrolling: touch;
+  }
+}
+
+/* The fixed mobile nav sits over the last row of content. */
+@media (max-width: 768px) {
+  .main-body { padding-bottom: 68px; }
+}
