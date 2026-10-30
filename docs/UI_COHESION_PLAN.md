@@ -94,7 +94,42 @@ ever wrote. On a seeded dataset the Gateways header claimed *0 pending* while
 five requests were waiting. All three now derive from data already in memory,
 and render `—` when there is none.
 
-### 1.7 Smaller repairs
+### 1.7 The sky now carries across the product
+
+The Command Center lived in a night sky; every other page sat on a flat dark
+background with the same accent colour. The palette matched, the *motif* did
+not — the constellation was a one-page flourish.
+
+Now the motif is a system:
+
+- **Every inner page opens on a band of sky.** `.hud` — the eyebrow line that
+  already opened History, Statistics, Gateways, Fleet, Integrations, Controls,
+  Settings, Logs and Windows — is now a lit strip: the same deep-blue glow the
+  Command Center sits under, a fixed scatter of ~16 stars (three of them amber,
+  the "gates"), and an amber hairline where the sky meets the page. The band is
+  the same on every page, so it reads as one horizon rather than a per-page
+  decoration.
+- **The page background keeps the stars.** The tiled star layer behind the
+  content was there but too faint to see; it is now in the same brightness
+  family as the Command Center's sky, so the space between panels is sky too.
+- **The sidebar is part of the same night.** A top glow and a handful of faint
+  stars sit behind the nav (through the existing blur/glass), with a hairline
+  under the brand and one down the rail — the threshold between the nav and the
+  page.
+- **Every panel carries the horizon.** `.widget` gets a 1px amber gradient that
+  fades at both ends — the same hairline as the band's bottom edge, repeated at
+  panel scale.
+
+The constellation itself stays unique to Command Center, because there it is
+*not* decoration: it is the fleet map — one figure, one star per gateway. That
+hierarchy is the point: the sky is everywhere, the map is where the fleet is.
+
+Rejected on the way: a star glyph before every section title (it becomes a flex
+item in `.widget-header` and re-centres the title — visible in the screenshots
+of that attempt), and per-page constellations (kitsch, and they would compete
+with the one on Command Center).
+
+### 1.8 Smaller repairs
 
 - Fleet roster: hostnames were clipped to one letter (`h…`, twice) because the
   IP won the width fight. Hostname + state on line 1, IP on line 2.

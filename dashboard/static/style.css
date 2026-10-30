@@ -81,12 +81,24 @@ button::-moz-focus-inner { border: 0; padding: 0; }
 
   /* ── Sidebar ────────────────────────────────────────────── */
   .sidebar{
+    position:relative;isolation:isolate;
     width:220px;min-width:220px;
     background:rgba(15,13,10,0.42);
     backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);
     display:flex;flex-direction:column;z-index:20;
     padding:0 0 16px 0;overflow:hidden;
     transition:width .55s cubic-bezier(.4,0,.2,1),min-width .55s cubic-bezier(.4,0,.2,1),opacity .4s ease;
+  }
+  .sidebar::before{
+    content:'';position:absolute;inset:0;pointer-events:none;z-index:-1;
+    background:
+      radial-gradient(ellipse 130% 16% at 50% -6%, rgba(46,72,132,0.34), transparent 70%),
+      radial-gradient(1px 1px at 22% 18%, rgba(205,216,230,0.30) 50%, transparent 51%),
+      radial-gradient(1px 1px at 68% 26%, rgba(205,216,230,0.24) 50%, transparent 51%),
+      radial-gradient(1.5px 1.5px at 41% 44%, rgba(205,216,230,0.26) 50%, transparent 51%),
+      radial-gradient(1px 1px at 78% 57%, rgba(205,216,230,0.20) 50%, transparent 51%),
+      radial-gradient(1px 1px at 30% 68%, rgba(205,216,230,0.22) 50%, transparent 51%),
+      radial-gradient(1.5px 1.5px at 62% 82%, rgba(245,158,11,0.16) 50%, transparent 51%);
   }
   .sidebar-brand{
     display:flex;align-items:center;gap:10px;
@@ -1868,11 +1880,11 @@ textarea { font-family: 'JetBrains Mono', monospace; }
   pointer-events: none;
   z-index: 0;
   background-image:
-    radial-gradient(1.5px 1.5px at 12% 22%, rgba(205,216,230,0.30) 50%, transparent 51%),
-    radial-gradient(1px 1px at 33% 9%, rgba(205,216,230,0.22) 50%, transparent 51%),
-    radial-gradient(1px 1px at 52% 17%, rgba(205,216,230,0.16) 50%, transparent 51%),
-    radial-gradient(1.5px 1.5px at 71% 6%, rgba(205,216,230,0.24) 50%, transparent 51%),
-    radial-gradient(1px 1px at 88% 13%, rgba(205,216,230,0.18) 50%, transparent 51%),
+    radial-gradient(1.5px 1.5px at 12% 22%, rgba(205,216,230,0.42) 50%, transparent 51%),
+    radial-gradient(1px 1px at 33% 9%, rgba(205,216,230,0.30) 50%, transparent 51%),
+    radial-gradient(1px 1px at 52% 17%, rgba(205,216,230,0.22) 50%, transparent 51%),
+    radial-gradient(1.5px 1.5px at 71% 6%, rgba(205,216,230,0.34) 50%, transparent 51%),
+    radial-gradient(1px 1px at 88% 13%, rgba(205,216,230,0.26) 50%, transparent 51%),
     radial-gradient(1px 1px at 24% 41%, rgba(245,158,11,0.12) 50%, transparent 51%),
     radial-gradient(1px 1px at 62% 34%, rgba(205,216,230,0.14) 50%, transparent 51%),
     radial-gradient(1.5px 1.5px at 91% 44%, rgba(245,158,11,0.14) 50%, transparent 51%),
@@ -2207,7 +2219,49 @@ input::placeholder, textarea::placeholder { color: #9c8e7a; }
    ============================================================== */
 
 /* ── HUD strip ── */
-.hud{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-bottom:16px}
+/* ── Sky strip ────────────────────────────────────────────────────────────
+   Every inner page opens on the same band of sky the Command Center sits in:
+   the deep-blue glow from above the horizon, a scatter of fixed stars and an
+   amber hairline where the sky meets the page. The constellation itself stays
+   unique to Command Center — there it *is* the fleet map — but the night it
+   lives in now carries across the whole product. */
+.hud{
+  position:relative; isolation:isolate;
+  display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;
+  margin:0 0 18px; padding:13px 18px 15px;
+  border-radius:10px;
+  background:
+    radial-gradient(ellipse 90% 220% at 50% -120%, rgba(52,82,148,0.50), transparent 74%),
+    radial-gradient(ellipse 45% 150% at 18% -70%, rgba(30,50,96,0.34), transparent 72%),
+    radial-gradient(ellipse 60% 120% at 82% -80%, rgba(46,72,132,0.22), transparent 76%),
+    linear-gradient(180deg, rgba(22,32,58,0.42) 0%, rgba(15,13,10,0) 96%);
+  overflow:hidden;
+}
+.hud::before{
+  content:''; position:absolute; inset:0; pointer-events:none; z-index:-1;
+  background-image:
+    radial-gradient(1.5px 1.5px at 7% 34%, rgba(205,216,230,0.55) 50%, transparent 51%),
+    radial-gradient(1px 1px at 13% 72%, rgba(205,216,230,0.35) 50%, transparent 51%),
+    radial-gradient(1px 1px at 21% 22%, rgba(205,216,230,0.30) 50%, transparent 51%),
+    radial-gradient(2px 2px at 29% 64%, rgba(245,158,11,0.35) 50%, transparent 51%),
+    radial-gradient(1px 1px at 37% 38%, rgba(205,216,230,0.28) 50%, transparent 51%),
+    radial-gradient(1px 1px at 44% 80%, rgba(205,216,230,0.32) 50%, transparent 51%),
+    radial-gradient(1.5px 1.5px at 51% 28%, rgba(205,216,230,0.42) 50%, transparent 51%),
+    radial-gradient(1px 1px at 58% 66%, rgba(205,216,230,0.30) 50%, transparent 51%),
+    radial-gradient(2px 2px at 66% 40%, rgba(245,158,11,0.30) 50%, transparent 51%),
+    radial-gradient(1px 1px at 73% 78%, rgba(205,216,230,0.30) 50%, transparent 51%),
+    radial-gradient(1.5px 1.5px at 81% 30%, rgba(205,216,230,0.40) 50%, transparent 51%),
+    radial-gradient(1px 1px at 88% 62%, rgba(205,216,230,0.28) 50%, transparent 51%),
+    radial-gradient(1px 1px at 94% 44%, rgba(205,216,230,0.34) 50%, transparent 51%),
+    radial-gradient(2px 2px at 33% 18%, rgba(205,216,230,0.55) 50%, transparent 51%),
+    radial-gradient(1.5px 1.5px at 62% 12%, rgba(205,216,230,0.45) 50%, transparent 51%),
+    radial-gradient(1px 1px at 90% 20%, rgba(245,158,11,0.30) 50%, transparent 51%);
+  opacity:1;
+}
+.hud::after{
+  content:''; position:absolute; left:18px; right:18px; bottom:0; height:1px;
+  background:linear-gradient(90deg, transparent, rgba(245,158,11,0.22) 18%, rgba(245,158,11,0.22) 82%, transparent);
+}
 .hud-txt{font-family:'JetBrains Mono',monospace;font-size: 11px;letter-spacing:2px;text-transform:uppercase;color:#a89880;display:flex;align-items:center;gap:10px}
 .hud-txt b{color:var(--accent);font-weight:700;}
 .hud-right{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
@@ -2905,3 +2959,19 @@ input::placeholder, textarea::placeholder { color: #9c8e7a; }
 @media (max-width: 768px) {
   .main-body { padding-bottom: 68px; }
 }
+
+/* Every panel gets the same horizon the page header does: a hairline of amber
+   that fades out at both ends. One motif, repeated softly, instead of a
+   different decoration per page. */
+.widget { position: relative; }
+.widget::before {
+  content: '';
+  position: absolute; top: 0; left: 14px; right: 14px; height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(245,158,11,0.16), transparent);
+  pointer-events: none;
+}
+
+/* The threshold: a hairline where the nav's sky meets the page, and one under
+   the brand so the rail reads as a place rather than a floating list. */
+.sidebar { border-right: 1px solid rgba(245,158,11,0.09); }
+.sidebar-brand { border-bottom: 1px solid rgba(245,158,11,0.06); }
