@@ -1406,11 +1406,9 @@ function ensureHudSky() {
     svg.setAttribute('class', 'hud-sky');
     svg.setAttribute('viewBox', '0 0 150 40');
     svg.setAttribute('role', 'img');
-    /* Ride with the eyebrow, not the controls: the right-hand cluster grows
-       and wraps per page (Statistics has a selector plus two buttons), and a
-       map that moves around is worse than no map. */
-    var txt = hud.querySelector('.hud-txt');
-    if (txt) txt.appendChild(svg); else hud.appendChild(svg);
+    /* Fixed slot on the right edge of the band. Inline next to the eyebrow it
+       slid left and right as page titles changed length, which read as jitter. */
+    hud.appendChild(svg);
   });
   renderHudSky();
 }
@@ -1982,7 +1980,7 @@ function renderEmptyState(total) {
   }
 
   var sparkHtml = renderSparkline();
-  var sessionsHtml = renderRecentSessions();
+  var sessionsHtml = '<div class="cc-sessions-host" id="cc-sessions-host"></div>';
 
   var headline, sub;
   if (total > 0) {
@@ -2163,157 +2161,95 @@ function renderSparkline() {
 }
 
 // ── Recent Sessions panel (below radar in empty state) ─────────────────
-function renderRecentSessions() {
-  var sessionMap = {};
-  (requestsData || []).forEach(function(r) {
-    var sid = r.session_id;
-    if (!sid || sid === 'unknown') return;
-    if (!sessionMap[sid]) sessionMap[sid] = { id: sid, requests: [], latest: 0 };
-    sessionMap[sid].requests.push(r);
-    if (r.created_at > sessionMap[sid].latest) sessionMap[sid].latest = r.created_at;
-  });
-  var sessions = Object.values(sessionMap);
-  if (sessions.length === 0) return '';
-  sessions.sort(function(a, b) { return b.latest - a.latest; });
-  sessions = sessions.slice(0, 6);
+var _recentSessions = [];
+var _sessionsExpanded = false;
+var SESSIONS_COLLAPSED = 3;
 
+function sessionRow(s, names, now) {
+  var meta = names[s.session_id] || {};
+  var reqs = s.reqs || 0, mcps = s.mcps || 0;
+  var kind = (reqs && mcps) ? 'mixed' : (mcps && !reqs) ? 'mcp' : 'ssh';
+  var title = meta.name
+    ? escapeHtml(meta.name)
+    : '<span class="sess-id">#' + escapeHtml(s.session_id.substring(0, 8)) + '</span>';
+  var activity = [];
+  if (reqs) activity.push(reqs + ' cmd');
+  if (mcps) activity.push(mcps + ' mcp');
+  var pending = s.pending || 0;
+  return '<tr class="sess-row" tabindex="0" role="button" onclick="openSessionModal(\'' + escapeHtml(s.session_id) + '\')" ' +
+      'onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();openSessionModal(\'' + escapeHtml(s.session_id) + '\');}">' +
+    '<td class="sess-name">' +
+      '<span class="sess-kind ' + kind + '">' + kind + '</span>' +
+      '<span class="sess-title">' + title + '</span>' +
+      (meta.description ? '<span class="sess-desc">' + escapeHtml(meta.description) + '</span>' : '') +
+    '</td>' +
+    '<td class="sess-host">' + escapeHtml(s.host || 'mcp') + '</td>' +
+    '<td class="sess-act">' + (activity.join(' \u00b7 ') || '\u2014') +
+      (pending ? ' <span class="sess-pending">' + pending + ' pending</span>' : '') + '</td>' +
+    '<td class="sess-age">' + formatAgo(now - (s.last_seen || now)) + '</td>' +
+    '<td class="sess-open">Open \u2192</td>' +
+  '</tr>';
+}
+
+function renderSessionsTable() {
+  var host = document.getElementById('cc-sessions-host');
+  if (!host) return;
   var names = _sessionNames || {};
   var now = Math.floor(Date.now() / 1000);
-
-  var cards = sessions.map(function(s) {
-    var meta = names[s.id] || {};
-    var displayName = meta.name || s.id.substring(0, 8);
-    var desc = meta.description || '';
-    var host = s.requests[0] ? (s.requests[0].hostname || s.requests[0].target_ip || '') : '';
-    var lastCmd = s.requests[s.requests.length - 1];
-    var cmdPreview = lastCmd ? escapeHtml(String(lastCmd.command || '').substring(0, 64)) : '';
-    var ago = formatAgo(now - s.latest);
-    var count = s.requests.length;
-    var pending = s.requests.filter(function(r){ return r.status === 'pending' && r.ttl > 0; }).length;
-    var expired = s.requests.filter(function(r){ return r.status === 'pending' && !(r.ttl > 0); }).length;
-    var badge = (pending ? '<span style="color:var(--status-warning);font-weight:700;">' + pending + ' pending</span> \u00b7 ' : '') +
-                (expired ? '<span style="color:var(--text-muted);font-weight:700;">' + expired + ' expired</span> \u00b7 ' : '');
-
-    return '<div class="recent-session-card" onclick="openSessionModal(\'' + escapeHtml(s.id) + '\')">' +
-      '<div class="rs-title"><span class="host">' + escapeHtml(host) + '</span> \u00b7 ' +
-        (meta.name
-          ? escapeHtml(meta.name) + ' <span style="color:var(--text-muted);font-weight:400;font-size:11px;">\u00b7 ' + escapeHtml(s.id.substring(0, 6)) + '</span>'
-          : '<span style="color:var(--text-muted);font-weight:400;font-size:11px;">#' + escapeHtml(s.id.substring(0, 8)) + '</span>') +
+  if (!_recentSessions.length) {
+    host.innerHTML = '<div class="cc-sessions"><div class="cc-sessions-head"><span>Recent sessions</span></div>' +
+      '<p class="text-muted text-xs" style="padding:10px 2px">No sessions recorded yet.</p></div>';
+    return;
+  }
+  var shown = _sessionsExpanded ? _recentSessions : _recentSessions.slice(0, SESSIONS_COLLAPSED);
+  var hidden = _recentSessions.length - shown.length;
+  host.innerHTML =
+    '<div class="cc-sessions">' +
+      '<div class="cc-sessions-head">' +
+        '<span>Recent sessions</span>' +
+        '<span class="cc-sessions-count">' + _recentSessions.length + ' total</span>' +
       '</div>' +
-      '<div class="rs-cmd-block">' + cmdPreview + '</div>' +
-      (desc ? '<div class="rs-desc">' + escapeHtml(desc) + '</div>' : '') +
-      '<div class="rs-meta"><span>' + badge + count + ' command' + (count > 1 ? 's' : '') + '</span><span>\u00b7</span><span>' + ago + '</span><span style="margin-left:auto;color:var(--accent);">View \u2192</span></div>' +
+      '<table class="sess-table"><thead><tr>' +
+        '<th>Session</th><th>Host</th><th>Activity</th><th>Last</th><th></th>' +
+      '</tr></thead><tbody>' + shown.map(function (s) { return sessionRow(s, names, now); }).join('') + '</tbody></table>' +
+      (_recentSessions.length > SESSIONS_COLLAPSED
+        ? '<button class="cc-sessions-more" onclick="toggleSessions()">' +
+            (_sessionsExpanded ? 'Show fewer' : 'Show all ' + _recentSessions.length) +
+          '</button>'
+        : '') +
     '</div>';
-  }).join('');
+}
 
-  return '<div class="cc-recent-sessions">' +
-    '<div class="cc-recent-sessions-header">Recent Sessions</div>' +
-    '<div class="cc-recent-sessions-grid" id="recent-sessions-grid">' + cards + '</div>' +
-  '</div>';
+function toggleSessions() {
+  _sessionsExpanded = !_sessionsExpanded;
+  renderSessionsTable();
 }
 
 /* Rebuild the Recent Sessions grid from the merged server summary so it also
    surfaces MCP-only and mixed (SSH + MCP) sessions, with real per-kind counts. */
 async function refreshRecentSessions() {
-  var grid = document.getElementById('recent-sessions-grid');
-  if (!grid) return;
+  if (!document.getElementById('cc-sessions-host')) return;
   var summaries = [];
+  var hostMap = {};
+  (requestsData || []).forEach(function (r) {
+    if (r.session_id && !hostMap[r.session_id]) hostMap[r.session_id] = r.hostname || r.target_ip || '';
+  });
   try {
-    var res = await authFetch('/api/sessions/recent?limit=6');
+    var res = await authFetch('/api/sessions/recent?limit=12');
     var d = await res.json();
     summaries = d.sessions || [];
   } catch (e) { console.warn('recent sessions fetch failed', e); return; }
-  grid = document.getElementById('recent-sessions-grid');
-  if (!grid) return;
-  var names = _sessionNames || {};
-  var now = Math.floor(Date.now() / 1000);
-  var reqMap = {};
-  (requestsData || []).forEach(function (r) {
-    var s = r.session_id;
-    if (!s || s === 'unknown') return;
-    if (!reqMap[s]) reqMap[s] = [];
-    reqMap[s].push(r);
+  _recentSessions = summaries.map(function (s) {
+    if (!s.host || s.host === 'unknown') s.host = hostMap[s.session_id] || '';
+    return s;
   });
-  if (!summaries.length) { grid.innerHTML = '<div style="font-family:var(--font-mono);font-size:11px;color:var(--muted);padding:6px 2px">no sessions yet</div>'; return; }
-  grid.innerHTML = summaries.map(function (s) {
-    var local = reqMap[s.session_id] || [];
-    var meta = names[s.session_id] || {};
-    var host = s.host || (local.length ? (local[0].hostname || local[0].target_ip || '') : '');
-    var pending = local.filter(function (r) { return r.status === 'pending' && r.ttl > 0; }).length;
-    var expired = local.filter(function (r) { return r.status === 'pending' && !(r.ttl > 0); }).length;
-    var lastLocal = local.length ? local[local.length - 1] : null;
-    var prev = lastLocal ? escapeHtml(String(lastLocal.command || '').substring(0, 60)) : '';
-    var reqs = s.reqs || 0, mcps = s.mcps || 0;
-    var kind = (reqs && mcps) ? 'mixed' : (mcps && !reqs) ? 'mcp-only' : 'ssh';
-    var hostTxt = reqs ? (s.host || 'ssh') : 'mcp';
-    var nameTxt = meta.name;
-    var idPart = nameTxt
-      ? escapeHtml(nameTxt) + ' <span style="color:var(--text-muted);font-weight:400;font-size:11px;">\u00b7 ' + escapeHtml(s.session_id.substring(0, 6)) + '</span>'
-      : '<span style="color:var(--text-muted);font-weight:400;font-size:11px;">#' + escapeHtml(s.session_id.substring(0, 8)) + '</span>';
-    var kinds = [];
-    if (reqs) kinds.push(reqs + ' cmd');
-    if (mcps) kinds.push(mcps + ' mcp');
-    var badge = (pending ? '<span style="color:var(--status-warning);font-weight:700;">' + pending + ' pending</span> \u00b7 ' : '') +
-                (expired ? '<span style="color:var(--text-muted);font-weight:700;">' + expired + ' expired</span> \u00b7 ' : '');
-    return '<div class="recent-session-card" onclick="openSessionModal(\'' + escapeHtml(s.session_id) + '\')">' +
-      '<div class="rs-title"><span class="rs-kind ' + kind + '">' + kind + '</span>' +
-      '<span class="host">' + escapeHtml(hostTxt) + '</span> \u00b7 ' + idPart + '</div>' +
-      (prev ? '<div class="rs-cmd-block">' + prev + '</div>' : (mcps ? '<div class="rs-cmd-block" style="color:var(--ice)">MCP integration activity</div>' : '')) +
-      (meta.description ? '<div class="rs-desc">' + escapeHtml(meta.description) + '</div>' : '') +
-      '<div class="rs-meta"><span>' + badge + (kinds.join(' \u00b7 ') || 'activity') + '</span><span>\u00b7</span><span>' + formatAgo(now - (s.last_seen || now)) + '</span><span style="margin-left:auto;color:var(--accent);">View \u2192</span></div>' +
-    '</div>';
-  }).join('');
-  enableSessionScroll();
+  renderSessionsTable();
 }
 
 function jumpToSession(sid) {
   openSessionModal(sid);
 }
 
-/* Horizontal carousel for the Recent Sessions strip. Delegated on the
-   document so it works regardless of when/whether the grid is re-rendered:
-   mouse-wheel scrolls sideways, cards can be grabbed and dragged, and a
-   real drag never opens the session as a click. */
-var _rsDrag = { down: false, moved: false, startX: 0, startLeft: 0, grid: null };
-function rsGridFrom(t) { return t && t.closest ? t.closest('.cc-recent-sessions-grid') : null; }
-document.addEventListener('wheel', function(e) {
-  var grid = rsGridFrom(e.target);
-  if (!grid || grid.scrollWidth <= grid.clientWidth) return;
-  if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
-    e.preventDefault();
-    grid.scrollLeft += e.deltaY;
-  }
-}, { passive: false });
-
-document.addEventListener('pointerdown', function(e) {
-  var grid = rsGridFrom(e.target);
-  if (!grid) return;
-  _rsDrag = { down: true, moved: false, startX: e.clientX, startLeft: grid.scrollLeft, grid: grid };
-  grid.classList.add('dragging');
-});
-document.addEventListener('pointermove', function(e) {
-  var g = _rsDrag;
-  if (!g || !g.down || !g.grid) return;
-  var dx = e.clientX - g.startX;
-  if (Math.abs(dx) > 6) { g.moved = true; g.grid.scrollLeft = g.startLeft - dx; }
-});
-function rsEndDrag() {
-  if (_rsDrag.grid) _rsDrag.grid.classList.remove('dragging');
-  _rsDrag.down = false;
-}
-document.addEventListener('pointerup', rsEndDrag);
-document.addEventListener('pointercancel', rsEndDrag);
-
-/* suppress the click (open session) when the pointer actually dragged */
-document.addEventListener('click', function(e) {
-  if (_rsDrag.moved) {
-    e.stopPropagation(); e.preventDefault();
-    _rsDrag.moved = false;
-  }
-}, true);
-
-/* no-op hook kept for call sites that previously wired the grid directly */
-function enableSessionScroll() {}
 function smFmtTime(ts) {
   if (!ts) return '';
   return new Date(ts * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' });

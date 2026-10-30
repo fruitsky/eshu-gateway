@@ -124,14 +124,17 @@ The constellation itself stays unique to Command Center, because there it is
 *not* decoration: it is the fleet map — one figure, one star per gateway. That
 hierarchy is the point: the sky is everywhere, the map is where the fleet is.
 
-**The fleet is in every header.** Each page's sky band carries the same
+**The fleet is in every header, in a fixed slot.** Each page's sky band carries the same
 constellation the Command Center draws at full size — 150×40, the same figure,
 the same stars — with one amber dot per online gateway and a hollow dot per
 offline one. It is not decoration: it says *which figure the fleet forms* and
 *how much of it is up*, from any page. It rides with the eyebrow text rather
 than the right-hand controls, because that cluster grows per page (Statistics
 has a selector plus two buttons) and a map that moves around is worse than no
-map. It redraws only when the fleet's shape or health changes.
+map. It sits in a fixed slot on the right edge of the band (the band reserves
+`padding-right` for it): inline next to the eyebrow it slid left and right as each
+page's title changed length, which read as jitter. It redraws only when the
+fleet's shape or health changes.
 
 This also exposed a real bug in the main sky: every figure was centred on
 `(0.5, 0.5)` of its normalised box rather than on its own bounding box
@@ -144,7 +147,27 @@ item in `.widget-header` and re-centres the title — visible in the screenshots
 of that attempt), and per-page constellations (kitsch, and they would compete
 with the one on Command Center).
 
-### 1.8 Smaller repairs
+### 1.8 Recent sessions: a carousel became a table
+
+The Command Center's "Recent sessions" was a horizontal card carousel — the
+same shape the pending queue used to have, with the same hidden-scroll
+problem, and cards that duplicated the session modal's contents. It also sat
+outside the design language of the rest of the product, where everything else
+is a ledger.
+
+It is now a **table**: Session (kind chip + name, or short id, with the
+description beneath) · Host · Activity (`12 cmd · 3 mcp`, pending count in
+amber) · Last seen · Open. **Three rows by default**, with a full-width
+"Show all N" toggle underneath — enough to see recent activity without giving
+a secondary panel the weight of the queue above it. Rows are
+`role="button" tabindex="0"` (Enter/Space opens the session), and on a phone it
+drops to Session / Activity / Open.
+
+The carousel's drag-and-wheel handlers, its `.rs-*` card CSS and
+`renderRecentSessions()` are deleted; `/api/sessions/recent` is now read once
+for the table (limit 12) rather than twice.
+
+### 1.9 Smaller repairs
 
 - Fleet roster: hostnames were clipped to one letter (`h…`, twice) because the
   IP won the width fight. Hostname + state on line 1, IP on line 2.
