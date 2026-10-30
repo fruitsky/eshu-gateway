@@ -196,6 +196,28 @@ by policy · 15 cleared by a human · 10 refused (6 policy / 4 human) · 0/5
 gateways online** — coloured in the same language as History. The spark panels
 are gone; each number appears once.
 
+**2.5b "The nodes" was a horizontal line** — ✅ shipped
+
+Reported as a long-standing bug: every gateway in the Statistics scatter sat on
+one horizontal line. Two causes, both in the placement maths:
+
+1. The y value was `(total − blocked − denied) / total`, i.e. *everything that
+   was not refused* — which counts human-approved JITs as automation. With
+   nothing blocked or denied, every gateway scored exactly 100% and landed on
+   the same row at `y = 16`.
+2. `Math.round(rate * 100)` collapsed near-equal rates onto the same row even
+   when the underlying numbers differed.
+
+Now `y = auto_approved / total`, unrounded for placement, and any nodes that
+still land in the same 3% cell are pushed apart on a golden-angle spiral — so a
+fleet with genuinely identical numbers reads as a cluster instead of one dot.
+The panel also gained what a scatter needs to be readable: a 0/25/50/75/100%
+grid, an "automated" axis label, dot size described in the legend (it encodes
+volume against the busiest gateway), and a tooltip that separates auto / human /
+refused instead of printing one misleading "automated" figure. The arbitrary
+connector lines between the four busiest nodes are gone — they implied a trend
+that did not exist. Nodes are `role="button" tabindex="0"` with Enter/Space.
+
 **2.6 Controls is a 1,100px-wide list of one-line rules**
 
 Thirteen allowlist rows, each a full-width bar with a `×` at the far right,

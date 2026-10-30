@@ -5297,31 +5297,77 @@ function renderStatsKpis(d) {
 
 function renderStatsNodes(d) {
   var el = document.getElementById('stats-nodes'); if (!el) return;
-  var gws = (d.per_gateway || []).slice().sort(function (a, b) { return (b.total || 0) - (a.total || 0); });
-  var now = Math.floor(Date.now() / 1000);
+  var gws = (d.per_gateway || []).slice();
   if (!gws.length) { el.innerHTML = '<p class="text-muted">No gateway data.</p>'; return; }
+
+  /* x = commands handled, y = automation rate.
+     The old y was "(total - blocked - denied) / total", which counted
+     human-approved JITs as automation — so with nothing refused every gateway
+     scored exactly 100% and the whole fleet collapsed onto one horizontal
+     line. Rounding to whole percent did the same again whenever rates were
+     close. Both are fixed: y is auto_approved / total, unrounded for
+     placement, and colliding nodes are pushed apart deterministically. */
   var maxT = Math.max.apply(null, gws.map(function (g) { return g.total || 0; }).concat([1]));
-  var placed = gws.map(function (g, i) {
-    var x = 12 + ((g.total || 0) / maxT) * 76 + ((i % 3) * 4 - 4);
-    var jitA = (g.total || 0) - (g.auto_approved || 0) - (g.blocked || 0) - (g.denied || 0);
-    var autoPct = g.total > 0 ? Math.round(((g.auto_approved || 0) + jitA) / g.total * 100) : 0;
-    return { x: Math.max(8, Math.min(92, x)), y: 16 + ((100 - autoPct) / 100) * 68, auto: autoPct };
+  var rows = gws.map(function (g) {
+    var total = g.total || 0;
+    var auto = g.auto_approved || 0;
+    var blocked = g.blocked || 0;
+    var denied = g.denied || 0;
+    return {
+      g: g, total: total,
+      autoRate: total ? (auto / total) * 100 : 0,
+      human: Math.max(0, total - auto - blocked - denied),
+      blocked: blocked, denied: denied
+    };
+  }).sort(function (a, b) { return b.total - a.total; });
+
+  var seen = {};
+  var placed = rows.map(function (row) {
+    var x = 10 + (row.total / maxT) * 80;
+    var y = 12 + (1 - row.autoRate / 100) * 76;
+    // spread exact/near ties on a golden-angle spiral so a fleet with identical
+    // numbers still reads as a cluster, not a single dot
+    var key = Math.round(x / 3) + ':' + Math.round(y / 3);
+    var n = seen[key] = (seen[key] || 0) + 1;
+    if (n > 1) {
+      var ang = (n - 2) * 2.39996;
+      var rad = 2.6 + 1.7 * (n - 2);
+      x += Math.cos(ang) * rad;
+      y += Math.sin(ang) * rad;
+    }
+    return { x: Math.max(6, Math.min(94, x)), y: Math.max(8, Math.min(86, y)) };
   });
-  var lines = '';
-  for (var i = 0; i < Math.min(4, placed.length) - 1; i++) {
-    lines += '<line class="scatter-line" x1="' + placed[i].x + '" y1="' + placed[i].y + '" x2="' + placed[i + 1].x + '" y2="' + placed[i + 1].y + '"/>';
-  }
-  el.innerHTML = '<svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">' + lines + '</svg>' + gws.map(function (g, i) {
-    var p = placed[i];
-    var online = !g.last_seen || gwIsOnline(g);
-    var jitA = (g.total || 0) - (g.auto_approved || 0) - (g.blocked || 0) - (g.denied || 0);
-    var autoPct = g.total > 0 ? Math.round(((g.auto_approved || 0) + jitA) / g.total * 100) : 0;
-    var cls = 'g-node' + (g.total >= maxT * 0.5 ? ' big' : (g.total <= maxT * 0.15 ? ' small' : '')) + (online ? '' : ' off') +
-      (_selectedStatsGateways.has(g.ip) ? '' : ' dim');
-    return '<div class="' + cls + '" style="left:' + p.x + '%;top:' + p.y + '%" data-cmds="' + (g.total || 0) + '" data-name="' + (g.hostname || g.ip) + '" onclick="toggleStatsGateway(\'' + g.ip + '\')">' +
-      '<span class="n-dot"></span><span class="n-ini">' + gwIni(g.hostname || g.ip) + '</span>' +
-      '<span class="tip"><b>' + escapeHtml(g.hostname || g.ip) + '</b><span><b>' + (g.total || 0) + '</b> commands</span><span><b>' + autoPct + '%</b> automated</span></span></div>';
-  }).join('');
+
+  var guides = '';
+  [0, 25, 50, 75, 100].forEach(function (pct) {
+    var gy = 12 + (1 - pct / 100) * 76;
+    guides += '<line class="scatter-guide' + (pct === 50 ? ' mid' : '') + '" x1="6" y1="' + gy + '" x2="96" y2="' + gy + '"/>';
+  });
+
+  el.innerHTML =
+    '<div class="scatter-axis" aria-hidden="true">' +
+      '<span style="top:12%">100%</span><span style="top:50%">50%</span><span style="top:88%">0%</span>' +
+      '<span class="ax-ylabel">automated</span>' +
+    '</div>' +
+    '<svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">' + guides + '</svg>' +
+    rows.map(function (row, i) {
+      var p = placed[i], g = row.g;
+      var online = !g.last_seen || gwIsOnline(g);
+      var cls = 'g-node' + (row.total >= maxT * 0.5 ? ' big' : (row.total <= maxT * 0.15 ? ' small' : '')) +
+        (online ? '' : ' off') + (_selectedStatsGateways.has(g.ip) ? '' : ' dim');
+      var tip = '<b>' + escapeHtml(g.hostname || g.ip) + '</b>' +
+        '<span><b>' + row.total + '</b> commands</span>' +
+        '<span><b>' + Math.round(row.autoRate) + '%</b> automated</span>' +
+        '<span><b>' + row.human + '</b> cleared by a human</span>' +
+        '<span><b>' + (row.blocked + row.denied) + '</b> refused</span>';
+      return '<div class="' + cls + '" style="left:' + p.x.toFixed(2) + '%;top:' + p.y.toFixed(2) + '%" ' +
+        'data-cmds="' + row.total + '" data-name="' + escapeHtml(g.hostname || g.ip) + '" ' +
+        'role="button" tabindex="0" aria-label="' + escapeHtml(g.hostname || g.ip) + ': ' + row.total + ' commands, ' + Math.round(row.autoRate) + '% automated" ' +
+        'onclick="toggleStatsGateway(\'' + g.ip + '\')" ' +
+        'onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();toggleStatsGateway(\'' + g.ip + '\');}">' +
+        '<span class="n-dot"></span><span class="n-ini">' + gwIni(g.hostname || g.ip) + '</span>' +
+        '<span class="tip">' + tip + '</span></div>';
+    }).join('');
   el.querySelectorAll('.g-node').forEach(function (n) {
     n.addEventListener('mouseenter', function () {
       tallyNodeTone(parseInt(n.getAttribute('data-cmds') || '0', 10), n.classList.contains('off'));

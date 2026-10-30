@@ -2354,9 +2354,13 @@ input::placeholder, textarea::placeholder { color: #9c8e7a; }
 .gw-dots .d.off{background:var(--border);box-shadow:none;opacity:0.6}
 
 /* ── Stats gateway constellation ── */
-.node-scatter{position:relative;height:340px;margin-top:6px}
+.node-scatter{position:relative;height:340px;margin-top:6px;padding-left:34px}
 .node-scatter svg{position:absolute;inset:0;width:100%;height:100%}
-.scatter-line{stroke:rgba(245,158,11,0.16);stroke-width:0.6;vector-effect:non-scaling-stroke}
+.scatter-guide{stroke:rgba(156,142,122,0.16);stroke-width:0.5;vector-effect:non-scaling-stroke}
+.scatter-guide.mid{stroke:rgba(156,142,122,0.3);stroke-dasharray:3 4}
+.scatter-axis{position:absolute;left:0;top:0;bottom:0;width:32px;pointer-events:none}
+.scatter-axis span{position:absolute;left:0;transform:translateY(-50%);font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-faint);font-variant-numeric:tabular-nums}
+.scatter-axis .ax-ylabel{top:2px;transform:none;font-size:11px;letter-spacing:1px;text-transform:uppercase;color:var(--text-muted)}
 .g-node{position:absolute;transform:translate(-50%,-50%);display:flex;flex-direction:column;align-items:center;gap:3px;cursor:pointer;z-index:2}
 .g-node .n-dot{position:relative;width:7px;height:7px;border-radius:50%;background:var(--accent);box-shadow:0 0 10px var(--accent-glow),0 0 0 3px rgba(245,158,11,0.10)}
 .g-node.big .n-dot{width:10px;height:10px;box-shadow:0 0 14px var(--accent-glow),0 0 0 4px rgba(245,158,11,0.12)}
