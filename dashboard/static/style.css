@@ -3339,3 +3339,127 @@ input::placeholder, textarea::placeholder { color: #9c8e7a; }
 #view-stats .cmd-name { color: var(--text-main); }
 #view-stats .cmd-fill { background: rgba(240, 230, 212, 0.5); }
 #view-stats .kpi .kval { font-variant-numeric: lining-nums; }
+
+/* ==============================================================
+   PILOT (2) — the same ink-and-signal language on Command Center
+   The queue stops being a stack of cards and becomes a ledger the constellation
+   sits behind. Everything is scoped to #view-home.
+   ============================================================== */
+
+/* The sky is the page, not a header above it: the figure now runs behind the
+   queue, so the pending requests sit *in* the constellation rather than under
+   it. */
+#view-home .starfield-wrap {
+  height: clamp(320px, 46vh, 520px);
+  margin-bottom: -190px;
+}
+#view-home .cc-queue, #view-home .cc-empty-headline, #view-home .cc-empty-sub,
+#view-home .cc-attention, #view-home .cc-ticker, #view-home .cc-sessions-host {
+  position: relative; z-index: 2;
+}
+#view-home .cc-queue { padding-top: 78px; }
+
+/* The decision, as a ledger entry: brackets, no card. */
+#view-home .ccq-hero .jit-ticket {
+  background: rgba(15, 13, 10, 0.55);
+  border: none;
+  border-radius: 0;
+  padding: 18px 20px;
+  box-shadow: none;
+  background-image:
+    linear-gradient(var(--rule)) 0 0 / 18px 1px no-repeat,
+    linear-gradient(var(--rule)) 0 0 / 1px 18px no-repeat,
+    linear-gradient(var(--rule)) 100% 0 / 18px 1px no-repeat,
+    linear-gradient(var(--rule)) 100% 0 / 1px 18px no-repeat,
+    linear-gradient(var(--rule)) 0 100% / 18px 1px no-repeat,
+    linear-gradient(var(--rule)) 0 100% / 1px 18px no-repeat,
+    linear-gradient(var(--rule)) 100% 100% / 18px 1px no-repeat,
+    linear-gradient(var(--rule)) 100% 100% / 1px 18px no-repeat;
+}
+#view-home .ccq-hero.is-cursor .jit-ticket,
+#view-home .ccq-hero .jit-ticket:hover { background-color: rgba(15, 13, 10, 0.72); }
+
+/* The rest of the queue: hairline rows on the sky, no container. */
+#view-home .ccq-rest {
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  margin-top: 18px;
+}
+#view-home .ccq-row {
+  background: transparent;
+  border-bottom: 1px solid var(--rule-weak);
+  padding: 10px 12px;
+}
+#view-home .ccq-row:hover { background: rgba(15, 13, 10, 0.5); }
+#view-home .ccq-row.is-cursor { outline: none; background: rgba(15, 13, 10, 0.55); box-shadow: inset 2px 0 0 var(--accent); }
+#view-home .ccq-human { color: var(--text-main); }
+#view-home .ccq-row .ccq-human { color: var(--text-main); }
+
+/* Type: the headline is the page's voice, in the ledger face. */
+#view-home .cc-empty-headline {
+  font-family: var(--serif);
+  font-weight: 400;
+  font-size: 38px;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--text-main);
+  margin-top: 26px;
+}
+#view-home .cc-empty-sub {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-top: 8px;
+}
+#view-home .ccq-hero-label { color: var(--text-muted); letter-spacing: 1.4px; }
+#view-home .ccq-rank {
+  font-family: var(--serif);
+  font-size: 15px;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--text-main);
+}
+
+/* The key becomes a footer line under the ledger: on the sky it collided with
+   the constellation, and it is a reference, not a feature. */
+#view-home .cc-legend {
+  position: static; margin: 22px auto 6px; padding: 0;
+  color: var(--text-faint); text-align: center; letter-spacing: 1px;
+}
+#view-home .cc-legend .k { color: var(--text-muted); }
+
+/* Attention rows lose their fill too. */
+#view-home .att-row {
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--rule-weak);
+  border-radius: 0;
+  padding: 9px 12px;
+}
+#view-home .att-row:hover { background: rgba(15, 13, 10, 0.5); border-color: var(--rule-weak); }
+#view-home .att-cta { color: var(--text-muted); }
+#view-home .att-row.warn .att-cta, #view-home .att-row.bad .att-cta { color: var(--text-main); }
+
+/* Sessions table: no panel, hairlines only. */
+#view-home .cc-sessions { margin-top: 22px; }
+#view-home .sess-table thead th { border-bottom-color: var(--rule); }
+#view-home .sess-row { border-bottom-color: var(--rule-weak); }
+#view-home .cc-sessions-more { border-color: var(--rule-weak); color: var(--text-muted); }
+
+/* The anomaly is stated in words under the command; a 3px red edge on an
+   otherwise borderless card reads as a stray mark. */
+#view-home .jit-ticket.urgent { border-left: none; }
+#view-home .jit-ticket.urgent .jit-human::after {
+  content: 'anomaly';
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px; letter-spacing: 1px; text-transform: uppercase;
+  color: var(--state-pending); border: 1px solid rgba(251,191,36,0.35);
+  border-radius: 2px; padding: 0 4px; margin-left: 8px;
+}
+
+/* Keyboard cursor: an ink ring, not an amber box. */
+#view-home .ccq-hero.is-cursor { outline: 1px solid var(--rule); outline-offset: 6px; }
+#view-home .ccq-hero.is-cursor .jit-ticket { outline: none; }

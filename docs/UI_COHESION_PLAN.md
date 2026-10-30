@@ -304,7 +304,31 @@ scoped to `#view-stats` and reverts in one block):
 Result: the only amber left on the page is *live data* — the chart, the fleet
 nodes, the peak cell, the alert count. Nothing in the chrome is amber.
 
-### 1.15 Smaller repairs
+### 1.15 Pilot 2: Command Center becomes a page, not a dashboard
+
+The same ink-and-signal language, now on the screen people actually live in
+(scoped to `#view-home`):
+
+- **The sky is the page.** The constellation is no longer a header band above
+  the queue — it runs behind it. The queue sits *in* the figure, with the
+  constellation's lines passing behind the hero card, which is the
+  star-trails-behind-text move from sora-to-ki's Notes page. The sky grew to
+  `clamp(320px, 46vh, 520px)` with a 190px negative margin, and the content
+  layers above it.
+- **The queue is a ledger.** The hero keeps its command block but loses the
+  card: transparent surface, corner brackets, no radius, no amber border. The
+  remaining requests are hairline rows on the sky rather than a bordered
+  container — you can see stars through the list.
+- **"At the threshold · 5 waiting"** is set in the serif at 38px. It is the
+  page's voice, and it is the only place on this screen that shouts.
+- **The keyboard key moved out of the sky** into a footer line under the
+  ledger. On the sky it collided with the constellation; as a reference line at
+  the bottom it costs nothing.
+- **The anomaly is a word, not a mark.** The 3px red edge on an otherwise
+  borderless card read as a stray pen mark; the hero now carries an `ANOMALY`
+  chip beside the command's plain-language line.
+
+### 1.16 Smaller repairs
 
 - Fleet roster: hostnames were clipped to one letter (`h…`, twice) because the
   IP won the width fight. Hostname + state on line 1, IP on line 2.

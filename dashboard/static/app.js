@@ -2044,7 +2044,6 @@ function renderEmptyState(total) {
       '<div class="dust-layer" id="dust-layer"></div>' +
       '<div class="sky" id="sky"><svg id="const-lines" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"></svg></div>' +
       '<div class="const-legend" id="const-legend"></div>' +
-      '<div class="cc-legend"><span class="k">↑↓</span> move · <span class="k">enter</span> open · <span class="k">O</span> override · <span class="k">B</span> ambience · <span class="k">C</span> constellation · <span class="k">M</span> mute · <span class="k">F</span> focus</div>' +
     '</div>' +
     '<div class="cc-queue' + (total > 0 ? ' show' : '') + '" id="cc-queue"></div>' +
     '<div class="cc-empty-headline">' + headline + '</div>' +
@@ -2052,6 +2051,7 @@ function renderEmptyState(total) {
     tickerHtml +
     attentionHtml +
     sessionsHtml +
+    '<div class="cc-legend"><span class="k">↑↓</span> move · <span class="k">enter</span> open · <span class="k">O</span> override · <span class="k">B</span> ambience · <span class="k">C</span> constellation · <span class="k">M</span> mute · <span class="k">F</span> focus</div>' +
   '</div>';
 }
 
