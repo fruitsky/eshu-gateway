@@ -260,7 +260,22 @@ The backend additions: `weekly_heatmap` (7×24, Monday-first, from
 `strftime('%w','%H')`), `busiest` (the hottest cell, for the chip), and
 `hosts` per top command. Existing keys are untouched.
 
-### 1.13 Smaller repairs
+### 1.13 Integrations and Gateways show health, not just configuration
+
+- **Integrations** had no "is it actually working" signal: you could see a name,
+  a URL and a gate mode, but not whether the upstream answered. Each card now
+  carries a last-call line — a state dot, `last call 21m ago`, and
+  `6 calls / 24h · 6 failed · 48ms avg` — fed by a new
+  `GET /api/integrations/health` (aggregate over `integration_calls`, one row
+  per integration). A card whose last call failed turns amber; a never-called
+  integration shows a hollow dot.
+- **Gateways** gained a `24h` column: 24 hourly bars per row, from a new
+  `per_gateway_hourly` map on the statistics endpoint (rotated so the right
+  edge is the current hour). It answers "is this host busy or idle" without
+  leaving the table. Nine columns now fit because the table's cell padding was
+  tightened for this view.
+
+### 1.14 Smaller repairs
 
 - Fleet roster: hostnames were clipped to one letter (`h…`, twice) because the
   IP won the width fight. Hostname + state on line 1, IP on line 2.

@@ -3183,3 +3183,31 @@ input::placeholder, textarea::placeholder { color: #9c8e7a; }
   .hygiene-item { border-left: none; padding-left: 0; border-top: 1px solid var(--border-color); padding-top: 8px; }
   .hygiene-item:first-child { border-top: none; padding-top: 0; }
 }
+
+/* Integration card: last-call health, so a broken upstream is visible in the
+   list instead of only when you open it. */
+.i-health {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 2px 6px; margin-top: 6px;
+  font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-muted);
+}
+.ih-stats { color: var(--text-faint); }
+.i-health.bad { color: var(--state-pending); }
+.ih-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--text-faint); flex-shrink: 0; }
+.ih-dot.ok { background: var(--state-approved); }
+.ih-dot.bad { background: var(--state-denied); }
+.ih-dot.never { background: transparent; border: 1px solid var(--text-faint); }
+.ih-sep { color: var(--text-faint); }
+
+/* Gateways: last 24 hours, one bar per hour. */
+.gw-spark-cell { width: 74px; }
+.gw-spark-bars {
+  display: inline-flex; align-items: flex-end; gap: 1px;
+  height: 16px; width: 62px;
+}
+.gws-b { flex: 1; min-width: 2px; background: rgba(245,158,11,0.55); border-radius: 1px; }
+.gws-b:hover { background: var(--accent); }
+.gw-spark-empty { color: var(--text-faint); }
+
+/* Gateways carries nine columns now; tighter cells keep the Actions column
+   inside the panel instead of behind a horizontal scroll. */
+#view-gateways table th, #view-gateways table td { padding-left: 10px !important; padding-right: 10px !important; }

@@ -1705,6 +1705,25 @@ def get_statistics(request: Request, days: int = 14, gateway_ip: str = None, gat
             row = (r['dow'] + 6) % 7          # 0 = Monday
             grid[row][r['hour']] = r['count']
         result['weekly_heatmap'] = grid
+
+        # Last 24h per gateway, for the sparkline in the Gateways table.
+        day_cutoff = int(time.time()) - 86400
+        cursor.execute(f'''
+            SELECT target_ip AS ip,
+                   CAST(strftime('%H', created_at, 'unixepoch') AS INTEGER) AS hour,
+                   COUNT(*) AS count
+            FROM requests
+            WHERE created_at >= ? AND status != 'window-rejected'{ip_filter}
+            GROUP BY ip, hour
+        ''', (day_cutoff,) + ip_params)
+        now_hour = int(time.strftime('%H', time.localtime()))
+        per_gw_hourly = {}
+        for r in cursor.fetchall():
+            buckets = per_gw_hourly.setdefault(r['ip'], [0] * 24)
+            # rotate so index 23 is the current hour
+            idx = (r['hour'] - now_hour - 1) % 24
+            buckets[idx] = r['count']
+        result['per_gateway_hourly'] = per_gw_hourly
         peak = {'dow': None, 'hour': None, 'count': 0}
         for ri, row in enumerate(grid):
             for hi, v in enumerate(row):
@@ -2608,6 +2627,14 @@ def create_integration_endpoint(payload: IntegrationPayload, request: Request):
     refresh_mcp_tools()
     record_audit_event("integration_created", details=f"Integration '{name}' created (kind {payload.kind})")
     return {"status": "ok", "name": name}
+
+
+@app.get("/api/integrations/health")
+def get_integrations_health_endpoint(request: Request):
+    """Per-integration last-call health (last 24h) for the Integrations cards."""
+    _check_session(request)
+    from db.integrations import get_integration_health
+    return {"health": get_integration_health()}
 
 
 @app.get("/api/integrations")

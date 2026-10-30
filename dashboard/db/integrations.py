@@ -592,6 +592,45 @@ def record_integration_call(integration: str, tool: str, agent: str, method: str
         return cursor.lastrowid
 
 
+def get_integration_health(window_seconds: int = 86400):
+    """Per-integration call health for the last `window_seconds`.
+
+    Returns `{integration: {last_call_at, last_outcome, calls, failed,
+    avg_latency_ms}}` so the Integrations cards can show whether an upstream
+    is actually answering without the operator opening it.
+    """
+    cutoff = int(time.time()) - window_seconds
+    out = {}
+    with db_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT c.integration,
+                   MAX(c.created_at) AS last_call_at,
+                   SUM(CASE WHEN c.created_at >= ? THEN 1 ELSE 0 END) AS calls,
+                   SUM(CASE WHEN c.created_at >= ? AND c.outcome != 'ok' THEN 1 ELSE 0 END) AS failed,
+                   AVG(CASE WHEN c.created_at >= ? AND c.latency_ms IS NOT NULL
+                            THEN c.latency_ms END) AS avg_latency_ms,
+                   (SELECT outcome FROM integration_calls c2
+                     WHERE c2.integration = c.integration
+                     ORDER BY c2.created_at DESC LIMIT 1) AS last_outcome
+            FROM integration_calls c
+            GROUP BY c.integration
+            """,
+            (cutoff, cutoff, cutoff),
+        )
+        for row in cursor.fetchall():
+            avg = row['avg_latency_ms']
+            out[row['integration']] = {
+                'last_call_at': row['last_call_at'],
+                'last_outcome': row['last_outcome'] or 'ok',
+                'calls': row['calls'] or 0,
+                'failed': row['failed'] or 0,
+                'avg_latency_ms': round(avg, 0) if avg is not None else None,
+            }
+    return out
+
+
 def get_integration_calls(search: str = None, start: int = None, end: int = None,
                           limit: int = 50, offset: int = 0, session: str = None,
                           approval: str = None):

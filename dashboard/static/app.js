@@ -417,7 +417,7 @@ async function switchView(target) {
     if (b.getAttribute('data-view') === target) b.setAttribute('aria-current', 'page');
     else b.removeAttribute('aria-current');
   });
-  if (target === 'gateways') { fetchGateways(); fetchEnrollData(); }
+  if (target === 'gateways') { fetchGateways(); fetchEnrollData(); fetchGatewayHourly(); }
   if (target === 'history') { fetchRequests(); fetchIntegrationCalls(); }
   if (target === 'windows') { fetchWindowsTable(); }
   if (target === 'stats') { fetchStatistics(); fetchSuggestions(); }
@@ -3494,6 +3494,31 @@ async function fetchCmdDescs() {
   } catch(e) {}
 }
 
+/* 24 hourly buckets for one gateway, as an inline bar strip. */
+var _gwHourly = {};
+function gwSparkline(ip) {
+  var buckets = _gwHourly[ip];
+  if (!buckets || !buckets.length) return '<span class="gw-spark-empty">\u2014</span>';
+  var max = Math.max.apply(null, buckets.concat([1]));
+  var total = buckets.reduce(function (a, b) { return a + b; }, 0);
+  if (!total) return '<span class="gw-spark-empty" title="no commands in 24h">\u2014</span>';
+  var bars = buckets.map(function (v) {
+    var h = Math.max(3, Math.round(v / max * 100));
+    return '<span class="gws-b" style="height:' + h + '%" title="' + v + ' command' + (v === 1 ? '' : 's') + '"></span>';
+  }).join('');
+  return '<span class="gw-spark-bars" title="' + total + ' commands in the last 24h">' + bars + '</span>';
+}
+
+async function fetchGatewayHourly() {
+  try {
+    var res = await authFetch('/api/statistics?days=1&extended=1');
+    if (!res.ok) return;
+    var d = await res.json();
+    _gwHourly = d.per_gateway_hourly || {};
+    if (document.getElementById('gateways-table-body')) fetchGateways();
+  } catch (e) {}
+}
+
 async function fetchGateways() {
   const res = await fetch('/api/gateways'); const data = await res.json();
   _gatewaysData = data;
@@ -3537,6 +3562,7 @@ async function fetchGateways() {
       'reachability ' + (Number(g.heartbeat_can_reach) ? 'ok' : 'failed'),
       'token ' + (g.has_token ? 'ok' : 'missing')
     ].join(', ');
+    const spark = gwSparkline(g.ip);
     const healthCell = g.last_heartbeat > 0
       ? '<span class="hb-status" aria-label="Health: ' + hbBits + '">' +
           hbDot(Number(g.heartbeat_poller_ok), 'Poller') +
@@ -3572,6 +3598,7 @@ async function fetchGateways() {
       '<td class="px-4 py-2 whitespace-nowrap text-muted">' + (g.first_seen ? formatAgo(now - g.first_seen) : '—') + '</td>' +
       '<td class="px-4 py-2">' + syncCell + '</td>' +
       '<td class="px-4 py-2">' + healthCell + '</td>' +
+      '<td class="px-4 py-2 gw-spark-cell">' + spark + '</td>' +
       '<td class="px-4 py-2">' + overrideCell + '</td>' +
       '<td class="px-4 py-2 text-right whitespace-nowrap"><button onclick="openRemoveGatewayModal(\'' + g.ip + '\', \'' + g.hostname + '\', ' + isOnline + ')" class="btn btn-deny btn-xs"> Remove</button></td>' +
       '</tr>';
@@ -5770,6 +5797,7 @@ setInterval(function() {
 let _selectedIntegration = null;
 let _editingIntegration = null;
 let _integrationsData = [];
+let _integrationHealth = {};
 
 // Supported integration profiles: guidance + auth defaults + seed availability.
 // `auth_type` set → the auth-type/header fields are hidden and pre-filled.
@@ -6286,6 +6314,7 @@ function renderIntegrationList() {
       '<span class="i-kind">' + esc(label) + '</span></div>' +
       '<div class="i-url">' + esc(urlLabel) + '</div>' +
       '<div class="i-meta">auth: ' + esc(i.auth_type) + ' &middot; gate: ' + esc(gateLabel) + ' &middot; mcp: ' + esc(i.mcp_mode || 'joined') + '</div>' +
+      integrationHealthLine(i.name) +
       '<div class="flex flex-wrap gap-1 mt-2" onclick="event.stopPropagation()">' +
       '<button onclick="editIntegration(\'' + esc(i.name) + '\')" class="btn btn-xs btn-muted" title="Edit base URL / secret">Edit</button>' +
       testBtn +
@@ -6300,9 +6329,32 @@ async function fetchIntegrationList() {
     const res = await authFetch('/api/integrations');
     if (!res.ok) return;
     _integrationsData = await res.json();
+    try {
+      var hr = await authFetch('/api/integrations/health');
+      if (hr.ok) _integrationHealth = (await hr.json()).health || {};
+    } catch (e) { _integrationHealth = {}; }
     renderIntegrationList();
     syncMcpStars();
   } catch(e) {}
+}
+
+/* One line per integration: is it answering, how often, how fast. */
+function integrationHealthLine(name) {
+  var h = _integrationHealth[name];
+  if (!h || !h.last_call_at) {
+    return '<div class="i-health"><span class="ih-dot never"></span>never called</div>';
+  }
+  var now = Math.floor(Date.now() / 1000);
+  var ago = formatAgo(now - h.last_call_at);
+  var bad = h.last_outcome !== 'ok' || h.failed > 0;
+  var bits = [h.calls + ' call' + (h.calls === 1 ? '' : 's') + ' / 24h'];
+  if (h.failed) bits.push(h.failed + ' failed');
+  if (h.avg_latency_ms != null) bits.push(h.avg_latency_ms + 'ms avg');
+  return '<div class="i-health' + (bad ? ' bad' : '') + '">' +
+    '<span class="ih-dot ' + (h.last_outcome === 'ok' ? 'ok' : 'bad') + '"></span>' +
+    '<span class="ih-last">last call ' + ago + '</span>' +
+    '<span class="ih-stats">' + escapeHtml(bits.join(' · ')) + '</span>' +
+  '</div>';
 }
 
 function resetIntegrationForm() {
