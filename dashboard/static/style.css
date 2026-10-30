@@ -3617,3 +3617,107 @@ input::placeholder, textarea::placeholder { color: #9c8e7a; }
 }
 .sidebar-status.freeze-on { border-color: rgba(248, 113, 113, 0.45); background: rgba(248, 113, 113, 0.06); }
 .nav-item.nav-logout { border-radius: 2px; }
+
+/* ==============================================================
+   PILOT (5) — Integrations and Logs
+   Both are lists at heart, so they move fully to hairlines: no card fills,
+   no header bands, no hover glow. Scoped to the two views.
+   ============================================================== */
+
+#view-integrations .widget, #view-logs .widget {
+  background: transparent;
+  border: none;
+  border-top: 1px solid var(--rule);
+  border-radius: 0;
+  padding: 18px 0 6px;
+  margin-bottom: 30px;
+}
+#view-integrations .widget::before, #view-logs .widget::before { display: none; }
+#view-integrations .widget-header, #view-logs .widget-header { color: var(--text-main); }
+
+/* Integration entries: hairline blocks, not cards. */
+#view-integrations .item-card {
+  background: transparent;
+  border: none;
+  border-top: 1px solid var(--rule-weak);
+  border-radius: 0;
+  padding: 12px 2px 14px;
+}
+#view-integrations .item-card.selectable:hover { background: rgba(240, 230, 212, 0.03); box-shadow: none; }
+#view-integrations .item-card.selected {
+  background: rgba(240, 230, 212, 0.04);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+#view-integrations .item-card .i-url,
+#view-integrations .item-card .i-meta { color: var(--text-muted); }
+#view-integrations .item-card .i-kind {
+  color: var(--text-muted);
+  border-color: var(--rule);
+  border-radius: 2px;
+  background: transparent;
+}
+#view-integrations #integration-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); column-gap: 24px; }
+
+/* The forms keep their inputs; only the frames go quiet. */
+#view-integrations .panel {
+  background: transparent;
+  border: none;
+  border-left: 1px solid var(--rule-weak);
+  border-radius: 0;
+  padding: 2px 0 2px 16px;
+}
+#view-integrations .panel h3 { color: var(--text-main); }
+
+/* Logs filter bar: tabs on a hairline, active one underlined in amber. */
+#view-logs .audit-filter-bar { border-bottom: 1px solid var(--rule); gap: 2px; padding: 6px 0 0; }
+#view-logs .audit-filter-tab { color: var(--text-muted); border-radius: 0; letter-spacing: .6px; }
+#view-logs .audit-filter-tab.active { color: var(--text-main); }
+#view-logs .audit-filter-tab.active::after { background: linear-gradient(90deg, transparent, var(--accent), transparent); }
+
+/* The log itself: hairlines, no zebra, no header band. */
+#view-logs thead th {
+  background: transparent;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  box-shadow: none;
+  border-bottom: 1px solid var(--rule);
+  color: var(--text-muted);
+}
+#view-logs tbody td { border-bottom: 1px solid var(--rule-weak); }
+#view-logs .log-row:hover { background: rgba(240, 230, 212, 0.03); }
+#view-logs .log-row.expanded { background: rgba(240, 230, 212, 0.04); box-shadow: inset 2px 0 0 var(--accent); }
+#view-logs .log-detail { background: transparent; border: none; border-left: 1px solid var(--rule); border-radius: 0; padding: 10px 0 10px 14px; }
+
+/* Search + count sit on the same rule as everything else. */
+#view-logs #audit-log-count { color: var(--text-faint); }
+
+/* Buttons are chrome: ink outline on paper. Approve/deny keep their state
+   colours, and the one true primary action (Add / Save) is ink at full
+   strength rather than a filled amber block. */
+#view-integrations .btn:not(.btn-approve):not(.btn-deny):not(.btn-danger),
+#view-logs .btn:not(.btn-approve):not(.btn-deny):not(.btn-danger) {
+  background: transparent;
+  border: 1px solid var(--rule);
+  border-radius: 2px;
+  color: var(--text-main);
+}
+#view-integrations .btn:not(.btn-approve):not(.btn-deny):not(.btn-danger):hover,
+#view-logs .btn:not(.btn-approve):not(.btn-deny):not(.btn-danger):hover {
+  background: rgba(240, 230, 212, 0.07);
+  border-color: var(--text-muted);
+  box-shadow: none;
+}
+#view-integrations .btn-primary {
+  background: transparent;
+  border: 1px solid var(--text-main);
+  color: var(--text-main);
+}
+#view-integrations .btn-primary:hover { background: var(--text-main); color: var(--bg-base); }
+
+/* The eyebrow is a flex row on desktop (word + gap + rest); on a phone the
+   rest wraps as a block and the gap turns into a hole. Let it flow as text. */
+@media (max-width: 768px) {
+  .hud-txt { display: block; }
+  .hud-txt b { display: inline; margin-right: 6px; }
+  .hud-sky { display: none; }
+}

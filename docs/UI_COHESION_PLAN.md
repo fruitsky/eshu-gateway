@@ -373,7 +373,28 @@ already outranked the utility class). Both are fixed; the stylesheet is back to
 **2 `!important`**, both documented, and 0 sub-11px text. It runs in
 `scripts/pre-commit.sh` as `ui tokens`, and prints its findings only on failure.
 
-### 1.18 Smaller repairs
+### 1.18 Pilot 5: Integrations and Logs
+
+Both are lists at heart, so they moved fully to hairlines (scoped to
+`#view-integrations` / `#view-logs`):
+
+- Sections are rules, as everywhere else; the add-form panels keep their inputs
+  but lose their boxes (a left hairline groups them instead).
+- Integration entries are hairline blocks in an auto-fill grid; selection is a
+  2px amber inset on the left, not a filled card.
+- **Buttons are chrome.** The solid amber `Create Token` / `Save` /
+  `Add Integration` blocks became ink outlines on paper — amber is for state
+  and live data, and those buttons are neither. Approve/deny keep their state
+  colours.
+- The log table loses the sticky header band and the zebra, and its filter tabs
+  sit on a hairline with an amber underline on the active one.
+- The eyebrow line now flows as text below 768px; as a flex row the gap turned
+  into a hole when it wrapped.
+
+With this, **no amber is spent on chrome in Integrations at all** — the only
+colour on the page is the enabled dot (green) and the health dot (red/amber).
+
+### 1.19 Smaller repairs
 
 - Fleet roster: hostnames were clipped to one letter (`h…`, twice) because the
   IP won the width fight. Hostname + state on line 1, IP on line 2.
