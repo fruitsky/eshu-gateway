@@ -830,3 +830,45 @@ it survives `prefers-reduced-motion` and a keyboard-only pass.
 5. 2.1 / 2.3 meaning of colour (health dots, log badges)
 6. 2.5 / 2.6 / 2.7 page-level density
 7. 2.13 mobile, 2.14 polish
+
+
+---
+
+## 5. Session handoff (state at 2026-10-31)
+
+**Where things stand:** `master` at `3180d76`, deployed to the LXC. Working tree
+clean. Seven views are in the ink language (Command Center, Statistics, History,
+Gateways, Integrations, Logs, Fleet Run) plus the rail, every page header, the
+login card and the mobile chrome. `scripts/ui_check.py` runs in
+`scripts/pre-commit.sh` as `ui tokens` and currently passes with **2 documented
+`!important`**, no sub-11px text and no undefined custom properties.
+
+**What is left, in order:**
+
+1. **Controls, Settings, Approved Windows** — headers and buttons only; these
+   are forms, so the panels can stay. The loud leftovers are the solid amber
+   `Save & Push Policies` and the mono headings.
+2. **Token sweep** — 83 literal hex colours outside `:root`, 119 padding values,
+   196 rgba alphas. Fold them into the palette, then delete the per-view
+   `#view-*` scoping once every view is converted (`style.css` currently ends
+   in six "PILOT" blocks appended in this session; they are ordered and
+   commented but they are still a second skin).
+3. **README + logo + fresh screenshots** — the banner art is still the old red
+   mark (1200×509, `dashboard/static/eshu_banner.png`); the README screenshots
+   predate the whole redesign.
+
+**Tooling that is not in the repo** (recreate if needed):
+
+- Visual review: a throwaway copy of `dashboard/` served on `127.0.0.1:8123`
+  with a seeded `eshu.db`, plus headless Chromium (no system browser on this
+  host; Chromium's shared libs were extracted into a private sysroot).
+- `snapshot.py` / `diffsnap.py` — computed-style snapshots for proving a CSS
+  refactor changed nothing (30 properties × every element × 12 viewport states).
+  This is the tool to reach for on the token sweep.
+- `audit_important.py` — toggles each `!important` off in the live CSSOM to
+  separate load-bearing from cargo-cult. Already done; the file is back to 2.
+
+**Known flakes:** `tests/test_omada_mcp.py` fails 2–3 tests in a full run
+roughly one time in three and passes 90/90 in isolation. Not related to UI work;
+worth a look at some point (likely ordering/shared state), but it has been
+ignored all session.
