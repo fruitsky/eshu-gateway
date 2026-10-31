@@ -23,14 +23,19 @@ function devBadge(g) {
   return '<span class="dev-pill">DEV</span>';
 }
 
-function toggleMobileSidebar() {
+function toggleMobileSidebar(force) {
   var sidebar = document.getElementById('main-sidebar');
   var overlay = document.getElementById('sidebar-overlay');
   var btn = document.getElementById('mobile-menu-btn');
   if (!sidebar || !overlay) return;
-  sidebar.classList.toggle('open');
-  overlay.classList.toggle('show');
-  if (btn) btn.classList.toggle('open', sidebar.classList.contains('open'));
+  var open = (force === undefined) ? !sidebar.classList.contains('open') : !!force;
+  sidebar.classList.toggle('open', open);
+  overlay.classList.toggle('show', open);
+  if (btn) btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  document.body.classList.toggle('nav-open', open);
+}
+function closeMobileSidebar() {
+  if (document.getElementById('main-sidebar').classList.contains('open')) toggleMobileSidebar(false);
 }
 // ── Command Center: Context Panel ────────────────────────────
 var _ccSelectedId = null;
@@ -419,10 +424,7 @@ async function switchView(target) {
     if (navBtn) navBtn.classList.toggle('active', v === target);
   });
   syncNavAria();
-  document.querySelectorAll('#mobile-nav button[data-view]').forEach(function(b) {
-    if (b.getAttribute('data-view') === target) b.setAttribute('aria-current', 'page');
-    else b.removeAttribute('aria-current');
-  });
+  closeMobileSidebar();
   if (target === 'gateways') { fetchGateways(); fetchEnrollData(); fetchGatewayHourly(); }
   if (target === 'history') { fetchRequests(); fetchIntegrationCalls(); }
   if (target === 'windows') { fetchWindowsTable(); }
@@ -2103,7 +2105,7 @@ function renderEmptyState(total) {
     if (lastAgo) sub += ' \u00b7 last activity ' + lastAgo;
   }
 
-  return '<div class="cc-empty">' +
+  return '<div class="cc-empty' + (total === 0 ? ' idle' : '') + '">' +
     '<div class="starfield-wrap">' +
       '<div class="dust-layer" id="dust-layer"></div>' +
       '<div class="sky" id="sky"><svg id="const-lines" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"></svg></div>' +
@@ -2887,6 +2889,7 @@ document.addEventListener('keydown', function(e) {
   else if (e.key === 'ArrowUp' || e.key === 'k') { if (typing || onControl) return; moveQueueCursor(-1); e.preventDefault(); }
   else if (e.key === 'Enter') { if (typing || onControl) return; openQueueCursor(); }
   else if (e.key === 'Escape') {
+    closeMobileSidebar();
     var om = document.getElementById('override-modal');
     if (om && !om.classList.contains('hidden')) { om.classList.add('hidden'); }
     else { deselectGateway(); }
@@ -3851,10 +3854,11 @@ function renderFreezeStatus(data) {
     if (pillDot) pillDot.classList.toggle('on', !!frozen);
     if (pillText) pillText.textContent = frozen ? 'Frozen — tap to unfreeze' : 'Freeze';
   }
-  var mf = document.getElementById('mnav-freeze');
+  var mf = document.getElementById('mobile-freeze');
   if (mf) {
     mf.classList.toggle('is-frozen', !!frozen);
-    mf.textContent = frozen ? 'Frozen' : 'Freeze';
+    var lbl = mf.querySelector('.mf-label');
+    if (lbl) lbl.textContent = frozen ? 'Frozen' : 'Freeze';
     mf.setAttribute('aria-pressed', frozen ? 'true' : 'false');
   }
 }

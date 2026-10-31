@@ -59,8 +59,13 @@
   </div>
 </div>
 
-<!-- Mobile menu button -->
-<button class="mobile-menu-btn" id="mobile-menu-btn" onclick="toggleMobileSidebar()" aria-label="Toggle navigation"></button>
+<!-- Mobile chrome: hamburger left, emergency freeze right -->
+<button class="mobile-menu-btn" id="mobile-menu-btn" onclick="toggleMobileSidebar()" aria-label="Open navigation" aria-expanded="false" aria-controls="main-sidebar">
+  <span></span><span></span><span></span>
+</button>
+<button class="mobile-freeze" id="mobile-freeze" onclick="toggleFreezeFromSidebar()" aria-label="Emergency freeze" aria-pressed="false">
+  <span class="mf-dot"></span><span class="mf-label">Freeze</span>
+</button>
 <div class="sidebar-overlay" id="sidebar-overlay" onclick="toggleMobileSidebar()"></div>
 
 <!-- ── Sidebar ─────────────────────────────────────────────────── -->
@@ -1275,15 +1280,6 @@
 
 <div class="sel-hint" id="sel-hint"><span class="nm" id="sel-hint-name"></span> <span class="kbd">O</span> override <span class="kbd">Esc</span> deselect</div>
 
-<nav class="mobile-nav" id="mobile-nav" aria-label="Primary">
-  <!-- Four destinations that fit a 390px screen, plus the two controls that
-       matter on a phone: the emergency freeze and the full menu. -->
-  <button data-view="home" aria-current="page" onclick="switchView('home')">Home</button>
-  <button data-view="history" onclick="switchView('history')">History</button>
-  <button data-view="stats" onclick="switchView('stats')">Stats</button>
-  <button data-view="fleet" onclick="switchView('fleet')">Fleet</button>
-  <button class="mnav-freeze" id="mnav-freeze" onclick="toggleFreezeFromSidebar()" aria-label="Emergency freeze">Freeze</button>
-  <button class="mnav-more" onclick="toggleMobileSidebar()" aria-label="All sections">More</button>
-</nav>
+
 </body>
 </html>

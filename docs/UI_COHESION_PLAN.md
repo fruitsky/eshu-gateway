@@ -448,7 +448,33 @@ strip, the orbit reduced to a dial); this pass brings it into the language:
 - **The dial is the only live ornament left** — its amber sun and the orbiting
   nodes are the one place colour animates on this page.
 
-### 1.21 Smaller repairs
+### 1.21 Mobile: a drawer instead of a bottom bar
+
+The mobile chrome had never worked: the ≤768px rule set `.sidebar { display:
+none }` and nothing re-enabled it, so the bottom bar's **More** button added a
+class to a hidden element. The bar also sat over the last row of every page and
+duplicated destinations that already existed in the rail.
+
+Now:
+
+- **A 44px hamburger, fixed top-left**, opens the sidebar as a real **drawer**:
+  full height, `min(86vw, 320px)`, solid paper, `translateX(-100%)` → `0`, a
+  scrim, and close on tap-outside, Escape, or picking a destination. Focus
+  state and `aria-expanded` are kept in sync; the page behind does not scroll.
+- **The bottom bar is gone.** Every destination plus Freeze / Sound / Log out
+  lives in the drawer, so nothing is pinned over the content.
+- **Freeze is still one tap**: a fixed `Freeze` control top-right that mirrors
+  its state (`Frozen`, red) — an emergency stop should not need a menu.
+- **The keyboard legend is hidden on touch** — there is no keyboard.
+- **Idle Command Center no longer pulls content over the sky.** The −190px
+  overlap exists so the *queue* sits inside the constellation; with nothing
+  queued it just put the headline on top of the stars. The overlap now applies
+  only in the decision state, so idle reads: figure, air, headline.
+- Fleet Run's compose strip stacks properly on a phone (command on its own
+  line, then timeout + action), and the home sky is capped at
+  `clamp(220px, 34vh, 300px)` instead of 388px.
+
+### 1.22 Smaller repairs
 
 - Fleet roster: hostnames were clipped to one letter (`h…`, twice) because the
   IP won the width fight. Hostname + state on line 1, IP on line 2.
