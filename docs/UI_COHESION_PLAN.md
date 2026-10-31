@@ -497,7 +497,15 @@ Three things came out of the pass beyond the three pages:
   picker with an ink row, and the match toggle with an amber knob: no amber
   fills anywhere.
 - **Token clean-up:** `--serif`, `--rule` and `--rule-weak` moved from the
-  Statistics pilot block into `:root`, because every page uses them now.
+  Statistics pilot block into `:root`, because every page uses them now. Then
+  the first half of the colour sweep: the four alias properties (`--border`,
+  `--muted`, `--info`, `--border-subtle`) are folded into the real palette,
+  `--text-quiet` and `--border-soft` are now proper tokens, and 45 literal hex
+  colours became `var(...)` of the token they duplicated — **83 literals
+  outside `:root` down to 26** (the rest are one-off legacy colours in the dev
+  pipeline and scrollbars). Proven by a computed-style snapshot (30 properties
+  × every element × 10 views × 2 viewports) before and after: zero differences
+  outside the live tables, whose rows change between runs.
 
 ### 1.23 Smaller repairs
 
