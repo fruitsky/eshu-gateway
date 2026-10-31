@@ -20,6 +20,11 @@
        Never use for text that has to be read. */
     --text-faint: #6f6555;
     --star: #cdd8e6;
+    /* The display face and the two hairline weights of the ink language.
+       Global, because every page now speaks it, not just Statistics. */
+    --serif: 'Instrument Serif', 'Iowan Old Style', Georgia, serif;
+    --rule: rgba(240, 230, 212, 0.22);
+    --rule-weak: rgba(240, 230, 212, 0.12);
     --accent: #f59e0b;
     --accent-hover: #fbbf24;
     --accent-glow: rgba(245, 158, 11, 0.2);
@@ -2331,8 +2336,14 @@ input::placeholder, textarea::placeholder { color: #9c8e7a; }
   content:''; position:absolute; left:18px; right:18px; bottom:0; height:1px;
   background:linear-gradient(90deg, transparent, rgba(245,158,11,0.22) 18%, rgba(245,158,11,0.22) 82%, transparent);
 }
-.hud-txt{font-family:'JetBrains Mono',monospace;font-size: 11px;letter-spacing:2px;text-transform:uppercase;color:#a89880;display:flex;align-items:center;gap:10px;flex:1 1 auto;min-width:0}
-.hud-txt b{color:var(--accent);font-weight:700;}
+.hud-txt{font-family:'JetBrains Mono',monospace;font-size: 11px;letter-spacing:1.5px;text-transform:uppercase;color:var(--text-muted);display:flex;align-items:center;gap:10px;flex:1 1 auto;min-width:0}
+/* The page is named in the display face, in ink: amber is not a heading
+   colour. One rule, so every page states its name the same way. */
+.hud-txt b{
+  font-family:var(--serif);font-weight:400;font-size:26px;letter-spacing:0;
+  text-transform:none;color:var(--text-main);margin-right:2px;line-height:1.1;
+}
+.hud-sub{min-width:0}
 .hud-right{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .hud-sum{display:flex;gap:14px;font-family:'JetBrains Mono',monospace;font-size: 11px;letter-spacing:1px;color:#a89880;flex-wrap:wrap}
 .hud-sum .n{color:var(--accent)}
@@ -3226,24 +3237,6 @@ input::placeholder, textarea::placeholder { color: #9c8e7a; }
    marks one thing. Everything here is scoped to #view-stats so it can be
    compared against the other pages and reverted in one block.
    ============================================================== */
-:root {
-  --serif: 'Instrument Serif', 'Iowan Old Style', Georgia, serif;
-  --rule: rgba(240, 230, 212, 0.22);
-  --rule-weak: rgba(240, 230, 212, 0.12);
-}
-
-/* Page title: one serif word, ink not amber, with the rest as a quiet line. */
-#view-stats .hud-txt { letter-spacing: 1.5px; }
-#view-stats .hud-txt b {
-  font-family: var(--serif);
-  font-weight: 400;
-  font-size: 26px;
-  letter-spacing: 0;
-  text-transform: none;
-  color: var(--text-main);
-  margin-right: 2px;
-}
-#view-stats .hud-txt { font-size: 11px; color: var(--text-muted); }
 
 /* Panels become rules and air, not filled cards. */
 #view-stats .widget {
@@ -3472,12 +3465,12 @@ input::placeholder, textarea::placeholder { color: #9c8e7a; }
 #view-home .ccq-hero.is-cursor .jit-ticket { outline: none; }
 
 /* ==============================================================
-   PILOT (3) — the table screens: History and Gateways
+   PILOT (3) — the table screens: History, Gateways, Approved Windows
    Same ink-and-signal language: sections are rules, numbers are serif,
-   tables are hairlines with no fill. Scoped to the two views.
+   tables are hairlines with no fill.
    ============================================================== */
 
-#view-history .widget, #view-gateways .widget {
+#view-history .widget, #view-gateways .widget, #view-windows .widget {
   background: transparent;
   border: none;
   border-top: 1px solid var(--rule);
@@ -3485,8 +3478,8 @@ input::placeholder, textarea::placeholder { color: #9c8e7a; }
   padding: 18px 0 6px;
   margin-bottom: 30px;
 }
-#view-history .widget::before, #view-gateways .widget::before { display: none; }
-#view-history .widget-header, #view-gateways .widget-header { color: var(--text-main); }
+#view-history .widget::before, #view-gateways .widget::before, #view-windows .widget::before { display: none; }
+#view-history .widget-header, #view-gateways .widget-header, #view-windows .widget-header { color: var(--text-main); }
 
 /* Tabs: ink, with the active one underlined rather than glowing. */
 #view-history .history-tab { color: var(--text-muted); letter-spacing: 1.2px; }
@@ -3522,7 +3515,7 @@ input::placeholder, textarea::placeholder { color: #9c8e7a; }
 #view-history .stat-card .stat-label { color: var(--text-muted); letter-spacing: 1.2px; }
 
 /* Tables: no header fill, no zebra, hairlines only. */
-#view-history thead th, #view-gateways thead th {
+#view-history thead th, #view-gateways thead th, #view-windows thead th {
   background: transparent;
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
@@ -3531,9 +3524,9 @@ input::placeholder, textarea::placeholder { color: #9c8e7a; }
   color: var(--text-muted);
   letter-spacing: 1.4px;
 }
-#view-history tbody tr:nth-child(even), #view-gateways tbody tr:nth-child(even) { background: transparent; }
-#view-history tbody td, #view-gateways tbody td { border-bottom: 1px solid var(--rule-weak); }
-#view-history tbody tr:hover, #view-gateways tbody tr:hover { background: rgba(240, 230, 212, 0.03); box-shadow: none; }
+#view-history tbody tr:nth-child(even), #view-gateways tbody tr:nth-child(even), #view-windows tbody tr:nth-child(even) { background: transparent; }
+#view-history tbody td, #view-gateways tbody td, #view-windows tbody td { border-bottom: 1px solid var(--rule-weak); }
+#view-history tbody tr:hover, #view-gateways tbody tr:hover, #view-windows tbody tr:hover { background: rgba(240, 230, 212, 0.03); box-shadow: none; }
 
 /* The enrollment panel is a section too, not a card. */
 #view-gateways .enroll-panel {
@@ -3724,7 +3717,8 @@ input::placeholder, textarea::placeholder { color: #9c8e7a; }
    rest wraps as a block and the gap turns into a hole. Let it flow as text. */
 @media (max-width: 768px) {
   .hud-txt { display: block; }
-  .hud-txt b { display: inline; margin-right: 6px; }
+  .hud-txt b { display: block; font-size: 24px; margin-right: 0; }
+  .hud-sub { display: block; margin-top: 5px; letter-spacing: 1.2px; }
   .hud-sky { display: none; }
 }
 
@@ -3925,3 +3919,250 @@ body.nav-open .mobile-freeze { opacity: 0; pointer-events: none; }
 }
 .login-card .btn:hover { background: var(--text-main); color: var(--bg-base); box-shadow: none; }
 .login-card input { border-radius: 2px; }
+
+/* ==============================================================
+   PILOT (7) — the form screens: Controls and Settings
+   These pages are made of controls rather than readings, so the panels
+   stay: a hairline box on black paper instead of a sheet of glass. The
+   header is ink, the primary action is ink, and amber is left for the
+   states that mean something (on, pending, core defaults).
+   ============================================================== */
+
+#view-controls .widget, #view-settings .widget {
+  background: transparent;
+  border: 1px solid var(--rule-weak);
+  border-radius: 2px;
+  padding: 20px 22px 18px;
+  margin-bottom: 22px;
+}
+#view-controls .widget::before, #view-settings .widget::before { display: none; }
+#view-controls .widget-header, #view-settings .widget-header { color: var(--text-main); text-shadow: none; }
+
+/* An island inside a panel: a hairline, no fill. */
+#view-controls .panel, #view-settings .panel {
+  background: transparent;
+  border: 1px solid var(--rule-weak);
+  border-radius: 2px;
+}
+
+/* Primary actions: ink at full strength, not an amber block. Quiet actions
+   and the semantic ones (deny, approve, danger, dev) keep their own colour. */
+:is(#view-controls, #view-settings, #view-windows) .btn:not(.btn-muted):not(.btn-deny):not(.btn-approve):not(.btn-danger):not(.btn-dev) {
+  background: transparent;
+  border: 1px solid var(--text-main);
+  border-radius: 2px;
+  color: var(--text-main);
+  box-shadow: none;
+  text-shadow: none;
+}
+:is(#view-controls, #view-settings, #view-windows) .btn:not(.btn-muted):not(.btn-deny):not(.btn-approve):not(.btn-danger):not(.btn-dev):hover {
+  background: var(--text-main);
+  color: var(--bg-base);
+  border-color: var(--text-main);
+  box-shadow: none;
+}
+
+/* Quiet actions: a hairline and muted ink. */
+:is(#view-controls, #view-settings, #view-windows) .btn-muted {
+  background: transparent;
+  border-color: var(--rule);
+  color: var(--text-muted);
+  border-radius: 2px;
+}
+:is(#view-controls, #view-settings, #view-windows) .btn-muted:hover {
+  background: transparent;
+  border-color: var(--text-muted);
+  color: var(--text-main);
+  box-shadow: none;
+}
+
+/* Fields keep their well — a place to write should read as one — but the
+   well is square-cornered and ruled like the rest of the page. */
+:is(#view-controls, #view-settings) :is(input[type="text"], input[type="password"], input[type="number"], textarea, select) {
+  border-color: var(--rule-weak);
+  border-radius: 2px;
+}
+:is(#view-controls, #view-settings) :is(input, textarea, select):focus {
+  border-color: rgba(245, 158, 11, 0.55);
+  box-shadow: none;
+}
+#view-settings input[type="checkbox"] { accent-color: var(--text-main); }
+
+/* Policy editor: the chip tray is a ruled box; each rule is a hairline. */
+#view-controls .policy-chips {
+  background: transparent;
+  border: 1px solid var(--rule-weak);
+  border-radius: 2px;
+}
+#view-controls .policy-chip,
+#view-controls .policy-chip:nth-child(even) {
+  background: transparent;
+  border: 1px solid var(--rule-weak);
+  border-radius: 2px;
+}
+#view-controls .policy-chip:hover { border-color: var(--rule); }
+#view-controls .policy-chip.core { border-color: rgba(245, 158, 11, 0.4); }
+#view-controls .policy-chip.removed { background: transparent; opacity: 0.5; }
+#view-controls .policy-add-input { background: transparent; border-color: var(--rule-weak); }
+
+/* The hardcoded blocklist is ink like any other heading; the disclosure
+   marker is the one amber mark on it. */
+#view-controls details summary { color: var(--text-muted); }
+#view-controls details summary:hover { color: var(--text-main); }
+#view-controls details summary::marker { color: var(--accent); }
+
+/* Settings rows: small hairline islands, toggle at the right. */
+#view-settings .setting-row { background: transparent; border: 1px solid var(--rule-weak); border-radius: 2px; }
+#view-settings .toggle-btn {
+  background: transparent;
+  border: 1px solid var(--rule);
+  border-radius: 2px;
+  color: var(--text-muted);
+  box-shadow: none;
+  display: inline-flex; align-items: center; gap: 7px;
+}
+#view-settings .toggle-btn::before {
+  content: ''; width: 5px; height: 5px; border-radius: 50%;
+  border: 1px solid var(--text-faint); background: transparent;
+}
+#view-settings .toggle-btn.on {
+  background: transparent;
+  border-color: rgba(245, 158, 11, 0.42);
+  color: var(--text-main);
+  box-shadow: none;
+}
+#view-settings .toggle-btn.on::before {
+  background: var(--accent); border-color: var(--accent);
+  box-shadow: 0 0 6px rgba(245, 158, 11, 0.55);
+}
+
+/* The approved-windows table: the command is ink on paper, not a filled well. */
+#view-windows .win-cmd-code { background: transparent; padding: 0; color: var(--text-main); }
+
+/* Form screens on a phone: the header actions get a full row of their own,
+   side by side, instead of stacking as two full-width blocks. */
+@media (max-width: 768px) {
+  #view-controls .widget-header > .flex, #view-settings .widget-header > .flex,
+  #view-windows .widget-header > .flex { width: 100%; }
+  #view-controls .widget-header .btn, #view-settings .widget-header .btn,
+  #view-windows .widget-header .btn { flex: 1 1 auto; }
+}
+
+/* ==============================================================
+   The dialogs
+   A dialog is the page's ink, not a pane of glass: solid paper, one
+   hairline, square corners. Section headings stay mono caps — the serif
+   belongs to page names — and the actions are ink, never amber blocks.
+   ============================================================== */
+.modal-overlay > .widget {
+  background: var(--bg-base);
+  border: 1px solid var(--rule);
+  border-radius: 2px;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.65);
+}
+.modal-overlay .widget-header {
+  color: var(--text-main);
+  border-bottom: 1px solid var(--rule-weak);
+  padding-bottom: 12px;
+}
+.modal-overlay .btn:not(.btn-muted):not(.btn-deny):not(.btn-approve):not(.btn-danger):not(.btn-dev) {
+  background: transparent;
+  border: 1px solid var(--text-main);
+  border-radius: 2px;
+  color: var(--text-main);
+  box-shadow: none;
+}
+.modal-overlay .btn:not(.btn-muted):not(.btn-deny):not(.btn-approve):not(.btn-danger):not(.btn-dev):hover {
+  background: var(--text-main);
+  color: var(--bg-base);
+}
+.modal-overlay .btn-muted {
+  background: transparent;
+  border-color: var(--rule);
+  color: var(--text-muted);
+  border-radius: 2px;
+}
+.modal-overlay .btn-muted:hover {
+  background: transparent;
+  border-color: var(--text-muted);
+  color: var(--text-main);
+  box-shadow: none;
+}
+.modal-overlay :is(input[type="text"], input[type="password"], input[type="number"], input[type="date"], input[type="time"], textarea, select) {
+  border-color: var(--rule-weak);
+  border-radius: 2px;
+}
+.modal-overlay input[type="checkbox"] { accent-color: var(--text-main); }
+
+/* The window dialog: a chosen thing is marked with an amber hairline, never
+   an amber fill. */
+#create-window-modal .win-radio-group {
+  background: transparent;
+  border: 1px solid var(--rule-weak);
+  border-radius: 2px;
+  padding: 2px;
+  gap: 2px;
+}
+#create-window-modal .win-radio-btn {
+  border-radius: 0;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+#create-window-modal .win-radio-btn.selected {
+  background: rgba(240, 230, 212, 0.07);
+  color: var(--text-main);
+  box-shadow: inset 0 -1px 0 var(--accent);
+}
+#create-window-modal .toggle-track { background: transparent; border-color: var(--rule); }
+#create-window-modal .toggle-track .toggle-knob { background: var(--text-muted); }
+#create-window-modal .toggle-track.on { background: transparent; border-color: rgba(245, 158, 11, 0.45); }
+#create-window-modal .toggle-track.on .toggle-knob {
+  background: var(--accent);
+  box-shadow: 0 0 8px rgba(245, 158, 11, 0.55);
+}
+#create-window-modal .toggle-label.text-success { color: var(--text-main); }
+#create-window-modal :is(.time-scroll, .time-scroll-arrow) {
+  background: transparent;
+  border-color: var(--rule-weak);
+  border-radius: 2px;
+}
+#create-window-modal .time-scroll-arrow:hover { border-color: var(--text-muted); color: var(--text-main); }
+#create-window-modal .time-digit.active { color: var(--text-main); background: rgba(240, 230, 212, 0.07); border-radius: 2px; }
+#create-window-modal .time-colon { color: var(--text-muted); }
+#create-window-modal .day-circle {
+  background: transparent;
+  border-color: var(--rule-weak);
+  color: var(--text-muted);
+}
+#create-window-modal .day-circle:hover { border-color: var(--text-muted); color: var(--text-main); }
+#create-window-modal .day-circle.active,
+#create-window-modal .day-circle.on {
+  border-color: rgba(245, 158, 11, 0.6);
+  background: transparent;
+  color: var(--text-main);
+  box-shadow: none;
+}
+#create-window-modal .gw-dropdown-trigger {
+  background: transparent;
+  border-color: var(--rule-weak);
+  border-radius: 2px;
+}
+#create-window-modal .gw-dropdown-menu {
+  background: #100e0b;
+  border-color: var(--rule);
+  border-radius: 2px;
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.6);
+}
+#create-window-modal .win-recent-list { background: transparent; border-color: var(--rule-weak); border-radius: 2px; }
+/* The compose field's 84px floor is for the Command Center; in a form row it
+   just makes two small buttons into towers. */
+#create-window-modal .cmd-input { min-height: 44px; padding: 11px 13px; }
+#create-window-modal .win-summary,
+#create-window-modal .win-token-card {
+  background: transparent;
+  border: 1px solid var(--rule-weak);
+  border-radius: 2px;
+  color: var(--text-muted);
+}

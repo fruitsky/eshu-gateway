@@ -474,7 +474,32 @@ Now:
   line, then timeout + action), and the home sky is capped at
   `clamp(220px, 34vh, 300px)` instead of 388px.
 
-### 1.22 Smaller repairs
+### 1.22 The form screens and the dialogs
+
+Controls, Settings and Approved Windows were the last three views in the old
+skin. They are forms, so the panels stay — but as hairline boxes on black paper
+instead of sheets of glass, with ink section headers and ink primary actions.
+Amber is left to the states that mean something: the `On` toggle's dot, a chosen
+day's ring, a selected tab's underline, the marker on the hardcoded blocklist.
+
+Three things came out of the pass beyond the three pages:
+
+- **The page name is now serif everywhere.** The serif title was scoped to
+  Statistics, so every other page still announced itself in amber mono caps.
+  It is one global rule now (`.hud-txt b`), and the caption under it is its own
+  element (`.hud-sub`) so a phone can put it on its own line instead of wrapping
+  mid-phrase beside a 26px title. Logs had no title at all; it has one — *The
+  record*.
+- **The dialogs are ink too.** A dialog is solid paper, one hairline, square
+  corners, a ruled header and an ink action — for every modal, not just the
+  window form. Inside the window dialog the segmented control marks the chosen
+  option with an amber underline, the day circles with an amber ring, the time
+  picker with an ink row, and the match toggle with an amber knob: no amber
+  fills anywhere.
+- **Token clean-up:** `--serif`, `--rule` and `--rule-weak` moved from the
+  Statistics pilot block into `:root`, because every page uses them now.
+
+### 1.23 Smaller repairs
 
 - Fleet roster: hostnames were clipped to one letter (`h…`, twice) because the
   IP won the width fight. Hostname + state on line 1, IP on line 2.
@@ -836,23 +861,21 @@ it survives `prefers-reduced-motion` and a keyboard-only pass.
 
 ## 5. Session handoff (state at 2026-10-31)
 
-**Where things stand:** `master` at `3180d76`, deployed to the LXC. Working tree
-clean. Seven views are in the ink language (Command Center, Statistics, History,
-Gateways, Integrations, Logs, Fleet Run) plus the rail, every page header, the
-login card and the mobile chrome. `scripts/ui_check.py` runs in
+**Where things stand:** all eight views, every dialog, the rail, the page
+headers, the login card and the mobile chrome are in the ink language. Working
+tree clean. `scripts/ui_check.py` runs in
 `scripts/pre-commit.sh` as `ui tokens` and currently passes with **2 documented
 `!important`**, no sub-11px text and no undefined custom properties.
 
 **What is left, in order:**
 
-1. **Controls, Settings, Approved Windows** — headers and buttons only; these
-   are forms, so the panels can stay. The loud leftovers are the solid amber
-   `Save & Push Policies` and the mono headings.
+1. ~~Controls, Settings, Approved Windows~~ — shipped (§1.22), with the dialogs.
 2. **Token sweep** — 83 literal hex colours outside `:root`, 119 padding values,
    196 rgba alphas. Fold them into the palette, then delete the per-view
-   `#view-*` scoping once every view is converted (`style.css` currently ends
-   in six "PILOT" blocks appended in this session; they are ordered and
-   commented but they are still a second skin).
+   `#view-*` scoping: `style.css` ends in eight "PILOT"/dialog blocks appended
+   across sessions. They are ordered and commented, but they are still a
+   second skin, and the shared primitives (`--serif`, `--rule`, the page-title
+   rule, the ink button) have already been promoted out of them.
 3. **README + logo + fresh screenshots** — the banner art is still the old red
    mark (1200×509, `dashboard/static/eshu_banner.png`); the README screenshots
    predate the whole redesign.
