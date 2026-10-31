@@ -11,6 +11,12 @@
 <link rel="apple-touch-icon" href="/static/eshu_logo.png">
 <title>Eshu Gateway Control Center</title>
 <link rel="icon" href="/static/eshu_logo.png" type="image/png">
+<!-- First-paint guard. Until style.css applies there is no cascade, so every
+     dialog in the markup would paint at once on a cold start. This inline rule
+     is overridden by style.css the moment it lands (same specificity, later). -->
+<style>
+  .modal-overlay { display: none; }
+</style>
 <link rel="preload" href="/static/fonts/space-grotesk-var-latin.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="preload" href="/static/fonts/instrument-serif-regular-latin.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="preload" href="/static/fonts/jetbrains-mono-var-latin.woff2" as="font" type="font/woff2" crossorigin>
@@ -30,9 +36,9 @@
 <div id="toast" role="status" aria-live="polite" class="hidden fixed top-4 left-1/2 transform -translate-x-1/2 z-50 px-6 py-3 rounded-lg text-sm font-medium shadow-lg toast"></div>
 
 <!-- First-Run Setup Overlay -->
-<div id="setup-overlay" class="hidden login-overlay">
+<div id="setup-overlay" class="hidden login-overlay" hidden>
   <div class="login-card">
-    <img src="/static/eshu_banner.png" alt="Eshu">
+    <img src="/static/eshu_banner.png" alt="Eshu" width="180" height="76">
     <h1>Welcome to Eshu</h1>
     <p>First-run setup — create your dashboard password</p>
     <div class="flex flex-col gap-3">
@@ -46,9 +52,9 @@
 </div>
 
 <!-- Login Overlay -->
-<div id="login-overlay" class="hidden login-overlay">
+<div id="login-overlay" class="hidden login-overlay" hidden>
   <div class="login-card">
-    <img src="/static/eshu_banner.png" alt="Eshu">
+    <img src="/static/eshu_banner.png" alt="Eshu" width="180" height="76">
     <h1>Eshu Gateway</h1>
     <p>Authentication Required</p>
     <div class="flex flex-col gap-3">

@@ -3853,7 +3853,8 @@ input::placeholder, textarea::placeholder { color: #9c8e7a; }
    destination (and Freeze / Sound / Log out) lives inside it, so nothing is
    pinned over the content. */
 @media (max-width: 768px) {
-  .mobile-menu-btn, .mobile-freeze { display: inline-flex; }
+  /* only once signed in: they are chrome for the dashboard, not the login */
+  body.authed .mobile-menu-btn, body.authed .mobile-freeze { display: inline-flex; }
   .main-body { padding-top: 58px; padding-bottom: 24px; }
 
   .sidebar {
@@ -3895,3 +3896,32 @@ body.nav-open { overflow: hidden; }
 
 /* While the drawer is open, the floating freeze would sit over the scrim. */
 body.nav-open .mobile-freeze { opacity: 0; pointer-events: none; }
+
+/* ── The threshold: the login card in the same language ──────────────────
+   No filled block, no amber fill on the action; the wordmark takes the serif
+   and the button is ink at full strength, like every other primary action. */
+.login-card {
+  background: transparent;
+  border: none;
+  border-top: 1px solid var(--rule);
+  border-bottom: 1px solid var(--rule);
+  border-radius: 0;
+  padding: 40px 8px;
+}
+.login-card h1 {
+  font-family: var(--serif);
+  font-weight: 400;
+  font-size: 34px;
+  letter-spacing: 0.2px;
+  text-transform: none;
+  color: var(--text-main);
+}
+.login-card p { font-size: 12px; letter-spacing: 0.6px; }
+.login-card .btn {
+  background: transparent;
+  border: 1px solid var(--text-main);
+  border-radius: 2px;
+  color: var(--text-main);
+}
+.login-card .btn:hover { background: var(--text-main); color: var(--bg-base); box-shadow: none; }
+.login-card input { border-radius: 2px; }

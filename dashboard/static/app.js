@@ -330,15 +330,22 @@ function notifyNewJIT(pendingCount) {
 }
 
 // ── Auth ─────────────────────────────────────────────────────────────────
+/* `hidden` (the attribute) as well as the class: before style.css lands, the
+   class means nothing and the login card — banner and all — paints at full
+   size for a frame on a cold start. */
 function hideAllOverlays() {
-  document.getElementById('setup-overlay').classList.add('hidden');
-  document.getElementById('login-overlay').classList.add('hidden');
+  var so = document.getElementById('setup-overlay'), lo = document.getElementById('login-overlay');
+  so.classList.add('hidden'); so.setAttribute('hidden', '');
+  lo.classList.add('hidden'); lo.setAttribute('hidden', '');
   document.getElementById('main-content').style.display = '';
   document.getElementById('main-sidebar').style.display = '';
+  document.body.classList.add('authed');
 }
 function showDashboard() { hideAllOverlays(); }
 function showSetup() {
+  document.body.classList.remove('authed');
   document.getElementById('setup-overlay').classList.remove('hidden');
+  document.getElementById('setup-overlay').removeAttribute('hidden');
   document.getElementById('login-overlay').classList.add('hidden');
   document.getElementById('main-content').style.display = 'none';
   document.getElementById('main-sidebar').style.display = 'none';
@@ -348,8 +355,10 @@ function showSetup() {
   document.getElementById('setup-password').focus();
 }
 function showLogin() {
+  document.body.classList.remove('authed');
   document.getElementById('setup-overlay').classList.add('hidden');
   document.getElementById('login-overlay').classList.remove('hidden');
+  document.getElementById('login-overlay').removeAttribute('hidden');
   document.getElementById('main-content').style.display = 'none';
   document.getElementById('main-sidebar').style.display = 'none';
   document.getElementById('login-error').classList.add('hidden');
