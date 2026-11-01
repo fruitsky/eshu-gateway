@@ -602,7 +602,7 @@ button::-moz-focus-inner { border: 0; padding: 0; }
     background: var(--bg-surface); border: 1px solid var(--border-color);
     border-radius: 14px; padding: 40px; width: 100%; max-width: 420px; text-align: center;
   }
-  .login-card img { max-height: 56px; object-fit: contain; margin: 0 auto 20px; }
+  .login-card img { width: 84px; height: 84px; object-fit: contain; margin: 0 auto 16px; }
   .login-card h1 { font-size: 22px; font-weight: 700; margin-bottom: 6px; }
   .login-card p { font-size: 13px; color: var(--text-muted); margin-bottom: 20px; }
 
@@ -3572,7 +3572,7 @@ input::placeholder, textarea::placeholder { color: var(--text-muted); }
   color: var(--text-faint);
 }
 .sidebar-brand { border-bottom: none; }
-.sidebar-brand-logo { border-radius: 2px; }
+.sidebar-brand-logo { width: 36px; height: 36px; border-radius: 0; border: none; overflow: visible; box-shadow: none; background: none; }
 
 /* Section labels become ledger rules: a word, then a hairline to the edge. */
 .nav-label {
