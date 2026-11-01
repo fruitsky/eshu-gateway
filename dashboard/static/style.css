@@ -268,12 +268,12 @@ button::-moz-focus-inner { border: 0; padding: 0; }
 
   /* ── Buttons ────────────────────────────────────────────── */
   .btn {
-    padding: 8px 18px; border-radius: var(--radius-sm); font-size: var(--text-sm); font-weight: 600;
-    cursor: pointer; border: none; transition: all 0.2s; font-family: inherit;
-    background: var(--accent); color: var(--bg-base); text-decoration: none;
+    padding: 8px 18px; border-radius: 2px; font-size: var(--text-sm); font-weight: 600;
+    cursor: pointer; border: 1px solid var(--text-main); transition: all 0.2s; font-family: inherit;
+    background: transparent; color: var(--text-main); text-decoration: none;
     display: inline-flex; align-items: center; justify-content: center; gap: 6px;
   }
-  .btn:hover { background: var(--accent-hover); }
+  .btn:hover { background: var(--text-main); color: var(--bg-base); }
   .btn:disabled { opacity: 0.45; cursor: not-allowed; }
   .btn-approve { background: rgba(74,222,128,0.14); color: var(--state-approved); border: 1px solid rgba(74,222,128,0.38); }
   .btn-approve:hover { background: rgba(74,222,128,0.24); border-color: var(--state-approved); }
@@ -281,8 +281,8 @@ button::-moz-focus-inner { border: 0; padding: 0; }
   .btn-danger:hover { background: rgba(230, 57, 70, 0.08); border-color: var(--danger-hover); color: var(--danger-hover); }
   .btn-deny { background: transparent; border: 1px solid rgba(248,113,113,0.35); color: var(--state-denied); }
   .btn-deny:hover { background: rgba(248,113,113,0.12); border-color: var(--state-denied); color: var(--danger-hover); }
-  .btn-muted { background: var(--bg-hover); border: 1px solid var(--border-color); color: var(--text-muted); }
-  .btn-muted:hover { border-color: var(--text-muted); color: var(--text-main); }
+  .btn-muted { background: transparent; border: 1px solid var(--rule); color: var(--text-dim); }
+  .btn-muted:hover { border-color: var(--text-muted); color: var(--text-main); background: transparent; }
   .btn-sm { padding: 5px 12px; font-size: 11px; }
   .btn-xs { padding: 3px 10px; font-size: 11px; border-radius: var(--radius-sm); }
   button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible, a:focus-visible {
@@ -1262,7 +1262,7 @@ button::-moz-focus-inner { border: 0; padding: 0; }
 
 
 /* Widgets */
-.widget-header { font-family: 'JetBrains Mono', monospace; font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 1.5px; color: var(--accent); }
+.widget-header { font-family: 'JetBrains Mono', monospace; font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 1.5px; color: var(--text-main); text-shadow: none; }
 .main-header h1 { font-family: 'JetBrains Mono', monospace; font-size: 16px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; }
 .version-badge { font-family: 'JetBrains Mono', monospace; background: rgba(245,158,11,0.08); color: var(--accent); border: 1px solid rgba(245,158,11,0.2); }
 
@@ -2097,24 +2097,24 @@ tbody tr:hover .text-muted, tbody tr:hover .cell-id, tbody tr:hover .log-time, t
   border-radius: 3px;
 }
 .chip-fleet-run { color: var(--accent); border-color: rgba(245,158,11,0.3); background: rgba(245,158,11,0.08); }
-.chip-override { color: var(--accent-hover); border-color: rgba(245,158,11,0.35); background: rgba(245,158,11,0.10); }
+.chip-override { color: var(--accent); border-color: rgba(245,158,11,0.35); background: transparent; }
 .chip-integration { color: var(--star); border-color: rgba(205,216,230,0.3); background: rgba(205,216,230,0.06); }
 
-/* ── Buttons (amber interaction states) ─────────────────── */
+/* ── Buttons ─────────────────────────────────────────────
+   Ink at full strength is the primary action; a quiet action is a hairline
+   (.btn-muted); a refusal keeps its state colour (.btn-deny / .btn-danger). */
 .btn {
   font-family: 'JetBrains Mono', monospace;
-  border-radius: 4px;
+  border-radius: 2px;
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.5px;
 }
-.btn:hover { box-shadow: 0 0 14px var(--accent-glow); background: var(--accent-hover); }
+.btn:hover { box-shadow: none; }
 .btn-approve { background: rgba(74,222,128,0.14); color: var(--state-approved); }
 .btn-approve:hover { background: rgba(74,222,128,0.24); box-shadow: 0 0 14px rgba(74,222,128,0.22); }
 .btn-deny { background: transparent; border: 1px solid var(--text-quiet); color: rgba(122,109,94,0.85); }
 .btn-deny:hover { border-color: var(--accent); color: var(--accent); background: rgba(245,158,11,0.05); }
-.btn-muted { background: rgba(26,23,20,0.5); border: 1px solid var(--border-soft); color: var(--text-dim); }
-.btn-muted:hover { border-color: rgba(245,158,11,0.4); color: var(--accent); background: rgba(245,158,11,0.06); }
 .btn-danger { border-color: rgba(220,38,38,0.55); }
 .btn-danger:hover { background: rgba(220,38,38,0.12); border-color: var(--danger); color: var(--danger-hover); box-shadow: 0 0 14px rgba(220,38,38,0.25); }
 
@@ -3247,8 +3247,6 @@ input::placeholder, textarea::placeholder { color: var(--text-muted); }
 #view-stats .widget::before { display: none; }   /* the shared horizon hairline */
 
 /* Section headers: ink. Amber is not a heading colour. */
-#view-stats .widget-header { color: var(--text-main); text-shadow: none; }
-
 /* The number the page is about, in the ledger face. */
 #view-stats .chart-big {
   font-family: var(--serif);
@@ -3476,8 +3474,6 @@ input::placeholder, textarea::placeholder { color: var(--text-muted); }
   margin-bottom: 30px;
 }
 #view-history .widget::before, #view-gateways .widget::before, #view-windows .widget::before { display: none; }
-#view-history .widget-header, #view-gateways .widget-header, #view-windows .widget-header { color: var(--text-main); }
-
 /* Tabs: ink, with the active one underlined rather than glowing. */
 #view-history .history-tab { color: var(--text-muted); letter-spacing: 1.2px; }
 #view-history .history-tab.active { color: var(--text-main); border-bottom-color: var(--accent); }
@@ -3538,8 +3534,6 @@ input::placeholder, textarea::placeholder { color: var(--text-muted); }
 /* Status and health keep their colour; only the chrome goes quiet. */
 #view-gateways .btn-deny, #view-gateways .chip-btn { border-radius: 2px; }
 #view-history .cmd-code { color: var(--text-main); }
-#view-history .widget-header .btn, #view-gateways .widget-header .btn { border-radius: 2px; }
-
 /* On a phone the five states go two-up again; the desktop gap of 26px would
    push each card to full width and make the row 500px tall. */
 @media (max-width: 768px) {
@@ -3629,8 +3623,6 @@ input::placeholder, textarea::placeholder { color: var(--text-muted); }
   margin-bottom: 30px;
 }
 #view-integrations .widget::before, #view-logs .widget::before { display: none; }
-#view-integrations .widget-header, #view-logs .widget-header { color: var(--text-main); }
-
 /* Integration entries: hairline blocks, not cards. */
 #view-integrations .item-card {
   background: transparent;
@@ -3687,27 +3679,6 @@ input::placeholder, textarea::placeholder { color: var(--text-muted); }
 /* Search + count sit on the same rule as everything else. */
 #view-logs #audit-log-count { color: var(--text-faint); }
 
-/* Buttons are chrome: ink outline on paper. Approve/deny keep their state
-   colours, and the one true primary action (Add / Save) is ink at full
-   strength rather than a filled amber block. */
-#view-integrations .btn:not(.btn-approve):not(.btn-deny):not(.btn-danger),
-#view-logs .btn:not(.btn-approve):not(.btn-deny):not(.btn-danger) {
-  background: transparent;
-  border: 1px solid var(--rule);
-  border-radius: 2px;
-  color: var(--text-main);
-}
-#view-integrations .btn:not(.btn-approve):not(.btn-deny):not(.btn-danger):hover,
-#view-logs .btn:not(.btn-approve):not(.btn-deny):not(.btn-danger):hover {
-  background: rgba(240, 230, 212, 0.07);
-  border-color: var(--text-muted);
-  box-shadow: none;
-}
-#view-integrations .btn-primary {
-  background: transparent;
-  border: 1px solid var(--text-main);
-  color: var(--text-main);
-}
 #view-integrations .btn-primary:hover { background: var(--text-main); color: var(--bg-base); }
 
 /* The eyebrow is a flex row on desktop (word + gap + rest); on a phone the
@@ -3933,44 +3904,11 @@ body.nav-open .mobile-freeze { opacity: 0; pointer-events: none; }
   margin-bottom: 22px;
 }
 #view-controls .widget::before, #view-settings .widget::before { display: none; }
-#view-controls .widget-header, #view-settings .widget-header { color: var(--text-main); text-shadow: none; }
-
 /* An island inside a panel: a hairline, no fill. */
 #view-controls .panel, #view-settings .panel {
   background: transparent;
   border: 1px solid var(--rule-weak);
   border-radius: 2px;
-}
-
-/* Primary actions: ink at full strength, not an amber block. Quiet actions
-   and the semantic ones (deny, approve, danger, dev) keep their own colour. */
-:is(#view-controls, #view-settings, #view-windows) .btn:not(.btn-muted):not(.btn-deny):not(.btn-approve):not(.btn-danger):not(.btn-dev) {
-  background: transparent;
-  border: 1px solid var(--text-main);
-  border-radius: 2px;
-  color: var(--text-main);
-  box-shadow: none;
-  text-shadow: none;
-}
-:is(#view-controls, #view-settings, #view-windows) .btn:not(.btn-muted):not(.btn-deny):not(.btn-approve):not(.btn-danger):not(.btn-dev):hover {
-  background: var(--text-main);
-  color: var(--bg-base);
-  border-color: var(--text-main);
-  box-shadow: none;
-}
-
-/* Quiet actions: a hairline and muted ink. */
-:is(#view-controls, #view-settings, #view-windows) .btn-muted {
-  background: transparent;
-  border-color: var(--rule);
-  color: var(--text-muted);
-  border-radius: 2px;
-}
-:is(#view-controls, #view-settings, #view-windows) .btn-muted:hover {
-  background: transparent;
-  border-color: var(--text-muted);
-  color: var(--text-main);
-  box-shadow: none;
 }
 
 /* Fields keep their well — a place to write should read as one — but the
@@ -4062,29 +4000,6 @@ body.nav-open .mobile-freeze { opacity: 0; pointer-events: none; }
   border-bottom: 1px solid var(--rule-weak);
   padding-bottom: 12px;
 }
-.modal-overlay .btn:not(.btn-muted):not(.btn-deny):not(.btn-approve):not(.btn-danger):not(.btn-dev) {
-  background: transparent;
-  border: 1px solid var(--text-main);
-  border-radius: 2px;
-  color: var(--text-main);
-  box-shadow: none;
-}
-.modal-overlay .btn:not(.btn-muted):not(.btn-deny):not(.btn-approve):not(.btn-danger):not(.btn-dev):hover {
-  background: var(--text-main);
-  color: var(--bg-base);
-}
-.modal-overlay .btn-muted {
-  background: transparent;
-  border-color: var(--rule);
-  color: var(--text-muted);
-  border-radius: 2px;
-}
-.modal-overlay .btn-muted:hover {
-  background: transparent;
-  border-color: var(--text-muted);
-  color: var(--text-main);
-  box-shadow: none;
-}
 .modal-overlay :is(input[type="text"], input[type="password"], input[type="number"], input[type="date"], input[type="time"], textarea, select) {
   border-color: var(--rule-weak);
   border-radius: 2px;
@@ -4163,3 +4078,12 @@ body.nav-open .mobile-freeze { opacity: 0; pointer-events: none; }
   border-radius: 2px;
   color: var(--text-muted);
 }
+
+/* A status is not a button: "auto-approved via Override Mode" is a marker, so
+   it is a hairline label at its own width rather than an amber block filling
+   the actions column. */
+#view-history .chip-actions.chip-override { width: auto; }
+
+/* History's header actions keep their words on one line; they used to be
+   squeezed until "Refresh" broke around its refresh glyph. */
+#view-history .widget-header .btn { flex-shrink: 0; white-space: nowrap; }
