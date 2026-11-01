@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="dashboard/static/eshu_banner.png" alt="Eshu Gateway" width="600">
+  <img src="dashboard/static/eshu_banner.png" alt="Eshu Gateway" width="880">
 </p>
 
 <p align="center">
@@ -43,10 +43,41 @@ flowchart LR
 
 ---
 
-## Screenshot
+## Screenshots
+
+**The Command Center.** Anything the policy does not clear waits here, inside
+the fleet's own constellation, for a word from you.
 
 <p align="center">
-  <img src="eshu_screenshot.png" alt="Eshu Dashboard" width="800">
+  <img src="docs/screenshots/command-center.png" alt="Eshu Command Center — a command waiting for approval" width="880">
+</p>
+
+**Statistics.** Fourteen days of crossings: the rhythm, who decided, what the
+fleet is running, and when it works.
+
+<p align="center">
+  <img src="docs/screenshots/statistics.png" alt="Eshu Statistics — command rhythm, approvals and fleet hygiene" width="880">
+</p>
+
+**Fleet Run.** One command, every ear: queue a broadcast, dispatch it to the
+gateways you mark, and read each answer as it comes back.
+
+<p align="center">
+  <img src="docs/screenshots/fleet-run.png" alt="Eshu Fleet Run — broadcast a command to the fleet" width="880">
+</p>
+
+**History.** Every crossing kept — the command, the gateway, the session and
+the decision.
+
+<p align="center">
+  <img src="docs/screenshots/history.png" alt="Eshu History — the command ledger with approvals" width="880">
+</p>
+
+**On a phone.** The same queue; the rail becomes a drawer and Freeze stays one
+tap away.
+
+<p align="center">
+  <img src="docs/screenshots/mobile.png" alt="Eshu on a phone" width="300">
 </p>
 
 ---
