@@ -3,10 +3,32 @@ from db.audit import record_audit_event
 from db.gateways import get_gateways, deregister_gateway, clear_trigger_uninstall
 from db.fleet import purge_old_fleet_commands
 from db.integrations import purge_old_integration_calls_by_retention
+from db.misc import get_meta_json, set_meta_json
 from core.notify import send_notify
 
 _disconnected_gateways = set()
 _offline_alerted = set()
+# Both sets are persisted: they used to live only in memory, so every restart
+# re-recorded a "disconnected" audit row and re-sent the webhook for every
+# gateway that was already offline. A deploy, or a second dashboard instance
+# reading a snapshot of the database, turned into a page of duplicate alerts.
+_watch_state_loaded = False
+
+
+def _load_watch_state():
+    global _disconnected_gateways, _offline_alerted, _watch_state_loaded
+    if _watch_state_loaded:
+        return
+    _disconnected_gateways = set(get_meta_json('watch_disconnected', []))
+    _offline_alerted = set(get_meta_json('watch_offline_alerted', []))
+    _watch_state_loaded = True
+
+
+def _save_watch_state():
+    set_meta_json('watch_disconnected', sorted(_disconnected_gateways))
+    set_meta_json('watch_offline_alerted', sorted(_offline_alerted))
+
+
 # Single source of truth for "online": a gateway is considered disconnected once
 # it has not been heard from for DISCONNECTED_AFTER seconds. The poller and the
 # logger each report every 30s, so a 30s threshold flapped on normal jitter; this
@@ -23,20 +45,28 @@ OFFLINE_THRESHOLD = 300
 UPDATE_ACTIVE_WINDOW = 600
 
 def _check_gateway_transitions(now: int):
+    _load_watch_state()
+    changed = False
     gateways = get_gateways()
     for g in gateways:
         if now - g['last_seen'] > DISCONNECTED_AFTER and g['ip'] not in _disconnected_gateways:
             record_audit_event("disconnected", g['ip'], g.get('hostname'), f"Last seen {now - g['last_seen']}s ago")
             _disconnected_gateways.add(g['ip'])
+            changed = True
         elif now - g['last_seen'] <= DISCONNECTED_AFTER and g['ip'] in _disconnected_gateways:
             _disconnected_gateways.discard(g['ip'])
             record_audit_event("connected", g['ip'], g.get('hostname'), "Reconnected")
+            changed = True
         if now - g['last_seen'] > OFFLINE_THRESHOLD and g['ip'] not in _offline_alerted:
             send_notify('offline', 'Gateway Offline', f'{g.get("hostname") or g["ip"]} — last seen {now - g["last_seen"]}s ago')
             _offline_alerted.add(g['ip'])
+            changed = True
         elif now - g['last_seen'] <= OFFLINE_THRESHOLD and g['ip'] in _offline_alerted:
             _offline_alerted.discard(g['ip'])
             send_notify('online', 'Gateway Online', f'{g.get("hostname") or g["ip"]} — back after ~{now - g["last_seen"]}s')
+            changed = True
+    if changed:
+        _save_watch_state()
 
 def _gateway_watch_loop():
     while True:

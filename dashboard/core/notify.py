@@ -1,4 +1,5 @@
 import json
+import os
 import urllib.request
 from db.misc import get_notify_config
 from core.utils import DASHBOARD_VERSION
@@ -33,7 +34,14 @@ def send_notify(event_type: str, title: str, body: str):
     otherwise (no webhook configured, event not subscribed, or the POST failed).
 
     The 'test' event always sends (used by the dashboard's Test button) so the
-    operator can validate the webhook regardless of subscribed events."""
+    operator can validate the webhook regardless of subscribed events.
+
+    `ESHU_NOTIFY_DISABLED=1` silences every outbound webhook. A second
+    dashboard instance — a review copy pointed at a snapshot of the live
+    database — would otherwise inherit the production webhook and page the
+    operator about gateways that are only stale in the copy."""
+    if os.environ.get('ESHU_NOTIFY_DISABLED', '').strip().lower() in ('1', 'true', 'yes'):
+        return False
     config = get_notify_config()
     if not config['url']:
         return False

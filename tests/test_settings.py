@@ -147,3 +147,24 @@ class TestNotifySend:
             urllib.request.urlopen = original
         assert captured['req'].get_header('User-agent') == _USER_AGENT
         assert captured['timeout'] is not None
+
+
+def test_notify_kill_switch(monkeypatch):
+    """A second dashboard instance (review copy) must be able to silence the
+    production webhook without editing the database."""
+    from core.notify import send_notify
+
+    sent = []
+    monkeypatch.setattr("core.notify.get_notify_config",
+                        lambda: {"url": "https://example.invalid/hook",
+                                 "events": "offline,online", "dashboard_url": ""})
+    monkeypatch.setattr("core.notify._do_webhook",
+                        lambda url, payload: sent.append(url) or True)
+
+    monkeypatch.setenv("ESHU_NOTIFY_DISABLED", "1")
+    assert send_notify("offline", "T", "B") is False
+    assert sent == []
+
+    monkeypatch.delenv("ESHU_NOTIFY_DISABLED")
+    assert send_notify("offline", "T", "B") is True
+    assert sent == ["https://example.invalid/hook"]

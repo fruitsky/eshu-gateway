@@ -79,6 +79,35 @@ def test_transition_watcher_uses_new_threshold():
     assert ip not in _disconnected_gateways
 
 
+def test_watch_state_survives_a_restart():
+    """A restart must not re-log or re-notify gateways that were already
+    offline: the sets are persisted, not just in memory."""
+    from db.gateways import register_gateway
+    from db.audit import get_audit_log
+    import core.gateway_watch as gw
+
+    ip = "10.0.0.6"
+    register_gateway(ip, "restart", "v15.3")
+    now = int(time.time())
+    _set_last_seen(ip, now - (gw.DISCONNECTED_AFTER + 5))
+
+    gw._disconnected_gateways.discard(ip)
+    gw._watch_state_loaded = False
+    gw._check_gateway_transitions(now)
+    first = sum(1 for e in get_audit_log()
+                if e["event_type"] == "disconnected" and e["gateway_ip"] == ip)
+    assert first == 1
+
+    # Simulate a fresh process: forget the in-memory state, keep the database.
+    gw._disconnected_gateways = set()
+    gw._offline_alerted = set()
+    gw._watch_state_loaded = False
+    gw._check_gateway_transitions(now)
+    second = sum(1 for e in get_audit_log()
+                 if e["event_type"] == "disconnected" and e["gateway_ip"] == ip)
+    assert second == 1
+
+
 def test_offline_during_recent_update_reports_updating(auth_client):
     from db.gateways import register_gateway, set_trigger_update_version
     from core.gateway_watch import DISCONNECTED_AFTER

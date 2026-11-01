@@ -26,6 +26,28 @@ def init_misc_tables(cursor):
     # system) — remove the old toggleable flag if it exists.
     cursor.execute("DELETE FROM feature_flags WHERE flag_name = 'approved_windows'")
 
+def get_meta_json(key: str, default):
+    """Small JSON values kept in the `meta` table (watch state, etc.)."""
+    with db_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT value FROM meta WHERE key = ?", (key,))
+        row = cursor.fetchone()
+    if not row:
+        return default
+    try:
+        return json.loads(row['value'])
+    except Exception:
+        return default
+
+
+def set_meta_json(key: str, value):
+    with db_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                       (key, json.dumps(value)))
+        conn.commit()
+
+
 def get_note():
     with db_conn() as conn:
         cursor = conn.cursor()
