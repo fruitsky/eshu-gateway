@@ -3238,23 +3238,25 @@ input::placeholder, textarea::placeholder { color: var(--text-muted); }
 #view-gateways table th, #view-gateways table td { padding-left: 10px; padding-right: 10px; }
 
 /* ==============================================================
-   PILOT — "ink and signal" on Statistics
-   Borrowed principles (not assets) from sora-to-ki's three materials:
-   black is the paper, white is the ink, amber is the signal and only ever
-   marks one thing. Everything here is scoped to #view-stats so it can be
-   compared against the other pages and reverted in one block.
+   The ink language — Statistics
+   Black is the paper, ink is the text, amber is the signal and only ever
+   marks one thing. What follows is the component CSS for this page; the
+   shared primitives (type, rules, buttons, page modes) live in the base.
    ============================================================== */
 
 /* Panels become rules and air, not filled cards. */
-#view-stats .widget {
+/* Two page modes, one rule each. A reading page is a stack of ruled sections;
+   a form page is a stack of hairline panels. The markup says which it is with
+   data-ink, instead of every block repeating a list of view ids. */
+[data-ink="section"] .widget {
   background: transparent;
   border: none;
   border-top: 1px solid var(--rule);
   border-radius: 0;
-  padding: 18px 0 4px;
-  margin-bottom: 34px;
+  padding: 18px 0 6px;
+  margin-bottom: 30px;
 }
-#view-stats .widget::before { display: none; }   /* the shared horizon hairline */
+[data-ink="section"] .widget::before { display: none; }
 
 /* Section headers: ink. Amber is not a heading colour. */
 /* The number the page is about, in the ledger face. */
@@ -3346,7 +3348,7 @@ input::placeholder, textarea::placeholder { color: var(--text-muted); }
 #view-stats .kpi .kval { font-variant-numeric: lining-nums; }
 
 /* ==============================================================
-   PILOT (2) — the same ink-and-signal language on Command Center
+   The ink language — Command Center
    The queue stops being a stack of cards and becomes a ledger the constellation
    sits behind. Everything is scoped to #view-home.
    ============================================================== */
@@ -3470,20 +3472,11 @@ input::placeholder, textarea::placeholder { color: var(--text-muted); }
 #view-home .ccq-hero.is-cursor .jit-ticket { outline: none; }
 
 /* ==============================================================
-   PILOT (3) — the table screens: History, Gateways, Approved Windows
+   The ink language — the table screens: History, Gateways, Approved Windows
    Same ink-and-signal language: sections are rules, numbers are serif,
    tables are hairlines with no fill.
    ============================================================== */
 
-#view-history .widget, #view-gateways .widget, #view-windows .widget {
-  background: transparent;
-  border: none;
-  border-top: 1px solid var(--rule);
-  border-radius: 0;
-  padding: 18px 0 6px;
-  margin-bottom: 30px;
-}
-#view-history .widget::before, #view-gateways .widget::before, #view-windows .widget::before { display: none; }
 /* Tabs: ink, with the active one underlined rather than glowing. */
 #view-history .history-tab { color: var(--text-muted); letter-spacing: 1.2px; }
 #view-history .history-tab.active { color: var(--text-main); border-bottom-color: var(--accent); }
@@ -3553,7 +3546,7 @@ input::placeholder, textarea::placeholder { color: var(--text-muted); }
 }
 
 /* ==============================================================
-   PILOT (4) — the rail
+   The ink language — the rail
    The sidebar is the last piece of chrome on every screen. It keeps the sky
    (it is the one surface that would otherwise be plain paper) but loses the
    frosted glass, the filled active pill and the square bullets.
@@ -3619,20 +3612,11 @@ input::placeholder, textarea::placeholder { color: var(--text-muted); }
 .nav-item.nav-logout { border-radius: 2px; }
 
 /* ==============================================================
-   PILOT (5) — Integrations and Logs
+   The ink language — Integrations and Logs
    Both are lists at heart, so they move fully to hairlines: no card fills,
    no header bands, no hover glow. Scoped to the two views.
    ============================================================== */
 
-#view-integrations .widget, #view-logs .widget {
-  background: transparent;
-  border: none;
-  border-top: 1px solid var(--rule);
-  border-radius: 0;
-  padding: 18px 0 6px;
-  margin-bottom: 30px;
-}
-#view-integrations .widget::before, #view-logs .widget::before { display: none; }
 /* Integration entries: hairline blocks, not cards. */
 #view-integrations .item-card {
   background: transparent;
@@ -3714,7 +3698,7 @@ input::placeholder, textarea::placeholder { color: var(--text-muted); }
 @keyframes star-breathe { 0%, 100% { opacity: 0.45; } 50% { opacity: 0.85; } }
 
 /* ==============================================================
-   PILOT (6) — Fleet Run
+   The ink language — Fleet Run
    The board was redesigned; this brings it into the ink language: hairline
    sections, hairline rows, an ink dispatch button, and the dial as the only
    live ornament. Scoped to #view-fleet.
@@ -3899,21 +3883,21 @@ body.nav-open .mobile-freeze { opacity: 0; pointer-events: none; }
 .login-card input { border-radius: 2px; }
 
 /* ==============================================================
-   PILOT (7) — the form screens: Controls and Settings
+   The ink language — the form screens: Controls and Settings
    These pages are made of controls rather than readings, so the panels
    stay: a hairline box on black paper instead of a sheet of glass. The
    header is ink, the primary action is ink, and amber is left for the
    states that mean something (on, pending, core defaults).
    ============================================================== */
 
-#view-controls .widget, #view-settings .widget {
+[data-ink="panel"] .widget {
   background: transparent;
   border: 1px solid var(--rule-weak);
   border-radius: 2px;
   padding: 20px 22px 18px;
   margin-bottom: 22px;
 }
-#view-controls .widget::before, #view-settings .widget::before { display: none; }
+[data-ink="panel"] .widget::before { display: none; }
 /* An island inside a panel: a hairline, no fill. */
 #view-controls .panel, #view-settings .panel {
   background: transparent;
