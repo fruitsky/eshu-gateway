@@ -11,6 +11,21 @@ from core.seeds import seed_for_kind
 from core.tool_runner import run_tool
 
 
+def _drain_body(handler):
+    """Consume a request body before replying.
+
+    Replying while the body is still unread makes the kernel reset the
+    connection, and whether urllib manages to parse the response first is a
+    race. That race is why three tests in this file failed intermittently with
+    ConnectionResetError while passing in isolation.
+    """
+    try:
+        length = int(handler.headers.get('Content-Length', '0') or 0)
+    except (TypeError, ValueError):
+        length = 0
+    if length:
+        handler.rfile.read(length)
+
 @pytest.fixture(autouse=True)
 def _clear_oauth_cache():
     """The OAuth2 token cache is module-level and must not leak across tests."""
@@ -52,6 +67,7 @@ def omada_upstream():
 
         def do_POST(self):
             if self._path() == '/openapi/authorize/token':
+                _drain_body(self)
                 idx = min(state['token_hits'], len(state['tokens']) - 1)
                 state['token_hits'] += 1
                 self._respond(200, {'errorCode': 0, 'result': {
@@ -825,6 +841,7 @@ def omada_acl_upstream():
         def do_POST(self):
             p = self._path()
             if p.endswith('/authorize/token'):
+                _drain_body(self)
                 self._respond(200, {'result': {'accessToken': 'tok-1', 'expiresIn': 7200}})
                 return
             if p.endswith('/acls/modifyIndex'):
@@ -1067,6 +1084,7 @@ def omada_group_upstream():
 
         def do_POST(self):
             if self._path().endswith('/authorize/token'):
+                _drain_body(self)
                 self._respond(200, {'result': {'accessToken': 'tok-1', 'expiresIn': 7200}})
                 return
             self._respond(404, {'error': 'not found'})
@@ -1409,6 +1427,7 @@ def omada_read_upstream():
         def do_POST(self):
             p = self._path()
             if p.endswith('/authorize/token'):
+                _drain_body(self)
                 self._respond(200, {'result': {'accessToken': 'tok-1', 'expiresIn': 7200}})
                 return
             if '/clients' in p:
@@ -1668,6 +1687,7 @@ def omada_error_upstream():
 
         def do_POST(self):
             if urlparse(self.path).path.endswith('/authorize/token'):
+                _drain_body(self)
                 self._respond(200, {'result': {'accessToken': 'tok-1', 'expiresIn': 7200}})
                 return
             self._respond(404, {'error': 'not found'})
