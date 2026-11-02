@@ -56,16 +56,24 @@ def update_ticket_consumed_by_ip(target_ip: str):
             return f"{ticket_ts}|{row['command']}"
         return None
 
-def get_all_requests():
+def get_all_requests(session_id: str = None):
+    """Newest 200 requests, optionally narrowed to one session.
+
+    A session filter has to run in SQL, not on the returned page: a session's
+    oldest commands are usually outside the newest 200 rows.
+    """
     with db_conn() as conn:
         cursor = conn.cursor()
-        cursor.execute('''
+        base = '''
             SELECT r.*, g.hostname
             FROM requests r
             LEFT JOIN gateways g ON r.target_ip = g.ip
             WHERE r.status NOT IN ('integration-approved', 'integration-denied')
-            ORDER BY r.id DESC LIMIT 200
-        ''')
+        '''
+        if session_id:
+            cursor.execute(base + ' AND r.session_id = ? ORDER BY r.id DESC LIMIT 200', (session_id,))
+        else:
+            cursor.execute(base + ' ORDER BY r.id DESC LIMIT 200')
         rows = cursor.fetchall()
         return [dict(row) for row in rows]
 
@@ -125,18 +133,24 @@ def delete_old_requests(before_ts: int):
         cursor.execute('DELETE FROM requests WHERE created_at < ?', (before_ts,))
         conn.commit()
 
-def search_requests(query: str, limit: int = 200):
+def search_requests(query: str, limit: int = 200, session_id: str = None):
     with db_conn() as conn:
         cursor = conn.cursor()
         pattern = f"%{query}%"
-        cursor.execute('''
+        sql = '''
             SELECT r.*, g.hostname
             FROM requests r
             LEFT JOIN gateways g ON r.target_ip = g.ip
             WHERE (r.command LIKE ? OR r.target_ip LIKE ? OR r.status LIKE ? OR g.hostname LIKE ?)
               AND r.status NOT IN ('integration-approved', 'integration-denied')
-            ORDER BY r.id DESC LIMIT ?
-        ''', (pattern, pattern, pattern, pattern, limit))
+        '''
+        params = [pattern, pattern, pattern, pattern]
+        if session_id:
+            sql += ' AND r.session_id = ?'
+            params.append(session_id)
+        sql += ' ORDER BY r.id DESC LIMIT ?'
+        params.append(limit)
+        cursor.execute(sql, params)
         rows = cursor.fetchall()
         return [dict(row) for row in rows]
 

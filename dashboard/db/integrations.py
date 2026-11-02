@@ -724,10 +724,17 @@ def list_recent_session_summaries(limit: int = 24):
             for r in cur2.fetchall():
                 if r[0] and r[1]:
                     latest.setdefault(r[0], {})['integration'] = r[1]
+        from db.sessions import get_session_meta_map
+        metas = get_session_meta_map(ids)
         for row in rows:
             l = latest.get(row['session_id'], {})
             row['host'] = l.get('host') or ''
             row['integration'] = l.get('integration') or ''
+            meta = metas.get(row['session_id']) or {}
+            row['goal'] = meta.get('goal') or ''
+            row['agent'] = meta.get('agent') or ''
+            row['source'] = meta.get('source') or (
+                'mcp-transport' if str(row['session_id']).startswith('mcp-') else '')
     return rows
 
 

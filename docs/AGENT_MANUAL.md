@@ -36,7 +36,11 @@ If a command passes a stage, it executes immediately. The pipeline stops on firs
 
 To let the operator group related commands into a single **Session** in the
 dashboard, prefix the command with `ESHU_SESSION_ID=<id>` (and optionally an
-`ESHU_EXECUTION_ID=<id>` for per-run drill-down):
+`ESHU_EXECUTION_ID=<id>` for per-run drill-down).
+
+**Start every task with `session_begin(goal)`** (MCP, below). It returns a
+`session_id` and the exact `ssh_prefix` string — copy both, rather than
+inventing an id from memory:
 
 ```bash
 ssh eshu-gateway@<host> "ESHU_SESSION_ID=cf0f09869854 <command>"
@@ -59,6 +63,31 @@ ssh eshu-gateway@<host> "ESHU_SESSION_ID=cf0f09869854 <command>"
 > **Subagents / cron:** resolve the id client-side before invoking ssh — e.g.
 > `ESHU_SESSION_ID="${PARENT_CHAT_ID:-${CRON_ORIGIN_CHAT_ID:-unknown}}"` so a
 > subagent inherits its parent's session and cron jobs fall back to `unknown`.
+
+### `session_begin` / `session_summary` (recommended)
+
+Call `session_begin(goal)` once at the start of a task:
+
+```json
+{"name": "session_begin", "arguments": {"goal": "swap the TLS certificate"}}
+```
+
+It returns the id to reuse and the SSH prefix to paste:
+
+```json
+{"session_id": "a1b2c3d4e5f6",
+ "ssh_prefix": "ESHU_SESSION_ID=a1b2c3d4e5f6 ",
+ "how": "Pass session_id=<id> to every Eshu tool, and prefix every SSH command with ssh_prefix."}
+```
+
+`session_summary()` then reports what the session did (commands by outcome, MCP
+calls, pending approvals, gateways) — useful for writing the task report.
+
+If you forget, the call still runs: MCP calls are grouped under the connection's
+transport session (shown as `auto` in the dashboard), and the tool result carries
+`_eshu.session_id` so you can adopt it for the rest of the task. SSH commands
+without the prefix are logged as untagged — nothing breaks, but the operator
+cannot group them with the rest.
 
 ### MCP calls (integrations) — session IDs
 
@@ -105,7 +134,9 @@ curl -s http://<dashboard>:8000/mcp \
 
 Rules:
 
-- `session_id` / `execution_id` are **optional**; omit them for context-less calls.
+- `session_id` / `execution_id` are **optional**; omit them only for genuinely
+  context-less calls. Without one, the call is grouped under the MCP connection's
+  transport session and its result carries `_eshu.session_id` so you can reuse it.
 - They are accepted as **tool arguments** (snake_case names) because that is what
   your client sends — the dashboard strips them before the call and they **never
   reach the upstream API**.

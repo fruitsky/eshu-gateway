@@ -20,9 +20,12 @@ from db.integrations import (
 from db.web_fetch import get_web_fetch_policy
 from core.agent_context import (
     current_agent_name,
+    current_session_id,
     get_current_agent,
     reset_current_agent,
+    reset_current_session,
     set_current_agent,
+    set_current_session,
 )
 from core.agent_policy import principal_allowed, rate_limit_for, visible_tool_allowed
 from core.rate_limit import check_agent_rate_limit_status
@@ -46,7 +49,7 @@ _DEFAULT_ALLOWED_HOSTS = ['127.0.0.1:*', 'localhost:*', '[::1]:*']
 
 # Tools that are not integration calls and must remain reachable so an agent
 # can poll its own approvals. They are always scoped to the caller.
-_ALWAYS_ALLOWED = {'check_approval'}
+_ALWAYS_ALLOWED = {'check_approval', 'session_begin', 'session_summary'}
 
 
 def _describe_web_fetch(base: str, policy: dict) -> str:
@@ -77,15 +80,33 @@ class EshuFastMCP(FastMCP):
 
     _eshu_namespace = None
 
-    def _request_agent(self):
-        request = None
+    def _request(self):
+        """The Starlette request behind this tool call, when there is one."""
         try:
             ctx = self.get_context()
-            request = ctx.request_context.request if ctx.request_context else None
+            return ctx.request_context.request if ctx.request_context else None
         except Exception:
-            request = None
+            return None
+
+    def _request_agent(self):
+        request = self._request()
         agent = getattr(getattr(request, 'state', None), 'agent', None)
         return agent or get_current_agent()
+
+    def _transport_session(self):
+        """The MCP transport session, shortened to a stable dashboard id.
+
+        Every streamable-HTTP client gets one; it is the closest thing to a
+        conversation identity the server can know without the agent's help.
+        """
+        request = self._request()
+        if request is None:
+            return ''
+        try:
+            raw = request.headers.get('mcp-session-id') or ''
+        except Exception:
+            return ''
+        return ('mcp-' + raw[:8]) if raw else ''
 
     def _effective_name(self, name: str) -> str:
         if self._eshu_namespace:
@@ -122,6 +143,7 @@ class EshuFastMCP(FastMCP):
     async def call_tool(self, name: str, arguments: dict):
         agent = self._request_agent()
         token = set_current_agent(agent)
+        session_token = set_current_session(self._transport_session())
         try:
             if agent and name not in _ALWAYS_ALLOWED:
                 effective = self._effective_name(name)
@@ -154,6 +176,7 @@ class EshuFastMCP(FastMCP):
             return await super().call_tool(name, arguments)
         finally:
             reset_current_agent(token)
+            reset_current_session(session_token)
 
 
 mcp = EshuFastMCP(
@@ -162,9 +185,10 @@ mcp = EshuFastMCP(
         "Eshu gateway for your homelab APIs. Read-only tools run immediately; "
         "mutating tools (start/stop/reboot/etc.) create a request that a human "
         "operator must approve — poll check_approval(id) until it resolves. "
-        "Group calls into a Session by passing the same optional session_id "
-        "(and execution_id) as tool arguments that you use for SSH commands — "
-        "they are used only to group work and never reach the upstream API."
+        "Start a task by calling session_begin(goal): it returns a session_id "
+        "and the exact SSH prefix to use. Pass that session_id to every Eshu "
+        "tool and prefix every SSH command with it — sessions group SSH and "
+        "API work in the dashboard and never reach the upstream API."
     ),
     # Mounted into the dashboard app at /mcp; use "/" so the effective endpoint
     # is http://<dashboard>:8000/mcp rather than /mcp/mcp.
@@ -396,6 +420,10 @@ def build_per_integration_mcp() -> dict:
             # approval polling is cross-cutting — present on every per-integration server
             inst.add_tool(check_approval_fn(), name="check_approval",
                           description=CHECK_APPROVAL_DESC)
+            inst.add_tool(session_begin_fn(), name="session_begin",
+                          description=SESSION_BEGIN_DESC)
+            inst.add_tool(session_summary_fn(), name="session_summary",
+                          description=SESSION_SUMMARY_DESC)
             _per_integration[ns] = inst
             _per_integration_apps[ns] = inst.streamable_http_app()
         except Exception as e:
@@ -495,3 +523,51 @@ def check_approval_fn():
 
 
 mcp.add_tool(check_approval_fn(), name="check_approval", description=CHECK_APPROVAL_DESC)
+
+
+SESSION_BEGIN_DESC = (
+    "Start a dashboard Session for this task and get the id to reuse. Call it "
+    "once at the start of a task; then pass the returned session_id to every "
+    "Eshu tool and prefix every SSH command with ssh_prefix. The optional goal "
+    "names the session in the dashboard."
+)
+
+
+def session_begin_fn():
+    def _session_begin(goal: str = "") -> str:
+        from db.sessions import new_session_id, upsert_session
+        sid = new_session_id()
+        row = upsert_session(sid, agent=current_agent_name(),
+                             goal=(goal or '').strip(), source='agent')
+        return json.dumps({
+            'session_id': sid,
+            'goal': row.get('goal', ''),
+            'ssh_prefix': 'ESHU_SESSION_ID=%s ' % sid,
+            'how': ('Pass session_id=<id> to every Eshu tool, and prefix every '
+                    'SSH command with ssh_prefix. The same id groups both.'),
+        })
+    return _session_begin
+
+
+SESSION_SUMMARY_DESC = (
+    "Summarise what this Session did: SSH commands by outcome, MCP calls, "
+    "pending approvals and the gateways touched. Defaults to the MCP "
+    "connection's session; pass session_id to summarise another one."
+)
+
+
+def session_summary_fn():
+    def _session_summary(session_id: str = "") -> str:
+        from db.sessions import get_session_summary
+        sid = (session_id or '').strip()[:64] or current_session_id()
+        if not sid:
+            return json.dumps({
+                'error': 'no_session',
+                'message': 'Call session_begin(goal) first, then pass its id.',
+            })
+        return json.dumps(get_session_summary(sid))
+    return _session_summary
+
+
+mcp.add_tool(session_begin_fn(), name="session_begin", description=SESSION_BEGIN_DESC)
+mcp.add_tool(session_summary_fn(), name="session_summary", description=SESSION_SUMMARY_DESC)

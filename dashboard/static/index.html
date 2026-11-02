@@ -255,6 +255,11 @@
             Command History
             <span id="filter-badge" class="hidden filter-badge"></span>
             <div class="flex items-center gap-2">
+              <span id="history-session-chip" class="hist-session-chip hidden">
+                <span class="hsc-label">session</span>
+                <code id="history-session-label"></code>
+                <button onclick="clearHistorySession()" aria-label="Clear session filter">&times;</button>
+              </span>
               <input type="text" id="request-search" placeholder="Search..." class="text-xs w-40" oninput="onRequestSearch()">
               <button onclick="fetchRequests()" class="btn btn-muted btn-xs" data-od-id="history-refresh">&#8635; Refresh</button>
               <div class="relative">
@@ -1279,6 +1284,7 @@
     <div class="session-modal-header">
       <div class="session-modal-title-row">
         <span class="session-modal-label">Session</span>
+        <button onclick="filterHistoryToSession()" class="btn btn-muted btn-xs" title="Show this session's commands in History">Filter history</button>
         <button onclick="closeModal('session-modal')" class="modal-close" aria-label="Close">&times;</button>
       </div>
       <div class="session-modal-name" id="sm-name" contenteditable="true" spellcheck="false" data-placeholder="Session name"></div>

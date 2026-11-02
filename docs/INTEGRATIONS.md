@@ -124,8 +124,10 @@ permitted and makes the request from the dashboard host.
   (and, in allowlist tool mode, `web_fetch_url` is added to its tool allowlist);
   every other agent is refused and does not see the tool. With no enabled
   policy the tool falls back to the inert `household` placeholder name.
-- **Grouping:** pass the usual optional `session_id`/`execution_id` arguments to
-  attach the fetch to the same dashboard session as the agent's HA calls.
+- **Grouping:** call `session_begin(goal)` once per task and pass the returned
+  `session_id` (plus optional `execution_id`) to every tool, SSH command and web
+  fetch. Calls without one are grouped under the MCP connection's transport
+  session, so the audit is never blank.
 - **No generic passthrough:** `webfetch` is in `NO_GENERIC_KINDS`, so the
   integration does not inherit `read`/`write` against a placeholder base URL.
 - **Per-agent allowlist:** stored in `web_fetch_policies`, keyed by agent

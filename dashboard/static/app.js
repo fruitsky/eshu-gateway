@@ -1497,7 +1497,10 @@ function updateHudSummaries(opts) {
 async function fetchRequests() {
   try {
     let url = '/api/requests';
-    if (_requestSearchQuery) url += '?search=' + encodeURIComponent(_requestSearchQuery);
+    let q = [];
+    if (_requestSearchQuery) q.push('search=' + encodeURIComponent(_requestSearchQuery));
+    if (_historySession) q.push('session=' + encodeURIComponent(_historySession));
+    if (q.length) url += '?' + q.join('&');
     const res = await fetch(url);
     if (res.status === 401) { await checkAuth(); return; }
     const data = await res.json();
@@ -2319,16 +2322,23 @@ function renderAttention() {
 
 // ── Recent Sessions panel (below radar in empty state) ─────────────────
 var _recentSessions = [];
+var _sessionCoverage = null;
 var _sessionsExpanded = false;
 var SESSIONS_COLLAPSED = 3;
+var _historySession = '';
 
 function sessionRow(s, names, now) {
   var meta = names[s.session_id] || {};
   var reqs = s.reqs || 0, mcps = s.mcps || 0;
   var kind = (reqs && mcps) ? 'mixed' : (mcps && !reqs) ? 'mcp' : 'ssh';
+  /* A session has a name if the operator gave it one, otherwise the goal the
+     agent passed to session_begin(). An id is the last resort. */
+  var goal = (s.goal || '').trim();
   var title = meta.name
     ? escapeHtml(meta.name)
-    : '<span class="sess-id">#' + escapeHtml(s.session_id.substring(0, 8)) + '</span>';
+    : (goal ? escapeHtml(goal)
+            : '<span class="sess-id">#' + escapeHtml(s.session_id.substring(0, 8)) + '</span>');
+  var auto = s.source === 'mcp-transport' || String(s.session_id).indexOf('mcp-') === 0;
   var activity = [];
   if (reqs) activity.push(reqs + ' cmd');
   if (mcps) activity.push(mcps + ' mcp');
@@ -2337,7 +2347,9 @@ function sessionRow(s, names, now) {
       'onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();openSessionModal(\'' + escapeHtml(s.session_id) + '\');}">' +
     '<td class="sess-name">' +
       '<span class="sess-kind ' + kind + '">' + kind + '</span>' +
+      (auto ? '<span class="sess-auto" title="The agent did not call session_begin; grouped by its MCP connection">auto</span>' : '') +
       '<span class="sess-title">' + title + '</span>' +
+      (s.agent ? '<span class="sess-agent">' + escapeHtml(s.agent) + '</span>' : '') +
       (meta.description ? '<span class="sess-desc">' + escapeHtml(meta.description) + '</span>' : '') +
     '</td>' +
     '<td class="sess-host">' + escapeHtml(s.host || 'mcp') + '</td>' +
@@ -2374,7 +2386,16 @@ function renderSessionsTable() {
             (_sessionsExpanded ? 'Show fewer' : 'Show all ' + _recentSessions.length) +
           '</button>'
         : '') +
+      sessionCoverageLine() +
     '</div>';
+}
+
+function sessionCoverageLine() {
+  var cov = _sessionCoverage && _sessionCoverage.ssh;
+  if (!cov || !cov.total) return '';
+  return '<div class="cc-sessions-cov" title="Commands that carried a session id, last 7 days">' +
+    cov.pct + '% of commands carried a session \u00b7 ' +
+    (cov.total - cov.tagged) + ' untagged</div>';
 }
 
 function toggleSessions() {
@@ -2395,6 +2416,7 @@ async function refreshRecentSessions() {
     var res = await authFetch('/api/sessions/recent?limit=12');
     var d = await res.json();
     summaries = d.sessions || [];
+    _sessionCoverage = d.coverage || null;
   } catch (e) { console.warn('recent sessions fetch failed', e); return; }
   _recentSessions = summaries.map(function (s) {
     if (!s.host || s.host === 'unknown') s.host = hostMap[s.session_id] || '';
@@ -2497,7 +2519,8 @@ async function openSessionModal(sid) {
   // Load saved name/desc
   var names = _sessionNames || {};
   var meta = names[sid] || {};
-  nameEl.textContent = meta.name || '';
+  var summary = (_recentSessions || []).filter(function (x) { return x.session_id === sid; })[0] || {};
+  nameEl.textContent = meta.name || summary.goal || '';
   descEl.textContent = meta.description || '';
   metaEl.innerHTML = '<span class="sm-muted">loading\u2026</span>';
   cmdsEl.innerHTML = '<div class="sm-mcp-none">loading session\u2026</div>';
@@ -2528,6 +2551,10 @@ async function openSessionModal(sid) {
   var denied = mcp.filter(function (c) { return c.approval === 'denied'; }).length;
   var auto = mcp.filter(function (c) { return c.approval === 'auto'; }).length;
   var bits = [];
+  if (summary.source === 'mcp-transport' || String(sid).indexOf('mcp-') === 0) {
+    bits.push('<span class="sm-muted" title="No session_begin call; grouped by the MCP connection">auto</span>');
+  }
+  if (summary.agent) bits.push(escapeHtml(summary.agent));
   if (host) bits.push(escapeHtml(host));
   bits.push(ssh.length + ' SSH');
   bits.push(mcp.length + ' MCP');
@@ -2562,6 +2589,42 @@ async function openSessionModal(sid) {
   // Save on Enter (prevent newline)
   nameEl.onkeydown = function(e) { if (e.key === 'Enter') { e.preventDefault(); nameEl.blur(); } };
   descEl.onkeydown = function(e) { if (e.key === 'Enter') { e.preventDefault(); descEl.blur(); } };
+}
+
+/* Filter History to one session. The modal is where a session is read, so it
+   owns the entry point; the History header carries the active chip. */
+function setHistorySession(sid, skipFetch) {
+  _historySession = (sid || '').slice(0, 64);
+  var chip = document.getElementById('history-session-chip');
+  var label = document.getElementById('history-session-label');
+  if (chip && label) {
+    var meta = (_sessionNames || {})[_historySession] || {};
+    var summary = (_recentSessions || []).filter(function (x) {
+      return x.session_id === _historySession;
+    })[0] || {};
+    label.textContent = _historySession
+      ? (meta.name || summary.goal || _historySession.substring(0, 12))
+      : '';
+    chip.classList.toggle('hidden', !_historySession);
+  }
+  if (_historySession) {
+    var box = document.getElementById('request-search');
+    if (box && box.value) { box.value = ''; _requestSearchQuery = ''; }
+  }
+  if (!skipFetch) fetchRequests();
+}
+
+function clearHistorySession() { setHistorySession(''); }
+
+function filterHistoryToSession() {
+  if (!_activeSessionSid) return;
+  var sid = _activeSessionSid;
+  closeModal('session-modal');
+  /* Set the filter BEFORE switching views: switchView('history') triggers its
+     own fetch, and an unfiltered response landing last would replace the table. */
+  setHistorySession(sid, true);
+  switchView('history');
+  fetchRequests();
 }
 
 function flashGlitch(text, danger) {

@@ -17,7 +17,7 @@ from db.integrations import (
     get_tool,
     record_integration_call,
 )
-from core.agent_context import get_current_agent
+from core.agent_context import current_session_id, get_current_agent
 from core.agent_policy import approval_mode, evaluate_call
 from core.integration_proxy import (
     ProxyError,
@@ -141,6 +141,34 @@ def _deny(agent_name, integration, tool, tool_name, args, session_id,
 
 
 def run_tool(integration_name: str, tool_name: str, args: dict, reason: str = '') -> str:
+    """Run one tool call, and tell the model which session it landed in.
+
+    The caller's own `session_id` argument always wins. When it is missing the
+    call still runs, grouped under the MCP transport session, and the result
+    carries that id so the agent can reuse it for SSH and later calls.
+    """
+    supplied = bool((args or {}).get('session_id'))
+    result = _run_tool(integration_name, tool_name, args, reason)
+    if supplied:
+        return result
+    sid = current_session_id()
+    return _annotate_session(result, sid) if sid else result
+
+
+def _annotate_session(result: str, session_id: str) -> str:
+    """Add `_eshu.session_id` to a JSON object result. Never mutates arrays or
+    non-JSON payloads — an annotation is a courtesy, not a payload change."""
+    try:
+        data = json.loads(result)
+    except Exception:
+        return result
+    if not isinstance(data, dict) or '_eshu' in data:
+        return result
+    data['_eshu'] = {'session_id': session_id, 'source': 'transport'}
+    return json.dumps(data)
+
+
+def _run_tool(integration_name: str, tool_name: str, args: dict, reason: str = '') -> str:
     """Execute (or gate) one MCP tool call and return the JSON string for the model."""
     integration = get_integration(integration_name)
     if not integration or not integration.get('enabled'):
@@ -153,7 +181,7 @@ def run_tool(integration_name: str, tool_name: str, args: dict, reason: str = ''
     # Phase 2: MCP tool calls accept structured session_id / execution_id so the
     # dashboard groups them with SSH commands from the same agent conversation.
     # Popped here so they never reach the upstream API as forwarded params.
-    session_id = (args.pop('session_id', '') or '')[:64]
+    session_id = (args.pop('session_id', '') or '')[:64] or current_session_id()
     execution_id = (args.pop('execution_id', '') or '')[:64]
 
     agent = get_current_agent()

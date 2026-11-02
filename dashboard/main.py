@@ -78,6 +78,7 @@ from db.web_fetch import (
     delete_web_fetch_policy, get_web_fetch_policies, get_web_fetch_policy,
     get_web_fetch_stats, set_web_fetch_policy,
 )
+from db.sessions import get_session_coverage, get_session_meta_map
 
 from schemas import (
     LoginPayload, SetPasswordPayload, GatewayPayload, RegisterPayload,
@@ -685,12 +686,13 @@ def claim_ticket_by_id(req_id: int, request: Request):
 # ── Dashboard Endpoints (AUTH PROTECTED — sensitive operations) ─────────
 
 @app.get("/api/requests")
-def list_requests(request: Request, search: str = None):
+def list_requests(request: Request, search: str = None, session: str = None):
     _check_session(request)
+    session = (session or '')[:64] or None
     if search:
-        reqs = search_requests(search)
+        reqs = search_requests(search, session_id=session)
     else:
-        reqs = get_all_requests()
+        reqs = get_all_requests(session_id=session)
     now = int(time.time())
     for r in reqs:
         if r['status'] in ['pending', 'approved']:
@@ -2821,9 +2823,14 @@ def session_detail_endpoint(sid: str, request: Request):
 
 @app.get("/api/sessions/recent")
 def session_recent_endpoint(request: Request, limit: int = 24):
-    """Newest session summaries merged across SSH requests and MCP calls."""
+    """Newest session summaries merged across SSH requests and MCP calls, plus
+    how much traffic carries a caller-supplied id at all (the quality metric
+    that says whether asking agents for one is working)."""
     _check_session(request)
-    return {"sessions": list_recent_session_summaries(limit=min(limit or 24, 100))}
+    return {
+        "sessions": list_recent_session_summaries(limit=min(limit or 24, 100)),
+        "coverage": get_session_coverage(7),
+    }
 
 
 @app.get("/api/integration-calls/pending")

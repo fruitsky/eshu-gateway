@@ -1780,10 +1780,11 @@ textarea { font-family: 'JetBrains Mono', monospace; }
     color: var(--text-muted);
   }
   .session-modal-name {
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 15px;
-    font-weight: 700;
-    color: var(--accent);
+    font-family: var(--serif);
+    font-size: 24px;
+    font-weight: 400;
+    letter-spacing: 0;
+    color: var(--text-main);
     outline: none;
     border-bottom: 1px solid transparent;
     padding: 2px 0;
@@ -4087,3 +4088,45 @@ body.nav-open .mobile-freeze { opacity: 0; pointer-events: none; }
 /* History's header actions keep their words on one line; they used to be
    squeezed until "Refresh" broke around its refresh glyph. */
 #view-history .widget-header .btn { flex-shrink: 0; white-space: nowrap; }
+
+/* ── Sessions: where the id came from, and how much traffic carries one ── */
+.sess-auto {
+  display: inline-block; margin-right: 8px; padding: 1px 5px; border-radius: 3px;
+  font-size: 11px; letter-spacing: 1px; text-transform: uppercase;
+  color: var(--text-muted); border: 1px solid var(--rule-weak); vertical-align: 1px;
+}
+.sess-agent { margin-left: 8px; font-size: 11px; color: var(--text-faint); }
+.cc-sessions-cov {
+  margin-top: 8px; padding: 0 2px;
+  font-family: 'JetBrains Mono', monospace; font-size: 11px;
+  letter-spacing: .4px; color: var(--text-faint);
+}
+
+/* History's active session filter: a removable chip beside the search box. */
+.hist-session-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  max-width: 260px; height: 26px; padding: 0 4px 0 8px;
+  border: 1px solid var(--rule); border-radius: 2px;
+  font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-main);
+}
+.hist-session-chip .hsc-label { color: var(--text-faint); letter-spacing: 1px; text-transform: uppercase; }
+.hist-session-chip code {
+  color: var(--text-main); text-transform: none; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; max-width: 200px;
+}
+.hist-session-chip button {
+  background: none; border: none; color: var(--text-muted); cursor: pointer;
+  font-size: 14px; line-height: 1; padding: 0 4px;
+}
+.hist-session-chip button:hover { color: var(--text-main); }
+
+/* History's toolbar on a phone: the session chip, search and actions wrap onto
+   their own rows instead of pushing each other off the edge. */
+@media (max-width: 768px) {
+  #view-history .widget-header > .flex {
+    width: 100%; flex-wrap: wrap; justify-content: flex-end; gap: 8px;
+  }
+  #view-history .hist-session-chip { max-width: 100%; }
+  #view-history .hist-session-chip code { max-width: 150px; }
+  #view-history #request-search { flex: 1 1 120px; min-width: 0; }
+}
