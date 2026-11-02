@@ -52,3 +52,26 @@ def reset_current_session(token):
 
 def current_session_id(default=''):
     return _current_session.get() or default
+
+
+# The last caller-supplied session id seen on each MCP transport connection.
+# `session_summary()` with no argument should describe the work the agent just
+# did, not the empty transport bucket. Bounded: a dead connection's entry is
+# dropped once the map is large.
+_last_session_by_transport = {}
+_LAST_SESSION_CAP = 512
+
+
+def remember_session_for_transport(session_id, transport=None):
+    transport = transport or _current_session.get()
+    sid = (session_id or '')[:64]
+    if not transport or not sid or sid == transport:
+        return
+    _last_session_by_transport[transport] = sid
+    if len(_last_session_by_transport) > _LAST_SESSION_CAP:
+        _last_session_by_transport.pop(next(iter(_last_session_by_transport)), None)
+
+
+def last_session_for_transport(transport=None):
+    transport = transport or _current_session.get()
+    return _last_session_by_transport.get(transport, '') if transport else ''

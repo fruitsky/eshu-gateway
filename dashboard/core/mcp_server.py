@@ -22,6 +22,8 @@ from core.agent_context import (
     current_agent_name,
     current_session_id,
     get_current_agent,
+    last_session_for_transport,
+    remember_session_for_transport,
     reset_current_agent,
     reset_current_session,
     set_current_agent,
@@ -526,22 +528,32 @@ mcp.add_tool(check_approval_fn(), name="check_approval", description=CHECK_APPRO
 
 
 SESSION_BEGIN_DESC = (
-    "Start a dashboard Session for this task and get the id to reuse. Call it "
-    "once at the start of a task; then pass the returned session_id to every "
-    "Eshu tool and prefix every SSH command with ssh_prefix. The optional goal "
-    "names the session in the dashboard."
+    "Start (or name) this task's dashboard Session. Pass your conversation/chat "
+    "id as session_id when you have one, so the chat id and the dashboard "
+    "session stay the same thing; omit it to mint a new id. Returns the id and "
+    "the exact ESHU_SESSION_ID prefix for SSH. Use that id on every Eshu tool "
+    "and every SSH command; the optional goal names the session."
 )
 
 
 def session_begin_fn():
-    def _session_begin(goal: str = "") -> str:
+    def _session_begin(goal: str = "", session_id: str = "") -> str:
         from db.sessions import new_session_id, upsert_session
-        sid = new_session_id()
+        adopted = (session_id or '').strip()[:64]
+        if adopted and not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', adopted):
+            return json.dumps({
+                'error': 'invalid_session_id',
+                'message': 'session_id must match [A-Za-z0-9_-]{1,64}.',
+            })
+        sid = adopted or new_session_id()
         row = upsert_session(sid, agent=current_agent_name(),
                              goal=(goal or '').strip(), source='agent')
+        # Make a following session_summary() (no arguments) describe this one.
+        remember_session_for_transport(sid)
         return json.dumps({
             'session_id': sid,
             'goal': row.get('goal', ''),
+            'adopted': bool(adopted),
             'ssh_prefix': 'ESHU_SESSION_ID=%s ' % sid,
             'how': ('Pass session_id=<id> to every Eshu tool, and prefix every '
                     'SSH command with ssh_prefix. The same id groups both.'),
@@ -550,16 +562,19 @@ def session_begin_fn():
 
 
 SESSION_SUMMARY_DESC = (
-    "Summarise what this Session did: SSH commands by outcome, MCP calls, "
-    "pending approvals and the gateways touched. Defaults to the MCP "
-    "connection's session; pass session_id to summarise another one."
+    "Summarise what a Session did: SSH commands by outcome, MCP calls, pending "
+    "approvals and the gateways touched. Defaults to the session this "
+    "connection used last (the id from session_begin, or the last id you "
+    "passed), so call it with no arguments at the end of a task."
 )
 
 
 def session_summary_fn():
     def _session_summary(session_id: str = "") -> str:
         from db.sessions import get_session_summary
-        sid = (session_id or '').strip()[:64] or current_session_id()
+        sid = (session_id or '').strip()[:64]
+        if not sid:
+            sid = last_session_for_transport() or current_session_id()
         if not sid:
             return json.dumps({
                 'error': 'no_session',

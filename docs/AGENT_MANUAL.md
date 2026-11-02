@@ -66,10 +66,14 @@ ssh eshu-gateway@<host> "ESHU_SESSION_ID=cf0f09869854 <command>"
 
 ### `session_begin` / `session_summary` (recommended)
 
-Call `session_begin(goal)` once at the start of a task:
+Call `session_begin(goal)` once at the start of a task. If your client already
+has a conversation id (Hermes' chat id, a cron origin id), pass it as
+`session_id` so one conversation stays one dashboard session:
 
 ```json
 {"name": "session_begin", "arguments": {"goal": "swap the TLS certificate"}}
+{"name": "session_begin", "arguments": {"goal": "swap the TLS certificate",
+                                        "session_id": "<your chat id>"}}
 ```
 
 It returns the id to reuse and the SSH prefix to paste:
@@ -81,7 +85,9 @@ It returns the id to reuse and the SSH prefix to paste:
 ```
 
 `session_summary()` then reports what the session did (commands by outcome, MCP
-calls, pending approvals, gateways) — useful for writing the task report.
+calls, pending approvals, gateways) — useful for writing the task report. Called
+with no argument it describes the session **this connection used last** (the id
+from `session_begin`, or the last id you passed), not the transport bucket.
 
 If you forget, the call still runs: MCP calls are grouped under the connection's
 transport session (shown as `auto` in the dashboard), and the tool result carries

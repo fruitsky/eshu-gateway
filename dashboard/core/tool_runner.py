@@ -17,7 +17,8 @@ from db.integrations import (
     get_tool,
     record_integration_call,
 )
-from core.agent_context import current_session_id, get_current_agent
+from core.agent_context import (current_session_id, get_current_agent,
+                               remember_session_for_transport)
 from core.agent_policy import approval_mode, evaluate_call
 from core.integration_proxy import (
     ProxyError,
@@ -147,9 +148,10 @@ def run_tool(integration_name: str, tool_name: str, args: dict, reason: str = ''
     call still runs, grouped under the MCP transport session, and the result
     carries that id so the agent can reuse it for SSH and later calls.
     """
-    supplied = bool((args or {}).get('session_id'))
+    supplied = ((args or {}).get('session_id') or '')[:64]
     result = _run_tool(integration_name, tool_name, args, reason)
     if supplied:
+        remember_session_for_transport(supplied)
         return result
     sid = current_session_id()
     return _annotate_session(result, sid) if sid else result

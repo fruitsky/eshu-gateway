@@ -51,6 +51,17 @@ class TestSessionBegin:
     def test_session_tools_ignore_agent_allowlists(self):
         assert {"session_begin", "session_summary"} <= _ALWAYS_ALLOWED
 
+    def test_begin_can_adopt_an_existing_chat_id(self):
+        out = json.loads(session_begin_fn()("adopted goal", "chat-123"))
+        assert out["session_id"] == "chat-123"
+        assert out["adopted"] is True
+        assert out["ssh_prefix"] == "ESHU_SESSION_ID=chat-123 "
+        assert get_session("chat-123")["goal"] == "adopted goal"
+
+    def test_begin_rejects_an_invalid_id(self):
+        out = json.loads(session_begin_fn()("goal", "not a valid id!"))
+        assert out["error"] == "invalid_session_id"
+
 
 class TestTransportFallback:
 
@@ -123,6 +134,31 @@ class TestSessionSummary:
         out = json.loads(session_summary_fn()(""))
         assert out["error"] == "no_session"
         assert "session_begin" in out["message"]
+
+    def test_default_summary_follows_the_last_id_the_connection_used(self, mock_upstream):
+        """No-arg summary must describe the task, not the transport bucket."""
+        create_integration("api", mock_upstream["base_url"], "none", "", gate_mode="none")
+        integration = get_integration("api")
+        create_tool(integration["id"], "read_thing", "Read", "GET", "/thing", [], "",
+                    read_only=True)
+        token = set_current_session("mcp-test-default")
+        try:
+            run_tool("api", "read_thing", {"session_id": "chat-9"}, "")
+            summary = json.loads(session_summary_fn()(""))
+        finally:
+            reset_current_session(token)
+        assert summary["session_id"] == "chat-9"
+        assert summary["mcp_calls"] == 1
+        assert summary["commands"] == 0
+
+    def test_default_summary_uses_the_id_just_begun(self):
+        token = set_current_session("mcp-test-begin")
+        try:
+            started = json.loads(session_begin_fn()("fresh goal"))
+            summary = json.loads(session_summary_fn()(""))
+        finally:
+            reset_current_session(token)
+        assert summary["session_id"] == started["session_id"]
 
 
 class TestSessionsApi:
