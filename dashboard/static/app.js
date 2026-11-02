@@ -5572,24 +5572,53 @@ function initTallyInteractions() {
   if (play) play.addEventListener('click', toggleTallyRhythm);
 }
 
+/* Drawn in the container's real pixel width. A fixed 560-wide viewBox with
+   preserveAspectRatio="none" scaled x by ~2 while y stayed at 1, so every
+   label was stretched sideways and the peak dot became an ellipse. The width
+   is re-read on resize so collapsing the rail (or a phone rotation) does not
+   reintroduce the distortion. */
+var _rhythmData = null;
+var _rhythmWidth = 0;
+var _rhythmRo = null;
+var _rhythmTimer = null;
+
+function _rhythmObserve(wrap) {
+  if (_rhythmRo || typeof ResizeObserver === 'undefined') return;
+  _rhythmRo = new ResizeObserver(function (entries) {
+    var w = entries[0] ? entries[0].contentRect.width : 0;
+    if (!_rhythmData || Math.abs(w - _rhythmWidth) < 4) return;
+    clearTimeout(_rhythmTimer);
+    _rhythmTimer = setTimeout(function () {
+      if (_rhythmData) renderRhythm(_rhythmData);
+    }, 120);
+  });
+  _rhythmRo.observe(wrap);
+}
+
 function renderRhythm(d) {
   var wrap = document.getElementById('stats-chart-wrap'); if (!wrap) return;
   var daily = (d.daily || []).filter(function (x) { return x && x.total != null; });
   var peakEl = document.getElementById('rhythm-peak');
   if (!daily.length) { wrap.innerHTML = '<p class="text-muted" style="padding:20px">No daily data yet.</p>'; if (peakEl) peakEl.textContent = ''; return; }
+  _rhythmData = d;
+  var W = Math.max(320, Math.round(wrap.clientWidth || 560));
+  _rhythmWidth = W;
+  _rhythmObserve(wrap);
   var n = daily.length, max = Math.max.apply(null, daily.map(function (x) { return x.total || 0; }).concat([1]));
   var total = 0; daily.forEach(function (x) { total += x.total || 0; });
   if (peakEl) peakEl.textContent = 'peak ' + max + ' cmds';
+  var padL = 20, padR = W - 20, base = 175;
   var pts = daily.map(function (x, i) {
-    return [n > 1 ? 20 + i * (520 / (n - 1)) : 280, 165 - Math.round((x.total || 0) / max * 140)];
+    var px = n > 1 ? padL + i * ((padR - padL) / (n - 1)) : (padL + padR) / 2;
+    return [Math.round(px * 10) / 10, 165 - Math.round((x.total || 0) / max * 140)];
   });
   var line = 'M' + pts.map(function (p) { return p[0] + ',' + p[1]; }).join(' L');
-  var area = line + ' L540,175 L20,175 Z';
+  var area = line + ' L' + padR + ',' + base + ' L' + padL + ',' + base + ' Z';
   var peakI = 0; daily.forEach(function (x, i) { if ((x.total || 0) > (daily[peakI].total || 0)) peakI = i; });
   var peakP = pts[peakI];
-  var gl = '<text class="grid-label" x="546" y="28" text-anchor="end">' + max + '</text>' +
-    '<text class="grid-label" x="546" y="103" text-anchor="end">' + Math.round(max / 2) + '</text>' +
-    '<text class="grid-label" x="546" y="178" text-anchor="end">0</text>';
+  var gl = '<text class="grid-label" x="' + (padR + 6) + '" y="28" text-anchor="end">' + max + '</text>' +
+    '<text class="grid-label" x="' + (padR + 6) + '" y="103" text-anchor="end">' + Math.round(max / 2) + '</text>' +
+    '<text class="grid-label" x="' + (padR + 6) + '" y="178" text-anchor="end">0</text>';
   var labelIdx = [];
   if (n <= 8) { for (var i = 0; i < n; i++) labelIdx.push(i); }
   else { labelIdx = [0, Math.floor((n - 1) / 3), Math.floor(2 * (n - 1) / 3), n - 1]; }
@@ -5601,15 +5630,15 @@ function renderRhythm(d) {
       labels += '<text class="day-label" x="' + pts[i][0] + '" y="203" text-anchor="middle">' + lb + '</text>';
     }
   });
-  var autoTxt = '—';
+  var autoTxt = '\u2014';
   if (d.automation_trend && d.automation_trend.length) {
     var psum = 0; d.automation_trend.forEach(function (a) { psum += a.automation_pct || 0; });
     autoTxt = Math.round(psum / d.automation_trend.length) + '%';
   }
   wrap.innerHTML =
-    '<svg viewBox="0 0 560 300" preserveAspectRatio="none" aria-hidden="true">' +
-    '<defs><linearGradient id="areaGrad" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="rgba(245,158,11,0.30)"/><stop offset="55%" stop-color="rgba(245,158,11,0.08)"/><stop offset="100%" stop-color="rgba(245,158,11,0)"/></linearGradient></defs>' +
-    '<line class="grid-line" x1="20" y1="25" x2="540" y2="25"/><line class="grid-line" x1="20" y1="75" x2="540" y2="75"/><line class="grid-line" x1="20" y1="125" x2="540" y2="125"/><line class="grid-line" x1="20" y1="175" x2="540" y2="175"/>' + gl +
+    '<svg viewBox="0 0 ' + W + ' 300" aria-hidden="true">' +
+    '<defs><linearGradient id="areaGrad" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" style="stop-color:var(--accent-line)"/><stop offset="55%" style="stop-color:var(--accent-wash)"/><stop offset="100%" style="stop-color:rgba(245,158,11,0)"/></linearGradient></defs>' +
+    '<line class="grid-line" x1="' + padL + '" y1="25" x2="' + padR + '" y2="25"/><line class="grid-line" x1="' + padL + '" y1="75" x2="' + padR + '" y2="75"/><line class="grid-line" x1="' + padL + '" y1="125" x2="' + padR + '" y2="125"/><line class="grid-line" x1="' + padL + '" y1="175" x2="' + padR + '" y2="175"/>' + gl +
     '<path class="area-fill" d="' + area + '"/><path class="rhythm-line" d="' + line + '"/>' + ticks + labels +
     '<circle class="peak-dot" cx="' + peakP[0] + '" cy="' + peakP[1] + '" r="3.5"/><text class="peak-label" x="' + peakP[0] + '" y="12" text-anchor="middle">' + max + '</text>' +
     '</svg>' +
@@ -5618,8 +5647,8 @@ function renderRhythm(d) {
     (function (i) {
       var col = document.createElement('div');
       col.className = 'scrub-col';
-      col.style.left = Math.max(0, pts[i][0] - 10) + 'px';
-      col.style.width = '20px';
+      col.style.left = (i / n * 100) + '%';
+      col.style.width = (100 / n) + '%';
       col.title = (daily[i].total || 0) + ' commands';
       col.addEventListener('mouseenter', function () {
         tallyTone(_tallyScale[tallyIdx(daily[i].total || 0, max)], i === peakI, 0.045, 1.0);
