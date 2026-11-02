@@ -34,66 +34,79 @@ If a command passes a stage, it executes immediately. The pipeline stops on firs
 
 ### Session & execution IDs (grouping)
 
-To let the operator group related commands into a single **Session** in the
-dashboard, prefix the command with `ESHU_SESSION_ID=<id>` (and optionally an
-`ESHU_EXECUTION_ID=<id>` for per-run drill-down).
+An **id** is what ties one task's SSH commands and MCP calls into a single
+Session in the dashboard. **Use the same id on both surfaces** — one task, one
+id, never two.
 
-**Start every task with `session_begin(goal)`** (MCP, below). It returns a
-`session_id` and the exact `ssh_prefix` string — copy both, rather than
-inventing an id from memory:
+**Start each task with `session_begin`.** If your client already has a
+conversation id (Hermes' chat id, a cron origin id), pass it, so the chat and
+the dashboard session stay the same thing:
 
-```bash
-ssh eshu-gateway@<host> "ESHU_SESSION_ID=cf0f09869854 <command>"
+```json
+{"name": "session_begin", "arguments": {"goal": "swap the TLS certificate", "session_id": "<your chat id>"}}
 ```
 
-- The prefix is **stripped before policy evaluation** — it never changes how a
-  command is classified (whitelist / JIT / FATAL).
-- Keys coexist and can be combined in any order, including with a window token:
+If you have no conversation id, omit `session_id` and Eshu mints one:
+
+```json
+{"name": "session_begin", "arguments": {"goal": "swap the TLS certificate"}}
+```
+
+Either way it answers:
+
+```json
+{"session_id": "a1b2c3d4e5f6",
+ "goal": "swap the TLS certificate",
+ "adopted": false,
+ "ssh_prefix": "ESHU_SESSION_ID=a1b2c3d4e5f6 ",
+ "how": "Pass session_id=<id> to every Eshu tool, and prefix every SSH command with ssh_prefix. The same id groups both."}
+```
+
+`adopted: true` means Eshu took the id you supplied. Then:
+
+- every MCP tool takes `session_id=<id>` (and optionally an `execution_id` for
+  per-run drill-down);
+- every SSH command starts with the returned `ssh_prefix`:
 
   ```bash
-  ssh eshu-gateway@<host> "ESHU_WINDOW_TOKEN=<token> ESHU_SESSION_ID=<id> <command>"
+  ssh eshu-gateway@<host> "ESHU_SESSION_ID=cf0f09869854 <command>"
   ```
 
-- `<id>` is an opaque `[A-Za-z0-9_-]{1,64}` string. Send `ESHU_SESSION_ID=unknown`
-  for context-less runs (e.g. fire-and-forget cron watchdogs) — those tickets
-  are kept but left ungrouped.
+At the end of the task, `session_summary()` with no arguments describes **the
+session this connection used last** — the id from `session_begin`, or the last
+id you passed — and returns `commands`, `approved`, `refused`, `expired`,
+`mcp_calls`, `mcp_pending`, `gateways`, `first_seen`, `last_seen`.
+
+Rules:
+
+- **One id per task.** If you minted one, keep the returned id and pass it on
+  every later call; never mix a minted id with your chat id.
+- **Both tools are always available**, even to an agent with a strict tool
+  allowlist.
+- **Omission is not an error.** An MCP call without `session_id` is grouped under
+  the connection's transport id (`mcp-…`, shown as `auto` in the dashboard), and
+  its result carries `_eshu.session_id` (object responses only) so you can adopt
+  it. That id is per-connection, not a durable identity. SSH without the prefix
+  is logged as untagged.
+- **Nothing is rejected** for a missing id; untagged SSH is visible to the
+  operator in the Sessions coverage line.
+
+The prefix is **stripped before policy evaluation** — it never changes how a
+command is classified (whitelist / JIT / FATAL). Keys coexist and can be
+combined in any order, including with a window token:
+
+```bash
+ssh eshu-gateway@<host> "ESHU_WINDOW_TOKEN=<token> ESHU_SESSION_ID=<id> <command>"
+```
+
+- `<id>` is an opaque `[A-Za-z0-9_-]{1,64}` string. `unknown` marks a context-less
+  run (fire-and-forget cron) — the tickets are kept but left ungrouped.
 - Commands that share the same `ESHU_SESSION_ID` are grouped into one
   collapsible Session in the operator's queue.
 
 > **Subagents / cron:** resolve the id client-side before invoking ssh — e.g.
 > `ESHU_SESSION_ID="${PARENT_CHAT_ID:-${CRON_ORIGIN_CHAT_ID:-unknown}}"` so a
 > subagent inherits its parent's session and cron jobs fall back to `unknown`.
-
-### `session_begin` / `session_summary` (recommended)
-
-Call `session_begin(goal)` once at the start of a task. If your client already
-has a conversation id (Hermes' chat id, a cron origin id), pass it as
-`session_id` so one conversation stays one dashboard session:
-
-```json
-{"name": "session_begin", "arguments": {"goal": "swap the TLS certificate"}}
-{"name": "session_begin", "arguments": {"goal": "swap the TLS certificate",
-                                        "session_id": "<your chat id>"}}
-```
-
-It returns the id to reuse and the SSH prefix to paste:
-
-```json
-{"session_id": "a1b2c3d4e5f6",
- "ssh_prefix": "ESHU_SESSION_ID=a1b2c3d4e5f6 ",
- "how": "Pass session_id=<id> to every Eshu tool, and prefix every SSH command with ssh_prefix."}
-```
-
-`session_summary()` then reports what the session did (commands by outcome, MCP
-calls, pending approvals, gateways) — useful for writing the task report. Called
-with no argument it describes the session **this connection used last** (the id
-from `session_begin`, or the last id you passed), not the transport bucket.
-
-If you forget, the call still runs: MCP calls are grouped under the connection's
-transport session (shown as `auto` in the dashboard), and the tool result carries
-`_eshu.session_id` so you can adopt it for the rest of the task. SSH commands
-without the prefix are logged as untagged — nothing breaks, but the operator
-cannot group them with the rest.
 
 ### MCP calls (integrations) — session IDs
 
