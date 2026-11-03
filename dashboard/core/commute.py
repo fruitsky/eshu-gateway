@@ -835,8 +835,10 @@ def handle_commute_override(integration, tool, args, ctx=None) -> str:
 def handle_commute_pause(integration, tool, args, ctx=None) -> str:
     try:
         person = _person_arg(args)
-        return json.dumps(
-            pause(person, (args or {}).get("until"), _agent(ctx)),
-            ensure_ascii=False)
+        until = (args or {}).get("until")
+        if until is None or str(until).strip() == "":
+            raise CommuteError(
+                "missing_until", "until: give YYYY-MM-DD, or 'clear'")
+        return json.dumps(pause(person, until, _agent(ctx)), ensure_ascii=False)
     except Exception as exc:  # noqa: BLE001
         return _error(exc)

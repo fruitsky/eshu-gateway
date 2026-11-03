@@ -315,6 +315,13 @@ class TestHandlers:
         assert store.get_profile("gui")["overrides"]["2026-11-04"] == "skip"
         assert store.get_profile("gui")["days"] == PROFILE["days"]
 
+    def test_pause_requires_until(self):
+        store.save_profile("gui", PROFILE)
+        out = json.loads(commute.handle_commute_pause(
+            None, None, {"person": "gui"}))
+        assert out["ok"] is False
+        assert out["error"] == "missing_until"
+
     def test_pause_and_clear(self):
         store.save_profile("gui", PROFILE)
         out = json.loads(commute.handle_commute_pause(

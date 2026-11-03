@@ -144,7 +144,7 @@ COMMUTE_SEED_TOOLS = [
             {"name": "person", "type": "string",
              "description": "Profile slug: gui or megan.", "required": True},
             {"name": "until", "type": "string",
-             "description": "YYYY-MM-DD, or 'clear'.", "required": False},
+             "description": "YYYY-MM-DD, or 'clear'.", "required": True},
         ],
         "fields": [],
         "read_only": False,
