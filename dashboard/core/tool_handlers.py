@@ -24,6 +24,10 @@ import time
 
 from core.ha_ws import ha_ws_exec
 from core.train import handle_train_plan, handle_train_status
+from core.commute import (
+    handle_commute_check, handle_commute_profile_get, handle_commute_profile_set,
+    handle_commute_override, handle_commute_pause,
+)
 from core.integration_proxy import (
     ProxyError, execute_generic_call, execute_integration_call,
 )
@@ -1008,6 +1012,11 @@ HANDLERS = {
     'web_fetch': _h_web_fetch,
     'train_plan': handle_train_plan,
     'train_status': handle_train_status,
+    'commute_check': handle_commute_check,
+    'commute_profile_get': handle_commute_profile_get,
+    'commute_profile_set': handle_commute_profile_set,
+    'commute_override': handle_commute_override,
+    'commute_pause': handle_commute_pause,
 }
 
 

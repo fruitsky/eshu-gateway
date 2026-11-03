@@ -54,6 +54,7 @@ def init_db():
     from db.agent_policies import init_agent_policies_tables
     from db.web_fetch import init_web_fetch_tables
     from db.sessions import init_sessions_tables
+    from db.commute import init_commute_tables
 
     init_requests_tables(cursor)
     init_gateways_tables(cursor)
@@ -69,6 +70,7 @@ def init_db():
     init_agent_policies_tables(cursor)
     init_web_fetch_tables(cursor)
     init_sessions_tables(cursor)
+    init_commute_tables(cursor)
 
     conn.commit()
     conn.close()

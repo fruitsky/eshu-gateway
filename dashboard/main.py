@@ -120,6 +120,7 @@ from core.mcp_server import (
 )
 from core.seeds import seed_for_kind, reseed_all_integrations, seed_tool_names
 from core.train_seed import ensure_train_integration
+from core.commute_seed import ensure_commute_integration
 
 
 def _get_gateway_hostname(ip: str) -> str:
@@ -247,6 +248,7 @@ def on_startup():
     # Re-apply each integration's seed catalog so deployed catalog changes
     # (new/changed tools) propagate without a manual re-seed.
     ensure_train_integration()
+    ensure_commute_integration()
     reseed_all_integrations()
     # Keep the web-fetch caller gate and agent tool allowlists aligned with the
     # enabled per-agent URL policies (idempotent; no token = fail closed).
@@ -2374,6 +2376,12 @@ class AgentPolicyPayload(BaseModel):
     rate_limit_per_min: int = 0
 
 
+class CommuteDuePayload(BaseModel):
+    person: str
+    at: str | None = None
+    dry_run: bool = False
+
+
 class WebFetchPolicyPayload(BaseModel):
     enabled: bool = False
     allow: list = []
@@ -2505,6 +2513,28 @@ def set_agent_policy_endpoint(agent_id: int, payload: AgentPolicyPayload,
                 f"rate_limit={policy['rate_limit_per_min']})")
     _sync_web_fetch_access()
     return get_agent_policy(agent_id)
+
+
+@app.post("/api/commute/due")
+def commute_due_endpoint(payload: CommuteDuePayload, request: Request):
+    """Scheduler trigger: decide whether a notify slot is due and compose it.
+
+    Authenticated with an agent bearer token (not a dashboard session). The
+    scheduler delivers the returned `text`; Eshu records the slot in
+    commute_notify_state so a scheduler loop cannot send twice.
+    """
+    agent = resolve_agent_optional(request)
+    if not agent:
+        raise HTTPException(status_code=401, detail="Invalid or missing agent token")
+    name = (agent.get("name") or "").strip()
+    if name not in {"rowana-household", "hermes"}:
+        raise HTTPException(status_code=403,
+                            detail="Agent is not allowed to run the commute scheduler")
+    from core.commute import CommuteError, due
+    try:
+        return due(payload.person, at=payload.at, dry_run=payload.dry_run)
+    except CommuteError as exc:
+        raise HTTPException(status_code=400, detail=exc.message)
 
 
 @app.get("/api/agents/{agent_id}/available-tools")
