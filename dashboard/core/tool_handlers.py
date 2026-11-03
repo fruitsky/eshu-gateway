@@ -23,6 +23,7 @@ import json
 import time
 
 from core.ha_ws import ha_ws_exec
+from core.train import handle_train_plan, handle_train_status
 from core.integration_proxy import (
     ProxyError, execute_generic_call, execute_integration_call,
 )
@@ -1005,6 +1006,8 @@ HANDLERS = {
     'seerr_request_create': _h_seerr_request_create,
     'arr_wanted_missing': _h_arr_wanted_missing,
     'web_fetch': _h_web_fetch,
+    'train_plan': handle_train_plan,
+    'train_status': handle_train_status,
 }
 
 

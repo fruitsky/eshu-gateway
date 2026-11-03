@@ -119,6 +119,7 @@ from core.mcp_server import (
     MCP_MODES,
 )
 from core.seeds import seed_for_kind, reseed_all_integrations, seed_tool_names
+from core.train_seed import ensure_train_integration
 
 
 def _get_gateway_hostname(ip: str) -> str:
@@ -245,6 +246,7 @@ def on_startup():
     profiles_thread.start()
     # Re-apply each integration's seed catalog so deployed catalog changes
     # (new/changed tools) propagate without a manual re-seed.
+    ensure_train_integration()
     reseed_all_integrations()
     # Keep the web-fetch caller gate and agent tool allowlists aligned with the
     # enabled per-agent URL policies (idempotent; no token = fail closed).
