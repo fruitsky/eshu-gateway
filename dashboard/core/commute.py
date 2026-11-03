@@ -725,14 +725,18 @@ def override(person: str, date_value: str, action: str, arrive_by: str | None,
     if not current:
         raise CommuteError("unknown_person", f"No commute profile for {person!r}.")
     day = parse_date(date_value).isoformat()
-    if action not in ("skip", "office"):
-        raise CommuteError("bad_action", "action: use 'skip' or 'office'")
-    entry = action
-    if action == "office" and arrive_by:
-        parse_time(arrive_by)
-        entry = {"office": True, "arrive_by": arrive_by}
+    if action not in ("skip", "office", "clear"):
+        raise CommuteError(
+            "bad_action", "action: use 'skip', 'office' or 'clear'")
     overrides = dict(current.get("overrides") or {})
-    overrides[day] = entry
+    if action == "clear":
+        overrides.pop(day, None)
+    else:
+        entry = action
+        if action == "office" and arrive_by:
+            parse_time(arrive_by)
+            entry = {"office": True, "arrive_by": arrive_by}
+        overrides[day] = entry
     merged = validate_patch({"overrides": overrides}, current)
     saved = store.save_profile(person, merged, agent)
     return {"ok": True, "person": person, "text": summary(person, saved),

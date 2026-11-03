@@ -26,13 +26,24 @@ def main() -> int:
     parser.add_argument("--person", required=True)
     parser.add_argument("--url", default=os.environ.get("ESHU_URL", "http://127.0.0.1:8000"))
     parser.add_argument("--token", default=os.environ.get("ESHU_TOKEN", ""))
+    parser.add_argument("--token-file", default=None,
+                        help="Read the agent token from a file (mode 600)")
     parser.add_argument("--at", default=None, help="Optional HH:MM override")
     parser.add_argument("--dry-run", action="store_true",
                         help="Compose but do not mark the slot sent")
     args = parser.parse_args()
 
-    if not args.token:
-        print("error: ESHU_TOKEN is not set", file=sys.stderr)
+    token = args.token
+    if args.token_file:
+        try:
+            with open(args.token_file, "r", encoding="utf-8") as handle:
+                token = handle.read().strip()
+        except OSError as exc:
+            print(f"error: cannot read token file: {exc}", file=sys.stderr)
+            return 2
+    if not token:
+        print("error: ESHU_TOKEN is not set and --token-file was not given",
+              file=sys.stderr)
         return 2
 
     body = json.dumps({
@@ -46,7 +57,7 @@ def main() -> int:
         method="POST",
         headers={
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {args.token}",
+            "Authorization": f"Bearer {token}",
         },
     )
     try:

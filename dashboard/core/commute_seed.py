@@ -101,9 +101,10 @@ COMMUTE_SEED_TOOLS = [
         "name": "override",
         "description": (
             "Set a one-off change for one date: action='skip' (no alert that "
-            "day) or 'office' (alert even if it is not a normal commute day). "
-            "Optionally set arrive_by for that date. Never edits the weekly "
-            "days list. Applies immediately and returns the stored read-back."
+            "day), 'office' (alert even if it is not a normal commute day), or "
+            "'clear' (remove that date's override). Optionally set arrive_by "
+            "for an office day. Never edits the weekly days list. Applies "
+            "immediately and returns the stored read-back."
         ),
         "method": "POST",
         "path_template": "/override",
@@ -113,7 +114,7 @@ COMMUTE_SEED_TOOLS = [
             {"name": "date", "type": "string",
              "description": "YYYY-MM-DD.", "required": True},
             {"name": "action", "type": "string",
-             "description": "'skip' or 'office'.", "required": True},
+             "description": "'skip', 'office' or 'clear'.", "required": True},
             {"name": "arrive_by", "type": "string",
              "description": "Optional HH:MM deadline for an office day.",
              "required": False},

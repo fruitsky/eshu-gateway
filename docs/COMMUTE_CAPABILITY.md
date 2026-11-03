@@ -12,7 +12,7 @@ scoped to the household agent.
 | `commute_check` | read-only | Live check for one person; `person`, optional `at` (HH:MM) |
 | `commute_profile_get` | read-only | Read-back text + profile object |
 | `commute_profile_set` | ungated write | `person`, `patch`; applies immediately, returns stored read-back |
-| `commute_override` | ungated write | `person`, `date`, `action` (`skip`/`office`), optional `arrive_by` |
+| `commute_override` | ungated write | `person`, `date`, `action` (`skip`/`office`/`clear`), optional `arrive_by` |
 | `commute_pause` | ungated write | `person`, optional `until` (`YYYY-MM-DD` or `clear`) |
 
 Shared `/mcp` names are `commute_check`, `commute_profile_get`, etc.;
@@ -38,6 +38,9 @@ recording (shadow testing).
 ```bash
 ESHU_URL=http://192.168.1.114:8000 ESHU_TOKEN=... \
     python3 scripts/commute-due.py --person megan
+
+# or keep the token in a 0600 file instead of the environment:
+python3 scripts/commute-due.py --person megan --token-file /path/to/eshu-token
 ```
 
 ## Profile shape

@@ -322,6 +322,15 @@ class TestHandlers:
         assert out["ok"] is False
         assert out["error"] == "missing_until"
 
+    def test_override_clear(self):
+        store.save_profile("gui", PROFILE)
+        commute.handle_commute_override(
+            None, None, {"person": "gui", "date": "2026-11-04", "action": "skip"})
+        out = json.loads(commute.handle_commute_override(
+            None, None, {"person": "gui", "date": "2026-11-04", "action": "clear"}))
+        assert out["ok"] is True
+        assert "2026-11-04" not in store.get_profile("gui")["overrides"]
+
     def test_pause_and_clear(self):
         store.save_profile("gui", PROFILE)
         out = json.loads(commute.handle_commute_pause(
