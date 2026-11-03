@@ -2527,7 +2527,7 @@ def commute_due_endpoint(payload: CommuteDuePayload, request: Request):
     if not agent:
         raise HTTPException(status_code=401, detail="Invalid or missing agent token")
     name = (agent.get("name") or "").strip()
-    if name not in {"rowana-household", "hermes"}:
+    if name not in {"rowana-household", "hermes", "commute-cron"}:
         raise HTTPException(status_code=403,
                             detail="Agent is not allowed to run the commute scheduler")
     from core.commute import CommuteError, due

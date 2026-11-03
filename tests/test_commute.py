@@ -386,6 +386,20 @@ class TestDueEndpoint:
             headers={"Authorization": f"Bearer {raw}"})
         assert response.status_code == 403
 
+    def test_dedicated_scheduler_token(self, client, monkeypatch):
+        raw, _agent_id = create_agent_token("commute-cron")
+        store.save_profile("gui", PROFILE)
+        monkeypatch.setattr(commute, "now_london", lambda at=None: NOW)
+        monkeypatch.setattr(commute, "bank_holidays", lambda: set())
+        monkeypatch.setattr(commute, "check", lambda *a, **k: {
+            "level": "normal", "text": "hello"})
+        store.clear_sent("gui", "2026-11-02")
+        response = client.post(
+            "/api/commute/due", json={"person": "gui", "at": "05:25"},
+            headers={"Authorization": f"Bearer {raw}"})
+        assert response.status_code == 200
+        assert response.json()["send"] is True
+
     def test_due_endpoint(self, client, monkeypatch):
         raw, _agent_id = create_agent_token("rowana-household")
         store.save_profile("gui", PROFILE)

@@ -91,6 +91,13 @@ python3 scripts/import-commute-profiles.py /path/to/profiles.json --dry-run
 The importer drops `chat_id`, maps `notify_at`, validates every profile, and
 only writes after all profiles have passed validation.
 
+## Scheduler token
+
+Use the existing `rowana-household` token from her MCP config, or create a
+dedicated `commute-cron` token in the Eshu Agents tab and set its MCP policy to
+`allowlist` with no tools. Store the raw token in a mode-600 file and pass it
+with `--token-file`; it is only accepted by `/api/commute/due`.
+
 ## Scheduler schedule
 
 Run the trigger every minute through the morning window, e.g.:
