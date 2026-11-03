@@ -299,7 +299,7 @@ def test_status_moves_url_to_detail_line(monkeypatch):
     }], None))
     result = train.status("southeastern")
     assert result["text"].startswith("Southeastern: Severe Delays — Signal failure at Lewisham")
-    assert "\nDetail: https://nationalrail.co.uk/x" in result["text"]
+    assert "\n— Detail: https://nationalrail.co.uk/x" in result["text"]
     assert "Severe Delays — https" not in result["text"]
 
 

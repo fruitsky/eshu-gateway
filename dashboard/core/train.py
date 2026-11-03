@@ -543,7 +543,7 @@ def format_status(lines: list) -> str:
         if reason_text:
             text += f" — {reason_text}"
         if links:
-            text += f"\nDetail: {links[0]}"
+            text += f"\n— Detail: {links[0]}"
         parts.append(text)
     return "\n".join(parts)
 
