@@ -33,7 +33,24 @@ Returns `{send, slot, text, ...}`. Eshu checks the day gate, notify times and
 The harness prints `text` when `send` is true. `dry_run` composes without
 recording (shadow testing).
 
-`scripts/commute-due.py` is the generic trigger:
+The preferred host-side trigger is the generic `eshu_call.py` client plus a
+tiny shim:
+
+```python
+# commute_due_megan.py
+import sys
+from eshu_call import main
+raise SystemExit(main([
+    "--path", "/api/commute/due",
+    "--body", '{"person": "megan"}',
+    "--print-field", "text",
+    "--when-field", "send",
+]))
+```
+
+Set `ESHU_URL` and `ESHU_TOKEN_FILE` in the shim environment. See
+`docs/ESHU_CALL_CLIENT.md` for install/version/hash details. The older
+`scripts/commute-due.py` remains as a compatibility path:
 
 ```bash
 ESHU_URL=http://192.168.1.114:8000 ESHU_TOKEN=... \

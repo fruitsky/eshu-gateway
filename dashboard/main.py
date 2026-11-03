@@ -1443,6 +1443,39 @@ def serve_agent_window_docs():
     raise HTTPException(status_code=404, detail="Agent manual not found")
 
 
+@app.get("/api/clients/eshu-call.py", response_class=PlainTextResponse)
+def serve_eshu_call_client(request: Request):
+    """Serve the generic Eshu REST client as a versioned artifact.
+
+    Agent-token authenticated. The host's bootstrap/update job fetches this,
+    verifies X-Client-SHA256, installs it, and restarts its timer. The client is
+    transport only; capability logic stays in Eshu.
+    """
+    agent = resolve_agent_optional(request)
+    if not agent:
+        raise HTTPException(status_code=401, detail="Invalid or missing agent token")
+    script_path = os.path.join(os.path.dirname(__file__), "..", "scripts", "eshu_call.py")
+    if not os.path.exists(script_path):
+        raise HTTPException(status_code=404, detail="Client script not found")
+    with open(script_path, "r", encoding="utf-8") as handle:
+        content = handle.read()
+    digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    version = "unknown"
+    for line in content.splitlines():
+        if line.startswith("VERSION = "):
+            version = line.split("=", 1)[1].strip().strip("\"'")
+            break
+    return PlainTextResponse(
+        content=content,
+        media_type="text/x-python; charset=utf-8",
+        headers={
+            "X-Client-Version": version,
+            "X-Client-SHA256": digest,
+            "Cache-Control": "no-cache",
+        },
+    )
+
+
 @app.get("/api/docs/agent-manual", response_class=PlainTextResponse)
 def serve_agent_manual():
     """Serve the AI agent manual for gateway interaction and Approved Windows.
