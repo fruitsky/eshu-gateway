@@ -72,10 +72,17 @@ Either way it answers:
   ssh eshu-gateway@<host> "ESHU_SESSION_ID=cf0f09869854 <command>"
   ```
 
-At the end of the task, `session_summary()` with no arguments describes **the
-session this connection used last** — the id from `session_begin`, or the last
-id you passed — and returns `commands`, `approved`, `refused`, `expired`,
-`mcp_calls`, `mcp_pending`, `gateways`, `first_seen`, `last_seen`.
+At the end of the task, `session_summary()` with no arguments describes **this
+MCP connection's bound session** — the id from `session_begin`, or the last id
+passed to an MCP tool. It does **not** see SSH commands stamped with a
+different id: if SSH and MCP used different ids, pass `session_id` explicitly.
+The response says which rule resolved the id (`resolved_from`: `argument`,
+`connection` or `transport`) and returns `commands`, `pending`, the permitted
+split (`whitelisted`, `jit_approved`, `override_approved`, `window_approved`,
+`fleet_run`, `consumed`), the back-compatible `approved` sum, `refused`,
+`expired`, `mcp_calls`, `mcp_pending`, `gateways`, `first_seen` and
+`last_seen`. `approved` means permitted, not succeeded — a command can be
+approved and then fail.
 
 Rules:
 
@@ -93,6 +100,17 @@ Rules:
 - **Nothing is rejected** for a missing id; untagged SSH is visible to the
   operator in the Sessions coverage line. Coverage counts only explicit ids —
   inherited and transport ids are reported as `auto`, not as compliance.
+- **One command, one ticket.** A session id groups commands; it does not cache
+  approvals. Re-running the same command raises a new JIT. The exception is an
+  operator-granted **Session Override** for that session (and host): while it
+  is active, matching commands auto-approve until it expires.
+- **`_eshu` is object-only.** Array-returning tools (the list endpoints) do not
+  carry `_eshu`, so their absence is not evidence of missing attribution. Pass
+  `session_id` explicitly if you need it, or confirm with
+  `session_summary(session_id=...)`.
+- **A failed command is marked.** The gateway appends `[ESHU exit=N]` to the
+  output on a non-zero exit and returns that status. `[OK] Approved!` means the
+  ticket was approved, not that the command succeeded.
 
 The prefix is **stripped before policy evaluation** — it never changes how a
 command is classified (whitelist / JIT / FATAL). Keys coexist and can be

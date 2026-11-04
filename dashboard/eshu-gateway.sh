@@ -43,7 +43,17 @@ log_window_reject() {
        -d '{"target_ip":"'"$TARGET_IP"'","encoded_command":"'"$enc_cmd"'","status":"window-rejected","reason":"'"$reason"'","token":"'"$ESHU_WINDOW_TOKEN"'","session_id":"'"${ESHU_SESSION_ID:-}"'","execution_id":"'"${ESHU_EXECUTION_ID:-}"'"}' >/dev/null 2>&1 &
 }
 
-run_sanitized() { "$@" 2>&1 | sanitize; exit $?; }
+run_sanitized() {
+  local rc=0
+  # `set -e` would abort before the sentinel on a failed pipeline; the `||`
+  # preserves the real status so the agent can see the outcome without
+  # appending its own `echo RC=$?`.
+  "$@" 2>&1 | sanitize || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "[ESHU exit=$rc]"
+  fi
+  exit "$rc"
+}
 
 logger -t eshu-gateway "from=${SSH_CONNECTION:-unknown} cmd=${SSH_ORIGINAL_COMMAND:-none}"
 if [ -z "${SSH_ORIGINAL_COMMAND:-}" ]; then exit 1; fi

@@ -144,8 +144,38 @@ class TestSessionSummary:
         s = get_session_summary("sum-1")
         assert s["commands"] == 1
         assert s["approved"] == 1
+        assert s["whitelisted"] == 1
+        assert s["jit_approved"] == 0
         assert s["mcp_calls"] == 1
         assert s["first_seen"] and s["last_seen"]
+
+    def test_summary_splits_permitted_without_claiming_success(self):
+        """`approved` is the sum; the split says *why* each row was permitted."""
+        create_request(target_ip="10.0.0.9", command="allowlisted",
+                       status="auto-approved", ttl=0, session_id="sum-split")
+        create_request(target_ip="10.0.0.9", command="human jit",
+                       status="approved", ttl=0, session_id="sum-split")
+        create_request(target_ip="10.0.0.9", command="host override",
+                       status="approved", ttl=0, reason="override",
+                       session_id="sum-split")
+        create_request(target_ip="10.0.0.9", command="session override",
+                       status="approved", ttl=0, reason="session-override:7",
+                       session_id="sum-split")
+        create_request(target_ip="10.0.0.9", command="window",
+                       status="window-approved", ttl=0, session_id="sum-split")
+        create_request(target_ip="10.0.0.9", command="fleet",
+                       status="fleet-run", ttl=0, session_id="sum-split")
+        create_request(target_ip="10.0.0.9", command="claimed ticket",
+                       status="consumed", ttl=0, session_id="sum-split")
+        s = get_session_summary("sum-split")
+        assert s["commands"] == 7
+        assert s["whitelisted"] == 1
+        assert s["jit_approved"] == 2       # human JIT + the claimed ticket
+        assert s["override_approved"] == 2  # host + session override
+        assert s["window_approved"] == 1
+        assert s["fleet_run"] == 1
+        assert s["consumed"] == 1
+        assert s["approved"] == 7
 
     def test_tool_defaults_to_the_transport_session(self):
         record_integration_call(integration="ha", tool="list_entities", agent="mcp",
@@ -159,6 +189,20 @@ class TestSessionSummary:
             reset_current_session(token)
         assert out["session_id"] == "mcp-cafebabe"
         assert out["mcp_calls"] == 1
+        assert out["resolved_from"] == "transport"
+
+    def test_summary_says_how_the_id_was_resolved(self):
+        explicit = json.loads(session_summary_fn()("sum-x"))
+        assert explicit["resolved_from"] == "argument"
+
+        token = set_current_session("mcp-resolve")
+        try:
+            started = json.loads(session_begin_fn()("resolve me"))
+            bound = json.loads(session_summary_fn()(""))
+        finally:
+            reset_current_session(token)
+        assert bound["session_id"] == started["session_id"]
+        assert bound["resolved_from"] == "connection"
 
     def test_tool_without_any_session_says_how_to_start_one(self):
         out = json.loads(session_summary_fn()(""))
