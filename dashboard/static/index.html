@@ -809,6 +809,13 @@
               </div>
             </div>
           </div>
+          <div class="widget" id="getting-started-widget">
+            <div class="widget-header">Getting started</div>
+            <div class="setting-row">
+              <div><span class="text-sm">The first-run walkthrough</span><p class="text-xs text-muted">The key, a gateway, the agent and integrations — in four steps.</p></div>
+              <button onclick="openOnboarding(0)" class="btn btn-muted btn-sm">Open</button>
+            </div>
+          </div>
         </div>
         <div class="flex flex-col gap-5">
           <div class="widget" id="external-notify-widget">
@@ -1279,6 +1286,29 @@
 </div>
 
 <!-- Session Detail Modal -->
+<!-- First-run walkthrough (content rendered from ONB_STEPS in app.js) -->
+<div id="onboarding-modal" class="modal-overlay hidden" onclick="if(event.target===this)closeOnboarding()">
+  <div class="onb-card" role="dialog" aria-modal="true" aria-labelledby="onb-title" tabindex="-1">
+    <div class="onb-head">
+      <div class="onb-heading">
+        <div class="onb-kicker" id="onb-kicker">Getting started</div>
+        <h2 class="onb-title" id="onb-title">Welcome to Eshu</h2>
+        <p class="onb-lede" id="onb-lede"></p>
+      </div>
+      <div class="onb-count" id="onb-count">1 / 4</div>
+    </div>
+    <div class="onb-rail" id="onb-rail"></div>
+    <div class="onb-body" id="onb-body"></div>
+    <div class="onb-foot">
+      <button class="btn btn-muted btn-xs" onclick="skipOnboarding()">Skip for now</button>
+      <span class="onb-esc">Esc to close</span>
+      <div class="onb-spacer"></div>
+      <button class="btn btn-muted btn-xs hidden" id="onb-back" onclick="onbBack()">Back</button>
+      <button class="btn btn-xs" id="onb-next" onclick="onbNext()">Continue</button>
+    </div>
+  </div>
+</div>
+
 <div id="session-modal" class="modal-overlay hidden" onclick="if(event.target===this)closeModal('session-modal')">
   <div class="session-modal-card">
     <div class="session-modal-header">

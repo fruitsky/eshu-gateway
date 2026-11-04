@@ -74,6 +74,7 @@ from database import (
 from db.agent_policies import (
     get_agent_policy, set_agent_policy, get_agent_policies_map,
 )
+from db.misc import get_meta_json, set_meta_json
 from db.web_fetch import (
     delete_web_fetch_policy, get_web_fetch_policies, get_web_fetch_policy,
     get_web_fetch_stats, set_web_fetch_policy,
@@ -1473,6 +1474,33 @@ def save_enroll_keys(payload: SSHKeysPayload, request: Request):
     _check_session(request)
     save_ssh_keys(payload.eshu_key)
     return {"status": "ok"}
+
+@app.get("/api/onboarding")
+def onboarding_state(request: Request):
+    """Should this install introduce itself?
+
+    Only on an empty install: no gateway enrolled and the wizard has not been
+    dismissed. Existing installs never see it automatically; Settings can
+    reopen it at any time."""
+    _check_session(request)
+    keys = get_ssh_keys() or {}
+    gateways = get_gateways()
+    done = bool(get_meta_json('onboarding_done', False))
+    return {
+        'done': done,
+        'key_configured': bool((keys.get('eshu_ssh_key') or '').strip()),
+        'gateways': len(gateways),
+        'show': (not done) and len(gateways) == 0,
+    }
+
+
+@app.post("/api/onboarding/done")
+def onboarding_done(request: Request):
+    """Mark the first-run walkthrough as seen (dismissed or finished)."""
+    _check_session(request)
+    set_meta_json('onboarding_done', True)
+    return {'done': True}
+
 
 @app.post("/api/enroll/generate")
 def generate_token(request: Request):

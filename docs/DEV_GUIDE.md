@@ -77,6 +77,28 @@ Run `bash scripts/setup-git-hooks.sh` once. After that, `git commit` automatical
 - `python3 -m py_compile` on Python files
 - `node --check` on JS files
 
+### First-run walkthrough
+
+The four-step introduction that opens on an empty install (key → gateway →
+agent → integrations) is content-shaped on purpose: the steps are
+`ONB_STEPS` in `dashboard/static/app.js`, the shell is `#onboarding-modal` in
+`index.html`, and the copy/design rules live in
+**[FIRST_RUN.md](FIRST_RUN.md)**.
+
+When changing it:
+
+- keep the shape — `id`, `label`, `title` (≤64), `lede` (≤130), `render`;
+- add the renderer next to the others, and an integration card if the step
+  gains one;
+- run `python3 scripts/check_onboarding.py` (pre-commit runs it as
+  `onboarding`) — it catches a missing renderer, a dead anchor or an empty card
+  before the commit;
+- verify the flow on a fresh DB (see FIRST_RUN.md) rather than on the install
+  you already finished, and check 390px: the card goes full-screen.
+
+The walkthrough only shows when there is no gateway and `meta.onboarding_done`
+is unset; never rely on it for anything the dashboard needs, it is a guide.
+
 ### Pulling latest changes on the dashboard host
 
 The generated installers (`dashboard/static/eshu-gateway-install.sh` and

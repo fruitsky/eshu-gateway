@@ -53,6 +53,16 @@ else
   errors=$((errors+1))
 fi
 
+# First-run walkthrough: every step has copy, a live renderer and a card set.
+echo -n "  onboarding... "
+if onb_out=$(python3 scripts/check_onboarding.py 2>&1); then
+  echo "OK"
+else
+  echo "FAIL"
+  echo "$onb_out" | sed 's/^/    /'
+  errors=$((errors+1))
+fi
+
 echo ""
 if [ "$errors" -eq 0 ]; then
   echo "✅ All checks passed"

@@ -1442,7 +1442,7 @@ function ensureHudSky() {
   renderHudSky();
 }
 
-async function initDashboard() { ensureHudSky(); updateNotifyUI(); fetchVersion(); fetchRequests(); fetchCmdDescs(); fetchSuggestions(); refreshPasswordUI(); fetchFreezeStatus(); fetchFleetCommands(); fetchGateways(); fetchIntegrations(); loadSessionNames(); }
+async function initDashboard() { ensureHudSky(); updateNotifyUI(); fetchVersion(); fetchRequests(); fetchCmdDescs(); fetchSuggestions(); refreshPasswordUI(); fetchFreezeStatus(); fetchFleetCommands(); fetchGateways(); fetchIntegrations(); loadSessionNames(); maybeShowOnboarding(); }
 
 // ── Requests ─────────────────────────────────────────────────────────────
 let _requestSearchQuery = '';
@@ -2961,6 +2961,8 @@ document.addEventListener('keydown', function(e) {
   else if (e.key === 'ArrowUp' || e.key === 'k') { if (typing || onControl) return; moveQueueCursor(-1); e.preventDefault(); }
   else if (e.key === 'Enter') { if (typing || onControl) return; openQueueCursor(); }
   else if (e.key === 'Escape') {
+    var onbModal = document.getElementById('onboarding-modal');
+    if (onbModal && !onbModal.classList.contains('hidden')) { closeOnboarding(); return; }
     closeMobileSidebar();
     var om = document.getElementById('override-modal');
     if (om && !om.classList.contains('hidden')) { om.classList.add('hidden'); }
@@ -7259,3 +7261,273 @@ document.addEventListener('click', function (e) {
     if (sid) openSessionModal(sid);
   }
 });
+
+
+// ── First-run walkthrough ─────────────────────────────────────────────
+/* Content lives in ONB_STEPS / ONB_INTEGRATIONS below; the machinery is
+   generic. docs/FIRST_RUN.md explains how to change it and
+   scripts/check_onboarding.py validates the shape. */
+var ONB_STEPS = [
+  { id: 'key', label: 'Key', title: 'The key your agent holds',
+    lede: 'A pair of keys: the agent keeps one, the dashboard gets the other.',
+    render: onbStepKey },
+  { id: 'gateway', label: 'Gateway', title: 'A gateway to guard',
+    lede: 'One one-liner installs the policy gate on a host and starts its poller.',
+    render: onbStepGateway },
+  { id: 'agent', label: 'Agent', title: 'Let the agent in',
+    lede: 'Point the agent at its private key, then make the first request.',
+    render: onbStepAgent },
+  { id: 'integrations', label: 'Integrations', title: 'Beyond SSH',
+    lede: 'The same gate for your homelab APIs: reads run, writes wait for you.',
+    render: onbStepIntegrations }
+];
+
+var ONB_INTEGRATIONS = [
+  { name: 'Proxmox', kind: 'proxmox', url: 'https://proxmox.home.lan:8006/api2/json',
+    blurb: 'Nodes, VMs and containers. Reads are free; start, stop and reboot wait for your approval.',
+    tools: ['list nodes', 'vm status', 'start / stop'] },
+  { name: 'Home Assistant', kind: 'ha', url: 'https://homeassistant.home.lan/api',
+    blurb: 'Entities, states and services, with per-domain rules for what the agent may call.',
+    tools: ['list entities', 'get state', 'call service'] },
+  { name: 'Any REST API', kind: 'custom', url: 'https://…',
+    blurb: 'A generic read/write floor for everything else. Credentials stay in Eshu.',
+    tools: ['read', 'write'] }
+];
+
+var _onb = {
+  step: 0, state: null, token: '', gateways: 0, gatewayList: [],
+  keyValue: '', poll: null, busy: false, checked: false
+};
+
+async function maybeShowOnboarding() {
+  if (_onb.checked) return;
+  _onb.checked = true;
+  try {
+    var res = await authFetch('/api/onboarding');
+    if (!res.ok) return;
+    _onb.state = await res.json();
+    if (_onb.state.show) openOnboarding(_onb.state.key_configured ? 1 : 0);
+  } catch (e) { /* a missing walkthrough must never block the dashboard */ }
+}
+
+function openOnboarding(step) {
+  var m = document.getElementById('onboarding-modal');
+  if (!m) return;
+  _onb.step = Math.max(0, Math.min(step || 0, ONB_STEPS.length - 1));
+  _onb.token = '';
+  m.classList.remove('hidden');
+  m.removeAttribute('hidden');
+  document.body.classList.add('onb-open');
+  loadOnbKeys();
+  loadOnbGateways();
+  renderOnboarding();
+  setTimeout(function () { var c = m.querySelector('.onb-card'); if (c) c.focus(); }, 30);
+}
+
+function closeOnboarding() {
+  stopOnbPoll();
+  var m = document.getElementById('onboarding-modal');
+  if (m) { m.classList.add('hidden'); m.setAttribute('hidden', ''); }
+  document.body.classList.remove('onb-open');
+}
+
+async function skipOnboarding() {
+  try { await authFetch('/api/onboarding/done', { method: 'POST' }); } catch (e) {}
+  closeOnboarding();
+}
+
+async function finishOnboarding() {
+  try { await authFetch('/api/onboarding/done', { method: 'POST' }); } catch (e) {}
+  closeOnboarding();
+  showToast('The way is open', 'success');
+}
+
+function onbGo(i) { stopOnbPoll(); _onb.step = i; renderOnboarding(); }
+function onbBack() { if (_onb.step > 0) onbGo(_onb.step - 1); }
+function onbNext() {
+  if (_onb.step >= ONB_STEPS.length - 1) finishOnboarding();
+  else onbGo(_onb.step + 1);
+}
+
+function renderOnboarding() {
+  var s = ONB_STEPS[_onb.step];
+  var title = document.getElementById('onb-title');
+  var lede = document.getElementById('onb-lede');
+  var count = document.getElementById('onb-count');
+  var rail = document.getElementById('onb-rail');
+  var body = document.getElementById('onb-body');
+  if (!s || !title || !body) return;
+  title.textContent = s.title;
+  lede.textContent = s.lede;
+  count.textContent = (_onb.step + 1) + ' / ' + ONB_STEPS.length;
+  rail.innerHTML = ONB_STEPS.map(function (st, i) {
+    var cls = i === _onb.step ? 'active' : (i < _onb.step ? 'done' : '');
+    return '<button class="onb-seg ' + cls + '" onclick="onbGo(' + i + ')"' +
+      (i === _onb.step ? ' aria-current="step"' : '') + '>' +
+      '<span class="onb-seg-line"></span>' +
+      '<span class="onb-seg-n">0' + (i + 1) + '</span>' +
+      '<span class="onb-seg-l">' + escapeHtml(st.label) + '</span></button>';
+  }).join('');
+  body.innerHTML = s.render();
+  var back = document.getElementById('onb-back');
+  var next = document.getElementById('onb-next');
+  if (back) back.classList.toggle('hidden', _onb.step === 0);
+  if (next) next.textContent = _onb.step === ONB_STEPS.length - 1 ? 'Finish' : 'Continue';
+  body.classList.remove('onb-enter');
+  void body.offsetWidth;
+  body.classList.add('onb-enter');
+}
+
+function onbCmd(text) {
+  return '<div class="onb-cmd"><code>' + escapeHtml(text) + '</code>' +
+    '<button class="onb-copy" data-copy="' + encodeURIComponent(text) + '" onclick="onbCopy(this)">Copy</button></div>';
+}
+
+function onbCopy(el) {
+  var text = decodeURIComponent(el.getAttribute('data-copy') || '');
+  if (!text) return;
+  copyToClipboard(text, true);
+  var old = el.textContent;
+  el.textContent = 'Copied';
+  el.classList.add('onb-copied');
+  setTimeout(function () { el.textContent = old; el.classList.remove('onb-copied'); }, 1400);
+}
+
+async function loadOnbKeys() {
+  try {
+    var r = await authFetch('/api/enroll/keys');
+    if (!r.ok) return;
+    var d = await r.json();
+    _onb.keyValue = d.eshu_ssh_key || '';
+    var inp = document.getElementById('onb-key-input');
+    if (inp && _onb.keyValue) inp.value = _onb.keyValue;
+  } catch (e) {}
+}
+
+async function loadOnbGateways() {
+  try {
+    var r = await authFetch('/api/gateways');
+    if (!r.ok) return;
+    var g = await r.json();
+    _onb.gatewayList = Array.isArray(g) ? g : [];
+    _onb.gateways = _onb.gatewayList.length;
+  } catch (e) {}
+}
+
+function onbStepKey() {
+  var saved = _onb.state && _onb.state.key_configured;
+  return '<p class="onb-para">Run this on the machine where your agent runs. The <b>private</b> key stays there; only the <b>.pub</b> file comes here.</p>' +
+    onbCmd('ssh-keygen -t ed25519 -f ~/.ssh/eshu_gateway -C "agent@eshu"') +
+    '<div class="onb-row">' +
+      '<input id="onb-key-input" class="onb-input" spellcheck="false" autocomplete="off" placeholder="ssh-ed25519 AAAA… agent@eshu" value="' + escapeHtml(_onb.keyValue || '') + '">' +
+      '<button class="btn btn-xs" onclick="onbSaveKey()">Save key</button>' +
+    '</div>' +
+    (saved ? '<div class="onb-ok"><span class="onb-check">✓</span> Public key saved</div>' : '') +
+    '<p class="onb-note">Only the public half is stored — the dashboard never sees the private key.</p>';
+}
+
+async function onbSaveKey() {
+  var inp = document.getElementById('onb-key-input');
+  var key = inp ? (inp.value || '').trim() : '';
+  if (!key || key.indexOf('ssh-') !== 0 || key.length < 40) {
+    showToast('Paste a public key (ssh-ed25519 …)', 'error');
+    return;
+  }
+  try {
+    var r = await authFetch('/api/enroll/keys', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ eshu_key: key })
+    });
+    if (!r.ok) throw new Error();
+    _onb.keyValue = key;
+    if (!_onb.state) _onb.state = {};
+    _onb.state.key_configured = true;
+    renderOnboarding();
+    showToast('Public key saved', 'success');
+  } catch (e) { showToast('Could not save the key', 'error'); }
+}
+
+function onbStepGateway() {
+  var enrolled = _onb.gateways > 0;
+  var out = '<p class="onb-para">Generate a one-time token, then run the command on the host you want to protect. It installs the gate and starts the poller.</p>';
+  if (enrolled) {
+    var names = _onb.gatewayList.slice(0, 3).map(function (g) { return g.hostname || g.ip; }).join(', ');
+    out += '<div class="onb-ok"><span class="onb-check">✓</span> ' + escapeHtml(names) + ' enrolled</div>';
+  }
+  if (!_onb.token) {
+    if (!enrolled) out += '<div class="onb-row"><button class="btn btn-xs" onclick="onbGenerateToken()">Generate token</button></div>';
+    return out;
+  }
+  var cmd = 'curl -s "' + window.location.origin + '/api/enroll?token=' + _onb.token + '" | bash';
+  out += onbCmd(cmd) +
+    '<div class="onb-status ' + (enrolled ? 'ok' : 'wait') + '"><span class="onb-dot"></span>' +
+      (enrolled ? 'Gateway enrolled' : 'Waiting for the gateway to check in…') + '</div>' +
+    '<p class="onb-note">The token is single-use and expires in 30 minutes. Run the command with sudo.</p>';
+  return out;
+}
+
+async function onbGenerateToken() {
+  if (_onb.busy) return;
+  _onb.busy = true;
+  try {
+    var r = await authFetch('/api/enroll/generate', { method: 'POST' });
+    var d = await r.json();
+    _onb.token = d.token || '';
+    renderOnboarding();
+    startOnbPoll();
+  } catch (e) { showToast('Could not generate a token', 'error'); }
+  _onb.busy = false;
+}
+
+function startOnbPoll() {
+  stopOnbPoll();
+  _onb.poll = setInterval(async function () {
+    try {
+      var r = await authFetch('/api/gateways');
+      var g = await r.json();
+      if (Array.isArray(g) && g.length) {
+        _onb.gatewayList = g;
+        _onb.gateways = g.length;
+        stopOnbPoll();
+        if (_onb.step === 1) renderOnboarding();
+      }
+    } catch (e) {}
+  }, 3000);
+}
+
+function stopOnbPoll() {
+  if (_onb.poll) { clearInterval(_onb.poll); _onb.poll = null; }
+}
+
+function onbStepAgent() {
+  var g = _onb.gatewayList[0] || {};
+  var host = g.hostname || g.ip || '<gateway>';
+  var cfg = 'Host eshu-*\n  User eshu-gateway\n  IdentityFile ~/.ssh/eshu_gateway\n  IdentitiesOnly yes';
+  return '<p class="onb-para">The private key lives on the agent\'s machine — owned by its user, <code>chmod 600</code>. Point the agent at it once:</p>' +
+    onbCmd(cfg) +
+    '<p class="onb-sub">Then ask the agent to run its first command:</p>' +
+    onbCmd('ssh eshu-gateway@' + host + ' "uptime"') +
+    '<p class="onb-note">Anything the policy does not clear lands in your queue for approve or deny. Nothing runs by accident.</p>';
+}
+
+function onbStepIntegrations() {
+  return '<p class="onb-para">Eshu can gate homelab APIs over MCP as well — same audit, same approvals, applied to <b>Integrations</b>.</p>' +
+    '<div class="onb-cards">' + ONB_INTEGRATIONS.map(onbIntegrationCard).join('') + '</div>' +
+    '<div class="onb-row"><button class="btn btn-muted btn-xs" onclick="onbOpenIntegrations()">Open Integrations</button>' +
+      '<span class="onb-note">Add one, seed its tools, then create an agent token.</span></div>';
+}
+
+function onbIntegrationCard(c) {
+  return '<div class="onb-int">' +
+    '<div class="onb-int-head"><span class="onb-int-name">' + escapeHtml(c.name) + '</span>' +
+      '<span class="onb-int-kind">' + escapeHtml(c.kind) + '</span></div>' +
+    '<div class="onb-int-url">' + escapeHtml(c.url) + '</div>' +
+    '<div class="onb-int-blurb">' + escapeHtml(c.blurb) + '</div>' +
+    '<div class="onb-int-tools">' + c.tools.map(function (t) { return '<span>' + escapeHtml(t) + '</span>'; }).join('') + '</div>' +
+  '</div>';
+}
+
+function onbOpenIntegrations() {
+  closeOnboarding();
+  switchView('integrations');
+}
