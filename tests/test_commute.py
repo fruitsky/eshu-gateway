@@ -456,7 +456,9 @@ class TestProfileEndpoints:
         assert response.status_code == 403
 
     def test_unknown_profile_404(self, auth_client):
-        assert auth_client.get("/api/commute/profile/nobody").status_code == 404
+        response = auth_client.get("/api/commute/profile/nobody")
+        assert response.status_code == 404
+        assert response.json() == {"detail": "Commute profile not found"}
 
 
 class TestDueEndpoint:
