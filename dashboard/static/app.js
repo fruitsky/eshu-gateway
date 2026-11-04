@@ -3184,7 +3184,10 @@ async function handleDenyBlocklist() {
 function dismissDenyBar() { document.getElementById('deny-blacklist-bar').classList.add('hidden'); lastDeniedCmd = ''; }
 
 // ── Table ────────────────────────────────────────────────────────────────
-function escapeHtml(str) { if (!str) return ''; return str.replace(/&/g, '&').replace(/</g, '<').replace(/>/g, '>').replace(/"/g, '"').replace(/'/g, '&#039;'); }
+/* One escaper. This used to be a second, identity implementation whose
+   replacement strings had been decoded in place — every agent-supplied
+   command, hostname and label was inserted into innerHTML unescaped. */
+function escapeHtml(str) { return esc(str); }
 function formatTime(epoch) { return new Date(epoch * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }); }
 function formatDateTime(epoch) { return new Date(epoch * 1000).toLocaleString('en-US', { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' }); }
 function formatAgo(seconds) { if (seconds < 0) seconds = 0; if (seconds < 60) return seconds + 's ago'; if (seconds < 3600) return Math.floor(seconds / 60) + 'm ago'; if (seconds < 86400) return Math.floor(seconds / 3600) + 'h ago'; return Math.floor(seconds / 86400) + 'd ago'; }
