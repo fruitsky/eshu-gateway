@@ -54,6 +54,29 @@ def current_session_id(default=''):
     return _current_session.get() or default
 
 
+# Where the session id on an audited row came from: 'caller' (an explicit
+# session_id argument), 'inherited' (the id session_begin bound to this
+# connection) or 'transport' (the mcp-… fallback). Coverage counts only
+# 'caller', so an inherited id never looks like the agent complied.
+_current_session_source = contextvars.ContextVar(
+    'eshu_current_session_source', default='')
+
+
+def set_current_session_source(source):
+    return _current_session_source.set(source or '')
+
+
+def reset_current_session_source(token):
+    try:
+        _current_session_source.reset(token)
+    except (LookupError, ValueError):
+        pass
+
+
+def current_session_source(default=''):
+    return _current_session_source.get() or default
+
+
 # The last caller-supplied session id seen on each MCP transport connection.
 # `session_summary()` with no argument should describe the work the agent just
 # did, not the empty transport bucket. Bounded: a dead connection's entry is
@@ -75,3 +98,8 @@ def remember_session_for_transport(session_id, transport=None):
 def last_session_for_transport(transport=None):
     transport = transport or _current_session.get()
     return _last_session_by_transport.get(transport, '') if transport else ''
+
+
+def reset_session_memory():
+    """Forget every connection's remembered session (tests, fresh start)."""
+    _last_session_by_transport.clear()

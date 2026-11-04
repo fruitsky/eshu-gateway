@@ -42,6 +42,8 @@ var _ccSelectedId = null;
 var _ccFilter = 'all';
 var _ccSelectedIds = new Set();
 var _activeSessionSid = null;
+var _activeSessionHost = '';
+var _activeSessionHostIp = '';
 
 function openContextPanel(reqId) {
   var panel = document.getElementById('cc-context');
@@ -110,15 +112,31 @@ function openContextPanel(reqId) {
   document.getElementById('ctx-status').textContent = req.status || '—';
   document.getElementById('ctx-time').textContent = req.created_at ? formatTime(req.created_at) : '—';
 
-  // Risk assessment
+  // Risk assessment + decoded preview for encoded wrappers
   var riskEl = document.getElementById('ctx-risk');
+  var decoded = decodedCmdHtml(req);
   if (req.risk || req.anomaly) {
     var html = '';
     if (req.risk) html += '<div class="ctx-meta-item" style="color:var(--status-warning);margin-bottom:4px"> ' + escapeHtml(req.risk) + '</div>';
     if (req.anomaly) html += '<div class="ctx-meta-item" style="color:var(--danger)"> ' + escapeHtml(req.anomaly) + '</div>';
-    riskEl.innerHTML = html;
+    riskEl.innerHTML = html + decoded;
+  } else if (decoded) {
+    riskEl.innerHTML = decoded;
   } else {
     riskEl.innerHTML = '<span class="ctx-meta-item" style="color:var(--text-muted)">No flags</span>';
+  }
+  // History rows carry only the `encoded` flag (decoding every row on every 3s
+  // poll would be megabytes). Fetch the preview for the open panel on demand.
+  if (req.encoded && !req.decoded_command) {
+    authFetch('/api/requests/' + req.id + '/decoded').then(function (res) {
+      return res.json();
+    }).then(function (d) {
+      if (!d || !d.decoded_command) return;
+      req.decoded_command = d.decoded_command;
+      req.decoded_truncated = d.decoded_truncated;
+      var el = document.getElementById('ctx-risk');
+      if (el) el.innerHTML += decodedCmdHtml(req);
+    }).catch(function () {});
   }
 
   // Action buttons
@@ -441,7 +459,19 @@ async function switchView(target) {
   if (target === 'controls') { fetchFreezeStatus(); fetchGateways(); fetchPolicies(); fetchPolicyChanges(); initWebFetchPolicyPanel(); }
   if (target === 'fleet') { fetchFleetCommands(); }
   if (target === 'integrations') { fetchIntegrations(); }
-  if (target === 'settings') { refreshPasswordUI(); fetchNotifyConfig(); fetchDevTools(); if (_devToolsEnabled) { fetchDevStatus(); fetchDevGateways(); fetchFeatureFlags(); } }
+  if (target === 'settings') {
+    refreshPasswordUI();
+    fetchNotifyConfig();
+    // fetchDevTools() is async; wait for it before deciding whether the dev
+    // widgets (and the feature-flag list) should load. Without this, the
+    // first visit to Settings left the list on "Loading...".
+    fetchDevTools().then(function () {
+      if (_devToolsEnabled) {
+        fetchDevStatus();
+        fetchDevGateways().then(fetchFeatureFlags);
+      }
+    });
+  }
   if (target === 'logs') { fetchAuditLog(); }
 }
 
@@ -493,7 +523,10 @@ async function toggleDevTools() {
   try {
     await authFetch('/api/settings/dev-tools', { method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({enabled: _devToolsEnabled}) });
     renderDevTools();
-    if (_devToolsEnabled) { fetchDevStatus(); fetchDevGateways(); fetchFeatureFlags(); }
+    if (_devToolsEnabled) {
+      fetchDevStatus();
+      fetchDevGateways().then(fetchFeatureFlags);
+    }
     showToast(_devToolsEnabled ? 'Development tools enabled' : 'Development tools disabled', 'success');
   } catch(e) {
     _devToolsEnabled = !_devToolsEnabled;
@@ -502,33 +535,67 @@ async function toggleDevTools() {
 }
 
 // ── Dev Mode Features ────────────────────────────────────────────────
+// A short, plain-English name/help for the flags that operators are most
+// likely to touch. The technical name stays visible beside the label.
+const FLAG_META = {
+  require_sessions: {
+    label: 'Require named sessions',
+    help: 'Agents must call session_begin(goal=..., session_id=...) and use the signed id on every SSH command and MCP call. Off by default; existing agents keep working until you enable it.'
+  }
+};
+
+function flagStateText(on, scope) {
+  if (!on) return 'Off — no enforcement.';
+  return scope === 'prod'
+    ? 'On for every gateway and all MCP calls.'
+    : 'On for dev-mode gateways and all MCP calls.';
+}
+
 async function fetchFeatureFlags() {
   try {
     const res = await fetch('/api/feature-flags'); const flags = await res.json();
     const container = document.getElementById('feature-flags-list');
     if (!container) return;
     let html = '';
+    var hasDev = (_devGateways || []).length > 0;
     Object.entries(flags).forEach(function(e) {
       var name = e[0], info = e[1], on = info.enabled, sc = info.scope || 'dev';
+      var meta = FLAG_META[name] || {};
+      var label = meta.label || name;
+      var desc = meta.help || info.description || '';
       var state = 'off';
       if (on && sc === 'dev') state = 'dev';
       if (on && sc === 'prod') state = 'prod';
       html += '<div class="flag-row">' +
-        '<div><span class="text-sm text-main">' + escapeHtml(name) + '</span><p class="text-xs text-muted">' + escapeHtml(info.description) + '</p></div>' +
+        '<div class="flag-copy">' +
+          '<div><span class="text-sm text-main">' + escapeHtml(label) + '</span>' +
+            (meta.label ? ' <code class="text-xs text-muted">' + escapeHtml(name) + '</code>' : '') +
+          '</div>' +
+          '<p class="text-xs text-muted">' + escapeHtml(desc) + '</p>' +
+          '<p class="text-xs text-muted flag-state">' + escapeHtml(flagStateText(on, sc)) + '</p>' +
+        '</div>' +
         '<div class="seg-group">' +
-          renderSeg('off', state, name) +
-          renderSeg('dev', state, name) +
-          renderSeg('prod', state, name) +
+          renderSeg('off', state, name, false) +
+          renderSeg('dev', state, name, !hasDev) +
+          renderSeg('prod', state, name, false) +
         '</div></div>';
     });
     container.innerHTML = html || '<p class="text-muted">No feature flags configured.</p>';
   } catch(e) {}
 }
 
-function renderSeg(val, current, name) {
+function renderSeg(val, current, name, disabled) {
   var active = val === current;
   var label = val === 'off' ? 'Off' : val === 'dev' ? 'Dev' : 'Prod';
-  return '<button onclick="setFeatureFlagState(\'' + name + '\',\'' + val + '\')" class="seg-btn' + (active ? ' active ' + val : '') + '">' + label + '</button>';
+  var title = val === 'off'
+    ? 'No enforcement'
+    : val === 'dev'
+      ? 'Dev-mode gateways and all MCP calls'
+      : 'Every gateway and all MCP calls';
+  if (disabled && !active) title = 'No dev gateways configured';
+  return '<button onclick="setFeatureFlagState(\'' + name + '\',\'' + val + '\')" ' +
+    'class="seg-btn' + (active ? ' active ' + val : '') + (disabled && !active ? ' seg-disabled' : '') + '" ' +
+    (disabled && !active ? 'disabled ' : '') + 'title="' + escapeHtml(title) + '">' + label + '</button>';
 }
 
 async function setFeatureFlagState(name, state) {
@@ -1442,7 +1509,7 @@ function ensureHudSky() {
   renderHudSky();
 }
 
-async function initDashboard() { ensureHudSky(); updateNotifyUI(); fetchVersion(); fetchRequests(); fetchCmdDescs(); fetchSuggestions(); refreshPasswordUI(); fetchFreezeStatus(); fetchFleetCommands(); fetchGateways(); fetchIntegrations(); loadSessionNames(); maybeShowOnboarding(); }
+async function initDashboard() { ensureHudSky(); updateNotifyUI(); fetchVersion(); fetchRequests(); fetchCmdDescs(); fetchSuggestions(); refreshPasswordUI(); fetchFreezeStatus(); fetchFleetCommands(); fetchGateways(); fetchIntegrations(); loadSessionNames(); refreshSessionOverrides(); maybeShowOnboarding(); }
 
 // ── Requests ─────────────────────────────────────────────────────────────
 let _requestSearchQuery = '';
@@ -2471,6 +2538,7 @@ function smSshDetailCard(r) {
       '<span class="sm-call-kind ssh">SSH</span>' +
       '<span class="sm-mcp-time">' + escapeHtml(smFmtTime(r.created_at)) + '</span></div>' +
     '<pre class="sm-call-json cmd">' + escapeHtml(r.command || '') + '</pre>' +
+    (r.encoded ? decodedCmdHtml(r) : '') +
     (r.risk ? '<div class="sm-call-reason">\u26a0 ' + escapeHtml(r.risk) + '</div>' : '') +
     (r.anomaly ? '<div class="sm-call-reason" style="color:var(--danger)">\u2605 ' + escapeHtml(r.anomaly) + '</div>' : '') +
     (meta.length ? '<div class="sm-mcp-meta">' + escapeHtml(meta.join(' \u00b7 ')) + '</div>' : '') +
@@ -2526,6 +2594,8 @@ async function openSessionModal(sid) {
   cmdsEl.innerHTML = '<div class="sm-mcp-none">loading session\u2026</div>';
   modal.classList.remove('hidden');
   _activeSessionSid = sid;
+  var idEl = document.getElementById('sm-id');
+  if (idEl) idEl.textContent = sid;
 
   // One-stop detail: SSH commands + proxied API calls (reason, masked args,
   // response summary, approval decision) in a single request.
@@ -2546,6 +2616,8 @@ async function openSessionModal(sid) {
   ssh.forEach(function (r) { var lr = reqById[r.id]; if (lr) { r.risk = lr.risk; r.anomaly = lr.anomaly; } });
 
   var host = ssh.length ? (ssh[0].hostname || ssh[0].target_ip || '') : '';
+  _activeSessionHost = host;
+  _activeSessionHostIp = ssh.length ? (ssh[0].target_ip || '') : '';
   var pending = ssh.filter(function (r) { return r.status === 'pending' && r.ttl > 0; }).length;
   var approved = mcp.filter(function (c) { return c.approval === 'approved'; }).length;
   var denied = mcp.filter(function (c) { return c.approval === 'denied'; }).length;
@@ -2556,6 +2628,12 @@ async function openSessionModal(sid) {
   }
   if (summary.agent) bits.push(escapeHtml(summary.agent));
   if (host) bits.push(escapeHtml(host));
+  var sessOv = _activeSessionOverrideFor(sid);
+  if (sessOv) {
+    bits.push('<span class="sm-pending" title="' + escapeHtml(sessOv.reason || '') + '">session override ' +
+      sessionOverrideClock(sessOv) + '</span>' +
+      ' <button class="btn btn-muted btn-xs" onclick="cancelSessionOverride(' + sessOv.id + ')">Cancel</button>');
+  }
   bits.push(ssh.length + ' SSH');
   bits.push(mcp.length + ' MCP');
   if (pending) bits.push('<span class="sm-pending">' + pending + ' pending</span>');
@@ -2589,6 +2667,13 @@ async function openSessionModal(sid) {
   // Save on Enter (prevent newline)
   nameEl.onkeydown = function(e) { if (e.key === 'Enter') { e.preventDefault(); nameEl.blur(); } };
   descEl.onkeydown = function(e) { if (e.key === 'Enter') { e.preventDefault(); descEl.blur(); } };
+}
+
+/* The list shows a short id for compactness; the modal is where the exact id
+   is read and copied (an adopted chat id can be longer than the 12-hex mint). */
+function copySessionId() {
+  if (!_activeSessionSid) return;
+  copyToClipboard(_activeSessionSid);
 }
 
 /* Filter History to one session. The modal is where a session is read, so it
@@ -3062,6 +3147,7 @@ function renderJitItem(item) {
       var riskHtml = '';
       if (r.risk) riskHtml += '<div style="color:var(--status-warning);font-size:11px;margin-top:4px"> ' + escapeHtml(r.risk) + '</div>';
       if (r.anomaly) riskHtml += '<div style="color:var(--danger);font-size:11px;margin-top:4px"> ' + escapeHtml(r.anomaly) + '</div>';
+      riskHtml += decodedCmdHtml(r);
       return '<div class="jit-ticket' + (r.anomaly ? ' urgent' : '') + '" data-id="' + r.id + '" onclick="openContextPanel(\'' + r.id + '\')">' +
         '<button type="button" class="jit-check" role="checkbox" aria-checked="false" aria-label="Select request" onclick="event.stopPropagation();toggleBulkSelect(\'' + r.id + '\',event)"></button>' +
         '<div class="jit-body" style="min-width:0">' +
@@ -3287,6 +3373,7 @@ function renderTable() {
     } else if (isPP && isExpired) badge = '<span class="badge badge-expired">Expired</span>';
     else if (req.status === 'consumed') badge = '<span class="badge badge-consumed">Ticket Claimed</span>';
     else if (req.status === 'blocked') badge = '<span class="badge badge-blocked">Blocked</span>';
+    else if (req.status === 'session-required') badge = '<span class="badge badge-blocked" title="No minted Session id/signature">Session required</span>';
     else if (req.status === 'denied') badge = '<span class="badge badge-denied">Denied</span>';
     else if (req.status === 'auto-approved') badge = '<span class="badge badge-auto">Auto-Approved</span>';
     else if (req.status === 'window-approved') badge = '<span class="badge badge-window">Window</span>';
@@ -3297,15 +3384,28 @@ function renderTable() {
     if (req.status === 'pending' && !isExpired) {
       actions = '<button onclick="handleAction(' + req.id + ', \'approve\')" class="btn btn-approve btn-xs mr-1">Approve</button>' +
         '<button onclick="handleAction(' + req.id + ', \'deny\')" class="btn btn-deny btn-xs">Deny</button>';
+      if (req.session_id && req.session_id !== 'unknown') {
+        actions += ' <button onclick="event.stopPropagation();openSessionOverrideModal(\'' +
+          escapeHtml(req.session_id) + '\',\'' + escapeHtml(req.target_ip || '') + '\',' + req.id + ')" ' +
+          'class="btn btn-muted btn-xs" title="Auto-approve this session on this host for a bounded window">' +
+          'Override session</button>';
+      }
     } else if (req.status === 'frozen') {
       actions = '<span class="chip chip-actions chip-frozen" title="Blocked by Emergency Freeze — the fleet is rejecting all commands until unfrozen.">' +
         'Frozen</span>';
     } else if (req.status === 'fleet-run') {
       actions = '<span class="chip chip-actions chip-fleet-run" title="Executed via Fleet Run — see the Fleet Run tab for per-gateway output.">' +
         'Fleet Run</span>';
-    } else if (req.reason === 'override') {
-      actions = '<span class="chip chip-actions chip-override" title="Auto-approved via Override Mode — every JIT is auto-approved while active">' +
-        'Override</span>';
+    } else if (req.reason === 'override' || String(req.reason || '').indexOf('session-override:') === 0) {
+      var _isSessOv = String(req.reason || '').indexOf('session-override:') === 0;
+      actions = '<span class="chip chip-actions chip-override" title="' +
+        (_isSessOv
+          ? 'Auto-approved via a session override — only this session, on the granted host'
+          : 'Auto-approved via Override Mode — every JIT is auto-approved while active') +
+        '">' + (_isSessOv ? 'Session override' : 'Override') + '</span>';
+    } else if (req.status === 'session-required') {
+      actions = '<span class="chip chip-actions" title="The gateway refused this command because no minted Session id/signature was supplied">' +
+        'Session required</span>';
     } else if (req.status === 'blocked' && isHardcoreBlocked(req.command)) {
       actions = '<span class="chip chip-actions chip-block-core" title="Blocked by a shipped Eshu safety pattern — manage in Controls → Blocklist">' +
         'Block by Core</span>';
@@ -3329,6 +3429,9 @@ function renderTable() {
     const gapTitle = gap ? ' title="' + escapeHtml(formatGapTooltip(gap)) + '"' : '';
     const idDisplay = gap ? ' #' + String(req.id).padStart(6, '0') : '#' + String(req.id).padStart(6, '0');
     const escapedCmd = escapeHtml(req.command);
+    const decodedChip = req.encoded
+      ? '<span class="decoded-badge" title="Encoded payload — open for the decoded command">decoded</span>'
+      : '';
     const gwPillHtml = gwPill(req.hostname || 'N/A');
     const _sid = req.session_id || '';
     const sCell = (_sid && _sid !== 'unknown')
@@ -3345,7 +3448,7 @@ function renderTable() {
       '<td class="' + idClass + '"' + gapTitle + '>' + idDisplay + '</td>' +
       '<td class="text-muted text-xs">' + formatTime(req.created_at) + '</td>' +
       '<td>' + gatewayCell + '</td>' +
-      '<td class="cell-cmd"><div class="flex items-center gap-1">' + riskHtml + anomalyHtml + '<code class="cmd-code" title="' + escapedCmd + '">' + escapedCmd + '</code><button class="js-copy-cmd flex-shrink-0 text-xs opacity-30 hover:opacity-80 px-1 py-0.5 rounded transition-opacity text-muted" data-cmd="' + encodeURIComponent(req.command) + '" title="Copy"></button></div>' +
+      '<td class="cell-cmd"><div class="flex items-center gap-1">' + riskHtml + anomalyHtml + '<code class="cmd-code" title="' + escapedCmd + '">' + escapedCmd + '</code><button class="js-copy-cmd flex-shrink-0 text-xs opacity-30 hover:opacity-80 px-1 py-0.5 rounded transition-opacity text-muted" data-cmd="' + encodeURIComponent(req.command) + '" title="Copy"></button>' + decodedChip + '</div>' +
         (function() {
           var _desc = describeCmd(req.command);
           if (!_desc) return '';
@@ -3406,6 +3509,7 @@ function decrementTimers() {
   });
   checkOverrideBanner();
   tickGatewayTableCountdowns();
+  renderSessionOverrideBanner();
 }
 
 // ── Core blocklist client-side check ────────────────────────────────────
@@ -3616,6 +3720,8 @@ function handlePolicyAction(selectEl, encodedCmd) { const action = selectEl.valu
 // ── Gateways ─────────────────────────────────────────────────────────────
 var _gatewaysData = [];
 var _overrideExpiries = {}; // ip -> epoch seconds (client-side)
+var _sessionOverrides = []; // rows from /api/session-overrides (active first)
+var _sessionOverrideCtx = null; // {session_id, host, hostname} for the modal
 var _uninstallingIps = {};  // ip -> true while an uninstall is in flight (row state)
 var _uninstallIp = null;    // ip currently being uninstalled (for the progress modal)
 let _removeIp = null;       // ip in the "Remove Gateway" modal
@@ -3649,6 +3755,19 @@ function _describeSingle(cmd) {
     }
   }
   return _cmdDescs[best] || '';
+}
+
+/* Encoded wrappers (base64/eval) are forced to JIT; show the decoded payload
+   beside the wrapper so the operator can read what will actually run. */
+function decodedCmdHtml(r) {
+  if (!r || !r.encoded) return '';
+  if (!r.decoded_command) {
+    return '<div class="decoded-wrap"><span class="decoded-badge">encoded</span> ' +
+      '<span class="text-xs text-muted">decoded preview unavailable</span></div>';
+  }
+  var label = r.decoded_truncated ? 'decoded \u00b7 truncated' : 'decoded';
+  return '<div class="decoded-wrap"><span class="decoded-badge">' + label + '</span>' +
+    '<pre class="decoded-cmd">' + escapeHtml(r.decoded_command) + '</pre></div>';
 }
 
 function describeCmd(cmd) {
@@ -3889,6 +4008,146 @@ async function cancelOverride(ip) {
     if (data.status === 'ok') {
       showToast('Override cancelled for ' + ip, 'success');
       fetchGateways();
+    } else { showToast('Failed: ' + (data.detail || 'unknown'), 'error'); }
+  } catch(e) { showToast('Error: ' + e.message, 'error'); }
+}
+
+// ── Session Override (narrower than the per-gateway one) ─────────────────
+function sessionLabel(sid) {
+  var meta = (_sessionNames || {})[sid] || {};
+  return meta.name || sid.substring(0, 8);
+}
+
+function sessionOverrideClock(ov) {
+  var rem = Math.max(0, (ov._clientUntil || 0) - Math.floor(Date.now() / 1000));
+  var mins = String(Math.floor(rem / 60)).padStart(2, '0');
+  var secs = String(rem % 60).padStart(2, '0');
+  return mins + ':' + secs;
+}
+
+function _activeSessionOverrideFor(sid) {
+  var now = Math.floor(Date.now() / 1000);
+  var matches = (_sessionOverrides || []).filter(function(o) {
+    return o.active !== false && o.session_id === sid && o._clientUntil > now;
+  });
+  if (!matches.length) return null;
+  // Exact-host grants beat any-host, mirroring the server's resolution.
+  matches.sort(function(a, b) { return (a.target_ip ? 0 : 1) - (b.target_ip ? 0 : 1); });
+  return matches[0];
+}
+
+async function refreshSessionOverrides() {
+  if (!document.getElementById('session-override-banner')) return;
+  try {
+    var res = await authFetch('/api/session-overrides');
+    if (!res.ok) return;
+    var data = await res.json();
+    var now = Math.floor(Date.now() / 1000);
+    var skew = (data.now || now) - now;
+    _sessionOverrides = (data.overrides || []).map(function(o) {
+      o._clientUntil = now + (o.remaining || 0) + skew;
+      return o;
+    });
+    renderSessionOverrideBanner();
+  } catch (e) { /* keep the last known state */ }
+}
+
+function renderSessionOverrideBanner() {
+  var banner = document.getElementById('session-override-banner');
+  var text = document.getElementById('session-override-banner-text');
+  if (!banner || !text) return;
+  var now = Math.floor(Date.now() / 1000);
+  var active = (_sessionOverrides || []).filter(function(o) {
+    return o.active !== false && o._clientUntil > now;
+  });
+  if (!active.length) {
+    banner.classList.add('hidden');
+    text.innerHTML = '';
+    return;
+  }
+  banner.classList.remove('hidden');
+  text.innerHTML = 'Session Override \u2014 ' + active.map(function(o) {
+    var scope = o.target_ip ? o.target_ip : 'any host';
+    return '<span class="session-ovr-item">' + escapeHtml(sessionLabel(o.session_id)) +
+      ' \u00b7 ' + escapeHtml(scope) + ' (' + sessionOverrideClock(o) + ')' +
+      ' <button class="btn btn-xs btn-on-banner" onclick="cancelSessionOverride(' + o.id + ')">Cancel</button></span>';
+  }).join(' <span class="session-ovr-sep">\u00b7</span> ');
+}
+
+function openSessionOverrideModal(sid, ip, reqId) {
+  sid = sid || _activeSessionSid;
+  if (!sid) return;
+  if (ip === undefined) ip = _activeSessionHostIp;
+  ip = ip || '';
+  var hostname = '';
+  var gw = (_gatewaysData || []).find(function(g) { return g.ip === ip; });
+  if (gw) hostname = gw.hostname;
+  _sessionOverrideCtx = { session_id: sid, host: ip, hostname: hostname,
+                          request_id: reqId || null };
+  document.getElementById('session-override-modal-session').textContent =
+    sessionLabel(sid) + ' (' + sid + ')';
+  document.getElementById('session-override-any-host').checked = !ip;
+  document.getElementById('session-override-reason').value = '';
+  document.getElementById('session-override-minutes').value = '30';
+  syncSessionOverrideHost();
+  document.getElementById('session-override-modal').classList.remove('hidden');
+  document.getElementById('session-override-reason').focus();
+}
+
+function syncSessionOverrideHost() {
+  var any = document.getElementById('session-override-any-host').checked;
+  var ctx = _sessionOverrideCtx || {};
+  var el = document.getElementById('session-override-modal-host');
+  if (any) { el.textContent = 'Any host in this session'; return; }
+  el.textContent = ctx.hostname
+    ? ctx.hostname + ' (' + ctx.host + ')'
+    : (ctx.host || 'No host recorded — tick "Any host"');
+}
+
+function closeSessionOverrideModal() {
+  document.getElementById('session-override-modal').classList.add('hidden');
+}
+
+async function confirmSessionOverride() {
+  var ctx = _sessionOverrideCtx;
+  if (!ctx) return;
+  var reason = document.getElementById('session-override-reason').value.trim();
+  var minutes = parseInt(document.getElementById('session-override-minutes').value);
+  var any = document.getElementById('session-override-any-host').checked;
+  if (!reason) { document.getElementById('session-override-reason').focus(); return; }
+  if (!any && !ctx.host) { showToast('Choose a host or tick "Any host"', 'error'); return; }
+  var btn = document.getElementById('session-override-start-btn');
+  btn.disabled = true; btn.textContent = 'Starting...';
+  try {
+    var res = await authFetch('/api/session-overrides', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({session_id: ctx.session_id,
+                            target_ip: any ? '' : ctx.host,
+                            minutes: minutes, reason: reason})
+    });
+    var data = await res.json();
+    if (data.status === 'ok') {
+      closeSessionOverrideModal();
+      showToast('Session override started', 'success');
+      await refreshSessionOverrides();
+      // Granting from a pending row should also clear that row — otherwise
+      // the operator grants the bypass and still has to approve by hand.
+      if (ctx.request_id) { await handleAction(ctx.request_id, 'approve'); }
+      else { fetchRequests(); }
+    } else { showToast('Failed: ' + (data.detail || 'unknown'), 'error'); }
+  } catch(e) { showToast('Error: ' + e.message, 'error'); }
+  btn.disabled = false; btn.textContent = 'Start Session Override';
+}
+
+async function cancelSessionOverride(id) {
+  if (!(await customConfirm('Cancel this session override? JIT commands in that session will need approval again.'))) return;
+  try {
+    var res = await authFetch('/api/session-overrides/' + id, { method: 'DELETE' });
+    var data = await res.json();
+    if (data.status === 'ok') {
+      showToast('Session override cancelled', 'success');
+      await refreshSessionOverrides();
     } else { showToast('Failed: ' + (data.detail || 'unknown'), 'error'); }
   } catch(e) { showToast('Error: ' + e.message, 'error'); }
 }
@@ -5245,7 +5504,7 @@ function copyEnrollCommand() { document.getElementById('enroll-command').select(
 
 // ── Audit Log ────────────────────────────────────────────────────────────
 const AUDIT_ICONS = { enrolled: '✓', version_updated: '↑', disconnected: '!', policy_committed: '↻', update_triggered: '↻', uninstall_triggered: '✕', uninstalled: '✕', password_changed: '', password_cleared: '', window_created: '', window_modified: '', window_deleted: '', window_toggled: '', window_claimed: '', dev_update_pushed: '', gateway_mode_changed: '' };
-const AUDIT_LABELS = { enrolled: 'enrolled', version_updated: 'updated', disconnected: 'disconnected', policy_committed: 'Policies committed', update_triggered: 'Update triggered', uninstall_triggered: 'Uninstall triggered', uninstalled: 'Uninstalled', password_changed: 'Password changed', password_cleared: 'Password removed', window_created: 'Window created', window_modified: 'Window updated', window_deleted: 'Window deleted', window_toggled: 'Window toggled', window_claimed: 'Window claimed', dev_update_pushed: 'Dev push', gateway_mode_changed: 'Gateway mode', agent_policy_updated: 'Agent policy updated', agent_token_revoked: 'Agent token revoked', mcp_policy_denied: 'MCP policy denied' };
+const AUDIT_LABELS = { enrolled: 'enrolled', version_updated: 'updated', disconnected: 'disconnected', policy_committed: 'Policies committed', update_triggered: 'Update triggered', uninstall_triggered: 'Uninstall triggered', uninstalled: 'Uninstalled', password_changed: 'Password changed', password_cleared: 'Password removed', window_created: 'Window created', window_modified: 'Window updated', window_deleted: 'Window deleted', window_toggled: 'Window toggled', window_claimed: 'Window claimed', dev_update_pushed: 'Dev push', gateway_mode_changed: 'Gateway mode', agent_policy_updated: 'Agent policy updated', agent_token_revoked: 'Agent token revoked', mcp_policy_denied: 'MCP policy denied', session_required: 'Session required', mcp_session_required: 'MCP session required' };
 let _auditLogSearchQuery = '';
 function onAuditLogSearch() {
   _auditLogSearchQuery = document.getElementById('audit-log-search').value.trim();
@@ -5993,6 +6252,7 @@ setInterval(function() {
   fetchGateways();
   fetchFreezeStatus();
   fetchFleetCommands();
+  refreshSessionOverrides();
 }, 10000);
 setInterval(function() {
   if (!document.getElementById('login-overlay').classList.contains('hidden')) return;

@@ -43,7 +43,17 @@ log_window_reject() {
        -d '{"target_ip":"'"$TARGET_IP"'","encoded_command":"'"$enc_cmd"'","status":"window-rejected","reason":"'"$reason"'","token":"'"$ESHU_WINDOW_TOKEN"'","session_id":"'"${ESHU_SESSION_ID:-}"'","execution_id":"'"${ESHU_EXECUTION_ID:-}"'"}' >/dev/null 2>&1 &
 }
 
-run_sanitized() { "$@" 2>&1 | sanitize; exit $?; }
+run_sanitized() {
+  local rc=0
+  # `set -e` would abort before the sentinel on a failed pipeline; the `||`
+  # preserves the real status so the agent can see the outcome without
+  # appending its own `echo RC=$?`.
+  "$@" 2>&1 | sanitize || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "[ESHU exit=$rc]"
+  fi
+  exit "$rc"
+}
 
 logger -t eshu-gateway "from=${SSH_CONNECTION:-unknown} cmd=${SSH_ORIGINAL_COMMAND:-none}"
 if [ -z "${SSH_ORIGINAL_COMMAND:-}" ]; then exit 1; fi
@@ -55,6 +65,7 @@ while :; do
   case "$cmd" in
     ESHU_WINDOW_TOKEN=*' '*) ESHU_WINDOW_TOKEN="${cmd%% *}"; ESHU_WINDOW_TOKEN="${ESHU_WINDOW_TOKEN#ESHU_WINDOW_TOKEN=}"; cmd="${cmd#* }" ;;
     ESHU_SESSION_ID=*' '*)   ESHU_SESSION_ID="${cmd%% *}";   ESHU_SESSION_ID="${ESHU_SESSION_ID#ESHU_SESSION_ID=}";         cmd="${cmd#* }" ;;
+    ESHU_SESSION_SIG=*' '*)  ESHU_SESSION_SIG="${cmd%% *}";  ESHU_SESSION_SIG="${ESHU_SESSION_SIG#ESHU_SESSION_SIG=}";      cmd="${cmd#* }" ;;
     ESHU_EXECUTION_ID=*' '*) ESHU_EXECUTION_ID="${cmd%% *}"; ESHU_EXECUTION_ID="${ESHU_EXECUTION_ID#ESHU_EXECUTION_ID=}";     cmd="${cmd#* }" ;;
     *) break ;;
   esac
@@ -113,6 +124,72 @@ if [ -f /etc/eshu-rblack.txt ] && [ -s /etc/eshu-rblack.txt ]; then
 fi
 
 # ============================================================
+# 2.5 SESSION GATE (strict mode — signed, minted session required)
+# ============================================================
+# The signature proves the id was minted by this dashboard (session_begin).
+# The gateway verifies it locally with the key from its last policy poll; no
+# per-session sync and no round-trip. Freeze and the blocklists above still
+# win, so a genuinely bad command reports the real reason first.
+if [ -f /etc/eshu-require-session ] && [ "$(cat /etc/eshu-require-session 2>/dev/null || echo '')" = "1" ]; then
+  if [ -z "${ESHU_SESSION_ID:-}" ]; then
+    logger -t eshu-gateway "SESSION REQUIRED: no id for command: $cmd"
+    log_auto_approve "$cmd" "session-required"
+    echo "[LOCKED] A minted Session is required. Call session_begin(goal=\"...\", session_id=\"...\") and prefix every command with the returned ssh_prefix (ESHU_SESSION_ID + ESHU_SESSION_SIG). [Gateway $GATEWAY_VERSION]"
+    exit 1
+  fi
+  if [ -f /etc/eshu-session-key ]; then
+    SESSION_KEY=$(cat /etc/eshu-session-key 2>/dev/null || echo "")
+    SESSION_KEY_PREV=$(cat /etc/eshu-session-key.prev 2>/dev/null || echo "")
+    if ! python3 - "$ESHU_SESSION_ID" "${ESHU_SESSION_SIG:-}" "$SESSION_KEY" "$SESSION_KEY_PREV" <<'PY'
+import hashlib
+import hmac
+import sys
+
+sid, sig, key, prev = sys.argv[1:5]
+if not sid or not sig:
+    sys.exit(1)
+for candidate in (key, prev):
+    if not candidate:
+        continue
+    try:
+        expected = hmac.new(bytes.fromhex(candidate), sid.encode(),
+                            hashlib.sha256).hexdigest()
+    except ValueError:
+        continue
+    if hmac.compare_digest(expected, sig):
+        sys.exit(0)
+sys.exit(1)
+PY
+    then
+      logger -t eshu-gateway "SESSION INVALID: id=$ESHU_SESSION_ID for command: $cmd"
+      log_auto_approve "$cmd" "session-required"
+      echo "[LOCKED] Session id/signature is invalid or was not minted by this dashboard. Re-run session_begin and use the new ssh_prefix. [Gateway $GATEWAY_VERSION]"
+      exit 1
+    fi
+  else
+    # A brand-new gateway can reach its first command before the first policy
+    # poll writes the key. Fail open only in that window; once the key exists,
+    # a missing/invalid signature is refused.
+    logger -t eshu-gateway "SESSION KEY MISSING: allowing $ESHU_SESSION_ID until first policy sync"
+  fi
+fi
+
+# ============================================================
+# 2.6 ENCODED PAYLOAD DETECTION (never auto-approve)
+# ============================================================
+# A base64/eval wrapper hides the real command from the literal blocklist and
+# allowlist. Force JIT so the dashboard can decode it, scan the decoded text,
+# and show it to the operator. Windows are skipped for the same reason.
+ENCODED_EXEC="0"
+case "$cmd" in
+  *'base64 -d'*|*'base64 --decode'*|*'base64 -D'*|*'xxd -r'*|*'openssl enc -d'*|*'gzip -d'*|*'eval '*|*'bash -c "$('*|*'sh -c "$('*|*'python -c'*'exec('*|*'python -c'*'eval('*|*'perl -e '*)
+    ENCODED_EXEC="1" ;;
+esac
+if [ "$ENCODED_EXEC" = "1" ]; then
+  logger -t eshu-gateway "ENCODED PAYLOAD: forcing JIT for: $cmd"
+fi
+
+# ============================================================
 # 3. EXACT MATCH WHITELIST
 # ============================================================
 # Zero-Trust gateways skip auto-run — allowlisted commands route to JIT instead.
@@ -123,7 +200,7 @@ if [ -f /etc/eshu-zero-trust ] && [ "$(cat /etc/eshu-zero-trust 2>/dev/null || e
   ZT_ACTIVE="1"
 fi
 
-if [ "$ZT_ACTIVE" != "1" ] && [ -f /etc/eshu-exact.txt ] && grep -qFx "$cmd" /etc/eshu-exact.txt; then
+if [ "$ENCODED_EXEC" = "0" ] && [ "$ZT_ACTIVE" != "1" ] && [ -f /etc/eshu-exact.txt ] && grep -qFx "$cmd" /etc/eshu-exact.txt; then
   log_auto_approve "$cmd" "auto-approved"
   run_sanitized bash -c "$cmd"
 fi
@@ -135,7 +212,7 @@ if [ -f /etc/eshu-rwhite.txt ] && [ -s /etc/eshu-rwhite.txt ]; then
   while IFS= read -r pattern || [ -n "${pattern:-}" ]; do
     [ -z "${pattern:-}" ] && continue
     [[ "${pattern:-}" =~ ^[[:space:]]*# ]] && continue
-    if [ "$ZT_ACTIVE" != "1" ] && [[ "$cmd" =~ $pattern ]]; then
+    if [ "$ENCODED_EXEC" = "0" ] && [ "$ZT_ACTIVE" != "1" ] && [[ "$cmd" =~ $pattern ]]; then
       log_auto_approve "$cmd" "auto-approved"
       run_sanitized bash -c "$cmd"
     fi
@@ -146,7 +223,7 @@ fi
 # 4.5 FEATURE SCRIPTS (downloaded by poller when flag enabled)
 # ============================================================
 FEATURES_DIR="/etc/eshu/features.d"
-if [ -d "$FEATURES_DIR" ]; then
+if [ "$ENCODED_EXEC" = "0" ] && [ -d "$FEATURES_DIR" ]; then
   for f in "$FEATURES_DIR"/*.sh; do
     [ -f "$f" ] && . "$f"
   done
@@ -197,6 +274,12 @@ HTTP_STATUS=$(echo "$RESPONSE" | tail -n1)
 if [ "${HTTP_STATUS:-}" = "429" ]; then
   logger -t eshu-gateway "Rate limited by dashboard (429) for JIT request: $cmd"
   echo "[LOCKED] ERROR: Rate limited by dashboard — too many requests. Try again in a moment."
+  exit 1
+fi
+if [ "${HTTP_STATUS:-}" = "403" ]; then
+  ENC_MSG=$(echo "$RESPONSE" | head -n1 | python3 -c "import sys, json; print(json.load(sys.stdin).get('detail', 'Encoded payload blocked.'))" 2>/dev/null || echo "Encoded payload blocked.")
+  logger -t eshu-gateway "ENCODED PAYLOAD BLOCKED: $ENC_MSG"
+  echo "[LOCKED] $ENC_MSG [Gateway $GATEWAY_VERSION]"
   exit 1
 fi
 if [ "${HTTP_STATUS:-}" != "200" ]; then

@@ -37,6 +37,8 @@ from database import (
     dismiss_policy_gap,
     get_mcp_allowed_hosts, set_mcp_allowed_hosts,
     get_session_names, set_session_names,
+    create_session_override, get_session_override,
+    list_session_overrides, stop_session_override,
     get_trigger_rollback, set_trigger_rollback, clear_trigger_rollback,
     set_trigger_freeze, get_trigger_freeze, clear_trigger_freeze,
     record_audit_event, get_audit_log,
@@ -44,6 +46,7 @@ from database import (
     search_requests, search_audit_log,
     get_gateway_token, set_gateway_token, get_gateway_by_token,
     get_feature_flags, set_feature_flag, set_feature_flag_scope,
+    get_session_signing_key, get_previous_session_signing_key,
     get_gateway_mode, set_gateway_mode, get_dev_gateways,
     get_gateway_zero_trust, set_gateway_zero_trust,
     set_override, clear_override, get_override_active,
@@ -93,10 +96,15 @@ from core.session import (
     SESSION_KEY, SESSION_TTL, _make_session_token, _verify_session_token,
     _check_session, _check_session_optional, _is_password_protected,
 )
+from core.agent_context import (
+    reset_current_session_source, set_current_session_source,
+)
 from core.rate_limit import _check_rate_limit
 from core.agent_policy import evaluate_call, safe_ident
+from core.session_guard import require_sessions_for_gateway
 from core.notify import send_notify
 from core.cmd_blocklist import hard_block_match, blocklist_substring_match, CORE_COMMAND_PATTERNS, HARD_PATTERNS
+from core.cmd_codec import decode_preview, detect_encoded_exec, scan_decoded
 from core.policy_eval import evaluate_policy_verdict
 from core.cmd_risk import get_cmd_risk, get_dry_run_suggestion
 from core.cmd_profiles import get_anomaly, refresh_profiles, _profiles_loop
@@ -121,6 +129,7 @@ from core.mcp_server import (
 )
 from core.seeds import seed_for_kind, reseed_all_integrations, seed_tool_names
 from core.train_seed import ensure_train_integration
+from core.commute_seed import ensure_commute_integration
 
 
 def _get_gateway_hostname(ip: str) -> str:
@@ -137,6 +146,20 @@ def _file_hash(path: str) -> str:
         return None
     with open(path, "rb") as f:
         return hashlib.sha256(f.read()).hexdigest()[:12]
+
+
+def _encoded_fields(command: str) -> dict:
+    """Decoded preview for the approval UI; never executes the payload."""
+    if not detect_encoded_exec(command):
+        return {}
+    preview = decode_preview(command)
+    if not preview:
+        return {'encoded': True}
+    return {
+        'encoded': True,
+        'decoded_command': preview['text'],
+        'decoded_truncated': preview['truncated'],
+    }
 
 
 def _is_dev_mode() -> bool:
@@ -248,6 +271,7 @@ def on_startup():
     # Re-apply each integration's seed catalog so deployed catalog changes
     # (new/changed tools) propagate without a manual re-seed.
     ensure_train_integration()
+    ensure_commute_integration()
     reseed_all_integrations()
     # Keep the web-fetch caller gate and agent tool allowlists aligned with the
     # enabled per-agent URL policies (idempotent; no token = fail closed).
@@ -542,22 +566,69 @@ def receive_request(payload: GatewayPayload, request: Request):
     _check_rate_limit(target_ip)
     cmd = decode_cmd(payload.encoded_command)
 
-    # Check override mode — auto-approve if active
+    now = int(time.time())
+    sid = (payload.session_id or '')[:64]
+    eid = (payload.execution_id or '')[:64]
+    # Freeze is absolute: the gateway rejects every command, so an override
+    # must not record an "approved" ticket that can never run.
+    frozen = get_trigger_freeze() is not None
+
+    # Encoded payloads are high risk: decode the wrapper, scan the decoded text
+    # against the hard/central blocklists, and refuse before any override or
+    # ticket can auto-approve it. Safe payloads fall through to the normal JIT
+    # flow; the UI shows the decoded preview.
+    if detect_encoded_exec(cmd):
+        preview = decode_preview(cmd)
+        if preview:
+            blocklist = (get_policies().get('regex_blacklist', '') or '').splitlines()
+            match = scan_decoded(preview['text'], HARD_PATTERNS, blocklist)
+            if match:
+                create_request(target_ip, cmd, status="blocked",
+                               reason="encoded-payload:%s" % match[:40],
+                               session_id=sid, execution_id=eid)
+                update_gateway_last_seen(target_ip)
+                record_audit_event(
+                    'encoded_payload_blocked', target_ip,
+                    details=f'Encoded payload matched "{match[:60]}": {cmd[:80]}')
+                raise HTTPException(
+                    status_code=403,
+                    detail=f'Encoded payload blocked: the decoded command matched "{match[:60]}".')
+
+    # Session override first: narrower than the host-wide one, and it only
+    # covers commands carrying the id it was granted for. Zero-Trust wins.
+    if sid and not frozen:
+        ov = get_session_override(sid, target_ip, now)
+        if ov and not get_gateway_zero_trust(target_ip):
+            req_id = create_request(target_ip, cmd, status="approved",
+                                    reason="session-override:%d" % ov["id"],
+                                    session_id=sid, execution_id=eid)
+            update_gateway_last_seen(target_ip)
+            scope = ov["target_ip"] or "any host"
+            record_audit_event(
+                'jit_override_approved', target_ip,
+                details=f'Session override #{ov["id"]} auto-approved JIT #{req_id}: '
+                        f'{cmd[:80]} (session {sid}, {scope}, '
+                        f'reason: {ov["reason"][:60]})')
+            return {"status": "ok", "id": f"{req_id:06d}", "override": True,
+                    "scope": "session",
+                    "message": "Auto-approved via Session Override"}
+
+    # Check host override mode — auto-approve if active
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute('SELECT override_until, override_reason FROM gateways WHERE ip = ?', (target_ip,))
     row = cursor.fetchone()
     conn.close()
-    now = int(time.time())
-    # Override auto-approves JIT — but never on a Zero-Trust gateway (ZT wins:
-    # every command must go through operator approval there).
-    if row and row['override_until'] and row['override_until'] > now and not get_gateway_zero_trust(target_ip):
-        req_id = create_request(target_ip, cmd, status="approved", reason="override", session_id=(payload.session_id or '')[:64], execution_id=(payload.execution_id or '')[:64])
+    if row and row['override_until'] and row['override_until'] > now \
+            and not frozen and not get_gateway_zero_trust(target_ip):
+        req_id = create_request(target_ip, cmd, status="approved", reason="override",
+                                session_id=sid, execution_id=eid)
         update_gateway_last_seen(target_ip)
         record_audit_event('jit_override_approved', target_ip, details=f'Override auto-approved JIT #{req_id}: {cmd[:80]} (reason: {row["override_reason"][:60]})')
-        return {"status": "ok", "id": f"{req_id:06d}", "override": True, "message": "Auto-approved via Override Mode"}
+        return {"status": "ok", "id": f"{req_id:06d}", "override": True,
+                "scope": "host", "message": "Auto-approved via Override Mode"}
 
-    req_id = create_request(target_ip, cmd, status="pending", session_id=(payload.session_id or '')[:64], execution_id=(payload.execution_id or '')[:64])
+    req_id = create_request(target_ip, cmd, status="pending", session_id=sid, execution_id=eid)
     update_gateway_last_seen(target_ip)
     send_notify('jit', 'JIT Approval Required', f'`{cmd[:80]}` on {target_ip}')
     record_audit_event('jit_created', target_ip, details=f'JIT #{req_id}: {cmd[:80]}')
@@ -577,6 +648,10 @@ def receive_log(payload: GatewayPayload, request: Request):
             record_window_execution(target['id'], payload.token, target_ip, cmd, 0, payload.reason)
     if payload.status == 'blocked':
         send_notify('blocked', '🛑 Command Blocked', f'`{cmd[:80]}` on {target_ip}')
+    if payload.status == 'session-required':
+        record_audit_event(
+            'session_required', target_ip,
+            details=f'Session required for: {cmd[:80]}')
     update_gateway_last_seen(target_ip)
     return {"status": "ok"}
 
@@ -652,6 +727,13 @@ def fetch_policy(target_ip: str, request: Request):
     # Approved Windows are core/always-on — delivered by data, not a feature flag
     policies['approved_windows'] = get_active_approved_windows(resolved_ip)
 
+    # Session enforcement: the gateway verifies the signed session token
+    # locally. Send the key to every authenticated gateway so it is ready when
+    # the flag moves from Off to Dev/Prod.
+    policies['require_sessions'] = 1 if require_sessions_for_gateway(gw_mode) else 0
+    policies['session_signing_key'] = get_session_signing_key()
+    policies['session_signing_key_prev'] = get_previous_session_signing_key()
+
     # Dev-mode gateways get the dev installer URL for updates
     if gw_mode == 'dev':
         policies['dev_installer_url'] = '/static/dev/eshu-gateway-install.sh'
@@ -703,11 +785,29 @@ def list_requests(request: Request, search: str = None, session: str = None):
             r['ttl'] = ttl if ttl > 0 else 0
         else:
             r['ttl'] = 0
+        # Decoded previews are large; attach them to pending rows (approval
+        # card) only. History asks for one on demand via /decoded.
+        if detect_encoded_exec(r['command']):
+            r['encoded'] = True
+            if r['status'] == 'pending':
+                r.update(_encoded_fields(r['command']))
         # Risk hint — pending-only so history stays clean
         r['risk'] = get_cmd_risk(r['command']) if r['status'] == 'pending' else None
         # Behavioural anomaly — pending-only ("first time on this gateway")
         r['anomaly'] = get_anomaly(r['target_ip'], r['command']) if r['status'] == 'pending' else None
     return reqs
+
+
+@app.get("/api/requests/{req_id}/decoded")
+def request_decoded(req_id: int, request: Request):
+    """On-demand decoded preview for one encoded wrapper (history panel)."""
+    _check_session(request)
+    command = get_request_command(req_id)
+    if command is None:
+        raise HTTPException(status_code=404, detail="Request not found")
+    return _encoded_fields(command) or {'encoded': False}
+
+
 @app.post("/api/approve/{req_id}")
 def approve_request(req_id: int, request: Request):
     _check_session(request)
@@ -762,6 +862,7 @@ def test_policy(command: str):
             "details": [{"type": "hard_blocklist", "pattern": v['matched_pattern'], "match": True}],
             "risk": get_cmd_risk(command),
             "dry_run": get_dry_run_suggestion(command),
+            **_encoded_fields(command),
         }
 
     result = {
@@ -771,6 +872,7 @@ def test_policy(command: str):
         "details": [],
         "risk": get_cmd_risk(command),
         "dry_run": get_dry_run_suggestion(command),
+        **_encoded_fields(command),
     }
     if v['action'] == 'blocked':
         result["details"].append({"type": "regex_blacklist", "pattern": v['matched_pattern'], "match": True})
@@ -873,6 +975,75 @@ def stop_override(ip: str, request: Request):
     record_audit_event("override_cancelled", gateway_ip=ip, hostname=hostname,
                        details="Override cancelled early")
     return {"status": "ok"}
+
+
+class SessionOverridePayload(BaseModel):
+    session_id: str
+    target_ip: str = ''
+    minutes: int = 30
+    reason: str = ''
+
+
+@app.get("/api/session-overrides")
+def get_session_overrides_endpoint(request: Request):
+    """Active session overrides first, then recent ended/expired ones."""
+    _check_session(request)
+    now = int(time.time())
+    return {"overrides": list_session_overrides(now=now), "now": now}
+
+
+@app.post("/api/session-overrides")
+def start_session_override_endpoint(payload: SessionOverridePayload,
+                                    request: Request):
+    """Grant one session a bounded JIT bypass, optionally on one host.
+
+    Dashboard-only on purpose: this is an approval bypass, so it is never
+    exposed as an MCP tool. An empty `target_ip` means "any host in this
+    session" and must be an explicit choice in the UI.
+    """
+    import re
+    _check_session(request)
+    sid = (payload.session_id or '').strip()
+    if not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', sid):
+        raise HTTPException(status_code=400,
+                            detail="session_id must match [A-Za-z0-9_-]{1,64}")
+    if not (payload.reason or '').strip():
+        raise HTTPException(status_code=400, detail="Reason is required")
+    if payload.minutes < 1 or payload.minutes > 1440:
+        raise HTTPException(status_code=400,
+                            detail="Minutes must be between 1 and 1440")
+    ip = (payload.target_ip or '').strip()
+    if ip:
+        if not get_gateway(ip):
+            raise HTTPException(status_code=404, detail="Gateway not found")
+        if get_gateway_zero_trust(ip):
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot start an override on a Zero-Trust gateway — "
+                       "they are mutually exclusive.")
+    ov = create_session_override(sid, ip,
+                                 int(time.time()) + payload.minutes * 60,
+                                 payload.reason.strip())
+    record_audit_event("override_session_started", gateway_ip=ip or None,
+                       details=f'Session override #{ov["id"]} for '
+                               f'{payload.minutes}m ({sid}, '
+                               f'{ip or "any host"}): '
+                               f'{payload.reason.strip()[:100]}')
+    return {"status": "ok", "override": ov}
+
+
+@app.delete("/api/session-overrides/{override_id}")
+def cancel_session_override_endpoint(override_id: int, request: Request):
+    _check_session(request)
+    ov = stop_session_override(override_id)
+    if not ov:
+        raise HTTPException(status_code=404,
+                            detail="Override not found or already ended")
+    record_audit_event("override_session_cancelled",
+                       gateway_ip=ov.get("target_ip") or None,
+                       details=f'Session override #{override_id} cancelled '
+                               f'early ({ov.get("session_id")})')
+    return {"status": "ok", "override": ov}
 
 # --- Emergency Freeze (global circuit breaker) ---
 @app.post("/api/freeze")
@@ -1440,6 +1611,39 @@ def serve_agent_window_docs():
             content = f.read()
         return PlainTextResponse(content=content, media_type="text/markdown; charset=utf-8")
     raise HTTPException(status_code=404, detail="Agent manual not found")
+
+
+@app.get("/api/clients/eshu-call.py", response_class=PlainTextResponse)
+def serve_eshu_call_client(request: Request):
+    """Serve the generic Eshu REST client as a versioned artifact.
+
+    Agent-token authenticated. The host's bootstrap/update job fetches this,
+    verifies X-Client-SHA256, installs it, and restarts its timer. The client is
+    transport only; capability logic stays in Eshu.
+    """
+    agent = resolve_agent_optional(request)
+    if not agent:
+        raise HTTPException(status_code=401, detail="Invalid or missing agent token")
+    script_path = os.path.join(os.path.dirname(__file__), "..", "scripts", "eshu_call.py")
+    if not os.path.exists(script_path):
+        raise HTTPException(status_code=404, detail="Client script not found")
+    with open(script_path, "r", encoding="utf-8") as handle:
+        content = handle.read()
+    digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    version = "unknown"
+    for line in content.splitlines():
+        if line.startswith("VERSION = "):
+            version = line.split("=", 1)[1].strip().strip("\"'")
+            break
+    return PlainTextResponse(
+        content=content,
+        media_type="text/x-python; charset=utf-8",
+        headers={
+            "X-Client-Version": version,
+            "X-Client-SHA256": digest,
+            "Cache-Control": "no-cache",
+        },
+    )
 
 
 @app.get("/api/docs/agent-manual", response_class=PlainTextResponse)
@@ -2402,6 +2606,13 @@ class AgentPolicyPayload(BaseModel):
     rate_limit_per_min: int = 0
 
 
+class CommuteDuePayload(BaseModel):
+    person: str
+    at: str | None = None
+    date: str | None = None
+    dry_run: bool = False
+
+
 class WebFetchPolicyPayload(BaseModel):
     enabled: bool = False
     allow: list = []
@@ -2533,6 +2744,74 @@ def set_agent_policy_endpoint(agent_id: int, payload: AgentPolicyPayload,
                 f"rate_limit={policy['rate_limit_per_min']})")
     _sync_web_fetch_access()
     return get_agent_policy(agent_id)
+
+
+COMMUTE_READ_AGENTS = {"rowana-household", "hermes", "commute-cron"}
+
+
+def _commute_reader(request: Request) -> str:
+    """Allow a valid commute agent token, or a dashboard session."""
+    agent = resolve_agent_optional(request)
+    if agent:
+        name = (agent.get("name") or "").strip()
+        if name not in COMMUTE_READ_AGENTS:
+            raise HTTPException(status_code=403,
+                                detail="Agent is not allowed to read commute profiles")
+        return name
+    _check_session(request)
+    return "dashboard"
+
+
+@app.get("/api/commute/profiles")
+def commute_profiles_endpoint(request: Request):
+    """Read-only profile inventory for the gate/UI. No chat ids are stored."""
+    _commute_reader(request)
+    from core.commute import summary
+    from db.commute import list_profiles
+    profiles = list_profiles()
+    summaries = {}
+    for person, profile in profiles.items():
+        try:
+            summaries[person] = summary(person, profile)
+        except Exception:  # noqa: BLE001 - a malformed row must not hide the rest
+            summaries[person] = ""
+    return {"people": sorted(profiles), "profiles": profiles,
+            "summaries": summaries}
+
+
+@app.get("/api/commute/profile/{person}")
+def commute_profile_endpoint(person: str, request: Request):
+    _commute_reader(request)
+    from core.commute import summary
+    from db.commute import get_profile
+    profile = get_profile(person.strip().lower())
+    if not profile:
+        raise HTTPException(status_code=404, detail="Commute profile not found")
+    return {"person": person.strip().lower(), "profile": profile,
+            "text": summary(person.strip().lower(), profile)}
+
+
+@app.post("/api/commute/due")
+def commute_due_endpoint(payload: CommuteDuePayload, request: Request):
+    """Scheduler trigger: decide whether a notify slot is due and compose it.
+
+    Authenticated with an agent bearer token (not a dashboard session). The
+    scheduler delivers the returned `text`; Eshu records the slot in
+    commute_notify_state so a scheduler loop cannot send twice.
+    """
+    agent = resolve_agent_optional(request)
+    if not agent:
+        raise HTTPException(status_code=401, detail="Invalid or missing agent token")
+    name = (agent.get("name") or "").strip()
+    if name not in {"rowana-household", "hermes", "commute-cron"}:
+        raise HTTPException(status_code=403,
+                            detail="Agent is not allowed to run the commute scheduler")
+    from core.commute import CommuteError, due
+    try:
+        return due(payload.person, at=payload.at, dry_run=payload.dry_run,
+                   date_value=payload.date)
+    except CommuteError as exc:
+        raise HTTPException(status_code=400, detail=exc.message)
 
 
 @app.get("/api/agents/{agent_id}/available-tools")
@@ -2847,6 +3126,8 @@ def session_detail_endpoint(sid: str, request: Request):
     _check_session(request)
     sid = (sid or '')[:64]
     ssh = get_session_requests(sid)
+    for row in ssh:
+        row.update(_encoded_fields(row.get('command', '')))
     mcp = get_integration_calls(session=sid, limit=500)['rows']
     return {'session_id': sid, 'ssh': ssh, 'mcp': mcp}
 
@@ -2925,6 +3206,7 @@ def _record_integration_denied(call):
         approval='denied',
         decided_at=int(time.time()),
         decided_by='operator',
+        session_source=call.get('session_source') or 'caller',
     )
 
 
@@ -2975,6 +3257,9 @@ def approve_integration_call(call_id: int, request: Request):
                 actor='operator')
             return {"status": "denied", "id": call_id, "reason": reason}
 
+    # Keep the provenance of the id on the executor's audit row: an approved
+    # inherited call must not start counting as caller-tagged coverage.
+    source_token = set_current_session_source(call.get('session_source') or 'caller')
     try:
         if tool.get('handler'):
             # Curated multi-step handler — same code path as the immediate run,
@@ -3040,6 +3325,8 @@ def approve_integration_call(call_id: int, request: Request):
                                               decided_by='operator')
     except ProxyError as e:
         result = {'error': e.message, 'status_code': e.status_code}
+    finally:
+        reset_current_session_source(source_token)
     if tool.get('response_hint'):
         # Merge even for an empty body (e.g. a 204 response) so an approved
         # write still carries its verification nudge — matches the immediate

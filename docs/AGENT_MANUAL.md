@@ -38,7 +38,26 @@ An **id** is what ties one task's SSH commands and MCP calls into a single
 Session in the dashboard. **Use the same id on both surfaces** — one task, one
 id, never two.
 
-**Start each task with `session_begin`.** If your client already has a
+> **Session contract — do this for every new task.** Call `session_begin` with
+> **both** a specific human-readable `goal` (the session name) and the id you
+> will use:
+>
+> ```json
+> {"name": "session_begin", "arguments": {"goal": "Investigate pve2 NVMe overheating (P-005), read-only", "session_id": "<your chat id>"}}
+> ```
+>
+> - `goal` is not optional in practice: it is the name the operator sees in the
+>   Sessions list. Use a specific task name, not "task" or "investigation".
+> - `session_id` is the client's conversation/chat id whenever one exists. If
+>   there is none, omit it once and keep the minted id.
+> - Then pass that id on **every** Eshu tool call and prefix **every** SSH
+>   command with the exact `ssh_prefix` — both `ESHU_SESSION_ID=<id>` and
+>   `ESHU_SESSION_SIG=<signature>`. Do not open a second session for the next
+>   step of the same task.
+> - End with `session_summary(session_id="<id>")` — the explicit id, not the
+>   no-argument form.
+
+**Every new session starts with `session_begin`.** If your client already has a
 conversation id (Hermes' chat id, a cron origin id), pass it, so the chat and
 the dashboard session stay the same thing:
 
@@ -52,44 +71,89 @@ If you have no conversation id, omit `session_id` and Eshu mints one:
 {"name": "session_begin", "arguments": {"goal": "swap the TLS certificate"}}
 ```
 
-Either way it answers:
+`goal` is required: an empty goal returns `{"error":"goal_required"}`. Either
+way it answers:
 
 ```json
 {"session_id": "a1b2c3d4e5f6",
  "goal": "swap the TLS certificate",
  "adopted": false,
- "ssh_prefix": "ESHU_SESSION_ID=a1b2c3d4e5f6 ",
- "how": "Pass session_id=<id> to every Eshu tool, and prefix every SSH command with ssh_prefix. The same id groups both."}
+ "session_sig": "<hmac-sha256 hex>",
+ "ssh_prefix": "ESHU_SESSION_ID=a1b2c3d4e5f6 ESHU_SESSION_SIG=<hmac-sha256 hex> ",
+ "how": "Pass session_id=<id> to every Eshu tool, and use the exact ssh_prefix (both keys) on every SSH command. The same id groups both."}
 ```
 
 `adopted: true` means Eshu took the id you supplied. Then:
 
 - every MCP tool takes `session_id=<id>` (and optionally an `execution_id` for
   per-run drill-down);
-- every SSH command starts with the returned `ssh_prefix`:
+- every SSH command starts with the returned `ssh_prefix` — copy it exactly,
+  including both keys:
 
   ```bash
-  ssh eshu-gateway@<host> "ESHU_SESSION_ID=cf0f09869854 <command>"
+  ssh eshu-gateway@<host> "ESHU_SESSION_ID=cf0f09869854 ESHU_SESSION_SIG=<signature> <command>"
   ```
 
-At the end of the task, `session_summary()` with no arguments describes **the
-session this connection used last** — the id from `session_begin`, or the last
-id you passed — and returns `commands`, `approved`, `refused`, `expired`,
-`mcp_calls`, `mcp_pending`, `gateways`, `first_seen`, `last_seen`.
+The signature proves to the gateway that this id was minted by the dashboard
+for this fleet; the gateway verifies it locally with the key from its last
+policy poll. Do not construct or reuse a prefix by hand.
+
+At the end of the task, `session_summary()` with no arguments describes **this
+MCP connection's bound session** — the id from `session_begin`, or the last id
+passed to an MCP tool. It does **not** see SSH commands stamped with a
+different id: if SSH and MCP used different ids, pass `session_id` explicitly.
+The response says which rule resolved the id (`resolved_from`: `argument`,
+`connection` or `transport`) and returns `commands`, `pending`, the permitted
+split (`whitelisted`, `jit_approved`, `override_approved`, `window_approved`,
+`fleet_run`, `consumed`), the back-compatible `approved` sum, `refused`,
+`expired`, `mcp_calls`, `mcp_pending`, `gateways`, `first_seen` and
+`last_seen`. `approved` means permitted, not succeeded — a command can be
+approved and then fail.
 
 Rules:
 
-- **One id per task.** If you minted one, keep the returned id and pass it on
-  every later call; never mix a minted id with your chat id.
+- **One name and one id per task.** The `goal` is the name the operator sees;
+  the id is the grouping key. Keep both for the whole task, pass the id on every
+  call, and never mix a minted id with your chat id.
 - **Both tools are always available**, even to an agent with a strict tool
   allowlist.
-- **Omission is not an error.** An MCP call without `session_id` is grouped under
-  the connection's transport id (`mcp-…`, shown as `auto` in the dashboard), and
-  its result carries `_eshu.session_id` (object responses only) so you can adopt
-  it. That id is per-connection, not a durable identity. SSH without the prefix
-  is logged as untagged.
-- **Nothing is rejected** for a missing id; untagged SSH is visible to the
-  operator in the Sessions coverage line.
+- **Omission is not an error when enforcement is off — it inherits.** After
+  `session_begin`, an MCP call without `session_id` is grouped into that session
+  on the same connection. Only a connection that never named a session falls
+  back to its transport id (`mcp-…`, shown as `auto`). The result still carries
+  `_eshu.session_id` and `_eshu.source` (`caller`, `inherited` or `transport`,
+  object responses only) so you can adopt it for SSH. That id is per-connection,
+  not a durable identity.
+- **Strict session mode.** If the operator enables **Require sessions**, the
+  dashboard refuses every MCP tool call that does not resolve to a minted,
+  named Session, and the gateway refuses every SSH command without a valid
+  `ESHU_SESSION_ID` + `ESHU_SESSION_SIG` pair. `session_begin` and
+  `check_approval` stay available so you can recover. Old unsigned prefixes are
+  refused — re-run `session_begin` and use the new `ssh_prefix`.
+- **Nothing is rejected for a missing id unless strict mode is on.** Untagged
+  SSH is visible to the operator in the Sessions coverage line. Coverage counts
+  only explicit ids — inherited and transport ids are reported as `auto`, not
+  as compliance.
+- **One command, one ticket.** A session id groups commands; it does not cache
+  approvals. Re-running the same command raises a new JIT. The exception is an
+  operator-granted **Session Override** for that session (and host): while it
+  is active, matching commands auto-approve until it expires.
+- **`_eshu` is object-only.** Array-returning tools (the list endpoints) do not
+  carry `_eshu`, so their absence is not evidence of missing attribution. Pass
+  `session_id` explicitly if you need it, or confirm with
+  `session_summary(session_id=...)`.
+- **A failed command is marked.** The gateway appends `[ESHU exit=N]` to the
+  output on a non-zero exit and returns that status. `[OK] Approved!` means the
+  ticket was approved, not that the command succeeded.
+
+**Checklist for every new session**
+
+1. `session_begin(goal="<specific task name>", session_id="<chat id>")`
+2. Every MCP call carries `session_id="<id>"`.
+3. Every SSH command starts with the exact `ssh_prefix` (both
+   `ESHU_SESSION_ID` and `ESHU_SESSION_SIG`).
+4. End with `session_summary(session_id="<id>")`.
+5. One name and one id for the whole task; never reuse them for another task.
 
 The prefix is **stripped before policy evaluation** — it never changes how a
 command is classified (whitelist / JIT / FATAL). Keys coexist and can be
@@ -175,8 +239,14 @@ Rules:
 Agent runs ──▶ ssh eshu-gateway@host "<cmd>"
                    │
                    ▼
+            0. Strict session? ──no──▶ ❌ Rejected — call session_begin
+                   │yes / strict off
+                   ▼
             1. Blocklisted? ──yes──▶ ❌ Rejected — report to operator
                    │no
+                   ▼
+            1.5 Encoded payload? ──yes──▶ Force JIT (decoded preview + scan)
+                   │no                (never auto-approved by allowlist/window)
                    ▼
             2. Whitelisted? ──yes──▶ ✅ Auto-approved — executed
                    │no
@@ -189,6 +259,19 @@ Agent runs ──▶ ssh eshu-gateway@host "<cmd>"
                    ▼
             5. Submit JIT request ──▶ Operator decides
 ```
+
+### Encoded commands
+
+Do not wrap a command in `base64 -d`, `eval`, `bash -c "$(...)"` or a similar
+decoder to get it past the policy. Those wrappers are detected and **forced to
+JIT regardless of allowlists or windows**; the dashboard decodes the payload,
+scans the decoded text against the blocklist before creating a ticket, and shows
+the operator a **decoded** preview next to the wrapper. If the decoded text
+matches a blocked pattern, the request is refused.
+
+Prefer readable commands. For multi-step work, send separate SSH invocations
+(each with the same session prefix) so each step is visible, approved and
+attributable.
 
 ---
 

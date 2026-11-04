@@ -21,6 +21,7 @@ from core.npm_seed import NPM_SEED_TOOLS, seed_npm_tools
 from core.seerr_seed import SEERR_SEED_TOOLS, seed_seerr_tools
 from core.web_fetch_seed import WEB_FETCH_SEED_TOOLS, seed_web_fetch_tools
 from core.train_seed import TRAIN_SEED_TOOLS, seed_train_tools
+from core.commute_seed import COMMUTE_SEED_TOOLS, seed_commute_tools
 from core.generic_tools import generic_tools_for, seed_generic_tools
 
 SEEDERS = {
@@ -38,6 +39,7 @@ SEEDERS = {
     'seerr': seed_seerr_tools,
     'webfetch': seed_web_fetch_tools,
     'trains': seed_train_tools,
+    'commute': seed_commute_tools,
 }
 
 _CATALOGS = {
@@ -55,6 +57,7 @@ _CATALOGS = {
     'seerr': SEERR_SEED_TOOLS,
     'webfetch': WEB_FETCH_SEED_TOOLS,
     'trains': TRAIN_SEED_TOOLS,
+    'commute': COMMUTE_SEED_TOOLS,
 }
 
 # Kinds that must NOT receive the generic read/write passthrough floor at all.
@@ -71,7 +74,7 @@ _CATALOGS = {
 # trigger torrent searches or delete media — so reads are open, writes stay on
 # the curated guardrailed catalog. Prowlarr's generic read is safe because the
 # always-on scrubber drops list-shaped `fields[]` (indexer credentials).
-NO_GENERIC_KINDS = {'pihole', 'npm', 'seerr', 'webfetch', 'trains'}
+NO_GENERIC_KINDS = {'pihole', 'npm', 'seerr', 'webfetch', 'trains', 'commute'}
 
 
 def seed_tool_names(kind: str) -> set:

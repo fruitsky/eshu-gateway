@@ -1,3 +1,4 @@
+import secrets
 import time
 import json
 from db.core import db_conn
@@ -25,6 +26,16 @@ def init_misc_tables(cursor):
     # Approved Windows are core/always-on now (decoupled from the feature-flag
     # system) — remove the old toggleable flag if it exists.
     cursor.execute("DELETE FROM feature_flags WHERE flag_name = 'approved_windows'")
+    # Session enforcement: off by default. Set to Dev to enforce on dev-mode
+    # gateways (and MCP) while testing, Prod to enforce everywhere.
+    cursor.execute('''
+        INSERT OR IGNORE INTO feature_flags
+            (flag_name, enabled, description, scope)
+        VALUES
+            ('require_sessions', 0,
+             'Refuse SSH commands and MCP calls that are not in a minted, named Session',
+             'dev')
+    ''')
 
 def get_meta_json(key: str, default):
     """Small JSON values kept in the `meta` table (watch state, etc.)."""
@@ -79,6 +90,41 @@ def set_feature_flag_scope(flag_name: str, scope: str):
         cursor = conn.cursor()
         cursor.execute("UPDATE feature_flags SET scope = ? WHERE flag_name = ?", (scope, flag_name))
         conn.commit()
+
+# ── Session signing key ───────────────────────────────────────────────────
+# One per dashboard. Sent to authenticated gateways in the policy response so
+# they can verify a session id was minted here, without a per-session sync or
+# a round-trip back to the dashboard.
+_SESSION_KEY = 'session_signing_key'
+_SESSION_KEY_PREV = 'session_signing_key_prev'
+
+
+def _meta_value(cursor, key: str) -> str:
+    cursor.execute("SELECT value FROM meta WHERE key = ?", (key,))
+    row = cursor.fetchone()
+    return row['value'] if row and row['value'] else ''
+
+
+def get_session_signing_key() -> str:
+    """Return the dashboard's signing key, creating it on first use."""
+    with db_conn() as conn:
+        cursor = conn.cursor()
+        key = _meta_value(cursor, _SESSION_KEY)
+        if key:
+            return key
+        candidate = secrets.token_hex(32)
+        cursor.execute(
+            "INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)",
+            (_SESSION_KEY, candidate))
+        conn.commit()
+        return _meta_value(cursor, _SESSION_KEY) or candidate
+
+
+def get_previous_session_signing_key() -> str:
+    """The previous key during a rotation; gateways accept both."""
+    with db_conn() as conn:
+        return _meta_value(conn.cursor(), _SESSION_KEY_PREV)
+
 
 def get_notify_config() -> dict:
     with db_conn() as conn:

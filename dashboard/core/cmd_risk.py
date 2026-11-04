@@ -9,6 +9,8 @@ These are static, curated, word-boundary aware rules — no model.
 
 import re
 
+from core.cmd_codec import detect_encoded_exec
+
 RISK_RULES = [
     (r'\bsystemctl\s+(restart|stop)\b', 'Restarts/stops a service — brief outage'),
     (r'\bdocker\s+(rm|rmi|volume\s+rm)\b', 'Removes containers/images — data loss'),
@@ -33,7 +35,11 @@ DRY_RUN_SUGGESTIONS = [
 def get_cmd_risk(cmd: str):
     """Return a one-line risk hint for the command, or None if it looks safe.
     Commands run with --dry-run don't modify anything, so they get no hint."""
-    if not cmd or '--dry-run' in cmd:
+    if not cmd:
+        return None
+    if detect_encoded_exec(cmd):
+        return 'Encoded payload — review the decoded command before approving'
+    if '--dry-run' in cmd:
         return None
     for pattern, hint in RISK_RULES:
         if re.search(pattern, cmd):

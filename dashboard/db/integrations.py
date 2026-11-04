@@ -1,6 +1,7 @@
 import json
 import time
 from db.core import db_conn
+from core.agent_context import current_session_source
 from core.secret_scrub import scrub_payload, secret_hashes
 
 
@@ -223,6 +224,15 @@ def init_integrations_tables(cursor):
                 cursor.execute(f"ALTER TABLE {tbl} ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
             except Exception:
                 pass
+    # Provenance of the id on the row: caller (explicit argument), inherited
+    # (bound by session_begin on this connection) or transport (mcp-… fallback).
+    # Coverage counts only caller, so an inherited id never inflates the score.
+    for tbl in ('integration_calls', 'pending_integration_calls'):
+        try:
+            cursor.execute(
+                f"ALTER TABLE {tbl} ADD COLUMN session_source TEXT NOT NULL DEFAULT ''")
+        except Exception:
+            pass
     # Caller attribution: the pending row remembers who queued it, and the
     # resolved row records both the caller and the human who approved/denied.
     for tbl, col in (('pending_integration_calls', 'agent'),
@@ -572,7 +582,11 @@ def record_integration_call(integration: str, tool: str, agent: str, method: str
                             approval: str = '', decided_at: int = 0,
                             decided_by: str = '', host: str = '',
                             resolved_ips: str = '', reason_code: str = '',
-                            final_url: str = ''):
+                            final_url: str = '', session_source: str = None):
+    # Default the provenance from the request context so every executor
+    # (proxy, WS, handler, denial) records it without threading a parameter.
+    if session_source is None:
+        session_source = current_session_source('')
     with db_conn() as conn:
         cursor = conn.cursor()
         now = int(time.time())
@@ -581,13 +595,14 @@ def record_integration_call(integration: str, tool: str, agent: str, method: str
                 (integration, tool, agent, method, path, status_code, latency_ms,
                  response_summary, response_bytes, truncated, outcome, session_id,
                  execution_id, reason, request_summary, approval, decided_at,
-                 decided_by, host, resolved_ips, reason_code, final_url, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 decided_by, host, resolved_ips, reason_code, final_url,
+                 session_source, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (integration, tool, agent, method, path, status_code, latency_ms,
               response_summary, response_bytes, truncated, outcome, session_id,
               execution_id, reason, request_summary, approval, decided_at or 0,
               decided_by, host or '', resolved_ips or '', reason_code or '',
-              final_url or '', now))
+              final_url or '', session_source or '', now))
         conn.commit()
         return cursor.lastrowid
 
@@ -740,17 +755,17 @@ def list_recent_session_summaries(limit: int = 24):
 
 def create_pending_call(integration: str, tool: str, payload: dict, reason: str = '',
                         session_id: str = '', execution_id: str = '',
-                        agent: str = '') -> int:
+                        agent: str = '', session_source: str = '') -> int:
     with db_conn() as conn:
         cursor = conn.cursor()
         now = int(time.time())
         cursor.execute('''
             INSERT INTO pending_integration_calls
                 (integration, tool, payload, reason, status, session_id,
-                 execution_id, agent, created_at)
-            VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?)
+                 execution_id, agent, session_source, created_at)
+            VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)
         ''', (integration, tool, json.dumps(payload or {}), reason, session_id,
-              execution_id, agent, now))
+              execution_id, agent, session_source or '', now))
         conn.commit()
         return cursor.lastrowid
 

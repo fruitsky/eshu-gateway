@@ -123,7 +123,7 @@ def get_session_summary(session_id: str) -> dict:
               SUM(status = 'fleet-run') AS fleet_run,
               SUM(status = 'consumed') AS consumed,
               SUM(status IN ('approved','auto-approved','consumed','window-approved','fleet-run')) AS approved,
-              SUM(status IN ('denied','blocked','window-rejected','integration-denied','frozen')) AS refused,
+              SUM(status IN ('denied','blocked','window-rejected','integration-denied','frozen','session-required')) AS refused,
               SUM(status = 'expired') AS expired,
               MIN(created_at) AS first_seen,
               MAX(created_at) AS last_seen
@@ -155,20 +155,29 @@ def get_session_coverage(days: int = 7) -> dict:
     """How much traffic carries a caller-supplied session id.
 
     A quality metric, not a rule: SSH tagging is voluntary, so this is the
-    number that shows whether asking the agent is working.
+    number that shows whether asking the agent is working. On the MCP side only
+    an explicit argument counts: an inherited id (bound by session_begin) and
+    the `mcp-…` transport fallback are reported as `auto`, so making the
+    fallback smarter does not make the agents look more compliant than they
+    are. Historical rows (session_source = '') keep the old behaviour.
     """
     since = int(time.time()) - max(1, int(days)) * 86400
     with db_conn() as conn:
         cur = conn.cursor()
         cur.execute('''
             SELECT COUNT(*) AS total,
-                   SUM(CASE WHEN session_id NOT IN ('', 'unknown') THEN 1 ELSE 0 END) AS tagged
+                   SUM(CASE WHEN session_id NOT IN ('', 'unknown') THEN 1 ELSE 0 END) AS tagged,
+                   0 AS auto
             FROM requests WHERE created_at >= ?
         ''', (since,))
         ssh = dict(cur.fetchone())
         cur.execute('''
             SELECT COUNT(*) AS total,
-                   SUM(CASE WHEN session_id NOT IN ('', 'unknown') THEN 1 ELSE 0 END) AS tagged
+                   SUM(CASE WHEN session_id NOT IN ('', 'unknown')
+                             AND session_source NOT IN ('inherited', 'transport')
+                             AND session_id NOT LIKE 'mcp-%' THEN 1 ELSE 0 END) AS tagged,
+                   SUM(CASE WHEN session_source IN ('inherited', 'transport')
+                             OR session_id LIKE 'mcp-%' THEN 1 ELSE 0 END) AS auto
             FROM integration_calls WHERE created_at >= ?
         ''', (since,))
         mcp = dict(cur.fetchone())
@@ -177,5 +186,6 @@ def get_session_coverage(days: int = 7) -> dict:
         total = int(row.get('total') or 0)
         tagged = int(row.get('tagged') or 0)
         out[label] = {'total': total, 'tagged': tagged,
+                      'auto': int(row.get('auto') or 0),
                       'pct': round(100.0 * tagged / total) if total else 0}
     return out

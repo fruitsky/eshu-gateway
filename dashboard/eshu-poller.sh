@@ -54,6 +54,39 @@ while true; do
     fi
     mv -f /etc/eshu-zero-trust.tmp /etc/eshu-zero-trust 2>/dev/null || true
 
+    # Sync the session signing key + enforcement flag. The gateway verifies the
+    # HMAC locally, so it needs the key before the flag is switched on.
+    SESSION_KEY=$(python3 -c "import sys, json; print(json.load(sys.stdin).get('session_signing_key',''))" < /tmp/eshu-policy.json 2>/dev/null || echo "")
+    SESSION_KEY_PREV=$(python3 -c "import sys, json; print(json.load(sys.stdin).get('session_signing_key_prev',''))" < /tmp/eshu-policy.json 2>/dev/null || echo "")
+    if [ -n "$SESSION_KEY" ]; then
+      ( umask 077; printf '%s' "$SESSION_KEY" > /etc/eshu-session-key.tmp )
+      if chown root:eshu-gateway /etc/eshu-session-key.tmp 2>/dev/null; then
+        chmod 640 /etc/eshu-session-key.tmp
+      else
+        chmod 644 /etc/eshu-session-key.tmp
+      fi
+      mv -f /etc/eshu-session-key.tmp /etc/eshu-session-key
+      if [ -n "$SESSION_KEY_PREV" ]; then
+        ( umask 077; printf '%s' "$SESSION_KEY_PREV" > /etc/eshu-session-key.prev.tmp )
+        if chown root:eshu-gateway /etc/eshu-session-key.prev.tmp 2>/dev/null; then
+          chmod 640 /etc/eshu-session-key.prev.tmp
+        else
+          chmod 644 /etc/eshu-session-key.prev.tmp
+        fi
+        mv -f /etc/eshu-session-key.prev.tmp /etc/eshu-session-key.prev
+      else
+        : > /etc/eshu-session-key.prev
+        chmod 640 /etc/eshu-session-key.prev 2>/dev/null || true
+      fi
+    fi
+    SESSION_REQUIRED=$(python3 -c "import sys, json; print(json.load(sys.stdin).get('require_sessions',0))" < /tmp/eshu-policy.json 2>/dev/null || echo "0")
+    if [ "$SESSION_REQUIRED" = "1" ]; then
+      echo "1" > /etc/eshu-require-session.tmp
+    else
+      : > /etc/eshu-require-session.tmp
+    fi
+    mv -f /etc/eshu-require-session.tmp /etc/eshu-require-session 2>/dev/null || true
+
     # Fleet Run — dispatch approved fleet commands detached via systemd-run.
     # The runner posts running/success/failed/timeout back to the dashboard.
     FLEET_CMD_ID=$(python3 -c "import sys, json; print(json.load(sys.stdin).get('pending_fleet_cmd_id',''))" < /tmp/eshu-policy.json 2>/dev/null || echo "")
