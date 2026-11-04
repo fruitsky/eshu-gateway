@@ -2725,6 +2725,9 @@ input::placeholder, textarea::placeholder { color: var(--text-muted); }
 .flag-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:9px 12px;background:rgba(26,23,20,0.45);border:1px solid rgba(45,41,34,0.4);border-radius:6px;margin-bottom:8px}
 .flag-row{flex-wrap:wrap}
 .flag-row>div:first-child{flex:1 1 220px;min-width:0}
+.flag-copy{flex:1 1 260px;min-width:0}
+.flag-state{margin-top:2px}
+.seg-btn:disabled,.seg-btn.seg-disabled{opacity:.35;cursor:not-allowed}
 .flag-row .seg-group{flex-shrink:0;margin-left:auto}
 .flag-row .seg-btn{flex:none;white-space:nowrap}
 .flag-row .f-name{font-family:'JetBrains Mono',monospace;font-size: 11px;color:var(--text-main)}

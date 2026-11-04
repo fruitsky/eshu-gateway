@@ -466,7 +466,10 @@ async function switchView(target) {
     // widgets (and the feature-flag list) should load. Without this, the
     // first visit to Settings left the list on "Loading...".
     fetchDevTools().then(function () {
-      if (_devToolsEnabled) { fetchDevStatus(); fetchDevGateways(); fetchFeatureFlags(); }
+      if (_devToolsEnabled) {
+        fetchDevStatus();
+        fetchDevGateways().then(fetchFeatureFlags);
+      }
     });
   }
   if (target === 'logs') { fetchAuditLog(); }
@@ -497,6 +500,7 @@ async function setDashboardPassword() {
 
 // ── Dev Tools ────────────────────────────────────────────────────────────
 let _devToolsEnabled = false;
+let _devGateways = [];
 async function fetchDevTools() {
   try {
     const res = await authFetch('/api/settings/dev-tools');
@@ -520,7 +524,10 @@ async function toggleDevTools() {
   try {
     await authFetch('/api/settings/dev-tools', { method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({enabled: _devToolsEnabled}) });
     renderDevTools();
-    if (_devToolsEnabled) { fetchDevStatus(); fetchDevGateways(); fetchFeatureFlags(); }
+    if (_devToolsEnabled) {
+      fetchDevStatus();
+      fetchDevGateways().then(fetchFeatureFlags);
+    }
     showToast(_devToolsEnabled ? 'Development tools enabled' : 'Development tools disabled', 'success');
   } catch(e) {
     _devToolsEnabled = !_devToolsEnabled;
@@ -529,33 +536,67 @@ async function toggleDevTools() {
 }
 
 // ── Dev Mode Features ────────────────────────────────────────────────
+// A short, plain-English name/help for the flags that operators are most
+// likely to touch. The technical name stays visible beside the label.
+const FLAG_META = {
+  require_sessions: {
+    label: 'Require named sessions',
+    help: 'Agents must call session_begin(goal=..., session_id=...) and use the signed id on every SSH command and MCP call. Off by default; existing agents keep working until you enable it.'
+  }
+};
+
+function flagStateText(on, scope) {
+  if (!on) return 'Off — no enforcement.';
+  return scope === 'prod'
+    ? 'On for every gateway and all MCP calls.'
+    : 'On for dev-mode gateways and all MCP calls.';
+}
+
 async function fetchFeatureFlags() {
   try {
     const res = await fetch('/api/feature-flags'); const flags = await res.json();
     const container = document.getElementById('feature-flags-list');
     if (!container) return;
     let html = '';
+    var hasDev = (_devGateways || []).length > 0;
     Object.entries(flags).forEach(function(e) {
       var name = e[0], info = e[1], on = info.enabled, sc = info.scope || 'dev';
+      var meta = FLAG_META[name] || {};
+      var label = meta.label || name;
+      var desc = meta.help || info.description || '';
       var state = 'off';
       if (on && sc === 'dev') state = 'dev';
       if (on && sc === 'prod') state = 'prod';
       html += '<div class="flag-row">' +
-        '<div><span class="text-sm text-main">' + escapeHtml(name) + '</span><p class="text-xs text-muted">' + escapeHtml(info.description) + '</p></div>' +
+        '<div class="flag-copy">' +
+          '<div><span class="text-sm text-main">' + escapeHtml(label) + '</span>' +
+            (meta.label ? ' <code class="text-xs text-muted">' + escapeHtml(name) + '</code>' : '') +
+          '</div>' +
+          '<p class="text-xs text-muted">' + escapeHtml(desc) + '</p>' +
+          '<p class="text-xs text-muted flag-state">' + escapeHtml(flagStateText(on, sc)) + '</p>' +
+        '</div>' +
         '<div class="seg-group">' +
-          renderSeg('off', state, name) +
-          renderSeg('dev', state, name) +
-          renderSeg('prod', state, name) +
+          renderSeg('off', state, name, false) +
+          renderSeg('dev', state, name, !hasDev) +
+          renderSeg('prod', state, name, false) +
         '</div></div>';
     });
     container.innerHTML = html || '<p class="text-muted">No feature flags configured.</p>';
   } catch(e) {}
 }
 
-function renderSeg(val, current, name) {
+function renderSeg(val, current, name, disabled) {
   var active = val === current;
   var label = val === 'off' ? 'Off' : val === 'dev' ? 'Dev' : 'Prod';
-  return '<button onclick="setFeatureFlagState(\'' + name + '\',\'' + val + '\')" class="seg-btn' + (active ? ' active ' + val : '') + '">' + label + '</button>';
+  var title = val === 'off'
+    ? 'No enforcement'
+    : val === 'dev'
+      ? 'Dev-mode gateways and all MCP calls'
+      : 'Every gateway and all MCP calls';
+  if (disabled && !active) title = 'No dev gateways configured';
+  return '<button onclick="setFeatureFlagState(\'' + name + '\',\'' + val + '\')" ' +
+    'class="seg-btn' + (active ? ' active ' + val : '') + (disabled && !active ? ' seg-disabled' : '') + '" ' +
+    (disabled && !active ? 'disabled ' : '') + 'title="' + escapeHtml(title) + '">' + label + '</button>';
 }
 
 async function setFeatureFlagState(name, state) {
