@@ -37,11 +37,31 @@ not a first run, even if the flag was never written.
 |---|---|---|
 | `key` | shows `ssh-keygen`, takes the **public** key, `PUT /api/enroll/keys` | `key_configured` |
 | `gateway` | `POST /api/enroll/generate`, shows the one-liner, polls `/api/gateways` every 3s until a gateway appears | gateway count |
-| `agent` | the `~/.ssh/config` block and the first `ssh … "uptime"`, using the first enrolled hostname | gateway list (for the host) |
-| `integrations` | three example integration cards and a link to the Integrations view | none |
+| `agent` | the `~/.ssh/config` block, the `session_begin` call, and the first signed `ssh … ` command, using the first enrolled hostname | gateway list (for the host) |
+| `integrations` | four example integration cards and a link to the Integrations view | none |
 
 The wizard never invents a state: if the key is already saved it says so, and
 if the agent is opened after enrolment step 2 shows the gateway by name.
+
+### The session contract (step 3)
+
+Step 3 must match what the fleet enforces. The agent calls
+`session_begin(goal="…", session_id="<chat id>")` and gets back a
+`session_sig` plus an `ssh_prefix`:
+
+```
+ESHU_SESSION_ID=<id> ESHU_SESSION_SIG=<signature> <command>
+```
+
+Every SSH command carries that prefix; every MCP call passes `session_id`. A
+gateway with `/etc/eshu-require-session` set to `1` refuses an unsigned command
+with `[LOCKED] A minted Session is required…`, so never show a bare
+`ssh host "uptime"` — it works only on a gateway that has not opted into strict
+mode.
+
+The prefix is shown with ellipses on purpose: signatures are long, and the
+point is the shape, not a value someone could copy. Describe it as something the
+agent does, not another thing the operator types.
 
 ## Editing it
 
@@ -65,8 +85,13 @@ the footer's last button becomes **Finish** automatically. To insert a step,
 add an object in the right position and a renderer; nothing else changes.
 
 `ONB_INTEGRATIONS` is the card list: `name`, `kind`, `url`, `blurb` and two or
-three example `tools`. They are rendered previews, not screenshots — they stay
-crisp, theme with the page, and cannot go stale.
+three example `tools`. There are four cards, laid out 2×2 (one column on a
+phone); adding a fifth means the grid needs `repeat(3, 1fr)` or a scroll, so
+prefer replacing one over growing the set. They are rendered previews, not
+screenshots — they stay crisp, theme with the page, and cannot go stale.
+
+Blurbs are single-quoted strings, so no apostrophes; `check_onboarding.py` reads
+them with a regex and will not parse a card that breaks the shape.
 
 ## Copy and design rules
 
@@ -93,7 +118,8 @@ For the real thing, run the dashboard against a fresh DB:
 1. log in — the modal opens on step 1;
 2. save a public key — the step shows "Public key saved";
 3. continue, generate a token — the command and the waiting pulse appear;
-4. continue through the agent and integrations steps;
+4. continue — step 3 names the enrolled gateway and shows the signed command,
+   step 4 shows four cards in a 2×2 grid;
 5. **Finish** — the modal closes and does not return on reload;
 6. **Settings → Getting started → Open** reopens it.
 

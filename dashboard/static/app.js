@@ -7535,14 +7535,17 @@ var ONB_STEPS = [
     lede: 'One one-liner installs the policy gate on a host and starts its poller.',
     render: onbStepGateway },
   { id: 'agent', label: 'Agent', title: 'Let the agent in',
-    lede: 'Point the agent at its private key, then make the first request.',
+    lede: 'Point the agent at its private key, then begin every task with a signed session.',
     render: onbStepAgent },
   { id: 'integrations', label: 'Integrations', title: 'Beyond SSH',
-    lede: 'The same gate for your homelab APIs: reads run, writes wait for you.',
+    lede: 'The same gate for Proxmox, Home Assistant, Commute and your own APIs.',
     render: onbStepIntegrations }
 ];
 
 var ONB_INTEGRATIONS = [
+  { name: 'Commute', kind: 'commute', url: '/api/commute/due',
+    blurb: 'Profiles, the day gate and notify slots live in Eshu; the scheduler only asks what is due.',
+    tools: ['commute_check', 'commute_override', 'profiles'] },
   { name: 'Proxmox', kind: 'proxmox', url: 'https://proxmox.home.lan:8006/api2/json',
     blurb: 'Nodes, VMs and containers. Reads are free; start, stop and reboot wait for your approval.',
     tools: ['list nodes', 'vm status', 'start / stop'] },
@@ -7719,10 +7722,11 @@ function onbStepGateway() {
     return out;
   }
   var cmd = 'curl -s "' + window.location.origin + '/api/enroll?token=' + _onb.token + '" | bash';
-  out += onbCmd(cmd) +
-    '<div class="onb-status ' + (enrolled ? 'ok' : 'wait') + '"><span class="onb-dot"></span>' +
-      (enrolled ? 'Gateway enrolled' : 'Waiting for the gateway to check in…') + '</div>' +
-    '<p class="onb-note">The token is single-use and expires in 30 minutes. Run the command with sudo.</p>';
+  /* Enrolled: the ✓ line above already names the gateway, so a second
+     "Gateway enrolled" row would just repeat it. */
+  out += onbCmd(cmd);
+  if (!enrolled) out += '<div class="onb-status wait"><span class="onb-dot"></span>Waiting for the gateway to check in…</div>';
+  out += '<p class="onb-note">The token is single-use and expires in 30 minutes. Run the command with sudo.</p>';
   return out;
 }
 
@@ -7763,15 +7767,17 @@ function onbStepAgent() {
   var g = _onb.gatewayList[0] || {};
   var host = g.hostname || g.ip || '<gateway>';
   var cfg = 'Host eshu-*\n  User eshu-gateway\n  IdentityFile ~/.ssh/eshu_gateway\n  IdentitiesOnly yes';
-  return '<p class="onb-para">The private key lives on the agent\'s machine — owned by its user, <code>chmod 600</code>. Point the agent at it once:</p>' +
+  return '<p class="onb-para">The private key stays on the agent\'s machine — owned by its user, <code>chmod 600</code>.</p>' +
     onbCmd(cfg) +
-    '<p class="onb-sub">Then ask the agent to run its first command:</p>' +
-    onbCmd('ssh eshu-gateway@' + host + ' "uptime"') +
-    '<p class="onb-note">Anything the policy does not clear lands in your queue for approve or deny. Nothing runs by accident.</p>';
+    '<p class="onb-sub">Every task starts with a goal</p>' +
+    onbCmd('session_begin(goal="turn on the patio lights", session_id="<chat id>")') +
+    '<p class="onb-sub">Then every command carries the prefix</p>' +
+    onbCmd('ssh eshu-gateway@' + host + ' "ESHU_SESSION_ID=… ESHU_SESSION_SIG=… uptime"') +
+    '<p class="onb-note">The prefix is the id plus its signature. A gateway with <code>/etc/eshu-require-session</code> refuses a command that does not carry both.</p>';
 }
 
 function onbStepIntegrations() {
-  return '<p class="onb-para">Eshu can gate homelab APIs over MCP as well — same audit, same approvals, applied to <b>Integrations</b>.</p>' +
+  return '<p class="onb-para">Beyond SSH, Eshu holds the credentials and the rules: reads run where you allow them, and anything that changes state waits for you. Add one in <b>Integrations</b>.</p>' +
     '<div class="onb-cards">' + ONB_INTEGRATIONS.map(onbIntegrationCard).join('') + '</div>' +
     '<div class="onb-row"><button class="btn btn-muted btn-xs" onclick="onbOpenIntegrations()">Open Integrations</button>' +
       '<span class="onb-note">Add one, seed its tools, then create an agent token.</span></div>';
