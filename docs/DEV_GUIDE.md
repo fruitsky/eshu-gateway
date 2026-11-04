@@ -172,7 +172,7 @@ database — no production data is touched.
 | `test_enrollment.py` | 11 | Enrollment tokens, install-script generation, single-key flow |
 | `test_fleet.py` | 36 | Fleet Run compose/dispatch/results, gateways-by-token, fleet delivery |
 | `test_freeze.py` | 12 | Emergency Freeze trigger, poller rejects while frozen, unfreeze |
-| `test_gateway_script.py` | 37 | Hermetic gateway-script harness: freeze, hard block, central blocklist, allowlists, zero-trust, JIT, ticket claim, sanitizer, exit sentinel |
+| `test_gateway_script.py` | 46 | Hermetic gateway-script harness: freeze, hard block, central blocklist, allowlists, zero-trust, JIT, ticket claim, sanitizer, exit sentinel |
 | `test_golden.py` | 26 | Build → Edge → Fleet pipeline: seed/promote/rollback, hashes, dev-gateways auth |
 | `test_installer.py` | 5 | Installer template: scoped token sed, no approver key, arg shift |
 | `test_learning.py` | 16 | Background gap scanner finds repeated JIT approvals + repeated denials, new/seen states |
