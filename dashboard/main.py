@@ -2512,6 +2512,7 @@ class AgentPolicyPayload(BaseModel):
 class CommuteDuePayload(BaseModel):
     person: str
     at: str | None = None
+    date: str | None = None
     dry_run: bool = False
 
 
@@ -2648,6 +2649,51 @@ def set_agent_policy_endpoint(agent_id: int, payload: AgentPolicyPayload,
     return get_agent_policy(agent_id)
 
 
+COMMUTE_READ_AGENTS = {"rowana-household", "hermes", "commute-cron"}
+
+
+def _commute_reader(request: Request) -> str:
+    """Allow a valid commute agent token, or a dashboard session."""
+    agent = resolve_agent_optional(request)
+    if agent:
+        name = (agent.get("name") or "").strip()
+        if name not in COMMUTE_READ_AGENTS:
+            raise HTTPException(status_code=403,
+                                detail="Agent is not allowed to read commute profiles")
+        return name
+    _check_session(request)
+    return "dashboard"
+
+
+@app.get("/api/commute/profiles")
+def commute_profiles_endpoint(request: Request):
+    """Read-only profile inventory for the gate/UI. No chat ids are stored."""
+    _commute_reader(request)
+    from core.commute import summary
+    from db.commute import list_profiles
+    profiles = list_profiles()
+    summaries = {}
+    for person, profile in profiles.items():
+        try:
+            summaries[person] = summary(person, profile)
+        except Exception:  # noqa: BLE001 - a malformed row must not hide the rest
+            summaries[person] = ""
+    return {"people": sorted(profiles), "profiles": profiles,
+            "summaries": summaries}
+
+
+@app.get("/api/commute/profile/{person}")
+def commute_profile_endpoint(person: str, request: Request):
+    _commute_reader(request)
+    from core.commute import summary
+    from db.commute import get_profile
+    profile = get_profile(person.strip().lower())
+    if not profile:
+        raise HTTPException(status_code=404, detail="Commute profile not found")
+    return {"person": person.strip().lower(), "profile": profile,
+            "text": summary(person.strip().lower(), profile)}
+
+
 @app.post("/api/commute/due")
 def commute_due_endpoint(payload: CommuteDuePayload, request: Request):
     """Scheduler trigger: decide whether a notify slot is due and compose it.
@@ -2665,7 +2711,8 @@ def commute_due_endpoint(payload: CommuteDuePayload, request: Request):
                             detail="Agent is not allowed to run the commute scheduler")
     from core.commute import CommuteError, due
     try:
-        return due(payload.person, at=payload.at, dry_run=payload.dry_run)
+        return due(payload.person, at=payload.at, dry_run=payload.dry_run,
+                   date_value=payload.date)
     except CommuteError as exc:
         raise HTTPException(status_code=400, detail=exc.message)
 

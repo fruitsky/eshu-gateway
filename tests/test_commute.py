@@ -262,6 +262,26 @@ class TestDue:
         assert result["send"] is True
         assert not store.was_sent("gui", "2026-11-02", "05:25")
 
+    def test_future_date_requires_dry_run(self, monkeypatch):
+        monkeypatch.setattr(commute.store, "get_profile", lambda person: PROFILE)
+        monkeypatch.setattr(commute, "now_london", fake_now)
+        monkeypatch.setattr(commute, "bank_holidays", lambda: set())
+        with pytest.raises(commute.CommuteError) as exc:
+            commute.due("gui", at="05:25", date_value="2026-11-06")
+        assert exc.value.code == "date_requires_dry_run"
+
+    def test_future_date_dry_run(self, monkeypatch):
+        monkeypatch.setattr(commute.store, "get_profile", lambda person: PROFILE)
+        monkeypatch.setattr(commute, "now_london", fake_now)
+        monkeypatch.setattr(commute, "bank_holidays", lambda: set())
+        monkeypatch.setattr(commute, "check", lambda *a, **k: {
+            "level": "normal", "text": "hello"})
+        store.clear_sent("gui", "2026-11-06")
+        result = commute.due("gui", at="05:25", dry_run=True,
+                             date_value="2026-11-06")
+        assert result["send"] is True
+        assert result["date"] == "2026-11-06"
+
     def test_day_gate_blocks(self, monkeypatch):
         tue_profile = dict(PROFILE, days=["tue"])
         monkeypatch.setattr(commute.store, "get_profile", lambda person: tue_profile)
@@ -269,6 +289,39 @@ class TestDue:
         monkeypatch.setattr(commute, "bank_holidays", lambda: set())
         result = commute.due("gui", at="05:25")
         assert result["send"] is False
+
+
+class TestProfileCreation:
+    def test_set_creates_missing_profile(self):
+        patch = {
+            "display_name": "New Person",
+            "from": {"name": "Chelsfield Rail Station", "naptan": "910GCHLSFLD"},
+            "to": {"name": "Cannon Street", "naptan": "910GCANONST"},
+            "days": ["mon"],
+            "arrive_by": "07:00",
+            "usual_train": "06:00",
+            "notify_times": ["05:30"],
+        }
+        out = json.loads(commute.handle_commute_profile_set(
+            None, None, {"person": "new", "patch": patch}))
+        assert out["ok"] is True
+        saved = store.get_profile("new")
+        assert saved["days"] == ["mon"]
+        assert saved["notify_times"] == ["05:30"]
+        assert saved["never_before"] == "06:00"
+
+    def test_create_rejects_incomplete_profile(self):
+        patch = {
+            "from": {"name": "Chelsfield Rail Station", "naptan": "910GCHLSFLD"},
+            "days": ["mon"],
+            "arrive_by": "07:00",
+            "usual_train": "06:00",
+            "notify_times": ["05:30"],
+        }
+        out = json.loads(commute.handle_commute_profile_set(
+            None, None, {"person": "new", "patch": patch}))
+        assert out["ok"] is False
+        assert store.get_profile("new") is None
 
 
 class TestStore:
@@ -372,6 +425,38 @@ class TestSeed:
         created, updated = seed_for_kind(get_integration("commute"))
         assert created == 0
         assert updated == len(COMMUTE_SEED_TOOLS)
+
+
+class TestProfileEndpoints:
+    def test_session_can_list_and_read(self, auth_client):
+        store.save_profile("gui", PROFILE)
+        listing = auth_client.get("/api/commute/profiles")
+        assert listing.status_code == 200
+        assert "gui" in listing.json()["people"]
+        one = auth_client.get("/api/commute/profile/gui")
+        assert one.status_code == 200
+        assert one.json()["profile"]["notify_times"] == ["05:25"]
+
+    def test_agent_token_can_read(self, client):
+        raw, _agent_id = create_agent_token("commute-cron")
+        store.save_profile("gui", PROFILE)
+        response = client.get(
+            "/api/commute/profile/gui",
+            headers={"Authorization": f"Bearer {raw}"})
+        assert response.status_code == 200
+
+    def test_requires_auth(self, client):
+        assert client.get("/api/commute/profiles").status_code == 401
+
+    def test_wrong_agent_forbidden(self, client):
+        raw, _agent_id = create_agent_token("someone-else")
+        response = client.get(
+            "/api/commute/profiles",
+            headers={"Authorization": f"Bearer {raw}"})
+        assert response.status_code == 403
+
+    def test_unknown_profile_404(self, auth_client):
+        assert auth_client.get("/api/commute/profile/nobody").status_code == 404
 
 
 class TestDueEndpoint:

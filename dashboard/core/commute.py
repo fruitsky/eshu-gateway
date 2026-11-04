@@ -639,13 +639,22 @@ def chat_check(person: str, at: str | None = None) -> dict:
     }
 
 
-def due(person: str, at: str | None = None, dry_run: bool = False) -> dict:
+def due(person: str, at: str | None = None, dry_run: bool = False,
+        date_value=None) -> dict:
     """Scheduler path: decide whether a notify slot is due and compose it."""
     profile = store.get_profile(person)
     if not profile:
         raise CommuteError("unknown_person", f"No commute profile for {person!r}.")
     now = now_london(at)
     day = now.date()
+    if date_value:
+        target = parse_date(date_value, "date")
+        if target != day and not dry_run:
+            raise CommuteError(
+                "date_requires_dry_run",
+                "date is only accepted with dry_run=true")
+        day = target
+        now = now.replace(year=target.year, month=target.month, day=target.day)
     should, why = day_gate(profile, day, bank_holidays())
     if not should:
         return {"ok": True, "person": person, "date": day.isoformat(),
@@ -710,10 +719,23 @@ def summary(person: str, profile: dict) -> str:
 
 
 def update_profile(person: str, patch: dict, agent: str = '') -> dict:
+    if not isinstance(patch, dict):
+        raise CommuteError("bad_patch", "patch: give a JSON object")
     current = store.get_profile(person)
     if not current:
-        raise CommuteError("unknown_person", f"No commute profile for {person!r}.")
-    merged = validate_patch(patch, current)
+        seed = {
+            "display_name": person.title(),
+            "never_before": patch.get("usual_train"),
+            "warn_minutes": 3,
+            "lines": list(DEFAULT_LINES),
+            "alerts_only": False,
+            "overrides": {},
+            "paused_until": None,
+        }
+        seed.update(patch)
+        merged = validate_patch(seed, {})
+    else:
+        merged = validate_patch(patch, current)
     saved = store.save_profile(person, merged, agent)
     return {"ok": True, "person": person, "text": summary(person, saved),
             "profile": saved}

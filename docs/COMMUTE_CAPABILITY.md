@@ -17,7 +17,21 @@ scoped to the household agent.
 
 Shared `/mcp` names are `commute_check`, `commute_profile_get`, etc.;
 `/mcp/commute` exposes `check`, `profile_get`, `profile_set`, `override` and
-`pause` un-namespaced. Write tools are `principal_allow: ["rowana-household"]`.
+`pause` un-namespaced.
+
+`commute_profile_set` also creates a profile when the person does not exist, if
+the required fields (`from`, `to`, `days`, `arrive_by`, `usual_train`,
+`notify_times`) are present. Other fields default.
+
+Read-only profile endpoints for the gate/UI:
+
+```text
+GET /api/commute/profiles
+GET /api/commute/profile/{person}
+```
+
+Both accept a dashboard session or one of the commute agent tokens
+(`rowana-household`, `hermes`, `commute-cron`). No chat ids are stored. Write tools are `principal_allow: ["rowana-household"]`.
 
 ## Scheduler endpoint
 
@@ -32,6 +46,15 @@ Returns `{send, slot, text, ...}`. Eshu checks the day gate, notify times and
 `commute_notify_state`; it records the slot only when it returns a message.
 The harness prints `text` when `send` is true. `dry_run` composes without
 recording (shadow testing).
+
+`date` is accepted only with `dry_run=true`, for future-day acceptance tests:
+
+```json
+{"person": "megan", "at": "05:30", "date": "2026-11-05", "dry_run": true}
+```
+
+Live scheduling always uses the current day. A real send at a slot marks it sent,
+so the one-minute grace window cannot produce a duplicate production message.
 
 The preferred host-side trigger is the generic `eshu_call.py` client plus a
 tiny shim:

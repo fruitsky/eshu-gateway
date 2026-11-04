@@ -70,8 +70,11 @@ COMMUTE_SEED_TOOLS = [
         "description": (
             "Change a person's permanent commute settings. Applies immediately "
             "— no approval step — then returns the stored profile; repeat that "
-            "read-back. Use only after commute_profile_get and after resolving "
-            "which person (Gui or Megan) if ambiguous. Patch fields: days, "
+            "read-back. If the person does not exist yet, this creates the "
+            "profile: provide from, to, days, arrive_by, usual_train and "
+            "notify_times; the other fields default. Use only after "
+            "commute_profile_get (when it exists) and after resolving which "
+            "person if ambiguous. Patch fields: days, "
             "arrive_by, usual_train, never_before, notify_times (list of HH:MM), "
             "warn_minutes, lines, alerts_only, display_name, from, to. For a "
             "single date use commute_override, not this. Never change days for a "
