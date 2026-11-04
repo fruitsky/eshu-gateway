@@ -38,7 +38,25 @@ An **id** is what ties one task's SSH commands and MCP calls into a single
 Session in the dashboard. **Use the same id on both surfaces** — one task, one
 id, never two.
 
-**Start each task with `session_begin`.** If your client already has a
+> **Session contract — do this for every new task.** Call `session_begin` with
+> **both** a specific human-readable `goal` (the session name) and the id you
+> will use:
+>
+> ```json
+> {"name": "session_begin", "arguments": {"goal": "Investigate pve2 NVMe overheating (P-005), read-only", "session_id": "<your chat id>"}}
+> ```
+>
+> - `goal` is not optional in practice: it is the name the operator sees in the
+>   Sessions list. Use a specific task name, not "task" or "investigation".
+> - `session_id` is the client's conversation/chat id whenever one exists. If
+>   there is none, omit it once and keep the minted id.
+> - Then pass that id on **every** Eshu tool call and prefix **every** SSH
+>   command with `ESHU_SESSION_ID=<id>`. Do not open a second session for the
+>   next step of the same task.
+> - End with `session_summary(session_id="<id>")` — the explicit id, not the
+>   no-argument form.
+
+**Every new session starts with `session_begin`.** If your client already has a
 conversation id (Hermes' chat id, a cron origin id), pass it, so the chat and
 the dashboard session stay the same thing:
 
@@ -86,8 +104,9 @@ approved and then fail.
 
 Rules:
 
-- **One id per task.** If you minted one, keep the returned id and pass it on
-  every later call; never mix a minted id with your chat id.
+- **One name and one id per task.** The `goal` is the name the operator sees;
+  the id is the grouping key. Keep both for the whole task, pass the id on every
+  call, and never mix a minted id with your chat id.
 - **Both tools are always available**, even to an agent with a strict tool
   allowlist.
 - **Omission is not an error — it inherits.** After `session_begin`, an MCP call
@@ -111,6 +130,14 @@ Rules:
 - **A failed command is marked.** The gateway appends `[ESHU exit=N]` to the
   output on a non-zero exit and returns that status. `[OK] Approved!` means the
   ticket was approved, not that the command succeeded.
+
+**Checklist for every new session**
+
+1. `session_begin(goal="<specific task name>", session_id="<chat id>")`
+2. Every MCP call carries `session_id="<id>"`.
+3. Every SSH command starts with `ESHU_SESSION_ID=<id> `.
+4. End with `session_summary(session_id="<id>")`.
+5. One name and one id for the whole task; never reuse them for another task.
 
 The prefix is **stripped before policy evaluation** — it never changes how a
 command is classified (whitelist / JIT / FATAL). Keys coexist and can be

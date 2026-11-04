@@ -528,11 +528,13 @@ mcp.add_tool(check_approval_fn(), name="check_approval", description=CHECK_APPRO
 
 
 SESSION_BEGIN_DESC = (
-    "Start (or name) this task's dashboard Session. Pass your conversation/chat "
-    "id as session_id when you have one, so the chat id and the dashboard "
-    "session stay the same thing; omit it to mint a new id. Returns the id and "
-    "the exact ESHU_SESSION_ID prefix for SSH. Use that id on every Eshu tool "
-    "and every SSH command; the optional goal names the session."
+    "Start every new task with this. Always pass a specific human-readable "
+    "goal — it becomes the session name the operator sees. Pass your "
+    "conversation/chat id as session_id when you have one, so the chat and the "
+    "dashboard session are the same thing; omit it only when the client has no "
+    "id, then keep the minted one. Returns the id and the exact "
+    "ESHU_SESSION_ID prefix for SSH. Pass that id on every Eshu tool call and "
+    "prefix every SSH command; end with session_summary(session_id=<id>)."
 )
 
 
