@@ -500,7 +500,6 @@ async function setDashboardPassword() {
 
 // ── Dev Tools ────────────────────────────────────────────────────────────
 let _devToolsEnabled = false;
-let _devGateways = [];
 async function fetchDevTools() {
   try {
     const res = await authFetch('/api/settings/dev-tools');
