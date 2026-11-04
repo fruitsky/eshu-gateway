@@ -55,6 +55,7 @@ def init_db():
     from db.web_fetch import init_web_fetch_tables
     from db.sessions import init_sessions_tables
     from db.commute import init_commute_tables
+    from db.overrides import init_session_overrides_tables
 
     init_requests_tables(cursor)
     init_gateways_tables(cursor)
@@ -71,6 +72,7 @@ def init_db():
     init_web_fetch_tables(cursor)
     init_sessions_tables(cursor)
     init_commute_tables(cursor)
+    init_session_overrides_tables(cursor)
 
     conn.commit()
     conn.close()

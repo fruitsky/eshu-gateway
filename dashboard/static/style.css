@@ -621,6 +621,8 @@ button::-moz-focus-inner { border: 0; padding: 0; }
     z-index: 100;
   }
   #custom-confirm-overlay { z-index: 200; }
+  /* Opened from inside the session modal, so it must paint above it. */
+  #session-override-modal { z-index: 150; }
 
   /* ── Scrollbar ──────────────────────────────────────────── */
   ::-webkit-scrollbar { width: 6px; }
@@ -1168,6 +1170,8 @@ button::-moz-focus-inner { border: 0; padding: 0; }
   }
   .override-banner .btn-on-banner:hover,
   .freeze-banner .btn-on-banner:hover { background: rgba(240, 230, 212, 0.08); }
+  .session-ovr-item { text-transform: none; letter-spacing: 0.4px; }
+  .session-ovr-sep { opacity: 0.35; }
   @keyframes override-pulse {
     0%, 100% { opacity: 1; }
     50% { opacity: 0.85; }
@@ -1829,6 +1833,16 @@ textarea { font-family: 'JetBrains Mono', monospace; }
     font-size: 11px;
     color: var(--text-muted);
   }
+  .session-modal-id {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 4px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+  .session-modal-id code { overflow-wrap: anywhere; }
   .sm-pending { color: var(--status-warning); }
   .sm-approved { color: var(--status-success); }
   .sm-auto { color: var(--accent); opacity: 0.7; }

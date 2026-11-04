@@ -18,7 +18,10 @@ from db.integrations import (
     record_integration_call,
 )
 from core.agent_context import (current_session_id, get_current_agent,
-                               remember_session_for_transport)
+                               last_session_for_transport,
+                               remember_session_for_transport,
+                               reset_current_session_source,
+                               set_current_session_source)
 from core.agent_policy import approval_mode, evaluate_call
 from core.integration_proxy import (
     ProxyError,
@@ -141,23 +144,49 @@ def _deny(agent_name, integration, tool, tool_name, args, session_id,
     })
 
 
+def resolve_session(explicit: str = ''):
+    """Resolve the id for one call, and say where it came from.
+
+    An explicit `session_id` always wins. Otherwise the id `session_begin`
+    bound to this connection is inherited, so "name it once, then forget"
+    still groups the rest of the task. Only if the connection never named a
+    session does the call fall back to the transport bucket (`mcp-…`), which
+    is the honest "no session was named" case.
+    """
+    explicit = (explicit or '')[:64]
+    if explicit:
+        return explicit, 'caller'
+    inherited = last_session_for_transport()
+    if inherited:
+        return inherited, 'inherited'
+    transport = current_session_id()
+    return transport, ('transport' if transport else '')
+
+
 def run_tool(integration_name: str, tool_name: str, args: dict, reason: str = '') -> str:
     """Run one tool call, and tell the model which session it landed in.
 
-    The caller's own `session_id` argument always wins. When it is missing the
-    call still runs, grouped under the MCP transport session, and the result
-    carries that id so the agent can reuse it for SSH and later calls.
+    The caller's own `session_id` argument always wins. When it is missing, the
+    id from `session_begin` (remembered per connection) is inherited; only if
+    that connection never named a session does the call fall back to the
+    transport bucket. The result says which id it used and where it came from.
     """
     supplied = ((args or {}).get('session_id') or '')[:64]
-    result = _run_tool(integration_name, tool_name, args, reason)
+    sid, source = resolve_session(supplied)
+    source_token = set_current_session_source(source)
+    try:
+        result = _run_tool(integration_name, tool_name, args, reason,
+                           session_id=sid, session_source=source)
+    finally:
+        reset_current_session_source(source_token)
     if supplied:
         remember_session_for_transport(supplied)
         return result
-    sid = current_session_id()
-    return _annotate_session(result, sid) if sid else result
+    return _annotate_session(result, sid, source) if sid else result
 
 
-def _annotate_session(result: str, session_id: str) -> str:
+def _annotate_session(result: str, session_id: str,
+                      source: str = 'transport') -> str:
     """Add `_eshu.session_id` to a JSON object result. Never mutates arrays or
     non-JSON payloads — an annotation is a courtesy, not a payload change."""
     try:
@@ -166,11 +195,13 @@ def _annotate_session(result: str, session_id: str) -> str:
         return result
     if not isinstance(data, dict) or '_eshu' in data:
         return result
-    data['_eshu'] = {'session_id': session_id, 'source': 'transport'}
+    data['_eshu'] = {'session_id': session_id,
+                     'source': source or 'transport'}
     return json.dumps(data)
 
 
-def _run_tool(integration_name: str, tool_name: str, args: dict, reason: str = '') -> str:
+def _run_tool(integration_name: str, tool_name: str, args: dict, reason: str = '',
+              session_id: str = None, session_source: str = '') -> str:
     """Execute (or gate) one MCP tool call and return the JSON string for the model."""
     integration = get_integration(integration_name)
     if not integration or not integration.get('enabled'):
@@ -183,7 +214,9 @@ def _run_tool(integration_name: str, tool_name: str, args: dict, reason: str = '
     # Phase 2: MCP tool calls accept structured session_id / execution_id so the
     # dashboard groups them with SSH commands from the same agent conversation.
     # Popped here so they never reach the upstream API as forwarded params.
-    session_id = (args.pop('session_id', '') or '')[:64] or current_session_id()
+    explicit = (args.pop('session_id', '') or '')[:64]
+    if session_id is None:
+        session_id, session_source = resolve_session(explicit)
     execution_id = (args.pop('execution_id', '') or '')[:64]
 
     agent = get_current_agent()
@@ -290,7 +323,8 @@ def _run_tool(integration_name: str, tool_name: str, args: dict, reason: str = '
                 return pre
         call_id = create_pending_call(
             integration['name'], tool_name, args, reason,
-            session_id=session_id, execution_id=execution_id, agent=agent_name)
+            session_id=session_id, execution_id=execution_id, agent=agent_name,
+            session_source=session_source)
         from core.notify import send_notify
         send_notify('jit', 'API Approval Required',
                     '`%s` on %s by %s: ' % (tool_name, integration_name, agent_name)

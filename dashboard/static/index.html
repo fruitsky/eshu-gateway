@@ -124,6 +124,12 @@
     <button onclick="switchView('gateways')" class="btn btn-xs btn-on-banner">View Gateways</button>
   </div>
 
+  <!-- Session Override Banner (narrower than a host override) -->
+  <div id="session-override-banner" class="override-banner hidden">
+    <span id="session-override-banner-text" class="flex-1"></span>
+    <button onclick="switchView('home')" class="btn btn-xs btn-on-banner">View Sessions</button>
+  </div>
+
   <!-- Emergency Freeze Banner -->
   <div id="freeze-banner" class="freeze-banner hidden">
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="flex-shrink-0"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
@@ -1108,6 +1114,47 @@
   </div>
 </div>
 
+<!-- Session Override Modal (one session, one host by default) -->
+<div id="session-override-modal" class="modal-overlay hidden" onclick="if(event.target===this)closeSessionOverrideModal()">
+  <div class="widget max-w-md w-full">
+    <div class="widget-header">
+      <span>Session Override</span>
+      <button onclick="closeSessionOverrideModal()" class="modal-close" aria-label="Close">&times;</button>
+    </div>
+    <div class="mb-4">
+      <label class="text-xs block mb-1 text-muted">Session</label>
+      <p id="session-override-modal-session" class="text-main font-semibold"></p>
+      <p class="text-xs text-muted mt-2">Only SSH JIT commands carrying this session id. Zero-Trust and Freeze still win.</p>
+    </div>
+    <div class="mb-4">
+      <label class="text-xs block mb-1 text-muted">Applies to</label>
+      <p id="session-override-modal-host" class="text-main font-semibold"></p>
+      <label class="flex items-center gap-2 cursor-pointer select-none text-xs text-muted mt-2">
+        <input type="checkbox" id="session-override-any-host" onchange="syncSessionOverrideHost()">
+        Any host in this session
+      </label>
+    </div>
+    <div class="mb-4">
+      <label class="text-xs block mb-1 text-muted">Duration</label>
+      <select id="session-override-minutes" class="w-full text-xs">
+        <option value="15">15 minutes</option>
+        <option value="30" selected>30 minutes</option>
+        <option value="60">1 hour</option>
+        <option value="120">2 hours</option>
+        <option value="240">4 hours</option>
+      </select>
+    </div>
+    <div class="mb-4">
+      <label class="text-xs block mb-1 text-muted">Reason (required)</label>
+      <textarea id="session-override-reason" class="fleet-input" rows="3" placeholder="Why does this session need to bypass JIT?"></textarea>
+    </div>
+    <div class="flex justify-end gap-2">
+      <button onclick="closeSessionOverrideModal()" class="btn btn-muted btn-sm">Cancel</button>
+      <button onclick="confirmSessionOverride()" id="session-override-start-btn" class="btn btn-danger btn-sm">Start Session Override</button>
+    </div>
+  </div>
+</div>
+
 <!-- Remove Gateway Modal (choose remote uninstall vs force-remove) -->
 <div id="remove-gateway-modal" class="modal-overlay hidden">
   <div class="widget w-full max-w-md">
@@ -1284,12 +1331,17 @@
     <div class="session-modal-header">
       <div class="session-modal-title-row">
         <span class="session-modal-label">Session</span>
+        <button onclick="openSessionOverrideModal()" class="btn btn-muted btn-xs" title="Auto-approve this session's JIT commands for a bounded window">Override session</button>
         <button onclick="filterHistoryToSession()" class="btn btn-muted btn-xs" title="Show this session's commands in History">Filter history</button>
         <button onclick="closeModal('session-modal')" class="modal-close" aria-label="Close">&times;</button>
       </div>
       <div class="session-modal-name" id="sm-name" contenteditable="true" spellcheck="false" data-placeholder="Session name"></div>
       <div class="session-modal-desc" id="sm-desc" contenteditable="true" spellcheck="false" data-placeholder="Add a description..."></div>
       <div class="session-modal-meta" id="sm-meta"></div>
+      <div class="session-modal-id">
+        <code id="sm-id"></code>
+        <button onclick="copySessionId()" class="btn btn-muted btn-xs" title="Copy the full session id">Copy id</button>
+      </div>
     </div>
     <div class="session-modal-commands" id="sm-commands"></div>
   </div>

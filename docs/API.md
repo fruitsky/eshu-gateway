@@ -61,8 +61,11 @@ only the dashboard UI after login.
 | `DELETE` | `/api/requests?older_than=` | Purge request history (`30m`/`1h`/`1d`/`2d`/`7d`/`all`) | Session |
 | `GET` | `/api/gateways` | List registered gateways (incl. token status, policy sync, override state) | Session |
 | `POST` | `/api/gateways/{ip}/uninstall` | Trigger remote uninstall | Session |
-| `POST` | `/api/gateways/{ip}/override` | Start Override Mode (body: `{"minutes": 30, "reason": "..."}`; 1-1440 min) | Session |
+| `POST` | `/api/gateways/{ip}/override` | Start Override Mode (body: `{"minutes": 30, "reason": "..."}`; 1-1440 min) — every JIT on that host | Session |
 | `DELETE` | `/api/gateways/{ip}/override` | Cancel Override Mode early | Session |
+| `GET` | `/api/session-overrides` | List session overrides (active first, with `remaining`) | Session |
+| `POST` | `/api/session-overrides` | Grant one session a bounded JIT bypass (body: `{"session_id", "target_ip"?, "minutes", "reason"}`; empty `target_ip` = any host) — SSH JIT only; Zero-Trust/Freeze still win | Session |
+| `DELETE` | `/api/session-overrides/{id}` | Cancel a session override early | Session |
 | `POST` | `/api/gateways/{ip}/zero-trust` | Toggle Zero-Trust on a gateway (body: `{"enabled": true/false}`) | Session |
 | `PUT` | `/api/gateways/{ip}/mode` | Set gateway mode (`dev`/`prod`) | Session |
 | `DELETE` | `/api/gateways/{ip}` | Deregister a gateway (session or matching gateway token) | Session/Gateway |

@@ -37,6 +37,8 @@ from database import (
     dismiss_policy_gap,
     get_mcp_allowed_hosts, set_mcp_allowed_hosts,
     get_session_names, set_session_names,
+    create_session_override, get_session_override,
+    list_session_overrides, stop_session_override,
     get_trigger_rollback, set_trigger_rollback, clear_trigger_rollback,
     set_trigger_freeze, get_trigger_freeze, clear_trigger_freeze,
     record_audit_event, get_audit_log,
@@ -91,6 +93,9 @@ from schemas import (
 from core.session import (
     SESSION_KEY, SESSION_TTL, _make_session_token, _verify_session_token,
     _check_session, _check_session_optional, _is_password_protected,
+)
+from core.agent_context import (
+    reset_current_session_source, set_current_session_source,
 )
 from core.rate_limit import _check_rate_limit
 from core.agent_policy import evaluate_call, safe_ident
@@ -543,22 +548,48 @@ def receive_request(payload: GatewayPayload, request: Request):
     _check_rate_limit(target_ip)
     cmd = decode_cmd(payload.encoded_command)
 
-    # Check override mode — auto-approve if active
+    now = int(time.time())
+    sid = (payload.session_id or '')[:64]
+    eid = (payload.execution_id or '')[:64]
+    # Freeze is absolute: the gateway rejects every command, so an override
+    # must not record an "approved" ticket that can never run.
+    frozen = get_trigger_freeze() is not None
+
+    # Session override first: narrower than the host-wide one, and it only
+    # covers commands carrying the id it was granted for. Zero-Trust wins.
+    if sid and not frozen:
+        ov = get_session_override(sid, target_ip, now)
+        if ov and not get_gateway_zero_trust(target_ip):
+            req_id = create_request(target_ip, cmd, status="approved",
+                                    reason="session-override:%d" % ov["id"],
+                                    session_id=sid, execution_id=eid)
+            update_gateway_last_seen(target_ip)
+            scope = ov["target_ip"] or "any host"
+            record_audit_event(
+                'jit_override_approved', target_ip,
+                details=f'Session override #{ov["id"]} auto-approved JIT #{req_id}: '
+                        f'{cmd[:80]} (session {sid}, {scope}, '
+                        f'reason: {ov["reason"][:60]})')
+            return {"status": "ok", "id": f"{req_id:06d}", "override": True,
+                    "scope": "session",
+                    "message": "Auto-approved via Session Override"}
+
+    # Check host override mode — auto-approve if active
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute('SELECT override_until, override_reason FROM gateways WHERE ip = ?', (target_ip,))
     row = cursor.fetchone()
     conn.close()
-    now = int(time.time())
-    # Override auto-approves JIT — but never on a Zero-Trust gateway (ZT wins:
-    # every command must go through operator approval there).
-    if row and row['override_until'] and row['override_until'] > now and not get_gateway_zero_trust(target_ip):
-        req_id = create_request(target_ip, cmd, status="approved", reason="override", session_id=(payload.session_id or '')[:64], execution_id=(payload.execution_id or '')[:64])
+    if row and row['override_until'] and row['override_until'] > now \
+            and not frozen and not get_gateway_zero_trust(target_ip):
+        req_id = create_request(target_ip, cmd, status="approved", reason="override",
+                                session_id=sid, execution_id=eid)
         update_gateway_last_seen(target_ip)
         record_audit_event('jit_override_approved', target_ip, details=f'Override auto-approved JIT #{req_id}: {cmd[:80]} (reason: {row["override_reason"][:60]})')
-        return {"status": "ok", "id": f"{req_id:06d}", "override": True, "message": "Auto-approved via Override Mode"}
+        return {"status": "ok", "id": f"{req_id:06d}", "override": True,
+                "scope": "host", "message": "Auto-approved via Override Mode"}
 
-    req_id = create_request(target_ip, cmd, status="pending", session_id=(payload.session_id or '')[:64], execution_id=(payload.execution_id or '')[:64])
+    req_id = create_request(target_ip, cmd, status="pending", session_id=sid, execution_id=eid)
     update_gateway_last_seen(target_ip)
     send_notify('jit', 'JIT Approval Required', f'`{cmd[:80]}` on {target_ip}')
     record_audit_event('jit_created', target_ip, details=f'JIT #{req_id}: {cmd[:80]}')
@@ -874,6 +905,75 @@ def stop_override(ip: str, request: Request):
     record_audit_event("override_cancelled", gateway_ip=ip, hostname=hostname,
                        details="Override cancelled early")
     return {"status": "ok"}
+
+
+class SessionOverridePayload(BaseModel):
+    session_id: str
+    target_ip: str = ''
+    minutes: int = 30
+    reason: str = ''
+
+
+@app.get("/api/session-overrides")
+def get_session_overrides_endpoint(request: Request):
+    """Active session overrides first, then recent ended/expired ones."""
+    _check_session(request)
+    now = int(time.time())
+    return {"overrides": list_session_overrides(now=now), "now": now}
+
+
+@app.post("/api/session-overrides")
+def start_session_override_endpoint(payload: SessionOverridePayload,
+                                    request: Request):
+    """Grant one session a bounded JIT bypass, optionally on one host.
+
+    Dashboard-only on purpose: this is an approval bypass, so it is never
+    exposed as an MCP tool. An empty `target_ip` means "any host in this
+    session" and must be an explicit choice in the UI.
+    """
+    import re
+    _check_session(request)
+    sid = (payload.session_id or '').strip()
+    if not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', sid):
+        raise HTTPException(status_code=400,
+                            detail="session_id must match [A-Za-z0-9_-]{1,64}")
+    if not (payload.reason or '').strip():
+        raise HTTPException(status_code=400, detail="Reason is required")
+    if payload.minutes < 1 or payload.minutes > 1440:
+        raise HTTPException(status_code=400,
+                            detail="Minutes must be between 1 and 1440")
+    ip = (payload.target_ip or '').strip()
+    if ip:
+        if not get_gateway(ip):
+            raise HTTPException(status_code=404, detail="Gateway not found")
+        if get_gateway_zero_trust(ip):
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot start an override on a Zero-Trust gateway — "
+                       "they are mutually exclusive.")
+    ov = create_session_override(sid, ip,
+                                 int(time.time()) + payload.minutes * 60,
+                                 payload.reason.strip())
+    record_audit_event("override_session_started", gateway_ip=ip or None,
+                       details=f'Session override #{ov["id"]} for '
+                               f'{payload.minutes}m ({sid}, '
+                               f'{ip or "any host"}): '
+                               f'{payload.reason.strip()[:100]}')
+    return {"status": "ok", "override": ov}
+
+
+@app.delete("/api/session-overrides/{override_id}")
+def cancel_session_override_endpoint(override_id: int, request: Request):
+    _check_session(request)
+    ov = stop_session_override(override_id)
+    if not ov:
+        raise HTTPException(status_code=404,
+                            detail="Override not found or already ended")
+    record_audit_event("override_session_cancelled",
+                       gateway_ip=ov.get("target_ip") or None,
+                       details=f'Session override #{override_id} cancelled '
+                               f'early ({ov.get("session_id")})')
+    return {"status": "ok", "override": ov}
 
 # --- Emergency Freeze (global circuit breaker) ---
 @app.post("/api/freeze")
@@ -2960,6 +3060,7 @@ def _record_integration_denied(call):
         approval='denied',
         decided_at=int(time.time()),
         decided_by='operator',
+        session_source=call.get('session_source') or 'caller',
     )
 
 
@@ -3010,6 +3111,9 @@ def approve_integration_call(call_id: int, request: Request):
                 actor='operator')
             return {"status": "denied", "id": call_id, "reason": reason}
 
+    # Keep the provenance of the id on the executor's audit row: an approved
+    # inherited call must not start counting as caller-tagged coverage.
+    source_token = set_current_session_source(call.get('session_source') or 'caller')
     try:
         if tool.get('handler'):
             # Curated multi-step handler — same code path as the immediate run,
@@ -3075,6 +3179,8 @@ def approve_integration_call(call_id: int, request: Request):
                                               decided_by='operator')
     except ProxyError as e:
         result = {'error': e.message, 'status_code': e.status_code}
+    finally:
+        reset_current_session_source(source_token)
     if tool.get('response_hint'):
         # Merge even for an empty body (e.g. a 204 response) so an approved
         # write still carries its verification nudge — matches the immediate

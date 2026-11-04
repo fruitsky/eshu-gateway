@@ -95,6 +95,36 @@ class TestTransportFallback:
                    for r in get_integration_calls(session="mine-1")["rows"])
         assert not get_integration_calls(session="mcp-deadbeef")["rows"]
 
+    def test_missing_id_inherits_the_session_just_begun(self, mock_upstream):
+        """Name it once, then forget: later calls follow session_begin."""
+        self._read_tool(mock_upstream)
+        token = set_current_session("mcp-inherit")
+        try:
+            started = json.loads(session_begin_fn()("inherited goal"))
+            out = run_tool("api", "read_thing", {}, "")
+        finally:
+            reset_current_session(token)
+        data = json.loads(out)
+        assert data["_eshu"] == {"session_id": started["session_id"],
+                                 "source": "inherited"}
+        rows = get_integration_calls(session=started["session_id"])["rows"]
+        assert any(r["tool"] == "read_thing" and r["session_source"] == "inherited"
+                   for r in rows)
+        assert not get_integration_calls(session="mcp-inherit")["rows"]
+
+    def test_explicit_id_beats_the_inherited_one(self, mock_upstream):
+        self._read_tool(mock_upstream)
+        token = set_current_session("mcp-inherit-2")
+        try:
+            session_begin_fn()("a task")
+            out = run_tool("api", "read_thing", {"session_id": "explicit-1"}, "")
+        finally:
+            reset_current_session(token)
+        assert "_eshu" not in json.loads(out)
+        rows = get_integration_calls(session="explicit-1")["rows"]
+        assert any(r["session_source"] == "caller" for r in rows)
+        assert not get_integration_calls(session="mcp-inherit-2")["rows"]
+
     def test_annotation_leaves_arrays_and_text_alone(self):
         assert _annotate_session("[1, 2]", "mcp-x") == "[1, 2]"
         assert _annotate_session("not json", "mcp-x") == "not json"
@@ -188,6 +218,20 @@ class TestSessionsApi:
 
 
 class TestCoverage:
+
+    def test_coverage_counts_only_explicit_mcp_ids(self):
+        for sid, source in (("caller-1", "caller"),
+                            ("named-1", "inherited"),
+                            ("mcp-transport-1", "transport")):
+            record_integration_call(integration="ha", tool="read", agent="mcp",
+                                    method="GET", path="/x", status_code=200,
+                                    latency_ms=1, response_summary="{}",
+                                    response_bytes=2, truncated=0, outcome="ok",
+                                    session_id=sid, session_source=source)
+        cov = get_session_coverage(7)
+        assert cov["mcp"]["total"] == 3
+        assert cov["mcp"]["tagged"] == 1
+        assert cov["mcp"]["auto"] == 2
 
     def test_coverage_counts_only_real_ids(self):
         create_request(target_ip="10.0.0.5", command="a", status="auto-approved", ttl=0,
