@@ -42,6 +42,8 @@ var _ccSelectedId = null;
 var _ccFilter = 'all';
 var _ccSelectedIds = new Set();
 var _activeSessionSid = null;
+var _activeSessionHost = '';
+var _activeSessionHostIp = '';
 
 function openContextPanel(reqId) {
   var panel = document.getElementById('cc-context');
@@ -1442,7 +1444,7 @@ function ensureHudSky() {
   renderHudSky();
 }
 
-async function initDashboard() { ensureHudSky(); updateNotifyUI(); fetchVersion(); fetchRequests(); fetchCmdDescs(); fetchSuggestions(); refreshPasswordUI(); fetchFreezeStatus(); fetchFleetCommands(); fetchGateways(); fetchIntegrations(); loadSessionNames(); }
+async function initDashboard() { ensureHudSky(); updateNotifyUI(); fetchVersion(); fetchRequests(); fetchCmdDescs(); fetchSuggestions(); refreshPasswordUI(); fetchFreezeStatus(); fetchFleetCommands(); fetchGateways(); fetchIntegrations(); loadSessionNames(); refreshSessionOverrides(); }
 
 // ── Requests ─────────────────────────────────────────────────────────────
 let _requestSearchQuery = '';
@@ -2548,6 +2550,8 @@ async function openSessionModal(sid) {
   ssh.forEach(function (r) { var lr = reqById[r.id]; if (lr) { r.risk = lr.risk; r.anomaly = lr.anomaly; } });
 
   var host = ssh.length ? (ssh[0].hostname || ssh[0].target_ip || '') : '';
+  _activeSessionHost = host;
+  _activeSessionHostIp = ssh.length ? (ssh[0].target_ip || '') : '';
   var pending = ssh.filter(function (r) { return r.status === 'pending' && r.ttl > 0; }).length;
   var approved = mcp.filter(function (c) { return c.approval === 'approved'; }).length;
   var denied = mcp.filter(function (c) { return c.approval === 'denied'; }).length;
@@ -2558,6 +2562,12 @@ async function openSessionModal(sid) {
   }
   if (summary.agent) bits.push(escapeHtml(summary.agent));
   if (host) bits.push(escapeHtml(host));
+  var sessOv = _activeSessionOverrideFor(sid);
+  if (sessOv) {
+    bits.push('<span class="sm-pending" title="' + escapeHtml(sessOv.reason || '') + '">session override ' +
+      sessionOverrideClock(sessOv) + '</span>' +
+      ' <button class="btn btn-muted btn-xs" onclick="cancelSessionOverride(' + sessOv.id + ')">Cancel</button>');
+  }
   bits.push(ssh.length + ' SSH');
   bits.push(mcp.length + ' MCP');
   if (pending) bits.push('<span class="sm-pending">' + pending + ' pending</span>');
@@ -3301,15 +3311,25 @@ function renderTable() {
     if (req.status === 'pending' && !isExpired) {
       actions = '<button onclick="handleAction(' + req.id + ', \'approve\')" class="btn btn-approve btn-xs mr-1">Approve</button>' +
         '<button onclick="handleAction(' + req.id + ', \'deny\')" class="btn btn-deny btn-xs">Deny</button>';
+      if (req.session_id && req.session_id !== 'unknown') {
+        actions += ' <button onclick="event.stopPropagation();openSessionOverrideModal(\'' +
+          escapeHtml(req.session_id) + '\',\'' + escapeHtml(req.target_ip || '') + '\',' + req.id + ')" ' +
+          'class="btn btn-muted btn-xs" title="Auto-approve this session on this host for a bounded window">' +
+          'Override session</button>';
+      }
     } else if (req.status === 'frozen') {
       actions = '<span class="chip chip-actions chip-frozen" title="Blocked by Emergency Freeze — the fleet is rejecting all commands until unfrozen.">' +
         'Frozen</span>';
     } else if (req.status === 'fleet-run') {
       actions = '<span class="chip chip-actions chip-fleet-run" title="Executed via Fleet Run — see the Fleet Run tab for per-gateway output.">' +
         'Fleet Run</span>';
-    } else if (req.reason === 'override') {
-      actions = '<span class="chip chip-actions chip-override" title="Auto-approved via Override Mode — every JIT is auto-approved while active">' +
-        'Override</span>';
+    } else if (req.reason === 'override' || String(req.reason || '').indexOf('session-override:') === 0) {
+      var _isSessOv = String(req.reason || '').indexOf('session-override:') === 0;
+      actions = '<span class="chip chip-actions chip-override" title="' +
+        (_isSessOv
+          ? 'Auto-approved via a session override — only this session, on the granted host'
+          : 'Auto-approved via Override Mode — every JIT is auto-approved while active') +
+        '">' + (_isSessOv ? 'Session override' : 'Override') + '</span>';
     } else if (req.status === 'blocked' && isHardcoreBlocked(req.command)) {
       actions = '<span class="chip chip-actions chip-block-core" title="Blocked by a shipped Eshu safety pattern — manage in Controls → Blocklist">' +
         'Block by Core</span>';
@@ -3410,6 +3430,7 @@ function decrementTimers() {
   });
   checkOverrideBanner();
   tickGatewayTableCountdowns();
+  renderSessionOverrideBanner();
 }
 
 // ── Core blocklist client-side check ────────────────────────────────────
@@ -3620,6 +3641,8 @@ function handlePolicyAction(selectEl, encodedCmd) { const action = selectEl.valu
 // ── Gateways ─────────────────────────────────────────────────────────────
 var _gatewaysData = [];
 var _overrideExpiries = {}; // ip -> epoch seconds (client-side)
+var _sessionOverrides = []; // rows from /api/session-overrides (active first)
+var _sessionOverrideCtx = null; // {session_id, host, hostname} for the modal
 var _uninstallingIps = {};  // ip -> true while an uninstall is in flight (row state)
 var _uninstallIp = null;    // ip currently being uninstalled (for the progress modal)
 let _removeIp = null;       // ip in the "Remove Gateway" modal
@@ -3893,6 +3916,146 @@ async function cancelOverride(ip) {
     if (data.status === 'ok') {
       showToast('Override cancelled for ' + ip, 'success');
       fetchGateways();
+    } else { showToast('Failed: ' + (data.detail || 'unknown'), 'error'); }
+  } catch(e) { showToast('Error: ' + e.message, 'error'); }
+}
+
+// ── Session Override (narrower than the per-gateway one) ─────────────────
+function sessionLabel(sid) {
+  var meta = (_sessionNames || {})[sid] || {};
+  return meta.name || sid.substring(0, 8);
+}
+
+function sessionOverrideClock(ov) {
+  var rem = Math.max(0, (ov._clientUntil || 0) - Math.floor(Date.now() / 1000));
+  var mins = String(Math.floor(rem / 60)).padStart(2, '0');
+  var secs = String(rem % 60).padStart(2, '0');
+  return mins + ':' + secs;
+}
+
+function _activeSessionOverrideFor(sid) {
+  var now = Math.floor(Date.now() / 1000);
+  var matches = (_sessionOverrides || []).filter(function(o) {
+    return o.active !== false && o.session_id === sid && o._clientUntil > now;
+  });
+  if (!matches.length) return null;
+  // Exact-host grants beat any-host, mirroring the server's resolution.
+  matches.sort(function(a, b) { return (a.target_ip ? 0 : 1) - (b.target_ip ? 0 : 1); });
+  return matches[0];
+}
+
+async function refreshSessionOverrides() {
+  if (!document.getElementById('session-override-banner')) return;
+  try {
+    var res = await authFetch('/api/session-overrides');
+    if (!res.ok) return;
+    var data = await res.json();
+    var now = Math.floor(Date.now() / 1000);
+    var skew = (data.now || now) - now;
+    _sessionOverrides = (data.overrides || []).map(function(o) {
+      o._clientUntil = now + (o.remaining || 0) + skew;
+      return o;
+    });
+    renderSessionOverrideBanner();
+  } catch (e) { /* keep the last known state */ }
+}
+
+function renderSessionOverrideBanner() {
+  var banner = document.getElementById('session-override-banner');
+  var text = document.getElementById('session-override-banner-text');
+  if (!banner || !text) return;
+  var now = Math.floor(Date.now() / 1000);
+  var active = (_sessionOverrides || []).filter(function(o) {
+    return o.active !== false && o._clientUntil > now;
+  });
+  if (!active.length) {
+    banner.classList.add('hidden');
+    text.innerHTML = '';
+    return;
+  }
+  banner.classList.remove('hidden');
+  text.innerHTML = 'Session Override \u2014 ' + active.map(function(o) {
+    var scope = o.target_ip ? o.target_ip : 'any host';
+    return '<span class="session-ovr-item">' + escapeHtml(sessionLabel(o.session_id)) +
+      ' \u00b7 ' + escapeHtml(scope) + ' (' + sessionOverrideClock(o) + ')' +
+      ' <button class="btn btn-xs btn-on-banner" onclick="cancelSessionOverride(' + o.id + ')">Cancel</button></span>';
+  }).join(' <span class="session-ovr-sep">\u00b7</span> ');
+}
+
+function openSessionOverrideModal(sid, ip, reqId) {
+  sid = sid || _activeSessionSid;
+  if (!sid) return;
+  if (ip === undefined) ip = _activeSessionHostIp;
+  ip = ip || '';
+  var hostname = '';
+  var gw = (_gatewaysData || []).find(function(g) { return g.ip === ip; });
+  if (gw) hostname = gw.hostname;
+  _sessionOverrideCtx = { session_id: sid, host: ip, hostname: hostname,
+                          request_id: reqId || null };
+  document.getElementById('session-override-modal-session').textContent =
+    sessionLabel(sid) + ' (' + sid + ')';
+  document.getElementById('session-override-any-host').checked = !ip;
+  document.getElementById('session-override-reason').value = '';
+  document.getElementById('session-override-minutes').value = '30';
+  syncSessionOverrideHost();
+  document.getElementById('session-override-modal').classList.remove('hidden');
+  document.getElementById('session-override-reason').focus();
+}
+
+function syncSessionOverrideHost() {
+  var any = document.getElementById('session-override-any-host').checked;
+  var ctx = _sessionOverrideCtx || {};
+  var el = document.getElementById('session-override-modal-host');
+  if (any) { el.textContent = 'Any host in this session'; return; }
+  el.textContent = ctx.hostname
+    ? ctx.hostname + ' (' + ctx.host + ')'
+    : (ctx.host || 'No host recorded — tick "Any host"');
+}
+
+function closeSessionOverrideModal() {
+  document.getElementById('session-override-modal').classList.add('hidden');
+}
+
+async function confirmSessionOverride() {
+  var ctx = _sessionOverrideCtx;
+  if (!ctx) return;
+  var reason = document.getElementById('session-override-reason').value.trim();
+  var minutes = parseInt(document.getElementById('session-override-minutes').value);
+  var any = document.getElementById('session-override-any-host').checked;
+  if (!reason) { document.getElementById('session-override-reason').focus(); return; }
+  if (!any && !ctx.host) { showToast('Choose a host or tick "Any host"', 'error'); return; }
+  var btn = document.getElementById('session-override-start-btn');
+  btn.disabled = true; btn.textContent = 'Starting...';
+  try {
+    var res = await authFetch('/api/session-overrides', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({session_id: ctx.session_id,
+                            target_ip: any ? '' : ctx.host,
+                            minutes: minutes, reason: reason})
+    });
+    var data = await res.json();
+    if (data.status === 'ok') {
+      closeSessionOverrideModal();
+      showToast('Session override started', 'success');
+      await refreshSessionOverrides();
+      // Granting from a pending row should also clear that row — otherwise
+      // the operator grants the bypass and still has to approve by hand.
+      if (ctx.request_id) { await handleAction(ctx.request_id, 'approve'); }
+      else { fetchRequests(); }
+    } else { showToast('Failed: ' + (data.detail || 'unknown'), 'error'); }
+  } catch(e) { showToast('Error: ' + e.message, 'error'); }
+  btn.disabled = false; btn.textContent = 'Start Session Override';
+}
+
+async function cancelSessionOverride(id) {
+  if (!(await customConfirm('Cancel this session override? JIT commands in that session will need approval again.'))) return;
+  try {
+    var res = await authFetch('/api/session-overrides/' + id, { method: 'DELETE' });
+    var data = await res.json();
+    if (data.status === 'ok') {
+      showToast('Session override cancelled', 'success');
+      await refreshSessionOverrides();
     } else { showToast('Failed: ' + (data.detail || 'unknown'), 'error'); }
   } catch(e) { showToast('Error: ' + e.message, 'error'); }
 }
@@ -5997,6 +6160,7 @@ setInterval(function() {
   fetchGateways();
   fetchFreezeStatus();
   fetchFleetCommands();
+  refreshSessionOverrides();
 }, 10000);
 setInterval(function() {
   if (!document.getElementById('login-overlay').classList.contains('hidden')) return;
