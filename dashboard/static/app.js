@@ -443,7 +443,16 @@ async function switchView(target) {
   if (target === 'controls') { fetchFreezeStatus(); fetchGateways(); fetchPolicies(); fetchPolicyChanges(); initWebFetchPolicyPanel(); }
   if (target === 'fleet') { fetchFleetCommands(); }
   if (target === 'integrations') { fetchIntegrations(); }
-  if (target === 'settings') { refreshPasswordUI(); fetchNotifyConfig(); fetchDevTools(); if (_devToolsEnabled) { fetchDevStatus(); fetchDevGateways(); fetchFeatureFlags(); } }
+  if (target === 'settings') {
+    refreshPasswordUI();
+    fetchNotifyConfig();
+    // fetchDevTools() is async; wait for it before deciding whether the dev
+    // widgets (and the feature-flag list) should load. Without this, the
+    // first visit to Settings left the list on "Loading...".
+    fetchDevTools().then(function () {
+      if (_devToolsEnabled) { fetchDevStatus(); fetchDevGateways(); fetchFeatureFlags(); }
+    });
+  }
   if (target === 'logs') { fetchAuditLog(); }
 }
 
