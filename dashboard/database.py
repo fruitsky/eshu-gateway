@@ -96,6 +96,7 @@ from db.misc import (
     update_note,
     get_feature_flags,
     set_feature_flag, set_feature_flag_scope,
+    get_session_signing_key, get_previous_session_signing_key,
     get_notify_config,
     set_notify_config,
     get_dev_tools_enabled,

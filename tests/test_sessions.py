@@ -12,7 +12,10 @@ from core.mcp_server import (
     session_begin_fn,
     session_summary_fn,
 )
+from core.session_sign import sign_session
 from core.tool_runner import _annotate_session, run_tool
+from db.gateways import set_gateway_mode
+from db.misc import set_feature_flag, set_feature_flag_scope
 from db.integrations import (
     create_integration,
     create_tool,
@@ -35,10 +38,18 @@ class TestSessionBegin:
         out = json.loads(session_begin_fn()("Investigate the media server"))
         sid = out["session_id"]
         assert len(sid) == 12 and sid.isalnum()
-        assert out["ssh_prefix"] == f"ESHU_SESSION_ID={sid} "
+        assert out["session_sig"] == sign_session(sid)
+        assert out["ssh_prefix"] == (
+            f"ESHU_SESSION_ID={sid} ESHU_SESSION_SIG={out['session_sig']} ")
         row = get_session(sid)
         assert row["goal"] == "Investigate the media server"
         assert row["source"] == "agent"
+
+    def test_begin_requires_a_goal(self):
+        out = json.loads(session_begin_fn()(""))
+        assert out["error"] == "goal_required"
+        out = json.loads(session_begin_fn()("   "))
+        assert out["error"] == "goal_required"
 
     def test_goal_survives_touches_and_can_be_replaced(self):
         sid = "abc123abc123"
@@ -55,7 +66,8 @@ class TestSessionBegin:
         out = json.loads(session_begin_fn()("adopted goal", "chat-123"))
         assert out["session_id"] == "chat-123"
         assert out["adopted"] is True
-        assert out["ssh_prefix"] == "ESHU_SESSION_ID=chat-123 "
+        assert out["ssh_prefix"] == (
+            "ESHU_SESSION_ID=chat-123 ESHU_SESSION_SIG=%s " % out["session_sig"])
         assert get_session("chat-123")["goal"] == "adopted goal"
 
     def test_begin_rejects_an_invalid_id(self):
@@ -130,6 +142,66 @@ class TestTransportFallback:
         assert _annotate_session("not json", "mcp-x") == "not json"
         wrapped = json.loads(_annotate_session('{"a": 1}', "mcp-x"))
         assert wrapped == {"a": 1, "_eshu": {"session_id": "mcp-x", "source": "transport"}}
+
+
+class TestStrictSessions:
+
+    def _read_tool(self, mock_upstream):
+        create_integration("api", mock_upstream["base_url"], "none", "", gate_mode="none")
+        integration = get_integration("api")
+        create_tool(integration["id"], "read_thing", "Read", "GET", "/thing", [], "",
+                    read_only=True)
+
+    def test_unminted_transport_call_is_refused(self, mock_upstream):
+        set_feature_flag("require_sessions", True)
+        self._read_tool(mock_upstream)
+        token = set_current_session("mcp-strict")
+        try:
+            out = json.loads(run_tool("api", "read_thing", {}, ""))
+        finally:
+            reset_current_session(token)
+        assert out["error"] == "session_required"
+        assert not get_integration_calls(session="mcp-strict")["rows"]
+
+    def test_invented_id_is_refused(self, mock_upstream):
+        set_feature_flag("require_sessions", True)
+        self._read_tool(mock_upstream)
+        out = json.loads(run_tool("api", "read_thing",
+                                  {"session_id": "invented"}, ""))
+        assert out["error"] == "session_required"
+        assert not get_integration_calls(session="invented")["rows"]
+
+    def test_unnamed_row_is_refused(self, mock_upstream):
+        set_feature_flag("require_sessions", True)
+        self._read_tool(mock_upstream)
+        upsert_session("silent-session", goal="")
+        out = json.loads(run_tool("api", "read_thing",
+                                  {"session_id": "silent-session"}, ""))
+        assert out["error"] == "session_required"
+
+    def test_minted_named_session_runs(self, mock_upstream):
+        set_feature_flag("require_sessions", True)
+        self._read_tool(mock_upstream)
+        token = set_current_session("mcp-strict-ok")
+        try:
+            started = json.loads(session_begin_fn()("strict goal"))
+            out = run_tool("api", "read_thing", {}, "")
+        finally:
+            reset_current_session(token)
+        data = json.loads(out)
+        assert data.get("_eshu", {}).get("session_id") == started["session_id"]
+        assert get_integration_calls(session=started["session_id"])["rows"]
+
+    def test_flag_off_keeps_the_transport_fallback(self, mock_upstream):
+        set_feature_flag("require_sessions", False)
+        self._read_tool(mock_upstream)
+        token = set_current_session("mcp-strict-off")
+        try:
+            out = run_tool("api", "read_thing", {}, "")
+        finally:
+            reset_current_session(token)
+        assert "_eshu" in json.loads(out)
+        assert get_integration_calls(session="mcp-strict-off")["rows"]
 
 
 class TestSessionSummary:
@@ -233,6 +305,32 @@ class TestSessionSummary:
         finally:
             reset_current_session(token)
         assert summary["session_id"] == started["session_id"]
+
+
+class TestSessionPolicy:
+
+    def test_dev_scope_enforces_dev_gateways_and_carries_the_key(
+            self, client, gateway_headers):
+        set_gateway_mode("10.0.0.1", "dev")
+        set_feature_flag("require_sessions", True)
+        set_feature_flag_scope("require_sessions", "dev")
+        body = client.get("/api/policy/10.0.0.1", headers=gateway_headers).json()
+        assert body["require_sessions"] == 1
+        assert len(body["session_signing_key"]) == 64
+
+    def test_dev_scope_leaves_prod_gateways_alone(self, client, gateway_headers):
+        set_gateway_mode("10.0.0.1", "prod")
+        set_feature_flag("require_sessions", True)
+        set_feature_flag_scope("require_sessions", "dev")
+        body = client.get("/api/policy/10.0.0.1", headers=gateway_headers).json()
+        assert body["require_sessions"] == 0
+
+    def test_prod_scope_enforces_prod_gateways(self, client, gateway_headers):
+        set_gateway_mode("10.0.0.1", "prod")
+        set_feature_flag("require_sessions", True)
+        set_feature_flag_scope("require_sessions", "prod")
+        body = client.get("/api/policy/10.0.0.1", headers=gateway_headers).json()
+        assert body["require_sessions"] == 1
 
 
 class TestSessionsApi:

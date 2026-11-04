@@ -46,6 +46,7 @@ from database import (
     search_requests, search_audit_log,
     get_gateway_token, set_gateway_token, get_gateway_by_token,
     get_feature_flags, set_feature_flag, set_feature_flag_scope,
+    get_session_signing_key, get_previous_session_signing_key,
     get_gateway_mode, set_gateway_mode, get_dev_gateways,
     get_gateway_zero_trust, set_gateway_zero_trust,
     set_override, clear_override, get_override_active,
@@ -99,6 +100,7 @@ from core.agent_context import (
 )
 from core.rate_limit import _check_rate_limit
 from core.agent_policy import evaluate_call, safe_ident
+from core.session_guard import require_sessions_for_gateway
 from core.notify import send_notify
 from core.cmd_blocklist import hard_block_match, blocklist_substring_match, CORE_COMMAND_PATTERNS, HARD_PATTERNS
 from core.policy_eval import evaluate_policy_verdict
@@ -609,6 +611,10 @@ def receive_log(payload: GatewayPayload, request: Request):
             record_window_execution(target['id'], payload.token, target_ip, cmd, 0, payload.reason)
     if payload.status == 'blocked':
         send_notify('blocked', '🛑 Command Blocked', f'`{cmd[:80]}` on {target_ip}')
+    if payload.status == 'session-required':
+        record_audit_event(
+            'session_required', target_ip,
+            details=f'Session required for: {cmd[:80]}')
     update_gateway_last_seen(target_ip)
     return {"status": "ok"}
 
@@ -683,6 +689,13 @@ def fetch_policy(target_ip: str, request: Request):
 
     # Approved Windows are core/always-on — delivered by data, not a feature flag
     policies['approved_windows'] = get_active_approved_windows(resolved_ip)
+
+    # Session enforcement: the gateway verifies the signed session token
+    # locally. Send the key to every authenticated gateway so it is ready when
+    # the flag moves from Off to Dev/Prod.
+    policies['require_sessions'] = 1 if require_sessions_for_gateway(gw_mode) else 0
+    policies['session_signing_key'] = get_session_signing_key()
+    policies['session_signing_key_prev'] = get_previous_session_signing_key()
 
     # Dev-mode gateways get the dev installer URL for updates
     if gw_mode == 'dev':

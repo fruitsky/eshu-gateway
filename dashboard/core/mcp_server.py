@@ -532,15 +532,24 @@ SESSION_BEGIN_DESC = (
     "goal — it becomes the session name the operator sees. Pass your "
     "conversation/chat id as session_id when you have one, so the chat and the "
     "dashboard session are the same thing; omit it only when the client has no "
-    "id, then keep the minted one. Returns the id and the exact "
-    "ESHU_SESSION_ID prefix for SSH. Pass that id on every Eshu tool call and "
-    "prefix every SSH command; end with session_summary(session_id=<id>)."
+    "id, then keep the minted one. Returns the id, its signature, and the exact "
+    "ssh_prefix (ESHU_SESSION_ID + ESHU_SESSION_SIG) to use on every SSH "
+    "command. Pass the id on every Eshu tool call; end with "
+    "session_summary(session_id=<id>)."
 )
 
 
 def session_begin_fn():
     def _session_begin(goal: str = "", session_id: str = "") -> str:
+        from core.session_sign import sign_session
         from db.sessions import new_session_id, upsert_session
+        goal = (goal or '').strip()
+        if not goal:
+            return json.dumps({
+                'error': 'goal_required',
+                'message': ('session_begin requires a specific goal — it is the '
+                            'session name the operator sees.'),
+            })
         adopted = (session_id or '').strip()[:64]
         if adopted and not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', adopted):
             return json.dumps({
@@ -549,16 +558,19 @@ def session_begin_fn():
             })
         sid = adopted or new_session_id()
         row = upsert_session(sid, agent=current_agent_name(),
-                             goal=(goal or '').strip(), source='agent')
+                             goal=goal, source='agent')
+        signature = sign_session(sid)
         # Make a following session_summary() (no arguments) describe this one.
         remember_session_for_transport(sid)
         return json.dumps({
             'session_id': sid,
             'goal': row.get('goal', ''),
             'adopted': bool(adopted),
-            'ssh_prefix': 'ESHU_SESSION_ID=%s ' % sid,
-            'how': ('Pass session_id=<id> to every Eshu tool, and prefix every '
-                    'SSH command with ssh_prefix. The same id groups both.'),
+            'session_sig': signature,
+            'ssh_prefix': 'ESHU_SESSION_ID=%s ESHU_SESSION_SIG=%s ' % (sid, signature),
+            'how': ('Pass session_id=<id> to every Eshu tool, and use the exact '
+                    'ssh_prefix (both keys) on every SSH command. The same id '
+                    'groups both.'),
         })
     return _session_begin
 

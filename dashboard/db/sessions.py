@@ -123,7 +123,7 @@ def get_session_summary(session_id: str) -> dict:
               SUM(status = 'fleet-run') AS fleet_run,
               SUM(status = 'consumed') AS consumed,
               SUM(status IN ('approved','auto-approved','consumed','window-approved','fleet-run')) AS approved,
-              SUM(status IN ('denied','blocked','window-rejected','integration-denied','frozen')) AS refused,
+              SUM(status IN ('denied','blocked','window-rejected','integration-denied','frozen','session-required')) AS refused,
               SUM(status = 'expired') AS expired,
               MIN(created_at) AS first_seen,
               MAX(created_at) AS last_seen

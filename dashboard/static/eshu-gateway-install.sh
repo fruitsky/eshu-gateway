@@ -485,6 +485,7 @@ while :; do
   case "$cmd" in
     ESHU_WINDOW_TOKEN=*' '*) ESHU_WINDOW_TOKEN="${cmd%% *}"; ESHU_WINDOW_TOKEN="${ESHU_WINDOW_TOKEN#ESHU_WINDOW_TOKEN=}"; cmd="${cmd#* }" ;;
     ESHU_SESSION_ID=*' '*)   ESHU_SESSION_ID="${cmd%% *}";   ESHU_SESSION_ID="${ESHU_SESSION_ID#ESHU_SESSION_ID=}";         cmd="${cmd#* }" ;;
+    ESHU_SESSION_SIG=*' '*)  ESHU_SESSION_SIG="${cmd%% *}";  ESHU_SESSION_SIG="${ESHU_SESSION_SIG#ESHU_SESSION_SIG=}";      cmd="${cmd#* }" ;;
     ESHU_EXECUTION_ID=*' '*) ESHU_EXECUTION_ID="${cmd%% *}"; ESHU_EXECUTION_ID="${ESHU_EXECUTION_ID#ESHU_EXECUTION_ID=}";     cmd="${cmd#* }" ;;
     *) break ;;
   esac
@@ -540,6 +541,57 @@ if [ -f /etc/eshu-rblack.txt ] && [ -s /etc/eshu-rblack.txt ]; then
       exit 1
     fi
   done < /etc/eshu-rblack.txt
+fi
+
+# ============================================================
+# 2.5 SESSION GATE (strict mode — signed, minted session required)
+# ============================================================
+# The signature proves the id was minted by this dashboard (session_begin).
+# The gateway verifies it locally with the key from its last policy poll; no
+# per-session sync and no round-trip. Freeze and the blocklists above still
+# win, so a genuinely bad command reports the real reason first.
+if [ -f /etc/eshu-require-session ] && [ "$(cat /etc/eshu-require-session 2>/dev/null || echo '')" = "1" ]; then
+  if [ -z "${ESHU_SESSION_ID:-}" ]; then
+    logger -t eshu-gateway "SESSION REQUIRED: no id for command: $cmd"
+    log_auto_approve "$cmd" "session-required"
+    echo "[LOCKED] A minted Session is required. Call session_begin(goal=\"...\", session_id=\"...\") and prefix every command with the returned ssh_prefix (ESHU_SESSION_ID + ESHU_SESSION_SIG). [Gateway $GATEWAY_VERSION]"
+    exit 1
+  fi
+  if [ -f /etc/eshu-session-key ]; then
+    SESSION_KEY=$(cat /etc/eshu-session-key 2>/dev/null || echo "")
+    SESSION_KEY_PREV=$(cat /etc/eshu-session-key.prev 2>/dev/null || echo "")
+    if ! python3 - "$ESHU_SESSION_ID" "${ESHU_SESSION_SIG:-}" "$SESSION_KEY" "$SESSION_KEY_PREV" <<'PY'
+import hashlib
+import hmac
+import sys
+
+sid, sig, key, prev = sys.argv[1:5]
+if not sid or not sig:
+    sys.exit(1)
+for candidate in (key, prev):
+    if not candidate:
+        continue
+    try:
+        expected = hmac.new(bytes.fromhex(candidate), sid.encode(),
+                            hashlib.sha256).hexdigest()
+    except ValueError:
+        continue
+    if hmac.compare_digest(expected, sig):
+        sys.exit(0)
+sys.exit(1)
+PY
+    then
+      logger -t eshu-gateway "SESSION INVALID: id=$ESHU_SESSION_ID for command: $cmd"
+      log_auto_approve "$cmd" "session-required"
+      echo "[LOCKED] Session id/signature is invalid or was not minted by this dashboard. Re-run session_begin and use the new ssh_prefix. [Gateway $GATEWAY_VERSION]"
+      exit 1
+    fi
+  else
+    # A brand-new gateway can reach its first command before the first policy
+    # poll writes the key. Fail open only in that window; once the key exists,
+    # a missing/invalid signature is refused.
+    logger -t eshu-gateway "SESSION KEY MISSING: allowing $ESHU_SESSION_ID until first policy sync"
+  fi
 fi
 
 # ============================================================
@@ -771,6 +823,39 @@ while true; do
       : > /etc/eshu-zero-trust.tmp
     fi
     mv -f /etc/eshu-zero-trust.tmp /etc/eshu-zero-trust 2>/dev/null || true
+
+    # Sync the session signing key + enforcement flag. The gateway verifies the
+    # HMAC locally, so it needs the key before the flag is switched on.
+    SESSION_KEY=$(python3 -c "import sys, json; print(json.load(sys.stdin).get('session_signing_key',''))" < /tmp/eshu-policy.json 2>/dev/null || echo "")
+    SESSION_KEY_PREV=$(python3 -c "import sys, json; print(json.load(sys.stdin).get('session_signing_key_prev',''))" < /tmp/eshu-policy.json 2>/dev/null || echo "")
+    if [ -n "$SESSION_KEY" ]; then
+      ( umask 077; printf '%s' "$SESSION_KEY" > /etc/eshu-session-key.tmp )
+      if chown root:eshu-gateway /etc/eshu-session-key.tmp 2>/dev/null; then
+        chmod 640 /etc/eshu-session-key.tmp
+      else
+        chmod 644 /etc/eshu-session-key.tmp
+      fi
+      mv -f /etc/eshu-session-key.tmp /etc/eshu-session-key
+      if [ -n "$SESSION_KEY_PREV" ]; then
+        ( umask 077; printf '%s' "$SESSION_KEY_PREV" > /etc/eshu-session-key.prev.tmp )
+        if chown root:eshu-gateway /etc/eshu-session-key.prev.tmp 2>/dev/null; then
+          chmod 640 /etc/eshu-session-key.prev.tmp
+        else
+          chmod 644 /etc/eshu-session-key.prev.tmp
+        fi
+        mv -f /etc/eshu-session-key.prev.tmp /etc/eshu-session-key.prev
+      else
+        : > /etc/eshu-session-key.prev
+        chmod 640 /etc/eshu-session-key.prev 2>/dev/null || true
+      fi
+    fi
+    SESSION_REQUIRED=$(python3 -c "import sys, json; print(json.load(sys.stdin).get('require_sessions',0))" < /tmp/eshu-policy.json 2>/dev/null || echo "0")
+    if [ "$SESSION_REQUIRED" = "1" ]; then
+      echo "1" > /etc/eshu-require-session.tmp
+    else
+      : > /etc/eshu-require-session.tmp
+    fi
+    mv -f /etc/eshu-require-session.tmp /etc/eshu-require-session 2>/dev/null || true
 
     # Fleet Run — dispatch approved fleet commands detached via systemd-run.
     # The runner posts running/success/failed/timeout back to the dashboard.

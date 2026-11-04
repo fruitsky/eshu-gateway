@@ -3301,6 +3301,7 @@ function renderTable() {
     } else if (isPP && isExpired) badge = '<span class="badge badge-expired">Expired</span>';
     else if (req.status === 'consumed') badge = '<span class="badge badge-consumed">Ticket Claimed</span>';
     else if (req.status === 'blocked') badge = '<span class="badge badge-blocked">Blocked</span>';
+    else if (req.status === 'session-required') badge = '<span class="badge badge-blocked" title="No minted Session id/signature">Session required</span>';
     else if (req.status === 'denied') badge = '<span class="badge badge-denied">Denied</span>';
     else if (req.status === 'auto-approved') badge = '<span class="badge badge-auto">Auto-Approved</span>';
     else if (req.status === 'window-approved') badge = '<span class="badge badge-window">Window</span>';
@@ -3330,6 +3331,9 @@ function renderTable() {
           ? 'Auto-approved via a session override — only this session, on the granted host'
           : 'Auto-approved via Override Mode — every JIT is auto-approved while active') +
         '">' + (_isSessOv ? 'Session override' : 'Override') + '</span>';
+    } else if (req.status === 'session-required') {
+      actions = '<span class="chip chip-actions" title="The gateway refused this command because no minted Session id/signature was supplied">' +
+        'Session required</span>';
     } else if (req.status === 'blocked' && isHardcoreBlocked(req.command)) {
       actions = '<span class="chip chip-actions chip-block-core" title="Blocked by a shipped Eshu safety pattern — manage in Controls → Blocklist">' +
         'Block by Core</span>';
@@ -5412,7 +5416,7 @@ function copyEnrollCommand() { document.getElementById('enroll-command').select(
 
 // ── Audit Log ────────────────────────────────────────────────────────────
 const AUDIT_ICONS = { enrolled: '✓', version_updated: '↑', disconnected: '!', policy_committed: '↻', update_triggered: '↻', uninstall_triggered: '✕', uninstalled: '✕', password_changed: '', password_cleared: '', window_created: '', window_modified: '', window_deleted: '', window_toggled: '', window_claimed: '', dev_update_pushed: '', gateway_mode_changed: '' };
-const AUDIT_LABELS = { enrolled: 'enrolled', version_updated: 'updated', disconnected: 'disconnected', policy_committed: 'Policies committed', update_triggered: 'Update triggered', uninstall_triggered: 'Uninstall triggered', uninstalled: 'Uninstalled', password_changed: 'Password changed', password_cleared: 'Password removed', window_created: 'Window created', window_modified: 'Window updated', window_deleted: 'Window deleted', window_toggled: 'Window toggled', window_claimed: 'Window claimed', dev_update_pushed: 'Dev push', gateway_mode_changed: 'Gateway mode', agent_policy_updated: 'Agent policy updated', agent_token_revoked: 'Agent token revoked', mcp_policy_denied: 'MCP policy denied' };
+const AUDIT_LABELS = { enrolled: 'enrolled', version_updated: 'updated', disconnected: 'disconnected', policy_committed: 'Policies committed', update_triggered: 'Update triggered', uninstall_triggered: 'Uninstall triggered', uninstalled: 'Uninstalled', password_changed: 'Password changed', password_cleared: 'Password removed', window_created: 'Window created', window_modified: 'Window updated', window_deleted: 'Window deleted', window_toggled: 'Window toggled', window_claimed: 'Window claimed', dev_update_pushed: 'Dev push', gateway_mode_changed: 'Gateway mode', agent_policy_updated: 'Agent policy updated', agent_token_revoked: 'Agent token revoked', mcp_policy_denied: 'MCP policy denied', session_required: 'Session required', mcp_session_required: 'MCP session required' };
 let _auditLogSearchQuery = '';
 function onAuditLogSearch() {
   _auditLogSearchQuery = document.getElementById('audit-log-search').value.trim();

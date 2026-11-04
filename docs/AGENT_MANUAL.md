@@ -51,8 +51,9 @@ id, never two.
 > - `session_id` is the client's conversation/chat id whenever one exists. If
 >   there is none, omit it once and keep the minted id.
 > - Then pass that id on **every** Eshu tool call and prefix **every** SSH
->   command with `ESHU_SESSION_ID=<id>`. Do not open a second session for the
->   next step of the same task.
+>   command with the exact `ssh_prefix` — both `ESHU_SESSION_ID=<id>` and
+>   `ESHU_SESSION_SIG=<signature>`. Do not open a second session for the next
+>   step of the same task.
 > - End with `session_summary(session_id="<id>")` — the explicit id, not the
 >   no-argument form.
 
@@ -70,25 +71,32 @@ If you have no conversation id, omit `session_id` and Eshu mints one:
 {"name": "session_begin", "arguments": {"goal": "swap the TLS certificate"}}
 ```
 
-Either way it answers:
+`goal` is required: an empty goal returns `{"error":"goal_required"}`. Either
+way it answers:
 
 ```json
 {"session_id": "a1b2c3d4e5f6",
  "goal": "swap the TLS certificate",
  "adopted": false,
- "ssh_prefix": "ESHU_SESSION_ID=a1b2c3d4e5f6 ",
- "how": "Pass session_id=<id> to every Eshu tool, and prefix every SSH command with ssh_prefix. The same id groups both."}
+ "session_sig": "<hmac-sha256 hex>",
+ "ssh_prefix": "ESHU_SESSION_ID=a1b2c3d4e5f6 ESHU_SESSION_SIG=<hmac-sha256 hex> ",
+ "how": "Pass session_id=<id> to every Eshu tool, and use the exact ssh_prefix (both keys) on every SSH command. The same id groups both."}
 ```
 
 `adopted: true` means Eshu took the id you supplied. Then:
 
 - every MCP tool takes `session_id=<id>` (and optionally an `execution_id` for
   per-run drill-down);
-- every SSH command starts with the returned `ssh_prefix`:
+- every SSH command starts with the returned `ssh_prefix` — copy it exactly,
+  including both keys:
 
   ```bash
-  ssh eshu-gateway@<host> "ESHU_SESSION_ID=cf0f09869854 <command>"
+  ssh eshu-gateway@<host> "ESHU_SESSION_ID=cf0f09869854 ESHU_SESSION_SIG=<signature> <command>"
   ```
+
+The signature proves to the gateway that this id was minted by the dashboard
+for this fleet; the gateway verifies it locally with the key from its last
+policy poll. Do not construct or reuse a prefix by hand.
 
 At the end of the task, `session_summary()` with no arguments describes **this
 MCP connection's bound session** — the id from `session_begin`, or the last id
@@ -109,16 +117,23 @@ Rules:
   call, and never mix a minted id with your chat id.
 - **Both tools are always available**, even to an agent with a strict tool
   allowlist.
-- **Omission is not an error — it inherits.** After `session_begin`, an MCP call
-  without `session_id` is grouped into that session on the same connection.
-  Only a connection that never named a session falls back to its transport id
-  (`mcp-…`, shown as `auto`). The result still carries `_eshu.session_id` and
-  `_eshu.source` (`caller`, `inherited` or `transport`, object responses only)
-  so you can adopt it for SSH. That id is per-connection, not a durable
-  identity. SSH without the prefix is logged as untagged.
-- **Nothing is rejected** for a missing id; untagged SSH is visible to the
-  operator in the Sessions coverage line. Coverage counts only explicit ids —
-  inherited and transport ids are reported as `auto`, not as compliance.
+- **Omission is not an error when enforcement is off — it inherits.** After
+  `session_begin`, an MCP call without `session_id` is grouped into that session
+  on the same connection. Only a connection that never named a session falls
+  back to its transport id (`mcp-…`, shown as `auto`). The result still carries
+  `_eshu.session_id` and `_eshu.source` (`caller`, `inherited` or `transport`,
+  object responses only) so you can adopt it for SSH. That id is per-connection,
+  not a durable identity.
+- **Strict session mode.** If the operator enables **Require sessions**, the
+  dashboard refuses every MCP tool call that does not resolve to a minted,
+  named Session, and the gateway refuses every SSH command without a valid
+  `ESHU_SESSION_ID` + `ESHU_SESSION_SIG` pair. `session_begin` and
+  `check_approval` stay available so you can recover. Old unsigned prefixes are
+  refused — re-run `session_begin` and use the new `ssh_prefix`.
+- **Nothing is rejected for a missing id unless strict mode is on.** Untagged
+  SSH is visible to the operator in the Sessions coverage line. Coverage counts
+  only explicit ids — inherited and transport ids are reported as `auto`, not
+  as compliance.
 - **One command, one ticket.** A session id groups commands; it does not cache
   approvals. Re-running the same command raises a new JIT. The exception is an
   operator-granted **Session Override** for that session (and host): while it
@@ -135,7 +150,8 @@ Rules:
 
 1. `session_begin(goal="<specific task name>", session_id="<chat id>")`
 2. Every MCP call carries `session_id="<id>"`.
-3. Every SSH command starts with `ESHU_SESSION_ID=<id> `.
+3. Every SSH command starts with the exact `ssh_prefix` (both
+   `ESHU_SESSION_ID` and `ESHU_SESSION_SIG`).
 4. End with `session_summary(session_id="<id>")`.
 5. One name and one id for the whole task; never reuse them for another task.
 

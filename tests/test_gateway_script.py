@@ -20,6 +20,8 @@ No root, no network, no real /etc, no real ticket file. Commands executed by the
 tests are deliberately harmless (echo/true/false/sh -c).
 """
 import base64
+import hashlib
+import hmac
 import json
 import os
 import shutil
@@ -31,6 +33,12 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[1]
 SCRIPT = REPO / "dashboard" / "eshu-gateway.sh"
+SESSION_KEY = "ab" * 32
+
+
+def session_sig(session_id, key=SESSION_KEY):
+    return hmac.new(bytes.fromhex(key), session_id.encode(),
+                    hashlib.sha256).hexdigest()
 
 pytestmark = pytest.mark.skipif(
     not shutil.which("bash"), reason="the gateway is a bash script")
@@ -129,7 +137,8 @@ printf '%s\\n' "$*" >> "__LOG__"
         text = swap('TICKETS_FILE="/var/run/eshu.tickets"',
                     'TICKETS_FILE="%s"' % self.ticket_file, 1)
         for name in ("eshu-freeze", "eshu-zero-trust", "eshu-rblack.txt",
-                     "eshu-exact.txt", "eshu-rwhite.txt"):
+                     "eshu-exact.txt", "eshu-rwhite.txt",
+                     "eshu-require-session", "eshu-session-key"):
             text = swap("/etc/" + name, str(self.etc / name))
         text = swap('FEATURES_DIR="/etc/eshu/features.d"',
                     'FEATURES_DIR="%s"' % self.features, 1)
@@ -145,7 +154,8 @@ printf '%s\\n' "$*" >> "__LOG__"
         # (The sandbox path itself ends with /etc/eshu-*, so compare counts: a
         # leftover real path makes the second count larger.)
         for name in ("eshu-freeze", "eshu-zero-trust", "eshu-rblack.txt",
-                     "eshu-exact.txt", "eshu-rwhite.txt"):
+                     "eshu-exact.txt", "eshu-rwhite.txt",
+                     "eshu-require-session", "eshu-session-key"):
             sandbox_path = str(self.etc / name)
             assert text.count("/etc/" + name) == text.count(sandbox_path), name
         assert "/etc/eshu/features.d" not in text
@@ -172,6 +182,13 @@ printf '%s\\n' "$*" >> "__LOG__"
 
     def zero_trust(self, on: bool):
         (self.etc / "eshu-zero-trust").write_text("1" if on else "")
+
+    def require_sessions(self, on: bool = True):
+        (self.etc / "eshu-require-session").write_text("1" if on else "")
+
+    def session_key(self, key: str = SESSION_KEY, prev: str = ""):
+        (self.etc / "eshu-session-key").write_text(key)
+        (self.etc / "eshu-session-key.prev").write_text(prev)
 
     def jit_status(self, status: str):
         self.status_file.write_text(status)
@@ -535,3 +552,99 @@ def test_no_command_exits_without_calling_the_dashboard(gw):
     proc = gw.run("")
     assert proc.returncode == 1
     assert gw.curl_calls() == []
+
+
+# ── strict session mode ────────────────────────────────────────────────────
+def test_strict_mode_refuses_an_untagged_allowlisted_command(gw):
+    gw.session_key()
+    gw.require_sessions(True)
+    gw.exact("echo hello")
+    proc = gw.run("echo hello")
+    assert "minted Session is required" in proc.stdout
+    assert "hello" not in proc.stdout
+    assert proc.returncode == 1
+    assert gw.wait_for(lambda calls: any(
+        c["url"].endswith("/api/log")
+        and c["data"].get("status") == "session-required"
+        for c in calls))
+
+
+def test_strict_mode_accepts_a_valid_signed_prefix(gw):
+    gw.session_key()
+    gw.require_sessions(True)
+    gw.exact("echo hello")
+    sid = "chat-signed"
+    proc = gw.run("ESHU_SESSION_ID=%s ESHU_SESSION_SIG=%s echo hello"
+                  % (sid, session_sig(sid)))
+    assert proc.stdout.strip() == "hello"
+    assert proc.returncode == 0
+
+
+def test_strict_mode_refuses_a_bad_signature(gw):
+    gw.session_key()
+    gw.require_sessions(True)
+    gw.exact("echo hello")
+    proc = gw.run("ESHU_SESSION_ID=chat-signed ESHU_SESSION_SIG=deadbeef echo hello")
+    assert "invalid or was not minted" in proc.stdout
+    assert "hello" not in proc.stdout
+    assert proc.returncode == 1
+
+
+def test_strict_mode_accepts_the_previous_key_during_rotation(gw):
+    new_key = "cd" * 32
+    gw.session_key(new_key, prev=SESSION_KEY)
+    gw.require_sessions(True)
+    gw.exact("echo hello")
+    sid = "chat-rotated"
+    proc = gw.run("ESHU_SESSION_ID=%s ESHU_SESSION_SIG=%s echo hello"
+                  % (sid, session_sig(sid, SESSION_KEY)))
+    assert proc.stdout.strip() == "hello"
+    assert proc.returncode == 0
+
+
+def test_strict_mode_fails_open_before_the_first_key_sync(gw):
+    # No eshu-session-key yet: a brand-new gateway must not brick its first day.
+    gw.require_sessions(True)
+    gw.exact("echo hello")
+    proc = gw.run("ESHU_SESSION_ID=chat-new ESHU_SESSION_SIG=whatever echo hello")
+    assert proc.stdout.strip() == "hello"
+    assert proc.returncode == 0
+    assert "SESSION KEY MISSING" in gw.logger_text()
+
+
+def test_freeze_still_wins_over_the_session_gate(gw):
+    gw.session_key()
+    gw.require_sessions(True)
+    gw.freeze(True)
+    gw.exact("echo hello")
+    proc = gw.run("echo hello")
+    assert "FROZEN" in proc.stdout
+    assert proc.returncode == 1
+
+
+def test_hard_block_still_wins_over_the_session_gate(gw):
+    gw.session_key()
+    gw.require_sessions(True)
+    proc = gw.run("cat /etc/eshu-exact.txt")
+    assert "FATAL" in proc.stdout
+    assert proc.returncode == 1
+
+
+def test_strict_mode_off_keeps_untagged_allowlist(gw):
+    gw.session_key()
+    gw.require_sessions(False)
+    gw.exact("echo hello")
+    proc = gw.run("echo hello")
+    assert proc.stdout.strip() == "hello"
+    assert proc.returncode == 0
+
+
+def test_strict_session_failure_is_logged_with_the_id(gw):
+    gw.session_key()
+    gw.require_sessions(True)
+    gw.run("ESHU_SESSION_ID=chat-bad ESHU_SESSION_SIG=deadbeef echo hello")
+    assert gw.wait_for(lambda calls: any(
+        c["url"].endswith("/api/log")
+        and c["data"].get("status") == "session-required"
+        and c["data"].get("session_id") == "chat-bad"
+        for c in calls))

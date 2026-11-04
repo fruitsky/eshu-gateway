@@ -23,6 +23,7 @@ from core.agent_context import (current_session_id, get_current_agent,
                                reset_current_session_source,
                                set_current_session_source)
 from core.agent_policy import approval_mode, evaluate_call
+from core.session_guard import require_sessions_enabled, session_problem
 from core.integration_proxy import (
     ProxyError,
     _apply_shaping,
@@ -173,6 +174,20 @@ def run_tool(integration_name: str, tool_name: str, args: dict, reason: str = ''
     """
     supplied = ((args or {}).get('session_id') or '')[:64]
     sid, source = resolve_session(supplied)
+    # Strict mode: no named, minted session means no tool execution. The
+    # built-ins (session_begin / session_summary / check_approval) do not go
+    # through run_tool, so the agent can always recover.
+    if require_sessions_enabled():
+        problem = session_problem(sid)
+        if problem:
+            record_audit_event(
+                'mcp_session_required',
+                details=f'{integration_name}.{tool_name}: {problem}')
+            return json.dumps({
+                'error': 'session_required',
+                'message': problem,
+                'session_id': sid,
+            })
     source_token = set_current_session_source(source)
     try:
         result = _run_tool(integration_name, tool_name, args, reason,
