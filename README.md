@@ -52,6 +52,13 @@ the fleet's own constellation, for a word from you.
   <img src="docs/screenshots/command-center.png" alt="Eshu Command Center — a command waiting for approval" width="880">
 </p>
 
+**Getting started.** A fresh install opens a four-step walkthrough — the key, a
+gateway, the agent's signed session, then the integrations worth adding next.
+
+<p align="center">
+  <img src="docs/screenshots/first-run.png" alt="Eshu first-run walkthrough — the integrations step" width="880">
+</p>
+
 **Statistics.** Fourteen days of crossings: the rhythm, who decided, what the
 fleet is running, and when it works.
 
@@ -85,13 +92,15 @@ tap away.
 ## Features
 
 - **Multi-Stage Policy Engine** — hardcoded catastrophic blocklist → blacklist → exact/regex whitelist → feature scripts → JIT human approval
-- **Integrations & MCP** — expose your homelab APIs to agents over MCP: server-side credential vaulting, per-call audit, and approval-gated mutations. Proxmox, Omada, Home Assistant, Pulse, Jellyfin, Pi-hole, Sonarr, Radarr, Prowlarr, Bazarr, plus generic read/write (and read-only where writes are sensitive) for any other REST API
+- **Integrations & MCP** — expose your homelab APIs to agents over MCP: server-side credential vaulting, per-call audit, and approval-gated mutations. Proxmox, Omada, Home Assistant, Pulse, Jellyfin, Pi-hole, Sonarr, Radarr, Prowlarr, Bazarr, Commute, TfL, Seerr, plus generic read/write (and read-only where writes are sensitive) for any other REST API
 - **Approved Windows** — pre-approve recurring or single-use time windows for specific commands; agents can request them via API and the operator approves
 - **Just-In-Time Approval** — anything not explicitly allowed lands in the operator's queue for approve/deny, with desktop notifications
+- **Sessions** — one id per task ties its SSH commands and MCP calls together. `session_begin` requires a goal, mints a signed id, and a strict gateway refuses a command that does not carry it; the dashboard lists recent sessions and how much traffic carries an id
 - **Zero-Trust Gateways** — a per-gateway strictness tier: *nothing* auto-runs; every command needs operator approval
 - **Emergency Freeze** — one button makes every gateway reject all commands until unfrozen (global circuit breaker)
 - **Fleet Run (Ansible-lite)** — queue commands and dispatch them to a subset of gateways with per-gateway results
 - **Live Dashboard** — real-time SPA: request queue, gateway health, policy editor, audit log, enrollment, statistics
+- **First-Run Walkthrough** — on an empty install, four steps take you from key to gateway to agent to integrations; dismissal is stored server-side, and **Settings → Getting started** reopens it
 - **Self-Syncing Gateways** — nodes pull policies every 30s via a systemd poller; no inbound connectivity needed
 - **One-Liner Enrollment** — `curl | bash` deploys a gateway in seconds with SSH keys embedded
 
@@ -117,10 +126,17 @@ flowchart LR
 ```
 
 **Supported kinds** — Proxmox · Omada · Home Assistant · Pulse · Jellyfin ·
-Pi-hole · Sonarr · Radarr · Prowlarr · Bazarr. Any other integration gets a
-**generic `read`/`write`** tool floor (including `HEAD` metadata reads) for
-arbitrary REST APIs; the *arr family gets a generic **read** only (writes stay
-on the curated, guardrailed catalog).
+Pi-hole · Sonarr · Radarr · Prowlarr · Bazarr · Commute · TfL · Seerr. Any
+other integration gets a **generic `read`/`write`** tool floor (including `HEAD`
+metadata reads) for arbitrary REST APIs; the *arr family gets a generic
+**read** only (writes stay on the curated, guardrailed catalog).
+
+- **Per-agent policies.** Each agent token can be scoped to a tool allowlist,
+  argument rules (Home Assistant domains, services and entities), an approval
+  class and a rate limit — enforced server-side, with every refusal audited.
+- **Mediated web fetch.** `web_fetch_url` reads a page *through* Eshu: a
+  per-agent domain allowlist (fail-closed), the resolved public IP pinned with
+  TLS verification, and the body returned as untrusted text.
 
 - **Credentials never leave Eshu.** Secrets live in the dashboard DB, are masked
   in the UI (last-4 suffix), scrubbed from every response and error before the
@@ -153,6 +169,11 @@ systemd unit, and starts the dashboard on port **8000**. It requires **Python
 first launch you'll be prompted to set a dashboard password (required — it
 protects all sensitive endpoints). Change it anytime in Settings → Dashboard
 Password, or via `python3 dashboard/set_password.py` on the dashboard host.
+
+On an empty install the dashboard then opens a four-step walkthrough that does
+the next three steps *with* you; if you skip it, it stays available under
+**Settings → Getting started**. The manual steps below are the same thing, in
+writing.
 
 ### 2. Create and register the agent's SSH key
 
@@ -193,10 +214,14 @@ dashboard within 30 seconds.
 
 ### 4. Connect your agent
 
-The agent uses its private key to SSH in as `eshu-gateway` on any enrolled host:
+The agent uses its private key to SSH in as `eshu-gateway` on any enrolled host.
+On a strict gateway a command must also carry a signed session id, so the agent
+first calls `session_begin(goal="…", session_id="<chat id>")` over MCP and
+prefixes each command with the `ssh_prefix` it returns:
 
 ```bash
-ssh -i ~/.ssh/eshu_gateway eshu-gateway@<host> "docker ps"
+ssh -i ~/.ssh/eshu_gateway eshu-gateway@<host> \
+  "ESHU_SESSION_ID=<id> ESHU_SESSION_SIG=<signature> docker ps"
 ```
 
 Make sure the private key file (e.g. `~/.ssh/eshu_gateway`) is installed on the
@@ -324,7 +349,8 @@ important.
 
 | Doc | What's in it |
 |-----|--------------|
-| [docs/AGENT_MANUAL.md](docs/AGENT_MANUAL.md) | The AI agent's manual: JIT requests, polling approvals, Approved Windows workflow |
+| [docs/AGENT_MANUAL.md](docs/AGENT_MANUAL.md) | The AI agent's manual: signed sessions, JIT requests, polling approvals, Approved Windows workflow |
+| [docs/FIRST_RUN.md](docs/FIRST_RUN.md) | The first-run walkthrough: when it shows, the four steps, how to edit them |
 | [docs/API.md](docs/API.md) | Full API reference |
 | [docs/INTEGRATIONS.md](docs/INTEGRATIONS.md) | Integrations & MCP setup: expose homelab APIs to agents with audit + approval |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Deployment layout, policy pipeline, gateway lifecycle |

@@ -151,6 +151,19 @@ development tools" Settings toggle; not reachable by gateways or AI agents.
 | `GET/PUT` | `/api/notify-config` | External webhook config (URL, subscribed events, dashboard URL for the 🔗 link) | Session |
 | `POST` | `/api/notify-test` | Send a test webhook; returns `delivered: true/false` | Session |
 
+## Sessions & Onboarding (dashboard authentication required)
+
+| Method | Path | Purpose | Auth |
+|--------|------|---------|------|
+| `GET` | `/api/sessions/recent?limit=24` | Recent session summaries merged across SSH and MCP, plus 7-day tagging coverage | Session |
+| `GET` | `/api/sessions/{id}/detail` | One session's SSH commands and MCP calls (encoded payloads decoded for review) | Session |
+| `GET` | `/api/onboarding` | First-run state: `done`, `key_configured`, gateway count, `show` | Session |
+| `POST` | `/api/onboarding/done` | Mark the first-run walkthrough as seen (Skip or Finish) | Session |
+
+Agents mint sessions over MCP with `session_begin(goal, session_id)` — see
+[AGENT_MANUAL.md](AGENT_MANUAL.md) — and the returned `ssh_prefix` is what a
+strict gateway verifies.
+
 ## Statistics & Monitoring (dashboard authentication required)
 
 | Method | Path | Purpose | Auth |
