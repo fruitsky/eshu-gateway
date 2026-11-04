@@ -1,6 +1,8 @@
 """Encoded wrappers are forced through JIT, previewed, and scanned decoded."""
 import base64
 
+from db.requests import create_request
+
 
 def b64(text):
     return base64.b64encode(text.encode()).decode()
@@ -46,3 +48,14 @@ class TestEncodedPayloadApi:
         row = next(x for x in rows if "base64 -d" in x["command"])
         assert row["status"] == "blocked"
         assert row["reason"].startswith("encoded-payload:")
+
+    def test_history_preview_is_fetched_on_demand(self, auth_client):
+        cmd = wrapper("echo HISTORY_ENCODED")
+        req_id = create_request("10.0.0.1", cmd, status="consumed", ttl=0,
+                                session_id="enc-hist")
+        rows = auth_client.get("/api/requests?session=enc-hist").json()
+        row = next(x for x in rows if x["id"] == req_id)
+        assert row["encoded"] is True
+        assert "decoded_command" not in row
+        detail = auth_client.get("/api/requests/%d/decoded" % req_id).json()
+        assert "HISTORY_ENCODED" in detail["decoded_command"]

@@ -125,6 +125,19 @@ function openContextPanel(reqId) {
   } else {
     riskEl.innerHTML = '<span class="ctx-meta-item" style="color:var(--text-muted)">No flags</span>';
   }
+  // History rows carry only the `encoded` flag (decoding every row on every 3s
+  // poll would be megabytes). Fetch the preview for the open panel on demand.
+  if (req.encoded && !req.decoded_command) {
+    authFetch('/api/requests/' + req.id + '/decoded').then(function (res) {
+      return res.json();
+    }).then(function (d) {
+      if (!d || !d.decoded_command) return;
+      req.decoded_command = d.decoded_command;
+      req.decoded_truncated = d.decoded_truncated;
+      var el = document.getElementById('ctx-risk');
+      if (el) el.innerHTML += decodedCmdHtml(req);
+    }).catch(function () {});
+  }
 
   // Action buttons
   var actionsEl = document.getElementById('ctx-actions');

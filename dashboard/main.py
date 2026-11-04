@@ -784,13 +784,29 @@ def list_requests(request: Request, search: str = None, session: str = None):
             r['ttl'] = ttl if ttl > 0 else 0
         else:
             r['ttl'] = 0
-        # Decoded preview for encoded wrappers (approval card + history).
-        r.update(_encoded_fields(r['command']))
+        # Decoded previews are large; attach them to pending rows (approval
+        # card) only. History asks for one on demand via /decoded.
+        if detect_encoded_exec(r['command']):
+            r['encoded'] = True
+            if r['status'] == 'pending':
+                r.update(_encoded_fields(r['command']))
         # Risk hint — pending-only so history stays clean
         r['risk'] = get_cmd_risk(r['command']) if r['status'] == 'pending' else None
         # Behavioural anomaly — pending-only ("first time on this gateway")
         r['anomaly'] = get_anomaly(r['target_ip'], r['command']) if r['status'] == 'pending' else None
     return reqs
+
+
+@app.get("/api/requests/{req_id}/decoded")
+def request_decoded(req_id: int, request: Request):
+    """On-demand decoded preview for one encoded wrapper (history panel)."""
+    _check_session(request)
+    command = get_request_command(req_id)
+    if command is None:
+        raise HTTPException(status_code=404, detail="Request not found")
+    return _encoded_fields(command) or {'encoded': False}
+
+
 @app.post("/api/approve/{req_id}")
 def approve_request(req_id: int, request: Request):
     _check_session(request)
