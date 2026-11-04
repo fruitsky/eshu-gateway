@@ -4124,8 +4124,10 @@ body.nav-open .mobile-freeze { opacity: 0; pointer-events: none; }
   color: var(--text-muted); border: 1px solid var(--rule-weak); vertical-align: 1px;
 }
 .sess-agent { margin-left: 8px; font-size: 11px; color: var(--text-faint); }
+/* Sits under a full-width "Show all" button, so it centres with the panel
+   rather than hanging off its left edge. */
 .cc-sessions-cov {
-  margin-top: 8px; padding: 0 2px;
+  margin-top: 8px; padding: 0 2px; text-align: center;
   font-family: 'JetBrains Mono', monospace; font-size: 11px;
   letter-spacing: .4px; color: var(--text-faint);
 }

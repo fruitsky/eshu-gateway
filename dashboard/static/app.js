@@ -3034,18 +3034,32 @@ document.addEventListener('keydown', function (e) {
   obs.observe(document.body, { attributes: true, attributeFilter: ['class'], subtree: true });
 })();
 
+/* The sky, the queue cursor and the ambience only exist on the Command Center.
+   Their keys used to be global, so pressing C on History flew the constellation
+   behind the table and O opened an override for a node that was not on screen.
+   Focus mode and mute stay global: both are shell controls, visible in the rail
+   from every view. */
+function onCommandCenter() {
+  var home = document.getElementById('view-home');
+  return !!home && !home.classList.contains('hidden');
+}
+
 document.addEventListener('keydown', function(e) {
-  var typing = e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT' || e.target.isContentEditable);
-  var onControl = e.target && (e.target.tagName === 'BUTTON' || e.target.tagName === 'A');
-  if (e.key === 'f' || e.key === 'F') { if (typing) return; document.body.classList.toggle('focus'); setSidebarCollapsed(document.body.classList.contains('focus')); }
-  else if (e.key === 'c' || e.key === 'C') { if (typing) return; nextConstellation(); }
-  else if (e.key === 'o' || e.key === 'O') { if (typing) return; openOverride(); }
-  else if (e.key === 'b' || e.key === 'B') { if (typing) return; toggleBrownNoise(); }
-  else if (e.key === 'm' || e.key === 'M') { if (typing) return; toggleMute(); }
-  else if (e.key === 'ArrowDown' || e.key === 'j') { if (typing || onControl) return; moveQueueCursor(1); e.preventDefault(); }
-  else if (e.key === 'ArrowUp' || e.key === 'k') { if (typing || onControl) return; moveQueueCursor(-1); e.preventDefault(); }
-  else if (e.key === 'Enter') { if (typing || onControl) return; openQueueCursor(); }
-  else if (e.key === 'Escape') {
+  var t = e.target;
+  var typing = t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable);
+  var onControl = t && (t.tagName === 'BUTTON' || t.tagName === 'A');
+  var modalOpen = !!_visibleModal();
+  var k = e.key;
+
+  /* Nothing behind the login or set-password screen. */
+  if (!document.body.classList.contains('authed')) return;
+
+  if (!typing && !modalOpen) {
+    if (k === 'f' || k === 'F') { document.body.classList.toggle('focus'); setSidebarCollapsed(document.body.classList.contains('focus')); return; }
+    if (k === 'm' || k === 'M') { toggleMute(); return; }
+  }
+
+  if (k === 'Escape') {
     var onbModal = document.getElementById('onboarding-modal');
     if (onbModal && !onbModal.classList.contains('hidden')) { closeOnboarding(); return; }
     closeMobileSidebar();
@@ -3054,7 +3068,18 @@ document.addEventListener('keydown', function(e) {
     else { deselectGateway(); }
     document.body.classList.remove('focus');
     setSidebarCollapsed(false);
+    return;
   }
+
+  /* A dialog owns the keyboard: no page shortcut should act behind it. */
+  if (typing || onControl || modalOpen || !onCommandCenter()) return;
+
+  if (k === 'c' || k === 'C') nextConstellation();
+  else if (k === 'o' || k === 'O') openOverride();
+  else if (k === 'b' || k === 'B') toggleBrownNoise();
+  else if (k === 'ArrowDown' || k === 'j') { moveQueueCursor(1); e.preventDefault(); }
+  else if (k === 'ArrowUp' || k === 'k') { moveQueueCursor(-1); e.preventDefault(); }
+  else if (k === 'Enter') openQueueCursor();
 });
 
 document.addEventListener('click', function(e) {
