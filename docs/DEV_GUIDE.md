@@ -126,21 +126,35 @@ across script updates.
 
 ### Running tests
 
-Full test suite (315 tests, ~35s):
+The suite is ~1,100 tests and takes a few minutes. One command runs the syntax
+checks and the whole suite:
 
 ```bash
-# Install runtime + test dependencies (fresh clone):
+# Fresh clone:
 pip install -r requirements-dev.txt
 
-bash tests/run.sh
-# Or directly:
-python3 -m pytest tests/ -v
+bash scripts/verify.sh
+# Equivalent to: bash scripts/pre-commit.sh && python3 -m pytest tests/ -q
 ```
 
 `requirements-dev.txt` (at the repo root) pulls in the runtime deps plus
 `pytest` + `httpx` — the test-suite dependencies. Tests use an ephemeral SQLite
-database — no production data is touched. Run this before deploying changes to
-the dashboard host or merging to master.
+database — no production data is touched.
+
+**Where the suite runs**
+
+- **Every push and PR:** `.github/workflows/ci.yml` runs the syntax checks and
+  `python3 -m pytest tests/ -q`. A feature branch is verified without anyone
+  having to remember to run it locally.
+- **Before merge or deploy:** run `bash scripts/verify.sh` and quote the pytest
+  summary. This is the local gate; the deploy helper stays fast and does not
+  run the suite.
+- **`tests/test_gateway_script.py`** is the regression net for
+  `dashboard/eshu-gateway.sh` (freeze, hard blocklist, central blocklist,
+  allowlists, zero-trust, JIT, ticket claim, sanitizer, exit sentinel). It is
+  hermetic — it copies the real script with only its paths relocated, stubs
+  `curl`/`logger`, and needs no root, network, or real `/etc` — so it runs in
+  the normal suite in a few seconds.
 
 ### What each test file checks
 
@@ -158,6 +172,7 @@ the dashboard host or merging to master.
 | `test_enrollment.py` | 11 | Enrollment tokens, install-script generation, single-key flow |
 | `test_fleet.py` | 36 | Fleet Run compose/dispatch/results, gateways-by-token, fleet delivery |
 | `test_freeze.py` | 12 | Emergency Freeze trigger, poller rejects while frozen, unfreeze |
+| `test_gateway_script.py` | 37 | Hermetic gateway-script harness: freeze, hard block, central blocklist, allowlists, zero-trust, JIT, ticket claim, sanitizer, exit sentinel |
 | `test_golden.py` | 26 | Build → Edge → Fleet pipeline: seed/promote/rollback, hashes, dev-gateways auth |
 | `test_installer.py` | 5 | Installer template: scoped token sed, no approver key, arg shift |
 | `test_learning.py` | 16 | Background gap scanner finds repeated JIT approvals + repeated denials, new/seen states |

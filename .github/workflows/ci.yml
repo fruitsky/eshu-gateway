@@ -1,8 +1,9 @@
 name: CI
 
 on:
+  # Every branch push runs the suite, so a feature branch is verified before
+  # anyone asks for a merge or a deploy. PRs to master run it as well.
   push:
-    branches: [master]
   pull_request:
     branches: [master]
 
