@@ -1829,6 +1829,16 @@ textarea { font-family: 'JetBrains Mono', monospace; }
     font-size: 11px;
     color: var(--text-muted);
   }
+  .session-modal-id {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 4px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+  .session-modal-id code { overflow-wrap: anywhere; }
   .sm-pending { color: var(--status-warning); }
   .sm-approved { color: var(--status-success); }
   .sm-auto { color: var(--accent); opacity: 0.7; }

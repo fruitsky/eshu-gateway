@@ -83,13 +83,16 @@ Rules:
   every later call; never mix a minted id with your chat id.
 - **Both tools are always available**, even to an agent with a strict tool
   allowlist.
-- **Omission is not an error.** An MCP call without `session_id` is grouped under
-  the connection's transport id (`mcp-…`, shown as `auto` in the dashboard), and
-  its result carries `_eshu.session_id` (object responses only) so you can adopt
-  it. That id is per-connection, not a durable identity. SSH without the prefix
-  is logged as untagged.
+- **Omission is not an error — it inherits.** After `session_begin`, an MCP call
+  without `session_id` is grouped into that session on the same connection.
+  Only a connection that never named a session falls back to its transport id
+  (`mcp-…`, shown as `auto`). The result still carries `_eshu.session_id` and
+  `_eshu.source` (`caller`, `inherited` or `transport`, object responses only)
+  so you can adopt it for SSH. That id is per-connection, not a durable
+  identity. SSH without the prefix is logged as untagged.
 - **Nothing is rejected** for a missing id; untagged SSH is visible to the
-  operator in the Sessions coverage line.
+  operator in the Sessions coverage line. Coverage counts only explicit ids —
+  inherited and transport ids are reported as `auto`, not as compliance.
 
 The prefix is **stripped before policy evaluation** — it never changes how a
 command is classified (whitelist / JIT / FATAL). Keys coexist and can be

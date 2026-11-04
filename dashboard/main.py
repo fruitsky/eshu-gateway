@@ -92,6 +92,9 @@ from core.session import (
     SESSION_KEY, SESSION_TTL, _make_session_token, _verify_session_token,
     _check_session, _check_session_optional, _is_password_protected,
 )
+from core.agent_context import (
+    reset_current_session_source, set_current_session_source,
+)
 from core.rate_limit import _check_rate_limit
 from core.agent_policy import evaluate_call, safe_ident
 from core.notify import send_notify
@@ -2897,6 +2900,7 @@ def _record_integration_denied(call):
         approval='denied',
         decided_at=int(time.time()),
         decided_by='operator',
+        session_source=call.get('session_source') or 'caller',
     )
 
 
@@ -2947,6 +2951,9 @@ def approve_integration_call(call_id: int, request: Request):
                 actor='operator')
             return {"status": "denied", "id": call_id, "reason": reason}
 
+    # Keep the provenance of the id on the executor's audit row: an approved
+    # inherited call must not start counting as caller-tagged coverage.
+    source_token = set_current_session_source(call.get('session_source') or 'caller')
     try:
         if tool.get('handler'):
             # Curated multi-step handler — same code path as the immediate run,
@@ -3012,6 +3019,8 @@ def approve_integration_call(call_id: int, request: Request):
                                               decided_by='operator')
     except ProxyError as e:
         result = {'error': e.message, 'status_code': e.status_code}
+    finally:
+        reset_current_session_source(source_token)
     if tool.get('response_hint'):
         # Merge even for an empty body (e.g. a 204 response) so an approved
         # write still carries its verification nudge — matches the immediate

@@ -2526,6 +2526,8 @@ async function openSessionModal(sid) {
   cmdsEl.innerHTML = '<div class="sm-mcp-none">loading session\u2026</div>';
   modal.classList.remove('hidden');
   _activeSessionSid = sid;
+  var idEl = document.getElementById('sm-id');
+  if (idEl) idEl.textContent = sid;
 
   // One-stop detail: SSH commands + proxied API calls (reason, masked args,
   // response summary, approval decision) in a single request.
@@ -2589,6 +2591,13 @@ async function openSessionModal(sid) {
   // Save on Enter (prevent newline)
   nameEl.onkeydown = function(e) { if (e.key === 'Enter') { e.preventDefault(); nameEl.blur(); } };
   descEl.onkeydown = function(e) { if (e.key === 'Enter') { e.preventDefault(); descEl.blur(); } };
+}
+
+/* The list shows a short id for compactness; the modal is where the exact id
+   is read and copied (an adopted chat id can be longer than the 12-hex mint). */
+function copySessionId() {
+  if (!_activeSessionSid) return;
+  copyToClipboard(_activeSessionSid);
 }
 
 /* Filter History to one session. The modal is where a session is read, so it
