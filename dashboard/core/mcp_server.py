@@ -563,9 +563,12 @@ def session_begin_fn():
 
 SESSION_SUMMARY_DESC = (
     "Summarise what a Session did: SSH commands by outcome, MCP calls, pending "
-    "approvals and the gateways touched. Defaults to the session this "
-    "connection used last (the id from session_begin, or the last id you "
-    "passed), so call it with no arguments at the end of a task."
+    "approvals and the gateways touched. With no argument it uses this MCP "
+    "connection's bound session — the id from session_begin, or the last id "
+    "passed to an MCP tool. SSH commands stamped with a different id are NOT "
+    "reflected; pass session_id explicitly at the end of an SSH task. The "
+    "response's `resolved_from` says whether the id came from the argument, "
+    "the connection, or the transport fallback."
 )
 
 
@@ -573,14 +576,20 @@ def session_summary_fn():
     def _session_summary(session_id: str = "") -> str:
         from db.sessions import get_session_summary
         sid = (session_id or '').strip()[:64]
-        if not sid:
-            sid = last_session_for_transport() or current_session_id()
+        if sid:
+            resolved_from = 'argument'
+        else:
+            bound = last_session_for_transport()
+            sid = bound or current_session_id()
+            resolved_from = 'connection' if bound else 'transport'
         if not sid:
             return json.dumps({
                 'error': 'no_session',
                 'message': 'Call session_begin(goal) first, then pass its id.',
             })
-        return json.dumps(get_session_summary(sid))
+        out = get_session_summary(sid)
+        out['resolved_from'] = resolved_from
+        return json.dumps(out)
     return _session_summary
 
 
