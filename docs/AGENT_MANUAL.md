@@ -239,8 +239,14 @@ Rules:
 Agent runs ──▶ ssh eshu-gateway@host "<cmd>"
                    │
                    ▼
+            0. Strict session? ──no──▶ ❌ Rejected — call session_begin
+                   │yes / strict off
+                   ▼
             1. Blocklisted? ──yes──▶ ❌ Rejected — report to operator
                    │no
+                   ▼
+            1.5 Encoded payload? ──yes──▶ Force JIT (decoded preview + scan)
+                   │no                (never auto-approved by allowlist/window)
                    ▼
             2. Whitelisted? ──yes──▶ ✅ Auto-approved — executed
                    │no
@@ -253,6 +259,19 @@ Agent runs ──▶ ssh eshu-gateway@host "<cmd>"
                    ▼
             5. Submit JIT request ──▶ Operator decides
 ```
+
+### Encoded commands
+
+Do not wrap a command in `base64 -d`, `eval`, `bash -c "$(...)"` or a similar
+decoder to get it past the policy. Those wrappers are detected and **forced to
+JIT regardless of allowlists or windows**; the dashboard decodes the payload,
+scans the decoded text against the blocklist before creating a ticket, and shows
+the operator a **decoded** preview next to the wrapper. If the decoded text
+matches a blocked pattern, the request is refused.
+
+Prefer readable commands. For multi-step work, send separate SSH invocations
+(each with the same session prefix) so each step is visible, approved and
+attributable.
 
 ---
 

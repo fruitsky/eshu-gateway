@@ -175,6 +175,21 @@ PY
 fi
 
 # ============================================================
+# 2.6 ENCODED PAYLOAD DETECTION (never auto-approve)
+# ============================================================
+# A base64/eval wrapper hides the real command from the literal blocklist and
+# allowlist. Force JIT so the dashboard can decode it, scan the decoded text,
+# and show it to the operator. Windows are skipped for the same reason.
+ENCODED_EXEC="0"
+case "$cmd" in
+  *'base64 -d'*|*'base64 --decode'*|*'base64 -D'*|*'xxd -r'*|*'openssl enc -d'*|*'gzip -d'*|*'eval '*|*'bash -c "$('*|*'sh -c "$('*|*'python -c'*'exec('*|*'python -c'*'eval('*|*'perl -e '*)
+    ENCODED_EXEC="1" ;;
+esac
+if [ "$ENCODED_EXEC" = "1" ]; then
+  logger -t eshu-gateway "ENCODED PAYLOAD: forcing JIT for: $cmd"
+fi
+
+# ============================================================
 # 3. EXACT MATCH WHITELIST
 # ============================================================
 # Zero-Trust gateways skip auto-run — allowlisted commands route to JIT instead.
@@ -185,7 +200,7 @@ if [ -f /etc/eshu-zero-trust ] && [ "$(cat /etc/eshu-zero-trust 2>/dev/null || e
   ZT_ACTIVE="1"
 fi
 
-if [ "$ZT_ACTIVE" != "1" ] && [ -f /etc/eshu-exact.txt ] && grep -qFx "$cmd" /etc/eshu-exact.txt; then
+if [ "$ENCODED_EXEC" = "0" ] && [ "$ZT_ACTIVE" != "1" ] && [ -f /etc/eshu-exact.txt ] && grep -qFx "$cmd" /etc/eshu-exact.txt; then
   log_auto_approve "$cmd" "auto-approved"
   run_sanitized bash -c "$cmd"
 fi
@@ -197,7 +212,7 @@ if [ -f /etc/eshu-rwhite.txt ] && [ -s /etc/eshu-rwhite.txt ]; then
   while IFS= read -r pattern || [ -n "${pattern:-}" ]; do
     [ -z "${pattern:-}" ] && continue
     [[ "${pattern:-}" =~ ^[[:space:]]*# ]] && continue
-    if [ "$ZT_ACTIVE" != "1" ] && [[ "$cmd" =~ $pattern ]]; then
+    if [ "$ENCODED_EXEC" = "0" ] && [ "$ZT_ACTIVE" != "1" ] && [[ "$cmd" =~ $pattern ]]; then
       log_auto_approve "$cmd" "auto-approved"
       run_sanitized bash -c "$cmd"
     fi
@@ -208,7 +223,7 @@ fi
 # 4.5 FEATURE SCRIPTS (downloaded by poller when flag enabled)
 # ============================================================
 FEATURES_DIR="/etc/eshu/features.d"
-if [ -d "$FEATURES_DIR" ]; then
+if [ "$ENCODED_EXEC" = "0" ] && [ -d "$FEATURES_DIR" ]; then
   for f in "$FEATURES_DIR"/*.sh; do
     [ -f "$f" ] && . "$f"
   done
@@ -259,6 +274,12 @@ HTTP_STATUS=$(echo "$RESPONSE" | tail -n1)
 if [ "${HTTP_STATUS:-}" = "429" ]; then
   logger -t eshu-gateway "Rate limited by dashboard (429) for JIT request: $cmd"
   echo "[LOCKED] ERROR: Rate limited by dashboard — too many requests. Try again in a moment."
+  exit 1
+fi
+if [ "${HTTP_STATUS:-}" = "403" ]; then
+  ENC_MSG=$(echo "$RESPONSE" | head -n1 | python3 -c "import sys, json; print(json.load(sys.stdin).get('detail', 'Encoded payload blocked.'))" 2>/dev/null || echo "Encoded payload blocked.")
+  logger -t eshu-gateway "ENCODED PAYLOAD BLOCKED: $ENC_MSG"
+  echo "[LOCKED] $ENC_MSG [Gateway $GATEWAY_VERSION]"
   exit 1
 fi
 if [ "${HTTP_STATUS:-}" != "200" ]; then

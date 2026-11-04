@@ -112,13 +112,16 @@ function openContextPanel(reqId) {
   document.getElementById('ctx-status').textContent = req.status || '—';
   document.getElementById('ctx-time').textContent = req.created_at ? formatTime(req.created_at) : '—';
 
-  // Risk assessment
+  // Risk assessment + decoded preview for encoded wrappers
   var riskEl = document.getElementById('ctx-risk');
+  var decoded = decodedCmdHtml(req);
   if (req.risk || req.anomaly) {
     var html = '';
     if (req.risk) html += '<div class="ctx-meta-item" style="color:var(--status-warning);margin-bottom:4px"> ' + escapeHtml(req.risk) + '</div>';
     if (req.anomaly) html += '<div class="ctx-meta-item" style="color:var(--danger)"> ' + escapeHtml(req.anomaly) + '</div>';
-    riskEl.innerHTML = html;
+    riskEl.innerHTML = html + decoded;
+  } else if (decoded) {
+    riskEl.innerHTML = decoded;
   } else {
     riskEl.innerHTML = '<span class="ctx-meta-item" style="color:var(--text-muted)">No flags</span>';
   }
@@ -2482,6 +2485,7 @@ function smSshDetailCard(r) {
       '<span class="sm-call-kind ssh">SSH</span>' +
       '<span class="sm-mcp-time">' + escapeHtml(smFmtTime(r.created_at)) + '</span></div>' +
     '<pre class="sm-call-json cmd">' + escapeHtml(r.command || '') + '</pre>' +
+    (r.encoded ? decodedCmdHtml(r) : '') +
     (r.risk ? '<div class="sm-call-reason">\u26a0 ' + escapeHtml(r.risk) + '</div>' : '') +
     (r.anomaly ? '<div class="sm-call-reason" style="color:var(--danger)">\u2605 ' + escapeHtml(r.anomaly) + '</div>' : '') +
     (meta.length ? '<div class="sm-mcp-meta">' + escapeHtml(meta.join(' \u00b7 ')) + '</div>' : '') +
@@ -3088,6 +3092,7 @@ function renderJitItem(item) {
       var riskHtml = '';
       if (r.risk) riskHtml += '<div style="color:var(--status-warning);font-size:11px;margin-top:4px"> ' + escapeHtml(r.risk) + '</div>';
       if (r.anomaly) riskHtml += '<div style="color:var(--danger);font-size:11px;margin-top:4px"> ' + escapeHtml(r.anomaly) + '</div>';
+      riskHtml += decodedCmdHtml(r);
       return '<div class="jit-ticket' + (r.anomaly ? ' urgent' : '') + '" data-id="' + r.id + '" onclick="openContextPanel(\'' + r.id + '\')">' +
         '<button type="button" class="jit-check" role="checkbox" aria-checked="false" aria-label="Select request" onclick="event.stopPropagation();toggleBulkSelect(\'' + r.id + '\',event)"></button>' +
         '<div class="jit-body" style="min-width:0">' +
@@ -3366,6 +3371,9 @@ function renderTable() {
     const gapTitle = gap ? ' title="' + escapeHtml(formatGapTooltip(gap)) + '"' : '';
     const idDisplay = gap ? ' #' + String(req.id).padStart(6, '0') : '#' + String(req.id).padStart(6, '0');
     const escapedCmd = escapeHtml(req.command);
+    const decodedChip = req.encoded
+      ? '<span class="decoded-badge" title="Encoded payload — open for the decoded command">decoded</span>'
+      : '';
     const gwPillHtml = gwPill(req.hostname || 'N/A');
     const _sid = req.session_id || '';
     const sCell = (_sid && _sid !== 'unknown')
@@ -3382,7 +3390,7 @@ function renderTable() {
       '<td class="' + idClass + '"' + gapTitle + '>' + idDisplay + '</td>' +
       '<td class="text-muted text-xs">' + formatTime(req.created_at) + '</td>' +
       '<td>' + gatewayCell + '</td>' +
-      '<td class="cell-cmd"><div class="flex items-center gap-1">' + riskHtml + anomalyHtml + '<code class="cmd-code" title="' + escapedCmd + '">' + escapedCmd + '</code><button class="js-copy-cmd flex-shrink-0 text-xs opacity-30 hover:opacity-80 px-1 py-0.5 rounded transition-opacity text-muted" data-cmd="' + encodeURIComponent(req.command) + '" title="Copy"></button></div>' +
+      '<td class="cell-cmd"><div class="flex items-center gap-1">' + riskHtml + anomalyHtml + '<code class="cmd-code" title="' + escapedCmd + '">' + escapedCmd + '</code><button class="js-copy-cmd flex-shrink-0 text-xs opacity-30 hover:opacity-80 px-1 py-0.5 rounded transition-opacity text-muted" data-cmd="' + encodeURIComponent(req.command) + '" title="Copy"></button>' + decodedChip + '</div>' +
         (function() {
           var _desc = describeCmd(req.command);
           if (!_desc) return '';
@@ -3689,6 +3697,19 @@ function _describeSingle(cmd) {
     }
   }
   return _cmdDescs[best] || '';
+}
+
+/* Encoded wrappers (base64/eval) are forced to JIT; show the decoded payload
+   beside the wrapper so the operator can read what will actually run. */
+function decodedCmdHtml(r) {
+  if (!r || !r.encoded) return '';
+  if (!r.decoded_command) {
+    return '<div class="decoded-wrap"><span class="decoded-badge">encoded</span> ' +
+      '<span class="text-xs text-muted">decoded preview unavailable</span></div>';
+  }
+  var label = r.decoded_truncated ? 'decoded \u00b7 truncated' : 'decoded';
+  return '<div class="decoded-wrap"><span class="decoded-badge">' + label + '</span>' +
+    '<pre class="decoded-cmd">' + escapeHtml(r.decoded_command) + '</pre></div>';
 }
 
 function describeCmd(cmd) {

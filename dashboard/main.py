@@ -103,6 +103,7 @@ from core.agent_policy import evaluate_call, safe_ident
 from core.session_guard import require_sessions_for_gateway
 from core.notify import send_notify
 from core.cmd_blocklist import hard_block_match, blocklist_substring_match, CORE_COMMAND_PATTERNS, HARD_PATTERNS
+from core.cmd_codec import decode_preview, detect_encoded_exec, scan_decoded
 from core.policy_eval import evaluate_policy_verdict
 from core.cmd_risk import get_cmd_risk, get_dry_run_suggestion
 from core.cmd_profiles import get_anomaly, refresh_profiles, _profiles_loop
@@ -144,6 +145,20 @@ def _file_hash(path: str) -> str:
         return None
     with open(path, "rb") as f:
         return hashlib.sha256(f.read()).hexdigest()[:12]
+
+
+def _encoded_fields(command: str) -> dict:
+    """Decoded preview for the approval UI; never executes the payload."""
+    if not detect_encoded_exec(command):
+        return {}
+    preview = decode_preview(command)
+    if not preview:
+        return {'encoded': True}
+    return {
+        'encoded': True,
+        'decoded_command': preview['text'],
+        'decoded_truncated': preview['truncated'],
+    }
 
 
 def _is_dev_mode() -> bool:
@@ -557,6 +572,27 @@ def receive_request(payload: GatewayPayload, request: Request):
     # must not record an "approved" ticket that can never run.
     frozen = get_trigger_freeze() is not None
 
+    # Encoded payloads are high risk: decode the wrapper, scan the decoded text
+    # against the hard/central blocklists, and refuse before any override or
+    # ticket can auto-approve it. Safe payloads fall through to the normal JIT
+    # flow; the UI shows the decoded preview.
+    if detect_encoded_exec(cmd):
+        preview = decode_preview(cmd)
+        if preview:
+            blocklist = (get_policies().get('regex_blacklist', '') or '').splitlines()
+            match = scan_decoded(preview['text'], HARD_PATTERNS, blocklist)
+            if match:
+                create_request(target_ip, cmd, status="blocked",
+                               reason="encoded-payload:%s" % match[:40],
+                               session_id=sid, execution_id=eid)
+                update_gateway_last_seen(target_ip)
+                record_audit_event(
+                    'encoded_payload_blocked', target_ip,
+                    details=f'Encoded payload matched "{match[:60]}": {cmd[:80]}')
+                raise HTTPException(
+                    status_code=403,
+                    detail=f'Encoded payload blocked: the decoded command matched "{match[:60]}".')
+
     # Session override first: narrower than the host-wide one, and it only
     # covers commands carrying the id it was granted for. Zero-Trust wins.
     if sid and not frozen:
@@ -748,6 +784,8 @@ def list_requests(request: Request, search: str = None, session: str = None):
             r['ttl'] = ttl if ttl > 0 else 0
         else:
             r['ttl'] = 0
+        # Decoded preview for encoded wrappers (approval card + history).
+        r.update(_encoded_fields(r['command']))
         # Risk hint — pending-only so history stays clean
         r['risk'] = get_cmd_risk(r['command']) if r['status'] == 'pending' else None
         # Behavioural anomaly — pending-only ("first time on this gateway")
@@ -807,6 +845,7 @@ def test_policy(command: str):
             "details": [{"type": "hard_blocklist", "pattern": v['matched_pattern'], "match": True}],
             "risk": get_cmd_risk(command),
             "dry_run": get_dry_run_suggestion(command),
+            **_encoded_fields(command),
         }
 
     result = {
@@ -816,6 +855,7 @@ def test_policy(command: str):
         "details": [],
         "risk": get_cmd_risk(command),
         "dry_run": get_dry_run_suggestion(command),
+        **_encoded_fields(command),
     }
     if v['action'] == 'blocked':
         result["details"].append({"type": "regex_blacklist", "pattern": v['matched_pattern'], "match": True})
@@ -3042,6 +3082,8 @@ def session_detail_endpoint(sid: str, request: Request):
     _check_session(request)
     sid = (sid or '')[:64]
     ssh = get_session_requests(sid)
+    for row in ssh:
+        row.update(_encoded_fields(row.get('command', '')))
     mcp = get_integration_calls(session=sid, limit=500)['rows']
     return {'session_id': sid, 'ssh': ssh, 'mcp': mcp}
 

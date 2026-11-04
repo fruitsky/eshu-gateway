@@ -93,6 +93,7 @@ case "$url" in
     mode=$(cat "$REQUEST_MODE" 2>/dev/null || echo ok)
     case "$mode" in
       429) printf '{"error":"rate_limited"}\\n429\\n' ;;
+      403) printf '{"detail":"Encoded payload blocked: the decoded command matched a blocklist pattern."}\\n403\\n' ;;
       fail) exit 7 ;;
       *) printf '{"id":"000123"}\\n200\\n' ;;
     esac
@@ -648,3 +649,26 @@ def test_strict_session_failure_is_logged_with_the_id(gw):
         and c["data"].get("status") == "session-required"
         and c["data"].get("session_id") == "chat-bad"
         for c in calls))
+
+
+# ── encoded payloads ───────────────────────────────────────────────────────
+def test_encoded_wrapper_is_forced_to_jit_even_when_allowlisted(gw):
+    inner = base64.b64encode(b"echo ENCODED_RAN").decode()
+    wrapper = "bash -c 'echo %s | base64 -d | bash'" % inner
+    gw.exact(wrapper)          # explicit allowlist must not auto-approve it
+    gw.jit_status("denied")
+    proc = gw.run(wrapper)
+    assert "[DENIED]" in proc.stdout
+    assert "ENCODED_RAN" not in proc.stdout
+    assert gw.wait_for(lambda calls: any(
+        c["url"].endswith("/api/request") for c in calls))
+    assert "ENCODED PAYLOAD" in gw.logger_text()
+
+
+def test_encoded_payload_403_is_surfaced(gw):
+    inner = base64.b64encode(b"cat /etc/eshu-exact.txt").decode()
+    wrapper = "bash -c 'echo %s | base64 -d | bash'" % inner
+    gw.request_mode("403")
+    proc = gw.run(wrapper)
+    assert "Encoded payload blocked" in proc.stdout
+    assert proc.returncode == 1
