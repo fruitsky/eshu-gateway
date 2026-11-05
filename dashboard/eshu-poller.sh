@@ -6,6 +6,56 @@ HOST_NAME="__HOST_NAME__"
 GATEWAY_TOKEN="__GATEWAY_TOKEN__"
 POLL_INTERVAL=30
 
+# Policy sync stamp. When the dashboard returns the exact same policy body and
+# every synced file is still present, skip the parse/write block entirely. That
+# replaces ~16 short-lived python3 starts per cycle (roughly a third of a Pi 1
+# core) with one sha256sum. Bump POLICY_STAMP_VERSION whenever the set of files
+# written below changes, so upgraded pollers re-sync once instead of skipping.
+POLICY_STAMP="/var/run/eshu.policy.sha256"
+POLICY_STAMP_VERSION="1"
+
+# Files the sync block always writes on a healthy cycle. The session key is
+# intentionally excluded: it is only written when the dashboard supplies one,
+# and any transition that needs it (strict sessions on, key rotation) changes
+# the policy body and therefore forces a re-sync.
+policy_files_ok() {
+  [ -f /etc/eshu-exact.txt ] &&
+  [ -f /etc/eshu-rwhite.txt ] &&
+  [ -f /etc/eshu-rblack.txt ] &&
+  [ -f /etc/eshu-freeze ] &&
+  [ -f /etc/eshu-zero-trust ] &&
+  [ -f /etc/eshu-require-session ] &&
+  [ -f /etc/eshu-windows.txt ]
+}
+
+policy_stamp_matches() {
+  local stamp
+  stamp=$(cat "$POLICY_STAMP" 2>/dev/null || true)
+  [ -n "$stamp" ] && [ "$stamp" = "$POLICY_STAMP_VERSION:$1" ]
+}
+
+# Feature scripts are refreshed on every healthy cycle, independent of the
+# policy hash: the dashboard's static files can change without a policy edit
+# (DASHBOARD_VERSION is a static string), so a stale window handler must not
+# linger. The download is bounded and syntax-checked before replacing the live
+# file. Runs only when the dashboard answered, matching the previous behavior.
+sync_feature_scripts() {
+  local features_dir="/etc/eshu/features.d"
+  mkdir -p "$features_dir"
+  curl -m 2 -s -o "$features_dir/approved_windows.sh.tmp" \
+       "$DASHBOARD_URL/static/features/approved_windows.sh" 2>/dev/null || true
+  if [ -s "$features_dir/approved_windows.sh.tmp" ] && bash -n "$features_dir/approved_windows.sh.tmp" 2>/dev/null; then
+    if cmp -s "$features_dir/approved_windows.sh.tmp" "$features_dir/approved_windows.sh"; then
+      rm -f "$features_dir/approved_windows.sh.tmp"
+    else
+      mv -f "$features_dir/approved_windows.sh.tmp" "$features_dir/approved_windows.sh"
+    fi
+  else
+    logger -t eshu-poller "Feature script download/validation failed — keeping previous version"
+    rm -f "$features_dir/approved_windows.sh.tmp"
+  fi
+}
+
 # Persist last processed trigger ID across restarts
 LAST_TRIGGER_ID="0"
 if [ -f "$TRIGGER_FILE" ]; then
@@ -30,8 +80,21 @@ while true; do
   HTTP_CODE=$(curl -m 2 -s -w "%{http_code}" -o /tmp/eshu-policy.json \
        -H "X-Gateway-Token: $GATEWAY_TOKEN" \
        "$DASHBOARD_URL/api/policy/$TARGET_IP")
+  POLICY_HASH=""
+  POLICY_STALE="1"
   if [ "$HTTP_CODE" = "200" ] && [ -s /tmp/eshu-policy.json ]; then
-    python3 -c "import sys, json; d=json.load(sys.stdin); open('/etc/eshu-exact.txt.tmp','w').write(d.get('exact_whitelist','')); open('/etc/eshu-rwhite.txt.tmp','w').write(d.get('regex_whitelist','')); open('/etc/eshu-rblack.txt.tmp','w').write(d.get('regex_blacklist',''))" < /tmp/eshu-policy.json 2>/dev/null || true
+    POLICY_HASH=$(sha256sum /tmp/eshu-policy.json 2>/dev/null | awk '{print $1}')
+    if [ -n "$POLICY_HASH" ] && policy_stamp_matches "$POLICY_HASH" && policy_files_ok; then
+      POLICY_STALE="0"
+    fi
+    # Independent of the policy hash: keep the window handler current.
+    sync_feature_scripts
+  fi
+  if [ "$POLICY_STALE" = "1" ] && [ "$HTTP_CODE" = "200" ] && [ -s /tmp/eshu-policy.json ]; then
+    POLICY_JSON_OK="0"
+    if python3 -c "import sys, json; d=json.load(sys.stdin); open('/etc/eshu-exact.txt.tmp','w').write(d.get('exact_whitelist','')); open('/etc/eshu-rwhite.txt.tmp','w').write(d.get('regex_whitelist','')); open('/etc/eshu-rblack.txt.tmp','w').write(d.get('regex_blacklist',''))" < /tmp/eshu-policy.json 2>/dev/null; then
+      POLICY_JSON_OK="1"
+    fi
     mv -f /etc/eshu-exact.txt.tmp /etc/eshu-exact.txt 2>/dev/null || true
     mv -f /etc/eshu-rwhite.txt.tmp /etc/eshu-rwhite.txt 2>/dev/null || true
     mv -f /etc/eshu-rblack.txt.tmp /etc/eshu-rblack.txt 2>/dev/null || true
@@ -130,20 +193,6 @@ with open('/etc/eshu-windows.txt.tmp', 'w') as f:
             w.get('expires_at','0') or '0', w.get('match_type','exact')))" \
       < /tmp/eshu-policy.json 2>/dev/null || true
     mv -f /etc/eshu-windows.txt.tmp /etc/eshu-windows.txt 2>/dev/null || true
-
-    # Sync feature scripts — Approved Windows is core/always-on, so the handler is
-    # always deployed (even when a host currently has no active windows); the
-    # script hard-rejects any presented token that doesn't match a window.
-    FEATURES_DIR="/etc/eshu/features.d"
-    mkdir -p "$FEATURES_DIR"
-    FEATURES_URL="$DASHBOARD_URL/static/features"
-    curl -s -o "$FEATURES_DIR/approved_windows.sh.tmp" "$FEATURES_URL/approved_windows.sh" 2>/dev/null || true
-    if [ -s "$FEATURES_DIR/approved_windows.sh.tmp" ] && bash -n "$FEATURES_DIR/approved_windows.sh.tmp" 2>/dev/null; then
-      mv "$FEATURES_DIR/approved_windows.sh.tmp" "$FEATURES_DIR/approved_windows.sh"
-    else
-      logger -t eshu-poller "Feature script download/validation failed — keeping previous version"
-      rm -f "$FEATURES_DIR/approved_windows.sh.tmp"
-    fi
 
     # Check for uninstall trigger (must check before update, since uninstall is terminal)
     UNINSTALL_FLAG=$(python3 -c "import sys, json; print(json.load(sys.stdin).get('trigger_uninstall', False))" < /tmp/eshu-policy.json 2>/dev/null || echo "False")
@@ -245,12 +294,23 @@ with open('/etc/eshu-windows.txt.tmp', 'w') as f:
         rm -f /tmp/eshu-dev-update.sh
       fi
     fi
+
+    # Remember this policy body only after a successful parse and once every
+    # expected file is in place. A malformed body or a partial write must retry
+    # next cycle, so the stamp is never advanced on a failed sync.
+    if [ "$POLICY_JSON_OK" = "1" ] && [ -n "$POLICY_HASH" ] && policy_files_ok; then
+      printf '%s' "$POLICY_STAMP_VERSION:$POLICY_HASH" > "$POLICY_STAMP.tmp" 2>/dev/null &&
+        mv -f "$POLICY_STAMP.tmp" "$POLICY_STAMP" 2>/dev/null || true
+    fi
   fi
 
   # 2. Poll for JIT Tickets
   WC=$(grep -c . /etc/eshu-windows.txt 2>/dev/null || echo 0)
   curl -m 2 -s -H "X-Gateway-Token: $GATEWAY_TOKEN" "$DASHBOARD_URL/api/poll/$TARGET_IP?wc=$WC" > /tmp/eshu-ticket.json
-  if [ -s /tmp/eshu-ticket.json ]; then
+  # Only start python when the response actually carries a ticket string. The
+  # endpoint always returns {"ticket":null,...}, and parsing that every cycle
+  # would keep one unnecessary interpreter start on the loop.
+  if [ -s /tmp/eshu-ticket.json ] && grep -qE '"ticket"[[:space:]]*:[[:space:]]*"' /tmp/eshu-ticket.json; then
     TICKET=$(python3 -c "import sys, json; print(json.load(sys.stdin).get('ticket') or '')" < /tmp/eshu-ticket.json 2>/dev/null)
     if [ -n "$TICKET" ] && [ "$TICKET" != "null" ]; then
       echo "$TICKET" >> /var/run/eshu.tickets
