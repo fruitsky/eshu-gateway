@@ -4602,3 +4602,56 @@ body.pol-open .mobile-menu-btn, body.pol-open .mobile-freeze { display: none; }
 @media (prefers-reduced-motion: reduce) {
   .pol-card { animation: none; }
 }
+
+/* ── Confirmation ─────────────────────────────────────────────────────
+   A row action asks in the row: the question takes the button's place, so
+   the row still says what is being deleted and the pointer never leaves it.
+   Only a system-wide action earns the dimmed card in the middle. */
+.inline-confirm {
+  display: inline-flex; align-items: center; justify-content: flex-end;
+  flex-wrap: wrap; gap: 6px;
+}
+.ic-q {
+  font-family: 'JetBrains Mono', monospace; font-size: 11px;
+  letter-spacing: .3px; color: var(--text-main);
+}
+.ic-btns { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; }
+
+.cf-card {
+  width: min(460px, 92vw);
+  padding: 26px 28px 20px;
+  background: var(--bg-base);
+  border: 1px solid var(--rule); border-radius: 2px;
+  box-shadow: 0 30px 90px rgba(0, 0, 0, 0.7);
+  animation: onb-in .22s cubic-bezier(.16, 1, .3, 1);
+}
+.cf-kicker {
+  font-family: 'JetBrains Mono', monospace; font-size: 11px;
+  letter-spacing: 2.4px; text-transform: uppercase; color: var(--text-muted);
+}
+.cf-title {
+  font-family: var(--serif); font-weight: 400; font-size: 26px;
+  line-height: 1.15; margin: 8px 0 10px; color: var(--text-main);
+}
+.cf-msg {
+  font-family: 'Space Grotesk', sans-serif; font-size: 13px;
+  line-height: 1.75; color: var(--text-muted); white-space: pre-line;
+}
+.cf-foot { display: flex; justify-content: flex-end; gap: 8px; margin-top: 22px; }
+
+/* One agent token per row, hairline instead of the old glass fill. */
+.agent-row {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 8px; padding: 10px 12px;
+  border: 1px solid var(--rule-weak); border-radius: 2px;
+}
+
+@media (max-width: 768px) {
+  .inline-confirm { justify-content: flex-start; }
+  .ic-q { width: 100%; }
+  .cf-card { padding: 22px 20px 16px; }
+  .cf-title { font-size: 23px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .cf-card { animation: none; }
+}

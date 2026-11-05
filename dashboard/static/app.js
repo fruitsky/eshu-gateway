@@ -438,9 +438,10 @@ function syncNavAria() {
 }
 
 async function switchView(target) {
+  cancelInlineConfirm();
   var winModal = document.getElementById('create-window-modal');
   if (winModal && !winModal.classList.contains('hidden') && typeof customConfirm === 'function') {
-    var ok = await customConfirm('You have unsaved changes in the Window editor. Leave anyway?');
+    var ok = await customConfirm('You have unsaved changes in the Window editor.', { title: 'Discard unsaved changes?', confirmLabel: 'Discard' });
     if (!ok) return;
     closeCreateWindowModal();
   }
@@ -893,7 +894,7 @@ async function fetchWindowsTable() {
               '<button onclick="denyWindowReq(' + w.id + ')" class="btn btn-deny btn-xs"> Deny</button>'
             : '<button onclick="openEditWindowModal(' + w.id + ')" class="btn btn-muted btn-xs" title="Edit">Edit</button>' +
               '<button onclick="showWindowHistory(' + w.id + ')" class="btn btn-muted btn-xs" title="Usage history">History</button>' +
-              '<button onclick="deleteWindow(' + w.id + ')" class="btn btn-deny btn-xs" title="Delete">Delete</button>') +
+              '<button onclick="deleteWindow(this, ' + w.id + ')" class="btn btn-deny btn-xs" title="Delete">Delete</button>') +
         '</div></td>' +
         '</tr>';
     }).join('');
@@ -1444,8 +1445,8 @@ async function toggleWindow(id, current) {
   } catch(e) { showToast('Failed', 'error'); }
 }
 
-async function deleteWindow(id) {
-  if (!(await customConfirm('Delete this approved window? This cannot be undone.'))) return;
+async function deleteWindow(btn, id) {
+  if (!(await inlineConfirm(btn, { question: 'Delete this window?', label: 'Delete' }))) return;
   try {
     await authFetch('/api/approved-windows/' + id, { method:'DELETE' });
     showToast('Window deleted', 'success');
@@ -3060,6 +3061,7 @@ document.addEventListener('keydown', function(e) {
   }
 
   if (k === 'Escape') {
+    if (_inlineConfirm) return;
     var onbModal = document.getElementById('onboarding-modal');
     if (onbModal && !onbModal.classList.contains('hidden')) { closeOnboarding(); return; }
     closeMobileSidebar();
@@ -3569,9 +3571,9 @@ function addCommandToAllowlist(encodedCmd) {
   addToPolicy(decodeURIComponent(encodedCmd), 'exact_whitelist');
 }
 
-async function dismissPolicyGap(encodedCmd) {
+async function dismissPolicyGap(btn, encodedCmd) {
   var cmd = decodeURIComponent(encodedCmd);
-  if (!(await customConfirm('Dismiss "' + cmd + '" from policy gaps? It will stop appearing here but can still be allowlisted from the policy editor.'))) return;
+  if (!(await inlineConfirm(btn, { question: 'Dismiss this gap?', label: 'Dismiss', danger: false }))) return;
   try {
     var res = await authFetch('/api/policies/dismiss-gap', {
       method: 'POST',
@@ -3648,7 +3650,7 @@ function renderSuggestions() {
         '</div>' +
         '<div class="flex gap-1 mt-1 flex-shrink-0">' +
           actionBtn +
-          '<button class="chip-btn" onclick="dismissPolicyGap(\'' + encodeCmd(c.command) + '\')">Dismiss</button>' +
+          '<button class="chip-btn" onclick="dismissPolicyGap(this, \'' + encodeCmd(c.command) + '\')">Dismiss</button>' +
         '</div>' +
         '</div>';
     }).join('');
@@ -3686,7 +3688,7 @@ async function savePoliciesSilent() {
 async function addToPolicy(cmd, policyType) {
   const labels = { exact_whitelist: 'Exact Allowlist', regex_whitelist: 'Regex Allowlist', regex_blacklist: 'Blocklist' };
   if (policyType === 'regex_whitelist_remove') {
-    if (!(await customConfirm('Remove "' + cmd + '" from allowlists?'))) return;
+    if (!(await customConfirm('"' + cmd + '" will be removed from both allowlists.', { title: 'Remove from the policy?', confirmLabel: 'Remove' }))) return;
     const exTextarea = document.getElementById('policy-exact'), rwTextarea = document.getElementById('policy-regex-white');
     exTextarea.value = exTextarea.value.split('\n').filter(l => l.trim() !== cmd && l !== cmd).join('\n');
     rwTextarea.value = rwTextarea.value.split('\n').filter(l => l.trim() !== '^' + cmd.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$').join('\n');
@@ -3696,7 +3698,7 @@ async function addToPolicy(cmd, policyType) {
     fetchPolicies(); fetchRequests(); return;
   }
   if (policyType === 'regex_blacklist_remove') {
-    if (!(await customConfirm('Remove "' + cmd + '" from blocklist?'))) return;
+    if (!(await customConfirm('"' + cmd + '" will be removed from the blocklist.', { title: 'Remove from the blocklist?', confirmLabel: 'Remove', danger: false }))) return;
     const rbTextarea = document.getElementById('policy-regex-black');
     rbTextarea.value = rbTextarea.value.split('\n').filter(l => l.trim() !== cmd).join('\n');
     await savePoliciesSilent(); await refreshPolicyCache();
@@ -3709,7 +3711,7 @@ async function addToPolicy(cmd, policyType) {
   if (policyType === 'exact_whitelist' && policyLines('exact_whitelist').indexOf(cmd) !== -1) { showToast('Already in Exact Allowlist', 'info'); return; }
   if (policyType === 'regex_whitelist' && policyLines('regex_whitelist').indexOf(escapedRegex) !== -1) { showToast('Already in Regex Allowlist', 'info'); return; }
   if (policyType === 'regex_blacklist' && policyLines('regex_blacklist').indexOf(cmd) !== -1) { showToast('Already in Blocklist', 'info'); return; }
-  if (!(await customConfirm('Add "' + cmd + '" to ' + labels[policyType] + '?'))) return;
+  if (!(await customConfirm('"' + cmd + '" will be allowed by the ' + labels[policyType] + '.', { title: 'Add to the policy?', confirmLabel: 'Add', danger: false }))) return;
   await fetchPolicies();
   const exTextarea = document.getElementById('policy-exact'), rwTextarea = document.getElementById('policy-regex-white'), rbTextarea = document.getElementById('policy-regex-black');
   if (policyType === 'exact_whitelist') { exTextarea.value = exTextarea.value.trim() ? exTextarea.value.trim() + '\n' + cmd : cmd; rbTextarea.value = rbTextarea.value.split('\n').filter(l => l.trim() !== cmd).join('\n'); }
@@ -4026,7 +4028,7 @@ async function confirmOverride() {
 }
 
 async function cancelOverride(ip) {
-  if (!(await customConfirm('Cancel Override Mode for this gateway? JIT requests will require manual approval again.'))) return;
+  if (!(await customConfirm('JIT requests on this gateway will require manual approval again.', { title: 'Cancel override mode?', confirmLabel: 'Cancel override' }))) return;
   try {
     var res = await authFetch('/api/gateways/' + encodeURIComponent(ip) + '/override', { method: 'DELETE' });
     var data = await res.json();
@@ -4166,7 +4168,7 @@ async function confirmSessionOverride() {
 }
 
 async function cancelSessionOverride(id) {
-  if (!(await customConfirm('Cancel this session override? JIT commands in that session will need approval again.'))) return;
+  if (!(await customConfirm('JIT commands in that session will need approval again.', { title: 'Cancel this session override?', confirmLabel: 'Cancel override' }))) return;
   try {
     var res = await authFetch('/api/session-overrides/' + id, { method: 'DELETE' });
     var data = await res.json();
@@ -4230,7 +4232,7 @@ async function toggleFreezeFromSidebar() {
 }
 
 async function triggerFreeze() {
-  if (!(await customConfirm('FREEZE THE ENTIRE FLEET?\n\nEvery gateway will reject ALL commands — including whitelisted and approved-window commands — until you unfreeze. This takes effect within 30s.\n\nContinue?'))) return;
+  if (!(await customConfirm('Every gateway will reject ALL commands — including whitelisted and approved-window commands — until you unfreeze. This takes effect within 30s.', { title: 'Freeze the entire fleet?', confirmLabel: 'Freeze fleet' }))) return;
   var btn = document.getElementById('freeze-btn');
   if (btn) { btn.disabled = true; btn.textContent = 'Freezing...'; }
   try {
@@ -4245,7 +4247,7 @@ async function triggerFreeze() {
 }
 
 async function triggerUnfreeze() {
-  if (!(await customConfirm('Unfreeze the fleet?\n\nGateways will resume normal policy enforcement on their next poll cycle (within 30s).'))) return;
+  if (!(await customConfirm('Gateways will resume normal policy enforcement on their next poll cycle (within 30s).', { title: 'Unfreeze the fleet?', confirmLabel: 'Unfreeze', danger: false }))) return;
   var btn = document.getElementById('unfreeze-btn');
   if (btn) { btn.disabled = true; btn.textContent = 'Unfreezing...'; }
   try {
@@ -4611,9 +4613,9 @@ async function dispatchFleetQueue() {
   var dryCount = _fleetQueue.filter(function(d) { return !!d.dry_run; }).length;
   var msg = 'Dispatch ' + _fleetQueue.length + ' command(s) to their target gateways?\n\nThis is the approval — they will run on each gateway\'s next poll cycle (≤30s).';
   if (dryCount > 0) {
-    msg += '\n\n ' + dryCount + ' command(s) have a dry-run version available for safe testing — press Cancel to go back and upgrade them, or Continue to dispatch as-is.';
+    msg += '\n\n ' + dryCount + ' command(s) have a dry-run version available for safe testing — press Cancel to go back and upgrade them, or Dispatch to send as-is.';
   }
-  if (!(await customConfirm(msg))) return;
+  if (!(await customConfirm(msg, { title: 'Dispatch the fleet queue?', confirmLabel: 'Dispatch' }))) return;
 
   var hardBlocked = [], blacklistedIdx = {};
   for (var i = 0; i < _fleetQueue.length; i++) {
@@ -4626,7 +4628,7 @@ async function dispatchFleetQueue() {
   }
   if (hardBlocked.length > 0) showToast('Hard-blocked, kept in queue: ' + hardBlocked.join('; '), 'error');
   if (Object.keys(blacklistedIdx).length > 0) {
-    var ok = await customConfirm(' ' + Object.keys(blacklistedIdx).length + ' queued command(s) match the central blocklist. Dispatch them anyway with override?');
+    var ok = await customConfirm(Object.keys(blacklistedIdx).length + ' queued command(s) match the central blocklist and will run with override.', { title: 'Dispatch blocklisted commands?', confirmLabel: 'Dispatch anyway' });
     if (!ok) return;
   }
 
@@ -4890,7 +4892,7 @@ async function copyFleetOutputModal() {
 }
 
 async function clearFleetResult(cmdId, ip) {
-  if (!(await customConfirm('Clear this gateway\'s stuck result for fleet #' + cmdId + '?\n\n' + ip + ' is marked queued (it never ran, e.g. the gateway is on an old poller). Clearing marks it skipped so this gateway\'s queue can move on — the command and the other gateways\' results are kept.'))) return;
+  if (!(await customConfirm(ip + ' is marked queued (it never ran, e.g. the gateway is on an old poller). Clearing marks it skipped so this gateway\'s queue can move on — the command and the other gateways\' results are kept.', { title: 'Clear the stuck result for fleet #' + cmdId + '?', confirmLabel: 'Clear result' }))) return;
   try {
     var res = await authFetch('/api/fleet/commands/' + cmdId + '/result/' + encodeURIComponent(ip), { method: 'DELETE' });
     var data = await res.json();
@@ -5039,7 +5041,7 @@ document.addEventListener('click', function(e) {
     renderPolicyChips();
   };
   if (isCore) {
-    customConfirm('Remove a shipped core block?\n\n"' + line + '" is a safety-net pattern that ships with Eshu by default. Removing it lets this kind of command reach JIT/approval.\n\nOnly continue if you are sure. Re-add it any time via "Core defaults".').then(function(ok){ if (ok) doRemove(); });
+    customConfirm('"' + line + '" is a safety-net pattern that ships with Eshu by default. Removing it lets this kind of command reach JIT/approval. Re-add it any time via "Core defaults".', { title: 'Remove a shipped safety pattern?', confirmLabel: 'Remove pattern' }).then(function(ok){ if (ok) doRemove(); });
   } else {
     doRemove();
   }
@@ -5153,7 +5155,7 @@ async function confirmSavePolicies() {
 }
 
 async function rollbackPolicyChange(changeId) {
-  if (!(await customConfirm('Restore policy to the state before this change? This will overwrite the current policy and push to gateways.'))) return;
+  if (!(await customConfirm('This overwrites the current policy and pushes it to gateways.', { title: 'Restore the previous policy?', confirmLabel: 'Restore' }))) return;
   try {
     const res = await authFetch('/api/policies/rollback/' + changeId, { method: 'POST' });
     if (!res.ok) { showToast('Rollback failed', 'error'); return; }
@@ -5211,11 +5213,11 @@ async function seedEdge() {
     if (sr.ok) {
       var sd = await sr.json();
       if (sd.pipeline_state === 'dev_in_progress') {
-        confirmMsg = 'A previous dev push is active. Seed Edge will stop it and deploy the latest Build to dev gateways. Continue?';
+        confirmMsg = 'A previous dev push is active. Seeding stops it and deploys the latest Build to dev gateways.';
       }
     }
   } catch(e) {}
-  if (!(await customConfirm(confirmMsg))) return;
+  if (!(await customConfirm(confirmMsg, { title: 'Seed Edge from the current Build?', confirmLabel: 'Seed Edge', danger: false }))) return;
   const btn = document.getElementById('seed-edge-btn'); btn.disabled = true; btn.textContent = 'Seeding...';
   try {
     const res = await authFetch('/api/dev/seed', { method: 'POST' });
@@ -5229,7 +5231,7 @@ async function seedEdge() {
 async function pushToDev() {
   const devCount = typeof _devGateways !== 'undefined' ? _devGateways.length : 0;
   if (devCount === 0) { showToast('No dev-mode gateways exist. Set a gateway to dev mode first.', 'error'); return; }
-  if (!(await customConfirm('Push Edge to ' + devCount + ' dev gateway(s)? Production gateways are not affected.'))) return;
+  if (!(await customConfirm('Production gateways are not affected.', { title: 'Push Edge to ' + devCount + ' dev gateway(s)?', confirmLabel: 'Push to dev', danger: false }))) return;
   const btn = document.getElementById('push-to-dev-btn'); btn.disabled = true; btn.textContent = 'Pushing...';
   try {
     const r = await authFetch('/api/dev-gateways/push', { method: 'POST' });
@@ -5241,7 +5243,7 @@ async function pushToDev() {
 }
 
 async function promoteToGolden() {
-  if (!(await customConfirm('Deploy Edge to Fleet? All connected gateways will update within ~3 seconds.\n\nA backup of the current Build will be saved.'))) return;
+  if (!(await customConfirm('All connected gateways will update within ~3 seconds. A backup of the current Build will be saved.', { title: 'Deploy Edge to the fleet?', confirmLabel: 'Deploy' }))) return;
   const btn = document.getElementById('promote-golden-btn'); btn.disabled = true; btn.textContent = 'Deploying...';
   try {
     const res = await authFetch('/api/dev/promote', { method: 'POST' });
@@ -5254,7 +5256,7 @@ async function promoteToGolden() {
 }
 
 async function rollbackGolden() {
-  if (!(await customConfirm('Rollback Fleet to the previous version from backup?\n\nALL gateways will update within ~3 seconds.'))) return;
+  if (!(await customConfirm('ALL gateways will update within ~3 seconds.', { title: 'Roll back the fleet?', confirmLabel: 'Roll back' }))) return;
   const btn = document.getElementById('rollback-golden-btn'); btn.disabled = true; btn.textContent = 'Rolling back...';
   try {
     const res = await authFetch('/api/dev/rollback', { method: 'POST' });
@@ -5515,7 +5517,7 @@ async function pollUninstallProgress(ip) {
   tryFetch();
 }
 async function handleForceRemoveGateway(ip, hostname) {
-  if (!(await customConfirm('Force remove ' + hostname + ' (' + ip + ') from the dashboard?\n\n This only deletes the dashboard record — it does NOT uninstall anything on the host.\n\nIf the gateway is still running, it will re-register on its next poll (~30s), so this may not be permanent. Use it only for decommissioned or never-completed hosts.'))) return;
+  if (!(await customConfirm('This only deletes the dashboard record — it does NOT uninstall anything on the host. If the gateway is still running, it will re-register on its next poll (~30s), so this may not be permanent. Use it only for decommissioned or never-completed hosts.', { title: 'Remove ' + hostname + ' (' + ip + ')?', confirmLabel: 'Remove record' }))) return;
   try {
     const res = await authFetch('/api/gateways/' + ip, { method: 'DELETE' });
     const data = await res.json();
@@ -5707,7 +5709,7 @@ function toggleDropdown() { document.getElementById('purge-dropdown').classList.
 async function purgeHistory(period) {
   document.getElementById('purge-dropdown').classList.remove('show');
   const label = period === 'all' ? 'all time' : period;
-  if (!(await customConfirm('Clear the queue of requests older than ' + label + '?\n\n This hides them from the queue. Stats are preserved.'))) return;
+  if (!(await customConfirm('This hides requests older than ' + label + ' from the queue. Stats are preserved.', { title: 'Clear old requests?', confirmLabel: 'Clear queue', danger: false }))) return;
   const now = Math.floor(Date.now() / 1000);
   const offsets = { '30m': 1800, '1h': 3600, '1d': 86400, '2d': 172800, '7d': 604800 };
   if (period === 'all') _queueClearBefore = now;
@@ -5718,7 +5720,7 @@ async function purgeHistory(period) {
 let _dbPurgeBefore = 0;
 async function purgeDatabase(period) {
   const label = period === 'all' ? 'all time' : period;
-      if (!(await customConfirm('PERMANENTLY DELETE all requests older than ' + label + ' from the database?\n\nThis CANNOT be undone. Stats, charts, and top commands will be affected.'))) return;
+      if (!(await customConfirm('Requests older than ' + label + ' are deleted from the database. This CANNOT be undone, and stats, charts and top commands will be affected.', { title: 'Permanently delete old requests?', confirmLabel: 'Delete permanently' }))) return;
   await authFetch('/api/requests?older_than=' + period, { method: 'DELETE' });
   _queueClearBefore = 0; // Reset client-side filter after DB purge
   showToast('Database purged (older than ' + label + ')', 'success');
@@ -5728,16 +5730,128 @@ async function purgeDatabase(period) {
 document.addEventListener('click', function(e) { if (!e.target.closest('#purge-btn') && !e.target.closest('#purge-dropdown')) document.getElementById('purge-dropdown').classList.remove('show'); });
 
 // ── Custom Confirm Dialog ────────────────────────────────────────────────
+/* Two shapes, chosen by blast radius:
+   - inlineConfirm() for an action that belongs to one row — the question takes
+     the place of the button, so the row keeps saying *what* is being deleted
+     and the pointer never leaves it;
+   - customConfirm() for an action that belongs to the whole system (freeze,
+     purge, deploy, rollback), where the extra pause and the room to explain
+     are the point. */
 let _confirmResolve = null;
-function customConfirm(msg) {
+function customConfirm(msg, opts) {
+  opts = opts || {};
   return new Promise(function(resolve) {
+    var ok = document.getElementById('custom-confirm-ok');
+    var title = document.getElementById('custom-confirm-title');
     _confirmResolve = function(result) {
       document.getElementById('custom-confirm-overlay').classList.add('hidden');
       resolve(result);
     };
+    if (title) title.textContent = opts.title || 'Confirm this action';
+    if (ok) {
+      ok.textContent = opts.confirmLabel || 'Confirm';
+      ok.classList.toggle('btn-danger', opts.danger !== false);
+    }
     document.getElementById('custom-confirm-msg').innerText = msg;
     document.getElementById('custom-confirm-overlay').classList.remove('hidden');
+    setTimeout(function () { var c = document.getElementById('custom-confirm-cancel'); if (c) c.focus(); }, 30);
   });
+}
+
+/* In-row confirmation. Replaces the trigger button with "<question> Cancel
+   <verb>" until the user answers; Esc or a click elsewhere cancels, and focus
+   returns to the trigger. Only one can be open at a time, and it cancels
+   itself if a re-render removes the row underneath it. */
+var _inlineConfirm = null;
+
+function inlineConfirm(btn, opts) {
+  opts = opts || {};
+  if (!btn) return Promise.resolve(false);
+  cancelInlineConfirm();
+  return new Promise(function(resolve) {
+    var done = false;
+    var danger = opts.danger !== false;
+    var root = document.createElement('span');
+    root.className = 'inline-confirm';
+    root.setAttribute('role', 'group');
+    /* Take over the whole action group, not just the trigger: the sibling
+       buttons (Edit, History, Policy) share a nowrap flex row, and squeezing
+       the question between them is what made the old inline attempt unusable. */
+    var host = opts.host || btn.parentNode;
+
+    var question = document.createElement('span');
+    question.className = 'ic-q';
+    question.id = 'ic-q-' + (Date.now() % 100000);
+    question.textContent = opts.question || 'Delete?';
+    root.setAttribute('aria-labelledby', question.id);
+
+    var cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.className = 'btn btn-muted btn-xs';
+    cancel.textContent = 'Cancel';
+    cancel.setAttribute('data-ic', 'cancel');
+
+    var ok = document.createElement('button');
+    ok.type = 'button';
+    ok.className = 'btn btn-xs' + (danger ? ' btn-deny' : '');
+    ok.textContent = opts.label || 'Delete';
+    ok.setAttribute('data-ic', 'ok');
+
+    var buttons = document.createElement('span');
+    buttons.className = 'ic-btns';
+    buttons.appendChild(cancel);
+    buttons.appendChild(ok);
+    root.appendChild(question);
+    root.appendChild(buttons);
+
+    btn.classList.add('hidden');
+    if (host && host.style) host.style.display = 'none';
+    if (host && host.parentNode) host.parentNode.insertBefore(root, host.nextSibling);
+    else btn.parentNode.insertBefore(root, btn.nextSibling);
+
+    var obs = new MutationObserver(function() {
+      if (!document.contains(btn) || !document.contains(root)) finish(false);
+    });
+    obs.observe(document.body, { childList: true, subtree: true });
+
+    function finish(result) {
+      if (done) return;
+      done = true;
+      obs.disconnect();
+      document.removeEventListener('keydown', onKey, true);
+      document.removeEventListener('pointerdown', onOutside, true);
+      if (_inlineConfirm && _inlineConfirm.root === root) _inlineConfirm = null;
+      if (root.parentNode) root.parentNode.removeChild(root);
+      if (host && host.style) host.style.display = '';
+      if (document.contains(btn)) {
+        btn.classList.remove('hidden');
+        if (!result) btn.focus();
+      }
+      resolve(result);
+    }
+    function onKey(e) {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        finish(false);
+      }
+    }
+    function onOutside(e) {
+      if (!root.contains(e.target)) finish(false);
+    }
+
+    cancel.addEventListener('click', function() { finish(false); });
+    ok.addEventListener('click', function() { finish(true); });
+    document.addEventListener('keydown', onKey, true);
+    document.addEventListener('pointerdown', onOutside, true);
+
+    _inlineConfirm = { root: root, finish: finish };
+    cancel.focus();
+  });
+}
+
+function cancelInlineConfirm() {
+  if (_inlineConfirm) _inlineConfirm.finish(false);
 }
 
 // ── Modals ───────────────────────────────────────────────────────────────
@@ -6330,10 +6444,6 @@ const INTEGRATION_PROFILES = {
                  auth_type: 'header', auth_header: 'X-Api-Key',
                  secret_hint: 'Seerr API key',
                  guidance: 'API key via X-Api-Key header. Base URL is https://<seerr>/api/v1. Fully curated (no generic passthrough); request_create is the only write and runs immediately — Seerr applies its own request approval.' },
-  seerr:       { label: 'Seerr', seedable: true,
-                 auth_type: 'header', auth_header: 'X-Api-Key',
-                 secret_hint: 'Seerr API key',
-                 guidance: 'API key via X-Api-Key header. Base URL is https://<seerr>/api/v1. Fully curated (no generic passthrough); request_create is the only write and runs immediately — Seerr applies its own request approval.' },
   pihole:      { label: 'Pi-hole', seedable: true,
                  auth_type: 'query_token', auth_header: '',
                  secret_hint: 'Pi-hole API token',
@@ -6586,10 +6696,10 @@ async function saveWebFetchPolicy() {
   }
 }
 
-async function deleteWebFetchPolicy() {
+async function deleteWebFetchPolicy(btn) {
   const principal = document.getElementById('wf-principal').value || '';
   if (!principal) { showToast('Select an agent token first', 'error'); return; }
-  if (!(await customConfirm('Delete the web-fetch policy for "' + principal + '"?'))) return;
+  if (!(await inlineConfirm(btn, { question: 'Delete this policy?', label: 'Delete' }))) return;
   try {
     const res = await authFetch('/api/web-fetch-policies/' + encodeURIComponent(principal), { method: 'DELETE' });
     if (!res.ok && res.status !== 404) { showToast('Delete failed', 'error'); return; }
@@ -6622,13 +6732,13 @@ async function fetchAgentTokens() {
         ? ((p.tools || []).length + ' allowed tool' + ((p.tools || []).length === 1 ? '' : 's'))
         : 'all tools';
       if (p.rate_limit_per_min) summary += ' · ' + p.rate_limit_per_min + '/min';
-      return '<div class="flex items-center justify-between gap-2 p-2 rounded bg-black/20">' +
+      return '<div class="agent-row">' +
         '<div><div class="text-sm">' + esc(a.name) + (a.revoked ? ' <span class="text-danger">(revoked)</span>' : '') + '</div>' +
         '<div class="text-xs text-muted">last used: ' + used + ' · ' + esc(summary) + '</div></div>' +
         '<div class="flex items-center gap-1">' +
         '<button onclick="openAgentPolicy(' + a.id + ')" class="btn btn-xs">Policy</button>' +
-        (a.revoked ? '' : '<button onclick="revokeAgentToken(' + a.id + ')" class="btn btn-xs btn-muted">Revoke</button>') +
-        '<button onclick="deleteAgentToken(' + a.id + ')" class="btn btn-xs btn-muted">Delete</button></div></div>';
+        (a.revoked ? '' : '<button onclick="revokeAgentToken(this, ' + a.id + ')" class="btn btn-xs btn-muted">Revoke</button>') +
+        '<button onclick="deleteAgentToken(this, ' + a.id + ')" class="btn btn-xs btn-muted">Delete</button></div></div>';
     }).join('');
   } catch(e) {}
 }
@@ -6944,8 +7054,8 @@ async function saveAgentPolicy() {
   } catch(e) { showToast('Failed: ' + e.message, 'error'); }
 }
 
-async function revokeAgentToken(id) {
-  if (!(await customConfirm('Revoke this agent token? It stops working immediately; the row is kept for audit.'))) return;
+async function revokeAgentToken(btn, id) {
+  if (!(await inlineConfirm(btn, { question: 'Revoke this token? It stops working now.', label: 'Revoke' }))) return;
   try {
     const res = await authFetch('/api/agents/' + id + '/revoke', { method: 'POST' });
     if (!res.ok) { showToast('Failed to revoke', 'error'); return; }
@@ -6971,8 +7081,8 @@ async function createAgentToken() {
   } catch(e) { showToast('Failed: ' + e.message, 'error'); }
 }
 
-async function deleteAgentToken(id) {
-  if (!(await customConfirm('Delete this agent token? The agent will lose access immediately.'))) return;
+async function deleteAgentToken(btn, id) {
+  if (!(await inlineConfirm(btn, { question: 'Delete this token?', label: 'Delete' }))) return;
   try {
     await authFetch('/api/agents/' + id, { method: 'DELETE' });
     fetchAgentTokens();
@@ -7008,7 +7118,7 @@ function renderIntegrationList() {
       '<button onclick="editIntegration(\'' + esc(i.name) + '\')" class="btn btn-xs btn-muted" title="Edit base URL / secret">Edit</button>' +
       testBtn +
       seedBtn +
-      '<button onclick="deleteIntegration(\'' + esc(i.name) + '\')" class="btn btn-xs btn-muted">Delete</button>' +
+      '<button onclick="deleteIntegration(this, \'' + esc(i.name) + '\')" class="btn btn-xs btn-muted">Delete</button>' +
       '</div></div>';
   }).join('');
 }
@@ -7210,8 +7320,8 @@ function clearTestResult() {
   if (box) box.classList.add('hidden');
 }
 
-async function deleteIntegration(name) {
-  if (!(await customConfirm('Delete integration "' + name + '" and all its tools?'))) return;
+async function deleteIntegration(btn, name) {
+  if (!(await inlineConfirm(btn, { question: 'Delete this integration and its tools?', label: 'Delete' }))) return;
   try {
     await authFetch('/api/integrations/' + encodeURIComponent(name), { method: 'DELETE' });
     if (_selectedIntegration === name) _selectedIntegration = null;
@@ -7278,7 +7388,7 @@ function renderTools(tools, name) {
 async function bulkSetTools(enabled) {
   if (!_selectedIntegration) return;
   const label = enabled ? 'Enable' : 'Disable';
-  if (!(await customConfirm(label + ' all tools for ' + _selectedIntegration + '? They take effect for agents on the next /reload-mcp.'))) return;
+  if (!(await customConfirm('They take effect for agents on the next /reload-mcp.', { title: label + ' all tools for ' + _selectedIntegration + '?', confirmLabel: label, danger: false }))) return;
   try {
     const res = await authFetch('/api/integrations/' + encodeURIComponent(_selectedIntegration) + '/tools/bulk', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: enabled }) });
     if (res.ok) { fetchTools(_selectedIntegration); showToast(label + 'd all tools for ' + _selectedIntegration, 'success'); }

@@ -23,7 +23,7 @@
 <link rel="preload" href="/static/fonts/instrument-serif-regular-latin.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="preload" href="/static/fonts/jetbrains-mono-var-latin.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="/static/fonts.css?v=2">
-<link rel="stylesheet" href="/static/style.css?v=ui6">
+<link rel="stylesheet" href="/static/style.css?v=ui7">
 
 </head>
 <body>
@@ -575,7 +575,7 @@
         <textarea id="wf-allow" rows="5" class="w-full text-xs" placeholder="bromley.gov.uk&#10;gov.uk&#10;tesco.com&#10;sainsburys.co.uk&#10;ocado.com"></textarea>
         <div class="flex flex-wrap items-center gap-2 mt-2">
           <button onclick="saveWebFetchPolicy()" class="btn btn-sm">Save Policy</button>
-          <button onclick="deleteWebFetchPolicy()" class="btn btn-sm btn-muted">Delete</button>
+          <button onclick="deleteWebFetchPolicy(this)" class="btn btn-sm btn-muted">Delete</button>
           <span id="wf-policy-status" class="text-xs text-muted"></span>
         </div>
         <div id="wf-stats" class="text-xs text-muted mt-2"></div>
@@ -929,7 +929,7 @@
 </main>
 
 <script src="/static/state.js?v=ui3"></script>
-<script src="/static/app.js?v=ui10"></script>
+<script src="/static/app.js?v=ui11"></script>
 
 <!-- Create / Edit Approved Window Modal -->
 <div id="create-window-modal" class="modal-overlay hidden">
@@ -1077,13 +1077,15 @@
   </div>
 </div>
 
-<!-- Custom Confirm Dialog -->
-<div id="custom-confirm-overlay" class="modal-overlay hidden">
-  <div class="widget max-w-md w-full text-center">
-    <p id="custom-confirm-msg" class="text-main mb-5" style="line-height:1.6;"></p>
-    <div class="flex justify-center gap-3">
-      <button onclick="_confirmResolve(false)" class="btn btn-muted btn-sm">Cancel</button>
-      <button onclick="_confirmResolve(true)" class="btn btn-danger btn-sm">Confirm</button>
+<!-- Custom Confirm Dialog — system-level actions only; a row confirms in place -->
+<div id="custom-confirm-overlay" class="modal-overlay hidden" onclick="if(event.target===this&&_confirmResolve)_confirmResolve(false)">
+  <div class="cf-card" role="dialog" aria-modal="true" aria-labelledby="custom-confirm-title">
+    <div class="cf-kicker">Please confirm</div>
+    <h2 class="cf-title" id="custom-confirm-title">Confirm this action</h2>
+    <p id="custom-confirm-msg" class="cf-msg"></p>
+    <div class="cf-foot">
+      <button id="custom-confirm-cancel" onclick="_confirmResolve(false)" class="btn btn-muted btn-sm">Cancel</button>
+      <button id="custom-confirm-ok" onclick="_confirmResolve(true)" class="btn btn-danger btn-sm">Confirm</button>
     </div>
   </div>
 </div>

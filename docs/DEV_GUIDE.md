@@ -241,6 +241,22 @@ git add -A && git commit -m "..."   # hook runs automatically
 git push
 ```
 
+### Destructive actions
+
+Confirm by blast radius, not by habit:
+
+- **One row, one confirm in the row.** `inlineConfirm(btn, {question, label})`
+  replaces the button with `<question> Cancel <verb>`; Esc or a click elsewhere
+  cancels and focus returns to the button. Use it for deleting an approved
+  window, revoking a token, removing an integration or a policy entry — the row
+  already says *what* is affected, and the pointer should not jump to the middle
+  of the screen.
+- **System-wide actions use `customConfirm(msg, {title, confirmLabel})`.**
+  Freeze/unfreeze, queue purge, deploy/rollback, restoring policy, discarding
+  unsaved edits: those deserve the extra pause and the room to explain. Always
+  pass the verb as `confirmLabel` ("Freeze fleet", "Purge") — a dialog should
+  never ask you to press *Confirm*.
+
 ### Key principles
 
 - Core scripts change rarely (infrastructure updates only)
