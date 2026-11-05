@@ -609,7 +609,7 @@ def receive_request(payload: GatewayPayload, request: Request):
                 details=f'Session override #{ov["id"]} auto-approved JIT #{req_id}: '
                         f'{cmd[:80]} (session {sid}, {scope}, '
                         f'reason: {ov["reason"][:60]})')
-            return {"status": "ok", "id": f"{req_id:06d}", "override": True,
+            return {"status": "ok", "id": f"{req_id:06d}", "request_id": req_id, "override": True,
                     "scope": "session",
                     "message": "Auto-approved via Session Override"}
 
@@ -625,14 +625,14 @@ def receive_request(payload: GatewayPayload, request: Request):
                                 session_id=sid, execution_id=eid)
         update_gateway_last_seen(target_ip)
         record_audit_event('jit_override_approved', target_ip, details=f'Override auto-approved JIT #{req_id}: {cmd[:80]} (reason: {row["override_reason"][:60]})')
-        return {"status": "ok", "id": f"{req_id:06d}", "override": True,
+        return {"status": "ok", "id": f"{req_id:06d}", "request_id": req_id, "override": True,
                 "scope": "host", "message": "Auto-approved via Override Mode"}
 
     req_id = create_request(target_ip, cmd, status="pending", session_id=sid, execution_id=eid)
     update_gateway_last_seen(target_ip)
     send_notify('jit', 'JIT Approval Required', f'`{cmd[:80]}` on {target_ip}')
     record_audit_event('jit_created', target_ip, details=f'JIT #{req_id}: {cmd[:80]}')
-    return {"status": "ok", "id": f"{req_id:06d}"}
+    return {"status": "ok", "id": f"{req_id:06d}", "request_id": req_id}
 
 @app.post("/api/log")
 def receive_log(payload: GatewayPayload, request: Request):

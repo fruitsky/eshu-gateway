@@ -9,6 +9,8 @@ import json
 from core.agent_context import reset_current_session, set_current_session
 from core.mcp_server import (
     _ALWAYS_ALLOWED,
+    check_approval_fn,
+    check_request_fn,
     session_begin_fn,
     session_summary_fn,
 )
@@ -23,7 +25,11 @@ from db.integrations import (
     get_integration_calls,
     record_integration_call,
 )
-from db.requests import create_request
+from db.requests import (
+    create_request,
+    expire_stale_requests,
+    get_request_row,
+)
 from db.sessions import (
     get_session,
     get_session_coverage,
@@ -386,3 +392,55 @@ class TestCoverage:
         assert cov["ssh"]["total"] == 3
         assert cov["ssh"]["tagged"] == 1
         assert cov["ssh"]["pct"] == 33
+
+
+class TestSshRequestLookup:
+    """check_request is the agent-facing view of SSH JIT ids (the other
+    approval namespace); check_approval must redirect, not say 'not found'."""
+
+    def test_returns_the_request_by_integer_id(self):
+        rid = create_request("10.0.0.7", "uptime", status="approved",
+                             ttl=90, session_id="chat-req")
+        out = json.loads(check_request_fn()(rid, session_id="chat-req"))
+        assert out["kind"] == "ssh"
+        assert out["status"] == "approved"
+        assert out["command"] == "uptime"
+        assert out["target_ip"] == "10.0.0.7"
+
+    def test_other_session_is_not_found(self):
+        rid = create_request("10.0.0.7", "uptime", status="pending",
+                             ttl=90, session_id="chat-req")
+        out = json.loads(check_request_fn()(rid, session_id="chat-other"))
+        assert out["error"] == "not found"
+
+    def test_check_approval_redirects_an_ssh_id(self):
+        rid = create_request("10.0.0.7", "uptime", status="approved",
+                             ttl=90, session_id="chat-req")
+        out = json.loads(check_approval_fn()(rid))
+        assert out["error"] == "wrong_namespace"
+        assert out["kind"] == "ssh"
+        assert "check_request" in out["message"]
+
+    def test_pending_expires_and_approved_is_abandoned(self):
+        import time
+        now = int(time.time())
+        rid_p = create_request("10.0.0.7", "never approved", status="pending", ttl=90)
+        rid_a = create_request("10.0.0.7", "approved but unclaimed", status="approved", ttl=90)
+        expired, abandoned = expire_stale_requests(now + 200)
+        assert rid_p in expired
+        assert rid_a in abandoned
+        assert get_request_row(rid_p)["status"] == "expired"
+        assert get_request_row(rid_a)["status"] == "abandoned"
+
+    def test_terminal_state_is_derived_before_the_sweep(self):
+        import time
+        now = int(time.time())
+        rid = create_request("10.0.0.7", "stale pending", status="pending", ttl=90)
+        # Force the row past its TTL without running the background sweep.
+        from db.core import db_conn
+        with db_conn() as conn:
+            conn.execute("UPDATE requests SET expires_at = ? WHERE id = ?",
+                         (now - 1, rid))
+            conn.commit()
+        out = json.loads(check_request_fn()(rid))
+        assert out["status"] == "expired"

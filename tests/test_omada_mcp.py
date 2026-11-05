@@ -738,7 +738,7 @@ class TestPerIntegrationMcp:
         assert not any(n.startswith("standalone_one_") for n in global_names)
         assert "standalone_one" in apps
         own = asyncio.run(_names(ms._per_integration["standalone_one"]))
-        assert {"list", "write", "check_approval", "session_begin", "session_summary"} == own
+        assert {"list", "write", "check_approval", "check_request", "session_begin", "session_summary"} == own
         # both: on shared AND own server
         assert "both_one_list" in global_names
         assert "both_one" in apps

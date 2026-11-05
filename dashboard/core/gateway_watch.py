@@ -3,6 +3,7 @@ from db.audit import record_audit_event
 from db.gateways import get_gateways, deregister_gateway, clear_trigger_uninstall
 from db.fleet import purge_old_fleet_commands
 from db.integrations import purge_old_integration_calls_by_retention
+from db.requests import expire_stale_requests
 from db.misc import get_meta_json, set_meta_json
 from core.notify import send_notify
 
@@ -68,11 +69,26 @@ def _check_gateway_transitions(now: int):
     if changed:
         _save_watch_state()
 
+def _expire_requests():
+    """Move timed-out JIT requests to terminal states and record the sweep."""
+    expired, abandoned = expire_stale_requests()
+    if expired or abandoned:
+        record_audit_event(
+            'jit_lifecycle_swept',
+            details=(f'Expired {len(expired)} pending and abandoned '
+                     f'{len(abandoned)} approved JIT request(s); rows retained'),
+        )
+
+
 def _gateway_watch_loop():
     while True:
         time.sleep(30)
         try:
             _check_gateway_transitions(int(time.time()))
+        except Exception:
+            pass
+        try:
+            _expire_requests()
         except Exception:
             pass
 

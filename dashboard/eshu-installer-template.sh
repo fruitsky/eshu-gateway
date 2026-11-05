@@ -370,7 +370,7 @@ fi
 
 # Fetch gateway version from dashboard API BEFORE registering (single source of truth)
 if [ -n "$DASHBOARD_URL" ]; then
-  GATEWAY_VERSION=$(curl -m 3 -s "$DASHBOARD_URL/api/version" 2>/dev/null | python3 -c "import sys, json; print(json.load(sys.stdin).get('version','v0.1.0'))" 2>/dev/null || echo "v0.1.0")
+  GATEWAY_VERSION=$(curl --connect-timeout 3 -m 15 -s "$DASHBOARD_URL/api/version" 2>/dev/null | python3 -c "import sys, json; print(json.load(sys.stdin).get('version','v0.1.0'))" 2>/dev/null || echo "v0.1.0")
 else
   GATEWAY_VERSION="v0.1.0"
 fi
@@ -379,7 +379,7 @@ fi
 REGISTER_RESPONSE=""
 if [ "$mode" != "upgrade" ]; then
   echo "Registering Gateway with Dashboard..."
-  REGISTER_RESPONSE=$(curl -m 3 -s -X POST "$DASHBOARD_URL/api/register" \
+  REGISTER_RESPONSE=$(curl --connect-timeout 3 -m 15 -s -X POST "$DASHBOARD_URL/api/register" \
        -H "Content-Type: application/json" \
        -H "X-Gateway-Token: ${GATEWAY_TOKEN:-}" \
        -H "X-Enrollment-Token: ${ESHU_ENROLL_TOKEN:-}" \
@@ -392,7 +392,7 @@ fi
 
 # Always re-register on update to report new version (and get token if missing)
 if [ "$mode" = "upgrade" ] && [ -n "$DASHBOARD_URL" ]; then
-  REGISTER_RESPONSE=$(curl -m 3 -s -X POST "$DASHBOARD_URL/api/register" \
+  REGISTER_RESPONSE=$(curl --connect-timeout 3 -m 15 -s -X POST "$DASHBOARD_URL/api/register" \
        -H "Content-Type: application/json" \
        -H "X-Gateway-Token: ${GATEWAY_TOKEN:-}" \
        -H "X-Enrollment-Token: ${ESHU_ENROLL_TOKEN:-}" \

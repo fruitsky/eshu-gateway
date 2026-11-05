@@ -63,6 +63,7 @@ class GatewaySandbox:
         self.logger_log = self.root / "logger.log"
         self.status_file = self.root / "jit-status"
         self.request_mode_file = self.root / "request-mode"
+        self.claim_mode_file = self.root / "claim-mode"
         self.ticket_file = self.run_dir / "eshu.tickets"
 
         self._write_stubs()
@@ -76,12 +77,14 @@ class GatewaySandbox:
 LOG="__LOG__"
 STATUS_FILE="__STATUS__"
 REQUEST_MODE="__MODE__"
+CLAIM_MODE="__CLAIM__"
 method="GET"; url=""; data=""
 while [ $# -gt 0 ]; do
   case "$1" in
     -X) method="$2"; shift 2 ;;
     -d) data="$2"; shift 2 ;;
-    -H|-m|-w) shift 2 ;;
+    -H|-m) shift 2 ;;
+    --connect-timeout) shift 2 ;;
     -s) shift ;;
     -*) shift ;;
     *) url="$1"; shift ;;
@@ -102,14 +105,19 @@ case "$url" in
     printf '{"status":"%s"}\\n' "$(cat "$STATUS_FILE" 2>/dev/null || echo pending)"
     ;;
   */api/ticket/*)
-    printf '{"ticket":"test-ticket"}\\n'
+    mode=$(cat "$CLAIM_MODE" 2>/dev/null || echo ok)
+    case "$mode" in
+      null) printf '{"ticket":null}\\n' ;;
+      *) printf '{"ticket":"test-ticket"}\\n' ;;
+    esac
     ;;
   *) : ;;
 esac
 '''
         curl = (curl.replace("__LOG__", str(self.curl_log))
                     .replace("__STATUS__", str(self.status_file))
-                    .replace("__MODE__", str(self.request_mode_file)))
+                    .replace("__MODE__", str(self.request_mode_file))
+                    .replace("__CLAIM__", str(self.claim_mode_file)))
         self._executable(self.bin / "curl", curl)
 
         logger = '''#!/bin/bash
@@ -197,6 +205,9 @@ printf '%s\\n' "$*" >> "__LOG__"
     def request_mode(self, mode: str):
         self.request_mode_file.write_text(mode)
 
+    def claim_mode(self, mode: str):
+        self.claim_mode_file.write_text(mode)
+
     def tickets(self, *lines: str):
         self._write(self.ticket_file, *lines)
 
@@ -210,6 +221,7 @@ printf '%s\\n' "$*" >> "__LOG__"
             "SSH_CONNECTION": "127.0.0.1 40000 127.0.0.1 22",
             "USER": "tester",
             "LANG": "C.UTF-8",
+            "ESHU_JIT_WAIT": "2",
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         }
         proc = subprocess.run(
@@ -457,6 +469,35 @@ def test_jit_consumed_runs_without_a_second_claim(gw):
     assert "consumed-ok" in proc.stdout
     assert proc.returncode == 0
     assert not any(c["url"].endswith("/api/ticket/") for c in gw.curl_calls())
+
+
+def test_failed_claim_does_not_execute(gw):
+    # A failed /api/ticket claim must not run the command: the dashboard would
+    # keep the request "approved" with no jit_consumed audit (bug #2393).
+    gw.claim_mode("null")
+    gw.jit_status("approved")
+    proc = gw.run("echo should-not-run")
+    assert "should-not-run" not in proc.stdout
+    assert proc.returncode == 1
+    assert "JIT CLAIM FAILED" in gw.logger_text()
+    assert gw.wait_for(lambda calls: any(
+        c["url"].endswith("/api/ticket/000123") for c in calls))
+
+
+def test_double_space_prefix_still_matches_the_whitelist(gw):
+    # The returned ssh_prefix ends with a space; a wrapper that adds its own
+    # leaves a leading space after stripping. It must not change classification.
+    gw.session_key()
+    gw.require_sessions(True)
+    gw.exact("uptime")
+    sid = "space-test"
+    proc = gw.run("ESHU_SESSION_ID=%s ESHU_SESSION_SIG=%s  uptime"
+                  % (sid, session_sig(sid)))
+    assert proc.returncode == 0
+    assert not any(c["url"].endswith("/api/request") for c in gw.curl_calls())
+    assert gw.wait_for(lambda calls: any(
+        c["url"].endswith("/api/log") and c["data"].get("status") == "auto-approved"
+        for c in calls))
 
 
 def test_jit_request_forwards_session_execution_and_stripped_command(gw):

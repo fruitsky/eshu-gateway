@@ -6,6 +6,7 @@ immediately; mutating tools create a pending call and require operator approval.
 """
 import json
 import re
+import time
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
@@ -17,6 +18,7 @@ from db.integrations import (
     get_integrations,
     get_pending_call,
 )
+from db.requests import get_request_row
 from db.web_fetch import get_web_fetch_policy
 from core.agent_context import (
     current_agent_name,
@@ -51,7 +53,7 @@ _DEFAULT_ALLOWED_HOSTS = ['127.0.0.1:*', 'localhost:*', '[::1]:*']
 
 # Tools that are not integration calls and must remain reachable so an agent
 # can poll its own approvals. They are always scoped to the caller.
-_ALWAYS_ALLOWED = {'check_approval', 'session_begin', 'session_summary'}
+_ALWAYS_ALLOWED = {'check_approval', 'check_request', 'session_begin', 'session_summary'}
 
 
 def _describe_web_fetch(base: str, policy: dict) -> str:
@@ -422,6 +424,8 @@ def build_per_integration_mcp() -> dict:
             # approval polling is cross-cutting — present on every per-integration server
             inst.add_tool(check_approval_fn(), name="check_approval",
                           description=CHECK_APPROVAL_DESC)
+            inst.add_tool(check_request_fn(), name="check_request",
+                          description=CHECK_REQUEST_DESC)
             inst.add_tool(session_begin_fn(), name="session_begin",
                           description=SESSION_BEGIN_DESC)
             inst.add_tool(session_summary_fn(), name="session_summary",
@@ -449,7 +453,9 @@ def _refresh_single_instance(ns: str, integration: dict):
     inst._web_fetch_tools = set()
     fresh = set(_register_tools(inst, integration, namespaced=False))
     inst.add_tool(check_approval_fn(), name="check_approval", description=CHECK_APPROVAL_DESC)
+    inst.add_tool(check_request_fn(), name="check_request", description=CHECK_REQUEST_DESC)
     fresh.add("check_approval")
+    fresh.add("check_request")
     _per_integration_tools[ns] = fresh
 
 
@@ -510,6 +516,17 @@ def check_approval_fn():
     def _check_approval(call_id: int) -> str:
         call = get_pending_call(call_id)
         if not call:
+            # The id may belong to the other approval system: SSH gateway JIT
+            # requests (the `requests` table) are not MCP calls. Say so instead
+            # of a bare "not found", which looks like a deleted/typo'd id.
+            if get_request_row(call_id):
+                return json.dumps({
+                    'error': 'wrong_namespace',
+                    'kind': 'ssh',
+                    'id': call_id,
+                    'message': ('This id is an SSH gateway JIT request, not an '
+                                'MCP approval. Use check_request(%d).' % call_id),
+                })
             return '{"error": "not found", "id": %d}' % call_id
         owner = (call.get('agent') or '').strip()
         caller = current_agent_name()
@@ -525,6 +542,55 @@ def check_approval_fn():
 
 
 mcp.add_tool(check_approval_fn(), name="check_approval", description=CHECK_APPROVAL_DESC)
+
+
+CHECK_REQUEST_DESC = (
+    "Check the status of an SSH gateway JIT request by the id the gateway "
+    "printed (#002392 -> 2392). Returns pending/approved/consumed/denied/"
+    "blocked/expired/abandoned plus the command, target and session. Use "
+    "check_approval for MCP integration approvals instead."
+)
+
+
+def check_request_fn():
+    """Agent-facing view of an SSH JIT request (the other approval namespace).
+
+    Scoped to the caller's session when the request carries one, so an agent
+    cannot read another conversation's command by guessing a sequential id.
+    Untagged requests (no session id) are returned as-is: there is no owner to
+    scope them to, and they are already visible in the dashboard history."""
+    def _check_request(request_id: int, session_id: str = "") -> str:
+        row = get_request_row(request_id)
+        if not row:
+            return json.dumps({'error': 'not found', 'id': request_id})
+        owner = (row.get('session_id') or '').strip()
+        sid = (session_id or '').strip()[:64]
+        if not sid:
+            from core.tool_runner import resolve_session
+            sid, _source = resolve_session('')
+        if owner and owner != sid:
+            return json.dumps({'error': 'not found', 'id': request_id})
+        status = row.get('status') or 'unknown'
+        expires_at = int(row.get('expires_at') or 0)
+        now = int(time.time())
+        # Derive a terminal state even before the 30s sweep runs.
+        if status == 'pending' and expires_at and expires_at < now:
+            status = 'expired'
+        elif status == 'approved' and expires_at and expires_at + 60 < now:
+            status = 'abandoned'
+        return json.dumps({
+            'id': request_id,
+            'kind': 'ssh',
+            'status': status,
+            'command': row.get('command') or '',
+            'target_ip': row.get('target_ip') or '',
+            'session_id': owner,
+            'expires_at': expires_at,
+        })
+    return _check_request
+
+
+mcp.add_tool(check_request_fn(), name="check_request", description=CHECK_REQUEST_DESC)
 
 
 SESSION_BEGIN_DESC = (

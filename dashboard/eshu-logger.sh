@@ -18,6 +18,8 @@ fi
 TARGET_IP=$(hostname -I | awk '{print $1}')
 HOST_NAME=$(hostname)
 INTERVAL=30
+HTTP_TIMEOUT="${ESHU_HTTP_TIMEOUT:-10}"
+HTTP_CONNECT_TIMEOUT="${ESHU_HTTP_CONNECT_TIMEOUT:-3}"
 
 while true; do
     POLLER_OK=0; GATEWAY_OK=0; CAN_REACH=0
@@ -27,11 +29,11 @@ while true; do
 
     systemctl is-active --quiet eshu-poller.service 2>/dev/null && POLLER_OK=1
     [ -f /usr/local/bin/eshu-gateway.sh ] && bash -n /usr/local/bin/eshu-gateway.sh >/dev/null 2>&1 && GATEWAY_OK=1
-    curl -m 5 -s "$DASHBOARD_URL/api/version" >/dev/null 2>&1 && CAN_REACH=1
+    curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s "$DASHBOARD_URL/api/version" >/dev/null 2>&1 && CAN_REACH=1
 
     logger -t eshu-logger "Heartbeat: poller=$POLLER_OK gw=$GATEWAY_OK reach=$CAN_REACH"
 
-    curl -m 5 -s -X POST "$DASHBOARD_URL/api/gateway-heartbeat" \
+    curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -X POST "$DASHBOARD_URL/api/gateway-heartbeat" \
         -H "Content-Type: application/json" \
         -H "X-Gateway-Token: ${GATEWAY_TOKEN:-}" \
         -d "{\"ip\":\"$TARGET_IP\",\"hostname\":\"$HOST_NAME\",\"poller_ok\":$POLLER_OK,\"gateway_ok\":$GATEWAY_OK,\"can_reach\":$CAN_REACH}" \

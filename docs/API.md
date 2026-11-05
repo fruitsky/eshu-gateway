@@ -245,4 +245,8 @@ For the full setup walkthrough (agent tokens, integrations, connecting Hermes, t
 
 Read-only tools forward immediately; mutating tools create a pending call and
 return `{"status": "pending", "id": N}` — the agent polls the `check_approval(id)`
-MCP tool until the operator approves/denies it in the dashboard.
+MCP tool until the operator approves/denies it in the dashboard. SSH gateway JIT
+requests are a separate namespace: the gateway prints `#002392` and the agent
+polls `check_request(2392)` for its terminal state (pending/approved/consumed/
+denied/blocked/expired/abandoned). `check_request` is scoped to the caller's
+session and is always available, like `check_approval`.

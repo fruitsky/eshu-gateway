@@ -98,6 +98,7 @@ while [ $# -gt 0 ]; do
     -o) out="$2"; shift 2 ;;
     -w) fmt="$2"; shift 2 ;;
     -X|-d|-H|-m) shift 2 ;;
+    --connect-timeout) shift 2 ;;
     -s) shift ;;
     -*) shift ;;
     *) url="$1"; shift ;;

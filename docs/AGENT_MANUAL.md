@@ -105,10 +105,13 @@ different id: if SSH and MCP used different ids, pass `session_id` explicitly.
 The response says which rule resolved the id (`resolved_from`: `argument`,
 `connection` or `transport`) and returns `commands`, `pending`, the permitted
 split (`whitelisted`, `jit_approved`, `override_approved`, `window_approved`,
-`fleet_run`, `consumed`), the back-compatible `approved` sum, `refused`,
+`fleet_run`, `consumed`, `abandoned`), the back-compatible `approved` sum, `refused`,
 `expired`, `mcp_calls`, `mcp_pending`, `gateways`, `first_seen` and
 `last_seen`. `approved` means permitted, not succeeded — a command can be
-approved and then fail.
+approved and then fail. `consumed` means the ticket was claimed and the command
+executed; `abandoned` means it was approved but never claimed before the claim
+window closed; `expired` means it was never approved. `approved` is the permitted
+sum and includes `abandoned`.
 
 Rules:
 
@@ -229,7 +232,11 @@ Rules:
 - **Subagents:** resolve the id client-side first and pass it down — e.g. use your
   parent conversation/chat id — so a subagent's MCP calls join the parent's Session.
 - Read-only tools run immediately; mutating tools return a pending `id` — poll
-  `check_approval(id)` until the operator approves or denies.
+  `check_approval(call_id)` until the operator approves or denies. `check_approval`
+  serves **MCP integration** calls only; SSH gateway JIT ids are a separate
+  sequence — use `check_request(id)` for those (see §4).
+- `check_approval` and `check_request` are always available, even under a strict
+  tool allowlist, so an agent can always recover.
 
 ---
 
@@ -334,12 +341,17 @@ ssh eshu-gateway@host "apt update"
 If not auto-approved or covered by a window token, the gateway returns:
 
 ```
-[LOCKED] Command blocked. JIT Approval #000XXX sent to Dashboard.
+[LOCKED] Command blocked. JIT request #000XXX sent to Dashboard.
    Auto-polling for approval (up to 90s)...
 ```
 
-The gateway auto-polls the dashboard for 90 seconds. Meanwhile, an operator sees a
-pending ticket in the dashboard's main queue. They can approve or deny it.
+The `#000XXX` is an **SSH JIT id** in the gateway's `requests` namespace. If the
+SSH client dies before the result arrives, call `check_request(XXX)` with the
+integer (drop the padding) to read its state: `pending`, `approved`, `consumed`,
+`denied`, `blocked`, `expired` or `abandoned`. Do **not** pass it to
+`check_approval` — that tool serves MCP integration approvals and will answer
+`wrong_namespace`. The gateway only executes after the dashboard records the
+ticket claim, so an executed command can no longer look merely "approved".
 
 The gateway handles all status polling internally — the agent only needs to wait for the SSH result.
 
@@ -514,6 +526,8 @@ Wait a few seconds and retry with exponential backoff.
 | `429 Too many requests` | Rate limited | Wait a few seconds, then retry |
 | `script_not_found` error | Gateway script missing | Contact operator |
 | JIT times out (90s) | Operator didn't respond | Reschedule for when operator is available |
+| `Host key verification failed.` (no `[LOCKED]`) | SSH transport failure before the gateway ran (unknown host key, network, auth) | Fix the client's known_hosts/connection; this is not a policy refusal. Only gateway output carries `[LOCKED]` |
+| JIT id unqueryable after the client disconnects | Wrong tool | Use `check_request(<integer>)` for SSH JIT ids; `check_approval` is MCP-only |
 | `Window request denied` | Operator denied request | Adjust parameters (time, command, label) and submit new request |
 
 ### Retry policy

@@ -93,6 +93,37 @@ def get_request_status(req_id: int):
         row = cursor.fetchone()
         return row['status'] if row else None
 
+
+def get_request_row(req_id: int):
+    """Full row for one request (used by the agent-facing check_request tool)."""
+    with db_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM requests WHERE id = ?', (req_id,))
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+
+def expire_stale_requests(now_ts: int = None):
+    """Move timed-out JIT rows to terminal states without deleting them.
+
+    `expired`  = never approved within the 90s TTL.
+    `abandoned`= approved but not claimed within the TTL + the 60s grace used by
+                 update_ticket_consumed_by_ip (so a late poll can still claim it).
+
+    Returns (expired_ids, abandoned_ids). The rows and their commands stay for
+    the audit trail; only the status changes."""
+    now = int(now_ts or time.time())
+    with db_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM requests WHERE status = 'pending' AND expires_at < ?", (now,))
+        expired = [row['id'] for row in cursor.fetchall()]
+        cursor.execute("UPDATE requests SET status = 'expired' WHERE status = 'pending' AND expires_at < ?", (now,))
+        cursor.execute("SELECT id FROM requests WHERE status = 'approved' AND expires_at < ?", (now - 60,))
+        abandoned = [row['id'] for row in cursor.fetchall()]
+        cursor.execute("UPDATE requests SET status = 'abandoned' WHERE status = 'approved' AND expires_at < ?", (now - 60,))
+        conn.commit()
+        return expired, abandoned
+
 def get_request_command(req_id: int):
     with db_conn() as conn:
         cursor = conn.cursor()

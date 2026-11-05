@@ -100,7 +100,7 @@ def get_session_summary(session_id: str) -> dict:
         # split below says *why* it was permitted. `approved` is not success:
         # an allowlisted command or a JIT whose payload failed still counts.
         'whitelisted': 0, 'jit_approved': 0, 'override_approved': 0,
-        'window_approved': 0, 'fleet_run': 0, 'consumed': 0,
+        'window_approved': 0, 'fleet_run': 0, 'consumed': 0, 'abandoned': 0,
         'mcp_calls': 0, 'mcp_pending': 0,
         'gateways': [], 'first_seen': 0, 'last_seen': 0,
     }
@@ -113,16 +113,17 @@ def get_session_summary(session_id: str) -> dict:
               COUNT(*) AS n,
               SUM(status = 'pending') AS pending,
               SUM(status = 'auto-approved') AS whitelisted,
-              SUM(status IN ('approved','consumed')
+              SUM(status IN ('approved','abandoned','consumed')
                   AND COALESCE(reason, '') NOT LIKE 'session-override:%'
                   AND COALESCE(reason, '') != 'override') AS jit_approved,
-              SUM(status IN ('approved','consumed')
+              SUM(status IN ('approved','abandoned','consumed')
                   AND (COALESCE(reason, '') LIKE 'session-override:%'
                        OR COALESCE(reason, '') = 'override')) AS override_approved,
               SUM(status = 'window-approved') AS window_approved,
               SUM(status = 'fleet-run') AS fleet_run,
               SUM(status = 'consumed') AS consumed,
-              SUM(status IN ('approved','auto-approved','consumed','window-approved','fleet-run')) AS approved,
+              SUM(status = 'abandoned') AS abandoned,
+              SUM(status IN ('approved','abandoned','auto-approved','consumed','window-approved','fleet-run')) AS approved,
               SUM(status IN ('denied','blocked','window-rejected','integration-denied','frozen','session-required')) AS refused,
               SUM(status = 'expired') AS expired,
               MIN(created_at) AS first_seen,
@@ -134,7 +135,7 @@ def get_session_summary(session_id: str) -> dict:
             out.update({k: int(row[k] or 0) for k in
                         ('n', 'pending', 'approved', 'refused', 'expired',
                          'whitelisted', 'jit_approved', 'override_approved',
-                         'window_approved', 'fleet_run', 'consumed',
+                         'window_approved', 'fleet_run', 'consumed', 'abandoned',
                          'first_seen', 'last_seen')})
             out['commands'] = out.pop('n')
         cur.execute('''

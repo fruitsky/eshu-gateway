@@ -6,6 +6,16 @@ HOST_NAME="__HOST_NAME__"
 GATEWAY_TOKEN="__GATEWAY_TOKEN__"
 POLL_INTERVAL=30
 
+# Runtime config. The installer bakes a URL, but /etc/eshu/dashboard_url wins so
+# an operator can move the dashboard (e.g. LAN HTTP for a slow/ARM gateway)
+# without reinstalling. Timeouts are generous enough for TLS on ARMv6; the
+# previous 2s values made every policy call fail on a Pi 1.
+if [ -s /etc/eshu/dashboard_url ]; then
+  DASHBOARD_URL=$(cat /etc/eshu/dashboard_url 2>/dev/null || echo "$DASHBOARD_URL")
+fi
+HTTP_TIMEOUT="${ESHU_HTTP_TIMEOUT:-10}"
+HTTP_CONNECT_TIMEOUT="${ESHU_HTTP_CONNECT_TIMEOUT:-3}"
+
 # Policy sync stamp. When the dashboard returns the exact same policy body and
 # every synced file is still present, skip the parse/write block entirely. That
 # replaces ~16 short-lived python3 starts per cycle (roughly a third of a Pi 1
@@ -42,7 +52,7 @@ policy_stamp_matches() {
 sync_feature_scripts() {
   local features_dir="/etc/eshu/features.d"
   mkdir -p "$features_dir"
-  curl -m 2 -s -o "$features_dir/approved_windows.sh.tmp" \
+  curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -o "$features_dir/approved_windows.sh.tmp" \
        "$DASHBOARD_URL/static/features/approved_windows.sh" 2>/dev/null || true
   if [ -s "$features_dir/approved_windows.sh.tmp" ] && bash -n "$features_dir/approved_windows.sh.tmp" 2>/dev/null; then
     if cmp -s "$features_dir/approved_windows.sh.tmp" "$features_dir/approved_windows.sh"; then
@@ -77,7 +87,7 @@ while true; do
   fi
 
   # 1. Sync Central Policies
-  HTTP_CODE=$(curl -m 2 -s -w "%{http_code}" -o /tmp/eshu-policy.json \
+  HTTP_CODE=$(curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -w "%{http_code}" -o /tmp/eshu-policy.json \
        -H "X-Gateway-Token: $GATEWAY_TOKEN" \
        "$DASHBOARD_URL/api/policy/$TARGET_IP")
   POLICY_HASH=""
@@ -158,7 +168,7 @@ while true; do
     LAST_FLEET_CMD_ID=$(cat /var/run/eshu.last_fleet_cmd 2>/dev/null || echo "0")
     if [ -n "$FLEET_CMD_ID" ] && [ "$FLEET_CMD_ID" != "0" ] && [ "$FLEET_CMD_ID" != "$LAST_FLEET_CMD_ID" ] && [ -n "$FLEET_CMD" ]; then
       logger -t eshu-poller "Fleet command #$FLEET_CMD_ID received. Downloading runner..."
-      curl -s -o /tmp/eshu-fleet-runner.sh.tmp "$DASHBOARD_URL/static/fleet-runner.sh" 2>/dev/null || true
+      curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m 60 -s -o /tmp/eshu-fleet-runner.sh.tmp "$DASHBOARD_URL/static/fleet-runner.sh" 2>/dev/null || true
       if [ -s /tmp/eshu-fleet-runner.sh.tmp ] && bash -n /tmp/eshu-fleet-runner.sh.tmp 2>/dev/null; then
         chmod +x /tmp/eshu-fleet-runner.sh.tmp
         mv -f /tmp/eshu-fleet-runner.sh.tmp /tmp/eshu-fleet-runner.sh
@@ -198,7 +208,7 @@ with open('/etc/eshu-windows.txt.tmp', 'w') as f:
     UNINSTALL_FLAG=$(python3 -c "import sys, json; print(json.load(sys.stdin).get('trigger_uninstall', False))" < /tmp/eshu-policy.json 2>/dev/null || echo "False")
     if [ "$UNINSTALL_FLAG" = "True" ]; then
       logger -t eshu-poller "Uninstall triggered. Downloading uninstaller..."
-      curl -s -o /tmp/eshu-uninstall.sh "$DASHBOARD_URL/api/gateway-script" 2>/dev/null
+      curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m 60 -s -o /tmp/eshu-uninstall.sh "$DASHBOARD_URL/api/gateway-script" 2>/dev/null
       if [ -s /tmp/eshu-uninstall.sh ] && head -1 /tmp/eshu-uninstall.sh | grep -q '^#!/bin/bash'; then
         chmod +x /tmp/eshu-uninstall.sh
         # Launch as a transient systemd service in its own cgroup.
@@ -207,7 +217,7 @@ with open('/etc/eshu-windows.txt.tmp', 'w') as f:
         systemd-run --unit=eshu-uninstall --collect \
           bash /tmp/eshu-uninstall.sh --uninstall --yes "$DASHBOARD_URL" >/dev/null 2>&1 || true
         # Clear trigger so the restarted poller doesn't re-spawn uninstalls
-        curl -m 3 -s -X POST "$DASHBOARD_URL/api/uninstall-started/$TARGET_IP" \
+        curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -X POST "$DASHBOARD_URL/api/uninstall-started/$TARGET_IP" \
              -H "X-Gateway-Token: $GATEWAY_TOKEN" >/dev/null 2>&1 || true
         rm -f /tmp/eshu-uninstall.sh
       fi
@@ -219,7 +229,7 @@ with open('/etc/eshu-windows.txt.tmp', 'w') as f:
     DASH_VER=$(python3 -c "import sys, json; print(json.load(sys.stdin).get('dashboard_version',''))" < /tmp/eshu-policy.json 2>/dev/null)
     if [ -n "$TRIGGER_ID" ] && [ "$TRIGGER_ID" != "0" ] && [ "$TRIGGER_ID" != "$LAST_TRIGGER_ID" ] && [ "$TRIGGER_ID" != "" ]; then
       logger -t eshu-poller "Update triggered (trigger $TRIGGER_ID, target version $DASH_VER). Downloading installer..."
-      curl -s -o /tmp/eshu-update.sh "$DASHBOARD_URL/api/gateway-script" 2>/dev/null
+      curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m 60 -s -o /tmp/eshu-update.sh "$DASHBOARD_URL/api/gateway-script" 2>/dev/null
       if [ -s /tmp/eshu-update.sh ] && head -1 /tmp/eshu-update.sh | grep -q '^#!/bin/bash'; then
         chmod +x /tmp/eshu-update.sh
         # Save trigger ID BEFORE running update (persists across poller restarts)
@@ -227,8 +237,8 @@ with open('/etc/eshu-windows.txt.tmp', 'w') as f:
         LAST_TRIGGER_ID="$TRIGGER_ID"
         sudo bash /tmp/eshu-update.sh --update 2>&1 | logger -t eshu-poller
         # Register with the version from the updated installer
-        NEW_VER=$(curl -m 3 -s "$DASHBOARD_URL/api/version" 2>/dev/null | python3 -c "import sys, json; print(json.load(sys.stdin).get('version','$DASH_VER'))" 2>/dev/null || echo "$DASH_VER")
-        REG_RESP=$(curl -m 3 -s -X POST "$DASHBOARD_URL/api/register" \
+        NEW_VER=$(curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s "$DASHBOARD_URL/api/version" 2>/dev/null | python3 -c "import sys, json; print(json.load(sys.stdin).get('version','$DASH_VER'))" 2>/dev/null || echo "$DASH_VER")
+        REG_RESP=$(curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -X POST "$DASHBOARD_URL/api/register" \
              -H "Content-Type: application/json" \
              -H "X-Gateway-Token: ${GATEWAY_TOKEN:-}" \
              -H "X-Enrollment-Token: ${ESHU_ENROLL_TOKEN:-}" \
@@ -249,7 +259,7 @@ with open('/etc/eshu-windows.txt.tmp', 'w') as f:
     LAST_ROLLBACK_ID=$(cat /var/run/eshu.last_rollback_trigger 2>/dev/null || echo "0")
     if [ -n "$ROLLBACK_ID" ] && [ "$ROLLBACK_ID" != "0" ] && [ "$ROLLBACK_ID" != "$LAST_ROLLBACK_ID" ]; then
       logger -t eshu-poller "Rollback triggered (rollback $ROLLBACK_ID). Downloading rollback installer..."
-      curl -s -o /tmp/eshu-rollback.sh "$DASHBOARD_URL/api/gateway-script-rollback" 2>/dev/null
+      curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m 60 -s -o /tmp/eshu-rollback.sh "$DASHBOARD_URL/api/gateway-script-rollback" 2>/dev/null
       if [ -s /tmp/eshu-rollback.sh ] && head -1 /tmp/eshu-rollback.sh | grep -q '^#!/bin/bash'; then
         chmod +x /tmp/eshu-rollback.sh
         echo "$ROLLBACK_ID" > /var/run/eshu.last_rollback_trigger
@@ -269,7 +279,7 @@ with open('/etc/eshu-windows.txt.tmp', 'w') as f:
     if [ -n "$DEV_UPDATE_ID" ] && [ "$DEV_UPDATE_ID" != "" ] && [ "$DEV_UPDATE_ID" != "$LAST_DEV_UPDATE_ID" ] && [ -n "$DEV_INSTALLER_URL" ]; then
       logger -t eshu-poller "Dev update triggered (trigger $DEV_UPDATE_ID). Downloading dev installer from $DEV_INSTALLER_URL..."
       FULL_DEV_URL="$DASHBOARD_URL$DEV_INSTALLER_URL"
-      curl -s -o /tmp/eshu-dev-update.sh "$FULL_DEV_URL" 2>/dev/null
+      curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m 60 -s -o /tmp/eshu-dev-update.sh "$FULL_DEV_URL" 2>/dev/null
       if [ -s /tmp/eshu-dev-update.sh ] && head -1 /tmp/eshu-dev-update.sh | grep -q '^#!/bin/bash'; then
         chmod +x /tmp/eshu-dev-update.sh
         echo "$DEV_UPDATE_ID" > /var/run/eshu.last_dev_update_trigger
@@ -277,8 +287,8 @@ with open('/etc/eshu-windows.txt.tmp', 'w') as f:
         logger -t eshu-poller "Dev update to trigger $DEV_UPDATE_ID completed."
         rm -f /tmp/eshu-dev-update.sh
         # Re-register with updated version
-        NEW_VER=$(curl -m 3 -s "$DASHBOARD_URL/api/version" 2>/dev/null | python3 -c "import sys, json; print(json.load(sys.stdin).get('version','$DASH_VER'))" 2>/dev/null || echo "$DASH_VER")
-        REG_RESP=$(curl -m 3 -s -X POST "$DASHBOARD_URL/api/register" \
+        NEW_VER=$(curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s "$DASHBOARD_URL/api/version" 2>/dev/null | python3 -c "import sys, json; print(json.load(sys.stdin).get('version','$DASH_VER'))" 2>/dev/null || echo "$DASH_VER")
+        REG_RESP=$(curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -X POST "$DASHBOARD_URL/api/register" \
              -H "Content-Type: application/json" \
              -H "X-Gateway-Token: ${GATEWAY_TOKEN:-}" \
              -H "X-Enrollment-Token: ${ESHU_ENROLL_TOKEN:-}" \
@@ -306,7 +316,7 @@ with open('/etc/eshu-windows.txt.tmp', 'w') as f:
 
   # 2. Poll for JIT Tickets
   WC=$(grep -c . /etc/eshu-windows.txt 2>/dev/null || echo 0)
-  curl -m 2 -s -H "X-Gateway-Token: $GATEWAY_TOKEN" "$DASHBOARD_URL/api/poll/$TARGET_IP?wc=$WC" > /tmp/eshu-ticket.json
+  curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -H "X-Gateway-Token: $GATEWAY_TOKEN" "$DASHBOARD_URL/api/poll/$TARGET_IP?wc=$WC" > /tmp/eshu-ticket.json
   # Only start python when the response actually carries a ticket string. The
   # endpoint always returns {"ticket":null,...}, and parsing that every cycle
   # would keep one unnecessary interpreter start on the loop.
