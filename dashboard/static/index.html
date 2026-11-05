@@ -23,7 +23,7 @@
 <link rel="preload" href="/static/fonts/instrument-serif-regular-latin.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="preload" href="/static/fonts/jetbrains-mono-var-latin.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="/static/fonts.css?v=2">
-<link rel="stylesheet" href="/static/style.css?v=ui5">
+<link rel="stylesheet" href="/static/style.css?v=ui6">
 
 </head>
 <body>
@@ -929,7 +929,7 @@
 </main>
 
 <script src="/static/state.js?v=ui3"></script>
-<script src="/static/app.js?v=ui9"></script>
+<script src="/static/app.js?v=ui10"></script>
 
 <!-- Create / Edit Approved Window Modal -->
 <div id="create-window-modal" class="modal-overlay hidden">
@@ -1260,61 +1260,114 @@
 
 <!-- Agent Policy Modal -->
 <div id="agent-policy-modal" class="modal-overlay hidden" onclick="if(event.target===this)closeAgentPolicyModal()">
-  <div class="widget w-11/12 md:w-3/4 lg:w-2/3" style="max-height:90vh;overflow:auto;">
-    <div class="widget-header">
-      <span id="agent-policy-title">Agent Policy</span>
+  <div class="pol-card" role="dialog" aria-modal="true" aria-labelledby="agent-policy-title" tabindex="-1">
+    <div class="pol-head">
+      <div class="pol-heading">
+        <div class="pol-kicker">Agent policy</div>
+        <h2 class="pol-title" id="agent-policy-title">Agent</h2>
+        <p class="pol-lede">What this token may call. Deny is the default, and every refusal is recorded.</p>
+      </div>
       <button onclick="closeAgentPolicyModal()" class="modal-close" aria-label="Close">&times;</button>
     </div>
-    <div class="text-xs text-muted mb-3">
-      Deny-by-default: an allowlisted agent can only call the checked tools. Argument rules are enforced
-      server-side before any upstream request. Deny rules always win over allow rules.
+
+    <div class="pol-rail" role="tablist" aria-label="Policy sections">
+      <button class="pol-tab active" id="pol-tab-tools" role="tab" aria-selected="true" onclick="setAgentPolicyTab('tools')">
+        <span class="pol-tab-l">Tools</span><span class="pol-tab-n" id="pol-tab-tools-n">&mdash;</span>
+      </button>
+      <button class="pol-tab" id="pol-tab-rules" role="tab" aria-selected="false" onclick="setAgentPolicyTab('rules')">
+        <span class="pol-tab-l">Rules</span><span class="pol-tab-n">Arguments</span>
+      </button>
+      <button class="pol-tab" id="pol-tab-advanced" role="tab" aria-selected="false" onclick="setAgentPolicyTab('advanced')">
+        <span class="pol-tab-l">Advanced</span><span class="pol-tab-n">JSON</span>
+      </button>
     </div>
 
-    <div class="flex items-center gap-4 mb-2 text-sm">
-      <label class="flex items-center gap-1"><input type="radio" name="agent-tools-mode" value="all" onchange="setAgentToolsMode('all')"> All tools</label>
-      <label class="flex items-center gap-1"><input type="radio" name="agent-tools-mode" value="allowlist" onchange="setAgentToolsMode('allowlist')"> Allowlist</label>
+    <div class="pol-body">
+      <section class="pol-pane" id="pol-pane-tools" role="tabpanel" aria-labelledby="pol-tab-tools">
+        <div class="pol-modes">
+          <button class="pol-mode" data-mode="all" onclick="setAgentToolsMode('all')" aria-pressed="false">
+            <span class="pol-mode-dot"></span>
+            <span class="pol-mode-name">All tools</span>
+            <span class="pol-mode-sub" id="pol-mode-all-sub">Everything the enabled integrations expose.</span>
+          </button>
+          <button class="pol-mode" data-mode="allowlist" onclick="setAgentToolsMode('allowlist')" aria-pressed="false">
+            <span class="pol-mode-dot"></span>
+            <span class="pol-mode-name">Allowlist</span>
+            <span class="pol-mode-sub">Only the tools you pick below.</span>
+          </button>
+        </div>
+
+        <p class="pol-note hidden" id="pol-all-note">Nothing to pick — this token can call every tool. Choose <b>Allowlist</b> to narrow it.</p>
+        <div class="pol-catalog hidden" id="pol-catalog"></div>
+
+        <div id="pol-tools-pane">
+          <div class="pol-tools-head">
+            <span class="pol-count" id="pol-tools-count">&mdash;</span>
+            <div class="pol-tools-actions">
+              <button onclick="agentPolicySelectAll(true)" class="pol-mini" id="pol-select-all-btn">Select all</button>
+              <button onclick="agentPolicySelectAll(false)" class="pol-mini" id="pol-clear-btn">Clear</button>
+            </div>
+          </div>
+          <input id="pol-tool-filter" class="pol-input pol-filter" placeholder="Filter tools&hellip;" oninput="agentPolicyFilter(this.value)" autocomplete="off" spellcheck="false">
+          <div class="pol-legend">
+            <span class="pol-lgroup"><span class="pol-rdot"></span> read, runs immediately</span>
+            <span class="pol-lgroup"><span class="pol-wdot"></span> write, waits for approval</span>
+          </div>
+          <div id="agent-policy-tools" class="pol-groups"><p class="pol-hint">Loading&hellip;</p></div>
+        </div>
+      </section>
+
+      <section class="pol-pane hidden" id="pol-pane-rules" role="tabpanel" aria-labelledby="pol-tab-rules">
+        <div class="pol-group-label">Home Assistant &middot; <code>call_service</code></div>
+        <div class="pol-grid">
+          <label class="pol-field">
+            <span class="pol-field-l">Allowed domains</span>
+            <input id="agent-ha-domain-allow" class="pol-input" placeholder="light, switch, climate, scene" spellcheck="false">
+          </label>
+          <label class="pol-field">
+            <span class="pol-field-l">Denied domains</span>
+            <input id="agent-ha-domain-deny" class="pol-input" placeholder="homeassistant, hassio, shell_command" spellcheck="false">
+            <span class="pol-hint">A denied domain always wins.</span>
+          </label>
+          <label class="pol-field">
+            <span class="pol-field-l">Denied services</span>
+            <input id="agent-ha-service-deny" class="pol-input" placeholder="reload, restart, stop" spellcheck="false">
+          </label>
+          <div class="pol-field">
+            <span class="pol-field-l">Approval for <code>call_service</code></span>
+            <div class="pol-seg" id="agent-ha-approval-seg">
+              <button type="button" data-val="inherit" onclick="setAgentHaApproval('inherit')">Inherit</button>
+              <button type="button" data-val="ungated" onclick="setAgentHaApproval('ungated')">Ungated</button>
+              <button type="button" data-val="gated" onclick="setAgentHaApproval('gated')">Always approve</button>
+            </div>
+            <input type="hidden" id="agent-ha-approval" value="inherit">
+            <span class="pol-hint">Ungated runs without a JIT row; the argument rules above still apply.</span>
+          </div>
+        </div>
+
+        <div class="pol-group-label">Limits</div>
+        <label class="pol-field pol-field-sm">
+          <span class="pol-field-l">Rate limit</span>
+          <span class="pol-inline">
+            <input id="agent-rate-limit" type="number" min="0" class="pol-input" value="0">
+            <span class="pol-unit">calls per minute</span>
+          </span>
+          <span class="pol-hint">0 means unlimited. Refusals are audited either way.</span>
+        </label>
+      </section>
+
+      <section class="pol-pane hidden" id="pol-pane-advanced" role="tabpanel" aria-labelledby="pol-tab-advanced">
+        <div class="pol-group-label">Argument policy &amp; approval, per tool</div>
+        <textarea id="agent-policy-json" class="pol-code" rows="14" spellcheck="false"></textarea>
+        <p class="pol-hint">Keys are namespaced MCP tool names, for example <code>home_assistant_call_service</code>. The Rules tab rewrites that entry on save; everything else is kept as written here.</p>
+      </section>
     </div>
-    <div id="agent-policy-tools" class="max-h-64 overflow-auto p-2 rounded bg-black/20 text-xs"><p class="text-muted">Loading…</p></div>
 
-    <hr class="hr">
-
-    <div class="text-xs font-semibold uppercase tracking-wide text-muted mb-2">Home Assistant call_service</div>
-    <div class="grid grid-cols-1 md:grid-cols-2 gap-2 text-xs">
-      <label>Allowed domains (comma-separated)
-        <input id="agent-ha-domain-allow" class="w-full text-xs" placeholder="light, switch, climate, scene">
-      </label>
-      <label>Denied domains (wins over allow)
-        <input id="agent-ha-domain-deny" class="w-full text-xs" placeholder="homeassistant, hassio, shell_command, script">
-      </label>
-      <label>Denied services
-        <input id="agent-ha-service-deny" class="w-full text-xs" placeholder="reload, restart, stop">
-      </label>
-      <label>Approval
-        <select id="agent-ha-approval" class="w-full text-xs">
-          <option value="inherit">Inherit integration policy</option>
-          <option value="ungated">Ungated (arg-constrained)</option>
-          <option value="gated">Always require approval</option>
-        </select>
-      </label>
-    </div>
-
-    <hr class="hr">
-
-    <div class="grid grid-cols-1 md:grid-cols-2 gap-2 text-xs items-end">
-      <label>Rate limit per minute (0 = unlimited)
-        <input id="agent-rate-limit" type="number" min="0" class="w-full text-xs" value="0">
-      </label>
-    </div>
-
-    <details class="mt-3">
-      <summary class="text-xs text-muted cursor-pointer">Advanced JSON (arg_policy + approval for any tool)</summary>
-      <textarea id="agent-policy-json" class="fleet-input w-full mt-2" rows="10" spellcheck="false"></textarea>
-      <p class="text-xs text-muted mt-1">Keys are namespaced MCP tool names, e.g. <code>home_assistant_call_service</code>. The structured fields above override the HA call_service entry on save.</p>
-    </details>
-
-    <div class="flex justify-end gap-2 mt-4">
+    <div class="pol-foot">
+      <span class="pol-foot-note" id="pol-foot-note">Changes apply to new calls only.</span>
+      <span class="pol-spacer"></span>
       <button onclick="closeAgentPolicyModal()" class="btn btn-muted btn-sm">Cancel</button>
-      <button onclick="saveAgentPolicy()" class="btn btn-sm">Save Policy</button>
+      <button onclick="saveAgentPolicy()" class="btn btn-sm">Save policy</button>
     </div>
   </div>
 </div>

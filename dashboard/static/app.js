@@ -6647,66 +6647,253 @@ async function openAgentPolicy(id) {
     _agentPolicyTools = tools.integrations || [];
     renderAgentPolicy(agent);
     document.getElementById('agent-policy-modal').classList.remove('hidden');
+    document.body.classList.add('pol-open');
+    setTimeout(function () { var c = document.querySelector('.pol-card'); if (c) c.focus(); }, 30);
   } catch(e) { showToast('Failed: ' + e.message, 'error'); }
 }
 
 function closeAgentPolicyModal() {
   document.getElementById('agent-policy-modal').classList.add('hidden');
+  document.body.classList.remove('pol-open');
 }
 
 function _splitList(value) {
   return (value || '').split(',').map(function(s) { return s.trim(); }).filter(Boolean);
 }
 
+/* The policy modal is three panes, not one long scroll: the tool chips on
+   Tools, the argument rules on Rules, raw JSON on Advanced. The selection is
+   held in a Set so filtering and per-integration All/None can redraw the
+   chips without losing what is ticked. */
+var _agentPolicySelected = null;
+var _agentPolicyMode = 'all';
+var _agentPolicyTab = 'tools';
+var _agentPolicyFilter = '';
+
 function renderAgentPolicy(agent) {
   const p = _agentPolicy || {};
-  document.getElementById('agent-policy-title').textContent = 'Agent Policy — ' + (agent.name || '');
-  const mode = p.tools_mode === 'allowlist' ? 'allowlist' : 'all';
-  document.querySelectorAll('input[name="agent-tools-mode"]').forEach(function(r) {
-    r.checked = (r.value === mode);
-  });
-
-  const selected = new Set(p.tools || []);
-  const groups = _agentPolicyTools.map(function(group) {
-    const rows = (group.tools || []).map(function(t) {
-      const checked = selected.has(t.name);
-      return '<label class="flex items-start gap-2 py-0.5">' +
-        '<input type="checkbox" data-tool="' + esc(t.name) + '" ' + (checked ? 'checked' : '') + ' ' +
-        (mode === 'all' ? 'disabled' : '') + '>' +
-        '<span><code>' + esc(t.name) + '</code>' +
-        (t.read_only ? ' <span class="text-muted">(read)</span>' : ' <span class="text-warning">(write)</span>') + '</span></label>';
-    }).join('');
-    return '<div class="mb-2"><div class="text-xs font-semibold text-main mb-1">' + esc(group.integration) + '</div>' + rows + '</div>';
-  }).join('');
-  document.getElementById('agent-policy-tools').innerHTML = groups || '<p class="text-muted">No integrations.</p>';
+  document.getElementById('agent-policy-title').textContent = agent.name || 'Agent';
+  _agentPolicySelected = new Set(p.tools || []);
+  _agentPolicyFilter = '';
 
   const ha = (p.arg_policy || {})['home_assistant_call_service'] || {};
   document.getElementById('agent-ha-domain-allow').value = (ha.domain_allow || []).join(', ');
   document.getElementById('agent-ha-domain-deny').value = (ha.domain_deny || []).join(', ');
   document.getElementById('agent-ha-service-deny').value = (ha.service_deny || []).join(', ');
-  document.getElementById('agent-ha-approval').value = (p.approval || {})['home_assistant_call_service'] || 'inherit';
+  setAgentHaApproval((p.approval || {})['home_assistant_call_service'] || 'inherit');
   document.getElementById('agent-rate-limit').value = p.rate_limit_per_min || 0;
   document.getElementById('agent-policy-json').value = JSON.stringify({
     arg_policy: p.arg_policy || {},
     approval: p.approval || {}
   }, null, 2);
+
+  const filterEl = document.getElementById('pol-tool-filter');
+  if (filterEl) filterEl.value = '';
+  agentPolicyFilter('');
+  setAgentPolicyTab('tools');
+  setAgentToolsMode(p.tools_mode === 'allowlist' ? 'allowlist' : 'all');
 }
 
-function setAgentToolsMode(mode) {
-  document.querySelectorAll('#agent-policy-tools input[type="checkbox"]').forEach(function(cb) {
-    cb.disabled = (mode === 'all');
+function setAgentPolicyTab(name) {
+  _agentPolicyTab = name;
+  ['tools', 'rules', 'advanced'].forEach(function(t) {
+    const pane = document.getElementById('pol-pane-' + t);
+    const btn = document.getElementById('pol-tab-' + t);
+    if (pane) pane.classList.toggle('hidden', t !== name);
+    if (btn) {
+      btn.classList.toggle('active', t === name);
+      btn.setAttribute('aria-selected', t === name ? 'true' : 'false');
+    }
   });
 }
 
-function collectAgentPolicy() {
-  const modeEl = document.querySelector('input[name="agent-tools-mode"]:checked');
-  const mode = modeEl ? modeEl.value : 'all';
-  const tools = [];
-  if (mode === 'allowlist') {
-    document.querySelectorAll('#agent-policy-tools input[data-tool]:checked').forEach(function(cb) {
-      tools.push(cb.getAttribute('data-tool'));
-    });
+function setAgentToolsMode(mode) {
+  _agentPolicyMode = mode === 'allowlist' ? 'allowlist' : 'all';
+  document.querySelectorAll('.pol-mode').forEach(function(btn) {
+    const on = btn.getAttribute('data-mode') === _agentPolicyMode;
+    btn.classList.toggle('active', on);
+    btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+  });
+  const list = document.getElementById('pol-tools-pane');
+  const note = document.getElementById('pol-all-note');
+  const catalog = document.getElementById('pol-catalog');
+  if (list) list.classList.toggle('hidden', _agentPolicyMode !== 'allowlist');
+  if (note) note.classList.toggle('hidden', _agentPolicyMode === 'allowlist');
+  if (catalog) catalog.classList.toggle('hidden', _agentPolicyMode === 'allowlist');
+  renderAgentPolicyTools();
+  renderAgentPolicyCatalog();
+  updateAgentPolicyCounts();
+}
+
+/* What "all tools" actually means, in numbers: the catalog behind the mode. */
+function renderAgentPolicyCatalog() {
+  const host = document.getElementById('pol-catalog');
+  if (!host) return;
+  host.innerHTML = (_agentPolicyTools || []).map(function(group) {
+    const tools = (group.tools || []).filter(function(t) { return t.enabled !== false; });
+    const writes = tools.filter(function(t) { return !t.read_only; }).length;
+    return '<div class="pol-cat-row">' +
+      '<span class="pol-cat-name">' + esc(group.integration) + '</span>' +
+      '<span class="pol-cat-n">' + tools.length + ' tools · ' + writes + ' write' + (writes === 1 ? '' : 's') + '</span>' +
+    '</div>';
+  }).join('');
+}
+
+function setAgentHaApproval(value) {
+  const input = document.getElementById('agent-ha-approval');
+  if (input) input.value = value;
+  document.querySelectorAll('#agent-ha-approval-seg button').forEach(function(btn) {
+    const on = btn.getAttribute('data-val') === value;
+    btn.classList.toggle('active', on);
+    btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+  });
+}
+
+function _agentPolicyMatches(t) {
+  if (!_agentPolicyFilter) return true;
+  const q = _agentPolicyFilter.toLowerCase();
+  return (t.name || '').toLowerCase().indexOf(q) !== -1 ||
+    (t.description || '').toLowerCase().indexOf(q) !== -1;
+}
+
+function _agentPolicyVisible() {
+  const out = [];
+  _agentPolicyTools.forEach(function(group) {
+    (group.tools || []).forEach(function(t) { if (_agentPolicyMatches(t)) out.push(t); });
+  });
+  return out;
+}
+
+function agentPolicyChip(t) {
+  const on = _agentPolicySelected && _agentPolicySelected.has(t.name);
+  const cls = 'pol-chip' + (on ? ' on' : '') + (t.read_only ? ' is-read' : ' is-write') +
+    (t.enabled === false ? ' is-off' : '');
+  const title = t.enabled === false
+    ? 'Disabled in Integrations — not callable until it is enabled there'
+    : (t.description || (t.read_only ? 'Read-only call' : 'Changes state — waits for approval'));
+  return '<label class="' + cls + '" title="' + esc(title) + '">' +
+    '<input type="checkbox" class="pol-chip-in" data-tool="' + esc(t.name) + '"' + (on ? ' checked' : '') +
+      ' onchange="agentPolicyToggle(this)">' +
+    '<span class="pol-chip-name">' + esc(t.name) + '</span>' +
+    (t.enabled === false ? '<span class="pol-off">off</span>' : '') +
+  '</label>';
+}
+
+function renderAgentPolicyTools() {
+  const host = document.getElementById('agent-policy-tools');
+  if (!host) return;
+  if (!_agentPolicyTools || !_agentPolicyTools.length) {
+    host.innerHTML = '<p class="pol-hint">No integrations are enabled, so there are no tools to allow.</p>';
+    return;
   }
+  let html = '';
+  _agentPolicyTools.forEach(function(group, gi) {
+    const tools = (group.tools || []).filter(_agentPolicyMatches);
+    if (!tools.length) return;
+    const sel = tools.filter(function(t) { return _agentPolicySelected && _agentPolicySelected.has(t.name); }).length;
+    html += '<div class="pol-group">' +
+      '<div class="pol-group-head">' +
+        '<span class="pol-group-name">' + esc(group.integration) + '</span>' +
+        '<span class="pol-group-count">' + sel + ' / ' + tools.length + '</span>' +
+        '<button class="pol-mini" onclick="agentPolicyGroupAll(' + gi + ', true)">All</button>' +
+        '<button class="pol-mini" onclick="agentPolicyGroupAll(' + gi + ', false)">None</button>' +
+      '</div>' +
+      '<div class="pol-chips">' + tools.map(agentPolicyChip).join('') + '</div>' +
+    '</div>';
+  });
+  host.innerHTML = html || '<p class="pol-hint">No tools match that filter.</p>';
+}
+
+function agentPolicyToggle(cb) {
+  if (!_agentPolicySelected) _agentPolicySelected = new Set();
+  const name = cb.getAttribute('data-tool');
+  if (cb.checked) _agentPolicySelected.add(name); else _agentPolicySelected.delete(name);
+  const chip = cb.closest('.pol-chip');
+  if (chip) chip.classList.toggle('on', cb.checked);
+  const group = cb.closest('.pol-group');
+  if (group) {
+    const boxes = group.querySelectorAll('input[data-tool]');
+    const on = group.querySelectorAll('input[data-tool]:checked').length;
+    const count = group.querySelector('.pol-group-count');
+    if (count) count.textContent = on + ' / ' + boxes.length;
+  }
+  updateAgentPolicyCounts();
+}
+
+function agentPolicyGroupAll(gi, on) {
+  const group = _agentPolicyTools[gi];
+  if (!group) return;
+  if (!_agentPolicySelected) _agentPolicySelected = new Set();
+  (group.tools || []).forEach(function(t) {
+    if (on) _agentPolicySelected.add(t.name); else _agentPolicySelected.delete(t.name);
+  });
+  renderAgentPolicyTools();
+  updateAgentPolicyCounts();
+}
+
+function agentPolicySelectAll(on) {
+  if (!_agentPolicySelected) _agentPolicySelected = new Set();
+  _agentPolicyVisible().forEach(function(t) {
+    if (on) _agentPolicySelected.add(t.name); else _agentPolicySelected.delete(t.name);
+  });
+  renderAgentPolicyTools();
+  updateAgentPolicyCounts();
+}
+
+function agentPolicyFilter(value) {
+  _agentPolicyFilter = value || '';
+  /* With a filter active these buttons act on what is shown, so say so. */
+  const allBtn = document.getElementById('pol-select-all-btn');
+  const clearBtn = document.getElementById('pol-clear-btn');
+  if (allBtn) allBtn.textContent = _agentPolicyFilter ? 'Select shown' : 'Select all';
+  if (clearBtn) clearBtn.textContent = _agentPolicyFilter ? 'Clear shown' : 'Clear';
+  renderAgentPolicyTools();
+}
+
+function updateAgentPolicyCounts() {
+  let total = 0, selected = 0, writes = 0;
+  (_agentPolicyTools || []).forEach(function(group) {
+    (group.tools || []).forEach(function(t) {
+      if (t.enabled === false) return;
+      total++;
+      if (_agentPolicySelected && _agentPolicySelected.has(t.name)) {
+        selected++;
+        if (!t.read_only) writes++;
+      }
+    });
+  });
+
+  const count = document.getElementById('pol-tools-count');
+  const tabN = document.getElementById('pol-tab-tools-n');
+  const allSub = document.getElementById('pol-mode-all-sub');
+  const foot = document.getElementById('pol-foot-note');
+  if (allSub) allSub.textContent = 'Everything ' + (_agentPolicyTools || []).length + ' integrations expose — ' + total + ' tools.';
+
+  if (_agentPolicyMode === 'all') {
+    if (count) { count.textContent = 'All ' + total + ' tools are callable'; count.classList.remove('warn'); }
+    if (tabN) tabN.textContent = 'All';
+    if (foot) foot.textContent = 'Changes apply to new calls only.';
+    return;
+  }
+
+  if (count) {
+    count.textContent = selected + ' of ' + total + ' allowed · ' + writes + ' write' + (writes === 1 ? '' : 's');
+    count.classList.toggle('warn', selected === 0);
+  }
+  if (tabN) tabN.textContent = selected + ' / ' + total;
+  if (foot) {
+    foot.textContent = selected === 0
+      ? 'No tool is allowed — this token will be refused on every call.'
+      : 'Changes apply to new calls only.';
+    foot.classList.toggle('warn', selected === 0);
+  }
+}
+
+function collectAgentPolicy() {
+  const mode = _agentPolicyMode === 'allowlist' ? 'allowlist' : 'all';
+  const tools = mode === 'allowlist'
+    ? Array.from(_agentPolicySelected || []).sort()
+    : [];
   let advanced;
   try {
     advanced = JSON.parse(document.getElementById('agent-policy-json').value || '{}');
