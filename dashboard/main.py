@@ -1,8 +1,10 @@
 import base64
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
+import re
 import secrets
 import threading
 import time
@@ -219,6 +221,64 @@ async def proxy_scheme_middleware(request: Request, call_next):
     if proto in ("http", "https"):
         request.scope["scheme"] = proto
     return await call_next(request)
+
+
+SESSION_COOKIE = "eshu_session"
+_CSRF_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+_CSP = ("default-src 'self'; img-src 'self' data:; "
+        "style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; "
+        "object-src 'none'; base-uri 'none'; frame-ancestors 'none'")
+
+
+def _csrf_origin_ok(request: Request) -> bool:
+    """True when Origin matches this request's own scheme+host (proxy-aware)."""
+    origin = request.headers.get("Origin", "").strip().rstrip("/")
+    if not origin:
+        return False
+    scheme = request.headers.get("X-Forwarded-Proto", request.url.scheme)
+    if scheme not in ("http", "https"):
+        scheme = request.url.scheme
+    host = request.headers.get("host") or request.url.netloc
+    return origin == f"{scheme}://{host}"
+
+
+@app.middleware("http")
+async def csrf_middleware(request: Request, call_next):
+    """CSRF gate for session-cookie-authenticated state-changing /api calls.
+
+    Browsers authenticate with the eshu_session cookie (SameSite=Lax, which
+    still allows same-site requests from sibling subdomains). A session-cookie
+    request must prove it is same-origin via Origin, or carry the custom
+    X-Eshu-CSRF header that app.js adds. Gateway/agent token callers carry no
+    session cookie and are exempt; /api/auth/login is always checked (login
+    CSRF) because it sets the cookie in the first place.
+    """
+    path = request.url.path
+    if request.method not in _CSRF_METHODS or not path.startswith("/api/"):
+        return await call_next(request)
+
+    is_login = path == "/api/auth/login"
+    if not is_login and not _check_session_optional(request):
+        return await call_next(request)
+
+    if request.headers.get("X-Eshu-CSRF", "").strip() == "1" or _csrf_origin_ok(request):
+        return await call_next(request)
+    return JSONResponse(status_code=403, content={"detail": "CSRF check failed"})
+
+
+@app.middleware("http")
+async def security_headers_middleware(request: Request, call_next):
+    """CSP + anti-sniffing/framing headers on HTML and /api responses."""
+    response = await call_next(request)
+    if request.url.path.startswith("/mcp"):
+        return response
+    content_type = response.headers.get("content-type", "")
+    if request.url.path.startswith("/api/") or content_type.startswith("text/html"):
+        response.headers.setdefault("Content-Security-Policy", _CSP)
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("Referrer-Policy", "same-origin")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+    return response
 
 @app.on_event("startup")
 def on_startup():
@@ -501,8 +561,26 @@ def _require_request_access(request: Request, req_id: int) -> str:
             raise HTTPException(status_code=404, detail="Request not found")
     return token_ip or ''
 
+_GATEWAY_HOSTNAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,253}$")
+
+
+def _validate_gateway_identity(ip: str, hostname: str) -> None:
+    """Reject a non-IP address or a hostname outside the safe charset (400).
+
+    Both fields are rendered in the dashboard and stored in the request/audit
+    trail, so the boundary is the API, not the browser.
+    """
+    try:
+        ipaddress.ip_address(ip)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid gateway ip")
+    if not _GATEWAY_HOSTNAME_RE.fullmatch(hostname or ""):
+        raise HTTPException(status_code=400, detail="Invalid gateway hostname")
+
+
 @app.post("/api/register")
 def register(payload: RegisterPayload, request: Request):
+    _validate_gateway_identity(payload.ip, payload.hostname)
     _check_rate_limit(payload.ip)
     # ── Authentication ──────────────────────────────────────────────────
     # /api/register previously returned a valid gateway token to ANY caller for
@@ -690,6 +768,7 @@ class HeartbeatPayload(BaseModel):
 @app.post("/api/gateway-heartbeat")
 def receive_heartbeat(payload: HeartbeatPayload, request: Request):
     """Called by eshu-logger.service every 30s to report gateway health."""
+    _validate_gateway_identity(payload.ip, payload.hostname)
     _require_gateway(request, payload.ip)
     _check_rate_limit(payload.ip)
     update_gateway_last_seen(payload.ip)

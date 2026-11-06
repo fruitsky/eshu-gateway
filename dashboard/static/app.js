@@ -1,6 +1,23 @@
 // State variables are in state.js — loaded first.
 // Constants and state declarations here are removed to avoid redeclaration.
 
+/* Chunk 4: one fetch wrapper adds the CSRF header to every state-changing
+   same-origin call, including raw fetch() sites added later. The server still
+   checks Origin or this header for session-cookie writes. */
+(function () {
+  var nativeFetch = window.fetch.bind(window);
+  window.fetch = function (input, init) {
+    init = init ? Object.assign({}, init) : {};
+    var method = (init.method || (input && input.method) || 'GET').toUpperCase();
+    if (method === 'POST' || method === 'PUT' || method === 'PATCH' || method === 'DELETE') {
+      var headers = new Headers(init.headers || (input && input.headers) || {});
+      if (!headers.has('X-Eshu-CSRF')) headers.set('X-Eshu-CSRF', '1');
+      init.headers = headers;
+    }
+    return nativeFetch(input, init);
+  };
+})();
+
 function deriveGatewayIdentity(hostname) {
   if (!hostname) return { code: '??', color: GW_COLORS[0], label: 'Unknown' };
   let hash = 0;
@@ -143,14 +160,14 @@ function openContextPanel(reqId) {
   var actionsEl = document.getElementById('ctx-actions');
   var actionsHtml = '';
   if (req.status === 'pending' || !req._type) {
-    actionsHtml = '<button onclick="handleAction(\'' + req.id + '\',\'approve\')" class="btn btn-approve btn-sm" style="flex:1">Approve</button>' +
-      '<button onclick="handleAction(\'' + req.id + '\',\'deny\')" class="btn btn-deny btn-sm" style="flex:1">Deny</button>';
+    actionsHtml = '<button onclick="handleAction(' + idJs(req.id) + ',\'approve\')" class="btn btn-approve btn-sm" style="flex:1">Approve</button>' +
+      '<button onclick="handleAction(' + idJs(req.id) + ',\'deny\')" class="btn btn-deny btn-sm" style="flex:1">Deny</button>';
   } else if (req._type === 'window') {
-    actionsHtml = '<button onclick="approveWindowReq(' + req.id + ')" class="btn btn-approve btn-sm" style="flex:1">Approve</button>' +
-      '<button onclick="denyWindowReq(' + req.id + ')" class="btn btn-deny btn-sm" style="flex:1">Deny</button>';
+    actionsHtml = '<button onclick="approveWindowReq(' + idJs(req.id) + ')" class="btn btn-approve btn-sm" style="flex:1">Approve</button>' +
+      '<button onclick="denyWindowReq(' + idJs(req.id) + ')" class="btn btn-deny btn-sm" style="flex:1">Deny</button>';
   } else if (req._type === 'integration') {
-    actionsHtml = '<button onclick="approveIntegrationCall(' + req.id + ')" class="btn btn-approve btn-sm" style="flex:1">Approve</button>' +
-      '<button onclick="denyIntegrationCall(' + req.id + ')" class="btn btn-deny btn-sm" style="flex:1">Deny</button>';
+    actionsHtml = '<button onclick="approveIntegrationCall(' + idJs(req.id) + ')" class="btn btn-approve btn-sm" style="flex:1">Approve</button>' +
+      '<button onclick="denyIntegrationCall(' + idJs(req.id) + ')" class="btn btn-deny btn-sm" style="flex:1">Deny</button>';
   } else {
     actionsHtml = '<button onclick="closeContextPanel()" class="btn btn-muted btn-sm" style="flex:1">Close</button>';
   }
@@ -594,7 +611,7 @@ function renderSeg(val, current, name, disabled) {
       ? 'Dev-mode gateways and all MCP calls'
       : 'Every gateway and all MCP calls';
   if (disabled && !active) title = 'No dev gateways configured';
-  return '<button onclick="setFeatureFlagState(\'' + name + '\',\'' + val + '\')" ' +
+  return '<button onclick="setFeatureFlagState(' + escJs(name) + ',' + escJs(val) + ')" ' +
     'class="seg-btn' + (active ? ' active ' + val : '') + (disabled && !active ? ' seg-disabled' : '') + '" ' +
     (disabled && !active ? 'disabled ' : '') + 'title="' + escapeHtml(title) + '">' + label + '</button>';
 }
@@ -619,7 +636,7 @@ function renderDevGatewayPills() {
   if (!pills) return;
   pills.innerHTML = _devGateways.map(function(g) {
     return '<span class="dev-gw-pill">' +
-      escapeHtml(g.hostname||g.ip) + ' <span onclick="removeDevGateway(\'' + g.ip + '\')" class="remove" title="Remove from dev">&times;</span></span>';
+      escapeHtml(g.hostname||g.ip) + ' <span onclick="removeDevGateway(' + escJs(g.ip) + ')" class="remove" title="Remove from dev">&times;</span></span>';
   }).join('');
 }
 
@@ -674,10 +691,18 @@ function onDevGatewayInput() {
     return g.ip === q || (g.hostname && g.hostname.toLowerCase().includes(q.toLowerCase()));
   }).slice(0, 5);
   results.innerHTML = matches.map(function(g) {
-    return '<div onclick="document.getElementById(\'dev-gateway-input\').value=\'' + g.hostname + '\';addDevGateway()" class="search-result">' +
-      gwPill(g.hostname) + ' ' + escapeHtml(g.hostname) + ' <span class="text-muted">(' + g.ip + ')</span></div>';
+    return '<div data-dev-host="' + esc(g.hostname || '') + '" class="search-result">' +
+      gwPill(g.hostname) + ' ' + escapeHtml(g.hostname) + ' <span class="text-muted">(' + escapeHtml(g.ip) + ')</span></div>';
   }).join('');
 }
+
+document.addEventListener('click', function(e) {
+  var el = e.target && e.target.closest ? e.target.closest('[data-dev-host]') : null;
+  if (!el) return;
+  var input = document.getElementById('dev-gateway-input');
+  if (input) input.value = el.getAttribute('data-dev-host') || '';
+  addDevGateway();
+});
 // ── Approved Windows ────────────────────────────────────────────────
 // State variables (let/const) are in state.js
 const DAY_NAMES = ['Mo','Tu','We','Th','Fr','Sa','Su'];
@@ -859,17 +884,17 @@ async function fetchWindowsTable() {
     if (!wins.length) { tbody.innerHTML = '<tr><td colspan="8" class="px-4 py-3 text-muted">No approved windows created yet.</td></tr>'; return; }
     var tableNow = Math.floor(Date.now() / 1000);
     tbody.innerHTML = wins.map(function(w) {
-      var stat = w.enabled ? '<span class="badge badge-approved cursor-pointer" onclick="toggleWindow(' + w.id + ',true)" title="Click to disable"> On</span>' :
+      var stat = w.enabled ? '<span class="badge badge-approved cursor-pointer" onclick="toggleWindow(' + idJs(w.id) + ',true)" title="Click to disable"> On</span>' :
         (w.status === 'pending_review' ? '<span class="badge badge-pending"> Review</span>' :
          (w.status === 'denied' ? '<span class="badge badge-window-rejected"> Denied</span>' :
-          '<span class="badge badge-expired cursor-pointer" onclick="toggleWindow(' + w.id + ',false)" title="Click to enable"> Off</span>'));
+          '<span class="badge badge-expired cursor-pointer" onclick="toggleWindow(' + idJs(w.id) + ',false)" title="Click to enable"> Off</span>'));
       var gw = gwMap[w.target_ip] || {};
       var originBadge = (w.origin === 'ai')
         ? '<span class="origin-ai" title="Inbound — AI requested">AI</span> '
         : '<span class="origin-human" title="Outbound — operator created">Human</span> ';
       var labelHtml = originBadge + (w.label ? '<span class="text-main font-medium">' + escapeHtml(w.label) + '</span><br>' : '') +
-        '<code class="text-xs font-mono text-muted" title="' + (w.token||'') + '">' + (w.token||'').substring(0, 8) + '…</code>' +
-        ' <span onclick="copyToClipboard(\'' + (w.token||'') + '\')" class="cursor-pointer text-xs opacity-40 hover:opacity-100" title="Copy token">Copy</span>';
+        '<code class="text-xs font-mono text-muted" title="' + escapeHtml(w.token||'') + '">' + escapeHtml((w.token||'').substring(0, 8)) + '…</code>' +
+        ' <span onclick="copyToClipboard(' + escJs(w.token||'') + ')" class="cursor-pointer text-xs opacity-40 hover:opacity-100" title="Copy token">Copy</span>';
       var execInfo = w.execution_count + (w.max_executions > 0 ? '/' + w.max_executions : '/∞');
       var lu = Number(w.last_used_at) || 0;
       if (lu > 0) execInfo += '<br><span class="text-xs text-muted">last ' + formatAgo(tableNow - lu) + '</span>';
@@ -881,7 +906,7 @@ async function fetchWindowsTable() {
         ? formatNextRun(computeNextRun(dowNum, etNum))
         : (wsNum && wsNum * 1000 > Date.now() ? formatNextRun(new Date(wsNum * 1000)) : ''));
       return '<tr>' +
-        '<td class="text-xs text-muted whitespace-nowrap" title="Numeric window ID — refer to it when coordinating with the agent">#' + w.id + '</td>' +
+        '<td class="text-xs text-muted whitespace-nowrap" title="Numeric window ID — refer to it when coordinating with the agent">#' + idText(w.id) + '</td>' +
         '<td>' + stat + '</td>' +
         '<td>' + labelHtml + '</td>' +
         '<td class="text-xs">' + gwPill(gw.hostname||w.target_ip) + ' ' + escapeHtml(gw.hostname||w.target_ip) + '</td>' +
@@ -890,11 +915,11 @@ async function fetchWindowsTable() {
         '<td class="text-center text-xs text-muted">' + execInfo + '</td>' +
         '<td class="text-right"><div class="flex items-center justify-end gap-1">' +
           (w.status === 'pending_review'
-            ? '<button onclick="approveWindowReq(' + w.id + ')" class="btn btn-approve btn-xs"> Approve</button>' +
-              '<button onclick="denyWindowReq(' + w.id + ')" class="btn btn-deny btn-xs"> Deny</button>'
-            : '<button onclick="openEditWindowModal(' + w.id + ')" class="btn btn-muted btn-xs" title="Edit">Edit</button>' +
-              '<button onclick="showWindowHistory(' + w.id + ')" class="btn btn-muted btn-xs" title="Usage history">History</button>' +
-              '<button onclick="deleteWindow(this, ' + w.id + ')" class="btn btn-deny btn-xs" title="Delete">Delete</button>') +
+            ? '<button onclick="approveWindowReq(' + idJs(w.id) + ')" class="btn btn-approve btn-xs"> Approve</button>' +
+              '<button onclick="denyWindowReq(' + idJs(w.id) + ')" class="btn btn-deny btn-xs"> Deny</button>'
+            : '<button onclick="openEditWindowModal(' + idJs(w.id) + ')" class="btn btn-muted btn-xs" title="Edit">Edit</button>' +
+              '<button onclick="showWindowHistory(' + idJs(w.id) + ')" class="btn btn-muted btn-xs" title="Usage history">History</button>' +
+              '<button onclick="deleteWindow(this, ' + idJs(w.id) + ')" class="btn btn-deny btn-xs" title="Delete">Delete</button>') +
         '</div></td>' +
         '</tr>';
     }).join('');
@@ -924,7 +949,7 @@ function selectGateway(ip) {
   if (!gw) return;
   document.getElementById('win-gateway').value = ip;
   var display = document.getElementById('gw-dropdown-display');
-  display.innerHTML = gwPill(gw.hostname||gw.ip) + ' ' + escapeHtml(gw.hostname||gw.ip) + ' <span class="text-xs text-muted">(' + ip + ')</span>';
+  display.innerHTML = gwPill(gw.hostname||gw.ip) + ' ' + escapeHtml(gw.hostname||gw.ip) + ' <span class="text-xs text-muted">(' + escapeHtml(ip) + ')</span>';
   display.classList.remove('text-muted');
   display.classList.add('text-main');
   _gwDropdownOpen = false;
@@ -986,7 +1011,7 @@ async function openCreateWindowModal() {
     if (!_winGateways.length) { menu.innerHTML = '<div class="p-3 text-xs text-muted">No gateways registered.</div>'; }
     else {
       menu.innerHTML = _winGateways.map(function(g) {
-        return '<div class="gw-dropdown-item" onclick="selectGateway(\'' + g.ip + '\')">' + gwPill(g.hostname||g.ip) + ' ' + escapeHtml(g.hostname||g.ip) + ' <span class="gw-dropdown-ip">' + g.ip + '</span></div>';
+        return '<div class="gw-dropdown-item" onclick="selectGateway(' + escJs(g.ip) + ')">' + gwPill(g.hostname||g.ip) + ' ' + escapeHtml(g.hostname||g.ip) + ' <span class="gw-dropdown-ip">' + escapeHtml(g.ip) + '</span></div>';
       }).join('');
     }
   } catch(e) {}
@@ -1004,7 +1029,7 @@ async function openEditWindowModal(id) {
     var gr = await fetch('/api/gateways'); _winGateways = await gr.json();
     var menu = document.getElementById('gw-dropdown-menu');
     menu.innerHTML = _winGateways.map(function(g) {
-      return '<div class="gw-dropdown-item" onclick="selectGateway(\'' + g.ip + '\')">' + gwPill(g.hostname||g.ip) + ' ' + escapeHtml(g.hostname||g.ip) + ' <span class="gw-dropdown-ip">' + g.ip + '</span></div>';
+      return '<div class="gw-dropdown-item" onclick="selectGateway(' + escJs(g.ip) + ')">' + gwPill(g.hostname||g.ip) + ' ' + escapeHtml(g.hostname||g.ip) + ' <span class="gw-dropdown-ip">' + escapeHtml(g.ip) + '</span></div>';
     }).join('');
 
     var r = await fetch('/api/approved-windows/' + id);
@@ -2216,35 +2241,35 @@ function queueModel(item) {
   if (item.type === 'integration') {
     var args = Object.keys(d.payload || {}).map(function(k){ return k + '=' + d.payload[k]; }).join(', ');
     return {
-      domId: 'int-' + d.id, ttl: Infinity, createdAt: d.created_at || 0, urgent: false,
+      domId: 'int-' + Number(d.id), ttl: Infinity, createdAt: d.created_at || 0, urgent: false,
       human: d.integration + ' / ' + d.tool,
       cmd: args ? args : '(no arguments)',
       host: 'API call', id: d.id,
-      approve: 'approveIntegrationCall(' + d.id + ')',
-      deny: 'denyIntegrationCall(' + d.id + ')',
+      approve: 'approveIntegrationCall(' + Number(d.id) + ')',
+      deny: 'denyIntegrationCall(' + Number(d.id) + ')',
       report: !!(d.reason)
     };
   }
   if (item.type === 'window') {
     return {
-      domId: 'win-' + d.id, ttl: Infinity, createdAt: d.created_at || 0, urgent: false,
+      domId: 'win-' + Number(d.id), ttl: Infinity, createdAt: d.created_at || 0, urgent: false,
       human: 'Window request', cmd: d.command,
       host: d.target_ip + (d.label ? ' \u00b7 ' + d.label : ''),
       id: d.id,
-      approve: 'approveWindowReq(' + d.id + ')',
-      deny: 'denyWindowReq(' + d.id + ')',
+      approve: 'approveWindowReq(' + Number(d.id) + ')',
+      deny: 'denyWindowReq(' + Number(d.id) + ')',
       report: false
     };
   }
   return {
-    domId: String(d.id), ttl: (d.ttl || 0) > 0 ? d.ttl : Infinity,
+    domId: String(Number(d.id)), ttl: (d.ttl || 0) > 0 ? d.ttl : Infinity,
     createdAt: d.created_at || 0, urgent: !!d.anomaly,
     human: describeCmd(d.command) || 'Command request',
     cmd: d.command,
     host: (d.hostname || d.target_ip || 'unknown host') + (d.hostname && d.target_ip ? ' \u00b7 ' + d.target_ip : ''),
     id: d.id,
-    approve: 'handleAction(' + d.id + ',\'approve\')',
-    deny: 'handleAction(' + d.id + ',\'deny\')',
+    approve: 'handleAction(' + Number(d.id) + ',\'approve\')',
+    deny: 'handleAction(' + Number(d.id) + ',\'deny\')',
     report: !!(d.risk || d.anomaly)
   };
 }
@@ -2269,17 +2294,17 @@ function renderQueue(items) {
   /* The hero keeps the full card markup (command block, risk line, TTL,
      Approve/Deny) so it behaves exactly like the tickets it replaced. */
   var heroItem = items.filter(function(it){ return queueModel(it).domId === hero.domId; })[0];
-  var heroHtml = '<div class="ccq-hero' + (hero.urgent ? ' urgent' : '') + '" data-queue-id="' + hero.domId + '">' +
+  var heroHtml = '<div class="ccq-hero' + (hero.urgent ? ' urgent' : '') + '" data-queue-id="' + esc(hero.domId) + '">' +
       (models.length > 1 ? '<div class="ccq-hero-label"><span class="ccq-rank">Next</span>' +
         '<span class="ccq-more">' + (models.length - 1) + ' more waiting below</span></div>' : '') +
       renderJitItem(heroItem) +
     '</div>';
 
   var rowsHtml = rest.map(function(m, i) {
-    return '<div class="ccq-row" role="button" tabindex="0" data-queue-id="' + m.domId + '" ' +
-        'onclick="openContextPanel(\'' + m.domId + '\')" ' +
-        'onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();openContextPanel(\'' + m.domId + '\');}">' +
-      '<button type="button" class="ccq-chk jit-check" role="checkbox" aria-checked="false" aria-label="Select request" onclick="event.stopPropagation();toggleBulkSelect(\'' + m.domId + '\',event)"></button>' +
+    return '<div class="ccq-row" role="button" tabindex="0" data-queue-id="' + esc(m.domId) + '" ' +
+        'onclick="openContextPanel(' + escJs(m.domId) + ')" ' +
+        'onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();openContextPanel(' + escJs(m.domId) + ');}">' +
+      '<button type="button" class="ccq-chk jit-check" role="checkbox" aria-checked="false" aria-label="Select request" onclick="event.stopPropagation();toggleBulkSelect(' + escJs(m.domId) + ',event)"></button>' +
       '<span class="ccq-main">' +
         '<span class="ccq-human">' + escapeHtml(m.human) + '</span>' +
         '<code class="ccq-cmd" title="' + escapeHtml(m.cmd) + '">' + escapeHtml(m.cmd) + '</code>' +
@@ -2287,8 +2312,8 @@ function renderQueue(items) {
       '<span class="ccq-host">' + escapeHtml(m.host) + '</span>' +
       (m.ttl !== Infinity ? '<span class="ccq-ttl"><span class="ttl-countdown" data-ttl="' + m.ttl + '">' + m.ttl + 's</span></span>' : '') +
       '<span class="ccq-acts" onclick="event.stopPropagation()">' +
-        '<button class="btn btn-deny btn-xs" onclick="' + m.deny + '">Deny</button>' +
-        '<button class="btn btn-approve btn-xs" onclick="' + m.approve + '">Approve</button>' +
+        '<button class="btn btn-deny btn-xs" onclick="' + esc(m.deny) + '">Deny</button>' +
+        '<button class="btn btn-approve btn-xs" onclick="' + esc(m.approve) + '">Approve</button>' +
       '</span>' +
     '</div>';
   }).join('');
@@ -2411,8 +2436,9 @@ function sessionRow(s, names, now) {
   if (reqs) activity.push(reqs + ' cmd');
   if (mcps) activity.push(mcps + ' mcp');
   var pending = s.pending || 0;
-  return '<tr class="sess-row" tabindex="0" role="button" onclick="openSessionModal(\'' + escapeHtml(s.session_id) + '\')" ' +
-      'onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();openSessionModal(\'' + escapeHtml(s.session_id) + '\');}">' +
+  var sidJs = escJs(s.session_id);
+  return '<tr class="sess-row" tabindex="0" role="button" onclick="openSessionModal(' + sidJs + ')" ' +
+      'onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();openSessionModal(' + sidJs + ');}">' +
     '<td class="sess-name">' +
       '<span class="sess-kind ' + kind + '">' + kind + '</span>' +
       (auto ? '<span class="sess-auto" title="The agent did not call session_begin; grouped by its MCP connection">auto</span>' : '') +
@@ -2546,8 +2572,8 @@ function smSshDetailCard(r) {
     (r.execution_id ? '<div class="sm-mcp-meta">exec ' + escapeHtml(r.execution_id) + '</div>' : '') +
     (r.reason ? '<div class="sm-call-label">Reason</div><div class="sm-call-reason">' + escapeHtml(r.reason) + '</div>' : '') +
     (isPending ? '<div class="sm-ssh-actions">' +
-        '<button onclick="event.stopPropagation();handleAction(' + r.id + ',\'deny\')" class="btn btn-deny btn-xs">Deny</button>' +
-        '<button onclick="event.stopPropagation();handleAction(' + r.id + ',\'approve\')" class="btn btn-approve btn-xs">Approve</button>' +
+        '<button onclick="event.stopPropagation();handleAction(' + idJs(r.id) + ',\'deny\')" class="btn btn-deny btn-xs">Deny</button>' +
+        '<button onclick="event.stopPropagation();handleAction(' + idJs(r.id) + ',\'approve\')" class="btn btn-approve btn-xs">Approve</button>' +
       '</div>' : '') +
     '</div>';
 }
@@ -2633,7 +2659,7 @@ async function openSessionModal(sid) {
   if (sessOv) {
     bits.push('<span class="sm-pending" title="' + escapeHtml(sessOv.reason || '') + '">session override ' +
       sessionOverrideClock(sessOv) + '</span>' +
-      ' <button class="btn btn-muted btn-xs" onclick="cancelSessionOverride(' + sessOv.id + ')">Cancel</button>');
+      ' <button class="btn btn-muted btn-xs" onclick="cancelSessionOverride(' + idJs(sessOv.id) + ')">Cancel</button>');
   }
   bits.push(ssh.length + ' SSH');
   bits.push(mcp.length + ' MCP');
@@ -3128,40 +3154,42 @@ function renderJitItem(item) {
   if (item.type === 'integration') {
       var c = item.data;
       var args = Object.keys(c.payload || {}).map(function(k) { return k + '=' + c.payload[k]; }).join(', ');
-      return '<div class="jit-ticket" data-id="int-' + c.id + '" onclick="openContextPanel(\'int-' + c.id + '\')">' +
-        '<button type="button" class="jit-check" role="checkbox" aria-checked="false" aria-label="Select request" onclick="event.stopPropagation();toggleBulkSelect(\'int-' + c.id + '\',event)"></button>' +
+      var cDom = 'int-' + Number(c.id);
+      return '<div class="jit-ticket" data-id="' + esc(cDom) + '" onclick="openContextPanel(' + escJs(cDom) + ')">' +
+        '<button type="button" class="jit-check" role="checkbox" aria-checked="false" aria-label="Select request" onclick="event.stopPropagation();toggleBulkSelect(' + escJs(cDom) + ',event)"></button>' +
         '<div style="flex:1;min-width:0">' +
           '<div class="jit-human">' + escapeHtml(c.integration) + ' / ' + escapeHtml(c.tool) + '</div>' +
           '<div class="jit-cmd-text">' + escapeHtml(c.integration) + ' ' + escapeHtml(c.tool) + (args ? '(' + escapeHtml(args) + ')' : '') + '</div>' +
           '<div class="jit-meta">' +
-            '<span class="jit-meta-item">#' + String(c.id).padStart(6,'0') + '</span>' +
+            '<span class="jit-meta-item">#' + esc(String(Number(c.id)).padStart(6,'0')) + '</span>' +
             '<span class="jit-meta-item">API call</span>' +
             (c.agent ? '<span class="jit-meta-item">agent ' + escapeHtml(c.agent) + '</span>' : '') +
             (c.reason ? '<span class="jit-meta-item">\u201c' + escapeHtml(c.reason) + '\u201d</span>' : '') +
           '</div>' +
         '</div>' +
         '<div class="jit-actions">' +
-          '<button onclick="event.stopPropagation();denyIntegrationCall(' + c.id + ')" class="btn btn-deny btn-xs">Deny</button>' +
-          '<button onclick="event.stopPropagation();approveIntegrationCall(' + c.id + ')" class="btn btn-approve btn-xs">Approve</button>' +
+          '<button onclick="event.stopPropagation();denyIntegrationCall(' + idJs(c.id) + ')" class="btn btn-deny btn-xs">Deny</button>' +
+          '<button onclick="event.stopPropagation();approveIntegrationCall(' + idJs(c.id) + ')" class="btn btn-approve btn-xs">Approve</button>' +
         '</div>' +
       '</div>';
     } else if (item.type === 'window') {
       var w = item.data;
-      return '<div class="jit-ticket" data-id="win-' + w.id + '" onclick="openContextPanel(\'win-' + w.id + '\')">' +
-        '<button type="button" class="jit-check" role="checkbox" aria-checked="false" aria-label="Select request" onclick="event.stopPropagation();toggleBulkSelect(\'win-' + w.id + '\',event)"></button>' +
+      var wDom = 'win-' + Number(w.id);
+      return '<div class="jit-ticket" data-id="' + esc(wDom) + '" onclick="openContextPanel(' + escJs(wDom) + ')">' +
+        '<button type="button" class="jit-check" role="checkbox" aria-checked="false" aria-label="Select request" onclick="event.stopPropagation();toggleBulkSelect(' + escJs(wDom) + ',event)"></button>' +
         '<div style="flex:1;min-width:0">' +
           '<div class="jit-human">Window request</div>' +
           '<div class="jit-cmd-text">' + escapeHtml(w.command) + '</div>' +
           '<div class="jit-meta">' +
-            '<span class="jit-meta-item">#' + String(w.id).padStart(6,'0') + '</span>' +
+            '<span class="jit-meta-item">#' + esc(String(Number(w.id)).padStart(6,'0')) + '</span>' +
             '<span class="jit-meta-item">' + escapeHtml(w.target_ip) + '</span>' +
             (w.label ? '<span class="jit-meta-item">' + escapeHtml(w.label) + '</span>' : '') +
             '<span class="jit-meta-item">' + formatWinSchedule(w) + '</span>' +
           '</div>' +
         '</div>' +
         '<div class="jit-actions">' +
-          '<button onclick="event.stopPropagation();denyWindowReq(' + w.id + ')" class="btn btn-deny btn-xs">Deny</button>' +
-          '<button onclick="event.stopPropagation();approveWindowReq(' + w.id + ')" class="btn btn-approve btn-xs">Approve</button>' +
+          '<button onclick="event.stopPropagation();denyWindowReq(' + idJs(w.id) + ')" class="btn btn-deny btn-xs">Deny</button>' +
+          '<button onclick="event.stopPropagation();approveWindowReq(' + idJs(w.id) + ')" class="btn btn-approve btn-xs">Approve</button>' +
         '</div>' +
       '</div>';
     } else {
@@ -3175,13 +3203,14 @@ function renderJitItem(item) {
       if (r.risk) riskHtml += '<div style="color:var(--status-warning);font-size:11px;margin-top:4px"> ' + escapeHtml(r.risk) + '</div>';
       if (r.anomaly) riskHtml += '<div style="color:var(--danger);font-size:11px;margin-top:4px"> ' + escapeHtml(r.anomaly) + '</div>';
       riskHtml += decodedCmdHtml(r);
-      return '<div class="jit-ticket' + (r.anomaly ? ' urgent' : '') + '" data-id="' + r.id + '" onclick="openContextPanel(\'' + r.id + '\')">' +
-        '<button type="button" class="jit-check" role="checkbox" aria-checked="false" aria-label="Select request" onclick="event.stopPropagation();toggleBulkSelect(\'' + r.id + '\',event)"></button>' +
+      var rDom = String(Number(r.id));
+      return '<div class="jit-ticket' + (r.anomaly ? ' urgent' : '') + '" data-id="' + esc(rDom) + '" onclick="openContextPanel(' + escJs(rDom) + ')">' +
+        '<button type="button" class="jit-check" role="checkbox" aria-checked="false" aria-label="Select request" onclick="event.stopPropagation();toggleBulkSelect(' + escJs(rDom) + ',event)"></button>' +
         '<div class="jit-body" style="min-width:0">' +
           '<div class="jit-human">' + escapeHtml(human || 'Command request') + '</div>' +
           '<div class="jit-cmd-text">' + escapeHtml(r.command) + '</div>' +
           '<div class="jit-meta">' +
-            '<span class="jit-meta-item">#' + String(r.id).padStart(6,'0') + '</span>' +
+            '<span class="jit-meta-item">#' + esc(String(Number(r.id)).padStart(6,'0')) + '</span>' +
             '<span class="jit-meta-item">' + hostCell + '</span>' +
             (r.hostname && r.target_ip && r.target_ip !== r.hostname ? '<span class="jit-meta-item">' + escapeHtml(r.target_ip) + '</span>' : '') +
             '<span class="jit-ttl"><span class="ttl-countdown" data-ttl="' + r.ttl + '">' + r.ttl + 's</span></span>' +
@@ -3189,8 +3218,8 @@ function renderJitItem(item) {
           riskHtml +
         '</div>' +
         '<div class="jit-actions">' +
-          '<button onclick="event.stopPropagation();handleAction(' + r.id + ',\'deny\')" class="btn btn-deny btn-xs">Deny</button>' +
-          '<button onclick="event.stopPropagation();handleAction(' + r.id + ',\'approve\')" class="btn btn-approve btn-xs">Approve</button>' +
+          '<button onclick="event.stopPropagation();handleAction(' + idJs(r.id) + ',\'deny\')" class="btn btn-deny btn-xs">Deny</button>' +
+          '<button onclick="event.stopPropagation();handleAction(' + idJs(r.id) + ',\'approve\')" class="btn btn-approve btn-xs">Approve</button>' +
         '</div>' +
       '</div>';
     }
@@ -3225,7 +3254,7 @@ function renderSessionCard(s) {
       '<span class="jit-session-label">' + escapeHtml(displayName) + (meta.name ? ' <span class="jit-session-id">' + short + '</span>' : '') + '</span>' +
       (desc ? '<span class="jit-session-desc">' + escapeHtml(desc) + '</span>' : '') +
       '<span class="jit-session-meta">' + escapeHtml(host) + ' \u00b7 ' + items.length + ' command' + (items.length > 1 ? 's' : '') + ' \u00b7 ' + age + '</span>' +
-      '<button class="jit-session-name-btn" onclick="event.stopPropagation();openSessionModal(\'' + escapeHtml(s.session_id) + '\')">View</button>' +
+      '<button class="jit-session-name-btn" onclick="event.stopPropagation();openSessionModal(' + escJs(s.session_id) + ')">View</button>' +
     '</div>' +
     '<div class="jit-session-body">' + items.map(function(it){ return renderJitItem(it); }).join('') + historyHtml + '</div>' +
   '</div>';
@@ -3396,7 +3425,7 @@ function renderTable() {
     const isPP = req.status === 'pending' || req.status === 'approved', isExpired = isPP && req.ttl <= 0;
     let badge = '';
     if (isPP && !isExpired) {
-      badge = '<span class="badge badge-' + (req.status==='pending'?'pending':'approved') + '"><span class="ttl-countdown font-mono w-8 text-center" data-ttl="' + req.ttl + '">' + req.ttl + 's</span> ' + req.status + '</span>';
+      badge = '<span class="badge badge-' + (req.status==='pending'?'pending':'approved') + '"><span class="ttl-countdown font-mono w-8 text-center" data-ttl="' + esc(req.ttl) + '">' + esc(req.ttl) + 's</span> ' + escapeHtml(req.status) + '</span>';
     } else if (isPP && isExpired) badge = '<span class="badge badge-expired">Expired</span>';
     else if (req.status === 'consumed') badge = '<span class="badge badge-consumed">Ticket Claimed</span>';
     else if (req.status === 'blocked') badge = '<span class="badge badge-blocked">Blocked</span>';
@@ -3409,11 +3438,11 @@ function renderTable() {
     else if (req.status === 'fleet-run') badge = '<span class="badge badge-approved" title="Dispatched via Fleet Run">Approved</span>';
     let actions = '<span class="text-muted">—</span>';
     if (req.status === 'pending' && !isExpired) {
-      actions = '<button onclick="handleAction(' + req.id + ', \'approve\')" class="btn btn-approve btn-xs mr-1">Approve</button>' +
-        '<button onclick="handleAction(' + req.id + ', \'deny\')" class="btn btn-deny btn-xs">Deny</button>';
+      actions = '<button onclick="handleAction(' + idJs(req.id) + ', \'approve\')" class="btn btn-approve btn-xs mr-1">Approve</button>' +
+        '<button onclick="handleAction(' + idJs(req.id) + ', \'deny\')" class="btn btn-deny btn-xs">Deny</button>';
       if (req.session_id && req.session_id !== 'unknown') {
-        actions += ' <button onclick="event.stopPropagation();openSessionOverrideModal(\'' +
-          escapeHtml(req.session_id) + '\',\'' + escapeHtml(req.target_ip || '') + '\',' + req.id + ')" ' +
+        actions += ' <button onclick="event.stopPropagation();openSessionOverrideModal(' +
+          escJs(req.session_id) + ',' + escJs(req.target_ip || '') + ',' + Number(req.id) + ')" ' +
           'class="btn btn-muted btn-xs" title="Auto-approve this session on this host for a bounded window">' +
           'Override session</button>';
       }
@@ -3441,7 +3470,7 @@ function renderTable() {
       const inAnyAllowlist = mem.inExact || mem.inRegexWhite;
       const disabledStyle = 'opacity:0.5;pointer-events:none;';
 
-      actions = '<select onchange="handlePolicyAction(this,\'' + encodeURIComponent(req.command) + '\')" class="btn-muted select-actions">' +
+      actions = '<select onchange="handlePolicyAction(this,' + escJs(encodeURIComponent(req.command)) + ')" class="btn-muted select-actions">' +
         '<option value="" disabled selected>Actions</option>' +
         '<option value="exact_whitelist"' + (mem.inExact ? ' disabled style="'+disabledStyle+'"' : '') + '>' + (mem.inExact ? '✓ ' : '+ ') + 'AL Exact</option>' +
         '<option value="regex_whitelist"' + (mem.inRegexWhite ? ' disabled style="'+disabledStyle+'"' : '') + '>' + (mem.inRegexWhite ? '✓ ' : '+ ') + 'AL Regex</option>' +
@@ -3454,7 +3483,7 @@ function renderTable() {
     const rowClass = gap ? 'gap-row' : '';
     const idClass = gap ? 'cell-id-warn' : 'cell-id';
     const gapTitle = gap ? ' title="' + escapeHtml(formatGapTooltip(gap)) + '"' : '';
-    const idDisplay = gap ? ' #' + String(req.id).padStart(6, '0') : '#' + String(req.id).padStart(6, '0');
+    const idDisplay = gap ? ' #' + esc(String(Number(req.id)).padStart(6, '0')) : '#' + esc(String(Number(req.id)).padStart(6, '0'));
     const escapedCmd = escapeHtml(req.command);
     const decodedChip = req.encoded
       ? '<span class="decoded-badge" title="Encoded payload — open for the decoded command">decoded</span>'
@@ -3483,9 +3512,9 @@ function renderTable() {
           if (_desc.length > _maxLen) {
             var _short = _desc.substring(0, _maxLen) + '...';
             return '<div class="cmd-desc">' +
-              '<span id="desc-short-' + req.id + '">' + escapeHtml(_short) + ' <a href="#" onclick="toggleDesc(' + req.id + ');return false;" class="text-info">More</a></span>' +
-              '<span id="desc-full-' + req.id + '" style="display:none;">' +
-                '<a href="#" onclick="toggleDesc(' + req.id + ');return false;" class="text-muted">Less</a> ' + escapeHtml(_desc) +
+              '<span id="desc-short-' + idText(req.id) + '">' + escapeHtml(_short) + ' <a href="#" onclick="toggleDesc(' + Number(req.id) + ');return false;" class="text-info">More</a></span>' +
+              '<span id="desc-full-' + idText(req.id) + '" style="display:none;">' +
+                '<a href="#" onclick="toggleDesc(' + Number(req.id) + ');return false;" class="text-muted">Less</a> ' + escapeHtml(_desc) +
               '</span>' +
               '</div>';
           }
@@ -3908,31 +3937,31 @@ async function fetchGateways() {
       ? '<span class="zt-badge" title="Zero-Trust — every command requires JIT approval"> ZT</span>'
       : '';
     var ztBtn = g.zero_trust
-      ? '<button onclick="toggleZeroTrust(\'' + g.ip + '\', false)" class="chip-btn zt-on" title="Zero-Trust ON — allowlisted commands go through JIT. Click to disable."> ZT</button>'
-      : '<button onclick="toggleZeroTrust(\'' + g.ip + '\', true)" class="chip-btn" title="Enable Zero-Trust — allowlisted commands must go through JIT">ZT</button>';
+      ? '<button onclick="toggleZeroTrust(' + escJs(g.ip) + ', false)" class="chip-btn zt-on" title="Zero-Trust ON — allowlisted commands go through JIT. Click to disable."> ZT</button>'
+      : '<button onclick="toggleZeroTrust(' + escJs(g.ip) + ', true)" class="chip-btn" title="Enable Zero-Trust — allowlisted commands must go through JIT">ZT</button>';
     var overrideCell;
     if (_uninstallingIps[g.ip]) {
       overrideCell = '<span class="text-warning text-xs"> Uninstalling…</span>';
     } else {
       var overrideControl;
       if ((g.override_remaining || 0) > 0) {
-        overrideControl = '<button class="chip-btn ovr-on" data-ovr-ip="' + g.ip + '" title="Override active — click to cancel">OVR 00:00</button>' +
-          '<button onclick="cancelOverride(\'' + g.ip + '\')" class="chip-btn danger">Cancel</button>';
+        overrideControl = '<button class="chip-btn ovr-on" data-ovr-ip="' + esc(g.ip) + '" title="Override active — click to cancel">OVR 00:00</button>' +
+          '<button onclick="cancelOverride(' + escJs(g.ip) + ')" class="chip-btn danger">Cancel</button>';
       } else {
-        overrideControl = '<button onclick="openOverrideModal(\'' + g.ip + '\',\'' + g.hostname.replace(/'/g, "\\'") + '\')" class="chip-btn ovr" title="Override Mode — auto-approve all JIT for a set duration">Override</button>';
+        overrideControl = '<button onclick="openOverrideModal(' + escJs(g.ip) + ',' + escJs(g.hostname) + ')" class="chip-btn ovr" title="Override Mode — auto-approve all JIT for a set duration">Override</button>';
       }
       overrideCell = '<div class="flex items-center gap-2">' + overrideControl + ztBtn + '</div>';
     }
     return '<tr>' +
       '<td class="px-4 py-2 whitespace-nowrap">' + statusCell + '</td>' +
       '<td class="px-4 py-2 whitespace-nowrap">' + gwPill(g.hostname) + ' ' + escapeHtml(g.hostname) + devBadge(g) + ztBadge + '</td>' +
-      '<td class="px-4 py-2 whitespace-nowrap text-muted">' + g.ip + '</td>' +
+      '<td class="px-4 py-2 whitespace-nowrap text-muted">' + escapeHtml(g.ip) + '</td>' +
       '<td class="px-4 py-2 whitespace-nowrap text-muted">' + (g.first_seen ? formatAgo(now - g.first_seen) : '—') + '</td>' +
       '<td class="px-4 py-2">' + syncCell + '</td>' +
       '<td class="px-4 py-2">' + healthCell + '</td>' +
       '<td class="px-4 py-2 gw-spark-cell">' + spark + '</td>' +
       '<td class="px-4 py-2">' + overrideCell + '</td>' +
-      '<td class="px-4 py-2 text-right whitespace-nowrap"><button onclick="openRemoveGatewayModal(\'' + g.ip + '\', \'' + g.hostname + '\', ' + isOnline + ')" class="btn btn-deny btn-xs"> Remove</button></td>' +
+      '<td class="px-4 py-2 text-right whitespace-nowrap"><button onclick="openRemoveGatewayModal(' + escJs(g.ip) + ', ' + escJs(g.hostname) + ', ' + isOnline + ')" class="btn btn-deny btn-xs"> Remove</button></td>' +
       '</tr>';
   }).join('');
   checkOverrideBanner();
@@ -4097,7 +4126,7 @@ function renderSessionOverrideBanner() {
     var scope = o.target_ip ? o.target_ip : 'any host';
     return '<span class="session-ovr-item">' + escapeHtml(sessionLabel(o.session_id)) +
       ' \u00b7 ' + escapeHtml(scope) + ' (' + sessionOverrideClock(o) + ')' +
-      ' <button class="btn btn-xs btn-on-banner" onclick="cancelSessionOverride(' + o.id + ')">Cancel</button></span>';
+      ' <button class="btn btn-xs btn-on-banner" onclick="cancelSessionOverride(' + idJs(o.id) + ')">Cancel</button></span>';
   }).join(' <span class="session-ovr-sep">\u00b7</span> ');
 }
 
@@ -4455,10 +4484,10 @@ function buildFleetSky() {
        stacked on the sun in the middle of the dial */
     n.style.left = (50 + r * Math.cos(a0)) + '%';
     n.style.top = (50 + r * Math.sin(a0)) + '%';
-    n.setAttribute('data-ip', g.ip);
+    n.setAttribute('data-ip', g.ip || '');
     n._o = { a0: a0, a: a0, r: r, speed: r === 20 ? 0.05 : (r === 33 ? 0.032 : 0.02), on: on };
     n.innerHTML = '<span class="nd"></span><span class="ni">' + gwIni(g.hostname || g.ip) + '</span>' +
-      '<span class="ntip"><b>' + escapeHtml(g.hostname || g.ip) + '</b> &middot; ' + g.ip + (on ? '' : ' &middot; offline') + '</span>';
+      '<span class="ntip"><b>' + escapeHtml(g.hostname || g.ip) + '</b> &middot; ' + escapeHtml(g.ip) + (on ? '' : ' &middot; offline') + '</span>';
     wrap.appendChild(n);
     _fleetNodeEls[g.ip] = n;
   });
@@ -4483,7 +4512,7 @@ function drawFleetTargets() {
   list.innerHTML = _fleetGateways.map(function (g) {
     var checked = _fleetSelected.has(g.ip);
     var online = g.online !== false;
-    return '<div class="trow' + (checked ? ' checked' : '') + (online ? '' : ' disabled') + '" data-ip="' + g.ip + '">' +
+    return '<div class="trow' + (checked ? ' checked' : '') + (online ? '' : ' disabled') + '" data-ip="' + esc(g.ip) + '">' +
       '<span class="tchk"></span>' +
       /* hostname first, IP beneath it: the rail is 240px wide and the IP used to
          win the space fight, clipping every hostname down to one letter. */
@@ -4491,7 +4520,7 @@ function drawFleetTargets() {
         '<span class="nm tname">' + escapeHtml(g.hostname || g.ip) + '</span>' +
         (online ? '' : '<em class="off">offline</em>') +
       '</span>' +
-      '<span class="tip">' + g.ip + '</span></span>' +
+      '<span class="tip">' + escapeHtml(g.ip) + '</span></span>' +
       '</div>';
   }).join('');
   list.querySelectorAll('.trow').forEach(function (row) {
@@ -4736,22 +4765,22 @@ function renderFleetRun(cmds) {
       var outId = c.id + '-' + r.gateway_ip;
       var outHtml = '';
       if (r.output) {
-        outHtml = '<details data-out="' + outId + '" class="mt-2" ontoggle="loadFleetOutputIfNeeded(' + c.id + ',\'' + r.gateway_ip + '\',this)"><summary class="text-xs cursor-pointer text-info">Show output' + (r.has_more ? ' (full)' : '') + '</summary>' +
+        outHtml = '<details data-out="' + esc(outId) + '" class="mt-2" ontoggle="loadFleetOutputIfNeeded(' + idJs(c.id) + ',' + escJs(r.gateway_ip) + ',this)"><summary class="text-xs cursor-pointer text-info">Show output' + (r.has_more ? ' (full)' : '') + '</summary>' +
           '<div class="mt-1 rounded border">' +
           '<div class="flex items-center justify-end gap-1 px-1 pt-1">' +
-          '<button onclick="copyFleetOutput(' + c.id + ',\'' + r.gateway_ip + '\')" class="chip-btn">Copy</button>' +
-          '<button onclick="openFleetOutputModal(' + c.id + ',\'' + r.gateway_ip + '\')" class="chip-btn info">View full</button>' +
+          '<button onclick="copyFleetOutput(' + idJs(c.id) + ',' + escJs(r.gateway_ip) + ')" class="chip-btn">Copy</button>' +
+          '<button onclick="openFleetOutputModal(' + idJs(c.id) + ',' + escJs(r.gateway_ip) + ')" class="chip-btn info">View full</button>' +
           '</div>' +
-          '<pre data-out="' + outId + '" class="fleet-out fleet-pre overflow-auto text-xs">' + escapeHtml(r.output) + '</pre>' +
+          '<pre data-out="' + esc(outId) + '" class="fleet-out fleet-pre overflow-auto text-xs">' + escapeHtml(r.output) + '</pre>' +
           '</div></details>';
       }
       var gName = r.hostname ? escapeHtml(r.hostname) : escapeHtml(r.gateway_ip);
       var gIp = (r.hostname && r.hostname !== r.gateway_ip) ? ' <span class="text-muted">(' + escapeHtml(r.gateway_ip) + ')</span>' : '';
       var clearBtn = (r.status === 'queued') ?
-        '<button onclick="clearFleetResult(' + c.id + ',\'' + r.gateway_ip + '\')" class="chip-btn" title="Clear this stuck gateway so its queue can move on (other results are kept)">&#10005;</button>' : '';
+        '<button onclick="clearFleetResult(' + idJs(c.id) + ',' + escJs(r.gateway_ip) + ')" class="chip-btn" title="Clear this stuck gateway so its queue can move on (other results are kept)">&#10005;</button>' : '';
       return '<div class="rt">' + fleetDot(r.status) + ' <strong>' + gName + '</strong>' + gIp + ' ' +
-        '<span class="badge ' + rBadge + '">' + r.status + '</span>' +
-        (r.exit_code != null && r.exit_code !== '' ? ' <span class="rms">exit ' + r.exit_code + '</span>' : '') +
+        '<span class="badge ' + rBadge + '">' + escapeHtml(r.status) + '</span>' +
+        (r.exit_code != null && r.exit_code !== '' ? ' <span class="rms">exit ' + escapeHtml(r.exit_code) + '</span>' : '') +
         times + clearBtn + outHtml + '</div>';
     }).join('');
     var runningRes = (c.results || []).filter(function(r) { return r.status === 'running' && r.started_at; });
@@ -4761,13 +4790,13 @@ function renderFleetRun(cmds) {
       var deadline = start + c.timeout;
       cdHtml = '<span class="text-xs fleet-countdown text-warning whitespace-nowrap" data-deadline="' + deadline + '"> counting…</span>';
     } else {
-      cdHtml = '<span class="text-xs text-muted whitespace-nowrap">' + c.timeout + 's timeout</span>';
+      cdHtml = '<span class="text-xs text-muted whitespace-nowrap">' + escapeHtml(c.timeout) + 's timeout</span>';
     }
     return '<div class="run">' +
       '<div class="run-top">' +
-      '<div class="flex items-center gap-2 flex-wrap"><span class="text-xs font-mono text-muted">#' + c.id + '</span>' +
+      '<div class="flex items-center gap-2 flex-wrap"><span class="text-xs font-mono text-muted">#' + idText(c.id) + '</span>' +
       '<code>' + escapeHtml(c.command) + '</code>' +
-      '<span class="badge ' + statusBadge + '">' + c.status + '</span></div>' +
+      '<span class="badge ' + statusBadge + '">' + escapeHtml(c.status) + '</span></div>' +
       '<div class="flex items-center gap-2 flex-wrap">' + cdHtml + '</div></div>' +
       '<div class="run-time">sent ' + formatDateTime(c.created_at) + '</div>' +
       '<div class="run-time">&#8594; ' + formatFleetTargets(c.target_ips || []).join(', ') + '</div>' +
@@ -4982,13 +5011,13 @@ function renderPolicyChips() {
     let html = displayLines.map(function(line) {
       const isCore = isCorePattern(line);
       const shield = '';
-      return '<span class="policy-chip' + (isCore ? ' core' : '') + '" title="' + line.replace(/"/g, '&quot;') + '">' + shield + '<code>' + escapeHtml(line) + '</code><button class="remove" data-line="' + encodeURIComponent(line) + '" data-core="' + (isCore ? '1' : '0') + '" title="Remove">&times;</button></span>';
+      return '<span class="policy-chip' + (isCore ? ' core' : '') + '" title="' + escapeHtml(line) + '">' + shield + '<code>' + escapeHtml(line) + '</code><button class="remove" data-line="' + encodeURIComponent(line) + '" data-core="' + (isCore ? '1' : '0') + '" title="Remove">&times;</button></span>';
     }).join('');
     // Removed core patterns — shipped defaults no longer in the list: struck + Restore
     if (type === 'regex_blacklist') {
       const removed = coreBlockPatterns().filter(function(p){ return lines.indexOf(p) === -1; });
       html += removed.map(function(p) {
-        return '<span class="policy-chip removed" title="' + p.replace(/"/g, '&quot;') + '"><code>' + escapeHtml(p) + '</code><button class="restore" data-line="' + encodeURIComponent(p) + '" title="Restore this core default">Restore</button></span>';
+        return '<span class="policy-chip removed" title="' + escapeHtml(p) + '"><code>' + escapeHtml(p) + '</code><button class="restore" data-line="' + encodeURIComponent(p) + '" title="Restore this core default">Restore</button></span>';
       }).join('');
     }
     if (!html) html = '<span class="policy-empty text-muted">No entries yet.</span>';
@@ -5069,9 +5098,9 @@ async function fetchPolicyChanges() {
   if (changes.length === 0) { changesList.innerHTML = '<p class="text-muted">No policy changes recorded.</p>'; return; }
   changesList.innerHTML = changes.map(function(c) {
     return '<div class="p-3 rounded-lg border mb-2 bg-base">' +
-    '<div class="flex items-center justify-between"><p class="text-xs text-muted">' + formatDateTime(c.timestamp) + ' - <span class="text-main">' + c.policy_type + '</span></p>' +
-    '<button class="chip-btn info flex-shrink-0" onclick="rollbackPolicyChange(' + c.id + ')">Restore</button></div>' +
-    '<div class="mt-2 text-xs font-mono"><p class="text-danger">- ' + c.old_content.split('\n').filter(function(l){return l.trim()!=='';}).join('<br>- ') + '</p><p class="text-success">+ ' + c.new_content.split('\n').filter(function(l){return l.trim()!=='';}).join('<br>+ ') + '</p></div></div>';
+    '<div class="flex items-center justify-between"><p class="text-xs text-muted">' + formatDateTime(c.timestamp) + ' - <span class="text-main">' + escapeHtml(c.policy_type) + '</span></p>' +
+    '<button class="chip-btn info flex-shrink-0" onclick="rollbackPolicyChange(' + idJs(c.id) + ')">Restore</button></div>' +
+    '<div class="mt-2 text-xs font-mono"><p class="text-danger">- ' + c.old_content.split('\n').filter(function(l){return l.trim()!=='';}).map(escapeHtml).join('<br>- ') + '</p><p class="text-success">+ ' + c.new_content.split('\n').filter(function(l){return l.trim()!=='';}).map(escapeHtml).join('<br>+ ') + '</p></div></div>';
   }).join('');
 }
 
@@ -5191,19 +5220,19 @@ async function testPolicy() {
       }
     } catch(e) {}
     rd.innerHTML = '<div class="' + vcls + '">' + vhtml + memLine + '</div>' + testerAddButtons(data.action, cmd);
-  } catch(err) { rd.innerHTML = '<div class="verdict blocked"> ' + err.message + '</div>'; }
+  } catch(err) { rd.innerHTML = '<div class="verdict blocked"> ' + escapeHtml(err.message) + '</div>'; }
 }
 
 function testerAddButtons(action, cmd) {
-  const enc = encodeURIComponent(cmd);
+  const enc = encodeCmd(cmd);
   if (action === 'blocked') {
     return '<div class="flex gap-2 mt-2">' +
-      '<button class="btn btn-xs" onclick="addToPolicy(decodeURIComponent(\'' + enc + '\'), \'regex_blacklist\')">＋ Blocklist</button>' +
+      '<button class="btn btn-xs" onclick="addToPolicy(decodeURIComponent(' + escJs(enc) + '), \'regex_blacklist\')">＋ Blocklist</button>' +
       '</div>';
   }
   return '<div class="flex gap-2 mt-2">' +
-    '<button class="btn btn-xs" onclick="addToPolicy(decodeURIComponent(\'' + enc + '\'), \'exact_whitelist\')">＋ Exact</button>' +
-    '<button class="btn btn-xs" onclick="addToPolicy(decodeURIComponent(\'' + enc + '\'), \'regex_whitelist\')">＋ Regex</button>' +
+    '<button class="btn btn-xs" onclick="addToPolicy(decodeURIComponent(' + escJs(enc) + '), \'exact_whitelist\')">＋ Exact</button>' +
+    '<button class="btn btn-xs" onclick="addToPolicy(decodeURIComponent(' + escJs(enc) + '), \'regex_whitelist\')">＋ Regex</button>' +
     '</div>';
 }
 async function seedEdge() {
@@ -5285,9 +5314,9 @@ async function fetchDevStatus() {
     const promoteBtn = document.getElementById('promote-golden-btn');
     const rollbackBtn = document.getElementById('rollback-golden-btn');
 
-    if (goldenLabel) goldenLabel.innerHTML = (data.dashboard_version || 'unset') + (data.golden_hash ? ' <span class="hash-tag">(' + data.golden_hash + ')</span>' : '');
-    if (edgeLabel) edgeLabel.innerHTML = (data.edge_exists ? (data.dashboard_version || 'staged') : 'not staged') + (data.edge_hash ? ' <span class="hash-tag">(' + data.edge_hash + ')</span>' : '');
-    if (fleetLabel) fleetLabel.innerHTML = (data.dashboard_version || 'unset') + (data.deployed_hash ? ' <span class="hash-tag">(' + data.deployed_hash + ')</span>' : '');
+    if (goldenLabel) goldenLabel.innerHTML = escapeHtml(data.dashboard_version || 'unset') + (data.golden_hash ? ' <span class="hash-tag">(' + escapeHtml(data.golden_hash) + ')</span>' : '');
+    if (edgeLabel) edgeLabel.innerHTML = escapeHtml(data.edge_exists ? (data.dashboard_version || 'staged') : 'not staged') + (data.edge_hash ? ' <span class="hash-tag">(' + escapeHtml(data.edge_hash) + ')</span>' : '');
+    if (fleetLabel) fleetLabel.innerHTML = escapeHtml(data.dashboard_version || 'unset') + (data.deployed_hash ? ' <span class="hash-tag">(' + escapeHtml(data.deployed_hash) + ')</span>' : '');
 
     // Button states
     if (seedBtn) seedBtn.disabled = false;
@@ -5322,7 +5351,7 @@ async function fetchDevStatus() {
 function generateRegex() {
   const cmd = document.getElementById('tester-input').value.trim(); if (!cmd) return;
   const rd = document.getElementById('tester-result');
-  rd.innerHTML = '<div class="regex-box"><p class="mb-1 text-danger">Generated Regex:</p><code>^' + cmd.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$</code><p class="mt-1 text-muted">Copy into Regex Allowlist.</p></div>';
+  rd.innerHTML = '<div class="regex-box"><p class="mb-1 text-danger">Generated Regex:</p><code>^' + escapeHtml(cmd.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')) + '$</code><p class="mt-1 text-muted">Copy into Regex Allowlist.</p></div>';
   rd.classList.remove('hidden');
 }
 
@@ -5615,7 +5644,7 @@ function renderAuditLog() {
   var logs = _auditLogs.filter(function(l){ return _auditFilter === 'all' || auditCategory(l.event_type) === _auditFilter; });
   if (logs.length === 0) { body.innerHTML = '<tr><td colspan="5" class="px-4 py-3 text-muted">No events recorded yet.</td></tr>'; return; }
   body.innerHTML = logs.map(function(l, i) {
-    var id = l.id || i;
+    var id = Number(l.id || i);
     var label = AUDIT_LABELS[l.event_type] || String(l.event_type).replace(/_/g, ' ');
     var badge = auditBadgeClass(l.event_type);
     var d = new Date(l.timestamp * 1000);
@@ -5626,14 +5655,14 @@ function renderAuditLog() {
     /* Audit rows said "Last seen 691233s ago" while every other screen said
        "8d ago" for the same fact. One phrasing, everywhere. */
     details = details.replace(/Last seen (\d+)s ago/, function(_, n){ return 'Last seen ' + formatAgo(parseInt(n, 10)); });
-    var row = '<tr class="log-row" data-aid="' + id + '" onclick="toggleAuditDetail(' + id + ')">' +
+    var row = '<tr class="log-row" data-aid="' + esc(id) + '" onclick="toggleAuditDetail(' + idJs(id) + ')">' +
       '<td><span class="log-expand">&#9656;</span></td>' +
       '<td><div class="log-time">' + time + '</div><div class="log-date">' + date + '</div></td>' +
       '<td><span class="badge ' + badge + '">' + escapeHtml(label) + '</span></td>' +
       '<td class="log-details">' + (details || '<span class="text-muted">—</span>') + '</td>' +
       '<td class="log-gw">' + (gw ? escapeHtml(gw) + (l.gateway_ip && l.hostname ? ' <span class="text-muted">' + escapeHtml(l.gateway_ip) + '</span>' : '') : '<span class="text-muted">—</span>') + '</td>' +
       '</tr>';
-    var detailRow = '<tr class="log-detail-row" id="audit-detail-' + id + '"><td class="log-detail-cell" colspan="5">' +
+    var detailRow = '<tr class="log-detail-row" id="audit-detail-' + esc(id) + '"><td class="log-detail-cell" colspan="5">' +
       '<div class="log-detail">' +
         '<div class="detail-row"><span class="detail-label">Timestamp</span><span class="detail-value">' + escapeHtml(d.toLocaleString()) + '</span></div>' +
         '<div class="detail-row"><span class="detail-label">Event</span><span class="detail-value">' + escapeHtml(label) + '</span></div>' +
@@ -6035,7 +6064,7 @@ function renderRhythm(d) {
     ticks += '<line class="day-tick" x1="' + pts[i][0] + '" y1="180" x2="' + pts[i][0] + '" y2="190"/>';
     if (labelIdx.indexOf(i) >= 0) {
       var lb = (x.date || x.day || ''); if (lb.indexOf('-') >= 0) { var pp = lb.split('-'); lb = pp[2] + '/' + pp[1]; }
-      labels += '<text class="day-label" x="' + pts[i][0] + '" y="203" text-anchor="middle">' + lb + '</text>';
+      labels += '<text class="day-label" x="' + pts[i][0] + '" y="203" text-anchor="middle">' + escapeHtml(lb) + '</text>';
     }
   });
   var autoTxt = '\u2014';
@@ -6253,8 +6282,8 @@ function renderStatsNodes(d) {
       return '<div class="' + cls + '" style="left:' + p.x.toFixed(2) + '%;top:' + p.y.toFixed(2) + '%" ' +
         'data-cmds="' + row.total + '" data-name="' + escapeHtml(g.hostname || g.ip) + '" ' +
         'role="button" tabindex="0" aria-label="' + escapeHtml(g.hostname || g.ip) + ': ' + row.total + ' commands, ' + Math.round(row.autoRate) + '% automated" ' +
-        'onclick="toggleStatsGateway(\'' + g.ip + '\')" ' +
-        'onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();toggleStatsGateway(\'' + g.ip + '\');}">' +
+        'onclick="toggleStatsGateway(' + escJs(g.ip) + ')" ' +
+        'onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();toggleStatsGateway(' + escJs(g.ip) + ');}">' +
         '<span class="n-dot"></span><span class="n-ini">' + gwIni(g.hostname || g.ip) + '</span>' +
         '<span class="tip">' + tip + '</span></div>';
     }).join('');
@@ -6361,7 +6390,7 @@ async function fetchVersion() {
     if (label) {
       label.textContent = data.version || '?';
       if (data.dev_mode) {
-        label.innerHTML = (data.version || '?') + ' <span class="dev-badge">DEV</span>';
+        label.innerHTML = escapeHtml(data.version || '?') + ' <span class="dev-badge">DEV</span>';
       }
     }
     document.title = 'Eshu Gateway | ' + (data.version || 'v0.1.0') + ' Control Center';
@@ -6741,9 +6770,9 @@ async function fetchAgentTokens() {
         '<div><div class="text-sm">' + esc(a.name) + (a.revoked ? ' <span class="text-danger">(revoked)</span>' : '') + '</div>' +
         '<div class="text-xs text-muted">last used: ' + used + ' · ' + esc(summary) + '</div></div>' +
         '<div class="flex items-center gap-1">' +
-        '<button onclick="openAgentPolicy(' + a.id + ')" class="btn btn-xs">Policy</button>' +
-        (a.revoked ? '' : '<button onclick="revokeAgentToken(this, ' + a.id + ')" class="btn btn-xs btn-muted">Revoke</button>') +
-        '<button onclick="deleteAgentToken(this, ' + a.id + ')" class="btn btn-xs btn-muted">Delete</button></div></div>';
+        '<button onclick="openAgentPolicy(' + idJs(a.id) + ')" class="btn btn-xs">Policy</button>' +
+        (a.revoked ? '' : '<button onclick="revokeAgentToken(this, ' + idJs(a.id) + ')" class="btn btn-xs btn-muted">Revoke</button>') +
+        '<button onclick="deleteAgentToken(this, ' + idJs(a.id) + ')" class="btn btn-xs btn-muted">Delete</button></div></div>';
     }).join('');
   } catch(e) {}
 }
@@ -7104,15 +7133,15 @@ function renderIntegrationList() {
     var profile = INTEGRATION_PROFILES[i.kind] || {};
     var seedable = !!profile.seedable;
     var seedBtn = seedable
-      ? '<button onclick="seedTools(\'' + esc(i.name) + '\')" class="btn btn-xs btn-muted" title="Seed the seed catalog for this integration">Seed</button>'
+      ? '<button onclick="seedTools(' + escJs(i.name) + ')" class="btn btn-xs btn-muted" title="Seed the seed catalog for this integration">Seed</button>'
       : '';
     var label = profile.label || i.kind || 'custom';
     var urlLabel = profile.no_base_url ? 'mediated fetch (no base URL)' : i.base_url;
     var testBtn = profile.no_test
       ? ''
-      : '<button onclick="testIntegration(\'' + esc(i.name) + '\')" class="btn btn-xs btn-muted" title="Run a read call to verify the connection">Test</button>';
+      : '<button onclick="testIntegration(' + escJs(i.name) + ')" class="btn btn-xs btn-muted" title="Run a read call to verify the connection">Test</button>';
     var gateLabel = profile.no_gate ? 'n/a' : (i.gate_mode || 'destructive');
-    return '<div class="item-card selectable' + (selected ? ' selected' : '') + '" onclick="selectIntegration(\'' + esc(i.name) + '\')">' +
+    return '<div class="item-card selectable' + (selected ? ' selected' : '') + '" onclick="selectIntegration(' + escJs(i.name) + ')">' +
       '<div class="flex items-center justify-between gap-2">' +
       '<span class="text-sm font-semibold ' + active + '"><span class="i-star' + (i.enabled ? '' : ' off') + '"></span> ' + esc(i.name) + '</span>' +
       '<span class="i-kind">' + esc(label) + '</span></div>' +
@@ -7120,10 +7149,10 @@ function renderIntegrationList() {
       '<div class="i-meta">auth: ' + esc(i.auth_type) + ' &middot; gate: ' + esc(gateLabel) + ' &middot; mcp: ' + esc(i.mcp_mode || 'joined') + '</div>' +
       integrationHealthLine(i.name) +
       '<div class="flex flex-wrap gap-1 mt-2" onclick="event.stopPropagation()">' +
-      '<button onclick="editIntegration(\'' + esc(i.name) + '\')" class="btn btn-xs btn-muted" title="Edit base URL / secret">Edit</button>' +
+      '<button onclick="editIntegration(' + escJs(i.name) + ')" class="btn btn-xs btn-muted" title="Edit base URL / secret">Edit</button>' +
       testBtn +
       seedBtn +
-      '<button onclick="deleteIntegration(this, \'' + esc(i.name) + '\')" class="btn btn-xs btn-muted">Delete</button>' +
+      '<button onclick="deleteIntegration(this, ' + escJs(i.name) + ')" class="btn btn-xs btn-muted">Delete</button>' +
       '</div></div>';
   }).join('');
 }
@@ -7386,7 +7415,7 @@ function renderTools(tools, name) {
       '<div class="t-top"><span class="t-name">' + esc(t.name) + '</span><span class="t-type ' + type + '">' + (t.read_only ? 'read' : 'mutating') + '</span></div>' +
       '<div class="t-desc">' + esc(t.description || '') + '</div>' +
       '<div class="t-foot"><span class="t-method">' + esc(t.method) + '</span>' +
-      '<button class="tgl' + (t.enabled ? ' on' : '') + '" onclick="toggleTool(' + t.id + ', ' + (t.enabled ? 'false' : 'true') + ')" title="Enable/Disable"></button></div></div>';
+      '<button class="tgl' + (t.enabled ? ' on' : '') + '" onclick="toggleTool(' + idJs(t.id) + ', ' + (t.enabled ? 'false' : 'true') + ')" title="Enable/Disable"></button></div></div>';
   }).join('');
 }
 
@@ -7599,6 +7628,13 @@ function esc(s) {
     return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch];
   });
 }
+/* Safe value for an inline JS call: JSON.stringify quotes/escapes, esc makes
+   it safe inside a double-quoted HTML attribute (entities decode back before
+   the JS runs, so esc() alone is not enough for a single-quoted JS literal). */
+function escJs(v) { return esc(JSON.stringify(v)); }
+/* Server ids are integers today; coerce before putting them in HTML/JS. */
+function idJs(v) { return escJs(Number(v)); }
+function idText(v) { return esc(Number(v)); }
 
 /* ==============================================================
    FLEET RUN — SOLAR BROADCAST CONSOLE
@@ -7697,8 +7733,8 @@ function renderFleetTxRail() {
           return '<span class="orb-tx-n wait"><span class="d"></span>' + escapeHtml((g && g.hostname ? g.hostname : ip).slice(0, 2)) + '</span>';
         }).join('');
     var sel = _fleetSelCmdId === c.id ? ' active' : '';
-    return '<div class="orb-tx' + sel + '" data-id="' + c.id + '">' +
-      '<div class="orb-tx-top"><span class="orb-tx-id">#' + c.id + '</span><span class="orb-tx-cmd">' + escapeHtml(c.command) + '</span><span class="orb-tx-v ' + v.cls + '">' + v.label + '</span></div>' +
+    return '<div class="orb-tx' + sel + '" data-id="' + idText(c.id) + '">' +
+      '<div class="orb-tx-top"><span class="orb-tx-id">#' + idText(c.id) + '</span><span class="orb-tx-cmd">' + escapeHtml(c.command) + '</span><span class="orb-tx-v ' + v.cls + '">' + v.label + '</span></div>' +
       '<div class="orb-tx-meta"><span>' + (c.created_at ? formatDateTime(c.created_at) : '') + '</span><span>' +
         (function (n) { return n + ' ear' + (n === 1 ? '' : 's'); })(rs.length || (c.target_ips || []).length) + '</span></div>' +
       '<div class="orb-tx-nodes">' + chips + '</div></div>';
