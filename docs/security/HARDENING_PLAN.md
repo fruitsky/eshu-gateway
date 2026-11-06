@@ -353,6 +353,49 @@ updated, only the dashboard can stop this.
 - [ ] Push to the **same** branch `sec/chunk-1-json-injection`; add a short
       "Round 2 implementer notes" subsection below this one.
 
+### Round 2 implementer notes
+
+Implemented on the same branch, on top of `4e1d18b`.
+
+**1f — duplicate JSON keys** (`dashboard/core/body_guard.py`, wired via
+`app.router.route_class` in `dashboard/main.py`)
+- `NoDuplicateJSONKeysRoute` runs before every `/api/` POST/PUT/PATCH handler
+  when the content type is `application/json`. It parses with an
+  `object_pairs_hook` that records repeated keys at any nesting level; the
+  endpoint still receives the body because Starlette caches `request.body()`.
+- A duplicate body gets 400 before any store, plus an audit row
+  `gateway_body_rejected` with `duplicate JSON keys: <names>` (names only,
+  never values). Non-JSON/empty/malformed bodies fall through to the existing
+  validation, and `/mcp`, GET and non-`/api` routes are untouched.
+- The installed FastAPI is 0.162 (not the 0.139 the plan mentions), which no
+  longer accepts `route_class=` in the `FastAPI(...)` constructor; the class is
+  assigned to `app.router.route_class` before the first route decorator.
+
+**1g — compat suite** (`tests/test_sec_compat.py`,
+`tests/fixtures/legacy/eshu-gateway-625995d.sh`)
+- Pinned `git show 625995d:dashboard/eshu-gateway.sh` with a frozen-copy header;
+  `GatewaySandbox` now accepts an optional `script=` path.
+- Legitimate flows from the pinned gateway (allowlist, blocklist, freeze,
+  session-required, window reject, JIT request) are replayed as raw bytes and
+  all return 2xx. Hostile prefix values that inject `status` or
+  `encoded_command` (including in the JIT body) replay to 400, add no
+  `requests` row, leave `/api/poll` at `ticket: null`, and produce a
+  `gateway_body_rejected` audit row.
+
+**Test-first evidence**
+- Before 1f, **9** of the new tests failed: 6 in
+  `tests/test_sec_duplicate_json.py` (duplicate/nested keys returned 200 and
+  stored rows) and the 3 `test_sec_compat_legacy_*_is_rejected` hostile replays
+  (200 + a stored row). The 6 legitimate legacy flows already passed, as
+  intended.
+- After: 18 new tests pass; `bash scripts/verify.sh` → **1214 passed**
+  (1196 + 18). No installer source changed, so no regeneration was needed.
+
+**Deliberate non-changes**
+- Kept 1e (still rejects malformed but non-duplicate ids).
+- Non-duplicate malformed bodies are not audited here; they keep FastAPI's
+  normal 422 path.
+
 ---
 
 ## Chunk 2 — Command chaining & self-protection bypasses  · slug `chaining` · HIGH
