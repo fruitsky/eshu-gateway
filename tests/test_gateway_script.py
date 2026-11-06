@@ -86,7 +86,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     -X) method="$2"; shift 2 ;;
     -d) data="$2"; shift 2 ;;
-    -H|-m) shift 2 ;;
+    -H|-m|-o|-w) shift 2 ;;
     --connect-timeout) shift 2 ;;
     -s) shift ;;
     -*) shift ;;
@@ -106,6 +106,9 @@ case "$url" in
     ;;
   */api/request_status/*)
     printf '{"status":"%s"}\\n' "$(cat "$STATUS_FILE" 2>/dev/null || echo pending)"
+    ;;
+  */api/approved-windows/execute/*)
+    printf '200'
     ;;
   */api/ticket/*)
     mode=$(cat "$CLAIM_MODE" 2>/dev/null || echo ok)
@@ -181,7 +184,7 @@ printf '%s\\n' "$*" >> "__LOG__"
         assert "/etc/eshu/features.d" not in text
         assert "/var/run/eshu.tickets" not in text
         # The hard self-protection case still names the real path on purpose.
-        assert '*"/etc/eshu-"*' in text
+        assert '"/etc/eshu' in text
         return text
 
     # ── policy/state helpers ────────────────────────────────────────────────
@@ -222,8 +225,24 @@ printf '%s\\n' "$*" >> "__LOG__"
     def tickets(self, *lines: str):
         self._write(self.ticket_file, *lines)
 
+    def command_script(self, name: str, body: str) -> str:
+        """Write an executable test command (no shell metacharacters)."""
+        path = self.root / name
+        path.write_text("#!/bin/bash\n" + body)
+        path.chmod(0o755)
+        return "./" + name
+
     def feature(self, name: str, body: str):
         (self.features / name).write_text(body)
+
+    def approved_windows(self, *lines: str):
+        """Install the real feature script with /etc/eshu-windows.txt relocated."""
+        self._write(self.etc / "eshu-windows.txt", *lines)
+        source = (REPO / "dashboard" / "static" / "features"
+                  / "approved_windows.sh").read_text()
+        source = source.replace("/etc/eshu-windows.txt",
+                                str(self.etc / "eshu-windows.txt"))
+        self.feature("approved_windows.sh", source)
 
     # ── execution/observation ───────────────────────────────────────────────
     def run(self, command: str):
@@ -581,7 +600,9 @@ def test_output_is_sanitized(gw, command, secret):
 
 
 def test_nonzero_exit_is_marked_and_propagated(gw):
-    command = "sh -c 'echo before; exit 3'"
+    # A script, not `sh -c '...; ...'`: the chunk 2 metacharacter gate now
+    # routes the latter to JIT, but exit propagation must still be covered.
+    command = gw.command_script("fails.sh", "echo before\nexit 3\n")
     gw.exact(command)
     proc = gw.run(command)
     assert "before" in proc.stdout
@@ -597,7 +618,8 @@ def test_zero_exit_has_no_sentinel(gw):
 
 
 def test_sanitizer_still_applies_when_the_command_fails(gw):
-    command = "sh -c 'echo API_KEY=supersecret; exit 5'"
+    command = gw.command_script("leaks.sh",
+                                "echo API_KEY=supersecret\nexit 5\n")
     gw.exact(command)
     proc = gw.run(command)
     assert "supersecret" not in proc.stdout
@@ -867,3 +889,91 @@ def test_sec_chunk1_invalid_target_ip_refuses_to_run(tmp_path):
     assert "Invalid gateway TARGET_IP" in proc.stdout
     assert "hello" not in proc.stdout
     assert gw.curl_calls() == []
+
+
+# ── Chunk 2: shell metacharacters, self-protection, prefix windows ─────────
+META_CASES = [
+    ("^uptime", "uptime; id"),
+    ("^uptime", "uptime && id"),
+    ("^uptime", "uptime | sh"),
+    ("^uptime", "uptime `id`"),
+    ("^uptime", "uptime $(id)"),
+    ("^uptime", "uptime > meta.out"),
+    ("^uptime", "uptime\nid"),
+    ("^uptime", "uptime \\ id"),
+    ("^journalctl .*", "journalctl -n 1; id"),
+]
+
+
+@pytest.mark.parametrize("pattern,command", META_CASES)
+def test_sec_chunk2_metacharacter_command_routes_to_jit(gw, pattern, command):
+    gw.regex_white(pattern)
+    gw.jit_status("denied")
+    proc = gw.run(command)
+    assert "[DENIED]" in proc.stdout
+    assert "uid=" not in proc.stdout
+    assert proc.returncode == 1
+    assert gw.wait_for(lambda calls: any(
+        c["url"].endswith("/api/request") for c in calls))
+    assert not any(c["url"].endswith("/api/log")
+                   and c["data"].get("status") == "auto-approved"
+                   for c in gw.curl_calls())
+
+
+def test_sec_chunk2_exact_allowlist_metachar_routes_to_jit(gw):
+    gw.exact("df -h | head")
+    gw.jit_status("denied")
+    proc = gw.run("df -h | head")
+    assert "[DENIED]" in proc.stdout
+    assert proc.returncode == 1
+    assert gw.wait_for(lambda calls: any(
+        c["url"].endswith("/api/request") for c in calls))
+
+
+@pytest.mark.parametrize("command", ["uptime", "df -h"])
+def test_sec_chunk2_plain_allowlist_still_auto_runs(gw, command):
+    gw.exact(command)
+    proc = gw.run(command)
+    assert proc.returncode == 0
+    assert not any(c["url"].endswith("/api/request")
+                   for c in gw.curl_calls())
+    assert gw.wait_for(lambda calls: any(
+        c["url"].endswith("/api/log")
+        and c["data"].get("status") == "auto-approved" for c in calls))
+
+
+SELF_PROTECTION_BYPASSES = [
+    "cat /run/eshu.tickets",
+    "ls /etc/eshu/features.d",
+    "cat /etc//eshu-exact.txt",
+    "cat /etc/./eshu-exact.txt",
+    "cat /etc/esh*",
+    "echo x > /etc/eshu/dashboard_url",
+    "cat /home/eshu/.ssh/authorized_keys",
+]
+
+
+@pytest.mark.parametrize("command", SELF_PROTECTION_BYPASSES)
+def test_sec_chunk2_self_protection_bypass_is_hard_blocked(gw, command):
+    # No allowlist entry: pre-fix these fall through to JIT (and are never
+    # executed), which is enough to prove the hard block missed them.
+    proc = gw.run(command)
+    assert "FATAL" in proc.stdout
+    assert proc.returncode == 1
+    assert gw.wait_for(lambda calls: any(
+        c["url"].endswith("/api/log")
+        and c["data"].get("status") == "blocked" for c in calls))
+
+
+def test_sec_chunk2_prefix_window_metachar_is_rejected(gw):
+    gw.approved_windows("wintok|systemctl status|0|0|0|0|0|prefix")
+    proc = gw.run("ESHU_WINDOW_TOKEN=wintok systemctl status nginx; id")
+    assert "Window rejected" in proc.stdout
+    assert "uid=" not in proc.stdout
+    assert proc.returncode == 1
+    assert gw.wait_for(lambda calls: any(
+        c["url"].endswith("/api/log")
+        and c["data"].get("status") == "window-rejected" for c in calls))
+    assert not any(c["url"].endswith("/api/request")
+                   for c in gw.curl_calls())
+    assert "APPROVED WINDOW MATCH" not in gw.logger_text()
