@@ -171,8 +171,9 @@ after the prefix-parsing loop, before freeze)
 * Apply the same session-id / execution-id regexes from 1a. Invalid → HTTP 400.
   Put the regexes in one place (e.g. `core/utils.py`) and reuse them.
 * Compat: current gateways only forward what the agent sent; a legitimate agent
-  already uses valid ids. Old gateways sending an injected body now get 400,
-  which is the desired outcome.
+  already uses valid ids. ~~Old gateways sending an injected body now get 400.~~
+  **Correction (reviewer, round 1):** this is not sufficient on its own — see
+  1f in "Reviewer round 1" below.
 
 ### Tests to add
 
@@ -289,6 +290,68 @@ Implemented on `sec/chunk-1-json-injection`, cut from `security-hardening@b6445a
   untouched: chunk 2 chaining, `/api/log` body-size limits, and server-side
   `WINDOW_TOKEN_PATTERN` enforcement (the gateway enforces the charset; the
   dashboard only caps the token length).
+
+### Reviewer round 1 — changes requested
+
+Reviewed `4170619`. Gateway changes (1a–1c), `/api/log` lockdown (1d), test
+quality and notes are **approved as-is** — do not rework them. Installers are in
+sync, pre-commit and the touched test files pass, and the reviewer's private
+reproduction of the `/api/log` path is now refused (400, no ticket).
+
+**Gap (planner error, not an implementer error):** 1e cannot detect injection.
+An injected value closes its own JSON string before adding keys, so after
+parsing *every* field (including `execution_id`) looks valid. Against the new
+dashboard, a body built by an **un-updated** gateway that carries a duplicate
+`encoded_command` is still accepted by `/api/request` (200) — the operator
+approves one command and the old gateway runs another. Until every gateway is
+updated, only the dashboard can stop this.
+
+**1f. Reject duplicate JSON keys on gateway-facing endpoints** (dashboard)
+
+* Legitimate gateways never send duplicate keys; a duplicate key is the
+  signature of injection. Reject such bodies with **400** before the handler
+  runs, store nothing, and `record_audit_event('gateway_body_rejected', ip, details='duplicate JSON keys: <key names>')`
+  (key names only — never the values).
+* Scope: at minimum `/api/request`, `/api/log`, `/api/register`,
+  `/api/gateway-heartbeat`, `/api/fleet/commands/{id}/result`,
+  `/api/uninstall-progress`, `/api/window-requests`. Applying it to **all**
+  JSON `POST/PUT/PATCH` under `/api/` is acceptable and preferred if the full
+  suite stays green (the UI never sends duplicates either). Do not apply it to
+  `/mcp`.
+* Implementation guidance (FastAPI 0.139 / Starlette 1.3 here): use an async
+  dependency (or a custom `APIRoute` subclass) that does
+  `json.loads(await request.body(), object_pairs_hook=_no_dupes)` where
+  `_no_dupes` raises on a repeated key at **any nesting level**. FastAPI caches
+  the body on the request, so the handler still receives it. Avoid
+  `@app.middleware("http")` body reads. Non-JSON or empty bodies: leave to
+  the existing validation (do not change their status codes).
+* Keep 1e — it is still useful against malformed values.
+
+**1g. Compat suite `tests/test_sec_compat.py`** (required now, not at rollout)
+
+* Pin the pre-chunk gateway: `git show 625995d:dashboard/eshu-gateway.sh > tests/fixtures/legacy/eshu-gateway-625995d.sh`
+  (commit it; add a header comment saying it is a frozen copy used only for
+  compatibility tests and must never be edited or deployed).
+* Let `GatewaySandbox` take an optional `script` path (default: the live
+  script) so the same harness can run the legacy copy.
+* Tests: run the **legacy** script in the sandbox for the normal flows
+  (exact-allowlist run, blocklist block, freeze, session-required, window
+  reject, JIT request), capture each recorded `-d` body + URL, and replay the
+  **raw bytes** (`client.post(url_path, content=raw, headers=…)`, not `json=`)
+  against the new dashboard with a gateway token for `10.0.0.1`. Every
+  legitimate body → 2xx.
+* Same replay with hostile prefixes run through the legacy script (a value that
+  adds an `encoded_command`, and one that adds a `status`) → **400** and no new
+  `requests` row, and `GET /api/poll/10.0.0.1` → `ticket` is `null`.
+* Mark the legacy-script tests clearly (e.g. `test_sec_compat_legacy_*`).
+
+**Acceptance for round 2**
+
+- [ ] 1g's hostile-replay test fails on `4170619` and passes after 1f
+      (say so in the notes).
+- [ ] `bash scripts/verify.sh` green; count ≥ 1196 + new tests.
+- [ ] Push to the **same** branch `sec/chunk-1-json-injection`; add a short
+      "Round 2 implementer notes" subsection below this one.
 
 ---
 
@@ -611,7 +674,7 @@ dashboard LXC or gateways. The reviewer runs it; the implementer does not deploy
 
 | Chunk | Slug | Severity | Status | Branch | Reviewer notes |
 |---|---|---|---|---|---|
-| 1 | json-injection | Critical | **Ready** | `sec/chunk-1-json-injection` | |
+| 1 | json-injection | Critical | **Changes requested (round 1)** | `sec/chunk-1-json-injection` | 1a–1d approved; add 1f + 1g |
 | 2 | chaining | High | Ready (after 1) | `sec/chunk-2-chaining` | |
 | 3 | tmp-races | High | Ready (after 2) | `sec/chunk-3-tmp-races` | |
 | 4 | web-hardening | Medium | Ready (after 3) | `sec/chunk-4-web-hardening` | |
