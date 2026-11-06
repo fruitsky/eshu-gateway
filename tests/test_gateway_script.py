@@ -47,9 +47,11 @@ pytestmark = pytest.mark.skipif(
 class GatewaySandbox:
     """A throwaway installation of the real gateway script."""
 
-    def __init__(self, root: Path, target_ip: str = "10.0.0.1"):
+    def __init__(self, root: Path, target_ip: str = "10.0.0.1",
+                 script: Path = SCRIPT):
         self.root = Path(root)
         self.target_ip = target_ip
+        self.source_script = Path(script)
         if " " in str(self.root):
             pytest.skip("temporary path contains a space; the script is not quoted")
         self.etc = self.root / "etc"
@@ -140,7 +142,7 @@ printf '%s\\n' "$*" >> "__LOG__"
         path.chmod(0o755)
 
     def _transformed(self) -> str:
-        text = SCRIPT.read_text()
+        text = self.source_script.read_text()
 
         def swap(old, new, expected=None):
             assert old in text, "the gateway script no longer contains %r" % old
