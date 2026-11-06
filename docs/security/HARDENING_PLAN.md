@@ -732,7 +732,83 @@ Gateways/agents unaffected (exempt by design). Browser UI requires the new
 
 ### Implementer notes
 
-_(fill in)_
+Implemented on `sec/chunk-4-web-hardening`, cut from the tip of
+`sec/chunk-3-tmp-races` (`114cb6f`).
+
+**XSS (`dashboard/static/app.js`)**
+- Added `escJs(v) = esc(JSON.stringify(v))`, plus `idJs`/`idText` numeric
+  coercers. `esc()` alone is not safe inside a single-quoted inline handler
+  because the HTML parser decodes entities back before V8 compiles it.
+- A full audit of all **130 `innerHTML` sites** found **70 findings / 76
+  interpolations / 18 function groups**; all are fixed. The 18 groups:
+  `openContextPanel`, `renderSeg`, `fetchWindowsTable`, `queueModel`,
+  `renderQueue`, `smSshDetailCard`, `openSessionModal`, `renderJitItem`,
+  `renderTable`, `renderSessionOverrideBanner`, `renderFleetRun`,
+  `fetchPolicyChanges`, `renderAuditLog`, `renderRhythm`, `fetchVersion`,
+  `fetchAgentTokens`, `renderTools`, `renderFleetTxRail`.
+- The highest-risk sinks were the feature-flag key (`renderSeg`), request
+  status text (`renderTable`), chart date labels (`renderRhythm`) and
+  `/api/version` (`fetchVersion`). The other 72 were ids (integers in today's
+  schema) now passed through `Number()`/`idJs`; that is defence in depth.
+- Also hardened earlier in the pass: gateway ip/hostname handlers
+  (`renderDevGatewayPills`, `onDevGatewayInput` via `data-dev-host` + delegated
+  listener, window gateway menus, gateways table, stats nodes), session ids
+  (`sessionRow`, `renderSessionCard`), integration names
+  (`renderIntegrationList`), fleet `gateway_ip` handlers, window tokens,
+  policy old/new content, deploy hashes/version, and generated regexes.
+- No `insertAdjacentHTML`/`outerHTML`/`document.write`/`srcdoc` sinks exist.
+
+**CSRF**
+- New `csrf_middleware`: for `/api/` POST/PUT/PATCH/DELETE authenticated by a
+  valid `eshu_session` cookie, it requires `Origin` equal to this request's
+  own scheme+host (honouring `X-Forwarded-Proto`/`Host`) or `X-Eshu-CSRF: 1`;
+  otherwise 403. `/api/auth/login` is always checked (login CSRF).
+- Requests with no session cookie are left to the existing auth gates, so
+  gateway tokens, enrollment tokens and agent bearer tokens are unaffected.
+- `app.js` now installs one global `fetch` wrapper that adds `X-Eshu-CSRF: 1`
+  to every state-changing call, including raw `fetch()` sites; `index.html`
+  cache-busts `app.js` to `?v=ui12`.
+
+**CSP / headers**
+- `security_headers_middleware` sets `Content-Security-Policy` (exactly the
+  policy in the chunk), `X-Content-Type-Options: nosniff`,
+  `Referrer-Policy: same-origin` and `X-Frame-Options: DENY` on HTML and
+  `/api/*` responses; `/mcp` is skipped. `index.html` has no external origins.
+- Follow-up (as the plan allows): `script-src` still includes
+  `'unsafe-inline'` because inline handlers remain; moving them to delegated
+  listeners lets the CSP drop it.
+
+**Server-side validation**
+- `_validate_gateway_identity` uses `ipaddress.ip_address` and
+  `^[A-Za-z0-9._-]{1,253}$` on `/api/register` and `/api/gateway-heartbeat`,
+  before auth, returning 400. Real gateways send `hostname -I`/`hostname`, so
+  compatible.
+
+**Test-first evidence**
+- `tests/test_sec_web_hardening.py` has 12 tests. Against the chunk-3 tip
+  (`114cb6f`) **7 failed** (hostname/ip validation, CSRF header/foreign-Origin,
+  login CSRF, CSP headers); the 5 positive/no-change tests passed. All 12 pass
+  after the fix.
+- `bash scripts/verify.sh` → **1287 passed** (1275 + 12).
+  `node --check dashboard/static/app.js` and `scripts/ui_check.py` pass. No
+  installer source changed, so no regeneration was needed.
+
+**Existing tests changed**
+- `tests/conftest.py`'s `auth_client` now sends `X-Eshu-CSRF: 1` (one place,
+  as required) and the four manual login/logout calls in `test_auth.py`,
+  `test_api.py`, `test_policies.py` add the header.
+
+**Manual smoke test**
+- **Not run in this unattended environment** (no browser and no deployment).
+  The reviewer should verify login, approve a JIT, run a fleet command and
+  freeze/unfreeze in the UI with the new `app.js`; the API-level equivalents
+  (session writes with the header/Origin, gateway-token exemption, CSP headers)
+  are covered by the tests above.
+
+**Compatibility**
+- Gateways/agents are unaffected (exempt by design). The browser UI requires
+  the new `app.js`; the `?v=ui12` bump makes browsers pick it up. No protocol
+  or response-shape change.
 
 ---
 
