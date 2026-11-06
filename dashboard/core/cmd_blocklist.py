@@ -10,10 +10,13 @@ isHardcoreBlocked(). Two layers:
   blocklist file so a human can relax them from the dashboard.
 """
 
-# Non-editable — guard the gateway install itself
+# Non-editable — guard the gateway install itself. Paths are normalised
+# (repeated '/' collapsed, '/./' removed) before matching, mirroring the
+# gateway's stage-1 blocklist.
 SELF_PROTECTION_PATTERNS = [
-    '/usr/local/bin/eshu-', '/etc/eshu-', '/var/run/eshu.',
-    'eshu.db', 'eshu.db-journal', 'eshu.db-wal',
+    '/usr/local/bin/eshu-', '/etc/eshu', '/var/run/eshu', '/run/eshu',
+    'eshu.db', 'eshu.tickets', 'eshu-session-key', 'features.d',
+    'sudoers.d/eshu', '.ssh/authorized_keys',
 ]
 
 # Non-editable — anti-tamper command substitution evasion
@@ -44,15 +47,41 @@ CORE_COMMAND_PATTERNS = [
 
 HARD_PATTERNS = SELF_PROTECTION_PATTERNS + EVASION_PATTERNS
 
+# Chunk 2a: metacharacter commands never auto-approve; they go to JIT.
+SHELL_METACHARACTERS = (';', '&', '|', '`', '$(', '>', '<', '\n', '\r', '\\')
+
+GLOB_CHARACTERS = ('*', '?', '[')
+
+
+def normalize_command_paths(cmd: str) -> str:
+    """Collapse repeated '/' and remove '/./' segments before hard matching."""
+    value = cmd or ''
+    while '//' in value:
+        value = value.replace('//', '/')
+    while '/./' in value:
+        value = value.replace('/./', '/')
+    return value
+
+
+def has_shell_metacharacters(cmd: str) -> bool:
+    """True when the command contains any character the auto-run gate rejects."""
+    value = cmd or ''
+    return any(token in value for token in SHELL_METACHARACTERS)
+
 
 def hard_block_match(cmd: str):
     """Return the matched pattern (or None) if the command hits the hardcoded
-    (non-editable) blocklist: self-protection + evasion only."""
+    (non-editable) blocklist: self-protection + evasion only. Mirrors
+    dashboard/eshu-gateway.sh stage 1, including path normalisation and the
+    glob-character + 'esh' rule."""
     if not cmd:
         return None
+    normalized = normalize_command_paths(cmd)
     for pattern in HARD_PATTERNS:
-        if pattern in cmd:
+        if pattern in normalized:
             return pattern
+    if any(ch in normalized for ch in GLOB_CHARACTERS) and 'esh' in normalized:
+        return 'glob+esh'
     return None
 
 

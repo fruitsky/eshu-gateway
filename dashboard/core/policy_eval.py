@@ -13,7 +13,11 @@ Matching order mirrors the gateway stages:
 """
 import re
 
-from core.cmd_blocklist import hard_block_match, blocklist_substring_match
+from core.cmd_blocklist import (
+    hard_block_match,
+    blocklist_substring_match,
+    has_shell_metacharacters,
+)
 
 
 def _lines(text):
@@ -45,6 +49,18 @@ def evaluate_policy_verdict(command, exact_whitelist, regex_whitelist, regex_bla
                 "matched_pattern": pattern,
                 "reason": f"Blocklist match (pattern: {pattern})",
             }
+
+    # Chunk 2a parity: a metacharacter command never auto-approves. The hard
+    # block and the editable blocklist above still win; everything else goes to
+    # JIT, exactly as the gateway's metacharacter gate does.
+    if has_shell_metacharacters(command):
+        return {
+            "action": "jit",
+            "tier": None,
+            "detail_type": "shell_meta",
+            "matched_pattern": None,
+            "reason": "Shell metacharacters require JIT approval",
+        }
 
     exact_lines = _lines(exact_whitelist)
     if command in exact_lines:

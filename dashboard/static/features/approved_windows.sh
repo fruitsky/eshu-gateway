@@ -61,10 +61,16 @@ if [ -n "${ESHU_WINDOW_TOKEN:-}" ] && [ -f /etc/eshu-windows.txt ] && [ -s /etc/
     # Command matching
     match_ok=0
     if [ "$win_mtype" = "prefix" ]; then
-      # Prefix match: command starts with win_cmd
-      case "$cmd" in
-        "${win_cmd}"*) match_ok=1 ;;
-      esac
+      # Prefix match: command starts with win_cmd. A metacharacter command must
+      # never be approved by a prefix window (chunk 2a) — it falls through to
+      # the reject below. Exact windows still require byte equality and may run.
+      if [ "${HAS_META:-0}" = "1" ]; then
+        match_ok=0
+      else
+        case "$cmd" in
+          "${win_cmd}"*) match_ok=1 ;;
+        esac
+      fi
     elif [ "$win_mtype" = "exact" ]; then
       # Exact match (also try multi-command JSON array)
       if [ "$cmd" = "$win_cmd" ]; then

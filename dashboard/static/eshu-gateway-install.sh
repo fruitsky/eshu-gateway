@@ -565,14 +565,46 @@ fi
 #    shipped by default in the synced blocklist (/etc/eshu-rblack.txt) so a
 #    human can relax them from the dashboard. Only the patterns below protect
 #    Eshu itself and cannot be withdrawn.
+#
+#    This is defence in depth, NOT a sandbox: commands run as root, and the
+#    real boundary is stage 2a (metacharacters -> JIT) plus human approval.
+#    Paths are normalised first so /etc//eshu and /etc/./eshu cannot slip past;
+#    the glob+esh rule closes wildcard variants.
 # ============================================================
-case "$cmd" in
-    *"/usr/local/bin/eshu-"*|*"/etc/eshu-"*|*"/var/run/eshu."*|*"eshu.db"*|*"eshu.db-journal"*|*"eshu.db-wal"*)
-        logger -t eshu-gateway "HARDCODED BLOCK: Eshu self-access attempt: $cmd"
-        log_auto_approve "$cmd" "blocked"
-        echo "[LOCKED] FATAL: Access to Eshu Gateway files is permanently blocked. [Gateway $GATEWAY_VERSION]"
-        exit 1
+normalize_paths() {
+  local value="$1"
+  while [[ "$value" == *"//"* ]]; do
+    value="${value//\/\//\/}"
+  done
+  while [[ "$value" == *"/./"* ]]; do
+    value="${value//\/.\//\/}"
+  done
+  printf '%s' "$value"
+}
+
+normalized_cmd=$(normalize_paths "$cmd")
+self_access=0
+case "$normalized_cmd" in
+    *"/usr/local/bin/eshu-"*|*"/etc/eshu"*|*"/var/run/eshu"*|*"/run/eshu"*|*"eshu.db"*|*"eshu.tickets"*|*"eshu-session-key"*|*"features.d"*|*"sudoers.d/eshu"*|*".ssh/authorized_keys"*)
+        self_access=1
         ;;
+esac
+if [ "$self_access" = "0" ]; then
+    case "$normalized_cmd" in
+        *'*'*|*'?'*|*'['*)
+            case "$normalized_cmd" in
+                *esh*) self_access=1 ;;
+            esac
+            ;;
+    esac
+fi
+if [ "$self_access" = "1" ]; then
+    logger -t eshu-gateway "HARDCODED BLOCK: Eshu self-access attempt: $cmd"
+    log_auto_approve "$cmd" "blocked"
+    echo "[LOCKED] FATAL: Access to Eshu Gateway files is permanently blocked. [Gateway $GATEWAY_VERSION]"
+    exit 1
+fi
+case "$cmd" in
     *'$(which '*|*'`which '*)
         logger -t eshu-gateway "HARDCODED BLOCK: Command substitution evasion detected: $cmd"
         log_auto_approve "$cmd" "blocked"
@@ -668,6 +700,23 @@ if [ "$ENCODED_EXEC" = "1" ]; then
 fi
 
 # ============================================================
+# 2.7 SHELL METACHARACTER GATE (never auto-approve)
+# ============================================================
+# A regex/prefix allowlist that is not fully anchored would otherwise approve
+# "allowed-cmd; anything". Any metacharacter means the literal command cannot be
+# what the policy author approved, so all auto-run paths (exact, regex and
+# prefix windows) are skipped; exact windows still require byte equality. The
+# dashboard mirrors this in core/policy_eval.py.
+HAS_META="0"
+case "$cmd" in
+  *';'*|*'&'*|*'|'*|*'`'*|*'$('*|*'>'*|*'<'*|*$'\n'*|*$'\r'*|*\\*)
+    HAS_META="1" ;;
+esac
+if [ "$HAS_META" = "1" ]; then
+  logger -t eshu-gateway "META: routing to JIT for: $cmd"
+fi
+
+# ============================================================
 # 3. EXACT MATCH WHITELIST
 # ============================================================
 # Zero-Trust gateways skip auto-run — allowlisted commands route to JIT instead.
@@ -678,7 +727,7 @@ if [ -f /etc/eshu-zero-trust ] && [ "$(cat /etc/eshu-zero-trust 2>/dev/null || e
   ZT_ACTIVE="1"
 fi
 
-if [ "$ENCODED_EXEC" = "0" ] && [ "$ZT_ACTIVE" != "1" ] && [ -f /etc/eshu-exact.txt ] && grep -qFx "$cmd" /etc/eshu-exact.txt; then
+if [ "$ENCODED_EXEC" = "0" ] && [ "$HAS_META" = "0" ] && [ "$ZT_ACTIVE" != "1" ] && [ -f /etc/eshu-exact.txt ] && grep -qFx "$cmd" /etc/eshu-exact.txt; then
   log_auto_approve "$cmd" "auto-approved"
   run_sanitized bash -c "$cmd"
 fi
@@ -690,7 +739,7 @@ if [ -f /etc/eshu-rwhite.txt ] && [ -s /etc/eshu-rwhite.txt ]; then
   while IFS= read -r pattern || [ -n "${pattern:-}" ]; do
     [ -z "${pattern:-}" ] && continue
     [[ "${pattern:-}" =~ ^[[:space:]]*# ]] && continue
-    if [ "$ENCODED_EXEC" = "0" ] && [ "$ZT_ACTIVE" != "1" ] && [[ "$cmd" =~ $pattern ]]; then
+    if [ "$ENCODED_EXEC" = "0" ] && [ "$HAS_META" = "0" ] && [ "$ZT_ACTIVE" != "1" ] && [[ "$cmd" =~ $pattern ]]; then
       log_auto_approve "$cmd" "auto-approved"
       run_sanitized bash -c "$cmd"
     fi
