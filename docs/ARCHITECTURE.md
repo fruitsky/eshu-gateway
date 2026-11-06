@@ -81,11 +81,11 @@ Every command passes through these stages in order:
 | Stage | Rule Set | Match → Action |
 |:-----:|----------|---------------|
 | **0** | **Emergency Freeze** (global circuit breaker) — when the operator freezes the fleet, every gateway rejects all commands until unfrozen | **FATAL — rejected while frozen** |
-| **1** | Hardcoded core blocklist — **self-protection** (`/usr/local/bin/eshu-*`, `/etc/eshu-*`, `/var/run/eshu.*`, `eshu.db*`) and **evasion** (`$(which …)`, `` `which …` ``) | **FATAL — blocked permanently** |
+| **1** | Hardcoded core blocklist — **self-protection** (`/usr/local/bin/eshu-*`, `/etc/eshu*`, `/var/run/eshu*`, `/run/eshu*`, `eshu.db*`, `eshu.tickets`, `eshu-session-key`, `features.d`, `sudoers.d/eshu`, `.ssh/authorized_keys`) and **evasion** (`$(which …)`, `` `which …` ``). Paths are normalised (repeated `/`, `/./`) and globchars near `esh` are blocked. **Defence in depth, not a sandbox.** | **FATAL — blocked permanently** |
 | **2** | Dashboard-managed blacklist (`/etc/eshu-rblack.txt`) — includes the shipped command-safety patterns (`rm -rf`, `mkfs`, `dd`, `iptables -F`, power control) by default, which the operator can relax | **Blocked** |
-| **3** | Exact whitelist (`/etc/eshu-exact.txt`) | **Auto-approved** |
-| **4** | Regex whitelist (`/etc/eshu-rwhite.txt`) | **Auto-approved** |
-| **4.5** | Feature scripts (`/etc/eshu/features.d/*.sh`) — loaded by poller when feature flags are enabled | **Auto-approved by window token** |
+| **3** | Exact whitelist (`/etc/eshu-exact.txt`) — skipped when the command contains shell metacharacters (stage 2a routes those to JIT) | **Auto-approved** |
+| **4** | Regex whitelist (`/etc/eshu-rwhite.txt`) — skipped when the command contains shell metacharacters (stage 2a routes those to JIT) | **Auto-approved** |
+| **4.5** | Feature scripts (`/etc/eshu/features.d/*.sh`) — loaded by poller when feature flags are enabled. Prefix windows are skipped for metacharacter commands; exact windows still require byte equality | **Auto-approved by window token** |
 | **5** | Claim-and-burn lockbox (`/var/run/eshu.tickets`) | **Execute & consume ticket** |
 | **6** | JIT human approval (90s auto-poll) | **Execute on approval** |
 
@@ -95,6 +95,11 @@ be relaxed from the dashboard**, even by a compromised dashboard. The command-sa
 patterns (`rm -rf`, `mkfs`, `dd`, firewall flush, power control) live in the
 dashboard-managed blacklist instead, seeded by default but removable by the
 operator (with a confirmation + audit trail).
+
+Stage 1 is **defence in depth, not a sandbox**: approved commands run as root.
+The real boundary is the stage-2a metacharacter gate (anything containing
+`; & | ` $( > <` newline/CR/backslash is forced to JIT) plus human approval for
+every command that is not byte-identical to an allowlisted literal.
 
 ## Tech Stack
 

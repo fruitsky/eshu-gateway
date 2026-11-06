@@ -481,7 +481,69 @@ Gateway-only behaviour change; dashboard parity is display-only. No protocol cha
 
 ### Implementer notes
 
-_(fill in)_
+Implemented on `sec/chunk-2-chaining`, cut from the tip of
+`sec/chunk-1-json-injection` (`4fab82e`) as requested for tonight's stack.
+
+**2a — metacharacter gate** (`dashboard/eshu-gateway.sh`,
+`dashboard/static/features/approved_windows.sh`)
+- Before stage 3 the gateway sets `HAS_META=1` for `; & | ` $( > <`, newline,
+  CR or backslash, logs `META: routing to JIT`, and skips the exact, regex and
+  **prefix** windows. Exact windows still require byte equality and may run.
+  There is no escape hatch in this chunk.
+- `approved_windows.sh` checks `${HAS_META:-0}` in the prefix branch and falls
+  through to the existing `command mismatch` reject, so a prefix window can no
+  longer approve `systemctl status nginx; id`.
+
+**2b — self-protection** (`dashboard/eshu-gateway.sh`,
+`docs/ARCHITECTURE.md`)
+- Stage 1 now normalises repeated `/` and `/./` before matching, blocks
+  `/etc/eshu*`, `/run/eshu*`, `/var/run/eshu*`, `eshu.tickets`,
+  `eshu-session-key`, `features.d`, `sudoers.d/eshu` and
+  `.ssh/authorized_keys`, and refuses any glob character near `esh`. The
+  `$(which` / `` `which `` evasion rule is unchanged.
+- The stage-1 comment and the architecture table now say explicitly that stage 1
+  is **defence in depth, not a sandbox**; commands run as root and the real
+  boundary is 2a + human approval.
+
+**2c — dashboard parity** (`dashboard/core/cmd_blocklist.py`,
+`dashboard/core/policy_eval.py`)
+- `hard_block_match` uses the same normalisation/tokens/glob+`esh` rule, and
+  `policy_eval` returns `jit` (detail_type `shell_meta`) for any metacharacter
+  command before the allowlists, so `/api/policies/test` and the preview agree
+  with the gateway.
+- `HARD_PATTERNS` is still the single list exposed to the UI; the parity test
+  asserts the same command list the gateway tests use.
+
+**Test-first evidence**
+- Before the fix, **35** new assertions failed: 17 in
+  `tests/test_gateway_script.py` (9 metacharacter bypasses, exact-allowlist
+  bypass, 7 self-protection bypasses, prefix-window bypass) and 18 in
+  `tests/test_sec_policy_bypass.py` (hard-block parity/normalisation and
+  metachar verdicts).
+- After: `bash scripts/verify.sh` → **1263 passed** (1214 + 49 new tests:
+  20 gateway, 29 parity). Installers regenerated with
+  `cd dashboard && python3 gen_installer.py`; both generated files are
+  identical. `dashboard/static/dev/` was restored to HEAD after the golden tests
+  dirtied it.
+
+**Existing tests changed (intent preserved)**
+- `test_nonzero_exit_is_marked_and_propagated` and
+  `test_sanitizer_still_applies_when_the_command_fails` used
+  `sh -c 'echo …; exit N'`, which 2a now correctly routes to JIT. They now run
+  an executable helper script in the sandbox (`./fails.sh`, `./leaks.sh`) with
+  no metacharacters, so exit propagation and output sanitisation are still
+  covered.
+- The sandbox `curl` stub now handles `-o`/`-w` and
+  `/api/approved-windows/execute/*` (returns 200), and has an
+  `approved_windows()` helper that installs the real feature script with
+  `/etc/eshu-windows.txt` relocated. The relocation assertion accepts both the
+  live (`/etc/eshu`) and frozen pre-chunk (`/etc/eshu-`) hard-block token.
+
+**Behaviour change / compatibility**
+- Gateway-only; no protocol change. Dashboard parity is display-only.
+- As required, operators who allowlisted a pipeline (e.g. `ps aux | grep x`)
+  now get JIT; this is recorded in `CHANGELOG.md` under Security as a
+  behaviour change. Exact windows remain usable for byte-identical commands.
 
 ---
 
