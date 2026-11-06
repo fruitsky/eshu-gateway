@@ -317,8 +317,9 @@ if id -u hermes-diag &>/dev/null || [ -f /usr/local/bin/hermes-diag.sh ] || [ -f
   rm -f /etc/hermes-exact.txt /etc/hermes-rwhite.txt /etc/hermes-rblack.txt
   rm -f /var/run/hermes.tickets /var/run/hermes.last_trigger
   if [ -f /root/.ssh/authorized_keys ]; then
-    grep -v "hermes-diag" /root/.ssh/authorized_keys > /tmp/eshu-ak-clean.tmp 2>/dev/null || true
-    mv -f /tmp/eshu-ak-clean.tmp /root/.ssh/authorized_keys 2>/dev/null || true
+    AK_CLEAN=$(mktemp)
+    grep -v "hermes-diag" /root/.ssh/authorized_keys > "$AK_CLEAN" 2>/dev/null || true
+    mv -f "$AK_CLEAN" /root/.ssh/authorized_keys 2>/dev/null || true
   fi
   echo "✅  Legacy Hermes cleaned. Proceeding with Eshu install..."
 fi
@@ -431,14 +432,19 @@ GWEOF
   # global replace could corrupt other lines that reference GATEWAY_TOKEN.
   sed -i "s|^GATEWAY_TOKEN=\"__GATEWAY_TOKEN__\"|GATEWAY_TOKEN=\"${GATEWAY_TOKEN:-}\"|" "$GATEWAY"
 
-  # Validate syntax before deploying — prevent broken templates from reaching gateways
-  if ! bash -n "$GATEWAY" 2>/tmp/eshu-syntax-error.log; then
+  # Validate syntax before deploying — prevent broken templates from reaching
+  # gateways. mktemp (not a fixed /tmp name) so another local user cannot
+  # pre-create or redirect the log.
+  SYNTAX_LOG=$(mktemp)
+  if ! bash -n "$GATEWAY" 2>"$SYNTAX_LOG"; then
     echo "FATAL: Gateway script has syntax errors. Restoring previous script."
     echo "Syntax check output:"
-    cat /tmp/eshu-syntax-error.log
+    cat "$SYNTAX_LOG"
+    rm -f "$SYNTAX_LOG"
     mv -f "${GATEWAY}.bak" "$GATEWAY"
     exit 1
   fi
+  rm -f "$SYNTAX_LOG"
   rm -f "${GATEWAY}.bak"
   chown root:root "$GATEWAY"; chmod 755 "$GATEWAY"
 }

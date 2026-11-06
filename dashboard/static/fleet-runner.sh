@@ -12,7 +12,12 @@ TARGET_IP="$3"
 CMD_ID="$4"
 TIMEOUT="${5:-180}"
 CMD_FILE="$6"
-OUT_FILE="/tmp/eshu-fleet-out-$CMD_ID.txt"
+OUT_FILE="${7:-}"
+if [ -z "$OUT_FILE" ]; then
+  # Older poller (six args) compatibility: a random sibling of the command
+  # file, never a fixed path in a world-writable directory.
+  OUT_FILE=$(mktemp "${CMD_FILE}.out.XXXXXX") || OUT_FILE="/dev/null"
+fi
 
 post_result() {
   local status="$1" exit_code="$2" out_file="$3"
