@@ -111,6 +111,19 @@ class TestCompleteUninstall:
         events = get_audit_log()
         assert any(e["event_type"] == "uninstalled" for e in events)
 
+    def test_audit_event_keeps_hostname(self, auth_client):
+        # The hostname must be read before the row is deleted, otherwise the
+        # audit entry records "unknown".
+        _register(auth_client)
+        auth_client.post("/api/uninstall-progress", json={
+            "ip": "10.0.0.1",
+            "step": "complete",
+            "message": ""
+        })
+        from db.audit import get_audit_log
+        event = next(e for e in get_audit_log() if e["event_type"] == "uninstalled")
+        assert event["hostname"] == "uninstall-test"
+
 
 class TestForceDeregister:
 
@@ -125,6 +138,16 @@ class TestForceDeregister:
         assert r.status_code == 200
         assert r.json()["status"] == "ok"
         assert r.json()["ip"] == "10.0.0.1"
+
+    def test_clears_stale_uninstall_progress(self, auth_client, gateway_headers):
+        # A gateway that deregistered before its final "complete" report (the
+        # old installer ordering) left a progress row behind, which made the
+        # dashboard modal poll forever. Deleting the row must clear it.
+        from db.gateways import set_uninstall_progress, get_uninstall_progress
+        set_uninstall_progress("10.0.0.1", "cleaning_legacy", "stale")
+        r = auth_client.delete("/api/gateways/10.0.0.1", headers=gateway_headers)
+        assert r.status_code == 200
+        assert get_uninstall_progress("10.0.0.1") is None
 
     def test_404_for_unknown_gateway(self, auth_client):
         r = auth_client.delete("/api/gateways/99.99.99.99")

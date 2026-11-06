@@ -195,14 +195,17 @@ if [ "$UNINSTALL" = "yes" ]; then
   _report "cleaning_legacy" "Legacy Hermes files removed"
   sleep 1
 
-  # Self-deregister from dashboard
+  # Report completion BEFORE deregistering. The `complete` step is what removes
+  # the gateway row and clears the progress record server-side. Sending an
+  # explicit DELETE first would invalidate our gateway token, so the following
+  # "deregistering"/"complete" posts would 401 and the dashboard modal would
+  # poll forever at the last step.
   if [ -n "$DASHBOARD_URL" ]; then
     echo "Deregistering from dashboard..."
-    curl -m 3 -s -X DELETE "$DASHBOARD_URL/api/gateways/$TARGET_IP" -H "X-Gateway-Token: ${GATEWAY_TOKEN:-}" >/dev/null 2>&1 || true
-    _report "deregistering" "Dashboard deregistration sent"
+    _report "deregistering" "Finalizing dashboard deregistration"
+    sleep 1
   fi
-  sleep 1
-  
+
   _report "complete" "All Eshu Gateway components removed"
   
   echo ""

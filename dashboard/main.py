@@ -1522,11 +1522,13 @@ def uninstall_progress(payload: UninstallProgressPayload, request: Request):
     _require_gateway(request, payload.ip)
     set_uninstall_progress(payload.ip, payload.step, payload.message)
     if payload.step == "complete":
+        # Resolve the hostname before de-registering — after the row is gone
+        # there is nothing left to look up and the audit entry says "unknown".
+        target = next((g for g in get_gateways() if g['ip'] == payload.ip), None)
+        hostname = target.get('hostname', 'unknown') if target else 'unknown'
         clear_trigger_uninstall(payload.ip)
         clear_uninstall_progress(payload.ip)
         deregister_gateway(payload.ip)
-        target = next((g for g in get_gateways() if g['ip'] == payload.ip), None)
-        hostname = target.get('hostname', 'unknown') if target else 'unknown'
         record_audit_event("uninstalled", payload.ip, hostname, "Gateway uninstalled via remote trigger")
         if payload.ip in _disconnected_gateways:
             _disconnected_gateways.discard(payload.ip)
@@ -1582,6 +1584,7 @@ def remove_gateway(ip: str, request: Request):
     deleted = deregister_gateway(ip)
     if deleted:
         clear_trigger_uninstall(ip)
+        clear_uninstall_progress(ip)
         if ip in _disconnected_gateways:
             _disconnected_gateways.discard(ip)
         record_audit_event("uninstalled", ip, hostname, "Gateway uninstalled and deregistered")

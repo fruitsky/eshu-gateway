@@ -5470,8 +5470,8 @@ function closeUninstallModal() {
 }
 
 async function pollUninstallProgress(ip) {
-  const STEPS = ['started','stopping_poller','removing_binaries','removing_sudoers','removing_policies','removing_runtime','removing_user','cleaning_keys','deregistering','complete'];
-  const STEP_LABELS = { started:'Initiated', stopping_poller:'Stopping poller', removing_binaries:'Removing binaries', removing_sudoers:'Removing sudoers', removing_policies:'Removing policies', removing_runtime:'Removing runtime', removing_user:'Removing user', cleaning_keys:'Cleaning SSH', deregistering:'Deregistering', complete:'Complete' };
+  const STEPS = ['started','stopping_poller','removing_binaries','removing_sudoers','removing_policies','removing_runtime','removing_logger','removing_user','cleaning_keys','cleaning_legacy','deregistering','complete'];
+  const STEP_LABELS = { started:'Initiated', stopping_poller:'Stopping poller', removing_binaries:'Removing binaries', removing_sudoers:'Removing sudoers', removing_policies:'Removing policies', removing_runtime:'Removing runtime', removing_logger:'Removing logger', removing_user:'Removing user', cleaning_keys:'Cleaning SSH', cleaning_legacy:'Cleaning legacy Hermes', deregistering:'Deregistering', complete:'Complete' };
   let currentStep = -1;
   let stopped = false;
   const finish = function() {
@@ -5497,6 +5497,11 @@ async function pollUninstallProgress(ip) {
         var note = document.getElementById('uninstall-modal-note');
         if (stepIdx === 0 && note && !note.classList.contains('hidden')) note.classList.add('hidden');
         if (step === 'complete') { finish(); return; }
+        // The gateway deregisters itself as its final action, so a missing
+        // row means the uninstall is done even if the last progress post was
+        // lost (or the server cleared the "complete" record already).
+        var gone = !(_gatewaysData || []).some(function(g) { return g.ip === ip; });
+        if (gone) { finish(); return; }
         var pct = currentStep < 0 ? 0 : Math.min(100, Math.round((currentStep / (STEPS.length - 1)) * 100));
         document.getElementById('uninstall-progress-fill').style.width = pct + '%';
         document.getElementById('uninstall-modal-step').textContent = STEP_LABELS[step] || step;

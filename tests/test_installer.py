@@ -55,6 +55,20 @@ def test_template_has_no_global_token_sed():
     assert 's|__GATEWAY_TOKEN__|${GATEWAY_TOKEN:-}|g' not in template
 
 
+def test_uninstall_completes_before_deregistering():
+    template = _read("dashboard/eshu-installer-template.sh")
+    m = re.search(r'# Handle --uninstall immediately before any other logic.*?\n  exit 0\nfi',
+                  template, re.S)
+    assert m, "uninstall branch not found"
+    branch = m.group(0)
+    # The uninstaller must not DELETE its own gateway row before the final
+    # progress reports: the DELETE invalidates the gateway token, so the
+    # "deregistering"/"complete" posts would 401 and the dashboard modal would
+    # poll forever at the last step. The "complete" endpoint deregisters.
+    assert 'DELETE "$DASHBOARD_URL/api/gateways/' not in branch
+    assert branch.index('_report "deregistering"') < branch.index('_report "complete"')
+
+
 def test_template_no_longer_requests_or_installs_approver_key():
     template = _read("dashboard/eshu-installer-template.sh")
     # The legacy approver key (operator root SSH key bypassing the gateway) was
