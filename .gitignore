@@ -2,6 +2,7 @@
 __pycache__/
 *.pyc
 venv/
+.venv/
 
 # SQLite database (runtime data, not source)
 *.db
@@ -29,7 +30,7 @@ dashboard/static/eshu-gateway-install-backup.sh
 
 # OS
 .DS_Store
-Thumbs.dbtests/.venv/
+Thumbs.db
 *.bak
 
 # SQLite write-ahead log sidecars (runtime data)
