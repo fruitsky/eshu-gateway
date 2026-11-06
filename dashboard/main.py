@@ -115,6 +115,7 @@ from core.gateway_watch import (
     UPDATE_ACTIVE_WINDOW,
 )
 from core.utils import DASHBOARD_VERSION, decode_cmd, _resolve_gateway_token, _hash_password, _verify_password, valid_gateway_metadata
+from core.body_guard import NoDuplicateJSONKeysRoute
 from core.integration_auth import resolve_agent, resolve_agent_optional, extract_agent_token
 from core.secret_scrub import scrub_payload, scrub_string
 from core.integration_proxy import execute_integration_call, execute_generic_call, generic_write_envelope, ProxyError, merge_response_hint, ALLOWED_AUTH_TYPES, PREVIEW_CHARS, safe_request_summary
@@ -187,6 +188,9 @@ app = FastAPI(
 _last_enroll_log = {}
 _ENROLL_DEDUP_WINDOW = 5  # seconds
 _app = app  # keep reference for router includes
+# Reject duplicate JSON keys on /api JSON writes before any handler runs
+# (chunk 1f). Set before the route decorators below register API routes.
+app.router.route_class = NoDuplicateJSONKeysRoute
 
 
 @app.middleware("http")
