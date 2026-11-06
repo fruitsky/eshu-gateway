@@ -47,8 +47,9 @@ pytestmark = pytest.mark.skipif(
 class GatewaySandbox:
     """A throwaway installation of the real gateway script."""
 
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, target_ip: str = "10.0.0.1"):
         self.root = Path(root)
+        self.target_ip = target_ip
         if " " in str(self.root):
             pytest.skip("temporary path contains a space; the script is not quoted")
         self.etc = self.root / "etc"
@@ -108,7 +109,15 @@ case "$url" in
     mode=$(cat "$CLAIM_MODE" 2>/dev/null || echo ok)
     case "$mode" in
       null) printf '{"ticket":null}\\n' ;;
-      *) printf '{"ticket":"test-ticket"}\\n' ;;
+      mismatch) printf '{"ticket":"123|some other command"}\\n' ;;
+      *)
+        # Mirror the real dashboard: the ticket is "<created_at>|<command>"
+        # for the command in the JIT request that just came through.
+        req_cmd=$(awk -F'\\t' '$2 ~ /\\/api\\/request$/ { data=$3 } END { print data }' "$LOG" \\
+          | python3 -c 'import base64,json,sys; print(base64.b64decode(json.load(sys.stdin)["encoded_command"]).decode())')
+        printf '%s' "$req_cmd" \\
+          | python3 -c 'import json,sys; print(json.dumps({"ticket": "123|" + sys.stdin.read()}, separators=(",", ":")))'
+        ;;
     esac
     ;;
   *) : ;;
@@ -152,7 +161,7 @@ printf '%s\\n' "$*" >> "__LOG__"
         text = swap('FEATURES_DIR="/etc/eshu/features.d"',
                     'FEATURES_DIR="%s"' % self.features, 1)
         for token, value in (
-            ("__TARGET_IP__", "10.0.0.1"),
+            ("__TARGET_IP__", self.target_ip),
             ("__DASHBOARD_URL__", "http://dashboard.test"),
             ("__GATEWAY_VERSION__", "v-test"),
             ("__GATEWAY_TOKEN__", "test-token"),
@@ -245,6 +254,16 @@ printf '%s\\n' "$*" >> "__LOG__"
                 payload = {}
             calls.append({"method": method, "url": url, "data": payload})
         return calls
+
+    def raw_bodies(self):
+        """The literal ``-d`` argument of every recorded call (unparsed)."""
+        if not self.curl_log.exists():
+            return []
+        bodies = []
+        for line in self.curl_log.read_text().splitlines():
+            parts = line.split("\t", 2)
+            bodies.append(parts[2] if len(parts) == 3 else "")
+        return bodies
 
     def wait_for(self, predicate, timeout=2.0):
         deadline = time.time() + timeout
@@ -463,11 +482,15 @@ def test_jit_approved_claims_and_runs(gw):
         c["url"].endswith("/api/ticket/000123") for c in calls))
 
 
-def test_jit_consumed_runs_without_a_second_claim(gw):
+def test_jit_consumed_claims_the_lockbox_ticket(gw):
+    # The poller has already consumed the ticket and deposited "<ts>|<cmd>" in
+    # the lockbox; the gateway may run only because that exact line exists.
+    gw.tickets("%d|echo consumed-ok" % int(time.time()))
     gw.jit_status("consumed")
     proc = gw.run("echo consumed-ok")
     assert "consumed-ok" in proc.stdout
     assert proc.returncode == 0
+    assert not gw.ticket_file.read_text().strip()
     assert not any(c["url"].endswith("/api/ticket/") for c in gw.curl_calls())
 
 
@@ -626,7 +649,7 @@ def test_strict_mode_refuses_a_bad_signature(gw):
     gw.session_key()
     gw.require_sessions(True)
     gw.exact("echo hello")
-    proc = gw.run("ESHU_SESSION_ID=chat-signed ESHU_SESSION_SIG=deadbeef echo hello")
+    proc = gw.run("ESHU_SESSION_ID=chat-signed ESHU_SESSION_SIG=deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef echo hello")
     assert "invalid or was not minted" in proc.stdout
     assert "hello" not in proc.stdout
     assert proc.returncode == 1
@@ -648,7 +671,7 @@ def test_strict_mode_fails_open_before_the_first_key_sync(gw):
     # No eshu-session-key yet: a brand-new gateway must not brick its first day.
     gw.require_sessions(True)
     gw.exact("echo hello")
-    proc = gw.run("ESHU_SESSION_ID=chat-new ESHU_SESSION_SIG=whatever echo hello")
+    proc = gw.run("ESHU_SESSION_ID=chat-new ESHU_SESSION_SIG=0000000000000000000000000000000000000000000000000000000000000000 echo hello")
     assert proc.stdout.strip() == "hello"
     assert proc.returncode == 0
     assert "SESSION KEY MISSING" in gw.logger_text()
@@ -684,7 +707,7 @@ def test_strict_mode_off_keeps_untagged_allowlist(gw):
 def test_strict_session_failure_is_logged_with_the_id(gw):
     gw.session_key()
     gw.require_sessions(True)
-    gw.run("ESHU_SESSION_ID=chat-bad ESHU_SESSION_SIG=deadbeef echo hello")
+    gw.run("ESHU_SESSION_ID=chat-bad ESHU_SESSION_SIG=deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef echo hello")
     assert gw.wait_for(lambda calls: any(
         c["url"].endswith("/api/log")
         and c["data"].get("status") == "session-required"
@@ -713,3 +736,132 @@ def test_encoded_payload_403_is_surfaced(gw):
     proc = gw.run(wrapper)
     assert "Encoded payload blocked" in proc.stdout
     assert proc.returncode == 1
+
+
+# ── Chunk 1: prefix metadata, JSON bodies, ticket binding ──────────────────
+HOSTILE_PREFIX_VALUES = [
+    ("ESHU_SESSION_ID", 'x","status":"approved'),
+    ("ESHU_EXECUTION_ID", 'x","status":"approved'),
+    ("ESHU_WINDOW_TOKEN", 'x","status":"approved'),
+    ("ESHU_SESSION_SIG", 'x","status":"approved'),
+]
+
+
+@pytest.mark.parametrize("name,value", HOSTILE_PREFIX_VALUES)
+def test_sec_chunk1_hostile_prefix_is_refused_without_a_dashboard_call(
+        gw, name, value):
+    gw.exact("echo hello")
+    proc = gw.run("%s=%s echo hello" % (name, value))
+    assert proc.returncode == 1
+    assert "Invalid ESHU_" in proc.stdout
+    assert "hello" not in proc.stdout
+    assert gw.curl_calls() == []
+    # The validation log line must never echo the raw value — only its length.
+    invalid_line = next(line for line in gw.logger_text().splitlines()
+                        if "INVALID PREFIX" in line)
+    assert value not in invalid_line
+    assert "length=" in invalid_line
+
+
+@pytest.mark.parametrize("value", ['x,y', 'x{y}', 'x\\y', 'x"y'])
+def test_sec_chunk1_execution_id_rejects_json_metacharacters(gw, value):
+    gw.exact("echo hello")
+    proc = gw.run("ESHU_EXECUTION_ID=%s echo hello" % value)
+    assert proc.returncode == 1
+    assert "Invalid ESHU_EXECUTION_ID" in proc.stdout
+    assert gw.curl_calls() == []
+
+
+def test_sec_chunk1_allowlist_log_body_is_well_formed(gw):
+    gw.exact("echo hello")
+    proc = gw.run("ESHU_SESSION_ID=chat_valid-1 ESHU_EXECUTION_ID=exec.v1:2 "
+                  "ESHU_WINDOW_TOKEN=WinToken123 echo hello")
+    assert proc.stdout.strip() == "hello"
+    assert gw.wait_for(lambda calls: any(
+        c["url"].endswith("/api/log") for c in calls))
+    bodies = [json.loads(raw) for raw in gw.raw_bodies()]
+    assert bodies
+    for payload in bodies:
+        assert set(payload) == {
+            "target_ip", "encoded_command", "status",
+            "session_id", "execution_id"}
+        assert payload["target_ip"] == "10.0.0.1"
+        assert payload["status"] == "auto-approved"
+        assert payload["session_id"] == "chat_valid-1"
+        assert payload["execution_id"] == "exec.v1:2"
+
+
+def test_sec_chunk1_jit_request_body_is_well_formed(gw):
+    gw.jit_status("denied")
+    proc = gw.run("ESHU_SESSION_ID=sess-1 ESHU_EXECUTION_ID=exec-1 echo hello")
+    assert proc.returncode == 1
+    assert gw.wait_for(lambda calls: any(
+        c["url"].endswith("/api/request") for c in calls))
+    for call, raw in zip(gw.curl_calls(), gw.raw_bodies()):
+        if call["url"].endswith("/api/request"):
+            payload = json.loads(raw)
+            assert set(payload) == {
+                "target_ip", "encoded_command", "session_id", "execution_id"}
+
+
+def test_sec_chunk1_window_reject_body_is_well_formed(gw):
+    gw.feature("window.sh", 'log_window_reject "$cmd" "unknown window token"\n')
+    gw.jit_status("denied")
+    proc = gw.run("ESHU_SESSION_ID=sess-1 ESHU_EXECUTION_ID=exec-1 "
+                  "ESHU_WINDOW_TOKEN=WinToken123 echo w")
+    assert proc.returncode == 1
+    assert gw.wait_for(lambda calls: any(
+        c["url"].endswith("/api/log")
+        and c["data"].get("status") == "window-rejected" for c in calls))
+    seen = False
+    for call, raw in zip(gw.curl_calls(), gw.raw_bodies()):
+        if (call["url"].endswith("/api/log")
+                and call["data"].get("status") == "window-rejected"):
+            seen = True
+            payload = json.loads(raw)
+            assert set(payload) == {
+                "target_ip", "encoded_command", "status", "reason", "token",
+                "session_id", "execution_id"}
+            assert payload["reason"] == "unknown window token"
+            assert payload["token"] == "WinToken123"
+    assert seen
+
+
+def test_sec_chunk1_claim_mismatch_is_refused(gw):
+    gw.jit_status("approved")
+    gw.claim_mode("mismatch")
+    proc = gw.run("echo should-not-run")
+    assert ("Approved command does not match the requested command"
+            in proc.stdout)
+    assert "should-not-run" not in proc.stdout
+    assert proc.returncode == 1
+    assert gw.wait_for(lambda calls: any(
+        c["url"].endswith("/api/ticket/000123") for c in calls))
+    assert "JIT COMMAND MISMATCH" in gw.logger_text()
+
+
+def test_sec_chunk1_claim_match_is_executed(gw):
+    gw.jit_status("approved")
+    proc = gw.run("ESHU_EXECUTION_ID=exec-1 echo matched")
+    assert "matched" in proc.stdout
+    assert proc.returncode == 0
+    assert gw.wait_for(lambda calls: any(
+        c["url"].endswith("/api/ticket/000123") for c in calls))
+
+
+def test_sec_chunk1_consumed_without_a_lockbox_ticket_is_refused(gw):
+    gw.jit_status("consumed")
+    proc = gw.run("echo should-not-run")
+    assert "should-not-run" not in proc.stdout
+    assert proc.returncode == 1
+    assert not any(c["url"].endswith("/api/ticket/")
+                   for c in gw.curl_calls())
+
+
+def test_sec_chunk1_invalid_target_ip_refuses_to_run(tmp_path):
+    gw = GatewaySandbox(tmp_path, target_ip="10.0.0.1;touch /tmp/eshu-pwned")
+    proc = gw.run("echo hello")
+    assert proc.returncode == 1
+    assert "Invalid gateway TARGET_IP" in proc.stdout
+    assert "hello" not in proc.stdout
+    assert gw.curl_calls() == []
