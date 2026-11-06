@@ -37,8 +37,8 @@ class TestPasswordIsMandatory:
 class TestLogout:
 
     def test_logout_clears_cookie(self, client):
-        client.post("/api/auth/login", json={"password": "test"})
-        r = client.post("/api/auth/logout")
+        client.post("/api/auth/login", json={"password": "test"}, headers={"X-Eshu-CSRF": "1"})
+        r = client.post("/api/auth/logout", headers={"X-Eshu-CSRF": "1"})
         assert r.status_code == 200
         assert r.cookies.get("eshu_session") is None or r.cookies.get("eshu_session") == ""
 

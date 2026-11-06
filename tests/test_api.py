@@ -280,12 +280,12 @@ class TestGatewayRegistration:
 class TestAuth:
 
     def test_login_sets_cookie(self, client):
-        r = client.post("/api/auth/login", json={"password": "test"})
+        r = client.post("/api/auth/login", json={"password": "test"}, headers={"X-Eshu-CSRF": "1"})
         assert r.status_code == 200
         assert r.cookies.get("eshu_session") is not None
 
     def test_login_wrong_password(self, client):
-        r = client.post("/api/auth/login", json={"password": "wrong"})
+        r = client.post("/api/auth/login", json={"password": "wrong"}, headers={"X-Eshu-CSRF": "1"})
         assert r.status_code == 401
 
     def test_protected_endpoint_needs_login(self, client):

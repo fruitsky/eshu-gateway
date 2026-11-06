@@ -49,6 +49,8 @@ def client(temp_db):
 
 @pytest.fixture
 def auth_client(client):
+    # Chunk 4: session-cookie writes need the CSRF header (or a same Origin).
+    client.headers.update({"X-Eshu-CSRF": "1"})
     client.post("/api/auth/login", json={"password": "test"})
     return client
 

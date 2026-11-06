@@ -151,7 +151,7 @@ class TestCoreBlocklist:
         from main import app
         from fastapi.testclient import TestClient
         with TestClient(app) as client:
-            client.post("/api/auth/login", json={"password": "test"})
+            client.post("/api/auth/login", json={"password": "test"}, headers={"X-Eshu-CSRF": "1"})
             for cmd in ("reboot", "rm -rf /tmp/x", "mkfs.ext4 /dev/sdb1"):
                 r = client.get("/api/policies/test", params={"command": cmd})
                 assert r.status_code == 200
