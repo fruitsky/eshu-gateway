@@ -66,9 +66,11 @@ class PollerSandbox:
         self.run_dir = self.root / "run"
         self.tmp = self.root / "tmp"
         self.bin = self.root / "bin"
+        self.work = self.root / "work"
         for directory in (self.etc, self.etc / "eshu" / "features.d",
                           self.run_dir, self.tmp, self.bin):
             directory.mkdir(parents=True, exist_ok=True)
+        self.work.mkdir(mode=0o700, exist_ok=True)
 
         self.policy_file = self.root / "policy.json"
         self.poll_file = self.root / "poll.json"
@@ -76,6 +78,11 @@ class PollerSandbox:
         self.curl_log = self.root / "curl.log"
         self.logger_log = self.root / "logger.log"
         self.python_log = self.root / "python.log"
+        self.systemd_log = self.root / "systemd-run.log"
+        self.work_stat_file = self.root / "work-stat"
+        self.work_stat_file.write_text("0 700")
+        self.fleet_runner_file = self.root / "fleet-runner.sh"
+        self.fleet_runner_file.write_text("#!/bin/bash\nexit 0\n")
 
         self.feature_file.write_text("#!/bin/bash\n# test feature\n")
         self.poll_file.write_text("")
@@ -92,6 +99,7 @@ LOG="__LOG__"
 POLICY="__POLICY__"
 POLL="__POLL__"
 FEATURE="__FEATURE__"
+RUNNER="__RUNNER__"
 out=""; fmt=""; url=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -104,7 +112,7 @@ while [ $# -gt 0 ]; do
     *) url="$1"; shift ;;
   esac
 done
-printf '%s\\n' "$url" >> "$LOG"
+printf '%s\\t%s\\n' "$url" "$out" >> "$LOG"
 body=""; code="200"
 case "$url" in
   */api/policy/*) body=$(cat "$POLICY" 2>/dev/null) ;;
@@ -120,6 +128,9 @@ case "$url" in
   */static/features/*)
     if [ -f "$FEATURE" ]; then body=$(cat "$FEATURE"); else code="404"; fi
     ;;
+  */static/fleet-runner.sh)
+    body=$(cat "$RUNNER" 2>/dev/null)
+    ;;
   *) code="404" ;;
 esac
 if [ -n "$out" ]; then
@@ -132,7 +143,8 @@ fi
         curl = (curl.replace("__LOG__", str(self.curl_log))
                     .replace("__POLICY__", str(self.policy_file))
                     .replace("__POLL__", str(self.poll_file))
-                    .replace("__FEATURE__", str(self.feature_file)))
+                    .replace("__FEATURE__", str(self.feature_file))
+                    .replace("__RUNNER__", str(self.fleet_runner_file)))
         self._executable(self.bin / "curl", curl)
 
         logger = '''#!/bin/bash
@@ -147,11 +159,32 @@ exec "__PYTHON__" "$@"
             "__PYTHON__", shutil.which("python3") or "/usr/bin/python3")
         self._executable(self.bin / "python3", python)
 
+        stat = '''#!/bin/bash
+fmt=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -c) fmt="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+line=$(cat "__STAT__" 2>/dev/null || echo "0 700")
+case "$fmt" in
+  "%u") printf '%s' "$(echo "$line" | awk '{print $1}')" ;;
+  "%a") printf '%s' "$(echo "$line" | awk '{print $2}')" ;;
+  *) : ;;
+esac
+'''.replace("__STAT__", str(self.work_stat_file))
+        self._executable(self.bin / "stat", stat)
+
         noop = '''#!/bin/bash
 exit 0
 '''
         self._executable(self.bin / "sudo", noop)
-        self._executable(self.bin / "systemd-run", noop)
+        systemd = '''#!/bin/bash
+printf '%s\\n' "$*" >> "__LOG__"
+exit 0
+'''.replace("__LOG__", str(self.systemd_log))
+        self._executable(self.bin / "systemd-run", systemd)
 
     @staticmethod
     def _executable(path: Path, body: str):
@@ -170,8 +203,13 @@ exit 0
         # Bound the infinite loop and remove the 30 s wait.
         text = swap("while true; do", "for _eshu_cycle in 1 2 3; do")
         text = swap("POLL_INTERVAL=30", "POLL_INTERVAL=0")
-        # Relocate paths. /tmp first: the sandbox root itself lives under /tmp.
+        # Relocate paths. /tmp first: the sandbox root itself lives under /tmp,
+        # so replacing /tmp after the ESHU_WORK swap would rewrite the sandbox
+        # path again. ESHU_WORK only exists after chunk 3, so this is optional.
         text = text.replace("/tmp/", str(self.tmp) + "/")
+        if 'ESHU_WORK="/run/eshu"' in text:
+            text = text.replace('ESHU_WORK="/run/eshu"',
+                                'ESHU_WORK="%s"' % self.work, 1)
         text = text.replace("/var/run/", str(self.run_dir) + "/")
         text = text.replace("/etc/", str(self.etc) + "/")
         for token, value in (
@@ -194,8 +232,6 @@ exit 0
             # real prefix — so no leftover real path may remain at all.
             assert "/var/run/" + name not in text, name
             assert str(self.run_dir / name) in text, name
-        for name in ("eshu-policy.json", "eshu-ticket.json"):
-            assert text.count("/tmp/" + name) == text.count(str(self.tmp / name)), name
         return text
 
     # ── inputs ──────────────────────────────────────────────────────────────
@@ -208,7 +244,7 @@ exit 0
             {"ticket": value, "mode": "prod", "version": "v-test"}))
 
     # ── execution/observation ───────────────────────────────────────────────
-    def run(self):
+    def run(self, expect_ok=True):
         env = {
             "PATH": str(self.bin) + ":" + os.environ.get("PATH", "/usr/bin:/bin"),
             "HOME": str(self.root),
@@ -217,8 +253,33 @@ exit 0
         proc = subprocess.run(
             ["bash", str(self.script)], env=env, cwd=str(self.root),
             capture_output=True, text=True, timeout=30)
-        assert proc.returncode == 0, proc.stderr
+        if expect_ok:
+            assert proc.returncode == 0, proc.stderr
         return proc
+
+    def set_work_stat(self, value: str):
+        """Canned `stat` output for ESHU_WORK (uid mode)."""
+        self.work_stat_file.write_text(value)
+
+    def systemd_args(self):
+        if not self.systemd_log.exists():
+            return []
+        return [line for line in self.systemd_log.read_text().splitlines() if line]
+
+    def curl_out_pairs(self):
+        if not self.curl_log.exists():
+            return []
+        pairs = []
+        for line in self.curl_log.read_text().splitlines():
+            parts = line.split("\t", 1)
+            if len(parts) == 2:
+                pairs.append((parts[0], parts[1]))
+        return pairs
+
+    def logger_text(self):
+        if not self.logger_log.exists():
+            return ""
+        return self.logger_log.read_text()
 
     def python_calls(self) -> int:
         if not self.python_log.exists():

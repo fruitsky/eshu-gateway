@@ -70,7 +70,7 @@ class TestEnrollmentScript:
         assert '"$(id -u)"' in r.text                # root branch present
         assert "command -v sudo" in r.text           # sudo branch present
         assert "requires root or sudo" in r.text     # clear no-root/no-sudo message
-        assert "bash /tmp/eshu-install.sh" in r.text  # sudo still used when available
+        assert 'bash "$T/eshu-install.sh"' in r.text  # sudo still used when available
         assert "ESHU_ENROLL_TOKEN=" in r.text         # enrollment token forwarded
         assert r.text.index('"$(id -u)"') < r.text.index("command -v sudo")  # root checked first
 
