@@ -210,7 +210,85 @@ attack 2.
 
 ### Implementer notes
 
-_(fill in)_
+Implemented on `sec/chunk-1-json-injection`, cut from `security-hardening@b6445a8`.
+
+**What changed**
+
+- **1a — gateway prefix validation** (`dashboard/eshu-gateway.sh`): a new
+  `validate_prefix` helper runs immediately after the prefix-parsing loop and
+  before freeze/blocklist handling. It enforces the four charsets, prints
+  `[LOCKED] Invalid ESHU_<NAME> prefix value — allowed: <charset>.`, logs the
+  name and length only (never the raw value in that line) and exits 1 before
+  any dashboard call. Absent values keep their old behaviour.
+- **1b — JSON bodies**: added a "why this concatenation is safe" comment above
+  each `-d` body, plus a startup `TARGET_IP` guard
+  (`^[0-9A-Fa-f:.]{1,64}$`) that refuses to run before any dashboard call.
+- **1c — ticket binding**: after a successful `/api/ticket/<id>` claim, one
+  `python3 -c` parses the JSON, splits `"<created_at>|<command>"` on the first
+  `|`, and executes only on a byte-exact command match; a mismatch logs
+  `JIT COMMAND MISMATCH` and exits 1. A malformed ticket is treated as a failed
+  claim (retry, never execute). Stage 5 is now a `claim_lockbox_ticket` helper;
+  the `consumed` branch reuses it and times out (exit 1) when no live `ts|cmd`
+  line exists, so it also cannot execute without a deposited ticket.
+- **1d — `/api/log`**: only `auto-approved`, `blocked`, `frozen`,
+  `session-required`, `window-rejected` are accepted; anything else is 400
+  before `create_request` (so an injected `approved` can never be turned into a
+  ticket by `update_ticket_consumed_by_ip`). `reason` is capped at 200 chars and
+  `token` at 64 (truncated, so an old gateway with a long reason still logs;
+  charset validation is the gateway's job).
+- **1e — server-side metadata**: `core/utils.py` now owns the four charset
+  patterns and `valid_gateway_metadata()`, used by `/api/request` and
+  `/api/log`; a set id outside the charset is 400. Empty ids remain valid.
+
+**Test-first evidence**
+
+- The regressions were written and run before the fix. Against the unmodified
+  sources, **24 of them failed** — 11 in `tests/test_gateway_script.py`
+  (hostile prefixes adding JSON keys, JSON metacharacters in ids, ticket
+  mismatch, `consumed` with no lockbox entry, invalid `TARGET_IP`) and 13 in the
+  new `tests/test_sec_log_status.py` (rejected log statuses, the
+  approved-status → pollable-ticket attack, invalid metadata, reason cap). All
+  pass after the fix.
+- `bash scripts/verify.sh` → **1196 passed** (baseline 1162, **+34**: 15 gateway
+  tests, 19 API tests). `bash scripts/pre-commit.sh` green. Installers
+  regenerated with `cd dashboard && python3 gen_installer.py`; the two generated
+  files are identical. `dashboard/static/dev/` was not edited (the golden tests
+  rewrite it as a side effect; it was restored to HEAD before committing).
+
+**Existing tests changed (intent preserved)**
+
+- `test_jit_consumed_runs_without_a_second_claim` asserted the vulnerable
+  behaviour (a `consumed` status ran with no ticket). Renamed to
+  `test_jit_consumed_claims_the_lockbox_ticket` and given a live lockbox line;
+  the no-ticket case is now
+  `test_sec_chunk1_consumed_without_a_lockbox_ticket_is_refused`.
+- Three strict-session tests used short placeholder signatures
+  (`deadbeef`/`whatever`). Under 1a those are malformed, so they now use
+  64-hex wrong/placeholder values; the tests still cover the invalid-signature
+  and fail-open-before-first-key paths.
+- The `curl` stub now mirrors the real dashboard ticket format
+  (`123|<the requested cmd>`, compact JSON) and has a `mismatch` mode plus a
+  `raw_bodies()` helper; `GatewaySandbox` accepts a `target_ip` override so the
+  `TARGET_IP` guard can be tested.
+
+**Compatibility / deliberate non-changes**
+
+- Dashboard 1d/1e accept every request an un-updated gateway sends today
+  (allowed statuses, empty metadata) and close attack 1 fleet-wide on deploy;
+  1a–1c need the gateway update for attack 2.
+- `$reason` in `log_window_reject` stays unvalidated because it is only ever an
+  internal literal from a feature script; the new comment says so and says any
+  future external reason must be validated/escaped.
+- No new `python3` start on the allowlist fast path (stages 0–4): prefix and
+  `TARGET_IP` checks are pure bash. The only added `python3` is on the JIT
+  ticket claim, which already ran python.
+- Not done (out of Chunk 1 scope): the §8 compat suite
+  (`tests/test_sec_compat.py`) that runs the **old** gateway script against the
+  new dashboard. The sandbox reads the live script, so this needs a pinned
+  pre-chunk copy and is left as a rollout-gate task for the reviewer. Also
+  untouched: chunk 2 chaining, `/api/log` body-size limits, and server-side
+  `WINDOW_TOKEN_PATTERN` enforcement (the gateway enforces the charset; the
+  dashboard only caps the token length).
 
 ---
 
