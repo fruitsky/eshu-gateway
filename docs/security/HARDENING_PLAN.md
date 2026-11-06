@@ -600,7 +600,64 @@ Gateway-side only; the fleet-runner argument is appended (old runner ignores it)
 
 ### Implementer notes
 
-_(fill in)_
+Implemented on `sec/chunk-3-tmp-races`, cut from the tip of
+`sec/chunk-2-chaining` (`ac4bc6e`).
+
+**Poller** (`dashboard/eshu-poller.sh`)
+- Startup creates `ESHU_WORK=/run/eshu` with `install -d -m 0700 -o root -g
+  root`, then refuses to start if it is a symlink, not a directory, not
+  root-owned, or not exactly mode `0700`. It logs the reason (systemd restarts
+  the service and the operator sees it) and sets `umask 077`.
+- Every scratch/download now lives under `$ESHU_WORK` via `mktemp -p
+  "$ESHU_WORK" …`: policy JSON, ticket JSON, update/rollback/dev-update,
+  uninstall and the fleet runner download. The per-cycle JSON files are removed
+  at the end of the cycle, so the work dir does not accumulate them.
+- Fleet dispatch passes a new **7th** argument, the output file
+  (`$ESHU_WORK/eshu-fleet-out-<id>.txt`), keeping the old positional order; the
+  command ID is validated as numeric before it is used in a path.
+
+**Fleet runner** (`dashboard/static/fleet-runner.sh`)
+- Uses `$7` for its output path. An older six-argument poller gets a
+  `mktemp` sibling of the command file instead of a fixed `/tmp` name (new
+  runner + old poller still works; old runner + new poller is unchanged).
+
+**Installer template** (`dashboard/eshu-installer-template.sh`)
+- The syntax-check log and the legacy authorized_keys rewrite both use
+  `mktemp` now. The second one was not in the chunk text, but it is the same
+  class of fixed root-owned `/tmp` path and the new no-`/tmp/` test would
+  otherwise need an exception.
+
+**Enrollment bootstrap** (`dashboard/main.py` `/api/enroll`)
+- The generated script downloads into `T=$(mktemp -d)` and registers
+  `trap 'rm -rf "$T"' EXIT`; the installer is run from `"$T/eshu-install.sh"`.
+  The explicit `rm` is gone (the trap owns cleanup).
+
+**Test-first evidence**
+- Before the fix, **11 of the 12** new `tests/test_sec_tmp_races.py` tests
+  failed (work-dir writes, symlink/world-writable/owner refusal, all three
+  no-`/tmp/` scans, installer mktemp, fleet output path, enrollment bootstrap).
+  The remaining umask assertion was tightened to require a top-level
+  `^umask 077$` (the pre-fix script only had subshell umasks), so all 12 are
+  genuine regressions.
+- `bash scripts/verify.sh` → **1275 passed** (1263 + 12). Installers
+  regenerated; both generated files are identical. `dashboard/static/dev/` was
+  restored to HEAD after the golden tests dirtied it.
+
+**Existing tests changed**
+- `tests/test_enrollment.py::test_script_is_privilege_aware` asserted
+  `bash /tmp/eshu-install.sh`, i.e. the fixed world-writable path this chunk
+  removes; it now asserts `bash "$T/eshu-install.sh"`.
+- `tests/test_poller.py`'s harness now creates a sandbox `work/` dir, stubs
+  `stat` for the owner/mode check, records `-o` targets and `systemd-run`
+  arguments, and treats the `ESHU_WORK` relocation as optional so the new
+  tests run against the pre-fix script too.
+
+**Compatibility / deliberate non-changes**
+- Gateway-side only; no protocol change. `/var/run/eshu.tickets` and the other
+  lockbox/trigger files stay where they are (root-owned, not world-writable);
+  `umask 077` only tightens how the poller creates them.
+- The tests do not run as root: the sandbox pre-creates `ESHU_WORK` and stubs
+  `stat`, so the production ownership check is exercised without needing root.
 
 ---
 
