@@ -450,6 +450,14 @@ HTTP_TIMEOUT="${ESHU_HTTP_TIMEOUT:-10}"
 HTTP_CONNECT_TIMEOUT="${ESHU_HTTP_CONNECT_TIMEOUT:-3}"
 JIT_WAIT_SECONDS="${ESHU_JIT_WAIT:-90}"
 
+# TARGET_IP is baked in by the installer and interpolated into JSON bodies.
+# Refuse to run if it is not a bare IP (checked once, before any dashboard call).
+if [[ ! "$TARGET_IP" =~ ^[0-9A-Fa-f:.]{1,64}$ ]]; then
+  logger -t eshu-gateway "INVALID TARGET_IP (length=${#TARGET_IP}) — refusing to run"
+  echo "[LOCKED] Invalid gateway TARGET_IP — refusing to run. [Gateway $GATEWAY_VERSION]"
+  exit 1
+fi
+
 sanitize() {
   sed -E \
     -e 's/("?(API_KEY|PASSWORD|TOKEN|SECRET|KEY)"?[[:space:]]*[:=][[:space:]]*")[^"]+/\1[REDACTED]/gI' \
@@ -461,6 +469,10 @@ log_auto_approve() {
   local status="$2"
   local enc_cmd
   enc_cmd=$(echo -n "$1" | base64 -w 0)
+  # Safe concatenation: TARGET_IP is checked at startup, the ESHU_* prefix
+  # values are checked after parsing (both against strict charsets), status is
+  # an internal literal and enc_cmd is base64. Any new field must be validated
+  # to a safe charset or JSON-escaped before it is added here.
   curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -X POST "$DASHBOARD_URL/api/log" \
        -H "X-Gateway-Token: ${GATEWAY_TOKEN:-}" \
        -H "Content-Type: application/json" \
@@ -471,6 +483,10 @@ log_window_reject() {
   local reason="$2"
   local enc_cmd
   enc_cmd=$(echo -n "$1" | base64 -w 0)
+  # Safe concatenation: TARGET_IP and the ESHU_* prefix values are validated,
+  # enc_cmd is base64, and reason is an internal literal supplied by a feature
+  # script. Any new field (or a reason that ever becomes external input) must
+  # be validated to a safe charset or JSON-escaped before it is added here.
   curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -X POST "$DASHBOARD_URL/api/log" \
        -H "X-Gateway-Token: ${GATEWAY_TOKEN:-}" \
        -H "Content-Type: application/json" \
@@ -493,6 +509,22 @@ logger -t eshu-gateway "from=${SSH_CONNECTION:-unknown} cmd=${SSH_ORIGINAL_COMMA
 if [ -z "${SSH_ORIGINAL_COMMAND:-}" ]; then exit 1; fi
 cmd="$SSH_ORIGINAL_COMMAND"
 
+# Prefix metadata is concatenated into JSON bodies below, so a value that is
+# set must match a strict charset (mirrored by core/utils.py on the dashboard).
+# Refuse before freeze/blocklist handling and before any dashboard call. Log
+# only the length — never echo the raw value into syslog.
+validate_prefix() {
+  local name="$1" value="$2" regex="$3" charset="$4"
+  if [ -z "$value" ]; then
+    return 0
+  fi
+  if [[ ! "$value" =~ $regex ]]; then
+    logger -t eshu-gateway "INVALID PREFIX: $name length=${#value} (allowed: $charset)"
+    echo "[LOCKED] Invalid ESHU_${name} prefix value — allowed: ${charset}. [Gateway $GATEWAY_VERSION]"
+    exit 1
+  fi
+}
+
 # Parse ESHU_* metadata keys from the command prefix (env vars can't cross forced-command SSH).
 # Iterative so keys coexist, e.g. "ESHU_WINDOW_TOKEN=abc ESHU_SESSION_ID=def <command>".
 while :; do
@@ -504,6 +536,11 @@ while :; do
     *) break ;;
   esac
 done
+
+validate_prefix "SESSION_ID" "${ESHU_SESSION_ID:-}" '^[A-Za-z0-9_-]{1,64}$' "A-Z a-z 0-9 _ -"
+validate_prefix "SESSION_SIG" "${ESHU_SESSION_SIG:-}" '^[0-9a-f]{64}$' "64 lowercase hex characters"
+validate_prefix "EXECUTION_ID" "${ESHU_EXECUTION_ID:-}" '^[A-Za-z0-9_.:-]{1,64}$' "A-Z a-z 0-9 _ . : -"
+validate_prefix "WINDOW_TOKEN" "${ESHU_WINDOW_TOKEN:-}" '^[A-Za-z0-9]{1,64}$' "A-Z a-z 0-9"
 
 # The returned ssh_prefix ends with a space. An agent/wrapper that joins with
 # its own space leaves cmd starting with one — which misses the exact whitelist
@@ -678,16 +715,21 @@ fi
 # ============================================================
 # 5. CLAIM-AND-BURN JIT LOCKBOX
 # ============================================================
-if [ -f "$TICKETS_FILE" ]; then
+# Claim exactly one live lockbox ticket whose command is byte-for-byte $cmd,
+# burning it and leaving every other line untouched. Returns 0 on a match;
+# the caller decides whether to execute. Reused by the "consumed" branch so
+# that path cannot execute without a deposited ticket either.
+claim_lockbox_ticket() {
+  [ -f "$TICKETS_FILE" ] || return 1
+
+  local now tmp matched="no"
   now=$(date +%s)
   tmp=$(mktemp)
-  matched="no"
   while IFS='|' read -r ticket_ts claimed_cmd || [ -n "${claimed_cmd:-}" ]; do
     if [ -z "${ticket_ts:-}" ]; then continue; fi
     if (( now - ticket_ts <= 90 )); then
       if [ "$matched" = "no" ] && [ "$cmd" = "$claimed_cmd" ]; then
         matched="yes"
-        logger -t eshu-gateway "JIT TICKET CLAIMED AND BURNED FOR: $cmd"
       else
         echo "$ticket_ts|$claimed_cmd" >> "$tmp"
       fi
@@ -697,15 +739,21 @@ if [ -f "$TICKETS_FILE" ]; then
   mv -f "$tmp" "$TICKETS_FILE"
   chmod 600 "$TICKETS_FILE"
 
-  if [ "$matched" = "yes" ]; then
-    run_sanitized bash -c "$cmd"
-  fi
+  [ "$matched" = "yes" ]
+}
+
+if claim_lockbox_ticket; then
+  logger -t eshu-gateway "JIT TICKET CLAIMED AND BURNED FOR: $cmd"
+  run_sanitized bash -c "$cmd"
 fi
 
 # ============================================================
 # 6. DISPATCH PENDING REQUEST (JIT WITH AUTO-POLL)
 # ============================================================
 enc_req=$(echo -n "$cmd" | base64 -w 0)
+# Safe concatenation: TARGET_IP and the ESHU_* prefix values are validated
+# (startup/prefix checks), and enc_req is base64. Any new field must be
+# validated to a safe charset or JSON-escaped before it is added here.
 RESPONSE=$(curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -w "\n%{http_code}" -X POST "$DASHBOARD_URL/api/request" \
      -H "X-Gateway-Token: ${GATEWAY_TOKEN:-}" \
      -H "Content-Type: application/json" \
@@ -765,8 +813,30 @@ while true; do
       -H "X-Gateway-Token: ${GATEWAY_TOKEN:-}" "$DASHBOARD_URL/api/ticket/$REQUEST_ID" 2>/dev/null || true)
     case "$CLAIM_BODY" in
       *'"ticket":"'*)
-        TICKET_FOUND="yes"
-        break
+        # The ticket is "<created_at>|<command>" (db/requests.py). Require the
+        # command part to equal the command we just asked approval for; a
+        # mismatch is fatal and must never fall through to execution. Parse
+        # with the python this path already starts.
+        CLAIM_PARSE_OK="no"
+        CLAIM_CMD=$(printf '%s' "$CLAIM_BODY" | python3 -c '
+import json
+import sys
+
+ticket = json.load(sys.stdin).get("ticket") or ""
+if not isinstance(ticket, str) or "|" not in ticket:
+    sys.exit(1)
+sys.stdout.write(ticket.split("|", 1)[1])
+' 2>/dev/null) && CLAIM_PARSE_OK="yes"
+        if [ "$CLAIM_PARSE_OK" != "yes" ]; then
+          logger -t eshu-gateway "JIT CLAIM FAILED for #$REQUEST_ID — malformed ticket, will retry"
+        elif [ "$CLAIM_CMD" != "$cmd" ]; then
+          logger -t eshu-gateway "JIT COMMAND MISMATCH for #$REQUEST_ID — refusing to run"
+          echo "[LOCKED] Approved command does not match the requested command — refusing to run."
+          exit 1
+        else
+          TICKET_FOUND="yes"
+          break
+        fi
         ;;
       *)
         logger -t eshu-gateway "JIT CLAIM FAILED for #$REQUEST_ID — will retry"
@@ -774,9 +844,17 @@ while true; do
     esac
   fi
   if [ "$REQ_STATUS" = "consumed" ]; then
-    # Poller already consumed it; lockbox may have the ticket
-    TICKET_FOUND="yes"
-    break
+    # The poller already consumed it and deposited "<ts>|<cmd>" in the lockbox.
+    # Reuse the stage-5 claim-and-burn: execute only if an exact, live line is
+    # there; otherwise this is a timeout, never an execution.
+    if claim_lockbox_ticket; then
+      logger -t eshu-gateway "JIT CONSUMED TICKET CLAIMED FROM LOCKBOX: $cmd"
+      TICKET_FOUND="yes"
+      break
+    fi
+    logger -t eshu-gateway "JIT CONSUMED WITHOUT A LOCKBOX TICKET for #$REQUEST_ID"
+    echo "   [TIMEOUT] JIT request #$DISPLAY_ID is consumed but no matching lockbox ticket was found. Retry after approval."
+    exit 1
   fi
   if [ "$REQ_STATUS" = "expired" ] || [ "$REQ_STATUS" = "abandoned" ]; then
     echo "   [EXPIRED] JIT request #$DISPLAY_ID is $REQ_STATUS. Retry to request a new approval."
