@@ -114,7 +114,7 @@ from core.gateway_watch import (
     _disconnected_gateways, _offline_alerted, OFFLINE_THRESHOLD, DISCONNECTED_AFTER,
     UPDATE_ACTIVE_WINDOW,
 )
-from core.utils import DASHBOARD_VERSION, decode_cmd, _resolve_gateway_token, _hash_password, _verify_password
+from core.utils import DASHBOARD_VERSION, decode_cmd, _resolve_gateway_token, _hash_password, _verify_password, valid_gateway_metadata
 from core.integration_auth import resolve_agent, resolve_agent_optional, extract_agent_token
 from core.secret_scrub import scrub_payload, scrub_string
 from core.integration_proxy import execute_integration_call, execute_generic_call, generic_write_envelope, ProxyError, merge_response_hint, ALLOWED_AUTH_TYPES, PREVIEW_CHARS, safe_request_summary
@@ -563,6 +563,11 @@ def receive_request(payload: GatewayPayload, request: Request):
     # Authenticated gateway (X-Gateway-Token bound to its IP) or dashboard session.
     target_ip = _require_gateway(request, payload.target_ip)
 
+    # Prefix metadata is concatenated into the gateway's JSON body, so an old
+    # gateway can forward a crafted id. Reject anything outside the charset the
+    # gateway itself enforces (core/utils.py mirrors eshu-gateway.sh).
+    valid_gateway_metadata(payload.session_id, payload.execution_id)
+
     _check_rate_limit(target_ip)
     cmd = decode_cmd(payload.encoded_command)
 
@@ -634,18 +639,33 @@ def receive_request(payload: GatewayPayload, request: Request):
     record_audit_event('jit_created', target_ip, details=f'JIT #{req_id}: {cmd[:80]}')
     return {"status": "ok", "id": f"{req_id:06d}", "request_id": req_id}
 
+# /api/log only records the outcomes a gateway actually emits. Anything else
+# (notably "approved") must never be stored: update_ticket_consumed_by_ip()
+# would turn an approved row into a runnable ticket on the next poll.
+ALLOWED_LOG_STATUSES = frozenset({
+    "auto-approved", "blocked", "frozen", "session-required", "window-rejected",
+})
+
+
 @app.post("/api/log")
 def receive_log(payload: GatewayPayload, request: Request):
     # Authenticated gateway (X-Gateway-Token bound to its IP) or dashboard session.
     target_ip = _require_gateway(request, payload.target_ip)
 
+    if payload.status not in ALLOWED_LOG_STATUSES:
+        raise HTTPException(status_code=400, detail="Invalid log status")
+    valid_gateway_metadata(payload.session_id, payload.execution_id)
+
+    # Bound the free-text fields so a caller cannot grow the request table.
+    reason = (payload.reason or '')[:200]
+    token = (payload.token or '')[:64]
     cmd = decode_cmd(payload.encoded_command)
-    create_request(target_ip, cmd, status=payload.status, ttl=0, reason=payload.reason, session_id=(payload.session_id or '')[:64], execution_id=(payload.execution_id or '')[:64])
-    if payload.status == 'window-rejected' and payload.token:
+    create_request(target_ip, cmd, status=payload.status, ttl=0, reason=reason, session_id=(payload.session_id or '')[:64], execution_id=(payload.execution_id or '')[:64])
+    if payload.status == 'window-rejected' and token:
         wins = get_approved_windows()
-        target = next((w for w in wins if w['token'] == payload.token), None)
+        target = next((w for w in wins if w['token'] == token), None)
         if target:
-            record_window_execution(target['id'], payload.token, target_ip, cmd, 0, payload.reason)
+            record_window_execution(target['id'], token, target_ip, cmd, 0, reason)
     if payload.status == 'blocked':
         send_notify('blocked', '🛑 Command Blocked', f'`{cmd[:80]}` on {target_ip}')
     if payload.status == 'session-required':

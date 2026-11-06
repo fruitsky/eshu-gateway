@@ -2,6 +2,7 @@
 import base64
 import hashlib
 import hmac
+import re
 import secrets
 import os
 import time
@@ -10,6 +11,29 @@ from db.gateways import get_gateway_by_token
 
 # ── Version ──
 DASHBOARD_VERSION = "v0.1.0"
+
+# ── Gateway metadata charsets ──
+# Mirrors the prefix validation in dashboard/eshu-gateway.sh. A gateway
+# concatenates these values into its JSON bodies, so an old gateway can still
+# forward an injected value; the dashboard rejects anything outside the charset.
+SESSION_ID_PATTERN = r'^[A-Za-z0-9_-]{1,64}$'
+SESSION_SIG_PATTERN = r'^[0-9a-f]{64}$'
+EXECUTION_ID_PATTERN = r'^[A-Za-z0-9_.:-]{1,64}$'
+WINDOW_TOKEN_PATTERN = r'^[A-Za-z0-9]{1,64}$'
+
+_SESSION_ID_RE = re.compile(SESSION_ID_PATTERN)
+_EXECUTION_ID_RE = re.compile(EXECUTION_ID_PATTERN)
+
+
+def valid_gateway_metadata(session_id: str, execution_id: str) -> None:
+    """Raise 400 when a *set* session/execution id is outside the allowed charset.
+
+    Empty values stay valid for compatibility (most gateways send no prefix).
+    """
+    if session_id and not _SESSION_ID_RE.fullmatch(session_id):
+        raise HTTPException(status_code=400, detail="Invalid session_id")
+    if execution_id and not _EXECUTION_ID_RE.fullmatch(execution_id):
+        raise HTTPException(status_code=400, detail="Invalid execution_id")
 
 # ── Token decode ──
 def decode_cmd(encoded: str) -> str:
