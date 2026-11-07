@@ -1106,6 +1106,14 @@ dashboard LXC or gateways. The reviewer runs it; the implementer does not deploy
    first-run setup, login/logout, approve + deny a JIT, Fleet Run dispatch,
    freeze/unfreeze, create/toggle/delete a window, add/test an integration —
    with the browser devtools console free of CSP or 403 CSRF errors.
+   **Done 2026-11-07 at `39c40e8` (reviewer, headless Chromium via
+   Playwright, fresh DB on 127.0.0.1):** 14/14 checks — CSP header present,
+   first-run setup on loopback, fake gateway enrol + heartbeat, JIT approve and
+   deny through the UI handlers, freeze/unfreeze, window create/toggle/delete,
+   Fleet Run dispatch, integration add, every view rendered, a stored
+   `<img onerror>` command shown as text and never executed, cookie-only write
+   refused with 403, logout + login. Zero console errors, zero CSP violations,
+   zero JS exceptions, zero unexpected 4xx/5xx.
 6. Note: `static/features/approved_windows.sh` and `static/fleet-runner.sh`
    reach **every** gateway as soon as the dashboard is deployed (no Edge
    stage) — their legacy-gateway compat tests (Chunk R2) must be green.
@@ -1127,7 +1135,7 @@ dashboard LXC or gateways. The reviewer runs it; the implementer does not deploy
 | 1 | json-injection | Critical | **Merged** | `sec/chunk-1-json-injection` @ `4fab82e` | Round 2 approved; reviewer repro (old-gateway raw bodies) → 400, no ticket |
 | 2 | chaining | High | **Merged** (follow-up R1) | `sec/chunk-2-chaining` @ `ac4bc6e` | Approved; glob+esh rule too broad → R1 |
 | 3 | tmp-races | High | **Merged** | `sec/chunk-3-tmp-races` @ `114cb6f` | Approved |
-| 4 | web-hardening | Medium | **Merged** (manual UI smoke test pending) | `sec/chunk-4-web-hardening` @ `9c845be` | Approved; browser smoke test is a rollout-gate item |
+| 4 | web-hardening | Medium | **Merged** | `sec/chunk-4-web-hardening` @ `9c845be` | Approved; UI smoke test done 2026-11-07 (see §8 item 5) |
 | 5 | authz | Medium | **Merged** (follow-up R4) | `sec/chunk-5-authz` @ `2d579be` | Approved; loopback check vs same-host proxy → R4 |
 | R | review-fixups | Medium | **Merged** | `sec/chunk-R-review-fixups` @ `0a8e400` | Approved; reviewer re-ran full suite (1343 passed), pre-commit, installer sync, and the tier probe (former false positives run normally; broad matches → JIT; Eshu paths FATAL) |
 | 6 | supply-chain | High | Design pending | — | |
