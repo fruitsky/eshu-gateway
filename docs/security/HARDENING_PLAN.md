@@ -1168,7 +1168,86 @@ a `command_allow` list of the read commands above. Remove once H ships.
 
 ### Implementer notes
 
-_(fill in)_
+**What I did** (H1–H5; dashboard only — no gateway, poller or installer file touched)
+
+* **H1.** `core/tool_runner.py` now passes every generic tool through
+  `_read_only_refusal()` before it executes: a read-only HTTP tool normalises
+  `args['method']` (default GET) and refuses anything but GET/HEAD with
+  `{"error":"not_a_read_method","status_code":400,"tool":"write"}`.
+  Defence in depth lives in `core/integration_proxy.execute_generic_call(...,
+  read_only=False)`: with `read_only=True` a mutating method raises
+  `ProxyError(400, "not_a_read_method: …")` before any request, and the runner
+  passes `read_only=not mutating`.
+* **H2.** New `core/ha_ws_policy.py` with `is_read_command()`. Deny rules are
+  checked first (`call_service`, `execute_script`, `supervisor/*`, `hassio/*`,
+  `auth/*`, `config/auth*`, `backup/*`, `repairs/*`, `subscribe_*`/
+  `unsubscribe_*`, and last segments `create`/`update`/`delete`/`remove`/
+  `set*`/`reload`/`restart`/`migrate`/`install`/`uninstall`/`write`), then the
+  reviewed allow set (`render_template`, `get_states`, `get_config`,
+  `get_services`, `zha/devices`) and read-name patterns (`list`, `get`,
+  `get_single`, `info`, `browse_media`, `statistics_during_period`, `config`).
+  Unknown commands are false. The runner refuses a non-read `ws_read` **before**
+  any WebSocket connection and points at `ws_write`.
+* **H3.** Both refusals write an `integration_calls` row with
+  `outcome='refused'` and `reason_code` = the error code, keeping only the
+  method/command (`{"method":"DELETE"}`, `{"command":"…"}`) and never the
+  path, params, data or payload, plus a `read_tool_refused` audit event naming
+  the integration and tool. The check runs after `evaluate_call`, so a
+  permissive agent policy cannot widen it and an `arg_policy` still applies on
+  top.
+* **H4.** `tests/test_sec_H_read_tools.py::TestH4CatalogInvariant` walks
+  `core.seeds._CATALOGS` and `generic_tools_for(kind)` for every kind: every
+  `read_only` HTTP tool must be GET/HEAD unless it is `not_implemented` or on
+  the commented read-by-POST allowlist (Omada's `list_site_clients` and
+  `list_known_clients` — the controller API exposes client lists only as
+  POST), and every `read_only` WS tool with a fixed `path_template` must
+  satisfy `is_read_command`. A deliberately bad fake tool proves the checker
+  fails.
+* **H5.** `CHANGELOG.md` `### Security` (two behaviour-change entries),
+  `docs/AGENT_MANUAL.md` §1 (new "generic `read` / `ws_read` are strictly
+  read-only" subsection with both error codes and the gated tools), and the
+  `read`/`ws_read` tool descriptions now state what is refused. Schemas and
+  params are unchanged.
+
+**Tests.** `tests/test_sec_H_read_tools.py` — 10 tests, all `test_sec_H_*`.
+Every one failed on `security-hardening` before the fix: the policy module and
+the catalog checker did not exist, and the two attacks reproduced on the
+reviewed commit (confirmed by running `run_tool` directly): a `read` call with
+`method: DELETE` reached the mock upstream with `DELETE` and no approval, and a
+`ws_read` with `command: call_service` opened a WebSocket. The only test that
+passes before and after is the control (`ws_read` still runs a read command).
+
+**Surprises / decisions**
+
+* The refusal runs **after** `evaluate_call`. The chunk says "regardless of
+  agent policy"; keeping the policy gate first preserves the existing
+  "policy is the first gate" behaviour, and the read-only refusal is
+  unconditional for every call the policy lets through, so a policy can only
+  narrow, never widen.
+* Only the generic tools are checked at runtime. A curated HA WS read tool has
+  a fixed `path_template` the agent cannot influence, so H4's catalog invariant
+  is the right guard for it; a runtime check there would also refuse the
+  handler-based lovelace read tools (empty `path_template`).
+* Refs to the gated tool are in both the response (``"tool": "write"`` /
+  ``"ws_write"``) and the message, so a model that only reads the error text
+  still finds the way forward.
+
+**Deliberately not done**
+
+* No change to `write`/`ws_write`, curated tools, agent-policy semantics or
+  MCP tool schemas; no gateway, poller or installer files.
+* No new read-by-POST allowlist entries beyond Omada's two reviewed ones.
+* The operator stopgap in the chunk (agent `arg_policy` rules with
+  `method_allow`/`command_allow`) is an operator action, not code.
+
+`bash scripts/verify.sh` (pre-commit green):
+
+```
+1353 passed, 7 warnings in 335.33s (0:05:35)
+```
+
+(1343 baseline + 10 new tests.)
+
 
 ---
 
