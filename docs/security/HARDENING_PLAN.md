@@ -1287,6 +1287,12 @@ Scope preview:
 
 ---
 
+* Added 2026-11-07 (review notes): installer `--update` re-registers before
+  loading its saved token (harmless 401s on every update); warn in the UI when
+  a host/session override is opened on a Proxmox host (`pct exec` reaches every
+  container); make `tests/test_db_audit.py::test_audit_log_ordering` robust to
+  background audit writes (flaky in the full suite).
+
 ## 8. Rollout gate (no deploy before this)
 
 Applies to the merge of `security-hardening` → `master` and any deploy to the
@@ -1337,7 +1343,7 @@ dashboard LXC or gateways. The reviewer runs it; the implementer does not deploy
 | 4 | web-hardening | Medium | **Merged** | `sec/chunk-4-web-hardening` @ `9c845be` | Approved; UI smoke test done 2026-11-07 (see §8 item 5) |
 | 5 | authz | Medium | **Merged** (follow-up R4) | `sec/chunk-5-authz` @ `2d579be` | Approved; loopback check vs same-host proxy → R4 |
 | R | review-fixups | Medium | **Merged** | `sec/chunk-R-review-fixups` @ `0a8e400` | Approved; reviewer re-ran full suite (1343 passed), pre-commit, installer sync, and the tier probe (former false positives run normally; broad matches → JIT; Eshu paths FATAL) |
-| H | read-tools | High | **Ready** | `sec/chunk-H-read-tools` | Found during feature work (ws_read) + reviewer (generic read accepts mutating methods) |
+| H | read-tools | High | **Merged** | `sec/chunk-H-read-tools` @ `d31c763` | Approved; full suite 1352 passed + 1 known flake (`test_audit_log_ordering`, passes 8/8 in isolation, untouched by H → Chunk 7); reviewer DELETE/POST/PUT/PATCH repro refused with no upstream request; WS classifier probe 29/29 |
 | 6 | supply-chain | High | Design pending | — | |
 | 7 | low | Low | Draft | — | |
 
