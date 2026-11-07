@@ -126,6 +126,18 @@ function openContextPanel(reqId) {
       '<span class="ctx-meta-item">Host: ' + escapeHtml(hostLabel) + '</span>' +
       (req.target_ip && req.target_ip !== hostLabel ? '<span class="ctx-meta-item">IP: ' + escapeHtml(req.target_ip) + '</span>' : '');
   }
+  /* Breakdown (F2): headline at the top, steps under the raw command. */
+  var bdHeadSec = document.getElementById('ctx-breakdown-head-section');
+  var bdStepsSec = document.getElementById('ctx-breakdown-steps-section');
+  var bdHeadEl = document.getElementById('ctx-breakdown-head');
+  var bdStepsEl = document.getElementById('ctx-breakdown-steps');
+  if (bdHeadSec && bdStepsSec && bdHeadEl && bdStepsEl) {
+    var hasBd = bdUsable(req);
+    bdHeadSec.classList.toggle('hidden', !hasBd);
+    bdStepsSec.classList.toggle('hidden', !hasBd);
+    bdHeadEl.innerHTML = hasBd ? bdHeadlineHtml(req) : '';
+    bdStepsEl.innerHTML = hasBd ? bdBodyHtml(req) : '';
+  }
   document.getElementById('ctx-status').textContent = req.status || '—';
   document.getElementById('ctx-time').textContent = req.created_at ? formatTime(req.created_at) : '—';
 
@@ -2269,6 +2281,7 @@ function queueModel(item) {
     createdAt: d.created_at || 0, urgent: !!d.anomaly,
     human: describeCmd(d.command) || 'Command request',
     cmd: d.command,
+    bd: d.breakdown,
     host: (d.hostname || d.target_ip || 'unknown host') + (d.hostname && d.target_ip ? ' \u00b7 ' + d.target_ip : ''),
     id: d.id,
     approve: 'handleAction(' + Number(d.id) + ',\'approve\')',
@@ -2310,6 +2323,7 @@ function renderQueue(items) {
       '<button type="button" class="ccq-chk jit-check" role="checkbox" aria-checked="false" aria-label="Select request" onclick="event.stopPropagation();toggleBulkSelect(' + escJs(m.domId) + ',event)"></button>' +
       '<span class="ccq-main">' +
         '<span class="ccq-human">' + escapeHtml(m.human) + '</span>' +
+        bdRowHeadlineHtml({ breakdown: m.bd }) +
         '<code class="ccq-cmd" title="' + escapeHtml(m.cmd) + '">' + escapeHtml(m.cmd) + '</code>' +
       '</span>' +
       '<span class="ccq-host">' + escapeHtml(m.host) + '</span>' +
@@ -2567,7 +2581,9 @@ function smSshDetailCard(r) {
     '<div class="sm-call-top"><span class="mcp-dot"></span><b>' + escapeHtml(host || 'Unknown host') + '</b>' +
       '<span class="sm-call-kind ssh">SSH</span>' +
       '<span class="sm-mcp-time">' + escapeHtml(smFmtTime(r.created_at)) + '</span></div>' +
+    bdHeadlineHtml(r) +
     '<pre class="sm-call-json cmd">' + escapeHtml(r.command || '') + '</pre>' +
+    bdBodyHtml(r, { raw: false }) +
     (r.encoded ? decodedCmdHtml(r) : '') +
     (r.risk ? '<div class="sm-call-reason">\u26a0 ' + escapeHtml(r.risk) + '</div>' : '') +
     (r.anomaly ? '<div class="sm-call-reason" style="color:var(--danger)">\u2605 ' + escapeHtml(r.anomaly) + '</div>' : '') +
@@ -2643,7 +2659,10 @@ async function openSessionModal(sid) {
   // pending requests (the detail endpoint doesn't recompute them).
   var reqById = {};
   (requestsData || []).forEach(function (r) { reqById[r.id] = r; });
-  ssh.forEach(function (r) { var lr = reqById[r.id]; if (lr) { r.risk = lr.risk; r.anomaly = lr.anomaly; } });
+  ssh.forEach(function (r) {
+    var lr = reqById[r.id];
+    if (lr) { r.risk = lr.risk; r.anomaly = lr.anomaly; r.breakdown = lr.breakdown; }
+  });
 
   var host = ssh.length ? (ssh[0].hostname || ssh[0].target_ip || '') : '';
   _activeSessionHost = host;
@@ -3111,7 +3130,16 @@ document.addEventListener('keydown', function(e) {
   else if (k === 'ArrowDown' || k === 'j') { moveQueueCursor(1); e.preventDefault(); }
   else if (k === 'ArrowUp' || k === 'k') { moveQueueCursor(-1); e.preventDefault(); }
   else if (k === 'Enter') openQueueCursor();
+  else if (k === 'x' || k === 'X') { e.preventDefault(); toggleQueueRaw(); }
 });
+
+/* F2: `X` opens/closes the raw command on the card under the queue cursor. */
+function toggleQueueRaw() {
+  var nodes = queueNodes();
+  var el = nodes[_queueCursor];
+  var ticket = el ? el.querySelector('.jit-ticket') : null;
+  if (ticket) ticket.classList.toggle('expanded');
+}
 
 document.addEventListener('click', function(e) {
   var t = e.target;
@@ -3211,7 +3239,9 @@ function renderJitItem(item) {
         '<button type="button" class="jit-check" role="checkbox" aria-checked="false" aria-label="Select request" onclick="event.stopPropagation();toggleBulkSelect(' + escJs(rDom) + ',event)"></button>' +
         '<div class="jit-body" style="min-width:0">' +
           '<div class="jit-human">' + escapeHtml(human || 'Command request') + '</div>' +
+          bdHeadlineHtml(r) +
           '<div class="jit-cmd-text">' + escapeHtml(r.command) + '</div>' +
+          bdBodyHtml(r) +
           '<div class="jit-meta">' +
             '<span class="jit-meta-item">#' + esc(String(Number(r.id)).padStart(6,'0')) + '</span>' +
             '<span class="jit-meta-item">' + hostCell + '</span>' +
@@ -3295,6 +3325,16 @@ async function denyWindowReq(id) {
 // ── Deny with Blocklist ─────────────────────────────────────────────────
 async function handleAction(id, action) {
   playApprovalPulse();
+  var _req = requestsData.find(function (r) { return String(r.id) === String(id); });
+  /* F2: a long command that still has an unclassified step asks for a second
+     press — the first one scrolls to and highlights that step. Short and
+     all-read commands keep the single click. */
+  if (action === 'approve' && _req && bdNeedsConfirm(_req) && !_bdUnknownConfirmed[id]) {
+    _bdUnknownConfirmed[id] = true;
+    bdHighlightFirstUnknown(id);
+    showToast('Read the highlighted unknown step first. Approve again to approve it.', 'info');
+    return;
+  }
   if (action === 'deny') {
     const res = await authFetch('/api/deny/' + id, { method: 'POST' });
     if (res.status === 401) { await checkAuth(); return; }
@@ -3491,6 +3531,10 @@ function renderTable() {
     const decodedChip = req.encoded
       ? '<span class="decoded-badge" title="Encoded payload — open for the decoded command">decoded</span>'
       : '';
+    /* F2: history rows do not carry a breakdown (pending-only field), so this
+       fetches /api/requests/{id}/breakdown on demand and expands a row. */
+    const breakdownLink = '<button type="button" class="bd-hist-link" title="Show the step breakdown" ' +
+      'onclick="event.stopPropagation();toggleHistoryBreakdown(' + Number(req.id) + ',this)">breakdown</button>';
     const gwPillHtml = gwPill(req.hostname || 'N/A');
     const _sid = req.session_id || '';
     const sCell = (_sid && _sid !== 'unknown')
@@ -3507,7 +3551,7 @@ function renderTable() {
       '<td class="' + idClass + '"' + gapTitle + '>' + idDisplay + '</td>' +
       '<td class="text-muted text-xs">' + formatTime(req.created_at) + '</td>' +
       '<td>' + gatewayCell + '</td>' +
-      '<td class="cell-cmd"><div class="flex items-center gap-1">' + riskHtml + anomalyHtml + '<code class="cmd-code" title="' + escapedCmd + '">' + escapedCmd + '</code><button class="js-copy-cmd flex-shrink-0 text-xs opacity-30 hover:opacity-80 px-1 py-0.5 rounded transition-opacity text-muted" data-cmd="' + encodeURIComponent(req.command) + '" title="Copy"></button>' + decodedChip + '</div>' +
+      '<td class="cell-cmd"><div class="flex items-center gap-1">' + riskHtml + anomalyHtml + '<code class="cmd-code" title="' + escapedCmd + '">' + escapedCmd + '</code><button class="js-copy-cmd flex-shrink-0 text-xs opacity-30 hover:opacity-80 px-1 py-0.5 rounded transition-opacity text-muted" data-cmd="' + encodeURIComponent(req.command) + '" title="Copy"></button>' + decodedChip + breakdownLink + '</div>' +
         (function() {
           var _desc = describeCmd(req.command);
           if (!_desc) return '';
@@ -3526,10 +3570,54 @@ function renderTable() {
         '</td>' +
       '<td>' + badge + '</td>' +
       '<td>' + sCell + '</td>' +
-      '<td class="text-right">' + actions + '</td></tr>';
+      '<td class="text-right">' + actions + '</td></tr>' +
+      (_bdHistory[req.id] ? bdHistoryRowHtml(req.id) : '');
   });
   tbody.innerHTML = html;
   restoreExpandedDescs();
+}
+
+/* F2: fetch one history row's breakdown and show it beneath the row. The
+   endpoint is session-authenticated; the result is escaped by the same
+   renderer the cards use. `_bdHistory[id]` holds the cell HTML (or the
+   'loading' sentinel) so the expanded row is rebuilt on every poll instead of
+   being wiped by the 3s table refresh. */
+var _bdHistoryLoading = '<span class="bd-loading">Loading breakdown\u2026</span>';
+
+function bdHistoryRowHtml(id) {
+  var html = _bdHistory[id];
+  if (!html) return '';
+  return '<tr id="bd-hist-' + Number(id) + '" class="bd-history-row"><td colspan="7">' +
+    '<div class="bd-history-cell">' + html + '</div></td></tr>';
+}
+
+function bdRefreshHistoryRow(id) {
+  var cell = document.querySelector('#bd-hist-' + Number(id) + ' .bd-history-cell');
+  if (cell) cell.innerHTML = _bdHistory[id] || '';
+}
+
+function toggleHistoryBreakdown(id, btn) {
+  id = Number(id);
+  if (_bdHistory[id]) {
+    delete _bdHistory[id];
+    var open = document.getElementById('bd-hist-' + id);
+    if (open && open.parentNode) open.parentNode.removeChild(open);
+    return;
+  }
+  var tr = btn && btn.closest ? btn.closest('tr') : null;
+  if (!tr) return;
+  _bdHistory[id] = _bdHistoryLoading;
+  tr.insertAdjacentHTML('afterend', bdHistoryRowHtml(id));
+  authFetch('/api/requests/' + encodeURIComponent(id) + '/breakdown').then(function (res) {
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    return res.json();
+  }).then(function (bd) {
+    _bdHistory[id] = bdBlockHtml({ id: id, command: '', breakdown: bd }, { raw: false });
+    bdRefreshHistoryRow(id);
+  }).catch(function () {
+    _bdHistory[id] = 'Breakdown unavailable.';
+    bdRefreshHistoryRow(id);
+  });
 }
 
 function toggleDesc(id) {
@@ -3827,6 +3915,198 @@ function decodedCmdHtml(r) {
   var label = r.decoded_truncated ? 'decoded \u00b7 truncated' : 'decoded';
   return '<div class="decoded-wrap"><span class="decoded-badge">' + label + '</span>' +
     '<pre class="decoded-cmd">' + escapeHtml(r.decoded_command) + '</pre></div>';
+}
+
+/* ── F2: reviewable approval card ─────────────────────────────────────────
+   Pending requests carry `breakdown` (F1): steps tagged read/write/unknown,
+   section markers, wrapper context, flags and an optional decoded `script`.
+   These helpers turn it into the headline, the step list and the flag chips.
+
+   They are pure: a request row in, an HTML string out. Every agent-controlled
+   string goes through escapeHtml — step text, section names, context chips,
+   the script body, the flags and the server headline. The tests in
+   tests/test_f2_review_card.py load this file and prove it by spying on
+   escapeHtml. */
+
+var _bdUnknownConfirmed = {};
+/* History breakdowns stay open across the 3s table re-render: id -> HTML. */
+var _bdHistory = {};
+
+var BD_FLAGS = {
+  'encoded': ['encoded', 'encoded payload — the decoded text is the real command'],
+  'heredoc': ['heredoc', 'heredoc input'],
+  'nested-ssh': ['nested ssh', 'runs a command on another host over ssh'],
+  'sensitive-path': ['sensitive path', 'touches a secret path'],
+  'redirect-to-file': ['redirect', 'writes a file through redirection'],
+  'follows': ['runs until stopped', 'streams and never ends on its own'],
+  'repo-config': ['repo can run programs', 'git may run repository-configured programs']
+};
+
+function bdUsable(r) {
+  var bd = r && r.breakdown;
+  return !!(bd && bd.steps && bd.steps.length);
+}
+
+function bdTone(bd) {
+  var s = (bd && bd.summary) || {};
+  if ((s.unknown || 0) > 0) return 'unknown';
+  if ((s.write || 0) > 0) return 'write';
+  return 'read';
+}
+
+function bdHeadlineHtml(r) {
+  if (!bdUsable(r)) return '';
+  var bd = r.breakdown;
+  var tone = bdTone(bd);
+  var html = '<div class="bd-head bd-' + tone + '" data-bd-head="1">' +
+    '<span class="bd-headline">' + escapeHtml(bd.headline || '') + '</span>';
+  if (tone === 'unknown') html += '<span class="bd-advice bd-advice-unknown">read it as written</span>';
+  if (bd.complete === false) {
+    html += '<span class="bd-advice bd-advice-incomplete">could not fully parse; read the raw command</span>';
+  }
+  return html + '</div>';
+}
+
+function bdFlagsHtml(r) {
+  if (!bdUsable(r)) return '';
+  var flags = r.breakdown.flags || [];
+  if (!flags.length) return '';
+  var chips = flags.map(function (flag) {
+    var meta = BD_FLAGS[flag];
+    var label = meta ? meta[0] : flag;
+    var title = meta ? meta[1] : flag;
+    return '<span class="bd-flag bd-flag-' + escapeHtml(flag) + '" title="' + escapeHtml(title) + '">' +
+      escapeHtml(label) + '</span>';
+  }).join('');
+  return '<div class="bd-flags">' + chips + '</div>';
+}
+
+function bdStepHtml(step, reqId, isFirstUnknown) {
+  var kind = (step.kind === 'write' || step.kind === 'unknown') ? step.kind : 'read';
+  var chips = (step.context || []).map(function (item) {
+    return '<span class="bd-ctx">' + escapeHtml(item) + '</span>';
+  }).join('');
+  var html = '<div class="bd-step bd-' + kind + '"' +
+    (isFirstUnknown ? ' data-bd-unknown-for="' + escapeHtml(reqId) + '"' : '') + '>' +
+    '<span class="bd-kind">' + escapeHtml(kind) + '</span>' +
+    (chips ? '<span class="bd-ctxs">' + chips + '</span>' : '') +
+    '<code class="bd-text">' + escapeHtml(step.text || '') + '</code>';
+  /* A read step's `why` is usually just the verb ("uptime"), which repeats the
+     text; only show it when it adds something ("journalctl (no vacuum/rotate)"). */
+  var why = step.why || '';
+  var firstWord = String(step.text || '').split(/\s+/)[0];
+  if (why && (kind !== 'read' || why !== firstWord)) {
+    html += '<span class="bd-why">' + escapeHtml(why) + '</span>';
+  }
+  if (step.script) {
+    html += '<details class="bd-script"><summary>decoded script</summary>' +
+      '<pre class="bd-script-body">' + escapeHtml(step.script) + '</pre></details>';
+  }
+  return html + '</div>';
+}
+
+function bdStepsHtml(r) {
+  if (!bdUsable(r)) return '';
+  var steps = r.breakdown.steps || [];
+  var firstUnknown = -1;
+  for (var u = 0; u < steps.length; u++) {
+    if (steps[u].kind === 'unknown') { firstUnknown = u; break; }
+  }
+  var out = [];
+  var currentSection = null;
+  var i = 0;
+  while (i < steps.length) {
+    var section = steps[i].section || '';
+    if (section !== currentSection) {
+      if (currentSection !== null) out.push('</div>');
+      out.push('<div class="bd-group">');
+      if (section) out.push('<div class="bd-section">' + escapeHtml(section) + '</div>');
+      currentSection = section;
+    }
+    if (steps[i].kind === 'read') {
+      var j = i;
+      while (j < steps.length && steps[j].kind === 'read'
+             && (steps[j].section || '') === currentSection) j++;
+      if (j - i >= 2) {
+        var run = [];
+        for (var k = i; k < j; k++) run.push(bdStepHtml(steps[k], r.id, false));
+        var count = String(j - i);
+        out.push('<div class="bd-run">' +
+          '<button type="button" class="bd-run-btn" data-bd-count="' + escapeHtml(count) + '" ' +
+            'onclick="event.stopPropagation();bdToggleRun(this)">' +
+            escapeHtml(count) + ' read steps ▸</button>' +
+          '<div class="bd-run-body hidden">' + run.join('') + '</div></div>');
+      } else {
+        out.push(bdStepHtml(steps[i], r.id, false));
+      }
+      i = j;
+      continue;
+    }
+    out.push(bdStepHtml(steps[i], r.id, i === firstUnknown));
+    i++;
+  }
+  if (currentSection !== null) out.push('</div>');
+  return out.join('');
+}
+
+function bdBodyHtml(r, opts) {
+  if (!bdUsable(r)) return '';
+  opts = opts || {};
+  var html = '<div class="bd-block">';
+  if (opts.raw !== false && (r.breakdown.steps || []).length >= 4) {
+    html += '<div class="bd-tools"><button type="button" class="bd-raw-btn" ' +
+      'onclick="event.stopPropagation();bdToggleRaw(this)" ' +
+      'title="Show the raw command (X)">raw command ▸</button></div>';
+  }
+  html += bdFlagsHtml(r) + bdStepsHtml(r);
+  return html + '</div>';
+}
+
+function bdBlockHtml(r, opts) {
+  return bdHeadlineHtml(r) + bdBodyHtml(r, opts);
+}
+
+/* Compact one-line headline for the queue rows (the hero card carries the
+   full step list). */
+function bdRowHeadlineHtml(r) {
+  if (!bdUsable(r)) return '';
+  return '<span class="ccq-bd bd-' + bdTone(r.breakdown) + '">' +
+    escapeHtml(r.breakdown.headline || '') + '</span>';
+}
+
+function bdToggleRun(btn) {
+  var body = btn.parentNode ? btn.parentNode.querySelector('.bd-run-body') : null;
+  if (!body) return;
+  var collapsed = body.classList.toggle('hidden');
+  var count = btn.getAttribute('data-bd-count') || '';
+  btn.innerHTML = escapeHtml(count) + (collapsed ? ' read steps ▸' : ' read steps ▾');
+}
+
+function bdToggleRaw(el) {
+  var ticket = el && el.closest ? el.closest('.jit-ticket') : null;
+  if (!ticket) return;
+  var open = ticket.classList.toggle('expanded');
+  el.classList.toggle('is-open', open);
+  el.innerHTML = escapeHtml(open ? 'hide raw command \u25be' : 'raw command \u25b8');
+}
+
+function bdHighlightFirstUnknown(id) {
+  var selector = '[data-bd-unknown-for="' + esc(String(id)) + '"]';
+  var nodes = document.querySelectorAll ? document.querySelectorAll(selector) : [];
+  var el = nodes && nodes.length ? nodes[0] : null;
+  if (!el) return false;
+  if (el.scrollIntoView) el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  el.classList.add('bd-flash');
+  setTimeout(function () { el.classList.remove('bd-flash'); }, 1800);
+  return true;
+}
+
+/* The two-press Approve: only for long commands that still contain a step we
+   could not classify. Short or all-read commands approve on the first press. */
+function bdNeedsConfirm(req) {
+  if (!req || !req.breakdown) return false;
+  var summary = req.breakdown.summary || {};
+  return (summary.unknown || 0) >= 1 && String(req.command || '').length > 500;
 }
 
 function describeCmd(cmd) {

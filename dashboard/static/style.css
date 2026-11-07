@@ -1147,6 +1147,194 @@ button::-moz-focus-inner { border: 0; padding: 0; }
     .btn-sm { padding: 6px 10px; font-size: 11px; }
   }
 
+  /* ── F2: breakdown on the approval card ──────────────────────
+     Advisory, never an approval: all-read is muted ink (not green), a write
+     is amber, an unclassified step is amber with a red rule. Agent-controlled
+     text is escaped before it gets here; these rules only shape it. */
+  .bd-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 6px;
+    margin: 2px 0 6px;
+    padding-left: 8px;
+    border-left: 2px solid var(--rule-weak);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: var(--text-micro);
+    letter-spacing: 0.3px;
+    color: var(--text-muted);
+  }
+  .bd-head.bd-write { border-left-color: var(--status-warning); color: var(--text-main); }
+  .bd-head.bd-unknown { border-left-color: var(--danger); color: var(--text-main); }
+  /* A long base64 headline must wrap instead of pushing the advice off-card:
+     flex items default to min-width:auto, which refuses to shrink. */
+  .bd-headline { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+  .bd-advice { flex: 0 0 auto; }
+  .bd-advice {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: var(--text-micro);
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    color: var(--status-warning);
+  }
+  .bd-advice-incomplete { color: var(--danger); }
+
+  .bd-block { margin: 0 0 8px; min-width: 0; }
+  .bd-tools { margin: 0 0 4px; }
+  .bd-flags { display: flex; flex-wrap: wrap; gap: 4px; margin: 0 0 6px; }
+  .bd-flag {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: var(--text-micro);
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+    color: var(--text-dim);
+    border: 1px solid var(--rule-weak);
+    border-radius: 3px;
+    padding: 1px 5px;
+  }
+  .bd-flag-encoded,
+  .bd-flag-sensitive-path,
+  .bd-flag-follows,
+  .bd-flag-repo-config,
+  .bd-flag-nested-ssh {
+    color: var(--status-warning);
+    border-color: var(--accent-line);
+  }
+
+  .bd-group { border-top: 1px solid var(--rule-weak); padding-top: 4px; margin-top: 4px; min-width: 0; }
+  .bd-group:first-child { border-top: 0; margin-top: 0; padding-top: 0; }
+  .bd-section {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: var(--text-micro);
+    letter-spacing: 1.1px;
+    text-transform: uppercase;
+    color: var(--text-quiet);
+    margin: 2px 0 3px;
+  }
+  .bd-step {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 6px;
+    padding: 2px 0 2px 8px;
+    border-left: 2px solid transparent;
+    min-width: 0;
+  }
+  .bd-step.bd-write { border-left-color: var(--status-warning); background: var(--accent-wash); }
+  .bd-step.bd-unknown { border-left-color: var(--danger); background: var(--accent-wash); }
+  .bd-kind {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: var(--text-micro);
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+    color: var(--text-quiet);
+    min-width: 42px;
+  }
+  .bd-step.bd-write .bd-kind,
+  .bd-step.bd-unknown .bd-kind { color: var(--status-warning); }
+  .bd-ctxs { display: inline-flex; flex-wrap: wrap; gap: 3px; }
+  .bd-ctx {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: var(--text-micro);
+    color: var(--text-dim);
+    border: 1px solid var(--rule-weak);
+    border-radius: 3px;
+    padding: 0 4px;
+  }
+  .bd-text {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: var(--text-micro);
+    color: var(--text-main);
+    background: transparent;
+    padding: 0;
+    overflow-wrap: anywhere;
+    min-width: 0;
+  }
+  .bd-why { font-size: var(--text-micro); color: var(--text-quiet); }
+  .bd-run-btn,
+  .bd-raw-btn {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: var(--text-micro);
+    color: var(--text-dim);
+    background: none;
+    border: 1px solid var(--rule-weak);
+    border-radius: 3px;
+    padding: 1px 6px;
+    cursor: pointer;
+  }
+  .bd-run-btn:hover,
+  .bd-raw-btn:hover { color: var(--text-main); border-color: var(--text-quiet); }
+  .bd-run-body { margin-left: 8px; }
+  .bd-script { flex-basis: 100%; margin-top: 2px; }
+  .bd-script summary {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: var(--text-micro);
+    color: var(--text-dim);
+    cursor: pointer;
+  }
+  .bd-script-body {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    max-height: 180px;
+    overflow: auto;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: var(--text-micro);
+    color: var(--text-main);
+    background: var(--bg-base);
+    border: 1px solid var(--border-color);
+    border-radius: 3px;
+    padding: 6px;
+    margin: 4px 0 0;
+  }
+  .bd-step.bd-flash { animation: bdFlash 1.6s ease; }
+  @keyframes bdFlash {
+    0%, 100% { background: transparent; }
+    25% { background: var(--accent-glow); }
+  }
+
+  /* Compact headline on the queue rows (the hero carries the full list). */
+  .ccq-bd {
+    display: block;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: var(--text-micro);
+    color: var(--text-muted);
+    margin: 2px 0 4px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .ccq-bd.bd-write,
+  .ccq-bd.bd-unknown { color: var(--status-warning); }
+
+  /* History: on-demand breakdown link + the expanded row beneath it. */
+  .bd-hist-link {
+    background: none;
+    border: 0;
+    padding: 0 2px;
+    margin-left: 2px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: var(--text-micro);
+    color: var(--text-dim);
+    text-decoration: underline dotted;
+    cursor: pointer;
+  }
+  .bd-hist-link:hover { color: var(--text-main); }
+  .bd-history-row > td {
+    padding: 6px 10px 12px;
+    background: var(--bg-base);
+    border-bottom: 1px solid var(--border-color);
+  }
+  .bd-history-cell { max-width: 860px; }
+  .bd-loading { color: var(--text-muted); font-size: var(--text-micro); }
+
+  /* The context panel is the mobile drawer below 768px, so the step list has
+     to survive a 400px column: chips wrap, text breaks anywhere. */
+  @media (max-width: 768px) {
+    .bd-step { padding-left: 6px; }
+    .bd-kind { min-width: 34px; }
+    .bd-history-cell { max-width: 100%; }
+  }
+
   /* ── Override Banner ─────────────────────────────────────── */
   .override-banner, .freeze-banner {
     background: rgba(15, 13, 10, 0.72);
