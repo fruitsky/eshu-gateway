@@ -722,6 +722,26 @@ the following. As before, each needs a `test_f1_s<N>_<what>` that fails first.
 **Round 3** paragraph to Implementer notes, push, and stop. If S1–S7 are clean
 I expect to merge F1 next round.
 
+**Round 3 — 2026-11-07 — approved and merged.**
+
+S1–S7 are fixed, each with a regression test; the R5 test change is justified
+(it encoded the `set` behaviour my S7 corrected). I re-ran all three probe sets
+(52 + 68 + 35 adversarial cases): every command that writes or executes is now
+`write` or `unknown`, and the only all-read results are genuine reads, or reads
+carrying the right flag (`sensitive-path`, `follows`, `repo-config`). Where the
+engine is wrong, it errs toward caution (a heredoc terminator with a trailing
+space is still treated as ending the body, so the next line is reported as a
+write). Performance unchanged (100 kB in 0.26 s).
+
+Live accuracy (read-only, SSH rows only): 6,558 steps, 75.9% read, 9.3% write,
+**14.7% unknown**; 44.1% of commands fully read. Acceptance criteria met.
+
+Gate re-run by the reviewer: pre-commit OK; `1703 passed`.
+
+Carried forward to F2/F4: render the step `script` field (collapsible) and the
+`follows`, `repo-config` and `sensitive-path` flags; F4 refuses `follows`,
+`repo-config` (unless allow-listed), `sensitive-path` and `complete: false`.
+
 
 ---
 
@@ -1465,8 +1485,8 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 
 | Order | Chunk | Slug | Area | Status | Branch | Depends on | Reviewer notes |
 |---|---|---|---|---|---|---|---|
-| 1 | F1 | breakdown | dashboard | **Changes requested** (round 2) | `feat/f1-breakdown` | — | R1–R11 done; S1–S7 open; live accuracy passes (15.1% unknown) |
-| 2 | F2 | review-card | UI | Ready (after F1) | `feat/f2-review-card` | F1 | |
+| 1 | F1 | breakdown | dashboard | **Merged** 2026-11-07 | `feat/f1-breakdown` @ `e0df20a` | — | 3 rounds; 155 adversarial cases; 14.7% unknown on live data |
+| 2 | F2 | review-card | UI | **Ready** | `feat/f2-review-card` | F1 | |
 | 3 | F7 | inner-target | dashboard | Ready (after F2) | `feat/f7-inner-target` | F1 | |
 | 4 | F3 | session-plans | dashboard + MCP | Ready (after F7) | `feat/f3-session-plans` | F2 | + security reviewer sign-off |
 | 5 | F4 | read-lane | dashboard | Ready (after F3) | `feat/f4-read-lane` | F1, F3, Chunk H | reviewer pass + security reviewer sign-off |
