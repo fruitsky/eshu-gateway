@@ -15,8 +15,8 @@ isHardcoreBlocked(). Two layers:
 # gateway's stage-1 blocklist.
 SELF_PROTECTION_PATTERNS = [
     '/usr/local/bin/eshu-', '/etc/eshu', '/var/run/eshu', '/run/eshu',
-    'eshu.db', 'eshu.tickets', 'eshu-session-key', 'features.d',
-    'sudoers.d/eshu', '.ssh/authorized_keys',
+    'eshu.db', 'eshu.tickets', 'eshu-session-key', 'eshu/features.d',
+    '/etc/sudoers.d/eshu',
 ]
 
 # Non-editable — anti-tamper command substitution evasion
@@ -70,17 +70,36 @@ def has_shell_metacharacters(cmd: str) -> bool:
 
 
 def hard_block_match(cmd: str):
-    """Return the matched pattern (or None) if the command hits the hardcoded
-    (non-editable) blocklist: self-protection + evasion only. Mirrors
-    dashboard/eshu-gateway.sh stage 1, including path normalisation and the
-    glob-character + 'esh' rule."""
+    """Return the matched pattern (or None) if the command hits the FATAL
+    hardcoded blocklist: explicit Eshu paths/tokens + evasion only. Mirrors
+    dashboard/eshu-gateway.sh stage 1 after path normalisation."""
     if not cmd:
         return None
     normalized = normalize_command_paths(cmd)
     for pattern in HARD_PATTERNS:
         if pattern in normalized:
             return pattern
-    if any(ch in normalized for ch in GLOB_CHARACTERS) and 'esh' in normalized:
+    return None
+
+
+def self_protection_jit_match(cmd: str):
+    """Return the force-JIT self-protection token (or None).
+
+    These broad matches must never be FATAL (a false positive would be
+    permanent) and must never auto-run: any user's authorized_keys, or a
+    wildcard next to an ``esh`` path component. Mirrors stage 1.5 of
+    dashboard/eshu-gateway.sh.
+    """
+    if not cmd:
+        return None
+    normalized = normalize_command_paths(cmd)
+    if '.ssh/authorized_keys' in normalized:
+        return '.ssh/authorized_keys'
+    if not any(ch in normalized for ch in GLOB_CHARACTERS):
+        return None
+    lower = normalized.lower()
+    if (lower.startswith('esh') or '/esh' in lower
+            or ' esh' in lower or '=esh' in lower):
         return 'glob+esh'
     return None
 

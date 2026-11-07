@@ -562,15 +562,14 @@ fi
 
 # ============================================================
 # 1. HARDCODED CORE BLOCKLIST (NON-EDITABLE — SELF-PROTECTION + EVASION)
-#    Command-safety patterns (rm -rf, mkfs, dd, firewall flush, power) are
-#    shipped by default in the synced blocklist (/etc/eshu-rblack.txt) so a
-#    human can relax them from the dashboard. Only the patterns below protect
-#    Eshu itself and cannot be withdrawn.
+#    FATAL is reserved for the explicit Eshu paths/tokens below; a false
+#    positive here is permanent because no human can approve it. Broader
+#    matches (wildcards near esh, any user's authorized_keys) are force-JIT
+#    instead: never auto-run, but a human may approve them.
 #
 #    This is defence in depth, NOT a sandbox: commands run as root, and the
 #    real boundary is stage 2a (metacharacters -> JIT) plus human approval.
-#    Paths are normalised first so /etc//eshu and /etc/./eshu cannot slip past;
-#    the glob+esh rule closes wildcard variants.
+#    Paths are normalised first so /etc//eshu and /etc/./eshu cannot slip past.
 # ============================================================
 normalize_paths() {
   local value="$1"
@@ -586,25 +585,38 @@ normalize_paths() {
 normalized_cmd=$(normalize_paths "$cmd")
 self_access=0
 case "$normalized_cmd" in
-    *"/usr/local/bin/eshu-"*|*"/etc/eshu"*|*"/var/run/eshu"*|*"/run/eshu"*|*"eshu.db"*|*"eshu.tickets"*|*"eshu-session-key"*|*"features.d"*|*"sudoers.d/eshu"*|*".ssh/authorized_keys"*)
+    *"/usr/local/bin/eshu-"*|*"/etc/eshu"*|*"/var/run/eshu"*|*"/run/eshu"*|*"eshu.db"*|*"eshu.tickets"*|*"eshu-session-key"*|*"eshu/features.d"*|*"/etc/sudoers.d/eshu"*)
         self_access=1
         ;;
 esac
-if [ "$self_access" = "0" ]; then
-    case "$normalized_cmd" in
-        *'*'*|*'?'*|*'['*)
-            case "$normalized_cmd" in
-                *esh*) self_access=1 ;;
-            esac
-            ;;
-    esac
-fi
 if [ "$self_access" = "1" ]; then
     logger -t eshu-gateway "HARDCODED BLOCK: Eshu self-access attempt: $cmd"
     log_auto_approve "$cmd" "blocked"
     echo "[LOCKED] FATAL: Access to Eshu Gateway files is permanently blocked. [Gateway $GATEWAY_VERSION]"
     exit 1
 fi
+
+# ============================================================
+# 1.5 FORCE-JIT SELF-PROTECTION (never FATAL, never auto-run)
+# ============================================================
+SELF_JIT="0"
+case "$normalized_cmd" in
+    *".ssh/authorized_keys"*) SELF_JIT="1" ;;
+esac
+if [ "$SELF_JIT" = "0" ]; then
+    lower_cmd="${normalized_cmd,,}"
+    case "$lower_cmd" in
+        esh*|*"/"esh*|*" "esh*|*"="esh*)
+            case "$normalized_cmd" in
+                *'*'*|*'?'*|*'['*) SELF_JIT="1" ;;
+            esac
+            ;;
+    esac
+fi
+if [ "$SELF_JIT" = "1" ]; then
+    logger -t eshu-gateway "SELF-PROTECTION JIT: forcing JIT for: $cmd"
+fi
+
 case "$cmd" in
     *'$(which '*|*'`which '*)
         logger -t eshu-gateway "HARDCODED BLOCK: Command substitution evasion detected: $cmd"
@@ -728,7 +740,7 @@ if [ -f /etc/eshu-zero-trust ] && [ "$(cat /etc/eshu-zero-trust 2>/dev/null || e
   ZT_ACTIVE="1"
 fi
 
-if [ "$ENCODED_EXEC" = "0" ] && [ "$HAS_META" = "0" ] && [ "$ZT_ACTIVE" != "1" ] && [ -f /etc/eshu-exact.txt ] && grep -qFx "$cmd" /etc/eshu-exact.txt; then
+if [ "$ENCODED_EXEC" = "0" ] && [ "$HAS_META" = "0" ] && [ "$SELF_JIT" = "0" ] && [ "$ZT_ACTIVE" != "1" ] && [ -f /etc/eshu-exact.txt ] && grep -qFx "$cmd" /etc/eshu-exact.txt; then
   log_auto_approve "$cmd" "auto-approved"
   run_sanitized bash -c "$cmd"
 fi
@@ -740,7 +752,7 @@ if [ -f /etc/eshu-rwhite.txt ] && [ -s /etc/eshu-rwhite.txt ]; then
   while IFS= read -r pattern || [ -n "${pattern:-}" ]; do
     [ -z "${pattern:-}" ] && continue
     [[ "${pattern:-}" =~ ^[[:space:]]*# ]] && continue
-    if [ "$ENCODED_EXEC" = "0" ] && [ "$HAS_META" = "0" ] && [ "$ZT_ACTIVE" != "1" ] && [[ "$cmd" =~ $pattern ]]; then
+    if [ "$ENCODED_EXEC" = "0" ] && [ "$HAS_META" = "0" ] && [ "$SELF_JIT" = "0" ] && [ "$ZT_ACTIVE" != "1" ] && [[ "$cmd" =~ $pattern ]]; then
       log_auto_approve "$cmd" "auto-approved"
       run_sanitized bash -c "$cmd"
     fi
@@ -751,7 +763,7 @@ fi
 # 4.5 FEATURE SCRIPTS (downloaded by poller when flag enabled)
 # ============================================================
 FEATURES_DIR="/etc/eshu/features.d"
-if [ "$ENCODED_EXEC" = "0" ] && [ -d "$FEATURES_DIR" ]; then
+if [ "$ENCODED_EXEC" = "0" ] && [ "$SELF_JIT" = "0" ] && [ -d "$FEATURES_DIR" ]; then
   for f in "$FEATURES_DIR"/*.sh; do
     [ -f "$f" ] && . "$f"
   done

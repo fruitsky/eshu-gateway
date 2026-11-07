@@ -17,6 +17,7 @@ from core.cmd_blocklist import (
     hard_block_match,
     blocklist_substring_match,
     has_shell_metacharacters,
+    self_protection_jit_match,
 )
 
 
@@ -49,6 +50,18 @@ def evaluate_policy_verdict(command, exact_whitelist, regex_whitelist, regex_bla
                 "matched_pattern": pattern,
                 "reason": f"Blocklist match (pattern: {pattern})",
             }
+
+    # Chunk R1: broad self-protection matches are force-JIT, never FATAL.
+    # Checked after the editable blocklist to mirror the gateway's stage order.
+    self_jit = self_protection_jit_match(command)
+    if self_jit:
+        return {
+            "action": "jit",
+            "tier": None,
+            "detail_type": "self_protection_jit",
+            "matched_pattern": self_jit,
+            "reason": f"Self-protection match ({self_jit}) requires JIT approval",
+        }
 
     # Chunk 2a parity: a metacharacter command never auto-approves. The hard
     # block and the editable blocklist above still win; everything else goes to
