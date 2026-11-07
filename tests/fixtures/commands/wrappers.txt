@@ -1,0 +1,38 @@
+### sudo-restart | kinds=write | flags=
+sudo systemctl restart nginx
+
+### sudo-u-read | kinds=read | flags=
+sudo -u root -n cat /etc/os-release
+
+### timeout-read | kinds=read | flags=
+timeout 30 journalctl -u nginx --no-pager
+
+### nice-read | kinds=read | flags=
+nice -n 10 ls -la
+
+### env-pct | kinds=read | flags= | inner=pct:103
+env FOO=bar pct exec 103 -- hostname
+
+### pct-docker | kinds=read | flags= | inner=pct:103,docker:web01
+pct exec 103 -- docker exec -it web01 date
+
+### docker-exec-sh | kinds=read,read | flags= | inner=docker:web01
+docker exec -it web01 sh -c 'journalctl -u app | tail -n 5'
+
+### compose-exec | kinds=read | flags= | inner=docker:web
+docker compose -f docker-compose.yml exec web uptime
+
+### su-c | kinds=read | flags=
+su - root -c 'cat /etc/hostname'
+
+### sh-c | kinds=read,read | flags=
+sh -c 'ls -la; df -h'
+
+### depth3-ok | kinds=read | flags=
+sudo sudo sudo ls
+
+### depth4-unknown | kinds=unknown | flags= | complete=false
+sudo sudo sudo sudo ls
+
+### pct-status | kinds=read | flags=
+pct status 103

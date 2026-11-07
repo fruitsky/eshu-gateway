@@ -1,0 +1,23 @@
+### pipeline-recon | kinds=read,read,read,read,read | flags=
+journalctl -u nginx --no-pager | grep -i error | sed 's/x/y/' | sort | uniq -c
+
+### pipeline-awk | kinds=read,read,read,read,read,read | flags=
+cat /var/log/syslog | awk '{print $1}' | sort | uniq -c | sort -rn | head -20
+
+### ss-grep | kinds=read,read | flags=
+ss -tulpn | grep 443
+
+### ip-show | kinds=read | flags=
+ip addr show
+
+### ip-add | kinds=write | flags=
+ip addr add 192.0.2.5/32 dev eth0
+
+### journal-vacuum | kinds=write | flags=
+journalctl --vacuum-time=7d
+
+### docker-stats | kinds=read | flags=
+docker stats --no-stream
+
+### docker-stats-stream | kinds=unknown | flags=
+docker stats
