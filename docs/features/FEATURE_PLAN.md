@@ -496,6 +496,39 @@ Three things for the reviewer to know about the new output:
 
 (1343 baseline + 321 round 1 + 22 round 2.)
 
+**Round 3 — 2026-11-07 — round 2 addressed.**
+
+S1–S7 are fixed on this branch (on top of the merge of `feature-roadmap`, which
+brings security Chunk H). Each has a regression test that failed on the
+reviewed commit; they live in `tests/test_cmd_parse.py::TestReviewRound2`.
+
+| # | Done | How | Test |
+|---|---|---|---|
+| S1 | yes | Heredoc bodies are now skipped only when the newline that starts them arrives, and the heredoc attaches to the statement it belongs to — so `cat <<EOF; rm x` and `cat <<EOF && rm x` keep the second command as a `write` step instead of swallowing it. | `test_f1_s1_command_after_heredoc_operator_same_line` |
+| S2 | yes | `_scan_heredocs()` collects **every** heredoc operator on the operator line first (`_heredoc_ops`) and then reads the bodies in order, each with its own quoting; `cat <<A <<B` scans both bodies. Quoted/partially quoted delimiters (`'A'`, `E"O"F`, `\EOF`) still mark the body as data. | `test_f1_s2_every_heredoc_body_is_scanned` |
+| S3 | yes | `>&` with a non-numeric target joined the write redirects (a digit or `-` is still fd duplication), and `&>>` is parsed as one operator instead of `&>` + `>` — which had lost the target and set `complete: false`. | `test_f1_s3_ampersand_redirects_write_files` |
+| S4 | yes | `tar` treats `--checkpoint-action` with `exec`, `-I`/`--use-compress-program`, `-F`/`--info-script`/`--new-volume-script`, `--rsh-command` and `--rmt-command` as `unknown` (`tar runs a program`) before any mode parsing. `--to-command` is left as it was, per the review. | `test_f1_s4_tar_options_that_execute` |
+| S5 | yes | The awk program is split into statements on `;`, `{`, `}` and newline outside string literals: a statement starting with `print`/`printf` that contains `>`/`>>` is a `write`, `|` is `unknown`; `c|getline` (no spaces) is caught too. | `test_f1_s5_awk_output_and_command_pipes` |
+| S6 | yes | `git status`/`log`/`diff`/`show` stay `read` but set the new `repo-config` flag (they can run repository-configured programs); `git branch` and every other verb do not. | `test_f1_s6_git_reads_carry_repo_config_flag` |
+| S7 | yes | `set` is `read` again with why `shell options` (`set -e`, `set -euo pipefail`, `set +x`, `set -- a b`, bare `set`); `unset` of a dangerous name and the other R5 rules are unchanged. The round-1 R5 test was updated because it asserted the old `set` behaviour. | `test_f1_s7_set_is_shell_options` |
+
+Notes for the merge:
+
+* `repo-config` is advisory only (F4 decides whether to refuse); it is not set
+  for `git -c` (already `unknown`) or for non-read subcommands.
+* The optional accuracy items from the review (`dig`/`host`/`nslookup`,
+  `pvesm status|list`) were deliberately left out — they were marked "not
+  required for merge".
+
+`bash scripts/verify.sh` (pre-commit green):
+
+```
+1703 passed, 7 warnings in 339.88s (0:05:39)
+```
+
+(1686 on the branch before this round + 10 from the merged security Chunk H +
+7 new S tests.)
+
 ### Reviewer notes
 
 **Round 1 — 2026-11-07 — changes requested.**
