@@ -1,12 +1,26 @@
 # Feature Plan — Reviewable approvals & less approval fatigue
 
-Status: **draft** · Branch: `feature-roadmap` (local) · Baseline: `master@625995d`
+Status: **active** · Branch: `feature-roadmap` · Baseline: `master@4d13fd8` (security chunks 1–5 + R merged and deployed), **1343 tests passing** (`bash scripts/verify.sh`)
 
 This plan turns the feature analysis of 2026-11-06 into small, reviewable
-chunks. It uses the same workflow as `docs/security/HARDENING_PLAN.md` (on
-branch `security-hardening`): one agent implements a chunk, a second agent
-reviews it against the acceptance criteria before it is merged. **Nothing
-reaches the dashboard LXC or any gateway until the rollout gate in § 8 passes.**
+chunks. One agent (the **implementer**) builds one chunk per branch; a second
+agent (the **reviewer**) reviews the diff against the chunk's acceptance
+criteria and merges it. The security work (`docs/security/HARDENING_PLAN.md`,
+chunks 6–7) is **paused** while this plan runs. **Nothing reaches the
+dashboard LXC or any gateway until the rollout gate in § 8 passes.**
+
+## 0. Start here (implementer)
+
+1. Read § 1 (why), § 2 (ground rules) and **only** the chunk you are given.
+2. Do the chunks **in the order of the status table (§ 9)**. Start with the
+   first chunk whose status is **Ready**. Do not start a chunk that says
+   *after* another chunk until that chunk is **Merged**.
+3. One chunk per branch, one branch per hand-off. When you are done, push the
+   branch and stop. The reviewer will answer on the same branch (review notes
+   are committed into the chunk's "Reviewer notes" section) or merge it.
+4. If anything in a chunk is unclear, contradicts the code, or looks unsafe:
+   do the safe, smaller thing, and explain it under **Implementer notes**.
+   Do not widen the scope.
 
 ---
 
@@ -43,40 +57,117 @@ The work below, in order:
 
 ---
 
-## 2. Ground rules
+## 2. Ground rules (read before every chunk)
 
-Everything in `HARDENING_PLAN.md` § 0 applies unchanged (branching, generated
-installers, compatibility rule, hermetic tests, style). The differences:
+### 2.1 Branching and workflow
 
-* Chunk branches are `feat/fN-<slug>`, created from **`feature-roadmap`**.
-  Do not push to `master`, `feature-roadmap` or `security-hardening`.
-* Test names: `test_fN_<what>`.
-* **No real data in fixtures.** Command fixtures are synthetic. They may copy
-  the *shape* of live traffic (sections, `pct exec` loops, journalctl
+1. `git fetch origin && git switch feature-roadmap && git pull --ff-only`
+2. Create the chunk branch **from `feature-roadmap`**:
+   `git switch -c feat/fN-<slug>` (the slug is in each chunk heading).
+3. Implement **only that chunk**. Out-of-scope findings go under
+   "Implementer notes" — do not fix them.
+4. Run the full gate: `bash scripts/verify.sh` (≈ 6 min). It must be green and
+   the test count must be **≥ the previous count + the tests you added**.
+   Quote the final pytest summary line in your implementer notes.
+5. Conventional commits, small and logical, e.g.
+   `feat(dashboard): add command breakdown engine`. End every commit message with
+   a `Co-Authored-By:` line naming your model, if your harness adds one.
+6. `git push -u origin feat/fN-<slug>`. **Do not** merge it yourself and **do
+   not** push to `master`, `feature-roadmap` or `security-hardening`.
+7. Last commit on the branch: fill in "Implementer notes" for the chunk in this
+   file (what you did, anything surprising, what you deliberately did not do,
+   the pytest summary line, and for UI chunks the screenshot paths).
+
+The reviewer merges approved chunks into `feature-roadmap` and updates § 9.
+
+### 2.2 Source-of-truth files — never hand-edit generated copies
+
+| Edit this | Never edit by hand |
+|---|---|
+| `dashboard/eshu-gateway.sh` | `dashboard/eshu-gateway-install.sh` |
+| `dashboard/eshu-poller.sh` | `dashboard/static/eshu-gateway-install.sh` |
+| `dashboard/eshu-logger.sh` | `dashboard/static/dev/eshu-gateway-install.sh` (managed by the Edge pipeline) |
+| `dashboard/eshu-installer-template.sh` | |
+
+After changing any left-hand file:
+
+```bash
+cd dashboard && python3 gen_installer.py && cd ..
+git diff --stat   # both generated installers must change identically
+```
+
+Commit the regenerated `dashboard/eshu-gateway-install.sh` and
+`dashboard/static/eshu-gateway-install.sh` **in the same commit** as the
+source change. Never touch `dashboard/static/dev/`. Only F5 touches gateway
+scripts; every other chunk is dashboard-only.
+
+### 2.3 Compatibility rule
+
+The dashboard is deployed first; gateways update later via Build → Edge → Fleet.
+
+* **New dashboard ↔ old gateway must keep working.** Every request today's
+  gateway sends must still be accepted, and every response field it reads keeps
+  its shape. New JSON fields are additive only.
+* New gateway ↔ new dashboard must work. New gateway ↔ old dashboard need not.
+* Each chunk states its compat impact. If you think a change breaks this rule,
+  stop and say so in the implementer notes.
+
+### 2.4 Testing rules
+
+* Hermetic only: **no root, no network, no real `/etc`, no paths outside
+  pytest's `tmp_path`.** Use the existing harnesses:
+  * `tests/conftest.py` — `client` / `auth_client` FastAPI fixtures (state-changing
+    calls from `auth_client` need the CSRF header the fixture already sets; check
+    how `tests/test_sec_web_hardening.py` does it).
+  * `tests/test_gateway_script.py` — `GatewaySandbox` (copies the real
+    `eshu-gateway.sh`, relocates paths, stubs `curl`/`logger`). Extend it; don't fork it.
+  * `tests/test_poller.py` — same pattern for the poller.
+  * `tests/test_db_concurrency.py` — pattern for race tests.
+* Test names: `test_fN_<what>`. Every behaviour in "Tests to add" gets a test.
+* Do not weaken, skip or delete existing tests. If one must change, say why in
+  the commit message.
+* `bash scripts/pre-commit.sh` must pass (`bash -n`, `py_compile`, `node --check app.js`, UI token checks).
+
+### 2.5 Data and privacy (the repo is public)
+
+* **No real data in the repo.** Fixtures are synthetic. They may copy the
+  *shape* of live traffic (section markers, `pct exec` loops, journalctl
   pipelines, a base64 script piped through `su -c`) but never real hostnames,
-  IPs, paths that reveal people, or `.env` contents.
-* **Classification is advisory unless a chunk says otherwise.** F1/F2 only
-  change what the operator sees. Only F4 lets a classification approve
-  anything, and only behind an off-by-default setting.
+  IPs, people's names, paths that reveal people, tokens or `.env` contents.
+  Use `192.0.2.x` / `198.51.100.x` (documentation ranges) and names like `web01`.
+* Never copy the live database into the repo. `eshu.db` must not be committed.
 
-### 2.1 Coexisting with the security work
+### 2.6 Safety rules specific to this plan
 
-The security branch changes the same files (`main.py`, `app.js`,
-`eshu-gateway.sh`). The rules:
+* **Classification is advisory unless a chunk says otherwise.** F1/F2 change
+  only what the operator sees. Only F3 (exact operator-approved bytes) and F4
+  (off by default, shadow first) create new auto-approve paths.
+* **New auto-approve paths are decided on the dashboard, inside
+  `POST /api/request`** (`receive_request`, `dashboard/main.py` ≈ line 680),
+  the same way session and host overrides are. The gateway already refuses to
+  auto-run anything with shell metacharacters (stage 2.7 `HAS_META` in
+  `eshu-gateway.sh`) and runs only the exact bytes of a claimed ticket. **No
+  chunk adds a gateway-side allowlist, prefix match or new auto-run stage.**
+* Order inside `receive_request` after this plan (keep it exactly):
+  metadata validation → rate limit → decode → freeze flag → encoded-payload
+  block → **F3 plan** → session override → **F4 read lane** → host override → pending.
+  Freeze, Zero-Trust and the blocklists always win.
+* Every new approval path writes an audit event and a distinct `reason`
+  prefix on the request row (F6 counts on it).
+* Every agent-controlled string shown in the UI (command text, step text,
+  section names, plan notes) goes through `escapeHtml`. The CSP allows inline
+  scripts, so escaping is the real XSS boundary.
 
-| Chunk | Touches | Can start |
-|---|---|---|
-| F1 | new module + one hook in `main.py` | **now**, from `feature-roadmap` |
-| F2, F3, F4, F6, F7 | `main.py`, `app.js`, `db/*` | after security chunks 4–5 are merged into `security-hardening`; then merge `security-hardening` into `feature-roadmap` first |
-| F5 | `eshu-gateway.sh`, poller, installers | only after security chunks **1–3** are merged (JSON body rules, ticket binding, temp-file rules) |
+### 2.7 Style
 
-**Design rule that follows from security chunk 2a:** once 2a lands, any
-command with shell metacharacters will never auto-run from a gateway
-allowlist. So every new "auto-approve" path here (F3 plans, F4 read lane) is
-decided **on the dashboard, inside `POST /api/request`**, the same way host
-and session overrides work today (`main.py:561–634`). The gateway then claims
-the ticket as usual, and security chunk 1c makes sure it runs exactly the
-approved bytes. **No feature in this plan adds a gateway-side allowlist.**
+* Python: match the surrounding code; **no new third-party packages**.
+* JS: plain ES5-style like `app.js`; no build step, no frameworks.
+* Bash (F5 only): keep `set -eo pipefail`, quote every expansion, no new
+  dependencies beyond `bash`, `curl`, `python3`, `coreutils`, `systemd`. Gateways
+  include a Raspberry Pi 1: no extra `python3` start on the hot path. The
+  gateway runs as root via `sudo`; temp files only via `mktemp -p /run/eshu`
+  (the private 0700 work dir the poller creates — refuse if it is missing or a symlink).
+* No drive-by refactors, renames or reformatting.
 
 ---
 
@@ -226,6 +317,10 @@ Additive JSON fields and one new GET endpoint. No gateway change.
 
 _(fill in)_
 
+### Reviewer notes
+
+_(reviewer)_
+
 ---
 
 ## Chunk F2 — Reviewable approval card · slug `review-card` · dashboard UI
@@ -282,6 +377,10 @@ UI only.
 ### Implementer notes
 
 _(fill in)_
+
+### Reviewer notes
+
+_(reviewer)_
 
 ---
 
@@ -361,11 +460,15 @@ claim tickets for `approved` rows.
 
 - [ ] All tests above pass; the audit log shows who approved which items.
 - [ ] Docs updated (AGENT_MANUAL, API.md).
-- [ ] Reviewer sign-off from the security chat on the approval path (one paragraph in Implementer notes).
+- [ ] Reviewer does a dedicated security pass on the approval path (atomic use counting, session binding, ordering in § 2.6) and records it under Reviewer notes.
 
 ### Implementer notes
 
 _(fill in)_
+
+### Reviewer notes
+
+_(reviewer)_
 
 ---
 
@@ -419,7 +522,7 @@ Additive; old gateways work unchanged (same approved-row path as overrides).
 ### Acceptance criteria
 
 - [ ] Default is `off` on every existing and new gateway (migration test).
-- [ ] Security chat has reviewed `cmd_rules.py` and `read_lane.py` before merge (recorded here).
+- [ ] Reviewer does a dedicated security pass on `cmd_rules.py` and `read_lane.py` (try to find a read-classified command that writes, executes or leaks a secret) and records it under Reviewer notes.
 - [ ] Rollout note: at least 7 days in `shadow` on at least 2 gateways before
       `on` is offered in the UI (the toggle shows "on" disabled until that gateway has ≥ 7 days of shadow data).
 
@@ -427,12 +530,20 @@ Additive; old gateways work unchanged (same approved-row path as overrides).
 
 _(fill in)_
 
+### Reviewer notes
+
+_(reviewer)_
+
 ---
 
 ## Chunk F5 — Execution results (exit code + output tail) · slug `exec-results` · gateway + dashboard
 
-> **Blocked** until security chunks 1–3 are merged. Before this chunk starts,
-> the reviewer rechecks this design against the merged gateway script.
+> **Two-step chunk.** First push a branch with **only** a design note under
+> Implementer notes: the exact bash for capturing the output tail and posting
+> it, how it interacts with `run_sanitized`, `set -eo pipefail`, the
+> `[ESHU exit=N]` sentinel and the JSON-body rules at the top of
+> `eshu-gateway.sh`, and the temp-file handling (§ 2.7). Wait for the reviewer
+> to mark the design **approved** in Reviewer notes, then implement on the same branch.
 
 ### Goal
 
@@ -443,7 +554,7 @@ duration, and the last part of the (already sanitized) output.
 
 * Gateway: `run_sanitized` keeps streaming to the agent unchanged and, in
   addition, tees the sanitized stream into a private temp file (created
-  following the security chunk 3 rules), capped at 16 KiB (keep the **tail**:
+  with `mktemp -p /run/eshu`, removed on exit via `trap`), capped at 16 KiB (keep the **tail**:
   `tail -c 16384`). After the command ends it posts, in the background:
   `POST /api/exec-result {target_ip, request_id?, encoded_command, exit_code, duration_ms, encoded_output, output_truncated}`.
   * `request_id` is known for JIT/ticket paths. For allowlist and window paths
@@ -483,6 +594,10 @@ New endpoint, new poll field. Old gateways never call it.
 
 _(fill in)_
 
+### Reviewer notes
+
+_(reviewer)_
+
 ---
 
 ## Chunk F6 — Session wrap-up & "how approved" stats · slug `session-wrapup` · dashboard
@@ -508,6 +623,10 @@ _(fill in)_
 
 _(fill in)_
 
+### Reviewer notes
+
+_(reviewer)_
+
 ---
 
 ## Chunk F7 — Inner target attribution · slug `inner-target` · dashboard
@@ -519,14 +638,23 @@ _(fill in)_
 * History filter and a chip on rows; Statistics "busiest targets" counts inner targets.
 * Optional: map `pct:<id>` to a gateway hostname when the Proxmox integration
   knows it (read-only lookup, cached; skip if not configured).
+* When the operator opens a **host override** on a gateway whose recent
+  history (30 days) has `pct:`/`qm:` inner targets, the override dialog shows:
+  "This host reaches N containers/VMs via pct/qm — an override here also
+  covers commands run inside them." (Warning only; no behaviour change.)
 
 ### Tests
 
 * Fill-in for each wrapper type; `multi`; none.
+* The override-dialog warning appears only when inner targets exist (API field test).
 
 ### Implementer notes
 
 _(fill in)_
+
+### Reviewer notes
+
+_(reviewer)_
 
 ---
 
@@ -545,6 +673,10 @@ _(fill in)_
 
 _(fill in)_
 
+### Reviewer notes
+
+_(reviewer)_
+
 ---
 
 ## 7. Backlog (not planned in detail)
@@ -562,10 +694,10 @@ _(fill in)_
 
 ## 8. Rollout gate
 
-Same as `HARDENING_PLAN.md` § 8, plus:
+The implementer never deploys. The reviewer runs this gate (same shape as `docs/security/HARDENING_PLAN.md` § 8):
 
-1. The security rollout goes first. No feature chunk is deployed before the
-   merged security work is live and soaked.
+1. The security rollout (chunks 1–5 + R) is already live. Security chunks 6–7
+   are paused; they resume after this plan's rollout.
 2. Deploy dashboard-only chunks (F1, F2, F6, F7, F8) together. F3 and F4 each
    need a separate deploy note in the CHANGELOG ("new approval path").
 3. F4 ships with every gateway `off`; the operator moves gateways to `shadow` by hand.
@@ -575,13 +707,16 @@ Same as `HARDENING_PLAN.md` § 8, plus:
 
 ## 9. Status
 
-| Chunk | Slug | Area | Status | Branch | Depends on | Reviewer notes |
-|---|---|---|---|---|---|---|
-| F1 | breakdown | dashboard | **Ready** | `feat/f1-breakdown` | — | |
-| F2 | review-card | UI | Ready (after F1 + sec 4–5) | `feat/f2-review-card` | F1, sec 4 (CSP) | |
-| F3 | session-plans | dashboard + MCP | Ready (after F2) | `feat/f3-session-plans` | F2, sec 5 | |
-| F4 | read-lane | dashboard | Ready (after F3) | `feat/f4-read-lane` | F1, F3, security review | |
-| F5 | exec-results | gateway + dashboard | Blocked | `feat/f5-exec-results` | sec 1–3 | design recheck needed |
-| F6 | session-wrapup | dashboard | Ready (after F4) | `feat/f6-session-wrapup` | F3, F4 (F5 optional) | |
-| F7 | inner-target | dashboard | Ready (after F1) | `feat/f7-inner-target` | F1 | |
-| F8 | test-traffic | dashboard | Ready | `feat/f8-test-traffic` | — | low priority |
+| Order | Chunk | Slug | Area | Status | Branch | Depends on | Reviewer notes |
+|---|---|---|---|---|---|---|---|
+| 1 | F1 | breakdown | dashboard | **Ready** | `feat/f1-breakdown` | — | |
+| 2 | F2 | review-card | UI | Ready (after F1) | `feat/f2-review-card` | F1 | |
+| 3 | F7 | inner-target | dashboard | Ready (after F2) | `feat/f7-inner-target` | F1 | |
+| 4 | F3 | session-plans | dashboard + MCP | Ready (after F7) | `feat/f3-session-plans` | F2 | |
+| 5 | F4 | read-lane | dashboard | Ready (after F3) | `feat/f4-read-lane` | F1, F3 | reviewer security pass |
+| 6 | F5 | exec-results | gateway + dashboard | Ready (after F4) — design first | `feat/f5-exec-results` | — | design approval needed |
+| 7 | F6 | session-wrapup | dashboard | Ready (after F5) | `feat/f6-session-wrapup` | F3, F4, F5 | |
+| 8 | F8 | test-traffic | dashboard | Ready (after F6) | `feat/f8-test-traffic` | — | low priority |
+
+Chunks are done **in the order column**; each new chunk branches from the
+updated `feature-roadmap` after the previous one is merged.
