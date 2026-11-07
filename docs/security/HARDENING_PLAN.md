@@ -1144,6 +1144,13 @@ dashboard LXC or gateways. The reviewer runs it; the implementer does not deploy
 Chunks are done **in order**; each new chunk branches from the updated
 `security-hardening` after the previous one is merged.
 
+Rollout 2026-11-07: `master` deployed to the dashboard LXC (pre-deploy DB
+backup taken; rollback commit `625995d`). Edge pushed to dev gateways heimdall
+and n8n; Hermes post-hardening suite passed (15/15 incl. re-tests 9b/11b);
+a second dev push confirmed the new poller's update path; Fleet Run passed on
+both. Promoted to Fleet: all 16 active gateways downloaded the installer and
+re-synced healthy (poller + gateway OK); zero rejected gateway bodies, zero 5xx.
+
 Review of 2026-11-07: chunks 1–5 reviewed as a stack and fast-forwarded into
 `security-hardening`. Reviewer re-ran `pre-commit.sh`, the installer-sync
 check and the **full suite at `2d579be`: 1313 passed**, plus private repros
