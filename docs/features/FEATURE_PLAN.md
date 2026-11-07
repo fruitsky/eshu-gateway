@@ -308,8 +308,11 @@ Additive JSON fields and one new GET endpoint. No gateway change.
 ### Acceptance criteria
 
 - [ ] All tests green; `bash scripts/verify.sh` count ≥ baseline + new tests.
-- [ ] Reviewer's `breakdown_report.py` run on the live DB copy: ≤ 15% of steps `unknown`,
-      and every `unknown` in the top 20 is either justified or added to the rules.
+- [ ] Reviewer's `breakdown_report.py` run on the live DB copy (SSH rows only, see R11):
+      ≤ 20% of steps `unknown`, and every `unknown` in the top 20 is either justified
+      (interpreter code, `curl`, site-specific CLIs, user-defined functions) or added to the rules.
+      *(Revised in review round 1 from 15%: the first measurement showed the remaining
+      unknowns are mostly legitimately opaque.)*
 - [ ] Not one fixture contains real hostnames, IPs or secrets.
 - [ ] No behaviour change: `/api/policies/test`, `/preview` and the gateway are untouched.
 
@@ -413,7 +416,141 @@ performance, report and API tests: **321 tests added** (baseline 1343).
 
 ### Reviewer notes
 
-_(reviewer)_
+**Round 1 — 2026-11-07 — changes requested.**
+
+Good work overall: the structure is clean, the module is total (never raises),
+the API hook is pending-only as specified, the report is read-only, the
+fixtures contain no real data, and the implementer notes are excellent. I
+re-ran the full gate (see the end of this section). The problems below are all in
+one direction: **a step is labelled `read` (or disappears) when the shell would
+write or execute.** F1 is advisory, but F2 shows operators "all read" and F4
+will auto-run on it, so this direction must be closed before merge. Every item
+below needs a regression test (`test_f1_r<N>_<what>`) that fails on the current branch.
+
+**Parser differentials (shell runs something the breakdown does not show)**
+
+* **R1 — critical: `#` inside a word is treated as a comment.** `shlex`
+  starts a comment at any `#` that begins a token *in its own state machine*,
+  which includes mid-word after a path separator or letter run. Example:
+  `ls /tmp/#dir; rm f` gives one step, `ls /tmp/`, and the `rm` vanishes; the
+  same happens with `echo a#b; rm f`. Bash only starts a comment when `#` begins
+  a word (after whitespace or an operator). Fix: set `commenters = ''` and strip
+  comments yourself at word starts, outside quotes. Tests: both examples give
+  two steps, the second `write`; `ls # rm f` is still one step.
+* **R2 — high: substitutions in heredoc bodies, here-strings and redirect
+  targets are never parsed.** `cat <<EOF` with a `$( … )` line in the body,
+  `cat <<< "$( … )"` and `cat < "$( … )"` all come out as one `read` step, but
+  the shell runs the substitution. Fix: for an **unquoted** heredoc delimiter,
+  scan the body for `$(`/backticks and parse them as steps (context `heredoc`);
+  quoted delimiters (`'EOF'`, `"EOF"`, `\EOF`) keep the body as data. Parse
+  substitutions in every redirect target and here-string word.
+* **R3 — high: process substitution is not parsed.** `cat <(rm -rf x)` is
+  `unknown` only by accident (the redirect loses its target), and
+  `diff <(ls a) <(ls b)` comes out as two `read` steps with `complete: false`.
+  Parse `<( … )` / `>( … )` as nested steps (context `procsubst`), with the
+  outer step's kind the worst of its own and the inner kinds. `>( … )` is
+  always at least `write`-adjacent: classify it like a pipe sink.
+
+**Verb table: write/execute paths labelled read**
+
+* **R4 — high: `sed`.** `-i` is missed in combined short flags: `sed -Ei`,
+  `sed -ri`, `sed -ni` and `sed -si` are all `read` today (and `-Ei` is a very
+  common agent spelling). Treat any short-flag cluster containing `i` as
+  in-place. `s` commands with flag letters, `s/x/y/ge` and `s/x/y/gw FILE`, and
+  any delimiter (`s#a#b#e`, `s|a|b|w f`) must be caught. `-f/--file SCRIPT`
+  → `unknown` (we cannot see the script).
+* **R5 — high: environment and shell-state changes that alter later steps.**
+  `LD_PRELOAD=… cat f`, `PATH=…:$PATH ls`, `env LD_PRELOAD=… ls`,
+  `export PATH=…; ls` and `printf -v PATH …; ls` are all-read today, but each
+  can make the following "read" execute arbitrary code. Rule: an assignment
+  prefix, an `env NAME=…` argument, or an `export/declare/typeset/readonly/local`
+  argument that sets a **dangerous name** (`PATH`, `LD_*`, `BASH_ENV`, `ENV`,
+  `IFS`, `SHELLOPTS`, `BASHOPTS`, `PS4`, `PROMPT_COMMAND`, `PYTHON*`, `PERL5*`,
+  `RUBY*`, `NODE_OPTIONS`, `GIT_*`) makes that step `unknown`, with why
+  `changes how later commands run`. `set`, `unset`, `alias`, `hash`, `enable`,
+  `trap`, `source`, `.`, `read`/`printf -v` into a dangerous name → `unknown`.
+  Remove `export`, `unset` and `set` from `READ_VERBS` and give them a handler.
+  Safe assignments (`FOO=1 ls`, `export LC_ALL=C`) stay `read`.
+* **R6 — high: path-qualified verbs.** `classify` uses
+  `os.path.basename(argv[0])`, so `/tmp/x/cat f` and `./cat f` are `read`. A
+  verb containing `/` is classified by its basename **only** when its directory
+  is one of `/bin`, `/usr/bin`, `/sbin`, `/usr/sbin`, `/usr/local/bin`,
+  `/usr/local/sbin`; otherwise `unknown` (`runs a binary outside the system
+  paths`). Apply the same rule to wrapper detection: a non-system
+  `…/sudo`, `…/timeout`, `…/env` is not unwrapped.
+* **R7 — medium: verb-specific gaps.**
+  * `awk`: `system (` with whitespace, `print … | "cmd"` / `printf … | "cmd"`
+    (pipe to a command), `"cmd" | getline` (already), `-f/--file PROG` →
+    `unknown`; `-i`/`--include` stays `write`, and `@include` → `unknown`.
+  * `find`: add `-fprint0` to the write flags.
+  * `git`: `--output`/`--output=` on `log/diff/show` → `write`; `--ext-diff`
+    and `--textconv` → `unknown` (they run configured programs).
+  * `smartctl`: write/action flags win over read flags — `-s`, `--smart`, `-t`,
+    `--test`, `-X`, `--abort`, `-o`, `--offlineauto`, `-S`, `--saveauto`,
+    `--set` → `write`. Today `smartctl -a -t long /dev/sda` is `read`.
+  * `ip`: `ip netns exec NS cmd…` is a wrapper. Unwrap it (context `netns NS`)
+    instead of reporting `write`.
+  * `sort --compress-program=…` → `unknown`; `tree -o FILE` → `write`;
+    `dmidecode --dump-bin` → `write`; `systemd-analyze set-*` → `write`.
+  * `nvidia-smi`: `read` only with no arguments or with `-q`, `-L`, `--query*`,
+    `--format`, `-i`/`--id`; anything else → `unknown` (`-r`, `-pl`, `-pm`, … change the GPU).
+    `vcgencmd`: `read` only for `measure_*`, `get_*`, `version`, `commands`; else `unknown`.
+  * Follow/stream modes (`tail -f/-F/--follow`, `journalctl -f/--follow`,
+    `docker logs -f/--follow`, `dmesg -w/--follow`, `docker events`): keep
+    `read` but add flag `follows` (F4 will refuse it: such a command never ends).
+* **R8 — medium: sensitive reads.** Add `shadow` (for `getent shadow`) and
+  `environ` (for `/proc/*/environ`) to `SENSITIVE_HINTS`. Flag
+  `sensitive-path` for `docker compose config` (it prints the interpolated
+  `.env` values), `docker inspect`, and bare `env`/`printenv` (they print
+  secrets inside containers reached via `pct`/`docker exec`).
+
+**Live-data accuracy**
+
+* **R9 — high (accuracy): decoded payloads fed to an interpreter are parsed as
+  shell.** `echo <b64> | base64 -d | python3` decodes Python and splits it into
+  dozens of shell "steps" (`print`, `import`, `def`, `try:` …). On the live DB
+  this alone is ~600 of the ~2,700 unknown steps. Rule: only decode-and-parse
+  when the pipeline's sink is a shell (`sh`, `bash`, …, including `sh -s`). For
+  `python*`, `perl`, `ruby` and `node` sinks, emit **one** `unknown` step,
+  why `decoded <lang> script (N lines)`, and put the decoded text on the step as
+  `script` (F2 shows it in a collapsible block). Same for `python3 - <<'PY'`
+  heredocs: one step, with the heredoc body as `script`.
+* **R10 — medium (accuracy).**
+  * Shell control builtins `:`, `exit`, `return`, `break`, `continue`,
+    `wait` → `read` (why `shell control`).
+  * `tar`: `-t`/`--list` (and the `t` letter in a bundled first argument such
+    as `tf`) → `read`; `x`/`c`/`r`/`u`/`A`/`--delete` → `write`.
+  * `install` → `write`.
+  * `runuser [-u U] [--] cmd…` and `runuser -l U -c '…'` are wrappers like
+    `sudo` / `su` (context `runuser`, `elevated: true`).
+  * Shell functions: a definition (`f() { … }`, `function f { … }`) is not a
+    step itself; its body steps stay. A later call to a function defined in the
+    same command gets kind = worst of the body, why `calls function f`.
+    Calling an undefined function stays `unknown`.
+* **R11 — low: report scope.** The `requests` table also holds MCP calls
+  (`status LIKE 'integration-%'`, with tool names as the "command"). Exclude
+  them by default (add `--include-integration` to opt in) and print how many
+  rows were excluded. Fixtures: prefer `192.0.2.x` over `10.0.0.1` (nit, optional).
+
+**Measured on the live database (read-only, aggregates only, not committed):**
+1,365 distinct commands; 8,893 steps: 60.9% read, 7.1% write, **32.0% unknown**;
+40.6% of commands fully read. SSH rows only: 31.2% unknown. Top unknown causes:
+decoded Python parsed as shell (R9), shell functions defined in agent scripts,
+`curl`, interpreter calls, `bash`/`sh` script sinks, `runuser`, `exit`, `tar`.
+After R9–R11 I will re-measure against the revised ≤ 20% target.
+
+**Gate re-run by the reviewer:** pre-commit OK; `1 failed, 1663 passed` — the
+failure is `tests/test_db_audit.py::test_audit_log_ordering`, a pre-existing
+timing flake (second-resolution timestamps vs a 1.1 s sleep under load). It
+passes 5/5 in isolation and F1 does not touch the audit code. Not yours to fix
+in this chunk. The API hook, the cache (deep copy per call) and the report's
+read-only open look correct.
+
+**What to do:** fix R1–R11 on this branch (`feat/f1-breakdown`), one or a few
+commits per item, add the regression tests, re-run `bash scripts/verify.sh`,
+add a **Round 2** paragraph to Implementer notes (each R item: done / how /
+test name), push, and stop.
+
 
 ---
 
@@ -803,7 +940,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 
 | Order | Chunk | Slug | Area | Status | Branch | Depends on | Reviewer notes |
 |---|---|---|---|---|---|---|---|
-| 1 | F1 | breakdown | dashboard | **Ready** | `feat/f1-breakdown` | — | |
+| 1 | F1 | breakdown | dashboard | **Changes requested** (round 1) | `feat/f1-breakdown` | — | R1–R11, see chunk |
 | 2 | F2 | review-card | UI | Ready (after F1) | `feat/f2-review-card` | F1 | |
 | 3 | F7 | inner-target | dashboard | Ready (after F2) | `feat/f7-inner-target` | F1 | |
 | 4 | F3 | session-plans | dashboard + MCP | Ready (after F7) | `feat/f3-session-plans` | F2 | |
