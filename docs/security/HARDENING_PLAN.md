@@ -1052,6 +1052,205 @@ Implemented on `sec/chunk-R-review-fixups`, cut from `security-hardening@9624247
 
 ---
 
+## Chunk H — Read-only integration tools must really be read-only  · slug `read-tools` · HIGH · **READY**
+
+Branch `sec/chunk-H-read-tools` from `security-hardening` (normal §0 rules).
+Dashboard only — no gateway, poller or installer changes.
+
+### Threat
+
+`core/tool_runner.py` runs any tool marked `read_only: True` immediately, with
+no approval (the "Read-only: always execute" branch). Two **generic** read tools
+take the operation from the agent's arguments and never check that it reads:
+
+1. **`read` (generic HTTP, `core/generic_tools.py`)** — documented as "GET or
+   HEAD", but the runner forwards `args['method']` to `execute_generic_call`,
+   which accepts `POST`, `PUT`, `PATCH` and `DELETE`. Reviewer-verified: a
+   `read` call with a mutating method reaches the upstream with that method
+   and no approval. Enabled live on 9 integrations (incl. Home Assistant,
+   Proxmox, Omada, Pulse, Jellyfin, the *arr apps), all using admin-level
+   credentials.
+2. **`ws_read` (generic Home Assistant WebSocket)** — forwards any command type
+   and payload (`core/ha_ws.py: execute_ws_call`). Service calls, Supervisor
+   API commands and registry `create/update/delete/remove` commands all run
+   without approval, bypassing the gated `call_service` / `ws_write` tools.
+
+The only limit today is an optional per-agent `arg_policy` rule
+(`core/agent_policy.py`: `method_allow`, `command_allow*`), which agents without
+a policy do not have. Live data (2026-11-07): every past `read` call was GET
+(161) or HEAD (3) and every `ws_read` call was a genuine read (42) — no misuse.
+
+### Changes
+
+**H1. Generic HTTP `read` is GET/HEAD only.** In the tool runner, before
+executing a generic HTTP tool whose `read_only` is true, normalise
+`args['method']` (default `GET`) and refuse anything other than `GET`/`HEAD`
+with `{"error": "not_a_read_method", ...}` (HTTP-style status 400) pointing to
+the gated `write` tool. Enforce it in `execute_generic_call` too by giving it a
+`read_only: bool` parameter (defence in depth), so no future caller can reuse
+the read path with a mutating method.
+
+**H2. `ws_read` only runs read commands.** New `core/ha_ws_policy.py` with
+`is_read_command(command) -> bool`:
+* **True** only for an explicit reviewed set plus safe name patterns: last path
+  segment in `list`, `get`, `get_single`, `info`, `browse_media`,
+  `statistics_during_period`, `config` (read form, e.g. `automation/config`);
+  plus `render_template`, `get_states`, `get_config`, `get_services`.
+* **False** (checked first, wins over the patterns) for `call_service`,
+  `execute_script`, any `supervisor/*`, `hassio/*`, `auth/*`, `config/auth*`,
+  `backup/*`, `repairs/*` actions, any `subscribe_*`/`unsubscribe_*`, and any
+  command whose last segment is `create`, `update`, `delete`, `remove`, `set*`,
+  `reload`, `restart`, `migrate`, `install`, `uninstall`, `write`.
+* Unknown commands are **false** (fail closed) — they can still be run through
+  the gated `ws_write`.
+The runner refuses a `ws_read` whose command is not a read with
+`{"error": "not_a_read_command", ...}` pointing to `ws_write`, **before** any
+WebSocket connection is opened.
+
+**H3. Audit.** Every refusal from H1/H2 writes an `integration_calls` row
+(`outcome: "refused"`, the method/command, no payload values) and a
+`record_audit_event('read_tool_refused', ...)`. These checks run regardless of
+agent policy; agent `arg_policy` rules still apply on top.
+
+**H4. Catalog invariant.** A test iterates every seeded catalog
+(`core/*_seed.py`, `generic_tools_for(kind)` for every kind) and asserts:
+every `read_only: True` HTTP tool uses `GET`/`HEAD`, **unless** it is
+`not_implemented`, or it is listed in an explicit, commented allowlist of
+reviewed read-by-POST endpoints (e.g. query/search endpoints that only read).
+Every `read_only: True` WS tool with a fixed `path_template` must satisfy
+`is_read_command`. A new tool that breaks this fails CI.
+
+**H5. Docs.** `CHANGELOG.md` under "Security — behaviour change";
+`docs/AGENT_MANUAL.md` (integrations section): `read` accepts only GET/HEAD,
+`ws_read` only read commands; use `write` / `ws_write` (approval-gated) for
+anything else, and the two new error codes.
+
+### Tests
+
+* H1: generic `read` with `POST`, `PUT`, `PATCH`, `DELETE` (and lower-case
+  variants) → `not_a_read_method`, **no upstream request** (assert on the mock
+  upstream), one refused audit row. `GET` and `HEAD` unchanged (existing tests).
+  `execute_generic_call(..., read_only=True)` with `DELETE` raises.
+* H2: allowed table — every command in live use: `automation/config`,
+  `recorder/statistics_during_period`, `persistent_notification/get`,
+  `system_log/list`, `config/area_registry/list`,
+  `config/entity_registry/get`, `config_entries/get_single`,
+  `media_source/browse_media`, `render_template`, `zha/devices`, plus
+  `get_states`, `get_config`, `get_services`. (`zha/devices` has no read-style
+  last segment — add it to the explicit set and say so in a comment.)
+  Refused table — `call_service`, `supervisor/api`, `execute_script`,
+  `config/entity_registry/update`, `config/device_registry/remove`,
+  `input_boolean/create`, `backup/generate`, `auth/delete_refresh_token`,
+  `subscribe_events`, and an unknown command. A refused `ws_read` opens **no**
+  WebSocket (monkeypatch `ha_ws_request` to fail the test if called) and writes
+  the audit row.
+* H4: the catalog invariant test, plus a deliberately bad fake tool proving it
+  fails.
+* Compat: curated tools and `write`/`ws_write` behave exactly as before; MCP
+  tool schemas unchanged.
+
+### Compat impact
+
+Additive refusals on two generic tools; schemas unchanged; no gateway impact.
+Agents that only read (all live traffic) are unaffected.
+
+### Operator stopgap until this ships
+
+For each agent without a policy, an `arg_policy` rule on each generic `read`
+tool with `method_allow: ["GET", "HEAD"]`, and on Home Assistant `ws_read`
+a `command_allow` list of the read commands above. Remove once H ships.
+
+### Acceptance criteria
+
+- [ ] H1–H4 regression tests fail before / pass after.
+- [ ] `bash scripts/verify.sh` green; count ≥ current baseline + new tests.
+- [ ] Reviewer re-runs the generic-`read` mutating-method reproduction → refused.
+
+### Implementer notes
+
+**What I did** (H1–H5; dashboard only — no gateway, poller or installer file touched)
+
+* **H1.** `core/tool_runner.py` now passes every generic tool through
+  `_read_only_refusal()` before it executes: a read-only HTTP tool normalises
+  `args['method']` (default GET) and refuses anything but GET/HEAD with
+  `{"error":"not_a_read_method","status_code":400,"tool":"write"}`.
+  Defence in depth lives in `core/integration_proxy.execute_generic_call(...,
+  read_only=False)`: with `read_only=True` a mutating method raises
+  `ProxyError(400, "not_a_read_method: …")` before any request, and the runner
+  passes `read_only=not mutating`.
+* **H2.** New `core/ha_ws_policy.py` with `is_read_command()`. Deny rules are
+  checked first (`call_service`, `execute_script`, `supervisor/*`, `hassio/*`,
+  `auth/*`, `config/auth*`, `backup/*`, `repairs/*`, `subscribe_*`/
+  `unsubscribe_*`, and last segments `create`/`update`/`delete`/`remove`/
+  `set*`/`reload`/`restart`/`migrate`/`install`/`uninstall`/`write`), then the
+  reviewed allow set (`render_template`, `get_states`, `get_config`,
+  `get_services`, `zha/devices`) and read-name patterns (`list`, `get`,
+  `get_single`, `info`, `browse_media`, `statistics_during_period`, `config`).
+  Unknown commands are false. The runner refuses a non-read `ws_read` **before**
+  any WebSocket connection and points at `ws_write`.
+* **H3.** Both refusals write an `integration_calls` row with
+  `outcome='refused'` and `reason_code` = the error code, keeping only the
+  method/command (`{"method":"DELETE"}`, `{"command":"…"}`) and never the
+  path, params, data or payload, plus a `read_tool_refused` audit event naming
+  the integration and tool. The check runs after `evaluate_call`, so a
+  permissive agent policy cannot widen it and an `arg_policy` still applies on
+  top.
+* **H4.** `tests/test_sec_H_read_tools.py::TestH4CatalogInvariant` walks
+  `core.seeds._CATALOGS` and `generic_tools_for(kind)` for every kind: every
+  `read_only` HTTP tool must be GET/HEAD unless it is `not_implemented` or on
+  the commented read-by-POST allowlist (Omada's `list_site_clients` and
+  `list_known_clients` — the controller API exposes client lists only as
+  POST), and every `read_only` WS tool with a fixed `path_template` must
+  satisfy `is_read_command`. A deliberately bad fake tool proves the checker
+  fails.
+* **H5.** `CHANGELOG.md` `### Security` (two behaviour-change entries),
+  `docs/AGENT_MANUAL.md` §1 (new "generic `read` / `ws_read` are strictly
+  read-only" subsection with both error codes and the gated tools), and the
+  `read`/`ws_read` tool descriptions now state what is refused. Schemas and
+  params are unchanged.
+
+**Tests.** `tests/test_sec_H_read_tools.py` — 10 tests, all `test_sec_H_*`.
+Every one failed on `security-hardening` before the fix: the policy module and
+the catalog checker did not exist, and the two attacks reproduced on the
+reviewed commit (confirmed by running `run_tool` directly): a `read` call with
+`method: DELETE` reached the mock upstream with `DELETE` and no approval, and a
+`ws_read` with `command: call_service` opened a WebSocket. The only test that
+passes before and after is the control (`ws_read` still runs a read command).
+
+**Surprises / decisions**
+
+* The refusal runs **after** `evaluate_call`. The chunk says "regardless of
+  agent policy"; keeping the policy gate first preserves the existing
+  "policy is the first gate" behaviour, and the read-only refusal is
+  unconditional for every call the policy lets through, so a policy can only
+  narrow, never widen.
+* Only the generic tools are checked at runtime. A curated HA WS read tool has
+  a fixed `path_template` the agent cannot influence, so H4's catalog invariant
+  is the right guard for it; a runtime check there would also refuse the
+  handler-based lovelace read tools (empty `path_template`).
+* Refs to the gated tool are in both the response (``"tool": "write"`` /
+  ``"ws_write"``) and the message, so a model that only reads the error text
+  still finds the way forward.
+
+**Deliberately not done**
+
+* No change to `write`/`ws_write`, curated tools, agent-policy semantics or
+  MCP tool schemas; no gateway, poller or installer files.
+* No new read-by-POST allowlist entries beyond Omada's two reviewed ones.
+* The operator stopgap in the chunk (agent `arg_policy` rules with
+  `method_allow`/`command_allow`) is an operator action, not code.
+
+`bash scripts/verify.sh` (pre-commit green):
+
+```
+1353 passed, 7 warnings in 335.33s (0:05:35)
+```
+
+(1343 baseline + 10 new tests.)
+
+
+---
+
 ## Chunk 6 — Update integrity & per-gateway session keys  · slug `supply-chain` · HIGH (design change)
 
 > The reviewer will write a detailed design for this chunk before it starts.
@@ -1087,6 +1286,12 @@ Scope preview:
 * Docs: README/ARCHITECTURE wording about the blocklist being a hard boundary.
 
 ---
+
+* Added 2026-11-07 (review notes): installer `--update` re-registers before
+  loading its saved token (harmless 401s on every update); warn in the UI when
+  a host/session override is opened on a Proxmox host (`pct exec` reaches every
+  container); make `tests/test_db_audit.py::test_audit_log_ordering` robust to
+  background audit writes (flaky in the full suite).
 
 ## 8. Rollout gate (no deploy before this)
 
@@ -1138,6 +1343,7 @@ dashboard LXC or gateways. The reviewer runs it; the implementer does not deploy
 | 4 | web-hardening | Medium | **Merged** | `sec/chunk-4-web-hardening` @ `9c845be` | Approved; UI smoke test done 2026-11-07 (see §8 item 5) |
 | 5 | authz | Medium | **Merged** (follow-up R4) | `sec/chunk-5-authz` @ `2d579be` | Approved; loopback check vs same-host proxy → R4 |
 | R | review-fixups | Medium | **Merged** | `sec/chunk-R-review-fixups` @ `0a8e400` | Approved; reviewer re-ran full suite (1343 passed), pre-commit, installer sync, and the tier probe (former false positives run normally; broad matches → JIT; Eshu paths FATAL) |
+| H | read-tools | High | **Merged** | `sec/chunk-H-read-tools` @ `d31c763` | Approved; full suite 1352 passed + 1 known flake (`test_audit_log_ordering`, passes 8/8 in isolation, untouched by H → Chunk 7); reviewer DELETE/POST/PUT/PATCH repro refused with no upstream request; WS classifier probe 29/29 |
 | 6 | supply-chain | High | Design pending | — | |
 | 7 | low | Low | Draft | — | |
 
