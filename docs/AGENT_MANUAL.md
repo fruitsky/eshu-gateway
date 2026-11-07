@@ -284,14 +284,14 @@ attributable.
 
 ## 3. Auto-approved commands
 
-Commands in the whitelist files are always auto-approved. You can check whether
-a command would be auto-approved without sending it:
+Commands in the whitelist files are always auto-approved.
 
-```bash
-curl -s "http://<dashboard>:8000/api/policies/test?command=uptime" | python3 -m json.tool
-```
+> **Operator pre-flight only (2026-11 hardening).** `/api/policies/test` now
+> requires a dashboard session; an agent bearer token is not accepted. Ask the
+> operator to run **Controls → Tester**, or simply send the command — the
+> gateway auto-runs allowlisted commands and turns everything else into a JIT
+> request. The Tester's response shape is:
 
-Example response:
 ```json
 {
     "command": "uptime",
@@ -325,8 +325,7 @@ passes stages 1-4 and is auto-approved. If not, it falls through to JIT (stage 5
 > **Policy membership check (`/api/policies/check`):** the operator's Tester uses a
 > separate endpoint to ask "is this command already in a policy list?" — it returns
 > `in_exact_whitelist` / `in_regex_whitelist` / `in_regex_blacklist` booleans. It is
-> **dashboard-session only** (not open to agents); use `/api/policies/test` above for
-> pre-flight.
+> **dashboard-session only**, as is `/api/policies/test`; agents cannot run either.
 
 ---
 
@@ -373,7 +372,7 @@ periodic diagnostics. There are two ways a window becomes available:
 
 ### Request a window (AI-requested)
 
-`POST /api/window-requests` (no auth; `Content-Type: application/json`):
+`POST /api/window-requests` (agent bearer token or gateway token; `Content-Type: application/json`):
 
 | Field | Type | Default | Meaning |
 |-------|------|---------|---------|
@@ -394,6 +393,7 @@ Example — nightly apt update:
 
 ```bash
 curl -s -X POST "$DASHBOARD_URL/api/window-requests" \
+  -H "Authorization: Bearer $ESHU_AGENT_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "gateway_ip": "'"$TARGET_IP"'",
@@ -433,10 +433,10 @@ done
 
 The token is returned only at approval: `{"status": "approved", "token": "..."}` — store it securely.
 
-### List windows & inspect one (read-only, no auth)
+### List windows & inspect one (read-only; agent/gateway token or session)
 
 ```bash
-curl -s "$DASHBOARD_URL/api/approved-windows" | python3 -m json.tool          # all windows (token omitted in the list)
+curl -s -H "Authorization: Bearer $ESHU_AGENT_TOKEN" "$DASHBOARD_URL/api/approved-windows" | python3 -m json.tool  # all windows (token omitted in the list)
 curl -s "$DASHBOARD_URL/api/approved-windows/$RETRIEVAL_KEY" | python3 -m json.tool  # full record + token by opaque key
 curl -s "$DASHBOARD_URL/api/window-by-token/<TOKEN>" | python3 -m json.tool    # parameters for an existing token
 ```
@@ -543,11 +543,11 @@ Wait a few seconds and retry with exponential backoff.
 
 | Endpoint | Method | Purpose | Auth |
 |----------|--------|---------|------|
-| `/api/policies/test?command=` | GET | Pre-flight a command — returns `action` (auto_approved / blocked / jit) + `tier: "fatal"` for the non-relaxable self-protection / evasion blocklist | Public |
+| `/api/policies/test?command=` | GET | Pre-flight a command — returns `action` (auto_approved / blocked / jit) + `tier: "fatal"` for the non-relaxable self-protection / evasion blocklist | Session |
 | `/mcp` | POST/GET | MCP streamable-HTTP endpoint — integration tool calls (auth: `Authorization: Bearer <agent-token>`; read-only auto-runs, mutations poll `check_approval`) | Agent token |
-| `/api/window-requests` | POST | Submit window request | Public |
+| `/api/window-requests` | POST | Submit window request | Agent or gateway token |
 | `/api/window-requests/{retrieval_key}` | GET | Poll window request status + token (read-only) | Public |
-| `/api/approved-windows` | GET | List windows (full status; token omitted) | Public (read) |
+| `/api/approved-windows` | GET | List windows (full status; token omitted for non-session callers; a gateway token sees only its own) | Agent/gateway token or session |
 | `/api/approved-windows/{retrieval_key}` | GET | Single window details + token (read-only) | Public (read) |
 | `/api/window-by-token/{token}` | GET | Parameters for an existing token (token is the auth) | Public |
 | `/api/docs/agent-windows` | GET | Alias for this manual (full guide incl. Approved Windows) | Public |
@@ -557,8 +557,9 @@ Wait a few seconds and retry with exponential backoff.
 
 ## 9. Complete example workflow
 
-This example shows the full flow: check a command, try auto-approval, request a window,
-and use it.
+This example shows the full flow: request a window and use it. (Pre-flight is
+operator-only; if you are unsure whether a command is allowlisted, just send
+it — the gateway auto-runs it or creates a JIT request.)
 
 ```bash
 #!/bin/bash
@@ -566,20 +567,13 @@ and use it.
 DASHBOARD="http://192.168.1.100:8000"
 GATEWAY="192.168.1.201"
 COMMAND="docker system prune -f --volumes"
+ESHU_AGENT_TOKEN="${ESHU_AGENT_TOKEN:?set the agent token}"
 
-# 1. Check if command is auto-approved
-echo "Checking if command is auto-approved..."
-RESULT=$(curl -s "$DASHBOARD/api/policies/test?command=$(echo "$COMMAND" | python3 -c "import urllib.parse; print(urllib.parse.quote(input()))")")
-if echo "$RESULT" | grep -q '"action": "auto_approved"'; then
-    echo "✅ Command is auto-approved — executing directly"
-    ssh eshu-gateway@"$GATEWAY" "$COMMAND"
-    exit $?
-fi
-
-# 2. Request a window for tomorrow at 03:00 UTC
+# 1. Request a window for tomorrow at 03:00 UTC
 TOMORROW=$(date -u -d "+1 day 03:00:00" +%s)
 echo "Requesting approved window for $TOMORROW..."
 WINDOW_RESPONSE=$(curl -s -X POST "$DASHBOARD/api/window-requests" \
+    -H "Authorization: Bearer $ESHU_AGENT_TOKEN" \
     -H "Content-Type: application/json" \
     -d "{\"gateway_ip\":\"$GATEWAY\",\"command\":\"$COMMAND\",\"match_type\":\"prefix\",\"window_start\":$TOMORROW,\"max_executions\":1,\"label\":\"Scheduled cleanup\"}")
 RETRIEVAL_KEY=$(echo "$WINDOW_RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('retrieval_key',''))")
@@ -592,7 +586,7 @@ fi
 
 echo "🪟 Window request submitted — waiting for operator approval..."
 
-# 3. Poll by retrieval_key (read-only, no auth) for up to 5 minutes
+# 2. Poll by retrieval_key (read-only, no auth) for up to 5 minutes
 for i in $(seq 1 100); do
     STATUS=$(curl -s "$DASHBOARD/api/window-requests/$RETRIEVAL_KEY" | \
         python3 -c "import sys,json; print(json.load(sys.stdin).get('status','unknown'))" 2>/dev/null || echo "pending")
@@ -600,7 +594,7 @@ for i in $(seq 1 100); do
         TOKEN=$(curl -s "$DASHBOARD/api/window-requests/$RETRIEVAL_KEY" | \
             python3 -c "import sys,json; print(json.load(sys.stdin).get('token',''))" 2>/dev/null || echo "")
         echo "🔑 Token received: $TOKEN"
-        # 4. Schedule the cron-job
+        # 3. Schedule the cron-job
         echo "$TOMORROW ESHU_WINDOW_TOKEN=$TOKEN ssh eshu-gateway@$GATEWAY \"ESHU_WINDOW_TOKEN=$TOKEN $COMMAND\"" | at -t $(date -d "@$TOMORROW" +%Y%m%d%H%M) 2>/dev/null || true
         echo "✅ Scheduled — command will run at 03:00 UTC with the window token."
         echo "   The gateway auto-approves it without JIT."

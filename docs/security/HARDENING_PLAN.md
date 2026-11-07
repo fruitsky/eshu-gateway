@@ -844,7 +844,80 @@ manual if the auth header changes). 5e changes first-run UX — document it.
 
 ### Implementer notes
 
-_(fill in)_
+Implemented on `sec/chunk-5-authz`, cut from the tip of
+`sec/chunk-4-web-hardening` (`9c845be`).
+
+**Endpoints**
+- **5a** `GET /api/policies/test` now calls `_check_session` (session only). The
+  response shape is unchanged. Agents lose this pre-flight; the manual now says
+  to send the command and let the gateway decide.
+- **5b** `GET /api/approved-windows` accepts a session, a gateway token or an
+  agent bearer token. A gateway token is scoped to its own `target_ip`; agents
+  and sessions may use the optional `ip` filter. Non-session callers still get
+  `token`/`retrieval_key` stripped.
+- **5c** `POST /api/window-requests` requires a gateway token (bound to
+  `gateway_ip`) or an agent bearer token; a browser session is deliberately not
+  an agent credential. Unauthenticated calls are 401.
+- **5d** `GET /api/enroll/token-status` requires a session.
+- **5e** First-run set-password is allowed only from loopback or with
+  `X-Eshu-Setup-Token` matching `ESHU_SETUP_TOKEN` (or the generated
+  `_SETUP_TOKEN`). Startup prints `First-run setup token: …` when no password is
+  set. The setup overlay has a **Setup token** field (remote installs), and the
+  app.js cache-buster is `ui13`. `docs/FIRST_RUN.md` documents the flow.
+- **5h** `/api/enroll` validates `Host` as `hostname[:port]` or
+  `[IPv6][:port]`; anything else is 400 before the bash bootstrap is built.
+
+**Tokens / passwords**
+- **5f** Enrollment tokens are `secrets.token_urlsafe(24)` (32 chars) instead of
+  the time/connection-hash value.
+- **5g** Window tokens are 24 alphanumeric chars from `secrets.choice`, at all
+  three creation sites (`create_approved_window`, `create_window_request`,
+  `approve_window_request`). The charset keeps the chunk-1 gateway regex valid.
+- **5j** Minimum password length is 12 in the API, the setup/settings UI and
+  `dashboard/set_password.py`.
+- **5k** `_verify_password` has no plaintext fallback; a legacy non-PBKDF2 hash
+  fails login and startup prints a loud warning pointing at
+  `python3 dashboard/set_password.py`.
+
+**5i window claim**
+- `approved_windows.sh` captures curl's exit status and treats any non-zero exit
+  as `000` (network down → fail open on the local cache). Every other non-200
+  HTTP answer (401/403/404/429/500/…) is a refusal via `_window_reject`. The
+  200-with-valid-cache path still runs.
+
+**Test-first evidence**
+- Before the fix, **14** new assertions failed: 11 in `tests/test_sec_authz.py`
+  (5a/5b/5c/5d/5e/5f/5g/5h/5j/5k) and 3 gateway window-claim cases
+  (401/429/500); 403/404 already rejected. After the fix all pass.
+- `bash scripts/verify.sh` → **1313 passed** (1287 + 26: 20 in
+  `tests/test_sec_authz.py`, 6 in `tests/test_gateway_script.py`).
+  No installer source changed (the feature script is served directly), so no
+  regeneration was needed.
+
+**Existing tests changed**
+- `tests/test_policies.py`: `test_policy_test_stays_public` → now asserts 401
+  (`test_policy_test_requires_session`), reflecting 5a.
+- `tests/test_window_read.py`: the "open" read tests now use an agent token for
+  the list and window-request POST; the claim source assertion checks the new
+  200/000/other branches.
+- `tests/test_enrollment.py`: token-status tests use a session; the
+  register-consumes-token test uses a fresh unauthenticated client so the
+  enrollment path (not the session path) is exercised.
+- `tests/test_auth.py`: 12-char passwords; first-run test sends the setup token.
+- `tests/test_cmd_risk.py`: the risk/dry-run policy test uses `auth_client`.
+
+**Compatibility / docs**
+- Gateways are unaffected: gateway-token callers keep working; a gateway token
+  on the list endpoint is scoped to its own windows.
+- Agents must now send `Authorization: Bearer <agent-token>` for `POST
+  /api/window-requests` and `GET /api/approved-windows`; the read-only poll by
+  `retrieval_key` and the single-window lookup are unchanged. `docs/AGENT_MANUAL.md`
+  examples and the endpoint table were updated. `scripts/eshu_call.py` already
+  supports arbitrary auth headers and MCP tool handlers do not call these
+  endpoints, so no code change was needed there.
+- `/api/policies/test` is session-only; agents should send the command instead.
+- First-run UX: remote operators use the Setup token field (or loopback/CLI);
+  documented in `docs/FIRST_RUN.md`.
 
 ---
 

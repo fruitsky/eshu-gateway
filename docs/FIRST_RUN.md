@@ -31,6 +31,30 @@ Consequences, on purpose:
 The rule is "empty install", not "first login": a dashboard with gateways is
 not a first run, even if the flag was never written.
 
+## First-run authentication
+
+If no dashboard password is set, startup prints a one-time token:
+
+```
+First-run setup token: <token>
+```
+
+- On the dashboard host, the setup overlay works from loopback without the
+  token. The equivalent CLI call is:
+
+  ```bash
+  curl -s -X POST http://127.0.0.1:8000/api/auth/set-password \
+    -H 'Content-Type: application/json' \
+    -d '{"password":"a-12-plus-character-password"}'
+  ```
+
+- From another host, paste the token into **Setup token** in the first-run
+  overlay (sent as `X-Eshu-Setup-Token`), or start the service with
+  `ESHU_SETUP_TOKEN=<value>` and use that value. Without either, a non-loopback
+  first-run request is refused with 403.
+- Passwords must be at least **12** characters. Legacy plaintext hashes are no
+  longer accepted at login; reset one with `python3 dashboard/set_password.py`.
+
 ## The four steps
 
 | step | what it does | state it reads |
