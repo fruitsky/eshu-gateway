@@ -463,22 +463,41 @@ def _yarn(args):
     return _unknown(f'yarn {sub}'.strip())
 
 
-def _git(args):
+GIT_READ_SUBCOMMANDS = ('status', 'log', 'diff', 'show')
+
+
+def _git_subcommand(args):
+    """Return (subcommand, tail, uses -c) for the arguments after `git`."""
     i = 0
     while i < len(args) and args[i].startswith('-'):
         a = args[i]
         if a == '--':
             i += 1
             break
-        if a in ('-c',) or (a.startswith('-c') and len(a) > 2):
-            return _unknown('git -c (config override)')
+        if a == '-c' or (a.startswith('-c') and len(a) > 2):
+            return '', args[i:], True
         if a in ('-C', '--git-dir', '--work-tree', '--namespace'):
             i += 2
             continue
         i += 1
-    sub = args[i] if i < len(args) else ''
-    tail = args[i + 1:]
-    if sub in ('status', 'log', 'diff', 'show'):
+    return (args[i] if i < len(args) else ''), args[i + 1:], False
+
+
+def git_read_subcommand(argv):
+    """The git read verb when argv is one of the reads that can run repo
+    config (`status`, `log`, `diff`, `show`), else ''. Used to set the
+    `repo-config` flag (review round 2, S6)."""
+    sub, _tail, config_override = _git_subcommand(argv[1:])
+    if config_override:
+        return ''
+    return sub if sub in GIT_READ_SUBCOMMANDS else ''
+
+
+def _git(args):
+    sub, tail, config_override = _git_subcommand(args)
+    if config_override:
+        return _unknown('git -c (config override)')
+    if sub in GIT_READ_SUBCOMMANDS:
         for arg in tail:
             if arg in ('--ext-diff', '--textconv'):
                 return _unknown(f'git {sub} {arg} (runs a configured program)')
@@ -704,15 +723,70 @@ def _sed(args):
     return _read('sed')
 
 
+_AWK_STRING_RE = re.compile(r'"(?:\\.|[^"\\])*"')
+
+
+def _awk_statements(program):
+    """Split an awk program on ; { } and newline, outside string literals."""
+    statements = []
+    current = []
+    in_string = False
+    i = 0
+    n = len(program)
+    while i < n:
+        ch = program[i]
+        if in_string:
+            current.append(ch)
+            if ch == '\\' and i + 1 < n:
+                current.append(program[i + 1])
+                i += 2
+                continue
+            if ch == '"':
+                in_string = False
+            i += 1
+            continue
+        if ch == '"':
+            in_string = True
+            current.append(ch)
+            i += 1
+            continue
+        if ch in ';{}\n':
+            statements.append(''.join(current))
+            current = []
+            i += 1
+            continue
+        current.append(ch)
+        i += 1
+    statements.append(''.join(current))
+    return statements
+
+
+def _awk_output_risk(joined):
+    """A print/printf statement that redirects to a file or pipes to a command."""
+    for statement in _awk_statements(joined):
+        stripped = statement.strip()
+        if not re.match(r'(?:print|printf)\b', stripped):
+            continue
+        bare = _AWK_STRING_RE.sub('""', stripped)
+        if '|' in bare:
+            return _unknown('awk print | (pipes to a command)')
+        if '>' in bare:
+            return _write('awk print > (writes a file)')
+    return None
+
+
 def _awk(args):
     joined = ' '.join(args)
-    if re.search(r'system\s*\(', joined) or '| getline' in joined:
+    if re.search(r'system\s*\(', joined) or re.search(r'\|\s*getline', joined):
         return _unknown('awk system()/getline (executes)')
     # `print … | "cmd"` pipes the record into a command; `@include` loads code.
     if re.search(r'\|\s*[\'"]', joined):
         return _unknown('awk pipe to a command (executes)')
     if '@include' in joined:
         return _unknown('awk @include (loads code)')
+    output = _awk_output_risk(joined)
+    if output:
+        return output
     if re.search(r'\b(?:print|printf)\s*>>?', joined):
         return _write('awk print > (writes a file)')
     for a in args:
@@ -837,7 +911,33 @@ _TAR_READ_MODES = set('t')
 _TAR_VALUE_LETTERS = set('fCTXbgHKLVN')
 
 
+# `--to-command` was already reported as a write via its -x sibling (review
+# round 2 called it right), so it is deliberately not listed here.
+_TAR_EXEC_OPTIONS = {'--use-compress-program', '--info-script',
+                     '--new-volume-script', '--rsh-command', '--rmt-command'}
+
+
+def _tar_executes(args):
+    """tar options that run a program (review round 2, S4)."""
+    merged = ' '.join(args)
+    if re.search(r'--checkpoint-action[= ]\S*exec', merged):
+        return True
+    for arg in args:
+        base = arg.split('=', 1)[0]
+        if base in _TAR_EXEC_OPTIONS:
+            return True
+        if arg.startswith('-I') and not arg.startswith('--'):
+            return True
+        if arg.startswith('-F') and not arg.startswith('--'):
+            return True
+        if arg.startswith('--checkpoint-action') and 'exec' in arg:
+            return True
+    return False
+
+
 def _tar(args):
+    if _tar_executes(args):
+        return _unknown('tar runs a program')
     for arg in args:
         if arg.startswith('--'):
             if arg in ('--list',):
@@ -876,6 +976,13 @@ def _declaration(args):
 
 def _shell_state(args):
     return _unknown('can change how later commands run')
+
+
+def _set_builtin(args):
+    """`set -e`, `set -euo pipefail`, `set +x`, `set -- a b`: shell options and
+    positional parameters only — they cannot change how later commands resolve
+    (review round 2, S7)."""
+    return _read('shell options')
 
 
 def _read_builtin(args):
@@ -1053,7 +1160,7 @@ _HANDLERS = {
     'typeset': _declaration,
     'readonly': _declaration,
     'local': _declaration,
-    'set': _shell_state,
+    'set': _set_builtin,
     'unset': _shell_state,
     'alias': _shell_state,
     'hash': _shell_state,

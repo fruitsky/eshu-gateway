@@ -40,8 +40,8 @@ WRITE = cmd_rules.WRITE
 UNKNOWN = cmd_rules.UNKNOWN
 
 _SEPS = {'&&', '||', ';', '|', '&', '\n'}
-_REDIRS = {'>', '>>', '>|', '&>', '>&', '<', '<<', '<<<', '<&'}
-_WRITE_REDIRS = {'>', '>>', '&>', '>|'}
+_REDIRS = {'>', '>>', '>|', '&>', '&>>', '>&', '<', '<<', '<<<', '<&'}
+_WRITE_REDIRS = {'>', '>>', '&>', '&>>', '>&', '>|'}
 _SHELLS = {'sh', 'bash', 'dash', 'zsh', 'ksh', 'ash'}
 _INTERPRETERS = {'python', 'python2', 'python3', 'perl', 'perl5', 'ruby',
                  'node', 'nodejs', 'php'}
@@ -150,6 +150,9 @@ def _split_punct(run):
         elif ch == '|' and nxt == '&':
             out.append('|')
             i += 2
+        elif ch == '&' and nxt == '>' and run[i + 2:i + 3] == '>':
+            out.append('&>>')
+            i += 3
         elif ch == '&' and nxt == '>':
             out.append('&>')
             i += 2
@@ -313,11 +316,104 @@ def _unquote_word(word):
     return ''.join(out)
 
 
+def _heredoc_ops(text, start, end):
+    """Every heredoc operator between start and end of one line, in order."""
+    ops = []
+    i = start
+    in_single = False
+    in_double = False
+    word_start = True
+    while i < end:
+        ch = text[i]
+        if in_single:
+            if ch == "'":
+                in_single = False
+            i += 1
+            word_start = False
+            continue
+        if in_double:
+            if ch == '\\':
+                i += 2
+                continue
+            if ch == '"':
+                in_double = False
+            i += 1
+            continue
+        if ch == '\\':
+            i += 2
+            word_start = False
+            continue
+        if ch == "'":
+            in_single = True
+            i += 1
+            word_start = False
+            continue
+        if ch == '"':
+            in_double = True
+            i += 1
+            word_start = False
+            continue
+        if ch == '`':
+            j = text.find('`', i + 1, end)
+            i = end if j < 0 else j + 1
+            word_start = False
+            continue
+        if ch == '#' and word_start:
+            while i < end and text[i] != '\n':
+                i += 1
+            continue
+        if (ch == '<' and text[i + 1:i + 2] == '<'
+                and text[i + 2:i + 3] != '<' and text[i - 1:i] != '<'):
+            op = '<<'
+            j = i + 2
+            if text[j:j + 1] == '-':
+                op = '<<-'
+                j += 1
+            while j < end and text[j] in ' \t':
+                j += 1
+            word_begin = j
+            quoted = False
+            while j < end and text[j] not in ' \t\n;&|<>()':
+                if text[j] in ('"', "'", '\\'):
+                    quoted = True
+                j += 1
+            delim = _unquote_word(text[word_begin:j])
+            if delim:
+                ops.append((op, delim, quoted))
+            i = j
+            word_start = False
+            continue
+        word_start = ch in ' \t\n;&|()<>'
+        i += 1
+    return ops
+
+
+def _read_heredoc_body(text, pos, op, delim):
+    """Read one heredoc body starting at `pos`; returns (body, body range, end)."""
+    n = len(text)
+    if pos >= n:
+        return '', n, n, n, False
+    line_pos = pos
+    while line_pos <= n:
+        line_end = text.find('\n', line_pos)
+        if line_end < 0:
+            line_end = n
+        line = text[line_pos:line_end]
+        if (line.lstrip('\t') if op == '<<-' else line) == delim:
+            return text[pos:line_pos], pos, line_pos, line_end, True
+        if line_end >= n:
+            break
+        line_pos = line_end + 1
+    return text[pos:], pos, n, n, False
+
+
 def _scan_heredocs(text):
     """Find heredocs in the raw text: delimiter quoting, body, body range.
 
     The token stream loses whether `<<EOF` was quoted, and the body is data
     unless the delimiter is unquoted. Both matter for review round 1 (R2).
+    Every heredoc on an operator line is collected before its bodies are read:
+    `cat <<A <<B` reads A's body first, then B's (review round 2, S2).
     """
     specs = []
     i = 0
@@ -358,58 +454,31 @@ def _scan_heredocs(text):
             while i < n and text[i] != '\n':
                 i += 1
             continue
-        if ch == '<' and text[i + 1:i + 2] == '<' and text[i + 2:i + 3] != '<' \
-                and text[i - 1:i] != '<':
-            op = '<<'
-            j = i + 2
-            if text[j:j + 1] == '-':
-                op = '<<-'
-                j += 1
-            while j < n and text[j] in ' \t':
-                j += 1
-            start = j
-            quoted = False
-            while j < n and text[j] not in ' \t\n;&|<>()':
-                if text[j] in ('"', "'", '\\'):
-                    quoted = True
-                j += 1
-            delim = _unquote_word(text[start:j])
-            if not delim:
-                i = j
+        if (ch == '<' and text[i + 1:i + 2] == '<'
+                and text[i + 2:i + 3] != '<' and text[i - 1:i] != '<'):
+            line_end = text.find('\n', i)
+            if line_end < 0:
+                line_end = n
+            group = _heredoc_ops(text, i, line_end)
+            if not group:
+                i += 1
                 continue
-            newline = text.find('\n', j)
-            if newline < 0:
-                specs.append({'op': op, 'delim': delim, 'quoted': quoted,
-                              'body': '', 'body_start': n, 'body_end': n,
-                              'end': n, 'found': False})
-                break
-            body_start = newline + 1
-            pos = body_start
-            body_end = n
-            end_pos = n
-            found = False
-            while pos <= n:
-                line_end = text.find('\n', pos)
-                if line_end < 0:
-                    line_end = n
-                line = text[pos:line_end]
-                if (line.lstrip('\t') if op == '<<-' else line) == delim:
-                    body_end = pos
-                    end_pos = line_end
-                    found = True
+            pos = line_end + 1 if line_end < n else n
+            for op, delim, quoted in group:
+                body, body_start, body_end, end_pos, found = _read_heredoc_body(
+                    text, pos, op, delim)
+                specs.append({
+                    'op': op, 'delim': delim, 'quoted': quoted,
+                    'body': body,
+                    'body_start': body_start,
+                    'body_end': body_end if found else n,
+                    'end': end_pos if found else n,
+                    'found': found,
+                })
+                if not found:
                     break
-                if line_end >= n:
-                    break
-                pos = line_end + 1
-            specs.append({
-                'op': op, 'delim': delim, 'quoted': quoted,
-                'body': text[body_start:body_end],
-                'body_start': body_start,
-                'body_end': body_end if found else n,
-                'end': end_pos if found else n,
-                'found': found,
-            })
-            i = (end_pos + 1) if found else n
+                pos = end_pos + 1
+            i = pos
             continue
         i += 1
     return specs
@@ -516,7 +585,9 @@ def _statements(atoms, state, heredoc_specs=()):
     argv = []
     redirs = []
     parts = []
-    heredocs = []
+    heredocs = []       # (delimiter, spec) awaiting their body, read at the newline
+    stmt_heredoc = False  # the statement being built carries a heredoc
+    stmt_specs = []
     op = ''
     pending_redir = None
     pending_fd = None
@@ -538,6 +609,9 @@ def _statements(atoms, state, heredoc_specs=()):
                     spec = specs[spec_index] if spec_index < len(specs) else None
                     spec_index += 1
                     heredocs.append((target, spec))
+                    stmt_heredoc = True
+                    if spec:
+                        stmt_specs.append(spec)
                     parts.append(f'{redir_op} {shlex.quote(target)}')
                 elif redir_op in ('>&', '<&') and (target.isdigit() or target == '-'):
                     # fd duplication (2>&1) — not a file write
@@ -572,9 +646,11 @@ def _statements(atoms, state, heredoc_specs=()):
             # never be swallowed by its header.
             if argv or redirs:
                 stmts.append(_Statement(list(argv), op, list(redirs),
-                                        ' '.join(parts), bool(heredocs),
-                                        [spec for _delim, spec in heredocs if spec]))
+                                        ' '.join(parts), stmt_heredoc,
+                                        list(stmt_specs)))
                 argv, redirs, parts = [], [], []
+                stmt_heredoc = False
+                stmt_specs = []
                 op = ''
             i += 1
             continue
@@ -585,14 +661,18 @@ def _statements(atoms, state, heredoc_specs=()):
             continue
 
         if atom in _SEPS:
-            heredoc_here = bool(heredocs)
             if argv or redirs:
                 stmts.append(_Statement(list(argv), op, list(redirs),
-                                        ' '.join(parts), heredoc_here,
-                                        [spec for _delim, spec in heredocs if spec]))
+                                        ' '.join(parts), stmt_heredoc,
+                                        list(stmt_specs)))
                 argv, redirs, parts = [], [], []
+                stmt_heredoc = False
+                stmt_specs = []
                 op = ''
-            if heredoc_here:
+            # A heredoc body starts on the line *after* the operator line, so
+            # `cat <<EOF; rm x` keeps the `rm` as its own statement (S1) and
+            # the bodies are only skipped when the newline arrives.
+            if atom == '\n' and heredocs:
                 for delim, _spec in heredocs:
                     i = _skip_heredoc_body(atoms, i, delim)
                     if i is None:
@@ -616,10 +696,12 @@ def _statements(atoms, state, heredoc_specs=()):
     if pending_redir is not None:
         # A redirection with no target (`echo hi >`): the shell would refuse it.
         state.complete = False
+    if heredocs:
+        # A heredoc whose body never started on its own line.
+        state.complete = False
     if argv or redirs:
         stmts.append(_Statement(list(argv), op, list(redirs),
-                                ' '.join(parts), bool(heredocs),
-                                [spec for _delim, spec in heredocs if spec]))
+                                ' '.join(parts), stmt_heredoc, list(stmt_specs)))
     return stmts
 
 
@@ -1102,6 +1184,15 @@ def _follow_cluster(args, letters='fF'):
     return False
 
 
+def _repo_config(argv):
+    """True for the git reads that can run repository-configured programs
+    (`core.fsmonitor`, textconv, pager) — review round 2, S6."""
+    verb, allowed = cmd_rules.resolve_verb(argv[0])
+    if not allowed or verb != 'git':
+        return False
+    return bool(cmd_rules.git_read_subcommand(argv))
+
+
 def _follows(argv):
     """True for commands that stream and never end (review round 1, R7)."""
     verb, allowed = cmd_rules.resolve_verb(argv[0])
@@ -1477,6 +1568,8 @@ def _parse_statement(st, ctx, depth, state):
             state.flag('follows')
         if _sensitive_command(assignments):
             state.flag('sensitive-path')
+        if _repo_config(assignments):
+            state.flag('repo-config')
 
     if dangerous_env:
         kind, why = UNKNOWN, 'changes how later commands run'
