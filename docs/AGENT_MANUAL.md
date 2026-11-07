@@ -253,6 +253,31 @@ Rules:
 - `check_approval` and `check_request` are always available, even under a strict
   tool allowlist, so an agent can always recover.
 
+### The generic `read` / `ws_read` tools are strictly read-only
+
+Two passthrough tools auto-run without approval; the server enforces that they
+cannot write.
+
+- **`read`** (generic HTTP) accepts `method` **GET** (default) or **HEAD** only.
+  Any other method — POST, PUT, PATCH, DELETE, in any case — is refused before
+  the request is sent: `{"error":"not_a_read_method","status_code":400}`. Use
+  the approval-gated **`write`** tool for those.
+- **`ws_read`** (generic Home Assistant WebSocket) runs only reviewed read
+  commands: `list`, `get`, `get_single`, `info`, `browse_media`,
+  `statistics_during_period`, and `config` reads such as `automation/config`,
+  plus `render_template`, `get_states`, `get_config`, `get_services` and
+  `zha/devices`. Everything else — `call_service`, `execute_script`,
+  `supervisor/*`, `hassio/*`, `auth/*`, `backup/*`, `repairs/*`, any registry
+  `create`/`update`/`remove`, `subscribe_*`/`unsubscribe_*` and unknown
+  commands — is refused before any WebSocket is opened:
+  `{"error":"not_a_read_command","status_code":400}`. Use the approval-gated
+  **`ws_write`** tool for those.
+
+Both refusals are recorded (`read_tool_refused` in the audit log, plus a
+`refused` row in the integration calls log) with the method/command only — never
+the payload. An agent `arg_policy` still applies on top of these checks, and it
+cannot widen them.
+
 ---
 
 ## 2. Command lifecycle
