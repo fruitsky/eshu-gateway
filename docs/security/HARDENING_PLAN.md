@@ -1129,7 +1129,7 @@ dashboard LXC or gateways. The reviewer runs it; the implementer does not deploy
 | 3 | tmp-races | High | **Merged** | `sec/chunk-3-tmp-races` @ `114cb6f` | Approved |
 | 4 | web-hardening | Medium | **Merged** (manual UI smoke test pending) | `sec/chunk-4-web-hardening` @ `9c845be` | Approved; browser smoke test is a rollout-gate item |
 | 5 | authz | Medium | **Merged** (follow-up R4) | `sec/chunk-5-authz` @ `2d579be` | Approved; loopback check vs same-host proxy → R4 |
-| R | review-fixups | Medium | **Ready** | `sec/chunk-R-review-fixups` | See "Chunk R" |
+| R | review-fixups | Medium | **Merged** | `sec/chunk-R-review-fixups` @ `0a8e400` | Approved; reviewer re-ran full suite (1343 passed), pre-commit, installer sync, and the tier probe (former false positives run normally; broad matches → JIT; Eshu paths FATAL) |
 | 6 | supply-chain | High | Design pending | — | |
 | 7 | low | Low | Draft | — | |
 
