@@ -18,6 +18,8 @@ import pytest
 FIXTURES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                             'fixtures', 'commands')
 
+from core.cmd_parse import breakdown  # noqa: E402 — conftest puts dashboard/ on sys.path
+
 
 def _load_cases():
     cases = []
@@ -455,3 +457,238 @@ class TestApi:
 
     def test_f1_breakdown_endpoint_404(self, gateway):
         assert gateway.get('/api/requests/999999/breakdown').status_code == 404
+
+
+class TestReviewRound1:
+    """Regressions for the F1 review round 1 (R1–R11).
+
+    Each test is named after its reviewer item and failed on the branch as
+    reviewed; see the Round 2 paragraph in the chunk's Implementer notes.
+    """
+
+    # ── R1: `#` only starts a comment at a word start ───────────────────────
+
+    def test_f1_r1_hash_inside_word_is_not_a_comment(self):
+        for command in ('ls /tmp/#dir; rm -f /tmp/synthetic-x',
+                        'echo a#b; rm -f /tmp/synthetic-x'):
+            result = breakdown(command)
+            assert [step['kind'] for step in result['steps']] == ['read', 'write'], command
+        # A real comment is still removed.
+        assert [step['kind'] for step in breakdown('ls # rm -f /tmp/synthetic-x')['steps']] == ['read']
+
+    # ── R2: substitutions in heredoc bodies, here-strings, redirect targets ─
+
+    def test_f1_r2_heredoc_body_substitution(self):
+        result = breakdown('cat <<EOF\n$(rm -rf /tmp/synthetic-x)\nEOF')
+        assert [step['kind'] for step in result['steps']] == ['write', 'write']
+
+    def test_f1_r2_quoted_heredoc_body_is_data(self):
+        result = breakdown("cat <<'EOF'\n$(rm -rf /tmp/synthetic-x)\nEOF")
+        assert [step['kind'] for step in result['steps']] == ['read']
+
+    def test_f1_r2_herestring_and_redirect_target_substitution(self):
+        for command in ('cat <<< "$(rm -rf /tmp/synthetic-x)"',
+                        'cat < "$(rm -rf /tmp/synthetic-x)"',
+                        'cat > "$(rm -rf /tmp/synthetic-x)"'):
+            result = breakdown(command)
+            assert 'write' in [step['kind'] for step in result['steps']], command
+
+    # ── R3: process substitution ────────────────────────────────────────────
+
+    def test_f1_r3_process_substitution(self):
+        result = breakdown('cat <(rm -rf /tmp/synthetic-x)')
+        assert result['complete'] is True
+        assert 'write' in [step['kind'] for step in result['steps']]
+        contexts = [ctx for step in result['steps'] for ctx in step['context']]
+        assert 'procsubst' in contexts
+        result = breakdown('diff <(ls /tmp/a) <(ls /tmp/b)')
+        assert result['complete'] is True
+        assert [step['kind'] for step in result['steps']] == ['read', 'read', 'read']
+        # `>( … )` is a sink: never a plain read.
+        assert breakdown('ls >(cat)')['steps'][0]['kind'] != 'read'
+
+    # ── R4: sed flags and scripts ───────────────────────────────────────────
+
+    def test_f1_r4_sed_combined_flags_and_scripts(self):
+        for command in ("sed -Ei 's/a/b/' /tmp/f.txt", "sed -ni 'p' /tmp/f.txt",
+                        "sed -ri 's/a/b/' /tmp/f.txt", "sed -si 's/a/b/' /tmp/f.txt"):
+            assert breakdown(command)['steps'][0]['kind'] == 'write', command
+        assert breakdown("sed 's/a/b/ge' /tmp/f.txt")['steps'][0]['kind'] == 'unknown'
+        assert breakdown("sed 's#a#b#w /tmp/synthetic-out' /tmp/f.txt")['steps'][0]['kind'] == 'write'
+        assert breakdown("sed -n 'w /tmp/synthetic-out' /tmp/f.txt")['steps'][0]['kind'] == 'write'
+        assert breakdown("sed -e 's/a/b/' -e 'w /tmp/synthetic-out' /tmp/f.txt")['steps'][0]['kind'] == 'write'
+        assert breakdown('sed -f /tmp/script.sed /tmp/f.txt')['steps'][0]['kind'] == 'unknown'
+        assert breakdown("sed 's/a/b/' /tmp/f.txt")['steps'][0]['kind'] == 'read'
+
+    # ── R5: dangerous environment / shell-state changes ─────────────────────
+
+    def test_f1_r5_dangerous_assignments(self):
+        for command in ('LD_PRELOAD=/tmp/x.so cat /tmp/f',
+                        'env LD_PRELOAD=/tmp/x.so ls',
+                        'PATH=/tmp/bin:$PATH ls',
+                        'export PATH=/tmp/bin:$PATH',
+                        'declare PATH=/tmp/bin',
+                        'local PATH',
+                        'printf -v PATH /tmp/bin'):
+            result = breakdown(command)
+            assert result['steps'][0]['kind'] == 'unknown', command
+            assert result['steps'][0]['why'] == 'changes how later commands run', command
+        # Safe assignments stay read.
+        assert breakdown('FOO=1 ls')['steps'][0]['kind'] == 'read'
+        assert breakdown('export LC_ALL=C')['steps'][0]['kind'] == 'read'
+
+    def test_f1_r5_state_builtins_are_unknown(self):
+        for command in ('set -e', 'unset FOO', 'alias ll=ls', 'hash -r',
+                        'enable -n echo', "trap 'rm -rf /tmp/x' EXIT",
+                        'source /tmp/script.sh', '. /tmp/script.sh'):
+            assert breakdown(command)['steps'][0]['kind'] == 'unknown', command
+        assert breakdown('read -r line')['steps'][0]['kind'] == 'read'
+
+    # ── R6: path-qualified verbs ────────────────────────────────────────────
+
+    def test_f1_r6_path_qualified_verbs(self):
+        for command in ('/tmp/synthetic-bin/cat /tmp/f', './cat /tmp/f', 'bin/cat /tmp/f'):
+            assert breakdown(command)['steps'][0]['kind'] == 'unknown', command
+        assert breakdown('/usr/bin/cat /tmp/f')['steps'][0]['kind'] == 'read'
+        assert breakdown('/bin/systemctl status nginx')['steps'][0]['kind'] == 'read'
+        result = breakdown('/tmp/synthetic-bin/sudo ls')
+        assert result['steps'][0]['kind'] == 'unknown'
+        assert result['steps'][0]['context'] == []
+
+    # ── R7: verb-specific gaps ──────────────────────────────────────────────
+
+    def test_f1_r7_awk_exec_and_pipes(self):
+        assert breakdown("awk '{ system (\"id\") }' /tmp/f")['steps'][0]['kind'] == 'unknown'
+        assert breakdown("awk '{ print | \"sh\" }' /tmp/f")['steps'][0]['kind'] == 'unknown'
+        assert breakdown('awk -f /tmp/prog.awk /tmp/f')['steps'][0]['kind'] == 'unknown'
+        assert breakdown("awk '@include \"/tmp/x\"' /tmp/f")['steps'][0]['kind'] == 'unknown'
+        assert breakdown("awk 'BEGIN { print 1 }' /tmp/f")['steps'][0]['kind'] == 'read'
+        assert breakdown("awk -i inplace '{print}' /tmp/f")['steps'][0]['kind'] == 'write'
+
+    def test_f1_r7_git_output_and_external_diff(self):
+        assert breakdown('git log --output=/tmp/synthetic-out')['steps'][0]['kind'] == 'write'
+        assert breakdown('git diff --ext-diff')['steps'][0]['kind'] == 'unknown'
+        assert breakdown('git show --textconv HEAD')['steps'][0]['kind'] == 'unknown'
+        assert breakdown('git log --oneline -5')['steps'][0]['kind'] == 'read'
+
+    def test_f1_r7_smartctl_actions_win(self):
+        assert breakdown('smartctl -a -t long /dev/sda')['steps'][0]['kind'] == 'write'
+        assert breakdown('smartctl -a /dev/sda')['steps'][0]['kind'] == 'read'
+
+    def test_f1_r7_ip_netns_exec_is_a_wrapper(self):
+        result = breakdown('ip netns exec webns uptime')
+        assert result['steps'][0]['kind'] == 'read'
+        assert result['steps'][0]['context'] == ['netns webns']
+
+    def test_f1_r7_misc_verb_paths(self):
+        assert breakdown("find /tmp -name '*.log' -fprint0 /tmp/synthetic-list")['steps'][0]['kind'] == 'write'
+        assert breakdown('sort --compress-program=/tmp/x /tmp/f')['steps'][0]['kind'] == 'unknown'
+        assert breakdown('tree -o /tmp/synthetic-out /tmp')['steps'][0]['kind'] == 'write'
+        assert breakdown('dmidecode --dump-bin /tmp/synthetic-dmi.bin')['steps'][0]['kind'] == 'write'
+        assert breakdown('systemd-analyze set-log-level debug')['steps'][0]['kind'] == 'write'
+        assert breakdown('nvidia-smi -q')['steps'][0]['kind'] == 'read'
+        assert breakdown('nvidia-smi -r')['steps'][0]['kind'] == 'unknown'
+        assert breakdown('vcgencmd measure_temp')['steps'][0]['kind'] == 'read'
+        assert breakdown('vcgencmd set_config int=1')['steps'][0]['kind'] == 'unknown'
+
+    def test_f1_r7_follow_flag(self):
+        for command in ('tail -f /var/log/syslog', 'journalctl -f',
+                        'docker logs -f web01', 'dmesg -w', 'docker events'):
+            result = breakdown(command)
+            assert result['steps'][0]['kind'] == 'read', command
+            assert 'follows' in result['flags'], command
+        assert 'follows' not in breakdown('tail -n 20 /var/log/syslog')['flags']
+
+    # ── R8: sensitive reads ─────────────────────────────────────────────────
+
+    def test_f1_r8_sensitive_reads(self):
+        assert 'sensitive-path' in breakdown('getent shadow')['flags']
+        assert 'sensitive-path' in breakdown('cat /proc/1/environ')['flags']
+        assert 'sensitive-path' in breakdown('docker inspect web01')['flags']
+        assert 'sensitive-path' in breakdown('docker compose config')['flags']
+        assert 'sensitive-path' in breakdown('env')['flags']
+        assert 'sensitive-path' in breakdown('printenv')['flags']
+        assert 'sensitive-path' not in breakdown('env FOO=1 uptime')['flags']
+
+    # ── R9: decoded interpreter payloads ────────────────────────────────────
+
+    def test_f1_r9_decoded_interpreter_payload_is_one_step(self):
+        import base64
+        payload = base64.b64encode(b"import os\nprint(os.getcwd())\n").decode()
+        result = breakdown('echo %s | base64 -d | python3' % payload)
+        assert result['summary']['steps'] == 1
+        step = result['steps'][0]
+        assert step['kind'] == 'unknown'
+        assert 'python3' in step['why']
+        assert 'import os' in step['script']
+
+    def test_f1_r9_python_heredoc_is_one_step(self):
+        result = breakdown("python3 - <<'PY'\nimport os\nprint(os.getcwd())\nPY")
+        assert result['summary']['steps'] == 1
+        step = result['steps'][0]
+        assert step['kind'] == 'unknown'
+        assert 'import os' in step['script']
+
+    # ── R10: accuracy ───────────────────────────────────────────────────────
+
+    def test_f1_r10_control_tar_install(self):
+        for command in (':', 'exit 1', 'return 0', 'break', 'continue', 'wait'):
+            assert breakdown(command)['steps'][0]['kind'] == 'read', command
+        assert breakdown('tar -tzf /tmp/a.tar.gz')['steps'][0]['kind'] == 'read'
+        assert breakdown('tar -czf /tmp/a.tar.gz /tmp/dir')['steps'][0]['kind'] == 'write'
+        assert breakdown('tar xf /tmp/a.tar')['steps'][0]['kind'] == 'write'
+        assert breakdown('install -m 755 /tmp/a /usr/local/bin/a')['steps'][0]['kind'] == 'write'
+
+    def test_f1_r10_runuser_is_a_wrapper(self):
+        result = breakdown('runuser -u root -- cat /etc/hostname')
+        assert result['steps'][0]['kind'] == 'read'
+        assert result['steps'][0]['context'] == ['runuser']
+        assert result['steps'][0]['elevated'] is True
+        result = breakdown("runuser -l root -c 'cat /etc/hostname'")
+        assert result['steps'][0]['kind'] == 'read'
+        assert result['steps'][0]['elevated'] is True
+
+    def test_f1_r10_shell_functions(self):
+        result = breakdown('f() { rm -rf /tmp/synthetic-x; }\nf')
+        assert [step['kind'] for step in result['steps']] == ['write', 'write']
+        assert result['steps'][-1]['why'] == 'calls function f'
+        result = breakdown('function g { ls /tmp; }\ng')
+        assert [step['kind'] for step in result['steps']] == ['read', 'read']
+        assert result['steps'][-1]['why'] == 'calls function g'
+        assert breakdown('undefined_thing /tmp/x')['steps'][0]['kind'] == 'unknown'
+
+    # ── R11: report scope ───────────────────────────────────────────────────
+
+    def test_f1_r11_report_excludes_integration_rows(self, tmp_path):
+        import sqlite3
+        import subprocess
+        import sys
+        path = tmp_path / 'copy.db'
+        conn = sqlite3.connect(str(path))
+        conn.execute('CREATE TABLE requests (id INTEGER PRIMARY KEY AUTOINCREMENT, '
+                     'target_ip TEXT, command TEXT, status TEXT, created_at INTEGER, '
+                     'expires_at INTEGER)')
+        rows = [
+            ('192.0.2.10', 'uptime', 'pending'),
+            ('192.0.2.10', 'frobnicate', 'pending'),
+            ('192.0.2.10', 'some_tool', 'integration-approved'),
+            ('192.0.2.10', 'other_tool', 'integration-denied'),
+        ]
+        for index, (ip, command, status) in enumerate(rows):
+            conn.execute('INSERT INTO requests (target_ip, command, status, created_at, '
+                         'expires_at) VALUES (?, ?, ?, ?, ?)',
+                         (ip, command, status, 1700000000 + index, 1700000900 + index))
+        conn.commit()
+        conn.close()
+        script = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                              'scripts', 'breakdown_report.py')
+        default = subprocess.run([sys.executable, script, '--db', str(path)],
+                                 capture_output=True, text=True, timeout=60)
+        assert default.returncode == 0, default.stderr
+        assert 'commands: 2 analysed' in default.stdout
+        assert 'excluded' in default.stdout
+        included = subprocess.run([sys.executable, script, '--db', str(path),
+                                   '--include-integration'],
+                                  capture_output=True, text=True, timeout=60)
+        assert included.returncode == 0, included.stderr
+        assert 'commands: 4 analysed' in included.stdout
