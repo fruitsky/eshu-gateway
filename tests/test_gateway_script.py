@@ -955,9 +955,9 @@ SELF_PROTECTION_BYPASSES = [
     "ls /etc/eshu/features.d",
     "cat /etc//eshu-exact.txt",
     "cat /etc/./eshu-exact.txt",
-    "cat /etc/esh*",
     "echo x > /etc/eshu/dashboard_url",
-    "cat /home/eshu/.ssh/authorized_keys",
+    "cat /etc/sudoers.d/eshu",
+    "cat /etc/eshu/features.d",
 ]
 
 
@@ -1005,3 +1005,75 @@ def test_sec_chunk5_window_claim_network_failure_still_runs(gw):
     proc = gw.run("ESHU_WINDOW_TOKEN=wintok echo window-ok")
     assert "window-ok" in proc.stdout
     assert proc.returncode == 0
+
+
+# ── Chunk R1: narrow FATAL, force-JIT the broad self-protection matches ────
+R_FALSE_POSITIVES = [
+    "systemctl status *mesh*",
+    'find /home -name "*refresh*"',
+    "[ -f /tmp/threshold ] && echo y",
+    'curl -s "http://x/api?fresh=1"',
+    "grep -r Refresh /var/log/*",
+    "ls -la ~/.ssh/authorized_keys",
+]
+
+
+@pytest.mark.parametrize("command", R_FALSE_POSITIVES)
+def test_sec_R_false_positive_is_not_fatal(gw, command):
+    gw.jit_status("denied")
+    proc = gw.run(command)
+    assert "FATAL" not in proc.stdout
+    assert gw.wait_for(lambda calls: any(
+        c["url"].endswith("/api/request") for c in calls))
+    assert not any(c["url"].endswith("/api/log")
+                   and c["data"].get("status") == "blocked"
+                   for c in gw.curl_calls())
+
+
+def test_sec_R_false_positive_allowlisted_runs(gw):
+    # Stub the binaries so the allowlisted false positives cannot touch the host.
+    gw._executable(gw.bin / "systemctl",
+                   "#!/bin/bash\necho SYSTEMCTL_STUB\n")
+    gw._executable(gw.bin / "find", "#!/bin/bash\necho FIND_STUB\n")
+    gw.exact("systemctl status *mesh*")
+    proc = gw.run("systemctl status *mesh*")
+    assert "SYSTEMCTL_STUB" in proc.stdout
+    assert proc.returncode == 0
+
+    gw.exact('find /home -name "*refresh*"')
+    proc = gw.run('find /home -name "*refresh*"')
+    assert "FIND_STUB" in proc.stdout
+    assert proc.returncode == 0
+
+    gw.exact('curl -s "http://x/api?fresh=1"')
+    proc = gw.run('curl -s "http://x/api?fresh=1"')
+    assert proc.returncode == 0
+    assert gw.wait_for(lambda calls: any(
+        c["url"].endswith("/api/log")
+        and c["data"].get("status") == "auto-approved"
+        for c in calls))
+
+
+def test_sec_R_glob_esh_path_prefix_is_jit(gw):
+    gw.exact("cat /etc/esh*")
+    gw.jit_status("denied")
+    proc = gw.run("cat /etc/esh*")
+    assert "FATAL" not in proc.stdout
+    assert "[DENIED]" in proc.stdout
+    assert proc.returncode == 1
+    assert gw.wait_for(lambda calls: any(
+        c["url"].endswith("/api/request") for c in calls))
+    assert not any(c["url"].endswith("/api/log")
+                   and c["data"].get("status") == "blocked"
+                   for c in gw.curl_calls())
+
+
+def test_sec_R_authorized_keys_is_jit(gw):
+    gw.exact("cat ~/.ssh/authorized_keys")
+    gw.jit_status("denied")
+    proc = gw.run("cat ~/.ssh/authorized_keys")
+    assert "FATAL" not in proc.stdout
+    assert "[DENIED]" in proc.stdout
+    assert proc.returncode == 1
+    assert gw.wait_for(lambda calls: any(
+        c["url"].endswith("/api/request") for c in calls))

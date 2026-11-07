@@ -14,14 +14,30 @@ SELF_PROTECTION_COMMANDS = [
     "ls /etc/eshu/features.d",
     "cat /etc//eshu-exact.txt",
     "cat /etc/./eshu-exact.txt",
-    "cat /etc/esh*",
     "echo x > /etc/eshu/dashboard_url",
-    "cat /home/eshu/.ssh/authorized_keys",
     "cat /usr/local/bin/eshu-gateway.sh",
     "cat /var/run/eshu.tickets",
     "cat eshu.db",
     "cat eshu-session-key",
-    "cat sudoers.d/eshu",
+    "cat /etc/sudoers.d/eshu",
+    "cat /etc/eshu/features.d",
+    "cat /etc/eshu/dashboard_url",
+]
+
+# Chunk R1: broad matches that must never be FATAL.
+SELF_PROTECTION_JIT_COMMANDS = [
+    "cat /etc/esh*",
+    "cat ~/.ssh/authorized_keys",
+    "ls -la ~/.ssh/authorized_keys",
+    "cat /home/eshu/.ssh/authorized_keys",
+]
+
+R_FALSE_POSITIVES = [
+    "systemctl status *mesh*",
+    'find /home -name "*refresh*"',
+    "[ -f /tmp/threshold ] && echo y",
+    'curl -s "http://x/api?fresh=1"',
+    "grep -r Refresh /var/log/*",
 ]
 
 PLAIN_COMMANDS = ["uptime", "df -h", "cat /etc/hosts", "journalctl -n 5"]
@@ -88,3 +104,30 @@ def test_sec_chunk2_policy_eval_blocklist_still_wins_over_meta_gate():
         regex_blacklist="id",
     )
     assert verdict["action"] == "blocked"
+
+
+# ── Chunk R1: dashboard parity for the narrowed FATAL / new JIT tier ──────
+@pytest.mark.parametrize("command", SELF_PROTECTION_JIT_COMMANDS)
+def test_sec_R_self_protection_jit_parity(command):
+    from core.cmd_blocklist import self_protection_jit_match
+    assert hard_block_match(command) is None
+    assert self_protection_jit_match(command) is not None
+
+
+@pytest.mark.parametrize("command", R_FALSE_POSITIVES)
+def test_sec_R_false_positive_parity(command):
+    from core.cmd_blocklist import self_protection_jit_match
+    assert hard_block_match(command) is None
+    assert self_protection_jit_match(command) is None
+
+
+@pytest.mark.parametrize("command", ["cat /etc/esh*", "cat ~/.ssh/authorized_keys"])
+def test_sec_R_policy_eval_self_protection_is_jit(command):
+    verdict = evaluate_policy_verdict(
+        command,
+        exact_whitelist=command,
+        regex_whitelist="^cat ",
+        regex_blacklist="",
+    )
+    assert verdict["action"] == "jit"
+    assert verdict["detail_type"] == "self_protection_jit"

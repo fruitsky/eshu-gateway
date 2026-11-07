@@ -102,3 +102,24 @@ def test_sec_chunk1_duplicate_key_is_refused_before_any_store(
     r = _post(client, gateway_headers, path, raw)
     assert r.status_code == 400
     assert get_all_requests() == []
+
+
+# ── Chunk R3: inspect bodies with no Content-Type and +json media types ────
+def _duplicate_target_ip_body():
+    return ('{"target_ip":"10.0.0.1","target_ip":"10.0.0.1",'
+            '"encoded_command":"dXB0aW1l","status":"blocked"}')
+
+
+def test_sec_R_duplicate_without_content_type_is_rejected(
+        client, gateway_headers):
+    r = client.post("/api/log", content=_duplicate_target_ip_body(),
+                    headers={**gateway_headers, "Content-Type": ""})
+    assert r.status_code == 400
+
+
+def test_sec_R_duplicate_vendor_json_type_is_rejected(
+        client, gateway_headers):
+    r = client.post("/api/log", content=_duplicate_target_ip_body(),
+                    headers={**gateway_headers,
+                             "Content-Type": "application/vnd.api+json"})
+    assert r.status_code == 400

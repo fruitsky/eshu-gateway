@@ -158,3 +158,41 @@ def test_sec_compat_legacy_injected_command_in_jit_request_is_rejected(
     raw = _calls(gw, "/api/request")[0][1]
     assert raw.count('"encoded_command"') >= 2
     _rejected_without_a_ticket(client, gateway_headers, gw, "/api/request")
+
+
+# ── Chunk R2: legacy gateway + current window feature script ──────────────
+def test_sec_R_window_exact_claim_200_runs(tmp_path):
+    gw = GatewaySandbox(tmp_path, script=LEGACY)
+    gw.approved_windows("wintok|echo window-ok|0|0|0|0|0|exact")
+    gw.window_claim("200")
+    proc = gw.run("ESHU_WINDOW_TOKEN=wintok echo window-ok")
+    assert "window-ok" in proc.stdout
+    assert proc.returncode == 0
+
+
+def test_sec_R_window_prefix_claim_200_runs(tmp_path):
+    gw = GatewaySandbox(tmp_path, script=LEGACY)
+    gw.approved_windows("wintok|echo prefix|0|0|0|0|0|prefix")
+    gw.window_claim("200")
+    proc = gw.run("ESHU_WINDOW_TOKEN=wintok echo prefix-ok")
+    assert "prefix-ok" in proc.stdout
+    assert proc.returncode == 0
+
+
+def test_sec_R_window_claim_404_is_rejected(tmp_path):
+    gw = GatewaySandbox(tmp_path, script=LEGACY)
+    gw.approved_windows("wintok|echo window-ok|0|0|0|0|0|exact")
+    gw.window_claim("404")
+    proc = gw.run("ESHU_WINDOW_TOKEN=wintok echo window-ok")
+    assert "Window rejected" in proc.stdout
+    assert "window-ok" not in proc.stdout
+    assert proc.returncode == 1
+
+
+def test_sec_R_window_claim_network_failure_runs(tmp_path):
+    gw = GatewaySandbox(tmp_path, script=LEGACY)
+    gw.approved_windows("wintok|echo window-ok|0|0|0|0|0|exact")
+    gw.window_claim("exit")
+    proc = gw.run("ESHU_WINDOW_TOKEN=wintok echo window-ok")
+    assert "window-ok" in proc.stdout
+    assert proc.returncode == 0

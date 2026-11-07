@@ -178,3 +178,24 @@ def test_sec_chunk5_pbkdf2_password_still_verified():
     from core.utils import _hash_password, _verify_password
     assert _verify_password("correct-horse", _hash_password("correct-horse")) is True
     assert _verify_password("wrong", _hash_password("correct-horse")) is False
+
+
+# ── Chunk R4: forwarded headers defeat the loopback first-run check ───────
+@pytest.mark.parametrize("header,value", [
+    ("X-Forwarded-For", "203.0.113.5"),
+    ("X-Real-IP", "203.0.113.5"),
+    ("Forwarded", "for=203.0.113.5"),
+])
+def test_sec_R_forwarded_loopback_requires_setup_token(temp_db, header, value):
+    import main
+    from db.auth import set_password_hash
+    from fastapi.testclient import TestClient
+    set_password_hash("")
+    c = TestClient(main.app, client=("127.0.0.1", 45680))
+    r = c.post("/api/auth/set-password", json={"password": "a" * 12},
+               headers={header: value})
+    assert r.status_code == 403
+    r2 = c.post("/api/auth/set-password", json={"password": "a" * 12},
+                headers={header: value,
+                         "X-Eshu-Setup-Token": main._SETUP_TOKEN})
+    assert r2.status_code == 200
