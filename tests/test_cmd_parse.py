@@ -538,7 +538,9 @@ class TestReviewRound1:
         assert breakdown('export LC_ALL=C')['steps'][0]['kind'] == 'read'
 
     def test_f1_r5_state_builtins_are_unknown(self):
-        for command in ('set -e', 'unset FOO', 'alias ll=ls', 'hash -r',
+        # `set` moved to read in review round 2 (S7): shell options cannot
+        # change how later commands resolve.
+        for command in ('unset FOO', 'alias ll=ls', 'hash -r',
                         'enable -n echo', "trap 'rm -rf /tmp/x' EXIT",
                         'source /tmp/script.sh', '. /tmp/script.sh'):
             assert breakdown(command)['steps'][0]['kind'] == 'unknown', command
@@ -692,3 +694,98 @@ class TestReviewRound1:
                                   capture_output=True, text=True, timeout=60)
         assert included.returncode == 0, included.stderr
         assert 'commands: 4 analysed' in included.stdout
+
+
+class TestReviewRound2:
+    """Regressions for the F1 review round 2 (S1-S7).
+
+    Each failed on the branch as reviewed; see the Round 3 paragraph in the
+    chunk's Implementer notes.
+    """
+
+    # ── S1: a command after a heredoc operator on the same line ─────────────
+
+    def test_f1_s1_command_after_heredoc_operator_same_line(self):
+        result = breakdown('cat <<EOF; rm -f /tmp/synthetic-x\nbody line\nEOF')
+        assert [step['kind'] for step in result['steps']] == ['read', 'write']
+        assert result['complete'] is True
+        assert result['steps'][0]['text'].startswith('cat')
+        # The heredoc belongs to `cat`, not to the command after the `;`.
+        assert result['steps'][1]['text'] == 'rm -f /tmp/synthetic-x'
+
+    # ── S2: every heredoc on a line, not just the first ─────────────────────
+
+    def test_f1_s2_every_heredoc_body_is_scanned(self):
+        command = ('cat <<A <<B\nfirst body\nA\n'
+                   '$(rm -rf /tmp/synthetic-x)\nB')
+        result = breakdown(command)
+        kinds = [step['kind'] for step in result['steps']]
+        assert 'write' in kinds, kinds
+        assert result['complete'] is True
+        contexts = [ctx for step in result['steps'] for ctx in step['context']]
+        assert 'heredoc' in contexts
+
+    # ── S3: `>& FILE` and `&>> FILE` ───────────────────────────────────────
+
+    def test_f1_s3_ampersand_redirects_write_files(self):
+        result = breakdown('ls >& /tmp/synthetic-out')
+        assert result['steps'][0]['kind'] == 'write'
+        assert 'redirect-to-file' in result['flags']
+        result = breakdown('ls &>> /tmp/synthetic-out')
+        assert result['steps'][0]['kind'] == 'write'
+        assert 'redirect-to-file' in result['flags']
+        assert result['complete'] is True
+        # fd duplication is still not a file write
+        result = breakdown('ls >&2')
+        assert result['steps'][0]['kind'] == 'read'
+        assert 'redirect-to-file' not in result['flags']
+
+    # ── S4: tar options that run a program ─────────────────────────────────
+
+    def test_f1_s4_tar_options_that_execute(self):
+        commands = [
+            'tar -cf /tmp/x.tar --checkpoint-action=exec=sh /tmp/dir',
+            'tar -I /tmp/prog -cf /tmp/x.tar /tmp/dir',
+            'tar --use-compress-program=/tmp/prog -cf /tmp/x.tar /tmp/dir',
+            'tar -F /tmp/prog -cf /tmp/x.tar /tmp/dir',
+            'tar --info-script=/tmp/prog -cf /tmp/x.tar /tmp/dir',
+            'tar --new-volume-script=/tmp/prog -cf /tmp/x.tar /tmp/dir',
+            'tar --rsh-command=/tmp/prog -cf /tmp/x.tar /tmp/dir',
+            'tar --rmt-command=/tmp/prog -cf /tmp/x.tar /tmp/dir',
+        ]
+        for command in commands:
+            assert breakdown(command)['steps'][0]['kind'] == 'unknown', command
+        assert breakdown('tar -cf /tmp/x.tar /tmp/dir')['steps'][0]['kind'] == 'write'
+
+    # ── S5: awk output and command pipes ───────────────────────────────────
+
+    def test_f1_s5_awk_output_and_command_pipes(self):
+        out = breakdown('awk \'{printf "x" >> "/tmp/synthetic-out"}\' /tmp/f')
+        assert out['steps'][0]['kind'] == 'write'
+        out = breakdown("awk '{c|getline}' /tmp/f")
+        assert out['steps'][0]['kind'] == 'unknown'
+        out = breakdown('awk \'BEGIN{print > "/tmp/synthetic-out"}\' /tmp/f')
+        assert out['steps'][0]['kind'] == 'write'
+        out = breakdown("awk '{print $1}' /tmp/f")
+        assert out['steps'][0]['kind'] == 'read'
+
+    # ── S6: git reads can run repository config ────────────────────────────
+
+    def test_f1_s6_git_reads_carry_repo_config_flag(self):
+        for command in ('git status', 'git -C /tmp/synthetic-repo log --oneline -5',
+                        'git diff', 'git show HEAD'):
+            result = breakdown(command)
+            assert result['steps'][0]['kind'] == 'read', command
+            assert 'repo-config' in result['flags'], command
+        assert 'repo-config' not in breakdown('git branch')['flags']
+        assert 'repo-config' not in breakdown('ls')['flags']
+
+    # ── S7: `set` is shell options, not a state change ─────────────────────
+
+    def test_f1_s7_set_is_shell_options(self):
+        for command in ('set -e', 'set -euo pipefail', 'set +x', 'set -- a b', 'set'):
+            result = breakdown(command)
+            assert result['steps'][0]['kind'] == 'read', command
+            assert result['steps'][0]['why'] == 'shell options', command
+        # R5 still applies to unset of a dangerous name.
+        assert breakdown('unset PATH')['steps'][0]['kind'] == 'unknown'
