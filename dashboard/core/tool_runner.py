@@ -35,6 +35,7 @@ from core.integration_proxy import (
     safe_request_summary,
 )
 from core.ha_ws import execute_ws_call
+from core.ha_ws_policy import is_read_command
 
 AGENT_LABEL = 'mcp'
 
@@ -61,6 +62,87 @@ def _run_write_verify(integration, args, res, tool_name, session_id,
 
 def _error(msg, status_code=500):
     return json.dumps({'error': msg, 'status_code': status_code})
+
+
+# Chunk H: a read-only tool must really be read-only. The generic HTTP `read`
+# passthrough only sends GET/HEAD, and the generic HA `ws_read` only sends
+# reviewed read commands. Both auto-run without an approval, so anything that
+# would write must take the approval-gated `write` / `ws_write` path instead.
+READ_METHODS = ('GET', 'HEAD')
+_READ_TOOL_WRITE_PATH = {'not_a_read_method': 'write',
+                         'not_a_read_command': 'ws_write'}
+
+
+def _normalise_method(method) -> str:
+    if method is None:
+        return 'GET'
+    return (str(method).strip().upper() or 'GET')
+
+
+def _read_only_refusal(tool, transport, args):
+    """(error_code, method-or-command) when a read-only tool is asked to write."""
+    if not tool.get('read_only') or not tool.get('generic'):
+        return None
+    if transport == 'ws':
+        command = (args or {}).get('command')
+        command = command.strip() if isinstance(command, str) else ''
+        if not is_read_command(command):
+            return ('not_a_read_command', command)
+        return None
+    method = _normalise_method((args or {}).get('method'))
+    if method not in READ_METHODS:
+        return ('not_a_read_method', method)
+    return None
+
+
+def _refuse_read_tool(integration, tool, tool_name, session_id,
+                      execution_id, agent_name, error_code, detail):
+    """Refuse a write/execute attempt on a read-only tool, and record it.
+
+    The audit row keeps the method/command only — never the payload values —
+    and the audit event names the tool so the operator can see an agent that
+    tried to write through the read path."""
+    transport = tool.get('transport') or 'http'
+    write_tool = _READ_TOOL_WRITE_PATH[error_code]
+    if error_code == 'not_a_read_method':
+        summary = json.dumps({'method': detail}, separators=(',', ':'))
+        message = (f"`{tool_name}` only accepts GET or HEAD; {detail} needs the "
+                   f"approval-gated `{write_tool}` tool.")
+        method, path = detail, ''
+        shown = detail
+    else:
+        summary = json.dumps({'command': detail}, separators=(',', ':'))
+        name = detail or '(missing command)'
+        message = (f"`{tool_name}` only runs read commands; `{name}` is not one. "
+                   f"Use the approval-gated `{write_tool}` tool for it.")
+        method, path = 'WS', detail
+        shown = name
+    record_integration_call(
+        integration=integration.get('name', ''),
+        tool=tool_name,
+        agent=agent_name,
+        method=method,
+        path=path,
+        status_code=400,
+        latency_ms=0,
+        response_summary=message,
+        response_bytes=0,
+        truncated=0,
+        outcome='refused',
+        session_id=session_id,
+        execution_id=execution_id,
+        reason=f'{error_code}: refused by the read-only tool policy',
+        request_summary=summary,
+        reason_code=error_code,
+    )
+    record_audit_event(
+        'read_tool_refused',
+        details=f"{integration.get('name')}.{tool_name}: {error_code} ({shown})",
+        actor=agent_name)
+    payload = {'error': error_code, 'message': message,
+               'status_code': 400, 'tool': write_tool}
+    payload['command' if error_code == 'not_a_read_command' else 'method'] = detail
+    return json.dumps(payload)
 
 
 def _result_error(res: dict) -> str:
@@ -256,6 +338,13 @@ def _run_tool(integration_name: str, tool_name: str, args: dict, reason: str = '
     generic = bool(tool.get('generic'))
     mutating = not tool.get('read_only')
     handler = tool.get('handler') or ''
+    # Chunk H: the read-only passthrough tools auto-run, so they must not be
+    # able to write or execute. This runs whatever the agent's policy says; an
+    # arg_policy still applies on top for the calls that do get through.
+    refusal = _read_only_refusal(tool, transport, args)
+    if refusal is not None:
+        return _refuse_read_tool(integration, tool, tool_name,
+                                 session_id, execution_id, agent_name, *refusal)
     # Audit labels: an immediate mutating call ran without operator sign-off
     # ("auto"); reads and handler dry-runs are not approval-relevant.
     approval_label = 'auto' if (mutating and not args.get('dry_run')) else ''
@@ -284,7 +373,8 @@ def _run_tool(integration_name: str, tool_name: str, args: dict, reason: str = '
                 args.get('params'), args.get('data'),
                 agent=agent_name, tool_name=tool_name, root=bool(args.get('root')),
                 session_id=session_id, execution_id=execution_id,
-                reason=exec_reason, approval=approval_label)
+                reason=exec_reason, approval=approval_label,
+                read_only=not mutating)
         return execute_integration_call(integration, tool, args, agent=agent_name,
                                         session_id=session_id, execution_id=execution_id,
                                         reason=exec_reason, approval=approval_label)

@@ -39,7 +39,9 @@ def generic_tools_for(kind: str) -> list:
         "integration's base URL (e.g. /states); `params` is an optional JSON "
         "object of query parameters. `method` is GET (default) or HEAD — HEAD "
         "returns headers-only metadata ({status, content_length, content_type, "
-        "url}) with no body, e.g. to check a media file's size. Credentials are "
+        "url}) with no body, e.g. to check a media file's size. **Read-only: "
+        "POST/PUT/PATCH/DELETE are refused** (`not_a_read_method`, status 400) "
+        "— use the approval-gated `write` tool for those. Credentials are "
         "injected by Eshu; every call is audited."
     )
     if prefix:
@@ -103,7 +105,7 @@ def generic_tools_for(kind: str) -> list:
         tools.extend([
             {
                 "name": "ws_read",
-                "description": "Call any read Home Assistant WebSocket command (e.g. config/entity_registry/list). `payload` is an optional JSON object of the command's fields. Audited.",
+                "description": "Call a read-only Home Assistant WebSocket command (e.g. config/entity_registry/list). Only reviewed read commands run: list/get/get_single/info/browse_media/statistics_during_period, config reads such as automation/config, plus render_template, get_states, get_config, get_services and zha/devices. Anything else (call_service, supervisor/*, registry create/update/remove, subscribe_*, backup/*) is refused (`not_a_read_command`) — use the approval-gated `ws_write` tool. `payload` is an optional JSON object of the command's fields. Audited.",
                 "method": "GET",
                 "path_template": "",
                 "params": [
