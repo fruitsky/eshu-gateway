@@ -771,6 +771,12 @@ Use the F1 breakdown so the operator can judge a 1–2 kB command in seconds.
   no extra click for short or all-read commands.)
 * Keyboard: the existing queue cursor shortcuts keep working; add `X` to toggle
   the raw command.
+* Render the F1 additions that landed during review: a step's optional
+  `script` field (decoded interpreter scripts, capped at 8 KiB) in a collapsed,
+  escaped monospace block; and the flags `follows` ("runs until stopped"),
+  `repo-config` ("git can run repository-configured programs"),
+  `sensitive-path` and `encoded` as chips. `complete: false` shows a
+  "could not fully parse; read the raw command" warning.
 * History rows: a "breakdown" link that fetches `/api/requests/{id}/breakdown` on demand.
 * `describeCmd` / `ctx-human` stay as they are for single-step commands.
 
