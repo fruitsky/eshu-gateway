@@ -109,6 +109,7 @@ from core.cmd_blocklist import hard_block_match, blocklist_substring_match, CORE
 from core.cmd_codec import decode_preview, detect_encoded_exec, scan_decoded
 from core.policy_eval import evaluate_policy_verdict
 from core.cmd_risk import get_cmd_risk, get_dry_run_suggestion
+from core.cmd_parse import breakdown as cmd_breakdown
 from core.cmd_profiles import get_anomaly, refresh_profiles, _profiles_loop
 from core.gateway_watch import (
     _check_gateway_transitions, _gateway_watch_loop,
@@ -935,7 +936,20 @@ def list_requests(request: Request, search: str = None, session: str = None):
         r['risk'] = get_cmd_risk(r['command']) if r['status'] == 'pending' else None
         # Behavioural anomaly — pending-only ("first time on this gateway")
         r['anomaly'] = get_anomaly(r['target_ip'], r['command']) if r['status'] == 'pending' else None
+        # Step breakdown (F1) — pending-only; history asks for one on demand.
+        if r['status'] == 'pending':
+            r['breakdown'] = cmd_breakdown(r['command'])
     return reqs
+
+
+@app.get("/api/requests/{req_id}/breakdown")
+def request_breakdown(req_id: int, request: Request):
+    """On-demand step breakdown for one request (history rows, F1)."""
+    _check_session(request)
+    command = get_request_command(req_id)
+    if command is None:
+        raise HTTPException(status_code=404, detail="Request not found")
+    return cmd_breakdown(command)
 
 
 @app.get("/api/requests/{req_id}/decoded")
