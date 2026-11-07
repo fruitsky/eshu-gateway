@@ -25,6 +25,22 @@ UNKNOWN = 'unknown'
 
 _RANK = {READ: 0, WRITE: 1, UNKNOWN: 2}
 
+# A verb is only trusted to be the command we classified when it is a bare
+# name or lives in a system binary directory. `/tmp/x/cat` and `./cat` are
+# not `cat` (review round 1, R6).
+SYSTEM_BIN_DIRS = frozenset({
+    '/bin', '/usr/bin', '/sbin', '/usr/sbin', '/usr/local/bin', '/usr/local/sbin',
+})
+
+
+def resolve_verb(token: str):
+    """Return ``(name, allowed)`` for one command word."""
+    if not token:
+        return '', False
+    if '/' not in token:
+        return token, True
+    return os.path.basename(token), os.path.dirname(token) in SYSTEM_BIN_DIRS
+
 
 def worst(a: str, b: str) -> str:
     """Return the more alarming of two kinds: unknown > write > read."""
@@ -101,7 +117,6 @@ READ_VERBS = {
     'cksum': 'cksum',
     'diff': 'diff',
     'cmp': 'cmp',
-    'tree': 'tree',
     'column': 'column',
     'rev': 'rev',
     'paste': 'paste',
@@ -110,24 +125,26 @@ READ_VERBS = {
     'modinfo': 'modinfo',
     'locale': 'locale',
     'lsb_release': 'lsb_release',
-    'dmidecode': 'dmidecode',
     'lshw': 'lshw',
-    'nvidia-smi': 'nvidia-smi',
     'pveversion': 'pveversion',
-    'vcgencmd': 'vcgencmd',
-    'systemd-analyze': 'systemd-analyze',
     'apt-cache': 'apt-cache',
     'dpkg-query': 'dpkg-query',
     # Shell builtins that only change the shell's own state. They do not
     # touch the host, and the command they prefix is classified on its own.
+    # `export`, `unset` and `set` are *not* here: they can change how later
+    # commands run (R5) and have handlers below.
     'cd': 'cd (shell state)',
     'pushd': 'pushd (shell state)',
     'popd': 'popd (shell state)',
-    'export': 'export (shell state)',
-    'unset': 'unset (shell state)',
-    'set': 'set (shell state)',
     'shift': 'shift (shell state)',
     'umask': 'umask (shell state)',
+    # Shell control flow: it ends or skips commands, it does not touch the host.
+    ':': 'shell control',
+    'exit': 'shell control',
+    'return': 'shell control',
+    'break': 'shell control',
+    'continue': 'shell control',
+    'wait': 'shell control',
 }
 
 # ── Verbs that always write ──────────────────────────────────────────────────
@@ -150,6 +167,7 @@ WRITE_VERBS = {
     'chgrp': 'chgrp',
     'tee': 'tee',
     'dd': 'dd',
+    'install': 'install',
     'truncate': 'truncate',
     'kill': 'kill',
     'pkill': 'pkill',
@@ -170,6 +188,36 @@ WRITE_VERBS = {
     'swapoff': 'swapoff',
 }
 
+# ── Dangerous environment (review round 1, R5) ──────────────────────────────
+#
+# These names change how a *later* command runs: PATH decides which binary is
+# found, LD_* / PYTHON* / PERL5* / RUBY* / NODE_OPTIONS / GIT_* inject code
+# into the next process, and the rest change how the shell parses commands.
+DANGEROUS_ENV_NAMES = frozenset({
+    'PATH', 'BASH_ENV', 'ENV', 'IFS', 'SHELLOPTS', 'BASHOPTS', 'PS4',
+    'PROMPT_COMMAND', 'NODE_OPTIONS',
+})
+DANGEROUS_ENV_PREFIXES = ('LD_', 'PYTHON', 'PERL5', 'RUBY', 'GIT_', 'BASH_FUNC_')
+
+_ASSIGN_NAME_RE = re.compile(r'^([A-Za-z_][A-Za-z0-9_]*)=')
+
+
+def assignment_name(token: str) -> str:
+    """The variable name of a `NAME=value` word, or ''."""
+    match = _ASSIGN_NAME_RE.match(token or '')
+    return match.group(1) if match else ''
+
+
+def dangerous_env_name(name: str) -> bool:
+    """True when setting `name` can change how later commands run."""
+    if not name:
+        return False
+    upper = name.upper()
+    if upper in DANGEROUS_ENV_NAMES:
+        return True
+    return any(upper.startswith(prefix) for prefix in DANGEROUS_ENV_PREFIXES)
+
+
 # ── Sensitive paths (flag only — F4 refuses them, F1 only labels them) ───────
 SENSITIVE_HINTS = (
     '.env',
@@ -185,6 +233,8 @@ SENSITIVE_HINTS = (
     'token',
     'passw',
     'credential',
+    'shadow',
+    'environ',
     'eshu',
 )
 
@@ -429,6 +479,11 @@ def _git(args):
     sub = args[i] if i < len(args) else ''
     tail = args[i + 1:]
     if sub in ('status', 'log', 'diff', 'show'):
+        for arg in tail:
+            if arg in ('--ext-diff', '--textconv'):
+                return _unknown(f'git {sub} {arg} (runs a configured program)')
+            if arg == '--output' or arg.startswith('--output='):
+                return _write('git --output (writes a file)')
         return _read(f'git {sub}')
     if sub == 'branch':
         write_flags = {'-d', '-D', '-m', '-M', '-c', '-C', '--delete',
@@ -499,7 +554,10 @@ def _hostname(args):
 
 def _sort(args):
     for a in args:
-        if a in ('-o', '--output') or a.startswith('--output='):
+        if a.startswith('--compress-program'):
+            return _unknown('sort --compress-program (executes)')
+        if (a in ('-o', '--output') or a.startswith('--output=')
+                or (a.startswith('-o') and not a.startswith('--') and len(a) > 2)):
             return _write('sort -o (writes a file)')
     return _read('sort')
 
@@ -526,7 +584,7 @@ def _crontab(args):
 
 def _find(args):
     write_flags = {'-delete', '-exec', '-execdir', '-ok', '-okdir',
-                   '-fprint', '-fprintf', '-fls'}
+                   '-fprint', '-fprint0', '-fprintf', '-fls'}
     for a in args:
         if a in write_flags:
             return _write(f'find {a}')
@@ -534,41 +592,135 @@ def _find(args):
 
 
 def _sed_script(args):
-    """The sed script: the argument after -e, or the first positional."""
-    for i, a in enumerate(args):
-        if a == '-e' or a == '--expression':
-            return args[i + 1] if i + 1 < len(args) else ''
-        if a.startswith('--expression='):
-            return a.split('=', 1)[1]
-    for a in args:
-        if not a.startswith('-') or a == '-':
-            return a
+    """The sed script(s): every -e expression, or the first positional."""
+    scripts = []
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == '-e' or arg == '--expression':
+            if i + 1 < len(args):
+                scripts.append(args[i + 1])
+            i += 2
+            continue
+        if arg.startswith('--expression='):
+            scripts.append(arg.split('=', 1)[1])
+            i += 1
+            continue
+        if arg.startswith('-e') and not arg.startswith('--') and len(arg) > 2:
+            scripts.append(arg[2:])
+            i += 1
+            continue
+        i += 1
+    if scripts:
+        return '\n'.join(scripts)
+    for arg in args:
+        if not arg.startswith('-') or arg == '-':
+            return arg
     return ''
 
 
+def _sed_inplace(args):
+    """True for `-i` anywhere in a short-flag cluster (`-Ei`, `-ni`, `-i.bak`)."""
+    for arg in args:
+        if arg == '--in-place' or arg.startswith('--in-place='):
+            return True
+        if arg.startswith('-') and not arg.startswith('--'):
+            for ch in arg[1:]:
+                if ch == 'i':
+                    return True
+                if ch in 'efl':  # these take a value; the rest is an argument
+                    break
+    return False
+
+
+def _sed_has_script_file(args):
+    for arg in args:
+        if arg == '--file' or arg.startswith('--file='):
+            return True
+        if arg.startswith('-') and not arg.startswith('--'):
+            for ch in arg[1:]:
+                if ch == 'f':
+                    return True
+                if ch in 'el':
+                    break
+    return False
+
+
+def _sed_script_risk(script):
+    """Side effects of a sed script itself: `w`/`W` writes, `e` executes."""
+    i = 0
+    n = len(script)
+    while i < n:
+        ch = script[i]
+        if ch in ' \t\n;{}':
+            i += 1
+            continue
+        if ch in 'wW':
+            return _write(f'sed {ch} (writes a file)')
+        if ch == 'e':
+            return _unknown('sed e (executes a command)')
+        if ch == 's':
+            delim = script[i + 1] if i + 1 < n else ''
+            if not delim or delim.isalnum() or delim in ' \t\n':
+                i += 1
+                continue
+            j = i + 2
+            seen = 0
+            while j < n:
+                if script[j] == '\\':
+                    j += 2
+                    continue
+                if script[j] == delim:
+                    seen += 1
+                    if seen == 2:
+                        break
+                j += 1
+            if seen < 2:
+                return None
+            k = j + 1
+            while k < n and script[k].isalpha():
+                flag = script[k]
+                if flag == 'e':
+                    return _unknown('sed s///e (executes)')
+                if flag in ('w', 'W'):
+                    return _write('sed s///w (writes a file)')
+                k += 1
+            i = k
+            continue
+        i += 1
+    return None
+
+
 def _sed(args):
-    for a in args:
-        if a == '--in-place' or a.startswith('--in-place='):
-            return _write('sed -i')
-        if a.startswith('-i') and not a.startswith('--'):
-            return _write('sed -i')
+    if _sed_inplace(args):
+        return _write('sed -i')
+    if _sed_has_script_file(args):
+        return _unknown('sed -f (script file)')
     script = _sed_script(args)
     if script:
-        if re.search(r'(?:^|[;\n])\s*[wW]\s+\S', script) or re.search(r'/\s*w\s+\S', script):
-            return _write('sed w (writes a file)')
-        if re.search(r'[/|]\s*e(?:\s|$)', script) or re.search(r'(?:^|[;\n])\s*e(?:\s|$)', script):
-            return _unknown('sed e (executes)')
+        risk = _sed_script_risk(script)
+        if risk:
+            return risk
     return _read('sed')
 
 
 def _awk(args):
     joined = ' '.join(args)
-    if 'system(' in joined or '| getline' in joined:
-        return _unknown('awk system() (executes)')
+    if re.search(r'system\s*\(', joined) or '| getline' in joined:
+        return _unknown('awk system()/getline (executes)')
+    # `print … | "cmd"` pipes the record into a command; `@include` loads code.
+    if re.search(r'\|\s*[\'"]', joined):
+        return _unknown('awk pipe to a command (executes)')
+    if '@include' in joined:
+        return _unknown('awk @include (loads code)')
     if re.search(r'\b(?:print|printf)\s*>>?', joined):
         return _write('awk print > (writes a file)')
     for a in args:
-        if a in ('-i', '--include') or a.startswith('-i'):
+        if a == '--file' or a.startswith('--file='):
+            return _unknown('awk -f (program file)')
+        if a.startswith('-f') and not a.startswith('--'):
+            return _unknown('awk -f (program file)')
+        if a in ('-i', '--include') or (a.startswith('-i') and not a.startswith('--')):
             return _write('awk -i inplace')
     return _read('awk')
 
@@ -607,7 +759,17 @@ _SMARTCTL_READ = {'-a', '-H', '-i', '-x', '--all', '--health', '--info',
                   '--xall', '--scan'}
 
 
+_SMARTCTL_WRITE = {'-s', '--smart', '-t', '--test', '-X', '--abort', '-o',
+                   '--offlineauto', '-S', '--saveauto', '--set'}
+_SMARTCTL_WRITE_PREFIX = ('--set', '--test', '--smart', '--abort',
+                          '--offlineauto', '--saveauto')
+
+
 def _smartctl(args):
+    # Action flags win over read flags: `smartctl -a -t long` starts a test.
+    for a in args:
+        if a in _SMARTCTL_WRITE or a.startswith(_SMARTCTL_WRITE_PREFIX):
+            return _write(f'smartctl {a}')
     for a in args:
         if a in _SMARTCTL_READ:
             return _read(f'smartctl {a}')
@@ -616,6 +778,120 @@ def _smartctl(args):
 
 _NVME_READ = {'smart-log', 'list', 'list-subsys', 'id-ctrl', 'id-ns',
               'error-log', 'fw-log', 'get-feature', 'show-regs'}
+
+
+def _tree(args):
+    for a in args:
+        if (a in ('-o', '--output') or a.startswith('--output=')
+                or (a.startswith('-o') and not a.startswith('--') and len(a) > 2)):
+            return _write('tree -o (writes a file)')
+    return _read('tree')
+
+
+def _dmidecode(args):
+    for a in args:
+        if a == '--dump-bin' or a.startswith('--dump-bin='):
+            return _write('dmidecode --dump-bin (writes a file)')
+    return _read('dmidecode')
+
+
+def _systemd_analyze(args):
+    sub = _subcommand(args)
+    if sub.startswith('set-'):
+        return _write(f'systemd-analyze {sub}')
+    return _read('systemd-analyze')
+
+
+_NVIDIA_READ_FLAGS = {'-q', '--query', '-L', '--list-gpus', '--format',
+                      '-i', '--id', '--query-gpu', '--query-compute-apps'}
+_NVIDIA_VALUE_FLAGS = {'-i', '--id', '--format', '--query-gpu',
+                       '--query-compute-apps'}
+
+
+def _nvidia_smi(args):
+    if not args:
+        return _read('nvidia-smi')
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        base = arg.split('=', 1)[0]
+        if base in _NVIDIA_READ_FLAGS or base.startswith('--query'):
+            if base in _NVIDIA_VALUE_FLAGS and '=' not in arg:
+                i += 2
+            else:
+                i += 1
+            continue
+        return _unknown(f'nvidia-smi {arg}')
+    return _read('nvidia-smi')
+
+
+def _vcgencmd(args):
+    sub = _subcommand(args)
+    if sub and (sub.startswith(('measure_', 'get_')) or sub in ('version', 'commands')):
+        return _read(f'vcgencmd {sub}')
+    return _unknown('vcgencmd')
+
+
+_TAR_WRITE_MODES = set('xcruA')
+_TAR_READ_MODES = set('t')
+_TAR_VALUE_LETTERS = set('fCTXbgHKLVN')
+
+
+def _tar(args):
+    for arg in args:
+        if arg.startswith('--'):
+            if arg in ('--list',):
+                return _read('tar --list')
+            if arg in ('--extract', '--get', '--create', '--append', '--update',
+                       '--catenate', '--delete', '--diff', '--compare'):
+                return _write(f'tar {arg}')
+    for arg in args:
+        if arg.startswith('--'):
+            continue
+        letters = arg[1:] if arg.startswith('-') else arg
+        if not letters:
+            continue
+        for ch in letters:
+            if ch in _TAR_VALUE_LETTERS:
+                break
+            if ch in _TAR_WRITE_MODES:
+                return _write('tar (writes)')
+            if ch in _TAR_READ_MODES:
+                return _read('tar --list')
+        if not arg.startswith('-'):
+            break
+    return _unknown('tar')
+
+
+def _declaration(args):
+    """export / declare / typeset / readonly / local — read unless dangerous."""
+    for arg in args:
+        if arg.startswith('-'):
+            continue
+        name = assignment_name(arg) or arg
+        if dangerous_env_name(name):
+            return _unknown('changes how later commands run')
+    return _read('shell state')
+
+
+def _shell_state(args):
+    return _unknown('can change how later commands run')
+
+
+def _read_builtin(args):
+    for arg in args:
+        if arg.startswith('-'):
+            continue
+        if dangerous_env_name(arg):
+            return _unknown('changes how later commands run')
+    return _read('read')
+
+
+def _printf(args):
+    for i, arg in enumerate(args):
+        if arg == '-v' and i + 1 < len(args) and dangerous_env_name(args[i + 1]):
+            return _unknown('changes how later commands run')
+    return _read('printf')
 
 
 def _nvme(args):
@@ -765,6 +1041,28 @@ _HANDLERS = {
     'date': _date,
     'hostname': _hostname,
     'sort': _sort,
+    'tree': _tree,
+    'dmidecode': _dmidecode,
+    'systemd-analyze': _systemd_analyze,
+    'nvidia-smi': _nvidia_smi,
+    'vcgencmd': _vcgencmd,
+    'tar': _tar,
+    'install': lambda args: _write('install'),
+    'export': _declaration,
+    'declare': _declaration,
+    'typeset': _declaration,
+    'readonly': _declaration,
+    'local': _declaration,
+    'set': _shell_state,
+    'unset': _shell_state,
+    'alias': _shell_state,
+    'hash': _shell_state,
+    'enable': _shell_state,
+    'trap': _shell_state,
+    'source': _shell_state,
+    '.': _shell_state,
+    'read': _read_builtin,
+    'printf': _printf,
     'uniq': _uniq,
     'ss': _ss,
     'crontab': _crontab,
@@ -805,7 +1103,9 @@ def classify(argv):
     """Return ``(kind, why)`` for an unwrapped argv."""
     if not argv:
         return UNKNOWN, 'empty command'
-    verb = os.path.basename(argv[0])
+    verb, allowed = resolve_verb(argv[0])
+    if not allowed:
+        return UNKNOWN, 'runs a binary outside the system paths'
     if not verb:
         return UNKNOWN, 'empty command'
     if verb.startswith('mkfs'):

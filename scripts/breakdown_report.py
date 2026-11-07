@@ -61,18 +61,37 @@ def _since_epoch(value):
     return int(parsed.timestamp())
 
 
-def _load_commands(conn, since):
-    sql = 'SELECT DISTINCT command FROM requests'
-    params = ()
+def _load_commands(conn, since, include_integration):
+    where = []
+    params = []
     if since is not None:
-        sql += ' WHERE created_at >= ?'
-        params = (since,)
+        where.append('created_at >= ?')
+        params.append(since)
+    if not include_integration:
+        # MCP calls are stored in `requests` too, with the tool name as the
+        # "command". They are not shell commands (review round 1, R11).
+        where.append("(status IS NULL OR status NOT LIKE 'integration-%')")
+    sql = 'SELECT DISTINCT command FROM requests'
+    if where:
+        sql += ' WHERE ' + ' AND '.join(where)
     try:
-        rows = conn.execute(sql, params).fetchall()
+        rows = conn.execute(sql, tuple(params)).fetchall()
     except sqlite3.Error as exc:
         _fail('cannot read the requests table: %s' % exc)
     return [row['command'] for row in rows
             if row['command'] and row['command'].strip()]
+
+
+def _count_excluded(conn, since):
+    sql = "SELECT COUNT(*) FROM requests WHERE status LIKE 'integration-%'"
+    params = ()
+    if since is not None:
+        sql += ' AND created_at >= ?'
+        params = (since,)
+    try:
+        return conn.execute(sql, params).fetchone()[0]
+    except sqlite3.Error:
+        return 0
 
 
 def _verb(text):
@@ -95,12 +114,15 @@ def main(argv=None):
     parser.add_argument('--since', help='only commands on/after this UTC date (YYYY-MM-DD)')
     parser.add_argument('--show-unknown', type=int, default=0, metavar='N',
                         help='print N example unknown steps (local use only)')
+    parser.add_argument('--include-integration', action='store_true',
+                        help='also analyse MCP/integration rows (default: skipped)')
     args = parser.parse_args(argv)
 
     since = _since_epoch(args.since) if args.since else None
     conn = _open_readonly(args.db)
     try:
-        commands = _load_commands(conn, since)
+        commands = _load_commands(conn, since, args.include_integration)
+        excluded = 0 if args.include_integration else _count_excluded(conn, since)
     finally:
         conn.close()
 
@@ -135,6 +157,9 @@ def main(argv=None):
     if args.since:
         print('  since:    %s (UTC)' % args.since)
     print('  commands: %d analysed, %d without steps' % (len(commands), empty))
+    if not args.include_integration:
+        print('  excluded: %d integration (MCP) rows — --include-integration to analyse them'
+              % excluded)
     print('  steps:    %d' % total_steps)
     for kind in ('read', 'write', 'unknown'):
         print('    %-7s %6d  %5.1f%%' % (kind, counts[kind], _percent(counts[kind], total_steps)))
