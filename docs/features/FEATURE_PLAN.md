@@ -1,6 +1,6 @@
 # Feature Plan — Reviewable approvals & less approval fatigue
 
-Status: **active** · Branch: `feature-roadmap` · Baseline: `master@4d13fd8` (security chunks 1–5 + R merged and deployed), **1343 tests passing** (`bash scripts/verify.sh`)
+Status: **active** · Branch: `feature-roadmap` · Baseline: `master@5c0045f` (security chunks 1–5 + R + H merged), merged into this branch 2026-11-07
 
 This plan turns the feature analysis of 2026-11-06 into small, reviewable
 chunks. One agent (the **implementer**) builds one chunk per branch; a second
@@ -157,6 +157,27 @@ The dashboard is deployed first; gateways update later via Build → Edge → Fl
 * Every agent-controlled string shown in the UI (command text, step text,
   section names, plan notes) goes through `escapeHtml`. The CSP allows inline
   scripts, so escaping is the real XSS boundary.
+
+### 2.6a Security review gate (agreed with the security work, 2026-11-07)
+
+* **F3 and F4 change what can run without the operator's approval.** Before
+  either merges into `feature-roadmap`, the feature reviewer approves it and then
+  hands the branch to the **security reviewer** (the `security-hardening` work)
+  for a second review. Both reviews are recorded under the chunk's Reviewer notes.
+  Same for F10 and F11.
+* **One notion of "read".** Security Chunk H (`master@5c0045f`) made the generic
+  integration read tools truly read-only: `core/tool_runner.py`
+  `_read_only_refusal` (HTTP: GET/HEAD only) and `core/ha_ws_policy.py`
+  `is_read_command` (HA WebSocket: deny rules first, reviewed allow lists, an
+  unknown command is not a read). New work must reuse these, never re-decide them:
+  * Any feature that auto-runs an **integration** call as a read calls the Chunk H checks.
+  * F4 (SSH read lane) is the SSH counterpart. It must follow the same design:
+    deny rules win, reviewed allow lists (F1's `cmd_rules.py`), fail closed,
+    and one entry point, `core/read_policy.py`, that exposes both
+    `is_read_integration_call(tool, transport, args)` (a thin wrapper over the
+    Chunk H functions, no new logic) and `is_read_ssh(breakdown)` (F4). F4's
+    eligibility code calls only `read_policy`, and the refusal/audit shape
+    matches Chunk H's (`reason_code`, an audit event, no payload values in the log).
 
 ### 2.7 Style
 
@@ -461,6 +482,7 @@ claim tickets for `approved` rows.
 - [ ] All tests above pass; the audit log shows who approved which items.
 - [ ] Docs updated (AGENT_MANUAL, API.md).
 - [ ] Reviewer does a dedicated security pass on the approval path (atomic use counting, session binding, ordering in § 2.6) and records it under Reviewer notes.
+- [ ] **Security reviewer sign-off** (§ 2.6a) recorded before merge.
 
 ### Implementer notes
 
@@ -502,7 +524,8 @@ a shadow period that shows the operator what it *would* have approved.
 
 * `gateways.read_lane` column (migration, default `'off'`); `PUT /api/gateways/{ip}/read-lane`
   (session + audit). Toggle in the Gateways table next to Zero-Trust (three-state).
-* `core/read_lane.py` `eligible(breakdown, verdict) -> (bool, reason)`.
+* `core/read_policy.py` (§ 2.6a): `is_read_ssh(breakdown)` holds the SSH read rules; `is_read_integration_call` wraps Chunk H.
+* `core/read_lane.py` `eligible(breakdown, verdict) -> (bool, reason)`: gateway state, size and blocklist checks, then `read_policy.is_read_ssh`. No read rules of its own.
 * Hook in `POST /api/request` after plans (F3) and session overrides, before host override.
 * Stats endpoint fields + UI tile.
 
@@ -523,6 +546,7 @@ Additive; old gateways work unchanged (same approved-row path as overrides).
 
 - [ ] Default is `off` on every existing and new gateway (migration test).
 - [ ] Reviewer does a dedicated security pass on `cmd_rules.py` and `read_lane.py` (try to find a read-classified command that writes, executes or leaks a secret) and records it under Reviewer notes.
+- [ ] **Security reviewer sign-off** (§ 2.6a) recorded before merge; `read_lane.py` goes through `core/read_policy.py` only.
 - [ ] Rollout note: at least 7 days in `shadow` on at least 2 gateways before
       `on` is offered in the UI (the toggle shows "on" disabled until that gateway has ≥ 7 days of shadow data).
 
@@ -911,14 +935,14 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 1 | F1 | breakdown | dashboard | **Ready** | `feat/f1-breakdown` | — | |
 | 2 | F2 | review-card | UI | Ready (after F1) | `feat/f2-review-card` | F1 | |
 | 3 | F7 | inner-target | dashboard | Ready (after F2) | `feat/f7-inner-target` | F1 | |
-| 4 | F3 | session-plans | dashboard + MCP | Ready (after F7) | `feat/f3-session-plans` | F2 | |
-| 5 | F4 | read-lane | dashboard | Ready (after F3) | `feat/f4-read-lane` | F1, F3 | reviewer security pass |
+| 4 | F3 | session-plans | dashboard + MCP | Ready (after F7) | `feat/f3-session-plans` | F2 | + security reviewer sign-off |
+| 5 | F4 | read-lane | dashboard | Ready (after F3) | `feat/f4-read-lane` | F1, F3, Chunk H | reviewer pass + security reviewer sign-off |
 | 6 | F5 | exec-results | gateway + dashboard | Ready (after F4) — design first | `feat/f5-exec-results` | — | design approval needed |
 | 7 | F6 | session-wrapup | dashboard | Ready (after F5) | `feat/f6-session-wrapup` | F3, F4, F5 | |
 | 8 | F8 | test-traffic | dashboard | Ready (after F6) | `feat/f8-test-traffic` | — | low priority |
 | 9 | F9 | ha-supervisor-read | dashboard | Ready (after F8) | `feat/f9-ha-supervisor-read` | — | token is from the operator's admin login; a dedicated `eshu` HA user is recommended |
-| 10 | F10 | ha-supervisor-actions | dashboard | Ready (after F9) | `feat/f10-ha-supervisor-actions` | F9, F3 | reviewer security pass |
-| 11 | F11 | ha-config-files | dashboard | Ready (after F10) — design first | `feat/f11-ha-config-files` | F10, F2, F5 | design approval needed |
+| 10 | F10 | ha-supervisor-actions | dashboard | Ready (after F9) | `feat/f10-ha-supervisor-actions` | F9, F3, Chunk H | reviewer pass + security reviewer sign-off |
+| 11 | F11 | ha-config-files | dashboard | Ready (after F10) — design first | `feat/f11-ha-config-files` | F10, F2, F5 | design approval + security reviewer sign-off |
 
 Chunks are done **in the order column**; each new chunk branches from the
 updated `feature-roadmap` after the previous one is merged.
