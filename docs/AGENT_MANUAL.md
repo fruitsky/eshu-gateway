@@ -499,7 +499,14 @@ at all does the gateway fall back to its local window cache.
 
 A **prefix** window never approves a command that contains shell chaining or
 redirection (`;` `&` `|` `` ` `` `$(` `>` `<` `\` newline) — the attempt is a
-window reject. An **exact** window still runs its exact command, chaining included.
+window reject. An **exact** window runs only the exact string stored in the
+window. If that stored string itself contains chaining (for example
+`apt update && apt upgrade -y`), it runs as stored; adding anything to it (such
+as `; id`) is a `command mismatch` reject.
+
+If a command is also matched by an allowlist rule, the allowlist runs it first
+and the window is not used (its execution count does not change). Use windows
+for commands that are not already allowlisted.
 
 ### Rejected windows (hard reject)
 
