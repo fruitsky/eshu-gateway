@@ -718,6 +718,15 @@ SSH gateways). That has to change before Eshu gets more power over HA.
 * Every response goes through `secret_scrub`. A `401/403` from `supervisor/api`
   becomes a clear error: "the HA token is not an admin token. Supervisor tools need an admin user."
 * `docs/INTEGRATIONS.md`: the HA section says which tools need an admin token.
+  It also recommends (as a setup step, not enforced) a **dedicated HA admin user
+  for Eshu** (e.g. `eshu`) whose long-lived token is used by the integration, so
+  HA's logbook attributes agent actions to it and the token can be revoked
+  without touching the operator's own login. Note in the docs that a
+  long-lived token carries all of its user's rights. The operator's current
+  token comes from their own (admin) login.
+* `ha_whoami` (read-only): WS `auth/current_user` → `{name, is_admin, is_owner}`,
+  so the operator (and the Supervisor tools' error messages) can confirm which
+  user the token belongs to.
 
 ### Tests to add
 
@@ -907,7 +916,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 6 | F5 | exec-results | gateway + dashboard | Ready (after F4) — design first | `feat/f5-exec-results` | — | design approval needed |
 | 7 | F6 | session-wrapup | dashboard | Ready (after F5) | `feat/f6-session-wrapup` | F3, F4, F5 | |
 | 8 | F8 | test-traffic | dashboard | Ready (after F6) | `feat/f8-test-traffic` | — | low priority |
-| 9 | F9 | ha-supervisor-read | dashboard | Ready (after F8) | `feat/f9-ha-supervisor-read` | — | needs an admin HA token |
+| 9 | F9 | ha-supervisor-read | dashboard | Ready (after F8) | `feat/f9-ha-supervisor-read` | — | token is from the operator's admin login; a dedicated `eshu` HA user is recommended |
 | 10 | F10 | ha-supervisor-actions | dashboard | Ready (after F9) | `feat/f10-ha-supervisor-actions` | F9, F3 | reviewer security pass |
 | 11 | F11 | ha-config-files | dashboard | Ready (after F10) — design first | `feat/f11-ha-config-files` | F10, F2, F5 | design approval needed |
 
