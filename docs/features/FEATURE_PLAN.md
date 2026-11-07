@@ -590,6 +590,62 @@ commits per item, add the regression tests, re-run `bash scripts/verify.sh`,
 add a **Round 2** paragraph to Implementer notes (each R item: done / how /
 test name), push, and stop.
 
+**Round 2 — 2026-11-07 — nearly there; changes requested (S1–S7).**
+
+All of R1–R11 are fixed and each has a regression test. I re-ran my round-1
+probe set (52 cases) and every one now gives the right answer. Performance is
+fine (100 kB of pipelines in 0.3 s; 400-deep `$(` and 3,000 parentheses stay
+bounded). **Live accuracy now passes:** SSH rows only, 6,558 steps: 75.6% read,
+9.3% write, **15.1% unknown** (18.2% since September), under the revised 20%.
+The top remaining unknowns are legitimately opaque (`curl`, site-specific CLIs,
+interpreters, scripts piped into a shell). A second probe set (68 cases) found
+the following. As before, each needs a `test_f1_s<N>_<what>` that fails first.
+
+* **S1 — critical: a command after a heredoc operator on the same line
+  disappears.** `cat <<EOF; rm /tmp/x` followed by a body and `EOF` gives one
+  `read` step (`cat`), and the `rm` is gone. This is the R1 class again: the
+  heredoc scan has to resume parsing the rest of the *operator line* (here
+  `; rm /tmp/x`) and skip only the body lines after it.
+* **S2 — high: only the first heredoc on a line has its body scanned.**
+  `cat <<A <<B` with an unquoted `$( … )` in B's body is `read`. Handle every
+  heredoc on the line in order, each with its own quoting. (Partially quoted
+  delimiters such as `E"O"F` and `\EOF` are correctly treated as data. Keep that.)
+* **S3 — high: `>& FILE` and `&>> FILE` write files.** `ls >& /tmp/x` is `read`
+  today: only a digit or `-` after `>&` is fd duplication; anything else is a
+  file write (add `>&` with a non-numeric target to the write redirects).
+  `ls &>> /tmp/x` is labelled `write` but sets `complete: false`. Parse `&>>` as
+  one operator.
+* **S4 — high: `tar` options that execute.** `--checkpoint-action=exec=…`,
+  `-I PROG` / `--use-compress-program`, `-F` / `--info-script` /
+  `--new-volume-script`, `--rsh-command` and `--rmt-command` → `unknown`
+  (`tar runs a program`). `--to-command` is already right.
+* **S5 — medium: `awk` output and command pipes.** `printf "x" >> "/tmp/x"`
+  (a string between `printf` and `>>`) and `c|getline` (no spaces) are `read`.
+  Rule: inside the awk program, `|` followed by optional space and `getline` →
+  `unknown`. In any statement that starts with `print`/`printf` (statements
+  split on `;`, `{`, `}` and newline), a `>`, `>>` or `|` outside a string
+  literal → `write` (or `unknown` for `|`). This is deliberately conservative:
+  `print ($1 > 2)` becomes `write`, which only costs a prompt.
+* **S6 — low: `git` reads that can run repository config.** `git status`,
+  `log`, `diff` and `show` can run programs configured in the repository being
+  read (for example `core.fsmonitor`), so `git -C /some/dir status` in a
+  directory the agent controls is not purely a read. Keep `read` but add flag
+  `repo-config`. F4 will refuse it unless the directory is on an allowlist (F4's design).
+* **S7 — low (correction of my R5): `set` is too broad.** `set -e`,
+  `set -euo pipefail`, `set +x` and `set -- a b` cannot change how later
+  commands resolve, so they should be `read` (why `shell options`). Keep
+  `unset` of a dangerous name and the other R5 rules. On the live DB this
+  removes ~21 needless unknowns.
+
+**Optional accuracy (not required for merge):** `dig`/`host`/`nslookup` →
+`read` (network query, why `DNS lookup`); `pvesm status|list` → `read`.
+
+**Gate re-run by the reviewer:** pre-commit OK; `1686 passed` (matches your count).
+
+**What to do:** fix S1–S7 on this branch, re-run `bash scripts/verify.sh`, add a
+**Round 3** paragraph to Implementer notes, push, and stop. If S1–S7 are clean
+I expect to merge F1 next round.
+
 
 ---
 
@@ -979,7 +1035,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 
 | Order | Chunk | Slug | Area | Status | Branch | Depends on | Reviewer notes |
 |---|---|---|---|---|---|---|---|
-| 1 | F1 | breakdown | dashboard | **Changes requested** (round 1) | `feat/f1-breakdown` | — | R1–R11, see chunk |
+| 1 | F1 | breakdown | dashboard | **Changes requested** (round 2) | `feat/f1-breakdown` | — | R1–R11 done; S1–S7 open; live accuracy passes (15.1% unknown) |
 | 2 | F2 | review-card | UI | Ready (after F1) | `feat/f2-review-card` | F1 | |
 | 3 | F7 | inner-target | dashboard | Ready (after F2) | `feat/f7-inner-target` | F1 | |
 | 4 | F3 | session-plans | dashboard + MCP | Ready (after F7) | `feat/f3-session-plans` | F2 | |
