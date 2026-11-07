@@ -804,7 +804,109 @@ UI only.
 
 ### Implementer notes
 
-_(fill in)_
+**What I did**
+
+* **`dashboard/static/app.js`** — the breakdown renderer and its four surfaces.
+  The helpers are pure (a request row in, an HTML string out):
+  `bdHeadlineHtml`, `bdBodyHtml`, `bdStepsHtml`, `bdFlagsHtml`, `bdStepHtml`,
+  `bdBlockHtml`, `bdRowHeadlineHtml`.
+  * **Headline** above the raw command on the queue hero card, a compact
+    one-line copy on every queue row, a "Breakdown" section at the top of the
+    context panel (which is the full-width mobile drawer below 768px), and on
+    the session-modal SSH rows.
+  * **Step list** under the command: grouped by `section`, each step's
+    `context` chain as prefix chips (`pct 103`, `sudo`, `decoded`), write and
+    unknown steps expanded and highlighted, runs of read steps collapsed to
+    "N read steps ▸", the optional `script` field in a collapsed escaped
+    monospace block, and `complete: false` shown as *"could not fully parse;
+    read the raw command"*.
+  * **Flags** as chips: `encoded`, `heredoc`, `nested ssh`, `sensitive path`,
+    `redirect`, `runs until stopped` (`follows`) and `repo can run programs`
+    (`repo-config`).
+  * **Colours** never read as pre-approved: all-read is muted ink (not green),
+    a write is amber, an unknown step adds *"read it as written"*.
+  * **Raw command** stays available and is collapsed behind a "raw command ▸"
+    toggle (and the `X` queue shortcut) when the breakdown has 4+ steps.
+  * **Two-press Approve**: for a command over 500 chars that still has an
+    unknown step, the first Approve scrolls to and briefly highlights that
+    step and says so in a toast; the second press approves. Short or all-read
+    commands are unchanged. It lives in `handleAction`, so it covers every
+    Approve path for that request (hero, context panel, session modal).
+  * **History** rows get a `breakdown` link that fetches
+    `GET /api/requests/{id}/breakdown` and expands a row beneath it.
+* **`dashboard/static/index.html`** — the two context-panel sections
+  (`ctx-breakdown-head`, `ctx-breakdown-steps`) and an `app.js` /
+  `style.css` cache-buster bump.
+* **`dashboard/static/style.css`** — the breakdown styles in the ink language;
+  `scripts/ui_check.py` stays clean (no new `!important`, tokens only,
+  nothing below 11px).
+* **`tests/fixtures/f2_harness.js` + `tests/test_f2_review_card.py`** — the
+  tests load the real `app.js` in a stubbed browser context under node and
+  render a fixture pending row, so they assert on the shipped code.
+
+**Surprises and decisions**
+
+* The queue is a hero card plus compact rows, and the context panel becomes a
+  full-width drawer below 768px — those *are* the four surfaces the chunk
+  names. There is no separate mobile component to change.
+* `escapeHtml` is the only escaper, and the test proves it by spying on it:
+  step text, section names, every context chip, the decoded `script` and the
+  headline are all recorded through it, and an `<img src=x onerror=…>`
+  payload is asserted absent from the rendered HTML.
+* A history breakdown row has to survive the 3-second table poll. The first
+  version appended a `<tr>` once and the next poll removed it; the row is now
+  rebuilt from `_bdHistory` on every render (verified by waiting two polls).
+* The raw command block joins a multi-line script onto one line — that is the
+  pre-existing `.jit-cmd-text` behaviour (3-line clamp), unchanged here. The
+  step list is what makes a long script readable.
+* A read step's `why` is usually just the verb (`uptime`), so it is hidden
+  when it repeats the text; write/unknown whys always show.
+
+**Deliberately not done**
+
+* No backend change: pending rows already carry `breakdown` (F1) and
+  `/api/requests/{id}/breakdown` already exists. No schema, API or gateway
+  change.
+* `describeCmd` / `ctx-human` are untouched, as are the risk line, the anomaly
+  line, the decoded preview and the TTL.
+* No new mobile-specific component (the existing responsive drawer covers it),
+  and no change to the F1 engine or the security work merged from
+  `feature-roadmap`.
+
+**Screenshots** (desktop 1440 px, phone 400 px; all synthetic data)
+
+* A 9+ step read-only recon command:
+  ![all-read desktop](../screenshots/f2/all-read-desktop.png)
+  ![all-read phone](../screenshots/f2/all-read-mobile.png)
+* A mixed read/write command (1 kB recon with one `sed -i`; the write step is
+  visible without scrolling):
+  ![mixed desktop](../screenshots/f2/mixed-desktop.png)
+  ![mixed phone](../screenshots/f2/mixed-mobile.png)
+* An encoded command (`base64 -d | bash`, decoded steps):
+  ![encoded desktop](../screenshots/f2/encoded-desktop.png)
+  ![encoded phone](../screenshots/f2/encoded-mobile.png)
+* The decoded `script` field (`| python3`), for completeness:
+  ![script desktop](../screenshots/f2/script-desktop.png)
+  ![script phone](../screenshots/f2/script-mobile.png)
+* The context panel (the mobile drawer):
+  ![context panel](../screenshots/f2/context-panel-desktop.png)
+
+**Tests**
+
+Eight tests in `tests/test_f2_review_card.py`, all `test_f2_*` — every one
+failed on the reviewed commit (the renderer did not exist). They cover the
+headline and step list rendering, the mixed write step, the unknown/incomplete
+warnings, the flags, the `script` block and the XSS check, plus a static check
+that the context-panel markup, the history link and the `X` shortcut exist.
+
+`bash scripts/verify.sh` (pre-commit green):
+
+```
+1711 passed, 7 warnings in 341.19s (0:05:41)
+```
+
+(1703 before this chunk + 8 new tests.)
+
 
 ### Reviewer notes
 
