@@ -315,7 +315,101 @@ Additive JSON fields and one new GET endpoint. No gateway change.
 
 ### Implementer notes
 
-_(fill in)_
+**What shipped**
+
+* `dashboard/core/cmd_rules.py` — the verb table: `classify(argv) -> (kind, why)`,
+  argument-aware for `systemctl`, `journalctl`, `docker`, `apt`, `dpkg`, `find`,
+  `sed`, `awk`, `ip`, `git`, `mount`, `sysctl`, `crontab`, `iptables`, … plus the
+  sensitive-path patterns. Data-heavy so the security-relevant half can be
+  reviewed on its own.
+* `dashboard/core/cmd_parse.py` — `breakdown(command)`: shlex tokenising, section
+  markers, wrapper unwrapping (depth ≤ 3), encoded payloads, heredocs,
+  redirections, `$( … )`/backtick substitutions, shell keywords, flags,
+  `inner_targets`, summary and headline. Cached with
+  `functools.lru_cache(maxsize=512)`; each call returns a deep copy.
+* `dashboard/main.py` — `list_requests` attaches `breakdown` to **pending** rows
+  only (next to `risk`/`anomaly`); new `GET /api/requests/{req_id}/breakdown`
+  (session auth, 404 on an unknown id). Nothing else changed.
+* `scripts/breakdown_report.py` — read-only (`file:…?mode=ro`) aggregates: step
+  split, fully-read share, top-20 unknown verbs; `--show-unknown N` prints
+  examples and is explicitly local-use only.
+* `tests/test_cmd_parse.py` + `tests/fixtures/commands/*.txt` — a 94-case table
+  over 10 fixture files, plus property, risk-consistency, cache, performance,
+  report and API tests.
+
+**Surprises and decisions worth a look**
+
+1. **shlex punctuation runs.** `shlex` hands back `);`, `))` and `&&` as single
+   tokens, so a closing parenthesis never matched. `_normalise()` splits runs
+   into single operators before paren matching and statement building.
+2. **Encoded payloads need a long blob.** `cmd_codec.decode_preview` only looks
+   at base64 runs of ≥ 16 characters, so `echo dXB0aW1l | base64 -d | bash`
+   (8 chars) is correctly "could not decode" and becomes one `unknown` step.
+   The fixtures use realistic multi-line payloads.
+3. **Loop headers.** `for …; do …; done`, `case … esac` and `if …; then` are
+   structure, not commands: `for`/`case` headers are dropped (substitutions
+   inside them are still parsed), `if`/`while` keep their condition.
+   `pct exec $i …` with a variable id stays `unknown`, because the chunk's
+   `pct exec <id>` needs a literal id and expanding loop variables is a parser
+   feature the chunk does not ask for.
+4. **A `case` body must not hide behind its header.** `case x in a) rm …` used
+   to reach the parser as one argv (`)` was dropped), so the `rm` vanished into
+   the dropped header. `)` is now a soft statement boundary; regression case
+   `loops.txt::case-block`.
+5. **Risk-map agreement.** `cmd_risk.get_cmd_risk` has false positives
+   (`\brm\b` also matches `cat /tmp/rm`), so a step the risk map flags is
+   never reported `read` — it degrades to `unknown`. That makes the chunk's
+   consistency test true by construction.
+6. **Cache key.** The chunk says "LRU keyed by `sha256(command)`
+   (`lru_cache` on the command string)". I used `lru_cache(maxsize=512)` on the
+   command text itself: hashing first would add a copy and lose readability for
+   no gain.
+7. **Verb table additions beyond § F1's READ list.** The acceptance criterion
+   says unknown verbs are "justified or added to the rules", so I added
+   read-only/recon verbs that were missing: `pwd printenv env false sleep seq
+   groups getent lsof pgrep pidof lsns tty w who users last sha256sum sha1sum
+   md5sum cksum diff cmp tree column rev paste comm lsmod modinfo locale
+   lsb_release dmidecode lshw nvidia-smi pveversion vcgencmd systemd-analyze`,
+   the session-local builtins `cd pushd popd export unset set shift umask`, and
+   argument-aware `hostnamectl`/`timedatectl` plus `systemctl --failed` (a
+   subcommand-less `systemctl` is a listing). All are read-only or only change
+   the shell's own state; drop any you disagree with and the table says which
+   fixtures move.
+8. **`docker stats` without `--no-stream` is `unknown`** (it streams forever),
+   and `sed 's/x/y/e'` / `awk system(…)` are `unknown` rather than `write`,
+   because they execute rather than write.
+9. **`<<-EOF`** arrives from shlex as `<<` + `-EOF`; the dash is re-attached so
+   a tab-stripped body is still skipped. A heredoc whose closing delimiter never
+   arrives sets `complete: false` — we cannot tell which lines the shell runs.
+10. **Compatibility.** Additive only: one new JSON field on pending rows and one
+    new GET. Old gateways are untouched; `/api/policies/test`, `/preview` and
+    the gateway scripts are unchanged.
+
+**Deliberately not done**
+
+* No F2 UI, no gateway change, no read-lane/plan plumbing (F3/F4 own those), no
+  new dependencies, no loop unrolling, no change to `cmd_risk`, policy or
+  blocklist behaviour.
+* `docs/TOOLSHED_PLAN.md` and `scripts/eval_tool_discovery.py` were already
+  untracked in the working tree when I started; they are **not** part of this
+  branch.
+* The reviewer's live-database run of `scripts/breakdown_report.py`
+  (≤ 15 % unknown steps) is still to do — it needs the database copy.
+* Heads-up for the reviewer: running `bash scripts/verify.sh` leaves
+  `dashboard/static/dev/eshu-gateway-install.sh` modified. `tests/test_golden.py`
+  exercises `POST /api/dev/seed`, which copies the golden installer over the dev
+  copy. That is a pre-existing side effect, unrelated to F1; I reverted it and
+  committed nothing under `static/dev/`.
+
+**Tests**
+
+94 synthetic cases (10 fixture files) plus property, risk-consistency, cache,
+performance, report and API tests: **321 tests added** (baseline 1343).
+`bash scripts/verify.sh`:
+
+```
+1664 passed, 7 warnings in 339.63s (0:05:39)
+```
 
 ### Reviewer notes
 
