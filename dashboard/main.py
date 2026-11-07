@@ -474,9 +474,17 @@ _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 
 
 def _first_run_setup_allowed(request: Request) -> bool:
-    """First-run setup is only reachable from loopback or with the setup token."""
+    """First-run setup is only reachable from loopback or with the setup token.
+
+    A reverse proxy on the dashboard host makes every remote browser look like
+    loopback, so any forwarded-client header disables the loopback shortcut and
+    requires the setup token.
+    """
+    forwarded = (request.headers.get("X-Forwarded-For")
+                 or request.headers.get("X-Real-IP")
+                 or request.headers.get("Forwarded"))
     client_host = request.client.host if request.client else ""
-    if client_host in _LOOPBACK_HOSTS:
+    if not forwarded and client_host in _LOOPBACK_HOSTS:
         return True
     supplied = request.headers.get("X-Eshu-Setup-Token", "").strip()
     return bool(supplied) and hmac.compare_digest(supplied, _SETUP_TOKEN)

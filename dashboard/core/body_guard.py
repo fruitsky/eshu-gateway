@@ -40,16 +40,23 @@ def _collect_duplicate_keys(pairs, duplicates):
 async def reject_duplicate_json_keys(request: Request) -> None:
     """Raise 400 (and audit the key names) when a JSON /api body repeats a key.
 
-    Non-JSON, empty and malformed bodies are left to the endpoint's existing
-    validation so their status codes do not change.
+    Empty and malformed bodies are left to the endpoint's existing validation
+    so their status codes do not change; an explicit non-JSON media type
+    (e.g. text/plain) is skipped, but a missing Content-Type is inspected
+    because FastAPI still parses it as JSON.
     """
     if request.method not in _WRITE_METHODS:
         return
     if not request.url.path.startswith("/api/"):
         return
-    content_type = request.headers.get("content-type", "")
-    if content_type.split(";", 1)[0].strip().lower() != _JSON_TYPE:
-        return
+    # FastAPI parses a body as JSON when no Content-Type is sent, and JSON
+    # media types may be application/*+json. Inspect all three; leave an
+    # explicit non-JSON type (e.g. text/plain) to the endpoint's validation.
+    content_type = request.headers.get("content-type")
+    if content_type is not None:
+        media_type = content_type.split(";", 1)[0].strip().lower()
+        if media_type and media_type != _JSON_TYPE and not media_type.endswith("+json"):
+            return
 
     # Reading here is safe: Starlette caches the body on the Request, so the
     # endpoint (and FastAPI's own body parsing) can read it again.
