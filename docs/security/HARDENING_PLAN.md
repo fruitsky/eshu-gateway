@@ -921,6 +921,76 @@ Implemented on `sec/chunk-5-authz`, cut from the tip of
 
 ---
 
+## Chunk R — Review follow-ups  · slug `review-fixups` · MEDIUM
+
+Branch `sec/chunk-R-review-fixups` from `security-hardening` (normal §0 rules,
+one branch, one PR). Each item needs a `test_sec_R_*` regression test that
+fails before the fix.
+
+**R1. Self-protection rules that are too broad (chunk 2 follow-up).** Stage 1
+is FATAL and cannot be approved by a human, so false positives are permanent
+for that command. Today these are hard-blocked:
+`systemctl status *mesh*`, `find /home -name "*refresh*"`,
+`[ -f /tmp/threshold ] && echo y`, `curl -s "http://x/api?fresh=1"`,
+`grep -r Refresh /var/log/*`, `ls -la ~/.ssh/authorized_keys`.
+(The glob+`esh` rule was the planner's choice, not an implementer error.)
+
+* Keep **FATAL** for the explicit Eshu paths/tokens: `/usr/local/bin/eshu-`,
+  `/etc/eshu`, `/var/run/eshu`, `/run/eshu`, `eshu.db`, `eshu.tickets`,
+  `eshu-session-key`, `/etc/sudoers.d/eshu`, and `features.d` **only when it
+  appears as `eshu/features.d`**.
+* Move to a new **force-JIT** tier (like the encoded-payload and metacharacter
+  gates — never auto-run, but a human may approve it):
+  * glob characters (`*`, `?`, `[`) combined with the case-insensitive
+    substring `esh` **only when it is a path component prefix**
+    (`/esh`, ` esh`, `=esh`, or the start of the command) — e.g.
+    `cat /etc/esh*` still forced to JIT, `ls *mesh*` not affected at all;
+  * `.ssh/authorized_keys` (any user).
+* Mirror the tiers in `core/cmd_blocklist.py` / `core/policy_eval.py`
+  (fatal vs `jit` with `detail_type: "self_protection_jit"`).
+* Tests: every false-positive command above is **not** FATAL (and runs if
+  allowlisted and metacharacter-free); `cat /etc/esh*`, `cat ~/.ssh/authorized_keys`
+  go to JIT; every chunk-2 FATAL regression test still passes unchanged.
+
+**R2. Permanent compat test for the window feature script.** The dashboard
+serves `static/features/approved_windows.sh` to **every** gateway on the next
+poll — it bypasses Build → Edge → Fleet. Add to `tests/test_sec_compat.py`:
+legacy gateway (`fixtures/legacy`) + the current feature script — exact window
+with claim 200 runs; prefix window with claim 200 runs; claim 404 is rejected;
+claim network failure runs. (Reviewer verified these by hand; make them
+permanent.)
+
+**R3. Duplicate-key guard when `Content-Type` is missing.** FastAPI parses the
+body as JSON when no `Content-Type` is sent, but `core/body_guard.py` only
+inspects `application/json`. Also inspect bodies with **no** content type
+(and `application/*+json`). Tests for both.
+
+**R4. First-run loopback check behind a same-host proxy (chunk 5 follow-up).**
+`_first_run_setup_allowed` trusts `request.client.host == 127.0.0.1`. If a
+reverse proxy runs on the same host, every remote browser looks like
+loopback. Treat the request as non-loopback when it carries any of
+`X-Forwarded-For`, `X-Real-IP`, `Forwarded`. Document in `docs/FIRST_RUN.md`.
+Test: loopback client + `X-Forwarded-For` and no setup token → 403.
+
+**R5. Docs — residual risk, no code.** In `docs/ARCHITECTURE.md` (policy
+pipeline section) add a short "Writing safe allowlist rules" note: anchor with
+`^…$`, avoid `.*` in arguments, and that argument-level execution
+(`find … -exec … +`, `xargs`, `awk 'BEGIN{system(…)}'`, quote-split paths) is
+not caught by the metacharacter gate — such commands belong in JIT or an
+exact rule.
+
+### Acceptance criteria
+
+- [ ] R1–R4 regression tests fail before / pass after; R5 docs present.
+- [ ] `bash scripts/verify.sh` green, count ≥ 1313 + new tests.
+- [ ] Installers regenerated (R1 touches `eshu-gateway.sh`).
+
+### Implementer notes
+
+_(fill in)_
+
+---
+
 ## Chunk 6 — Update integrity & per-gateway session keys  · slug `supply-chain` · HIGH (design change)
 
 > The reviewer will write a detailed design for this chunk before it starts.
@@ -970,7 +1040,15 @@ dashboard LXC or gateways. The reviewer runs it; the implementer does not deploy
    flows (allowlist log, blocked log, JIT request → approve → claim, heartbeat,
    policy poll). Added as `tests/test_sec_compat.py` in Chunk 1 and extended
    by later chunks.
-5. Deploy order:
+5. Manual UI smoke test against a **local** dashboard run from the branch
+   (`cd dashboard && ESHU_SETUP_TOKEN=… bash start.sh`, browser on loopback):
+   first-run setup, login/logout, approve + deny a JIT, Fleet Run dispatch,
+   freeze/unfreeze, create/toggle/delete a window, add/test an integration —
+   with the browser devtools console free of CSP or 403 CSRF errors.
+6. Note: `static/features/approved_windows.sh` and `static/fleet-runner.sh`
+   reach **every** gateway as soon as the dashboard is deployed (no Edge
+   stage) — their legacy-gateway compat tests (Chunk R2) must be green.
+7. Deploy order:
    1. Dashboard LXC: back up `eshu.db`, `git pull` the merged `master`,
       `bash scripts/deploy-dashboard.sh`, check the UI and `/api/version`.
    2. Gateways: Seed Edge → push to **one** dev gateway → soak ≥ 24 h (JIT,
@@ -985,13 +1063,21 @@ dashboard LXC or gateways. The reviewer runs it; the implementer does not deploy
 
 | Chunk | Slug | Severity | Status | Branch | Reviewer notes |
 |---|---|---|---|---|---|
-| 1 | json-injection | Critical | **Changes requested (round 1)** | `sec/chunk-1-json-injection` | 1a–1d approved; add 1f + 1g |
-| 2 | chaining | High | Ready (after 1) | `sec/chunk-2-chaining` | |
-| 3 | tmp-races | High | Ready (after 2) | `sec/chunk-3-tmp-races` | |
-| 4 | web-hardening | Medium | Ready (after 3) | `sec/chunk-4-web-hardening` | |
-| 5 | authz | Medium | Ready (after 4) | `sec/chunk-5-authz` | |
+| 1 | json-injection | Critical | **Merged** | `sec/chunk-1-json-injection` @ `4fab82e` | Round 2 approved; reviewer repro (old-gateway raw bodies) → 400, no ticket |
+| 2 | chaining | High | **Merged** (follow-up R1) | `sec/chunk-2-chaining` @ `ac4bc6e` | Approved; glob+esh rule too broad → R1 |
+| 3 | tmp-races | High | **Merged** | `sec/chunk-3-tmp-races` @ `114cb6f` | Approved |
+| 4 | web-hardening | Medium | **Merged** (manual UI smoke test pending) | `sec/chunk-4-web-hardening` @ `9c845be` | Approved; browser smoke test is a rollout-gate item |
+| 5 | authz | Medium | **Merged** (follow-up R4) | `sec/chunk-5-authz` @ `2d579be` | Approved; loopback check vs same-host proxy → R4 |
+| R | review-fixups | Medium | **Ready** | `sec/chunk-R-review-fixups` | See "Chunk R" |
 | 6 | supply-chain | High | Design pending | — | |
 | 7 | low | Low | Draft | — | |
 
 Chunks are done **in order**; each new chunk branches from the updated
 `security-hardening` after the previous one is merged.
+
+Review of 2026-11-07: chunks 1–5 reviewed as a stack and fast-forwarded into
+`security-hardening`. Reviewer re-ran `pre-commit.sh`, the installer-sync
+check and the **full suite at `2d579be`: 1313 passed**, plus private repros
+(old-gateway injected bodies on `/api/log` and `/api/request`, incl.
+`application/json; charset=utf-8`) and old-gateway + new `approved_windows.sh`
+(exact, prefix, 404) — all as expected.
