@@ -64,7 +64,8 @@ def _verify_password(password: str, stored: str) -> bool:
     try:
         parts = stored.split('$')
         if len(parts) != 4 or parts[1] != 'pbkdf2':
-            return password == stored
+            # No plaintext fallback: a legacy hash must be re-set explicitly.
+            return False
         _, _, salt, key_hex = parts
         expected = _hash_password(password, salt)
         return hmac.compare_digest(expected, stored)

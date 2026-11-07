@@ -95,13 +95,23 @@ if [ -n "${ESHU_WINDOW_TOKEN:-}" ] && [ -f /etc/eshu-windows.txt ] && [ -s /etc/
       #   404  -> token consumed, disabled, expired, or exhausted -> fail closed
       #   network error (000) -> dashboard unreachable -> fail OPEN on the
       #   local cache so windows still work during a dashboard outage.
+      WINDOW_CLAIM_EXIT=0
       WINDOW_CLAIM_HTTP=$(curl -m 3 -s -o /dev/null -w "%{http_code}" \
         -X POST "$DASHBOARD_URL/api/approved-windows/execute/$ESHU_WINDOW_TOKEN" \
-        -H "X-Gateway-Token: ${GATEWAY_TOKEN:-}" 2>/dev/null || echo "000")
-      if [ "$WINDOW_CLAIM_HTTP" = "404" ] || [ "$WINDOW_CLAIM_HTTP" = "403" ]; then
-        logger -t eshu-gateway "APPROVED WINDOW REJECTED: token=$ESHU_WINDOW_TOKEN claim=$WINDOW_CLAIM_HTTP"
-        _window_reject "window consumed or disabled"
+        -H "X-Gateway-Token: ${GATEWAY_TOKEN:-}" 2>/dev/null) || WINDOW_CLAIM_EXIT=$?
+      # Fail open ONLY when curl itself failed (network down). Any HTTP answer
+      # other than 200 — 401/403/404/429/500 — is a refusal.
+      if [ "$WINDOW_CLAIM_EXIT" -ne 0 ]; then
+        WINDOW_CLAIM_HTTP="000"
       fi
+      case "$WINDOW_CLAIM_HTTP" in
+        200) ;;
+        000) logger -t eshu-gateway "APPROVED WINDOW CLAIM UNREACHABLE: token=$ESHU_WINDOW_TOKEN — failing open on local cache" ;;
+        *)
+          logger -t eshu-gateway "APPROVED WINDOW REJECTED: token=$ESHU_WINDOW_TOKEN claim=$WINDOW_CLAIM_HTTP"
+          _window_reject "window claim failed (HTTP $WINDOW_CLAIM_HTTP)"
+          ;;
+      esac
       logger -t eshu-gateway "APPROVED WINDOW MATCH: token=$ESHU_WINDOW_TOKEN cmd=$cmd mtype=$win_mtype claim=$WINDOW_CLAIM_HTTP"
       run_sanitized bash -c "$cmd"
     else

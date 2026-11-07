@@ -1,5 +1,5 @@
 import time
-import hashlib
+import secrets
 from db.core import db_conn
 
 def init_enrollment_tables(cursor):
@@ -28,7 +28,7 @@ def save_ssh_keys(eshu_key: str):
 def generate_enrollment_token(ttl_seconds: int = 120):
     with db_conn() as conn:
         cursor = conn.cursor()
-        token = hashlib.sha256(str(time.time() + hash(str(conn))).encode()).hexdigest()[:24]
+        token = secrets.token_urlsafe(24)
         now = int(time.time())
         cursor.execute('''
             INSERT INTO enrollment_tokens (token, created_at, expires_at, used)

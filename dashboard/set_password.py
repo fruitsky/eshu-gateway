@@ -53,9 +53,9 @@ def main():
     if current:
         print("A password is already set. You will overwrite it.")
 
-    password = getpass("New password (min 4 chars): ")
-    if len(password.strip()) < 4:
-        print("❌ Password must be at least 4 characters. Aborted.")
+    password = getpass("New password (min 12 chars): ")
+    if len(password.strip()) < 12:
+        print("❌ Password must be at least 12 characters. Aborted.")
         sys.exit(1)
 
     confirm = getpass("Confirm password: ")

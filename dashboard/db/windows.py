@@ -1,5 +1,4 @@
 import time
-import random
 import string
 import secrets
 import sqlite3
@@ -125,7 +124,7 @@ def create_approved_window(target_ip: str, command: str, window_start: int = 0, 
                            max_executions: int = 1, label: str = '', days_of_week: int = 0,
                            execution_time: int = 0, expires_at: int = None,
                            match_type: str = 'exact', origin: str = 'human') -> dict:
-    token = ''.join(random.choices(string.ascii_letters + string.digits, k=10))
+    token = ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(24))
     retrieval_key = _make_retrieval_key()
     with db_conn() as conn:
         cursor = conn.cursor()
@@ -285,7 +284,7 @@ def create_window_request(target_ip: str, command: str, days_of_week: int = 0,
     # Unique placeholder token — the column is UNIQUE, and an empty string would
     # collide with any other pending/denied agent request (500 IntegrityError).
     # approve_window_request() replaces it with the real token on approval.
-    token = ''.join(random.choices(string.ascii_letters + string.digits, k=10))
+    token = ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(24))
     retrieval_key = _make_retrieval_key()
     now = int(time.time())
     window_end = 0
@@ -337,7 +336,7 @@ def get_approved_window_by_key(retrieval_key: str) -> dict:
         return dict(row) if row else None
 
 def approve_window_request(request_id: int) -> dict:
-    token = ''.join(random.choices(string.ascii_letters + string.digits, k=10))
+    token = ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(24))
     with db_conn() as conn:
         cursor = conn.cursor()
         cursor.execute('''

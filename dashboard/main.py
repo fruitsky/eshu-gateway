@@ -190,6 +190,10 @@ app = FastAPI(
 _last_enroll_log = {}
 _ENROLL_DEDUP_WINDOW = 5  # seconds
 _app = app  # keep reference for router includes
+# First-run setup token: printed at startup when no password is set, and
+# accepted via X-Eshu-Setup-Token from a non-loopback browser.
+_SETUP_TOKEN = os.environ.get('ESHU_SETUP_TOKEN', '').strip() or secrets.token_urlsafe(24)
+app.state.setup_token = _SETUP_TOKEN
 # Reject duplicate JSON keys on /api JSON writes before any handler runs
 # (chunk 1f). Set before the route decorators below register API routes.
 app.router.route_class = NoDuplicateJSONKeysRoute
@@ -297,11 +301,19 @@ def on_startup():
     from core.cmd_descs import load_whatis_db
     load_whatis_db()
     pw = get_password_hash()
+    if pw and not str(pw).startswith('$pbkdf2$'):
+        print("!" * 72)
+        print("  WARNING: a legacy plaintext password hash was detected.")
+        print("  Plaintext login is no longer accepted. Reset it with:")
+        print("     python3 dashboard/set_password.py")
+        print("!" * 72)
     if not pw:
         print("\n" + "=" * 60)
         print("  🔐  No dashboard password is set.")
         print("     Complete setup in the dashboard on first launch, or run:")
         print("     python3 dashboard/set_password.py")
+        print(f"     First-run setup token: {_SETUP_TOKEN}")
+        print("     (send it as X-Eshu-Setup-Token if the browser is not on loopback)")
         print("=" * 60 + "\n")
     else:
         print(f"Eshu Gateway Dashboard {DASHBOARD_VERSION} started (password-protected)")
@@ -458,16 +470,33 @@ def auth_logout(response: Response):
     return {"status": "ok"}
 
 
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+
+
+def _first_run_setup_allowed(request: Request) -> bool:
+    """First-run setup is only reachable from loopback or with the setup token."""
+    client_host = request.client.host if request.client else ""
+    if client_host in _LOOPBACK_HOSTS:
+        return True
+    supplied = request.headers.get("X-Eshu-Setup-Token", "").strip()
+    return bool(supplied) and hmac.compare_digest(supplied, _SETUP_TOKEN)
+
+
 @app.post("/api/auth/set-password")
 def set_password(payload: SetPasswordPayload, request: Request):
-    """Set the dashboard password. Requires auth if password already exists.
-    On first-run (no password set), this works without authentication."""
-    # Only require auth if a password already exists (changing an existing one)
+    """Set the dashboard password. Requires auth if a password already exists.
+    On first-run (no password set), only loopback or X-Eshu-Setup-Token works."""
+    # Changing an existing password still requires the session.
     if _is_password_protected():
         _check_session(request)
+    elif not _first_run_setup_allowed(request):
+        raise HTTPException(
+            status_code=403,
+            detail="First-run setup requires loopback or the X-Eshu-Setup-Token header",
+        )
     new_password = payload.password.strip()
-    if not new_password or len(new_password) < 4:
-        raise HTTPException(status_code=400, detail="Password must be at least 4 characters")
+    if not new_password or len(new_password) < 12:
+        raise HTTPException(status_code=400, detail="Password must be at least 12 characters")
     hash_value = _hash_password(new_password)
     set_password_hash(hash_value)
     record_audit_event("password_changed", details="Dashboard password updated")
@@ -946,7 +975,8 @@ def purge_requests(older_than: str = "1h", request: Request = None):
     return {"status": "ok", "deleted": deleted}
 
 @app.get("/api/policies/test")
-def test_policy(command: str):
+def test_policy(command: str, request: Request):
+    _check_session(request)
     policies = get_policies()
     v = evaluate_policy_verdict(
         command,
@@ -1821,8 +1851,9 @@ def generate_token(request: Request):
     return {"token": token}
 
 @app.get("/api/enroll/token-status")
-def check_token_status(token: str):
+def check_token_status(token: str, request: Request):
     """Check whether an enrollment token has been used (consumed by a gateway)."""
+    _check_session(request)
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute("SELECT used, expires_at FROM enrollment_tokens WHERE token = ?", (token,))
@@ -1854,8 +1885,13 @@ def serve_enrollment_script(token: str, request: Request):
             media_type="text/plain"
         )
     
-    # Determine dashboard base URL from the request
+    # Determine dashboard base URL from the request. The Host is inserted into
+    # the bash bootstrap, so it must be a hostname/IPv4[:port] or [IPv6][:port].
     host = request.headers.get('host', 'localhost')
+    host_ok = (re.fullmatch(r"[A-Za-z0-9.-]+(:[0-9]{1,5})?", host)
+               or re.fullmatch(r"\[[0-9A-Fa-f:]+\](:[0-9]{1,5})?", host))
+    if not host_ok:
+        raise HTTPException(status_code=400, detail="Invalid Host header")
     scheme = request.headers.get('X-Forwarded-Proto', 'https' if request.url.scheme == 'https' else 'http')
     if scheme not in ('http', 'https'):
         scheme = 'http'
@@ -2370,13 +2406,16 @@ def edit_window(window_id: int, payload: WindowUpdatePayload, request: Request):
 
 @app.get("/api/approved-windows")
 def list_windows(request: Request, ip: str = None):
-    """List approved windows. Open to agents (read-only) — full status, but the
-    token and retrieval_key fields are omitted for unauthenticated callers
-    (session-authed UI still sees them). Tokens are retrievable by the opaque
-    retrieval_key via /api/window-requests/{key}."""
+    """List approved windows for a session, a gateway (scoped to its own IP) or
+    an agent token. Non-session callers never see tokens/retrieval keys."""
     _check_rate_limit(request.client.host if request.client else "127.0.0.1")
-    wins = get_approved_windows(ip)
-    if not _check_session_optional(request):
+    session_ok = _check_session_optional(request)
+    token_ip, _ = _resolve_gateway_token(request)  # invalid token -> 401
+    agent = resolve_agent_optional(request)
+    if not (session_ok or token_ip or agent):
+        raise HTTPException(status_code=401, detail="Authentication required")
+    wins = get_approved_windows(token_ip if token_ip else ip)
+    if not session_ok:
         for w in wins:
             w.pop('retrieval_key', None)
             w.pop('token', None)
@@ -2490,8 +2529,13 @@ class WindowRequestPayload(BaseModel):
 
 @app.post("/api/window-requests")
 def submit_window_request(payload: WindowRequestPayload, request: Request):
-    # Resolve gateway identity from X-Gateway-Token (same pattern as /api/request)
+    # Gateway token (bound to its IP) or agent bearer token. A browser session
+    # is not an agent credential and is deliberately not accepted here.
     token_ip, _ = _resolve_gateway_token(request)
+    agent = resolve_agent_optional(request)
+    if not token_ip and not agent:
+        raise HTTPException(status_code=401,
+                            detail="Authentication required — gateway or agent token")
     gw_ip = token_ip if token_ip else payload.gateway_ip
     if token_ip and token_ip != payload.gateway_ip:
         raise HTTPException(status_code=401, detail="Gateway token does not match self-reported gateway_ip")

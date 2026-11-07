@@ -412,12 +412,15 @@ async function checkAuth() {
 async function doSetup() {
   const pw = document.getElementById('setup-password').value;
   const pwConfirm = document.getElementById('setup-password-confirm').value;
+  const setupToken = (document.getElementById('setup-token') || {}).value || '';
   const errEl = document.getElementById('setup-error'), btn = document.getElementById('setup-btn');
-  if (!pw || pw.length < 4) { errEl.textContent = 'Password must be at least 4 characters.'; errEl.classList.remove('hidden'); return; }
+  if (!pw || pw.length < 12) { errEl.textContent = 'Password must be at least 12 characters.'; errEl.classList.remove('hidden'); return; }
   if (pw !== pwConfirm) { errEl.textContent = 'Passwords do not match.'; errEl.classList.remove('hidden'); return; }
   btn.disabled = true; btn.textContent = 'Setting up...'; errEl.classList.add('hidden');
   try {
-    const res = await fetch('/api/auth/set-password', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: pw }) });
+    const headers = { 'Content-Type': 'application/json' };
+    if (setupToken) headers['X-Eshu-Setup-Token'] = setupToken;
+    const res = await fetch('/api/auth/set-password', { method: 'POST', headers: headers, body: JSON.stringify({ password: pw }) });
     if (res.ok) {
       const loginRes = await fetch('/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: pw }) });
       if (loginRes.ok) { showDashboard(); initDashboard(); return; }
@@ -508,7 +511,7 @@ async function refreshPasswordUI() {
 }
 async function setDashboardPassword() {
   const pw = document.getElementById('new-password').value.trim();
-  if (!pw || pw.length < 4) { showToast('Password must be at least 4 characters', 'error'); return; }
+  if (!pw || pw.length < 12) { showToast('Password must be at least 12 characters', 'error'); return; }
   try {
     const res = await authFetch('/api/auth/set-password', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: pw }) });
     if (res.ok) { document.getElementById('new-password').value = ''; refreshPasswordUI(); showToast('Password updated', 'success'); }
