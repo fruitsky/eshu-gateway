@@ -81,7 +81,8 @@ Every command passes through these stages in order:
 | Stage | Rule Set | Match → Action |
 |:-----:|----------|---------------|
 | **0** | **Emergency Freeze** (global circuit breaker) — when the operator freezes the fleet, every gateway rejects all commands until unfrozen | **FATAL — rejected while frozen** |
-| **1** | Hardcoded core blocklist — **self-protection** (`/usr/local/bin/eshu-*`, `/etc/eshu*`, `/var/run/eshu*`, `/run/eshu*`, `eshu.db*`, `eshu.tickets`, `eshu-session-key`, `features.d`, `sudoers.d/eshu`, `.ssh/authorized_keys`) and **evasion** (`$(which …)`, `` `which …` ``). Paths are normalised (repeated `/`, `/./`) and globchars near `esh` are blocked. **Defence in depth, not a sandbox.** | **FATAL — blocked permanently** |
+| **1** | Hardcoded core blocklist — **FATAL self-protection** (`/usr/local/bin/eshu-*`, `/etc/eshu*`, `/var/run/eshu*`, `/run/eshu*`, `eshu.db*`, `eshu.tickets`, `eshu-session-key`, `eshu/features.d`, `/etc/sudoers.d/eshu`) and **evasion** (`$(which …)`, `` `which …` ``). Paths are normalised (repeated `/`, `/./`). **Defence in depth, not a sandbox.** | **FATAL — blocked permanently** |
+| **1.5** | Broad self-protection matches — any user's `.ssh/authorized_keys`, and wildcard characters next to an `esh` path component (`/esh`, ` esh`, `=esh`, command start) | **Force JIT — never auto-run, human may approve** |
 | **2** | Dashboard-managed blacklist (`/etc/eshu-rblack.txt`) — includes the shipped command-safety patterns (`rm -rf`, `mkfs`, `dd`, `iptables -F`, power control) by default, which the operator can relax | **Blocked** |
 | **3** | Exact whitelist (`/etc/eshu-exact.txt`) — skipped when the command contains shell metacharacters (stage 2a routes those to JIT) | **Auto-approved** |
 | **4** | Regex whitelist (`/etc/eshu-rwhite.txt`) — skipped when the command contains shell metacharacters (stage 2a routes those to JIT) | **Auto-approved** |
@@ -100,6 +101,25 @@ Stage 1 is **defence in depth, not a sandbox**: approved commands run as root.
 The real boundary is the stage-2a metacharacter gate (anything containing
 `; & | ` $( > <` newline/CR/backslash is forced to JIT) plus human approval for
 every command that is not byte-identical to an allowlisted literal.
+
+Stage 1 FATAL is reserved for the explicit Eshu paths/tokens: a false positive
+there is permanent because no human can approve it. Broader self-protection
+matches (wildcards near an `esh` path component, any user's
+`.ssh/authorized_keys`) are **stage 1.5 force-JIT** instead.
+
+### Writing safe allowlist rules
+
+Regex allowlists are matched with `[[ "$cmd" =~ $pattern ]]` and the result is
+run with `bash -c "$cmd"`, so an unanchored pattern widens the rule. Anchor
+with `^…$` and avoid `.*` in the argument part; prefer a narrow character class
+or an exact rule.
+
+The stage-2a metacharacter gate is not a command parser. **Argument-level
+execution is not caught by it**: `find … -exec … +`, `xargs`, `awk
+'BEGIN{system(…)}'`, options in `sed`/`git` that run commands, and shell-quote
+splitting in a path can still turn an allowlisted literal into a different
+command. Put such commands in JIT (no allowlist) or an exact rule that matches
+the operator's intent byte-for-byte.
 
 ## Tech Stack
 

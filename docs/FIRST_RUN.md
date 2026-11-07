@@ -52,6 +52,10 @@ First-run setup token: <token>
   overlay (sent as `X-Eshu-Setup-Token`), or start the service with
   `ESHU_SETUP_TOKEN=<value>` and use that value. Without either, a non-loopback
   first-run request is refused with 403.
+- **Behind a reverse proxy on the same host**, the loopback shortcut is
+  disabled whenever the request carries `X-Forwarded-For`, `X-Real-IP` or
+  `Forwarded`; the setup token is required even though the proxy connects from
+  127.0.0.1.
 - Passwords must be at least **12** characters. Legacy plaintext hashes are no
   longer accepted at login; reset one with `python3 dashboard/set_password.py`.
 

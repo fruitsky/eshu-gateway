@@ -987,7 +987,68 @@ exact rule.
 
 ### Implementer notes
 
-_(fill in)_
+Implemented on `sec/chunk-R-review-fixups`, cut from `security-hardening@9624247`.
+
+**R1 — self-protection tiers**
+- FATAL is now only the explicit Eshu paths/tokens: `/usr/local/bin/eshu-`,
+  `/etc/eshu`, `/var/run/eshu`, `/run/eshu`, `eshu.db`, `eshu.tickets`,
+  `eshu-session-key`, `eshu/features.d`, `/etc/sudoers.d/eshu`, plus the
+  `$(which` / `` `which `` evasion rule.
+- New stage 1.5 `SELF_JIT` (never FATAL, never auto-run, human may approve):
+  any `.ssh/authorized_keys`, and a glob character next to an `esh` path
+  component (`/esh`, space, `=esh`, or command start). It skips the exact,
+  regex and feature-script/window paths, then goes to JIT.
+- `core/cmd_blocklist.py` mirrors this with `self_protection_jit_match()`;
+  `hard_block_match()` is FATAL-only. `policy_eval` returns
+  `action: "jit", detail_type: "self_protection_jit"` after the editable
+  blocklist (matching the gateway's stage order).
+- Tests: the six listed false positives are not FATAL;
+  `systemctl status *mesh*`, `find … "*refresh*"` and the fake dashboard curl
+  run when allowlisted (stubbed binaries), while `grep` is classified only
+  (the gateway itself uses `grep`); `cat /etc/esh*` and
+  `cat ~/.ssh/authorized_keys` are JIT even when allowlisted. The chunk-2 FATAL
+  cases are unchanged except that the two broad ones are now in the JIT tests.
+
+**R2 — window feature-script compat**
+- Added four permanent tests in `tests/test_sec_compat.py`: legacy gateway
+  (`625995d`) + current feature script, exact claim 200 runs, prefix claim 200
+  runs, claim 404 rejects, claim network failure (curl exit 7) runs.
+- These are test-only; they already passed on `security-hardening` because the
+  chunk-5 claim fix is already in the served feature script. They now guard the
+  direct-served script path against regressions.
+
+**R3 — duplicate-key media types**
+- `core/body_guard.py` now inspects a body when `Content-Type` is missing/empty
+  and when the media type is `application/*+json`; an explicit other type
+  (e.g. `text/plain`) is still left to the endpoint. Tests cover no content
+  type and `application/vnd.api+json`.
+
+**R4 — loopback behind a same-host proxy**
+- `_first_run_setup_allowed` treats any `X-Forwarded-For`, `X-Real-IP` or
+  `Forwarded` header as non-loopback, requiring `X-Eshu-Setup-Token`.
+  `docs/FIRST_RUN.md` documents it. Tests cover all three headers.
+
+**R5 — docs**
+- Added "Writing safe allowlist rules" to `docs/ARCHITECTURE.md` (anchor
+  `^…$`, avoid `.*`, and argument-level execution via `find -exec`, `xargs`,
+  `awk 'BEGIN{system(…)}'`, etc. is not caught by the metacharacter gate).
+
+**Test-first evidence**
+- Before the fixes, **26** `test_sec_R_*` assertions failed (R1 gateway/parity,
+  R3, R4, R5). The four R2 tests passed immediately (test-only item, no fix).
+- Final `bash scripts/verify.sh` → **1343 passed** (1313 + 30 new R tests).
+  The count was kept at baseline + new tests by adding three explicit Eshu-path
+  FATAL cases while the two broad chunk-2 param cases moved to JIT; no coverage
+  was dropped.
+- Installers regenerated with `cd dashboard && python3 gen_installer.py`; both
+  generated files are identical. `dashboard/static/dev/` was untouched.
+
+**Compatibility**
+- New gateway + new dashboard agree on the tiers. New dashboard + old gateway
+  remains safe: the old gateway still FATALs the broad commands until it is
+  updated (dashboard tester shows JIT for them); no request shape changed.
+- This only narrows permanent refusals and adds a force-JIT tier; explicit Eshu
+  paths remain FATAL. No protocol change.
 
 ---
 
