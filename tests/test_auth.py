@@ -1,7 +1,7 @@
 class TestSetPassword:
 
     def test_set_password_succeeds(self, auth_client):
-        r = auth_client.post("/api/auth/set-password", json={"password": "newpass"})
+        r = auth_client.post("/api/auth/set-password", json={"password": "newpass123456"})
         assert r.status_code == 200
         assert r.json()["status"] == "ok"
 
@@ -26,10 +26,14 @@ class TestPasswordIsMandatory:
         assert r.status_code == 401
 
     def test_set_password_still_allowed_on_first_run(self, client):
-        # First-run setup: with no password, set-password works unauth'd.
+        # First-run setup: with no password, a non-loopback client must present
+        # the setup token printed at startup (5e).
+        import main
         from db.auth import set_password_hash
         set_password_hash('')
-        r = client.post("/api/auth/set-password", json={"password": "firstrun"})
+        r = client.post("/api/auth/set-password",
+                        json={"password": "firstrun12345"},
+                        headers={"X-Eshu-Setup-Token": main._SETUP_TOKEN})
         assert r.status_code == 200
         assert r.json()["status"] == "ok"
 

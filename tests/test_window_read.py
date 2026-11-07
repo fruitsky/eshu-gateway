@@ -1,6 +1,8 @@
+import os
+
+import pytest
 from fastapi.testclient import TestClient
 from main import app
-import os
 
 _FEATURE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "dashboard", "static", "features", "approved_windows.sh")
 
@@ -16,6 +18,13 @@ def _anon():
     return TestClient(app)
 
 
+@pytest.fixture
+def agent_headers(temp_db):
+    from db.agent_tokens import create_agent_token
+    raw, _ = create_agent_token("window-read-agent")
+    return {"Authorization": "Bearer " + raw}
+
+
 class TestWindowReadOpen:
 
     def _make_window(self, auth_client, command="uptime", recurring=True):
@@ -26,11 +35,13 @@ class TestWindowReadOpen:
             body.update({"window_start": 4102444800, "max_executions": 1})
         return auth_client.post("/api/approved-windows", json=body)
 
-    def test_list_open_without_token_for_anonymous(self, client, auth_client):
+    def test_list_with_agent_token_omits_secrets(self, client, auth_client,
+                                                agent_headers):
         r = self._make_window(auth_client)
         assert r.status_code == 200
-        anon = _anon()
-        wins = anon.get("/api/approved-windows").json()
+        resp = _anon().get("/api/approved-windows", headers=agent_headers)
+        assert resp.status_code == 200
+        wins = resp.json()
         assert len(wins) >= 1
         assert all("token" not in w for w in wins)
         assert all("retrieval_key" not in w for w in wins)
@@ -60,8 +71,9 @@ class TestWindowReadOpen:
         # Session-authed callers (the UI) may still use the numeric id.
         assert auth_client.get(f"/api/approved-windows/{wid}").status_code == 200
 
-    def test_request_poll_open_by_key_flow(self, client, auth_client):
-        req = client.post("/api/window-requests", json={
+    def test_request_poll_open_by_key_flow(self, client, auth_client,
+                                           agent_headers):
+        req = client.post("/api/window-requests", headers=agent_headers, json={
             "gateway_ip": "10.0.0.1", "command": "hostname", "match_type": "exact",
             "window_start": 4102444800, "max_executions": 1
         }).json()
@@ -79,8 +91,9 @@ class TestWindowReadOpen:
         assert anon.get(f"/api/window-requests/{req['id']}").status_code == 404
         assert anon.get("/api/window-requests/999999").status_code == 404
 
-    def test_request_poll_open_by_key_recurring(self, client, auth_client):
-        req = client.post("/api/window-requests", json={
+    def test_request_poll_open_by_key_recurring(self, client, auth_client,
+                                                agent_headers):
+        req = client.post("/api/window-requests", headers=agent_headers, json={
             "gateway_ip": "10.0.0.1", "command": "apt update", "match_type": "prefix",
             "days_of_week": 62, "execution_time": 10800
         }).json()
@@ -98,38 +111,39 @@ class TestWindowReadOpen:
         assert client.post("/api/window-requests/1/deny").status_code in (401, 403)
         assert client.delete("/api/approved-windows/1").status_code in (401, 403)
 
-    def _submit(self, client, command, **kw):
+    def _submit(self, client, command, headers=None, **kw):
         body = {"gateway_ip": "10.0.0.1", "command": command, "match_type": "exact",
                 "window_start": 4102444800, "max_executions": 1}
         body.update(kw)
-        return client.post("/api/window-requests", json=body)
+        return client.post("/api/window-requests", json=body, headers=headers)
 
-    def test_multiple_pending_requests_no_collision(self, client):
+    def test_multiple_pending_requests_no_collision(self, client, agent_headers):
         # Regression: agent requests all used token='' which collided on the
         # UNIQUE token column -> 500 IntegrityError for every request after the
         # first. Each pending request now gets a unique placeholder token.
-        r1 = self._submit(client, "hostname")
+        r1 = self._submit(client, "hostname", headers=agent_headers)
         assert r1.status_code == 200
-        r2 = self._submit(client, "date")
+        r2 = self._submit(client, "date", headers=agent_headers)
         assert r2.status_code == 200
         assert r2.json()["id"] != r1.json()["id"]
-        r3 = self._submit(client, "uptime")
+        r3 = self._submit(client, "uptime", headers=agent_headers)
         assert r3.status_code == 200
 
-    def test_expires_at_null_accepted(self, client):
+    def test_expires_at_null_accepted(self, client, agent_headers):
         # The documented payload may send "expires_at": null (meaning never);
         # it must not 422.
-        r = self._submit(client, "uptime", expires_at=None)
+        r = self._submit(client, "uptime", headers=agent_headers, expires_at=None)
         assert r.status_code == 200
         assert r.json()["status"] == "pending_review"
 
-    def test_denied_request_then_new_submission(self, client, auth_client):
+    def test_denied_request_then_new_submission(self, client, auth_client,
+                                                agent_headers):
         # A denied request keeps its placeholder token; a subsequent submission
         # must still succeed (previously both held token='' and collided).
-        r1 = self._submit(client, "hostname")
+        r1 = self._submit(client, "hostname", headers=agent_headers)
         rid = r1.json()["id"]
         assert auth_client.post(f"/api/window-requests/{rid}/deny").status_code == 200
-        r2 = self._submit(client, "date")
+        r2 = self._submit(client, "date", headers=agent_headers)
         assert r2.status_code == 200
 
 
@@ -143,9 +157,13 @@ class TestAtomicWindowConsumption:
         src = _read_feature()
         assert '%{http_code}' in src
         assert 'WINDOW_CLAIM_HTTP' in src
-        assert 'window consumed or disabled' in src
+        assert 'WINDOW_CLAIM_EXIT' in src
+        # Fail open only for 000/network; every other non-200 HTTP status rejects.
+        assert 'case "$WINDOW_CLAIM_HTTP" in' in src
+        assert '200) ;;' in src
+        assert 'window claim failed (HTTP' in src
         # Fail-closed branch comes before execution.
-        assert src.index('"$WINDOW_CLAIM_HTTP" = "404"') < src.index('run_sanitized')
+        assert src.index('window claim failed (HTTP') < src.index('run_sanitized')
         # The old fire-and-forget notify must be gone.
         assert '>/dev/null 2>&1 || true' not in src.split('WINDOW_CLAIM_HTTP')[0]
 

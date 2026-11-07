@@ -60,11 +60,11 @@ class TestPolicyTest:
         assert r.status_code == 200
         assert r.json().get("action") == "jit"
 
-    def test_policy_test_stays_public(self, client):
-        # Agent pre-flight must stay open (no session) so agents can check
-        # whether a command will auto-approve, hard-block, or need JIT.
+    def test_policy_test_requires_session(self, client):
+        # Chunk 5a: the test endpoint reveals the allowlist/blocklist, so it is
+        # session-only now (agents use the MCP pre-flight path instead).
         r = client.get("/api/policies/test?command=uptime")
-        assert r.status_code == 200
+        assert r.status_code == 401
 
     def test_policy_check_requires_auth(self, client):
         # /api/policies/check reveals allowlist/blocklist membership — the

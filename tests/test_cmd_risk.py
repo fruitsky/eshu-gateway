@@ -103,8 +103,8 @@ class TestRiskApi:
         row = next(r for r in reqs if r["id"] == int(rid))
         assert row["risk"] is None
 
-    def test_policies_test_includes_risk_and_dry_run(self, client):
-        r = client.get("/api/policies/test?command=" + quote("apt-get install nginx"))
+    def test_policies_test_includes_risk_and_dry_run(self, auth_client):
+        r = auth_client.get("/api/policies/test?command=" + quote("apt-get install nginx"))
         assert r.status_code == 200
         data = r.json()
         assert data["risk"] is not None

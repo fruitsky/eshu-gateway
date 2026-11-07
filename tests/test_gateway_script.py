@@ -67,6 +67,8 @@ class GatewaySandbox:
         self.status_file = self.root / "jit-status"
         self.request_mode_file = self.root / "request-mode"
         self.claim_mode_file = self.root / "claim-mode"
+        self.window_claim_file = self.root / "window-claim"
+        self.window_claim_file.write_text("200")
         self.ticket_file = self.run_dir / "eshu.tickets"
 
         self._write_stubs()
@@ -108,7 +110,9 @@ case "$url" in
     printf '{"status":"%s"}\\n' "$(cat "$STATUS_FILE" 2>/dev/null || echo pending)"
     ;;
   */api/approved-windows/execute/*)
-    printf '200'
+    mode=$(cat "__WINDOW_CLAIM__" 2>/dev/null || echo 200)
+    if [ "$mode" = "exit" ]; then exit 7; fi
+    printf '%s' "$mode"
     ;;
   */api/ticket/*)
     mode=$(cat "$CLAIM_MODE" 2>/dev/null || echo ok)
@@ -131,7 +135,8 @@ esac
         curl = (curl.replace("__LOG__", str(self.curl_log))
                     .replace("__STATUS__", str(self.status_file))
                     .replace("__MODE__", str(self.request_mode_file))
-                    .replace("__CLAIM__", str(self.claim_mode_file)))
+                    .replace("__CLAIM__", str(self.claim_mode_file))
+                    .replace("__WINDOW_CLAIM__", str(self.window_claim_file)))
         self._executable(self.bin / "curl", curl)
 
         logger = '''#!/bin/bash
@@ -221,6 +226,9 @@ printf '%s\\n' "$*" >> "__LOG__"
 
     def claim_mode(self, mode: str):
         self.claim_mode_file.write_text(mode)
+
+    def window_claim(self, mode: str):
+        self.window_claim_file.write_text(mode)
 
     def tickets(self, *lines: str):
         self._write(self.ticket_file, *lines)
@@ -977,3 +985,23 @@ def test_sec_chunk2_prefix_window_metachar_is_rejected(gw):
     assert not any(c["url"].endswith("/api/request")
                    for c in gw.curl_calls())
     assert "APPROVED WINDOW MATCH" not in gw.logger_text()
+
+
+# ── Chunk 5: window claim fails open only on network loss ─────────────────
+@pytest.mark.parametrize("claim_code", ["401", "403", "404", "429", "500"])
+def test_sec_chunk5_window_claim_http_error_is_rejected(gw, claim_code):
+    gw.approved_windows("wintok|echo window-ok|0|0|0|0|0|exact")
+    gw.window_claim(claim_code)
+    proc = gw.run("ESHU_WINDOW_TOKEN=wintok echo window-ok")
+    assert "Window rejected" in proc.stdout
+    assert "window-ok" not in proc.stdout
+    assert proc.returncode == 1
+
+
+def test_sec_chunk5_window_claim_network_failure_still_runs(gw):
+    # Fail open only when curl itself failed (network down), i.e. no HTTP code.
+    gw.approved_windows("wintok|echo window-ok|0|0|0|0|0|exact")
+    gw.window_claim("exit")
+    proc = gw.run("ESHU_WINDOW_TOKEN=wintok echo window-ok")
+    assert "window-ok" in proc.stdout
+    assert proc.returncode == 0

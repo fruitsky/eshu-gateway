@@ -20,17 +20,17 @@ class TestTokenGeneration:
         assert isinstance(token, str)
         assert len(token) > 0
 
-    def test_token_status_valid_and_unused(self, client):
+    def test_token_status_valid_and_unused(self, auth_client):
         from db.enrollment import generate_enrollment_token
         token = generate_enrollment_token()
-        r = client.get(f"/api/enroll/token-status?token={token}")
+        r = auth_client.get(f"/api/enroll/token-status?token={token}")
         assert r.status_code == 200
         data = r.json()
         assert data["valid"] is True
         assert data["used"] is False
 
-    def test_token_status_invalid_for_nonexistent(self, client):
-        r = client.get("/api/enroll/token-status?token=nonexistent")
+    def test_token_status_invalid_for_nonexistent(self, auth_client):
+        r = auth_client.get("/api/enroll/token-status?token=nonexistent")
         assert r.status_code == 200
         assert r.json()["valid"] is False
 
@@ -74,25 +74,28 @@ class TestEnrollmentScript:
         assert "ESHU_ENROLL_TOKEN=" in r.text         # enrollment token forwarded
         assert r.text.index('"$(id -u)"') < r.text.index("command -v sudo")  # root checked first
 
-    def test_serving_script_does_not_consume_token(self, client):
+    def test_serving_script_does_not_consume_token(self, client, auth_client):
         # The token is consumed at /api/register (the authoritative enrollment
         # step), not when the bootstrap is served — so a slow install can finish.
         from db.enrollment import generate_enrollment_token, save_ssh_keys
         save_ssh_keys("eshu-key")
         token = generate_enrollment_token()
         client.get(f"/api/enroll?token={token}")
-        r = client.get(f"/api/enroll/token-status?token={token}")
+        r = auth_client.get(f"/api/enroll/token-status?token={token}")
         assert r.json()["used"] is False
 
-    def test_register_consumes_token(self, client):
+    def test_register_consumes_token(self, client, auth_client):
         from db.enrollment import generate_enrollment_token, save_ssh_keys
         save_ssh_keys("eshu-key")
         token = generate_enrollment_token()
-        r = client.post("/api/register",
-                        json={"ip": "10.1.1.1", "hostname": "h", "version": "v15.3"},
-                        headers={"X-Enrollment-Token": token})
+        from fastapi.testclient import TestClient
+        from main import app
+        anon = TestClient(app)  # no session cookie: exercise the enrollment path
+        r = anon.post("/api/register",
+                      json={"ip": "10.1.1.1", "hostname": "h", "version": "v15.3"},
+                      headers={"X-Enrollment-Token": token})
         assert r.status_code == 200
-        st = client.get(f"/api/enroll/token-status?token={token}").json()
+        st = auth_client.get(f"/api/enroll/token-status?token={token}").json()
         assert st["used"] is True
 
 
