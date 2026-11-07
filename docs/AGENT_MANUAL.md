@@ -25,12 +25,19 @@ ssh eshu-gateway@<host> "<command>"
 The script runs the command through a multi-stage policy pipeline:
 
 1. **Blocklist** — matches against hardcoded + synced blocked patterns
-2. **Whitelist** — exact/regex match → auto-approved
-3. **Feature scripts** — approved windows, future features loaded at runtime
-4. **JIT lockbox** — claim-and-burn tickets from approved requests
-5. **JIT human approval** — operator approves/denies via dashboard
+2. **Approval-only gates** — commands that can never auto-run, whatever the
+   allowlist says: shell chaining/redirection (`;` `&` `|` `` ` `` `$(` `>` `<`
+   `\` or a newline), encoded/eval wrappers, and broad self-protection matches
+   (any `.ssh/authorized_keys`, or a wildcard next to an `esh…` path). These go
+   to JIT (stage 5) so a human sees them.
+3. **Whitelist** — exact/regex match → auto-approved
+4. **Feature scripts** — approved windows, future features loaded at runtime
+5. **JIT lockbox** — claim-and-burn tickets from approved requests
+6. **JIT human approval** — operator approves/denies via dashboard
 
 If a command passes a stage, it executes immediately. The pipeline stops on first match.
+A JIT-approved command runs only if it is byte-for-byte the command the
+operator approved.
 
 ### Session & execution IDs (grouping)
 
@@ -166,6 +173,14 @@ combined in any order, including with a window token:
 ssh eshu-gateway@<host> "ESHU_WINDOW_TOKEN=<token> ESHU_SESSION_ID=<id> <command>"
 ```
 
+- **Prefix values are validated before anything else.** A value outside its
+  allowed characters is refused with
+  `[LOCKED] Invalid ESHU_<NAME> prefix value — allowed: …` and the command does
+  not run:
+  - `ESHU_SESSION_ID`: `[A-Za-z0-9_-]{1,64}`
+  - `ESHU_SESSION_SIG`: exactly 64 lowercase hex characters
+  - `ESHU_EXECUTION_ID`: `[A-Za-z0-9_.:-]{1,64}`
+  - `ESHU_WINDOW_TOKEN`: `[A-Za-z0-9]{1,64}`
 - `<id>` is an opaque `[A-Za-z0-9_-]{1,64}` string. `unknown` marks a context-less
   run (fire-and-forget cron) — the tickets are kept but left ungrouped.
 - Commands that share the same `ESHU_SESSION_ID` are grouped into one
@@ -246,15 +261,19 @@ Rules:
 Agent runs ──▶ ssh eshu-gateway@host "<cmd>"
                    │
                    ▼
+           -1. Invalid ESHU_* prefix value? ──yes──▶ ❌ Rejected (see prefix rules)
+                   │no
+                   ▼
             0. Strict session? ──no──▶ ❌ Rejected — call session_begin
                    │yes / strict off
                    ▼
             1. Blocklisted? ──yes──▶ ❌ Rejected — report to operator
                    │no
                    ▼
-            1.5 Encoded payload? ──yes──▶ Force JIT (decoded preview + scan)
-                   │no                (never auto-approved by allowlist/window)
-                   ▼
+            1.5 Encoded payload, shell chaining/redirection, or broad
+                self-protection match? ──yes──▶ Force JIT
+                   │no                (never auto-approved by allowlist or
+                   ▼                   prefix window; exact windows still apply)
             2. Whitelisted? ──yes──▶ ✅ Auto-approved — executed
                    │no
                    ▼
@@ -284,7 +303,12 @@ attributable.
 
 ## 3. Auto-approved commands
 
-Commands in the whitelist files are always auto-approved.
+Commands in the whitelist files are auto-approved **unless** an approval-only
+gate applies: shell chaining/redirection (`;` `&` `|` `` ` `` `$(` `>` `<` `\`
+newline), an encoded/eval wrapper, a broad self-protection match, or a
+Zero-Trust gateway. So `uptime` auto-runs, but `uptime; whoami` and
+`dmesg | grep -i usb` go to JIT even if a rule seems to cover them. Send one
+plain command per SSH call when you want the allowlist to apply.
 
 > **Operator pre-flight only (2026-11 hardening).** `/api/policies/test` now
 > requires a dashboard session; an agent bearer token is not accepted. Ask the
@@ -309,7 +333,7 @@ Commands in the whitelist files are always auto-approved.
 |----------|---------|
 | `auto_approved` | Whitelisted — will execute without operator approval |
 | `blocked` | Rejected — either the dashboard blocklist (includes the shipped command-safety patterns) or the **hardcoded FATAL tier** (`tier: "fatal"` — Eshu self-protection / `$(which`-evasion, e.g. `cat /etc/eshu-freeze`) |
-| `jit` | No rule matched — will require operator approval |
+| `jit` | Will require operator approval — no rule matched, or an approval-only gate applies (`detail_type: "shell_meta"` for chaining/redirection, `"self_protection_jit"` for broad self-protection matches) |
 
 Use this to pre-flight a command. `tier: "fatal"` means the gateway hard-blocks
 it and it can never run — don't attempt it. Commands like `rm -rf` and `reboot`
@@ -459,15 +483,23 @@ SSH forced commands strip environment variables, so embed the token at the **sta
 command string**:
 
 ```bash
-ssh eshu-gateway@host "ESHU_WINDOW_TOKEN=aB3dEfGhIj docker logs -n 50 my-app"
+ssh eshu-gateway@host "ESHU_WINDOW_TOKEN=aB3dEfGhIjKlMnOpQrStUvWx docker logs -n 50 my-app"
 # from a cron job on the gateway itself:
-ESHU_WINDOW_TOKEN="aB3dEfGhIj" /usr/local/bin/eshu-gateway bash -c "docker logs -n 50 my-app"
+ESHU_WINDOW_TOKEN="aB3dEfGhIjKlMnOpQrStUvWx" /usr/local/bin/eshu-gateway bash -c "docker logs -n 50 my-app"
 ```
+
+Window tokens are 24 letters/digits (older 10-character tokens keep working).
 
 The gateway validates the token, checks expiry + schedule + command match, notifies the
 dashboard to increment the execution counter, and auto-disables the window once
 `execution_count >= max_executions`. **Do not call `/api/approved-windows/execute/{token}`
-yourself** — the gateway does it.
+yourself** — the gateway does it. If the dashboard answers that claim with anything
+other than success, the window is rejected; only when the dashboard cannot be reached
+at all does the gateway fall back to its local window cache.
+
+A **prefix** window never approves a command that contains shell chaining or
+redirection (`;` `&` `|` `` ` `` `$(` `>` `<` `\` newline) — the attempt is a
+window reject. An **exact** window still runs its exact command, chaining included.
 
 ### Rejected windows (hard reject)
 
@@ -504,8 +536,8 @@ Weekdays = `31` (`1+2+4+8+16`) · weekends = `96` (`32+64`) · every day = `0`.
 ## 6. Rate limits
 
 The dashboard enforces a sliding-window rate limit of **60 requests per 60 seconds**
-per source IP on all unauthenticated endpoints (request, log, register, heartbeat,
-window-requests, poll, policy). If exceeded:
+per source IP (or per gateway) on the gateway and agent endpoints (request,
+register, heartbeat, window-requests, poll, window lookups). If exceeded:
 
 ```
 429 Too many requests. Slow down.
@@ -522,6 +554,10 @@ Wait a few seconds and retry with exponential backoff.
 | `Command blocked` + JIT | Not whitelisted, no window token | Wait for operator approval, or request a window |
 | `WINDOW TOKEN` + `[LOCKED] Window rejected: <reason>` | Token presented but invalid/expired/mismatch | Check window start time, target gateway, command match — no JIT is created for a rejected window |
 | `Invalid or expired window token` | Token exhausted, expired, or wrong cache | Re-request window or use JIT |
+| `[LOCKED] Window rejected: window claim failed (HTTP <code>)` | The dashboard refused the window claim (disabled, exhausted, rate-limited, error) | Do not retry in a loop — use JIT or ask the operator |
+| `[LOCKED] Invalid ESHU_<NAME> prefix value` | A prefix value has characters outside its allowed set | Fix the value (see the prefix rules in §1); re-run `session_begin` for a fresh `ssh_prefix` |
+| `[LOCKED] Approved command does not match the requested command` | The approved ticket was for a different command | Do not retry — report to the operator |
+| An allowlisted command went to JIT | It contains chaining/redirection, an encoded wrapper, a broad self-protection match, or the gateway is Zero-Trust | Split it into plain single commands, or wait for approval |
 | `Cannot connect to dashboard` | Dashboard unreachable | Retry later. Gateway falls back to last synced policy |
 | `429 Too many requests` | Rate limited | Wait a few seconds, then retry |
 | `script_not_found` error | Gateway script missing | Contact operator |
