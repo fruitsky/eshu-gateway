@@ -1,0 +1,17 @@
+### encoded-bash | kinds=read | flags=encoded | sections=HOST
+echo ZWNobyAnPT09IEhPU1QgPT09Jwp1cHRpbWU= | base64 -d | bash
+
+### encoded-su | kinds=read | flags=encoded | sections=HOST
+su - root -c "echo ZWNobyAnPT09IEhPU1QgPT09Jwp1cHRpbWU= | base64 -d | bash"
+
+### encoded-eval | kinds=read | flags=encoded | sections=HOST
+eval "$(echo ZWNobyAnPT09IEhPU1QgPT09Jwp1cHRpbWU= | base64 -d)"
+
+### encoded-bad | kinds=unknown | flags=encoded | complete=false
+echo 'not base64 at all' | base64 -d | bash
+
+### encoded-write | kinds=write | flags=encoded
+echo cm0gLXJmIC90bXAvc3ludGhldGljLWRpcg== | base64 -d | bash
+
+### encoded-redirect | kinds=read,write | flags=encoded,redirect-to-file | sections=HOST
+echo ZWNobyAnPT09IEhPU1QgPT09Jwp1cHRpbWU= | base64 -d | bash > /tmp/synthetic-out

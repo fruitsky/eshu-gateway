@@ -1,0 +1,14 @@
+### quotes-semicolon | kinds=read,read | flags=
+echo "a;b|c" && ls
+
+### grep-ere | kinds=read | flags=
+grep -E 'a|b' /etc/hosts
+
+### quotes-section-semicolon | kinds=read | flags=
+echo '=== A;B ==='
+
+### docker-sh-quotes | kinds=read,read | flags= | inner=docker:web01
+docker exec web01 sh -c 'echo a && echo b'
+
+### printf-arrow | kinds=read | flags=
+printf '%s\n' "x > y"

@@ -1,0 +1,15 @@
+### unterminated-quote | kinds=unknown | flags= | complete=false
+echo "unterminated
+
+### redirect-no-target | kinds=read | flags= | complete=false
+echo hi >
+
+### empty-command | kinds= | flags=
+
+
+### sudo-no-command | kinds=unknown | flags=
+sudo
+
+### heredoc-unterminated | kinds=read | flags=heredoc | complete=false
+cat <<EOF
+hello

@@ -1,0 +1,23 @@
+### loop-pct-var | kinds=unknown | flags=
+for i in 101 102 103; do pct exec $i -- uptime; done
+
+### loop-pct-literal | kinds=read | flags= | inner=pct:101
+for i in 101 102 103; do pct exec 101 -- uptime; done
+
+### if-block | kinds=read,read | flags=
+if [ -f /etc/os-release ]; then cat /etc/os-release; fi
+
+### case-block | kinds=write | flags=
+case "$x" in a) rm -rf /tmp/synthetic-dir ;; esac
+
+### recon-script | kinds=read,read,read,read,read,read,read,write | flags= | sections=UPTIME,DISK,LOGS,SERVICES
+echo "=== UPTIME ==="
+uptime
+echo "=== DISK ==="
+df -h /
+echo "=== LOGS ==="
+journalctl -u nginx --since today --no-pager | grep -i error | tail -n 20
+echo "=== SERVICES ==="
+systemctl is-active nginx
+docker ps
+sed -i 's/a/b/' /etc/nginx/nginx.conf

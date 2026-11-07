@@ -1,0 +1,51 @@
+### ls-simple | kinds=read | flags=
+ls -la
+
+### journalctl-read | kinds=read | flags=
+journalctl -u nginx --since today --no-pager
+
+### systemctl-status | kinds=read | flags=
+systemctl status nginx
+
+### systemctl-restart | kinds=write | flags=
+systemctl restart nginx
+
+### chain-and | kinds=read,write | flags=
+ls -la && systemctl restart nginx
+
+### chain-or | kinds=read,read | flags=
+ls /nonexistent || true
+
+### chain-semicolon | kinds=read,read | flags=
+uptime; free -h
+
+### pipe-sort | kinds=read,read | flags=
+df -h | sort -k5 -n
+
+### docker-ps | kinds=read | flags=
+docker ps --format '{{.Names}}'
+
+### rm-write | kinds=write | flags=
+rm -rf /tmp/synthetic-dir
+
+### docker-run | kinds=write | flags=
+docker run --rm alpine true
+
+### newline-split | kinds=read,read | flags=
+ls -la
+df -h
+
+### systemctl-failed | kinds=read
+systemctl --failed
+
+### hostnamectl-read | kinds=read
+hostnamectl
+
+### hostnamectl-write | kinds=write
+hostnamectl set-hostname web01
+
+### timedatectl-write | kinds=write
+timedatectl set-timezone UTC
+
+### lsb-release | kinds=read
+lsb_release -a

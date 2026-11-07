@@ -1,0 +1,68 @@
+### sed-inplace | kinds=write | flags=
+sed -i 's/a/b/' /etc/nginx/nginx.conf
+
+### tee-write | kinds=read,write | flags=
+echo hi | tee /tmp/synthetic-out
+
+### redirect-out | kinds=write | flags=redirect-to-file
+echo hi > /tmp/synthetic-out
+
+### redirect-append | kinds=write | flags=redirect-to-file
+echo hi >> /tmp/synthetic-out
+
+### redirect-fd | kinds=read | flags=
+echo hi 2>&1
+
+### redirect-null | kinds=read | flags=
+echo hi > /dev/null
+
+### find-delete | kinds=write | flags=
+find /var/log -name '*.log' -delete
+
+### awk-system | kinds=unknown | flags=
+awk '{system("rm -rf /tmp/synthetic-dir")}' /tmp/synthetic.txt
+
+### awk-print-file | kinds=write | flags=
+awk '{print > "/tmp/synthetic-out"}' /tmp/synthetic.txt
+
+### mount-list | kinds=read | flags=
+mount
+
+### mount-write | kinds=write | flags=
+mount /dev/sdb1 /mnt
+
+### crontab-list | kinds=read | flags=
+crontab -l
+
+### crontab-edit | kinds=write | flags=
+crontab -e
+
+### chmod-777 | kinds=write | flags=
+chmod 777 /tmp/synthetic-dir
+
+### ssh-nested | kinds=unknown | flags=nested-ssh
+ssh root@192.0.2.5 uptime
+
+### curl-get | kinds=unknown | flags=
+curl -s http://192.0.2.10/status
+
+### curl-post | kinds=unknown | flags=
+curl -s -X POST -d 'a=1' http://192.0.2.10/api
+
+### sensitive-env | kinds=read | flags=sensitive-path
+cat /srv/app/.env
+
+### heredoc-cat | kinds=write | flags=heredoc,redirect-to-file
+cat > /tmp/synthetic.txt <<EOF
+hello
+EOF
+
+### heredoc-bash | kinds=unknown | flags=heredoc
+bash <<EOF
+ls -la
+EOF
+
+### heredoc-dash | kinds=read | flags=heredoc
+cat <<-EOF
+	hello
+	EOF

@@ -1,0 +1,25 @@
+### section-echo | kinds=read | flags= | sections=LOGS
+echo "=== LOGS ==="; journalctl -u nginx --no-pager
+
+### section-printf | kinds=read | flags= | sections=DISK
+printf -- "--- DISK ---\n"; df -h
+
+### section-two | kinds=read | flags= | sections=DISK,LOGS
+echo "=== DISK ==="; echo "=== LOGS ==="; journalctl -u nginx
+
+### section-echo-plain | kinds=read,write | flags=
+echo "restarting nginx"; systemctl restart nginx
+
+### section-dashes-only | kinds=read | flags=
+echo "-----"
+
+### section-with-eq | kinds=read | flags=
+echo "=== A=B ==="
+
+### section-script | kinds=read,read,write,read | flags= | sections=DISK,MEM
+echo "=== DISK ==="
+df -h /
+echo "=== MEM ==="
+free -h
+systemctl restart nginx
+uptime
