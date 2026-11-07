@@ -847,18 +847,26 @@ def execute_generic_call(integration: dict, method: str, path: str, params=None,
                          session_id: str = '', execution_id: str = '',
                          root: bool = False, reason: str = '',
                          approval: str = '', decided_at: int = 0,
-                         decided_by: str = '') -> dict:
+                         decided_by: str = '', read_only: bool = False) -> dict:
     """Call an arbitrary endpoint on the integration — the generic read/write
     floor. method/path come from the agent; `params` becomes the query string,
     `data` the JSON body. `root=True` resolves `path` against the host origin
     (scheme://host:port) instead of the integration's base URL — for resources
     served at the root (e.g. HA media at /media/local/<file>) rather than under
-    a base path like /api. Credentials, TLS, SSRF guard, and audit all apply."""
+    a base path like /api. Credentials, TLS, SSRF guard, and audit all apply.
+
+    `read_only=True` is defence in depth for the read-only passthrough tool: a
+    mutating method raises instead of being sent, so no future caller can reuse
+    this path with a write (chunk H)."""
     if not integration or not integration.get('enabled'):
         raise ProxyError(404, "Integration not found or disabled")
     method = (method or 'GET').upper()
     if method not in ('GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'):
         raise ProxyError(400, f"Unsupported method: {method}")
+    if read_only and method not in ('GET', 'HEAD'):
+        raise ProxyError(
+            400, f"not_a_read_method: {method} is not a read method "
+                 f"(the read-only passthrough only sends GET/HEAD)")
     auth_type = (integration.get('auth_type') or 'none').lower()
     if auth_type not in ALLOWED_AUTH_TYPES:
         raise ProxyError(500, f"Unsupported auth_type: {auth_type}")

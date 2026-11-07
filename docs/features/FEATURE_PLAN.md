@@ -1,6 +1,6 @@
 # Feature Plan — Reviewable approvals & less approval fatigue
 
-Status: **active** · Branch: `feature-roadmap` · Baseline: `master@4d13fd8` (security chunks 1–5 + R merged and deployed), **1343 tests passing** (`bash scripts/verify.sh`)
+Status: **active** · Branch: `feature-roadmap` · Baseline: `master@5c0045f` (security chunks 1–5 + R + H merged), merged into this branch 2026-11-07
 
 This plan turns the feature analysis of 2026-11-06 into small, reviewable
 chunks. One agent (the **implementer**) builds one chunk per branch; a second
@@ -23,6 +23,28 @@ dashboard LXC or any gateway until the rollout gate in § 8 passes.**
    Do not widen the scope.
 
 ---
+
+## 0.1 The features in plain words
+
+| Chunk | What it does for the operator |
+|---|---|
+| F1 | Splits each long command into steps and labels each step read, write or unknown |
+| F2 | The approval card shows "9 steps · 8 read · 1 write: …" and highlights the risky step |
+| F7 | Records the real target of `pct exec` / `docker exec`; warns when a Proxmox-host override also covers its containers |
+| F3 | The agent proposes a list of changes; approve the list once and those exact commands run without more prompts |
+| F4 | Read-only commands can run without asking, per host, opt-in, after a week in "shadow mode" |
+| F5 | Records each command's exit code and the end of its output |
+| F12 | Agents run SSH commands through Eshu over MCP with their own token: one identity per agent for SSH and APIs, no shared SSH key |
+| F6 | A summary card per session: goal, what ran, what changed, what failed, how much ran under overrides |
+| F13 | At the end of a job the agent files a conclusion (what worked, what didn't, the fix); confirmed conclusions become searchable runbooks |
+| F8 | Mark test traffic so it stops distorting statistics |
+| F9 | Freeze also stops integration writes; read-only views of HA add-ons, backups, updates and system info |
+| F10 | Approval-gated HA actions: add-on restart/update, backups, HA update, restart after a passing config check |
+| F11 | Edit HA YAML through Eshu with a diff, automatic backup, and automatic undo if the config check fails |
+| F14 | "Where is X?": one lookup for a service's host, container, IP, URL, proxy entry and DNS name |
+| F15 | One-call health checks (service, container, disk, DNS) that return a short summary |
+| F16 | Reviewed, parameterised scripts ("recipes") any agent can run with one approval, often drafted from F13 runbooks |
+| F17 | A ready-made setup for a local model in LM Studio: its own token, a small toolset, and a hand-off to Hermes |
 
 ## 1. Why — what the live data says
 
@@ -157,6 +179,27 @@ The dashboard is deployed first; gateways update later via Build → Edge → Fl
 * Every agent-controlled string shown in the UI (command text, step text,
   section names, plan notes) goes through `escapeHtml`. The CSP allows inline
   scripts, so escaping is the real XSS boundary.
+
+### 2.6a Security review gate (agreed with the security work, 2026-11-07)
+
+* **F3 and F4 change what can run without the operator's approval.** Before
+  either merges into `feature-roadmap`, the feature reviewer approves it and then
+  hands the branch to the **security reviewer** (the `security-hardening` work)
+  for a second review. Both reviews are recorded under the chunk's Reviewer notes.
+  Same for F10 and F11.
+* **One notion of "read".** Security Chunk H (`master@5c0045f`) made the generic
+  integration read tools truly read-only: `core/tool_runner.py`
+  `_read_only_refusal` (HTTP: GET/HEAD only) and `core/ha_ws_policy.py`
+  `is_read_command` (HA WebSocket: deny rules first, reviewed allow lists, an
+  unknown command is not a read). New work must reuse these, never re-decide them:
+  * Any feature that auto-runs an **integration** call as a read calls the Chunk H checks.
+  * F4 (SSH read lane) is the SSH counterpart. It must follow the same design:
+    deny rules win, reviewed allow lists (F1's `cmd_rules.py`), fail closed,
+    and one entry point, `core/read_policy.py`, that exposes both
+    `is_read_integration_call(tool, transport, args)` (a thin wrapper over the
+    Chunk H functions, no new logic) and `is_read_ssh(breakdown)` (F4). F4's
+    eligibility code calls only `read_policy`, and the refusal/audit shape
+    matches Chunk H's (`reason_code`, an audit event, no payload values in the log).
 
 ### 2.7 Style
 
@@ -787,6 +830,7 @@ claim tickets for `approved` rows.
 - [ ] All tests above pass; the audit log shows who approved which items.
 - [ ] Docs updated (AGENT_MANUAL, API.md).
 - [ ] Reviewer does a dedicated security pass on the approval path (atomic use counting, session binding, ordering in § 2.6) and records it under Reviewer notes.
+- [ ] **Security reviewer sign-off** (§ 2.6a) recorded before merge.
 
 ### Implementer notes
 
@@ -828,7 +872,8 @@ a shadow period that shows the operator what it *would* have approved.
 
 * `gateways.read_lane` column (migration, default `'off'`); `PUT /api/gateways/{ip}/read-lane`
   (session + audit). Toggle in the Gateways table next to Zero-Trust (three-state).
-* `core/read_lane.py` `eligible(breakdown, verdict) -> (bool, reason)`.
+* `core/read_policy.py` (§ 2.6a): `is_read_ssh(breakdown)` holds the SSH read rules; `is_read_integration_call` wraps Chunk H.
+* `core/read_lane.py` `eligible(breakdown, verdict) -> (bool, reason)`: gateway state, size and blocklist checks, then `read_policy.is_read_ssh`. No read rules of its own.
 * Hook in `POST /api/request` after plans (F3) and session overrides, before host override.
 * Stats endpoint fields + UI tile.
 
@@ -849,6 +894,7 @@ Additive; old gateways work unchanged (same approved-row path as overrides).
 
 - [ ] Default is `off` on every existing and new gateway (migration test).
 - [ ] Reviewer does a dedicated security pass on `cmd_rules.py` and `read_lane.py` (try to find a read-classified command that writes, executes or leaks a secret) and records it under Reviewer notes.
+- [ ] **Security reviewer sign-off** (§ 2.6a) recorded before merge; `read_lane.py` goes through `core/read_policy.py` only.
 - [ ] Rollout note: at least 7 days in `shadow` on at least 2 gateways before
       `on` is offered in the UI (the toggle shows "on" disabled until that gateway has ≥ 7 days of shadow data).
 
@@ -1005,10 +1051,361 @@ _(reviewer)_
 
 ---
 
+## Chunk F9 — Freeze covers integrations + HA Supervisor reads · slug `ha-supervisor-read` · dashboard
+
+### Why
+
+Home Assistant OS has a Supervisor (add-ons, backups, updates, host/OS info).
+Eshu's HA integration cannot see it today, but HA Core already forwards it over
+the WebSocket API with the `supervisor/api` command
+(`homeassistant/components/hassio/websocket_api.py`: `@require_admin`, schema
+`endpoint: str, method: str, data?: dict, params?: dict, timeout?`). **HA applies
+no endpoint allowlist:** any admin token can call every Supervisor endpoint,
+including host reboot, backup restore and add-on options. Eshu must therefore
+own the allowlist. Endpoints are fixed in Eshu's tool definitions; an agent never supplies one.
+
+Separately, **Emergency Freeze does not stop integration calls today** (only
+SSH gateways). That has to change before Eshu gets more power over HA.
+
+### Changes
+
+* **Freeze covers integrations.** In `core/tool_runner.py`, while the freeze
+  flag is set, every **mutating** integration call (and every approval of a
+  pending integration call in `main.py`'s approve route) is refused with
+  `{"error": {"code": "frozen", …}}`, plus an audit event. Reads keep working (an
+  operator investigating an incident needs them). The UI's freeze banner text
+  says "SSH and integration writes".
+* **Supervisor reads** — new WS tools in `core/ha_seed.py`, all `read_only`,
+  implemented as handlers (`core/tool_handlers.py`) that call
+  `ha_ws_request(integration, 'supervisor/api', {'endpoint': E, 'method': 'get'})`
+  with `E` from a constant table in a new `core/ha_supervisor.py`:
+  `ha_supervisor_info` (`/supervisor/info`), `ha_core_info` (`/core/info`),
+  `ha_os_info` (`/os/info`), `ha_host_info` (`/host/info`),
+  `ha_addons` (`/addons`, compact: slug, name, state, version, update_available),
+  `ha_addon_info(slug)` (`/addons/{slug}/info`, slug validated `^[a-z0-9_]{1,64}$`;
+  drop `options` from the output — they hold add-on secrets),
+  `ha_backups` (`/backups`, compact), `ha_resolution` (`/resolution/info`).
+* `ha_check_config` — REST `POST /api/config/core/check_config` (read-only in effect; it
+  validates and changes nothing). Mark it `read_only`.
+* Every response goes through `secret_scrub`. A `401/403` from `supervisor/api`
+  becomes a clear error: "the HA token is not an admin token. Supervisor tools need an admin user."
+* `docs/INTEGRATIONS.md`: the HA section says which tools need an admin token.
+  It also recommends (as a setup step, not enforced) a **dedicated HA admin user
+  for Eshu** (e.g. `eshu`) whose long-lived token is used by the integration, so
+  HA's logbook attributes agent actions to it and the token can be revoked
+  without touching the operator's own login. Note in the docs that a
+  long-lived token carries all of its user's rights. The operator's current
+  token comes from their own (admin) login.
+* `ha_whoami` (read-only): WS `auth/current_user` → `{name, is_admin, is_owner}`,
+  so the operator (and the Supervisor tools' error messages) can confirm which
+  user the token belongs to.
+
+### Tests to add
+
+* Freeze: a mutating HA call and an approval of a pending integration call are
+  refused while frozen; reads still run; audit rows written.
+* Each Supervisor tool sends exactly the fixed endpoint and method (stub `ha_ws_request`);
+  a slug with `/`, `..` or `?` is rejected before any call.
+* `ha_addon_info` output never contains `options`.
+* Non-admin error mapping.
+* **Allowlist test:** the set of endpoints any F9/F10 tool can send equals the
+  constant table. Fails when someone adds an endpoint without updating it.
+
+### Compat impact
+
+Additive tools. Freeze now also blocks integration writes, which is a behaviour change. CHANGELOG entry.
+
+### Acceptance criteria
+
+- [ ] No code path can send an endpoint that is not in `ha_supervisor.py`'s table.
+- [ ] Freeze blocks integration writes and approvals; reads unaffected.
+- [ ] Seeded tools appear after "seed" on an existing HA integration without duplicates.
+
+### Implementer notes
+
+_(fill in)_
+
+### Reviewer notes
+
+_(reviewer)_
+
+---
+
+## Chunk F10 — HA Supervisor actions (approval-gated) · slug `ha-supervisor-actions` · dashboard
+
+### Changes
+
+> Before coding, confirm each payload shape against the HA Core source
+> (`components/hassio/websocket_api.py`, `components/hassio/update.py`) and the
+> Supervisor API docs. The reviewer has only verified `supervisor/api`'s schema. Record what you
+> checked in Implementer notes.
+
+* Mutating tools (`read_only: False`, `always_gate: True`, so each call lands in
+  the Pending API Approvals queue), via the same `ha_supervisor.py` table:
+  * `ha_addon_action(slug, action)`: `action ∈ {start, stop, restart}` → `POST /addons/{slug}/{action}`.
+  * `ha_addon_update(slug, backup=true)` → WS `hassio/update/addon` `{addon, backup}`.
+  * `ha_core_update(backup=true)` → WS `hassio/update/core` `{backup}`.
+  * `ha_backup_create(name, partial_addons?, partial_folders?)` → `POST /backups/new/full` or `/backups/new/partial`.
+  * `ha_core_restart()` → refuses unless an `ha_check_config` in the last 10 minutes
+    on this integration returned `valid` (record the last result in `meta`);
+    then `POST /core/restart`.
+  * `ha_host_reboot()` → `POST /host/reboot`: **seeded disabled** (the tool toggle
+    is off by default), and its approval card shows a red "reboots the whole HA host" line.
+* **Never exposed** (and listed in a `FORBIDDEN` table that a test checks against):
+  backup restore (`/backups/*/restore/*`), add-on options/install/uninstall,
+  `/supervisor/options`, `/host/shutdown`, `/store/repositories`, `/auth*`,
+  `/security*`, `/os/datadisk*`, `/os/boot-slot`.
+* **Preflight** (`PREFLIGHT` in `tool_handlers.py`) validates arguments when the call
+  is queued, so the approval card shows the exact action, the add-on name and the
+  current → target version for updates (from `/addons/{slug}/info` / `/core/info`).
+* **Existing `call_service` loophole:** `call_service(domain='hassio', …)` reaches
+  the same powers outside this allowlist. When F10 is installed, `call_service`
+  refuses domain `hassio` (error points to the F10 tools), unless an agent
+  policy explicitly allows `hassio` (operator escape hatch, audited).
+* Freeze (F9) blocks all of these.
+* Plans (F3): add plan item type `mcp` `{integration, tool, args_hash}` so an
+  approved plan can cover "backup → update → check → restart". Matching is by exact
+  argument hash, the same rule as SSH items. If F3 has already merged, this is a
+  small extension in F10; if not, F3 includes it.
+
+### Tests to add
+
+* Each action builds the right endpoint and payload; unknown actions and bad slugs refused.
+* `ha_core_restart` refuses without a recent valid check; works after one.
+* `ha_host_reboot` is seeded disabled.
+* `FORBIDDEN` endpoints are unreachable from every tool (table test).
+* `call_service` with `hassio` refused by default; allowed only with an explicit policy.
+* Preflight populates the approval summary; plan item of type `mcp` approves exactly one matching call.
+
+### Acceptance criteria
+
+- [ ] Reviewer security pass: try to reach a forbidden endpoint through any F9/F10 tool or `call_service`.
+- [ ] Every action is approval-gated and audited; freeze blocks them.
+
+### Implementer notes
+
+_(fill in)_
+
+### Reviewer notes
+
+_(reviewer)_
+
+---
+
+## Chunk F11 — HA config files via the SSH add-on · slug `ha-config-files` · dashboard
+
+> **Design first,** like F5: push a design note only, wait for approval, then implement.
+
+### Why
+
+YAML-only integrations need edits to `/config/*.yaml`, and no HA API writes
+config files. The supported route is the **Advanced SSH & Web Terminal** add-on.
+It cannot be an Eshu gateway: the add-on is an Alpine container without systemd
+(no poller, logger or `systemd-run`) that is rebuilt on every add-on update. So
+the **dashboard itself** connects to it.
+
+### Design (to be confirmed in the design note)
+
+* A new integration kind `ha_ssh` (or an "SSH access" section on the HA
+  integration): host, port, username, and a **private key made only for this
+  use**, stored like other integration secrets (masked, scrubbed). The host key
+  is pinned on first use (TOFU) and shown to the operator; a changed key refuses.
+* Transport: the system `ssh` client via `subprocess` (no new Python package),
+  `BatchMode=yes`, `StrictHostKeyChecking=yes` with an Eshu-owned
+  `known_hosts`, a temp key file under a 0700 dir, deleted afterwards, and a
+  timeout. Commands are **fixed templates**, never agent-supplied shell. Reuse
+  the dashboard-side SSH runner built in F12 (`ssh_exec`).
+* Tools:
+  * `ha_config_list()`: `*.yaml` under `/config` and `/config/packages/**`.
+  * `ha_config_read(path)`: allowed paths only (above). `secrets.yaml`
+    returns key names with values masked. Refused: `.storage/**`, `*.db*`,
+    `.ssh/**`, anything outside `/config`, symlinks (checked on the remote with
+    `realpath`). Returns `content` and `sha256`.
+  * `ha_config_write(path, content, expect_hash, dry_run)`: mutating, always gated.
+    `dry_run` returns a unified diff without approval. On approval:
+    (1) re-check `expect_hash`; (2) copy to `<path>.eshu-<ts>.bak`;
+    (3) write via stdin to a temp file and `mv` it into place; (4) run `ha core check`.
+    (5) **If the check fails, restore the backup automatically** and return the
+    check output. The approval card shows the diff (F2's card renders it).
+  * `ha_config_restore(path, backup)`: gated; restores a `.eshu-*.bak`.
+  * `ha_core_restart` from F10 also accepts a passing `ha core check` from this transport.
+* Freeze blocks writes and restores. Results (output, exit code) are stored like F5's.
+* Setup doc: create an Eshu-only key pair, add the public key to the add-on's
+  `authorized_keys`, and keep "Protection mode" **on** (with it off, the add-on can control Docker = the whole host).
+
+### Tests to add (outline; finalised in the design note)
+
+* Path allowlist and refusals (including `..`, symlinks, `secrets.yaml` masking).
+* Hash mismatch refuses; failed check restores the backup (stub the ssh runner).
+* Changed host key refuses; key file permissions and cleanup.
+* Command templates are built with `shlex.quote` and never include agent text unquoted.
+
+### Implementer notes
+
+_(fill in)_
+
+### Reviewer notes
+
+_(reviewer)_
+
+---
+
+## Chunk F12 — SSH through Eshu over MCP (`ssh_exec`) · slug `ssh-exec` · dashboard (+ small gateway change)
+
+> **Design first** (push a design note only, wait for approval). Needs the
+> **security reviewer's** sign-off (§ 2.6a): it gives the dashboard a key that reaches every gateway.
+
+### Why
+
+Today every agent that uses SSH logs in as `eshu-gateway` with **one shared key
+pair**. Eshu cannot tell agents apart on SSH, cannot give them different SSH
+rules, and cannot revoke one without rotating the key everywhere. MCP already has
+per-agent tokens and policies. Routing SSH through MCP gives one identity per
+agent for both surfaces, and lets MCP-only clients (LM Studio, F17) use gateways
+without an SSH client or key.
+
+### Design (to be confirmed in the design note)
+
+* **MCP tool** `ssh_exec(host, command, session_id?, timeout?)`, available to agents per policy.
+  * `host` is a gateway IP or hostname known to Eshu (no arbitrary hosts).
+  * The agent's own policy applies first (new SSH rules in `agent_policies`,
+    e.g. `ssh_hosts_allow`, `ssh_mode: read_only | approval | normal`). A
+    `read_only` agent's non-read command (per `core/read_policy.is_read_ssh`, § 2.6a)
+    is sent to JIT, never auto-run.
+* **Delivery:** the dashboard connects to the gateway as `eshu-gateway` with a
+  **dashboard-only key**, using the dashboard-side SSH runner (system `ssh` via
+  `subprocess`, `BatchMode`, pinned host keys, private 0700 key dir, timeouts). F11 reuses this runner.
+  * The installer adds the dashboard key to `authorized_keys` with the same forced
+    command **and** `from="<dashboard IP>"`.
+  * The command carries signed prefix metadata `ESHU_AGENT=<id>` +
+    `ESHU_AGENT_SIG` (HMAC like `ESHU_SESSION_SIG`, covering agent id, session id
+    and a timestamp). The gateway validates it with the same charset rules as the
+    other prefixes and passes `agent` to `/api/request` and `/api/log`. Requests
+    gain an `agent` column, so history, stats and overrides can be per agent.
+  * Every gateway check still runs (freeze, blocklists, allowlists, Zero-Trust, JIT).
+    The policy is enforced twice: on the dashboard (agent policy) and on the gateway.
+* **Approvals:** an MCP call cannot hang for minutes. If the gateway answers
+  "JIT request #N sent", `ssh_exec` returns `{status: "pending", request_id: N}`
+  straight away and the agent polls `check_request(N)`. Once approved, the
+  agent calls `ssh_exec` again (the ticket is waiting), or a `wait: true`
+  option polls for up to 60 s.
+* **Output:** stdout/stderr (already sanitized by the gateway) come back in the
+  MCP result, capped (default 64 KiB, tail kept) and also stored as an F5 result.
+* **Migration:** direct SSH keeps working. A per-gateway setting
+  `ssh_mode: direct+mcp | mcp_only` lets the operator retire the shared agent key
+  from a gateway once its agents use `ssh_exec`.
+
+### Tests to add (outline; finalised in the design note)
+
+* Agent policy refusals and `read_only` mode; unknown host refused.
+* Prefix signing and validation (gateway sandbox); a forged or unsigned
+  `ESHU_AGENT` is refused; `from=` restriction present in generated `authorized_keys`.
+* Pending → `check_request` → re-run flow; output cap; timeout.
+* Requests and audit rows carry the agent; freeze blocks `ssh_exec`.
+
+### Implementer notes
+
+_(fill in)_
+
+### Reviewer notes
+
+_(reviewer)_
+
+---
+
+## Chunk F13 — Session conclusions & runbooks · slug `session-conclusions` · dashboard + MCP
+
+### Why
+
+Sessions already hold the full trail: goal, every SSH command with its outcome
+and approval path, every MCP call, and (after F5) outputs and exit codes. What is
+missing is the **meaning**: what worked, what didn't, what the fix was. The agent
+that did the job knows that best at the end of it. Captured and confirmed, it
+becomes knowledge any later agent can retrieve: a strong cloud model (Hermes)
+does the reasoning once, and a small local model (F17) reuses it cheaply.
+
+### Changes
+
+* **MCP tool** `session_conclude(session_id, outcome, summary, worked[],
+  did_not_work[], root_cause?, fix?, follow_ups[], tags[], runbook_candidate)`.
+  * `outcome ∈ {solved, partial, failed, abandoned}`.
+  * `worked` / `did_not_work` items may reference request ids / call ids from the
+    session (`{"ref": "req:2594", "note": "…"}`); Eshu validates that the refs
+    belong to that session.
+  * Allowed once per session per agent (a second call replaces the draft until
+    the operator confirms it). `session_summary` reminds the agent to call it.
+* **Storage:** `session_conclusions` table (session id, agent, fields above, `status:
+  draft | confirmed | rejected`, operator note, timestamps), with an SQLite **FTS5**
+  index over summary, root cause, fix, tags and the session goal (no new dependency).
+* **Operator review** in the session modal (F6 card): shows the conclusion next
+  to the evidence (commands, outcomes, outputs), with Confirm / Edit / Reject.
+  Only **confirmed** conclusions are served to agents. Agent text is untrusted,
+  escaped in the UI, and never executed.
+* **Runbooks:** a confirmed conclusion with `runbook_candidate: true` can be
+  promoted to a **runbook**: title, when to use it (symptoms/tags), ordered
+  steps, each step either a reference to a command/tool call that worked in the
+  session (copied verbatim, with its F1 breakdown) or a short instruction, plus
+  "known dead ends" from `did_not_work`. Runbooks are documents for agents
+  to follow, not executable. F16 can turn one into a recipe.
+* **MCP tools for retrieval:** `find_runbooks(query, tags?)` and
+  `similar_incidents(query)` → top 5 confirmed items, compact (≤ 1,500 tokens
+  each), with ids; `get_runbook(id)`.
+* **Secrets:** conclusions and runbooks pass through `secret_scrub` on write and on read.
+
+### Tests to add
+
+* Refs must belong to the session; draft → confirmed flow; only confirmed are retrievable.
+* FTS search ranking smoke test; scrubbed secrets; XSS escaping of agent text.
+* Promotion copies steps verbatim and records the source request/call ids.
+
+### Implementer notes
+
+_(fill in)_
+
+### Reviewer notes
+
+_(reviewer)_
+
+---
+
+## Chunks F14–F17 — Local-model support · outline (detailed before they start)
+
+Goal: let a small local model (e.g. a 14–20B model in LM Studio on a 16 GB GPU)
+handle routine homelab support by moving the intelligence to **authoring time**:
+a strong model or the operator works something out once, Eshu stores it as
+reviewed building blocks, and the local model picks one and fills in parameters.
+
+* **F14 — Inventory (`whereis`)** · read-only. One cached lookup joining what Eshu
+  already knows (gateways, Proxmox guests, Omada clients, NPM hosts, Pi-hole
+  records, HA) → host, container id, IP, URL, FQDN, proxy entry, gateway present.
+  Refreshed periodically; read through the Chunk H read-only checks.
+* **F15 — Diagnostic probes** · read-only. Reviewed bundles
+  (`diagnose_service(host, unit)`, `diagnose_container`, `disk_pressure(host)`,
+  `dns_check(name)`) that run reads through `ssh_exec` (F12) and the read lane (F4)
+  and return a structured digest of 1–2k tokens: status, de-duplicated recent errors,
+  restarts, ports, disk, recent changes from Eshu's own history.
+* **F16 — Recipes** · **design first + security reviewer sign-off.** Named,
+  versioned procedures of steps (Eshu tool calls or SSH command templates on named
+  hosts), with **typed parameters** (hostname, IPv4, port, slug: validated by
+  regex, shell-quoted, never free text into a shell), a check after each
+  step, and optional undo steps. Drafted by Hermes (often from an F13 runbook),
+  approved once by the operator (pinned to the content hash; any edit is a new
+  version), run with `recipe_run(name, params)`: one approval per run, or none
+  for recipes that only read. Example: `add_internal_fqdn(fqdn, target_ip, port)` →
+  Pi-hole record + NPM proxy host + `dig` and `curl` checks.
+* **F17 — Local-agent profile** · an agent-policy preset and setup guide for LM
+  Studio's MCP client (URL + bearer header in its `mcp.json`): its own token, a
+  small toolset (`whereis`, probes, runbooks, recipes, generic reads,
+  `ssh_exec` in `read_only` mode), short tool descriptions, writes gated, and an
+  `escalate(summary)` tool that notifies the operator and attaches the session
+  digest for Hermes to pick up.
+
+---
+
 ## 7. Backlog (not planned in detail)
 
 * Deny with a reason, shown to the agent (cheap; low value given the data).
-* MCP `ssh_exec` tool, so MCP-only agents reach gateways through the same gate.
+* Multiple SSH keys tagged per agent (superseded by F12, kept only as a fallback idea).
 * Gateway tags, with policy / freeze / Fleet Run per tag.
 * Approve/deny from a phone notification (Web Push via the existing PWA, or ntfy) —
   needs a security design for authenticating the notification action.
@@ -1038,11 +1435,19 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 1 | F1 | breakdown | dashboard | **Changes requested** (round 2) | `feat/f1-breakdown` | — | R1–R11 done; S1–S7 open; live accuracy passes (15.1% unknown) |
 | 2 | F2 | review-card | UI | Ready (after F1) | `feat/f2-review-card` | F1 | |
 | 3 | F7 | inner-target | dashboard | Ready (after F2) | `feat/f7-inner-target` | F1 | |
-| 4 | F3 | session-plans | dashboard + MCP | Ready (after F7) | `feat/f3-session-plans` | F2 | |
-| 5 | F4 | read-lane | dashboard | Ready (after F3) | `feat/f4-read-lane` | F1, F3 | reviewer security pass |
+| 4 | F3 | session-plans | dashboard + MCP | Ready (after F7) | `feat/f3-session-plans` | F2 | + security reviewer sign-off |
+| 5 | F4 | read-lane | dashboard | Ready (after F3) | `feat/f4-read-lane` | F1, F3, Chunk H | reviewer pass + security reviewer sign-off |
 | 6 | F5 | exec-results | gateway + dashboard | Ready (after F4) — design first | `feat/f5-exec-results` | — | design approval needed |
-| 7 | F6 | session-wrapup | dashboard | Ready (after F5) | `feat/f6-session-wrapup` | F3, F4, F5 | |
-| 8 | F8 | test-traffic | dashboard | Ready (after F6) | `feat/f8-test-traffic` | — | low priority |
-
+| 7 | F12 | ssh-exec | dashboard + gateway | Ready (after F5) — design first | `feat/f12-ssh-exec` | F4, F5 | design approval + security reviewer sign-off |
+| 8 | F6 | session-wrapup | dashboard | Ready (after F12) | `feat/f6-session-wrapup` | F3, F4, F5 | |
+| 9 | F13 | session-conclusions | dashboard + MCP | Ready (after F6) | `feat/f13-session-conclusions` | F5, F6 | |
+| 10 | F8 | test-traffic | dashboard | Ready (after F13) | `feat/f8-test-traffic` | — | low priority |
+| 11 | F9 | ha-supervisor-read | dashboard | Ready (after F8) | `feat/f9-ha-supervisor-read` | — | token is now a dedicated `eshu` HA admin user |
+| 12 | F10 | ha-supervisor-actions | dashboard | Ready (after F9) | `feat/f10-ha-supervisor-actions` | F9, F3, Chunk H | reviewer pass + security reviewer sign-off |
+| 13 | F11 | ha-config-files | dashboard | Ready (after F10) — design first | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | design approval + security reviewer sign-off |
+| 14 | F14 | inventory | dashboard | Outline — detail before start | `feat/f14-inventory` | Chunk H | |
+| 15 | F15 | probes | dashboard | Outline — detail before start | `feat/f15-probes` | F4, F12 | |
+| 16 | F16 | recipes | dashboard + MCP | Outline — design first | `feat/f16-recipes` | F3, F12, F13 | design approval + security reviewer sign-off |
+| 17 | F17 | local-agent | dashboard + docs | Outline — detail before start | `feat/f17-local-agent` | F12–F16 | |
 Chunks are done **in the order column**; each new chunk branches from the
 updated `feature-roadmap` after the previous one is merged.
