@@ -679,10 +679,200 @@ _(reviewer)_
 
 ---
 
+## Chunk F9 — Freeze covers integrations + HA Supervisor reads · slug `ha-supervisor-read` · dashboard
+
+### Why
+
+Home Assistant OS has a Supervisor (add-ons, backups, updates, host/OS info).
+Eshu's HA integration cannot see it today, but HA Core already forwards it over
+the WebSocket API with the `supervisor/api` command
+(`homeassistant/components/hassio/websocket_api.py`: `@require_admin`, schema
+`endpoint: str, method: str, data?: dict, params?: dict, timeout?`). **HA applies
+no endpoint allowlist:** any admin token can call every Supervisor endpoint,
+including host reboot, backup restore and add-on options. Eshu must therefore
+own the allowlist. Endpoints are fixed in Eshu's tool definitions; an agent never supplies one.
+
+Separately, **Emergency Freeze does not stop integration calls today** (only
+SSH gateways). That has to change before Eshu gets more power over HA.
+
+### Changes
+
+* **Freeze covers integrations.** In `core/tool_runner.py`, while the freeze
+  flag is set, every **mutating** integration call (and every approval of a
+  pending integration call in `main.py`'s approve route) is refused with
+  `{"error": {"code": "frozen", …}}`, plus an audit event. Reads keep working (an
+  operator investigating an incident needs them). The UI's freeze banner text
+  says "SSH and integration writes".
+* **Supervisor reads** — new WS tools in `core/ha_seed.py`, all `read_only`,
+  implemented as handlers (`core/tool_handlers.py`) that call
+  `ha_ws_request(integration, 'supervisor/api', {'endpoint': E, 'method': 'get'})`
+  with `E` from a constant table in a new `core/ha_supervisor.py`:
+  `ha_supervisor_info` (`/supervisor/info`), `ha_core_info` (`/core/info`),
+  `ha_os_info` (`/os/info`), `ha_host_info` (`/host/info`),
+  `ha_addons` (`/addons`, compact: slug, name, state, version, update_available),
+  `ha_addon_info(slug)` (`/addons/{slug}/info`, slug validated `^[a-z0-9_]{1,64}$`;
+  drop `options` from the output — they hold add-on secrets),
+  `ha_backups` (`/backups`, compact), `ha_resolution` (`/resolution/info`).
+* `ha_check_config` — REST `POST /api/config/core/check_config` (read-only in effect; it
+  validates and changes nothing). Mark it `read_only`.
+* Every response goes through `secret_scrub`. A `401/403` from `supervisor/api`
+  becomes a clear error: "the HA token is not an admin token. Supervisor tools need an admin user."
+* `docs/INTEGRATIONS.md`: the HA section says which tools need an admin token.
+
+### Tests to add
+
+* Freeze: a mutating HA call and an approval of a pending integration call are
+  refused while frozen; reads still run; audit rows written.
+* Each Supervisor tool sends exactly the fixed endpoint and method (stub `ha_ws_request`);
+  a slug with `/`, `..` or `?` is rejected before any call.
+* `ha_addon_info` output never contains `options`.
+* Non-admin error mapping.
+* **Allowlist test:** the set of endpoints any F9/F10 tool can send equals the
+  constant table. Fails when someone adds an endpoint without updating it.
+
+### Compat impact
+
+Additive tools. Freeze now also blocks integration writes, which is a behaviour change. CHANGELOG entry.
+
+### Acceptance criteria
+
+- [ ] No code path can send an endpoint that is not in `ha_supervisor.py`'s table.
+- [ ] Freeze blocks integration writes and approvals; reads unaffected.
+- [ ] Seeded tools appear after "seed" on an existing HA integration without duplicates.
+
+### Implementer notes
+
+_(fill in)_
+
+### Reviewer notes
+
+_(reviewer)_
+
+---
+
+## Chunk F10 — HA Supervisor actions (approval-gated) · slug `ha-supervisor-actions` · dashboard
+
+### Changes
+
+> Before coding, confirm each payload shape against the HA Core source
+> (`components/hassio/websocket_api.py`, `components/hassio/update.py`) and the
+> Supervisor API docs. The reviewer has only verified `supervisor/api`'s schema. Record what you
+> checked in Implementer notes.
+
+* Mutating tools (`read_only: False`, `always_gate: True`, so each call lands in
+  the Pending API Approvals queue), via the same `ha_supervisor.py` table:
+  * `ha_addon_action(slug, action)`: `action ∈ {start, stop, restart}` → `POST /addons/{slug}/{action}`.
+  * `ha_addon_update(slug, backup=true)` → WS `hassio/update/addon` `{addon, backup}`.
+  * `ha_core_update(backup=true)` → WS `hassio/update/core` `{backup}`.
+  * `ha_backup_create(name, partial_addons?, partial_folders?)` → `POST /backups/new/full` or `/backups/new/partial`.
+  * `ha_core_restart()` → refuses unless an `ha_check_config` in the last 10 minutes
+    on this integration returned `valid` (record the last result in `meta`);
+    then `POST /core/restart`.
+  * `ha_host_reboot()` → `POST /host/reboot`: **seeded disabled** (the tool toggle
+    is off by default), and its approval card shows a red "reboots the whole HA host" line.
+* **Never exposed** (and listed in a `FORBIDDEN` table that a test checks against):
+  backup restore (`/backups/*/restore/*`), add-on options/install/uninstall,
+  `/supervisor/options`, `/host/shutdown`, `/store/repositories`, `/auth*`,
+  `/security*`, `/os/datadisk*`, `/os/boot-slot`.
+* **Preflight** (`PREFLIGHT` in `tool_handlers.py`) validates arguments when the call
+  is queued, so the approval card shows the exact action, the add-on name and the
+  current → target version for updates (from `/addons/{slug}/info` / `/core/info`).
+* **Existing `call_service` loophole:** `call_service(domain='hassio', …)` reaches
+  the same powers outside this allowlist. When F10 is installed, `call_service`
+  refuses domain `hassio` (error points to the F10 tools), unless an agent
+  policy explicitly allows `hassio` (operator escape hatch, audited).
+* Freeze (F9) blocks all of these.
+* Plans (F3): add plan item type `mcp` `{integration, tool, args_hash}` so an
+  approved plan can cover "backup → update → check → restart". Matching is by exact
+  argument hash, the same rule as SSH items. If F3 has already merged, this is a
+  small extension in F10; if not, F3 includes it.
+
+### Tests to add
+
+* Each action builds the right endpoint and payload; unknown actions and bad slugs refused.
+* `ha_core_restart` refuses without a recent valid check; works after one.
+* `ha_host_reboot` is seeded disabled.
+* `FORBIDDEN` endpoints are unreachable from every tool (table test).
+* `call_service` with `hassio` refused by default; allowed only with an explicit policy.
+* Preflight populates the approval summary; plan item of type `mcp` approves exactly one matching call.
+
+### Acceptance criteria
+
+- [ ] Reviewer security pass: try to reach a forbidden endpoint through any F9/F10 tool or `call_service`.
+- [ ] Every action is approval-gated and audited; freeze blocks them.
+
+### Implementer notes
+
+_(fill in)_
+
+### Reviewer notes
+
+_(reviewer)_
+
+---
+
+## Chunk F11 — HA config files via the SSH add-on · slug `ha-config-files` · dashboard
+
+> **Design first,** like F5: push a design note only, wait for approval, then implement.
+
+### Why
+
+YAML-only integrations need edits to `/config/*.yaml`, and no HA API writes
+config files. The supported route is the **Advanced SSH & Web Terminal** add-on.
+It cannot be an Eshu gateway: the add-on is an Alpine container without systemd
+(no poller, logger or `systemd-run`) that is rebuilt on every add-on update. So
+the **dashboard itself** connects to it.
+
+### Design (to be confirmed in the design note)
+
+* A new integration kind `ha_ssh` (or an "SSH access" section on the HA
+  integration): host, port, username, and a **private key made only for this
+  use**, stored like other integration secrets (masked, scrubbed). The host key
+  is pinned on first use (TOFU) and shown to the operator; a changed key refuses.
+* Transport: the system `ssh` client via `subprocess` (no new Python package),
+  `BatchMode=yes`, `StrictHostKeyChecking=yes` with an Eshu-owned
+  `known_hosts`, a temp key file under a 0700 dir, deleted afterwards, and a
+  timeout. Commands are **fixed templates**, never agent-supplied shell. This
+  dashboard-side SSH runner is reusable for the backlog's MCP `ssh_exec`.
+* Tools:
+  * `ha_config_list()`: `*.yaml` under `/config` and `/config/packages/**`.
+  * `ha_config_read(path)`: allowed paths only (above). `secrets.yaml`
+    returns key names with values masked. Refused: `.storage/**`, `*.db*`,
+    `.ssh/**`, anything outside `/config`, symlinks (checked on the remote with
+    `realpath`). Returns `content` and `sha256`.
+  * `ha_config_write(path, content, expect_hash, dry_run)`: mutating, always gated.
+    `dry_run` returns a unified diff without approval. On approval:
+    (1) re-check `expect_hash`; (2) copy to `<path>.eshu-<ts>.bak`;
+    (3) write via stdin to a temp file and `mv` it into place; (4) run `ha core check`.
+    (5) **If the check fails, restore the backup automatically** and return the
+    check output. The approval card shows the diff (F2's card renders it).
+  * `ha_config_restore(path, backup)`: gated; restores a `.eshu-*.bak`.
+  * `ha_core_restart` from F10 also accepts a passing `ha core check` from this transport.
+* Freeze blocks writes and restores. Results (output, exit code) are stored like F5's.
+* Setup doc: create an Eshu-only key pair, add the public key to the add-on's
+  `authorized_keys`, and keep "Protection mode" **on** (with it off, the add-on can control Docker = the whole host).
+
+### Tests to add (outline; finalised in the design note)
+
+* Path allowlist and refusals (including `..`, symlinks, `secrets.yaml` masking).
+* Hash mismatch refuses; failed check restores the backup (stub the ssh runner).
+* Changed host key refuses; key file permissions and cleanup.
+* Command templates are built with `shlex.quote` and never include agent text unquoted.
+
+### Implementer notes
+
+_(fill in)_
+
+### Reviewer notes
+
+_(reviewer)_
+
+---
+
 ## 7. Backlog (not planned in detail)
 
 * Deny with a reason, shown to the agent (cheap; low value given the data).
-* MCP `ssh_exec` tool, so MCP-only agents reach gateways through the same gate.
+* MCP `ssh_exec` tool, so MCP-only agents reach gateways through the same gate (can reuse F11's dashboard-side SSH runner).
 * Gateway tags, with policy / freeze / Fleet Run per tag.
 * Approve/deny from a phone notification (Web Push via the existing PWA, or ntfy) —
   needs a security design for authenticating the notification action.
@@ -717,6 +907,9 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 6 | F5 | exec-results | gateway + dashboard | Ready (after F4) — design first | `feat/f5-exec-results` | — | design approval needed |
 | 7 | F6 | session-wrapup | dashboard | Ready (after F5) | `feat/f6-session-wrapup` | F3, F4, F5 | |
 | 8 | F8 | test-traffic | dashboard | Ready (after F6) | `feat/f8-test-traffic` | — | low priority |
+| 9 | F9 | ha-supervisor-read | dashboard | Ready (after F8) | `feat/f9-ha-supervisor-read` | — | needs an admin HA token |
+| 10 | F10 | ha-supervisor-actions | dashboard | Ready (after F9) | `feat/f10-ha-supervisor-actions` | F9, F3 | reviewer security pass |
+| 11 | F11 | ha-config-files | dashboard | Ready (after F10) — design first | `feat/f11-ha-config-files` | F10, F2, F5 | design approval needed |
 
 Chunks are done **in the order column**; each new chunk branches from the
 updated `feature-roadmap` after the previous one is merged.
