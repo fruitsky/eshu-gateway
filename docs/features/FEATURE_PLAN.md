@@ -1231,6 +1231,52 @@ the full gate:
 and the session goal next to the plan number:
 ![Plans card](../screenshots/f3/plans-card-desktop.png)
 
+### Round 3 — security items (SR1–SR4)
+
+The security reviewer approved F3 on `de741ec`, conditional on SR1; SR2–SR4
+are done as well.
+
+* **SR1 — truly byte-exact matching.** `claim_plan_item` no longer strips the
+  request command (the gateway already trims; the old `str.strip()` also
+  removed `\x1f`, `\x85`, `\xa0`, `\u2028`, …), and `validate_items`
+  refuses any command containing a C0 control (tab excepted), DEL or
+  non-ASCII whitespace — checked on the **raw** text, because `strip()` itself
+  would have hidden `\x1c`/`\xa0` before the check. Tests:
+  `test_f3_sr1_item_does_not_match_control_bytes` (an item `echo ok` does not
+  match `echo ok\x1f`, `\x1cecho ok`, `echo ok\u00a0`; it still matches
+  exactly `echo ok`) and `test_f3_sr1_proposal_refuses_hidden_characters`
+  (those bytes, DEL and `\n` are refused with `invalid_command`; plain space
+  and tab are accepted).
+* **SR2 — ownership fails closed.** Both tools now compare
+  `owner != current_agent_name()` without the `owner and` guard, so an empty
+  owner (or an anonymous caller) is never "yours". Tests:
+  `test_f3_sr2_anonymous_caller_is_refused` (no agent context, both tools) and
+  `test_f3_sr2_session_without_owner_is_refused`.
+* **SR3 — the warning sits where the decision is made.** The plan payload
+  carries `strict_sessions` (`require_sessions_enabled()`), and the card shows
+  "Strict sessions are off — anyone with the gateway SSH key who knows this
+  session id can use this plan." when it is off. AGENT_MANUAL now recommends
+  enabling strict sessions before relying on plans. Tests:
+  `test_f3_sr3_api_reports_whether_strict_sessions_are_on` and the harness
+  test `test_f3_sr3_strict_sessions_hint_in_the_card`.
+* **SR4 — broad items stand out.** An item with `host: "*"` or
+  `max_uses > 1` is rendered with `plan-item-broad`, an amber host label and
+  an amber uses count (the two ways an item grants more than one exact run on
+  one host). Harness test: `test_f3_sr4_broad_items_are_highlighted`
+  (two of three items highlighted; a single-use exact item is not).
+
+The Plans screenshot was refreshed: it shows the strict-sessions line, the
+`any host` item and the `×2` item both highlighted, next to the agent and
+session goal.
+
+Full gate:
+
+```
+1767 passed, 7 warnings in 351.50s (0:05:51)
+```
+
+(1760 before this round + 7 new security tests.)
+
 ### Reviewer notes
 
 **Round 1 (2026-11-08): changes requested.** 105 targeted tests pass locally
