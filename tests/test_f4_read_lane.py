@@ -63,56 +63,71 @@ def _verdict(command):
 # ── the table ───────────────────────────────────────────────────────────────
 
 ELIGIBLE = [
-    # status verbs (no file operands)
+    # status verbs (no file operands; SC2 path-checks any operand, so a unit
+    # name is not a read — see the INELIGIBLE list and the open question)
     'uptime',
     'df -h',
     'free -h',
-    'systemctl status nginx',
-    'systemctl is-active nginx',
-    'systemctl is-enabled nginx',
+    'systemctl status',
     'systemctl list-units --type=service',
+    'systemctl list-timers --no-pager',
     'ip addr show',
-    'ip route',
+    'ip -4 route',
     'ss -tlnp',
+    'ss -s',
     'ps aux',
+    'ps -ef',
     'uname -a',
     'hostname',
     'lsblk',
+    'lsblk -f',
     'lscpu',
     'whoami',
     'id',
+    'id -u',
     'date',
+    'date -u',
     'nproc',
     'journalctl -u nginx -n 200 --no-pager',
     'journalctl -u nginx -n 1000 --no-pager',
+    'journalctl -n 5 --dmesg',
     'journalctl --disk-usage',
     'docker ps',
+    'docker ps -a',
     'docker stats --no-stream',
-    'docker images',
+    'docker images -q',
     'pct list',
     'qm list',
     'zpool status',
+    'zpool status -v',
+    'zpool list -H',
     'zfs list',
+    'zfs list -d 1 -t filesystem',
     # file readers, only inside the safe trees
-    'cat /var/log/syslog',
     'head -n 50 /var/log/nginx/error.log',
+    'head --lines=50 /var/log/syslog',
+    'head -50 /var/log/syslog',
     'tail -n 50 /var/log/syslog',
-    'grep -e error /var/log/syslog',
-    'grep -r -e error /var/log',
+    'tail -c 4096 /var/log/syslog',
+    'grep -m 50 -e error /var/log/syslog',
+    'grep -m 10 -i -e error /var/log/syslog',
+    'grep -m 10 --regexp=error /var/log/syslog',
+    'grep -r -m 50 -e error /var/log',
+    'grep error /proc/1/status',
     'ls -R /var/log',
-    'ps -ef',
-    'head -c 1048576 /var/log/syslog',
-    'wc -l /var/log/syslog',
     'ls -la /var/log',
     'stat /var/log/syslog',
+    'stat -f /var/log',
     'du -sh /var/log',
+    'du -d 1 /var/log',
     'cat /proc/cpuinfo',
+    'cat -n /proc/meminfo',
     'cat /sys/class/thermal/thermal_zone0/temp',
     'cat /etc/os-release',
     'cat /etc/hostname',
     'cat /etc/hosts',
     'cat /etc/resolv.conf',
-    'sudo cat /var/log/syslog',
+    'sudo cat /proc/loadavg',
 ]
 
 INELIGIBLE = [
@@ -135,6 +150,16 @@ INELIGIBLE = [
     'cat /proc/self/environ',
     'cat /proc/kcore',
     'cat /proc/kmsg',
+    # SC6: /proc links, page maps and huge kernel files
+    'cat /proc/1/exe',
+    'cat /proc/1/pagemap',
+    'cat /proc/kpageflags',
+    'cat /sys/kernel/debug/tracing/trace',
+    'cat /sys/kernel/tracing/trace',
+    'cat /sys/fs/bpf/synthetic',
+    'cat /var/log/installer/syslog',
+    'cat /var/log/cloud-init.log',
+    'cat /var/log/cloud-init-output.log',
     # probe class: globs and `..` in a path operand
     'cat /var/log/*/../../etc/hosts',
     'cat /var/log/../etc/hosts',
@@ -153,6 +178,12 @@ INELIGIBLE = [
     'tail -f /var/log/syslog',
     'tail -F /var/log/syslog',
     'tail -n 5000 /var/log/syslog',
+    # SC2: a status verb reads no file, so a bare name is not a read
+    'systemctl status nginx',
+    'systemctl is-active nginx',
+    'systemctl is-enabled nginx',
+    'ip addr show dev eth0',
+    'ip link set eth0 down',
     # probe class: verbs outside the allowlist
     'crontab -l',
     'git -C /srv/app log',
@@ -189,6 +220,30 @@ INELIGIBLE = [
     'cat --file=/etc/shadow',
     'cat /var/log/syslog; rm /var/log/synthetic',
     'cat "$(rm -rf /tmp/synthetic-x)"',
+    # SC1: options are an allowlist, matched exactly, with no abbreviation
+    'df --huma',
+    'head --line=5 /var/log/syslog',
+    'journalctl --line 10',
+    'ls --colour=always /var/log',
+    'grep --recur -m 5 -e error /var/log',
+    'ss -tlnpq',
+    'ls -lz /var/log',
+    'cat -- /proc/cpuinfo',
+    'cat - /proc/cpuinfo',
+    'head -n5x /var/log/syslog',
+    # SC1: no status verb may take an option that names a file, a host, a
+    # machine, a context or a format template
+    'docker -H 192.0.2.5 ps',
+    'docker --context synthetic ps',
+    'systemctl -H 192.0.2.5 status',
+    'journalctl --root=/ -n 5',
+    'docker ps --format {{.Names}}',
+    'ps -o pid,cmd',
+    'stat -c %n /var/log/syslog',
+    'date +%s',
+    'journalctl -o json -n 5',
+    'grep -f /etc/passwd /var/log/syslog',
+    'grep --exclude-from=/etc/passwd -m 5 -e error /var/log',
     # R5: recursion under /proc or /sys, and -R / -d recurse anywhere
     'grep -R -e error /var/log',
     'grep -R -e error /proc',
@@ -220,15 +275,38 @@ INELIGIBLE = [
     'journalctl --root=/ -n 10',
     'journalctl --image=synthetic -n 10',
     'journalctl -m -n 10',
-    # S2: head/tail byte cap
+    # S2/SC5: line and byte caps, and no way around them
     'head -c 2000000 /var/log/syslog',
     'tail -c 2000000 /var/log/syslog',
+    'head -n 5000 /var/log/syslog',
+    'tail --lines=5000 /var/log/syslog',
+    'head -n +5 /var/log/syslog',
+    'tail -n -5 /var/log/syslog',
+    'journalctl -n -1',
+    'journalctl --no-tail -n 5',
+    # SC5: a log is read through head, tail or `grep -m` only
+    'cat /var/log/syslog',
+    'wc -l /var/log/syslog',
+    'grep -e error /var/log/syslog',
+    'grep -r -e error /var/log',
+    'cat /var/log/nginx/error.log',
     # S3: /sys/firmware
     'cat /sys/firmware/efi/efivars/synthetic',
-    # R4: the guest never opted in
+    # R4/SC4: the guest never opted in, and the policy checks subcommands
     'pct exec 103 -- uptime',
     'docker exec web01 df -h',
     'qm guest exec 201 -- uptime',
+    'pct start 103',
+    'zfs destroy tank/data',
+    'zpool',
+    'docker',
+    'ip addr flush dev eth0',
+    # SC3: input redirection, here-string or heredoc feeds the step
+    'cat /proc/cpuinfo < /etc/shadow',
+    'head -n 5 /var/log/syslog < /etc/shadow',
+    'grep -m 5 -e error /var/log/syslog < /etc/passwd',
+    'cat <<< synthetic',
+    'cat <<EOF\nhi\nEOF',
 ]
 
 
@@ -269,14 +347,18 @@ class TestEligibility:
 
     def test_f4_eligible_cases_have_no_endless_form(self):
         """R7: a static check per verb — no eligible case can run forever."""
-        endless = ('-s', '--seconds', '-c', '--count', '--events', '-T')
+        endless = {
+            'free': ('-s', '--seconds', '-c', '--count'),
+            'ss': ('-E', '--events'),
+            'zpool': ('-T', '-t'),
+        }
         for command in ELIGIBLE:
             tokens = command.split()
             if tokens[0] == 'zpool':
                 assert not any(token.isdigit() for token in tokens[1:]), command
             for token in tokens[1:]:
-                if tokens[0] in ('free', 'ss', 'zpool'):
-                    assert token not in endless, (command, token)
+                if tokens[0] in endless:
+                    assert token not in endless[tokens[0]], (command, token)
             # `follows` is the one flag F1 would set; R3 refuses it.
             assert not (tokens[0] == 'tail' and ('-f' in tokens or '-F' in tokens)), command
 
@@ -320,6 +402,209 @@ class TestEligibility:
         assert checked >= 20, checked
 
 
+class TestSecurityConditions:
+    """SC1–SC8 from the security reviewer's sign-off (Round 5)."""
+
+    def test_f4_sc1_options_are_an_exact_allowlist(self):
+        for command in ('df --huma', 'head --line=5 /var/log/syslog',
+                        'journalctl --line 10', 'ls --colour=always /var/log',
+                        'ss -tlnpq', 'ls -lz /var/log'):
+            ok, why = _verdict(command)
+            assert ok is False, command
+            assert why.startswith('option:'), (command, why)
+
+    def test_f4_sc1_dashdash_and_lone_dash_are_refused(self):
+        for command in ('cat -- /proc/cpuinfo', 'cat - /proc/cpuinfo'):
+            ok, why = _verdict(command)
+            assert ok is False and why == 'dash', (command, why)
+
+    def test_f4_sc1_short_clusters_need_every_letter(self):
+        assert _verdict('ss -tlnp')[0] is True
+        assert _verdict('ss -tlnpq')[0] is False
+        assert _verdict('ls -la /var/log')[0] is True
+        assert _verdict('ls -lz /var/log')[0] is False
+
+    def test_f4_sc1_values_are_decided_per_verb(self):
+        # `-m` is a grep option (a pattern), not a file-reader option.
+        assert _verdict('grep -m 5 -e error /var/log/syslog')[0] is True
+        assert _verdict('head -m 5 /var/log/syslog')[0] is False
+        # `-c` is bytes for head/tail and not an option for free.
+        assert _verdict('head -c 4096 /var/log/syslog')[0] is True
+        assert _verdict('free -c 5')[0] is False
+
+    def test_f4_sc1_no_status_option_names_a_file_host_or_format(self):
+        for command in ('docker -H 192.0.2.5 ps',
+                        'docker --context synthetic ps',
+                        'systemctl -H 192.0.2.5 status',
+                        'docker ps --format {{.Names}}',
+                        'ps -o pid,cmd', 'stat -c %n /var/log/syslog',
+                        'date +%s', 'journalctl -o json -n 5',
+                        'grep -f /etc/passwd /var/log/syslog'):
+            assert _verdict(command)[0] is False, command
+
+    def test_f4_sc2_a_status_operand_is_not_a_read(self):
+        """SC2: a word that is not an option or its value is path-checked."""
+        for command in ('systemctl status nginx', 'systemctl is-active nginx',
+                        'ip addr show dev eth0'):
+            ok, why = _verdict(command)
+            assert ok is False and why.startswith('operand:'), (command, why)
+        # The value of a listed option is not an operand.
+        assert _verdict('journalctl -u nginx -n 5')[0] is True
+
+    def test_f4_sc2_grep_pattern_is_the_one_exception(self):
+        assert _verdict('grep error /proc/1/status')[0] is True
+        # With `-e` there is no positional pattern: every other word is a file.
+        assert _verdict('grep -e error /etc/shadow')[0] is False
+        assert _verdict('grep error /etc/shadow')[0] is False
+
+    def test_f4_sc3_input_redirection_is_ineligible(self):
+        for command in ('cat /proc/cpuinfo < /etc/shadow',
+                        'head -n 5 /var/log/syslog < /etc/shadow',
+                        'cat /proc/cpuinfo < /proc/loadavg'):
+            ok, why = _verdict(command)
+            assert ok is False and 'input-redirect' in why, (command, why)
+        assert _verdict('cat <<< synthetic')[0] is False
+        ok, why = _verdict('cat <<EOF\nhi\nEOF')
+        assert ok is False and 'heredoc' in why
+
+    def test_f4_sc3_f1_records_the_redirection_per_step(self):
+        bd = breakdown('cat /proc/cpuinfo < /etc/shadow')
+        assert 'input-redirect' in bd['flags']
+        assert bd['steps'][0]['input_redirects'] == [
+            {'op': '<', 'target': '/etc/shadow'}]
+
+    def test_f4_sc4_subcommands_are_checked_here(self):
+        """SC4: the policy decides, not F1 — so probe it with words F1 never
+        classifies as a read."""
+        from core import read_policy
+        check = read_policy._check_status
+        assert check('zpool', ['status']) == (True, '')
+        assert check('zpool', ['list', '-H']) == (True, '')
+        assert check('zpool', [])[1] == 'subcommand:-'
+        assert check('zpool', ['destroy', 'tank'])[1] == 'subcommand:destroy'
+        assert check('zpool', ['import'])[1] == 'subcommand:import'
+        assert check('docker', ['rm', 'web01'])[1] == 'subcommand:rm'
+        assert check('pct', ['start', '103'])[1] == 'subcommand:start'
+        assert check('ip', ['addr', 'flush', 'dev', 'eth0'])[1] == 'action:flush'
+        assert check('ip', ['link', 'set', 'eth0', 'down'])[1] == 'action:set'
+        assert check('systemctl', ['list-unit-files'])[1] == 'subcommand:list-unit-files'
+        # F1 already refuses these as write/unknown; the policy also refuses
+        # the subcommand when F1 calls it a read.
+        assert _verdict('systemctl list-unit-files')[1] == 'subcommand:list-unit-files'
+
+    def test_f4_sc5_caps_apply_to_every_spelling(self):
+        assert _verdict('head -n 1000 /var/log/syslog')[0] is True
+        assert _verdict('head -n 1001 /var/log/syslog')[0] is False
+        assert _verdict('head --lines=1001 /var/log/syslog')[0] is False
+        assert _verdict('head -1001 /var/log/syslog')[0] is False
+        assert _verdict('head -c 1048576 /var/log/syslog')[0] is True
+        assert _verdict('head -c 1048577 /var/log/syslog')[0] is False
+        assert _verdict('tail -c 1048577 /var/log/syslog')[0] is False
+        assert _verdict('head -n +5 /var/log/syslog')[0] is False
+        assert _verdict('head -n5x /var/log/syslog')[0] is False
+        assert _verdict('tail -n -5 /var/log/syslog')[0] is False
+        assert _verdict('journalctl -n 1000')[0] is True
+        assert _verdict('journalctl -n 1001')[0] is False
+        assert _verdict('grep -m 1000 -e x /var/log/syslog')[0] is True
+        assert _verdict('grep -m 1001 -e x /var/log/syslog')[0] is False
+
+    def test_f4_sc5_logs_need_a_capped_reader(self):
+        assert _verdict('head -n 20 /var/log/syslog')[0] is True
+        assert _verdict('tail /var/log/syslog')[0] is True
+        assert _verdict('grep -m 5 -e x /var/log/syslog')[0] is True
+        for command in ('cat /var/log/syslog', 'wc -l /var/log/syslog',
+                        'grep -e x /var/log/syslog'):
+            assert _verdict(command)[0] is False, command
+
+    def test_f4_sc6_safe_trees_are_tighter(self):
+        for command in ('cat /proc/1/exe', 'cat /proc/1/pagemap',
+                        'cat /proc/kpageflags',
+                        'cat /sys/kernel/debug/tracing/trace',
+                        'cat /sys/kernel/tracing/trace',
+                        'cat /sys/fs/bpf/synthetic',
+                        'cat /var/log/installer/syslog',
+                        'cat /var/log/cloud-init.log',
+                        'cat /var/log/cloud-init-output.log'):
+            ok, why = _verdict(command)
+            assert ok is False and why.startswith('operand:'), (command, why)
+        # The ordinary files next to them still read.
+        assert _verdict('cat /proc/1/status')[0] is True
+        assert _verdict('cat /sys/class/thermal/thermal_zone0/temp')[0] is True
+        assert _verdict('head -n 5 /var/log/cloud-init.log')[0] is False
+
+    def test_f4_sc7_any_needs_a_human_verdict_wins(self):
+        bd = breakdown('uptime')
+        assert eligible(bd, {'action': 'jit'}, 'uptime', 'on') == (True, '')
+        assert eligible(bd, {'action': 'auto_approved',
+                             'detail_type': 'exact_whitelist'},
+                        'uptime', 'on') == (True, '')
+        for verdict in ({'action': 'jit', 'detail_type': 'self_protection_jit'},
+                        {'action': 'jit', 'detail_type': 'shell_meta'},
+                        {'action': 'jit', 'detail_type': 'future_kind'},
+                        {'action': 'future_thing'}):
+            ok, why = eligible(bd, verdict, 'uptime', 'on')
+            assert ok is False, verdict
+            assert why.startswith('verdict:'), (verdict, why)
+
+    def test_f4_sc8_every_option_in_every_eligible_case_is_allowlisted(self):
+        """Generated: an eligible case may use only its verb's listed options."""
+        import shlex
+        from core import read_policy
+        verbs = read_policy.READ_LANE_VERBS['file'] | \
+            read_policy.READ_LANE_VERBS['status']
+        checked = 0
+        for command in ELIGIBLE:
+            for step in breakdown(command)['steps']:
+                tokens = shlex.split(step['text'])
+                verb, rest = tokens[0], tokens[1:]
+                assert verb in verbs, (command, verb)
+                sub = ''
+                if verb in read_policy.SUBCOMMANDS:
+                    index = next((i for i, token in enumerate(rest)
+                                  if not token.startswith('-')), None)
+                    assert index is not None, command
+                    sub = rest.pop(index)
+                    assert sub in read_policy.SUBCOMMANDS[verb], (command, sub)
+                    if verb in read_policy.ACTIONS:
+                        action = next((i for i, token in enumerate(rest)
+                                       if not token.startswith('-')), None)
+                        if action is not None:
+                            assert rest[action] in read_policy.ACTIONS[verb]
+                            rest.pop(action)
+                spec = read_policy.option_spec_for(verb, sub)
+                assert spec is not None, (command, verb, sub)
+                index = 0
+                while index < len(rest):
+                    token = rest[index]
+                    if token in spec['words']:
+                        checked += 1
+                    elif token.startswith('--'):
+                        name, sep, _value = token.partition('=')
+                        assert name in spec['flags'] or name in spec['values'], \
+                            (command, token)
+                        checked += 1
+                        if name in spec['values'] and not sep:
+                            index += 1
+                    elif token.startswith('-') and len(token) > 1:
+                        if token in spec['flags'] or token in spec['values']:
+                            checked += 1
+                            if token in spec['values']:
+                                index += 1
+                        elif spec['digits'] and token[1:].isdigit():
+                            checked += 1
+                        else:
+                            letters = token[1:]
+                            for position, letter in enumerate(letters):
+                                option = '-' + letter
+                                if option in spec['values']:
+                                    assert position == len(letters) - 1, (command, token)
+                                    break
+                                assert letter in spec['letters'], (command, token, option)
+                            checked += 1
+                    index += 1
+        assert checked >= 50, checked
+
+
 class TestReadPolicy:
     """§ 2.6a: F4 reuses Chunk H through one entry point."""
 
@@ -343,6 +628,14 @@ class TestReadPolicy:
 
 class TestLaneModes:
 
+    def _unlock_on(self):
+        """Round 4/5: `on` also needs the hand-set meta key."""
+        from db.core import db_conn
+        with db_conn() as conn:
+            conn.execute("INSERT OR REPLACE INTO meta (key, value) "
+                         "VALUES ('read_lane_on_enabled', '1')")
+            conn.commit()
+
     def test_f4_shadow_never_approves(self, gateway):
         client, headers = gateway
         set_gateway_read_lane('10.0.0.1', 'shadow')
@@ -354,6 +647,7 @@ class TestLaneModes:
 
     def test_f4_on_approves_only_eligible_commands(self, gateway):
         client, headers = gateway
+        self._unlock_on()
         set_gateway_read_lane('10.0.0.1', 'on')
         response = _jit(client, headers, 'uptime')
         assert response['read_lane'] == 'on'
@@ -375,6 +669,7 @@ class TestLaneModes:
 
     def test_f4_zero_trust_wins(self, gateway):
         client, headers = gateway
+        self._unlock_on()
         set_gateway_read_lane('10.0.0.1', 'on')
         set_gateway_zero_trust('10.0.0.1', True)
         try:
@@ -386,6 +681,7 @@ class TestLaneModes:
 
     def test_f4_freeze_wins(self, gateway):
         client, headers = gateway
+        self._unlock_on()
         set_gateway_read_lane('10.0.0.1', 'on')
         set_trigger_freeze()
         try:
@@ -397,6 +693,7 @@ class TestLaneModes:
 
     def test_f4_blocklist_wins(self, gateway):
         client, headers = gateway
+        self._unlock_on()
         update_policy('regex_blacklist', 'uptime')
         set_gateway_read_lane('10.0.0.1', 'on')
         try:
@@ -408,6 +705,7 @@ class TestLaneModes:
 
     def test_f4_long_command_is_ineligible(self, gateway):
         client, headers = gateway
+        self._unlock_on()
         set_gateway_read_lane('10.0.0.1', 'on')
         command = 'cat ' + 'a' * 8200
         assert 'read_lane' not in _jit(client, headers, command)
@@ -521,6 +819,16 @@ class TestOnLock:
         response = client.put('/api/gateways/10.0.0.1/read-lane', json={'mode': 'on'})
         assert response.status_code == 400
         assert get_gateway_read_lane('10.0.0.1') == 'shadow'
+
+    def test_f4_stored_on_is_shadow_while_the_key_is_unset(self, gateway):
+        """Round 5: the lock also covers an `on` row written behind the API."""
+        client, headers = gateway
+        set_gateway_read_lane('10.0.0.1', 'on')     # bypasses the endpoint
+        assert get_gateway_read_lane('10.0.0.1') == 'on'
+        assert 'read_lane' not in _jit(client, headers, 'uptime')
+        row = next(r for r in get_all_requests() if r['command'] == 'uptime')
+        assert row['status'] == 'pending'
+        assert row['reason'] == 'read-lane-shadow'
 
     def test_f4_no_api_writes_the_lock_key(self, gateway):
         client, _headers = gateway

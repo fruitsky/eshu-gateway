@@ -194,7 +194,7 @@ class TestWaiting:
     @needs_f4
     def test_f18_waiting_read_lane_off(self, gateway):
         _set_lane('off')
-        req_id = create_request('10.0.0.1', 'cat /var/log/syslog',
+        req_id = create_request('10.0.0.1', 'uptime',
                                 status='pending', ttl=90)
         waiting = _context(gateway, req_id)['waiting']
         assert 'read lane is off' in waiting
@@ -202,7 +202,7 @@ class TestWaiting:
     @needs_f4
     def test_f18_waiting_read_lane_shadow(self, gateway):
         _set_lane('shadow')
-        req_id = create_request('10.0.0.1', 'cat /var/log/syslog',
+        req_id = create_request('10.0.0.1', 'uptime',
                                 status='pending', ttl=90)
         assert 'shadow' in _context(gateway, req_id)['waiting']
 
@@ -212,7 +212,9 @@ class TestWaiting:
         req_id = create_request('10.0.0.1', 'less /var/log/syslog',
                                 status='pending', ttl=90)
         waiting = _context(gateway, req_id)['waiting']
-        assert 'read lane ineligible' in waiting and 'verb:less' in waiting
+        # F1 classifies `less` as unknown, so the lane's first refusal is
+        # `not-read`. (It used to say `verb:less` before Round 5's SC2.)
+        assert 'read lane ineligible' in waiting and 'not-read' in waiting
 
     def test_f18_waiting_no_allowlist_match(self, gateway):
         _set_lane('off')
