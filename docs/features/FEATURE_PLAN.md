@@ -910,7 +910,44 @@ that the context-panel markup, the history link and the `X` shortcut exist.
 
 ### Reviewer notes
 
-_(reviewer)_
+**Round 1 — 2026-11-08 — one fix requested (B1), then merge.**
+
+Solid work. The rendering is pure and escaped throughout (`esc` covers `& < > " '`,
+so the attribute uses are safe too), the history row survives the poll, the
+headline is never green, the write step is visible without scrolling at both
+widths (checked the committed screenshots), and the node-based escaping tests are
+a good pattern for later UI chunks. Gate re-run by the reviewer: pre-commit OK,
+`1711 passed`.
+
+* **B1 — must fix: the two-press Approve silently drops requests from
+  callers that are not a person pressing the button.** `handleAction(id,
+  'approve')` now returns early (toast only) for a long command with an unknown
+  step. Two existing callers rely on it approving:
+  * `bulkApprove()` loops over the selection, then calls `clearSelection()`. A
+    selected long-unknown request is skipped, and the selection is cleared, so the
+    operator believes it was approved while it stays pending and the agent times out.
+  * `submitSessionOverride()` ("Start Session Override" from a pending row) calls
+    `handleAction(ctx.request_id, 'approve')` to clear the row it was opened from;
+    that row stays pending.
+
+  Fix: give `handleAction` an options argument, e.g. `handleAction(id, action,
+  {confirmed: true})`, which skips the two-press check.
+  * Session override path: pass `confirmed: true` (the operator has just granted
+    a bypass for this session explicitly).
+  * Bulk approve: **do not** auto-confirm. Approve the others, leave the
+    long-unknown ones **selected**, and show one toast: "N requests have unknown
+    steps — review and approve them individually." Only clear the ones that were sent.
+  * Keyboard approve and the per-card buttons keep the two-press behaviour.
+  * Tests (node harness): bulk with one long-unknown + one normal request → one
+    POST, the long-unknown id stays in the selection, toast shown; session-override
+    path → POST sent; single press on the card → no POST, second press → POST.
+* **N1 — optional nit: decoded scripts appear twice on the queue card**
+  (the new collapsed `decoded script` block on the step, and the existing
+  "DECODED" block from `decodedCmdHtml` below the meta line). If the step has a
+  `script`, skip `decodedCmdHtml` for that card, or the reverse. Either is fine.
+
+**What to do:** fix B1 (and N1 if you agree) on this branch, re-run
+`bash scripts/verify.sh`, add a Round 2 paragraph to Implementer notes, push, stop.
 
 ---
 
@@ -1594,7 +1631,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | Order | Chunk | Slug | Area | Status | Branch | Depends on | Reviewer notes |
 |---|---|---|---|---|---|---|---|
 | 1 | F1 | breakdown | dashboard | **Merged** 2026-11-07 | `feat/f1-breakdown` @ `e0df20a` | — | 3 rounds; 155 adversarial cases; 14.7% unknown on live data |
-| 2 | F2 | review-card | UI | **Ready** | `feat/f2-review-card` | F1 | |
+| 2 | F2 | review-card | UI | **Changes requested** (round 1) | `feat/f2-review-card` | F1 | B1 bulk/override approve; N1 optional |
 | 3 | F7 | inner-target | dashboard | Ready (after F2) | `feat/f7-inner-target` | F1 | |
 | 4 | F3 | session-plans | dashboard + MCP | Ready (after F7) | `feat/f3-session-plans` | F2 | + security reviewer sign-off |
 | 5 | F4 | read-lane | dashboard | Ready (after F3) | `feat/f4-read-lane` | F1, F3, Chunk H | reviewer pass + security reviewer sign-off |
