@@ -2914,7 +2914,57 @@ characters, since a docker container name is agent-controlled. The out-of-scope
 
 ### Implementer notes
 
-_(fill in)_
+**What I did**
+
+* **`requests.excluded`** (`db/requests.py`): `INTEGER DEFAULT 0`, added by the
+  usual migration loop. Every existing row reads 0 — **no migration or rule
+  excludes anything by itself**, which is the chunk's one-off requirement.
+  `mark_requests_excluded(ids, session_id)` is the single writer: idempotent
+  (only rows currently at 0 are touched) and it returns how many it changed.
+* **`POST /api/requests/exclude`** `{ids[] | session_id}` (session auth,
+  audit `requests_excluded`, 400 when neither is given, ids capped at 1000).
+  Unknown ids are not an error; they simply count 0. Rows stay in History and
+  in `/api/requests` — only the aggregate views skip them.
+* **Statistics** (`/api/statistics` and `/api/statistics/export`): every
+  request-based aggregate adds `COALESCE(r.excluded, 0) = 0` — per-gateway,
+  daily, top commands, inner targets, hourly, weekday×hour, per-gateway
+  sparkline, automation trend and top denied (9 + 2 queries).
+* **Learning gaps** (`core/learning.py`, both the approval and the denial
+  query) and **anomaly profiles** (`core/cmd_profiles.compute_profiles`) skip
+  excluded rows, so a smoke test can no longer trigger an allowlist
+  suggestion or make a command look "already seen".
+* **Inner-target warning** (`/api/gateways/{ip}/inner-targets`) skips them
+  too: a test `pct exec` should not widen the host-override warning.
+* **UI**: a row marked excluded gets an `excluded` chip and is dimmed;
+  unexcluded rows carry an `exclude` link next to `breakdown`. The session
+  modal shows a dashed hint when the goal matches `/test|smoke/i` — the
+  suggestion, never an automatic action — with an "Exclude from stats"
+  button; the same action is available as a plain **Exclude** button in the
+  modal header for sessions whose goal does not say it. Both go through the
+  same endpoint and confirm first.
+* **Tests**: `tests/test_f8_test_traffic.py` (17) — the endpoint (ids,
+  session, idempotence, 400, auth, audit, rows still listed, unknown ids),
+  statistics (daily, per-gateway, top commands, top denied, export,
+  inner-target warning), learning (approvals and denials), profiles, that
+  nothing is excluded automatically, and a node harness for the suggestion
+  predicate and the excluded marker.
+
+**Decisions and surprises**
+
+* The chunk says statistics, learning and anomaly profiles; I also applied the
+  flag to the inner-target warning (it feeds an operator decision) and to the
+  CSV export (it is the same statistic leaving the app). Both are additive.
+* The policy **preview** (`/api/policies/preview`) still replays excluded
+  commands. It answers "what would this draft policy do to this traffic", and
+  the operator may deliberately want test traffic in that what-if; leaving it
+  alone also keeps this chunk from changing a decision tool. Say so if you
+  want it filtered.
+* Exclusion is one-way: there is no "include again" in the API or the UI. The
+  flag is a single boolean, so a future chunk can add it without a migration.
+* The session hint matches any `test`/`smoke` in the goal, as specified. It is
+  a hint with a confirm button, so a false positive costs one ignored line.
+
+`bash scripts/verify.sh`: `1873 passed, 3 skipped, 7 warnings in 383.49s (0:06:23)`. The three skips are F18's read-lane tests (F4 is not on this branch).
 
 ### Reviewer notes
 
