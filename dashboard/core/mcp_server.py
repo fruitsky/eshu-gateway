@@ -53,7 +53,8 @@ _DEFAULT_ALLOWED_HOSTS = ['127.0.0.1:*', 'localhost:*', '[::1]:*']
 
 # Tools that are not integration calls and must remain reachable so an agent
 # can poll its own approvals. They are always scoped to the caller.
-_ALWAYS_ALLOWED = {'check_approval', 'check_request', 'session_begin', 'session_summary'}
+_ALWAYS_ALLOWED = {'check_approval', 'check_request', 'session_begin',
+                   'session_summary', 'session_plan', 'check_plan'}
 
 
 def _describe_web_fetch(base: str, policy: dict) -> str:
@@ -430,6 +431,10 @@ def build_per_integration_mcp() -> dict:
                           description=SESSION_BEGIN_DESC)
             inst.add_tool(session_summary_fn(), name="session_summary",
                           description=SESSION_SUMMARY_DESC)
+            inst.add_tool(session_plan_fn(), name="session_plan",
+                          description=SESSION_PLAN_DESC)
+            inst.add_tool(check_plan_fn(), name="check_plan",
+                          description=CHECK_PLAN_DESC)
             _per_integration[ns] = inst
             _per_integration_apps[ns] = inst.streamable_http_app()
         except Exception as e:
@@ -454,8 +459,12 @@ def _refresh_single_instance(ns: str, integration: dict):
     fresh = set(_register_tools(inst, integration, namespaced=False))
     inst.add_tool(check_approval_fn(), name="check_approval", description=CHECK_APPROVAL_DESC)
     inst.add_tool(check_request_fn(), name="check_request", description=CHECK_REQUEST_DESC)
+    inst.add_tool(session_plan_fn(), name="session_plan", description=SESSION_PLAN_DESC)
+    inst.add_tool(check_plan_fn(), name="check_plan", description=CHECK_PLAN_DESC)
     fresh.add("check_approval")
     fresh.add("check_request")
+    fresh.add("session_plan")
+    fresh.add("check_plan")
     _per_integration_tools[ns] = fresh
 
 
@@ -601,7 +610,10 @@ SESSION_BEGIN_DESC = (
     "id, then keep the minted one. Returns the id, its signature, and the exact "
     "ssh_prefix (ESHU_SESSION_ID + ESHU_SESSION_SIG) to use on every SSH "
     "command. Pass the id on every Eshu tool call; end with "
-    "session_summary(session_id=<id>)."
+    "session_summary(session_id=<id>). For work that changes things, look "
+    "around first, then propose the exact commands with session_plan and "
+    "poll check_plan — one approval for the whole change instead of one per "
+    "command."
 )
 
 
@@ -673,5 +685,114 @@ def session_summary_fn():
     return _session_summary
 
 
+SESSION_PLAN_DESC = (
+    "Propose the changes a Session intends to make, so the operator approves "
+    "the list once instead of each command. Recon first (reads, look around), "
+    "then call this with the exact commands you intend to run: "
+    '{"host": "<gateway ip>" or "*", "command": "<exact text>", "max_uses": 1}. '
+    "Matching is byte-exact after trimming whitespace — no patterns, no "
+    "prefixes. Up to 50 items, each under 4 kB. Returns plan_id in status "
+    "'proposed'; the operator approves (possibly a subset, with a TTL of up to "
+    "4 hours) in the dashboard. Poll check_plan(plan_id) for its state."
+)
+
+
+def session_plan_fn():
+    def _session_plan(session_id: str = "", items=None, note: str = "") -> str:
+        from db.session_plans import PlanError, create_plan, validate_items
+        from db.sessions import get_session
+        from core.notify import send_notify
+        sid = (session_id or '').strip()
+        if not sid or not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', sid):
+            return json.dumps({
+                'error': 'invalid_session_id',
+                'message': 'session_id must match [A-Za-z0-9_-]{1,64}.',
+            })
+        if not get_session(sid):
+            return json.dumps({
+                'error': 'unknown_session',
+                'message': ('Call session_begin(goal="<task name>") first — a plan '
+                            'belongs to a minted session.'),
+            })
+        try:
+            validate_items(items)
+            created = create_plan(sid, items, note)
+        except PlanError as exc:
+            return json.dumps({'error': exc.code, 'message': exc.message})
+        last = ['', '']
+        try:
+            row = get_session(sid)
+            last[0] = row.get('goal') or ''
+        except Exception:
+            pass
+        send_notify(
+            'jit', 'Session Plan Proposed',
+            f"Plan for session {sid}{(' — ' + last[0]) if last[0] else ''}: "
+            f"{created['items']} changes on {created['hosts']} host(s). "
+            "Approve it in the dashboard.")
+        record_audit_event(
+            'plan_proposed',
+            details=f"Session plan #{created['plan_id']} proposed for session {sid}: "
+                    f"{created['items']} item(s), {created['hosts']} host(s)",
+            actor=current_agent_name())
+        return json.dumps({
+            'plan_id': created['plan_id'],
+            'status': 'proposed',
+            'session_id': sid,
+            'items': created['items'],
+            'hosts': created['hosts'],
+            'how': ('The operator approves it in the dashboard. Poll '
+                    'check_plan(plan_id); approved items then run without '
+                    'further prompts for this session, up to their max_uses.'),
+        })
+    return _session_plan
+
+
+CHECK_PLAN_DESC = (
+    "Check a Session plan you proposed: its status (proposed / approved / "
+    "denied / expired / ended), its expiry, and the remaining uses of each "
+    "item. Pass the optional session_id to assert the plan belongs to that "
+    "session."
+)
+
+
+def check_plan_fn():
+    def _check_plan(plan_id: int = 0, session_id: str = "") -> str:
+        from db.session_plans import get_plan
+        try:
+            plan = get_plan(int(plan_id))
+        except (TypeError, ValueError):
+            plan = None
+        if not plan:
+            return json.dumps({'error': 'not_found',
+                               'message': 'No session plan with that id.'})
+        wanted = (session_id or '').strip()
+        if wanted and wanted != plan['session_id']:
+            return json.dumps({
+                'error': 'session_mismatch',
+                'message': 'That plan belongs to a different session.',
+            })
+        items = [{
+            'id': item['id'],
+            'host': item['host'],
+            'command': item['command'],
+            'max_uses': item['max_uses'],
+            'uses': item['uses'],
+            'remaining': max(0, item['max_uses'] - item['uses']),
+            'removed': bool(item['removed']),
+        } for item in plan['items']]
+        return json.dumps({
+            'plan_id': plan['id'],
+            'session_id': plan['session_id'],
+            'status': plan['status'],
+            'until': plan['until'],
+            'note': plan['note'],
+            'items': items,
+        })
+    return _check_plan
+
+
 mcp.add_tool(session_begin_fn(), name="session_begin", description=SESSION_BEGIN_DESC)
 mcp.add_tool(session_summary_fn(), name="session_summary", description=SESSION_SUMMARY_DESC)
+mcp.add_tool(session_plan_fn(), name="session_plan", description=SESSION_PLAN_DESC)
+mcp.add_tool(check_plan_fn(), name="check_plan", description=CHECK_PLAN_DESC)
