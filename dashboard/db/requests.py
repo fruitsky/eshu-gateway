@@ -51,6 +51,22 @@ def update_request_status(req_id: int, status: str):
         cursor.execute('UPDATE requests SET status = ? WHERE id = ?', (status, req_id))
         conn.commit()
 
+
+def update_request_status_if_pending(req_id: int, status: str) -> bool:
+    """X1: approve/deny may only move a `pending` row.
+
+    The UPDATE is conditional so two racing presses cannot both "win", and an
+    old id (denied, expired, consumed, blocked) can never be re-approved by a
+    stale click or a colliding integration-call id.
+    """
+    with db_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE requests SET status = ? WHERE id = ? AND status = 'pending'",
+            (status, req_id))
+        conn.commit()
+        return cursor.rowcount == 1
+
 def update_ticket_consumed_by_ip(target_ip: str):
     with db_conn() as conn:
         cursor = conn.cursor()
