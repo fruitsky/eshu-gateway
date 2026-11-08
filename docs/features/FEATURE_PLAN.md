@@ -1585,7 +1585,80 @@ is ready for that pass.
 
 ### Reviewer notes
 
-_(reviewer)_
+**Round 1 (2026-11-08): changes requested. Not ready for the security
+reviewer yet.** The structure is right. One notion of "read" lives in
+`core/read_policy.py`, `read_lane.py` holds no rules of its own, and the hook
+order is correct: after F3 and the session override, after freeze and the
+encoded-payload block. Zero-Trust and freeze win, `on` is server-gated on
+7 days of shadow, and the default is `off`. F1 also stood up well to a probe
+set run in a scratch dir with synthetic commands. It refuses environment
+dumps, `curl`/`wget`, `awk system()`, `sed e`/`w`, `find -exec`/`-delete`,
+`xargs`, `dd`, `less`, `tar -c`, `docker inspect` and `kubectl get secret`.
+
+The core premise of the spec's design rule 3 is wrong, and that is the
+planner's mistake, not the implementer's. **The gateway runs every command as
+root** (the key is in `/root/.ssh/authorized_keys`). "Elevated" (a `sudo`
+prefix) therefore says nothing about privilege, and a plain `cat` reaches
+everything. With a denylist (`sensitive-path`) as the only guard, these were
+**eligible** in the probe:
+
+* any credential-bearing file whose name F1 doesn't know (shell history, an
+  app's `config.yml`, a relative `cat config.yml`)
+* raw block devices (`head -c … /dev/sdX`)
+* `/proc/<pid>/root/…`, `/proc/<pid>/cwd/…` (links into the real filesystem)
+  and `/proc/kcore`
+* a glob ahead of `..` (`/var/log/*/../../…`): `_elevated_path_allowed` cuts
+  the token at `*` before it looks for `..`
+* `systemctl show`/`systemctl cat` (they print `Environment=`) and
+  `crontab -l`
+* `git … log` with `repo-config` set, and `tail -f`/`follows` (never ends):
+  F1 sets those flags, but they are not in `READ_BLOCKING_FLAGS`
+* `sleep 100000` and `cat /dev/zero`
+
+*Must fix (replaces design rule 3):*
+
+* **R1 Allowlist on top of F1.** Add `READ_LANE_VERBS` to `read_policy.py`,
+  a reviewed list of what may auto-run, in two groups:
+  1. **Status verbs that take no file operands**: `uptime`, `df`, `free`,
+     `ip` (`a`/`addr`/`route`/`link`), `ss`, `ps`, `uname`, `hostname`,
+     `lsblk`, `lscpu`, `whoami`, `id`, `date`, `nproc`, `systemctl`
+     (`status`/`is-active`/`is-enabled`/`list-units`/`list-timers` only),
+     `journalctl` (no `-f`), `docker` (`ps`/`stats --no-stream`/`images`),
+     `pct list`/`qm list`, `zpool status`/`list`, `zfs list`.
+  2. **File readers** (`cat`, `head`, `tail` without `-f`, `grep`, `wc`,
+     `ls`, `stat`, `du`): eligible only when **every** operand, including
+     bare and relative words and `--opt=/path` values, is inside the safe
+     trees.
+
+  Anything not on the list is ineligible even if F1 says `read`. The list
+  is in code and reviewed; it is not an operator setting.
+* **R2 Safe trees, for every step.** Apply the path check whether or not the
+  step is elevated, because every step is elevated.
+  * **Allowed:** `/var/log/`, `/proc/` and `/sys/`, plus exactly
+    `/etc/os-release`, `/etc/hostname`, `/etc/hosts` and `/etc/resolv.conf`.
+  * **Refused inside `/proc`:** `*/root`, `*/cwd`, `*/fd`, `*/map_files`,
+    `*/mem`, `*/environ`, `kcore`, `kmsg`.
+  * **Refused anywhere:** `/dev/`.
+  * **Refused shapes:** any glob or brace character (`*?[]{}`) in a path
+    operand, and any `..` component, checked on the whole token.
+* **R3 Flags fail closed.** Any F1 flag blocks unless it is on an explicit
+  harmless list, which starts empty. `repo-config` and `follows` then block
+  automatically, and so will any flag F1 adds later.
+* **R4 No inner targets.** A command with an inner target (`pct exec`,
+  `qm guest exec`, `docker exec`) is ineligible. The lane is opted in per
+  gateway, and the guest never opted in.
+* **Tests:** add every probe class above to the ineligible table, with
+  synthetic paths and the IP range `192.0.2.x`. Also add a generated test:
+  every eligible case's first verb is in `READ_LANE_VERBS`. Update the
+  spec's design rule 3 to say "every step (the gateway runs as root)".
+
+*Should fix:*
+
+* **S1** Cap `journalctl` and `tail` at `-n ≤ 1000` (or require `-n`), so one
+  auto-run read cannot dump a whole journal.
+
+Once R1–R4 are in, F4 goes to the security reviewer (§ 2.6a). They asked for
+a closer look because this lane runs with no human at all.
 
 ---
 
@@ -3003,7 +3076,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 2 | F2 | review-card | UI | **Merged** 2026-11-08 | `feat/f2-review-card` @ `286df1b` | F1 | 2 rounds |
 | 3 | F7 | inner-target | dashboard | **Merged** 2026-11-08 | `feat/f7-inner-target` @ `0ad167f` | F1 | 1 round; backfill 7.1 s on a live-DB copy |
 | 4 | F3 | session-plans | dashboard + MCP | Merged | `feat/f3-session-plans` | F2 | + security reviewer sign-off |
-| 5 | F4 | read-lane | dashboard | Ready (after F3) | `feat/f4-read-lane` | F1, F3, Chunk H | reviewer pass + security reviewer sign-off |
+| 5 | F4 | read-lane | dashboard | **Changes requested (R1–R4)** | `feat/f4-read-lane` | F1, F3, Chunk H | reviewer pass + security reviewer sign-off |
 | 6 | F5 | exec-results | gateway + dashboard | Merged | `feat/f5-exec-results` | — | |
 | 7 | F12 | ssh-exec | dashboard + gateway | Ready (after F5) — design first | `feat/f12-ssh-exec` | F4, F5 | design approval + security reviewer sign-off |
 | 8 | F6 | session-wrapup | dashboard | Ready (after F12) | `feat/f6-session-wrapup` | F3, F4, F5 | |
