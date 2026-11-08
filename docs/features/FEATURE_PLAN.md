@@ -2550,7 +2550,37 @@ read-lane reasons above.)
 
 ### Reviewer notes
 
-_(reviewer)_
+**Round 1 (2026-11-08): changes requested (small).** The structure is good.
+It computes on demand, the caps are in place, fingerprints are filled in
+`create_request`, the backfill follows the F7 pattern, every agent string is
+escaped (harness), and the endpoint requires session auth. 15 tests pass
+locally. This panel helps the operator decide, so it must not overstate the
+case for approving:
+
+* **C1 Split "you approved" from "it was auto-approved".** `_approved`
+  counts `auto-approved` and `window-approved` (and, once F3/F4 merge, plan
+  and read-lane rows) as approvals. "Seen before: approved 50" then reads as
+  50 operator decisions when the allowlist made them. Return three counts,
+  `operator_approved` (`approved`/`consumed` with no `session-plan:` or
+  `read-lane` reason), `auto` (everything automatic) and `denied`, and label
+  them that way in the UI. Test with mixed rows.
+* **C2 "Like this" must not over-match.** A one-step shape such as
+  `cat:read` or `bash:unknown` matches thousands of unrelated commands, so
+  its counts are noise that looks like evidence. Show the section only when
+  the shape has ≥ 2 steps, or when its verb is not `bash`/`sh`/`python*`;
+  otherwise show "too generic to compare". Also compute the counts in SQL
+  (`COUNT`/`SUM(...)` plus `LIMIT 3` for examples) instead of fetching every
+  matching row. Tests: a generic shape gets no counts, and the SQL path
+  returns the same numbers.
+* **C3 "Why waiting" only for pending rows, worded as a best guess.** It
+  re-derives the reason, so it can differ from the real path (host
+  override, freeze, order changes). Return it only for `pending` rows, and
+  label it "Likely waiting because: …". Test that a non-pending row has no
+  reason.
+* **C4 Merge `feature-roadmap` into this branch.** It now contains X1, and
+  both touch `openContextPanel`. Keep X1's `contextActionsHtml`/two-press
+  code and add the F18 container. Re-run the X1 harness tests. The three F4
+  skips stay until F4 merges, which is fine.
 
 ---
 
@@ -3162,7 +3192,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 5 | F4 | read-lane | dashboard | **Changes requested (R1–R4)** | `feat/f4-read-lane` | F1, F3, Chunk H | reviewer pass + security reviewer sign-off |
 | 5a | X1 | ctx-actions | dashboard | **Ready — do next, small bug fix** | `fix/x1-ctx-actions` | — | FYI to security reviewer (approve ignored status) |
 | 6 | F5 | exec-results | gateway + dashboard | Merged | `feat/f5-exec-results` | — | |
-| 6a | F18 | request-context | dashboard | Ready (after X1) | `feat/f18-request-context` | F1, F5, F7, X1 | |
+| 6a | F18 | request-context | dashboard | **Changes requested (C1–C4)** | `feat/f18-request-context` | F1, F5, F7, X1 | |
 | 7 | F12 | ssh-exec | dashboard + gateway | Ready (after F5) — design first | `feat/f12-ssh-exec` | F4, F5 | design approval + security reviewer sign-off |
 | 8 | F6 | session-wrapup | dashboard | Ready (after F12) | `feat/f6-session-wrapup` | F3, F4, F5 | |
 | 9 | F13 | session-conclusions | dashboard + MCP | Ready (after F6) | `feat/f13-session-conclusions` | F5, F6 | |
