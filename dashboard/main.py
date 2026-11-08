@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field
 
 from database import (
     init_db, create_request, update_request_status, 
-    update_ticket_consumed_by_ip, get_all_requests, get_request_row, get_pending_request_by_cmd,
+    update_ticket_consumed_by_ip, update_request_status_if_pending, get_all_requests, get_request_row, get_pending_request_by_cmd,
     get_request_status, get_request_command, count_denied, get_ticket_by_request_id, delete_old_requests,
     get_session_requests, get_request_target_ip,
     register_gateway, get_gateways, get_gateway, update_gateway_last_seen,
@@ -1130,17 +1130,27 @@ def request_decoded(req_id: int, request: Request):
 
 @app.post("/api/approve/{req_id}")
 def approve_request(req_id: int, request: Request):
+    """X1: only a `pending` row can be approved; anything else is 409."""
     _check_session(request)
-    update_request_status(req_id, "approved")
+    row = get_request_row(req_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Request not found")
+    if not update_request_status_if_pending(req_id, "approved"):
+        raise HTTPException(status_code=409, detail="not_pending")
     record_audit_event('jit_approved', details=f'JIT #{req_id} approved')
     return {"status": "ok"}
 
 
 @app.post("/api/deny/{req_id}")
 def deny_request(req_id: int, request: Request):
+    """X1: only a `pending` row can be denied; anything else is 409."""
     _check_session(request)
-    command = get_request_command(req_id)
-    update_request_status(req_id, "denied")
+    row = get_request_row(req_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Request not found")
+    command = row.get('command') or ''
+    if not update_request_status_if_pending(req_id, "denied"):
+        raise HTTPException(status_code=409, detail="not_pending")
     record_audit_event('jit_denied', details=f'JIT #{req_id} denied')
     deny_count = count_denied(command) if command else 0
     return {"status": "ok", "deny_count": deny_count, "command": command}
