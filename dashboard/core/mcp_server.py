@@ -708,11 +708,22 @@ def session_plan_fn():
                 'error': 'invalid_session_id',
                 'message': 'session_id must match [A-Za-z0-9_-]{1,64}.',
             })
-        if not get_session(sid):
+        session = get_session(sid)
+        if not session:
             return json.dumps({
                 'error': 'unknown_session',
                 'message': ('Call session_begin(goal="<task name>") first — a plan '
                             'belongs to a minted session.'),
+            })
+        owner = (session.get('agent') or '').strip()
+        if owner and owner != current_agent_name():
+            # A plan names exact commands; another agent's session must never
+            # be able to propose into it (the operator would see a familiar
+            # goal and approve someone else's bytes).
+            return json.dumps({
+                'error': 'session_not_yours',
+                'message': 'That session was minted by another agent. '
+                           'Call session_begin(goal=...) for your own session.',
             })
         try:
             validate_items(items)
@@ -751,14 +762,14 @@ def session_plan_fn():
 CHECK_PLAN_DESC = (
     "Check a Session plan you proposed: its status (proposed / approved / "
     "denied / expired / ended), its expiry, and the remaining uses of each "
-    "item. Pass the optional session_id to assert the plan belongs to that "
-    "session."
+    "item. Only plans belonging to your own session are returned."
 )
 
 
 def check_plan_fn():
-    def _check_plan(plan_id: int = 0, session_id: str = "") -> str:
+    def _check_plan(plan_id: int = 0) -> str:
         from db.session_plans import get_plan
+        from db.sessions import get_session
         try:
             plan = get_plan(int(plan_id))
         except (TypeError, ValueError):
@@ -766,11 +777,14 @@ def check_plan_fn():
         if not plan:
             return json.dumps({'error': 'not_found',
                                'message': 'No session plan with that id.'})
-        wanted = (session_id or '').strip()
-        if wanted and wanted != plan['session_id']:
+        # Plans are scoped to the caller: a plan id is a small integer and a
+        # plan names the commands another session intends to run.
+        session = get_session(plan['session_id'])
+        owner = (session.get('agent') or '').strip() if session else ''
+        if owner and owner != current_agent_name():
             return json.dumps({
-                'error': 'session_mismatch',
-                'message': 'That plan belongs to a different session.',
+                'error': 'session_not_yours',
+                'message': 'That plan belongs to another agent\'s session.',
             })
         items = [{
             'id': item['id'],
