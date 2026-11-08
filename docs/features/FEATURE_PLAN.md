@@ -1704,6 +1704,12 @@ passed; still refused when unlocked but shadow is younger than 7 days; no API
 attempt can set the key (and the gateway list reports the lock). The existing
 7-day test now unlocks the key first, since the lock is its own gate.
 
+The lock is the second gate on `on`: the security sign-off above approved the
+lane on conditions SC1–SC8, and the operator sets `read_lane_on_enabled` by
+hand only once those are addressed and the lane is verified in shadow.
+
+`bash scripts/verify.sh`: `1992 passed, 7 warnings in 391.24s (0:06:31)`.
+
 ### Reviewer notes
 
 **Round 1 (2026-11-08): changes requested. Not ready for the security
