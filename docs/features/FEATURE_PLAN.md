@@ -1176,6 +1176,61 @@ and the session modal's plan with per-item uses:
 (1735 before this chunk + 15 new F3 tests.)
 
 
+### Round 2 — fixes for reviewer round 1 (R1–R4, S1–S4)
+
+The "hand-off to the security reviewer" note was left alone as instructed.
+
+* **R1 ownership.** `session_plan` refuses `session_not_yours` when the
+  session's `sessions.agent` is set and differs from `current_agent_name()`;
+  `check_plan` is scoped to the caller the same way, so the optional
+  `session_id` argument is gone. The plan payload now carries `agent` and
+  `session_goal`, and the card shows both (escaped) next to the plan number —
+  the operator can no longer approve another agent's plan believing it is
+  theirs. Tests: `test_f3_mcp_session_plan_refuses_another_agents_session`,
+  `test_f3_mcp_check_plan_refuses_another_agents_plan`,
+  `test_f3_plan_payload_names_the_agent_and_goal`.
+* **R2 TTL reset on poll.** The chosen TTL lives in `_planTtl` (like
+  `_planRemoved`), so the 3 s queue refresh keeps it. Harness test
+  `test_f3_plan_ttl_survives_a_poll_rerender` (choose 30 min, render twice,
+  still selected); the screenshot run also checked it live against the
+  polling page (`ttl after poll: 30`).
+* **R3 plan replaced mid-review.** `renderPlans` remembers the plan id shown
+  per session; when a session's proposal changes, the new card gets the
+  "This proposal replaced the one you were reviewing" banner, a warning
+  border, and Approve needs a second press (F2's pattern). Harness test
+  `test_f3_replaced_plan_needs_a_second_press` (first press sends 0 POSTs,
+  second sends 1).
+* **R4 End vs claim.** The claim's UPDATE now also requires
+  `plan_id IN (SELECT id FROM session_plans WHERE status='approved' AND
+  until > ?)`. `claim_plan_item` uses a `_claim_candidate` helper so the test
+  can end the plan between the SELECT and the UPDATE:
+  `test_f3_end_between_select_and_update_consumes_no_use` (no use consumed).
+* **S1 state guards.** `_decide` allows Deny only from `proposed` and End only
+  from `proposed`/`approved`; anything else is `PlanError('bad_state')` → 400,
+  so a decided outcome is never rewritten. Test:
+  `test_f3_deny_approved_and_end_expired_are_rejected`.
+* **S2** `removed_item_ids` is typed `list[int]`, so a non-integer is a 422
+  instead of a 500. Test: `test_f3_non_integer_removed_ids_is_422`.
+* **S3** `fetchSessionPlans` uses `authFetch`. Harness test:
+  `test_f3_plan_fetch_uses_authed_fetch` (the plans URL goes through
+  `authFetch`, not plain `fetch`).
+* **S4 F2's rule for plans.** `planNeedsConfirm` requires a second press when
+  any kept item is a >500-char command with an unknown step (a plan can
+  authorise many more runs than one request). Harness test:
+  `test_f3_long_unknown_plan_needs_a_second_press`.
+
+New harness: `tests/fixtures/f3_harness.js` on top of
+`tests/fixtures/appjs_loader.js` (the F2/F7 pattern). All 25 F3 tests pass;
+the full gate:
+
+```
+1760 passed, 7 warnings in 349.18s (0:05:49)
+```
+
+**Screenshot** — replaced so the card shows the proposing agent (`hermes`)
+and the session goal next to the plan number:
+![Plans card](../screenshots/f3/plans-card-desktop.png)
+
 ### Reviewer notes
 
 **Round 1 (2026-11-08): changes requested.** 105 targeted tests pass locally
