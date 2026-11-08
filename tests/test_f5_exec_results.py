@@ -197,7 +197,8 @@ class TestGateway:
         assert body['exit_code'] == 0
 
     def test_f5_gateway_dead_reader_keeps_stdout(self, gw):
-        """D1: a dead FIFO reader must not truncate the agent's stream."""
+        """D1/E1: a dead `tail` must not truncate the agent's stream (the
+        reader group's `cat` keeps draining the FIFO)."""
         gw.exact('./slowout')
         gw.capture('tail')
         gw.command_script('slowout', "echo one\nsleep 0.4\necho two\nexit 7\n")
@@ -214,6 +215,37 @@ class TestGateway:
             stub.unlink()
         assert proc.returncode == 7
         assert proc.stdout == 'one\ntwo\n[ESHU exit=7]\n'
+
+    def _disconnect_after_first_bytes(self, gw):
+        proc = gw.popen('yes')
+        try:
+            assert proc.stdout.read(16)
+            proc.stdout.close()   # the agent's reader goes away
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
+            pytest.fail('the command kept running after the agent disconnected')
+        finally:
+            try:
+                proc.stderr.close()
+            except Exception:
+                pass
+        return proc
+
+    def test_f5_gateway_disconnect_ends_command_in_tail_mode(self, gw):
+        """E1: plain `tee` — an agent disconnect still kills the command."""
+        gw.exact('yes')
+        gw.capture('tail')
+        proc = self._disconnect_after_first_bytes(gw)
+        assert proc.returncode in (-13, 141)
+
+    def test_f5_gateway_disconnect_ends_command_in_exit_only_mode(self, gw):
+        """E1: pin today's behaviour for the non-capture path too."""
+        gw.exact('yes')
+        gw.capture('exit-only')
+        proc = self._disconnect_after_first_bytes(gw)
+        assert proc.returncode in (-13, 141)
 
     def test_f5_gateway_hostile_prefix_posts_nothing(self, gw):
         gw.exact('echo hello')
@@ -273,6 +305,28 @@ class TestMatching:
         assert response.json()['attached'] is True
         assert get_result(req_id) is not None
 
+    def test_f5_lockbox_match_window_is_wider(self, auth_client, gateway_headers,
+                                              ):
+        """E4: a lockbox claim can follow a long JIT wait + ticket life."""
+        from db.core import db_conn
+        old = create_request('10.0.0.1', 'uptime', status='approved', ttl=0)
+        with db_conn() as conn:
+            conn.execute('UPDATE requests SET created_at = ? WHERE id = ?',
+                         (int(time.time()) - 200, old))
+            conn.commit()
+        attached = _post(auth_client, gateway_headers, 'uptime', path='lockbox')
+        assert attached.json()['attached'] is True
+        assert attached.json()['request_id'] == old
+
+        # The allowlist window stays 120 s: the same age is too old there.
+        old_allow = create_request('10.0.0.1', 'df -h', status='auto-approved', ttl=0)
+        with db_conn() as conn:
+            conn.execute('UPDATE requests SET created_at = ? WHERE id = ?',
+                         (int(time.time()) - 200, old_allow))
+            conn.commit()
+        orphaned = _post(auth_client, gateway_headers, 'df -h', path='allowlist')
+        assert orphaned.json()['orphaned'] is True
+
     def test_f5_no_double_attach(self, auth_client, gateway_headers):
         first = create_request('10.0.0.1', 'uptime', status='auto-approved', ttl=0)
         second = create_request('10.0.0.1', 'uptime', status='auto-approved', ttl=0)
@@ -314,6 +368,13 @@ class TestMatching:
         assert second.json()['reason'] == 'already_has_result'
         assert get_result(req_id)['output'] == 'first\n'
 
+    def test_f5_oversized_body_is_422(self, auth_client, gateway_headers):
+        """E2: the request body is capped per field, before any work."""
+        assert _post(auth_client, gateway_headers,
+                     encoded_output='A' * 30000).status_code == 422
+        assert _post(auth_client, gateway_headers,
+                     encoded_command='A' * 20000).status_code == 422
+
     def test_f5_unknown_path_rejected(self, auth_client, gateway_headers):
         for path in ('bogus', '', 'ALLOWLIST'):
             assert _post(auth_client, gateway_headers, path=path).status_code == 400
@@ -346,6 +407,14 @@ class TestMatching:
 
 class TestStorage:
 
+    def test_f5_no_audit_event_per_result(self, auth_client, gateway_headers):
+        """E3: the results table is the record; no audit row per execution."""
+        from db.audit import get_audit_log
+        create_request('10.0.0.1', 'uptime', status='auto-approved', ttl=0)
+        assert _post(auth_client, gateway_headers, 'uptime').status_code == 200
+        assert [e for e in get_audit_log()
+                if e['event_type'] == 'exec_result'] == []
+
     def test_f5_scrub_applied(self, auth_client, gateway_headers):
         req_id = create_request('10.0.0.1', 'uptime', status='approved', ttl=0)
         _post(auth_client, gateway_headers, request_id=req_id,
@@ -356,8 +425,10 @@ class TestStorage:
 
     def test_f5_output_cap_server_side(self, auth_client, gateway_headers):
         req_id = create_request('10.0.0.1', 'uptime', status='approved', ttl=0)
+        # 17 KiB raw (base64 within E2's 24 KiB cap) — the server keeps the
+        # tail and sets truncated.
         _post(auth_client, gateway_headers, request_id=req_id,
-              encoded_output=b64('x' * 20000))
+              encoded_output=b64('x' * 17000))
         result = get_result(req_id)
         assert len(result['output']) == 16384
         assert result['truncated'] == 1
