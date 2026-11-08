@@ -14,7 +14,7 @@ from typing import Optional
 from fastapi import FastAPI, Request, HTTPException, Response
 from fastapi.responses import JSONResponse, HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from database import (
     init_db, create_request, update_request_status, 
@@ -828,11 +828,13 @@ def receive_log(payload: GatewayPayload, request: Request):
 
 class ExecResultPayload(BaseModel):
     target_ip: str
-    encoded_command: str
+    # E2: 16 KiB command (the /api/log limit) and 24 KiB of base64 output
+    # (16 KiB raw + envelope) — the design's 64 KB request cap split by field.
+    encoded_command: str = Field(max_length=16384)
     path: str = ''
     exit_code: int
     duration_ms: int = 0
-    encoded_output: str = ''
+    encoded_output: str = Field(default='', max_length=24576)
     output_truncated: bool = False
     request_id: int = None
 
@@ -889,25 +891,17 @@ def receive_exec_result(payload: ExecResultPayload, request: Request):
             raise HTTPException(status_code=400, detail="Request is not executable")
         stored = save_result(payload.request_id, payload.exit_code,
                              payload.duration_ms, output, truncated)
-        if stored:
-            record_audit_event(
-                'exec_result', target_ip,
-                details=f"request #{payload.request_id}: exit {payload.exit_code}, "
-                        f"{len(output)} bytes"
-                        + (", truncated" if truncated else ""))
         return {"status": "ok", "attached": stored, "request_id": payload.request_id,
                 "reason": None if stored else "already_has_result"}
 
-    since = int(time.time()) - 120
+    # E4: a lockbox claim can happen long after the request was created (JIT
+    # wait + ticket lifetime), so it gets a wider window than the allowlist.
+    window = 300 if payload.path == 'lockbox' else 120
+    since = int(time.time()) - window
     match = find_match_request(target_ip, cmd, PATH_STATUSES[payload.path], since)
     if match:
         stored = save_result(match, payload.exit_code, payload.duration_ms,
                              output, truncated)
-        if stored:
-            record_audit_event(
-                'exec_result', target_ip,
-                details=f"request #{match}: exit {payload.exit_code}, {len(output)} bytes"
-                        + (", truncated" if truncated else ""))
         return {"status": "ok", "attached": stored, "request_id": match,
                 "reason": None if stored else "already_has_result"}
 
