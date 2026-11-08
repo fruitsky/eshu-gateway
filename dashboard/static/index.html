@@ -23,7 +23,7 @@
 <link rel="preload" href="/static/fonts/instrument-serif-regular-latin.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="preload" href="/static/fonts/jetbrains-mono-var-latin.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="/static/fonts.css?v=2">
-<link rel="stylesheet" href="/static/style.css?v=ui8">
+<link rel="stylesheet" href="/static/style.css?v=ui9">
 
 </head>
 <body>
@@ -275,6 +275,11 @@
                 <code id="history-session-label"></code>
                 <button onclick="clearHistorySession()" aria-label="Clear session filter">&times;</button>
               </span>
+              <span id="history-inner-chip" class="hist-session-chip hidden">
+                <span class="hsc-label">inside</span>
+                <code id="history-inner-label"></code>
+                <button onclick="clearHistoryInnerTarget()" aria-label="Clear inner-target filter">&times;</button>
+              </span>
               <input type="text" id="request-search" placeholder="Search..." class="text-xs w-40" oninput="onRequestSearch()">
               <button onclick="fetchRequests()" class="btn btn-muted btn-xs" data-od-id="history-refresh">&#8635; Refresh</button>
               <div class="relative">
@@ -466,6 +471,10 @@
           <div id="stats-topcmds"><p class="text-muted">Loading...</p></div>
         </div>
         <div class="flex flex-col gap-5">
+          <div class="widget h-full" data-od-id="stats-inner-targets-widget">
+            <div class="widget-header">Busiest inner targets</div>
+            <div id="stats-inner-targets"><p class="text-muted">Loading...</p></div>
+          </div>
           <div class="widget h-full" data-od-id="stats-categories-widget">
             <div class="widget-header">Command categories</div>
             <div id="stats-categories"><p class="text-muted">Loading...</p></div>
@@ -938,7 +947,7 @@
 </main>
 
 <script src="/static/state.js?v=ui3"></script>
-<script src="/static/app.js?v=ui14"></script>
+<script src="/static/app.js?v=ui15"></script>
 
 <!-- Create / Edit Approved Window Modal -->
 <div id="create-window-modal" class="modal-overlay hidden">
@@ -1110,6 +1119,7 @@
       <label class="text-xs block mb-1 text-muted">Gateway</label>
       <p id="override-modal-gateway" class="text-main font-semibold"></p>
     </div>
+    <div id="override-modal-inner-warning" class="hidden"></div>
     <div class="mb-4">
       <label class="text-xs block mb-1 text-muted">Duration</label>
       <select id="override-modal-minutes" class="w-full text-xs">
