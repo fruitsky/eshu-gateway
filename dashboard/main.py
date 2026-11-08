@@ -2078,14 +2078,14 @@ def get_statistics(request: Request, days: int = 14, gateway_ip: str = None, gat
 
     # Daily aggregation (all gateways)
     cursor.execute(f'''
-        SELECT DATE(created_at, 'unixepoch') AS date,
+        SELECT DATE(r.created_at, 'unixepoch') AS date,
                COUNT(*) AS total,
-               SUM(CASE WHEN status IN ('auto-approved','consumed','window-approved') THEN 1 ELSE 0 END) AS auto_approved,
-               SUM(CASE WHEN status IN ('approved','consumed') THEN 1 ELSE 0 END) AS jit_approved,
-               SUM(CASE WHEN status = 'blocked' THEN 1 ELSE 0 END) AS blocked,
-               SUM(CASE WHEN status = 'denied' THEN 1 ELSE 0 END) AS denied
-        FROM requests
-        WHERE created_at >= ?{ip_filter} AND status != 'window-rejected'
+               SUM(CASE WHEN r.status IN ('auto-approved','consumed','window-approved') THEN 1 ELSE 0 END) AS auto_approved,
+               SUM(CASE WHEN r.status IN ('approved','consumed') THEN 1 ELSE 0 END) AS jit_approved,
+               SUM(CASE WHEN r.status = 'blocked' THEN 1 ELSE 0 END) AS blocked,
+               SUM(CASE WHEN r.status = 'denied' THEN 1 ELSE 0 END) AS denied
+        FROM requests r
+        WHERE r.created_at >= ?{ip_filter} AND r.status != 'window-rejected'
         GROUP BY date
         ORDER BY date ASC
     ''', (cutoff,) + ip_params)
@@ -2106,7 +2106,7 @@ def get_statistics(request: Request, days: int = 14, gateway_ip: str = None, gat
     # Top commands — split on shell chaining operators.
     # Also count how many distinct gateways ran each one: a command spreading
     # across hosts is a different signal from one host hammering it.
-    cursor.execute(f'SELECT command, target_ip FROM requests WHERE created_at >= ?{ip_filter}', (cutoff,) + ip_params)
+    cursor.execute(f'SELECT r.command, r.target_ip FROM requests r WHERE r.created_at >= ?{ip_filter}', (cutoff,) + ip_params)
     rows = [(r[0], r[1]) for r in cursor.fetchall() if r[0]]
     import re as _re
     cmd_counts = {}
@@ -2151,10 +2151,10 @@ def get_statistics(request: Request, days: int = 14, gateway_ip: str = None, gat
     if extended:
         # Hourly heatmap — 24-element array
         cursor.execute(f'''
-            SELECT CAST(strftime('%H', created_at, 'unixepoch') AS INTEGER) AS hour,
+            SELECT CAST(strftime('%H', r.created_at, 'unixepoch') AS INTEGER) AS hour,
                    COUNT(*) AS count
-            FROM requests
-            WHERE created_at >= ?{ip_filter} AND status != 'window-rejected'
+            FROM requests r
+            WHERE r.created_at >= ?{ip_filter} AND r.status != 'window-rejected'
             GROUP BY hour
             ORDER BY hour
         ''', (cutoff,) + ip_params)
@@ -2164,11 +2164,11 @@ def get_statistics(request: Request, days: int = 14, gateway_ip: str = None, gat
         # Weekday × hour grid (Monday first) — "when does the fleet work?".
         # strftime('%w') is 0=Sunday, so rotate to a Mon-first week.
         cursor.execute(f'''
-            SELECT CAST(strftime('%w', created_at, 'unixepoch') AS INTEGER) AS dow,
-                   CAST(strftime('%H', created_at, 'unixepoch') AS INTEGER) AS hour,
+            SELECT CAST(strftime('%w', r.created_at, 'unixepoch') AS INTEGER) AS dow,
+                   CAST(strftime('%H', r.created_at, 'unixepoch') AS INTEGER) AS hour,
                    COUNT(*) AS count
-            FROM requests
-            WHERE created_at >= ?{ip_filter} AND status != 'window-rejected'
+            FROM requests r
+            WHERE r.created_at >= ?{ip_filter} AND r.status != 'window-rejected'
             GROUP BY dow, hour
         ''', (cutoff,) + ip_params)
         grid = [[0] * 24 for _ in range(7)]
@@ -2180,11 +2180,11 @@ def get_statistics(request: Request, days: int = 14, gateway_ip: str = None, gat
         # Last 24h per gateway, for the sparkline in the Gateways table.
         day_cutoff = int(time.time()) - 86400
         cursor.execute(f'''
-            SELECT target_ip AS ip,
-                   CAST(strftime('%H', created_at, 'unixepoch') AS INTEGER) AS hour,
+            SELECT r.target_ip AS ip,
+                   CAST(strftime('%H', r.created_at, 'unixepoch') AS INTEGER) AS hour,
                    COUNT(*) AS count
-            FROM requests
-            WHERE created_at >= ? AND status != 'window-rejected'{ip_filter}
+            FROM requests r
+            WHERE r.created_at >= ? AND r.status != 'window-rejected'{ip_filter}
             GROUP BY ip, hour
         ''', (day_cutoff,) + ip_params)
         now_hour = int(time.strftime('%H', time.localtime()))
@@ -2204,11 +2204,11 @@ def get_statistics(request: Request, days: int = 14, gateway_ip: str = None, gat
 
         # Automation trend — add approved/executed counts to daily data
         cursor.execute(f'''
-            SELECT DATE(created_at, 'unixepoch') AS date,
-                   SUM(CASE WHEN status IN ('auto-approved','window-approved') THEN 1 ELSE 0 END) AS auto_approved,
-                   SUM(CASE WHEN status IN ('approved','consumed') THEN 1 ELSE 0 END) AS jit_approved
-            FROM requests
-            WHERE created_at >= ?{ip_filter} AND status NOT IN ('window-rejected','denied','blocked')
+            SELECT DATE(r.created_at, 'unixepoch') AS date,
+                   SUM(CASE WHEN r.status IN ('auto-approved','window-approved') THEN 1 ELSE 0 END) AS auto_approved,
+                   SUM(CASE WHEN r.status IN ('approved','consumed') THEN 1 ELSE 0 END) AS jit_approved
+            FROM requests r
+            WHERE r.created_at >= ?{ip_filter} AND r.status NOT IN ('window-rejected','denied','blocked')
             GROUP BY date
             ORDER BY date ASC
         ''', (cutoff,) + ip_params)
@@ -2266,10 +2266,10 @@ def get_statistics(request: Request, days: int = 14, gateway_ip: str = None, gat
 
         # Top denied commands
         cursor.execute(f'''
-            SELECT command, COUNT(*) AS count
-            FROM requests
-            WHERE status = 'denied' AND created_at >= ?{ip_filter}
-            GROUP BY command
+            SELECT r.command, COUNT(*) AS count
+            FROM requests r
+            WHERE r.status = 'denied' AND r.created_at >= ?{ip_filter}
+            GROUP BY r.command
             ORDER BY count DESC
             LIMIT 10
         ''', (cutoff,) + ip_params)
