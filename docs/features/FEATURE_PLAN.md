@@ -34,6 +34,8 @@ dashboard LXC or any gateway until the rollout gate in § 8 passes.**
 | F3 | The agent proposes a list of changes; approve the list once and those exact commands run without more prompts |
 | F4 | Read-only commands can run without asking, per host, opt-in, after a week in "shadow mode" |
 | F5 | Records each command's exit code and the end of its output |
+| X1 | Bug fix: the sidebar's Approve/Deny work for every kind of request, and approve/deny only act on a request that is still pending |
+| F18 | The sidebar shows context from the database: this session's earlier commands, how often this command (or ones like it) ran before and what you decided, the host's state, and why it is waiting for you |
 | F12 | Agents run SSH commands through Eshu over MCP with their own token: one identity per agent for SSH and APIs, no shared SSH key |
 | F6 | A summary card per session: goal, what ran, what changed, what failed, how much ran under overrides |
 | F13 | At the end of a job the agent files a conclusion (what worked, what didn't, the fix); confirmed conclusions become searchable runbooks |
@@ -45,6 +47,7 @@ dashboard LXC or any gateway until the rollout gate in § 8 passes.**
 | F15 | One-call health checks (service, container, disk, DNS) that return a short summary |
 | F16 | Reviewed, parameterised scripts ("recipes") any agent can run with one approval, often drafted from F13 runbooks |
 | F17 | A ready-made setup for a local model in LM Studio: its own token, a small toolset, and a hand-off to Hermes |
+| F19 | Commands that run with nobody watching (read lane, probes, read-only recipes) get a hard time limit and output cap on the gateway |
 
 ## 1. Why — what the live data says
 
@@ -2819,6 +2822,373 @@ and of `/api/log`'s command (§ 11).
 
 ---
 
+## Chunk X1 — Sidebar actions and pending-only decisions · slug `ctx-actions` · dashboard · BUG
+
+### Problem (found by the operator, 2026-11-08)
+
+Open a request in the right-hand sidebar (`openContextPanel`) and press
+Approve: the sound plays and nothing happens. Two causes in `app.js`:
+
+1. **Wrong branch for integration calls.** The action buttons use
+   `if (req.status === 'pending' || !req._type)`. Pending integration calls
+   have `status: 'pending'`, so they take the SSH branch:
+   `handleAction(<integration id>)` POSTs `/api/approve/<integration id>`, the
+   **SSH** endpoint. Usually that id matches nothing, so nothing happens.
+2. **F2's two-press rule from the sidebar.** For a long command with an
+   unknown step, the first press highlights that step in the queue card
+   behind the panel; the sidebar itself shows nothing.
+
+Behind cause 1 is a backend gap. `POST /api/approve/{id}` and
+`/api/deny/{id}` call `update_request_status` **without checking the current
+status**. An approve can therefore move a `denied`, `expired`, `consumed` or
+`blocked` row back to `approved`. If an integration-call id happens to equal
+an old SSH request id, the sidebar re-approves that old command without
+saying so.
+
+### Changes
+
+* **UI:** dispatch on `req._type` first (`integration` / `window` / SSH), then
+  on status. For integration calls use `approveIntegrationCall` and
+  `denyIntegrationCall`.
+* **UI:** when the sidebar's approve press arms F2's two-press rule, the
+  sidebar shows it on its own button ("Press again to approve") and
+  highlights the unknown step in its own breakdown, not only in the card.
+* **UI:** surface a failed approve/deny (non-2xx) as an error toast in
+  `handleAction`; today a failure is silent.
+* **API:** approve and deny act only on a `pending` row. Do it with a
+  conditional update (`UPDATE … WHERE id = ? AND status = 'pending'`) and
+  return 409 `not_pending` otherwise. Audit only real transitions.
+
+### Tests to add
+
+* Node harness (F2 pattern): opening a pending **integration** call and
+  pressing Approve calls the integration endpoint, never `/api/approve/`.
+  The same check for window requests and SSH requests.
+* Harness: a long-unknown SSH request in the sidebar needs two presses, and
+  the sidebar button shows the armed state.
+* API: approving or denying a `denied`, `expired`, `consumed` or `blocked`
+  row returns 409 and leaves the status unchanged; pending → approved still
+  works; there are no audit events for refused transitions.
+* API: a request approved twice gets 409 on the second call.
+
+### Acceptance criteria
+
+- [ ] All tests above pass.
+- [ ] No other approval path changes: bulk approve, the session override and
+  F3 plans keep their own routes. Check that bulk approve and the history
+  table still work against the 409 rule.
+- [ ] Reviewer notes tell the security reviewer about the backend gap (FYI;
+  no sign-off needed).
+
+### Implementer notes
+
+**What I did**
+
+* **UI dispatch (`app.js`).** The sidebar buttons now come from
+  `contextActionsHtml(req)`, which dispatches on `_type` first:
+  integration → `approveIntegrationCall`/`denyIntegrationCall`, window →
+  `approveWindowReq`/`denyWindowReq`, SSH pending → `handleAction`, anything
+  else → Close. Pending integration calls no longer fall into the SSH branch
+  and no longer POST to `/api/approve/<integration id>`.
+* **Two-press in the sidebar.** `contextApproveLabel(req)` returns
+  "Press again to approve" once F2's arming press has set
+  `_bdUnknownConfirmed[id]`; `handleAction` calls `armSidebarConfirm(id)`,
+  which re-renders the sidebar buttons and flashes the sidebar's **own**
+  unknown step (`#ctx-breakdown-steps`), not only the queue card behind it.
+* **Visible failures.** `handleAction` now shows an error toast on any
+  non-2xx from approve/deny (`Could not approve request #N: not_pending`) and
+  refreshes the queue, instead of silently doing nothing.
+* **API (`main.py`, `db/requests.py`).** `POST /api/approve/{id}` and
+  `/api/deny/{id}` act only on a `pending` row, via
+  `update_request_status_if_pending`
+  (`UPDATE requests SET status = ? WHERE id = ? AND status = 'pending'`,
+  `rowcount` checked). Unknown id → 404; any other state → 409 `not_pending`;
+  the audit event is written only after a real transition.
+
+**Notes**
+
+* Bulk approve (one POST per selected pending id) and the history table are
+  unchanged and still work against the 409 rule — covered by
+  `test_x1_bulk_approve_sequence_still_works`.
+* No other approval path changed: session overrides, F3 plans and window
+  approvals keep their own routes; only the generic approve/deny handlers
+  became pending-only.
+
+**For the security reviewer (FYI, no sign-off needed).** The backend gap: the
+old handlers called `update_request_status` unconditionally, so a stale click
+or a colliding integration-call id could move a `denied`, `expired`,
+`consumed` or `blocked` SSH row back to `approved` (and, once approved, the
+gateway would claim and run it). It is now a conditional update with a 409 and
+no audit on refusal.
+
+**Tests** — `tests/test_x1_ctx_actions.py` (18): the sidebar harness
+(dispatch for integration/window/SSH/closed, and the two-press armed label
+with zero then one POST) plus the API cases (pending approve/deny still work;
+approve refused for denied/expired/consumed/blocked/approved/auto-approved;
+deny refused for approved/denied/expired/consumed/blocked; double approve;
+unknown id 404; bulk sequence; no audit events for refused transitions).
+
+`bash scripts/verify.sh` (pre-commit green):
+
+```
+1835 passed, 7 warnings in 371.15s (0:06:11)
+```
+
+
+### Reviewer notes
+
+**Round 1 (2026-11-08): approved and merged.**
+
+* **Sidebar:** dispatch goes by type first, so a pending integration call
+  can no longer reach `/api/approve`.
+* **Backend:** approve and deny use one conditional UPDATE, with 404/409 and
+  audit only on a real transition.
+* **No other callers:** nothing else posts to these endpoints apart from
+  `handleAction`.
+* **Tests:** 30 X1 + F2 tests pass locally.
+
+Nit, for the UI pass: `contextApproveLabel` reads `_bdUnknownConfirmed` for
+integration calls too. The id spaces are shared, so an armed SSH request
+with the same number would relabel an integration button. It is cosmetic
+only, because the integration handler has no two-press rule.
+
+FYI for the security reviewer: before X1, `/api/approve/{id}` moved a row of
+any status to `approved`. It is now pending-only.
+
+---
+
+## Chunk F18 — Request context in the sidebar · slug `request-context` · dashboard
+
+### Goal
+
+Make the sidebar answer "should I approve this?" with what Eshu already
+knows, instead of repeating the card.
+
+### Design
+
+One endpoint, `GET /api/requests/{id}/context` (session auth), computed on
+demand when the panel opens (never in the 3 s poll). Every block has a hard
+cap and is computed from indexed columns. Sections, in this order:
+
+1. **Why it is waiting for you.** The first rule on the approval path that did
+   not let it through, reusing the existing checks:
+   * metacharacter gate
+   * no allowlist match
+   * Zero-Trust
+   * read lane off, shadow, or ineligible with F4's reason
+   * no plan or override match
+   * encoded payload
+
+   One line, e.g. "Waiting because: contains `&&` (metacharacter rule)".
+2. **This session.** The goal and agent, then the session's last 10 commands
+   with status and F5 exit badge, plus any active plan or override.
+3. **Seen before.** The exact command on any host in the last 90 days:
+   count, last time, the operator's decisions (approved/denied counts), last
+   exit code. It matches on exact bytes via sha256, so add an indexed
+   `command_sha` column with a backfill (the F7 pattern).
+4. **Like this.** Requests with the same F1 *shape*: the sequence of
+   `(verb, kind)` over steps, with arguments dropped. Show the counts
+   approved and denied, and up to 3 examples. Store a `shape_sha` column as
+   well, filled at creation from the breakdown.
+5. **Host.** Hostname, inner target (F7), Zero-Trust, read-lane mode, the
+   gateway's last-seen time, and the count of failed commands in 24 h (F5).
+
+### Changes
+
+* **DB:**
+  * `requests.command_sha` and `requests.shape_sha`, nullable and indexed;
+    filled at creation.
+  * A batched background backfill with a meta flag, as in F7's
+    `inner_targets`.
+* **API:** the context endpoint. Responses are capped: 10 session rows,
+  3 examples, commands cut to 300 chars. Agent text is returned unescaped
+  for the UI to escape.
+* **UI:**
+  * The sidebar renders the sections, each collapsible, with its state
+    remembered in `localStorage` (wrapped in try/catch).
+  * A "Seen before" or "Like this" row opens History filtered to it.
+  * Every string goes through `escapeHtml`.
+
+### Tests to add
+
+* Each section from synthetic rows: the session list order and cap, exact
+  matches across hosts, decision counts, a shape match ignoring arguments,
+  and the "why waiting" reason for each rule.
+* Backfill: batched, idempotent, and skipped on the second start.
+* Performance: on 50k synthetic rows the endpoint answers in < 150 ms (local
+  test, generous bound).
+* Node harness: escaping of agent text in every section.
+* Session auth required.
+
+### Acceptance criteria
+
+- [ ] Opening the sidebar costs one request; the poll is unchanged.
+- [ ] Synthetic data only; screenshots use the sandbox.
+
+### Implementer notes
+
+**What I did**
+
+* **DB** (`db/requests.py`): nullable `command_sha` and `shape_sha` columns,
+  both indexed. They are filled inside `create_request` itself, so every call
+  site (request, log, fleet run, window) gets them with no extra plumbing.
+* **Fingerprints** (`core/fingerprint.py`): `command_sha` is the sha256 of the
+  exact command bytes; `shape_sha` hashes the sequence of `verb:kind` over
+  F1's steps, so arguments are dropped.
+* **Backfill** (`core/request_fingerprints.py`): the F7 pattern — batches of
+  500 **distinct commands** where `command_sha IS NULL`, one `meta` key
+  (`request_fingerprint_backfill_done`), daemon thread from `on_startup`,
+  idempotent and skipped on a second start.
+* **Context** (`core/request_context.py`): `build_context(request_id)` returns
+  the five sections, all capped (10 session rows, 3 examples, 300-char
+  commands) and computed on demand:
+  1. `waiting` — the first rule that applies, in approval-path order:
+     encoded payload → metacharacter (naming the token, e.g. `&&`) →
+     Zero-Trust → read lane (off / shadow / ineligible with F4's reason) →
+     no allowlist match → no plan or session override matched. (The chunk
+     lists the rules; this is the precedence used, so a read that the lane
+     would cover reports the lane, not "no allowlist").
+  2. `session` — goal/agent, the last 10 commands newest-first with status and
+     F5 exit code, plus the active plan and session override.
+  3. `seen` — exact `command_sha` across hosts in 90 days: count, last time,
+     approved/denied counts, last exit code (includes the current row: it is
+     the full record).
+  4. `like` — same `shape_sha` in 90 days, excluding the current row: counts
+     and up to 3 examples.
+  5. `host` — hostname, inner target, Zero-Trust, read-lane mode, last seen,
+     and failed commands in 24 h.
+* **API**: `GET /api/requests/{id}/context` (session auth, 404 unknown).
+* **UI** (`app.js`): `renderRequestContext` renders the five `<details>`
+  sections; each open/closed state is stored in `localStorage` inside
+  try/catch. "Seen before" has a **show in history** link (and like-this rows
+  are commands) that sets the History search filter. Fetched only when the
+  panel opens — the 3 s poll is unchanged. Every agent string goes through
+  `escapeHtml`; the node harness proves it for every section.
+* **Tests** — `tests/test_f18_request_context.py` (15 + 3 skipped): session
+  order and cap, exact matches across hosts, decision counts, shape match
+  ignoring arguments, host section, every "why waiting" rule, the backfill
+  (batched, idempotent, flagged), new rows carrying fingerprints, session
+  auth, 404, the 50k-row performance bound (< 150 ms) and the escaping
+  harness.
+
+**Surprises and decisions**
+
+* **The base did not have X1 or F4.** `feature-roadmap` was at `5b79914`
+  (neither merged) when this branch was cut, as instructed. F18 does not
+  depend on X1 — it appends a container and the section renderers to
+  `openContextPanel` and leaves the action buttons alone. Without F4 the
+  read-lane reasons and the host's mode are inert: the three read-lane
+  "why waiting" tests skip until `core.read_lane` exists (`needs_f4`), and the
+  host section reports `read lane off`. Both switch on automatically when F4
+  merges.
+* `command_sha`/`shape_sha` are computed in `create_request` rather than at
+  each call site, so a future path cannot forget them; the cost is one cached
+  `breakdown()` per request, which the request path already computes for F7.
+* The "like this" section excludes the current row; "seen before" includes it
+  (the row is part of its own history).
+
+**Screenshot** (synthetic `web01` / `10.0.0.1`, session `hermes`, all five
+sections open):
+
+![Sidebar request context](../screenshots/f18/sidebar-context.png)
+
+`bash scripts/verify.sh` (pre-commit green):
+
+```
+1832 passed, 3 skipped, 7 warnings in 373.92s (0:06:13)
+```
+
+(1817 before this chunk + 15 F18 tests; the 3 skips are the F4-dependent
+read-lane reasons above.)
+
+
+### Round 2 — fixes for reviewer round 1 (C1–C4)
+
+* **C4 — merged `feature-roadmap` (X1) first.** The only conflict was
+  `openContextPanel` in `app.js`: kept X1's `contextActionsHtml` /
+  `renderContextActions` / `armSidebarConfirm` / `contextApproveLabel` code and
+  added F18's container and section renderers (one shared `_ctxReq`
+  declaration). The X1 harness tests (`tests/test_x1_ctx_actions.py`, 18) run
+  green on the merge. The three F4-dependent read-lane reasons still skip.
+* **C1 — operator decisions are not automatic ones.** `seen` (and `like`)
+  now return `operator_approved` (`approved`/`consumed` with no
+  `session-plan:`/`read-lane` reason), `auto` (`auto-approved`,
+  `window-approved`, and plan/read-lane approvals) and `denied`, computed in
+  SQL. The UI reads "approved by you N · auto N · denied N". Test:
+  `test_f18_seen_splits_operator_from_auto` with one row of each kind.
+* **C2 — "Like this" refuses generic shapes.** A one-step shape whose verb is
+  `bash`/`sh`/`python*` returns `generic: true` with no counts and the UI says
+  "Too generic to compare."; everything with ≥ 2 steps (or a non-interpreter
+  verb) keeps its counts. The counts and the 3 examples are now one `COUNT`/
+  `SUM` plus one `LIMIT 3` query instead of fetching every row. Tests:
+  `test_f18_generic_shape_has_no_counts` and
+  `test_f18_like_this_counts_in_sql` (exact numbers from the aggregates).
+* **C3 — "why waiting" only for pending rows, worded as a guess.** A
+  non-pending row returns `waiting: null` and the UI hides the section; for a
+  pending row it says **"Likely waiting because: …"**. Test:
+  `test_f18_non_pending_has_no_waiting_reason`, plus a harness check for the
+  label and the empty body.
+
+**Round-2 tests** — 4 new in `tests/test_f18_request_context.py` (one per C
+item) and one harness case; the F18 file is 23 tests, 3 of them skipped until F4 merges.
+
+**Screenshot** — refreshed with the new wording and split counts:
+![Sidebar request context](../screenshots/f18/sidebar-context.png)
+
+`bash scripts/verify.sh` (pre-commit green):
+
+```
+1855 passed, 3 skipped, 7 warnings in 378.14s (0:06:18)
+```
+
+
+**Round 1 (2026-11-08): changes requested (small).** The structure is good.
+It computes on demand, the caps are in place, fingerprints are filled in
+`create_request`, the backfill follows the F7 pattern, every agent string is
+escaped (harness), and the endpoint requires session auth. 15 tests pass
+locally. This panel helps the operator decide, so it must not overstate the
+case for approving:
+
+* **C1 Split "you approved" from "it was auto-approved".** `_approved`
+  counts `auto-approved` and `window-approved` (and, once F3/F4 merge, plan
+  and read-lane rows) as approvals. "Seen before: approved 50" then reads as
+  50 operator decisions when the allowlist made them. Return three counts,
+  `operator_approved` (`approved`/`consumed` with no `session-plan:` or
+  `read-lane` reason), `auto` (everything automatic) and `denied`, and label
+  them that way in the UI. Test with mixed rows.
+* **C2 "Like this" must not over-match.** A one-step shape such as
+  `cat:read` or `bash:unknown` matches thousands of unrelated commands, so
+  its counts are noise that looks like evidence. Show the section only when
+  the shape has ≥ 2 steps, or when its verb is not `bash`/`sh`/`python*`;
+  otherwise show "too generic to compare". Also compute the counts in SQL
+  (`COUNT`/`SUM(...)` plus `LIMIT 3` for examples) instead of fetching every
+  matching row. Tests: a generic shape gets no counts, and the SQL path
+  returns the same numbers.
+* **C3 "Why waiting" only for pending rows, worded as a best guess.** It
+  re-derives the reason, so it can differ from the real path (host
+  override, freeze, order changes). Return it only for `pending` rows, and
+  label it "Likely waiting because: …". Test that a non-pending row has no
+  reason.
+* **C4 Merge `feature-roadmap` into this branch.** It now contains X1, and
+  both touch `openContextPanel`. Keep X1's `contextActionsHtml`/two-press
+  code and add the F18 container. Re-run the X1 harness tests. The three F4
+  skips stay until F4 merges, which is fine.
+
+**Round 2 (2026-11-08): approved and merged.** C1–C4 are done. 38 F18 and X1
+tests pass locally, and the X1 sidebar actions survived the merge.
+
+* **Fixed during review (C1 gap):** rows approved under a host or session
+  override (`override`, `session-override:%`) still counted as "approved by
+  you". They now count as `auto`. Added
+  `test_f18_override_approvals_are_automatic`, which fails before the fix
+  and passes after.
+* **Accepted as is:** C2 marks only one-step *interpreter* shapes as generic
+  (as the note was worded). One-step shapes such as `cat:read` keep their
+  counts, which is useful enough.
+* **For the UI pass:** consider showing "similar" only for ≥ 2-step shapes.
+
+---
+
 ## Chunk F6 — Session wrap-up & "how approved" stats · slug `session-wrapup` · dashboard
 
 ### Changes
@@ -3355,37 +3725,317 @@ _(reviewer)_
 
 ---
 
-## Chunks F14–F17 — Local-model support · outline (detailed before they start)
+## Chunks F14–F17 — Local-model support
 
 Goal: let a small local model (e.g. a 14–20B model in LM Studio on a 16 GB GPU)
 handle routine homelab support by moving the intelligence to **authoring time**:
 a strong model or the operator works something out once, Eshu stores it as
 reviewed building blocks, and the local model picks one and fills in parameters.
+Small models do well with **few tools, short descriptions, small structured
+results, and no free-form shell**. Every chunk below is built around that.
 
-* **F14 — Inventory (`whereis`)** · read-only. One cached lookup joining what Eshu
-  already knows (gateways, Proxmox guests, Omada clients, NPM hosts, Pi-hole
-  records, HA) → host, container id, IP, URL, FQDN, proxy entry, gateway present.
-  Refreshed periodically; read through the Chunk H read-only checks.
-* **F15 — Diagnostic probes** · read-only. Reviewed bundles
-  (`diagnose_service(host, unit)`, `diagnose_container`, `disk_pressure(host)`,
-  `dns_check(name)`) that run reads through `ssh_exec` (F12) and the read lane (F4)
-  and return a structured digest of 1–2k tokens: status, de-duplicated recent errors,
-  restarts, ports, disk, recent changes from Eshu's own history.
-* **F16 — Recipes** · **design first + security reviewer sign-off.** Named,
-  versioned procedures of steps (Eshu tool calls or SSH command templates on named
-  hosts), with **typed parameters** (hostname, IPv4, port, slug: validated by
-  regex, shell-quoted, never free text into a shell), a check after each
-  step, and optional undo steps. Drafted by Hermes (often from an F13 runbook),
-  approved once by the operator (pinned to the content hash; any edit is a new
-  version), run with `recipe_run(name, params)`: one approval per run, or none
-  for recipes that only read. Example: `add_internal_fqdn(fqdn, target_ip, port)` →
-  Pi-hole record + NPM proxy host + `dig` and `curl` checks.
-* **F17 — Local-agent profile** · an agent-policy preset and setup guide for LM
-  Studio's MCP client (URL + bearer header in its `mcp.json`): its own token, a
-  small toolset (`whereis`, probes, runbooks, recipes, generic reads,
-  `ssh_exec` in `read_only` mode), short tool descriptions, writes gated, and an
-  `escalate(summary)` tool that notifies the operator and attaches the session
-  digest for Hermes to pick up.
+Shared rules for F14–F17:
+
+* **Token budget.** Every result an agent sees is compact JSON under a stated
+  cap. When it is cut, it says so (`"truncated": true`) and says how to ask
+  for more.
+* **Reads go through `core/read_policy.py`** (§ 2.6a): integration reads
+  through `is_read_integration_call`, and SSH reads through `is_read_ssh`
+  (F4).
+* **No new execution path.** F14 reads integrations. F15 and F16 run SSH
+  only through the F12 runner and the normal approval path. Nothing here
+  bypasses freeze, Zero-Trust, the blocklists or JIT.
+
+---
+
+## Chunk F14 — Inventory (`whereis`) · slug `inventory` · dashboard + MCP
+
+### Goal
+
+One lookup answers "where is X?" for a service, host, container, IP or name:
+which host it runs on, its container or VM id, its IPs, the URLs and FQDNs that
+point at it, its proxy entry and DNS records, and whether an Eshu gateway is
+on it.
+
+### Design
+
+* **Sources**, read-only and each optional (skipped if the integration is not
+  configured):
+  * **Eshu:** gateways (ip, hostname), F7 inner targets.
+  * **Proxmox:** `get_cluster_resources` (node, vmid, name, type, status).
+    Guest IPs come from `get_container_status` / agent data where present.
+  * **NPM:** `proxy_hosts` (domain names → forward host:port, SSL).
+  * **Pi-hole:** local DNS records. **Add** a read tool `local_dns_records`
+    to `pihole_seed.py` (v6 `GET /api/config/dns/hosts` and
+    `cnameRecords`). It must pass Chunk H's read check.
+  * **Omada:** `list_known_clients` (name, MAC, IP, last seen).
+  * **HA:** optional, add-on slugs only, after F9.
+* **Refresh:** a background job every 15 min (setting, 5–120) plus a manual
+  "refresh now". Each source is cached in `inventory_items(source, kind, key,
+  name, ips, fqdns, host, vmid, url, extra_json, seen_at)`. A failed source
+  keeps its last good rows and is reported as stale.
+* **Join** on IP first (gateway ↔ Proxmox guest ↔ Omada client ↔ NPM forward
+  host ↔ Pi-hole record), then on a normalised name. The result is an
+  **entity** with the fields above and the list of sources that contributed.
+  Conflicts (two sources disagree on an IP) are shown, not resolved.
+* **MCP tool** `whereis(query)`: exact or substring match over name, FQDN, IP,
+  vmid and MAC. It returns up to 5 entities, each ≤ 600 chars, with `sources`
+  and `stale` flags. It is always allowed, the same as for `session_begin`.
+  It goes through agent policy like any tool.
+* **UI:** an Inventory page (or a tab under Integrations). It has a search
+  box, an entity list showing source chips, and a stale badge on each source.
+  Every string is escaped.
+
+### Tests to add
+
+* A join fixture with synthetic data across all five sources (`192.0.2.x`,
+  `web01`, `app.example.test`), plus a conflict case.
+* A source that fails keeps its previous rows and is reported stale.
+* `whereis` caps: 5 entities, each cut at 600 chars with `truncated`.
+* `local_dns_records` passes `is_read_integration_call`.
+* Escaping in the UI (node harness). The refresh interval is clamped.
+
+### Compat impact
+
+Additive. With no integrations configured, `whereis` only returns Eshu's own
+gateways.
+
+### Acceptance criteria
+
+- [ ] Every source read goes through `read_policy.is_read_integration_call`.
+- [ ] No live data in fixtures or screenshots.
+
+### Implementer notes
+
+_(implementer)_
+
+### Reviewer notes
+
+_(reviewer)_
+
+---
+
+## Chunk F15 — Diagnostic probes · slug `probes` · dashboard + MCP
+
+### Goal
+
+One call answers "what's wrong with X?" with a short structured digest, so a
+small model never has to compose a shell pipeline or read 400 log lines.
+
+### Design
+
+* **Probes are code, not agent text.** Each probe is a fixed list of
+  read-only commands built from **typed parameters**:
+  * `host`: a gateway IP from the registry
+  * `unit`: a systemd unit, `^[A-Za-z0-9@._-]{1,128}$`
+  * `container`: a Docker name or Proxmox vmid
+  * `name`: an FQDN, `^[A-Za-z0-9.-]{1,253}$`
+
+  Each value is validated, then shell-quoted with `shlex.quote`. Every
+  generated command must pass `read_policy.is_read_ssh`. A test asserts this
+  for each probe with sample parameters.
+* **The set to start with:**
+  * `diagnose_service(host, unit)`: `systemctl status` (capped),
+    `journalctl -u unit -n 200`, restart count, ports via `ss -tlnp`.
+  * `diagnose_container(host, container)`: `docker ps`/`docker logs --tail`
+    or `pct status`.
+  * `disk_pressure(host)`: `df -h`, `df -i`, the largest log dirs under
+    `/var/log`.
+  * `dns_check(name)`: the Pi-hole record (F14), and on the gateway that NPM
+    reports, `getent hosts`.
+* **Execution** goes through the F12 runner as normal requests. With F4 `on`
+  for that host, they auto-run; otherwise they go to the normal approval
+  queue as **one** grouped approval (an F3 plan the probe proposes itself).
+* **Digest:** the dashboard parses the outputs (F5 results) into
+  `{status, active_since, restarts_24h, errors: [{msg, count, last}],
+  ports, disk, recent_changes}`.
+  * Errors are de-duplicated by message after stripping numbers and hex.
+  * `recent_changes` lists Eshu's own write-approved requests on that
+    host in the last 24 h.
+  * Hard cap 2,000 tokens, with `truncated`.
+* **MCP tools:** one per probe, with short descriptions (≤ 200 chars each).
+
+### Tests to add
+
+* Every probe, for each sample parameter set, passes `is_read_ssh`. Hostile
+  parameters (quotes, `;`, `$(`, newlines, `..`) are rejected by the type
+  check before any command is built.
+* Digest parsing on synthetic outputs: dedup, caps and `truncated`.
+* Without F4 `on`, a probe creates one plan, not N pending requests.
+
+### Dependencies
+
+F12 (runner), F4 (read lane), F5 (outputs), F3 (grouped approval), F14 (for
+`dns_check`).
+
+### Implementer notes
+
+_(implementer)_
+
+### Reviewer notes
+
+_(reviewer)_
+
+---
+
+## Chunk F16 — Recipes · slug `recipes` · dashboard + MCP · **design first + security reviewer sign-off**
+
+### Goal
+
+A reviewed, parameterised procedure (for example "add an internal FQDN": a
+Pi-hole record, an NPM proxy host, then check with `dig` and `curl`) that
+any agent, including a small local one, can run with one approval and
+almost no inference.
+
+### Design questions the design note must answer
+
+1. **Shape.** Named, versioned procedures. A step is either an Eshu tool call
+   (an integration tool with arguments) or an SSH command template on a
+   named host. Each step has a check, plus an optional undo step. How are
+   steps, checks and undo represented, and how is a check's pass or fail
+   decided without free-form parsing?
+2. **Typed parameters only.** Types are a closed set: `hostname`, `ipv4`,
+   `port`, `fqdn`, `slug`, `int` and `enum`, each with a regex and
+   normalisation. Values are substituted only into marked slots. In SSH
+   templates the slots are `shlex.quote`d; in tool calls they are JSON
+   values. Free text never goes into a shell. Show the substitution code.
+3. **Approval model.** The operator approves a recipe **version** once,
+   pinned to its content hash (any edit is a new, unapproved version). Each
+   **run** then needs one approval showing the filled-in steps (reusing F3,
+   so a run is a plan). A recipe whose every step passes `read_policy` may run
+   without a run approval when F4 is `on` for those hosts. Is that right, or
+   should read-only recipes still need approval in the first version?
+4. **Authoring.** Who can create recipes? Hermes drafts them through
+   `recipe_propose` (often from an F13 runbook), and only the operator
+   approves. How is a draft shown for review, with each step rendered through
+   the F2 breakdown?
+5. **Failure.** When a step's check fails, does the recipe stop, run the undo
+   steps in reverse, or ask? What is recorded (F5 results and audit)?
+6. **Blast radius.** Limits on host count per run and on steps per recipe,
+   plus a list of integration tools a recipe may never call (deletes,
+   restarts of core services).
+
+### Example to specify end to end
+
+`add_internal_fqdn(fqdn, target_ip, port)` →
+1. Pi-hole: add a local DNS record.
+2. NPM: create the proxy host.
+3. Check: `getent hosts fqdn` on a named gateway.
+4. Check: an HTTP status via the generic read tool.
+
+Undo: delete the NPM host, then delete the Pi-hole record.
+
+### Implementer notes
+
+_(design note goes here first)_
+
+### Reviewer notes
+
+_(reviewer)_
+
+---
+
+## Chunk F17 — Local-agent profile · slug `local-agent` · dashboard + docs
+
+### Goal
+
+A local model in LM Studio connects to Eshu over MCP in minutes, sees a small
+toolset it can use well, and hands over to Hermes cleanly when a job is beyond
+it.
+
+### Design
+
+* **Preset agent policy** `local-agent`, applied when the operator creates its
+  token:
+  * `tools_mode` allowlist: `session_begin`, `session_summary`,
+    `session_conclude`, `whereis`, the F15 probes, `find_runbooks`,
+    `get_runbook`, `recipe_list`, `recipe_run`, `ssh_exec` (read-only mode),
+    `escalate`.
+  * Generic reads are GET/HEAD only (Chunk H).
+  * Every write needs approval.
+* **Short descriptions.** A "compact" description variant per tool (≤ 160
+  chars). The MCP server serves it when the agent's policy sets
+  `compact_descriptions: true`.
+* **`escalate(summary, session_id)`** notifies the operator and attaches the
+  F6 session digest, plus a "for Hermes" hand-off record that Hermes can
+  read with `get_escalation(id)`. It is always allowed.
+* **Setup guide** `docs/LOCAL_AGENT.md`:
+  * LM Studio's `mcp.json` entry (URL plus `Authorization: Bearer` header);
+  * recommended models and context size for a 16 GB GPU (stated as
+    guidance, not tested claims);
+  * a system prompt template ("look it up with `whereis`, diagnose with
+    probes, follow runbooks, run recipes, escalate when unsure");
+  * what the agent cannot do.
+* **Eval script** `scripts/eval_local_agent.py`: a fixed set of 10 synthetic
+  support tasks run against a sandbox dashboard. It checks which tools the
+  model chose, against the expected ones, so the toolset can be tuned. It is
+  run manually and never in CI.
+
+### Tests to add
+
+* The preset creates the allowlist above; `ssh_exec` is read-only for this
+  agent.
+* Compact descriptions are served only with the flag set.
+* `escalate` notifies the operator and stores the hand-off; `get_escalation`
+  is scoped to the operator and the agents allowed to read it.
+
+### Dependencies
+
+F12–F16, F13.
+
+### Implementer notes
+
+_(implementer)_
+
+### Reviewer notes
+
+_(reviewer)_
+
+---
+
+## Chunk F19 — Time and output limits for unattended runs · slug `unattended-limits` · gateway + dashboard · **design first + security reviewer sign-off**
+
+### Why
+
+The F4 security sign-off listed this as a residual risk. The read-only lane's
+parser is the only bound on run time and output: `df` on a stale mount, or
+`docker` with a hung daemon, can hang, and the gateway has no execution timeout
+or output cap of its own. The same applies to F15 probes and read-only F16
+recipes. Any command that runs with no human watching should have a hard
+bound at the gateway.
+
+### Design (to confirm in the design note)
+
+* The dashboard's `request_status` / ticket response for rows approved with
+  no human (`reason` = `read-lane`, later probe or recipe runs) adds
+  `run_limit: {seconds, bytes}`. Defaults are 60 s and 1 MiB; settings range
+  over 5–300 s and 64 KiB–8 MiB.
+* The gateway validates both as digits within the range. It wraps the run
+  as `timeout --kill-after=5 "$secs" bash -c "$cmd"` and caps the stream
+  after `sanitize` with `head -c "$bytes"`, printing
+  `[ESHU limit: output cut at N bytes]` or `[ESHU limit: stopped after N s]`.
+  It records the limit hit in F5's result (`limit: time|bytes`).
+* Rows approved by a human are unchanged.
+* The design note must show the exact bash and how it interacts with
+  F5's `tee`/FIFO capture, `pipefail` and the `[ESHU exit=N]` sentinel. It
+  must also cover old gateways: they ignore the field, and the dashboard
+  refuses to auto-run on a gateway too old to enforce limits. That last rule
+  is decided per gateway version.
+
+### Tests to add (outline)
+
+Gateway sandbox: a command that sleeps past the limit is stopped at N s
+(rc 124); output past N bytes is cut, with the marker; human-approved runs
+have no limit; a bad `run_limit` value means no auto-run. Dashboard: the limit
+is sent only for unattended rows; old gateway versions are refused for `on`.
+
+### Implementer notes
+
+_(design note goes here first)_
+
+### Reviewer notes
+
+_(reviewer)_
 
 ---
 
@@ -3399,6 +4049,7 @@ reviewed building blocks, and the local model picks one and fills in parameters.
 * Config export/import (policies, agent policies, windows, integration definitions without secrets).
 * Split `main.py` into FastAPI routers; build installers in CI instead of committing copies.
 * Agent-facing read-only "would this auto-run?" tool (lower value: commands rarely repeat).
+* **UI design pass, after the features are done, in a fresh chat** (start from `docs/features/UI_INVENTORY.md`). Review the layout as a whole: what lives in the queue, the sidebar, the session modal and Statistics; what to merge or move; consistency across F2/F3/F5/F7/F18 additions.
 
 ---
 
@@ -3423,8 +4074,10 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 2 | F2 | review-card | UI | **Merged** 2026-11-08 | `feat/f2-review-card` @ `286df1b` | F1 | 2 rounds |
 | 3 | F7 | inner-target | dashboard | **Merged** 2026-11-08 | `feat/f7-inner-target` @ `0ad167f` | F1 | 1 round; backfill 7.1 s on a live-DB copy |
 | 4 | F3 | session-plans | dashboard + MCP | Merged | `feat/f3-session-plans` | F2 | + security reviewer sign-off |
-| 5 | F4 | read-lane | dashboard | **Approved (feature review); awaiting security sign-off** | `feat/f4-read-lane` | F1, F3, Chunk H | reviewer pass + security reviewer sign-off |
+| 5 | F4 | read-lane | dashboard | Security sign-off recorded (SC1–SC8) — Round 5 | `feat/f4-read-lane` | F1, F3, Chunk H | reviewer pass + security reviewer sign-off |
+| 5a | X1 | ctx-actions | dashboard | Merged | `fix/x1-ctx-actions` | — | FYI to security reviewer (approve ignored status) |
 | 6 | F5 | exec-results | gateway + dashboard | Merged | `feat/f5-exec-results` | — | |
+| 6a | F18 | request-context | dashboard | Merged | `feat/f18-request-context` | F1, F5, F7, X1 | |
 | 7 | F12 | ssh-exec | dashboard + gateway | Ready (after F5) — design first | `feat/f12-ssh-exec` | F4, F5 | design approval + security reviewer sign-off |
 | 8 | F6 | session-wrapup | dashboard | Ready (after F12) | `feat/f6-session-wrapup` | F3, F4, F5 | |
 | 9 | F13 | session-conclusions | dashboard + MCP | Ready (after F6) | `feat/f13-session-conclusions` | F5, F6 | |
@@ -3432,9 +4085,10 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 11 | F9 | ha-supervisor-read | dashboard | Ready (after F8) | `feat/f9-ha-supervisor-read` | — | token is now a dedicated `eshu` HA admin user |
 | 12 | F10 | ha-supervisor-actions | dashboard | Ready (after F9) | `feat/f10-ha-supervisor-actions` | F9, F3, Chunk H | reviewer pass + security reviewer sign-off |
 | 13 | F11 | ha-config-files | dashboard | Ready (after F10) — design first | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | design approval + security reviewer sign-off |
-| 14 | F14 | inventory | dashboard | Outline — detail before start | `feat/f14-inventory` | Chunk H | |
-| 15 | F15 | probes | dashboard | Outline — detail before start | `feat/f15-probes` | F4, F12 | |
-| 16 | F16 | recipes | dashboard + MCP | Outline — design first | `feat/f16-recipes` | F3, F12, F13 | design approval + security reviewer sign-off |
-| 17 | F17 | local-agent | dashboard + docs | Outline — detail before start | `feat/f17-local-agent` | F12–F16 | |
+| 14 | F14 | inventory | dashboard + MCP | Ready (spec detailed 2026-11-08) | `feat/f14-inventory` | Chunk H | |
+| 15 | F15 | probes | dashboard + MCP | Ready after F12 | `feat/f15-probes` | F4, F12 | |
+| 16 | F16 | recipes | dashboard + MCP | Design first (questions listed) | `feat/f16-recipes` | F3, F12, F13 | design approval + security reviewer sign-off |
+| 17 | F17 | local-agent | dashboard + docs | Ready after F12–F16 | `feat/f17-local-agent` | F12–F16 | |
+| 18 | F19 | unattended-limits | gateway + dashboard | Design first; before F4 `on` is unlocked | `feat/f19-unattended-limits` | F4, F5 | design approval + security reviewer sign-off |
 Chunks are done **in the order column**; each new chunk branches from the
 updated `feature-roadmap` after the previous one is merged.

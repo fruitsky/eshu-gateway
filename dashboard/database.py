@@ -7,6 +7,7 @@ from db.core import DB_PATH, get_db, init_db
 from db.requests import (
     create_request,
     update_request_status,
+    update_request_status_if_pending,
     update_ticket_consumed_by_ip,
     get_all_requests,
     get_request_row,

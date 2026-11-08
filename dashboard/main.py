@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field
 
 from database import (
     init_db, create_request, update_request_status, 
-    update_ticket_consumed_by_ip, get_all_requests, get_request_row, get_pending_request_by_cmd,
+    update_ticket_consumed_by_ip, update_request_status_if_pending, get_all_requests, get_request_row, get_pending_request_by_cmd,
     get_request_status, get_request_command, count_denied, get_ticket_by_request_id, delete_old_requests,
     get_session_requests, get_request_target_ip,
     register_gateway, get_gateways, get_gateway, update_gateway_last_seen,
@@ -124,8 +124,8 @@ from core.cmd_codec import decode_preview, detect_encoded_exec, scan_decoded
 from core.policy_eval import evaluate_policy_verdict
 from core.cmd_risk import get_cmd_risk, get_dry_run_suggestion
 from core.cmd_parse import breakdown as cmd_breakdown
-from core.policy_eval import evaluate_policy_verdict
 from core.read_lane import eligible as read_lane_eligible
+from core.request_context import build_context
 from core.cmd_profiles import get_anomaly, refresh_profiles, _profiles_loop
 from core.gateway_watch import (
     _check_gateway_transitions, _gateway_watch_loop,
@@ -362,6 +362,9 @@ def on_startup():
     # and idempotent, so it never delays startup or a request.
     from core.inner_targets import start_backfill_thread
     start_backfill_thread()
+    # F18: fingerprints for the request context (seen before / like this).
+    from core.request_fingerprints import start_backfill_thread as start_fp_backfill
+    start_fp_backfill()
     # Start background gap scanner (learning suggestions)
     from core.learning import refresh_gaps, _gaps_loop
     refresh_gaps()
@@ -981,6 +984,20 @@ def receive_exec_result(payload: ExecResultPayload, request: Request):
     return {"status": "ok", "attached": False, "orphaned": True}
 
 
+@app.get("/api/requests/{request_id}/context")
+def request_context(request_id: int, request: Request):
+    """F18: what the sidebar needs to answer "should I approve this?".
+
+    Computed on demand (never in the 3 s poll), five capped sections, all from
+    indexed columns (`command_sha`, `shape_sha`, `session_id`).
+    """
+    _check_session(request)
+    data = build_context(request_id)
+    if not data:
+        raise HTTPException(status_code=404, detail="Request not found")
+    return data
+
+
 @app.get("/api/requests/{request_id}/output")
 def request_output(request_id: int, request: Request):
     """The stored output tail for one request (session auth; on demand)."""
@@ -1168,17 +1185,27 @@ def request_decoded(req_id: int, request: Request):
 
 @app.post("/api/approve/{req_id}")
 def approve_request(req_id: int, request: Request):
+    """X1: only a `pending` row can be approved; anything else is 409."""
     _check_session(request)
-    update_request_status(req_id, "approved")
+    row = get_request_row(req_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Request not found")
+    if not update_request_status_if_pending(req_id, "approved"):
+        raise HTTPException(status_code=409, detail="not_pending")
     record_audit_event('jit_approved', details=f'JIT #{req_id} approved')
     return {"status": "ok"}
 
 
 @app.post("/api/deny/{req_id}")
 def deny_request(req_id: int, request: Request):
+    """X1: only a `pending` row can be denied; anything else is 409."""
     _check_session(request)
-    command = get_request_command(req_id)
-    update_request_status(req_id, "denied")
+    row = get_request_row(req_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Request not found")
+    command = row.get('command') or ''
+    if not update_request_status_if_pending(req_id, "denied"):
+        raise HTTPException(status_code=409, detail="not_pending")
     record_audit_event('jit_denied', details=f'JIT #{req_id} denied')
     deny_count = count_denied(command) if command else 0
     return {"status": "ok", "deny_count": deny_count, "command": command}

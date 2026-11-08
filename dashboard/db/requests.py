@@ -32,16 +32,34 @@ def init_requests_tables(cursor):
     cursor.execute(
         "CREATE INDEX IF NOT EXISTS idx_requests_inner_target "
         "ON requests(target_ip, inner_target)")
+    # F18: fingerprints for "seen before" (exact bytes) and "like this"
+    # (verb/kind shape). Nullable so the startup backfill can find old rows.
+    for col in ('command_sha', 'shape_sha'):
+        if col not in existing:
+            try:
+                cursor.execute(f"ALTER TABLE requests ADD COLUMN {col} TEXT")
+            except Exception:
+                pass
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_requests_command_sha "
+                   "ON requests(command_sha)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_requests_shape_sha "
+                   "ON requests(shape_sha)")
 
 def create_request(target_ip: str, command: str, status: str = 'pending', ttl: int = 90, reason: str = '', session_id: str = '', execution_id: str = '', inner_target: str = ''):
+    # F18: compute both fingerprints for every new row (no extra call site).
+    try:
+        from core.fingerprint import fingerprints
+        cmd_sha, shape_sha = fingerprints(command)
+    except Exception:
+        cmd_sha, shape_sha = None, None
     with db_conn() as conn:
         cursor = conn.cursor()
         created_at = int(time.time())
         expires_at = created_at + ttl
         cursor.execute('''
-            INSERT INTO requests (target_ip, command, status, created_at, expires_at, reason, session_id, execution_id, inner_target)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (target_ip, command, status, created_at, expires_at, reason, session_id, execution_id, inner_target or ''))
+            INSERT INTO requests (target_ip, command, status, created_at, expires_at, reason, session_id, execution_id, inner_target, command_sha, shape_sha)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (target_ip, command, status, created_at, expires_at, reason, session_id, execution_id, inner_target or '', cmd_sha, shape_sha))
         conn.commit()
         return cursor.lastrowid
 
@@ -50,6 +68,22 @@ def update_request_status(req_id: int, status: str):
         cursor = conn.cursor()
         cursor.execute('UPDATE requests SET status = ? WHERE id = ?', (status, req_id))
         conn.commit()
+
+
+def update_request_status_if_pending(req_id: int, status: str) -> bool:
+    """X1: approve/deny may only move a `pending` row.
+
+    The UPDATE is conditional so two racing presses cannot both "win", and an
+    old id (denied, expired, consumed, blocked) can never be re-approved by a
+    stale click or a colliding integration-call id.
+    """
+    with db_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE requests SET status = ? WHERE id = ? AND status = 'pending'",
+            (status, req_id))
+        conn.commit()
+        return cursor.rowcount == 1
 
 def update_ticket_consumed_by_ip(target_ip: str):
     with db_conn() as conn:
