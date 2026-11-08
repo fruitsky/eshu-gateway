@@ -2089,6 +2089,132 @@ can check SC4–SC8.
 
 **Not blocking:** `main.py` imports `evaluate_policy_verdict` twice.
 
+**Round 4 (2026-11-08): changes requested (SC5 and SC6 gaps). SC1–SC3
+ready for the security reviewer.** Reviewed at `43fd95e`; `bash scripts/verify.sh`: `2120 passed, 7 warnings in 341.83s` (the Round 5
+commits `4b3a121`, `0861afe`, `c470d6e`, `43fd95e`). As agreed, this round
+checks SC4–SC8; SC1–SC3 go back to the security chat.
+
+**SC1–SC3 are present, each with tests.** They are `OPTION_SPECS`, the
+`_scan_options` operand rule, and F1's `input-redirect` flag plus the
+per-step `input_redirects`. Tests: `test_f4_sc1_*` (5), `test_f4_sc2_*` (2)
+and `test_f4_sc3_*` (2). **SC1–SC3 ready for the security reviewer.**
+
+**What holds:**
+
+* **SC4.** `SUBCOMMANDS`/`ACTIONS` check every status verb's subcommand
+  (and `ip`'s action) in the policy itself, `zpool` included. An option or
+  value before the subcommand cannot hide one, because the first non-option
+  word is taken as the subcommand and refused if it is not listed. "Another
+  host" options in either position are refused.
+* **SC5, mostly.** Line and byte caps apply to every spelling (`-n`,
+  `--lines=`, attached and bare-digit forms). "From line N" and "all but the
+  last N" are refused, and `head` matches `tail`. Logs under `/var/log` are
+  refused for `cat` and `wc`, and `grep` on a log needs `-m`. `journalctl`
+  needs `-n` and has no source or output options.
+* **SC6, by spelling.** All the new names are refused as written.
+* **SC7.** Only an `auto_approved` verdict or a `jit` verdict with no
+  `detail_type` passes, so `self_protection_jit` and anything added later
+  are refused. A stored `on` now degrades to shadow while
+  `read_lane_on_enabled` is unset (`0861afe`, tested).
+* **SC8.** Every class in the sign-off has a table row or a test, and the
+  generated option test walks every eligible case. The README carries the
+  accepted residual risks.
+* **No live data.** The new fixtures use `192.0.2.x` and the existing
+  `10.0.0.1` test gateway.
+
+I ran about 140 synthetic commands through `breakdown` → `eligible` in a
+scratch dir, with both a bare `jit` verdict and the real
+`evaluate_policy_verdict`. Four classes are still eligible and break SC5 or
+SC6.
+
+*Must fix:*
+
+* **R1 Paths are not normalised before the SC6 prefix checks.** A path
+  spelled with an empty component (`//`) or a `.` component gets past every
+  *prefix* denial: `/sys/kernel/debug`, `/sys/kernel/tracing`, `/sys/fs/bpf`,
+  `/sys/firmware` and `/var/log/installer`. Only `cat` happens to catch the
+  `/var/log` form, through `cat-tree`. The `/proc` checks are not affected,
+  because they split on parts. **Fix:** in `_path_ok`, refuse any token with
+  an empty or `.` component (or refuse any token where
+  `posixpath.normpath(token) != token`, after allowing one trailing slash),
+  before any prefix test. **Test:** for every entry in `SYS_DENY_PREFIXES`
+  and `LOG_DENY_PREFIXES`, the `//` and `/./` spellings are ineligible for
+  `cat`, `head`, `tail`, `grep -m`, `ls` and `stat`.
+* **R2 Recursive `grep` on `/var/log` reads the SC6 exclusions.** `grep -r`
+  is allowed on any operand under `/var/log`, including `/var/log` itself.
+  It then walks into `/var/log/installer/` and the cloud-init logs, which
+  SC6 refuses by name, so the check only covers files named on the command
+  line. `-m` is also per file, so a recursive grep over the whole tree has
+  no overall bound (SC5). **Fix:** refuse recursion on any operand that is
+  `/var/log` itself or an ancestor of an SC6 exclusion. Or, more simply,
+  take `-r`/`--recursive` out of the lane: `ls -R` and `du` still give the
+  names. **Test:** a recursive grep with `/var/log` (with and without a
+  trailing slash, and with the R1 spellings) as the operand is ineligible.
+* **R3 `grep` context options undo the `-m` cap on logs.** `-A`/`-B`/`-C`
+  are capped at 1000 each, independently of `-m`, so a capped log grep can
+  still print about `m × (1 + A + B)` lines. That is up to a million, which
+  is in effect the whole file. SC5 says "any option that undoes a line cap
+  is refused". **Fix:** for a `/var/log` operand, either refuse the context
+  options or require `m × (1 + A + B) ≤ 1000` (take the larger of `-C` and
+  each of `-A`/`-B`). **Test:** a log grep with `-m` at the cap and a context
+  option at the cap is ineligible, and one within the product is eligible.
+* **R4 `head -z`/`tail -z` undo the line cap.** `-z`/`--zero-terminated`
+  makes NUL the line separator. A text log has no NUL, so `-n ≤ 1000` then
+  prints the whole file. **Fix:** remove `-z`/`--zero-terminated` from both
+  specs and the `z` letter from both clusters. **Test:** each spelling (short,
+  long, inside a cluster) is ineligible for both verbs, under `/var/log`.
+
+*Should fix:*
+
+* **S1 Status verbs with no operands should refuse every operand.** Today a
+  word that passes `_path_ok` is accepted after any status verb. For
+  `date`, `uptime`, `id`, `whoami`, `nproc`, `uname`, `free`, `lscpu`, `ps`
+  and the `docker`/`pct`/`qm` subcommands this is harmless today (the tool
+  errors out). But it lets an operand through where none is ever valid, and
+  `date`'s operand is a set-the-clock argument. Add an `operands` field to
+  `_spec` (none / safe paths), with paths only for `df`, `journalctl`,
+  `systemctl status`, `zfs`/`zpool` and `ip … show`. **Test:** each no-operand
+  verb with a safe-tree path operand is ineligible.
+* **S2 The `zpool` short letters don't match its flags.** The letters
+  include `G`, but the flag list has `-g`, so `-G` passes and a cluster with
+  `g` does not. Make them the same set. **Test:** the SC8 generated test also
+  asserts that every spec's `letters` equals the single-letter `flags`.
+* **S3 Many log operands multiply the caps.** One `head -n 1000` with dozens
+  of `/var/log` files is within the 8 kB limit and prints dozens of times
+  the cap. Consider at most N file operands (say 4) for a `/var/log` read.
+  **Test:** N+1 log operands are ineligible.
+* **S4 `grep -P` and back-references on logs.** A pathological pattern can
+  run for a very long time, and nothing at the gateway stops it (see F19).
+  Consider dropping `-P` from the lane until F19 adds a time limit. **Test:**
+  `-P`/`--perl-regexp` is ineligible.
+
+*Questions for the security reviewer and the operator (no change asked yet):*
+
+* **Q1 SC7 also refuses `shell_meta`, so a chained or piped read never
+  auto-runs.** `evaluate_policy_verdict` returns `jit` with
+  `detail_type="shell_meta"` for any command with `;`, `&&` or `|`. Round 5
+  reads "plain `jit`" as "no `detail_type`", so every multi-step command is
+  now ineligible in the real request path. §1 says about 40% of traffic is
+  chained and 40% piped. The eligibility table does not show this, because
+  its helper passes a bare `{'action': 'jit'}`. Both readings are safe:
+  `shell_meta` only says the *gateway* will not auto-run the command, and
+  the lane is decided per parsed step on the dashboard. The question is
+  scope. If chained reads should stay eligible, SC7 becomes "the `jit`
+  `detail_type` is `None` or `shell_meta`, nothing else". Either way, add an
+  end-to-end shadow test through `POST /api/request` with a two-step read,
+  so the table and the real path agree.
+* **Q2 The implementer's open question (unit names under SC2).** I agree
+  with implementing SC2 literally for now. If an exception is wanted,
+  scope it to `systemctl status|is-active|is-enabled`, with one name word
+  matching `[A-Za-z0-9@_.:-]{1,64}` (no `/`, no leading `-`, no glob).
+* **Q3 Wrapper options.** The `sudo` context is accepted with any `sudo`
+  options. A login-shell or shell form runs root's shell startup files
+  before the command. Consider accepting only a bare `sudo`.
+
+Once R1–R4 are in (S1–S4 are welcome in the same round), the feature
+reviewer can approve SC4–SC8. SC1–SC3 go to the security chat now, in
+parallel.
+
 ---
 
 ## Chunk F5 — Execution results (exit code + output tail) · slug `exec-results` · gateway + dashboard
@@ -4153,7 +4279,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 2 | F2 | review-card | UI | **Merged** 2026-11-08 | `feat/f2-review-card` @ `286df1b` | F1 | 2 rounds |
 | 3 | F7 | inner-target | dashboard | **Merged** 2026-11-08 | `feat/f7-inner-target` @ `0ad167f` | F1 | 1 round; backfill 7.1 s on a live-DB copy |
 | 4 | F3 | session-plans | dashboard + MCP | Merged | `feat/f3-session-plans` | F2 | + security reviewer sign-off |
-| 5 | F4 | read-lane | dashboard | Security sign-off recorded (SC1–SC8) — Round 5 | `feat/f4-read-lane` | F1, F3, Chunk H | reviewer pass + security reviewer sign-off |
+| 5 | F4 | read-lane | dashboard | **Changes requested (R1–R4)** — Round 5 reviewed; SC1–SC3 ready for the security reviewer | `feat/f4-read-lane` | F1, F3, Chunk H | reviewer pass + security reviewer sign-off |
 | 5a | X1 | ctx-actions | dashboard | Merged | `fix/x1-ctx-actions` | — | FYI to security reviewer (approve ignored status) |
 | 6 | F5 | exec-results | gateway + dashboard | Merged | `feat/f5-exec-results` | — | |
 | 6a | F18 | request-context | dashboard | Merged | `feat/f18-request-context` | F1, F5, F7, X1 | |
