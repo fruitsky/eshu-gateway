@@ -2473,7 +2473,80 @@ cap and is computed from indexed columns. Sections, in this order:
 
 ### Implementer notes
 
-_(implementer)_
+**What I did**
+
+* **DB** (`db/requests.py`): nullable `command_sha` and `shape_sha` columns,
+  both indexed. They are filled inside `create_request` itself, so every call
+  site (request, log, fleet run, window) gets them with no extra plumbing.
+* **Fingerprints** (`core/fingerprint.py`): `command_sha` is the sha256 of the
+  exact command bytes; `shape_sha` hashes the sequence of `verb:kind` over
+  F1's steps, so arguments are dropped.
+* **Backfill** (`core/request_fingerprints.py`): the F7 pattern — batches of
+  500 **distinct commands** where `command_sha IS NULL`, one `meta` key
+  (`request_fingerprint_backfill_done`), daemon thread from `on_startup`,
+  idempotent and skipped on a second start.
+* **Context** (`core/request_context.py`): `build_context(request_id)` returns
+  the five sections, all capped (10 session rows, 3 examples, 300-char
+  commands) and computed on demand:
+  1. `waiting` — the first rule that applies, in approval-path order:
+     encoded payload → metacharacter (naming the token, e.g. `&&`) →
+     Zero-Trust → read lane (off / shadow / ineligible with F4's reason) →
+     no allowlist match → no plan or session override matched. (The chunk
+     lists the rules; this is the precedence used, so a read that the lane
+     would cover reports the lane, not "no allowlist").
+  2. `session` — goal/agent, the last 10 commands newest-first with status and
+     F5 exit code, plus the active plan and session override.
+  3. `seen` — exact `command_sha` across hosts in 90 days: count, last time,
+     approved/denied counts, last exit code (includes the current row: it is
+     the full record).
+  4. `like` — same `shape_sha` in 90 days, excluding the current row: counts
+     and up to 3 examples.
+  5. `host` — hostname, inner target, Zero-Trust, read-lane mode, last seen,
+     and failed commands in 24 h.
+* **API**: `GET /api/requests/{id}/context` (session auth, 404 unknown).
+* **UI** (`app.js`): `renderRequestContext` renders the five `<details>`
+  sections; each open/closed state is stored in `localStorage` inside
+  try/catch. "Seen before" has a **show in history** link (and like-this rows
+  are commands) that sets the History search filter. Fetched only when the
+  panel opens — the 3 s poll is unchanged. Every agent string goes through
+  `escapeHtml`; the node harness proves it for every section.
+* **Tests** — `tests/test_f18_request_context.py` (15 + 3 skipped): session
+  order and cap, exact matches across hosts, decision counts, shape match
+  ignoring arguments, host section, every "why waiting" rule, the backfill
+  (batched, idempotent, flagged), new rows carrying fingerprints, session
+  auth, 404, the 50k-row performance bound (< 150 ms) and the escaping
+  harness.
+
+**Surprises and decisions**
+
+* **The base did not have X1 or F4.** `feature-roadmap` was at `5b79914`
+  (neither merged) when this branch was cut, as instructed. F18 does not
+  depend on X1 — it appends a container and the section renderers to
+  `openContextPanel` and leaves the action buttons alone. Without F4 the
+  read-lane reasons and the host's mode are inert: the three read-lane
+  "why waiting" tests skip until `core.read_lane` exists (`needs_f4`), and the
+  host section reports `read lane off`. Both switch on automatically when F4
+  merges.
+* `command_sha`/`shape_sha` are computed in `create_request` rather than at
+  each call site, so a future path cannot forget them; the cost is one cached
+  `breakdown()` per request, which the request path already computes for F7.
+* The "like this" section excludes the current row; "seen before" includes it
+  (the row is part of its own history).
+
+**Screenshot** (synthetic `web01` / `10.0.0.1`, session `hermes`, all five
+sections open):
+
+![Sidebar request context](../screenshots/f18/sidebar-context.png)
+
+`bash scripts/verify.sh` (pre-commit green):
+
+```
+1832 passed, 3 skipped, 7 warnings in 373.92s (0:06:13)
+```
+
+(1817 before this chunk + 15 F18 tests; the 3 skips are the F4-dependent
+read-lane reasons above.)
+
 
 ### Reviewer notes
 
