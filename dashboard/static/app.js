@@ -3871,6 +3871,9 @@ function renderTable() {
     const breakdownLink = '<button type="button" class="bd-hist-link" title="Show the step breakdown" ' +
       'onclick="event.stopPropagation();toggleHistoryBreakdown(' + Number(req.id) + ',this)">breakdown</button>';
     const innerChip = innerTargetChipHtml(req.inner_target);
+    const readLaneChip = req.reason === 'read-lane-shadow'
+      ? '<span class="read-lane-chip" title="Eligible for the read-only lane in shadow — the operator still decided">would auto-run</span>'
+      : '';
     const gwPillHtml = gwPill(req.hostname || 'N/A');
     const _sid = req.session_id || '';
     const sCell = (_sid && _sid !== 'unknown')
@@ -3904,7 +3907,7 @@ function renderTable() {
           return '<div class="cmd-desc">' + escapeHtml(_desc) + '</div>';
         })() +
         '</td>' +
-      '<td>' + badge + '</td>' +
+      '<td>' + badge + readLaneChip + '</td>' +
       '<td>' + sCell + '</td>' +
       '<td class="text-right">' + actions + '</td></tr>' +
       (_bdHistory[req.id] ? bdHistoryRowHtml(req.id) : '');
@@ -4626,6 +4629,15 @@ async function fetchGateways() {
     var ztBadge = g.zero_trust
       ? '<span class="zt-badge" title="Zero-Trust — every command requires JIT approval"> ZT</span>'
       : '';
+    var readMode = g.read_lane || 'off';
+    var readSelect = '<select class="capture-select" title="Read-only lane (shadow first)" ' +
+      'onchange="setReadLane(' + escJs(g.ip) + ',this.value)" aria-label="Read-only lane">' +
+      [['off', 'RL off'], ['shadow', 'RL shadow'], ['on', 'RL on']].map(function (pair) {
+        var locked = pair[0] === 'on' && !g.read_lane_ready;
+        return '<option value="' + pair[0] + '"' + (readMode === pair[0] ? ' selected' : '') +
+          (locked ? ' disabled title="Needs 7 days in shadow first"' : '') + '>' +
+          pair[1] + '</option>';
+      }).join('') + '</select>';
     var capMode = g.capture_output || 'exit-only';
     var capSelect = '<select class="capture-select" title="Output capture for this gateway" ' +
       'onchange="setCaptureMode(' + escJs(g.ip) + ',this.value)" aria-label="Output capture">' +
@@ -4647,7 +4659,7 @@ async function fetchGateways() {
       } else {
         overrideControl = '<button onclick="openOverrideModal(' + escJs(g.ip) + ',' + escJs(g.hostname) + ')" class="chip-btn ovr" title="Override Mode — auto-approve all JIT for a set duration">Override</button>';
       }
-      overrideCell = '<div class="flex items-center gap-2">' + overrideControl + ztBtn + capSelect + '</div>';
+      overrideCell = '<div class="flex items-center gap-2">' + overrideControl + ztBtn + capSelect + readSelect + '</div>';
     }
     return '<tr>' +
       '<td class="px-4 py-2 whitespace-nowrap">' + statusCell + '</td>' +
@@ -4662,6 +4674,21 @@ async function fetchGateways() {
       '</tr>';
   }).join('');
   checkOverrideBanner();
+}
+
+async function setReadLane(ip, mode) {
+  try {
+    var res = await authFetch('/api/gateways/' + encodeURIComponent(ip) + '/read-lane', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode: mode })
+    });
+    var data = await res.json();
+    if (res.ok && data.status === 'ok') {
+      showToast('Read-only lane: ' + data.read_lane + ' on ' + ip, 'success');
+      fetchGateways();
+    } else { showToast('Failed: ' + (data.detail || 'unknown'), 'error'); }
+  } catch (e) { showToast('Error: ' + e.message, 'error'); }
 }
 
 async function setCaptureMode(ip, mode) {
@@ -7038,6 +7065,27 @@ function renderStatsTop(d) {
   }).join('');
 }
 
+function renderStatsReadLane(d) {
+  var el = document.getElementById('stats-read-lane'); if (!el) return;
+  var rl = d.read_lane || {};
+  var eligible = Number(rl.shadow_eligible || 0);
+  var auto = Number(rl.auto_approved || 0);
+  if (!eligible && !auto) {
+    el.innerHTML = '<p class="text-muted">No read-lane activity in this window.</p>';
+    return;
+  }
+  var approved = Number(rl.shadow_approved || 0);
+  var denied = Number(rl.shadow_denied || 0);
+  var rate = eligible ? Math.round(approved / eligible * 100) : 0;
+  el.innerHTML =
+    '<div class="kpi"><div class="kval">' + eligible + '</div>' +
+      '<div class="klbl">would have auto-run (shadow)</div></div>' +
+    '<div class="cmd-row"><span class="cmd-count">' + approved + '</span> approved \u00b7 ' +
+      denied + ' denied \u00b7 median ' + Number(rl.shadow_median_len || 0) + ' chars</div>' +
+    '<div class="text-xs text-muted">' + rate + '% approved by the operator' +
+      (auto ? ' \u00b7 ' + auto + ' auto-ran with the lane on' : '') + '</div>';
+}
+
 function renderStatsInnerTargets(d) {
   var el = document.getElementById('stats-inner-targets'); if (!el) return;
   var rows = d.inner_targets || [];
@@ -7100,6 +7148,7 @@ function renderStatistics() {
   renderStatsNodes(d);
   renderStatsTop(d);
   renderStatsInnerTargets(d);
+  renderStatsReadLane(d);
   renderStatsCats(d);
   renderStatsDenied(d);
 }

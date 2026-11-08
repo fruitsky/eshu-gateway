@@ -1147,6 +1147,21 @@ button::-moz-focus-inner { border: 0; padding: 0; }
     .btn-sm { padding: 6px 10px; font-size: 11px; }
   }
 
+  /* ── F4: read-only lane ────────────────────────────────────── */
+  .read-lane-chip {
+    display: inline-flex;
+    align-items: center;
+    margin-left: 6px;
+    padding: 1px 6px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: var(--text-micro);
+    letter-spacing: 0.3px;
+    color: var(--status-info);
+    border: 1px dashed var(--accent-line);
+    border-radius: 3px;
+    white-space: nowrap;
+  }
+
   /* ── F5: execution results ──────────────────────────────────── */
   .exec-badge {
     display: inline-flex;
