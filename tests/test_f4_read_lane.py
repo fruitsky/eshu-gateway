@@ -434,6 +434,12 @@ class TestSetting:
 
     def test_f4_on_requires_seven_days_of_shadow(self, gateway):
         client, _headers = gateway
+        # The on-lock is its own gate (Round 4); unlock it to test readiness.
+        from db.core import db_conn
+        with db_conn() as conn:
+            conn.execute("INSERT OR REPLACE INTO meta (key, value) "
+                         "VALUES ('read_lane_on_enabled', '1')")
+            conn.commit()
         client.put('/api/gateways/10.0.0.1/read-lane', json={'mode': 'shadow'})
         assert client.put('/api/gateways/10.0.0.1/read-lane',
                           json={'mode': 'on'}).status_code == 400
@@ -453,6 +459,83 @@ class TestSetting:
     def test_f4_requires_a_session(self, client):
         assert client.put('/api/gateways/10.0.0.1/read-lane',
                           json={'mode': 'shadow'}).status_code in (401, 403)
+
+
+class TestOnLock:
+    """The `on` mode is hard-locked until an operator unlocks it by hand."""
+
+    def _ready(self, ip='10.0.0.1'):
+        from db.core import db_conn
+        with db_conn() as conn:
+            conn.execute(
+                "UPDATE gateways SET read_lane = 'shadow', read_lane_since = ? "
+                "WHERE ip = ?", (int(time.time()) - 8 * 86400, ip))
+            conn.commit()
+
+    def _unlock(self, on=True):
+        from db.core import db_conn
+        with db_conn() as conn:
+            if on:
+                conn.execute("INSERT OR REPLACE INTO meta (key, value) "
+                             "VALUES ('read_lane_on_enabled', '1')")
+            else:
+                conn.execute("DELETE FROM meta WHERE key = 'read_lane_on_enabled'")
+            conn.commit()
+
+    def test_f4_on_is_locked_by_default(self, gateway):
+        client, _headers = gateway
+        self._ready()
+        response = client.put('/api/gateways/10.0.0.1/read-lane', json={'mode': 'on'})
+        assert response.status_code == 409
+        assert response.json()['detail'] == 'read_lane_on_locked'
+        assert get_gateway_read_lane('10.0.0.1') != 'on'
+
+    def test_f4_on_locked_even_after_seven_days(self, gateway):
+        client, _headers = gateway
+        from db.gateways import read_lane_ready
+        self._ready()
+        assert read_lane_ready('10.0.0.1') is True
+        assert client.put('/api/gateways/10.0.0.1/read-lane',
+                          json={'mode': 'on'}).status_code == 409
+
+    def test_f4_shadow_and_off_unaffected_by_the_lock(self, gateway):
+        client, _headers = gateway
+        for mode in ('shadow', 'off', 'shadow'):
+            assert client.put('/api/gateways/10.0.0.1/read-lane',
+                              json={'mode': mode}).status_code == 200
+        assert get_gateway_read_lane('10.0.0.1') == 'shadow'
+
+    def test_f4_on_allowed_when_unlocked_and_ready(self, gateway):
+        client, _headers = gateway
+        self._unlock()
+        self._ready()
+        response = client.put('/api/gateways/10.0.0.1/read-lane', json={'mode': 'on'})
+        assert response.status_code == 200
+        assert response.json()['read_lane'] == 'on'
+        assert get_gateway_read_lane('10.0.0.1') == 'on'
+
+    def test_f4_on_still_needs_seven_days_when_unlocked(self, gateway):
+        client, _headers = gateway
+        self._unlock()
+        client.put('/api/gateways/10.0.0.1/read-lane', json={'mode': 'shadow'})
+        response = client.put('/api/gateways/10.0.0.1/read-lane', json={'mode': 'on'})
+        assert response.status_code == 400
+        assert get_gateway_read_lane('10.0.0.1') == 'shadow'
+
+    def test_f4_no_api_writes_the_lock_key(self, gateway):
+        client, _headers = gateway
+        from db.gateways import read_lane_on_enabled
+        assert read_lane_on_enabled() is False
+        client.put('/api/gateways/10.0.0.1/read-lane', json={'mode': 'on'})
+        assert read_lane_on_enabled() is False
+        row = next(g for g in client.get('/api/gateways').json()
+                   if g['ip'] == '10.0.0.1')
+        assert row['read_lane_on_enabled'] is False
+        # Only a hand edit enables it; once set, the UI is told.
+        self._unlock()
+        row = next(g for g in client.get('/api/gateways').json()
+                   if g['ip'] == '10.0.0.1')
+        assert row['read_lane_on_enabled'] is True
 
 
 class TestReport:
