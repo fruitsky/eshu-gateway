@@ -122,6 +122,7 @@ from core.cmd_codec import decode_preview, detect_encoded_exec, scan_decoded
 from core.policy_eval import evaluate_policy_verdict
 from core.cmd_risk import get_cmd_risk, get_dry_run_suggestion
 from core.cmd_parse import breakdown as cmd_breakdown
+from core.request_context import build_context
 from core.cmd_profiles import get_anomaly, refresh_profiles, _profiles_loop
 from core.gateway_watch import (
     _check_gateway_transitions, _gateway_watch_loop,
@@ -358,6 +359,9 @@ def on_startup():
     # and idempotent, so it never delays startup or a request.
     from core.inner_targets import start_backfill_thread
     start_backfill_thread()
+    # F18: fingerprints for the request context (seen before / like this).
+    from core.request_fingerprints import start_backfill_thread as start_fp_backfill
+    start_fp_backfill()
     # Start background gap scanner (learning suggestions)
     from core.learning import refresh_gaps, _gaps_loop
     refresh_gaps()
@@ -941,6 +945,20 @@ def receive_exec_result(payload: ExecResultPayload, request: Request):
     add_orphan(target_ip, cmd, payload.exit_code, payload.duration_ms,
                output, truncated)
     return {"status": "ok", "attached": False, "orphaned": True}
+
+
+@app.get("/api/requests/{request_id}/context")
+def request_context(request_id: int, request: Request):
+    """F18: what the sidebar needs to answer "should I approve this?".
+
+    Computed on demand (never in the 3 s poll), five capped sections, all from
+    indexed columns (`command_sha`, `shape_sha`, `session_id`).
+    """
+    _check_session(request)
+    data = build_context(request_id)
+    if not data:
+        raise HTTPException(status_code=404, detail="Request not found")
+    return data
 
 
 @app.get("/api/requests/{request_id}/output")

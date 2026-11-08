@@ -1147,6 +1147,41 @@ button::-moz-focus-inner { border: 0; padding: 0; }
     .btn-sm { padding: 6px 10px; font-size: 11px; }
   }
 
+  /* ── F18: request context sections ─────────────────────────── */
+  .ctx-sec {
+    border-top: 1px solid var(--rule-weak);
+    padding: 6px 0;
+  }
+  .ctx-sec summary {
+    cursor: pointer;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: var(--text-micro);
+    letter-spacing: 0.6px;
+    text-transform: uppercase;
+    color: var(--text-muted);
+  }
+  .ctx-sec-body { padding: 6px 0 2px; font-size: var(--text-xs); color: var(--text-main); }
+  .ctx-goal { color: var(--text-dim); margin-bottom: 4px; }
+  .ctx-row {
+    padding: 2px 0;
+    color: var(--text-dim);
+    overflow-wrap: anywhere;
+  }
+  .ctx-row code {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: var(--text-micro);
+    color: var(--text-main);
+  }
+  .ctx-tag {
+    display: inline-block;
+    margin-left: 6px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: var(--text-micro);
+    color: var(--text-quiet);
+  }
+  .ctx-wait { color: var(--text-main); }
+  .ctx-empty { color: var(--text-muted); font-size: var(--text-xs); }
+
   /* ── F5: execution results ──────────────────────────────────── */
   .exec-badge {
     display: inline-flex;

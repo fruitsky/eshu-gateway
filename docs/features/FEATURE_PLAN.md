@@ -2540,11 +2540,165 @@ cap and is computed from indexed columns. Sections, in this order:
 
 ### Implementer notes
 
-_(implementer)_
+**What I did**
 
-### Reviewer notes
+* **DB** (`db/requests.py`): nullable `command_sha` and `shape_sha` columns,
+  both indexed. They are filled inside `create_request` itself, so every call
+  site (request, log, fleet run, window) gets them with no extra plumbing.
+* **Fingerprints** (`core/fingerprint.py`): `command_sha` is the sha256 of the
+  exact command bytes; `shape_sha` hashes the sequence of `verb:kind` over
+  F1's steps, so arguments are dropped.
+* **Backfill** (`core/request_fingerprints.py`): the F7 pattern — batches of
+  500 **distinct commands** where `command_sha IS NULL`, one `meta` key
+  (`request_fingerprint_backfill_done`), daemon thread from `on_startup`,
+  idempotent and skipped on a second start.
+* **Context** (`core/request_context.py`): `build_context(request_id)` returns
+  the five sections, all capped (10 session rows, 3 examples, 300-char
+  commands) and computed on demand:
+  1. `waiting` — the first rule that applies, in approval-path order:
+     encoded payload → metacharacter (naming the token, e.g. `&&`) →
+     Zero-Trust → read lane (off / shadow / ineligible with F4's reason) →
+     no allowlist match → no plan or session override matched. (The chunk
+     lists the rules; this is the precedence used, so a read that the lane
+     would cover reports the lane, not "no allowlist").
+  2. `session` — goal/agent, the last 10 commands newest-first with status and
+     F5 exit code, plus the active plan and session override.
+  3. `seen` — exact `command_sha` across hosts in 90 days: count, last time,
+     approved/denied counts, last exit code (includes the current row: it is
+     the full record).
+  4. `like` — same `shape_sha` in 90 days, excluding the current row: counts
+     and up to 3 examples.
+  5. `host` — hostname, inner target, Zero-Trust, read-lane mode, last seen,
+     and failed commands in 24 h.
+* **API**: `GET /api/requests/{id}/context` (session auth, 404 unknown).
+* **UI** (`app.js`): `renderRequestContext` renders the five `<details>`
+  sections; each open/closed state is stored in `localStorage` inside
+  try/catch. "Seen before" has a **show in history** link (and like-this rows
+  are commands) that sets the History search filter. Fetched only when the
+  panel opens — the 3 s poll is unchanged. Every agent string goes through
+  `escapeHtml`; the node harness proves it for every section.
+* **Tests** — `tests/test_f18_request_context.py` (15 + 3 skipped): session
+  order and cap, exact matches across hosts, decision counts, shape match
+  ignoring arguments, host section, every "why waiting" rule, the backfill
+  (batched, idempotent, flagged), new rows carrying fingerprints, session
+  auth, 404, the 50k-row performance bound (< 150 ms) and the escaping
+  harness.
 
-_(reviewer)_
+**Surprises and decisions**
+
+* **The base did not have X1 or F4.** `feature-roadmap` was at `5b79914`
+  (neither merged) when this branch was cut, as instructed. F18 does not
+  depend on X1 — it appends a container and the section renderers to
+  `openContextPanel` and leaves the action buttons alone. Without F4 the
+  read-lane reasons and the host's mode are inert: the three read-lane
+  "why waiting" tests skip until `core.read_lane` exists (`needs_f4`), and the
+  host section reports `read lane off`. Both switch on automatically when F4
+  merges.
+* `command_sha`/`shape_sha` are computed in `create_request` rather than at
+  each call site, so a future path cannot forget them; the cost is one cached
+  `breakdown()` per request, which the request path already computes for F7.
+* The "like this" section excludes the current row; "seen before" includes it
+  (the row is part of its own history).
+
+**Screenshot** (synthetic `web01` / `10.0.0.1`, session `hermes`, all five
+sections open):
+
+![Sidebar request context](../screenshots/f18/sidebar-context.png)
+
+`bash scripts/verify.sh` (pre-commit green):
+
+```
+1832 passed, 3 skipped, 7 warnings in 373.92s (0:06:13)
+```
+
+(1817 before this chunk + 15 F18 tests; the 3 skips are the F4-dependent
+read-lane reasons above.)
+
+
+### Round 2 — fixes for reviewer round 1 (C1–C4)
+
+* **C4 — merged `feature-roadmap` (X1) first.** The only conflict was
+  `openContextPanel` in `app.js`: kept X1's `contextActionsHtml` /
+  `renderContextActions` / `armSidebarConfirm` / `contextApproveLabel` code and
+  added F18's container and section renderers (one shared `_ctxReq`
+  declaration). The X1 harness tests (`tests/test_x1_ctx_actions.py`, 18) run
+  green on the merge. The three F4-dependent read-lane reasons still skip.
+* **C1 — operator decisions are not automatic ones.** `seen` (and `like`)
+  now return `operator_approved` (`approved`/`consumed` with no
+  `session-plan:`/`read-lane` reason), `auto` (`auto-approved`,
+  `window-approved`, and plan/read-lane approvals) and `denied`, computed in
+  SQL. The UI reads "approved by you N · auto N · denied N". Test:
+  `test_f18_seen_splits_operator_from_auto` with one row of each kind.
+* **C2 — "Like this" refuses generic shapes.** A one-step shape whose verb is
+  `bash`/`sh`/`python*` returns `generic: true` with no counts and the UI says
+  "Too generic to compare."; everything with ≥ 2 steps (or a non-interpreter
+  verb) keeps its counts. The counts and the 3 examples are now one `COUNT`/
+  `SUM` plus one `LIMIT 3` query instead of fetching every row. Tests:
+  `test_f18_generic_shape_has_no_counts` and
+  `test_f18_like_this_counts_in_sql` (exact numbers from the aggregates).
+* **C3 — "why waiting" only for pending rows, worded as a guess.** A
+  non-pending row returns `waiting: null` and the UI hides the section; for a
+  pending row it says **"Likely waiting because: …"**. Test:
+  `test_f18_non_pending_has_no_waiting_reason`, plus a harness check for the
+  label and the empty body.
+
+**Round-2 tests** — 4 new in `tests/test_f18_request_context.py` (one per C
+item) and one harness case; the F18 file is 23 tests, 3 of them skipped until F4 merges.
+
+**Screenshot** — refreshed with the new wording and split counts:
+![Sidebar request context](../screenshots/f18/sidebar-context.png)
+
+`bash scripts/verify.sh` (pre-commit green):
+
+```
+1855 passed, 3 skipped, 7 warnings in 378.14s (0:06:18)
+```
+
+
+**Round 1 (2026-11-08): changes requested (small).** The structure is good.
+It computes on demand, the caps are in place, fingerprints are filled in
+`create_request`, the backfill follows the F7 pattern, every agent string is
+escaped (harness), and the endpoint requires session auth. 15 tests pass
+locally. This panel helps the operator decide, so it must not overstate the
+case for approving:
+
+* **C1 Split "you approved" from "it was auto-approved".** `_approved`
+  counts `auto-approved` and `window-approved` (and, once F3/F4 merge, plan
+  and read-lane rows) as approvals. "Seen before: approved 50" then reads as
+  50 operator decisions when the allowlist made them. Return three counts,
+  `operator_approved` (`approved`/`consumed` with no `session-plan:` or
+  `read-lane` reason), `auto` (everything automatic) and `denied`, and label
+  them that way in the UI. Test with mixed rows.
+* **C2 "Like this" must not over-match.** A one-step shape such as
+  `cat:read` or `bash:unknown` matches thousands of unrelated commands, so
+  its counts are noise that looks like evidence. Show the section only when
+  the shape has ≥ 2 steps, or when its verb is not `bash`/`sh`/`python*`;
+  otherwise show "too generic to compare". Also compute the counts in SQL
+  (`COUNT`/`SUM(...)` plus `LIMIT 3` for examples) instead of fetching every
+  matching row. Tests: a generic shape gets no counts, and the SQL path
+  returns the same numbers.
+* **C3 "Why waiting" only for pending rows, worded as a best guess.** It
+  re-derives the reason, so it can differ from the real path (host
+  override, freeze, order changes). Return it only for `pending` rows, and
+  label it "Likely waiting because: …". Test that a non-pending row has no
+  reason.
+* **C4 Merge `feature-roadmap` into this branch.** It now contains X1, and
+  both touch `openContextPanel`. Keep X1's `contextActionsHtml`/two-press
+  code and add the F18 container. Re-run the X1 harness tests. The three F4
+  skips stay until F4 merges, which is fine.
+
+**Round 2 (2026-11-08): approved and merged.** C1–C4 are done. 38 F18 and X1
+tests pass locally, and the X1 sidebar actions survived the merge.
+
+* **Fixed during review (C1 gap):** rows approved under a host or session
+  override (`override`, `session-override:%`) still counted as "approved by
+  you". They now count as `auto`. Added
+  `test_f18_override_approvals_are_automatic`, which fails before the fix
+  and passes after.
+* **Accepted as is:** C2 marks only one-step *interpreter* shapes as generic
+  (as the note was worded). One-step shapes such as `cat:read` keep their
+  counts, which is useful enough.
+* **For the UI pass:** consider showing "similar" only for ≥ 2-step shapes.
 
 ---
 
@@ -3156,7 +3310,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 5 | F4 | read-lane | dashboard | **Changes requested (R1–R4)** | `feat/f4-read-lane` | F1, F3, Chunk H | reviewer pass + security reviewer sign-off |
 | 5a | X1 | ctx-actions | dashboard | Merged | `fix/x1-ctx-actions` | — | FYI to security reviewer (approve ignored status) |
 | 6 | F5 | exec-results | gateway + dashboard | Merged | `feat/f5-exec-results` | — | |
-| 6a | F18 | request-context | dashboard | Ready (after X1) | `feat/f18-request-context` | F1, F5, F7, X1 | |
+| 6a | F18 | request-context | dashboard | Merged | `feat/f18-request-context` | F1, F5, F7, X1 | |
 | 7 | F12 | ssh-exec | dashboard + gateway | Ready (after F5) — design first | `feat/f12-ssh-exec` | F4, F5 | design approval + security reviewer sign-off |
 | 8 | F6 | session-wrapup | dashboard | Ready (after F12) | `feat/f6-session-wrapup` | F3, F4, F5 | |
 | 9 | F13 | session-conclusions | dashboard + MCP | Ready (after F6) | `feat/f13-session-conclusions` | F5, F6 | |

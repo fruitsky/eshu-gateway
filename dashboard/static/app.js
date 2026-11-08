@@ -62,11 +62,139 @@ var _activeSessionSid = null;
 var _activeSessionHost = '';
 var _activeSessionHostIp = '';
 
+/* ── F18: request context sections ──────────────────────────────────────
+   Five capped sections rendered from GET /api/requests/{id}/context, fetched
+   only when the panel opens. Every agent string is escaped here; a section's
+   open/closed state lives in localStorage (best effort). */
+var _ctxReq = null;
+
+function ctxCut(text) {
+  return String(text == null ? '' : text).slice(0, 300);
+}
+
+function ctxOpenState(key) {
+  try {
+    return localStorage.getItem('ctx-open-' + key) !== '0';
+  } catch (e) { return true; }
+}
+
+function ctxSaveOpen(key, open) {
+  try { localStorage.setItem('ctx-open-' + key, open ? '1' : '0'); } catch (e) {}
+}
+
+function ctxSectionHtml(key, title, body) {
+  if (!body) return '';
+  var open = ctxOpenState(key);
+  return '<details class="ctx-sec" data-ctx-sec="' + escapeHtml(key) + '"' +
+    (open ? ' open' : '') + ' ontoggle="ctxSaveOpen(' + escJs(key) + ',this.open)">' +
+    '<summary>' + escapeHtml(title) + '</summary>' +
+    '<div class="ctx-sec-body">' + body + '</div></details>';
+}
+
+function ctxWaitingBody(d) {
+  var waiting = (d || {}).waiting;
+  // C3: only a pending row is waiting, and the reason is a re-derivation.
+  if (!waiting) return '';
+  return '<div class="ctx-wait"><span class="ctx-tag">Likely waiting because:</span> ' +
+    escapeHtml(waiting) + '</div>';
+}
+
+function ctxSessionBody(d) {
+  var s = (d || {}).session;
+  if (!s) return '<div class="ctx-empty">No session on this request.</div>';
+  var rows = (s.commands || []).map(function (c) {
+    return '<div class="ctx-row"><code>' + escapeHtml(ctxCut(c.command)) + '</code>' +
+      '<span class="ctx-tag">' + escapeHtml(c.status || '') + '</span>' +
+      (c.exit_code === null || c.exit_code === undefined ? ''
+        : '<span class="ctx-tag">exit ' + Number(c.exit_code) + '</span>') + '</div>';
+  }).join('');
+  return '<div class="ctx-goal">' + escapeHtml(s.goal || '') +
+    (s.agent ? ' \u00b7 ' + escapeHtml(s.agent) : '') + '</div>' + rows +
+    (s.plan ? '<div class="ctx-tag">plan #' + Number(s.plan.id) +
+      ' until ' + formatTime(Number(s.plan.until)) + '</div>' : '') +
+    (s.override ? '<div class="ctx-tag">session override active</div>' : '');
+}
+
+function ctxSeenBody(d) {
+  var s = (d || {}).seen || {};
+  if (!s.count) return '<div class="ctx-empty">Not seen before.</div>';
+  var last = s.last_at ? formatAgo(Math.floor(Date.now() / 1000) - Number(s.last_at)) : '\u2014';
+  // C1: the operator's decisions are not the same thing as the allowlist's.
+  return '<div class="ctx-row">' + Number(s.count) + '\u00d7 on record \u00b7 approved by you ' +
+    Number(s.operator_approved || 0) + ' \u00b7 auto ' + Number(s.auto || 0) +
+    ' \u00b7 denied ' + Number(s.denied || 0) +
+    ' \u00b7 last ' + escapeHtml(last) +
+    (s.last_exit_code === null || s.last_exit_code === undefined ? ''
+      : ' \u00b7 exit ' + Number(s.last_exit_code)) + '</div>' +
+    '<button type="button" class="bd-hist-link" onclick="filterHistoryToCommand(' +
+      escJs(ctxCut((d || {}).request_command || '')) + ')">show in history</button>';
+}
+
+function ctxLikeBody(d) {
+  var s = (d || {}).like || {};
+  // C2: a one-step interpreter shape matches thousands of unrelated commands.
+  if (s.generic) return '<div class="ctx-empty">Too generic to compare.</div>';
+  if (!s.count) return '<div class="ctx-empty">Nothing similar yet.</div>';
+  var examples = (s.examples || []).map(function (e) {
+    return '<div class="ctx-row"><code>' + escapeHtml(ctxCut(e.command)) + '</code>' +
+      (e.hostname ? ' <span class="ctx-tag">' + escapeHtml(e.hostname) + '</span>' : '') +
+      '</div>';
+  }).join('');
+  return '<div class="ctx-row">' + Number(s.count) + ' similar \u00b7 approved by you ' +
+    Number(s.operator_approved || 0) + ' \u00b7 auto ' + Number(s.auto || 0) +
+    ' \u00b7 denied ' + Number(s.denied || 0) + '</div>' + examples;
+}
+
+function ctxHostBody(d) {
+  var h = (d || {}).host || {};
+  return '<div class="ctx-row">' + escapeHtml(h.hostname || '') +
+    (h.inner_target ? ' \u00b7 inside ' + escapeHtml(h.inner_target) : '') +
+    (h.zero_trust ? ' \u00b7 Zero-Trust' : '') +
+    ' \u00b7 read lane ' + escapeHtml(h.read_lane || 'off') +
+    ' \u00b7 failed 24h ' + Number(h.failed_24h || 0) + '</div>';
+}
+
+function renderRequestContext(data) {
+  var el = document.getElementById('ctx-context');
+  if (!el) return;
+  el.innerHTML =
+    ctxSectionHtml('waiting', 'Why it is waiting for you', ctxWaitingBody(data)) +
+    ctxSectionHtml('session', 'This session', ctxSessionBody(data)) +
+    ctxSectionHtml('seen', 'Seen before', ctxSeenBody(data)) +
+    ctxSectionHtml('like', 'Like this', ctxLikeBody(data)) +
+    ctxSectionHtml('host', 'Host', ctxHostBody(data));
+}
+
+function loadRequestContext(requestId, command) {
+  var el = document.getElementById('ctx-context');
+  if (!el) return;
+  el.innerHTML = '<div class="ctx-empty">Loading context\u2026</div>';
+  authFetch('/api/requests/' + Number(requestId) + '/context').then(function (res) {
+    return res.ok ? res.json() : null;
+  }).then(function (data) {
+    if (!data || !_ctxReq || String(_ctxReq.id) !== String(requestId)) return;
+    data.request_command = command || (_ctxReq && _ctxReq.command) || '';
+    renderRequestContext(data);
+  }).catch(function () {
+    if (el && _ctxReq && String(_ctxReq.id) === String(requestId)) {
+      el.innerHTML = '<div class="ctx-empty">Could not load the context.</div>';
+    }
+  });
+}
+
+function filterHistoryToCommand(command) {
+  var text = ctxCut(command);
+  if (!text) return;
+  _requestSearchQuery = text;
+  var box = document.getElementById('request-search');
+  if (box) box.value = text;
+  switchView('history');
+  fetchRequests();
+}
+
 /* X1: the sidebar's approve label reflects F2's two-press rule for the open
    request, and the actions dispatch on the request type first — a pending
    integration call used to fall into the SSH branch and POST /api/approve. */
-var _ctxReq = null;
-
 function contextApproveLabel(req) {
   return (req && _bdUnknownConfirmed[req.id]) ? 'Press again to approve' : 'Approve';
 }
@@ -219,6 +347,14 @@ function openContextPanel(reqId) {
 
   // Action buttons (X1: dispatch on the request type first)
   renderContextActions(req);
+
+  // F18: the context sections are fetched only when the panel opens.
+  if (req._type === 'integration' || req._type === 'window') {
+    var ctxEl = document.getElementById('ctx-context');
+    if (ctxEl) ctxEl.innerHTML = '';
+  } else {
+    loadRequestContext(req.id, req.command);
+  }
 }
 
 /* When the panel is showing the request you just approved or denied, the
