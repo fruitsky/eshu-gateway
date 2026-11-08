@@ -926,7 +926,7 @@ a good pattern for later UI chunks. Gate re-run by the reviewer: pre-commit OK,
   * `bulkApprove()` loops over the selection, then calls `clearSelection()`. A
     selected long-unknown request is skipped, and the selection is cleared, so the
     operator believes it was approved while it stays pending and the agent times out.
-  * `submitSessionOverride()` ("Start Session Override" from a pending row) calls
+  * `confirmSessionOverride()` ("Start Session Override" from a pending row) calls
     `handleAction(ctx.request_id, 'approve')` to clear the row it was opened from;
     that row stays pending.
 
