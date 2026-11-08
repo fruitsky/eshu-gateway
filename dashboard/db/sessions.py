@@ -15,6 +15,7 @@ source of truth for what actually happened.
 import secrets
 import time
 
+from core.approval_buckets import bucket_for, empty_buckets as _empty_buckets
 from db.core import db_conn
 
 
@@ -103,6 +104,11 @@ def get_session_summary(session_id: str) -> dict:
         'window_approved': 0, 'fleet_run': 0, 'consumed': 0, 'abandoned': 0,
         'mcp_calls': 0, 'mcp_pending': 0,
         'gateways': [], 'first_seen': 0, 'last_seen': 0,
+        # F6: how the session's commands were approved, and how long the agent
+        # waited on a human (sum of decided_at - created_at; NULL for rows that
+        # predate the column, so old sessions report fewer seconds, not wrong
+        # ones).
+        'by_approval': _empty_buckets(), 'waited_seconds': 0, 'decided': 0,
     }
     if not sid:
         return out
@@ -152,6 +158,28 @@ def get_session_summary(session_id: str) -> dict:
             WHERE r.session_id = ? AND x.exit_code != 0
         ''', (sid,))
         out['failed'] = int(cur.fetchone()['n'] or 0)
+        # F6: group by the pair, then bucket in Python — one mapping, shared
+        # with the statistics series and the MCP summary.
+        cur.execute('''
+            SELECT status, COALESCE(reason, '') AS reason, COUNT(*) AS n
+            FROM requests WHERE session_id = ?
+            GROUP BY status, reason
+        ''', (sid,))
+        by_approval = _empty_buckets()
+        for row in cur.fetchall():
+            bucket = bucket_for(row['status'], row['reason'])
+            if bucket:
+                by_approval[bucket] += int(row['n'] or 0)
+        out['by_approval'] = by_approval
+        cur.execute('''
+            SELECT COALESCE(SUM(decided_at - created_at), 0) AS waited,
+                   COUNT(decided_at) AS decided
+            FROM requests
+            WHERE session_id = ? AND decided_at IS NOT NULL AND decided_at >= created_at
+        ''', (sid,))
+        waited = cur.fetchone()
+        out['waited_seconds'] = int(waited['waited'] or 0)
+        out['decided'] = int(waited['decided'] or 0)
         cur.execute('SELECT COUNT(*) AS n FROM integration_calls WHERE session_id = ?', (sid,))
         out['mcp_calls'] = int(cur.fetchone()['n'] or 0)
         cur.execute('SELECT COUNT(*) AS n FROM pending_integration_calls WHERE session_id = ?', (sid,))

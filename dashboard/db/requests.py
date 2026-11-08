@@ -40,6 +40,13 @@ def init_requests_tables(cursor):
                 cursor.execute(f"ALTER TABLE requests ADD COLUMN {col} TEXT")
             except Exception:
                 pass
+    # F6: when the row stopped waiting (approved, denied or expired). Nullable
+    # so pre-F6 rows stay unknown rather than being given a made-up wait.
+    if 'decided_at' not in existing:
+        try:
+            cursor.execute("ALTER TABLE requests ADD COLUMN decided_at INTEGER")
+        except Exception:
+            pass
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_requests_command_sha "
                    "ON requests(command_sha)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_requests_shape_sha "
@@ -66,7 +73,16 @@ def create_request(target_ip: str, command: str, status: str = 'pending', ttl: i
 def update_request_status(req_id: int, status: str):
     with db_conn() as conn:
         cursor = conn.cursor()
-        cursor.execute('UPDATE requests SET status = ? WHERE id = ?', (status, req_id))
+        if status == 'pending':
+            cursor.execute(
+                'UPDATE requests SET status = ?, decided_at = NULL WHERE id = ?',
+                (status, req_id))
+        else:
+            # F6: the first decision wins. A later consume/expire pass must not
+            # rewrite when the human actually answered.
+            cursor.execute(
+                'UPDATE requests SET status = ?, decided_at = COALESCE(decided_at, ?) '
+                'WHERE id = ?', (status, int(time.time()), req_id))
         conn.commit()
 
 
@@ -80,8 +96,9 @@ def update_request_status_if_pending(req_id: int, status: str) -> bool:
     with db_conn() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "UPDATE requests SET status = ? WHERE id = ? AND status = 'pending'",
-            (status, req_id))
+            "UPDATE requests SET status = ?, decided_at = ? "
+            "WHERE id = ? AND status = 'pending'",
+            (status, int(time.time()), req_id))
         conn.commit()
         return cursor.rowcount == 1
 
@@ -172,10 +189,13 @@ def expire_stale_requests(now_ts: int = None):
         cursor = conn.cursor()
         cursor.execute("SELECT id FROM requests WHERE status = 'pending' AND expires_at < ?", (now,))
         expired = [row['id'] for row in cursor.fetchall()]
-        cursor.execute("UPDATE requests SET status = 'expired' WHERE status = 'pending' AND expires_at < ?", (now,))
+        cursor.execute("UPDATE requests SET status = 'expired', decided_at = ? "
+                       "WHERE status = 'pending' AND expires_at < ?", (now, now))
         cursor.execute("SELECT id FROM requests WHERE status = 'approved' AND expires_at < ?", (now - 60,))
         abandoned = [row['id'] for row in cursor.fetchall()]
-        cursor.execute("UPDATE requests SET status = 'abandoned' WHERE status = 'approved' AND expires_at < ?", (now - 60,))
+        cursor.execute("UPDATE requests SET status = 'abandoned', "
+                       "decided_at = COALESCE(decided_at, ?) "
+                       "WHERE status = 'approved' AND expires_at < ?", (now, now - 60))
         conn.commit()
         return expired, abandoned
 

@@ -2822,6 +2822,63 @@ async function saveSessionNames() {
   } catch(e) {}
 }
 
+/* ── F6: the wrap-up card ────────────────────────────────────────────────
+   The number a session is judged by is not how many commands it ran but who
+   cleared them: the override share is exactly what F3 plans and F4's lane
+   exist to replace. The buckets come from the server's one mapping
+   (`core/approval_buckets.py`) so this card and Statistics agree. */
+var APPROVAL_BUCKETS = [
+  ['allowlist', 'allowlist'], ['human', 'human'], ['plan', 'plan'],
+  ['read-lane', 'read lane'], ['session-override', 'session override'],
+  ['host-override', 'host override'], ['window', 'window'], ['fleet', 'fleet run']
+];
+
+function fmtDuration(seconds) {
+  var s = Math.max(0, Math.round(seconds || 0));
+  if (s < 60) return s + 's';
+  var m = Math.floor(s / 60), h = Math.floor(m / 60);
+  if (h) return h + 'h ' + (m % 60) + 'm';
+  return m + 'm ' + (s % 60) + 's';
+}
+
+function approvalChipHtml(key, label, count) {
+  var n = Math.max(0, parseInt(count, 10) || 0);
+  return '<span class="appr-chip appr-' + key + (n ? '' : ' zero') + '" title="' +
+    escapeHtml(n + ' cleared by ' + label) + '">' + escapeHtml(label) +
+    ' <b>' + n + '</b></span>';
+}
+
+function sessionSummaryHtml(sum) {
+  if (!sum || !sum.commands) return '';
+  var buckets = sum.by_approval || {};
+  var chips = APPROVAL_BUCKETS.map(function (b) {
+    return approvalChipHtml(b[0], b[1], buckets[b[0]]);
+  }).join('');
+  var writes = sum.writes_by_host || {};
+  var writeBits = Object.keys(writes).sort().map(function (h) {
+    return escapeHtml(h) + ' <b>' + (parseInt(writes[h], 10) || 0) + '</b>';
+  }).join(' \u00b7 ');
+  var facts = [];
+  if (sum.duration_seconds) facts.push(fmtDuration(sum.duration_seconds) + ' long');
+  facts.push((parseInt(sum.commands, 10) || 0) + ' commands');
+  if (sum.failed) facts.push('<span class="sm-blocked">' + (parseInt(sum.failed, 10) || 0) + ' failed</span>');
+  facts.push(sum.decided ? ('waited ' + fmtDuration(sum.waited_seconds) + ' for a human')
+                         : 'wait not recorded');
+  var html = '<div class="session-summary-facts">' + facts.join(' \u00b7 ') + '</div>' +
+    '<div class="session-summary-row"><span class="session-summary-label">how approved</span>' + chips + '</div>';
+  if (writeBits) {
+    html += '<div class="session-summary-row"><span class="session-summary-label">writes</span>' + writeBits + '</div>';
+  }
+  return html;
+}
+
+function renderSessionSummary(el, sum) {
+  if (!el) return;
+  var html = sessionSummaryHtml(sum);
+  el.innerHTML = html;
+  el.classList.toggle('hidden', !html);
+}
+
 async function openSessionModal(sid) {
   var modal = document.getElementById('session-modal');
   var nameEl = document.getElementById('sm-name');
@@ -2890,6 +2947,7 @@ async function openSessionModal(sid) {
   if (denied) bits.push('<span class="sm-blocked">' + denied + ' denied</span>');
   if (auto) bits.push('<span class="sm-muted">' + auto + ' auto</span>');
   metaEl.innerHTML = bits.join(' \u00b7 ');
+  renderSessionSummary(document.getElementById('sm-summary'), detail.summary || {});
 
   // Unified, chronological timeline.
   var items = [];
@@ -7009,6 +7067,67 @@ function renderRhythm(d) {
   }
 }
 
+/* ── F6: how approved ────────────────────────────────────────────────────
+   A stacked bar per day, oldest first: the mix of who cleared the work. The
+   headline is the override share — the number F3 plans and F4's read lane
+   exist to bring down. Zero-count buckets stay in the legend, greyed, so the
+   absence of overrides is visible rather than merely unmentioned. */
+function approvalsHtml(ab) {
+  ab = ab || {};
+  var series = ab.series || [];
+  var totals = ab.totals || {};
+  var order = (ab.buckets && ab.buckets.length)
+    ? ab.buckets.map(function (b) { return [b.key, b.label]; })
+    : APPROVAL_BUCKETS;
+  if (!series.length) return '<p class="text-muted">No decisions in this window.</p>';
+  var max = 1;
+  series.forEach(function (day) {
+    var t = 0;
+    order.forEach(function (b) { t += parseInt(day[b[0]], 10) || 0; });
+    if (t > max) max = t;
+  });
+  var rows = series.map(function (day) {
+    var total = 0;
+    order.forEach(function (b) { total += parseInt(day[b[0]], 10) || 0; });
+    var segs = order.map(function (b) {
+      var n = parseInt(day[b[0]], 10) || 0;
+      if (!n || !total) return '';
+      return '<span class="appr-seg appr-' + b[0] + '" style="width:' +
+        (n / total * 100).toFixed(2) + '%" title="' +
+        escapeHtml(b[1] + ': ' + n) + '"></span>';
+    }).join('');
+    var width = Math.round(total / max * 100);
+    var label = String(day.date || '').slice(5).replace('-', '/');
+    return '<div class="appr-day" title="' +
+      escapeHtml(String(day.date || '') + ' \u00b7 ' + total + ' approved') + '">' +
+      '<span class="appr-date">' + escapeHtml(label) + '</span>' +
+      '<span class="appr-track"><span class="appr-bar" style="width:' + width + '%">' + segs + '</span></span>' +
+      '<span class="appr-total">' + (total || '') + '</span></div>';
+  }).join('');
+  var legend = order.map(function (b) {
+    var n = parseInt(totals[b[0]], 10) || 0;
+    return '<span class="appr-legend-item' + (n ? '' : ' zero') + '">' +
+      '<i class="appr-dot appr-' + b[0] + '"></i>' + escapeHtml(b[1]) +
+      ' <b>' + n + '</b></span>';
+  }).join('');
+  return '<div class="appr-days">' + rows + '</div>' +
+    '<div class="appr-legend">' + legend + '</div>';
+}
+
+function renderStatsApprovals(d) {
+  var el = document.getElementById('stats-approvals');
+  var shareEl = document.getElementById('approvals-share');
+  if (!el) return;
+  var ab = (d && d.approval_breakdown) || {};
+  var approved = parseInt(ab.approved, 10) || 0;
+  if (shareEl) {
+    shareEl.textContent = approved
+      ? ('override share ' + (Number(ab.override_share) || 0) + '%')
+      : 'no decisions yet';
+  }
+  el.innerHTML = approvalsHtml(ab);
+}
+
 function renderStatsKpis(d) {
   var el = document.getElementById('stats-summary-cards'); if (!el) return;
   /* The chart above already prints the command total and the automation rate.
@@ -7280,6 +7399,7 @@ function renderStatistics() {
   initTallyInteractions();
   renderRhythm(d);
   renderStatsKpis(d);
+  renderStatsApprovals(d);
   renderStatsHygiene(d);
   renderStatsHeatmap(d);
   renderStatsNodes(d);
