@@ -2791,7 +2791,7 @@ tests pass locally, and the X1 sidebar actions survived the merge.
 
 ### Reviewer notes
 
-**Round 1 (2026-11-09): changes requested.** Reviewed at `6b35d99`;
+**Round 1 (2026-11-08): changes requested.** Reviewed at `6b35d99`;
 `bash scripts/verify.sh`: `1909 passed, 3 skipped, 7 warnings in 331.10s (0:05:31)`.
 
 **What holds.** One mapping (`core/approval_buckets.py`) feeds the session
