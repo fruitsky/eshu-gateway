@@ -151,6 +151,15 @@ while true; do
     fi
     mv -f /etc/eshu-zero-trust.tmp /etc/eshu-zero-trust 2>/dev/null || true
 
+    # F5: per-gateway output capture mode (off | exit-only | tail). Absent or
+    # garbage means exit-only — capture must never switch itself on.
+    CAPTURE_MODE=$(python3 -c "import sys, json; print(json.load(sys.stdin).get('capture_output','exit-only'))" < "$POLICY_FILE" 2>/dev/null || echo "exit-only")
+    case "$CAPTURE_MODE" in
+      off|exit-only|tail) printf '%s' "$CAPTURE_MODE" > /etc/eshu-capture.tmp ;;
+      *) printf 'exit-only' > /etc/eshu-capture.tmp ;;
+    esac
+    mv -f /etc/eshu-capture.tmp /etc/eshu-capture 2>/dev/null || true
+
     # Sync the session signing key + enforcement flag. The gateway verifies the
     # HMAC locally, so it needs the key before the flag is switched on.
     SESSION_KEY=$(python3 -c "import sys, json; print(json.load(sys.stdin).get('session_signing_key',''))" < "$POLICY_FILE" 2>/dev/null || echo "")

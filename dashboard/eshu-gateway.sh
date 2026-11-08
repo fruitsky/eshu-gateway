@@ -27,6 +27,20 @@ HTTP_TIMEOUT="${ESHU_HTTP_TIMEOUT:-10}"
 HTTP_CONNECT_TIMEOUT="${ESHU_HTTP_CONNECT_TIMEOUT:-3}"
 JIT_WAIT_SECONDS="${ESHU_JIT_WAIT:-90}"
 
+# F5: execution results. Capture is opt-in per gateway (/etc/eshu-capture) and
+# must never cut the agent's stream: `tee -p` ignores a dead FIFO reader, and
+# without that option (non-GNU tee) capture stays exit-only.
+ESHU_RUN_DIR="${ESHU_RUN_DIR:-/run/eshu}"
+ESHU_RUN_OWNER="${ESHU_RUN_OWNER:-0}"
+ESHU_CAPTURE_FILE="${ESHU_CAPTURE_FILE:-/etc/eshu-capture}"
+TEE_NOPIPE="0"
+if tee -p /dev/null </dev/null >/dev/null 2>&1; then TEE_NOPIPE="1"; fi
+ESHU_OUT_TAIL=""
+ESHU_OUT_FIFO=""
+ESHU_TAIL_PID=""
+RESULT_REQUEST_ID=""
+RESULT_PATH="allowlist"
+
 # TARGET_IP is baked in by the installer and interpolated into JSON bodies.
 # Refuse to run if it is not a bare IP (checked once, before any dashboard call).
 if [[ ! "$TARGET_IP" =~ ^[0-9A-Fa-f:.]{1,64}$ ]]; then
@@ -70,15 +84,106 @@ log_window_reject() {
        -d '{"target_ip":"'"$TARGET_IP"'","encoded_command":"'"$enc_cmd"'","status":"window-rejected","reason":"'"$reason"'","token":"'"$ESHU_WINDOW_TOKEN"'","session_id":"'"${ESHU_SESSION_ID:-}"'","execution_id":"'"${ESHU_EXECUTION_ID:-}"'"}' >/dev/null 2>&1 &
 }
 
+capture_mode() {
+  # off | exit-only | tail. Anything else (missing file, garbage, a symlink)
+  # is exit-only: an unknown value must never turn capture on.
+  local v="exit-only"
+  if [ "$TEE_NOPIPE" = "1" ] && [ -f "$ESHU_CAPTURE_FILE" ] && [ ! -L "$ESHU_CAPTURE_FILE" ]; then
+    # D8: no trailing-newline surprise from any writer.
+    IFS= read -r v < "$ESHU_CAPTURE_FILE" || true
+    case "$v" in off|exit-only|tail) ;; *) v="exit-only" ;; esac
+  fi
+  printf '%s' "$v"
+}
+
+post_exec_result() {   # $1=rc  $2=duration_ms  $3=mode  $4=path
+  local rc="$1" duration_ms="$2" mode="$3" path="$4"
+  local enc_cmd enc_out="" truncated="false" rid="" body
+  if [ "$mode" = "off" ]; then return 0; fi
+  enc_cmd=$(printf '%s' "$cmd" | base64 -w 0)
+  if [ "$mode" = "tail" ] && [ -n "$ESHU_OUT_TAIL" ] && [ -s "$ESHU_OUT_TAIL" ]; then
+    if [ "$(stat -c '%s' "$ESHU_OUT_TAIL")" -gt 16384 ]; then
+      truncated="true"
+      enc_out=$(tail -c 16384 "$ESHU_OUT_TAIL" | base64 -w 0)
+    else
+      enc_out=$(base64 -w 0 < "$ESHU_OUT_TAIL")
+    fi
+  fi
+  # JSON body: all interpolated values are internal literals, validated
+  # (TARGET_IP at startup, request id is digits-only), arithmetic integers or
+  # base64. Any new field must be validated to a safe charset or JSON-escaped
+  # before it is added here.
+  case "${RESULT_REQUEST_ID:-}" in
+    ''|*[!0-9]*) rid="" ;;
+    *) rid=',"request_id":'"${RESULT_REQUEST_ID}" ;;
+  esac
+  body='{"target_ip":"'"$TARGET_IP"'","encoded_command":"'"$enc_cmd"'","path":"'"$path"'","exit_code":'"$rc"',"duration_ms":'"$duration_ms"',"encoded_output":"'"$enc_out"'","output_truncated":'"$truncated"''"$rid"'}'
+  # D2: the body (up to ~22 KB) goes on stdin, never into argv.
+  { printf '%s' "$body" | curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s \
+         -X POST "$DASHBOARD_URL/api/exec-result" \
+         -H "X-Gateway-Token: ${GATEWAY_TOKEN:-}" \
+         -H "Content-Type: application/json" \
+         --data-binary @- ; } >/dev/null 2>&1 &
+}
+
 run_sanitized() {
-  local rc=0
-  # `set -e` would abort before the sentinel on a failed pipeline; the `||`
-  # preserves the real status so the agent can see the outcome without
-  # appending its own `echo RC=$?`.
-  "$@" 2>&1 | sanitize || rc=$?
+  local rc=0 mode start_ns end_ns duration_ms path
+  mode=$(capture_mode)
+  path="${RESULT_PATH:-allowlist}"
+  case "$path" in allowlist|window|lockbox|jit) ;; *) path="allowlist" ;; esac
+  ESHU_OUT_TAIL=""
+  ESHU_OUT_FIFO=""
+  ESHU_TAIL_PID=""
+  if [ "$mode" = "tail" ]; then
+    # § 2.7 / D7: only the poller's private 0700 root-owned work dir; refuse a
+    # missing, symlinked, foreign-mode or foreign-owner one instead of writing
+    # capture files somewhere else. Never create the dir here.
+    if [ ! -d "$ESHU_RUN_DIR" ] || [ -L "$ESHU_RUN_DIR" ] \
+       || [ "$(stat -c '%a' "$ESHU_RUN_DIR")" != "700" ] \
+       || [ "$(stat -c '%u' "$ESHU_RUN_DIR")" != "$ESHU_RUN_OWNER" ]; then
+      logger -t eshu-gateway "CAPTURE DISABLED: unsafe $ESHU_RUN_DIR"
+      mode="exit-only"
+    else
+      ESHU_OUT_TAIL=$(mktemp -p "$ESHU_RUN_DIR" eshu-out.XXXXXX) || {
+        mode="exit-only"; ESHU_OUT_TAIL=""; }
+      if [ -n "$ESHU_OUT_TAIL" ]; then
+        ESHU_OUT_FIFO=$(mktemp -u -p "$ESHU_RUN_DIR" eshu-fifo.XXXXXX)
+        # F5: the first EXIT trap in this script. A later one must extend this,
+        # not replace it, or the capture files leak.
+        trap 'rm -f "$ESHU_OUT_TAIL" "$ESHU_OUT_FIFO"' EXIT
+        # 16 KiB + 1 tells truncation apart without counting the stream; the
+        # reader only holds the tail, so a runaway command cannot fill tmpfs,
+        # and `wait` makes the read race-free.
+        if mkfifo "$ESHU_OUT_FIFO" 2>/dev/null; then
+          tail -c 16385 < "$ESHU_OUT_FIFO" > "$ESHU_OUT_TAIL" &
+          ESHU_TAIL_PID=$!
+        else
+          ESHU_OUT_FIFO=""
+          mode="exit-only"
+        fi
+      fi
+    fi
+  fi
+
+  start_ns=$(date +%s%N)
+  if [ "$mode" = "tail" ] && [ -n "$ESHU_OUT_FIFO" ] && [ -p "$ESHU_OUT_FIFO" ]; then
+    # D1: `-p` ignores a dead FIFO reader, so the agent's stream keeps flowing
+    # and the pipeline status stays the command's. The diagnostic goes to
+    # /dev/null so a dead reader never injects a line into the agent's output.
+    "$@" 2>&1 | sanitize | tee -p "$ESHU_OUT_FIFO" 2>/dev/null || rc=$?
+    wait "$ESHU_TAIL_PID" 2>/dev/null || true
+  else
+    # D8: never leave a reader blocked on open() if we skip the FIFO branch.
+    if [ -n "$ESHU_TAIL_PID" ]; then kill "$ESHU_TAIL_PID" 2>/dev/null || true; fi
+    "$@" 2>&1 | sanitize || rc=$?
+  fi
+  end_ns=$(date +%s%N)
+  duration_ms=$(( (end_ns - start_ns) / 1000000 ))
+
   if [ "$rc" -ne 0 ]; then
     echo "[ESHU exit=$rc]"
   fi
+  post_exec_result "$rc" "$duration_ms" "$mode" "$path"
   exit "$rc"
 }
 
@@ -318,6 +423,7 @@ fi
 
 if [ "$ENCODED_EXEC" = "0" ] && [ "$HAS_META" = "0" ] && [ "$SELF_JIT" = "0" ] && [ "$ZT_ACTIVE" != "1" ] && [ -f /etc/eshu-exact.txt ] && grep -qFx "$cmd" /etc/eshu-exact.txt; then
   log_auto_approve "$cmd" "auto-approved"
+  RESULT_PATH="allowlist"
   run_sanitized bash -c "$cmd"
 fi
 
@@ -330,6 +436,7 @@ if [ -f /etc/eshu-rwhite.txt ] && [ -s /etc/eshu-rwhite.txt ]; then
     [[ "${pattern:-}" =~ ^[[:space:]]*# ]] && continue
     if [ "$ENCODED_EXEC" = "0" ] && [ "$HAS_META" = "0" ] && [ "$SELF_JIT" = "0" ] && [ "$ZT_ACTIVE" != "1" ] && [[ "$cmd" =~ $pattern ]]; then
       log_auto_approve "$cmd" "auto-approved"
+      RESULT_PATH="allowlist"
       run_sanitized bash -c "$cmd"
     fi
   done < /etc/eshu-rwhite.txt
@@ -382,6 +489,7 @@ claim_lockbox_ticket() {
 
 if claim_lockbox_ticket; then
   logger -t eshu-gateway "JIT TICKET CLAIMED AND BURNED FOR: $cmd"
+  RESULT_PATH="lockbox"
   run_sanitized bash -c "$cmd"
 fi
 
@@ -510,6 +618,8 @@ if [ "$TICKET_FOUND" = "yes" ]; then
     mv -f "$TICKETS_FILE.tmp" "$TICKETS_FILE"
     chmod 600 "$TICKETS_FILE"
   fi
+  RESULT_PATH="jit"
+  RESULT_REQUEST_ID="$REQUEST_ID_INT"
   run_sanitized bash -c "$cmd"
 else
   exit 1
