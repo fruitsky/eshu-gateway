@@ -14,7 +14,8 @@ Design notes for the reviewer:
 * `shlex.shlex(posix=True, punctuation_chars=True)` does the tokenising, as
   chunk rule 1 requires. Newline is added to the punctuation set so a newline
   outside quotes is a separator while a newline inside quotes is not (rule 1).
-* Wrappers (`sudo`, `timeout`, `pct exec`, `docker exec`, `sh -c`, …) are
+* Wrappers (`sudo`, `timeout`, `pct exec`, `qm guest exec`, `docker exec`,
+  `sh -c`, …) are
   unwrapped before classification; each unwrap lands in the step's ``context``
   list (outermost first), which is what F2 renders as prefix chips (rule 3).
 * Anything the engine cannot see through is ``unknown``. `read` is the only
@@ -1000,6 +1001,19 @@ def _unwrap(argv, state):
             if not rest:
                 return None
             return rest, f'pct {args[1]}', f'pct:{args[1]}'
+        return None
+
+    if verb == 'qm':
+        # `qm guest exec <vmid> [--] cmd…` runs inside a VM, like `pct exec`
+        # (F7). `qm list|status|config` are handled by the verb table.
+        if (len(args) >= 3 and args[0] == 'guest' and args[1] == 'exec'
+                and args[2].isdigit()):
+            rest = args[3:]
+            if rest and rest[0] == '--':
+                rest = rest[1:]
+            if not rest:
+                return None
+            return rest, f'qm {args[2]}', f'qm:{args[2]}'
         return None
 
     if verb == 'ip':

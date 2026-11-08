@@ -36,3 +36,6 @@ sudo sudo sudo sudo ls
 
 ### pct-status | kinds=read | flags=
 pct status 103
+
+### qm-guest-exec | kinds=read | inner=qm:201
+qm guest exec 201 -- uptime
