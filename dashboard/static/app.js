@@ -3296,14 +3296,21 @@ function planNeedsConfirm(plan) {
 function planItemHtml(plan, item) {
   var removed = (_planRemoved[String(plan.id)] || {})[item.id];
   var row = { id: plan.id, command: item.command, breakdown: item.breakdown };
-  return '<div class="plan-item' + (removed ? ' plan-item-off' : '') + '">' +
+  /* SR4: an item that reaches any host, or that may run more than once, grants
+     more than one exact run on one host — make those stand out. */
+  var anyHost = !item.host || item.host === '*';
+  var multiUse = (Number(item.max_uses) || 1) > 1;
+  return '<div class="plan-item' + (removed ? ' plan-item-off' : '') +
+      (anyHost || multiUse ? ' plan-item-broad' : '') + '">' +
     '<label class="plan-pick" title="Untick to remove this item before approving">' +
       '<input type="checkbox" data-plan="' + Number(plan.id) + '" data-item="' + Number(item.id) + '"' +
         (removed ? '' : ' checked') + ' onchange="togglePlanItem(this)"></label>' +
     '<div class="plan-item-body">' +
       '<div class="plan-item-head">' +
-        '<span class="plan-host">' + escapeHtml(planHostLabel(item.host)) + '</span>' +
-        '<span class="plan-uses" title="How many times this exact command may run">\u00d7' +
+        '<span class="plan-host' + (anyHost ? ' plan-host-any' : '') + '">' +
+          escapeHtml(planHostLabel(item.host)) + '</span>' +
+        '<span class="plan-uses' + (multiUse ? ' plan-uses-multi' : '') +
+          '" title="How many times this exact command may run">\u00d7' +
           Number(item.max_uses || 1) + '</span>' +
       '</div>' +
       '<code class="plan-cmd">' + escapeHtml(item.command || '') + '</code>' +
@@ -3335,6 +3342,9 @@ function planCardHtml(plan) {
         'Check the items, then press Approve again.</div>'
       : '') +
     (plan.note ? '<div class="plan-note">' + escapeHtml(plan.note) + '</div>' : '') +
+    (plan.strict_sessions ? '' :
+      '<div class="plan-hint">Strict sessions are off — anyone with the gateway ' +
+      'SSH key who knows this session id can use this plan.</div>') +
     items.map(function (item) { return planItemHtml(plan, item); }).join('') +
     '<div class="plan-actions">' +
       '<label class="plan-ttl">Approve for <select id="plan-ttl-' + Number(plan.id) +

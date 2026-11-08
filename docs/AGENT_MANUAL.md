@@ -141,6 +141,10 @@ Rules:
   id cannot use one.
 - Prefer one plan per task, proposed after recon. A session override is still
   available to the operator, but a plan is the reviewable form.
+- **Plans inherit the session's trust boundary.** With strict sessions off, any
+  caller that has the gateway SSH key and knows the session id can use the
+  plan; the approval card says so. Turn strict sessions on before relying on
+  plans for anything that matters.
 
 At the end of the task, `session_summary()` with no arguments describes **this
 MCP connection's bound session** — the id from `session_begin`, or the last id

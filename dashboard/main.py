@@ -3418,6 +3418,9 @@ def _plan_payload(plan: dict) -> dict:
     session = get_session(plan.get('session_id') or '')
     out['agent'] = session.get('agent') or ''
     out['session_goal'] = session.get('goal') or ''
+    # SR3: the card says when a plan is only as safe as the session id, so the
+    # operator can enable strict sessions before relying on it.
+    out['strict_sessions'] = require_sessions_enabled()
     return out
 
 
