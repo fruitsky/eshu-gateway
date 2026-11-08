@@ -105,6 +105,43 @@ The signature proves to the gateway that this id was minted by the dashboard
 for this fleet; the gateway verifies it locally with the key from its last
 policy poll. Do not construct or reuse a prefix by hand.
 
+### Session plans — propose the changes, get one approval
+
+Reconnaissance is cheap; changing things is not. After you have looked around,
+call `session_plan` with the **exact commands** you intend to run, so the
+operator approves the list once instead of every command:
+
+```json
+{"name": "session_plan", "arguments": {
+  "session_id": "<id>",
+  "note": "Add the app vhost and reload nginx on web01",
+  "items": [
+    {"host": "192.0.2.10", "command": "cp /etc/nginx/sites-available/app /etc/nginx/sites-available/app.bak", "max_uses": 1},
+    {"host": "192.0.2.10", "command": "sed -i 's/listen 80;/listen 8080;/' /etc/nginx/sites-available/app", "max_uses": 1},
+    {"host": "192.0.2.10", "command": "systemctl reload nginx", "max_uses": 1}
+  ]}}
+```
+
+Rules:
+
+- `host` is a gateway IP or `*`; `command` is the **exact text** you will send.
+  Matching is byte-exact after trimming whitespace — no patterns, no prefixes.
+  `max_uses` (1–100) says how many times that exact command may run under the
+  plan.
+- At most 50 items, each under 4 kB. The session must have been started with
+  `session_begin`.
+- The operator approves it in the dashboard, possibly removing items and
+  choosing a TTL (30 minutes to 4 hours). Each approved item then runs without
+  further prompts for that session until its uses are spent or the plan
+  expires. Anything not in the plan (or a removed item) still needs normal JIT.
+- Poll `check_plan(plan_id)` for `status` (`proposed`, `approved`, `denied`,
+  `expired`, `ended`) and each item's remaining uses.
+- Freeze and Zero-Trust always win; a denied/ended/expired plan grants nothing.
+  A plan never covers another session, and with strict sessions on an unsigned
+  id cannot use one.
+- Prefer one plan per task, proposed after recon. A session override is still
+  available to the operator, but a plan is the reviewable form.
+
 At the end of the task, `session_summary()` with no arguments describes **this
 MCP connection's bound session** — the id from `session_begin`, or the last id
 passed to an MCP tool. It does **not** see SSH commands stamped with a
@@ -125,8 +162,9 @@ Rules:
 - **One name and one id per task.** The `goal` is the name the operator sees;
   the id is the grouping key. Keep both for the whole task, pass the id on every
   call, and never mix a minted id with your chat id.
-- **Both tools are always available**, even to an agent with a strict tool
-  allowlist.
+- **The session tools are always available** (`session_begin`,
+  `session_summary`, `session_plan`, `check_plan`), even to an agent with a
+  strict tool allowlist.
 - **Omission is not an error when enforcement is off — it inherits.** After
   `session_begin`, an MCP call without `session_id` is grouped into that session
   on the same connection. Only a connection that never named a session falls
@@ -145,9 +183,10 @@ Rules:
   only explicit ids — inherited and transport ids are reported as `auto`, not
   as compliance.
 - **One command, one ticket.** A session id groups commands; it does not cache
-  approvals. Re-running the same command raises a new JIT. The exception is an
-  operator-granted **Session Override** for that session (and host): while it
-  is active, matching commands auto-approve until it expires.
+  approvals. Re-running the same command raises a new JIT. The exceptions are an
+  operator-granted **Session Override** for that session (and host), and an
+  operator-approved **plan item** (see "Session plans"), which covers that exact
+  command up to its `max_uses` while the plan is active.
 - **`_eshu` is object-only.** Array-returning tools (the list endpoints) do not
   carry `_eshu`, so their absence is not evidence of missing attribution. Pass
   `session_id` explicitly if you need it, or confirm with

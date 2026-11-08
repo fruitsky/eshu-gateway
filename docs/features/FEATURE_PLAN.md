@@ -1079,7 +1079,102 @@ claim tickets for `approved` rows.
 
 ### Implementer notes
 
-_(fill in)_
+**What I did**
+
+* **DB** (`db/session_plans.py`, tables created from `db/core.py`):
+  `session_plans` + `session_plan_items` and the lifecycle
+  `proposed → approved | denied → expired | ended`. `create_plan` replaces an
+  existing `proposed` plan; `approve_plan` requires the plan to still be
+  `proposed`, marks the removed items, clamps the TTL to 1–240 min (default
+  60) and ends any other approved plan for the session; `expire_plans` lazily
+  expires; `claim_plan_item` selects the matching item and then does **one**
+  conditional `UPDATE … SET uses = uses + 1 WHERE id = ? AND removed = 0 AND
+  uses < max_uses`, refusing when `rowcount != 1`.
+* **Approval path** (`POST /api/request`): the plan check sits after the
+  encoded-payload block and before the session override (§ 2.6). It runs only
+  with a session id, when the fleet is not frozen and the gateway is not
+  Zero-Trust; with strict sessions on, `session_problem(sid)` must be empty
+  (the dashboard half of the signature rule — the gateway refuses unsigned ids
+  first). A match creates the request as `approved` with
+  `reason="session-plan:<plan>:<item>"`, audits `jit_plan_approved` and returns
+  `{plan: true, plan_id}`. Matching is byte-exact after trimming whitespace;
+  `*` matches any host, an explicit host matches only that gateway.
+* **REST**: `GET /api/session-plans?status=&session_id=`,
+  `POST /{id}/approve {ttl_minutes, removed_item_ids}`, `POST /{id}/deny`,
+  `POST /{id}/end` — session-authenticated, each audited (`plan_approved`,
+  `plan_denied`, `plan_ended` with the actor and item ids; the proposal is
+  audited as `plan_proposed`). Plan items carry their F2 breakdown for the
+  review card.
+* **MCP**: `session_plan(session_id, items, note)` and
+  `check_plan(plan_id, session_id?)`, registered next to `session_begin` on the
+  shared server and every per-integration server and added to
+  `_ALWAYS_ALLOWED`. `session_plan` validates the id shape and that the session
+  exists, the 50-item / 4 kB / host / max_uses limits, notifies the operator
+  ("Plan for session X: N changes on M hosts") and audits `plan_proposed`.
+* **UI**: a "Plans awaiting approval" card above the queue. Each item shows its
+  host, `×max_uses`, the exact command and the F2 breakdown; unticking removes
+  it from the approval; a TTL selector (30 min – 4 h) and Approve/Deny. The
+  session modal shows the session's plan with per-item `uses/max_uses` and an
+  End button. Every agent-controlled string is escaped.
+* **Docs**: `docs/AGENT_MANUAL.md` (a "Session plans" section plus the
+  "one command, one ticket" exceptions), `docs/API.md`, and the `session_begin`
+  description.
+
+**Surprises and decisions**
+
+* The plan check sits **after** the encoded-payload scan, so a blocked decoded
+  payload still raises before any plan can approve it.
+* The claim's `rowcount == 0` case means another request took the last use; the
+  caller then falls through to normal JIT instead of being approved. Eight
+  threads racing a `max_uses=1` item produce exactly one approval.
+* Removed items stay in the table (`removed=1`) so the audit trail shows what
+  the operator dropped; they never match. Denied/expired/ended plans match
+  nothing (the claim requires `status='approved' AND until > now`), and
+  `expire_plans` marks an elapsed plan `expired` so the UI says so.
+* The proposal notification rides the existing `jit` webhook event, so it
+  reaches operators with the default subscription; no new event type to
+  configure.
+* `check_plan` takes an optional `session_id` and refuses a mismatch — plan ids
+  are small integers and a plan names the commands another session intends to
+  run.
+* The TTL is clamped server-side (1–240 min) even though the UI offers
+  30/60/120/240, and a plan can only be approved once (`not_proposed`
+  otherwise).
+* One existing test changed: `tests/test_omada_mcp.py` asserted the exact
+  per-integration tool set, which now includes `session_plan` and `check_plan`
+  (commit message says so). Everything else is untouched.
+
+**Deliberately not done**
+
+* No item editing (out of scope), no guest-name labels (F7 optional), and no
+  statistics bucket — the `session-plan:` "how approved" bucket is F6's job.
+* No change to the gateway, to session overrides, or to F4's read lane. A plan
+  is the only new auto-approve path and it only ever matches the exact bytes
+  an operator approved.
+
+**Tests** — `tests/test_f3_session_plans.py` (15): approve-once-then-pend and
+the audit event; approve-a-subset (removed item pends); host-specific vs `*`;
+session binding (another id and no id never match); expired/denied/ended plans
+do not approve; Zero-Trust and Freeze win; strict sessions refuse an unminted
+session; the 8-thread `max_uses=1` race approves exactly one; the REST list /
+approve-subset / deny / end / auth; and the MCP validation + `check_plan`
+reporting.
+
+**Screenshot** — the Plans card (each item with its F2 breakdown, the TTL
+selector and the approve/deny actions):
+![Plans card](../screenshots/f3/plans-card-desktop.png)
+
+and the session modal's plan with per-item uses:
+![Session plan](../screenshots/f3/session-plan-modal.png)
+
+`bash scripts/verify.sh` (pre-commit green):
+
+```
+1750 passed, 7 warnings in 350.22s (0:05:50)
+```
+
+(1735 before this chunk + 15 new F3 tests.)
+
 
 ### Reviewer notes
 

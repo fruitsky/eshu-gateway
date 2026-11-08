@@ -157,12 +157,19 @@ development tools" Settings toggle; not reachable by gateways or AI agents.
 |--------|------|---------|------|
 | `GET` | `/api/sessions/recent?limit=24` | Recent session summaries merged across SSH and MCP, plus 7-day tagging coverage | Session |
 | `GET` | `/api/sessions/{id}/detail` | One session's SSH commands and MCP calls (encoded payloads decoded for review) | Session |
+| `GET` | `/api/session-plans?status=proposed&session_id=…` | Session plans (F3): items, per-item uses and the F2 breakdown | Session |
+| `POST` | `/api/session-plans/{id}/approve` | Approve a plan: `{ttl_minutes, removed_item_ids}` (1–240 min) | Session |
+| `POST` | `/api/session-plans/{id}/deny` | Deny a plan — none of its items can auto-approve | Session |
+| `POST` | `/api/session-plans/{id}/end` | End an approved plan (or withdraw a proposed one) | Session |
 | `GET` | `/api/onboarding` | First-run state: `done`, `key_configured`, gateway count, `show` | Session |
 | `POST` | `/api/onboarding/done` | Mark the first-run walkthrough as seen (Skip or Finish) | Session |
 
 Agents mint sessions over MCP with `session_begin(goal, session_id)` — see
 [AGENT_MANUAL.md](AGENT_MANUAL.md) — and the returned `ssh_prefix` is what a
-strict gateway verifies.
+strict gateway verifies. They propose changes with `session_plan(items)` and
+poll `check_plan(plan_id)`; an operator-approved plan item auto-approves that
+exact command for that session up to its `max_uses` (reason prefix
+`session-plan:`).
 
 ## Statistics & Monitoring (dashboard authentication required)
 
