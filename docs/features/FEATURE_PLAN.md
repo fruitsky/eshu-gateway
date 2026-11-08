@@ -1309,6 +1309,28 @@ chat ids. The plan's docs should recommend turning strict sessions on
 before relying on plans. The security reviewer decides whether to require
 it.
 
+
+**Round 2 (2026-11-08): approved by the feature reviewer; waiting on security sign-off (§ 2.6a).**
+127 F3, F2 and MCP tests pass locally; implementer's full run 1760 passed.
+
+* **R1:** `session_plan` and `check_plan` refuse another agent's session with
+  `session_not_yours`. The card shows the agent and the session goal, both
+  escaped. A session minted with no agent can still take a plan from any
+  caller; the card then reads "unknown agent", which is acceptable.
+* **R2:** the TTL lives in `_planTtl` and survives the 3 s poll.
+* **R3:** a changed proposal id for a session on screen shows the banner and
+  needs a second press. `create_plan` replaces a proposal in one transaction,
+  so no poll can see a gap that would hide the swap.
+* **R4:** the UPDATE rechecks the plan's status and `until`; a test ends the
+  plan between the SELECT and the UPDATE.
+* **S1–S4:** all done as asked.
+
+**Do not merge until the security reviewer signs off below.**
+
+#### Security reviewer sign-off
+
+_(security reviewer)_
+
 ---
 
 ## Chunk F4 — Read-only lane (shadow first) · slug `read-lane` · dashboard
@@ -2044,7 +2066,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 1 | F1 | breakdown | dashboard | **Merged** 2026-11-07 | `feat/f1-breakdown` @ `e0df20a` | — | 3 rounds; 155 adversarial cases; 14.7% unknown on live data |
 | 2 | F2 | review-card | UI | **Merged** 2026-11-08 | `feat/f2-review-card` @ `286df1b` | F1 | 2 rounds |
 | 3 | F7 | inner-target | dashboard | **Merged** 2026-11-08 | `feat/f7-inner-target` @ `0ad167f` | F1 | 1 round; backfill 7.1 s on a live-DB copy |
-| 4 | F3 | session-plans | dashboard + MCP | **Changes requested (R1)** | `feat/f3-session-plans` | F2 | + security reviewer sign-off |
+| 4 | F3 | session-plans | dashboard + MCP | **Approved (feature review); awaiting security sign-off** | `feat/f3-session-plans` | F2 | + security reviewer sign-off |
 | 5 | F4 | read-lane | dashboard | Ready (after F3) | `feat/f4-read-lane` | F1, F3, Chunk H | reviewer pass + security reviewer sign-off |
 | 6 | F5 | exec-results | gateway + dashboard | Ready (after F4) — design first | `feat/f5-exec-results` | — | design approval needed |
 | 7 | F12 | ssh-exec | dashboard + gateway | Ready (after F5) — design first | `feat/f12-ssh-exec` | F4, F5 | design approval + security reviewer sign-off |
