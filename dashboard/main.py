@@ -166,6 +166,12 @@ def _encoded_fields(command: str) -> dict:
     }
 
 
+def _inner_target_for(command: str) -> str:
+    """F7: the container/VM a command really runs inside, for the request row."""
+    from core.inner_targets import inner_target_for
+    return inner_target_for(command)
+
+
 def _is_dev_mode() -> bool:
     head_path = os.path.join(os.path.dirname(
         os.path.abspath(__file__)), '..', '.git', 'HEAD')
@@ -336,6 +342,10 @@ def on_startup():
     # Start background gateway transition watcher (offline detection)
     watch_thread = threading.Thread(target=_gateway_watch_loop, daemon=True)
     watch_thread.start()
+    # F7: attribute pre-migration rows to their real container/VM. Background
+    # and idempotent, so it never delays startup or a request.
+    from core.inner_targets import start_backfill_thread
+    start_backfill_thread()
     # Start background gap scanner (learning suggestions)
     from core.learning import refresh_gaps, _gaps_loop
     refresh_gaps()
@@ -710,7 +720,8 @@ def receive_request(payload: GatewayPayload, request: Request):
             if match:
                 create_request(target_ip, cmd, status="blocked",
                                reason="encoded-payload:%s" % match[:40],
-                               session_id=sid, execution_id=eid)
+                               session_id=sid, execution_id=eid,
+                               inner_target=_inner_target_for(cmd))
                 update_gateway_last_seen(target_ip)
                 record_audit_event(
                     'encoded_payload_blocked', target_ip,
@@ -726,7 +737,8 @@ def receive_request(payload: GatewayPayload, request: Request):
         if ov and not get_gateway_zero_trust(target_ip):
             req_id = create_request(target_ip, cmd, status="approved",
                                     reason="session-override:%d" % ov["id"],
-                                    session_id=sid, execution_id=eid)
+                                    session_id=sid, execution_id=eid,
+                                    inner_target=_inner_target_for(cmd))
             update_gateway_last_seen(target_ip)
             scope = ov["target_ip"] or "any host"
             record_audit_event(
@@ -747,13 +759,15 @@ def receive_request(payload: GatewayPayload, request: Request):
     if row and row['override_until'] and row['override_until'] > now \
             and not frozen and not get_gateway_zero_trust(target_ip):
         req_id = create_request(target_ip, cmd, status="approved", reason="override",
-                                session_id=sid, execution_id=eid)
+                                session_id=sid, execution_id=eid,
+                                inner_target=_inner_target_for(cmd))
         update_gateway_last_seen(target_ip)
         record_audit_event('jit_override_approved', target_ip, details=f'Override auto-approved JIT #{req_id}: {cmd[:80]} (reason: {row["override_reason"][:60]})')
         return {"status": "ok", "id": f"{req_id:06d}", "request_id": req_id, "override": True,
                 "scope": "host", "message": "Auto-approved via Override Mode"}
 
-    req_id = create_request(target_ip, cmd, status="pending", session_id=sid, execution_id=eid)
+    req_id = create_request(target_ip, cmd, status="pending", session_id=sid, execution_id=eid,
+                            inner_target=_inner_target_for(cmd))
     update_gateway_last_seen(target_ip)
     send_notify('jit', 'JIT Approval Required', f'`{cmd[:80]}` on {target_ip}')
     record_audit_event('jit_created', target_ip, details=f'JIT #{req_id}: {cmd[:80]}')
@@ -780,7 +794,10 @@ def receive_log(payload: GatewayPayload, request: Request):
     reason = (payload.reason or '')[:200]
     token = (payload.token or '')[:64]
     cmd = decode_cmd(payload.encoded_command)
-    create_request(target_ip, cmd, status=payload.status, ttl=0, reason=reason, session_id=(payload.session_id or '')[:64], execution_id=(payload.execution_id or '')[:64])
+    create_request(target_ip, cmd, status=payload.status, ttl=0, reason=reason,
+                   session_id=(payload.session_id or '')[:64],
+                   execution_id=(payload.execution_id or '')[:64],
+                   inner_target=_inner_target_for(cmd))
     if payload.status == 'window-rejected' and token:
         wins = get_approved_windows()
         target = next((w for w in wins if w['token'] == token), None)
@@ -912,13 +929,15 @@ def claim_ticket_by_id(req_id: int, request: Request):
 # ── Dashboard Endpoints (AUTH PROTECTED — sensitive operations) ─────────
 
 @app.get("/api/requests")
-def list_requests(request: Request, search: str = None, session: str = None):
+def list_requests(request: Request, search: str = None, session: str = None,
+                  inner_target: str = None):
     _check_session(request)
     session = (session or '')[:64] or None
+    inner_target = (inner_target or '')[:64] or None
     if search:
-        reqs = search_requests(search, session_id=session)
+        reqs = search_requests(search, session_id=session, inner_target=inner_target)
     else:
-        reqs = get_all_requests(session_id=session)
+        reqs = get_all_requests(session_id=session, inner_target=inner_target)
     now = int(time.time())
     for r in reqs:
         if r['status'] in ['pending', 'approved']:
@@ -1101,6 +1120,42 @@ def list_gateways(request: Request):
         override_until = g.get('override_until', 0) or 0
         g['override_remaining'] = max(0, override_until - now)
     return gateways
+
+@app.get("/api/gateways/{ip}/inner-targets")
+def gateway_inner_targets(ip: str, request: Request, days: int = 30):
+    """F7: the containers/VMs a gateway reached in the last `days` days.
+
+    Aggregates the `requests.inner_target` column written for pct/qm/docker
+    wrappers. `multi` rows (a command that reached several targets) are not
+    attributed to any one target. Session-authenticated; the override dialog
+    uses it to warn that a host override also covers its guests.
+    """
+    _check_session(request)
+    days = max(1, min(int(days or 30), 365))
+    cutoff = int(time.time()) - days * 86400
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            """
+            SELECT inner_target, COUNT(*) AS calls
+            FROM requests
+            WHERE target_ip = ? AND created_at >= ?
+              AND inner_target IS NOT NULL AND inner_target != ''
+              AND inner_target != 'multi'
+            GROUP BY inner_target
+            """, (ip, cutoff)).fetchall()
+    finally:
+        conn.close()
+    groups = {'pct': [], 'qm': [], 'docker': []}
+    for row in rows:
+        kind, _sep, name = (row['inner_target'] or '').partition(':')
+        if kind in groups and name:
+            groups[kind].append(name)
+    for kind in groups:
+        groups[kind] = sorted(set(groups[kind]))
+    return {'pct': groups['pct'], 'qm': groups['qm'], 'docker': groups['docker'],
+            'count': len(groups['pct']) + len(groups['qm']) + len(groups['docker'])}
+
 
 class OverridePayload(BaseModel):
     minutes: int = 30
@@ -2077,7 +2132,21 @@ def get_statistics(request: Request, days: int = 14, gateway_ip: str = None, gat
         for tc in top_commands:
             tc['description'] = describe_command(tc['command'])
 
-    result = {"daily": filled, "per_gateway": per_gateway, "top_commands": top_commands}
+    # F7: busiest inner targets — the containers/VMs commands really ran in.
+    cursor.execute(f'''
+        SELECT r.inner_target AS target, COUNT(*) AS count
+        FROM requests r
+        WHERE r.created_at >= ?{ip_filter}
+          AND r.inner_target IS NOT NULL AND r.inner_target != ''
+          AND r.inner_target != 'multi'
+        GROUP BY r.inner_target
+        ORDER BY count DESC
+        LIMIT 10
+    ''', (cutoff,) + ip_params)
+    inner_targets = [dict(row) for row in cursor.fetchall()]
+
+    result = {"daily": filled, "per_gateway": per_gateway,
+              "top_commands": top_commands, "inner_targets": inner_targets}
 
     if extended:
         # Hourly heatmap — 24-element array

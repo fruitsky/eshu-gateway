@@ -1147,6 +1147,38 @@ button::-moz-focus-inner { border: 0; padding: 0; }
     .btn-sm { padding: 6px 10px; font-size: 11px; }
   }
 
+  /* ── F7: inner-target chip + override warning ───────────────── */
+  .inner-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    margin-left: 6px;
+    padding: 1px 6px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: var(--text-micro);
+    letter-spacing: 0.4px;
+    color: var(--text-dim);
+    background: none;
+    border: 1px solid var(--rule-weak);
+    border-radius: 3px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .inner-chip:hover { color: var(--text-main); border-color: var(--text-quiet); }
+  .inner-chip-pct { color: var(--status-warning); border-color: var(--accent-line); }
+  .inner-chip-qm { color: var(--state-auto); border-color: var(--rule); }
+  .inner-chip-docker { color: var(--text-dim); border-color: var(--rule); }
+  .inner-chip-multi { color: var(--text-quiet); border-style: dashed; cursor: default; }
+  .override-inner-warning {
+    margin: 0 0 12px;
+    padding: 8px 10px;
+    border-left: 2px solid var(--status-warning);
+    background: var(--accent-wash);
+    color: var(--text-main);
+    font-size: var(--text-xs);
+    line-height: 1.45;
+  }
+
   /* ── F2: breakdown on the approval card ──────────────────────
      Advisory, never an approval: all-read is muted ink (not green), a write
      is amber, an unclassified step is amber with a red rule. Agent-controlled

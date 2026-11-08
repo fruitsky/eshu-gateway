@@ -13,21 +13,35 @@ def init_requests_tables(cursor):
         )
     ''')
     # Migrations: add optional columns over time (session_id groups SSH requests into sessions)
+    existing = {row[1] for row in cursor.execute("PRAGMA table_info(requests)").fetchall()}
     for col, defval in [('reason', "''"), ('session_id', "''"), ('execution_id', "''")]:
+        if col in existing:
+            continue
         try:
             cursor.execute(f"ALTER TABLE requests ADD COLUMN {col} TEXT DEFAULT {defval}")
         except Exception:
             pass
+    # F7: the real target of a pct/qm/docker wrapper. Deliberately nullable:
+    # NULL marks a row that predates the column and still needs the startup
+    # backfill, while '' means "this command has no inner target".
+    if 'inner_target' not in existing:
+        try:
+            cursor.execute("ALTER TABLE requests ADD COLUMN inner_target TEXT")
+        except Exception:
+            pass
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_requests_inner_target "
+        "ON requests(target_ip, inner_target)")
 
-def create_request(target_ip: str, command: str, status: str = 'pending', ttl: int = 90, reason: str = '', session_id: str = '', execution_id: str = ''):
+def create_request(target_ip: str, command: str, status: str = 'pending', ttl: int = 90, reason: str = '', session_id: str = '', execution_id: str = '', inner_target: str = ''):
     with db_conn() as conn:
         cursor = conn.cursor()
         created_at = int(time.time())
         expires_at = created_at + ttl
         cursor.execute('''
-            INSERT INTO requests (target_ip, command, status, created_at, expires_at, reason, session_id, execution_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (target_ip, command, status, created_at, expires_at, reason, session_id, execution_id))
+            INSERT INTO requests (target_ip, command, status, created_at, expires_at, reason, session_id, execution_id, inner_target)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (target_ip, command, status, created_at, expires_at, reason, session_id, execution_id, inner_target or ''))
         conn.commit()
         return cursor.lastrowid
 
@@ -56,11 +70,12 @@ def update_ticket_consumed_by_ip(target_ip: str):
             return f"{ticket_ts}|{row['command']}"
         return None
 
-def get_all_requests(session_id: str = None):
-    """Newest 200 requests, optionally narrowed to one session.
+def get_all_requests(session_id: str = None, inner_target: str = None):
+    """Newest 200 requests, optionally narrowed to one session or inner target.
 
     A session filter has to run in SQL, not on the returned page: a session's
-    oldest commands are usually outside the newest 200 rows.
+    oldest commands are usually outside the newest 200 rows. `inner_target`
+    (F7) is an exact match on the recorded container/VM target.
     """
     with db_conn() as conn:
         cursor = conn.cursor()
@@ -70,10 +85,14 @@ def get_all_requests(session_id: str = None):
             LEFT JOIN gateways g ON r.target_ip = g.ip
             WHERE r.status NOT IN ('integration-approved', 'integration-denied')
         '''
+        params = []
         if session_id:
-            cursor.execute(base + ' AND r.session_id = ? ORDER BY r.id DESC LIMIT 200', (session_id,))
-        else:
-            cursor.execute(base + ' ORDER BY r.id DESC LIMIT 200')
+            base += ' AND r.session_id = ?'
+            params.append(session_id)
+        if inner_target:
+            base += ' AND r.inner_target = ?'
+            params.append(inner_target)
+        cursor.execute(base + ' ORDER BY r.id DESC LIMIT 200', tuple(params))
         rows = cursor.fetchall()
         return [dict(row) for row in rows]
 
@@ -164,7 +183,8 @@ def delete_old_requests(before_ts: int):
         cursor.execute('DELETE FROM requests WHERE created_at < ?', (before_ts,))
         conn.commit()
 
-def search_requests(query: str, limit: int = 200, session_id: str = None):
+def search_requests(query: str, limit: int = 200, session_id: str = None,
+                    inner_target: str = None):
     with db_conn() as conn:
         cursor = conn.cursor()
         pattern = f"%{query}%"
@@ -179,6 +199,9 @@ def search_requests(query: str, limit: int = 200, session_id: str = None):
         if session_id:
             sql += ' AND r.session_id = ?'
             params.append(session_id)
+        if inner_target:
+            sql += ' AND r.inner_target = ?'
+            params.append(inner_target)
         sql += ' ORDER BY r.id DESC LIMIT ?'
         params.append(limit)
         cursor.execute(sql, params)

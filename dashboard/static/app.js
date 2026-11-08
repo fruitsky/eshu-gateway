@@ -1631,6 +1631,7 @@ async function fetchRequests() {
     let q = [];
     if (_requestSearchQuery) q.push('search=' + encodeURIComponent(_requestSearchQuery));
     if (_historySession) q.push('session=' + encodeURIComponent(_historySession));
+    if (_historyInnerTarget) q.push('inner_target=' + encodeURIComponent(_historyInnerTarget));
     if (q.length) url += '?' + q.join('&');
     const res = await fetch(url);
     if (res.status === 401) { await checkAuth(); return; }
@@ -2459,6 +2460,7 @@ var _sessionCoverage = null;
 var _sessionsExpanded = false;
 var SESSIONS_COLLAPSED = 3;
 var _historySession = '';
+var _historyInnerTarget = '';
 
 function sessionRow(s, names, now) {
   var meta = names[s.session_id] || {};
@@ -2772,6 +2774,28 @@ function setHistorySession(sid, skipFetch) {
 }
 
 function clearHistorySession() { setHistorySession(''); }
+
+/* F7: an inner-target filter, alongside the session filter. Clicking a chip
+   on a history row, a pending card or the Statistics list lands here. */
+function setHistoryInnerTarget(target, skipFetch) {
+  _historyInnerTarget = (target || '').slice(0, 64);
+  var chip = document.getElementById('history-inner-chip');
+  var label = document.getElementById('history-inner-label');
+  if (chip && label) {
+    label.textContent = _historyInnerTarget ? innerTargetLabel(_historyInnerTarget) : '';
+    chip.classList.toggle('hidden', !_historyInnerTarget);
+  }
+  if (!skipFetch) fetchRequests();
+}
+
+function clearHistoryInnerTarget() { setHistoryInnerTarget(''); }
+
+function filterByInnerTarget(target) {
+  if (!target) return;
+  setHistoryInnerTarget(target, true);
+  switchView('history');
+  fetchRequests();
+}
 
 function filterHistoryToSession() {
   if (!_activeSessionSid) return;
@@ -3261,7 +3285,7 @@ function renderJitItem(item) {
       return '<div class="jit-ticket' + (r.anomaly ? ' urgent' : '') + '" data-id="' + esc(rDom) + '" onclick="openContextPanel(' + escJs(rDom) + ')">' +
         '<button type="button" class="' + ccCheckClass(rDom) + '" role="checkbox" aria-checked="' + ccCheckAria(rDom) + '" aria-label="Select request" onclick="event.stopPropagation();toggleBulkSelect(' + escJs(rDom) + ',event)"></button>' +
         '<div class="jit-body" style="min-width:0">' +
-          '<div class="jit-human">' + escapeHtml(human || 'Command request') + '</div>' +
+          '<div class="jit-human">' + escapeHtml(human || 'Command request') + innerTargetChipHtml(r.inner_target) + '</div>' +
           bdHeadlineHtml(r) +
           '<div class="jit-cmd-text">' + escapeHtml(r.command) + '</div>' +
           bdBodyHtml(r) +
@@ -3562,6 +3586,7 @@ function renderTable() {
        fetches /api/requests/{id}/breakdown on demand and expands a row. */
     const breakdownLink = '<button type="button" class="bd-hist-link" title="Show the step breakdown" ' +
       'onclick="event.stopPropagation();toggleHistoryBreakdown(' + Number(req.id) + ',this)">breakdown</button>';
+    const innerChip = innerTargetChipHtml(req.inner_target);
     const gwPillHtml = gwPill(req.hostname || 'N/A');
     const _sid = req.session_id || '';
     const sCell = (_sid && _sid !== 'unknown')
@@ -3578,7 +3603,7 @@ function renderTable() {
       '<td class="' + idClass + '"' + gapTitle + '>' + idDisplay + '</td>' +
       '<td class="text-muted text-xs">' + formatTime(req.created_at) + '</td>' +
       '<td>' + gatewayCell + '</td>' +
-      '<td class="cell-cmd"><div class="flex items-center gap-1">' + riskHtml + anomalyHtml + '<code class="cmd-code" title="' + escapedCmd + '">' + escapedCmd + '</code><button class="js-copy-cmd flex-shrink-0 text-xs opacity-30 hover:opacity-80 px-1 py-0.5 rounded transition-opacity text-muted" data-cmd="' + encodeURIComponent(req.command) + '" title="Copy"></button>' + decodedChip + breakdownLink + '</div>' +
+      '<td class="cell-cmd"><div class="flex items-center gap-1">' + riskHtml + anomalyHtml + '<code class="cmd-code" title="' + escapedCmd + '">' + escapedCmd + '</code><button class="js-copy-cmd flex-shrink-0 text-xs opacity-30 hover:opacity-80 px-1 py-0.5 rounded transition-opacity text-muted" data-cmd="' + encodeURIComponent(req.command) + '" title="Copy"></button>' + decodedChip + innerChip + breakdownLink + '</div>' +
         (function() {
           var _desc = describeCmd(req.command);
           if (!_desc) return '';
@@ -4162,6 +4187,51 @@ function bdNeedsConfirm(req) {
   return (summary.unknown || 0) >= 1 && String(req.command || '').length > 500;
 }
 
+/* ── F7: inner target attribution ─────────────────────────────────────────
+   A command wrapped in pct/qm/docker runs inside a container or VM; the row
+   records that target (`pct:103`, `qm:201`, `docker:sonarr`, or `multi`).
+   These helpers render the chip and the host-override warning. The chip text
+   is agent-adjacent data, so it goes through escapeHtml like everything else. */
+
+var INNER_KIND_LABEL = { pct: 'pct', qm: 'qm', docker: 'docker' };
+
+function innerTargetLabel(value) {
+  if (!value) return '';
+  if (value === 'multi') return 'multi';
+  var idx = value.indexOf(':');
+  if (idx <= 0) return value;
+  var kind = value.substring(0, idx);
+  return (INNER_KIND_LABEL[kind] || kind) + ' ' + value.substring(idx + 1);
+}
+
+function innerTargetChipHtml(value) {
+  if (!value || typeof value !== 'string') return '';
+  if (value === 'multi') {
+    return '<span class="inner-chip inner-chip-multi" title="This command reaches several containers/VMs">multi</span>';
+  }
+  var idx = value.indexOf(':');
+  if (idx <= 0 || idx === value.length - 1) return '';
+  var kind = value.substring(0, idx);
+  var label = innerTargetLabel(value);
+  return '<button type="button" class="inner-chip inner-chip-' + escapeHtml(kind) + '" ' +
+    'title="Runs inside ' + escapeHtml(label) + ' \u2014 click to filter history" ' +
+    'onclick="event.stopPropagation();filterByInnerTarget(' + escJs(value) + ')">' +
+    escapeHtml(label) + '</button>';
+}
+
+/* The host-override dialog warning: an override on a Proxmox host also covers
+   every container/VM reached through pct/qm. Warning only. */
+function overrideInnerWarningHtml(data) {
+  if (!data) return '';
+  var total = ((data.pct || []).length) + ((data.qm || []).length);
+  if (!total) return '';
+  var one = total === 1;
+  var text = 'This host reaches ' + total + ' container' + (one ? '' : 's') +
+    '/VM' + (one ? '' : 's') + ' via pct/qm. An override here also covers ' +
+    'commands run inside ' + (one ? 'it' : 'them') + '.';
+  return '<div class="override-inner-warning" role="status">' + escapeHtml(text) + '</div>';
+}
+
 function describeCmd(cmd) {
   if (!cmd || !_cmdDescs || Object.keys(_cmdDescs).length === 0) return '';
   // For compound chains, describe each meaningful fragment and join them.
@@ -4366,6 +4436,23 @@ function openOverrideModal(ip, hostname) {
   document.getElementById('override-modal-reason').value = '';
   document.getElementById('override-modal').classList.remove('hidden');
   document.getElementById('override-modal-reason').focus();
+  /* F7: warn when this host reaches containers/VMs through pct/qm — the
+     override covers those guests too. Warning only, never a block. */
+  var warn = document.getElementById('override-modal-inner-warning');
+  if (warn) { warn.innerHTML = ''; warn.classList.add('hidden'); }
+  if (ip) {
+    authFetch('/api/gateways/' + encodeURIComponent(ip) + '/inner-targets?days=30')
+      .then(function (res) { return res.ok ? res.json() : null; })
+      .then(function (data) {
+        var modal = document.getElementById('override-modal');
+        if (!modal || modal.dataset.ip !== ip) return;  // reopened for another host
+        var el = document.getElementById('override-modal-inner-warning');
+        if (!el) return;
+        el.innerHTML = overrideInnerWarningHtml(data);
+        el.classList.toggle('hidden', !el.innerHTML);
+      })
+      .catch(function () {});
+  }
 }
 
 async function confirmOverride() {
@@ -6645,6 +6732,23 @@ function renderStatsTop(d) {
   }).join('');
 }
 
+function renderStatsInnerTargets(d) {
+  var el = document.getElementById('stats-inner-targets'); if (!el) return;
+  var rows = d.inner_targets || [];
+  if (!rows.length) {
+    el.innerHTML = '<p class="text-muted">No pct/qm/docker targets recorded in this window.</p>';
+    return;
+  }
+  var max = Math.max.apply(null, rows.map(function (r) { return r.count || 0; }).concat([1]));
+  el.innerHTML = rows.slice(0, 10).map(function (r, i) {
+    var pct = max > 0 ? Math.round((r.count || 0) / max * 100) : 0;
+    return '<div class="cmd-row"><span class="cmd-rank">' + String(i + 1).padStart(2, '0') + '</span>' +
+      '<div class="cmd-main"><div class="cmd-name">' + innerTargetChipHtml(r.target || '') + '</div>' +
+      '<div class="cmd-track"><div class="cmd-fill" style="width:' + pct + '%"></div></div></div>' +
+      '<span class="cmd-count">' + (r.count || 0) + '</span></div>';
+  }).join('');
+}
+
 function renderStatsCats(d) {
   var el = document.getElementById('stats-categories'); if (!el) return;
   var cats = d.category_counts || [];
@@ -6689,6 +6793,7 @@ function renderStatistics() {
   renderStatsHeatmap(d);
   renderStatsNodes(d);
   renderStatsTop(d);
+  renderStatsInnerTargets(d);
   renderStatsCats(d);
   renderStatsDenied(d);
 }
