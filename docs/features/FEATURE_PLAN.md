@@ -1953,6 +1953,14 @@ uid-0 run dir and `read -r`.
   miss. For the `lockbox` path, use 300 s. Add a test with a row created
   200 s ago.
 
+**Code round 2 (2026-11-08): approved and merged.** E1–E4 are fixed as
+asked. I re-ran the disconnect check with synthetic commands: the drained
+reader with plain `tee` stops immediately. 181 F5, gateway-script, poller
+and golden tests pass locally; implementer's full run 1784 passed. Installers
+regenerate with no diff, and `static/dev/` is untouched. No security sign-off
+is needed (§ 2.6a). The backlog keeps the argv exposure of the gateway token
+and of `/api/log`'s command (§ 11).
+
 ---
 
 ## Chunk F6 — Session wrap-up & "how approved" stats · slug `session-wrapup` · dashboard
@@ -2560,7 +2568,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 3 | F7 | inner-target | dashboard | **Merged** 2026-11-08 | `feat/f7-inner-target` @ `0ad167f` | F1 | 1 round; backfill 7.1 s on a live-DB copy |
 | 4 | F3 | session-plans | dashboard + MCP | **Ready** | `feat/f3-session-plans` | F2 | + security reviewer sign-off |
 | 5 | F4 | read-lane | dashboard | Ready (after F3) | `feat/f4-read-lane` | F1, F3, Chunk H | reviewer pass + security reviewer sign-off |
-| 6 | F5 | exec-results | gateway + dashboard | **Changes requested (code round 1)** | `feat/f5-exec-results` | — | |
+| 6 | F5 | exec-results | gateway + dashboard | Merged | `feat/f5-exec-results` | — | |
 | 7 | F12 | ssh-exec | dashboard + gateway | Ready (after F5) — design first | `feat/f12-ssh-exec` | F4, F5 | design approval + security reviewer sign-off |
 | 8 | F6 | session-wrapup | dashboard | Ready (after F12) | `feat/f6-session-wrapup` | F3, F4, F5 | |
 | 9 | F13 | session-conclusions | dashboard + MCP | Ready (after F6) | `feat/f13-session-conclusions` | F5, F6 | |
