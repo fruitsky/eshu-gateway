@@ -1248,22 +1248,58 @@ _(reviewer)_
 
 ## Chunk F7 — Inner target attribution · slug `inner-target` · dashboard
 
+### Why
+
+About 100 recorded commands ran inside a container or VM (`pct exec`,
+`docker exec`) but are recorded against the host that ran the wrapper. History,
+statistics and overrides should know the real target, and an override on a
+Proxmox host silently covers every container it can reach.
+
 ### Changes
 
-* `requests.inner_target` column (`pct:103`, `docker:sonarr`, `qm:201`), filled
-  at request/log time from `breakdown.inner_targets` (first one; `multi` if several).
-* History filter and a chip on rows; Statistics "busiest targets" counts inner targets.
-* Optional: map `pct:<id>` to a gateway hostname when the Proxmox integration
-  knows it (read-only lookup, cached; skip if not configured).
-* When the operator opens a **host override** on a gateway whose recent
-  history (30 days) has `pct:`/`qm:` inner targets, the override dialog shows:
-  "This host reaches N containers/VMs via pct/qm — an override here also
-  covers commands run inside them." (Warning only; no behaviour change.)
+* **Parser:** F1 already reports `inner_targets` for `pct exec <id>` (`pct:<id>`)
+  and `docker exec` / `docker compose exec` (`docker:<name>`). Add
+  `qm guest exec <vmid> [--] cmd…` as a wrapper in `core/cmd_parse.py` (context
+  `qm <vmid>`, inner target `qm:<vmid>`, the inner command classified as usual).
+  Add a fixture case and keep F1's tests green.
+* **Column:** `requests.inner_target TEXT DEFAULT ''` (migration in the same
+  style as `db/requests.py`'s existing `ALTER TABLE` loop), indexed together with `target_ip`.
+  Value: the first inner target, `multi` when there are several, `''` for none.
+  Filled in `create_request` callers for both `/api/request` and `/api/log`
+  (compute `breakdown(cmd)['inner_targets']`; it is cached and fast).
+* **Backfill:** a one-off background job at startup fills `inner_target` for
+  existing rows where it is `NULL` (rows added before the migration), in batches
+  of 500 distinct commands, idempotent, with a `meta` key recording completion.
+  It must never block startup or the request path. Without it the history filter
+  and the warning below would be empty for weeks.
+* **API:**
+  * `/api/requests` rows and `/api/requests/{id}/breakdown` callers already
+    have the data; add `inner_target` to request rows.
+  * `GET /api/gateways/{ip}/inner-targets?days=30` (session auth) →
+    `{"pct": ["103", "106"], "qm": [], "docker": ["sonarr"], "count": 3}`.
+  * `/api/requests?inner_target=pct:103` filter (exact match), alongside the existing `search`/`session` filters.
+* **UI:** an inner-target chip on history rows and pending cards (`pct 103`,
+  `docker sonarr`), escaped, clicking it filters history; Statistics gets a
+  "busiest inner targets" list (top 10, 14 days).
+* **Override warning:** when the host-override dialog opens for a gateway
+  whose `inner-targets` count (30 days) for `pct`/`qm` is > 0, show:
+  "This host reaches N containers/VMs via pct/qm. An override here also covers
+  commands run inside them." Warning only; no behaviour change.
+* **Optional (skip if it grows the chunk):** label `pct:<id>` with the guest name
+  from the Proxmox integration (read-only, cached 10 min; nothing shown if not configured).
 
 ### Tests
 
-* Fill-in for each wrapper type; `multi`; none.
-* The override-dialog warning appears only when inner targets exist (API field test).
+* Parser: `qm guest exec 201 -- uptime` → context `qm 201`, inner `qm:201`, step `read`.
+* Fill-in on `/api/request` and `/api/log` for pct, docker, qm, `multi` and none.
+* Backfill: fills old rows, skips filled ones, sets the completion key, safe to run twice.
+* `inner-targets` endpoint counts and the `days` window; `inner_target` filter.
+* The override-dialog warning appears only when pct/qm targets exist (node harness or API test).
+* Chip text is escaped (node harness, same pattern as F2).
+
+### Compat impact
+
+Additive column and fields; no gateway change.
 
 ### Implementer notes
 
