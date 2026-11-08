@@ -1107,6 +1107,18 @@ def _redirect_suffix(st):
     return ''.join(out)
 
 
+def _input_redirects(st):
+    """Redirections that feed the command: `<`, `<<`, `<<<`, `<&`.
+
+    SC3: F1 drops these from the step text, so `cat /var/log/x < /etc/shadow`
+    would otherwise look like a plain read. They are recorded per step and
+    flagged on the command.
+    """
+    return [{'op': redir_op, 'target': shlex.quote(target)}
+            for redir_op, target, _fd in st.redirs
+            if redir_op not in _WRITE_REDIRS]
+
+
 def _write_targets(st):
     return [(redir_op, target) for redir_op, target, _fd in st.redirs
             if redir_op in _WRITE_REDIRS and target != '/dev/null']
@@ -1451,6 +1463,12 @@ def _parse_statement(st, ctx, depth, state):
     ctx = list(ctx)
     heredoc_specs = list(st.heredoc_specs)
 
+    if _input_redirects(st):
+        # SC3 (F4): an input redirection, here-string or heredoc feeds the
+        # command from something the step text does not show. The read lane
+        # must refuse it, so the command is flagged and the step records it.
+        state.flag('input-redirect')
+
     if not argv:
         # A bare redirection (`> /tmp/x`) truncates the target.
         targets = _write_targets(st)
@@ -1626,7 +1644,9 @@ def _parse_statement(st, ctx, depth, state):
     if kind == READ and get_cmd_risk(text):
         kind, why = UNKNOWN, 'flagged by the risk rules'
 
-    return [_step(text, st.op, kind, why, ctx, state)] + sub_steps
+    input_redirects = _input_redirects(st)
+    extra = {'input_redirects': input_redirects} if input_redirects else None
+    return [_step(text, st.op, kind, why, ctx, state, extra)] + sub_steps
 
 
 # ── Result ──────────────────────────────────────────────────────────────────
