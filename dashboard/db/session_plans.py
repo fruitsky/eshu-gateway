@@ -252,6 +252,12 @@ def approve_plan(plan_id: int, ttl_minutes: int = DEFAULT_TTL_MINUTES,
     return get_plan(plan_id)
 
 
+_DECIDABLE_FROM = {
+    'denied': ('proposed',),            # Deny is for a pending proposal only.
+    'ended': ('proposed', 'approved'),  # End also withdraws a pending proposal.
+}
+
+
 def deny_plan(plan_id: int, decided_by: str = 'operator') -> dict:
     return _decide(plan_id, 'denied', decided_by)
 
@@ -270,12 +276,31 @@ def _decide(plan_id: int, status: str, decided_by: str) -> dict:
                            (plan_id,)).fetchone()
         if not plan:
             raise PlanError('not_found', 'plan not found')
+        # Never rewrite a decided outcome: denying an approved plan (or ending
+        # an expired/denied one) must not look like it changed anything.
+        if plan['status'] not in _DECIDABLE_FROM[status]:
+            raise PlanError('bad_state',
+                            f"cannot {status} a plan that is {plan['status']}")
         cur.execute('''
             UPDATE session_plans SET status = ?, decided_at = ?, decided_by = ?
             WHERE id = ?
         ''', (status, now, (decided_by or 'operator')[:64], plan_id))
         conn.commit()
     return get_plan(plan_id)
+
+
+def _claim_candidate(conn, session_id: str, host: str, command: str, now: int):
+    """The first item of the session's active plan that still has a use left."""
+    return conn.execute('''
+        SELECT i.id, i.plan_id
+        FROM session_plan_items i
+        JOIN session_plans p ON p.id = i.plan_id
+        WHERE p.session_id = ? AND p.status = 'approved' AND p.until > ?
+          AND i.removed = 0 AND i.uses < i.max_uses
+          AND i.command = ? AND (i.host = ? OR i.host = '*')
+        ORDER BY i.id
+        LIMIT 1
+    ''', (session_id, now, command, host)).fetchone()
 
 
 def claim_plan_item(session_id: str, host: str, command: str, now: int = None):
@@ -294,22 +319,19 @@ def claim_plan_item(session_id: str, host: str, command: str, now: int = None):
     expire_plans(now)
     with db_conn() as conn:
         cur = conn.cursor()
-        row = cur.execute('''
-            SELECT i.id, i.plan_id
-            FROM session_plan_items i
-            JOIN session_plans p ON p.id = i.plan_id
-            WHERE p.session_id = ? AND p.status = 'approved' AND p.until > ?
-              AND i.removed = 0 AND i.uses < i.max_uses
-              AND i.command = ? AND (i.host = ? OR i.host = '*')
-            ORDER BY i.id
-            LIMIT 1
-        ''', (sid, now, command, host)).fetchone()
+        row = _claim_candidate(conn, sid, host, command, now)
         if not row:
             return None
+        # The plan's state is rechecked in the same statement: End or Deny can
+        # land between the SELECT above and this UPDATE, and must still stop it.
         cur.execute('''
             UPDATE session_plan_items SET uses = uses + 1
             WHERE id = ? AND removed = 0 AND uses < max_uses
-        ''', (row['id'],))
+              AND plan_id IN (
+                  SELECT id FROM session_plans
+                  WHERE status = 'approved' AND until > ?
+              )
+        ''', (row['id'], now))
         if cur.rowcount != 1:
             # Another request took the last use between the SELECT and here.
             conn.rollback()

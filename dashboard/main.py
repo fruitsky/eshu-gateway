@@ -84,7 +84,7 @@ from db.web_fetch import (
     delete_web_fetch_policy, get_web_fetch_policies, get_web_fetch_policy,
     get_web_fetch_stats, set_web_fetch_policy,
 )
-from db.sessions import get_session_coverage, get_session_meta_map
+from db.sessions import get_session, get_session_coverage, get_session_meta_map
 from db.session_plans import (
     PlanError, approve_plan, claim_plan_item, create_plan, deny_plan,
     end_plan, get_active_plan, get_plan, list_plans,
@@ -3396,7 +3396,7 @@ def list_integration_calls(request: Request, search: str = None, start: int = No
 
 class SessionPlanApprovePayload(BaseModel):
     ttl_minutes: int = 60
-    removed_item_ids: list = []
+    removed_item_ids: list[int] = []
 
 
 def _plan_payload(plan: dict) -> dict:
@@ -3413,6 +3413,11 @@ def _plan_payload(plan: dict) -> dict:
     out['items'] = items
     out['hosts'] = len({item['host'] for item in items if not item.get('removed')})
     out['kept'] = len([item for item in items if not item.get('removed')])
+    # R1: the operator must see whose session this is and what it is for, so
+    # they cannot approve another agent's plan believing it is theirs.
+    session = get_session(plan.get('session_id') or '')
+    out['agent'] = session.get('agent') or ''
+    out['session_goal'] = session.get('goal') or ''
     return out
 
 
