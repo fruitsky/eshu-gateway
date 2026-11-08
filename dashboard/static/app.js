@@ -3238,7 +3238,11 @@ function renderJitTickets() {
    run without further prompts for that session. Items are rendered with the
    F2 breakdown; every agent-controlled string is escaped. */
 var _sessionPlans = [];
-var _planRemoved = {};
+var _planRemoved = {};    // plan id -> {item id: true} for unticked items
+var _planTtl = {};        // plan id -> chosen TTL, so polling never resets it
+var _planDisplayed = {};  // session id -> the plan id currently shown
+var _planReplaced = {};   // plan id -> true when it replaced a plan mid-review
+var _planConfirm = {};    // plan id -> true after the first (arming) press
 
 function planHostLabel(host) {
   return (!host || host === '*') ? 'any host' : host;
@@ -3246,7 +3250,7 @@ function planHostLabel(host) {
 
 async function fetchSessionPlans() {
   try {
-    var res = await fetch('/api/session-plans?status=proposed');
+    var res = await authFetch('/api/session-plans?status=proposed');
     if (!res.ok) return;
     var plans = await res.json();
     _sessionPlans = Array.isArray(plans) ? plans : [];
@@ -3261,6 +3265,32 @@ function togglePlanItem(el) {
   if (el.checked) delete _planRemoved[planId][itemId];
   else _planRemoved[planId][itemId] = true;
   renderPlans();
+}
+
+/* R2: the queue polls every 3 s and re-renders the card, so the TTL choice
+   lives in state — not in the <select> that is about to be replaced. */
+function setPlanTtl(el) {
+  var planId = String(el.getAttribute('data-plan'));
+  var minutes = parseInt(el.value, 10);
+  if (!isNaN(minutes)) _planTtl[planId] = minutes;
+}
+
+function planTtlFor(plan) {
+  return _planTtl[String(plan && plan.id)] || 60;
+}
+
+/* R3/S4: a plan that replaced the one on screen — or that carries a long
+   command with an unclassified step — needs a deliberate second press. A plan
+   can authorise many more runs than a single request, so it gets the F2 rule
+   and the replacement rule on top. */
+function planNeedsConfirm(plan) {
+  if (!plan) return false;
+  if (_planReplaced[String(plan.id)]) return true;
+  var items = (plan.items || []).filter(function (item) { return !item.removed; });
+  return items.some(function (item) {
+    var summary = (item.breakdown || {}).summary || {};
+    return (summary.unknown || 0) >= 1 && String(item.command || '').length > 500;
+  });
 }
 
 function planItemHtml(plan, item) {
@@ -3286,26 +3316,37 @@ function planCardHtml(plan) {
   var removed = _planRemoved[String(plan.id)] || {};
   var items = (plan.items || []).filter(function (item) { return !item.removed; });
   var kept = items.filter(function (item) { return !removed[item.id]; });
-  var ttl = [30, 60, 120, 240];
-  return '<div class="plan-card" data-plan-card="' + Number(plan.id) + '">' +
+  var chosen = planTtlFor(plan);
+  var replaced = !!_planReplaced[String(plan.id)];
+  var armed = !!_planConfirm[String(plan.id)];
+  var who = plan.agent || 'unknown agent';
+  var goal = plan.session_goal || plan.session_id || '';
+  return '<div class="plan-card' + (replaced ? ' plan-card-replaced' : '') +
+      '" data-plan-card="' + Number(plan.id) + '">' +
     '<div class="plan-head">' +
       '<span class="plan-title">Plan #' + Number(plan.id) + '</span>' +
-      '<span class="plan-session" title="' + escapeHtml(String(plan.session_id || '')) + '">' +
-        escapeHtml(String(plan.session_id || '').substring(0, 12)) + '</span>' +
+      '<span class="plan-who" title="Who proposed this plan">' + escapeHtml(who) + '</span>' +
+      '<span class="plan-goal" title="Session goal">' + escapeHtml(goal) + '</span>' +
       '<span class="plan-count">' + kept.length + ' change' + (kept.length === 1 ? '' : 's') +
         ' on ' + Number(plan.hosts || 0) + ' host' + (Number(plan.hosts) === 1 ? '' : 's') + '</span>' +
     '</div>' +
+    (replaced
+      ? '<div class="plan-warn">This proposal replaced the one you were reviewing. ' +
+        'Check the items, then press Approve again.</div>'
+      : '') +
     (plan.note ? '<div class="plan-note">' + escapeHtml(plan.note) + '</div>' : '') +
     items.map(function (item) { return planItemHtml(plan, item); }).join('') +
     '<div class="plan-actions">' +
-      '<label class="plan-ttl">Approve for <select id="plan-ttl-' + Number(plan.id) + '">' +
-        ttl.map(function (minutes) {
-          return '<option value="' + minutes + '"' + (minutes === 60 ? ' selected' : '') + '>' +
+      '<label class="plan-ttl">Approve for <select id="plan-ttl-' + Number(plan.id) +
+        '" data-plan="' + Number(plan.id) + '" onchange="setPlanTtl(this)">' +
+        [30, 60, 120, 240].map(function (minutes) {
+          return '<option value="' + minutes + '"' + (minutes === chosen ? ' selected' : '') + '>' +
             (minutes >= 60 ? (minutes / 60) + ' h' : minutes + ' min') + '</option>';
         }).join('') +
       '</select></label>' +
       '<button class="btn btn-deny btn-xs" onclick="decidePlan(' + Number(plan.id) + ',\'deny\')">Deny</button>' +
-      '<button class="btn btn-approve btn-xs" onclick="decidePlan(' + Number(plan.id) + ',\'approve\')">Approve plan</button>' +
+      '<button class="btn btn-approve btn-xs" onclick="decidePlan(' + Number(plan.id) + ',\'approve\')">' +
+        (armed ? 'Press again to approve' : 'Approve plan') + '</button>' +
     '</div></div>';
 }
 
@@ -3319,8 +3360,20 @@ function renderPlans() {
     widget.classList.add('hidden');
     list.innerHTML = '';
     if (count) count.textContent = '';
+    _planDisplayed = {};
     return;
   }
+  /* R3: if a session's proposal id changed while its card was on screen, the
+     operator was looking at a different plan — flag the new one. */
+  var nextDisplayed = {};
+  plans.forEach(function (plan) {
+    var key = String(plan.session_id || '');
+    if (_planDisplayed[key] && Number(_planDisplayed[key]) !== Number(plan.id)) {
+      _planReplaced[String(plan.id)] = true;
+    }
+    nextDisplayed[key] = Number(plan.id);
+  });
+  _planDisplayed = nextDisplayed;
   widget.classList.remove('hidden');
   if (count) count.textContent = plans.length + ' waiting';
   list.innerHTML = plans.map(planCardHtml).join('');
@@ -3328,12 +3381,18 @@ function renderPlans() {
 
 async function decidePlan(planId, action) {
   planId = Number(planId);
+  var plan = (_sessionPlans || []).filter(function (p) { return Number(p.id) === planId; })[0];
+  if (action === 'approve' && !_planConfirm[planId] && planNeedsConfirm(plan)) {
+    _planConfirm[planId] = true;
+    renderPlans();
+    showToast('Check the plan again, then press Approve a second time.', 'info');
+    return;
+  }
   var init = { method: 'POST', headers: { 'Content-Type': 'application/json' } };
   if (action === 'approve') {
-    var ttlEl = document.getElementById('plan-ttl-' + planId);
     var removed = Object.keys(_planRemoved[String(planId)] || {}).map(Number);
     init.body = JSON.stringify({
-      ttl_minutes: ttlEl ? parseInt(ttlEl.value, 10) : 60,
+      ttl_minutes: planTtlFor({ id: planId }),
       removed_item_ids: removed,
     });
   } else {
@@ -3347,6 +3406,9 @@ async function decidePlan(planId, action) {
       return;
     }
     delete _planRemoved[String(planId)];
+    delete _planTtl[String(planId)];
+    delete _planConfirm[planId];
+    delete _planReplaced[String(planId)];
     showToast(action === 'approve' ? 'Plan approved' : 'Plan denied',
               action === 'approve' ? 'success' : 'info');
     fetchSessionPlans();
