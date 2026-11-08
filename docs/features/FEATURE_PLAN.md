@@ -987,6 +987,15 @@ a good pattern for later UI chunks. Gate re-run by the reviewer: pre-commit OK,
 **What to do:** fix B1 (and N1 if you agree) on this branch, re-run
 `bash scripts/verify.sh`, add a Round 2 paragraph to Implementer notes, push, stop.
 
+**Round 2 — 2026-11-08 — approved and merged.**
+
+B1 fixed as specified: `handleAction(id, action, {confirmed})`, used only by
+`confirmSessionOverride()`; bulk approve sends the rest, keeps the
+long-unknown ones selected (now drawn from `_ccSelectedIds`, so they stay
+checked across polls) and says why. N1 fixed: the decoded script appears once
+(checked the re-shot screenshot). Gate re-run by the reviewer: pre-commit OK,
+`1715 passed`.
+
 ---
 
 ## Chunk F3 — Session plans · slug `session-plans` · dashboard + MCP
@@ -1669,8 +1678,8 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | Order | Chunk | Slug | Area | Status | Branch | Depends on | Reviewer notes |
 |---|---|---|---|---|---|---|---|
 | 1 | F1 | breakdown | dashboard | **Merged** 2026-11-07 | `feat/f1-breakdown` @ `e0df20a` | — | 3 rounds; 155 adversarial cases; 14.7% unknown on live data |
-| 2 | F2 | review-card | UI | **Changes requested** (round 1) | `feat/f2-review-card` | F1 | B1 bulk/override approve; N1 optional |
-| 3 | F7 | inner-target | dashboard | Ready (after F2) | `feat/f7-inner-target` | F1 | |
+| 2 | F2 | review-card | UI | **Merged** 2026-11-08 | `feat/f2-review-card` @ `286df1b` | F1 | 2 rounds |
+| 3 | F7 | inner-target | dashboard | **Ready** | `feat/f7-inner-target` | F1 | |
 | 4 | F3 | session-plans | dashboard + MCP | Ready (after F7) | `feat/f3-session-plans` | F2 | + security reviewer sign-off |
 | 5 | F4 | read-lane | dashboard | Ready (after F3) | `feat/f4-read-lane` | F1, F3, Chunk H | reviewer pass + security reviewer sign-off |
 | 6 | F5 | exec-results | gateway + dashboard | Ready (after F4) — design first | `feat/f5-exec-results` | — | design approval needed |
