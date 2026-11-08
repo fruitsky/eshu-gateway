@@ -1394,7 +1394,24 @@ fixture case.)
 
 ### Reviewer notes
 
-_(reviewer)_
+**Round 1 — 2026-11-08 — approved and merged.**
+
+Clean chunk. All new SQL is parameterised; the nullable column is the right call
+(NULL = not yet backfilled, `''` = no inner target), and only `create_request`
+inserts into `requests`, so every new row gets a value. The backfill always makes
+progress (each update clears that command's NULL rows), commits in small
+transactions, and is retried on the next start if it fails part-way.
+
+Measured on a **copy** of the live database (taken with `.backup` into a temp
+dir on the dashboard host, deleted afterwards; the live file was not touched):
+migration 0.01 s; backfill 7.1 s in the background for 1,365 distinct commands,
+attributing 123 rows (87 docker, 26 pct, 1 qm, 9 multi); second run skipped;
+no NULL rows left. Override-warning screenshot checked. Gate re-run by the
+reviewer: pre-commit OK, `1735 passed`.
+
+Nit for a later chunk (not blocking): cap `inner_target_for()`'s value at 64
+characters, since a docker container name is agent-controlled. The out-of-scope
+`/api/statistics?gateway_ips=` 500 you found is logged in `docs/KNOWN_ISSUES.md`.
 
 ---
 
@@ -1802,8 +1819,8 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 |---|---|---|---|---|---|---|---|
 | 1 | F1 | breakdown | dashboard | **Merged** 2026-11-07 | `feat/f1-breakdown` @ `e0df20a` | — | 3 rounds; 155 adversarial cases; 14.7% unknown on live data |
 | 2 | F2 | review-card | UI | **Merged** 2026-11-08 | `feat/f2-review-card` @ `286df1b` | F1 | 2 rounds |
-| 3 | F7 | inner-target | dashboard | **Ready** | `feat/f7-inner-target` | F1 | |
-| 4 | F3 | session-plans | dashboard + MCP | Ready (after F7) | `feat/f3-session-plans` | F2 | + security reviewer sign-off |
+| 3 | F7 | inner-target | dashboard | **Merged** 2026-11-08 | `feat/f7-inner-target` @ `0ad167f` | F1 | 1 round; backfill 7.1 s on a live-DB copy |
+| 4 | F3 | session-plans | dashboard + MCP | **Ready** | `feat/f3-session-plans` | F2 | + security reviewer sign-off |
 | 5 | F4 | read-lane | dashboard | Ready (after F3) | `feat/f4-read-lane` | F1, F3, Chunk H | reviewer pass + security reviewer sign-off |
 | 6 | F5 | exec-results | gateway + dashboard | Ready (after F4) — design first | `feat/f5-exec-results` | — | design approval needed |
 | 7 | F12 | ssh-exec | dashboard + gateway | Ready (after F5) — design first | `feat/f12-ssh-exec` | F4, F5 | design approval + security reviewer sign-off |
