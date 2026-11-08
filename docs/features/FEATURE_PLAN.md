@@ -1725,6 +1725,58 @@ everything. With a denylist (`sensitive-path`) as the only guard, these were
 Once R1–R4 are in, F4 goes to the security reviewer (§ 2.6a). They asked for
 a closer look because this lane runs with no human at all.
 
+**Round 2 (2026-11-08): nearly there; small changes requested.** R1–R4 and S1
+are in, and every round-1 probe is now ineligible. A second probe set ran
+against the allowlisted verbs, with synthetic commands in a scratch dir. It
+confirmed that every `ip`/`date`/`hostname`/`journalctl` write, `ss -K`,
+`grep -f`/`--exclude-from`, `/proc/*/task/*/environ` and the
+`/proc/self/root|cwd` links are refused. Five gaps remain eligible:
+
+*Must fix:*
+
+* **R5 Recursive grep under `/proc` and `/sys`.**
+  * `grep -R` follows `/proc/<pid>/root` into the whole filesystem.
+  * `grep -r` reads every `/proc/<pid>/environ` as a regular file, which
+    leaks environment secrets.
+
+  Allow `-r`/`-R`/`--recursive` (and `-d recurse`) only when every operand is
+  under `/var/log/`, and use `-r` only (refuse `-R` everywhere, because it
+  follows links). Apply the same rule to `ls -R` and `du` under `/proc`;
+  names only are acceptable, but keep them to `/var/log` for one simple
+  rule.
+* **R6 `ps` environment output.** A BSD option word containing `e` (`ps e`,
+  `ps eww`, `ps auxe`) or `--env`/`-O environ` prints every process's
+  environment. Refuse BSD option clusters containing `e` and any
+  `-o`/`-O`/`--format` value naming `environ`/`env`. `ps -e`/`-ef` (UNIX
+  "all processes") stay eligible.
+* **R7 Endless or interval forms.** These never return:
+  * `free -s N` and `free -c N`
+  * `zpool status|list` with a trailing interval or count, or `-T`
+  * `ss -E`/`--events`
+
+  Refuse them. Add a generated test that every eligible table case finishes
+  under the sandbox's 2 s limit (or a static assertion per verb, if running
+  them is impractical).
+* **R8 Other journal sources.** `journalctl --file=`, `--directory=`,
+  `--root=`, `--image=` and `-m`/`--merge` read journals outside the
+  default; only `-D` is refused today. Refuse the whole set.
+
+*Should fix:*
+
+* **S2** Cap `head -c`/`tail -c` at 1 MiB, as `-n` is capped at 1000.
+* **S3** Drop `/sys/firmware/` from the safe trees (EFI variables can carry
+  vendor secrets).
+
+*For the security reviewer (no change asked):*
+
+* `ps aux` and `docker ps --no-trunc` show full command lines, which may
+  contain secrets passed as arguments. I left them eligible as everyday
+  reads.
+* The `grep -e` only rule and the absence of `echo` are deliberate
+  narrowings. Both are acceptable.
+
+After R5–R8 (plus S2 and S3), F4 goes to the security reviewer.
+
 ---
 
 ## Chunk F5 — Execution results (exit code + output tail) · slug `exec-results` · gateway + dashboard
@@ -3141,7 +3193,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 2 | F2 | review-card | UI | **Merged** 2026-11-08 | `feat/f2-review-card` @ `286df1b` | F1 | 2 rounds |
 | 3 | F7 | inner-target | dashboard | **Merged** 2026-11-08 | `feat/f7-inner-target` @ `0ad167f` | F1 | 1 round; backfill 7.1 s on a live-DB copy |
 | 4 | F3 | session-plans | dashboard + MCP | Merged | `feat/f3-session-plans` | F2 | + security reviewer sign-off |
-| 5 | F4 | read-lane | dashboard | **Changes requested (R1–R4)** | `feat/f4-read-lane` | F1, F3, Chunk H | reviewer pass + security reviewer sign-off |
+| 5 | F4 | read-lane | dashboard | **Changes requested (round 2: R5–R8)** | `feat/f4-read-lane` | F1, F3, Chunk H | reviewer pass + security reviewer sign-off |
 | 6 | F5 | exec-results | gateway + dashboard | Merged | `feat/f5-exec-results` | — | |
 | 7 | F12 | ssh-exec | dashboard + gateway | Ready (after F5) — design first | `feat/f12-ssh-exec` | F4, F5 | design approval + security reviewer sign-off |
 | 8 | F6 | session-wrapup | dashboard | Ready (after F12) | `feat/f6-session-wrapup` | F3, F4, F5 | |
