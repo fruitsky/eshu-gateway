@@ -54,6 +54,7 @@ def init_db():
     from db.agent_policies import init_agent_policies_tables
     from db.web_fetch import init_web_fetch_tables
     from db.sessions import init_sessions_tables
+    from db.session_plans import init_session_plans_tables
     from db.commute import init_commute_tables
     from db.overrides import init_session_overrides_tables
 
@@ -71,6 +72,7 @@ def init_db():
     init_agent_policies_tables(cursor)
     init_web_fetch_tables(cursor)
     init_sessions_tables(cursor)
+    init_session_plans_tables(cursor)
     init_commute_tables(cursor)
     init_session_overrides_tables(cursor)
 

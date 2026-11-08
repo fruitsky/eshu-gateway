@@ -84,7 +84,11 @@ from db.web_fetch import (
     delete_web_fetch_policy, get_web_fetch_policies, get_web_fetch_policy,
     get_web_fetch_stats, set_web_fetch_policy,
 )
-from db.sessions import get_session_coverage, get_session_meta_map
+from db.sessions import get_session, get_session_coverage, get_session_meta_map
+from db.session_plans import (
+    PlanError, approve_plan, claim_plan_item, create_plan, deny_plan,
+    end_plan, get_active_plan, get_plan, list_plans,
+)
 
 from schemas import (
     LoginPayload, SetPasswordPayload, GatewayPayload, RegisterPayload,
@@ -103,7 +107,9 @@ from core.agent_context import (
 )
 from core.rate_limit import _check_rate_limit
 from core.agent_policy import evaluate_call, safe_ident
-from core.session_guard import require_sessions_for_gateway
+from core.session_guard import (
+    require_sessions_enabled, require_sessions_for_gateway, session_problem,
+)
 from core.notify import send_notify
 from core.cmd_blocklist import hard_block_match, blocklist_substring_match, CORE_COMMAND_PATTERNS, HARD_PATTERNS
 from core.cmd_codec import decode_preview, detect_encoded_exec, scan_decoded
@@ -730,7 +736,34 @@ def receive_request(payload: GatewayPayload, request: Request):
                     status_code=403,
                     detail=f'Encoded payload blocked: the decoded command matched "{match[:60]}".')
 
-    # Session override first: narrower than the host-wide one, and it only
+    # F3: an operator-approved session plan authorises these exact bytes.
+    # Order per § 2.6: after the encoded-payload block, before the session
+    # override. Freeze, Zero-Trust and the blocklists always win, and a plan
+    # only matches a command carrying the session id it was granted for.
+    if sid and not frozen and not get_gateway_zero_trust(target_ip):
+        plan_allowed = True
+        if require_sessions_enabled():
+            # Strict sessions: only a minted, named session can use a plan (the
+            # gateway refuses unsigned ids first; this is the dashboard half).
+            plan_allowed = not session_problem(sid)
+        if plan_allowed:
+            claimed = claim_plan_item(sid, target_ip, cmd, now)
+            if claimed:
+                plan_id, item_id = claimed
+                req_id = create_request(target_ip, cmd, status="approved",
+                                        reason=f"session-plan:{plan_id}:{item_id}",
+                                        session_id=sid, execution_id=eid,
+                                        inner_target=_inner_target_for(cmd))
+                update_gateway_last_seen(target_ip)
+                record_audit_event(
+                    'jit_plan_approved', target_ip,
+                    details=f'Session plan #{plan_id} item #{item_id} approved JIT '
+                            f'#{req_id}: {cmd[:80]} (session {sid})')
+                return {"status": "ok", "id": f"{req_id:06d}", "request_id": req_id,
+                        "plan": True, "plan_id": plan_id,
+                        "message": "Auto-approved via Session Plan"}
+
+    # Session override next: narrower than the host-wide one, and it only
     # covers commands carrying the id it was granted for. Zero-Trust wins.
     if sid and not frozen:
         ov = get_session_override(sid, target_ip, now)
@@ -3359,6 +3392,93 @@ def list_integration_calls(request: Request, search: str = None, start: int = No
     return get_integration_calls(search=search, start=start, end=end,
                                  limit=limit, offset=offset, session=session,
                                  approval=approval)
+
+
+class SessionPlanApprovePayload(BaseModel):
+    ttl_minutes: int = 60
+    removed_item_ids: list[int] = []
+
+
+def _plan_payload(plan: dict) -> dict:
+    """A plan as the API/UI wants it: items with their F2 breakdown and the
+    remaining uses, plus the host count. Agent text stays unescaped here; the
+    UI escapes it."""
+    out = dict(plan)
+    items = []
+    for item in plan.get('items', []):
+        row = dict(item)
+        row['remaining'] = max(0, int(row.get('max_uses') or 0) - int(row.get('uses') or 0))
+        row['breakdown'] = None if row.get('removed') else cmd_breakdown(row.get('command') or '')
+        items.append(row)
+    out['items'] = items
+    out['hosts'] = len({item['host'] for item in items if not item.get('removed')})
+    out['kept'] = len([item for item in items if not item.get('removed')])
+    # R1: the operator must see whose session this is and what it is for, so
+    # they cannot approve another agent's plan believing it is theirs.
+    session = get_session(plan.get('session_id') or '')
+    out['agent'] = session.get('agent') or ''
+    out['session_goal'] = session.get('goal') or ''
+    # SR3: the card says when a plan is only as safe as the session id, so the
+    # operator can enable strict sessions before relying on it.
+    out['strict_sessions'] = require_sessions_enabled()
+    return out
+
+
+@app.get("/api/session-plans")
+def list_session_plans(request: Request, status: str = None, session_id: str = None):
+    """Session plans (F3), newest first, filtered by status and/or session."""
+    _check_session(request)
+    status = (status or '')[:32] or None
+    session_id = (session_id or '')[:64] or None
+    return [_plan_payload(plan) for plan in
+            list_plans(status=status, session_id=session_id)]
+
+
+@app.post("/api/session-plans/{plan_id}/approve")
+def approve_session_plan(plan_id: int, payload: SessionPlanApprovePayload,
+                         request: Request):
+    """Approve a proposed plan (a subset, with a TTL). The approved bytes are
+    the only ones the plan can ever authorise."""
+    _check_session(request)
+    try:
+        plan = approve_plan(plan_id, payload.ttl_minutes, payload.removed_item_ids,
+                            decided_by='operator')
+    except PlanError as exc:
+        raise HTTPException(status_code=400, detail=exc.message)
+    plan = _plan_payload(plan)
+    kept = [item['id'] for item in plan['items'] if not item.get('removed')]
+    record_audit_event(
+        'plan_approved', actor='operator',
+        details=f"Session plan #{plan_id} for session {plan['session_id']} approved: "
+                f"{len(kept)} item(s) {kept}, ttl {payload.ttl_minutes} min")
+    return plan
+
+
+@app.post("/api/session-plans/{plan_id}/deny")
+def deny_session_plan(plan_id: int, request: Request):
+    _check_session(request)
+    try:
+        plan = deny_plan(plan_id, decided_by='operator')
+    except PlanError as exc:
+        raise HTTPException(status_code=400, detail=exc.message)
+    record_audit_event('plan_denied', actor='operator',
+                       details=f"Session plan #{plan_id} for session "
+                               f"{plan['session_id']} denied")
+    return _plan_payload(plan)
+
+
+@app.post("/api/session-plans/{plan_id}/end")
+def end_session_plan(plan_id: int, request: Request):
+    """End an approved plan early (or withdraw a proposed one)."""
+    _check_session(request)
+    try:
+        plan = end_plan(plan_id, decided_by='operator')
+    except PlanError as exc:
+        raise HTTPException(status_code=400, detail=exc.message)
+    record_audit_event('plan_ended', actor='operator',
+                       details=f"Session plan #{plan_id} for session "
+                               f"{plan['session_id']} ended")
+    return _plan_payload(plan)
 
 
 @app.get("/api/sessions/{sid}/detail")

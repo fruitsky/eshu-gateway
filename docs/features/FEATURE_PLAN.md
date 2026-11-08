@@ -1079,11 +1079,381 @@ claim tickets for `approved` rows.
 
 ### Implementer notes
 
-_(fill in)_
+**What I did**
+
+* **DB** (`db/session_plans.py`, tables created from `db/core.py`):
+  `session_plans` + `session_plan_items` and the lifecycle
+  `proposed → approved | denied → expired | ended`. `create_plan` replaces an
+  existing `proposed` plan; `approve_plan` requires the plan to still be
+  `proposed`, marks the removed items, clamps the TTL to 1–240 min (default
+  60) and ends any other approved plan for the session; `expire_plans` lazily
+  expires; `claim_plan_item` selects the matching item and then does **one**
+  conditional `UPDATE … SET uses = uses + 1 WHERE id = ? AND removed = 0 AND
+  uses < max_uses`, refusing when `rowcount != 1`.
+* **Approval path** (`POST /api/request`): the plan check sits after the
+  encoded-payload block and before the session override (§ 2.6). It runs only
+  with a session id, when the fleet is not frozen and the gateway is not
+  Zero-Trust; with strict sessions on, `session_problem(sid)` must be empty
+  (the dashboard half of the signature rule — the gateway refuses unsigned ids
+  first). A match creates the request as `approved` with
+  `reason="session-plan:<plan>:<item>"`, audits `jit_plan_approved` and returns
+  `{plan: true, plan_id}`. Matching is byte-exact after trimming whitespace;
+  `*` matches any host, an explicit host matches only that gateway.
+* **REST**: `GET /api/session-plans?status=&session_id=`,
+  `POST /{id}/approve {ttl_minutes, removed_item_ids}`, `POST /{id}/deny`,
+  `POST /{id}/end` — session-authenticated, each audited (`plan_approved`,
+  `plan_denied`, `plan_ended` with the actor and item ids; the proposal is
+  audited as `plan_proposed`). Plan items carry their F2 breakdown for the
+  review card.
+* **MCP**: `session_plan(session_id, items, note)` and
+  `check_plan(plan_id, session_id?)`, registered next to `session_begin` on the
+  shared server and every per-integration server and added to
+  `_ALWAYS_ALLOWED`. `session_plan` validates the id shape and that the session
+  exists, the 50-item / 4 kB / host / max_uses limits, notifies the operator
+  ("Plan for session X: N changes on M hosts") and audits `plan_proposed`.
+* **UI**: a "Plans awaiting approval" card above the queue. Each item shows its
+  host, `×max_uses`, the exact command and the F2 breakdown; unticking removes
+  it from the approval; a TTL selector (30 min – 4 h) and Approve/Deny. The
+  session modal shows the session's plan with per-item `uses/max_uses` and an
+  End button. Every agent-controlled string is escaped.
+* **Docs**: `docs/AGENT_MANUAL.md` (a "Session plans" section plus the
+  "one command, one ticket" exceptions), `docs/API.md`, and the `session_begin`
+  description.
+
+**Surprises and decisions**
+
+* The plan check sits **after** the encoded-payload scan, so a blocked decoded
+  payload still raises before any plan can approve it.
+* The claim's `rowcount == 0` case means another request took the last use; the
+  caller then falls through to normal JIT instead of being approved. Eight
+  threads racing a `max_uses=1` item produce exactly one approval.
+* Removed items stay in the table (`removed=1`) so the audit trail shows what
+  the operator dropped; they never match. Denied/expired/ended plans match
+  nothing (the claim requires `status='approved' AND until > now`), and
+  `expire_plans` marks an elapsed plan `expired` so the UI says so.
+* The proposal notification rides the existing `jit` webhook event, so it
+  reaches operators with the default subscription; no new event type to
+  configure.
+* `check_plan` takes an optional `session_id` and refuses a mismatch — plan ids
+  are small integers and a plan names the commands another session intends to
+  run.
+* The TTL is clamped server-side (1–240 min) even though the UI offers
+  30/60/120/240, and a plan can only be approved once (`not_proposed`
+  otherwise).
+* One existing test changed: `tests/test_omada_mcp.py` asserted the exact
+  per-integration tool set, which now includes `session_plan` and `check_plan`
+  (commit message says so). Everything else is untouched.
+
+**Deliberately not done**
+
+* No item editing (out of scope), no guest-name labels (F7 optional), and no
+  statistics bucket — the `session-plan:` "how approved" bucket is F6's job.
+* No change to the gateway, to session overrides, or to F4's read lane. A plan
+  is the only new auto-approve path and it only ever matches the exact bytes
+  an operator approved.
+
+**Tests** — `tests/test_f3_session_plans.py` (15): approve-once-then-pend and
+the audit event; approve-a-subset (removed item pends); host-specific vs `*`;
+session binding (another id and no id never match); expired/denied/ended plans
+do not approve; Zero-Trust and Freeze win; strict sessions refuse an unminted
+session; the 8-thread `max_uses=1` race approves exactly one; the REST list /
+approve-subset / deny / end / auth; and the MCP validation + `check_plan`
+reporting.
+
+**Screenshot** — the Plans card (each item with its F2 breakdown, the TTL
+selector and the approve/deny actions):
+![Plans card](../screenshots/f3/plans-card-desktop.png)
+
+and the session modal's plan with per-item uses:
+![Session plan](../screenshots/f3/session-plan-modal.png)
+
+`bash scripts/verify.sh` (pre-commit green):
+
+```
+1750 passed, 7 warnings in 350.22s (0:05:50)
+```
+
+(1735 before this chunk + 15 new F3 tests.)
+
+
+### Round 2 — fixes for reviewer round 1 (R1–R4, S1–S4)
+
+The "hand-off to the security reviewer" note was left alone as instructed.
+
+* **R1 ownership.** `session_plan` refuses `session_not_yours` when the
+  session's `sessions.agent` is set and differs from `current_agent_name()`;
+  `check_plan` is scoped to the caller the same way, so the optional
+  `session_id` argument is gone. The plan payload now carries `agent` and
+  `session_goal`, and the card shows both (escaped) next to the plan number —
+  the operator can no longer approve another agent's plan believing it is
+  theirs. Tests: `test_f3_mcp_session_plan_refuses_another_agents_session`,
+  `test_f3_mcp_check_plan_refuses_another_agents_plan`,
+  `test_f3_plan_payload_names_the_agent_and_goal`.
+* **R2 TTL reset on poll.** The chosen TTL lives in `_planTtl` (like
+  `_planRemoved`), so the 3 s queue refresh keeps it. Harness test
+  `test_f3_plan_ttl_survives_a_poll_rerender` (choose 30 min, render twice,
+  still selected); the screenshot run also checked it live against the
+  polling page (`ttl after poll: 30`).
+* **R3 plan replaced mid-review.** `renderPlans` remembers the plan id shown
+  per session; when a session's proposal changes, the new card gets the
+  "This proposal replaced the one you were reviewing" banner, a warning
+  border, and Approve needs a second press (F2's pattern). Harness test
+  `test_f3_replaced_plan_needs_a_second_press` (first press sends 0 POSTs,
+  second sends 1).
+* **R4 End vs claim.** The claim's UPDATE now also requires
+  `plan_id IN (SELECT id FROM session_plans WHERE status='approved' AND
+  until > ?)`. `claim_plan_item` uses a `_claim_candidate` helper so the test
+  can end the plan between the SELECT and the UPDATE:
+  `test_f3_end_between_select_and_update_consumes_no_use` (no use consumed).
+* **S1 state guards.** `_decide` allows Deny only from `proposed` and End only
+  from `proposed`/`approved`; anything else is `PlanError('bad_state')` → 400,
+  so a decided outcome is never rewritten. Test:
+  `test_f3_deny_approved_and_end_expired_are_rejected`.
+* **S2** `removed_item_ids` is typed `list[int]`, so a non-integer is a 422
+  instead of a 500. Test: `test_f3_non_integer_removed_ids_is_422`.
+* **S3** `fetchSessionPlans` uses `authFetch`. Harness test:
+  `test_f3_plan_fetch_uses_authed_fetch` (the plans URL goes through
+  `authFetch`, not plain `fetch`).
+* **S4 F2's rule for plans.** `planNeedsConfirm` requires a second press when
+  any kept item is a >500-char command with an unknown step (a plan can
+  authorise many more runs than one request). Harness test:
+  `test_f3_long_unknown_plan_needs_a_second_press`.
+
+New harness: `tests/fixtures/f3_harness.js` on top of
+`tests/fixtures/appjs_loader.js` (the F2/F7 pattern). All 25 F3 tests pass;
+the full gate:
+
+```
+1760 passed, 7 warnings in 349.18s (0:05:49)
+```
+
+**Screenshot** — replaced so the card shows the proposing agent (`hermes`)
+and the session goal next to the plan number:
+![Plans card](../screenshots/f3/plans-card-desktop.png)
+
+### Round 3 — security items (SR1–SR4)
+
+The security reviewer approved F3 on `de741ec`, conditional on SR1; SR2–SR4
+are done as well.
+
+* **SR1 — truly byte-exact matching.** `claim_plan_item` no longer strips the
+  request command (the gateway already trims; the old `str.strip()` also
+  removed `\x1f`, `\x85`, `\xa0`, `\u2028`, …), and `validate_items`
+  refuses any command containing a C0 control (tab excepted), DEL or
+  non-ASCII whitespace — checked on the **raw** text, because `strip()` itself
+  would have hidden `\x1c`/`\xa0` before the check. Tests:
+  `test_f3_sr1_item_does_not_match_control_bytes` (an item `echo ok` does not
+  match `echo ok\x1f`, `\x1cecho ok`, `echo ok\u00a0`; it still matches
+  exactly `echo ok`) and `test_f3_sr1_proposal_refuses_hidden_characters`
+  (those bytes, DEL and `\n` are refused with `invalid_command`; plain space
+  and tab are accepted).
+* **SR2 — ownership fails closed.** Both tools now compare
+  `owner != current_agent_name()` without the `owner and` guard, so an empty
+  owner (or an anonymous caller) is never "yours". Tests:
+  `test_f3_sr2_anonymous_caller_is_refused` (no agent context, both tools) and
+  `test_f3_sr2_session_without_owner_is_refused`.
+* **SR3 — the warning sits where the decision is made.** The plan payload
+  carries `strict_sessions` (`require_sessions_enabled()`), and the card shows
+  "Strict sessions are off — anyone with the gateway SSH key who knows this
+  session id can use this plan." when it is off. AGENT_MANUAL now recommends
+  enabling strict sessions before relying on plans. Tests:
+  `test_f3_sr3_api_reports_whether_strict_sessions_are_on` and the harness
+  test `test_f3_sr3_strict_sessions_hint_in_the_card`.
+* **SR4 — broad items stand out.** An item with `host: "*"` or
+  `max_uses > 1` is rendered with `plan-item-broad`, an amber host label and
+  an amber uses count (the two ways an item grants more than one exact run on
+  one host). Harness test: `test_f3_sr4_broad_items_are_highlighted`
+  (two of three items highlighted; a single-use exact item is not).
+
+The Plans screenshot was refreshed: it shows the strict-sessions line, the
+`any host` item and the `×2` item both highlighted, next to the agent and
+session goal.
+
+Full gate:
+
+```
+1767 passed, 7 warnings in 351.50s (0:05:51)
+```
+
+(1760 before this round + 7 new security tests.)
 
 ### Reviewer notes
 
-_(reviewer)_
+**Round 1 (2026-11-08): changes requested.** 105 targeted tests pass locally
+(`test_f3_session_plans.py` + `test_omada_mcp.py`); implementer's full run
+1750 passed.
+
+*Security pass on the approval path. These checks are correct:*
+
+* **Order (§ 2.6):** the plan check sits after the encoded-payload block and
+  before the session override. Freeze and Zero-Trust are checked first. The
+  gateway's blocklists and self-protection run before the dashboard is asked,
+  so a plan can never approve a blocked command.
+* **Exact bytes end to end:** a match creates an ordinary `approved` row, so
+  the gateway still runs it through claim-and-burn of a lockbox ticket that
+  matches the command byte for byte. A plan adds no new way to execute.
+* **Session binding:** the claim is keyed on `sid`. No id means no match, and
+  another session's id never matches (tests cover both).
+* **Use counting:** a conditional `UPDATE … WHERE uses < max_uses` with
+  `rowcount` checked; the 8-thread race approves exactly one.
+* **Approval:** by plan id only, over REST with `_check_session`. Items are
+  never changed after creation (a new proposal is a new id), so an approved
+  plan's content cannot be swapped. No MCP tool can approve.
+* **XSS:** every agent string in the card and the modal goes through
+  `escapeHtml`; ids are passed through `Number()`.
+
+*Must fix:*
+
+* **R1 Ownership.** `session_plan` accepts any existing session, including
+  one minted by a different agent (`sessions.agent` records who minted it).
+  The notification and card then show the other session's goal, so the
+  operator approves a plan believing it is Hermes's. Fixes:
+  * `session_plan`: refuse with `session_not_yours` when `sessions.agent` is
+    set and differs from `current_agent_name()`.
+  * `check_plan`: return only plans whose session belongs to the caller. That
+    replaces the optional-`session_id` check; the `_ALWAYS_ALLOWED` comment
+    already says these tools are "scoped to the caller".
+  * The plan card shows the **agent** and the **session goal** (escaped).
+  * Tests: agent B is refused for A's session, and `check_plan` refuses B.
+* **R2 TTL resets on every poll.** `fetchSessionPlans()` runs in the queue
+  refresh and rebuilds `plans-list.innerHTML`, so the TTL `<select>` jumps
+  back to 1 h. An operator who picks 30 min and waits a few seconds approves
+  for 1 h. Fix: keep the chosen TTL in state (like `_planRemoved`), or skip
+  the re-render when the plan list is unchanged. Add a harness test: choose a
+  TTL, re-render, check the selection.
+* **R3 Plan replaced while it is being read.** A new proposal deletes the old
+  one, and the next poll swaps the card's content under the operator. They
+  can press Approve on items they never saw. Fix: when a session's proposed
+  plan id changes while its card is shown, mark the card "Replaced, review
+  again" and require a second press (reuse the F2 two-press pattern). Add a
+  harness test.
+* **R4 End vs claim.** The claim's UPDATE rechecks `uses` but not the plan.
+  If End or Deny lands between the SELECT and the UPDATE, one more use goes
+  through. Add `AND plan_id IN (SELECT id FROM session_plans WHERE status =
+  'approved' AND until > ?)` to the UPDATE, with a test that ends the plan
+  between the two steps (monkeypatch or a direct call).
+
+*Should fix:*
+
+* **S1 State guards in `_decide`.** Deny only a `proposed` plan, and End only
+  a `proposed` or `approved` one; anything else returns `PlanError('bad_state')`,
+  which becomes a 400. Today Deny on an approved plan, or End on an expired
+  one, rewrites its recorded outcome.
+* **S2** `removed_item_ids` with a non-integer gives a 500. Type it
+  `list[int]` in the payload model.
+* **S3** `fetchSessionPlans` uses plain `fetch`; switch to `authFetch` like
+  the decide calls.
+* **S4** Apply F2's rule to the plan: if any kept item is over 500 chars with
+  an unknown step, Approve needs a second press. A plan can carry many more
+  runs than a single request.
+
+*Hand-off to the security reviewer (not a regression, no change asked
+here):* with strict sessions off, any SSH caller that knows a session id
+can use that session's plan. Session overrides have the same exposure
+today. Minted ids are 12 hex chars, but agents may also bring their own
+chat ids. The plan's docs should recommend turning strict sessions on
+before relying on plans. The security reviewer decides whether to require
+it.
+
+
+**Round 2 (2026-11-08): approved by the feature reviewer; waiting on security sign-off (§ 2.6a).**
+127 F3, F2 and MCP tests pass locally; implementer's full run 1760 passed.
+
+* **R1:** `session_plan` and `check_plan` refuse another agent's session with
+  `session_not_yours`. The card shows the agent and the session goal, both
+  escaped. A session minted with no agent can still take a plan from any
+  caller; the card then reads "unknown agent", which is acceptable.
+* **R2:** the TTL lives in `_planTtl` and survives the 3 s poll.
+* **R3:** a changed proposal id for a session on screen shows the banner and
+  needs a second press. `create_plan` replaces a proposal in one transaction,
+  so no poll can see a gap that would hide the swap.
+* **R4:** the UPDATE rechecks the plan's status and `until`; a test ends the
+  plan between the SELECT and the UPDATE.
+* **S1–S4:** all done as asked.
+
+**Do not merge until the security reviewer signs off below.**
+
+**Round 3 (2026-11-08): SR1 checked; merged.** SR1 is correct.
+`claim_plan_item` compares the request bytes unstripped, and `validate_items`
+checks the raw text before `strip()`. The listed tests pass.
+
+* **Fixed during review (SR2 gap):** the check `owner != current_agent_name()`
+  still let an anonymous caller use an ownerless session, because `'' == ''`.
+  Both tools now use `not owner or owner != current_agent_name()`. Added
+  `test_f3_sr2_anonymous_caller_and_ownerless_session_is_refused`; it fails
+  before the fix and passes after.
+* **Observation (no change):** the gateway does not trim `SSH_ORIGINAL_COMMAND`.
+  An agent that sends stray leading or trailing spaces gets no match and
+  falls through to normal JIT, which fails safe.
+* SR3 and SR4 done. Per the security reviewer's merge rule, no further
+  security pass is needed.
+
+#### Security reviewer sign-off
+
+**2026-11-08 — approved, conditional on SR1 (security chat, reviewed at `de741ec`).**
+Reviewer ran F3, all `test_sec_*`, gateway-script, session and session-override
+tests on the branch: 317 passed. The branch already contains security Chunk H.
+
+**What was reviewed and holds:**
+1. **Approval path (`receive_request`).** Placement is right: after the
+   encoded-payload block, before the session override. Freeze and Zero-Trust
+   short-circuit it; strict sessions use the global flag
+   (`require_sessions_enabled`), which is stricter than the per-gateway scope
+   and is fine. Blocklists and the hard block are enforced by the gateway
+   before a request ever reaches `/api/request`, so a plan cannot approve
+   anything the gateway refuses. Security chunk 1c still binds execution to
+   the approved bytes, and the approved row records
+   `session-plan:<plan>:<item>` plus an audit event — attributable.
+2. **`claim_plan_item`.** The conditional UPDATE (`uses < max_uses`, plan
+   still `approved` and unexpired, item not removed) is atomic; a lost race
+   rolls back and falls through to normal JIT. Correct.
+3. **Ownership (`session_plan`, `check_plan`).** Sessions are only created by
+   `session_begin`, which always records the calling agent; `upsert_session`
+   never overwrites an existing owner, so adopting someone else's id does not
+   transfer it (worst case a pre-minted id denies its real owner — no
+   escalation). All 22 live sessions have an owner. Combined with R1 (agent +
+   goal on the card), the operator cannot be misled about whose plan it is.
+4. **Hand-off — should plans require strict sessions?** **No, not required.**
+   Without strict sessions a plan is usable by any caller that holds the
+   gateway SSH key *and* the session id — the same trust boundary session
+   overrides already have — but a plan is strictly narrower: exact
+   operator-approved bytes, named hosts, counted uses, TTL ≤ 4 h. Requiring
+   strict sessions would make plans unavailable on installs that have not
+   turned it on, for little gain. Do instead: **SR3** below. (The live install
+   already runs with strict sessions on.)
+
+**Required before merge:**
+
+* **SR1 — make the match truly byte-exact.** `claim_plan_item` compares
+  `command.strip()`. Python's `str.strip()` removes far more than the
+  gateway's `[[:space:]]` trim (e.g. `\x1c–\x1f`, `\x85`, `\xa0`, `\u2028`), so
+  the item `echo ok` matches a request for `echo ok` followed by one of those
+  bytes; the request row then stores — and, via 1c, the gateway runs — the
+  extra bytes. Impact is small (those bytes cannot start a new command), but
+  the design promises exact bytes. Fix: compare the request command **without**
+  stripping (the gateway already trims), and in `validate_items` refuse
+  commands containing C0 control characters other than tab, DEL, or Unicode
+  whitespace other than plain space/tab. Tests: an item `echo ok` does **not**
+  match `echo ok\x1f`, `\x1cecho ok`, `echo ok\u00a0`; a proposal containing
+  such characters is refused with `invalid_command`.
+
+**Recommended (do now or in a follow-up, no second security pass needed):**
+
+* **SR2 — ownership fails closed.** In both tools, treat an empty owner as
+  "not yours" (`owner != current_agent_name()` without the `owner and`
+  guard). Today unreachable (every session has an owner), but it removes the
+  "unknown agent can take a plan from any caller" case noted under R1.
+* **SR3 — say it where the operator decides.** When strict sessions are off,
+  show one line in the plan approval card: "Strict sessions are off — anyone
+  with the gateway SSH key who knows this session id can use this plan." Keep
+  the docs recommendation to enable strict sessions before relying on plans.
+* **SR4 — highlight the broad items.** In the card, make `any host` (`*`)
+  items and `max_uses > 1` visually distinct, since those are the items that
+  grant more than one exact run on one host.
+
+**Merge rule:** once SR1 is in with its tests and the feature reviewer has
+checked it, F3 may merge into `feature-roadmap` without another security
+pass. SR2–SR4 do not block.
 
 ---
 
@@ -1820,7 +2190,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 1 | F1 | breakdown | dashboard | **Merged** 2026-11-07 | `feat/f1-breakdown` @ `e0df20a` | — | 3 rounds; 155 adversarial cases; 14.7% unknown on live data |
 | 2 | F2 | review-card | UI | **Merged** 2026-11-08 | `feat/f2-review-card` @ `286df1b` | F1 | 2 rounds |
 | 3 | F7 | inner-target | dashboard | **Merged** 2026-11-08 | `feat/f7-inner-target` @ `0ad167f` | F1 | 1 round; backfill 7.1 s on a live-DB copy |
-| 4 | F3 | session-plans | dashboard + MCP | **Ready** | `feat/f3-session-plans` | F2 | + security reviewer sign-off |
+| 4 | F3 | session-plans | dashboard + MCP | Merged | `feat/f3-session-plans` | F2 | + security reviewer sign-off |
 | 5 | F4 | read-lane | dashboard | Ready (after F3) | `feat/f4-read-lane` | F1, F3, Chunk H | reviewer pass + security reviewer sign-off |
 | 6 | F5 | exec-results | gateway + dashboard | Ready (after F4) — design first | `feat/f5-exec-results` | — | design approval needed |
 | 7 | F12 | ssh-exec | dashboard + gateway | Ready (after F5) — design first | `feat/f12-ssh-exec` | F4, F5 | design approval + security reviewer sign-off |
