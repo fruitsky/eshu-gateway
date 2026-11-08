@@ -143,7 +143,7 @@ function openContextPanel(reqId) {
 
   // Risk assessment + decoded preview for encoded wrappers
   var riskEl = document.getElementById('ctx-risk');
-  var decoded = decodedCmdHtml(req);
+  var decoded = bdDecodedPreviewHtml(req);
   if (req.risk || req.anomaly) {
     var html = '';
     if (req.risk) html += '<div class="ctx-meta-item" style="color:var(--status-warning);margin-bottom:4px"> ' + escapeHtml(req.risk) + '</div>';
@@ -283,12 +283,35 @@ function clearSelection() {
 }
 
 function bulkApprove() {
-  _ccSelectedIds.forEach(function(id) {
+  /* B1: a request that still needs the two-press review is NOT approved here
+     and stays selected, so the operator sees it instead of believing the
+     whole selection went through. Everything else is sent immediately. */
+  var kept = [];
+  Array.from(_ccSelectedIds).forEach(function(id) {
     if (id.indexOf('int-') === 0) { approveIntegrationCall(id.slice(4)); }
     else if (id.indexOf('win-') === 0) { approveWindowReq(id.slice(4)); }
-    else { handleAction(id, 'approve'); }
+    else {
+      var req = requestsData.find(function (r) { return String(r.id) === String(id); });
+      if (req && bdNeedsConfirm(req)) { kept.push(id); return; }
+      handleAction(id, 'approve');
+    }
+    if (kept.indexOf(id) < 0) _ccSelectedIds.delete(id);
   });
-  clearSelection();
+  /* Only the kept ones stay checked; clearSelection() would drop them too. */
+  document.querySelectorAll('.jit-check.checked').forEach(function(el) {
+    var holder = el.closest ? el.closest('.jit-ticket, .ccq-row') : null;
+    var held = holder ? (holder.getAttribute('data-id')
+                         || holder.getAttribute('data-queue-id')) : null;
+    if (held && kept.indexOf(held) >= 0) return;
+    el.classList.remove('checked');
+    el.setAttribute('aria-checked', 'false');
+  });
+  updateBulkBar();
+  if (kept.length) {
+    showToast(kept.length + ' request' + (kept.length === 1 ? ' has' : 's have') +
+      ' unknown steps \u2014 review and approve ' + (kept.length === 1 ? 'it' : 'them') +
+      ' individually.', 'info');
+  }
 }
 
 function bulkDeny() {
@@ -2320,7 +2343,7 @@ function renderQueue(items) {
     return '<div class="ccq-row" role="button" tabindex="0" data-queue-id="' + esc(m.domId) + '" ' +
         'onclick="openContextPanel(' + escJs(m.domId) + ')" ' +
         'onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();openContextPanel(' + escJs(m.domId) + ');}">' +
-      '<button type="button" class="ccq-chk jit-check" role="checkbox" aria-checked="false" aria-label="Select request" onclick="event.stopPropagation();toggleBulkSelect(' + escJs(m.domId) + ',event)"></button>' +
+      '<button type="button" class="ccq-chk ' + ccCheckClass(m.domId) + '" role="checkbox" aria-checked="' + ccCheckAria(m.domId) + '" aria-label="Select request" onclick="event.stopPropagation();toggleBulkSelect(' + escJs(m.domId) + ',event)"></button>' +
       '<span class="ccq-main">' +
         '<span class="ccq-human">' + escapeHtml(m.human) + '</span>' +
         bdRowHeadlineHtml({ breakdown: m.bd }) +
@@ -2584,7 +2607,7 @@ function smSshDetailCard(r) {
     bdHeadlineHtml(r) +
     '<pre class="sm-call-json cmd">' + escapeHtml(r.command || '') + '</pre>' +
     bdBodyHtml(r, { raw: false }) +
-    (r.encoded ? decodedCmdHtml(r) : '') +
+    bdDecodedPreviewHtml(r) +
     (r.risk ? '<div class="sm-call-reason">\u26a0 ' + escapeHtml(r.risk) + '</div>' : '') +
     (r.anomaly ? '<div class="sm-call-reason" style="color:var(--danger)">\u2605 ' + escapeHtml(r.anomaly) + '</div>' : '') +
     (meta.length ? '<div class="sm-mcp-meta">' + escapeHtml(meta.join(' \u00b7 ')) + '</div>' : '') +
@@ -3187,7 +3210,7 @@ function renderJitItem(item) {
       var args = Object.keys(c.payload || {}).map(function(k) { return k + '=' + c.payload[k]; }).join(', ');
       var cDom = 'int-' + Number(c.id);
       return '<div class="jit-ticket" data-id="' + esc(cDom) + '" onclick="openContextPanel(' + escJs(cDom) + ')">' +
-        '<button type="button" class="jit-check" role="checkbox" aria-checked="false" aria-label="Select request" onclick="event.stopPropagation();toggleBulkSelect(' + escJs(cDom) + ',event)"></button>' +
+        '<button type="button" class="' + ccCheckClass(cDom) + '" role="checkbox" aria-checked="' + ccCheckAria(cDom) + '" aria-label="Select request" onclick="event.stopPropagation();toggleBulkSelect(' + escJs(cDom) + ',event)"></button>' +
         '<div style="flex:1;min-width:0">' +
           '<div class="jit-human">' + escapeHtml(c.integration) + ' / ' + escapeHtml(c.tool) + '</div>' +
           '<div class="jit-cmd-text">' + escapeHtml(c.integration) + ' ' + escapeHtml(c.tool) + (args ? '(' + escapeHtml(args) + ')' : '') + '</div>' +
@@ -3207,7 +3230,7 @@ function renderJitItem(item) {
       var w = item.data;
       var wDom = 'win-' + Number(w.id);
       return '<div class="jit-ticket" data-id="' + esc(wDom) + '" onclick="openContextPanel(' + escJs(wDom) + ')">' +
-        '<button type="button" class="jit-check" role="checkbox" aria-checked="false" aria-label="Select request" onclick="event.stopPropagation();toggleBulkSelect(' + escJs(wDom) + ',event)"></button>' +
+        '<button type="button" class="' + ccCheckClass(wDom) + '" role="checkbox" aria-checked="' + ccCheckAria(wDom) + '" aria-label="Select request" onclick="event.stopPropagation();toggleBulkSelect(' + escJs(wDom) + ',event)"></button>' +
         '<div style="flex:1;min-width:0">' +
           '<div class="jit-human">Window request</div>' +
           '<div class="jit-cmd-text">' + escapeHtml(w.command) + '</div>' +
@@ -3233,10 +3256,10 @@ function renderJitItem(item) {
       var riskHtml = '';
       if (r.risk) riskHtml += '<div style="color:var(--status-warning);font-size:11px;margin-top:4px"> ' + escapeHtml(r.risk) + '</div>';
       if (r.anomaly) riskHtml += '<div style="color:var(--danger);font-size:11px;margin-top:4px"> ' + escapeHtml(r.anomaly) + '</div>';
-      riskHtml += decodedCmdHtml(r);
+      riskHtml += bdDecodedPreviewHtml(r);
       var rDom = String(Number(r.id));
       return '<div class="jit-ticket' + (r.anomaly ? ' urgent' : '') + '" data-id="' + esc(rDom) + '" onclick="openContextPanel(' + escJs(rDom) + ')">' +
-        '<button type="button" class="jit-check" role="checkbox" aria-checked="false" aria-label="Select request" onclick="event.stopPropagation();toggleBulkSelect(' + escJs(rDom) + ',event)"></button>' +
+        '<button type="button" class="' + ccCheckClass(rDom) + '" role="checkbox" aria-checked="' + ccCheckAria(rDom) + '" aria-label="Select request" onclick="event.stopPropagation();toggleBulkSelect(' + escJs(rDom) + ',event)"></button>' +
         '<div class="jit-body" style="min-width:0">' +
           '<div class="jit-human">' + escapeHtml(human || 'Command request') + '</div>' +
           bdHeadlineHtml(r) +
@@ -3323,13 +3346,17 @@ async function denyWindowReq(id) {
 }
 
 // ── Deny with Blocklist ─────────────────────────────────────────────────
-async function handleAction(id, action) {
+async function handleAction(id, action, opts) {
   playApprovalPulse();
+  opts = opts || {};
   var _req = requestsData.find(function (r) { return String(r.id) === String(id); });
   /* F2: a long command that still has an unclassified step asks for a second
      press — the first one scrolls to and highlights that step. Short and
-     all-read commands keep the single click. */
-  if (action === 'approve' && _req && bdNeedsConfirm(_req) && !_bdUnknownConfirmed[id]) {
+     all-read commands keep the single click. Callers that have already made
+     the decision for the operator (a session override) pass
+     {confirmed: true}; bulk approve never does. */
+  if (action === 'approve' && !opts.confirmed && _req && bdNeedsConfirm(_req)
+      && !_bdUnknownConfirmed[id]) {
     _bdUnknownConfirmed[id] = true;
     bdHighlightFirstUnknown(id);
     showToast('Read the highlighted unknown step first. Approve again to approve it.', 'info');
@@ -3942,6 +3969,32 @@ var BD_FLAGS = {
   'repo-config': ['repo can run programs', 'git may run repository-configured programs']
 };
 
+function bdHasScript(r) {
+  var bd = r && r.breakdown;
+  if (!bd || !bd.steps) return false;
+  for (var i = 0; i < bd.steps.length; i++) {
+    if (bd.steps[i] && bd.steps[i].script) return true;
+  }
+  return false;
+}
+
+/* N1: when the step already carries the decoded script, the older DECODED
+   block would repeat it on the same card. */
+function bdDecodedPreviewHtml(r) {
+  if (bdHasScript(r)) return '';
+  return decodedCmdHtml(r);
+}
+
+/* The queue re-renders on every poll, so a selection that outlives a poll
+   (bulk approve keeps the ones that need review) must be drawn from state. */
+function ccCheckClass(id) {
+  return _ccSelectedIds.has(String(id)) ? 'jit-check checked' : 'jit-check';
+}
+
+function ccCheckAria(id) {
+  return _ccSelectedIds.has(String(id)) ? 'true' : 'false';
+}
+
 function bdUsable(r) {
   var bd = r && r.breakdown;
   return !!(bd && bd.steps && bd.steps.length);
@@ -4472,7 +4525,7 @@ async function confirmSessionOverride() {
       await refreshSessionOverrides();
       // Granting from a pending row should also clear that row — otherwise
       // the operator grants the bypass and still has to approve by hand.
-      if (ctx.request_id) { await handleAction(ctx.request_id, 'approve'); }
+      if (ctx.request_id) { await handleAction(ctx.request_id, 'approve', { confirmed: true }); }
       else { fetchRequests(); }
     } else { showToast('Failed: ' + (data.detail || 'unknown'), 'error'); }
   } catch(e) { showToast('Error: ' + e.message, 'error'); }
