@@ -5088,3 +5088,31 @@ body.pol-open .mobile-menu-btn, body.pol-open .mobile-freeze { display: none; }
 @media (prefers-reduced-motion: reduce) {
   .cf-card { animation: none; }
 }
+
+  /* ── F8: excluded test traffic ─────────────────────────────── */
+  .excluded-row { opacity: .55; }
+  .excluded-chip {
+    display: inline-flex;
+    align-items: center;
+    margin-left: 6px;
+    padding: 1px 6px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: var(--text-micro);
+    letter-spacing: .3px;
+    color: var(--text-quiet);
+    border: 1px dashed var(--rule-weak);
+    border-radius: 3px;
+    white-space: nowrap;
+  }
+  .sm-test-hint {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    margin-top: 8px;
+    padding: 6px 8px;
+    border: 1px dashed var(--rule-weak);
+    border-radius: 4px;
+    font-size: var(--text-xs);
+    color: var(--text-dim);
+  }

@@ -2822,6 +2822,77 @@ async function saveSessionNames() {
   } catch(e) {}
 }
 
+/* ── F8: test-traffic hygiene ────────────────────────────────────────────
+   Excluding a row is a one-way, audited flag: it never deletes anything and
+   only the aggregate views stop counting. No rule excludes anything on its
+   own; the session hint is a suggestion, and the operator presses the button. */
+var TEST_GOAL_RE = /test|smoke/i;
+
+function looksLikeTestGoal(goal) {
+  return TEST_GOAL_RE.test(String(goal || ''));
+}
+
+function excludedMarkHtml(req) {
+  if (req && req.excluded) {
+    return '<span class="excluded-chip" title="Excluded from statistics, learning gaps and anomaly profiles">excluded</span>';
+  }
+  return '<button type="button" class="bd-hist-link" ' +
+    'title="Exclude this request from statistics and learning" ' +
+    'onclick="event.stopPropagation();excludeRequest(' + Number(req.id) + ')">exclude</button>';
+}
+
+async function excludeRequests(payload, label) {
+  var ok = await customConfirm(
+    'Exclude ' + label + ' from statistics, learning gaps and anomaly profiles? ' +
+    'The rows stay in History, marked excluded.',
+    { title: 'Exclude test traffic?', confirmLabel: 'Exclude', danger: false });
+  if (!ok) return false;
+  try {
+    var res = await authFetch('/api/requests/exclude', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload) });
+    var data = await res.json();
+    if (!res.ok) { showToast(data.detail || 'Could not exclude', 'error'); return false; }
+    showToast('Excluded ' + data.excluded + ' request' + (data.excluded === 1 ? '' : 's'), 'success');
+    fetchRequests();
+    var stats = document.getElementById('view-statistics');
+    if (stats && !stats.classList.contains('hidden')) fetchStatistics();
+    return true;
+  } catch (e) {
+    showToast('Could not exclude', 'error');
+    return false;
+  }
+}
+
+function excludeRequest(id) {
+  return excludeRequests({ ids: [Number(id)] }, 'this request');
+}
+
+function excludeActiveSession() {
+  if (!_activeSessionSid) return Promise.resolve(false);
+  var sid = _activeSessionSid;
+  return excludeRequests({ session_id: sid }, 'this session').then(function (ok) {
+    if (!ok) return false;
+    var el = document.getElementById('sm-test-hint');
+    if (el) el.innerHTML = '<span>This session is excluded from statistics and learning.</span>';
+    return true;
+  });
+}
+
+function renderSessionTestHint(goal) {
+  var el = document.getElementById('sm-test-hint');
+  if (!el) return;
+  if (!looksLikeTestGoal(goal)) {
+    el.innerHTML = '';
+    el.classList.add('hidden');
+    return;
+  }
+  el.classList.remove('hidden');
+  el.innerHTML = '<span>This looks like test traffic (goal: &ldquo;' +
+    escapeHtml(goal) + '&rdquo;).</span> ' +
+    '<button class="btn btn-muted btn-xs" onclick="excludeActiveSession()">Exclude from stats</button>';
+}
+
 async function openSessionModal(sid) {
   var modal = document.getElementById('session-modal');
   var nameEl = document.getElementById('sm-name');
@@ -2890,6 +2961,7 @@ async function openSessionModal(sid) {
   if (denied) bits.push('<span class="sm-blocked">' + denied + ' denied</span>');
   if (auto) bits.push('<span class="sm-muted">' + auto + ' auto</span>');
   metaEl.innerHTML = bits.join(' \u00b7 ');
+  renderSessionTestHint(summary.goal || '');
 
   // Unified, chronological timeline.
   var items = [];
@@ -4043,7 +4115,7 @@ function renderTable() {
       '</select>';
     }
     const gap = gapMap.get(req.id);
-    const rowClass = gap ? 'gap-row' : '';
+    const rowClass = (gap ? 'gap-row ' : '') + (req.excluded ? 'excluded-row' : '');
     const idClass = gap ? 'cell-id-warn' : 'cell-id';
     const gapTitle = gap ? ' title="' + escapeHtml(formatGapTooltip(gap)) + '"' : '';
     const idDisplay = gap ? ' #' + esc(String(Number(req.id)).padStart(6, '0')) : '#' + esc(String(Number(req.id)).padStart(6, '0'));
@@ -4072,7 +4144,7 @@ function renderTable() {
       '<td class="' + idClass + '"' + gapTitle + '>' + idDisplay + '</td>' +
       '<td class="text-muted text-xs">' + formatTime(req.created_at) + '</td>' +
       '<td>' + gatewayCell + '</td>' +
-      '<td class="cell-cmd"><div class="flex items-center gap-1">' + riskHtml + anomalyHtml + '<code class="cmd-code" title="' + escapedCmd + '">' + escapedCmd + '</code><button class="js-copy-cmd flex-shrink-0 text-xs opacity-30 hover:opacity-80 px-1 py-0.5 rounded transition-opacity text-muted" data-cmd="' + encodeURIComponent(req.command) + '" title="Copy"></button>' + decodedChip + innerChip + execBadgeHtml(req) + execOutputLink(req) + breakdownLink + '</div>' +
+      '<td class="cell-cmd"><div class="flex items-center gap-1">' + riskHtml + anomalyHtml + '<code class="cmd-code" title="' + escapedCmd + '">' + escapedCmd + '</code><button class="js-copy-cmd flex-shrink-0 text-xs opacity-30 hover:opacity-80 px-1 py-0.5 rounded transition-opacity text-muted" data-cmd="' + encodeURIComponent(req.command) + '" title="Copy"></button>' + decodedChip + innerChip + execBadgeHtml(req) + execOutputLink(req) + breakdownLink + excludedMarkHtml(req) + '</div>' +
         (function() {
           var _desc = describeCmd(req.command);
           if (!_desc) return '';
