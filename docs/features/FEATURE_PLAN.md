@@ -804,11 +804,197 @@ UI only.
 
 ### Implementer notes
 
-_(fill in)_
+**What I did**
+
+* **`dashboard/static/app.js`** — the breakdown renderer and its four surfaces.
+  The helpers are pure (a request row in, an HTML string out):
+  `bdHeadlineHtml`, `bdBodyHtml`, `bdStepsHtml`, `bdFlagsHtml`, `bdStepHtml`,
+  `bdBlockHtml`, `bdRowHeadlineHtml`.
+  * **Headline** above the raw command on the queue hero card, a compact
+    one-line copy on every queue row, a "Breakdown" section at the top of the
+    context panel (which is the full-width mobile drawer below 768px), and on
+    the session-modal SSH rows.
+  * **Step list** under the command: grouped by `section`, each step's
+    `context` chain as prefix chips (`pct 103`, `sudo`, `decoded`), write and
+    unknown steps expanded and highlighted, runs of read steps collapsed to
+    "N read steps ▸", the optional `script` field in a collapsed escaped
+    monospace block, and `complete: false` shown as *"could not fully parse;
+    read the raw command"*.
+  * **Flags** as chips: `encoded`, `heredoc`, `nested ssh`, `sensitive path`,
+    `redirect`, `runs until stopped` (`follows`) and `repo can run programs`
+    (`repo-config`).
+  * **Colours** never read as pre-approved: all-read is muted ink (not green),
+    a write is amber, an unknown step adds *"read it as written"*.
+  * **Raw command** stays available and is collapsed behind a "raw command ▸"
+    toggle (and the `X` queue shortcut) when the breakdown has 4+ steps.
+  * **Two-press Approve**: for a command over 500 chars that still has an
+    unknown step, the first Approve scrolls to and briefly highlights that
+    step and says so in a toast; the second press approves. Short or all-read
+    commands are unchanged. It lives in `handleAction`, so it covers every
+    Approve path for that request (hero, context panel, session modal).
+  * **History** rows get a `breakdown` link that fetches
+    `GET /api/requests/{id}/breakdown` and expands a row beneath it.
+* **`dashboard/static/index.html`** — the two context-panel sections
+  (`ctx-breakdown-head`, `ctx-breakdown-steps`) and an `app.js` /
+  `style.css` cache-buster bump.
+* **`dashboard/static/style.css`** — the breakdown styles in the ink language;
+  `scripts/ui_check.py` stays clean (no new `!important`, tokens only,
+  nothing below 11px).
+* **`tests/fixtures/f2_harness.js` + `tests/test_f2_review_card.py`** — the
+  tests load the real `app.js` in a stubbed browser context under node and
+  render a fixture pending row, so they assert on the shipped code.
+
+**Surprises and decisions**
+
+* The queue is a hero card plus compact rows, and the context panel becomes a
+  full-width drawer below 768px — those *are* the four surfaces the chunk
+  names. There is no separate mobile component to change.
+* `escapeHtml` is the only escaper, and the test proves it by spying on it:
+  step text, section names, every context chip, the decoded `script` and the
+  headline are all recorded through it, and an `<img src=x onerror=…>`
+  payload is asserted absent from the rendered HTML.
+* A history breakdown row has to survive the 3-second table poll. The first
+  version appended a `<tr>` once and the next poll removed it; the row is now
+  rebuilt from `_bdHistory` on every render (verified by waiting two polls).
+* The raw command block joins a multi-line script onto one line — that is the
+  pre-existing `.jit-cmd-text` behaviour (3-line clamp), unchanged here. The
+  step list is what makes a long script readable.
+* A read step's `why` is usually just the verb (`uptime`), so it is hidden
+  when it repeats the text; write/unknown whys always show.
+
+**Deliberately not done**
+
+* No backend change: pending rows already carry `breakdown` (F1) and
+  `/api/requests/{id}/breakdown` already exists. No schema, API or gateway
+  change.
+* `describeCmd` / `ctx-human` are untouched, as are the risk line, the anomaly
+  line, the decoded preview and the TTL.
+* No new mobile-specific component (the existing responsive drawer covers it),
+  and no change to the F1 engine or the security work merged from
+  `feature-roadmap`.
+
+**Screenshots** (desktop 1440 px, phone 400 px; all synthetic data)
+
+* A 9+ step read-only recon command:
+  ![all-read desktop](../screenshots/f2/all-read-desktop.png)
+  ![all-read phone](../screenshots/f2/all-read-mobile.png)
+* A mixed read/write command (1 kB recon with one `sed -i`; the write step is
+  visible without scrolling):
+  ![mixed desktop](../screenshots/f2/mixed-desktop.png)
+  ![mixed phone](../screenshots/f2/mixed-mobile.png)
+* An encoded command (`base64 -d | bash`, decoded steps):
+  ![encoded desktop](../screenshots/f2/encoded-desktop.png)
+  ![encoded phone](../screenshots/f2/encoded-mobile.png)
+* The decoded `script` field (`| python3`), for completeness:
+  ![script desktop](../screenshots/f2/script-desktop.png)
+  ![script phone](../screenshots/f2/script-mobile.png)
+* The context panel (the mobile drawer):
+  ![context panel](../screenshots/f2/context-panel-desktop.png)
+
+**Tests**
+
+Eight tests in `tests/test_f2_review_card.py`, all `test_f2_*` — every one
+failed on the reviewed commit (the renderer did not exist). They cover the
+headline and step list rendering, the mixed write step, the unknown/incomplete
+warnings, the flags, the `script` block and the XSS check, plus a static check
+that the context-panel markup, the history link and the `X` shortcut exist.
+
+`bash scripts/verify.sh` (pre-commit green):
+
+```
+1711 passed, 7 warnings in 341.19s (0:05:41)
+```
+
+(1703 before this chunk + 8 new tests.)
+
+
+**Round 2 — 2026-11-08 — round 1 addressed.**
+
+* **B1 — fixed.** `handleAction(id, action, opts)` now accepts
+  `{confirmed: true}`, which skips the two-press check for callers that have
+  already made the decision:
+  * `confirmSessionOverride()` passes it — the operator has just granted an
+    explicit session bypass, so the row it was opened from is cleared.
+  * `bulkApprove()` does **not**. It approves everything that does not need
+    review, leaves the long-unknown requests **selected**, and shows one
+    toast: *"N requests have unknown steps — review and approve them
+    individually."* Only the requests actually sent leave the selection.
+  * Per-card buttons (hero, queue rows, context panel, History) and the
+    session-modal buttons keep the two-press behaviour.
+  * Because the queue re-renders on every poll, a kept selection is now drawn
+    from `_ccSelectedIds` (checkbox class + `aria-checked`), so it no longer
+    looks unselected after the next refresh.
+  * Tests: `test_f2_b1_bulk_approve_keeps_unconfirmed_selected`,
+    `test_f2_b1_session_override_approves_confirmed`,
+    `test_f2_b1_card_approve_needs_two_presses`. The node harness now drives
+    `bulkApprove` / `confirmSessionOverride` / `handleAction` with an
+    `authFetch` and `showToast` spy, and sets `requestsData` from inside the
+    context (it is a `let` in `state.js`, so a plain property assignment from
+    outside the VM did not reach the app).
+* **N1 — agreed and fixed.** `bdDecodedPreviewHtml()` skips the older DECODED
+  block when a step already carries `script`, so the decoded source appears
+  once, in the step's collapsed `decoded script` block. Used on the hero card,
+  the context panel and the session modal. Test:
+  `test_f2_n1_decoded_script_not_duplicated`; `script-desktop.png` /
+  `script-mobile.png` were re-shot and now show the single block.
+
+`bash scripts/verify.sh` (pre-commit green):
+
+```
+1715 passed, 7 warnings in 341.35s (0:05:41)
+```
+
+(1711 before this round + 4 new tests.)
 
 ### Reviewer notes
 
-_(reviewer)_
+**Round 1 — 2026-11-08 — one fix requested (B1), then merge.**
+
+Solid work. The rendering is pure and escaped throughout (`esc` covers `& < > " '`,
+so the attribute uses are safe too), the history row survives the poll, the
+headline is never green, the write step is visible without scrolling at both
+widths (checked the committed screenshots), and the node-based escaping tests are
+a good pattern for later UI chunks. Gate re-run by the reviewer: pre-commit OK,
+`1711 passed`.
+
+* **B1 — must fix: the two-press Approve silently drops requests from
+  callers that are not a person pressing the button.** `handleAction(id,
+  'approve')` now returns early (toast only) for a long command with an unknown
+  step. Two existing callers rely on it approving:
+  * `bulkApprove()` loops over the selection, then calls `clearSelection()`. A
+    selected long-unknown request is skipped, and the selection is cleared, so the
+    operator believes it was approved while it stays pending and the agent times out.
+  * `confirmSessionOverride()` ("Start Session Override" from a pending row) calls
+    `handleAction(ctx.request_id, 'approve')` to clear the row it was opened from;
+    that row stays pending.
+
+  Fix: give `handleAction` an options argument, e.g. `handleAction(id, action,
+  {confirmed: true})`, which skips the two-press check.
+  * Session override path: pass `confirmed: true` (the operator has just granted
+    a bypass for this session explicitly).
+  * Bulk approve: **do not** auto-confirm. Approve the others, leave the
+    long-unknown ones **selected**, and show one toast: "N requests have unknown
+    steps — review and approve them individually." Only clear the ones that were sent.
+  * Keyboard approve and the per-card buttons keep the two-press behaviour.
+  * Tests (node harness): bulk with one long-unknown + one normal request → one
+    POST, the long-unknown id stays in the selection, toast shown; session-override
+    path → POST sent; single press on the card → no POST, second press → POST.
+* **N1 — optional nit: decoded scripts appear twice on the queue card**
+  (the new collapsed `decoded script` block on the step, and the existing
+  "DECODED" block from `decodedCmdHtml` below the meta line). If the step has a
+  `script`, skip `decodedCmdHtml` for that card, or the reverse. Either is fine.
+
+**What to do:** fix B1 (and N1 if you agree) on this branch, re-run
+`bash scripts/verify.sh`, add a Round 2 paragraph to Implementer notes, push, stop.
+
+**Round 2 — 2026-11-08 — approved and merged.**
+
+B1 fixed as specified: `handleAction(id, action, {confirmed})`, used only by
+`confirmSessionOverride()`; bulk approve sends the rest, keeps the
+long-unknown ones selected (now drawn from `_ccSelectedIds`, so they stay
+checked across polls) and says why. N1 fixed: the decoded script appears once
+(checked the re-shot screenshot). Gate re-run by the reviewer: pre-commit OK,
+`1715 passed`.
 
 ---
 
@@ -1492,8 +1678,8 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | Order | Chunk | Slug | Area | Status | Branch | Depends on | Reviewer notes |
 |---|---|---|---|---|---|---|---|
 | 1 | F1 | breakdown | dashboard | **Merged** 2026-11-07 | `feat/f1-breakdown` @ `e0df20a` | — | 3 rounds; 155 adversarial cases; 14.7% unknown on live data |
-| 2 | F2 | review-card | UI | **Ready** | `feat/f2-review-card` | F1 | |
-| 3 | F7 | inner-target | dashboard | Ready (after F2) | `feat/f7-inner-target` | F1 | |
+| 2 | F2 | review-card | UI | **Merged** 2026-11-08 | `feat/f2-review-card` @ `286df1b` | F1 | 2 rounds |
+| 3 | F7 | inner-target | dashboard | **Ready** | `feat/f7-inner-target` | F1 | |
 | 4 | F3 | session-plans | dashboard + MCP | Ready (after F7) | `feat/f3-session-plans` | F2 | + security reviewer sign-off |
 | 5 | F4 | read-lane | dashboard | Ready (after F3) | `feat/f4-read-lane` | F1, F3, Chunk H | reviewer pass + security reviewer sign-off |
 | 6 | F5 | exec-results | gateway + dashboard | Ready (after F4) — design first | `feat/f5-exec-results` | — | design approval needed |

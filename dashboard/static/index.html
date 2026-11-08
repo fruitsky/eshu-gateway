@@ -23,7 +23,7 @@
 <link rel="preload" href="/static/fonts/instrument-serif-regular-latin.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="preload" href="/static/fonts/jetbrains-mono-var-latin.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="/static/fonts.css?v=2">
-<link rel="stylesheet" href="/static/style.css?v=ui7">
+<link rel="stylesheet" href="/static/style.css?v=ui8">
 
 </head>
 <body>
@@ -190,9 +190,17 @@
               <div>Select a request from the feed<br>to view details</div>
             </div>
             <div id="cc-context-content" class="hidden">
+              <div class="ctx-section hidden" id="ctx-breakdown-head-section">
+                <div class="ctx-label">Breakdown</div>
+                <div id="ctx-breakdown-head"></div>
+              </div>
               <div class="ctx-section">
                 <div class="ctx-label">Command</div>
                 <div class="ctx-cmd" id="ctx-cmd"></div>
+              </div>
+              <div class="ctx-section hidden" id="ctx-breakdown-steps-section">
+                <div class="ctx-label">Steps</div>
+                <div id="ctx-breakdown-steps"></div>
               </div>
               <div class="ctx-section">
                 <div class="ctx-label">What It Does</div>
@@ -930,7 +938,7 @@
 </main>
 
 <script src="/static/state.js?v=ui3"></script>
-<script src="/static/app.js?v=ui13"></script>
+<script src="/static/app.js?v=ui14"></script>
 
 <!-- Create / Edit Approved Window Modal -->
 <div id="create-window-modal" class="modal-overlay hidden">
