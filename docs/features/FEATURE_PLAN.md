@@ -1389,6 +1389,84 @@ run_sanitized() {
   by the `EXIT` trap. The dir is refused if missing, symlinked or not 0700,
   and capture degrades to `exit-only` (never to an unredacted path).
 
+#### 2b. Design round 1: D1–D8 folded in
+
+The design reviewer approved with changes; these are now part of the design.
+
+* **D1 — capture must never cut the agent's output.** `tee -p`
+  (`--output-error=warn-nopipe`) keeps stdout flowing when the FIFO reader
+  dies (OOM, kill) and keeps the pipeline status; without the option (non-GNU
+  `tee`) capture degrades to `exit-only` at startup. The `tee` diagnostic is
+  sent to `/dev/null` so a dead reader never injects a line into the agent's
+  stream. Test: kill the reader mid-stream; stdout stays byte-identical and
+  `rc` is the command's.
+* **D2 — output and command off the process list.** The body (up to ~22 KB) is
+  piped to `curl --data-binary @-` on **stdin**, never `-d` in argv. The
+  token header and `/api/log`'s command in argv are pre-existing exposures and
+  go to the § 11 backlog, not this chunk.
+* **D3 — the lockbox path must match too.** The gateway sends an
+  internal-literal `path` (`allowlist` | `window` | `lockbox` | `jit`). The
+  matcher's status set depends on it: `allowlist` → `auto-approved`,
+  `window` → `window-approved`, `lockbox`/`jit` → `approved`/`consumed`
+  (JIT, session override, F3 plan after a reconnect). An unknown `path` is a
+  400 and stores nothing. Test: a lockbox result attaches to an `approved`
+  row.
+* **D4 — first result wins.** `INSERT OR IGNORE`; a second post returns
+  `200 {attached: false, reason: "already_has_result"}` and never overwrites
+  the stored output.
+* **D5 — the request must be executable.** A `request_id` must also be
+  `approved`/`consumed`; a result for `pending`/`denied`/`blocked` is a 400
+  (`not_executable`), so a forged post cannot make a denied command look run.
+* **D6 — bound the orphan table and rate-limit the endpoint.** At most 50
+  orphans per gateway (oldest dropped), `/api/exec-result` goes through
+  `_check_rate_limit`, and the endpoint is gateway-token-only via
+  `_require_gateway(request, target_ip)` — a dashboard session cannot post.
+* **D7 — the run-dir check mirrors the poller**: missing, symlink, mode ≠ 700
+  **or owner uid ≠ 0** disables capture (`exit-only`); the gateway never
+  creates `/run/eshu` itself.
+* **D8 — small bash points.** The setting is read with `IFS= read -r v <
+  file` (a trailing newline cannot turn `tail` into `exit-only`); if the FIFO
+  exists but the pipeline takes the no-FIFO branch the reader is killed
+  (`kill "$ESHU_TAIL_PID"`) so it never sits blocked on `open()`; the `EXIT`
+  trap is the first in the script and carries a comment that any later trap
+  must extend it.
+
+Corrected capture/post snippet (the `tee` and body lines are the deltas):
+
+```bash
+# startup, once
+TEE_NOPIPE="0"
+if tee -p /dev/null </dev/null >/dev/null 2>&1; then TEE_NOPIPE="1"; fi
+
+capture_mode() {
+  local v="exit-only"
+  if [ "$TEE_NOPIPE" = "1" ] && [ -f "$ESHU_CAPTURE_FILE" ] \
+     && [ ! -L "$ESHU_CAPTURE_FILE" ]; then
+    IFS= read -r v < "$ESHU_CAPTURE_FILE" || true   # D8: no newline surprise
+    case "$v" in off|exit-only|tail) ;; *) v="exit-only" ;; esac
+  fi
+  printf '%s' "$v"
+}
+
+post_exec_result() {   # $1=rc  $2=duration_ms  $3=mode  $4=path
+  ...  # same body build as § 2, plus "path":"'"$path"'"
+  # D2: stdin, not argv.
+  { printf '%s' "$body" | curl ... --data-binary @- ... ; } >/dev/null 2>&1 &
+}
+
+# inside run_sanitized, the FIFO branch (D1, D8)
+if [ -d "$ESHU_RUN_DIR" ] && [ ! -L "$ESHU_RUN_DIR" ] \
+   && [ "$(stat -c '%a' "$ESHU_RUN_DIR")" = "700" ] \
+   && [ "$(stat -c '%u' "$ESHU_RUN_DIR")" = "0" ]; then
+  ...
+  "$@" 2>&1 | sanitize | tee -p "$ESHU_OUT_FIFO" 2>/dev/null || rc=$?
+  wait "$ESHU_TAIL_PID" 2>/dev/null || true
+else
+  if [ -n "$ESHU_TAIL_PID" ]; then kill "$ESHU_TAIL_PID" 2>/dev/null || true; fi
+  "$@" 2>&1 | sanitize || rc=$?
+fi
+```
+
 #### 3. `capture_output` setting (policy → `/etc/eshu-capture`)
 
 * New per-gateway policy field `capture_output: "off" | "exit-only" | "tail"`,
@@ -1417,8 +1495,8 @@ request_results(
 )
 ```
 
-`INSERT OR REPLACE` on `request_id` (a gateway retry is idempotent; "first
-result wins" for attachment is enforced by the matcher, not the writer).
+`INSERT OR IGNORE` on `request_id` (D4): the first stored result wins and a
+retry is a harmless `attached: false`.
 
 **Caps**
 
@@ -1432,13 +1510,17 @@ result wins" for attachment is enforced by the matcher, not the writer).
 
 **Matching rules** (`db/exec_results.py`)
 
-1. With `request_id`: the request must exist, be `target_ip`-owned, and have
-   no result. Otherwise 400 (`unknown_request`) / 409 (`already_has_result`) /
-   403-ish via the gateway token check — never attach by guess.
+1. With `request_id`: the request must exist, be `target_ip`-owned, still have
+   no result, and be `approved` or `consumed` (D5). Unknown → 400
+   `unknown_request`; wrong state → 400 `not_executable`; a second post →
+   200 `{attached: false, reason: "already_has_result"}` (D4, `INSERT OR
+   IGNORE`, the stored output is never overwritten). Never attach by guess.
 2. Without it: newest row for `(target_ip, sha256(command))` created in the
-   last 120 s with `status IN ('auto-approved','window-approved')` and no
-   `request_results` row. `sha256` is computed on the decoded command — the
-   same bytes `/api/log` stored — so the allowlist and window paths match.
+   last 120 s with the status set selected by `path` (D3): `allowlist` →
+   `auto-approved`; `window` → `window-approved`; `lockbox`/`jit` →
+   `approved`/`consumed`; with no `request_results` row. `path` is an
+   internal literal; an unknown value is a 400. `sha256` is computed on the
+   decoded command — the same bytes `/api/log` stored.
 3. Nothing yet: insert an `exec_result_orphans` row
    (`target_ip, cmd_sha, exit_code, duration_ms, output, truncated, created_at`).
    `/api/log` calls `attach_orphan(target_ip, sha256(cmd), new_request_id)`
@@ -1608,7 +1690,103 @@ new tests.
   permissions; the retention window is the control.
 * No UI for the retention setting beyond one number field (default 30).
 * `capture_output` is per gateway, not per session; a session can't opt in.
+* Backlog for the security owner (D2): the gateway token header and the
+  command in `/api/log`'s argv remain visible in `/proc/*/cmdline`; F5 moves
+  only the exec-result body to stdin. Streaming output live, encrypting it at
+  rest and per-session capture are also backlog (§ 7 of the design).
 
+
+### Implementation (folded in after the design review)
+
+The D1–D8 points are part of the design now (§ 2b); this is what landed.
+
+**Gateway** (`dashboard/eshu-gateway.sh`, installers regenerated in the same
+commit)
+* `capture_mode()` reads `/etc/eshu-capture` with `IFS= read -r` (D8) and
+  accepts only `off | exit-only | tail`; a missing/garbage/symlinked file or a
+  `tee` without `-p` is `exit-only` (D1).
+* `run_sanitized` tees the sanitized stream through a 0600 `mktemp` file and a
+  FIFO read by `tail -c 16385` (bounded tmpfs, race-free `wait`), checks the
+  run dir is 0700 **and** uid 0 (D7), keeps the `EXIT` trap first with a
+  comment that later traps must extend it (D8), kills the reader if it has to
+  skip the FIFO branch (D8), and never touches stdout: `tee -p` ignores a dead
+  reader, with its diagnostic on `/dev/null` (D1).
+* `post_exec_result` builds the body with `path` (D3) and the digits-only
+  `request_id`, then pipes it to `curl --data-binary @-` on **stdin** (D2).
+  Call sites set `RESULT_PATH` (`allowlist`, `lockbox`, `jit`, `window` in the
+  feature script) and the JIT poll path sets `RESULT_REQUEST_ID`.
+**Poller**: writes `/etc/eshu-capture` atomically from the policy field,
+defaulting to `exit-only` for absent/garbage. **Dashboard**: policy response
+carries `capture_output`; `POST /api/gateways/{ip}/capture` sets it; the
+gateway table has a small `off/exit/tail` select.
+
+**Dashboard**
+* `db/exec_results.py` + tables in `db/core.py`; gateway-only
+  `POST /api/exec-result` (`_require_gateway` is not enough — D6 requires the
+  token outright), rate-limited.
+* Matching (D3): `request_id` → must belong to the gateway and be
+  `approved`/`consumed` (D5); otherwise the `path` picks the status set
+  (`allowlist` → `auto-approved`, `window` → `window-approved`,
+  `lockbox`/`jit` → `approved`/`consumed`) and the newest unresulted row for
+  `(ip, sha256(exact command))` in 120 s wins. No match → a bounded orphan
+  (50/gateway, 120 s) attached by `/api/log` when the row appears. First result
+  wins (`INSERT OR IGNORE`, `attached: false` on a retry — D4).
+* Output is scrubbed with `secret_scrub.scrub_body` before storage, capped at
+  16 KiB (the tail, `truncated=1`), and cleaned by the existing loop with
+  `meta.exec_result_retention_days` (default 30, 1–365).
+* `get_all_requests` / `search_requests` / `get_session_requests` join the
+  summary columns (`exit_code`, `duration_ms`, `output_truncated`); the output
+  itself is `GET /api/requests/{id}/output` (session auth, on demand).
+* UI: `exit N` + duration on history rows and in the session modal, an
+  "output" button opening an escaped monospace modal (`execOutputHtml`), a
+  capture select on the gateway row. `get_session_summary` adds `failed`.
+
+**Two existing tests changed (with reasons in the commit message)**
+* `tests/test_gateway_script.py::test_sec_chunk1_allowlist_log_body_is_well_formed`
+  now selects the `/api/log` calls only — the gateway legitimately makes a
+  second post (`/api/exec-result`) with a different body shape.
+* `tests/test_poller.py::test_first_run_parses_once_per_cycle` expects 17
+  python starts instead of 16: the new `capture_output` field is parsed in the
+  same stale-policy branch; the steady-state test still proves a clean cycle
+  starts none.
+
+**Surprises / decisions**
+* `auto-approved` rows (the allowlist path) are created by the *background*
+  `/api/log` call, so they cannot carry a `request_id`; that path always
+  matches by sha. The JIT poll path is the only one that knows the id; the
+  lockbox claim path cannot (ticket is `ts|cmd`), which D3's `path` handles.
+* The result post is fire-and-forget: a 404 (old dashboard) or a dead
+  connection changes nothing about the command (tested).
+* The retention setting has no Settings input yet; the default 30 days and
+  `set_retention_days()` are in place, and the cleanup loop reads it.
+
+**Deliberately not done**
+* No live streaming, no encryption at rest beyond file permissions, no
+  per-session opt-in (all listed as backlog in the design).
+* No Settings number field for retention (see above).
+* The token header/argv exposure noted in D2 stays as backlog (only the exec
+  body moved to stdin).
+
+**Tests** — `tests/test_f5_exec_results.py` (37): the whole § 10 list, plus
+D1 (dead reader keeps stdout), D3 (lockbox attaches to an `approved` row),
+D4 (idempotent), D5 (non-executable rejected), D6 (orphan cap, session cannot
+post), and the poller capture tests (3) in `tests/test_poller.py`.
+
+**Screenshots** (synthetic `web01` / `192.0.2.x` fixtures)
+
+* The exit badge and duration on a history row (`exit 1 · 3.1 s` with the
+  output link):
+  ![Exit badge](../screenshots/f5/exec-badge-history.png)
+* The "show output" view (escaped, monospace, max height):
+  ![Command output](../screenshots/f5/exec-output-modal.png)
+
+`bash scripts/verify.sh` (pre-commit green):
+
+```
+1779 passed, 7 warnings in 358.58s (0:05:58)
+```
+
+(1739 before this chunk + 37 F5 tests + 3 poller tests.)
 
 ### Reviewer notes
 
