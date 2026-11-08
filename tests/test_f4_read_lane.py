@@ -98,6 +98,10 @@ ELIGIBLE = [
     'head -n 50 /var/log/nginx/error.log',
     'tail -n 50 /var/log/syslog',
     'grep -e error /var/log/syslog',
+    'grep -r -e error /var/log',
+    'ls -R /var/log',
+    'ps -ef',
+    'head -c 1048576 /var/log/syslog',
     'wc -l /var/log/syslog',
     'ls -la /var/log',
     'stat /var/log/syslog',
@@ -185,6 +189,42 @@ INELIGIBLE = [
     'cat --file=/etc/shadow',
     'cat /var/log/syslog; rm /var/log/synthetic',
     'cat "$(rm -rf /tmp/synthetic-x)"',
+    # R5: recursion under /proc or /sys, and -R / -d recurse anywhere
+    'grep -R -e error /var/log',
+    'grep -R -e error /proc',
+    'grep -r -e error /proc',
+    'grep -r -e error /sys',
+    'grep --recursive -e error /proc',
+    'grep -d recurse -e error /var/log',
+    'ls -R /proc',
+    'ls -R /sys',
+    'du -sh /proc',
+    'du -sh /sys',
+    # R6: ps environment output
+    'ps e',
+    'ps eww',
+    'ps auxe',
+    'ps -eo pid,environ',
+    'ps --format=environ',
+    # R7: endless or interval forms
+    'free -s 1',
+    'free -c 5',
+    'zpool status 5',
+    'zpool list 10',
+    'zpool status -T',
+    'ss -E',
+    'ss --events',
+    # R8: journal sources outside the default
+    'journalctl --file=/var/log/syslog -n 10',
+    'journalctl --directory=/var/log/journal -n 10',
+    'journalctl --root=/ -n 10',
+    'journalctl --image=synthetic -n 10',
+    'journalctl -m -n 10',
+    # S2: head/tail byte cap
+    'head -c 2000000 /var/log/syslog',
+    'tail -c 2000000 /var/log/syslog',
+    # S3: /sys/firmware
+    'cat /sys/firmware/efi/efivars/synthetic',
     # R4: the guest never opted in
     'pct exec 103 -- uptime',
     'docker exec web01 df -h',
@@ -226,6 +266,19 @@ class TestEligibility:
         assert _verdict('journalctl -u nginx')[0] is False
         assert _verdict('tail -n 1000 /var/log/syslog')[0] is True
         assert _verdict('tail -n 5000 /var/log/syslog')[0] is False
+
+    def test_f4_eligible_cases_have_no_endless_form(self):
+        """R7: a static check per verb — no eligible case can run forever."""
+        endless = ('-s', '--seconds', '-c', '--count', '--events', '-T')
+        for command in ELIGIBLE:
+            tokens = command.split()
+            if tokens[0] == 'zpool':
+                assert not any(token.isdigit() for token in tokens[1:]), command
+            for token in tokens[1:]:
+                if tokens[0] in ('free', 'ss', 'zpool'):
+                    assert token not in endless, (command, token)
+            # `follows` is the one flag F1 would set; R3 refuses it.
+            assert not (tokens[0] == 'tail' and ('-f' in tokens or '-F' in tokens)), command
 
     def test_f4_any_flag_blocks(self):
         """R3: flags fail closed; the harmless list is deliberately empty."""

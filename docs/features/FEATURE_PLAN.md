@@ -1648,6 +1648,40 @@ ineligible.
 (1884 before this round + 67 new/expanded F4 tests; the F4 file has
 134 tests.)
 
+### Round 3 — fixes for reviewer round 2 (R5–R8, S2, S3)
+
+* **R5 — recursion only under `/var/log`.** `grep -R` and
+  `--dereference-recursive` are refused everywhere (they follow links), and
+  `grep -r`/`--recursive`, `ls -R` are allowed only when every operand is
+  under `/var/log/`; `grep -d recurse`/`--directories=recurse` is refused.
+  `du` recurses implicitly, so its operands may not be `/proc` or `/sys`.
+  Table: `grep -R …`, `grep -r … /proc`, `grep -r … /sys`, `ls -R /proc`,
+  `du -sh /proc`; eligible adds `grep -r -e error /var/log` and
+  `ls -R /var/log`.
+* **R6 — no `ps` environment output.** BSD option words (no leading dash)
+  containing `e` are refused (`ps e`, `ps eww`, `ps auxe`), as is any
+  `environ`/`env` token (`ps -eo pid,environ`, `ps --format=environ`);
+  `ps -e`/`-ef` stay eligible. Table cases added.
+* **R7 — no endless/interval forms.** `free -s`/`-c`, `zpool status|list`
+  with a numeric interval or `-T`, and `ss -E`/`--events` are refused.
+  `test_f4_eligible_cases_have_no_endless_form` statically asserts that no
+  eligible table case carries one of those forms.
+* **R8 — journal sources.** `--file=`, `--directory=`, `--root=`, `--image=`,
+  `-m`/`--merge` (and their `--opt=value` spellings) are refused, not only
+  `-D`.
+* **S2** `head -c`/`tail -c` are capped at 1 MiB (`bytes-cap`), as `-n` is
+  capped at 1000.
+* **S3** `/sys/firmware` is out of the safe trees (EFI variables can carry
+  vendor secrets).
+
+All synthetic (`192.0.2.x`, `/var/log/synthetic-*`, `web01`). Full gate:
+
+```
+1986 passed, 7 warnings in 373.06s (0:06:13)
+```
+
+(1884 + 102: the F4 file now has 169 tests.)
+
 ### Reviewer notes
 
 **Round 1 (2026-11-08): changes requested. Not ready for the security

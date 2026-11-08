@@ -69,10 +69,17 @@ _VALUE_OPTS = frozenset({
     'since', 'until', 'type', 'unit', 'pid', 'user', 'id', 'field', 'no-pager',
     'no-stream', 'all', 'human-readable', 'sort', 'time',
 })
-_JOURNAL_DENY = ('-f', '--follow', '--file', '-D', '--directory', '--root')
+_JOURNAL_DENY = ('-f', '--follow', '-m', '--merge', '--file', '-D',
+                 '--directory', '--root', '-i', '--image')
+# R8: the `--opt=value` spellings of the same sources.
+_JOURNAL_DENY_PREFIX = ('--file=', '--directory=', '--root=', '--image=',
+                        '--merge', '--since-cursor')
 _TAIL_DENY = ('-f', '--follow', '-F')
 # S1: one auto-run read may not dump a whole journal.
 JOURNAL_MAX_LINES = 1000
+BYTES_MAX = 1024 * 1024   # S2: head/tail -c cap
+# S3: EFI variables can carry vendor secrets.
+SYS_DENY_PREFIXES = ('/sys/firmware',)
 
 
 def is_read_integration_call(tool, transport, args):
@@ -107,6 +114,8 @@ def _path_ok(token: str) -> bool:
         return True
     if token in ('/sys', '/var/log'):
         return True
+    if token.startswith(SYS_DENY_PREFIXES):
+        return False
     if token.startswith('/sys/') or token.startswith('/var/log/'):
         return True
     return token in SAFE_PATH_EXACT
@@ -158,6 +167,13 @@ def _check_operands(tokens, allow_pattern=False):
 
 def _check_status(verb, tokens):
     rest = tokens[1:]
+    if verb == 'zpool':
+        # R7: a trailing interval/count or -T keeps printing.
+        if any(token == '-T' or token.startswith('-T') for token in rest):
+            return False, 'zpool-interval'
+        if any(token.isdigit() for token in rest):
+            return False, 'zpool-interval'
+        return True, ''
     if verb in _SUBCOMMANDS:
         sub = next((t for t in rest if not t.startswith('-')), '')
         if sub not in _SUBCOMMANDS[verb]:
@@ -169,6 +185,8 @@ def _check_status(verb, tokens):
         return True, ''
     if verb == 'journalctl':
         if any(flag in rest for flag in _JOURNAL_DENY):
+            return False, 'journal-flag'
+        if any(token.startswith(_JOURNAL_DENY_PREFIX) for token in rest):
             return False, 'journal-flag'
         if '--disk-usage' in rest:
             # Usage statistics only; it never dumps the journal.
@@ -187,6 +205,26 @@ def _check_status(verb, tokens):
         except (TypeError, ValueError):
             return False, 'journal-lines'
         return True, ''
+    if verb == 'free':
+        # R7: `free -s N` / `free -c N` never return.
+        if any(token in ('-s', '--seconds', '-c', '--count')
+               or token.startswith(('--seconds=', '--count=')) for token in rest):
+            return False, 'free-interval'
+        return True, ''
+    if verb == 'ps':
+        # R6: BSD option words are the ones without a leading dash; a cluster
+        # containing `e` prints the environment. `ps -e` / `-ef` stay eligible.
+        for token in rest:
+            if not token.startswith('-') and 'e' in token:
+                return False, 'ps-env'
+            if token.lower() == 'env' or 'environ' in token.lower():
+                return False, 'ps-env'
+        return True, ''
+    if verb == 'ss':
+        if any(token == '--events' or (token.startswith('-') and not token.startswith('--')
+                                       and 'E' in token[1:]) for token in rest):
+            return False, 'ss-events'
+        return True, ''
     if verb == 'date':
         if any(token in ('-s', '--set') or token.startswith('--set=')
                for token in rest):
@@ -199,17 +237,88 @@ def _check_status(verb, tokens):
     return True, ''
 
 
+def _operands(tokens):
+    """Non-flag tokens (values of value flags skipped)."""
+    out = []
+    skip_next = False
+    for token in tokens:
+        if skip_next:
+            skip_next = False
+            continue
+        if token.startswith('-'):
+            if token in _VALUE_FLAGS:
+                skip_next = True
+            continue
+        out.append(token)
+    return out
+
+
+def _recursive_flag(rest, letters='rR'):
+    """True when a short cluster or long form asks for recursion."""
+    for token in rest:
+        if token in ('--recursive', '--dereference-recursive'):
+            return True
+        if token.startswith('-') and not token.startswith('--') and any(
+                ch in letters for ch in token[1:]):
+            return True
+    return False
+
+
+def _bytes_ok(rest):
+    for index, token in enumerate(rest):
+        value = None
+        if token in ('-c', '--bytes') and index + 1 < len(rest):
+            value = rest[index + 1]
+        elif token.startswith('--bytes='):
+            value = token.split('=', 1)[1]
+        if value is None:
+            continue
+        try:
+            if int(value) > BYTES_MAX:
+                return False
+        except (TypeError, ValueError):
+            return False
+    return True
+
+
 def _check_file_reader(verb, tokens):
     rest = tokens[1:]
     if verb == 'tail':
         if any(token in _TAIL_DENY or token.startswith('--follow') for token in rest):
             return False, 'follows'
     if verb == 'grep':
+        # R5: `-R` follows links anywhere; `-d recurse` is the same idea.
+        if any(token in ('-R', '--dereference-recursive') for token in rest):
+            return False, 'grep-R'
+        if any(token == '-d' or token.startswith('--directories=')
+               for token in rest):
+            # `-d recurse` / `--directories=recurse` (or skip/read)
+            return False, 'grep-d'
         ok, why = _check_operands(rest, allow_pattern=True)
-    else:
-        ok, why = _check_operands(rest)
+        if not ok:
+            return False, why
+        if _recursive_flag(rest, 'rR'):
+            # R5: recursion is only safe under /var/log (names only, no /proc).
+            for operand in _operands(rest):
+                if not (operand == '/var/log' or operand.startswith('/var/log/')):
+                    return False, 'grep-recursive'
+        return True, ''
+    ok, why = _check_operands(rest)
     if not ok:
         return False, why
+    operands = _operands(rest)
+    if verb == 'ls' and _recursive_flag(rest, 'R'):
+        for operand in operands:
+            if not (operand == '/var/log' or operand.startswith('/var/log/')):
+                return False, 'ls-recursive'
+    if verb == 'du':
+        # du recurses by default: keep it out of /proc and /sys.
+        for operand in operands:
+            if operand == '/proc' or operand.startswith('/proc/') \
+               or operand == '/sys' or operand.startswith('/sys/'):
+                return False, 'du-recursive'
+    if verb in ('head', 'tail') and not _bytes_ok(rest):
+        return False, 'bytes-cap'
     if verb == 'tail':
         for index, token in enumerate(rest):
             if token in ('-n', '--lines') and index + 1 < len(rest):
