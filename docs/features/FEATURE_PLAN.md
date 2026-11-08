@@ -2450,7 +2450,23 @@ unknown id 404; bulk sequence; no audit events for refused transitions).
 
 ### Reviewer notes
 
-_(reviewer)_
+**Round 1 (2026-11-08): approved and merged.**
+
+* **Sidebar:** dispatch goes by type first, so a pending integration call
+  can no longer reach `/api/approve`.
+* **Backend:** approve and deny use one conditional UPDATE, with 404/409 and
+  audit only on a real transition.
+* **No other callers:** nothing else posts to these endpoints apart from
+  `handleAction`.
+* **Tests:** 30 X1 + F2 tests pass locally.
+
+Nit, for the UI pass: `contextApproveLabel` reads `_bdUnknownConfirmed` for
+integration calls too. The id spaces are shared, so an armed SSH request
+with the same number would relabel an integration button. It is cosmetic
+only, because the integration handler has no two-press rule.
+
+FYI for the security reviewer: before X1, `/api/approve/{id}` moved a row of
+any status to `approved`. It is now pending-only.
 
 ---
 
@@ -3138,7 +3154,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 3 | F7 | inner-target | dashboard | **Merged** 2026-11-08 | `feat/f7-inner-target` @ `0ad167f` | F1 | 1 round; backfill 7.1 s on a live-DB copy |
 | 4 | F3 | session-plans | dashboard + MCP | Merged | `feat/f3-session-plans` | F2 | + security reviewer sign-off |
 | 5 | F4 | read-lane | dashboard | **Changes requested (R1–R4)** | `feat/f4-read-lane` | F1, F3, Chunk H | reviewer pass + security reviewer sign-off |
-| 5a | X1 | ctx-actions | dashboard | **Ready — do next, small bug fix** | `fix/x1-ctx-actions` | — | FYI to security reviewer (approve ignored status) |
+| 5a | X1 | ctx-actions | dashboard | Merged | `fix/x1-ctx-actions` | — | FYI to security reviewer (approve ignored status) |
 | 6 | F5 | exec-results | gateway + dashboard | Merged | `feat/f5-exec-results` | — | |
 | 6a | F18 | request-context | dashboard | Ready (after X1) | `feat/f18-request-context` | F1, F5, F7, X1 | |
 | 7 | F12 | ssh-exec | dashboard + gateway | Ready (after F5) — design first | `feat/f12-ssh-exec` | F4, F5 | design approval + security reviewer sign-off |
