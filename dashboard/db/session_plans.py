@@ -59,6 +59,22 @@ def init_session_plans_tables(cursor):
         'ON session_plan_items(plan_id)')
 
 
+def _forbidden_command_char(command: str):
+    """SR1: the one character class a plan item may not contain.
+
+    Matching is byte-exact, but `str.strip()` removes far more than the
+    gateway's `[[:space:]]` trim (C0 separators, DEL, `\xa0`, `\u2028`, …), so
+    those bytes could hide a mismatch. Items may contain printable text, plain
+    spaces and tabs — nothing else.
+    """
+    for ch in command:
+        if ch in (' ', '\t'):
+            continue
+        if ord(ch) < 0x20 or ord(ch) == 0x7f or ch.isspace():
+            return ch
+    return None
+
+
 class PlanError(ValueError):
     """A plan operation the caller should see as a stable error code."""
 
@@ -82,6 +98,12 @@ def validate_items(items):
         command = item.get('command')
         if not isinstance(command, str) or not command.strip():
             raise PlanError('invalid_command', 'each item needs a command')
+        # SR1: inspect the raw text first — `strip()` itself would silently
+        # remove `\x1c`, `\xa0`, `\u2028`, … and hide them from the check.
+        if _forbidden_command_char(command) is not None:
+            raise PlanError('invalid_command',
+                            'commands may not contain control characters or '
+                            'non-ASCII whitespace (plain spaces and tabs only)')
         command = command.strip()
         if len(command.encode('utf-8')) > MAX_COMMAND_BYTES:
             raise PlanError('command_too_long',
@@ -315,7 +337,9 @@ def claim_plan_item(session_id: str, host: str, command: str, now: int = None):
         return None
     now = int(now or time.time())
     host = (host or '').strip()
-    command = (command or '').strip()
+    # SR1: compare exactly what the gateway sent — it already trims surrounding
+    # whitespace, and stripping here would let a trailing C0 byte match.
+    command = command or ''
     expire_plans(now)
     with db_conn() as conn:
         cur = conn.cursor()
