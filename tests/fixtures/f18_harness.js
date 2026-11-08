@@ -30,6 +30,8 @@ out.like = ctx.ctxLikeBody({
   like: { count: 1, approved: 1, denied: 0,
           examples: [{ id: 3, command: payload, hostname: payload, created_at: 0 }] },
 });
+out.waitingEmpty = ctx.ctxWaitingBody({ waiting: null });
+out.generic = ctx.ctxLikeBody({ like: { generic: true, count: 0, examples: [] } });
 out.host = ctx.ctxHostBody({
   host: { hostname: payload, inner_target: payload, zero_trust: true,
           read_lane: payload, failed_24h: 0, last_seen: 0 },

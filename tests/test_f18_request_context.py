@@ -86,9 +86,25 @@ class TestSections:
         save_result(req_id, 3, 10, '')
         seen = _context(gateway, req_id)['seen']
         assert seen['count'] == 3
-        assert seen['approved'] == 1
+        assert seen['operator_approved'] == 1
         assert seen['denied'] == 1
         assert seen['last_exit_code'] == 3
+
+    def test_f18_seen_splits_operator_from_auto(self, gateway):
+        """C1: an allowlist hit is not a decision the operator made."""
+        req_id = create_request('10.0.0.1', 'uptime', status='pending', ttl=90)
+        create_request('10.0.0.2', 'uptime', status='approved', ttl=0)
+        create_request('10.0.0.2', 'uptime', status='auto-approved', ttl=0)
+        create_request('10.0.0.1', 'uptime', status='approved', ttl=0,
+                       reason='session-plan:1:2')
+        create_request('10.0.0.1', 'uptime', status='consumed', ttl=0,
+                       reason='read-lane')
+        create_request('10.0.0.1', 'uptime', status='denied', ttl=0)
+        seen = _context(gateway, req_id)['seen']
+        assert seen['count'] == 6
+        assert seen['operator_approved'] == 1
+        assert seen['auto'] == 3
+        assert seen['denied'] == 1
 
     def test_f18_like_this_ignores_arguments(self, gateway):
         req_id = create_request('10.0.0.1', 'df -h /var', status='pending', ttl=90)
@@ -96,10 +112,37 @@ class TestSections:
         create_request('10.0.0.1', 'df -h /tmp', status='denied', ttl=0)
         like = _context(gateway, req_id)['like']
         assert like['count'] == 2
-        assert like['approved'] == 1 and like['denied'] == 1
-        assert [e['id'] for e in like['examples']] == sorted([other], reverse=True)[:1] or \
-            len(like['examples']) <= 3
+        assert like['operator_approved'] == 1 and like['denied'] == 1
+        assert len(like['examples']) <= 3
         assert all(e['id'] != req_id for e in like['examples'])
+
+    def test_f18_generic_shape_has_no_counts(self, gateway):
+        """C2: a one-step interpreter shape is too generic to compare."""
+        req_id = create_request('10.0.0.1', 'bash /tmp/synthetic.sh',
+                                status='pending', ttl=90)
+        create_request('10.0.0.1', 'bash /tmp/other.sh', status='approved', ttl=0)
+        like = _context(gateway, req_id)['like']
+        assert like['generic'] is True
+        assert like['count'] == 0
+        assert like['examples'] == []
+
+    def test_f18_like_this_counts_in_sql(self, gateway):
+        """C2: counts come from SQL and match the stored rows."""
+        req_id = create_request('10.0.0.1', 'cat /var/log/a; cat /var/log/b',
+                                status='pending', ttl=90)
+        create_request('10.0.0.1', 'cat /var/log/c; cat /var/log/d',
+                       status='approved', ttl=0)
+        create_request('10.0.0.1', 'cat /var/log/e; cat /var/log/f',
+                       status='denied', ttl=0)
+        create_request('10.0.0.1', 'cat /var/log/g; cat /var/log/h',
+                       status='auto-approved', ttl=0)
+        like = _context(gateway, req_id)['like']
+        assert like['generic'] is False
+        assert like['count'] == 3
+        assert like['operator_approved'] == 1
+        assert like['auto'] == 1
+        assert like['denied'] == 1
+        assert len(like['examples']) == 3
 
     def test_f18_host_section(self, gateway):
         set_gateway_zero_trust('10.0.0.1', True)
@@ -202,6 +245,16 @@ class TestBackfill:
         assert row['shape_sha'] == shape_sha('pct exec 103 -- df -h')
 
 
+class TestWaitingPendingOnly:
+
+    def test_f18_non_pending_has_no_waiting_reason(self, gateway):
+        """C3: the reason is only a guess for a row that is still waiting."""
+        req_id = create_request('10.0.0.1', 'uptime', status='approved', ttl=0)
+        assert _context(gateway, req_id)['waiting'] is None
+        pending = create_request('10.0.0.1', 'uptime', status='pending', ttl=90)
+        assert isinstance(_context(gateway, pending)['waiting'], str)
+
+
 class TestApi:
 
     def test_f18_requires_a_session(self, client):
@@ -234,6 +287,12 @@ class TestApi:
 
 @pytest.mark.skipif(NODE is None, reason='node is not installed')
 class TestUi:
+
+    def test_f18_waiting_label_and_generic_shape(self):
+        out = run_node({'payload': 'x'})
+        assert 'Likely waiting because' in out['waiting']
+        assert out['waitingEmpty'] == ''
+        assert 'Too generic to compare' in out['generic']
 
     def test_f18_every_section_escapes_agent_text(self):
         payload = '<img src=x onerror=alert(1)>'
