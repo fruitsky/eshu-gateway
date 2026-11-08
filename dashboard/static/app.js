@@ -62,6 +62,128 @@ var _activeSessionSid = null;
 var _activeSessionHost = '';
 var _activeSessionHostIp = '';
 
+/* ── F18: request context sections ──────────────────────────────────────
+   Five capped sections rendered from GET /api/requests/{id}/context, fetched
+   only when the panel opens. Every agent string is escaped here; a section's
+   open/closed state lives in localStorage (best effort). */
+var _ctxReq = null;
+
+function ctxCut(text) {
+  return String(text == null ? '' : text).slice(0, 300);
+}
+
+function ctxOpenState(key) {
+  try {
+    return localStorage.getItem('ctx-open-' + key) !== '0';
+  } catch (e) { return true; }
+}
+
+function ctxSaveOpen(key, open) {
+  try { localStorage.setItem('ctx-open-' + key, open ? '1' : '0'); } catch (e) {}
+}
+
+function ctxSectionHtml(key, title, body) {
+  if (!body) return '';
+  var open = ctxOpenState(key);
+  return '<details class="ctx-sec" data-ctx-sec="' + escapeHtml(key) + '"' +
+    (open ? ' open' : '') + ' ontoggle="ctxSaveOpen(' + escJs(key) + ',this.open)">' +
+    '<summary>' + escapeHtml(title) + '</summary>' +
+    '<div class="ctx-sec-body">' + body + '</div></details>';
+}
+
+function ctxWaitingBody(d) {
+  return '<div class="ctx-wait">' + escapeHtml((d || {}).waiting || '') + '</div>';
+}
+
+function ctxSessionBody(d) {
+  var s = (d || {}).session;
+  if (!s) return '<div class="ctx-empty">No session on this request.</div>';
+  var rows = (s.commands || []).map(function (c) {
+    return '<div class="ctx-row"><code>' + escapeHtml(ctxCut(c.command)) + '</code>' +
+      '<span class="ctx-tag">' + escapeHtml(c.status || '') + '</span>' +
+      (c.exit_code === null || c.exit_code === undefined ? ''
+        : '<span class="ctx-tag">exit ' + Number(c.exit_code) + '</span>') + '</div>';
+  }).join('');
+  return '<div class="ctx-goal">' + escapeHtml(s.goal || '') +
+    (s.agent ? ' \u00b7 ' + escapeHtml(s.agent) : '') + '</div>' + rows +
+    (s.plan ? '<div class="ctx-tag">plan #' + Number(s.plan.id) +
+      ' until ' + formatTime(Number(s.plan.until)) + '</div>' : '') +
+    (s.override ? '<div class="ctx-tag">session override active</div>' : '');
+}
+
+function ctxSeenBody(d) {
+  var s = (d || {}).seen || {};
+  if (!s.count) return '<div class="ctx-empty">Not seen before.</div>';
+  var last = s.last_at ? formatAgo(Math.floor(Date.now() / 1000) - Number(s.last_at)) : '\u2014';
+  return '<div class="ctx-row">' + Number(s.count) + '\u00d7 on record \u00b7 approved ' +
+    Number(s.approved || 0) + ' \u00b7 denied ' + Number(s.denied || 0) +
+    ' \u00b7 last ' + escapeHtml(last) +
+    (s.last_exit_code === null || s.last_exit_code === undefined ? ''
+      : ' \u00b7 exit ' + Number(s.last_exit_code)) + '</div>' +
+    '<button type="button" class="bd-hist-link" onclick="filterHistoryToCommand(' +
+      escJs(ctxCut((d || {}).request_command || '')) + ')">show in history</button>';
+}
+
+function ctxLikeBody(d) {
+  var s = (d || {}).like || {};
+  if (!s.count) return '<div class="ctx-empty">Nothing similar yet.</div>';
+  var examples = (s.examples || []).map(function (e) {
+    return '<div class="ctx-row"><code>' + escapeHtml(ctxCut(e.command)) + '</code>' +
+      (e.hostname ? ' <span class="ctx-tag">' + escapeHtml(e.hostname) + '</span>' : '') +
+      '</div>';
+  }).join('');
+  return '<div class="ctx-row">' + Number(s.count) + ' similar \u00b7 approved ' +
+    Number(s.approved || 0) + ' \u00b7 denied ' + Number(s.denied || 0) + '</div>' +
+    examples;
+}
+
+function ctxHostBody(d) {
+  var h = (d || {}).host || {};
+  return '<div class="ctx-row">' + escapeHtml(h.hostname || '') +
+    (h.inner_target ? ' \u00b7 inside ' + escapeHtml(h.inner_target) : '') +
+    (h.zero_trust ? ' \u00b7 Zero-Trust' : '') +
+    ' \u00b7 read lane ' + escapeHtml(h.read_lane || 'off') +
+    ' \u00b7 failed 24h ' + Number(h.failed_24h || 0) + '</div>';
+}
+
+function renderRequestContext(data) {
+  var el = document.getElementById('ctx-context');
+  if (!el) return;
+  el.innerHTML =
+    ctxSectionHtml('waiting', 'Why it is waiting for you', ctxWaitingBody(data)) +
+    ctxSectionHtml('session', 'This session', ctxSessionBody(data)) +
+    ctxSectionHtml('seen', 'Seen before', ctxSeenBody(data)) +
+    ctxSectionHtml('like', 'Like this', ctxLikeBody(data)) +
+    ctxSectionHtml('host', 'Host', ctxHostBody(data));
+}
+
+function loadRequestContext(requestId, command) {
+  var el = document.getElementById('ctx-context');
+  if (!el) return;
+  el.innerHTML = '<div class="ctx-empty">Loading context\u2026</div>';
+  authFetch('/api/requests/' + Number(requestId) + '/context').then(function (res) {
+    return res.ok ? res.json() : null;
+  }).then(function (data) {
+    if (!data || !_ctxReq || String(_ctxReq.id) !== String(requestId)) return;
+    data.request_command = command || (_ctxReq && _ctxReq.command) || '';
+    renderRequestContext(data);
+  }).catch(function () {
+    if (el && _ctxReq && String(_ctxReq.id) === String(requestId)) {
+      el.innerHTML = '<div class="ctx-empty">Could not load the context.</div>';
+    }
+  });
+}
+
+function filterHistoryToCommand(command) {
+  var text = ctxCut(command);
+  if (!text) return;
+  _requestSearchQuery = text;
+  var box = document.getElementById('request-search');
+  if (box) box.value = text;
+  switchView('history');
+  fetchRequests();
+}
+
 function openContextPanel(reqId) {
   var panel = document.getElementById('cc-context');
   var empty = document.getElementById('cc-context-empty');
@@ -96,6 +218,7 @@ function openContextPanel(reqId) {
     content.classList.add('hidden');
     return;
   }
+  _ctxReq = req;
 
   empty.classList.add('hidden');
   content.classList.remove('hidden');
@@ -184,6 +307,14 @@ function openContextPanel(reqId) {
     actionsHtml = '<button onclick="closeContextPanel()" class="btn btn-muted btn-sm" style="flex:1">Close</button>';
   }
   actionsEl.innerHTML = actionsHtml;
+
+  // F18: the context sections are fetched only when the panel opens.
+  if (req._type === 'integration' || req._type === 'window') {
+    var ctxEl = document.getElementById('ctx-context');
+    if (ctxEl) ctxEl.innerHTML = '';
+  } else {
+    loadRequestContext(req.id, req.command);
+  }
 }
 
 /* When the panel is showing the request you just approved or denied, the
