@@ -1303,7 +1303,94 @@ Additive column and fields; no gateway change.
 
 ### Implementer notes
 
-_(fill in)_
+**What I did**
+
+* **Parser** (`core/cmd_parse.py`): `qm guest exec <vmid> [--] cmd…` is now a
+  wrapper like `pct exec` — context `qm 201`, inner target `qm:201`, the inner
+  command classified as usual. New fixture `wrappers.txt::qm-guest-exec`; F1's
+  table still passes.
+* **Column** (`db/requests.py`): `inner_target`, added by the same migration
+  loop, indexed `(target_ip, inner_target)`. **Deliberately nullable** rather
+  than `TEXT DEFAULT ''`: NULL marks a row that predates the column so the
+  backfill can find it, while `''` means "this command has no inner target".
+  The API and UI normalise NULL to `''`.
+* **Fill-in**: `_inner_target_for(cmd)` (a thin wrapper over
+  `core.inner_targets.inner_target_for`, which uses F1's cached breakdown) is
+  passed by all four `/api/request` creation paths (encoded-payload block,
+  session override, host override, pending) and by `/api/log`. Value is the
+  first target, `multi` for several, `''` for none.
+* **Backfill** (`core/inner_targets.py`): `backfill_inner_targets()` walks
+  NULL rows in batches of 500 **distinct commands**, recomputes each command
+  once, and sets the `meta` key `inner_target_backfill_done` when done. It is
+  idempotent (only NULL rows are touched; the key short-circuits a second
+  run) and runs in a daemon thread from `on_startup`, so it never delays
+  startup or the request path.
+* **API**: `inner_target` is on every request row (`SELECT r.*`), a new
+  `GET /api/gateways/{ip}/inner-targets?days=30` returns
+  `{pct, qm, docker, count}` (distinct targets, `multi` excluded), and
+  `GET /api/requests?inner_target=pct:103` filters exactly, composing with
+  `search`/`session`. `/api/statistics` gains `inner_targets` (top 10 for the
+  window, `multi` and empty excluded).
+* **UI**: an inner-target chip on pending cards (hero) and on history rows;
+  clicking it switches to History with a removable `inside pct 103` filter
+  chip in the header. Statistics gets a "Busiest inner targets" widget (top
+  10, same 14-day window) whose chips filter too. The host-override dialog
+  fetches the endpoint and shows "This host reaches N containers/VMs via
+  pct/qm. An override here also covers commands run inside them." — warning
+  only, no behaviour change, and nothing appears when the host has no pct/qm
+  targets.
+* **Tests**: `tests/test_f7_inner_target.py` (17 tests) — parser, fill-in on
+  `/api/request` and `/api/log` (pct, docker, qm, `multi`, none), the backfill
+  (fills, skips filled, sets the key, safe twice, batches, thread), the
+  endpoint (counts, `days` window, unknown gateway, session auth), the filter,
+  the statistics list, and the two node-harness checks (chip escaped;
+  override warning only with pct/qm). The node harnesses now share
+  `tests/fixtures/appjs_loader.js`; the F2 harness was moved onto it and its
+  12 tests still pass.
+
+**Surprises and decisions**
+
+* The nullable column is the one deviation from the chunk's literal
+  `TEXT DEFAULT ''`: with a default, pre-migration rows would read `''` and
+  the backfill would have nothing to select. `''` vs NULL keeps "no inner
+  target" and "not computed yet" apart, which is what the one-off job needs.
+* `multi` rows are recorded (the card shows a `multi` chip) but excluded from
+  the gateway endpoint and the statistics list — a command that reached
+  several guests cannot be attributed to one.
+* The override warning counts **pct + qm only** (as the chunk specifies);
+  docker targets do not trigger it.
+* Out of scope, found while testing: `/api/statistics?...gateway_ips=…` 500s
+  with `no such column: r.target_ip` — a pre-existing unaliased query in the
+  daily aggregation (the UI does not pass that parameter today). My new
+  inner-targets query uses the `r` alias so it does not add a second one; I
+  left the pre-existing bug alone per § 2.1.3.
+* Only `/api/request` and `/api/log` fill the column at write time, as the
+  chunk asks. Rows created by Fleet Run and window logging keep `''` rather
+  than a computed target (the backfill only fills NULL). Say so if you want
+  those two paths added.
+* The optional guest-name labelling (`pct:<id>` → guest name from the Proxmox
+  integration) was skipped — the chunk marks it optional and it would have
+  grown the chunk.
+
+**Screenshots** (synthetic gateway `web01` / `10.0.0.1`)
+
+* The inner-target chip on a pending card and on a history row:
+  ![pending card chip](../screenshots/f7/pending-card-chip.png)
+  ![history row chip](../screenshots/f7/history-row-chip.png)
+* The host-override warning:
+  ![override warning](../screenshots/f7/override-warning.png)
+* Statistics "Busiest inner targets":
+  ![statistics inner targets](../screenshots/f7/stats-inner-targets.png)
+
+`bash scripts/verify.sh` (pre-commit green):
+
+```
+1735 passed, 7 warnings in 345.69s (0:05:45)
+```
+
+(1715 before this chunk + 17 new F7 tests + 3 parser-table tests from the new
+fixture case.)
+
 
 ### Reviewer notes
 
