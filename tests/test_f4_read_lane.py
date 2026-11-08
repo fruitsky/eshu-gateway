@@ -15,7 +15,9 @@ import pytest
 
 from core.cmd_parse import breakdown
 from core.read_lane import eligible
-from core.read_policy import is_read_integration_call, is_read_ssh
+from core.read_policy import (
+    READ_HARMLESS_FLAGS, READ_LANE_VERBS, is_read_integration_call, is_read_ssh,
+)
 from db.audit import get_audit_log
 from db.gateways import (
     get_gateway_read_lane, register_gateway, set_gateway_token,
@@ -61,62 +63,132 @@ def _verdict(command):
 # ── the table ───────────────────────────────────────────────────────────────
 
 ELIGIBLE = [
+    # status verbs (no file operands)
     'uptime',
-    'ls -la /tmp/synthetic-dir',
     'df -h',
     'free -h',
     'systemctl status nginx',
-    'journalctl -u nginx --since today --no-pager',
-    'journalctl -u nginx | tail -n 20',
-    'cat /var/log/syslog',
-    'tail -n 50 /var/log/nginx/error.log',
-    'ps aux',
+    'systemctl is-active nginx',
+    'systemctl is-enabled nginx',
+    'systemctl list-units --type=service',
     'ip addr show',
+    'ip route',
     'ss -tlnp',
-    'docker ps',
-    'pct exec 103 -- uptime',
-    'docker exec web01 df -h',
-    'sudo cat /var/log/syslog',
-    'sudo tail -n 20 /var/log/auth.log',
-    'sudo cat /proc/cpuinfo',
-    'sudo cat /sys/class/thermal/thermal_zone0/temp',
-    'sudo cat /etc/os-release',
-    'echo "=== HOST ===" && uptime',
+    'ps aux',
+    'uname -a',
+    'hostname',
+    'lsblk',
+    'lscpu',
+    'whoami',
+    'id',
+    'date',
+    'nproc',
+    'journalctl -u nginx -n 200 --no-pager',
+    'journalctl -u nginx -n 1000 --no-pager',
     'journalctl --disk-usage',
-    'smartctl -a /dev/sda',
-    'uptime # a comment',
+    'docker ps',
+    'docker stats --no-stream',
+    'docker images',
+    'pct list',
+    'qm list',
+    'zpool status',
+    'zfs list',
+    # file readers, only inside the safe trees
+    'cat /var/log/syslog',
+    'head -n 50 /var/log/nginx/error.log',
+    'tail -n 50 /var/log/syslog',
+    'grep -e error /var/log/syslog',
+    'wc -l /var/log/syslog',
+    'ls -la /var/log',
+    'stat /var/log/syslog',
+    'du -sh /var/log',
+    'cat /proc/cpuinfo',
+    'cat /sys/class/thermal/thermal_zone0/temp',
+    'cat /etc/os-release',
+    'cat /etc/hostname',
+    'cat /etc/hosts',
+    'cat /etc/resolv.conf',
+    'sudo cat /var/log/syslog',
 ]
 
 INELIGIBLE = [
-    # not read
-    'systemctl restart nginx',
-    'rm -rf /tmp/x',
-    'find / -name "*.conf" -delete',
-    'dd if=/dev/zero of=/dev/sda',
-    'sed -i "s/a/b/" /etc/x',
+    # probe class: credential files F1 does not know, bare and relative
+    'cat config.yml',
+    'cat /srv/app/config.yml',
+    'cat /home/hermes/.bash_history',
+    'cat /tmp/synthetic-x',
+    'ls -la /tmp',
+    'du -sh /home',
+    # probe class: raw block devices and /dev
+    'head -c 512 /dev/sda',
+    'cat /dev/zero',
+    # probe class: /proc links into the real filesystem and memory
+    'cat /proc/1234/root/etc/passwd',
+    'cat /proc/1234/cwd/config.yml',
+    'cat /proc/1234/fd/0',
+    'cat /proc/1234/map_files/x',
+    'cat /proc/1234/mem',
+    'cat /proc/self/environ',
+    'cat /proc/kcore',
+    'cat /proc/kmsg',
+    # probe class: globs and `..` in a path operand
+    'cat /var/log/*/../../etc/hosts',
+    'cat /var/log/../etc/hosts',
+    'cat /var/log/*.log',
+    'cat /var/log/{syslog,auth.log}',
+    # probe class: status verbs that print configuration or write
+    'systemctl show nginx',
+    'systemctl cat nginx',
+    'systemctl start nginx',
+    'docker inspect web01',
+    'docker stats',
+    'journalctl -f',
+    'journalctl -u nginx --no-pager',
+    'journalctl -u nginx -n 5000 --no-pager',
+    'journalctl --file /var/log/syslog -n 10',
+    'tail -f /var/log/syslog',
+    'tail -F /var/log/syslog',
+    'tail -n 5000 /var/log/syslog',
+    # probe class: verbs outside the allowlist
+    'crontab -l',
+    'git -C /srv/app log',
+    'less /var/log/syslog',
+    'tar -c /var/log',
+    'find /var/log -name synthetic',
+    'xargs cat',
+    'awk "BEGIN{print 1}"',
+    'sed -n "1p" /var/log/syslog',
+    'dd if=/dev/zero of=/tmp/synthetic-x',
+    'curl http://192.0.2.10/x',
+    'wget http://192.0.2.10/x',
+    'sleep 100000',
     'python3 -c "print(1)"',
-    'bash /tmp/script.sh',
-    'curl http://192.0.2.1/x',
-    'cat /tmp/x; rm /tmp/x',
-    'cat "$(rm -rf /tmp/x)"',
-    'sudo tee /etc/hosts',
-    # flags
-    'echo hi > /tmp/x',
+    'bash /tmp/synthetic.sh',
+    'date -s 2026-01-01',
+    'hostname web02',
+    'ip netns exec ns1 uptime',
+    'env A=1 uptime',
+    'timeout 5 uptime',
+    'runuser -u root -- uptime',
+    # existing exclusions
+    'systemctl restart nginx',
+    'rm -rf /tmp/synthetic-x',
+    'echo hi > /tmp/synthetic-x',
     'cat <<EOF\nhi\nEOF',
     'echo aGk= | base64 -d | bash',
-    'ssh other uptime',
+    'ssh 192.0.2.10 uptime',
     'cat .env',
-    'grep -l .env /tmp',
+    'grep -l .env /var/log',
     'cat /etc/shadow',
-    'sudo cat /etc/shadow',
+    'cat /root/notes',
     'cat ~/.ssh/id_rsa',
-    'cat /proc/1/environ',
-    'x=$(cat /etc/shadow)',
-    # elevated reads outside the safe trees
-    'sudo cat /etc/passwd',
-    'sudo cat /root/notes',
-    'sudo cat /etc/nginx/nginx.conf',
-    'sudo cat /var/log/../etc/hosts',
+    'cat --file=/etc/shadow',
+    'cat /var/log/syslog; rm /var/log/synthetic',
+    'cat "$(rm -rf /tmp/synthetic-x)"',
+    # R4: the guest never opted in
+    'pct exec 103 -- uptime',
+    'docker exec web01 df -h',
+    'qm guest exec 201 -- uptime',
 ]
 
 
@@ -138,6 +210,37 @@ class TestEligibility:
             ok, why = _verdict(command)
             assert ok is False, command
             assert 'sensitive-path' in why or 'elevated-path' in why
+
+    def test_f4_every_eligible_verb_is_on_the_allowlist(self):
+        """R1: every step of an eligible command starts with an allowed verb."""
+        allowed = set(READ_LANE_VERBS['status']) | set(READ_LANE_VERBS['file'])
+        for command in ELIGIBLE:
+            for step in breakdown(command)['steps']:
+                verb = (step.get('text') or '').split()[0]
+                assert verb in allowed, (command, verb)
+
+    def test_f4_journal_and_tail_line_caps(self):
+        """S1: one auto-run read cannot dump a whole journal."""
+        assert _verdict('journalctl -n 1000 -u nginx')[0] is True
+        assert _verdict('journalctl -n 5000 -u nginx')[0] is False
+        assert _verdict('journalctl -u nginx')[0] is False
+        assert _verdict('tail -n 1000 /var/log/syslog')[0] is True
+        assert _verdict('tail -n 5000 /var/log/syslog')[0] is False
+
+    def test_f4_any_flag_blocks(self):
+        """R3: flags fail closed; the harmless list is deliberately empty."""
+        from core.cmd_parse import breakdown as bd
+        assert READ_HARMLESS_FLAGS == frozenset()
+        assert bd('tail -f /var/log/syslog')['flags']
+        assert _verdict('tail -f /var/log/syslog')[0] is False
+
+    def test_f4_inner_targets_are_ineligible(self):
+        """R4: the lane is opted in per gateway, the guest never did."""
+        for command in ('pct exec 103 -- uptime', 'qm guest exec 201 -- uptime',
+                        'docker exec web01 df -h'):
+            ok, why = _verdict(command)
+            assert ok is False
+            assert why == 'inner-target'
 
     def test_f4_every_write_or_unknown_fixture_is_ineligible(self):
         """Generated: no F1 write/unknown case may be read-lane eligible."""
