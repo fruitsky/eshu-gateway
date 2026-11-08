@@ -47,6 +47,7 @@ dashboard LXC or any gateway until the rollout gate in § 8 passes.**
 | F15 | One-call health checks (service, container, disk, DNS) that return a short summary |
 | F16 | Reviewed, parameterised scripts ("recipes") any agent can run with one approval, often drafted from F13 runbooks |
 | F17 | A ready-made setup for a local model in LM Studio: its own token, a small toolset, and a hand-off to Hermes |
+| F19 | Commands that run with nobody watching (read lane, probes, read-only recipes) get a hard time limit and output cap on the gateway |
 
 ## 1. Why — what the live data says
 
@@ -3238,37 +3239,317 @@ _(reviewer)_
 
 ---
 
-## Chunks F14–F17 — Local-model support · outline (detailed before they start)
+## Chunks F14–F17 — Local-model support
 
 Goal: let a small local model (e.g. a 14–20B model in LM Studio on a 16 GB GPU)
 handle routine homelab support by moving the intelligence to **authoring time**:
 a strong model or the operator works something out once, Eshu stores it as
 reviewed building blocks, and the local model picks one and fills in parameters.
+Small models do well with **few tools, short descriptions, small structured
+results, and no free-form shell**. Every chunk below is built around that.
 
-* **F14 — Inventory (`whereis`)** · read-only. One cached lookup joining what Eshu
-  already knows (gateways, Proxmox guests, Omada clients, NPM hosts, Pi-hole
-  records, HA) → host, container id, IP, URL, FQDN, proxy entry, gateway present.
-  Refreshed periodically; read through the Chunk H read-only checks.
-* **F15 — Diagnostic probes** · read-only. Reviewed bundles
-  (`diagnose_service(host, unit)`, `diagnose_container`, `disk_pressure(host)`,
-  `dns_check(name)`) that run reads through `ssh_exec` (F12) and the read lane (F4)
-  and return a structured digest of 1–2k tokens: status, de-duplicated recent errors,
-  restarts, ports, disk, recent changes from Eshu's own history.
-* **F16 — Recipes** · **design first + security reviewer sign-off.** Named,
-  versioned procedures of steps (Eshu tool calls or SSH command templates on named
-  hosts), with **typed parameters** (hostname, IPv4, port, slug: validated by
-  regex, shell-quoted, never free text into a shell), a check after each
-  step, and optional undo steps. Drafted by Hermes (often from an F13 runbook),
-  approved once by the operator (pinned to the content hash; any edit is a new
-  version), run with `recipe_run(name, params)`: one approval per run, or none
-  for recipes that only read. Example: `add_internal_fqdn(fqdn, target_ip, port)` →
-  Pi-hole record + NPM proxy host + `dig` and `curl` checks.
-* **F17 — Local-agent profile** · an agent-policy preset and setup guide for LM
-  Studio's MCP client (URL + bearer header in its `mcp.json`): its own token, a
-  small toolset (`whereis`, probes, runbooks, recipes, generic reads,
-  `ssh_exec` in `read_only` mode), short tool descriptions, writes gated, and an
-  `escalate(summary)` tool that notifies the operator and attaches the session
-  digest for Hermes to pick up.
+Shared rules for F14–F17:
+
+* **Token budget.** Every result an agent sees is compact JSON under a stated
+  cap. When it is cut, it says so (`"truncated": true`) and says how to ask
+  for more.
+* **Reads go through `core/read_policy.py`** (§ 2.6a): integration reads
+  through `is_read_integration_call`, and SSH reads through `is_read_ssh`
+  (F4).
+* **No new execution path.** F14 reads integrations. F15 and F16 run SSH
+  only through the F12 runner and the normal approval path. Nothing here
+  bypasses freeze, Zero-Trust, the blocklists or JIT.
+
+---
+
+## Chunk F14 — Inventory (`whereis`) · slug `inventory` · dashboard + MCP
+
+### Goal
+
+One lookup answers "where is X?" for a service, host, container, IP or name:
+which host it runs on, its container or VM id, its IPs, the URLs and FQDNs that
+point at it, its proxy entry and DNS records, and whether an Eshu gateway is
+on it.
+
+### Design
+
+* **Sources**, read-only and each optional (skipped if the integration is not
+  configured):
+  * **Eshu:** gateways (ip, hostname), F7 inner targets.
+  * **Proxmox:** `get_cluster_resources` (node, vmid, name, type, status).
+    Guest IPs come from `get_container_status` / agent data where present.
+  * **NPM:** `proxy_hosts` (domain names → forward host:port, SSL).
+  * **Pi-hole:** local DNS records. **Add** a read tool `local_dns_records`
+    to `pihole_seed.py` (v6 `GET /api/config/dns/hosts` and
+    `cnameRecords`). It must pass Chunk H's read check.
+  * **Omada:** `list_known_clients` (name, MAC, IP, last seen).
+  * **HA:** optional, add-on slugs only, after F9.
+* **Refresh:** a background job every 15 min (setting, 5–120) plus a manual
+  "refresh now". Each source is cached in `inventory_items(source, kind, key,
+  name, ips, fqdns, host, vmid, url, extra_json, seen_at)`. A failed source
+  keeps its last good rows and is reported as stale.
+* **Join** on IP first (gateway ↔ Proxmox guest ↔ Omada client ↔ NPM forward
+  host ↔ Pi-hole record), then on a normalised name. The result is an
+  **entity** with the fields above and the list of sources that contributed.
+  Conflicts (two sources disagree on an IP) are shown, not resolved.
+* **MCP tool** `whereis(query)`: exact or substring match over name, FQDN, IP,
+  vmid and MAC. It returns up to 5 entities, each ≤ 600 chars, with `sources`
+  and `stale` flags. It is always allowed, the same as for `session_begin`.
+  It goes through agent policy like any tool.
+* **UI:** an Inventory page (or a tab under Integrations). It has a search
+  box, an entity list showing source chips, and a stale badge on each source.
+  Every string is escaped.
+
+### Tests to add
+
+* A join fixture with synthetic data across all five sources (`192.0.2.x`,
+  `web01`, `app.example.test`), plus a conflict case.
+* A source that fails keeps its previous rows and is reported stale.
+* `whereis` caps: 5 entities, each cut at 600 chars with `truncated`.
+* `local_dns_records` passes `is_read_integration_call`.
+* Escaping in the UI (node harness). The refresh interval is clamped.
+
+### Compat impact
+
+Additive. With no integrations configured, `whereis` only returns Eshu's own
+gateways.
+
+### Acceptance criteria
+
+- [ ] Every source read goes through `read_policy.is_read_integration_call`.
+- [ ] No live data in fixtures or screenshots.
+
+### Implementer notes
+
+_(implementer)_
+
+### Reviewer notes
+
+_(reviewer)_
+
+---
+
+## Chunk F15 — Diagnostic probes · slug `probes` · dashboard + MCP
+
+### Goal
+
+One call answers "what's wrong with X?" with a short structured digest, so a
+small model never has to compose a shell pipeline or read 400 log lines.
+
+### Design
+
+* **Probes are code, not agent text.** Each probe is a fixed list of
+  read-only commands built from **typed parameters**:
+  * `host`: a gateway IP from the registry
+  * `unit`: a systemd unit, `^[A-Za-z0-9@._-]{1,128}$`
+  * `container`: a Docker name or Proxmox vmid
+  * `name`: an FQDN, `^[A-Za-z0-9.-]{1,253}$`
+
+  Each value is validated, then shell-quoted with `shlex.quote`. Every
+  generated command must pass `read_policy.is_read_ssh`. A test asserts this
+  for each probe with sample parameters.
+* **The set to start with:**
+  * `diagnose_service(host, unit)`: `systemctl status` (capped),
+    `journalctl -u unit -n 200`, restart count, ports via `ss -tlnp`.
+  * `diagnose_container(host, container)`: `docker ps`/`docker logs --tail`
+    or `pct status`.
+  * `disk_pressure(host)`: `df -h`, `df -i`, the largest log dirs under
+    `/var/log`.
+  * `dns_check(name)`: the Pi-hole record (F14), and on the gateway that NPM
+    reports, `getent hosts`.
+* **Execution** goes through the F12 runner as normal requests. With F4 `on`
+  for that host, they auto-run; otherwise they go to the normal approval
+  queue as **one** grouped approval (an F3 plan the probe proposes itself).
+* **Digest:** the dashboard parses the outputs (F5 results) into
+  `{status, active_since, restarts_24h, errors: [{msg, count, last}],
+  ports, disk, recent_changes}`.
+  * Errors are de-duplicated by message after stripping numbers and hex.
+  * `recent_changes` lists Eshu's own write-approved requests on that
+    host in the last 24 h.
+  * Hard cap 2,000 tokens, with `truncated`.
+* **MCP tools:** one per probe, with short descriptions (≤ 200 chars each).
+
+### Tests to add
+
+* Every probe, for each sample parameter set, passes `is_read_ssh`. Hostile
+  parameters (quotes, `;`, `$(`, newlines, `..`) are rejected by the type
+  check before any command is built.
+* Digest parsing on synthetic outputs: dedup, caps and `truncated`.
+* Without F4 `on`, a probe creates one plan, not N pending requests.
+
+### Dependencies
+
+F12 (runner), F4 (read lane), F5 (outputs), F3 (grouped approval), F14 (for
+`dns_check`).
+
+### Implementer notes
+
+_(implementer)_
+
+### Reviewer notes
+
+_(reviewer)_
+
+---
+
+## Chunk F16 — Recipes · slug `recipes` · dashboard + MCP · **design first + security reviewer sign-off**
+
+### Goal
+
+A reviewed, parameterised procedure (for example "add an internal FQDN": a
+Pi-hole record, an NPM proxy host, then check with `dig` and `curl`) that
+any agent, including a small local one, can run with one approval and
+almost no inference.
+
+### Design questions the design note must answer
+
+1. **Shape.** Named, versioned procedures. A step is either an Eshu tool call
+   (an integration tool with arguments) or an SSH command template on a
+   named host. Each step has a check, plus an optional undo step. How are
+   steps, checks and undo represented, and how is a check's pass or fail
+   decided without free-form parsing?
+2. **Typed parameters only.** Types are a closed set: `hostname`, `ipv4`,
+   `port`, `fqdn`, `slug`, `int` and `enum`, each with a regex and
+   normalisation. Values are substituted only into marked slots. In SSH
+   templates the slots are `shlex.quote`d; in tool calls they are JSON
+   values. Free text never goes into a shell. Show the substitution code.
+3. **Approval model.** The operator approves a recipe **version** once,
+   pinned to its content hash (any edit is a new, unapproved version). Each
+   **run** then needs one approval showing the filled-in steps (reusing F3,
+   so a run is a plan). A recipe whose every step passes `read_policy` may run
+   without a run approval when F4 is `on` for those hosts. Is that right, or
+   should read-only recipes still need approval in the first version?
+4. **Authoring.** Who can create recipes? Hermes drafts them through
+   `recipe_propose` (often from an F13 runbook), and only the operator
+   approves. How is a draft shown for review, with each step rendered through
+   the F2 breakdown?
+5. **Failure.** When a step's check fails, does the recipe stop, run the undo
+   steps in reverse, or ask? What is recorded (F5 results and audit)?
+6. **Blast radius.** Limits on host count per run and on steps per recipe,
+   plus a list of integration tools a recipe may never call (deletes,
+   restarts of core services).
+
+### Example to specify end to end
+
+`add_internal_fqdn(fqdn, target_ip, port)` →
+1. Pi-hole: add a local DNS record.
+2. NPM: create the proxy host.
+3. Check: `getent hosts fqdn` on a named gateway.
+4. Check: an HTTP status via the generic read tool.
+
+Undo: delete the NPM host, then delete the Pi-hole record.
+
+### Implementer notes
+
+_(design note goes here first)_
+
+### Reviewer notes
+
+_(reviewer)_
+
+---
+
+## Chunk F17 — Local-agent profile · slug `local-agent` · dashboard + docs
+
+### Goal
+
+A local model in LM Studio connects to Eshu over MCP in minutes, sees a small
+toolset it can use well, and hands over to Hermes cleanly when a job is beyond
+it.
+
+### Design
+
+* **Preset agent policy** `local-agent`, applied when the operator creates its
+  token:
+  * `tools_mode` allowlist: `session_begin`, `session_summary`,
+    `session_conclude`, `whereis`, the F15 probes, `find_runbooks`,
+    `get_runbook`, `recipe_list`, `recipe_run`, `ssh_exec` (read-only mode),
+    `escalate`.
+  * Generic reads are GET/HEAD only (Chunk H).
+  * Every write needs approval.
+* **Short descriptions.** A "compact" description variant per tool (≤ 160
+  chars). The MCP server serves it when the agent's policy sets
+  `compact_descriptions: true`.
+* **`escalate(summary, session_id)`** notifies the operator and attaches the
+  F6 session digest, plus a "for Hermes" hand-off record that Hermes can
+  read with `get_escalation(id)`. It is always allowed.
+* **Setup guide** `docs/LOCAL_AGENT.md`:
+  * LM Studio's `mcp.json` entry (URL plus `Authorization: Bearer` header);
+  * recommended models and context size for a 16 GB GPU (stated as
+    guidance, not tested claims);
+  * a system prompt template ("look it up with `whereis`, diagnose with
+    probes, follow runbooks, run recipes, escalate when unsure");
+  * what the agent cannot do.
+* **Eval script** `scripts/eval_local_agent.py`: a fixed set of 10 synthetic
+  support tasks run against a sandbox dashboard. It checks which tools the
+  model chose, against the expected ones, so the toolset can be tuned. It is
+  run manually and never in CI.
+
+### Tests to add
+
+* The preset creates the allowlist above; `ssh_exec` is read-only for this
+  agent.
+* Compact descriptions are served only with the flag set.
+* `escalate` notifies the operator and stores the hand-off; `get_escalation`
+  is scoped to the operator and the agents allowed to read it.
+
+### Dependencies
+
+F12–F16, F13.
+
+### Implementer notes
+
+_(implementer)_
+
+### Reviewer notes
+
+_(reviewer)_
+
+---
+
+## Chunk F19 — Time and output limits for unattended runs · slug `unattended-limits` · gateway + dashboard · **design first + security reviewer sign-off**
+
+### Why
+
+The F4 security sign-off listed this as a residual risk. The read-only lane's
+parser is the only bound on run time and output: `df` on a stale mount, or
+`docker` with a hung daemon, can hang, and the gateway has no execution timeout
+or output cap of its own. The same applies to F15 probes and read-only F16
+recipes. Any command that runs with no human watching should have a hard
+bound at the gateway.
+
+### Design (to confirm in the design note)
+
+* The dashboard's `request_status` / ticket response for rows approved with
+  no human (`reason` = `read-lane`, later probe or recipe runs) adds
+  `run_limit: {seconds, bytes}`. Defaults are 60 s and 1 MiB; settings range
+  over 5–300 s and 64 KiB–8 MiB.
+* The gateway validates both as digits within the range. It wraps the run
+  as `timeout --kill-after=5 "$secs" bash -c "$cmd"` and caps the stream
+  after `sanitize` with `head -c "$bytes"`, printing
+  `[ESHU limit: output cut at N bytes]` or `[ESHU limit: stopped after N s]`.
+  It records the limit hit in F5's result (`limit: time|bytes`).
+* Rows approved by a human are unchanged.
+* The design note must show the exact bash and how it interacts with
+  F5's `tee`/FIFO capture, `pipefail` and the `[ESHU exit=N]` sentinel. It
+  must also cover old gateways: they ignore the field, and the dashboard
+  refuses to auto-run on a gateway too old to enforce limits. That last rule
+  is decided per gateway version.
+
+### Tests to add (outline)
+
+Gateway sandbox: a command that sleeps past the limit is stopped at N s
+(rc 124); output past N bytes is cut, with the marker; human-approved runs
+have no limit; a bad `run_limit` value means no auto-run. Dashboard: the limit
+is sent only for unattended rows; old gateway versions are refused for `on`.
+
+### Implementer notes
+
+_(design note goes here first)_
+
+### Reviewer notes
+
+_(reviewer)_
 
 ---
 
@@ -3282,7 +3563,7 @@ reviewed building blocks, and the local model picks one and fills in parameters.
 * Config export/import (policies, agent policies, windows, integration definitions without secrets).
 * Split `main.py` into FastAPI routers; build installers in CI instead of committing copies.
 * Agent-facing read-only "would this auto-run?" tool (lower value: commands rarely repeat).
-* **UI design pass, after the features are done, in a fresh chat.** Review the layout as a whole: what lives in the queue, the sidebar, the session modal and Statistics; what to merge or move; consistency across F2/F3/F5/F7/F18 additions.
+* **UI design pass, after the features are done, in a fresh chat** (start from `docs/features/UI_INVENTORY.md`). Review the layout as a whole: what lives in the queue, the sidebar, the session modal and Statistics; what to merge or move; consistency across F2/F3/F5/F7/F18 additions.
 
 ---
 
@@ -3318,9 +3599,10 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 11 | F9 | ha-supervisor-read | dashboard | Ready (after F8) | `feat/f9-ha-supervisor-read` | — | token is now a dedicated `eshu` HA admin user |
 | 12 | F10 | ha-supervisor-actions | dashboard | Ready (after F9) | `feat/f10-ha-supervisor-actions` | F9, F3, Chunk H | reviewer pass + security reviewer sign-off |
 | 13 | F11 | ha-config-files | dashboard | Ready (after F10) — design first | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | design approval + security reviewer sign-off |
-| 14 | F14 | inventory | dashboard | Outline — detail before start | `feat/f14-inventory` | Chunk H | |
-| 15 | F15 | probes | dashboard | Outline — detail before start | `feat/f15-probes` | F4, F12 | |
-| 16 | F16 | recipes | dashboard + MCP | Outline — design first | `feat/f16-recipes` | F3, F12, F13 | design approval + security reviewer sign-off |
-| 17 | F17 | local-agent | dashboard + docs | Outline — detail before start | `feat/f17-local-agent` | F12–F16 | |
+| 14 | F14 | inventory | dashboard + MCP | Ready (spec detailed 2026-11-08) | `feat/f14-inventory` | Chunk H | |
+| 15 | F15 | probes | dashboard + MCP | Ready after F12 | `feat/f15-probes` | F4, F12 | |
+| 16 | F16 | recipes | dashboard + MCP | Design first (questions listed) | `feat/f16-recipes` | F3, F12, F13 | design approval + security reviewer sign-off |
+| 17 | F17 | local-agent | dashboard + docs | Ready after F12–F16 | `feat/f17-local-agent` | F12–F16 | |
+| 18 | F19 | unattended-limits | gateway + dashboard | Design first; before F4 `on` is unlocked | `feat/f19-unattended-limits` | F4, F5 | design approval + security reviewer sign-off |
 Chunks are done **in the order column**; each new chunk branches from the
 updated `feature-roadmap` after the previous one is merged.
