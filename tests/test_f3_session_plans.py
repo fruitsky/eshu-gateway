@@ -9,8 +9,12 @@ ordered after the encoded-payload block, with Freeze and Zero-Trust winning.
 
 import base64
 import json
+import os
+import shutil
+import subprocess
 import threading
 import time
+from contextlib import contextmanager
 
 import pytest
 
@@ -22,9 +26,33 @@ from db.gateways import (
 from db.misc import set_feature_flag, set_feature_flag_scope
 from db.requests import get_all_requests
 from db.session_plans import (
-    approve_plan, claim_plan_item, create_plan, get_plan,
+    approve_plan, claim_plan_item, create_plan, get_plan, list_plans,
 )
 from db.sessions import upsert_session
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+HARNESS = os.path.join(HERE, 'fixtures', 'f3_harness.js')
+NODE = shutil.which('node')
+
+
+@contextmanager
+def as_agent(name):
+    """Run an MCP tool call as one agent (the ContextVar the MCP sets)."""
+    from core.agent_context import reset_current_agent, set_current_agent
+    token = set_current_agent({'name': name})
+    try:
+        yield
+    finally:
+        reset_current_agent(token)
+
+
+def run_node(payload):
+    proc = subprocess.run([NODE, HARNESS, json.dumps(payload)],
+                          capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout)
+    assert 'error' not in out, out['error']
+    return out
 
 
 def b64(text):
@@ -237,6 +265,25 @@ class TestConcurrency:
         assert len(approved) == 1, results
         assert approved[0][0] == plan_id
 
+    def test_f3_end_between_select_and_update_consumes_no_use(self, monkeypatch):
+        """R4: the UPDATE rechecks the plan's state, not just its uses."""
+        import db.session_plans as sp
+        sid = _mint('plan-session-end-race')
+        plan_id = _plan(sid, [{'host': '*', 'command': 'uptime', 'max_uses': 1}])
+        approve_plan(plan_id, 60)
+
+        real = sp._claim_candidate
+
+        def hook(conn, session_id, host, command, now):
+            row = real(conn, session_id, host, command, now)
+            # The operator ends the plan between the SELECT and the UPDATE.
+            sp.end_plan(plan_id)
+            return row
+
+        monkeypatch.setattr(sp, '_claim_candidate', hook)
+        assert sp.claim_plan_item(sid, '10.0.0.1', 'uptime') is None
+        assert get_plan(plan_id)['items'][0]['uses'] == 0
+
 
 class TestApi:
 
@@ -287,6 +334,37 @@ class TestApi:
     def test_f3_api_requires_a_session(self, client):
         assert client.get('/api/session-plans').status_code in (401, 403)
 
+    def test_f3_deny_approved_and_end_expired_are_rejected(self, auth_client):
+        """S1: a decided outcome is never rewritten."""
+        sid = _mint('plan-session-state')
+        plan_id = create_plan(sid, [{'host': '*', 'command': 'uptime'}])['plan_id']
+        approve_plan(plan_id, 60)
+        response = auth_client.post('/api/session-plans/%d/deny' % plan_id)
+        assert response.status_code == 400
+        assert get_plan(plan_id)['status'] == 'approved'
+
+        plan2 = create_plan(sid, [{'host': '*', 'command': 'df -h'}])['plan_id']
+        approve_plan(plan2, 60)
+        from db.core import db_conn
+        with db_conn() as conn:
+            conn.execute('UPDATE session_plans SET until = ? WHERE id = ?',
+                         (int(time.time()) - 5, plan2))
+            conn.commit()
+        from db.session_plans import expire_plans
+        expire_plans()
+        response = auth_client.post('/api/session-plans/%d/end' % plan2)
+        assert response.status_code == 400
+        assert get_plan(plan2)['status'] == 'expired'
+
+    def test_f3_non_integer_removed_ids_is_422(self, auth_client):
+        """S2: a bad body is a validation error, not a 500."""
+        sid = _mint('plan-session-s2')
+        plan_id = create_plan(sid, [{'host': '*', 'command': 'uptime'}])['plan_id']
+        response = auth_client.post('/api/session-plans/%d/approve' % plan_id,
+                                    json={'ttl_minutes': 30,
+                                          'removed_item_ids': ['abc']})
+        assert response.status_code == 422
+
 
 class TestMcp:
 
@@ -297,32 +375,34 @@ class TestMcp:
     def test_f3_mcp_session_plan_validates_inputs(self):
         tool = self._tool()
         _mint('plan-session-mcp')
-        out = json.loads(tool(session_id='no-such-session', items=[
-            {'host': '*', 'command': 'uptime'}]))
-        assert out['error'] == 'unknown_session'
-        out = json.loads(tool(session_id='bad id!', items=[{'command': 'uptime'}]))
-        assert out['error'] == 'invalid_session_id'
-        out = json.loads(tool(session_id='plan-session-mcp', items=[]))
-        assert out['error'] == 'invalid_items'
-        out = json.loads(tool(session_id='plan-session-mcp',
-                              items=[{'command': 'x' * 5000}]))
-        assert out['error'] == 'command_too_long'
-        out = json.loads(tool(session_id='plan-session-mcp',
-                              items=[{'host': 'not-an-ip', 'command': 'uptime'}]))
-        assert out['error'] == 'invalid_host'
-        out = json.loads(tool(session_id='plan-session-mcp',
-                              items=[{'command': 'uptime %d' % i} for i in range(51)]))
-        assert out['error'] == 'too_many_items'
-        out = json.loads(tool(session_id='plan-session-mcp',
-                              items=[{'command': 'uptime', 'max_uses': 0}]))
-        assert out['error'] == 'invalid_max_uses'
+        with as_agent('test-agent'):
+            out = json.loads(tool(session_id='no-such-session', items=[
+                {'host': '*', 'command': 'uptime'}]))
+            assert out['error'] == 'unknown_session'
+            out = json.loads(tool(session_id='bad id!', items=[{'command': 'uptime'}]))
+            assert out['error'] == 'invalid_session_id'
+            out = json.loads(tool(session_id='plan-session-mcp', items=[]))
+            assert out['error'] == 'invalid_items'
+            out = json.loads(tool(session_id='plan-session-mcp',
+                                  items=[{'command': 'x' * 5000}]))
+            assert out['error'] == 'command_too_long'
+            out = json.loads(tool(session_id='plan-session-mcp',
+                                  items=[{'host': 'not-an-ip', 'command': 'uptime'}]))
+            assert out['error'] == 'invalid_host'
+            out = json.loads(tool(session_id='plan-session-mcp',
+                                  items=[{'command': 'uptime %d' % i} for i in range(51)]))
+            assert out['error'] == 'too_many_items'
+            out = json.loads(tool(session_id='plan-session-mcp',
+                                  items=[{'command': 'uptime', 'max_uses': 0}]))
+            assert out['error'] == 'invalid_max_uses'
 
     def test_f3_mcp_session_plan_creates_a_plan_and_notifies(self):
         tool = self._tool()
         _mint('plan-session-mcp2', goal='mcp plan')
-        out = json.loads(tool(session_id='plan-session-mcp2', note='note',
-                              items=[{'host': '*', 'command': 'uptime'},
-                                     {'host': '10.0.0.1', 'command': 'df -h'}]))
+        with as_agent('test-agent'):
+            out = json.loads(tool(session_id='plan-session-mcp2', note='note',
+                                  items=[{'host': '*', 'command': 'uptime'},
+                                         {'host': '10.0.0.1', 'command': 'df -h'}]))
         assert out['status'] == 'proposed'
         assert out['items'] == 2 and out['hosts'] == 2
         plan = get_plan(out['plan_id'])
@@ -337,10 +417,82 @@ class TestMcp:
         plan_id = _plan(sid, [{'host': '*', 'command': 'uptime', 'max_uses': 2}])
         approve_plan(plan_id, 60)
         assert claim_plan_item(sid, '10.0.0.1', 'uptime')
-        out = json.loads(tool(plan_id=plan_id))
+        with as_agent('test-agent'):
+            out = json.loads(tool(plan_id=plan_id))
         assert out['status'] == 'approved'
         assert out['items'][0]['uses'] == 1
         assert out['items'][0]['remaining'] == 1
         assert out['until'] > int(time.time())
-        assert json.loads(tool(plan_id=999999))['error'] == 'not_found'
-        assert json.loads(tool(plan_id=plan_id, session_id='other'))['error'] == 'session_mismatch'
+        with as_agent('test-agent'):
+            assert json.loads(tool(plan_id=999999))['error'] == 'not_found'
+
+
+class TestOwnership:
+    """R1: a plan belongs to the agent that minted the session."""
+
+    def test_f3_mcp_session_plan_refuses_another_agents_session(self):
+        from core.mcp_server import session_plan_fn
+        sid = _mint('plan-owner-session', goal='owned by A')
+        tool = session_plan_fn()
+        with as_agent('agent-b'):
+            out = json.loads(tool(session_id=sid, items=[{'command': 'uptime'}]))
+        assert out['error'] == 'session_not_yours'
+        assert not list_plans(session_id=sid), 'nothing may be stored for another agent'
+        # The owner still can.
+        with as_agent('test-agent'):
+            out = json.loads(tool(session_id=sid, items=[{'command': 'uptime'}]))
+        assert out['status'] == 'proposed'
+
+    def test_f3_mcp_check_plan_refuses_another_agents_plan(self):
+        from core.mcp_server import check_plan_fn
+        sid = _mint('plan-owner-session2')
+        plan_id = _plan(sid, [{'host': '*', 'command': 'uptime'}])
+        approve_plan(plan_id, 60)
+        tool = check_plan_fn()
+        with as_agent('agent-b'):
+            out = json.loads(tool(plan_id=plan_id))
+        assert out['error'] == 'session_not_yours'
+        with as_agent('test-agent'):
+            assert json.loads(tool(plan_id=plan_id))['status'] == 'approved'
+
+    def test_f3_plan_payload_names_the_agent_and_goal(self, auth_client):
+        sid = _mint('plan-payload', goal='Rotate the TLS certificate')
+        create_plan(sid, [{'host': '*', 'command': 'uptime'}])
+        plan = auth_client.get('/api/session-plans?status=proposed').json()[0]
+        assert plan['agent'] == 'test-agent'
+        assert plan['session_goal'] == 'Rotate the TLS certificate'
+
+
+@pytest.mark.skipif(NODE is None, reason='node is not installed')
+class TestUi:
+    """R2, R3, S3 and S4, driven through the real app.js helpers."""
+
+    def test_f3_plan_ttl_survives_a_poll_rerender(self):
+        out = run_node({'action': 'plan-ttl', 'ttl': 30})
+        assert out['ttl'] == 30
+        assert 'value="30" selected' in out['rendered']
+        # The queue poll re-renders the card; the choice must not jump back.
+        assert 'value="30" selected' in out['again']
+        assert 'value="60" selected' not in out['rendered']
+
+    def test_f3_replaced_plan_needs_a_second_press(self):
+        out = run_node({'action': 'plan-replaced'})
+        assert out['replaced'] is True
+        assert out['needsConfirm'] is True
+        assert 'replaced the one you were reviewing' in out['card']
+        assert 'Press again to approve' in out['afterFirstPress']
+        assert out['firstPressPosts'] == 0
+        assert out['secondPressPosts'] == 1
+        assert '"ttl_minutes":60' in out['secondBody']
+
+    def test_f3_long_unknown_plan_needs_a_second_press(self):
+        out = run_node({'action': 'plan-s4'})
+        assert out['replaced'] is False
+        assert out['needsConfirm'] is True
+        assert out['firstPressPosts'] == 0
+        assert out['secondPressPosts'] == 1
+
+    def test_f3_plan_fetch_uses_authed_fetch(self):
+        out = run_node({'action': 'plan-authfetch'})
+        assert any('/api/session-plans' in url for url in out['calls']['auth'])
+        assert not any('/api/session-plans' in url for url in out['calls']['plain'])
