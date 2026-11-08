@@ -2724,7 +2724,70 @@ tests pass locally, and the X1 sidebar actions survived the merge.
 
 ### Implementer notes
 
-_(fill in)_
+**What I did**
+
+* **`core/approval_buckets.py`**: one mapping, `bucket_for(status, reason)`,
+  and the order the UI shows: allowlist · human · plan · read lane · session
+  override · host override · window · fleet run. Status wins where the status
+  alone is the answer (`auto-approved`, `window-approved`, `fleet-run`), so a
+  gateway's free-text reason on an allowlist row cannot move it between
+  buckets. Everything else on an approved row goes by reason prefix;
+  `session-plan:` and `session-override:` are prefixes, `override` and
+  `read-lane` are exact. **The read-lane reasons are matched by string** —
+  this branch has no F4 code to import. Refusals return `None`; a read-lane
+  *shadow* row is pending, and if a human approves it the bucket is `human`
+  (the lane did not clear it).
+* **`requests.decided_at`** (`db/requests.py`): a nullable column, set by the
+  first decision (`update_request_status_if_pending`, the approve/deny path),
+  by `update_request_status` (`COALESCE`, so a later consume never rewrites
+  it), and by the expiry sweep (`expired`/`abandoned`). Nullable on purpose:
+  pre-F6 rows stay unknown instead of being given an invented wait.
+* **`get_session_summary`** grows `by_approval` (all eight buckets, zeros
+  included), `waited_seconds` (`SUM(decided_at - created_at)`) and `decided`.
+  The MCP `session_summary` tool returns the dict as JSON, so it carries the
+  same breakdown without a second code path.
+* **`GET /api/sessions/{sid}/detail`** adds `summary`: the above plus `goal`,
+  `started_at`, `duration_seconds`, `failed` (F5), and `writes` /
+  `writes_by_host`, counted from F1's breakdown per row — a session can span
+  hosts, and the card names the host. Encoded commands count zero writes
+  (their steps are unknown; they never get this far).
+* **`GET /api/statistics`** adds `approval_breakdown`: `buckets`, `series`
+  (one row per day in the selected window, all buckets), `totals`,
+  `approved`, `override_share` (session + host override ÷ every approval,
+  per cent). Grouped in SQL by `(day, status, reason)` and bucketed in Python,
+  so the row count stays small.
+* **UI**: the session modal gets a wrap-up card under the meta line — how long
+  it ran, command/failed counts, the wait for a human, the eight approval
+  chips (zero counts greyed, so the absence of overrides is visible) and the
+  writes per host. Statistics gets a "How approved" widget: a stacked bar per
+  day, oldest first, with the override share as the chip headline and a legend
+  that keeps empty buckets visible. Bucket colours are tokens in `:root`
+  (`--appr-*`), not literals in rules.
+* **Tests**: `tests/test_f6_session_wrapup.py` (53) — the mapping table, the
+  generated reason-literal scan, the summary (counts, wait, MCP JSON),
+  `decided_at` on approve/deny/expire/consume/second-decision, the detail
+  summary (goal/duration/writes per host/failures), the statistics block
+  (series, totals, share, gateway filter, empty window), and four node-harness
+  checks for the card and the widget (escaping, zero buckets, duration
+  formatting).
+
+**Decisions and surprises**
+
+* `approval_breakdown` follows the page's day selector (7–365, default 14)
+  rather than being pinned to 14 — the chart and the KPI cards then describe
+  the same window.
+* A status's own meaning beats the reason in three places: `auto-approved`
+  (allowlist reason text is free-form from the gateway), `window-approved`
+  (no reason at all today) and `fleet-run` (the operator's own reason is free
+  text). Everything else is a reason prefix on an approved row.
+* `integration-approved`/`integration-denied` appear in the requests table
+  historically but are not SSH approvals; they map to `None` and are counted
+  as MCP calls, which is what the modal already did.
+* The wait is `decided_at - created_at` per row, summed. Rows created before
+  the column existed contribute nothing, and the card says "wait not
+  recorded" when no row has one, instead of showing a confident zero.
+
+`bash scripts/verify.sh`: `1909 passed, 3 skipped, 7 warnings in 383.81s (0:06:23)`. The three skips are F18's read-lane tests: F4 is not on this branch.
 
 ### Reviewer notes
 
