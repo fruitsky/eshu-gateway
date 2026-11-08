@@ -802,6 +802,11 @@ def receive_request(payload: GatewayPayload, request: Request):
     read_lane_reason = ''
     if not frozen and not get_gateway_zero_trust(target_ip):
         lane_mode = get_gateway_read_lane(target_ip)
+        if lane_mode == 'on' and not read_lane_on_enabled():
+            # Round 5: the hard lock also covers a stored `on`. If the meta
+            # key is removed (or never set by hand), an `on` row degrades to
+            # shadow instead of auto-running with no human in the loop.
+            lane_mode = 'shadow'
         if lane_mode != 'off':
             _pol = get_policies()
             _verdict = evaluate_policy_verdict(
