@@ -52,6 +52,7 @@ from database import (
     get_gateway_mode, set_gateway_mode, get_dev_gateways,
     get_gateway_zero_trust, set_gateway_zero_trust,
     get_gateway_capture_output, set_gateway_capture_output,
+    get_gateway_read_lane, read_lane_ready, set_gateway_read_lane,
     set_override, clear_override, get_override_active,
     create_approved_window, get_approved_windows, get_active_approved_windows,
     delete_approved_window, toggle_approved_window,
@@ -122,6 +123,8 @@ from core.cmd_codec import decode_preview, detect_encoded_exec, scan_decoded
 from core.policy_eval import evaluate_policy_verdict
 from core.cmd_risk import get_cmd_risk, get_dry_run_suggestion
 from core.cmd_parse import breakdown as cmd_breakdown
+from core.policy_eval import evaluate_policy_verdict
+from core.read_lane import eligible as read_lane_eligible
 from core.cmd_profiles import get_anomaly, refresh_profiles, _profiles_loop
 from core.gateway_watch import (
     _check_gateway_transitions, _gateway_watch_loop,
@@ -789,6 +792,35 @@ def receive_request(payload: GatewayPayload, request: Request):
                     "scope": "session",
                     "message": "Auto-approved via Session Override"}
 
+    # F4: read-only lane. Opt-in per gateway (off by default), shadow first:
+    # in shadow the request stays pending but is tagged, in on it auto-approves.
+    # It sits after F3 plans and the session override, before the host override.
+    read_lane_reason = ''
+    if not frozen and not get_gateway_zero_trust(target_ip):
+        lane_mode = get_gateway_read_lane(target_ip)
+        if lane_mode != 'off':
+            _pol = get_policies()
+            _verdict = evaluate_policy_verdict(
+                cmd, _pol.get('exact_whitelist', ''),
+                _pol.get('regex_whitelist', ''), _pol.get('regex_blacklist', ''))
+            _ok, _why = read_lane_eligible(
+                cmd_breakdown(cmd), _verdict, cmd, lane_mode, frozen,
+                get_gateway_zero_trust(target_ip))
+            if _ok and lane_mode == 'on':
+                req_id = create_request(target_ip, cmd, status="approved",
+                                        reason="read-lane", session_id=sid,
+                                        execution_id=eid,
+                                        inner_target=_inner_target_for(cmd))
+                update_gateway_last_seen(target_ip)
+                record_audit_event(
+                    'jit_read_lane_approved', target_ip,
+                    details=f'Read-only lane auto-approved JIT #{req_id}: {cmd[:80]}')
+                return {"status": "ok", "id": f"{req_id:06d}", "request_id": req_id,
+                        "read_lane": "on",
+                        "message": "Auto-approved: read-only command"}
+            if _ok:
+                read_lane_reason = 'read-lane-shadow'
+
     # Check host override mode — auto-approve if active
     conn = get_db()
     cursor = conn.cursor()
@@ -805,11 +837,16 @@ def receive_request(payload: GatewayPayload, request: Request):
         return {"status": "ok", "id": f"{req_id:06d}", "request_id": req_id, "override": True,
                 "scope": "host", "message": "Auto-approved via Override Mode"}
 
-    req_id = create_request(target_ip, cmd, status="pending", session_id=sid, execution_id=eid,
+    req_id = create_request(target_ip, cmd, status="pending", session_id=sid,
+                            execution_id=eid, reason=read_lane_reason,
                             inner_target=_inner_target_for(cmd))
     update_gateway_last_seen(target_ip)
     send_notify('jit', 'JIT Approval Required', f'`{cmd[:80]}` on {target_ip}')
     record_audit_event('jit_created', target_ip, details=f'JIT #{req_id}: {cmd[:80]}')
+    if read_lane_reason:
+        record_audit_event(
+            'jit_read_lane_shadow', target_ip,
+            details=f'JIT #{req_id} would auto-run (read-only lane, shadow): {cmd[:80]}')
     return {"status": "ok", "id": f"{req_id:06d}", "request_id": req_id}
 
 # /api/log only records the outcomes a gateway actually emits. Anything else
@@ -1266,6 +1303,8 @@ def list_gateways(request: Request):
         g['updating'] = (not g['online']) and update_recent
         override_until = g.get('override_until', 0) or 0
         g['override_remaining'] = max(0, override_until - now)
+        g['read_lane'] = g.get('read_lane') or 'off'
+        g['read_lane_ready'] = read_lane_ready(g['ip'], now)
     return gateways
 
 @app.get("/api/gateways/{ip}/inner-targets")
@@ -2435,6 +2474,34 @@ def get_statistics(request: Request, days: int = 14, gateway_ip: str = None, gat
             key=lambda x: x['count'], reverse=True
         )
 
+    # F4: the read-lane report — the shadow evidence for switching to `on`,
+    # plus how many commands actually auto-ran once it was on.
+    cursor.execute(f'''
+        SELECT COUNT(*) AS n,
+               SUM(r.status IN ('approved','consumed','auto-approved')) AS approved,
+               SUM(r.status = 'denied') AS denied
+        FROM requests r
+        WHERE r.reason = 'read-lane-shadow' AND r.created_at >= ?{ip_filter}
+    ''', (cutoff,) + ip_params)
+    shadow = cursor.fetchone()
+    cursor.execute(f'''
+        SELECT r.command FROM requests r
+        WHERE r.reason = 'read-lane-shadow' AND r.created_at >= ?{ip_filter}
+    ''', (cutoff,) + ip_params)
+    lengths = sorted(len(r['command'] or '') for r in cursor.fetchall())
+    median_len = lengths[len(lengths) // 2] if lengths else 0
+    cursor.execute(f'''
+        SELECT COUNT(*) AS n FROM requests r
+        WHERE r.reason = 'read-lane' AND r.created_at >= ?{ip_filter}
+    ''', (cutoff,) + ip_params)
+    result['read_lane'] = {
+        'shadow_eligible': int(shadow['n'] or 0),
+        'shadow_approved': int(shadow['approved'] or 0),
+        'shadow_denied': int(shadow['denied'] or 0),
+        'shadow_median_len': median_len,
+        'auto_approved': int(cursor.fetchone()['n'] or 0),
+    }
+
     conn.close()
 
     return result
@@ -2543,6 +2610,28 @@ class ZeroTrustPayload(BaseModel):
 
 class CapturePayload(BaseModel):
     mode: str = 'exit-only'
+
+
+class ReadLanePayload(BaseModel):
+    mode: str = 'off'
+
+
+@app.put("/api/gateways/{ip}/read-lane")
+def set_gw_read_lane(ip: str, payload: ReadLanePayload, request: Request):
+    """F4: off | shadow | on. `on` needs the rollout window (7 days in shadow)."""
+    _check_session(request)
+    if payload.mode not in ('off', 'shadow', 'on'):
+        raise HTTPException(status_code=400,
+                            detail="mode must be 'off', 'shadow' or 'on'")
+    if payload.mode == 'on' and not read_lane_ready(ip):
+        raise HTTPException(
+            status_code=400,
+            detail="The read-only lane needs at least 7 days in shadow on this "
+                   "gateway before 'on' is offered.")
+    mode = set_gateway_read_lane(ip, payload.mode)
+    record_audit_event('read_lane_' + mode, ip,
+                       details=f"Read-only lane set to '{mode}'")
+    return {"status": "ok", "ip": ip, "read_lane": mode}
 
 
 @app.post("/api/gateways/{ip}/capture")

@@ -22,6 +22,15 @@ def init_gateways_tables(cursor):
         cursor.execute("ALTER TABLE gateways ADD COLUMN capture_output TEXT DEFAULT 'exit-only'")
     except Exception:
         pass
+    # F4: the read-only lane (off | shadow | on). Default off everywhere.
+    try:
+        cursor.execute("ALTER TABLE gateways ADD COLUMN read_lane TEXT DEFAULT 'off'")
+    except Exception:
+        pass
+    try:
+        cursor.execute("ALTER TABLE gateways ADD COLUMN read_lane_since INTEGER DEFAULT 0")
+    except Exception:
+        pass
     try:
         cursor.execute("ALTER TABLE gateways ADD COLUMN windows_count INTEGER DEFAULT 0")
     except Exception:
@@ -279,7 +288,49 @@ def get_gateway_zero_trust(ip: str) -> bool:
         row = cursor.fetchone()
         return bool(row and row['zero_trust'])
 
+READ_LANE_MODES = ('off', 'shadow', 'on')
+READ_LANE_SHADOW_DAYS = 7
+
 CAPTURE_MODES = ('off', 'exit-only', 'tail')
+
+
+def get_gateway_read_lane(ip: str) -> str:
+    with db_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT read_lane FROM gateways WHERE ip = ?', (ip,))
+        row = cursor.fetchone()
+        mode = (row['read_lane'] if row else '') or 'off'
+        return mode if mode in READ_LANE_MODES else 'off'
+
+
+def get_gateway_read_lane_since(ip: str) -> int:
+    with db_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT read_lane_since FROM gateways WHERE ip = ?', (ip,))
+        row = cursor.fetchone()
+        return int(row['read_lane_since'] or 0) if row else 0
+
+
+def read_lane_ready(ip: str, now: int = None) -> bool:
+    """True once the gateway has been in shadow for the rollout window."""
+    since = get_gateway_read_lane_since(ip)
+    if since <= 0:
+        return False
+    now = int(now or time.time())
+    return now - since >= READ_LANE_SHADOW_DAYS * 86400
+
+
+def set_gateway_read_lane(ip: str, mode: str, now: int = None) -> str:
+    """Set the mode; entering shadow starts the rollout clock, leaving clears it."""
+    mode = mode if mode in READ_LANE_MODES else 'off'
+    now = int(now or time.time())
+    since = now if mode == 'shadow' else (get_gateway_read_lane_since(ip) if mode == 'on' else 0)
+    with db_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute('UPDATE gateways SET read_lane = ?, read_lane_since = ? WHERE ip = ?',
+                       (mode, since, ip))
+        conn.commit()
+    return mode
 
 
 def get_gateway_capture_output(ip: str) -> str:
