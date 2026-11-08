@@ -1329,7 +1329,70 @@ it.
 
 #### Security reviewer sign-off
 
-_(security reviewer)_
+**2026-11-08 — approved, conditional on SR1 (security chat, reviewed at `de741ec`).**
+Reviewer ran F3, all `test_sec_*`, gateway-script, session and session-override
+tests on the branch: 317 passed. The branch already contains security Chunk H.
+
+**What was reviewed and holds:**
+1. **Approval path (`receive_request`).** Placement is right: after the
+   encoded-payload block, before the session override. Freeze and Zero-Trust
+   short-circuit it; strict sessions use the global flag
+   (`require_sessions_enabled`), which is stricter than the per-gateway scope
+   and is fine. Blocklists and the hard block are enforced by the gateway
+   before a request ever reaches `/api/request`, so a plan cannot approve
+   anything the gateway refuses. Security chunk 1c still binds execution to
+   the approved bytes, and the approved row records
+   `session-plan:<plan>:<item>` plus an audit event — attributable.
+2. **`claim_plan_item`.** The conditional UPDATE (`uses < max_uses`, plan
+   still `approved` and unexpired, item not removed) is atomic; a lost race
+   rolls back and falls through to normal JIT. Correct.
+3. **Ownership (`session_plan`, `check_plan`).** Sessions are only created by
+   `session_begin`, which always records the calling agent; `upsert_session`
+   never overwrites an existing owner, so adopting someone else's id does not
+   transfer it (worst case a pre-minted id denies its real owner — no
+   escalation). All 22 live sessions have an owner. Combined with R1 (agent +
+   goal on the card), the operator cannot be misled about whose plan it is.
+4. **Hand-off — should plans require strict sessions?** **No, not required.**
+   Without strict sessions a plan is usable by any caller that holds the
+   gateway SSH key *and* the session id — the same trust boundary session
+   overrides already have — but a plan is strictly narrower: exact
+   operator-approved bytes, named hosts, counted uses, TTL ≤ 4 h. Requiring
+   strict sessions would make plans unavailable on installs that have not
+   turned it on, for little gain. Do instead: **SR3** below. (The live install
+   already runs with strict sessions on.)
+
+**Required before merge:**
+
+* **SR1 — make the match truly byte-exact.** `claim_plan_item` compares
+  `command.strip()`. Python's `str.strip()` removes far more than the
+  gateway's `[[:space:]]` trim (e.g. `\x1c–\x1f`, `\x85`, `\xa0`, `\u2028`), so
+  the item `echo ok` matches a request for `echo ok` followed by one of those
+  bytes; the request row then stores — and, via 1c, the gateway runs — the
+  extra bytes. Impact is small (those bytes cannot start a new command), but
+  the design promises exact bytes. Fix: compare the request command **without**
+  stripping (the gateway already trims), and in `validate_items` refuse
+  commands containing C0 control characters other than tab, DEL, or Unicode
+  whitespace other than plain space/tab. Tests: an item `echo ok` does **not**
+  match `echo ok\x1f`, `\x1cecho ok`, `echo ok\u00a0`; a proposal containing
+  such characters is refused with `invalid_command`.
+
+**Recommended (do now or in a follow-up, no second security pass needed):**
+
+* **SR2 — ownership fails closed.** In both tools, treat an empty owner as
+  "not yours" (`owner != current_agent_name()` without the `owner and`
+  guard). Today unreachable (every session has an owner), but it removes the
+  "unknown agent can take a plan from any caller" case noted under R1.
+* **SR3 — say it where the operator decides.** When strict sessions are off,
+  show one line in the plan approval card: "Strict sessions are off — anyone
+  with the gateway SSH key who knows this session id can use this plan." Keep
+  the docs recommendation to enable strict sessions before relying on plans.
+* **SR4 — highlight the broad items.** In the card, make `any host` (`*`)
+  items and `max_uses > 1` visually distinct, since those are the items that
+  grant more than one exact run on one host.
+
+**Merge rule:** once SR1 is in with its tests and the feature reviewer has
+checked it, F3 may merge into `feature-roadmap` without another security
+pass. SR2–SR4 do not block.
 
 ---
 
