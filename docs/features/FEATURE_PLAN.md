@@ -2395,7 +2395,58 @@ saying so.
 
 ### Implementer notes
 
-_(implementer)_
+**What I did**
+
+* **UI dispatch (`app.js`).** The sidebar buttons now come from
+  `contextActionsHtml(req)`, which dispatches on `_type` first:
+  integration → `approveIntegrationCall`/`denyIntegrationCall`, window →
+  `approveWindowReq`/`denyWindowReq`, SSH pending → `handleAction`, anything
+  else → Close. Pending integration calls no longer fall into the SSH branch
+  and no longer POST to `/api/approve/<integration id>`.
+* **Two-press in the sidebar.** `contextApproveLabel(req)` returns
+  "Press again to approve" once F2's arming press has set
+  `_bdUnknownConfirmed[id]`; `handleAction` calls `armSidebarConfirm(id)`,
+  which re-renders the sidebar buttons and flashes the sidebar's **own**
+  unknown step (`#ctx-breakdown-steps`), not only the queue card behind it.
+* **Visible failures.** `handleAction` now shows an error toast on any
+  non-2xx from approve/deny (`Could not approve request #N: not_pending`) and
+  refreshes the queue, instead of silently doing nothing.
+* **API (`main.py`, `db/requests.py`).** `POST /api/approve/{id}` and
+  `/api/deny/{id}` act only on a `pending` row, via
+  `update_request_status_if_pending`
+  (`UPDATE requests SET status = ? WHERE id = ? AND status = 'pending'`,
+  `rowcount` checked). Unknown id → 404; any other state → 409 `not_pending`;
+  the audit event is written only after a real transition.
+
+**Notes**
+
+* Bulk approve (one POST per selected pending id) and the history table are
+  unchanged and still work against the 409 rule — covered by
+  `test_x1_bulk_approve_sequence_still_works`.
+* No other approval path changed: session overrides, F3 plans and window
+  approvals keep their own routes; only the generic approve/deny handlers
+  became pending-only.
+
+**For the security reviewer (FYI, no sign-off needed).** The backend gap: the
+old handlers called `update_request_status` unconditionally, so a stale click
+or a colliding integration-call id could move a `denied`, `expired`,
+`consumed` or `blocked` SSH row back to `approved` (and, once approved, the
+gateway would claim and run it). It is now a conditional update with a 409 and
+no audit on refusal.
+
+**Tests** — `tests/test_x1_ctx_actions.py` (18): the sidebar harness
+(dispatch for integration/window/SSH/closed, and the two-press armed label
+with zero then one POST) plus the API cases (pending approve/deny still work;
+approve refused for denied/expired/consumed/blocked/approved/auto-approved;
+deny refused for approved/denied/expired/consumed/blocked; double approve;
+unknown id 404; bulk sequence; no audit events for refused transitions).
+
+`bash scripts/verify.sh` (pre-commit green):
+
+```
+1835 passed, 7 warnings in 371.15s (0:06:11)
+```
+
 
 ### Reviewer notes
 
