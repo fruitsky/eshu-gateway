@@ -23,13 +23,17 @@ NODE = shutil.which('node')
 pytestmark = pytest.mark.skipif(NODE is None, reason='node is not installed')
 
 
-def render(row):
-    proc = subprocess.run([NODE, HARNESS, json.dumps({'row': row})],
+def run(payload):
+    proc = subprocess.run([NODE, HARNESS, json.dumps(payload)],
                           capture_output=True, text=True, timeout=60)
     assert proc.returncode == 0, proc.stderr
     out = json.loads(proc.stdout)
     assert 'error' not in out, out['error']
     return out
+
+
+def render(row):
+    return run({'action': 'render', 'row': row})
 
 
 def step(text, kind='read', section='', context=None, why='', script=None):
@@ -165,3 +169,53 @@ class TestSurfaces:
         assert '/breakdown' in src
         # The `X` queue shortcut toggles the raw command.
         assert "k === 'x' || k === 'X'" in src
+
+
+def _long_unknown(request_id=2):
+    """A >500 char command with one unknown step (the two-press case)."""
+    steps = [step('uptime'), step('frobnicate --inspect --all', kind='unknown')]
+    return row(steps, command='echo "=== SITE ==="\nfrobnicate --inspect --all\n' + ('x' * 520)) | {'id': request_id}
+
+
+def _plain(request_id=3):
+    return row([step('uptime')]) | {'id': request_id}
+
+
+class TestBulkAndConfirm:
+    """B1: the two-press check must not swallow approvals from other callers."""
+
+    def test_f2_b1_bulk_approve_keeps_unconfirmed_selected(self):
+        result = run({'action': 'bulk', 'requests': [_long_unknown(2), _plain(3)],
+                      'selected': ['2', '3']})
+        # Only the request that did not need a second press is sent.
+        assert result['approved'] == ['3']
+        # The long-unknown one stays selected so the operator can see it.
+        assert result['selected'] == ['2']
+        assert len(result['toasts']) == 1
+        assert 'unknown steps' in result['toasts'][0]['message']
+
+    def test_f2_b1_session_override_approves_confirmed(self):
+        result = run({'action': 'session-override', 'requests': [_long_unknown(2)],
+                      'requestId': 2})
+        assert result['approved'] == ['2']
+
+    def test_f2_b1_card_approve_needs_two_presses(self):
+        result = run({'action': 'card', 'requests': [_long_unknown(2)], 'requestId': 2})
+        assert result['afterFirst'] == []
+        assert result['approved'] == ['2']
+
+
+class TestDecodedPreview:
+    """N1: the decoded script is shown once, in the step's script block."""
+
+    def test_f2_n1_decoded_script_not_duplicated(self):
+        with_script = row([step('python3 -', kind='unknown', script='print(1)')])
+        with_script['encoded'] = True
+        with_script['decoded_command'] = 'print(1)'
+        result = run({'action': 'decoded', 'row': with_script})
+        assert result['preview'] == ''
+        without_script = row([step('python3 -', kind='unknown')])
+        without_script['encoded'] = True
+        without_script['decoded_command'] = 'print(1)'
+        result = run({'action': 'decoded', 'row': without_script})
+        assert 'decoded' in result['preview']
