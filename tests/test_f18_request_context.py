@@ -106,6 +106,19 @@ class TestSections:
         assert seen['auto'] == 3
         assert seen['denied'] == 1
 
+    def test_f18_override_approvals_are_automatic(self, gateway):
+        """C1: a command run under a host or session override was not
+        approved by the operator one by one."""
+        req_id = create_request('10.0.0.1', 'uptime', status='pending', ttl=90)
+        create_request('10.0.0.1', 'uptime', status='approved', ttl=0,
+                       reason='override')
+        create_request('10.0.0.1', 'uptime', status='consumed', ttl=0,
+                       reason='session-override:7')
+        create_request('10.0.0.1', 'uptime', status='approved', ttl=0)
+        seen = _context(gateway, req_id)['seen']
+        assert seen['operator_approved'] == 1
+        assert seen['auto'] == 2
+
     def test_f18_like_this_ignores_arguments(self, gateway):
         req_id = create_request('10.0.0.1', 'df -h /var', status='pending', ttl=90)
         other = create_request('10.0.0.1', 'df -h /', status='approved', ttl=0)

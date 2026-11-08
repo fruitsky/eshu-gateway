@@ -43,18 +43,23 @@ APPROVED_STATUSES = ('approved', 'consumed', 'auto-approved', 'window-approved')
 # name what it found (`&&`, not `&`).
 _METACHARS = ('$(', '&&', '||', ';', '&', '|', '`', '>', '<', '\n', '\r', '\\')
 
-# C1: "approved" in this panel means a human decision. Plan items and the read
-# lane are automatic, so they are counted separately.
+# C1: "approved" in this panel means a human decision. Plan items, the read
+# lane and host/session overrides are automatic per command, so they are
+# counted separately.
 OPERATOR_APPROVED_SQL = """
     r.status IN ('approved','consumed')
     AND COALESCE(r.reason, '') NOT LIKE 'session-plan:%'
     AND COALESCE(r.reason, '') NOT LIKE 'read-lane%'
+    AND COALESCE(r.reason, '') NOT LIKE 'override%'
+    AND COALESCE(r.reason, '') NOT LIKE 'session-override:%'
 """
 AUTO_SQL = """
     r.status IN ('auto-approved','window-approved')
     OR (r.status IN ('approved','consumed')
         AND (COALESCE(r.reason, '') LIKE 'session-plan:%'
-             OR COALESCE(r.reason, '') LIKE 'read-lane%'))
+             OR COALESCE(r.reason, '') LIKE 'read-lane%'
+             OR COALESCE(r.reason, '') LIKE 'override%'
+             OR COALESCE(r.reason, '') LIKE 'session-override:%'))
 """
 
 _INTERPRETERS = ('bash', 'sh', 'python', 'python2', 'python3')

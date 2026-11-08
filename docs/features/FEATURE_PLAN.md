@@ -2687,6 +2687,19 @@ case for approving:
   code and add the F18 container. Re-run the X1 harness tests. The three F4
   skips stay until F4 merges, which is fine.
 
+**Round 2 (2026-11-08): approved and merged.** C1–C4 are done. 38 F18 and X1
+tests pass locally, and the X1 sidebar actions survived the merge.
+
+* **Fixed during review (C1 gap):** rows approved under a host or session
+  override (`override`, `session-override:%`) still counted as "approved by
+  you". They now count as `auto`. Added
+  `test_f18_override_approvals_are_automatic`, which fails before the fix
+  and passes after.
+* **Accepted as is:** C2 marks only one-step *interpreter* shapes as generic
+  (as the note was worded). One-step shapes such as `cat:read` keep their
+  counts, which is useful enough.
+* **For the UI pass:** consider showing "similar" only for ≥ 2-step shapes.
+
 ---
 
 ## Chunk F6 — Session wrap-up & "how approved" stats · slug `session-wrapup` · dashboard
@@ -3297,7 +3310,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 5 | F4 | read-lane | dashboard | **Changes requested (R1–R4)** | `feat/f4-read-lane` | F1, F3, Chunk H | reviewer pass + security reviewer sign-off |
 | 5a | X1 | ctx-actions | dashboard | Merged | `fix/x1-ctx-actions` | — | FYI to security reviewer (approve ignored status) |
 | 6 | F5 | exec-results | gateway + dashboard | Merged | `feat/f5-exec-results` | — | |
-| 6a | F18 | request-context | dashboard | **Changes requested (C1–C4)** | `feat/f18-request-context` | F1, F5, F7, X1 | |
+| 6a | F18 | request-context | dashboard | Merged | `feat/f18-request-context` | F1, F5, F7, X1 | |
 | 7 | F12 | ssh-exec | dashboard + gateway | Ready (after F5) — design first | `feat/f12-ssh-exec` | F4, F5 | design approval + security reviewer sign-off |
 | 8 | F6 | session-wrapup | dashboard | Ready (after F12) | `feat/f6-session-wrapup` | F3, F4, F5 | |
 | 9 | F13 | session-conclusions | dashboard + MCP | Ready (after F6) | `feat/f13-session-conclusions` | F5, F6 | |
