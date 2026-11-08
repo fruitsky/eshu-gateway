@@ -1788,6 +1788,46 @@ post), and the poller capture tests (3) in `tests/test_poller.py`.
 
 (1739 before this chunk + 37 F5 tests + 3 poller tests.)
 
+### Round 2 — fixes for code review round 1 (E1–E4)
+
+**E1 — capture no longer keeps commands alive after the agent disconnects.**
+Reverted `tee -p` to plain `tee`, and made the reader unable to stall the pipe
+instead: `{ tail -c 16385 > "$ESHU_OUT_TAIL" || true; cat > /dev/null; } <
+"$ESHU_OUT_FIFO" &` — if `tail` dies, `cat` keeps draining. The `tee -p`
+startup probe is gone (one fewer fork per command), and the disconnect
+behaviour is back to today's: the next write after the agent leaves gets
+SIGPIPE. Tests: `test_f5_gateway_disconnect_ends_command_in_tail_mode` and
+`test_f5_gateway_disconnect_ends_command_in_exit_only_mode` (endless `yes`,
+the reader closed after 16 bytes, the process exits within 2 s with 141), and
+`test_f5_gateway_dead_reader_keeps_stdout` (the `tail` process dies, `cat`
+drains, stdout stays byte-identical). Installers regenerated in the same
+commit; `static/dev/` untouched.
+
+**E2 — request body caps.** `ExecResultPayload.encoded_output` is capped at
+24 576 chars (16 KiB raw + base64 envelope) and `encoded_command` at 16 384 —
+the `/api/log` limit. Test: `test_f5_oversized_body_is_422` (both fields).
+The server-side re-cap test now sends 17 KiB raw, because anything over the
+base64 cap is a 422 before it can be truncated.
+
+**E3 — no audit row per execution.** Dropped the `exec_result` audit event;
+the results table is the record (a command's execution is not a decision).
+Test: `test_f5_no_audit_event_per_result`.
+
+**E4 — a wider lockbox window.** The `lockbox` path matches within 300 s
+(JIT wait up to 90 s + ticket life 90 s + reconnect slack); `allowlist` and
+`window` stay at 120 s. Test: `test_f5_lockbox_match_window_is_wider` — a
+200-second-old `approved` row attaches via the lockbox path, while an equally
+old `auto-approved` row is orphaned by the allowlist path.
+
+Full gate:
+
+```
+1784 passed, 7 warnings in 360.54s (0:06:00)
+```
+
+(1779 before this round + 5 new tests: two disconnect, oversized body, no
+audit event, lockbox window.)
+
 ### Reviewer notes
 
 **Design round 1 (2026-11-08): approved with changes.** Fold D1–D8 into the
