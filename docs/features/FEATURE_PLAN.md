@@ -245,14 +245,16 @@ Returns:
      "why": "journalctl (no vacuum/rotate)",
      "section": "LOGS",          // nearest preceding echo marker, or ""
      "context": ["pct 103"],     // wrapper chain, outermost first
-     "elevated": false},         // sudo / su seen in the wrapper chain
+     "elevated": false,          // sudo / su seen in the wrapper chain
+     "input_redirects": [        // F4 SC3: `<`, `<<`, `<<<`, `<&` (omitted when none)
+       {"op": "<", "target": "/etc/shadow"}]},
     ...
   ],
   "sections": ["LOGS", "DISK"],
   "summary": {"steps": 9, "read": 8, "write": 1, "unknown": 0},
   "headline": "9 steps · 8 read · 1 write: systemctl restart nginx",
   "inner_targets": ["pct:103"],  // for F7
-  "flags": ["redirect-to-file", "heredoc", "encoded", "nested-ssh", "sensitive-path"],
+  "flags": ["redirect-to-file", "heredoc", "input-redirect", "encoded", "nested-ssh", "sensitive-path"],
   "complete": true               // false if parsing gave up somewhere (then kind=unknown)
 }
 ```
@@ -1712,6 +1714,83 @@ lane on conditions SC1–SC8, and the operator sets `read_lane_on_enabled` by
 hand only once those are addressed and the lane is verified in shadow.
 
 `bash scripts/verify.sh`: `1992 passed, 7 warnings in 391.24s (0:06:31)`.
+
+### Round 5: security conditions
+
+The sign-off approved F4 on conditions SC1–SC8. All eight are in.
+
+**SC1–SC3 are the diff the security chat should look at** (`4b3a121`, files
+`dashboard/core/read_policy.py` and `dashboard/core/cmd_parse.py`); SC4–SC7 are
+in the same commit, and SC8's tests are in `c470d6e`.
+
+* **SC1 — options are allowlisted per verb and subcommand.** `OPTION_SPECS` in
+  `core/read_policy.py` is the whole list, keyed by `(verb, subcommand)`.
+  Spellings are exact (`--huma` is not `--human-readable`), a short cluster is
+  allowed only when every letter is on that verb's list (`ss -tlnp` yes,
+  `ss -tlnpq` no), and whether an option takes a value is decided per verb
+  (`grep -m` is a count, `head -m` is not an option). `--` and a lone `-` are
+  refused. No status option names a file, a host, a machine, a context or a
+  format template: `docker -H`/`--context`/`--format`, `systemctl -H`,
+  `ps -o`, `stat -c`, `date +%s` and `journalctl -o` are all out.
+* **SC2 — every other word is a file.** `_scan_options` returns the operands
+  after the listed options and their values, and each must pass `_path_ok`.
+  grep's first non-option word is its pattern, and only when `-e` is absent.
+  Consequence: a status verb's bare name is an operand, so
+  `systemctl status nginx` is no longer eligible while bare `systemctl status`
+  is — see the open question.
+* **SC3 — no input redirection.** F1 now flags `input-redirect` and records
+  `input_redirects: [{op, target}]` on the step; `is_read_ssh` refuses either.
+  `cat /proc/cpuinfo < /etc/shadow` used to look like a plain read because the
+  step text dropped the redirection.
+* **SC4 — the policy checks subcommands.** `SUBCOMMANDS`/`ACTIONS` decide
+  `systemctl`, `docker`, `pct`, `qm`, `zpool`, `zfs` and `ip` (including the
+  action), so `zpool destroy`, `ip addr flush` and `systemctl list-unit-files`
+  are refused even if F1 ever called them reads.
+* **SC5 — bounded output.** `_cap_lines` (≤ 1000) and `_cap_bytes` (≤ 1 MiB)
+  run for every spelling (`-n`, `--lines=`, `-n5`, `-100`); `+N` is refused
+  because it means "from line N" (uncapped); `head` has the same cap as
+  `tail`. Logs under `/var/log` leave the lane unless read through `head`,
+  `tail`, or `grep` with `-m` ≤ 1000 — `cat` and `wc` stay for `/proc`,
+  `/sys` and the four `/etc` files.
+* **SC6 — tighter safe trees.** `PROC_DENY_PARTS` adds `exe` and `pagemap`,
+  `kpage*` names are refused, and `/sys/kernel/debug`, `/sys/kernel/tracing`,
+  `/sys/fs/bpf`, `/var/log/installer` and the cloud-init logs are out.
+* **SC7 — a "needs a human" verdict wins.** `eligible()` acts only on a plain
+  `jit` (no `detail_type`) or `auto_approved`; `self_protection_jit`,
+  `shell_meta` and any future action are refused before the read rules run.
+* **SC8 — tests.** `TestSecurityConditions` covers each class above, with
+  synthetic paths and the `192.0.2.x` range, and the generated
+  `test_f4_sc8_every_option_in_every_eligible_case_is_allowlisted` walks every
+  eligible case and asserts each option spelling or cluster letter is in that
+  verb's spec.
+
+**Also from the sign-off**
+
+* The duplicate `evaluate_policy_verdict` import is gone; it went with the
+  `feature-roadmap` merge in `1d25807`.
+* `receive_request` treats a stored `on` as shadow while
+  `read_lane_on_enabled` is unset (`0861afe`), covered by
+  `test_f4_stored_on_is_shadow_while_the_key_is_unset`.
+* The sign-off's accepted residual risks are now in the README's
+  "Security & threat model" section, next to the other honest limitations.
+
+**Tests.** `tests/test_f4_read_lane.py` has 260 tests (169 before this round);
+the F18 read-lane tests no longer skip (24 pass in that file). `bash
+scripts/verify.sh`: `2120 passed, 7 warnings in 390.00s (0:06:29)`.
+
+**Open questions**
+
+1. **SC2 against a status verb's unit name.** SC2 says every word that is not
+   a listed option or its value is a file operand and must pass the safe-tree
+   check. Taken literally that makes `systemctl status nginx`,
+   `systemctl is-active nginx`, `docker inspect web01` and
+   `ip addr show dev eth0` ineligible, while bare `systemctl status` and
+   `systemctl list-units --type=service` stay. The round-3 probe list treats
+   `systemctl status`/`list-units` as everyday reads, and a unit name is a
+   name, not a file — but the condition as written has no exception for it. I
+   implemented it literally (fail closed) and moved those cases to the
+   ineligible table. If a bare-name exception is wanted, it needs a scope
+   (which verbs, which characters) and a line in §2.6a; otherwise no change.
 
 ### Reviewer notes
 

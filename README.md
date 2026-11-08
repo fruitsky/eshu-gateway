@@ -97,6 +97,7 @@ tap away.
 - **Just-In-Time Approval** — anything not explicitly allowed lands in the operator's queue for approve/deny, with desktop notifications
 - **Sessions** — one id per task ties its SSH commands and MCP calls together. `session_begin` requires a goal, mints a signed id, and a strict gateway refuses a command that does not carry it; the dashboard lists recent sessions and how much traffic carries an id
 - **Zero-Trust Gateways** — a per-gateway strictness tier: *nothing* auto-runs; every command needs operator approval
+- **Read-only lane (opt-in)** — per gateway, `off` / `shadow` / `on`: commands the parser proves are read-only can run without a prompt, after the operator has watched them in shadow for a week. `on` stays hard-locked until unlocked by hand (see the threat model)
 - **Emergency Freeze** — one button makes every gateway reject all commands until unfrozen (global circuit breaker)
 - **Fleet Run (Ansible-lite)** — queue commands and dispatch them to a subset of gateways with per-gateway results
 - **Live Dashboard** — real-time SPA: request queue, gateway health, policy editor, audit log, enrollment, statistics
@@ -342,6 +343,26 @@ important.
 - The static command-string screens (blocklists, risk hints) are
   **best-effort**, not a guarantee — treat them as ergonomic guardrails, with
   JIT as the real gate.
+
+**Read-only lane: accepted residual risks.** The lane (`off` → `shadow` →
+`on`, per gateway) auto-runs commands the parser proves are reads, with no
+human seeing them first. The security review accepted these risks; read them
+before turning `on`:
+
+- **Logs can hold anything.** `/var/log` holds whatever services write to it,
+  including secrets logged by mistake. Turning the lane on hands those logs to
+  the agent with no human in the loop.
+- **A planted symlink is followed.** A service account that owns a directory
+  under `/var/log` can plant a symlink and root follows it; the path check is
+  textual. This needs a service account to be compromised first.
+- **A hung read can hang.** `df` on a stale network mount, or `docker` with a
+  hung daemon, can hang. A gateway-side execution timeout for read-lane runs
+  is a known follow-up (F5 or security Chunk 7).
+
+`on` is also double-gated: `PUT /api/gateways/{ip}/read-lane` refuses it with
+`409 read_lane_on_locked` until the operator sets the `read_lane_on_enabled`
+key in the dashboard's `meta` table by hand, and the gateway additionally needs
+7 days in `shadow`. No API or UI writes that key.
 
 ---
 
