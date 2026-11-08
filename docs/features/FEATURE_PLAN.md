@@ -2395,11 +2395,78 @@ saying so.
 
 ### Implementer notes
 
-_(implementer)_
+**What I did**
+
+* **UI dispatch (`app.js`).** The sidebar buttons now come from
+  `contextActionsHtml(req)`, which dispatches on `_type` first:
+  integration → `approveIntegrationCall`/`denyIntegrationCall`, window →
+  `approveWindowReq`/`denyWindowReq`, SSH pending → `handleAction`, anything
+  else → Close. Pending integration calls no longer fall into the SSH branch
+  and no longer POST to `/api/approve/<integration id>`.
+* **Two-press in the sidebar.** `contextApproveLabel(req)` returns
+  "Press again to approve" once F2's arming press has set
+  `_bdUnknownConfirmed[id]`; `handleAction` calls `armSidebarConfirm(id)`,
+  which re-renders the sidebar buttons and flashes the sidebar's **own**
+  unknown step (`#ctx-breakdown-steps`), not only the queue card behind it.
+* **Visible failures.** `handleAction` now shows an error toast on any
+  non-2xx from approve/deny (`Could not approve request #N: not_pending`) and
+  refreshes the queue, instead of silently doing nothing.
+* **API (`main.py`, `db/requests.py`).** `POST /api/approve/{id}` and
+  `/api/deny/{id}` act only on a `pending` row, via
+  `update_request_status_if_pending`
+  (`UPDATE requests SET status = ? WHERE id = ? AND status = 'pending'`,
+  `rowcount` checked). Unknown id → 404; any other state → 409 `not_pending`;
+  the audit event is written only after a real transition.
+
+**Notes**
+
+* Bulk approve (one POST per selected pending id) and the history table are
+  unchanged and still work against the 409 rule — covered by
+  `test_x1_bulk_approve_sequence_still_works`.
+* No other approval path changed: session overrides, F3 plans and window
+  approvals keep their own routes; only the generic approve/deny handlers
+  became pending-only.
+
+**For the security reviewer (FYI, no sign-off needed).** The backend gap: the
+old handlers called `update_request_status` unconditionally, so a stale click
+or a colliding integration-call id could move a `denied`, `expired`,
+`consumed` or `blocked` SSH row back to `approved` (and, once approved, the
+gateway would claim and run it). It is now a conditional update with a 409 and
+no audit on refusal.
+
+**Tests** — `tests/test_x1_ctx_actions.py` (18): the sidebar harness
+(dispatch for integration/window/SSH/closed, and the two-press armed label
+with zero then one POST) plus the API cases (pending approve/deny still work;
+approve refused for denied/expired/consumed/blocked/approved/auto-approved;
+deny refused for approved/denied/expired/consumed/blocked; double approve;
+unknown id 404; bulk sequence; no audit events for refused transitions).
+
+`bash scripts/verify.sh` (pre-commit green):
+
+```
+1835 passed, 7 warnings in 371.15s (0:06:11)
+```
+
 
 ### Reviewer notes
 
-_(reviewer)_
+**Round 1 (2026-11-08): approved and merged.**
+
+* **Sidebar:** dispatch goes by type first, so a pending integration call
+  can no longer reach `/api/approve`.
+* **Backend:** approve and deny use one conditional UPDATE, with 404/409 and
+  audit only on a real transition.
+* **No other callers:** nothing else posts to these endpoints apart from
+  `handleAction`.
+* **Tests:** 30 X1 + F2 tests pass locally.
+
+Nit, for the UI pass: `contextApproveLabel` reads `_bdUnknownConfirmed` for
+integration calls too. The id spaces are shared, so an armed SSH request
+with the same number would relabel an integration button. It is cosmetic
+only, because the integration handler has no two-press rule.
+
+FYI for the security reviewer: before X1, `/api/approve/{id}` moved a row of
+any status to `approved`. It is now pending-only.
 
 ---
 
@@ -3190,7 +3257,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 3 | F7 | inner-target | dashboard | **Merged** 2026-11-08 | `feat/f7-inner-target` @ `0ad167f` | F1 | 1 round; backfill 7.1 s on a live-DB copy |
 | 4 | F3 | session-plans | dashboard + MCP | Merged | `feat/f3-session-plans` | F2 | + security reviewer sign-off |
 | 5 | F4 | read-lane | dashboard | **Changes requested (R1–R4)** | `feat/f4-read-lane` | F1, F3, Chunk H | reviewer pass + security reviewer sign-off |
-| 5a | X1 | ctx-actions | dashboard | **Ready — do next, small bug fix** | `fix/x1-ctx-actions` | — | FYI to security reviewer (approve ignored status) |
+| 5a | X1 | ctx-actions | dashboard | Merged | `fix/x1-ctx-actions` | — | FYI to security reviewer (approve ignored status) |
 | 6 | F5 | exec-results | gateway + dashboard | Merged | `feat/f5-exec-results` | — | |
 | 6a | F18 | request-context | dashboard | **Changes requested (C1–C4)** | `feat/f18-request-context` | F1, F5, F7, X1 | |
 | 7 | F12 | ssh-exec | dashboard + gateway | Ready (after F5) — design first | `feat/f12-ssh-exec` | F4, F5 | design approval + security reviewer sign-off |

@@ -184,6 +184,52 @@ function filterHistoryToCommand(command) {
   fetchRequests();
 }
 
+/* X1: the sidebar's approve label reflects F2's two-press rule for the open
+   request, and the actions dispatch on the request type first — a pending
+   integration call used to fall into the SSH branch and POST /api/approve. */
+function contextApproveLabel(req) {
+  return (req && _bdUnknownConfirmed[req.id]) ? 'Press again to approve' : 'Approve';
+}
+
+function contextActionsHtml(req) {
+  if (!req) return '';
+  if (req._type === 'integration') {
+    return '<button data-ctx-approve="1" onclick="approveIntegrationCall(' + idJs(req.id) + ')" class="btn btn-approve btn-sm" style="flex:1">' + contextApproveLabel(req) + '</button>' +
+      '<button onclick="denyIntegrationCall(' + idJs(req.id) + ')" class="btn btn-deny btn-sm" style="flex:1">Deny</button>';
+  }
+  if (req._type === 'window') {
+    return '<button onclick="approveWindowReq(' + idJs(req.id) + ')" class="btn btn-approve btn-sm" style="flex:1">Approve</button>' +
+      '<button onclick="denyWindowReq(' + idJs(req.id) + ')" class="btn btn-deny btn-sm" style="flex:1">Deny</button>';
+  }
+  if (req.status === 'pending') {
+    return '<button data-ctx-approve="1" onclick="handleAction(' + idJs(req.id) + ',\'approve\')" class="btn btn-approve btn-sm" style="flex:1">' + contextApproveLabel(req) + '</button>' +
+      '<button onclick="handleAction(' + idJs(req.id) + ',\'deny\')" class="btn btn-deny btn-sm" style="flex:1">Deny</button>';
+  }
+  return '<button onclick="closeContextPanel()" class="btn btn-muted btn-sm" style="flex:1">Close</button>';
+}
+
+function renderContextActions(req) {
+  var el = document.getElementById('ctx-actions');
+  if (el) el.innerHTML = contextActionsHtml(req);
+}
+
+/* When the arming press happens while the sidebar shows the request, the
+   sidebar must show it too: re-render its button and flash its own unknown
+   step (the queue card's copy flashes separately). */
+function armSidebarConfirm(reqId) {
+  if (!_ctxReq || String(_ctxReq.id) !== String(reqId)) return;
+  renderContextActions(_ctxReq);
+  var steps = document.getElementById('ctx-breakdown-steps');
+  if (steps && steps.querySelector) {
+    var el = steps.querySelector('[data-bd-unknown-for="' + esc(String(reqId)) + '"]');
+    if (el) {
+      if (el.scrollIntoView) el.scrollIntoView({ block: 'nearest' });
+      el.classList.add('bd-flash');
+      setTimeout(function () { el.classList.remove('bd-flash'); }, 1800);
+    }
+  }
+}
+
 function openContextPanel(reqId) {
   var panel = document.getElementById('cc-context');
   var empty = document.getElementById('cc-context-empty');
@@ -291,22 +337,8 @@ function openContextPanel(reqId) {
     }).catch(function () {});
   }
 
-  // Action buttons
-  var actionsEl = document.getElementById('ctx-actions');
-  var actionsHtml = '';
-  if (req.status === 'pending' || !req._type) {
-    actionsHtml = '<button onclick="handleAction(' + idJs(req.id) + ',\'approve\')" class="btn btn-approve btn-sm" style="flex:1">Approve</button>' +
-      '<button onclick="handleAction(' + idJs(req.id) + ',\'deny\')" class="btn btn-deny btn-sm" style="flex:1">Deny</button>';
-  } else if (req._type === 'window') {
-    actionsHtml = '<button onclick="approveWindowReq(' + idJs(req.id) + ')" class="btn btn-approve btn-sm" style="flex:1">Approve</button>' +
-      '<button onclick="denyWindowReq(' + idJs(req.id) + ')" class="btn btn-deny btn-sm" style="flex:1">Deny</button>';
-  } else if (req._type === 'integration') {
-    actionsHtml = '<button onclick="approveIntegrationCall(' + idJs(req.id) + ')" class="btn btn-approve btn-sm" style="flex:1">Approve</button>' +
-      '<button onclick="denyIntegrationCall(' + idJs(req.id) + ')" class="btn btn-deny btn-sm" style="flex:1">Deny</button>';
-  } else {
-    actionsHtml = '<button onclick="closeContextPanel()" class="btn btn-muted btn-sm" style="flex:1">Close</button>';
-  }
-  actionsEl.innerHTML = actionsHtml;
+  // Action buttons (X1: dispatch on the request type first)
+  renderContextActions(req);
 
   // F18: the context sections are fetched only when the panel opens.
   if (req._type === 'integration' || req._type === 'window') {
@@ -327,6 +359,7 @@ function closeContextPanel() {
   var panel = document.getElementById('cc-context');
   if (panel) panel.classList.add('collapsed');
   _ccSelectedId = null;
+  _ctxReq = null;
   document.querySelectorAll('.jit-ticket.selected').forEach(function(el) {
     el.classList.remove('selected');
   });
@@ -3751,6 +3784,7 @@ async function handleAction(id, action, opts) {
       && !_bdUnknownConfirmed[id]) {
     _bdUnknownConfirmed[id] = true;
     bdHighlightFirstUnknown(id);
+    armSidebarConfirm(id);
     showToast('Read the highlighted unknown step first. Approve again to approve it.', 'info');
     return;
   }
@@ -3759,6 +3793,11 @@ async function handleAction(id, action, opts) {
     if (res.status === 401) { await checkAuth(); return; }
     let denyCount = 0, denyCmd = '';
     try { const data = await res.json(); denyCount = data.deny_count || 0; denyCmd = data.command || ''; } catch(e) {}
+    if (!res.ok) {
+      showToast('Could not deny request #' + id + ': ' + (denyCount || 'not pending'), 'error');
+      fetchRequests();
+      return;
+    }
     const req = requestsData.find(r => r.id === id);
     const cmd = denyCmd || (req ? req.command : '');
     if (cmd && denyCount === DENY_BLOCKLIST_PROMPT_THRESHOLD) {
@@ -3771,6 +3810,13 @@ async function handleAction(id, action, opts) {
   } else {
     const res = await authFetch('/api/' + action + '/' + id, { method: 'POST' });
     if (res.status === 401) { await checkAuth(); return; }
+    if (!res.ok) {
+      let detail = '';
+      try { detail = (await res.json()).detail || ''; } catch(e) {}
+      showToast('Could not ' + action + ' request #' + id + ': ' + (detail || res.status), 'error');
+      fetchRequests();
+      return;
+    }
     closePanelIfShowing(id);
     fetchRequests().then(function() { if (_activeSessionSid) openSessionModal(_activeSessionSid); });
   }
