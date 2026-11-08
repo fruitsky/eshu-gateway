@@ -1468,12 +1468,24 @@ a shadow period that shows the operator what it *would* have approved.
 
 * Per-gateway setting `read_lane`: `off` (default) | `shadow` | `on`.
 * A JIT request is **read-lane eligible** only if all of these hold:
-  1. `breakdown.complete` is true and every step is `read` (no `write`, no `unknown`);
-  2. no flags from {`encoded`, `heredoc`, `nested-ssh`, `sensitive-path`, `redirect-to-file`};
-  3. no `elevated` step that reads a path outside `/proc`, `/sys`, `/var/log`, `/etc/os-release`
-     (reading as root can reach secrets; keep it narrow);
-  4. command ≤ 8 kB; gateway not frozen and not Zero-Trust;
-  5. not blocked by the central blocklist (`policy_eval` verdict is not `blocked`/`fatal`).
+  1. `breakdown.complete` is true, every step is `read` (no `write`, no
+     `unknown`), and every step's verb is on the reviewed `READ_LANE_VERBS`
+     allowlist in `core/read_policy.py` — status verbs that take no file
+     operands, and file readers (`cat`, `head`, `tail`, `grep`, `wc`, `ls`,
+     `stat`, `du`) that may only touch the safe trees;
+  2. no flags at all (F1's flag list fails closed; `repo-config` and
+     `follows` block automatically, and so will any flag F1 adds later);
+  3. every step reads only inside the safe trees — `/var/log/`, `/proc/`,
+     `/sys/` and exactly `/etc/os-release`, `/etc/hostname`, `/etc/hosts`,
+     `/etc/resolv.conf` (the gateway runs **every** command as root, so this
+     applies to every step, not just `sudo` ones). `/proc/*/root`,
+     `/proc/*/cwd`, `/proc/*/fd`, `/proc/*/map_files`, `/proc/*/mem`,
+     `/proc/*/environ`, `kcore`, `kmsg` and all of `/dev/` are refused, as are
+     globs and `..` components in a path operand;
+  4. no inner target (`pct exec`, `qm guest exec`, `docker exec`) — the lane is
+     opted in per gateway and the guest never opted in;
+  5. command ≤ 8 kB; gateway not frozen and not Zero-Trust;
+  6. not blocked by the central blocklist (`policy_eval` verdict is not `blocked`/`fatal`).
 * `shadow`: the request stays pending as usual, but the row gets
   `reason="read-lane-shadow"` (shown as a small chip "would auto-run") and an
   audit event. The operator's own decision is the ground truth.
@@ -1582,6 +1594,59 @@ is ready for that pass.
 
 (1817 before this chunk + 67 F4 tests.)
 
+
+### Round 2 — fixes for reviewer round 1 (R1–R4, S1)
+
+The design's rule 3 was wrong — the gateway runs **every** command as root, so
+`sudo` says nothing about privilege. It is replaced by a closed allowlist on
+top of F1, and the spec now says "every step (the gateway runs as root)".
+
+* **R1 — allowlist on top of F1.** `READ_LANE_VERBS` in `core/read_policy.py`
+  has two groups. Status verbs that take no file operands: `uptime`, `df`,
+  `free`, `ip` (`a`/`addr`/`route`/`link`), `ss`, `ps`, `uname`, `hostname`,
+  `lsblk`, `lscpu`, `whoami`, `id`, `date`, `nproc`, `systemctl`
+  (`status`/`is-active`/`is-enabled`/`list-units`/`list-timers`), `journalctl`
+  (with `-n`, or `--disk-usage`), `docker` (`ps`/`stats --no-stream`/
+  `images`), `pct list`/`qm list`, `zpool status|list`, `zfs list`. File
+  readers: `cat`, `head`, `tail` (no `-f`), `grep`, `wc`, `ls`, `stat`, `du`,
+  and every operand — bare or relative words and `--opt=value` included —
+  must be a safe path. Anything else is ineligible even if F1 says `read`.
+  A wrapper other than `sudo` (`env`, `ip netns exec`, `timeout`, `runuser`)
+  is refused too: it hides part of the command. Tests: the 45-case eligible
+  table and `test_f4_every_eligible_verb_is_on_the_allowlist`; every probe
+  class is in the ineligible table.
+* **R2 — the safe trees apply to every step.** `/var/log/`, `/proc/`, `/sys/`
+  and exactly `/etc/os-release`, `/etc/hostname`, `/etc/hosts`,
+  `/etc/resolv.conf`; inside `/proc` the `root`, `cwd`, `fd`, `map_files`,
+  `mem` and `environ` entries and `kcore`/`kmsg` are refused; all of `/dev/`
+  is refused; any glob or brace character and any `..` part is refused on the
+  whole token. Tests: block devices, `/proc` links, `cat config.yml`,
+  `/srv/app/config.yml`, glob-before-`..`.
+* **R3 — flags fail closed.** `READ_HARMLESS_FLAGS` is empty, so every F1
+  flag blocks — `repo-config` and `follows` included, and any future flag.
+  Tests: `test_f4_any_flag_blocks` plus the `git log` / `tail -f` /
+  `journalctl -f` table cases.
+* **R4 — no inner targets.** `pct exec`, `qm guest exec` and `docker exec`
+  are ineligible. Test: `test_f4_inner_targets_are_ineligible` plus the table
+  cases.
+* **S1 — line caps.** `journalctl` needs `-n ≤ 1000` (or `--disk-usage`) and
+  `tail -n` is capped at 1000, so one auto-run read cannot dump a whole
+  journal. Test: `test_f4_journal_and_tail_line_caps`.
+
+Two deliberate narrowings worth the security reviewer's eye: `grep` patterns
+are bare operands under R1's "every operand ... including bare words", so only
+`grep -e <pattern> <safe-path>` is eligible; and `echo` section markers are
+not on the verb list, so agent scripts that echo section headers stay
+ineligible.
+
+`bash scripts/verify.sh` (pre-commit green):
+
+```
+1951 passed, 7 warnings in 373.87s (0:06:13)
+```
+
+(1884 before this round + 67 new/expanded F4 tests; the F4 file has
+134 tests.)
 
 ### Reviewer notes
 
