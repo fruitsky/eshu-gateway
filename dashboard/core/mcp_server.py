@@ -716,7 +716,7 @@ def session_plan_fn():
                             'belongs to a minted session.'),
             })
         owner = (session.get('agent') or '').strip()
-        if owner != current_agent_name():   # SR2: empty owner is not yours
+        if not owner or owner != current_agent_name():   # SR2: fail closed
             # A plan names exact commands; another agent's session must never
             # be able to propose into it (the operator would see a familiar
             # goal and approve someone else's bytes).
@@ -781,7 +781,7 @@ def check_plan_fn():
         # plan names the commands another session intends to run.
         session = get_session(plan['session_id'])
         owner = (session.get('agent') or '').strip() if session else ''
-        if owner != current_agent_name():   # SR2: empty owner is not yours
+        if not owner or owner != current_agent_name():   # SR2: fail closed
             return json.dumps({
                 'error': 'session_not_yours',
                 'message': 'That plan belongs to another agent\'s session.',

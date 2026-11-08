@@ -1373,6 +1373,21 @@ it.
 
 **Do not merge until the security reviewer signs off below.**
 
+**Round 3 (2026-11-08): SR1 checked; merged.** SR1 is correct.
+`claim_plan_item` compares the request bytes unstripped, and `validate_items`
+checks the raw text before `strip()`. The listed tests pass.
+
+* **Fixed during review (SR2 gap):** the check `owner != current_agent_name()`
+  still let an anonymous caller use an ownerless session, because `'' == ''`.
+  Both tools now use `not owner or owner != current_agent_name()`. Added
+  `test_f3_sr2_anonymous_caller_and_ownerless_session_is_refused`; it fails
+  before the fix and passes after.
+* **Observation (no change):** the gateway does not trim `SSH_ORIGINAL_COMMAND`.
+  An agent that sends stray leading or trailing spaces gets no match and
+  falls through to normal JIT, which fails safe.
+* SR3 and SR4 done. Per the security reviewer's merge rule, no further
+  security pass is needed.
+
 #### Security reviewer sign-off
 
 **2026-11-08 — approved, conditional on SR1 (security chat, reviewed at `de741ec`).**
@@ -2175,7 +2190,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 1 | F1 | breakdown | dashboard | **Merged** 2026-11-07 | `feat/f1-breakdown` @ `e0df20a` | — | 3 rounds; 155 adversarial cases; 14.7% unknown on live data |
 | 2 | F2 | review-card | UI | **Merged** 2026-11-08 | `feat/f2-review-card` @ `286df1b` | F1 | 2 rounds |
 | 3 | F7 | inner-target | dashboard | **Merged** 2026-11-08 | `feat/f7-inner-target` @ `0ad167f` | F1 | 1 round; backfill 7.1 s on a live-DB copy |
-| 4 | F3 | session-plans | dashboard + MCP | **Approved (feature review); awaiting security sign-off** | `feat/f3-session-plans` | F2 | + security reviewer sign-off |
+| 4 | F3 | session-plans | dashboard + MCP | Merged | `feat/f3-session-plans` | F2 | + security reviewer sign-off |
 | 5 | F4 | read-lane | dashboard | Ready (after F3) | `feat/f4-read-lane` | F1, F3, Chunk H | reviewer pass + security reviewer sign-off |
 | 6 | F5 | exec-results | gateway + dashboard | Ready (after F4) — design first | `feat/f5-exec-results` | — | design approval needed |
 | 7 | F12 | ssh-exec | dashboard + gateway | Ready (after F5) — design first | `feat/f12-ssh-exec` | F4, F5 | design approval + security reviewer sign-off |

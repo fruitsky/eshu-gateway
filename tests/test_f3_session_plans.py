@@ -506,6 +506,16 @@ class TestSecurityRound3:
                                                items=[{'command': 'uptime'}]))
         assert out['error'] == 'session_not_yours'
 
+    def test_f3_sr2_anonymous_caller_and_ownerless_session_is_refused(self):
+        # Empty owner and empty caller must not compare equal ('' == '').
+        from core.mcp_server import check_plan_fn, session_plan_fn
+        upsert_session('plan-sr2c', agent='', goal='no owner', source='caller')
+        out = json.loads(session_plan_fn()(session_id='plan-sr2c',
+                                           items=[{'command': 'uptime'}]))
+        assert out['error'] == 'session_not_yours'
+        plan_id = _plan('plan-sr2c', [{'host': '*', 'command': 'uptime'}])
+        assert json.loads(check_plan_fn()(plan_id=plan_id))['error'] == 'session_not_yours'
+
     def test_f3_sr3_api_reports_whether_strict_sessions_are_on(self, auth_client):
         sid = _mint('plan-sr3', goal='strict hint')
         create_plan(sid, [{'host': '*', 'command': 'uptime'}])
