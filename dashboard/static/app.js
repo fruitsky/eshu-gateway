@@ -92,7 +92,11 @@ function ctxSectionHtml(key, title, body) {
 }
 
 function ctxWaitingBody(d) {
-  return '<div class="ctx-wait">' + escapeHtml((d || {}).waiting || '') + '</div>';
+  var waiting = (d || {}).waiting;
+  // C3: only a pending row is waiting, and the reason is a re-derivation.
+  if (!waiting) return '';
+  return '<div class="ctx-wait"><span class="ctx-tag">Likely waiting because:</span> ' +
+    escapeHtml(waiting) + '</div>';
 }
 
 function ctxSessionBody(d) {
@@ -115,8 +119,10 @@ function ctxSeenBody(d) {
   var s = (d || {}).seen || {};
   if (!s.count) return '<div class="ctx-empty">Not seen before.</div>';
   var last = s.last_at ? formatAgo(Math.floor(Date.now() / 1000) - Number(s.last_at)) : '\u2014';
-  return '<div class="ctx-row">' + Number(s.count) + '\u00d7 on record \u00b7 approved ' +
-    Number(s.approved || 0) + ' \u00b7 denied ' + Number(s.denied || 0) +
+  // C1: the operator's decisions are not the same thing as the allowlist's.
+  return '<div class="ctx-row">' + Number(s.count) + '\u00d7 on record \u00b7 approved by you ' +
+    Number(s.operator_approved || 0) + ' \u00b7 auto ' + Number(s.auto || 0) +
+    ' \u00b7 denied ' + Number(s.denied || 0) +
     ' \u00b7 last ' + escapeHtml(last) +
     (s.last_exit_code === null || s.last_exit_code === undefined ? ''
       : ' \u00b7 exit ' + Number(s.last_exit_code)) + '</div>' +
@@ -126,15 +132,17 @@ function ctxSeenBody(d) {
 
 function ctxLikeBody(d) {
   var s = (d || {}).like || {};
+  // C2: a one-step interpreter shape matches thousands of unrelated commands.
+  if (s.generic) return '<div class="ctx-empty">Too generic to compare.</div>';
   if (!s.count) return '<div class="ctx-empty">Nothing similar yet.</div>';
   var examples = (s.examples || []).map(function (e) {
     return '<div class="ctx-row"><code>' + escapeHtml(ctxCut(e.command)) + '</code>' +
       (e.hostname ? ' <span class="ctx-tag">' + escapeHtml(e.hostname) + '</span>' : '') +
       '</div>';
   }).join('');
-  return '<div class="ctx-row">' + Number(s.count) + ' similar \u00b7 approved ' +
-    Number(s.approved || 0) + ' \u00b7 denied ' + Number(s.denied || 0) + '</div>' +
-    examples;
+  return '<div class="ctx-row">' + Number(s.count) + ' similar \u00b7 approved by you ' +
+    Number(s.operator_approved || 0) + ' \u00b7 auto ' + Number(s.auto || 0) +
+    ' \u00b7 denied ' + Number(s.denied || 0) + '</div>' + examples;
 }
 
 function ctxHostBody(d) {

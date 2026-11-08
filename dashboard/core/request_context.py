@@ -9,18 +9,8 @@ import time
 
 from core.cmd_parse import breakdown
 from core.cmd_blocklist import has_shell_metacharacters
-
-# The gateway's HAS_META set (stage 2.7), longest forms first so the reason can
-# name what it found (`&&`, not `&`).
-_METACHARS = ('$(', '&&', '||', ';', '&', '|', '`', '>', '<', '\n', '\r', '\\')
-
-
-def _metachar(command: str):
-    for token in _METACHARS:
-        if token in (command or ''):
-            return token
-    return ''
 from core.policy_eval import evaluate_policy_verdict
+
 try:
     # F4 may not be merged into this branch's base yet; the read-lane reasons
     # switch on automatically when it is (§ 2.6a: one read policy).
@@ -36,6 +26,7 @@ try:
 except Exception:  # pragma: no cover - F4 not merged yet
     def get_gateway_read_lane(ip):  # noqa: E306 - tiny fallback
         return 'off'
+
 from db.overrides import get_session_override
 from db.policies import get_policies
 from db.requests import get_request_row
@@ -48,13 +39,36 @@ MAX_TEXT = 300
 SEEN_DAYS = 90
 APPROVED_STATUSES = ('approved', 'consumed', 'auto-approved', 'window-approved')
 
+# The gateway's HAS_META set (stage 2.7), longest forms first so the reason can
+# name what it found (`&&`, not `&`).
+_METACHARS = ('$(', '&&', '||', ';', '&', '|', '`', '>', '<', '\n', '\r', '\\')
+
+# C1: "approved" in this panel means a human decision. Plan items and the read
+# lane are automatic, so they are counted separately.
+OPERATOR_APPROVED_SQL = """
+    r.status IN ('approved','consumed')
+    AND COALESCE(r.reason, '') NOT LIKE 'session-plan:%'
+    AND COALESCE(r.reason, '') NOT LIKE 'read-lane%'
+"""
+AUTO_SQL = """
+    r.status IN ('auto-approved','window-approved')
+    OR (r.status IN ('approved','consumed')
+        AND (COALESCE(r.reason, '') LIKE 'session-plan:%'
+             OR COALESCE(r.reason, '') LIKE 'read-lane%'))
+"""
+
+_INTERPRETERS = ('bash', 'sh', 'python', 'python2', 'python3')
+
 
 def _cut(text) -> str:
     return (text or '')[:MAX_TEXT]
 
 
-def _approved(status) -> bool:
-    return status in APPROVED_STATUSES
+def _metachar(command: str):
+    for token in _METACHARS:
+        if token in (command or ''):
+            return token
+    return ''
 
 
 def waiting_reason(row) -> str:
@@ -122,54 +136,81 @@ def _session_section(row) -> dict:
 
 def _seen_section(row) -> dict:
     sha = row.get('command_sha')
-    empty = {'count': 0, 'last_at': 0, 'approved': 0, 'denied': 0,
-             'last_exit_code': None}
+    empty = {'count': 0, 'last_at': 0, 'operator_approved': 0, 'auto': 0,
+             'denied': 0, 'last_exit_code': None}
     if not sha:
         return empty
     since = int(time.time()) - SEEN_DAYS * 86400
     with db_conn() as conn:
-        rows = conn.execute('''
-            SELECT r.id, r.status, r.created_at, x.exit_code
-            FROM requests r
-            LEFT JOIN request_results x ON x.request_id = r.id
+        agg = conn.execute('''
+            SELECT COUNT(*) AS n, MAX(r.created_at) AS last_at,
+                   SUM(CASE WHEN %s THEN 1 ELSE 0 END) AS operator_approved,
+                   SUM(CASE WHEN %s THEN 1 ELSE 0 END) AS auto,
+                   SUM(CASE WHEN r.status = 'denied' THEN 1 ELSE 0 END) AS denied
+            FROM requests r WHERE r.command_sha = ? AND r.created_at >= ?
+        ''' % (OPERATOR_APPROVED_SQL, AUTO_SQL), (sha, since)).fetchone()
+        last = conn.execute('''
+            SELECT x.exit_code FROM requests r
+            JOIN request_results x ON x.request_id = r.id
             WHERE r.command_sha = ? AND r.created_at >= ?
-        ''', (sha, since)).fetchall()
-    if not rows:
-        return empty
-    approved = sum(1 for r in rows if _approved(r['status']))
-    denied = sum(1 for r in rows if r['status'] == 'denied')
-    exits = [r for r in rows if r['exit_code'] is not None]
-    exits.sort(key=lambda r: r['id'])
+            ORDER BY r.id DESC LIMIT 1
+        ''', (sha, since)).fetchone()
     return {
-        'count': len(rows),
-        'last_at': max(r['created_at'] for r in rows),
-        'approved': approved,
-        'denied': denied,
-        'last_exit_code': exits[-1]['exit_code'] if exits else None,
+        'count': int(agg['n'] or 0),
+        'last_at': int(agg['last_at'] or 0),
+        'operator_approved': int(agg['operator_approved'] or 0),
+        'auto': int(agg['auto'] or 0),
+        'denied': int(agg['denied'] or 0),
+        'last_exit_code': last['exit_code'] if last else None,
     }
 
 
-def _like_section(row) -> dict:
+def _shape_is_generic(breakdown_result) -> bool:
+    """C2: one-step interpreter shapes have no comparable shape."""
+    steps = (breakdown_result or {}).get('steps') or []
+    if len(steps) >= 2:
+        return False
+    verb = ((steps[0].get('text') or '').split() or [''])[0] if steps else ''
+    return verb in _INTERPRETERS or verb.startswith('python')
+
+
+def _like_section(row, breakdown_result=None) -> dict:
     sha = row.get('shape_sha')
-    empty = {'count': 0, 'approved': 0, 'denied': 0, 'examples': []}
+    empty = {'count': 0, 'operator_approved': 0, 'auto': 0, 'denied': 0,
+             'examples': [], 'generic': False}
     if not sha:
         return empty
+    if _shape_is_generic(breakdown_result):
+        return {'count': 0, 'operator_approved': 0, 'auto': 0, 'denied': 0,
+                'examples': [], 'generic': True}
     since = int(time.time()) - SEEN_DAYS * 86400
     with db_conn() as conn:
-        rows = conn.execute('''
-            SELECT r.id, r.command, r.status, r.created_at, g.hostname
+        agg = conn.execute('''
+            SELECT COUNT(*) AS n,
+                   SUM(CASE WHEN %s THEN 1 ELSE 0 END) AS operator_approved,
+                   SUM(CASE WHEN %s THEN 1 ELSE 0 END) AS auto,
+                   SUM(CASE WHEN r.status = 'denied' THEN 1 ELSE 0 END) AS denied
+            FROM requests r
+            WHERE r.shape_sha = ? AND r.created_at >= ? AND r.id != ?
+        ''' % (OPERATOR_APPROVED_SQL, AUTO_SQL),
+            (sha, since, row['id'])).fetchone()
+        examples = conn.execute('''
+            SELECT r.id, r.command, r.created_at, g.hostname
             FROM requests r
             LEFT JOIN gateways g ON r.target_ip = g.ip
             WHERE r.shape_sha = ? AND r.created_at >= ? AND r.id != ?
-            ORDER BY r.id DESC
-        ''', (sha, since, row['id'])).fetchall()
-    approved = sum(1 for r in rows if _approved(r['status']))
-    denied = sum(1 for r in rows if r['status'] == 'denied')
-    examples = [{'id': r['id'], 'command': _cut(r['command']),
-                 'hostname': r['hostname'] or '', 'created_at': r['created_at']}
-                for r in rows[:EXAMPLES]]
-    return {'count': len(rows), 'approved': approved, 'denied': denied,
-            'examples': examples}
+            ORDER BY r.id DESC LIMIT ?
+        ''', (sha, since, row['id'], EXAMPLES)).fetchall()
+    return {
+        'count': int(agg['n'] or 0),
+        'operator_approved': int(agg['operator_approved'] or 0),
+        'auto': int(agg['auto'] or 0),
+        'denied': int(agg['denied'] or 0),
+        'generic': False,
+        'examples': [{'id': r['id'], 'command': _cut(r['command']),
+                      'hostname': r['hostname'] or '', 'created_at': r['created_at']}
+                     for r in examples],
+    }
 
 
 def _host_section(row) -> dict:
@@ -197,11 +238,14 @@ def build_context(request_id: int):
     row = get_request_row(request_id)
     if not row:
         return None
+    bd = breakdown(row.get('command') or '')
     return {
         'request_id': int(request_id),
-        'waiting': waiting_reason(row),
+        # C3: only a pending row is "waiting", and the reason is re-derived —
+        # the UI words it as a likely reason, not a verdict.
+        'waiting': waiting_reason(row) if row.get('status') == 'pending' else None,
         'session': _session_section(row),
         'seen': _seen_section(row),
-        'like': _like_section(row),
+        'like': _like_section(row, bd),
         'host': _host_section(row),
     }
