@@ -1612,7 +1612,77 @@ new tests.
 
 ### Reviewer notes
 
-_(reviewer)_
+**Design round 1 (2026-11-08): approved with changes.** Fold D1–D8 into the
+design section, then implement on this branch. No second design round is
+needed; I check D1–D8 in the code review. The design is sound. The
+sanitize-then-tee position, the FIFO plus `tail -c 16385` bound, the sentinel
+staying outside the capture, the `/etc/eshu-capture` fail-safe and the orphan
+buffer are all the right calls.
+
+*Must address:*
+
+* **D1 Capture must never cut the agent's output.** With plain `tee`, if the
+  FIFO reader dies (OOM, killed), tee's next write to the FIFO raises SIGPIPE
+  and tee exits, so the agent's stream is truncated and `rc` becomes 141.
+  * Use `tee --output-error=warn-nopipe` (`-p`), so a dead FIFO is ignored and
+    stdout keeps flowing.
+  * Check at startup that the option exists. If it doesn't (non-GNU tee),
+    capture degrades to `exit-only`.
+  * Test: kill the reader mid-stream; stdout stays byte-identical and `rc` is
+    the command's.
+* **D2 Output and command off the process list.** `curl -d '…'` puts the
+  base64 output, up to ~22 KB of sanitized command output, into argv, and any
+  local user can read argv in `/proc/*/cmdline`. Send the body on stdin
+  (`printf '%s' "$body" | curl --data-binary @- …`). The token header and
+  `/api/log`'s command in argv are an existing exposure and out of scope.
+  Note them in §11 for the security backlog.
+* **D3 Lockbox-claim results must match.** That path runs rows that are
+  `approved`/`consumed` (JIT, session override, F3 plan after a reconnect).
+  Rule 2 only looks at `auto-approved`/`window-approved`, so those results
+  would be orphaned, then dropped. The acceptance criterion "visible for JIT …
+  and plan paths" fails.
+  * Send an internal-literal `path` field: `allowlist` | `window` | `lockbox`
+    | `jit`.
+  * Rule 2 then picks the status set per path: `lockbox` matches
+    `approved`/`consumed` rows for `(ip, sha256)`, decided in the last 120 s.
+  * Unknown `path` → 400.
+  * Add the test.
+* **D4 First result wins.** §4 says `INSERT OR REPLACE` and rule 1 says 409,
+  but test 16 says idempotent; these contradict each other. Use
+  `INSERT OR IGNORE`, return 200 `{attached: false, reason: "already_has_result"}`,
+  and keep the first stored output. A later post must never overwrite a
+  stored result.
+* **D5 Rule 1 checks status too.** A `request_id` must also be in an
+  executable state (`approved`/`consumed`). A result for a `pending`,
+  `denied` or `blocked` row is rejected, so a forged post cannot make a denied
+  command look as if it ran.
+* **D6 Bound the orphan table.** Cap orphans per gateway (e.g. 50, oldest
+  dropped). Apply the existing `_check_rate_limit` to `/api/exec-result`. The
+  endpoint is gateway-only via `_require_gateway(request, target_ip)`, so the
+  token is bound to the IP like `/api/log`. A dashboard session cannot post
+  results.
+* **D7 Run dir checks mirror the poller.** Besides missing, symlink and mode
+  700, also require owner uid 0 (`stat -c '%u'`), as `eshu-poller.sh` does.
+  The poller creates `/run/eshu`. If the gateway runs before the poller has
+  started after a boot, capture is simply `exit-only`; the gateway must not
+  create the dir itself.
+* **D8 Small bash points.**
+  * Read the setting with `IFS= read -r v < "$ESHU_CAPTURE_FILE"`, so a
+    trailing newline from any writer doesn't turn `tail` into `exit-only`.
+  * If `mkfifo` succeeds but the pipeline later takes the no-FIFO branch, kill
+    the reader (`kill "$ESHU_TAIL_PID"`) so it doesn't sit blocked on `open()`
+    forever.
+  * The `EXIT` trap is the first in the script. Put a comment there saying any
+    later trap must extend it, not replace it.
+
+*Answers to §11:*
+* **Ticket format:** keep it as is; D3 covers it.
+* **Streaming, encryption, per-session opt-in:** agreed out of scope; list
+  them in §7 backlog.
+* **Single retention field:** fine.
+* **Security sign-off:** not required for F5 (§2.6a list), since it adds no
+  new approval path. The gateway change runs as root on every command, though,
+  so I review the bash line by line.
 
 ---
 
@@ -2221,7 +2291,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 3 | F7 | inner-target | dashboard | **Merged** 2026-11-08 | `feat/f7-inner-target` @ `0ad167f` | F1 | 1 round; backfill 7.1 s on a live-DB copy |
 | 4 | F3 | session-plans | dashboard + MCP | **Ready** | `feat/f3-session-plans` | F2 | + security reviewer sign-off |
 | 5 | F4 | read-lane | dashboard | Ready (after F3) | `feat/f4-read-lane` | F1, F3, Chunk H | reviewer pass + security reviewer sign-off |
-| 6 | F5 | exec-results | gateway + dashboard | Ready (after F4) — design first | `feat/f5-exec-results` | — | design approval needed |
+| 6 | F5 | exec-results | gateway + dashboard | **Design approved with changes (D1–D8); implementing** | `feat/f5-exec-results` | — | |
 | 7 | F12 | ssh-exec | dashboard + gateway | Ready (after F5) — design first | `feat/f12-ssh-exec` | F4, F5 | design approval + security reviewer sign-off |
 | 8 | F6 | session-wrapup | dashboard | Ready (after F12) | `feat/f6-session-wrapup` | F3, F4, F5 | |
 | 9 | F13 | session-conclusions | dashboard + MCP | Ready (after F6) | `feat/f13-session-conclusions` | F5, F6 | |
