@@ -1811,6 +1811,26 @@ confirmed that every `ip`/`date`/`hostname`/`journalctl` write, `ss -K`,
 
 After R5–R8 (plus S2 and S3), F4 goes to the security reviewer.
 
+**Round 3 (2026-11-08): approved by the feature reviewer; waiting on security
+sign-off (§ 2.6a).** R5–R8, S2 and S3 are in. I re-ran all four probe sets,
+about 130 synthetic commands in a scratch dir. The only eligible commands left
+are everyday status reads and log reads under `/var/log`:
+
+* `uptime`, `df`, `free`, `ip a`, `ss -tlnp`, `ps aux`/`-ef`
+* `systemctl status`/`list-units`, `journalctl -n ≤1000`
+* `docker ps`/`stats --no-stream`, `zpool status`, `lsblk`, `uname`
+* `cat`/`grep -e`/`ls -R`/`du` under `/var/log`, and `stat` of the four
+  `/etc` files
+
+Pipelines into `grep` without an operand are ineligible. That is narrow but
+safe.
+
+**Do not merge until the security reviewer signs off below.**
+
+#### Security reviewer sign-off
+
+_(security reviewer)_
+
 ---
 
 ## Chunk F5 — Execution results (exit code + output tail) · slug `exec-results` · gateway + dashboard
@@ -3227,7 +3247,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 2 | F2 | review-card | UI | **Merged** 2026-11-08 | `feat/f2-review-card` @ `286df1b` | F1 | 2 rounds |
 | 3 | F7 | inner-target | dashboard | **Merged** 2026-11-08 | `feat/f7-inner-target` @ `0ad167f` | F1 | 1 round; backfill 7.1 s on a live-DB copy |
 | 4 | F3 | session-plans | dashboard + MCP | Merged | `feat/f3-session-plans` | F2 | + security reviewer sign-off |
-| 5 | F4 | read-lane | dashboard | **Changes requested (round 2: R5–R8)** | `feat/f4-read-lane` | F1, F3, Chunk H | reviewer pass + security reviewer sign-off |
+| 5 | F4 | read-lane | dashboard | **Approved (feature review); awaiting security sign-off** | `feat/f4-read-lane` | F1, F3, Chunk H | reviewer pass + security reviewer sign-off |
 | 6 | F5 | exec-results | gateway + dashboard | Merged | `feat/f5-exec-results` | — | |
 | 7 | F12 | ssh-exec | dashboard + gateway | Ready (after F5) — design first | `feat/f12-ssh-exec` | F4, F5 | design approval + security reviewer sign-off |
 | 8 | F6 | session-wrapup | dashboard | Ready (after F12) | `feat/f6-session-wrapup` | F3, F4, F5 | |
