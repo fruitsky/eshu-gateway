@@ -3176,7 +3176,202 @@ without an SSH client or key.
 
 ### Implementer notes
 
-_(fill in)_
+**Status: design note only — no code on this branch.** Wait for the reviewer
+to mark it approved, and for the security reviewer's sign-off (§ 2.6a): this
+chunk gives the dashboard a key that reaches every gateway.
+
+#### 1. The shape of the change
+
+```
+agent ──MCP──▶ dashboard.ssh_exec(host, command)
+                 │  1. agent policy (hosts, ssh_mode, rate limit)
+                 │  2. resolve host → gateway row (IP/hostname only)
+                 │  3. ssh -i /var/lib/eshu/ssh/dashboard_ed25519                  │        eshu-gateway@<host>                  │        "ESHU_AGENT=… ESHU_AGENT_SIG=… ESHU_TS=…                  │         ESHU_MCP=1 [ESHU_FORCE_JIT=1] <command>"
+                 ▼
+            gateway forced command (unchanged entry point)
+                 │  validate prefixes → freeze → blocklist → allowlist /
+                 │  window / Zero-Trust → JIT (as today)
+                 │  MCP mode: print one JSON envelope instead of the
+                 │  human-readable text, and do not sit waiting on a JIT
+                 ▼
+            dashboard parses the envelope
+                 │  ran     → store an F5 result, return output (≤ 64 KiB tail)
+                 │  pending → return {status:"pending", request_id}
+                 │  refused → return the reason
+```
+
+Direct SSH keeps its current text output; **only** a request carrying
+`ESHU_MCP=1` gets the envelope, so F5's golden output test stays untouched.
+
+#### 2. The MCP tool
+
+`ssh_exec(host, command, session_id?, timeout?, wait?)`
+
+* `host` must match a registered gateway **IP or hostname** (`get_gateway` /
+  a name match, case-insensitive, unique). No arbitrary hosts, no user@, no
+  port, no `-o` — the host is looked up, never interpolated into the ssh
+  command line as free text.
+* `command` ≤ 8 KiB (the read-lane cap is a good fleet-wide default). The
+  bytes go to the gateway **unmodified**; the gateway's `SSH_ORIGINAL_COMMAND`
+  trim is what decides whitespace, as today.
+* `session_id` is optional; when given it must be a session the caller owns
+  (same rule as F3's tools). It becomes `ESHU_SESSION` in the signed prefix.
+* `timeout` seconds, default 60, capped at 120. `wait: true` polls the
+  request row for up to 60 s instead of returning `pending` immediately.
+* Result: `{status: "ran"|"pending"|"refused", request_id, exit_code?,
+  output? (tail, ≤ 64 KiB), truncated?, reason?}`. Agent text is never
+  interpreted.
+
+#### 3. Agent policy
+
+`agent_policies` gains:
+
+* `ssh_hosts_allow` — comma/JSON list of gateway IPs or hostnames; empty means
+  **none** (opt-in), `*` means any registered gateway.
+* `ssh_mode` — `read_only` | `approval` | `normal` (default `approval`).
+  * `read_only`: a command that `core/read_policy.is_read_ssh` does not prove
+    read-only is sent to **JIT**, never auto-run. It is not refused: the
+    operator can still approve it, and the agent learns the command is
+    waiting. Enforced by the dashboard adding `ESHU_FORCE_JIT=1`.
+  * `approval`: every command is forced to JIT, reads included (the strictest
+    useful mode for a new agent).
+  * `normal`: the gateway's own policy decides, as for a direct SSH agent.
+* Rate limit per agent (requests/minute) shared with the MCP call budget.
+
+The dashboard check is **additive**: the gateway still runs freeze, blocklists,
+allowlists, Zero-Trust, plans, the read lane and JIT exactly as today. A bug in
+the dashboard policy can only make a command *more* gated, never less: the
+only levers the dashboard sends are `ESHU_FORCE_JIT`, which widens gating, and
+the signed identity, which attribution uses.
+
+#### 4. The dashboard SSH key and the `from=` pin
+
+* Key: `/var/lib/eshu/ssh/dashboard_ed25519`, generated once at startup if
+  missing (ed25519, no passphrase — it is a service key), directory `0700`,
+  key `0600`. `GET /api/ssh-key` (session auth) returns the public line so an
+  operator can add it by hand; the enrollment script fetches it from
+  `/api/ssh-key` automatically.
+* Installer: adds **one** line to `eshu-gateway`'s `authorized_keys`:
+  `from="<dashboard addresses>",command="/usr/local/bin/eshu-gateway" ssh-ed25519 AAAA… eshu-dashboard`.
+  The addresses are the resolved `DASHBOARD_URL` host at install time. A
+  gateway enrolled before this chunk can be refreshed by re-running its
+  install line (idempotent, same as today's reinstall path).
+* Host keys: pinned per gateway in a new `gateways.ssh_host_key` column
+  (SHA256 fingerprint) captured at registration, before the first use.
+  `StrictHostKeyChecking=yes`, a per-gateway known_hosts file under the key
+  directory. A mismatch refuses the call and raises an audit event; re-pinning
+  is an explicit operator action.
+* Runner: `ssh` from `subprocess` with a fixed argv (no shell), `BatchMode=yes`,
+  `ConnectTimeout=10`, `ServerAliveInterval=15`, `-o IdentitiesOnly=yes`,
+  no agent forwarding, no `-t`, `LANG=C`. Total wall clock is enforced by the
+  caller with a timeout and a process-group kill.
+
+#### 5. Attribution: the signed prefix
+
+```
+ESHU_AGENT=<agent name> ESHU_AGENT_SIG=<hex> ESHU_TS=<unix> ESHU_MCP=1 [ESHU_FORCE_JIT=1]
+```
+
+* `ESHU_AGENT_SIG = HMAC-SHA256(gateway_token, "eshu-ssh-agent-v1\0" + agent +
+  "\0" + session + "\0" + ts + "\0" + force_jit)`, hex, lowercase. The
+  gateway token is already shared (dashboard row + `/etc/eshu-token`), so no
+  new secret distribution; the label keeps it from being the bearer token's
+  signature.
+* The gateway checks the signature **and** that `ts` is within ±300 s. A
+  present-but-invalid signature is refused; a missing one is refused when the
+  gateway's `ssh_mode` is `mcp_only`, and ignored otherwise (direct SSH).
+* Charset rules are the existing ones: agent name `^[A-Za-z0-9_.:-]{1,64}$`,
+  session id as today, timestamp digits only, so a prefix cannot smuggle shell.
+* The gateway passes `agent` to `/api/request` and `/api/log`; `requests.agent`
+  (nullable, `''` = direct SSH) makes history, statistics and overrides
+  per-agent later. Audit rows record the agent on every MCP request.
+
+#### 6. Approvals
+
+An MCP call cannot hang: in MCP mode the gateway creates the JIT row and
+returns `{status:"pending", request_id}` immediately instead of polling. The
+agent then:
+
+* polls `check_request(request_id)` (already exists) and calls `ssh_exec`
+  again once it is approved — the gateway's approved-ticket path runs the
+  approved bytes without creating a second request; or
+* calls `ssh_exec(..., wait: true)`, where the dashboard polls its own
+  `requests` row for up to 60 s and then performs the run. The poll is
+  read-only; approvals still happen on the dashboard UI.
+
+Freeze, Zero-Trust and blocklists win over all of this, as today.
+
+#### 7. Output
+
+* The gateway's envelope carries `exit_code`, base64 `output` (the already
+  sanitized stream, tail-capped at 64 KiB), and `truncated`.
+* The dashboard runs `secret_scrub` (second pass), stores an F5
+  `request_results` row against `request_id`, and returns at most 64 KiB to
+  the MCP client.
+* Stderr is merged into the same stream (as the gateway does today), so the
+  agent sees what a direct SSH agent would.
+
+#### 8. Migration and launch
+
+* Per-gateway `ssh_mode` setting: `direct+mcp` (default) or `mcp_only`.
+  `mcp_only` makes the gateway require a valid `ESHU_AGENT_SIG` and refuse
+  unsigned requests, so the operator can remove the shared agent key from
+  `authorized_keys` once every agent uses `ssh_exec`. Additive: nothing
+  changes until the operator flips it.
+* Old dashboards/gateways: an old gateway ignores the unknown prefixes and
+  answers with its current text, so `ssh_exec` needs the gateway half; the
+  design ships both in one chunk and refuses to call a gateway that has not
+  reported the new capability (a `capabilities` field in the poll).
+
+#### 9. Tests to add (final)
+
+* **Policy**: unknown host refused (not registered, or not in
+  `ssh_hosts_allow`); `-o`/`user@`/port in `host` refused; `read_only` agent's
+  write is forced to JIT (the gateway stub asserts `ESHU_FORCE_JIT`); an
+  `approval` agent's `uptime` is forced to JIT too; rate limit.
+* **Signing**: the dashboard's signature verifies with the gateway token; a
+  forged agent, a stale timestamp, a bad hex sig and an unsigned request are
+  all refused (gateway sandbox tests, `test_gateway_script.py` style);
+  `mcp_only` refuses direct SSH.
+* **Runner**: pinned host key enforced; mismatch refuses and audits; timeout
+  kills the process group; the argv never goes through a shell.
+* **Flow**: pending → `check_request` → re-run consumes the ticket exactly
+  once; `wait: true` returns the run or times out; a refused command returns
+  the reason and does not create a request.
+* **Output**: 64 KiB tail kept, truncation flag, `secret_scrub` applied, F5
+  result stored and visible in history.
+* **Enrollment**: generated `authorized_keys` contains `from=` and the forced
+  command; re-running the installer does not duplicate the line.
+* **Freeze**: `ssh_exec` is blocked while frozen; audit row written.
+
+#### 10. Open questions for the reviewer
+
+1. **Signing key.** Deriving the HMAC key from the gateway token (my
+   proposal) avoids a new secret distribution but reuses the bearer token as
+   key material under a label. Alternative: a per-gateway `ssh_signing_key`
+   pushed in the policy poll (new secret, new failure mode). Which does the
+   security reviewer prefer?
+2. **`from=` and NAT.** The installer pins the address it resolves. A
+   dashboard behind NAT, a proxy or a dual-stack network will not match. Do we
+   accept "re-run the installer when the dashboard moves", or is a
+   `from=`-less line with just the forced command (and the HMAC) acceptable?
+   My preference is to keep `from=` and document the re-run.
+3. **`read_only` semantics.** "Sent to JIT, never auto-run" is my reading: the
+   operator can approve a write for a read-only agent. The alternative is a
+   flat refusal. JIT is more useful and no less safe (the operator still
+   decides), but it lets a read-only agent queue writes for a tired operator.
+4. **Where the key lives.** `/var/lib/eshu/ssh/` assumes the dashboard runs
+   with write access there. If the deployment is read-only-root or in a
+   container, an operator-provided key path should override. Confirm the
+   default and the override before coding.
+5. **`wait: true` and the 90 s JIT TTL.** A 60 s poll fits inside the default
+   TTL, but an operator who takes longer gets an expired ticket. Is
+   `wait: true` worth keeping, or should the agent always poll
+   `check_request`? I lean to keeping both, with `wait` capped at 60 s.
+
+**No code on this branch**, as the chunk asks. `bash scripts/verify.sh` still
+runs green on the docs change: `1856 passed, 3 skipped, 7 warnings in 379.03s
+(0:06:19)` (the three skips are F18's read-lane tests; F4 is not on this base).
 
 ### Reviewer notes
 
