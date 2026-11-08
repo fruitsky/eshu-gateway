@@ -339,7 +339,29 @@ def test_first_run_parses_once_per_cycle(poller):
     # python at all. This is the whole optimization in one assertion.
     poller.policy(policy_body())
     poller.run()
-    assert poller.python_calls() == 16
+    # 16 before F5; the per-gateway capture_output field is one more python
+    # parse inside the same stale-policy branch (the steady-state test below
+    # still proves a stale-free cycle starts none).
+    assert poller.python_calls() == 17
+
+
+def test_f5_poller_writes_capture_mode(poller):
+    poller.policy(policy_body(capture_output="tail"))
+    poller.run()
+    assert poller.read("eshu-capture") == "tail"
+
+
+def test_f5_poller_bad_capture_mode_is_exit_only(poller):
+    poller.policy(policy_body(capture_output="garbage"))
+    poller.run()
+    assert poller.read("eshu-capture") == "exit-only"
+
+
+def test_f5_poller_missing_capture_mode_is_exit_only(poller):
+    body = policy_body()
+    poller.policy(body)
+    poller.run()
+    assert poller.read("eshu-capture") == "exit-only"
 
 
 # ── steady state ────────────────────────────────────────────────────────────

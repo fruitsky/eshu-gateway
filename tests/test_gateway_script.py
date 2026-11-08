@@ -61,6 +61,10 @@ class GatewaySandbox:
         self.features = self.etc / "features.d"
         for directory in (self.etc, self.run_dir, self.bin, self.home, self.features):
             directory.mkdir(parents=True, exist_ok=True)
+        # F5: the poller's private work dir (0700, owner-checked before use).
+        self.capture_dir = self.root / "run-eshu"
+        self.capture_dir.mkdir(parents=True, exist_ok=True)
+        os.chmod(self.capture_dir, 0o700)
 
         self.curl_log = self.root / "curl.log"
         self.logger_log = self.root / "logger.log"
@@ -68,6 +72,7 @@ class GatewaySandbox:
         self.request_mode_file = self.root / "request-mode"
         self.claim_mode_file = self.root / "claim-mode"
         self.window_claim_file = self.root / "window-claim"
+        self.exec_fail_file = self.root / "exec-fail"
         self.window_claim_file.write_text("200")
         self.ticket_file = self.run_dir / "eshu.tickets"
 
@@ -88,6 +93,12 @@ while [ $# -gt 0 ]; do
   case "$1" in
     -X) method="$2"; shift 2 ;;
     -d) data="$2"; shift 2 ;;
+    --data-binary)
+      case "$2" in
+        @-) data=$(cat) ;;
+        *) data="$2" ;;
+      esac
+      shift 2 ;;
     -H|-m|-o|-w) shift 2 ;;
     --connect-timeout) shift 2 ;;
     -s) shift ;;
@@ -108,6 +119,10 @@ case "$url" in
     ;;
   */api/request_status/*)
     printf '{"status":"%s"}\\n' "$(cat "$STATUS_FILE" 2>/dev/null || echo pending)"
+    ;;
+  */api/exec-result)
+    # F5: simulate an old dashboard / dropped connection for the result post.
+    if [ -f "__EXECFAIL__" ]; then exit 7; fi
     ;;
   */api/approved-windows/execute/*)
     mode=$(cat "__WINDOW_CLAIM__" 2>/dev/null || echo 200)
@@ -136,7 +151,8 @@ esac
                     .replace("__STATUS__", str(self.status_file))
                     .replace("__MODE__", str(self.request_mode_file))
                     .replace("__CLAIM__", str(self.claim_mode_file))
-                    .replace("__WINDOW_CLAIM__", str(self.window_claim_file)))
+                    .replace("__WINDOW_CLAIM__", str(self.window_claim_file))
+                    .replace("__EXECFAIL__", str(self.exec_fail_file)))
         self._executable(self.bin / "curl", curl)
 
         logger = '''#!/bin/bash
@@ -166,10 +182,18 @@ printf '%s\\n' "$*" >> "__LOG__"
                     'TICKETS_FILE="%s"' % self.ticket_file, 1)
         for name in ("eshu-freeze", "eshu-zero-trust", "eshu-rblack.txt",
                      "eshu-exact.txt", "eshu-rwhite.txt",
-                     "eshu-require-session", "eshu-session-key"):
-            text = swap("/etc/" + name, str(self.etc / name))
+                     "eshu-require-session", "eshu-session-key",
+                     "eshu-capture"):
+            if "/etc/" + name in text:
+                text = swap("/etc/" + name, str(self.etc / name))
         text = swap('FEATURES_DIR="/etc/eshu/features.d"',
                     'FEATURES_DIR="%s"' % self.features, 1)
+        if 'ESHU_RUN_DIR="${ESHU_RUN_DIR:-/run/eshu}"' in text:
+            text = swap('ESHU_RUN_DIR="${ESHU_RUN_DIR:-/run/eshu}"',
+                        'ESHU_RUN_DIR="${ESHU_RUN_DIR:-%s}"' % self.capture_dir, 1)
+        if 'ESHU_RUN_OWNER="${ESHU_RUN_OWNER:-0}"' in text:
+            text = swap('ESHU_RUN_OWNER="${ESHU_RUN_OWNER:-0}"',
+                        'ESHU_RUN_OWNER="${ESHU_RUN_OWNER:-%d}"' % os.getuid(), 1)
         for token, value in (
             ("__TARGET_IP__", self.target_ip),
             ("__DASHBOARD_URL__", "http://dashboard.test"),
@@ -183,11 +207,13 @@ printf '%s\\n' "$*" >> "__LOG__"
         # leftover real path makes the second count larger.)
         for name in ("eshu-freeze", "eshu-zero-trust", "eshu-rblack.txt",
                      "eshu-exact.txt", "eshu-rwhite.txt",
-                     "eshu-require-session", "eshu-session-key"):
+                     "eshu-require-session", "eshu-session-key",
+                     "eshu-capture"):
             sandbox_path = str(self.etc / name)
             assert text.count("/etc/" + name) == text.count(sandbox_path), name
         assert "/etc/eshu/features.d" not in text
         assert "/var/run/eshu.tickets" not in text
+        assert "${ESHU_RUN_DIR:-/run/eshu}" not in text
         # The hard self-protection case still names the real path on purpose.
         assert '"/etc/eshu' in text
         return text
@@ -207,6 +233,28 @@ printf '%s\\n' "$*" >> "__LOG__"
 
     def freeze(self, on: bool):
         (self.etc / "eshu-freeze").write_text("1" if on else "")
+
+    def exec_fail(self, on: bool):
+        if on:
+            self.exec_fail_file.write_text("1")
+        elif self.exec_fail_file.exists():
+            self.exec_fail_file.unlink()
+
+    def capture(self, mode: str):
+        (self.etc / "eshu-capture").write_text(mode)
+
+    def popen(self, command: str):
+        env = {
+            "SSH_ORIGINAL_COMMAND": command,
+            "SSH_CONNECTION": "127.0.0.1 40000 127.0.0.1 22",
+            "USER": "tester",
+            "LANG": "C.UTF-8",
+            "ESHU_JIT_WAIT": "2",
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        }
+        return subprocess.Popen(
+            ["bash", str(self.script)], cwd=str(self.root), env=env,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
     def zero_trust(self, on: bool):
         (self.etc / "eshu-zero-trust").write_text("1" if on else "")
@@ -811,7 +859,11 @@ def test_sec_chunk1_allowlist_log_body_is_well_formed(gw):
     assert proc.stdout.strip() == "hello"
     assert gw.wait_for(lambda calls: any(
         c["url"].endswith("/api/log") for c in calls))
-    bodies = [json.loads(raw) for raw in gw.raw_bodies()]
+    # F5 adds a second gateway post (/api/exec-result); this test is about the
+    # /api/log body, so select those calls only.
+    bodies = [json.loads(raw) for raw, call in
+              zip(gw.raw_bodies(), gw.curl_calls())
+              if call["url"].endswith("/api/log")]
     assert bodies
     for payload in bodies:
         assert set(payload) == {
