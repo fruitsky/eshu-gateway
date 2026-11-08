@@ -1147,6 +1147,101 @@ button::-moz-focus-inner { border: 0; padding: 0; }
     .btn-sm { padding: 6px 10px; font-size: 11px; }
   }
 
+  /* ── F3: session plans ──────────────────────────────────────── */
+  .plan-card {
+    border: 1px solid var(--border-color);
+    border-left: 2px solid var(--accent-line);
+    border-radius: var(--radius-sm);
+    background: var(--bg-surface);
+    padding: 10px 12px;
+    margin-bottom: 8px;
+  }
+  .plan-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; margin-bottom: 4px; }
+  .plan-title {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: var(--text-micro);
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+    color: var(--accent);
+  }
+  .plan-session {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: var(--text-micro);
+    color: var(--text-dim);
+  }
+  .plan-count { margin-left: auto; font-size: var(--text-micro); color: var(--text-muted); }
+  .plan-note { font-size: var(--text-xs); color: var(--text-dim); margin-bottom: 6px; }
+  .plan-item { display: flex; gap: 8px; padding: 6px 0; border-top: 1px solid var(--rule-weak); }
+  .plan-item:first-of-type { border-top: 0; }
+  .plan-item-off { opacity: 0.45; }
+  .plan-pick { padding-top: 2px; }
+  .plan-item-body { flex: 1 1 auto; min-width: 0; }
+  .plan-item-head { display: flex; gap: 8px; align-items: baseline; }
+  .plan-host {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: var(--text-micro);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--status-info);
+  }
+  .plan-uses { font-family: 'JetBrains Mono', monospace; font-size: var(--text-micro); color: var(--text-quiet); }
+  .plan-cmd {
+    display: block;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: var(--text-micro);
+    color: var(--text-main);
+    background: var(--bg-base);
+    border: 1px solid var(--border-color);
+    border-radius: 3px;
+    padding: 5px 7px;
+    margin: 4px 0;
+    overflow-wrap: anywhere;
+  }
+  .plan-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
+  .plan-ttl {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    white-space: nowrap;
+    font-size: var(--text-micro);
+    color: var(--text-muted);
+  }
+  .plan-ttl select {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: var(--text-micro);
+    background: var(--bg-base);
+    color: var(--text-main);
+    border: 1px solid var(--border-color);
+    border-radius: 3px;
+    padding: 2px 4px;
+  }
+  .plan-actions .btn-approve { margin-left: auto; }
+  .session-plan {
+    margin: 0 0 12px;
+    padding: 10px 12px;
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    background: var(--bg-base);
+  }
+  .sm-plan-head {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: var(--text-micro);
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    color: var(--accent);
+    margin-bottom: 6px;
+  }
+  .sm-plan-item { display: flex; gap: 8px; align-items: baseline; padding: 2px 0; }
+  .sm-plan-item code {
+    flex: 1 1 auto;
+    min-width: 0;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: var(--text-micro);
+    color: var(--text-main);
+    overflow-wrap: anywhere;
+  }
+  .sm-plan-uses { font-family: 'JetBrains Mono', monospace; font-size: var(--text-micro); color: var(--text-quiet); }
+
   /* ── F7: inner-target chip + override warning ───────────────── */
   .inner-chip {
     display: inline-flex;

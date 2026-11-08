@@ -1654,6 +1654,7 @@ async function fetchRequests() {
     detectNewIntegrationCalls();
     await refreshPolicyCache();
     renderJitTickets(); renderTable(); updateStats();
+    fetchSessionPlans();
   } catch(err) {}
 }
 function detectNewJITs(newData) {
@@ -2725,6 +2726,9 @@ async function openSessionModal(sid) {
     ? items.map(function (i) { return i.html; }).join('')
     : '<div class="sm-mcp-none">No activity recorded for this session.</div>';
 
+  // F3: the session's plan (approved or proposed) and per-item uses.
+  loadSessionPlanIntoModal(sid);
+
   // Save name/desc on blur (persisted server-side so it survives across browsers)
   nameEl.onblur = function() {
     if (!_sessionNames[sid]) _sessionNames[sid] = {};
@@ -3226,6 +3230,165 @@ function renderJitTickets() {
   initSkyParallax();
   if (total > 0) renderQueue(allItems);
   refreshRecentSessions();
+}
+
+/* ── F3: session plans awaiting approval ─────────────────────────────────
+   The agent proposes the exact commands it intends to run; the operator
+   approves the list once (possibly a subset, with a TTL) and those bytes then
+   run without further prompts for that session. Items are rendered with the
+   F2 breakdown; every agent-controlled string is escaped. */
+var _sessionPlans = [];
+var _planRemoved = {};
+
+function planHostLabel(host) {
+  return (!host || host === '*') ? 'any host' : host;
+}
+
+async function fetchSessionPlans() {
+  try {
+    var res = await fetch('/api/session-plans?status=proposed');
+    if (!res.ok) return;
+    var plans = await res.json();
+    _sessionPlans = Array.isArray(plans) ? plans : [];
+    renderPlans();
+  } catch (e) { /* the queue keeps working without the plans card */ }
+}
+
+function togglePlanItem(el) {
+  var planId = String(el.getAttribute('data-plan'));
+  var itemId = Number(el.getAttribute('data-item'));
+  if (!_planRemoved[planId]) _planRemoved[planId] = {};
+  if (el.checked) delete _planRemoved[planId][itemId];
+  else _planRemoved[planId][itemId] = true;
+  renderPlans();
+}
+
+function planItemHtml(plan, item) {
+  var removed = (_planRemoved[String(plan.id)] || {})[item.id];
+  var row = { id: plan.id, command: item.command, breakdown: item.breakdown };
+  return '<div class="plan-item' + (removed ? ' plan-item-off' : '') + '">' +
+    '<label class="plan-pick" title="Untick to remove this item before approving">' +
+      '<input type="checkbox" data-plan="' + Number(plan.id) + '" data-item="' + Number(item.id) + '"' +
+        (removed ? '' : ' checked') + ' onchange="togglePlanItem(this)"></label>' +
+    '<div class="plan-item-body">' +
+      '<div class="plan-item-head">' +
+        '<span class="plan-host">' + escapeHtml(planHostLabel(item.host)) + '</span>' +
+        '<span class="plan-uses" title="How many times this exact command may run">\u00d7' +
+          Number(item.max_uses || 1) + '</span>' +
+      '</div>' +
+      '<code class="plan-cmd">' + escapeHtml(item.command || '') + '</code>' +
+      bdHeadlineHtml(row) +
+      bdBodyHtml(row, { raw: false }) +
+    '</div></div>';
+}
+
+function planCardHtml(plan) {
+  var removed = _planRemoved[String(plan.id)] || {};
+  var items = (plan.items || []).filter(function (item) { return !item.removed; });
+  var kept = items.filter(function (item) { return !removed[item.id]; });
+  var ttl = [30, 60, 120, 240];
+  return '<div class="plan-card" data-plan-card="' + Number(plan.id) + '">' +
+    '<div class="plan-head">' +
+      '<span class="plan-title">Plan #' + Number(plan.id) + '</span>' +
+      '<span class="plan-session" title="' + escapeHtml(String(plan.session_id || '')) + '">' +
+        escapeHtml(String(plan.session_id || '').substring(0, 12)) + '</span>' +
+      '<span class="plan-count">' + kept.length + ' change' + (kept.length === 1 ? '' : 's') +
+        ' on ' + Number(plan.hosts || 0) + ' host' + (Number(plan.hosts) === 1 ? '' : 's') + '</span>' +
+    '</div>' +
+    (plan.note ? '<div class="plan-note">' + escapeHtml(plan.note) + '</div>' : '') +
+    items.map(function (item) { return planItemHtml(plan, item); }).join('') +
+    '<div class="plan-actions">' +
+      '<label class="plan-ttl">Approve for <select id="plan-ttl-' + Number(plan.id) + '">' +
+        ttl.map(function (minutes) {
+          return '<option value="' + minutes + '"' + (minutes === 60 ? ' selected' : '') + '>' +
+            (minutes >= 60 ? (minutes / 60) + ' h' : minutes + ' min') + '</option>';
+        }).join('') +
+      '</select></label>' +
+      '<button class="btn btn-deny btn-xs" onclick="decidePlan(' + Number(plan.id) + ',\'deny\')">Deny</button>' +
+      '<button class="btn btn-approve btn-xs" onclick="decidePlan(' + Number(plan.id) + ',\'approve\')">Approve plan</button>' +
+    '</div></div>';
+}
+
+function renderPlans() {
+  var widget = document.getElementById('plans-widget');
+  var list = document.getElementById('plans-list');
+  var count = document.getElementById('plans-count');
+  if (!widget || !list) return;
+  var plans = _sessionPlans || [];
+  if (!plans.length) {
+    widget.classList.add('hidden');
+    list.innerHTML = '';
+    if (count) count.textContent = '';
+    return;
+  }
+  widget.classList.remove('hidden');
+  if (count) count.textContent = plans.length + ' waiting';
+  list.innerHTML = plans.map(planCardHtml).join('');
+}
+
+async function decidePlan(planId, action) {
+  planId = Number(planId);
+  var init = { method: 'POST', headers: { 'Content-Type': 'application/json' } };
+  if (action === 'approve') {
+    var ttlEl = document.getElementById('plan-ttl-' + planId);
+    var removed = Object.keys(_planRemoved[String(planId)] || {}).map(Number);
+    init.body = JSON.stringify({
+      ttl_minutes: ttlEl ? parseInt(ttlEl.value, 10) : 60,
+      removed_item_ids: removed,
+    });
+  } else {
+    init.body = '{}';
+  }
+  try {
+    var res = await authFetch('/api/session-plans/' + planId + '/' + action, init);
+    var data = await res.json().catch(function () { return {}; });
+    if (!res.ok) {
+      showToast('Plan ' + action + ' failed: ' + (data.detail || 'unknown'), 'error');
+      return;
+    }
+    delete _planRemoved[String(planId)];
+    showToast(action === 'approve' ? 'Plan approved' : 'Plan denied',
+              action === 'approve' ? 'success' : 'info');
+    fetchSessionPlans();
+    fetchRequests();
+    if (_activeSessionSid) loadSessionPlanIntoModal(_activeSessionSid);
+  } catch (e) {
+    showToast('Error: ' + e.message, 'error');
+  }
+}
+
+/* The session modal shows the session's plan with per-item uses. */
+async function loadSessionPlanIntoModal(sid) {
+  var el = document.getElementById('sm-plan');
+  if (!el) return;
+  el.classList.add('hidden');
+  el.innerHTML = '';
+  var plans = [];
+  try {
+    var res = await authFetch('/api/session-plans?session_id=' + encodeURIComponent(sid));
+    if (!res.ok) return;
+    plans = await res.json();
+  } catch (e) { return; }
+  if (_activeSessionSid !== sid) return;
+  var nowSec = Math.floor(Date.now() / 1000);
+  var plan = (plans || []).filter(function (p) {
+    return p.status === 'approved' && Number(p.until) > nowSec;
+  })[0] || (plans || []).filter(function (p) { return p.status === 'proposed'; })[0];
+  if (!plan) return;
+  var items = (plan.items || []).filter(function (item) { return !item.removed; });
+  var head = plan.status === 'approved'
+    ? 'Plan #' + Number(plan.id) + ' \u00b7 approved until ' + formatTime(Number(plan.until))
+    : 'Plan #' + Number(plan.id) + ' \u00b7 awaiting approval';
+  el.innerHTML = '<div class="sm-plan-head">' + escapeHtml(head) + '</div>' +
+    items.map(function (item) {
+      return '<div class="sm-plan-item"><code>' + escapeHtml(item.command || '') + '</code>' +
+        '<span class="sm-plan-uses">' + Number(item.uses || 0) + '/' + Number(item.max_uses || 1) +
+        '</span></div>';
+    }).join('') +
+    (plan.status === 'approved'
+      ? '<button class="btn btn-muted btn-xs" onclick="decidePlan(' + Number(plan.id) + ',\'end\')">End plan</button>'
+      : '');
+  el.classList.remove('hidden');
 }
 
 function renderJitItem(item) {
