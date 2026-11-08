@@ -106,6 +106,26 @@ function stubDecide() {
     await ctx.decidePlan(p.id, 'approve');
     out.secondPressPosts = planPosts().length;
     out.secondBody = planPosts().length ? planPosts()[planPosts().length - 1].body : '';
+  } else if (input.action === 'plan-strict') {
+    out.off = ctx.planCardHtml(plan({ id: 9, strict_sessions: false }));
+    out.on = ctx.planCardHtml(plan({ id: 10, strict_sessions: true }));
+  } else if (input.action === 'plan-broad') {
+    const broad = plan({
+      id: 11,
+      items: [
+        item({ id: 1, host: '*', command: 'uptime', max_uses: 1 }),
+        item({ id: 2, host: '10.0.0.1', command: 'df -h', max_uses: 2 }),
+        item({ id: 3, host: '10.0.0.1', command: 'free -h', max_uses: 1 }),
+      ],
+    });
+    out.card = ctx.planCardHtml(broad);
+    out.broadCount = (out.card.match(/plan-item-broad/g) || []).length;
+    out.anyHost = out.card.indexOf('plan-host-any') !== -1;
+    out.multiUse = out.card.indexOf('plan-uses-multi') !== -1;
+    out.single = ctx.planCardHtml(plan({
+      id: 12,
+      items: [item({ id: 4, host: '10.0.0.1', command: 'uptime', max_uses: 1 })],
+    }));
   } else if (input.action === 'plan-authfetch') {
     const calls = { auth: [], plain: [] };
     ctx.authFetch = function (url) {

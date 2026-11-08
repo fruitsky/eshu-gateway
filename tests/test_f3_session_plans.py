@@ -463,6 +463,78 @@ class TestOwnership:
         assert plan['session_goal'] == 'Rotate the TLS certificate'
 
 
+class TestSecurityRound3:
+    """SR1–SR4 from the security sign-off."""
+
+    def test_f3_sr1_item_does_not_match_control_bytes(self, gateways):
+        client, web01, _web02 = gateways
+        sid = _mint('plan-sr1')
+        plan_id = _plan(sid, [{'host': '*', 'command': 'echo ok', 'max_uses': 3}])
+        approve_plan(plan_id, 60)
+        # A stripped compare used to match all three; exact bytes must not.
+        for command in ('echo ok\x1f', '\x1cecho ok', 'echo ok\u00a0'):
+            assert 'plan' not in _request(client, web01, command, sid), repr(command)
+        # The exact approved bytes still match.
+        assert _request(client, web01, 'echo ok', sid).get('plan') is True
+
+    def test_f3_sr1_proposal_refuses_hidden_characters(self):
+        from db.session_plans import PlanError
+        sid = _mint('plan-sr1b')
+        for command in ('echo ok\x1f', '\x1cecho ok', 'echo ok\u00a0',
+                        'echo\x7fok', 'a\nb'):
+            with pytest.raises(PlanError) as exc:
+                create_plan(sid, [{'host': '*', 'command': command}])
+            assert exc.value.code == 'invalid_command', repr(command)
+        # Plain spaces and tabs are the only whitespace a plan may carry.
+        assert create_plan(sid, [{'host': '*', 'command': 'echo\ta b'}])['status'] == 'proposed'
+
+    def test_f3_sr2_anonymous_caller_is_refused(self):
+        from core.mcp_server import check_plan_fn, session_plan_fn
+        sid = _mint('plan-sr2')
+        plan_id = _plan(sid, [{'host': '*', 'command': 'uptime'}])
+        approve_plan(plan_id, 60)
+        # No agent context: current_agent_name() is empty, the session's is not.
+        out = json.loads(session_plan_fn()(session_id=sid, items=[{'command': 'uptime'}]))
+        assert out['error'] == 'session_not_yours'
+        assert json.loads(check_plan_fn()(plan_id=plan_id))['error'] == 'session_not_yours'
+
+    def test_f3_sr2_session_without_owner_is_refused(self):
+        from core.mcp_server import session_plan_fn
+        upsert_session('plan-sr2b', agent='', goal='no owner', source='caller')
+        with as_agent('test-agent'):
+            out = json.loads(session_plan_fn()(session_id='plan-sr2b',
+                                               items=[{'command': 'uptime'}]))
+        assert out['error'] == 'session_not_yours'
+
+    def test_f3_sr3_api_reports_whether_strict_sessions_are_on(self, auth_client):
+        sid = _mint('plan-sr3', goal='strict hint')
+        create_plan(sid, [{'host': '*', 'command': 'uptime'}])
+        plan = auth_client.get('/api/session-plans?status=proposed').json()[0]
+        assert plan['strict_sessions'] is False
+        set_feature_flag('require_sessions', True)
+        try:
+            plan = auth_client.get('/api/session-plans?status=proposed').json()[0]
+            assert plan['strict_sessions'] is True
+        finally:
+            set_feature_flag('require_sessions', False)
+
+    @pytest.mark.skipif(NODE is None, reason='node is not installed')
+    def test_f3_sr3_strict_sessions_hint_in_the_card(self):
+        out = run_node({'action': 'plan-strict'})
+        assert 'Strict sessions are off' in out['off']
+        assert 'Strict sessions are off' not in out['on']
+
+    @pytest.mark.skipif(NODE is None, reason='node is not installed')
+    def test_f3_sr4_broad_items_are_highlighted(self):
+        out = run_node({'action': 'plan-broad'})
+        # `*` and max_uses > 1 are the two broad cases; a single-use exact item
+        # is not highlighted.
+        assert out['broadCount'] == 2
+        assert out['anyHost'] is True
+        assert out['multiUse'] is True
+        assert 'plan-item-broad' not in out['single']
+
+
 @pytest.mark.skipif(NODE is None, reason='node is not installed')
 class TestUi:
     """R2, R3, S3 and S4, driven through the real app.js helpers."""
