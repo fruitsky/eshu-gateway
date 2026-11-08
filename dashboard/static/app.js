@@ -4630,12 +4630,18 @@ async function fetchGateways() {
       ? '<span class="zt-badge" title="Zero-Trust — every command requires JIT approval"> ZT</span>'
       : '';
     var readMode = g.read_lane || 'off';
+    // `on` stays locked until the operator sets the meta key by hand after the
+    // security sign-off; the 7-day shadow rule applies after that.
+    var onLocked = !g.read_lane_on_enabled;
     var readSelect = '<select class="capture-select" title="Read-only lane (shadow first)" ' +
       'onchange="setReadLane(' + escJs(g.ip) + ',this.value)" aria-label="Read-only lane">' +
-      [['off', 'RL off'], ['shadow', 'RL shadow'], ['on', 'RL on']].map(function (pair) {
-        var locked = pair[0] === 'on' && !g.read_lane_ready;
+      [['off', 'RL off'], ['shadow', 'RL shadow'],
+       ['on', onLocked ? 'RL on: locked until security sign-off' : 'RL on']].map(function (pair) {
+        var locked = pair[0] === 'on' && (onLocked || !g.read_lane_ready);
         return '<option value="' + pair[0] + '"' + (readMode === pair[0] ? ' selected' : '') +
-          (locked ? ' disabled title="Needs 7 days in shadow first"' : '') + '>' +
+          (locked ? ' disabled title="' +
+            (onLocked ? 'Locked until the security sign-off (set read_lane_on_enabled by hand)'
+                      : 'Needs 7 days in shadow first') + '"' : '') + '>' +
           pair[1] + '</option>';
       }).join('') + '</select>';
     var capMode = g.capture_output || 'exit-only';

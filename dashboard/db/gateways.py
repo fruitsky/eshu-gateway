@@ -290,8 +290,19 @@ def get_gateway_zero_trust(ip: str) -> bool:
 
 READ_LANE_MODES = ('off', 'shadow', 'on')
 READ_LANE_SHADOW_DAYS = 7
+# Hard lock on `on`: only an operator editing the DB by hand after the security
+# sign-off may set this meta key to "1". No API or UI writes it.
+READ_LANE_ON_KEY = 'read_lane_on_enabled'
 
 CAPTURE_MODES = ('off', 'exit-only', 'tail')
+
+
+def read_lane_on_enabled() -> bool:
+    """True only when the operator unlocked `on` by hand post-sign-off."""
+    with db_conn() as conn:
+        row = conn.execute("SELECT value FROM meta WHERE key = ?",
+                           (READ_LANE_ON_KEY,)).fetchone()
+    return bool(row and (row['value'] or '').strip() == '1')
 
 
 def get_gateway_read_lane(ip: str) -> str:

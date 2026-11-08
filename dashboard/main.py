@@ -52,7 +52,8 @@ from database import (
     get_gateway_mode, set_gateway_mode, get_dev_gateways,
     get_gateway_zero_trust, set_gateway_zero_trust,
     get_gateway_capture_output, set_gateway_capture_output,
-    get_gateway_read_lane, read_lane_ready, set_gateway_read_lane,
+    get_gateway_read_lane, read_lane_on_enabled, read_lane_ready,
+    set_gateway_read_lane,
     set_override, clear_override, get_override_active,
     create_approved_window, get_approved_windows, get_active_approved_windows,
     delete_approved_window, toggle_approved_window,
@@ -1290,6 +1291,7 @@ def list_gateways(request: Request):
             return int(v)
         except (TypeError, ValueError):
             return 0
+    read_lane_unlocked = read_lane_on_enabled()
     update_ts = max(_as_int(get_trigger_update_version()), _as_int(get_trigger_dev_update()))
     update_recent = update_ts > 0 and (now - update_ts) <= UPDATE_ACTIVE_WINDOW
     for g in gateways:
@@ -1305,6 +1307,7 @@ def list_gateways(request: Request):
         g['override_remaining'] = max(0, override_until - now)
         g['read_lane'] = g.get('read_lane') or 'off'
         g['read_lane_ready'] = read_lane_ready(g['ip'], now)
+        g['read_lane_on_enabled'] = read_lane_unlocked
     return gateways
 
 @app.get("/api/gateways/{ip}/inner-targets")
@@ -2623,11 +2626,16 @@ def set_gw_read_lane(ip: str, payload: ReadLanePayload, request: Request):
     if payload.mode not in ('off', 'shadow', 'on'):
         raise HTTPException(status_code=400,
                             detail="mode must be 'off', 'shadow' or 'on'")
-    if payload.mode == 'on' and not read_lane_ready(ip):
-        raise HTTPException(
-            status_code=400,
-            detail="The read-only lane needs at least 7 days in shadow on this "
-                   "gateway before 'on' is offered.")
+    if payload.mode == 'on':
+        # Hard lock: `on` stays unreachable until the operator sets the meta
+        # key by hand after the security sign-off. No API or UI writes it.
+        if not read_lane_on_enabled():
+            raise HTTPException(status_code=409, detail="read_lane_on_locked")
+        if not read_lane_ready(ip):
+            raise HTTPException(
+                status_code=400,
+                detail="The read-only lane needs at least 7 days in shadow on "
+                       "this gateway before 'on' is offered.")
     mode = set_gateway_read_lane(ip, payload.mode)
     record_audit_event('read_lane_' + mode, ip,
                        details=f"Read-only lane set to '{mode}'")

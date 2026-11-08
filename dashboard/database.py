@@ -56,6 +56,7 @@ from db.gateways import (
     get_gateway_capture_output,
     set_gateway_capture_output,
     get_gateway_read_lane,
+    read_lane_on_enabled,
     read_lane_ready,
     set_gateway_read_lane,
     get_dev_gateways,
