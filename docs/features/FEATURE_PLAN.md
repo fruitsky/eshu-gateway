@@ -1515,7 +1515,73 @@ Additive; old gateways work unchanged (same approved-row path as overrides).
 
 ### Implementer notes
 
-_(fill in)_
+**What I did**
+
+* **`core/read_policy.py` (§ 2.6a)**: one entry point for "is this a read?".
+  `is_read_ssh(breakdown)` is F4's rule set — the breakdown must be complete,
+  every step must be `read`, none of F1's blocking flags may be set
+  (`encoded`, `heredoc`, `nested-ssh`, `sensitive-path`, `redirect-to-file`),
+  and a step marked `elevated` may only touch `/proc/`, `/sys/`, `/var/log/`
+  or exactly `/etc/os-release` (a path token containing `..` is refused
+  outright, so `/var/log/../…` cannot slip through the prefix check).
+  `is_read_integration_call(tool, transport, args)` is a thin wrapper over
+  Chunk H's `_read_only_refusal` — no new integration logic.
+* **`core/read_lane.py`**: `eligible(breakdown, verdict, command, mode,
+  frozen, zero_trust)` checks mode, freeze, Zero-Trust, the 8 kB cap and the
+  policy verdict (`blocked`/`fatal` lose), then delegates to
+  `read_policy.is_read_ssh`. It has no read rules of its own.
+* **Setting**: `gateways.read_lane` (`off` default, migration) plus
+  `read_lane_since`; `read_lane_ready()` is true after 7 days in shadow.
+  `PUT /api/gateways/{ip}/read-lane` (session auth, audit `read_lane_<mode>`)
+  refuses `on` before that window — the UI disables the option, but the
+  server does not rely on the UI.
+* **Hook** in `POST /api/request`, after F3's plan and the session override,
+  before the host override (§ 2.6). `shadow`: the request stays pending as
+  usual (notify + `jit_created`) but gets `reason="read-lane-shadow"` and an
+  audit `jit_read_lane_shadow`; the operator's decision is the ground truth.
+  `on`: creates `approved` with `reason="read-lane"`, audits
+  `jit_read_lane_approved`, no notification.
+* **UI**: a "would auto-run" chip on shadow rows, a three-state
+  `off / shadow / on` select on the Gateway row (`on` disabled until ready),
+  and a **Read-only lane · shadow** tile in Statistics (eligible, approved /
+  denied, median length, how many auto-ran once on).
+
+**Surprises and decisions**
+
+* The 7-day rollout clock is stored (`read_lane_since`, set on entering
+  shadow) rather than inferred from audit history; the "at least 2 gateways"
+  part of the rollout note is operator policy and is not enforced in code.
+* Shadow reuses the normal pending path instead of a separate branch, so
+  notifications and the `jit_created` audit stay exactly as they were.
+* F1's `sensitive-path` already covers `.env`, keys, `/etc/shadow`,
+  `/proc/*/environ` and the broad `secret`/`token`/`passw` tokens, so those
+  commands are refused by flag before the elevated-path rule ever runs.
+* A read lane has no session requirement (unlike F3 plans): it also covers
+  SSH callers that never minted a session, which is the common case for
+  allowlist-less reads.
+* The new statistics queries tripped the KI-1 regression test on the first
+  gate run (`r.target_ip` without the alias); they are aliased now — the test
+  did its job.
+
+**Tests** — `tests/test_f4_read_lane.py` (67): 24 eligible and 27 ineligible
+table cases covering every exclusion in the chunk, `.env` (four spellings),
+and a **generated** test that every F1 `write`/`unknown`/incomplete fixture is
+ineligible (≥20 checked). Plus the Chunk H wrappers, shadow-never-approves,
+`on`-approves-only-eligible, `off`-does-nothing, Zero-Trust/freeze/blocklist
+wins, the 8 kB cap, the default-`off` migration, the endpoint + 7-day gate +
+session auth, and the statistics report (counts and median).
+
+Security sign-off (§ 2.6a) is still owed by the security reviewer; the branch
+is ready for that pass.
+
+`bash scripts/verify.sh` (pre-commit green):
+
+```
+1884 passed, 7 warnings in 371.46s (0:06:11)
+```
+
+(1817 before this chunk + 67 F4 tests.)
+
 
 ### Reviewer notes
 
