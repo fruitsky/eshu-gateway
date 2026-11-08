@@ -2615,7 +2615,45 @@ sections open):
 read-lane reasons above.)
 
 
-### Reviewer notes
+### Round 2 — fixes for reviewer round 1 (C1–C4)
+
+* **C4 — merged `feature-roadmap` (X1) first.** The only conflict was
+  `openContextPanel` in `app.js`: kept X1's `contextActionsHtml` /
+  `renderContextActions` / `armSidebarConfirm` / `contextApproveLabel` code and
+  added F18's container and section renderers (one shared `_ctxReq`
+  declaration). The X1 harness tests (`tests/test_x1_ctx_actions.py`, 18) run
+  green on the merge. The three F4-dependent read-lane reasons still skip.
+* **C1 — operator decisions are not automatic ones.** `seen` (and `like`)
+  now return `operator_approved` (`approved`/`consumed` with no
+  `session-plan:`/`read-lane` reason), `auto` (`auto-approved`,
+  `window-approved`, and plan/read-lane approvals) and `denied`, computed in
+  SQL. The UI reads "approved by you N · auto N · denied N". Test:
+  `test_f18_seen_splits_operator_from_auto` with one row of each kind.
+* **C2 — "Like this" refuses generic shapes.** A one-step shape whose verb is
+  `bash`/`sh`/`python*` returns `generic: true` with no counts and the UI says
+  "Too generic to compare."; everything with ≥ 2 steps (or a non-interpreter
+  verb) keeps its counts. The counts and the 3 examples are now one `COUNT`/
+  `SUM` plus one `LIMIT 3` query instead of fetching every row. Tests:
+  `test_f18_generic_shape_has_no_counts` and
+  `test_f18_like_this_counts_in_sql` (exact numbers from the aggregates).
+* **C3 — "why waiting" only for pending rows, worded as a guess.** A
+  non-pending row returns `waiting: null` and the UI hides the section; for a
+  pending row it says **"Likely waiting because: …"**. Test:
+  `test_f18_non_pending_has_no_waiting_reason`, plus a harness check for the
+  label and the empty body.
+
+**Round-2 tests** — 4 new in `tests/test_f18_request_context.py` (one per C
+item) and one harness case; the F18 file is 23 tests, 3 of them skipped until F4 merges.
+
+**Screenshot** — refreshed with the new wording and split counts:
+![Sidebar request context](../screenshots/f18/sidebar-context.png)
+
+`bash scripts/verify.sh` (pre-commit green):
+
+```
+1855 passed, 3 skipped, 7 warnings in 378.14s (0:06:18)
+```
+
 
 **Round 1 (2026-11-08): changes requested (small).** The structure is good.
 It computes on demand, the caps are in place, fingerprints are filled in
