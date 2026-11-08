@@ -1862,6 +1862,57 @@ buffer are all the right calls.
   new approval path. The gateway change runs as root on every command, though,
   so I review the bash line by line.
 
+**Code round 1 (2026-11-08): changes requested.** I read the gateway bash
+line by line. D2–D8 are done well: stdin body, `path` literal, first result
+wins, executable-only ids, bounded orphans, gateway-token-only endpoint, the
+uid-0 run dir and `read -r`.
+
+*Must fix:*
+
+* **E1 `tee -p` keeps commands alive after the agent disconnects.** This is
+  my D1 advice going wrong. With `--output-error=warn-nopipe`, tee also
+  ignores the broken pipe to the agent's stdout (it is a pipe too), so it
+  keeps reading and the command never receives SIGPIPE. In `tail` mode an
+  agent that disconnects from `journalctl -f` or `tail -f` leaves a root
+  process running forever. Today it dies at its next write. Reproduced with
+  synthetic commands:
+  * `yes | sed '' | tee -p FIFO | head -c 10` was still running at the 8 s
+    timeout.
+  * The same pipeline with plain `tee` stopped at once.
+
+  Fix:
+  * Go back to plain `tee "$ESHU_OUT_FIFO"`, and make the reader unable to
+    stall the pipe instead:
+    `{ tail -c 16385 > "$ESHU_OUT_TAIL" || true; cat > /dev/null; } < "$ESHU_OUT_FIFO" &`.
+    If `tail` dies, `cat` keeps draining.
+  * Drop the `tee -p` startup probe (one fewer fork per command).
+  * Tests:
+    * **Disconnect test:** in `tail` mode, an endless command whose stdout
+      reader closes after a few bytes ends within 2 s, with `rc` 141. Add the
+      same check for `exit-only`, to pin today's behaviour.
+    * **Dead-reader test:** kill the `tail` process, not the group; stdout
+      stays byte-identical.
+* **E2 The 64 KB request cap from the design is missing.** No body limit
+  exists for `/api/exec-result`. Add `Field(max_length=…)`:
+  * `encoded_output`: 24 576
+  * `encoded_command`: the same limit `/api/log` uses (or 16 384 if there is
+    none)
+
+  Test that an oversized body gets 422.
+
+*Should fix:*
+
+* **E3 Drop the per-result audit event.** Every executed command, allowlist
+  ones included, now writes an `exec_result` audit row. That doubles audit
+  volume with no decision in it; the results table is the record. Remove
+  the event, or keep it only for `exit_code != 0` (your choice), and update
+  the test.
+* **E4 Lockbox match window.** Rule 2 uses `created_at >= now - 120`. A JIT
+  request can be created up to `JIT_WAIT_SECONDS` (90 s) before approval,
+  and its ticket lives another 90 s, so a lockbox claim after a reconnect can
+  miss. For the `lockbox` path, use 300 s. Add a test with a row created
+  200 s ago.
+
 ---
 
 ## Chunk F6 — Session wrap-up & "how approved" stats · slug `session-wrapup` · dashboard
@@ -2469,7 +2520,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 3 | F7 | inner-target | dashboard | **Merged** 2026-11-08 | `feat/f7-inner-target` @ `0ad167f` | F1 | 1 round; backfill 7.1 s on a live-DB copy |
 | 4 | F3 | session-plans | dashboard + MCP | **Ready** | `feat/f3-session-plans` | F2 | + security reviewer sign-off |
 | 5 | F4 | read-lane | dashboard | Ready (after F3) | `feat/f4-read-lane` | F1, F3, Chunk H | reviewer pass + security reviewer sign-off |
-| 6 | F5 | exec-results | gateway + dashboard | **Design approved with changes (D1–D8); implementing** | `feat/f5-exec-results` | — | |
+| 6 | F5 | exec-results | gateway + dashboard | **Changes requested (code round 1)** | `feat/f5-exec-results` | — | |
 | 7 | F12 | ssh-exec | dashboard + gateway | Ready (after F5) — design first | `feat/f12-ssh-exec` | F4, F5 | design approval + security reviewer sign-off |
 | 8 | F6 | session-wrapup | dashboard | Ready (after F12) | `feat/f6-session-wrapup` | F3, F4, F5 | |
 | 9 | F13 | session-conclusions | dashboard + MCP | Ready (after F6) | `feat/f13-session-conclusions` | F5, F6 | |
