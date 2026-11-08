@@ -34,6 +34,8 @@ dashboard LXC or any gateway until the rollout gate in § 8 passes.**
 | F3 | The agent proposes a list of changes; approve the list once and those exact commands run without more prompts |
 | F4 | Read-only commands can run without asking, per host, opt-in, after a week in "shadow mode" |
 | F5 | Records each command's exit code and the end of its output |
+| X1 | Bug fix: the sidebar's Approve/Deny work for every kind of request, and approve/deny only act on a request that is still pending |
+| F18 | The sidebar shows context from the database: this session's earlier commands, how often this command (or ones like it) ran before and what you decided, the host's state, and why it is waiting for you |
 | F12 | Agents run SSH commands through Eshu over MCP with their own token: one identity per agent for SSH and APIs, no shared SSH key |
 | F6 | A summary card per session: goal, what ran, what changed, what failed, how much ran under overrides |
 | F13 | At the end of a job the agent files a conclusion (what worked, what didn't, the fix); confirmed conclusions become searchable runbooks |
@@ -2333,6 +2335,152 @@ and of `/api/log`'s command (§ 11).
 
 ---
 
+## Chunk X1 — Sidebar actions and pending-only decisions · slug `ctx-actions` · dashboard · BUG
+
+### Problem (found by the operator, 2026-11-08)
+
+Open a request in the right-hand sidebar (`openContextPanel`) and press
+Approve: the sound plays and nothing happens. Two causes in `app.js`:
+
+1. **Wrong branch for integration calls.** The action buttons use
+   `if (req.status === 'pending' || !req._type)`. Pending integration calls
+   have `status: 'pending'`, so they take the SSH branch:
+   `handleAction(<integration id>)` POSTs `/api/approve/<integration id>`, the
+   **SSH** endpoint. Usually that id matches nothing, so nothing happens.
+2. **F2's two-press rule from the sidebar.** For a long command with an
+   unknown step, the first press highlights that step in the queue card
+   behind the panel; the sidebar itself shows nothing.
+
+Behind cause 1 is a backend gap. `POST /api/approve/{id}` and
+`/api/deny/{id}` call `update_request_status` **without checking the current
+status**. An approve can therefore move a `denied`, `expired`, `consumed` or
+`blocked` row back to `approved`. If an integration-call id happens to equal
+an old SSH request id, the sidebar re-approves that old command without
+saying so.
+
+### Changes
+
+* **UI:** dispatch on `req._type` first (`integration` / `window` / SSH), then
+  on status. For integration calls use `approveIntegrationCall` and
+  `denyIntegrationCall`.
+* **UI:** when the sidebar's approve press arms F2's two-press rule, the
+  sidebar shows it on its own button ("Press again to approve") and
+  highlights the unknown step in its own breakdown, not only in the card.
+* **UI:** surface a failed approve/deny (non-2xx) as an error toast in
+  `handleAction`; today a failure is silent.
+* **API:** approve and deny act only on a `pending` row. Do it with a
+  conditional update (`UPDATE … WHERE id = ? AND status = 'pending'`) and
+  return 409 `not_pending` otherwise. Audit only real transitions.
+
+### Tests to add
+
+* Node harness (F2 pattern): opening a pending **integration** call and
+  pressing Approve calls the integration endpoint, never `/api/approve/`.
+  The same check for window requests and SSH requests.
+* Harness: a long-unknown SSH request in the sidebar needs two presses, and
+  the sidebar button shows the armed state.
+* API: approving or denying a `denied`, `expired`, `consumed` or `blocked`
+  row returns 409 and leaves the status unchanged; pending → approved still
+  works; there are no audit events for refused transitions.
+* API: a request approved twice gets 409 on the second call.
+
+### Acceptance criteria
+
+- [ ] All tests above pass.
+- [ ] No other approval path changes: bulk approve, the session override and
+  F3 plans keep their own routes. Check that bulk approve and the history
+  table still work against the 409 rule.
+- [ ] Reviewer notes tell the security reviewer about the backend gap (FYI;
+  no sign-off needed).
+
+### Implementer notes
+
+_(implementer)_
+
+### Reviewer notes
+
+_(reviewer)_
+
+---
+
+## Chunk F18 — Request context in the sidebar · slug `request-context` · dashboard
+
+### Goal
+
+Make the sidebar answer "should I approve this?" with what Eshu already
+knows, instead of repeating the card.
+
+### Design
+
+One endpoint, `GET /api/requests/{id}/context` (session auth), computed on
+demand when the panel opens (never in the 3 s poll). Every block has a hard
+cap and is computed from indexed columns. Sections, in this order:
+
+1. **Why it is waiting for you.** The first rule on the approval path that did
+   not let it through, reusing the existing checks:
+   * metacharacter gate
+   * no allowlist match
+   * Zero-Trust
+   * read lane off, shadow, or ineligible with F4's reason
+   * no plan or override match
+   * encoded payload
+
+   One line, e.g. "Waiting because: contains `&&` (metacharacter rule)".
+2. **This session.** The goal and agent, then the session's last 10 commands
+   with status and F5 exit badge, plus any active plan or override.
+3. **Seen before.** The exact command on any host in the last 90 days:
+   count, last time, the operator's decisions (approved/denied counts), last
+   exit code. It matches on exact bytes via sha256, so add an indexed
+   `command_sha` column with a backfill (the F7 pattern).
+4. **Like this.** Requests with the same F1 *shape*: the sequence of
+   `(verb, kind)` over steps, with arguments dropped. Show the counts
+   approved and denied, and up to 3 examples. Store a `shape_sha` column as
+   well, filled at creation from the breakdown.
+5. **Host.** Hostname, inner target (F7), Zero-Trust, read-lane mode, the
+   gateway's last-seen time, and the count of failed commands in 24 h (F5).
+
+### Changes
+
+* **DB:**
+  * `requests.command_sha` and `requests.shape_sha`, nullable and indexed;
+    filled at creation.
+  * A batched background backfill with a meta flag, as in F7's
+    `inner_targets`.
+* **API:** the context endpoint. Responses are capped: 10 session rows,
+  3 examples, commands cut to 300 chars. Agent text is returned unescaped
+  for the UI to escape.
+* **UI:**
+  * The sidebar renders the sections, each collapsible, with its state
+    remembered in `localStorage` (wrapped in try/catch).
+  * A "Seen before" or "Like this" row opens History filtered to it.
+  * Every string goes through `escapeHtml`.
+
+### Tests to add
+
+* Each section from synthetic rows: the session list order and cap, exact
+  matches across hosts, decision counts, a shape match ignoring arguments,
+  and the "why waiting" reason for each rule.
+* Backfill: batched, idempotent, and skipped on the second start.
+* Performance: on 50k synthetic rows the endpoint answers in < 150 ms (local
+  test, generous bound).
+* Node harness: escaping of agent text in every section.
+* Session auth required.
+
+### Acceptance criteria
+
+- [ ] Opening the sidebar costs one request; the poll is unchanged.
+- [ ] Synthetic data only; screenshots use the sandbox.
+
+### Implementer notes
+
+_(implementer)_
+
+### Reviewer notes
+
+_(reviewer)_
+
+---
+
 ## Chunk F6 — Session wrap-up & "how approved" stats · slug `session-wrapup` · dashboard
 
 ### Changes
@@ -2913,6 +3061,7 @@ reviewed building blocks, and the local model picks one and fills in parameters.
 * Config export/import (policies, agent policies, windows, integration definitions without secrets).
 * Split `main.py` into FastAPI routers; build installers in CI instead of committing copies.
 * Agent-facing read-only "would this auto-run?" tool (lower value: commands rarely repeat).
+* **UI design pass, after the features are done, in a fresh chat.** Review the layout as a whole: what lives in the queue, the sidebar, the session modal and Statistics; what to merge or move; consistency across F2/F3/F5/F7/F18 additions.
 
 ---
 
@@ -2937,8 +3086,10 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 2 | F2 | review-card | UI | **Merged** 2026-11-08 | `feat/f2-review-card` @ `286df1b` | F1 | 2 rounds |
 | 3 | F7 | inner-target | dashboard | **Merged** 2026-11-08 | `feat/f7-inner-target` @ `0ad167f` | F1 | 1 round; backfill 7.1 s on a live-DB copy |
 | 4 | F3 | session-plans | dashboard + MCP | Merged | `feat/f3-session-plans` | F2 | + security reviewer sign-off |
-| 5 | F4 | read-lane | dashboard | Ready (after F3) | `feat/f4-read-lane` | F1, F3, Chunk H | reviewer pass + security reviewer sign-off |
+| 5 | F4 | read-lane | dashboard | **Changes requested (R1–R4)** | `feat/f4-read-lane` | F1, F3, Chunk H | reviewer pass + security reviewer sign-off |
+| 5a | X1 | ctx-actions | dashboard | **Ready — do next, small bug fix** | `fix/x1-ctx-actions` | — | FYI to security reviewer (approve ignored status) |
 | 6 | F5 | exec-results | gateway + dashboard | Merged | `feat/f5-exec-results` | — | |
+| 6a | F18 | request-context | dashboard | Ready (after X1) | `feat/f18-request-context` | F1, F5, F7, X1 | |
 | 7 | F12 | ssh-exec | dashboard + gateway | Ready (after F5) — design first | `feat/f12-ssh-exec` | F4, F5 | design approval + security reviewer sign-off |
 | 8 | F6 | session-wrapup | dashboard | Ready (after F12) | `feat/f6-session-wrapup` | F3, F4, F5 | |
 | 9 | F13 | session-conclusions | dashboard + MCP | Ready (after F6) | `feat/f13-session-conclusions` | F5, F6 | |
