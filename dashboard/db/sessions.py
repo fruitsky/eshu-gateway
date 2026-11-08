@@ -145,6 +145,13 @@ def get_session_summary(session_id: str) -> dict:
             GROUP BY r.target_ip
         ''', (sid,))
         out['gateways'] = [r['hostname'] or r['target_ip'] for r in cur.fetchall()]
+        # F5: how many of this session's commands ran and failed.
+        cur.execute('''
+            SELECT COUNT(*) AS n FROM requests r
+            JOIN request_results x ON x.request_id = r.id
+            WHERE r.session_id = ? AND x.exit_code != 0
+        ''', (sid,))
+        out['failed'] = int(cur.fetchone()['n'] or 0)
         cur.execute('SELECT COUNT(*) AS n FROM integration_calls WHERE session_id = ?', (sid,))
         out['mcp_calls'] = int(cur.fetchone()['n'] or 0)
         cur.execute('SELECT COUNT(*) AS n FROM pending_integration_calls WHERE session_id = ?', (sid,))

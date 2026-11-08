@@ -91,6 +91,13 @@ def _gateway_watch_loop():
             _expire_requests()
         except Exception:
             pass
+        try:
+            # F5: execution outputs are the most sensitive rows; drop them at
+            # the retention boundary (default 30 days) with the other cleanup.
+            from db.exec_results import cleanup_exec_results
+            cleanup_exec_results()
+        except Exception:
+            pass
 
 
 _STALE_GATEWAY_DAYS = 7
