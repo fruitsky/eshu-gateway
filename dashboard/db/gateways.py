@@ -17,6 +17,11 @@ def init_gateways_tables(cursor):
         except Exception:
             pass
     cursor.execute("UPDATE gateways SET api_token = NULL WHERE api_token = 'None'")
+    # F5: per-gateway output capture (off | exit-only | tail). Default exit-only.
+    try:
+        cursor.execute("ALTER TABLE gateways ADD COLUMN capture_output TEXT DEFAULT 'exit-only'")
+    except Exception:
+        pass
     try:
         cursor.execute("ALTER TABLE gateways ADD COLUMN windows_count INTEGER DEFAULT 0")
     except Exception:
@@ -273,6 +278,27 @@ def get_gateway_zero_trust(ip: str) -> bool:
         cursor.execute('SELECT zero_trust FROM gateways WHERE ip = ?', (ip,))
         row = cursor.fetchone()
         return bool(row and row['zero_trust'])
+
+CAPTURE_MODES = ('off', 'exit-only', 'tail')
+
+
+def get_gateway_capture_output(ip: str) -> str:
+    with db_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT capture_output FROM gateways WHERE ip = ?', (ip,))
+        row = cursor.fetchone()
+        mode = (row['capture_output'] if row else '') or 'exit-only'
+        return mode if mode in CAPTURE_MODES else 'exit-only'
+
+
+def set_gateway_capture_output(ip: str, mode: str) -> str:
+    mode = mode if mode in CAPTURE_MODES else 'exit-only'
+    with db_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute('UPDATE gateways SET capture_output = ? WHERE ip = ?', (mode, ip))
+        conn.commit()
+    return mode
+
 
 def set_gateway_zero_trust(ip: str, enabled: bool):
     with db_conn() as conn:

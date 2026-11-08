@@ -14,11 +14,11 @@ from typing import Optional
 from fastapi import FastAPI, Request, HTTPException, Response
 from fastapi.responses import JSONResponse, HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from database import (
     init_db, create_request, update_request_status, 
-    update_ticket_consumed_by_ip, get_all_requests, get_pending_request_by_cmd,
+    update_ticket_consumed_by_ip, get_all_requests, get_request_row, get_pending_request_by_cmd,
     get_request_status, get_request_command, count_denied, get_ticket_by_request_id, delete_old_requests,
     get_session_requests, get_request_target_ip,
     register_gateway, get_gateways, get_gateway, update_gateway_last_seen,
@@ -51,6 +51,7 @@ from database import (
     get_session_signing_key, get_previous_session_signing_key,
     get_gateway_mode, set_gateway_mode, get_dev_gateways,
     get_gateway_zero_trust, set_gateway_zero_trust,
+    get_gateway_capture_output, set_gateway_capture_output,
     set_override, clear_override, get_override_active,
     create_approved_window, get_approved_windows, get_active_approved_windows,
     delete_approved_window, toggle_approved_window,
@@ -89,6 +90,11 @@ from db.session_plans import (
     PlanError, approve_plan, claim_plan_item, create_plan, deny_plan,
     end_plan, get_active_plan, get_plan, list_plans,
 )
+from db.exec_results import (
+    EXECUTABLE_STATUSES, MAX_OUTPUT, PATH_STATUSES, add_orphan, attach_orphan,
+    cleanup_exec_results, find_match_request, get_retention_days, get_result,
+    save_result,
+)
 
 from schemas import (
     LoginPayload, SetPasswordPayload, GatewayPayload, RegisterPayload,
@@ -126,7 +132,7 @@ from core.gateway_watch import (
 from core.utils import DASHBOARD_VERSION, decode_cmd, _resolve_gateway_token, _hash_password, _verify_password, valid_gateway_metadata
 from core.body_guard import NoDuplicateJSONKeysRoute
 from core.integration_auth import resolve_agent, resolve_agent_optional, extract_agent_token
-from core.secret_scrub import scrub_payload, scrub_string
+from core.secret_scrub import scrub_body, scrub_payload, scrub_string
 from core.integration_proxy import execute_integration_call, execute_generic_call, generic_write_envelope, ProxyError, merge_response_hint, ALLOWED_AUTH_TYPES, PREVIEW_CHARS, safe_request_summary
 from core.ha_ws import execute_ws_call
 from core.mcp_server import (
@@ -827,10 +833,17 @@ def receive_log(payload: GatewayPayload, request: Request):
     reason = (payload.reason or '')[:200]
     token = (payload.token or '')[:64]
     cmd = decode_cmd(payload.encoded_command)
-    create_request(target_ip, cmd, status=payload.status, ttl=0, reason=reason,
-                   session_id=(payload.session_id or '')[:64],
-                   execution_id=(payload.execution_id or '')[:64],
-                   inner_target=_inner_target_for(cmd))
+    req_id = create_request(target_ip, cmd, status=payload.status, ttl=0, reason=reason,
+                            session_id=(payload.session_id or '')[:64],
+                            execution_id=(payload.execution_id or '')[:64],
+                            inner_target=_inner_target_for(cmd))
+    # F5: an exec result can arrive before this row exists (both are background
+    # curls). Attach the waiting orphan now.
+    if payload.status in ('auto-approved', 'window-approved'):
+        try:
+            attach_orphan(target_ip, cmd, req_id)
+        except Exception:
+            pass
     if payload.status == 'window-rejected' and token:
         wins = get_approved_windows()
         target = next((w for w in wins if w['token'] == token), None)
@@ -844,6 +857,105 @@ def receive_log(payload: GatewayPayload, request: Request):
             details=f'Session required for: {cmd[:80]}')
     update_gateway_last_seen(target_ip)
     return {"status": "ok"}
+
+
+class ExecResultPayload(BaseModel):
+    target_ip: str
+    # E2: 16 KiB command (the /api/log limit) and 24 KiB of base64 output
+    # (16 KiB raw + envelope) — the design's 64 KB request cap split by field.
+    encoded_command: str = Field(max_length=16384)
+    path: str = ''
+    exit_code: int
+    duration_ms: int = 0
+    encoded_output: str = Field(default='', max_length=24576)
+    output_truncated: bool = False
+    request_id: int = None
+
+
+def _decode_exec_output(encoded: str):
+    """Decode the output tail; returns (text, truncated)."""
+    try:
+        raw = base64.b64decode(encoded or '', validate=True)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid encoded_output")
+    truncated = False
+    if len(raw) > MAX_OUTPUT:
+        # Defensive: the gateway already caps at 16 KiB, but never store more.
+        raw = raw[-MAX_OUTPUT:]
+        truncated = True
+    return raw.decode('utf-8', 'replace'), truncated
+
+
+@app.post("/api/exec-result")
+def receive_exec_result(payload: ExecResultPayload, request: Request):
+    """F5: the gateway posts exit code, duration and the sanitized output tail.
+
+    Gateway-token only (bound to the payload IP like /api/log); a dashboard
+    session cannot post a result. First result wins (D4); a request id must be
+    executable (D5) and the path literal decides which statuses may match
+    without one (D3).
+    """
+    # D6: gateway-only. `/api/log` also accepts a dashboard session; a result
+    # must not, so the token (bound to the payload IP) is required outright.
+    token_ip, _ = _resolve_gateway_token(request)
+    if not token_ip or token_ip != payload.target_ip:
+        raise HTTPException(status_code=401, detail="Gateway token required")
+    target_ip = token_ip
+    _check_rate_limit(target_ip)
+
+    if payload.path not in PATH_STATUSES:
+        raise HTTPException(status_code=400, detail="Invalid path")
+    if payload.exit_code < -255 or payload.exit_code > 255:
+        raise HTTPException(status_code=400, detail="Invalid exit_code")
+    if payload.duration_ms < 0 or payload.duration_ms > 86400000:
+        raise HTTPException(status_code=400, detail="Invalid duration_ms")
+
+    cmd = decode_cmd(payload.encoded_command)
+    output, truncated = _decode_exec_output(payload.encoded_output)
+    if payload.output_truncated:
+        truncated = True
+    output = scrub_body(output)
+
+    if payload.request_id is not None:
+        row = get_request_row(int(payload.request_id))
+        if not row or row.get('target_ip') != target_ip:
+            raise HTTPException(status_code=400, detail="Unknown request")
+        if row.get('status') not in EXECUTABLE_STATUSES:
+            raise HTTPException(status_code=400, detail="Request is not executable")
+        stored = save_result(payload.request_id, payload.exit_code,
+                             payload.duration_ms, output, truncated)
+        return {"status": "ok", "attached": stored, "request_id": payload.request_id,
+                "reason": None if stored else "already_has_result"}
+
+    # E4: a lockbox claim can happen long after the request was created (JIT
+    # wait + ticket lifetime), so it gets a wider window than the allowlist.
+    window = 300 if payload.path == 'lockbox' else 120
+    since = int(time.time()) - window
+    match = find_match_request(target_ip, cmd, PATH_STATUSES[payload.path], since)
+    if match:
+        stored = save_result(match, payload.exit_code, payload.duration_ms,
+                             output, truncated)
+        return {"status": "ok", "attached": stored, "request_id": match,
+                "reason": None if stored else "already_has_result"}
+
+    add_orphan(target_ip, cmd, payload.exit_code, payload.duration_ms,
+               output, truncated)
+    return {"status": "ok", "attached": False, "orphaned": True}
+
+
+@app.get("/api/requests/{request_id}/output")
+def request_output(request_id: int, request: Request):
+    """The stored output tail for one request (session auth; on demand)."""
+    _check_session(request)
+    result = get_result(request_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="No result for this request")
+    return {"request_id": int(request_id),
+            "exit_code": result['exit_code'],
+            "duration_ms": result['duration_ms'],
+            "truncated": bool(result['truncated']),
+            "created_at": result['created_at'],
+            "output": result['output']}
 
 
 class HeartbeatPayload(BaseModel):
@@ -903,6 +1015,8 @@ def fetch_policy(target_ip: str, request: Request):
     policies['trigger_uninstall'] = check_trigger_uninstall(resolved_ip) is not None
     policies['trigger_freeze'] = get_trigger_freeze() is not None
     policies['zero_trust'] = 1 if get_gateway_zero_trust(resolved_ip) else 0
+    # F5: per-gateway output capture (off | exit-only | tail).
+    policies['capture_output'] = get_gateway_capture_output(resolved_ip)
 
     # Fleet Run — inject pending command into the selected gateways' policy response
     fleet_cmd = get_injectable_fleet_cmd(resolved_ip)
@@ -2426,6 +2540,26 @@ def set_gw_mode(ip: str, payload: GatewayModePayload, request: Request):
 
 class ZeroTrustPayload(BaseModel):
     enabled: bool = True
+
+class CapturePayload(BaseModel):
+    mode: str = 'exit-only'
+
+
+@app.post("/api/gateways/{ip}/capture")
+def set_gw_capture(ip: str, payload: CapturePayload, request: Request):
+    """F5: how much of an executed command's output this gateway posts back.
+
+    off — nothing; exit-only — exit code and duration (default); tail — plus
+    the last 16 KiB of the sanitized output."""
+    _check_session(request)
+    if payload.mode not in ('off', 'exit-only', 'tail'):
+        raise HTTPException(status_code=400,
+                            detail="mode must be 'off', 'exit-only' or 'tail'")
+    mode = set_gateway_capture_output(ip, payload.mode)
+    record_audit_event('capture_' + mode.replace('-', '_'), ip,
+                       details=f"Output capture set to '{mode}'")
+    return {"status": "ok", "ip": ip, "capture_output": mode}
+
 
 @app.post("/api/gateways/{ip}/zero-trust")
 def set_gw_zero_trust(ip: str, payload: ZeroTrustPayload, request: Request):

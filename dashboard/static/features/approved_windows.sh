@@ -113,6 +113,7 @@ if [ -n "${ESHU_WINDOW_TOKEN:-}" ] && [ -f /etc/eshu-windows.txt ] && [ -s /etc/
           ;;
       esac
       logger -t eshu-gateway "APPROVED WINDOW MATCH: token=$ESHU_WINDOW_TOKEN cmd=$cmd mtype=$win_mtype claim=$WINDOW_CLAIM_HTTP"
+      RESULT_PATH="window"
       run_sanitized bash -c "$cmd"
     else
       _window_reject "command mismatch"

@@ -2613,6 +2613,8 @@ function smSshDetailCard(r) {
     bdDecodedPreviewHtml(r) +
     (r.risk ? '<div class="sm-call-reason">\u26a0 ' + escapeHtml(r.risk) + '</div>' : '') +
     (r.anomaly ? '<div class="sm-call-reason" style="color:var(--danger)">\u2605 ' + escapeHtml(r.anomaly) + '</div>' : '') +
+    (execBadgeHtml(r) || execOutputLink(r)
+      ? '<div class="sm-exec">' + execBadgeHtml(r) + execOutputLink(r) + '</div>' : '') +
     (meta.length ? '<div class="sm-mcp-meta">' + escapeHtml(meta.join(' \u00b7 ')) + '</div>' : '') +
     (r.execution_id ? '<div class="sm-mcp-meta">exec ' + escapeHtml(r.execution_id) + '</div>' : '') +
     (r.reason ? '<div class="sm-call-label">Reason</div><div class="sm-call-reason">' + escapeHtml(r.reason) + '</div>' : '') +
@@ -3738,6 +3740,53 @@ function checkCommandMembership(cmd) {
   return { inExact: inExact, inRegexWhite: inRegexWhite, inBlacklist: inBlacklist };
 }
 
+/* ── F5: execution results ───────────────────────────────────────────────
+   The gateway posts the exit code, duration and the sanitized output tail.
+   The badge is shown on history rows and in the session modal; the output
+   itself opens on demand (the list payload never carries 16 KiB per row). */
+
+function execDuration(ms) {
+  ms = Number(ms) || 0;
+  return ms < 1000 ? ms + ' ms' : (ms / 1000).toFixed(1) + ' s';
+}
+
+function execBadgeHtml(req) {
+  if (!req || req.exit_code === null || req.exit_code === undefined) return '';
+  var code = Number(req.exit_code);
+  return '<span class="exec-badge ' + (code === 0 ? 'exec-ok' : 'exec-fail') +
+    '" title="Exit code ' + escapeHtml(String(code)) + ' after ' +
+    execDuration(req.duration_ms) + '">exit ' + code + '</span>' +
+    '<span class="exec-dur">' + escapeHtml(execDuration(req.duration_ms)) + '</span>';
+}
+
+function execOutputLink(req) {
+  if (!req || req.exit_code === null || req.exit_code === undefined) return '';
+  return '<button type="button" class="bd-hist-link" title="Show the captured output tail" ' +
+    'onclick="event.stopPropagation();showExecOutput(' + Number(req.id) + ')">output</button>';
+}
+
+function execOutputHtml(data) {
+  return escapeHtml(String((data && data.output) || '(no output)')) +
+    (data && data.truncated ? '\n\n\u2026 (tail of the last 16 KiB)' : '');
+}
+
+async function showExecOutput(id) {
+  try {
+    var res = await authFetch('/api/requests/' + Number(id) + '/output');
+    if (!res.ok) { showToast('No output stored for this request', 'info'); return; }
+    var data = await res.json();
+    var meta = 'exit ' + Number(data.exit_code) + ' \u00b7 ' + execDuration(data.duration_ms);
+    if (data.truncated) meta += ' \u00b7 the tail of the last 16 KiB is kept';
+    document.getElementById('exec-output-meta').textContent = meta;
+    document.getElementById('exec-output-body').innerHTML = execOutputHtml(data);
+    document.getElementById('exec-output-modal').classList.remove('hidden');
+  } catch (e) { showToast('Error: ' + e.message, 'error'); }
+}
+
+function closeExecOutput() {
+  document.getElementById('exec-output-modal').classList.add('hidden');
+}
+
 function renderTable() {
   if (document.activeElement && document.activeElement.tagName === 'SELECT') return;
   const tbody = document.getElementById('table-body'), emptyState = document.getElementById('empty-state');
@@ -3838,7 +3887,7 @@ function renderTable() {
       '<td class="' + idClass + '"' + gapTitle + '>' + idDisplay + '</td>' +
       '<td class="text-muted text-xs">' + formatTime(req.created_at) + '</td>' +
       '<td>' + gatewayCell + '</td>' +
-      '<td class="cell-cmd"><div class="flex items-center gap-1">' + riskHtml + anomalyHtml + '<code class="cmd-code" title="' + escapedCmd + '">' + escapedCmd + '</code><button class="js-copy-cmd flex-shrink-0 text-xs opacity-30 hover:opacity-80 px-1 py-0.5 rounded transition-opacity text-muted" data-cmd="' + encodeURIComponent(req.command) + '" title="Copy"></button>' + decodedChip + innerChip + breakdownLink + '</div>' +
+      '<td class="cell-cmd"><div class="flex items-center gap-1">' + riskHtml + anomalyHtml + '<code class="cmd-code" title="' + escapedCmd + '">' + escapedCmd + '</code><button class="js-copy-cmd flex-shrink-0 text-xs opacity-30 hover:opacity-80 px-1 py-0.5 rounded transition-opacity text-muted" data-cmd="' + encodeURIComponent(req.command) + '" title="Copy"></button>' + decodedChip + innerChip + execBadgeHtml(req) + execOutputLink(req) + breakdownLink + '</div>' +
         (function() {
           var _desc = describeCmd(req.command);
           if (!_desc) return '';
@@ -4577,6 +4626,13 @@ async function fetchGateways() {
     var ztBadge = g.zero_trust
       ? '<span class="zt-badge" title="Zero-Trust — every command requires JIT approval"> ZT</span>'
       : '';
+    var capMode = g.capture_output || 'exit-only';
+    var capSelect = '<select class="capture-select" title="Output capture for this gateway" ' +
+      'onchange="setCaptureMode(' + escJs(g.ip) + ',this.value)" aria-label="Output capture">' +
+      [['off', 'off'], ['exit-only', 'exit'], ['tail', 'tail']].map(function (pair) {
+        return '<option value="' + pair[0] + '"' + (capMode === pair[0] ? ' selected' : '') + '>' +
+          pair[1] + '</option>';
+      }).join('') + '</select>';
     var ztBtn = g.zero_trust
       ? '<button onclick="toggleZeroTrust(' + escJs(g.ip) + ', false)" class="chip-btn zt-on" title="Zero-Trust ON — allowlisted commands go through JIT. Click to disable."> ZT</button>'
       : '<button onclick="toggleZeroTrust(' + escJs(g.ip) + ', true)" class="chip-btn" title="Enable Zero-Trust — allowlisted commands must go through JIT">ZT</button>';
@@ -4591,7 +4647,7 @@ async function fetchGateways() {
       } else {
         overrideControl = '<button onclick="openOverrideModal(' + escJs(g.ip) + ',' + escJs(g.hostname) + ')" class="chip-btn ovr" title="Override Mode — auto-approve all JIT for a set duration">Override</button>';
       }
-      overrideCell = '<div class="flex items-center gap-2">' + overrideControl + ztBtn + '</div>';
+      overrideCell = '<div class="flex items-center gap-2">' + overrideControl + ztBtn + capSelect + '</div>';
     }
     return '<tr>' +
       '<td class="px-4 py-2 whitespace-nowrap">' + statusCell + '</td>' +
@@ -4606,6 +4662,21 @@ async function fetchGateways() {
       '</tr>';
   }).join('');
   checkOverrideBanner();
+}
+
+async function setCaptureMode(ip, mode) {
+  try {
+    var res = await authFetch('/api/gateways/' + encodeURIComponent(ip) + '/capture', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode: mode })
+    });
+    var data = await res.json();
+    if (res.ok && data.status === 'ok') {
+      showToast('Output capture: ' + data.capture_output + ' on ' + ip, 'success');
+      fetchGateways();
+    } else { showToast('Failed: ' + (data.detail || 'unknown'), 'error'); }
+  } catch (e) { showToast('Error: ' + e.message, 'error'); }
 }
 
 async function toggleZeroTrust(ip, enabled) {

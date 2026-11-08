@@ -1119,6 +1119,17 @@
 </div>
 
 <!-- Override Mode Modal -->
+<div id="exec-output-modal" class="modal-overlay hidden" onclick="if(event.target===this)closeExecOutput()">
+  <div class="widget max-w-2xl w-full">
+    <div class="widget-header">
+      <span>Command output</span>
+      <button onclick="closeExecOutput()" class="modal-close" aria-label="Close">&times;</button>
+    </div>
+    <div id="exec-output-meta" class="text-xs text-muted mb-2"></div>
+    <pre id="exec-output-body" class="exec-output-body"></pre>
+  </div>
+</div>
+
 <div id="override-modal" class="modal-overlay hidden" onclick="if(event.target===this)document.getElementById('override-modal').classList.add('hidden')">
   <div class="widget max-w-md w-full">
     <div class="widget-header">

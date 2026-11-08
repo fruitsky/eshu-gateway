@@ -80,9 +80,11 @@ def get_all_requests(session_id: str = None, inner_target: str = None):
     with db_conn() as conn:
         cursor = conn.cursor()
         base = '''
-            SELECT r.*, g.hostname
+            SELECT r.*, g.hostname, x.exit_code, x.duration_ms,
+                   x.truncated AS output_truncated
             FROM requests r
             LEFT JOIN gateways g ON r.target_ip = g.ip
+            LEFT JOIN request_results x ON x.request_id = r.id
             WHERE r.status NOT IN ('integration-approved', 'integration-denied')
         '''
         params = []
@@ -189,9 +191,11 @@ def search_requests(query: str, limit: int = 200, session_id: str = None,
         cursor = conn.cursor()
         pattern = f"%{query}%"
         sql = '''
-            SELECT r.*, g.hostname
+            SELECT r.*, g.hostname, x.exit_code, x.duration_ms,
+                   x.truncated AS output_truncated
             FROM requests r
             LEFT JOIN gateways g ON r.target_ip = g.ip
+            LEFT JOIN request_results x ON x.request_id = r.id
             WHERE (r.command LIKE ? OR r.target_ip LIKE ? OR r.status LIKE ? OR g.hostname LIKE ?)
               AND r.status NOT IN ('integration-approved', 'integration-denied')
         '''
@@ -216,9 +220,11 @@ def get_session_requests(session_id: str, limit: int = 500):
     with db_conn() as conn:
         cursor = conn.cursor()
         cursor.execute('''
-            SELECT r.*, g.hostname
+            SELECT r.*, g.hostname, x.exit_code, x.duration_ms,
+                   x.truncated AS output_truncated
             FROM requests r
             LEFT JOIN gateways g ON r.target_ip = g.ip
+            LEFT JOIN request_results x ON x.request_id = r.id
             WHERE r.session_id = ?
               AND r.status NOT IN ('integration-approved', 'integration-denied')
             ORDER BY r.id ASC LIMIT ?
