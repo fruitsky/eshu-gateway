@@ -452,13 +452,12 @@ HTTP_CONNECT_TIMEOUT="${ESHU_HTTP_CONNECT_TIMEOUT:-3}"
 JIT_WAIT_SECONDS="${ESHU_JIT_WAIT:-90}"
 
 # F5: execution results. Capture is opt-in per gateway (/etc/eshu-capture) and
-# must never cut the agent's stream: `tee -p` ignores a dead FIFO reader, and
-# without that option (non-GNU tee) capture stays exit-only.
+# must never cut the agent's stream: the FIFO reader drains whatever `tail`
+# leaves unread, and a disconnect still ends the command at its next write
+# (plain `tee` — `-p` would keep it alive after the agent is gone).
 ESHU_RUN_DIR="${ESHU_RUN_DIR:-/run/eshu}"
 ESHU_RUN_OWNER="${ESHU_RUN_OWNER:-0}"
 ESHU_CAPTURE_FILE="${ESHU_CAPTURE_FILE:-/etc/eshu-capture}"
-TEE_NOPIPE="0"
-if tee -p /dev/null </dev/null >/dev/null 2>&1; then TEE_NOPIPE="1"; fi
 ESHU_OUT_TAIL=""
 ESHU_OUT_FIFO=""
 ESHU_TAIL_PID=""
@@ -512,7 +511,7 @@ capture_mode() {
   # off | exit-only | tail. Anything else (missing file, garbage, a symlink)
   # is exit-only: an unknown value must never turn capture on.
   local v="exit-only"
-  if [ "$TEE_NOPIPE" = "1" ] && [ -f "$ESHU_CAPTURE_FILE" ] && [ ! -L "$ESHU_CAPTURE_FILE" ]; then
+  if [ -f "$ESHU_CAPTURE_FILE" ] && [ ! -L "$ESHU_CAPTURE_FILE" ]; then
     # D8: no trailing-newline surprise from any writer.
     IFS= read -r v < "$ESHU_CAPTURE_FILE" || true
     case "$v" in off|exit-only|tail) ;; *) v="exit-only" ;; esac
@@ -579,7 +578,10 @@ run_sanitized() {
         # reader only holds the tail, so a runaway command cannot fill tmpfs,
         # and `wait` makes the read race-free.
         if mkfifo "$ESHU_OUT_FIFO" 2>/dev/null; then
-          tail -c 16385 < "$ESHU_OUT_FIFO" > "$ESHU_OUT_TAIL" &
+          # E1: if `tail` dies, `cat` keeps draining the FIFO, so the writer
+          # never blocks and the agent's stream is never cut.
+          { tail -c 16385 > "$ESHU_OUT_TAIL" || true; cat > /dev/null; } \
+            < "$ESHU_OUT_FIFO" &
           ESHU_TAIL_PID=$!
         else
           ESHU_OUT_FIFO=""
@@ -591,10 +593,9 @@ run_sanitized() {
 
   start_ns=$(date +%s%N)
   if [ "$mode" = "tail" ] && [ -n "$ESHU_OUT_FIFO" ] && [ -p "$ESHU_OUT_FIFO" ]; then
-    # D1: `-p` ignores a dead FIFO reader, so the agent's stream keeps flowing
-    # and the pipeline status stays the command's. The diagnostic goes to
-    # /dev/null so a dead reader never injects a line into the agent's output.
-    "$@" 2>&1 | sanitize | tee -p "$ESHU_OUT_FIFO" 2>/dev/null || rc=$?
+    # E1: plain `tee`, so an agent disconnect still ends the command at its
+    # next write; the reader drains whatever tail did not consume.
+    "$@" 2>&1 | sanitize | tee "$ESHU_OUT_FIFO" || rc=$?
     wait "$ESHU_TAIL_PID" 2>/dev/null || true
   else
     # D8: never leave a reader blocked on open() if we skip the FIFO branch.
