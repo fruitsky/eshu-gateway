@@ -1682,6 +1682,28 @@ All synthetic (`192.0.2.x`, `/var/log/synthetic-*`, `web01`). Full gate:
 
 (1884 + 102: the F4 file now has 169 tests.)
 
+### Round 4: on-lock
+
+`on` is now hard-locked behind a `meta` key that only a human can set.
+
+* `PUT /api/gateways/{ip}/read-lane` refuses `mode=on` with **409
+  `read_lane_on_locked`** unless `meta.read_lane_on_enabled` is the string
+  `"1"` (`read_lane_on_enabled()` in `db/gateways.py`). The key is unset by
+  default and **no API or UI writes it** — it is set by hand after the
+  security sign-off.
+* The lock is checked before the 7-day readiness rule, so a gateway that has
+  had a week of shadow still cannot be switched on while locked. `shadow` and
+  `off` are unaffected.
+* `GET /api/gateways` exposes the state as `read_lane_on_enabled`; the
+  Gateway table's select shows **"RL on: locked until security sign-off"**
+  (disabled) while the key is unset, and the 7-day hint takes over once it is.
+
+**Tests** (`TestOnLock`, 6): refused by default even with `read_lane_ready`
+true; shadow/off unaffected; allowed when the key is `"1"` and the window has
+passed; still refused when unlocked but shadow is younger than 7 days; no API
+attempt can set the key (and the gateway list reports the lock). The existing
+7-day test now unlocks the key first, since the lock is its own gate.
+
 ### Reviewer notes
 
 **Round 1 (2026-11-08): changes requested. Not ready for the security
