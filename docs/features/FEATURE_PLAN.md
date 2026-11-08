@@ -908,6 +908,44 @@ that the context-panel markup, the history link and the `X` shortcut exist.
 (1703 before this chunk + 8 new tests.)
 
 
+**Round 2 — 2026-11-08 — round 1 addressed.**
+
+* **B1 — fixed.** `handleAction(id, action, opts)` now accepts
+  `{confirmed: true}`, which skips the two-press check for callers that have
+  already made the decision:
+  * `confirmSessionOverride()` passes it — the operator has just granted an
+    explicit session bypass, so the row it was opened from is cleared.
+  * `bulkApprove()` does **not**. It approves everything that does not need
+    review, leaves the long-unknown requests **selected**, and shows one
+    toast: *"N requests have unknown steps — review and approve them
+    individually."* Only the requests actually sent leave the selection.
+  * Per-card buttons (hero, queue rows, context panel, History) and the
+    session-modal buttons keep the two-press behaviour.
+  * Because the queue re-renders on every poll, a kept selection is now drawn
+    from `_ccSelectedIds` (checkbox class + `aria-checked`), so it no longer
+    looks unselected after the next refresh.
+  * Tests: `test_f2_b1_bulk_approve_keeps_unconfirmed_selected`,
+    `test_f2_b1_session_override_approves_confirmed`,
+    `test_f2_b1_card_approve_needs_two_presses`. The node harness now drives
+    `bulkApprove` / `confirmSessionOverride` / `handleAction` with an
+    `authFetch` and `showToast` spy, and sets `requestsData` from inside the
+    context (it is a `let` in `state.js`, so a plain property assignment from
+    outside the VM did not reach the app).
+* **N1 — agreed and fixed.** `bdDecodedPreviewHtml()` skips the older DECODED
+  block when a step already carries `script`, so the decoded source appears
+  once, in the step's collapsed `decoded script` block. Used on the hero card,
+  the context panel and the session modal. Test:
+  `test_f2_n1_decoded_script_not_duplicated`; `script-desktop.png` /
+  `script-mobile.png` were re-shot and now show the single block.
+
+`bash scripts/verify.sh` (pre-commit green):
+
+```
+1715 passed, 7 warnings in 341.35s (0:05:41)
+```
+
+(1711 before this round + 4 new tests.)
+
 ### Reviewer notes
 
 **Round 1 — 2026-11-08 — one fix requested (B1), then merge.**
