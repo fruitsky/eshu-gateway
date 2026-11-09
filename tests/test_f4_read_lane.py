@@ -699,6 +699,14 @@ class TestReadPolicy:
         ok, why = is_read_integration_call(tool, 'http', {'method': 'POST'})
         assert ok is False and why == 'not_a_read_method'
 
+    def test_f4_a_curated_write_tool_is_not_a_read(self):
+        """The `read_only` guard the merged F9/F14 wrapper depends on."""
+        assert is_read_integration_call(
+            {'read_only': False}, 'http', {}) == (False, 'write_tool')
+        assert is_read_integration_call(
+            {'read_only': True}, 'ws',
+            {'endpoint': '/addons', 'method': 'get'}) == (True, '')
+
     def test_f4_read_policy_wraps_chunk_h_ws(self):
         tool = {'read_only': True, 'generic': True}
         assert is_read_integration_call(tool, 'ws', {'command': 'get_states'}) == (True, '')

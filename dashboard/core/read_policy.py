@@ -648,7 +648,15 @@ def is_read_ssh(breakdown):
 
 
 def is_read_integration_call(tool, transport, args):
-    """(ok, reason) — a thin wrapper over Chunk H, no new logic."""
+    """(ok, reason). True when this integration call is a read.
+
+    F9/F14's branches hold the same function; this is the copy that merges
+    with their guarded version (F9's Reviewer notes): the `read_only` guard
+    must stay, because `_read_only_refusal` only inspects generic passthrough
+    tools and would otherwise call a curated write tool a read.
+    """
+    if not (tool or {}).get('read_only'):
+        return False, 'write_tool'
     refusal = _read_only_refusal(tool, transport, args)
     if refusal:
         return False, refusal[0]

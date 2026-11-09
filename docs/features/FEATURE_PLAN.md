@@ -1837,6 +1837,14 @@ scripts/verify.sh`: `2120 passed, 7 warnings in 390.00s (0:06:29)`.
   number of log operands) is bounded by the 8 kB command cap today. Both are
   written down here so they are not lost.
 
+**Shared `core/read_policy.py` (merge prep).** F9 and F14 each carry only
+`is_read_integration_call` plus the `read_only` guard, so their copies combine
+cleanly with this file's SSH half. This branch's wrapper now has the same
+guard — it was a bare `_read_only_refusal` wrapper, which would have called a
+curated write tool a read — and `test_f4_a_curated_write_tool_is_not_a_read`
+locks it in. At merge, keep this file's SSH rules and take F9's guarded
+integration wrapper, as F9's Reviewer notes say.
+
 **Security round 2 landed after this round's push.** It confirms R1-R4 (and R2
 as implemented: `-r` is gone), and adds work that is deliberately **not** in
 this round, because it is a new security condition, not a feature-review R
@@ -1856,7 +1864,7 @@ item:
 Also confirmed there: unlocking `on` waits for the gateway to stop logging
 session signatures (the F12 note), which is security Chunk 7 work.
 
-`bash scripts/verify.sh`: `2133 passed, 7 warnings in 391.14s (0:06:31)`.
+`bash scripts/verify.sh`: `2134 passed, 7 warnings in 390.21s (0:06:30)` (round 6, after the read-policy guard and its test).
 
 ### Reviewer notes
 
