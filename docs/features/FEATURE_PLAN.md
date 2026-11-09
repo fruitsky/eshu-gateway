@@ -3767,7 +3767,86 @@ does the reasoning once, and a small local model (F17) reuses it cheaply.
 
 ### Implementer notes
 
-_(fill in)_
+**What I did**
+
+* **MCP `session_conclude`** (`core/mcp_server.py`, `core/conclusions.py`):
+  outcome in `solved|partial|failed|abandoned`, summary required, worked /
+  did_not_work items as `{"ref": "req:2594", "note": "..."}` (or a plain
+  note); every ref is checked against **this** session — a request or
+  integration call from another session, or an unknown id, is
+  `ref_not_in_session`. The session's owner (when it has one) must match the
+  caller. One conclusion per session per agent: a second call replaces the
+  draft; a **confirmed** one is final (`already_confirmed`). Everything is
+  length-capped and `secret_scrub`bed on write.
+* **Storage** (`db/conclusions.py`): `session_conclusions` (session, agent,
+  goal copy, all fields, status `draft|confirmed|rejected`, operator note,
+  timestamps) with an **FTS5** table over summary, root cause, fix, tags and
+  the session goal, kept in step by rowid (no external-content table, no new
+  dependency). Status transitions are SQL-conditional, so a confirmed
+  conclusion cannot be edited or re-drafted.
+* **Operator review** in the session modal, under F6's wrap-up card: outcome,
+  tags, summary, worked / did-not-work (refs labelled `request #N` /
+  `call #N`), root cause, fix, follow-ups and the operator note, with
+  **Confirm**, **Edit** (inline textareas for summary / root cause / fix) and
+  **Reject** for a draft; a confirmed runbook candidate shows **Promote to
+  runbook**, and a promoted one shows `Runbook #N`. All agent text is escaped;
+  nothing is ever executed. Endpoints: `POST /api/conclusions/{id}/confirm`
+  and `/reject`, `PATCH /api/conclusions/{id}`,
+  `POST /api/conclusions/{id}/runbook`, each audited; `GET
+  /api/sessions/{sid}/detail` now also returns `conclusions` (scrubbed again
+  on read) and `runbooks`.
+* **Runbooks**: promotion is server-side and operator-only. Each cited
+  command is copied **verbatim** from the request row with F1's breakdown; a
+  cited call keeps integration/tool/method/path; an uncited note becomes an
+  instruction; did_not_work becomes `dead_ends`. Steps are capped at 20, and
+  runbooks are documents, not executable (F16 can turn one into a recipe).
+* **Retrieval**: `find_runbooks(query, tags?)`, `similar_incidents(query)` and
+  `get_runbook(id)` return **confirmed** material only, top 5 (with a `more`
+  flag), each incident under ~1,500 tokens (6,000 chars, trimmed with
+  `truncated`). `session_summary` now carries `conclusion` (id/status) and a
+  `next_step` reminder to call `session_conclude`.
+* **Secrets**: every text field is scrubbed on write, and the stored payload
+  is scrubbed again as JSON on read (`scrub_read`, `_scrub_payload`), so a
+  token that slipped past one pass is still masked.
+* **Screenshot**: `docs/screenshots/f13/conclusion-review.png` (source
+  `conclusion-review.svg`) shows the draft review card with synthetic data
+  (`sess-f13-nginx`, `web01`, `192.0.2.10`). The build box has no browser, so
+  it is rendered from the shipped markup/CSS palette through SVG + sharp
+  rather than captured from a live session; the strings match the node
+  harness fixture.
+* **Tests**: `tests/test_f13_session_conclusions.py` (22) — refs (foreign,
+  unknown, malformed), outcome/length/tag limits, ownership (ownerless
+  sessions stay usable), draft replacement, confirmed finality, reject then
+  re-draft, confirm/edit only on a draft, only-confirmed retrieval, the FTS
+  ranking smoke test, write/read scrubbing, the 5-item cap, promotion
+  (verbatim command + breakdown + refs, tool steps, instructions, dead ends,
+  requires confirmed and candidate), runbook search/tags/get, the MCP tools
+  and the summary reminder, the API review/promote path and its 404/409s,
+  session auth, and a node harness for escaping and the card's states and
+  buttons. `tests/test_omada_mcp.py`'s per-integration tool set gains the
+  four new built-ins.
+
+**Decisions**
+
+* A confirmed conclusion is immutable for its agent; the operator can still
+  edit a draft before confirming. Rejecting a draft lets the same agent try
+  again (a new draft, same row).
+* `session_conclude` requires the session to exist and, when it has an owner,
+  requires the caller to be that owner. Ownerless sessions (an adopted chat
+  id) stay usable, matching the pre-SR2 plan rule.
+* The four knowledge tools are in `_ALWAYS_ALLOWED` with the session tools:
+  they are session-scoped or read only confirmed, operator-approved material,
+  and an allowlist that cannot see `session_conclude` could never record a
+  conclusion. `session_conclude` writes a *draft*, never an approval.
+* `similar_incidents` quotes its FTS terms (implicit AND) so a query with FTS
+  syntax cannot error the tool; an empty query returns nothing rather than
+  everything.
+* The FTS index is standalone (not `content=` external) so `rowid` is always
+  the conclusion id; the database module keeps it in sync on write and edit.
+  A SQLite build without FTS5 would fail at table creation, which is correct
+  for a chunk that requires it (the venv's SQLite has it).
+
+`bash scripts/verify.sh`: `2032 passed, 3 skipped, 7 warnings in 415.73s (0:06:55)`.
 
 ### Reviewer notes
 

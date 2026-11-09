@@ -93,6 +93,19 @@ class InventorySettingsPayload(BaseModel):
     """F14: how often the inventory refreshes (clamped to 5-120 minutes)."""
     interval_minutes: int = 15
 
+class ConclusionReviewPayload(BaseModel):
+    note: str = ""
+
+class ConclusionEditPayload(BaseModel):
+    summary: Optional[str] = None
+    root_cause: Optional[str] = None
+    fix: Optional[str] = None
+    note: str = ""
+
+class RunbookPromotePayload(BaseModel):
+    title: str = ""
+    when_to_use: str = ""
+
 class NotifyConfigPayload(BaseModel):
     url: str
     events: str

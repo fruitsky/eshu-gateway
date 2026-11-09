@@ -195,6 +195,21 @@ endpoint. Agents authenticate to the MCP surface with a bearer **agent token**.
 | `GET` | `/api/agents` | List agent tokens (no raw token) | Session |
 | `DELETE` | `/api/agents/{id}` | Revoke + delete an agent token | Session |
 
+### Sessions & conclusions (F13, dashboard authentication required)
+
+| Method | Path | Purpose | Auth |
+|--------|------|---------|------|
+| `POST` | `/api/conclusions/{id}/confirm` | Confirm a draft conclusion (`{"note"}` optional); only confirmed conclusions reach agents | Session |
+| `POST` | `/api/conclusions/{id}/reject` | Reject a draft (`{"note"}` optional) | Session |
+| `PATCH` | `/api/conclusions/{id}` | Operator edit of a draft (`summary`, `root_cause`, `fix`, `note`) | Session |
+| `POST` | `/api/conclusions/{id}/runbook` | Promote a confirmed, runbook-candidate conclusion (`title`, `when_to_use`); steps are copied from the cited evidence | Session |
+| `GET` | `/api/runbooks/{id}` | Read a confirmed runbook with its steps and dead ends | Session |
+
+`GET /api/sessions/{sid}/detail` also returns `conclusions` (draft/confirmed/
+rejected, scrubbed on read) and the `runbooks` promoted from them. The MCP
+side is `session_conclude`, `find_runbooks`, `similar_incidents` and
+`get_runbook`; only confirmed material is served.
+
 ### Inventory (F14, dashboard authentication required)
 
 | Method | Path | Purpose | Auth |
