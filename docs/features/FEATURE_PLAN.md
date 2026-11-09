@@ -2994,7 +2994,87 @@ Additive tools. Freeze now also blocks integration writes, which is a behaviour 
 
 ### Implementer notes
 
-_(fill in)_
+**What I did**
+
+* **Freeze covers integrations** (`core/tool_runner.py`): with the freeze flag
+  set, a call that is not a read is refused before any pending row, preflight
+  or upstream request, with `{"error": {"code": "frozen", "message": …,
+  "status_code": 409}}`, an `integration_calls` row (`outcome=refused`,
+  `reason_code=frozen`, method/path only) and an audit event
+  `mcp_frozen_refused`. Reads keep working; a handler **dry-run** also runs,
+  because it changes nothing upstream (the freeze protects state, not the
+  validation path). Whether a call is a read comes from
+  `core/read_policy.is_read_integration_call` (§2.6a), not from a second local
+  rule — the module is the one the task asked for: the integration half only,
+  with a note that F4's branch holds the full file (SSH rules) and that the
+  `read_only` guard must survive the merge.
+* **Approvals** (`POST /api/integration-calls/{id}/approve`): while frozen the
+  approval is refused with **409** and an audit event
+  `integration_call_refused_frozen`; the call **stays pending**, so unfreezing
+  lets the operator approve it (a freeze pauses the queue, it does not destroy
+  it). Denying is still allowed — removing work is never a write.
+* **`core/ha_supervisor.py`**: the fixed endpoint table
+  (`SUPERVISOR_READS`: tool → endpoint, method, shaper), `endpoint_for(tool,
+  args)` (the only place an endpoint is built; the add-on slug is validated
+  against `^[a-z0-9_]{1,64}$` **before** formatting, so `/`, `..`, `?` and
+  uppercase never reach the upstream), per-shape field allowlists (lists
+  capped at 200 rows), `ha_addon_info` shaped without `options`,
+  `run_supervisor_read` (audit via `ha_ws_exec` with the tool name, then
+  `secret_scrub`), and the 401/403 → `ha_admin_required` mapping.
+  `SUPERVISOR_ACTIONS` is an empty table for F10, kept separate so
+  `SUPERVISOR_READS` stays "reads only".
+* **Tools** (`core/ha_seed.py`, `handler: ha_supervisor_read` for the eight
+  reads, `handler: ha_whoami` for the WS `auth/current_user`):
+  `ha_supervisor_info`, `ha_core_info`, `ha_os_info`, `ha_host_info`,
+  `ha_addons`, `ha_addon_info(slug)`, `ha_backups`, `ha_resolution`,
+  `ha_whoami`, and `ha_check_config` (REST `POST
+  /config/core/check_config`, `read_only: True` — it validates and changes
+  nothing, so it runs without approval). Seeding is idempotent by name, so an
+  existing HA integration gets the ten new tools after "Seed" without
+  duplicates.
+* **UI**: the freeze banner, the freeze pill tooltip and the freeze toast now
+  say "SSH and integration writes rejected".
+* **Docs**: `docs/INTEGRATIONS.md` documents the Supervisor tools, the
+  admin-token requirement, `ha_whoami`, the dedicated-`eshu`-admin-user
+  recommendation (a long-lived token carries all of its user's rights) and
+  that freeze now covers integration writes. CHANGELOG entries for both
+  behaviour changes.
+* **Tests**: `tests/test_f9_ha_supervisor_read.py` (37) — freeze (write
+  refused, nothing queued, read allowed, dry-run allowed, approval refused and
+  kept pending, approval after unfreeze, the read policy is consulted),
+  each tool's exact endpoint and method, slug validation (7 bad forms never
+  reach the upstream), `options` never returned, compact add-ons, non-admin
+  mapping, upstream error, `ha_whoami`, `ha_check_config` as a read, scrubbing,
+  the allowlist (table == tools; no other module builds a `supervisor/api`
+  payload; every supervisor tool is read-only), and idempotent seeding. Two
+  pre-existing count assertions moved from 18 to 28 seeded tools, explained in
+  the commit.
+
+**Decisions**
+
+* The tool names are the chunk's literal `ha_*` names. MCP prefixes the
+  integration name, so on the shared surface an integration named "Home
+  Assistant" exposes `home_assistant_ha_supervisor_info`. The alternative is
+  to drop the `ha_` prefix in the seed (then it reads
+  `home_assistant_supervisor_info`); say which reads better and it is a
+  one-line rename per tool.
+* `ha_check_config` is a POST but `read_only: True`: `_read_only_refusal` only
+  guards generic passthrough tools, so a curated read-only POST runs directly —
+  which is the intent ("validates and changes nothing").
+* The Supervisor read shapers are allowlists, not denylists: a new upstream
+  field is dropped until someone adds it, which is the safe default for a
+  surface that can carry secrets.
+* An add-on's `options` would be caught by `secret_scrub` for the obvious
+  password-shaped keys, but not for arbitrary ones; the shaper dropping
+  `options` entirely is the real protection.
+
+**Open questions**
+
+1. **Tool naming** (above): keep the `ha_` prefix in the seed, or drop it so
+   the MCP-visible name is `<integration>_supervisor_info`? Nothing depends on
+   either choice except the docs and the existing-name test.
+
+`bash scripts/verify.sh`: `1893 passed, 3 skipped, 7 warnings in 394.38s (0:06:34)`. The three skips are F18's read-lane tests (F4 is not on this branch).
 
 ### Reviewer notes
 
