@@ -24,7 +24,7 @@ from core.agent_context import get_current_agent
 from core.cmd_parse import breakdown as cmd_breakdown
 from core.read_policy import is_read_ssh
 from core.secret_scrub import scrub_string
-from db.agent_policies import get_agent_policy
+from db.agent_policies import DEFAULT_SSH_MODE, get_agent_policy
 from db.audit import record_audit_event
 from db.exec_results import save_result
 from db.gateways import (
@@ -48,6 +48,9 @@ TICKET_FORMAT = 'v2'
 STATUSES = ('ran', 'pending', 'refused')
 
 HOST_RE = re.compile(r'[A-Za-z0-9_.:-]{1,253}')
+# S4: the host argument is always a bare IP, never a hostname or an
+# option. Mirrors the gateway's own TARGET_IP check.
+IP_RE = re.compile(r'[0-9A-Fa-f:.]{1,64}')
 AGENT_NAME_RE = re.compile(r'[A-Za-z0-9_.:-]{1,64}')
 SESSION_ID_RE = re.compile(r'[A-Za-z0-9_-]{1,64}')
 CONTROL_ALLOWED = frozenset('\t\n')
@@ -121,7 +124,7 @@ def agent_ssh_policy(agent) -> dict:
     policy = get_agent_policy(agent.get('id')) if agent and agent.get('id') else {}
     return {
         'ssh_hosts_allow': list((policy or {}).get('ssh_hosts_allow') or []),
-        'ssh_mode': (policy or {}).get('ssh_mode') or 'approval',
+        'ssh_mode': (policy or {}).get('ssh_mode') or DEFAULT_SSH_MODE,
     }
 
 
@@ -373,13 +376,22 @@ def ssh_exec(host: str, command: str, session_id: str = '', timeout=None,
         timeout_s = DEFAULT_TIMEOUT
     timeout_s = max(1, min(timeout_s, MAX_TIMEOUT))
 
-    force_jit = policy['ssh_mode'] == 'approval'
+    force_jit = policy['ssh_mode'] == DEFAULT_SSH_MODE
     try:
         command_line = _signed_command(gateway, key_hex, name, session_id or '',
                                        force_jit, command)
     except ValueError:
         _audit('signing_failed', gateway)
         return refused('signing_failed')
+
+    # S4: build_argv must never see a host that starts with `-`. The IP is the
+    # gateway row's primary key and is validated on registration; this is
+    # defence in depth at the last point before argv is built.
+    ip = gateway.get('ip') or ''
+    if not IP_RE.fullmatch(ip):
+        _audit('invalid_gateway_ip', gateway)
+        return refused('invalid_gateway_ip',
+                       message='the gateway record has no valid IP address.')
 
     run = run_ssh(gateway, command_line, known_hosts, key_path, timeout_s)
     duration_ms = int((time.time() - started) * 1000)
@@ -421,9 +433,13 @@ def ssh_exec(host: str, command: str, session_id: str = '', timeout=None,
                 if current in ('denied', 'expired', 'abandoned'):
                     _audit('denied', gateway)
                     return refused(current, request_id=request_id, message=reason)
-                if current in ('approved', 'consumed'):
-                    # The ticket is waiting: one more signed call claims it.
-                    _audit('wait-approved', gateway)
+                if current == 'consumed':
+                    # M2: the ticket is claimable only after the poller has
+                    # taken it — that is what flips the row to `consumed` and
+                    # deposits the lockbox line. Re-running at `approved`
+                    # races the poll: the gateway finds no ticket, files a
+                    # second JIT request and the operator is asked twice.
+                    _audit('wait-consumed', gateway)
                     return ssh_exec(host, command, session_id=session_id,
                                     timeout=timeout, wait=False, agent=agent)
                 time.sleep(POLL_INTERVAL)

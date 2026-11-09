@@ -434,3 +434,89 @@ def test_an_unsigned_session_still_needs_a_signature(gw):
     gw.session_key()
     proc = gw.run("ESHU_SESSION_ID=sess-1 echo hello")
     assert proc.returncode == 1
+
+
+# ── code round 1: R2, R3, S1, S2 and R4 ───────────────────────────────────
+def test_an_unknown_eshu_key_is_refused_direct(gw):
+    """R3/G2: the gateway refuses what the dashboard refuses for signed calls.
+
+    A caller on the shared key reaches the script directly; an unknown key
+    stops the prefix parser, and without this check it would run as part of
+    the command (or slip past the allowlist as `ESHU_...` noise).
+    """
+    gw.exact("echo hello")
+    proc = gw.run("ESHU_BOGUS=1 echo hello")
+    assert proc.returncode == 1
+    assert "Unknown ESHU_ prefix" in proc.stdout
+    assert "hello" not in proc.stdout
+
+
+def test_a_known_key_after_an_unknown_one_is_refused(gw):
+    gw.exact("echo hello")
+    proc = gw.run("ESHU_BOGUS=1 ESHU_AGENT=agent-a echo hello")
+    assert proc.returncode == 1
+    assert "Unknown ESHU_ prefix" in proc.stdout
+
+
+def test_an_unknown_eshu_key_is_refused_in_mcp_mode(gw):
+    gw.exact("echo hello")
+    proc = gw.run(gw.sign("ESHU_BOGUS=1 echo hello"))
+    assert envelope(proc)["status"] == "refused"
+    assert "Unknown ESHU_ prefix" in messages_of(proc)
+
+
+def test_a_signed_prefix_must_not_carry_unmaced_keys(gw):
+    """S1: WINDOW_TOKEN and EXECUTION_ID are outside the MAC."""
+    gw.exact("echo hello")
+    for key in ("ESHU_WINDOW_TOKEN=WinToken123", "ESHU_EXECUTION_ID=exec-1"):
+        proc = gw.run(key + " " + gw.sign("echo hello"))
+        assert envelope(proc)["status"] == "refused", key
+        assert "must not carry" in messages_of(proc), key
+
+
+def test_the_nonce_store_is_self_protected(gw):
+    """S2: deleting /var/lib/eshu would reopen the replay window."""
+    proc = gw.run("rm -rf /var/lib/eshu")
+    assert proc.returncode == 1
+    assert "FATAL" in proc.stdout
+    assert "HARDCODED BLOCK" in gw.logger_text()
+
+
+def test_the_refusal_log_carries_no_unverified_agent(gw):
+    """R2: a value that failed its charset check must not reach syslog."""
+    gw.exact("echo hello")
+    proc = gw.run("ESHU_AGENT=bad\x01agent echo hello")
+    assert proc.returncode == 1
+    text = gw.logger_text()
+    assert "\x01" not in text
+    assert "bad\x01agent" not in text
+    assert "agent=none" in text
+
+
+def _result_post(gw):
+    assert gw.wait_for(lambda calls: any(
+        c['url'].endswith('/api/exec-result') for c in calls)), gw.curl_calls()
+    for call in gw.curl_calls():
+        if call['url'].endswith('/api/exec-result'):
+            return call['data']
+    raise AssertionError('no result post')
+
+
+def test_mcp_exit_only_stores_no_output(gw):
+    """R4: the operator's capture setting wins in MCP mode too (§2.5)."""
+    gw.exact("echo hello")
+    gw.capture("exit-only")
+    proc = gw.run(gw.sign("echo hello"))
+    assert envelope(proc)["status"] == "ran"
+    body = _result_post(gw)
+    assert body["encoded_output"] == ""
+    assert body["exit_code"] == 0
+
+
+def test_mcp_tail_still_stores_the_tail(gw):
+    gw.exact("echo hello")
+    gw.capture("tail")
+    gw.run(gw.sign("echo hello"))
+    body = _result_post(gw)
+    import base64
+    assert base64.b64decode(body["encoded_output"]) == b"hello\n"

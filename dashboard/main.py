@@ -83,7 +83,7 @@ from database import (
     revoke_agent_token, delete_agent_token,
 )
 from db.agent_policies import (
-    get_agent_policy, set_agent_policy, get_agent_policies_map,
+    DEFAULT_SSH_MODE, get_agent_policy, set_agent_policy, get_agent_policies_map,
 )
 from db.misc import get_meta_json, set_meta_json
 from db.web_fetch import (
@@ -794,15 +794,20 @@ def receive_request(payload: GatewayPayload, request: Request):
         raise HTTPException(status_code=400, detail="Invalid agent")
     force_jit = bool(payload.force_jit)
     if agent and not force_jit:
-        # Re-derive the mode from the agent's own policy so a gateway (or a
-        # prefix) cannot downgrade an `approval` agent to auto-run.
+        # M3: re-derive the mode from the agent's own policy so a gateway (or
+        # a prefix) cannot downgrade an `approval` agent to auto-run — and
+        # fail closed when the policy cannot be read at all. An unknown agent,
+        # an error and an unset mode all mean DEFAULT_SSH_MODE (approval),
+        # the same constant core.ssh_exec uses for the outbound call.
         try:
             _agent_row = get_agent_by_name(agent)
+            _mode = DEFAULT_SSH_MODE
             if _agent_row:
-                _mode = get_agent_policy(_agent_row['id']).get('ssh_mode')
-                force_jit = (_mode == 'approval')
+                _mode = (get_agent_policy(_agent_row['id']).get('ssh_mode')
+                         or DEFAULT_SSH_MODE)
+            force_jit = (_mode == DEFAULT_SSH_MODE)
         except Exception:
-            force_jit = False
+            force_jit = True
 
     now = int(time.time())
     sid = (payload.session_id or '')[:64]

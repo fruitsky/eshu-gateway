@@ -304,7 +304,8 @@ with open('/etc/eshu-windows.txt.tmp', 'w') as f:
           sed -i "s|^GATEWAY_TOKEN=.*|GATEWAY_TOKEN=\"$NEW_TOKEN\"|" /usr/local/bin/eshu-poller.sh
           sed -i "s|^GATEWAY_TOKEN=.*|GATEWAY_TOKEN=\"$NEW_TOKEN\"|" /usr/local/bin/eshu-gateway.sh
           # F12: the MAC helper reads the token from here, not from argv.
-          printf '%s\n' "$NEW_TOKEN" > /etc/eshu-token.tmp && chmod 600 /etc/eshu-token.tmp && mv -f /etc/eshu-token.tmp /etc/eshu-token 2>/dev/null || true
+          # R1: umask 077 so the temp file is never readable before chmod.
+          ( umask 077; printf '%s\n' "$NEW_TOKEN" > /etc/eshu-token.tmp ) && chmod 600 /etc/eshu-token.tmp && mv -f /etc/eshu-token.tmp /etc/eshu-token 2>/dev/null || true
           GATEWAY_TOKEN="$NEW_TOKEN"
         fi
         logger -t eshu-poller "Update to $NEW_VER completed (trigger $TRIGGER_ID)."
@@ -358,7 +359,8 @@ with open('/etc/eshu-windows.txt.tmp', 'w') as f:
           sed -i "s|^GATEWAY_TOKEN=.*|GATEWAY_TOKEN=\"$NEW_TOKEN\"|" /usr/local/bin/eshu-poller.sh
           sed -i "s|^GATEWAY_TOKEN=.*|GATEWAY_TOKEN=\"$NEW_TOKEN\"|" /usr/local/bin/eshu-gateway.sh
           # F12: the MAC helper reads the token from here, not from argv.
-          printf '%s\n' "$NEW_TOKEN" > /etc/eshu-token.tmp && chmod 600 /etc/eshu-token.tmp && mv -f /etc/eshu-token.tmp /etc/eshu-token 2>/dev/null || true
+          # R1: umask 077 so the temp file is never readable before chmod.
+          ( umask 077; printf '%s\n' "$NEW_TOKEN" > /etc/eshu-token.tmp ) && chmod 600 /etc/eshu-token.tmp && mv -f /etc/eshu-token.tmp /etc/eshu-token 2>/dev/null || true
           GATEWAY_TOKEN="$NEW_TOKEN"
         fi
       else

@@ -225,7 +225,12 @@ post_exec_result() {   # $1=rc  $2=duration_ms  $3=mode  $4=path
   # (the same stream, one reader).
   local out_src="$ESHU_OUT_TAIL"
   if [ -n "$ESHU_MCP_CAP" ] && [ -s "$ESHU_MCP_CAP" ]; then out_src="$ESHU_MCP_CAP"; fi
-  if { [ "$mode" = "tail" ] || [ -n "$ESHU_MCP_CAP" ]; } && [ -n "$out_src" ] && [ -s "$out_src" ]; then
+  # R4: the operator's capture setting decides what is stored, in MCP mode
+  # too (§2.5). `off` posts nothing, `exit-only` stores the exit code and
+  # duration only, `tail` stores the tail. The envelope already carried the
+  # bytes to the agent; being more auditable does not override an explicit
+  # choice to keep output off the dashboard.
+  if [ "$mode" = "tail" ] && [ -n "$out_src" ] && [ -s "$out_src" ]; then
     if [ "$(stat -c '%s' "$out_src")" -gt 16384 ]; then
       truncated="true"
       enc_out=$(tail -c 16384 "$out_src" | base64 -w 0)
@@ -385,7 +390,17 @@ done
 cmd="${cmd#"${cmd%%[![:space:]]*}"}"
 cmd="${cmd%"${cmd##*[![:space:]]}"}"
 
+
 prefix_refusal=""
+# R3/G2: callers on the shared key reach this script directly, so the gateway
+# itself refuses a command whose first word is still an ESHU_ key. The parse
+# loop stops at an unknown key, which would otherwise become part of the
+# command; this also catches a known key placed after an unknown one.
+if [ -z "$prefix_refusal" ]; then
+  case "${cmd%% *}" in
+    ESHU_*) prefix_refusal="Unknown ESHU_ prefix — refusing." ;;
+  esac
+fi
 check_charset() {   # $1=name $2=value $3=regex $4=charset
   local name="$1" value="$2" regex="$3" charset="$4"
   if [ -n "$value" ] && [[ ! "$value" =~ $regex ]]; then
@@ -420,6 +435,14 @@ if [ -n "${ESHU_AGENT}${ESHU_AGENT_SIG}${ESHU_TS}${ESHU_NONCE}${ESHU_MCP}${ESHU_
 fi
 if [ -z "$ESHU_MCP" ]; then ESHU_MCP="0"; fi
 if [ -z "$ESHU_FORCE_JIT" ]; then ESHU_FORCE_JIT="0"; fi
+
+# S1: ESHU_WINDOW_TOKEN and ESHU_EXECUTION_ID are outside the agent MAC. The
+# dashboard never sends them on a signed call, so a signed prefix that carries
+# one is refused rather than trusted for the window/execution path.
+if [ "$MANIFEST_PRESENT" = "1" ] && [ -z "$prefix_refusal" ] \
+   && [ -n "${ESHU_WINDOW_TOKEN}${ESHU_EXECUTION_ID}" ]; then
+  prefix_refusal="A signed prefix must not carry ESHU_WINDOW_TOKEN or ESHU_EXECUTION_ID."
+fi
 
 if [ "$MANIFEST_PRESENT" = "1" ] && [ -z "$prefix_refusal" ]; then
   if [ -z "$ESHU_AGENT" ] || [ -z "$ESHU_AGENT_SIG" ] || [ -z "$ESHU_TS" ] || [ -z "$ESHU_NONCE" ]; then
@@ -496,7 +519,9 @@ if [ -z "$prefix_refusal" ] && [ -z "$cmd" ]; then
 fi
 
 if [ -n "$prefix_refusal" ]; then
-  logger -t eshu-gateway "PREFIX REFUSED from=${SSH_CONNECTION:-unknown} agent=${ESHU_AGENT:-none} sig=${SIG_STATE:-none} gateway_key=${DASHBOARD_KEY} mode=${SSH_MODE} reason=${prefix_refusal%%[[:space:]]*}"
+  # R2/G8: only the agent name that passed the MAC check is logged — an
+  # unverified value can carry control bytes and forge a log line.
+  logger -t eshu-gateway "PREFIX REFUSED from=${SSH_CONNECTION:-unknown} agent=${ESHU_VERIFIED_AGENT:-none} sig=${SIG_STATE:-none} gateway_key=${DASHBOARD_KEY} mode=${SSH_MODE} reason=${prefix_refusal%%[[:space:]]*}"
   say "[LOCKED] ${prefix_refusal} [Gateway $GATEWAY_VERSION]"
   finish refused 1
 fi
@@ -539,7 +564,7 @@ normalize_paths() {
 normalized_cmd=$(normalize_paths "$cmd")
 self_access=0
 case "$normalized_cmd" in
-    *"/usr/local/bin/eshu-"*|*"/etc/eshu"*|*"/var/run/eshu"*|*"/run/eshu"*|*"eshu.db"*|*"eshu.tickets"*|*"eshu-session-key"*|*"eshu/features.d"*|*"/etc/sudoers.d/eshu"*)
+    *"/usr/local/bin/eshu-"*|*"/etc/eshu"*|*"/var/run/eshu"*|*"/run/eshu"*|*"/var/lib/eshu"*|*"eshu.db"*|*"eshu.tickets"*|*"eshu-session-key"*|*"eshu/features.d"*|*"/etc/sudoers.d/eshu"*)
         self_access=1
         ;;
 esac

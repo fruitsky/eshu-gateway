@@ -597,6 +597,14 @@ def check_request_fn():
             status = 'expired'
         elif status == 'approved' and expires_at and expires_at + 60 < now:
             status = 'abandoned'
+        # M2: say when a re-run is safe. The lockbox only holds the ticket
+        # once the poller has consumed the row; re-running at `approved`
+        # races that poll and files a second JIT request.
+        next_step = {
+            'pending': 'waiting for operator approval',
+            'approved': 'approved, delivering to the gateway — do not re-run yet',
+            'consumed': 'ready to re-run: call ssh_exec again with the same arguments',
+        }.get(status, '')
         return json.dumps({
             'id': request_id,
             'kind': 'ssh',
@@ -605,6 +613,7 @@ def check_request_fn():
             'target_ip': row.get('target_ip') or '',
             'session_id': owner,
             'expires_at': expires_at,
+            'next_step': next_step,
         })
     return _check_request
 
@@ -811,8 +820,9 @@ SSH_EXEC_DESC = (
     "command to approval. Returns {status: ran|pending|refused, request_id, "
     "exit_code?, output? (tail, <=64 KiB), truncated?, reason?}. When the "
     "status is pending, poll check_request(request_id) and call ssh_exec again "
-    "with the same arguments once it is approved, or pass wait=true to poll "
-    "here for up to 60 s."
+    "with the same arguments once check_request says `consumed` (the ticket is "
+    "in the lockbox then; `approved` means it is still being delivered). "
+    "wait=true polls here for up to 60 s."
 )
 
 

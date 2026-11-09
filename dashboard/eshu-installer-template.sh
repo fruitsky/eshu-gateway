@@ -408,6 +408,15 @@ else
 fi
 
 # Register gateway with correct version
+# S1: a gateway with no /etc/eshu-token cannot sign an agent prefix (a
+# self-update that never re-installed leaves the file absent), so it must not
+# advertise the agent format. The dashboard then refuses with a clear
+# `ssh_not_ready` instead of a `bad signature` at call time. A fresh
+# install/reinstall writes the token below, so it reports both.
+SSH_REG_CAPS='"ssh_host_key":"'"$HOST_KEY_LINE"'","ssh_ticket_format":"v2"'
+if [ "$mode" != "upgrade" ] || [ -f /etc/eshu-token ]; then
+  SSH_REG_CAPS='"ssh_host_key":"'"$HOST_KEY_LINE"'","ssh_agent_format":"eshu-ssh-agent-v1","ssh_ticket_format":"v2"'
+fi
 REGISTER_RESPONSE=""
 if [ "$mode" != "upgrade" ]; then
   echo "Registering Gateway with Dashboard..."
@@ -415,7 +424,7 @@ if [ "$mode" != "upgrade" ]; then
        -H "Content-Type: application/json" \
        -H "X-Gateway-Token: ${GATEWAY_TOKEN:-}" \
        -H "X-Enrollment-Token: ${ESHU_ENROLL_TOKEN:-}" \
-       -d '{"ip":"'"$TARGET_IP"'","hostname":"'"$HOST_NAME"'","version":"'"$GATEWAY_VERSION"'","ssh_host_key":"'"$HOST_KEY_LINE"'","ssh_agent_format":"eshu-ssh-agent-v1","ssh_ticket_format":"v2"}')
+       -d '{"ip":"'"$TARGET_IP"'","hostname":"'"$HOST_NAME"'","version":"'"$GATEWAY_VERSION"'",'"$SSH_REG_CAPS"'}')
   GATEWAY_TOKEN=$(echo "$REGISTER_RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); t=d.get('gateway_token'); print(t if t and t!='None' else '')" 2>/dev/null || echo "")
   if [ -n "$GATEWAY_TOKEN" ]; then
     echo "   Gateway API token received (v15+ auth)"
@@ -430,7 +439,7 @@ if [ "$mode" = "upgrade" ] && [ -n "$DASHBOARD_URL" ]; then
        -H "Content-Type: application/json" \
        -H "X-Gateway-Token: ${GATEWAY_TOKEN:-}" \
        -H "X-Enrollment-Token: ${ESHU_ENROLL_TOKEN:-}" \
-       -d '{"ip":"'"$TARGET_IP"'","hostname":"'"$HOST_NAME"'","version":"'"$GATEWAY_VERSION"'","ssh_host_key":"'"$HOST_KEY_LINE"'","ssh_agent_format":"eshu-ssh-agent-v1","ssh_ticket_format":"v2"}')
+       -d '{"ip":"'"$TARGET_IP"'","hostname":"'"$HOST_NAME"'","version":"'"$GATEWAY_VERSION"'",'"$SSH_REG_CAPS"'}')
   GATEWAY_TOKEN=$(echo "$REGISTER_RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); t=d.get('gateway_token'); print(t if t and t!='None' else '')" 2>/dev/null || echo "")
   if [ -n "$GATEWAY_TOKEN" ]; then
     echo "   Gateway API token received (v15+ auth)"
@@ -452,10 +461,16 @@ if [ -z "${GATEWAY_TOKEN:-}" ] || [ "${GATEWAY_TOKEN:-}" = "None" ]; then
 fi
 
 write_gateway() {
-  cp -f "$GATEWAY" "${GATEWAY}.bak" 2>/dev/null || true
-  cat > "$GATEWAY" <<'GWEOF'
+  # R1: the script carries GATEWAY_TOKEN, which is also the MAC key material.
+  # Create it (and its temporary backup) root-only from the first byte, and
+  # finish 0700 root:root in every mode — install, reinstall and update.
+  (
+    umask 077
+    cp -f "$GATEWAY" "${GATEWAY}.bak" 2>/dev/null || true
+    cat > "$GATEWAY" <<'GWEOF'
 __GATEWAY_CONTENT__
 GWEOF
+  )
 
   sed -i "s|__TARGET_IP__|$TARGET_IP|g" "$GATEWAY"
   sed -i "s|__DASHBOARD_URL__|$DASHBOARD_URL|g" "$GATEWAY"
@@ -478,13 +493,13 @@ GWEOF
   fi
   rm -f "$SYNTAX_LOG"
   rm -f "${GATEWAY}.bak"
-  chown root:root "$GATEWAY"; chmod 755 "$GATEWAY"
+  chown root:root "$GATEWAY"; chmod 700 "$GATEWAY"
 }
 
 write_sudoers() {
   cat > "$SUDOERS" <<'EOF'
 Defaults:eshu-gateway env_keep += "SSH_ORIGINAL_COMMAND"
-eshu-gateway ALL=(root) NOPASSWD: /usr/local/bin/eshu-gateway.sh, /usr/local/bin/eshu-gateway.sh --dashboard-key
+eshu-gateway ALL=(root) NOPASSWD: /usr/local/bin/eshu-gateway.sh "", /usr/local/bin/eshu-gateway.sh --dashboard-key
 EOF
   chmod 440 "$SUDOERS"; chown root:root "$SUDOERS"
   if ! visudo -cf "$SUDOERS"; then echo "Sudoers error."; exit 1; fi
@@ -548,8 +563,10 @@ LOGGERUNIT
 
 # F12: the MAC key material. The gateway reads this file itself, so the key
 # never appears on argv. Root-only; rewritten on every install and update.
+# R1: umask 077 means the temp file is never readable, not even for the
+# instant before `chmod`.
 if [ -n "${GATEWAY_TOKEN:-}" ] && [ "$GATEWAY_TOKEN" != "None" ]; then
-  printf '%s\n' "$GATEWAY_TOKEN" > /etc/eshu-token.tmp
+  ( umask 077; printf '%s\n' "$GATEWAY_TOKEN" > /etc/eshu-token.tmp )
   chmod 600 /etc/eshu-token.tmp
   chown root:root /etc/eshu-token.tmp
   mv -f /etc/eshu-token.tmp /etc/eshu-token

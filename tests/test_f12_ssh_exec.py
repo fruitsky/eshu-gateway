@@ -361,14 +361,15 @@ class TestFlow:
         out = sx.ssh_exec(IP, 'uptime', wait=True, agent=AGENT)
         assert out['status'] == 'pending'
 
-    def test_wait_reruns_once_approved(self, stub, monkeypatch):
+    def test_wait_reruns_once_consumed(self, stub, monkeypatch):
+        """M2: `consumed` means the poller took the ticket into the lockbox."""
         _gateway()
         set_agent_policy(1, ssh_hosts_allow=[IP], ssh_mode='approval')
         stub['state']['envelope'] = _envelope(status='pending', request_id=5)
         monkeypatch.setattr(sx, 'WAIT_SECONDS', 2)
         monkeypatch.setattr(sx, 'POLL_INTERVAL', 0.01)
         req = create_request(IP, 'uptime', agent='agent-a')
-        update_request_status(req, 'approved')
+        update_request_status(req, 'consumed')
 
         def run(gateway, command_line, known_hosts, key_path, timeout):
             stub['calls'].append({'command_line': command_line})
@@ -382,6 +383,27 @@ class TestFlow:
         out = sx.ssh_exec(IP, 'uptime', wait=True, agent=AGENT)
         assert out['status'] == 'ran' and out['output'] == 'up\n'
         assert len(stub['calls']) == 2
+
+    def test_wait_does_not_rerun_while_approved(self, stub, monkeypatch):
+        """M2: `approved` is not "the ticket is waiting".
+
+        The row is approved when the operator presses the button; the ticket
+        reaches the lockbox only on the poller's next poll (which also flips
+        the row to `consumed`). Re-running at `approved` races that poll,
+        finds no ticket and files a second JIT request — the operator is
+        asked twice and the first ticket expires unused.
+        """
+        _gateway()
+        set_agent_policy(1, ssh_hosts_allow=[IP], ssh_mode='approval')
+        stub['state']['envelope'] = _envelope(status='pending', request_id=5)
+        monkeypatch.setattr(sx, 'WAIT_SECONDS', 1)
+        monkeypatch.setattr(sx, 'POLL_INTERVAL', 0.01)
+        req = create_request(IP, 'uptime', agent='agent-a')
+        update_request_status(req, 'approved')
+        out = sx.ssh_exec(IP, 'uptime', wait=True, agent=AGENT)
+        assert out['status'] == 'pending'
+        assert len(stub['calls']) == 1          # no second signed call
+        assert get_request_row(req)['status'] == 'approved'
 
     def test_refused_returns_the_reason(self, stub):
         _gateway()
@@ -416,6 +438,25 @@ class TestFlow:
         rows = [r for r in get_audit_log(20) if r['event_type'] == 'ssh_exec']
         assert rows
         assert all('topsecret' not in (r['details'] or '') for r in rows)
+
+
+    def test_a_gateway_whose_ip_is_not_an_ip_is_refused(self, stub, monkeypatch):
+        """S4: build_argv must never see a host that starts with `-`.
+
+        The IP is validated on registration; this is the last check before the
+        ssh argv is built, so a hand-edited row cannot inject an option.
+        """
+        set_agent_policy(1, ssh_hosts_allow=['*'], ssh_mode='normal')
+        fake = {'ip': 'gateway.example.test', 'hostname': 'web01',
+                'ssh_agent_format': sx.AGENT_FORMAT,
+                'ssh_ticket_format': sx.TICKET_FORMAT}
+        monkeypatch.setattr(sx, 'resolve_gateway', lambda host: fake)
+        monkeypatch.setattr(sx, 'get_gateway_ssh_host_key', lambda ip: HOST_KEY)
+        monkeypatch.setattr(sx, 'get_gateway_ssh_key_derived', lambda ip: 'ab' * 32)
+        out = sx.ssh_exec('anything', 'uptime', agent=AGENT)
+        assert out['status'] == 'refused'
+        assert out['reason'] == 'invalid_gateway_ip'
+        assert stub['calls'] == []
 
 
 class TestRunnerArgv:
@@ -497,6 +538,54 @@ class TestForceJitOnTheDashboard:
         assert client.post('/api/request', headers=gw_headers,
                            json=body).status_code == 400
 
+    def test_an_unknown_agent_fails_closed_to_approval(
+            self, client, gw_headers, temp_db):
+        """M3: an agent with no policy row cannot be vouched for."""
+        from db.policies import update_policy
+        update_policy('exact_whitelist', 'uptime')
+        body = {'target_ip': IP,
+                'encoded_command': base64.b64encode(b'uptime').decode(),
+                'agent': 'ghost-agent', 'force_jit': False}
+        r = client.post('/api/request', headers=gw_headers, json=body)
+        assert r.status_code == 200
+        assert get_request_row(r.json()['request_id'])['status'] == 'pending'
+
+    def test_a_policy_error_fails_closed_to_approval(
+            self, client, gw_headers, temp_db, monkeypatch):
+        from db.policies import update_policy
+        update_policy('exact_whitelist', 'uptime')
+        import main as main_module
+
+        def boom(*args, **kwargs):
+            raise RuntimeError('policy store unavailable')
+
+        monkeypatch.setattr(main_module, 'get_agent_by_name', boom)
+        body = {'target_ip': IP,
+                'encoded_command': base64.b64encode(b'uptime').decode(),
+                'agent': 'agent-a', 'force_jit': False}
+        r = client.post('/api/request', headers=gw_headers, json=body)
+        assert r.status_code == 200
+        assert get_request_row(r.json()['request_id'])['status'] == 'pending'
+
+    def test_an_unset_ssh_mode_fails_closed_to_approval(
+            self, client, gw_headers, temp_db, monkeypatch):
+        from db.agent_tokens import create_agent_token, get_agent_by_name
+        from db.policies import update_policy
+        update_policy('exact_whitelist', 'uptime')
+        create_agent_token('agent-a')
+        row = get_agent_by_name('agent-a')
+        set_agent_policy(row['id'], ssh_hosts_allow=[IP], ssh_mode='normal')
+        import main as main_module
+        # A policy row without the field (an old row, a partial mapping).
+        monkeypatch.setattr(main_module, 'get_agent_policy',
+                            lambda agent_id: {})
+        body = {'target_ip': IP,
+                'encoded_command': base64.b64encode(b'uptime').decode(),
+                'agent': 'agent-a', 'force_jit': False}
+        r = client.post('/api/request', headers=gw_headers, json=body)
+        assert r.status_code == 200
+        assert get_request_row(r.json()['request_id'])['status'] == 'pending'
+
     def test_approval_mode_forces_jit_from_the_policy(self, client,
                                                       gw_headers, temp_db):
         from db.agent_tokens import create_agent_token
@@ -517,17 +606,86 @@ class TestForceJitOnTheDashboard:
 class TestTickets:
     """G5: the tag, the agent binding and the compatibility rules."""
 
+    def _row(self, req):
+        from db.core import db_conn
+        with db_conn() as conn:
+            return conn.execute('SELECT * FROM requests WHERE id = ?',
+                                (req,)).fetchone()
+
     def test_v2_line_shape(self, temp_db):
         from db.requests import ticket_line
         register_gateway(IP, HOST, 'v-test')
         req = create_request(IP, 'a | b', agent='agent-a', session_id='sess-1')
-        from db.core import db_conn
-        with db_conn() as conn:
-            row = conn.execute('SELECT * FROM requests WHERE id = ?', (req,)).fetchone()
-        line = ticket_line(row)
+        line = ticket_line(self._row(req), 'v2')
         assert line.startswith('v2|')
         assert line.endswith('|a | b')
         assert line.split('|')[2] == 'agent-a'
+
+    def test_old_line_shape(self, temp_db):
+        from db.requests import ticket_line
+        register_gateway(IP, HOST, 'v-test')
+        req = create_request(IP, 'a | b')
+        line = ticket_line(self._row(req), '')
+        assert not line.startswith('v2|')
+        ts, command = line.split('|', 1)
+        assert ts.isdigit() and command == 'a | b'
+
+    def _old_gateway(self):
+        register_gateway(IP, HOST, 'v-test')
+        set_gateway_token(IP, TOKEN)
+
+    def test_an_old_gateway_gets_the_old_line_from_both_call_sites(
+            self, client, temp_db):
+        """M1: an old gateway splits on the first `|` and expects `ts|cmd`."""
+        self._old_gateway()
+        poll_req = create_request(IP, 'uptime')
+        update_request_status(poll_req, 'approved')
+        headers = {'X-Gateway-Token': TOKEN}
+        ticket = client.get(f'/api/poll/{IP}', headers=headers).json()['ticket']
+        assert ticket.split('|', 1)[1] == 'uptime'
+        assert ticket.split('|', 1)[0].isdigit()
+
+        req = create_request(IP, 'uptime')
+        update_request_status(req, 'approved')
+        ticket = client.get(f'/api/ticket/{req}', headers=headers).json()['ticket']
+        assert ticket.split('|', 1)[1] == 'uptime'
+        assert not ticket.startswith('v2|')
+
+    def test_a_v2_gateway_gets_v2_from_both_call_sites(self, client, temp_db):
+        _gateway()
+        headers = {'X-Gateway-Token': TOKEN}
+        poll_req = create_request(IP, 'uptime', agent='agent-a')
+        update_request_status(poll_req, 'approved')
+        assert client.get(f'/api/poll/{IP}', headers=headers).json()[
+            'ticket'].startswith('v2|')
+        req = create_request(IP, 'uptime', agent='agent-a')
+        update_request_status(req, 'approved')
+        assert client.get(f'/api/ticket/{req}', headers=headers).json()[
+            'ticket'].startswith('v2|')
+
+    def test_an_agent_row_on_an_old_gateway_is_refused(self, client, temp_db):
+        """M1: the old format has no agent field, so an unsigned caller could
+        claim it. Refuse (and deny) instead of delivering."""
+        self._old_gateway()
+        headers = {'X-Gateway-Token': TOKEN}
+        req = create_request(IP, 'uptime', agent='agent-a')
+        update_request_status(req, 'approved')
+        assert client.get(f'/api/poll/{IP}', headers=headers).json()['ticket'] is None
+        assert get_request_row(req)['status'] == 'denied'
+
+    def test_the_ticket_endpoint_refuses_an_agent_row_on_an_old_gateway(
+            self, client, temp_db):
+        self._old_gateway()
+        headers = {'X-Gateway-Token': TOKEN}
+        req = create_request(IP, 'uptime', agent='agent-a')
+        update_request_status(req, 'approved')
+        assert client.get(f'/api/ticket/{req}', headers=headers).json()['ticket'] is None
+        assert get_request_row(req)['status'] == 'denied'
+        from db.core import db_conn
+        with db_conn() as conn:
+            events = [r['event_type'] for r in
+                      conn.execute('SELECT event_type FROM audit_log').fetchall()]
+        assert 'jit_refused' in events
 
     def test_ticket_endpoint_returns_v2(self, client, gw_headers, temp_db):
         req = create_request(IP, 'uptime', session_id='sess-1', agent='agent-a')

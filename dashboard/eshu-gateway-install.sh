@@ -408,6 +408,15 @@ else
 fi
 
 # Register gateway with correct version
+# S1: a gateway with no /etc/eshu-token cannot sign an agent prefix (a
+# self-update that never re-installed leaves the file absent), so it must not
+# advertise the agent format. The dashboard then refuses with a clear
+# `ssh_not_ready` instead of a `bad signature` at call time. A fresh
+# install/reinstall writes the token below, so it reports both.
+SSH_REG_CAPS='"ssh_host_key":"'"$HOST_KEY_LINE"'","ssh_ticket_format":"v2"'
+if [ "$mode" != "upgrade" ] || [ -f /etc/eshu-token ]; then
+  SSH_REG_CAPS='"ssh_host_key":"'"$HOST_KEY_LINE"'","ssh_agent_format":"eshu-ssh-agent-v1","ssh_ticket_format":"v2"'
+fi
 REGISTER_RESPONSE=""
 if [ "$mode" != "upgrade" ]; then
   echo "Registering Gateway with Dashboard..."
@@ -415,7 +424,7 @@ if [ "$mode" != "upgrade" ]; then
        -H "Content-Type: application/json" \
        -H "X-Gateway-Token: ${GATEWAY_TOKEN:-}" \
        -H "X-Enrollment-Token: ${ESHU_ENROLL_TOKEN:-}" \
-       -d '{"ip":"'"$TARGET_IP"'","hostname":"'"$HOST_NAME"'","version":"'"$GATEWAY_VERSION"'","ssh_host_key":"'"$HOST_KEY_LINE"'","ssh_agent_format":"eshu-ssh-agent-v1","ssh_ticket_format":"v2"}')
+       -d '{"ip":"'"$TARGET_IP"'","hostname":"'"$HOST_NAME"'","version":"'"$GATEWAY_VERSION"'",'"$SSH_REG_CAPS"'}')
   GATEWAY_TOKEN=$(echo "$REGISTER_RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); t=d.get('gateway_token'); print(t if t and t!='None' else '')" 2>/dev/null || echo "")
   if [ -n "$GATEWAY_TOKEN" ]; then
     echo "   Gateway API token received (v15+ auth)"
@@ -430,7 +439,7 @@ if [ "$mode" = "upgrade" ] && [ -n "$DASHBOARD_URL" ]; then
        -H "Content-Type: application/json" \
        -H "X-Gateway-Token: ${GATEWAY_TOKEN:-}" \
        -H "X-Enrollment-Token: ${ESHU_ENROLL_TOKEN:-}" \
-       -d '{"ip":"'"$TARGET_IP"'","hostname":"'"$HOST_NAME"'","version":"'"$GATEWAY_VERSION"'","ssh_host_key":"'"$HOST_KEY_LINE"'","ssh_agent_format":"eshu-ssh-agent-v1","ssh_ticket_format":"v2"}')
+       -d '{"ip":"'"$TARGET_IP"'","hostname":"'"$HOST_NAME"'","version":"'"$GATEWAY_VERSION"'",'"$SSH_REG_CAPS"'}')
   GATEWAY_TOKEN=$(echo "$REGISTER_RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); t=d.get('gateway_token'); print(t if t and t!='None' else '')" 2>/dev/null || echo "")
   if [ -n "$GATEWAY_TOKEN" ]; then
     echo "   Gateway API token received (v15+ auth)"
@@ -452,8 +461,13 @@ if [ -z "${GATEWAY_TOKEN:-}" ] || [ "${GATEWAY_TOKEN:-}" = "None" ]; then
 fi
 
 write_gateway() {
-  cp -f "$GATEWAY" "${GATEWAY}.bak" 2>/dev/null || true
-  cat > "$GATEWAY" <<'GWEOF'
+  # R1: the script carries GATEWAY_TOKEN, which is also the MAC key material.
+  # Create it (and its temporary backup) root-only from the first byte, and
+  # finish 0700 root:root in every mode — install, reinstall and update.
+  (
+    umask 077
+    cp -f "$GATEWAY" "${GATEWAY}.bak" 2>/dev/null || true
+    cat > "$GATEWAY" <<'GWEOF'
 #!/bin/bash
 set -eo pipefail
 IFS=$'\n\t'
@@ -681,7 +695,12 @@ post_exec_result() {   # $1=rc  $2=duration_ms  $3=mode  $4=path
   # (the same stream, one reader).
   local out_src="$ESHU_OUT_TAIL"
   if [ -n "$ESHU_MCP_CAP" ] && [ -s "$ESHU_MCP_CAP" ]; then out_src="$ESHU_MCP_CAP"; fi
-  if { [ "$mode" = "tail" ] || [ -n "$ESHU_MCP_CAP" ]; } && [ -n "$out_src" ] && [ -s "$out_src" ]; then
+  # R4: the operator's capture setting decides what is stored, in MCP mode
+  # too (§2.5). `off` posts nothing, `exit-only` stores the exit code and
+  # duration only, `tail` stores the tail. The envelope already carried the
+  # bytes to the agent; being more auditable does not override an explicit
+  # choice to keep output off the dashboard.
+  if [ "$mode" = "tail" ] && [ -n "$out_src" ] && [ -s "$out_src" ]; then
     if [ "$(stat -c '%s' "$out_src")" -gt 16384 ]; then
       truncated="true"
       enc_out=$(tail -c 16384 "$out_src" | base64 -w 0)
@@ -841,7 +860,17 @@ done
 cmd="${cmd#"${cmd%%[![:space:]]*}"}"
 cmd="${cmd%"${cmd##*[![:space:]]}"}"
 
+
 prefix_refusal=""
+# R3/G2: callers on the shared key reach this script directly, so the gateway
+# itself refuses a command whose first word is still an ESHU_ key. The parse
+# loop stops at an unknown key, which would otherwise become part of the
+# command; this also catches a known key placed after an unknown one.
+if [ -z "$prefix_refusal" ]; then
+  case "${cmd%% *}" in
+    ESHU_*) prefix_refusal="Unknown ESHU_ prefix — refusing." ;;
+  esac
+fi
 check_charset() {   # $1=name $2=value $3=regex $4=charset
   local name="$1" value="$2" regex="$3" charset="$4"
   if [ -n "$value" ] && [[ ! "$value" =~ $regex ]]; then
@@ -876,6 +905,14 @@ if [ -n "${ESHU_AGENT}${ESHU_AGENT_SIG}${ESHU_TS}${ESHU_NONCE}${ESHU_MCP}${ESHU_
 fi
 if [ -z "$ESHU_MCP" ]; then ESHU_MCP="0"; fi
 if [ -z "$ESHU_FORCE_JIT" ]; then ESHU_FORCE_JIT="0"; fi
+
+# S1: ESHU_WINDOW_TOKEN and ESHU_EXECUTION_ID are outside the agent MAC. The
+# dashboard never sends them on a signed call, so a signed prefix that carries
+# one is refused rather than trusted for the window/execution path.
+if [ "$MANIFEST_PRESENT" = "1" ] && [ -z "$prefix_refusal" ] \
+   && [ -n "${ESHU_WINDOW_TOKEN}${ESHU_EXECUTION_ID}" ]; then
+  prefix_refusal="A signed prefix must not carry ESHU_WINDOW_TOKEN or ESHU_EXECUTION_ID."
+fi
 
 if [ "$MANIFEST_PRESENT" = "1" ] && [ -z "$prefix_refusal" ]; then
   if [ -z "$ESHU_AGENT" ] || [ -z "$ESHU_AGENT_SIG" ] || [ -z "$ESHU_TS" ] || [ -z "$ESHU_NONCE" ]; then
@@ -952,7 +989,9 @@ if [ -z "$prefix_refusal" ] && [ -z "$cmd" ]; then
 fi
 
 if [ -n "$prefix_refusal" ]; then
-  logger -t eshu-gateway "PREFIX REFUSED from=${SSH_CONNECTION:-unknown} agent=${ESHU_AGENT:-none} sig=${SIG_STATE:-none} gateway_key=${DASHBOARD_KEY} mode=${SSH_MODE} reason=${prefix_refusal%%[[:space:]]*}"
+  # R2/G8: only the agent name that passed the MAC check is logged — an
+  # unverified value can carry control bytes and forge a log line.
+  logger -t eshu-gateway "PREFIX REFUSED from=${SSH_CONNECTION:-unknown} agent=${ESHU_VERIFIED_AGENT:-none} sig=${SIG_STATE:-none} gateway_key=${DASHBOARD_KEY} mode=${SSH_MODE} reason=${prefix_refusal%%[[:space:]]*}"
   say "[LOCKED] ${prefix_refusal} [Gateway $GATEWAY_VERSION]"
   finish refused 1
 fi
@@ -995,7 +1034,7 @@ normalize_paths() {
 normalized_cmd=$(normalize_paths "$cmd")
 self_access=0
 case "$normalized_cmd" in
-    *"/usr/local/bin/eshu-"*|*"/etc/eshu"*|*"/var/run/eshu"*|*"/run/eshu"*|*"eshu.db"*|*"eshu.tickets"*|*"eshu-session-key"*|*"eshu/features.d"*|*"/etc/sudoers.d/eshu"*)
+    *"/usr/local/bin/eshu-"*|*"/etc/eshu"*|*"/var/run/eshu"*|*"/run/eshu"*|*"/var/lib/eshu"*|*"eshu.db"*|*"eshu.tickets"*|*"eshu-session-key"*|*"eshu/features.d"*|*"/etc/sudoers.d/eshu"*)
         self_access=1
         ;;
 esac
@@ -1435,6 +1474,7 @@ else
   exit 1
 fi
 GWEOF
+  )
 
   sed -i "s|__TARGET_IP__|$TARGET_IP|g" "$GATEWAY"
   sed -i "s|__DASHBOARD_URL__|$DASHBOARD_URL|g" "$GATEWAY"
@@ -1457,13 +1497,13 @@ GWEOF
   fi
   rm -f "$SYNTAX_LOG"
   rm -f "${GATEWAY}.bak"
-  chown root:root "$GATEWAY"; chmod 755 "$GATEWAY"
+  chown root:root "$GATEWAY"; chmod 700 "$GATEWAY"
 }
 
 write_sudoers() {
   cat > "$SUDOERS" <<'EOF'
 Defaults:eshu-gateway env_keep += "SSH_ORIGINAL_COMMAND"
-eshu-gateway ALL=(root) NOPASSWD: /usr/local/bin/eshu-gateway.sh, /usr/local/bin/eshu-gateway.sh --dashboard-key
+eshu-gateway ALL=(root) NOPASSWD: /usr/local/bin/eshu-gateway.sh "", /usr/local/bin/eshu-gateway.sh --dashboard-key
 EOF
   chmod 440 "$SUDOERS"; chown root:root "$SUDOERS"
   if ! visudo -cf "$SUDOERS"; then echo "Sudoers error."; exit 1; fi
@@ -1778,7 +1818,8 @@ with open('/etc/eshu-windows.txt.tmp', 'w') as f:
           sed -i "s|^GATEWAY_TOKEN=.*|GATEWAY_TOKEN=\"$NEW_TOKEN\"|" /usr/local/bin/eshu-poller.sh
           sed -i "s|^GATEWAY_TOKEN=.*|GATEWAY_TOKEN=\"$NEW_TOKEN\"|" /usr/local/bin/eshu-gateway.sh
           # F12: the MAC helper reads the token from here, not from argv.
-          printf '%s\n' "$NEW_TOKEN" > /etc/eshu-token.tmp && chmod 600 /etc/eshu-token.tmp && mv -f /etc/eshu-token.tmp /etc/eshu-token 2>/dev/null || true
+          # R1: umask 077 so the temp file is never readable before chmod.
+          ( umask 077; printf '%s\n' "$NEW_TOKEN" > /etc/eshu-token.tmp ) && chmod 600 /etc/eshu-token.tmp && mv -f /etc/eshu-token.tmp /etc/eshu-token 2>/dev/null || true
           GATEWAY_TOKEN="$NEW_TOKEN"
         fi
         logger -t eshu-poller "Update to $NEW_VER completed (trigger $TRIGGER_ID)."
@@ -1832,7 +1873,8 @@ with open('/etc/eshu-windows.txt.tmp', 'w') as f:
           sed -i "s|^GATEWAY_TOKEN=.*|GATEWAY_TOKEN=\"$NEW_TOKEN\"|" /usr/local/bin/eshu-poller.sh
           sed -i "s|^GATEWAY_TOKEN=.*|GATEWAY_TOKEN=\"$NEW_TOKEN\"|" /usr/local/bin/eshu-gateway.sh
           # F12: the MAC helper reads the token from here, not from argv.
-          printf '%s\n' "$NEW_TOKEN" > /etc/eshu-token.tmp && chmod 600 /etc/eshu-token.tmp && mv -f /etc/eshu-token.tmp /etc/eshu-token 2>/dev/null || true
+          # R1: umask 077 so the temp file is never readable before chmod.
+          ( umask 077; printf '%s\n' "$NEW_TOKEN" > /etc/eshu-token.tmp ) && chmod 600 /etc/eshu-token.tmp && mv -f /etc/eshu-token.tmp /etc/eshu-token 2>/dev/null || true
           GATEWAY_TOKEN="$NEW_TOKEN"
         fi
       else
@@ -1965,8 +2007,10 @@ LOGGERUNIT
 
 # F12: the MAC key material. The gateway reads this file itself, so the key
 # never appears on argv. Root-only; rewritten on every install and update.
+# R1: umask 077 means the temp file is never readable, not even for the
+# instant before `chmod`.
 if [ -n "${GATEWAY_TOKEN:-}" ] && [ "$GATEWAY_TOKEN" != "None" ]; then
-  printf '%s\n' "$GATEWAY_TOKEN" > /etc/eshu-token.tmp
+  ( umask 077; printf '%s\n' "$GATEWAY_TOKEN" > /etc/eshu-token.tmp )
   chmod 600 /etc/eshu-token.tmp
   chown root:root /etc/eshu-token.tmp
   mv -f /etc/eshu-token.tmp /etc/eshu-token

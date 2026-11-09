@@ -231,7 +231,11 @@ printf '%s\\n' "$*" >> "__LOG__"
         assert "/etc/eshu/features.d" not in text
         assert "/var/run/eshu.tickets" not in text
         assert "${ESHU_RUN_DIR:-/run/eshu}" not in text
-        assert "/var/lib/eshu" not in text
+        # F12/S2: the nonce store is on the hard self-protection list, so the
+        # real path appears exactly once on purpose. The frozen pre-F12 copy
+        # has no nonce store at all.
+        if "ESHU_NONCE_DIR" in text:
+            assert text.count("/var/lib/eshu") == 1
         # The hard self-protection case still names the real path on purpose.
         assert '"/etc/eshu' in text
         return text

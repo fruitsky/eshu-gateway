@@ -7,6 +7,9 @@ token is now re-enrollment — so nothing else depends on the placeholder.
 """
 import os
 import re
+import shutil
+import stat
+import subprocess
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 
@@ -127,6 +130,10 @@ def test_f12_sudoers_allows_exactly_two_argv_shapes():
     line = next(l for l in src.splitlines()
                 if l.startswith("eshu-gateway ALL=(root) NOPASSWD:"))
     assert line.count("/usr/local/bin/eshu-gateway.sh") == 2
+    # S3: without `""` sudo allows any arguments (sudoers(5): no arguments
+    # listed means the user may pass their own). The dashboard line already
+    # names its one argument.
+    assert '/usr/local/bin/eshu-gateway.sh "",' in line
     assert line.rstrip().endswith("eshu-gateway.sh --dashboard-key")
 
 
@@ -135,7 +142,11 @@ def test_f12_register_reports_pin_and_capabilities():
     assert '"ssh_host_key":"\'"$HOST_KEY_LINE"\'"' in src
     assert '"ssh_agent_format":"eshu-ssh-agent-v1"' in src
     assert '"ssh_ticket_format":"v2"' in src
-    assert src.count('"ssh_agent_format"') == 2   # install and update paths
+    # S1: one capability string, used by both registration paths, and the
+    # agent format is only claimed when the token file exists on an upgrade.
+    assert src.count('\'"$SSH_REG_CAPS"\'') == 2
+    assert '[ -f /etc/eshu-token ]' in src
+    assert src.count('"ssh_agent_format"') == 1
 
 
 def test_f12_nonce_dir_is_created_by_the_installer():
@@ -163,3 +174,98 @@ def test_f12_mac_key_file_is_written_and_removed():
     # ... and an uninstall does not leave the key material behind.
     uninstall = src.split("Removing binaries...", 1)[1].split("Removing sudoers", 1)[0]
     assert "rm -f /etc/eshu-token" in uninstall
+
+
+# ── R1: the token-holding files are root-only from creation ────────────────
+def _function(src, name):
+    """The exact text of one shell function from the template."""
+    start = src.index("%s() {" % name)
+    end = src.index("\n}\n", start) + 3
+    return src[start:end]
+
+
+def _stub(bindir, name, body):
+    path = bindir / name
+    path.write_text("#!/bin/sh\n" + body + "\n")
+    path.chmod(0o755)
+    return path
+
+
+def test_f12_write_gateway_is_root_only_in_every_mode(tmp_path):
+    """R1: the script carries GATEWAY_TOKEN (the MAC key), so it is 0700.
+
+    `write_gateway` runs unconditionally — install, reinstall and update all
+    take this path — so one run covers every mode. The second run exercises
+    the update path (an existing file and its temporary `.bak`).
+    """
+    template = _read("dashboard/eshu-installer-template.sh")
+    body = _function(template, "write_gateway")
+    body = body.replace(
+        "__GATEWAY_CONTENT__",
+        '#!/bin/bash\nGATEWAY_TOKEN="__GATEWAY_TOKEN__"\n')
+    target = tmp_path / "eshu-gateway.sh"
+    harness = tmp_path / "harness.sh"
+    harness.write_text(body + """
+GATEWAY="%s"
+GATEWAY_TOKEN="tok-123"
+DASHBOARD_URL="http://dashboard.test"
+GATEWAY_VERSION="v-test"
+write_gateway
+write_gateway
+""" % target)
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    _stub(bindir, "chown", "exit 0")     # root-only chown is not ours to run
+    env = {"PATH": "%s:%s" % (bindir, os.environ.get("PATH", "/usr/bin:/bin"))}
+    proc = subprocess.run(["bash", str(harness)], capture_output=True,
+                          text=True, env=env, timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    assert stat.S_IMODE(target.stat().st_mode) == 0o700
+    assert "tok-123" in target.read_text()
+    # The temporary backup held the old token too; it must not be left behind.
+    assert not (tmp_path / "eshu-gateway.sh.bak").exists()
+
+
+def test_f12_token_file_is_created_0600_under_a_permissive_umask(tmp_path):
+    """R1: `/etc/eshu-token` is never readable, not even for an instant.
+
+    The block runs under `umask 022`; a `chmod` shim records the mode *at the
+    moment* the explicit chmod runs, which is what proves the temp file was
+    already 0600 from its creating `umask 077` (the final mode alone would not
+    distinguish the two).
+    """
+    template = _read("dashboard/eshu-installer-template.sh")
+    marker = ('if [ -n "${GATEWAY_TOKEN:-}" ] && '
+              '[ "$GATEWAY_TOKEN" != "None" ]; then')
+    start = template.index(marker)
+    end = template.index("\nfi\n", start) + len("\nfi\n")
+    token = tmp_path / "eshu-token"
+    block = template[start:end].replace("/etc/eshu-token", str(token))
+
+    observed = tmp_path / "modes"
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    _stub(bindir, "chown", "exit 0")
+    chmod = bindir / "chmod"
+    chmod.write_text("#!/bin/sh\n"
+                     'if [ "$1" = "600" ]; then stat -c "%%a" "$2" >> "%s"; fi\n'
+                     'exec %s "$@"\n' % (observed, shutil.which("chmod")))
+    chmod.chmod(0o755)
+
+    harness = tmp_path / "harness.sh"
+    harness.write_text("umask 022\nGATEWAY_TOKEN='tok-123'\n" + block)
+    env = {"PATH": "%s:%s" % (bindir, os.environ.get("PATH", "/usr/bin:/bin"))}
+    proc = subprocess.run(["bash", str(harness)], capture_output=True,
+                          text=True, env=env, timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    assert token.read_text() == "tok-123\n"
+    assert stat.S_IMODE(token.stat().st_mode) == 0o600
+    assert observed.read_text().split() == ["600"], observed.read_text()
+
+
+def test_f12_poller_token_rotation_uses_umask_077():
+    """R1: both rotation paths create the temp token file root-only."""
+    poller = _read("dashboard/eshu-poller.sh")
+    write = ("( umask 077; printf '%s\\n' \"$NEW_TOKEN\" > "
+             "/etc/eshu-token.tmp )")
+    assert poller.count(write) == 2
