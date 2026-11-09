@@ -451,6 +451,15 @@
       <!-- KPI cards -->
       <div id="stats-summary-cards" class="kpis" data-od-id="stats-summary-cards"></div>
 
+      <!-- How approved (F6) -->
+      <div class="widget" data-od-id="approval-breakdown">
+        <div class="widget-header">
+          <span>How approved &middot; who cleared the work</span>
+          <span class="chip" id="approvals-share"></span>
+        </div>
+        <div class="approvals-wrap" id="stats-approvals"><p class="text-muted">Loading...</p></div>
+      </div>
+
       <!-- Fleet hygiene -->
       <div class="widget" data-od-id="fleet-hygiene">
         <div class="widget-header">
@@ -1489,6 +1498,7 @@
       <div class="session-modal-name" id="sm-name" contenteditable="true" spellcheck="false" data-placeholder="Session name"></div>
       <div class="session-modal-desc" id="sm-desc" contenteditable="true" spellcheck="false" data-placeholder="Add a description..."></div>
       <div class="session-modal-meta" id="sm-meta"></div>
+      <div class="session-summary hidden" id="sm-summary"></div>
       <div class="sm-test-hint hidden" id="sm-test-hint"></div>
       <div class="session-modal-id">
         <code id="sm-id"></code>

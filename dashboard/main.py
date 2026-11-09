@@ -85,7 +85,10 @@ from db.web_fetch import (
     delete_web_fetch_policy, get_web_fetch_policies, get_web_fetch_policy,
     get_web_fetch_stats, set_web_fetch_policy,
 )
-from db.sessions import get_session, get_session_coverage, get_session_meta_map
+from db.sessions import (
+    get_session, get_session_coverage, get_session_meta_map,
+    get_session_summary,
+)
 from db.session_plans import (
     PlanError, approve_plan, claim_plan_item, create_plan, deny_plan,
     end_plan, get_active_plan, get_plan, list_plans,
@@ -122,6 +125,9 @@ from core.cmd_codec import decode_preview, detect_encoded_exec, scan_decoded
 from core.policy_eval import evaluate_policy_verdict
 from core.cmd_risk import get_cmd_risk, get_dry_run_suggestion
 from core.cmd_parse import breakdown as cmd_breakdown
+from core.approval_buckets import (
+    BUCKETS, BUCKET_KEYS, OVERRIDE_BUCKETS, bucket_for, empty_buckets,
+)
 from core.request_context import build_context
 from core.cmd_profiles import get_anomaly, refresh_profiles, _profiles_loop
 from core.gateway_watch import (
@@ -2350,8 +2356,48 @@ def get_statistics(request: Request, days: int = 14, gateway_ip: str = None, gat
     ''', (cutoff,) + ip_params)
     inner_targets = [dict(row) for row in cursor.fetchall()]
 
+    # F6: "how approved" — the stacked series and the override share that
+    # F3/F4 aim to lower. Bucketed in Python (one mapping); grouped in SQL so
+    # the row count stays small.
+    cursor.execute(f'''
+        SELECT DATE(r.created_at, 'unixepoch') AS date,
+               r.status AS status, COALESCE(r.reason, '') AS reason,
+               COUNT(*) AS n
+        FROM requests r
+        WHERE r.created_at >= ?{ip_filter}
+          AND COALESCE(r.excluded, 0) = 0
+        GROUP BY date, r.status, r.reason
+    ''', (cutoff,) + ip_params)
+    approval_totals = empty_buckets()
+    approval_by_day = {}
+    for row in cursor.fetchall():
+        bucket = bucket_for(row['status'], row['reason'])
+        if not bucket:
+            continue
+        count = int(row['n'] or 0)
+        day = approval_by_day.setdefault(row['date'], {})
+        day[bucket] = day.get(bucket, 0) + count
+        approval_totals[bucket] += count
+    approved_total = sum(approval_totals.values())
+    override_total = sum(approval_totals[key] for key in OVERRIDE_BUCKETS)
+    approval_breakdown = {
+        'days': days,
+        'buckets': [{'key': key, 'label': label} for key, label in BUCKETS],
+        'series': [
+            dict({'date': day['date']},
+                 **{key: approval_by_day.get(day['date'], {}).get(key, 0)
+                    for key in BUCKET_KEYS})
+            for day in filled
+        ],
+        'totals': approval_totals,
+        'approved': approved_total,
+        'override_share': round(override_total / approved_total * 100, 1)
+                          if approved_total else 0,
+    }
+
     result = {"daily": filled, "per_gateway": per_gateway,
-              "top_commands": top_commands, "inner_targets": inner_targets}
+              "top_commands": top_commands, "inner_targets": inner_targets,
+              "approval_breakdown": approval_breakdown}
 
     if extended:
         # Hourly heatmap — 24-element array
@@ -3724,11 +3770,36 @@ def session_detail_endpoint(sid: str, request: Request):
     for row in ssh:
         row.update(_encoded_fields(row.get('command', '')))
     mcp = get_integration_calls(session=sid, limit=500)['rows']
-    # F8 S3: whether the whole session is already excluded, so the modal shows
-    # the done state instead of offering the button again.
+    # F6: the wrap-up card's numbers. `by_approval` and the wait come from
+    # get_session_summary (one mapping for every surface); the writes are
+    # counted from F1's breakdown, per host, because a session can span hosts.
+    summary = get_session_summary(sid)
+    session_row = get_session(sid) or {}
+    summary['goal'] = session_row.get('goal') or ''
+    started = int(session_row.get('started_at') or summary.get('first_seen') or 0)
+    last = int(summary.get('last_seen') or session_row.get('last_seen') or 0)
+    summary['started_at'] = started
+    summary['duration_seconds'] = max(0, last - started) if started else 0
+    writes_by_host = {}
+    for row in ssh:
+        # F6 R2: "writes" means what changed (or was cleared to change), so a
+        # denied, blocked or expired command is not a write. Use the same
+        # bucket mapping as the approval chips: None is not an approval.
+        if bucket_for(row.get('status'), row.get('reason')) is None:
+            continue
+        broken = cmd_breakdown(row.get('command') or '')
+        writes = sum(1 for step in (broken.get('steps') or [])
+                     if step.get('kind') == 'write')
+        if writes:
+            host = row.get('hostname') or row.get('target_ip') or ''
+            writes_by_host[host] = writes_by_host.get(host, 0) + writes
+    summary['writes_by_host'] = writes_by_host
+    summary['writes'] = sum(writes_by_host.values())
+    # F8 S3 (merged): whether the whole session is already excluded, so the
+    # modal shows the done state instead of offering the button again.
     excluded = sum(1 for row in ssh if row.get('excluded'))
-    summary = {'excluded': excluded,
-               'all_excluded': bool(ssh) and excluded == len(ssh)}
+    summary['excluded'] = excluded
+    summary['all_excluded'] = bool(ssh) and excluded == len(ssh)
     return {'session_id': sid, 'ssh': ssh, 'mcp': mcp, 'summary': summary}
 
 

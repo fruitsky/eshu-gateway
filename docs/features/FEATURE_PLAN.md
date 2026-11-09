@@ -2724,11 +2724,221 @@ tests pass locally, and the X1 sidebar actions survived the merge.
 
 ### Implementer notes
 
-_(fill in)_
+**What I did**
+
+* **`core/approval_buckets.py`**: one mapping, `bucket_for(status, reason)`,
+  and the order the UI shows: allowlist · human · plan · read lane · session
+  override · host override · window · fleet run. Status wins where the status
+  alone is the answer (`auto-approved`, `window-approved`, `fleet-run`), so a
+  gateway's free-text reason on an allowlist row cannot move it between
+  buckets. Everything else on an approved row goes by reason prefix;
+  `session-plan:` and `session-override:` are prefixes, `override` and
+  `read-lane` are exact. **The read-lane reasons are matched by string** —
+  this branch has no F4 code to import. Refusals return `None`; a read-lane
+  *shadow* row is pending, and if a human approves it the bucket is `human`
+  (the lane did not clear it).
+* **`requests.decided_at`** (`db/requests.py`): a nullable column, set by the
+  first decision (`update_request_status_if_pending`, the approve/deny path),
+  by `update_request_status` (`COALESCE`, so a later consume never rewrites
+  it), and by the expiry sweep (`expired`/`abandoned`). Nullable on purpose:
+  pre-F6 rows stay unknown instead of being given an invented wait.
+* **`get_session_summary`** grows `by_approval` (all eight buckets, zeros
+  included), `waited_seconds` (`SUM(decided_at - created_at)`) and `decided`.
+  The MCP `session_summary` tool returns the dict as JSON, so it carries the
+  same breakdown without a second code path.
+* **`GET /api/sessions/{sid}/detail`** adds `summary`: the above plus `goal`,
+  `started_at`, `duration_seconds`, `failed` (F5), and `writes` /
+  `writes_by_host`, counted from F1's breakdown per row — a session can span
+  hosts, and the card names the host. Encoded commands count zero writes
+  (their steps are unknown; they never get this far).
+* **`GET /api/statistics`** adds `approval_breakdown`: `buckets`, `series`
+  (one row per day in the selected window, all buckets), `totals`,
+  `approved`, `override_share` (session + host override ÷ every approval,
+  per cent). Grouped in SQL by `(day, status, reason)` and bucketed in Python,
+  so the row count stays small.
+* **UI**: the session modal gets a wrap-up card under the meta line — how long
+  it ran, command/failed counts, the wait for a human, the eight approval
+  chips (zero counts greyed, so the absence of overrides is visible) and the
+  writes per host. Statistics gets a "How approved" widget: a stacked bar per
+  day, oldest first, with the override share as the chip headline and a legend
+  that keeps empty buckets visible. Bucket colours are tokens in `:root`
+  (`--appr-*`), not literals in rules.
+* **Tests**: `tests/test_f6_session_wrapup.py` (53) — the mapping table, the
+  generated reason-literal scan, the summary (counts, wait, MCP JSON),
+  `decided_at` on approve/deny/expire/consume/second-decision, the detail
+  summary (goal/duration/writes per host/failures), the statistics block
+  (series, totals, share, gateway filter, empty window), and four node-harness
+  checks for the card and the widget (escaping, zero buckets, duration
+  formatting).
+
+**Decisions and surprises**
+
+* `approval_breakdown` follows the page's day selector (7–365, default 14)
+  rather than being pinned to 14 — the chart and the KPI cards then describe
+  the same window.
+* A status's own meaning beats the reason in three places: `auto-approved`
+  (allowlist reason text is free-form from the gateway), `window-approved`
+  (no reason at all today) and `fleet-run` (the operator's own reason is free
+  text). Everything else is a reason prefix on an approved row.
+* `integration-approved`/`integration-denied` appear in the requests table
+  historically but are not SSH approvals; they map to `None` and are counted
+  as MCP calls, which is what the modal already did.
+* The wait is `decided_at - created_at` per row, summed. Rows created before
+  the column existed contribute nothing, and the card says "wait not
+  recorded" when no row has one, instead of showing a confident zero.
+
+`bash scripts/verify.sh`: `1909 passed, 3 skipped, 7 warnings in 383.81s (0:06:23)`. The three skips are F18's read-lane tests: F4 is not on this branch.
+
+### Round 2: fixes for reviewer round 1
+
+* **R1 — a row created already decided starts decided.** `create_request` now
+  stamps `decided_at = created_at` for every non-`pending` status (allowlist,
+  host/session override, plan, read lane, window, fleet), and `pending` keeps
+  NULL. The expiry sweep's `COALESCE` therefore never rewrites a creation
+  decision, so an unclaimed override swept to `abandoned` adds **0** to
+  `waited_seconds` and 1 to `decided`. Tests:
+  `test_f6_a_decided_row_starts_at_its_creation` (six status/reason pairs),
+  `test_f6_a_pending_row_has_no_decision`,
+  `test_f6_an_unclaimed_override_waits_zero` (override,
+  `session-override:` and `session-plan:` swept to abandoned) and
+  `test_f6_an_auto_approved_log_row_waits_zero` (an `/api/log`
+  `auto-approved` row through the gateway endpoint).
+* **R2 — writes mean what changed.** `session_detail_endpoint` now skips a row
+  whose `bucket_for(status, reason)` is `None`, so denied, blocked and expired
+  commands are not counted as writes; the card uses the same mapping as the
+  approval chips. `test_f6_writes_count_only_decided_rows`: one approved, one
+  denied, one blocked and one expired write give `writes == 1` on the approved
+  row's host.
+* **R3 — the generated reason test can fail now.**
+  `core/approval_buckets.KNOWN_REASON_PREFIXES` maps each prefix to its bucket
+  or to `None` ("not an approval": `encoded-payload`, `exhausted or
+  disabled"), and `bucket_for` goes through `known_reason()` instead of
+  hard-coded `startswith` checks. The scan is now a function over a list
+  (`_unmapped_prefixes`), the test asserts the scanned code prefixes are all
+  keys, and `test_f6_the_reason_check_can_fail` proves a synthetic
+  `brand-new-prefix` fails while known ones pass.
+  `test_f6_the_table_agrees_with_bucket_for` keeps the table and
+  `bucket_for` in step.
+* **S1 — the goal is on the card.** The facts line now starts with
+  `goal "…"` (escaped), so a named session no longer hides what it was for;
+  the node harness carries a goal and asserts it renders.
+* **S2 — known mismatch, not changed.** The approval series groups by SQLite
+  `DATE(created_at, 'unixepoch')` (UTC) while `filled` uses
+  `time.localtime`, exactly like the existing daily chart. On a non-UTC
+  dashboard the newest day's approvals can land in no bar; fixing it means
+  changing both charts' day boundary, so it is written down here rather than
+  half-fixed. **S3** (per-open `cmd_breakdown`) is likewise left as a known
+  cost; the modal is opened by a human, not in a loop.
+
+`bash scripts/verify.sh`: `1921 passed, 3 skipped, 7 warnings in 383.60s (0:06:23)`.
+
+### Round 3: merge with F8, F9 and F14
+
+`git merge origin/feature-roadmap` brings the approved F8 (test traffic), F9
+(freeze + HA Supervisor reads) and F14 (inventory) onto this branch. Four
+files conflicted; each was resolved by keeping both features, whole:
+
+* **`main.session_detail_endpoint`** keeps **one** summary dict: F6's
+  `by_approval`, `waited_seconds`, `decided`, `failed`, `duration_seconds`,
+  `writes` and `writes_by_host` plus F8's `excluded` and `all_excluded`. The
+  write count still uses the bucket mapping (R2), and the exclusion counts
+  still cover every SSH row of the session (F8 S3).
+* **`index.html`** keeps both `sm-summary` (F6's wrap-up card) and
+  `sm-test-hint` (F8's suggestion), in that order, under `sm-meta`.
+* **`app.js`** keeps the F6 block (`sessionSummaryHtml`, `renderSessionSummary`,
+  the approval chips, the goal line) and the F8 block (`looksLikeTestGoal`,
+  `excludedMarkHtml`, `excludeRequests`, `renderSessionTestHint`) whole; the
+  modal calls `renderSessionSummary(...)` then `renderSessionTestHint(...)`.
+* **`style.css`** keeps the F6, F14 and F8 blocks whole and once each: the F6
+  `--appr-*`/`.appr-*`/`.session-summary*` rules, the F14 `.inv-*` rules and
+  the F8 `.excluded-*`/`.sm-test-hint` rules. `ui_check.py` stays green and
+  `node --check` passes.
+
+**F8's merge note is implemented**, not just recorded: the F6
+`approval_breakdown` query now adds `COALESCE(r.excluded, 0) = 0` (the same
+filter as the other statistics queries), so an excluded approval is not in the
+"how approved" series. F8's generated statistics-filter scan walks
+`get_statistics` and now covers that query too, and
+`test_f6_approval_breakdown_skips_excluded_rows` checks the behaviour (one
+approved row plus one excluded approved row reports `human == 1`). The F6 and
+F8 test files both pass on the merged tree.
+
+`bash scripts/verify.sh`: `2010 passed, 3 skipped, 7 warnings in 410.61s (0:06:50)`.
 
 ### Reviewer notes
 
-_(reviewer)_
+**Round 1 (2026-11-08): changes requested.** Reviewed at `6b35d99`;
+`bash scripts/verify.sh`: `1909 passed, 3 skipped, 7 warnings in 331.10s (0:05:31)`.
+
+**What holds.** One mapping (`core/approval_buckets.py`) feeds the session
+card, the Statistics series and the MCP `session_summary`. "Status wins over
+a free-text reason" is the right call. `decided_at` is nullable, so old rows
+report no wait instead of a made-up one, and the first decision wins. The UI
+escapes every server string: host names, labels and dates. Bucket keys come
+from the server's fixed list. Colours are `:root` tokens. No approval path
+or order changed: this chunk only reads. The fixtures use `192.0.2.x`, and
+there is no live data.
+
+*Must fix:*
+
+* **R1 Rows that no human saw get counted as waiting for a human.** A row
+  created already approved (host override, session override, plan, and later
+  the read lane) has `decided_at = NULL`. If the gateway never claims it, the
+  expiry sweep marks it `abandoned` and stamps `decided_at = now`
+  (`COALESCE`). The agent then appears to have "waited" the whole TTL plus
+  the sweep delay. In a scratch test, one host-override row with a 90 s TTL,
+  swept 600 s later, added 600 s to `waited_seconds` and 1 to `decided`.
+  **Fix:** stamp `decided_at = created_at` in `create_request` for any status
+  other than `pending` (the decision *was* the creation), and keep the
+  `COALESCE` in the sweep. **Test:** create an `approved` row with
+  `reason="override"`, sweep it to `abandoned`, and check that it adds 0 to
+  `waited_seconds`. Do the same for `session-override:`, `session-plan:` and
+  `/api/log` `auto-approved` rows.
+* **R2 Denied, blocked and expired commands are counted as writes.** The
+  `writes_by_host` loop in `session_detail_endpoint` counts F1 write steps
+  in every SSH row of the session. The card says "writes", meaning what
+  changed, but a denied `systemctl restart` and a blocked `rm` both count. In
+  a scratch test, a session with one denied and one blocked write showed
+  `writes: 2`. **Fix:** count only rows whose bucket is not `None` (they ran,
+  or were cleared to run). Use `bucket_for(row['status'], row['reason'])`,
+  so the card uses the same mapping. **Test:** a session with one approved,
+  one denied, one blocked and one expired write reports `writes == 1` on the
+  approved row's host.
+* **R3 The "new reason prefix" test can never fail.** The spec asks for "a
+  test that fails when a new reason prefix is added without a bucket".
+  `test_f6_code_reasons_have_a_bucket` asserts
+  `bucket_for('approved', prefix) is not None`, but `bucket_for` returns
+  `human` for *any* unknown reason on an approved row, so every new prefix
+  passes. **Fix:** add a `KNOWN_REASON_PREFIXES` table to
+  `approval_buckets.py` that maps each prefix to its bucket, or to "not an
+  approval" (`encoded-payload`). Then assert that every scanned prefix is a
+  key in that table, and that `bucket_for` agrees with the table. **Test:**
+  the scan itself. Also add a negative case: a synthetic prefix that is not
+  in the table makes the check fail. Run the check function on a list, not
+  on the tree.
+
+*Should fix:*
+
+* **S1 The goal is not on the card once the session has a name.** The spec
+  lists the goal first. The card relies on the modal title, which shows
+  `meta.name || goal`, so a named session hides its goal. Show the goal in
+  the facts line when the session has a name. **Test:** the node harness
+  renders a named session, and the goal appears, escaped.
+* **S2 The day buckets mix UTC and local time.** The new series keys
+  `approval_by_day` by SQLite `DATE(created_at, 'unixepoch')` (UTC), but
+  `filled` uses `time.localtime`. The existing daily chart has the same
+  mismatch, so this is not new. On a non-UTC dashboard, the newest day's
+  approvals can land in no bar. Either use the same clock on both sides, or
+  write the mismatch down as known. **Test:** with `TZ` set to a non-zero
+  offset, today's approvals appear in the last series entry.
+* **S3 Writes are counted on every detail open.** `cmd_breakdown` runs once
+  per SSH row (up to 500) on every modal open. That is fine today. If it is
+  ever slow, cache the count per row, or reuse F18's stored breakdown.
+
+F6 lists F4 as a dependency. The read-lane bucket is matched by string and
+tested, which is acceptable. When F4 merges, re-run
+`test_f6_code_reasons_have_a_bucket` (after R3), so the `read-lane` literal
+is picked up.
 
 ---
 
@@ -4092,7 +4302,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 6 | F5 | exec-results | gateway + dashboard | Merged | `feat/f5-exec-results` | — | |
 | 6a | F18 | request-context | dashboard | Merged | `feat/f18-request-context` | F1, F5, F7, X1 | |
 | 7 | F12 | ssh-exec | dashboard + gateway | Ready (after F5) — design first | `feat/f12-ssh-exec` | F4, F5 | design approval + security reviewer sign-off |
-| 8 | F6 | session-wrapup | dashboard | Ready (after F12) | `feat/f6-session-wrapup` | F3, F4, F5 | |
+| 8 | F6 | session-wrapup | dashboard | **Changes requested (R1–R3)** — round 1 | `feat/f6-session-wrapup` | F3, F4, F5 | |
 | 9 | F13 | session-conclusions | dashboard + MCP | Ready (after F6) | `feat/f13-session-conclusions` | F5, F6 | |
 | 10 | F8 | test-traffic | dashboard | Merged | `feat/f8-test-traffic` | — | low priority |
 | 11 | F9 | ha-supervisor-read | dashboard | Merged | `feat/f9-ha-supervisor-read` | — | token is now a dedicated `eshu` HA admin user |
