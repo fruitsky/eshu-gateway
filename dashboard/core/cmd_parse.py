@@ -60,6 +60,14 @@ _RUNUSER_VALUE_FLAGS = {'-u', '--user', '-g', '--group', '-G', '--supp-group',
 _ASSIGN_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*=')
 
 _KEYWORDS_DROP = {'for', 'select', 'case', 'function'}
+# SC10 (security round 3): a loop, conditional, function definition, brace
+# group or subshell is not a plain chain of reads. The lane refuses any command
+# carrying the `compound` flag; F1 marks it here, from the parsed atoms (so a
+# word inside a quoted argument is not mistaken for a keyword).
+_COMPOUND_KEYWORDS = {'for', 'select', 'while', 'until', 'if', 'case',
+                      'function'}
+_COMPOUND_STARTS = {'', ';', ';;', '&', '&&', '||', '|', '\n', '(', '{',
+                    'do', 'then', 'else', 'elif', '!', 'time'}
 _KEYWORDS_TRIM = {'if', 'elif', 'while', 'until', 'then', 'do', 'else',
                   'done', 'fi', 'esac', '{', '}', '!', 'time'}
 
@@ -259,6 +267,27 @@ def _normalise(tokens):
         else:
             out.append(token)
     return out
+
+
+def _mark_compound(atoms, state):
+    """SC10: flag loops, conditionals, functions, brace groups and subshells."""
+    previous = ''
+    for atom in atoms:
+        if isinstance(atom, tuple):
+            word = atom[1]
+            if word in _COMPOUND_KEYWORDS and (
+                    previous in _COMPOUND_STARTS
+                    or previous in _COMPOUND_KEYWORDS):
+                state.flag('compound')
+            elif word in ('{', '}'):
+                state.flag('compound')
+            previous = word
+        else:
+            # A bare `(`/`)` is a subshell (or a case/function group, which is
+            # already flagged); `$(`/`<(` were folded into word atoms above.
+            if atom in ('(', ')'):
+                state.flag('compound')
+            previous = atom
 
 
 def _atomise(tokens):
@@ -1364,7 +1393,9 @@ def _parse_text(text, ctx, depth, state, first_op=''):
         state.complete = False
         return [_step(text.strip(), first_op, UNKNOWN, 'unterminated quote', ctx, state)]
 
-    atoms = _extract_functions(_atomise(tokens), state, depth)
+    atoms = _atomise(tokens)
+    _mark_compound(atoms, state)
+    atoms = _extract_functions(atoms, state, depth)
     stmts = _statements(atoms, state, heredoc_specs)
     steps = []
     first = True

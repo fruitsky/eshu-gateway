@@ -480,7 +480,10 @@ def _binary_log(path):
         return True
     name = os.path.basename(path)
     for base in LOG_BINARY_NAMES:
-        if name == base or name.startswith(base + '.'):
+        # SC11: plain, dotted (`wtmp.1`), dated (`btmp-20260101`, and its
+        # `.gz`) rotations all name the same binary record.
+        if name == base or name.startswith(base + '.') \
+                or name.startswith(base + '-'):
             return True
     return False
 

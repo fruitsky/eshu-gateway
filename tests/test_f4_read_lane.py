@@ -67,6 +67,8 @@ ELIGIBLE = [
     # name is not a read — see the INELIGIBLE list and the open question)
     'uptime',
     'uptime && whoami',
+    'uptime && df -h',
+    'uptime; free -h',
     'df -h',
     'free -h',
     'systemctl status',
@@ -811,6 +813,57 @@ class TestRoundSeven:
             ok, why = _verdict(command)
             assert ok is False, (command, why)
             assert why.startswith('context:'), (command, why)
+
+
+class TestRoundEight:
+    """Round 8 — security round 3's SC10 and SC11."""
+
+    def test_f4_sc10_compound_constructs_are_refused(self):
+        for command in (
+                'while true; do uptime; df -h; done',
+                'until false; do free -h; done',
+                'for i in 101 102; do uptime; done',
+                'select x in a b; do uptime; done',
+                'if [ -f /etc/os-release ]; then cat /etc/os-release; fi',
+                'case x in a) cat /etc/hosts ;; esac',
+                'f() { uptime; }; f',
+                '{ uptime; df -h; }',
+                '( uptime; df -h )'):
+            ok, why = _verdict(command)
+            assert ok is False, (command, why)
+            assert 'compound' in why, (command, why)
+
+    def test_f4_sc10_a_loop_of_eligible_reads_is_refused(self):
+        # The reviewer's example: condition and body are both plain reads.
+        bd = breakdown('while uptime; do df -h; done')
+        assert bd['flags'] == ['compound']
+        ok, why = _verdict('while uptime; do df -h; done')
+        assert ok is False and why == 'flag:compound'
+
+    def test_f4_sc10_background_hidden_in_grouping(self):
+        for command in ('{ uptime & }', '( uptime & )', '{ df -h & }'):
+            ok, why = _verdict(command)
+            assert ok is False, (command, why)
+            assert 'compound' in why, (command, why)
+
+    def test_f4_sc10_plain_chains_stay_eligible(self):
+        for command in ('uptime && df -h', 'uptime; free -h',
+                        'uptime || whoami', 'uptime && df -h && free -h'):
+            assert _verdict(command)[0] is True, command
+        # A keyword as an argument is not a construct.
+        assert _verdict('grep for /proc/1/status')[0] is True
+        assert breakdown('grep for /proc/1/status')['flags'] == []
+
+    def test_f4_sc11_dated_login_record_rotations_are_refused(self):
+        for base in ('lastlog', 'wtmp', 'btmp', 'faillog'):
+            for path in ('/var/log/%s-20260101' % base,
+                         '/var/log/%s-20260101.gz' % base):
+                for verb in ('head -n 5 {p}', 'tail -n 5 {p}',
+                             'grep -m 5 -e x {p}'):
+                    command = verb.format(p=path)
+                    ok, why = _verdict(command)
+                    assert ok is False, (command, why)
+                    assert why == 'binary-log', (command, why)
 
 
 class TestReadPolicy:
