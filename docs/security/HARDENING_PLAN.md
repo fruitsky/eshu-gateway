@@ -1267,6 +1267,20 @@ Scope preview:
   covers only the session id. Plan: derive a per-gateway key
   (`HMAC(master, gateway_ip)`) and include an expiry in the signed payload;
   remove the "fail open until first key sync" window.
+* **Bind the session signature to the command** (added 2026-11-09, from the
+  F4 security review). Today `ESHU_SESSION_SIG` covers the session id only.
+  Anyone who sees one valid signature can therefore reuse it with any
+  command until it expires: another agent, or anything that reads the
+  gateway's logs (see the Chunk 7 item). Plan: sign the command together
+  with the session id and the expiry, or make each signature single-use, so
+  that a leaked signature cannot be reused. The design must say how the
+  agent obtains a signature per command without a round trip that slows
+  every call down.
+  * **Precondition for unlocking the F4 read lane's `on` mode** on any
+    gateway (the `read_lane_on_enabled` meta key, set by hand). This item and
+    the Chunk 7 logging item must both be merged and deployed first.
+  * **F12 (`ssh_exec`) depends on this.** Its design must build on the
+    command-bound signature, not on today's id-only one.
 
 ---
 
@@ -1292,6 +1306,18 @@ Scope preview:
   a host/session override is opened on a Proxmox host (`pct exec` reaches every
   container); make `tests/test_db_audit.py::test_audit_log_ordering` robust to
   background audit writes (flaky in the full suite).
+* Added 2026-11-09 (F4 security review): **stop logging the session
+  signature.** `eshu-gateway.sh` writes the whole `SSH_ORIGINAL_COMMAND` to
+  syslog before it strips the prefixes, so `ESHU_SESSION_SIG` ends up in
+  syslog and the journal. Log the command without its signed prefixes. The
+  session id may stay, because it is not a secret on its own. Check every
+  other `logger` call and every log line the dashboard stores, so the
+  signature appears in none of them. Tests: a gateway sandbox run with a
+  signed prefix leaves no 64-hex signature in the captured log output.
+  * **Precondition for unlocking the F4 read lane's `on` mode** on any
+    gateway. With `on`, the agent can read syslog and the journal with no
+    human approving it, and could pick up another session's signature. Ship
+    this item ahead of the rest of Chunk 7 if the unlock comes first.
 
 ## 8. Rollout gate (no deploy before this)
 
@@ -1344,8 +1370,8 @@ dashboard LXC or gateways. The reviewer runs it; the implementer does not deploy
 | 5 | authz | Medium | **Merged** (follow-up R4) | `sec/chunk-5-authz` @ `2d579be` | Approved; loopback check vs same-host proxy → R4 |
 | R | review-fixups | Medium | **Merged** | `sec/chunk-R-review-fixups` @ `0a8e400` | Approved; reviewer re-ran full suite (1343 passed), pre-commit, installer sync, and the tier probe (former false positives run normally; broad matches → JIT; Eshu paths FATAL) |
 | H | read-tools | High | **Merged** | `sec/chunk-H-read-tools` @ `d31c763` | Approved; full suite 1352 passed + 1 known flake (`test_audit_log_ordering`, passes 8/8 in isolation, untouched by H → Chunk 7); reviewer DELETE/POST/PUT/PATCH repro refused with no upstream request; WS classifier probe 29/29 |
-| 6 | supply-chain | High | Design pending | — | |
-| 7 | low | Low | Draft | — | |
+| 6 | supply-chain | High | Design pending | — | Includes binding the session signature to the command: a precondition for F4 `on` and a dependency of F12 |
+| 7 | low | Low | Draft | — | Includes not logging the session signature: a precondition for F4 `on` (may ship early) |
 
 Chunks are done **in order**; each new chunk branches from the updated
 `security-hardening` after the previous one is merged.
