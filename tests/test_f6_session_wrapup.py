@@ -389,6 +389,20 @@ class TestStatisticsApprovals:
         today = block['series'][-1]
         assert today['allowlist'] == 1 and today['human'] == 1
 
+    def test_f6_approval_breakdown_skips_excluded_rows(self, auth_client):
+        """F8 merge note: the series is a statistic, so excluded rows go."""
+        from db.requests import mark_requests_excluded
+        sid = 'sess-f6-excluded'
+        _create(target_ip='192.0.2.10', command='uptime', status='approved',
+                session_id=sid)
+        hidden = _create(target_ip='192.0.2.10', command='id', status='approved',
+                         session_id=sid)
+        mark_requests_excluded(ids=[hidden])
+        data = auth_client.get('/api/statistics?days=14').json()
+        block = data['approval_breakdown']
+        assert block['totals']['human'] == 1
+        assert block['approved'] == 1
+
     def test_f6_statistics_gateway_filter(self, auth_client):
         self._make()
         _create(target_ip='192.0.2.99', command='uptime',
