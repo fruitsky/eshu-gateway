@@ -4682,7 +4682,137 @@ F14 merges second only needs to resolve the docstring.
 
 ### Implementer notes
 
-_(fill in)_
+**Status: implemented, awaiting review.** The acceptance criteria include a
+reviewer security pass (try to reach every FORBIDDEN endpoint), so this note
+lists where to push and what the tests already prove.
+
+**Commit:** the code and tests are in `1e14827` (`feat(f10): HA Supervisor
+actions (approval-gated)`) on `feat/f10-ha-supervisor-actions`. This note is
+a separate docs commit.
+
+#### 1. What was checked against the HA Core source
+
+Checked on 2026-11-09 against `home-assistant/core@dev`:
+
+* `homeassistant/components/hassio/websocket_api.py` — the `supervisor/api`
+  command requires `endpoint` (string) and `method` (string), accepts optional
+  `data` (dict), `params` (dict) and `timeout` (number), is `@require_admin`,
+  and hands `data` to the Supervisor passthrough client; the WS result is
+  `result["data"]`. `hassio/update/addon` requires `addon` (str) **and**
+  `backup` (bool); `hassio/update/core` requires `backup` (bool). Both are
+  `@require_admin` and delegate to `update_helper.update_addon/update_core`.
+* `homeassistant/components/hassio/const.py` — `WS_TYPE_API = "supervisor/api"`.
+* `homeassistant/components/hassio/update.py` / `update_helper.py` — the
+  update WS commands schedule the same work the Supervisor's
+  `/addons/{slug}/update` and `/core/update` endpoints do; the command returns
+  after the Supervisor call completes, which is the source of the timeout note
+  in §5.
+
+**Not verifiable from that source:** the Supervisor itself is closed-source,
+so the REST endpoint names and payloads (`/backups/new/full`,
+`/backups/new/partial`, `/core/restart`, `/host/reboot`,
+`/addons/{slug}/{action}`) come from the Supervisor API docs and this chunk's
+spec, not from HA Core. That is recorded as open question 1 rather than
+assumed silently.
+
+#### 2. The table
+
+`core/ha_supervisor.SUPERVISOR_ACTIONS` maps each tool to one fixed
+(endpoint, method) pair; `WS_ACTIONS` holds the two update commands. The agent
+supplies arguments only, and only as validated placeholders:
+
+| Tool | Fixed target | Arguments | Notes |
+|---|---|---|---|
+| `ha_addon_action` | `POST /addons/{slug}/{action}` via `supervisor/api` | `slug`, `action` | `action` must be one of start/stop/restart (the only `{action}` values in the table) |
+| `ha_addon_update` | WS `hassio/update/addon` | `slug`, `backup` | |
+| `ha_core_update` | WS `hassio/update/core` | `backup` | |
+| `ha_backup_create` | `POST /backups/new/full` or `/partial` | `name`, `partial_addons`, `partial_folders` | the *payload* decides partial vs full; nothing agent-supplied reaches the path |
+| `ha_core_restart` | `POST /core/restart` | — | refused unless a valid `ha_check_config` ran on this integration in the last 10 min |
+| `ha_host_reboot` | `POST /host/reboot` | — | seeded **disabled**; summary is `REBOOTS THE WHOLE HA HOST` and the card renders it in red |
+
+All six are `read_only: False`, `always_gate: True`, `handler:
+ha_supervisor_action`, so each call creates a pending approval and **nothing
+runs before the operator approves it**. Freeze refuses before queueing (the
+generic F9 path, tested). `ha_check_config` now has a handler so its result is
+recorded in `meta` under `ha_check_config_<integration>` (`result`, `at`): a
+valid check on one HA instance never vouches for another.
+
+#### 3. FORBIDDEN
+
+`FORBIDDEN` lists restore (`/backups/`), add-on options/install/uninstall
+(`/addons/`), `/supervisor/options`, `/host/shutdown`, `/store/repositories`,
+`/auth*`, `/security*`, `/os/datadisk*` and `/os/boot-slot`. A table test
+walks every endpoint the read and action tables can produce and every WS
+command, and fails if one starts with a forbidden prefix. The one deliberate
+exception is documented in the test: `/backups/new/full|partial` are the only
+`/backups/` paths reachable, and `/addons/{slug}/{start|stop|restart}` the only
+`/addons/` ones. The generic WS tools remain unable to send
+`supervisor/`/`hassio/` commands at all (F9 R2), and an approved pending call
+runs the *handler*, not a raw command, so that does not change here.
+
+#### 4. `call_service(domain='hassio')`
+
+Refused with an audited `hassio_domain_refused` (403) before any queue entry,
+unless the agent's own policy lists `hassio` in the `ha_call_service`
+`domain_allow` list — the operator's explicit, audited escape hatch. The
+refusal message points at the F10 tools. Tested both ways, plus the "other
+domains are untouched" case.
+
+#### 5. Preflight, the summary, and timeouts
+
+* Each action is validated by `_preflight_ha_supervisor_action` *before* the
+  approval is created: bad slug, bad action, bad backup name, an update with
+  no version available (`ha_update_not_available`) and a restart without a
+  recent valid check are refused instead of queued.
+* A viable action returns `{'_summary': …}`. `tool_runner` stores it in the new
+  `pending_integration_calls.summary` column, and the approval card renders it
+  (a red line for the reboot). The add-on update summary is
+  `addon_update | <slug> | <current> -> <target>`, read from
+  `/addons/{slug}/info`; core update reads `/core/info`.
+* **Timeouts (found while checking the source):** `supervisor/api` defaults
+  its per-call `timeout` to **10 s**, and updates/backups can run for minutes.
+  The action path therefore sends `timeout: 600` for backups and `120` for the
+  other supervisor/api calls, and raises the WebSocket read timeout to 620 s
+  (backup/update) or 60 s (everything else). Reads keep the 30 s default.
+
+#### 6. Plan items of type `mcp`
+
+`session_plan_items` gains `kind` (`ssh` default, so pre-F10 rows are
+unchanged), `integration`, `tool` and `args_hash`. An `mcp` item is proposed as
+`{kind: "mcp", integration, tool, args: {...}, max_uses}` and the dashboard
+stores the **hash only** — an HA service payload can carry a secret, and a plan
+row is rendered in the UI. Matching in `tool_runner` is integration + tool +
+the exact argument hash, one use per claim, through the same conditional
+UPDATE as the SSH claim; a different argument hash never matches. The SSH
+claim now filters `kind='ssh'`, so the two item types cannot cross-claim.
+
+#### 7. Tests
+
+`tests/test_f10_ha_supervisor_actions.py` (39) covers every case in the chunk:
+right endpoint/payload per action; unknown action and bad slug refused; restart
+without a recent valid check refused and queued after one; the reboot tool
+seeded disabled; the FORBIDDEN table walk; `call_service` with `hassio`
+refused by default and allowed only with an explicit policy; the preflight
+summary; an `mcp` plan item approving exactly one matching call and nothing
+else; freeze queueing nothing. `tests/test_ha_mcp.py` and
+`tests/test_integrations.py` were updated for the six new seeded tools.
+
+`bash scripts/verify.sh`: `2370 passed, 7 warnings in 445.42s (0:07:25)`.
+
+#### Open questions
+
+1. The Supervisor REST payloads (backup create, restart, reboot, add-on
+   action) are closed-source; they come from the Supervisor API docs and this
+   chunk's spec. Please confirm `/backups/new/partial` takes
+   `{name, addons, folders}` against a live Supervisor before this ships.
+2. A slow add-on/Core update can exceed the 620 s read timeout. The Supervisor
+   continues the update; the tool then reports a timeout, which reads as a
+   failure to the agent. Options: a fire-and-poll mode (start, then read
+   `ha_addons`/`ha_core_info` for `version`), or a larger cap. This is a UX
+   decision, not a security one.
+3. The reboot warning is a red meta line driven by the tool name + summary.
+   A dedicated "destructive" card style belongs to the UI pass.
+
 
 ### Reviewer notes
 
@@ -5748,7 +5878,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 9 | F13 | session-conclusions | dashboard + MCP | Merged | `feat/f13-session-conclusions` | F5, F6 | |
 | 10 | F8 | test-traffic | dashboard | Merged | `feat/f8-test-traffic` | — | low priority |
 | 11 | F9 | ha-supervisor-read | dashboard | Merged | `feat/f9-ha-supervisor-read` | — | token is now a dedicated `eshu` HA admin user |
-| 12 | F10 | ha-supervisor-actions | dashboard | Ready (after F9) | `feat/f10-ha-supervisor-actions` | F9, F3, Chunk H | reviewer pass + security reviewer sign-off |
+| 12 | F10 | ha-supervisor-actions | dashboard | **Implemented** — awaiting review/security pass | `feat/f10-ha-supervisor-actions` @ `1e14827` | F9, F3, Chunk H | reviewer pass + security reviewer sign-off |
 | 13 | F11 | ha-config-files | dashboard | Ready (after F10) — design first | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | design approval + security reviewer sign-off |
 | 14 | F14 | inventory | dashboard + MCP | Merged | `feat/f14-inventory` | Chunk H | |
 | 15 | F15 | probes | dashboard + MCP | Ready after F12 | `feat/f15-probes` | F4, F12 | |
