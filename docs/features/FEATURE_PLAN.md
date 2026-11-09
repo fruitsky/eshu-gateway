@@ -3616,6 +3616,66 @@ as R1. It is out of F12's scope. It belongs with security Chunk 6 or 7.
 Once R1–R6 are written into the note, F12 goes to the security reviewer
 (§ 2.6a) for design sign-off. No code until both approvals are recorded.
 
+**Design round 2 (2026-11-09, main feature reviewer): approved in principle;
+fold in A1–A5, then it goes to the security reviewer.** R1–R6 are right, and
+the reasoning in §6 (force-JIT has to cover the dashboard's auto paths too)
+and §8 (one envelope, output only inside it) is exactly what was missing.
+Five parts are still underspecified and would become bugs in the code. Add
+them to the note (no code):
+
+* **A1 Nonce store on the gateway.** The gateway is a new process per SSH
+  call, so "a seen-nonce set" must be a file. Specify it:
+  * Path: `/run/eshu/nonces`, which inherits the poller's 0700 root-owned
+    checks.
+  * Concurrency: `flock` around check-and-add, so two concurrent calls with
+    the same nonce cannot both pass.
+  * Pruning: entries older than the ±300 s window are dropped on each write.
+  * Size bound: if the file is over N entries, refuse new signed calls
+    (fail closed) rather than evict unexpired nonces.
+  * Tests: two concurrent calls with the same nonce, exactly one passes.
+* **A2 Canonical form and HMAC tooling.** Make the MACed string unambiguous:
+  a fixed field order joined with `\n`, every field validated against a
+  charset without `\n`, and the version label first. Say how the gateway
+  computes HMAC without `python3` on the hot path: reuse whatever
+  `ESHU_SESSION_SIG` verification uses today, or `openssl dgst -sha256
+  -mac HMAC -macopt hexkey:…`, with the key **never on argv**, so pass it by
+  file or stdin. Give a test vector shared by the dashboard and gateway
+  tests.
+* **A3 Every gateway `echo` in MCP mode.** Today the gateway prints banners
+  and status lines on many paths (JIT "request sent", "[OK] Approved!
+  Executing…", blocklist and freeze messages, timeouts). In MCP mode none
+  of these may reach stdout. List the stdout writers in `eshu-gateway.sh`
+  and route them through one `say()` helper, which prints in direct mode
+  and appends to the envelope's `messages` field (escaped) in MCP mode.
+  Test: in MCP mode, stdout is exactly one envelope line on every path
+  (ran, pending, blocked, frozen, Zero-Trust, encoded, bad signature).
+  Also settle the output cap: F5's capture keeps 16 KiB, while this note
+  says 64 KiB. Pick one for MCP mode and show the bash.
+* **A4 Ticket format and compatibility.** The new ticket line carries agent
+  and session in front of the command (`ts|agent|session|cmd`, with the
+  command last so `|` inside it survives).
+  * Say who writes it: the poller, from a new field in the approval
+    payload.
+  * The new gateway must still read old `ts|cmd` lines as agent-less.
+  * An old poller writing old lines must never let a signed MCP request
+    claim an agent-less ticket. A signed request may only claim a ticket
+    for its own agent.
+  * Tests for both directions.
+* **A5 State the trust change plainly.** Until now the dashboard could
+  approve commands but not start them. With the dashboard key it can start
+  a command on every gateway, so a compromised dashboard can now both start
+  and approve its own commands. JIT still runs on the gateway, but the
+  approval lives on the same dashboard. Write this as an accepted risk, and
+  list the mitigations:
+  * `from=` on the key;
+  * per-gateway `ssh_mode` with `direct+mcp` as default, so the key can be
+    left off sensitive gateways;
+  * the key file's modes;
+  * an audit row per `ssh_exec`.
+
+  Add one option for the security reviewer to decide: a per-gateway "never
+  accept the dashboard key" switch (the installer omits the line).
+
 ---
 
 ## Chunk F13 — Session conclusions & runbooks · slug `session-conclusions` · dashboard + MCP
@@ -4026,7 +4086,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 5a | X1 | ctx-actions | dashboard | Merged | `fix/x1-ctx-actions` | — | FYI to security reviewer (approve ignored status) |
 | 6 | F5 | exec-results | gateway + dashboard | Merged | `feat/f5-exec-results` | — | |
 | 6a | F18 | request-context | dashboard | Merged | `feat/f18-request-context` | F1, F5, F7, X1 | |
-| 7 | F12 | ssh-exec | dashboard + gateway | **Design: changes requested (R1–R6)** — round 1; no code yet | `feat/f12-ssh-exec` | F4, F5 | design approval + security reviewer sign-off |
+| 7 | F12 | ssh-exec | dashboard + gateway | **Design approved in principle; fold A1–A5, then security review** | `feat/f12-ssh-exec` | F4, F5 | design approval + security reviewer sign-off |
 | 8 | F6 | session-wrapup | dashboard | Ready (after F12) | `feat/f6-session-wrapup` | F3, F4, F5 | |
 | 9 | F13 | session-conclusions | dashboard + MCP | Ready (after F6) | `feat/f13-session-conclusions` | F5, F6 | |
 | 10 | F8 | test-traffic | dashboard | Ready (after F13) | `feat/f8-test-traffic` | — | low priority |
