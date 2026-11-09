@@ -4816,7 +4816,59 @@ else; freeze queueing nothing. `tests/test_ha_mcp.py` and
 
 ### Reviewer notes
 
-_(reviewer)_
+**Round 1 (2026-11-09, main feature reviewer): changes requested.** 177 F10,
+F9, F3, HA and integration tests pass locally.
+
+*What holds:*
+
+* Every action is always-gated and audited, and freeze blocks it.
+* `SLUG_RE` (`^[a-z0-9_]{1,64}$`) makes path tricks in slugs impossible.
+* Shapers pass only named fields, so `options` never reaches an add-on.
+* `ha_host_reboot` is seeded disabled.
+* `ha_core_restart` needs a recent valid config check.
+* `call_service(domain='hassio')` is refused unless allowed (domain check
+  is trimmed and case-folded).
+
+*Must fix:*
+
+* **M1 The generic HA REST tools reach the Supervisor.** F9 R2 closed
+  `ws_write`, but the HA integration's generic REST `read`/`write` are not
+  checked for:
+  * `/api/hassio/…`, HA Core's Supervisor proxy, which admin tokens can use;
+  * `/api/services/hassio/…`, the same services `call_service` now refuses.
+
+  So "FORBIDDEN endpoints are unreachable from every tool" does not hold:
+  a backup restore or host shutdown is one approval away through the
+  generic write. Fix: in `tool_runner`, for HA-kind integrations, refuse a
+  generic REST call whose normalised path (percent-decoded, lowercased,
+  `//` collapsed, leading `/` and an `api/` prefix stripped) starts with
+  `hassio/` or `services/hassio/`, before gating and when a pending call is
+  approved (mirror F9 R2).
+  * Extend the FORBIDDEN table test to walk **every** HA tool, including the
+    generic read and write, with each spelling.
+  * Confirm against HA Core's `components/hassio/http.py` which `/api/hassio`
+    paths exist, and record it in the notes.
+* **M2 MCP plan items are not bound to the caller.** `claim_mcp_plan_item`
+  matches on `session_id`, integration, tool and the argument hash. But an
+  MCP caller can name **any** session id (`resolve_session` takes the
+  explicit value as is). Agent B could therefore spend agent A's approved
+  "update add-on X" item. Require the session's owner to equal the calling
+  agent (fail closed for ownerless sessions, as in F3's SR2) before
+  claiming. Tests: B cannot claim A's item, and A claims it exactly once.
+
+*Should fix:*
+
+* **S1** `ha_host_reboot` should never be plan-coverable. Each reboot gets
+  its own approval card with the red line. Refuse `mcp` plan items naming
+  it when a plan is proposed.
+* **S2** Answer to the open questions: keep the partial-backup payload
+  behind a "verify against a live instance" note. Raise long-update
+  timeouts as their own setting, not the shared read timeout. The
+  "destructive" card style goes to the UI pass list.
+
+**Needs the security reviewer before merge (§ 2.6a).** F10 adds a new
+auto-approve path for integration calls (plan items of kind `mcp`), in
+addition to the Supervisor actions.
 
 ---
 
@@ -5878,7 +5930,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 9 | F13 | session-conclusions | dashboard + MCP | Merged | `feat/f13-session-conclusions` | F5, F6 | |
 | 10 | F8 | test-traffic | dashboard | Merged | `feat/f8-test-traffic` | — | low priority |
 | 11 | F9 | ha-supervisor-read | dashboard | Merged | `feat/f9-ha-supervisor-read` | — | token is now a dedicated `eshu` HA admin user |
-| 12 | F10 | ha-supervisor-actions | dashboard | **Implemented** — awaiting review/security pass | `feat/f10-ha-supervisor-actions` @ `1e14827` | F9, F3, Chunk H | reviewer pass + security reviewer sign-off |
+| 12 | F10 | ha-supervisor-actions | dashboard | **Round 1: changes requested (M1–M2)** | `feat/f10-ha-supervisor-actions` @ `1e14827` | F9, F3, Chunk H | reviewer pass + security reviewer sign-off |
 | 13 | F11 | ha-config-files | dashboard | Ready (after F10) — design first | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | design approval + security reviewer sign-off |
 | 14 | F14 | inventory | dashboard + MCP | Merged | `feat/f14-inventory` | Chunk H | |
 | 15 | F15 | probes | dashboard + MCP | Ready after F12 | `feat/f15-probes` | F4, F12 | |
