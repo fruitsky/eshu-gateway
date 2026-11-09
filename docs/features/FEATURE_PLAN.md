@@ -5702,6 +5702,118 @@ Dashboard (`tests/test_f19_limits.py`):
 
 _(reviewer)_
 
+#### Security reviewer sign-off
+
+**Design review (4d18218), 2026-11-09: changes requested on the design.**
+The approach is sound: the limit is set by the dashboard, enforced by the
+gateway, and refuses to run when the value is broken. Eight conditions must
+be in the note before code starts. L3 is the important one, because without
+it the limit can be skipped. I will re-read only the sections that change.
+
+* **L1. Bounded by default, with a list of exemptions.** As written, a
+  limit applies only where `reason = read-lane`. F15, F16 and any later
+  path would each need to remember to add themselves.
+  - Turn this around: the dashboard sends a `run_limit` for every row it
+    approves without a human approving that exact command.
+  - Name the exemptions in the note as an accepted risk: a JIT click, plans,
+    session overrides and host overrides, because they can legitimately run
+    for a long time.
+  - The gateway-local paths (the allowlists and windows) stay as they are.
+  - Test: a row with any new auto-approval reason gets a limit.
+* **L2. Once a limit is set, it stays.** It can arrive on three responses.
+  - The first limit seen applies to the whole call. A later response that
+    leaves it out does not clear it, and two different limits mean the
+    smaller one applies.
+  - `parse_run_limit` must return three different results: absent, valid or
+    invalid. Today it returns 1 both when the field is missing and when it
+    is broken.
+  - The sketch splits `"60 1048576"` with `set -- $secs`, but the script
+    sets `IFS` to newline and tab, so that split never happens. Use
+    `read -r` with a tab separator.
+  - Tests: the limit is absent on one response and present on another; a
+    present but broken limit is refused.
+* **L3. Every path that can run an unattended row carries its limit.** The
+  note's claim that a lockbox ticket "has no limit by construction" is
+  wrong for read-lane rows. The poller can move an approved read-lane row
+  into the lockbox. Stage 5 then runs it *before* any `/api/request`
+  response is read, with no limit. Three routes lead there:
+  - the MCP re-run: F12 returns `pending` and calls again, and the feature
+    reviewer's M2 makes that re-run wait for `consumed`;
+  - a direct retry after the 90-second wait;
+  - a poller that gets there first.
+
+  Pick one fix and write it down. I recommend these two together:
+  - `/api/poll` never puts an unattended row in the lockbox. The row is
+    claimed only through `/api/ticket/{id}`, which carries the limit.
+  - In MCP mode, a row that the `/api/request` response shows as already
+    approved is claimed and run in the same call instead of returning
+    `pending`.
+
+  The alternative is a lockbox line that carries the limit, which means a
+  new ticket tag and a capability check. Tests, for each route: a lagging
+  poller, an MCP re-run and a direct retry. None of them runs a read-lane
+  row without its limit.
+* **L4. The pipeline must survive `set -e` and keep direct-mode output.**
+  - The sketch sends the whole group to `/dev/null`, so a direct-SSH agent
+    would see nothing. Only MCP mode should discard stdout.
+  - The sketch has no `||` and runs under `set -eo pipefail`, so any
+    non-zero exit, or the SIGPIPE when `head` closes, would end the gateway
+    before the envelope and the F5 row are written.
+  - Copy `PIPESTATUS` in the same statement as the pipeline, with errexit
+    switched off around it.
+  - Test: a capped run and a failing command both still produce the
+    envelope, the F5 row and the right exit code.
+* **L5. Cap the raw stream before `sanitize` as well.** `sanitize` is
+  `sed`, which holds a whole line in memory until it sees a newline. A long
+  stream with no newlines, which some pseudo-files under the read-lane trees
+  can produce, grows `sed`'s memory without limit until the timer fires.
+  - Put a `head -c` (bytes + 1) before `sanitize` as well as after it.
+  - Decide whether the output was cut from the raw stream, because redaction
+    changes lengths.
+  - Test: a newline-free stream larger than the cap is cut at the cap, and
+    `sed` never holds more than the cap.
+* **L6. The time limit bounds the whole call, not just its direct child.**
+  GNU `timeout` signals the process group. BusyBox `timeout` signals only
+  the child, so a grandchild that keeps the pipe open would hold the call,
+  and the ticket's run, past the limit.
+  - Requirement: when the limit fires, the call returns within the limit
+    plus the kill grace plus a few seconds, and nothing the run started is
+    left running.
+  - Test with a stub `timeout` that behaves like BusyBox's.
+* **L7. The script that is running reports the capability on each request,
+  not just at registration.** A poller self-update or a rollback can change
+  the script without re-registering, and then the stored `run_limits: v1`
+  is stale.
+  - The gateway sends `"run_limits":"v1"` in the `/api/request` body.
+  - The dashboard auto-approves an unattended row only when that request
+    carries it.
+  - Keep the stored column for the gateway card.
+  - Test: a request without the field gets `read-lane-no-limits` even when
+    the gateway row says v1.
+* **L8. The settings endpoint is for operators only.**
+  - `PUT /api/settings/run-limit` uses the same session login and CSRF
+    protection as the other operator settings, and every change is audited
+    with the old and new values.
+  - No MCP tool and no gateway token can reach it.
+  - The gateway keeps its own hard-coded range check, as the sketch already
+    does.
+  - Tests: no session means 401 or 403; a change writes an audit row.
+
+*Smaller points:*
+
+* A command can exit 124 on its own, so mark `time` only when
+  `rc == 124` and the time elapsed is at least the limit.
+* A byte cut normally ends the command with SIGPIPE (141), not 0. The note
+  should say so. It also means the byte cap stops a runaway command, which
+  is the point.
+* Over plain-HTTP `dashboard_url`, a network attacker could drop
+  `run_limit`, but they could already forge an approval there. Nothing new;
+  I mention it so nobody counts F19 as protection on that path.
+
+**For the F4 `on` gate:** F19 meets the fourth precondition only once L3
+and L7 are implemented, merged and deployed fleet-wide. Without L3, the
+lockbox route runs read-lane commands with no limit.
+
 ---
 
 ## 7. Backlog (not planned in detail)
