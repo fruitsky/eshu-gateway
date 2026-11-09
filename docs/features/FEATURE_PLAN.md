@@ -2968,7 +2968,59 @@ characters, since a docker container name is agent-controlled. The out-of-scope
 
 ### Reviewer notes
 
-_(reviewer)_
+**Round 1 (2026-11-09): changes requested (one small item).** Reviewed at
+`d544096`; `bash scripts/verify.sh`: `1873 passed, 3 skipped, 7 warnings in 331.04s (0:05:31)`.
+
+**What holds.** `excluded` defaults to 0, and the migration flags nothing. A
+test proves nothing is excluded automatically. The endpoint needs a session
+(the CSRF middleware covers the POST), writes an audit event, is idempotent,
+and caps `ids` at 1000. Excluded rows stay in History. Statistics, the CSV
+export, both learning-gap queries and the anomaly profiles skip them.
+Leaving rows out of the profiles makes a command look *newer*, not older,
+so the anomaly signal can only get louder. The UI escapes the session goal,
+and the row id goes through `Number()`. No approval path or order changed.
+The fixtures are synthetic.
+
+*Must fix:*
+
+* **R1 Keep the inner-target warning on every row.** The chunk asks for
+  statistics, learning gaps and anomaly profiles. The branch also filters
+  `GET /api/gateways/{ip}/inner-targets`, which feeds F7's host-override
+  warning ("this override also covers these containers"). That warning is
+  a safety prompt, not a statistic. Excluding a session that ran `pct exec`
+  into a guest would make the next host override look narrower than it is.
+  §0 rule 4 also says not to widen scope. Revert that one filter. Keep the
+  filter on the Statistics "inner targets" table, which is a statistic.
+  **Test:** replace `test_f8_inner_target_warning_skips_excluded` with one
+  showing that an excluded `pct exec` row *still* appears in the
+  inner-targets warning, while it is gone from `/api/statistics`
+  `inner_targets`.
+
+*Should fix:*
+
+* **S1 Match "test" as a word.** `/test|smoke/i` also matches "latest",
+  "contest" and "attestation", so a goal like "update to the latest kernel"
+  gets the hint. The spec says "contains", so this is not wrong, but a
+  word match (`/\b(smoke|tests?)\b/i`) gives fewer false positives.
+  **Test:** the harness predicate is false for "latest" and true for
+  "smoke test" and "run the tests".
+* **S2 A generated test for the statistics filter.** Nine queries in
+  `get_statistics` got the filter by hand, and the tests cover four of the
+  surfaces (daily, per gateway, top commands and denied, export). Hourly,
+  the heatmap, the sparkline and the automation trend have no test. A
+  scan test would make sure a future aggregate cannot forget the filter:
+  every `FROM requests` in `get_statistics`/`export_statistics` must
+  mention `excluded`.
+* **S3 The session hint after excluding.** Reopening an excluded session
+  shows "This looks like test traffic" again, with the button (the call
+  then reports 0). Have the session detail say whether every row is
+  excluded, and show the done state instead. Rows the session adds later
+  are not excluded. That is fine, but say so in the confirm text.
+
+**Merge note (F6 ↔ F8).** F6's new `approval_breakdown` query on
+`feat/f6-session-wrapup` is not filtered, because the branches are
+independent. Whichever of the two merges second must add
+`COALESCE(r.excluded, 0) = 0` to that query and to the S2 scan.
 
 ---
 
@@ -3645,7 +3697,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 7 | F12 | ssh-exec | dashboard + gateway | Ready (after F5) — design first | `feat/f12-ssh-exec` | F4, F5 | design approval + security reviewer sign-off |
 | 8 | F6 | session-wrapup | dashboard | Ready (after F12) | `feat/f6-session-wrapup` | F3, F4, F5 | |
 | 9 | F13 | session-conclusions | dashboard + MCP | Ready (after F6) | `feat/f13-session-conclusions` | F5, F6 | |
-| 10 | F8 | test-traffic | dashboard | Ready (after F13) | `feat/f8-test-traffic` | — | low priority |
+| 10 | F8 | test-traffic | dashboard | **Changes requested (R1)** — round 1 | `feat/f8-test-traffic` | — | low priority |
 | 11 | F9 | ha-supervisor-read | dashboard | Ready (after F8) | `feat/f9-ha-supervisor-read` | — | token is now a dedicated `eshu` HA admin user |
 | 12 | F10 | ha-supervisor-actions | dashboard | Ready (after F9) | `feat/f10-ha-supervisor-actions` | F9, F3, Chunk H | reviewer pass + security reviewer sign-off |
 | 13 | F11 | ha-config-files | dashboard | Ready (after F10) — design first | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | design approval + security reviewer sign-off |
