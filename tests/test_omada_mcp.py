@@ -742,7 +742,8 @@ class TestPerIntegrationMcp:
         # existing session/approval tools.
         assert {"list", "write", "check_approval", "check_request",
                 "session_begin", "session_summary",
-                "session_plan", "check_plan"} == own
+                "session_plan", "check_plan", "session_conclude",
+                "find_runbooks", "similar_incidents", "get_runbook"} == own
         # both: on shared AND own server
         assert "both_one_list" in global_names
         assert "both_one" in apps

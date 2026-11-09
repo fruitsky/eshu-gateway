@@ -105,6 +105,7 @@ from schemas import (
     UninstallProgressPayload, FeatureFlagTogglePayload, GatewayModePayload,
     ApprovedWindowPayload, WindowUpdatePayload, WindowRequestPayload,
     NotifyConfigPayload, ExcludeRequestsPayload, InventorySettingsPayload,
+    ConclusionReviewPayload, ConclusionEditPayload, RunbookPromotePayload,
 )
 
 from core.session import (
@@ -3800,7 +3801,125 @@ def session_detail_endpoint(sid: str, request: Request):
     excluded = sum(1 for row in ssh if row.get('excluded'))
     summary['excluded'] = excluded
     summary['all_excluded'] = bool(ssh) and excluded == len(ssh)
-    return {'session_id': sid, 'ssh': ssh, 'mcp': mcp, 'summary': summary}
+    # F13: the session's conclusions (draft/confirmed/rejected) for the modal's
+    # review block, and any runbook promoted from one of them.
+    from core.conclusions import scrub_read
+    from db.conclusions import list_for_session, list_runbooks_for_session
+    conclusions = scrub_read(list_for_session(sid))
+    runbooks = [{'id': rb['id'], 'title': rb['title'],
+                 'conclusion_id': rb['conclusion_id']}
+                for rb in list_runbooks_for_session(sid)]
+    return {'session_id': sid, 'ssh': ssh, 'mcp': mcp, 'summary': summary,
+            'conclusions': conclusions, 'runbooks': runbooks}
+
+
+@app.post("/api/conclusions/{conclusion_id}/confirm")
+def confirm_conclusion_endpoint(conclusion_id: int,
+                                payload: ConclusionReviewPayload,
+                                request: Request):
+    """F13: the operator confirms a draft; only confirmed text reaches agents."""
+    _check_session(request)
+    from core.secret_scrub import scrub_string
+    from db.conclusions import ConclusionError, confirm_conclusion
+    try:
+        row = confirm_conclusion(conclusion_id,
+                                 note=scrub_string(payload.note or '')[:2000],
+                                 by='operator')
+    except ConclusionError as exc:
+        raise HTTPException(status_code=409 if exc.code == 'bad_state' else 404,
+                            detail=exc.code)
+    record_audit_event(
+        'conclusion_confirmed',
+        details=f'Conclusion #{conclusion_id} (session {row["session_id"]}) '
+                f'confirmed by the operator')
+    return {'status': 'ok', 'conclusion': row}
+
+
+@app.post("/api/conclusions/{conclusion_id}/reject")
+def reject_conclusion_endpoint(conclusion_id: int,
+                               payload: ConclusionReviewPayload,
+                               request: Request):
+    _check_session(request)
+    from core.secret_scrub import scrub_string
+    from db.conclusions import ConclusionError, reject_conclusion
+    try:
+        row = reject_conclusion(conclusion_id,
+                                note=scrub_string(payload.note or '')[:2000],
+                                by='operator')
+    except ConclusionError as exc:
+        raise HTTPException(status_code=409 if exc.code == 'bad_state' else 404,
+                            detail=exc.code)
+    record_audit_event(
+        'conclusion_rejected',
+        details=f'Conclusion #{conclusion_id} (session {row["session_id"]}) '
+                f'rejected by the operator')
+    return {'status': 'ok', 'conclusion': row}
+
+
+@app.patch("/api/conclusions/{conclusion_id}")
+def edit_conclusion_endpoint(conclusion_id: int, payload: ConclusionEditPayload,
+                             request: Request):
+    """Operator edit of an agent draft (the agent's text is untrusted)."""
+    _check_session(request)
+    from core.secret_scrub import scrub_string
+    from db.conclusions import ConclusionError, edit_conclusion
+    try:
+        row = edit_conclusion(
+            conclusion_id,
+            summary=None if payload.summary is None else scrub_string(payload.summary),
+            root_cause=None if payload.root_cause is None else scrub_string(payload.root_cause),
+            fix=None if payload.fix is None else scrub_string(payload.fix),
+            note=scrub_string(payload.note or ''))
+    except ConclusionError as exc:
+        status = {'not_found': 404, 'bad_state': 409}.get(exc.code, 409)
+        raise HTTPException(status_code=status, detail=exc.code)
+    record_audit_event(
+        'conclusion_edited',
+        details=f'Conclusion #{conclusion_id} (session {row["session_id"]}) '
+                f'edited by the operator')
+    return {'status': 'ok', 'conclusion': row}
+
+
+@app.post("/api/conclusions/{conclusion_id}/runbook")
+def promote_conclusion_endpoint(conclusion_id: int,
+                                payload: RunbookPromotePayload,
+                                request: Request):
+    """F13: promote a confirmed, runbook-candidate conclusion to a runbook.
+
+    Steps are built server-side from the conclusion's cited evidence: commands
+    are copied verbatim from the request row (with F1's breakdown), tool calls
+    keep their integration/tool/method/path, and un-cited items become
+    instructions. Nothing is executed.
+    """
+    _check_session(request)
+    from core.conclusions import promote_conclusion
+    from core.secret_scrub import scrub_string
+    from db.conclusions import ConclusionError
+    try:
+        runbook = promote_conclusion(
+            conclusion_id,
+            title=scrub_string(payload.title or ''),
+            when_to_use=scrub_string(payload.when_to_use or ''),
+            by='operator')
+    except ConclusionError as exc:
+        status = {'not_found': 404, 'not_confirmed': 409,
+                  'not_a_candidate': 409}.get(exc.code, 409)
+        raise HTTPException(status_code=status, detail=exc.code)
+    record_audit_event(
+        'runbook_created',
+        details=f'Runbook #{runbook["id"]} from conclusion #{conclusion_id} '
+                f'(session {runbook["session_id"]}, {len(runbook["steps"])} steps)')
+    return {'status': 'ok', 'runbook': runbook}
+
+
+@app.get("/api/runbooks/{runbook_id}")
+def get_runbook_endpoint(runbook_id: int, request: Request):
+    _check_session(request)
+    from core.conclusions import get_runbook_payload
+    payload = get_runbook_payload(runbook_id)
+    if not payload:
+        raise HTTPException(status_code=404, detail="not_found")
+    return payload
 
 
 @app.get("/api/sessions/recent")

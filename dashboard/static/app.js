@@ -2962,6 +2962,217 @@ function renderSessionTestHint(goal, sessionSummary) {
     '<button class="btn btn-muted btn-xs" onclick="excludeActiveSession()">Exclude from stats</button>';
 }
 
+/* ── F13: the session conclusion ─────────────────────────────────────────
+   The agent's account of what the session meant, sitting under the evidence.
+   It is untrusted text: escaped here, never executed, and only a confirmed
+   conclusion is served to other agents. The operator confirms, edits or
+   rejects it, and may promote a confirmed candidate to a runbook. */
+var _conclusionEditing = {};
+
+function conclusionStatusChip(status) {
+  var label = {'draft': 'draft · awaiting review', 'confirmed': 'confirmed',
+               'rejected': 'rejected'}[status] || status;
+  return '<span class="cc-status cc-' + escapeHtml(status || 'draft') + '">' +
+    escapeHtml(label) + '</span>';
+}
+
+function conclusionRefLabel(ref) {
+  var m = String(ref || '').match(/^(req|call):([0-9]+)$/);
+  if (!m) return '';
+  return m[1] === 'req' ? ('request #' + m[2]) : ('call #' + m[2]);
+}
+
+function conclusionItemsHtml(items, cls) {
+  var rows = (items || []).map(function (item) {
+    var ref = conclusionRefLabel(item.ref);
+    var note = escapeHtml(item.note || '');
+    if (!ref && !note) return '';
+    return '<li>' + (ref ? '<code class="cc-ref">' + escapeHtml(ref) + '</code> ' : '') +
+      note + '</li>';
+  }).filter(Boolean);
+  if (!rows.length) return '';
+  return '<div class="cc-sec"><span class="cc-k">' + escapeHtml(cls) + '</span>' +
+    '<ul class="cc-list">' + rows.join('') + '</ul></div>';
+}
+
+function conclusionHtml(c, runbookId) {
+  var editing = !!_conclusionEditing[c.id];
+  var body = '';
+  if (editing) {
+    body += '<textarea class="cc-edit" id="cc-edit-summary-' + Number(c.id) + '" rows="3" ' +
+      'placeholder="Summary">' + escapeHtml(c.summary || '') + '</textarea>';
+    body += '<textarea class="cc-edit" id="cc-edit-root-' + Number(c.id) + '" rows="2" ' +
+      'placeholder="Root cause">' + escapeHtml(c.root_cause || '') + '</textarea>';
+    body += '<textarea class="cc-edit" id="cc-edit-fix-' + Number(c.id) + '" rows="2" ' +
+      'placeholder="Fix">' + escapeHtml(c.fix || '') + '</textarea>';
+  } else {
+    body += '<div class="cc-summary">' + escapeHtml(c.summary || '') + '</div>';
+    body += conclusionItemsHtml(c.worked, 'worked');
+    body += conclusionItemsHtml(c.did_not_work, 'did not work');
+    if (c.root_cause) {
+      body += '<div class="cc-sec"><span class="cc-k">root cause</span> ' +
+        escapeHtml(c.root_cause) + '</div>';
+    }
+    if (c.fix) {
+      body += '<div class="cc-sec"><span class="cc-k">fix</span> ' +
+        escapeHtml(c.fix) + '</div>';
+    }
+    if ((c.follow_ups || []).length) {
+      body += '<div class="cc-sec"><span class="cc-k">follow-ups</span> ' +
+        c.follow_ups.map(function (v) { return escapeHtml(v); }).join(' · ') + '</div>';
+    }
+    if ((c.operator_note || '').length) {
+      body += '<div class="cc-sec cc-note"><span class="cc-k">operator note</span> ' +
+        escapeHtml(c.operator_note) + '</div>';
+    }
+  }
+  var tags = (c.tags || []).map(function (t) {
+    return '<span class="cc-tag">' + escapeHtml(t) + '</span>';
+  }).join(' ');
+  var actions = '';
+  if (c.status === 'draft' && editing) {
+    actions = '<button class="btn btn-approve btn-xs" onclick="saveConclusionEdit(' +
+      Number(c.id) + ')">Save</button>' +
+      '<button class="btn btn-muted btn-xs" onclick="cancelConclusionEdit(' +
+      Number(c.id) + ')">Cancel</button>';
+  } else if (c.status === 'draft') {
+    actions = '<button class="btn btn-approve btn-xs" onclick="confirmConclusion(' +
+      Number(c.id) + ')">Confirm</button>' +
+      '<button class="btn btn-muted btn-xs" onclick="startConclusionEdit(' +
+      Number(c.id) + ')">Edit</button>' +
+      '<button class="btn btn-deny btn-xs" onclick="rejectConclusion(' +
+      Number(c.id) + ')">Reject</button>';
+  } else if (c.status === 'confirmed') {
+    if (runbookId) {
+      actions = '<span class="cc-runbook">Runbook #' + Number(runbookId) + '</span>';
+    } else if (c.runbook_candidate) {
+      actions = '<button class="btn btn-sm" onclick="promoteConclusion(' +
+        Number(c.id) + ')">Promote to runbook</button>';
+    }
+  }
+  return '<div class="cc-card' + (c.status === 'confirmed' ? ' cc-confirmed' : '') +
+    '" data-od-id="conclusion-card">' +
+    '<div class="cc-head"><span class="cc-title">Conclusion</span>' +
+    conclusionStatusChip(c.status) +
+    '<span class="cc-outcome">' + escapeHtml(c.outcome || '') + '</span>' +
+    (c.runbook_candidate && c.status === 'confirmed'
+      ? '<span class="cc-candidate">runbook candidate</span>' : '') +
+    '</div>' +
+    (tags ? '<div class="cc-tags">' + tags + '</div>' : '') +
+    body +
+    (actions ? '<div class="cc-actions">' + actions + '</div>' : '') +
+    '</div>';
+}
+
+function renderConclusionBlock(conclusions, runbooks) {
+  var el = document.getElementById('sm-conclusion');
+  if (!el) return;
+  var byConclusion = {};
+  (runbooks || []).forEach(function (rb) { byConclusion[rb.conclusion_id] = rb.id; });
+  var rows = (conclusions || []).slice().sort(function (a, b) {
+    return Number(b.id) - Number(a.id);
+  });
+  if (!rows.length) {
+    el.innerHTML = '<div class="cc-empty">No conclusion yet. The agent can call ' +
+      '<code>session_conclude</code> when the task is done.</div>';
+    el.classList.remove('hidden');
+    return;
+  }
+  el.innerHTML = rows.map(function (c) {
+    return conclusionHtml(c, byConclusion[c.id]);
+  }).join('');
+  el.classList.remove('hidden');
+}
+
+function _conclusionReload() {
+  if (!_activeSessionSid) return;
+  openSessionModal(_activeSessionSid);
+}
+
+async function _conclusionPost(url, body, method) {
+  try {
+    var res = await authFetch(url, {
+      method: method || 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body || {}) });
+    var data = await res.json();
+    if (!res.ok) {
+      showToast('Could not update the conclusion: ' + (data.detail || 'error'), 'error');
+      return false;
+    }
+    return true;
+  } catch (e) {
+    showToast('Could not update the conclusion', 'error');
+    return false;
+  }
+}
+
+async function confirmConclusion(id) {
+  if (await _conclusionPost('/api/conclusions/' + Number(id) + '/confirm', {})) {
+    showToast('Conclusion confirmed', 'success');
+    _conclusionReload();
+  }
+}
+
+async function rejectConclusion(id) {
+  var ok = await customConfirm(
+    'Reject this conclusion? It stays in the session but is never served to agents.',
+    { title: 'Reject conclusion', confirmLabel: 'Reject', danger: true });
+  if (!ok) return;
+  if (await _conclusionPost('/api/conclusions/' + Number(id) + '/reject', {})) {
+    showToast('Conclusion rejected', 'info');
+    _conclusionReload();
+  }
+}
+
+function startConclusionEdit(id) {
+  _conclusionEditing[id] = true;
+  _conclusionReload();
+}
+
+function cancelConclusionEdit(id) {
+  delete _conclusionEditing[id];
+  _conclusionReload();
+}
+
+async function saveConclusionEdit(id) {
+  var summary = document.getElementById('cc-edit-summary-' + Number(id));
+  var root = document.getElementById('cc-edit-root-' + Number(id));
+  var fix = document.getElementById('cc-edit-fix-' + Number(id));
+  var body = {
+    summary: summary ? summary.value : '',
+    root_cause: root ? root.value : '',
+    fix: fix ? fix.value : '',
+  };
+  if (await _conclusionPost('/api/conclusions/' + Number(id), body, 'PATCH')) {
+    delete _conclusionEditing[id];
+    showToast('Conclusion updated', 'success');
+    _conclusionReload();
+  }
+}
+
+async function promoteConclusion(id) {
+  var ok = await customConfirm(
+    'Promote this confirmed conclusion to a runbook? Steps are copied verbatim ' +
+    'from the session evidence; nothing is executed.',
+    { title: 'Promote to runbook', confirmLabel: 'Promote', danger: false });
+  if (!ok) return;
+  try {
+    var res = await authFetch('/api/conclusions/' + Number(id) + '/runbook', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}) });
+    var data = await res.json();
+    if (!res.ok) {
+      showToast('Could not promote: ' + (data.detail || 'error'), 'error');
+      return;
+    }
+    showToast('Runbook #' + data.runbook.id + ' created', 'success');
+    _conclusionReload();
+  } catch (e) {
+    showToast('Could not promote the conclusion', 'error');
+  }
+}
+
 async function openSessionModal(sid) {
   var modal = document.getElementById('session-modal');
   var nameEl = document.getElementById('sm-name');
@@ -3032,6 +3243,7 @@ async function openSessionModal(sid) {
   metaEl.innerHTML = bits.join(' \u00b7 ');
   renderSessionSummary(document.getElementById('sm-summary'), detail.summary || {});
   renderSessionTestHint(summary.goal || '', detail.summary || {});
+  renderConclusionBlock(detail.conclusions || [], detail.runbooks || []);
 
   // Unified, chronological timeline.
   var items = [];
