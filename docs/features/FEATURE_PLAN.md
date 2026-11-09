@@ -6101,6 +6101,134 @@ is stored (G1). G3 whitespace and control-character refusal is in.
 
 The gateway bash is with the security reviewer (their code review is
 separate). M1 is the one item they may also flag.
+=======
+**Code review of the gateway bash (aa268de, notes cfe8db0), 2026-11-09:
+changes requested (R1–R4).** I read `eshu-gateway.sh`, `eshu-poller.sh`,
+the installer template and the `ssh_exec` runner argv. I did not run anything.
+
+*Must fix before merge:*
+
+* **R1. Anyone on the gateway host can read the token, and with F12 the token
+  signs requests.** The installer leaves `/usr/local/bin/eshu-gateway.sh`
+  mode 0755 with `GATEWAY_TOKEN` written into it (true since v0.1.0). Before
+  F12 this let a local user call the dashboard as the gateway. Now the
+  signing key is derived from the token, so the same user can sign requests
+  as any agent: take another agent's approved ticket, vouch for any session
+  on a gateway that requires sessions, and pass `mcp_only`. The new 0600
+  `/etc/eshu-token` protects nothing while a copy sits in a world-readable
+  file.
+  - Fix: install the gateway script 0700 root:root in every installer mode
+    (install, reinstall and update). sudo runs it as root, and the poller is
+    already 0700.
+  - Write `/etc/eshu-token` with `umask 077`, so the temp file is never
+    readable, not even for the moment before `chmod`. That applies to the
+    installer and to both poller token-rotation paths.
+  - Test: an installer sandbox run in each mode leaves the script at 0700
+    and the token file at 0600. The token write runs under umask 077 in the
+    installer and in the poller.
+* **R2. The refusal log line records the unverified agent name.** Line 499
+  logs `agent=${ESHU_AGENT}`, even when that value failed its character
+  check, so raw bytes from the caller reach syslog. A newline in that value
+  can forge a log line. G8 says no prefix value is logged.
+  - Fix: log only the verified agent, or `none`.
+  - Test: an agent value containing a control character is refused, and
+    nothing from it appears in the logger output.
+* **R3. The gateway does not refuse a command whose first word still starts
+  with `ESHU_` after the prefixes are stripped (G2).** The dashboard refuses
+  these for signed calls, but callers on the shared key reach the gateway
+  directly. An unknown `ESHU_` key currently ends prefix parsing and becomes
+  part of the command.
+  - Fix: after the parse loop, refuse when the first word starts with
+    `ESHU_`.
+  - Test, in direct and MCP mode: an unknown key is refused, and so is a
+    known key placed after an unknown one.
+* **R4. In MCP mode, output is stored when capture is set to `exit-only`.**
+  This answers open question 1. The operator's capture setting wins:
+  - `off`: no result row. Line 222 already does this, so the implementation
+    note's description is wrong.
+  - `exit-only`: the exit code only.
+  - `tail`: the tail.
+
+  The agent already has the bytes from the envelope. Being more auditable
+  does not justify overriding an operator's explicit choice to keep output
+  off the dashboard (§2.5).
+  - Fix: at line 228, drop the `-n "$ESHU_MCP_CAP"` alternative.
+  - Test: an MCP run with `exit-only` capture posts an empty
+    `encoded_output`.
+
+*Where this meets the feature reviewer's code round 1:* their M1 (the
+ticket format sent to old gateways) is a correct finding, and I agree with
+it. R2 is their S2, made a must-fix. R4 is the same answer as theirs to open
+question 1. One correction to their notes: the sudoers line does not
+restrict the arguments (see S3); forced commands do.
+
+*Should fix (may follow in a later chunk):*
+
+* **S1. `ESHU_WINDOW_TOKEN` and `ESHU_EXECUTION_ID` are outside the MAC.**
+  The dashboard never sends them on a signed call, so refuse them in a
+  signed prefix. This also keeps the window script's direct `echo` from
+  breaking an MCP envelope. Test: a signed prefix carrying a window token is
+  refused.
+* **S2. The nonce store is not on the self-protection list.** Add
+  `/var/lib/eshu` to the hard-coded list. Deleting the store would reopen
+  the 300-second replay window. Test: a command naming that path is refused
+  as FATAL.
+* **S3. The sudoers line allows extra arguments.** It names the gateway
+  script with no arguments, and in sudoers that means any arguments. Write
+  `/usr/local/bin/eshu-gateway.sh ""` instead. Forced commands block extra
+  arguments today, so this is defence in depth.
+* **S4 (dashboard side, for the feature reviewer).** Check the gateway IP
+  with a strict IP pattern just before `build_argv`, so the host argument
+  can never start with `-`.
+
+*Checked and fine:*
+
+* **Prefix parsing (G2):**
+  - Duplicate keys are refused.
+  - Any one of the six identity keys requires the full signed set, in every
+    `ssh_mode`.
+  - The MAC helper reads the key from `/etc/eshu-token`, takes the canonical
+    form on stdin and compares in constant time. Only the signature is on
+    argv.
+  - The canonical form hashes the trimmed command. That is also the exact
+    command that runs, and the dashboard refuses surrounding whitespace, so
+    the binding holds (G3).
+* **The nonce store (G4):**
+  - The nonce is checked alone.
+  - A separate lock file, a temp file and a rename; the store is never
+    truncated in place.
+  - The nonce is written only after the timestamp and the MAC pass.
+  - The store is in `/var/lib/eshu`, a 0700 directory.
+  - Pruning by the signed timestamp matches the ±300 s window.
+  - The environment overrides are scrubbed before use.
+* **Ticket v2 (G5):**
+  - The tag is parsed on all three paths: the lockbox claim, the
+    consumed-ticket claim and the `/api/ticket` claim.
+  - A signed call takes only its own agent's ticket, and only its own
+    session's ticket when it names a session. An unsigned call takes only an
+    agent-less ticket.
+  - The poller prunes v2 lines by their own timestamp field.
+* **The dashboard key (G6):** an unsigned call arriving on it is refused in
+  every mode. `mcp_only` refuses unsigned calls, and the installer drops the
+  shared-key line.
+* **Envelope-only stdout:**
+  - One `say()` writer, and every MCP exit path goes through `finish`.
+  - `tee` writes to `/dev/null`.
+  - The dashboard parser requires exactly one line. A command that writes to
+    the gateway's own stdout, for example through `/proc`, gets
+    `bad-envelope`, which fails closed.
+* **Logging (G8):** the main line logs only the stripped command. Both
+  heredoc fixes in round 6 are correct.
+* **The runner (G7):** the argv carries `-F /dev/null`, the pinned
+  `UserKnownHostsFile` and `GlobalKnownHostsFile=/dev/null`.
+* **Open question 2:** the installer warning about `ALLOWED_SSH_FROM` is
+  enough for G7. The UI follow-up is optional.
+* **A re-register from an old installer clears the capability fields.**
+  Agreed: that fails closed.
+
+**Verdict:** changes requested. Once R1–R4 are fixed with their tests, I
+review only that diff, not the whole bash again. F12 must not merge before
+then.
 
 
 ---
