@@ -101,7 +101,7 @@ from schemas import (
     PolicyPayload, NotePayload, SSHKeysPayload, HeartbeatPayload,
     UninstallProgressPayload, FeatureFlagTogglePayload, GatewayModePayload,
     ApprovedWindowPayload, WindowUpdatePayload, WindowRequestPayload,
-    NotifyConfigPayload,
+    NotifyConfigPayload, InventorySettingsPayload,
 )
 
 from core.session import (
@@ -362,6 +362,10 @@ def on_startup():
     # F18: fingerprints for the request context (seen before / like this).
     from core.request_fingerprints import start_backfill_thread as start_fp_backfill
     start_fp_backfill()
+    # F14: refresh the read-only inventory in the background. The loop sleeps
+    # one interval first, so a boot never fires source calls while starting.
+    from core.inventory import start_inventory_loop
+    start_inventory_loop()
     # Start background gap scanner (learning suggestions)
     from core.learning import refresh_gaps, _gaps_loop
     refresh_gaps()
@@ -2466,6 +2470,40 @@ def get_statistics(request: Request, days: int = 14, gateway_ip: str = None, gat
     conn.close()
 
     return result
+
+
+# ── Inventory (F14) ────────────────────────────────────────────────────
+
+@app.get("/api/inventory")
+def view_inventory(request: Request, q: str = None):
+    """The inventory snapshot for the UI (and a quick search)."""
+    _check_session(request)
+    from core.inventory import inventory_snapshot
+    return inventory_snapshot(q or '', limit=25)
+
+
+@app.post("/api/inventory/refresh")
+def refresh_inventory_now(request: Request):
+    """Refresh every configured source now. Read-only source calls only."""
+    _check_session(request)
+    from core.inventory import refresh_inventory
+    result = refresh_inventory()
+    record_audit_event(
+        'inventory_refreshed',
+        details=f"Inventory refreshed from {result['sources']} source(s) "
+                f"in {result['duration_ms']} ms")
+    return {"status": "ok", **result}
+
+
+@app.post("/api/inventory/settings")
+def update_inventory_settings(payload: InventorySettingsPayload,
+                              request: Request):
+    _check_session(request)
+    from core.inventory import set_interval_minutes
+    minutes = set_interval_minutes(payload.interval_minutes)
+    record_audit_event('inventory_interval_changed',
+                       details=f"Inventory refresh every {minutes} minutes")
+    return {"status": "ok", "interval_minutes": minutes}
 
 
 @app.get("/api/statistics/export")

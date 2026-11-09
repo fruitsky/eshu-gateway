@@ -83,6 +83,10 @@ class WindowRequestPayload(BaseModel):
     label: str = ""
     window_start: int = 0
 
+class InventorySettingsPayload(BaseModel):
+    """F14: how often the inventory refreshes (clamped to 5-120 minutes)."""
+    interval_minutes: int = 15
+
 class NotifyConfigPayload(BaseModel):
     url: str
     events: str

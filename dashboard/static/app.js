@@ -687,6 +687,7 @@ async function switchView(target) {
   if (target === 'controls') { fetchFreezeStatus(); fetchGateways(); fetchPolicies(); fetchPolicyChanges(); initWebFetchPolicyPanel(); }
   if (target === 'fleet') { fetchFleetCommands(); }
   if (target === 'integrations') { fetchIntegrations(); }
+  if (target === 'inventory') { fetchInventory(); }
   if (target === 'settings') {
     refreshPasswordUI();
     fetchNotifyConfig();
@@ -7287,6 +7288,119 @@ function renderStatistics() {
   renderStatsInnerTargets(d);
   renderStatsCats(d);
   renderStatsDenied(d);
+}
+
+/* ── F14: the inventory ──────────────────────────────────────────────────
+   One search box over the cached map: a service, host, container, IP, FQDN,
+   vmid or MAC. Every source chip carries its own staleness, and an IP that
+   two sources name differently is shown as a conflict rather than resolved
+   silently. All agent/upstream text is escaped. */
+var _invTimer = null;
+
+function debouncedInventorySearch() {
+  clearTimeout(_invTimer);
+  _invTimer = setTimeout(function () {
+    var box = document.getElementById('inv-search');
+    fetchInventory(box ? box.value : '');
+  }, 250);
+}
+
+async function fetchInventory(q) {
+  try {
+    var url = '/api/inventory' + (q ? '?q=' + encodeURIComponent(q) : '');
+    var res = await authFetch(url);
+    if (!res.ok) return;
+    renderInventory(await res.json());
+  } catch (e) {}
+}
+
+function invSourceChips(sources) {
+  return (sources || []).map(function (s) {
+    var label = s.label || s.source || '';
+    return '<span class="inv-source' + (s.stale ? ' stale' : '') + '" title="' +
+      escapeHtml((s.stale ? 'stale — ' : '') + 'from ' + (s.source || label)) + '">' +
+      escapeHtml(label) + (s.stale ? ' \u00b7 stale' : '') + '</span>';
+  }).join('');
+}
+
+function invEntityHtml(entity) {
+  var facts = [];
+  var add = function (key, values) {
+    if (!values || !values.length) return;
+    facts.push('<span class="inv-k">' + key + '</span> ' +
+      values.map(function (v) { return escapeHtml(String(v)); }).join(', '));
+  };
+  add('ip', entity.ips);
+  add('name', entity.fqdns);
+  add('host', entity.hosts);
+  add('guest', entity.vmids);
+  add('url', entity.urls);
+  if (entity.extra && entity.extra.mac) add('mac', [entity.extra.mac]);
+  var conflicts = (entity.conflicts || []).map(function (c) {
+    return '<div class="inv-conflict">' + escapeHtml(String(c.ip || '')) +
+      ' is claimed by ' + (c.names || []).map(function (n) {
+        return escapeHtml(String(n));
+      }).join(' / ') + '</div>';
+  }).join('');
+  return '<div class="inv-entity' + (entity.stale ? ' stale' : '') + '" data-od-id="inventory-entity">' +
+    '<div class="inv-head"><span class="inv-name">' + escapeHtml(entity.name || 'unnamed') + '</span>' +
+    '<span class="inv-chips">' + invSourceChips(entity.sources) + '</span></div>' +
+    (facts.length ? '<div class="inv-facts">' + facts.join(' \u00b7 ') + '</div>' : '') +
+    conflicts + '</div>';
+}
+
+function renderInventory(data) {
+  data = data || {};
+  var results = document.getElementById('inv-results');
+  var sourcesEl = document.getElementById('inv-sources');
+  var refreshed = document.getElementById('inv-refreshed');
+  var box = document.getElementById('inv-interval');
+  if (box && !box.dataset.dirty && data.interval_minutes) box.value = data.interval_minutes;
+  if (refreshed) {
+    refreshed.textContent = data.refreshed_at
+      ? ('refreshed ' + formatTime(data.refreshed_at)) : 'never refreshed';
+  }
+  if (sourcesEl) {
+    sourcesEl.innerHTML = Object.keys(data.sources || {}).sort().map(function (source) {
+      var s = data.sources[source] || {};
+      return '<span class="inv-source' + (s.stale ? ' stale' : '') + '" title="' +
+        escapeHtml(s.error || '') + '">' + escapeHtml(s.label || source) +
+        ' <b>' + (Number(s.items) || 0) + '</b>' + (s.stale ? ' \u00b7 stale' : '') + '</span>';
+    }).join('');
+  }
+  if (!results) return;
+  var items = data.items || [];
+  results.innerHTML = items.length
+    ? items.map(invEntityHtml).join('')
+    : '<p class="text-muted">Nothing matches yet. Configure an integration and press \u201cRefresh now\u201d.</p>';
+}
+
+async function refreshInventoryNow() {
+  var btn = document.getElementById('inv-refresh-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Refreshing\u2026'; }
+  try {
+    var res = await authFetch('/api/inventory/refresh', { method: 'POST' });
+    var data = await res.json();
+    showToast('Inventory refreshed (' + (Number(data.sources) || 0) + ' source(s), ' +
+      (Number(data.duration_ms) || 0) + ' ms)', 'success');
+    var box = document.getElementById('inv-search');
+    fetchInventory(box ? box.value : '');
+  } catch (e) { showToast('Could not refresh the inventory', 'error'); }
+  if (btn) { btn.disabled = false; btn.textContent = 'Refresh now'; }
+}
+
+async function saveInventoryInterval() {
+  var box = document.getElementById('inv-interval');
+  var minutes = box ? parseInt(box.value, 10) : 15;
+  try {
+    var res = await authFetch('/api/inventory/settings', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ interval_minutes: minutes }) });
+    var data = await res.json();
+    if (!res.ok) { showToast(data.detail || 'Could not save the interval', 'error'); return; }
+    if (box) { box.value = data.interval_minutes; box.dataset.dirty = ''; }
+    showToast('Inventory refreshes every ' + data.interval_minutes + ' minutes', 'success');
+  } catch (e) { showToast('Could not save the interval', 'error'); }
 }
 
 // ── Gateway Health Checker ────────────────────────────────────────────

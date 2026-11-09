@@ -54,7 +54,7 @@ _DEFAULT_ALLOWED_HOSTS = ['127.0.0.1:*', 'localhost:*', '[::1]:*']
 # Tools that are not integration calls and must remain reachable so an agent
 # can poll its own approvals. They are always scoped to the caller.
 _ALWAYS_ALLOWED = {'check_approval', 'check_request', 'session_begin',
-                   'session_summary', 'session_plan', 'check_plan'}
+                   'session_summary', 'session_plan', 'check_plan', 'whereis'}
 
 
 def _describe_web_fetch(base: str, policy: dict) -> str:
@@ -431,6 +431,8 @@ def build_per_integration_mcp() -> dict:
                           description=SESSION_BEGIN_DESC)
             inst.add_tool(session_summary_fn(), name="session_summary",
                           description=SESSION_SUMMARY_DESC)
+            inst.add_tool(whereis_fn(), name="whereis",
+                          description=WHEREIS_DESC)
             inst.add_tool(session_plan_fn(), name="session_plan",
                           description=SESSION_PLAN_DESC)
             inst.add_tool(check_plan_fn(), name="check_plan",
@@ -664,6 +666,23 @@ SESSION_SUMMARY_DESC = (
 )
 
 
+WHEREIS_DESC = (
+    "Look up where something lives across Eshu and the configured homelab "
+    "integrations: pass a service, host, container, IP, name, FQDN, vmid or MAC. "
+    "Returns up to 5 entities, each with the IPs, FQDNs, host, container/VM id and "
+    "URLs that point at it, the sources that contributed, and a `stale` flag when a "
+    "source has not refreshed. Always available, like session_begin: it reads "
+    "Eshu's own cached inventory and never calls an upstream API on the request."
+)
+
+
+def whereis_fn():
+    def _whereis(query: str) -> str:
+        from core.inventory import whereis
+        return json.dumps(whereis(query))
+    return _whereis
+
+
 def session_summary_fn():
     def _session_summary(session_id: str = "") -> str:
         from db.sessions import get_session_summary
@@ -808,5 +827,6 @@ def check_plan_fn():
 
 mcp.add_tool(session_begin_fn(), name="session_begin", description=SESSION_BEGIN_DESC)
 mcp.add_tool(session_summary_fn(), name="session_summary", description=SESSION_SUMMARY_DESC)
+mcp.add_tool(whereis_fn(), name="whereis", description=WHEREIS_DESC)
 mcp.add_tool(session_plan_fn(), name="session_plan", description=SESSION_PLAN_DESC)
 mcp.add_tool(check_plan_fn(), name="check_plan", description=CHECK_PLAN_DESC)
