@@ -2966,6 +2966,36 @@ characters, since a docker container name is agent-controlled. The out-of-scope
 
 `bash scripts/verify.sh`: `1873 passed, 3 skipped, 7 warnings in 383.49s (0:06:23)`. The three skips are F18's read-lane tests (F4 is not on this branch).
 
+### Round 2: fixes for reviewer round 1
+
+* **R1 — the override warning sees every row again.** Removed
+  `COALESCE(excluded, 0) = 0` from `GET /api/gateways/{ip}/inner-targets`: it
+  feeds F7's host-override warning ("an override here also covers these
+  containers"), which is a safety prompt, not a statistic. The Statistics
+  `inner_targets` table keeps the filter. The old test is replaced by
+  `test_f8_inner_target_warning_keeps_excluded_rows`, which shows the excluded
+  `pct exec` guest is still in the warning and gone from `/api/statistics`.
+* **S1 — "test" as a word.** `TEST_GOAL_RE` is now `/\b(smoke|tests?)\b/i`,
+  so "update to the latest kernel" no longer gets the hint while "smoke test"
+  and "run the tests" do; the harness asserts all five cases.
+* **S2 — a generated guard for the statistics filter.**
+  `test_f8_every_statistics_query_filters_excluded` splits
+  `get_statistics`/`export_statistics` into `cursor.execute(` blocks, and every
+  block that reads `FROM requests` must mention `excluded` (9 blocks checked).
+  A future aggregate cannot forget the filter.
+* **S3 — an excluded session says so.** The session detail now carries
+  `summary.excluded` and `summary.all_excluded`; the modal hint shows "This
+  session is excluded from statistics and learning" instead of the button
+  when every row is excluded, and the confirm text says rows the session adds
+  later are not excluded. `test_f8_detail_reports_an_excluded_session` covers
+  the done state and the new row that turns it off.
+
+**Merge note (F6 ↔ F8), recorded not fixed:** F6's `approval_breakdown`
+query exists only on `feat/f6-session-wrapup`; whichever merges second must add
+`COALESCE(r.excluded, 0) = 0` to it and add it to the S2 scan's coverage.
+
+`bash scripts/verify.sh`: `1875 passed, 3 skipped, 7 warnings in 384.64s (0:06:24)`.
+
 ### Reviewer notes
 
 **Round 1 (2026-11-09): changes requested (one small item).** Reviewed at
