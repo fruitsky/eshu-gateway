@@ -22,6 +22,7 @@ import hashlib
 import json
 import time
 
+from core.ha_supervisor import run_supervisor_read, run_whoami
 from core.ha_ws import ha_ws_exec
 from core.train import handle_train_plan, handle_train_status
 from core.commute import (
@@ -1072,8 +1073,20 @@ def _h_pihole_local_dns_records(integration, tool, args, ctx=None):
     return json.dumps(out)
 
 
+def _h_ha_supervisor_read(integration, tool, args, ctx=None):
+    """F9: one fixed Supervisor endpoint, chosen by the tool's name."""
+    return run_supervisor_read(integration, (tool or {}).get('name') or '',
+                               args or {}, ctx or {})
+
+
+def _h_ha_whoami(integration, tool, args, ctx=None):
+    return run_whoami(integration, ctx or {})
+
+
 HANDLERS = {
     'pihole_local_dns_records': _h_pihole_local_dns_records,
+    'ha_supervisor_read': _h_ha_supervisor_read,
+    'ha_whoami': _h_ha_whoami,
     'ha_lovelace_dashboards': _h_dashboards,
     'ha_lovelace_dashboard': _h_dashboard,
     'ha_lovelace_create_dashboard': _h_create_dashboard,

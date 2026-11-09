@@ -3126,11 +3126,196 @@ Additive tools. Freeze now also blocks integration writes, which is a behaviour 
 
 ### Implementer notes
 
-_(fill in)_
+**What I did**
+
+* **Freeze covers integrations** (`core/tool_runner.py`): with the freeze flag
+  set, a call that is not a read is refused before any pending row, preflight
+  or upstream request, with `{"error": {"code": "frozen", "message": …,
+  "status_code": 409}}`, an `integration_calls` row (`outcome=refused`,
+  `reason_code=frozen`, method/path only) and an audit event
+  `mcp_frozen_refused`. Reads keep working; a handler **dry-run** also runs,
+  because it changes nothing upstream (the freeze protects state, not the
+  validation path). Whether a call is a read comes from
+  `core/read_policy.is_read_integration_call` (§2.6a), not from a second local
+  rule — the module is the one the task asked for: the integration half only,
+  with a note that F4's branch holds the full file (SSH rules) and that the
+  `read_only` guard must survive the merge.
+* **Approvals** (`POST /api/integration-calls/{id}/approve`): while frozen the
+  approval is refused with **409** and an audit event
+  `integration_call_refused_frozen`; the call **stays pending**, so unfreezing
+  lets the operator approve it (a freeze pauses the queue, it does not destroy
+  it). Denying is still allowed — removing work is never a write.
+* **`core/ha_supervisor.py`**: the fixed endpoint table
+  (`SUPERVISOR_READS`: tool → endpoint, method, shaper), `endpoint_for(tool,
+  args)` (the only place an endpoint is built; the add-on slug is validated
+  against `^[a-z0-9_]{1,64}$` **before** formatting, so `/`, `..`, `?` and
+  uppercase never reach the upstream), per-shape field allowlists (lists
+  capped at 200 rows), `ha_addon_info` shaped without `options`,
+  `run_supervisor_read` (audit via `ha_ws_exec` with the tool name, then
+  `secret_scrub`), and the 401/403 → `ha_admin_required` mapping.
+  `SUPERVISOR_ACTIONS` is an empty table for F10, kept separate so
+  `SUPERVISOR_READS` stays "reads only".
+* **Tools** (`core/ha_seed.py`, `handler: ha_supervisor_read` for the eight
+  reads, `handler: ha_whoami` for the WS `auth/current_user`):
+  `ha_supervisor_info`, `ha_core_info`, `ha_os_info`, `ha_host_info`,
+  `ha_addons`, `ha_addon_info(slug)`, `ha_backups`, `ha_resolution`,
+  `ha_whoami`, and `ha_check_config` (REST `POST
+  /config/core/check_config`, `read_only: True` — it validates and changes
+  nothing, so it runs without approval). Seeding is idempotent by name, so an
+  existing HA integration gets the ten new tools after "Seed" without
+  duplicates.
+* **UI**: the freeze banner, the freeze pill tooltip and the freeze toast now
+  say "SSH and integration writes rejected".
+* **Docs**: `docs/INTEGRATIONS.md` documents the Supervisor tools, the
+  admin-token requirement, `ha_whoami`, the dedicated-`eshu`-admin-user
+  recommendation (a long-lived token carries all of its user's rights) and
+  that freeze now covers integration writes. CHANGELOG entries for both
+  behaviour changes.
+* **Tests**: `tests/test_f9_ha_supervisor_read.py` (37) — freeze (write
+  refused, nothing queued, read allowed, dry-run allowed, approval refused and
+  kept pending, approval after unfreeze, the read policy is consulted),
+  each tool's exact endpoint and method, slug validation (7 bad forms never
+  reach the upstream), `options` never returned, compact add-ons, non-admin
+  mapping, upstream error, `ha_whoami`, `ha_check_config` as a read, scrubbing,
+  the allowlist (table == tools; no other module builds a `supervisor/api`
+  payload; every supervisor tool is read-only), and idempotent seeding. Two
+  pre-existing count assertions moved from 18 to 28 seeded tools, explained in
+  the commit.
+
+**Decisions**
+
+* The tool names are the chunk's literal `ha_*` names. MCP prefixes the
+  integration name, so on the shared surface an integration named "Home
+  Assistant" exposes `home_assistant_ha_supervisor_info`. The alternative is
+  to drop the `ha_` prefix in the seed (then it reads
+  `home_assistant_supervisor_info`); say which reads better and it is a
+  one-line rename per tool.
+* `ha_check_config` is a POST but `read_only: True`: `_read_only_refusal` only
+  guards generic passthrough tools, so a curated read-only POST runs directly —
+  which is the intent ("validates and changes nothing").
+* The Supervisor read shapers are allowlists, not denylists: a new upstream
+  field is dropped until someone adds it, which is the safe default for a
+  surface that can carry secrets.
+* An add-on's `options` would be caught by `secret_scrub` for the obvious
+  password-shaped keys, but not for arbitrary ones; the shaper dropping
+  `options` entirely is the real protection.
+
+**Open questions**
+
+1. **Tool naming** (above): keep the `ha_` prefix in the seed, or drop it so
+   the MCP-visible name is `<integration>_supervisor_info`? Nothing depends on
+   either choice except the docs and the existing-name test.
+
+`bash scripts/verify.sh`: `1893 passed, 3 skipped, 7 warnings in 394.38s (0:06:34)`. The three skips are F18's read-lane tests (F4 is not on this branch).
+
+### Round 2: fixes for reviewer round 1
+
+* **R1 — only a handler dry-run is exempt from the freeze.** The freeze check
+  used `not args.get('dry_run')`, so an agent-supplied `dry_run: true` let a
+  curated REST tool, a generic tool or `ws_write` past the freeze (it is just
+  another argument for those; only handlers honour it). The exemption is now
+  `handler and args.get('dry_run')`, the same condition the gate below uses.
+  Tests: `test_f9_a_curated_rest_dry_run_is_still_a_write`,
+  `test_f9_a_ws_write_dry_run_is_still_a_write` and
+  `test_f9_a_generic_write_dry_run_is_still_a_write` — each is refused with
+  `frozen`, queues nothing and makes no upstream request; the handler dry-run
+  test stays green.
+* **R2 — the generic WS tools cannot reach the Supervisor.** `ws_write` could
+  still forward an agent-chosen `supervisor/api` (or `hassio/*`) endpoint, and
+  HA has no allowlist of its own. Two guards, no socket before the decision:
+  * `core/tool_runner._run_tool` refuses a WS command whose name starts with
+    `supervisor/` or `hassio/` **before gating**, so no pending call is
+    created either (error `supervisor_command_refused`, 403, an
+    `integration_calls` row with `reason_code=supervisor_command_refused` and a
+    `ws_supervisor_refused` audit event);
+  * `core/ha_ws.execute_ws_call` refuses the same prefixes, which covers the
+    approval executor and any direct caller.
+  `core/ha_ws.is_supervisor_command` is the one predicate; the curated
+  handlers still use `ha_ws_request` with constants, so `ha_supervisor.py`'s
+  table remains the only path. Tests: `test_f9_ws_write_refuses_supervisor_before_connecting`,
+  `test_f9_ws_write_refuses_hassio_before_connecting`,
+  `test_f9_an_approved_supervisor_ws_call_is_refused` (a pending call created
+  before the guard is refused on approval, its stored result carries the
+  message) and `test_f9_a_normal_ws_command_still_reaches_the_transport`.
+  The HA test fixture now seeds the generic tools too, since those are the
+  tools under test.
+* **S1 — the one POST that keeps working.** `docs/INTEGRATIONS.md` now says
+  that `ha_check_config` still runs while frozen, because it only validates.
+* **S2 — tool naming** is the operator's call and is left as the open
+  question from round 1 (see the round-1 Reviewer notes).
+
+`bash scripts/verify.sh`: `1900 passed, 3 skipped, 7 warnings in 398.68s (0:06:38)`.
 
 ### Reviewer notes
 
-_(reviewer)_
+**Round 1 (2026-11-09): changes requested.** Reviewed at `d43147f`;
+`bash scripts/verify.sh`: `1893 passed, 3 skipped, 7 warnings in 346.84s (0:05:46)`.
+
+**What holds.**
+
+* **The endpoint table.** `ha_supervisor.py` is a fixed table. The slug is
+  validated before formatting, and the response shapers are allowlists:
+  `options` is never returned, and lists are capped.
+* **401/403 mapping.** A 401 or 403 becomes `ha_admin_required`.
+* **`ha_whoami`.** It returns only name, `is_admin` and `is_owner`.
+* **Generic reads.** Chunk H's `DENY_PREFIXES` already keep `supervisor/`
+  and `hassio/` out of the generic `ws_read`.
+* **Freeze routing.** The freeze decision goes through
+  `read_policy.is_read_integration_call`, and its `read_only` guard is the
+  right addition.
+* **Approval while frozen.** It is refused with a 409 and audited, and the
+  call stays pending.
+* **Seeding.** It is idempotent.
+* **No live data.** The fixtures use `192.0.2.x`.
+
+*Must fix:*
+
+* **R1 An agent-set `dry_run` flag gets a write past the freeze.** The
+  freeze check skips any call whose args contain `dry_run: true`. Only
+  *handler* tools honour that flag, though, and the gating code further down
+  checks `handler and args.get('dry_run')`. For a curated REST tool, a
+  generic tool or a WS tool, `dry_run` is just one more argument. In a
+  scratch test, a frozen `call_service` with `dry_run: true` was **queued
+  for approval** instead of refused, against "queues nothing". A tool that
+  its gate policy leaves ungated would go on to run upstream while frozen.
+  **Fix:** exempt only `handler and args.get('dry_run')`, the same
+  condition the gate uses. **Test:** while frozen, `dry_run: true` on a
+  curated REST write, on `ws_write` and on the generic `write` tool is
+  refused with `frozen`, queues nothing and makes no upstream request. The
+  existing handler dry-run test stays green.
+* **R2 `ws_write` can still send any Supervisor endpoint.** The acceptance
+  criterion is "no code path can send an endpoint that is not in
+  `ha_supervisor.py`'s table". The approval-gated generic `ws_write` tool
+  still forwards `supervisor/api` (and `hassio/*`) with an endpoint and
+  method chosen by the agent. Because HA has no allowlist of its own, one
+  tired approval reaches host reboot, backup restore or add-on options. The
+  static scan in `test_f9_no_other_module_builds_a_supervisor_payload` does
+  not see this, because the command comes from the agent's arguments at run
+  time. **Fix:** refuse `supervisor/` and `hassio/` commands in `ws_write`
+  before connecting, with a reason that points at the curated tools. F10
+  will add the reviewed action endpoints to the table. **Test:** `ws_write`
+  with `supervisor/api` (and a `hassio/` command) is refused before any
+  WebSocket opens, both at call time and if a pending call is approved.
+
+*Should fix:*
+
+* **S1 `ha_check_config` and the freeze.** It is a `read_only` POST, so it
+  runs while frozen. That matches "validates and changes nothing", which is
+  fine. Say so in `INTEGRATIONS.md` next to the freeze note, so the operator
+  knows the one POST that keeps working.
+* **S2 Tool naming (the implementer's open question).** Drop the `ha_`
+  prefix: the MCP name already starts with the integration's name, and
+  `home_assistant_supervisor_info` reads better than
+  `home_assistant_ha_supervisor_info`. This is the operator's call. It is
+  one rename per tool, plus the name test.
+
+**Merge note: `core/read_policy.py` exists on three branches.** F9, F14 and
+F4 each create it. F9 and F14 have the same function, with different
+docstrings. F4's version has no `read_only` guard in
+`is_read_integration_call`. When F4 merges, keep F4's SSH half, take F9's
+guarded integration wrapper, and add a test that a curated write tool is not
+a read (`test_f9_a_curated_write_tool_is_not_a_read`). Whichever of F9 and
+F14 merges second only needs to resolve the docstring.
 
 ---
 
@@ -3900,8 +4085,8 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 7 | F12 | ssh-exec | dashboard + gateway | Ready (after F5) — design first | `feat/f12-ssh-exec` | F4, F5 | design approval + security reviewer sign-off |
 | 8 | F6 | session-wrapup | dashboard | Ready (after F12) | `feat/f6-session-wrapup` | F3, F4, F5 | |
 | 9 | F13 | session-conclusions | dashboard + MCP | Ready (after F6) | `feat/f13-session-conclusions` | F5, F6 | |
-| 10 | F8 | test-traffic | dashboard | **Changes requested (R1)** — round 1 | `feat/f8-test-traffic` | — | low priority |
-| 11 | F9 | ha-supervisor-read | dashboard | Ready (after F8) | `feat/f9-ha-supervisor-read` | — | token is now a dedicated `eshu` HA admin user |
+| 10 | F8 | test-traffic | dashboard | Merged | `feat/f8-test-traffic` | — | low priority |
+| 11 | F9 | ha-supervisor-read | dashboard | Merged | `feat/f9-ha-supervisor-read` | — | token is now a dedicated `eshu` HA admin user |
 | 12 | F10 | ha-supervisor-actions | dashboard | Ready (after F9) | `feat/f10-ha-supervisor-actions` | F9, F3, Chunk H | reviewer pass + security reviewer sign-off |
 | 13 | F11 | ha-config-files | dashboard | Ready (after F10) — design first | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | design approval + security reviewer sign-off |
 | 14 | F14 | inventory | dashboard + MCP | **Changes requested (R1)** — round 1 | `feat/f14-inventory` | Chunk H | |

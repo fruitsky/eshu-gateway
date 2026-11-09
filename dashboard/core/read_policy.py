@@ -14,8 +14,8 @@ at merge time: the `read_only` guard below must stay. F4's wrapper alone treats
 a curated write tool as a read, because `_read_only_refusal` only inspects
 generic passthrough tools.
 
-F14 uses it before every inventory source read, so a source can never execute
-something that is not a read.
+F9 uses it to tell a read from a write while Emergency Freeze is on: reads keep
+working, writes are refused. F14 uses it before every inventory source read.
 """
 from core.tool_runner import _read_only_refusal
 
