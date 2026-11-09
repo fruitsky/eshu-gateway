@@ -59,8 +59,24 @@ def init_requests_tables(cursor):
             cursor.execute("ALTER TABLE requests ADD COLUMN excluded INTEGER DEFAULT 0")
         except Exception:
             pass
+    # F12: the MCP agent that asked for this command ('' = direct SSH).
+    if 'agent' not in existing:
+        try:
+            cursor.execute("ALTER TABLE requests ADD COLUMN agent TEXT DEFAULT ''")
+        except Exception:
+            pass
 
-def create_request(target_ip: str, command: str, status: str = 'pending', ttl: int = 90, reason: str = '', session_id: str = '', execution_id: str = '', inner_target: str = ''):
+def ticket_line(row) -> str:
+    """F12 G5: the lockbox line. `v2` first so the format is never guessed
+    from the number of `|`, then ts, agent, session, command (last, so a `|`
+    inside the command survives). An old gateway reads a line without the tag
+    as `ts|cmd`; a v2-aware one matches the agent and session too."""
+    agent = (row['agent'] if 'agent' in row.keys() else '') or ''
+    session = (row['session_id'] if 'session_id' in row.keys() else '') or ''
+    return f"v2|{row['created_at']}|{agent}|{session}|{row['command']}"
+
+
+def create_request(target_ip: str, command: str, status: str = 'pending', ttl: int = 90, reason: str = '', session_id: str = '', execution_id: str = '', inner_target: str = '', agent: str = ''):
     # F18: compute both fingerprints for every new row (no extra call site).
     try:
         from core.fingerprint import fingerprints
@@ -78,9 +94,9 @@ def create_request(target_ip: str, command: str, status: str = 'pending', ttl: i
         # waiting time.
         decided_at = created_at if status != 'pending' else None
         cursor.execute('''
-            INSERT INTO requests (target_ip, command, status, created_at, expires_at, reason, session_id, execution_id, inner_target, command_sha, shape_sha, decided_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (target_ip, command, status, created_at, expires_at, reason, session_id, execution_id, inner_target or '', cmd_sha, shape_sha, decided_at))
+            INSERT INTO requests (target_ip, command, status, created_at, expires_at, reason, session_id, execution_id, inner_target, command_sha, shape_sha, decided_at, agent)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (target_ip, command, status, created_at, expires_at, reason, session_id, execution_id, inner_target or '', cmd_sha, shape_sha, decided_at, (agent or '')[:64]))
         conn.commit()
         return cursor.lastrowid
 
@@ -150,8 +166,10 @@ def update_ticket_consumed_by_ip(target_ip: str):
         now = int(time.time())
         expired_ago = 60
         cursor.execute('''
-            SELECT id, created_at, expires_at, command FROM requests
+            SELECT id, created_at, expires_at, command, agent, session_id
+            FROM requests
             WHERE target_ip = ? AND status = 'approved' AND expires_at > ?
+            ORDER BY id ASC
             LIMIT 1
         ''', (target_ip, now - expired_ago))
         row = cursor.fetchone()
@@ -159,8 +177,7 @@ def update_ticket_consumed_by_ip(target_ip: str):
             req_id = row['id']
             cursor.execute("UPDATE requests SET status = 'consumed', expires_at = ? WHERE id = ?", (now, req_id))
             conn.commit()
-            ticket_ts = row['created_at']
-            return f"{ticket_ts}|{row['command']}"
+            return ticket_line(row)
         return None
 
 def get_all_requests(session_id: str = None, inner_target: str = None):
@@ -265,14 +282,14 @@ def count_denied(command: str):
 def get_ticket_by_request_id(req_id: int):
     with db_conn() as conn:
         cursor = conn.cursor()
-        cursor.execute('SELECT command, created_at, status FROM requests WHERE id = ? AND status IN ("approved", "consumed")', (req_id,))
+        cursor.execute('SELECT command, created_at, status, agent, session_id FROM requests WHERE id = ? AND status IN ("approved", "consumed")', (req_id,))
         row = cursor.fetchone()
         if row:
             if row['status'] == 'approved':
                 now = int(time.time())
                 cursor.execute("UPDATE requests SET status = 'consumed', expires_at = ? WHERE id = ?", (now, req_id))
                 conn.commit()
-            return {"command": row['command'], "ticket": f"{row['created_at']}|{row['command']}"}
+            return {"command": row['command'], "ticket": ticket_line(row)}
         return None
 
 def delete_old_requests(before_ts: int):

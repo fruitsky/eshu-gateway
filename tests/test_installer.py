@@ -97,3 +97,69 @@ def test_enroll_script_does_not_reference_approver():
 def test_schema_has_no_approver_field():
     schema = _read("dashboard/schemas.py")
     assert "approver_key" not in schema
+
+
+# ── F12: the dashboard key, the host-key pin and the ssh_mode line ──────────
+def _installers():
+    return (_read("dashboard/eshu-gateway-install.sh"),
+            _read("dashboard/static/eshu-gateway-install.sh"))
+
+
+def test_f12_both_installers_are_regenerated_identically():
+    src, static = _installers()
+    assert src == static
+    assert "--dashboard-key" in src
+
+
+def test_f12_dashboard_key_line_and_marker():
+    src, _ = _installers()
+    # The dashboard line's forced command carries exactly the one argument
+    # sudoers allows; the comment is what makes a re-run idempotent.
+    assert 'eshu-gateway.sh --dashboard-key",no-port-forwarding' in src
+    assert "eshu-dashboard" in src
+    assert "eshu-gateway-key" in src
+    # A pre-F12 line without a comment is dropped by the same prefix match.
+    assert 'grep -v \'command="/usr/bin/sudo /usr/local/bin/eshu-gateway.sh\'' in src
+
+
+def test_f12_sudoers_allows_exactly_two_argv_shapes():
+    src, _ = _installers()
+    line = next(l for l in src.splitlines()
+                if l.startswith("eshu-gateway ALL=(root) NOPASSWD:"))
+    assert line.count("/usr/local/bin/eshu-gateway.sh") == 2
+    assert line.rstrip().endswith("eshu-gateway.sh --dashboard-key")
+
+
+def test_f12_register_reports_pin_and_capabilities():
+    src, _ = _installers()
+    assert '"ssh_host_key":"\'"$HOST_KEY_LINE"\'"' in src
+    assert '"ssh_agent_format":"eshu-ssh-agent-v1"' in src
+    assert '"ssh_ticket_format":"v2"' in src
+    assert src.count('"ssh_agent_format"') == 2   # install and update paths
+
+
+def test_f12_nonce_dir_is_created_by_the_installer():
+    src, _ = _installers()
+    assert "install -d -m 700 -o root -g root /var/lib/eshu" in src
+
+
+def test_f12_installer_warns_about_a_wide_allowed_ssh_from():
+    src, _ = _installers()
+    assert "is wider" not in src
+    assert "may use the dashboard key" in src
+
+
+def test_f12_mcp_only_drops_the_shared_key_line():
+    src, _ = _installers()
+    assert '"${GATEWAY_SSH_MODE:-direct+mcp}" != "mcp_only"' in src
+    assert "ssh_mode" in src
+
+
+def test_f12_mac_key_file_is_written_and_removed():
+    src, _ = _installers()
+    # The gateway reads the token itself (never from argv) ...
+    assert "if [ -n \"${GATEWAY_TOKEN:-}\" ] && [ \"$GATEWAY_TOKEN\" != \"None\" ]; then" in src
+    assert "mv -f /etc/eshu-token.tmp /etc/eshu-token" in src
+    # ... and an uninstall does not leave the key material behind.
+    uninstall = src.split("Removing binaries...", 1)[1].split("Removing sudoers", 1)[0]
+    assert "rm -f /etc/eshu-token" in uninstall

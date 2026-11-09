@@ -17,6 +17,7 @@ YES_UNINSTALL="no"
 MIGRATE_HERMES="no"
 GATEWAY_PUB_KEY=""
 DASHBOARD_URL=""
+GATEWAY_SSH_MODE="direct+mcp"
 
 if [[ "${1:-}" == "--reinstall" ]]; then REINSTALL="yes"; shift || true; fi
 if [[ "${1:-}" == "--update" ]]; then UPDATE="yes"; shift || true; fi
@@ -121,6 +122,8 @@ if [ "$UNINSTALL" = "yes" ]; then
   rm -f /usr/local/bin/eshu-gateway.sh
   rm -f /usr/local/bin/eshu-poller.sh
   rm -f /usr/local/bin/eshu-logger.sh
+  # F12: the MAC key material must not outlive the gateway it belongs to.
+  rm -f /etc/eshu-token
   _report "removing_binaries" "Gateway, poller, and logger scripts removed"
   sleep 1
   
@@ -357,6 +360,31 @@ if [ "$mode" != "upgrade" ] && [ "$user_exists" = "no" ]; then useradd -m -s /bi
 TARGET_IP=$(hostname -I | awk '{print $1}')
 HOST_NAME=$(hostname)
 
+# F12: the host key pin and the dashboard's service key.
+# The pin is the gateway's own public host key line, sent with the
+# token-authenticated registration. The dashboard key is fetched from
+# /api/ssh-key (a public key) so the dashboard can open one SSH connection per
+# MCP command without any agent holding a key.
+HOST_KEY_LINE=""
+for _hk in /etc/ssh/ssh_host_ed25519_key.pub /etc/ssh/ssh_host_ecdsa_key.pub /etc/ssh/ssh_host_rsa_key.pub /etc/ssh/ssh_host_*_key.pub; do
+  if [ -s "$_hk" ]; then HOST_KEY_LINE=$(head -n1 "$_hk"); break; fi
+done
+DASHBOARD_SSH_PUB=""
+if [ -n "$DASHBOARD_URL" ]; then
+  DASHBOARD_SSH_PUB=$(curl --connect-timeout 3 -m 15 -s "$DASHBOARD_URL/api/ssh-key" 2>/dev/null \
+    | python3 -c "import sys, json; print(json.load(sys.stdin).get('public_key',''))" 2>/dev/null || echo "")
+fi
+
+# G4: the nonce store must survive a reboot; /run does not. Root-only 0700.
+install -d -m 700 -o root -g root /var/lib/eshu 2>/dev/null || true
+
+# G7: every entry in ALLOWED_SSH_FROM may use the dashboard key, so a list
+# wider than the dashboard's own address is worth saying out loud.
+if [ -n "$ALLOWED_SSH_FROM" ] && [ -n "$DASHBOARD_SSH_PUB" ]; then
+  echo "   WARNING: ALLOWED_SSH_FROM='$ALLOWED_SSH_FROM' — every host in that"
+  echo "            list may use the dashboard key, not only the dashboard."
+fi
+
 # Only prompt for DASHBOARD_URL during install/reinstall, not update
 if [ "$mode" != "upgrade" ]; then
   if [ -z "$DASHBOARD_URL" ]; then
@@ -387,11 +415,13 @@ if [ "$mode" != "upgrade" ]; then
        -H "Content-Type: application/json" \
        -H "X-Gateway-Token: ${GATEWAY_TOKEN:-}" \
        -H "X-Enrollment-Token: ${ESHU_ENROLL_TOKEN:-}" \
-       -d '{"ip":"'"$TARGET_IP"'","hostname":"'"$HOST_NAME"'","version":"'"$GATEWAY_VERSION"'"}')
+       -d '{"ip":"'"$TARGET_IP"'","hostname":"'"$HOST_NAME"'","version":"'"$GATEWAY_VERSION"'","ssh_host_key":"'"$HOST_KEY_LINE"'","ssh_agent_format":"eshu-ssh-agent-v1","ssh_ticket_format":"v2"}')
   GATEWAY_TOKEN=$(echo "$REGISTER_RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); t=d.get('gateway_token'); print(t if t and t!='None' else '')" 2>/dev/null || echo "")
   if [ -n "$GATEWAY_TOKEN" ]; then
     echo "   Gateway API token received (v15+ auth)"
   fi
+  GATEWAY_SSH_MODE=$(echo "$REGISTER_RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('ssh_mode','direct+mcp'))" 2>/dev/null || echo "direct+mcp")
+  case "$GATEWAY_SSH_MODE" in mcp_only) ;; *) GATEWAY_SSH_MODE="direct+mcp" ;; esac
 fi
 
 # Always re-register on update to report new version (and get token if missing)
@@ -400,11 +430,13 @@ if [ "$mode" = "upgrade" ] && [ -n "$DASHBOARD_URL" ]; then
        -H "Content-Type: application/json" \
        -H "X-Gateway-Token: ${GATEWAY_TOKEN:-}" \
        -H "X-Enrollment-Token: ${ESHU_ENROLL_TOKEN:-}" \
-       -d '{"ip":"'"$TARGET_IP"'","hostname":"'"$HOST_NAME"'","version":"'"$GATEWAY_VERSION"'"}')
+       -d '{"ip":"'"$TARGET_IP"'","hostname":"'"$HOST_NAME"'","version":"'"$GATEWAY_VERSION"'","ssh_host_key":"'"$HOST_KEY_LINE"'","ssh_agent_format":"eshu-ssh-agent-v1","ssh_ticket_format":"v2"}')
   GATEWAY_TOKEN=$(echo "$REGISTER_RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); t=d.get('gateway_token'); print(t if t and t!='None' else '')" 2>/dev/null || echo "")
   if [ -n "$GATEWAY_TOKEN" ]; then
     echo "   Gateway API token received (v15+ auth)"
   fi
+  GATEWAY_SSH_MODE=$(echo "$REGISTER_RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('ssh_mode','direct+mcp'))" 2>/dev/null || echo "direct+mcp")
+  case "$GATEWAY_SSH_MODE" in mcp_only) ;; *) GATEWAY_SSH_MODE="direct+mcp" ;; esac
 fi
 
 # Check for existing token in current gateway script (survives upgrades)
@@ -452,7 +484,7 @@ GWEOF
 write_sudoers() {
   cat > "$SUDOERS" <<'EOF'
 Defaults:eshu-gateway env_keep += "SSH_ORIGINAL_COMMAND"
-eshu-gateway ALL=(root) NOPASSWD: /usr/local/bin/eshu-gateway.sh
+eshu-gateway ALL=(root) NOPASSWD: /usr/local/bin/eshu-gateway.sh, /usr/local/bin/eshu-gateway.sh --dashboard-key
 EOF
   chmod 440 "$SUDOERS"; chown root:root "$SUDOERS"
   if ! visudo -cf "$SUDOERS"; then echo "Sudoers error."; exit 1; fi
@@ -514,6 +546,15 @@ LOGGERUNIT
   systemctl restart eshu-logger.service
 }
 
+# F12: the MAC key material. The gateway reads this file itself, so the key
+# never appears on argv. Root-only; rewritten on every install and update.
+if [ -n "${GATEWAY_TOKEN:-}" ] && [ "$GATEWAY_TOKEN" != "None" ]; then
+  printf '%s\n' "$GATEWAY_TOKEN" > /etc/eshu-token.tmp
+  chmod 600 /etc/eshu-token.tmp
+  chown root:root /etc/eshu-token.tmp
+  mv -f /etc/eshu-token.tmp /etc/eshu-token
+fi
+
 write_gateway; write_logger; write_sudoers; write_poller
 
 # SSH key setup only for install/reinstall (skip on update)
@@ -526,10 +567,30 @@ if [ "$mode" = "install" ] || [ "$mode" = "reinstall" ]; then
   fi
 
   mkdir -p "/home/$USER/.ssh"; chmod 700 "/home/$USER/.ssh"
+  # F12: two lines, each with its own comment (eshu-gateway-key, eshu-dashboard),
+  # so a re-run replaces them by comment instead of appending duplicates. The
+  # dashboard line's forced command carries the one fixed --dashboard-key
+  # argument; sshd sets it, so a shared-key caller cannot (G6).
   AK='command="/usr/bin/sudo /usr/local/bin/eshu-gateway.sh",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty,restrict'
   if [ -n "$ALLOWED_SSH_FROM" ]; then AK='from="'"$ALLOWED_SSH_FROM"'",'"$AK"; fi
-  echo "$AK $GATEWAY_PUB_KEY" > "/home/$USER/.ssh/authorized_keys"
-  chown -R "$USER":"$USER" "/home/$USER/.ssh"; chmod 600 "/home/$USER/.ssh/authorized_keys"
+  AK_DASH='command="/usr/bin/sudo /usr/local/bin/eshu-gateway.sh --dashboard-key",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty,restrict'
+  if [ -n "$ALLOWED_SSH_FROM" ]; then AK_DASH='from="'"$ALLOWED_SSH_FROM"'",'"$AK_DASH"; fi
+  AK_FILE="/home/$USER/.ssh/authorized_keys"
+  {
+    # Keep keys this installer does not own; drop every Eshu gateway line,
+    # including a pre-F12 one without a comment, then write ours back.
+    if [ -f "$AK_FILE" ]; then
+      grep -v 'command="/usr/bin/sudo /usr/local/bin/eshu-gateway.sh' "$AK_FILE" || true
+    fi
+    if [ "${GATEWAY_SSH_MODE:-direct+mcp}" != "mcp_only" ]; then
+      printf '%s %s eshu-gateway-key\n' "$AK" "$GATEWAY_PUB_KEY"
+    fi
+    if [ -n "$DASHBOARD_SSH_PUB" ]; then
+      printf '%s %s eshu-dashboard\n' "$AK_DASH" "$DASHBOARD_SSH_PUB"
+    fi
+  } > "$AK_FILE.tmp"
+  mv -f "$AK_FILE.tmp" "$AK_FILE"
+  chown -R "$USER":"$USER" "/home/$USER/.ssh"; chmod 600 "$AK_FILE"
 fi
 
 echo ""

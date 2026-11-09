@@ -54,6 +54,9 @@ from database import (
     get_gateway_capture_output, set_gateway_capture_output,
     get_gateway_read_lane, read_lane_on_enabled, read_lane_ready,
     set_gateway_read_lane,
+    get_gateway_ssh_mode, set_gateway_ssh_mode, get_gateway_ssh_host_key,
+    set_gateway_ssh_host_key, get_gateway_ssh_capabilities,
+    set_gateway_ssh_capabilities,
     set_override, clear_override, get_override_active,
     create_approved_window, get_approved_windows, get_active_approved_windows,
     delete_approved_window, toggle_approved_window,
@@ -108,6 +111,7 @@ from schemas import (
     ApprovedWindowPayload, WindowUpdatePayload, WindowRequestPayload,
     NotifyConfigPayload, ExcludeRequestsPayload, InventorySettingsPayload,
     ConclusionReviewPayload, ConclusionEditPayload, RunbookPromotePayload,
+    SSHHostKeyPayload,
 )
 
 from core.session import (
@@ -577,11 +581,18 @@ class GatewayPayload(BaseModel):
     token: str = ""
     session_id: str = ""
     execution_id: str = ""
+    # F12: attribution and gating for an MCP-run command (mirrors schemas.py;
+    # these local copies shadow the import, so both must stay in step).
+    agent: str = ""
+    force_jit: bool = False
 
 class RegisterPayload(BaseModel):
     ip: str
     hostname: str
     version: str = "v6.0"
+    ssh_host_key: str = ""
+    ssh_agent_format: str = ""
+    ssh_ticket_format: str = ""
 
 class PolicyPayload(BaseModel):
     type: str
@@ -656,6 +667,41 @@ def _validate_gateway_identity(ip: str, hostname: str) -> None:
         raise HTTPException(status_code=400, detail="Invalid gateway hostname")
 
 
+SSH_AGENT_FORMATS = ('eshu-ssh-agent-v1',)
+SSH_TICKET_FORMATS = ('v2',)
+
+
+def _clean_ssh_capability(value, allowed) -> str:
+    """Only a format this dashboard knows is stored; anything else is ''."""
+    value = (value or '').strip()
+    return value if value in allowed else ''
+
+
+def _pin_ssh_host_key(ip: str, hostname: str, key_line: str) -> None:
+    """Pin on first sight, audit a change, never re-pin silently (F12 R6/G7).
+
+    The key line arrives in the token-authenticated registration, so it is
+    the gateway speaking for itself; a *change* is a fact to record, not a
+    reason to start trusting a different key.
+    """
+    from core.ssh_keys import fingerprint, parse_public_key
+    key_line = (key_line or '').strip()
+    if not key_line:
+        return
+    if parse_public_key(key_line) is None:
+        raise HTTPException(status_code=400, detail="Invalid ssh_host_key")
+    current = get_gateway_ssh_host_key(ip)
+    if not current:
+        set_gateway_ssh_host_key(ip, key_line)
+        record_audit_event('ssh_host_key_pinned', ip, hostname,
+                           f"SSH host key pinned: {fingerprint(key_line)}")
+    elif fingerprint(current) != fingerprint(key_line):
+        record_audit_event('ssh_host_key_changed', ip, hostname,
+                           f"SSH host key changed on the gateway: pinned "
+                           f"{fingerprint(current)}, reported {fingerprint(key_line)}. "
+                           f"The pin is unchanged; re-pin it explicitly.")
+
+
 @app.post("/api/register")
 def register(payload: RegisterPayload, request: Request):
     _validate_gateway_identity(payload.ip, payload.hostname)
@@ -704,6 +750,14 @@ def register(payload: RegisterPayload, request: Request):
     if payload.version == DASHBOARD_VERSION:
         update_gateway_last_updated(payload.ip)
     register_gateway(payload.ip, payload.hostname, payload.version)
+    # F12: the same installer writes the gateway and the poller, so the pair of
+    # formats it reports is the pair it installed. Stored for the fail-closed
+    # check in ssh_exec (§9); absent fields clear them.
+    _pin_ssh_host_key(payload.ip, payload.hostname, payload.ssh_host_key)
+    set_gateway_ssh_capabilities(
+        payload.ip,
+        _clean_ssh_capability(payload.ssh_agent_format, SSH_AGENT_FORMATS),
+        _clean_ssh_capability(payload.ssh_ticket_format, SSH_TICKET_FORMATS))
     # Clear any stale uninstall trigger — re-enrollment cancels pending uninstalls
     clear_trigger_uninstall(payload.ip)
     
@@ -716,7 +770,8 @@ def register(payload: RegisterPayload, request: Request):
         existing_token = secrets.token_hex(32)
         set_gateway_token(payload.ip, existing_token)
     
-    return {"status": "ok", "gateway_token": existing_token}
+    return {"status": "ok", "gateway_token": existing_token,
+            "ssh_mode": get_gateway_ssh_mode(payload.ip)}
 
 @app.post("/api/request")
 def receive_request(payload: GatewayPayload, request: Request):
@@ -730,6 +785,24 @@ def receive_request(payload: GatewayPayload, request: Request):
 
     _check_rate_limit(target_ip)
     cmd = decode_cmd(payload.encoded_command)
+
+    # F12: an MCP command is attributed to the agent that asked for it, and a
+    # forced JIT may only *add* gating. The value is validated here even though
+    # the gateway checked it: an old gateway forwards whatever it parsed.
+    agent = (payload.agent or '').strip()[:64]
+    if agent and not re.fullmatch(r'[A-Za-z0-9_.:-]{1,64}', agent):
+        raise HTTPException(status_code=400, detail="Invalid agent")
+    force_jit = bool(payload.force_jit)
+    if agent and not force_jit:
+        # Re-derive the mode from the agent's own policy so a gateway (or a
+        # prefix) cannot downgrade an `approval` agent to auto-run.
+        try:
+            _agent_row = get_agent_by_name(agent)
+            if _agent_row:
+                _mode = get_agent_policy(_agent_row['id']).get('ssh_mode')
+                force_jit = (_mode == 'approval')
+        except Exception:
+            force_jit = False
 
     now = int(time.time())
     sid = (payload.session_id or '')[:64]
@@ -751,7 +824,7 @@ def receive_request(payload: GatewayPayload, request: Request):
                 create_request(target_ip, cmd, status="blocked",
                                reason="encoded-payload:%s" % match[:40],
                                session_id=sid, execution_id=eid,
-                               inner_target=_inner_target_for(cmd))
+                               inner_target=_inner_target_for(cmd), agent=agent)
                 update_gateway_last_seen(target_ip)
                 record_audit_event(
                     'encoded_payload_blocked', target_ip,
@@ -764,7 +837,7 @@ def receive_request(payload: GatewayPayload, request: Request):
     # Order per § 2.6: after the encoded-payload block, before the session
     # override. Freeze, Zero-Trust and the blocklists always win, and a plan
     # only matches a command carrying the session id it was granted for.
-    if sid and not frozen and not get_gateway_zero_trust(target_ip):
+    if sid and not frozen and not force_jit and not get_gateway_zero_trust(target_ip):
         plan_allowed = True
         if require_sessions_enabled():
             # Strict sessions: only a minted, named session can use a plan (the
@@ -777,7 +850,7 @@ def receive_request(payload: GatewayPayload, request: Request):
                 req_id = create_request(target_ip, cmd, status="approved",
                                         reason=f"session-plan:{plan_id}:{item_id}",
                                         session_id=sid, execution_id=eid,
-                                        inner_target=_inner_target_for(cmd))
+                                        inner_target=_inner_target_for(cmd), agent=agent)
                 update_gateway_last_seen(target_ip)
                 record_audit_event(
                     'jit_plan_approved', target_ip,
@@ -789,13 +862,13 @@ def receive_request(payload: GatewayPayload, request: Request):
 
     # Session override next: narrower than the host-wide one, and it only
     # covers commands carrying the id it was granted for. Zero-Trust wins.
-    if sid and not frozen:
+    if sid and not frozen and not force_jit:
         ov = get_session_override(sid, target_ip, now)
         if ov and not get_gateway_zero_trust(target_ip):
             req_id = create_request(target_ip, cmd, status="approved",
                                     reason="session-override:%d" % ov["id"],
                                     session_id=sid, execution_id=eid,
-                                    inner_target=_inner_target_for(cmd))
+                                    inner_target=_inner_target_for(cmd), agent=agent)
             update_gateway_last_seen(target_ip)
             scope = ov["target_ip"] or "any host"
             record_audit_event(
@@ -811,7 +884,7 @@ def receive_request(payload: GatewayPayload, request: Request):
     # in shadow the request stays pending but is tagged, in on it auto-approves.
     # It sits after F3 plans and the session override, before the host override.
     read_lane_reason = ''
-    if not frozen and not get_gateway_zero_trust(target_ip):
+    if not frozen and not force_jit and not get_gateway_zero_trust(target_ip):
         lane_mode = get_gateway_read_lane(target_ip)
         if lane_mode == 'on' and not read_lane_on_enabled():
             # Round 5: the hard lock also covers a stored `on`. If the meta
@@ -830,7 +903,7 @@ def receive_request(payload: GatewayPayload, request: Request):
                 req_id = create_request(target_ip, cmd, status="approved",
                                         reason="read-lane", session_id=sid,
                                         execution_id=eid,
-                                        inner_target=_inner_target_for(cmd))
+                                        inner_target=_inner_target_for(cmd), agent=agent)
                 update_gateway_last_seen(target_ip)
                 record_audit_event(
                     'jit_read_lane_approved', target_ip,
@@ -848,18 +921,19 @@ def receive_request(payload: GatewayPayload, request: Request):
     row = cursor.fetchone()
     conn.close()
     if row and row['override_until'] and row['override_until'] > now \
-            and not frozen and not get_gateway_zero_trust(target_ip):
+            and not frozen and not force_jit and not get_gateway_zero_trust(target_ip):
         req_id = create_request(target_ip, cmd, status="approved", reason="override",
                                 session_id=sid, execution_id=eid,
-                                inner_target=_inner_target_for(cmd))
+                                inner_target=_inner_target_for(cmd), agent=agent)
         update_gateway_last_seen(target_ip)
         record_audit_event('jit_override_approved', target_ip, details=f'Override auto-approved JIT #{req_id}: {cmd[:80]} (reason: {row["override_reason"][:60]})')
         return {"status": "ok", "id": f"{req_id:06d}", "request_id": req_id, "override": True,
                 "scope": "host", "message": "Auto-approved via Override Mode"}
 
     req_id = create_request(target_ip, cmd, status="pending", session_id=sid,
-                            execution_id=eid, reason=read_lane_reason,
-                            inner_target=_inner_target_for(cmd))
+                            execution_id=eid,
+                            reason=('force-jit' if force_jit else read_lane_reason),
+                            inner_target=_inner_target_for(cmd), agent=agent)
     update_gateway_last_seen(target_ip)
     send_notify('jit', 'JIT Approval Required', f'`{cmd[:80]}` on {target_ip}')
     record_audit_event('jit_created', target_ip, details=f'JIT #{req_id}: {cmd[:80]}')
@@ -890,10 +964,13 @@ def receive_log(payload: GatewayPayload, request: Request):
     reason = (payload.reason or '')[:200]
     token = (payload.token or '')[:64]
     cmd = decode_cmd(payload.encoded_command)
+    log_agent = (payload.agent or '').strip()[:64]
+    if log_agent and not re.fullmatch(r'[A-Za-z0-9_.:-]{1,64}', log_agent):
+        raise HTTPException(status_code=400, detail="Invalid agent")
     req_id = create_request(target_ip, cmd, status=payload.status, ttl=0, reason=reason,
                             session_id=(payload.session_id or '')[:64],
                             execution_id=(payload.execution_id or '')[:64],
-                            inner_target=_inner_target_for(cmd))
+                            inner_target=_inner_target_for(cmd), agent=log_agent)
     # F5: an exec result can arrive before this row exists (both are background
     # curls). Attach the waiting orphan now.
     if payload.status in ('auto-approved', 'window-approved'):
@@ -1035,6 +1112,7 @@ class HeartbeatPayload(BaseModel):
     poller_ok: int = 0
     gateway_ok: int = 0
     can_reach: int = 0
+    ssh_host_key: str = ""
 
 @app.post("/api/gateway-heartbeat")
 def receive_heartbeat(payload: HeartbeatPayload, request: Request):
@@ -1045,6 +1123,18 @@ def receive_heartbeat(payload: HeartbeatPayload, request: Request):
     update_gateway_last_seen(payload.ip)
     update_gateway_heartbeat(payload.ip, payload.hostname,
                              payload.poller_ok, payload.gateway_ok, payload.can_reach)
+    # F12: a heartbeat can report a new host key, but it never moves the pin —
+    # only an explicit, audited operator action does (design §4, R6).
+    if (payload.ssh_host_key or '').strip():
+        from core.ssh_keys import fingerprint
+        current = get_gateway_ssh_host_key(payload.ip)
+        reported = (payload.ssh_host_key or '').strip()
+        if current and fingerprint(current) != fingerprint(reported):
+            record_audit_event(
+                'ssh_host_key_changed', payload.ip, payload.hostname,
+                f"SSH host key changed on the gateway: pinned "
+                f"{fingerprint(current)}, reported {fingerprint(reported)}. "
+                f"The pin is unchanged; re-pin it explicitly.")
     return {"status": "ok"}
 
 
@@ -1088,6 +1178,9 @@ def fetch_policy(target_ip: str, request: Request):
     policies['zero_trust'] = 1 if get_gateway_zero_trust(resolved_ip) else 0
     # F5: per-gateway output capture (off | exit-only | tail).
     policies['capture_output'] = get_gateway_capture_output(resolved_ip)
+    # F12: direct+mcp | mcp_only. The poller writes /etc/eshu-ssh-mode, which
+    # is the gateway's own enforcement point for the shared key.
+    policies['ssh_mode'] = get_gateway_ssh_mode(resolved_ip)
 
     # Fleet Run — inject pending command into the selected gateways' policy response
     fleet_cmd = get_injectable_fleet_cmd(resolved_ip)
@@ -2792,6 +2885,57 @@ def set_gw_read_lane(ip: str, payload: ReadLanePayload, request: Request):
     record_audit_event('read_lane_' + mode, ip,
                        details=f"Read-only lane set to '{mode}'")
     return {"status": "ok", "ip": ip, "read_lane": mode}
+
+
+class SSHSettingsPayload(BaseModel):
+    mode: str = 'direct+mcp'
+
+
+@app.get("/api/ssh-key")
+def serve_dashboard_ssh_key():
+    """F12: the dashboard's public SSH key.
+
+    Public on purpose: it is a public key, and the installer has to fetch it
+    before it holds any credential. It returns nothing else — no tokens, no
+    fingerprints of private material.
+    """
+    from core.ssh_keys import KeyError_, fingerprint, public_key_line
+    try:
+        line = public_key_line()
+    except KeyError_ as exc:
+        raise HTTPException(status_code=503, detail=f"ssh key unavailable: {exc.code}")
+    return {"public_key": line, "fingerprint": fingerprint(line)}
+
+
+@app.put("/api/gateways/{ip}/ssh-mode")
+def set_gw_ssh_mode(ip: str, payload: SSHSettingsPayload, request: Request):
+    """F12: direct+mcp (default) or mcp_only (the shared key is retired)."""
+    _check_session(request)
+    mode = set_gateway_ssh_mode(ip, payload.mode)
+    record_audit_event('ssh_mode_' + mode, ip,
+                       details=f"SSH mode set to '{mode}'")
+    return {"status": "ok", "ip": ip, "ssh_mode": mode}
+
+
+@app.post("/api/gateways/{ip}/ssh-host-key")
+def repin_ssh_host_key(ip: str, payload: SSHHostKeyPayload, request: Request):
+    """F12 R6: the explicit, audited re-pin. Nothing else moves a pin."""
+    _check_session(request)
+    from core.ssh_keys import fingerprint, parse_public_key
+    key_line = (payload.ssh_host_key or '').strip()
+    if parse_public_key(key_line) is None:
+        raise HTTPException(status_code=400, detail="Invalid ssh_host_key")
+    gateway = get_gateway(ip)
+    if not gateway:
+        raise HTTPException(status_code=404, detail="Gateway not found")
+    previous = get_gateway_ssh_host_key(ip)
+    set_gateway_ssh_host_key(ip, key_line)
+    record_audit_event(
+        'ssh_host_key_repinned', ip, gateway.get('hostname') or '',
+        f"SSH host key re-pinned by the operator: "
+        f"{fingerprint(previous) or '(none)'} -> {fingerprint(key_line)}")
+    return {"status": "ok", "ip": ip, "ssh_host_key": key_line,
+            "fingerprint": fingerprint(key_line)}
 
 
 @app.post("/api/gateways/{ip}/capture")

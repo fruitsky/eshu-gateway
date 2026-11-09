@@ -59,8 +59,14 @@ class GatewaySandbox:
         self.bin = self.root / "bin"
         self.home = self.root / "home"
         self.features = self.etc / "features.d"
-        for directory in (self.etc, self.run_dir, self.bin, self.home, self.features):
+        # F12: the persistent nonce store (root-only 0700 in production).
+        self.nonce_dir = self.root / "var-lib-eshu"
+        for directory in (self.etc, self.run_dir, self.bin, self.home, self.features,
+                          self.nonce_dir):
             directory.mkdir(parents=True, exist_ok=True)
+        os.chmod(self.nonce_dir, 0o700)
+        self.token_file = self.etc / "eshu-token"
+        self.token_file.write_text("test-token\n")
         # F5: the poller's private work dir (0700, owner-checked before use).
         self.capture_dir = self.root / "run-eshu"
         self.capture_dir.mkdir(parents=True, exist_ok=True)
@@ -188,6 +194,17 @@ printf '%s\\n' "$*" >> "__LOG__"
                 text = swap("/etc/" + name, str(self.etc / name))
         text = swap('FEATURES_DIR="/etc/eshu/features.d"',
                     'FEATURES_DIR="%s"' % self.features, 1)
+        # F12: the prefix MAC key, the ssh_mode marker and the nonce store.
+        for name in ("eshu-token", "eshu-ssh-mode"):
+            if "/etc/" + name in text:
+                text = swap("/etc/" + name, str(self.etc / name))
+        # A frozen pre-F12 copy (tests/test_sec_compat.py) has no store yet.
+        if 'ESHU_NONCE_DIR="${ESHU_NONCE_DIR:-/var/lib/eshu}"' in text:
+            text = swap('ESHU_NONCE_DIR="${ESHU_NONCE_DIR:-/var/lib/eshu}"',
+                        'ESHU_NONCE_DIR="${ESHU_NONCE_DIR:-%s}"' % self.nonce_dir, 1)
+        if 'ESHU_NONCE_OWNER="${ESHU_NONCE_OWNER:-0}"' in text:
+            text = swap('ESHU_NONCE_OWNER="${ESHU_NONCE_OWNER:-0}"',
+                        'ESHU_NONCE_OWNER="${ESHU_NONCE_OWNER:-%d}"' % os.getuid(), 1)
         if 'ESHU_RUN_DIR="${ESHU_RUN_DIR:-/run/eshu}"' in text:
             text = swap('ESHU_RUN_DIR="${ESHU_RUN_DIR:-/run/eshu}"',
                         'ESHU_RUN_DIR="${ESHU_RUN_DIR:-%s}"' % self.capture_dir, 1)
@@ -208,12 +225,13 @@ printf '%s\\n' "$*" >> "__LOG__"
         for name in ("eshu-freeze", "eshu-zero-trust", "eshu-rblack.txt",
                      "eshu-exact.txt", "eshu-rwhite.txt",
                      "eshu-require-session", "eshu-session-key",
-                     "eshu-capture"):
+                     "eshu-capture", "eshu-token", "eshu-ssh-mode"):
             sandbox_path = str(self.etc / name)
             assert text.count("/etc/" + name) == text.count(sandbox_path), name
         assert "/etc/eshu/features.d" not in text
         assert "/var/run/eshu.tickets" not in text
         assert "${ESHU_RUN_DIR:-/run/eshu}" not in text
+        assert "/var/lib/eshu" not in text
         # The hard self-protection case still names the real path on purpose.
         assert '"/etc/eshu' in text
         return text
@@ -243,7 +261,7 @@ printf '%s\\n' "$*" >> "__LOG__"
     def capture(self, mode: str):
         (self.etc / "eshu-capture").write_text(mode)
 
-    def popen(self, command: str):
+    def popen(self, command: str, args=None):
         env = {
             "SSH_ORIGINAL_COMMAND": command,
             "SSH_CONNECTION": "127.0.0.1 40000 127.0.0.1 22",
@@ -253,8 +271,8 @@ printf '%s\\n' "$*" >> "__LOG__"
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         }
         return subprocess.Popen(
-            ["bash", str(self.script)], cwd=str(self.root), env=env,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            ["bash", str(self.script)] + list(args or []), cwd=str(self.root),
+            env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
     def zero_trust(self, on: bool):
         (self.etc / "eshu-zero-trust").write_text("1" if on else "")
@@ -281,6 +299,29 @@ printf '%s\\n' "$*" >> "__LOG__"
     def tickets(self, *lines: str):
         self._write(self.ticket_file, *lines)
 
+    def ssh_mode(self, mode: str):
+        (self.etc / "eshu-ssh-mode").write_text(mode)
+
+    def token(self, value: str):
+        self.token_file.write_text(value + "\n")
+
+    def sign(self, command: str, agent: str = "agent-a", session: str = "",
+             force_jit: str = "0", ts: int = None, nonce: str = None):
+        """Build the signed prefix exactly as core/ssh_crypto.py does."""
+        import secrets as _secrets
+        ts = str(ts if ts is not None else int(time.time()))
+        nonce = nonce or _secrets.token_hex(16)
+        import sys as _sys
+        _sys.path.insert(0, str(REPO / "dashboard"))
+        from core import ssh_crypto
+        key = ssh_crypto.derive_key((self.etc / "eshu-token").read_text().strip())
+        canonical = ssh_crypto.canonical(
+            command, agent, session=session, mcp="1", force_jit=force_jit,
+            ts=ts, nonce=nonce, gateway_ip=self.target_ip)
+        signature = ssh_crypto.sign(key, canonical)
+        return ssh_crypto.prefix_line(agent, session, force_jit, ts, nonce,
+                                      signature) + command
+
     def command_script(self, name: str, body: str) -> str:
         """Write an executable test command (no shell metacharacters)."""
         path = self.root / name
@@ -301,7 +342,7 @@ printf '%s\\n' "$*" >> "__LOG__"
         self.feature("approved_windows.sh", source)
 
     # ── execution/observation ───────────────────────────────────────────────
-    def run(self, command: str):
+    def run(self, command: str, args=None):
         env = {
             "SSH_ORIGINAL_COMMAND": command,
             "SSH_CONNECTION": "127.0.0.1 40000 127.0.0.1 22",
@@ -311,8 +352,8 @@ printf '%s\\n' "$*" >> "__LOG__"
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         }
         proc = subprocess.run(
-            ["bash", str(self.script)], cwd=str(self.root), env=env,
-            capture_output=True, text=True, timeout=20)
+            ["bash", str(self.script)] + list(args or []), cwd=str(self.root),
+            env=env, capture_output=True, text=True, timeout=20)
         time.sleep(0.15)  # let the backgrounded /api/log stub finish
         return proc
 
@@ -868,7 +909,7 @@ def test_sec_chunk1_allowlist_log_body_is_well_formed(gw):
     for payload in bodies:
         assert set(payload) == {
             "target_ip", "encoded_command", "status",
-            "session_id", "execution_id"}
+            "session_id", "execution_id", "agent"}
         assert payload["target_ip"] == "10.0.0.1"
         assert payload["status"] == "auto-approved"
         assert payload["session_id"] == "chat_valid-1"
@@ -885,7 +926,8 @@ def test_sec_chunk1_jit_request_body_is_well_formed(gw):
         if call["url"].endswith("/api/request"):
             payload = json.loads(raw)
             assert set(payload) == {
-                "target_ip", "encoded_command", "session_id", "execution_id"}
+                "target_ip", "encoded_command", "session_id", "execution_id",
+                "agent", "force_jit"}
 
 
 def test_sec_chunk1_window_reject_body_is_well_formed(gw):
@@ -905,7 +947,7 @@ def test_sec_chunk1_window_reject_body_is_well_formed(gw):
             payload = json.loads(raw)
             assert set(payload) == {
                 "target_ip", "encoded_command", "status", "reason", "token",
-                "session_id", "execution_id"}
+                "session_id", "execution_id", "agent"}
             assert payload["reason"] == "unknown window token"
             assert payload["token"] == "WinToken123"
     assert seen

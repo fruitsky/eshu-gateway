@@ -802,6 +802,29 @@ def session_conclude_fn():
     return _session_conclude
 
 
+SSH_EXEC_DESC = (
+    "Run one command over SSH on a registered gateway as this agent, without "
+    "holding an SSH key. `host` is a gateway IP or hostname Eshu knows (never "
+    "user@host, a port or an -o option) and `command` is sent byte-for-byte. "
+    "The gateway's policy still decides: freeze, blocklists, allowlists, "
+    "Zero-Trust and JIT all apply, and this agent's ssh_mode may force every "
+    "command to approval. Returns {status: ran|pending|refused, request_id, "
+    "exit_code?, output? (tail, <=64 KiB), truncated?, reason?}. When the "
+    "status is pending, poll check_request(request_id) and call ssh_exec again "
+    "with the same arguments once it is approved, or pass wait=true to poll "
+    "here for up to 60 s."
+)
+
+
+def ssh_exec_fn():
+    def _ssh_exec(host: str, command: str, session_id: str = "",
+                  timeout: int = 60, wait: bool = False) -> str:
+        from core.ssh_exec import as_json, ssh_exec
+        return as_json(ssh_exec(host, command, session_id=session_id,
+                                timeout=timeout, wait=wait))
+    return _ssh_exec
+
+
 def find_runbooks_fn():
     def _find_runbooks(query: str = "", tags=None) -> str:
         from core.conclusions import as_json, find_runbooks
@@ -958,5 +981,6 @@ mcp.add_tool(find_runbooks_fn(), name="find_runbooks", description=FIND_RUNBOOKS
 mcp.add_tool(similar_incidents_fn(), name="similar_incidents", description=SIMILAR_INCIDENTS_DESC)
 mcp.add_tool(get_runbook_fn(), name="get_runbook", description=GET_RUNBOOK_DESC)
 mcp.add_tool(whereis_fn(), name="whereis", description=WHEREIS_DESC)
+mcp.add_tool(ssh_exec_fn(), name="ssh_exec", description=SSH_EXEC_DESC)
 mcp.add_tool(session_plan_fn(), name="session_plan", description=SESSION_PLAN_DESC)
 mcp.add_tool(check_plan_fn(), name="check_plan", description=CHECK_PLAN_DESC)

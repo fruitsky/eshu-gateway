@@ -105,7 +105,12 @@ while true; do
   # Clean expired lockbox tickets (older than 90s)
   if [ -f /var/run/eshu.tickets ] && [ -s /var/run/eshu.tickets ]; then
     NOW=$(date +%s)
-    awk -F'|' -v now="$NOW" '($1+90) >= now { print }' /var/run/eshu.tickets > /var/run/eshu.tickets.tmp
+    # F12 G5: a v2 line is `v2|ts|agent|session|cmd`; the timestamp is $2.
+    # Reading $1 as the timestamp would delete every v2 ticket as stale.
+    awk -F'|' -v now="$NOW" '
+      $1 == "v2" { if (($2 + 90) >= now) print; next }
+      { if (($1 + 90) >= now) print }
+    ' /var/run/eshu.tickets > /var/run/eshu.tickets.tmp
     mv -f /var/run/eshu.tickets.tmp /var/run/eshu.tickets
     chmod 600 /var/run/eshu.tickets
   fi
@@ -185,6 +190,15 @@ while true; do
         chmod 640 /etc/eshu-session-key.prev 2>/dev/null || true
       fi
     fi
+    # F12: direct+mcp | mcp_only. Only mcp_only is written; anything else is
+    # the default, so a garbage value can never retire the shared key.
+    SSH_MODE=$(python3 -c "import sys, json; print(json.load(sys.stdin).get('ssh_mode','direct+mcp'))" < "$POLICY_FILE" 2>/dev/null || echo "direct+mcp")
+    case "$SSH_MODE" in
+      mcp_only) printf '%s' "mcp_only" > /etc/eshu-ssh-mode.tmp ;;
+      *) printf '%s' "direct+mcp" > /etc/eshu-ssh-mode.tmp ;;
+    esac
+    mv -f /etc/eshu-ssh-mode.tmp /etc/eshu-ssh-mode 2>/dev/null || true
+
     SESSION_REQUIRED=$(python3 -c "import sys, json; print(json.load(sys.stdin).get('require_sessions',0))" < "$POLICY_FILE" 2>/dev/null || echo "0")
     if [ "$SESSION_REQUIRED" = "1" ]; then
       echo "1" > /etc/eshu-require-session.tmp
@@ -289,6 +303,8 @@ with open('/etc/eshu-windows.txt.tmp', 'w') as f:
         if [ -n "$NEW_TOKEN" ] && [ "$NEW_TOKEN" != "None" ]; then
           sed -i "s|^GATEWAY_TOKEN=.*|GATEWAY_TOKEN=\"$NEW_TOKEN\"|" /usr/local/bin/eshu-poller.sh
           sed -i "s|^GATEWAY_TOKEN=.*|GATEWAY_TOKEN=\"$NEW_TOKEN\"|" /usr/local/bin/eshu-gateway.sh
+          # F12: the MAC helper reads the token from here, not from argv.
+          printf '%s\n' "$NEW_TOKEN" > /etc/eshu-token.tmp && chmod 600 /etc/eshu-token.tmp && mv -f /etc/eshu-token.tmp /etc/eshu-token 2>/dev/null || true
           GATEWAY_TOKEN="$NEW_TOKEN"
         fi
         logger -t eshu-poller "Update to $NEW_VER completed (trigger $TRIGGER_ID)."
@@ -341,6 +357,8 @@ with open('/etc/eshu-windows.txt.tmp', 'w') as f:
         if [ -n "$NEW_TOKEN" ] && [ "$NEW_TOKEN" != "None" ]; then
           sed -i "s|^GATEWAY_TOKEN=.*|GATEWAY_TOKEN=\"$NEW_TOKEN\"|" /usr/local/bin/eshu-poller.sh
           sed -i "s|^GATEWAY_TOKEN=.*|GATEWAY_TOKEN=\"$NEW_TOKEN\"|" /usr/local/bin/eshu-gateway.sh
+          # F12: the MAC helper reads the token from here, not from argv.
+          printf '%s\n' "$NEW_TOKEN" > /etc/eshu-token.tmp && chmod 600 /etc/eshu-token.tmp && mv -f /etc/eshu-token.tmp /etc/eshu-token 2>/dev/null || true
           GATEWAY_TOKEN="$NEW_TOKEN"
         fi
       else
