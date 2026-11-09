@@ -3375,7 +3375,153 @@ runs green on the docs change: `1856 passed, 3 skipped, 7 warnings in 379.03s
 
 ### Reviewer notes
 
-_(reviewer)_
+**Round 1 (2026-11-09): design changes requested. Not ready for the security
+reviewer yet.** I reviewed the design note at `97776d6`, against the gateway
+(`eshu-gateway.sh`) and the installer template as they are on
+`feature-roadmap`. Only the design was reviewed, because the branch has no
+code. `bash scripts/verify.sh` on the docs change: `1856 passed, 3 skipped, 7 warnings in 328.10s (0:05:28)`.
+
+**What is right.** The overall shape works:
+
+* `ssh_exec` reaches the gateway's existing forced command, so every
+  gateway stage still runs.
+* `host` is looked up, never interpolated.
+* The runner uses a fixed argv with no shell, `BatchMode`, and a
+  process-group kill.
+* Direct SSH keeps its text output, so the F5 golden test is untouched.
+* `ssh_hosts_allow` is opt-in, with empty meaning none.
+* `mcp_only` lets the operator retire the shared key one gateway at a
+  time.
+
+The dashboard key adds little new power. The dashboard can already approve
+anything, and the key only reaches the same forced command. Six design gaps
+need an answer before the security review.
+
+*Must fix (in the design note):*
+
+* **R1 The agent signature must bind the command and be single-use.** The
+  proposed MAC covers the agent, session, timestamp and `force_jit`, but not
+  the command bytes and not `ESHU_MCP`. It is valid for ±300 s and can be
+  reused. Today the gateway also writes the whole `SSH_ORIGINAL_COMMAND`,
+  prefixes included, to syslog (stage 1, `logger … cmd=…`). Anything that can
+  read the gateway's logs can therefore see a fresh signed prefix. That
+  includes an agent with log reads, and later F4's read lane, which allows
+  `/var/log` and `journalctl`. A direct-SSH agent could then put that prefix
+  in front of its own command and be recorded as the other agent, inheriting
+  that agent's mode, and later its per-agent overrides. **Design change:**
+  * The MAC covers a canonical encoding of every prefix field plus
+    `sha256(command)` and the gateway's own identity (its IP, or a gateway
+    id).
+  * Add a random nonce, which the gateway keeps for the validity window and
+    refuses to see twice.
+  * Stop logging the signature and nonce values: log `agent=` and
+    `sig=ok|bad|none` only.
+
+  **Tests:** a valid prefix with a different command is refused; the same
+  prefix twice is refused; a prefix signed for gateway A is refused on
+  gateway B; a flipped `ESHU_MCP` is refused; the syslog line has no
+  signature hex.
+* **R2 Say where `ESHU_FORCE_JIT` is honoured, end to end.** The auto-run
+  decisions are not all on the gateway. The allowlist and windows run there,
+  but the F3 plan, session override, F4 read lane and host override run on
+  the dashboard inside `receive_request` (§ 2.6). As written, an `approval`
+  agent's `uptime` would still be auto-approved by an active host override
+  or the read lane. The note also says that the gateway still runs "plans,
+  the read lane … exactly as today", which contradicts the `approval` mode.
+  **Design change:**
+  * The gateway skips its allowlist and window auto-run stages when
+    `force_jit` is set and signed, and passes `force_jit` (and the verified
+    `agent`) to `/api/request`.
+  * `receive_request` then skips every auto-approve path: plan, session
+    override, read lane and host override. It also re-derives the mode from
+    the agent's own policy, so the dashboard does not rely on the prefix
+    alone.
+  * The § 2.6 order is otherwise unchanged. Freeze, the encoded-payload
+    block and the blocklists still win.
+
+  **Tests:** for each auto path (allowlist, window, plan, session override,
+  read lane, host override), a `force_jit` request stays pending.
+* **R3 Bind the approved ticket to the agent.** `claim_lockbox_ticket`
+  matches on the command bytes alone. While a gateway is in `direct+mcp`,
+  any shared-key caller that sends the same bytes within 90 s takes agent
+  A's approved ticket, runs it under its own identity and gets the output.
+  The re-run step of the pending → approve → re-run flow depends on that
+  claim. **Design change:** the ticket line carries `agent` (and the
+  session), and the claim also matches them. An unsigned request can claim
+  only a ticket with no agent. **Tests:** agent B, and an unsigned caller,
+  cannot claim agent A's ticket; agent A claims it exactly once.
+* **R4 The `authorized_keys` line must reuse today's options.** The
+  installer writes
+  `command="/usr/bin/sudo /usr/local/bin/eshu-gateway.sh",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty,restrict`
+  and an optional `from=` (`ALLOWED_SSH_FROM`). It *overwrites* the file
+  with that one line. The note's proposed line has a different command path
+  and no `restrict`/`no-*` options. **Design change:** the dashboard key
+  gets the same option set and forced command, plus its own `from=`. The
+  installer writes both lines (the shared key, while the gateway is in
+  `direct+mcp`, and the dashboard key). Re-running it replaces each line
+  rather than adding to it. **Tests:** the generated file has both lines,
+  each with `restrict` and the forced command; re-running does not
+  duplicate either line; and `mcp_only` drops the shared-key line.
+* **R5 Framing of the MCP envelope.** The dashboard parses the gateway's
+  stdout. If any command output reaches stdout outside the envelope, a
+  command can print an envelope-shaped line and forge `status: "ran"` or a
+  fake `exit_code`. **Design change:** in MCP mode, the gateway captures all
+  command output (F5's capture path), base64-encodes it inside the
+  envelope, and prints *only* the envelope. The dashboard accepts exactly
+  one envelope with a fixed marker and treats anything else as `refused`
+  (`bad-envelope`). **Test:** a command whose output contains an
+  envelope-shaped line comes back inside `output`, and the outer result is
+  unchanged.
+* **R6 Where the pinned host key comes from.** "Captured at registration" is
+  not specific enough. The dashboard must not learn the key by scanning it
+  over the network on first use. **Design change:** the gateway sends its
+  own host public key (from `/etc/ssh/ssh_host_ed25519_key.pub`) in the
+  token-authenticated registration and heartbeat. The dashboard stores the
+  fingerprint and refuses to `ssh_exec` a gateway that has no pin. A
+  changed key in a heartbeat raises an audit event and does **not** re-pin.
+  Re-pinning is an explicit, audited operator action. **Tests:** no pin
+  means refused; a mismatch is refused and audited; a heartbeat with a new
+  key does not change the pin.
+
+*Should fix:*
+
+* **S1 (Q3) `read_only` should refuse non-reads.** `approval` already means
+  "ask me about everything". If `read_only` also queues writes for the
+  operator, the two modes differ only in whether reads auto-run. That is
+  the tired-operator risk the note names. Return
+  `{status: "refused", reason: "read-only agent"}` and create no request.
+* **S2 Timeouts.** Killing the local `ssh` does not stop the remote
+  command. Say that F19 is the real bound, and that until F19 the `timeout`
+  only limits how long the agent waits. Keep `timeout` ≤ 120 s, and note
+  that a JIT TTL of 90 s means `wait` cannot exceed 60 s usefully.
+* **S3 The capability flag fails closed.** `ssh_exec` refuses a gateway
+  that has not reported the capability, as written. Also refuse one whose
+  version predates the R1 MAC format, so a half-updated fleet cannot
+  downgrade the format.
+
+*Answers to the open questions:*
+
+1. **Signing key.** Using the gateway token with a label is acceptable to
+   me if the key is derived as `HMAC(token, "eshu-ssh-agent-v1")` and that
+   derived key is used for the MAC. Rotating the token then rotates it.
+   This is the security reviewer's call.
+2. **`from=` and NAT.** Keep `from=`, and reuse the installer's existing
+   `ALLOWED_SSH_FROM` override for NAT or a proxy. Do not ship a line
+   without `from=`.
+3. **`read_only`.** Refuse; see S1.
+4. **Key location.** Default to `/var/lib/eshu/ssh/`, with an env override
+   (`ESHU_SSH_KEY_DIR`). Refuse to start the runner if the directory is not
+   `0700` and owned by the service user, or if the key is not `0600`.
+5. **`wait: true`.** Keep it, capped at 60 s. When the cap is reached,
+   return `pending` with the `request_id`, so the agent falls back to
+   `check_request`.
+
+*For the security reviewer (no change asked here):* the existing
+`ESHU_SESSION_SIG` has the same "logged and not bound to the command" shape
+as R1. It is out of F12's scope. It belongs with security Chunk 6 or 7.
+
+Once R1–R6 are written into the note, F12 goes to the security reviewer
+(§ 2.6a) for design sign-off. No code until both approvals are recorded.
 
 ---
 
@@ -3787,7 +3933,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 5a | X1 | ctx-actions | dashboard | Merged | `fix/x1-ctx-actions` | — | FYI to security reviewer (approve ignored status) |
 | 6 | F5 | exec-results | gateway + dashboard | Merged | `feat/f5-exec-results` | — | |
 | 6a | F18 | request-context | dashboard | Merged | `feat/f18-request-context` | F1, F5, F7, X1 | |
-| 7 | F12 | ssh-exec | dashboard + gateway | Ready (after F5) — design first | `feat/f12-ssh-exec` | F4, F5 | design approval + security reviewer sign-off |
+| 7 | F12 | ssh-exec | dashboard + gateway | **Design: changes requested (R1–R6)** — round 1; no code yet | `feat/f12-ssh-exec` | F4, F5 | design approval + security reviewer sign-off |
 | 8 | F6 | session-wrapup | dashboard | Ready (after F12) | `feat/f6-session-wrapup` | F3, F4, F5 | |
 | 9 | F13 | session-conclusions | dashboard + MCP | Ready (after F6) | `feat/f13-session-conclusions` | F5, F6 | |
 | 10 | F8 | test-traffic | dashboard | Ready (after F13) | `feat/f8-test-traffic` | — | low priority |
