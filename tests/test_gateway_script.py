@@ -338,11 +338,52 @@ printf '%s\\n' "$*" >> "__LOG__"
             "ESHU_JIT_WAIT": "2",
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         }
-        proc = subprocess.run(
-            ["bash", str(self.script)], cwd=str(self.root), env=env,
-            capture_output=True, text=True, timeout=60)
+        try:
+            proc = subprocess.run(
+                ["bash", str(self.script)], cwd=str(self.root), env=env,
+                capture_output=True, text=True, timeout=60)
+        except subprocess.TimeoutExpired as exc:
+            # A hang is the interesting failure: show what every process in
+            # the sandbox is waiting on, so a CI-only hang explains itself.
+            pytest.fail(self._hang_report() + '\n--- stdout ---\n'
+                        + (exc.stdout or '')[-2000:])
         time.sleep(0.15)  # let the backgrounded /api/log stub finish
         return proc
+
+    def _hang_report(self) -> str:
+        """ps + wchan + open fds for the sandbox's processes, best effort."""
+        lines = []
+        try:
+            ps = subprocess.run(['ps', '-eo', 'pid,ppid,stat,wchan:24,args'],
+                                capture_output=True, text=True, timeout=10)
+            body = [line for line in ps.stdout.splitlines()
+                    if str(self.root) in line or 'eshu-gateway.sh' in line]
+            lines.append('ps:\n' + '\n'.join(body))
+        except Exception as exc:  # noqa: BLE001 - diagnostics only
+            lines.append('ps failed: %r' % (exc,))
+        try:
+            out = os.listdir('/proc')
+            for pid in [p for p in out if p.isdigit()]:
+                try:
+                    cmd = open('/proc/%s/cmdline' % pid, 'rb').read() \
+                        .replace(b'\0', b' ').decode('utf-8', 'replace')
+                except OSError:
+                    continue
+                if 'eshu-gateway' not in cmd:
+                    continue
+                try:
+                    wchan = open('/proc/%s/wchan' % pid).read().strip()
+                except OSError:
+                    wchan = '?'
+                try:
+                    fds = os.listdir('/proc/%s/fd' % pid)
+                except OSError:
+                    fds = []
+                lines.append('pid %s wchan=%s fds=%s cmd=%s'
+                             % (pid, wchan, len(fds), cmd[:160]))
+        except Exception as exc:  # noqa: BLE001
+            lines.append('proc scan failed: %r' % (exc,))
+        return 'HANG: ' + '\n'.join(lines)
 
     def curl_calls(self):
         if not self.curl_log.exists():
