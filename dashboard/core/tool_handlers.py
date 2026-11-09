@@ -22,6 +22,7 @@ import hashlib
 import json
 import time
 
+from core.ha_supervisor import run_supervisor_read, run_whoami
 from core.ha_ws import ha_ws_exec
 from core.train import handle_train_plan, handle_train_status
 from core.commute import (
@@ -998,7 +999,94 @@ def _h_web_fetch(integration, tool, args, ctx):
     return build_envelope(result)
 
 
+def _pihole_dns_rows(data, kind, config_key=None):
+    """Normalise Pi-hole v6 config payloads for `local_dns_records`.
+
+    FTL returns the config nested (`{"config": {"dns": {"hosts": [...]}}}`),
+    but the lists themselves may be plain strings ("<ip> <name>") or objects,
+    so both are accepted.
+    """
+    config_key = config_key or kind
+    rows = data
+    if isinstance(data, dict):
+        config = data.get('config')
+        dns = config.get('dns') if isinstance(config, dict) else None
+        if isinstance(dns, dict):
+            rows = dns.get(config_key)
+        elif config_key in data:
+            rows = data.get(config_key)
+    if not isinstance(rows, list):
+        return []
+    out = []
+    for row in rows:
+        if isinstance(row, str):
+            parts = row.replace(',', ' ').split()
+            if kind == 'hosts' and len(parts) >= 2:
+                out.append({'name': parts[1], 'ips': [parts[0]]})
+            elif kind == 'cnames' and len(parts) >= 2:
+                out.append({'name': parts[0], 'target': parts[1]})
+            continue
+        if not isinstance(row, dict):
+            continue
+        if kind == 'hosts':
+            name = str(row.get('name') or '')
+            ip = str(row.get('ip') or '')
+            if name and ip:
+                out.append({'name': name, 'ips': [ip]})
+        else:
+            name = str(row.get('name') or '')
+            target = str(row.get('target') or '')
+            if name and target:
+                out.append({'name': name, 'target': target})
+    return out
+
+
+def _h_pihole_local_dns_records(integration, tool, args, ctx=None):
+    """F14: read a Pi-hole v6 instance's local DNS host + CNAME records.
+
+    Two fixed GETs (`config/dns/hosts`, `config/dns/cnameRecords`), never an
+    agent-supplied path. Both are reads; the inventory gates this handler
+    through `core/read_policy.is_read_integration_call` first.
+    """
+    agent = (ctx or {}).get('agent', '')
+    out = {'hosts': [], 'cnames': []}
+    for kind, config_key, path in (
+            ('hosts', 'hosts', 'config/dns/hosts'),
+            ('cnames', 'cnameRecords', 'config/dns/cnameRecords')):
+        probe = {'method': 'GET', 'path_template': path, 'params': [],
+                 'read_only': True}
+        try:
+            res = execute_integration_call(integration, probe, {}, agent=agent)
+        except ProxyError as exc:
+            return json.dumps({'error': 'local_dns_records_failed',
+                               'message': exc.message,
+                               'status_code': exc.status_code})
+        if res.get('error'):
+            return json.dumps({'error': 'local_dns_records_failed',
+                               'message': res['error'],
+                               'status_code': res.get('status_code') or 502})
+        try:
+            data = json.loads(res.get('body') or 'null')
+        except ValueError:
+            data = None
+        out[kind] = _pihole_dns_rows(data, kind, config_key)
+    return json.dumps(out)
+
+
+def _h_ha_supervisor_read(integration, tool, args, ctx=None):
+    """F9: one fixed Supervisor endpoint, chosen by the tool's name."""
+    return run_supervisor_read(integration, (tool or {}).get('name') or '',
+                               args or {}, ctx or {})
+
+
+def _h_ha_whoami(integration, tool, args, ctx=None):
+    return run_whoami(integration, ctx or {})
+
+
 HANDLERS = {
+    'pihole_local_dns_records': _h_pihole_local_dns_records,
+    'ha_supervisor_read': _h_ha_supervisor_read,
+    'ha_whoami': _h_ha_whoami,
     'ha_lovelace_dashboards': _h_dashboards,
     'ha_lovelace_dashboard': _h_dashboard,
     'ha_lovelace_create_dashboard': _h_create_dashboard,

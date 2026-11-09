@@ -20,6 +20,7 @@ from db.requests import (
     search_requests,
     get_session_requests,
     get_request_target_ip,
+    mark_requests_excluded,
 )
 
 from db.gateways import (
@@ -56,6 +57,10 @@ from db.gateways import (
     set_gateway_zero_trust,
     get_gateway_capture_output,
     set_gateway_capture_output,
+    get_gateway_read_lane,
+    read_lane_on_enabled,
+    read_lane_ready,
+    set_gateway_read_lane,
     get_dev_gateways,
     update_gateway_windows_count,
     update_gateway_heartbeat,

@@ -245,14 +245,16 @@ Returns:
      "why": "journalctl (no vacuum/rotate)",
      "section": "LOGS",          // nearest preceding echo marker, or ""
      "context": ["pct 103"],     // wrapper chain, outermost first
-     "elevated": false},         // sudo / su seen in the wrapper chain
+     "elevated": false,          // sudo / su seen in the wrapper chain
+     "input_redirects": [        // F4 SC3: `<`, `<<`, `<<<`, `<&` (omitted when none)
+       {"op": "<", "target": "/etc/shadow"}]},
     ...
   ],
   "sections": ["LOGS", "DISK"],
   "summary": {"steps": 9, "read": 8, "write": 1, "unknown": 0},
   "headline": "9 steps · 8 read · 1 write: systemctl restart nginx",
   "inner_targets": ["pct:103"],  // for F7
-  "flags": ["redirect-to-file", "heredoc", "encoded", "nested-ssh", "sensitive-path"],
+  "flags": ["redirect-to-file", "heredoc", "input-redirect", "encoded", "nested-ssh", "sensitive-path"],
   "complete": true               // false if parsing gave up somewhere (then kind=unknown)
 }
 ```
@@ -1471,12 +1473,24 @@ a shadow period that shows the operator what it *would* have approved.
 
 * Per-gateway setting `read_lane`: `off` (default) | `shadow` | `on`.
 * A JIT request is **read-lane eligible** only if all of these hold:
-  1. `breakdown.complete` is true and every step is `read` (no `write`, no `unknown`);
-  2. no flags from {`encoded`, `heredoc`, `nested-ssh`, `sensitive-path`, `redirect-to-file`};
-  3. no `elevated` step that reads a path outside `/proc`, `/sys`, `/var/log`, `/etc/os-release`
-     (reading as root can reach secrets; keep it narrow);
-  4. command ≤ 8 kB; gateway not frozen and not Zero-Trust;
-  5. not blocked by the central blocklist (`policy_eval` verdict is not `blocked`/`fatal`).
+  1. `breakdown.complete` is true, every step is `read` (no `write`, no
+     `unknown`), and every step's verb is on the reviewed `READ_LANE_VERBS`
+     allowlist in `core/read_policy.py` — status verbs that take no file
+     operands, and file readers (`cat`, `head`, `tail`, `grep`, `wc`, `ls`,
+     `stat`, `du`) that may only touch the safe trees;
+  2. no flags at all (F1's flag list fails closed; `repo-config` and
+     `follows` block automatically, and so will any flag F1 adds later);
+  3. every step reads only inside the safe trees — `/var/log/`, `/proc/`,
+     `/sys/` and exactly `/etc/os-release`, `/etc/hostname`, `/etc/hosts`,
+     `/etc/resolv.conf` (the gateway runs **every** command as root, so this
+     applies to every step, not just `sudo` ones). `/proc/*/root`,
+     `/proc/*/cwd`, `/proc/*/fd`, `/proc/*/map_files`, `/proc/*/mem`,
+     `/proc/*/environ`, `kcore`, `kmsg` and all of `/dev/` are refused, as are
+     globs and `..` components in a path operand;
+  4. no inner target (`pct exec`, `qm guest exec`, `docker exec`) — the lane is
+     opted in per gateway and the guest never opted in;
+  5. command ≤ 8 kB; gateway not frozen and not Zero-Trust;
+  6. not blocked by the central blocklist (`policy_eval` verdict is not `blocked`/`fatal`).
 * `shadow`: the request stays pending as usual, but the row gets
   `reason="read-lane-shadow"` (shown as a small chip "would auto-run") and an
   audit event. The operator's own decision is the ground truth.
@@ -1518,11 +1532,1088 @@ Additive; old gateways work unchanged (same approved-row path as overrides).
 
 ### Implementer notes
 
-_(fill in)_
+**What I did**
+
+* **`core/read_policy.py` (§ 2.6a)**: one entry point for "is this a read?".
+  `is_read_ssh(breakdown)` is F4's rule set — the breakdown must be complete,
+  every step must be `read`, none of F1's blocking flags may be set
+  (`encoded`, `heredoc`, `nested-ssh`, `sensitive-path`, `redirect-to-file`),
+  and a step marked `elevated` may only touch `/proc/`, `/sys/`, `/var/log/`
+  or exactly `/etc/os-release` (a path token containing `..` is refused
+  outright, so `/var/log/../…` cannot slip through the prefix check).
+  `is_read_integration_call(tool, transport, args)` is a thin wrapper over
+  Chunk H's `_read_only_refusal` — no new integration logic.
+* **`core/read_lane.py`**: `eligible(breakdown, verdict, command, mode,
+  frozen, zero_trust)` checks mode, freeze, Zero-Trust, the 8 kB cap and the
+  policy verdict (`blocked`/`fatal` lose), then delegates to
+  `read_policy.is_read_ssh`. It has no read rules of its own.
+* **Setting**: `gateways.read_lane` (`off` default, migration) plus
+  `read_lane_since`; `read_lane_ready()` is true after 7 days in shadow.
+  `PUT /api/gateways/{ip}/read-lane` (session auth, audit `read_lane_<mode>`)
+  refuses `on` before that window — the UI disables the option, but the
+  server does not rely on the UI.
+* **Hook** in `POST /api/request`, after F3's plan and the session override,
+  before the host override (§ 2.6). `shadow`: the request stays pending as
+  usual (notify + `jit_created`) but gets `reason="read-lane-shadow"` and an
+  audit `jit_read_lane_shadow`; the operator's decision is the ground truth.
+  `on`: creates `approved` with `reason="read-lane"`, audits
+  `jit_read_lane_approved`, no notification.
+* **UI**: a "would auto-run" chip on shadow rows, a three-state
+  `off / shadow / on` select on the Gateway row (`on` disabled until ready),
+  and a **Read-only lane · shadow** tile in Statistics (eligible, approved /
+  denied, median length, how many auto-ran once on).
+
+**Surprises and decisions**
+
+* The 7-day rollout clock is stored (`read_lane_since`, set on entering
+  shadow) rather than inferred from audit history; the "at least 2 gateways"
+  part of the rollout note is operator policy and is not enforced in code.
+* Shadow reuses the normal pending path instead of a separate branch, so
+  notifications and the `jit_created` audit stay exactly as they were.
+* F1's `sensitive-path` already covers `.env`, keys, `/etc/shadow`,
+  `/proc/*/environ` and the broad `secret`/`token`/`passw` tokens, so those
+  commands are refused by flag before the elevated-path rule ever runs.
+* A read lane has no session requirement (unlike F3 plans): it also covers
+  SSH callers that never minted a session, which is the common case for
+  allowlist-less reads.
+* The new statistics queries tripped the KI-1 regression test on the first
+  gate run (`r.target_ip` without the alias); they are aliased now — the test
+  did its job.
+
+**Tests** — `tests/test_f4_read_lane.py` (67): 24 eligible and 27 ineligible
+table cases covering every exclusion in the chunk, `.env` (four spellings),
+and a **generated** test that every F1 `write`/`unknown`/incomplete fixture is
+ineligible (≥20 checked). Plus the Chunk H wrappers, shadow-never-approves,
+`on`-approves-only-eligible, `off`-does-nothing, Zero-Trust/freeze/blocklist
+wins, the 8 kB cap, the default-`off` migration, the endpoint + 7-day gate +
+session auth, and the statistics report (counts and median).
+
+Security sign-off (§ 2.6a) is still owed by the security reviewer; the branch
+is ready for that pass.
+
+`bash scripts/verify.sh` (pre-commit green):
+
+```
+1884 passed, 7 warnings in 371.46s (0:06:11)
+```
+
+(1817 before this chunk + 67 F4 tests.)
+
+
+### Round 2 — fixes for reviewer round 1 (R1–R4, S1)
+
+The design's rule 3 was wrong — the gateway runs **every** command as root, so
+`sudo` says nothing about privilege. It is replaced by a closed allowlist on
+top of F1, and the spec now says "every step (the gateway runs as root)".
+
+* **R1 — allowlist on top of F1.** `READ_LANE_VERBS` in `core/read_policy.py`
+  has two groups. Status verbs that take no file operands: `uptime`, `df`,
+  `free`, `ip` (`a`/`addr`/`route`/`link`), `ss`, `ps`, `uname`, `hostname`,
+  `lsblk`, `lscpu`, `whoami`, `id`, `date`, `nproc`, `systemctl`
+  (`status`/`is-active`/`is-enabled`/`list-units`/`list-timers`), `journalctl`
+  (with `-n`, or `--disk-usage`), `docker` (`ps`/`stats --no-stream`/
+  `images`), `pct list`/`qm list`, `zpool status|list`, `zfs list`. File
+  readers: `cat`, `head`, `tail` (no `-f`), `grep`, `wc`, `ls`, `stat`, `du`,
+  and every operand — bare or relative words and `--opt=value` included —
+  must be a safe path. Anything else is ineligible even if F1 says `read`.
+  A wrapper other than `sudo` (`env`, `ip netns exec`, `timeout`, `runuser`)
+  is refused too: it hides part of the command. Tests: the 45-case eligible
+  table and `test_f4_every_eligible_verb_is_on_the_allowlist`; every probe
+  class is in the ineligible table.
+* **R2 — the safe trees apply to every step.** `/var/log/`, `/proc/`, `/sys/`
+  and exactly `/etc/os-release`, `/etc/hostname`, `/etc/hosts`,
+  `/etc/resolv.conf`; inside `/proc` the `root`, `cwd`, `fd`, `map_files`,
+  `mem` and `environ` entries and `kcore`/`kmsg` are refused; all of `/dev/`
+  is refused; any glob or brace character and any `..` part is refused on the
+  whole token. Tests: block devices, `/proc` links, `cat config.yml`,
+  `/srv/app/config.yml`, glob-before-`..`.
+* **R3 — flags fail closed.** `READ_HARMLESS_FLAGS` is empty, so every F1
+  flag blocks — `repo-config` and `follows` included, and any future flag.
+  Tests: `test_f4_any_flag_blocks` plus the `git log` / `tail -f` /
+  `journalctl -f` table cases.
+* **R4 — no inner targets.** `pct exec`, `qm guest exec` and `docker exec`
+  are ineligible. Test: `test_f4_inner_targets_are_ineligible` plus the table
+  cases.
+* **S1 — line caps.** `journalctl` needs `-n ≤ 1000` (or `--disk-usage`) and
+  `tail -n` is capped at 1000, so one auto-run read cannot dump a whole
+  journal. Test: `test_f4_journal_and_tail_line_caps`.
+
+Two deliberate narrowings worth the security reviewer's eye: `grep` patterns
+are bare operands under R1's "every operand ... including bare words", so only
+`grep -e <pattern> <safe-path>` is eligible; and `echo` section markers are
+not on the verb list, so agent scripts that echo section headers stay
+ineligible.
+
+`bash scripts/verify.sh` (pre-commit green):
+
+```
+1951 passed, 7 warnings in 373.87s (0:06:13)
+```
+
+(1884 before this round + 67 new/expanded F4 tests; the F4 file has
+134 tests.)
+
+### Round 3 — fixes for reviewer round 2 (R5–R8, S2, S3)
+
+* **R5 — recursion only under `/var/log`.** `grep -R` and
+  `--dereference-recursive` are refused everywhere (they follow links), and
+  `grep -r`/`--recursive`, `ls -R` are allowed only when every operand is
+  under `/var/log/`; `grep -d recurse`/`--directories=recurse` is refused.
+  `du` recurses implicitly, so its operands may not be `/proc` or `/sys`.
+  Table: `grep -R …`, `grep -r … /proc`, `grep -r … /sys`, `ls -R /proc`,
+  `du -sh /proc`; eligible adds `grep -r -e error /var/log` and
+  `ls -R /var/log`.
+* **R6 — no `ps` environment output.** BSD option words (no leading dash)
+  containing `e` are refused (`ps e`, `ps eww`, `ps auxe`), as is any
+  `environ`/`env` token (`ps -eo pid,environ`, `ps --format=environ`);
+  `ps -e`/`-ef` stay eligible. Table cases added.
+* **R7 — no endless/interval forms.** `free -s`/`-c`, `zpool status|list`
+  with a numeric interval or `-T`, and `ss -E`/`--events` are refused.
+  `test_f4_eligible_cases_have_no_endless_form` statically asserts that no
+  eligible table case carries one of those forms.
+* **R8 — journal sources.** `--file=`, `--directory=`, `--root=`, `--image=`,
+  `-m`/`--merge` (and their `--opt=value` spellings) are refused, not only
+  `-D`.
+* **S2** `head -c`/`tail -c` are capped at 1 MiB (`bytes-cap`), as `-n` is
+  capped at 1000.
+* **S3** `/sys/firmware` is out of the safe trees (EFI variables can carry
+  vendor secrets).
+
+All synthetic (`192.0.2.x`, `/var/log/synthetic-*`, `web01`). Full gate:
+
+```
+1986 passed, 7 warnings in 373.06s (0:06:13)
+```
+
+(1884 + 102: the F4 file now has 169 tests.)
+
+### Round 4: on-lock
+
+`on` is now hard-locked behind a `meta` key that only a human can set.
+
+* `PUT /api/gateways/{ip}/read-lane` refuses `mode=on` with **409
+  `read_lane_on_locked`** unless `meta.read_lane_on_enabled` is the string
+  `"1"` (`read_lane_on_enabled()` in `db/gateways.py`). The key is unset by
+  default and **no API or UI writes it** — it is set by hand after the
+  security sign-off.
+* The lock is checked before the 7-day readiness rule, so a gateway that has
+  had a week of shadow still cannot be switched on while locked. `shadow` and
+  `off` are unaffected.
+* `GET /api/gateways` exposes the state as `read_lane_on_enabled`; the
+  Gateway table's select shows **"RL on: locked until security sign-off"**
+  (disabled) while the key is unset, and the 7-day hint takes over once it is.
+
+**Tests** (`TestOnLock`, 6): refused by default even with `read_lane_ready`
+true; shadow/off unaffected; allowed when the key is `"1"` and the window has
+passed; still refused when unlocked but shadow is younger than 7 days; no API
+attempt can set the key (and the gateway list reports the lock). The existing
+7-day test now unlocks the key first, since the lock is its own gate.
+
+The lock is the second gate on `on`: the security sign-off above approved the
+lane on conditions SC1–SC8, and the operator sets `read_lane_on_enabled` by
+hand only once those are addressed and the lane is verified in shadow.
+
+`bash scripts/verify.sh`: `1992 passed, 7 warnings in 391.24s (0:06:31)`.
+
+### Round 5: security conditions
+
+The sign-off approved F4 on conditions SC1–SC8. All eight are in.
+
+**SC1–SC3 are the diff the security chat should look at** (`4b3a121`, files
+`dashboard/core/read_policy.py` and `dashboard/core/cmd_parse.py`); SC4–SC7 are
+in the same commit, and SC8's tests are in `c470d6e`.
+
+* **SC1 — options are allowlisted per verb and subcommand.** `OPTION_SPECS` in
+  `core/read_policy.py` is the whole list, keyed by `(verb, subcommand)`.
+  Spellings are exact (`--huma` is not `--human-readable`), a short cluster is
+  allowed only when every letter is on that verb's list (`ss -tlnp` yes,
+  `ss -tlnpq` no), and whether an option takes a value is decided per verb
+  (`grep -m` is a count, `head -m` is not an option). `--` and a lone `-` are
+  refused. No status option names a file, a host, a machine, a context or a
+  format template: `docker -H`/`--context`/`--format`, `systemctl -H`,
+  `ps -o`, `stat -c`, `date +%s` and `journalctl -o` are all out.
+* **SC2 — every other word is a file.** `_scan_options` returns the operands
+  after the listed options and their values, and each must pass `_path_ok`.
+  grep's first non-option word is its pattern, and only when `-e` is absent.
+  Consequence: a status verb's bare name is an operand, so
+  `systemctl status nginx` is no longer eligible while bare `systemctl status`
+  is — see the open question.
+* **SC3 — no input redirection.** F1 now flags `input-redirect` and records
+  `input_redirects: [{op, target}]` on the step; `is_read_ssh` refuses either.
+  `cat /proc/cpuinfo < /etc/shadow` used to look like a plain read because the
+  step text dropped the redirection.
+* **SC4 — the policy checks subcommands.** `SUBCOMMANDS`/`ACTIONS` decide
+  `systemctl`, `docker`, `pct`, `qm`, `zpool`, `zfs` and `ip` (including the
+  action), so `zpool destroy`, `ip addr flush` and `systemctl list-unit-files`
+  are refused even if F1 ever called them reads.
+* **SC5 — bounded output.** `_cap_lines` (≤ 1000) and `_cap_bytes` (≤ 1 MiB)
+  run for every spelling (`-n`, `--lines=`, `-n5`, `-100`); `+N` is refused
+  because it means "from line N" (uncapped); `head` has the same cap as
+  `tail`. Logs under `/var/log` leave the lane unless read through `head`,
+  `tail`, or `grep` with `-m` ≤ 1000 — `cat` and `wc` stay for `/proc`,
+  `/sys` and the four `/etc` files.
+* **SC6 — tighter safe trees.** `PROC_DENY_PARTS` adds `exe` and `pagemap`,
+  `kpage*` names are refused, and `/sys/kernel/debug`, `/sys/kernel/tracing`,
+  `/sys/fs/bpf`, `/var/log/installer` and the cloud-init logs are out.
+* **SC7 — a "needs a human" verdict wins.** `eligible()` acts only on a plain
+  `jit` (no `detail_type`) or `auto_approved`; `self_protection_jit`,
+  `shell_meta` and any future action are refused before the read rules run.
+* **SC8 — tests.** `TestSecurityConditions` covers each class above, with
+  synthetic paths and the `192.0.2.x` range, and the generated
+  `test_f4_sc8_every_option_in_every_eligible_case_is_allowlisted` walks every
+  eligible case and asserts each option spelling or cluster letter is in that
+  verb's spec.
+
+**Also from the sign-off**
+
+* The duplicate `evaluate_policy_verdict` import is gone; it went with the
+  `feature-roadmap` merge in `1d25807`.
+* `receive_request` treats a stored `on` as shadow while
+  `read_lane_on_enabled` is unset (`0861afe`), covered by
+  `test_f4_stored_on_is_shadow_while_the_key_is_unset`.
+* The sign-off's accepted residual risks are now in the README's
+  "Security & threat model" section, next to the other honest limitations.
+
+**Tests.** `tests/test_f4_read_lane.py` has 260 tests (169 before this round);
+the F18 read-lane tests no longer skip (24 pass in that file). `bash
+scripts/verify.sh`: `2120 passed, 7 warnings in 390.00s (0:06:29)`.
+
+**Open questions**
+
+1. **SC2 against a status verb's unit name.** SC2 says every word that is not
+   a listed option or its value is a file operand and must pass the safe-tree
+   check. Taken literally that makes `systemctl status nginx`,
+   `systemctl is-active nginx`, `docker inspect web01` and
+   `ip addr show dev eth0` ineligible, while bare `systemctl status` and
+   `systemctl list-units --type=service` stay. The round-3 probe list treats
+   `systemctl status`/`list-units` as everyday reads, and a unit name is a
+   name, not a file — but the condition as written has no exception for it. I
+   implemented it literally (fail closed) and moved those cases to the
+   ineligible table. If a bare-name exception is wanted, it needs a scope
+   (which verbs, which characters) and a line in §2.6a; otherwise no change.
+
+### Round 6: fixes for reviewer round 5
+
+* **R1 — the path is compared with its normalised form.** `_path_ok` refuses
+  any path where `posixpath.normpath(token)` differs from the token (one
+  trailing slash allowed), before any prefix check, so `/sys/kernel//debug`
+  and `/sys/./kernel/debug` cannot get past the SC6 prefix denials. The
+  explicit `..` refusal stays. `test_f4_r1_normalised_paths_cannot_slip_past_a_prefix_denial`
+  covers every `SYS_DENY_PREFIXES`/`LOG_DENY_PREFIXES` entry with both
+  spellings across `cat`, `head`, `tail`, `grep -m`, `ls` and `stat`;
+  `test_f4_r1_a_trailing_slash_still_reads` keeps `/var/log/` legal.
+* **R2 — recursion is out of the lane.** `-r`/`--recursive` are removed from
+  the `grep` spec (and `r` from its cluster letters), so a recursive log grep
+  is refused as an unknown option instead of walking into `/var/log/installer`
+  and the cloud-init logs; `ls -R` and `du` still list names. This also closes
+  the per-file `-m` bound. `test_f4_r2_recursive_grep_is_not_in_the_lane`
+  tries `/var/log`, `/var/log/`, `//var/log` and `/var/log/./` with both
+  spellings.
+* **R3 — context options cannot undo the `-m` cap.** For a `/var/log`
+  operand, `_grep_log_lines` requires `m × (1 + max(A + B, 2C)) ≤ 1000`;
+  `-A`/`-B`/`-C` are still capped at 1000 individually.
+  `test_f4_r3_grep_context_cannot_undo_the_cap` checks at the limit
+  (`-m 500 -A 1`, `-m 300 -C 1`), over it (`-m 500 -A 2`, `-m 1000 -A 1000`)
+  and that context outside `/var/log` is unaffected.
+* **R4 — `head`/`tail` lose `-z`.** `-z`/`--zero-terminated` (and the `z`
+  cluster letter) are gone from both specs, so they cannot turn a text log's
+  line cap into a whole-file dump. `test_f4_r4_head_and_tail_have_no_zero_terminated`
+  covers the short, long and clustered spellings for both verbs.
+* **S2 — `zpool`'s cluster letters match its flags** (`vxHpLPg`), so `-g`
+  works and `-G` is refused; **S4 — `grep -P`/`--perl-regexp` is out** of the
+  lane until F19 adds a time bound. `test_f4_s2_*` and `test_f4_s4_*`.
+* **Q1 — SC7 is unchanged in this round, as the task asked.** The security
+  answer ("yes, allow `shell_meta`", in the Security reviewer sign-off below)
+  landed while this round was being pushed, so the behaviour here is still the
+  round-5 one: `shell_meta` is not a plain `jit`. The end-to-end test is
+  `test_f4_sc7_chained_read_is_not_lane_eligible_end_to_end`: with the lane in
+  shadow, `uptime && whoami` through `POST /api/request` stays pending with no
+  `read-lane-shadow` reason, and with the lane `on` (and the lock unlocked)
+  `uptime || whoami` is not auto-approved. The next round flips it, together
+  with the security round-2 items below.
+* **S1 and S3 are not in this round.** S1 (an operand-class model so status
+  verbs refuse every operand) is a policy-shape change the reviewer marked
+  optional and it needs a spec line for which verbs take paths; S3 (a maximum
+  number of log operands) is bounded by the 8 kB command cap today. Both are
+  written down here so they are not lost.
+
+**Shared `core/read_policy.py` (merge prep).** F9 and F14 each carry only
+`is_read_integration_call` plus the `read_only` guard, so their copies combine
+cleanly with this file's SSH half. This branch's wrapper now has the same
+guard — it was a bare `_read_only_refusal` wrapper, which would have called a
+curated write tool a read — and `test_f4_a_curated_write_tool_is_not_a_read`
+locks it in. At merge, keep this file's SSH rules and take F9's guarded
+integration wrapper, as F9's Reviewer notes say.
+
+**Security round 2 landed after this round's push.** It confirms R1-R4 (and R2
+as implemented: `-r` is gone), and adds work that is deliberately **not** in
+this round, because it is a new security condition, not a feature-review R
+item:
+
+* **SC9 (must):** no eligible word may carry a shell expansion (`$`,
+  backtick, `{`, `}`, `*`, `?`, `[`, `]`, a leading `~`, a backslash) - path
+  operands, option values and patterns alike - and a bare assignment
+  statement must be refused. This is the one that must ship before
+  `shell_meta` is allowed, hence the Q1 order: SC9 and Q1 in the same round.
+* **R5 (add, must):** refuse the journal directory and `lastlog`/`wtmp`/
+  `btmp`/`faillog` under `/var/log`, and refuse `grep -a`/`--text`.
+* **Q1:** allow `shell_meta` (and refuse a `&`-backgrounded step); **Q2:** the
+  narrow `systemctl status|is-active|is-enabled` name exception; **Q3:** only
+  a bare `sudo` (F1 must record that the wrapper had no options).
+
+Also confirmed there: unlocking `on` waits for the gateway to stop logging
+session signatures (the F12 note), which is security Chunk 7 work.
+
+`bash scripts/verify.sh`: `2134 passed, 7 warnings in 390.21s (0:06:30)` (round 6, after the read-policy guard and its test).
+
+### Round 7: security round 2 (SC9, R5, Q1-Q3)
+
+**Commits for the security chat: SC9 is `51f2e40` + `0ed276c`; Q1 is
+`51f2e40` + `0ed276c`; Q3 is `51f2e40` + `0ed276c`.** (`51f2e40` is F1's half —
+bare assignments, the background marker, the `sudo(options)` label; `0ed276c`
+is the lane's half.)
+
+* **SC9 — the shell cannot expand a word the lane approved.** `_step_ok`
+  checks the **raw** step words (from the display text, before
+  `shlex.split` strips F1's re-quoting) and refuses `$`, a backtick, `{`,
+  `}`, `*`, `?`, `[`, `]`, a backslash anywhere and a leading `~`. It covers
+  path operands, option values and both grep pattern spellings, and quoted
+  words are included because F1 does not record whether a word was quoted.
+  A bare `NAME=value` statement now emits an `unknown` step ("bare variable
+  assignment") instead of vanishing, so the lane refuses it (and F1's
+  `assignment-then-echo` fixture expects the extra step). Tests
+  (`TestRoundSeven`): every character in a path, in a `grep -e` pattern and
+  in an option value; the first-word pattern form; a quoted backslash; a
+  leading `~`; the bare assignment (`FOO=1`) and the prefixed form (still
+  refused, fail closed).
+* **Recursion — every spelling is out of the lane.** `-r`, `-R`,
+  `--recursive`, `--dereference-recursive`, `-ir`, `-ri`, `-rn`,
+  `-d recurse` and `--directories=recurse` are unknown options, so each is
+  refused (with `/var/log` and `/var/log/` as the operand). This replaces
+  round 6's R2 with the simpler rule the security reviewer named; `ls -R` and
+  `du` still list names.
+* **R5 — binary logs.** `head`, `tail` and `grep` refuse the journal tree
+  (`/var/log/journal` and below) and the login-record files (`lastlog`,
+  `wtmp`, `btmp`, `faillog`, including `wtmp.1`-style rotations), because a
+  file with few newlines defeats the line cap. `ls`/`stat` metadata stays
+  allowed, and an ordinary log still reads. `grep -a`/`--text` are removed
+  from the spec (so they are unknown options) and `--binary-files=text` was
+  never listed; all are refused.
+* **Q1 — chains and pipes are eligible; background is not.** `read_lane.eligible`
+  now accepts `auto_approved`, a `jit` with no `detail_type`, **or a `jit`
+  with `shell_meta`**, because `shell_meta` only says the gateway cannot vouch
+  for the literal string and the lane parses every step itself (SC9 and the
+  rest still apply to those steps). A step marked `background` by F1 (the
+  statement before a `&`, including a trailing `cmd &`) is refused, since it
+  can outlive the session. The end-to-end test is flipped:
+  `test_f4_sc7_chained_read_is_lane_eligible_end_to_end` — in shadow,
+  `uptime && whoami` through `POST /api/request` now carries
+  `read-lane-shadow`; with the lane `on` it auto-approves; the verdict is
+  asserted to be `shell_meta`.
+* **Q2 — unit names for the three reviewed subcommands.** `systemctl
+  status`, `is-active` and `is-enabled` take up to 8 operands, each matching
+  `[A-Za-z0-9][A-Za-z0-9@_.:-]{0,63}` (first character a letter or digit, no
+  `/`, no glob, no backslash). A path-shaped operand, a ninth name, a
+  65-character name and an escaped name all stay with a human; other
+  subcommands still refuse every operand. The `-n` cap on `status` is
+  unchanged.
+* **Q3 — bare `sudo` only.** `_unwrap` labels only the bare form `sudo`; any
+  option or assignment gets `sudo(options)`, which the lane refuses through
+  its existing `context != ['sudo']` rule. Tests cover `-E`, `-u root`, `-i`
+  and `--`, and assert F1's contexts directly.
+* **Merge integration.** The branch now merges `origin/feature-roadmap`
+  (F8, F9, F14). `core/read_policy.py` keeps F4's full module (SSH rules and
+  the guarded integration wrapper) and takes F9's docstring line about the
+  freeze. F8's generated statistics-filter scan exposed F4's read-lane report
+  queries; they now skip excluded rows like the other statistics, so the scan
+  passes on the merged tree.
+
+`bash scripts/verify.sh`: `2236 passed, 7 warnings in 419.39s (0:06:59)`.
+
+### Round 8: security round 3 (SC10, SC11)
+
+The final sign-off approved the lane on two small conditions; both are in, and
+the feature reviewer checks them (no further security pass).
+
+* **SC10 — loops and grouping are refused.** F1 now flags any command that
+  contains a loop (`for`, `select`, `while`, `until`), a conditional (`if`,
+  `case`), a function definition (`function` or `name()`), a brace group or a
+  subshell with `compound`. The check runs on the **parsed atoms** in
+  `_parse_text`, not on the raw text, so a keyword at a command position is
+  caught while a keyword used as an argument (`grep for …`) is not; `{`/`}`
+  and bare `(`/`)` atoms flag grouping, and `$( )`/`<( )` were already folded
+  into word atoms. Every flag blocks the lane, so these commands are
+  ineligible; plain chains (`uptime && df -h`, `uptime; free -h`,
+  `uptime || whoami`) stay eligible. Tests (`TestRoundEight`): each construct,
+  including a `while` whose condition and body are both eligible reads, a
+  backgrounded read inside braces and inside parentheses, the plain chains,
+  and `grep for …` staying clean. The four `loops.txt` fixtures now expect
+  `flags=compound`.
+* **SC11 — dated login-record rotations.** `_binary_log` matches a plain name,
+  a dotted rotation (`wtmp.1`) and now a dated one (`btmp-20260101`, with or
+  without `.gz`) for `lastlog`, `wtmp`, `btmp` and `faillog`, so `head`,
+  `tail` and `grep` refuse all of them. Tests for each of the four names in
+  both forms across the three verbs, plus the ordinary-log and metadata
+  checks already in R5.
+
+Both conditions are in commit **`9f06cb6`** (the F1 atom scan and its
+fixtures, the `_binary_log` change and the tests).
+
+`bash scripts/verify.sh`: `2243 passed, 7 warnings in 419.62s (0:06:59)`.
 
 ### Reviewer notes
 
-_(reviewer)_
+**Round 1 (2026-11-08): changes requested. Not ready for the security
+reviewer yet.** The structure is right. One notion of "read" lives in
+`core/read_policy.py`, `read_lane.py` holds no rules of its own, and the hook
+order is correct: after F3 and the session override, after freeze and the
+encoded-payload block. Zero-Trust and freeze win, `on` is server-gated on
+7 days of shadow, and the default is `off`. F1 also stood up well to a probe
+set run in a scratch dir with synthetic commands. It refuses environment
+dumps, `curl`/`wget`, `awk system()`, `sed e`/`w`, `find -exec`/`-delete`,
+`xargs`, `dd`, `less`, `tar -c`, `docker inspect` and `kubectl get secret`.
+
+The core premise of the spec's design rule 3 is wrong, and that is the
+planner's mistake, not the implementer's. **The gateway runs every command as
+root** (the key is in `/root/.ssh/authorized_keys`). "Elevated" (a `sudo`
+prefix) therefore says nothing about privilege, and a plain `cat` reaches
+everything. With a denylist (`sensitive-path`) as the only guard, these were
+**eligible** in the probe:
+
+* any credential-bearing file whose name F1 doesn't know (shell history, an
+  app's `config.yml`, a relative `cat config.yml`)
+* raw block devices (`head -c … /dev/sdX`)
+* `/proc/<pid>/root/…`, `/proc/<pid>/cwd/…` (links into the real filesystem)
+  and `/proc/kcore`
+* a glob ahead of `..` (`/var/log/*/../../…`): `_elevated_path_allowed` cuts
+  the token at `*` before it looks for `..`
+* `systemctl show`/`systemctl cat` (they print `Environment=`) and
+  `crontab -l`
+* `git … log` with `repo-config` set, and `tail -f`/`follows` (never ends):
+  F1 sets those flags, but they are not in `READ_BLOCKING_FLAGS`
+* `sleep 100000` and `cat /dev/zero`
+
+*Must fix (replaces design rule 3):*
+
+* **R1 Allowlist on top of F1.** Add `READ_LANE_VERBS` to `read_policy.py`,
+  a reviewed list of what may auto-run, in two groups:
+  1. **Status verbs that take no file operands**: `uptime`, `df`, `free`,
+     `ip` (`a`/`addr`/`route`/`link`), `ss`, `ps`, `uname`, `hostname`,
+     `lsblk`, `lscpu`, `whoami`, `id`, `date`, `nproc`, `systemctl`
+     (`status`/`is-active`/`is-enabled`/`list-units`/`list-timers` only),
+     `journalctl` (no `-f`), `docker` (`ps`/`stats --no-stream`/`images`),
+     `pct list`/`qm list`, `zpool status`/`list`, `zfs list`.
+  2. **File readers** (`cat`, `head`, `tail` without `-f`, `grep`, `wc`,
+     `ls`, `stat`, `du`): eligible only when **every** operand, including
+     bare and relative words and `--opt=/path` values, is inside the safe
+     trees.
+
+  Anything not on the list is ineligible even if F1 says `read`. The list
+  is in code and reviewed; it is not an operator setting.
+* **R2 Safe trees, for every step.** Apply the path check whether or not the
+  step is elevated, because every step is elevated.
+  * **Allowed:** `/var/log/`, `/proc/` and `/sys/`, plus exactly
+    `/etc/os-release`, `/etc/hostname`, `/etc/hosts` and `/etc/resolv.conf`.
+  * **Refused inside `/proc`:** `*/root`, `*/cwd`, `*/fd`, `*/map_files`,
+    `*/mem`, `*/environ`, `kcore`, `kmsg`.
+  * **Refused anywhere:** `/dev/`.
+  * **Refused shapes:** any glob or brace character (`*?[]{}`) in a path
+    operand, and any `..` component, checked on the whole token.
+* **R3 Flags fail closed.** Any F1 flag blocks unless it is on an explicit
+  harmless list, which starts empty. `repo-config` and `follows` then block
+  automatically, and so will any flag F1 adds later.
+* **R4 No inner targets.** A command with an inner target (`pct exec`,
+  `qm guest exec`, `docker exec`) is ineligible. The lane is opted in per
+  gateway, and the guest never opted in.
+* **Tests:** add every probe class above to the ineligible table, with
+  synthetic paths and the IP range `192.0.2.x`. Also add a generated test:
+  every eligible case's first verb is in `READ_LANE_VERBS`. Update the
+  spec's design rule 3 to say "every step (the gateway runs as root)".
+
+*Should fix:*
+
+* **S1** Cap `journalctl` and `tail` at `-n ≤ 1000` (or require `-n`), so one
+  auto-run read cannot dump a whole journal.
+
+Once R1–R4 are in, F4 goes to the security reviewer (§ 2.6a). They asked for
+a closer look because this lane runs with no human at all.
+
+**Round 2 (2026-11-08): nearly there; small changes requested.** R1–R4 and S1
+are in, and every round-1 probe is now ineligible. A second probe set ran
+against the allowlisted verbs, with synthetic commands in a scratch dir. It
+confirmed that every `ip`/`date`/`hostname`/`journalctl` write, `ss -K`,
+`grep -f`/`--exclude-from`, `/proc/*/task/*/environ` and the
+`/proc/self/root|cwd` links are refused. Five gaps remain eligible:
+
+*Must fix:*
+
+* **R5 Recursive grep under `/proc` and `/sys`.**
+  * `grep -R` follows `/proc/<pid>/root` into the whole filesystem.
+  * `grep -r` reads every `/proc/<pid>/environ` as a regular file, which
+    leaks environment secrets.
+
+  Allow `-r`/`-R`/`--recursive` (and `-d recurse`) only when every operand is
+  under `/var/log/`, and use `-r` only (refuse `-R` everywhere, because it
+  follows links). Apply the same rule to `ls -R` and `du` under `/proc`;
+  names only are acceptable, but keep them to `/var/log` for one simple
+  rule.
+* **R6 `ps` environment output.** A BSD option word containing `e` (`ps e`,
+  `ps eww`, `ps auxe`) or `--env`/`-O environ` prints every process's
+  environment. Refuse BSD option clusters containing `e` and any
+  `-o`/`-O`/`--format` value naming `environ`/`env`. `ps -e`/`-ef` (UNIX
+  "all processes") stay eligible.
+* **R7 Endless or interval forms.** These never return:
+  * `free -s N` and `free -c N`
+  * `zpool status|list` with a trailing interval or count, or `-T`
+  * `ss -E`/`--events`
+
+  Refuse them. Add a generated test that every eligible table case finishes
+  under the sandbox's 2 s limit (or a static assertion per verb, if running
+  them is impractical).
+* **R8 Other journal sources.** `journalctl --file=`, `--directory=`,
+  `--root=`, `--image=` and `-m`/`--merge` read journals outside the
+  default; only `-D` is refused today. Refuse the whole set.
+
+*Should fix:*
+
+* **S2** Cap `head -c`/`tail -c` at 1 MiB, as `-n` is capped at 1000.
+* **S3** Drop `/sys/firmware/` from the safe trees (EFI variables can carry
+  vendor secrets).
+
+*For the security reviewer (no change asked):*
+
+* `ps aux` and `docker ps --no-trunc` show full command lines, which may
+  contain secrets passed as arguments. I left them eligible as everyday
+  reads.
+* The `grep -e` only rule and the absence of `echo` are deliberate
+  narrowings. Both are acceptable.
+
+After R5–R8 (plus S2 and S3), F4 goes to the security reviewer.
+
+**Round 3 (2026-11-08): approved by the feature reviewer; waiting on security
+sign-off (§ 2.6a).** R5–R8, S2 and S3 are in. I re-ran all four probe sets,
+about 130 synthetic commands in a scratch dir. The only eligible commands left
+are everyday status reads and log reads under `/var/log`:
+
+* `uptime`, `df`, `free`, `ip a`, `ss -tlnp`, `ps aux`/`-ef`
+* `systemctl status`/`list-units`, `journalctl -n ≤1000`
+* `docker ps`/`stats --no-stream`, `zpool status`, `lsblk`, `uname`
+* `cat`/`grep -e`/`ls -R`/`du` under `/var/log`, and `stat` of the four
+  `/etc` files
+
+Pipelines into `grep` without an operand are ineligible. That is narrow but
+safe.
+
+**Do not merge until the security reviewer signs off below.**
+
+#### Security reviewer sign-off
+
+**2026-11-08: approved on conditions (security chat, reviewed at `7666adc`).**
+This was a read-only design and code review of `core/read_policy.py`,
+`core/read_lane.py`, the F4 hook in `receive_request`, the read-lane
+functions in `db/gateways.py`, and the parts of F1 (`cmd_parse.py`,
+`cmd_rules.py`) that the lane relies on. Nothing was run, because the feature
+reviewer had already done the adversarial testing. Threat model: the caller
+is an agent that may be prompt-injected, every command runs as root, and in
+`on` no human sees the command before it runs.
+
+**What holds:**
+
+1. **Hook position.** The lane runs after the freeze check, the
+   encoded-payload block, F3 plans and the session override, and before the
+   host override. Freeze and Zero-Trust are checked before the lane and again
+   inside `eligible()`. The gateway enforces the hard block and the
+   blocklists before a request reaches the dashboard, and the lane checks
+   the verdict a second time. The lane is never the first thing to say yes.
+2. **Default, gate and audit.** The column defaults to `off`, and any unknown
+   value reads back as `off`. The server refuses `on` unless the gateway has
+   7 days in shadow, so the UI alone cannot turn it on. Entering shadow
+   starts the clock and leaving it clears the clock. Every mode change is
+   audited (`read_lane_<mode>`), and so is every shadow tag
+   (`jit_read_lane_shadow`) and every auto-approval
+   (`jit_read_lane_approved`). Auto-approved rows carry `reason="read-lane"`
+   and stay attributable.
+3. **One notion of "read".** `read_lane.py` holds gateway-state, size and
+   verdict checks only, and it gets its read decision from
+   `read_policy.is_read_ssh`.
+4. **The outer structure fails closed.** An incomplete breakdown, any F1
+   flag (the harmless list is empty), an inner target, a wrapper other than
+   `sudo`, a step that is not `read` and a verb that is not on
+   `READ_LANE_VERBS` are all refused. Substitution steps carry a `subst`
+   context and are refused. F1 re-quotes any word that holds a shell-special
+   character (`$`, quotes, backslash, `~`, globs), so such a word no longer
+   starts with `/` and fails the path check. Variable and quoting tricks in
+   paths therefore fail closed.
+5. **Path checks apply to every step.** Elevation plays no part in the path
+   check.
+
+**What does not hold yet:** the verb list fails closed, but the options
+*inside* each verb do not. Options are allowed unless they are on a short
+deny list, matched by exact spelling. Several gaps follow from that. Some of
+them let a "read" write a file as root or read any file:
+
+* Some allowed status verbs have options that write a file, read an arbitrary
+  file and echo it back in an error message, set the clock or set the
+  hostname. Neither F1 nor `read_policy` knows about these options. The
+  affected verbs are `journalctl`, `ss`, `date` and `hostname`.
+* Long options can be abbreviated (the tools use getopt), and short options
+  can be clustered. Both slip past exact-match deny lists. This affects the
+  follow, interval, journal-source and clock-set checks.
+* `systemctl` and `docker` take a "run against another host or container"
+  option that the subcommand check does not see. That breaks R4: the other
+  host never opted in.
+* `_VALUE_FLAGS` is one list shared by every verb. An option that takes no
+  value for *this* verb can therefore hide the next real file from the path
+  check. The `grep` recursion check has the same hole.
+* `grep` treats every word starting with `.` or `^` as a pattern and skips
+  it. Relative dot-files in root's home are then read without a path check,
+  and most of them are not on F1's sensitive-name list.
+* F1 drops input redirections from the step text, so `read_policy` cannot
+  see them. A lone `-` (standard input) is skipped as a flag. Together they
+  let a file reader take any file as standard input. The same gap lets a
+  command open a FIFO or a bash network pseudo-path.
+* The `zpool` branch never checks the subcommand. Today F1 covers it, but
+  the policy should not depend on that.
+* The self-protection "must go to a human" verdict (`self_protection_jit`)
+  is not refused. Only `blocked` and `fatal` are.
+* Output is not bounded. `cat` has no cap, `head -n` has no cap, the tail
+  cap misses the attached, `--lines=` and "from line N" forms, `journalctl`
+  has an option that ignores `-n`, and `systemctl status` takes its own
+  line count. The gateway has no execution timeout or output cap, so the
+  parser is the only limit.
+
+**Conditions (all before merge):**
+
+* **SC1: options are allowlisted per verb.** Each verb (and each subcommand)
+  may use only the options listed for it in `read_policy.py`. Any other
+  option makes the command ineligible, and that includes abbreviations and
+  unknown spellings. Short-option clusters are allowed only if every letter
+  is on the list. Whether an option takes a value is decided per verb. There
+  is no shared list. `--` and a lone `-` are refused. No status verb may take
+  an option that names a file, a host, a machine, a context or a format
+  template.
+* **SC2: every other word is a file and is path-checked.** A word that is
+  neither a listed option nor that option's value counts as a file operand
+  and must pass the safe-tree check. The single exception is `grep`'s
+  pattern: the first such word, and only when no `-e` is given.
+* **SC3: no input redirection.** F1 must pass each step's redirections
+  through to the breakdown, or keep them in the step text. A step with any
+  input redirection, here-string or heredoc is ineligible.
+* **SC4: the policy checks subcommands itself.** Every status verb with
+  subcommands has its subcommand (and for `ip`, the action) checked in
+  `read_policy.py`, so the policy does not rely on F1 alone. This includes
+  `zpool`.
+* **SC5: every eligible command has bounded output and finishes.** Line and
+  byte caps apply to every spelling of the option, and "from line N" counts
+  as uncapped. `head` gets the same cap as `tail`. Log files under
+  `/var/log` are read only through `head`, `tail` or `grep` with a cap
+  (`grep -m` ≤ 1000). `cat` stays for `/proc`, `/sys` and the four `/etc`
+  files. Any option that undoes a line cap is refused.
+* **SC6: tighten the safe trees.** Also refuse `/proc/*/exe` (a link into
+  the real filesystem), `/proc/*/pagemap` and `/proc/kpage*` (huge), and
+  `/sys/kernel/debug`, `/sys/kernel/tracing` and `/sys/fs/bpf` (some files
+  block forever, others dump kernel data). Also refuse
+  `/var/log/installer/` and the cloud-init logs, which can hold
+  install-time password hashes and user-data.
+* **SC7: any "needs a human" verdict wins.** The lane acts only when the
+  policy verdict is plain `jit` or `auto_approved`. `self_protection_jit`
+  and anything added later are refused.
+* **SC8: tests.** Add each class above to the ineligible table, using
+  synthetic paths and the `192.0.2.x` range, with no live data. Add a
+  generated test that every option in every eligible case is on that
+  verb's list.
+
+**Who checks:** SC1–SC3 change how the policy reads a command, so send them
+back to the security chat for a short look at the diff. The feature reviewer
+can check SC4–SC8.
+
+**Open questions:**
+
+* **(a) `ps aux` and `docker ps --no-trunc`: acceptable.** Linux shows every
+  process's command line to every local user by default, so command
+  arguments are not a secret channel, and the same data is already readable
+  at `/proc/<pid>/cmdline` inside the safe trees. On a Proxmox host this
+  includes guest processes. That is metadata, and `pct list` is already
+  allowed. Under SC1, `docker ps` may not take `--format`, because templates
+  can print labels, and labels often hold auth hashes.
+* **(b) The safe-tree list: acceptable with SC6.** The four exact `/etc`
+  files are fine. `/var/log` is fine as a tree, with SC6's exclusions and SC5's
+  caps. `/proc` and `/sys` are deny lists inside a root-readable tree, which
+  is the weakest part of the design. They are acceptable with SC6. A follow-up
+  should replace them with a positive list of the status files people
+  actually read (`meminfo`, `loadavg`, `pressure/*`, `net/*`,
+  `/proc/<pid>/status`, `/sys/class/*`, `/sys/block/*`, `/sys/fs/cgroup/*`).
+
+**Accepted residual risks (write them in the operator docs):**
+
+* Logs contain whatever services write to them, including secrets that apps
+  log by mistake. Turning the lane on hands those logs to the agent with no
+  human in the loop.
+* A service account that owns a directory under `/var/log` can plant a
+  symlink, and root follows it. The path check is textual. This needs a
+  service account to be compromised first.
+* `df` on a stale network mount, or `docker` with a hung daemon, can hang.
+  A gateway-side execution timeout for read-lane runs is worth a follow-up
+  (F5 or security Chunk 7).
+
+**Not blocking:** `main.py` imports `evaluate_policy_verdict` twice.
+
+**Round 4 (2026-11-08): changes requested (SC5 and SC6 gaps). SC1–SC3
+ready for the security reviewer.** Reviewed at `43fd95e`; `bash scripts/verify.sh`: `2120 passed, 7 warnings in 341.83s` (the Round 5
+commits `4b3a121`, `0861afe`, `c470d6e`, `43fd95e`). As agreed, this round
+checks SC4–SC8; SC1–SC3 go back to the security chat.
+
+**SC1–SC3 are present, each with tests.** They are `OPTION_SPECS`, the
+`_scan_options` operand rule, and F1's `input-redirect` flag plus the
+per-step `input_redirects`. Tests: `test_f4_sc1_*` (5), `test_f4_sc2_*` (2)
+and `test_f4_sc3_*` (2). **SC1–SC3 ready for the security reviewer.**
+
+**What holds:**
+
+* **SC4.** `SUBCOMMANDS`/`ACTIONS` check every status verb's subcommand
+  (and `ip`'s action) in the policy itself, `zpool` included. An option or
+  value before the subcommand cannot hide one, because the first non-option
+  word is taken as the subcommand and refused if it is not listed. "Another
+  host" options in either position are refused.
+* **SC5, mostly.** Line and byte caps apply to every spelling (`-n`,
+  `--lines=`, attached and bare-digit forms). "From line N" and "all but the
+  last N" are refused, and `head` matches `tail`. Logs under `/var/log` are
+  refused for `cat` and `wc`, and `grep` on a log needs `-m`. `journalctl`
+  needs `-n` and has no source or output options.
+* **SC6, by spelling.** All the new names are refused as written.
+* **SC7.** Only an `auto_approved` verdict or a `jit` verdict with no
+  `detail_type` passes, so `self_protection_jit` and anything added later
+  are refused. A stored `on` now degrades to shadow while
+  `read_lane_on_enabled` is unset (`0861afe`, tested).
+* **SC8.** Every class in the sign-off has a table row or a test, and the
+  generated option test walks every eligible case. The README carries the
+  accepted residual risks.
+* **No live data.** The new fixtures use `192.0.2.x` and the existing
+  `10.0.0.1` test gateway.
+
+I ran about 140 synthetic commands through `breakdown` → `eligible` in a
+scratch dir, with both a bare `jit` verdict and the real
+`evaluate_policy_verdict`. Four classes are still eligible and break SC5 or
+SC6.
+
+*Must fix:*
+
+* **R1 Paths are not normalised before the SC6 prefix checks.** A path
+  spelled with an empty component (`//`) or a `.` component gets past every
+  *prefix* denial: `/sys/kernel/debug`, `/sys/kernel/tracing`, `/sys/fs/bpf`,
+  `/sys/firmware` and `/var/log/installer`. Only `cat` happens to catch the
+  `/var/log` form, through `cat-tree`. The `/proc` checks are not affected,
+  because they split on parts. **Fix:** in `_path_ok`, refuse any token with
+  an empty or `.` component (or refuse any token where
+  `posixpath.normpath(token) != token`, after allowing one trailing slash),
+  before any prefix test. **Test:** for every entry in `SYS_DENY_PREFIXES`
+  and `LOG_DENY_PREFIXES`, the `//` and `/./` spellings are ineligible for
+  `cat`, `head`, `tail`, `grep -m`, `ls` and `stat`.
+* **R2 Recursive `grep` on `/var/log` reads the SC6 exclusions.** `grep -r`
+  is allowed on any operand under `/var/log`, including `/var/log` itself.
+  It then walks into `/var/log/installer/` and the cloud-init logs, which
+  SC6 refuses by name, so the check only covers files named on the command
+  line. `-m` is also per file, so a recursive grep over the whole tree has
+  no overall bound (SC5). **Fix:** refuse recursion on any operand that is
+  `/var/log` itself or an ancestor of an SC6 exclusion. Or, more simply,
+  take `-r`/`--recursive` out of the lane: `ls -R` and `du` still give the
+  names. **Test:** a recursive grep with `/var/log` (with and without a
+  trailing slash, and with the R1 spellings) as the operand is ineligible.
+* **R3 `grep` context options undo the `-m` cap on logs.** `-A`/`-B`/`-C`
+  are capped at 1000 each, independently of `-m`, so a capped log grep can
+  still print about `m × (1 + A + B)` lines. That is up to a million, which
+  is in effect the whole file. SC5 says "any option that undoes a line cap
+  is refused". **Fix:** for a `/var/log` operand, either refuse the context
+  options or require `m × (1 + A + B) ≤ 1000` (take the larger of `-C` and
+  each of `-A`/`-B`). **Test:** a log grep with `-m` at the cap and a context
+  option at the cap is ineligible, and one within the product is eligible.
+* **R4 `head -z`/`tail -z` undo the line cap.** `-z`/`--zero-terminated`
+  makes NUL the line separator. A text log has no NUL, so `-n ≤ 1000` then
+  prints the whole file. **Fix:** remove `-z`/`--zero-terminated` from both
+  specs and the `z` letter from both clusters. **Test:** each spelling (short,
+  long, inside a cluster) is ineligible for both verbs, under `/var/log`.
+
+*Should fix:*
+
+* **S1 Status verbs with no operands should refuse every operand.** Today a
+  word that passes `_path_ok` is accepted after any status verb. For
+  `date`, `uptime`, `id`, `whoami`, `nproc`, `uname`, `free`, `lscpu`, `ps`
+  and the `docker`/`pct`/`qm` subcommands this is harmless today (the tool
+  errors out). But it lets an operand through where none is ever valid, and
+  `date`'s operand is a set-the-clock argument. Add an `operands` field to
+  `_spec` (none / safe paths), with paths only for `df`, `journalctl`,
+  `systemctl status`, `zfs`/`zpool` and `ip … show`. **Test:** each no-operand
+  verb with a safe-tree path operand is ineligible.
+* **S2 The `zpool` short letters don't match its flags.** The letters
+  include `G`, but the flag list has `-g`, so `-G` passes and a cluster with
+  `g` does not. Make them the same set. **Test:** the SC8 generated test also
+  asserts that every spec's `letters` equals the single-letter `flags`.
+* **S3 Many log operands multiply the caps.** One `head -n 1000` with dozens
+  of `/var/log` files is within the 8 kB limit and prints dozens of times
+  the cap. Consider at most N file operands (say 4) for a `/var/log` read.
+  **Test:** N+1 log operands are ineligible.
+* **S4 `grep -P` and back-references on logs.** A pathological pattern can
+  run for a very long time, and nothing at the gateway stops it (see F19).
+  Consider dropping `-P` from the lane until F19 adds a time limit. **Test:**
+  `-P`/`--perl-regexp` is ineligible.
+
+*Questions for the security reviewer and the operator (no change asked yet):*
+
+* **Q1 SC7 also refuses `shell_meta`, so a chained or piped read never
+  auto-runs.** `evaluate_policy_verdict` returns `jit` with
+  `detail_type="shell_meta"` for any command with `;`, `&&` or `|`. Round 5
+  reads "plain `jit`" as "no `detail_type`", so every multi-step command is
+  now ineligible in the real request path. §1 says about 40% of traffic is
+  chained and 40% piped. The eligibility table does not show this, because
+  its helper passes a bare `{'action': 'jit'}`. Both readings are safe:
+  `shell_meta` only says the *gateway* will not auto-run the command, and
+  the lane is decided per parsed step on the dashboard. The question is
+  scope. If chained reads should stay eligible, SC7 becomes "the `jit`
+  `detail_type` is `None` or `shell_meta`, nothing else". Either way, add an
+  end-to-end shadow test through `POST /api/request` with a two-step read,
+  so the table and the real path agree.
+* **Q2 The implementer's open question (unit names under SC2).** I agree
+  with implementing SC2 literally for now. If an exception is wanted,
+  scope it to `systemctl status|is-active|is-enabled`, with one name word
+  matching `[A-Za-z0-9@_.:-]{1,64}` (no `/`, no leading `-`, no glob).
+* **Q3 Wrapper options.** The `sudo` context is accepted with any `sudo`
+  options. A login-shell or shell form runs root's shell startup files
+  before the command. Consider accepting only a bare `sudo`.
+
+Once R1–R4 are in (S1–S4 are welcome in the same round), the feature
+reviewer can approve SC4–SC8. SC1–SC3 go to the security chat now, in
+parallel.
+
+**Security round 2 (2026-11-09): SC1 and SC3 hold. SC2 holds as a rule, but
+Round 5 opened a new gap (SC9), which comes back here.** Security chat,
+reviewed at `24d3833` (code at `4b3a121`, tests at `c470d6e`). This was a
+read-only review. Nothing was run.
+
+**What holds:**
+
+* **SC1.** `OPTION_SPECS` has one entry per verb or subcommand and no shared
+  list. `_scan_options` matches exact spellings only, so an abbreviation is
+  refused. A long flag with `=` is refused, and a cluster passes only when
+  every letter is listed. A value-taking letter inside a cluster takes the
+  rest of the cluster as its value, and every value goes through a
+  validator. `--` and a lone `-` are refused. The "another host or
+  container" options are refused in either position, because a word
+  before the subcommand is taken as the subcommand and fails the check.
+* **SC3.** F1 records input redirections and here-strings per step and
+  flags the whole command. Heredocs still set the `heredoc` flag. Process
+  substitution is refused through its `procsubst` context. Any flag blocks,
+  so the early-return paths in `_parse_statement` (shells, `su`/`runuser`)
+  are covered as well.
+* **The `on` lock** (`read_lane_on_enabled`, set by hand only, and a stored
+  `on` treated as shadow while it is unset) is stricter than I asked for.
+  Keep it.
+
+**New gap, must fix (SC9): the shell expands words the policy has already
+approved.** Round 5 switched `_step_ok` from splitting on whitespace to
+`shlex.split`. F1's lexer has already removed the original quoting, and
+`_display` re-quotes any word that holds a shell-special character. In
+round 3 such a word started with a quote, failed the path check and was
+refused. That was the "variable and quoting tricks fail closed" point in my
+round-1 note. `shlex.split` now strips that quote again, so the policy sees
+a clean-looking word, while the gateway runs the *original* text through
+`bash -c`, which expands it. Two classes are eligible today:
+
+* **Parameter expansion in a path.** A `$` word inside a safe-tree path
+  passes the textual checks. At run time it can add `..` components or split
+  into several words, through the default `IFS` or an earlier bare
+  assignment (an assignment-only statement produces no step at all). That
+  gives a root read outside the safe trees.
+* **Brace and glob expansion in a `grep` pattern.** Neither the `-e` value
+  nor the first-word pattern is checked for shell characters. At run time
+  one unquoted pattern can expand into several words, and `grep` reads all
+  but the first as files, starting in root's home directory.
+
+None of this sets a metacharacter (`$` alone, braces and globs are not on
+the list), so neither SC7 nor the gateway's gate catches it. The tests have
+no expansion case. I missed the pattern half in round 1, when the `-e` value
+was skipped without any check.
+
+* **SC9 rule:** no word in an eligible step may contain a character the
+  shell expands when it is unquoted: `$`, a backtick, `{`, `}`, `*`, `?`,
+  `[`, `]`, a leading `~`, or a backslash. This covers path operands, option
+  values and patterns alike. The breakdown does not say whether a word was
+  quoted, so the rule must hold for quoted words too. Patterns are then
+  limited to plain text and `.`/`^` anchors, which is acceptable. If regex
+  patterns are wanted later, F1 must first record per word that it was
+  entirely single-quoted, and only such a word may carry those characters.
+* **Also:** refuse any command with a bare variable assignment statement,
+  since it changes what later words expand to and shows up as no step.
+* **Tests:** one ineligible row per class (parameter expansion in a path, in
+  an option value, and in a pattern; brace and glob expansion in a pattern; a
+  bare assignment before an eligible read), using synthetic paths only.
+* **Who checks:** this one comes back to the security chat.
+
+**The feature reviewer's Round 6 list (R1–R4): confirmed, and extended.**
+
+* **R1–R4 confirmed** as written. For R2, take the simpler fix: remove
+  `-r`/`--recursive` from the lane. `ls -R` and `du` still list names.
+* **R5 (add, must): line caps don't bound binary or sparse logs.** Like
+  `-z`, a file with few newlines makes `-n ≤ 1000` or `-m ≤ 1000` print most
+  of the file. The worst case is the sparse login-record file, which can be
+  many gigabytes of zeros. For `head`, `tail` and `grep`, refuse the
+  journal directory under `/var/log` (use `journalctl`) and the
+  login-record files `lastlog`, `wtmp`, `btmp` and `faillog`. Also refuse
+  `grep -a`/`--text`; without it `grep` prints only "binary file matches".
+* **S1–S4: agree.** S1 matters most, because `date` takes an operand. S3:
+  4 log operands is fine.
+
+**Answers to the three questions:**
+
+* **Q1: yes, allow `shell_meta`.** "Plain jit" meant "no rule says a human
+  must look". `shell_meta` means "the gateway cannot vouch for this literal
+  string", which is exactly the case the lane exists to parse step by step.
+  SC7 becomes: the verdict is `auto_approved`, or `jit` with `detail_type`
+  `None` or `shell_meta`, and nothing else. Two additions:
+  * Refuse a step sent to the background with `&`, because it can outlive
+    the session.
+  * Add the end-to-end shadow test through `POST /api/request` with a
+    two-step read, as the feature reviewer asked.
+
+  This does not depend on SC9, because the expansion classes carry no
+  metacharacter, but ship it in the same round.
+* **Q2: yes, allow the narrow named-operand exception.** It applies only to
+  `systemctl status`, `is-active` and `is-enabled`. Each name must match
+  `[A-Za-z0-9][A-Za-z0-9@_.:-]{0,63}`: the first character is a letter or
+  digit, so a name can never be read as an option, and there is no `/`, no
+  glob and no backslash. Allow at most 8 names, and the `-n` cap still
+  applies to `status`. Escaped unit names (with `\x2d`) stay with a human.
+  SC9 must land first or in the same round.
+* **Q3: yes, accept only a bare `sudo`.** Every command already runs as
+  root, so `sudo` adds nothing. Its options add a login shell (root's
+  startup files), a shell, a chroot, a different working directory,
+  backgrounding and sudoedit. F1 must record whether the `sudo` wrapper had
+  any option or assignment, for example by labelling only the bare form
+  `sudo`. The lane refuses every other form.
+
+**Precondition for unlocking `on` on any gateway: the gateway must stop
+logging session signatures.** This is about the F12 note, and it is
+confirmed. The gateway writes the whole `SSH_ORIGINAL_COMMAND` to syslog
+before it strips the prefixes, so `ESHU_SESSION_SIG` ends up in the logs.
+That signature covers the session id only, not the command, so it can be
+replayed while it is valid. Today a human approves every log read. With
+`on`, the agent could read syslog or the journal unattended, pick up
+*another* session's signed id, and then use that session's F3 plan items
+or session override. This does not block the merge, and shadow is
+unaffected because nobody unlocks `on` before this is fixed:
+
+* **Gateway fix (security work, before the unlock):** log the command
+  without its signed prefixes (the id alone is fine). This is small and
+  belongs in security Chunk 7.
+* **Design fix (security Chunk 6):** bind the signature to the command, or
+  make it single-use, so a leaked signature is worthless. F12 should take
+  this into account.
+
+**Status:** SC1 and SC3 are done. SC2 is done once SC9 is in. When SC9, Q1
+and Q3 are implemented, send them back here. The feature reviewer checks
+R1–R5 and S1–S4. Q2 is optional, and if it is done, the security chat
+looks at it together with SC9.
+
+**Round 7 (2026-11-09, main feature reviewer): feature side approved; SC9,
+Q1 and Q3 go to the security reviewer.** I re-ran every probe set from
+rounds 1–6 plus a Round 7 set, about 150 synthetic commands.
+
+* **Still eligible:** only status reads (`uptime`, `df`, `free`, `ip a`,
+  `ss`, `ps`, `systemctl status <unit>`/`list-units`, `journalctl -n`,
+  `docker ps`/`stats --no-stream`, `zpool status`, `lsblk`, `uname`), log
+  reads with caps (`tail -n 50 /var/log/syslog`), `ls`/`du`/`stat` of safe
+  paths, and chains of these (`uptime && df -h`).
+* **Refused:**
+  * shell-expansion characters in any word (glob or brace grep patterns,
+    `$` in paths);
+  * bare and prefix assignments;
+  * `&` background steps;
+  * `sudo` with options;
+  * `wtmp` (and its rotations) and the journal folder;
+  * `grep -a`, every recursive grep spelling, `/./` paths, `grep -C`
+    beyond the cap, `head -z`;
+  * command substitution in a chained step.
+
+The F8 merge also made the read-lane report skip excluded rows, which is
+correct. **Still owed before merge:** the security reviewer's look at SC9,
+Q1 and Q3 (commits `51f2e40` and `0ed276c`). **Still owed before `on` can be
+unlocked:** security Chunk 7 (stop logging signatures), Chunk 6 (bind the
+signature to the command) and F19 (gateway time and output limits).
+
+**Security round 3 (2026-11-09): final sign-off. Approved on two small
+conditions, which the feature reviewer checks. No return trip.** Security
+chat, reviewed at `60045c8` (commits `51f2e40` and `0ed276c`). This was a
+read-only review. Nothing was run.
+
+**What holds:**
+
+* **SC9.** Every raw step word is checked before `shlex.split`, so F1's
+  re-quoting can no longer be undone. All the expansion characters are
+  refused, a leading `~` included, even behind a quote. That covers paths,
+  option values and both pattern forms. A bare assignment is now an
+  `unknown` step. Prefix assignments were already refused, because the
+  assignment word becomes the verb.
+* **Q1.** SC7 accepts `auto_approved`, or `jit` with `detail_type` `None` or
+  `shell_meta`, and nothing else, so `self_protection_jit` still wins. A
+  statement ended by `&` carries `background` and is refused. In a
+  backgrounded pipeline, the last member carries the marker, so the whole
+  command is still refused.
+* **Q3.** Only a bare `sudo` keeps the `sudo` context. Any option, `--` or
+  assignment gives `sudo(options)`, and nested `sudo` gives a two-item
+  context. The lane refuses both.
+* **Q2.** The unit-name exception is scoped as agreed: three subcommands,
+  at most 8 names, a letter or digit first, and no `/`, glob or backslash.
+* **R1–R5** are in as specified. Paths are normalised before the prefix
+  checks, recursive `grep` and `-P` are gone, the context product is
+  capped, `-z` is gone, binary logs are refused and `grep -a` is gone.
+  `ls -R` stays allowed under `/var/log` only, which lists names and is
+  acceptable.
+
+**Conditions (before merge, feature reviewer checks):**
+
+* **SC10: refuse loops and grouping.** F1 drops shell keywords and keeps
+  only the commands inside them. Q1 now allows `;` and newlines, so a
+  `while` or `until` loop whose condition and body are both eligible reads
+  is eligible today. It never ends and prints without limit, which is
+  exactly what SC5 forbids. This is a consequence of my Q1 answer. Grouping
+  with braces or parentheses also loses the `background` marker, because
+  the `&` lands after the closing word. **Rule:** F1 flags any command that
+  contains a loop (`while`, `until`, `for`, `select`), a conditional (`if`,
+  `case`), a function definition, a brace group or a subshell, for example
+  with a `compound` flag. Every flag blocks the lane, so these commands are
+  refused. The lane is for plain chains of reads. **Tests:** synthetic
+  ineligible rows for a `while` loop of two eligible reads, an `until` loop,
+  a `for` loop over a fixed list, a grouped read sent to the background with
+  braces, and the same with parentheses. Plain chains (`uptime && df -h`,
+  `uptime; free -h`) stay eligible.
+* **SC11: date-suffixed login-record rotations.** `_binary_log` matches
+  `wtmp.1` but not the dated `name-YYYYMMDD` rotation that some
+  distributions use. The failed-login file can hold passwords typed into
+  the username prompt by mistake. **Rule:** also match `name-` followed by
+  anything. **Test:** a dated rotation of each of the four names is
+  ineligible for `head`, `tail` and `grep`.
+
+**Verdict:** F4 may merge once SC10 and SC11 are in and the feature reviewer
+has checked them. No further security pass is needed for that. `on` stays
+hard-locked until security Chunk 7 (stop logging signatures), Chunk 6
+(bind the signature to the command) and F19 (gateway time and output
+limits) are merged and deployed. Unlocking it on any gateway is a separate
+decision for the operator, made by hand.
+
+**Round 8 (2026-11-09, main feature reviewer): approved and merged.** SC10
+holds: every loop, `if`/`case`, function, brace group and subshell is
+flagged `compound` and refused, including `{ … & }` and `( … & )`. Plain
+chains (`&&`, `;`, `||`) stay eligible, and a keyword inside an argument
+(`grep -e for …`) is not a construct. SC11 holds: dated login-record
+rotations (`btmp-YYYYMMDD`, `.gz`) are refused. All earlier probe sets give
+the same eligible set as in round 7.
+
+**`on` stays hard-locked.** Unlocking it requires all of these to be merged
+and deployed: security Chunk 7 (prefix-stripped logging), Chunk 6 (the
+signature bound to the command), the session key off argv (the security
+reviewer's third precondition) and F19 (gateway time and output limits).
+Then the operator sets `read_lane_on_enabled` by hand, per the security
+sign-off.
+
 
 ---
 
@@ -2724,11 +3815,224 @@ tests pass locally, and the X1 sidebar actions survived the merge.
 
 ### Implementer notes
 
-_(fill in)_
+**What I did**
+
+* **`core/approval_buckets.py`**: one mapping, `bucket_for(status, reason)`,
+  and the order the UI shows: allowlist · human · plan · read lane · session
+  override · host override · window · fleet run. Status wins where the status
+  alone is the answer (`auto-approved`, `window-approved`, `fleet-run`), so a
+  gateway's free-text reason on an allowlist row cannot move it between
+  buckets. Everything else on an approved row goes by reason prefix;
+  `session-plan:` and `session-override:` are prefixes, `override` and
+  `read-lane` are exact. **The read-lane reasons are matched by string** —
+  this branch has no F4 code to import. Refusals return `None`; a read-lane
+  *shadow* row is pending, and if a human approves it the bucket is `human`
+  (the lane did not clear it).
+* **`requests.decided_at`** (`db/requests.py`): a nullable column, set by the
+  first decision (`update_request_status_if_pending`, the approve/deny path),
+  by `update_request_status` (`COALESCE`, so a later consume never rewrites
+  it), and by the expiry sweep (`expired`/`abandoned`). Nullable on purpose:
+  pre-F6 rows stay unknown instead of being given an invented wait.
+* **`get_session_summary`** grows `by_approval` (all eight buckets, zeros
+  included), `waited_seconds` (`SUM(decided_at - created_at)`) and `decided`.
+  The MCP `session_summary` tool returns the dict as JSON, so it carries the
+  same breakdown without a second code path.
+* **`GET /api/sessions/{sid}/detail`** adds `summary`: the above plus `goal`,
+  `started_at`, `duration_seconds`, `failed` (F5), and `writes` /
+  `writes_by_host`, counted from F1's breakdown per row — a session can span
+  hosts, and the card names the host. Encoded commands count zero writes
+  (their steps are unknown; they never get this far).
+* **`GET /api/statistics`** adds `approval_breakdown`: `buckets`, `series`
+  (one row per day in the selected window, all buckets), `totals`,
+  `approved`, `override_share` (session + host override ÷ every approval,
+  per cent). Grouped in SQL by `(day, status, reason)` and bucketed in Python,
+  so the row count stays small.
+* **UI**: the session modal gets a wrap-up card under the meta line — how long
+  it ran, command/failed counts, the wait for a human, the eight approval
+  chips (zero counts greyed, so the absence of overrides is visible) and the
+  writes per host. Statistics gets a "How approved" widget: a stacked bar per
+  day, oldest first, with the override share as the chip headline and a legend
+  that keeps empty buckets visible. Bucket colours are tokens in `:root`
+  (`--appr-*`), not literals in rules.
+* **Tests**: `tests/test_f6_session_wrapup.py` (53) — the mapping table, the
+  generated reason-literal scan, the summary (counts, wait, MCP JSON),
+  `decided_at` on approve/deny/expire/consume/second-decision, the detail
+  summary (goal/duration/writes per host/failures), the statistics block
+  (series, totals, share, gateway filter, empty window), and four node-harness
+  checks for the card and the widget (escaping, zero buckets, duration
+  formatting).
+
+**Decisions and surprises**
+
+* `approval_breakdown` follows the page's day selector (7–365, default 14)
+  rather than being pinned to 14 — the chart and the KPI cards then describe
+  the same window.
+* A status's own meaning beats the reason in three places: `auto-approved`
+  (allowlist reason text is free-form from the gateway), `window-approved`
+  (no reason at all today) and `fleet-run` (the operator's own reason is free
+  text). Everything else is a reason prefix on an approved row.
+* `integration-approved`/`integration-denied` appear in the requests table
+  historically but are not SSH approvals; they map to `None` and are counted
+  as MCP calls, which is what the modal already did.
+* The wait is `decided_at - created_at` per row, summed. Rows created before
+  the column existed contribute nothing, and the card says "wait not
+  recorded" when no row has one, instead of showing a confident zero.
+
+`bash scripts/verify.sh`: `1909 passed, 3 skipped, 7 warnings in 383.81s (0:06:23)`. The three skips are F18's read-lane tests: F4 is not on this branch.
+
+### Round 2: fixes for reviewer round 1
+
+* **R1 — a row created already decided starts decided.** `create_request` now
+  stamps `decided_at = created_at` for every non-`pending` status (allowlist,
+  host/session override, plan, read lane, window, fleet), and `pending` keeps
+  NULL. The expiry sweep's `COALESCE` therefore never rewrites a creation
+  decision, so an unclaimed override swept to `abandoned` adds **0** to
+  `waited_seconds` and 1 to `decided`. Tests:
+  `test_f6_a_decided_row_starts_at_its_creation` (six status/reason pairs),
+  `test_f6_a_pending_row_has_no_decision`,
+  `test_f6_an_unclaimed_override_waits_zero` (override,
+  `session-override:` and `session-plan:` swept to abandoned) and
+  `test_f6_an_auto_approved_log_row_waits_zero` (an `/api/log`
+  `auto-approved` row through the gateway endpoint).
+* **R2 — writes mean what changed.** `session_detail_endpoint` now skips a row
+  whose `bucket_for(status, reason)` is `None`, so denied, blocked and expired
+  commands are not counted as writes; the card uses the same mapping as the
+  approval chips. `test_f6_writes_count_only_decided_rows`: one approved, one
+  denied, one blocked and one expired write give `writes == 1` on the approved
+  row's host.
+* **R3 — the generated reason test can fail now.**
+  `core/approval_buckets.KNOWN_REASON_PREFIXES` maps each prefix to its bucket
+  or to `None` ("not an approval": `encoded-payload`, `exhausted or
+  disabled"), and `bucket_for` goes through `known_reason()` instead of
+  hard-coded `startswith` checks. The scan is now a function over a list
+  (`_unmapped_prefixes`), the test asserts the scanned code prefixes are all
+  keys, and `test_f6_the_reason_check_can_fail` proves a synthetic
+  `brand-new-prefix` fails while known ones pass.
+  `test_f6_the_table_agrees_with_bucket_for` keeps the table and
+  `bucket_for` in step.
+* **S1 — the goal is on the card.** The facts line now starts with
+  `goal "…"` (escaped), so a named session no longer hides what it was for;
+  the node harness carries a goal and asserts it renders.
+* **S2 — known mismatch, not changed.** The approval series groups by SQLite
+  `DATE(created_at, 'unixepoch')` (UTC) while `filled` uses
+  `time.localtime`, exactly like the existing daily chart. On a non-UTC
+  dashboard the newest day's approvals can land in no bar; fixing it means
+  changing both charts' day boundary, so it is written down here rather than
+  half-fixed. **S3** (per-open `cmd_breakdown`) is likewise left as a known
+  cost; the modal is opened by a human, not in a loop.
+
+`bash scripts/verify.sh`: `1921 passed, 3 skipped, 7 warnings in 383.60s (0:06:23)`.
+
+### Round 3: merge with F8, F9 and F14
+
+`git merge origin/feature-roadmap` brings the approved F8 (test traffic), F9
+(freeze + HA Supervisor reads) and F14 (inventory) onto this branch. Four
+files conflicted; each was resolved by keeping both features, whole:
+
+* **`main.session_detail_endpoint`** keeps **one** summary dict: F6's
+  `by_approval`, `waited_seconds`, `decided`, `failed`, `duration_seconds`,
+  `writes` and `writes_by_host` plus F8's `excluded` and `all_excluded`. The
+  write count still uses the bucket mapping (R2), and the exclusion counts
+  still cover every SSH row of the session (F8 S3).
+* **`index.html`** keeps both `sm-summary` (F6's wrap-up card) and
+  `sm-test-hint` (F8's suggestion), in that order, under `sm-meta`.
+* **`app.js`** keeps the F6 block (`sessionSummaryHtml`, `renderSessionSummary`,
+  the approval chips, the goal line) and the F8 block (`looksLikeTestGoal`,
+  `excludedMarkHtml`, `excludeRequests`, `renderSessionTestHint`) whole; the
+  modal calls `renderSessionSummary(...)` then `renderSessionTestHint(...)`.
+* **`style.css`** keeps the F6, F14 and F8 blocks whole and once each: the F6
+  `--appr-*`/`.appr-*`/`.session-summary*` rules, the F14 `.inv-*` rules and
+  the F8 `.excluded-*`/`.sm-test-hint` rules. `ui_check.py` stays green and
+  `node --check` passes.
+
+**F8's merge note is implemented**, not just recorded: the F6
+`approval_breakdown` query now adds `COALESCE(r.excluded, 0) = 0` (the same
+filter as the other statistics queries), so an excluded approval is not in the
+"how approved" series. F8's generated statistics-filter scan walks
+`get_statistics` and now covers that query too, and
+`test_f6_approval_breakdown_skips_excluded_rows` checks the behaviour (one
+approved row plus one excluded approved row reports `human == 1`). The F6 and
+F8 test files both pass on the merged tree.
+
+`bash scripts/verify.sh`: `2010 passed, 3 skipped, 7 warnings in 410.61s (0:06:50)`.
 
 ### Reviewer notes
 
-_(reviewer)_
+**Round 1 (2026-11-08): changes requested.** Reviewed at `6b35d99`;
+`bash scripts/verify.sh`: `1909 passed, 3 skipped, 7 warnings in 331.10s (0:05:31)`.
+
+**What holds.** One mapping (`core/approval_buckets.py`) feeds the session
+card, the Statistics series and the MCP `session_summary`. "Status wins over
+a free-text reason" is the right call. `decided_at` is nullable, so old rows
+report no wait instead of a made-up one, and the first decision wins. The UI
+escapes every server string: host names, labels and dates. Bucket keys come
+from the server's fixed list. Colours are `:root` tokens. No approval path
+or order changed: this chunk only reads. The fixtures use `192.0.2.x`, and
+there is no live data.
+
+*Must fix:*
+
+* **R1 Rows that no human saw get counted as waiting for a human.** A row
+  created already approved (host override, session override, plan, and later
+  the read lane) has `decided_at = NULL`. If the gateway never claims it, the
+  expiry sweep marks it `abandoned` and stamps `decided_at = now`
+  (`COALESCE`). The agent then appears to have "waited" the whole TTL plus
+  the sweep delay. In a scratch test, one host-override row with a 90 s TTL,
+  swept 600 s later, added 600 s to `waited_seconds` and 1 to `decided`.
+  **Fix:** stamp `decided_at = created_at` in `create_request` for any status
+  other than `pending` (the decision *was* the creation), and keep the
+  `COALESCE` in the sweep. **Test:** create an `approved` row with
+  `reason="override"`, sweep it to `abandoned`, and check that it adds 0 to
+  `waited_seconds`. Do the same for `session-override:`, `session-plan:` and
+  `/api/log` `auto-approved` rows.
+* **R2 Denied, blocked and expired commands are counted as writes.** The
+  `writes_by_host` loop in `session_detail_endpoint` counts F1 write steps
+  in every SSH row of the session. The card says "writes", meaning what
+  changed, but a denied `systemctl restart` and a blocked `rm` both count. In
+  a scratch test, a session with one denied and one blocked write showed
+  `writes: 2`. **Fix:** count only rows whose bucket is not `None` (they ran,
+  or were cleared to run). Use `bucket_for(row['status'], row['reason'])`,
+  so the card uses the same mapping. **Test:** a session with one approved,
+  one denied, one blocked and one expired write reports `writes == 1` on the
+  approved row's host.
+* **R3 The "new reason prefix" test can never fail.** The spec asks for "a
+  test that fails when a new reason prefix is added without a bucket".
+  `test_f6_code_reasons_have_a_bucket` asserts
+  `bucket_for('approved', prefix) is not None`, but `bucket_for` returns
+  `human` for *any* unknown reason on an approved row, so every new prefix
+  passes. **Fix:** add a `KNOWN_REASON_PREFIXES` table to
+  `approval_buckets.py` that maps each prefix to its bucket, or to "not an
+  approval" (`encoded-payload`). Then assert that every scanned prefix is a
+  key in that table, and that `bucket_for` agrees with the table. **Test:**
+  the scan itself. Also add a negative case: a synthetic prefix that is not
+  in the table makes the check fail. Run the check function on a list, not
+  on the tree.
+
+*Should fix:*
+
+* **S1 The goal is not on the card once the session has a name.** The spec
+  lists the goal first. The card relies on the modal title, which shows
+  `meta.name || goal`, so a named session hides its goal. Show the goal in
+  the facts line when the session has a name. **Test:** the node harness
+  renders a named session, and the goal appears, escaped.
+* **S2 The day buckets mix UTC and local time.** The new series keys
+  `approval_by_day` by SQLite `DATE(created_at, 'unixepoch')` (UTC), but
+  `filled` uses `time.localtime`. The existing daily chart has the same
+  mismatch, so this is not new. On a non-UTC dashboard, the newest day's
+  approvals can land in no bar. Either use the same clock on both sides, or
+  write the mismatch down as known. **Test:** with `TZ` set to a non-zero
+  offset, today's approvals appear in the last series entry.
+* **S3 Writes are counted on every detail open.** `cmd_breakdown` runs once
+  per SSH row (up to 500) on every modal open. That is fine today. If it is
+  ever slow, cache the count per row, or reuse F18's stored breakdown.
+
+F6 lists F4 as a dependency. The read-lane bucket is matched by string and
+tested, which is acceptable. When F4 merges, re-run
+`test_f6_code_reasons_have_a_bucket` (after R3), so the `read-lane` literal
+is picked up.
+
+
+**Round 2 (2026-11-09, main feature reviewer): approved and merged.** The overnight reviewer approved R1–R3. The merge with F8 keeps one `summary` dict, and `approval_breakdown` skips excluded rows (covered by F8's generated scan). No duplicate functions in `app.js`; CSS braces balance.
 
 ---
 
@@ -2914,11 +4218,146 @@ characters, since a docker container name is agent-controlled. The out-of-scope
 
 ### Implementer notes
 
-_(fill in)_
+**What I did**
+
+* **`requests.excluded`** (`db/requests.py`): `INTEGER DEFAULT 0`, added by the
+  usual migration loop. Every existing row reads 0 — **no migration or rule
+  excludes anything by itself**, which is the chunk's one-off requirement.
+  `mark_requests_excluded(ids, session_id)` is the single writer: idempotent
+  (only rows currently at 0 are touched) and it returns how many it changed.
+* **`POST /api/requests/exclude`** `{ids[] | session_id}` (session auth,
+  audit `requests_excluded`, 400 when neither is given, ids capped at 1000).
+  Unknown ids are not an error; they simply count 0. Rows stay in History and
+  in `/api/requests` — only the aggregate views skip them.
+* **Statistics** (`/api/statistics` and `/api/statistics/export`): every
+  request-based aggregate adds `COALESCE(r.excluded, 0) = 0` — per-gateway,
+  daily, top commands, inner targets, hourly, weekday×hour, per-gateway
+  sparkline, automation trend and top denied (9 + 2 queries).
+* **Learning gaps** (`core/learning.py`, both the approval and the denial
+  query) and **anomaly profiles** (`core/cmd_profiles.compute_profiles`) skip
+  excluded rows, so a smoke test can no longer trigger an allowlist
+  suggestion or make a command look "already seen".
+* **Inner-target warning** (`/api/gateways/{ip}/inner-targets`) skips them
+  too: a test `pct exec` should not widen the host-override warning.
+* **UI**: a row marked excluded gets an `excluded` chip and is dimmed;
+  unexcluded rows carry an `exclude` link next to `breakdown`. The session
+  modal shows a dashed hint when the goal matches `/test|smoke/i` — the
+  suggestion, never an automatic action — with an "Exclude from stats"
+  button; the same action is available as a plain **Exclude** button in the
+  modal header for sessions whose goal does not say it. Both go through the
+  same endpoint and confirm first.
+* **Tests**: `tests/test_f8_test_traffic.py` (17) — the endpoint (ids,
+  session, idempotence, 400, auth, audit, rows still listed, unknown ids),
+  statistics (daily, per-gateway, top commands, top denied, export,
+  inner-target warning), learning (approvals and denials), profiles, that
+  nothing is excluded automatically, and a node harness for the suggestion
+  predicate and the excluded marker.
+
+**Decisions and surprises**
+
+* The chunk says statistics, learning and anomaly profiles; I also applied the
+  flag to the inner-target warning (it feeds an operator decision) and to the
+  CSV export (it is the same statistic leaving the app). Both are additive.
+* The policy **preview** (`/api/policies/preview`) still replays excluded
+  commands. It answers "what would this draft policy do to this traffic", and
+  the operator may deliberately want test traffic in that what-if; leaving it
+  alone also keeps this chunk from changing a decision tool. Say so if you
+  want it filtered.
+* Exclusion is one-way: there is no "include again" in the API or the UI. The
+  flag is a single boolean, so a future chunk can add it without a migration.
+* The session hint matches any `test`/`smoke` in the goal, as specified. It is
+  a hint with a confirm button, so a false positive costs one ignored line.
+
+`bash scripts/verify.sh`: `1873 passed, 3 skipped, 7 warnings in 383.49s (0:06:23)`. The three skips are F18's read-lane tests (F4 is not on this branch).
+
+### Round 2: fixes for reviewer round 1
+
+* **R1 — the override warning sees every row again.** Removed
+  `COALESCE(excluded, 0) = 0` from `GET /api/gateways/{ip}/inner-targets`: it
+  feeds F7's host-override warning ("an override here also covers these
+  containers"), which is a safety prompt, not a statistic. The Statistics
+  `inner_targets` table keeps the filter. The old test is replaced by
+  `test_f8_inner_target_warning_keeps_excluded_rows`, which shows the excluded
+  `pct exec` guest is still in the warning and gone from `/api/statistics`.
+* **S1 — "test" as a word.** `TEST_GOAL_RE` is now `/\b(smoke|tests?)\b/i`,
+  so "update to the latest kernel" no longer gets the hint while "smoke test"
+  and "run the tests" do; the harness asserts all five cases.
+* **S2 — a generated guard for the statistics filter.**
+  `test_f8_every_statistics_query_filters_excluded` splits
+  `get_statistics`/`export_statistics` into `cursor.execute(` blocks, and every
+  block that reads `FROM requests` must mention `excluded` (9 blocks checked).
+  A future aggregate cannot forget the filter.
+* **S3 — an excluded session says so.** The session detail now carries
+  `summary.excluded` and `summary.all_excluded`; the modal hint shows "This
+  session is excluded from statistics and learning" instead of the button
+  when every row is excluded, and the confirm text says rows the session adds
+  later are not excluded. `test_f8_detail_reports_an_excluded_session` covers
+  the done state and the new row that turns it off.
+
+**Merge note (F6 ↔ F8), recorded not fixed:** F6's `approval_breakdown`
+query exists only on `feat/f6-session-wrapup`; whichever merges second must add
+`COALESCE(r.excluded, 0) = 0` to it and add it to the S2 scan's coverage.
+
+`bash scripts/verify.sh`: `1875 passed, 3 skipped, 7 warnings in 384.64s (0:06:24)`.
 
 ### Reviewer notes
 
-_(reviewer)_
+**Round 1 (2026-11-09): changes requested (one small item).** Reviewed at
+`d544096`; `bash scripts/verify.sh`: `1873 passed, 3 skipped, 7 warnings in 331.04s (0:05:31)`.
+
+**What holds.** `excluded` defaults to 0, and the migration flags nothing. A
+test proves nothing is excluded automatically. The endpoint needs a session
+(the CSRF middleware covers the POST), writes an audit event, is idempotent,
+and caps `ids` at 1000. Excluded rows stay in History. Statistics, the CSV
+export, both learning-gap queries and the anomaly profiles skip them.
+Leaving rows out of the profiles makes a command look *newer*, not older,
+so the anomaly signal can only get louder. The UI escapes the session goal,
+and the row id goes through `Number()`. No approval path or order changed.
+The fixtures are synthetic.
+
+*Must fix:*
+
+* **R1 Keep the inner-target warning on every row.** The chunk asks for
+  statistics, learning gaps and anomaly profiles. The branch also filters
+  `GET /api/gateways/{ip}/inner-targets`, which feeds F7's host-override
+  warning ("this override also covers these containers"). That warning is
+  a safety prompt, not a statistic. Excluding a session that ran `pct exec`
+  into a guest would make the next host override look narrower than it is.
+  §0 rule 4 also says not to widen scope. Revert that one filter. Keep the
+  filter on the Statistics "inner targets" table, which is a statistic.
+  **Test:** replace `test_f8_inner_target_warning_skips_excluded` with one
+  showing that an excluded `pct exec` row *still* appears in the
+  inner-targets warning, while it is gone from `/api/statistics`
+  `inner_targets`.
+
+*Should fix:*
+
+* **S1 Match "test" as a word.** `/test|smoke/i` also matches "latest",
+  "contest" and "attestation", so a goal like "update to the latest kernel"
+  gets the hint. The spec says "contains", so this is not wrong, but a
+  word match (`/\b(smoke|tests?)\b/i`) gives fewer false positives.
+  **Test:** the harness predicate is false for "latest" and true for
+  "smoke test" and "run the tests".
+* **S2 A generated test for the statistics filter.** Nine queries in
+  `get_statistics` got the filter by hand, and the tests cover four of the
+  surfaces (daily, per gateway, top commands and denied, export). Hourly,
+  the heatmap, the sparkline and the automation trend have no test. A
+  scan test would make sure a future aggregate cannot forget the filter:
+  every `FROM requests` in `get_statistics`/`export_statistics` must
+  mention `excluded`.
+* **S3 The session hint after excluding.** Reopening an excluded session
+  shows "This looks like test traffic" again, with the button (the call
+  then reports 0). Have the session detail say whether every row is
+  excluded, and show the done state instead. Rows the session adds later
+  are not excluded. That is fine, but say so in the confirm text.
+
+**Merge note (F6 ↔ F8).** F6's new `approval_breakdown` query on
+`feat/f6-session-wrapup` is not filtered, because the branches are
+independent. Whichever of the two merges second must add
+`COALESCE(r.excluded, 0) = 0` to that query and to the S2 scan.
+
+
+**Round 2 (2026-11-09, main feature reviewer): approved and merged.** R1 is right: the inner-target warning counts excluded rows again, and Statistics still drops them. S1–S3 are fine.
 
 ---
 
@@ -2994,11 +4433,199 @@ Additive tools. Freeze now also blocks integration writes, which is a behaviour 
 
 ### Implementer notes
 
-_(fill in)_
+**What I did**
+
+* **Freeze covers integrations** (`core/tool_runner.py`): with the freeze flag
+  set, a call that is not a read is refused before any pending row, preflight
+  or upstream request, with `{"error": {"code": "frozen", "message": …,
+  "status_code": 409}}`, an `integration_calls` row (`outcome=refused`,
+  `reason_code=frozen`, method/path only) and an audit event
+  `mcp_frozen_refused`. Reads keep working; a handler **dry-run** also runs,
+  because it changes nothing upstream (the freeze protects state, not the
+  validation path). Whether a call is a read comes from
+  `core/read_policy.is_read_integration_call` (§2.6a), not from a second local
+  rule — the module is the one the task asked for: the integration half only,
+  with a note that F4's branch holds the full file (SSH rules) and that the
+  `read_only` guard must survive the merge.
+* **Approvals** (`POST /api/integration-calls/{id}/approve`): while frozen the
+  approval is refused with **409** and an audit event
+  `integration_call_refused_frozen`; the call **stays pending**, so unfreezing
+  lets the operator approve it (a freeze pauses the queue, it does not destroy
+  it). Denying is still allowed — removing work is never a write.
+* **`core/ha_supervisor.py`**: the fixed endpoint table
+  (`SUPERVISOR_READS`: tool → endpoint, method, shaper), `endpoint_for(tool,
+  args)` (the only place an endpoint is built; the add-on slug is validated
+  against `^[a-z0-9_]{1,64}$` **before** formatting, so `/`, `..`, `?` and
+  uppercase never reach the upstream), per-shape field allowlists (lists
+  capped at 200 rows), `ha_addon_info` shaped without `options`,
+  `run_supervisor_read` (audit via `ha_ws_exec` with the tool name, then
+  `secret_scrub`), and the 401/403 → `ha_admin_required` mapping.
+  `SUPERVISOR_ACTIONS` is an empty table for F10, kept separate so
+  `SUPERVISOR_READS` stays "reads only".
+* **Tools** (`core/ha_seed.py`, `handler: ha_supervisor_read` for the eight
+  reads, `handler: ha_whoami` for the WS `auth/current_user`):
+  `ha_supervisor_info`, `ha_core_info`, `ha_os_info`, `ha_host_info`,
+  `ha_addons`, `ha_addon_info(slug)`, `ha_backups`, `ha_resolution`,
+  `ha_whoami`, and `ha_check_config` (REST `POST
+  /config/core/check_config`, `read_only: True` — it validates and changes
+  nothing, so it runs without approval). Seeding is idempotent by name, so an
+  existing HA integration gets the ten new tools after "Seed" without
+  duplicates.
+* **UI**: the freeze banner, the freeze pill tooltip and the freeze toast now
+  say "SSH and integration writes rejected".
+* **Docs**: `docs/INTEGRATIONS.md` documents the Supervisor tools, the
+  admin-token requirement, `ha_whoami`, the dedicated-`eshu`-admin-user
+  recommendation (a long-lived token carries all of its user's rights) and
+  that freeze now covers integration writes. CHANGELOG entries for both
+  behaviour changes.
+* **Tests**: `tests/test_f9_ha_supervisor_read.py` (37) — freeze (write
+  refused, nothing queued, read allowed, dry-run allowed, approval refused and
+  kept pending, approval after unfreeze, the read policy is consulted),
+  each tool's exact endpoint and method, slug validation (7 bad forms never
+  reach the upstream), `options` never returned, compact add-ons, non-admin
+  mapping, upstream error, `ha_whoami`, `ha_check_config` as a read, scrubbing,
+  the allowlist (table == tools; no other module builds a `supervisor/api`
+  payload; every supervisor tool is read-only), and idempotent seeding. Two
+  pre-existing count assertions moved from 18 to 28 seeded tools, explained in
+  the commit.
+
+**Decisions**
+
+* The tool names are the chunk's literal `ha_*` names. MCP prefixes the
+  integration name, so on the shared surface an integration named "Home
+  Assistant" exposes `home_assistant_ha_supervisor_info`. The alternative is
+  to drop the `ha_` prefix in the seed (then it reads
+  `home_assistant_supervisor_info`); say which reads better and it is a
+  one-line rename per tool.
+* `ha_check_config` is a POST but `read_only: True`: `_read_only_refusal` only
+  guards generic passthrough tools, so a curated read-only POST runs directly —
+  which is the intent ("validates and changes nothing").
+* The Supervisor read shapers are allowlists, not denylists: a new upstream
+  field is dropped until someone adds it, which is the safe default for a
+  surface that can carry secrets.
+* An add-on's `options` would be caught by `secret_scrub` for the obvious
+  password-shaped keys, but not for arbitrary ones; the shaper dropping
+  `options` entirely is the real protection.
+
+**Open questions**
+
+1. **Tool naming** (above): keep the `ha_` prefix in the seed, or drop it so
+   the MCP-visible name is `<integration>_supervisor_info`? Nothing depends on
+   either choice except the docs and the existing-name test.
+
+`bash scripts/verify.sh`: `1893 passed, 3 skipped, 7 warnings in 394.38s (0:06:34)`. The three skips are F18's read-lane tests (F4 is not on this branch).
+
+### Round 2: fixes for reviewer round 1
+
+* **R1 — only a handler dry-run is exempt from the freeze.** The freeze check
+  used `not args.get('dry_run')`, so an agent-supplied `dry_run: true` let a
+  curated REST tool, a generic tool or `ws_write` past the freeze (it is just
+  another argument for those; only handlers honour it). The exemption is now
+  `handler and args.get('dry_run')`, the same condition the gate below uses.
+  Tests: `test_f9_a_curated_rest_dry_run_is_still_a_write`,
+  `test_f9_a_ws_write_dry_run_is_still_a_write` and
+  `test_f9_a_generic_write_dry_run_is_still_a_write` — each is refused with
+  `frozen`, queues nothing and makes no upstream request; the handler dry-run
+  test stays green.
+* **R2 — the generic WS tools cannot reach the Supervisor.** `ws_write` could
+  still forward an agent-chosen `supervisor/api` (or `hassio/*`) endpoint, and
+  HA has no allowlist of its own. Two guards, no socket before the decision:
+  * `core/tool_runner._run_tool` refuses a WS command whose name starts with
+    `supervisor/` or `hassio/` **before gating**, so no pending call is
+    created either (error `supervisor_command_refused`, 403, an
+    `integration_calls` row with `reason_code=supervisor_command_refused` and a
+    `ws_supervisor_refused` audit event);
+  * `core/ha_ws.execute_ws_call` refuses the same prefixes, which covers the
+    approval executor and any direct caller.
+  `core/ha_ws.is_supervisor_command` is the one predicate; the curated
+  handlers still use `ha_ws_request` with constants, so `ha_supervisor.py`'s
+  table remains the only path. Tests: `test_f9_ws_write_refuses_supervisor_before_connecting`,
+  `test_f9_ws_write_refuses_hassio_before_connecting`,
+  `test_f9_an_approved_supervisor_ws_call_is_refused` (a pending call created
+  before the guard is refused on approval, its stored result carries the
+  message) and `test_f9_a_normal_ws_command_still_reaches_the_transport`.
+  The HA test fixture now seeds the generic tools too, since those are the
+  tools under test.
+* **S1 — the one POST that keeps working.** `docs/INTEGRATIONS.md` now says
+  that `ha_check_config` still runs while frozen, because it only validates.
+* **S2 — tool naming** is the operator's call and is left as the open
+  question from round 1 (see the round-1 Reviewer notes).
+
+`bash scripts/verify.sh`: `1900 passed, 3 skipped, 7 warnings in 398.68s (0:06:38)`.
 
 ### Reviewer notes
 
-_(reviewer)_
+**Round 1 (2026-11-09): changes requested.** Reviewed at `d43147f`;
+`bash scripts/verify.sh`: `1893 passed, 3 skipped, 7 warnings in 346.84s (0:05:46)`.
+
+**What holds.**
+
+* **The endpoint table.** `ha_supervisor.py` is a fixed table. The slug is
+  validated before formatting, and the response shapers are allowlists:
+  `options` is never returned, and lists are capped.
+* **401/403 mapping.** A 401 or 403 becomes `ha_admin_required`.
+* **`ha_whoami`.** It returns only name, `is_admin` and `is_owner`.
+* **Generic reads.** Chunk H's `DENY_PREFIXES` already keep `supervisor/`
+  and `hassio/` out of the generic `ws_read`.
+* **Freeze routing.** The freeze decision goes through
+  `read_policy.is_read_integration_call`, and its `read_only` guard is the
+  right addition.
+* **Approval while frozen.** It is refused with a 409 and audited, and the
+  call stays pending.
+* **Seeding.** It is idempotent.
+* **No live data.** The fixtures use `192.0.2.x`.
+
+*Must fix:*
+
+* **R1 An agent-set `dry_run` flag gets a write past the freeze.** The
+  freeze check skips any call whose args contain `dry_run: true`. Only
+  *handler* tools honour that flag, though, and the gating code further down
+  checks `handler and args.get('dry_run')`. For a curated REST tool, a
+  generic tool or a WS tool, `dry_run` is just one more argument. In a
+  scratch test, a frozen `call_service` with `dry_run: true` was **queued
+  for approval** instead of refused, against "queues nothing". A tool that
+  its gate policy leaves ungated would go on to run upstream while frozen.
+  **Fix:** exempt only `handler and args.get('dry_run')`, the same
+  condition the gate uses. **Test:** while frozen, `dry_run: true` on a
+  curated REST write, on `ws_write` and on the generic `write` tool is
+  refused with `frozen`, queues nothing and makes no upstream request. The
+  existing handler dry-run test stays green.
+* **R2 `ws_write` can still send any Supervisor endpoint.** The acceptance
+  criterion is "no code path can send an endpoint that is not in
+  `ha_supervisor.py`'s table". The approval-gated generic `ws_write` tool
+  still forwards `supervisor/api` (and `hassio/*`) with an endpoint and
+  method chosen by the agent. Because HA has no allowlist of its own, one
+  tired approval reaches host reboot, backup restore or add-on options. The
+  static scan in `test_f9_no_other_module_builds_a_supervisor_payload` does
+  not see this, because the command comes from the agent's arguments at run
+  time. **Fix:** refuse `supervisor/` and `hassio/` commands in `ws_write`
+  before connecting, with a reason that points at the curated tools. F10
+  will add the reviewed action endpoints to the table. **Test:** `ws_write`
+  with `supervisor/api` (and a `hassio/` command) is refused before any
+  WebSocket opens, both at call time and if a pending call is approved.
+
+*Should fix:*
+
+* **S1 `ha_check_config` and the freeze.** It is a `read_only` POST, so it
+  runs while frozen. That matches "validates and changes nothing", which is
+  fine. Say so in `INTEGRATIONS.md` next to the freeze note, so the operator
+  knows the one POST that keeps working.
+* **S2 Tool naming (the implementer's open question).** Drop the `ha_`
+  prefix: the MCP name already starts with the integration's name, and
+  `home_assistant_supervisor_info` reads better than
+  `home_assistant_ha_supervisor_info`. This is the operator's call. It is
+  one rename per tool, plus the name test.
+
+**Merge note: `core/read_policy.py` exists on three branches.** F9, F14 and
+F4 each create it. F9 and F14 have the same function, with different
+docstrings. F4's version has no `read_only` guard in
+`is_read_integration_call`. When F4 merges, keep F4's SSH half, take F9's
+guarded integration wrapper, and add a test that a curated write tool is not
+a read (`test_f9_a_curated_write_tool_is_not_a_read`). Whichever of F9 and
+F14 merges second only needs to resolve the docstring.
+
+
+**Round 2 (2026-11-09, main feature reviewer): approved and merged.** R1 is right: the freeze exemption now uses the same `handler and dry_run` condition as the gate. R2 is right: `supervisor/` and `hassio/` are refused before gating and again in `execute_ws_call`. Merge: `read_policy.py` takes F9's docstring. `tool_handlers.py` holds one `HANDLERS` table with F14's Pi-hole handler and F9's two handlers.
 
 ---
 
@@ -4143,11 +5770,112 @@ does the reasoning once, and a small local model (F17) reuses it cheaply.
 
 ### Implementer notes
 
-_(fill in)_
+**What I did**
+
+* **MCP `session_conclude`** (`core/mcp_server.py`, `core/conclusions.py`):
+  outcome in `solved|partial|failed|abandoned`, summary required, worked /
+  did_not_work items as `{"ref": "req:2594", "note": "..."}` (or a plain
+  note); every ref is checked against **this** session — a request or
+  integration call from another session, or an unknown id, is
+  `ref_not_in_session`. The session's owner (when it has one) must match the
+  caller. One conclusion per session per agent: a second call replaces the
+  draft; a **confirmed** one is final (`already_confirmed`). Everything is
+  length-capped and `secret_scrub`bed on write.
+* **Storage** (`db/conclusions.py`): `session_conclusions` (session, agent,
+  goal copy, all fields, status `draft|confirmed|rejected`, operator note,
+  timestamps) with an **FTS5** table over summary, root cause, fix, tags and
+  the session goal, kept in step by rowid (no external-content table, no new
+  dependency). Status transitions are SQL-conditional, so a confirmed
+  conclusion cannot be edited or re-drafted.
+* **Operator review** in the session modal, under F6's wrap-up card: outcome,
+  tags, summary, worked / did-not-work (refs labelled `request #N` /
+  `call #N`), root cause, fix, follow-ups and the operator note, with
+  **Confirm**, **Edit** (inline textareas for summary / root cause / fix) and
+  **Reject** for a draft; a confirmed runbook candidate shows **Promote to
+  runbook**, and a promoted one shows `Runbook #N`. All agent text is escaped;
+  nothing is ever executed. Endpoints: `POST /api/conclusions/{id}/confirm`
+  and `/reject`, `PATCH /api/conclusions/{id}`,
+  `POST /api/conclusions/{id}/runbook`, each audited; `GET
+  /api/sessions/{sid}/detail` now also returns `conclusions` (scrubbed again
+  on read) and `runbooks`.
+* **Runbooks**: promotion is server-side and operator-only. Each cited
+  command is copied **verbatim** from the request row with F1's breakdown; a
+  cited call keeps integration/tool/method/path; an uncited note becomes an
+  instruction; did_not_work becomes `dead_ends`. Steps are capped at 20, and
+  runbooks are documents, not executable (F16 can turn one into a recipe).
+* **Retrieval**: `find_runbooks(query, tags?)`, `similar_incidents(query)` and
+  `get_runbook(id)` return **confirmed** material only, top 5 (with a `more`
+  flag), each incident under ~1,500 tokens (6,000 chars, trimmed with
+  `truncated`). `session_summary` now carries `conclusion` (id/status) and a
+  `next_step` reminder to call `session_conclude`.
+* **Secrets**: every text field is scrubbed on write, and the stored payload
+  is scrubbed again as JSON on read (`scrub_read`, `_scrub_payload`), so a
+  token that slipped past one pass is still masked.
+* **Screenshot**: `docs/screenshots/f13/conclusion-review.png` (source
+  `conclusion-review.svg`) shows the draft review card with synthetic data
+  (`sess-f13-nginx`, `web01`, `192.0.2.10`). The build box has no browser, so
+  it is rendered from the shipped markup/CSS palette through SVG + sharp
+  rather than captured from a live session; the strings match the node
+  harness fixture.
+* **Tests**: `tests/test_f13_session_conclusions.py` (22) — refs (foreign,
+  unknown, malformed), outcome/length/tag limits, ownership (ownerless
+  sessions stay usable), draft replacement, confirmed finality, reject then
+  re-draft, confirm/edit only on a draft, only-confirmed retrieval, the FTS
+  ranking smoke test, write/read scrubbing, the 5-item cap, promotion
+  (verbatim command + breakdown + refs, tool steps, instructions, dead ends,
+  requires confirmed and candidate), runbook search/tags/get, the MCP tools
+  and the summary reminder, the API review/promote path and its 404/409s,
+  session auth, and a node harness for escaping and the card's states and
+  buttons. `tests/test_omada_mcp.py`'s per-integration tool set gains the
+  four new built-ins.
+
+**Decisions**
+
+* A confirmed conclusion is immutable for its agent; the operator can still
+  edit a draft before confirming. Rejecting a draft lets the same agent try
+  again (a new draft, same row).
+* `session_conclude` requires the session to exist and, when it has an owner,
+  requires the caller to be that owner. Ownerless sessions (an adopted chat
+  id) stay usable, matching the pre-SR2 plan rule.
+* The four knowledge tools are in `_ALWAYS_ALLOWED` with the session tools:
+  they are session-scoped or read only confirmed, operator-approved material,
+  and an allowlist that cannot see `session_conclude` could never record a
+  conclusion. `session_conclude` writes a *draft*, never an approval.
+* `similar_incidents` quotes its FTS terms (implicit AND) so a query with FTS
+  syntax cannot error the tool; an empty query returns nothing rather than
+  everything.
+* The FTS index is standalone (not `content=` external) so `rowid` is always
+  the conclusion id; the database module keeps it in sync on write and edit.
+  A SQLite build without FTS5 would fail at table creation, which is correct
+  for a chunk that requires it (the venv's SQLite has it).
+
+`bash scripts/verify.sh`: `2032 passed, 3 skipped, 7 warnings in 415.73s (0:06:55)`.
 
 ### Reviewer notes
 
-_(reviewer)_
+**Round 1 (2026-11-09): approved and merged.** 178 F13, F6 and MCP tests
+pass locally. What I checked and what holds:
+
+* Refs are validated against the session.
+* Only `confirmed` items are retrievable.
+* FTS terms are quoted (`_fts_match`), so agent text cannot inject FTS
+  syntax.
+* Secrets are scrubbed on write and on read.
+* Agent text in the review UI is escaped (harness).
+* Status changes are conditional.
+
+Follow-ups (S, non-blocking):
+
+* **S1** Ownership in `save_conclusion` is `owner and agent != owner`, so an
+  ownerless session takes a draft from anyone. That is harmless (the
+  operator reviews every draft), but make it fail closed for consistency
+  with F3's SR2.
+* **S2** `search_runbooks` matches the whole query as one LIKE phrase.
+  Search per term (or through FTS) so that "nginx 502" finds a runbook
+  mentioning both words apart.
+* **S3** Confirmed runbooks are later read by other agents, so a confirmed
+  text is effectively an instruction to them. The operator's Confirm is the
+  only gate; say so in the review UI ("agents will follow this").
 
 ---
 
@@ -4233,11 +5961,187 @@ gateways.
 
 ### Implementer notes
 
-_(implementer)_
+**What I did**
+
+* **`core/read_policy.py` (§2.6a)**: the same minimal, integration-half module
+  the task asks for — `is_read_integration_call(tool, transport, args)` wraps
+  Chunk H's `_read_only_refusal` and adds the `read_only` guard. F4's branch
+  holds the full file (SSH rules); this one will be merged with it, and the
+  guard must survive that merge. **Every source read goes through it**:
+  `core.inventory._call_tool` refuses a source tool that is not a read before
+  anything is sent.
+* **`local_dns_records`** (`core/pihole_seed.py` + a handler in
+  `core/tool_handlers.py`): two fixed GETs, `config/dns/hosts` and
+  `config/dns/cnameRecords` (Pi-hole v6; the integration's base URL ends in
+  `/api`). The payload is accepted in both shapes FTL uses — nested under
+  `{"config": {"dns": {...}}}` and `"<ip> <name>"` / `"<name>,<target>"`
+  strings — and returned as `{hosts: [{name, ips}], cnames: [{name, target}]}`.
+  It is `read_only`, so `is_read_integration_call` passes; the description says
+  it needs a v6 integration.
+* **`core/inventory.py`**: five source adapters — Eshu (gateways + F7 inner
+  targets), Proxmox (`get_cluster_resources`), NPM (`proxy_hosts`), Pi-hole
+  (`local_dns_records`), Omada (`list_sites` then `list_known_clients` per
+  site, capped at 10 sites). Each is optional; a missing integration is
+  skipped, a failed one records its reason. `refresh_inventory()` swaps one
+  source's rows in one transaction and records the result in
+  `inventory_sources`; a failure **keeps the last good rows** and marks the
+  source stale (last error, or no success for two intervals).
+* **Join** (`build_entities`): union-find over `ip:<ip>`, `name:<normalised>`
+  (the name, each FQDN, and an FQDN's first label when it is at least three
+  characters) and `vmid:<host>:<vmid>`. An entity carries name, IPs, FQDNs,
+  hosts, vmids, URLs, kinds, the contributing sources (with their staleness)
+  and `conflicts` — an IP claimed by two different names is listed, never
+  resolved silently.
+* **`whereis(query)`**: exact matches first, then substrings, over name, IPs,
+  FQDNs, vmids, hosts, URLs and the MAC/inner-target extras. Up to **5**
+  entities, each trimmed under **600 characters** with `truncated` set.
+* **API**: `GET /api/inventory` (snapshot + `?q=` search), `POST
+  /api/inventory/refresh` (audited, synchronous — the operator pressed it),
+  `POST /api/inventory/settings` (interval clamped to 5–120, default 15,
+  audited). The background loop sleeps one interval before its first refresh,
+  so a boot never fires source calls while the dashboard starts.
+* **MCP**: `whereis` is a built-in on the shared and per-integration servers
+  (and in `_ALWAYS_ALLOWED`, like `session_begin`) — it answers from Eshu's own
+  cache and makes no upstream call on the request, so there is nothing for the
+  agent policy to gate.
+* **UI**: an Inventory page (sidebar) with a search box, the per-source chip
+  row (counts and stale dashes), the interval control, "Refresh now", and one
+  card per entity: name, ip/name/host/guest/url/mac facts, source chips and
+  the conflict line. Every string is escaped; a stale entity is dimmed.
+* **Tests**: `tests/test_f14_inventory.py` (18) — the five-source join (one
+  entity, all sources), the read-only source calls, a conflict, a failed
+  source keeping its rows and turning stale, Eshu-only with no integrations,
+  the 5-entity and 600-character caps, matching by IP/vmid/MAC/name, interval
+  clamping, `local_dns_records` passing the read check, the v6 parser on both
+  payload shapes, the upstream-error path, the three endpoints (session auth
+  included), and two node-harness checks (escaping; stale + conflict markers).
+
+**Decisions**
+
+* **HA add-on slugs are skipped**: the chunk says "after F9", and F9 is not on
+  `feature-roadmap`. Adding the source later is one adapter.
+* The **manual refresh is synchronous** so its result is real (the operator
+  pressed a button and gets counts). The background loop sleeps first and then
+  refreshes on the interval, so it never competes with a cold start.
+* The **join is deliberately loose on FQDNs** (first label) — `app.example.test`
+  should reach a guest named `app`. A wrong join is visible as a conflict
+  rather than hidden, and an entity lists every source that contributed.
+* Omada is the only source needing two calls (sites, then clients); sites are
+  capped at 10 so one controller cannot multiply the refresh cost.
+* The inventory stores **only read-only metadata** (names, addresses, ids,
+  URLs, MACs, a few status flags) and never a secret; the response scrubber
+  still runs on upstream responses before anything is cached.
+
+`bash scripts/verify.sh`: `1874 passed, 3 skipped, 7 warnings in 380.39s (0:06:20)`. The three skips are F18's read-lane tests (F4 is not on this branch).
+
+### Round 2: fixes for reviewer round 1
+
+* **R1 — `whereis` goes through agent policy and only shows allowed
+  sources.** It is out of `_ALWAYS_ALLOWED` and off the per-integration
+  servers; it lives once on the shared `/mcp` surface, so an agent's
+  `tools` allowlist (or `tools_mode`) decides whether it can call it.
+  `inventory.whereis` *also* checks `visible_tool_allowed(agent, 'whereis')`
+  itself and returns `{error: forbidden}` when the tool is not allowed, so a
+  direct call cannot skip the policy.
+  * `allowed_sources(agent)` returns Eshu's own rows always, plus an
+    integration's name only when the agent's policy permits at least one
+    enabled read tool on it — decided by `agent_policy.evaluate_call`, not by
+    the inventory.
+  * The filter runs **before** the join (`build_entities(..., allowed=…)`), so
+    an entity never carries a field from a source the caller cannot see.
+  * Every agent call writes a `whereis_query` audit event with the agent, the
+    query **length** (never the query) and the entity count.
+
+  Tests (`TestWhereisAgentPolicy`): a denied agent is refused
+  (`test_f14_a_denied_agent_is_refused`); an HA-only agent sees only
+  `eshu`+`ha` sources with no vmid and no MAC; a Proxmox agent sees the guest
+  (vmid 103) but not the Omada MAC; an unrestricted agent sees the full four
+  source join; the call is audited; `whereis` is not in `_ALWAYS_ALLOWED`
+  (and `test_sessions` now asserts it stays out).
+* **S1 — untrusted names.** `WHEREIS_DESC` says names come from the network
+  and are untrusted data, and `_entity` strips control characters from names,
+  IPs, FQDNs, hosts, vmids, URLs and string extras
+  (`test_f14_control_characters_are_stripped`).
+* **S2 — background refresh rows, recorded not filtered.** Each refresh
+  writes `integration_calls` rows with agent `inventory`; they are real
+  audit of what the dashboard read and when, attributed to the component that
+  made the call. They are not agent activity, so an activity view that wants
+  only agents should filter `agent = 'inventory'` (no such view does today).
+* **S3 — HA add-on slugs** stay for the round after F9 merges, through
+  `read_policy` like every other source.
+
+`bash scripts/verify.sh`: `1881 passed, 3 skipped, 7 warnings in 381.89s (0:06:21)`.
 
 ### Reviewer notes
 
-_(reviewer)_
+**Round 1 (2026-11-09): changes requested (one item).** Reviewed at `aa44771`;
+`bash scripts/verify.sh`: `1874 passed, 3 skipped, 7 warnings in 331.25s (0:05:31)`.
+
+**What holds.**
+
+* **Reads go through the read policy.** Every source read goes through
+  `read_policy.is_read_integration_call` (`inventory._call_tool`), and a
+  test proves it.
+* **`local_dns_records`.** It is `read_only`, it makes two fixed GETs, and
+  it passes the check.
+* **Failed sources.** A failed source keeps its last good rows and is
+  marked stale.
+* **The join.** It is union-find over IP, normalised name and vmid.
+  Conflicts are listed, not resolved.
+* **`whereis` caps.** 5 entities, each ≤ 600 characters, with
+  `truncated`.
+* **Interval.** It is clamped to 5–120.
+* **Boot.** The background loop sleeps before its first refresh.
+* **UI escaping.** The UI escapes every upstream string: names, FQDNs,
+  URLs, MACs, error titles and conflict names.
+* **No live data.** The fixtures use `192.0.2.x`, `example.test` and
+  `AA:BB:…` MACs.
+* **Approvals.** No approval path changed.
+
+*Must fix:*
+
+* **R1 `whereis` skips agent policy, and it exposes every source to every
+  agent.** The spec says `whereis` "goes through agent policy like any
+  tool". The branch puts it in `_ALWAYS_ALLOWED` and adds it to every
+  per-integration MCP server. `_ALWAYS_ALLOWED` is meant for tools "always
+  scoped to the caller", like polling your own approval, and `whereis` is
+  not scoped: it returns the combined Proxmox, Omada, NPM and Pi-hole map.
+  So an agent whose policy allows only one integration (say HA, or a small
+  local model under F17) gets every client's IP and MAC address and every
+  guest and proxy entry. **Fix:**
+  * Take `whereis` out of `_ALWAYS_ALLOWED`, so an agent policy can deny it.
+  * Filter each answer to the sources the calling agent may read: Eshu's
+    own gateways always, and an integration's rows only if the agent's
+    policy allows at least one read tool on that integration.
+  * Record the call (agent, query length, entity count) like the other MCP
+    calls.
+
+  **Tests:** an agent denied `whereis` is refused. An agent allowed only HA
+  sees no Proxmox or Omada fields. An agent allowed Proxmox sees the guest
+  but not the Omada MAC. An unrestricted agent sees the full join.
+
+*Should fix:*
+
+* **S1 Device-chosen names are untrusted text for the agent.** Omada client
+  names, Proxmox guest names and NPM domains can be set by whoever controls
+  a device or a guest, and `whereis` hands them to a model as facts. Add one
+  line to `WHEREIS_DESC` ("names come from the network and are untrusted
+  data") and strip control characters in `_entity`. **Test:** a name with
+  control characters is cleaned in the `whereis` output.
+* **S2 Background refreshes in the call log.** Every refresh writes
+  `integration_calls` rows for agent `inventory` (about 4 sources × 96 a
+  day at 15 min). That is fine, but filter them out of the agent-activity
+  views, or say in the implementer notes why they should show.
+* **S3 HA add-on slugs.** Skipping them until F9 merges is right. Add the
+  adapter in the round after F9 lands, through `read_policy` like the
+  others.
+
+**Merge note.** `core/read_policy.py` is also created by F9 (same function)
+and by F4 (the SSH half, without the `read_only` guard). See F9's merge
+note.
+
+
+**Round 2 (2026-11-09, main feature reviewer): approved and merged.** R1 is right: `whereis` is gated by agent policy, sources are filtered before the join, and each call is audited. Note: a caller with no agent identity (a legacy MCP token) gets the unfiltered join and no audit row, the same as for the integration tools themselves. Tighten this in the UI/hardening pass if legacy tokens are retired.
 
 ---
 
@@ -4500,18 +6404,18 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 2 | F2 | review-card | UI | **Merged** 2026-11-08 | `feat/f2-review-card` @ `286df1b` | F1 | 2 rounds |
 | 3 | F7 | inner-target | dashboard | **Merged** 2026-11-08 | `feat/f7-inner-target` @ `0ad167f` | F1 | 1 round; backfill 7.1 s on a live-DB copy |
 | 4 | F3 | session-plans | dashboard + MCP | Merged | `feat/f3-session-plans` | F2 | + security reviewer sign-off |
-| 5 | F4 | read-lane | dashboard | **Changes requested (R1–R4)** | `feat/f4-read-lane` | F1, F3, Chunk H | reviewer pass + security reviewer sign-off |
+| 5 | F4 | read-lane | dashboard | Merged — shadow only; `on` hard-locked | `feat/f4-read-lane` | F1, F3, Chunk H | reviewer pass + security reviewer sign-off |
 | 5a | X1 | ctx-actions | dashboard | Merged | `fix/x1-ctx-actions` | — | FYI to security reviewer (approve ignored status) |
 | 6 | F5 | exec-results | gateway + dashboard | Merged | `feat/f5-exec-results` | — | |
 | 6a | F18 | request-context | dashboard | Merged | `feat/f18-request-context` | F1, F5, F7, X1 | |
-| 7 | F12 | ssh-exec | dashboard + gateway | **Design approved (feature); with the security reviewer** | `feat/f12-ssh-exec` | F4, F5 | design approval + security reviewer sign-off |
-| 8 | F6 | session-wrapup | dashboard | Ready (after F12) | `feat/f6-session-wrapup` | F3, F4, F5 | |
-| 9 | F13 | session-conclusions | dashboard + MCP | Ready (after F6) | `feat/f13-session-conclusions` | F5, F6 | |
-| 10 | F8 | test-traffic | dashboard | Ready (after F13) | `feat/f8-test-traffic` | — | low priority |
-| 11 | F9 | ha-supervisor-read | dashboard | Ready (after F8) | `feat/f9-ha-supervisor-read` | — | token is now a dedicated `eshu` HA admin user |
+| 7 | F12 | ssh-exec | dashboard + gateway | **Design approved (feature + security, conditions G1–G8)** — implementing | `feat/f12-ssh-exec` | F4, F5 | design approval + security reviewer sign-off |
+| 8 | F6 | session-wrapup | dashboard | Merged | `feat/f6-session-wrapup` | F3, F4, F5 | |
+| 9 | F13 | session-conclusions | dashboard + MCP | Merged | `feat/f13-session-conclusions` | F5, F6 | |
+| 10 | F8 | test-traffic | dashboard | Merged | `feat/f8-test-traffic` | — | low priority |
+| 11 | F9 | ha-supervisor-read | dashboard | Merged | `feat/f9-ha-supervisor-read` | — | token is now a dedicated `eshu` HA admin user |
 | 12 | F10 | ha-supervisor-actions | dashboard | Ready (after F9) | `feat/f10-ha-supervisor-actions` | F9, F3, Chunk H | reviewer pass + security reviewer sign-off |
 | 13 | F11 | ha-config-files | dashboard | Ready (after F10) — design first | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | design approval + security reviewer sign-off |
-| 14 | F14 | inventory | dashboard + MCP | Ready (spec detailed 2026-11-08) | `feat/f14-inventory` | Chunk H | |
+| 14 | F14 | inventory | dashboard + MCP | Merged | `feat/f14-inventory` | Chunk H | |
 | 15 | F15 | probes | dashboard + MCP | Ready after F12 | `feat/f15-probes` | F4, F12 | |
 | 16 | F16 | recipes | dashboard + MCP | Design first (questions listed) | `feat/f16-recipes` | F3, F12, F13 | design approval + security reviewer sign-off |
 | 17 | F17 | local-agent | dashboard + docs | Ready after F12–F16 | `feat/f17-local-agent` | F12–F16 | |

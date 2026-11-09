@@ -60,6 +60,14 @@ _RUNUSER_VALUE_FLAGS = {'-u', '--user', '-g', '--group', '-G', '--supp-group',
 _ASSIGN_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*=')
 
 _KEYWORDS_DROP = {'for', 'select', 'case', 'function'}
+# SC10 (security round 3): a loop, conditional, function definition, brace
+# group or subshell is not a plain chain of reads. The lane refuses any command
+# carrying the `compound` flag; F1 marks it here, from the parsed atoms (so a
+# word inside a quoted argument is not mistaken for a keyword).
+_COMPOUND_KEYWORDS = {'for', 'select', 'while', 'until', 'if', 'case',
+                      'function'}
+_COMPOUND_STARTS = {'', ';', ';;', '&', '&&', '||', '|', '\n', '(', '{',
+                    'do', 'then', 'else', 'elif', '!', 'time'}
 _KEYWORDS_TRIM = {'if', 'elif', 'while', 'until', 'then', 'do', 'else',
                   'done', 'fi', 'esac', '{', '}', '!', 'time'}
 
@@ -101,15 +109,20 @@ class _ParseState:
 class _Statement:
     """One simple command (or pipeline member) plus its redirections."""
 
-    __slots__ = ('argv', 'op', 'redirs', 'text', 'heredoc', 'heredoc_specs')
+    __slots__ = ('argv', 'op', 'redirs', 'text', 'heredoc', 'heredoc_specs',
+                 'background')
 
-    def __init__(self, argv, op, redirs, text, heredoc=False, heredoc_specs=()):
+    def __init__(self, argv, op, redirs, text, heredoc=False, heredoc_specs=(),
+                 background=False):
         self.argv = argv
         self.op = op
         self.redirs = redirs
         self.text = text
         self.heredoc = heredoc
         self.heredoc_specs = list(heredoc_specs)
+        # Round 7 Q1: the statement before a `&` is sent to the background and
+        # can outlive the session, so the read lane refuses it.
+        self.background = background
 
 
 # ── Tokenising ──────────────────────────────────────────────────────────────
@@ -254,6 +267,27 @@ def _normalise(tokens):
         else:
             out.append(token)
     return out
+
+
+def _mark_compound(atoms, state):
+    """SC10: flag loops, conditionals, functions, brace groups and subshells."""
+    previous = ''
+    for atom in atoms:
+        if isinstance(atom, tuple):
+            word = atom[1]
+            if word in _COMPOUND_KEYWORDS and (
+                    previous in _COMPOUND_STARTS
+                    or previous in _COMPOUND_KEYWORDS):
+                state.flag('compound')
+            elif word in ('{', '}'):
+                state.flag('compound')
+            previous = word
+        else:
+            # A bare `(`/`)` is a subshell (or a case/function group, which is
+            # already flagged); `$(`/`<(` were folded into word atoms above.
+            if atom in ('(', ')'):
+                state.flag('compound')
+            previous = atom
 
 
 def _atomise(tokens):
@@ -665,7 +699,8 @@ def _statements(atoms, state, heredoc_specs=()):
             if argv or redirs:
                 stmts.append(_Statement(list(argv), op, list(redirs),
                                         ' '.join(parts), stmt_heredoc,
-                                        list(stmt_specs)))
+                                        list(stmt_specs),
+                                        background=(atom == '&')))
                 argv, redirs, parts = [], [], []
                 stmt_heredoc = False
                 stmt_specs = []
@@ -953,10 +988,16 @@ def _unwrap(argv, state):
     args = argv[1:]
 
     if verb == 'sudo':
+        # Round 7 Q3: only the bare form is the `sudo` context. Any option
+        # (login shell, shell, chroot, -u, -E, ...) or assignment gets a
+        # distinguishable label so the read lane refuses the form; every
+        # command already runs as root, so bare sudo adds nothing.
+        optioned = bool(args) and (args[0].startswith('-')
+                                   or bool(_ASSIGN_RE.match(args[0])))
         rest = _strip_flags(args, _VALUE_FLAGS_SUDO)
         if not rest:
             return None
-        return rest, 'sudo', ''
+        return rest, 'sudo(options)' if optioned else 'sudo', ''
 
     if verb == 'timeout':
         i = 0
@@ -1105,6 +1146,18 @@ def _redirect_suffix(st):
         if redir_op in _WRITE_REDIRS:
             out.append(f' {redir_op} {shlex.quote(target)}')
     return ''.join(out)
+
+
+def _input_redirects(st):
+    """Redirections that feed the command: `<`, `<<`, `<<<`, `<&`.
+
+    SC3: F1 drops these from the step text, so `cat /var/log/x < /etc/shadow`
+    would otherwise look like a plain read. They are recorded per step and
+    flagged on the command.
+    """
+    return [{'op': redir_op, 'target': shlex.quote(target)}
+            for redir_op, target, _fd in st.redirs
+            if redir_op not in _WRITE_REDIRS]
 
 
 def _write_targets(st):
@@ -1340,7 +1393,9 @@ def _parse_text(text, ctx, depth, state, first_op=''):
         state.complete = False
         return [_step(text.strip(), first_op, UNKNOWN, 'unterminated quote', ctx, state)]
 
-    atoms = _extract_functions(_atomise(tokens), state, depth)
+    atoms = _atomise(tokens)
+    _mark_compound(atoms, state)
+    atoms = _extract_functions(atoms, state, depth)
     stmts = _statements(atoms, state, heredoc_specs)
     steps = []
     first = True
@@ -1450,6 +1505,12 @@ def _parse_statement(st, ctx, depth, state):
     argv = list(st.argv)
     ctx = list(ctx)
     heredoc_specs = list(st.heredoc_specs)
+
+    if _input_redirects(st):
+        # SC3 (F4): an input redirection, here-string or heredoc feeds the
+        # command from something the step text does not show. The read lane
+        # must refuse it, so the command is flagged and the step records it.
+        state.flag('input-redirect')
 
     if not argv:
         # A bare redirection (`> /tmp/x`) truncates the target.
@@ -1567,6 +1628,11 @@ def _parse_statement(st, ctx, depth, state):
             # The statement is only `$( … )`: whatever it prints is executed.
             steps.append(_step(st.text, st.op, UNKNOWN,
                                'command is built by a substitution', ctx, state))
+        elif _ASSIGN_RE.match(clean_argv[0]):
+            # Round 7 SC9: a bare assignment (`FOO=1` on its own) changes what
+            # later words expand to and otherwise produces no step at all.
+            steps.append(_step(st.text, st.op, UNKNOWN,
+                               'bare variable assignment', ctx, state))
         return steps
 
     verb, allowed = cmd_rules.resolve_verb(assignments[0])
@@ -1626,7 +1692,13 @@ def _parse_statement(st, ctx, depth, state):
     if kind == READ and get_cmd_risk(text):
         kind, why = UNKNOWN, 'flagged by the risk rules'
 
-    return [_step(text, st.op, kind, why, ctx, state)] + sub_steps
+    input_redirects = _input_redirects(st)
+    extra = {}
+    if input_redirects:
+        extra['input_redirects'] = input_redirects
+    if st.background:
+        extra['background'] = True
+    return [_step(text, st.op, kind, why, ctx, state, extra or None)] + sub_steps
 
 
 # ── Result ──────────────────────────────────────────────────────────────────

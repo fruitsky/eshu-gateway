@@ -20,7 +20,7 @@ from database import (
     init_db, create_request, update_request_status, 
     update_ticket_consumed_by_ip, update_request_status_if_pending, get_all_requests, get_request_row, get_pending_request_by_cmd,
     get_request_status, get_request_command, count_denied, get_ticket_by_request_id, delete_old_requests,
-    get_session_requests, get_request_target_ip,
+    get_session_requests, get_request_target_ip, mark_requests_excluded,
     register_gateway, get_gateways, get_gateway, update_gateway_last_seen,
     update_gateway_policy_version, update_gateway_policy_sync,
     update_gateway_last_updated, update_gateway_windows_count, update_gateway_heartbeat, deregister_gateway,
@@ -52,6 +52,8 @@ from database import (
     get_gateway_mode, set_gateway_mode, get_dev_gateways,
     get_gateway_zero_trust, set_gateway_zero_trust,
     get_gateway_capture_output, set_gateway_capture_output,
+    get_gateway_read_lane, read_lane_on_enabled, read_lane_ready,
+    set_gateway_read_lane,
     set_override, clear_override, get_override_active,
     create_approved_window, get_approved_windows, get_active_approved_windows,
     delete_approved_window, toggle_approved_window,
@@ -85,7 +87,10 @@ from db.web_fetch import (
     delete_web_fetch_policy, get_web_fetch_policies, get_web_fetch_policy,
     get_web_fetch_stats, set_web_fetch_policy,
 )
-from db.sessions import get_session, get_session_coverage, get_session_meta_map
+from db.sessions import (
+    get_session, get_session_coverage, get_session_meta_map,
+    get_session_summary,
+)
 from db.session_plans import (
     PlanError, approve_plan, claim_plan_item, create_plan, deny_plan,
     end_plan, get_active_plan, get_plan, list_plans,
@@ -101,7 +106,8 @@ from schemas import (
     PolicyPayload, NotePayload, SSHKeysPayload, HeartbeatPayload,
     UninstallProgressPayload, FeatureFlagTogglePayload, GatewayModePayload,
     ApprovedWindowPayload, WindowUpdatePayload, WindowRequestPayload,
-    NotifyConfigPayload,
+    NotifyConfigPayload, ExcludeRequestsPayload, InventorySettingsPayload,
+    ConclusionReviewPayload, ConclusionEditPayload, RunbookPromotePayload,
 )
 
 from core.session import (
@@ -122,6 +128,10 @@ from core.cmd_codec import decode_preview, detect_encoded_exec, scan_decoded
 from core.policy_eval import evaluate_policy_verdict
 from core.cmd_risk import get_cmd_risk, get_dry_run_suggestion
 from core.cmd_parse import breakdown as cmd_breakdown
+from core.approval_buckets import (
+    BUCKETS, BUCKET_KEYS, OVERRIDE_BUCKETS, bucket_for, empty_buckets,
+)
+from core.read_lane import eligible as read_lane_eligible
 from core.request_context import build_context
 from core.cmd_profiles import get_anomaly, refresh_profiles, _profiles_loop
 from core.gateway_watch import (
@@ -362,6 +372,10 @@ def on_startup():
     # F18: fingerprints for the request context (seen before / like this).
     from core.request_fingerprints import start_backfill_thread as start_fp_backfill
     start_fp_backfill()
+    # F14: refresh the read-only inventory in the background. The loop sleeps
+    # one interval first, so a boot never fires source calls while starting.
+    from core.inventory import start_inventory_loop
+    start_inventory_loop()
     # Start background gap scanner (learning suggestions)
     from core.learning import refresh_gaps, _gaps_loop
     refresh_gaps()
@@ -793,6 +807,40 @@ def receive_request(payload: GatewayPayload, request: Request):
                     "scope": "session",
                     "message": "Auto-approved via Session Override"}
 
+    # F4: read-only lane. Opt-in per gateway (off by default), shadow first:
+    # in shadow the request stays pending but is tagged, in on it auto-approves.
+    # It sits after F3 plans and the session override, before the host override.
+    read_lane_reason = ''
+    if not frozen and not get_gateway_zero_trust(target_ip):
+        lane_mode = get_gateway_read_lane(target_ip)
+        if lane_mode == 'on' and not read_lane_on_enabled():
+            # Round 5: the hard lock also covers a stored `on`. If the meta
+            # key is removed (or never set by hand), an `on` row degrades to
+            # shadow instead of auto-running with no human in the loop.
+            lane_mode = 'shadow'
+        if lane_mode != 'off':
+            _pol = get_policies()
+            _verdict = evaluate_policy_verdict(
+                cmd, _pol.get('exact_whitelist', ''),
+                _pol.get('regex_whitelist', ''), _pol.get('regex_blacklist', ''))
+            _ok, _why = read_lane_eligible(
+                cmd_breakdown(cmd), _verdict, cmd, lane_mode, frozen,
+                get_gateway_zero_trust(target_ip))
+            if _ok and lane_mode == 'on':
+                req_id = create_request(target_ip, cmd, status="approved",
+                                        reason="read-lane", session_id=sid,
+                                        execution_id=eid,
+                                        inner_target=_inner_target_for(cmd))
+                update_gateway_last_seen(target_ip)
+                record_audit_event(
+                    'jit_read_lane_approved', target_ip,
+                    details=f'Read-only lane auto-approved JIT #{req_id}: {cmd[:80]}')
+                return {"status": "ok", "id": f"{req_id:06d}", "request_id": req_id,
+                        "read_lane": "on",
+                        "message": "Auto-approved: read-only command"}
+            if _ok:
+                read_lane_reason = 'read-lane-shadow'
+
     # Check host override mode — auto-approve if active
     conn = get_db()
     cursor = conn.cursor()
@@ -809,11 +857,16 @@ def receive_request(payload: GatewayPayload, request: Request):
         return {"status": "ok", "id": f"{req_id:06d}", "request_id": req_id, "override": True,
                 "scope": "host", "message": "Auto-approved via Override Mode"}
 
-    req_id = create_request(target_ip, cmd, status="pending", session_id=sid, execution_id=eid,
+    req_id = create_request(target_ip, cmd, status="pending", session_id=sid,
+                            execution_id=eid, reason=read_lane_reason,
                             inner_target=_inner_target_for(cmd))
     update_gateway_last_seen(target_ip)
     send_notify('jit', 'JIT Approval Required', f'`{cmd[:80]}` on {target_ip}')
     record_audit_event('jit_created', target_ip, details=f'JIT #{req_id}: {cmd[:80]}')
+    if read_lane_reason:
+        record_audit_event(
+            'jit_read_lane_shadow', target_ip,
+            details=f'JIT #{req_id} would auto-run (read-only lane, shadow): {cmd[:80]}')
     return {"status": "ok", "id": f"{req_id:06d}", "request_id": req_id}
 
 # /api/log only records the outcomes a gateway actually emits. Anything else
@@ -1126,6 +1179,27 @@ def list_requests(request: Request, search: str = None, session: str = None,
     return reqs
 
 
+@app.post("/api/requests/exclude")
+def exclude_requests(payload: ExcludeRequestsPayload, request: Request):
+    """F8: mark test traffic as excluded from statistics and learning.
+
+    Rows stay in History and in the audit trail; the aggregate views stop
+    counting them. Session auth, audited, and idempotent — a second call
+    reports 0 newly excluded. This is the only way rows become excluded: no
+    migration or rule flags live data on its own.
+    """
+    _check_session(request)
+    ids = [int(i) for i in (payload.ids or [])][:1000]
+    sid = (payload.session_id or '').strip()[:64]
+    if not ids and not sid:
+        raise HTTPException(status_code=400, detail="ids or session_id required")
+    count = mark_requests_excluded(ids=ids, session_id=sid)
+    scope = ('session %s' % sid) if sid else '%d id(s)' % len(ids)
+    record_audit_event('requests_excluded',
+                       details=f'Excluded {count} request(s) from statistics ({scope})')
+    return {'status': 'ok', 'excluded': count, 'session_id': sid}
+
+
 @app.get("/api/requests/{req_id}/breakdown")
 def request_breakdown(req_id: int, request: Request):
     """On-demand step breakdown for one request (history rows, F1)."""
@@ -1281,6 +1355,7 @@ def list_gateways(request: Request):
             return int(v)
         except (TypeError, ValueError):
             return 0
+    read_lane_unlocked = read_lane_on_enabled()
     update_ts = max(_as_int(get_trigger_update_version()), _as_int(get_trigger_dev_update()))
     update_recent = update_ts > 0 and (now - update_ts) <= UPDATE_ACTIVE_WINDOW
     for g in gateways:
@@ -1294,6 +1369,9 @@ def list_gateways(request: Request):
         g['updating'] = (not g['online']) and update_recent
         override_until = g.get('override_until', 0) or 0
         g['override_remaining'] = max(0, override_until - now)
+        g['read_lane'] = g.get('read_lane') or 'off'
+        g['read_lane_ready'] = read_lane_ready(g['ip'], now)
+        g['read_lane_on_enabled'] = read_lane_unlocked
     return gateways
 
 @app.get("/api/gateways/{ip}/inner-targets")
@@ -2246,6 +2324,7 @@ def get_statistics(request: Request, days: int = 14, gateway_ip: str = None, gat
         FROM requests r
         LEFT JOIN gateways g ON r.target_ip = g.ip
         WHERE r.created_at >= ?{ip_filter} AND r.status != 'window-rejected'
+          AND COALESCE(r.excluded, 0) = 0
         GROUP BY r.target_ip
         ORDER BY total DESC
     ''', (cutoff,) + ip_params)
@@ -2261,6 +2340,7 @@ def get_statistics(request: Request, days: int = 14, gateway_ip: str = None, gat
                SUM(CASE WHEN r.status = 'denied' THEN 1 ELSE 0 END) AS denied
         FROM requests r
         WHERE r.created_at >= ?{ip_filter} AND r.status != 'window-rejected'
+          AND COALESCE(r.excluded, 0) = 0
         GROUP BY date
         ORDER BY date ASC
     ''', (cutoff,) + ip_params)
@@ -2281,7 +2361,9 @@ def get_statistics(request: Request, days: int = 14, gateway_ip: str = None, gat
     # Top commands — split on shell chaining operators.
     # Also count how many distinct gateways ran each one: a command spreading
     # across hosts is a different signal from one host hammering it.
-    cursor.execute(f'SELECT r.command, r.target_ip FROM requests r WHERE r.created_at >= ?{ip_filter}', (cutoff,) + ip_params)
+    cursor.execute(f'''SELECT r.command, r.target_ip FROM requests r
+        WHERE r.created_at >= ?{ip_filter} AND COALESCE(r.excluded, 0) = 0''',
+        (cutoff,) + ip_params)
     rows = [(r[0], r[1]) for r in cursor.fetchall() if r[0]]
     import re as _re
     cmd_counts = {}
@@ -2312,6 +2394,7 @@ def get_statistics(request: Request, days: int = 14, gateway_ip: str = None, gat
         SELECT r.inner_target AS target, COUNT(*) AS count
         FROM requests r
         WHERE r.created_at >= ?{ip_filter}
+          AND COALESCE(r.excluded, 0) = 0
           AND r.inner_target IS NOT NULL AND r.inner_target != ''
           AND r.inner_target != 'multi'
         GROUP BY r.inner_target
@@ -2320,8 +2403,48 @@ def get_statistics(request: Request, days: int = 14, gateway_ip: str = None, gat
     ''', (cutoff,) + ip_params)
     inner_targets = [dict(row) for row in cursor.fetchall()]
 
+    # F6: "how approved" — the stacked series and the override share that
+    # F3/F4 aim to lower. Bucketed in Python (one mapping); grouped in SQL so
+    # the row count stays small.
+    cursor.execute(f'''
+        SELECT DATE(r.created_at, 'unixepoch') AS date,
+               r.status AS status, COALESCE(r.reason, '') AS reason,
+               COUNT(*) AS n
+        FROM requests r
+        WHERE r.created_at >= ?{ip_filter}
+          AND COALESCE(r.excluded, 0) = 0
+        GROUP BY date, r.status, r.reason
+    ''', (cutoff,) + ip_params)
+    approval_totals = empty_buckets()
+    approval_by_day = {}
+    for row in cursor.fetchall():
+        bucket = bucket_for(row['status'], row['reason'])
+        if not bucket:
+            continue
+        count = int(row['n'] or 0)
+        day = approval_by_day.setdefault(row['date'], {})
+        day[bucket] = day.get(bucket, 0) + count
+        approval_totals[bucket] += count
+    approved_total = sum(approval_totals.values())
+    override_total = sum(approval_totals[key] for key in OVERRIDE_BUCKETS)
+    approval_breakdown = {
+        'days': days,
+        'buckets': [{'key': key, 'label': label} for key, label in BUCKETS],
+        'series': [
+            dict({'date': day['date']},
+                 **{key: approval_by_day.get(day['date'], {}).get(key, 0)
+                    for key in BUCKET_KEYS})
+            for day in filled
+        ],
+        'totals': approval_totals,
+        'approved': approved_total,
+        'override_share': round(override_total / approved_total * 100, 1)
+                          if approved_total else 0,
+    }
+
     result = {"daily": filled, "per_gateway": per_gateway,
-              "top_commands": top_commands, "inner_targets": inner_targets}
+              "top_commands": top_commands, "inner_targets": inner_targets,
+              "approval_breakdown": approval_breakdown}
 
     if extended:
         # Hourly heatmap — 24-element array
@@ -2330,6 +2453,7 @@ def get_statistics(request: Request, days: int = 14, gateway_ip: str = None, gat
                    COUNT(*) AS count
             FROM requests r
             WHERE r.created_at >= ?{ip_filter} AND r.status != 'window-rejected'
+              AND COALESCE(r.excluded, 0) = 0
             GROUP BY hour
             ORDER BY hour
         ''', (cutoff,) + ip_params)
@@ -2344,6 +2468,7 @@ def get_statistics(request: Request, days: int = 14, gateway_ip: str = None, gat
                    COUNT(*) AS count
             FROM requests r
             WHERE r.created_at >= ?{ip_filter} AND r.status != 'window-rejected'
+              AND COALESCE(r.excluded, 0) = 0
             GROUP BY dow, hour
         ''', (cutoff,) + ip_params)
         grid = [[0] * 24 for _ in range(7)]
@@ -2360,6 +2485,7 @@ def get_statistics(request: Request, days: int = 14, gateway_ip: str = None, gat
                    COUNT(*) AS count
             FROM requests r
             WHERE r.created_at >= ? AND r.status != 'window-rejected'{ip_filter}
+              AND COALESCE(r.excluded, 0) = 0
             GROUP BY ip, hour
         ''', (day_cutoff,) + ip_params)
         now_hour = int(time.strftime('%H', time.localtime()))
@@ -2384,6 +2510,7 @@ def get_statistics(request: Request, days: int = 14, gateway_ip: str = None, gat
                    SUM(CASE WHEN r.status IN ('approved','consumed') THEN 1 ELSE 0 END) AS jit_approved
             FROM requests r
             WHERE r.created_at >= ?{ip_filter} AND r.status NOT IN ('window-rejected','denied','blocked')
+              AND COALESCE(r.excluded, 0) = 0
             GROUP BY date
             ORDER BY date ASC
         ''', (cutoff,) + ip_params)
@@ -2444,6 +2571,7 @@ def get_statistics(request: Request, days: int = 14, gateway_ip: str = None, gat
             SELECT r.command, COUNT(*) AS count
             FROM requests r
             WHERE r.status = 'denied' AND r.created_at >= ?{ip_filter}
+              AND COALESCE(r.excluded, 0) = 0
             GROUP BY r.command
             ORDER BY count DESC
             LIMIT 10
@@ -2463,9 +2591,74 @@ def get_statistics(request: Request, days: int = 14, gateway_ip: str = None, gat
             key=lambda x: x['count'], reverse=True
         )
 
+    # F4: the read-lane report — the shadow evidence for switching to `on`,
+    # plus how many commands actually auto-ran once it was on.
+    cursor.execute(f'''
+        SELECT COUNT(*) AS n,
+               SUM(r.status IN ('approved','consumed','auto-approved')) AS approved,
+               SUM(r.status = 'denied') AS denied
+        FROM requests r
+        WHERE r.reason = 'read-lane-shadow' AND r.created_at >= ?{ip_filter}
+          AND COALESCE(r.excluded, 0) = 0
+    ''', (cutoff,) + ip_params)
+    shadow = cursor.fetchone()
+    cursor.execute(f'''
+        SELECT r.command FROM requests r
+        WHERE r.reason = 'read-lane-shadow' AND r.created_at >= ?{ip_filter}
+          AND COALESCE(r.excluded, 0) = 0
+    ''', (cutoff,) + ip_params)
+    lengths = sorted(len(r['command'] or '') for r in cursor.fetchall())
+    median_len = lengths[len(lengths) // 2] if lengths else 0
+    cursor.execute(f'''
+        SELECT COUNT(*) AS n FROM requests r
+        WHERE r.reason = 'read-lane' AND r.created_at >= ?{ip_filter}
+          AND COALESCE(r.excluded, 0) = 0
+    ''', (cutoff,) + ip_params)
+    result['read_lane'] = {
+        'shadow_eligible': int(shadow['n'] or 0),
+        'shadow_approved': int(shadow['approved'] or 0),
+        'shadow_denied': int(shadow['denied'] or 0),
+        'shadow_median_len': median_len,
+        'auto_approved': int(cursor.fetchone()['n'] or 0),
+    }
+
     conn.close()
 
     return result
+
+
+# ── Inventory (F14) ────────────────────────────────────────────────────
+
+@app.get("/api/inventory")
+def view_inventory(request: Request, q: str = None):
+    """The inventory snapshot for the UI (and a quick search)."""
+    _check_session(request)
+    from core.inventory import inventory_snapshot
+    return inventory_snapshot(q or '', limit=25)
+
+
+@app.post("/api/inventory/refresh")
+def refresh_inventory_now(request: Request):
+    """Refresh every configured source now. Read-only source calls only."""
+    _check_session(request)
+    from core.inventory import refresh_inventory
+    result = refresh_inventory()
+    record_audit_event(
+        'inventory_refreshed',
+        details=f"Inventory refreshed from {result['sources']} source(s) "
+                f"in {result['duration_ms']} ms")
+    return {"status": "ok", **result}
+
+
+@app.post("/api/inventory/settings")
+def update_inventory_settings(payload: InventorySettingsPayload,
+                              request: Request):
+    _check_session(request)
+    from core.inventory import set_interval_minutes
+    minutes = set_interval_minutes(payload.interval_minutes)
+    record_audit_event('inventory_interval_changed',
+                       details=f"Inventory refresh every {minutes} minutes")
+    return {"status": "ok", "interval_minutes": minutes}
 
 
 @app.get("/api/statistics/export")
@@ -2486,6 +2679,7 @@ def export_statistics(request: Request, days: int = 14, format: str = "csv"):
                SUM(CASE WHEN status = 'denied' THEN 1 ELSE 0 END) AS denied
         FROM requests
         WHERE created_at >= ? AND status != 'window-rejected'
+          AND COALESCE(excluded, 0) = 0
         GROUP BY date ORDER BY date ASC
     ''', (cutoff,))
     rows = [dict(r) for r in cursor.fetchall()]
@@ -2571,6 +2765,33 @@ class ZeroTrustPayload(BaseModel):
 
 class CapturePayload(BaseModel):
     mode: str = 'exit-only'
+
+
+class ReadLanePayload(BaseModel):
+    mode: str = 'off'
+
+
+@app.put("/api/gateways/{ip}/read-lane")
+def set_gw_read_lane(ip: str, payload: ReadLanePayload, request: Request):
+    """F4: off | shadow | on. `on` needs the rollout window (7 days in shadow)."""
+    _check_session(request)
+    if payload.mode not in ('off', 'shadow', 'on'):
+        raise HTTPException(status_code=400,
+                            detail="mode must be 'off', 'shadow' or 'on'")
+    if payload.mode == 'on':
+        # Hard lock: `on` stays unreachable until the operator sets the meta
+        # key by hand after the security sign-off. No API or UI writes it.
+        if not read_lane_on_enabled():
+            raise HTTPException(status_code=409, detail="read_lane_on_locked")
+        if not read_lane_ready(ip):
+            raise HTTPException(
+                status_code=400,
+                detail="The read-only lane needs at least 7 days in shadow on "
+                       "this gateway before 'on' is offered.")
+    mode = set_gateway_read_lane(ip, payload.mode)
+    record_audit_event('read_lane_' + mode, ip,
+                       details=f"Read-only lane set to '{mode}'")
+    return {"status": "ok", "ip": ip, "read_lane": mode}
 
 
 @app.post("/api/gateways/{ip}/capture")
@@ -3654,7 +3875,155 @@ def session_detail_endpoint(sid: str, request: Request):
     for row in ssh:
         row.update(_encoded_fields(row.get('command', '')))
     mcp = get_integration_calls(session=sid, limit=500)['rows']
-    return {'session_id': sid, 'ssh': ssh, 'mcp': mcp}
+    # F6: the wrap-up card's numbers. `by_approval` and the wait come from
+    # get_session_summary (one mapping for every surface); the writes are
+    # counted from F1's breakdown, per host, because a session can span hosts.
+    summary = get_session_summary(sid)
+    session_row = get_session(sid) or {}
+    summary['goal'] = session_row.get('goal') or ''
+    started = int(session_row.get('started_at') or summary.get('first_seen') or 0)
+    last = int(summary.get('last_seen') or session_row.get('last_seen') or 0)
+    summary['started_at'] = started
+    summary['duration_seconds'] = max(0, last - started) if started else 0
+    writes_by_host = {}
+    for row in ssh:
+        # F6 R2: "writes" means what changed (or was cleared to change), so a
+        # denied, blocked or expired command is not a write. Use the same
+        # bucket mapping as the approval chips: None is not an approval.
+        if bucket_for(row.get('status'), row.get('reason')) is None:
+            continue
+        broken = cmd_breakdown(row.get('command') or '')
+        writes = sum(1 for step in (broken.get('steps') or [])
+                     if step.get('kind') == 'write')
+        if writes:
+            host = row.get('hostname') or row.get('target_ip') or ''
+            writes_by_host[host] = writes_by_host.get(host, 0) + writes
+    summary['writes_by_host'] = writes_by_host
+    summary['writes'] = sum(writes_by_host.values())
+    # F8 S3 (merged): whether the whole session is already excluded, so the
+    # modal shows the done state instead of offering the button again.
+    excluded = sum(1 for row in ssh if row.get('excluded'))
+    summary['excluded'] = excluded
+    summary['all_excluded'] = bool(ssh) and excluded == len(ssh)
+    # F13: the session's conclusions (draft/confirmed/rejected) for the modal's
+    # review block, and any runbook promoted from one of them.
+    from core.conclusions import scrub_read
+    from db.conclusions import list_for_session, list_runbooks_for_session
+    conclusions = scrub_read(list_for_session(sid))
+    runbooks = [{'id': rb['id'], 'title': rb['title'],
+                 'conclusion_id': rb['conclusion_id']}
+                for rb in list_runbooks_for_session(sid)]
+    return {'session_id': sid, 'ssh': ssh, 'mcp': mcp, 'summary': summary,
+            'conclusions': conclusions, 'runbooks': runbooks}
+
+
+@app.post("/api/conclusions/{conclusion_id}/confirm")
+def confirm_conclusion_endpoint(conclusion_id: int,
+                                payload: ConclusionReviewPayload,
+                                request: Request):
+    """F13: the operator confirms a draft; only confirmed text reaches agents."""
+    _check_session(request)
+    from core.secret_scrub import scrub_string
+    from db.conclusions import ConclusionError, confirm_conclusion
+    try:
+        row = confirm_conclusion(conclusion_id,
+                                 note=scrub_string(payload.note or '')[:2000],
+                                 by='operator')
+    except ConclusionError as exc:
+        raise HTTPException(status_code=409 if exc.code == 'bad_state' else 404,
+                            detail=exc.code)
+    record_audit_event(
+        'conclusion_confirmed',
+        details=f'Conclusion #{conclusion_id} (session {row["session_id"]}) '
+                f'confirmed by the operator')
+    return {'status': 'ok', 'conclusion': row}
+
+
+@app.post("/api/conclusions/{conclusion_id}/reject")
+def reject_conclusion_endpoint(conclusion_id: int,
+                               payload: ConclusionReviewPayload,
+                               request: Request):
+    _check_session(request)
+    from core.secret_scrub import scrub_string
+    from db.conclusions import ConclusionError, reject_conclusion
+    try:
+        row = reject_conclusion(conclusion_id,
+                                note=scrub_string(payload.note or '')[:2000],
+                                by='operator')
+    except ConclusionError as exc:
+        raise HTTPException(status_code=409 if exc.code == 'bad_state' else 404,
+                            detail=exc.code)
+    record_audit_event(
+        'conclusion_rejected',
+        details=f'Conclusion #{conclusion_id} (session {row["session_id"]}) '
+                f'rejected by the operator')
+    return {'status': 'ok', 'conclusion': row}
+
+
+@app.patch("/api/conclusions/{conclusion_id}")
+def edit_conclusion_endpoint(conclusion_id: int, payload: ConclusionEditPayload,
+                             request: Request):
+    """Operator edit of an agent draft (the agent's text is untrusted)."""
+    _check_session(request)
+    from core.secret_scrub import scrub_string
+    from db.conclusions import ConclusionError, edit_conclusion
+    try:
+        row = edit_conclusion(
+            conclusion_id,
+            summary=None if payload.summary is None else scrub_string(payload.summary),
+            root_cause=None if payload.root_cause is None else scrub_string(payload.root_cause),
+            fix=None if payload.fix is None else scrub_string(payload.fix),
+            note=scrub_string(payload.note or ''))
+    except ConclusionError as exc:
+        status = {'not_found': 404, 'bad_state': 409}.get(exc.code, 409)
+        raise HTTPException(status_code=status, detail=exc.code)
+    record_audit_event(
+        'conclusion_edited',
+        details=f'Conclusion #{conclusion_id} (session {row["session_id"]}) '
+                f'edited by the operator')
+    return {'status': 'ok', 'conclusion': row}
+
+
+@app.post("/api/conclusions/{conclusion_id}/runbook")
+def promote_conclusion_endpoint(conclusion_id: int,
+                                payload: RunbookPromotePayload,
+                                request: Request):
+    """F13: promote a confirmed, runbook-candidate conclusion to a runbook.
+
+    Steps are built server-side from the conclusion's cited evidence: commands
+    are copied verbatim from the request row (with F1's breakdown), tool calls
+    keep their integration/tool/method/path, and un-cited items become
+    instructions. Nothing is executed.
+    """
+    _check_session(request)
+    from core.conclusions import promote_conclusion
+    from core.secret_scrub import scrub_string
+    from db.conclusions import ConclusionError
+    try:
+        runbook = promote_conclusion(
+            conclusion_id,
+            title=scrub_string(payload.title or ''),
+            when_to_use=scrub_string(payload.when_to_use or ''),
+            by='operator')
+    except ConclusionError as exc:
+        status = {'not_found': 404, 'not_confirmed': 409,
+                  'not_a_candidate': 409}.get(exc.code, 409)
+        raise HTTPException(status_code=status, detail=exc.code)
+    record_audit_event(
+        'runbook_created',
+        details=f'Runbook #{runbook["id"]} from conclusion #{conclusion_id} '
+                f'(session {runbook["session_id"]}, {len(runbook["steps"])} steps)')
+    return {'status': 'ok', 'runbook': runbook}
+
+
+@app.get("/api/runbooks/{runbook_id}")
+def get_runbook_endpoint(runbook_id: int, request: Request):
+    _check_session(request)
+    from core.conclusions import get_runbook_payload
+    payload = get_runbook_payload(runbook_id)
+    if not payload:
+        raise HTTPException(status_code=404, detail="not_found")
+    return payload
 
 
 @app.get("/api/sessions/recent")
@@ -3781,6 +4150,20 @@ def approve_integration_call(call_id: int, request: Request):
                         f"denied by policy: {reason}",
                 actor='operator')
             return {"status": "denied", "id": call_id, "reason": reason}
+
+    # F9: Emergency Freeze refuses the approval itself. The call stays pending
+    # so the operator can approve it after unfreezing — a freeze pauses work,
+    # it does not destroy the queue.
+    if get_trigger_freeze():
+        record_audit_event(
+            'integration_call_refused_frozen',
+            details=f"Integration call #{call_id} ({call['integration']}.{call['tool']}) "
+                    f"not approved: Emergency Freeze is on",
+            actor='operator')
+        raise HTTPException(
+            status_code=409,
+            detail="Emergency Freeze is on: integration writes are paused. "
+                   "Unfreeze the fleet to approve this call.")
 
     # Keep the provenance of the id on the executor's audit row: an approved
     # inherited call must not start counting as caller-tagged coverage.

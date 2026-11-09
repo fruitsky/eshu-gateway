@@ -58,6 +58,8 @@ def init_db():
     from db.exec_results import init_exec_results_tables
     from db.commute import init_commute_tables
     from db.overrides import init_session_overrides_tables
+    from db.inventory import init_inventory_tables
+    from db.conclusions import init_conclusions_tables
 
     init_requests_tables(cursor)
     init_gateways_tables(cursor)
@@ -77,6 +79,8 @@ def init_db():
     init_exec_results_tables(cursor)
     init_commute_tables(cursor)
     init_session_overrides_tables(cursor)
+    init_inventory_tables(cursor)
+    init_conclusions_tables(cursor)
 
     conn.commit()
     conn.close()

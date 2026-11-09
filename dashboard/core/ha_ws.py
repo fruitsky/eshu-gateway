@@ -23,6 +23,18 @@ from core.secret_scrub import scrub_body, scrub_string
 
 READ_TIMEOUT = 30
 
+# F9 R2: HA's Supervisor has no endpoint allowlist of its own, so the curated
+# table in `core/ha_supervisor.py` is the only way in. The generic WS tools
+# must never send these prefixes — not at call time and not from an approved
+# pending call. `ha_ws_request` stays available to the curated handlers, whose
+# commands are constants.
+SUPERVISOR_COMMAND_PREFIXES = ('supervisor/', 'hassio/')
+
+
+def is_supervisor_command(command) -> bool:
+    return str(command or '').strip().lower().startswith(
+        SUPERVISOR_COMMAND_PREFIXES)
+
 
 def _ws_url(integration: dict) -> str:
     base = (integration.get('base_url') or '').rstrip('/')
@@ -87,10 +99,34 @@ def execute_ws_call(integration: dict, command: str, payload=None,
     """Run one HA WS command with audit logging. Returns a result dict shaped
     like the HTTP executors ({status_code, body, truncated, latency_ms, error}),
     so callers (MCP tool runner / approval executor) handle it uniformly."""
+    from db.audit import record_audit_event
     from db.integrations import record_integration_call
     start = time.time()
     outcome = 'ok'
     error = None
+    command = str(command or '')
+    if is_supervisor_command(command):
+        # F9 R2: the Supervisor is reachable only through the fixed table in
+        # core/ha_supervisor.py. Refuse before any socket opens, and record it.
+        message = ("Supervisor commands are not available through the generic WS "
+                   "tool. Use the curated ha_supervisor_* tools; their endpoints "
+                   "are fixed and reviewed.")
+        record_integration_call(
+            integration=integration.get('name', ''), tool=tool_name,
+            agent=agent, method='WS', path=command, status_code=403,
+            latency_ms=0, response_summary=message, response_bytes=0,
+            truncated=0, outcome='refused', session_id=session_id,
+            execution_id=execution_id, reason=reason or 'supervisor command refused',
+            request_summary=safe_request_summary({'command': command}),
+            approval=approval, decided_at=decided_at, decided_by=decided_by,
+            reason_code='supervisor_command_refused')
+        record_audit_event(
+            'ws_supervisor_refused',
+            details=f"{integration.get('name')}.{tool_name}: refused '{command}' "
+                    f"(Supervisor is table-only)",
+            actor=agent)
+        return {'status_code': 403, 'body': '', 'truncated': 0,
+                'latency_ms': 0, 'error': message}
     try:
         result = ha_ws_request(integration, command, payload or {})
         body = scrub_body(json.dumps(result))

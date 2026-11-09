@@ -10,7 +10,7 @@ echo $(echo $(rm -rf /tmp/synthetic-dir))
 ### subst-backtick | kinds=read,read | flags=
 echo `hostname`
 
-### assignment-then-echo | kinds=read,read | flags=
+### assignment-then-echo | kinds=read,unknown,read | flags=
 x=$(date); echo $x
 
 ### subst-command | kinds=read,unknown | flags=

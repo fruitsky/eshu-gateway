@@ -687,6 +687,7 @@ async function switchView(target) {
   if (target === 'controls') { fetchFreezeStatus(); fetchGateways(); fetchPolicies(); fetchPolicyChanges(); initWebFetchPolicyPanel(); }
   if (target === 'fleet') { fetchFleetCommands(); }
   if (target === 'integrations') { fetchIntegrations(); }
+  if (target === 'inventory') { fetchInventory(); }
   if (target === 'settings') {
     refreshPasswordUI();
     fetchNotifyConfig();
@@ -2822,6 +2823,356 @@ async function saveSessionNames() {
   } catch(e) {}
 }
 
+/* ── F6: the wrap-up card ────────────────────────────────────────────────
+   The number a session is judged by is not how many commands it ran but who
+   cleared them: the override share is exactly what F3 plans and F4's lane
+   exist to replace. The buckets come from the server's one mapping
+   (`core/approval_buckets.py`) so this card and Statistics agree. */
+var APPROVAL_BUCKETS = [
+  ['allowlist', 'allowlist'], ['human', 'human'], ['plan', 'plan'],
+  ['read-lane', 'read lane'], ['session-override', 'session override'],
+  ['host-override', 'host override'], ['window', 'window'], ['fleet', 'fleet run']
+];
+
+function fmtDuration(seconds) {
+  var s = Math.max(0, Math.round(seconds || 0));
+  if (s < 60) return s + 's';
+  var m = Math.floor(s / 60), h = Math.floor(m / 60);
+  if (h) return h + 'h ' + (m % 60) + 'm';
+  return m + 'm ' + (s % 60) + 's';
+}
+
+function approvalChipHtml(key, label, count) {
+  var n = Math.max(0, parseInt(count, 10) || 0);
+  return '<span class="appr-chip appr-' + key + (n ? '' : ' zero') + '" title="' +
+    escapeHtml(n + ' cleared by ' + label) + '">' + escapeHtml(label) +
+    ' <b>' + n + '</b></span>';
+}
+
+function sessionSummaryHtml(sum) {
+  if (!sum || !sum.commands) return '';
+  var buckets = sum.by_approval || {};
+  var chips = APPROVAL_BUCKETS.map(function (b) {
+    return approvalChipHtml(b[0], b[1], buckets[b[0]]);
+  }).join('');
+  var writes = sum.writes_by_host || {};
+  var writeBits = Object.keys(writes).sort().map(function (h) {
+    return escapeHtml(h) + ' <b>' + (parseInt(writes[h], 10) || 0) + '</b>';
+  }).join(' \u00b7 ');
+  var facts = [];
+  // The modal title shows the session's name when it has one, so the goal
+  // belongs in the card: it is the one line that says what the session was for.
+  if (sum.goal) facts.push('goal &ldquo;' + escapeHtml(sum.goal) + '&rdquo;');
+  if (sum.duration_seconds) facts.push(fmtDuration(sum.duration_seconds) + ' long');
+  facts.push((parseInt(sum.commands, 10) || 0) + ' commands');
+  if (sum.failed) facts.push('<span class="sm-blocked">' + (parseInt(sum.failed, 10) || 0) + ' failed</span>');
+  facts.push(sum.decided ? ('waited ' + fmtDuration(sum.waited_seconds) + ' for a human')
+                         : 'wait not recorded');
+  var html = '<div class="session-summary-facts">' + facts.join(' \u00b7 ') + '</div>' +
+    '<div class="session-summary-row"><span class="session-summary-label">how approved</span>' + chips + '</div>';
+  if (writeBits) {
+    html += '<div class="session-summary-row"><span class="session-summary-label">writes</span>' + writeBits + '</div>';
+  }
+  return html;
+}
+
+function renderSessionSummary(el, sum) {
+  if (!el) return;
+  var html = sessionSummaryHtml(sum);
+  el.innerHTML = html;
+  el.classList.toggle('hidden', !html);
+}
+
+/* ── F8: test-traffic hygiene ────────────────────────────────────────────
+   Excluding a row is a one-way, audited flag: it never deletes anything and
+   only the aggregate views stop counting. No rule excludes anything on its
+   own; the session hint is a suggestion, and the operator presses the button. */
+var TEST_GOAL_RE = /\b(smoke|tests?)\b/i;
+
+function looksLikeTestGoal(goal) {
+  return TEST_GOAL_RE.test(String(goal || ''));
+}
+
+function excludedMarkHtml(req) {
+  if (req && req.excluded) {
+    return '<span class="excluded-chip" title="Excluded from statistics, learning gaps and anomaly profiles">excluded</span>';
+  }
+  return '<button type="button" class="bd-hist-link" ' +
+    'title="Exclude this request from statistics and learning" ' +
+    'onclick="event.stopPropagation();excludeRequest(' + Number(req.id) + ')">exclude</button>';
+}
+
+async function excludeRequests(payload, label) {
+  var ok = await customConfirm(
+    'Exclude ' + label + ' from statistics, learning gaps and anomaly profiles? ' +
+    'The rows stay in History, marked excluded.' +
+    (payload && payload.session_id
+      ? ' Rows the session adds later are not excluded.' : ''),
+    { title: 'Exclude test traffic?', confirmLabel: 'Exclude', danger: false });
+  if (!ok) return false;
+  try {
+    var res = await authFetch('/api/requests/exclude', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload) });
+    var data = await res.json();
+    if (!res.ok) { showToast(data.detail || 'Could not exclude', 'error'); return false; }
+    showToast('Excluded ' + data.excluded + ' request' + (data.excluded === 1 ? '' : 's'), 'success');
+    fetchRequests();
+    var stats = document.getElementById('view-statistics');
+    if (stats && !stats.classList.contains('hidden')) fetchStatistics();
+    return true;
+  } catch (e) {
+    showToast('Could not exclude', 'error');
+    return false;
+  }
+}
+
+function excludeRequest(id) {
+  return excludeRequests({ ids: [Number(id)] }, 'this request');
+}
+
+function excludeActiveSession() {
+  if (!_activeSessionSid) return Promise.resolve(false);
+  var sid = _activeSessionSid;
+  return excludeRequests({ session_id: sid }, 'this session').then(function (ok) {
+    if (!ok) return false;
+    var el = document.getElementById('sm-test-hint');
+    if (el) el.innerHTML = '<span>This session is excluded from statistics and learning.</span>';
+    return true;
+  });
+}
+
+function renderSessionTestHint(goal, sessionSummary) {
+  var el = document.getElementById('sm-test-hint');
+  if (!el) return;
+  if (sessionSummary && sessionSummary.all_excluded) {
+    // S3: already done — do not offer the button again.
+    el.classList.remove('hidden');
+    el.innerHTML = '<span>This session is excluded from statistics and learning.</span>';
+    return;
+  }
+  if (!looksLikeTestGoal(goal)) {
+    el.innerHTML = '';
+    el.classList.add('hidden');
+    return;
+  }
+  el.classList.remove('hidden');
+  el.innerHTML = '<span>This looks like test traffic (goal: &ldquo;' +
+    escapeHtml(goal) + '&rdquo;).</span> ' +
+    '<button class="btn btn-muted btn-xs" onclick="excludeActiveSession()">Exclude from stats</button>';
+}
+
+/* ── F13: the session conclusion ─────────────────────────────────────────
+   The agent's account of what the session meant, sitting under the evidence.
+   It is untrusted text: escaped here, never executed, and only a confirmed
+   conclusion is served to other agents. The operator confirms, edits or
+   rejects it, and may promote a confirmed candidate to a runbook. */
+var _conclusionEditing = {};
+
+function conclusionStatusChip(status) {
+  var label = {'draft': 'draft · awaiting review', 'confirmed': 'confirmed',
+               'rejected': 'rejected'}[status] || status;
+  return '<span class="cc-status cc-' + escapeHtml(status || 'draft') + '">' +
+    escapeHtml(label) + '</span>';
+}
+
+function conclusionRefLabel(ref) {
+  var m = String(ref || '').match(/^(req|call):([0-9]+)$/);
+  if (!m) return '';
+  return m[1] === 'req' ? ('request #' + m[2]) : ('call #' + m[2]);
+}
+
+function conclusionItemsHtml(items, cls) {
+  var rows = (items || []).map(function (item) {
+    var ref = conclusionRefLabel(item.ref);
+    var note = escapeHtml(item.note || '');
+    if (!ref && !note) return '';
+    return '<li>' + (ref ? '<code class="cc-ref">' + escapeHtml(ref) + '</code> ' : '') +
+      note + '</li>';
+  }).filter(Boolean);
+  if (!rows.length) return '';
+  return '<div class="cc-sec"><span class="cc-k">' + escapeHtml(cls) + '</span>' +
+    '<ul class="cc-list">' + rows.join('') + '</ul></div>';
+}
+
+function conclusionHtml(c, runbookId) {
+  var editing = !!_conclusionEditing[c.id];
+  var body = '';
+  if (editing) {
+    body += '<textarea class="cc-edit" id="cc-edit-summary-' + Number(c.id) + '" rows="3" ' +
+      'placeholder="Summary">' + escapeHtml(c.summary || '') + '</textarea>';
+    body += '<textarea class="cc-edit" id="cc-edit-root-' + Number(c.id) + '" rows="2" ' +
+      'placeholder="Root cause">' + escapeHtml(c.root_cause || '') + '</textarea>';
+    body += '<textarea class="cc-edit" id="cc-edit-fix-' + Number(c.id) + '" rows="2" ' +
+      'placeholder="Fix">' + escapeHtml(c.fix || '') + '</textarea>';
+  } else {
+    body += '<div class="cc-summary">' + escapeHtml(c.summary || '') + '</div>';
+    body += conclusionItemsHtml(c.worked, 'worked');
+    body += conclusionItemsHtml(c.did_not_work, 'did not work');
+    if (c.root_cause) {
+      body += '<div class="cc-sec"><span class="cc-k">root cause</span> ' +
+        escapeHtml(c.root_cause) + '</div>';
+    }
+    if (c.fix) {
+      body += '<div class="cc-sec"><span class="cc-k">fix</span> ' +
+        escapeHtml(c.fix) + '</div>';
+    }
+    if ((c.follow_ups || []).length) {
+      body += '<div class="cc-sec"><span class="cc-k">follow-ups</span> ' +
+        c.follow_ups.map(function (v) { return escapeHtml(v); }).join(' · ') + '</div>';
+    }
+    if ((c.operator_note || '').length) {
+      body += '<div class="cc-sec cc-note"><span class="cc-k">operator note</span> ' +
+        escapeHtml(c.operator_note) + '</div>';
+    }
+  }
+  var tags = (c.tags || []).map(function (t) {
+    return '<span class="cc-tag">' + escapeHtml(t) + '</span>';
+  }).join(' ');
+  var actions = '';
+  if (c.status === 'draft' && editing) {
+    actions = '<button class="btn btn-approve btn-xs" onclick="saveConclusionEdit(' +
+      Number(c.id) + ')">Save</button>' +
+      '<button class="btn btn-muted btn-xs" onclick="cancelConclusionEdit(' +
+      Number(c.id) + ')">Cancel</button>';
+  } else if (c.status === 'draft') {
+    actions = '<button class="btn btn-approve btn-xs" onclick="confirmConclusion(' +
+      Number(c.id) + ')">Confirm</button>' +
+      '<button class="btn btn-muted btn-xs" onclick="startConclusionEdit(' +
+      Number(c.id) + ')">Edit</button>' +
+      '<button class="btn btn-deny btn-xs" onclick="rejectConclusion(' +
+      Number(c.id) + ')">Reject</button>';
+  } else if (c.status === 'confirmed') {
+    if (runbookId) {
+      actions = '<span class="cc-runbook">Runbook #' + Number(runbookId) + '</span>';
+    } else if (c.runbook_candidate) {
+      actions = '<button class="btn btn-sm" onclick="promoteConclusion(' +
+        Number(c.id) + ')">Promote to runbook</button>';
+    }
+  }
+  return '<div class="cc-card' + (c.status === 'confirmed' ? ' cc-confirmed' : '') +
+    '" data-od-id="conclusion-card">' +
+    '<div class="cc-head"><span class="cc-title">Conclusion</span>' +
+    conclusionStatusChip(c.status) +
+    '<span class="cc-outcome">' + escapeHtml(c.outcome || '') + '</span>' +
+    (c.runbook_candidate && c.status === 'confirmed'
+      ? '<span class="cc-candidate">runbook candidate</span>' : '') +
+    '</div>' +
+    (tags ? '<div class="cc-tags">' + tags + '</div>' : '') +
+    body +
+    (actions ? '<div class="cc-actions">' + actions + '</div>' : '') +
+    '</div>';
+}
+
+function renderConclusionBlock(conclusions, runbooks) {
+  var el = document.getElementById('sm-conclusion');
+  if (!el) return;
+  var byConclusion = {};
+  (runbooks || []).forEach(function (rb) { byConclusion[rb.conclusion_id] = rb.id; });
+  var rows = (conclusions || []).slice().sort(function (a, b) {
+    return Number(b.id) - Number(a.id);
+  });
+  if (!rows.length) {
+    el.innerHTML = '<div class="cc-empty">No conclusion yet. The agent can call ' +
+      '<code>session_conclude</code> when the task is done.</div>';
+    el.classList.remove('hidden');
+    return;
+  }
+  el.innerHTML = rows.map(function (c) {
+    return conclusionHtml(c, byConclusion[c.id]);
+  }).join('');
+  el.classList.remove('hidden');
+}
+
+function _conclusionReload() {
+  if (!_activeSessionSid) return;
+  openSessionModal(_activeSessionSid);
+}
+
+async function _conclusionPost(url, body, method) {
+  try {
+    var res = await authFetch(url, {
+      method: method || 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body || {}) });
+    var data = await res.json();
+    if (!res.ok) {
+      showToast('Could not update the conclusion: ' + (data.detail || 'error'), 'error');
+      return false;
+    }
+    return true;
+  } catch (e) {
+    showToast('Could not update the conclusion', 'error');
+    return false;
+  }
+}
+
+async function confirmConclusion(id) {
+  if (await _conclusionPost('/api/conclusions/' + Number(id) + '/confirm', {})) {
+    showToast('Conclusion confirmed', 'success');
+    _conclusionReload();
+  }
+}
+
+async function rejectConclusion(id) {
+  var ok = await customConfirm(
+    'Reject this conclusion? It stays in the session but is never served to agents.',
+    { title: 'Reject conclusion', confirmLabel: 'Reject', danger: true });
+  if (!ok) return;
+  if (await _conclusionPost('/api/conclusions/' + Number(id) + '/reject', {})) {
+    showToast('Conclusion rejected', 'info');
+    _conclusionReload();
+  }
+}
+
+function startConclusionEdit(id) {
+  _conclusionEditing[id] = true;
+  _conclusionReload();
+}
+
+function cancelConclusionEdit(id) {
+  delete _conclusionEditing[id];
+  _conclusionReload();
+}
+
+async function saveConclusionEdit(id) {
+  var summary = document.getElementById('cc-edit-summary-' + Number(id));
+  var root = document.getElementById('cc-edit-root-' + Number(id));
+  var fix = document.getElementById('cc-edit-fix-' + Number(id));
+  var body = {
+    summary: summary ? summary.value : '',
+    root_cause: root ? root.value : '',
+    fix: fix ? fix.value : '',
+  };
+  if (await _conclusionPost('/api/conclusions/' + Number(id), body, 'PATCH')) {
+    delete _conclusionEditing[id];
+    showToast('Conclusion updated', 'success');
+    _conclusionReload();
+  }
+}
+
+async function promoteConclusion(id) {
+  var ok = await customConfirm(
+    'Promote this confirmed conclusion to a runbook? Steps are copied verbatim ' +
+    'from the session evidence; nothing is executed.',
+    { title: 'Promote to runbook', confirmLabel: 'Promote', danger: false });
+  if (!ok) return;
+  try {
+    var res = await authFetch('/api/conclusions/' + Number(id) + '/runbook', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}) });
+    var data = await res.json();
+    if (!res.ok) {
+      showToast('Could not promote: ' + (data.detail || 'error'), 'error');
+      return;
+    }
+    showToast('Runbook #' + data.runbook.id + ' created', 'success');
+    _conclusionReload();
+  } catch (e) {
+    showToast('Could not promote the conclusion', 'error');
+  }
+}
+
 async function openSessionModal(sid) {
   var modal = document.getElementById('session-modal');
   var nameEl = document.getElementById('sm-name');
@@ -2890,6 +3241,9 @@ async function openSessionModal(sid) {
   if (denied) bits.push('<span class="sm-blocked">' + denied + ' denied</span>');
   if (auto) bits.push('<span class="sm-muted">' + auto + ' auto</span>');
   metaEl.innerHTML = bits.join(' \u00b7 ');
+  renderSessionSummary(document.getElementById('sm-summary'), detail.summary || {});
+  renderSessionTestHint(summary.goal || '', detail.summary || {});
+  renderConclusionBlock(detail.conclusions || [], detail.runbooks || []);
 
   // Unified, chronological timeline.
   var items = [];
@@ -4010,7 +4364,7 @@ function renderTable() {
           'Override session</button>';
       }
     } else if (req.status === 'frozen') {
-      actions = '<span class="chip chip-actions chip-frozen" title="Blocked by Emergency Freeze — the fleet is rejecting all commands until unfrozen.">' +
+      actions = '<span class="chip chip-actions chip-frozen" title="Blocked by Emergency Freeze — the fleet is rejecting all SSH commands until unfrozen.">' +
         'Frozen</span>';
     } else if (req.status === 'fleet-run') {
       actions = '<span class="chip chip-actions chip-fleet-run" title="Executed via Fleet Run — see the Fleet Run tab for per-gateway output.">' +
@@ -4043,7 +4397,7 @@ function renderTable() {
       '</select>';
     }
     const gap = gapMap.get(req.id);
-    const rowClass = gap ? 'gap-row' : '';
+    const rowClass = (gap ? 'gap-row ' : '') + (req.excluded ? 'excluded-row' : '');
     const idClass = gap ? 'cell-id-warn' : 'cell-id';
     const gapTitle = gap ? ' title="' + escapeHtml(formatGapTooltip(gap)) + '"' : '';
     const idDisplay = gap ? ' #' + esc(String(Number(req.id)).padStart(6, '0')) : '#' + esc(String(Number(req.id)).padStart(6, '0'));
@@ -4056,6 +4410,9 @@ function renderTable() {
     const breakdownLink = '<button type="button" class="bd-hist-link" title="Show the step breakdown" ' +
       'onclick="event.stopPropagation();toggleHistoryBreakdown(' + Number(req.id) + ',this)">breakdown</button>';
     const innerChip = innerTargetChipHtml(req.inner_target);
+    const readLaneChip = req.reason === 'read-lane-shadow'
+      ? '<span class="read-lane-chip" title="Eligible for the read-only lane in shadow — the operator still decided">would auto-run</span>'
+      : '';
     const gwPillHtml = gwPill(req.hostname || 'N/A');
     const _sid = req.session_id || '';
     const sCell = (_sid && _sid !== 'unknown')
@@ -4072,7 +4429,7 @@ function renderTable() {
       '<td class="' + idClass + '"' + gapTitle + '>' + idDisplay + '</td>' +
       '<td class="text-muted text-xs">' + formatTime(req.created_at) + '</td>' +
       '<td>' + gatewayCell + '</td>' +
-      '<td class="cell-cmd"><div class="flex items-center gap-1">' + riskHtml + anomalyHtml + '<code class="cmd-code" title="' + escapedCmd + '">' + escapedCmd + '</code><button class="js-copy-cmd flex-shrink-0 text-xs opacity-30 hover:opacity-80 px-1 py-0.5 rounded transition-opacity text-muted" data-cmd="' + encodeURIComponent(req.command) + '" title="Copy"></button>' + decodedChip + innerChip + execBadgeHtml(req) + execOutputLink(req) + breakdownLink + '</div>' +
+      '<td class="cell-cmd"><div class="flex items-center gap-1">' + riskHtml + anomalyHtml + '<code class="cmd-code" title="' + escapedCmd + '">' + escapedCmd + '</code><button class="js-copy-cmd flex-shrink-0 text-xs opacity-30 hover:opacity-80 px-1 py-0.5 rounded transition-opacity text-muted" data-cmd="' + encodeURIComponent(req.command) + '" title="Copy"></button>' + decodedChip + innerChip + execBadgeHtml(req) + execOutputLink(req) + breakdownLink + excludedMarkHtml(req) + '</div>' +
         (function() {
           var _desc = describeCmd(req.command);
           if (!_desc) return '';
@@ -4089,7 +4446,7 @@ function renderTable() {
           return '<div class="cmd-desc">' + escapeHtml(_desc) + '</div>';
         })() +
         '</td>' +
-      '<td>' + badge + '</td>' +
+      '<td>' + badge + readLaneChip + '</td>' +
       '<td>' + sCell + '</td>' +
       '<td class="text-right">' + actions + '</td></tr>' +
       (_bdHistory[req.id] ? bdHistoryRowHtml(req.id) : '');
@@ -4811,6 +5168,21 @@ async function fetchGateways() {
     var ztBadge = g.zero_trust
       ? '<span class="zt-badge" title="Zero-Trust — every command requires JIT approval"> ZT</span>'
       : '';
+    var readMode = g.read_lane || 'off';
+    // `on` stays locked until the operator sets the meta key by hand after the
+    // security sign-off; the 7-day shadow rule applies after that.
+    var onLocked = !g.read_lane_on_enabled;
+    var readSelect = '<select class="capture-select" title="Read-only lane (shadow first)" ' +
+      'onchange="setReadLane(' + escJs(g.ip) + ',this.value)" aria-label="Read-only lane">' +
+      [['off', 'RL off'], ['shadow', 'RL shadow'],
+       ['on', onLocked ? 'RL on: locked until security sign-off' : 'RL on']].map(function (pair) {
+        var locked = pair[0] === 'on' && (onLocked || !g.read_lane_ready);
+        return '<option value="' + pair[0] + '"' + (readMode === pair[0] ? ' selected' : '') +
+          (locked ? ' disabled title="' +
+            (onLocked ? 'Locked until the security sign-off (set read_lane_on_enabled by hand)'
+                      : 'Needs 7 days in shadow first') + '"' : '') + '>' +
+          pair[1] + '</option>';
+      }).join('') + '</select>';
     var capMode = g.capture_output || 'exit-only';
     var capSelect = '<select class="capture-select" title="Output capture for this gateway" ' +
       'onchange="setCaptureMode(' + escJs(g.ip) + ',this.value)" aria-label="Output capture">' +
@@ -4832,7 +5204,7 @@ async function fetchGateways() {
       } else {
         overrideControl = '<button onclick="openOverrideModal(' + escJs(g.ip) + ',' + escJs(g.hostname) + ')" class="chip-btn ovr" title="Override Mode — auto-approve all JIT for a set duration">Override</button>';
       }
-      overrideCell = '<div class="flex items-center gap-2">' + overrideControl + ztBtn + capSelect + '</div>';
+      overrideCell = '<div class="flex items-center gap-2">' + overrideControl + ztBtn + capSelect + readSelect + '</div>';
     }
     return '<tr>' +
       '<td class="px-4 py-2 whitespace-nowrap">' + statusCell + '</td>' +
@@ -4847,6 +5219,21 @@ async function fetchGateways() {
       '</tr>';
   }).join('');
   checkOverrideBanner();
+}
+
+async function setReadLane(ip, mode) {
+  try {
+    var res = await authFetch('/api/gateways/' + encodeURIComponent(ip) + '/read-lane', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode: mode })
+    });
+    var data = await res.json();
+    if (res.ok && data.status === 'ok') {
+      showToast('Read-only lane: ' + data.read_lane + ' on ' + ip, 'success');
+      fetchGateways();
+    } else { showToast('Failed: ' + (data.detail || 'unknown'), 'error'); }
+  } catch (e) { showToast('Error: ' + e.message, 'error'); }
 }
 
 async function setCaptureMode(ip, mode) {
@@ -5144,7 +5531,7 @@ function renderFreezeStatus(data) {
   var pillText = document.getElementById('freeze-pill-text');
   if (banner) banner.classList.toggle('hidden', !frozen);
   if (label) {
-    if (frozen) { label.textContent = 'FROZEN — all commands rejected'; label.style.background = 'var(--state-denied)'; label.style.color = 'white'; }
+    if (frozen) { label.textContent = 'FROZEN — SSH and integration writes rejected'; label.style.background = 'var(--state-denied)'; label.style.color = 'white'; }
     else { label.textContent = 'Active — running normally'; label.style.background = 'var(--state-approved)'; label.style.color = 'var(--bg-base)'; }
   }
   if (freezeBtn) freezeBtn.classList.toggle('hidden', frozen);
@@ -5182,7 +5569,7 @@ async function triggerFreeze() {
     var res = await authFetch('/api/freeze', { method: 'POST' });
     var data = await res.json();
     if (data.status === 'ok') {
-      showToast('Fleet FROZEN — all commands rejected within 30s', 'success');
+      showToast('Fleet FROZEN — SSH and integration writes rejected within 30s', 'success');
       fetchFreezeStatus();
     } else { showToast('Failed: ' + (data.detail || 'unknown'), 'error'); }
   } catch(e) { showToast('Error: ' + e.message, 'error'); }
@@ -7009,6 +7396,67 @@ function renderRhythm(d) {
   }
 }
 
+/* ── F6: how approved ────────────────────────────────────────────────────
+   A stacked bar per day, oldest first: the mix of who cleared the work. The
+   headline is the override share — the number F3 plans and F4's read lane
+   exist to bring down. Zero-count buckets stay in the legend, greyed, so the
+   absence of overrides is visible rather than merely unmentioned. */
+function approvalsHtml(ab) {
+  ab = ab || {};
+  var series = ab.series || [];
+  var totals = ab.totals || {};
+  var order = (ab.buckets && ab.buckets.length)
+    ? ab.buckets.map(function (b) { return [b.key, b.label]; })
+    : APPROVAL_BUCKETS;
+  if (!series.length) return '<p class="text-muted">No decisions in this window.</p>';
+  var max = 1;
+  series.forEach(function (day) {
+    var t = 0;
+    order.forEach(function (b) { t += parseInt(day[b[0]], 10) || 0; });
+    if (t > max) max = t;
+  });
+  var rows = series.map(function (day) {
+    var total = 0;
+    order.forEach(function (b) { total += parseInt(day[b[0]], 10) || 0; });
+    var segs = order.map(function (b) {
+      var n = parseInt(day[b[0]], 10) || 0;
+      if (!n || !total) return '';
+      return '<span class="appr-seg appr-' + b[0] + '" style="width:' +
+        (n / total * 100).toFixed(2) + '%" title="' +
+        escapeHtml(b[1] + ': ' + n) + '"></span>';
+    }).join('');
+    var width = Math.round(total / max * 100);
+    var label = String(day.date || '').slice(5).replace('-', '/');
+    return '<div class="appr-day" title="' +
+      escapeHtml(String(day.date || '') + ' \u00b7 ' + total + ' approved') + '">' +
+      '<span class="appr-date">' + escapeHtml(label) + '</span>' +
+      '<span class="appr-track"><span class="appr-bar" style="width:' + width + '%">' + segs + '</span></span>' +
+      '<span class="appr-total">' + (total || '') + '</span></div>';
+  }).join('');
+  var legend = order.map(function (b) {
+    var n = parseInt(totals[b[0]], 10) || 0;
+    return '<span class="appr-legend-item' + (n ? '' : ' zero') + '">' +
+      '<i class="appr-dot appr-' + b[0] + '"></i>' + escapeHtml(b[1]) +
+      ' <b>' + n + '</b></span>';
+  }).join('');
+  return '<div class="appr-days">' + rows + '</div>' +
+    '<div class="appr-legend">' + legend + '</div>';
+}
+
+function renderStatsApprovals(d) {
+  var el = document.getElementById('stats-approvals');
+  var shareEl = document.getElementById('approvals-share');
+  if (!el) return;
+  var ab = (d && d.approval_breakdown) || {};
+  var approved = parseInt(ab.approved, 10) || 0;
+  if (shareEl) {
+    shareEl.textContent = approved
+      ? ('override share ' + (Number(ab.override_share) || 0) + '%')
+      : 'no decisions yet';
+  }
+  el.innerHTML = approvalsHtml(ab);
+}
+
 function renderStatsKpis(d) {
   var el = document.getElementById('stats-summary-cards'); if (!el) return;
   /* The chart above already prints the command total and the automation rate.
@@ -7223,6 +7671,27 @@ function renderStatsTop(d) {
   }).join('');
 }
 
+function renderStatsReadLane(d) {
+  var el = document.getElementById('stats-read-lane'); if (!el) return;
+  var rl = d.read_lane || {};
+  var eligible = Number(rl.shadow_eligible || 0);
+  var auto = Number(rl.auto_approved || 0);
+  if (!eligible && !auto) {
+    el.innerHTML = '<p class="text-muted">No read-lane activity in this window.</p>';
+    return;
+  }
+  var approved = Number(rl.shadow_approved || 0);
+  var denied = Number(rl.shadow_denied || 0);
+  var rate = eligible ? Math.round(approved / eligible * 100) : 0;
+  el.innerHTML =
+    '<div class="kpi"><div class="kval">' + eligible + '</div>' +
+      '<div class="klbl">would have auto-run (shadow)</div></div>' +
+    '<div class="cmd-row"><span class="cmd-count">' + approved + '</span> approved \u00b7 ' +
+      denied + ' denied \u00b7 median ' + Number(rl.shadow_median_len || 0) + ' chars</div>' +
+    '<div class="text-xs text-muted">' + rate + '% approved by the operator' +
+      (auto ? ' \u00b7 ' + auto + ' auto-ran with the lane on' : '') + '</div>';
+}
+
 function renderStatsInnerTargets(d) {
   var el = document.getElementById('stats-inner-targets'); if (!el) return;
   var rows = d.inner_targets || [];
@@ -7280,13 +7749,128 @@ function renderStatistics() {
   initTallyInteractions();
   renderRhythm(d);
   renderStatsKpis(d);
+  renderStatsApprovals(d);
   renderStatsHygiene(d);
   renderStatsHeatmap(d);
   renderStatsNodes(d);
   renderStatsTop(d);
   renderStatsInnerTargets(d);
+  renderStatsReadLane(d);
   renderStatsCats(d);
   renderStatsDenied(d);
+}
+
+/* ── F14: the inventory ──────────────────────────────────────────────────
+   One search box over the cached map: a service, host, container, IP, FQDN,
+   vmid or MAC. Every source chip carries its own staleness, and an IP that
+   two sources name differently is shown as a conflict rather than resolved
+   silently. All agent/upstream text is escaped. */
+var _invTimer = null;
+
+function debouncedInventorySearch() {
+  clearTimeout(_invTimer);
+  _invTimer = setTimeout(function () {
+    var box = document.getElementById('inv-search');
+    fetchInventory(box ? box.value : '');
+  }, 250);
+}
+
+async function fetchInventory(q) {
+  try {
+    var url = '/api/inventory' + (q ? '?q=' + encodeURIComponent(q) : '');
+    var res = await authFetch(url);
+    if (!res.ok) return;
+    renderInventory(await res.json());
+  } catch (e) {}
+}
+
+function invSourceChips(sources) {
+  return (sources || []).map(function (s) {
+    var label = s.label || s.source || '';
+    return '<span class="inv-source' + (s.stale ? ' stale' : '') + '" title="' +
+      escapeHtml((s.stale ? 'stale — ' : '') + 'from ' + (s.source || label)) + '">' +
+      escapeHtml(label) + (s.stale ? ' \u00b7 stale' : '') + '</span>';
+  }).join('');
+}
+
+function invEntityHtml(entity) {
+  var facts = [];
+  var add = function (key, values) {
+    if (!values || !values.length) return;
+    facts.push('<span class="inv-k">' + key + '</span> ' +
+      values.map(function (v) { return escapeHtml(String(v)); }).join(', '));
+  };
+  add('ip', entity.ips);
+  add('name', entity.fqdns);
+  add('host', entity.hosts);
+  add('guest', entity.vmids);
+  add('url', entity.urls);
+  if (entity.extra && entity.extra.mac) add('mac', [entity.extra.mac]);
+  var conflicts = (entity.conflicts || []).map(function (c) {
+    return '<div class="inv-conflict">' + escapeHtml(String(c.ip || '')) +
+      ' is claimed by ' + (c.names || []).map(function (n) {
+        return escapeHtml(String(n));
+      }).join(' / ') + '</div>';
+  }).join('');
+  return '<div class="inv-entity' + (entity.stale ? ' stale' : '') + '" data-od-id="inventory-entity">' +
+    '<div class="inv-head"><span class="inv-name">' + escapeHtml(entity.name || 'unnamed') + '</span>' +
+    '<span class="inv-chips">' + invSourceChips(entity.sources) + '</span></div>' +
+    (facts.length ? '<div class="inv-facts">' + facts.join(' \u00b7 ') + '</div>' : '') +
+    conflicts + '</div>';
+}
+
+function renderInventory(data) {
+  data = data || {};
+  var results = document.getElementById('inv-results');
+  var sourcesEl = document.getElementById('inv-sources');
+  var refreshed = document.getElementById('inv-refreshed');
+  var box = document.getElementById('inv-interval');
+  if (box && !box.dataset.dirty && data.interval_minutes) box.value = data.interval_minutes;
+  if (refreshed) {
+    refreshed.textContent = data.refreshed_at
+      ? ('refreshed ' + formatTime(data.refreshed_at)) : 'never refreshed';
+  }
+  if (sourcesEl) {
+    sourcesEl.innerHTML = Object.keys(data.sources || {}).sort().map(function (source) {
+      var s = data.sources[source] || {};
+      return '<span class="inv-source' + (s.stale ? ' stale' : '') + '" title="' +
+        escapeHtml(s.error || '') + '">' + escapeHtml(s.label || source) +
+        ' <b>' + (Number(s.items) || 0) + '</b>' + (s.stale ? ' \u00b7 stale' : '') + '</span>';
+    }).join('');
+  }
+  if (!results) return;
+  var items = data.items || [];
+  results.innerHTML = items.length
+    ? items.map(invEntityHtml).join('')
+    : '<p class="text-muted">Nothing matches yet. Configure an integration and press \u201cRefresh now\u201d.</p>';
+}
+
+async function refreshInventoryNow() {
+  var btn = document.getElementById('inv-refresh-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Refreshing\u2026'; }
+  try {
+    var res = await authFetch('/api/inventory/refresh', { method: 'POST' });
+    var data = await res.json();
+    showToast('Inventory refreshed (' + (Number(data.sources) || 0) + ' source(s), ' +
+      (Number(data.duration_ms) || 0) + ' ms)', 'success');
+    var box = document.getElementById('inv-search');
+    fetchInventory(box ? box.value : '');
+  } catch (e) { showToast('Could not refresh the inventory', 'error'); }
+  if (btn) { btn.disabled = false; btn.textContent = 'Refresh now'; }
+}
+
+async function saveInventoryInterval() {
+  var box = document.getElementById('inv-interval');
+  var minutes = box ? parseInt(box.value, 10) : 15;
+  try {
+    var res = await authFetch('/api/inventory/settings', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ interval_minutes: minutes }) });
+    var data = await res.json();
+    if (!res.ok) { showToast(data.detail || 'Could not save the interval', 'error'); return; }
+    if (box) { box.value = data.interval_minutes; box.dataset.dirty = ''; }
+    showToast('Inventory refreshes every ' + data.interval_minutes + ' minutes', 'success');
+  } catch (e) { showToast('Could not save the interval', 'error'); }
 }
 
 // ── Gateway Health Checker ────────────────────────────────────────────

@@ -101,13 +101,14 @@
   </div>
   <div class="nav-section">
     <div class="nav-label">Configure</div>
+    <button class="nav-item" id="nav-inventory" onclick="switchView('inventory')"><span>Inventory</span></button>
     <button class="nav-item" id="nav-controls" onclick="switchView('controls')"><span>Controls</span></button>
     <button class="nav-item" id="nav-settings" onclick="switchView('settings')"><span>Settings</span></button>
     <button class="nav-item" id="nav-logs" onclick="switchView('logs')"><span>Logs</span></button>
   </div>
   <div class="nav-spacer"></div>
   <div class="sidebar-bottom">
-    <div class="sidebar-status user-pill" id="freeze-pill" title="Emergency Freeze — reject all commands fleet-wide" onclick="toggleFreezeFromSidebar()" style="cursor:pointer;">
+    <div class="sidebar-status user-pill" id="freeze-pill" title="Emergency Freeze — reject all SSH commands and integration writes" onclick="toggleFreezeFromSidebar()" style="cursor:pointer;">
       <span id="freeze-pill-dot" class="freeze-dot"></span>
       <span class="sidebar-status-text" id="freeze-pill-text">Freeze</span>
     </div>
@@ -134,7 +135,7 @@
   <!-- Emergency Freeze Banner -->
   <div id="freeze-banner" class="freeze-banner hidden">
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="flex-shrink-0"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
-    <span id="freeze-banner-text" class="flex-1">Fleet FROZEN — all commands rejected</span>
+    <span id="freeze-banner-text" class="flex-1">Fleet FROZEN — SSH and integration writes rejected</span>
     <button onclick="triggerUnfreeze()" class="btn btn-xs btn-on-banner">Unfreeze</button>
   </div>
 
@@ -450,6 +451,15 @@
       <!-- KPI cards -->
       <div id="stats-summary-cards" class="kpis" data-od-id="stats-summary-cards"></div>
 
+      <!-- How approved (F6) -->
+      <div class="widget" data-od-id="approval-breakdown">
+        <div class="widget-header">
+          <span>How approved &middot; who cleared the work</span>
+          <span class="chip" id="approvals-share"></span>
+        </div>
+        <div class="approvals-wrap" id="stats-approvals"><p class="text-muted">Loading...</p></div>
+      </div>
+
       <!-- Fleet hygiene -->
       <div class="widget" data-od-id="fleet-hygiene">
         <div class="widget-header">
@@ -482,6 +492,10 @@
           <div id="stats-topcmds"><p class="text-muted">Loading...</p></div>
         </div>
         <div class="flex flex-col gap-5">
+          <div class="widget h-full" data-od-id="stats-read-lane-widget">
+            <div class="widget-header">Read-only lane &middot; shadow</div>
+            <div id="stats-read-lane"><p class="text-muted">Loading...</p></div>
+          </div>
           <div class="widget h-full" data-od-id="stats-inner-targets-widget">
             <div class="widget-header">Busiest inner targets</div>
             <div id="stats-inner-targets"><p class="text-muted">Loading...</p></div>
@@ -508,6 +522,28 @@
         </div>
         <p class="text-xs mb-3 text-muted">Repeatedly approved (allowlist) and repeatedly denied (blocklist) commands. Review periodically and allowlist/block the ones you trust to reduce JIT noise.</p>
         <div id="suggestions-list"><p class="text-muted">Loading...</p></div>
+      </div>
+    </div>
+
+    <!-- INVENTORY VIEW — where is X? (F14) -->
+    <div id="view-inventory" class="hidden w-full" data-ink="section">
+      <div class="hud" data-od-id="inventory-hud">
+        <div class="hud-txt"><b>The map</b><span class="hud-sub">&middot; every name, one address</span></div>
+      </div>
+      <div class="widget" data-od-id="inventory-panel">
+        <div class="widget-header">
+          <span>Inventory</span>
+          <span class="chip" id="inv-refreshed">never refreshed</span>
+          <div class="flex-1"></div>
+          <label class="text-xs text-muted" for="inv-interval">refresh every</label>
+          <input type="number" id="inv-interval" min="5" max="120" step="5" class="w-16 text-xs" value="15" oninput="this.dataset.dirty='1'">
+          <span class="text-xs text-muted">min</span>
+          <button class="btn btn-muted btn-xs" onclick="saveInventoryInterval()">Save</button>
+          <button class="btn btn-sm" id="inv-refresh-btn" onclick="refreshInventoryNow()" data-od-id="inventory-refresh">Refresh now</button>
+        </div>
+        <input type="text" id="inv-search" placeholder="Where is…? name, IP, FQDN, vmid, MAC" class="w-full text-sm mb-3" oninput="debouncedInventorySearch()" data-od-id="inventory-search">
+        <div id="inv-sources" class="inv-sources"></div>
+        <div id="inv-results"><p class="text-muted">Loading…</p></div>
       </div>
     </div>
 
@@ -1459,12 +1495,16 @@
       <div class="session-modal-title-row">
         <span class="session-modal-label">Session</span>
         <button onclick="openSessionOverrideModal()" class="btn btn-muted btn-xs" title="Auto-approve this session's JIT commands for a bounded window">Override session</button>
+        <button onclick="excludeActiveSession()" class="btn btn-muted btn-xs" title="Exclude this session's requests from statistics and learning">Exclude</button>
         <button onclick="filterHistoryToSession()" class="btn btn-muted btn-xs" title="Show this session's commands in History">Filter history</button>
         <button onclick="closeModal('session-modal')" class="modal-close" aria-label="Close">&times;</button>
       </div>
       <div class="session-modal-name" id="sm-name" contenteditable="true" spellcheck="false" data-placeholder="Session name"></div>
       <div class="session-modal-desc" id="sm-desc" contenteditable="true" spellcheck="false" data-placeholder="Add a description..."></div>
       <div class="session-modal-meta" id="sm-meta"></div>
+      <div class="session-summary hidden" id="sm-summary"></div>
+      <div class="sm-test-hint hidden" id="sm-test-hint"></div>
+      <div class="session-conclusion hidden" id="sm-conclusion"></div>
       <div class="session-modal-id">
         <code id="sm-id"></code>
         <button onclick="copySessionId()" class="btn btn-muted btn-xs" title="Copy the full session id">Copy id</button>
