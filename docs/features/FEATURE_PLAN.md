@@ -2940,6 +2940,9 @@ tested, which is acceptable. When F4 merges, re-run
 `test_f6_code_reasons_have_a_bucket` (after R3), so the `read-lane` literal
 is picked up.
 
+
+**Round 2 (2026-11-09, main feature reviewer): approved and merged.** The overnight reviewer approved R1–R3. The merge with F8 keeps one `summary` dict, and `approval_breakdown` skips excluded rows (covered by F8's generated scan). No duplicate functions in `app.js`; CSS braces balance.
+
 ---
 
 ## Chunk F7 — Inner target attribution · slug `inner-target` · dashboard
@@ -4302,7 +4305,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 6 | F5 | exec-results | gateway + dashboard | Merged | `feat/f5-exec-results` | — | |
 | 6a | F18 | request-context | dashboard | Merged | `feat/f18-request-context` | F1, F5, F7, X1 | |
 | 7 | F12 | ssh-exec | dashboard + gateway | Ready (after F5) — design first | `feat/f12-ssh-exec` | F4, F5 | design approval + security reviewer sign-off |
-| 8 | F6 | session-wrapup | dashboard | **Changes requested (R1–R3)** — round 1 | `feat/f6-session-wrapup` | F3, F4, F5 | |
+| 8 | F6 | session-wrapup | dashboard | Merged | `feat/f6-session-wrapup` | F3, F4, F5 | |
 | 9 | F13 | session-conclusions | dashboard + MCP | Ready (after F6) | `feat/f13-session-conclusions` | F5, F6 | |
 | 10 | F8 | test-traffic | dashboard | Merged | `feat/f8-test-traffic` | — | low priority |
 | 11 | F9 | ha-supervisor-read | dashboard | Merged | `feat/f9-ha-supervisor-read` | — | token is now a dedicated `eshu` HA admin user |
