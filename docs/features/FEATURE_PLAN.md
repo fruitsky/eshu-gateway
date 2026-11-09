@@ -6220,7 +6220,195 @@ is already in F10's code; F11 does not change F10's handlers.
 
 `bash scripts/verify.sh`: `2331 passed, 7 warnings in 428.95s (0:07:08)` (docs-only).
 
+### Round 2 — design after review round 1 (H1–H8)
 
+This section is the design of record where it differs from §1–§10; it also
+answers the four open questions, as the reviewer asked. The rest still stands.
+
+#### H1 — secrets never pass through the dashboard in clear
+
+`secrets.yaml` holds the credentials every other YAML file references. Three
+rules replace the round-1 "mask after `cat`" (which still left the raw value
+in the integration-call row, the `dry_run` diff and the approval card):
+
+1. **Read is masked remotely.** `ha_config_read('secrets.yaml')` runs a fixed
+   template on the add-on that prints **key names only**, so the values never
+   leave the add-on and no dashboard code, log or row can see them:
+   `sed -n 's/^\([A-Za-z0-9_]*\):.*/\1/p' -- {path}`. The response is
+   `{keys: [...], masked: true, size, sha256}`; there is **no `content`
+   field** for this file.
+2. **Write and restore of `secrets.yaml` are refused**
+   (`config_secret_refused`) before any connection: the operator edits it
+   through the add-on's own editor or the HA UI. Eshu does not rewrite the
+   credential file.
+3. **Read and `dry_run` results are never stored.** The integration-call row
+   for `ha_config_read` and for a `dry_run` keeps `size`, `sha256` and the
+   risky-key list, plus `response_bytes`, but **no output tail** (the other
+   tools keep the scrubbed 8 KiB tail §7 describes). The diff is rendered in
+   the approval card and not persisted.
+
+Tests: a synthetic secret value in a canned `secrets.yaml` appears in no DB
+row, no audit row and no tool response; `ha_config_write` and
+`ha_config_restore` on `secrets.yaml` are refused with `config_secret_refused`
+and open no connection.
+
+#### H2 — one remote script per write, not five connections
+
+The round-1 write was five SSH calls (realpath, hash, backup, temp write,
+move, check), each with its own gap; the file could change between them. A
+write is now **one** fixed script, with the path, the expected hash, the
+backup name and the temp name as positional arguments and the new content on
+**stdin**:
+
+```bash
+# core/ha_config_ssh.py (design): WRITE_SCRIPT, one connection, `set -eu`,
+# one exit code per step so the dashboard maps the failure without parsing
+# stderr.
+sh -c '
+set -eu
+path=$1; expect=$2; backup=$3; tmp=$4
+root=$(realpath -e -- "$(dirname -- "$path")") || exit 10
+case "$root" in /homeassistant|/homeassistant/packages) ;; *) exit 11 ;; esac
+real=$(realpath -e -- "$path") || exit 12
+[ "$real" = "$root/$(basename -- "$path")" ] || exit 13
+[ "$(sha256sum -- "$real" | cut -d" " -f1)" = "$expect" ] || exit 14
+cp -p -- "$real" "$backup" || exit 15
+cat > "$tmp" || { rm -f -- "$tmp"; exit 16; }
+mv -f -- "$tmp" "$real" || exit 17
+ha core check 2>&1 || { cp -p -- "$backup" "$real"; exit 18; }
+printf "ok %s\n" "$(sha256sum -- "$real" | cut -d" " -f1)"
+' _ "$path" "$expect" "$backup" "$tmp"
+```
+
+Exit codes: 10/11 the directory is not the expected HA config tree, 12 the
+file is missing, 13 a symlink or a path that escapes, 14 the hash changed,
+15 backup failed, 16 write failed, 17 move failed, 18 `ha core check` failed
+**and the backup was put back**. The dashboard maps them to stable error
+codes (`config_path_refused`, `config_hash_changed`, `config_check_failed`, …)
+and names the failing step in the message. `ha_config_restore` uses its own
+single script of the same shape (validate the backup, copy it in, check, and
+on a failed check put the previous content back from a second temp copy).
+
+#### H3 — the config root may be a symlink
+
+In current HA and add-on versions the config directory is `/homeassistant`,
+and `/config` is a symlink to it (the SSH add-on maps it). Comparing
+`realpath(/config/app.yaml)` with the requested `/config/app.yaml` would then
+never match and every call would be refused. **Decision:** the check is
+**root-relative** (as in the script above): resolve the *directory*, require
+it to be `/homeassistant` or `/homeassistant/packages`, and require
+`realpath(path)` to equal that directory plus the file's `basename`. That
+holds whether `/config` is a symlink or a real directory. The note assumes
+**HA 2024.x+ and Advanced SSH & Web Terminal 1.x**, where `/config` is a
+symlink; for an older setup with a real `/config` directory the same helper
+accepts `/config` as the root too (one helper, both spellings, tested against
+a mocked `realpath`).
+
+#### H4 — risky config in the approval card
+
+Writing YAML is code execution on HA. The preflight (which already renders the
+diff) also flags the keys that turn a config file into one: `shell_command`,
+`command_line` (sensor/binary_sensor/switch), `python_script`,
+`rest_command`, `http` (trusted proxies, auth providers), `homeassistant`
+(`auth_providers`), `packages`, and any `!include*` that points outside the
+config root. **The banner does not block**; the operator must see it on the
+card.
+
+**Decision on the check:** no new Python package (§2.7), so this is not
+PyYAML. The file is walked by a small **structural top-level mapping scan**
+(`core/ha_config_yaml.py`): comments stripped, a top-level key is the text
+before the first unquoted `:` at indentation 0 (so `shell_command :` and
+`"shell_command":` both match), values are never interpreted, and `!include`
+tags are collected anywhere. It is not a regex over the text, and it is not a
+general YAML parser either; the authoritative validity check is still
+`ha core check` **after** the write, with the automatic restore. The scan runs
+on the *proposed* content before it is sent, and its output is key names only.
+If a reviewer later prefers a real parser, that is one dependency and one
+function.
+
+Tests: each risky key is found in its normal and quoted spelling, behind a
+comment, and with extra spaces before the colon; a key-looking line inside a
+block scalar is not reported (the scan tracks indentation); an
+`!include ../secrets.yaml` is flagged.
+
+#### H5 — the shared check key is invalidated before the write
+
+F10's `ha_core_restart` trusts `meta['ha_check_config_<integration>']` for 10
+minutes. A round-1 write left a previous `valid` in place, so a restart could
+pass on a check that ran *before* the edit. **Decision:** the write handler
+deletes `ha_check_config_<integration>` **before** it opens the connection;
+only the post-write `ha core check` may write `valid` again. A timed-out or
+failed check leaves the key absent, so the next restart is refused with "no
+recent config check" rather than the previous `valid`.
+
+#### H6 — timeouts and concurrency
+
+`ha core check` routinely takes 30 s+ on a Pi. The transport timeout is 30 s
+for the short calls (list, read, realpath, the check template) and **120 s for
+`ha_config_check` and the check phase of a write/restore**; a timeout is a
+**failure**, so a write that times out is restored (the script's
+`ha core check` is the last step; a dashboard-side kill leaves the backup in
+place, the restore is attempted with the short timeout, and if that also
+fails the run is marked `config_check_unknown` with the backup name — never
+"ok"). A per-integration **lock** (one in-flight write/restore, held for the
+whole script) stops two approved writes from interleaving; a second call is
+refused with `config_busy`.
+
+#### H7 — the add-on side, the key at rest, and the open questions
+
+* The `authorized_keys` line Eshu asks the operator to add carries
+  `from="<dashboard address>"` (the same idea as F12's `ALLOWED_SSH_FROM`), so
+  the key is usable only from the dashboard's address. The setup doc checks
+  that the add-on's `authorized_keys` option keeps key options (a line with
+  `from=` is still parsed).
+* The private key lives in the integration's `secret` column, which is
+  **plaintext in the SQLite file** like every other integration secret — it is
+  masked in responses and scrubbed from records, but not encrypted at rest.
+  The note says so; encrypting the column is a separate hardening item, not
+  something F11 silently assumes.
+* **Open question 1 (who creates the key):** the dashboard generates the
+  keypair (`ssh-keygen -t ed25519 -N ''`), shows the public line once, and
+  keeps pasting an existing key possible.
+* **Open question 2 (TOFU vs an explicit pin):** an **explicit pin at setup**
+  is the default — the operator compares the fingerprint with
+  `ssh-keygen -lf` inside the add-on and confirms it before the integration is
+  enabled. TOFU stays available only behind an explicit "trust on first use"
+  checkbox; the security reviewer makes the final call, and writes require a
+  pin either way (§2's pin-before-write rule).
+* **Open question 3 (user):** `root` is acceptable with protection mode on,
+  LAN only, and the `from=` restriction above; the setup doc suggests nothing
+  else.
+* **Open question 4 (backup retention):** after a **successful** write, a fixed
+  template prunes all but the **last 10** backups for that file
+  (`find … -maxdepth 1 -name '<basename>.eshu-*.bak' | sort`, names only);
+  the agent supplies no part of it. A failed write keeps its backup (the
+  evidence of the failed attempt).
+
+#### H8 — the `list` template
+
+The round-1 template had two bugs: the Python literal `'\('` is an invalid
+escape (a `SyntaxWarning` on 3.12), and `-maxdepth` after `-o` warns and can
+change the match. The template is one plain `find` per root, written as a raw
+Python string:
+
+```bash
+find /homeassistant -maxdepth 1 -type f \( -name '*.yaml' -o -name '*.yml' \)
+find /homeassistant/packages -type f \( -name '*.yaml' -o -name '*.yml' \) 2>/dev/null
+```
+
+#### Tools and tests, amended
+
+`ha_config_read('secrets.yaml')` returns key names only; `ha_config_write` and
+`ha_config_restore` refuse it; read and `dry_run` store no output; the write
+and the restore are one script each; the check timeout is 120 s; a
+per-integration lock; H4's risky-key scan; H5's invalidation. The test list
+gains: a synthetic secret in no row and no response, the single-script exit
+codes (10–18), the root-relative check with `/config` as a symlink, the
+risky-key spellings, the meta key absent before a write, a check timeout
+restoring, and `config_busy` under two concurrent calls. The setup doc gains
+the `from=` line, the explicit pin and the plaintext-at-rest statement.
+
+`bash scripts/verify.sh`: `2331 passed, 7 warnings in 428.60s (0:07:08)` (docs only).
 
 ### Reviewer notes
 
@@ -13193,7 +13381,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 10 | F8 | test-traffic | dashboard | Merged | `feat/f8-test-traffic` | — | low priority |
 | 11 | F9 | ha-supervisor-read | dashboard | Merged | `feat/f9-ha-supervisor-read` | — | token is now a dedicated `eshu` HA admin user |
 | 12 | F10 | ha-supervisor-actions | dashboard | Ready (after F9) | `feat/f10-ha-supervisor-actions` | F9, F3, Chunk H | reviewer pass + security reviewer sign-off |
-| 13 | F11 | ha-config-files | dashboard | **Design round 1: changes requested** (H1–H8) | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | design approval + security reviewer sign-off |
+| 13 | F11 | ha-config-files | dashboard | **Round 2: design revised for H1–H8, open questions answered — awaiting security review** | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | design approval + security reviewer sign-off |
 | 14 | F14 | inventory | dashboard + MCP | Merged | `feat/f14-inventory` | Chunk H | |
 | 15 | F19 | unattended-limits | gateway + dashboard | **Merged** 2026-11-11 (security sign-off `67bec51`; AF1/AF2 checked) | `feat/f19-unattended-limits` | F4, F5, F12 | AF3 goes on the next gateway branch |
 | 16 | F15 | probes | dashboard + MCP | **Merged** 2026-11-11 (AG1 security decision `eca8982`; AI1 fix merged) | `feat/f15-probes` | F4, F12, F14 | |
