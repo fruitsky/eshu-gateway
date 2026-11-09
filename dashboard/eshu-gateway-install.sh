@@ -461,6 +461,10 @@ ESHU_CAPTURE_FILE="${ESHU_CAPTURE_FILE:-/etc/eshu-capture}"
 ESHU_OUT_TAIL=""
 ESHU_OUT_FIFO=""
 ESHU_TAIL_PID=""
+# How long to wait for the capture reader after the command ends. It copies at
+# most 16 KiB, so anything beyond a moment means it is wedged; the run must
+# never hang because the reader did.
+ESHU_CAPTURE_WAIT="${ESHU_CAPTURE_WAIT:-10}"
 RESULT_REQUEST_ID=""
 RESULT_PATH="allowlist"
 
@@ -580,8 +584,12 @@ run_sanitized() {
         if mkfifo "$ESHU_OUT_FIFO" 2>/dev/null; then
           # E1: if `tail` dies, `cat` keeps draining the FIFO, so the writer
           # never blocks and the agent's stream is never cut.
+          # The reader keeps its own stdout/stderr away from the caller's: an
+          # SSH client (or a CI test harness) reads the gateway's stdout until
+          # EOF, and a reader that outlived the script would keep that pipe open
+          # and look like a hung command.
           { tail -c 16385 > "$ESHU_OUT_TAIL" || true; cat > /dev/null; } \
-            < "$ESHU_OUT_FIFO" &
+            < "$ESHU_OUT_FIFO" >/dev/null 2>&1 &
           ESHU_TAIL_PID=$!
         else
           ESHU_OUT_FIFO=""
@@ -596,6 +604,20 @@ run_sanitized() {
     # E1: plain `tee`, so an agent disconnect still ends the command at its
     # next write; the reader drains whatever tail did not consume.
     "$@" 2>&1 | sanitize | tee "$ESHU_OUT_FIFO" || rc=$?
+    # The command is done, so the writer is closed and the reader has EOF. It
+    # still has to be waited for — but never forever: a wedged reader must not
+    # hang a gateway call (which, over SSH, means a root process that never
+    # returns).
+    _waited=0
+    while kill -0 "$ESHU_TAIL_PID" 2>/dev/null; do
+      if [ "$_waited" -ge $((ESHU_CAPTURE_WAIT * 10)) ]; then
+        logger -t eshu-gateway "CAPTURE READER WEDGED — killing it after ${ESHU_CAPTURE_WAIT}s"
+        kill "$ESHU_TAIL_PID" 2>/dev/null || true
+        break
+      fi
+      sleep 0.1
+      _waited=$((_waited + 1))
+    done
     wait "$ESHU_TAIL_PID" 2>/dev/null || true
   else
     # D8: never leave a reader blocked on open() if we skip the FIFO branch.

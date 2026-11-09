@@ -258,6 +258,29 @@ class TestGateway:
         time.sleep(0.3)
         assert _exec_calls(gw) == []
 
+    def test_f5_gateway_wedged_reader_does_not_hang(self, gw):
+        """CI regression: the capture reader must never hang the call.
+
+        The reader is a child of the gateway; before this test existed, a
+        `tail` that did not exit left the call (and, on a CI runner, the whole
+        `subprocess.run`) waiting for ever. The wait is bounded now, and the
+        reader no longer inherits the caller's stdout.
+        """
+        gw.exact('echo hello')
+        gw.capture('tail')
+        stub = gw.bin / 'tail'
+        stub.write_text('#!/bin/bash\nsleep 60\n')
+        stub.chmod(0o755)
+        try:
+            started = time.time()
+            proc = gw.run('echo hello')
+        finally:
+            stub.unlink()
+        assert proc.returncode == 0
+        assert proc.stdout.strip() == 'hello'
+        assert time.time() - started < 20
+        assert 'WEDGED' in gw.logger_text()
+
     def test_f5_gateway_result_post_failure_is_harmless(self, gw):
         """New gateway against a dashboard without the endpoint: 404/refused."""
         gw.exact('echo hello')

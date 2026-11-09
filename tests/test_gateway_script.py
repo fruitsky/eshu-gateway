@@ -217,6 +217,10 @@ printf '%s\\n' "$*" >> "__LOG__"
         if 'ESHU_RUN_OWNER="${ESHU_RUN_OWNER:-0}"' in text:
             text = swap('ESHU_RUN_OWNER="${ESHU_RUN_OWNER:-0}"',
                         'ESHU_RUN_OWNER="${ESHU_RUN_OWNER:-%d}"' % os.getuid(), 1)
+        # Keep the "wedged reader" regression test quick.
+        if 'ESHU_CAPTURE_WAIT="${ESHU_CAPTURE_WAIT:-10}"' in text:
+            text = swap('ESHU_CAPTURE_WAIT="${ESHU_CAPTURE_WAIT:-10}"',
+                        'ESHU_CAPTURE_WAIT="${ESHU_CAPTURE_WAIT:-1}"', 1)
         for token, value in (
             ("__TARGET_IP__", self.target_ip),
             ("__DASHBOARD_URL__", "http://dashboard.test"),
@@ -237,6 +241,7 @@ printf '%s\\n' "$*" >> "__LOG__"
         assert "/etc/eshu/features.d" not in text
         assert "/var/run/eshu.tickets" not in text
         assert "${ESHU_RUN_DIR:-/run/eshu}" not in text
+        assert 'ESHU_CAPTURE_WAIT:-10' not in text
         # The hard self-protection case still names the real path on purpose.
         assert '"/etc/eshu' in text
         return text
