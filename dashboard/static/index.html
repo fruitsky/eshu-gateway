@@ -107,7 +107,7 @@
   </div>
   <div class="nav-spacer"></div>
   <div class="sidebar-bottom">
-    <div class="sidebar-status user-pill" id="freeze-pill" title="Emergency Freeze — reject all commands fleet-wide" onclick="toggleFreezeFromSidebar()" style="cursor:pointer;">
+    <div class="sidebar-status user-pill" id="freeze-pill" title="Emergency Freeze — reject all SSH commands and integration writes" onclick="toggleFreezeFromSidebar()" style="cursor:pointer;">
       <span id="freeze-pill-dot" class="freeze-dot"></span>
       <span class="sidebar-status-text" id="freeze-pill-text">Freeze</span>
     </div>
@@ -134,7 +134,7 @@
   <!-- Emergency Freeze Banner -->
   <div id="freeze-banner" class="freeze-banner hidden">
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="flex-shrink-0"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
-    <span id="freeze-banner-text" class="flex-1">Fleet FROZEN — all commands rejected</span>
+    <span id="freeze-banner-text" class="flex-1">Fleet FROZEN — SSH and integration writes rejected</span>
     <button onclick="triggerUnfreeze()" class="btn btn-xs btn-on-banner">Unfreeze</button>
   </div>
 

@@ -4010,7 +4010,7 @@ function renderTable() {
           'Override session</button>';
       }
     } else if (req.status === 'frozen') {
-      actions = '<span class="chip chip-actions chip-frozen" title="Blocked by Emergency Freeze — the fleet is rejecting all commands until unfrozen.">' +
+      actions = '<span class="chip chip-actions chip-frozen" title="Blocked by Emergency Freeze — the fleet is rejecting all SSH commands until unfrozen.">' +
         'Frozen</span>';
     } else if (req.status === 'fleet-run') {
       actions = '<span class="chip chip-actions chip-fleet-run" title="Executed via Fleet Run — see the Fleet Run tab for per-gateway output.">' +
@@ -5144,7 +5144,7 @@ function renderFreezeStatus(data) {
   var pillText = document.getElementById('freeze-pill-text');
   if (banner) banner.classList.toggle('hidden', !frozen);
   if (label) {
-    if (frozen) { label.textContent = 'FROZEN — all commands rejected'; label.style.background = 'var(--state-denied)'; label.style.color = 'white'; }
+    if (frozen) { label.textContent = 'FROZEN — SSH and integration writes rejected'; label.style.background = 'var(--state-denied)'; label.style.color = 'white'; }
     else { label.textContent = 'Active — running normally'; label.style.background = 'var(--state-approved)'; label.style.color = 'var(--bg-base)'; }
   }
   if (freezeBtn) freezeBtn.classList.toggle('hidden', frozen);
@@ -5182,7 +5182,7 @@ async function triggerFreeze() {
     var res = await authFetch('/api/freeze', { method: 'POST' });
     var data = await res.json();
     if (data.status === 'ok') {
-      showToast('Fleet FROZEN — all commands rejected within 30s', 'success');
+      showToast('Fleet FROZEN — SSH and integration writes rejected within 30s', 'success');
       fetchFreezeStatus();
     } else { showToast('Failed: ' + (data.detail || 'unknown'), 'error'); }
   } catch(e) { showToast('Error: ' + e.message, 'error'); }

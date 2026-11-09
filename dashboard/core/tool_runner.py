@@ -11,6 +11,7 @@ strings.
 import json
 
 from db.audit import record_audit_event
+from db.gateways import get_trigger_freeze
 from db.integrations import (
     create_pending_call,
     get_integration,
@@ -143,6 +144,45 @@ def _refuse_read_tool(integration, tool, tool_name, session_id,
                'status_code': 400, 'tool': write_tool}
     payload['command' if error_code == 'not_a_read_command' else 'method'] = detail
     return json.dumps(payload)
+
+
+def _frozen_refusal(integration, tool, tool_name, args, session_id,
+                    execution_id, agent_name):
+    """F9: Emergency Freeze stops integration writes too.
+
+    Reads keep working (an operator investigating an incident still needs
+    them); a handler dry-run changes nothing upstream, so it also runs. The
+    refusal is audited like a policy denial, and no upstream call is made.
+    """
+    message = ('Emergency Freeze is on: SSH and integration writes are paused. '
+               'Reads keep working; ask the operator to unfreeze.')
+    method, path = _request_shape(
+        tool, args, tool.get('transport') or 'http', bool(tool.get('generic')),
+        tool.get('handler') or '')
+    record_integration_call(
+        integration=integration.get('name', ''),
+        tool=tool_name,
+        agent=agent_name,
+        method=method,
+        path=path,
+        status_code=409,
+        latency_ms=0,
+        response_summary=message,
+        response_bytes=0,
+        truncated=0,
+        outcome='refused',
+        session_id=session_id,
+        execution_id=execution_id,
+        reason='Emergency Freeze',
+        request_summary=safe_request_summary(args, tool),
+        reason_code='frozen',
+    )
+    record_audit_event(
+        'mcp_frozen_refused',
+        details=f"{integration.get('name')}.{tool_name} refused while frozen",
+        actor=agent_name)
+    return json.dumps({'error': {'code': 'frozen', 'message': message,
+                                 'status_code': 409}})
 
 
 def _result_error(res: dict) -> str:
@@ -338,6 +378,18 @@ def _run_tool(integration_name: str, tool_name: str, args: dict, reason: str = '
     generic = bool(tool.get('generic'))
     mutating = not tool.get('read_only')
     handler = tool.get('handler') or ''
+    # F9: Emergency Freeze covers integration writes as well as SSH. Whether
+    # this call is a read comes from the §2.6a policy, not from a second local
+    # notion. A dry-run never writes upstream, so it runs while frozen.
+    if get_trigger_freeze() and not args.get('dry_run'):
+        # Imported here: read_policy wraps _read_only_refusal from this module,
+        # so a top-level import would be a cycle.
+        from core.read_policy import is_read_integration_call
+        is_read, _why = is_read_integration_call(
+            tool, tool.get('transport') or 'http', args)
+        if not is_read:
+            return _frozen_refusal(integration, tool, tool_name, args,
+                                   session_id, execution_id, agent_name)
     # Chunk H: the read-only passthrough tools auto-run, so they must not be
     # able to write or execute. This runs whatever the agent's policy says; an
     # arg_policy still applies on top for the calls that do get through.

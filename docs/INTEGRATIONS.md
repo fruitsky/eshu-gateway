@@ -416,6 +416,30 @@ no tool-name conflicts, no cross-talk.
   - Gotchas encoded in the tools: all Lovelace commands are admin-only; the
     update/delete key is `dashboard_id`, while config read/save use `url_path`;
     YAML-mode dashboards are read-only.
+- **Supervisor reads** (`ha_supervisor_info`, `ha_core_info`, `ha_os_info`,
+  `ha_host_info`, `ha_addons`, `ha_addon_info(slug)`, `ha_backups`,
+  `ha_resolution`) — read-only, auto-run. They call the fixed `supervisor/api`
+  endpoints in `core/ha_supervisor.py`; an agent never supplies an endpoint.
+  HA's own API has **no** endpoint allowlist (any admin token can reboot the
+  host or restore a backup), so that table *is* the allowlist.
+  `ha_addon_info` never returns an add-on's `options` — those hold secrets.
+  **These tools need an admin token**: HA's `supervisor/api` is
+  `@require_admin`, and a non-admin token gets a clear `ha_admin_required`
+  error. `ha_whoami` reports which user the token belongs to (`name`,
+  `is_admin`, `is_owner`).
+- **`ha_check_config`** — validates the configuration via
+  `POST /api/config/core/check_config`. Read-only in effect (it changes
+  nothing), so it runs without approval.
+- **Recommended: a dedicated HA admin user for Eshu** (e.g. `eshu`) — create
+  it under Settings → People with *Administrator* on, create a long-lived
+  token while logged in as it, and paste that into the integration. HA's
+  logbook then attributes agent actions to that user, and the token can be
+  revoked without touching your own login. A long-lived token carries **all**
+  of its user's rights; an admin token is admin, so treat it as one. (The
+  token in use today is usually your own admin login's.)
+- **Emergency Freeze covers integration writes**: while the fleet is frozen,
+  every mutating integration call — and every approval of a pending one — is
+  refused with `frozen`. Reads keep working so you can still investigate.
 - **Behind a reverse proxy**: ensure it forwards the `Authorization` header, e.g.
   NPM Advanced config `proxy_set_header Authorization $http_authorization;` —
   otherwise HA returns 401 and the **Test** button will surface it.

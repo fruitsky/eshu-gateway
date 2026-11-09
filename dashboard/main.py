@@ -3782,6 +3782,20 @@ def approve_integration_call(call_id: int, request: Request):
                 actor='operator')
             return {"status": "denied", "id": call_id, "reason": reason}
 
+    # F9: Emergency Freeze refuses the approval itself. The call stays pending
+    # so the operator can approve it after unfreezing — a freeze pauses work,
+    # it does not destroy the queue.
+    if get_trigger_freeze():
+        record_audit_event(
+            'integration_call_refused_frozen',
+            details=f"Integration call #{call_id} ({call['integration']}.{call['tool']}) "
+                    f"not approved: Emergency Freeze is on",
+            actor='operator')
+        raise HTTPException(
+            status_code=409,
+            detail="Emergency Freeze is on: integration writes are paused. "
+                   "Unfreeze the fleet to approve this call.")
+
     # Keep the provenance of the id on the executor's audit row: an approved
     # inherited call must not start counting as caller-tagged coverage.
     source_token = set_current_session_source(call.get('session_source') or 'caller')
