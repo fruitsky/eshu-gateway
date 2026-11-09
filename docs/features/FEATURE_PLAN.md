@@ -3320,6 +3320,106 @@ ESHU_MCP=1 [ESHU_FORCE_JIT=1] ESHU_SESSION=<id>
   `requests.agent` (nullable, `''` = direct SSH) makes history, statistics and
   overrides per-agent later. Audit rows record the agent on every MCP request.
 
+**A1 — the nonce store.** The gateway is a new process per SSH call, so the
+seen set is a file:
+
+* Path `/run/eshu/nonces`, mode `0600`, inside the `0700` root-owned run dir
+  the poller already checks (it is also where the F5 capture files live).
+* One line per accepted nonce: `<unix ts> <nonce hex>`. The write path takes
+  an exclusive `flock` and does check → append → prune **under the lock**, so
+  two concurrent calls with the same nonce cannot both pass.
+* Prune on every write: lines whose timestamp is older than the ±300 s
+  window are dropped.
+* Size bound: more than **4096** entries *after* pruning refuses new signed
+  calls (`nonce-store-full`) instead of evicting unexpired nonces. A full
+  store is an operator problem, not a reason to trust a replay.
+* Any lock/read/write failure refuses the call (`nonce-store-error`), so a
+  broken store fails closed.
+
+```bash
+# A1: check-and-add, all under one lock. Returns 0 accepted, 2 replay,
+# 3 full, 1 store error.
+consume_nonce() {            # $1 = nonce hex, $2 = ts
+  local nonce="$1" ts="$2" now rc=0
+  now=$(date +%s)
+  exec 9>>/run/eshu/nonces || return 1
+  flock -w 2 9 || { exec 9>&-; return 1; }
+  awk -v lo=$((now - 300)) '$1 >= lo' /run/eshu/nonces > /run/eshu/nonces.tmp     && cat /run/eshu/nonces.tmp > /run/eshu/nonces || rc=1
+  if [ "$rc" = 0 ] && grep -qxF "$ts $nonce" /run/eshu/nonces; then rc=2; fi
+  if [ "$rc" = 0 ] && [ "$(wc -l < /run/eshu/nonces)" -ge 4096 ]; then rc=3; fi
+  if [ "$rc" = 0 ]; then printf '%s %s\n' "$ts" "$nonce" >> /run/eshu/nonces; fi
+  rm -f /run/eshu/nonces.tmp
+  exec 9>&-
+  return "$rc"
+}
+```
+
+Tests (gateway sandbox): two concurrent calls with the same nonce, exactly
+one passes; a stale entry is pruned and does not block a new nonce; a store
+at the bound refuses; an unwritable/locked-out store refuses.
+
+**A2 — canonical form and HMAC tooling.** The MACed string is fixed, one
+field per line, version first, and every field is validated against a charset
+that cannot contain `newline`:
+
+```
+v1
+<agent>            [A-Za-z0-9_.:-]{1,64}
+<session>          [A-Za-z0-9_.:-]{0,64}
+<mcp>              0 | 1
+<force_jit>        0 | 1
+<ts>               [0-9]{1,12}
+<nonce>            [0-9a-f]{16,64}
+<gateway>          the gateway's registered IP  [A-Za-z0-9_.:-]{1,64}
+<sha256(command)>  64 lowercase hex
+```
+
+`K = HMAC-SHA256(gateway_token, "eshu-ssh-agent-v1")`,
+`ESHU_AGENT_SIG = HMAC-SHA256(K, canonical)` (64 lowercase hex).
+
+The gateway already starts `python3` for `ESHU_SESSION_SIG`, so the new check
+reuses that shape — but the **key never goes on argv**: the helper reads
+`/etc/eshu-token` itself, the canonical string arrives on **stdin**, and only
+the signature is an argument.
+
+```bash
+canonical=$(printf 'v1\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s' \
+  "$ESHU_AGENT" "${ESHU_SESSION_ID:-}" "$ESHU_MCP" "${ESHU_FORCE_JIT:-0}" \
+  "$ESHU_TS" "$ESHU_NONCE" "$GATEWAY_IP" "$(printf '%s' "$cmd" | sha256sum | cut -d' ' -f1)")
+if printf '%s' "$canonical" | python3 - "$ESHU_AGENT_SIG" <<'PY'
+import hmac, hashlib, sys
+sig = sys.argv[1].strip()
+token = open('/etc/eshu-token', 'rb').read().strip()
+key = hmac.new(token, b'eshu-ssh-agent-v1', hashlib.sha256).digest()
+want = hmac.new(key, sys.stdin.buffer.read(), hashlib.sha256).hexdigest()
+sys.exit(0 if hmac.compare_digest(sig, want) else 1)
+PY
+then sig_state=ok; else sig_state=bad; fi
+```
+
+**Shared test vector** (dashboard and gateway tests use the same one): token
+`eshu-test-token`, agent `agent-a`, session `sess-1`, mcp `1`, force_jit `0`,
+ts `1700000000`, nonce `0123456789abcdef`, gateway `192.0.2.10`, command
+`uptime` (`sha256 = dd291cd6294bafef2a7e9c378eb320e87198d6dae214272addb569775750c802`):
+
+```
+v1
+agent-a
+sess-1
+1
+0
+1700000000
+0123456789abcdef
+192.0.2.10
+dd291cd6294bafef2a7e9c378eb320e87198d6dae214272addb569775750c802
+```
+
+→ `ESHU_AGENT_SIG = 8e16581e343844cc2d75453461d3464b4c36cd22ae046573093fa63f93db0b04`
+(derived key hex `04bfe393d32b73020113f6cefcec7ad1825272cfa3b48547e0648c5d2fa041d5`).
+The existing `ESHU_SESSION_SIG` helper still passes its key on argv; moving it
+to the same file-read shape is a small security Chunk 7 cleanup, not part of
+this design.
+
 #### 6. `ESHU_FORCE_JIT`, end to end
 
 The auto-run decisions are **not all on the gateway**: the allowlist and the
@@ -3363,6 +3463,29 @@ only a ticket with no agent. Without this, any shared-key caller in
 under its own identity and read the output. Tests: agent B cannot claim agent
 A's ticket; an unsigned caller cannot claim it; agent A claims it exactly once.
 
+**A4 — ticket format and compatibility.** The approved ticket line becomes
+`<ts>|<agent>|<session>|<command>`, with the command **last** so a `|` inside
+it survives. The dashboard's poller writes it, from the request row it has
+just approved (the `/api/ticket` / request-status payload gains `agent` and
+`session`; both are charset-checked like the rest). Compatibility is
+explicit, in both directions:
+
+* a **new gateway** reading an old `ts|cmd` line treats the agent and session
+  as empty (an agent-less ticket, claimable only by an unsigned request);
+* an **old poller** keeps writing `ts|cmd`. A signed MCP request (agent
+  non-empty) may only claim a ticket whose agent field equals its own, so it
+  can never claim an old agent-less line — the re-run after approval returns
+  "no ticket for this agent" and falls back to a fresh request instead of
+  taking another agent's approval;
+* an unsigned request may claim either an agent-less old line or a new line
+  with an empty agent. It may never claim a ticket with an agent.
+* once the fleet runs the new poller, `direct+mcp` gateways can keep serving
+  direct SSH with agent-less tickets and MCP with bound ones side by side.
+
+Tests, both directions: old line + new gateway (signed request refused,
+unsigned accepted); new line + old poller (signed request refused, no
+cross-agent claim); new line + new gateway (agent A claims exactly once).
+
 #### 8. Output and the envelope
 
 * **The envelope is the only stdout in MCP mode.** The gateway captures all
@@ -3379,6 +3502,54 @@ A's ticket; an unsigned caller cannot claim it; agent A claims it exactly once.
   the MCP client.
 * Stderr is merged into the same stream (as the gateway does today), so the
   agent sees what a direct SSH agent would.
+
+**A3 — one `say()` helper, and the output cap.** The gateway prints on many
+paths, not just the command: the `[LOCKED]` messages (freeze, blocklist, hard
+block, session required/invalid, bad prefix, rate limit, JIT unreachable,
+encoded payload), the JIT status lines (`#N sent`, `[DENIED]`, `[TIMEOUT]`,
+`[EXPIRED]`, `[OK] Approved! Executing…`), the `[ESHU exit=N]` sentinel, and
+the command's own stream through `sanitize`. Every human-facing writer is
+routed through one helper:
+
+```bash
+# A3: the only human-facing writer. Direct mode prints; MCP mode appends the
+# line to the envelope's `messages` (JSON-escaped) and prints nothing.
+say() {
+  if [ "$ESHU_MCP" = "1" ]; then
+    ESHU_MSG_JSON="${ESHU_MSG_JSON:+$ESHU_MSG_JSON,}\"$(json_escape "$*")\""
+  else
+    printf '%s\n' "$*"
+  fi
+}
+```
+
+`[ESHU exit=N]` becomes `say`-free: in MCP mode it is `exit_code` in the
+envelope, not a stdout line. The command's own output never reaches stdout in
+MCP mode:
+
+```bash
+# A3: MCP mode captures the stream (F5's tee already fans it out) and keeps
+# its tail; direct mode is untouched.
+ESHU_MCP_CAP=$(mktemp -p "$ESHU_RUN_DIR" eshu-mcp.XXXXXX) || exit 1
+{ tail -c 65537 > "$ESHU_MCP_CAP" || true; cat > /dev/null; } < "$ESHU_OUT_FIFO" &
+...
+mcp_size=$(wc -c < "$ESHU_MCP_CAP")
+mcp_trunc=false; [ "$mcp_size" -gt 65536 ] && mcp_trunc=true
+mcp_b64=$(tail -c 65536 "$ESHU_MCP_CAP" | base64 -w0)
+printf 'ESHU-MCP-ENVELOPE {"status":"%s","request_id":%s,"exit_code":%s,"output_b64":"%s","truncated":%s,"messages":[%s]}\n' \
+  "$status" "${DISPLAY_ID:-0}" "$rc" "$mcp_b64" "$mcp_trunc" "$ESHU_MSG_JSON"
+```
+
+**The cap is 64 KiB for the MCP envelope** (the design's number). F5's
+16 KiB stays what it is for `request_results`: the stored execution result is
+a different artefact from the bytes handed to the MCP client, and 64 KiB is
+the MCP ceiling the note promised. The dashboard re-applies its own 64 KiB
+cap after decoding, so a gateway that sends more is still trimmed.
+
+Test: in MCP mode, stdout is **exactly one** `ESHU-MCP-ENVELOPE` line on
+every path — ran, pending, blocked, frozen, Zero-Trust, encoded payload and a
+bad signature — with no banner or status line outside it, and any other
+stdout makes the dashboard return `refused`/`bad-envelope`.
 
 #### 9. Migration and launch
 
@@ -3441,6 +3612,39 @@ decisions, not questions:
    request id at the cap; `timeout` ≤ 120 s and F19 is the real remote bound
    (§2, §7).
 
+#### 12. Accepted risk: the dashboard can start commands
+
+Until now the dashboard could approve a command but not start one: the
+gateway's forced command ran on the agent's own SSH connection. With the
+dashboard key it can start a command on every gateway that holds the key, so
+a **compromised dashboard can both start and approve its own commands**;
+JIT still runs on the gateway, but with the approval UI on the same host that
+holds the key, the human gate is only as strong as the dashboard. This is a
+real trust change and is accepted for the homelab threat model, with these
+mitigations:
+
+* `from="<dashboard addresses>"` on the key line, so a stolen key does not
+  work from anywhere else;
+* per-gateway `ssh_mode` with `direct+mcp` as the default, so sensitive
+  gateways can keep the key out entirely;
+* the key file is `0600` in a `0700` directory owned by the service user, and
+  the runner refuses to run otherwise;
+* an `ssh_exec` audit row per call (agent, gateway, command hash, request id,
+  outcome), on top of the gateway's own request/audit rows;
+* `mcp_only` is opt-in: it retires the shared agent key, it does not widen the
+  dashboard's reach.
+
+**Option for the security reviewer: a per-gateway "never accept the dashboard
+key" switch.** A gateway setting (`dashboard_key: never`, a checkbox, and an
+installer flag `--no-dashboard-key`) makes the installer omit the dashboard
+line (and remove it on a re-run); the server side then refuses to call that
+gateway with `ssh_exec` (`dashboard_key_disabled`) and the UI says so. That is
+the strongest available answer short of not shipping the key: the operator can
+keep the dashboard unable to start commands on the gateways that matter, at
+the cost of `ssh_exec` not working there. The design leaves the default at
+"key present" and asks the security reviewer to decide whether the switch
+should ship in this chunk or in F19/Chunk 7.
+
 #### Round 2: fixes for design review round 1
 
 * **R1** — the MAC now covers every prefix field, `sha256(command)` and the
@@ -3465,6 +3669,34 @@ decisions, not questions:
 * **Answers 1–5** are folded in as decisions (§11).
 
 `bash scripts/verify.sh`: `1856 passed, 3 skipped, 7 warnings in 379.20s (0:06:19)` (docs-only; the three skips are F18's read-lane tests).
+
+#### Round 3: fixes for design review round 2
+
+* **A1** — the nonce store is `/run/eshu/nonces`, `flock`ed check → append →
+  prune under one lock, pruned to ±300 s, bounded at 4096 entries (fail
+  closed, never evict unexpired), and fails closed on any store error. The
+  bash and the concurrency/stale/full/unwritable tests are in §5.
+* **A2** — the canonical form is a fixed `v1`-first newline-joined block with
+  every field charset-checked, `K = HMAC(token, "eshu-ssh-agent-v1")`, and the
+  gateway helper reads the key from `/etc/eshu-token` with the canonical string
+  on **stdin** (the signature is the only argument, so the key is never on
+  argv). The shared test vector (`eshu-test-token` … `uptime`) and its
+  expected MAC are in §5.
+* **A3** — every human-facing writer goes through `say()`, which prints in
+  direct mode and appends an escaped `messages` entry in MCP mode; the
+  command stream is captured and only the envelope reaches stdout. The cap is
+  **64 KiB for the MCP envelope** (F5's 16 KiB stays for `request_results`),
+  with the bash and the "exactly one envelope on every path" test in §8.
+* **A4** — the ticket line is `ts|agent|session|cmd` (command last), written
+  by the poller from the approval payload; a new gateway reads old `ts|cmd`
+  lines as agent-less; a signed request can never claim an agent-less line; an
+  unsigned request can claim only agent-less tickets. Both directions and the
+  cross-agent case are tested (§7).
+* **A5** — the trust change is written as an accepted risk with its
+  mitigations, plus the per-gateway "never accept the dashboard key" option
+  for the security reviewer to accept or defer (§12).
+
+`bash scripts/verify.sh`: `1856 passed, 3 skipped, 7 warnings in 379.12s (0:06:19)` (docs-only; the three skips are F18's read-lane tests).
 
 ### Reviewer notes
 
