@@ -114,7 +114,12 @@ capture_tail() {   # $1 = capture file
       size[slot] = length($0) + 1
       total += size[slot]
       while (n - head >= 1 && total - size[head % 20000] >= 16385) {
-        total -= size[head % 20000]
+        # C5: free the slot. Advancing `head` alone kept up to 20000 old lines
+        # alive (395 MB resident for 200 MB of output).
+        slot = head % 20000
+        total -= size[slot]
+        delete line[slot]
+        delete size[slot]
         head++
       } }
     END {

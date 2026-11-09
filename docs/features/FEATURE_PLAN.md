@@ -3395,6 +3395,24 @@ Both installers were regenerated in this commit
 
 `bash scripts/verify.sh`: `2352 passed, 7 warnings in 429.69s (0:07:09)`.
 
+### Round 5 — CI fix review round 4 (C5)
+
+* **C5 — dropped ring lines were never freed.** The ring advanced `head` but
+  left `line[head % 20000]` in the array until its slot was reused, so up to
+  20 000 dropped lines stayed resident: 200 MB of output peaked at 395 MB
+  resident instead of 16 KiB. The loop now `delete`s both `line` and `size`
+  for the slot it drops.
+  `test_f5_capture_tail_frees_dropped_lines` streams 2000 × 100 KB lines
+  through the function under `ulimit -v 65536` (64 MB) for each awk, so a leak
+  is fatal rather than slow, and still asserts the stored bytes are
+  `tail -c 16385`. Without the `delete`s the test fails under both awks; the
+  two-awk run takes about 2 s.
+
+Both installers were regenerated in this commit
+(`python3 dashboard/gen_installer.py`).
+
+`bash scripts/verify.sh`: `2354 passed, 7 warnings in 430.48s (0:07:10)`.
+
 ### Reviewer notes
 
 **Design round 1 (2026-11-08): approved with changes.** Fold D1–D8 into the

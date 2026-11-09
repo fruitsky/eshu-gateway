@@ -53,29 +53,35 @@ def awk_name(request):
     return request.param
 
 
+def _sandbox(tmp_path, awk_name):
+    """`awk` bound to one implementation, a quiet logger, and the harness."""
+    bindir = tmp_path / 'bin'
+    bindir.mkdir()
+    (bindir / 'awk').symlink_to(shutil.which(awk_name))
+    # Hermetic: the failure path logs; never write to the host's syslog.
+    logger = bindir / 'logger'
+    logger.write_text('#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s"\n'
+                      % (bindir / 'logger.log'))
+    logger.chmod(0o755)
+    harness = tmp_path / 'harness.sh'
+    harness.write_text(_capture_function() + '\ncapture_tail "$1"\n')
+    env = {
+        'PATH': '%s:%s' % (bindir, os.environ.get('PATH', '/usr/bin:/bin')),
+        'LANG': 'C.UTF-8',
+        'LC_ALL': '',
+    }
+    return bindir, harness, env
+
+
 class Capture:
     """Run the extracted function against `data` with `awk` bound to one awk."""
 
     def __init__(self, tmp_path, awk_name, data, cap_is_dir=False):
-        bindir = tmp_path / 'bin'
-        bindir.mkdir()
-        (bindir / 'awk').symlink_to(shutil.which(awk_name))
-        # Hermetic: the failure path logs; never write to the host's syslog.
-        logger = bindir / 'logger'
-        logger.write_text('#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s"\n'
-                          % (bindir / 'logger.log'))
-        logger.chmod(0o755)
+        bindir, harness, env = _sandbox(tmp_path, awk_name)
         self.log = bindir / 'logger.log'
-        harness = tmp_path / 'harness.sh'
-        harness.write_text(_capture_function() + '\ncapture_tail "$1"\n')
         self.cap = tmp_path / 'capture.out'
         if cap_is_dir:
             self.cap.mkdir()
-        env = {
-            'PATH': '%s:%s' % (bindir, os.environ.get('PATH', '/usr/bin:/bin')),
-            'LANG': 'C.UTF-8',
-            'LC_ALL': '',
-        }
         self.proc = subprocess.run(
             ['bash', str(harness), str(self.cap)], input=data,
             capture_output=True, env=env, timeout=120)
@@ -166,3 +172,31 @@ class TestCaptureTail:
     def test_f5_capture_tail_does_not_log_on_success(self, tmp_path, awk_name):
         run = Capture(tmp_path, awk_name, b'hello\n')
         assert run.logged() == ''
+
+    def test_f5_capture_tail_frees_dropped_lines(self, tmp_path, awk_name):
+        """C5: 200 MB of output must fit in a 64 MB address space.
+
+        The ring holds at most 16 KiB of lines. A dropped line that is only
+        unlinked from the head index but left in the array costs 100 KB each,
+        up to 20000 of them (395 MB resident). The lines are streamed in, so
+        the test itself holds one line, and `ulimit -v` makes the leak fatal
+        instead of merely slow.
+        """
+        bindir, harness, env = _sandbox(tmp_path, awk_name)
+        cap = tmp_path / 'capture.out'
+        line = b'x' * 100000 + b'\n'
+        script = ('ulimit -v 65536\n'
+                  'exec bash "%s" "%s" > /dev/null\n' % (harness, cap))
+        proc = subprocess.Popen(['bash', '-c', script], stdin=subprocess.PIPE,
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.PIPE, env=env)
+        try:
+            for _ in range(2000):
+                proc.stdin.write(line)
+            proc.stdin.close()
+        except BrokenPipeError:
+            pass
+        proc.wait(timeout=180)
+        err = proc.stderr.read()
+        assert proc.returncode == 0, err[-2000:]
+        assert cap.read_bytes() == b'x' * 16384 + b'\n'
