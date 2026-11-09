@@ -3321,7 +3321,78 @@ gateways.
 
 ### Implementer notes
 
-_(implementer)_
+**What I did**
+
+* **`core/read_policy.py` (§2.6a)**: the same minimal, integration-half module
+  the task asks for — `is_read_integration_call(tool, transport, args)` wraps
+  Chunk H's `_read_only_refusal` and adds the `read_only` guard. F4's branch
+  holds the full file (SSH rules); this one will be merged with it, and the
+  guard must survive that merge. **Every source read goes through it**:
+  `core.inventory._call_tool` refuses a source tool that is not a read before
+  anything is sent.
+* **`local_dns_records`** (`core/pihole_seed.py` + a handler in
+  `core/tool_handlers.py`): two fixed GETs, `config/dns/hosts` and
+  `config/dns/cnameRecords` (Pi-hole v6; the integration's base URL ends in
+  `/api`). The payload is accepted in both shapes FTL uses — nested under
+  `{"config": {"dns": {...}}}` and `"<ip> <name>"` / `"<name>,<target>"`
+  strings — and returned as `{hosts: [{name, ips}], cnames: [{name, target}]}`.
+  It is `read_only`, so `is_read_integration_call` passes; the description says
+  it needs a v6 integration.
+* **`core/inventory.py`**: five source adapters — Eshu (gateways + F7 inner
+  targets), Proxmox (`get_cluster_resources`), NPM (`proxy_hosts`), Pi-hole
+  (`local_dns_records`), Omada (`list_sites` then `list_known_clients` per
+  site, capped at 10 sites). Each is optional; a missing integration is
+  skipped, a failed one records its reason. `refresh_inventory()` swaps one
+  source's rows in one transaction and records the result in
+  `inventory_sources`; a failure **keeps the last good rows** and marks the
+  source stale (last error, or no success for two intervals).
+* **Join** (`build_entities`): union-find over `ip:<ip>`, `name:<normalised>`
+  (the name, each FQDN, and an FQDN's first label when it is at least three
+  characters) and `vmid:<host>:<vmid>`. An entity carries name, IPs, FQDNs,
+  hosts, vmids, URLs, kinds, the contributing sources (with their staleness)
+  and `conflicts` — an IP claimed by two different names is listed, never
+  resolved silently.
+* **`whereis(query)`**: exact matches first, then substrings, over name, IPs,
+  FQDNs, vmids, hosts, URLs and the MAC/inner-target extras. Up to **5**
+  entities, each trimmed under **600 characters** with `truncated` set.
+* **API**: `GET /api/inventory` (snapshot + `?q=` search), `POST
+  /api/inventory/refresh` (audited, synchronous — the operator pressed it),
+  `POST /api/inventory/settings` (interval clamped to 5–120, default 15,
+  audited). The background loop sleeps one interval before its first refresh,
+  so a boot never fires source calls while the dashboard starts.
+* **MCP**: `whereis` is a built-in on the shared and per-integration servers
+  (and in `_ALWAYS_ALLOWED`, like `session_begin`) — it answers from Eshu's own
+  cache and makes no upstream call on the request, so there is nothing for the
+  agent policy to gate.
+* **UI**: an Inventory page (sidebar) with a search box, the per-source chip
+  row (counts and stale dashes), the interval control, "Refresh now", and one
+  card per entity: name, ip/name/host/guest/url/mac facts, source chips and
+  the conflict line. Every string is escaped; a stale entity is dimmed.
+* **Tests**: `tests/test_f14_inventory.py` (18) — the five-source join (one
+  entity, all sources), the read-only source calls, a conflict, a failed
+  source keeping its rows and turning stale, Eshu-only with no integrations,
+  the 5-entity and 600-character caps, matching by IP/vmid/MAC/name, interval
+  clamping, `local_dns_records` passing the read check, the v6 parser on both
+  payload shapes, the upstream-error path, the three endpoints (session auth
+  included), and two node-harness checks (escaping; stale + conflict markers).
+
+**Decisions**
+
+* **HA add-on slugs are skipped**: the chunk says "after F9", and F9 is not on
+  `feature-roadmap`. Adding the source later is one adapter.
+* The **manual refresh is synchronous** so its result is real (the operator
+  pressed a button and gets counts). The background loop sleeps first and then
+  refreshes on the interval, so it never competes with a cold start.
+* The **join is deliberately loose on FQDNs** (first label) — `app.example.test`
+  should reach a guest named `app`. A wrong join is visible as a conflict
+  rather than hidden, and an entity lists every source that contributed.
+* Omada is the only source needing two calls (sites, then clients); sites are
+  capped at 10 so one controller cannot multiply the refresh cost.
+* The inventory stores **only read-only metadata** (names, addresses, ids,
+  URLs, MACs, a few status flags) and never a secret; the response scrubber
+  still runs on upstream responses before anything is cached.
+
+`bash scripts/verify.sh`: `1874 passed, 3 skipped, 7 warnings in 380.39s (0:06:20)`. The three skips are F18's read-lane tests (F4 is not on this branch).
 
 ### Reviewer notes
 
