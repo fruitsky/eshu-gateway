@@ -34,6 +34,7 @@ Round 5 implements the security reviewer's conditions SC1–SC7:
   `auto_approved` verdict may be auto-run.
 """
 import os
+import posixpath
 import re
 import shlex
 
@@ -268,9 +269,9 @@ OPTION_SPECS = {
     ('pct', 'list'): _spec(),
     ('qm', 'list'): _spec(),
     ('zpool', 'status'): _spec(
-        flags=('-v', '-x', '-H', '-p', '-L', '-P', '-g'), letters='vxHpLPG'),
+        flags=('-v', '-x', '-H', '-p', '-L', '-P', '-g'), letters='vxHpLPg'),
     ('zpool', 'list'): _spec(
-        flags=('-v', '-x', '-H', '-p', '-L', '-P', '-g'), letters='vxHpLPG'),
+        flags=('-v', '-x', '-H', '-p', '-L', '-P', '-g'), letters='vxHpLPg'),
     ('zfs', 'list'): _spec(
         flags=('-H', '-p', '-r'), letters='Hpr',
         values={'-d': 'depth', '-t': 'text'}),
@@ -279,15 +280,13 @@ OPTION_SPECS = {
         flags=('-n', '-b', '-s', '-E', '-T', '-A', '-v', '-e', '-t', '-u'),
         letters='nbsETAvetu'),
     ('head', ''): _spec(
-        flags=('-q', '--quiet', '--silent', '-v', '--verbose',
-               '-z', '--zero-terminated'),
-        letters='qvz', digits=True,
+        flags=('-q', '--quiet', '--silent', '-v', '--verbose'),
+        letters='qv', digits=True,
         values={'-n': 'lines', '--lines': 'lines',
                 '-c': 'bytes', '--bytes': 'bytes'}),
     ('tail', ''): _spec(
-        flags=('-q', '--quiet', '--silent', '-v', '--verbose',
-               '-z', '--zero-terminated'),
-        letters='qvz', digits=True,
+        flags=('-q', '--quiet', '--silent', '-v', '--verbose'),
+        letters='qv', digits=True,
         values={'-n': 'lines', '--lines': 'lines',
                 '-c': 'bytes', '--bytes': 'bytes'}),
     ('grep', ''): _spec(
@@ -297,10 +296,9 @@ OPTION_SPECS = {
                '-q', '--quiet', '--silent', '-s', '--no-messages',
                '-H', '--with-filename', '-h', '--no-filename',
                '-E', '--extended-regexp', '-F', '--fixed-strings',
-               '-G', '--basic-regexp', '-P', '--perl-regexp', '-w',
-               '--word-regexp', '-x', '--line-regexp', '-r', '--recursive',
-               '-a', '--text'),
-        letters='ivnclLoqsHhEFGPwxra',
+               '-G', '--basic-regexp', '-w',
+               '--word-regexp', '-x', '--line-regexp', '-a', '--text'),
+        letters='ivnclLoqsHhEFGwxa',
         values={'-e': 'pattern', '--regexp': 'pattern',
                 '-m': 'mcount', '--max-count': 'mcount',
                 '-A': 'lines', '-B': 'lines', '-C': 'lines',
@@ -329,7 +327,7 @@ def option_spec_for(verb, sub):
 
 
 def _scan_options(tokens, spec):
-    """Consume the listed options. Returns (operands, used, error).
+    """Consume the listed options. Returns (operands, used, values, error).
 
     SC1: exact spellings only, `--`/`-` refused, clusters only when every
     letter is listed, and a value is read only for an option this verb says
@@ -337,12 +335,13 @@ def _scan_options(tokens, spec):
     """
     operands = []
     used = set()
+    values = {}
     index = 0
     total = len(tokens)
     while index < total:
         token = tokens[index]
         if token in ('--', '-'):
-            return None, None, 'dash'
+            return None, None, None, 'dash'
         if token in spec['words']:
             used.add(token)
             index += 1
@@ -353,16 +352,17 @@ def _scan_options(tokens, spec):
                 if not sep:
                     index += 1
                     if index >= total:
-                        return None, None, 'missing-value'
+                        return None, None, None, 'missing-value'
                     value = tokens[index]
                 ok, why = VALIDATORS[spec['values'][name]](value)
                 if not ok:
-                    return None, None, why
+                    return None, None, None, why
                 used.add(name)
+                values[name] = value
                 index += 1
                 continue
             if sep or name not in spec['flags']:
-                return None, None, 'option:' + token
+                return None, None, None, 'option:' + token
             used.add(name)
             index += 1
             continue
@@ -370,11 +370,12 @@ def _scan_options(tokens, spec):
             if token in spec['values']:
                 index += 1
                 if index >= total:
-                    return None, None, 'missing-value'
+                    return None, None, None, 'missing-value'
                 ok, why = VALIDATORS[spec['values'][token]](tokens[index])
                 if not ok:
-                    return None, None, why
+                    return None, None, None, why
                 used.add(token)
+                values[token] = tokens[index]
                 index += 1
                 continue
             if token in spec['flags']:
@@ -384,8 +385,9 @@ def _scan_options(tokens, spec):
             if spec['digits'] and token[1:].isdigit():
                 ok, why = _cap_lines(token[1:])
                 if not ok:
-                    return None, None, why
+                    return None, None, None, why
                 used.add('-n')
+                values['-n'] = token[1:]
                 index += 1
                 continue
             cluster = token[1:]
@@ -400,22 +402,23 @@ def _scan_options(tokens, spec):
                     else:
                         index += 1
                         if index >= total:
-                            return None, None, 'missing-value'
+                            return None, None, None, 'missing-value'
                         value = tokens[index]
                     ok, why = VALIDATORS[spec['values'][option]](value)
                     if not ok:
-                        return None, None, why
+                        return None, None, None, why
                     used.add(option)
+                    values[option] = value
                     break
                 if letter not in spec['letters']:
-                    return None, None, 'option:' + option
+                    return None, None, None, 'option:' + option
                 used.add(option)
                 position += 1
             index += 1
             continue
         operands.append(token)
         index += 1
-    return operands, used, ''
+    return operands, used, values, ''
 
 
 def _under(path, prefixes):
@@ -437,13 +440,22 @@ def _cat_allowed(path):
 
 
 def _path_ok(token):
-    """R2/SC6: an absolute path inside the safe trees, no glob, no `..`."""
+    """R2/SC6: an absolute path inside the safe trees, no glob, no `..`.
+
+    Round 6 R1: the path is compared with its normalised form (one trailing
+    slash allowed), so an empty component (`/sys/kernel//debug`) or a `.`
+    component (`/sys/./kernel/debug`) cannot slip past a textual prefix
+    denial. The `..` refusal stays explicit for the reason message.
+    """
     if not token.startswith('/'):
         return False
     if any(ch in GLOB_CHARS for ch in token):
         return False
     parts = token.split('/')
     if '..' in parts:
+        return False
+    stripped = token[:-1] if token.endswith('/') and len(token) > 1 else token
+    if posixpath.normpath(stripped) != stripped:
         return False
     if token == '/dev' or token.startswith('/dev/'):
         return False
@@ -472,10 +484,36 @@ def _path_ok(token):
     return token in SAFE_PATH_EXACT
 
 
+def _grep_log_lines(used, values):
+    """R3: how many lines one capped log grep may print.
+
+    `m × (1 + max(A + B, 2C))`, or None when a value cannot be read. The
+    reviewer's rule: a context option must not undo the `-m` cap.
+    """
+    def _int(*names):
+        for name in names:
+            if name in values:
+                try:
+                    return int(values[name])
+                except (TypeError, ValueError):
+                    return None
+        return 0
+
+    matches = _int('-m', '--max-count')
+    if matches is None:
+        return None
+    after = _int('-A', '--after-context')
+    before = _int('-B', '--before-context')
+    context = _int('-C', '--context')
+    if after is None or before is None or context is None:
+        return None
+    return matches * (1 + max(after + before, context * 2))
+
+
 def _check_files(verb, rest):
     """A file reader: SC2 operands, then the per-verb reading rules."""
     spec = OPTION_SPECS[(verb, '')]
-    operands, used, error = _scan_options(rest, spec)
+    operands, used, values, error = _scan_options(rest, spec)
     if error:
         return False, error
     if verb == 'grep':
@@ -493,15 +531,17 @@ def _check_files(verb, rest):
         if not _path_ok(name):
             return False, 'operand:' + name
     if verb == 'grep':
-        recursive = '-r' in used or '--recursive' in used
-        if recursive:
-            for name in files:
-                if not _under_log(name):
-                    return False, 'grep-recursive'
+        # R2: recursion is not in the lane — `-r`/`--recursive` are not in the
+        # grep spec at all, so they are refused as unknown options before this
+        # point. `ls -R` and `du` still list the names.
         if any(_under_log(name) for name in files):
             # SC5: a log is read through grep only with a line cap.
             if '-m' not in used and '--max-count' not in used:
                 return False, 'grep-cap'
+            # R3: context options multiply the cap, so the product must fit.
+            lines = _grep_log_lines(used, values)
+            if lines is None or lines > JOURNAL_MAX_LINES:
+                return False, 'grep-context'
     if verb == 'ls' and ('-R' in used or '--recursive' in used):
         for name in files:
             if not _under_log(name):
@@ -543,7 +583,7 @@ def _check_status(verb, rest):
     spec = option_spec_for(verb, sub)
     if spec is None:
         return False, 'verb:' + verb
-    operands, used, error = _scan_options(rest, spec)
+    operands, used, values, error = _scan_options(rest, spec)
     if error:
         return False, error
     # SC2: a status verb reads no files, so any leftover word must already be

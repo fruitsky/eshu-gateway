@@ -112,7 +112,9 @@ ELIGIBLE = [
     'grep -m 50 -e error /var/log/syslog',
     'grep -m 10 -i -e error /var/log/syslog',
     'grep -m 10 --regexp=error /var/log/syslog',
-    'grep -r -m 50 -e error /var/log',
+    'grep -m 500 -A 1 -e error /var/log/syslog',
+    'grep -m 300 -C 1 -e error /var/log/syslog',
+    'grep -m 1 -A 500 -e error /var/log/syslog',
     'grep error /proc/1/status',
     'ls -R /var/log',
     'ls -la /var/log',
@@ -244,6 +246,10 @@ INELIGIBLE = [
     'journalctl -o json -n 5',
     'grep -f /etc/passwd /var/log/syslog',
     'grep --exclude-from=/etc/passwd -m 5 -e error /var/log',
+    # R2 round 6: recursion is not in the lane at all (grep -r refused)
+    'grep -r -m 50 -e error /var/log',
+    'grep -r -m 50 -e error /var/log/',
+    'grep --recursive -m 50 -e error /var/log',
     # R5: recursion under /proc or /sys, and -R / -d recurse anywhere
     'grep -R -e error /var/log',
     'grep -R -e error /proc',
@@ -603,6 +609,80 @@ class TestSecurityConditions:
                             checked += 1
                     index += 1
         assert checked >= 50, checked
+
+
+class TestRoundSixFixes:
+    """Round 6 R1–R4 (reviewer round 5)."""
+
+    def test_f4_r1_normalised_paths_cannot_slip_past_a_prefix_denial(self):
+        prefixes = ('/sys/firmware', '/sys/kernel/debug', '/sys/kernel/tracing',
+                    '/sys/fs/bpf', '/var/log/installer')
+        verbs = ('cat {p}', 'head -n 5 {p}', 'tail -n 5 {p}',
+                 'grep -m 5 -e x {p}', 'ls {p}', 'stat {p}')
+        for prefix in prefixes:
+            split = prefix.rfind('/')
+            for spelling in (prefix[:split] + '//' + prefix[split + 1:],
+                             prefix[:split] + '/./' + prefix[split + 1:]):
+                for template in verbs:
+                    command = template.format(p=spelling)
+                    ok, why = _verdict(command)
+                    assert ok is False, (command, why)
+
+    def test_f4_r1_a_trailing_slash_still_reads(self):
+        assert _verdict('head -n 5 /var/log/')[0] is True
+        assert _verdict('ls /var/log/')[0] is True
+        assert _verdict('cat /etc/hosts/')[0] is False
+
+    def test_f4_r2_recursive_grep_is_not_in_the_lane(self):
+        for operand in ('/var/log', '/var/log/', '//var/log', '/var/log/./'):
+            for command in ('grep -r -m 5 -e x %s' % operand,
+                            'grep --recursive -m 5 -e x %s' % operand):
+                ok, why = _verdict(command)
+                assert ok is False, (command, why)
+
+    def test_f4_r3_grep_context_cannot_undo_the_cap(self):
+        assert _verdict('grep -m 1000 -e x /var/log/syslog')[0] is True
+        assert _verdict('grep -m 500 -A 1 -e x /var/log/syslog')[0] is True
+        assert _verdict('grep -m 300 -C 1 -e x /var/log/syslog')[0] is True
+        assert _verdict('grep -m 500 -A 2 -e x /var/log/syslog')[0] is False
+        assert _verdict('grep -m 1000 -A 1000 -e x /var/log/syslog')[0] is False
+        assert _verdict('grep -m 10 -C 100 -e x /var/log/syslog')[0] is False
+        # Context outside /var/log is bounded by the option caps alone.
+        assert _verdict('grep -m 5 -A 10 -e x /proc/1/status')[0] is True
+
+    def test_f4_r4_head_and_tail_have_no_zero_terminated(self):
+        for command in ('head -z /var/log/syslog', 'head --zero-terminated /var/log/syslog',
+                        'head -qz /var/log/syslog', 'tail -z /var/log/syslog',
+                        'tail --zero-terminated /var/log/syslog',
+                        'tail -qz /var/log/syslog'):
+            ok, why = _verdict(command)
+            assert ok is False, (command, why)
+
+    def test_f4_s2_zpool_letters_match_its_flags(self):
+        assert _verdict('zpool status -g')[0] is True
+        assert _verdict('zpool status -G')[0] is False
+
+    def test_f4_s4_grep_perl_regexp_is_out(self):
+        assert _verdict('grep -P -m 5 -e x /var/log/syslog')[0] is False
+        assert _verdict('grep --perl-regexp -m 5 -e x /var/log/syslog')[0] is False
+
+    def test_f4_sc7_chained_read_is_not_lane_eligible_end_to_end(self, gateway):
+        """Q1 stays as today: a `shell_meta` verdict is not a plain `jit`."""
+        client, headers = gateway
+        set_gateway_read_lane('10.0.0.1', 'shadow')
+        _jit(client, headers, 'uptime && whoami')
+        row = next(r for r in get_all_requests()
+                   if r['command'] == 'uptime && whoami')
+        assert row['status'] == 'pending'
+        assert row['reason'] == ''
+        set_gateway_read_lane('10.0.0.1', 'on')
+        from db.core import db_conn
+        with db_conn() as conn:
+            conn.execute("INSERT OR REPLACE INTO meta (key, value) "
+                         "VALUES ('read_lane_on_enabled', '1')")
+            conn.commit()
+        response = _jit(client, headers, 'uptime || whoami')
+        assert 'read_lane' not in response
 
 
 class TestReadPolicy:
