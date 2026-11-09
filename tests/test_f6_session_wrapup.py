@@ -16,8 +16,8 @@ import time
 import pytest
 
 from core.approval_buckets import (
-    APPROVED_STATUSES, BUCKET_KEYS, BUCKETS, NOT_AN_APPROVAL, OVERRIDE_BUCKETS,
-    bucket_for, empty_buckets,
+    APPROVED_STATUSES, BUCKET_KEYS, BUCKETS, KNOWN_REASON_PREFIXES,
+    NOT_AN_APPROVAL, OVERRIDE_BUCKETS, bucket_for, empty_buckets,
 )
 from db.requests import (
     create_request, expire_stale_requests, update_request_status,
@@ -49,6 +49,30 @@ def _decide(req_id, status, ago=30):
         cur.execute('UPDATE requests SET status = ?, decided_at = ? WHERE id = ?',
                     (status, created + ago, req_id))
         conn.commit()
+
+
+def _scan_reason_prefixes():
+    """Every reason literal passed to create_request in dashboard/."""
+    root = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        'dashboard')
+    prefixes = set()
+    for base, _dirs, files in os.walk(root):
+        for name in files:
+            if not name.endswith('.py'):
+                continue
+            text = open(os.path.join(base, name), encoding='utf-8').read()
+            for match in re.finditer(r'create_request\((.*?)\)', text, re.S):
+                for reason in re.finditer(
+                        r'reason\s*=\s*(?:f)?["\']([^"\']*)["\']',
+                        match.group(1)):
+                    prefix = re.split(r'[:%{}]', reason.group(1))[0]
+                    if prefix:
+                        prefixes.add(prefix)
+    return prefixes
+
+
+def _unmapped_prefixes(prefixes):
+    return sorted(p for p in prefixes if p not in KNOWN_REASON_PREFIXES)
 
 
 class TestBucketMapping:
@@ -107,36 +131,26 @@ class TestBucketMapping:
         for key in OVERRIDE_BUCKETS:
             assert key in BUCKET_KEYS
 
-    def test_f6_code_reasons_have_a_bucket(self):
-        """Generated: a new request reason cannot slip in unbucketed."""
-        root = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                            'dashboard')
-        prefixes = set()
-        for base, _dirs, files in os.walk(root):
-            for name in files:
-                if not name.endswith('.py'):
-                    continue
-                text = open(os.path.join(base, name), encoding='utf-8').read()
-                for match in re.finditer(
-                        r'create_request\((.*?)\)', text, re.S):
-                    call = match.group(1)
-                    for reason in re.finditer(
-                            r'reason\s*=\s*(?:f)?["\']([^"\']*)["\']', call):
-                        value = reason.group(1)
-                        prefix = re.split(r'[:%{}]', value)[0]
-                        if prefix:
-                            prefixes.add(prefix)
+    def test_f6_every_code_reason_prefix_is_known(self):
+        """Generated: a new request reason cannot slip in without the table."""
+        prefixes = _scan_reason_prefixes()
         assert 'session-plan' in prefixes
         assert 'session-override' in prefixes
         assert 'override' in prefixes
-        # `read-lane` comes from F4, which is not on this branch; the bucket is
-        # still tested by string (TestBucketMapping). When F4 merges, the scan
-        # picks the literal up and it must keep mapping to `read-lane`.
-        for prefix in prefixes:
-            # A bucket for an approved row, or an explicitly known value that
-            # is not an approval (e.g. an encoded-payload block).
-            bucket = bucket_for('approved', prefix)
-            assert bucket is not None or prefix in ('encoded-payload',), prefix
+        # `read-lane` comes from F4, which is not on this branch; the table
+        # already carries it, so the scan picks the literal up after merge.
+        assert _unmapped_prefixes(prefixes) == []
+
+    def test_f6_the_reason_check_can_fail(self):
+        """R3: run the check on a list, so a synthetic new prefix fails it."""
+        assert _unmapped_prefixes(['brand-new-prefix']) == ['brand-new-prefix']
+        assert _unmapped_prefixes(['session-plan', 'override']) == []
+
+    def test_f6_the_table_agrees_with_bucket_for(self):
+        for prefix, bucket in KNOWN_REASON_PREFIXES.items():
+            sample = prefix + ':synthetic' if prefix in (
+                'session-plan', 'session-override', 'encoded-payload') else prefix
+            assert bucket_for('approved', sample) == bucket, prefix
 
 
 class TestSessionSummary:
@@ -235,6 +249,53 @@ class TestDecidedAt:
         assert _row(req_id)['decided_at'] is None
 
 
+class TestRowsDecidedAtCreation:
+    """R1: a row created already approved was never waiting for a human."""
+
+    @pytest.mark.parametrize('status,reason', [
+        ('approved', 'override'),
+        ('approved', 'session-override:4'),
+        ('approved', 'session-plan:7:1'),
+        ('auto-approved', ''),
+        ('window-approved', ''),
+        ('fleet-run', 'operator asked'),
+    ])
+    def test_f6_a_decided_row_starts_at_its_creation(self, status, reason):
+        req_id = _create(target_ip='192.0.2.10', command='uptime',
+                         status=status, reason=reason)
+        row = _row(req_id)
+        assert row['decided_at'] == row['created_at'], (status, reason)
+
+    def test_f6_a_pending_row_has_no_decision(self):
+        req_id = _create(target_ip='192.0.2.10', command='uptime')
+        assert _row(req_id)['decided_at'] is None
+
+    def test_f6_an_unclaimed_override_waits_zero(self):
+        sid = 'sess-r1-abandoned'
+        for reason in ('override', 'session-override:1', 'session-plan:2:1'):
+            create_request('192.0.2.10', 'uptime', status='approved', ttl=1,
+                           reason=reason, session_id=sid)
+        expire_stale_requests(int(time.time()) + 600)
+        summary = get_session_summary(sid)
+        assert summary['waited_seconds'] == 0
+        assert summary['decided'] == 3
+        for reason in ('override', 'session-override:1', 'session-plan:2:1'):
+            assert bucket_for('abandoned', reason) is not None
+
+    def test_f6_an_auto_approved_log_row_waits_zero(self, client, gateway_headers):
+        import base64
+        response = client.post('/api/log', json={
+            'target_ip': '10.0.0.1',
+            'encoded_command': base64.b64encode(b'uptime').decode(),
+            'status': 'auto-approved',
+        }, headers=gateway_headers)
+        assert response.status_code == 200, response.text
+        from db.requests import get_all_requests
+        row = max(get_all_requests(), key=lambda r: r['id'])
+        assert row['status'] == 'auto-approved'
+        assert row['decided_at'] == row['created_at']
+
+
 class TestSessionDetail:
 
     def test_f6_detail_carries_the_wrapup_summary(self, auth_client):
@@ -265,6 +326,21 @@ class TestSessionDetail:
         summary = data['summary']
         assert summary['writes'] == 2
         assert summary['writes_by_host'] == {'192.0.2.10': 1, '192.0.2.20': 1}
+
+    def test_f6_writes_count_only_decided_rows(self, auth_client):
+        """R2: denied, blocked and expired commands are not changes."""
+        sid = 'sess-r2-writes'
+        _create(target_ip='192.0.2.10', command='mv /tmp/a /tmp/b',
+                status='approved', session_id=sid)
+        _create(target_ip='192.0.2.10', command='rm -rf /tmp/x',
+                status='denied', session_id=sid)
+        _create(target_ip='192.0.2.10', command='systemctl restart nginx',
+                status='blocked', session_id=sid)
+        _create(target_ip='192.0.2.10', command='tar -c /tmp/x',
+                status='expired', session_id=sid)
+        data = auth_client.get(f'/api/sessions/{sid}/detail').json()
+        assert data['summary']['writes'] == 1
+        assert data['summary']['writes_by_host'] == {'192.0.2.10': 1}
 
     def test_f6_detail_reports_failures(self, auth_client):
         from db.exec_results import save_result
@@ -360,6 +436,8 @@ class TestUi:
         assert '1 failed' in html
         assert 'waited 1m 15s for a human' in html
         assert 'writes' in html and 'web01' in html
+        # S1: the goal stays visible when the session has a name.
+        assert 'goal' in html and 'web01' in html
         assert out['summaryNoCommands'] == ''
         assert 'wait not recorded' in out['summaryNoWait']
 

@@ -36,6 +36,26 @@ BUCKET_LABELS = dict(BUCKETS)
 # The two buckets whose share is the headline "can we stop overriding?" number.
 OVERRIDE_BUCKETS = ('session-override', 'host-override')
 
+# Every reason prefix the code writes on a request row, with the bucket it
+# maps to — or None when the reason is never an approval (`encoded-payload`
+# and the window sweep's explanation). A new prefix must be added here; the
+# generated test scans the source and fails on anything missing, so an
+# unknown reason can no longer fall through to "human" unnoticed.
+#
+# A key matches a reason that equals it or continues with ':' (so
+# `session-plan:12:3` matches the `session-plan` key). `read-lane` and
+# `read-lane-shadow` are separate keys: the first is the lane's own
+# approval, the second is a tag on a row a human still cleared.
+KNOWN_REASON_PREFIXES = {
+    'session-plan': 'plan',
+    'session-override': 'session-override',
+    'override': 'host-override',
+    'read-lane': 'read-lane',
+    'read-lane-shadow': 'human',
+    'encoded-payload': None,
+    'exhausted or disabled': None,
+}
+
 APPROVED_STATUSES = frozenset({
     'auto-approved', 'approved', 'consumed', 'abandoned', 'window-approved',
     'fleet-run',
@@ -48,6 +68,21 @@ NOT_AN_APPROVAL = frozenset({
     'session-required', 'window-rejected', 'window-requested',
     'integration-approved', 'integration-denied',
 })
+
+
+def known_reason(reason):
+    """The `KNOWN_REASON_PREFIXES` key a reason belongs to, or None.
+
+    The longest matching key wins, so a future `read-lane:foo` cannot be
+    captured by a shorter key.
+    """
+    reason = (reason or '').strip()
+    match = None
+    for prefix in KNOWN_REASON_PREFIXES:
+        if reason == prefix or reason.startswith(prefix + ':'):
+            if match is None or len(prefix) > len(match):
+                match = prefix
+    return match
 
 
 def bucket_for(status, reason=''):
@@ -67,16 +102,14 @@ def bucket_for(status, reason=''):
     if status == 'fleet-run':
         return 'fleet'
     if status in ('approved', 'consumed', 'abandoned'):
-        if reason.startswith('session-plan:'):
-            return 'plan'
-        if reason.startswith('session-override:'):
-            return 'session-override'
-        if reason == 'override':
-            return 'host-override'
-        if reason == 'read-lane':
-            return 'read-lane'
-        # `read-lane-shadow` is tagged but still waits for a human; if it is
-        # approved here, the human cleared it.
+        prefix = known_reason(reason)
+        if prefix is not None:
+            # A known prefix maps to its bucket, or to None when the reason
+            # is not an approval at all. A reason no one has classified is
+            # still a human approval — the status says the row was allowed —
+            # but the generated test makes adding one without the table a
+            # test failure.
+            return KNOWN_REASON_PREFIXES[prefix]
         return 'human'
     return None
 

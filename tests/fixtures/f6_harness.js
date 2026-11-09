@@ -21,7 +21,7 @@ writes[payload] = 2;
 
 out.summary = ctx.sessionSummaryHtml({
   commands: 3, duration_seconds: 3725, waited_seconds: 75, decided: 2,
-  failed: 1,
+  failed: 1, goal: payload,
   by_approval: {
     'allowlist': 1, 'human': 1, 'plan': 0, 'read-lane': 0,
     'session-override': 1, 'host-override': 0, 'window': 0, 'fleet': 0,

@@ -63,10 +63,16 @@ def create_request(target_ip: str, command: str, status: str = 'pending', ttl: i
         cursor = conn.cursor()
         created_at = int(time.time())
         expires_at = created_at + ttl
+        # F6 R1: a row created already decided (allowlist, override, plan,
+        # read lane, window, fleet) was decided *at creation* — no human was
+        # waited on. Without this the expiry sweep would later stamp
+        # `decided_at = now` on an unclaimed row and invent the whole TTL as
+        # waiting time.
+        decided_at = created_at if status != 'pending' else None
         cursor.execute('''
-            INSERT INTO requests (target_ip, command, status, created_at, expires_at, reason, session_id, execution_id, inner_target, command_sha, shape_sha)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (target_ip, command, status, created_at, expires_at, reason, session_id, execution_id, inner_target or '', cmd_sha, shape_sha))
+            INSERT INTO requests (target_ip, command, status, created_at, expires_at, reason, session_id, execution_id, inner_target, command_sha, shape_sha, decided_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (target_ip, command, status, created_at, expires_at, reason, session_id, execution_id, inner_target or '', cmd_sha, shape_sha, decided_at))
         conn.commit()
         return cursor.lastrowid
 

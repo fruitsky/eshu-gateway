@@ -3711,6 +3711,11 @@ def session_detail_endpoint(sid: str, request: Request):
     summary['duration_seconds'] = max(0, last - started) if started else 0
     writes_by_host = {}
     for row in ssh:
+        # F6 R2: "writes" means what changed (or was cleared to change), so a
+        # denied, blocked or expired command is not a write. Use the same
+        # bucket mapping as the approval chips: None is not an approval.
+        if bucket_for(row.get('status'), row.get('reason')) is None:
+            continue
         broken = cmd_breakdown(row.get('command') or '')
         writes = sum(1 for step in (broken.get('steps') or [])
                      if step.get('kind') == 'write')

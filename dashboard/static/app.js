@@ -2859,6 +2859,9 @@ function sessionSummaryHtml(sum) {
     return escapeHtml(h) + ' <b>' + (parseInt(writes[h], 10) || 0) + '</b>';
   }).join(' \u00b7 ');
   var facts = [];
+  // The modal title shows the session's name when it has one, so the goal
+  // belongs in the card: it is the one line that says what the session was for.
+  if (sum.goal) facts.push('goal &ldquo;' + escapeHtml(sum.goal) + '&rdquo;');
   if (sum.duration_seconds) facts.push(fmtDuration(sum.duration_seconds) + ' long');
   facts.push((parseInt(sum.commands, 10) || 0) + ' commands');
   if (sum.failed) facts.push('<span class="sm-blocked">' + (parseInt(sum.failed, 10) || 0) + ' failed</span>');
