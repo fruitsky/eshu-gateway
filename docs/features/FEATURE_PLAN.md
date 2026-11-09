@@ -2508,6 +2508,66 @@ Q1 and Q3 (commits `51f2e40` and `0ed276c`). **Still owed before `on` can be
 unlocked:** security Chunk 7 (stop logging signatures), Chunk 6 (bind the
 signature to the command) and F19 (gateway time and output limits).
 
+**Security round 3 (2026-11-09): final sign-off. Approved on two small
+conditions, which the feature reviewer checks. No return trip.** Security
+chat, reviewed at `60045c8` (commits `51f2e40` and `0ed276c`). This was a
+read-only review. Nothing was run.
+
+**What holds:**
+
+* **SC9.** Every raw step word is checked before `shlex.split`, so F1's
+  re-quoting can no longer be undone. All the expansion characters are
+  refused, a leading `~` included, even behind a quote. That covers paths,
+  option values and both pattern forms. A bare assignment is now an
+  `unknown` step. Prefix assignments were already refused, because the
+  assignment word becomes the verb.
+* **Q1.** SC7 accepts `auto_approved`, or `jit` with `detail_type` `None` or
+  `shell_meta`, and nothing else, so `self_protection_jit` still wins. A
+  statement ended by `&` carries `background` and is refused. In a
+  backgrounded pipeline, the last member carries the marker, so the whole
+  command is still refused.
+* **Q3.** Only a bare `sudo` keeps the `sudo` context. Any option, `--` or
+  assignment gives `sudo(options)`, and nested `sudo` gives a two-item
+  context. The lane refuses both.
+* **Q2.** The unit-name exception is scoped as agreed: three subcommands,
+  at most 8 names, a letter or digit first, and no `/`, glob or backslash.
+* **R1–R5** are in as specified. Paths are normalised before the prefix
+  checks, recursive `grep` and `-P` are gone, the context product is
+  capped, `-z` is gone, binary logs are refused and `grep -a` is gone.
+  `ls -R` stays allowed under `/var/log` only, which lists names and is
+  acceptable.
+
+**Conditions (before merge, feature reviewer checks):**
+
+* **SC10: refuse loops and grouping.** F1 drops shell keywords and keeps
+  only the commands inside them. Q1 now allows `;` and newlines, so a
+  `while` or `until` loop whose condition and body are both eligible reads
+  is eligible today. It never ends and prints without limit, which is
+  exactly what SC5 forbids. This is a consequence of my Q1 answer. Grouping
+  with braces or parentheses also loses the `background` marker, because
+  the `&` lands after the closing word. **Rule:** F1 flags any command that
+  contains a loop (`while`, `until`, `for`, `select`), a conditional (`if`,
+  `case`), a function definition, a brace group or a subshell, for example
+  with a `compound` flag. Every flag blocks the lane, so these commands are
+  refused. The lane is for plain chains of reads. **Tests:** synthetic
+  ineligible rows for a `while` loop of two eligible reads, an `until` loop,
+  a `for` loop over a fixed list, a grouped read sent to the background with
+  braces, and the same with parentheses. Plain chains (`uptime && df -h`,
+  `uptime; free -h`) stay eligible.
+* **SC11: date-suffixed login-record rotations.** `_binary_log` matches
+  `wtmp.1` but not the dated `name-YYYYMMDD` rotation that some
+  distributions use. The failed-login file can hold passwords typed into
+  the username prompt by mistake. **Rule:** also match `name-` followed by
+  anything. **Test:** a dated rotation of each of the four names is
+  ineligible for `head`, `tail` and `grep`.
+
+**Verdict:** F4 may merge once SC10 and SC11 are in and the feature reviewer
+has checked them. No further security pass is needed for that. `on` stays
+hard-locked until security Chunk 7 (stop logging signatures), Chunk 6
+(bind the signature to the command) and F19 (gateway time and output
+limits) are merged and deployed. Unlocking it on any gateway is a separate
+decision for the operator, made by hand.
+
 ---
 
 ## Chunk F5 — Execution results (exit code + output tail) · slug `exec-results` · gateway + dashboard
