@@ -3411,7 +3411,15 @@ Both installers were regenerated in this commit
 Both installers were regenerated in this commit
 (`python3 dashboard/gen_installer.py`).
 
-`bash scripts/verify.sh`: `2354 passed, 7 warnings in 430.48s (0:07:10)`.
+`bash scripts/verify.sh` (gawk installed): `2354 passed, 7 warnings in 430.48s (0:07:10)`.
+`bash scripts/verify.sh` (gawk absent here, so its parameters skip):
+`2342 passed, 12 skipped, 7 warnings in 433.29s (0:07:13)`.
+
+**A test-oracle note.** On one CI run (`05d72f2`) the *linear* test failed
+while `capture_tail` had stored the correct 16 385 bytes: the oracle, a
+`tail -c 16385` subprocess, returned a 32.5 KB suffix. The test no longer
+depends on a tool it is not testing — `_tail` slices the payload in Python
+(`data[-CAP:]`), which is exactly what `tail -c CAP` means for a byte string.
 
 ### Reviewer notes
 

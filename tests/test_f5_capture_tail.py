@@ -96,8 +96,15 @@ class Capture:
 
 
 def _tail(data: bytes) -> bytes:
-    return subprocess.run(['tail', '-c', str(CAP)], input=data,
-                          capture_output=True, check=True).stdout
+    """`tail -c 16385` of a byte string, computed without an external `tail`.
+
+    The oracle must not depend on a tool that is not under test: on one CI
+    run the `tail` subprocess returned a longer suffix (32.5 KB where 16 385
+    was asked for) while `capture_tail` stored the correct bytes, which made
+    the test blame the code it guards. For a `bytes` payload the last CAP
+    bytes *are* `tail -c CAP`, byte for byte.
+    """
+    return data[-CAP:]
 
 
 def _varied() -> bytes:
