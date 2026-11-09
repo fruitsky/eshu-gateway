@@ -5345,7 +5345,458 @@ Undo: delete the NPM host, then delete the Pi-hole record.
 
 ### Implementer notes
 
-_(design note goes here first)_
+**Status: design note only — no code on this branch.** F16 is design first
+and needs the security reviewer's sign-off before any code.
+
+#### 1. Shape: named, versioned procedures (Q1)
+
+A recipe is a **row plus an immutable version**:
+
+```
+recipes(id, name, owner, status: draft|approved|disabled, current_version_id)
+recipe_versions(id, recipe_id, version, content_hash, document_json,
+                approved_at, approved_by)
+```
+
+* `document_json` is the whole procedure. `content_hash` is `sha256` of its
+  **canonical JSON** (`json.dumps(..., sort_keys=True, separators=(",", ":"),
+  ensure_ascii=False)`), so any edit — a character in a description, a changed
+  check, a reordered step — is a new version with a new hash.
+* Only an **approved version** can run. Approval pins `(recipe_id, version,
+  content_hash)`; a run records that triple, so a run is always reproducible
+  from the stored document even after the recipe is edited again.
+* Numbers: a recipe has at most **10 steps**, each step names at most one host,
+  and a run is at most those 10 steps. Version history is kept (a run may
+  reference an old version; nothing is deleted).
+
+A step is one of two kinds, and both are **fixed shapes**, not free text:
+
+```json
+{"id": "1", "kind": "tool",
+ "call": {"integration": "Pi-hole", "tool": "pihole_local_dns_record_add",
+          "args": {"hostname": {"param": "fqdn"},
+                   "ip": {"param": "target_ip"}}},
+ "check": {"kind": "tool", "call": {...}, "pass": {"field": "status",
+                                                   "equals": "ok"}},
+ "undo": {"kind": "tool", "call": {...}}}
+
+{"id": "3", "kind": "ssh",
+ "ssh": {"host": {"enum": ["web01.example.test"]},
+         "command": "getent hosts {fqdn}"},
+ "check": {"kind": "ssh", "ssh": {"host": {"enum": ["web01.example.test"]},
+                                  "command": "getent hosts {fqdn}"},
+           "pass": {"exit_code": 0}},
+ "undo": null}
+```
+
+**How a check passes or fails without free-form parsing.** A check is itself
+a step, and it carries a `pass` predicate over a *structured* result:
+
+* `{"exit_code": 0}` — the SSH result's exit code (F5 already records it);
+* `{"field": "<dotted.path>", "equals": <json value>}` — a value in the
+  tool's JSON response (`data.result`, `name`, …);
+* `{"status_code": 200}` — the integration call's HTTP status;
+* `{"all": [ … ]}` / `{"any": [ … ]}` for at most two nested predicates.
+
+The evaluator is a closed set of comparisons (`equals`, `in`, `contains`,
+`present`, `exit_code`, `status_code`); there is **no regex, no shell test, no
+jq, and no model judgement**. A check that cannot be evaluated (missing field, non-JSON
+response) **fails closed** and the recipe stops. Each check's result is stored
+with the run (F5 `request_results` for SSH, the integration-call row for
+tools), so the operator sees the evidence, not a verdict.
+
+#### 2. Typed parameters only (Q2)
+
+Parameters are a **closed set**. Each has a regex and a normalisation, and a
+value either matches or the whole run is refused before anything executes.
+
+| type | regex | normalisation | example |
+|---|---|---|---|
+| `hostname` | `^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$` | lower-case | `web01` |
+| `fqdn` | `^[a-z0-9-]{1,63}(\.[a-z0-9-]{1,63})+$` | lower-case, no trailing dot | `app.example.test` |
+| `ipv4` | four `0–255` octets | `ipaddress.IPv4Address` | `192.0.2.10` |
+| `port` | `^[0-9]{1,5}$` | `int`, `1–65535` | `443` |
+| `slug` | `^[a-z0-9_]{1,64}$` | unchanged | `core_mosquitto` |
+| `int` | `^-?[0-9]{1,9}$` | `int`, bounded by the recipe's `min`/`max` | `30` |
+| `enum` | one of the recipe's `values` | exact | `restart` |
+
+```python
+# core/recipe_params.py (design)
+import ipaddress
+import json
+import re
+import shlex
+
+TYPES = {
+    'hostname': re.compile(r'^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$'),
+    'fqdn': re.compile(r'^[a-z0-9-]{1,63}(\.[a-z0-9-]{1,63})+$'),
+    'ipv4': None,                      # parsed with ipaddress
+    'port': re.compile(r'^[0-9]{1,5}$'),
+    'slug': re.compile(r'^[a-z0-9_]{1,64}$'),
+    'int': re.compile(r'^-?[0-9]{1,9}$'),
+    'enum': None,                      # must be in the parameter's values
+}
+
+
+class RecipeParamError(ValueError):
+    def __init__(self, code, message):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+def normalise_param(spec, raw):
+    """Validate and normalise one declared parameter value."""
+    kind = spec['type']
+    text = str(raw if raw is not None else '').strip()
+    if kind == 'ipv4':
+        try:
+            return str(ipaddress.IPv4Address(text))
+        except ValueError:
+            raise RecipeParamError('invalid_param',
+                                   '%s must be an IPv4 address' % spec['name'])
+    if kind == 'enum':
+        values = [str(v) for v in spec.get('values') or []]
+        if text not in values:
+            raise RecipeParamError('invalid_param',
+                                   '%s must be one of %s' % (spec['name'], values))
+        return text
+    pattern = TYPES.get(kind)
+    if pattern is None or not pattern.fullmatch(text):
+        raise RecipeParamError('invalid_param',
+                               '%s is not a valid %s' % (spec['name'], kind))
+    if kind == 'port':
+        value = int(text)
+        if not 1 <= value <= 65535:
+            raise RecipeParamError('invalid_param', '%s is out of range' % spec['name'])
+        return value
+    if kind == 'int':
+        value = int(text)
+        low, high = spec.get('min'), spec.get('max')
+        if low is not None and value < low:
+            raise RecipeParamError('invalid_param', '%s is below %s' % (spec['name'], low))
+        if high is not None and value > high:
+            raise RecipeParamError('invalid_param', '%s is above %s' % (spec['name'], high))
+        return value
+    if kind in ('hostname', 'fqdn'):
+        return text.lower().rstrip('.')
+    return text
+
+
+def resolve_values(recipe, supplied):
+    """Every declared parameter is required; no extra values are accepted."""
+    declared = {spec['name']: spec for spec in recipe['parameters']}
+    unknown = set(supplied or {}) - set(declared)
+    if unknown:
+        raise RecipeParamError('unknown_param',
+                               'unknown parameters: %s' % ', '.join(sorted(unknown)))
+    missing = [name for name in declared if name not in (supplied or {})]
+    if missing:
+        raise RecipeParamError('missing_param',
+                               'missing parameters: %s' % ', '.join(missing))
+    return {name: normalise_param(spec, supplied[name])
+            for name, spec in declared.items()}
+```
+
+**Substitution happens only in marked slots**, and the two kinds are handled
+differently:
+
+```python
+PLACEHOLDER = re.compile(r'\{([a-z][a-z0-9_]{0,31})\}')
+
+
+def substitute_command(template, values):
+    """SSH: every `{name}` is replaced with the shell-quoted value.
+
+    The template is authored by an operator and reviewed; the *values* are the
+    only untrusted part, and they never reach the shell unquoted. A placeholder
+    whose name is not a declared parameter refuses the run (fail closed), and
+    so does a `$`, backtick or newline in the template — a recipe may not build
+    shell syntax from parameters at all.
+    """
+    if any(ch in template for ch in ('$', '`', '\n', '\r')):
+        raise RecipeParamError('invalid_step',
+                               'SSH templates may not contain $, backticks or newlines')
+
+    def _one(match):
+        name = match.group(1)
+        if name not in values:
+            raise RecipeParamError('unknown_param', 'template uses {%s}' % name)
+        value = values[name]
+        return shlex.quote(str(value))
+
+    return PLACEHOLDER.sub(_one, template)
+
+
+def substitute_args(node, values):
+    """Tool calls: a `{"param": name}` slot is replaced by the *typed* value.
+
+    Nothing is ever string-interpolated into a tool argument, so a value can
+    never change the shape of the JSON payload (no escaping problems, no
+    injection into an argument that happens to be a path or a URL).
+    """
+    if isinstance(node, dict):
+        if set(node) == {'param'}:
+            name = node['param']
+            if name not in values:
+                raise RecipeParamError('unknown_param', 'slot uses %s' % name)
+            return values[name]
+        return {key: substitute_args(value, values) for key, value in node.items()}
+    if isinstance(node, list):
+        return [substitute_args(item, values) for item in node]
+    return node
+```
+
+Notes on the two decisions:
+
+* **SSH values are quoted, never interpolated raw.** `shlex.quote` turns a
+  value into exactly one word; a `slug`, `fqdn` or `port` that slipped past
+  its regex still cannot become shell syntax. Templates themselves are
+  reviewed text and may not contain `$`, backticks or newlines (the R5 rule
+  from F12), so there is no second layer of expansion behind the slot.
+* **Tool arguments are JSON values, not strings.** A `{"param": "fqdn"}` slot
+  is replaced by the value *after* normalisation, so a `port` is a number and
+  an `enum` is a string; nothing is concatenated, and the upstream tool sees
+  the same argument type the operator saw in the preview.
+
+#### 3. Approval model (Q3)
+
+Three levels, and v1 requires all of them:
+
+1. **Recipe version approval (once per version).** The operator approves the
+   draft; the approval is stored against `content_hash`. Any edit creates a
+   new `draft` version that needs its own approval — a recipe cannot be
+   "approved once and then edited".
+2. **Run approval (once per run).** `recipe_run` fills the parameters
+   (validated, substituted), writes the **filled-in steps** into a session
+   plan (F3) and returns `pending`. The operator sees every command and every
+   tool call as it will run, including each undo step, and approves once.
+   Executing steps is then covered by that plan: SSH steps are plan items
+   (F3, exact bytes), tool steps are `mcp` plan items (the F10 extension:
+   `{kind: "mcp", integration, tool, args_hash}`). F10 is not merged at the
+   time of writing; if F16 ships first, this chunk brings those item types
+   with it — the shape is already agreed in F10's design.
+3. **Read-only recipes.** A recipe whose every step (including checks) passes
+   `read_policy` may auto-run **only** when all of these hold: F4 is `on` for
+   the host, the gateway reports the F19 `run_limits` capability, every SSH
+   step is on a host whose read lane is `on`, and the recipe version and its
+   parameters are approved. **v1 still requires the run approval**: the first
+   version should not stack "unattended" on top of "procedure nobody has run
+   yet". The auto-run path is enabled after the read-lane `on` unlock (which
+   already requires F19), and it is a per-recipe flag `auto_run: true` that
+   the operator must set explicitly.
+
+Failed checks do not silently pass: a run whose check fails is `failed` and
+consumes its approval; a retry is a new run (new plan, new approval).
+
+#### 4. Authoring (Q4)
+
+* `recipe_propose(recipe)` — an agent (Hermes, typically from an F13 runbook)
+  submits a draft. It is stored as `draft`, **never runnable**, and audited
+  (`recipe_proposed`). Agents cannot approve, edit an approved version, or
+  toggle `auto_run`.
+* Only the operator approves (`POST /api/recipes/{id}/versions/{v}/approve`,
+  session auth), and approval records who and when. Denying or editing
+  leaves the recipe unusable.
+* **Review UI**: the draft is rendered step by step exactly like the F2
+  review card: each SSH step shows the **F1 breakdown** of its template (verb,
+  kind, risk, flags) and the substituted preview for the example values the
+  operator types in a "preview with these values" box; each tool step shows
+  integration, tool, arguments (masked like any pending call) and the check's
+  `pass` predicate in plain words. Undo steps render below their step, greyed.
+  The approve button is disabled while any placeholder is unknown or any
+  preview fails `read_policy`/`cmd_parse` cleanly.
+* Version diff: the review page shows the previous approved version next to
+  the draft (step added/removed/changed), because "approve this version" is
+  really "approve this change".
+
+#### 5. Failure (Q5)
+
+* **A failing check stops the run.** The remaining steps are not executed and
+  their plan items are marked `skipped`. The run records `failed` at step N
+  with the check's structured result.
+* **Undo steps are not run automatically.** They are the dangerous half of a
+  procedure (delete the proxy host, delete the DNS record) and running them on
+  a *partial* failure can make things worse (the step that failed may have
+  half-written). Instead: `recipe_rollback(run_id)` is a separate,
+  approval-gated action that executes the undo steps of the steps that
+  *completed*, in reverse order, as its own plan. The run page offers it with
+  a one-click review.
+* **What is recorded**: one `recipe_runs` row (recipe/version/hash, session,
+  agent, parameters **after normalisation**, status, failed step, timestamps),
+  one row per step (`recipe_run_steps`: status, F5 request id or integration
+  call id, check result), and audit events (`recipe_run_started`,
+  `recipe_step_failed`, `recipe_run_finished`, `recipe_rollback`). The F5
+  result of each SSH step is the existing record; tool steps already write an
+  integration-call row.
+* A failure never retries a step. A step that is not idempotent (NPM create)
+  is expected to be written against its check; retrying the whole recipe is
+  the operator's decision.
+
+#### 6. Blast radius (Q6)
+
+Limits, all enforced when a recipe is proposed **and** when it runs:
+
+* ≤ 10 steps per recipe (checks and undos do not count), ≤ 3 SSH steps per
+  recipe, ≤ 1 host per step, ≤ 1 run approval per session at a time?
+  (a run is a plan; F3 already allows one active plan per session).
+* No loops, no conditionals, no parameters in `host`: the host slot is an
+  `enum` of registered gateway names/IPs, chosen at authoring time (a
+  parameter may not name a host — otherwise a run could target any gateway).
+* `enum` parameters are capped at 16 values; `int` needs `min`/`max`.
+* **Forbidden tool calls** (a recipe may never contain them; checked at
+  propose and at approve):
+  * any `ha_host_reboot`, `ha_core_restart`, `ha_backup_create`,
+    `ha_addon_update`, `ha_core_update`;
+  * backup restore and any `/backups/*` write, add-on install/uninstall/
+    options, `/supervisor/options`, `/host/shutdown`, `/store/*`, `/auth*`,
+    `/security*`, `/os/datadisk*` (the F10 `FORBIDDEN` table, reused);
+  * `call_service` with `domain=hassio`, and `call_service` domains
+    `shell_command`, `python_script`, `rest_command`;
+  * `web_fetch`, `ssh_exec` (a recipe may not run arbitrary commands; its SSH
+    steps are fixed templates), `write`/`ws_write` generic tools, and any
+    `recipe_*` tool (no recursion).
+  The list is a module constant with a test that walks every recipe-free
+  tool: a recipe that names a forbidden tool is refused with
+  `recipe_tool_forbidden`.
+* A recipe may not carry secrets: parameter types cannot be secret, and a
+  tool step references an integration **by name** (its credential stays in
+  the integration row). The F5/F2 scrubbers still run on every result.
+
+#### 7. `add_internal_fqdn` end to end
+
+**Parameters**: `fqdn` (`fqdn`), `target_ip` (`ipv4`), `port` (`port`).
+**Hosts**: `web01.example.test` (a gateway with dig/getent).
+
+```json
+{"name": "add_internal_fqdn",
+ "description": "Point a new internal FQDN at a host: Pi-hole record, NPM proxy host, then verify with dig/getent and HTTP.",
+ "parameters": [
+   {"name": "fqdn", "type": "fqdn", "example": "app.example.test"},
+   {"name": "target_ip", "type": "ipv4", "example": "192.0.2.10"},
+   {"name": "port", "type": "port", "example": 443}
+ ],
+ "steps": [
+  {"id": "1", "kind": "tool",
+   "title": "Pi-hole local DNS record",
+   "call": {"integration": "Pi-hole", "tool": "pihole_local_dns_record_add",
+            "args": {"hostname": {"param": "fqdn"}, "ip": {"param": "target_ip"}}},
+   "check": {"kind": "tool",
+             "call": {"integration": "Pi-hole", "tool": "pihole_local_dns_records"},
+             "pass": {"field": "hosts", "contains": {"param": "fqdn"}}},
+   "undo": {"kind": "tool",
+            "call": {"integration": "Pi-hole", "tool": "pihole_local_dns_record_delete",
+                     "args": {"hostname": {"param": "fqdn"}}}}},
+
+  {"id": "2", "kind": "tool",
+   "title": "NPM proxy host",
+   "call": {"integration": "Nginx Proxy Manager", "tool": "npm_proxy_host_create",
+            "args": {"domain_names": [{"param": "fqdn"}],
+                     "forward_host": {"param": "target_ip"},
+                     "forward_port": {"param": "port"},
+                     "forward_scheme": "http"}},
+   "check": {"kind": "tool",
+             "call": {"integration": "Nginx Proxy Manager", "tool": "npm_proxy_hosts"},
+             "pass": {"field": "items", "contains": {"param": "fqdn"}}},
+   "undo": {"kind": "tool",
+            "call": {"integration": "Nginx Proxy Manager", "tool": "npm_proxy_host_delete",
+                     "args": {"domain": {"param": "fqdn"}}}}},
+
+  {"id": "3", "kind": "ssh",
+   "title": "The name resolves on the gateway",
+   "ssh": {"host": {"enum": ["web01.example.test"]},
+           "command": "getent hosts {fqdn}"},
+   "check": {"kind": "ssh",
+             "ssh": {"host": {"enum": ["web01.example.test"]},
+                     "command": "getent hosts {fqdn}"},
+             "pass": {"exit_code": 0}},
+   "undo": null},
+
+  {"id": "4", "kind": "ssh",
+   "title": "The URL answers over HTTP from the gateway",
+   "ssh": {"host": {"enum": ["web01.example.test"]},
+           "command": "curl -fsS -o /dev/null https://{fqdn}/"},
+   "check": {"kind": "ssh",
+             "ssh": {"host": {"enum": ["web01.example.test"]},
+                     "command": "curl -fsS -o /dev/null https://{fqdn}/"},
+             "pass": {"exit_code": 0}},
+   "undo": null}
+ ]}
+```
+
+Two choices in that step are deliberate:
+
+* **The HTTP check is an SSH step on the gateway, not a generic read tool.**
+  The chunk's outline says "an HTTP status via the generic read tool"; the
+  generic read tool is bound to its integration's `base_url`, so it cannot
+  fetch an arbitrary FQDN. An SSH `curl` on a named gateway *is* a bounded
+  read: `-f` makes any non-2xx/3xx exit non-zero, `-o /dev/null` discards the
+  body, F1 parses the command, and it passes `read_policy`. The note uses it.
+* **No `-w '%{http_code}'`.** A template may contain `{name}` placeholders
+  and nothing else in braces; `%{http_code}` would look like a placeholder
+  for an undeclared parameter and (correctly) refuse the step. That is why
+  §2's template rule rejects any brace outside a declared placeholder: it
+  turns a silent mis-substitution into a review-time refusal.
+
+**Run, step by step** (what the operator approves and what happens):
+
+1. `recipe_run("add_internal_fqdn", {fqdn: "app.example.test",
+   target_ip: "192.0.2.10", port: 443})` (MCP) — the values normalise (port
+   becomes the integer 443), the four steps are substituted, each SSH command
+   is parsed with F1 and must be `complete`, and the filled-in steps go into
+   the session plan. The response is `{status: "pending", plan_id, preview}`.
+2. The operator reviews: step 1's Pi-hole call shows `hostname=app.example.test`,
+   `ip=192.0.2.10`; step 2 shows `domain_names=["app.example.test"]`,
+   `forward_host=192.0.2.10`, `forward_port=443`; step 3 shows
+   `getent hosts app.example.test` with its F1 breakdown (read, exact bytes);
+   step 4 shows `curl -fsS -o /dev/null https://app.example.test/` (read).
+   Approving the plan approves the four calls once.
+3. Each step runs through the **normal paths**: the tool steps through the
+   MCP approval queue's executor (the plan item consumed, not a second
+   prompt), the SSH steps as plan items on their gateway — so freeze,
+   blocklists, Zero-Trust and the read lane all still apply. Each result is
+   stored (F5 row or integration-call row) and the step's check is evaluated
+   against it.
+4. Step 1's check fails if the Pi-hole response does not list the hostname →
+   the run stops `failed at 1`; steps 2–4 are `skipped`. Steps 1's undo is
+   **not** run automatically; the run page offers "roll back completed steps",
+   which is the approval-gated `recipe_rollback`.
+5. On success the run is `ok`; the run row keeps the parameters, the version
+   hash and the per-step result ids. A later edit to the recipe does not
+   change what this run did.
+
+#### 8. What is deliberately out of scope
+
+* No loops, conditionals, retries, delays or variables beyond the closed
+  parameter set.
+* No free-text parameters and no "run this command with these args" step.
+* No automatic undo and no automatic retry.
+* No cross-recipe calls and no recipe inside a recipe.
+* No UI authoring: recipes are proposed as JSON (by an agent) and reviewed,
+  not built in a form designer.
+
+#### 9. Tests to add (final)
+
+* parameters: each type's accept/reject cases, normalisation (port → int,
+  lower-case/`rstrip('.')`), unknown/missing parameter, `concat` parts;
+* substitution: a value with quotes/spaces/newlines is one shell word
+  (`shlex.quote`), a tool slot stays a JSON value (a number for `port`), an
+  unknown placeholder refuses, a template with `$`/backtick/brace refuses;
+* shape: >10 steps, >3 SSH steps, a host parameter, an unknown tool, a
+  forbidden tool, an `enum` parameter with 17 values;
+* approval: a draft cannot run; an edited approved recipe is a new draft; the
+  approved hash is what the run records; a plan approval covers exactly its
+  steps;
+* checks: `exit_code`, `status_code`, `equals`, `contains`, `all`/`any`;
+  a missing field fails closed;
+* failure: a failed check stops the run, remaining steps are skipped, undo
+  does not run, `recipe_rollback` runs completed undos in reverse;
+* the example: `add_internal_fqdn` builds the four substituted steps, its
+  checks pass/fail on canned responses, and a rollback deletes in reverse.
+
+`bash scripts/verify.sh`: `2331 passed, 7 warnings in 429.16s (0:07:09)` (docs-only).
+
+
 
 ### Reviewer notes
 
@@ -5505,7 +5956,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 13 | F11 | ha-config-files | dashboard | Ready (after F10) — design first | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | design approval + security reviewer sign-off |
 | 14 | F14 | inventory | dashboard + MCP | Merged | `feat/f14-inventory` | Chunk H | |
 | 15 | F15 | probes | dashboard + MCP | Ready after F12 | `feat/f15-probes` | F4, F12 | |
-| 16 | F16 | recipes | dashboard + MCP | Design first (questions listed) | `feat/f16-recipes` | F3, F12, F13 | design approval + security reviewer sign-off |
+| 16 | F16 | recipes | dashboard + MCP | **Design note written** — awaiting review | `feat/f16-recipes` | F3, F12, F13 | design approval + security reviewer sign-off |
 | 17 | F17 | local-agent | dashboard + docs | Ready after F12–F16 | `feat/f17-local-agent` | F12–F16 | |
 | 18 | F19 | unattended-limits | gateway + dashboard | Design first; before F4 `on` is unlocked | `feat/f19-unattended-limits` | F4, F5 | design approval + security reviewer sign-off |
 Chunks are done **in the order column**; each new chunk branches from the
