@@ -101,15 +101,20 @@ class _ParseState:
 class _Statement:
     """One simple command (or pipeline member) plus its redirections."""
 
-    __slots__ = ('argv', 'op', 'redirs', 'text', 'heredoc', 'heredoc_specs')
+    __slots__ = ('argv', 'op', 'redirs', 'text', 'heredoc', 'heredoc_specs',
+                 'background')
 
-    def __init__(self, argv, op, redirs, text, heredoc=False, heredoc_specs=()):
+    def __init__(self, argv, op, redirs, text, heredoc=False, heredoc_specs=(),
+                 background=False):
         self.argv = argv
         self.op = op
         self.redirs = redirs
         self.text = text
         self.heredoc = heredoc
         self.heredoc_specs = list(heredoc_specs)
+        # Round 7 Q1: the statement before a `&` is sent to the background and
+        # can outlive the session, so the read lane refuses it.
+        self.background = background
 
 
 # ── Tokenising ──────────────────────────────────────────────────────────────
@@ -665,7 +670,8 @@ def _statements(atoms, state, heredoc_specs=()):
             if argv or redirs:
                 stmts.append(_Statement(list(argv), op, list(redirs),
                                         ' '.join(parts), stmt_heredoc,
-                                        list(stmt_specs)))
+                                        list(stmt_specs),
+                                        background=(atom == '&')))
                 argv, redirs, parts = [], [], []
                 stmt_heredoc = False
                 stmt_specs = []
@@ -953,10 +959,16 @@ def _unwrap(argv, state):
     args = argv[1:]
 
     if verb == 'sudo':
+        # Round 7 Q3: only the bare form is the `sudo` context. Any option
+        # (login shell, shell, chroot, -u, -E, ...) or assignment gets a
+        # distinguishable label so the read lane refuses the form; every
+        # command already runs as root, so bare sudo adds nothing.
+        optioned = bool(args) and (args[0].startswith('-')
+                                   or bool(_ASSIGN_RE.match(args[0])))
         rest = _strip_flags(args, _VALUE_FLAGS_SUDO)
         if not rest:
             return None
-        return rest, 'sudo', ''
+        return rest, 'sudo(options)' if optioned else 'sudo', ''
 
     if verb == 'timeout':
         i = 0
@@ -1585,6 +1597,11 @@ def _parse_statement(st, ctx, depth, state):
             # The statement is only `$( … )`: whatever it prints is executed.
             steps.append(_step(st.text, st.op, UNKNOWN,
                                'command is built by a substitution', ctx, state))
+        elif _ASSIGN_RE.match(clean_argv[0]):
+            # Round 7 SC9: a bare assignment (`FOO=1` on its own) changes what
+            # later words expand to and otherwise produces no step at all.
+            steps.append(_step(st.text, st.op, UNKNOWN,
+                               'bare variable assignment', ctx, state))
         return steps
 
     verb, allowed = cmd_rules.resolve_verb(assignments[0])
@@ -1645,8 +1662,12 @@ def _parse_statement(st, ctx, depth, state):
         kind, why = UNKNOWN, 'flagged by the risk rules'
 
     input_redirects = _input_redirects(st)
-    extra = {'input_redirects': input_redirects} if input_redirects else None
-    return [_step(text, st.op, kind, why, ctx, state, extra)] + sub_steps
+    extra = {}
+    if input_redirects:
+        extra['input_redirects'] = input_redirects
+    if st.background:
+        extra['background'] = True
+    return [_step(text, st.op, kind, why, ctx, state, extra or None)] + sub_steps
 
 
 # ── Result ──────────────────────────────────────────────────────────────────
