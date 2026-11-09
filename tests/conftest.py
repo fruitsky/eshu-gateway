@@ -157,10 +157,13 @@ def pytest_runtest_logreport(report):
     if len(_CI_FAILED) > 40:
         return
     detail = getattr(report, 'longreprtext', '') or ''
-    first = next((line for line in detail.splitlines() if line.strip()), '')
-    sys.stdout.write('\n::error title=%s::%s\n'
-                     % (_ci_escape(nodeid)[:200],
-                        _ci_escape(first)[:400]))
+    lines = [line for line in detail.splitlines() if line.strip()]
+    # The first line is `self = <…>`; the `E ` lines carry the assertion.
+    tail = [line for line in lines if line.startswith('E ')] or lines[-6:]
+    sys.stdout.write('\n::error file=%s,line=1,title=%s::%s\n'
+                     % (_ci_escape(nodeid.split('::')[0]),
+                        _ci_escape(nodeid)[:200],
+                        _ci_escape(' | '.join(tail))[:900]))
     sys.stdout.flush()
 
 
