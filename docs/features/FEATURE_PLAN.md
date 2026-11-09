@@ -5327,7 +5327,52 @@ _(implementer)_
 
 ### Reviewer notes
 
-_(reviewer)_
+**Pre-implementation notes (2026-11-09).** The outline is sound. Close these
+points in the implementation; each needs a test. F15 starts after F12 is
+merged.
+
+* **P1 (must): no option injection through a parameter.** `shlex.quote`
+  stops shell syntax but not a value starting with `-`. `unit=--help` or
+  `container=-v` is one quoted word that `systemctl` or `docker` still reads
+  as an option. Every type's first character must be alphanumeric:
+  * `unit` `^[A-Za-z0-9][A-Za-z0-9@._-]{0,127}$`;
+  * `container` is a Docker name `^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`, or a
+    vmid `^[0-9]{3,9}$`;
+  * `name` uses the F16 `fqdn` rule (labels of at most 63 characters, no
+    leading `-`, no `..`).
+  
+  Also put `--` before the operand wherever the tool accepts it.
+* **P2 (must): structured sources over parsing prose.** Take state from
+  `systemctl show -p ActiveState,SubState,ActiveEnterTimestamp,NRestarts
+  -- <unit>`, not by parsing `systemctl status`. NRestarts is the restart
+  count. Keep `status` out of the probe entirely, or use it for display only.
+* **P3 (must): say what happens without output capture.** The digest needs F5
+  `tail` output, and every live gateway is on `exit-only`. Pick one:
+  * the probe refuses with `capture_off` and a hint; or
+  * F12's per-request capture override applies to probe requests (only if
+    the F12 R4 rules allow it).
+  
+  Never return an empty digest as if all is well.
+* **P4 (must): don't block the MCP call.** Without F4 `on` (and `on` is
+  locked), every probe waits for approval. `diagnose_*` returns
+  `{status: "pending", plan_id}`, and `probe_result(plan_id)` returns the
+  digest when it is ready. The plan is proposed by the probe's code, not by
+  agent text, and an agent cannot approve it.
+* **P5 (must): scrub before the digest.** `docker logs` and `journalctl`
+  lines can carry tokens. Run the F5 scrubber over each output before
+  parsing, and test that a synthetic token in a log line never reaches the
+  digest.
+* **P6 (should): bounded commands.** `du` over `/var/log` can be slow on a
+  big host. Use `du -x -d 1 -- /var/log`, and rely on F19's time limit once
+  it lands. Until then, document that a probe can take as long as its
+  slowest command.
+* **P7 (should): make the cap testable.** "2,000 tokens" should be a byte or
+  character cap (for example 8,000 characters of JSON), with `truncated: true`
+  and the order things are dropped in (errors beyond the top 10 first, then
+  ports).
+* **P8 (should):** `dns_check` must say which gateway it uses: the one F14's
+  inventory maps the NPM proxy host to, else none (Pi-hole only). Never let
+  the agent name it.
 
 ---
 
@@ -5442,7 +5487,36 @@ _(implementer)_
 
 ### Reviewer notes
 
-_(reviewer)_
+**Pre-implementation notes (2026-11-09).** Close these points in the
+implementation; each needs a test. F17 starts after F15. F16's recipe tools
+are optional, so the preset must work without them.
+
+* **A1 (must): define "read-only `ssh_exec`".** The command is accepted only
+  if F4's `eligible()` would pass it, and anything else is **refused**
+  (`read_only_agent`), not queued for approval. A small model should not be
+  able to flood the operator with write requests. Enforce it on the server
+  from the agent's policy (`ssh_mode: 'read-only'`), never from the tool
+  description.
+* **A2 (must): preset tools that exist.** Build the allowlist by filtering the
+  preset list against the tool registry. `recipe_*` and the probes may not be
+  there yet. Store the preset version on the agent row, so a later preset
+  change never silently widens an existing agent.
+* **A3 (must): `escalate` is agent text.** Cap the summary (2 KiB), rate-limit
+  it (per agent, a few per hour), and render it escaped in the notification
+  and the UI, with no links made clickable. "Always allowed" should mean
+  "not gated", not "not limited".
+* **A4 (must): who may read an escalation.** `get_escalation` is limited to
+  the operator and the agents the **operator** names in settings (for
+  example `escalation_readers: ["hermes"]`), never a list the escalating
+  agent supplies. Test that another agent gets `not_found`, not
+  `forbidden`.
+* **A5 (should): compact descriptions keep the safety words.** Every
+  allowlisted tool has a compact variant of at most 160 characters. A test
+  checks that a tool whose full description says "needs approval" or
+  "read-only" still says so in the compact one.
+* **A6 (should): the eval script never touches a real dashboard.** It refuses
+  a non-loopback base URL and creates its own temp DB, with synthetic hosts
+  only (`192.0.2.0/24`, `*.example.test`).
 
 ---
 
@@ -5531,17 +5605,18 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 5a | X1 | ctx-actions | dashboard | Merged | `fix/x1-ctx-actions` | — | FYI to security reviewer (approve ignored status) |
 | 6 | F5 | exec-results | gateway + dashboard | Merged | `feat/f5-exec-results` | — | |
 | 6a | F18 | request-context | dashboard | Merged | `feat/f18-request-context` | F1, F5, F7, X1 | |
-| 7 | F12 | ssh-exec | dashboard + gateway | Ready (after F5) — design first | `feat/f12-ssh-exec` | F4, F5 | design approval + security reviewer sign-off |
+| 7 | F12 | ssh-exec | dashboard + gateway | Design signed off; **code round 1: changes requested** (M1–M3, S1–S2 + security R1–R4) | `feat/f12-ssh-exec` | F4, F5 | security reviewer re-checks the gateway bash diff |
 | 8 | F6 | session-wrapup | dashboard | Merged | `feat/f6-session-wrapup` | F3, F4, F5 | |
 | 9 | F13 | session-conclusions | dashboard + MCP | Merged | `feat/f13-session-conclusions` | F5, F6 | |
 | 10 | F8 | test-traffic | dashboard | Merged | `feat/f8-test-traffic` | — | low priority |
 | 11 | F9 | ha-supervisor-read | dashboard | Merged | `feat/f9-ha-supervisor-read` | — | token is now a dedicated `eshu` HA admin user |
-| 12 | F10 | ha-supervisor-actions | dashboard | Ready (after F9) | `feat/f10-ha-supervisor-actions` | F9, F3, Chunk H | reviewer pass + security reviewer sign-off |
-| 13 | F11 | ha-config-files | dashboard | Ready (after F10) — design first | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | design approval + security reviewer sign-off |
+| 12 | F10 | ha-supervisor-actions | dashboard | **Code round 1: changes requested** (M1–M2, S1–S2) | `feat/f10-ha-supervisor-actions` | F9, F3, Chunk H | then security reviewer sign-off |
+| 13 | F11 | ha-config-files | dashboard | **Design round 1: changes requested** (H1–H8) | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | then security reviewer sign-off on the design |
 | 14 | F14 | inventory | dashboard + MCP | Merged | `feat/f14-inventory` | Chunk H | |
-| 15 | F15 | probes | dashboard + MCP | Ready after F12 | `feat/f15-probes` | F4, F12 | |
-| 16 | F16 | recipes | dashboard + MCP | Design first (questions listed) | `feat/f16-recipes` | F3, F12, F13 | design approval + security reviewer sign-off |
-| 17 | F17 | local-agent | dashboard + docs | Ready after F12–F16 | `feat/f17-local-agent` | F12–F16 | |
-| 18 | F19 | unattended-limits | gateway + dashboard | Design first; before F4 `on` is unlocked | `feat/f19-unattended-limits` | F4, F5 | design approval + security reviewer sign-off |
+| 15 | F15 | probes | dashboard + MCP | Ready after F12; pre-implementation notes P1–P8 | `feat/f15-probes` | F4, F12 | |
+| 16 | F16 | recipes | dashboard + MCP | **Design round 1: changes requested** (R1–R8) | `feat/f16-recipes` | F3, F12, F13 | then security reviewer sign-off on the design |
+| 17 | F17 | local-agent | dashboard + docs | Ready after F15; pre-implementation notes A1–A6 | `feat/f17-local-agent` | F12–F16 | |
+| 18 | F19 | unattended-limits | gateway + dashboard | **Design round 1: changes requested** (D1–D4, S1 + security L1–L8) | `feat/f19-unattended-limits` | F4, F5 | before F4 `on` is unlocked |
+| — | CI fix | ci-environment | gateway + tests | **Round 4: one fix left** (C5); then security reviewer (gateway bash) | `fix/ci-environment` | F5 | release precondition (`RELEASE_1.md`) |
 Chunks are done **in the order column**; each new chunk branches from the
 updated `feature-roadmap` after the previous one is merged.
