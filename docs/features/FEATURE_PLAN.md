@@ -6010,6 +6010,98 @@ merge.
 feature reviewer checks the dashboard side of the code. The gateway bash
 comes back to the security chat before merge.
 
+**Code round 1 (2026-11-09, main feature reviewer): changes requested.**
+I ran 278 F12, gateway-script, installer, poller and golden tests locally;
+the implementer's full gate passed 2462.
+
+*What holds in the gateway bash (`aa268de`):*
+
+* **Prefix parsing:** keys are allowlisted, duplicate and half-signed
+  prefixes are refused, and `printf -v` only touches listed names.
+* **Signature:** `ts` and the MAC are checked **before** the nonce is
+  consumed. The nonce store uses a separate lock file, a temp file plus
+  rename, and fails closed on any error.
+* **Dashboard key:** `--dashboard-key` is set only by the forced command
+  (sudoers allows exactly that form), and calls on it must be signed.
+* **Logging:** one log line, after every prefix is stripped, with no
+  prefix values.
+* **MCP mode:** `say()`/`finish()` make stdout exactly one envelope, and
+  `tee >/dev/null` keeps the stream off it.
+* **Force-JIT:** the allowlist, the regex allowlist and the feature
+  scripts are all skipped under force-JIT.
+* **Tickets:** `ticket_allowed` binds the claim to the agent and session.
+* **Poller:** it understands v2 lines when pruning.
+
+*Dashboard:* the runner argv is fixed (`-F /dev/null`, the IP only,
+`StrictHostKeyChecking=yes`, a per-gateway known_hosts file, process-group
+kill). Session ownership fails closed. `read_only` refuses. The derived key
+is stored (G1). G3 whitespace and control-character refusal is in.
+
+*Must fix:*
+
+* **M1 Old gateways break on the first dashboard deploy.** `ticket_line()`
+  now always returns `v2|ts|agent|session|cmd`, from both
+  `update_ticket_consumed_by_ip` (the poller) and `get_ticket_by_request_id`
+  (the gateway's JIT claim), whoever asks.
+  * An **old gateway's** JIT claim takes `split("|",1)[1]` (`<ts>|…|cmd`),
+    which never equals `cmd`. The result is "Approved command does not
+    match" on **every** approval.
+  * An **old poller** prunes on `$1+90`, so every v2 line is deleted as
+    stale.
+
+  The rollout is "dashboard first, gateways later", so this breaks every
+  approval fleet-wide until each gateway updates. Fix: emit
+  `v2|…` **only** to a gateway whose stored `ssh_ticket_format == 'v2'`,
+  and the old `ts|cmd` otherwise. A row that has an `agent` must never be
+  issued in the old format: refuse it and audit, since `ssh_exec` already
+  refuses gateways without the capability. Tests: an old-format gateway
+  gets `ts|cmd` from both call sites; a v2 gateway gets v2; an agent row on
+  an old gateway is refused.
+* **M2 The approval race on re-run.** After approval, `ssh_exec(wait=true)`
+  re-runs as soon as the row is `approved`. But the ticket reaches the
+  lockbox only when the poller next calls `/api/poll`, which also flips the
+  row to `consumed`. A re-run that lands first finds no ticket, so the
+  gateway files a **second** JIT request. The operator is asked twice, and
+  the first ticket expires unused. Agents that poll `check_request` and call
+  again hit the same race.
+  * Minimal fix: `wait` re-runs only once the row is `consumed`, which
+    means the poller has taken the ticket.
+  * `check_request` tells MCP agents "ready to re-run" only at `consumed`,
+    and `approved` reads as "approved, delivering to the gateway".
+  * Test with a simulated poller lag: no second request is created.
+
+  (A deterministic alternative is a MAC-covered `ESHU_REQUEST_ID` that lets
+  the MCP re-run claim through `/api/ticket/{id}`. It is cleaner but a
+  design change, so only take it if the minimal fix proves flaky.)
+* **M3 The force-JIT re-derivation fails open.** In `receive_request`,
+  when the gateway sends `force_jit=false` with an agent:
+  * an unknown agent leaves `force_jit=False`;
+  * an exception sets it `False`;
+  * an agent whose `ssh_mode` is unset gets `False`, while `ssh_exec`
+    treats unset as `approval`.
+
+  Make it fail closed: unknown agent → force; exception → force; unset
+  mode → `approval` (one shared default constant used by both places).
+  Tests for each.
+
+*Should fix / answers to the open questions:*
+
+* **S1** Report `ssh_agent_format` only when `/etc/eshu-token` exists. A
+  gateway updated by self-update without a re-install has no token file;
+  today every signed call there fails as `bad signature`, which is safe
+  but confusing.
+* **S2** In `PREFIX REFUSED` log lines, log `agent=` only when it passed
+  its charset check, so nothing arbitrary reaches syslog.
+* **Open question 1 (capture `off`):** honour the operator's setting. The
+  agent still gets its output in the envelope, but `request_results`
+  stores the exit code and duration only.
+* **Open question 2 (`ALLOWED_SSH_FROM`):** the installer warns when it
+  falls back. The gateway's detail view shows the `from=` addresses the key
+  line was written with.
+
+The gateway bash is with the security reviewer (their code review is
+separate). M1 is the one item they may also flag.
+
 
 ---
 
@@ -6698,7 +6790,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 5a | X1 | ctx-actions | dashboard | Merged | `fix/x1-ctx-actions` | — | FYI to security reviewer (approve ignored status) |
 | 6 | F5 | exec-results | gateway + dashboard | Merged | `feat/f5-exec-results` | — | |
 | 6a | F18 | request-context | dashboard | Merged | `feat/f18-request-context` | F1, F5, F7, X1 | |
-| 7 | F12 | ssh-exec | dashboard + gateway | **Implemented** — awaiting review; gateway bash to the security chat | `feat/f12-ssh-exec` @ `aa268de` | F4, F5 | design approval + security reviewer sign-off |
+| 7 | F12 | ssh-exec | dashboard + gateway | **Code round 1: changes requested (M1–M3); gateway bash with the security reviewer** | `feat/f12-ssh-exec` @ `aa268de` | F4, F5 | design approval + security reviewer sign-off |
 | 8 | F6 | session-wrapup | dashboard | Merged | `feat/f6-session-wrapup` | F3, F4, F5 | |
 | 9 | F13 | session-conclusions | dashboard + MCP | Merged | `feat/f13-session-conclusions` | F5, F6 | |
 | 10 | F8 | test-traffic | dashboard | Merged | `feat/f8-test-traffic` | — | low priority |
