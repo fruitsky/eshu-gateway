@@ -5796,7 +5796,232 @@ Two choices in that step are deliberate:
 
 `bash scripts/verify.sh`: `2331 passed, 7 warnings in 429.16s (0:07:09)` (docs-only).
 
+### Round 2 — design after review round 1 (R1–R8)
 
+This section is the design of record where it differs from §1–§9; the rest
+still stands. It folds the eight review items, and §7's `add_internal_fqdn`
+document below is the amended version.
+
+#### R1 — templates: no quotes, only declared braces, whole-word slots
+
+The round-1 claim — "a value that slipped past its regex still cannot become
+shell syntax" — only holds when the slot is a **bare word**: in
+`echo '{fqdn}'`, `shlex.quote` returns `'value'` and the template's own quote
+closes early. Three rules replace the weaker check, and the code is §2's
+`substitute_command` (now taking `declared`):
+
+1. **No `'` or `"` anywhere in a template.** A template that needs a quoted
+   argument is written without the quotes or is not a recipe step; this is
+   refused at propose time (`invalid_step`).
+2. **Every `{` and `}` belongs to a declared placeholder.** Any leftover brace
+   after removing the placeholders is refused. The round-1 code only refused
+   `$`, backtick and newline, so `{X}` and `{ x }` passed silently; they no
+   longer do. (This is what makes `%{http_code}` in §7 a review-time refusal
+   rather than a mis-substitution.)
+3. **Every placeholder is a whole word.** Replace each placeholder with a
+   one-word sentinel and `shlex.split` the result; the word count must equal
+   the template's. A placeholder glued to other characters
+   (`--host={fqdn}`) would still be safe with a quoted value, but a whole-word
+   slot is the rule the reviewer asked for and it is cheap to enforce.
+
+```python
+def substitute_command(template, values, declared):
+    if any(ch in template for ch in ('$', '`', '\n', '\r', "'", '"')):
+        raise RecipeParamError(
+            'invalid_step',
+            'SSH templates may not contain $, backticks, newlines or quotes')
+    outside = PLACEHOLDER.sub('', template)
+    if '{' in outside or '}' in outside:
+        raise RecipeParamError('invalid_step',
+                               'braces must be declared placeholders')
+    names = PLACEHOLDER.findall(template)
+    unknown = [n for n in names if n not in declared]
+    if unknown:
+        raise RecipeParamError('unknown_param',
+                               'template uses %s' % ', '.join(sorted(set(unknown))))
+    sentinel = 'eshu-sentinel'
+    if len(shlex.split(PLACEHOLDER.sub(sentinel, template))) != \
+            len(shlex.split(template)):
+        raise RecipeParamError('invalid_step',
+                               'a placeholder must be a whole word')
+    def _one(match):
+        return shlex.quote(str(values[match.group(1)]))
+    return PLACEHOLDER.sub(_one, template)
+```
+
+Tests: `echo '{fqdn}'`, `echo "{fqdn}"`, `echo {X}`, `echo { x }` and
+`echo --host={fqdn}` are all refused; `echo {fqdn}` substitutes to exactly one
+word; the tool-slot substitution is unchanged (a JSON value, never a string).
+
+#### R2 — an allowlist of recipe tools (and the denylist as a second check)
+
+A denylist makes every tool a future integration adds recipe-usable by
+default. The allowlist is the primary check, in `core/recipe_tools.py`:
+
+```python
+# Tool name -> its undo partner, or None when a recipe has no safe undo for it.
+RECIPE_TOOLS = {
+    'pihole_local_dns_record_add': 'pihole_local_dns_record_delete',
+    'pihole_local_dns_record_delete': None,
+    'pihole_local_dns_records': None,          # read, used by a check
+    'npm_proxy_host_create': 'npm_proxy_host_delete',
+    'npm_proxy_host_delete': None,
+    'npm_proxy_hosts': None,
+}
+
+# Kept as a second check: a tool here is refused even if a bad edit adds it to
+# the allowlist, and a test asserts the two sets are disjoint.
+FORBIDDEN_RECIPE_TOOLS = frozenset({
+    'ha_host_reboot', 'ha_core_restart', 'ha_backup_create',
+    'ha_addon_update', 'ha_core_update', 'ssh_exec', 'write', 'ws_write',
+    'web_fetch', 'recipe_run', 'recipe_rollback',
+})
+```
+
+`recipe_propose` and the operator's approve both check that **every** tool a
+step names is in `RECIPE_TOOLS` and in neither `FORBIDDEN_RECIPE_TOOLS` nor the
+F10 `FORBIDDEN` endpoint table (the endpoint check still applies to the F10
+tools). A recipe naming anything else is refused with
+`recipe_tool_forbidden`. The test walks the **whole tool registry** (every
+integration's tools, including generic `read`/`write`, `ws_read`/`ws_write`)
+and asserts each name is in exactly one of `RECIPE_TOOLS` and
+`FORBIDDEN_RECIPE_TOOLS`; an unclassified tool fails the test, so adding an
+integration forces the decision.
+
+#### R3 — `precheck`, and rollback owns only what the run created
+
+A step may carry an optional `precheck`: the same predicate shapes, written as
+the **positive** statement ("a record for this domain exists"). The engine
+evaluates it before the step:
+
+* precheck **passes** (the thing already exists) → the step is not run,
+  recorded `already-present`, `created = false`;
+* precheck **fails** (absent) → the step runs; on success `created = true`, on
+  failure the run stops;
+* precheck cannot be evaluated → fail closed, the run stops.
+
+`recipe_rollback` undoes only steps with `created = true`, in reverse order.
+An operator's pre-existing Pi-hole record or proxy host is therefore never
+deleted by a rollback, which was the round-1 hazard. The per-step `created`
+flag is stored in `recipe_run_steps`, and the rollback preview shows exactly
+which steps it will undo and which it will leave alone.
+
+#### R4 — `contains`, defined
+
+`contains` is **element equality**, never a substring:
+
+* a list of scalars: `{"field": "tags", "contains": "internal"}`;
+* a list of objects, one field:
+  `{"field": "items", "contains": {"key": "domain_names", "value": {"param": "fqdn"}}}`;
+* a list of objects, several fields on the **same element**:
+  `{"field": "items", "contains": {"where": {"domain": {"param": "fqdn"},
+  "ip": {"param": "target_ip"}}}}`. A `where` value is compared exactly; when
+  the element's field is a list, the value must be an element of it (again
+  equality).
+
+A substring test on `hosts` would have passed for `myapp.example.test`; a
+`where` on the domain does not. Step 1's check asserts the record maps the
+FQDN to `target_ip`, and step 2's asserts the proxy host forwards to
+`target_ip` on `port`; a stale record with another IP fails the check (the
+precheck passes on the domain, the step is skipped, and the check then fails
+the run).
+
+#### R5 — one run approval per session, and who may run
+
+The open question is settled: **one run approval per session at a time**, which
+F3's single active plan already gives; a second `recipe_run` in the same
+session while a plan is open returns `plan_waiting` rather than queueing.
+
+A recipe also carries `allowed_agents`: a list of agent names, **empty meaning
+operator-started only**. The run approval and the run itself are refused for an
+agent not on the list (`recipe_agent_not_allowed`), which keeps "one approval"
+from becoming "any agent with a session may spend it".
+
+#### R6 — `"check": "self"`
+
+Steps 3 and 4 are their own check (the command *is* the verification), and the
+round-1 document ran each command twice. A check may now be the string
+`"self"`: the step's own structured result is the verdict (SSH: exit code 0;
+tool: no error status), and a failing result fails the step and the run. The
+two commands run once.
+
+#### R7 — `curl` is not a read-lane verb (correction)
+
+The round-1 note said the HTTP check "passes `read_policy`". It does not:
+`core/read_policy.READ_LANE_VERBS` has no `curl` (status verbs and file
+readers only), so step 4 is an ordinary SSH step that needs the run approval.
+That only matters for the deferred read-only auto-run (§3.3), which v1 does
+not enable; a test pins `curl` as not a read-lane verb so the note cannot drift
+again.
+
+#### R8 — no `concat`
+
+The tests list mentioned "`concat` parts", which the design never defines.
+Dropped; the parameter types are the closed set in §2 and nothing concatenates
+two parameters into one value.
+
+#### `add_internal_fqdn`, amended (R3, R4, R6)
+
+Parameters and hosts are unchanged. The steps become:
+
+```json
+{"id": "1", "kind": "tool",
+ "call": {"integration": "Pi-hole", "tool": "pihole_local_dns_record_add",
+          "args": {"hostname": {"param": "fqdn"}, "ip": {"param": "target_ip"}}},
+ "precheck": {"kind": "tool",
+              "call": {"integration": "Pi-hole", "tool": "pihole_local_dns_records"},
+              "pass": {"field": "hosts", "contains": {"where": {"domain": {"param": "fqdn"}}}}},
+ "check": {"kind": "tool",
+           "call": {"integration": "Pi-hole", "tool": "pihole_local_dns_records"},
+           "pass": {"field": "hosts", "contains": {"where": {"domain": {"param": "fqdn"},
+                                                              "ip": {"param": "target_ip"}}}}},
+ "undo": {"kind": "tool",
+          "call": {"integration": "Pi-hole", "tool": "pihole_local_dns_record_delete",
+                   "args": {"hostname": {"param": "fqdn"}}}}},
+
+{"id": "2", "kind": "tool",
+ "call": {"integration": "Nginx Proxy Manager", "tool": "npm_proxy_host_create",
+          "args": {"domain_names": [{"param": "fqdn"}],
+                   "forward_host": {"param": "target_ip"},
+                   "forward_port": {"param": "port"},
+                   "forward_scheme": "http"}},
+ "precheck": {"kind": "tool",
+              "call": {"integration": "Nginx Proxy Manager", "tool": "npm_proxy_hosts"},
+              "pass": {"field": "items", "contains": {"where": {"domain_names": {"param": "fqdn"}}}}},
+ "check": {"kind": "tool",
+           "call": {"integration": "Nginx Proxy Manager", "tool": "npm_proxy_hosts"},
+           "pass": {"field": "items", "contains": {"where": {"domain_names": {"param": "fqdn"},
+                                                              "forward_host": {"param": "target_ip"},
+                                                              "forward_port": {"param": "port"}}}}},
+ "undo": {"kind": "tool",
+          "call": {"integration": "Nginx Proxy Manager", "tool": "npm_proxy_host_delete",
+                   "args": {"domain": {"param": "fqdn"}}}}},
+
+{"id": "3", "kind": "ssh",
+ "ssh": {"host": {"enum": ["web01.example.test"]}, "command": "getent hosts {fqdn}"},
+ "check": "self", "undo": null},
+
+{"id": "4", "kind": "ssh",
+ "ssh": {"host": {"enum": ["web01.example.test"]},
+         "command": "curl -fsS -o /dev/null https://{fqdn}/"},
+ "check": "self", "undo": null}
+```
+
+The rollback for a run where step 1 found the record already present and step 2
+created the proxy host deletes **only** the proxy host. A stale record with a
+different IP fails step 1's check (the run stops `failed at 1`) and nothing is
+created.
+
+#### Tests, amended (§9)
+
+Add: each R1 template spelling; the registry-walk allowlist test; a precheck
+that passes (no create, no undo), fails (create, undo on rollback) and is
+unevaluable (fail closed); `contains` scalar, `key` and `where` forms plus a
+substring false-positive (`myapp.example.test` vs `app.example.test`);
+`check: "self"` runs the command once; `allowed_agents` refusal; `curl` is not
+a read-lane verb. Drop `concat`.
+
+`bash scripts/verify.sh`: `2331 passed, 7 warnings in 427.94s (0:07:07)` (docs only).
 
 ### Reviewer notes
 
@@ -6010,7 +6235,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 13 | F11 | ha-config-files | dashboard | Ready (after F10) — design first | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | design approval + security reviewer sign-off |
 | 14 | F14 | inventory | dashboard + MCP | Merged | `feat/f14-inventory` | Chunk H | |
 | 15 | F15 | probes | dashboard + MCP | Ready after F12 | `feat/f15-probes` | F4, F12 | |
-| 16 | F16 | recipes | dashboard + MCP | **Design round 1: changes requested** (R1–R8) | `feat/f16-recipes` | F3, F12, F13 | design approval + security reviewer sign-off |
+| 16 | F16 | recipes | dashboard + MCP | **Round 2: design revised for R1–R8 — awaiting security review** | `feat/f16-recipes` | F3, F12, F13 | design approval + security reviewer sign-off |
 | 17 | F17 | local-agent | dashboard + docs | Ready after F12–F16 | `feat/f17-local-agent` | F12–F16 | |
 | 18 | F19 | unattended-limits | gateway + dashboard | Design first; before F4 `on` is unlocked | `feat/f19-unattended-limits` | F4, F5 | design approval + security reviewer sign-off |
 Chunks are done **in the order column**; each new chunk branches from the
