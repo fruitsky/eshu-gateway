@@ -6224,7 +6224,70 @@ is already in F10's code; F11 does not change F10's handlers.
 
 ### Reviewer notes
 
-_(reviewer)_
+**Design round 1 (2026-11-09): approved in direction, changes requested.**
+Fixed templates, pin-before-write, hash re-check and auto-restore are the
+right shape. Fold these into a "Round 2" section. Then it goes to the
+security reviewer.
+
+* **H1 (must): secrets must never pass through the dashboard in clear.**
+  Masking "on the dashboard" after `cat` means the integration-call row's
+  8 KiB output tail, the `dry_run` diff and the approval card all see raw
+  values. Rules: `secrets.yaml` is **read-masked remotely** (a fixed template
+  that prints key names only; values never leave the add-on), **write and
+  restore of `secrets.yaml` are refused**, and `read`/`dry_run` output is
+  **never stored** in the call row (store size and hash only). Test that a
+  synthetic secret value appears in no DB row, audit row or response.
+* **H2 (must): one remote script per write, not five SSH calls.** realpath,
+  hash check, backup, temp write, `mv` and `ha core check` are currently
+  separate connections, each with its own gap. Make write (and restore) a
+  single fixed `sh -c '<constant script>' _ "$path" "$expect" "$backup"
+  "$tmp"` with content on stdin. The script checks realpath, then
+  sha256 == expect, then backs up, writes and moves, all in one process,
+  and returns a structured status line. The dashboard still checks the path
+  first. Use `set -e` and an explicit status per step, so a failure says
+  which step failed.
+* **H3 (must): verify the `/config` path on a real add-on.** In current
+  versions of the SSH add-on, HA's config lives at `/homeassistant`, and
+  `/config` may be a symlink to it. Then `realpath(/config/x.yaml)` never
+  equals the requested path, and every call is refused. Compare against
+  `realpath` of the **root** plus the relative remainder, not the literal
+  string, and state which add-on version the note assumes.
+* **H4 (must): flag risky config in the approval card.** Writing YAML is
+  code execution on HA. `shell_command`, `command_line`, `python_script`,
+  `rest_command`, `http:` (trusted proxies, auth), `homeassistant: auth_providers`,
+  `packages`, and any `!include*` path outside `/config` should get a
+  high-risk banner in the preflight summary. Keep it as a parsed-YAML key
+  check, not a regex over text. It does not block, but the operator must
+  see it.
+* **H5 (must): invalidate the shared F10 meta key on every write.** Clear
+  `ha_check_config_<integration>` **before** the write starts. Only the
+  post-write check may set it to `valid`. Otherwise a `valid` from 9
+  minutes ago (before the edit) lets `ha_core_restart` through on an
+  unchecked file, for example when the post-write check times out.
+* **H6 (should): timeouts and concurrency.** `ha core check` often takes
+  over 30 s on a Pi. Give `check` its own timeout (120 s), and treat a
+  timeout as **failed**: restore. Add a per-integration lock so two
+  approved writes cannot interleave.
+* **H7 (should): restrict the key on the add-on side.** Document a
+  `from="<dashboard address>"` prefix on the `authorized_keys` line, like
+  F12's open question 2. Check that the add-on's `authorized_keys` option
+  keeps key options. Also say where the private key sits at rest: the
+  integration `secret` column, and whether that is encrypted.
+* **H8 (nit):** in the `list` template, the Python string `'\('` is an
+  invalid escape (a SyntaxWarning on 3.12). Use a raw string or `[(]`. Also
+  `-maxdepth` after `-o` warns. Use one `find /config -maxdepth 1 -type f
+  \( -name '*.yaml' -o -name '*.yml' \)`.
+
+**Open questions:**
+1. The dashboard generates the key; pasting stays possible.
+2. Prefer an explicit pin at setup, with TOFU only if the operator ticks
+   "trust on first use". Leave the final call to the security reviewer.
+3. root is acceptable with protection mode on and LAN only, plus H7.
+4. Prune after a successful write, with a fixed template and no agent
+   input, keeping the last 10.
+
+**Security gate:** after Round 2, the security reviewer reviews the design
+(§ 2.6a). F11 code waits for F10 and F12 to be merged.
 
 ---
 
@@ -13130,7 +13193,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 10 | F8 | test-traffic | dashboard | Merged | `feat/f8-test-traffic` | — | low priority |
 | 11 | F9 | ha-supervisor-read | dashboard | Merged | `feat/f9-ha-supervisor-read` | — | token is now a dedicated `eshu` HA admin user |
 | 12 | F10 | ha-supervisor-actions | dashboard | Ready (after F9) | `feat/f10-ha-supervisor-actions` | F9, F3, Chunk H | reviewer pass + security reviewer sign-off |
-| 13 | F11 | ha-config-files | dashboard | **Design note written** — awaiting review | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | design approval + security reviewer sign-off |
+| 13 | F11 | ha-config-files | dashboard | **Design round 1: changes requested** (H1–H8) | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | design approval + security reviewer sign-off |
 | 14 | F14 | inventory | dashboard + MCP | Merged | `feat/f14-inventory` | Chunk H | |
 | 15 | F19 | unattended-limits | gateway + dashboard | **Merged** 2026-11-11 (security sign-off `67bec51`; AF1/AF2 checked) | `feat/f19-unattended-limits` | F4, F5, F12 | AF3 goes on the next gateway branch |
 | 16 | F15 | probes | dashboard + MCP | **Merged** 2026-11-11 (AG1 security decision `eca8982`; AI1 fix merged) | `feat/f15-probes` | F4, F12, F14 | |
