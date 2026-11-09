@@ -3850,7 +3850,29 @@ does the reasoning once, and a small local model (F17) reuses it cheaply.
 
 ### Reviewer notes
 
-_(reviewer)_
+**Round 1 (2026-11-09): approved and merged.** 178 F13, F6 and MCP tests
+pass locally. What I checked and what holds:
+
+* Refs are validated against the session.
+* Only `confirmed` items are retrievable.
+* FTS terms are quoted (`_fts_match`), so agent text cannot inject FTS
+  syntax.
+* Secrets are scrubbed on write and on read.
+* Agent text in the review UI is escaped (harness).
+* Status changes are conditional.
+
+Follow-ups (S, non-blocking):
+
+* **S1** Ownership in `save_conclusion` is `owner and agent != owner`, so an
+  ownerless session takes a draft from anyone. That is harmless (the
+  operator reviews every draft), but make it fail closed for consistency
+  with F3's SR2.
+* **S2** `search_runbooks` matches the whole query as one LIKE phrase.
+  Search per term (or through FTS) so that "nginx 502" finds a runbook
+  mentioning both words apart.
+* **S3** Confirmed runbooks are later read by other agents, so a confirmed
+  text is effectively an instruction to them. The operator's Confirm is the
+  only gate; say so in the review UI ("agents will follow this").
 
 ---
 
@@ -4385,7 +4407,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 6a | F18 | request-context | dashboard | Merged | `feat/f18-request-context` | F1, F5, F7, X1 | |
 | 7 | F12 | ssh-exec | dashboard + gateway | Ready (after F5) — design first | `feat/f12-ssh-exec` | F4, F5 | design approval + security reviewer sign-off |
 | 8 | F6 | session-wrapup | dashboard | Merged | `feat/f6-session-wrapup` | F3, F4, F5 | |
-| 9 | F13 | session-conclusions | dashboard + MCP | Ready (after F6) | `feat/f13-session-conclusions` | F5, F6 | |
+| 9 | F13 | session-conclusions | dashboard + MCP | Merged | `feat/f13-session-conclusions` | F5, F6 | |
 | 10 | F8 | test-traffic | dashboard | Merged | `feat/f8-test-traffic` | — | low priority |
 | 11 | F9 | ha-supervisor-read | dashboard | Merged | `feat/f9-ha-supervisor-read` | — | token is now a dedicated `eshu` HA admin user |
 | 12 | F10 | ha-supervisor-actions | dashboard | Ready (after F9) | `feat/f10-ha-supervisor-actions` | F9, F3, Chunk H | reviewer pass + security reviewer sign-off |
