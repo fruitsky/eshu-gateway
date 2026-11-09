@@ -746,6 +746,16 @@ def execute_integration_call(integration: dict, tool: dict, args: dict, agent: s
         raise ProxyError(500, f"Unsupported auth_type: {auth_type}")
 
     method, path, query_string, body_params, raw_body = _build_request(tool, args)
+    # M1/F10: the Supervisor is table-only. Re-check the rendered path here so
+    # an approved pending call is refused too, not only the immediate run.
+    if (integration.get('kind') or '').lower() == 'ha':
+        # Local import: ha_ws imports this module, so a top-level import of
+        # ha_supervisor here would be a cycle.
+        from core.ha_supervisor import is_supervisor_rest_path
+        if is_supervisor_rest_path(path):
+            raise ProxyError(
+                403, "Supervisor endpoints are not available through "
+                     "integration tools; use the curated ha_supervisor_* tools.")
     # Omada list endpoints 400 without page/pageSize — inject defaults for the
     # curated-tool path too (mirrors the generic-read handling), never
     # overriding explicit params.
@@ -872,6 +882,14 @@ def execute_generic_call(integration: dict, method: str, path: str, params=None,
         raise ProxyError(500, f"Unsupported auth_type: {auth_type}")
 
     path = (path or '').lstrip('/')
+    # M1/F10: re-check the generic path as well, so the approval path and the
+    # verify_path GET cannot reach the Supervisor either.
+    if (integration.get('kind') or '').lower() == 'ha':
+        from core.ha_supervisor import is_supervisor_rest_path
+        if is_supervisor_rest_path(path):
+            raise ProxyError(
+                403, "Supervisor endpoints are not available through the "
+                     "generic REST tools; use the curated ha_supervisor_* tools.")
     base_url = (integration.get('base_url') or '').rstrip('/')
     params = params or {}
     # Omada list endpoints 400 without page/pageSize — inject defaults so the

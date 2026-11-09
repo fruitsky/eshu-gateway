@@ -124,6 +124,11 @@ def _validate_mcp_item(item):
     if not TOOL_RE.match(integration) or not TOOL_RE.match(tool):
         raise PlanError('invalid_items',
                         'integration and tool must be plain names')
+    if tool == 'ha_host_reboot':
+        # S1: a reboot always needs its own approval card with the red line.
+        # A plan must never cover it, whatever the integration is called.
+        raise PlanError('not_plan_coverable',
+                        'ha_host_reboot needs its own approval every time')
     digest = item.get('args_hash')
     if digest is None:
         digest = args_hash(item.get('args') or {})
@@ -396,36 +401,46 @@ def _claim_candidate(conn, session_id: str, host: str, command: str, now: int):
     ''', (session_id, now, command, host)).fetchone()
 
 
-def _claim_mcp_candidate(conn, session_id: str, integration: str, tool: str,
-                         digest: str, now: int):
+def _claim_mcp_candidate(conn, session_id: str, owner: str, integration: str,
+                         tool: str, digest: str, now: int):
+    # F10 M2: the caller must own the session. The join makes this the same
+    # statement as the claim, so a concurrent ownership change cannot slip
+    # between the check and the use. An ownerless session matches nothing.
     return conn.execute('''
         SELECT i.id, i.plan_id
         FROM session_plan_items i
         JOIN session_plans p ON p.id = i.plan_id
+        JOIN sessions s ON s.id = p.session_id
         WHERE p.session_id = ? AND p.status = 'approved' AND p.until > ?
+          AND s.agent != '' AND s.agent = ?
           AND i.removed = 0 AND i.uses < i.max_uses
           AND i.kind = 'mcp' AND i.integration = ? AND i.tool = ?
           AND i.args_hash = ?
         ORDER BY i.id
         LIMIT 1
-    ''', (session_id, now, integration, tool, digest)).fetchone()
+    ''', (session_id, now, owner, integration, tool, digest)).fetchone()
 
 
 def claim_mcp_plan_item(session_id: str, integration: str, tool: str,
-                        digest: str, now: int = None):
+                        digest: str, owner: str = '', now: int = None):
     """F10: consume one use of an approved `mcp` plan item.
 
     Matching is by integration + tool + the exact argument hash, never by a
     pattern: an approved plan covers the call the operator saw, not a family of
-    calls. Same conditional UPDATE as the SSH claim."""
+    calls. Same conditional UPDATE as the SSH claim.
+
+    M2: the session's owner must be the calling agent. An MCP caller can name
+    any session id, so without this agent B could spend agent A's approved
+    "update add-on X" item. An ownerless session matches nothing (F3 SR2)."""
     sid = (session_id or '').strip()[:64]
-    if not sid or not integration or not tool or not digest:
+    owner = (owner or '').strip()[:64]
+    if not sid or not integration or not tool or not digest or not owner:
         return None
     now = int(now or time.time())
     expire_plans(now)
     with db_conn() as conn:
         cur = conn.cursor()
-        row = _claim_mcp_candidate(conn, sid, integration, tool, digest, now)
+        row = _claim_mcp_candidate(conn, sid, owner, integration, tool, digest, now)
         if not row:
             return None
         cur.execute('''

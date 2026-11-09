@@ -19,6 +19,7 @@ ones.
 """
 import json
 import re
+import urllib.parse
 
 from core.ha_ws import ha_ws_exec
 from core.integration_proxy import ProxyError
@@ -71,6 +72,35 @@ FORBIDDEN = (
 )
 
 SLUG_RE = re.compile(r'^[a-z0-9_]{1,64}$')
+
+# M1: HA Core proxies `/api/hassio/…` to the Supervisor
+# (`homeassistant/components/hassio/http.py`, one catch-all view) and
+# `POST /api/services/hassio/…` runs the Supervisor's own services. Neither is
+# in this table, so the generic REST tools must not reach them either.
+REST_SUPERVISOR_PREFIXES = ('hassio', 'services/hassio')
+
+
+def is_supervisor_rest_path(path) -> bool:
+    """Is this HA REST path the Supervisor proxy or its service domain?
+
+    The same request has many spellings — percent-encoded, upper-case, with
+    `//` or an `api/` prefix — so the path is percent-decoded, lowercased,
+    `//`-collapsed and stripped of its leading slash and `api/` prefix before
+    the check. The caller must refuse the request, not normalise it and then
+    send it.
+    """
+    text = urllib.parse.unquote(str(path or '')).strip().lower()
+    while '//' in text:
+        text = text.replace('//', '/')
+    text = text.lstrip('/')
+    if text.startswith('api/'):
+        text = text[len('api/'):]
+    text = text.lstrip('/')
+    for prefix in REST_SUPERVISOR_PREFIXES:
+        if text == prefix or text.startswith(prefix + '/'):
+            return True
+    return False
+
 
 # The fields each shaper may pass through. Anything not named is dropped —
 # most importantly `options` on an add-on.

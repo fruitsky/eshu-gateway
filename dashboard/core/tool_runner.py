@@ -35,6 +35,7 @@ from core.integration_proxy import (
     merge_response_hint,
     safe_request_summary,
 )
+from core.ha_supervisor import is_supervisor_rest_path
 from core.ha_ws import execute_ws_call, is_supervisor_command
 from core.ha_ws_policy import is_read_command
 
@@ -174,6 +175,37 @@ def _refuse_supervisor_ws(integration, tool, tool_name, args, session_id,
                 f"(Supervisor is table-only)",
         actor=agent_name)
     return json.dumps({'error': 'supervisor_command_refused',
+                       'message': message, 'status_code': 403})
+
+
+def _refuse_supervisor_rest(integration, tool, tool_name, args, session_id,
+                            execution_id, agent_name, path):
+    """M1: the Supervisor is reachable only through `core/ha_supervisor.py`.
+
+    HA Core proxies `/api/hassio/…` to the Supervisor and `/api/services/hassio/…`
+    runs its services; the curated table alone cannot stop a path chosen by the
+    agent. This runs before gating, so no pending call is created either.
+    """
+    message = ("Supervisor endpoints are not available through the generic REST "
+               "tools. Use the curated ha_supervisor_* tools; their endpoints "
+               "are fixed and reviewed.")
+    method, shown_path = _request_shape(
+        tool, args, tool.get('transport') or 'http', bool(tool.get('generic')),
+        tool.get('handler') or '')
+    record_integration_call(
+        integration=integration.get('name', ''), tool=tool_name,
+        agent=agent_name, method=method, path=path or shown_path, status_code=403,
+        latency_ms=0, response_summary=message, response_bytes=0,
+        truncated=0, outcome='refused', session_id=session_id,
+        execution_id=execution_id, reason='Supervisor is table-only',
+        request_summary=safe_request_summary(args, tool),
+        reason_code='supervisor_rest_refused')
+    record_audit_event(
+        'rest_supervisor_refused',
+        details=f"{integration.get('name')}.{tool_name}: refused REST path "
+                f"'{path}' (Supervisor is table-only)",
+        actor=agent_name)
+    return json.dumps({'error': 'supervisor_rest_refused',
                        'message': message, 'status_code': 403})
 
 
@@ -457,6 +489,16 @@ def _run_tool(integration_name: str, tool_name: str, args: dict, reason: str = '
             return _refuse_supervisor_ws(integration, tool, tool_name, args,
                                          session_id, execution_id, agent_name,
                                          str(command))
+    # F10 M1: the same rule for HA's REST surface. `/api/hassio/…` is HA Core's
+    # Supervisor proxy and `/api/services/hassio/…` the Supervisor's services.
+    # A generic path is chosen by the agent, so the static FORBIDDEN scan
+    # cannot see it; this runs before gating, and the executors re-check.
+    if (integration.get('kind') or '').lower() == 'ha' and transport == 'http':
+        _method, _path = _request_shape(tool, args, transport, generic, handler)
+        if is_supervisor_rest_path(_path):
+            return _refuse_supervisor_rest(integration, tool, tool_name, args,
+                                           session_id, execution_id, agent_name,
+                                           str(_path))
     # Audit labels: an immediate mutating call ran without operator sign-off
     # ("auto"); reads and handler dry-runs are not approval-relevant.
     approval_label = 'auto' if (mutating and not args.get('dry_run')) else ''
@@ -536,8 +578,11 @@ def _run_tool(integration_name: str, tool_name: str, args: dict, reason: str = '
         from db.session_plans import (PlanError, args_hash,
                                       claim_mcp_plan_item)
         try:
-            claimed = claim_mcp_plan_item(session_id, integration['name'],
-                                          tool_name, args_hash(args))
+            # M2: the claim is bound to the session's owner; an ownerless
+            # session (or no authenticated agent) matches nothing.
+            claimed = claim_mcp_plan_item(
+                session_id, integration['name'], tool_name, args_hash(args),
+                owner=(agent or {}).get('name') or '')
         except PlanError:
             claimed = None
         if claimed:
