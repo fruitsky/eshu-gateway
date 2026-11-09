@@ -245,14 +245,16 @@ Returns:
      "why": "journalctl (no vacuum/rotate)",
      "section": "LOGS",          // nearest preceding echo marker, or ""
      "context": ["pct 103"],     // wrapper chain, outermost first
-     "elevated": false},         // sudo / su seen in the wrapper chain
+     "elevated": false,          // sudo / su seen in the wrapper chain
+     "input_redirects": [        // F4 SC3: `<`, `<<`, `<<<`, `<&` (omitted when none)
+       {"op": "<", "target": "/etc/shadow"}]},
     ...
   ],
   "sections": ["LOGS", "DISK"],
   "summary": {"steps": 9, "read": 8, "write": 1, "unknown": 0},
   "headline": "9 steps · 8 read · 1 write: systemctl restart nginx",
   "inner_targets": ["pct:103"],  // for F7
-  "flags": ["redirect-to-file", "heredoc", "encoded", "nested-ssh", "sensitive-path"],
+  "flags": ["redirect-to-file", "heredoc", "input-redirect", "encoded", "nested-ssh", "sensitive-path"],
   "complete": true               // false if parsing gave up somewhere (then kind=unknown)
 }
 ```
@@ -1471,12 +1473,24 @@ a shadow period that shows the operator what it *would* have approved.
 
 * Per-gateway setting `read_lane`: `off` (default) | `shadow` | `on`.
 * A JIT request is **read-lane eligible** only if all of these hold:
-  1. `breakdown.complete` is true and every step is `read` (no `write`, no `unknown`);
-  2. no flags from {`encoded`, `heredoc`, `nested-ssh`, `sensitive-path`, `redirect-to-file`};
-  3. no `elevated` step that reads a path outside `/proc`, `/sys`, `/var/log`, `/etc/os-release`
-     (reading as root can reach secrets; keep it narrow);
-  4. command ≤ 8 kB; gateway not frozen and not Zero-Trust;
-  5. not blocked by the central blocklist (`policy_eval` verdict is not `blocked`/`fatal`).
+  1. `breakdown.complete` is true, every step is `read` (no `write`, no
+     `unknown`), and every step's verb is on the reviewed `READ_LANE_VERBS`
+     allowlist in `core/read_policy.py` — status verbs that take no file
+     operands, and file readers (`cat`, `head`, `tail`, `grep`, `wc`, `ls`,
+     `stat`, `du`) that may only touch the safe trees;
+  2. no flags at all (F1's flag list fails closed; `repo-config` and
+     `follows` block automatically, and so will any flag F1 adds later);
+  3. every step reads only inside the safe trees — `/var/log/`, `/proc/`,
+     `/sys/` and exactly `/etc/os-release`, `/etc/hostname`, `/etc/hosts`,
+     `/etc/resolv.conf` (the gateway runs **every** command as root, so this
+     applies to every step, not just `sudo` ones). `/proc/*/root`,
+     `/proc/*/cwd`, `/proc/*/fd`, `/proc/*/map_files`, `/proc/*/mem`,
+     `/proc/*/environ`, `kcore`, `kmsg` and all of `/dev/` are refused, as are
+     globs and `..` components in a path operand;
+  4. no inner target (`pct exec`, `qm guest exec`, `docker exec`) — the lane is
+     opted in per gateway and the guest never opted in;
+  5. command ≤ 8 kB; gateway not frozen and not Zero-Trust;
+  6. not blocked by the central blocklist (`policy_eval` verdict is not `blocked`/`fatal`).
 * `shadow`: the request stays pending as usual, but the row gets
   `reason="read-lane-shadow"` (shown as a small chip "would auto-run") and an
   audit event. The operator's own decision is the ground truth.
@@ -1518,11 +1532,1088 @@ Additive; old gateways work unchanged (same approved-row path as overrides).
 
 ### Implementer notes
 
-_(fill in)_
+**What I did**
+
+* **`core/read_policy.py` (§ 2.6a)**: one entry point for "is this a read?".
+  `is_read_ssh(breakdown)` is F4's rule set — the breakdown must be complete,
+  every step must be `read`, none of F1's blocking flags may be set
+  (`encoded`, `heredoc`, `nested-ssh`, `sensitive-path`, `redirect-to-file`),
+  and a step marked `elevated` may only touch `/proc/`, `/sys/`, `/var/log/`
+  or exactly `/etc/os-release` (a path token containing `..` is refused
+  outright, so `/var/log/../…` cannot slip through the prefix check).
+  `is_read_integration_call(tool, transport, args)` is a thin wrapper over
+  Chunk H's `_read_only_refusal` — no new integration logic.
+* **`core/read_lane.py`**: `eligible(breakdown, verdict, command, mode,
+  frozen, zero_trust)` checks mode, freeze, Zero-Trust, the 8 kB cap and the
+  policy verdict (`blocked`/`fatal` lose), then delegates to
+  `read_policy.is_read_ssh`. It has no read rules of its own.
+* **Setting**: `gateways.read_lane` (`off` default, migration) plus
+  `read_lane_since`; `read_lane_ready()` is true after 7 days in shadow.
+  `PUT /api/gateways/{ip}/read-lane` (session auth, audit `read_lane_<mode>`)
+  refuses `on` before that window — the UI disables the option, but the
+  server does not rely on the UI.
+* **Hook** in `POST /api/request`, after F3's plan and the session override,
+  before the host override (§ 2.6). `shadow`: the request stays pending as
+  usual (notify + `jit_created`) but gets `reason="read-lane-shadow"` and an
+  audit `jit_read_lane_shadow`; the operator's decision is the ground truth.
+  `on`: creates `approved` with `reason="read-lane"`, audits
+  `jit_read_lane_approved`, no notification.
+* **UI**: a "would auto-run" chip on shadow rows, a three-state
+  `off / shadow / on` select on the Gateway row (`on` disabled until ready),
+  and a **Read-only lane · shadow** tile in Statistics (eligible, approved /
+  denied, median length, how many auto-ran once on).
+
+**Surprises and decisions**
+
+* The 7-day rollout clock is stored (`read_lane_since`, set on entering
+  shadow) rather than inferred from audit history; the "at least 2 gateways"
+  part of the rollout note is operator policy and is not enforced in code.
+* Shadow reuses the normal pending path instead of a separate branch, so
+  notifications and the `jit_created` audit stay exactly as they were.
+* F1's `sensitive-path` already covers `.env`, keys, `/etc/shadow`,
+  `/proc/*/environ` and the broad `secret`/`token`/`passw` tokens, so those
+  commands are refused by flag before the elevated-path rule ever runs.
+* A read lane has no session requirement (unlike F3 plans): it also covers
+  SSH callers that never minted a session, which is the common case for
+  allowlist-less reads.
+* The new statistics queries tripped the KI-1 regression test on the first
+  gate run (`r.target_ip` without the alias); they are aliased now — the test
+  did its job.
+
+**Tests** — `tests/test_f4_read_lane.py` (67): 24 eligible and 27 ineligible
+table cases covering every exclusion in the chunk, `.env` (four spellings),
+and a **generated** test that every F1 `write`/`unknown`/incomplete fixture is
+ineligible (≥20 checked). Plus the Chunk H wrappers, shadow-never-approves,
+`on`-approves-only-eligible, `off`-does-nothing, Zero-Trust/freeze/blocklist
+wins, the 8 kB cap, the default-`off` migration, the endpoint + 7-day gate +
+session auth, and the statistics report (counts and median).
+
+Security sign-off (§ 2.6a) is still owed by the security reviewer; the branch
+is ready for that pass.
+
+`bash scripts/verify.sh` (pre-commit green):
+
+```
+1884 passed, 7 warnings in 371.46s (0:06:11)
+```
+
+(1817 before this chunk + 67 F4 tests.)
+
+
+### Round 2 — fixes for reviewer round 1 (R1–R4, S1)
+
+The design's rule 3 was wrong — the gateway runs **every** command as root, so
+`sudo` says nothing about privilege. It is replaced by a closed allowlist on
+top of F1, and the spec now says "every step (the gateway runs as root)".
+
+* **R1 — allowlist on top of F1.** `READ_LANE_VERBS` in `core/read_policy.py`
+  has two groups. Status verbs that take no file operands: `uptime`, `df`,
+  `free`, `ip` (`a`/`addr`/`route`/`link`), `ss`, `ps`, `uname`, `hostname`,
+  `lsblk`, `lscpu`, `whoami`, `id`, `date`, `nproc`, `systemctl`
+  (`status`/`is-active`/`is-enabled`/`list-units`/`list-timers`), `journalctl`
+  (with `-n`, or `--disk-usage`), `docker` (`ps`/`stats --no-stream`/
+  `images`), `pct list`/`qm list`, `zpool status|list`, `zfs list`. File
+  readers: `cat`, `head`, `tail` (no `-f`), `grep`, `wc`, `ls`, `stat`, `du`,
+  and every operand — bare or relative words and `--opt=value` included —
+  must be a safe path. Anything else is ineligible even if F1 says `read`.
+  A wrapper other than `sudo` (`env`, `ip netns exec`, `timeout`, `runuser`)
+  is refused too: it hides part of the command. Tests: the 45-case eligible
+  table and `test_f4_every_eligible_verb_is_on_the_allowlist`; every probe
+  class is in the ineligible table.
+* **R2 — the safe trees apply to every step.** `/var/log/`, `/proc/`, `/sys/`
+  and exactly `/etc/os-release`, `/etc/hostname`, `/etc/hosts`,
+  `/etc/resolv.conf`; inside `/proc` the `root`, `cwd`, `fd`, `map_files`,
+  `mem` and `environ` entries and `kcore`/`kmsg` are refused; all of `/dev/`
+  is refused; any glob or brace character and any `..` part is refused on the
+  whole token. Tests: block devices, `/proc` links, `cat config.yml`,
+  `/srv/app/config.yml`, glob-before-`..`.
+* **R3 — flags fail closed.** `READ_HARMLESS_FLAGS` is empty, so every F1
+  flag blocks — `repo-config` and `follows` included, and any future flag.
+  Tests: `test_f4_any_flag_blocks` plus the `git log` / `tail -f` /
+  `journalctl -f` table cases.
+* **R4 — no inner targets.** `pct exec`, `qm guest exec` and `docker exec`
+  are ineligible. Test: `test_f4_inner_targets_are_ineligible` plus the table
+  cases.
+* **S1 — line caps.** `journalctl` needs `-n ≤ 1000` (or `--disk-usage`) and
+  `tail -n` is capped at 1000, so one auto-run read cannot dump a whole
+  journal. Test: `test_f4_journal_and_tail_line_caps`.
+
+Two deliberate narrowings worth the security reviewer's eye: `grep` patterns
+are bare operands under R1's "every operand ... including bare words", so only
+`grep -e <pattern> <safe-path>` is eligible; and `echo` section markers are
+not on the verb list, so agent scripts that echo section headers stay
+ineligible.
+
+`bash scripts/verify.sh` (pre-commit green):
+
+```
+1951 passed, 7 warnings in 373.87s (0:06:13)
+```
+
+(1884 before this round + 67 new/expanded F4 tests; the F4 file has
+134 tests.)
+
+### Round 3 — fixes for reviewer round 2 (R5–R8, S2, S3)
+
+* **R5 — recursion only under `/var/log`.** `grep -R` and
+  `--dereference-recursive` are refused everywhere (they follow links), and
+  `grep -r`/`--recursive`, `ls -R` are allowed only when every operand is
+  under `/var/log/`; `grep -d recurse`/`--directories=recurse` is refused.
+  `du` recurses implicitly, so its operands may not be `/proc` or `/sys`.
+  Table: `grep -R …`, `grep -r … /proc`, `grep -r … /sys`, `ls -R /proc`,
+  `du -sh /proc`; eligible adds `grep -r -e error /var/log` and
+  `ls -R /var/log`.
+* **R6 — no `ps` environment output.** BSD option words (no leading dash)
+  containing `e` are refused (`ps e`, `ps eww`, `ps auxe`), as is any
+  `environ`/`env` token (`ps -eo pid,environ`, `ps --format=environ`);
+  `ps -e`/`-ef` stay eligible. Table cases added.
+* **R7 — no endless/interval forms.** `free -s`/`-c`, `zpool status|list`
+  with a numeric interval or `-T`, and `ss -E`/`--events` are refused.
+  `test_f4_eligible_cases_have_no_endless_form` statically asserts that no
+  eligible table case carries one of those forms.
+* **R8 — journal sources.** `--file=`, `--directory=`, `--root=`, `--image=`,
+  `-m`/`--merge` (and their `--opt=value` spellings) are refused, not only
+  `-D`.
+* **S2** `head -c`/`tail -c` are capped at 1 MiB (`bytes-cap`), as `-n` is
+  capped at 1000.
+* **S3** `/sys/firmware` is out of the safe trees (EFI variables can carry
+  vendor secrets).
+
+All synthetic (`192.0.2.x`, `/var/log/synthetic-*`, `web01`). Full gate:
+
+```
+1986 passed, 7 warnings in 373.06s (0:06:13)
+```
+
+(1884 + 102: the F4 file now has 169 tests.)
+
+### Round 4: on-lock
+
+`on` is now hard-locked behind a `meta` key that only a human can set.
+
+* `PUT /api/gateways/{ip}/read-lane` refuses `mode=on` with **409
+  `read_lane_on_locked`** unless `meta.read_lane_on_enabled` is the string
+  `"1"` (`read_lane_on_enabled()` in `db/gateways.py`). The key is unset by
+  default and **no API or UI writes it** — it is set by hand after the
+  security sign-off.
+* The lock is checked before the 7-day readiness rule, so a gateway that has
+  had a week of shadow still cannot be switched on while locked. `shadow` and
+  `off` are unaffected.
+* `GET /api/gateways` exposes the state as `read_lane_on_enabled`; the
+  Gateway table's select shows **"RL on: locked until security sign-off"**
+  (disabled) while the key is unset, and the 7-day hint takes over once it is.
+
+**Tests** (`TestOnLock`, 6): refused by default even with `read_lane_ready`
+true; shadow/off unaffected; allowed when the key is `"1"` and the window has
+passed; still refused when unlocked but shadow is younger than 7 days; no API
+attempt can set the key (and the gateway list reports the lock). The existing
+7-day test now unlocks the key first, since the lock is its own gate.
+
+The lock is the second gate on `on`: the security sign-off above approved the
+lane on conditions SC1–SC8, and the operator sets `read_lane_on_enabled` by
+hand only once those are addressed and the lane is verified in shadow.
+
+`bash scripts/verify.sh`: `1992 passed, 7 warnings in 391.24s (0:06:31)`.
+
+### Round 5: security conditions
+
+The sign-off approved F4 on conditions SC1–SC8. All eight are in.
+
+**SC1–SC3 are the diff the security chat should look at** (`4b3a121`, files
+`dashboard/core/read_policy.py` and `dashboard/core/cmd_parse.py`); SC4–SC7 are
+in the same commit, and SC8's tests are in `c470d6e`.
+
+* **SC1 — options are allowlisted per verb and subcommand.** `OPTION_SPECS` in
+  `core/read_policy.py` is the whole list, keyed by `(verb, subcommand)`.
+  Spellings are exact (`--huma` is not `--human-readable`), a short cluster is
+  allowed only when every letter is on that verb's list (`ss -tlnp` yes,
+  `ss -tlnpq` no), and whether an option takes a value is decided per verb
+  (`grep -m` is a count, `head -m` is not an option). `--` and a lone `-` are
+  refused. No status option names a file, a host, a machine, a context or a
+  format template: `docker -H`/`--context`/`--format`, `systemctl -H`,
+  `ps -o`, `stat -c`, `date +%s` and `journalctl -o` are all out.
+* **SC2 — every other word is a file.** `_scan_options` returns the operands
+  after the listed options and their values, and each must pass `_path_ok`.
+  grep's first non-option word is its pattern, and only when `-e` is absent.
+  Consequence: a status verb's bare name is an operand, so
+  `systemctl status nginx` is no longer eligible while bare `systemctl status`
+  is — see the open question.
+* **SC3 — no input redirection.** F1 now flags `input-redirect` and records
+  `input_redirects: [{op, target}]` on the step; `is_read_ssh` refuses either.
+  `cat /proc/cpuinfo < /etc/shadow` used to look like a plain read because the
+  step text dropped the redirection.
+* **SC4 — the policy checks subcommands.** `SUBCOMMANDS`/`ACTIONS` decide
+  `systemctl`, `docker`, `pct`, `qm`, `zpool`, `zfs` and `ip` (including the
+  action), so `zpool destroy`, `ip addr flush` and `systemctl list-unit-files`
+  are refused even if F1 ever called them reads.
+* **SC5 — bounded output.** `_cap_lines` (≤ 1000) and `_cap_bytes` (≤ 1 MiB)
+  run for every spelling (`-n`, `--lines=`, `-n5`, `-100`); `+N` is refused
+  because it means "from line N" (uncapped); `head` has the same cap as
+  `tail`. Logs under `/var/log` leave the lane unless read through `head`,
+  `tail`, or `grep` with `-m` ≤ 1000 — `cat` and `wc` stay for `/proc`,
+  `/sys` and the four `/etc` files.
+* **SC6 — tighter safe trees.** `PROC_DENY_PARTS` adds `exe` and `pagemap`,
+  `kpage*` names are refused, and `/sys/kernel/debug`, `/sys/kernel/tracing`,
+  `/sys/fs/bpf`, `/var/log/installer` and the cloud-init logs are out.
+* **SC7 — a "needs a human" verdict wins.** `eligible()` acts only on a plain
+  `jit` (no `detail_type`) or `auto_approved`; `self_protection_jit`,
+  `shell_meta` and any future action are refused before the read rules run.
+* **SC8 — tests.** `TestSecurityConditions` covers each class above, with
+  synthetic paths and the `192.0.2.x` range, and the generated
+  `test_f4_sc8_every_option_in_every_eligible_case_is_allowlisted` walks every
+  eligible case and asserts each option spelling or cluster letter is in that
+  verb's spec.
+
+**Also from the sign-off**
+
+* The duplicate `evaluate_policy_verdict` import is gone; it went with the
+  `feature-roadmap` merge in `1d25807`.
+* `receive_request` treats a stored `on` as shadow while
+  `read_lane_on_enabled` is unset (`0861afe`), covered by
+  `test_f4_stored_on_is_shadow_while_the_key_is_unset`.
+* The sign-off's accepted residual risks are now in the README's
+  "Security & threat model" section, next to the other honest limitations.
+
+**Tests.** `tests/test_f4_read_lane.py` has 260 tests (169 before this round);
+the F18 read-lane tests no longer skip (24 pass in that file). `bash
+scripts/verify.sh`: `2120 passed, 7 warnings in 390.00s (0:06:29)`.
+
+**Open questions**
+
+1. **SC2 against a status verb's unit name.** SC2 says every word that is not
+   a listed option or its value is a file operand and must pass the safe-tree
+   check. Taken literally that makes `systemctl status nginx`,
+   `systemctl is-active nginx`, `docker inspect web01` and
+   `ip addr show dev eth0` ineligible, while bare `systemctl status` and
+   `systemctl list-units --type=service` stay. The round-3 probe list treats
+   `systemctl status`/`list-units` as everyday reads, and a unit name is a
+   name, not a file — but the condition as written has no exception for it. I
+   implemented it literally (fail closed) and moved those cases to the
+   ineligible table. If a bare-name exception is wanted, it needs a scope
+   (which verbs, which characters) and a line in §2.6a; otherwise no change.
+
+### Round 6: fixes for reviewer round 5
+
+* **R1 — the path is compared with its normalised form.** `_path_ok` refuses
+  any path where `posixpath.normpath(token)` differs from the token (one
+  trailing slash allowed), before any prefix check, so `/sys/kernel//debug`
+  and `/sys/./kernel/debug` cannot get past the SC6 prefix denials. The
+  explicit `..` refusal stays. `test_f4_r1_normalised_paths_cannot_slip_past_a_prefix_denial`
+  covers every `SYS_DENY_PREFIXES`/`LOG_DENY_PREFIXES` entry with both
+  spellings across `cat`, `head`, `tail`, `grep -m`, `ls` and `stat`;
+  `test_f4_r1_a_trailing_slash_still_reads` keeps `/var/log/` legal.
+* **R2 — recursion is out of the lane.** `-r`/`--recursive` are removed from
+  the `grep` spec (and `r` from its cluster letters), so a recursive log grep
+  is refused as an unknown option instead of walking into `/var/log/installer`
+  and the cloud-init logs; `ls -R` and `du` still list names. This also closes
+  the per-file `-m` bound. `test_f4_r2_recursive_grep_is_not_in_the_lane`
+  tries `/var/log`, `/var/log/`, `//var/log` and `/var/log/./` with both
+  spellings.
+* **R3 — context options cannot undo the `-m` cap.** For a `/var/log`
+  operand, `_grep_log_lines` requires `m × (1 + max(A + B, 2C)) ≤ 1000`;
+  `-A`/`-B`/`-C` are still capped at 1000 individually.
+  `test_f4_r3_grep_context_cannot_undo_the_cap` checks at the limit
+  (`-m 500 -A 1`, `-m 300 -C 1`), over it (`-m 500 -A 2`, `-m 1000 -A 1000`)
+  and that context outside `/var/log` is unaffected.
+* **R4 — `head`/`tail` lose `-z`.** `-z`/`--zero-terminated` (and the `z`
+  cluster letter) are gone from both specs, so they cannot turn a text log's
+  line cap into a whole-file dump. `test_f4_r4_head_and_tail_have_no_zero_terminated`
+  covers the short, long and clustered spellings for both verbs.
+* **S2 — `zpool`'s cluster letters match its flags** (`vxHpLPg`), so `-g`
+  works and `-G` is refused; **S4 — `grep -P`/`--perl-regexp` is out** of the
+  lane until F19 adds a time bound. `test_f4_s2_*` and `test_f4_s4_*`.
+* **Q1 — SC7 is unchanged in this round, as the task asked.** The security
+  answer ("yes, allow `shell_meta`", in the Security reviewer sign-off below)
+  landed while this round was being pushed, so the behaviour here is still the
+  round-5 one: `shell_meta` is not a plain `jit`. The end-to-end test is
+  `test_f4_sc7_chained_read_is_not_lane_eligible_end_to_end`: with the lane in
+  shadow, `uptime && whoami` through `POST /api/request` stays pending with no
+  `read-lane-shadow` reason, and with the lane `on` (and the lock unlocked)
+  `uptime || whoami` is not auto-approved. The next round flips it, together
+  with the security round-2 items below.
+* **S1 and S3 are not in this round.** S1 (an operand-class model so status
+  verbs refuse every operand) is a policy-shape change the reviewer marked
+  optional and it needs a spec line for which verbs take paths; S3 (a maximum
+  number of log operands) is bounded by the 8 kB command cap today. Both are
+  written down here so they are not lost.
+
+**Shared `core/read_policy.py` (merge prep).** F9 and F14 each carry only
+`is_read_integration_call` plus the `read_only` guard, so their copies combine
+cleanly with this file's SSH half. This branch's wrapper now has the same
+guard — it was a bare `_read_only_refusal` wrapper, which would have called a
+curated write tool a read — and `test_f4_a_curated_write_tool_is_not_a_read`
+locks it in. At merge, keep this file's SSH rules and take F9's guarded
+integration wrapper, as F9's Reviewer notes say.
+
+**Security round 2 landed after this round's push.** It confirms R1-R4 (and R2
+as implemented: `-r` is gone), and adds work that is deliberately **not** in
+this round, because it is a new security condition, not a feature-review R
+item:
+
+* **SC9 (must):** no eligible word may carry a shell expansion (`$`,
+  backtick, `{`, `}`, `*`, `?`, `[`, `]`, a leading `~`, a backslash) - path
+  operands, option values and patterns alike - and a bare assignment
+  statement must be refused. This is the one that must ship before
+  `shell_meta` is allowed, hence the Q1 order: SC9 and Q1 in the same round.
+* **R5 (add, must):** refuse the journal directory and `lastlog`/`wtmp`/
+  `btmp`/`faillog` under `/var/log`, and refuse `grep -a`/`--text`.
+* **Q1:** allow `shell_meta` (and refuse a `&`-backgrounded step); **Q2:** the
+  narrow `systemctl status|is-active|is-enabled` name exception; **Q3:** only
+  a bare `sudo` (F1 must record that the wrapper had no options).
+
+Also confirmed there: unlocking `on` waits for the gateway to stop logging
+session signatures (the F12 note), which is security Chunk 7 work.
+
+`bash scripts/verify.sh`: `2134 passed, 7 warnings in 390.21s (0:06:30)` (round 6, after the read-policy guard and its test).
+
+### Round 7: security round 2 (SC9, R5, Q1-Q3)
+
+**Commits for the security chat: SC9 is `51f2e40` + `0ed276c`; Q1 is
+`51f2e40` + `0ed276c`; Q3 is `51f2e40` + `0ed276c`.** (`51f2e40` is F1's half —
+bare assignments, the background marker, the `sudo(options)` label; `0ed276c`
+is the lane's half.)
+
+* **SC9 — the shell cannot expand a word the lane approved.** `_step_ok`
+  checks the **raw** step words (from the display text, before
+  `shlex.split` strips F1's re-quoting) and refuses `$`, a backtick, `{`,
+  `}`, `*`, `?`, `[`, `]`, a backslash anywhere and a leading `~`. It covers
+  path operands, option values and both grep pattern spellings, and quoted
+  words are included because F1 does not record whether a word was quoted.
+  A bare `NAME=value` statement now emits an `unknown` step ("bare variable
+  assignment") instead of vanishing, so the lane refuses it (and F1's
+  `assignment-then-echo` fixture expects the extra step). Tests
+  (`TestRoundSeven`): every character in a path, in a `grep -e` pattern and
+  in an option value; the first-word pattern form; a quoted backslash; a
+  leading `~`; the bare assignment (`FOO=1`) and the prefixed form (still
+  refused, fail closed).
+* **Recursion — every spelling is out of the lane.** `-r`, `-R`,
+  `--recursive`, `--dereference-recursive`, `-ir`, `-ri`, `-rn`,
+  `-d recurse` and `--directories=recurse` are unknown options, so each is
+  refused (with `/var/log` and `/var/log/` as the operand). This replaces
+  round 6's R2 with the simpler rule the security reviewer named; `ls -R` and
+  `du` still list names.
+* **R5 — binary logs.** `head`, `tail` and `grep` refuse the journal tree
+  (`/var/log/journal` and below) and the login-record files (`lastlog`,
+  `wtmp`, `btmp`, `faillog`, including `wtmp.1`-style rotations), because a
+  file with few newlines defeats the line cap. `ls`/`stat` metadata stays
+  allowed, and an ordinary log still reads. `grep -a`/`--text` are removed
+  from the spec (so they are unknown options) and `--binary-files=text` was
+  never listed; all are refused.
+* **Q1 — chains and pipes are eligible; background is not.** `read_lane.eligible`
+  now accepts `auto_approved`, a `jit` with no `detail_type`, **or a `jit`
+  with `shell_meta`**, because `shell_meta` only says the gateway cannot vouch
+  for the literal string and the lane parses every step itself (SC9 and the
+  rest still apply to those steps). A step marked `background` by F1 (the
+  statement before a `&`, including a trailing `cmd &`) is refused, since it
+  can outlive the session. The end-to-end test is flipped:
+  `test_f4_sc7_chained_read_is_lane_eligible_end_to_end` — in shadow,
+  `uptime && whoami` through `POST /api/request` now carries
+  `read-lane-shadow`; with the lane `on` it auto-approves; the verdict is
+  asserted to be `shell_meta`.
+* **Q2 — unit names for the three reviewed subcommands.** `systemctl
+  status`, `is-active` and `is-enabled` take up to 8 operands, each matching
+  `[A-Za-z0-9][A-Za-z0-9@_.:-]{0,63}` (first character a letter or digit, no
+  `/`, no glob, no backslash). A path-shaped operand, a ninth name, a
+  65-character name and an escaped name all stay with a human; other
+  subcommands still refuse every operand. The `-n` cap on `status` is
+  unchanged.
+* **Q3 — bare `sudo` only.** `_unwrap` labels only the bare form `sudo`; any
+  option or assignment gets `sudo(options)`, which the lane refuses through
+  its existing `context != ['sudo']` rule. Tests cover `-E`, `-u root`, `-i`
+  and `--`, and assert F1's contexts directly.
+* **Merge integration.** The branch now merges `origin/feature-roadmap`
+  (F8, F9, F14). `core/read_policy.py` keeps F4's full module (SSH rules and
+  the guarded integration wrapper) and takes F9's docstring line about the
+  freeze. F8's generated statistics-filter scan exposed F4's read-lane report
+  queries; they now skip excluded rows like the other statistics, so the scan
+  passes on the merged tree.
+
+`bash scripts/verify.sh`: `2236 passed, 7 warnings in 419.39s (0:06:59)`.
+
+### Round 8: security round 3 (SC10, SC11)
+
+The final sign-off approved the lane on two small conditions; both are in, and
+the feature reviewer checks them (no further security pass).
+
+* **SC10 — loops and grouping are refused.** F1 now flags any command that
+  contains a loop (`for`, `select`, `while`, `until`), a conditional (`if`,
+  `case`), a function definition (`function` or `name()`), a brace group or a
+  subshell with `compound`. The check runs on the **parsed atoms** in
+  `_parse_text`, not on the raw text, so a keyword at a command position is
+  caught while a keyword used as an argument (`grep for …`) is not; `{`/`}`
+  and bare `(`/`)` atoms flag grouping, and `$( )`/`<( )` were already folded
+  into word atoms. Every flag blocks the lane, so these commands are
+  ineligible; plain chains (`uptime && df -h`, `uptime; free -h`,
+  `uptime || whoami`) stay eligible. Tests (`TestRoundEight`): each construct,
+  including a `while` whose condition and body are both eligible reads, a
+  backgrounded read inside braces and inside parentheses, the plain chains,
+  and `grep for …` staying clean. The four `loops.txt` fixtures now expect
+  `flags=compound`.
+* **SC11 — dated login-record rotations.** `_binary_log` matches a plain name,
+  a dotted rotation (`wtmp.1`) and now a dated one (`btmp-20260101`, with or
+  without `.gz`) for `lastlog`, `wtmp`, `btmp` and `faillog`, so `head`,
+  `tail` and `grep` refuse all of them. Tests for each of the four names in
+  both forms across the three verbs, plus the ordinary-log and metadata
+  checks already in R5.
+
+Both conditions are in commit **`9f06cb6`** (the F1 atom scan and its
+fixtures, the `_binary_log` change and the tests).
+
+`bash scripts/verify.sh`: `2243 passed, 7 warnings in 419.62s (0:06:59)`.
 
 ### Reviewer notes
 
-_(reviewer)_
+**Round 1 (2026-11-08): changes requested. Not ready for the security
+reviewer yet.** The structure is right. One notion of "read" lives in
+`core/read_policy.py`, `read_lane.py` holds no rules of its own, and the hook
+order is correct: after F3 and the session override, after freeze and the
+encoded-payload block. Zero-Trust and freeze win, `on` is server-gated on
+7 days of shadow, and the default is `off`. F1 also stood up well to a probe
+set run in a scratch dir with synthetic commands. It refuses environment
+dumps, `curl`/`wget`, `awk system()`, `sed e`/`w`, `find -exec`/`-delete`,
+`xargs`, `dd`, `less`, `tar -c`, `docker inspect` and `kubectl get secret`.
+
+The core premise of the spec's design rule 3 is wrong, and that is the
+planner's mistake, not the implementer's. **The gateway runs every command as
+root** (the key is in `/root/.ssh/authorized_keys`). "Elevated" (a `sudo`
+prefix) therefore says nothing about privilege, and a plain `cat` reaches
+everything. With a denylist (`sensitive-path`) as the only guard, these were
+**eligible** in the probe:
+
+* any credential-bearing file whose name F1 doesn't know (shell history, an
+  app's `config.yml`, a relative `cat config.yml`)
+* raw block devices (`head -c … /dev/sdX`)
+* `/proc/<pid>/root/…`, `/proc/<pid>/cwd/…` (links into the real filesystem)
+  and `/proc/kcore`
+* a glob ahead of `..` (`/var/log/*/../../…`): `_elevated_path_allowed` cuts
+  the token at `*` before it looks for `..`
+* `systemctl show`/`systemctl cat` (they print `Environment=`) and
+  `crontab -l`
+* `git … log` with `repo-config` set, and `tail -f`/`follows` (never ends):
+  F1 sets those flags, but they are not in `READ_BLOCKING_FLAGS`
+* `sleep 100000` and `cat /dev/zero`
+
+*Must fix (replaces design rule 3):*
+
+* **R1 Allowlist on top of F1.** Add `READ_LANE_VERBS` to `read_policy.py`,
+  a reviewed list of what may auto-run, in two groups:
+  1. **Status verbs that take no file operands**: `uptime`, `df`, `free`,
+     `ip` (`a`/`addr`/`route`/`link`), `ss`, `ps`, `uname`, `hostname`,
+     `lsblk`, `lscpu`, `whoami`, `id`, `date`, `nproc`, `systemctl`
+     (`status`/`is-active`/`is-enabled`/`list-units`/`list-timers` only),
+     `journalctl` (no `-f`), `docker` (`ps`/`stats --no-stream`/`images`),
+     `pct list`/`qm list`, `zpool status`/`list`, `zfs list`.
+  2. **File readers** (`cat`, `head`, `tail` without `-f`, `grep`, `wc`,
+     `ls`, `stat`, `du`): eligible only when **every** operand, including
+     bare and relative words and `--opt=/path` values, is inside the safe
+     trees.
+
+  Anything not on the list is ineligible even if F1 says `read`. The list
+  is in code and reviewed; it is not an operator setting.
+* **R2 Safe trees, for every step.** Apply the path check whether or not the
+  step is elevated, because every step is elevated.
+  * **Allowed:** `/var/log/`, `/proc/` and `/sys/`, plus exactly
+    `/etc/os-release`, `/etc/hostname`, `/etc/hosts` and `/etc/resolv.conf`.
+  * **Refused inside `/proc`:** `*/root`, `*/cwd`, `*/fd`, `*/map_files`,
+    `*/mem`, `*/environ`, `kcore`, `kmsg`.
+  * **Refused anywhere:** `/dev/`.
+  * **Refused shapes:** any glob or brace character (`*?[]{}`) in a path
+    operand, and any `..` component, checked on the whole token.
+* **R3 Flags fail closed.** Any F1 flag blocks unless it is on an explicit
+  harmless list, which starts empty. `repo-config` and `follows` then block
+  automatically, and so will any flag F1 adds later.
+* **R4 No inner targets.** A command with an inner target (`pct exec`,
+  `qm guest exec`, `docker exec`) is ineligible. The lane is opted in per
+  gateway, and the guest never opted in.
+* **Tests:** add every probe class above to the ineligible table, with
+  synthetic paths and the IP range `192.0.2.x`. Also add a generated test:
+  every eligible case's first verb is in `READ_LANE_VERBS`. Update the
+  spec's design rule 3 to say "every step (the gateway runs as root)".
+
+*Should fix:*
+
+* **S1** Cap `journalctl` and `tail` at `-n ≤ 1000` (or require `-n`), so one
+  auto-run read cannot dump a whole journal.
+
+Once R1–R4 are in, F4 goes to the security reviewer (§ 2.6a). They asked for
+a closer look because this lane runs with no human at all.
+
+**Round 2 (2026-11-08): nearly there; small changes requested.** R1–R4 and S1
+are in, and every round-1 probe is now ineligible. A second probe set ran
+against the allowlisted verbs, with synthetic commands in a scratch dir. It
+confirmed that every `ip`/`date`/`hostname`/`journalctl` write, `ss -K`,
+`grep -f`/`--exclude-from`, `/proc/*/task/*/environ` and the
+`/proc/self/root|cwd` links are refused. Five gaps remain eligible:
+
+*Must fix:*
+
+* **R5 Recursive grep under `/proc` and `/sys`.**
+  * `grep -R` follows `/proc/<pid>/root` into the whole filesystem.
+  * `grep -r` reads every `/proc/<pid>/environ` as a regular file, which
+    leaks environment secrets.
+
+  Allow `-r`/`-R`/`--recursive` (and `-d recurse`) only when every operand is
+  under `/var/log/`, and use `-r` only (refuse `-R` everywhere, because it
+  follows links). Apply the same rule to `ls -R` and `du` under `/proc`;
+  names only are acceptable, but keep them to `/var/log` for one simple
+  rule.
+* **R6 `ps` environment output.** A BSD option word containing `e` (`ps e`,
+  `ps eww`, `ps auxe`) or `--env`/`-O environ` prints every process's
+  environment. Refuse BSD option clusters containing `e` and any
+  `-o`/`-O`/`--format` value naming `environ`/`env`. `ps -e`/`-ef` (UNIX
+  "all processes") stay eligible.
+* **R7 Endless or interval forms.** These never return:
+  * `free -s N` and `free -c N`
+  * `zpool status|list` with a trailing interval or count, or `-T`
+  * `ss -E`/`--events`
+
+  Refuse them. Add a generated test that every eligible table case finishes
+  under the sandbox's 2 s limit (or a static assertion per verb, if running
+  them is impractical).
+* **R8 Other journal sources.** `journalctl --file=`, `--directory=`,
+  `--root=`, `--image=` and `-m`/`--merge` read journals outside the
+  default; only `-D` is refused today. Refuse the whole set.
+
+*Should fix:*
+
+* **S2** Cap `head -c`/`tail -c` at 1 MiB, as `-n` is capped at 1000.
+* **S3** Drop `/sys/firmware/` from the safe trees (EFI variables can carry
+  vendor secrets).
+
+*For the security reviewer (no change asked):*
+
+* `ps aux` and `docker ps --no-trunc` show full command lines, which may
+  contain secrets passed as arguments. I left them eligible as everyday
+  reads.
+* The `grep -e` only rule and the absence of `echo` are deliberate
+  narrowings. Both are acceptable.
+
+After R5–R8 (plus S2 and S3), F4 goes to the security reviewer.
+
+**Round 3 (2026-11-08): approved by the feature reviewer; waiting on security
+sign-off (§ 2.6a).** R5–R8, S2 and S3 are in. I re-ran all four probe sets,
+about 130 synthetic commands in a scratch dir. The only eligible commands left
+are everyday status reads and log reads under `/var/log`:
+
+* `uptime`, `df`, `free`, `ip a`, `ss -tlnp`, `ps aux`/`-ef`
+* `systemctl status`/`list-units`, `journalctl -n ≤1000`
+* `docker ps`/`stats --no-stream`, `zpool status`, `lsblk`, `uname`
+* `cat`/`grep -e`/`ls -R`/`du` under `/var/log`, and `stat` of the four
+  `/etc` files
+
+Pipelines into `grep` without an operand are ineligible. That is narrow but
+safe.
+
+**Do not merge until the security reviewer signs off below.**
+
+#### Security reviewer sign-off
+
+**2026-11-08: approved on conditions (security chat, reviewed at `7666adc`).**
+This was a read-only design and code review of `core/read_policy.py`,
+`core/read_lane.py`, the F4 hook in `receive_request`, the read-lane
+functions in `db/gateways.py`, and the parts of F1 (`cmd_parse.py`,
+`cmd_rules.py`) that the lane relies on. Nothing was run, because the feature
+reviewer had already done the adversarial testing. Threat model: the caller
+is an agent that may be prompt-injected, every command runs as root, and in
+`on` no human sees the command before it runs.
+
+**What holds:**
+
+1. **Hook position.** The lane runs after the freeze check, the
+   encoded-payload block, F3 plans and the session override, and before the
+   host override. Freeze and Zero-Trust are checked before the lane and again
+   inside `eligible()`. The gateway enforces the hard block and the
+   blocklists before a request reaches the dashboard, and the lane checks
+   the verdict a second time. The lane is never the first thing to say yes.
+2. **Default, gate and audit.** The column defaults to `off`, and any unknown
+   value reads back as `off`. The server refuses `on` unless the gateway has
+   7 days in shadow, so the UI alone cannot turn it on. Entering shadow
+   starts the clock and leaving it clears the clock. Every mode change is
+   audited (`read_lane_<mode>`), and so is every shadow tag
+   (`jit_read_lane_shadow`) and every auto-approval
+   (`jit_read_lane_approved`). Auto-approved rows carry `reason="read-lane"`
+   and stay attributable.
+3. **One notion of "read".** `read_lane.py` holds gateway-state, size and
+   verdict checks only, and it gets its read decision from
+   `read_policy.is_read_ssh`.
+4. **The outer structure fails closed.** An incomplete breakdown, any F1
+   flag (the harmless list is empty), an inner target, a wrapper other than
+   `sudo`, a step that is not `read` and a verb that is not on
+   `READ_LANE_VERBS` are all refused. Substitution steps carry a `subst`
+   context and are refused. F1 re-quotes any word that holds a shell-special
+   character (`$`, quotes, backslash, `~`, globs), so such a word no longer
+   starts with `/` and fails the path check. Variable and quoting tricks in
+   paths therefore fail closed.
+5. **Path checks apply to every step.** Elevation plays no part in the path
+   check.
+
+**What does not hold yet:** the verb list fails closed, but the options
+*inside* each verb do not. Options are allowed unless they are on a short
+deny list, matched by exact spelling. Several gaps follow from that. Some of
+them let a "read" write a file as root or read any file:
+
+* Some allowed status verbs have options that write a file, read an arbitrary
+  file and echo it back in an error message, set the clock or set the
+  hostname. Neither F1 nor `read_policy` knows about these options. The
+  affected verbs are `journalctl`, `ss`, `date` and `hostname`.
+* Long options can be abbreviated (the tools use getopt), and short options
+  can be clustered. Both slip past exact-match deny lists. This affects the
+  follow, interval, journal-source and clock-set checks.
+* `systemctl` and `docker` take a "run against another host or container"
+  option that the subcommand check does not see. That breaks R4: the other
+  host never opted in.
+* `_VALUE_FLAGS` is one list shared by every verb. An option that takes no
+  value for *this* verb can therefore hide the next real file from the path
+  check. The `grep` recursion check has the same hole.
+* `grep` treats every word starting with `.` or `^` as a pattern and skips
+  it. Relative dot-files in root's home are then read without a path check,
+  and most of them are not on F1's sensitive-name list.
+* F1 drops input redirections from the step text, so `read_policy` cannot
+  see them. A lone `-` (standard input) is skipped as a flag. Together they
+  let a file reader take any file as standard input. The same gap lets a
+  command open a FIFO or a bash network pseudo-path.
+* The `zpool` branch never checks the subcommand. Today F1 covers it, but
+  the policy should not depend on that.
+* The self-protection "must go to a human" verdict (`self_protection_jit`)
+  is not refused. Only `blocked` and `fatal` are.
+* Output is not bounded. `cat` has no cap, `head -n` has no cap, the tail
+  cap misses the attached, `--lines=` and "from line N" forms, `journalctl`
+  has an option that ignores `-n`, and `systemctl status` takes its own
+  line count. The gateway has no execution timeout or output cap, so the
+  parser is the only limit.
+
+**Conditions (all before merge):**
+
+* **SC1: options are allowlisted per verb.** Each verb (and each subcommand)
+  may use only the options listed for it in `read_policy.py`. Any other
+  option makes the command ineligible, and that includes abbreviations and
+  unknown spellings. Short-option clusters are allowed only if every letter
+  is on the list. Whether an option takes a value is decided per verb. There
+  is no shared list. `--` and a lone `-` are refused. No status verb may take
+  an option that names a file, a host, a machine, a context or a format
+  template.
+* **SC2: every other word is a file and is path-checked.** A word that is
+  neither a listed option nor that option's value counts as a file operand
+  and must pass the safe-tree check. The single exception is `grep`'s
+  pattern: the first such word, and only when no `-e` is given.
+* **SC3: no input redirection.** F1 must pass each step's redirections
+  through to the breakdown, or keep them in the step text. A step with any
+  input redirection, here-string or heredoc is ineligible.
+* **SC4: the policy checks subcommands itself.** Every status verb with
+  subcommands has its subcommand (and for `ip`, the action) checked in
+  `read_policy.py`, so the policy does not rely on F1 alone. This includes
+  `zpool`.
+* **SC5: every eligible command has bounded output and finishes.** Line and
+  byte caps apply to every spelling of the option, and "from line N" counts
+  as uncapped. `head` gets the same cap as `tail`. Log files under
+  `/var/log` are read only through `head`, `tail` or `grep` with a cap
+  (`grep -m` ≤ 1000). `cat` stays for `/proc`, `/sys` and the four `/etc`
+  files. Any option that undoes a line cap is refused.
+* **SC6: tighten the safe trees.** Also refuse `/proc/*/exe` (a link into
+  the real filesystem), `/proc/*/pagemap` and `/proc/kpage*` (huge), and
+  `/sys/kernel/debug`, `/sys/kernel/tracing` and `/sys/fs/bpf` (some files
+  block forever, others dump kernel data). Also refuse
+  `/var/log/installer/` and the cloud-init logs, which can hold
+  install-time password hashes and user-data.
+* **SC7: any "needs a human" verdict wins.** The lane acts only when the
+  policy verdict is plain `jit` or `auto_approved`. `self_protection_jit`
+  and anything added later are refused.
+* **SC8: tests.** Add each class above to the ineligible table, using
+  synthetic paths and the `192.0.2.x` range, with no live data. Add a
+  generated test that every option in every eligible case is on that
+  verb's list.
+
+**Who checks:** SC1–SC3 change how the policy reads a command, so send them
+back to the security chat for a short look at the diff. The feature reviewer
+can check SC4–SC8.
+
+**Open questions:**
+
+* **(a) `ps aux` and `docker ps --no-trunc`: acceptable.** Linux shows every
+  process's command line to every local user by default, so command
+  arguments are not a secret channel, and the same data is already readable
+  at `/proc/<pid>/cmdline` inside the safe trees. On a Proxmox host this
+  includes guest processes. That is metadata, and `pct list` is already
+  allowed. Under SC1, `docker ps` may not take `--format`, because templates
+  can print labels, and labels often hold auth hashes.
+* **(b) The safe-tree list: acceptable with SC6.** The four exact `/etc`
+  files are fine. `/var/log` is fine as a tree, with SC6's exclusions and SC5's
+  caps. `/proc` and `/sys` are deny lists inside a root-readable tree, which
+  is the weakest part of the design. They are acceptable with SC6. A follow-up
+  should replace them with a positive list of the status files people
+  actually read (`meminfo`, `loadavg`, `pressure/*`, `net/*`,
+  `/proc/<pid>/status`, `/sys/class/*`, `/sys/block/*`, `/sys/fs/cgroup/*`).
+
+**Accepted residual risks (write them in the operator docs):**
+
+* Logs contain whatever services write to them, including secrets that apps
+  log by mistake. Turning the lane on hands those logs to the agent with no
+  human in the loop.
+* A service account that owns a directory under `/var/log` can plant a
+  symlink, and root follows it. The path check is textual. This needs a
+  service account to be compromised first.
+* `df` on a stale network mount, or `docker` with a hung daemon, can hang.
+  A gateway-side execution timeout for read-lane runs is worth a follow-up
+  (F5 or security Chunk 7).
+
+**Not blocking:** `main.py` imports `evaluate_policy_verdict` twice.
+
+**Round 4 (2026-11-08): changes requested (SC5 and SC6 gaps). SC1–SC3
+ready for the security reviewer.** Reviewed at `43fd95e`; `bash scripts/verify.sh`: `2120 passed, 7 warnings in 341.83s` (the Round 5
+commits `4b3a121`, `0861afe`, `c470d6e`, `43fd95e`). As agreed, this round
+checks SC4–SC8; SC1–SC3 go back to the security chat.
+
+**SC1–SC3 are present, each with tests.** They are `OPTION_SPECS`, the
+`_scan_options` operand rule, and F1's `input-redirect` flag plus the
+per-step `input_redirects`. Tests: `test_f4_sc1_*` (5), `test_f4_sc2_*` (2)
+and `test_f4_sc3_*` (2). **SC1–SC3 ready for the security reviewer.**
+
+**What holds:**
+
+* **SC4.** `SUBCOMMANDS`/`ACTIONS` check every status verb's subcommand
+  (and `ip`'s action) in the policy itself, `zpool` included. An option or
+  value before the subcommand cannot hide one, because the first non-option
+  word is taken as the subcommand and refused if it is not listed. "Another
+  host" options in either position are refused.
+* **SC5, mostly.** Line and byte caps apply to every spelling (`-n`,
+  `--lines=`, attached and bare-digit forms). "From line N" and "all but the
+  last N" are refused, and `head` matches `tail`. Logs under `/var/log` are
+  refused for `cat` and `wc`, and `grep` on a log needs `-m`. `journalctl`
+  needs `-n` and has no source or output options.
+* **SC6, by spelling.** All the new names are refused as written.
+* **SC7.** Only an `auto_approved` verdict or a `jit` verdict with no
+  `detail_type` passes, so `self_protection_jit` and anything added later
+  are refused. A stored `on` now degrades to shadow while
+  `read_lane_on_enabled` is unset (`0861afe`, tested).
+* **SC8.** Every class in the sign-off has a table row or a test, and the
+  generated option test walks every eligible case. The README carries the
+  accepted residual risks.
+* **No live data.** The new fixtures use `192.0.2.x` and the existing
+  `10.0.0.1` test gateway.
+
+I ran about 140 synthetic commands through `breakdown` → `eligible` in a
+scratch dir, with both a bare `jit` verdict and the real
+`evaluate_policy_verdict`. Four classes are still eligible and break SC5 or
+SC6.
+
+*Must fix:*
+
+* **R1 Paths are not normalised before the SC6 prefix checks.** A path
+  spelled with an empty component (`//`) or a `.` component gets past every
+  *prefix* denial: `/sys/kernel/debug`, `/sys/kernel/tracing`, `/sys/fs/bpf`,
+  `/sys/firmware` and `/var/log/installer`. Only `cat` happens to catch the
+  `/var/log` form, through `cat-tree`. The `/proc` checks are not affected,
+  because they split on parts. **Fix:** in `_path_ok`, refuse any token with
+  an empty or `.` component (or refuse any token where
+  `posixpath.normpath(token) != token`, after allowing one trailing slash),
+  before any prefix test. **Test:** for every entry in `SYS_DENY_PREFIXES`
+  and `LOG_DENY_PREFIXES`, the `//` and `/./` spellings are ineligible for
+  `cat`, `head`, `tail`, `grep -m`, `ls` and `stat`.
+* **R2 Recursive `grep` on `/var/log` reads the SC6 exclusions.** `grep -r`
+  is allowed on any operand under `/var/log`, including `/var/log` itself.
+  It then walks into `/var/log/installer/` and the cloud-init logs, which
+  SC6 refuses by name, so the check only covers files named on the command
+  line. `-m` is also per file, so a recursive grep over the whole tree has
+  no overall bound (SC5). **Fix:** refuse recursion on any operand that is
+  `/var/log` itself or an ancestor of an SC6 exclusion. Or, more simply,
+  take `-r`/`--recursive` out of the lane: `ls -R` and `du` still give the
+  names. **Test:** a recursive grep with `/var/log` (with and without a
+  trailing slash, and with the R1 spellings) as the operand is ineligible.
+* **R3 `grep` context options undo the `-m` cap on logs.** `-A`/`-B`/`-C`
+  are capped at 1000 each, independently of `-m`, so a capped log grep can
+  still print about `m × (1 + A + B)` lines. That is up to a million, which
+  is in effect the whole file. SC5 says "any option that undoes a line cap
+  is refused". **Fix:** for a `/var/log` operand, either refuse the context
+  options or require `m × (1 + A + B) ≤ 1000` (take the larger of `-C` and
+  each of `-A`/`-B`). **Test:** a log grep with `-m` at the cap and a context
+  option at the cap is ineligible, and one within the product is eligible.
+* **R4 `head -z`/`tail -z` undo the line cap.** `-z`/`--zero-terminated`
+  makes NUL the line separator. A text log has no NUL, so `-n ≤ 1000` then
+  prints the whole file. **Fix:** remove `-z`/`--zero-terminated` from both
+  specs and the `z` letter from both clusters. **Test:** each spelling (short,
+  long, inside a cluster) is ineligible for both verbs, under `/var/log`.
+
+*Should fix:*
+
+* **S1 Status verbs with no operands should refuse every operand.** Today a
+  word that passes `_path_ok` is accepted after any status verb. For
+  `date`, `uptime`, `id`, `whoami`, `nproc`, `uname`, `free`, `lscpu`, `ps`
+  and the `docker`/`pct`/`qm` subcommands this is harmless today (the tool
+  errors out). But it lets an operand through where none is ever valid, and
+  `date`'s operand is a set-the-clock argument. Add an `operands` field to
+  `_spec` (none / safe paths), with paths only for `df`, `journalctl`,
+  `systemctl status`, `zfs`/`zpool` and `ip … show`. **Test:** each no-operand
+  verb with a safe-tree path operand is ineligible.
+* **S2 The `zpool` short letters don't match its flags.** The letters
+  include `G`, but the flag list has `-g`, so `-G` passes and a cluster with
+  `g` does not. Make them the same set. **Test:** the SC8 generated test also
+  asserts that every spec's `letters` equals the single-letter `flags`.
+* **S3 Many log operands multiply the caps.** One `head -n 1000` with dozens
+  of `/var/log` files is within the 8 kB limit and prints dozens of times
+  the cap. Consider at most N file operands (say 4) for a `/var/log` read.
+  **Test:** N+1 log operands are ineligible.
+* **S4 `grep -P` and back-references on logs.** A pathological pattern can
+  run for a very long time, and nothing at the gateway stops it (see F19).
+  Consider dropping `-P` from the lane until F19 adds a time limit. **Test:**
+  `-P`/`--perl-regexp` is ineligible.
+
+*Questions for the security reviewer and the operator (no change asked yet):*
+
+* **Q1 SC7 also refuses `shell_meta`, so a chained or piped read never
+  auto-runs.** `evaluate_policy_verdict` returns `jit` with
+  `detail_type="shell_meta"` for any command with `;`, `&&` or `|`. Round 5
+  reads "plain `jit`" as "no `detail_type`", so every multi-step command is
+  now ineligible in the real request path. §1 says about 40% of traffic is
+  chained and 40% piped. The eligibility table does not show this, because
+  its helper passes a bare `{'action': 'jit'}`. Both readings are safe:
+  `shell_meta` only says the *gateway* will not auto-run the command, and
+  the lane is decided per parsed step on the dashboard. The question is
+  scope. If chained reads should stay eligible, SC7 becomes "the `jit`
+  `detail_type` is `None` or `shell_meta`, nothing else". Either way, add an
+  end-to-end shadow test through `POST /api/request` with a two-step read,
+  so the table and the real path agree.
+* **Q2 The implementer's open question (unit names under SC2).** I agree
+  with implementing SC2 literally for now. If an exception is wanted,
+  scope it to `systemctl status|is-active|is-enabled`, with one name word
+  matching `[A-Za-z0-9@_.:-]{1,64}` (no `/`, no leading `-`, no glob).
+* **Q3 Wrapper options.** The `sudo` context is accepted with any `sudo`
+  options. A login-shell or shell form runs root's shell startup files
+  before the command. Consider accepting only a bare `sudo`.
+
+Once R1–R4 are in (S1–S4 are welcome in the same round), the feature
+reviewer can approve SC4–SC8. SC1–SC3 go to the security chat now, in
+parallel.
+
+**Security round 2 (2026-11-09): SC1 and SC3 hold. SC2 holds as a rule, but
+Round 5 opened a new gap (SC9), which comes back here.** Security chat,
+reviewed at `24d3833` (code at `4b3a121`, tests at `c470d6e`). This was a
+read-only review. Nothing was run.
+
+**What holds:**
+
+* **SC1.** `OPTION_SPECS` has one entry per verb or subcommand and no shared
+  list. `_scan_options` matches exact spellings only, so an abbreviation is
+  refused. A long flag with `=` is refused, and a cluster passes only when
+  every letter is listed. A value-taking letter inside a cluster takes the
+  rest of the cluster as its value, and every value goes through a
+  validator. `--` and a lone `-` are refused. The "another host or
+  container" options are refused in either position, because a word
+  before the subcommand is taken as the subcommand and fails the check.
+* **SC3.** F1 records input redirections and here-strings per step and
+  flags the whole command. Heredocs still set the `heredoc` flag. Process
+  substitution is refused through its `procsubst` context. Any flag blocks,
+  so the early-return paths in `_parse_statement` (shells, `su`/`runuser`)
+  are covered as well.
+* **The `on` lock** (`read_lane_on_enabled`, set by hand only, and a stored
+  `on` treated as shadow while it is unset) is stricter than I asked for.
+  Keep it.
+
+**New gap, must fix (SC9): the shell expands words the policy has already
+approved.** Round 5 switched `_step_ok` from splitting on whitespace to
+`shlex.split`. F1's lexer has already removed the original quoting, and
+`_display` re-quotes any word that holds a shell-special character. In
+round 3 such a word started with a quote, failed the path check and was
+refused. That was the "variable and quoting tricks fail closed" point in my
+round-1 note. `shlex.split` now strips that quote again, so the policy sees
+a clean-looking word, while the gateway runs the *original* text through
+`bash -c`, which expands it. Two classes are eligible today:
+
+* **Parameter expansion in a path.** A `$` word inside a safe-tree path
+  passes the textual checks. At run time it can add `..` components or split
+  into several words, through the default `IFS` or an earlier bare
+  assignment (an assignment-only statement produces no step at all). That
+  gives a root read outside the safe trees.
+* **Brace and glob expansion in a `grep` pattern.** Neither the `-e` value
+  nor the first-word pattern is checked for shell characters. At run time
+  one unquoted pattern can expand into several words, and `grep` reads all
+  but the first as files, starting in root's home directory.
+
+None of this sets a metacharacter (`$` alone, braces and globs are not on
+the list), so neither SC7 nor the gateway's gate catches it. The tests have
+no expansion case. I missed the pattern half in round 1, when the `-e` value
+was skipped without any check.
+
+* **SC9 rule:** no word in an eligible step may contain a character the
+  shell expands when it is unquoted: `$`, a backtick, `{`, `}`, `*`, `?`,
+  `[`, `]`, a leading `~`, or a backslash. This covers path operands, option
+  values and patterns alike. The breakdown does not say whether a word was
+  quoted, so the rule must hold for quoted words too. Patterns are then
+  limited to plain text and `.`/`^` anchors, which is acceptable. If regex
+  patterns are wanted later, F1 must first record per word that it was
+  entirely single-quoted, and only such a word may carry those characters.
+* **Also:** refuse any command with a bare variable assignment statement,
+  since it changes what later words expand to and shows up as no step.
+* **Tests:** one ineligible row per class (parameter expansion in a path, in
+  an option value, and in a pattern; brace and glob expansion in a pattern; a
+  bare assignment before an eligible read), using synthetic paths only.
+* **Who checks:** this one comes back to the security chat.
+
+**The feature reviewer's Round 6 list (R1–R4): confirmed, and extended.**
+
+* **R1–R4 confirmed** as written. For R2, take the simpler fix: remove
+  `-r`/`--recursive` from the lane. `ls -R` and `du` still list names.
+* **R5 (add, must): line caps don't bound binary or sparse logs.** Like
+  `-z`, a file with few newlines makes `-n ≤ 1000` or `-m ≤ 1000` print most
+  of the file. The worst case is the sparse login-record file, which can be
+  many gigabytes of zeros. For `head`, `tail` and `grep`, refuse the
+  journal directory under `/var/log` (use `journalctl`) and the
+  login-record files `lastlog`, `wtmp`, `btmp` and `faillog`. Also refuse
+  `grep -a`/`--text`; without it `grep` prints only "binary file matches".
+* **S1–S4: agree.** S1 matters most, because `date` takes an operand. S3:
+  4 log operands is fine.
+
+**Answers to the three questions:**
+
+* **Q1: yes, allow `shell_meta`.** "Plain jit" meant "no rule says a human
+  must look". `shell_meta` means "the gateway cannot vouch for this literal
+  string", which is exactly the case the lane exists to parse step by step.
+  SC7 becomes: the verdict is `auto_approved`, or `jit` with `detail_type`
+  `None` or `shell_meta`, and nothing else. Two additions:
+  * Refuse a step sent to the background with `&`, because it can outlive
+    the session.
+  * Add the end-to-end shadow test through `POST /api/request` with a
+    two-step read, as the feature reviewer asked.
+
+  This does not depend on SC9, because the expansion classes carry no
+  metacharacter, but ship it in the same round.
+* **Q2: yes, allow the narrow named-operand exception.** It applies only to
+  `systemctl status`, `is-active` and `is-enabled`. Each name must match
+  `[A-Za-z0-9][A-Za-z0-9@_.:-]{0,63}`: the first character is a letter or
+  digit, so a name can never be read as an option, and there is no `/`, no
+  glob and no backslash. Allow at most 8 names, and the `-n` cap still
+  applies to `status`. Escaped unit names (with `\x2d`) stay with a human.
+  SC9 must land first or in the same round.
+* **Q3: yes, accept only a bare `sudo`.** Every command already runs as
+  root, so `sudo` adds nothing. Its options add a login shell (root's
+  startup files), a shell, a chroot, a different working directory,
+  backgrounding and sudoedit. F1 must record whether the `sudo` wrapper had
+  any option or assignment, for example by labelling only the bare form
+  `sudo`. The lane refuses every other form.
+
+**Precondition for unlocking `on` on any gateway: the gateway must stop
+logging session signatures.** This is about the F12 note, and it is
+confirmed. The gateway writes the whole `SSH_ORIGINAL_COMMAND` to syslog
+before it strips the prefixes, so `ESHU_SESSION_SIG` ends up in the logs.
+That signature covers the session id only, not the command, so it can be
+replayed while it is valid. Today a human approves every log read. With
+`on`, the agent could read syslog or the journal unattended, pick up
+*another* session's signed id, and then use that session's F3 plan items
+or session override. This does not block the merge, and shadow is
+unaffected because nobody unlocks `on` before this is fixed:
+
+* **Gateway fix (security work, before the unlock):** log the command
+  without its signed prefixes (the id alone is fine). This is small and
+  belongs in security Chunk 7.
+* **Design fix (security Chunk 6):** bind the signature to the command, or
+  make it single-use, so a leaked signature is worthless. F12 should take
+  this into account.
+
+**Status:** SC1 and SC3 are done. SC2 is done once SC9 is in. When SC9, Q1
+and Q3 are implemented, send them back here. The feature reviewer checks
+R1–R5 and S1–S4. Q2 is optional, and if it is done, the security chat
+looks at it together with SC9.
+
+**Round 7 (2026-11-09, main feature reviewer): feature side approved; SC9,
+Q1 and Q3 go to the security reviewer.** I re-ran every probe set from
+rounds 1–6 plus a Round 7 set, about 150 synthetic commands.
+
+* **Still eligible:** only status reads (`uptime`, `df`, `free`, `ip a`,
+  `ss`, `ps`, `systemctl status <unit>`/`list-units`, `journalctl -n`,
+  `docker ps`/`stats --no-stream`, `zpool status`, `lsblk`, `uname`), log
+  reads with caps (`tail -n 50 /var/log/syslog`), `ls`/`du`/`stat` of safe
+  paths, and chains of these (`uptime && df -h`).
+* **Refused:**
+  * shell-expansion characters in any word (glob or brace grep patterns,
+    `$` in paths);
+  * bare and prefix assignments;
+  * `&` background steps;
+  * `sudo` with options;
+  * `wtmp` (and its rotations) and the journal folder;
+  * `grep -a`, every recursive grep spelling, `/./` paths, `grep -C`
+    beyond the cap, `head -z`;
+  * command substitution in a chained step.
+
+The F8 merge also made the read-lane report skip excluded rows, which is
+correct. **Still owed before merge:** the security reviewer's look at SC9,
+Q1 and Q3 (commits `51f2e40` and `0ed276c`). **Still owed before `on` can be
+unlocked:** security Chunk 7 (stop logging signatures), Chunk 6 (bind the
+signature to the command) and F19 (gateway time and output limits).
+
+**Security round 3 (2026-11-09): final sign-off. Approved on two small
+conditions, which the feature reviewer checks. No return trip.** Security
+chat, reviewed at `60045c8` (commits `51f2e40` and `0ed276c`). This was a
+read-only review. Nothing was run.
+
+**What holds:**
+
+* **SC9.** Every raw step word is checked before `shlex.split`, so F1's
+  re-quoting can no longer be undone. All the expansion characters are
+  refused, a leading `~` included, even behind a quote. That covers paths,
+  option values and both pattern forms. A bare assignment is now an
+  `unknown` step. Prefix assignments were already refused, because the
+  assignment word becomes the verb.
+* **Q1.** SC7 accepts `auto_approved`, or `jit` with `detail_type` `None` or
+  `shell_meta`, and nothing else, so `self_protection_jit` still wins. A
+  statement ended by `&` carries `background` and is refused. In a
+  backgrounded pipeline, the last member carries the marker, so the whole
+  command is still refused.
+* **Q3.** Only a bare `sudo` keeps the `sudo` context. Any option, `--` or
+  assignment gives `sudo(options)`, and nested `sudo` gives a two-item
+  context. The lane refuses both.
+* **Q2.** The unit-name exception is scoped as agreed: three subcommands,
+  at most 8 names, a letter or digit first, and no `/`, glob or backslash.
+* **R1–R5** are in as specified. Paths are normalised before the prefix
+  checks, recursive `grep` and `-P` are gone, the context product is
+  capped, `-z` is gone, binary logs are refused and `grep -a` is gone.
+  `ls -R` stays allowed under `/var/log` only, which lists names and is
+  acceptable.
+
+**Conditions (before merge, feature reviewer checks):**
+
+* **SC10: refuse loops and grouping.** F1 drops shell keywords and keeps
+  only the commands inside them. Q1 now allows `;` and newlines, so a
+  `while` or `until` loop whose condition and body are both eligible reads
+  is eligible today. It never ends and prints without limit, which is
+  exactly what SC5 forbids. This is a consequence of my Q1 answer. Grouping
+  with braces or parentheses also loses the `background` marker, because
+  the `&` lands after the closing word. **Rule:** F1 flags any command that
+  contains a loop (`while`, `until`, `for`, `select`), a conditional (`if`,
+  `case`), a function definition, a brace group or a subshell, for example
+  with a `compound` flag. Every flag blocks the lane, so these commands are
+  refused. The lane is for plain chains of reads. **Tests:** synthetic
+  ineligible rows for a `while` loop of two eligible reads, an `until` loop,
+  a `for` loop over a fixed list, a grouped read sent to the background with
+  braces, and the same with parentheses. Plain chains (`uptime && df -h`,
+  `uptime; free -h`) stay eligible.
+* **SC11: date-suffixed login-record rotations.** `_binary_log` matches
+  `wtmp.1` but not the dated `name-YYYYMMDD` rotation that some
+  distributions use. The failed-login file can hold passwords typed into
+  the username prompt by mistake. **Rule:** also match `name-` followed by
+  anything. **Test:** a dated rotation of each of the four names is
+  ineligible for `head`, `tail` and `grep`.
+
+**Verdict:** F4 may merge once SC10 and SC11 are in and the feature reviewer
+has checked them. No further security pass is needed for that. `on` stays
+hard-locked until security Chunk 7 (stop logging signatures), Chunk 6
+(bind the signature to the command) and F19 (gateway time and output
+limits) are merged and deployed. Unlocking it on any gateway is a separate
+decision for the operator, made by hand.
+
+**Round 8 (2026-11-09, main feature reviewer): approved and merged.** SC10
+holds: every loop, `if`/`case`, function, brace group and subshell is
+flagged `compound` and refused, including `{ … & }` and `( … & )`. Plain
+chains (`&&`, `;`, `||`) stay eligible, and a keyword inside an argument
+(`grep -e for …`) is not a construct. SC11 holds: dated login-record
+rotations (`btmp-YYYYMMDD`, `.gz`) are refused. All earlier probe sets give
+the same eligible set as in round 7.
+
+**`on` stays hard-locked.** Unlocking it requires all of these to be merged
+and deployed: security Chunk 7 (prefix-stripped logging), Chunk 6 (the
+signature bound to the command), the session key off argv (the security
+reviewer's third precondition) and F19 (gateway time and output limits).
+Then the operator sets `read_lane_on_enabled` by hand, per the security
+sign-off.
+
 
 ---
 
@@ -4401,7 +5492,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 2 | F2 | review-card | UI | **Merged** 2026-11-08 | `feat/f2-review-card` @ `286df1b` | F1 | 2 rounds |
 | 3 | F7 | inner-target | dashboard | **Merged** 2026-11-08 | `feat/f7-inner-target` @ `0ad167f` | F1 | 1 round; backfill 7.1 s on a live-DB copy |
 | 4 | F3 | session-plans | dashboard + MCP | Merged | `feat/f3-session-plans` | F2 | + security reviewer sign-off |
-| 5 | F4 | read-lane | dashboard | **Changes requested (R1–R4)** | `feat/f4-read-lane` | F1, F3, Chunk H | reviewer pass + security reviewer sign-off |
+| 5 | F4 | read-lane | dashboard | Merged — shadow only; `on` hard-locked | `feat/f4-read-lane` | F1, F3, Chunk H | reviewer pass + security reviewer sign-off |
 | 5a | X1 | ctx-actions | dashboard | Merged | `fix/x1-ctx-actions` | — | FYI to security reviewer (approve ignored status) |
 | 6 | F5 | exec-results | gateway + dashboard | Merged | `feat/f5-exec-results` | — | |
 | 6a | F18 | request-context | dashboard | Merged | `feat/f18-request-context` | F1, F5, F7, X1 | |

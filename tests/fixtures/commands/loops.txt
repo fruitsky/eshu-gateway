@@ -1,13 +1,13 @@
-### loop-pct-var | kinds=unknown | flags=
+### loop-pct-var | kinds=unknown | flags=compound
 for i in 101 102 103; do pct exec $i -- uptime; done
 
-### loop-pct-literal | kinds=read | flags= | inner=pct:101
+### loop-pct-literal | kinds=read | flags=compound | inner=pct:101
 for i in 101 102 103; do pct exec 101 -- uptime; done
 
-### if-block | kinds=read,read | flags=
+### if-block | kinds=read,read | flags=compound
 if [ -f /etc/os-release ]; then cat /etc/os-release; fi
 
-### case-block | kinds=write | flags=
+### case-block | kinds=write | flags=compound
 case "$x" in a) rm -rf /tmp/synthetic-dir ;; esac
 
 ### recon-script | kinds=read,read,read,read,read,read,read,write | flags= | sections=UPTIME,DISK,LOGS,SERVICES
