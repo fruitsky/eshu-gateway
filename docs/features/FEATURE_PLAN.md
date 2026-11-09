@@ -3931,6 +3931,147 @@ another design round:
    "never accept the dashboard key" switch is in scope.
 5. The note moves the existing `ESHU_SESSION_SIG` key-on-argv to Chunk 7.
 
+#### Security reviewer sign-off
+
+**2026-11-09: design approved on conditions (security chat, reviewed at
+`3a286cb`).** This was a design and code-text review of the note and the
+bash it shows, checked against `eshu-gateway.sh` and `db/gateways.py`.
+Nothing was run. Write conditions G1–G8 into the note before any code. The
+gateway bash (prefix parsing, nonce store, ticket parsing, `say()` and the
+envelope) then comes back to the security chat as a code review before
+merge.
+
+**What holds:**
+
+* The MAC covers every prefix field, the command hash and the gateway
+  identity, in a versioned canonical form that cannot contain a newline.
+  That is the right shape, and it is also the model for Chunk 6's binding
+  of the session signature to the command.
+* Force-JIT is enforced on both sides, and the dashboard re-derives it from
+  the agent's policy. A dashboard bug can only add gating.
+* Host keys are pinned from the token-authenticated registration, and a
+  changed key is never re-pinned silently.
+* The envelope is the only stdout, with all output base64-encoded inside it,
+  so a command cannot forge a status.
+* The key never goes on argv for the new helper. Signatures and nonces are
+  never logged.
+
+**Conditions:**
+
+* **G1: the dashboard signs with the derived key, not the token.** Today the
+  dashboard stores gateway tokens in plain text. Chunk 7 will store only a
+  hash of them, and after that the dashboard cannot compute `K` from the
+  token. Rule: compute `K` when a token is set or rotated, store it in its
+  own column, and sign with that column. `K` never appears in logs or in any
+  API response.
+* **G2: the gateway refuses half-signed and ambiguous prefixes.**
+  * If any of `ESHU_AGENT`, `ESHU_AGENT_SIG`, `ESHU_TS`, `ESHU_NONCE`,
+    `ESHU_MCP` or `ESHU_FORCE_JIT` is present without a valid signature, the
+    gateway refuses the request in every `ssh_mode`, rather than ignoring
+    the fields. Otherwise an unsigned agent name could reach attribution.
+  * A prefix key that appears twice is refused. Today the parse loop keeps
+    the last value it sees.
+  * `ssh_exec` refuses a command whose first word starts with `ESHU_`.
+  * §5 writes `ESHU_SESSION=` in the prefix but `ESHU_SESSION_ID` in the
+    canonical form. Use `ESHU_SESSION_ID` throughout.
+  * State how strict sessions apply. The valid agent MAC covers the session
+    id, so the gateway may accept it *in place of* `ESHU_SESSION_SIG`, but
+    only when the MAC is valid.
+* **G3: hash exactly the bytes the gateway will run.** The gateway trims
+  whitespace before the command reaches the hash, and Python's `strip()` is
+  not the same trim (the F3 SR1 lesson). Rule: `ssh_exec` refuses a command
+  with leading or trailing whitespace or any control character other than
+  tab and newline, instead of hashing something the gateway will change.
+* **G4: the nonce store, in four fixes:**
+  * (a) N1: check the nonce on its own.
+  * (b) Never truncate the store in place. If the write after
+    `cat … > nonces` fails, it leaves an empty store, and the *next* call
+    accepts replays. Use a separate lock file, write the pruned list plus
+    the new nonce to a temp file, and rename it into place.
+  * (c) Check the timestamp and the MAC first, and write the nonce only
+    after both pass. Otherwise unsigned garbage from a shared-key caller can
+    fill the 4096-entry bound and lock out every signed call for five
+    minutes.
+  * (d) Keep the store across restarts. `/run` is cleared on reboot, and a
+    container restarts in seconds, well inside the ±300 s window. Put the
+    store in a persistent, root-only `0700` directory such as
+    `/var/lib/eshu/`, and refuse the call if the store is missing and cannot
+    be created.
+
+  Tests: a failed write leaves the previous store intact; a call with a bad
+  MAC adds no entry; and a replay after the store's directory is recreated
+  is still refused.
+* **G5: version the ticket line, and require the new poller.**
+  * Detecting the format by counting `|` is ambiguous. An old `ts|cmd` line
+    whose command is a pipeline whose first words look like an agent and a
+    session would parse as a ticket bound to that agent, for a shorter
+    command than the one the human approved.
+  * Rule: new lines start with a fixed tag (`v2|ts|agent|session|cmd`). A
+    line without the tag is old: everything after the first `|` is the
+    command, and the ticket is agent-less.
+  * The capability check in §9 must also cover the poller's ticket format.
+    Otherwise, on a gateway with an old poller, an MCP agent loops through
+    pending, approve and refused for ever.
+  * Test: an old line whose command looks like `agent|session|…` stays
+    agent-less, and only an unsigned request for the *whole* command can
+    claim it.
+* **G6: a call on the dashboard key must be signed.** Give the dashboard
+  line a forced command with a fixed marker argument, for example
+  `… eshu-gateway.sh --dashboard-key`, and allow exactly that argument in
+  sudoers. The gateway then refuses any call that arrives on the dashboard
+  key without a valid signature, in every `ssh_mode`. A leaked key file
+  without the derived keys then runs nothing. Callers on the shared key
+  cannot set the marker, because sshd sets it.
+* **G7: harden the runner.**
+  * Connect to the registered IP and never resolve the hostname.
+  * Pass `-F /dev/null`, so no user or system `ssh_config` applies (no
+    `ProxyCommand`, no `Match`).
+  * Use `UserKnownHostsFile=<pin file>` and `GlobalKnownHostsFile=/dev/null`.
+  * The UI warns when `ALLOWED_SSH_FROM` on a gateway covers more than the
+    dashboard's own address.
+* **G8: one logging rule for every prefix.** The gateway logs the command
+  only after *all* prefixes are stripped, `ESHU_SESSION_SIG` included. This
+  delivers the Chunk 7 "stop logging the session signature" item as part of
+  F12. That's fine, but the item stays open in Chunk 7 until whichever
+  ships first is merged and deployed.
+
+**Answers to the five questions:**
+
+1. **Key derivation: acceptable.** HMAC keyed with the token over a fixed
+   label is a sound one-step key derivation. It keeps the MAC key separate
+   from the token's role as a bearer credential, and rotating the token
+   rotates the key. Anyone who holds the token can forge an agent identity,
+   but only on that one gateway, because the gateway's identity is in the
+   MAC. Holding the token already means root on that gateway, so this adds
+   nothing. Condition: G1.
+2. **Nonce store: not yet.** The intent is right: everything happens under
+   one lock, the bound fails closed, and errors refuse the call. But three
+   paths let replays back in or lock out legitimate calls: the in-place
+   truncate, writing the nonce before the MAC is checked, and the store
+   being cleared on reboot. It fails closed once G4 is in.
+3. **Ticket compatibility: sound rules, ambiguous format.** These rules are
+   correct: a signed request claims only its own agent's ticket, and an
+   unsigned request claims only an agent-less one. Fix the format detection
+   and the poller check with G5.
+4. **The accepted risk in §12: accepted. The "never accept the dashboard
+   key" switch is not required in F12.** A compromised dashboard already
+   controls the fleet, because it serves the installer, the feature scripts
+   and the fleet runner, which run as root on every gateway (the Chunk 6
+   threat). A switch enforced by an installer that the dashboard itself
+   serves cannot stop a compromised dashboard. The switch only means
+   something once gateways verify scripts against a key the dashboard does
+   not hold, so design it in Chunk 6. The realistic risk F12 adds is a
+   leaked key file, and G6 covers it.
+5. **`ESHU_SESSION_SIG`'s key off argv: yes, in Chunk 7, but it is more
+   than a cleanup.** While the helper runs, the fleet-wide session key is
+   visible in `ps` and `/proc/<pid>/cmdline`. F4's read lane allows
+   `ps aux` with no human approving it. Make it a third precondition for
+   unlocking F4's `on` mode, next to the logging and binding items.
+
+**Verdict:** design approved once G1–G8 are written into the note. The
+feature reviewer checks the dashboard side of the code. The gateway bash
+comes back to the security chat before merge.
+
 
 ---
 
