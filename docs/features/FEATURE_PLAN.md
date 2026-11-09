@@ -1866,6 +1866,70 @@ session signatures (the F12 note), which is security Chunk 7 work.
 
 `bash scripts/verify.sh`: `2134 passed, 7 warnings in 390.21s (0:06:30)` (round 6, after the read-policy guard and its test).
 
+### Round 7: security round 2 (SC9, R5, Q1-Q3)
+
+**Commits for the security chat: SC9 is `51f2e40` + `0ed276c`; Q1 is
+`51f2e40` + `0ed276c`; Q3 is `51f2e40` + `0ed276c`.** (`51f2e40` is F1's half —
+bare assignments, the background marker, the `sudo(options)` label; `0ed276c`
+is the lane's half.)
+
+* **SC9 — the shell cannot expand a word the lane approved.** `_step_ok`
+  checks the **raw** step words (from the display text, before
+  `shlex.split` strips F1's re-quoting) and refuses `$`, a backtick, `{`,
+  `}`, `*`, `?`, `[`, `]`, a backslash anywhere and a leading `~`. It covers
+  path operands, option values and both grep pattern spellings, and quoted
+  words are included because F1 does not record whether a word was quoted.
+  A bare `NAME=value` statement now emits an `unknown` step ("bare variable
+  assignment") instead of vanishing, so the lane refuses it (and F1's
+  `assignment-then-echo` fixture expects the extra step). Tests
+  (`TestRoundSeven`): every character in a path, in a `grep -e` pattern and
+  in an option value; the first-word pattern form; a quoted backslash; a
+  leading `~`; the bare assignment (`FOO=1`) and the prefixed form (still
+  refused, fail closed).
+* **Recursion — every spelling is out of the lane.** `-r`, `-R`,
+  `--recursive`, `--dereference-recursive`, `-ir`, `-ri`, `-rn`,
+  `-d recurse` and `--directories=recurse` are unknown options, so each is
+  refused (with `/var/log` and `/var/log/` as the operand). This replaces
+  round 6's R2 with the simpler rule the security reviewer named; `ls -R` and
+  `du` still list names.
+* **R5 — binary logs.** `head`, `tail` and `grep` refuse the journal tree
+  (`/var/log/journal` and below) and the login-record files (`lastlog`,
+  `wtmp`, `btmp`, `faillog`, including `wtmp.1`-style rotations), because a
+  file with few newlines defeats the line cap. `ls`/`stat` metadata stays
+  allowed, and an ordinary log still reads. `grep -a`/`--text` are removed
+  from the spec (so they are unknown options) and `--binary-files=text` was
+  never listed; all are refused.
+* **Q1 — chains and pipes are eligible; background is not.** `read_lane.eligible`
+  now accepts `auto_approved`, a `jit` with no `detail_type`, **or a `jit`
+  with `shell_meta`**, because `shell_meta` only says the gateway cannot vouch
+  for the literal string and the lane parses every step itself (SC9 and the
+  rest still apply to those steps). A step marked `background` by F1 (the
+  statement before a `&`, including a trailing `cmd &`) is refused, since it
+  can outlive the session. The end-to-end test is flipped:
+  `test_f4_sc7_chained_read_is_lane_eligible_end_to_end` — in shadow,
+  `uptime && whoami` through `POST /api/request` now carries
+  `read-lane-shadow`; with the lane `on` it auto-approves; the verdict is
+  asserted to be `shell_meta`.
+* **Q2 — unit names for the three reviewed subcommands.** `systemctl
+  status`, `is-active` and `is-enabled` take up to 8 operands, each matching
+  `[A-Za-z0-9][A-Za-z0-9@_.:-]{0,63}` (first character a letter or digit, no
+  `/`, no glob, no backslash). A path-shaped operand, a ninth name, a
+  65-character name and an escaped name all stay with a human; other
+  subcommands still refuse every operand. The `-n` cap on `status` is
+  unchanged.
+* **Q3 — bare `sudo` only.** `_unwrap` labels only the bare form `sudo`; any
+  option or assignment gets `sudo(options)`, which the lane refuses through
+  its existing `context != ['sudo']` rule. Tests cover `-E`, `-u root`, `-i`
+  and `--`, and assert F1's contexts directly.
+* **Merge integration.** The branch now merges `origin/feature-roadmap`
+  (F8, F9, F14). `core/read_policy.py` keeps F4's full module (SSH rules and
+  the guarded integration wrapper) and takes F9's docstring line about the
+  freeze. F8's generated statistics-filter scan exposed F4's read-lane report
+  queries; they now skip excluded rows like the other statistics, so the scan
+  passes on the merged tree.
+
+`bash scripts/verify.sh`: `2236 passed, 7 warnings in 419.39s (0:06:59)`.
+
 ### Reviewer notes
 
 **Round 1 (2026-11-08): changes requested. Not ready for the security
