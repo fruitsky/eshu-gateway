@@ -2826,7 +2826,7 @@ async function saveSessionNames() {
    Excluding a row is a one-way, audited flag: it never deletes anything and
    only the aggregate views stop counting. No rule excludes anything on its
    own; the session hint is a suggestion, and the operator presses the button. */
-var TEST_GOAL_RE = /test|smoke/i;
+var TEST_GOAL_RE = /\b(smoke|tests?)\b/i;
 
 function looksLikeTestGoal(goal) {
   return TEST_GOAL_RE.test(String(goal || ''));
@@ -2844,7 +2844,9 @@ function excludedMarkHtml(req) {
 async function excludeRequests(payload, label) {
   var ok = await customConfirm(
     'Exclude ' + label + ' from statistics, learning gaps and anomaly profiles? ' +
-    'The rows stay in History, marked excluded.',
+    'The rows stay in History, marked excluded.' +
+    (payload && payload.session_id
+      ? ' Rows the session adds later are not excluded.' : ''),
     { title: 'Exclude test traffic?', confirmLabel: 'Exclude', danger: false });
   if (!ok) return false;
   try {
@@ -2879,9 +2881,15 @@ function excludeActiveSession() {
   });
 }
 
-function renderSessionTestHint(goal) {
+function renderSessionTestHint(goal, sessionSummary) {
   var el = document.getElementById('sm-test-hint');
   if (!el) return;
+  if (sessionSummary && sessionSummary.all_excluded) {
+    // S3: already done — do not offer the button again.
+    el.classList.remove('hidden');
+    el.innerHTML = '<span>This session is excluded from statistics and learning.</span>';
+    return;
+  }
   if (!looksLikeTestGoal(goal)) {
     el.innerHTML = '';
     el.classList.add('hidden');
@@ -2961,7 +2969,7 @@ async function openSessionModal(sid) {
   if (denied) bits.push('<span class="sm-blocked">' + denied + ' denied</span>');
   if (auto) bits.push('<span class="sm-muted">' + auto + ' auto</span>');
   metaEl.innerHTML = bits.join(' \u00b7 ');
-  renderSessionTestHint(summary.goal || '');
+  renderSessionTestHint(summary.goal || '', detail.summary || {});
 
   // Unified, chronological timeline.
   var items = [];

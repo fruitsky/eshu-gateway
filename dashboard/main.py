@@ -1336,7 +1336,6 @@ def gateway_inner_targets(ip: str, request: Request, days: int = 30):
             SELECT inner_target, COUNT(*) AS calls
             FROM requests
             WHERE target_ip = ? AND created_at >= ?
-              AND COALESCE(excluded, 0) = 0
               AND inner_target IS NOT NULL AND inner_target != ''
               AND inner_target != 'multi'
             GROUP BY inner_target
@@ -3687,7 +3686,12 @@ def session_detail_endpoint(sid: str, request: Request):
     for row in ssh:
         row.update(_encoded_fields(row.get('command', '')))
     mcp = get_integration_calls(session=sid, limit=500)['rows']
-    return {'session_id': sid, 'ssh': ssh, 'mcp': mcp}
+    # F8 S3: whether the whole session is already excluded, so the modal shows
+    # the done state instead of offering the button again.
+    excluded = sum(1 for row in ssh if row.get('excluded'))
+    summary = {'excluded': excluded,
+               'all_excluded': bool(ssh) and excluded == len(ssh)}
+    return {'session_id': sid, 'ssh': ssh, 'mcp': mcp, 'summary': summary}
 
 
 @app.get("/api/sessions/recent")

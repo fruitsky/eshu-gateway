@@ -38,6 +38,12 @@ def _row(req_id):
         return dict(cur.fetchone())
 
 
+def _request_query_blocks(text):
+    """Every `cursor.execute(` block in a function body that reads requests."""
+    return [block for block in text.split('cursor.execute(')[1:]
+            if 'FROM requests' in block]
+
+
 class TestExcludeEndpoint:
 
     def test_f8_exclude_by_ids(self, auth_client):
@@ -128,15 +134,19 @@ class TestStatisticsIgnoreExcluded:
         rows = auth_client.get('/api/statistics/export?days=14&format=json').json()
         assert sum(r['total'] for r in rows) == 1
 
-    def test_f8_inner_target_warning_skips_excluded(self, auth_client):
+    def test_f8_inner_target_warning_keeps_excluded_rows(self, auth_client):
+        """R1: the override warning is a safety prompt, not a statistic."""
         register_gateway('192.0.2.10', 'pve01', 'v15.3')
         _mk('pct exec 103 -- uptime', inner_target='pct:103')
         hidden = _mk('pct exec 106 -- uptime', inner_target='pct:106')
         auth_client.post('/api/requests/exclude', json={'ids': [hidden]})
-        data = auth_client.get(
+        warning = auth_client.get(
             '/api/gateways/192.0.2.10/inner-targets').json()
-        assert data['pct'] == ['103']
-        assert data['count'] == 1
+        assert warning['pct'] == ['103', '106']
+        assert warning['count'] == 2
+        # The Statistics table is a statistic, so it still skips the row.
+        stats = auth_client.get('/api/statistics?days=14').json()
+        assert [row['target'] for row in stats['inner_targets']] == ['pct:103']
 
 
 class TestLearningIgnoreExcluded:
@@ -183,7 +193,51 @@ class TestTrafficSuggestions:
                               text=True, timeout=60)
         assert proc.returncode == 0, proc.stderr
         out = json.loads(proc.stdout)
-        assert out['test'] == [True, False, False]
+        assert out['test'] == [True, False, False, False, True]
         assert 'excluded-chip' in out['excludedChip']
         assert 'excludeRequest(5)' in out['excludeLink']
         assert 'excluded-chip' not in out['excludeLink']
+
+
+class TestStatisticsFilterScan:
+    """S2: a future aggregate cannot forget the exclusion filter."""
+
+    def _main_source(self):
+        path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            'dashboard', 'main.py')
+        return open(path, encoding='utf-8').read()
+
+    def test_f8_every_statistics_query_filters_excluded(self):
+        src = self._main_source()
+        stats = src[src.index('def get_statistics('):
+                    src.index('@app.get("/api/statistics/export")')]
+        export = src[src.index('def export_statistics('):
+                     src.index('# --- Notes ---')]
+        checked = 0
+        for name, body in (('get_statistics', stats),
+                           ('export_statistics', export)):
+            blocks = _request_query_blocks(body)
+            assert blocks, name
+            for block in blocks:
+                assert 'excluded' in block, (name, block[:160])
+                checked += 1
+        assert checked >= 9, checked
+
+
+class TestExcludedSessionState:
+    """S3: an excluded session says so instead of offering the button again."""
+
+    def test_f8_detail_reports_an_excluded_session(self, auth_client):
+        sid = 'sess-f8-excluded'
+        _mk('uptime', session=sid)
+        _mk('id', session=sid)
+        auth_client.post('/api/requests/exclude', json={'session_id': sid})
+        data = auth_client.get(f'/api/sessions/{sid}/detail').json()
+        assert data['summary']['excluded'] == 2
+        assert data['summary']['all_excluded'] is True
+        # Rows added to the session later are not excluded.
+        _mk('date', session=sid)
+        data = auth_client.get(f'/api/sessions/{sid}/detail').json()
+        assert data['summary']['excluded'] == 2
+        assert data['summary']['all_excluded'] is False

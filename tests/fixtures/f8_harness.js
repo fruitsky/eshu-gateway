@@ -18,6 +18,8 @@ out.test = [
   ctx.looksLikeTestGoal('Smoke test the edge'),
   ctx.looksLikeTestGoal('deploy nginx'),
   ctx.looksLikeTestGoal(''),
+  ctx.looksLikeTestGoal('update to the latest kernel'),
+  ctx.looksLikeTestGoal('run the tests'),
 ];
 out.excludedChip = ctx.excludedMarkHtml({ id: 5, excluded: 1 });
 out.excludeLink = ctx.excludedMarkHtml({ id: 5 });
