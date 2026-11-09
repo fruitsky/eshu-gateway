@@ -5938,7 +5938,289 @@ the **dashboard itself** connects to it.
 
 ### Implementer notes
 
-_(fill in)_
+**Status: design note only — no code on this branch.** F11 is design first
+(like F5) and needs the security reviewer's sign-off. It reuses two branches
+that are not merged yet: **F12** (`feat/f12-ssh-exec`, the dashboard-side SSH
+runner) and **F10** (`feat/f10-ha-supervisor-actions`, the always-gated
+action handler and preflight pattern). This note references their designs by
+section; it does not copy their code.
+
+#### 1. Why the dashboard connects to the add-on
+
+The **Advanced SSH & Web Terminal** add-on is the supported way to touch
+`/config/*.yaml`: no HA API writes config files. It cannot be an Eshu gateway
+— an Alpine container without systemd (no poller, logger or `systemd-run`),
+rebuilt on every add-on update. So the dashboard opens the SSH connection
+itself, exactly the way F12's `ssh_exec` does for gateways, with three
+differences that this note is about:
+
+* the login is a **user** on the add-on (normally `root`), not the
+  `eshu-gateway` forced command, so there is **no gateway-side gate** behind
+  Eshu: every check in this note is the only check;
+* the commands are **fixed templates**, never agent text (no `ssh_exec`, no
+  `bash -c "$agent_text"`);
+* the key, the host-key pin and the connection live on the **integration
+  row**, not on a gateway row.
+
+Protection mode stays **on** in the add-on: with it off, the add-on can drive
+Docker, which is the whole host. Eshu does not need it off for any tool here.
+
+#### 2. Integration kind `ha_ssh`
+
+A new integration kind (`kind = 'ha_ssh'`) with these fields, all stored the
+way integration credentials already are (`secret` masked in every response,
+scrubbed in every record):
+
+| field | meaning | default |
+|---|---|---|
+| `base_url` | `host` or `host:port` of the add-on | — |
+| `secret` | the **private key** (OpenSSH ed25519, no passphrase) | — |
+| `config_json.ssh_user` | login user | `root` |
+| `config_json.ssh_port` | port | `22` |
+| `config_json.host_key` | the pinned public host key line | `''` until first use |
+| `config_json.host_fingerprint` | `SHA256:…` of the pin, for display | `''` |
+
+* The key is **made for this use only**. The design recommends the dashboard
+  generate it (`ssh-keygen -t ed25519 -N '' -C 'eshu-ha-config'`) when the
+  integration is created and show the public line once, for the operator to
+  add to the add-on (`authorized_keys` of the add-on's user), exactly like
+  F12's `/api/ssh-key` flow. It is stored in the integration's `secret`, so
+  the existing masking/scrubbing applies.
+* **Host-key pin (TOFU).** The first successful connection records the host
+  key line and its fingerprint; the operator sees the fingerprint in the
+  integration card. A later connection whose key differs is **refused**
+  (`ssh_host_key_changed`) and audited; re-pinning is an explicit, audited
+  operator action (the same rule as F12 §4/R6).
+* **Pin before write.** Read tools may run once TOFU has happened. A **write
+  or restore requires an existing pin** (`ssh_host_unpinned` otherwise): the
+  first connection of a brand-new integration is a read (`ha_config_list`),
+  so a write can never be the thing that establishes trust.
+
+#### 3. Transport: F12's runner, with no gateway prefix and no envelope
+
+F11 reuses the **pure runner** from F12 (`core/ssh_exec.py` on
+`feat/f12-ssh-exec`): the fixed argv (registered IP, `-F /dev/null`,
+`BatchMode=yes`, `IdentitiesOnly=yes`, `StrictHostKeyChecking=yes`,
+`UserKnownHostsFile=<pin file>`, `GlobalKnownHostsFile=/dev/null`,
+`ConnectTimeout=10`, `LANG=C`), the process-group kill on timeout, and the
+key-dir/known-hosts helpers in `core/ssh_keys.py`. Two F12 artifacts do not
+apply and are switched off:
+
+* **no signed prefix and no `ESHU-MCP-ENVELOPE`**: the add-on has no Eshu
+  gateway code, so the connection is a plain SSH command whose stdout/stderr
+  is captured and scrubbed (F12's envelope exists because a *gateway* runs
+  the command; here Eshu builds every byte itself);
+* **no agent identity**: the audit actor is the calling agent, but there is no
+  per-agent identity on the add-on side.
+
+Concretely, F11 needs a small extraction in F12's module (a follow-up commit
+on whatever branch merges second — the design does not duplicate the runner):
+
+```python
+# core/ssh_client.py (shared by F12's ssh_exec and F11)
+def build_argv(target, command_line, known_hosts, key_path): ...
+def run_ssh(target, command_line, known_hosts, key_path, timeout): ...
+# target = {'ip': …, 'port': 22, 'user': 'root', 'envelope': False}
+```
+
+with the exact hardening of F12 §4/§G7 unchanged. F11 keeps its own
+connection limits: **timeout 30 s** per call (these commands are file I/O and
+`ha core check`), and a per-integration **rate limit** (the existing agent
+rate limit applies too).
+
+Key material: the private key is written to a `0600` temp file inside a
+`0700` directory owned by the service user, `finally`-removed after the call;
+a failure to create or lock that down refuses the call (`ssh_key_dir`), the
+same rules F12 §4 uses for its service key.
+
+#### 4. Fixed command templates
+
+Every command is a constant template with validated slots. There is no
+`bash -c` of agent text and no `ssh_exec`; a call's only inputs are a path, a
+backup name and file content (which is streamed on **stdin**, never on the
+command line).
+
+```python
+# core/ha_config_ssh.py (design)
+CONFIG_ROOTS = ('/config', '/config/packages')
+YAML_RE = re.compile(r'^[A-Za-z0-9._/-]{1,200}\.ya?ml$')
+BACKUP_RE = re.compile(r'^[A-Za-z0-9._/-]{1,220}\.eshu-[0-9]{10}\.bak$')
+MAX_BYTES = 256 * 1024
+
+COMMANDS = {
+    # list *.yaml under /config and /config/packages, one per line
+    'list': "find /config -maxdepth 1 -type f -name '*.yaml' -o -maxdepth 1 -type f -name '*.yml'; "
+            "find /config/packages -type f \( -name '*.yaml' -o -name '*.yml' \) 2>/dev/null",
+    'read': 'cat -- {path}',
+    'realpath': 'realpath -- {path}',
+    'sha256': 'sha256sum -- {path}',
+    'backup': 'cp -p -- {path} {backup}',
+    'write': 'tee -- {tmp} >/dev/null && mv -f -- {tmp} {path}',
+    'restore': 'cp -p -- {backup} {path}',
+    'check': 'ha core check 2>&1',
+}
+```
+
+* `{path}` is only ever a path that passed the allowlist in §5, and it is
+  `shlex.quote`d when the command is assembled.
+* `write` streams the new content on stdin to a `.eshu-tmp-<random>` file in
+  the same directory and `mv`s it into place (atomic on one filesystem,
+  keeps the target's directory entry). The temp name is generated
+  server-side from `secrets.token_hex`, never from the path.
+* `check` is `ha core check` — the CLI inside the add-on, which is the same
+  check the F10 `ha_check_config` tool does over the API. Its exit code is
+  the structured result (0 = valid).
+
+#### 5. Path policy
+
+`ha_config_list()` lists `*.yaml`/`*.yml` under `/config` and
+`/config/packages/**` only.
+
+`_resolve_config_path(path)` runs **on the dashboard** and again **on the
+remote**, and refuses unless all of these hold:
+
+1. `path` matches `YAML_RE` (no `..`, no spaces, no shell characters, one of
+   the two roots, ends in `.yaml`/`.yml`);
+2. `realpath -- <path>` (run remotely) is **inside** `/config` and does not
+   cross into `.storage/`, `.ssh/`, `*.db*`, `deps/`, `tts/` or any dot
+   directory, and it **equals** the requested path (a symlink that resolves
+   elsewhere is refused, not silently followed);
+3. the file exists and is a regular file (for read/write/restore);
+4. for `secrets.yaml` the read is allowed but **masked**: only key names and
+   `"***"` values are returned (`secrets_masked: true`).
+
+The refused list is a table test: `.storage/**`, `*.db*`, `.ssh/**`,
+`/config/../etc/passwd`, `..%2f`, absolute paths outside `/config`,
+symlinks, directories, non-YAML files (for write), and content over 256 KiB.
+
+#### 6. Tools
+
+| tool | gated | behaviour |
+|---|---|---|
+| `ha_config_list()` | no | YAML files under the two roots, with size + mtime |
+| `ha_config_read(path)` | no | `{content, sha256, size}`; `secrets.yaml` masked; a hash the operator can compare |
+| `ha_config_write(path, content, expect_hash, dry_run)` | **yes** | `dry_run` returns a unified diff **without approval**; a real write is gated |
+| `ha_config_restore(path, backup)` | **yes** | restores a `.eshu-<ts>.bak`, then checks |
+| `ha_config_check()` | no | runs `ha core check` and records the result (below) |
+
+**`ha_config_write` on approval** (F10's `always_gate` + preflight pattern):
+
+1. the call arrives with `expect_hash` (from the `read` before it); the handler
+   re-reads the file and **refuses on a mismatch** (`config_hash_changed` —
+   someone edited it since the diff was shown);
+2. `cp -p -- path path.eshu-<ts>.bak` (kept; the retention rule is "keep the
+   last 10 backups per file", pruned by a read-only list + explicit delete,
+   not by the write path);
+3. write the new content on stdin to a temp file and `mv` it into place;
+4. `ha core check`;
+5. **if the check fails, restore the backup automatically** and return
+   `{error: "config_check_failed", rolled_back: true, check_output: …}`;
+6. on success return `{ok: true, backup, sha256: <new>, check: "valid"}` and
+   record the check result in F10's meta key (see §8).
+
+**`ha_config_restore`**: the backup name must match `BACKUP_RE`, belong to the
+same path, and exist. Restore, then check; if the check fails, put back the
+content that was there before the restore (a second temp copy) and return
+`restored: false, rolled_back: true`. Nothing is deleted by a restore.
+
+**The approval card** (F2) shows, for a write: the file path, the expected vs
+current hash, the unified diff (`dry_run` output, computed by the
+**preflight** so the card never queues a doomed write), and the plan to back
+up + check + auto-restore. For a restore: the backup name, its timestamp and
+the same check/rollback promise.
+
+#### 7. Freeze, results and audit
+
+* Freeze blocks every write and restore before queueing (F10's rule, tested):
+  the call is refused with `frozen` and nothing is fetched or written.
+  Reads keep working while frozen, like F9's integration reads.
+* Every call records an integration-call row: tool, agent, session, the
+  **fixed command template name** (not the expanded command), the exit code,
+  a scrubbed output tail (8 KiB), the bytes read/written and the backup name.
+  These are not `request_results` (those are keyed to a JIT request); the
+  integration-call row is the record, as for every other integration call.
+* Audit events: `ha_config_write` (path, hash old→new, backup),
+  `ha_config_restore` (path, backup), `ha_config_check` (result) and
+  `ha_config_rollback` (when the automatic restore fires). The file content
+  itself is never in an audit row (it may hold secrets).
+
+#### 8. Interaction with F10's `ha_core_restart`
+
+F10's `ha_core_restart` refuses unless `meta['ha_check_config_<integration>']`
+holds a `valid` result from the last 10 minutes (recorded by F10's
+`ha_check_config` handler). F11's `ha_config_check` writes **the same meta
+key** with `{result, at, source: 'ha_ssh'}` after a successful check, so:
+
+* "edit YAML → check → restart" works with one F10 approval for the restart;
+* a failed check never writes `valid` (the key keeps the previous result, and
+  the failed check is in the audit trail and the call row);
+* the 10-minute window is shared, so a check from either transport counts, and
+  its age is visible in the restart refusal message.
+
+This is the only coupling between F11 and F10: the meta key and its shape. It
+is already in F10's code; F11 does not change F10's handlers.
+
+#### 9. Setup doc
+
+`docs/HA_CONFIG_SSH.md`:
+
+1. install the Advanced SSH & Web Terminal add-on, **protection mode on**,
+   bind it to the LAN only (no ingress, no public exposure);
+2. create the Eshu key (or let the dashboard generate it) and append the
+   public line to the add-on's `authorized_keys` for the chosen user;
+3. add the integration in Eshu (`host:port`, user, private key), run
+   `ha_config_list` once, compare the shown host-key fingerprint with
+   `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` in the add-on, then use
+   writes;
+4. what Eshu does **not** do: install packages, change add-on options, restart
+   the add-on, touch `.storage`, or run arbitrary commands. If the add-on is
+   removed or its key rotated, writes fail closed (`ssh_host_key_changed` or
+   auth failure) until the integration is updated.
+
+#### 10. Tests to add (final)
+
+* path policy: accept `/config/*.yaml` and `/config/packages/**`; refuse
+  `.storage`, `*.db*`, `.ssh`, `..`, absolute outside `/config`, symlinks
+  (remote `realpath` differs), directories, non-YAML for write, >256 KiB;
+* `secrets.yaml` read: keys only, values masked, `secrets_masked` true;
+* write: hash mismatch refuses before any SSH call; dry-run returns a diff and
+  queues nothing; a write backs up, writes atomically and checks; a failed
+  check restores the backup and reports `rolled_back`;
+* restore: a bad backup name/path refuses; a successful restore checks; a
+  failed post-restore check puts the previous content back;
+* pin: no pin → reads allowed, writes refused; first connect pins and shows
+  the fingerprint; a changed key refuses and audits; re-pin is audited;
+* freeze: writes and restores refuse, reads still work, nothing queued;
+* runner reuse: the argv has `-F /dev/null`, the pin file, `BatchMode`,
+  `IdentitiesOnly`, the configured port/user; the key temp file is removed
+  even on a timeout (stub `run_ssh`);
+* F10 coupling: a passing `ha_config_check` makes `ha_core_restart` queueable
+  within 10 minutes; a failed one does not;
+* approval card: the preflight summary and diff are on the pending call.
+
+#### Open questions
+
+1. **Who creates the key**: the dashboard (generate + show the public line,
+   like F12 `/api/ssh-key`) or the operator (paste an existing private key)?
+   The note assumes the dashboard generates; pasting stays possible for
+   operators who manage keys elsewhere.
+2. **TOFU vs an explicit pin at setup**: the note pins on the first *read* and
+   requires a pin before any write. The alternative — the operator pastes the
+   add-on's host key during setup — is stricter and removes the TOFU window;
+   which does the security reviewer prefer?
+3. **User**: the add-on's usual user is `root`, which is what `/config` writes
+   and `ha core check` need. A dedicated non-root user would need sudoers
+   inside the add-on; the note assumes `root` and documents it. Confirm that
+   is acceptable given protection mode is on and the port is LAN-only.
+4. **Backup retention**: "keep the last 10 per file" needs a delete path
+   (there is no `rm` tool in the table). Either a maintenance task prunes them
+   or `ha_config_write` prunes after a successful write; the note prefers the
+   latter (a fixed `find … -name '*.eshu-*.bak'` template, no agent input)
+   and asks the reviewer to confirm that a delete template is in scope.
+
+`bash scripts/verify.sh`: `2331 passed, 7 warnings in 428.95s (0:07:08)` (docs-only).
+
+
 
 ### Reviewer notes
 
@@ -12847,8 +13129,8 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 9 | F13 | session-conclusions | dashboard + MCP | Merged | `feat/f13-session-conclusions` | F5, F6 | |
 | 10 | F8 | test-traffic | dashboard | Merged | `feat/f8-test-traffic` | — | low priority |
 | 11 | F9 | ha-supervisor-read | dashboard | Merged | `feat/f9-ha-supervisor-read` | — | token is now a dedicated `eshu` HA admin user |
-| 12 | F10 | ha-supervisor-actions | dashboard | Merged (security sign-off `f9e2c22`) | `feat/f10-ha-supervisor-actions` | F9, F3, Chunk H | security re-reads the P1–P3 diff only |
-| 13 | F11 | ha-config-files | dashboard | Security round 7 (`9e75cad`): Z3/Z5 approved; **AH1–AH4 must** (descriptor-based reads, wider redaction, modes, refuse `!include secrets.yaml`), then security re-reads the changes | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | then code |
+| 12 | F10 | ha-supervisor-actions | dashboard | Ready (after F9) | `feat/f10-ha-supervisor-actions` | F9, F3, Chunk H | reviewer pass + security reviewer sign-off |
+| 13 | F11 | ha-config-files | dashboard | **Design note written** — awaiting review | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | design approval + security reviewer sign-off |
 | 14 | F14 | inventory | dashboard + MCP | Merged | `feat/f14-inventory` | Chunk H | |
 | 15 | F19 | unattended-limits | gateway + dashboard | **Merged** 2026-11-11 (security sign-off `67bec51`; AF1/AF2 checked) | `feat/f19-unattended-limits` | F4, F5, F12 | AF3 goes on the next gateway branch |
 | 16 | F15 | probes | dashboard + MCP | **Merged** 2026-11-11 (AG1 security decision `eca8982`; AI1 fix merged) | `feat/f15-probes` | F4, F12, F14 | |
