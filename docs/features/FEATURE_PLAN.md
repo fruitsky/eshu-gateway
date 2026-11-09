@@ -4813,6 +4813,51 @@ else; freeze queueing nothing. `tests/test_ha_mcp.py` and
 3. The reboot warning is a red meta line driven by the tool name + summary.
    A dedicated "destructive" card style belongs to the UI pass.
 
+### Round 2 — fixes for reviewer round 1 (M1–M2, S1)
+
+**Commit: `5ceb569`** on `feat/f10-ha-supervisor-actions`.
+
+* **M1 — the generic HA REST tools reached the Supervisor.**
+  `core/ha_supervisor.is_supervisor_rest_path` decodes the path, lowercases it,
+  collapses `//`, strips a leading `/` and an `api/` prefix, and matches
+  `hassio` and `services/hassio` (exact or as a prefix). `core/tool_runner`
+  refuses a HA-kind HTTP call **before gating**, so no approval card is ever
+  created and no upstream request is made; the audit row is
+  `rest_supervisor_refused` with `reason_code='supervisor_rest_refused'`.
+  `execute_integration_call` (rendered curated path) and
+  `execute_generic_call` (the generic path, and the `verify_path` GET) re-check
+  it, so an already-approved pending call is refused too (the F9 R2 shape).
+  Tests, in `TestSupervisorRestGuard`: every spelling (`/api/hassio/…`,
+  `api//HASSIO//…`, `/api/%68assio/…`, `/api/services/hassio/…` and the
+  services spelling with a percent-encoded `h`) is refused by both the generic
+  read and the generic write, with `mock_upstream['requests'] == []` and no
+  pending call; an approved pending call is refused and runs nothing; every
+  FORBIDDEN prefix has a REST spelling; no curated HA template names a
+  Supervisor path; and the refusal is audited.
+  **Checked against HA Core (`components/hassio/http.py`, `dev`,
+  2026-11-09):** `HassIOView` is registered at `/api/hassio/{path:.+}` and
+  both `get` and `post` proxy to the Supervisor. It is admin-only except for
+  the add-on logo/icon paths, and `backups/…`, `addons/<slug>/logs/…` and the
+  log tails have **no timeout** (`NO_TIMEOUT`), so a generic call could also
+  park a request for ever. `/api/services/hassio/<service>` is the ordinary
+  Core service API for the `hassio` domain. The view rejects a path that is
+  not equal to its `unquote`, so HA itself decodes once; the guard refuses
+  rather than normalising-and-sending.
+* **M2 — MCP plan items were not bound to the caller.**
+  `claim_mcp_plan_item` takes the calling agent and joins `sessions` in the
+  same statement as the claim (`s.agent != '' AND s.agent = ?`), so a
+  concurrent ownership change cannot slip between the check and the use, and
+  an ownerless session (or no authenticated agent) matches nothing — F3 SR2's
+  fail-closed rule. `tool_runner` passes the authenticated agent name, not the
+  `mcp` display label. Tests: `test_another_agents_session_is_not_claimable`
+  (B's call is queued for the operator, A's item keeps its use and runs
+  exactly once) and `test_an_ownerless_session_is_not_claimable`.
+* **S1 — `ha_host_reboot` was plan-coverable.**
+  `_validate_mcp_item` refuses an `mcp` item naming `ha_host_reboot` when the
+  plan is proposed (`PlanError('not_plan_coverable')`), so every reboot has its
+  own approval card. Test: `test_host_reboot_is_not_plan_coverable`.
+
+`bash scripts/verify.sh`: `2393 passed, 7 warnings in 458.83s (0:07:38)`.
 
 ### Reviewer notes
 
