@@ -2482,6 +2482,32 @@ and Q3 are implemented, send them back here. The feature reviewer checks
 R1–R5 and S1–S4. Q2 is optional, and if it is done, the security chat
 looks at it together with SC9.
 
+**Round 7 (2026-11-09, main feature reviewer): feature side approved; SC9,
+Q1 and Q3 go to the security reviewer.** I re-ran every probe set from
+rounds 1–6 plus a Round 7 set, about 150 synthetic commands.
+
+* **Still eligible:** only status reads (`uptime`, `df`, `free`, `ip a`,
+  `ss`, `ps`, `systemctl status <unit>`/`list-units`, `journalctl -n`,
+  `docker ps`/`stats --no-stream`, `zpool status`, `lsblk`, `uname`), log
+  reads with caps (`tail -n 50 /var/log/syslog`), `ls`/`du`/`stat` of safe
+  paths, and chains of these (`uptime && df -h`).
+* **Refused:**
+  * shell-expansion characters in any word (glob or brace grep patterns,
+    `$` in paths);
+  * bare and prefix assignments;
+  * `&` background steps;
+  * `sudo` with options;
+  * `wtmp` (and its rotations) and the journal folder;
+  * `grep -a`, every recursive grep spelling, `/./` paths, `grep -C`
+    beyond the cap, `head -z`;
+  * command substitution in a chained step.
+
+The F8 merge also made the read-lane report skip excluded rows, which is
+correct. **Still owed before merge:** the security reviewer's look at SC9,
+Q1 and Q3 (commits `51f2e40` and `0ed276c`). **Still owed before `on` can be
+unlocked:** security Chunk 7 (stop logging signatures), Chunk 6 (bind the
+signature to the command) and F19 (gateway time and output limits).
+
 ---
 
 ## Chunk F5 — Execution results (exit code + output tail) · slug `exec-results` · gateway + dashboard
@@ -5045,7 +5071,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 2 | F2 | review-card | UI | **Merged** 2026-11-08 | `feat/f2-review-card` @ `286df1b` | F1 | 2 rounds |
 | 3 | F7 | inner-target | dashboard | **Merged** 2026-11-08 | `feat/f7-inner-target` @ `0ad167f` | F1 | 1 round; backfill 7.1 s on a live-DB copy |
 | 4 | F3 | session-plans | dashboard + MCP | Merged | `feat/f3-session-plans` | F2 | + security reviewer sign-off |
-| 5 | F4 | read-lane | dashboard | **Changes requested (R1–R4)** — Round 5 reviewed; SC1–SC3 ready for the security reviewer | `feat/f4-read-lane` | F1, F3, Chunk H | reviewer pass + security reviewer sign-off |
+| 5 | F4 | read-lane | dashboard | **Feature review approved (round 7); SC9/Q1/Q3 with the security reviewer** | `feat/f4-read-lane` | F1, F3, Chunk H | reviewer pass + security reviewer sign-off |
 | 5a | X1 | ctx-actions | dashboard | Merged | `fix/x1-ctx-actions` | — | FYI to security reviewer (approve ignored status) |
 | 6 | F5 | exec-results | gateway + dashboard | Merged | `feat/f5-exec-results` | — | |
 | 6a | F18 | request-context | dashboard | Merged | `feat/f18-request-context` | F1, F5, F7, X1 | |
