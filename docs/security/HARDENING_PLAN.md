@@ -1277,8 +1277,8 @@ Scope preview:
   agent obtains a signature per command without a round trip that slows
   every call down.
   * **Precondition for unlocking the F4 read lane's `on` mode** on any
-    gateway (the `read_lane_on_enabled` meta key, set by hand). This item and
-    the Chunk 7 logging item must both be merged and deployed first.
+    gateway (the `read_lane_on_enabled` meta key, set by hand). See the list
+    of four preconditions after Chunk 7.
   * **F12 (`ssh_exec`) depends on this.** Its design must build on the
     command-bound signature, not on today's id-only one.
 
@@ -1318,6 +1318,42 @@ Scope preview:
     gateway. With `on`, the agent can read syslog and the journal with no
     human approving it, and could pick up another session's signature. Ship
     this item ahead of the rest of Chunk 7 if the unlock comes first.
+  * F12's condition G8 (log the command only after every prefix is stripped)
+    delivers this item. It stays open here until whichever ships first is
+    merged and deployed.
+* Added 2026-11-09 (F12 security review): **take the session key off
+  argv.** The gateway's `ESHU_SESSION_SIG` check starts `python3` with
+  `$SESSION_KEY` and `$SESSION_KEY_PREV` as arguments. While the helper runs,
+  the fleet-wide session-signing key is visible to anyone who can run `ps`
+  or read `/proc/<pid>/cmdline`. Use the shape F12 uses: the helper reads
+  the key from its root-only file itself, the data to check arrives on
+  stdin, and only the signature is an argument. Check every other helper
+  and `curl` call in the gateway and poller scripts for secrets on argv.
+  Tests: in a gateway sandbox run, no process's command line contains
+  either key, using a fake `python3` that records its argv.
+  * **Precondition for unlocking the F4 read lane's `on` mode** on any
+    gateway. F4 auto-runs `ps aux` with no human approving it, so a timed
+    read could catch the key. Ship this item ahead of the rest of Chunk 7 if
+    the unlock comes first.
+
+### Preconditions for unlocking F4's `on` mode (agreed 2026-11-09)
+
+The read lane runs in shadow only. `on` is hard-locked behind the
+`read_lane_on_enabled` meta key, which an operator sets by hand. Leave it
+unset on every gateway until all four of these items are merged **and
+deployed** to the dashboard and the whole fleet:
+
+1. **Chunk 7: prefix-stripped logging.** No session signature in syslog or
+   the journal (F12's G8 may deliver it).
+2. **Chunk 7: session key off argv.** The key is never on a process's
+   command line.
+3. **Chunk 6: the signature bound to the command.** A seen signature cannot
+   be reused with another command.
+4. **F19: gateway time and output limits.** The gateway itself bounds every
+   auto-run command, so the parser's caps are no longer the only limit.
+
+Unlocking `on` after that is still the operator's own decision, made one
+gateway at a time.
 
 ## 8. Rollout gate (no deploy before this)
 
@@ -1371,7 +1407,7 @@ dashboard LXC or gateways. The reviewer runs it; the implementer does not deploy
 | R | review-fixups | Medium | **Merged** | `sec/chunk-R-review-fixups` @ `0a8e400` | Approved; reviewer re-ran full suite (1343 passed), pre-commit, installer sync, and the tier probe (former false positives run normally; broad matches → JIT; Eshu paths FATAL) |
 | H | read-tools | High | **Merged** | `sec/chunk-H-read-tools` @ `d31c763` | Approved; full suite 1352 passed + 1 known flake (`test_audit_log_ordering`, passes 8/8 in isolation, untouched by H → Chunk 7); reviewer DELETE/POST/PUT/PATCH repro refused with no upstream request; WS classifier probe 29/29 |
 | 6 | supply-chain | High | Design pending | — | Includes binding the session signature to the command: a precondition for F4 `on` and a dependency of F12 |
-| 7 | low | Low | Draft | — | Includes not logging the session signature: a precondition for F4 `on` (may ship early) |
+| 7 | low | Low | Draft | — | Includes not logging the session signature and taking the session key off argv: both are preconditions for F4 `on` (may ship early) |
 
 Chunks are done **in order**; each new chunk branches from the updated
 `security-hardening` after the previous one is merged.
