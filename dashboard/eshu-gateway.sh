@@ -148,6 +148,7 @@ run_sanitized() {
       mode="exit-only"
     else
       ESHU_OUT_TAIL=$(mktemp -p "$ESHU_RUN_DIR" eshu-out.XXXXXX) || {
+        logger -t eshu-gateway "CAPTURE DISABLED: mktemp failed in $ESHU_RUN_DIR"
         mode="exit-only"; ESHU_OUT_TAIL=""; }
       if [ -n "$ESHU_OUT_TAIL" ]; then
         ESHU_OUT_FIFO=$(mktemp -u -p "$ESHU_RUN_DIR" eshu-fifo.XXXXXX)
@@ -168,6 +169,7 @@ run_sanitized() {
             < "$ESHU_OUT_FIFO" >/dev/null 2>&1 &
           ESHU_TAIL_PID=$!
         else
+          logger -t eshu-gateway "CAPTURE DISABLED: mkfifo failed in $ESHU_RUN_DIR"
           ESHU_OUT_FIFO=""
           mode="exit-only"
         fi

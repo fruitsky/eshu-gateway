@@ -80,7 +80,7 @@ class TestGateway:
         assert body['path'] == 'allowlist'
         assert body['exit_code'] == 0
         assert isinstance(body['duration_ms'], int) and body['duration_ms'] >= 0
-        assert unb64(body['encoded_output']).strip() == 'hello'
+        assert unb64(body['encoded_output']).strip() == 'hello', gw.logger_text()
         assert body['output_truncated'] is False
         assert 'request_id' not in body
 
@@ -166,7 +166,7 @@ class TestGateway:
         _wait_result(gw)
         output = unb64(_result_body(gw)['encoded_output'])
         assert 'SECRETVALUE123' not in output
-        assert '[redacted]' in output.lower()
+        assert '[redacted]' in output.lower(), (output, gw.logger_text())
 
     def test_f5_gateway_temp_files_removed(self, gw):
         gw.exact('echo hello')
