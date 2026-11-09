@@ -2789,6 +2789,49 @@ tests pass locally, and the X1 sidebar actions survived the merge.
 
 `bash scripts/verify.sh`: `1909 passed, 3 skipped, 7 warnings in 383.81s (0:06:23)`. The three skips are F18's read-lane tests: F4 is not on this branch.
 
+### Round 2: fixes for reviewer round 1
+
+* **R1 — a row created already decided starts decided.** `create_request` now
+  stamps `decided_at = created_at` for every non-`pending` status (allowlist,
+  host/session override, plan, read lane, window, fleet), and `pending` keeps
+  NULL. The expiry sweep's `COALESCE` therefore never rewrites a creation
+  decision, so an unclaimed override swept to `abandoned` adds **0** to
+  `waited_seconds` and 1 to `decided`. Tests:
+  `test_f6_a_decided_row_starts_at_its_creation` (six status/reason pairs),
+  `test_f6_a_pending_row_has_no_decision`,
+  `test_f6_an_unclaimed_override_waits_zero` (override,
+  `session-override:` and `session-plan:` swept to abandoned) and
+  `test_f6_an_auto_approved_log_row_waits_zero` (an `/api/log`
+  `auto-approved` row through the gateway endpoint).
+* **R2 — writes mean what changed.** `session_detail_endpoint` now skips a row
+  whose `bucket_for(status, reason)` is `None`, so denied, blocked and expired
+  commands are not counted as writes; the card uses the same mapping as the
+  approval chips. `test_f6_writes_count_only_decided_rows`: one approved, one
+  denied, one blocked and one expired write give `writes == 1` on the approved
+  row's host.
+* **R3 — the generated reason test can fail now.**
+  `core/approval_buckets.KNOWN_REASON_PREFIXES` maps each prefix to its bucket
+  or to `None` ("not an approval": `encoded-payload`, `exhausted or
+  disabled"), and `bucket_for` goes through `known_reason()` instead of
+  hard-coded `startswith` checks. The scan is now a function over a list
+  (`_unmapped_prefixes`), the test asserts the scanned code prefixes are all
+  keys, and `test_f6_the_reason_check_can_fail` proves a synthetic
+  `brand-new-prefix` fails while known ones pass.
+  `test_f6_the_table_agrees_with_bucket_for` keeps the table and
+  `bucket_for` in step.
+* **S1 — the goal is on the card.** The facts line now starts with
+  `goal "…"` (escaped), so a named session no longer hides what it was for;
+  the node harness carries a goal and asserts it renders.
+* **S2 — known mismatch, not changed.** The approval series groups by SQLite
+  `DATE(created_at, 'unixepoch')` (UTC) while `filled` uses
+  `time.localtime`, exactly like the existing daily chart. On a non-UTC
+  dashboard the newest day's approvals can land in no bar; fixing it means
+  changing both charts' day boundary, so it is written down here rather than
+  half-fixed. **S3** (per-open `cmd_breakdown`) is likewise left as a known
+  cost; the modal is opened by a human, not in a loop.
+
+`bash scripts/verify.sh`: `1921 passed, 3 skipped, 7 warnings in 383.60s (0:06:23)`.
+
 ### Reviewer notes
 
 **Round 1 (2026-11-08): changes requested.** Reviewed at `6b35d99`;
