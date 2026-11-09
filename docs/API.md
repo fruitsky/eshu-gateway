@@ -195,6 +195,19 @@ endpoint. Agents authenticate to the MCP surface with a bearer **agent token**.
 | `GET` | `/api/agents` | List agent tokens (no raw token) | Session |
 | `DELETE` | `/api/agents/{id}` | Revoke + delete an agent token | Session |
 
+### Inventory (F14, dashboard authentication required)
+
+| Method | Path | Purpose | Auth |
+|--------|------|---------|------|
+| `GET` | `/api/inventory` | The cached map: `{items, sources, interval_minutes, refreshed_at}`. `?q=` filters by name, IP, FQDN, vmid or MAC (25 rows) | Session |
+| `POST` | `/api/inventory/refresh` | Refresh every configured source now (read-only source calls) | Session |
+| `POST` | `/api/inventory/settings` | Set the background refresh interval (`{"interval_minutes": 5..120}`, clamped; default 15) | Session |
+
+The MCP tool `whereis(query)` answers the same question for an agent: up to 5
+entities, each under 600 characters, with the contributing sources and a
+`stale` flag. It is always available (like `session_begin`) because it reads
+Eshu's own cached inventory and never calls an upstream API on the request.
+
 ### Integrations & tools (dashboard authentication required)
 
 | Method | Path | Purpose | Auth |

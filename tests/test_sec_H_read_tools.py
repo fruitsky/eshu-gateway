@@ -237,6 +237,10 @@ class TestH4CatalogInvariant:
         # POSTed, but the calls only read (no body beyond the pagination/query).
         ('omada', 'list_site_clients'),
         ('omada', 'list_known_clients'),
+        # F9: HA's config check is a POST that only validates (it returns
+        # valid/invalid and changes nothing), so the Supervisor-era tool runs
+        # without approval rather than queueing an operator for a dry read.
+        ('ha', 'ha_check_config'),
     }
 
     def test_sec_H_catalog_read_only_tools_are_reads(self):

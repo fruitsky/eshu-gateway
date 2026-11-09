@@ -83,6 +83,16 @@ class WindowRequestPayload(BaseModel):
     label: str = ""
     window_start: int = 0
 
+class ExcludeRequestsPayload(BaseModel):
+    """F8: exclude by explicit ids and/or a whole session."""
+    ids: list[int] = []
+    session_id: str = ""
+
+
+class InventorySettingsPayload(BaseModel):
+    """F14: how often the inventory refreshes (clamped to 5-120 minutes)."""
+    interval_minutes: int = 15
+
 class NotifyConfigPayload(BaseModel):
     url: str
     events: str

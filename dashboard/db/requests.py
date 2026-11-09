@@ -51,6 +51,14 @@ def init_requests_tables(cursor):
                    "ON requests(command_sha)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_requests_shape_sha "
                    "ON requests(shape_sha)")
+    # F8: test traffic is kept (the audit trail and History still show it) but
+    # left out of statistics, learning gaps and anomaly profiles. 0 for every
+    # existing row: nothing is excluded until the operator says so.
+    if 'excluded' not in existing:
+        try:
+            cursor.execute("ALTER TABLE requests ADD COLUMN excluded INTEGER DEFAULT 0")
+        except Exception:
+            pass
 
 def create_request(target_ip: str, command: str, status: str = 'pending', ttl: int = 90, reason: str = '', session_id: str = '', execution_id: str = '', inner_target: str = ''):
     # F18: compute both fingerprints for every new row (no extra call site).
@@ -75,6 +83,34 @@ def create_request(target_ip: str, command: str, status: str = 'pending', ttl: i
         ''', (target_ip, command, status, created_at, expires_at, reason, session_id, execution_id, inner_target or '', cmd_sha, shape_sha, decided_at))
         conn.commit()
         return cursor.lastrowid
+
+def mark_requests_excluded(ids=None, session_id: str = '') -> int:
+    """F8: flag rows as test traffic. Idempotent; returns newly flagged rows.
+
+    The rows stay in History (and the audit trail) — only the aggregate views
+    stop counting them.
+    """
+    ids = [int(i) for i in (ids or []) if str(i).strip().isdigit()]
+    sid = (session_id or '')[:64]
+    if not ids and not sid:
+        return 0
+    count = 0
+    with db_conn() as conn:
+        cursor = conn.cursor()
+        if ids:
+            placeholders = ','.join('?' * len(ids))
+            cursor.execute(
+                f"UPDATE requests SET excluded = 1 WHERE id IN ({placeholders}) "
+                "AND COALESCE(excluded, 0) = 0", ids)
+            count += cursor.rowcount
+        if sid:
+            cursor.execute(
+                "UPDATE requests SET excluded = 1 WHERE session_id = ? "
+                "AND COALESCE(excluded, 0) = 0", (sid,))
+            count += cursor.rowcount
+        conn.commit()
+    return count
+
 
 def update_request_status(req_id: int, status: str):
     with db_conn() as conn:

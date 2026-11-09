@@ -687,6 +687,7 @@ async function switchView(target) {
   if (target === 'controls') { fetchFreezeStatus(); fetchGateways(); fetchPolicies(); fetchPolicyChanges(); initWebFetchPolicyPanel(); }
   if (target === 'fleet') { fetchFleetCommands(); }
   if (target === 'integrations') { fetchIntegrations(); }
+  if (target === 'inventory') { fetchInventory(); }
   if (target === 'settings') {
     refreshPasswordUI();
     fetchNotifyConfig();
@@ -2882,6 +2883,85 @@ function renderSessionSummary(el, sum) {
   el.classList.toggle('hidden', !html);
 }
 
+/* ── F8: test-traffic hygiene ────────────────────────────────────────────
+   Excluding a row is a one-way, audited flag: it never deletes anything and
+   only the aggregate views stop counting. No rule excludes anything on its
+   own; the session hint is a suggestion, and the operator presses the button. */
+var TEST_GOAL_RE = /\b(smoke|tests?)\b/i;
+
+function looksLikeTestGoal(goal) {
+  return TEST_GOAL_RE.test(String(goal || ''));
+}
+
+function excludedMarkHtml(req) {
+  if (req && req.excluded) {
+    return '<span class="excluded-chip" title="Excluded from statistics, learning gaps and anomaly profiles">excluded</span>';
+  }
+  return '<button type="button" class="bd-hist-link" ' +
+    'title="Exclude this request from statistics and learning" ' +
+    'onclick="event.stopPropagation();excludeRequest(' + Number(req.id) + ')">exclude</button>';
+}
+
+async function excludeRequests(payload, label) {
+  var ok = await customConfirm(
+    'Exclude ' + label + ' from statistics, learning gaps and anomaly profiles? ' +
+    'The rows stay in History, marked excluded.' +
+    (payload && payload.session_id
+      ? ' Rows the session adds later are not excluded.' : ''),
+    { title: 'Exclude test traffic?', confirmLabel: 'Exclude', danger: false });
+  if (!ok) return false;
+  try {
+    var res = await authFetch('/api/requests/exclude', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload) });
+    var data = await res.json();
+    if (!res.ok) { showToast(data.detail || 'Could not exclude', 'error'); return false; }
+    showToast('Excluded ' + data.excluded + ' request' + (data.excluded === 1 ? '' : 's'), 'success');
+    fetchRequests();
+    var stats = document.getElementById('view-statistics');
+    if (stats && !stats.classList.contains('hidden')) fetchStatistics();
+    return true;
+  } catch (e) {
+    showToast('Could not exclude', 'error');
+    return false;
+  }
+}
+
+function excludeRequest(id) {
+  return excludeRequests({ ids: [Number(id)] }, 'this request');
+}
+
+function excludeActiveSession() {
+  if (!_activeSessionSid) return Promise.resolve(false);
+  var sid = _activeSessionSid;
+  return excludeRequests({ session_id: sid }, 'this session').then(function (ok) {
+    if (!ok) return false;
+    var el = document.getElementById('sm-test-hint');
+    if (el) el.innerHTML = '<span>This session is excluded from statistics and learning.</span>';
+    return true;
+  });
+}
+
+function renderSessionTestHint(goal, sessionSummary) {
+  var el = document.getElementById('sm-test-hint');
+  if (!el) return;
+  if (sessionSummary && sessionSummary.all_excluded) {
+    // S3: already done — do not offer the button again.
+    el.classList.remove('hidden');
+    el.innerHTML = '<span>This session is excluded from statistics and learning.</span>';
+    return;
+  }
+  if (!looksLikeTestGoal(goal)) {
+    el.innerHTML = '';
+    el.classList.add('hidden');
+    return;
+  }
+  el.classList.remove('hidden');
+  el.innerHTML = '<span>This looks like test traffic (goal: &ldquo;' +
+    escapeHtml(goal) + '&rdquo;).</span> ' +
+    '<button class="btn btn-muted btn-xs" onclick="excludeActiveSession()">Exclude from stats</button>';
+}
+
 async function openSessionModal(sid) {
   var modal = document.getElementById('session-modal');
   var nameEl = document.getElementById('sm-name');
@@ -2951,6 +3031,7 @@ async function openSessionModal(sid) {
   if (auto) bits.push('<span class="sm-muted">' + auto + ' auto</span>');
   metaEl.innerHTML = bits.join(' \u00b7 ');
   renderSessionSummary(document.getElementById('sm-summary'), detail.summary || {});
+  renderSessionTestHint(summary.goal || '', detail.summary || {});
 
   // Unified, chronological timeline.
   var items = [];
@@ -4071,7 +4152,7 @@ function renderTable() {
           'Override session</button>';
       }
     } else if (req.status === 'frozen') {
-      actions = '<span class="chip chip-actions chip-frozen" title="Blocked by Emergency Freeze — the fleet is rejecting all commands until unfrozen.">' +
+      actions = '<span class="chip chip-actions chip-frozen" title="Blocked by Emergency Freeze — the fleet is rejecting all SSH commands until unfrozen.">' +
         'Frozen</span>';
     } else if (req.status === 'fleet-run') {
       actions = '<span class="chip chip-actions chip-fleet-run" title="Executed via Fleet Run — see the Fleet Run tab for per-gateway output.">' +
@@ -4104,7 +4185,7 @@ function renderTable() {
       '</select>';
     }
     const gap = gapMap.get(req.id);
-    const rowClass = gap ? 'gap-row' : '';
+    const rowClass = (gap ? 'gap-row ' : '') + (req.excluded ? 'excluded-row' : '');
     const idClass = gap ? 'cell-id-warn' : 'cell-id';
     const gapTitle = gap ? ' title="' + escapeHtml(formatGapTooltip(gap)) + '"' : '';
     const idDisplay = gap ? ' #' + esc(String(Number(req.id)).padStart(6, '0')) : '#' + esc(String(Number(req.id)).padStart(6, '0'));
@@ -4133,7 +4214,7 @@ function renderTable() {
       '<td class="' + idClass + '"' + gapTitle + '>' + idDisplay + '</td>' +
       '<td class="text-muted text-xs">' + formatTime(req.created_at) + '</td>' +
       '<td>' + gatewayCell + '</td>' +
-      '<td class="cell-cmd"><div class="flex items-center gap-1">' + riskHtml + anomalyHtml + '<code class="cmd-code" title="' + escapedCmd + '">' + escapedCmd + '</code><button class="js-copy-cmd flex-shrink-0 text-xs opacity-30 hover:opacity-80 px-1 py-0.5 rounded transition-opacity text-muted" data-cmd="' + encodeURIComponent(req.command) + '" title="Copy"></button>' + decodedChip + innerChip + execBadgeHtml(req) + execOutputLink(req) + breakdownLink + '</div>' +
+      '<td class="cell-cmd"><div class="flex items-center gap-1">' + riskHtml + anomalyHtml + '<code class="cmd-code" title="' + escapedCmd + '">' + escapedCmd + '</code><button class="js-copy-cmd flex-shrink-0 text-xs opacity-30 hover:opacity-80 px-1 py-0.5 rounded transition-opacity text-muted" data-cmd="' + encodeURIComponent(req.command) + '" title="Copy"></button>' + decodedChip + innerChip + execBadgeHtml(req) + execOutputLink(req) + breakdownLink + excludedMarkHtml(req) + '</div>' +
         (function() {
           var _desc = describeCmd(req.command);
           if (!_desc) return '';
@@ -5205,7 +5286,7 @@ function renderFreezeStatus(data) {
   var pillText = document.getElementById('freeze-pill-text');
   if (banner) banner.classList.toggle('hidden', !frozen);
   if (label) {
-    if (frozen) { label.textContent = 'FROZEN — all commands rejected'; label.style.background = 'var(--state-denied)'; label.style.color = 'white'; }
+    if (frozen) { label.textContent = 'FROZEN — SSH and integration writes rejected'; label.style.background = 'var(--state-denied)'; label.style.color = 'white'; }
     else { label.textContent = 'Active — running normally'; label.style.background = 'var(--state-approved)'; label.style.color = 'var(--bg-base)'; }
   }
   if (freezeBtn) freezeBtn.classList.toggle('hidden', frozen);
@@ -5243,7 +5324,7 @@ async function triggerFreeze() {
     var res = await authFetch('/api/freeze', { method: 'POST' });
     var data = await res.json();
     if (data.status === 'ok') {
-      showToast('Fleet FROZEN — all commands rejected within 30s', 'success');
+      showToast('Fleet FROZEN — SSH and integration writes rejected within 30s', 'success');
       fetchFreezeStatus();
     } else { showToast('Failed: ' + (data.detail || 'unknown'), 'error'); }
   } catch(e) { showToast('Error: ' + e.message, 'error'); }
@@ -7410,6 +7491,119 @@ function renderStatistics() {
   renderStatsInnerTargets(d);
   renderStatsCats(d);
   renderStatsDenied(d);
+}
+
+/* ── F14: the inventory ──────────────────────────────────────────────────
+   One search box over the cached map: a service, host, container, IP, FQDN,
+   vmid or MAC. Every source chip carries its own staleness, and an IP that
+   two sources name differently is shown as a conflict rather than resolved
+   silently. All agent/upstream text is escaped. */
+var _invTimer = null;
+
+function debouncedInventorySearch() {
+  clearTimeout(_invTimer);
+  _invTimer = setTimeout(function () {
+    var box = document.getElementById('inv-search');
+    fetchInventory(box ? box.value : '');
+  }, 250);
+}
+
+async function fetchInventory(q) {
+  try {
+    var url = '/api/inventory' + (q ? '?q=' + encodeURIComponent(q) : '');
+    var res = await authFetch(url);
+    if (!res.ok) return;
+    renderInventory(await res.json());
+  } catch (e) {}
+}
+
+function invSourceChips(sources) {
+  return (sources || []).map(function (s) {
+    var label = s.label || s.source || '';
+    return '<span class="inv-source' + (s.stale ? ' stale' : '') + '" title="' +
+      escapeHtml((s.stale ? 'stale — ' : '') + 'from ' + (s.source || label)) + '">' +
+      escapeHtml(label) + (s.stale ? ' \u00b7 stale' : '') + '</span>';
+  }).join('');
+}
+
+function invEntityHtml(entity) {
+  var facts = [];
+  var add = function (key, values) {
+    if (!values || !values.length) return;
+    facts.push('<span class="inv-k">' + key + '</span> ' +
+      values.map(function (v) { return escapeHtml(String(v)); }).join(', '));
+  };
+  add('ip', entity.ips);
+  add('name', entity.fqdns);
+  add('host', entity.hosts);
+  add('guest', entity.vmids);
+  add('url', entity.urls);
+  if (entity.extra && entity.extra.mac) add('mac', [entity.extra.mac]);
+  var conflicts = (entity.conflicts || []).map(function (c) {
+    return '<div class="inv-conflict">' + escapeHtml(String(c.ip || '')) +
+      ' is claimed by ' + (c.names || []).map(function (n) {
+        return escapeHtml(String(n));
+      }).join(' / ') + '</div>';
+  }).join('');
+  return '<div class="inv-entity' + (entity.stale ? ' stale' : '') + '" data-od-id="inventory-entity">' +
+    '<div class="inv-head"><span class="inv-name">' + escapeHtml(entity.name || 'unnamed') + '</span>' +
+    '<span class="inv-chips">' + invSourceChips(entity.sources) + '</span></div>' +
+    (facts.length ? '<div class="inv-facts">' + facts.join(' \u00b7 ') + '</div>' : '') +
+    conflicts + '</div>';
+}
+
+function renderInventory(data) {
+  data = data || {};
+  var results = document.getElementById('inv-results');
+  var sourcesEl = document.getElementById('inv-sources');
+  var refreshed = document.getElementById('inv-refreshed');
+  var box = document.getElementById('inv-interval');
+  if (box && !box.dataset.dirty && data.interval_minutes) box.value = data.interval_minutes;
+  if (refreshed) {
+    refreshed.textContent = data.refreshed_at
+      ? ('refreshed ' + formatTime(data.refreshed_at)) : 'never refreshed';
+  }
+  if (sourcesEl) {
+    sourcesEl.innerHTML = Object.keys(data.sources || {}).sort().map(function (source) {
+      var s = data.sources[source] || {};
+      return '<span class="inv-source' + (s.stale ? ' stale' : '') + '" title="' +
+        escapeHtml(s.error || '') + '">' + escapeHtml(s.label || source) +
+        ' <b>' + (Number(s.items) || 0) + '</b>' + (s.stale ? ' \u00b7 stale' : '') + '</span>';
+    }).join('');
+  }
+  if (!results) return;
+  var items = data.items || [];
+  results.innerHTML = items.length
+    ? items.map(invEntityHtml).join('')
+    : '<p class="text-muted">Nothing matches yet. Configure an integration and press \u201cRefresh now\u201d.</p>';
+}
+
+async function refreshInventoryNow() {
+  var btn = document.getElementById('inv-refresh-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Refreshing\u2026'; }
+  try {
+    var res = await authFetch('/api/inventory/refresh', { method: 'POST' });
+    var data = await res.json();
+    showToast('Inventory refreshed (' + (Number(data.sources) || 0) + ' source(s), ' +
+      (Number(data.duration_ms) || 0) + ' ms)', 'success');
+    var box = document.getElementById('inv-search');
+    fetchInventory(box ? box.value : '');
+  } catch (e) { showToast('Could not refresh the inventory', 'error'); }
+  if (btn) { btn.disabled = false; btn.textContent = 'Refresh now'; }
+}
+
+async function saveInventoryInterval() {
+  var box = document.getElementById('inv-interval');
+  var minutes = box ? parseInt(box.value, 10) : 15;
+  try {
+    var res = await authFetch('/api/inventory/settings', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ interval_minutes: minutes }) });
+    var data = await res.json();
+    if (!res.ok) { showToast(data.detail || 'Could not save the interval', 'error'); return; }
+    if (box) { box.value = data.interval_minutes; box.dataset.dirty = ''; }
+    showToast('Inventory refreshes every ' + data.interval_minutes + ' minutes', 'success');
+  } catch (e) { showToast('Could not save the interval', 'error'); }
 }
 
 // ── Gateway Health Checker ────────────────────────────────────────────
