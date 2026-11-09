@@ -4993,6 +4993,13 @@ Three small changes, each with its test; no schema change and no new tool.
 
 `bash scripts/verify.sh`: `2333 passed, 7 warnings in 445.03s (0:07:25)`.
 
+**Follow-ups review (2026-11-09): approved and merged.** S1 fails closed for
+ownerless sessions, tested through the core call and the MCP tool. S2's
+per-term `LIKE`s stay parameterised and capped at 8. S3 uses existing tokens
+(`--text-micro`, `--text-quiet`). A user's `%` or `_` in a search term still
+acts as a `LIKE` wildcard. That is harmless (it only widens a search of
+confirmed runbooks), and it is left as it is.
+
 ---
 
 ## Chunks F14–F17 — Local-model support
