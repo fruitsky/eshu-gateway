@@ -88,6 +88,11 @@ class ExcludeRequestsPayload(BaseModel):
     ids: list[int] = []
     session_id: str = ""
 
+
+class InventorySettingsPayload(BaseModel):
+    """F14: how often the inventory refreshes (clamped to 5-120 minutes)."""
+    interval_minutes: int = 15
+
 class NotifyConfigPayload(BaseModel):
     url: str
     events: str
