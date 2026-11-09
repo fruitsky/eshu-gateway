@@ -667,7 +667,12 @@ class TestRoundSixFixes:
         assert _verdict('grep --perl-regexp -m 5 -e x /var/log/syslog')[0] is False
 
     def test_f4_sc7_chained_read_is_not_lane_eligible_end_to_end(self, gateway):
-        """Q1 stays as today: a `shell_meta` verdict is not a plain `jit`."""
+        """Round-5 behaviour: `shell_meta` is not a plain `jit`.
+
+        The security round 2 answered Q1 ("allow shell_meta"), so the next
+        round flips this test together with SC9; it is kept here because this
+        round was scoped to the feature reviewer's R1-R4.
+        """
         client, headers = gateway
         set_gateway_read_lane('10.0.0.1', 'shadow')
         _jit(client, headers, 'uptime && whoami')

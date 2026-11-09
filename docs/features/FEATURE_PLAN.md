@@ -1792,6 +1792,72 @@ scripts/verify.sh`: `2120 passed, 7 warnings in 390.00s (0:06:29)`.
    ineligible table. If a bare-name exception is wanted, it needs a scope
    (which verbs, which characters) and a line in §2.6a; otherwise no change.
 
+### Round 6: fixes for reviewer round 5
+
+* **R1 — the path is compared with its normalised form.** `_path_ok` refuses
+  any path where `posixpath.normpath(token)` differs from the token (one
+  trailing slash allowed), before any prefix check, so `/sys/kernel//debug`
+  and `/sys/./kernel/debug` cannot get past the SC6 prefix denials. The
+  explicit `..` refusal stays. `test_f4_r1_normalised_paths_cannot_slip_past_a_prefix_denial`
+  covers every `SYS_DENY_PREFIXES`/`LOG_DENY_PREFIXES` entry with both
+  spellings across `cat`, `head`, `tail`, `grep -m`, `ls` and `stat`;
+  `test_f4_r1_a_trailing_slash_still_reads` keeps `/var/log/` legal.
+* **R2 — recursion is out of the lane.** `-r`/`--recursive` are removed from
+  the `grep` spec (and `r` from its cluster letters), so a recursive log grep
+  is refused as an unknown option instead of walking into `/var/log/installer`
+  and the cloud-init logs; `ls -R` and `du` still list names. This also closes
+  the per-file `-m` bound. `test_f4_r2_recursive_grep_is_not_in_the_lane`
+  tries `/var/log`, `/var/log/`, `//var/log` and `/var/log/./` with both
+  spellings.
+* **R3 — context options cannot undo the `-m` cap.** For a `/var/log`
+  operand, `_grep_log_lines` requires `m × (1 + max(A + B, 2C)) ≤ 1000`;
+  `-A`/`-B`/`-C` are still capped at 1000 individually.
+  `test_f4_r3_grep_context_cannot_undo_the_cap` checks at the limit
+  (`-m 500 -A 1`, `-m 300 -C 1`), over it (`-m 500 -A 2`, `-m 1000 -A 1000`)
+  and that context outside `/var/log` is unaffected.
+* **R4 — `head`/`tail` lose `-z`.** `-z`/`--zero-terminated` (and the `z`
+  cluster letter) are gone from both specs, so they cannot turn a text log's
+  line cap into a whole-file dump. `test_f4_r4_head_and_tail_have_no_zero_terminated`
+  covers the short, long and clustered spellings for both verbs.
+* **S2 — `zpool`'s cluster letters match its flags** (`vxHpLPg`), so `-g`
+  works and `-G` is refused; **S4 — `grep -P`/`--perl-regexp` is out** of the
+  lane until F19 adds a time bound. `test_f4_s2_*` and `test_f4_s4_*`.
+* **Q1 — SC7 is unchanged in this round, as the task asked.** The security
+  answer ("yes, allow `shell_meta`", in the Security reviewer sign-off below)
+  landed while this round was being pushed, so the behaviour here is still the
+  round-5 one: `shell_meta` is not a plain `jit`. The end-to-end test is
+  `test_f4_sc7_chained_read_is_not_lane_eligible_end_to_end`: with the lane in
+  shadow, `uptime && whoami` through `POST /api/request` stays pending with no
+  `read-lane-shadow` reason, and with the lane `on` (and the lock unlocked)
+  `uptime || whoami` is not auto-approved. The next round flips it, together
+  with the security round-2 items below.
+* **S1 and S3 are not in this round.** S1 (an operand-class model so status
+  verbs refuse every operand) is a policy-shape change the reviewer marked
+  optional and it needs a spec line for which verbs take paths; S3 (a maximum
+  number of log operands) is bounded by the 8 kB command cap today. Both are
+  written down here so they are not lost.
+
+**Security round 2 landed after this round's push.** It confirms R1-R4 (and R2
+as implemented: `-r` is gone), and adds work that is deliberately **not** in
+this round, because it is a new security condition, not a feature-review R
+item:
+
+* **SC9 (must):** no eligible word may carry a shell expansion (`$`,
+  backtick, `{`, `}`, `*`, `?`, `[`, `]`, a leading `~`, a backslash) - path
+  operands, option values and patterns alike - and a bare assignment
+  statement must be refused. This is the one that must ship before
+  `shell_meta` is allowed, hence the Q1 order: SC9 and Q1 in the same round.
+* **R5 (add, must):** refuse the journal directory and `lastlog`/`wtmp`/
+  `btmp`/`faillog` under `/var/log`, and refuse `grep -a`/`--text`.
+* **Q1:** allow `shell_meta` (and refuse a `&`-backgrounded step); **Q2:** the
+  narrow `systemctl status|is-active|is-enabled` name exception; **Q3:** only
+  a bare `sudo` (F1 must record that the wrapper had no options).
+
+Also confirmed there: unlocking `on` waits for the gateway to stop logging
+session signatures (the F12 note), which is security Chunk 7 work.
+
+`bash scripts/verify.sh`: `2133 passed, 7 warnings in 391.14s (0:06:31)`.
+
 ### Reviewer notes
 
 **Round 1 (2026-11-08): changes requested. Not ready for the security
