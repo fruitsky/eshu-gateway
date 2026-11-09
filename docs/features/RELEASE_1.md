@@ -72,6 +72,25 @@ kept in the reviewer's scratchpad and never committed):
 * **Host:** SQLite 3.45.1 with FTS5 (needed by F13), Python 3.12. No
   requirement or service-file changes.
 
+## Local smoke test (synthetic data, 2026-11-09)
+
+The `feature-roadmap` dashboard was run locally on a fresh DB, with three
+TEST-NET gateways (`192.0.2.10–12`) and synthetic requests sent through
+`/api/request` with gateway tokens:
+
+* Every parameterless `GET /api/*` route returns 200 as the operator, except five
+  that need a token or a query parameter and correctly return 401/422.
+* Gateway request → sidebar context (session, seen, like, waiting reason) →
+  breakdown → decoded → approve → gateway status → ticket (`ts|cmd`) →
+  `exec-result` → stored output: all 200, with the expected bodies.
+* Deny works. Approving an already-denied request is refused with
+  `409 not_pending`.
+* Session detail and the Docker inner-target list work.
+
+**Not covered: a real browser.** Headless Chrome on the reviewer's machine is
+missing system libraries (`libnspr4`), so no click-through or JS-console check
+was run. Step 4 below is that check, done by hand.
+
 ## Steps (each on the operator's go-ahead)
 
 1. **Merge.** `git checkout master && git merge --ff-only feature-roadmap &&
