@@ -1930,6 +1930,37 @@ is the lane's half.)
 
 `bash scripts/verify.sh`: `2236 passed, 7 warnings in 419.39s (0:06:59)`.
 
+### Round 8: security round 3 (SC10, SC11)
+
+The final sign-off approved the lane on two small conditions; both are in, and
+the feature reviewer checks them (no further security pass).
+
+* **SC10 — loops and grouping are refused.** F1 now flags any command that
+  contains a loop (`for`, `select`, `while`, `until`), a conditional (`if`,
+  `case`), a function definition (`function` or `name()`), a brace group or a
+  subshell with `compound`. The check runs on the **parsed atoms** in
+  `_parse_text`, not on the raw text, so a keyword at a command position is
+  caught while a keyword used as an argument (`grep for …`) is not; `{`/`}`
+  and bare `(`/`)` atoms flag grouping, and `$( )`/`<( )` were already folded
+  into word atoms. Every flag blocks the lane, so these commands are
+  ineligible; plain chains (`uptime && df -h`, `uptime; free -h`,
+  `uptime || whoami`) stay eligible. Tests (`TestRoundEight`): each construct,
+  including a `while` whose condition and body are both eligible reads, a
+  backgrounded read inside braces and inside parentheses, the plain chains,
+  and `grep for …` staying clean. The four `loops.txt` fixtures now expect
+  `flags=compound`.
+* **SC11 — dated login-record rotations.** `_binary_log` matches a plain name,
+  a dotted rotation (`wtmp.1`) and now a dated one (`btmp-20260101`, with or
+  without `.gz`) for `lastlog`, `wtmp`, `btmp` and `faillog`, so `head`,
+  `tail` and `grep` refuse all of them. Tests for each of the four names in
+  both forms across the three verbs, plus the ordinary-log and metadata
+  checks already in R5.
+
+Both conditions are in commit **`9f06cb6`** (the F1 atom scan and its
+fixtures, the `_binary_log` change and the tests).
+
+`bash scripts/verify.sh`: `2243 passed, 7 warnings in 419.62s (0:06:59)`.
+
 ### Reviewer notes
 
 **Round 1 (2026-11-08): changes requested. Not ready for the security
