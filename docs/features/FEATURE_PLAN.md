@@ -5800,7 +5800,61 @@ Two choices in that step are deliberate:
 
 ### Reviewer notes
 
-_(reviewer)_
+**Design round 1 (2026-11-09): approved in direction, changes requested.**
+The shape is right: immutable hashed versions, a closed predicate set, typed
+parameters, run approval through an F3 plan, stop-don't-undo, and no host
+parameters. Fold these into a "Round 2" section. Then it goes to the security
+reviewer before any code.
+
+* **R1 (must): a placeholder inside quotes breaks `shlex.quote`.** The claim
+  "a value that slipped past its regex still cannot become shell syntax" only
+  holds when the slot is a bare word. In `echo '{fqdn}'`, the quoted value
+  closes the template's own quote. Rule: a template may contain no `'` or `"`
+  at all, *or* every placeholder must be a whole token. Check it by
+  replacing each placeholder with a sentinel and running `shlex.split`.
+  Also make the code match § 7's sentence: refuse **any** `{` or `}` that is
+  not part of a declared placeholder. The § 2 code only refuses `$`, backtick
+  and newline, so `{X}` or `{ x }` passes silently today. Test both.
+* **R2 (must): an allowlist of recipe tools, not a forbidden list.** With a
+  denylist, every tool a future integration adds is recipe-usable by
+  default. Make it `RECIPE_TOOLS`: the tools a recipe may call, each with its
+  undo partner if it has one. Keep the forbidden list as a second check and
+  a test, so a tool cannot be on both lists. The "walks every recipe-free
+  tool" sentence is unclear; the test should walk the whole tool registry
+  and assert every tool is in exactly one of the two lists.
+* **R3 (must): rollback must not delete what the run did not create.** If
+  `app.example.test` already had a Pi-hole record or an NPM host, step 1 may
+  succeed or fail, and `recipe_rollback` would then delete the operator's
+  pre-existing entry. Add an optional `precheck` per step (the same predicate
+  shapes) that must **fail** before the step runs, for example "the record is
+  absent". Record per step whether it created something. Rollback only undoes
+  steps whose precheck passed and whose action succeeded. Make
+  `add_internal_fqdn` use it.
+* **R4 (must): define `contains`.** For lists, it means element equality.
+  For lists of objects, it needs a `key` (`{"field": "items", "contains":
+  {"key": "domain_names", "value": …}}`). It is never a substring match: a
+  substring test on `hosts` would pass for `myapp.example.test`. Also check
+  the value, not just presence. Step 1's check should assert the record maps
+  `fqdn` → `target_ip`, and step 2's that the proxy host forwards to
+  `target_ip:port`. A stale entry with another IP must fail.
+* **R5 (should):** settle "≤ 1 run approval per session at a time?". Pick
+  one run per session, which F3's one active plan already gives you, and
+  drop the question mark. Also say who may run an approved recipe: any agent
+  with a session, or only agents named on the recipe? I suggest
+  `allowed_agents`, empty meaning operator-started only.
+* **R6 (should):** in steps 3 and 4 the check is the step itself, so the
+  command runs twice. Allow `"check": "self"` (the step's own structured
+  result) and use it there.
+* **R7 (should):** the note says `curl -fsS -o /dev/null https://…` "passes
+  `read_policy`". Check that against `READ_LANE_VERBS` on `feature-roadmap`
+  with a test. If `curl` is not in the read lane, say so; it only matters for
+  the deferred auto-run, not for v1.
+* **R8 (nit):** the tests list mentions "`concat` parts", which the design
+  never defines. Either define it or drop it.
+
+**Security gate:** after Round 2, the security reviewer reviews the design
+(§ 2.6a), especially R1 to R3 and the forbidden/allowed tables. F16 code waits
+for F10 (`mcp` plan items) and F12 (SSH steps) to be merged.
 
 ---
 
@@ -5956,7 +6010,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 13 | F11 | ha-config-files | dashboard | Ready (after F10) — design first | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | design approval + security reviewer sign-off |
 | 14 | F14 | inventory | dashboard + MCP | Merged | `feat/f14-inventory` | Chunk H | |
 | 15 | F15 | probes | dashboard + MCP | Ready after F12 | `feat/f15-probes` | F4, F12 | |
-| 16 | F16 | recipes | dashboard + MCP | **Design note written** — awaiting review | `feat/f16-recipes` | F3, F12, F13 | design approval + security reviewer sign-off |
+| 16 | F16 | recipes | dashboard + MCP | **Design round 1: changes requested** (R1–R8) | `feat/f16-recipes` | F3, F12, F13 | design approval + security reviewer sign-off |
 | 17 | F17 | local-agent | dashboard + docs | Ready after F12–F16 | `feat/f17-local-agent` | F12–F16 | |
 | 18 | F19 | unattended-limits | gateway + dashboard | Design first; before F4 `on` is unlocked | `feat/f19-unattended-limits` | F4, F5 | design approval + security reviewer sign-off |
 Chunks are done **in the order column**; each new chunk branches from the
