@@ -439,7 +439,9 @@ no tool-name conflicts, no cross-talk.
   token in use today is usually your own admin login's.)
 - **Emergency Freeze covers integration writes**: while the fleet is frozen,
   every mutating integration call — and every approval of a pending one — is
-  refused with `frozen`. Reads keep working so you can still investigate.
+  refused with `frozen`. Reads keep working so you can still investigate, and
+  `ha_check_config` (a POST that only validates) is the one write-shaped tool
+  that still runs, because it changes nothing.
 - **Behind a reverse proxy**: ensure it forwards the `Authorization` header, e.g.
   NPM Advanced config `proxy_set_header Authorization $http_authorization;` —
   otherwise HA returns 401 and the **Test** button will surface it.

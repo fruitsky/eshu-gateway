@@ -30,9 +30,12 @@ DASHBOARD = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file_
 
 @pytest.fixture
 def ha(mock_upstream):
+    from core.generic_tools import seed_generic_tools
     create_integration('ha', mock_upstream['base_url'], 'bearer', 'tok', kind='ha')
     integration = get_integration('ha')
     seed_ha_tools(integration['id'])
+    # The generic read/write/ws_read/ws_write tools ship with a real HA seed.
+    seed_generic_tools(integration['id'], 'ha')
     return integration
 
 
@@ -121,6 +124,108 @@ class TestFreezeCoversIntegrations:
         response = auth_client.post(f'/api/integration-calls/{call_id}/approve')
         assert response.status_code == 200
         assert get_pending_call(call_id)['status'] == 'approved'
+
+
+class TestFreezeDryRun:
+    """R1: only a handler dry-run is exempt from the freeze."""
+
+    def test_f9_a_curated_rest_dry_run_is_still_a_write(self, ha, mock_upstream):
+        set_trigger_freeze()
+        try:
+            out = json.loads(run_tool(
+                'ha', 'call_service',
+                {'domain': 'light', 'service': 'turn_on', 'dry_run': True}))
+        finally:
+            clear_trigger_freeze()
+        assert out['error']['code'] == 'frozen'
+        assert mock_upstream['requests'] == []
+        from db.integrations import get_pending_calls
+        assert get_pending_calls() == []
+
+    def test_f9_a_ws_write_dry_run_is_still_a_write(self, ha, monkeypatch):
+        def _no_ws(*args, **kwargs):
+            pytest.fail('opened a WebSocket while frozen')
+
+        monkeypatch.setattr('core.ha_ws.ha_ws_request', _no_ws)
+        set_trigger_freeze()
+        try:
+            out = json.loads(run_tool(
+                'ha', 'ws_write',
+                {'command': 'config/entity_registry/remove',
+                 'payload': {'entity_id': 'sensor.x'}, 'dry_run': True}))
+        finally:
+            clear_trigger_freeze()
+        assert out['error']['code'] == 'frozen'
+        from db.integrations import get_pending_calls
+        assert get_pending_calls() == []
+
+    def test_f9_a_generic_write_dry_run_is_still_a_write(self, ha, mock_upstream):
+        set_trigger_freeze()
+        try:
+            out = json.loads(run_tool(
+                'ha', 'write',
+                {'method': 'POST', 'path': '/config', 'data': {},
+                 'dry_run': True}))
+        finally:
+            clear_trigger_freeze()
+        assert out['error']['code'] == 'frozen'
+        assert mock_upstream['requests'] == []
+        from db.integrations import get_pending_calls
+        assert get_pending_calls() == []
+
+
+class TestSupervisorWsGuard:
+    """R2: the curated table is the only path to the Supervisor."""
+
+    def _no_ws(self, monkeypatch):
+        def _fail(*args, **kwargs):
+            pytest.fail('opened a WebSocket')
+        monkeypatch.setattr('core.ha_ws.ha_ws_request', _fail)
+
+    def test_f9_ws_write_refuses_supervisor_before_connecting(self, ha, monkeypatch):
+        self._no_ws(monkeypatch)
+        out = json.loads(run_tool('ha', 'ws_write', {
+            'command': 'supervisor/api',
+            'payload': {'endpoint': '/host/reboot', 'method': 'post'}}))
+        assert out['error'] == 'supervisor_command_refused'
+        assert out['status_code'] == 403
+        from db.integrations import get_pending_calls
+        assert get_pending_calls() == []
+        assert [e for e in get_audit_log()
+                if e['event_type'] == 'ws_supervisor_refused']
+
+    def test_f9_ws_write_refuses_hassio_before_connecting(self, ha, monkeypatch):
+        self._no_ws(monkeypatch)
+        out = json.loads(run_tool('ha', 'ws_write', {
+            'command': 'hassio/host/reboot', 'payload': {}}))
+        assert out['error'] == 'supervisor_command_refused'
+
+    def test_f9_an_approved_supervisor_ws_call_is_refused(self, ha, monkeypatch,
+                                                          auth_client):
+        self._no_ws(monkeypatch)
+        call_id = create_pending_call(
+            'ha', 'ws_write',
+            {'command': 'supervisor/api',
+             'payload': {'endpoint': '/backups', 'method': 'post'}},
+            'test', agent='operator')
+        response = auth_client.post(f'/api/integration-calls/{call_id}/approve')
+        assert response.status_code == 200
+        stored = json.loads(get_pending_call(call_id)['result'])
+        assert 'Supervisor commands' in stored['error']
+        assert stored['status_code'] == 403
+
+    def test_f9_a_normal_ws_command_still_reaches_the_transport(self, ha, monkeypatch):
+        seen = {}
+
+        def _fake(integration, command, payload):
+            seen['command'] = command
+            return {'ok': True}
+
+        monkeypatch.setattr('core.ha_ws.ha_ws_request', _fake)
+        out = json.loads(run_tool('ha', 'ws_read',
+                                  {'command': 'config/entity_registry/list'}))
+        assert seen.get('command') == 'config/entity_registry/list'
+        assert out == {'ok': True}
 
 
 class TestReadPolicy:
