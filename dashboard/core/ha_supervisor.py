@@ -37,8 +37,38 @@ SUPERVISOR_READS = {
     'ha_resolution': ('/resolution/info', 'get', 'resolution'),
 }
 
-# F10 adds mutating endpoints here (kept separate so this table stays "reads").
-SUPERVISOR_ACTIONS = {}
+# F10: the mutating endpoints, kept separate so SUPERVISOR_READS stays "reads".
+# A tool's entry is (endpoint template, method, shape). `{slug}` and `{action}`
+# are validated before formatting; `WS_ACTIONS` covers the two update endpoints,
+# which Supervisor exposes over the WS command bus rather than supervisor/api.
+SUPERVISOR_ACTIONS = {
+    'ha_addon_action': ('/addons/{slug}/{action}', 'post', 'action'),
+    'ha_addon_update': ('hassio/update/addon', 'ws', 'action'),
+    'ha_core_update': ('hassio/update/core', 'ws', 'action'),
+    'ha_backup_create': ('/backups/new/full', 'post', 'action'),
+    'ha_core_restart': ('/core/restart', 'post', 'action'),
+    'ha_host_reboot': ('/host/reboot', 'post', 'action'),
+}
+
+# The two update endpoints are WebSocket command types, not supervisor/api
+# endpoints. Their payload shape is decided by HA Core's `hassio/update.py`.
+WS_ACTIONS = {
+    'ha_addon_update': 'hassio/update/addon',
+    'ha_core_update': 'hassio/update/core',
+}
+
+ACTION_VALUES = {'ha_addon_action': ('start', 'stop', 'restart')}
+NAME_RE = re.compile(r'^[A-Za-z0-9_. -]{1,64}$')
+FOLDER_VALUES = ('ssl', 'addons', 'config', 'share', 'local', 'media', 'backup')
+
+# F10: endpoints no tool may ever send. The table test asserts that nothing in
+# SUPERVISOR_READS / SUPERVISOR_ACTIONS / WS_ACTIONS starts with one of these.
+# Restore, add-on reconfiguration, host power, the store, auth/security and the
+# OS disk/boot tools stay operator-only (dashboard UI or the HA app itself).
+FORBIDDEN = (
+    '/backups/', '/addons/', '/supervisor/options', '/host/shutdown',
+    '/store/repositories', '/auth', '/security', '/os/datadisk', '/os/boot-slot',
+)
 
 SLUG_RE = re.compile(r'^[a-z0-9_]{1,64}$')
 
@@ -66,6 +96,7 @@ _SHAPES = {
     'backups': ('name', 'slug', 'date', 'type', 'size', 'location',
                 'protected', 'supervisor_version', 'homeassistant'),
     'resolution': ('unsupported', 'unhealthy', 'issues'),
+    'action': ('result', 'data', 'message'),
 }
 
 _ISSUE_FIELDS = ('type', 'context', 'reference', 'created', 'dismissed', 'uuid')
@@ -87,6 +118,12 @@ def endpoint_for(tool_name: str, args: dict = None):
         if not SLUG_RE.match(slug):
             raise ValueError(slug)
         endpoint = template.replace('{slug}', slug)
+    if '{action}' in template:
+        action = str((args or {}).get('action') or '').strip().lower()
+        allowed = ACTION_VALUES.get(tool_name, ())
+        if action not in allowed:
+            raise ValueError(action or 'missing')
+        endpoint = endpoint.replace('{action}', action)
     return endpoint, method
 
 
@@ -160,6 +197,119 @@ def run_supervisor_read(integration: dict, tool_name: str, args: dict,
                            'message': scrub_string(message)[:400],
                            'status_code': exc.status_code or 502})
     return scrub_string(json.dumps(_shape(shape, data)))
+
+
+def _action_payload(tool_name: str, args: dict) -> dict:
+    """The supervisor/api payload (or WS payload) for one action, validated."""
+    args = args or {}
+    if tool_name == 'ha_addon_action':
+        return {}
+    if tool_name == 'ha_backup_create':
+        name = str(args.get('name') or '').strip()
+        if not NAME_RE.match(name):
+            raise ValueError('name')
+        addons = args.get('partial_addons') or []
+        folders = args.get('partial_folders') or []
+        if addons:
+            if not isinstance(addons, list) or any(
+                    not SLUG_RE.match(str(a).strip()) for a in addons):
+                raise ValueError('partial_addons')
+            clean_addons = [str(a).strip() for a in addons]
+            clean_folders = [str(f).strip() for f in folders
+                             if str(f).strip() in FOLDER_VALUES]
+            return {'name': name, 'addons': clean_addons,
+                    'folders': clean_folders}
+        if folders:
+            clean = [str(f).strip() for f in folders if str(f).strip() in FOLDER_VALUES]
+            if not clean:
+                raise ValueError('partial_folders')
+            return {'name': name, 'addons': [], 'folders': clean}
+        return {'name': name}
+    if tool_name in ('ha_addon_update', 'ha_core_update'):
+        backup = args.get('backup', True)
+        if not isinstance(backup, bool):
+            raise ValueError('backup')
+        if tool_name == 'ha_core_update':
+            return {'backup': backup}
+        slug = str(args.get('slug') or '').strip()
+        if not SLUG_RE.match(slug):
+            raise ValueError('slug')
+        return {'addon': slug, 'backup': backup}
+    return {}
+
+
+def run_supervisor_action(integration: dict, tool_name: str, args: dict,
+                          ctx: dict) -> str:
+    """F10: run one fixed Supervisor action. Never builds an endpoint from
+    agent text — the table decides, and the arguments only fill validated
+    placeholders (G/F9 R2 rule)."""
+    if tool_name not in SUPERVISOR_ACTIONS:
+        return json.dumps({'error': 'ha_supervisor_unknown',
+                           'message': "No Supervisor action for '%s'" % tool_name,
+                           'status_code': 400})
+    try:
+        endpoint, method = endpoint_for(tool_name, args)
+        payload = _action_payload(tool_name, args)
+        # A partial backup is a different endpoint, decided by the validated
+        # payload, not by anything the agent wrote into a path.
+        if tool_name == 'ha_backup_create' and payload.get('addons'):
+            endpoint = '/backups/new/partial'
+        elif tool_name == 'ha_backup_create' and payload.get('folders'):
+            endpoint = '/backups/new/partial'
+    except ValueError as exc:
+        return json.dumps({'error': 'ha_supervisor_bad_argument',
+                           'message': 'Invalid Supervisor action argument: %r' % (str(exc),),
+                           'status_code': 400})
+    # A backup, an add-on update or a Core update can run for minutes; the
+    # other actions answer in seconds. HA's supervisor/api has its own per-call
+    # timeout (10 s by default), so both sides are raised together.
+    long_running = tool_name in ('ha_addon_update', 'ha_core_update',
+                                 'ha_backup_create')
+    read_timeout = 620 if long_running else 60
+    if method != 'ws':
+        payload = {'endpoint': endpoint, 'method': method,
+                   'data': payload,
+                   'timeout': 600 if tool_name == 'ha_backup_create' else 120}
+    try:
+        if method == 'ws':
+            command = WS_ACTIONS[tool_name]
+            data = ha_ws_exec(
+                integration, command, payload,
+                agent=ctx.get('agent', ''), tool_name=tool_name,
+                session_id=ctx.get('session_id', ''),
+                execution_id=ctx.get('execution_id', ''),
+                reason=ctx.get('reason', ''),
+                approval=ctx.get('approval', ''),
+                decided_at=ctx.get('decided_at', 0),
+                decided_by=ctx.get('decided_by', ''),
+                read_timeout=read_timeout)
+        else:
+            data = ha_ws_exec(
+                integration, 'supervisor/api', payload,
+                agent=ctx.get('agent', ''), tool_name=tool_name,
+                session_id=ctx.get('session_id', ''),
+                execution_id=ctx.get('execution_id', ''),
+                reason=ctx.get('reason', ''),
+                approval=ctx.get('approval', ''),
+                decided_at=ctx.get('decided_at', 0),
+                decided_by=ctx.get('decided_by', ''),
+                read_timeout=read_timeout)
+    except ProxyError as exc:
+        message = str(exc.message or '')
+        if exc.status_code in (401, 403) or 'admin' in message.lower() \
+                or 'unauthor' in message.lower():
+            return _admin_error(message)
+        return json.dumps({'error': 'ha_supervisor_action_failed',
+                           'message': scrub_string(message)[:400],
+                           'status_code': exc.status_code or 502})
+    out = {'ok': True, 'action': tool_name,
+           'endpoint': endpoint if method != 'ws' else WS_ACTIONS[tool_name]}
+    if isinstance(data, dict):
+        if data.get('result') not in (None, '', 'ok'):
+            out['result'] = data.get('result')
+        if isinstance(data.get('data'), dict):
+            out['data'] = _shape('action', data.get('data'))
+    return scrub_string(json.dumps(out))
 
 
 def run_whoami(integration: dict, ctx: dict) -> str:

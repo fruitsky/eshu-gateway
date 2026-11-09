@@ -423,6 +423,26 @@ def _run_tool(integration_name: str, tool_name: str, args: dict, reason: str = '
         if not is_read:
             return _frozen_refusal(integration, tool, tool_name, args,
                                    session_id, execution_id, agent_name)
+    # F10: `call_service(domain='hassio', …)` reaches the Supervisor powers the
+    # F10 tools gate one by one, outside that table. Refuse it unless the agent's
+    # own policy names `hassio` explicitly (the operator's audited escape hatch).
+    if tool_name == 'call_service' and \
+            str((args or {}).get('domain') or '').strip().lower() == 'hassio':
+        from core.agent_policy import explicit_hassio_allowed
+        if not explicit_hassio_allowed(agent, integration['name'], tool_name):
+            record_audit_event(
+                'hassio_domain_refused', details=(
+                    f"{integration['name']}.{tool_name}: domain=hassio refused; "
+                    f"use the F10 Supervisor tools (agent={agent_name})"))
+            return json.dumps({
+                'error': 'hassio_domain_refused',
+                'message': ('domain=hassio is refused by default: use the F10 '
+                            'Supervisor tools (ha_addon_action, ha_addon_update, '
+                            'ha_core_update, ha_backup_create, ha_core_restart, '
+                            'ha_host_reboot), which are approval-gated. An operator '
+                            'can allow hassio for this agent explicitly.'),
+                'status_code': 403,
+            })
     # Chunk H: the read-only passthrough tools auto-run, so they must not be
     # able to write or execute. This runs whatever the agent's policy says; an
     # arg_policy still applies on top for the calls that do get through.
@@ -441,6 +461,7 @@ def _run_tool(integration_name: str, tool_name: str, args: dict, reason: str = '
     # ("auto"); reads and handler dry-runs are not approval-relevant.
     approval_label = 'auto' if (mutating and not args.get('dry_run')) else ''
     exec_reason = reason if mutating else ''
+    # (the plan claim below may replace approval_label with the plan reference)
 
     def _execute():
         if handler:
@@ -507,6 +528,27 @@ def _run_tool(integration_name: str, tool_name: str, args: dict, reason: str = '
     if handler and args.get('dry_run'):
         should_gate = False
 
+    # F10/F3: an approved Session plan can cover an MCP call. Matching is by
+    # integration + tool + the exact argument hash, one use per claim — the
+    # same rule as SSH plan items, never a pattern.
+    plan_approval = ''
+    if should_gate and session_id:
+        from db.session_plans import (PlanError, args_hash,
+                                      claim_mcp_plan_item)
+        try:
+            claimed = claim_mcp_plan_item(session_id, integration['name'],
+                                          tool_name, args_hash(args))
+        except PlanError:
+            claimed = None
+        if claimed:
+            should_gate = False
+            plan_approval = 'session-plan:%d:%d' % claimed
+            approval_label = plan_approval
+            record_audit_event(
+                'jit_plan_approved', details=(
+                    f'Session plan #{claimed[0]} item #{claimed[1]} approved '
+                    f'{integration["name"]}.{tool_name} (session {session_id})'))
+
     if should_gate:
         if handler:
             # Validate the write (read → patch → diff, no write) before queuing
@@ -516,6 +558,21 @@ def _run_tool(integration_name: str, tool_name: str, args: dict, reason: str = '
             pre = run_preflight(handler, integration, tool, args,
                                 agent=agent_name, session_id=session_id,
                                 execution_id=execution_id)
+            if isinstance(pre, dict):
+                # F10: a viable action may hand back the summary the approval
+                # card shows. Anything else keeps the old "error string or None".
+                summary = str(pre.get('_summary') or '')
+                call_id = create_pending_call(
+                    integration['name'], tool_name, args, reason,
+                    session_id=session_id, execution_id=execution_id,
+                    agent=agent_name, session_source=session_source,
+                    summary=summary)
+                from core.notify import send_notify
+                send_notify('jit', 'API Approval Required',
+                            '`%s` on %s by %s: ' % (tool_name, integration_name, agent_name)
+                            + (summary or reason or '')[:80])
+                return json.dumps({'status': 'pending', 'id': call_id,
+                                   'message': 'Awaiting operator approval. Call check_approval(%d) to poll.' % call_id})
             if pre is not None:
                 return pre
         call_id = create_pending_call(

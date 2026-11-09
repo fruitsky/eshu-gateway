@@ -22,7 +22,8 @@ import hashlib
 import json
 import time
 
-from core.ha_supervisor import run_supervisor_read, run_whoami
+from core.ha_supervisor import (run_supervisor_action, run_supervisor_read,
+                                run_whoami)
 from core.ha_ws import ha_ws_exec
 from core.train import handle_train_plan, handle_train_status
 from core.commute import (
@@ -1079,6 +1080,47 @@ def _h_ha_supervisor_read(integration, tool, args, ctx=None):
                                args or {}, ctx or {})
 
 
+def _h_ha_supervisor_action(integration, tool, args, ctx=None):
+    """F10: one fixed Supervisor action, chosen by the tool's name."""
+    return run_supervisor_action(integration, (tool or {}).get('name') or '',
+                                 args or {}, ctx or {})
+
+
+def _h_ha_check_config(integration, tool, args, ctx=None):
+    """F10: run the config check and remember its result for ha_core_restart.
+
+    `ha_core_restart` is the one action whose safety depends on a prior call,
+    so the prior call has to be recorded somewhere durable. The meta key is per
+    integration: a valid check against one HA instance never vouches for
+    another one on the same dashboard."""
+    import time as _time
+    from core.integration_proxy import execute_integration_call
+    try:
+        res = execute_integration_call(
+            integration, tool, args or {},
+            agent=(ctx or {}).get('agent', ''),
+            session_id=(ctx or {}).get('session_id', ''),
+            execution_id=(ctx or {}).get('execution_id', ''),
+            reason=(ctx or {}).get('reason', ''),
+            approval=(ctx or {}).get('approval', ''))
+    except ProxyError as exc:
+        return _err(_translate(exc.message), exc.message, exc.status_code)
+    if res.get('error'):
+        return _err('ha_check_config_failed', res['error'],
+                    res.get('status_code') or 502)
+    body = res.get('body') or '{}'
+    try:
+        data = json.loads(body)
+    except (ValueError, TypeError):
+        data = {}
+    result = str((data or {}).get('result') or '').lower() if isinstance(data, dict) else ''
+    if result:
+        from db.misc import set_meta_json
+        set_meta_json('ha_check_config_' + (integration.get('name') or ''),
+                      {'result': result, 'at': int(_time.time())})
+    return body
+
+
 def _h_ha_whoami(integration, tool, args, ctx=None):
     return run_whoami(integration, ctx or {})
 
@@ -1086,6 +1128,8 @@ def _h_ha_whoami(integration, tool, args, ctx=None):
 HANDLERS = {
     'pihole_local_dns_records': _h_pihole_local_dns_records,
     'ha_supervisor_read': _h_ha_supervisor_read,
+    'ha_supervisor_action': _h_ha_supervisor_action,
+    'ha_check_config': _h_ha_check_config,
     'ha_whoami': _h_ha_whoami,
     'ha_lovelace_dashboards': _h_dashboards,
     'ha_lovelace_dashboard': _h_dashboard,
@@ -1139,7 +1183,73 @@ def _preflight_quality_definition_update(integration, tool, args, ctx):
     return None
 
 
+def _preflight_ha_supervisor_action(integration, tool, args, ctx):
+    """F10: validate the action and build the approval-card summary.
+
+    Returns an error string when the action cannot succeed, otherwise a dict
+    `{'_summary': …}` that `tool_runner` stores on the pending call. The summary
+    names the exact action, the add-on and (for updates) the current → target
+    version, so the operator approves what the Supervisor will actually do.
+    """
+    import time as _time
+    from core.ha_supervisor import SUPERVISOR_ACTIONS, endpoint_for
+    name = (tool or {}).get('name') or ''
+    if name not in SUPERVISOR_ACTIONS:
+        return _err('ha_supervisor_unknown',
+                    "No Supervisor action for '%s'" % name, 400)
+    try:
+        endpoint_for(name, args or {})
+    except ValueError as exc:
+        return _err('ha_supervisor_bad_argument',
+                    'Invalid Supervisor action argument: %r' % (str(exc),), 400)
+    a = args or {}
+    addon = ''
+    if name in ('ha_addon_action', 'ha_addon_update'):
+        addon = str(a.get('slug') or '').strip()
+    version = ''
+    if name == 'ha_core_restart':
+        from db.misc import get_meta_json
+        last = get_meta_json('ha_check_config_' + (integration.get('name') or ''), {}) or {}
+        at = int(last.get('at') or 0)
+        if (last.get('result') or '') != 'valid' or _time.time() - at > 600:
+            return _err(
+                'ha_check_config_stale',
+                'Run ha_check_config on this integration first: a restart needs a '
+                'valid config check from the last 10 minutes.', 400)
+        version = 'checked %ds ago' % int(_time.time() - at)
+    if name in ('ha_addon_update', 'ha_core_update'):
+        try:
+            info = (run_supervisor_read(integration, 'ha_addon_info', {'slug': addon}, ctx)
+                    if name == 'ha_addon_update'
+                    else run_supervisor_read(integration, 'ha_core_info', {}, ctx))
+            data = json.loads(info)
+        except (ValueError, TypeError):
+            data = {}
+        if isinstance(data, dict) and data.get('error'):
+            return _err('ha_supervisor_preflight', str(data.get('message') or ''), 502)
+        if isinstance(data, dict):
+            current = data.get('version') or ''
+            target = data.get('version_latest') or current
+            if current and target and current == target:
+                return _err('ha_update_not_available',
+                            'Already on the latest version (%s).' % current, 400)
+            version = '%s -> %s' % (current or '?', target or '?')
+    if name == 'ha_host_reboot':
+        return {'_summary': 'REBOOTS THE WHOLE HA HOST'}
+    parts = [name.replace('ha_', '')]
+    if addon:
+        parts.append(addon)
+    if name == 'ha_addon_action':
+        parts.append(str(a.get('action') or ''))
+    if name == 'ha_backup_create':
+        parts.append(str(a.get('name') or ''))
+    if version:
+        parts.append(version)
+    return {'_summary': ' | '.join(p for p in parts if p)}
+
+
 PREFLIGHT = {
+    'ha_supervisor_action': _preflight_ha_supervisor_action,
     'ha_lovelace_save_config': _preflight_save_config,
     'ha_lovelace_delete_dashboard': _preflight_delete_dashboard,
     'arr_quality_definition_update': _preflight_quality_definition_update,

@@ -836,9 +836,12 @@ SESSION_PLAN_DESC = (
     "then call this with the exact commands you intend to run: "
     '{"host": "<gateway ip>" or "*", "command": "<exact text>", "max_uses": 1}. '
     "Matching is byte-exact after trimming whitespace — no patterns, no "
-    "prefixes. Up to 50 items, each under 4 kB. Returns plan_id in status "
-    "'proposed'; the operator approves (possibly a subset, with a TTL of up to "
-    "4 hours) in the dashboard. Poll check_plan(plan_id) for its state."
+    "prefixes. An MCP call can be covered too: "
+    '{"kind": "mcp", "integration": "Home Assistant", "tool": "ha_addon_update", '
+    '"args": {...}, "max_uses": 1} — matching is by the exact argument hash, '
+    "one use per call. Up to 50 items, each under 4 kB. Returns plan_id in "
+    "status 'proposed'; the operator approves (possibly a subset, with a TTL "
+    "of up to 4 hours) in the dashboard. Poll check_plan(plan_id) for its state."
 )
 
 

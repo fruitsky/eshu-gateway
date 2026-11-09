@@ -19,8 +19,13 @@ import time
 
 from db.core import db_conn
 
+import re
+
 MAX_ITEMS = 50
 MAX_COMMAND_BYTES = 4096
+# F10: an `mcp` item names one integration tool; the hash is SHA-256 hex.
+TOOL_RE = re.compile(r'^[A-Za-z0-9_.:-]{1,120}$')
+HASH_RE = re.compile(r'^[0-9a-f]{64}$')
 MAX_NOTE = 500
 DEFAULT_TTL_MINUTES = 60
 MAX_TTL_MINUTES = 240
@@ -57,6 +62,16 @@ def init_session_plans_tables(cursor):
     cursor.execute(
         'CREATE INDEX IF NOT EXISTS idx_session_plan_items_plan '
         'ON session_plan_items(plan_id)')
+    # F10: a plan item is either an SSH command (kind='ssh', the default and
+    # every pre-F10 row) or one MCP tool call (kind='mcp') identified by the
+    # exact argument hash the agent proposed. `command` stays the human label
+    # the plan UI already renders.
+    for col, default in [('kind', "'ssh'"), ('integration', "''"),
+                         ('tool', "''"), ('args_hash', "''")]:
+        try:
+            cursor.execute(f"ALTER TABLE session_plan_items ADD COLUMN {col} TEXT DEFAULT {default}")
+        except Exception:
+            pass
 
 
 def _forbidden_command_char(command: str):
@@ -84,6 +99,49 @@ class PlanError(ValueError):
         self.message = message
 
 
+def args_hash(args) -> str:
+    """Stable hash of one MCP call's arguments (sorted keys, compact JSON).
+
+    The plan stores the hash, never the raw arguments: secrets in an argument
+    (an HA service payload can carry a token) must not be copied into a plan
+    row that the UI renders."""
+    import hashlib
+    import json
+    try:
+        body = json.dumps(args or {}, sort_keys=True, separators=(',', ':'),
+                          ensure_ascii=False)
+    except (TypeError, ValueError):
+        raise PlanError('invalid_args', 'args must be JSON-serialisable')
+    return hashlib.sha256(body.encode('utf-8')).hexdigest()
+
+
+def _validate_mcp_item(item):
+    integration = str(item.get('integration') or '').strip()
+    tool = str(item.get('tool') or '').strip()
+    if not integration or not tool:
+        raise PlanError('invalid_items',
+                        "an mcp item needs 'integration' and 'tool'")
+    if not TOOL_RE.match(integration) or not TOOL_RE.match(tool):
+        raise PlanError('invalid_items',
+                        'integration and tool must be plain names')
+    digest = item.get('args_hash')
+    if digest is None:
+        digest = args_hash(item.get('args') or {})
+    digest = str(digest or '').strip().lower()
+    if not HASH_RE.match(digest):
+        raise PlanError('invalid_items', 'args_hash must be 64 lowercase hex')
+    max_uses = item.get('max_uses', 1)
+    if isinstance(max_uses, bool) or not isinstance(max_uses, int):
+        raise PlanError('invalid_max_uses', 'max_uses must be an integer')
+    if max_uses < 1 or max_uses > MAX_USES:
+        raise PlanError('invalid_max_uses',
+                        f'max_uses must be between 1 and {MAX_USES}')
+    label = f"mcp: {integration}.{tool} ({digest[:12]})"
+    return {'kind': 'mcp', 'host': '*', 'command': label,
+            'integration': integration, 'tool': tool, 'args_hash': digest,
+            'max_uses': max_uses}
+
+
 def validate_items(items):
     """Normalise and validate the proposed items; raises PlanError."""
     if not isinstance(items, (list, tuple)) or not items:
@@ -95,6 +153,12 @@ def validate_items(items):
     for item in items:
         if not isinstance(item, dict):
             raise PlanError('invalid_items', 'each item must be an object')
+        kind = str(item.get('kind') or 'ssh').strip().lower()
+        if kind == 'mcp':
+            normalised.append(_validate_mcp_item(item))
+            continue
+        if kind != 'ssh':
+            raise PlanError('invalid_items', "item kind must be 'ssh' or 'mcp'")
         command = item.get('command')
         if not isinstance(command, str) or not command.strip():
             raise PlanError('invalid_command', 'each item needs a command')
@@ -121,7 +185,9 @@ def validate_items(items):
         if max_uses < 1 or max_uses > MAX_USES:
             raise PlanError('invalid_max_uses',
                             f'max_uses must be between 1 and {MAX_USES}')
-        normalised.append({'host': host, 'command': command, 'max_uses': max_uses})
+        normalised.append({'kind': 'ssh', 'host': host, 'command': command,
+                           'integration': '', 'tool': '', 'args_hash': '',
+                           'max_uses': max_uses})
     return normalised
 
 
@@ -162,9 +228,13 @@ def create_plan(session_id: str, items, note: str = '') -> dict:
         plan_id = cur.lastrowid
         for item in normalised:
             cur.execute('''
-                INSERT INTO session_plan_items (plan_id, host, command, max_uses, uses, removed)
-                VALUES (?, ?, ?, ?, 0, 0)
-            ''', (plan_id, item['host'], item['command'], item['max_uses']))
+                INSERT INTO session_plan_items
+                    (plan_id, host, command, max_uses, uses, removed,
+                     kind, integration, tool, args_hash)
+                VALUES (?, ?, ?, ?, 0, 0, ?, ?, ?, ?)
+            ''', (plan_id, item['host'], item['command'], item['max_uses'],
+                    item.get('kind') or 'ssh', item.get('integration') or '',
+                    item.get('tool') or '', item.get('args_hash') or ''))
         conn.commit()
     hosts = {item['host'] for item in normalised}
     return {'plan_id': plan_id, 'status': 'proposed', 'session_id': sid,
@@ -319,10 +389,57 @@ def _claim_candidate(conn, session_id: str, host: str, command: str, now: int):
         JOIN session_plans p ON p.id = i.plan_id
         WHERE p.session_id = ? AND p.status = 'approved' AND p.until > ?
           AND i.removed = 0 AND i.uses < i.max_uses
+          AND i.kind = 'ssh'
           AND i.command = ? AND (i.host = ? OR i.host = '*')
         ORDER BY i.id
         LIMIT 1
     ''', (session_id, now, command, host)).fetchone()
+
+
+def _claim_mcp_candidate(conn, session_id: str, integration: str, tool: str,
+                         digest: str, now: int):
+    return conn.execute('''
+        SELECT i.id, i.plan_id
+        FROM session_plan_items i
+        JOIN session_plans p ON p.id = i.plan_id
+        WHERE p.session_id = ? AND p.status = 'approved' AND p.until > ?
+          AND i.removed = 0 AND i.uses < i.max_uses
+          AND i.kind = 'mcp' AND i.integration = ? AND i.tool = ?
+          AND i.args_hash = ?
+        ORDER BY i.id
+        LIMIT 1
+    ''', (session_id, now, integration, tool, digest)).fetchone()
+
+
+def claim_mcp_plan_item(session_id: str, integration: str, tool: str,
+                        digest: str, now: int = None):
+    """F10: consume one use of an approved `mcp` plan item.
+
+    Matching is by integration + tool + the exact argument hash, never by a
+    pattern: an approved plan covers the call the operator saw, not a family of
+    calls. Same conditional UPDATE as the SSH claim."""
+    sid = (session_id or '').strip()[:64]
+    if not sid or not integration or not tool or not digest:
+        return None
+    now = int(now or time.time())
+    expire_plans(now)
+    with db_conn() as conn:
+        cur = conn.cursor()
+        row = _claim_mcp_candidate(conn, sid, integration, tool, digest, now)
+        if not row:
+            return None
+        cur.execute('''
+            UPDATE session_plan_items SET uses = uses + 1
+            WHERE id = ? AND removed = 0 AND uses < max_uses
+              AND plan_id IN (
+                  SELECT id FROM session_plans
+                  WHERE status = 'approved' AND until > ?
+              )
+        ''', (row['id'], now))
+        if cur.rowcount != 1:
+            return None
+        conn.commit()
+        return row['plan_id'], row['id']
 
 
 def claim_plan_item(session_id: str, host: str, command: str, now: int = None):

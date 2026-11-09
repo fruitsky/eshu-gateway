@@ -124,6 +124,27 @@ def _prefix_match(path, prefixes):
     return any(any(v.startswith(p) for v in variants) for p in _as_list(prefixes))
 
 
+def explicit_hassio_allowed(agent, integration_name, tool_name) -> bool:
+    """F10: did the operator explicitly allow `domain: hassio` for this agent?
+
+    Only an exact `hassio` entry in the call_service arg policy counts. The
+    absence of a domain allowlist does not: that would be the default, and the
+    default is a refusal that points at the F10 tools.
+    """
+    policy = (agent or {}).get('policy') or {}
+    if not isinstance(policy, dict):
+        return False
+    arg_policy = policy.get('arg_policy') or {}
+    if not isinstance(arg_policy, dict):
+        return False
+    rules = _lookup(arg_policy, tool_key(integration_name, tool_name),
+                    integration_name)
+    if not isinstance(rules, dict):
+        return False
+    return 'hassio' in [str(d).strip().lower()
+                        for d in _as_list(rules.get('domain_allow'))]
+
+
 def _evaluate_ha_call_service(rules, args):
     domain = str(args.get('domain') or '').strip().lower()
     service = str(args.get('service') or '').strip().lower()

@@ -4004,6 +4004,9 @@ function renderJitItem(item) {
           '<div class="jit-meta">' +
             '<span class="jit-meta-item">#' + esc(String(Number(c.id)).padStart(6,'0')) + '</span>' +
             '<span class="jit-meta-item">API call</span>' +
+            (c.summary && c.tool === 'ha_host_reboot'
+              ? '<span class="jit-meta-item" style="color:var(--danger)">' + escapeHtml(c.summary) + '</span>'
+              : (c.summary ? '<span class="jit-meta-item">' + escapeHtml(c.summary) + '</span>' : '')) +
             (c.agent ? '<span class="jit-meta-item">agent ' + escapeHtml(c.agent) + '</span>' : '') +
             (c.reason ? '<span class="jit-meta-item">\u201c' + escapeHtml(c.reason) + '\u201d</span>' : '') +
           '</div>' +
