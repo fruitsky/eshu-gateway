@@ -6022,7 +6022,7 @@ the implementer's full gate passed 2462.
   consumed. The nonce store uses a separate lock file, a temp file plus
   rename, and fails closed on any error.
 * **Dashboard key:** `--dashboard-key` is set only by the forced command
-  (sudoers allows exactly that form), and calls on it must be signed.
+  (the forced command, not sudoers, blocks extra arguments; see the security reviewer's S3), and calls on it must be signed.
 * **Logging:** one log line, after every prefix is stripped, with no
   prefix values.
 * **MCP mode:** `say()`/`finish()` make stdout exactly one envelope, and
