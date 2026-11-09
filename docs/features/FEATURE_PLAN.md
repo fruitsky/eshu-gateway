@@ -3052,6 +3052,9 @@ The fixtures are synthetic.
 independent. Whichever of the two merges second must add
 `COALESCE(r.excluded, 0) = 0` to that query and to the S2 scan.
 
+
+**Round 2 (2026-11-09, main feature reviewer): approved and merged.** R1 is right: the inner-target warning counts excluded rows again, and Statistics still drops them. S1–S3 are fine.
+
 ---
 
 ## Chunk F9 — Freeze covers integrations + HA Supervisor reads · slug `ha-supervisor-read` · dashboard
@@ -3316,6 +3319,9 @@ docstrings. F4's version has no `read_only` guard in
 guarded integration wrapper, and add a test that a curated write tool is not
 a read (`test_f9_a_curated_write_tool_is_not_a_read`). Whichever of F9 and
 F14 merges second only needs to resolve the docstring.
+
+
+**Round 2 (2026-11-09, main feature reviewer): approved and merged.** R1 is right: the freeze exemption now uses the same `handler and dry_run` condition as the gate. R2 is right: `supervisor/` and `hassio/` are refused before gating and again in `execute_ws_call`. Merge: `read_policy.py` takes F9's docstring. `tool_handlers.py` holds one `HANDLERS` table with F14's Pi-hole handler and F9's two handlers.
 
 ---
 
@@ -3817,6 +3823,9 @@ gateways.
 and by F4 (the SSH half, without the `read_only` guard). See F9's merge
 note.
 
+
+**Round 2 (2026-11-09, main feature reviewer): approved and merged.** R1 is right: `whereis` is gated by agent policy, sources are filtered before the join, and each call is audited. Note: a caller with no agent identity (a legacy MCP token) gets the unfiltered join and no audit row, the same as for the integration tools themselves. Tighten this in the UI/hardening pass if legacy tokens are retired.
+
 ---
 
 ## Chunk F15 — Diagnostic probes · slug `probes` · dashboard + MCP
@@ -4089,7 +4098,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 11 | F9 | ha-supervisor-read | dashboard | Merged | `feat/f9-ha-supervisor-read` | — | token is now a dedicated `eshu` HA admin user |
 | 12 | F10 | ha-supervisor-actions | dashboard | Ready (after F9) | `feat/f10-ha-supervisor-actions` | F9, F3, Chunk H | reviewer pass + security reviewer sign-off |
 | 13 | F11 | ha-config-files | dashboard | Ready (after F10) — design first | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | design approval + security reviewer sign-off |
-| 14 | F14 | inventory | dashboard + MCP | **Changes requested (R1)** — round 1 | `feat/f14-inventory` | Chunk H | |
+| 14 | F14 | inventory | dashboard + MCP | Merged | `feat/f14-inventory` | Chunk H | |
 | 15 | F15 | probes | dashboard + MCP | Ready after F12 | `feat/f15-probes` | F4, F12 | |
 | 16 | F16 | recipes | dashboard + MCP | Design first (questions listed) | `feat/f16-recipes` | F3, F12, F13 | design approval + security reviewer sign-off |
 | 17 | F17 | local-agent | dashboard + docs | Ready after F12–F16 | `feat/f17-local-agent` | F12–F16 | |
