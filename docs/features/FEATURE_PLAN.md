@@ -5565,6 +5565,77 @@ the sections above so the code cannot invent them:
 
 `bash scripts/verify.sh`: `2331 passed, 7 warnings in 428.69s (0:07:08)` (docs-only).
 
+#### Round 6: implementation of round 5 (code round)
+
+The code commit is **`aa268de`** — *"feat(f12): ssh_exec — SSH through Eshu
+over MCP (design round 5)"*. **It contains the gateway bash**
+(`dashboard/eshu-gateway.sh`, `dashboard/eshu-poller.sh`,
+`dashboard/eshu-installer-template.sh` and both regenerated installers), so
+that is the commit the security reviewer reviews before merge. The dashboard
+side is in the same commit because the two halves share the canonical form
+and the test vector; the notes commit (`this one`) is docs-only.
+
+**Where each condition lives.**
+
+| | Dashboard | Gateway / installer | Tests |
+|---|---|---|---|
+| G1 | `core/ssh_crypto.derive_key`, `gateways.ssh_key_derived` (set on every `set_gateway_token`, startup backfill, `ssh_key_unprovisioned` refusal) | the helper derives `K` itself from `/etc/eshu-token` | `TestDerivedKey`, `test_key_is_not_in_the_register_response` |
+| G2 | `command_problem` (no `ESHU_` first word), `ESHU_SESSION_ID` everywhere, session ownership | duplicate keys and half-signed prefixes refused in every mode; agent MAC vouches for the session it covers | `test_a_lone_mcp_flag_is_refused`, `test_half_signed_*`, `test_a_duplicate_prefix_key_is_refused`, `test_an_incomplete_prefix_is_refused`, `test_a_valid_agent_mac_vouches_for_the_session` |
+| G3 | leading/trailing whitespace and control bytes refused before signing | the trim happens after the prefix parse, so the MAC covers what runs | `TestCommandBytes` |
+| G4 | — | `nonce_store_ready` / `consume_nonce` exactly as §5, `/var/lib/eshu/nonces`, temp + rename, MAC before write | `test_nonce_store_is_persistent_not_in_run`, `test_a_bad_mac_adds_no_entry`, `test_an_unwritable_store_refuses_and_keeps_the_old_entries`, `test_a_full_store_refuses` |
+| G5 | `requests.ticket_line` (`v2\|ts\|agent\|session\|cmd`), `/api/poll` and `/api/ticket` | `parse_ticket_line`, `ticket_allowed`, `remove_claimed_ticket`; the poller prunes `$2` for `v2` | `TestTickets`, the ticket cases in `tests/test_f12_gateway.py` |
+| G6 | — | `--dashboard-key` refuses an unsigned call in every `ssh_mode`; sudoers allows exactly the two argv shapes | `test_dashboard_key_*`, `test_f12_sudoers_allows_exactly_two_argv_shapes` |
+| G7 | `build_argv` (registered IP, `-F /dev/null`, `UserKnownHostsFile`, `GlobalKnownHostsFile=/dev/null`, `StrictHostKeyChecking=yes`), pin helpers | — | `TestRunnerArgv`, `test_f12_dashboard_key_line_and_marker` |
+| G8 | audit rows carry the command **hash**, never the command | one log line after the parse, stripped, no prefix values | `test_log_line_has_the_stripped_command_and_no_prefix_values`, `test_refusal_log_has_no_raw_value` |
+
+**Two bugs the tests caught during implementation** (both in the gateway
+bash, both worth seeing in review):
+
+* The A2 snippet in the design said "the canonical string arrives on stdin".
+  The original code used a heredoc for the Python program, and a heredoc
+  takes stdin for itself, so the canonical never reached the helper and every
+  signature was refused. The fix is `python3 -c '…' "$ESHU_AGENT_SIG"`, which
+  keeps stdin free — exactly what the design text describes, so the text did
+  not need to change.
+* In MCP mode the stream went through `tee "$ESHU_OUT_FIFO"`, and `tee`
+  also writes to stdout: the command's output appeared *before* the envelope,
+  which the dashboard correctly called `bad-envelope`. In MCP mode the `tee`
+  now writes to `/dev/null`; the FIFO reader is the only consumer, so the
+  envelope is the only stdout.
+
+**Other things the reviewer should see.**
+
+* `ESHU_NONCE_OWNER` is a test seam (default `0`) like the existing
+  `ESHU_RUN_OWNER`: the sandbox runs as a non-root user. Env cannot move the
+  store in production — the script unsets every variable it does not
+  whitelist before the store is touched.
+* An old installer that re-registers sends no capability fields, which
+  **clears** the stored pair and makes `ssh_exec` refuse (`ssh_not_ready`)
+  until the gateway is re-enrolled with the new installer. That is the
+  fail-closed reading of §9; noted in case the reviewer prefers keeping the
+  last reported pair.
+* The gateway posts the F5 row for an MCP run even when `/etc/eshu-capture`
+  is `off`/`exit-only` (the envelope already carried those bytes to the
+  agent, and the dashboard would store them otherwise). See open question 1.
+
+**Open questions (for the security reviewer / reviewer):**
+
+1. Should an MCP run's output be stored in `request_results` when the
+   gateway's capture mode is `off`? Round 5 says the row comes from the
+   gateway; in practice MCP mode captures to build the envelope, so the
+   gateway stores the last 16 KiB of it. The alternative is to store nothing
+   when capture is off and let the MCP client be the only holder. This is a
+   data-retention choice, not a security one, and the current behaviour is
+   the more auditable one.
+2. §4 says "the UI warns when `ALLOWED_SSH_FROM` on a gateway covers more
+   than the dashboard's own address". The dashboard cannot know that value
+   (the installer applies it locally), so the warning is printed by the
+   installer, where the value exists. If a UI warning is still wanted, it
+   needs the installer to report the applied `from=` at registration — say
+   the word and it is a small follow-up, not part of this commit.
+
+`bash scripts/verify.sh`: `2462 passed, 7 warnings in 456.51s (0:07:36)` (the whole suite, on `aa268de`).
+
 ### Reviewer notes
 
 **Round 1 (2026-11-09): design changes requested. Not ready for the security
@@ -6627,7 +6698,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 5a | X1 | ctx-actions | dashboard | Merged | `fix/x1-ctx-actions` | — | FYI to security reviewer (approve ignored status) |
 | 6 | F5 | exec-results | gateway + dashboard | Merged | `feat/f5-exec-results` | — | |
 | 6a | F18 | request-context | dashboard | Merged | `feat/f18-request-context` | F1, F5, F7, X1 | |
-| 7 | F12 | ssh-exec | dashboard + gateway | **Design approved (feature + security, conditions G1–G8)** — implementing | `feat/f12-ssh-exec` | F4, F5 | design approval + security reviewer sign-off |
+| 7 | F12 | ssh-exec | dashboard + gateway | **Implemented** — awaiting review; gateway bash to the security chat | `feat/f12-ssh-exec` @ `aa268de` | F4, F5 | design approval + security reviewer sign-off |
 | 8 | F6 | session-wrapup | dashboard | Merged | `feat/f6-session-wrapup` | F3, F4, F5 | |
 | 9 | F13 | session-conclusions | dashboard + MCP | Merged | `feat/f13-session-conclusions` | F5, F6 | |
 | 10 | F8 | test-traffic | dashboard | Merged | `feat/f8-test-traffic` | — | low priority |
