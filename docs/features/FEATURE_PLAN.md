@@ -5449,7 +5449,254 @@ is sent only for unattended rows; old gateway versions are refused for `on`.
 
 ### Implementer notes
 
-_(design note goes here first)_
+**Status: design note only — no code on this branch.** F19 is design first
+and needs the security reviewer's sign-off before any code. It is also one of
+the preconditions for unlocking F4's `on` mode, so it is the next gateway
+change after F12.
+
+#### 1. What is bounded, and what is not
+
+A **run limit** exists only for a row the dashboard approved **without a
+human**: today that is the read lane (`reason = read-lane`), later F15 probes
+and read-only F16 recipes. The row's `reason` is the switch, and it is set by
+the dashboard, never by the gateway.
+
+* A human-approved run (JIT, plan, session override, host override, window,
+  allowlist) keeps today's behaviour: no timeout, no cap. A human saw the
+  command and can watch it. Changing that would be a different feature with
+  its own review.
+* A run limit is **advisory on the dashboard and authoritative on the
+  gateway**: the gateway refuses a limit it cannot parse, ignores one it did
+  not get, and never runs unbounded when it was told to bound.
+* A limit hit is a *completed* run, not a refusal: `status: ran`,
+  `exit_code: 124` for time (or the command's own code for a byte cut), and
+  a marker line. The ticket is burned either way; a bounded run cannot be
+  retried by replaying the ticket.
+
+#### 2. Where the limit travels
+
+The limit is a JSON field next to the payload, **not** part of the ticket
+line. The ticket line is `v2|ts|agent|session|cmd` and is consumed by
+gateways that may predate F19; adding a field there would either break them
+or need a `v3` tag for no benefit. Three responses carry it, all on the
+dashboard side:
+
+* `POST /api/request` → `{"status":"ok","request_id":…,"run_limit":{…}}`
+  when the row it just created is unattended. This is the path the read lane
+  uses (the gateway gets `approved` immediately and runs without polling).
+* `GET /api/request_status/{id}` → `run_limit` while `status` is `approved`,
+  so the polling path and a late claim both see it.
+* `GET /api/ticket/{id}` → the same field beside `ticket`, for a gateway that
+  claims the ticket in one call.
+
+A locked-box ticket claimed from the poller has no limit beside it, by
+construction: those rows were approved by a human (or by a plan), and §1 says
+they keep today's behaviour.
+
+Shape and ranges (defaults 60 s / 1 MiB):
+
+```
+run_limit: {"seconds": 60, "bytes": 1048576}
+seconds  5..300       bytes  65536..8388608
+```
+
+The values live in a `meta` key (`run_limit`) so the operator can set them
+without a deploy, and a settings endpoint (`GET`/`PUT /api/settings/run-limit`,
+session auth) validates the range. A missing key means the defaults; a
+corrupt key also means the defaults (a broken setting must not remove the
+bound). The dashboard never sends a value outside the range; the gateway
+still checks.
+
+#### 3. The gateway: parse, wrap, cap
+
+The limit arrives as a JSON body the gateway already parses for
+`request_id`. Two variables hold it, and `RUN_LIMIT_*` empty means "no limit"
+(human-approved):
+
+```bash
+# F19: run limits for a row the dashboard approved with no human watching.
+# Empty means "no limit" (a human approved this). Anything unusable also
+# means no auto-run: never a partially applied bound.
+RUN_LIMIT_SECS=""
+RUN_LIMIT_BYTES=""
+
+parse_run_limit() {   # $1 = dashboard JSON body
+  local secs="" bytes=""
+  secs=$(printf '%s' "$1" | python3 -c '
+import json, sys
+d = (json.load(sys.stdin) or {}).get("run_limit") or {}
+sys.stdout.write("%d %d" % (int(d.get("seconds") or 0), int(d.get("bytes") or 0)))
+' 2>/dev/null || echo "0 0")
+  set -- $secs
+  case "${1:-}" in ''|*[!0-9]*) return 1 ;; esac
+  case "${2:-}" in ''|*[!0-9]*) return 1 ;; esac
+  if [ "$1" -lt 5 ] || [ "$1" -gt 300 ] || [ "$2" -lt 65536 ] || [ "$2" -gt 8388608 ]; then
+    return 1
+  fi
+  RUN_LIMIT_SECS="$1"
+  RUN_LIMIT_BYTES="$2"
+  return 0
+}
+```
+
+Called right after the `/api/request` response is parsed; a `run_limit` that
+is present but unusable **refuses the call** (`[LOCKED] Invalid run_limit …`)
+instead of running unbounded. A 200 response without the field leaves both
+variables empty (human-approved path).
+
+The run itself is wrapped inside `run_sanitized`, so every run path (read
+lane, window, lockbox, JIT) is bounded by the same code and a future path
+cannot forget it:
+
+```bash
+run_sanitized() {
+  local rc=0 ... time_limited="0" byte_limited="0"
+  local -a run_argv=("$@")
+  if [ -n "$RUN_LIMIT_SECS" ]; then
+    # -k (not --kill-after) is what both GNU and BusyBox timeout understand;
+    # the extra 5 s only decides how long a stuck process gets to die.
+    run_argv=(timeout -k 5 "$RUN_LIMIT_SECS" "${run_argv[@]}")
+    time_limited="1"
+  fi
+  ...
+  if [ -n "$RUN_LIMIT_BYTES" ]; then
+    # F19: cap the stream AFTER sanitize (secrets are still redacted) and
+    # BEFORE the FIFO, so F5 stores exactly the bytes the agent saw. The
+    # pipeline runs under `pipefail`, so read the command's own status from
+    # PIPESTATUS[0]; the byte cut is a separate flag, not a status.
+    { "${run_argv[@]}" 2>&1 | sanitize | head -c $((RUN_LIMIT_BYTES + 1)) \
+        | tee "$ESHU_OUT_FIFO"; } >/dev/null 2>&1
+    rc=${PIPESTATUS[0]}
+    LIMIT_HIT=""
+    if [ -s "$ESHU_OUT_CAP" ] && [ "$(stat -c '%s' "$ESHU_OUT_CAP")" -gt "$RUN_LIMIT_BYTES" ]; then
+      byte_limited="1"
+      LIMIT_HIT="bytes"
+      # Drop the probe byte so the cap is exact.
+      truncate -s "$RUN_LIMIT_BYTES" "$ESHU_OUT_CAP"
+    fi
+  else
+    ...today's branches, unchanged...
+  fi
+  if [ "$time_limited" = "1" ] && [ "$rc" -eq 124 ]; then
+    LIMIT_HIT="time"
+    say "   [ESHU limit: stopped after ${RUN_LIMIT_SECS} s]"
+  fi
+  if [ "$byte_limited" = "1" ]; then
+    say "   [ESHU limit: output cut at ${RUN_LIMIT_BYTES} bytes]"
+  fi
+  ...
+}
+```
+
+Details that matter, and why:
+
+* **`head -c $((bytes + 1))` and a probe byte.** With exactly `bytes`, a stream
+  that happens to end at the cap is indistinguishable from one that was cut.
+  One extra byte distinguishes them; it is dropped before anything is stored
+  or shown, so the cap the operator set is the cap that is kept.
+* **`truncate -s`** (coreutils) may be missing on a minimal host. The
+  fallback for that case is `head -c "$RUN_LIMIT_BYTES" "$ESHU_OUT_CAP" >
+  "$ESHU_OUT_CAP.trim" && mv -f …`; the design note records the fallback so
+  the implementer does not have to invent one. The marker and the F5 row are
+  identical either way.
+* **`pipefail` and `PIPESTATUS[0]`.** The existing code reads `$?` after a
+  `||`, which is the *pipeline's* status under `pipefail`; for a capped run
+  that would report `head`'s or `sed`'s SIGPIPE (141) as the command's exit
+  code. Reading `PIPESTATUS[0]` gives the command's real status, so
+  `[ESHU exit=N]` and the envelope's `exit_code` keep meaning "what the
+  command returned". The SIGPIPE the writer gets when `head` closes is
+  expected and is not reported.
+* **The F5 capture still works.** The FIFO reader is unchanged; it now
+  receives at most `bytes + 1` bytes, so `tail -c 16385` keeps the whole head.
+  `post_exec_result` stores that, and a byte cut marks the row
+  `truncated: true` as it does today. The new field is `limit: time|bytes`
+  (empty when no limit fired), which is a new additive column
+  (`request_results.limit TEXT DEFAULT ''`) and an optional body field on
+  `/api/exec-result`.
+* **`[ESHU exit=N]` in direct mode.** For a time limit N is `124` (GNU and
+  BusyBox timeout both use it), so an SSH agent sees
+  `[ESHU exit=124]` plus `[ESHU limit: stopped after 60 s]`. For a byte cut
+  the sentinel is unchanged (typically `[ESHU exit=0]`) and the marker is the
+  only sign, which is correct: the command was not stopped.
+* **MCP mode.** The markers go through `say`, so they land in the envelope's
+  `messages`; the exit code is the envelope's `exit_code`; a byte cut sets
+  `truncated: true` exactly as a 64 KiB tail would. Nothing new is needed in
+  the envelope format.
+* **The timeout only bounds the run, not the whole call.** `timeout` kills
+  the direct child (`bash -c`), and `-k 5` forces it 5 s later if it ignores
+  SIGTERM. A command that backgrounds a child can still outlive it; that is
+  the same statement F12 §4 makes about killing the local `ssh`, and the
+  reason the dashboard's `timeout` and this limit are separate bounds.
+
+#### 4. Old gateways and old dashboards
+
+* **Old gateway, new dashboard.** The gateway ignores `run_limit` entirely,
+  so nothing is bounded there. The dashboard therefore refuses to *auto-run*
+  an unattended row on a gateway that has not reported the capability
+  `run_limits: "v1"` (a new `gateways` column, sent by the installer in its
+  existing `/api/register`, exactly like F12's
+  `ssh_agent_format`/`ssh_ticket_format`). Instead of approving, the row is
+  created `pending` with `reason = "read-lane-no-limits"` and an audit event
+  `read_lane_no_limits`; the human sees it in the queue with that reason.
+  With F4's `on` hard-locked, this is the second gate that must be green
+  before `on` is unlocked at all.
+* **New gateway, old dashboard.** No `run_limit` in the response → no limit →
+  today's behaviour. The capability is reported but unused.
+* **The capability is reported, not inferred from the version string.**
+  Version strings lie after a dev update and a rollback; a reported
+  capability is what the installer that wrote the script knows. It is stored
+  on the gateway row and shown in the gateway card.
+* **Rollout order.** F19 ships with every gateway on `off` (no lane), the
+  capability starts empty, and the dashboard refuses `on` until every gateway
+  the operator wants in the lane reports `v1`. That is the F4 § 8 gate, and
+  it keeps "old gateway" a state that cannot auto-run.
+
+#### 5. What is deliberately out of scope
+
+* No per-command limits, no priorities, no queue: one fleet-wide pair of
+  numbers, overridable only by the operator's settings.
+* No output limit for a human-approved run: the human can interrupt it, and
+  F5's 16 KiB tail already bounds what is *stored*.
+* No `nice`/`cpulimit`/cgroup: a wall-clock bound and a byte cap are what the
+  residual risk named; CPU accounting is a different feature.
+* No change to the 90 s JIT wait, the 60 s `wait: true` poll or F12's
+  `timeout` — those bound the *conversation*, not the command.
+
+#### 6. Tests to add (final)
+
+Gateway sandbox (`tests/test_f19_limits.py`), with the existing harness:
+
+* a `sleep 10` command with `seconds: 5` is stopped, `exit_code` 124, the
+  marker in `messages` (MCP) and `[ESHU exit=124]` + marker (direct), and the
+  F5 row has `limit: time`;
+* a command printing 2 MiB with `bytes: 65536` keeps exactly 65536 bytes,
+  `truncated` is true, the marker says `output cut at 65536 bytes`, and the F5
+  row has `limit: bytes`;
+* a stream that ends exactly at the cap is **not** marked cut (the probe
+  byte);
+* a human-approved run (no `run_limit`) is unbounded: `sleep 6` finishes and
+  no marker appears;
+* `run_limit` present but out of range / non-numeric / negative → the call is
+  refused and nothing runs;
+* `run_limit` on a 200 response with `status: pending` is ignored (no run);
+* the F5 capture path is untouched for an unlimited run (regex-allowlist and
+  ticket paths).
+
+Dashboard (`tests/test_f19_limits.py`):
+
+* `run_limit` is added to `/api/request` only for `reason = read-lane`
+  (pending rows and human-approved rows get none);
+* `/api/request_status/{id}` and `/api/ticket/{id}` carry it for an
+  unattended approved row;
+* defaults are 60/1048576; a corrupt meta value falls back to the defaults;
+  the settings endpoint rejects 4 s, 301 s, 65535 bytes and 8 MiB + 1;
+* `receive_request` refuses to auto-approve a read-lane row on a gateway
+  without `run_limits: v1` (row pending, reason `read-lane-no-limits`, audit
+  row written);
+* with the capability present, the row is approved as today;
+* `/api/exec-result` stores `limit` and rejects an unknown value.
+
+`bash scripts/verify.sh`: `2331 passed, 7 warnings in 430.08s (0:07:10)` (docs-only; this branch is `feature-roadmap` + the note, so F12's new tests are not in it).
 
 ### Reviewer notes
 
@@ -5507,6 +5754,6 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 15 | F15 | probes | dashboard + MCP | Ready after F12 | `feat/f15-probes` | F4, F12 | |
 | 16 | F16 | recipes | dashboard + MCP | Design first (questions listed) | `feat/f16-recipes` | F3, F12, F13 | design approval + security reviewer sign-off |
 | 17 | F17 | local-agent | dashboard + docs | Ready after F12–F16 | `feat/f17-local-agent` | F12–F16 | |
-| 18 | F19 | unattended-limits | gateway + dashboard | Design first; before F4 `on` is unlocked | `feat/f19-unattended-limits` | F4, F5 | design approval + security reviewer sign-off |
+| 18 | F19 | unattended-limits | gateway + dashboard | **Design note written** — awaiting review; before F4 `on` is unlocked | `feat/f19-unattended-limits` | F4, F5 | design approval + security reviewer sign-off |
 Chunks are done **in the order column**; each new chunk branches from the
 updated `feature-roadmap` after the previous one is merged.
