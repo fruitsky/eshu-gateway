@@ -3908,6 +3908,30 @@ them to the note (no code):
   Add one option for the security reviewer to decide: a per-gateway "never
   accept the dashboard key" switch (the installer omits the line).
 
+**Design round 3 (2026-11-09, main feature reviewer): feature side approved;
+to the security reviewer.** A1–A5 are complete and specific. I recomputed the
+shared test vector independently (command hash, derived key and signature)
+and all three match. Two small points to apply in the code, with no need for
+another design round:
+
+* **N1** `consume_nonce` checks `"$ts $nonce"`. Check the **nonce alone**,
+  so a repeated nonce is refused whatever timestamp it comes with. The MAC
+  already binds the timestamp, but the store should not depend on that.
+* **N2** The envelope prints `request_id` from `DISPLAY_ID`, which is
+  zero-padded (`000123`) and is not a valid JSON number. Use
+  `REQUEST_ID_INT`. Add it to the envelope test.
+
+**For the security reviewer:**
+
+1. The key derivation (§5, A2).
+2. The nonce store failing closed (A1).
+3. The ticket compatibility rules (A4).
+4. The accepted risk in §12 (A5): with the dashboard key, the dashboard can
+   start commands as well as approve them. Decide whether the per-gateway
+   "never accept the dashboard key" switch is in scope.
+5. The note moves the existing `ESHU_SESSION_SIG` key-on-argv to Chunk 7.
+
+
 ---
 
 ## Chunk F13 — Session conclusions & runbooks · slug `session-conclusions` · dashboard + MCP
@@ -4318,7 +4342,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 5a | X1 | ctx-actions | dashboard | Merged | `fix/x1-ctx-actions` | — | FYI to security reviewer (approve ignored status) |
 | 6 | F5 | exec-results | gateway + dashboard | Merged | `feat/f5-exec-results` | — | |
 | 6a | F18 | request-context | dashboard | Merged | `feat/f18-request-context` | F1, F5, F7, X1 | |
-| 7 | F12 | ssh-exec | dashboard + gateway | **Design approved in principle; fold A1–A5, then security review** | `feat/f12-ssh-exec` | F4, F5 | design approval + security reviewer sign-off |
+| 7 | F12 | ssh-exec | dashboard + gateway | **Design approved (feature); with the security reviewer** | `feat/f12-ssh-exec` | F4, F5 | design approval + security reviewer sign-off |
 | 8 | F6 | session-wrapup | dashboard | Ready (after F12) | `feat/f6-session-wrapup` | F3, F4, F5 | |
 | 9 | F13 | session-conclusions | dashboard + MCP | Ready (after F6) | `feat/f13-session-conclusions` | F5, F6 | |
 | 10 | F8 | test-traffic | dashboard | Ready (after F13) | `feat/f8-test-traffic` | — | low priority |
