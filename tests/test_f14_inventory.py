@@ -10,6 +10,7 @@ import json
 import os
 import shutil
 import subprocess
+from contextlib import contextmanager
 
 import pytest
 
@@ -19,10 +20,14 @@ from core.inventory import (
     set_interval_minutes, stale_sources, whereis,
 )
 from core.pihole_seed import seed_pihole_tools
+from core.agent_context import reset_current_agent, set_current_agent
 from core.read_policy import is_read_integration_call
 from core.tool_handlers import run_handler
+from db.audit import get_audit_log
 from db.gateways import register_gateway
-from db.integrations import create_integration, get_integration, get_tool
+from db.integrations import (
+    create_integration, create_tool, get_integration, get_tool,
+)
 from db.inventory import get_inventory_items, replace_source_items
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -316,3 +321,120 @@ class TestUi:
         assert 'stale' in out['chips']
         assert 'is claimed by' in out['entity']
         assert out['empty'].count('inv-entity') == 1
+
+
+@contextmanager
+def _acting_as(agent):
+    token = set_current_agent(agent)
+    try:
+        yield agent
+    finally:
+        reset_current_agent(token)
+
+
+def _agent(name, **policy):
+    from db.agent_policies import get_agent_policy, set_agent_policy
+    from db.agent_tokens import create_agent_token, get_agent_by_token
+    raw, agent_id = create_agent_token(name)
+    if policy:
+        set_agent_policy(agent_id, **policy)
+    agent = get_agent_by_token(raw)
+    agent['policy'] = get_agent_policy(agent_id)
+    return agent
+
+
+@pytest.fixture
+def world(temp_db):
+    """Three integrations with one read tool each, and one shared entity."""
+    for name, kind, tool in (
+            ('ha', 'ha', 'list_entities'),
+            ('pve', 'proxmox', 'get_cluster_resources'),
+            ('omada', 'omada', 'list_known_clients')):
+        create_integration(name, 'http://192.0.2.70/api', 'none', '', kind=kind)
+        integration = get_integration(name)
+        create_tool(integration['id'], tool, 'Read something', 'GET', '/x',
+                    [], '', read_only=True)
+    register_gateway('192.0.2.10', 'web01', 'v15.3')
+    replace_source_items('eshu', [
+        {'kind': 'gateway', 'key': '192.0.2.10', 'name': 'web01',
+         'ips': ['192.0.2.10'], 'extra': {}}])
+    replace_source_items('ha', [
+        {'kind': 'client', 'key': 'ha1', 'name': 'ha-thing',
+         'ips': ['192.0.2.10'], 'extra': {'ha_domain': 'light'}}])
+    replace_source_items('pve', [
+        {'kind': 'guest', 'key': 'pve1', 'name': 'web01',
+         'ips': ['192.0.2.10'], 'vmid': '103', 'host': 'pve01', 'extra': {}}])
+    replace_source_items('omada', [
+        {'kind': 'client', 'key': 'om1', 'name': 'web01',
+         'ips': ['192.0.2.10'], 'extra': {'mac': 'AA:BB:CC:DD:EE:01'}}])
+
+
+class TestWhereisAgentPolicy:
+    """R1: whereis goes through agent policy and only shows allowed sources."""
+
+    def test_f14_a_denied_agent_is_refused(self, world):
+        from core.mcp_server import whereis_fn
+        agent = _agent('home-only', tools_mode='allowlist',
+                       tools=['ha_list_entities'])
+        with _acting_as(agent):
+            out = json.loads(whereis_fn()('web01'))
+        assert out['error'] == 'forbidden'
+        assert "whereis" in out['reason']
+
+    def test_f14_an_ha_only_agent_sees_no_proxmox_or_omada_fields(self, world):
+        from core.mcp_server import whereis_fn
+        agent = _agent('ha-only', tools_mode='allowlist',
+                       tools=['ha_list_entities', 'whereis'])
+        with _acting_as(agent):
+            out = json.loads(whereis_fn()('web01'))
+        entity = out['entities'][0]
+        assert {row['source'] for row in entity['sources']} == {'eshu', 'ha'}
+        assert entity['vmids'] == []
+        assert 'mac' not in entity['extra']
+        assert 'ha_domain' in entity['extra']
+
+    def test_f14_a_proxmox_agent_sees_the_guest_but_not_the_omada_mac(self, world):
+        from core.mcp_server import whereis_fn
+        agent = _agent('pve-only', tools_mode='allowlist',
+                       tools=['pve_get_cluster_resources', 'whereis'])
+        with _acting_as(agent):
+            out = json.loads(whereis_fn()('web01'))
+        entity = out['entities'][0]
+        assert {row['source'] for row in entity['sources']} == {'eshu', 'pve'}
+        assert entity['vmids'] == ['103']
+        assert 'mac' not in entity['extra']
+        assert 'ha_domain' not in entity['extra']
+
+    def test_f14_an_unrestricted_agent_sees_the_full_join(self, world):
+        from core.mcp_server import whereis_fn
+        agent = _agent('everything', tools_mode='all')
+        with _acting_as(agent):
+            out = json.loads(whereis_fn()('web01'))
+        entity = out['entities'][0]
+        assert {row['source'] for row in entity['sources']} == {
+            'eshu', 'ha', 'pve', 'omada'}
+        assert entity['vmids'] == ['103']
+        assert entity['extra']['mac'] == 'AA:BB:CC:DD:EE:01'
+
+    def test_f14_the_call_is_audited(self, world):
+        from core.mcp_server import whereis_fn
+        agent = _agent('audited', tools_mode='all')
+        with _acting_as(agent):
+            json.loads(whereis_fn()('web01'))
+        events = [e for e in get_audit_log()
+                  if e['event_type'] == 'whereis_query']
+        assert events
+        assert 'audited' in events[0]['details']
+        assert 'query_len=5' in events[0]['details']
+        assert 'entities=1' in events[0]['details']
+
+    def test_f14_whereis_is_not_always_allowed(self):
+        from core import mcp_server
+        assert 'whereis' not in mcp_server._ALWAYS_ALLOWED
+
+    def test_f14_control_characters_are_stripped(self):
+        replace_source_items('eshu', [
+            {'kind': 'gateway', 'key': '1',
+             'name': 'web\x01\x1b01', 'ips': ['192.0.2.40'], 'extra': {}}])
+        entity = whereis('web')['entities'][0]
+        assert entity['name'] == 'web01'

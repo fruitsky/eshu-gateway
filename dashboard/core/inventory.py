@@ -25,9 +25,13 @@ from core.integration_proxy import execute_integration_call
 from core.ha_ws import execute_ws_call
 from core.read_policy import is_read_integration_call
 from core.tool_handlers import run_handler
+from core.agent_context import get_current_agent
+from db.audit import record_audit_event
 from db.core import db_conn
 from db.gateways import get_gateways
-from db.integrations import get_integration, get_integrations, get_tool
+from db.integrations import (
+    get_integration, get_integrations, get_tool, get_tools,
+)
 from db.inventory import (
     get_inventory_items, get_inventory_sources, record_source,
     replace_source_items,
@@ -42,6 +46,14 @@ WHEREIS_MAX = 5
 WHEREIS_MAX_CHARS = 600
 
 _LOCK = threading.Lock()
+
+# Device- and guest-chosen names are untrusted text for a model: strip control
+# characters before they reach the card or the MCP result.
+_CONTROL_RE = re.compile(r'[\x00-\x1f\x7f]+')
+
+
+def _clean(value):
+    return _CONTROL_RE.sub('', str(value or ''))[:200]
 _STOP = threading.Event()
 
 # Kind priority when picking an entity's display name.
@@ -118,6 +130,32 @@ def _call_tool(integration, tool_name, args):
         raise
     except Exception as exc:  # noqa: BLE001 - a source must never crash a refresh
         raise SourceError('%s: %s' % (type(exc).__name__, exc))
+
+
+def allowed_sources(agent=None):
+    """The sources this caller may read, or None for unrestricted (operator).
+
+    Eshu's own gateway rows are always allowed. An integration's rows are
+    allowed only when the agent's policy permits at least one enabled read
+    tool on that integration — the caller's policy decides, never the
+    inventory's own opinion.
+    """
+    if agent is None:
+        return None
+    from core.agent_policy import evaluate_call
+    allowed = {'eshu'}
+    for integration in get_integrations():
+        if not integration.get('enabled'):
+            continue
+        for tool in get_tools(integration['id']):
+            if not tool.get('enabled') or not tool.get('read_only'):
+                continue
+            ok, _why = evaluate_call(agent, integration['name'], tool['name'],
+                                     {}, tool=tool, integration=integration)
+            if ok:
+                allowed.add(integration['name'])
+                break
+    return allowed
 
 
 def _integrations(kind):
@@ -409,9 +447,16 @@ def _join_keys(item):
         yield 'vmid:%s:%s' % (host, vmid)
 
 
-def build_entities(items=None, stale=None, now=None):
-    """Join the cached rows into entities (IP first, then normalised name)."""
+def build_entities(items=None, stale=None, now=None, allowed=None):
+    """Join the cached rows into entities (IP first, then normalised name).
+
+    `allowed` is a set of source names the caller may read (None = all);
+    filtered *before* the join, so an entity never carries fields from a
+    source the caller cannot see.
+    """
     items = list(get_inventory_items() if items is None else items)
+    if allowed is not None:
+        items = [item for item in items if item.get('source') in allowed]
     stale = stale_sources(now) if stale is None else stale
     parent = list(range(len(items)))
 
@@ -444,21 +489,21 @@ def build_entities(items=None, stale=None, now=None):
 def _entity(members, stale):
     ordered = sorted(members, key=lambda item: (
         _NAME_ORDER.get(item.get('kind'), 9), item.get('name') or ''))
-    name = ordered[0].get('name') or ordered[0].get('key') or ''
+    name = _clean(ordered[0].get('name') or ordered[0].get('key') or '')
     ips, fqdns, hosts, vmids, urls = [], [], [], [], []
     for item in ordered:
         for ip in item.get('ips') or []:
             if ip not in ips:
-                ips.append(ip)
+                ips.append(_clean(ip))
         for fqdn in item.get('fqdns') or []:
             if fqdn not in fqdns:
-                fqdns.append(fqdn)
+                fqdns.append(_clean(fqdn))
         if item.get('host') and item['host'] not in hosts:
-            hosts.append(item['host'])
+            hosts.append(_clean(item['host']))
         if item.get('vmid') and item['vmid'] not in vmids:
-            vmids.append(item['vmid'])
+            vmids.append(_clean(item['vmid']))
         if item.get('url') and item['url'] not in urls:
-            urls.append(item['url'])
+            urls.append(_clean(item['url']))
     sources, kinds, extra = [], [], {}
     for item in ordered:
         if item['source'] not in sources:
@@ -467,7 +512,7 @@ def _entity(members, stale):
             kinds.append(item.get('kind'))
         for key, value in (item.get('extra') or {}).items():
             if value not in (None, '', []) and key not in extra:
-                extra[key] = value
+                extra[key] = _clean(value) if isinstance(value, str) else value
     source_rows = []
     for source in sources:
         state = stale.get(source) or {}
@@ -514,10 +559,10 @@ def _matches(entity, needle):
         any(needle in value for value in values)
 
 
-def entities_matching(query, limit=25, items=None):
+def entities_matching(query, limit=25, items=None, allowed=None):
     """Exact matches first, then substrings, stable by name."""
     needle = str(query or '').strip().lower()
-    entities = build_entities(items)
+    entities = build_entities(items, allowed=allowed)
     if not needle:
         return entities[:limit]
     exact, partial = [], []
@@ -550,10 +595,31 @@ def _trim(entity, max_chars=WHEREIS_MAX_CHARS):
     return payload
 
 
-def whereis(query):
-    """The MCP answer: up to 5 entities, each under 600 characters."""
-    matches = entities_matching(query, limit=WHEREIS_MAX)
+def whereis(query, agent=None):
+    """The MCP answer: up to 5 entities, each under 600 characters.
+
+    Goes through the caller's agent policy: the tool itself must be in the
+    allowlist, and only the sources the agent may read are joined. The call is
+    audited with the agent, the query length (never the query) and the result
+    count.
+    """
+    if agent is None:
+        agent = get_current_agent()
+    if agent is not None:
+        from core.agent_policy import visible_tool_allowed
+        if not visible_tool_allowed(agent, 'whereis'):
+            return {'error': 'forbidden',
+                    'reason': "tool 'whereis' is not in this agent's allowlist",
+                    'policy': agent.get('name') or ''}
+    allowed = allowed_sources(agent)
+    matches = entities_matching(query, limit=WHEREIS_MAX, allowed=allowed)
     rows = [_trim(entity) for entity in matches]
+    if agent is not None:
+        record_audit_event(
+            'whereis_query',
+            details=f"whereis by '{agent.get('name') or 'agent'}': "
+                    f"query_len={len(str(query or ''))} entities={len(rows)}",
+            actor=agent.get('name') or '')
     return {
         'query': str(query or ''),
         'entities': rows,

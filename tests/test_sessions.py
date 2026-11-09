@@ -67,8 +67,8 @@ class TestSessionBegin:
 
     def test_session_tools_ignore_agent_allowlists(self):
         assert {"session_begin", "session_summary"} <= _ALWAYS_ALLOWED
-        # F14: whereis is always available too (it reads Eshu's own cache).
-        assert "whereis" in _ALWAYS_ALLOWED
+        # F14: whereis is an ordinary policy-gated tool, not a session built-in.
+        assert "whereis" not in _ALWAYS_ALLOWED
 
     def test_begin_can_adopt_an_existing_chat_id(self):
         out = json.loads(session_begin_fn()("adopted goal", "chat-123"))
