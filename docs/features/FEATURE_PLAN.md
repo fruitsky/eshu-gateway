@@ -3460,6 +3460,50 @@ regenerate with no diff, and `static/dev/` is untouched. No security sign-off
 is needed (§ 2.6a). The backlog keeps the argv exposure of the gateway token
 and of `/api/log`'s command (§ 11).
 
+**CI fix review, round 3 (2026-11-09): changes requested.** The diagnosis is
+good work: the `::error` annotations made GitHub's failure readable, and
+removing the second reader is the right fix. Nothing can wedge now. Four
+problems in `capture_tail()`, all reproduced with synthetic input:
+
+* **C1 (must): the trimmer can change the exit code.** `set -o pipefail` is on,
+  so if `awk` fails, the pipeline reports awk's status, not the command's.
+  An unwritable capture file (tmpfs full, `mktemp` file removed) turns rc 0
+  into 2, and rc 3 into 2. `test_f5_gateway_dead_trimmer_keeps_stdout_and_exit`
+  does not catch it: it stubs `tail`, which the run no longer calls, so it
+  passes without exercising anything. Fix: take the rc from
+  `PIPESTATUS[0]` (with `set +e` around the pipeline), and make the awk END
+  write failure-tolerant. Rewrite the test so the *awk* write fails (for
+  example, the capture path is replaced by a directory before the run) and
+  assert rc, stdout and `[ESHU exit=N]` are the command's.
+* **C2 (must): quadratic cost.** Every line copies the 16 KiB buffer.
+  `seq 2000000` through `capture_tail` takes 26.6 s with gawk and 2.8 s with
+  mawk, against 0.06 s for `cat`. A root process burning CPU on a large
+  `journalctl` or `find` in `tail` mode is a regression. A ring of lines
+  with a running byte total (drop the oldest lines while the total minus the
+  oldest is still over 16385, trim the first line at END) takes 1.7 s with gawk
+  and 1.0 s with mawk, and its file is byte-identical to `tail -c 16385`. Add
+  a test that bounds the time for ~200k lines generously (say < 10 s), so it
+  catches the quadratic case without being flaky.
+* **C3 (must): run awk with `LC_ALL=C`.** In a UTF-8 locale gawk's
+  `length`/`substr` count characters, not bytes, and invalid UTF-8 can be
+  handled differently by mawk and gawk. Bytes are what the cap means.
+  Test with multibyte output and with invalid bytes.
+* **C4 (should): a missing final newline is added.** `printf 'a\nb'` reaches
+  the agent as `a\nb\n`. `tee` was byte-exact. Portable awk cannot see the
+  missing newline (only gawk's `RT`), so either accept it and say so in § 2.7
+  and the F5 notes, or keep the agent's stream byte-exact by other means.
+  Either is fine; pin it with a test.
+
+Also: test under **mawk** as well as gawk. Debian and Ubuntu gateways ship
+mawk as `awk`, and CI images often have gawk. A test that runs the
+capture function under each awk that is installed (skip if absent) is
+enough. If you know why the old reader never saw EOF on the runners, add one
+line about it; it is not blocking.
+
+**Security gate:** this changes the root gateway script, so after C1–C4 the
+security reviewer checks the `capture_tail`/`run_sanitized` diff before merge
+(§ 2.6a). The CI annotation helper in `tests/conftest.py` is fine as it is.
+
 ---
 
 ## Chunk X1 — Sidebar actions and pending-only decisions · slug `ctx-actions` · dashboard · BUG
