@@ -80,6 +80,23 @@ PROC_DENY_NAMES = frozenset({'kcore', 'kmsg'})
 # R2: a glob or a `..` anywhere makes the textual prefix meaningless.
 GLOB_CHARS = frozenset('*?[]{}')
 
+# SC9 (round 7): the shell expands these in an unquoted word, and F1's lexer
+# has already removed the quoting that would have stopped it. The rule is
+# checked on the raw step words, before `shlex.split` strips anything.
+SHELL_EXPANSION_CHARS = frozenset('$`{}*?[]\\')
+
+# Q2: the only status operands that are names, never files.
+UNIT_NAME_VERBS = frozenset({
+    ('systemctl', 'status'), ('systemctl', 'is-active'),
+    ('systemctl', 'is-enabled'),
+})
+UNIT_NAME_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9@_.:-]{0,63}')
+MAX_UNIT_NAMES = 8
+
+# R5: binary or sparse logs, where a line cap does not bound the read.
+LOG_BINARY_TREES = ('/var/log/journal',)
+LOG_BINARY_NAMES = ('lastlog', 'wtmp', 'btmp', 'faillog')
+
 # SC6: kernel internals that block, dump kernel data, or hold EFI secrets.
 SYS_DENY_PREFIXES = (
     '/sys/firmware',
@@ -305,8 +322,8 @@ OPTION_SPECS = {
                '-H', '--with-filename', '-h', '--no-filename',
                '-E', '--extended-regexp', '-F', '--fixed-strings',
                '-G', '--basic-regexp', '-w',
-               '--word-regexp', '-x', '--line-regexp', '-a', '--text'),
-        letters='ivnclLoqsHhEFGwxa',
+               '--word-regexp', '-x', '--line-regexp'),
+        letters='ivnclLoqsHhEFGwx',
         values={'-e': 'pattern', '--regexp': 'pattern',
                 '-m': 'mcount', '--max-count': 'mcount',
                 '-A': 'lines', '-B': 'lines', '-C': 'lines',
@@ -447,6 +464,27 @@ def _cat_allowed(path):
     return path in SAFE_PATH_EXACT
 
 
+def _has_shell_expansion(word):
+    """SC9: True when the shell would expand this word (quoted or not)."""
+    if any(ch in SHELL_EXPANSION_CHARS for ch in word):
+        return True
+    probe = word
+    while probe[:1] in ("'", '"'):
+        probe = probe[1:]
+    return probe.startswith('~')
+
+
+def _binary_log(path):
+    """R5: a binary or sparse log under /var/log."""
+    if _under(path, LOG_BINARY_TREES):
+        return True
+    name = os.path.basename(path)
+    for base in LOG_BINARY_NAMES:
+        if name == base or name.startswith(base + '.'):
+            return True
+    return False
+
+
 def _path_ok(token):
     """R2/SC6: an absolute path inside the safe trees, no glob, no `..`.
 
@@ -558,6 +596,11 @@ def _check_files(verb, rest):
         for name in files:
             if _under(name, ('/proc', '/sys')):
                 return False, 'du-recursive'
+    if verb in ('head', 'tail', 'grep'):
+        # R5: a binary/sparse log defeats the line cap; journalctl is the read.
+        for name in files:
+            if _under_log(name) and _binary_log(name):
+                return False, 'binary-log'
     if verb == 'cat':
         for name in files:
             if not _cat_allowed(name):
@@ -595,8 +638,16 @@ def _check_status(verb, rest):
     if error:
         return False, error
     # SC2: a status verb reads no files, so any leftover word must already be
-    # a safe path to be allowed through.
+    # a safe path to be allowed through — except Q2's narrow unit-name form.
+    names = (verb, sub) in UNIT_NAME_VERBS
+    if names and len(operands) > MAX_UNIT_NAMES:
+        return False, 'unit-count'
     for operand in operands:
+        if names:
+            # Q2: a name, never a file, for the three reviewed subcommands.
+            if not UNIT_NAME_RE.fullmatch(operand):
+                return False, 'operand:' + operand
+            continue
         if not _path_ok(operand):
             return False, 'operand:' + operand
     if verb == 'journalctl':
@@ -609,8 +660,13 @@ def _check_status(verb, rest):
 
 
 def _step_ok(step):
-    """One step of the breakdown: SC1–SC6 for its words."""
+    """One step of the breakdown: SC1–SC9 for its words."""
     text = (step.get('text') or '').strip()
+    # SC9: before shlex strips F1's re-quoting, refuse any word the shell
+    # would expand — paths, option values and patterns alike.
+    for word in text.split():
+        if _has_shell_expansion(word):
+            return False, 'shell-expansion:' + word[:24]
     try:
         tokens = shlex.split(text)
     except ValueError:
@@ -647,6 +703,9 @@ def is_read_ssh(breakdown):
         # SC3: F1 records input redirections per step (and flags the command).
         if step.get('input_redirects'):
             return False, 'input-redirect'
+        # Q1 (round 7): a `&`-backgrounded step can outlive the session.
+        if step.get('background'):
+            return False, 'background'
         if (step.get('kind') or 'unknown') != 'read':
             return False, 'not-read'
         ok, why = _step_ok(step)

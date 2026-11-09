@@ -2552,17 +2552,20 @@ def get_statistics(request: Request, days: int = 14, gateway_ip: str = None, gat
                SUM(r.status = 'denied') AS denied
         FROM requests r
         WHERE r.reason = 'read-lane-shadow' AND r.created_at >= ?{ip_filter}
+          AND COALESCE(r.excluded, 0) = 0
     ''', (cutoff,) + ip_params)
     shadow = cursor.fetchone()
     cursor.execute(f'''
         SELECT r.command FROM requests r
         WHERE r.reason = 'read-lane-shadow' AND r.created_at >= ?{ip_filter}
+          AND COALESCE(r.excluded, 0) = 0
     ''', (cutoff,) + ip_params)
     lengths = sorted(len(r['command'] or '') for r in cursor.fetchall())
     median_len = lengths[len(lengths) // 2] if lengths else 0
     cursor.execute(f'''
         SELECT COUNT(*) AS n FROM requests r
         WHERE r.reason = 'read-lane' AND r.created_at >= ?{ip_filter}
+          AND COALESCE(r.excluded, 0) = 0
     ''', (cutoff,) + ip_params)
     result['read_lane'] = {
         'shadow_eligible': int(shadow['n'] or 0),

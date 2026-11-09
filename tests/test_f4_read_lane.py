@@ -66,9 +66,14 @@ ELIGIBLE = [
     # status verbs (no file operands; SC2 path-checks any operand, so a unit
     # name is not a read — see the INELIGIBLE list and the open question)
     'uptime',
+    'uptime && whoami',
     'df -h',
     'free -h',
     'systemctl status',
+    'systemctl status nginx',
+    'systemctl is-active nginx',
+    'systemctl is-enabled nginx',
+    'systemctl status nginx.service nginx.socket',
     'systemctl list-units --type=service',
     'systemctl list-timers --no-pager',
     'ip addr show',
@@ -180,12 +185,11 @@ INELIGIBLE = [
     'tail -f /var/log/syslog',
     'tail -F /var/log/syslog',
     'tail -n 5000 /var/log/syslog',
-    # SC2: a status verb reads no file, so a bare name is not a read
-    'systemctl status nginx',
-    'systemctl is-active nginx',
-    'systemctl is-enabled nginx',
+    # SC2: a status verb reads no file; only Q2's three subcommands take names
     'ip addr show dev eth0',
     'ip link set eth0 down',
+    'systemctl status /var/log/syslog',
+    'systemctl status $(whoami)',
     # probe class: verbs outside the allowlist
     'crontab -l',
     'git -C /srv/app log',
@@ -449,11 +453,15 @@ class TestSecurityConditions:
             assert _verdict(command)[0] is False, command
 
     def test_f4_sc2_a_status_operand_is_not_a_read(self):
-        """SC2: a word that is not an option or its value is path-checked."""
-        for command in ('systemctl status nginx', 'systemctl is-active nginx',
-                        'ip addr show dev eth0'):
+        """SC2: a status operand is a file unless Q2 names that subcommand."""
+        for command in ('ip addr show dev eth0',
+                        'systemctl status /var/log/syslog'):
             ok, why = _verdict(command)
-            assert ok is False and why.startswith('operand:'), (command, why)
+            assert ok is False and why.startswith(('operand:',
+                                                  'subcommand:')), (command, why)
+        # Q2: the three reviewed subcommands take a name, not a file.
+        assert _verdict('systemctl status nginx')[0] is True
+        assert _verdict('systemctl is-active nginx')[0] is True
         # The value of a listed option is not an operand.
         assert _verdict('journalctl -u nginx -n 5')[0] is True
 
@@ -544,8 +552,10 @@ class TestSecurityConditions:
         assert eligible(bd, {'action': 'auto_approved',
                              'detail_type': 'exact_whitelist'},
                         'uptime', 'on') == (True, '')
+        # Q1 (round 7): `shell_meta` is allowed — the lane parses each step.
+        assert eligible(bd, {'action': 'jit', 'detail_type': 'shell_meta'},
+                        'uptime', 'on') == (True, '')
         for verdict in ({'action': 'jit', 'detail_type': 'self_protection_jit'},
-                        {'action': 'jit', 'detail_type': 'shell_meta'},
                         {'action': 'jit', 'detail_type': 'future_kind'},
                         {'action': 'future_thing'}):
             ok, why = eligible(bd, verdict, 'uptime', 'on')
@@ -666,28 +676,141 @@ class TestRoundSixFixes:
         assert _verdict('grep -P -m 5 -e x /var/log/syslog')[0] is False
         assert _verdict('grep --perl-regexp -m 5 -e x /var/log/syslog')[0] is False
 
-    def test_f4_sc7_chained_read_is_not_lane_eligible_end_to_end(self, gateway):
-        """Round-5 behaviour: `shell_meta` is not a plain `jit`.
-
-        The security round 2 answered Q1 ("allow shell_meta"), so the next
-        round flips this test together with SC9; it is kept here because this
-        round was scoped to the feature reviewer's R1-R4.
-        """
+    def test_f4_sc7_chained_read_is_lane_eligible_end_to_end(self, gateway):
+        """Q1 (round 7): a `shell_meta` verdict is eligible when every step is."""
         client, headers = gateway
         set_gateway_read_lane('10.0.0.1', 'shadow')
         _jit(client, headers, 'uptime && whoami')
         row = next(r for r in get_all_requests()
                    if r['command'] == 'uptime && whoami')
         assert row['status'] == 'pending'
-        assert row['reason'] == ''
-        set_gateway_read_lane('10.0.0.1', 'on')
+        assert row['reason'] == 'read-lane-shadow'
         from db.core import db_conn
         with db_conn() as conn:
             conn.execute("INSERT OR REPLACE INTO meta (key, value) "
                          "VALUES ('read_lane_on_enabled', '1')")
             conn.commit()
+        set_gateway_read_lane('10.0.0.1', 'on')
         response = _jit(client, headers, 'uptime || whoami')
-        assert 'read_lane' not in response
+        assert response.get('read_lane') == 'on'
+        # The metacharacter verdict is what made this a `shell_meta` jit.
+        from core.cmd_parse import breakdown as _bd
+        from core.policy_eval import evaluate_policy_verdict
+        verdict = evaluate_policy_verdict('uptime || whoami', '', '', '')
+        assert verdict['detail_type'] == 'shell_meta'
+
+
+class TestRoundSeven:
+    """Round 7 — security round 2 (SC9, R5, Q1-Q3) and the recursion rule."""
+
+    def test_f4_sc9_expansion_characters_are_refused_in_a_path(self):
+        for ch in ('$', '`', '{', '}', '*', '?', '[', ']'):
+            command = 'cat /var/log/a%sb' % ch
+            ok, why = _verdict(command)
+            assert ok is False, (command, why)
+            # A backtick is a substitution to F1, so it may refuse earlier.
+            assert 'shell-expansion' in why or why == 'not-read', (command, why)
+        # A quoted backslash survives into the step text; an unquoted one is
+        # consumed by F1 exactly as the shell would consume it.
+        ok, why = _verdict("cat '/var/log/a\\b'")
+        assert ok is False and 'shell-expansion' in why, why
+        assert _verdict('head ~/notes')[0] is False
+
+    def test_f4_sc9_expansion_characters_are_refused_in_a_pattern(self):
+        for pattern in ('a$', 'a`b', 'a{b}', '*.log', 'a?b', '[ab]'):
+            command = "grep -e '%s' /var/log/syslog" % pattern
+            ok, why = _verdict(command)
+            assert ok is False, (command, why)
+            assert 'shell-expansion' in why or why == 'not-read', (command, why)
+        # The first-word pattern form is checked too.
+        assert _verdict('grep *.log /var/log/syslog')[0] is False
+
+    def test_f4_sc9_expansion_characters_are_refused_in_an_option_value(self):
+        for command in ('journalctl -u nginx$ -n 5',
+                        'systemctl status ngin$x',
+                        'zfs list -t filesystem{1}'):
+            ok, why = _verdict(command)
+            assert ok is False, (command, why)
+            assert 'shell-expansion' in why, (command, why)
+
+    def test_f4_sc9_a_bare_assignment_is_refused(self):
+        ok, why = _verdict('FOO=1')
+        assert ok is False and why == 'not-read'
+        from core.cmd_parse import breakdown as _bd
+        step = _bd('FOO=1')['steps'][0]
+        assert step['kind'] == 'unknown'
+        assert step['why'] == 'bare variable assignment'
+        # A prefixed assignment keeps F1's `read` kind but the step text starts
+        # with the assignment, so the lane refuses it (fail closed).
+        assert _verdict('FOO=1 cat /proc/loadavg')[0] is False
+
+    def test_f4_recursion_is_not_in_the_lane_in_any_spelling(self):
+        for spelling in ('-r', '-R', '--recursive', '--dereference-recursive',
+                         '-ir', '-ri', '-rn', '-d recurse',
+                         '--directories=recurse'):
+            command = 'grep %s -m 5 -e x /var/log' % spelling
+            ok, why = _verdict(command)
+            assert ok is False, (command, why)
+        for operand in ('/var/log', '/var/log/'):
+            assert _verdict('grep -r -m 5 -e x %s' % operand)[0] is False
+
+    def test_f4_r5_binary_logs_are_refused(self):
+        for path in ('/var/log/journal', '/var/log/journal/x',
+                     '/var/log/lastlog', '/var/log/wtmp', '/var/log/wtmp.1',
+                     '/var/log/btmp', '/var/log/faillog'):
+            for verb in ('head -n 5 {p}', 'tail -n 5 {p}',
+                         'grep -m 5 -e x {p}'):
+                command = verb.format(p=path)
+                ok, why = _verdict(command)
+                assert ok is False, (command, why)
+                assert why == 'binary-log', (command, why)
+        # Metadata is still fine, and an ordinary log still reads.
+        assert _verdict('ls /var/log/wtmp')[0] is True
+        assert _verdict('stat /var/log/journal')[0] is True
+        assert _verdict('head -n 5 /var/log/syslog')[0] is True
+
+    def test_f4_r5_grep_cannot_read_binary_as_text(self):
+        for command in ('grep -a -m 5 -e x /var/log/syslog',
+                        'grep --text -m 5 -e x /var/log/syslog',
+                        'grep --binary-files=text -m 5 -e x /var/log/syslog',
+                        'grep -am 5 -e x /var/log/syslog'):
+            ok, why = _verdict(command)
+            assert ok is False, (command, why)
+
+    def test_f4_q1_a_backgrounded_step_is_refused(self):
+        for command in ('uptime &', 'uptime & whoami', 'df -h &'):
+            ok, why = _verdict(command)
+            assert ok is False and why == 'background', (command, why)
+        assert _verdict('uptime && whoami')[0] is True
+
+    def test_f4_q2_unit_names_at_and_over_each_limit(self):
+        assert _verdict('systemctl status ' + 'a' * 64)[0] is True
+        assert _verdict('systemctl status ' + 'a' * 65)[0] is False
+        eight = ' '.join('svc%d' % i for i in range(8))
+        nine = ' '.join('svc%d' % i for i in range(9))
+        assert _verdict('systemctl status ' + eight)[0] is True
+        ok, why = _verdict('systemctl status ' + nine)
+        assert ok is False and why == 'unit-count'
+        # A name must start with a letter or digit and carry no path chars.
+        for name in ('_nginx', '-nginx', 'ngin/x', "'nginx\\x2dservice'"):
+            assert _verdict('systemctl status ' + name)[0] is False, name
+        # Only the three reviewed subcommands take names.
+        assert _verdict('systemctl list-units nginx')[0] is False
+        assert _verdict('systemctl show nginx')[0] is False
+
+    def test_f4_q3_only_a_bare_sudo_is_recognised(self):
+        from core.cmd_parse import breakdown as _bd
+        assert _bd('sudo cat /var/log/syslog')['steps'][0]['context'] == ['sudo']
+        assert _bd('sudo -E cat /var/log/syslog')['steps'][0]['context'] == [
+            'sudo(options)']
+        assert _verdict('sudo cat /proc/loadavg')[0] is True
+        for command in ('sudo -E cat /proc/loadavg',
+                        'sudo -u root cat /proc/loadavg',
+                        'sudo -i cat /proc/loadavg',
+                        'sudo -- cat /proc/loadavg'):
+            ok, why = _verdict(command)
+            assert ok is False, (command, why)
+            assert why.startswith('context:'), (command, why)
 
 
 class TestReadPolicy:
