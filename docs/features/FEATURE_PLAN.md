@@ -5636,6 +5636,119 @@ bash, both worth seeing in review):
 
 `bash scripts/verify.sh`: `2462 passed, 7 warnings in 456.51s (0:07:36)` (the whole suite, on `aa268de`).
 
+#### Round 7: fixes for code round 1 (M1–M3, S1–S2; the gateway bash review R1–R4, S1–S4)
+
+The code commit is **`c137e55`**. **It contains the gateway bash**
+(`dashboard/eshu-gateway.sh`, `dashboard/eshu-poller.sh`,
+`dashboard/eshu-installer-template.sh`) and both regenerated installers, so
+that is the commit the security reviewer re-reads (only the diff, as asked).
+This notes commit is docs-only.
+
+**Feature reviewer.**
+
+* **M1 — an old gateway got a v2 ticket.** `db/requests.ticket_line` now
+  takes the gateway's reported format: `v2|ts|agent|session|cmd` only when
+  the stored `ssh_ticket_format` is `v2`, the old `ts|cmd` otherwise. Both
+  call sites pass it (`update_ticket_consumed_by_ip` for `/api/poll`,
+  `get_ticket_by_request_id` for `/api/ticket`), read in the same function so
+  a re-registration cannot change the format mid-delivery. An agent row on a
+  gateway that has not reported v2 is **refused**: the row is denied (a
+  terminal state the agent's `wait`/`check_request` sees) and a `jit_refused`
+  audit row is written, because the old format has no agent field and an
+  unsigned caller could claim it. Tests:
+  `test_an_old_gateway_gets_the_old_line_from_both_call_sites`,
+  `test_a_v2_gateway_gets_v2_from_both_call_sites`,
+  `test_an_agent_row_on_an_old_gateway_is_refused`,
+  `test_the_ticket_endpoint_refuses_an_agent_row_on_an_old_gateway` and the
+  `ticket_line` shape tests.
+* **M2 — the approval race on re-run.** `wait` re-runs only at `consumed`
+  (the poller has taken the ticket into the lockbox), never at `approved`;
+  `check_request` returns a `next_step` — `approved` reads "delivering to the
+  gateway — do not re-run yet", `consumed` reads "ready to re-run" — and the
+  `ssh_exec` description says `consumed` too. Tests:
+  `test_wait_reruns_once_consumed`, `test_wait_does_not_rerun_while_approved`
+  (a simulated poller lag: exactly one signed call, the row stays approved)
+  and `test_next_step_is_ready_only_after_consumed`.
+* **M3 — force-JIT failed open.** The re-derivation now uses
+  `db.agent_policies.DEFAULT_SSH_MODE` (the same constant `ssh_exec` uses):
+  an unknown agent, an exception and an unset mode all force JIT instead of
+  auto-running. Tests: `test_an_unknown_agent_fails_closed_to_approval`,
+  `test_a_policy_error_fails_closed_to_approval`,
+  `test_an_unset_ssh_mode_fails_closed_to_approval`.
+* **S1 — capability vs token file.** The installer claims
+  `ssh_agent_format=eshu-ssh-agent-v1` only when it will write
+  `/etc/eshu-token` (install/reinstall) or the file already exists (upgrade).
+  A self-updated gateway with no token file therefore reports no agent
+  format, and `ssh_exec` refuses with `ssh_not_ready` instead of every call
+  failing as `bad signature`. Ticket format v2 is still reported — the new
+  gateway script understands it without a token. Test:
+  `test_f12_register_reports_pin_and_capabilities`.
+* **S2 — an unverified agent in the log.** See R2.
+
+**Security reviewer (gateway bash).**
+
+* **R1 — the token was world-readable.** `write_gateway` creates the script
+  (and its temporary `.bak`) under `umask 077` and finishes 0700 root:root in
+  every installer mode; the token temp file is written under `umask 077` in
+  the installer and in both poller rotation paths, so it is never readably
+  transient. Tests: `test_f12_write_gateway_is_root_only_in_every_mode` (a
+  real run of the shipped `write_gateway` twice, covering the update path),
+  `test_f12_token_file_is_created_0600_under_a_permissive_umask` (runs the
+  block under `umask 022` and observes the mode *at the chmod*, proving the
+  creating umask) and `test_f12_poller_token_rotation_uses_umask_077`.
+* **R2/S2 — `PREFIX REFUSED` logged the raw agent value.** It now logs
+  `${ESHU_VERIFIED_AGENT:-none}`, set only after the MAC verifies, so a
+  value that failed its charset check never reaches syslog. Test:
+  `test_the_refusal_log_carries_no_unverified_agent` (a control byte in
+  `ESHU_AGENT`; nothing from it appears in the log).
+* **R3 — an unknown `ESHU_` word after the parse.** The gateway refuses a
+  command whose first word still starts with `ESHU_` after the prefixes are
+  stripped, which covers both an unknown key and a known key placed after
+  one. Tests: `test_an_unknown_eshu_key_is_refused_direct`,
+  `test_an_unknown_eshu_key_is_refused_in_mcp_mode`,
+  `test_a_known_key_after_an_unknown_one_is_refused`.
+* **R4 — MCP output was stored under `exit-only`.** `post_exec_result` now
+  keys on the capture mode alone: `off` posts nothing, `exit-only` stores the
+  exit code and duration, `tail` stores the tail (in MCP mode still read from
+  the envelope capture, the same stream). Tests:
+  `test_mcp_exit_only_stores_no_output`, `test_mcp_tail_still_stores_the_tail`.
+* **S1 — unmaced keys in a signed prefix.** A signed prefix carrying
+  `ESHU_WINDOW_TOKEN` or `ESHU_EXECUTION_ID` (neither is in the MAC) is
+  refused. Test: `test_a_signed_prefix_must_not_carry_unmaced_keys`.
+* **S2 — the nonce store was not self-protected.** `/var/lib/eshu` is on the
+  hard blocklist, so deleting it is FATAL. Test:
+  `test_the_nonce_store_is_self_protected`.
+* **S3 — sudoers allowed arguments.** The plain line is now
+  `/usr/local/bin/eshu-gateway.sh ""` (sudoers(5): `""` means no arguments);
+  the dashboard line already named its one argument. Test:
+  `test_f12_sudoers_allows_exactly_two_argv_shapes`.
+* **S4 — the host argument.** `ssh_exec` checks the gateway IP against
+  `IP_RE` (`[0-9A-Fa-f:.]{1,64}`, the gateway's own `TARGET_IP` pattern)
+  just before `run_ssh`, so neither a hostname nor an option-like string can
+  reach `build_argv`. Test:
+  `test_a_gateway_whose_ip_is_not_an_ip_is_refused`.
+
+**The two open questions, answered as the reviews decided.**
+
+1. **MCP output and capture `off`.** The operator's setting wins (R4, §2.5):
+   `off` writes no `request_results` row, `exit-only` stores the exit code and
+   duration only, `tail` stores the tail. The MCP envelope still carries the
+   bytes to the agent — the row is a dashboard artefact, not the agent's
+   only copy.
+2. **`ALLOWED_SSH_FROM`.** The installer warning (already in the installer,
+   where the value exists) is the answer; the security reviewer recorded that
+   it is enough for G7. The optional UI echo of the applied `from=` would
+   need the installer to report it at registration — deferred, not needed
+   for the gate.
+
+**One thing the reviewer should see.** `_refuse_agent_ticket` takes the
+request id explicitly, and both lookup paths capture the fields the audit
+needs inside the `with` block: `get_ticket_by_request_id` projects only the
+columns it returns (no `id`), and a `sqlite3.Row` is not safe to read after
+its connection closes.
+
+`bash scripts/verify.sh`: `2484 passed, 7 warnings in 461.05s (0:07:41)`.
+
 ### Reviewer notes
 
 **Round 1 (2026-11-09): design changes requested. Not ready for the security
@@ -6918,7 +7031,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 5a | X1 | ctx-actions | dashboard | Merged | `fix/x1-ctx-actions` | — | FYI to security reviewer (approve ignored status) |
 | 6 | F5 | exec-results | gateway + dashboard | Merged | `feat/f5-exec-results` | — | |
 | 6a | F18 | request-context | dashboard | Merged | `feat/f18-request-context` | F1, F5, F7, X1 | |
-| 7 | F12 | ssh-exec | dashboard + gateway | **Code round 1: changes requested (M1–M3); gateway bash with the security reviewer** | `feat/f12-ssh-exec` @ `aa268de` | F4, F5 | design approval + security reviewer sign-off |
+| 7 | F12 | ssh-exec | dashboard + gateway | **Round 2: code round 1 and the bash review fixed (M1–M3, S1–S2, R1–R4, S1–S4); re-review + security diff check** | `feat/f12-ssh-exec` @ `c137e55` | F4, F5 | design approval + security reviewer sign-off |
 | 8 | F6 | session-wrapup | dashboard | Merged | `feat/f6-session-wrapup` | F3, F4, F5 | |
 | 9 | F13 | session-conclusions | dashboard + MCP | Merged | `feat/f13-session-conclusions` | F5, F6 | |
 | 10 | F8 | test-traffic | dashboard | Merged | `feat/f8-test-traffic` | — | low priority |
