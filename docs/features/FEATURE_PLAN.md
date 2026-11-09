@@ -3344,8 +3344,11 @@ consume_nonce() {            # $1 = nonce hex, $2 = ts
   now=$(date +%s)
   exec 9>>/run/eshu/nonces || return 1
   flock -w 2 9 || { exec 9>&-; return 1; }
-  awk -v lo=$((now - 300)) '$1 >= lo' /run/eshu/nonces > /run/eshu/nonces.tmp     && cat /run/eshu/nonces.tmp > /run/eshu/nonces || rc=1
-  if [ "$rc" = 0 ] && grep -qxF "$ts $nonce" /run/eshu/nonces; then rc=2; fi
+  awk -v lo=$((now - 300)) '$1 >= lo' /run/eshu/nonces > /run/eshu/nonces.tmp || rc=1
+  if [ "$rc" = 0 ]; then cat /run/eshu/nonces.tmp > /run/eshu/nonces || rc=1; fi
+  # N1: match the nonce on its own, so a repeat is refused whatever ts it
+  # carries (the MAC binds ts, but the store must not depend on that).
+  if [ "$rc" = 0 ] && awk -v n="$nonce" '$2 == n { f = 1 } END { exit !f }' /run/eshu/nonces; then rc=2; fi
   if [ "$rc" = 0 ] && [ "$(wc -l < /run/eshu/nonces)" -ge 4096 ]; then rc=3; fi
   if [ "$rc" = 0 ]; then printf '%s %s\n' "$ts" "$nonce" >> /run/eshu/nonces; fi
   rm -f /run/eshu/nonces.tmp
@@ -3536,8 +3539,10 @@ ESHU_MCP_CAP=$(mktemp -p "$ESHU_RUN_DIR" eshu-mcp.XXXXXX) || exit 1
 mcp_size=$(wc -c < "$ESHU_MCP_CAP")
 mcp_trunc=false; [ "$mcp_size" -gt 65536 ] && mcp_trunc=true
 mcp_b64=$(tail -c 65536 "$ESHU_MCP_CAP" | base64 -w0)
+# N2: request_id is the integer id, never the zero-padded DISPLAY_ID (which is
+# not a valid JSON number).
 printf 'ESHU-MCP-ENVELOPE {"status":"%s","request_id":%s,"exit_code":%s,"output_b64":"%s","truncated":%s,"messages":[%s]}\n' \
-  "$status" "${DISPLAY_ID:-0}" "$rc" "$mcp_b64" "$mcp_trunc" "$ESHU_MSG_JSON"
+  "$status" "$REQUEST_ID_INT" "$rc" "$mcp_b64" "$mcp_trunc" "$ESHU_MSG_JSON"
 ```
 
 **The cap is 64 KiB for the MCP envelope** (the design's number). F5's
@@ -3549,7 +3554,9 @@ cap after decoding, so a gateway that sends more is still trimmed.
 Test: in MCP mode, stdout is **exactly one** `ESHU-MCP-ENVELOPE` line on
 every path — ran, pending, blocked, frozen, Zero-Trust, encoded payload and a
 bad signature — with no banner or status line outside it, and any other
-stdout makes the dashboard return `refused`/`bad-envelope`.
+stdout makes the dashboard return `refused`/`bad-envelope`. The envelope's
+`request_id` is an integer (`REQUEST_ID_INT`), never the zero-padded
+`DISPLAY_ID` (N2).
 
 #### 9. Migration and launch
 
@@ -3696,7 +3703,21 @@ should ship in this chunk or in F19/Chunk 7.
   mitigations, plus the per-gateway "never accept the dashboard key" option
   for the security reviewer to accept or defer (§12).
 
-`bash scripts/verify.sh`: `1856 passed, 3 skipped, 7 warnings in 379.12s (0:06:19)` (docs-only; the three skips are F18's read-lane tests).
+#### Round 4: code-time notes from design round 3
+
+No code: F12 waits for the operator's go-ahead. The security sign-off below is
+recorded, and its G1-G8 conditions must be written into this note before the
+first line of code; the gateway bash then goes back to the security chat.
+
+* **N1 — the nonce store matches the nonce alone.** `consume_nonce` looks for
+  `$2 == nonce` (awk), so a repeated nonce is refused whatever timestamp it
+  carries. The MAC already binds the timestamp, but the store does not rely
+  on that. The A1 snippet shows the check.
+* **N2 — the envelope's `request_id` is an integer.** It prints
+  `REQUEST_ID_INT`, never the zero-padded `DISPLAY_ID`, which is not a valid
+  JSON number. The A3 snippet and its test say so.
+
+`bash scripts/verify.sh`: `1856 passed, 3 skipped, 7 warnings in 380.40s (0:06:20)` (docs-only; the three skips are F18's read-lane tests).
 
 ### Reviewer notes
 
