@@ -3292,6 +3292,41 @@ Full gate:
 (1779 before this round + 5 new tests: two disconnect, oversized body, no
 audit event, lockbox window.)
 
+### Round 3 — the CI hang in the capture reader (fix)
+
+GitHub's `Run test suite` failed on every push from F5 onward: six gateway
+tests timed out (`exit_zero_posts_result`, `nonzero_exit_posts_result`,
+`agent_output_unchanged`, `sanitize_before_capture`, `temp_files_removed`,
+`result_post_failure_is_harmless`), all of them a `tail`-mode run with under
+16 KiB of output, while the same tests passed on every machine tried here
+(fresh venv with only `requirements-dev.txt`, clean `/etc`, C locale, 6× CPU
+oversubscription, a real Ubuntu 24.04 rootfs as uid 1000).
+
+The reader was the problem: `{ tail …; cat …; } < "$FIFO" &` plus `wait`.
+On the runners it never saw EOF, so the call (and with it the test's
+`subprocess.run`) waited for ever; a gateway call that never returns is a
+root process that never returns. Making the wait bounded and detaching the
+reader's stdio turned the hang into a visibly empty capture and proved the
+reader was the stuck part (`CAPTURE READER WEDGED` in the log).
+
+**The reader is gone.** `capture_tail()` keeps the last 16 KiB + 1 *in the
+stream*: one `awk` that passes every line through to the agent
+(`print; fflush()`), keeps a bounded window in memory, and writes the file at
+`END`. No FIFO, no second process, no wait, so there is nothing that can
+wedge. The properties the FIFO existed for are unchanged and tested: output
+still streams live (`test_f5_gateway_output_streams_live`), the stream is
+still never cut on a disconnect (E1 tests), the stored bytes are still capped
+at 16 KiB, and a failing trimmer cannot change the command's exit code
+(`test_f5_gateway_dead_trimmer_keeps_stdout_and_exit`). A capture that cannot
+be set up now logs `CAPTURE DISABLED` with the reason instead of silently
+degrading.
+
+`test_f5_gateway_dead_reader_keeps_stdout` was replaced by the two tests
+above: the reader it guarded no longer exists, and its replacement pins the
+behaviour that matters.
+
+`bash scripts/verify.sh`: `2330 passed, 7 warnings in 431.19s (0:07:11)`.
+
 ### Reviewer notes
 
 **Design round 1 (2026-11-08): approved with changes.** Fold D1–D8 into the

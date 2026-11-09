@@ -459,12 +459,6 @@ ESHU_RUN_DIR="${ESHU_RUN_DIR:-/run/eshu}"
 ESHU_RUN_OWNER="${ESHU_RUN_OWNER:-0}"
 ESHU_CAPTURE_FILE="${ESHU_CAPTURE_FILE:-/etc/eshu-capture}"
 ESHU_OUT_TAIL=""
-ESHU_OUT_FIFO=""
-ESHU_TAIL_PID=""
-# How long to wait for the capture reader after the command ends. It copies at
-# most 16 KiB, so anything beyond a moment means it is wedged; the run must
-# never hang because the reader did.
-ESHU_CAPTURE_WAIT="${ESHU_CAPTURE_WAIT:-10}"
 RESULT_REQUEST_ID=""
 RESULT_PATH="allowlist"
 
@@ -511,6 +505,23 @@ log_window_reject() {
        -d '{"target_ip":"'"$TARGET_IP"'","encoded_command":"'"$enc_cmd"'","status":"window-rejected","reason":"'"$reason"'","token":"'"$ESHU_WINDOW_TOKEN"'","session_id":"'"${ESHU_SESSION_ID:-}"'","execution_id":"'"${ESHU_EXECUTION_ID:-}"'"}' >/dev/null 2>&1 &
 }
 
+# F5: pass every line through to the agent AND keep the last 16 KiB + 1 of it
+# for the execution result. One process, bounded memory.
+#
+# This used to be `tee` into a FIFO with a second `tail` reader. The reader is
+# a child the script must wait for, and on some hosts (GitHub's CI runners,
+# reproducibly) that reader never sees EOF and the call hangs — a gateway call
+# that never returns is a root process that never returns. Fusing the "keep the
+# tail" step into the stream itself removes the second process, the FIFO and
+# the wait; the capture file is written by END, in the same process.
+capture_tail() {   # $1 = capture file
+  awk -v cap="$1" '
+    { print; fflush()
+      buf = buf $0 "\n"
+      if (length(buf) > 16385) { buf = substr(buf, length(buf) - 16384) } }
+    END { printf "%s", buf > cap; close(cap) }'
+}
+
 capture_mode() {
   # off | exit-only | tail. Anything else (missing file, garbage, a symlink)
   # is exit-only: an unknown value must never turn capture on.
@@ -531,9 +542,9 @@ post_exec_result() {   # $1=rc  $2=duration_ms  $3=mode  $4=path
   if [ "$mode" = "tail" ] && [ -n "$ESHU_OUT_TAIL" ] && [ -s "$ESHU_OUT_TAIL" ]; then
     if [ "$(stat -c '%s' "$ESHU_OUT_TAIL")" -gt 16384 ]; then
       truncated="true"
-      enc_out=$(tail -c 16384 "$ESHU_OUT_TAIL" | base64 -w 0)
+      enc_out=$(tail -c 16384 "$ESHU_OUT_TAIL" | base64 -w 0) || enc_out=""
     else
-      enc_out=$(base64 -w 0 < "$ESHU_OUT_TAIL")
+      enc_out=$(base64 -w 0 < "$ESHU_OUT_TAIL") || enc_out=""
     fi
   fi
   # JSON body: all interpolated values are internal literals, validated
@@ -559,8 +570,6 @@ run_sanitized() {
   path="${RESULT_PATH:-allowlist}"
   case "$path" in allowlist|window|lockbox|jit) ;; *) path="allowlist" ;; esac
   ESHU_OUT_TAIL=""
-  ESHU_OUT_FIFO=""
-  ESHU_TAIL_PID=""
   if [ "$mode" = "tail" ]; then
     # § 2.7 / D7: only the poller's private 0700 root-owned work dir; refuse a
     # missing, symlinked, foreign-mode or foreign-owner one instead of writing
@@ -575,55 +584,21 @@ run_sanitized() {
         logger -t eshu-gateway "CAPTURE DISABLED: mktemp failed in $ESHU_RUN_DIR"
         mode="exit-only"; ESHU_OUT_TAIL=""; }
       if [ -n "$ESHU_OUT_TAIL" ]; then
-        ESHU_OUT_FIFO=$(mktemp -u -p "$ESHU_RUN_DIR" eshu-fifo.XXXXXX)
         # F5: the first EXIT trap in this script. A later one must extend this,
-        # not replace it, or the capture files leak.
-        trap 'rm -f "$ESHU_OUT_TAIL" "$ESHU_OUT_FIFO"' EXIT
-        # 16 KiB + 1 tells truncation apart without counting the stream; the
-        # reader only holds the tail, so a runaway command cannot fill tmpfs,
-        # and `wait` makes the read race-free.
-        if mkfifo "$ESHU_OUT_FIFO" 2>/dev/null; then
-          # E1: if `tail` dies, `cat` keeps draining the FIFO, so the writer
-          # never blocks and the agent's stream is never cut.
-          # The reader keeps its own stdout/stderr away from the caller's: an
-          # SSH client (or a CI test harness) reads the gateway's stdout until
-          # EOF, and a reader that outlived the script would keep that pipe open
-          # and look like a hung command.
-          { tail -c 16385 > "$ESHU_OUT_TAIL" || true; cat > /dev/null; } \
-            < "$ESHU_OUT_FIFO" >/dev/null 2>&1 &
-          ESHU_TAIL_PID=$!
-        else
-          logger -t eshu-gateway "CAPTURE DISABLED: mkfifo failed in $ESHU_RUN_DIR"
-          ESHU_OUT_FIFO=""
-          mode="exit-only"
-        fi
+        # not replace it, or the capture file leaks.
+        trap 'rm -f "$ESHU_OUT_TAIL"' EXIT
+      else
+        mode="exit-only"
       fi
     fi
   fi
 
   start_ns=$(date +%s%N)
-  if [ "$mode" = "tail" ] && [ -n "$ESHU_OUT_FIFO" ] && [ -p "$ESHU_OUT_FIFO" ]; then
-    # E1: plain `tee`, so an agent disconnect still ends the command at its
-    # next write; the reader drains whatever tail did not consume.
-    "$@" 2>&1 | sanitize | tee "$ESHU_OUT_FIFO" || rc=$?
-    # The command is done, so the writer is closed and the reader has EOF. It
-    # still has to be waited for — but never forever: a wedged reader must not
-    # hang a gateway call (which, over SSH, means a root process that never
-    # returns).
-    _waited=0
-    while kill -0 "$ESHU_TAIL_PID" 2>/dev/null; do
-      if [ "$_waited" -ge $((ESHU_CAPTURE_WAIT * 10)) ]; then
-        logger -t eshu-gateway "CAPTURE READER WEDGED — killing it after ${ESHU_CAPTURE_WAIT}s"
-        kill "$ESHU_TAIL_PID" 2>/dev/null || true
-        break
-      fi
-      sleep 0.1
-      _waited=$((_waited + 1))
-    done
-    wait "$ESHU_TAIL_PID" 2>/dev/null || true
+  if [ "$mode" = "tail" ] && [ -n "$ESHU_OUT_TAIL" ]; then
+    # E1: the capture rides in the stream, so an agent disconnect still ends
+    # the command at its next write, and there is no reader to wait for.
+    "$@" 2>&1 | sanitize | capture_tail "$ESHU_OUT_TAIL" || rc=$?
   else
-    # D8: never leave a reader blocked on open() if we skip the FIFO branch.
-    if [ -n "$ESHU_TAIL_PID" ]; then kill "$ESHU_TAIL_PID" 2>/dev/null || true; fi
     "$@" 2>&1 | sanitize || rc=$?
   fi
   end_ns=$(date +%s%N)

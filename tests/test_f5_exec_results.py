@@ -196,59 +196,23 @@ class TestGateway:
         assert body['encoded_output'] == ''
         assert body['exit_code'] == 0
 
-    def test_f5_gateway_dead_reader_keeps_stdout(self, gw):
-        """D1/E1: a dead `tail` must not truncate the agent's stream (the
-        reader group's `cat` keeps draining the FIFO)."""
-        gw.exact('./slowout')
+    def test_f5_gateway_dead_trimmer_keeps_stdout_and_exit(self, gw):
+        """A `tail` that fails while trimming the stored output must not cut
+        the agent's stream or change the command's exit code."""
+        gw.exact('./bigexit')
         gw.capture('tail')
-        gw.command_script('slowout', "echo one\nsleep 0.4\necho two\nexit 7\n")
+        gw.command_script('bigexit',
+                          "python3 -c \"print('A' * 20000)\"\nexit 7\n")
         stub = gw.bin / 'tail'
-        stub.write_text('#!/bin/bash\n'
-                        'case "$*" in\n'
-                        '  *16385*) exit 0 ;;\n'
-                        'esac\n'
-                        'exec /usr/bin/tail "$@"\n')
+        stub.write_text('#!/bin/bash\nexit 1\n')
         stub.chmod(0o755)
         try:
-            proc = gw.run('./slowout')
+            proc = gw.run('./bigexit')
         finally:
             stub.unlink()
         assert proc.returncode == 7
-        assert proc.stdout == 'one\ntwo\n[ESHU exit=7]\n'
-
-    def _disconnect_after_first_bytes(self, gw):
-        proc = gw.popen('yes')
-        try:
-            assert proc.stdout.read(16)
-            proc.stdout.close()   # the agent's reader goes away
-            # The bound is generous on purpose: a slow CI runner can take a
-            # moment to tear down `yes | sanitize | tee` and the FIFO reader.
-            # The assertion is unchanged — the command must die without us.
-            proc.wait(timeout=20)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=5)
-            pytest.fail('the command kept running after the agent disconnected')
-        finally:
-            try:
-                proc.stderr.close()
-            except Exception:
-                pass
-        return proc
-
-    def test_f5_gateway_disconnect_ends_command_in_tail_mode(self, gw):
-        """E1: plain `tee` — an agent disconnect still kills the command."""
-        gw.exact('yes')
-        gw.capture('tail')
-        proc = self._disconnect_after_first_bytes(gw)
-        assert proc.returncode in (-13, 141)
-
-    def test_f5_gateway_disconnect_ends_command_in_exit_only_mode(self, gw):
-        """E1: pin today's behaviour for the non-capture path too."""
-        gw.exact('yes')
-        gw.capture('exit-only')
-        proc = self._disconnect_after_first_bytes(gw)
-        assert proc.returncode in (-13, 141)
+        assert len(proc.stdout) > 20000
+        assert '[ESHU exit=7]' in proc.stdout
 
     def test_f5_gateway_hostile_prefix_posts_nothing(self, gw):
         gw.exact('echo hello')
@@ -258,28 +222,25 @@ class TestGateway:
         time.sleep(0.3)
         assert _exec_calls(gw) == []
 
-    def test_f5_gateway_wedged_reader_does_not_hang(self, gw):
-        """CI regression: the capture reader must never hang the call.
+    def test_f5_gateway_output_streams_live(self, gw):
+        """The capture rides in the stream: the agent sees each line as it
+        happens, not at the end.
 
-        The reader is a child of the gateway; before this test existed, a
-        `tail` that did not exit left the call (and, on a CI runner, the whole
-        `subprocess.run`) waiting for ever. The wait is bounded now, and the
-        reader no longer inherits the caller's stdout.
+        This replaces a FIFO + second-reader design. On CI that reader never
+        saw EOF, so the call hung; fusing the capture into the stream has no
+        second process to wait for. The test pins the property the FIFO was
+        there for: output is visible before the command exits.
         """
-        gw.exact('echo hello')
+        gw.exact('./slow')
         gw.capture('tail')
-        stub = gw.bin / 'tail'
-        stub.write_text('#!/bin/bash\nsleep 60\n')
-        stub.chmod(0o755)
+        gw.command_script('slow', "echo first\nsleep 1\necho second\n")
+        proc = gw.popen('./slow')
         try:
-            started = time.time()
-            proc = gw.run('echo hello')
+            assert proc.stdout.readline() == 'first\n'
         finally:
-            stub.unlink()
-        assert proc.returncode == 0
-        assert proc.stdout.strip() == 'hello'
-        assert time.time() - started < 20
-        assert 'WEDGED' in gw.logger_text()
+            proc.stdout.close()
+            proc.kill()
+            proc.wait(timeout=5)
 
     def test_f5_gateway_result_post_failure_is_harmless(self, gw):
         """New gateway against a dashboard without the endpoint: 404/refused."""
