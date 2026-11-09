@@ -505,21 +505,50 @@ log_window_reject() {
        -d '{"target_ip":"'"$TARGET_IP"'","encoded_command":"'"$enc_cmd"'","status":"window-rejected","reason":"'"$reason"'","token":"'"$ESHU_WINDOW_TOKEN"'","session_id":"'"${ESHU_SESSION_ID:-}"'","execution_id":"'"${ESHU_EXECUTION_ID:-}"'"}' >/dev/null 2>&1 &
 }
 
-# F5: pass every line through to the agent AND keep the last 16 KiB + 1 of it
-# for the execution result. One process, bounded memory.
+# F5: pass every line through to the agent AND keep the last 16 KiB of it for
+# the execution result. One process, bounded memory (≈ 16 K + one line).
 #
 # This used to be `tee` into a FIFO with a second `tail` reader. The reader is
 # a child the script must wait for, and on some hosts (GitHub's CI runners,
-# reproducibly) that reader never sees EOF and the call hangs — a gateway call
+# reproducibly) that reader never saw EOF and the call hangs — a gateway call
 # that never returns is a root process that never returns. Fusing the "keep the
 # tail" step into the stream itself removes the second process, the FIFO and
 # the wait; the capture file is written by END, in the same process.
+#
+# C2: a ring of lines with a running byte total, so the cost is linear in the
+# output. (The first version re-copied a growing 16 KiB buffer for every line:
+# 26.6 s for `seq 2000000` with gawk.) 20000 slots is enough because at most
+# 16385 lines can be retained (one empty line costs one byte), so a live slot
+# is never overwritten.
+# C3: LC_ALL=C — the cap counts bytes. In a UTF-8 locale gawk counts
+# characters, and mawk and gawk disagree about invalid byte sequences.
+# C4: portable awk cannot see a missing final newline (only gawk's RT), so a
+# stream that does not end in "\n" stores one extra newline. `tee` was
+# byte-exact; this is accepted and documented in § 2.7 and pinned by a test.
 capture_tail() {   # $1 = capture file
-  awk -v cap="$1" '
+  # C1: the capture is best effort. If the file cannot be written (tmpfs full,
+  # the path replaced), awk exits non-zero at END — after the agent already got
+  # every line — and no diagnostic is pushed into the agent's stream.
+  LC_ALL=C awk -v cap="$1" '
+    BEGIN { head = 1 }
     { print; fflush()
-      buf = buf $0 "\n"
-      if (length(buf) > 16385) { buf = substr(buf, length(buf) - 16384) } }
-    END { printf "%s", buf > cap; close(cap) }'
+      n++
+      slot = n % 20000
+      line[slot] = $0
+      size[slot] = length($0) + 1
+      total += size[slot]
+      while (n - head >= 1 && total - size[head % 20000] >= 16385) {
+        total -= size[head % 20000]
+        head++
+      } }
+    END {
+      for (i = head; i <= n; i++) {
+        s = line[i % 20000]
+        if (i == head && total > 16385) s = substr(s, total - 16385 + 1)
+        printf "%s\n", s > cap
+      }
+      close(cap) }' 2>/dev/null \
+    || logger -t eshu-gateway "CAPTURE FAILED: cannot write the capture file"
 }
 
 capture_mode() {
@@ -539,7 +568,8 @@ post_exec_result() {   # $1=rc  $2=duration_ms  $3=mode  $4=path
   local enc_cmd enc_out="" truncated="false" rid="" body
   if [ "$mode" = "off" ]; then return 0; fi
   enc_cmd=$(printf '%s' "$cmd" | base64 -w 0)
-  if [ "$mode" = "tail" ] && [ -n "$ESHU_OUT_TAIL" ] && [ -s "$ESHU_OUT_TAIL" ]; then
+  if [ "$mode" = "tail" ] && [ -n "$ESHU_OUT_TAIL" ] && [ -f "$ESHU_OUT_TAIL" ] \
+     && [ -s "$ESHU_OUT_TAIL" ]; then
     if [ "$(stat -c '%s' "$ESHU_OUT_TAIL")" -gt 16384 ]; then
       truncated="true"
       enc_out=$(tail -c 16384 "$ESHU_OUT_TAIL" | base64 -w 0) || enc_out=""
@@ -585,8 +615,10 @@ run_sanitized() {
         mode="exit-only"; ESHU_OUT_TAIL=""; }
       if [ -n "$ESHU_OUT_TAIL" ]; then
         # F5: the first EXIT trap in this script. A later one must extend this,
-        # not replace it, or the capture file leaks.
-        trap 'rm -f "$ESHU_OUT_TAIL"' EXIT
+        # not replace it, or the capture file leaks. The capture is best
+        # effort: a file already gone (or replaced) must not change the call's
+        # exit status or write a diagnostic into the agent's stream.
+        trap 'rm -f "$ESHU_OUT_TAIL" 2>/dev/null || true' EXIT
       else
         mode="exit-only"
       fi
@@ -594,13 +626,21 @@ run_sanitized() {
   fi
 
   start_ns=$(date +%s%N)
+  # C1: the command's status is the first pipeline element's, never the
+  # filter's. `set -o pipefail` is right for a plain pipeline but wrong here:
+  # under it an unwritable capture file (awk exits 2) turned rc 0 into 2 and
+  # rc 3 into 2, i.e. the trimmer's failure was reported as the command's.
+  # `set +e` keeps `set -e` from exiting before the sentinel and the post.
+  set +e
   if [ "$mode" = "tail" ] && [ -n "$ESHU_OUT_TAIL" ]; then
     # E1: the capture rides in the stream, so an agent disconnect still ends
     # the command at its next write, and there is no reader to wait for.
-    "$@" 2>&1 | sanitize | capture_tail "$ESHU_OUT_TAIL" || rc=$?
+    "$@" 2>&1 | sanitize | capture_tail "$ESHU_OUT_TAIL"
   else
-    "$@" 2>&1 | sanitize || rc=$?
+    "$@" 2>&1 | sanitize
   fi
+  rc=${PIPESTATUS[0]}
+  set -e
   end_ns=$(date +%s%N)
   duration_ms=$(( (end_ns - start_ns) / 1000000 ))
 

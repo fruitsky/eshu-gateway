@@ -196,23 +196,32 @@ class TestGateway:
         assert body['encoded_output'] == ''
         assert body['exit_code'] == 0
 
-    def test_f5_gateway_dead_trimmer_keeps_stdout_and_exit(self, gw):
-        """A `tail` that fails while trimming the stored output must not cut
-        the agent's stream or change the command's exit code."""
+    def test_f5_gateway_unwritable_capture_keeps_stdout_and_exit(self, gw):
+        """C1: a capture that cannot be written is not the command's failure.
+
+        The capture file is created by `mktemp` before the command runs, then
+        replaced by a directory, so awk's END write fails (this also fails as
+        root, unlike a `chmod`). Every byte must still reach the agent, the
+        exit code and the sentinel must be the command's, and the result post
+        must carry no output rather than a broken one.
+        """
         gw.exact('./bigexit')
         gw.capture('tail')
-        gw.command_script('bigexit',
-                          "python3 -c \"print('A' * 20000)\"\nexit 7\n")
-        stub = gw.bin / 'tail'
-        stub.write_text('#!/bin/bash\nexit 1\n')
-        stub.chmod(0o755)
-        try:
-            proc = gw.run('./bigexit')
-        finally:
-            stub.unlink()
+        cap = str(gw.capture_dir)
+        gw.command_script(
+            'bigexit',
+            "python3 -c \"print('A' * 20000)\"\n"
+            "for f in %s/eshu-out.*; do rm -f \"$f\"; mkdir \"$f\"; done\n"
+            "exit 7\n" % cap)
+        proc = gw.run('./bigexit')
         assert proc.returncode == 7
         assert len(proc.stdout) > 20000
         assert '[ESHU exit=7]' in proc.stdout
+        assert 'CAPTURE FAILED' in gw.logger_text(), gw.logger_text()
+        _wait_result(gw)
+        body = _result_body(gw)
+        assert body['exit_code'] == 7
+        assert body['encoded_output'] == ''
 
     def test_f5_gateway_hostile_prefix_posts_nothing(self, gw):
         gw.exact('echo hello')

@@ -213,6 +213,15 @@ The dashboard is deployed first; gateways update later via Build → Edge → Fl
   include a Raspberry Pi 1: no extra `python3` start on the hot path. The
   gateway runs as root via `sudo`; temp files only via `mktemp -p /run/eshu`
   (the private 0700 work dir the poller creates — refuse if it is missing or a symlink).
+* **F5 capture is byte-bounded and best effort.** `capture_tail` runs `awk`
+  with `LC_ALL=C` and keeps the last 16 385 bytes in a ring of lines (linear
+  cost, file written at `END`). The cap counts **bytes**; in a UTF-8 locale
+  gawk counts characters. A stream that does not end in a newline stores one
+  extra newline: portable awk cannot see the missing newline (only gawk's
+  `RT`), so this is accepted rather than emulated — `tee` was byte-exact here.
+  The command's status is `PIPESTATUS[0]` of the stream, never the trimmer's;
+  a capture that cannot be written logs `CAPTURE FAILED` and changes nothing
+  else.
 * No drive-by refactors, renames or reformatting.
 
 ---
@@ -3317,7 +3326,8 @@ wedge. The properties the FIFO existed for are unchanged and tested: output
 still streams live (`test_f5_gateway_output_streams_live`), the stream is
 still never cut on a disconnect (E1 tests), the stored bytes are still capped
 at 16 KiB, and a failing trimmer cannot change the command's exit code
-(`test_f5_gateway_dead_trimmer_keeps_stdout_and_exit`). A capture that cannot
+(the test now named `test_f5_gateway_unwritable_capture_keeps_stdout_and_exit`,
+see round 4). A capture that cannot
 be set up now logs `CAPTURE DISABLED` with the reason instead of silently
 degrading.
 
@@ -3326,6 +3336,64 @@ above: the reader it guarded no longer exists, and its replacement pins the
 behaviour that matters.
 
 `bash scripts/verify.sh`: `2330 passed, 7 warnings in 431.19s (0:07:11)`.
+
+### Round 4 — CI fix review round 3 (C1–C4)
+
+The reviewer reproduced four problems in `capture_tail()` on synthetic input.
+All four are fixed. The tests now run the function under **mawk and gawk**
+(whichever is installed; a missing one skips with a reason), because that is
+the environment difference that matters for a gateway: Debian and Ubuntu ship
+mawk as `awk`.
+
+* **C1 — the trimmer could change the exit code.** `set -o pipefail` reported
+  awk's status as the command's: an unwritable capture file turned rc 0 into 2
+  and rc 3 into 2. `rc` now comes from `PIPESTATUS[0]` of the stream (`set +e`
+  around the pipeline so `set -e` cannot exit before the sentinel and the
+  post). The non-capture branch takes `PIPESTATUS[0]` too, so a failing
+  `sanitize` can no longer mask the command either. The awk write is best
+  effort: its stderr is not pushed into the agent's stream, a failure logs
+  `CAPTURE FAILED`, the `EXIT` trap is quiet when the file is already gone,
+  and `post_exec_result` reads only a regular file. The old test stubbed
+  `tail`, which the run no longer calls, so it passed without exercising
+  anything; `test_f5_gateway_unwritable_capture_keeps_stdout_and_exit`
+  replaces it. The command replaces the `mktemp`ed capture path with a
+  directory (this fails as root too, unlike a `chmod`), prints 20 000 bytes
+  and exits 7; the test asserts rc 7, the full stream, `[ESHU exit=7]`, the
+  `CAPTURE FAILED` log and an empty stored output.
+* **C2 — quadratic cost.** The 16 KiB buffer was re-copied for every line
+  (26.6 s for `seq 2000000` with gawk). It is now a ring of lines with a
+  running byte total: drop the oldest while the rest is still ≥ 16 385 bytes,
+  trim the first line at `END` to exactly 16 385 bytes. That is
+  byte-identical to `tail -c 16385`, and 200 000 lines take ~0.3 s.
+  `test_f5_capture_tail_is_linear_in_the_output` bounds it at 10 s — loose
+  enough for a slow runner, still an order of magnitude below the quadratic
+  case.
+* **C3 — locale.** The cap is bytes, so awk runs with `LC_ALL=C`. In a UTF-8
+  locale gawk counts characters: the multibyte payload would store 19 835
+  bytes where the cap is 16 385, and mawk and gawk treat invalid byte
+  sequences differently. Payloads: multibyte text and invalid bytes, each
+  compared byte for byte with `tail -c 16385`.
+* **C4 — missing final newline.** Portable awk cannot see it (only gawk's
+  `RT`), so a stream that does not end in "\n" stores one extra newline.
+  Accepted rather than emulated, stated in § 2.7, and pinned by
+  `test_f5_capture_tail_matches_tail_c_16385[no-final-newline-…]`.
+
+**Why the old reader never saw EOF.** Not conclusively established: the
+bounded wait showed the reader blocked in `cat` waiting for EOF, so something
+still held the FIFO's write end after `tee` finished; which process that was
+was never identified. The reader is gone, so the question is closed either
+way.
+
+New file `tests/test_f5_capture_tail.py` lifts the `capture_tail` definition
+out of the script (asserting it is still there, under `LC_ALL=C`) and runs it
+with `awk` bound to each implementation: the cap and byte-exactness over
+varied, huge-single-line, empty-line, multibyte and invalid-byte payloads, the
+stream unchanged, linear cost, the write failure, and no log on success.
+
+Both installers were regenerated in this commit
+(`python3 dashboard/gen_installer.py`).
+
+`bash scripts/verify.sh`: `2352 passed, 7 warnings in 429.69s (0:07:09)`.
 
 ### Reviewer notes
 
