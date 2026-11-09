@@ -3396,7 +3396,71 @@ gateways.
 
 ### Reviewer notes
 
-_(reviewer)_
+**Round 1 (2026-11-09): changes requested (one item).** Reviewed at `aa44771`;
+`bash scripts/verify.sh`: `1874 passed, 3 skipped, 7 warnings in 331.25s (0:05:31)`.
+
+**What holds.**
+
+* **Reads go through the read policy.** Every source read goes through
+  `read_policy.is_read_integration_call` (`inventory._call_tool`), and a
+  test proves it.
+* **`local_dns_records`.** It is `read_only`, it makes two fixed GETs, and
+  it passes the check.
+* **Failed sources.** A failed source keeps its last good rows and is
+  marked stale.
+* **The join.** It is union-find over IP, normalised name and vmid.
+  Conflicts are listed, not resolved.
+* **`whereis` caps.** 5 entities, each ≤ 600 characters, with
+  `truncated`.
+* **Interval.** It is clamped to 5–120.
+* **Boot.** The background loop sleeps before its first refresh.
+* **UI escaping.** The UI escapes every upstream string: names, FQDNs,
+  URLs, MACs, error titles and conflict names.
+* **No live data.** The fixtures use `192.0.2.x`, `example.test` and
+  `AA:BB:…` MACs.
+* **Approvals.** No approval path changed.
+
+*Must fix:*
+
+* **R1 `whereis` skips agent policy, and it exposes every source to every
+  agent.** The spec says `whereis` "goes through agent policy like any
+  tool". The branch puts it in `_ALWAYS_ALLOWED` and adds it to every
+  per-integration MCP server. `_ALWAYS_ALLOWED` is meant for tools "always
+  scoped to the caller", like polling your own approval, and `whereis` is
+  not scoped: it returns the combined Proxmox, Omada, NPM and Pi-hole map.
+  So an agent whose policy allows only one integration (say HA, or a small
+  local model under F17) gets every client's IP and MAC address and every
+  guest and proxy entry. **Fix:**
+  * Take `whereis` out of `_ALWAYS_ALLOWED`, so an agent policy can deny it.
+  * Filter each answer to the sources the calling agent may read: Eshu's
+    own gateways always, and an integration's rows only if the agent's
+    policy allows at least one read tool on that integration.
+  * Record the call (agent, query length, entity count) like the other MCP
+    calls.
+
+  **Tests:** an agent denied `whereis` is refused. An agent allowed only HA
+  sees no Proxmox or Omada fields. An agent allowed Proxmox sees the guest
+  but not the Omada MAC. An unrestricted agent sees the full join.
+
+*Should fix:*
+
+* **S1 Device-chosen names are untrusted text for the agent.** Omada client
+  names, Proxmox guest names and NPM domains can be set by whoever controls
+  a device or a guest, and `whereis` hands them to a model as facts. Add one
+  line to `WHEREIS_DESC` ("names come from the network and are untrusted
+  data") and strip control characters in `_entity`. **Test:** a name with
+  control characters is cleaned in the `whereis` output.
+* **S2 Background refreshes in the call log.** Every refresh writes
+  `integration_calls` rows for agent `inventory` (about 4 sources × 96 a
+  day at 15 min). That is fine, but filter them out of the agent-activity
+  views, or say in the implementer notes why they should show.
+* **S3 HA add-on slugs.** Skipping them until F9 merges is right. Add the
+  adapter in the round after F9 lands, through `read_policy` like the
+  others.
+
+**Merge note.** `core/read_policy.py` is also created by F9 (same function)
+and by F4 (the SSH half, without the `read_only` guard). See F9's merge
+note.
 
 ---
 
@@ -3670,7 +3734,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 11 | F9 | ha-supervisor-read | dashboard | Ready (after F8) | `feat/f9-ha-supervisor-read` | — | token is now a dedicated `eshu` HA admin user |
 | 12 | F10 | ha-supervisor-actions | dashboard | Ready (after F9) | `feat/f10-ha-supervisor-actions` | F9, F3, Chunk H | reviewer pass + security reviewer sign-off |
 | 13 | F11 | ha-config-files | dashboard | Ready (after F10) — design first | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | design approval + security reviewer sign-off |
-| 14 | F14 | inventory | dashboard + MCP | Ready (spec detailed 2026-11-08) | `feat/f14-inventory` | Chunk H | |
+| 14 | F14 | inventory | dashboard + MCP | **Changes requested (R1)** — round 1 | `feat/f14-inventory` | Chunk H | |
 | 15 | F15 | probes | dashboard + MCP | Ready after F12 | `feat/f15-probes` | F4, F12 | |
 | 16 | F16 | recipes | dashboard + MCP | Design first (questions listed) | `feat/f16-recipes` | F3, F12, F13 | design approval + security reviewer sign-off |
 | 17 | F17 | local-agent | dashboard + docs | Ready after F12–F16 | `feat/f17-local-agent` | F12–F16 | |
