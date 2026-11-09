@@ -20,7 +20,7 @@ from database import (
     init_db, create_request, update_request_status, 
     update_ticket_consumed_by_ip, update_request_status_if_pending, get_all_requests, get_request_row, get_pending_request_by_cmd,
     get_request_status, get_request_command, count_denied, get_ticket_by_request_id, delete_old_requests,
-    get_session_requests, get_request_target_ip,
+    get_session_requests, get_request_target_ip, mark_requests_excluded,
     register_gateway, get_gateways, get_gateway, update_gateway_last_seen,
     update_gateway_policy_version, update_gateway_policy_sync,
     update_gateway_last_updated, update_gateway_windows_count, update_gateway_heartbeat, deregister_gateway,
@@ -101,7 +101,7 @@ from schemas import (
     PolicyPayload, NotePayload, SSHKeysPayload, HeartbeatPayload,
     UninstallProgressPayload, FeatureFlagTogglePayload, GatewayModePayload,
     ApprovedWindowPayload, WindowUpdatePayload, WindowRequestPayload,
-    NotifyConfigPayload,
+    NotifyConfigPayload, ExcludeRequestsPayload,
 )
 
 from core.session import (
@@ -1124,6 +1124,27 @@ def list_requests(request: Request, search: str = None, session: str = None,
         if r['status'] == 'pending':
             r['breakdown'] = cmd_breakdown(r['command'])
     return reqs
+
+
+@app.post("/api/requests/exclude")
+def exclude_requests(payload: ExcludeRequestsPayload, request: Request):
+    """F8: mark test traffic as excluded from statistics and learning.
+
+    Rows stay in History and in the audit trail; the aggregate views stop
+    counting them. Session auth, audited, and idempotent — a second call
+    reports 0 newly excluded. This is the only way rows become excluded: no
+    migration or rule flags live data on its own.
+    """
+    _check_session(request)
+    ids = [int(i) for i in (payload.ids or [])][:1000]
+    sid = (payload.session_id or '').strip()[:64]
+    if not ids and not sid:
+        raise HTTPException(status_code=400, detail="ids or session_id required")
+    count = mark_requests_excluded(ids=ids, session_id=sid)
+    scope = ('session %s' % sid) if sid else '%d id(s)' % len(ids)
+    record_audit_event('requests_excluded',
+                       details=f'Excluded {count} request(s) from statistics ({scope})')
+    return {'status': 'ok', 'excluded': count, 'session_id': sid}
 
 
 @app.get("/api/requests/{req_id}/breakdown")
@@ -2246,6 +2267,7 @@ def get_statistics(request: Request, days: int = 14, gateway_ip: str = None, gat
         FROM requests r
         LEFT JOIN gateways g ON r.target_ip = g.ip
         WHERE r.created_at >= ?{ip_filter} AND r.status != 'window-rejected'
+          AND COALESCE(r.excluded, 0) = 0
         GROUP BY r.target_ip
         ORDER BY total DESC
     ''', (cutoff,) + ip_params)
@@ -2261,6 +2283,7 @@ def get_statistics(request: Request, days: int = 14, gateway_ip: str = None, gat
                SUM(CASE WHEN r.status = 'denied' THEN 1 ELSE 0 END) AS denied
         FROM requests r
         WHERE r.created_at >= ?{ip_filter} AND r.status != 'window-rejected'
+          AND COALESCE(r.excluded, 0) = 0
         GROUP BY date
         ORDER BY date ASC
     ''', (cutoff,) + ip_params)
@@ -2281,7 +2304,9 @@ def get_statistics(request: Request, days: int = 14, gateway_ip: str = None, gat
     # Top commands — split on shell chaining operators.
     # Also count how many distinct gateways ran each one: a command spreading
     # across hosts is a different signal from one host hammering it.
-    cursor.execute(f'SELECT r.command, r.target_ip FROM requests r WHERE r.created_at >= ?{ip_filter}', (cutoff,) + ip_params)
+    cursor.execute(f'''SELECT r.command, r.target_ip FROM requests r
+        WHERE r.created_at >= ?{ip_filter} AND COALESCE(r.excluded, 0) = 0''',
+        (cutoff,) + ip_params)
     rows = [(r[0], r[1]) for r in cursor.fetchall() if r[0]]
     import re as _re
     cmd_counts = {}
@@ -2312,6 +2337,7 @@ def get_statistics(request: Request, days: int = 14, gateway_ip: str = None, gat
         SELECT r.inner_target AS target, COUNT(*) AS count
         FROM requests r
         WHERE r.created_at >= ?{ip_filter}
+          AND COALESCE(r.excluded, 0) = 0
           AND r.inner_target IS NOT NULL AND r.inner_target != ''
           AND r.inner_target != 'multi'
         GROUP BY r.inner_target
@@ -2330,6 +2356,7 @@ def get_statistics(request: Request, days: int = 14, gateway_ip: str = None, gat
                    COUNT(*) AS count
             FROM requests r
             WHERE r.created_at >= ?{ip_filter} AND r.status != 'window-rejected'
+              AND COALESCE(r.excluded, 0) = 0
             GROUP BY hour
             ORDER BY hour
         ''', (cutoff,) + ip_params)
@@ -2344,6 +2371,7 @@ def get_statistics(request: Request, days: int = 14, gateway_ip: str = None, gat
                    COUNT(*) AS count
             FROM requests r
             WHERE r.created_at >= ?{ip_filter} AND r.status != 'window-rejected'
+              AND COALESCE(r.excluded, 0) = 0
             GROUP BY dow, hour
         ''', (cutoff,) + ip_params)
         grid = [[0] * 24 for _ in range(7)]
@@ -2360,6 +2388,7 @@ def get_statistics(request: Request, days: int = 14, gateway_ip: str = None, gat
                    COUNT(*) AS count
             FROM requests r
             WHERE r.created_at >= ? AND r.status != 'window-rejected'{ip_filter}
+              AND COALESCE(r.excluded, 0) = 0
             GROUP BY ip, hour
         ''', (day_cutoff,) + ip_params)
         now_hour = int(time.strftime('%H', time.localtime()))
@@ -2384,6 +2413,7 @@ def get_statistics(request: Request, days: int = 14, gateway_ip: str = None, gat
                    SUM(CASE WHEN r.status IN ('approved','consumed') THEN 1 ELSE 0 END) AS jit_approved
             FROM requests r
             WHERE r.created_at >= ?{ip_filter} AND r.status NOT IN ('window-rejected','denied','blocked')
+              AND COALESCE(r.excluded, 0) = 0
             GROUP BY date
             ORDER BY date ASC
         ''', (cutoff,) + ip_params)
@@ -2444,6 +2474,7 @@ def get_statistics(request: Request, days: int = 14, gateway_ip: str = None, gat
             SELECT r.command, COUNT(*) AS count
             FROM requests r
             WHERE r.status = 'denied' AND r.created_at >= ?{ip_filter}
+              AND COALESCE(r.excluded, 0) = 0
             GROUP BY r.command
             ORDER BY count DESC
             LIMIT 10
@@ -2486,6 +2517,7 @@ def export_statistics(request: Request, days: int = 14, format: str = "csv"):
                SUM(CASE WHEN status = 'denied' THEN 1 ELSE 0 END) AS denied
         FROM requests
         WHERE created_at >= ? AND status != 'window-rejected'
+          AND COALESCE(excluded, 0) = 0
         GROUP BY date ORDER BY date ASC
     ''', (cutoff,))
     rows = [dict(r) for r in cursor.fetchall()]
@@ -3654,7 +3686,12 @@ def session_detail_endpoint(sid: str, request: Request):
     for row in ssh:
         row.update(_encoded_fields(row.get('command', '')))
     mcp = get_integration_calls(session=sid, limit=500)['rows']
-    return {'session_id': sid, 'ssh': ssh, 'mcp': mcp}
+    # F8 S3: whether the whole session is already excluded, so the modal shows
+    # the done state instead of offering the button again.
+    excluded = sum(1 for row in ssh if row.get('excluded'))
+    summary = {'excluded': excluded,
+               'all_excluded': bool(ssh) and excluded == len(ssh)}
+    return {'session_id': sid, 'ssh': ssh, 'mcp': mcp, 'summary': summary}
 
 
 @app.get("/api/sessions/recent")

@@ -1459,12 +1459,14 @@
       <div class="session-modal-title-row">
         <span class="session-modal-label">Session</span>
         <button onclick="openSessionOverrideModal()" class="btn btn-muted btn-xs" title="Auto-approve this session's JIT commands for a bounded window">Override session</button>
+        <button onclick="excludeActiveSession()" class="btn btn-muted btn-xs" title="Exclude this session's requests from statistics and learning">Exclude</button>
         <button onclick="filterHistoryToSession()" class="btn btn-muted btn-xs" title="Show this session's commands in History">Filter history</button>
         <button onclick="closeModal('session-modal')" class="modal-close" aria-label="Close">&times;</button>
       </div>
       <div class="session-modal-name" id="sm-name" contenteditable="true" spellcheck="false" data-placeholder="Session name"></div>
       <div class="session-modal-desc" id="sm-desc" contenteditable="true" spellcheck="false" data-placeholder="Add a description..."></div>
       <div class="session-modal-meta" id="sm-meta"></div>
+      <div class="sm-test-hint hidden" id="sm-test-hint"></div>
       <div class="session-modal-id">
         <code id="sm-id"></code>
         <button onclick="copySessionId()" class="btn btn-muted btn-xs" title="Copy the full session id">Copy id</button>

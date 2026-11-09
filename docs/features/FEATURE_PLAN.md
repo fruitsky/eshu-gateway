@@ -2914,11 +2914,143 @@ characters, since a docker container name is agent-controlled. The out-of-scope
 
 ### Implementer notes
 
-_(fill in)_
+**What I did**
+
+* **`requests.excluded`** (`db/requests.py`): `INTEGER DEFAULT 0`, added by the
+  usual migration loop. Every existing row reads 0 — **no migration or rule
+  excludes anything by itself**, which is the chunk's one-off requirement.
+  `mark_requests_excluded(ids, session_id)` is the single writer: idempotent
+  (only rows currently at 0 are touched) and it returns how many it changed.
+* **`POST /api/requests/exclude`** `{ids[] | session_id}` (session auth,
+  audit `requests_excluded`, 400 when neither is given, ids capped at 1000).
+  Unknown ids are not an error; they simply count 0. Rows stay in History and
+  in `/api/requests` — only the aggregate views skip them.
+* **Statistics** (`/api/statistics` and `/api/statistics/export`): every
+  request-based aggregate adds `COALESCE(r.excluded, 0) = 0` — per-gateway,
+  daily, top commands, inner targets, hourly, weekday×hour, per-gateway
+  sparkline, automation trend and top denied (9 + 2 queries).
+* **Learning gaps** (`core/learning.py`, both the approval and the denial
+  query) and **anomaly profiles** (`core/cmd_profiles.compute_profiles`) skip
+  excluded rows, so a smoke test can no longer trigger an allowlist
+  suggestion or make a command look "already seen".
+* **Inner-target warning** (`/api/gateways/{ip}/inner-targets`) skips them
+  too: a test `pct exec` should not widen the host-override warning.
+* **UI**: a row marked excluded gets an `excluded` chip and is dimmed;
+  unexcluded rows carry an `exclude` link next to `breakdown`. The session
+  modal shows a dashed hint when the goal matches `/test|smoke/i` — the
+  suggestion, never an automatic action — with an "Exclude from stats"
+  button; the same action is available as a plain **Exclude** button in the
+  modal header for sessions whose goal does not say it. Both go through the
+  same endpoint and confirm first.
+* **Tests**: `tests/test_f8_test_traffic.py` (17) — the endpoint (ids,
+  session, idempotence, 400, auth, audit, rows still listed, unknown ids),
+  statistics (daily, per-gateway, top commands, top denied, export,
+  inner-target warning), learning (approvals and denials), profiles, that
+  nothing is excluded automatically, and a node harness for the suggestion
+  predicate and the excluded marker.
+
+**Decisions and surprises**
+
+* The chunk says statistics, learning and anomaly profiles; I also applied the
+  flag to the inner-target warning (it feeds an operator decision) and to the
+  CSV export (it is the same statistic leaving the app). Both are additive.
+* The policy **preview** (`/api/policies/preview`) still replays excluded
+  commands. It answers "what would this draft policy do to this traffic", and
+  the operator may deliberately want test traffic in that what-if; leaving it
+  alone also keeps this chunk from changing a decision tool. Say so if you
+  want it filtered.
+* Exclusion is one-way: there is no "include again" in the API or the UI. The
+  flag is a single boolean, so a future chunk can add it without a migration.
+* The session hint matches any `test`/`smoke` in the goal, as specified. It is
+  a hint with a confirm button, so a false positive costs one ignored line.
+
+`bash scripts/verify.sh`: `1873 passed, 3 skipped, 7 warnings in 383.49s (0:06:23)`. The three skips are F18's read-lane tests (F4 is not on this branch).
+
+### Round 2: fixes for reviewer round 1
+
+* **R1 — the override warning sees every row again.** Removed
+  `COALESCE(excluded, 0) = 0` from `GET /api/gateways/{ip}/inner-targets`: it
+  feeds F7's host-override warning ("an override here also covers these
+  containers"), which is a safety prompt, not a statistic. The Statistics
+  `inner_targets` table keeps the filter. The old test is replaced by
+  `test_f8_inner_target_warning_keeps_excluded_rows`, which shows the excluded
+  `pct exec` guest is still in the warning and gone from `/api/statistics`.
+* **S1 — "test" as a word.** `TEST_GOAL_RE` is now `/\b(smoke|tests?)\b/i`,
+  so "update to the latest kernel" no longer gets the hint while "smoke test"
+  and "run the tests" do; the harness asserts all five cases.
+* **S2 — a generated guard for the statistics filter.**
+  `test_f8_every_statistics_query_filters_excluded` splits
+  `get_statistics`/`export_statistics` into `cursor.execute(` blocks, and every
+  block that reads `FROM requests` must mention `excluded` (9 blocks checked).
+  A future aggregate cannot forget the filter.
+* **S3 — an excluded session says so.** The session detail now carries
+  `summary.excluded` and `summary.all_excluded`; the modal hint shows "This
+  session is excluded from statistics and learning" instead of the button
+  when every row is excluded, and the confirm text says rows the session adds
+  later are not excluded. `test_f8_detail_reports_an_excluded_session` covers
+  the done state and the new row that turns it off.
+
+**Merge note (F6 ↔ F8), recorded not fixed:** F6's `approval_breakdown`
+query exists only on `feat/f6-session-wrapup`; whichever merges second must add
+`COALESCE(r.excluded, 0) = 0` to it and add it to the S2 scan's coverage.
+
+`bash scripts/verify.sh`: `1875 passed, 3 skipped, 7 warnings in 384.64s (0:06:24)`.
 
 ### Reviewer notes
 
-_(reviewer)_
+**Round 1 (2026-11-09): changes requested (one small item).** Reviewed at
+`d544096`; `bash scripts/verify.sh`: `1873 passed, 3 skipped, 7 warnings in 331.04s (0:05:31)`.
+
+**What holds.** `excluded` defaults to 0, and the migration flags nothing. A
+test proves nothing is excluded automatically. The endpoint needs a session
+(the CSRF middleware covers the POST), writes an audit event, is idempotent,
+and caps `ids` at 1000. Excluded rows stay in History. Statistics, the CSV
+export, both learning-gap queries and the anomaly profiles skip them.
+Leaving rows out of the profiles makes a command look *newer*, not older,
+so the anomaly signal can only get louder. The UI escapes the session goal,
+and the row id goes through `Number()`. No approval path or order changed.
+The fixtures are synthetic.
+
+*Must fix:*
+
+* **R1 Keep the inner-target warning on every row.** The chunk asks for
+  statistics, learning gaps and anomaly profiles. The branch also filters
+  `GET /api/gateways/{ip}/inner-targets`, which feeds F7's host-override
+  warning ("this override also covers these containers"). That warning is
+  a safety prompt, not a statistic. Excluding a session that ran `pct exec`
+  into a guest would make the next host override look narrower than it is.
+  §0 rule 4 also says not to widen scope. Revert that one filter. Keep the
+  filter on the Statistics "inner targets" table, which is a statistic.
+  **Test:** replace `test_f8_inner_target_warning_skips_excluded` with one
+  showing that an excluded `pct exec` row *still* appears in the
+  inner-targets warning, while it is gone from `/api/statistics`
+  `inner_targets`.
+
+*Should fix:*
+
+* **S1 Match "test" as a word.** `/test|smoke/i` also matches "latest",
+  "contest" and "attestation", so a goal like "update to the latest kernel"
+  gets the hint. The spec says "contains", so this is not wrong, but a
+  word match (`/\b(smoke|tests?)\b/i`) gives fewer false positives.
+  **Test:** the harness predicate is false for "latest" and true for
+  "smoke test" and "run the tests".
+* **S2 A generated test for the statistics filter.** Nine queries in
+  `get_statistics` got the filter by hand, and the tests cover four of the
+  surfaces (daily, per gateway, top commands and denied, export). Hourly,
+  the heatmap, the sparkline and the automation trend have no test. A
+  scan test would make sure a future aggregate cannot forget the filter:
+  every `FROM requests` in `get_statistics`/`export_statistics` must
+  mention `excluded`.
+* **S3 The session hint after excluding.** Reopening an excluded session
+  shows "This looks like test traffic" again, with the button (the call
+  then reports 0). Have the session detail say whether every row is
+  excluded, and show the done state instead. Rows the session adds later
+  are not excluded. That is fine, but say so in the confirm text.
+
+**Merge note (F6 ↔ F8).** F6's new `approval_breakdown` query on
+`feat/f6-session-wrapup` is not filtered, because the branches are
+independent. Whichever of the two merges second must add
+`COALESCE(r.excluded, 0) = 0` to that query and to the S2 scan.
 
 ---
 
@@ -3595,7 +3727,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 7 | F12 | ssh-exec | dashboard + gateway | Ready (after F5) — design first | `feat/f12-ssh-exec` | F4, F5 | design approval + security reviewer sign-off |
 | 8 | F6 | session-wrapup | dashboard | Ready (after F12) | `feat/f6-session-wrapup` | F3, F4, F5 | |
 | 9 | F13 | session-conclusions | dashboard + MCP | Ready (after F6) | `feat/f13-session-conclusions` | F5, F6 | |
-| 10 | F8 | test-traffic | dashboard | Ready (after F13) | `feat/f8-test-traffic` | — | low priority |
+| 10 | F8 | test-traffic | dashboard | **Changes requested (R1)** — round 1 | `feat/f8-test-traffic` | — | low priority |
 | 11 | F9 | ha-supervisor-read | dashboard | Ready (after F8) | `feat/f9-ha-supervisor-read` | — | token is now a dedicated `eshu` HA admin user |
 | 12 | F10 | ha-supervisor-actions | dashboard | Ready (after F9) | `feat/f10-ha-supervisor-actions` | F9, F3, Chunk H | reviewer pass + security reviewer sign-off |
 | 13 | F11 | ha-config-files | dashboard | Ready (after F10) — design first | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | design approval + security reviewer sign-off |

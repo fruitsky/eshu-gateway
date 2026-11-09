@@ -51,6 +51,7 @@ def compute_gaps() -> dict:
         SELECT target_ip, command, COUNT(*) AS approved_count
         FROM requests
         WHERE status IN ('approved', 'consumed')
+          AND COALESCE(excluded, 0) = 0
         GROUP BY target_ip, command
         HAVING approved_count >= ?
         ORDER BY approved_count DESC
@@ -61,6 +62,7 @@ def compute_gaps() -> dict:
         SELECT target_ip, command, COUNT(*) AS denied_count
         FROM requests
         WHERE status = 'denied'
+          AND COALESCE(excluded, 0) = 0
         GROUP BY target_ip, command
         HAVING denied_count >= ?
         ORDER BY denied_count DESC

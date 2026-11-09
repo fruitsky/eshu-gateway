@@ -45,7 +45,9 @@ def compute_profiles():
     # Exclude in-flight 'pending' requests so a new command isn't counted as
     # "already seen" by the very request being evaluated.
     cursor.execute(
-        "SELECT target_ip, command FROM requests WHERE created_at >= ? AND status != 'pending'",
+        "SELECT target_ip, command FROM requests "
+        "WHERE created_at >= ? AND status != 'pending' "
+        "AND COALESCE(excluded, 0) = 0",
         (cutoff,),
     )
     rows = cursor.fetchall()
