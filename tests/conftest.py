@@ -125,3 +125,28 @@ def mock_upstream():
     yield {'base_url': base_url, 'handler': _Handler, 'requests': _Handler.requests}
     server.shutdown()
     server.server_close()
+
+
+# ── Temporary CI diagnostics ────────────────────────────────────────────────
+# GitHub Actions parses `::error::` lines from the job log into check-run
+# annotations. The job log itself needs admin rights to download, but the
+# annotations are public, so this makes a CI-only failure readable from
+# outside. Harmless locally (the env var is only set on Actions).
+_DIAG_FAILURES = []
+
+
+def pytest_runtest_logreport(report):
+    import os
+    import sys
+    if not os.environ.get('GITHUB_ACTIONS'):
+        return
+    if report.failed and report.when in ('setup', 'call'):
+        nodeid = getattr(report, 'nodeid', '?')
+        if nodeid in _DIAG_FAILURES:
+            return
+        _DIAG_FAILURES.append(nodeid)
+        if len(_DIAG_FAILURES) > 40:
+            return
+        detail = (report.longreprtext or '').replace('\n', ' | ')[:600]
+        sys.stdout.write('\n::error title=%s::%s\n' % (nodeid, detail))
+        sys.stdout.flush()
