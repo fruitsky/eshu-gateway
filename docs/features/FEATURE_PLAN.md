@@ -3076,6 +3076,44 @@ Additive tools. Freeze now also blocks integration writes, which is a behaviour 
 
 `bash scripts/verify.sh`: `1893 passed, 3 skipped, 7 warnings in 394.38s (0:06:34)`. The three skips are F18's read-lane tests (F4 is not on this branch).
 
+### Round 2: fixes for reviewer round 1
+
+* **R1 — only a handler dry-run is exempt from the freeze.** The freeze check
+  used `not args.get('dry_run')`, so an agent-supplied `dry_run: true` let a
+  curated REST tool, a generic tool or `ws_write` past the freeze (it is just
+  another argument for those; only handlers honour it). The exemption is now
+  `handler and args.get('dry_run')`, the same condition the gate below uses.
+  Tests: `test_f9_a_curated_rest_dry_run_is_still_a_write`,
+  `test_f9_a_ws_write_dry_run_is_still_a_write` and
+  `test_f9_a_generic_write_dry_run_is_still_a_write` — each is refused with
+  `frozen`, queues nothing and makes no upstream request; the handler dry-run
+  test stays green.
+* **R2 — the generic WS tools cannot reach the Supervisor.** `ws_write` could
+  still forward an agent-chosen `supervisor/api` (or `hassio/*`) endpoint, and
+  HA has no allowlist of its own. Two guards, no socket before the decision:
+  * `core/tool_runner._run_tool` refuses a WS command whose name starts with
+    `supervisor/` or `hassio/` **before gating**, so no pending call is
+    created either (error `supervisor_command_refused`, 403, an
+    `integration_calls` row with `reason_code=supervisor_command_refused` and a
+    `ws_supervisor_refused` audit event);
+  * `core/ha_ws.execute_ws_call` refuses the same prefixes, which covers the
+    approval executor and any direct caller.
+  `core/ha_ws.is_supervisor_command` is the one predicate; the curated
+  handlers still use `ha_ws_request` with constants, so `ha_supervisor.py`'s
+  table remains the only path. Tests: `test_f9_ws_write_refuses_supervisor_before_connecting`,
+  `test_f9_ws_write_refuses_hassio_before_connecting`,
+  `test_f9_an_approved_supervisor_ws_call_is_refused` (a pending call created
+  before the guard is refused on approval, its stored result carries the
+  message) and `test_f9_a_normal_ws_command_still_reaches_the_transport`.
+  The HA test fixture now seeds the generic tools too, since those are the
+  tools under test.
+* **S1 — the one POST that keeps working.** `docs/INTEGRATIONS.md` now says
+  that `ha_check_config` still runs while frozen, because it only validates.
+* **S2 — tool naming** is the operator's call and is left as the open
+  question from round 1 (see the round-1 Reviewer notes).
+
+`bash scripts/verify.sh`: `1900 passed, 3 skipped, 7 warnings in 398.68s (0:06:38)`.
+
 ### Reviewer notes
 
 **Round 1 (2026-11-09): changes requested.** Reviewed at `d43147f`;
