@@ -4965,6 +4965,34 @@ Follow-ups (S, non-blocking):
   text is effectively an instruction to them. The operator's Confirm is the
   only gate; say so in the review UI ("agents will follow this").
 
+### Round 2 — the reviewer follow-ups S1–S3
+
+Three small changes, each with its test; no schema change and no new tool.
+
+* **S1 — ownership fails closed.** `validate_payload` refused only when the
+  session had an owner and it differed, so an ownerless session accepted a
+  draft from any agent. It now refuses **whenever there is no owner** or the
+  owner differs (`session_not_yours`), matching F3's SR2 rule: a conclusion is
+  read by other agents later, so no one may write one into a session that has
+  nobody to vouch for the caller. The old "an adopted chat id stays usable"
+  rule is retired. Test: `test_f13_ownerless_session_is_refused_closed`, both
+  through `save_conclusion` and through `session_conclude`.
+* **S2 — runbook search matches per term.** `search_runbooks` compared the
+  whole query as one `LIKE '%…%'` over four columns, so "nginx 502" only
+  matched a runbook that contained that exact phrase in one field. The query
+  is split on whitespace (at most 8 terms, `MAX_TERMS`) and every term must
+  match at least one of title / when-to-use / tags / summary — an `AND` of
+  per-term `OR`s, still parameterised. Test:
+  `test_f13_runbook_search_matches_each_term` (terms across fields, an
+  unmatched term excludes, spacing/order/duplicates are harmless).
+* **S3 — the Confirm button says what it does.** The draft card now shows
+  "Agents will follow this once confirmed." next to Confirm
+  (`.cc-hint`, muted, 11 px). A confirmed card does not repeat it. Test: the
+  node harness asserts the hint is in the draft markup and not in the
+  confirmed one.
+
+`bash scripts/verify.sh`: `2333 passed, 7 warnings in 445.03s (0:07:25)`.
+
 ---
 
 ## Chunks F14–F17 — Local-model support

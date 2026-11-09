@@ -5367,6 +5367,13 @@ body.pol-open .mobile-menu-btn, body.pol-open .mobile-freeze { display: none; }
     color: var(--accent);
   }
   .cc-note { color: var(--text-muted); font-style: italic; }
+  /* F13 S3: what Confirm actually does -- the conclusion is served to
+     other agents, not just filed. */
+  .cc-hint {
+    margin-right: auto;
+    font-size: var(--text-micro);
+    color: var(--text-quiet);
+  }
   .cc-actions { display: flex; align-items: center; gap: 6px; margin-top: 8px; }
   .cc-runbook {
     font-family: 'JetBrains Mono', monospace;
