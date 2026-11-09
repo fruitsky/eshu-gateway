@@ -37,7 +37,7 @@ def unb64(text):
 
 def run_node(payload):
     proc = subprocess.run([NODE, HARNESS, json.dumps(payload)],
-                          capture_output=True, text=True, timeout=60)
+                          capture_output=True, text=True, timeout=120)
     assert proc.returncode == 0, proc.stderr
     out = json.loads(proc.stdout)
     assert 'error' not in out, out['error']
@@ -221,7 +221,10 @@ class TestGateway:
         try:
             assert proc.stdout.read(16)
             proc.stdout.close()   # the agent's reader goes away
-            proc.wait(timeout=2)
+            # The bound is generous on purpose: a slow CI runner can take a
+            # moment to tear down `yes | sanitize | tee` and the FIFO reader.
+            # The assertion is unchanged — the command must die without us.
+            proc.wait(timeout=20)
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait(timeout=5)

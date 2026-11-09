@@ -76,10 +76,33 @@ class GatewaySandbox:
         self.window_claim_file.write_text("200")
         self.ticket_file = self.run_dir / "eshu.tickets"
 
+        self._assert_tmpdir_can_exec()
         self._write_stubs()
         self.script = self.root / "eshu-gateway.sh"
         self.script.write_text(self._transformed())
         subprocess.run(["bash", "-n", str(self.script)], check=True)
+
+    def _assert_tmpdir_can_exec(self):
+        """Skip with a reason when the temp dir cannot run scripts.
+
+        Several tests execute a script they wrote (`./bigout`), so a TMPDIR
+        mounted `noexec` — some CI sandboxes do that — fails them for a reason
+        that has nothing to do with the gateway. Skip instead of failing, and
+        say why.
+        """
+        probe = self.root / "probe-exec"
+        probe.write_text("#!/bin/sh\nexit 0\n")
+        probe.chmod(0o755)
+        try:
+            subprocess.run([str(probe)], check=True, capture_output=True,
+                           timeout=10)
+        except (OSError, subprocess.SubprocessError) as exc:
+            pytest.skip("the temporary directory cannot execute scripts: %s" % exc)
+        finally:
+            try:
+                probe.unlink()
+            except OSError:
+                pass
 
     # ── sandbox construction ────────────────────────────────────────────────
     def _write_stubs(self):
@@ -312,7 +335,7 @@ printf '%s\\n' "$*" >> "__LOG__"
         }
         proc = subprocess.run(
             ["bash", str(self.script)], cwd=str(self.root), env=env,
-            capture_output=True, text=True, timeout=20)
+            capture_output=True, text=True, timeout=60)
         time.sleep(0.15)  # let the backgrounded /api/log stub finish
         return proc
 
@@ -342,7 +365,7 @@ printf '%s\\n' "$*" >> "__LOG__"
             bodies.append(parts[2] if len(parts) == 3 else "")
         return bodies
 
-    def wait_for(self, predicate, timeout=2.0):
+    def wait_for(self, predicate, timeout=10.0):
         deadline = time.time() + timeout
         while time.time() < deadline:
             if predicate(self.curl_calls()):
