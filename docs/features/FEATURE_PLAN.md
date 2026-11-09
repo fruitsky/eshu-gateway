@@ -3572,6 +3572,24 @@ line about it; it is not blocking.
 security reviewer checks the `capture_tail`/`run_sanitized` diff before merge
 (§ 2.6a). The CI annotation helper in `tests/conftest.py` is fine as it is.
 
+**CI fix review, round 4 (2026-11-09, `cf59287`): one fix left (C5).** C1–C4
+are fixed as asked. rc comes from `PIPESTATUS[0]` under `set +e`; the old
+`tail`-stub test is replaced by a directory-capture test; the ring is linear
+and byte-identical to `tail -c 16385` (checked here under gawk and mawk); and
+the C4 newline is documented and pinned. 163 capture, F5 and gateway tests pass
+locally.
+
+* **C5 (must): dropped ring lines are never freed.** The loop advances
+  `head` but leaves `line[head % 20000]` in the array until its slot is
+  reused, so up to 20000 old lines stay in memory. With 4000 lines of
+  100 KB (400 MB of output), maxrss is **395 MB** under gawk and 393 MB under
+  mawk. Adding `delete line[head % 20000]` before `head++` brings that to
+  **4.3 MB** and 3.1 MB, with the file still byte-identical to `tail -c 16385`.
+  Add a test that bounds memory: for example, 2000 × 100 KB lines through
+  `capture_tail` under `ulimit -v` of about 64 MB must succeed, under each awk.
+  Then this goes to the security reviewer, with the diff `9470cff..` on
+  `eshu-gateway.sh`.
+
 ---
 
 ## Chunk X1 — Sidebar actions and pending-only decisions · slug `ctx-actions` · dashboard · BUG
