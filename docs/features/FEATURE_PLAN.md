@@ -5700,119 +5700,63 @@ Dashboard (`tests/test_f19_limits.py`):
 
 ### Reviewer notes
 
-_(reviewer)_
+**Design round 1 (2026-11-09, main feature reviewer): changes requested.** The
+shape is right:
+* limits apply only to rows approved with nobody watching, keyed by the
+  dashboard's `reason`;
+* a present-but-unusable limit refuses the call;
+* a reported `run_limits: v1` capability, not a version string, gates
+  auto-run;
+* the probe byte tells "cut" apart from "ended exactly at the cap".
 
-#### Security reviewer sign-off
+Four pieces of the bash or the flow would misbehave:
 
-**Design review (4d18218), 2026-11-09: changes requested on the design.**
-The approach is sound: the limit is set by the dashboard, enforced by the
-gateway, and refuses to run when the value is broken. Eight conditions must
-be in the note before code starts. L3 is the important one, because without
-it the limit can be skipped. I will re-read only the sections that change.
+* **D1 In direct mode the agent would see nothing.** The capped pipeline
+  ends `| tee "$ESHU_OUT_FIFO"; } >/dev/null`, which throws away the stdout
+  the agent reads. `>/dev/null` belongs only to MCP mode (F12's rule). In
+  direct mode, tee must still write to stdout.
+* **D2 A byte cut reports 141, not 0.** When `head` closes after
+  `bytes+1`, the writer gets SIGPIPE, so `PIPESTATUS[0]` is `141` (or the
+  shell's status after `sanitize` dies). The note says the sentinel stays
+  "typically `[ESHU exit=0]`". Decide one rule and test it. My suggestion:
+  report the real `141`, add the `[ESHU limit: output cut …]` marker, and
+  set `limit: bytes`, so the agent knows the command did not finish on its
+  own.
+* **D3 `set -e` aborts the script.** The new pipeline has no `||` guard.
+  Under `set -eo pipefail`, a non-zero pipeline (124 or 141) exits the
+  gateway before the marker, `post_exec_result` or the envelope. Use
+  `set +e; …pipeline…; _ps=("${PIPESTATUS[@]}"); set -e`, then read
+  `_ps[0]`. A `|| true` would overwrite `PIPESTATUS`. Add a test that the
+  marker and the F5 row appear after a time stop and after a byte cut.
+* **D4 The lockbox path runs unattended rows unbounded.** §2 says a
+  lockbox ticket "has no limit by construction: those rows were approved by
+  a human". That is not true. `update_ticket_consumed_by_ip` (the poller)
+  deposits **any** `approved` row, read-lane ones included, and a lockbox
+  claim then runs with no `run_limit`. This happens whenever the poller beats
+  the gateway's JIT poll, when a direct agent reconnects, and always in F12
+  MCP mode, where the gateway returns `pending` at once and the re-run
+  claims from the lockbox. Fix both halves:
+  * The poller never receives an unattended row:
+    `update_ticket_consumed_by_ip` skips `reason IN ('read-lane', …)`, so
+    those rows can only be claimed through `/api/ticket/{id}`, which carries
+    the limit.
+  * In MCP mode, when `/api/request` answers with the row already
+    `approved` (the read lane), the gateway claims it through
+    `/api/ticket/{id}` and runs it with its limit straight away, instead of
+    returning `pending`. That also removes one case of F12's M2 race.
+  * Tests: an unattended row never appears in `/api/poll`; an MCP read-lane
+    call runs bounded in one round trip.
 
-* **L1. Bounded by default, with a list of exemptions.** As written, a
-  limit applies only where `reason = read-lane`. F15, F16 and any later
-  path would each need to remember to add themselves.
-  - Turn this around: the dashboard sends a `run_limit` for every row it
-    approves without a human approving that exact command.
-  - Name the exemptions in the note as an accepted risk: a JIT click, plans,
-    session overrides and host overrides, because they can legitimately run
-    for a long time.
-  - The gateway-local paths (the allowlists and windows) stay as they are.
-  - Test: a row with any new auto-approval reason gets a limit.
-* **L2. Once a limit is set, it stays.** It can arrive on three responses.
-  - The first limit seen applies to the whole call. A later response that
-    leaves it out does not clear it, and two different limits mean the
-    smaller one applies.
-  - `parse_run_limit` must return three different results: absent, valid or
-    invalid. Today it returns 1 both when the field is missing and when it
-    is broken.
-  - The sketch splits `"60 1048576"` with `set -- $secs`, but the script
-    sets `IFS` to newline and tab, so that split never happens. Use
-    `read -r` with a tab separator.
-  - Tests: the limit is absent on one response and present on another; a
-    present but broken limit is refused.
-* **L3. Every path that can run an unattended row carries its limit.** The
-  note's claim that a lockbox ticket "has no limit by construction" is
-  wrong for read-lane rows. The poller can move an approved read-lane row
-  into the lockbox. Stage 5 then runs it *before* any `/api/request`
-  response is read, with no limit. Three routes lead there:
-  - the MCP re-run: F12 returns `pending` and calls again, and the feature
-    reviewer's M2 makes that re-run wait for `consumed`;
-  - a direct retry after the 90-second wait;
-  - a poller that gets there first.
+*Should fix:*
 
-  Pick one fix and write it down. I recommend these two together:
-  - `/api/poll` never puts an unattended row in the lockbox. The row is
-    claimed only through `/api/ticket/{id}`, which carries the limit.
-  - In MCP mode, a row that the `/api/request` response shows as already
-    approved is claimed and run in the same call instead of returning
-    `pending`.
+* **S1** On GNU `timeout`: without `--foreground` it signals the command's
+  **process group**, so ordinary background children are stopped too. Only
+  a child that calls `setsid` escapes. Correct §3's last bullet, and say
+  that BusyBox `timeout` signals only the child, so the capability check
+  must be specific to GNU `timeout`.
 
-  The alternative is a lockbox line that carries the limit, which means a
-  new ticket tag and a capability check. Tests, for each route: a lagging
-  poller, an MCP re-run and a direct retry. None of them runs a read-lane
-  row without its limit.
-* **L4. The pipeline must survive `set -e` and keep direct-mode output.**
-  - The sketch sends the whole group to `/dev/null`, so a direct-SSH agent
-    would see nothing. Only MCP mode should discard stdout.
-  - The sketch has no `||` and runs under `set -eo pipefail`, so any
-    non-zero exit, or the SIGPIPE when `head` closes, would end the gateway
-    before the envelope and the F5 row are written.
-  - Copy `PIPESTATUS` in the same statement as the pipeline, with errexit
-    switched off around it.
-  - Test: a capped run and a failing command both still produce the
-    envelope, the F5 row and the right exit code.
-* **L5. Cap the raw stream before `sanitize` as well.** `sanitize` is
-  `sed`, which holds a whole line in memory until it sees a newline. A long
-  stream with no newlines, which some pseudo-files under the read-lane trees
-  can produce, grows `sed`'s memory without limit until the timer fires.
-  - Put a `head -c` (bytes + 1) before `sanitize` as well as after it.
-  - Decide whether the output was cut from the raw stream, because redaction
-    changes lengths.
-  - Test: a newline-free stream larger than the cap is cut at the cap, and
-    `sed` never holds more than the cap.
-* **L6. The time limit bounds the whole call, not just its direct child.**
-  GNU `timeout` signals the process group. BusyBox `timeout` signals only
-  the child, so a grandchild that keeps the pipe open would hold the call,
-  and the ticket's run, past the limit.
-  - Requirement: when the limit fires, the call returns within the limit
-    plus the kill grace plus a few seconds, and nothing the run started is
-    left running.
-  - Test with a stub `timeout` that behaves like BusyBox's.
-* **L7. The script that is running reports the capability on each request,
-  not just at registration.** A poller self-update or a rollback can change
-  the script without re-registering, and then the stored `run_limits: v1`
-  is stale.
-  - The gateway sends `"run_limits":"v1"` in the `/api/request` body.
-  - The dashboard auto-approves an unattended row only when that request
-    carries it.
-  - Keep the stored column for the gateway card.
-  - Test: a request without the field gets `read-lane-no-limits` even when
-    the gateway row says v1.
-* **L8. The settings endpoint is for operators only.**
-  - `PUT /api/settings/run-limit` uses the same session login and CSRF
-    protection as the other operator settings, and every change is audited
-    with the old and new values.
-  - No MCP tool and no gateway token can reach it.
-  - The gateway keeps its own hard-coded range check, as the sketch already
-    does.
-  - Tests: no session means 401 or 403; a change writes an audit row.
-
-*Smaller points:*
-
-* A command can exit 124 on its own, so mark `time` only when
-  `rc == 124` and the time elapsed is at least the limit.
-* A byte cut normally ends the command with SIGPIPE (141), not 0. The note
-  should say so. It also means the byte cap stops a runaway command, which
-  is the point.
-* Over plain-HTTP `dashboard_url`, a network attacker could drop
-  `run_limit`, but they could already forge an approval there. Nothing new;
-  I mention it so nobody counts F19 as protection on that path.
-
-**For the F4 `on` gate:** F19 meets the fourth precondition only once L3
-and L7 are implemented, merged and deployed fleet-wide. Without L3, the
-lockbox route runs read-lane commands with no limit.
+This goes to the security reviewer too (§ 2.6a). They are reviewing the same
+note in parallel, so fold in both sets of findings together.
 
 ---
 
@@ -5866,6 +5810,6 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 15 | F15 | probes | dashboard + MCP | Ready after F12 | `feat/f15-probes` | F4, F12 | |
 | 16 | F16 | recipes | dashboard + MCP | Design first (questions listed) | `feat/f16-recipes` | F3, F12, F13 | design approval + security reviewer sign-off |
 | 17 | F17 | local-agent | dashboard + docs | Ready after F12–F16 | `feat/f17-local-agent` | F12–F16 | |
-| 18 | F19 | unattended-limits | gateway + dashboard | **Design note written** — awaiting review; before F4 `on` is unlocked | `feat/f19-unattended-limits` | F4, F5 | design approval + security reviewer sign-off |
+| 18 | F19 | unattended-limits | gateway + dashboard | **Design round 1: changes requested (D1–D4)** | `feat/f19-unattended-limits` | F4, F5 | design approval + security reviewer sign-off |
 Chunks are done **in the order column**; each new chunk branches from the
 updated `feature-roadmap` after the previous one is merged.
