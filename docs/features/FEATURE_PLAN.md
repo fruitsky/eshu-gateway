@@ -2215,6 +2215,135 @@ Once R1–R4 are in (S1–S4 are welcome in the same round), the feature
 reviewer can approve SC4–SC8. SC1–SC3 go to the security chat now, in
 parallel.
 
+**Security round 2 (2026-11-09): SC1 and SC3 hold. SC2 holds as a rule, but
+Round 5 opened a new gap (SC9), which comes back here.** Security chat,
+reviewed at `24d3833` (code at `4b3a121`, tests at `c470d6e`). This was a
+read-only review. Nothing was run.
+
+**What holds:**
+
+* **SC1.** `OPTION_SPECS` has one entry per verb or subcommand and no shared
+  list. `_scan_options` matches exact spellings only, so an abbreviation is
+  refused. A long flag with `=` is refused, and a cluster passes only when
+  every letter is listed. A value-taking letter inside a cluster takes the
+  rest of the cluster as its value, and every value goes through a
+  validator. `--` and a lone `-` are refused. The "another host or
+  container" options are refused in either position, because a word
+  before the subcommand is taken as the subcommand and fails the check.
+* **SC3.** F1 records input redirections and here-strings per step and
+  flags the whole command. Heredocs still set the `heredoc` flag. Process
+  substitution is refused through its `procsubst` context. Any flag blocks,
+  so the early-return paths in `_parse_statement` (shells, `su`/`runuser`)
+  are covered as well.
+* **The `on` lock** (`read_lane_on_enabled`, set by hand only, and a stored
+  `on` treated as shadow while it is unset) is stricter than I asked for.
+  Keep it.
+
+**New gap, must fix (SC9): the shell expands words the policy has already
+approved.** Round 5 switched `_step_ok` from splitting on whitespace to
+`shlex.split`. F1's lexer has already removed the original quoting, and
+`_display` re-quotes any word that holds a shell-special character. In
+round 3 such a word started with a quote, failed the path check and was
+refused. That was the "variable and quoting tricks fail closed" point in my
+round-1 note. `shlex.split` now strips that quote again, so the policy sees
+a clean-looking word, while the gateway runs the *original* text through
+`bash -c`, which expands it. Two classes are eligible today:
+
+* **Parameter expansion in a path.** A `$` word inside a safe-tree path
+  passes the textual checks. At run time it can add `..` components or split
+  into several words, through the default `IFS` or an earlier bare
+  assignment (an assignment-only statement produces no step at all). That
+  gives a root read outside the safe trees.
+* **Brace and glob expansion in a `grep` pattern.** Neither the `-e` value
+  nor the first-word pattern is checked for shell characters. At run time
+  one unquoted pattern can expand into several words, and `grep` reads all
+  but the first as files, starting in root's home directory.
+
+None of this sets a metacharacter (`$` alone, braces and globs are not on
+the list), so neither SC7 nor the gateway's gate catches it. The tests have
+no expansion case. I missed the pattern half in round 1, when the `-e` value
+was skipped without any check.
+
+* **SC9 rule:** no word in an eligible step may contain a character the
+  shell expands when it is unquoted: `$`, a backtick, `{`, `}`, `*`, `?`,
+  `[`, `]`, a leading `~`, or a backslash. This covers path operands, option
+  values and patterns alike. The breakdown does not say whether a word was
+  quoted, so the rule must hold for quoted words too. Patterns are then
+  limited to plain text and `.`/`^` anchors, which is acceptable. If regex
+  patterns are wanted later, F1 must first record per word that it was
+  entirely single-quoted, and only such a word may carry those characters.
+* **Also:** refuse any command with a bare variable assignment statement,
+  since it changes what later words expand to and shows up as no step.
+* **Tests:** one ineligible row per class (parameter expansion in a path, in
+  an option value, and in a pattern; brace and glob expansion in a pattern; a
+  bare assignment before an eligible read), using synthetic paths only.
+* **Who checks:** this one comes back to the security chat.
+
+**The feature reviewer's Round 6 list (R1–R4): confirmed, and extended.**
+
+* **R1–R4 confirmed** as written. For R2, take the simpler fix: remove
+  `-r`/`--recursive` from the lane. `ls -R` and `du` still list names.
+* **R5 (add, must): line caps don't bound binary or sparse logs.** Like
+  `-z`, a file with few newlines makes `-n ≤ 1000` or `-m ≤ 1000` print most
+  of the file. The worst case is the sparse login-record file, which can be
+  many gigabytes of zeros. For `head`, `tail` and `grep`, refuse the
+  journal directory under `/var/log` (use `journalctl`) and the
+  login-record files `lastlog`, `wtmp`, `btmp` and `faillog`. Also refuse
+  `grep -a`/`--text`; without it `grep` prints only "binary file matches".
+* **S1–S4: agree.** S1 matters most, because `date` takes an operand. S3:
+  4 log operands is fine.
+
+**Answers to the three questions:**
+
+* **Q1: yes, allow `shell_meta`.** "Plain jit" meant "no rule says a human
+  must look". `shell_meta` means "the gateway cannot vouch for this literal
+  string", which is exactly the case the lane exists to parse step by step.
+  SC7 becomes: the verdict is `auto_approved`, or `jit` with `detail_type`
+  `None` or `shell_meta`, and nothing else. Two additions:
+  * Refuse a step sent to the background with `&`, because it can outlive
+    the session.
+  * Add the end-to-end shadow test through `POST /api/request` with a
+    two-step read, as the feature reviewer asked.
+
+  This does not depend on SC9, because the expansion classes carry no
+  metacharacter, but ship it in the same round.
+* **Q2: yes, allow the narrow named-operand exception.** It applies only to
+  `systemctl status`, `is-active` and `is-enabled`. Each name must match
+  `[A-Za-z0-9][A-Za-z0-9@_.:-]{0,63}`: the first character is a letter or
+  digit, so a name can never be read as an option, and there is no `/`, no
+  glob and no backslash. Allow at most 8 names, and the `-n` cap still
+  applies to `status`. Escaped unit names (with `\x2d`) stay with a human.
+  SC9 must land first or in the same round.
+* **Q3: yes, accept only a bare `sudo`.** Every command already runs as
+  root, so `sudo` adds nothing. Its options add a login shell (root's
+  startup files), a shell, a chroot, a different working directory,
+  backgrounding and sudoedit. F1 must record whether the `sudo` wrapper had
+  any option or assignment, for example by labelling only the bare form
+  `sudo`. The lane refuses every other form.
+
+**Precondition for unlocking `on` on any gateway: the gateway must stop
+logging session signatures.** This is about the F12 note, and it is
+confirmed. The gateway writes the whole `SSH_ORIGINAL_COMMAND` to syslog
+before it strips the prefixes, so `ESHU_SESSION_SIG` ends up in the logs.
+That signature covers the session id only, not the command, so it can be
+replayed while it is valid. Today a human approves every log read. With
+`on`, the agent could read syslog or the journal unattended, pick up
+*another* session's signed id, and then use that session's F3 plan items
+or session override. This does not block the merge, and shadow is
+unaffected because nobody unlocks `on` before this is fixed:
+
+* **Gateway fix (security work, before the unlock):** log the command
+  without its signed prefixes (the id alone is fine). This is small and
+  belongs in security Chunk 7.
+* **Design fix (security Chunk 6):** bind the signature to the command, or
+  make it single-use, so a leaked signature is worthless. F12 should take
+  this into account.
+
+**Status:** SC1 and SC3 are done. SC2 is done once SC9 is in. When SC9, Q1
+and Q3 are implemented, send them back here. The feature reviewer checks
+R1–R5 and S1–S4. Q2 is optional, and if it is done, the security chat
+looks at it together with SC9.
+
 ---
 
 ## Chunk F5 — Execution results (exit code + output tail) · slug `exec-results` · gateway + dashboard
