@@ -11,6 +11,7 @@ strings.
 import json
 
 from db.audit import record_audit_event
+from db.gateways import get_trigger_freeze
 from db.integrations import (
     create_pending_call,
     get_integration,
@@ -34,7 +35,7 @@ from core.integration_proxy import (
     merge_response_hint,
     safe_request_summary,
 )
-from core.ha_ws import execute_ws_call
+from core.ha_ws import execute_ws_call, is_supervisor_command
 from core.ha_ws_policy import is_read_command
 
 AGENT_LABEL = 'mcp'
@@ -143,6 +144,76 @@ def _refuse_read_tool(integration, tool, tool_name, session_id,
                'status_code': 400, 'tool': write_tool}
     payload['command' if error_code == 'not_a_read_command' else 'method'] = detail
     return json.dumps(payload)
+
+
+def _refuse_supervisor_ws(integration, tool, tool_name, args, session_id,
+                          execution_id, agent_name, command):
+    """F9 R2: the Supervisor is reachable only through `core/ha_supervisor.py`.
+
+    Read/mutate WS commands chosen by an agent must not be able to send
+    `supervisor/*` or `hassio/*` at all — one approved `ws_write` would
+    otherwise reach host reboot or add-on options, and HA has no allowlist of
+    its own. This runs before gating, so no pending call is created either.
+    """
+    message = ("Supervisor commands are not available through the generic WS "
+               "tool. Use the curated ha_supervisor_* tools; their endpoints "
+               "are fixed and reviewed.")
+    method, path = _request_shape(tool, args, 'ws', bool(tool.get('generic')),
+                                  tool.get('handler') or '')
+    record_integration_call(
+        integration=integration.get('name', ''), tool=tool_name,
+        agent=agent_name, method=method, path=path, status_code=403,
+        latency_ms=0, response_summary=message, response_bytes=0,
+        truncated=0, outcome='refused', session_id=session_id,
+        execution_id=execution_id, reason='Supervisor is table-only',
+        request_summary=safe_request_summary(args, tool),
+        reason_code='supervisor_command_refused')
+    record_audit_event(
+        'ws_supervisor_refused',
+        details=f"{integration.get('name')}.{tool_name}: refused '{command}' "
+                f"(Supervisor is table-only)",
+        actor=agent_name)
+    return json.dumps({'error': 'supervisor_command_refused',
+                       'message': message, 'status_code': 403})
+
+
+def _frozen_refusal(integration, tool, tool_name, args, session_id,
+                    execution_id, agent_name):
+    """F9: Emergency Freeze stops integration writes too.
+
+    Reads keep working (an operator investigating an incident still needs
+    them); a handler dry-run changes nothing upstream, so it also runs. The
+    refusal is audited like a policy denial, and no upstream call is made.
+    """
+    message = ('Emergency Freeze is on: SSH and integration writes are paused. '
+               'Reads keep working; ask the operator to unfreeze.')
+    method, path = _request_shape(
+        tool, args, tool.get('transport') or 'http', bool(tool.get('generic')),
+        tool.get('handler') or '')
+    record_integration_call(
+        integration=integration.get('name', ''),
+        tool=tool_name,
+        agent=agent_name,
+        method=method,
+        path=path,
+        status_code=409,
+        latency_ms=0,
+        response_summary=message,
+        response_bytes=0,
+        truncated=0,
+        outcome='refused',
+        session_id=session_id,
+        execution_id=execution_id,
+        reason='Emergency Freeze',
+        request_summary=safe_request_summary(args, tool),
+        reason_code='frozen',
+    )
+    record_audit_event(
+        'mcp_frozen_refused',
+        details=f"{integration.get('name')}.{tool_name} refused while frozen",
+        actor=agent_name)
+    return json.dumps({'error': {'code': 'frozen', 'message': message,
+                                 'status_code': 409}})
 
 
 def _result_error(res: dict) -> str:
@@ -338,6 +409,20 @@ def _run_tool(integration_name: str, tool_name: str, args: dict, reason: str = '
     generic = bool(tool.get('generic'))
     mutating = not tool.get('read_only')
     handler = tool.get('handler') or ''
+    # F9: Emergency Freeze covers integration writes as well as SSH. Whether
+    # this call is a read comes from the §2.6a policy, not from a second local
+    # notion. Only a *handler* dry-run is exempt: `dry_run` is a real argument
+    # on curated handlers (they honour it), but on a REST/WS/generic tool it is
+    # just one more argument — the same condition the gate below uses.
+    if get_trigger_freeze() and not (handler and args.get('dry_run')):
+        # Imported here: read_policy wraps _read_only_refusal from this module,
+        # so a top-level import would be a cycle.
+        from core.read_policy import is_read_integration_call
+        is_read, _why = is_read_integration_call(
+            tool, tool.get('transport') or 'http', args)
+        if not is_read:
+            return _frozen_refusal(integration, tool, tool_name, args,
+                                   session_id, execution_id, agent_name)
     # Chunk H: the read-only passthrough tools auto-run, so they must not be
     # able to write or execute. This runs whatever the agent's policy says; an
     # arg_policy still applies on top for the calls that do get through.
@@ -345,6 +430,13 @@ def _run_tool(integration_name: str, tool_name: str, args: dict, reason: str = '
     if refusal is not None:
         return _refuse_read_tool(integration, tool, tool_name,
                                  session_id, execution_id, agent_name, *refusal)
+    # F9 R2: the generic WS tools must never send a Supervisor command.
+    if transport == 'ws':
+        command = (args or {}).get('command') or tool.get('path_template') or ''
+        if is_supervisor_command(command):
+            return _refuse_supervisor_ws(integration, tool, tool_name, args,
+                                         session_id, execution_id, agent_name,
+                                         str(command))
     # Audit labels: an immediate mutating call ran without operator sign-off
     # ("auto"); reads and handler dry-runs are not approval-relevant.
     approval_label = 'auto' if (mutating and not args.get('dry_run')) else ''

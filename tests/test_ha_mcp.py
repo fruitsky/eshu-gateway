@@ -100,7 +100,8 @@ class TestHaSeed:
         })
         r = auth_client.post("/api/integrations/ha/seed")
         assert r.status_code == 200
-        assert r.json()["created"] == 18  # 14 curated + generic read/write/ws_read/ws_write
+        # 24 curated (14 + F9's 10 Supervisor/check tools) + 4 generic
+        assert r.json()["created"] == 28
         tools = auth_client.get("/api/integrations/ha/tools").json()
         names = {t["name"] for t in tools}
         assert names == {"list_entities", "get_entity", "call_service",
@@ -109,6 +110,10 @@ class TestHaSeed:
                          "lovelace_dashboards", "lovelace_dashboard",
                          "lovelace_create_dashboard", "lovelace_update_dashboard",
                          "lovelace_save_config", "lovelace_delete_dashboard",
+                         "ha_supervisor_info", "ha_core_info", "ha_os_info",
+                         "ha_host_info", "ha_addons", "ha_addon_info",
+                         "ha_backups", "ha_resolution", "ha_whoami",
+                         "ha_check_config",
                          "read", "write", "ws_read", "ws_write"}
         cs = next(t for t in tools if t["name"] == "call_service")
         assert cs["read_only"] == 0

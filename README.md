@@ -100,6 +100,7 @@ tap away.
 - **Read-only lane (opt-in)** — per gateway, `off` / `shadow` / `on`: commands the parser proves are read-only can run without a prompt, after the operator has watched them in shadow for a week. `on` stays hard-locked until unlocked by hand (see the threat model)
 - **Emergency Freeze** — one button makes every gateway reject all commands until unfrozen (global circuit breaker)
 - **Fleet Run (Ansible-lite)** — queue commands and dispatch them to a subset of gateways with per-gateway results
+- **Inventory ("where is X?")** — one lookup joins Eshu's gateways and containers with Proxmox, Nginx Proxy Manager, Pi-hole DNS and Omada clients, so an agent can find a service's host, VM id, IPs, FQDNs and URLs instead of guessing
 - **Live Dashboard** — real-time SPA: request queue, gateway health, policy editor, audit log, enrollment, statistics
 - **First-Run Walkthrough** — on an empty install, four steps take you from key to gateway to agent to integrations; dismissal is stored server-side, and **Settings → Getting started** reopens it
 - **Self-Syncing Gateways** — nodes pull policies every 30s via a systemd poller; no inbound connectivity needed

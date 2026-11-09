@@ -30,8 +30,16 @@ Round 5 implements the security reviewer's conditions SC1–SC7:
 * SC6 — the safe trees are tighter: `/proc/*/exe`, `pagemap`, `kpage*`,
   `/sys/kernel/{debug,tracing}`, `/sys/fs/bpf`, `/var/log/installer/` and the
   cloud-init logs are refused.
-* SC7 is enforced in `core/read_lane.py`: only a plain `jit` or
+* SC7 is enforced in `core/read_lane.py`: only a plain `jit` or an
   `auto_approved` verdict may be auto-run.
+* SC9 (round 7) — no eligible word may contain a character the shell expands
+  (`$`, a backtick, `{`, `}`, `*`, `?`, `[`, `]`, a leading `~`, a backslash),
+  checked before any quote-stripping, and a bare variable assignment statement
+  is refused.
+
+F9 uses the integration half to tell a read from a write while Emergency Freeze
+is on: reads keep working, writes are refused. F14 uses it before every
+inventory source read.
 """
 import os
 import posixpath

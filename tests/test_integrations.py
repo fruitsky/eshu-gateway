@@ -215,7 +215,8 @@ class TestReseed:
         create_integration("custom", "https://x.local/api", "none", "")
         reseed_all_integrations()
         assert len(get_tools(1)) == 18  # proxmox + generic read/write
-        assert len(get_tools(2)) == 18  # ha curated + generic read/write/ws_read/ws_write
+        # 24 ha curated (14 + F9's 10) + generic read/write/ws_read/ws_write
+        assert len(get_tools(2)) == 28
         assert {t["name"] for t in get_tools(3)} == {'read', 'write'}  # custom: generic floor only
 
     def test_reseed_updates_changed_fields(self):

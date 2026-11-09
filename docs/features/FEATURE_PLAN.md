@@ -3808,11 +3808,146 @@ characters, since a docker container name is agent-controlled. The out-of-scope
 
 ### Implementer notes
 
-_(fill in)_
+**What I did**
+
+* **`requests.excluded`** (`db/requests.py`): `INTEGER DEFAULT 0`, added by the
+  usual migration loop. Every existing row reads 0 — **no migration or rule
+  excludes anything by itself**, which is the chunk's one-off requirement.
+  `mark_requests_excluded(ids, session_id)` is the single writer: idempotent
+  (only rows currently at 0 are touched) and it returns how many it changed.
+* **`POST /api/requests/exclude`** `{ids[] | session_id}` (session auth,
+  audit `requests_excluded`, 400 when neither is given, ids capped at 1000).
+  Unknown ids are not an error; they simply count 0. Rows stay in History and
+  in `/api/requests` — only the aggregate views skip them.
+* **Statistics** (`/api/statistics` and `/api/statistics/export`): every
+  request-based aggregate adds `COALESCE(r.excluded, 0) = 0` — per-gateway,
+  daily, top commands, inner targets, hourly, weekday×hour, per-gateway
+  sparkline, automation trend and top denied (9 + 2 queries).
+* **Learning gaps** (`core/learning.py`, both the approval and the denial
+  query) and **anomaly profiles** (`core/cmd_profiles.compute_profiles`) skip
+  excluded rows, so a smoke test can no longer trigger an allowlist
+  suggestion or make a command look "already seen".
+* **Inner-target warning** (`/api/gateways/{ip}/inner-targets`) skips them
+  too: a test `pct exec` should not widen the host-override warning.
+* **UI**: a row marked excluded gets an `excluded` chip and is dimmed;
+  unexcluded rows carry an `exclude` link next to `breakdown`. The session
+  modal shows a dashed hint when the goal matches `/test|smoke/i` — the
+  suggestion, never an automatic action — with an "Exclude from stats"
+  button; the same action is available as a plain **Exclude** button in the
+  modal header for sessions whose goal does not say it. Both go through the
+  same endpoint and confirm first.
+* **Tests**: `tests/test_f8_test_traffic.py` (17) — the endpoint (ids,
+  session, idempotence, 400, auth, audit, rows still listed, unknown ids),
+  statistics (daily, per-gateway, top commands, top denied, export,
+  inner-target warning), learning (approvals and denials), profiles, that
+  nothing is excluded automatically, and a node harness for the suggestion
+  predicate and the excluded marker.
+
+**Decisions and surprises**
+
+* The chunk says statistics, learning and anomaly profiles; I also applied the
+  flag to the inner-target warning (it feeds an operator decision) and to the
+  CSV export (it is the same statistic leaving the app). Both are additive.
+* The policy **preview** (`/api/policies/preview`) still replays excluded
+  commands. It answers "what would this draft policy do to this traffic", and
+  the operator may deliberately want test traffic in that what-if; leaving it
+  alone also keeps this chunk from changing a decision tool. Say so if you
+  want it filtered.
+* Exclusion is one-way: there is no "include again" in the API or the UI. The
+  flag is a single boolean, so a future chunk can add it without a migration.
+* The session hint matches any `test`/`smoke` in the goal, as specified. It is
+  a hint with a confirm button, so a false positive costs one ignored line.
+
+`bash scripts/verify.sh`: `1873 passed, 3 skipped, 7 warnings in 383.49s (0:06:23)`. The three skips are F18's read-lane tests (F4 is not on this branch).
+
+### Round 2: fixes for reviewer round 1
+
+* **R1 — the override warning sees every row again.** Removed
+  `COALESCE(excluded, 0) = 0` from `GET /api/gateways/{ip}/inner-targets`: it
+  feeds F7's host-override warning ("an override here also covers these
+  containers"), which is a safety prompt, not a statistic. The Statistics
+  `inner_targets` table keeps the filter. The old test is replaced by
+  `test_f8_inner_target_warning_keeps_excluded_rows`, which shows the excluded
+  `pct exec` guest is still in the warning and gone from `/api/statistics`.
+* **S1 — "test" as a word.** `TEST_GOAL_RE` is now `/\b(smoke|tests?)\b/i`,
+  so "update to the latest kernel" no longer gets the hint while "smoke test"
+  and "run the tests" do; the harness asserts all five cases.
+* **S2 — a generated guard for the statistics filter.**
+  `test_f8_every_statistics_query_filters_excluded` splits
+  `get_statistics`/`export_statistics` into `cursor.execute(` blocks, and every
+  block that reads `FROM requests` must mention `excluded` (9 blocks checked).
+  A future aggregate cannot forget the filter.
+* **S3 — an excluded session says so.** The session detail now carries
+  `summary.excluded` and `summary.all_excluded`; the modal hint shows "This
+  session is excluded from statistics and learning" instead of the button
+  when every row is excluded, and the confirm text says rows the session adds
+  later are not excluded. `test_f8_detail_reports_an_excluded_session` covers
+  the done state and the new row that turns it off.
+
+**Merge note (F6 ↔ F8), recorded not fixed:** F6's `approval_breakdown`
+query exists only on `feat/f6-session-wrapup`; whichever merges second must add
+`COALESCE(r.excluded, 0) = 0` to it and add it to the S2 scan's coverage.
+
+`bash scripts/verify.sh`: `1875 passed, 3 skipped, 7 warnings in 384.64s (0:06:24)`.
 
 ### Reviewer notes
 
-_(reviewer)_
+**Round 1 (2026-11-09): changes requested (one small item).** Reviewed at
+`d544096`; `bash scripts/verify.sh`: `1873 passed, 3 skipped, 7 warnings in 331.04s (0:05:31)`.
+
+**What holds.** `excluded` defaults to 0, and the migration flags nothing. A
+test proves nothing is excluded automatically. The endpoint needs a session
+(the CSRF middleware covers the POST), writes an audit event, is idempotent,
+and caps `ids` at 1000. Excluded rows stay in History. Statistics, the CSV
+export, both learning-gap queries and the anomaly profiles skip them.
+Leaving rows out of the profiles makes a command look *newer*, not older,
+so the anomaly signal can only get louder. The UI escapes the session goal,
+and the row id goes through `Number()`. No approval path or order changed.
+The fixtures are synthetic.
+
+*Must fix:*
+
+* **R1 Keep the inner-target warning on every row.** The chunk asks for
+  statistics, learning gaps and anomaly profiles. The branch also filters
+  `GET /api/gateways/{ip}/inner-targets`, which feeds F7's host-override
+  warning ("this override also covers these containers"). That warning is
+  a safety prompt, not a statistic. Excluding a session that ran `pct exec`
+  into a guest would make the next host override look narrower than it is.
+  §0 rule 4 also says not to widen scope. Revert that one filter. Keep the
+  filter on the Statistics "inner targets" table, which is a statistic.
+  **Test:** replace `test_f8_inner_target_warning_skips_excluded` with one
+  showing that an excluded `pct exec` row *still* appears in the
+  inner-targets warning, while it is gone from `/api/statistics`
+  `inner_targets`.
+
+*Should fix:*
+
+* **S1 Match "test" as a word.** `/test|smoke/i` also matches "latest",
+  "contest" and "attestation", so a goal like "update to the latest kernel"
+  gets the hint. The spec says "contains", so this is not wrong, but a
+  word match (`/\b(smoke|tests?)\b/i`) gives fewer false positives.
+  **Test:** the harness predicate is false for "latest" and true for
+  "smoke test" and "run the tests".
+* **S2 A generated test for the statistics filter.** Nine queries in
+  `get_statistics` got the filter by hand, and the tests cover four of the
+  surfaces (daily, per gateway, top commands and denied, export). Hourly,
+  the heatmap, the sparkline and the automation trend have no test. A
+  scan test would make sure a future aggregate cannot forget the filter:
+  every `FROM requests` in `get_statistics`/`export_statistics` must
+  mention `excluded`.
+* **S3 The session hint after excluding.** Reopening an excluded session
+  shows "This looks like test traffic" again, with the button (the call
+  then reports 0). Have the session detail say whether every row is
+  excluded, and show the done state instead. Rows the session adds later
+  are not excluded. That is fine, but say so in the confirm text.
+
+**Merge note (F6 ↔ F8).** F6's new `approval_breakdown` query on
+`feat/f6-session-wrapup` is not filtered, because the branches are
+independent. Whichever of the two merges second must add
+`COALESCE(r.excluded, 0) = 0` to that query and to the S2 scan.
+
+
+**Round 2 (2026-11-09, main feature reviewer): approved and merged.** R1 is right: the inner-target warning counts excluded rows again, and Statistics still drops them. S1–S3 are fine.
 
 ---
 
@@ -3888,11 +4023,199 @@ Additive tools. Freeze now also blocks integration writes, which is a behaviour 
 
 ### Implementer notes
 
-_(fill in)_
+**What I did**
+
+* **Freeze covers integrations** (`core/tool_runner.py`): with the freeze flag
+  set, a call that is not a read is refused before any pending row, preflight
+  or upstream request, with `{"error": {"code": "frozen", "message": …,
+  "status_code": 409}}`, an `integration_calls` row (`outcome=refused`,
+  `reason_code=frozen`, method/path only) and an audit event
+  `mcp_frozen_refused`. Reads keep working; a handler **dry-run** also runs,
+  because it changes nothing upstream (the freeze protects state, not the
+  validation path). Whether a call is a read comes from
+  `core/read_policy.is_read_integration_call` (§2.6a), not from a second local
+  rule — the module is the one the task asked for: the integration half only,
+  with a note that F4's branch holds the full file (SSH rules) and that the
+  `read_only` guard must survive the merge.
+* **Approvals** (`POST /api/integration-calls/{id}/approve`): while frozen the
+  approval is refused with **409** and an audit event
+  `integration_call_refused_frozen`; the call **stays pending**, so unfreezing
+  lets the operator approve it (a freeze pauses the queue, it does not destroy
+  it). Denying is still allowed — removing work is never a write.
+* **`core/ha_supervisor.py`**: the fixed endpoint table
+  (`SUPERVISOR_READS`: tool → endpoint, method, shaper), `endpoint_for(tool,
+  args)` (the only place an endpoint is built; the add-on slug is validated
+  against `^[a-z0-9_]{1,64}$` **before** formatting, so `/`, `..`, `?` and
+  uppercase never reach the upstream), per-shape field allowlists (lists
+  capped at 200 rows), `ha_addon_info` shaped without `options`,
+  `run_supervisor_read` (audit via `ha_ws_exec` with the tool name, then
+  `secret_scrub`), and the 401/403 → `ha_admin_required` mapping.
+  `SUPERVISOR_ACTIONS` is an empty table for F10, kept separate so
+  `SUPERVISOR_READS` stays "reads only".
+* **Tools** (`core/ha_seed.py`, `handler: ha_supervisor_read` for the eight
+  reads, `handler: ha_whoami` for the WS `auth/current_user`):
+  `ha_supervisor_info`, `ha_core_info`, `ha_os_info`, `ha_host_info`,
+  `ha_addons`, `ha_addon_info(slug)`, `ha_backups`, `ha_resolution`,
+  `ha_whoami`, and `ha_check_config` (REST `POST
+  /config/core/check_config`, `read_only: True` — it validates and changes
+  nothing, so it runs without approval). Seeding is idempotent by name, so an
+  existing HA integration gets the ten new tools after "Seed" without
+  duplicates.
+* **UI**: the freeze banner, the freeze pill tooltip and the freeze toast now
+  say "SSH and integration writes rejected".
+* **Docs**: `docs/INTEGRATIONS.md` documents the Supervisor tools, the
+  admin-token requirement, `ha_whoami`, the dedicated-`eshu`-admin-user
+  recommendation (a long-lived token carries all of its user's rights) and
+  that freeze now covers integration writes. CHANGELOG entries for both
+  behaviour changes.
+* **Tests**: `tests/test_f9_ha_supervisor_read.py` (37) — freeze (write
+  refused, nothing queued, read allowed, dry-run allowed, approval refused and
+  kept pending, approval after unfreeze, the read policy is consulted),
+  each tool's exact endpoint and method, slug validation (7 bad forms never
+  reach the upstream), `options` never returned, compact add-ons, non-admin
+  mapping, upstream error, `ha_whoami`, `ha_check_config` as a read, scrubbing,
+  the allowlist (table == tools; no other module builds a `supervisor/api`
+  payload; every supervisor tool is read-only), and idempotent seeding. Two
+  pre-existing count assertions moved from 18 to 28 seeded tools, explained in
+  the commit.
+
+**Decisions**
+
+* The tool names are the chunk's literal `ha_*` names. MCP prefixes the
+  integration name, so on the shared surface an integration named "Home
+  Assistant" exposes `home_assistant_ha_supervisor_info`. The alternative is
+  to drop the `ha_` prefix in the seed (then it reads
+  `home_assistant_supervisor_info`); say which reads better and it is a
+  one-line rename per tool.
+* `ha_check_config` is a POST but `read_only: True`: `_read_only_refusal` only
+  guards generic passthrough tools, so a curated read-only POST runs directly —
+  which is the intent ("validates and changes nothing").
+* The Supervisor read shapers are allowlists, not denylists: a new upstream
+  field is dropped until someone adds it, which is the safe default for a
+  surface that can carry secrets.
+* An add-on's `options` would be caught by `secret_scrub` for the obvious
+  password-shaped keys, but not for arbitrary ones; the shaper dropping
+  `options` entirely is the real protection.
+
+**Open questions**
+
+1. **Tool naming** (above): keep the `ha_` prefix in the seed, or drop it so
+   the MCP-visible name is `<integration>_supervisor_info`? Nothing depends on
+   either choice except the docs and the existing-name test.
+
+`bash scripts/verify.sh`: `1893 passed, 3 skipped, 7 warnings in 394.38s (0:06:34)`. The three skips are F18's read-lane tests (F4 is not on this branch).
+
+### Round 2: fixes for reviewer round 1
+
+* **R1 — only a handler dry-run is exempt from the freeze.** The freeze check
+  used `not args.get('dry_run')`, so an agent-supplied `dry_run: true` let a
+  curated REST tool, a generic tool or `ws_write` past the freeze (it is just
+  another argument for those; only handlers honour it). The exemption is now
+  `handler and args.get('dry_run')`, the same condition the gate below uses.
+  Tests: `test_f9_a_curated_rest_dry_run_is_still_a_write`,
+  `test_f9_a_ws_write_dry_run_is_still_a_write` and
+  `test_f9_a_generic_write_dry_run_is_still_a_write` — each is refused with
+  `frozen`, queues nothing and makes no upstream request; the handler dry-run
+  test stays green.
+* **R2 — the generic WS tools cannot reach the Supervisor.** `ws_write` could
+  still forward an agent-chosen `supervisor/api` (or `hassio/*`) endpoint, and
+  HA has no allowlist of its own. Two guards, no socket before the decision:
+  * `core/tool_runner._run_tool` refuses a WS command whose name starts with
+    `supervisor/` or `hassio/` **before gating**, so no pending call is
+    created either (error `supervisor_command_refused`, 403, an
+    `integration_calls` row with `reason_code=supervisor_command_refused` and a
+    `ws_supervisor_refused` audit event);
+  * `core/ha_ws.execute_ws_call` refuses the same prefixes, which covers the
+    approval executor and any direct caller.
+  `core/ha_ws.is_supervisor_command` is the one predicate; the curated
+  handlers still use `ha_ws_request` with constants, so `ha_supervisor.py`'s
+  table remains the only path. Tests: `test_f9_ws_write_refuses_supervisor_before_connecting`,
+  `test_f9_ws_write_refuses_hassio_before_connecting`,
+  `test_f9_an_approved_supervisor_ws_call_is_refused` (a pending call created
+  before the guard is refused on approval, its stored result carries the
+  message) and `test_f9_a_normal_ws_command_still_reaches_the_transport`.
+  The HA test fixture now seeds the generic tools too, since those are the
+  tools under test.
+* **S1 — the one POST that keeps working.** `docs/INTEGRATIONS.md` now says
+  that `ha_check_config` still runs while frozen, because it only validates.
+* **S2 — tool naming** is the operator's call and is left as the open
+  question from round 1 (see the round-1 Reviewer notes).
+
+`bash scripts/verify.sh`: `1900 passed, 3 skipped, 7 warnings in 398.68s (0:06:38)`.
 
 ### Reviewer notes
 
-_(reviewer)_
+**Round 1 (2026-11-09): changes requested.** Reviewed at `d43147f`;
+`bash scripts/verify.sh`: `1893 passed, 3 skipped, 7 warnings in 346.84s (0:05:46)`.
+
+**What holds.**
+
+* **The endpoint table.** `ha_supervisor.py` is a fixed table. The slug is
+  validated before formatting, and the response shapers are allowlists:
+  `options` is never returned, and lists are capped.
+* **401/403 mapping.** A 401 or 403 becomes `ha_admin_required`.
+* **`ha_whoami`.** It returns only name, `is_admin` and `is_owner`.
+* **Generic reads.** Chunk H's `DENY_PREFIXES` already keep `supervisor/`
+  and `hassio/` out of the generic `ws_read`.
+* **Freeze routing.** The freeze decision goes through
+  `read_policy.is_read_integration_call`, and its `read_only` guard is the
+  right addition.
+* **Approval while frozen.** It is refused with a 409 and audited, and the
+  call stays pending.
+* **Seeding.** It is idempotent.
+* **No live data.** The fixtures use `192.0.2.x`.
+
+*Must fix:*
+
+* **R1 An agent-set `dry_run` flag gets a write past the freeze.** The
+  freeze check skips any call whose args contain `dry_run: true`. Only
+  *handler* tools honour that flag, though, and the gating code further down
+  checks `handler and args.get('dry_run')`. For a curated REST tool, a
+  generic tool or a WS tool, `dry_run` is just one more argument. In a
+  scratch test, a frozen `call_service` with `dry_run: true` was **queued
+  for approval** instead of refused, against "queues nothing". A tool that
+  its gate policy leaves ungated would go on to run upstream while frozen.
+  **Fix:** exempt only `handler and args.get('dry_run')`, the same
+  condition the gate uses. **Test:** while frozen, `dry_run: true` on a
+  curated REST write, on `ws_write` and on the generic `write` tool is
+  refused with `frozen`, queues nothing and makes no upstream request. The
+  existing handler dry-run test stays green.
+* **R2 `ws_write` can still send any Supervisor endpoint.** The acceptance
+  criterion is "no code path can send an endpoint that is not in
+  `ha_supervisor.py`'s table". The approval-gated generic `ws_write` tool
+  still forwards `supervisor/api` (and `hassio/*`) with an endpoint and
+  method chosen by the agent. Because HA has no allowlist of its own, one
+  tired approval reaches host reboot, backup restore or add-on options. The
+  static scan in `test_f9_no_other_module_builds_a_supervisor_payload` does
+  not see this, because the command comes from the agent's arguments at run
+  time. **Fix:** refuse `supervisor/` and `hassio/` commands in `ws_write`
+  before connecting, with a reason that points at the curated tools. F10
+  will add the reviewed action endpoints to the table. **Test:** `ws_write`
+  with `supervisor/api` (and a `hassio/` command) is refused before any
+  WebSocket opens, both at call time and if a pending call is approved.
+
+*Should fix:*
+
+* **S1 `ha_check_config` and the freeze.** It is a `read_only` POST, so it
+  runs while frozen. That matches "validates and changes nothing", which is
+  fine. Say so in `INTEGRATIONS.md` next to the freeze note, so the operator
+  knows the one POST that keeps working.
+* **S2 Tool naming (the implementer's open question).** Drop the `ha_`
+  prefix: the MCP name already starts with the integration's name, and
+  `home_assistant_supervisor_info` reads better than
+  `home_assistant_ha_supervisor_info`. This is the operator's call. It is
+  one rename per tool, plus the name test.
+
+**Merge note: `core/read_policy.py` exists on three branches.** F9, F14 and
+F4 each create it. F9 and F14 have the same function, with different
+docstrings. F4's version has no `read_only` guard in
+`is_read_integration_call`. When F4 merges, keep F4's SSH half, take F9's
+guarded integration wrapper, and add a test that a curated write tool is not
+a read (`test_f9_a_curated_write_tool_is_not_a_read`). Whichever of F9 and
+F14 merges second only needs to resolve the docstring.
+
+
+**Round 2 (2026-11-09, main feature reviewer): approved and merged.** R1 is right: the freeze exemption now uses the same `handler and dry_run` condition as the gate. R2 is right: `supervisor/` and `hassio/` are refused before gating and again in `execute_ws_call`. Merge: `read_policy.py` takes F9's docstring. `tool_handlers.py` holds one `HANDLERS` table with F14's Pi-hole handler and F9's two handlers.
 
 ---
 
@@ -4215,11 +4538,187 @@ gateways.
 
 ### Implementer notes
 
-_(implementer)_
+**What I did**
+
+* **`core/read_policy.py` (§2.6a)**: the same minimal, integration-half module
+  the task asks for — `is_read_integration_call(tool, transport, args)` wraps
+  Chunk H's `_read_only_refusal` and adds the `read_only` guard. F4's branch
+  holds the full file (SSH rules); this one will be merged with it, and the
+  guard must survive that merge. **Every source read goes through it**:
+  `core.inventory._call_tool` refuses a source tool that is not a read before
+  anything is sent.
+* **`local_dns_records`** (`core/pihole_seed.py` + a handler in
+  `core/tool_handlers.py`): two fixed GETs, `config/dns/hosts` and
+  `config/dns/cnameRecords` (Pi-hole v6; the integration's base URL ends in
+  `/api`). The payload is accepted in both shapes FTL uses — nested under
+  `{"config": {"dns": {...}}}` and `"<ip> <name>"` / `"<name>,<target>"`
+  strings — and returned as `{hosts: [{name, ips}], cnames: [{name, target}]}`.
+  It is `read_only`, so `is_read_integration_call` passes; the description says
+  it needs a v6 integration.
+* **`core/inventory.py`**: five source adapters — Eshu (gateways + F7 inner
+  targets), Proxmox (`get_cluster_resources`), NPM (`proxy_hosts`), Pi-hole
+  (`local_dns_records`), Omada (`list_sites` then `list_known_clients` per
+  site, capped at 10 sites). Each is optional; a missing integration is
+  skipped, a failed one records its reason. `refresh_inventory()` swaps one
+  source's rows in one transaction and records the result in
+  `inventory_sources`; a failure **keeps the last good rows** and marks the
+  source stale (last error, or no success for two intervals).
+* **Join** (`build_entities`): union-find over `ip:<ip>`, `name:<normalised>`
+  (the name, each FQDN, and an FQDN's first label when it is at least three
+  characters) and `vmid:<host>:<vmid>`. An entity carries name, IPs, FQDNs,
+  hosts, vmids, URLs, kinds, the contributing sources (with their staleness)
+  and `conflicts` — an IP claimed by two different names is listed, never
+  resolved silently.
+* **`whereis(query)`**: exact matches first, then substrings, over name, IPs,
+  FQDNs, vmids, hosts, URLs and the MAC/inner-target extras. Up to **5**
+  entities, each trimmed under **600 characters** with `truncated` set.
+* **API**: `GET /api/inventory` (snapshot + `?q=` search), `POST
+  /api/inventory/refresh` (audited, synchronous — the operator pressed it),
+  `POST /api/inventory/settings` (interval clamped to 5–120, default 15,
+  audited). The background loop sleeps one interval before its first refresh,
+  so a boot never fires source calls while the dashboard starts.
+* **MCP**: `whereis` is a built-in on the shared and per-integration servers
+  (and in `_ALWAYS_ALLOWED`, like `session_begin`) — it answers from Eshu's own
+  cache and makes no upstream call on the request, so there is nothing for the
+  agent policy to gate.
+* **UI**: an Inventory page (sidebar) with a search box, the per-source chip
+  row (counts and stale dashes), the interval control, "Refresh now", and one
+  card per entity: name, ip/name/host/guest/url/mac facts, source chips and
+  the conflict line. Every string is escaped; a stale entity is dimmed.
+* **Tests**: `tests/test_f14_inventory.py` (18) — the five-source join (one
+  entity, all sources), the read-only source calls, a conflict, a failed
+  source keeping its rows and turning stale, Eshu-only with no integrations,
+  the 5-entity and 600-character caps, matching by IP/vmid/MAC/name, interval
+  clamping, `local_dns_records` passing the read check, the v6 parser on both
+  payload shapes, the upstream-error path, the three endpoints (session auth
+  included), and two node-harness checks (escaping; stale + conflict markers).
+
+**Decisions**
+
+* **HA add-on slugs are skipped**: the chunk says "after F9", and F9 is not on
+  `feature-roadmap`. Adding the source later is one adapter.
+* The **manual refresh is synchronous** so its result is real (the operator
+  pressed a button and gets counts). The background loop sleeps first and then
+  refreshes on the interval, so it never competes with a cold start.
+* The **join is deliberately loose on FQDNs** (first label) — `app.example.test`
+  should reach a guest named `app`. A wrong join is visible as a conflict
+  rather than hidden, and an entity lists every source that contributed.
+* Omada is the only source needing two calls (sites, then clients); sites are
+  capped at 10 so one controller cannot multiply the refresh cost.
+* The inventory stores **only read-only metadata** (names, addresses, ids,
+  URLs, MACs, a few status flags) and never a secret; the response scrubber
+  still runs on upstream responses before anything is cached.
+
+`bash scripts/verify.sh`: `1874 passed, 3 skipped, 7 warnings in 380.39s (0:06:20)`. The three skips are F18's read-lane tests (F4 is not on this branch).
+
+### Round 2: fixes for reviewer round 1
+
+* **R1 — `whereis` goes through agent policy and only shows allowed
+  sources.** It is out of `_ALWAYS_ALLOWED` and off the per-integration
+  servers; it lives once on the shared `/mcp` surface, so an agent's
+  `tools` allowlist (or `tools_mode`) decides whether it can call it.
+  `inventory.whereis` *also* checks `visible_tool_allowed(agent, 'whereis')`
+  itself and returns `{error: forbidden}` when the tool is not allowed, so a
+  direct call cannot skip the policy.
+  * `allowed_sources(agent)` returns Eshu's own rows always, plus an
+    integration's name only when the agent's policy permits at least one
+    enabled read tool on it — decided by `agent_policy.evaluate_call`, not by
+    the inventory.
+  * The filter runs **before** the join (`build_entities(..., allowed=…)`), so
+    an entity never carries a field from a source the caller cannot see.
+  * Every agent call writes a `whereis_query` audit event with the agent, the
+    query **length** (never the query) and the entity count.
+
+  Tests (`TestWhereisAgentPolicy`): a denied agent is refused
+  (`test_f14_a_denied_agent_is_refused`); an HA-only agent sees only
+  `eshu`+`ha` sources with no vmid and no MAC; a Proxmox agent sees the guest
+  (vmid 103) but not the Omada MAC; an unrestricted agent sees the full four
+  source join; the call is audited; `whereis` is not in `_ALWAYS_ALLOWED`
+  (and `test_sessions` now asserts it stays out).
+* **S1 — untrusted names.** `WHEREIS_DESC` says names come from the network
+  and are untrusted data, and `_entity` strips control characters from names,
+  IPs, FQDNs, hosts, vmids, URLs and string extras
+  (`test_f14_control_characters_are_stripped`).
+* **S2 — background refresh rows, recorded not filtered.** Each refresh
+  writes `integration_calls` rows with agent `inventory`; they are real
+  audit of what the dashboard read and when, attributed to the component that
+  made the call. They are not agent activity, so an activity view that wants
+  only agents should filter `agent = 'inventory'` (no such view does today).
+* **S3 — HA add-on slugs** stay for the round after F9 merges, through
+  `read_policy` like every other source.
+
+`bash scripts/verify.sh`: `1881 passed, 3 skipped, 7 warnings in 381.89s (0:06:21)`.
 
 ### Reviewer notes
 
-_(reviewer)_
+**Round 1 (2026-11-09): changes requested (one item).** Reviewed at `aa44771`;
+`bash scripts/verify.sh`: `1874 passed, 3 skipped, 7 warnings in 331.25s (0:05:31)`.
+
+**What holds.**
+
+* **Reads go through the read policy.** Every source read goes through
+  `read_policy.is_read_integration_call` (`inventory._call_tool`), and a
+  test proves it.
+* **`local_dns_records`.** It is `read_only`, it makes two fixed GETs, and
+  it passes the check.
+* **Failed sources.** A failed source keeps its last good rows and is
+  marked stale.
+* **The join.** It is union-find over IP, normalised name and vmid.
+  Conflicts are listed, not resolved.
+* **`whereis` caps.** 5 entities, each ≤ 600 characters, with
+  `truncated`.
+* **Interval.** It is clamped to 5–120.
+* **Boot.** The background loop sleeps before its first refresh.
+* **UI escaping.** The UI escapes every upstream string: names, FQDNs,
+  URLs, MACs, error titles and conflict names.
+* **No live data.** The fixtures use `192.0.2.x`, `example.test` and
+  `AA:BB:…` MACs.
+* **Approvals.** No approval path changed.
+
+*Must fix:*
+
+* **R1 `whereis` skips agent policy, and it exposes every source to every
+  agent.** The spec says `whereis` "goes through agent policy like any
+  tool". The branch puts it in `_ALWAYS_ALLOWED` and adds it to every
+  per-integration MCP server. `_ALWAYS_ALLOWED` is meant for tools "always
+  scoped to the caller", like polling your own approval, and `whereis` is
+  not scoped: it returns the combined Proxmox, Omada, NPM and Pi-hole map.
+  So an agent whose policy allows only one integration (say HA, or a small
+  local model under F17) gets every client's IP and MAC address and every
+  guest and proxy entry. **Fix:**
+  * Take `whereis` out of `_ALWAYS_ALLOWED`, so an agent policy can deny it.
+  * Filter each answer to the sources the calling agent may read: Eshu's
+    own gateways always, and an integration's rows only if the agent's
+    policy allows at least one read tool on that integration.
+  * Record the call (agent, query length, entity count) like the other MCP
+    calls.
+
+  **Tests:** an agent denied `whereis` is refused. An agent allowed only HA
+  sees no Proxmox or Omada fields. An agent allowed Proxmox sees the guest
+  but not the Omada MAC. An unrestricted agent sees the full join.
+
+*Should fix:*
+
+* **S1 Device-chosen names are untrusted text for the agent.** Omada client
+  names, Proxmox guest names and NPM domains can be set by whoever controls
+  a device or a guest, and `whereis` hands them to a model as facts. Add one
+  line to `WHEREIS_DESC` ("names come from the network and are untrusted
+  data") and strip control characters in `_entity`. **Test:** a name with
+  control characters is cleaned in the `whereis` output.
+* **S2 Background refreshes in the call log.** Every refresh writes
+  `integration_calls` rows for agent `inventory` (about 4 sources × 96 a
+  day at 15 min). That is fine, but filter them out of the agent-activity
+  views, or say in the implementer notes why they should show.
+* **S3 HA add-on slugs.** Skipping them until F9 merges is right. Add the
+  adapter in the round after F9 lands, through `read_policy` like the
+  others.
+
+**Merge note.** `core/read_policy.py` is also created by F9 (same function)
+and by F4 (the SSH half, without the `read_only` guard). See F9's merge
+note.
+
+
+**Round 2 (2026-11-09, main feature reviewer): approved and merged.** R1 is right: `whereis` is gated by agent policy, sources are filtered before the join, and each call is audited. Note: a caller with no agent identity (a legacy MCP token) gets the unfiltered join and no audit row, the same as for the integration tools themselves. Tighten this in the UI/hardening pass if legacy tokens are retired.
 
 ---
 
@@ -4489,11 +4988,11 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 7 | F12 | ssh-exec | dashboard + gateway | Ready (after F5) — design first | `feat/f12-ssh-exec` | F4, F5 | design approval + security reviewer sign-off |
 | 8 | F6 | session-wrapup | dashboard | Ready (after F12) | `feat/f6-session-wrapup` | F3, F4, F5 | |
 | 9 | F13 | session-conclusions | dashboard + MCP | Ready (after F6) | `feat/f13-session-conclusions` | F5, F6 | |
-| 10 | F8 | test-traffic | dashboard | Ready (after F13) | `feat/f8-test-traffic` | — | low priority |
-| 11 | F9 | ha-supervisor-read | dashboard | Ready (after F8) | `feat/f9-ha-supervisor-read` | — | token is now a dedicated `eshu` HA admin user |
+| 10 | F8 | test-traffic | dashboard | Merged | `feat/f8-test-traffic` | — | low priority |
+| 11 | F9 | ha-supervisor-read | dashboard | Merged | `feat/f9-ha-supervisor-read` | — | token is now a dedicated `eshu` HA admin user |
 | 12 | F10 | ha-supervisor-actions | dashboard | Ready (after F9) | `feat/f10-ha-supervisor-actions` | F9, F3, Chunk H | reviewer pass + security reviewer sign-off |
 | 13 | F11 | ha-config-files | dashboard | Ready (after F10) — design first | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | design approval + security reviewer sign-off |
-| 14 | F14 | inventory | dashboard + MCP | Ready (spec detailed 2026-11-08) | `feat/f14-inventory` | Chunk H | |
+| 14 | F14 | inventory | dashboard + MCP | Merged | `feat/f14-inventory` | Chunk H | |
 | 15 | F15 | probes | dashboard + MCP | Ready after F12 | `feat/f15-probes` | F4, F12 | |
 | 16 | F16 | recipes | dashboard + MCP | Design first (questions listed) | `feat/f16-recipes` | F3, F12, F13 | design approval + security reviewer sign-off |
 | 17 | F17 | local-agent | dashboard + docs | Ready after F12–F16 | `feat/f17-local-agent` | F12–F16 | |

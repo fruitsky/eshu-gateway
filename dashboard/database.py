@@ -20,6 +20,7 @@ from db.requests import (
     search_requests,
     get_session_requests,
     get_request_target_ip,
+    mark_requests_excluded,
 )
 
 from db.gateways import (
