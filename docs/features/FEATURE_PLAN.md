@@ -3394,6 +3394,44 @@ gateways.
 
 `bash scripts/verify.sh`: `1874 passed, 3 skipped, 7 warnings in 380.39s (0:06:20)`. The three skips are F18's read-lane tests (F4 is not on this branch).
 
+### Round 2: fixes for reviewer round 1
+
+* **R1 — `whereis` goes through agent policy and only shows allowed
+  sources.** It is out of `_ALWAYS_ALLOWED` and off the per-integration
+  servers; it lives once on the shared `/mcp` surface, so an agent's
+  `tools` allowlist (or `tools_mode`) decides whether it can call it.
+  `inventory.whereis` *also* checks `visible_tool_allowed(agent, 'whereis')`
+  itself and returns `{error: forbidden}` when the tool is not allowed, so a
+  direct call cannot skip the policy.
+  * `allowed_sources(agent)` returns Eshu's own rows always, plus an
+    integration's name only when the agent's policy permits at least one
+    enabled read tool on it — decided by `agent_policy.evaluate_call`, not by
+    the inventory.
+  * The filter runs **before** the join (`build_entities(..., allowed=…)`), so
+    an entity never carries a field from a source the caller cannot see.
+  * Every agent call writes a `whereis_query` audit event with the agent, the
+    query **length** (never the query) and the entity count.
+
+  Tests (`TestWhereisAgentPolicy`): a denied agent is refused
+  (`test_f14_a_denied_agent_is_refused`); an HA-only agent sees only
+  `eshu`+`ha` sources with no vmid and no MAC; a Proxmox agent sees the guest
+  (vmid 103) but not the Omada MAC; an unrestricted agent sees the full four
+  source join; the call is audited; `whereis` is not in `_ALWAYS_ALLOWED`
+  (and `test_sessions` now asserts it stays out).
+* **S1 — untrusted names.** `WHEREIS_DESC` says names come from the network
+  and are untrusted data, and `_entity` strips control characters from names,
+  IPs, FQDNs, hosts, vmids, URLs and string extras
+  (`test_f14_control_characters_are_stripped`).
+* **S2 — background refresh rows, recorded not filtered.** Each refresh
+  writes `integration_calls` rows with agent `inventory`; they are real
+  audit of what the dashboard read and when, attributed to the component that
+  made the call. They are not agent activity, so an activity view that wants
+  only agents should filter `agent = 'inventory'` (no such view does today).
+* **S3 — HA add-on slugs** stay for the round after F9 merges, through
+  `read_policy` like every other source.
+
+`bash scripts/verify.sh`: `1881 passed, 3 skipped, 7 warnings in 381.89s (0:06:21)`.
+
 ### Reviewer notes
 
 **Round 1 (2026-11-09): changes requested (one item).** Reviewed at `aa44771`;
