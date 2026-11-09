@@ -2832,6 +2832,39 @@ tests pass locally, and the X1 sidebar actions survived the merge.
 
 `bash scripts/verify.sh`: `1921 passed, 3 skipped, 7 warnings in 383.60s (0:06:23)`.
 
+### Round 3: merge with F8, F9 and F14
+
+`git merge origin/feature-roadmap` brings the approved F8 (test traffic), F9
+(freeze + HA Supervisor reads) and F14 (inventory) onto this branch. Four
+files conflicted; each was resolved by keeping both features, whole:
+
+* **`main.session_detail_endpoint`** keeps **one** summary dict: F6's
+  `by_approval`, `waited_seconds`, `decided`, `failed`, `duration_seconds`,
+  `writes` and `writes_by_host` plus F8's `excluded` and `all_excluded`. The
+  write count still uses the bucket mapping (R2), and the exclusion counts
+  still cover every SSH row of the session (F8 S3).
+* **`index.html`** keeps both `sm-summary` (F6's wrap-up card) and
+  `sm-test-hint` (F8's suggestion), in that order, under `sm-meta`.
+* **`app.js`** keeps the F6 block (`sessionSummaryHtml`, `renderSessionSummary`,
+  the approval chips, the goal line) and the F8 block (`looksLikeTestGoal`,
+  `excludedMarkHtml`, `excludeRequests`, `renderSessionTestHint`) whole; the
+  modal calls `renderSessionSummary(...)` then `renderSessionTestHint(...)`.
+* **`style.css`** keeps the F6, F14 and F8 blocks whole and once each: the F6
+  `--appr-*`/`.appr-*`/`.session-summary*` rules, the F14 `.inv-*` rules and
+  the F8 `.excluded-*`/`.sm-test-hint` rules. `ui_check.py` stays green and
+  `node --check` passes.
+
+**F8's merge note is implemented**, not just recorded: the F6
+`approval_breakdown` query now adds `COALESCE(r.excluded, 0) = 0` (the same
+filter as the other statistics queries), so an excluded approval is not in the
+"how approved" series. F8's generated statistics-filter scan walks
+`get_statistics` and now covers that query too, and
+`test_f6_approval_breakdown_skips_excluded_rows` checks the behaviour (one
+approved row plus one excluded approved row reports `human == 1`). The F6 and
+F8 test files both pass on the merged tree.
+
+`bash scripts/verify.sh`: `2010 passed, 3 skipped, 7 warnings in 410.61s (0:06:50)`.
+
 ### Reviewer notes
 
 **Round 1 (2026-11-08): changes requested.** Reviewed at `6b35d99`;
