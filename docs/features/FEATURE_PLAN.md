@@ -6101,6 +6101,7 @@ is stored (G1). G3 whitespace and control-character refusal is in.
 
 The gateway bash is with the security reviewer (their code review is
 separate). M1 is the one item they may also flag.
+
 **Code review of the gateway bash (aa268de, notes cfe8db0), 2026-11-09:
 changes requested (R1–R4).** I read `eshu-gateway.sh`, `eshu-poller.sh`,
 the installer template and the `ssh_exec` runner argv. I did not run anything.
