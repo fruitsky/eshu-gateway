@@ -3813,6 +3813,43 @@ to me.** The proposed approach is fine. Conditions:
   and L5) builds on the line-buffered `sanitize`. F19's time limit stays the
   bound for unattended runs, whatever the buffering does.
 
+**Buffering fix review (feature reviewer, 2026-11-10, `fix/stream-unbuffered` at
+`5477da5`): approved; to the security reviewer (gateway bash, § 2.6a).** CI is
+green on the branch.
+
+* **B1 is right.** `stdbuf -oL sed -E` with the same expressions, found once
+  per call, plain `sed` plus a syslog line when absent. Rechecked here: a
+  slow writer through `stdbuf -oL sed` into a reader that closes after the
+  first line ends in **0.2 s** (exit-only path).
+* **B2's rejection is right, and the evidence is stronger than the note
+  says.** On this reviewer's mawk 1.3.4 **20240123**, `-W interactive` does not
+  split a 20 000-byte line: it **truncates** it to 4 097 bytes (one line,
+  `wc -c` 4097). Either way it corrupts the agent's stream, so it must not be
+  used. The `-W interactive` source guard stays.
+* **The residual is real and limited to `tail` capture on mawk.** Measured:
+  slow writer → `stdbuf -oL sed` → `mawk` ring → reader closes after one line:
+  **10.7 s** (the whole writer). The 16 live gateways are all `exit-only`, where
+  awk is not in the stream, so B1 fully fixes them. `RELEASE_1.md` step 6
+  (optional `tail` on one gateway) should mention it.
+* **S1 (should, a later fix, not this branch): take awk out of the visible
+  stream in `tail` mode.** `… | sanitize | tee >(capture_tail "$cap" >/dev/null)`
+  measured **0.3 s** with mawk: `tee` writes as it reads, gets EPIPE at once,
+  and the ring only reads. The cost is waiting for the process substitution
+  before the result post (bash ≥ 5.1 `wait $!`, or the ring writes to a temp
+  name and `mv`s, with a short bounded poll). Its own small chunk, gateway bash,
+  security sign-off.
+* **N1 (nit):** the slow-writer test skips mawk in **both** modes, but in
+  `exit-only` awk is not in the pipeline, so the mawk/exit-only case can run.
+  Skip only `mawk` + `tail`.
+* **N2 (nit):** without `stdbuf` the syslog line is written on every call. All
+  gateways are systemd hosts with coreutils, so this will not fire in
+  practice; fine as is.
+
+**Merge order:** security signs off → I merge this into `feature-roadmap` →
+F12 merges `feature-roadmap` forward again (it does **not** have B1 yet: the
+F12 report said "B1 came with the merge", but `sanitize` on F12 is still
+plain `sed`) → security re-checks the merged F12 gateway diff → I merge F12.
+
 ---
 
 ## Chunk X1 — Sidebar actions and pending-only decisions · slug `ctx-actions` · dashboard · BUG
