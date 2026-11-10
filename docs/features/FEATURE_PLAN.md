@@ -6523,6 +6523,185 @@ is unchanged.
 
 `bash scripts/verify.sh`: `2331 passed, 7 warnings in 429.52s (0:07:09)` (docs only).
 
+### Round 4 — design after the round-4 check (W1–W5)
+
+V1 is answered by the operator's read-only run on a real **Advanced SSH &
+Web Terminal** add-on (Home Assistant OS, BusyBox v1.37.0, no GNU coreutils,
+`/config -> /homeassistant`). The design now uses only forms that run on that
+userland, and W1–W5 are folded in. V1's first option — require GNU coreutils
+— is out: the add-on does not have them.
+
+#### W1 — arguments first, then BusyBox `realpath`
+
+BusyBox `realpath` parses **no options at all**, not even `--`, so
+`realpath -e -- "$path"` fails on every call (the round-3 script would exit
+12 and F11 would never work). The order is now:
+
+1. refuse any argument that is not absolute (`case "$path" in /*) ;; *) exit
+   19 ;; esac`, the same for `$backup` and `$tmp`) **before any tool sees
+   it** — that also removes the need for `--` everywhere;
+2. `real=$(realpath "$path")` with no options, then `[ -f "$real" ]` (BusyBox
+   `realpath` fails on a missing last component, GNU succeeds without `-e`;
+   the explicit test makes both refuse);
+3. `dir=$(dirname "$real")`, then `[ -d "$dir" ]`;
+4. `dirname`, `basename`, `sha256sum`, `cp`, `mv` and `rm` are called with the
+   bare absolute names — no `--`, so the script does not depend on which
+   applets parse options.
+
+With every argument absolute and every value `realpath`ed, `--` has nothing
+left to protect against.
+
+#### W2 — copy mode and owner with `stat -c`
+
+BusyBox has no `chmod --reference` / `chown --reference`. The confirmed form
+is used instead:
+
+```bash
+chmod "$(stat -c %a "$real")" "$tmp" || exit 16
+chown "$(stat -c %u:%g "$real")" "$tmp" 2>/dev/null || true
+```
+
+(`stat -c '%a %u:%g'` on the add-on returns `644 0:0`; `chown` is best effort
+because a non-root user cannot change ownership, but the add-on's user is
+root.)
+
+#### W3 — do not key anything on exit 124
+
+BusyBox `timeout` reports a killed command as **143** (137 with `-k`), not
+GNU's 124. The script already folds every failure of
+`timeout 100 ha core check` into exit 18 *after restoring the backup*; that
+stays the only rule. Any test stub, dashboard message or future code that
+tells "timed out" from "check failed" must accept **124, 137 and 143**; the
+script itself never looks at the number.
+
+#### W4 — never start `find` at the `/config` symlink
+
+`find /config -maxdepth 1 -type f` prints **nothing** on the add-on (BusyBox
+`find` does not follow a symlinked start point); `find /config/` does. The
+list template already uses `/homeassistant` and stays that way:
+
+```bash
+find /homeassistant -maxdepth 1 -type f \( -name '*.yaml' -o -name '*.yml' \)
+find /homeassistant/packages -type f \( -name '*.yaml' -o -name '*.yml' \) 2>/dev/null
+```
+
+A test asserts the constant contains no `find /config ` (with the space; the
+trailing-slash form is also not used) and does contain `find /homeassistant`.
+The setup doc states that `/config` is a symlink to `/homeassistant` on this
+add-on (confirmed 2026-11-10, BusyBox 1.37.0), and that the round-2
+root-relative check is right: `realpath(dirname(/config/x.yaml))` is
+`/homeassistant`.
+
+#### W5 — CI runs the scripts under BusyBox too
+
+The implementation adds `busybox` to the CI apt packages (the `tests` job in
+`.github/workflows/ci.yml`, before `pip install`), and adds
+`tests/test_f11_ha_config_ssh.py`:
+
+* `WRITE_SCRIPT` and `RESTORE_SCRIPT` are module constants in
+  `core/ha_config_ssh.py`, so the test lifts the exact text (and asserts the
+  shipped constant still says `/homeassistant`);
+* the test runs that text as `busybox sh -c '<script>' _ <args>` with a PATH
+  that holds **only** BusyBox applet links (`realpath`, `readlink`, `stat`,
+  `chmod`, `chown`, `cp`, `mv`, `rm`, `cat`, `sha256sum`, `cut`, `dirname`,
+  `basename`, `timeout`, `printf`, `sh`, `sleep`) plus a stub `ha`, and again
+  under the system `sh` with GNU coreutils (the timeout stub sleeps through
+  the absolute `/bin/sleep`, because the BusyBox PATH holds only applets);
+* `/homeassistant` cannot be created in CI, so the test substitutes a temp
+  root into **its own copy** of the script text; the shipped constant is
+  never modified. The timeout case substitutes `timeout 100` with a short
+  bound in the copy too, so the stub `ha` can sleep past it;
+* a missing `busybox` skips the BusyBox half with a clear reason locally;
+  CI installs it, so CI always runs it.
+
+Cases, both userlands: a good write (content replaced, backup holds the old
+bytes, exit 0); a missing file (12); a relative path (19, and nothing is
+touched); a symlinked file (13); a `0640` file staying `0640`; a stub `ha`
+that sleeps past the short bound (the backup is restored, exit 18, content is
+the old one). The restore script runs the same matrix plus "the backup is
+copied to the second temp before the restore".
+
+While writing this note the script was run exactly that way: `busybox sh`
+with a BusyBox-only PATH on a temp root, and the good write (0, mode kept,
+backup old), missing file (12), relative path (19), symlinked file (13) and
+the short-bound timeout (restored, 18) all behaved as designed.
+
+#### The write script, amended (W1–W4)
+
+```bash
+# WRITE_SCRIPT — one connection, `set -eu`, BusyBox- and GNU-compatible.
+# Exit codes: 10/11 the directory is not the HA config tree, 12 missing file,
+# 13 symlink/escape, 14 hash changed, 15 backup failed, 16 write failed,
+# 17 move failed, 18 check failed and the backup was restored, 19 bad argument.
+# 1 is a failed restore inside the || group; it must map to
+# config_state_unknown (U3), never to a clean failure.
+sh -c '
+set -eu
+path=$1; expect=$2; backup=$3; tmp=$4
+
+# W1: every argument must be absolute before any tool sees it. BusyBox
+# realpath parses no options, so it cannot be asked to treat "--" as one.
+case "$path"   in /*) ;; *) exit 19 ;; esac
+case "$backup" in /*) ;; *) exit 19 ;; esac
+case "$tmp"    in /*) ;; *) exit 19 ;; esac
+
+real=$(realpath "$path") || exit 12
+[ -f "$real" ] || exit 12
+dir=$(dirname "$real")
+[ -d "$dir" ] || exit 11
+# W4: /config is a symlink to /homeassistant on the add-on.
+case "$dir" in
+  /homeassistant|/homeassistant/packages|/homeassistant/packages/*) ;;
+  *) exit 11 ;;
+esac
+[ "$(realpath "$(dirname "$path")")" = "$dir" ] || exit 13
+[ "$(basename "$real")" = "$(basename "$path")" ] || exit 13
+
+case "$backup" in
+  "$real".eshu-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9].bak) ;;
+  *) exit 19 ;;
+esac
+case "$tmp" in
+  "$real".eshu-tmp-*) ;;
+  *) exit 19 ;;
+esac
+[ "$(dirname "$backup")" = "$dir" ] || exit 19
+[ "$(dirname "$tmp")" = "$dir" ] || exit 19
+[ ! -e "$backup" ] || exit 19
+[ ! -e "$tmp" ] || exit 19
+
+[ "$(sha256sum "$real" | cut -d" " -f1)" = "$expect" ] || exit 14
+cp -p "$real" "$backup" || exit 15
+cat > "$tmp" || { rm -f "$tmp"; exit 16; }
+
+# W2: BusyBox has no --reference; copy the mode and owner explicitly.
+chmod "$(stat -c %a "$real")" "$tmp" || exit 16
+chown "$(stat -c %u:%g "$real")" "$tmp" 2>/dev/null || true
+
+mv -f "$tmp" "$real" || exit 17
+
+# W3: BusyBox timeout reports a kill as 143 (137 with -k). Every failure of
+# the check restores the backup and exits 18; nothing is keyed on 124.
+timeout 100 ha core check 2>&1 || { cp -p "$backup" "$real" || exit 1; exit 18; }
+printf "ok %s\n" "$(sha256sum "$real" | cut -d" " -f1)"
+' _ "$path" "$expect" "$backup" "$tmp"
+```
+
+The restore script keeps the same preamble (absolute arguments, BusyBox
+`realpath`, `-f`/`-d`, the accepted directory, the basename equality, the
+backup/temp name checks) and then: copy the current file to `$tmp`, copy
+`$backup` over `$real`, `timeout 100 ha core check`, and on failure copy
+`$tmp` back (exit 1 if that also fails, exit 18 otherwise).
+
+#### Tests, added
+
+The W5 matrix (write and restore, `busybox sh` and GNU `sh`); W4's template
+assertion (no `find /config `, `/homeassistant` present); a setup-doc
+assertion that the `/config -> /homeassistant` symlink is stated. The
+dashboard's own cases are unchanged.
+
+`bash scripts/verify.sh`: `2331 passed, 7 warnings in 426.99s (0:07:06)` (docs only).
+
 ### Reviewer notes
 
 **Design round 1 (2026-11-09): approved in direction, changes requested.**
@@ -13629,7 +13808,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 10 | F8 | test-traffic | dashboard | Merged | `feat/f8-test-traffic` | — | low priority |
 | 11 | F9 | ha-supervisor-read | dashboard | Merged | `feat/f9-ha-supervisor-read` | — | token is now a dedicated `eshu` HA admin user |
 | 12 | F10 | ha-supervisor-actions | dashboard | Ready (after F9) | `feat/f10-ha-supervisor-actions` | F9, F3, Chunk H | reviewer pass + security reviewer sign-off |
-| 13 | F11 | ha-config-files | dashboard | **Round 4: V1 checked on a real add-on (BusyBox); W1–W5 to fold, then security review** | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | design approval + security reviewer sign-off |
+| 13 | F11 | ha-config-files | dashboard | **Round 4: W1–W5 folded (BusyBox/GNU-compatible scripts, CI busybox) — awaiting security review** | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | design approval + security reviewer sign-off |
 | 14 | F14 | inventory | dashboard + MCP | Merged | `feat/f14-inventory` | Chunk H | |
 | 15 | F19 | unattended-limits | gateway + dashboard | **Merged** 2026-11-11 (security sign-off `67bec51`; AF1/AF2 checked) | `feat/f19-unattended-limits` | F4, F5, F12 | AF3 goes on the next gateway branch |
 | 16 | F15 | probes | dashboard + MCP | **Merged** 2026-11-11 (AG1 security decision `eca8982`; AI1 fix merged) | `feat/f15-probes` | F4, F12, F14 | |
