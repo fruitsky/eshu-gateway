@@ -6818,7 +6818,10 @@ case "$tmp" in
 esac
 [ "$(dirname "$backup")" = "$dir" ] || exit 19
 [ "$(dirname "$tmp")" = "$dir" ] || exit 19
-[ -f "$backup" ] || exit 19
+
+# X1: `-f` follows a symlink, so a link planted at the backup name would make
+# `cp -p "$backup" "$real"` copy whatever readable file it points at.
+[ -f "$backup" ] && [ ! -L "$backup" ] || exit 19
 
 # W6: a dangling symlink passes `-e`; refuse it explicitly.
 [ ! -e "$tmp" ] && [ ! -L "$tmp" ] || exit 19
@@ -6836,6 +6839,40 @@ The write script gets the same W7 preamble and the `SUPERVISOR_TOKEN=…` prefix
 on its check, plus the W6 checks and `set -C`.
 
 `bash scripts/verify.sh`: `2331 passed, 7 warnings in 427.47s (0:07:07)` (docs only).
+
+### Round 6 — X1: a symlink at the backup name (design only)
+
+**Design only; no code on this branch yet.** Folded into the restore script
+above and into its test matrix.
+
+* **X1 — `[ -f "$backup" ]` follows a symlink.** The restore's backup check
+  is the positive one (the backup must exist), so W6's `[ ! -e ] && [ ! -L ]`
+  pattern does not apply to it, and a symlink passing `-f` was accepted. A
+  planted link at `<real>.eshu-<ts>.bak` would make `cp -p "$backup" "$real"`
+  copy **any readable file on the add-on** — `/etc/shadow`, the add-on's own
+  key, the Supervisor token file — into a `.yaml` the same agent can then read
+  back with `ha_config_read`. The dashboard's `BACKUP_RE` check does not help:
+  the name is valid, it is the target that is not a backup.
+  The check is now
+  `[ -f "$backup" ] && [ ! -L "$backup" ] || exit 19`
+  (with `set -eu` the failing left operand of `&&` is not an error, and the
+  `||` catches either failure). Nothing is touched before it, so exit 19
+  leaves the config as it was; the restore never reaches `$tmp` or the check.
+
+  The same argument applies to `$real`'s own path, but that is already covered:
+  `realpath` plus the basename equality (exit 13) refuse a symlinked target,
+  and the write script's `[ ! -e "$backup" ] && [ ! -L "$backup" ]` plus
+  `set -C` cover the create side.
+
+  **Test** (added to the round-5 matrix, both userlands): a regular file with
+  recognisable synthetic content (`eshu-planted-sentinel`) is the target of a
+  symlink placed at the backup name; the restore exits 19, the config file is
+  byte-identical to before, and the sentinel appears nowhere in the config
+  directory. A **dangling** symlink at the same name also exits 19 and its
+  target path is not created. Both cases fail on the old script (which copied
+  the sentinel / followed the link) and pass with the `-L` check.
+
+`bash scripts/verify.sh`: `2331 passed, 7 warnings in 428.65s (0:07:08)` (docs only).
 
 ### Reviewer notes
 
