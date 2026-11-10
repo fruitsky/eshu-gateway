@@ -6727,6 +6727,19 @@ merge-forward and the security diff check.**
      installer-template and poller diff once, against `feature-roadmap`.
   4. Then I merge.
 
+**Merge-forward review (feature reviewer, 2026-11-10, `bb12b76`): approved.**
+CI is green. The MCP branch is `… | sanitize | capture_tail "$ESHU_MCP_CAP"
+65537 >/dev/null`: one ring, no FIFO, no wait; `capture_tail` takes the cap as
+`$2` with `cap + 2` slots and the C5 `delete`s; the envelope reads the last
+65 536 bytes and the +1 tells "cut". Its output goes to `/dev/null`, so mawk's
+input buffering (see the buffering-fix note) does not matter on this path.
+
+* **Correction to the report:** B1 is **not** on this branch. It is only on
+  `fix/stream-unbuffered`, which has not merged; `sanitize` here is still plain
+  `sed -E`. After that fix merges, merge `feature-roadmap` forward once more
+  (expect a small conflict at `sanitize`; take the `SANITIZE_CMD` form), then
+  the security reviewer re-checks the merged gateway diff, then I merge F12.
+
 
 ---
 
