@@ -7022,7 +7022,8 @@ created without `set -C`, so a link planted there would be written through as
 root (the Z4 hole, one level down). The output is now captured in a variable
 and piped into `redact`; nothing is created in the config directory. The
 variable is capped (the check output is at most 64 KiB, the same bound the
-call row keeps), and the cap is applied **before** redaction.
+call row keeps), and the cap is applied **after** redaction (AE1; an earlier
+copy of this paragraph said "before", which AE1 reversed).
 
 Every value from every file is collected (a union), not first-match: a value
 quoted in the output could come from either definition. Over-redaction of the
@@ -7143,7 +7144,10 @@ the binding unset is refused and opens no connection.
 * **Z9 — "ok" means exit 0 and the last line.** A write succeeds only on exit
   0 **and** a last line `ok <64 hex>` that equals the SHA-256 of the content
   the engine sent. The output is never scanned for `ok`: the check output
-  comes first and the file can put anything in it.
+  comes first and the file can put anything in it. Round 8 (AH) amends this:
+  the status line is the **last line** of the response, a blank line may
+  precede it when the check output was cut, and the parser takes the final
+  line rather than the first one that starts with `ok`.
 
 #### Gating
 
@@ -7928,7 +7932,814 @@ Nits (the feature reviewer can check these):
   integration then refuses, rather than clearing a key nobody reads.
 
 After AH1–AH4, I review only the changed parts of Z1, Z2 and Z4 and the
-final scripts.
+final scripts. That round is below (round 8), so F11 goes back to the
+security reviewer after it.
+
+### Round 8 — AH1–AH4 and the three nits (design round)
+
+**Design only; no code on this branch.** AH1–AH4 are folded below, the three
+nits are fixed, and the five scripts are restated in full at the end of the
+round because AH1 changes every read in all of them. Where an earlier round
+and this one disagree, **this round wins**.
+
+Every script was run under **BusyBox `sh`** and under **`dash`** (the W5
+matrix) with a BusyBox-only `PATH`, a substituted temp root, a stub `ha` and
+a substituted token file; both userlands pass the same 80 cases, and each
+case that matters fails on the round-7 text. This container has BusyBox
+1.36.1; V1 reported 1.37.0 on the add-on and nothing below uses an applet
+that differs between them.
+
+#### AH1 — open once, check the open file, read only through the descriptor
+
+The pattern, once per file, from the one `exec` that opens it:
+
+```sh
+exec 3< "$real"                                    # one open
+fd3=/proc/$$/fd/3                                  # the descriptor names it
+[ "$(readlink "$fd3")" = "$real" ] || exit 13      # this is the file opened
+[ -f "$fd3" ] || exit 12                           # a regular file
+[ "$(stat -L -c %h "$fd3")" = 1 ] || exit 21       # and not a hard link
+```
+
+After that every read goes through `"$fd3"`. `sha256sum "$fd3"`, `cat
+"$fd3"` and `cat "$fd3" >&4` each open `/proc/$$/fd/3`, which the kernel
+resolves to the inode fd 3 holds: a name in the config tree can be swapped
+for a link, that path cannot be pointed at another inode.
+
+**What each descriptor holds.**
+
+| script | fd 3 | fd 4 | fd 5 | fd 6 | fd 9 |
+|---|---|---|---|---|---|
+| write | the target: the hash before the write, and the backup copy | the backup: the rollback source | the new content: the `!include` scan and the `ok` hash | the rollback file | one `secrets.yaml` at a time (`redact`) |
+| restore | the target: the pre-restore copy | the backup: the restore source, hashed before and after | the pre-restore copy: the rollback source | the restored file, which becomes the target | one `secrets.yaml` (`redact`) |
+| read | the target | — | — | — | — |
+| keys | the target | — | — | — | — |
+
+**No checked name is opened a second time, because the descriptor is made by
+the open.**
+
+* **The backup.** `exec 4> "$backup"` creates the file under `set -C` **and**
+  holds it, in one step; the bytes are `cat "$fd3" >&4`. There is no `cp`
+  and no second open of the name. The `[ ! -e ] && [ ! -L ]` check before it
+  stays as the early refusal, but it is no longer what protects the write.
+* **The new content.** `exec 5> "$tmp"`, content `cat >&5`. The `ok` hash is
+  `sha256sum "$fd5"` taken **after** `mv -f "$tmp" "$real"`, when `readlink
+  "$fd5"` is `"$real"`; the number reported therefore describes the inode
+  that is at the target now, not whatever the name points at. A `$tmp`
+  replaced between our write and the `mv` makes the `ok` hash differ from the
+  SHA-256 the dashboard sent, so the call reports `config_state_unknown`
+  instead of a clean success.
+* **The write's rollback.** `exec 6> "$rb"`, bytes `cat "$fd4" >&6`, then
+  `mv -f "$rb" "$real"`. The backup is read from fd 4, so AH1's serious case
+  — the backup's *name* replaced by a symlink to the token file while the
+  check fails — copies the real backup bytes; the planted link is never
+  read, and the sentinel never reaches the `.yaml`.
+* **The restore re-reads its own result.** The restored file is fd 6, built
+  from fd 4; after the check, `sha256sum /proc/$$/fd/6` must equal the hash
+  of fd 4 taken before it, so a restore that somehow moved different bytes
+  does not print `ok`.
+* **The restore's rollback** is `mv -f "$tmp" "$real"` followed by
+  `[ "$(readlink "$fd5")" = "$real" ]`: if `$tmp` was renamed over, the
+  descriptor shows it and the restore reports `config_state_unknown`
+  (exit 1) rather than claiming the pre-restore content is back.
+
+**`redact` is the one place that uses `/proc/self/fd/9`, not `/proc/$$/fd/9`.**
+It is called in a pipeline (`printf … | redact | head -c 65536`), so it runs
+in a **subshell**, and POSIX `$$` still names the parent shell. The document
+was opened by the subshell, so `/proc/$$/fd/9` names an entry that does not
+exist and every candidate would be skipped — redaction that silently does
+nothing. `/proc/self/fd/9` is resolved by the process that opens it
+(`readlink`, `stat`, `awk`, `sha256sum`), all of which inherited the
+descriptor, so it always names the right inode. The matrix caught this; it
+is not visible by reading the script.
+
+**No `|| exit N` after an `exec`.** A redirection error on `exec` ends a
+non-interactive shell (POSIX; dash, ash and bash all do it), so a guard after
+it would never run and the shell's own status is 1. The scripts carry no such
+guard, and the exit-code table says 1 means "the file could not be opened
+after it was checked" (or a failed rollback), which the dashboard maps to
+`config_state_unknown`. The one place a *candidate* file could hit this is
+`redact`, so each candidate is gated with `[ -f "$f" ]` before the open: that
+refuses a FIFO (whose open would block) and a file that vanished since the
+`find`, and a `secrets.yaml` deleted in that window fails the call closed
+instead of printing unredacted output.
+
+Tests, both userlands. The round-7 text cannot pass the first, third and
+fourth: its rollback copies the backup by name, and every read opens the
+target by name after the checks have passed. (Confirmed against the round-7
+read script, which prints the sentinel and exits 0 when the swap is inserted
+just before its `cat`.)
+
+* the backup's name replaced by a symlink to a sentinel **and then** the
+  check fails: the target ends with the old content, and the sentinel
+  appears in no file and in no output;
+* the target's name replaced by a symlink to the sentinel and the check
+  fails: the target is a regular file with the old content and the sentinel
+  is untouched (this re-tests Z4 at the same time);
+* the target swapped for a symlink **between `realpath` and the open** (one
+  line inserted into the test's copy of the script, the way W5 substitutes
+  the temp root): exit 13 and nothing printed;
+* the backup swapped for a symlink **between the `-L` check and the open**
+  in the restore: exit 19, nothing read and nothing written;
+* a hard link on the target: 21; a symlink planted at the backup name or the
+  temp name before the run: 19.
+
+#### AH2 — redaction sees every value HA can print
+
+`ha core check` validates the **whole** configuration, so the values it can
+quote are not only the ones the edited file can resolve. Two changes:
+
+* **Every `secrets.yaml` in the tree.** `redact` collects `find
+  /homeassistant -xdev -name secrets.yaml -type f` and opens each candidate
+  through AH1's checks (`-f`, `readlink`, link count 1) before awk reads it
+  through the descriptor. AB1's upward walk is a strict subset of this —
+  every parent of the edited file is under `/homeassistant`, where the find
+  starts — so it is replaced, not kept alongside; AB1's own test (a file in
+  `packages/net/` whose only `secrets.yaml` is the root one) still passes.
+  AB1 could not protect `ha_config_check` at all: it has no edited file, and
+  before this change it redacted nothing. `-xdev` is the reviewer's own form;
+  a `secrets.yaml` on another mount under the tree is not collected, which
+  the setup doc states. Candidates are opened one at a time on fd 9, so many
+  files cost time, not descriptor slots.
+* **Parsing.** For each `key: value` line:
+  * a **double-quoted** value adds the form as written **and** the form with
+    `\"` and `\\` decoded;
+  * a **single-quoted** value adds the form as written **and** the form with
+    `''` decoded;
+  * an **unquoted** value adds the value as written **and** the value with a
+    trailing ` #…` removed, because HA resolves `key: value  # comment` to
+    `value` and the round-7 collector kept the comment, so the real value
+    never matched;
+  * block scalars (`|`, `>`) are unchanged from AB2: line by line, indent
+    stripped, length ≥ 4. The 4-character floor and the line-by-line limit
+    stay documented in the setup doc.
+
+  Over-redaction is acceptable; a value that is never added is the bug.
+
+A trap the matrix found: the single-quote decode cannot be written
+`gsub(/''/, "\047", b)`. The awk program sits inside the shell's single
+quotes, so `''` **closes and reopens** the string and the regex becomes
+empty — `gsub(//, "'")` inserts a quote between every character, which looks
+like redaction working while the real value is never added. The shipped form
+is `gsub(/\047\047/, "\047", b)`.
+
+Tests: a value with a trailing comment is redacted (and so is the bare
+value); the decoded form of a double-quoted and of a single-quoted value is
+redacted; a value defined only in `packages/other/secrets.yaml` is redacted
+in a write's check output **and** in `ha_config_check`; a 3-character value
+is not; an ordinary line survives unchanged (AC1).
+
+#### AH3 — the mode is set when the file is created; `chown -h`; no `chmod`
+
+Every new file takes its mode from the file it is a copy of, through `umask`
+set just before the noclobber open. There is no `chmod` at all, and no window
+in which a new file is more permissive than its source:
+
+```sh
+umask_for() {
+  m=$(stat -L -c %a "$1")     # the source's permission bits
+  m=${m#"${m%???}"}           # last three digits: drop setuid/setgid/sticky
+  umask "$(printf "%o" $(( 0777 & ~0$m )))"
+}
+```
+
+| new file | mode from | why |
+|---|---|---|
+| write `$backup` | fd 3, the target | it is a copy of it |
+| write `$tmp` | fd 3, the target | it becomes the target |
+| write `$rb` | fd 4, the backup | it becomes the target again |
+| restore `$tmp` | fd 3, the target | it is the target's content if the restore fails |
+| restore `$rb`, the restored file | fd 4, the backup | it becomes the target; the backup is the state being restored |
+
+The last three digits matter because `stat -c %a` prints four for a file with
+setuid (`4755`); `0$m` would then be octal `04755` and produce a nonsense
+umask. The created file is `0666 & ~umask`, so a source mode with an execute
+bit comes back without it (`0755` → `0644`): that narrows, never widens, and
+config files are not executable. Ownership is copied with `chown -h
+"$(stat -L -c %u:%g "$fd3")" "$new" 2>/dev/null || true` — `-h` changes a
+link rather than its target if one was swapped in after the create, and a
+non-root user's failure is ignored (the add-on's user is root, which W8
+checks with `id -u`).
+
+Tests: a `0640` file is still `0640` after a failed-check rollback and after
+a restore; a `0600` file stays `0600`; the backup and the restored file carry
+the source's mode.
+
+#### AH4 — `!include` of a secrets file is refused
+
+`foo: !include secrets.yaml` loads the whole credential file as ordinary
+config: any key the API returns then exposes every value in it, and Z3's
+banner never sees it. Two places refuse it:
+
+* **dashboard preflight, before approval.** The proposed content is scanned
+  line by line for `!include` followed by a target whose basename is
+  `secrets.yaml` — bare, `../`, absolute, quoted, in any position on the
+  line. The call is refused with `config_secret_include_refused` and no card
+  is created. It sits beside `!env_var`'s refusal in the same preflight, and
+  a target that merely *contains* the name is refused too (over-refusal).
+* **the script.** After the content is in fd 5 and before the `mv`,
+  `grep -qE "!include[[:space:]]+.*secrets\.yaml" "$fd5"` refuses with exit
+  22 and leaves the target untouched: `/proc/$$/fd/5` is the file just
+  written, so the scan reads the bytes that would be installed. This is belt
+  and braces against a dashboard bug; the preflight is the gate.
+
+`!include_dir_*` needs nothing: HA's directory loaders skip `secrets.yaml` by
+name, so they cannot return its values. A file that *already* contains such
+an include is not repaired by refusing a write — the write is refused, the
+tree is left as it is, and AH2 redacts the check output either way.
+
+Tests: both spellings refused (a dashboard test on the preflight, and the
+script → 22 with the target unchanged and neither the temp nor the backup
+left behind); an `!include` of an ordinary file is still accepted.
+
+#### The three nits
+
+* **AC2's paragraph** now says the cap is applied **after** redaction. It was
+  a one-line contradiction left by AE1; the round-7 text is corrected in
+  place, because a design of record that argues with itself is worse than a
+  stale one.
+* **A cut cannot join the status line.** Both scripts print `printf "\n"`
+  after the capped check output and before the status line, so a cut in the
+  middle of a line cannot put the status on the end of that line. Z9 takes
+  the **last line** of the response and allows a blank line before it; the
+  status is never searched for inside the check output. With a secret placed
+  so that it straddles byte 65 536, the returned output holds no prefix of it
+  and the last line is still `ok <hash>` (tested in both userlands).
+* **The binding is re-checked at write time.** `ha_config_write` and
+  `ha_config_restore` resolve `config_json.ha_integration` again immediately
+  before connecting: it must still name an existing, enabled integration of
+  kind `ha` (`config_ha_integration_unset` / `config_ha_integration_invalid`,
+  as Z5 defines them), and the meta key H5 clears and the post-write check
+  sets is computed from the newly resolved row. A renamed or deleted HA
+  integration now refuses instead of clearing a key nothing reads. `list`
+  and `read` still do not need the binding.
+
+#### Exit codes, as shipped
+
+| code | meaning |
+|---|---|
+| 1 | the shell could not open a file it had just checked, or a rollback failed — the dashboard maps 1 to `config_state_unknown` (U3) |
+| 10, 11 | the directory is not the HA config tree |
+| 12 | the file is missing |
+| 13 | a symlink, an escape from the tree, or the opened file is not the path that was resolved |
+| 14 | the hash changed since the dashboard read the file |
+| 15 | the backup could not be written (write) / the pre-restore copy could not be written (restore) |
+| 16 | the new content or the restored file could not be written |
+| 17 | the `mv` into place failed |
+| 18 | `ha core check` failed and the original content was put back |
+| 19 | a refused argument or file name |
+| 20 | the token file is missing |
+| 21 | a hard link, or another link on a file we just created |
+| 22 | the content is refused — `!include` of a secrets file |
+
+`ok` is printed only on exit 0; its hash is the SHA-256 of the bytes now at
+the target (write) or of the restored file (restore), and the dashboard
+compares it with what it sent (write) or with the backup it asked to restore.
+
+#### The scripts, final
+
+Each script is the **body** of one `sh -c` call. The dashboard sends it as
+`ssh … /bin/sh -c <body> _ <arguments>` with the body quoted by
+`shlex.quote`, so the awk programs keep their single quotes and the shell
+never expands anything in the body. `_` is `$0`; the arguments are `$1`, `$2`,
+…, always absolute, always built by the dashboard from a fixed template.
+
+`/homeassistant` is the config root (W4: `/config` is a symlink to it on the
+add-on). The token file and `timeout 100` are constants (W7, U1).
+
+**WRITE_SCRIPT**
+
+```bash
+# WRITE_SCRIPT — the body of the single sh -c. BusyBox- and GNU-compatible.
+# Arguments: $1 path, $2 expect (sha256 hex), $3 backup, $4 tmp.
+set -eu
+set -f
+PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH
+me=$$
+umask_for() {
+  m=$(stat -L -c %a "$1")
+  m=${m#"${m%???}"}
+  umask "$(printf "%o" $(( 0777 & ~0$m )))"
+}
+path=$1; expect=$2; backup=$3; tmp=$4
+
+case "$path"   in /*) ;; *) exit 19 ;; esac
+case "$backup" in /*) ;; *) exit 19 ;; esac
+case "$tmp"    in /*) ;; *) exit 19 ;; esac
+case "$path" in *.yaml|*.yml) ;; *) exit 19 ;; esac
+[ "$(basename "$path")" != secrets.yaml ] || exit 19
+
+token_file=/run/s6/container_environment/SUPERVISOR_TOKEN
+[ -r "$token_file" ] || exit 20
+SUPERVISOR_TOKEN=$(cat "$token_file") || exit 20
+
+real=$(realpath "$path") || exit 12
+[ -f "$real" ] || exit 12
+dir=$(dirname "$real")
+[ -d "$dir" ] || exit 11
+case "$dir" in
+  /homeassistant|/homeassistant/packages|/homeassistant/packages/*) ;;
+  *) exit 11 ;;
+esac
+[ "$(realpath "$(dirname "$path")")" = "$dir" ] || exit 13
+[ "$(basename "$real")" = "$(basename "$path")" ] || exit 13
+[ "$(basename "$real")" != secrets.yaml ] || exit 19
+
+case "$backup" in
+  "$real".eshu-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9].bak) ;;
+  *) exit 19 ;;
+esac
+case "$tmp" in "$real".eshu-tmp-*) ;; *) exit 19 ;; esac
+[ "$(dirname "$backup")" = "$dir" ] || exit 19
+[ "$(dirname "$tmp")" = "$dir" ] || exit 19
+[ ! -e "$backup" ] && [ ! -L "$backup" ] || exit 19
+[ ! -e "$tmp" ] && [ ! -L "$tmp" ] || exit 19
+
+exec 3< "$real"
+fd3=/proc/$me/fd/3
+[ "$(readlink "$fd3")" = "$real" ] || exit 13
+[ -f "$fd3" ] || exit 12
+[ "$(stat -L -c %h "$fd3")" = 1 ] || exit 21
+
+[ "$(sha256sum "$fd3" | cut -d" " -f1)" = "$expect" ] || exit 14
+
+umask_for "$fd3"
+set -C
+exec 4> "$backup"
+set +C
+cat "$fd3" >&4 || { rm -f "$backup"; exit 15; }
+chown -h "$(stat -L -c %u:%g "$fd3")" "$backup" 2>/dev/null || true
+fd4=/proc/$me/fd/4
+[ "$(readlink "$fd4")" = "$backup" ] || exit 15
+[ -f "$fd4" ] || exit 15
+[ "$(stat -L -c %h "$fd4")" = 1 ] || exit 21
+
+set -C
+exec 5> "$tmp"
+set +C
+cat >&5 || { exec 5>&-; rm -f "$tmp"; exit 16; }
+chown -h "$(stat -L -c %u:%g "$fd3")" "$tmp" 2>/dev/null || true
+fd5=/proc/$me/fd/5
+[ "$(readlink "$fd5")" = "$tmp" ] || { exec 5>&-; rm -f "$tmp"; exit 16; }
+[ -f "$fd5" ] || exit 16
+[ "$(stat -L -c %h "$fd5")" = 1 ] || exit 21
+grep -qE "!include[[:space:]]+.*secrets\.yaml" "$fd5" \
+  && { exec 5>&-; rm -f "$tmp" "$backup"; exit 22; }
+
+mv -f "$tmp" "$real" || exit 17
+[ "$(readlink "$fd5")" = "$real" ] || exit 17
+
+redact() {
+  set -f
+  in=$(cat)
+  list=$(find /homeassistant -xdev -name secrets.yaml -type f 2>/dev/null) || list=""
+  oldifs=$IFS
+  IFS='
+'
+  for f in $list; do
+    [ -n "$f" ] || continue
+    [ -f "$f" ] || continue
+    exec 9< "$f"
+    fd9=/proc/self/fd/9
+    if [ "$(readlink "$fd9")" != "$f" ] || [ ! -f "$fd9" ] || \
+       [ "$(stat -L -c %h "$fd9")" != 1 ]; then
+      exec 9<&-
+      continue
+    fi
+    in=$(printf "%s\n" "$in" | awk -v fd="$fd9" '
+      function add1(v) { sub(/[ \t]+$/, "", v); if (length(v) >= 4) s[++n] = v }
+      function add(v,   q, b) {
+        sub(/^[ \t]+/, "", v); sub(/[ \t]+$/, "", v)
+        if (v == "") return
+        q = substr(v, 1, 1)
+        if (q == "\"" || q == "\047") {
+          add1(v)
+          b = substr(v, 2)
+          sub(/["\047][ \t]*$/, "", b)
+          if (q == "\"") { gsub(/\\"/, "\"", b); gsub(/\\\\/, "\\", b) }
+          else gsub(/\047\047/, "\047", b)
+          add1(b)
+          return
+        }
+        add1(v)
+        p = index(v, " #")
+        if (p > 0) add1(substr(v, 1, p - 1))
+      }
+      BEGIN {
+        inblock = 0
+        while ((getline l < fd) > 0) {
+          if (l ~ /^[ \t]*[A-Za-z0-9_]+:[ \t]*[|>][-+]?[ \t]*$/) { inblock = 1; continue }
+          if (inblock) {
+            if (l ~ /^[ \t]+[^ \t]/) { add(l); continue }
+            inblock = 0
+          }
+          if (match(l, /^[A-Za-z0-9_]+:[ \t]*/)) add(substr(l, RLENGTH + 1))
+        }
+        close(fd)
+      }
+      { for (i = 1; i <= n; i++)
+          while ((p = index($0, s[i])) > 0)
+            $0 = substr($0, 1, p - 1) "***" substr($0, p + length(s[i]))
+        print }')
+    exec 9<&-
+  done
+  IFS=$oldifs
+  printf "%s\n" "$in"
+}
+
+crc=0
+out=$(SUPERVISOR_TOKEN="$SUPERVISOR_TOKEN" timeout 100 ha core check 2>&1) || crc=$?
+printf "%s\n" "$out" | redact | head -c 65536
+if [ "$crc" -ne 0 ]; then
+  rb="$real.eshu-tmp-rb-$me"
+  [ ! -e "$rb" ] && [ ! -L "$rb" ] || exit 1
+  umask_for "$fd4"
+  set -C
+  exec 6> "$rb"
+  set +C
+  cat "$fd4" >&6 || { rm -f "$rb"; exit 1; }
+  chown -h "$(stat -L -c %u:%g "$fd4")" "$rb" 2>/dev/null || true
+  mv -f "$rb" "$real" || exit 1
+  exit 18
+fi
+printf "\n"
+printf "ok %s\n" "$(sha256sum "$fd5" | cut -d" " -f1)"
+```
+
+**RESTORE_SCRIPT**
+
+```bash
+# RESTORE_SCRIPT — the body of the single sh -c.
+# Arguments: $1 path, $2 backup, $3 tmp (the pre-restore copy's name).
+set -eu
+set -f
+PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH
+me=$$
+umask_for() {
+  m=$(stat -L -c %a "$1")
+  m=${m#"${m%???}"}
+  umask "$(printf "%o" $(( 0777 & ~0$m )))"
+}
+path=$1; backup=$2; tmp=$3
+
+case "$path"   in /*) ;; *) exit 19 ;; esac
+case "$backup" in /*) ;; *) exit 19 ;; esac
+case "$tmp"    in /*) ;; *) exit 19 ;; esac
+case "$path" in *.yaml|*.yml) ;; *) exit 19 ;; esac
+[ "$(basename "$path")" != secrets.yaml ] || exit 19
+
+token_file=/run/s6/container_environment/SUPERVISOR_TOKEN
+[ -r "$token_file" ] || exit 20
+SUPERVISOR_TOKEN=$(cat "$token_file") || exit 20
+
+real=$(realpath "$path") || exit 12
+[ -f "$real" ] || exit 12
+dir=$(dirname "$real")
+[ -d "$dir" ] || exit 11
+case "$dir" in
+  /homeassistant|/homeassistant/packages|/homeassistant/packages/*) ;;
+  *) exit 11 ;;
+esac
+[ "$(realpath "$(dirname "$path")")" = "$dir" ] || exit 13
+[ "$(basename "$real")" = "$(basename "$path")" ] || exit 13
+[ "$(basename "$real")" != secrets.yaml ] || exit 19
+
+case "$backup" in
+  "$real".eshu-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9].bak) ;;
+  *) exit 19 ;;
+esac
+case "$tmp" in "$real".eshu-tmp-*) ;; *) exit 19 ;; esac
+[ "$(dirname "$backup")" = "$dir" ] || exit 19
+[ "$(dirname "$tmp")" = "$dir" ] || exit 19
+[ -f "$backup" ] && [ ! -L "$backup" ] || exit 19
+[ ! -e "$tmp" ] && [ ! -L "$tmp" ] || exit 19
+
+exec 3< "$real"
+fd3=/proc/$me/fd/3
+[ "$(readlink "$fd3")" = "$real" ] || exit 13
+[ -f "$fd3" ] || exit 12
+[ "$(stat -L -c %h "$fd3")" = 1 ] || exit 21
+
+exec 4< "$backup"
+fd4=/proc/$me/fd/4
+[ "$(readlink "$fd4")" = "$backup" ] || exit 19
+[ -f "$fd4" ] || exit 19
+[ "$(stat -L -c %h "$fd4")" = 1 ] || exit 21
+want=$(sha256sum "$fd4" | cut -d" " -f1)
+
+umask_for "$fd3"
+set -C
+exec 5> "$tmp"
+set +C
+cat "$fd3" >&5 || { rm -f "$tmp"; exit 15; }
+chown -h "$(stat -L -c %u:%g "$fd3")" "$tmp" 2>/dev/null || true
+fd5=/proc/$me/fd/5
+[ "$(readlink "$fd5")" = "$tmp" ] || exit 15
+[ -f "$fd5" ] || exit 15
+[ "$(stat -L -c %h "$fd5")" = 1 ] || exit 21
+
+rb="$real.eshu-tmp-rb-$me"
+[ ! -e "$rb" ] && [ ! -L "$rb" ] || exit 19
+umask_for "$fd4"
+set -C
+exec 6> "$rb"
+set +C
+cat "$fd4" >&6 || { rm -f "$rb"; exit 16; }
+chown -h "$(stat -L -c %u:%g "$fd4")" "$rb" 2>/dev/null || true
+[ "$(readlink /proc/$me/fd/6)" = "$rb" ] || exit 16
+[ "$(stat -L -c %h /proc/$me/fd/6)" = 1 ] || exit 21
+mv -f "$rb" "$real" || exit 16
+[ "$(readlink /proc/$me/fd/6)" = "$real" ] || exit 1
+
+redact() {
+  set -f
+  in=$(cat)
+  list=$(find /homeassistant -xdev -name secrets.yaml -type f 2>/dev/null) || list=""
+  oldifs=$IFS
+  IFS='
+'
+  for f in $list; do
+    [ -n "$f" ] || continue
+    [ -f "$f" ] || continue
+    exec 9< "$f"
+    fd9=/proc/self/fd/9
+    if [ "$(readlink "$fd9")" != "$f" ] || [ ! -f "$fd9" ] || \
+       [ "$(stat -L -c %h "$fd9")" != 1 ]; then
+      exec 9<&-
+      continue
+    fi
+    in=$(printf "%s\n" "$in" | awk -v fd="$fd9" '
+      function add1(v) { sub(/[ \t]+$/, "", v); if (length(v) >= 4) s[++n] = v }
+      function add(v,   q, b) {
+        sub(/^[ \t]+/, "", v); sub(/[ \t]+$/, "", v)
+        if (v == "") return
+        q = substr(v, 1, 1)
+        if (q == "\"" || q == "\047") {
+          add1(v)
+          b = substr(v, 2)
+          sub(/["\047][ \t]*$/, "", b)
+          if (q == "\"") { gsub(/\\"/, "\"", b); gsub(/\\\\/, "\\", b) }
+          else gsub(/\047\047/, "\047", b)
+          add1(b)
+          return
+        }
+        add1(v)
+        p = index(v, " #")
+        if (p > 0) add1(substr(v, 1, p - 1))
+      }
+      BEGIN {
+        inblock = 0
+        while ((getline l < fd) > 0) {
+          if (l ~ /^[ \t]*[A-Za-z0-9_]+:[ \t]*[|>][-+]?[ \t]*$/) { inblock = 1; continue }
+          if (inblock) {
+            if (l ~ /^[ \t]+[^ \t]/) { add(l); continue }
+            inblock = 0
+          }
+          if (match(l, /^[A-Za-z0-9_]+:[ \t]*/)) add(substr(l, RLENGTH + 1))
+        }
+        close(fd)
+      }
+      { for (i = 1; i <= n; i++)
+          while ((p = index($0, s[i])) > 0)
+            $0 = substr($0, 1, p - 1) "***" substr($0, p + length(s[i]))
+        print }')
+    exec 9<&-
+  done
+  IFS=$oldifs
+  printf "%s\n" "$in"
+}
+
+crc=0
+out=$(SUPERVISOR_TOKEN="$SUPERVISOR_TOKEN" timeout 100 ha core check 2>&1) || crc=$?
+printf "%s\n" "$out" | redact | head -c 65536
+if [ "$crc" -ne 0 ]; then
+  mv -f "$tmp" "$real" || exit 1
+  [ "$(readlink "$fd5")" = "$real" ] || exit 1
+  exit 18
+fi
+got=$(sha256sum /proc/$me/fd/6 | cut -d" " -f1)
+[ "$got" = "$want" ] || exit 1
+rm -f "$tmp"
+printf "\n"
+printf "ok %s\n" "$got"
+```
+
+**READ_SCRIPT**
+
+```bash
+# READ_SCRIPT — the body of the single sh -c. Exit codes: 11/12/13/19/21;
+# the bytes go to stdout unchanged.
+set -eu
+set -f
+PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH
+me=$$
+path=$1
+
+case "$path" in /*) ;; *) exit 19 ;; esac
+case "$path" in *.yaml|*.yml) ;; *) exit 19 ;; esac
+[ "$(basename "$path")" != secrets.yaml ] || exit 19
+
+real=$(realpath "$path") || exit 12
+[ -f "$real" ] || exit 12
+dir=$(dirname "$real")
+[ -d "$dir" ] || exit 11
+case "$dir" in
+  /homeassistant|/homeassistant/packages|/homeassistant/packages/*) ;;
+  *) exit 11 ;;
+esac
+[ "$(realpath "$(dirname "$path")")" = "$dir" ] || exit 13
+[ "$(basename "$real")" = "$(basename "$path")" ] || exit 13
+[ "$(basename "$real")" != secrets.yaml ] || exit 19
+
+exec 3< "$real"
+fd3=/proc/$me/fd/3
+[ "$(readlink "$fd3")" = "$real" ] || exit 13
+[ -f "$fd3" ] || exit 12
+[ "$(stat -L -c %h "$fd3")" = 1 ] || exit 21
+cat "$fd3"
+```
+
+**SECRETS_KEYS_SCRIPT**
+
+```bash
+# SECRETS_KEYS_SCRIPT — READ_SCRIPT with the last line replaced and with the two
+# `secrets.yaml` refusals removed: it is the one script that must open that
+# file (H1), and it prints key names only.
+set -eu
+set -f
+PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH
+me=$$
+path=$1
+
+case "$path" in /*) ;; *) exit 19 ;; esac
+case "$path" in *.yaml|*.yml) ;; *) exit 19 ;; esac
+
+real=$(realpath "$path") || exit 12
+[ -f "$real" ] || exit 12
+dir=$(dirname "$real")
+[ -d "$dir" ] || exit 11
+case "$dir" in
+  /homeassistant|/homeassistant/packages|/homeassistant/packages/*) ;;
+  *) exit 11 ;;
+esac
+[ "$(realpath "$(dirname "$path")")" = "$dir" ] || exit 13
+[ "$(basename "$real")" = "$(basename "$path")" ] || exit 13
+
+exec 3< "$real"
+fd3=/proc/$me/fd/3
+[ "$(readlink "$fd3")" = "$real" ] || exit 13
+[ -f "$fd3" ] || exit 12
+[ "$(stat -L -c %h "$fd3")" = 1 ] || exit 21
+sed -n "s/^\([A-Za-z0-9_][A-Za-z0-9_]*\):.*/\1/p" "$fd3"
+```
+
+**CHECK_SCRIPT**
+
+```bash
+# CHECK_SCRIPT — ha_config_check: no file argument, the whole tree is checked.
+# Exit codes: 11/13/18/20; `ok check` is printed only on exit 0.
+set -eu
+set -f
+PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH
+me=$$
+[ -d /homeassistant ] || exit 11
+[ ! -L /homeassistant ] || exit 13
+[ "$(realpath /homeassistant)" = /homeassistant ] || exit 13
+
+token_file=/run/s6/container_environment/SUPERVISOR_TOKEN
+[ -r "$token_file" ] || exit 20
+SUPERVISOR_TOKEN=$(cat "$token_file") || exit 20
+
+
+redact() {
+  set -f
+  in=$(cat)
+  list=$(find /homeassistant -xdev -name secrets.yaml -type f 2>/dev/null) || list=""
+  oldifs=$IFS
+  IFS='
+'
+  for f in $list; do
+    [ -n "$f" ] || continue
+    [ -f "$f" ] || continue
+    exec 9< "$f"
+    fd9=/proc/self/fd/9
+    if [ "$(readlink "$fd9")" != "$f" ] || [ ! -f "$fd9" ] || \
+       [ "$(stat -L -c %h "$fd9")" != 1 ]; then
+      exec 9<&-
+      continue
+    fi
+    in=$(printf "%s\n" "$in" | awk -v fd="$fd9" '
+      function add1(v) { sub(/[ \t]+$/, "", v); if (length(v) >= 4) s[++n] = v }
+      function add(v,   q, b) {
+        sub(/^[ \t]+/, "", v); sub(/[ \t]+$/, "", v)
+        if (v == "") return
+        q = substr(v, 1, 1)
+        if (q == "\"" || q == "\047") {
+          add1(v)
+          b = substr(v, 2)
+          sub(/["\047][ \t]*$/, "", b)
+          if (q == "\"") { gsub(/\\"/, "\"", b); gsub(/\\\\/, "\\", b) }
+          else gsub(/\047\047/, "\047", b)
+          add1(b)
+          return
+        }
+        add1(v)
+        p = index(v, " #")
+        if (p > 0) add1(substr(v, 1, p - 1))
+      }
+      BEGIN {
+        inblock = 0
+        while ((getline l < fd) > 0) {
+          if (l ~ /^[ \t]*[A-Za-z0-9_]+:[ \t]*[|>][-+]?[ \t]*$/) { inblock = 1; continue }
+          if (inblock) {
+            if (l ~ /^[ \t]+[^ \t]/) { add(l); continue }
+            inblock = 0
+          }
+          if (match(l, /^[A-Za-z0-9_]+:[ \t]*/)) add(substr(l, RLENGTH + 1))
+        }
+        close(fd)
+      }
+      { for (i = 1; i <= n; i++)
+          while ((p = index($0, s[i])) > 0)
+            $0 = substr($0, 1, p - 1) "***" substr($0, p + length(s[i]))
+        print }')
+    exec 9<&-
+  done
+  IFS=$oldifs
+  printf "%s\n" "$in"
+}
+
+crc=0
+out=$(SUPERVISOR_TOKEN="$SUPERVISOR_TOKEN" timeout 100 ha core check 2>&1) || crc=$?
+printf "%s\n" "$out" | redact | head -c 65536
+[ "$crc" -eq 0 ] || exit 18
+printf "\n"
+printf "ok check\n"
+```
+
+#### The W5 matrix: what was run
+
+The test lifts each body from the design's constant, substitutes its own temp
+root for `/homeassistant`, its own token file and a short `timeout` bound, and
+runs it as `busybox sh -c <body> _ …` with a `PATH` that holds **only** BusyBox
+applet links — `sh realpath readlink stat chown cat sha256sum cut dirname
+basename timeout printf find grep sed awk head mv rm ln sleep echo mkdir touch
+chmod id wc ls tr sort test env true false` — plus a stub `ha`; then again
+under `dash` with the system applets. The stub `ha` can pass, fail, print a
+synthetic secret, and plant a symlink at the backup or the target before it
+fails. Every case below runs in both userlands and passes in both.
+
+| # | case | expected |
+|---|---|---|
+| 1 | good write | content replaced; backup holds the old bytes; both `0640`; last line `ok <sha of the new content>`; blank line before it; no temp left |
+| 2 | wrong `expect` | 14; nothing created |
+| 3 | relative path / file outside the tree / `secrets.yaml` | 19 / 11 / 19 |
+| 4 | check fails | 18; the target is the old content; mode `0640` |
+| 5 | backup's name swapped for a link to a sentinel, check fails | 18; target is the old content; sentinel in no file, no output |
+| 6 | target's name swapped for a link to the sentinel, check fails | 18; target is a regular file with the old content; sentinel untouched |
+| 7 | symlink planted at the backup name / dangling symlink at the temp name | 19 / 19 |
+| 8 | hard link on the target | 21 |
+| 9 | target swapped for a link between `realpath` and the open | 13; nothing printed |
+| 10 | `foo: !include secrets.yaml` and `… ../secrets.yaml` | 22; target unchanged; no temp, no backup |
+| 11 | `0600` file, check fails | the target is `0600` again |
+| 12 | good restore | content is the backup's; `ok <sha of the backup>`; mode kept; temp cleaned |
+| 13 | restore, check fails | 18; pre-restore content back; mode kept |
+| 14 | restore whose check rewrites the file | 1; no `ok` line |
+| 15 | symlinked backup name / backup swapped after the `-L` check | 19 / 19; sentinel never read |
+| 16 | read returns the bytes / `secrets.yaml` / a symlink / a hard link / outside the tree | bytes / 19 / 13 / 21 / 11 |
+| 17 | read, target swapped between `realpath` and the open | 13; nothing printed |
+| 18 | keys script | key names only, no values |
+| 19 | redaction: trailing comment, decoded double quote, decoded single quote, sibling package's `secrets.yaml` | all `***`; the ordinary line survives; a 3-character value is not redacted |
+| 20 | a secret straddling byte 65 536 | no prefix of it; output bounded; status on its own last line |
+
+80 assertions per userland, 160 in total, all green. On the round-7 text,
+cases 5, 15 and 19 fail for lack of a mechanism (the backup copy by name, the
+restore's open by name, the single-quote decode), case 17 leaks the sentinel,
+and case 9 refuses — but by accident, with 14 from the hash check, which is
+reading the file the attacker chose.
+
+#### What the security reviewer should read
+
+Only these parts changed:
+
+* **Z1's read** — the `exec 3<` / `readlink` / `stat -L %h` pattern in all
+  five scripts, and `redact`'s `/proc/self/fd/9` note;
+* **Z2's `redact`** — the tree-wide `find`, the per-file descriptor, and the
+  three parsing rules (comment, double quote, single quote), including the
+  `\047\047` reason;
+* **Z4's create and rollback** — `exec 4>`/`5>`/`6>`, `umask_for`, `chown -h`,
+  and the `readlink "$fd5" = "$real"` check after each `mv`;
+* **AH4's refusal** in the preflight and the fd-5 scan;
+* the **exit-code table** (22 is new; 1 now covers a failed open);
+* the **three nits**, which are one line of text, one `printf "\n"`, and one
+  re-resolution.
+
+The rest of Z1–Z9 is unchanged: the pin and TOFU rules (Q2), the pruning
+(Q4), the banner and `!env_var` refusal (Z3), the binding as an operator
+setting (Z5), the gating and dry-run sets, and the dashboard's hashing of the
+bytes it received.
+
+`bash scripts/verify.sh`: `2331 passed, 7 warnings in 432.09s (0:07:12)` (docs only).
 
 ---
 
@@ -14834,7 +15645,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 10 | F8 | test-traffic | dashboard | Merged | `feat/f8-test-traffic` | — | low priority |
 | 11 | F9 | ha-supervisor-read | dashboard | Merged | `feat/f9-ha-supervisor-read` | — | token is now a dedicated `eshu` HA admin user |
 | 12 | F10 | ha-supervisor-actions | dashboard | Ready (after F9) | `feat/f10-ha-supervisor-actions` | F9, F3, Chunk H | reviewer pass + security reviewer sign-off |
-| 13 | F11 | ha-config-files | dashboard | **Round 7 + AB1/AB2/AC1/AC2 (upward `secrets.yaml`, block scalars, stdin `redact`, no check file): design closed — to security for Z1–Z5** | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | security reads only the Round 7 Z1–Z5 sections |
+| 13 | F11 | ha-config-files | dashboard | **Round 8 (AH1–AH4: one open per file via `/proc`, tree-wide `secrets.yaml`, mode by `umask`, `!include secrets.yaml` refused) — to security for a re-read of Z1/Z2/Z4 and the scripts** | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | security re-reads Z1/Z2/Z4 changed parts and the five scripts |
 | 14 | F14 | inventory | dashboard + MCP | Merged | `feat/f14-inventory` | Chunk H | |
 | 15 | F19 | unattended-limits | gateway + dashboard | **Merged** 2026-11-11 (security sign-off `67bec51`; AF1/AF2 checked) | `feat/f19-unattended-limits` | F4, F5, F12 | AF3 goes on the next gateway branch |
 | 16 | F15 | probes | dashboard + MCP | **Merged** 2026-11-11 (AG1 security decision `eca8982`; AI1 fix merged) | `feat/f15-probes` | F4, F12, F14 | |
