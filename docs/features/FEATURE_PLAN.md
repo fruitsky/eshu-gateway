@@ -7795,6 +7795,141 @@ unescaped, and no check file is created in the config directory.
 With AE1 folded, F11 goes to the security reviewer for Z1–Z5 (no further round
 from me).
 
+**Security review — Round 7, Z1–Z5 (2026-11-10, `471f58f`): Z3 and Z5
+approved; Z1, Z2 and Z4 need four more changes (AH1–AH4).** The direction is
+right on all five. What is left is the same class of bug at three more
+points: a name is checked, and the file is opened again later by name.
+
+What is right:
+* **Z1:**
+  * one script per read;
+  * hard links refused;
+  * the dashboard hashes the bytes it received.
+* **Z2:**
+  * redaction runs on the add-on, values never go on a command line, and
+    `index()` is used, not a regex;
+  * the cap comes after redaction;
+  * no check file is created in the config tree.
+* **Z3:**
+  * new `!secret` names are listed on the banner;
+  * `!env_var` is refused;
+  * the four admin-power triggers show the red line.
+* **Z4:** new files are created with noclobber, and the target changes only
+  by `mv`.
+* **Z5:** the binding is operator-set, never an argument, and a write is
+  refused while it is unset.
+
+Changes:
+
+* **AH1 (must): open each file once, check the open file, and read only
+  from that descriptor.**
+  * **Where the race is:** in the read, write and restore scripts, every
+    check is on a *name*, and the later `cat "$real"`, `sha256sum "$real"`,
+    `cat "$real" > "$backup"` and `cat "$backup" > "$rb"` open that name
+    again.
+  * **The serious case is the rollback.** Something that can write into the
+    config tree can do two things during an approved write:
+    1. replace `$backup` with a symlink to the token file;
+    2. break the config, so the check fails.
+
+    The rollback then copies the token into the `.yaml`, which the agent
+    reads back with the ungated read tool. One script per call makes the
+    window smaller, but it does not close it.
+
+  **Fix:** open first, then check the open file:
+  ```sh
+  exec 3< "$real" || exit 12
+  fd=/proc/$$/fd/3
+  [ "$(readlink "$fd")" = "$real" ] || exit 13     # the file actually opened
+  [ -f "$fd" ] && [ "$(stat -L -c %h "$fd")" = 1 ] || exit 21
+  ```
+  * After that, every read uses `"$fd"` (`sha256sum "$fd"`,
+    `cat "$fd" > "$backup"`, `cat "$fd"` in the read script). A path under
+    `/proc/$$/fd` always reaches the inode that was opened.
+  * The backup gets the same treatment right after it is created (`exec 4<
+    "$backup"`, the same three checks), and the rollback reads from fd 4,
+    never from the name.
+  * The restore opens `$backup` this way before X1's check.
+  * Rollbacks that are `mv -f "$tmp" "$real"` are already safe: if `$tmp`
+    was swapped for a link, `$real` becomes that link, and every read
+    refuses a link.
+  * A FIFO planted at the name would make the open block. The dashboard
+    timeout bounds that, and the setup doc can mention it.
+
+  Test, in both userlands: a stub `ha` that swaps `$backup` for a symlink
+  to a sentinel and then fails the check. `$real` ends with the old content
+  (or the script exits 1), and the sentinel appears in no file and no
+  response. A swap of `$real` between the check and the read is refused
+  in the read script.
+* **AH2 (must): redaction must see every value HA can print.**
+  * `ha core check` validates the **whole** configuration, not just the
+    edited file. A package under `packages/other/` whose own `secrets.yaml`
+    is not on the edited file's upward path can still have its value quoted
+    in the output. `ha_config_check` has no "edited file" at all.
+
+    **Fix:** collect every `secrets.yaml` in the tree:
+    ```sh
+    find /homeassistant -xdev -name secrets.yaml -type f
+    ```
+    `-type f` skips links; apply AH1's link-count check to each file. The
+    union rule stays.
+  * **Parsing:**
+    * `key: value  # comment` resolves to `value`, but today the whole rest
+      of the line is collected, so the real value never matches. For an
+      unquoted value, strip ` #…`.
+    * For a double-quoted value, also add the form with `\"` and `\\`
+      decoded. For a single-quoted value, also add the form with `''` decoded.
+    * Redacting both forms is cheap, and over-redacting is fine.
+
+  Tests:
+  * a value with a trailing comment is redacted;
+  * a value from a `secrets.yaml` beside another package is redacted in a
+    write's check output and in `ha_config_check`.
+* **AH3 (must): the rollback file keeps the mode.**
+  * `rb` (the write's rollback, and the restore's `rb`) is created under
+    the add-on's umask and never `chmod`ed. A `0640` file comes back
+    `0644` after a failed check, which widens access to a file that may hold
+    credentials.
+  * Also, the `chmod`/`chown` of `$backup` and `$tmp` go *by name*, so a link
+    swapped in after creation is followed.
+
+  **Fix:** create every new file with its mode already right, by setting
+  `umask` from the source file's mode just before the noclobber `cat`:
+  ```sh
+  umask "$(printf '%o' $(( 0777 & ~0$(stat -c %a "$fd") )))"
+  ```
+  This drops the `chmod`, and `chown -h` (BusyBox has `-h`) never follows a
+  link.
+
+  Test: a `0640` file is still `0640` after a failed-check rollback and
+  after a restore.
+* **AH4 (must, small): refuse `!include` of `secrets.yaml`.**
+  * `foo: !include secrets.yaml` (or `../secrets.yaml`) loads the whole
+    credential file as ordinary config. That is more than Z3's new-`!secret`
+    banner covers, and it skips the banner completely.
+  * HA's `!include_dir_*` loaders skip `secrets.yaml`, so only the
+    single-file forms need refusing.
+
+  **Fix:** refuse (`config_secret_include_refused`) any `!include` whose
+  target basename is `secrets.yaml`.
+
+  Test: both spellings are refused.
+
+Nits (the feature reviewer can check these):
+* AC2's paragraph still says the cap is applied "**before** redaction". AE1
+  made it after. Fix the text so the design of record doesn't contradict
+  itself.
+* `head -c 65536` can cut mid-line, and the next `printf "ok %s\n"` then
+  joins the cut line. Z9's last-line check fails, so a good write reports
+  `config_state_unknown`. That is safe but wrong. Print a `\n` before the
+  `ok` line, and have Z9 accept a blank line before it.
+* Z5: validate the binding again at write time (it exists, is of kind `ha`,
+  and is enabled), not only when it is saved. A renamed or deleted HA
+  integration then refuses, rather than clearing a key nobody reads.
+
+After AH1–AH4, I review only the changed parts of Z1, Z2 and Z4 and the
+final scripts.
+
 ---
 
 ## Chunk F12 — SSH through Eshu over MCP (`ssh_exec`) · slug `ssh-exec` · dashboard (+ small gateway change)
