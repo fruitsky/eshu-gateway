@@ -6276,6 +6276,119 @@ before the security review (T1–T3).** R2–R8 are folded in well:
 After T1–T3, to the security reviewer (§ 2.6a), with R1/T1 (templates), R2
 (allowlist) and R3/T2 (rollback) as the points to check.
 
+#### Security reviewer sign-off
+
+**Design review (Rounds 2 and 3, `419951e`), 2026-11-10: approved in
+direction, changes requested (V1–V6).** The parts I was asked to check
+mostly hold:
+- **Templates:** quotes, `$`, backticks, newlines and backslashes are
+  refused, braces must be declared placeholders, and each slot must be a
+  whole token. `shlex.split` glues `;`, `|`, `&` and `>` into the
+  neighbouring token, so a slot next to them is refused, which is the safe
+  direction.
+- **Tool lists:** an allowlist, with a registry walk that forces a decision
+  for every new tool.
+- **Rollback:** it undoes only what the run created, using `precheck` and
+  `created`.
+
+The six conditions close what those rules leave open. Write them into a
+Round 4 section. I will re-read only that section.
+
+* **V1. A placeholder may never be something the shell runs.** A whole,
+  quoted word is still a command when it is the command word, or when the
+  verb executes its arguments. `hostname` and `slug` values such as an
+  ordinary verb's name pass every type regex.
+  - At propose and at approve, run the F1 breakdown on the template with
+    the sentinel in place.
+  - Refuse when the sentinel is the command word of any step.
+  - Also refuse when a step's verb runs its arguments: shells with `-c`,
+    `eval`, `exec`, `env`, `sudo`, `xargs`, `timeout`, `nice`, `nohup`,
+    `ssh`, `find -exec`/`-execdir`, `watch`, and anything F1 already marks
+    as executing an argument.
+  - At run time, run F1 again on the filled-in bytes. For the future
+    `auto_run`, run `read_policy` on those bytes as well, never on the
+    template.
+  - Tests: `{x} --help`, `sudo {x}`, `sh -c {x}` and `xargs {x}` are each
+    refused.
+* **V2. No SSH value may start with `-`.**
+  - The `fqdn` regex accepts labels that start or end with `-`, so a value
+    such as `-o.example` passes and becomes an option to the verb. Use RFC
+    labels: `[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?`.
+  - `int` allows negative numbers. Inside SSH templates, refuse any value
+    that begins with `-`, whatever its type. Tool arguments, which are JSON
+    values, are unaffected.
+  - Tests: a leading-dash `fqdn`, a trailing-dash label, and a negative
+    `int` in an SSH slot are each refused.
+* **V3. Each allowlisted tool needs its own allowlist of arguments.**
+  `create_proxy_host` takes a free `body`. A recipe could fix
+  `advanced_config` (raw nginx directives), `locations`, or
+  `access_list_id: 0`, which makes the host public, and the operator would
+  have to catch it in a JSON blob.
+  - In `RECIPE_TOOLS`, give each tool the keys a recipe may set and which of
+    them may be parameter slots.
+  - For `create_proxy_host`: `domain_names`, `forward_scheme`,
+    `forward_host`, `forward_port` and a short list of named booleans.
+    `advanced_config`, `locations` and any custom-config key are refused.
+  - Test: a recipe whose body sets `advanced_config` is refused as
+    `recipe_arg_forbidden`.
+* **V4. An undo must check that it is deleting what the run created.** A
+  rollback can come days after the run. NPM's ids can be reused once a host
+  is deleted, since SQLite without AUTOINCREMENT can reuse the highest id.
+  "Delete id 7" could therefore remove the operator's newer host.
+  - Just before each undo runs, not only at preview time, read the object by
+    its stored id. Compare it with the run's own values, for example
+    `domain_names` and `forward_host`.
+  - On a mismatch or a missing object, stop that step's rollback and record
+    `rollback_target_changed`.
+  - Test: the id is reused by a different host, and the rollback deletes
+    nothing.
+* **V5. Only the recipe engine can spend a recipe's approvals.** Run steps
+  and rollback undos are stored as F3 and F10 plan items. A plan item is
+  claimed by *any* matching call from the same agent in the session. So the
+  agent could:
+  - call `delete_proxy_host(id=7)` directly, skipping V4;
+  - run an SSH step out of order, skipping its `precheck`;
+  - spend an item on a call the engine never made.
+
+  Fix:
+  - Mark recipe-made items with the source and the run id. The ordinary
+    plan claim (F10 `claim_mcp_plan_item`, F3 SSH claim) never matches
+    them, and only the engine's own execution of step N can consume step N.
+  - Undo-only tools can enter a plan only from `recipe_rollback`, never
+    from `session_plan` or `recipe_run`.
+  - This agrees with F10's P1: the plan-coverable allowlist holds the
+    curated F10 actions for agent plans, and recipe tools only for
+    engine-made items.
+  - Tests: a direct call with the exact bytes or arguments of a pending
+    step is queued for the operator and leaves the item unspent; a
+    `session_plan` naming `delete_proxy_host` is refused.
+* **V6. Key the allowlists by integration kind as well as tool name.**
+  `RECIPE_TOOLS` and `FORBIDDEN_RECIPE_TOOLS` use bare names such as
+  `proxy_hosts` or `create_proxy_host`. Another integration can carry a tool
+  with the same name.
+  - Use `(kind, tool)` pairs, and check at run time that the named
+    integration is still that kind.
+  - Test: a same-named tool on another kind is refused.
+
+*Smaller points:*
+
+* **The worked example breaks its own T1 rule.** Step 3's
+  `https://{fqdn}/` is a glued slot. Change the example, for instance with a
+  read tool or a template where the URL is not glued. Add a test that every
+  example document in the note passes the validator.
+* **Store step results and check evidence after the existing scrubber, and
+  cap their size.** That covers `result_json` and the precondition
+  responses. A list response such as `proxy_hosts` carries other hosts'
+  configuration. Keep the matched element and the fields the undo needs,
+  not the whole list (§ 2.5).
+* **`auto_run` comes back to security before it is ever enabled**, even with
+  F4 `on` and F19 in place. It is the step that removes the human from a
+  multi-step change.
+
+**Verdict:** changes requested on the design. Once V1–V6 are in a Round 4
+section, I check only that section, and code can start after F10 and F12
+merge.
+
 ---
 
 ## Chunk F17 — Local-agent profile · slug `local-agent` · dashboard + docs
