@@ -113,18 +113,29 @@ def commands(name, params):
             # P2: a structured state, never prose from `systemctl status`.
             {'label': 'state', 'command': 'systemctl is-active --no-pager %s' % unit,
              'structured': True},
+            # AG6: warnings and above, so `errors` is errors, and the default
+            # output keeps the timestamp `last` reads.
             {'label': 'journal',
-             'command': 'journalctl -u %s -n 200 --no-pager -o short-iso' % unit},
+             'command': 'journalctl -u %s -n 200 --no-pager -p warning' % unit},
             {'label': 'ports', 'command': 'ss -tlnp'},
         ]
     if name == 'diagnose_container':
         kind, value = p['container']
         value = _q(value)
         if kind == 'pct':
-            return [{'label': 'list', 'command': 'pct list'},
+            # AG4: one guest, and no full config dump.
+            return [{'label': 'status', 'command': 'pct status %s' % value},
                     {'label': 'config', 'command': 'pct config %s' % value}]
-        return [{'label': 'ps', 'command': 'docker ps -a --no-trunc'},
-                {'label': 'inspect', 'command': 'docker inspect %s' % value}]
+        # AG4: a formatted inspect (state only — the full JSON carries
+        # Config.Env, which is often database passwords the scrubber cannot
+        # know) and one named container, not every command line on the host.
+        fields = ('{{.State.Status}} {{.State.Running}} '
+                  '{{.RestartCount}} {{.State.StartedAt}}')
+        return [{'label': 'ps',
+                 'command': ('docker ps -a --filter name=^%s$ '
+                             '--format {{.Names}}\t{{.Status}}' % value)},
+                {'label': 'inspect',
+                 'command': "docker inspect --format '%s' %s" % (fields, value)}]
     if name == 'disk_pressure':
         return [
             {'label': 'df', 'command': 'df -h'},
@@ -153,14 +164,18 @@ PROBES = {
 
 MAX_JSON = 8000
 MAX_ERRORS = 10
-_COUNTY = re.compile(r'\b(?:0x)?[0-9a-fA-F]{2,}\b')
+# AG6: `add`, `bad`, `cafe` are words, not counts. A hex-looking token only
+# loses its identity with an `0x` prefix or at least one digit in it.
+_HEX = re.compile(r'\b0x[0-9a-fA-F]+\b')
+_DIGIT_WORD = re.compile(r'\b(?=[0-9a-fA-F]*[0-9])[0-9a-fA-F]{2,}\b')
 _NUMBER = re.compile(r'\b\d+\b')
 
 
 def _normalise_message(line):
     """Strip the parts that make two occurrences of one error differ."""
     text = line.strip()
-    text = _COUNTY.sub('<n>', text)
+    text = _HEX.sub('<n>', text)
+    text = _DIGIT_WORD.sub('<n>', text)
     text = _NUMBER.sub('<n>', text)
     return text
 
@@ -173,17 +188,26 @@ def parse_errors(text, now=None):
         line = line.strip()
         if not line:
             continue
-        # Drop journalctl's own timestamp/prefix; keep the message.
+        # AG6: the line's own time becomes `last`; `now` is only the fallback
+        # when the journal format has no timestamp.
         body = line
-        if re.match(r'^\d{4}-\d\d-\d\dT', line):
+        stamp = now
+        match = re.match(r'^(\d{4}-\d\d-\d\dT[0-9:]+)', line)
+        if match:
+            try:
+                stamp = int(time.mktime(time.strptime(match.group(1),
+                                                      '%Y-%m-%dT%H:%M:%S')))
+            except (ValueError, OverflowError):
+                stamp = now
             parts = line.split(None, 2)
             body = parts[2] if len(parts) > 2 else line
         key = _normalise_message(body)
         row = found.get(key)
         if not row:
-            found[key] = {'msg': body[:300], 'count': 1, 'last': now}
+            found[key] = {'msg': body[:300], 'count': 1, 'last': stamp}
         else:
             row['count'] += 1
+            row['last'] = max(row['last'], stamp)
     rows = sorted(found.values(), key=lambda r: (-r['count'], r['msg']))
     return rows[:MAX_ERRORS]
 
@@ -235,15 +259,6 @@ def _du_rows(text):
     return rows
 
 
-def _kv(text):
-    out = {}
-    for line in (text or '').splitlines():
-        key, sep, value = line.partition('=')
-        if sep:
-            out[key.strip()] = value.strip()
-    return out
-
-
 def build_digest(name, outputs, context=None):
     """Turn raw command outputs into the probe's digest dict (scrubbed)."""
     context = context or {}
@@ -259,9 +274,18 @@ def build_digest(name, outputs, context=None):
     elif name == 'diagnose_container':
         digest['ps'] = [line for line in (clean.get('ps') or '').splitlines()
                         if line.strip()][:50]
-        props = _kv(clean.get('inspect'))
-        digest['running'] = props.get('State.Running') or props.get('Running') or ''
-        digest['status'] = props.get('State.Status') or ''
+        # AG4: the inspect output is one formatted line:
+        # <Status> <Running> <RestartCount> <StartedAt>
+        fields = (clean.get('inspect') or '').split()
+        if fields:
+            digest['status'] = fields[0][:40]
+            digest['running'] = fields[1] if len(fields) > 1 else ''
+            digest['restarts'] = fields[2] if len(fields) > 2 else ''
+            digest['started_at'] = fields[3] if len(fields) > 3 else ''
+        status_lines = [line for line in (clean.get('status') or '').splitlines()
+                        if line.strip()]
+        if status_lines:
+            digest['status'] = status_lines[0][:60]
         digest['config'] = [line for line in (clean.get('config') or '').splitlines()
                             if line.strip()][:40]
     elif name == 'disk_pressure':
@@ -280,6 +304,21 @@ def build_digest(name, outputs, context=None):
     return cap_digest(digest)
 
 
+def _size_bytes(text):
+    """`du -h`'s 5G / 120M / 8.0K to a number, for sorting only."""
+    match = re.match(r'^\s*([0-9.]+)\s*([KMGTP]?i?B?)?', str(text or ''))
+    if not match:
+        return 0
+    try:
+        value = float(match.group(1))
+    except ValueError:
+        return 0
+    unit = (match.group(2) or '').upper()[:1]
+    scale = {'K': 1024, 'M': 1024 ** 2, 'G': 1024 ** 3, 'T': 1024 ** 4,
+             'P': 1024 ** 5}.get(unit, 1)
+    return int(value * scale)
+
+
 def cap_digest(digest):
     """P7: a byte cap with a documented drop order (errors, then ports)."""
     def size(d):
@@ -288,6 +327,15 @@ def cap_digest(digest):
         return len(json.dumps(d, sort_keys=True))
 
     out = json.loads(json.dumps(digest))
+    # AG7: the cut drops from the end, so the most useful rows come first.
+    if out.get('filesystems'):
+        out['filesystems'].sort(
+            key=lambda r: int(str(r.get('use_pct') or '0').rstrip('%')) or 0,
+            reverse=True)
+    if out.get('log_dirs'):
+        out['log_dirs'].sort(key=lambda r: _size_bytes(r.get('size')), reverse=True)
+    if out.get('ports'):
+        out['ports'].sort(key=lambda r: r.get('port') or 0)
     if size(out) <= MAX_JSON:
         return out
     out['truncated'] = True
@@ -309,19 +357,45 @@ def cap_digest(digest):
 
 # ── execution: one grouped plan, then the digest (P3, P4) ──────────────────
 
-def _recent_changes(host):
-    """Eshu's own approved writes on that host in the last 24 h."""
+def run_steps(command):
+    """The F1 steps of a command that write (used by `recent_changes`)."""
+    from core.cmd_parse import breakdown
     try:
-        from db.requests import get_all_requests
-        since = int(time.time()) - 86400
-        return [{'id': r['id'], 'command': (r.get('command') or '')[:120],
-                 'at': r.get('created_at')}
-                for r in get_all_requests()
-                if r.get('target_ip') == host and r.get('created_at', 0) >= since
-                and r.get('status') in ('approved', 'consumed')
-                and (r.get('reason') or '').startswith('jit')][:5]
+        steps = breakdown(command or '').get('steps') or []
     except Exception:
         return []
+    return [s for s in steps if (s.get('kind') or '') == 'write']
+
+
+def _recent_changes(host):
+    """Eshu's own approved **writes** on that host in the last 24 h.
+
+    AG5: a SQL query by host, not `get_all_requests()` (the newest 200 rows
+    from every host), and the judgement is F1's write step, not the agent's
+    free-text reason.
+    """
+    from db.core import db_conn
+    since = int(time.time()) - 86400
+    rows = []
+    try:
+        with db_conn() as conn:
+            rows = conn.execute(
+                "SELECT id, command, created_at FROM requests "
+                "WHERE target_ip = ? AND created_at >= ? "
+                "AND status IN ('approved', 'consumed') "
+                "ORDER BY id DESC LIMIT 200", (host, since)).fetchall()
+    except Exception:
+        return []
+    out = []
+    for row in rows:
+        if not run_steps(row['command']):
+            continue
+        out.append({'id': row['id'],
+                    'command': scrub_string(row['command'] or '')[:120],
+                    'at': row['created_at']})
+        if len(out) == 5:
+            break
+    return out
 
 
 def plan_probe(name, params, session_id):
@@ -359,22 +433,24 @@ def plan_probe(name, params, session_id):
 
 
 def _run_dns(p):
-    """The Pi-hole record for a name; nothing on a gateway (P8)."""
+    """The Pi-hole record for a name; nothing on a gateway (P8).
+
+    AG3: through F14's `_call_tool`, which checks the tool exists and is
+    enabled, enforces the read policy, and runs the registered v6 handler.
+    A hand-built v5 tool would neither authenticate nor respect the flags.
+    """
     record = None
     reason = ''
     try:
         from db.integrations import get_integrations
-        from core.integration_proxy import execute_integration_call
+        from core.inventory import SourceError, _call_tool
         for integration in get_integrations(include_secret=False):
             if (integration.get('kind') or '').lower() not in ('pihole', 'pi-hole'):
                 continue
-            tool = {'name': 'local_dns_records', 'enabled': 1, 'method': 'GET',
-                    'path_template': 'admin/api.php?customdns', 'params': [],
-                    'transport': 'http', 'read_only': 1}
-            res = execute_integration_call(integration, tool, {})
-            body = res.get('body') or '{}'
-            data = json.loads(body) if body.strip().startswith('{') else {}
+            data = _call_tool(integration, 'local_dns_records', {})
             hosts = data.get('hosts') or data.get('data') or []
+            if isinstance(hosts, dict):
+                hosts = [{'domain': k, 'ip': v} for k, v in hosts.items()]
             for row in hosts if isinstance(hosts, list) else []:
                 if str(row.get('domain') or '').lower() == p['name']:
                     record = {'domain': row.get('domain'),
@@ -399,13 +475,27 @@ def probe_result(plan_id, session_id=''):
     if not meta:
         return {'error': 'probe_not_found',
                 'message': 'No probe plan #%s' % plan_id}
+    # AG2: the session (and its owner) is checked BEFORE a stored digest is
+    # returned — otherwise any agent that guesses a plan id reads another
+    # session's journal lines, ports and container list.
+    plan = get_plan(int(plan_id)) or {}
+    sid = (session_id or '').strip()[:64]
+    if not sid or plan.get('session_id') != sid:
+        return {'error': 'probe_not_found', 'message': 'No probe plan #%s' % plan_id}
+    try:
+        from core.agent_context import get_current_agent
+        from db.sessions import get_session
+        owner = (get_session(sid) or {}).get('agent') or ''
+        agent = (get_current_agent() or {}).get('name') or ''
+        if owner and agent and owner != agent:
+            return {'error': 'probe_not_found',
+                    'message': 'No probe plan #%s' % plan_id}
+    except Exception:
+        return {'error': 'probe_not_found', 'message': 'No probe plan #%s' % plan_id}
     done = get_meta_json('probe_result_%d' % int(plan_id), None)
     if done:
         return {'status': 'ran', 'plan_id': int(plan_id),
                 'probe': meta.get('probe'), 'digest': done}
-    plan = get_plan(int(plan_id)) or {}
-    if plan.get('session_id') != (session_id or '').strip()[:64]:
-        return {'error': 'probe_not_found', 'message': 'No probe plan #%s' % plan_id}
     if plan.get('status') == 'proposed':
         return {'status': 'pending', 'plan_id': int(plan_id),
                 'probe': meta.get('probe'),

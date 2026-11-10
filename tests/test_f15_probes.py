@@ -5,6 +5,7 @@ digest back. These tests pin the parameter rules (P1), the digest parsing,
 scrubbing (P5), the cap (P7), and that a probe proposes ONE plan (P4).
 """
 import json
+import time
 
 import pytest
 
@@ -234,19 +235,21 @@ def test_probe_result_runs_the_commands_after_approval(gateway, monkeypatch):
 
 
 def test_the_dns_record_is_found(gateway, monkeypatch):
+    """AG3: through F14's gated reader, not a hand-built tool."""
     from core.probes import _run_dns
     from db.integrations import create_integration
 
     create_integration('Pi-hole', 'http://192.0.2.10', 'none', '',
                        kind='pihole')
+    seen = []
 
-    def fake_call(integration, tool, args, **kw):
-        return {'body': json.dumps({'hosts': [
-            {'domain': 'app.example.test', 'ip': '192.0.2.20'}]})}
+    def fake_call(integration, tool_name, args):
+        seen.append(tool_name)
+        return {'hosts': [{'domain': 'app.example.test', 'ip': '192.0.2.20'}]}
 
-    monkeypatch.setattr('core.integration_proxy.execute_integration_call',
-                        fake_call)
+    monkeypatch.setattr('core.inventory._call_tool', fake_call)
     out = _run_dns({'name': 'app.example.test'})
+    assert seen == ['local_dns_records']
     assert out['digest']['record'] == {'domain': 'app.example.test',
                                        'ip': '192.0.2.20'}
     assert out['digest']['gateway'] is None
@@ -257,10 +260,27 @@ def test_dns_check_reports_no_record(gateway, monkeypatch):
     from db.integrations import create_integration
     create_integration('Pi-hole', 'http://192.0.2.10', 'none', '',
                        kind='pihole')
-    monkeypatch.setattr('core.integration_proxy.execute_integration_call',
-                        lambda *a, **k: {'body': '{"hosts": []}'})
+    monkeypatch.setattr('core.inventory._call_tool',
+                        lambda *a: {'hosts': []})
     out = _run_dns({'name': 'nope.example.test'})
     assert out['digest']['record'] is None
+
+
+def test_dns_check_says_when_the_tool_is_missing(gateway, monkeypatch):
+    """AG3: a disabled or missing tool is reported, not silently empty."""
+    from core.probes import _run_dns
+    from core.inventory import SourceError
+    from db.integrations import create_integration
+    create_integration('Pi-hole', 'http://192.0.2.10', 'none', '',
+                       kind='pihole')
+
+    def missing(*_a):
+        raise SourceError('tool_missing:local_dns_records')
+
+    monkeypatch.setattr('core.inventory._call_tool', missing)
+    out = _run_dns({'name': 'app.example.test'})
+    assert out['digest']['record'] is None
+    assert 'tool_missing' in out['digest']['error']
 
 
 # ── AG1: probe plans cover approval-mode agents, agent plans never do ──────
@@ -353,3 +373,98 @@ def test_a_server_plan_must_name_a_specific_host():
         create_plan('sess-4', [{'host': '*', 'command': 'uptime'}],
                     origin='probe')
     assert exc.value.code == 'invalid_host'
+
+
+# ── AG2: a stored digest is bound to the session and its owner ─────────────
+
+def test_another_session_cannot_read_a_finished_probe(gateway, monkeypatch):
+    from core.probes import plan_probe, probe_result
+    from db.session_plans import approve_plan
+    from db.sessions import upsert_session
+    upsert_session('sess-1', agent='agent-a')
+    out = plan_probe('disk_pressure', {'host': gateway}, 'sess-1')
+    approve_plan(out['plan_id'], ttl_minutes=30)
+    monkeypatch.setattr('core.ssh_exec.ssh_exec',
+                        lambda host, command, **kw: {'status': 'ran',
+                                                     'output': '5G\t/var/log\n'})
+    assert probe_result(out['plan_id'], 'sess-1')['status'] == 'ran'
+    leak = probe_result(out['plan_id'], 'sess-2')
+    assert leak['error'] == 'probe_not_found'
+
+
+# ── AG4: container state from a formatted inspect, never Env ──────────────
+
+def test_container_commands_are_narrow(gateway):
+    from core.probes import commands, validate
+    params = validate('diagnose_container', {'host': gateway,
+                                             'container': 'db'})
+    text = ' '.join(c['command'] for c in commands('diagnose_container', params))
+    assert '--format' in text
+    assert 'Config.Env' not in text
+    assert 'name=^db$' in text
+    vmid = validate('diagnose_container', {'host': gateway,
+                                           'container': '101'})
+    cmds = [c['command'] for c in commands('diagnose_container', vmid)]
+    assert cmds == ['pct status 101', 'pct config 101']
+
+
+def test_the_formatted_inspect_parses():
+    from core.probes import build_digest
+    digest = build_digest('diagnose_container', {
+        'ps': 'db\tUp 3 hours\n',
+        'inspect': 'running true 3 2026-11-10T10:00:00Z\n',
+        'config': '',
+    }, {'params': {}})
+    assert digest['status'] == 'running'
+    assert digest['running'] == 'true'
+    assert digest['restarts'] == '3'
+    assert 'Env' not in json.dumps(digest)
+
+
+# ── AG5: recent changes are this host's writes, from SQL ───────────────────
+
+def test_recent_changes_keeps_this_hosts_writes(gateway):
+    import time as _time
+    from core.probes import _recent_changes
+    from db.requests import create_request
+    now = int(_time.time())
+    create_request('10.0.0.1', 'systemctl restart nginx', status='approved',
+                   reason='jit', ttl=90)
+    create_request('10.0.0.1', 'df -h', status='approved', reason='jit', ttl=90)
+    create_request('10.0.0.2', 'systemctl restart nginx', status='approved',
+                   reason='jit', ttl=90)
+    old = create_request('10.0.0.1', 'systemctl restart nginx', status='approved',
+                         reason='jit', ttl=90)
+    from db.core import db_conn
+    with db_conn() as conn:
+        conn.execute('UPDATE requests SET created_at = ? WHERE id = ?',
+                     (now - 90000, old))
+        conn.commit()
+    rows = _recent_changes('10.0.0.1')
+    assert [r['command'] for r in rows] == ['systemctl restart nginx']
+
+
+# ── AG6/AG7: the journal and the cap order ────────────────────────────────
+
+def test_errors_use_the_lines_own_timestamp():
+    from core.probes import parse_errors
+    rows = parse_errors('2026-11-10T10:00:00+0000 host app[1]: boom\n')
+    assert rows[0]['last'] == int(time.mktime(
+        time.strptime('2026-11-10T10:00:00', '%Y-%m-%dT%H:%M:%S')))
+
+
+def test_hex_looking_words_are_not_counts():
+    from core.probes import parse_errors
+    rows = parse_errors('a bad add cafe\n')
+    assert rows[0]['msg'] == 'a bad add cafe'
+
+
+def test_the_cap_keeps_the_most_used_filesystems():
+    from core.probes import cap_digest
+    digest = {'filesystems': [
+        {'mount': '/a', 'size': '1G', 'used': '1G', 'avail': '0', 'use_pct': '10%'},
+        {'mount': '/b', 'size': '1G', 'used': '1G', 'avail': '0', 'use_pct': '99%'},
+        {'mount': '/c', 'size': '1G', 'used': '1G', 'avail': '0', 'use_pct': '50%'},
+    ], 'ports': [], 'truncated': False}
+    capped = cap_digest(digest)
+    assert [r['mount'] for r in capped['filesystems']] == ['/b', '/c', '/a']
