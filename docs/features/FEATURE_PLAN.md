@@ -6090,6 +6090,38 @@ it the limit can be skipped. I will re-read only the sections that change.
 and L7 are implemented, merged and deployed fleet-wide. Without L3, the
 lockbox route runs read-lane commands with no limit.
 
+**Design round 2 (feature reviewer, 2026-11-10, `39ed243`): approved, with
+one change before code (Q1).** D1–D4 and S1 are folded in correctly:
+* direct-mode output kept;
+* `PIPESTATUS` copied with errexit off;
+* the real 141 reported;
+* `limit: time` only for 124 plus elapsed time;
+* the poller never gets an unattended row, so every route carries the limit.
+
+* **Q1 (must): base the pipeline on the new capture code.** The § 3 sketch
+  still uses `ESHU_OUT_FIFO`/`tee`/`wait "$ESHU_TAIL_PID"`. The CI fix
+  (`fix/ci-environment`, merging before this) removes the FIFO and the
+  second reader: capture is now `… | sanitize | capture_tail "$ESHU_OUT_TAIL"`,
+  with `set +e` and `PIPESTATUS[0]`. Redraw § 3 on that code, and on F12's
+  MCP envelope capture (`ESHU_MCP_CAP`) if F12 merges first:
+  `"${run_argv[@]}" 2>&1 | cap_raw | sanitize | cap_visible | capture_tail …`.
+  * `capture_tail` keeps the last 16 KiB, not the first. Say how the
+    `bytes + 1` cut probe now works: count the visible bytes in
+    `cap_visible`, or compare the stored size with `stat`. Remember that
+    `capture_tail` adds a newline when the stream has none (C4).
+  * In MCP mode, the stdout redirect goes on the stage that feeds the
+    envelope, not on a `tee`.
+* **Q2 (should): `ssh_exec`'s wait loop and unattended rows.** F12's `wait`
+  re-runs at `consumed`. An unattended row is now consumed only through
+  `/api/ticket/{id}` in the same round trip. If that claim fails (for
+  example, a network blip), `wait` sees `approved` until the row expires.
+  Say what the agent gets: I suggest `check_request` shows
+  `approved (unattended): re-run now`, because the re-run claims by id and
+  carries the limit, so it cannot race the poller.
+
+After Q1, to the security reviewer, for the sections that change (§ 3, plus
+§ 4 if Q2 changes it).
+
 ---
 
 ## 7. Backlog (not planned in detail)
