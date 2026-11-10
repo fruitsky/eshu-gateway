@@ -13538,6 +13538,32 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 10 | F8 | test-traffic | dashboard | Merged | `feat/f8-test-traffic` | — | low priority |
 | 11 | F9 | ha-supervisor-read | dashboard | Merged | `feat/f9-ha-supervisor-read` | — | token is now a dedicated `eshu` HA admin user |
 | 12 | F10 | ha-supervisor-actions | dashboard | Ready (after F9) | `feat/f10-ha-supervisor-actions` | F9, F3, Chunk H | reviewer pass + security reviewer sign-off |
+**Design round 3 (feature reviewer, 2026-11-10): approved in direction, one
+check before the security review (V1).** U1–U4 are right:
+* the remote `timeout 100` restores before the client gives up;
+* the dashboard never restores on its own, and the lock is held until a
+  hash read;
+* subdirectories under `packages/` are accepted, `packages-old` is not;
+* `$backup` and `$tmp` are checked (same directory, name patterns, must not
+  exist), and every exit outside 10–18 maps to `config_state_unknown`;
+* the file mode is kept.
+
+* **V1 (must): the script must run on the add-on's userland.** The Advanced
+  SSH & Web Terminal add-on is Alpine-based, and the script uses GNU-only
+  forms:
+  * `realpath -e`: BusyBox `realpath` takes no options;
+  * `chmod --reference` and `chown --reference`: BusyBox has neither.
+
+  If the add-on only has BusyBox versions, every write exits 12 or 16:
+  safe, but F11 would never work. Either confirm on a real add-on that GNU
+  coreutils is installed (`realpath --version`, `chmod --version`), and
+  write the version into the setup doc as a precondition the dashboard
+  checks once on the first `list`. Or use forms that work under both:
+  * `readlink -f` plus an existence check;
+  * `chmod "$(stat -c %a "$real")"` and `chown "$(stat -c %u:%g "$real")"`.
+
+  `timeout 100` works in both.
+
 | 13 | F11 | ha-config-files | dashboard | **Round 3: U1–U4 folded (remote bound, packages, argument checks, modes) — awaiting security review** | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | design approval + security reviewer sign-off |
 | 14 | F14 | inventory | dashboard + MCP | Merged | `feat/f14-inventory` | Chunk H | |
 | 15 | F19 | unattended-limits | gateway + dashboard | **Merged** 2026-11-11 (security sign-off `67bec51`; AF1/AF2 checked) | `feat/f19-unattended-limits` | F4, F5, F12 | AF3 goes on the next gateway branch |
