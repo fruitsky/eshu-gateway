@@ -8619,6 +8619,96 @@ probe and F12's `ESHU_MCP_CAP` all call. A failed check disables capture
 Test: an unsafe `/run/eshu` with a `run_limit` refuses the call and runs
 nothing; with no `run_limit` the call runs as before.
 
+### Round 5 — implementation (code round)
+
+**Branch `feat/f19-unattended-limits`, on top of `feature-roadmap` at
+`c0954cc`** (merge `8865712`). The gateway bash is the part that goes to the
+security reviewer before merge.
+
+**Gateway (`dashboard/eshu-gateway.sh`, installers regenerated).**
+
+* **The limit travels and is parsed three ways (L2).** `parse_run_limit` uses
+  `python3 -I -c` and prints `absent`, `valid	<s>	<b>` or `invalid`; a later
+  response without the field keeps the first limit, two limits take the
+  smaller per field, and a present but unusable one refuses the call
+  (`[LOCKED] Invalid run_limit …`). Out of range (5–300 s, 65 536–8 388 608
+  bytes), non-integer, boolean, list and non-JSON are all `invalid`.
+* **Capability (L6/L7).** `RUN_LIMITS_CAP=v1` only when
+  `timeout --version` names GNU coreutils; it is sent on **every**
+  `/api/request` as `"run_limits"`, and a limit received without it is refused
+  (never half-applied). The installer reports the same value at `/api/register`
+  (an absent field keeps the stored value; the column is display only).
+* **W1.** One `run_dir_safe()` (directory, not a symlink, mode 700, owner
+  `ESHU_RUN_OWNER`) is used by the F5 tail capture, F12's `ESHU_MCP_CAP` and
+  the F19 probe. An unsafe directory still disables `tail` capture and still
+  refuses an MCP capture; with a byte limit it now **refuses the run**.
+* **Pipeline.** `run_argv` gets `timeout -k 5 <secs>` when a time limit is
+  set; each branch is
+  `… | cap_raw | sanitize | cap_visible [| capture_tail …]` under
+  `set +e`, with `rc=${PIPESTATUS[0]}`. `cap_raw` bounds `sed`'s input (L5);
+  `cap_visible` tees the sanitized stream into `ESHU_LIMIT_PROBE` at
+  `bytes + 1`. The marker and `limit: bytes` are decided from that probe
+  (`stat` > bytes), never by scanning the output; `time` needs `rc == 124`
+  **and** elapsed ≥ the limit. The command's real status (141 after a byte
+  cut, 124 after a stop) is what `[ESHU exit=N]` and the envelope carry.
+* **Q3.** The MCP branch is
+  `… | capture_tail "$ESHU_MCP_CAP" 65537 >/dev/null`: one in-stream ring, no
+  unbounded `tee`, and a human-approved MCP run cannot fill `/run`.
+* **L3, one round trip.** When `/api/request` answers `approved` (the
+  unattended path), an MCP call claims `/api/ticket/{id}` immediately, reads
+  `run_limit` beside the ticket, and runs bounded instead of returning
+  `pending`. The ticket parse is now one `parse_claim_body()` used by both
+  that path and the poll loop, and it understands the `v2|ts|agent|session|cmd`
+  line the stub and the dashboard use.
+* **`python3 -I`** on every inline interpreter in the gateway (the F12
+  security note): no user site-packages and no `PYTHONPATH` reach a script
+  that parses dashboard JSON.
+* **F5 row.** `/api/exec-result` gains `"limit":"time|bytes"` and a byte cut
+  sets `output_truncated` even when the stored tail is short.
+
+**Dashboard.**
+
+* `requests.unattended` and `requests.run_limit` (JSON), additive migrations;
+  `request_results.limit_kind`; `gateways.run_limits` (display only).
+* `approve_unattended()` in `main.py` is the only auto-approval path: it
+  creates the row **approved** with the limit only when the *request* reports
+  `run_limits: v1`; otherwise the row is `pending` with
+  `reason = read-lane-no-limits` and a `read_lane_no_limits` audit row (L7 —
+  the stored column never decides). The read lane calls it.
+* `/api/request` returns `approved`, `unattended` and `run_limit`;
+  `/api/request_status/{id}` and `/api/ticket/{id}` return the limit beside
+  the ticket (the ticket marks the row consumed in the same call).
+* `update_ticket_consumed_by_ip` skips `unattended = 1`, so the poller never
+  receives one (L3).
+* `GET`/`PUT /api/settings/run-limit`: operator session + CSRF, range-checked,
+  audited with the old and new values (L8). Defaults 60 s / 1 MiB; a corrupt
+  meta value falls back to them.
+* `check_request` returns `unattended` and says
+  `approved (unattended): re-run now …`; `ssh_exec`'s `wait` re-runs at
+  `approved` for such a row instead of waiting for `consumed` (Q2).
+
+**`dashboard/static/dev/eshu-gateway-install.sh`.** It is a **committed**
+file (served as `dev_installer_url` to dev-mode gateways, and rewritten on
+the host by a dev push; `scripts/deploy-dashboard.sh` resets it) and it was
+stale: 1 281 lines with no F12 code and no `SANITIZE_CMD`. It is regenerated
+from the current `static/` installer in this round; `gen_installer.py` does
+not write it, so a dev push or this copy is what keeps it current.
+
+**Tests (`tests/test_f19_limits.py`, 32).** Gateway: the parser's three
+answers, stickiness, `min()` combination and eight unusable values; the
+directory check (700, 755, symlink, missing, foreign owner); an MCP
+unattended run capped at 65 536 bytes with the marker and `limit: bytes`; a
+5 s stop (exit 124, marker, `limit: time`); an allowlisted run with no limit
+and no field; an unusable limit refusing; an unsafe run directory refusing a
+limited run. Dashboard: defaults and corrupt fallback; approved-with-limit vs
+pending-without-capability (and the audit row); the poller skipping the row;
+the ticket carrying it; both endpoints; the stored column not deciding; the
+settings endpoint's auth, range and audit; `/api/exec-result` storing and
+rejecting `limit`. `tests/test_gateway_script.py` gains the approved/limit
+stub and its JIT-body test now expects `run_limits`.
+
+`bash scripts/verify.sh`: `2538 passed, 22 skipped, 7 warnings in 477.75s (0:07:57)`.
+
 ---
 
 ## 7. Backlog (not planned in detail)
@@ -8671,7 +8761,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 15 | F15 | probes | dashboard + MCP | Ready after F12; pre-implementation notes P1–P8 | `feat/f15-probes` | F4, F12 | |
 | 16 | F16 | recipes | dashboard + MCP | **Security approved Round 4 with Y1 + W2**; Round 5 to feature reviewer only | `feat/f16-recipes` | F3, F12, F13 | security re-reads Round 4 only |
 | 17 | F17 | local-agent | dashboard + docs | Ready after F15; pre-implementation notes A1–A6 | `feat/f17-local-agent` | F12–F16 | |
-| 18 | F19 | unattended-limits | gateway + dashboard | **Design approved by security** (`d67ad02`); code after F12 merges (W1 at code time) | `feat/f19-unattended-limits` | F4, F5 | then security re-review of § 3 |
+| 18 | F19 | unattended-limits | gateway + dashboard | **Code round 5: W1, Q3, `python3 -I`, L3/L7 per request — to security for the gateway bash** | `feat/f19-unattended-limits` | F4, F5 | security reviews the gateway diff; feature reviewer checks the rest |
 | — | CI fix | ci-environment | gateway + tests | **Approved by feature reviewer** (round 5); CI green; **to security** (gateway bash) | `fix/ci-environment` | F5 | release precondition (`RELEASE_1.md`) |
 
 **Design round 3 (feature reviewer, 2026-11-10): approved, with one fix (Q3).**
