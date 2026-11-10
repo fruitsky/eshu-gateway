@@ -18,7 +18,14 @@ Done on the operator's go-ahead, 2026-11-10:
   is the expected 503 `ssh_key_dir` until `/var/lib/eshu/ssh` exists (the
   installer treats that as "no dashboard key" and installs as before). MCP
   clients' stale sessions got the normal 404 after the restart. **The browser
-  click-through in step 4 is still the operator's.** Each step needs the operator's
+  click-through in step 4 is still the operator's.**
+* release 1.1 (F10), 18:07 UTC: CI green on `be5e87d`; `master`
+  `c8ffe2c..be5e87d`; backup `eshu-pre-release1.1-20261110-180724.db`
+  (`integrity_check` ok, mode 600) and `pre-release1.1-commit.txt`
+  (`c8ffe2c`); deployed with the new helper (no manual reset needed); unit
+  active, no traceback, routes as before; the HA integration has the five
+  curated actions plus `ha_check_config` enabled and `ha_host_reboot`
+  disabled. Each step needs the operator's
 go-ahead. Nothing in this file has been run against the live system except
 the read-only checks under "Checked before release".
 
