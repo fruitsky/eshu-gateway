@@ -6955,11 +6955,14 @@ and that a block scalar is handled line by line (a value that spans several
 lines is redacted only where a line matches).
 
 ```bash
-# Z2/AB1: replace each literal secret value (len >= 4) that the edited file's
-# !secret can resolve. index(), never a regex: the value is data.
+# Z2/AB1/AC1/AC2: replace each literal secret value (len >= 4) that the edited
+# file's !secret can resolve. Reads the check output on **stdin** and writes it
+# on stdout — there is no file, and no path argument to get wrong.
+# index(), never a regex: the value is data.
 # This is the single definition; the WRITE_SCRIPT, RESTORE_SCRIPT and
 # CHECK_SCRIPT constants inline it unchanged (the program moves to double
-# quotes there because each script is the body of `sh -c '...'`).
+# quotes there because each script is the body of `sh -c '...'`, and inside
+# those only the awk *fields* are escaped — `\$0`; there is no `$1`).
 redact() {
   files=""
   d=$dir
@@ -6996,25 +6999,45 @@ $f"; fi
     { for (i = 1; i <= n; i++)
         while ((p = index($0, s[i])) > 0)
           $0 = substr($0, 1, p - 1) "***" substr($0, p + length(s[i]))
-      print }' "$1"
+      print }'
 }
 ```
 
 The values are read inside `awk`, never passed on a command line, so they do
 not appear in the add-on's process list, and no `secrets.yaml` is copied. The
-same function wraps the check phase of the write, the check phase of the
-restore and the whole of `ha_config_check`.
+caller is always a pipe: `printf '%s\n' "$out" | redact`. The same function
+wraps the check phase of the write, the check phase of the restore and the
+whole of `ha_config_check`.
+
+**AC1 — the file argument.** The earlier copy passed `"\$1"` inside the
+`sh -c` body: the inner shell handed awk the *literal* name `$1`, awk could
+not open it, and the check output was lost (not leaked, but gone). Only awk
+fields need escaping (`\$0`); a shell argument must stay `"$1"`. Reading
+stdin removes the argument entirely, so the class of bug cannot come back,
+and the tests assert that a **non-secret line survives** redaction.
+
+**AC2 — no check-output file.** The old block wrote
+`> "$dir/.eshu-check.$$"`: a predictable name inside the config directory,
+created without `set -C`, so a link planted there would be written through as
+root (the Z4 hole, one level down). The output is now captured in a variable
+and piped into `redact`; nothing is created in the config directory. The
+variable is capped (the check output is at most 64 KiB, the same bound the
+call row keeps), and the cap is applied **before** redaction.
 
 Every value from every file is collected (a union), not first-match: a value
 quoted in the output could come from either definition. Over-redaction of the
 check output is acceptable; an unredacted value is not.
 
-Tests: a stub `ha` echoes a synthetic secret; `***` appears and the value
-appears in no tool response, call row or audit row (the tail is the redacted
-text). **AB1:** a file under `packages/net/` whose only `secrets.yaml` is the
-root one is redacted, and the root file is read even when the file's own
-directory has none. **AB2:** a block-scalar certificate's lines are redacted;
-a 3-character value is not (documented limit), and a 4-character one is.
+Tests: a stub `ha` echoes a synthetic secret and an ordinary line; `***`
+appears, the ordinary line **survives unchanged** (AC1), and the value appears
+in no tool response, call row or audit row (the tail is the redacted text).
+**AB1:** a file under `packages/net/` whose only `secrets.yaml` is the root
+one is redacted, and the root file is read even when the file's own directory
+has none. **AB2:** a block-scalar certificate's lines are redacted; a
+3-character value is not (documented limit), and a 4-character one is.
+**AC2:** no file is created in the config directory during a check (the
+test watches the directory), and a planted link at the old
+`.eshu-check.<pid>` name is never written through.
 
 #### Z3 — the banner also covers what a file can make HA reveal or run
 
@@ -7105,7 +7128,10 @@ the binding unset is refused and opens no connection.
   `from="<dashboard address>",restrict`, or, if the add-on rejects
   `restrict`, `no-port-forwarding,no-agent-forwarding,no-X11-forwarding,no-pty`.
   Without it a port forward from the add-on reaches the Supervisor's network.
-  The setup doc records which form the add-on accepts.
+  The setup doc records which form the add-on accepts, **and says to remove
+  personal keys from the add-on's `authorized_keys`** (or restrict them the
+  same way) once Eshu's key is in place: a leftover operator key with no
+  `from=`/`restrict` keeps the same reach and bypasses everything here.
 * **Z8 — settable state is invalidated.** `config_json.root_checked` and the
   pin's confirmed flag are cleared whenever host, port, user or key changes;
   `ssh_user` must match `^[a-z_][a-z0-9_-]{0,31}$`; the host is an IP or a
@@ -7193,26 +7219,25 @@ chmod "$(stat -c %a "$real")" "$backup" "$tmp" || exit 16
 chown "$(stat -c %u:%g "$real")" "$backup" "$tmp" 2>/dev/null || true
 mv -f "$tmp" "$real" || exit 17
 
-# Z2/AB1: redact() is the function from Z2, unchanged — the same upward
-# secrets.yaml list and the same block-scalar handling. It is inlined into the
-# three script constants; inside `sh -c '...'` the awk program moves to double
-# quotes, with `\$0` and `\$1` escaped once so the inner shell hands awk a
-# literal `$0`/`$1`.
+# Z2/AB1/AC1/AC2: redact() is the function from Z2, reading stdin. It is
+# inlined into the three script constants; inside `sh -c '...'` only the awk
+# fields are escaped (`\$0`) — the earlier copy also escaped `\$1`, which
+# handed awk a literal file name and lost the output. There is no file
+# argument now, and nothing is created in the config tree.
 #
-#   redact "$dir/.eshu-check.$$"
-
-# Z2/Z9: the check runs with only the token; its output is redacted here and
-# the last line is the hash, computed from the file itself.
-if ! SUPERVISOR_TOKEN="$SUPERVISOR_TOKEN" timeout 100 ha core check > "$dir/.eshu-check.$$" 2>&1
-then
-  redact "$dir/.eshu-check.$$"; rm -f "$dir/.eshu-check.$$"
+# Z2/Z9: the check runs with only the token, its output is captured in a
+# variable (capped, then redacted), and success is exit 0 plus the last line.
+crc=0
+out=$(SUPERVISOR_TOKEN="$SUPERVISOR_TOKEN" timeout 100 ha core check 2>&1) || crc=$?
+out=${out:0:65536}
+printf '%s\n' "$out" | redact
+if [ "$crc" -ne 0 ]; then
   # Z4: roll the backup in by mv, never by cp onto "$real".
   rb="$real.eshu-tmp-rb-$$"
   set -C; cat "$backup" > "$rb"; set +C
   mv -f "$rb" "$real" || exit 1
   exit 18
 fi
-redact "$dir/.eshu-check.$$"; rm -f "$dir/.eshu-check.$$"
 printf "ok %s\n" "$(sha256sum "$real" | cut -d" " -f1)"
 ' _ "$path" "$expect" "$backup" "$tmp"
 ```
@@ -7223,12 +7248,14 @@ accepted directory, basename equality), then: `[ -f "$backup" ] && [ ! -L
 "$backup" ] || exit 19` plus its own link-count check (X1/Z1); create `"$tmp"`
 noclobber with the pre-restore content; create the restore file noclobber with
 `cat "$backup" > "$rb"`, copy the mode/owner with `stat -c`, `mv -f "$rb"
-"$real"`; run the check with `redact`; on failure `mv -f "$tmp" "$real"`
-(exit 18, or exit 1 if that fails). The `ok` line is the backup's hash,
-computed before the restore and checked again after it, so a restore that
-somehow moved different bytes does not report ok.
+"$real"`; run the check into a variable and pipe it through `redact` (AC2 —
+the restore writes no check file either, and `redact` reads stdin); on failure
+`mv -f "$tmp" "$real"` (exit 18, or exit 1 if that fails). The `ok` line is
+the backup's hash, computed before the restore and checked again after it, so
+a restore that somehow moved different bytes does not report ok.
+`ha_config_check` uses the same capture-then-redact shape in its own script.
 
-`bash scripts/verify.sh`: `2331 passed, 7 warnings in 427.21s (0:07:07)` (docs only).
+`bash scripts/verify.sh`: `2331 passed, 7 warnings in 427.59s (0:07:07)` (docs only).
 
 ### Reviewer notes
 
@@ -14648,7 +14675,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 10 | F8 | test-traffic | dashboard | Merged | `feat/f8-test-traffic` | — | low priority |
 | 11 | F9 | ha-supervisor-read | dashboard | Merged | `feat/f9-ha-supervisor-read` | — | token is now a dedicated `eshu` HA admin user |
 | 12 | F10 | ha-supervisor-actions | dashboard | Ready (after F9) | `feat/f10-ha-supervisor-actions` | F9, F3, Chunk H | reviewer pass + security reviewer sign-off |
-| 13 | F11 | ha-config-files | dashboard | **Round 7 + AB1/AB2 (upward `secrets.yaml`, block scalars): Z1–Z5 folded, Z6–Z9 + Q2/Q4 decided — to security for Z1–Z5** | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | security reads only the Round 7 Z1–Z5 sections |
+| 13 | F11 | ha-config-files | dashboard | **Round 7 + AB1/AB2/AC1/AC2 (upward `secrets.yaml`, block scalars, stdin `redact`, no check file): design closed — to security for Z1–Z5** | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | security reads only the Round 7 Z1–Z5 sections |
 | 14 | F14 | inventory | dashboard + MCP | Merged | `feat/f14-inventory` | Chunk H | |
 | 15 | F19 | unattended-limits | gateway + dashboard | **Merged** 2026-11-11 (security sign-off `67bec51`; AF1/AF2 checked) | `feat/f19-unattended-limits` | F4, F5, F12 | AF3 goes on the next gateway branch |
 | 16 | F15 | probes | dashboard + MCP | **Merged** 2026-11-11 (AG1 security decision `eca8982`; AI1 fix merged) | `feat/f15-probes` | F4, F12, F14 | |
