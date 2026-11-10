@@ -9456,6 +9456,37 @@ status table.
 
 `bash scripts/verify.sh`: `2678 passed, 22 skipped, 7 warnings in 561.48s (0:09:21)`.
 
+### Round 7 — security's AF1 and AF2
+
+**Security approved the gateway bash on two conditions; the feature reviewer
+checks them here. AF3 is deliberately not on this branch** — it belongs to the
+next gateway-bash branch (the session-signature check still passes the key in
+argv).
+
+* **AF1 — an unattended row must never run without a limit.** Three changes:
+  - the gateway's parser now reads `unattended: true` with a missing, `null`
+    or unusable `run_limit` as **invalid**, not as "absent" (absent means "a
+    human approved this" and only applies without the marker);
+  - the direct-SSH poll loop runs `parse_run_limit "$CLAIM_BODY"` after a
+    claim, exactly as the MCP path does, so a corrupt limit in the claim is
+    refused before anything runs;
+  - `/api/ticket` and `/api/request_status` always send `run_limit` for an
+    unattended row. A stored value that does not parse is sent as `{}`, which
+    the gateway refuses — never `null`, never omitted.
+  Tests: the parser refuses `unattended` with no limit, `null`, `{}` or a
+  non-dict; the endpoints send `{}` for a corrupt stored limit; an MCP run
+  and a poll-path run whose claim carries `"run_limit": null` are both refused
+  and nothing runs.
+* **AF2 — the range check lives in the Python.** `5 <= seconds <= 300` and
+  `65 536 <= bytes <= 8 388 608` are checked where the JSON is parsed. Bash
+  `[ -lt ]` on an integer above 2^63 errors, and inside `if` that error counts
+  as false, so a huge value used to pass as `valid` and GNU `timeout` would
+  treat it as effectively unbounded. The bash layer stays as a second check
+  with a digit-length guard, so no oversized word ever reaches `[ -lt ]`.
+  Test: `seconds: 10**30` and `bytes: 10**30` are refused.
+
+`bash scripts/verify.sh`: `2689 passed, 22 skipped, 7 warnings in 564.62s (0:09:24)`.
+
 **Code round 1 (feature reviewer, 2026-11-10, `90c4df7` / `51fb2a8`): the
 design is implemented faithfully; three must-fixes before the security
 reviewer reads the gateway bash.** Read in full: `parse_run_limit` (three
