@@ -7792,7 +7792,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 5a | X1 | ctx-actions | dashboard | Merged | `fix/x1-ctx-actions` | — | FYI to security reviewer (approve ignored status) |
 | 6 | F5 | exec-results | gateway + dashboard | Merged | `feat/f5-exec-results` | — | |
 | 6a | F18 | request-context | dashboard | Merged | `feat/f18-request-context` | F1, F5, F7, X1 | |
-| 7 | F12 | ssh-exec | dashboard + gateway | **Merged forward onto the buffering fix (`ef2418f`): `SANITIZE_CMD` (stdbuf -oL) plus the MCP capture on `capture_tail` at 65 537 bytes, no FIFO — awaiting the security diff check** | `feat/f12-ssh-exec` | F4, F5 | security reviewer re-checks the merged gateway bash |
+| 7 | F12 | ssh-exec | dashboard + gateway | Merged (`c0954cc`) | `feat/f12-ssh-exec` | F4, F5 | security reviewer re-checks the merged gateway bash |
 | 8 | F6 | session-wrapup | dashboard | Merged | `feat/f6-session-wrapup` | F3, F4, F5 | |
 | 9 | F13 | session-conclusions | dashboard + MCP | Merged | `feat/f13-session-conclusions` | F5, F6 | |
 | 10 | F8 | test-traffic | dashboard | Merged | `feat/f8-test-traffic` | — | low priority |

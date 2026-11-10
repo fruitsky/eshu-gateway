@@ -1,6 +1,6 @@
 # Release 1 — `feature-roadmap` → `master`
 
-Status: **preconditions met (2026-11-10); release not started.** Each step needs the operator's
+Status: **operator go-ahead given 2026-11-10; release in progress.** Each step needs the operator's
 go-ahead. Nothing in this file has been run against the live system except
 the read-only checks under "Checked before release".
 
@@ -19,14 +19,17 @@ Chunks merged on `feature-roadmap` (§ 9 of `FEATURE_PLAN.md`):
 * F13 session conclusions and runbooks;
 * F8 test traffic;
 * F9 HA Supervisor read tools;
-* F14 inventory.
+* F14 inventory;
+* F12 SSH through Eshu over MCP (`ssh_exec`), merged `c0954cc` with the
+  security sign-off on the merged gateway diff. Dashboard side only until a
+  gateway is reinstalled; see "F12 on the dashboard host" below.
 
 Plus the CI fix (`fix/ci-environment`, merged `f2746ef`), the deploy-helper fix
 (`afd5ea6`) and the buffering fix (`fix/stream-unbuffered`: `sanitize` is
 line-buffered, so a slow command stops promptly when its caller disconnects;
 signed off by the security reviewer).
 
-Not in this release: F10, F11, F12, F15, F16, F17 and F19.
+Not in this release: F10, F11, F15, F16, F17 and F19.
 
 ## Preconditions
 
@@ -136,6 +139,20 @@ was run. Step 4 below is that check, done by hand.
    buffering fix, not a regression.
 7. **Update the remaining gateways**, a few at a time, with the step 5 check
    on each batch.
+
+## F12 on the dashboard host
+
+Re-checked 2026-11-10 with F12 merged: `init_db()` on the private live-DB copy
+is unchanged (0.05 s, no table dropped, no row count changed, `integrity_check`
+ok), and the current `master` code still starts on the migrated copy.
+
+`ssh_exec` keeps its service key in `/var/lib/eshu/ssh` (or
+`ESHU_SSH_KEY_DIR`), which must be `0700` and owned by the service user. The
+dashboard does not create `/var/lib/eshu` itself (it is root-owned), so until
+the operator creates it, every `ssh_exec` call is refused cleanly with
+`ssh_key_dir`; nothing else is affected. To try F12:
+`sudo install -d -o dragon -g dragon -m 700 /var/lib/eshu /var/lib/eshu/ssh`,
+then reinstall one gateway so it enrols the dashboard key.
 
 ## Rollback
 
