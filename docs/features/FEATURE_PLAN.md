@@ -3850,6 +3850,40 @@ F12 merges `feature-roadmap` forward again (it does **not** have B1 yet: the
 F12 report said "B1 came with the merge", but `sanitize` on F12 is still
 plain `sed`) → security re-checks the merged F12 gateway diff → I merge F12.
 
+**Security reviewer sign-off: buffering fix (`fix/stream-unbuffered` at
+`981f467`, gateway diff `5b0f5e4`), 2026-11-10: approved.**
+
+* **B1 is right.**
+  - `stdbuf` is looked up once on the fixed `PATH`, after the environment is
+    scrubbed. Its `LD_PRELOAD` reaches only `sed`.
+  - The redaction expressions are unchanged, and the fallback writes to
+    syslog only.
+  - With `exit-only` capture, which is every live gateway, awk is not in the
+    stream, so B1 fully closes the slow-writer gap there.
+* **The rejection of B2 is accepted.** `-W interactive` splits or truncates
+  long lines, which corrupts the agent's stream. A wrong stream is worse
+  than a late stop.
+* **The residual risk is accepted, with limits.** On mawk with `tail`
+  capture, a slow writer can outlive a disconnect until awk's input buffer
+  fills. This uses resources but gives no access beyond what was approved.
+  F19's time limit bounds it for unattended runs. Conditions:
+  - `RELEASE_1.md` step 6 says so for anyone turning on `tail` capture on a
+    mawk host.
+  - The SIGPIPE-ignored case stays out of scope: sshd gives its children the
+    default handling.
+  - N1 is worth doing: run the mawk plus `exit-only` case instead of
+    skipping it.
+* **For the later tee-based fix (S1), when it comes to me:**
+  - It brings back a second process that the script waits for, which is the
+    shape that hung CI. The wait must be bounded: a short poll with a hard
+    deadline, after which the result post goes without the capture. It must
+    never be an unbounded `wait`.
+  - The capture must be written to a temporary name and renamed, so a
+    half-written capture is never posted.
+  - Test: a capture process that never exits does not hold the call.
+* **Merge order:** as the feature reviewer wrote. I check the merged F12
+  gateway diff, which picks up B1, before F12 merges.
+
 ---
 
 ## Chunk X1 — Sidebar actions and pending-only decisions · slug `ctx-actions` · dashboard · BUG
