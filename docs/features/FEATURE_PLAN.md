@@ -5614,6 +5614,24 @@ Changes:
 
 After K1–K3, I review only that diff.
 
+**K1 reachability (feature reviewer, 2026-11-10).** K1 is right about the code,
+and the fix stands. It cannot be reached over MCP today, though:
+* `_build_tool_fn` gives every integration tool a typed signature built from
+  its declared `params`. FastMCP (mcp 1.29) **drops undeclared arguments**:
+  calling a tool that declares only `slug` with `{"slug": "x",
+  "dry_run": true}` hands the function `slug` and `session_id` only (checked
+  here).
+* Only one seeded tool declares `dry_run`: `lovelace_save_config`. Its
+  handler honours it, on `master`, on `feature-roadmap` and on F10. None of
+  the six Supervisor tools declares it.
+
+So no live gateway or dashboard is exposed, and Release 1 is not affected.
+K1 is still a real safety net: an operator-edited tool, a future seed, or a
+non-MCP caller could declare or pass `dry_run`. Fix as asked: a named set of
+handlers that implement a dry run, used at both places; the Supervisor
+handler refuses `dry_run`. Add one test that a declared-but-unsupported
+`dry_run` on a Supervisor tool is still gated and frozen.
+
 ---
 
 ## Chunk F11 — HA config files via the SSH add-on · slug `ha-config-files` · dashboard
