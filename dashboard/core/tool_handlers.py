@@ -1080,10 +1080,33 @@ def _h_ha_supervisor_read(integration, tool, args, ctx=None):
                                args or {}, ctx or {})
 
 
+def _config_check_fresh(integration):
+    """F10 P3: is there a valid config check from the last 10 minutes?
+
+    Called by the preflight (so a doomed restart is never queued) and again by
+    the handler immediately before the Supervisor call, which covers a
+    plan-claimed restart, an ungated one and an approval that arrives after
+    the check went stale.
+    """
+    import time as _time
+    from db.misc import get_meta_json
+    last = get_meta_json('ha_check_config_' + (integration.get('name') or ''), {}) or {}
+    at = int(last.get('at') or 0)
+    fresh = (last.get('result') or '') == 'valid' and _time.time() - at <= 600
+    return fresh, last
+
+
 def _h_ha_supervisor_action(integration, tool, args, ctx=None):
     """F10: one fixed Supervisor action, chosen by the tool's name."""
-    return run_supervisor_action(integration, (tool or {}).get('name') or '',
-                                 args or {}, ctx or {})
+    name = (tool or {}).get('name') or ''
+    if name == 'ha_core_restart':
+        fresh, _last = _config_check_fresh(integration)
+        if not fresh:
+            return _err(
+                'ha_check_config_stale',
+                'Run ha_check_config on this integration first: a restart needs a '
+                'valid config check from the last 10 minutes.', 400)
+    return run_supervisor_action(integration, name, args or {}, ctx or {})
 
 
 def _h_ha_check_config(integration, tool, args, ctx=None):
@@ -1208,15 +1231,13 @@ def _preflight_ha_supervisor_action(integration, tool, args, ctx):
         addon = str(a.get('slug') or '').strip()
     version = ''
     if name == 'ha_core_restart':
-        from db.misc import get_meta_json
-        last = get_meta_json('ha_check_config_' + (integration.get('name') or ''), {}) or {}
-        at = int(last.get('at') or 0)
-        if (last.get('result') or '') != 'valid' or _time.time() - at > 600:
+        fresh, last = _config_check_fresh(integration)
+        if not fresh:
             return _err(
                 'ha_check_config_stale',
                 'Run ha_check_config on this integration first: a restart needs a '
                 'valid config check from the last 10 minutes.', 400)
-        version = 'checked %ds ago' % int(_time.time() - at)
+        version = 'checked %ds ago' % int(_time.time() - int(last.get('at') or 0))
     if name in ('ha_addon_update', 'ha_core_update'):
         try:
             info = (run_supervisor_read(integration, 'ha_addon_info', {'slug': addon}, ctx)

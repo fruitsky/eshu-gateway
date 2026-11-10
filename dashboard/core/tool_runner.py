@@ -35,7 +35,8 @@ from core.integration_proxy import (
     merge_response_hint,
     safe_request_summary,
 )
-from core.ha_supervisor import is_supervisor_rest_path
+from core.ha_supervisor import (is_admin_config_write,
+                               is_supervisor_rest_request)
 from core.ha_ws import execute_ws_call, is_supervisor_command
 from core.ha_ws_policy import is_read_command
 
@@ -176,6 +177,30 @@ def _refuse_supervisor_ws(integration, tool, tool_name, args, session_id,
         actor=agent_name)
     return json.dumps({'error': 'supervisor_command_refused',
                        'message': message, 'status_code': 403})
+
+
+_UNGATED_OVERRIDE_WARNED = set()
+
+
+def _audit_ignored_ungated(agent_name, integration_name, tool_name):
+    """P2: tell the operator once per agent and tool that `ungated` did not win.
+
+    `always_gate` is the tool's own promise, not an agent setting, so an
+    `ungated` override cannot switch it off. One audit row per pair is enough;
+    the tool keeps working as gated either way.
+    """
+    key = (agent_name, integration_name, tool_name)
+    if key in _UNGATED_OVERRIDE_WARNED:
+        return
+    _UNGATED_OVERRIDE_WARNED.add(key)
+    try:
+        record_audit_event(
+            'mcp_ungated_ignored',
+            details=(f"{integration_name}.{tool_name}: the agent's ungated "
+                     f"override was ignored; this tool is always gated "
+                     f"(agent={agent_name})"))
+    except Exception:
+        pass
 
 
 def _refuse_supervisor_rest(integration, tool, tool_name, args, session_id,
@@ -493,12 +518,16 @@ def _run_tool(integration_name: str, tool_name: str, args: dict, reason: str = '
     # Supervisor proxy and `/api/services/hassio/…` the Supervisor's services.
     # A generic path is chosen by the agent, so the static FORBIDDEN scan
     # cannot see it; this runs before gating, and the executors re-check.
+    _ha_path = ''
     if (integration.get('kind') or '').lower() == 'ha' and transport == 'http':
         _method, _path = _request_shape(tool, args, transport, generic, handler)
-        if is_supervisor_rest_path(_path):
+        _ha_path = str(_path)
+        # S-a: check the path the request will carry, including the
+        # integration's own base path, not only the tool's part.
+        if is_supervisor_rest_request(integration.get('base_url'), _path):
             return _refuse_supervisor_rest(integration, tool, tool_name, args,
                                            session_id, execution_id, agent_name,
-                                           str(_path))
+                                           _ha_path)
     # Audit labels: an immediate mutating call ran without operator sign-off
     # ("auto"); reads and handler dry-runs are not approval-relevant.
     approval_label = 'auto' if (mutating and not args.get('dry_run')) else ''
@@ -564,7 +593,22 @@ def _run_tool(integration_name: str, tool_name: str, args: dict, reason: str = '
         if mode == 'gated':
             should_gate = True
         elif mode == 'ungated':
-            should_gate = False
+            # P2: `always_gate` wins. An agent policy (`ha.*: ungated`, `*:
+            # ungated`, or an exact key) can no longer switch off the gate on
+            # a Supervisor action; a plan is the one way to pre-approve one,
+            # and the reboot never can be. The override is audited once per
+            # agent and tool so the operator learns why it had no effect.
+            if tool.get('always_gate'):
+                _audit_ignored_ungated(agent_name, integration['name'], tool_name)
+            else:
+                should_gate = False
+    # S-b: an approved write to HA's automation/script/scene config API can
+    # define an action that calls any hassio.* service. The path is not
+    # FORBIDDEN, so the card must carry the same red line as the reboot.
+    config_warning = ''
+    if _ha_path and mutating and is_admin_config_write(_ha_path):
+        config_warning = ('⚠ Admin power: this config write can define an action '
+                          'that calls any Supervisor (hassio.*) service.')
     # A handler dry-run never writes upstream, so it runs pre-gate regardless
     # of the tool's or agent's gating policy.
     if handler and args.get('dry_run'):
@@ -607,6 +651,8 @@ def _run_tool(integration_name: str, tool_name: str, args: dict, reason: str = '
                 # F10: a viable action may hand back the summary the approval
                 # card shows. Anything else keeps the old "error string or None".
                 summary = str(pre.get('_summary') or '')
+                if config_warning:
+                    summary = (config_warning + ' ' + summary).strip()
                 call_id = create_pending_call(
                     integration['name'], tool_name, args, reason,
                     session_id=session_id, execution_id=execution_id,
@@ -623,7 +669,7 @@ def _run_tool(integration_name: str, tool_name: str, args: dict, reason: str = '
         call_id = create_pending_call(
             integration['name'], tool_name, args, reason,
             session_id=session_id, execution_id=execution_id, agent=agent_name,
-            session_source=session_source)
+            session_source=session_source, summary=config_warning)
         from core.notify import send_notify
         send_notify('jit', 'API Approval Required',
                     '`%s` on %s by %s: ' % (tool_name, integration_name, agent_name)

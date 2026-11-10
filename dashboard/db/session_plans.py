@@ -23,6 +23,15 @@ import re
 
 MAX_ITEMS = 50
 MAX_COMMAND_BYTES = 4096
+# P1: only these curated Supervisor actions may be covered by an agent's MCP
+# plan item. The generic read/write, `call_service`, `ws_write` and
+# `ha_host_reboot` never can; the reboot always needs its own card (S1 follows
+# from this allowlist).
+PLAN_COVERABLE_TOOLS = frozenset({
+    'ha_addon_action', 'ha_addon_update', 'ha_core_update',
+    'ha_backup_create', 'ha_core_restart',
+})
+MAX_ARGS_DISPLAY = 2000
 # F10: an `mcp` item names one integration tool; the hash is SHA-256 hex.
 TOOL_RE = re.compile(r'^[A-Za-z0-9_.:-]{1,120}$')
 HASH_RE = re.compile(r'^[0-9a-f]{64}$')
@@ -66,8 +75,12 @@ def init_session_plans_tables(cursor):
     # every pre-F10 row) or one MCP tool call (kind='mcp') identified by the
     # exact argument hash the agent proposed. `command` stays the human label
     # the plan UI already renders.
+    # P1: `args_json` is the redacted display copy the plan card shows (the
+    # match still uses `args_hash`), and `summary` is the handler preflight
+    # summary when there is one.
     for col, default in [('kind', "'ssh'"), ('integration', "''"),
-                         ('tool', "''"), ('args_hash', "''")]:
+                         ('tool', "''"), ('args_hash', "''"),
+                         ('args_json', "''"), ('summary', "''")]:
         try:
             cursor.execute(f"ALTER TABLE session_plan_items ADD COLUMN {col} TEXT DEFAULT {default}")
         except Exception:
@@ -124,27 +137,61 @@ def _validate_mcp_item(item):
     if not TOOL_RE.match(integration) or not TOOL_RE.match(tool):
         raise PlanError('invalid_items',
                         'integration and tool must be plain names')
-    if tool == 'ha_host_reboot':
-        # S1: a reboot always needs its own approval card with the red line.
-        # A plan must never cover it, whatever the integration is called.
+    if tool not in PLAN_COVERABLE_TOOLS:
+        # P1: an allowlist, not one excluded tool. The operator must be able to
+        # read what a plan item does; the generic tools take an arbitrary path
+        # and body, so they can never be covered by a plan.
         raise PlanError('not_plan_coverable',
-                        'ha_host_reboot needs its own approval every time')
-    digest = item.get('args_hash')
-    if digest is None:
-        digest = args_hash(item.get('args') or {})
-    digest = str(digest or '').strip().lower()
-    if not HASH_RE.match(digest):
-        raise PlanError('invalid_items', 'args_hash must be 64 lowercase hex')
+                        '%s cannot be covered by a plan; only the curated '
+                        'Supervisor actions can be' % tool)
+    raw = item.get('args')
+    if not isinstance(raw, dict):
+        # P1: a bare args_hash hid the arguments from the operator.
+        raise PlanError('invalid_items',
+                        "an mcp item needs its 'args', not only an args_hash")
+    digest = args_hash(raw)
+    supplied = item.get('args_hash')
+    if supplied is not None and str(supplied).strip().lower() != digest:
+        raise PlanError('invalid_items',
+                        'args_hash does not match args')
     max_uses = item.get('max_uses', 1)
     if isinstance(max_uses, bool) or not isinstance(max_uses, int):
         raise PlanError('invalid_max_uses', 'max_uses must be an integer')
     if max_uses < 1 or max_uses > MAX_USES:
         raise PlanError('invalid_max_uses',
                         f'max_uses must be between 1 and {MAX_USES}')
+    # P1: the card shows the arguments with secret-looking keys redacted, and
+    # the handler's preflight summary when it has one. Both are display only;
+    # the call still matches on the hash of the raw arguments.
+    display, summary = _mcp_display(integration, tool, raw)
     label = f"mcp: {integration}.{tool} ({digest[:12]})"
     return {'kind': 'mcp', 'host': '*', 'command': label,
             'integration': integration, 'tool': tool, 'args_hash': digest,
-            'max_uses': max_uses}
+            'args_json': display, 'summary': summary, 'max_uses': max_uses}
+
+
+def _mcp_display(integration_name: str, tool_name: str, args: dict):
+    """P1: (redacted args JSON, preflight summary) for the plan card."""
+    import json as _json
+    try:
+        from core.secret_scrub import scrub_payload
+        display = _json.dumps(scrub_payload(args or {}), sort_keys=True,
+                              separators=(',', ':'))[:MAX_ARGS_DISPLAY]
+    except Exception:
+        display = ''
+    summary = ''
+    try:
+        from core.tool_handlers import run_preflight
+        from db.integrations import get_integration, get_tool
+        integration = get_integration(integration_name)
+        tool = get_tool(integration_name, tool_name)
+        if integration and tool and tool.get('handler'):
+            pre = run_preflight(tool['handler'], integration, tool, args or {})
+            if isinstance(pre, dict):
+                summary = str(pre.get('_summary') or '')[:300]
+    except Exception:
+        summary = ''
+    return display, summary
 
 
 def validate_items(items):
@@ -235,11 +282,12 @@ def create_plan(session_id: str, items, note: str = '') -> dict:
             cur.execute('''
                 INSERT INTO session_plan_items
                     (plan_id, host, command, max_uses, uses, removed,
-                     kind, integration, tool, args_hash)
-                VALUES (?, ?, ?, ?, 0, 0, ?, ?, ?, ?)
+                     kind, integration, tool, args_hash, args_json, summary)
+                VALUES (?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?)
             ''', (plan_id, item['host'], item['command'], item['max_uses'],
                     item.get('kind') or 'ssh', item.get('integration') or '',
-                    item.get('tool') or '', item.get('args_hash') or ''))
+                    item.get('tool') or '', item.get('args_hash') or '',
+                    item.get('args_json') or '', item.get('summary') or ''))
         conn.commit()
     hosts = {item['host'] for item in normalised}
     return {'plan_id': plan_id, 'status': 'proposed', 'session_id': sid,

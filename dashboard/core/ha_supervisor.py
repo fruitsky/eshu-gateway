@@ -80,21 +80,11 @@ SLUG_RE = re.compile(r'^[a-z0-9_]{1,64}$')
 REST_SUPERVISOR_PREFIXES = ('hassio', 'services/hassio')
 
 
-def is_supervisor_rest_path(path) -> bool:
-    """Is this HA REST path the Supervisor proxy, its service domain, or a
-    non-canonical spelling of *any* HA path?
+def _normalise_rest_path(path) -> str:
+    """Decode-until-stable, then strip the leading slash and an `api/` prefix.
 
-    The same request has many spellings — percent-encoded, upper-case, with
-    `//` or an `api/` prefix — so the path is percent-decoded (repeatedly,
-    N1), lowercased, `//`-collapsed and stripped of its leading slash and
-    `api/` prefix before the Supervisor check.
-
-    N1: a dot segment, a backslash or a control character is refused whatever
-    the prefix is. `urllib` sends the bytes as given, but a reverse proxy in
-    front of HA (nginx/NPM) resolves `..` and decodes `%2e`, so
-    `api/states/../hassio/backups/x/restore` would otherwise reach the
-    Supervisor. HA has no legitimate API path with those, and refusing beats
-    normalising: the bytes sent must be the bytes checked.
+    Returns '' when the path is non-canonical (a dot segment, a backslash or a
+    control character), which every caller refuses.
     """
     text = str(path or '')
     # N1: unquote until stable. One pass would let `%252e%252e` become
@@ -105,21 +95,72 @@ def is_supervisor_rest_path(path) -> bool:
             break
         text = decoded
     if '\\' in text or any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in text):
-        return True
+        return None
     text = text.strip()
     if any(segment in ('.', '..') for segment in text.split('/')):
-        return True
+        return None
     text = text.lower()
     while '//' in text:
         text = text.replace('//', '/')
     text = text.lstrip('/')
-    if text.startswith('api/'):
+    # A base URL that ends in /api and a path that starts with api/ would
+    # otherwise leave two prefixes; strip them all.
+    while text.startswith('api/'):
         text = text[len('api/'):]
-    text = text.lstrip('/')
+    return text.lstrip('/')
+
+
+def is_supervisor_rest_path(path) -> bool:
+    """Is this HA REST path the Supervisor proxy, its service domain, or a
+    non-canonical spelling of *any* HA path?
+
+    The same request has many spellings — percent-encoded, upper-case, with
+    `//` or an `api/` prefix — so the path is normalised before the check.
+
+    N1: a dot segment, a backslash or a control character is refused whatever
+    the prefix is. `urllib` sends the bytes as given, but a reverse proxy in
+    front of HA (nginx/NPM) resolves `..` and decodes `%2e`, so
+    `api/states/../hassio/backups/x/restore` would otherwise reach the
+    Supervisor. HA has no legitimate API path with those, and refusing beats
+    normalising: the bytes sent must be the bytes checked.
+
+    S-a: the first segment only has to *start* with `hassio`, which also
+    covers the add-on ingress proxy (`hassio_ingress/...`).
+    """
+    text = _normalise_rest_path(path)
+    if text is None:
+        return True
+    if not text:
+        return False
+    if text.split('/', 1)[0].startswith('hassio'):
+        return True
     for prefix in REST_SUPERVISOR_PREFIXES:
         if text == prefix or text.startswith(prefix + '/'):
             return True
     return False
+
+
+def is_supervisor_rest_request(base_url, path) -> bool:
+    """Check the path the *request* will carry: the integration's own base
+    path plus the tool's path (S-a). A base URL that ends in `/hassio` is as
+    forbidden as a tool path that starts with it."""
+    base_path = urllib.parse.urlparse(str(base_url or '')).path or ''
+    return is_supervisor_rest_path((base_path.rstrip('/') + '/' +
+                                    str(path or '')).strip('/'))
+
+
+ADMIN_CONFIG_PREFIXES = ('config/automation', 'config/script', 'config/scene')
+
+
+def is_admin_config_write(path) -> bool:
+    """S-b: does this HA REST write edit an automation, script or scene?
+
+    Such a document can define an action that calls any `hassio.*` service, so
+    approving it grants Supervisor power even though the path is not
+    FORBIDDEN. The approval card must say so.
+    """
+    text = _normalise_rest_path(path)
+    return bool(text) and text.startswith(ADMIN_CONFIG_PREFIXES)
 
 
 # The fields each shaper may pass through. Anything not named is dropped —

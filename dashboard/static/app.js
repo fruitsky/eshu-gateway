@@ -3844,6 +3844,12 @@ function planItemHtml(plan, item) {
           Number(item.max_uses || 1) + '</span>' +
       '</div>' +
       '<code class="plan-cmd">' + escapeHtml(item.command || '') + '</code>' +
+      /* P1: the redacted arguments (and the preflight summary when there is
+         one) are on the card, so an mcp item is not just a hash. */
+      (item.summary
+        ? '<div class="plan-note">' + escapeHtml(item.summary) + '</div>' : '') +
+      (item.args
+        ? '<code class="plan-cmd plan-args">' + escapeHtml(item.args) + '</code>' : '') +
       bdHeadlineHtml(row) +
       bdBodyHtml(row, { raw: false }) +
     '</div></div>';
@@ -4006,7 +4012,7 @@ function renderJitItem(item) {
           '<div class="jit-meta">' +
             '<span class="jit-meta-item">#' + esc(String(Number(c.id)).padStart(6,'0')) + '</span>' +
             '<span class="jit-meta-item">API call</span>' +
-            (c.summary && c.tool === 'ha_host_reboot'
+            (c.summary && (c.tool === 'ha_host_reboot' || c.summary.indexOf('\u26a0') === 0)
               ? '<span class="jit-meta-item" style="color:var(--danger)">' + escapeHtml(c.summary) + '</span>'
               : (c.summary ? '<span class="jit-meta-item">' + escapeHtml(c.summary) + '</span>' : '')) +
             (c.agent ? '<span class="jit-meta-item">agent ' + escapeHtml(c.agent) + '</span>' : '') +

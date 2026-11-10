@@ -885,8 +885,8 @@ def execute_generic_call(integration: dict, method: str, path: str, params=None,
     # M1/F10: re-check the generic path as well, so the approval path and the
     # verify_path GET cannot reach the Supervisor either.
     if (integration.get('kind') or '').lower() == 'ha':
-        from core.ha_supervisor import is_supervisor_rest_path
-        if is_supervisor_rest_path(path):
+        from core.ha_supervisor import is_supervisor_rest_request
+        if is_supervisor_rest_request(integration.get('base_url'), path):
             raise ProxyError(
                 403, "Supervisor endpoints are not available through the "
                      "generic REST tools; use the curated ha_supervisor_* tools.")

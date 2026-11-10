@@ -24,6 +24,7 @@ from db.integrations import (
     create_integration, create_pending_call, get_integration,
     get_pending_call, get_pending_calls, get_tools,
 )
+from db.agent_policies import set_agent_policy
 from db.misc import set_meta_json
 
 DASHBOARD = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -492,6 +493,8 @@ class TestSupervisorRestGuard:
         'api/hassio\\backups',
         'api/services/%252e%252e/hassio/x',
         '/api/hassio\x00/backups',
+        # S-a: the add-on ingress proxy is part of the Supervisor surface.
+        '/api/hassio_ingress/abc123/',
     )
 
     @pytest.mark.parametrize('path', DOT_SPELLINGS)
@@ -519,3 +522,190 @@ class TestSupervisorRestGuard:
         with pytest.raises(ProxyError) as exc:
             execute_integration_call(ha, tool, {})
         assert exc.value.status_code == 403
+
+
+class TestPlanCoverage:
+    """P1: an MCP plan item is readable, and only the curated actions are
+    coverable."""
+
+    def _mcp(self, tool='ha_addon_action', **args):
+        return {'kind': 'mcp', 'integration': 'ha', 'tool': tool,
+                'args': args or {'slug': 'core_mosquitto', 'action': 'restart'}}
+
+    def test_a_bare_args_hash_is_refused(self, temp_db):
+        from db.session_plans import PlanError, create_plan
+        with pytest.raises(PlanError) as exc:
+            create_plan('sess-1', [{'kind': 'mcp', 'integration': 'ha',
+                                    'tool': 'ha_addon_action',
+                                    'args_hash': '0' * 64}])
+        assert exc.value.code == 'invalid_items'
+
+    def test_the_plan_card_shows_the_redacted_arguments(self, temp_db):
+        from db.session_plans import create_plan, get_plan
+        made = create_plan('sess-1', [self._mcp(
+            slug='core_mosquitto', action='restart',
+            api_key='SECRETVALUE123')])
+        item = get_plan(made['plan_id'])['items'][0]
+        assert 'SECRETVALUE123' not in item['args_json']
+        assert 'core_mosquitto' in item['args_json']
+        # The match still uses the hash of the raw arguments.
+        assert item['args_hash']
+
+    def test_only_the_curated_actions_are_coverable(self, temp_db):
+        from db.session_plans import PlanError, create_plan
+        for tool in ('write', 'ws_write', 'call_service', 'read',
+                     'ha_host_reboot'):
+            with pytest.raises(PlanError) as exc:
+                create_plan('sess-1', [{'kind': 'mcp', 'integration': 'ha',
+                                        'tool': tool, 'args': {}}])
+            assert exc.value.code == 'not_plan_coverable', tool
+
+    def test_every_curated_action_is_coverable(self, temp_db):
+        from db.session_plans import create_plan
+        for tool in ('ha_addon_action', 'ha_addon_update', 'ha_core_update',
+                     'ha_backup_create', 'ha_core_restart'):
+            if tool == 'ha_addon_action':
+                args = {'slug': 'core_mosquitto', 'action': 'restart'}
+            elif tool == 'ha_addon_update':
+                args = {'slug': 'core_mosquitto'}
+            else:
+                args = {}
+            create_plan('sess-1', [{'kind': 'mcp', 'integration': 'ha',
+                                    'tool': tool, 'args': args}])
+
+
+class TestAlwaysGateWins:
+    """P2: an agent's ungated override cannot switch off `always_gate`."""
+
+    ACTIONS = {
+        'ha_addon_action': {'slug': 'core_mosquitto', 'action': 'restart'},
+        'ha_addon_update': {'slug': 'core_mosquitto'},
+        'ha_core_update': {},
+        'ha_backup_create': {},
+        'ha_core_restart': {},
+        # ha_host_reboot is seeded disabled, so run_tool refuses it at the
+        # registry (404) before any gate; it is covered by its own card.
+    }
+
+    def _agent(self, approval):
+        from db.agent_tokens import create_agent_token, get_agent_by_name
+        create_agent_token('agent-a')
+        row = get_agent_by_name('agent-a')
+        set_agent_policy(row['id'], approval=approval)
+        from core.agent_context import set_current_agent
+        from db.agent_policies import get_agent_policy
+        # approval_mode() reads agent['policy'], so attach the stored one.
+        set_current_agent({'id': row['id'], 'name': 'agent-a',
+                           'policy': get_agent_policy(row['id'])})
+
+    @pytest.mark.parametrize('approval', [
+        {'*': 'ungated'}, {'ha.*': 'ungated'}, {'ha.ha_core_update': 'ungated'}])
+    @pytest.mark.parametrize('tool', sorted(ACTIONS))
+    def test_every_action_stays_gated(self, ha, monkeypatch, approval, tool):
+        if tool == 'ha_core_restart':
+            import time
+            set_meta_json('ha_check_config_ha',
+                          {'result': 'valid', 'at': int(time.time())})
+        _patch_ws(monkeypatch)     # the update preflight reads versions
+        self._agent(approval)
+        out = json.loads(run_tool('ha', tool, dict(self.ACTIONS[tool])))
+        assert out.get('status') == 'pending', (approval, tool, out)
+        assert get_pending_calls()
+
+    def test_the_ignored_override_is_audited_once(self, ha, monkeypatch):
+        from core import tool_runner
+        tool_runner._UNGATED_OVERRIDE_WARNED.clear()
+        _patch_ws(monkeypatch)
+        self._agent({'*': 'ungated'})
+        args = dict(self.ACTIONS['ha_core_update'])
+        run_tool('ha', 'ha_core_update', dict(args))
+        run_tool('ha', 'ha_core_update', dict(args))
+        rows = [e for e in get_audit_log()
+                if e['event_type'] == 'mcp_ungated_ignored']
+        assert len(rows) == 1
+
+
+class TestRestartRechecksTheConfig:
+    """P3: the 10-minute rule is checked again at the point of the call."""
+
+    def _stale(self):
+        import time
+        set_meta_json('ha_check_config_ha',
+                      {'result': 'valid', 'at': int(time.time()) - 601})
+
+    def test_a_plan_claimed_restart_is_refused(self, ha, monkeypatch):
+        import time
+        from core.agent_context import set_current_agent
+        from db.agent_tokens import create_agent_token, get_agent_by_name
+        from db.session_plans import approve_plan, create_plan
+        from db.sessions import upsert_session
+        create_agent_token('agent-a')
+        row = get_agent_by_name('agent-a')
+        set_current_agent({'id': row['id'], 'name': 'agent-a'})
+        upsert_session('sess-1', agent='agent-a')
+        set_meta_json('ha_check_config_ha',
+                      {'result': 'valid', 'at': int(time.time())})
+        made = create_plan('sess-1', [{'kind': 'mcp', 'integration': 'ha',
+                                       'tool': 'ha_core_restart', 'args': {}}])
+        approve_plan(made['plan_id'], ttl_minutes=30)
+        self._stale()                       # expires between plan and run
+        calls = _patch_ws(monkeypatch)
+        out = json.loads(run_tool('ha', 'ha_core_restart',
+                                  {'session_id': 'sess-1'}))
+        assert err_code(out) == 'ha_check_config_stale'
+        assert calls == []
+
+    def test_a_late_approval_is_refused(self, ha, monkeypatch, auth_client):
+        import time
+        set_meta_json('ha_check_config_ha',
+                      {'result': 'valid', 'at': int(time.time())})
+        call_id = create_pending_call('ha', 'ha_core_restart', {},
+                                      'test', agent='operator')
+        self._stale()
+        calls = _patch_ws(monkeypatch)
+        response = auth_client.post(f'/api/integration-calls/{call_id}/approve')
+        assert response.status_code == 200
+        stored = json.loads(get_pending_call(call_id)['result'])
+        # The approval endpoint stores the handler's JSON answer under `body`.
+        assert json.loads(stored['body'])['error'] == 'ha_check_config_stale'
+        assert calls == []
+
+    def test_the_handler_refuses_directly_with_a_stale_check(self, ha, monkeypatch):
+        from core.tool_handlers import run_handler
+        self._stale()
+        calls = _patch_ws(monkeypatch)
+        out = json.loads(run_handler('ha_supervisor_action', ha,
+                                     {'name': 'ha_core_restart'}, {}))
+        assert out.get('error') == 'ha_check_config_stale'
+        assert calls == []
+
+
+class TestAdminConfigWrite:
+    """S-b: a config write that can reach Supervisor powers is flagged."""
+
+    def test_the_approval_card_carries_the_admin_warning(self, ha, mock_upstream):
+        out = json.loads(run_tool(
+            'ha', 'write',
+            {'method': 'POST', 'path': '/api/config/automation/config/1',
+             'data': {'alias': 'x'}}))
+        assert out.get('status') == 'pending', out
+        call = get_pending_calls()[0]
+        assert call['summary'].startswith('\u26a0')
+        assert 'Supervisor' in call['summary']
+
+    def test_a_base_url_that_ends_in_hassio_is_refused(self, mock_upstream):
+        """S-a: the path the request carries includes the integration's own
+        base path, not only the tool's part."""
+        from core.generic_tools import seed_generic_tools
+        create_integration('ha_hassio', mock_upstream['base_url'] + '/hassio',
+                           'bearer', 'tok', kind='ha')
+        integration = get_integration('ha_hassio')
+        seed_generic_tools(integration['id'], 'ha')
+        out = json.loads(run_tool('ha_hassio', 'write',
+                                  {'method': 'POST', 'path': 'backups',
+                                   'data': {}}))
+        assert err_code(out) == 'supervisor_rest_refused'
+        assert mock_upstream['requests'] == []
+        from core.integration_proxy import ProxyError, execute_generic_call
+        with pytest.raises(ProxyError):
+            execute_generic_call(integration, 'POST', 'backups', data={})
