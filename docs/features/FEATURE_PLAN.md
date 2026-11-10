@@ -7650,6 +7650,30 @@ Gating, and the rest:
 After Z1–Z5, I review only those sections. Z6–Z9 can go to the feature
 reviewer.
 
+**Round 7 (feature reviewer, 2026-11-10, `f6cdbbd`): two fixes to Z2 before the
+security reviewer reads it.** Z1 (one read script, no symlink or hard link),
+Z3, Z4 (noclobber, `mv` only) and Z5 (bound HA integration) read right. The
+`index()` loop always terminates (each replacement shortens the match from at
+least 4 characters to 3).
+
+* **AB1 (must): `redact` reads the wrong `secrets.yaml` for packages.** It
+  reads `"$dir/secrets.yaml"`, where `$dir` is the edited file's directory.
+  HA resolves `!secret` from the file's own directory **up to the config
+  root**, so a file in `packages/net/` usually takes its values from
+  `/homeassistant/secrets.yaml`. There, `redact` finds no file, returns 0 and
+  prints the check output **unredacted**. Read every `secrets.yaml` from
+  `$dir` up to `/homeassistant` (each with `-f` and `! -L`), and always
+  include `/homeassistant/secrets.yaml`. Test: a file under
+  `packages/net/` whose secret is defined only at the root is still redacted.
+* **AB2 (should): multi-line values are not covered.** A block scalar
+  (`key: |` or `key: >`, such as certificates or keys) leaves `v` = `|`, so
+  the indented lines that follow are never collected. Collect them (strip the
+  indent, redact each line of length ≥ 4), or state the limit in the setup
+  doc. Values shorter than 4 characters (PINs) are also not redacted. State
+  that limit in the doc too.
+
+Z6–Z9, Q2 and Q4 will be checked in the next round, together with AB1/AB2.
+
 ---
 
 ## Chunk F12 — SSH through Eshu over MCP (`ssh_exec`) · slug `ssh-exec` · dashboard (+ small gateway change)
