@@ -8423,6 +8423,65 @@ the journal step into the lane; worth doing if AG6 touches that line anyway.
 decided by the security reviewer first: DeepSeek should implement the
 proposed rule behind a test, and both reviewers read it.
 
+**Security reviewer — AG1 decision (2026-11-10): the proposed rule is
+accepted, with six conditions.**
+
+Why it's acceptable:
+* `approval` means "a human approves the exact bytes before they run".
+* A plan built by server code from a probe definition (written by the
+  operator), and approved on one card that lists every command, meets that.
+  Asking a second time adds nothing.
+* An agent-proposed plan does not meet it. Its items, hosts and `max_uses`
+  are the agent's choice, and in `approval` mode the operator chose to see
+  each command. So the rule turns on who **wrote** the plan, not on who
+  approved it.
+
+Conditions:
+1. **Origin is written only by server code.**
+   * `session_plans.origin`, `NOT NULL DEFAULT 'agent'`; every existing row
+     is `agent`.
+   * `create_plan()` takes `origin` as a keyword. The MCP `plan_propose`
+     path and every HTTP route hard-code `agent`. No request field, note or
+     item field can set or change it.
+   * Allowed values are a fixed set: `agent`, `probe`, and later `recipe`
+     and `check`.
+   * Test: a proposal that sends `origin: 'probe'` in any field is stored as
+     `agent`.
+2. **A server plan is closed.**
+   * No agent-facing path may add, edit or re-enable an item of a plan whose
+     origin isn't `agent`. The operator may still remove items.
+   * The card shows the origin (for example "probe: disk_usage") and lists
+     every item.
+   * Items name a specific host, never `*`.
+3. **The claim checks the session's owner.**
+   * In `approval` mode a covered claim also requires the session's owner to
+     be the verified agent on the request. This is F10's M2 rule; the SSH
+     `claim_plan_item` does not have it today.
+   * The agent identity is the one the signed prefix carries, which the
+     agent MAC already covers.
+   * Test: agent B, in `approval` mode, sending A's session id with a
+     matching command does not claim A's probe item.
+4. **Nothing else moves.**
+   * Freeze and zero-trust still skip plan coverage.
+   * The encoded-payload block and the blocklists still come first.
+   * The session override and the read lane stay off under `force_jit`.
+   * The change is one branch in `receive_request`: `force_jit` permits a
+     plan claim only when the claimed item's plan origin is in
+     `SERVER_PLAN_ORIGINS`. `normal` mode is unchanged.
+   * The approved request records `session-plan:<plan>:<item>` and the
+     origin in its reason, so the audit shows why no card appeared.
+5. **It is tested with the real `receive_request`.** The cases are the ones
+   AG1 lists, plus conditions 1 and 3.
+6. **`check` (F22) is not decided here.** This rule covers a plan item that
+   the agent's own call claims while the operator's approval is fresh. An
+   item that runs later with no agent call and no human present (F22's
+   check) is an *unattended* run. It goes through F19's
+   `approve_unattended()`, with the limit and the capability, and F22's
+   design review decides whether it may use this origin at all. `recipe`
+   (F16 V5) also still claims by request id, as agreed for F16.
+
+DeepSeek implements this. Both reviewers read the diff.
+
 ---
 
 ## Chunk F16 — Recipes · slug `recipes` · dashboard + MCP · **design first + security reviewer sign-off**
