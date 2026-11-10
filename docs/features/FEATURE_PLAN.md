@@ -5696,6 +5696,14 @@ reads this diff next.
 
 `bash scripts/verify.sh`: `2485 passed, 14 skipped, 7 warnings in 501.02s (0:08:21)`.
 
+**K1–K3 review (feature reviewer, 2026-11-10, `a463d31`): approved; to the
+security reviewer for that diff only.** K1: `DRY_RUN_HANDLERS` (only
+`ha_lovelace_save_config`) behind one `_dry_run_exempt()` at both the freeze
+check and the gate skip, and the Supervisor handler refuses `dry_run`. K2:
+`is_admin_config_write` sets the same `always` flag as `always_gate`, so
+`ungated` cannot skip the card. K3: `execute_integration_call` uses
+`is_supervisor_rest_request`. Both nits are done.
+
 ---
 
 ## Chunk F11 — HA config files via the SSH add-on · slug `ha-config-files` · dashboard
