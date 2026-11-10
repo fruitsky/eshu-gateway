@@ -5480,6 +5480,32 @@ the approval-mode lookup. I did not run anything.
 **Verdict:** changes requested. Once P1–P3 have their tests, I review only
 that diff. F10 must not merge before then.
 
+**Round 4 code review (feature reviewer, 2026-11-10, `2a2ca70` on `b8b5f48`):
+approved; to the security reviewer for the P1–P3 diff.** CI is green;
+`tests/test_f10_ha_supervisor_actions.py`: 111 passed here.
+
+* **P1:** an `mcp` plan item needs a `dict` of `args` (a bare hash is refused,
+  a supplied hash must match); coverage is an allowlist of the five curated
+  actions; the card shows the scrubbed arguments and the preflight summary,
+  both through `escapeHtml`.
+* **P2:** `ungated` no longer clears `always_gate`, for exact keys and
+  wildcards; the ignored override is audited once per agent and tool.
+* **P3:** `_config_check_fresh` runs in the handler right before the restart,
+  so plan-claimed, ungated and late-approved restarts are refused.
+* **S-a / S-b:** `hassio*` first segments (ingress) are refused, the check
+  includes the integration's base path, and automation/script/scene writes
+  carry the red admin-power line.
+
+Two small hardening points. Fold them with any security changes; they do not
+need another round from me:
+* **R1:** `claim_mcp_plan_item` does not re-check `PLAN_COVERABLE_TOOLS`. Only
+  `create_plan` checks it today, which is enough, but one extra
+  `tool in PLAN_COVERABLE_TOOLS` test at claim time keeps a future insert path
+  from widening coverage.
+* **R2:** the allowlist is by tool name only. Also require the integration's
+  `kind == 'ha'` at validation and at claim, matching F16's V6 rule (kind +
+  tool).
+
 ---
 
 ## Chunk F11 — HA config files via the SSH add-on · slug `ha-config-files` · dashboard
