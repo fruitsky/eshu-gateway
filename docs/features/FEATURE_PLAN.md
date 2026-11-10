@@ -7037,7 +7037,11 @@ has none. **AB2:** a block-scalar certificate's lines are redacted; a
 3-character value is not (documented limit), and a 4-character one is.
 **AC2:** no file is created in the config directory during a check (the
 test watches the directory), and a planted link at the old
-`.eshu-check.<pid>` name is never written through.
+`.eshu-check.<pid>` name is never written through. **AE1:** the check pipeline
+runs under `dash` and BusyBox `sh` (the W5 matrix), so the bash-only substring
+form could not have passed, and a secret placed so that it **straddles byte
+65 536** leaves no prefix of itself in the returned output (redaction runs
+before the cut).
 
 #### Z3 — the banner also covers what a file can make HA reveal or run
 
@@ -7225,12 +7229,14 @@ mv -f "$tmp" "$real" || exit 17
 # handed awk a literal file name and lost the output. There is no file
 # argument now, and nothing is created in the config tree.
 #
-# Z2/Z9: the check runs with only the token, its output is captured in a
-# variable (capped, then redacted), and success is exit 0 plus the last line.
+# Z2/Z9/AE1: the check runs with only the token, its output is captured in a
+# variable and piped through `redact` **then** `head -c`. The cap is portable
+# (`${out:0:65536}` is bash-only: dash and BusyBox ash reject it, and under
+# `set -e` that killed the script before the rollback) and it applies after
+# redaction, so a secret straddling the boundary cannot leave its prefix.
 crc=0
 out=$(SUPERVISOR_TOKEN="$SUPERVISOR_TOKEN" timeout 100 ha core check 2>&1) || crc=$?
-out=${out:0:65536}
-printf '%s\n' "$out" | redact
+printf '%s\n' "$out" | redact | head -c 65536
 if [ "$crc" -ne 0 ]; then
   # Z4: roll the backup in by mv, never by cp onto "$real".
   rb="$real.eshu-tmp-rb-$$"
@@ -7248,14 +7254,15 @@ accepted directory, basename equality), then: `[ -f "$backup" ] && [ ! -L
 "$backup" ] || exit 19` plus its own link-count check (X1/Z1); create `"$tmp"`
 noclobber with the pre-restore content; create the restore file noclobber with
 `cat "$backup" > "$rb"`, copy the mode/owner with `stat -c`, `mv -f "$rb"
-"$real"`; run the check into a variable and pipe it through `redact` (AC2 —
-the restore writes no check file either, and `redact` reads stdin); on failure
+"$real"`; run the check into a variable and pipe it through
+`redact | head -c 65536` (AC2/AE1 — the restore writes no check file either,
+`redact` reads stdin, and the cap is portable and comes after redaction); on failure
 `mv -f "$tmp" "$real"` (exit 18, or exit 1 if that fails). The `ok` line is
 the backup's hash, computed before the restore and checked again after it, so
 a restore that somehow moved different bytes does not report ok.
 `ha_config_check` uses the same capture-then-redact shape in its own script.
 
-`bash scripts/verify.sh`: `2331 passed, 7 warnings in 427.59s (0:07:07)` (docs only).
+`bash scripts/verify.sh`: `2331 passed, 7 warnings in 428.03s (0:07:08)` (docs only).
 
 ### Reviewer notes
 
