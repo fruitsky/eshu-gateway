@@ -294,10 +294,13 @@ class TestStreamBuffering:
     @pytest.mark.parametrize('sigpipe', ['default', 'ignored'])
     def test_f5_gateway_slow_writer_dies_with_the_agent(
             self, tmp_path, awk_name, mode, sigpipe):
-        if awk_name == 'mawk':
-            pytest.skip('mawk holds stdin in a 4 KiB buffer (B2 note in the '
-                        'F5 Implementer notes); `-W interactive` would stream '
-                        'but splits records longer than 4096 bytes')
+        if awk_name == 'mawk' and mode == 'tail':
+            # N1: awk is not in the pipeline in exit-only mode (B1's fix is
+            # sed-side), so that case runs under mawk too. In tail mode mawk
+            # holds stdin in a 4 KiB buffer (B2 note); `-W interactive` would
+            # stream but corrupts long records, so the ring waits for 4 KiB.
+            pytest.skip('mawk reads stdin in 4 KiB blocks, so the tail ring '
+                        'cannot see the first line early (10.7 s measured)')
         if sigpipe == 'ignored':
             pytest.skip('with SIGPIPE ignored GNU sed keeps reading after '
                         'EPIPE, so no buffering change can bound the command; '
