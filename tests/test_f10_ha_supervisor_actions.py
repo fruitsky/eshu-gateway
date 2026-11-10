@@ -308,7 +308,7 @@ class TestMcpPlanItems:
         upsert_session(session_id, agent=agent)
         set_current_agent({'id': 1, 'name': agent} if agent else None)
 
-    def test_an_mcp_item_carries_a_hash_not_the_args(self, temp_db):
+    def test_an_mcp_item_carries_a_hash_not_the_args(self, temp_db, ha):
         from db.session_plans import args_hash, create_plan, get_plan
         args = {'slug': 'core_mosquitto', 'action': 'restart'}
         created, digest = self._plan('sess-1', args)
@@ -540,7 +540,7 @@ class TestPlanCoverage:
                                     'args_hash': '0' * 64}])
         assert exc.value.code == 'invalid_items'
 
-    def test_the_plan_card_shows_the_redacted_arguments(self, temp_db):
+    def test_the_plan_card_shows_the_redacted_arguments(self, temp_db, ha):
         from db.session_plans import create_plan, get_plan
         made = create_plan('sess-1', [self._mcp(
             slug='core_mosquitto', action='restart',
@@ -560,7 +560,7 @@ class TestPlanCoverage:
                                         'tool': tool, 'args': {}}])
             assert exc.value.code == 'not_plan_coverable', tool
 
-    def test_every_curated_action_is_coverable(self, temp_db):
+    def test_every_curated_action_is_coverable(self, temp_db, ha):
         from db.session_plans import create_plan
         for tool in ('ha_addon_action', 'ha_addon_update', 'ha_core_update',
                      'ha_backup_create', 'ha_core_restart'):
@@ -572,6 +572,83 @@ class TestPlanCoverage:
                 args = {}
             create_plan('sess-1', [{'kind': 'mcp', 'integration': 'ha',
                                     'tool': tool, 'args': args}])
+
+    # ── R1/R2: the claim and the validation use the same (kind, tool) rule ──
+
+    def _owned_plan(self, session_id='sess-1', agent='agent-a'):
+        """An approved plan with one claimable mcp item, and its args."""
+        from db.session_plans import approve_plan, create_plan
+        from db.sessions import upsert_session
+        upsert_session(session_id, agent=agent)
+        args = {'slug': 'core_mosquitto', 'action': 'restart'}
+        made = create_plan(session_id, [{'kind': 'mcp', 'integration': 'ha',
+                                         'tool': 'ha_addon_action',
+                                         'args': args}])
+        approve_plan(made['plan_id'], ttl_minutes=30)
+        return made['plan_id'], args
+
+    def test_validation_needs_an_ha_integration(self, temp_db, ha):
+        """R2: (kind, tool), not the tool name alone."""
+        from db.integrations import create_integration
+        from db.session_plans import PlanError, create_plan
+        create_integration('not_ha', 'http://192.0.2.10:8123', 'bearer',
+                           'tok', kind='custom')
+        for name in ('not_ha', 'missing'):
+            with pytest.raises(PlanError) as exc:
+                create_plan('sess-1', [{'kind': 'mcp', 'integration': name,
+                                        'tool': 'ha_addon_action',
+                                        'args': {'slug': 'core_mosquitto',
+                                                 'action': 'restart'}}])
+            assert exc.value.code == 'not_plan_coverable', name
+            assert name in exc.value.message
+
+    def test_claim_rechecks_the_allowlist(self, ha):
+        """R1: a row that skipped validation cannot be spent.
+
+        `create_plan` is the only writer today, so the widened row is built
+        here directly — the claim must still refuse it."""
+        from db.core import db_conn
+        from db.session_plans import args_hash, claim_mcp_plan_item
+        plan_id, args = self._owned_plan()
+        digest = args_hash(args)
+        with db_conn() as conn:
+            conn.execute("UPDATE session_plan_items SET tool = 'write' "
+                         "WHERE plan_id = ?", (plan_id,))
+            conn.commit()
+        assert claim_mcp_plan_item('sess-1', 'ha', 'write', digest,
+                                   owner='agent-a') is None
+        # Put the curated tool back: the same row is then claimable, so the
+        # refusal above is R1 and not a broken fixture.
+        with db_conn() as conn:
+            conn.execute("UPDATE session_plan_items SET tool = 'ha_addon_action' "
+                         "WHERE plan_id = ?", (plan_id,))
+            conn.commit()
+        assert claim_mcp_plan_item('sess-1', 'ha', 'ha_addon_action', digest,
+                                   owner='agent-a') is not None
+
+    def test_claim_needs_an_ha_integration(self, ha):
+        """R2: a row naming a non-HA integration is not spendable either."""
+        from db.core import db_conn
+        from db.integrations import create_integration
+        from db.session_plans import args_hash, claim_mcp_plan_item
+        plan_id, args = self._owned_plan()
+        digest = args_hash(args)
+        create_integration('not_ha', 'http://192.0.2.10:8123', 'bearer',
+                           'tok', kind='custom')
+        with db_conn() as conn:
+            conn.execute("UPDATE session_plan_items SET integration = 'not_ha' "
+                         "WHERE plan_id = ?", (plan_id,))
+            conn.commit()
+        assert claim_mcp_plan_item('sess-1', 'not_ha', 'ha_addon_action',
+                                   digest, owner='agent-a') is None
+        # Re-pointing the same row at the HA integration makes it claimable:
+        # the (kind, tool) check, not the name itself, is what refuses.
+        with db_conn() as conn:
+            conn.execute("UPDATE session_plan_items SET integration = 'ha' "
+                         "WHERE plan_id = ?", (plan_id,))
+            conn.commit()
+        assert claim_mcp_plan_item('sess-1', 'ha', 'ha_addon_action', digest,
+                                   owner='agent-a') is not None
 
 
 class TestAlwaysGateWins:

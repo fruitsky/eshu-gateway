@@ -128,6 +128,18 @@ def args_hash(args) -> str:
     return hashlib.sha256(body.encode('utf-8')).hexdigest()
 
 
+def _is_ha_integration(name: str) -> bool:
+    """R2: is `name` an integration of kind 'ha'? Unknown names are not.
+
+    The kind is read from the integrations row, never taken from the caller:
+    an item stores the integration *name*, and that name is what the claim
+    matches, so the kind has to come from the same row."""
+    with db_conn() as conn:
+        row = conn.execute('SELECT kind FROM integrations WHERE name = ?',
+                           (name,)).fetchone()
+    return bool(row) and (row['kind'] or '').strip().lower() == 'ha'
+
+
 def _validate_mcp_item(item):
     integration = str(item.get('integration') or '').strip()
     tool = str(item.get('tool') or '').strip()
@@ -160,6 +172,14 @@ def _validate_mcp_item(item):
     if max_uses < 1 or max_uses > MAX_USES:
         raise PlanError('invalid_max_uses',
                         f'max_uses must be between 1 and {MAX_USES}')
+    if not _is_ha_integration(integration):
+        # R2: the allowlist above is keyed by tool name, and any integration
+        # can register a tool with the same name. F16's V6 rule keys on
+        # (kind, tool), so an mcp item must name an integration of kind 'ha'.
+        # Checked here and again in claim_mcp_plan_item.
+        raise PlanError('not_plan_coverable',
+                        '%s is not a Home Assistant integration; its tools '
+                        'cannot be covered by a plan' % integration)
     # P1: the card shows the arguments with secret-looking keys redacted, and
     # the handler's preflight summary when it has one. Both are display only;
     # the call still matches on the hash of the raw arguments.
@@ -479,10 +499,19 @@ def claim_mcp_plan_item(session_id: str, integration: str, tool: str,
 
     M2: the session's owner must be the calling agent. An MCP caller can name
     any session id, so without this agent B could spend agent A's approved
-    "update add-on X" item. An ownerless session matches nothing (F3 SR2)."""
+    "update add-on X" item. An ownerless session matches nothing (F3 SR2).
+
+    R1: the tool is re-checked against the allowlist here, not only in
+    `create_plan`. R2: so is the integration's kind. `create_plan` is the only
+    writer of `mcp` items today, so both are defence in depth — a future
+    insert path must not be able to widen what an approved plan can spend."""
     sid = (session_id or '').strip()[:64]
     owner = (owner or '').strip()[:64]
     if not sid or not integration or not tool or not digest or not owner:
+        return None
+    if tool not in PLAN_COVERABLE_TOOLS:
+        return None
+    if not _is_ha_integration(integration):
         return None
     now = int(now or time.time())
     expire_plans(now)
