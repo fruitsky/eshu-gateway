@@ -6550,6 +6550,51 @@ One point for the security reviewer to weigh, not a blocker from me:
   hold a slot (for example `getent`, `dig`, `host`, `ping`), with every other
   verb refused when a sentinel is present.
 
+**Security reviewer, Round 4 (`62b138b`), 2026-11-10: design approved, on
+two conditions for a short Round 5.** The feature reviewer can check that
+round; it does not need to come back to me. V2, V4, V5, V6 and the smaller
+points are answered as asked.
+
+* **Y1 is accepted: use an allowlist of verbs that may hold a slot.** With
+  curated recipes, an allowlist is the simpler and safer rule. A deny list
+  of executors has to anticipate `awk`'s `system()`, `sed`'s `e`,
+  `tar --to-command` and the like.
+  - Start with `getent`, `dig`, `host`, `ping` and `nslookup`.
+  - A step that holds a sentinel must have its verb on the list and no F1
+    wrapper context (`sudo`, `env`, `timeout` and the rest).
+  - Steps without a slot are fixed, operator-approved text and are left as
+    they are.
+  - Keep `EXEC_VERBS` as a second check, as with the tool lists.
+  - Run the same rule on the filled-in bytes at run time.
+  - Tests: the V1 spellings plus `awk {x}` and `sed {x}` are refused;
+    `getent hosts {fqdn}` passes.
+* **W2. Every proxy host a recipe makes is public.** V3 forbids
+  `access_list_id`, and in NPM the absent value means no access list, so
+  the host is public. NPM picks the site by the `Host` header. On an NPM
+  instance that is reachable from the internet, an "internal" name made by
+  `add_internal_fqdn` would therefore be served to anyone who sends that
+  header, whatever the internal DNS says.
+  - Make `access_list_id` a fixed `enum` chosen when the recipe is written,
+    from the ids of existing access lists, never a parameter.
+  - Show it on the version card and the run card as the list's name.
+  - Leaving it unset must be stated explicitly as "public (no access
+    list)", in red.
+  - Test: a body without the key is refused unless the version states
+    "public" explicitly.
+
+*Two code-time notes:*
+
+* **V3: any key not on a tool's list is refused.** The `forbid` list is
+  only a second check.
+* **V5: the recipe engine claims by request id.** When the engine runs
+  step N over SSH, the gateway request it causes must be tied to the
+  claimed item by request id, as F19's unattended claim is, not by matching
+  bytes. Otherwise an identical direct call arriving at the same moment
+  could take the approval.
+
+The code comes back to me after F10 and F12 merge. `auto_run` comes back
+before it is ever enabled.
+
 ---
 
 ## Chunk F17 — Local-agent profile · slug `local-agent` · dashboard + docs
