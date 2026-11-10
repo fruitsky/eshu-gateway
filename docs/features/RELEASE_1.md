@@ -127,6 +127,10 @@ was run. Step 4 below is that check, done by hand.
    with large output (for example `journalctl -n 20000`), and confirm the
    result appears in the request's sidebar and the call returns promptly. Then
    set it back, or keep it if wanted.
+   Known limit until a later fix (buffering S1 in the F5 notes): with `tail`
+   capture on a mawk host (the Debian/Ubuntu default), a slow command can keep
+   running for a while after the caller disconnects. `exit-only` is not
+   affected.
 7. **Update the remaining gateways**, a few at a time, with the step 5 check
    on each batch.
 
