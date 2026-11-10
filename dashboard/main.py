@@ -56,7 +56,7 @@ from database import (
     set_gateway_read_lane,
     get_gateway_ssh_mode, set_gateway_ssh_mode, get_gateway_ssh_host_key,
     set_gateway_ssh_host_key, get_gateway_ssh_capabilities,
-    set_gateway_ssh_capabilities,
+    set_gateway_ssh_capabilities, set_gateway_run_limits, get_gateway_run_limits,
     set_override, clear_override, get_override_active,
     create_approved_window, get_approved_windows, get_active_approved_windows,
     delete_approved_window, toggle_approved_window,
@@ -85,7 +85,8 @@ from database import (
 from db.agent_policies import (
     DEFAULT_SSH_MODE, get_agent_policy, set_agent_policy, get_agent_policies_map,
 )
-from db.misc import get_meta_json, set_meta_json
+from db.misc import (get_meta_json, set_meta_json, get_run_limit_settings,
+                         set_run_limit_settings, run_limit_problem)
 from db.web_fetch import (
     delete_web_fetch_policy, get_web_fetch_policies, get_web_fetch_policy,
     get_web_fetch_stats, set_web_fetch_policy,
@@ -585,6 +586,9 @@ class GatewayPayload(BaseModel):
     # these local copies shadow the import, so both must stay in step).
     agent: str = ""
     force_jit: bool = False
+    # F19: the script that is running reports the run-limit capability on each
+    # request (L7: the stored column can be stale after a self-update).
+    run_limits: str = ""
 
 class RegisterPayload(BaseModel):
     ip: str
@@ -593,6 +597,10 @@ class RegisterPayload(BaseModel):
     ssh_host_key: str = ""
     ssh_agent_format: str = ""
     ssh_ticket_format: str = ""
+    # F19: '' or 'v1'; stored for the gateway card, never for the decision.
+    # None means "not reported" (an older installer or the poller), which keeps
+    # the stored value instead of clearing it.
+    run_limits: Optional[str] = None
 
 class PolicyPayload(BaseModel):
     type: str
@@ -758,6 +766,11 @@ def register(payload: RegisterPayload, request: Request):
         payload.ip,
         _clean_ssh_capability(payload.ssh_agent_format, SSH_AGENT_FORMATS),
         _clean_ssh_capability(payload.ssh_ticket_format, SSH_TICKET_FORMATS))
+    # F19: the installer reports the capability it just wrote. Display only
+    # (the auto-run decision reads the per-request field).
+    if payload.run_limits is not None:
+        set_gateway_run_limits(payload.ip,
+                               _clean_ssh_capability(payload.run_limits, {'v1'}))
     # Clear any stale uninstall trigger — re-enrollment cancels pending uninstalls
     clear_trigger_uninstall(payload.ip)
     
@@ -772,6 +785,42 @@ def register(payload: RegisterPayload, request: Request):
     
     return {"status": "ok", "gateway_token": existing_token,
             "ssh_mode": get_gateway_ssh_mode(payload.ip)}
+
+
+def approve_unattended(target_ip: str, cmd: str, reason: str, sid: str,
+                       eid: str, inner_target: str, agent: str,
+                       capability: str) -> dict:
+    """F19: the one way a row is approved without a human deciding on it.
+
+    Such a row always carries a run limit, and it is created approved only when
+    the gateway *that is asking* reports the capability on this request (L7).
+    An older gateway ignores the field and would run unbounded, so its row is
+    left pending for a human instead of being approved.
+    """
+    if (capability or "").strip() != "v1":
+        req_id = create_request(target_ip, cmd, status="pending",
+                                reason=reason + "-no-limits", session_id=sid,
+                                execution_id=eid, inner_target=inner_target,
+                                agent=agent)
+        record_audit_event(
+            "read_lane_no_limits", target_ip,
+            details=("JIT #%d would auto-run (%s) but the gateway does not "
+                     "report run_limits v1: %s" % (req_id, reason, cmd[:80])))
+        return {"status": "ok", "id": f"{req_id:06d}", "request_id": req_id}
+    limit = get_run_limit_settings()
+    req_id = create_request(target_ip, cmd, status="approved", reason=reason,
+                            session_id=sid, execution_id=eid,
+                            inner_target=inner_target, agent=agent,
+                            unattended=True,
+                            run_limit=json.dumps(limit, separators=(",", ":")))
+    record_audit_event(
+        "jit_unattended_approved", target_ip,
+        details=("Unattended (%s) JIT #%d approved with a %d s / %d byte "
+                 "limit: %s" % (reason, req_id, limit["seconds"],
+                                limit["bytes"], cmd[:80])))
+    return {"status": "ok", "id": f"{req_id:06d}", "request_id": req_id,
+            "approved": True, "unattended": True, "run_limit": limit}
+
 
 @app.post("/api/request")
 def receive_request(payload: GatewayPayload, request: Request):
@@ -905,17 +954,19 @@ def receive_request(payload: GatewayPayload, request: Request):
                 cmd_breakdown(cmd), _verdict, cmd, lane_mode, frozen,
                 get_gateway_zero_trust(target_ip))
             if _ok and lane_mode == 'on':
-                req_id = create_request(target_ip, cmd, status="approved",
-                                        reason="read-lane", session_id=sid,
-                                        execution_id=eid,
-                                        inner_target=_inner_target_for(cmd), agent=agent)
+                # F19: through the one unattended helper, so the row carries a
+                # limit (or stays pending on a gateway too old to enforce one).
+                result = approve_unattended(
+                    target_ip, cmd, 'read-lane', sid, eid,
+                    _inner_target_for(cmd), agent, payload.run_limits)
                 update_gateway_last_seen(target_ip)
-                record_audit_event(
-                    'jit_read_lane_approved', target_ip,
-                    details=f'Read-only lane auto-approved JIT #{req_id}: {cmd[:80]}')
-                return {"status": "ok", "id": f"{req_id:06d}", "request_id": req_id,
-                        "read_lane": "on",
-                        "message": "Auto-approved: read-only command"}
+                if result.get('approved'):
+                    record_audit_event(
+                        'jit_read_lane_approved', target_ip,
+                        details=f'Read-only lane auto-approved JIT #{result["request_id"]}: {cmd[:80]}')
+                    result.update({'read_lane': 'on',
+                                   'message': 'Auto-approved: read-only command'})
+                return result
             if _ok:
                 read_lane_reason = 'read-lane-shadow'
 
@@ -1009,6 +1060,8 @@ class ExecResultPayload(BaseModel):
     encoded_output: str = Field(default='', max_length=24576)
     output_truncated: bool = False
     request_id: int = None
+    # F19: 'time', 'bytes' or '' — which run limit fired, if any.
+    limit: str = ''
 
 
 def _decode_exec_output(encoded: str):
@@ -1048,6 +1101,8 @@ def receive_exec_result(payload: ExecResultPayload, request: Request):
         raise HTTPException(status_code=400, detail="Invalid exit_code")
     if payload.duration_ms < 0 or payload.duration_ms > 86400000:
         raise HTTPException(status_code=400, detail="Invalid duration_ms")
+    if payload.limit not in ('', 'time', 'bytes'):
+        raise HTTPException(status_code=400, detail="Invalid limit")
 
     cmd = decode_cmd(payload.encoded_command)
     output, truncated = _decode_exec_output(payload.encoded_output)
@@ -1062,7 +1117,8 @@ def receive_exec_result(payload: ExecResultPayload, request: Request):
         if row.get('status') not in EXECUTABLE_STATUSES:
             raise HTTPException(status_code=400, detail="Request is not executable")
         stored = save_result(payload.request_id, payload.exit_code,
-                             payload.duration_ms, output, truncated)
+                             payload.duration_ms, output, truncated,
+                             limit_kind=payload.limit)
         return {"status": "ok", "attached": stored, "request_id": payload.request_id,
                 "reason": None if stored else "already_has_result"}
 
@@ -1073,7 +1129,7 @@ def receive_exec_result(payload: ExecResultPayload, request: Request):
     match = find_match_request(target_ip, cmd, PATH_STATUSES[payload.path], since)
     if match:
         stored = save_result(match, payload.exit_code, payload.duration_ms,
-                             output, truncated)
+                             output, truncated, limit_kind=payload.limit)
         return {"status": "ok", "attached": stored, "request_id": match,
                 "reason": None if stored else "already_has_result"}
 
@@ -1228,7 +1284,17 @@ def check_request_status(req_id: int, request: Request):
     status = get_request_status(req_id)
     if status is None:
         raise HTTPException(status_code=404, detail="Request not found")
-    return {"id": req_id, "status": status}
+    out = {"id": req_id, "status": status}
+    # F19: an approved unattended row still has to run under its limit, whether
+    # it is claimed by the poll loop or by a re-run.
+    row = get_request_row(req_id) or {}
+    if row.get('unattended') and status in ('approved', 'consumed') and row.get('run_limit'):
+        try:
+            out['run_limit'] = json.loads(row['run_limit'])
+        except (TypeError, ValueError):
+            pass
+        out['unattended'] = True
+    return out
 
 @app.get("/api/ticket/{req_id}")
 def claim_ticket_by_id(req_id: int, request: Request):
@@ -1239,7 +1305,16 @@ def claim_ticket_by_id(req_id: int, request: Request):
     ticket = get_ticket_by_request_id(req_id)
     if ticket:
         record_audit_event('jit_consumed', details=f'JIT #{req_id} ticket claimed via /api/ticket')
-        return {"ticket": ticket['ticket']}
+        out = {"ticket": ticket['ticket']}
+        # F19: the limit travels beside the ticket, in the same response, so the
+        # gateway runs this claim bounded (the poller never gets these rows).
+        if ticket.get('unattended'):
+            out['unattended'] = True
+            try:
+                out['run_limit'] = json.loads(ticket.get('run_limit') or '{}')
+            except (TypeError, ValueError):
+                out['run_limit'] = None
+        return out
     return {"ticket": None}
 
 # ── Dashboard Endpoints (AUTH PROTECTED — sensitive operations) ─────────
@@ -3318,6 +3393,35 @@ class DevToolsPayload(BaseModel):
 def get_dev_tools_endpoint(request: Request):
     _check_session(request)
     return {"enabled": get_dev_tools_enabled()}
+
+class RunLimitPayload(BaseModel):
+    seconds: int
+    bytes: int
+
+
+@app.get("/api/settings/run-limit")
+def get_run_limit_endpoint(request: Request):
+    """F19: the limit unattended runs get. Operator session only."""
+    _check_session(request)
+    return get_run_limit_settings()
+
+
+@app.put("/api/settings/run-limit")
+def set_run_limit_endpoint(payload: RunLimitPayload, request: Request):
+    """F19: fleet-wide limits. Session + CSRF (the middleware), audited with
+    the old and the new values; no MCP tool and no gateway token reaches it."""
+    _check_session(request)
+    problem = run_limit_problem(payload.seconds, payload.bytes)
+    if problem:
+        raise HTTPException(status_code=400, detail=problem)
+    old = get_run_limit_settings()
+    set_run_limit_settings(payload.seconds, payload.bytes)
+    record_audit_event(
+        "run_limit_changed",
+        details=("Run limit %d s / %d bytes -> %d s / %d bytes"
+                 % (old["seconds"], old["bytes"], payload.seconds, payload.bytes)))
+    return get_run_limit_settings()
+
 
 @app.put("/api/settings/dev-tools")
 def set_dev_tools_endpoint(payload: DevToolsPayload, request: Request):

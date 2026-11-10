@@ -276,3 +276,41 @@ def set_session_names(names: dict):
         cursor.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('session_names', ?)",
                        (json.dumps(names or {}),))
         conn.commit()
+
+
+# ── F19: run limits for unattended runs ─────────────────────────────────────
+# One fleet-wide pair of numbers, kept in a meta key so the operator can change
+# it without a deploy. A missing or corrupt value falls back to the defaults:
+# a broken setting must never remove the bound.
+RUN_LIMIT_META_KEY = 'run_limit'
+RUN_LIMIT_DEFAULTS = {'seconds': 60, 'bytes': 1048576}
+RUN_LIMIT_RANGE = {'seconds': (5, 300), 'bytes': (65536, 8388608)}
+
+
+def run_limit_problem(seconds, bytes_):
+    """Return an error string when a proposed limit is out of range."""
+    for key, value in (('seconds', seconds), ('bytes', bytes_)):
+        lo, hi = RUN_LIMIT_RANGE[key]
+        if isinstance(value, bool) or not isinstance(value, int):
+            return '%s must be an integer' % key
+        if value < lo or value > hi:
+            return '%s must be between %d and %d' % (key, lo, hi)
+    return ''
+
+
+def get_run_limit_settings() -> dict:
+    """The limit sent with an unattended row; always inside the valid range."""
+    raw = get_meta_json(RUN_LIMIT_META_KEY, None)
+    out = dict(RUN_LIMIT_DEFAULTS)
+    if isinstance(raw, dict):
+        for key in ('seconds', 'bytes'):
+            value = raw.get(key)
+            if not isinstance(value, bool) and isinstance(value, int) and \
+                    RUN_LIMIT_RANGE[key][0] <= value <= RUN_LIMIT_RANGE[key][1]:
+                out[key] = value
+    return out
+
+
+def set_run_limit_settings(seconds: int, bytes_: int):
+    set_meta_json(RUN_LIMIT_META_KEY, {'seconds': int(seconds),
+                                       'bytes': int(bytes_)})

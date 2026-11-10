@@ -78,9 +78,13 @@ def init_gateways_tables(cursor):
     #   ssh_ticket_format the lockbox ticket format the poller writes
     #   ssh_key_derived   K = HMAC-SHA256(token, label), computed on set/rotate
     #                      (G1: signing must not need the token itself)
+    #   run_limits        F19: the limit capability this installer/watcher
+    #                     reports ('v1' or ''). Display only — the decision is
+    #                     per request (L7), because a self-update can change
+    #                     the script without re-registering.
     for col, default in [('ssh_mode', "'direct+mcp'"), ('ssh_host_key', "''"),
                          ('ssh_agent_format', "''"), ('ssh_ticket_format', "''"),
-                         ('ssh_key_derived', "''")]:
+                         ('ssh_key_derived', "''"), ('run_limits', "''")]:
         try:
             cursor.execute(f"ALTER TABLE gateways ADD COLUMN {col} TEXT DEFAULT {default}")
         except Exception:
@@ -521,3 +525,19 @@ def set_gateway_ssh_capabilities(ip: str, agent_format: str, ticket_format: str)
             'UPDATE gateways SET ssh_agent_format = ?, ssh_ticket_format = ? WHERE ip = ?',
             (agent_format or '', ticket_format or '', ip))
         conn.commit()
+
+
+def set_gateway_run_limits(ip: str, capability: str):
+    """F19: remember the reported limit capability (display only; the
+    auto-run decision reads the capability on each request)."""
+    with db_conn() as conn:
+        conn.execute('UPDATE gateways SET run_limits = ? WHERE ip = ?',
+                     ((capability or '')[:16], ip))
+        conn.commit()
+
+
+def get_gateway_run_limits(ip: str) -> str:
+    with db_conn() as conn:
+        row = conn.execute('SELECT run_limits FROM gateways WHERE ip = ?',
+                           (ip,)).fetchone()
+    return ((row['run_limits'] if row else '') or '')
