@@ -15,11 +15,24 @@ class GatewayPayload(BaseModel):
     token: str = ""
     session_id: str = ""
     execution_id: str = ""
+    # F12: attribution and gating for an MCP-run command. Both are validated
+    # again server-side; a direct-SSH gateway sends neither.
+    agent: str = ""
+    force_jit: bool = False
 
 class RegisterPayload(BaseModel):
     ip: str
     hostname: str
     version: str = "v6.0"
+    # F12: sent by the same installer that writes the gateway and poller, so
+    # the pair is always the pair that is installed. All optional: an old
+    # installer reports nothing and the gateway is refused ssh_exec.
+    ssh_host_key: str = ""
+    ssh_agent_format: str = ""
+    ssh_ticket_format: str = ""
+
+class SSHHostKeyPayload(BaseModel):
+    ssh_host_key: str = ""
 
 class PolicyPayload(BaseModel):
     type: str
@@ -37,6 +50,7 @@ class HeartbeatPayload(BaseModel):
     poller_ok: int = 0
     gateway_ok: int = 0
     can_reach: int = 0
+    ssh_host_key: str = ""
 
 class UninstallProgressPayload(BaseModel):
     ip: str

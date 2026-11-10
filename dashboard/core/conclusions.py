@@ -100,8 +100,12 @@ def validate_payload(session_id, agent, outcome, summary, worked=None,
     session = get_session(session_id)
     if not session:
         raise ValueError('no_session')
+    # SR/S1: fail closed. A session with no owner has no one to vouch for the
+    # caller, and a conclusion is written for (and later trusted by) other
+    # agents -- so it is refused exactly like another agent's session. The
+    # pre-SR2 "ownerless sessions stay usable" rule is retired.
     owner = (session.get('agent') or '').strip()
-    if owner and (agent or '') != owner:
+    if not owner or (agent or '') != owner:
         raise ValueError('session_not_yours')
     if (outcome or '') not in OUTCOMES:
         raise ValueError('bad_outcome')

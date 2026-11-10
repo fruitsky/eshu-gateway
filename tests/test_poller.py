@@ -340,9 +340,9 @@ def test_first_run_parses_once_per_cycle(poller):
     poller.policy(policy_body())
     poller.run()
     # 16 before F5; the per-gateway capture_output field is one more python
-    # parse inside the same stale-policy branch (the steady-state test below
-    # still proves a stale-free cycle starts none).
-    assert poller.python_calls() == 17
+    # parse inside the same stale-policy branch, and F12's ssh_mode is another
+    # (the steady-state test below still proves a stale-free cycle starts none).
+    assert poller.python_calls() == 18
 
 
 def test_f5_poller_writes_capture_mode(poller):

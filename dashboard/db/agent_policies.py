@@ -6,6 +6,7 @@ policy, and no rate limit. That makes the migration to multi-agent identities
 non-breaking for the existing admin token.
 """
 import json
+import re
 import time
 
 from db.core import db_conn
@@ -13,6 +14,12 @@ from db.core import db_conn
 TOOLS_MODES = ('all', 'allowlist')
 APPROVAL_MODES = ('inherit', 'gated', 'ungated')
 DEFAULT_RATE_LIMIT = 0
+
+# F12: SSH through Eshu. The default is the strictest useful mode — every
+# command is forced to JIT — and an empty host list means "no gateway", so a
+# new agent cannot reach SSH until the operator opts in per host.
+SSH_MODES = ('read_only', 'approval', 'normal')
+DEFAULT_SSH_MODE = 'approval'
 
 
 def init_agent_policies_tables(cursor):
@@ -27,6 +34,13 @@ def init_agent_policies_tables(cursor):
             updated_at INTEGER NOT NULL DEFAULT 0
         )
     ''')
+    # F12: additive columns; a pre-F12 row reads as "no hosts, approval mode".
+    for col, default in [('ssh_hosts_allow_json', "'[]'"),
+                         ('ssh_mode', "'approval'")]:
+        try:
+            cursor.execute(f"ALTER TABLE agent_policies ADD COLUMN {col} TEXT DEFAULT {default}")
+        except Exception:
+            pass
 
 
 def default_policy(agent_id=None):
@@ -37,6 +51,8 @@ def default_policy(agent_id=None):
         'arg_policy': {},
         'approval': {},
         'rate_limit_per_min': DEFAULT_RATE_LIMIT,
+        'ssh_hosts_allow': [],
+        'ssh_mode': DEFAULT_SSH_MODE,
         'updated_at': 0,
     }
 
@@ -56,8 +72,31 @@ def _as_int(value, default=0):
         return default
 
 
+def _validate_ssh_hosts(value):
+    """A list of gateway IPs/hostnames, or '*' for any registered gateway."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        value = [v.strip() for v in value.split(',') if v.strip()]
+    if not isinstance(value, (list, tuple)):
+        raise ValueError("ssh_hosts_allow must be a list of hosts")
+    hosts = []
+    for item in value:
+        if not isinstance(item, str):
+            raise ValueError("ssh_hosts_allow entries must be strings")
+        item = item.strip()
+        if not item:
+            continue
+        if item != '*' and not re.fullmatch(r'[A-Za-z0-9_.:-]{1,253}', item):
+            raise ValueError(f"ssh_hosts_allow entry is not a host: {item[:40]}")
+        if item.lower() not in [h.lower() for h in hosts]:
+            hosts.append(item)
+    return hosts
+
+
 def validate_policy(tools_mode='all', tools=None, arg_policy=None,
-                    approval=None, rate_limit_per_min=0):
+                    approval=None, rate_limit_per_min=0, ssh_hosts_allow=None,
+                    ssh_mode=DEFAULT_SSH_MODE):
     """Validate a policy payload. Raises ValueError with a caller-facing reason."""
     if tools_mode not in TOOLS_MODES:
         raise ValueError("tools_mode must be 'all' or 'allowlist'")
@@ -89,12 +128,16 @@ def validate_policy(tools_mode='all', tools=None, arg_policy=None,
     rate = _as_int(rate_limit_per_min, -1)
     if rate < 0:
         raise ValueError("rate_limit_per_min must be 0 (unlimited) or a positive integer")
+    if ssh_mode not in SSH_MODES:
+        raise ValueError(f"ssh_mode must be one of {', '.join(SSH_MODES)}")
     return {
         'tools_mode': tools_mode,
         'tools': sorted({t.strip() for t in tools}),
         'arg_policy': arg_policy,
         'approval': approval,
         'rate_limit_per_min': rate,
+        'ssh_hosts_allow': _validate_ssh_hosts(ssh_hosts_allow),
+        'ssh_mode': ssh_mode,
     }
 
 
@@ -106,6 +149,10 @@ def _row_to_policy(row):
     item['arg_policy'] = _load_json(item.pop('arg_policy_json', '{}'), {})
     item['approval'] = _load_json(item.pop('approval_json', '{}'), {})
     item['rate_limit_per_min'] = _as_int(item.get('rate_limit_per_min'), 0)
+    hosts = _load_json(item.pop('ssh_hosts_allow_json', '[]'), [])
+    item['ssh_hosts_allow'] = [str(h) for h in hosts if str(h).strip()]
+    mode = item.get('ssh_mode') or DEFAULT_SSH_MODE
+    item['ssh_mode'] = mode if mode in SSH_MODES else DEFAULT_SSH_MODE
     return item
 
 
@@ -125,18 +172,22 @@ def get_agent_policies_map():
 
 
 def set_agent_policy(agent_id, tools_mode='all', tools=None, arg_policy=None,
-                     approval=None, rate_limit_per_min=0):
-    clean = validate_policy(tools_mode, tools, arg_policy, approval, rate_limit_per_min)
+                     approval=None, rate_limit_per_min=0, ssh_hosts_allow=None,
+                     ssh_mode=DEFAULT_SSH_MODE):
+    clean = validate_policy(tools_mode, tools, arg_policy, approval,
+                            rate_limit_per_min, ssh_hosts_allow, ssh_mode)
     with db_conn() as conn:
         cursor = conn.cursor()
         cursor.execute('''
             INSERT OR REPLACE INTO agent_policies
                 (agent_id, tools_mode, tools_json, arg_policy_json,
-                 approval_json, rate_limit_per_min, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                 approval_json, rate_limit_per_min, updated_at,
+                 ssh_hosts_allow_json, ssh_mode)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (agent_id, clean['tools_mode'], json.dumps(clean['tools']),
               json.dumps(clean['arg_policy']), json.dumps(clean['approval']),
-              clean['rate_limit_per_min'], int(time.time())))
+              clean['rate_limit_per_min'], int(time.time()),
+              json.dumps(clean['ssh_hosts_allow']), clean['ssh_mode']))
         conn.commit()
     return get_agent_policy(agent_id)
 

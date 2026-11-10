@@ -48,10 +48,14 @@ class GatewaySandbox:
     """A throwaway installation of the real gateway script."""
 
     def __init__(self, root: Path, target_ip: str = "10.0.0.1",
-                 script: Path = SCRIPT):
+                 script: Path = SCRIPT, stdbuf: bool = True):
         self.root = Path(root)
         self.target_ip = target_ip
         self.source_script = Path(script)
+        # B1: a gateway whose userland has no stdbuf (BusyBox) falls back to
+        # plain sed. The swap below is the only way to exercise that here,
+        # because the system stdbuf is always on PATH.
+        self.stdbuf = stdbuf
         if " " in str(self.root):
             pytest.skip("temporary path contains a space; the script is not quoted")
         self.etc = self.root / "etc"
@@ -59,8 +63,14 @@ class GatewaySandbox:
         self.bin = self.root / "bin"
         self.home = self.root / "home"
         self.features = self.etc / "features.d"
-        for directory in (self.etc, self.run_dir, self.bin, self.home, self.features):
+        # F12: the persistent nonce store (root-only 0700 in production).
+        self.nonce_dir = self.root / "var-lib-eshu"
+        for directory in (self.etc, self.run_dir, self.bin, self.home, self.features,
+                          self.nonce_dir):
             directory.mkdir(parents=True, exist_ok=True)
+        os.chmod(self.nonce_dir, 0o700)
+        self.token_file = self.etc / "eshu-token"
+        self.token_file.write_text("test-token\n")
         # F5: the poller's private work dir (0700, owner-checked before use).
         self.capture_dir = self.root / "run-eshu"
         self.capture_dir.mkdir(parents=True, exist_ok=True)
@@ -76,10 +86,33 @@ class GatewaySandbox:
         self.window_claim_file.write_text("200")
         self.ticket_file = self.run_dir / "eshu.tickets"
 
+        self._assert_tmpdir_can_exec()
         self._write_stubs()
         self.script = self.root / "eshu-gateway.sh"
         self.script.write_text(self._transformed())
         subprocess.run(["bash", "-n", str(self.script)], check=True)
+
+    def _assert_tmpdir_can_exec(self):
+        """Skip with a reason when the temp dir cannot run scripts.
+
+        Several tests execute a script they wrote (`./bigout`), so a TMPDIR
+        mounted `noexec` — some CI sandboxes do that — fails them for a reason
+        that has nothing to do with the gateway. Skip instead of failing, and
+        say why.
+        """
+        probe = self.root / "probe-exec"
+        probe.write_text("#!/bin/sh\nexit 0\n")
+        probe.chmod(0o755)
+        try:
+            subprocess.run([str(probe)], check=True, capture_output=True,
+                           timeout=10)
+        except (OSError, subprocess.SubprocessError) as exc:
+            pytest.skip("the temporary directory cannot execute scripts: %s" % exc)
+        finally:
+            try:
+                probe.unlink()
+            except OSError:
+                pass
 
     # ── sandbox construction ────────────────────────────────────────────────
     def _write_stubs(self):
@@ -188,12 +221,27 @@ printf '%s\\n' "$*" >> "__LOG__"
                 text = swap("/etc/" + name, str(self.etc / name))
         text = swap('FEATURES_DIR="/etc/eshu/features.d"',
                     'FEATURES_DIR="%s"' % self.features, 1)
+        if not self.stdbuf:
+            text = swap('if command -v stdbuf >/dev/null 2>&1; then',
+                        'if false; then', 1)
+        # F12: the prefix MAC key, the ssh_mode marker and the nonce store.
+        for name in ("eshu-token", "eshu-ssh-mode"):
+            if "/etc/" + name in text:
+                text = swap("/etc/" + name, str(self.etc / name))
+        # A frozen pre-F12 copy (tests/test_sec_compat.py) has no store yet.
+        if 'ESHU_NONCE_DIR="${ESHU_NONCE_DIR:-/var/lib/eshu}"' in text:
+            text = swap('ESHU_NONCE_DIR="${ESHU_NONCE_DIR:-/var/lib/eshu}"',
+                        'ESHU_NONCE_DIR="${ESHU_NONCE_DIR:-%s}"' % self.nonce_dir, 1)
+        if 'ESHU_NONCE_OWNER="${ESHU_NONCE_OWNER:-0}"' in text:
+            text = swap('ESHU_NONCE_OWNER="${ESHU_NONCE_OWNER:-0}"',
+                        'ESHU_NONCE_OWNER="${ESHU_NONCE_OWNER:-%d}"' % os.getuid(), 1)
         if 'ESHU_RUN_DIR="${ESHU_RUN_DIR:-/run/eshu}"' in text:
             text = swap('ESHU_RUN_DIR="${ESHU_RUN_DIR:-/run/eshu}"',
                         'ESHU_RUN_DIR="${ESHU_RUN_DIR:-%s}"' % self.capture_dir, 1)
         if 'ESHU_RUN_OWNER="${ESHU_RUN_OWNER:-0}"' in text:
             text = swap('ESHU_RUN_OWNER="${ESHU_RUN_OWNER:-0}"',
                         'ESHU_RUN_OWNER="${ESHU_RUN_OWNER:-%d}"' % os.getuid(), 1)
+
         for token, value in (
             ("__TARGET_IP__", self.target_ip),
             ("__DASHBOARD_URL__", "http://dashboard.test"),
@@ -208,12 +256,17 @@ printf '%s\\n' "$*" >> "__LOG__"
         for name in ("eshu-freeze", "eshu-zero-trust", "eshu-rblack.txt",
                      "eshu-exact.txt", "eshu-rwhite.txt",
                      "eshu-require-session", "eshu-session-key",
-                     "eshu-capture"):
+                     "eshu-capture", "eshu-token", "eshu-ssh-mode"):
             sandbox_path = str(self.etc / name)
             assert text.count("/etc/" + name) == text.count(sandbox_path), name
         assert "/etc/eshu/features.d" not in text
         assert "/var/run/eshu.tickets" not in text
         assert "${ESHU_RUN_DIR:-/run/eshu}" not in text
+        # F12/S2: the nonce store is on the hard self-protection list, so the
+        # real path appears exactly once on purpose. The frozen pre-F12 copy
+        # has no nonce store at all.
+        if "ESHU_NONCE_DIR" in text:
+            assert text.count("/var/lib/eshu") == 1
         # The hard self-protection case still names the real path on purpose.
         assert '"/etc/eshu' in text
         return text
@@ -243,7 +296,7 @@ printf '%s\\n' "$*" >> "__LOG__"
     def capture(self, mode: str):
         (self.etc / "eshu-capture").write_text(mode)
 
-    def popen(self, command: str):
+    def popen(self, command: str, args=None):
         env = {
             "SSH_ORIGINAL_COMMAND": command,
             "SSH_CONNECTION": "127.0.0.1 40000 127.0.0.1 22",
@@ -253,8 +306,8 @@ printf '%s\\n' "$*" >> "__LOG__"
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         }
         return subprocess.Popen(
-            ["bash", str(self.script)], cwd=str(self.root), env=env,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            ["bash", str(self.script)] + list(args or []), cwd=str(self.root),
+            env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
     def zero_trust(self, on: bool):
         (self.etc / "eshu-zero-trust").write_text("1" if on else "")
@@ -281,6 +334,29 @@ printf '%s\\n' "$*" >> "__LOG__"
     def tickets(self, *lines: str):
         self._write(self.ticket_file, *lines)
 
+    def ssh_mode(self, mode: str):
+        (self.etc / "eshu-ssh-mode").write_text(mode)
+
+    def token(self, value: str):
+        self.token_file.write_text(value + "\n")
+
+    def sign(self, command: str, agent: str = "agent-a", session: str = "",
+             force_jit: str = "0", ts: int = None, nonce: str = None):
+        """Build the signed prefix exactly as core/ssh_crypto.py does."""
+        import secrets as _secrets
+        ts = str(ts if ts is not None else int(time.time()))
+        nonce = nonce or _secrets.token_hex(16)
+        import sys as _sys
+        _sys.path.insert(0, str(REPO / "dashboard"))
+        from core import ssh_crypto
+        key = ssh_crypto.derive_key((self.etc / "eshu-token").read_text().strip())
+        canonical = ssh_crypto.canonical(
+            command, agent, session=session, mcp="1", force_jit=force_jit,
+            ts=ts, nonce=nonce, gateway_ip=self.target_ip)
+        signature = ssh_crypto.sign(key, canonical)
+        return ssh_crypto.prefix_line(agent, session, force_jit, ts, nonce,
+                                      signature) + command
+
     def command_script(self, name: str, body: str) -> str:
         """Write an executable test command (no shell metacharacters)."""
         path = self.root / name
@@ -301,7 +377,7 @@ printf '%s\\n' "$*" >> "__LOG__"
         self.feature("approved_windows.sh", source)
 
     # ── execution/observation ───────────────────────────────────────────────
-    def run(self, command: str):
+    def run(self, command: str, args=None):
         env = {
             "SSH_ORIGINAL_COMMAND": command,
             "SSH_CONNECTION": "127.0.0.1 40000 127.0.0.1 22",
@@ -310,11 +386,53 @@ printf '%s\\n' "$*" >> "__LOG__"
             "ESHU_JIT_WAIT": "2",
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         }
-        proc = subprocess.run(
-            ["bash", str(self.script)], cwd=str(self.root), env=env,
-            capture_output=True, text=True, timeout=20)
+        try:
+            proc = subprocess.run(
+                ["bash", str(self.script)] + list(args or []),
+                cwd=str(self.root), env=env, capture_output=True, text=True,
+                timeout=60)
+        except subprocess.TimeoutExpired as exc:
+            # A hang is the interesting failure: show what every process in
+            # the sandbox is waiting on, so a CI-only hang explains itself.
+            pytest.fail(self._hang_report() + '\n--- stdout ---\n'
+                        + (exc.stdout or '')[-2000:])
         time.sleep(0.15)  # let the backgrounded /api/log stub finish
         return proc
+
+    def _hang_report(self) -> str:
+        """ps + wchan + open fds for the sandbox's processes, best effort."""
+        lines = []
+        try:
+            ps = subprocess.run(['ps', '-eo', 'pid,ppid,stat,wchan:24,args'],
+                                capture_output=True, text=True, timeout=10)
+            body = [line for line in ps.stdout.splitlines()
+                    if str(self.root) in line or 'eshu-gateway.sh' in line]
+            lines.append('ps:\n' + '\n'.join(body))
+        except Exception as exc:  # noqa: BLE001 - diagnostics only
+            lines.append('ps failed: %r' % (exc,))
+        try:
+            out = os.listdir('/proc')
+            for pid in [p for p in out if p.isdigit()]:
+                try:
+                    cmd = open('/proc/%s/cmdline' % pid, 'rb').read() \
+                        .replace(b'\0', b' ').decode('utf-8', 'replace')
+                except OSError:
+                    continue
+                if 'eshu-gateway' not in cmd:
+                    continue
+                try:
+                    wchan = open('/proc/%s/wchan' % pid).read().strip()
+                except OSError:
+                    wchan = '?'
+                try:
+                    fds = os.listdir('/proc/%s/fd' % pid)
+                except OSError:
+                    fds = []
+                lines.append('pid %s wchan=%s fds=%s cmd=%s'
+                             % (pid, wchan, len(fds), cmd[:160]))
+        except Exception as exc:  # noqa: BLE001
+            lines.append('proc scan failed: %r' % (exc,))
+        return 'HANG: ' + '\n'.join(lines)
 
     def curl_calls(self):
         if not self.curl_log.exists():
@@ -342,7 +460,7 @@ printf '%s\\n' "$*" >> "__LOG__"
             bodies.append(parts[2] if len(parts) == 3 else "")
         return bodies
 
-    def wait_for(self, predicate, timeout=2.0):
+    def wait_for(self, predicate, timeout=10.0):
         deadline = time.time() + timeout
         while time.time() < deadline:
             if predicate(self.curl_calls()):
@@ -868,7 +986,7 @@ def test_sec_chunk1_allowlist_log_body_is_well_formed(gw):
     for payload in bodies:
         assert set(payload) == {
             "target_ip", "encoded_command", "status",
-            "session_id", "execution_id"}
+            "session_id", "execution_id", "agent"}
         assert payload["target_ip"] == "10.0.0.1"
         assert payload["status"] == "auto-approved"
         assert payload["session_id"] == "chat_valid-1"
@@ -885,7 +1003,8 @@ def test_sec_chunk1_jit_request_body_is_well_formed(gw):
         if call["url"].endswith("/api/request"):
             payload = json.loads(raw)
             assert set(payload) == {
-                "target_ip", "encoded_command", "session_id", "execution_id"}
+                "target_ip", "encoded_command", "session_id", "execution_id",
+                "agent", "force_jit"}
 
 
 def test_sec_chunk1_window_reject_body_is_well_formed(gw):
@@ -905,7 +1024,7 @@ def test_sec_chunk1_window_reject_body_is_well_formed(gw):
             payload = json.loads(raw)
             assert set(payload) == {
                 "target_ip", "encoded_command", "status", "reason", "token",
-                "session_id", "execution_id"}
+                "session_id", "execution_id", "agent"}
             assert payload["reason"] == "unknown window token"
             assert payload["token"] == "WinToken123"
     assert seen
