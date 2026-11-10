@@ -8728,11 +8728,21 @@ comes last. Shared rules:
   F19's limits, and it runs only on a gateway that reports `run_limits: v1`.
   On any other gateway it does not run, and the card says "not run", never
   "passed".
-* **"Operator-approved exact bytes" is one rule, not one per feature.** F15
-  (AG1), F16 (V5) and F22 each need a command the operator approved once to
-  run without a second prompt, even for an agent whose SSH mode is
-  `approval`. The security reviewer decides that rule once, on F15's AG1.
-  F16 and F22 reuse it and do not invent their own.
+* **"Operator-approved exact bytes": the security reviewer's decision on
+  F15 AG1 (2026-11-10).** Under `ssh_mode=approval`, a plan item may be
+  claimed only when **server code** built its plan:
+  * the `origin` column is set by server code only, defaults to `agent`, and
+    no agent field can set it;
+  * agents cannot change the plan's items;
+  * each item names one host;
+  * the claim checks the session's owner;
+  * freeze, Zero-Trust and the blocklists still win.
+
+  What matters is who wrote the plan, not who approved it. This covers F15
+  probes. F16 recipe steps keep claiming by request id. **F22's check is not
+  covered:** it runs with no agent call and no human present, so it is an
+  unattended run under F19's limits. F22's design review decides whether it
+  gets an origin at all.
 * **No live data** in tests or fixtures (§ 2.5): TEST-NET addresses, made-up
   vmids and names.
 
@@ -9366,15 +9376,15 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 10 | F8 | test-traffic | dashboard | Merged | `feat/f8-test-traffic` | — | low priority |
 | 11 | F9 | ha-supervisor-read | dashboard | Merged | `feat/f9-ha-supervisor-read` | — | token is now a dedicated `eshu` HA admin user |
 | 12 | F10 | ha-supervisor-actions | dashboard | Merged (security sign-off `f9e2c22`) | `feat/f10-ha-supervisor-actions` | F9, F3, Chunk H | security re-reads the P1–P3 diff only |
-| 13 | F11 | ha-config-files | dashboard | Design round 7 done (AE1 at `471f58f`); **to security for Z1–Z5** | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | then code |
+| 13 | F11 | ha-config-files | dashboard | Security round 7 (`9e75cad`): Z3/Z5 approved; **AH1–AH4 must** (descriptor-based reads, wider redaction, modes, refuse `!include secrets.yaml`), then security re-reads the changes | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | then code |
 | 14 | F14 | inventory | dashboard + MCP | Merged | `feat/f14-inventory` | Chunk H | |
 | 15 | F19 | unattended-limits | gateway + dashboard | Code approved by both reviewers on AF1/AF2 (security `67bec51`); feature reviewer checks AF1/AF2, then merge | `feat/f19-unattended-limits` | F4, F5, F12 | moved ahead of F21–F23: nearly done, and F22 needs it. AF3 goes on the next gateway branch |
 | 16 | F15 | probes | dashboard + MCP | Code round 1: changes requested AG1–AG7 (`56d86e3`); **AG1 to security** | `feat/f15-probes` | F4, F12, F14 | main line, not only local-model |
 | 17 | F21 | snapshot-approve | dashboard + Proxmox | Design first | `feat/f21-snapshot-approve` | F7, F14, F2 | + security sign-off (new write path, destructive rollback) |
 | 18 | F23 | change-journal | dashboard | Ready | `feat/f23-change-journal` | F1, F5, F7, F14 | no security gate; can be coded while F21's design is with security |
 | 18a | X2 | runbooks-page | dashboard UI | Ready | `feat/x2-runbooks-page` | F13 | small; no security gate |
-| 19 | F22 | change-checks | dashboard + MCP | After F19 merges and F15's AG1 is decided | `feat/f22-change-checks` | F3, F5, F12, F19, F15 (AG1 rule) | + security sign-off (the unattended check) |
-| 20 | F16 | recipes | dashboard + MCP | Design complete (security Round 4; feature reviewer Round 5 with AA1/AA2); code next after F22 | `feat/f16-recipes` | F3, F12, F13, F19, F15 (AG1 rule) | main line; code comes back to security; auto_run comes back to security |
+| 19 | F22 | change-checks | dashboard + MCP | After F19 merges | `feat/f22-change-checks` | F3, F5, F12, F19 | + security sign-off (the unattended check; AG1's origin rule does not cover it) |
+| 20 | F16 | recipes | dashboard + MCP | Design complete (security Round 4; feature reviewer Round 5 with AA1/AA2); code next after F22 | `feat/f16-recipes` | F3, F12, F13, F19 | main line; steps claim by request id; code comes back to security; auto_run comes back to security |
 | 21 | F24 | content-tripwire | dashboard | Design first | `feat/f24-content-tripwire` | F12, F14 | + security sign-off (retention) |
 | 22 | F25 | secrets-broker | gateway + dashboard | Design first | `feat/f25-secrets-broker` | F1, F12, F19; security Chunk 7 before deploy | + security sign-off; gateway bash line by line |
 | 23 | F26 | agent-shadow | dashboard + MCP | Ready after F16 | `feat/f26-agent-shadow` | F1, F12, F16, F18 | security reads the enforcement points |
