@@ -8213,7 +8213,57 @@ F12 (runner), F4 (read lane), F5 (outputs), F3 (grouped approval), F14 (for
 
 ### Implementer notes
 
-_(implementer)_
+**Code round 1 (2026-11-10) — `dashboard/core/probes.py`, five MCP tools,
+`tests/test_f15_probes.py` (43 tests).** Probes are code: typed parameters in,
+a fixed command list out, a capped digest back.
+
+**The probes and their commands.** `diagnose_service`:
+`systemctl is-active --no-pager <unit>`, `journalctl -u <unit> -n 200
+--no-pager -o short-iso`, `ss -tlnp`. `diagnose_container`: `docker ps -a
+--no-trunc` + `docker inspect <name>`, or `pct list` + `pct config <vmid>`.
+`disk_pressure`: `df -h`, `df -i`, `du -x -d 1 /var/log`. `dns_check`: the
+Pi-hole record only (P8's "else none").
+**P1** is a per-type first-character rule: `unit` `^[A-Za-z0-9][A-Za-z0-9@._-]
+{0,127}$`, a Docker name `^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$` or a vmid
+`^[0-9]{3,9}$`, an FQDN of lower-cased RFC labels with no `..` and no leading
+dash, and `host` must be a registered gateway IP. Every value is
+`shlex.quote`d, and unknown parameters are refused (`command=id` cannot ride
+along). **P2:** state comes from `systemctl is-active` (a structured word,
+never prose); `systemctl status` is not used at all. **P5:** each output goes
+through `core.secret_scrub.scrub_string` before parsing (test: a synthetic
+`API_KEY` value never reaches the digest). **P6:** the `du` is
+`-x -d 1 /var/log`. **P7:** the digest is capped at 8,000 bytes of
+`json.dumps`, `truncated` is set, and the drop order is errors past the top 10
+first, then ports, then the log/ps lists. **P8:** `dns_check` reports
+`gateway: null` and why, and the agent cannot name a host.
+
+**P3 — no capture dependency.** The digest is built from the F12 envelope's
+output, which the runner returns whatever `/etc/eshu-capture` says, so a
+gateway on `exit-only` still yields a digest. There is no silent empty digest:
+a command that did not run lands in `incomplete` with its reason.
+
+**P4 — one grouped approval.** `diagnose_*` validates, builds the commands,
+and proposes **one** F3 plan (the probe's own code, not agent text) with one
+item per command; the call returns `{status: pending, plan_id}` and creates no
+JIT requests (test). `probe_result(plan_id)` returns `pending` until the
+operator approves; then it runs each command through the F12 runner (the
+approved plan claims them), builds the digest, stores it, and returns it. A
+second `probe_result` returns the stored digest without re-running (test).
+The agent cannot approve a plan.
+
+**Deviation, for the reviewer — probes do not use F4's read lane.** The
+outline says every generated command must pass `read_policy.is_read_ssh`, and
+P2 says to use `systemctl show`. Those conflict: `read_policy` deliberately
+refuses `systemctl show`, `docker logs`, `pct status` and `getent` (its
+`probe class` tests pin `systemctl show nginx` as ineligible), and extending
+the lane is its own reviewed surface. So probes rely on the **grouped
+approval** instead of auto-run: the operator approves the exact commands,
+which is stronger than lane eligibility, and no agent text reaches a shell
+either way. If the reviewer prefers `active_since`/`NRestarts` in the digest,
+it needs `systemctl show` in the lane (a separate change); the digest
+currently carries `state`, `errors`, `ports` and `error_total`.
+
+`bash scripts/verify.sh`: `2685 passed, 22 skipped, 7 warnings in 535.07s (0:08:55)`.
 
 ### Reviewer notes
 
@@ -8750,7 +8800,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 12 | F10 | ha-supervisor-actions | dashboard | Merged (security sign-off `f9e2c22`) | `feat/f10-ha-supervisor-actions` | F9, F3, Chunk H | security re-reads the P1–P3 diff only |
 | 13 | F11 | ha-config-files | dashboard | **Round 7 (Z1–Z9) under review; AB1/AB2 to fold** (`81135a4`), then security for Z1–Z5 | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | then security reviewer on the design |
 | 14 | F14 | inventory | dashboard + MCP | Merged | `feat/f14-inventory` | Chunk H | |
-| 15 | F15 | probes | dashboard + MCP | Ready after F12; pre-implementation notes P1–P8 | `feat/f15-probes` | F4, F12 | |
+| 15 | F15 | probes | dashboard + MCP | **Code round 1: P1–P8 implemented; probes use the grouped plan (read-lane deviation for review)** | `feat/f15-probes` | F4, F12 | reviewer checks the lane deviation in the Implementer notes |
 | 16 | F16 | recipes | dashboard + MCP | **Security approved Round 4 with Y1 + W2**; Round 5 to feature reviewer only | `feat/f16-recipes` | F3, F12, F13 | security re-reads Round 4 only |
 | 17 | F17 | local-agent | dashboard + docs | Ready after F15; pre-implementation notes A1–A6 | `feat/f17-local-agent` | F12–F16 | |
 | 18 | F19 | unattended-limits | gateway + dashboard | **Design approved by security** (`d67ad02`); code after F12 merges (W1 at code time) | `feat/f19-unattended-limits` | F4, F5 | then security re-review of § 3 |
