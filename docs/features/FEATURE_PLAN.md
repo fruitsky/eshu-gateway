@@ -6430,6 +6430,20 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 13 | F11 | ha-config-files | dashboard | Ready (after F10) — design first | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | design approval + security reviewer sign-off |
 | 14 | F14 | inventory | dashboard + MCP | Merged | `feat/f14-inventory` | Chunk H | |
 | 15 | F15 | probes | dashboard + MCP | Ready after F12 | `feat/f15-probes` | F4, F12 | |
+**Design round 3 (feature reviewer, 2026-11-10): approved; to the security
+reviewer.**
+* T1's per-token rule refuses `--host={fqdn}`, `x{fqdn}` and `\{fqdn}`, and
+  backslashes are banned.
+* T2's result-slot undo fails closed, accepts scalars only and is shown in the
+  preview.
+* T3 now uses real registry names. Turning the Pi-hole record into a run
+  precondition is the honest answer while no Pi-hole write tool exists.
+* The three-way registry walk (allowed / undo-only / forbidden) makes every
+  new tool a decision.
+
+Points for the security reviewer: R1/T1 templates, the R2/T3 tool lists, and
+R3/T2 rollback.
+
 | 16 | F16 | recipes | dashboard + MCP | **Round 3: T1–T3 folded (templates, result-slot undo, real tool names) — awaiting security review** | `feat/f16-recipes` | F3, F12, F13 | design approval + security reviewer sign-off |
 | 17 | F17 | local-agent | dashboard + docs | Ready after F12–F16 | `feat/f17-local-agent` | F12–F16 | |
 | 18 | F19 | unattended-limits | gateway + dashboard | Design first; before F4 `on` is unlocked | `feat/f19-unattended-limits` | F4, F5 | design approval + security reviewer sign-off |
