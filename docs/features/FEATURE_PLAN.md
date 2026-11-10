@@ -5704,6 +5704,30 @@ check and the gate skip, and the Supervisor handler refuses `dry_run`. K2:
 `ungated` cannot skip the card. K3: `execute_integration_call` uses
 `is_supervisor_rest_request`. Both nits are done.
 
+**Security reviewer — K1–K3 (2026-11-10, `a463d31`): approved. F10 may
+merge.**
+* **K1:**
+  * `_dry_run_exempt()` is the only exemption, and it is used at both the
+    freeze check and the gate skip.
+  * `DRY_RUN_HANDLERS` holds only `ha_lovelace_save_config`, whose handler
+    does return before writing on `dry_run`.
+  * The Supervisor handler refuses any call whose arguments include
+    `dry_run`, so a future runner mistake still fails closed.
+  * The tests cover all six Supervisor tools, gated and frozen, plus a
+    handler that declares `dry_run` but is not on the list.
+* **K2:** an admin config write sets the same `always` flag as
+  `always_gate`. `ungated` is audited and ignored, and the red line comes
+  from the same flag. A generic write still can't be covered by a plan, so
+  the card is the only way through.
+* **K3:** all three check points now include the base path.
+* **Nits:**
+  * Over-long plan arguments are refused, not truncated.
+  * The docstring is fixed.
+  * One leftover, which does not block: if `_mcp_display` hits an exception,
+    it returns `''`, which passes the length check and shows no arguments.
+    Refuse the item when the display is empty but `args` is not, on the
+    next F10 touch or F16.
+
 ---
 
 ## Chunk F11 — HA config files via the SSH add-on · slug `ha-config-files` · dashboard
