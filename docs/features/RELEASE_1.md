@@ -47,7 +47,14 @@ Plus the CI fix (`fix/ci-environment`, merged `f2746ef`), the deploy-helper fix
 line-buffered, so a slow command stops promptly when its caller disconnects;
 signed off by the security reviewer).
 
-Not in this release: F10, F11, F15, F16, F17 and F19.
+**Release 1.1, same day:** F10 HA Supervisor actions (add-on restart/update,
+backups, Core update, restart after a passing config check; every action
+gated, the host reboot disabled by default), merged `5c62898` after the
+security sign-off `f9e2c22`. Full suite 2659 passed; on the private live-DB
+copy its migration only adds `session_plan_items.args_json` and `summary`, and
+the Release 1 code (`c8ffe2c`) still starts on the migrated copy.
+
+Not in this release: F11, F15, F16, F17 and F19.
 
 ## Preconditions
 
