@@ -125,3 +125,55 @@ def mock_upstream():
     yield {'base_url': base_url, 'handler': _Handler, 'requests': _Handler.requests}
     server.shutdown()
     server.server_close()
+
+
+# ── CI failure reporting ────────────────────────────────────────────────────
+# GitHub renders `::error` workflow commands as check-run annotations, and the
+# annotations are readable through the API without repo-admin rights (the job
+# log is not). That is the difference that made a CI-only failure impossible to
+# diagnose from outside: `bash scripts/verify.sh` says which test failed, the
+# workflow log is private. With this hook a failing CI run names the tests and
+# the first line of each failure, so "it fails in CI but not locally" can be
+# answered without asking an admin for a log download.
+#
+# Harmless locally: `GITHUB_ACTIONS` is only set on Actions runners.
+_CI_FAILED = []
+
+
+def _ci_escape(text: str) -> str:
+    return (str(text).replace('%', '%25').replace('\r', '%0D')
+            .replace('\n', '%0A'))
+
+
+def pytest_runtest_logreport(report):
+    import os
+    import sys
+    if not os.environ.get('GITHUB_ACTIONS') or not report.failed:
+        return
+    nodeid = getattr(report, 'nodeid', '?')
+    if nodeid in _CI_FAILED:
+        return
+    _CI_FAILED.append(nodeid)
+    if len(_CI_FAILED) > 40:
+        return
+    detail = getattr(report, 'longreprtext', '') or ''
+    lines = [line for line in detail.splitlines() if line.strip()]
+    # The first line is `self = <…>`; the `E ` lines carry the assertion.
+    tail = [line for line in lines if line.startswith('E ')] or lines[-6:]
+    sys.stdout.write('\n::error file=%s,line=1,title=%s::%s\n'
+                     % (_ci_escape(nodeid.split('::')[0]),
+                        _ci_escape(nodeid)[:200],
+                        _ci_escape(' | '.join(tail))[:900]))
+    sys.stdout.flush()
+
+
+def pytest_sessionfinish(session, exitstatus):
+    import os
+    import sys
+    if not os.environ.get('GITHUB_ACTIONS'):
+        return
+    total = len(getattr(session, 'items', []) or [])
+    sys.stdout.write('\n::notice::%d failed of %d collected%s\n'
+                     % (len(_CI_FAILED), total,
+                        (' — ' + ', '.join(_CI_FAILED[:10])) if _CI_FAILED else ''))
+    sys.stdout.flush()
