@@ -21,8 +21,10 @@ Chunks merged on `feature-roadmap` (§ 9 of `FEATURE_PLAN.md`):
 * F9 HA Supervisor read tools;
 * F14 inventory.
 
-Plus the CI fix (`fix/ci-environment`), once it is approved and merged (see
-"Preconditions").
+Plus the CI fix (`fix/ci-environment`, merged `f2746ef`), the deploy-helper fix
+(`afd5ea6`) and the buffering fix (`fix/stream-unbuffered`: `sanitize` is
+line-buffered, so a slow command stops promptly when its caller disconnects;
+signed off by the security reviewer).
 
 Not in this release: F10, F11, F12, F15, F16, F17 and F19.
 
@@ -126,7 +128,12 @@ was run. Step 4 below is that check, done by hand.
 6. **Optional, on that gateway only:** set capture to `tail`, run a command
    with large output (for example `journalctl -n 20000`), and confirm the
    result appears in the request's sidebar and the call returns promptly. Then
-   set it back, or keep it if wanted.
+   set it back, or keep it if wanted. **On a host whose `awk` is `mawk`**
+   (`awk -W version`): `tail` capture puts `mawk` in the output stream, and it
+   reads stdin in 4 KiB blocks, so a *slow* command can outlive an agent
+   disconnect until 4 KiB accumulate (measured 10.7 s). `exit-only` has no
+   `awk` in the path and is not affected. This is the accepted residual of the
+   buffering fix, not a regression.
 7. **Update the remaining gateways**, a few at a time, with the step 5 check
    on each batch.
 

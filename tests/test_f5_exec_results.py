@@ -10,6 +10,7 @@ rendering.
 import base64
 import json
 import os
+import shutil
 import subprocess
 import time
 
@@ -260,6 +261,113 @@ class TestGateway:
         assert proc.returncode == 0
         assert proc.stdout.strip() == 'hello'
         assert _exec_calls(gw), 'the post is still attempted'
+
+
+# ── B1–B3: a slow command must not outlive the agent's disconnect ───────────
+
+def _alive(pid):
+    """True while `pid` exists and is not a zombie."""
+    try:
+        with open('/proc/%d/stat' % pid) as handle:
+            fields = handle.read().split()
+        return fields[2] != 'Z'
+    except OSError:
+        return False
+
+
+class TestStreamBuffering:
+    """B3: the D1 slow-writer case through the real `run_sanitized`.
+
+    sed block-buffers its output into a pipe, so a slow command's first bytes
+    never reach a closed connection and the command keeps running (39-41 s in
+    the D1 check). With `stdbuf -oL sed`, the first line reaches the agent,
+    the disconnect is noticed, and the command dies.
+    """
+
+    @pytest.fixture(params=['mawk', 'gawk'])
+    def awk_name(self, request):
+        if shutil.which(request.param) is None:
+            pytest.skip('%s is not installed' % request.param)
+        return request.param
+
+    @pytest.mark.parametrize('mode', ['tail', 'exit-only'])
+    @pytest.mark.parametrize('sigpipe', ['default', 'ignored'])
+    def test_f5_gateway_slow_writer_dies_with_the_agent(
+            self, tmp_path, awk_name, mode, sigpipe):
+        if awk_name == 'mawk' and mode == 'tail':
+            # N1: awk is not in the pipeline in exit-only mode (B1's fix is
+            # sed-side), so that case runs under mawk too. In tail mode mawk
+            # holds stdin in a 4 KiB buffer (B2 note); `-W interactive` would
+            # stream but corrupts long records, so the ring waits for 4 KiB.
+            pytest.skip('mawk reads stdin in 4 KiB blocks, so the tail ring '
+                        'cannot see the first line early (10.7 s measured)')
+        if sigpipe == 'ignored':
+            pytest.skip('with SIGPIPE ignored GNU sed keeps reading after '
+                        'EPIPE, so no buffering change can bound the command; '
+                        'sshd gives its children the default signal, and the '
+                        'function-level D1 test covers awk in both modes')
+        from test_gateway_script import GatewaySandbox
+        gw = GatewaySandbox(tmp_path / 'gw')
+        (gw.bin / 'awk').symlink_to(shutil.which(awk_name))
+        pidfile = gw.root / 'slow.pid'
+        writer = gw.root / 'slow.py'
+        writer.write_text(
+            "import os, time\n"
+            "open(%r, 'w').write(str(os.getpid()))\n"
+            "for i in range(600):\n"
+            "    print('line %%d' %% i, flush=True)\n"
+            "    time.sleep(0.1)\n" % str(pidfile))
+        gw.command_script('slow', 'exec python3 "%s"\n' % writer)
+        gw.exact('./slow')
+        gw.capture(mode)
+        env = {
+            'SSH_ORIGINAL_COMMAND': './slow',
+            'SSH_CONNECTION': '127.0.0.1 40000 127.0.0.1 22',
+            'USER': 'tester',
+            'LANG': 'C.UTF-8',
+            'ESHU_JIT_WAIT': '2',
+            'PATH': os.environ.get('PATH', '/usr/bin:/bin'),
+        }
+        wrapper = ('trap "" PIPE; exec bash "$1"' if sigpipe == 'ignored'
+                   else 'exec bash "$1"')
+        # stderr to DEVNULL: with SIGPIPE ignored, sed's per-line write errors
+        # would fill an undrained pipe and block the very hang this test looks
+        # for.
+        proc = subprocess.Popen(['bash', '-c', wrapper, '_', str(gw.script)],
+                                cwd=str(gw.root), env=env,
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL,
+                                text=True)
+        try:
+            first = proc.stdout.readline()
+            assert first.strip() == 'line 0', first
+            started = time.monotonic()
+            proc.stdout.close()
+            proc.wait(timeout=30)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+        elapsed = time.monotonic() - started
+        assert elapsed < 5, '%s/%s kept running %.1f s after the disconnect' % (
+            awk_name, sigpipe, elapsed)
+        deadline = time.monotonic() + 3
+        pid = int(pidfile.read_text())
+        while time.monotonic() < deadline and _alive(pid):
+            time.sleep(0.05)
+        assert not _alive(pid), 'the command (pid %d) outlived the gateway' % pid
+
+    def test_f5_gateway_without_stdbuf_still_runs(self, tmp_path):
+        """B3: no stdbuf (BusyBox) falls back to plain sed; output and rc stay."""
+        from test_gateway_script import GatewaySandbox
+        gw = GatewaySandbox(tmp_path / 'gw', stdbuf=False)
+        gw.exact('echo hello')
+        gw.capture('tail')
+        proc = gw.run('echo hello')
+        assert proc.returncode == 0
+        assert proc.stdout.strip() == 'hello'
+        assert 'BUFFERING: stdbuf is unavailable' in gw.logger_text()
+        _wait_result(gw)
+        assert unb64(_result_body(gw)['encoded_output']).strip() == 'hello'
 
 
 # ── Dashboard ───────────────────────────────────────────────────────────────

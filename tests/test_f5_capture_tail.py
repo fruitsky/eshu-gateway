@@ -53,11 +53,17 @@ def awk_name(request):
     return request.param
 
 
-def _sandbox(tmp_path, awk_name, cap=None):
-    """`awk` bound to one implementation, a quiet logger, and the harness."""
+def _sandbox(tmp_path, awk_name=None, awk_body=None, cap=None):
+    """`awk` bound to one implementation (or a stub), a quiet logger, the
+    harness; `cap` is the byte cap handed to `capture_tail` (None = default)."""
     bindir = tmp_path / 'bin'
     bindir.mkdir()
-    (bindir / 'awk').symlink_to(shutil.which(awk_name))
+    if awk_body is not None:
+        stub = bindir / 'awk'
+        stub.write_text('#!/bin/sh\n' + awk_body)
+        stub.chmod(0o755)
+    else:
+        (bindir / 'awk').symlink_to(shutil.which(awk_name))
     # Hermetic: the failure path logs; never write to the host's syslog.
     logger = bindir / 'logger'
     logger.write_text('#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s"\n'
@@ -255,3 +261,13 @@ class TestCaptureTail:
         assert run.proc.returncode == 0, run.proc.stderr
         assert len(run.stored) == 65537
         assert run.stored == data[-65537:]
+
+    def test_f5_capture_tail_does_not_use_mawk_interactive(self):
+        """B2: `-W interactive` is rejected; it splits long records.
+
+        Measured on mawk 1.3.4: a 20000-byte line becomes five records
+        (4096-byte chunks), so the agent would gain newlines that were never
+        in the command's output. The 20000-byte payload test is the
+        behavioural guard; this pins the decision where the code is.
+        """
+        assert '-W interactive' not in _capture_function()
