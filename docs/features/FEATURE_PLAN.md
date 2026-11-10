@@ -7079,6 +7079,7 @@ right check.
   the prose.
 
 After W6, W7 and the nit, to the security reviewer (§ 2.6a), with H1,
+H2/U1/U3/W6 and H4 as the points to check.
 
 **W7 answered (feature reviewer, 2026-11-10), plus W8.** Read-only checks over
 a real non-interactive SSH command (`ssh hassio@<ha> '…'`, the add-on key, the
@@ -7123,7 +7124,17 @@ same shape F11 uses), on HA OS with Advanced SSH & Web Terminal:
 
 After W6–W8 and the restore-script nit, to the security reviewer (§ 2.6a),
 with H1, H2/U1/U3/W6, H4 and W7 (token handling) as the points to check.
-H2/U1/U3/W6 and H4 as the points to check.
+
+**Design round 5 (feature reviewer, 2026-11-10, `8fe03c1`): approved; one line,
+then straight to the security reviewer (no further round from me).** W6 (`-L`
+plus `set -C`), W7 (token read from the fixed s6 file, only `ha` sees it, exit
+20 before anything is touched), W8 (root only, checked at `list`) and the full
+restore script are all in.
+
+* **X1 (must, one line):** in the restore script, `[ -f "$backup" ]` follows a
+  symlink, so a link planted at the backup name would copy any readable file
+  on the add-on into the HA config. Use `[ -f "$backup" ] && [ ! -L "$backup" ]
+  || exit 19`, plus a test.
 
 ---
 
