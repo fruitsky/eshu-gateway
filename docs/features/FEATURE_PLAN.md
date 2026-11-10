@@ -6268,6 +6268,49 @@ security reviewer (§ 2.6a).** Q3 is folded: the MCP branch ends in
 mawk it truncates rather than splits). As the round 4 note says, F19's time
 limit, not buffering, is the bound for unattended runs.
 
+**Design review of Rounds 2–4 (`2286b43`), 2026-11-10: approved.** I read
+Rounds 2 and 3 as well as Round 4, because they answer L1–L8.
+
+* **L1:** one `approve_unattended()` helper, and a generated test that fails
+  when an unattended row has no limit. The exemptions are named.
+* **L2:** absent, valid and invalid are distinct; a limit stays once set;
+  the smaller value wins; the field is read with a tab separator.
+* **L3:** the poller never receives an unattended row. MCP claims through
+  `/api/ticket/{id}` in the same round trip, and the Q2 wait rule follows
+  `unattended`.
+* **L4:** errexit is off around the pipeline only, and `PIPESTATUS` is
+  copied in the next statement.
+* **L5:** there is a raw cap before `sanitize`. Deciding a cut on the
+  visible stream is a sensible trade, and no unsanitized bytes are written.
+* **L6:** GNU `timeout` is part of the capability, and a limit received
+  without it is refused rather than half-applied. One gap remains: a
+  process that calls `setsid` escapes the group kill. No read-lane verb can
+  do that today. Any later unattended path (F15 probes, F16 `auto_run`)
+  must keep that true.
+* **L7:** the capability travels on each request, so the stored column is
+  for display only.
+* **L8:** the operator session, CSRF and audit, with no MCP or token
+  access.
+* **Q3:** the MCP capture goes through `capture_tail` at 65537, so a
+  human-approved MCP run cannot fill `/run`. One thing to state plainly in
+  the design: in MCP mode nothing reaches the SSH channel until the
+  envelope, so a dropped connection is not noticed while a human-approved
+  MCP run is still going. That is F12's accepted §4 risk, and F19 bounds it
+  only for unattended rows.
+
+*One condition at code time (the feature reviewer can check it):*
+
+* **W1. The probe file uses the same directory check as the capture.**
+  Round 3 runs `mktemp -p "$ESHU_RUN_DIR"` for the probe whenever there is a
+  byte limit. Under `exit-only`, the directory check in `run_sanitized` is
+  skipped. Apply the same check (0700, owned by root, not a symlink) before
+  creating the probe, and refuse the call if it fails. Test: an unsafe
+  `/run/eshu` with a `run_limit` refuses the call and runs nothing.
+
+**For the F4 `on` gate:** F19 meets the fourth precondition once this code
+(L3, L6, L7 and W1 included) is merged and deployed fleet-wide. The gateway
+bash comes back to me before merge.
+
 ---
 
 ## 7. Backlog (not planned in detail)
