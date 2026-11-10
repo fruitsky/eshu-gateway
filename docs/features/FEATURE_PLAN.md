@@ -6940,6 +6940,61 @@ is the roadmap's `"${SANITIZE_CMD[@]}"` form (`stdbuf -oL sed -E`, plain
 `capture_tail "$ESHU_MCP_CAP" 65537 >/dev/null`. Both installers embed both.
 After the security check, I merge F12 into `feature-roadmap`.
 
+**Security reviewer — merged gateway diff (2026-11-10, `61ad819`, read
+against `feature-roadmap`): approved. F12 may merge.** I read
+`dashboard/eshu-gateway.sh`, its copy embedded in both installers (identical
+to the script), the installer's file modes, the sudoers line and the key
+lines, and the S4 check in `core/ssh_exec.py`.
+
+* **The buffering fix merge is right.**
+  * `sanitize` is the roadmap's `SANITIZE_CMD` form, with the redaction rules
+    unchanged.
+  * MCP mode keeps `capture_tail "$ESHU_MCP_CAP" 65537 >/dev/null`. The ring
+    has `cap + 2` slots, so a live line is never overwritten.
+  * The F5 tail in MCP mode comes from the same capture, and R4's
+    `exit-only` rule applies to it.
+* **R1–R4 and S1–S4 are all in:**
+  * R1: the script is installed `0700` and owned by root, and every write of
+    `/etc/eshu-token` is a temp file under `umask 077`, then `chmod 600`,
+    then a rename.
+  * R2: only the verified agent name is logged.
+  * R3: a leftover `ESHU_` first word is refused, including a known key
+    placed after an unknown one.
+  * R4 is done.
+  * S1: a signed prefix carrying `ESHU_WINDOW_TOKEN` or `ESHU_EXECUTION_ID`
+    is refused.
+  * S2: `/var/lib/eshu` is on the self-protection list.
+  * S3: the sudoers line allows exactly `""` and `--dashboard-key`.
+  * S4: `IP_RE` is checked right before `run_ssh`.
+* **The rest of the gate holds:**
+  * prefix keys are an allowlist, a duplicate is refused, and the charsets
+    are checked before the MAC;
+  * the nonce is written only after the timestamp and MAC pass, through a
+    temp file and a rename under a separate lock;
+  * the dashboard key always requires a signature, and `mcp_only` refuses an
+    unsigned call;
+  * force-JIT skips the exact list, the regex list and the feature scripts;
+  * a `v2` ticket is claimable only by its own agent and session, and an old
+    line is agent-less, both in the lockbox claim and in the poll-claim path;
+  * every exit in MCP mode goes through `finish`, and no bare `echo` is left
+    after the prefix parse;
+  * the window script prints with `echo`, but it only runs with a window
+    token, which a signed prefix cannot carry. So it cannot write raw output
+    into an MCP envelope.
+* **Notes, not blocking:**
+  * **N-a:** run the two inline Pythons (the MAC check and the session
+    signature check) as `python3 -I`, so neither the working directory nor
+    the environment can put a module ahead of `hmac` or `hashlib`. Sudo
+    already resets the environment, so this is a small hardening step.
+    Do it on the next gateway-bash branch.
+  * **N-b:** `dashboard/static/dev/eshu-gateway-install.sh` has no F12 code
+    (last changed before F5). If anything still serves it, regenerate it or
+    remove it. A gateway installed from it would not enforce `mcp_only`.
+  * **For the record:** in MCP mode nothing sees a client disconnect,
+    because the output goes to `/dev/null`. The dashboard's timeout ends the
+    wait, not the command. That is still accepted with F19 as the bound for
+    unattended runs, as recorded in the F19 review.
+
 
 ---
 
