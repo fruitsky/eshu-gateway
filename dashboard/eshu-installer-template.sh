@@ -416,7 +416,8 @@ fi
 # F19: report whether this host can enforce a run limit (GNU timeout signals
 # the process group). Display only: the dashboard decides per request.
 RUN_LIMITS_CAP=""
-if timeout --version 2>/dev/null | grep -q 'GNU coreutils'; then RUN_LIMITS_CAP="v1"; fi
+TIMEOUT_VERSION=$(timeout --version 2>/dev/null || true)
+if printf '%s' "$TIMEOUT_VERSION" | grep -q 'GNU coreutils'; then RUN_LIMITS_CAP="v1"; fi
 SSH_REG_CAPS='"ssh_host_key":"'"$HOST_KEY_LINE"'","ssh_ticket_format":"v2","run_limits":"'"$RUN_LIMITS_CAP"'"'
 if [ "$mode" != "upgrade" ] || [ -f /etc/eshu-token ]; then
   SSH_REG_CAPS='"ssh_host_key":"'"$HOST_KEY_LINE"'","ssh_agent_format":"eshu-ssh-agent-v1","ssh_ticket_format":"v2","run_limits":"'"$RUN_LIMITS_CAP"'"'

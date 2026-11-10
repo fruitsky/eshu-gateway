@@ -407,3 +407,40 @@ def test_the_read_lane_without_the_capability_keeps_the_row_pending(
     row = next(r for r in get_all_requests() if r['id'] == body['request_id'])
     assert row['status'] == 'pending'
     assert row['reason'] == 'read-lane-no-limits'
+
+
+def test_a_sigkilled_command_is_still_a_time_limit(tmp_path):
+    """AD1: `timeout -k 5` kills a TERM-ignoring command with SIGKILL, and
+    timeout then exits 137 instead of 124. Both are the limit firing."""
+    gw = _gateway(tmp_path)
+    gw.unattended({'seconds': 5, 'bytes': 65536})
+    cmd = gw.command_script('stubborn', 'trap "" TERM\nsleep 30\n')
+    proc = gw.run(gw.sign(cmd))
+    env = _envelope(proc)
+    assert env['exit_code'] == 137, env
+    assert 'stopped after 5 s' in ' '.join(env['messages'])
+    assert _result_bodies(gw)[-1]['limit'] == 'time'
+
+
+def test_a_command_that_exits_137_itself_is_not_a_limit(tmp_path):
+    """The elapsed-time guard still applies to 137."""
+    gw = _gateway(tmp_path)
+    gw.unattended({'seconds': 60, 'bytes': 65536})
+    cmd = gw.command_script('self137', 'exit 137\n')
+    proc = gw.run(gw.sign(cmd))
+    env = _envelope(proc)
+    assert env['exit_code'] == 137
+    assert 'ESHU limit' not in ' '.join(env['messages'])
+    posted = _result_bodies(gw)
+    assert posted and 'limit' not in posted[-1]
+
+
+def test_a_gateway_without_gnu_timeout_refuses_a_limited_run(tmp_path):
+    """AD2: uutils/BusyBox `timeout` cannot bound the process group."""
+    gw = _gateway(tmp_path, timeout_version='timeout (uutils coreutils) 0.0.1')
+    gw.unattended({'seconds': 60, 'bytes': 65536})
+    cmd = gw.command_script('marker3', 'touch ran-marker\n')
+    proc = gw.run(gw.sign(cmd))
+    assert 'cannot be enforced' in proc.stdout
+    assert not (gw.root / 'ran-marker').exists()
+    assert not _result_bodies(gw)

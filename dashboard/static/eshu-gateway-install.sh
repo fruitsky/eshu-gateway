@@ -416,7 +416,8 @@ fi
 # F19: report whether this host can enforce a run limit (GNU timeout signals
 # the process group). Display only: the dashboard decides per request.
 RUN_LIMITS_CAP=""
-if timeout --version 2>/dev/null | grep -q 'GNU coreutils'; then RUN_LIMITS_CAP="v1"; fi
+TIMEOUT_VERSION=$(timeout --version 2>/dev/null || true)
+if printf '%s' "$TIMEOUT_VERSION" | grep -q 'GNU coreutils'; then RUN_LIMITS_CAP="v1"; fi
 SSH_REG_CAPS='"ssh_host_key":"'"$HOST_KEY_LINE"'","ssh_ticket_format":"v2","run_limits":"'"$RUN_LIMITS_CAP"'"'
 if [ "$mode" != "upgrade" ] || [ -f /etc/eshu-token ]; then
   SSH_REG_CAPS='"ssh_host_key":"'"$HOST_KEY_LINE"'","ssh_agent_format":"eshu-ssh-agent-v1","ssh_ticket_format":"v2","run_limits":"'"$RUN_LIMITS_CAP"'"'
@@ -548,7 +549,11 @@ ESHU_LIMIT_PROBE=""
 # every request, so a self-updated or rolled-back script is never trusted
 # because a row still says v1.
 RUN_LIMITS_CAP=""
-if timeout --version 2>/dev/null | grep -q 'GNU coreutils'; then
+# Captured first: under `set -o pipefail` a `timeout --version | grep` pipeline
+# reports grep's failure too, and the "is it GNU?" question must not depend on
+# how the two ends of a pipe are scheduled.
+TIMEOUT_VERSION=$(timeout --version 2>/dev/null || true)
+if printf '%s' "$TIMEOUT_VERSION" | grep -q 'GNU coreutils'; then
   RUN_LIMITS_CAP="v1"
 fi
 
@@ -993,10 +998,18 @@ run_sanitized() {
      && [ "$(stat -c '%s' "$ESHU_LIMIT_PROBE")" -gt "$RUN_LIMIT_BYTES" ]; then
     RUN_LIMIT_HIT="bytes"
   fi
-  if [ -n "$RUN_LIMIT_SECS" ] && [ "$rc" -eq 124 ] \
-     && [ "$duration_ms" -ge $(( RUN_LIMIT_SECS * 1000 - 200 )) ]; then
-    RUN_LIMIT_HIT="time"
-  fi
+  # AD1: `timeout -k 5` SIGKILLs a command that ignores SIGTERM, and then
+  # timeout exits 137, not 124. Both mean the limit fired; the elapsed-time
+  # guard still keeps a command that exits 124/137 on its own from being
+  # labelled a limit hit.
+  case "$rc" in
+    124|137)
+      if [ -n "$RUN_LIMIT_SECS" ] \
+         && [ "$duration_ms" -ge $(( RUN_LIMIT_SECS * 1000 - 200 )) ]; then
+        RUN_LIMIT_HIT="time"
+      fi
+      ;;
+  esac
   if [ "$RUN_LIMIT_HIT" = "time" ]; then
     say "   [ESHU limit: stopped after ${RUN_LIMIT_SECS} s]"
   elif [ "$RUN_LIMIT_HIT" = "bytes" ]; then

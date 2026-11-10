@@ -48,10 +48,17 @@ class GatewaySandbox:
     """A throwaway installation of the real gateway script."""
 
     def __init__(self, root: Path, target_ip: str = "10.0.0.1",
-                 script: Path = SCRIPT, stdbuf: bool = True):
+                 script: Path = SCRIPT, stdbuf: bool = True,
+                 timeout_version: str = "timeout (GNU coreutils) 9.4"):
         self.root = Path(root)
         self.target_ip = target_ip
         self.source_script = Path(script)
+        # F19/AD2: the host's `timeout` decides the run-limit capability. CI
+        # runners move between GNU coreutils, uutils and BusyBox, so the
+        # sandbox binds a stub whose --version the test chooses and whose
+        # behaviour is the real local timeout.
+        self.timeout_version = timeout_version
+        self._real_timeout = shutil.which("timeout") or "/usr/bin/timeout"
         # B1: a gateway whose userland has no stdbuf (BusyBox) falls back to
         # plain sed. The swap below is the only way to exercise that here,
         # because the system stdbuf is always on PATH.
@@ -218,6 +225,16 @@ esac
 printf '%s\\n' "$*" >> "__LOG__"
 '''.replace("__LOG__", str(self.logger_log))
         self._executable(self.bin / "logger", logger)
+
+        timeout = '''#!/bin/bash
+if [ "$1" = "--version" ]; then
+  printf '%s\\n' "__VERSION__"
+  exit 0
+fi
+exec "__REAL__" "$@"
+'''.replace("__VERSION__", self.timeout_version).replace(
+            "__REAL__", self._real_timeout)
+        self._executable(self.bin / "timeout", timeout)
 
     @staticmethod
     def _executable(path: Path, body: str):
