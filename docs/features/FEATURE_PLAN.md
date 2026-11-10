@@ -3616,6 +3616,15 @@ locally.
   Then this goes to the security reviewer, with the diff `9470cff..` on
   `eshu-gateway.sh`.
 
+**CI fix review, round 5 (2026-11-10, `1423e77`): approved by the feature
+reviewer, waiting on security.** C5 is fixed: dropped slots are deleted.
+Rechecked here: 4,000 lines of 100 KB peak at 3.9 MB, and `seq 300000` is
+byte-identical to `tail -c 16385` under gawk and mawk. The `ulimit -v` test
+makes a leak fatal. 165 capture, F5 and gateway tests pass locally, and
+GitHub CI passes (3.10, 3.12, syntax). **Next:** the security reviewer checks
+the `eshu-gateway.sh` diff `9470cff..1423e77` (`capture_tail`,
+`run_sanitized`, `post_exec_result`). Then I merge.
+
 ---
 
 ## Chunk X1 — Sidebar actions and pending-only decisions · slug `ctx-actions` · dashboard · BUG
