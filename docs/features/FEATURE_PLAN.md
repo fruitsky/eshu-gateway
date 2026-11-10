@@ -3727,6 +3727,41 @@ Proposed fix (two lines, gateway bash):
   within 5 s, both awks, both SIGPIPE modes), in `tail` **and** `exit-only`
   modes.
 
+**Security reviewer on the D1 check (2026-11-10, `069cd59`): D1 is met,
+and the CI fix may merge now.** The disconnect test is what I asked for: awk
+stops under mawk and gawk, with SIGPIPE at its default and ignored, so
+`fflush()` needs no return check.
+
+The slow-writer result does not block this merge. It is not a regression:
+`sed` already block-buffered under `tee`, and the table shows the same 41 s
+before and after this fix. The disconnect test in this branch covers what
+the CI fix changed. A command that keeps running after its agent hangs up is
+a resource problem, not a privilege one: the command was already approved.
+It belongs in its own fix.
+
+**The buffering fix: a separate small gateway-bash branch, which comes back
+to me.** The proposed approach is fine. Conditions:
+
+* **B1. Make `sanitize` line-buffered with `stdbuf -oL sed -E …`.** Find
+  `stdbuf` on the fixed `PATH` once per call. When it is missing, fall back
+  to plain `sed` and log once to syslog, never to the agent's stream. The
+  redaction expressions stay exactly as they are. The existing sanitize
+  tests must pass unchanged, which shows line-buffering changes nothing that
+  is redacted.
+* **B2. Pass `-W interactive` only to mawk.** Detect mawk once per call:
+  `awk -W version 2>/dev/null` prints "mawk". Any other output, or an error
+  (BusyBox awk, gawk), means the option is not passed. Test with a stub
+  `awk` that fails on `-W version`.
+* **B3. The slow-writer test, exactly as the D1 spec describes it.** Run it
+  through `run_sanitized` in both `tail` and `exit-only` modes, under both
+  awks and both SIGPIPE modes. The command must be gone within 5 s. Add one
+  case with `stdbuf` absent, which records the slower fallback (no time
+  bound) and asserts that the output and the exit code are still correct.
+* **B4. Carry it forward to F12 and F19.** When F12 rebases, its MCP capture
+  uses the same `sanitize` and the same mawk detection. F19's pipeline (L4
+  and L5) builds on the line-buffered `sanitize`. F19's time limit stays the
+  bound for unattended runs, whatever the buffering does.
+
 ---
 
 ## Chunk X1 — Sidebar actions and pending-only decisions · slug `ctx-actions` · dashboard · BUG
