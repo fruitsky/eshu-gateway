@@ -5539,6 +5539,81 @@ security reviewer needs to read: the diff adds R1/R2 on top of `2a2ca70`
 
 `bash scripts/verify.sh`: `2462 passed, 14 skipped, 7 warnings in 488.87s (0:08:08)`.
 
+### Security review — P1–P3 and R1–R2 code (2026-11-10, `2a2ca70` + `8f76878`)
+
+**Verdict: changes requested. One blocker (K1), one must (K2) and one small
+fix (K3).** P1–P3, S-a, S-b, R1 and R2 are done as asked. K1 is in code from
+before this diff. I missed it in my first F10 code review; it was found while
+checking how P2's `always_gate` interacts with the rest of the gate.
+
+What is right:
+* **P1:** a plan item needs its real `args`, and a supplied hash must match
+  them. Coverage is an allowlist of five actions. The card shows the scrubbed
+  arguments and the summary, both escaped.
+* **P2:** an `ungated` override cannot remove `always_gate`, including
+  wildcards, and the ignored override is audited.
+* **P3:** the 10-minute check is repeated in the handler, just before the
+  restart.
+* **R1 and R2:** the claim checks the tool allowlist again and requires an
+  integration of kind `ha`, read from the row.
+* **S-a:** `hassio*` first segments are refused, and the base path is checked
+  at the runner and in `execute_generic_call`.
+* **S-b:** the red line appears on the card.
+
+Changes:
+
+* **K1 (blocker): a handler dry-run skips the gate even when the handler has
+  no dry-run.**
+  * `tool_runner.py:614` sets `should_gate = False` for *any* handler call
+    that carries a truthy `dry_run`. The freeze check at `:474` has the same
+    exemption.
+  * The comment says curated handlers honour `dry_run`. The
+    `ha_supervisor_action` handler, used by all six Supervisor tools including
+    the reboot, does not: `run_supervisor_action` never reads it.
+  * So the exemption skips the approval card and Emergency Freeze, and then
+    runs the real action. `always_gate`, P2 and the plan rules never come into
+    play.
+
+  Fix:
+  * Exempt only handlers that are listed as implementing a dry run, in a
+    named set next to `HANDLERS` (for example `DRY_RUN_HANDLERS`). Use the
+    same set at both places in the runner.
+  * `ha_supervisor_action` is not in that set.
+  * As a second layer, the Supervisor handler refuses a call whose arguments
+    include `dry_run`.
+
+  Test: for each of the six Supervisor tools, a call with `dry_run` set
+  queues a card (or is refused) and makes no Supervisor request, both with
+  and without freeze. F11's `ha_config_write` will rely on the same set, so
+  its dry run must be the one in the set and must open no write.
+* **K2 (must): an automation, script or scene config write can still skip
+  the card.**
+  * S-b adds the red line to the *card*, but an agent policy of `ungated`
+    (exact, `ha.*` or `*`) on the generic write tool means no card is made.
+  * Writing an automation and then triggering it reaches any `hassio.*`
+    service. That is the power P2 keeps gated.
+
+  Fix: treat `is_admin_config_write(path)` like `always_gate`. `ungated` does
+  not clear it, and the override is audited the same way. The generic write
+  is not plan-coverable, so this closes it.
+
+  Test: `ha.*: ungated` plus a write under `config/automation/` queues a card
+  with the red line.
+* **K3 (should, one line): the third S-a check point.**
+  `integration_proxy.py:755` (`execute_integration_call`) still calls
+  `is_supervisor_rest_path(path)` without the base path. Switch it to
+  `is_supervisor_rest_request(integration.get('base_url'), path)`, as at the
+  other two.
+* **Nits:**
+  * `_mcp_display` truncates the argument display at 2000 bytes, while the
+    match uses the full arguments. Refuse an item whose display would be
+    truncated, so the operator never approves a hidden tail. The curated
+    actions take short arguments.
+  * `_normalise_rest_path`'s docstring says it returns `''` for a
+    non-canonical path; it returns `None`.
+
+After K1–K3, I review only that diff.
+
 ---
 
 ## Chunk F11 — HA config files via the SSH add-on · slug `ha-config-files` · dashboard
