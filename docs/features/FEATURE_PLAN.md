@@ -4986,6 +4986,101 @@ space still pass. 116 F10 and F3 tests pass locally.
 checkpoints and N1, the `mcp` plan-claim owner binding (M2), and
 `ha_host_reboot` never being plan-coverable (S1).
 
+#### Security reviewer sign-off
+
+**Code review (`3a6f65b`), 2026-11-10: changes requested (P1–P3).** I read
+`ha_supervisor.py`, the three checkpoints in `tool_runner.py` and
+`integration_proxy.py`, `session_plans.py`, the `session_plan` MCP tool and
+the approval-mode lookup. I did not run anything.
+
+*The three points I was asked to check hold:*
+
+* **M1 and N1, the path guard.**
+  - The guard runs at all three checkpoints: before gating, in the curated
+    executor and in the generic executor. An already-approved call is
+    re-checked when it runs.
+  - Decoding until the path stops changing, then refusing dot segments,
+    backslashes and control characters whatever the prefix, is the right
+    shape. Refusing beats normalising.
+  - I found no spelling that gets past it through the query string, `;`,
+    repeated encoding or case.
+* **M2, the owner binding.** The plan claim checks the session's owner in
+  the same statement, so an ownerless session or an unauthenticated caller
+  matches nothing.
+* **S1.** `ha_host_reboot` can never be a plan item.
+
+*Must fix:*
+
+* **P1. An operator can approve a plan item without being able to see what
+  it does.**
+  - `_validate_mcp_item` accepts an `args_hash` from the agent with no
+    `args`. Even when `args` are given, only the hash is kept.
+  - The operator's plan card therefore shows `mcp: <integration>.<tool>
+    (<12 hex chars>)`, and they approve bytes they cannot read.
+  - Any tool can be a plan item, including the HA generic write and
+    `call_service`. There, the hidden arguments are an arbitrary path and
+    body.
+  - Fix 1: refuse a bare `args_hash`. `args` are required.
+  - Fix 2: when the plan is proposed, keep a display copy of the arguments
+    for the plan card, with secret-looking keys redacted by the existing
+    scrubber, and match on the hash as now. For a handler tool, also store
+    its preflight summary, for example `addon_update | slug | 1.2 -> 1.3`,
+    and show that.
+  - Fix 3: make plan coverage an allowlist, not one excluded tool. Only the
+    curated F10 actions can be plan items: add-on action, add-on update,
+    Core update, backup create and Core restart. The generic read and write,
+    `call_service`, `ws_write` and the reboot never can. S1 then follows
+    from the allowlist.
+  - Tests:
+    - a bare hash is refused;
+    - the plan card shows the redacted arguments or the summary;
+    - a generic-write or `call_service` item is refused as
+      `not_plan_coverable`.
+* **P2. An agent's "ungated" override switches off `always_gate`.** In
+  `tool_runner`, `approval_mode() == 'ungated'` sets `should_gate = False`
+  after `always_gate` set it to True. The lookup also falls back to the
+  `ha.*`, `ha_*` and `*` wildcards.
+  - Result: an agent whose policy said `ha.*: ungated` before F10 now runs
+    backups, updates, restarts, and reboots once enabled, with no approval
+    card at all.
+  - Fix: on an `always_gate` tool, ignore `ungated`. Plans (P1) are the one
+    way to pre-approve these, and the reboot can never be pre-approved.
+    Audit an ignored override once per agent and tool, so the operator
+    learns why it had no effect.
+  - Tests: `*: ungated`, `ha.*: ungated` and an exact `ha.ha_core_update:
+    ungated` each still queue the call.
+* **P3. The config-check rule for a Core restart is checked only in
+  preflight.** Preflight runs only when the call is queued, so the rule is
+  skipped in three cases:
+  - a plan-claimed restart;
+  - an ungated one (until P2 is fixed);
+  - an approval that arrives long after the check went stale.
+
+  Fix: check "a valid `ha_check_config` within 10 minutes" again inside the
+  restart handler, right before the POST, and refuse with
+  `ha_check_config_stale`. Tests: a plan-claimed restart with no recent
+  check is refused; an approval that arrives after the check expired is
+  refused and nothing is sent.
+
+*Should fix:*
+
+* **S-a. Widen the Supervisor prefix to the whole first segment.** Refuse
+  any path whose first segment starts with `hassio`, which also covers HA's
+  add-on ingress proxy, `hassio_ingress`. Run the check on the full request
+  path, including any path that is part of the integration's own
+  `base_url`, not only on the tool's part. Test: a `hassio_ingress/...`
+  path is refused at all three checkpoints.
+* **S-b. Say where FORBIDDEN stops.** An approved generic HA write to the
+  automation, script or scene config API can define an action that calls
+  any `hassio.*` service, and running it reaches what FORBIDDEN names.
+  Scanning the body cannot catch this, because templates can build the
+  domain name. Document it in § 3: FORBIDDEN covers direct paths, and
+  approving a config write grants admin power. Give those approval cards
+  the same red line as the reboot. P1 already keeps them out of plans.
+
+**Verdict:** changes requested. Once P1–P3 have their tests, I review only
+that diff. F10 must not merge before then.
+
 ---
 
 ## Chunk F11 — HA config files via the SSH add-on · slug `ha-config-files` · dashboard
