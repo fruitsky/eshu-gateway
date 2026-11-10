@@ -8482,6 +8482,45 @@ Conditions:
 
 DeepSeek implements this. Both reviewers read the diff.
 
+### Code round 2 — AG1 (own commit) and AG2–AG7
+
+**AG1 — `1bf7233`, on its own, because security decides it.** The security
+reviewer's six conditions are in:
+* `session_plans.origin` is `NOT NULL DEFAULT 'agent'` and only
+  `create_plan(origin=...)` writes it, from `agent|probe|recipe`. The MCP and
+  HTTP proposal paths pass no origin, so a field named `origin` in an item or a
+  request is stored as `agent` (test).
+* A server plan must name a specific host — an item with `*` or `''` is
+  refused as `invalid_host` (condition 2).
+* `receive_request` permits a claim under `force_jit` only for `origin='probe'`
+  plans; an agent plan still never covers a command in `approval` mode, and
+  `normal` mode is unchanged. The claim also requires the session's owner to be
+  the verified agent (F10's M2 rule), and the approved row's reason is
+  `session-plan:<plan>:<item>:probe`, so the audit shows why no card appeared.
+* The plan card shows a small `probe` origin badge (`_plan_payload` carries
+  `origin`).
+* Tests drive the **real** `receive_request`: a probe plan covers each command
+  once (and only once), an agent plan does not, another agent cannot spend the
+  item, no request field can set the origin, and an any-host server plan is
+  refused.
+
+**AG2–AG7 — `bd71c1f`.**
+* **AG2:** `probe_result` checks the plan's session **and its owner** before
+  returning a stored digest; another session gets `probe_not_found`.
+* **AG3:** `dns_check` calls F14's `_call_tool` (exists, enabled, read policy,
+  v6 handler); a missing tool is reported in the digest as an error.
+* **AG4:** `docker inspect --format '{{.State.Status}} {{.State.Running}}
+  {{.RestartCount}} {{.State.StartedAt}}'`, `docker ps -a --filter name=^NAME$`
+  and `pct status`/`pct config` — no `Config.Env`, no every-container listing.
+* **AG5:** `recent_changes` is a SQL query by host over 24 h, keeping rows F1
+  says have a write step, scrubbed.
+* **AG6:** `journalctl … -p warning`, `last` from the line's timestamp, and a
+  hex-looking word only normalises with `0x` or a digit.
+* **AG7:** filesystems sort by use %, log dirs by size, ports by port before
+  the cap drops anything.
+
+`bash scripts/verify.sh`: `2698 passed, 22 skipped, 7 warnings in 537.81s (0:08:57)`.
+
 ---
 
 ## Chunk F16 — Recipes · slug `recipes` · dashboard + MCP · **design first + security reviewer sign-off**
