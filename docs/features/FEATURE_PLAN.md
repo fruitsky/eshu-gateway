@@ -6634,6 +6634,97 @@ H2's single script is the right shape.
 After U1–U4, to the security reviewer (§ 2.6a), with H1, H2/U1/U3 and H4 as
 the points to check.
 
+**Design round 3 (feature reviewer, 2026-11-10): approved in direction, one
+check before the security review (V1).** U1–U4 are right:
+* the remote `timeout 100` restores before the client gives up;
+* the dashboard never restores on its own, and the lock is held until a
+  hash read;
+* subdirectories under `packages/` are accepted, `packages-old` is not;
+* `$backup` and `$tmp` are checked (same directory, name patterns, must not
+  exist), and every exit outside 10–18 maps to `config_state_unknown`;
+* the file mode is kept.
+
+* **V1 (must): the script must run on the add-on's userland.** The Advanced
+  SSH & Web Terminal add-on is Alpine-based, and the script uses GNU-only
+  forms:
+  * `realpath -e`: BusyBox `realpath` takes no options;
+  * `chmod --reference` and `chown --reference`: BusyBox has neither.
+
+  If the add-on only has BusyBox versions, every write exits 12 or 16:
+  safe, but F11 would never work. Either confirm on a real add-on that GNU
+  coreutils is installed (`realpath --version`, `chmod --version`), and
+  write the version into the setup doc as a precondition the dashboard
+  checks once on the first `list`. Or use forms that work under both:
+  * `readlink -f` plus an existence check;
+  * `chmod "$(stat -c %a "$real")"` and `chown "$(stat -c %u:%g "$real")"`.
+
+  `timeout 100` works in both.
+
+**Design round 4 check (feature reviewer, 2026-11-10): V1 answered on a real
+add-on.** The operator ran read-only checks in the Advanced SSH & Web Terminal
+add-on's web terminal (Home Assistant OS; BusyBox v1.37.0 userland). Results:
+
+| Check | Result on the add-on |
+|---|---|
+| `realpath --version`, `chmod --version`, `readlink --version`, `stat --version` | all BusyBox; no GNU coreutils |
+| `realpath <existing>` / `realpath <missing>` | prints the path / `No such file or directory`, exit 1 |
+| `readlink -f <missing>` | no output, exit 1 |
+| `realpath --version` | `realpath: --version: No such file or directory`: BusyBox `realpath` parses **no options at all**, not even `--` |
+| `stat -c '%a %u:%g'` on `configuration.yaml` | `644 0:0` |
+| `cp -p` then `stat -c` on the copy | `644 0:0` (kept) |
+| `timeout 2 sleep 5` | killed; exit **143**, not GNU's 124 |
+| `sha256sum`, `mktemp`, `command -v ha` | work; `ha` is `/usr/bin/ha` |
+| `ls -ld /config` | `/config -> /homeassistant` (a symlink) |
+| `realpath /config/configuration.yaml` | `/homeassistant/configuration.yaml` |
+| `find /config -maxdepth 1 -type f` | **nothing**: `find` does not follow a symlinked start point |
+| `find /config/ -maxdepth 1 -type f` | lists the files |
+
+So V1's first option (GNU coreutils as a precondition) is out. Use forms that
+work under both BusyBox and GNU:
+
+* **W1 (must): no `realpath -e`, and no `--` for `realpath`.** BusyBox
+  `realpath` treats `-e` and `--` as file names, so `realpath -e -- "$path"`
+  fails on every call (exit 12, F11 never works). Instead, reject any
+  argument that is not absolute **first** (`case "$path" in /*) ;; *) exit
+  19 ;; esac`, the same for `$backup` and `$tmp`), then call
+  `realpath "$path"` with no options, and add an explicit `[ -f "$real" ]`.
+  GNU `realpath` without `-e` succeeds on a missing last component; BusyBox
+  does not; the `-f` test makes both refuse. The same for the directory:
+  `[ -d "$dir" ]`. With every argument known to start with `/`, drop `--`
+  from the other calls as well (`dirname`, `basename`, `sha256sum`, `cp`,
+  `mv`, `rm`), so the script does not depend on which BusyBox applets parse
+  options.
+* **W2 (must): copy mode and owner with `stat -c`.**
+  `chmod "$(stat -c %a "$real")" "$tmp" || exit 16` and
+  `chown "$(stat -c %u:%g "$real")" "$tmp" 2>/dev/null || true`. Both are
+  confirmed above.
+* **W3 (should): do not key anything on exit 124.** BusyBox `timeout`
+  reports a kill as 143 (137 with `-k`). The script already folds every
+  failure of `timeout 100 ha core check` into exit 18 after restoring, which
+  is right; keep it that way. Any test stub or dashboard message that tells
+  "timed out" from "check failed" must accept 124, 137 and 143.
+* **W4 (must): never start `find` at the `/config` symlink.** The list
+  template already uses `/homeassistant` (round 2), and that stays. Add a
+  test that the list template contains no `find /config ` without the
+  trailing slash, and say in the setup doc that `/config` is a symlink to
+  `/homeassistant` on this add-on (confirmed 2026-11-10, BusyBox 1.37.0).
+  The round 2 root-relative check (H3) is confirmed correct:
+  `realpath(dirname(/config/x.yaml))` is `/homeassistant`.
+* **W5 (must): test the scripts under BusyBox.** Add `busybox` to the CI
+  apt packages. Add a test that runs the write and restore scripts with
+  `busybox sh` and a `PATH` that holds only BusyBox applet links (`realpath`,
+  `readlink`, `stat`, `chmod`, `chown`, `cp`, `mv`, `rm`, `cat`, `sha256sum`,
+  `cut`, `dirname`, `basename`, `timeout`, `printf`) plus a stub `ha`.
+  Because the root `/homeassistant` cannot be created in CI, the test may
+  substitute a temp root into the **test's copy** of the script text; the
+  shipped constant keeps `/homeassistant`. Run the same cases under GNU
+  too. Skip the BusyBox run with a clear reason if `busybox` is missing
+  locally, but CI must run it. Cases: a good write, a missing file (12), a
+  relative path (19), a symlinked file (13), a 0640 file staying 0640, and a
+  stub `ha` that sleeps past a short bound (restores, exit 18).
+
+After W1–W5 the design goes to the security reviewer, as round 3 said.
+
 ---
 
 ## Chunk F12 — SSH through Eshu over MCP (`ssh_exec`) · slug `ssh-exec` · dashboard (+ small gateway change)
@@ -13538,33 +13629,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 10 | F8 | test-traffic | dashboard | Merged | `feat/f8-test-traffic` | — | low priority |
 | 11 | F9 | ha-supervisor-read | dashboard | Merged | `feat/f9-ha-supervisor-read` | — | token is now a dedicated `eshu` HA admin user |
 | 12 | F10 | ha-supervisor-actions | dashboard | Ready (after F9) | `feat/f10-ha-supervisor-actions` | F9, F3, Chunk H | reviewer pass + security reviewer sign-off |
-**Design round 3 (feature reviewer, 2026-11-10): approved in direction, one
-check before the security review (V1).** U1–U4 are right:
-* the remote `timeout 100` restores before the client gives up;
-* the dashboard never restores on its own, and the lock is held until a
-  hash read;
-* subdirectories under `packages/` are accepted, `packages-old` is not;
-* `$backup` and `$tmp` are checked (same directory, name patterns, must not
-  exist), and every exit outside 10–18 maps to `config_state_unknown`;
-* the file mode is kept.
-
-* **V1 (must): the script must run on the add-on's userland.** The Advanced
-  SSH & Web Terminal add-on is Alpine-based, and the script uses GNU-only
-  forms:
-  * `realpath -e`: BusyBox `realpath` takes no options;
-  * `chmod --reference` and `chown --reference`: BusyBox has neither.
-
-  If the add-on only has BusyBox versions, every write exits 12 or 16:
-  safe, but F11 would never work. Either confirm on a real add-on that GNU
-  coreutils is installed (`realpath --version`, `chmod --version`), and
-  write the version into the setup doc as a precondition the dashboard
-  checks once on the first `list`. Or use forms that work under both:
-  * `readlink -f` plus an existence check;
-  * `chmod "$(stat -c %a "$real")"` and `chown "$(stat -c %u:%g "$real")"`.
-
-  `timeout 100` works in both.
-
-| 13 | F11 | ha-config-files | dashboard | **Round 3: U1–U4 folded (remote bound, packages, argument checks, modes) — awaiting security review** | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | design approval + security reviewer sign-off |
+| 13 | F11 | ha-config-files | dashboard | **Round 4: V1 checked on a real add-on (BusyBox); W1–W5 to fold, then security review** | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | design approval + security reviewer sign-off |
 | 14 | F14 | inventory | dashboard + MCP | Merged | `feat/f14-inventory` | Chunk H | |
 | 15 | F19 | unattended-limits | gateway + dashboard | **Merged** 2026-11-11 (security sign-off `67bec51`; AF1/AF2 checked) | `feat/f19-unattended-limits` | F4, F5, F12 | AF3 goes on the next gateway branch |
 | 16 | F15 | probes | dashboard + MCP | **Merged** 2026-11-11 (AG1 security decision `eca8982`; AI1 fix merged) | `feat/f15-probes` | F4, F12, F14 | |
