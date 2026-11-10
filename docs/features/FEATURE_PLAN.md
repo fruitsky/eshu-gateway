@@ -3421,6 +3421,57 @@ while `capture_tail` had stored the correct 16 385 bytes: the oracle, a
 depends on a tool it is not testing — `_tail` slices the payload in Python
 (`data[-CAP:]`), which is exactly what `tail -c CAP` means for a byte string.
 
+### Round 6 — the buffering fix (B1–B4)
+
+**Commit: `5b0f5e4`.** It contains `dashboard/eshu-gateway.sh` and both
+regenerated installers; the security reviewer signs off this diff.
+
+* **B1 — `sanitize` is line-buffered.** GNU `sed` block-buffers its output
+  into a pipe, so a slow command's first bytes never reach a closed
+  connection and the command keeps running (the D1 check timed 39–41 s in
+  every mode, including `exit-only`). `sanitize` now runs
+  `stdbuf -oL sed -E …`; `stdbuf` is looked up once per call on the fixed
+  PATH, and when it is missing (BusyBox) the script falls back to plain `sed`
+  and writes one line to syslog. The redaction expressions are unchanged,
+  and every existing sanitize test passes unchanged.
+  `test_f5_gateway_without_stdbuf_still_runs` runs the fallback with the
+  sandbox's `stdbuf=False` seam and asserts the output, the exit code and the
+  result row are still correct (and the syslog line is present).
+* **B2 — `-W interactive` was measured and rejected.** mawk does
+  block-buffer its stdin, but `-W interactive` makes mawk split **any record
+  longer than 4096 bytes**: a 20000-byte line becomes five records, and the
+  agent's stream gains four newlines that were never in the command's output.
+  That breaks F5's byte-exactness contract (the C4 newline is the only
+  accepted deviation), so the option is not passed. `stdbuf -i0` was also
+  measured and does not change mawk's reader (it keeps its own buffer), so
+  no wrapper is used. **Consequence:** on mawk, a *very* slow writer (under
+  ~4 KiB after the agent hangs up) is still held in awk's input buffer, so
+  the disconnect is noticed only when the buffer fills. This is the
+  pre-existing mawk behaviour the D1 check identified; the command was
+  already approved and no privilege is gained, and F19's time limit is the
+  bound for unattended runs. `test_f5_capture_tail_does_not_use_mawk_interactive`
+  pins the decision at the source, and the 20000-byte payload test is the
+  behavioural guard.
+* **B3 — the slow-writer test, through `run_sanitized`.**
+  `test_f5_gateway_slow_writer_dies_with_the_agent` runs a writer that prints
+  every 0.1 s for 60 s through the real gateway in `tail` and `exit-only`
+  modes, closes the reading end after the first line, and asserts the
+  gateway and the command are gone within 5 s. Under **gawk** both modes pass
+  (about 0.3 s). Two cases skip with a stated reason: **mawk** (the B2
+  input-buffer residual) and **SIGPIPE ignored** — with SIGPIPE ignored GNU
+  `sed` keeps reading after EPIPE, so no buffering change can bound the
+  command; `yes | stdbuf -oL sed | head -1` hangs the same way under
+  `trap '' PIPE`. sshd gives its children the default signal, and the
+  function-level D1 test still covers awk in both modes.
+* **B4 — carried forward.** F12's MCP capture moves onto `capture_tail`
+  (separate branch) and F19's pipeline is redrawn on this `sanitize`
+  (design round 3). F19's time limit remains the bound for unattended runs,
+  whatever the buffering does.
+
+Both installers were regenerated in this commit.
+
+`bash scripts/verify.sh`: `2366 passed, 6 skipped, 7 warnings in 432.32s (0:07:12)`.
+
 ### Reviewer notes
 
 **Design round 1 (2026-11-08): approved with changes.** Fold D1–D8 into the
@@ -3761,6 +3812,104 @@ to me.** The proposed approach is fine. Conditions:
   uses the same `sanitize` and the same mawk detection. F19's pipeline (L4
   and L5) builds on the line-buffered `sanitize`. F19's time limit stays the
   bound for unattended runs, whatever the buffering does.
+
+**Buffering fix review (feature reviewer, 2026-11-10, `fix/stream-unbuffered` at
+`5477da5`): approved; to the security reviewer (gateway bash, § 2.6a).** CI is
+green on the branch.
+
+* **B1 is right.** `stdbuf -oL sed -E` with the same expressions, found once
+  per call, plain `sed` plus a syslog line when absent. Rechecked here: a
+  slow writer through `stdbuf -oL sed` into a reader that closes after the
+  first line ends in **0.2 s** (exit-only path).
+* **B2's rejection is right, and the evidence is stronger than the note
+  says.** On this reviewer's mawk 1.3.4 **20240123**, `-W interactive` does not
+  split a 20 000-byte line: it **truncates** it to 4 097 bytes (one line,
+  `wc -c` 4097). Either way it corrupts the agent's stream, so it must not be
+  used. The `-W interactive` source guard stays.
+* **The residual is real and limited to `tail` capture on mawk.** Measured:
+  slow writer → `stdbuf -oL sed` → `mawk` ring → reader closes after one line:
+  **10.7 s** (the whole writer). The 16 live gateways are all `exit-only`, where
+  awk is not in the stream, so B1 fully fixes them. `RELEASE_1.md` step 6
+  (optional `tail` on one gateway) should mention it.
+* **S1 (should, a later fix, not this branch): take awk out of the visible
+  stream in `tail` mode.** `… | sanitize | tee >(capture_tail "$cap" >/dev/null)`
+  measured **0.3 s** with mawk: `tee` writes as it reads, gets EPIPE at once,
+  and the ring only reads. The cost is waiting for the process substitution
+  before the result post (bash ≥ 5.1 `wait $!`, or the ring writes to a temp
+  name and `mv`s, with a short bounded poll). Its own small chunk, gateway bash,
+  security sign-off.
+* **N1 (nit):** the slow-writer test skips mawk in **both** modes, but in
+  `exit-only` awk is not in the pipeline, so the mawk/exit-only case can run.
+  Skip only `mawk` + `tail`.
+* **N2 (nit):** without `stdbuf` the syslog line is written on every call. All
+  gateways are systemd hosts with coreutils, so this will not fire in
+  practice; fine as is.
+
+**Merge order:** security signs off → I merge this into `feature-roadmap` →
+F12 merges `feature-roadmap` forward again (it does **not** have B1 yet: the
+F12 report said "B1 came with the merge", but `sanitize` on F12 is still
+plain `sed`) → security re-checks the merged F12 gateway diff → I merge F12.
+
+**Security reviewer sign-off: buffering fix (`fix/stream-unbuffered` at
+`981f467`, gateway diff `5b0f5e4`), 2026-11-10: approved.**
+
+* **B1 is right.**
+  - `stdbuf` is looked up once on the fixed `PATH`, after the environment is
+    scrubbed. Its `LD_PRELOAD` reaches only `sed`.
+  - The redaction expressions are unchanged, and the fallback writes to
+    syslog only.
+  - With `exit-only` capture, which is every live gateway, awk is not in the
+    stream, so B1 fully closes the slow-writer gap there.
+* **The rejection of B2 is accepted.** `-W interactive` splits or truncates
+  long lines, which corrupts the agent's stream. A wrong stream is worse
+  than a late stop.
+* **The residual risk is accepted, with limits.** On mawk with `tail`
+  capture, a slow writer can outlive a disconnect until awk's input buffer
+  fills. This uses resources but gives no access beyond what was approved.
+  F19's time limit bounds it for unattended runs. Conditions:
+  - `RELEASE_1.md` step 6 says so for anyone turning on `tail` capture on a
+    mawk host.
+  - The SIGPIPE-ignored case stays out of scope: sshd gives its children the
+    default handling.
+  - N1 is worth doing: run the mawk plus `exit-only` case instead of
+    skipping it.
+* **For the later tee-based fix (S1), when it comes to me:**
+  - It brings back a second process that the script waits for, which is the
+    shape that hung CI. The wait must be bounded: a short poll with a hard
+    deadline, after which the result post goes without the capture. It must
+    never be an unbounded `wait`.
+  - The capture must be written to a temporary name and renamed, so a
+    half-written capture is never posted.
+  - Test: a capture process that never exits does not hold the call.
+* **Merge order:** as the feature reviewer wrote. I check the merged F12
+  gateway diff, which picks up B1, before F12 merges.
+
+### Round 7 — N1 (test-only)
+
+**Commit: test change only** (`tests/test_f5_exec_results.py`), plus the
+`RELEASE_1.md` step 6 note the security sign-off made a condition.
+
+* **N1 — the mawk skip is now `mawk` + `tail` only.** In `exit-only` capture
+  `awk` is not in the pipeline, so the mawk case says nothing about mawk: it
+  runs, and the `mode == 'tail'` guard replaces the old `awk_name == 'mawk'`
+  skip. The skip reason now states why (mawk reads stdin in 4 KiB blocks, so
+  the tail ring cannot see the first line early; 10.7 s measured).
+  The matrix here (mawk 1.3.4, no gawk in this container): `mawk`/`exit-only`/
+  **default** runs and passes (about 0.3 s to the disconnect, command gone);
+  `mawk`/`tail` skips; the `gawk` parameters skip as before (not installed);
+  SIGPIPE-ignored keeps its own skip in both modes — that is GNU `sed` on
+  EPIPE, not the awk in the path. On the two F5 files: `58 passed, 21 skipped`
+  with this change, `57 passed, 22 skipped` without it — one case moved from
+  skip to pass, nothing else.
+* **`RELEASE_1.md` step 6** now names the mawk/`tail` residual for anyone
+  turning on `tail` capture, as the sign-off required.
+* **S1 is not done here** (the `tee`-based tail, its own chunk with a bounded
+  wait, per the sign-off); the merge order from the review stands, and F12 is
+  not merged forward on this branch.
+
+`bash scripts/verify.sh`: `2351 passed, 21 skipped, 7 warnings in 430.97s (0:07:10)`
+(gawk is not installed in this container, so the 15 `gawk` parameters skip —
+unchanged by this commit; CI runs them).
 
 ---
 
