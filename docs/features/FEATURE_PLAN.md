@@ -6261,6 +6261,13 @@ one change before code (Q1).** D1–D4 and S1 are folded in correctly:
 After Q1, to the security reviewer, for the sections that change (§ 3, plus
 § 4 if Q2 changes it).
 
+**Design round 4 (feature reviewer, 2026-11-10, `9b355a4`): approved; to the
+security reviewer (§ 2.6a).** Q3 is folded: the MCP branch ends in
+`capture_tail "$ESHU_MCP_CAP" 65537 >/dev/null`, with the 2 MiB / no
+`run_limit` test. The B4 correction is right (no `-W interactive`; on a newer
+mawk it truncates rather than splits). As the round 4 note says, F19's time
+limit, not buffering, is the bound for unattended runs.
+
 ---
 
 ## 7. Backlog (not planned in detail)
