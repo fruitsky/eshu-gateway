@@ -9518,6 +9518,79 @@ the local `chore/ci-pin-ubuntu-24-04`. AD3: the stray file is removed
 (`4a86f81`). Nit, optional: `case "$TIMEOUT_VERSION" in *'GNU coreutils'*)`
 avoids the last pipe completely.
 
+**Security reviewer — gateway bash (2026-11-10, `90c4df7` + `6b30707`):
+approved on two small conditions (AF1, AF2). The feature reviewer checks them
+with their tests; they don't need to come back to me.**
+
+What is right:
+* **Run limits:** three parse results, `min()` per field, and the first
+  limit sticks.
+* **The capability:**
+  * it is GNU `timeout` only and reported on every request;
+  * a limit on a gateway without GNU `timeout` is refused, not half-applied;
+  * uutils and BusyBox report none, so their unattended rows stay pending.
+* **W1:** one `run_dir_safe()` covers the F5, F12 and F19 files. The probe is
+  created only after the check passes, and an unsafe directory refuses a
+  limited run.
+* **The pipeline:**
+  * `cap_raw` bounds the raw stream before `sed` sees it;
+  * the probe holds only sanitized bytes, at most `bytes + 1`;
+  * the exit code comes from `PIPESTATUS[0]`;
+  * a time stop is 124 or 137 plus the elapsed-time guard, and "cut" is
+    decided by the probe's size, never by scanning the output.
+* **L3:** the MCP branch claims by id in the same round trip, checks the
+  command and ticket owner, and exits through `finish`. The poller never
+  gets these rows.
+* **N-b:** the three installers embed the script byte for byte, and the dev
+  installer now has F12 and F19.
+
+Conditions:
+* **AF1 (must): a row marked unattended with no usable limit must refuse,
+  not run without a limit.**
+  * `parse_run_limit` reads a missing or `null` `run_limit` as "absent",
+    which correctly means "a human approved this".
+  * But `/api/ticket` sends `run_limit: null` beside `unattended: true` when
+    the stored limit does not parse. `/api/request_status` drops the field
+    in the same case (`except …: pass`) while still sending
+    `unattended: true`.
+  * Either way the gateway runs without a limit, though the dashboard has
+    said this is an unattended row.
+
+  Fix, on both sides:
+  * the gateway's parser answers `invalid` when `unattended is True` and the
+    limit is not a valid dict;
+  * the poll loop also runs `parse_run_limit "$CLAIM_BODY"` after a claim,
+    as the MCP branch does;
+  * both endpoints send a marker the gateway refuses (an empty dict, for
+    example), never `null` and never nothing.
+
+  Test: an unattended row whose stored limit is corrupt is refused on the
+  MCP path and on the poll path.
+* **AF2 (must): do the range check in Python.**
+  * Python prints any size of integer. Bash `[ -lt ]` on a value over 2^63
+    fails with an error, and inside `if`/`||` that error counts as false. So
+    `[ "$secs" -lt 5 ] || [ "$secs" -gt 300 ]` lets a huge value through as
+    `valid`.
+  * GNU `timeout` treats a huge duration as effectively unbounded.
+  * Only the dashboard can send it, but L2's rule is "unparsable refuses".
+
+  Fix: check `5 <= s <= 300` and `65536 <= b <= 8388608` in the Python
+  that already parses the JSON, and keep the bash checks as a second layer.
+
+  Test: `seconds: 10**30` is refused.
+
+Should, on the next gateway-bash branch:
+* **AF3:** the session-signature check (around line 848) is still
+  `python3 -` with `SESSION_KEY` and `SESSION_KEY_PREV` passed in **argv**.
+  * Make it `python3 -I`, which the "all interpreters are `-I`" claim needs.
+  * Have Python read `/etc/eshu-session-key` and the `.prev` file itself.
+    A root process's argv can be read by every local user through `/proc`,
+    so the session key is exposed for the length of the check. This is from
+    before F19, but the line is being touched anyway.
+* **For the record:** a process that calls `setsid` still escapes the time
+  limit (the byte limit still holds). No read-lane verb does this, as
+  recorded in the design review.
+
 ---
 
 ## 7. Backlog (not planned in detail)
