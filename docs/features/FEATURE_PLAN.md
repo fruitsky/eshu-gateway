@@ -6096,13 +6096,13 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 9 | F13 | session-conclusions | dashboard + MCP | Merged | `feat/f13-session-conclusions` | F5, F6 | |
 | 10 | F8 | test-traffic | dashboard | Merged | `feat/f8-test-traffic` | — | low priority |
 | 11 | F9 | ha-supervisor-read | dashboard | Merged | `feat/f9-ha-supervisor-read` | — | token is now a dedicated `eshu` HA admin user |
-| 12 | F10 | ha-supervisor-actions | dashboard | **P1–P3 fixed, approved by feature reviewer** (`3aaa4ab`); security re-reads the P1–P3 diff | `feat/f10-ha-supervisor-actions` | F9, F3, Chunk H | security re-reads the P1–P3 diff only |
-| 13 | F11 | ha-config-files | dashboard | **Design round 5 approved after X1** (`0b84698`; checked on a real add-on), then security | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | then security reviewer on the design |
+| 12 | F10 | ha-supervisor-actions | dashboard | **R1–R2 added; approved by feature reviewer** (`1ff3106`); security reads P1–P3 + R1–R2 | `feat/f10-ha-supervisor-actions` | F9, F3, Chunk H | security re-reads the P1–P3 diff only |
+| 13 | F11 | ha-config-files | dashboard | **Design round 6 (X1) approved by feature reviewer** (`273999c`); to security for the full design | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | then security reviewer on the design |
 | 14 | F14 | inventory | dashboard + MCP | Merged | `feat/f14-inventory` | Chunk H | |
 | 15 | F15 | probes | dashboard + MCP | Ready after F12; pre-implementation notes P1–P8 | `feat/f15-probes` | F4, F12 | |
-| 16 | F16 | recipes | dashboard + MCP | **Round 4 (V1–V6) approved by feature reviewer** (`62b138b`); security re-reads Round 4 | `feat/f16-recipes` | F3, F12, F13 | security re-reads Round 4 only |
+| 16 | F16 | recipes | dashboard + MCP | **Security approved Round 4 with Y1 + W2**; Round 5 to feature reviewer only | `feat/f16-recipes` | F3, F12, F13 | security re-reads Round 4 only |
 | 17 | F17 | local-agent | dashboard + docs | Ready after F15; pre-implementation notes A1–A6 | `feat/f17-local-agent` | F12–F16 | |
-| 18 | F19 | unattended-limits | gateway + dashboard | **Round 4 (Q3) approved by feature reviewer** (`2286b43`); to security | `feat/f19-unattended-limits` | F4, F5 | then security re-review of § 3 |
+| 18 | F19 | unattended-limits | gateway + dashboard | **Design approved by security** (`d67ad02`); code after F12 merges (W1 at code time) | `feat/f19-unattended-limits` | F4, F5 | then security re-review of § 3 |
 | — | CI fix | ci-environment | gateway + tests | **Approved by feature reviewer** (round 5); CI green; **to security** (gateway bash) | `fix/ci-environment` | F5 | release precondition (`RELEASE_1.md`) |
 Chunks are done **in the order column**; each new chunk branches from the
 updated `feature-roadmap` after the previous one is merged.
