@@ -3036,7 +3036,9 @@ function conclusionHtml(c, runbookId) {
       '<button class="btn btn-muted btn-xs" onclick="cancelConclusionEdit(' +
       Number(c.id) + ')">Cancel</button>';
   } else if (c.status === 'draft') {
-    actions = '<button class="btn btn-approve btn-xs" onclick="confirmConclusion(' +
+    // F13 S3: say what confirming means; the text is served to other agents.
+    actions = '<span class="cc-hint">Agents will follow this once confirmed.</span>' +
+      '<button class="btn btn-approve btn-xs" onclick="confirmConclusion(' +
       Number(c.id) + ')">Confirm</button>' +
       '<button class="btn btn-muted btn-xs" onclick="startConclusionEdit(' +
       Number(c.id) + ')">Edit</button>' +

@@ -11,11 +11,15 @@ dependency. The FTS row is kept in step with the table by hand (there is no
 `content=` external table) so a rowid always maps to a conclusion id.
 """
 import json
+import re
 import time
 
 from db.core import db_conn
 
 CONCLUSION_STATUSES = ('draft', 'confirmed', 'rejected')
+# S2: a search string is matched term by term; cap the terms so one query can
+# never grow the SQL without bound.
+MAX_TERMS = 8
 
 
 class ConclusionError(Exception):
@@ -361,10 +365,16 @@ def search_runbooks(query, tags=None, limit: int = 5):
     where = ["c.status = 'confirmed'"]
     params = []
     if query:
-        needle = '%' + query.strip() + '%'
-        where.append('(r.title LIKE ? OR r.when_to_use LIKE ? '
-                     'OR r.tags_json LIKE ? OR c.summary LIKE ?)')
-        params += [needle] * 4
+        # S2: match per term, not the whole string. "nginx reload" must find a
+        # runbook whose title says "reload nginx" and whose summary says
+        # "certificate" -- the old single LIKE required the exact phrase to
+        # appear inside one field.
+        terms = [term for term in re.split(r'\s+', query.strip()) if term]
+        for term in terms[:MAX_TERMS]:
+            needle = '%' + term + '%'
+            where.append('(r.title LIKE ? OR r.when_to_use LIKE ? '
+                         'OR r.tags_json LIKE ? OR c.summary LIKE ?)')
+            params += [needle] * 4
     for tag in (tags or []):
         where.append('r.tags_json LIKE ?')
         params.append('%%"%s"%%' % str(tag).replace('"', ''))

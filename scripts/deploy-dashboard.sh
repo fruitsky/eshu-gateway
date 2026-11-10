@@ -18,6 +18,12 @@ cd "$(dirname "$0")/.."
 
 if [ "${1:-}" != "--no-pull" ]; then
   echo "== git pull --ff-only =="
+  # The running dashboard rewrites dashboard/static/dev/eshu-gateway-install.sh
+  # (its dev-push path), so a live checkout is dirty and `pull --ff-only`
+  # refuses — the deploy would stop before restarting anything. Reset that
+  # generated tree *before* the pull (RELEASE_1.md precondition 2). The
+  # post-pull checkout stays as the safety net for the rest of static/.
+  git checkout -- dashboard/static/dev/ 2>/dev/null || true
   # A pull can replace this very file. Bash reads scripts incrementally, so the
   # remaining lines would be read from shifted offsets (which silently ran the
   # *old* verification block after an update). Re-exec when the helper changed.

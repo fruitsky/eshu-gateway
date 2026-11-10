@@ -213,6 +213,15 @@ The dashboard is deployed first; gateways update later via Build → Edge → Fl
   include a Raspberry Pi 1: no extra `python3` start on the hot path. The
   gateway runs as root via `sudo`; temp files only via `mktemp -p /run/eshu`
   (the private 0700 work dir the poller creates — refuse if it is missing or a symlink).
+* **F5 capture is byte-bounded and best effort.** `capture_tail` runs `awk`
+  with `LC_ALL=C` and keeps the last 16 385 bytes in a ring of lines (linear
+  cost, file written at `END`). The cap counts **bytes**; in a UTF-8 locale
+  gawk counts characters. A stream that does not end in a newline stores one
+  extra newline: portable awk cannot see the missing newline (only gawk's
+  `RT`), so this is accepted rather than emulated — `tee` was byte-exact here.
+  The command's status is `PIPESTATUS[0]` of the stream, never the trimmer's;
+  a capture that cannot be written logs `CAPTURE FAILED` and changes nothing
+  else.
 * No drive-by refactors, renames or reformatting.
 
 ---
@@ -3292,6 +3301,126 @@ Full gate:
 (1779 before this round + 5 new tests: two disconnect, oversized body, no
 audit event, lockbox window.)
 
+### Round 3 — the CI hang in the capture reader (fix)
+
+GitHub's `Run test suite` failed on every push from F5 onward: six gateway
+tests timed out (`exit_zero_posts_result`, `nonzero_exit_posts_result`,
+`agent_output_unchanged`, `sanitize_before_capture`, `temp_files_removed`,
+`result_post_failure_is_harmless`), all of them a `tail`-mode run with under
+16 KiB of output, while the same tests passed on every machine tried here
+(fresh venv with only `requirements-dev.txt`, clean `/etc`, C locale, 6× CPU
+oversubscription, a real Ubuntu 24.04 rootfs as uid 1000).
+
+The reader was the problem: `{ tail …; cat …; } < "$FIFO" &` plus `wait`.
+On the runners it never saw EOF, so the call (and with it the test's
+`subprocess.run`) waited for ever; a gateway call that never returns is a
+root process that never returns. Making the wait bounded and detaching the
+reader's stdio turned the hang into a visibly empty capture and proved the
+reader was the stuck part (`CAPTURE READER WEDGED` in the log).
+
+**The reader is gone.** `capture_tail()` keeps the last 16 KiB + 1 *in the
+stream*: one `awk` that passes every line through to the agent
+(`print; fflush()`), keeps a bounded window in memory, and writes the file at
+`END`. No FIFO, no second process, no wait, so there is nothing that can
+wedge. The properties the FIFO existed for are unchanged and tested: output
+still streams live (`test_f5_gateway_output_streams_live`), the stream is
+still never cut on a disconnect (E1 tests), the stored bytes are still capped
+at 16 KiB, and a failing trimmer cannot change the command's exit code
+(the test now named `test_f5_gateway_unwritable_capture_keeps_stdout_and_exit`,
+see round 4). A capture that cannot
+be set up now logs `CAPTURE DISABLED` with the reason instead of silently
+degrading.
+
+`test_f5_gateway_dead_reader_keeps_stdout` was replaced by the two tests
+above: the reader it guarded no longer exists, and its replacement pins the
+behaviour that matters.
+
+`bash scripts/verify.sh`: `2330 passed, 7 warnings in 431.19s (0:07:11)`.
+
+### Round 4 — CI fix review round 3 (C1–C4)
+
+The reviewer reproduced four problems in `capture_tail()` on synthetic input.
+All four are fixed. The tests now run the function under **mawk and gawk**
+(whichever is installed; a missing one skips with a reason), because that is
+the environment difference that matters for a gateway: Debian and Ubuntu ship
+mawk as `awk`.
+
+* **C1 — the trimmer could change the exit code.** `set -o pipefail` reported
+  awk's status as the command's: an unwritable capture file turned rc 0 into 2
+  and rc 3 into 2. `rc` now comes from `PIPESTATUS[0]` of the stream (`set +e`
+  around the pipeline so `set -e` cannot exit before the sentinel and the
+  post). The non-capture branch takes `PIPESTATUS[0]` too, so a failing
+  `sanitize` can no longer mask the command either. The awk write is best
+  effort: its stderr is not pushed into the agent's stream, a failure logs
+  `CAPTURE FAILED`, the `EXIT` trap is quiet when the file is already gone,
+  and `post_exec_result` reads only a regular file. The old test stubbed
+  `tail`, which the run no longer calls, so it passed without exercising
+  anything; `test_f5_gateway_unwritable_capture_keeps_stdout_and_exit`
+  replaces it. The command replaces the `mktemp`ed capture path with a
+  directory (this fails as root too, unlike a `chmod`), prints 20 000 bytes
+  and exits 7; the test asserts rc 7, the full stream, `[ESHU exit=7]`, the
+  `CAPTURE FAILED` log and an empty stored output.
+* **C2 — quadratic cost.** The 16 KiB buffer was re-copied for every line
+  (26.6 s for `seq 2000000` with gawk). It is now a ring of lines with a
+  running byte total: drop the oldest while the rest is still ≥ 16 385 bytes,
+  trim the first line at `END` to exactly 16 385 bytes. That is
+  byte-identical to `tail -c 16385`, and 200 000 lines take ~0.3 s.
+  `test_f5_capture_tail_is_linear_in_the_output` bounds it at 10 s — loose
+  enough for a slow runner, still an order of magnitude below the quadratic
+  case.
+* **C3 — locale.** The cap is bytes, so awk runs with `LC_ALL=C`. In a UTF-8
+  locale gawk counts characters: the multibyte payload would store 19 835
+  bytes where the cap is 16 385, and mawk and gawk treat invalid byte
+  sequences differently. Payloads: multibyte text and invalid bytes, each
+  compared byte for byte with `tail -c 16385`.
+* **C4 — missing final newline.** Portable awk cannot see it (only gawk's
+  `RT`), so a stream that does not end in "\n" stores one extra newline.
+  Accepted rather than emulated, stated in § 2.7, and pinned by
+  `test_f5_capture_tail_matches_tail_c_16385[no-final-newline-…]`.
+
+**Why the old reader never saw EOF.** Not conclusively established: the
+bounded wait showed the reader blocked in `cat` waiting for EOF, so something
+still held the FIFO's write end after `tee` finished; which process that was
+was never identified. The reader is gone, so the question is closed either
+way.
+
+New file `tests/test_f5_capture_tail.py` lifts the `capture_tail` definition
+out of the script (asserting it is still there, under `LC_ALL=C`) and runs it
+with `awk` bound to each implementation: the cap and byte-exactness over
+varied, huge-single-line, empty-line, multibyte and invalid-byte payloads, the
+stream unchanged, linear cost, the write failure, and no log on success.
+
+Both installers were regenerated in this commit
+(`python3 dashboard/gen_installer.py`).
+
+`bash scripts/verify.sh`: `2352 passed, 7 warnings in 429.69s (0:07:09)`.
+
+### Round 5 — CI fix review round 4 (C5)
+
+* **C5 — dropped ring lines were never freed.** The ring advanced `head` but
+  left `line[head % 20000]` in the array until its slot was reused, so up to
+  20 000 dropped lines stayed resident: 200 MB of output peaked at 395 MB
+  resident instead of 16 KiB. The loop now `delete`s both `line` and `size`
+  for the slot it drops.
+  `test_f5_capture_tail_frees_dropped_lines` streams 2000 × 100 KB lines
+  through the function under `ulimit -v 65536` (64 MB) for each awk, so a leak
+  is fatal rather than slow, and still asserts the stored bytes are
+  `tail -c 16385`. Without the `delete`s the test fails under both awks; the
+  two-awk run takes about 2 s.
+
+Both installers were regenerated in this commit
+(`python3 dashboard/gen_installer.py`).
+
+`bash scripts/verify.sh` (gawk installed): `2354 passed, 7 warnings in 430.48s (0:07:10)`.
+`bash scripts/verify.sh` (gawk absent here, so its parameters skip):
+`2342 passed, 12 skipped, 7 warnings in 433.29s (0:07:13)`.
+
+**A test-oracle note.** On one CI run (`05d72f2`) the *linear* test failed
+while `capture_tail` had stored the correct 16 385 bytes: the oracle, a
+`tail -c 16385` subprocess, returned a 32.5 KB suffix. The test no longer
+depends on a tool it is not testing — `_tail` slices the payload in Python
+(`data[-CAP:]`), which is exactly what `tail -c CAP` means for a byte string.
+
 ### Reviewer notes
 
 **Design round 1 (2026-11-08): approved with changes.** Fold D1–D8 into the
@@ -3424,6 +3553,214 @@ and golden tests pass locally; implementer's full run 1784 passed. Installers
 regenerate with no diff, and `static/dev/` is untouched. No security sign-off
 is needed (§ 2.6a). The backlog keeps the argv exposure of the gateway token
 and of `/api/log`'s command (§ 11).
+
+**CI fix review, round 3 (2026-11-09): changes requested.** The diagnosis is
+good work: the `::error` annotations made GitHub's failure readable, and
+removing the second reader is the right fix. Nothing can wedge now. Four
+problems in `capture_tail()`, all reproduced with synthetic input:
+
+* **C1 (must): the trimmer can change the exit code.** `set -o pipefail` is on,
+  so if `awk` fails, the pipeline reports awk's status, not the command's.
+  An unwritable capture file (tmpfs full, `mktemp` file removed) turns rc 0
+  into 2, and rc 3 into 2. `test_f5_gateway_dead_trimmer_keeps_stdout_and_exit`
+  does not catch it: it stubs `tail`, which the run no longer calls, so it
+  passes without exercising anything. Fix: take the rc from
+  `PIPESTATUS[0]` (with `set +e` around the pipeline), and make the awk END
+  write failure-tolerant. Rewrite the test so the *awk* write fails (for
+  example, the capture path is replaced by a directory before the run) and
+  assert rc, stdout and `[ESHU exit=N]` are the command's.
+* **C2 (must): quadratic cost.** Every line copies the 16 KiB buffer.
+  `seq 2000000` through `capture_tail` takes 26.6 s with gawk and 2.8 s with
+  mawk, against 0.06 s for `cat`. A root process burning CPU on a large
+  `journalctl` or `find` in `tail` mode is a regression. A ring of lines
+  with a running byte total (drop the oldest lines while the total minus the
+  oldest is still over 16385, trim the first line at END) takes 1.7 s with gawk
+  and 1.0 s with mawk, and its file is byte-identical to `tail -c 16385`. Add
+  a test that bounds the time for ~200k lines generously (say < 10 s), so it
+  catches the quadratic case without being flaky.
+* **C3 (must): run awk with `LC_ALL=C`.** In a UTF-8 locale gawk's
+  `length`/`substr` count characters, not bytes, and invalid UTF-8 can be
+  handled differently by mawk and gawk. Bytes are what the cap means.
+  Test with multibyte output and with invalid bytes.
+* **C4 (should): a missing final newline is added.** `printf 'a\nb'` reaches
+  the agent as `a\nb\n`. `tee` was byte-exact. Portable awk cannot see the
+  missing newline (only gawk's `RT`), so either accept it and say so in § 2.7
+  and the F5 notes, or keep the agent's stream byte-exact by other means.
+  Either is fine; pin it with a test.
+
+Also: test under **mawk** as well as gawk. Debian and Ubuntu gateways ship
+mawk as `awk`, and CI images often have gawk. A test that runs the
+capture function under each awk that is installed (skip if absent) is
+enough. If you know why the old reader never saw EOF on the runners, add one
+line about it; it is not blocking.
+
+**Security gate:** this changes the root gateway script, so after C1–C4 the
+security reviewer checks the `capture_tail`/`run_sanitized` diff before merge
+(§ 2.6a). The CI annotation helper in `tests/conftest.py` is fine as it is.
+
+**CI fix review, round 4 (2026-11-09, `cf59287`): one fix left (C5).** C1–C4
+are fixed as asked. rc comes from `PIPESTATUS[0]` under `set +e`; the old
+`tail`-stub test is replaced by a directory-capture test; the ring is linear
+and byte-identical to `tail -c 16385` (checked here under gawk and mawk); and
+the C4 newline is documented and pinned. 163 capture, F5 and gateway tests pass
+locally.
+
+* **C5 (must): dropped ring lines are never freed.** The loop advances
+  `head` but leaves `line[head % 20000]` in the array until its slot is
+  reused, so up to 20000 old lines stay in memory. With 4000 lines of
+  100 KB (400 MB of output), maxrss is **395 MB** under gawk and 393 MB under
+  mawk. Adding `delete line[head % 20000]` before `head++` brings that to
+  **4.3 MB** and 3.1 MB, with the file still byte-identical to `tail -c 16385`.
+  Add a test that bounds memory: for example, 2000 × 100 KB lines through
+  `capture_tail` under `ulimit -v` of about 64 MB must succeed, under each awk.
+  Then this goes to the security reviewer, with the diff `9470cff..` on
+  `eshu-gateway.sh`.
+
+**CI fix review, round 5 (2026-11-10, `1423e77`): approved by the feature
+reviewer, waiting on security.** C5 is fixed: dropped slots are deleted.
+Rechecked here: 4,000 lines of 100 KB peak at 3.9 MB, and `seq 300000` is
+byte-identical to `tail -c 16385` under gawk and mawk. The `ulimit -v` test
+makes a leak fatal. 165 capture, F5 and gateway tests pass locally, and
+GitHub CI passes (3.10, 3.12, syntax). **Next:** the security reviewer checks
+the `eshu-gateway.sh` diff `9470cff..1423e77` (`capture_tail`,
+`run_sanitized`, `post_exec_result`). Then I merge.
+
+**Security reviewer sign-off: CI fix (`9470cff..1423e77`,
+`eshu-gateway.sh`), 2026-11-10: approved, with one test required before
+merge.** I read `capture_tail`, `run_sanitized` and `post_exec_result`. I did
+not run anything.
+
+*What holds:*
+
+* **Nothing is left to hang on.** There is no FIFO, no background reader and
+  no `wait`. The capture rides in the stream and is written by `END` in the
+  same process, so the gateway call ends when the pipeline ends.
+* **Exit code.** It comes from `PIPESTATUS[0]` with `set +e` around the
+  pipeline only, and `set -e` is restored straight after. A failing capture
+  can no longer change the command's exit code, and it cannot stop the
+  sentinel or the result post. The `[ESHU exit=N]` tests cover both
+  branches.
+* **The awk program never treats output as code.** Data is used only through
+  `print`, `length` and `substr`. The capture path comes in through `-v` and
+  is a `mktemp` name in the root-only 0700 directory, so nobody else can
+  swap the file under it.
+* **Memory and CPU are bounded.** The ring holds about 16 KiB plus one line,
+  the work grows in step with the output, and dropped slots are freed. The
+  slot count is safe, since no more than 16385 lines can be kept.
+  `LC_ALL=C` makes the cap count bytes.
+* **The capture is best effort.** A write failure reaches syslog, never the
+  agent's stream. `post_exec_result` checks `-f` and falls back to an empty
+  output on any read error.
+
+*Required before merge (the feature reviewer can check it; it does not need
+to come back to me):*
+
+* **D1. A disconnect test.** E1, "an agent disconnect still ends the
+  command", used to rest on `tee`. It now rests on awk dying when it writes
+  to a closed stdout, and no test covers that. A root command that outlives
+  its caller is exactly what this fix exists to prevent.
+  - Test, under mawk and gawk: run a command that writes a line every 0.1 s
+    for 60 s, through `run_sanitized` in `tail` mode. Close the reading end
+    after the first line.
+  - Assert that the gateway process and the command are gone within a few
+    seconds.
+  - Run it twice: once with the default SIGPIPE handling, which is what sshd
+    gives its children, and once with SIGPIPE ignored (`trap '' PIPE` in the
+    harness).
+  - If an awk keeps going in the ignored case, add `if (fflush() < 0) exit 1`.
+    The `fflush()` return check is portable.
+
+*Recorded, not blocking:*
+
+* **Three ways the agent's stream is no longer byte-exact.** In `tail` mode
+  awk now sits in the stream to the agent, which `tee` did not. A missing
+  final newline gets added (C4, accepted). Embedded NUL bytes may be handled
+  differently by different awks. A single huge line is held in memory once
+  more, on top of `sed`'s copy. None of this is a security change. The F19
+  raw byte cap (L5) bounds the memory for unattended runs.
+* **A misleading syslog line.** When awk is killed by a disconnect, the
+  `|| logger` line logs "CAPTURE FAILED". If that proves confusing, log the
+  exit status as well.
+* **Rebasing F12 and F19 onto this fix.**
+  - F12's `run_sanitized` still has the FIFO plus `tail -c 65537` reader for
+    the MCP envelope. When F12 rebases onto this fix, the MCP capture must
+    use this ring too: make the 16385 a parameter and send stdout to
+    `/dev/null` in MCP mode. No second reader may come back.
+  - The F12 rebase of `run_sanitized` comes back to me with F12's R1–R4 diff.
+  - F19's pipeline sketch (`head -c` and `PIPESTATUS`) should be rewritten
+    on top of this version.
+
+**D1 check (feature reviewer, 2026-11-10).** I wrote the test myself
+(`test_f5_capture_tail_ends_when_the_agent_disconnects`, under mawk and gawk,
+with SIGPIPE at its default and ignored): a command writing as fast as it can
+(`yes`), with the reader hanging up after one line. awk stops in all four
+cases, so `fflush()` needs no return check. 28 capture tests pass.
+
+The **slow writer from the D1 spec** shows something older than this fix. I
+used a line every 0.1 s and the reader hanging up after line 1, timing until
+the command stops:
+
+| pipeline | command keeps running |
+|---|---|
+| `sanitize \| tee` (F5, what is live today) | 41 s (the whole run) |
+| `sanitize \| capture_tail`, gawk or mawk | 39–41 s |
+| `stdbuf -oL sed … \| mawk -W interactive …` | 0.3 s |
+| `sed -u … \| capture_tail` (gawk) | 0.3 s |
+
+The cause is **`sanitize`**. GNU `sed` block-buffers its output into a pipe,
+so a slow command's first ~4 KB never reaches the closed connection, and the
+command never gets its SIGPIPE until then. That is true in **every** capture
+mode, including `exit-only` (`"$@" | sanitize`), so it is live on every
+gateway today. mawk also block-buffers its *input* from a pipe unless given
+`-W interactive`, which matters once `sed` is fixed. The CI fix is therefore
+**no worse than `tee`**, but the D1 spec as written fails for a reason the CI
+fix did not introduce.
+
+Proposed fix (two lines, gateway bash):
+* `sanitize`: `stdbuf -oL sed -E …`, with plain `sed` if `stdbuf` is
+  missing. That costs 0.8 s per million lines, against 0.1 s today; `sed -u`
+  costs 2.7 s.
+* `capture_tail`: add `-W interactive` when `awk -W version` reports mawk.
+  gawk prints a warning for that option, so detect mawk first; don't pass it
+  blindly.
+* The test exactly as specified (slow writer through `run_sanitized`, gone
+  within 5 s, both awks, both SIGPIPE modes), in `tail` **and** `exit-only`
+  modes.
+
+**Security reviewer on the D1 check (2026-11-10, `069cd59`): D1 is met,
+and the CI fix may merge now.** The disconnect test is what I asked for: awk
+stops under mawk and gawk, with SIGPIPE at its default and ignored, so
+`fflush()` needs no return check.
+
+The slow-writer result does not block this merge. It is not a regression:
+`sed` already block-buffered under `tee`, and the table shows the same 41 s
+before and after this fix. The disconnect test in this branch covers what
+the CI fix changed. A command that keeps running after its agent hangs up is
+a resource problem, not a privilege one: the command was already approved.
+It belongs in its own fix.
+
+**The buffering fix: a separate small gateway-bash branch, which comes back
+to me.** The proposed approach is fine. Conditions:
+
+* **B1. Make `sanitize` line-buffered with `stdbuf -oL sed -E …`.** Find
+  `stdbuf` on the fixed `PATH` once per call. When it is missing, fall back
+  to plain `sed` and log once to syslog, never to the agent's stream. The
+  redaction expressions stay exactly as they are. The existing sanitize
+  tests must pass unchanged, which shows line-buffering changes nothing that
+  is redacted.
+* **B2. Pass `-W interactive` only to mawk.** Detect mawk once per call:
+  `awk -W version 2>/dev/null` prints "mawk". Any other output, or an error
+  (BusyBox awk, gawk), means the option is not passed. Test with a stub
+  `awk` that fails on `-W version`.
+* **B3. The slow-writer test, exactly as the D1 spec describes it.** Run it
+  through `run_sanitized` in both `tail` and `exit-only` modes, under both
+  awks and both SIGPIPE modes. The command must be gone within 5 s. Add one
+  case with `stdbuf` absent, which records the slower fallback (no time
+  bound) and asserts that the output and the exit code are still correct.
+* **B4. Carry it forward to F12 and F19.** When F12 rebases, its MCP capture
+  uses the same `sanitize` and the same mawk detection. F19's pipeline (L4
+  and L5) builds on the line-buffered `sanitize`. F19's time limit stays the
+  bound for unattended runs, whatever the buffering does.
 
 ---
 
@@ -4682,404 +5019,11 @@ F14 merges second only needs to resolve the docstring.
 
 ### Implementer notes
 
-**Status: implemented, awaiting review.** The acceptance criteria include a
-reviewer security pass (try to reach every FORBIDDEN endpoint), so this note
-lists where to push and what the tests already prove.
-
-**Commit:** the code and tests are in `1e14827` (`feat(f10): HA Supervisor
-actions (approval-gated)`) on `feat/f10-ha-supervisor-actions`. This note is
-a separate docs commit.
-
-#### 1. What was checked against the HA Core source
-
-Checked on 2026-11-09 against `home-assistant/core@dev`:
-
-* `homeassistant/components/hassio/websocket_api.py` — the `supervisor/api`
-  command requires `endpoint` (string) and `method` (string), accepts optional
-  `data` (dict), `params` (dict) and `timeout` (number), is `@require_admin`,
-  and hands `data` to the Supervisor passthrough client; the WS result is
-  `result["data"]`. `hassio/update/addon` requires `addon` (str) **and**
-  `backup` (bool); `hassio/update/core` requires `backup` (bool). Both are
-  `@require_admin` and delegate to `update_helper.update_addon/update_core`.
-* `homeassistant/components/hassio/const.py` — `WS_TYPE_API = "supervisor/api"`.
-* `homeassistant/components/hassio/update.py` / `update_helper.py` — the
-  update WS commands schedule the same work the Supervisor's
-  `/addons/{slug}/update` and `/core/update` endpoints do; the command returns
-  after the Supervisor call completes, which is the source of the timeout note
-  in §5.
-
-**Not verifiable from that source:** the Supervisor itself is closed-source,
-so the REST endpoint names and payloads (`/backups/new/full`,
-`/backups/new/partial`, `/core/restart`, `/host/reboot`,
-`/addons/{slug}/{action}`) come from the Supervisor API docs and this chunk's
-spec, not from HA Core. That is recorded as open question 1 rather than
-assumed silently.
-
-#### 2. The table
-
-`core/ha_supervisor.SUPERVISOR_ACTIONS` maps each tool to one fixed
-(endpoint, method) pair; `WS_ACTIONS` holds the two update commands. The agent
-supplies arguments only, and only as validated placeholders:
-
-| Tool | Fixed target | Arguments | Notes |
-|---|---|---|---|
-| `ha_addon_action` | `POST /addons/{slug}/{action}` via `supervisor/api` | `slug`, `action` | `action` must be one of start/stop/restart (the only `{action}` values in the table) |
-| `ha_addon_update` | WS `hassio/update/addon` | `slug`, `backup` | |
-| `ha_core_update` | WS `hassio/update/core` | `backup` | |
-| `ha_backup_create` | `POST /backups/new/full` or `/partial` | `name`, `partial_addons`, `partial_folders` | the *payload* decides partial vs full; nothing agent-supplied reaches the path |
-| `ha_core_restart` | `POST /core/restart` | — | refused unless a valid `ha_check_config` ran on this integration in the last 10 min |
-| `ha_host_reboot` | `POST /host/reboot` | — | seeded **disabled**; summary is `REBOOTS THE WHOLE HA HOST` and the card renders it in red |
-
-All six are `read_only: False`, `always_gate: True`, `handler:
-ha_supervisor_action`, so each call creates a pending approval and **nothing
-runs before the operator approves it**. Freeze refuses before queueing (the
-generic F9 path, tested). `ha_check_config` now has a handler so its result is
-recorded in `meta` under `ha_check_config_<integration>` (`result`, `at`): a
-valid check on one HA instance never vouches for another.
-
-#### 3. FORBIDDEN
-
-`FORBIDDEN` lists restore (`/backups/`), add-on options/install/uninstall
-(`/addons/`), `/supervisor/options`, `/host/shutdown`, `/store/repositories`,
-`/auth*`, `/security*`, `/os/datadisk*` and `/os/boot-slot`. A table test
-walks every endpoint the read and action tables can produce and every WS
-command, and fails if one starts with a forbidden prefix. The one deliberate
-exception is documented in the test: `/backups/new/full|partial` are the only
-`/backups/` paths reachable, and `/addons/{slug}/{start|stop|restart}` the only
-`/addons/` ones. The generic WS tools remain unable to send
-`supervisor/`/`hassio/` commands at all (F9 R2), and an approved pending call
-runs the *handler*, not a raw command, so that does not change here.
-
-#### 4. `call_service(domain='hassio')`
-
-Refused with an audited `hassio_domain_refused` (403) before any queue entry,
-unless the agent's own policy lists `hassio` in the `ha_call_service`
-`domain_allow` list — the operator's explicit, audited escape hatch. The
-refusal message points at the F10 tools. Tested both ways, plus the "other
-domains are untouched" case.
-
-#### 5. Preflight, the summary, and timeouts
-
-* Each action is validated by `_preflight_ha_supervisor_action` *before* the
-  approval is created: bad slug, bad action, bad backup name, an update with
-  no version available (`ha_update_not_available`) and a restart without a
-  recent valid check are refused instead of queued.
-* A viable action returns `{'_summary': …}`. `tool_runner` stores it in the new
-  `pending_integration_calls.summary` column, and the approval card renders it
-  (a red line for the reboot). The add-on update summary is
-  `addon_update | <slug> | <current> -> <target>`, read from
-  `/addons/{slug}/info`; core update reads `/core/info`.
-* **Timeouts (found while checking the source):** `supervisor/api` defaults
-  its per-call `timeout` to **10 s**, and updates/backups can run for minutes.
-  The action path therefore sends `timeout: 600` for backups and `120` for the
-  other supervisor/api calls, and raises the WebSocket read timeout to 620 s
-  (backup/update) or 60 s (everything else). Reads keep the 30 s default.
-
-#### 6. Plan items of type `mcp`
-
-`session_plan_items` gains `kind` (`ssh` default, so pre-F10 rows are
-unchanged), `integration`, `tool` and `args_hash`. An `mcp` item is proposed as
-`{kind: "mcp", integration, tool, args: {...}, max_uses}` and the dashboard
-stores the **hash only** — an HA service payload can carry a secret, and a plan
-row is rendered in the UI. Matching in `tool_runner` is integration + tool +
-the exact argument hash, one use per claim, through the same conditional
-UPDATE as the SSH claim; a different argument hash never matches. The SSH
-claim now filters `kind='ssh'`, so the two item types cannot cross-claim.
-
-#### 7. Tests
-
-`tests/test_f10_ha_supervisor_actions.py` (39) covers every case in the chunk:
-right endpoint/payload per action; unknown action and bad slug refused; restart
-without a recent valid check refused and queued after one; the reboot tool
-seeded disabled; the FORBIDDEN table walk; `call_service` with `hassio`
-refused by default and allowed only with an explicit policy; the preflight
-summary; an `mcp` plan item approving exactly one matching call and nothing
-else; freeze queueing nothing. `tests/test_ha_mcp.py` and
-`tests/test_integrations.py` were updated for the six new seeded tools.
-
-`bash scripts/verify.sh`: `2370 passed, 7 warnings in 445.42s (0:07:25)`.
-
-#### Open questions
-
-1. The Supervisor REST payloads (backup create, restart, reboot, add-on
-   action) are closed-source; they come from the Supervisor API docs and this
-   chunk's spec. Please confirm `/backups/new/partial` takes
-   `{name, addons, folders}` against a live Supervisor before this ships.
-2. A slow add-on/Core update can exceed the 620 s read timeout. The Supervisor
-   continues the update; the tool then reports a timeout, which reads as a
-   failure to the agent. Options: a fire-and-poll mode (start, then read
-   `ha_addons`/`ha_core_info` for `version`), or a larger cap. This is a UX
-   decision, not a security one.
-3. The reboot warning is a red meta line driven by the tool name + summary.
-   A dedicated "destructive" card style belongs to the UI pass.
-
-### Round 2 — fixes for reviewer round 1 (M1–M2, S1)
-
-**Commit: `5ceb569`** on `feat/f10-ha-supervisor-actions`.
-
-* **M1 — the generic HA REST tools reached the Supervisor.**
-  `core/ha_supervisor.is_supervisor_rest_path` decodes the path, lowercases it,
-  collapses `//`, strips a leading `/` and an `api/` prefix, and matches
-  `hassio` and `services/hassio` (exact or as a prefix). `core/tool_runner`
-  refuses a HA-kind HTTP call **before gating**, so no approval card is ever
-  created and no upstream request is made; the audit row is
-  `rest_supervisor_refused` with `reason_code='supervisor_rest_refused'`.
-  `execute_integration_call` (rendered curated path) and
-  `execute_generic_call` (the generic path, and the `verify_path` GET) re-check
-  it, so an already-approved pending call is refused too (the F9 R2 shape).
-  Tests, in `TestSupervisorRestGuard`: every spelling (`/api/hassio/…`,
-  `api//HASSIO//…`, `/api/%68assio/…`, `/api/services/hassio/…` and the
-  services spelling with a percent-encoded `h`) is refused by both the generic
-  read and the generic write, with `mock_upstream['requests'] == []` and no
-  pending call; an approved pending call is refused and runs nothing; every
-  FORBIDDEN prefix has a REST spelling; no curated HA template names a
-  Supervisor path; and the refusal is audited.
-  **Checked against HA Core (`components/hassio/http.py`, `dev`,
-  2026-11-09):** `HassIOView` is registered at `/api/hassio/{path:.+}` and
-  both `get` and `post` proxy to the Supervisor. It is admin-only except for
-  the add-on logo/icon paths, and `backups/…`, `addons/<slug>/logs/…` and the
-  log tails have **no timeout** (`NO_TIMEOUT`), so a generic call could also
-  park a request for ever. `/api/services/hassio/<service>` is the ordinary
-  Core service API for the `hassio` domain. The view rejects a path that is
-  not equal to its `unquote`, so HA itself decodes once; the guard refuses
-  rather than normalising-and-sending.
-* **M2 — MCP plan items were not bound to the caller.**
-  `claim_mcp_plan_item` takes the calling agent and joins `sessions` in the
-  same statement as the claim (`s.agent != '' AND s.agent = ?`), so a
-  concurrent ownership change cannot slip between the check and the use, and
-  an ownerless session (or no authenticated agent) matches nothing — F3 SR2's
-  fail-closed rule. `tool_runner` passes the authenticated agent name, not the
-  `mcp` display label. Tests: `test_another_agents_session_is_not_claimable`
-  (B's call is queued for the operator, A's item keeps its use and runs
-  exactly once) and `test_an_ownerless_session_is_not_claimable`.
-* **S1 — `ha_host_reboot` was plan-coverable.**
-  `_validate_mcp_item` refuses an `mcp` item naming `ha_host_reboot` when the
-  plan is proposed (`PlanError('not_plan_coverable')`), so every reboot has its
-  own approval card. Test: `test_host_reboot_is_not_plan_coverable`.
-
-`bash scripts/verify.sh`: `2393 passed, 7 warnings in 458.83s (0:07:38)`.
-
-### Round 3 — N1 (round 2 review): non-canonical paths
-
-**Commit: `2f0fdf1`.**
-
-`is_supervisor_rest_path` now refuses a path **whatever its prefix** when it
-is not canonical:
-
-* it is percent-decoded **until stable** (one pass let `%252e%252e` become
-  `%2e%2e`, which the proxy then decoded);
-* any `.` or `..` segment, a backslash, or a NUL/control character is
-  refused — HA has no legitimate API path with those;
-* only then are `//`, the leading `/` and an `api/` prefix stripped and the
-  Supervisor prefixes checked, as before.
-
-Refusing beats normalising because the bytes sent must be the bytes checked:
-`urllib` sends the path verbatim, and nginx/NPM in front of HA resolves dot
-segments and decodes `%2e`, so `api/states/../hassio/backups/x/restore`
-would otherwise reach the Supervisor.
-
-The table runs seven spellings through **all three checkpoints** (21 tests):
-`api/states/../hassio/backups/x/restore`, `api/./hassio/host/reboot`,
-`api/states/%2e%2e/hassio/x`, `api/services/./hassio/x`,
-`api/hassio\backups`, `api/services/%252e%252e/hassio/x` and a NUL byte.
-`test_a_non_canonical_path_is_refused_before_gating` (no pending call, no
-upstream request), `..._by_the_curated_executor` (`execute_integration_call`)
-and `..._by_the_generic_executor` (`execute_generic_call`) each assert a 403.
-
-`bash scripts/verify.sh`: `2414 passed, 7 warnings in 469.74s (0:07:49)`.
+_(fill in)_
 
 ### Reviewer notes
 
-**Round 1 (2026-11-09, main feature reviewer): changes requested.** 177 F10,
-F9, F3, HA and integration tests pass locally.
-
-*What holds:*
-
-* Every action is always-gated and audited, and freeze blocks it.
-* `SLUG_RE` (`^[a-z0-9_]{1,64}$`) makes path tricks in slugs impossible.
-* Shapers pass only named fields, so `options` never reaches an add-on.
-* `ha_host_reboot` is seeded disabled.
-* `ha_core_restart` needs a recent valid config check.
-* `call_service(domain='hassio')` is refused unless allowed (domain check
-  is trimmed and case-folded).
-
-*Must fix:*
-
-* **M1 The generic HA REST tools reach the Supervisor.** F9 R2 closed
-  `ws_write`, but the HA integration's generic REST `read`/`write` are not
-  checked for:
-  * `/api/hassio/…`, HA Core's Supervisor proxy, which admin tokens can use;
-  * `/api/services/hassio/…`, the same services `call_service` now refuses.
-
-  So "FORBIDDEN endpoints are unreachable from every tool" does not hold:
-  a backup restore or host shutdown is one approval away through the
-  generic write. Fix: in `tool_runner`, for HA-kind integrations, refuse a
-  generic REST call whose normalised path (percent-decoded, lowercased,
-  `//` collapsed, leading `/` and an `api/` prefix stripped) starts with
-  `hassio/` or `services/hassio/`, before gating and when a pending call is
-  approved (mirror F9 R2).
-  * Extend the FORBIDDEN table test to walk **every** HA tool, including the
-    generic read and write, with each spelling.
-  * Confirm against HA Core's `components/hassio/http.py` which `/api/hassio`
-    paths exist, and record it in the notes.
-* **M2 MCP plan items are not bound to the caller.** `claim_mcp_plan_item`
-  matches on `session_id`, integration, tool and the argument hash. But an
-  MCP caller can name **any** session id (`resolve_session` takes the
-  explicit value as is). Agent B could therefore spend agent A's approved
-  "update add-on X" item. Require the session's owner to equal the calling
-  agent (fail closed for ownerless sessions, as in F3's SR2) before
-  claiming. Tests: B cannot claim A's item, and A claims it exactly once.
-
-*Should fix:*
-
-* **S1** `ha_host_reboot` should never be plan-coverable. Each reboot gets
-  its own approval card with the red line. Refuse `mcp` plan items naming
-  it when a plan is proposed.
-* **S2** Answer to the open questions: keep the partial-backup payload
-  behind a "verify against a live instance" note. Raise long-update
-  timeouts as their own setting, not the shared read timeout. The
-  "destructive" card style goes to the UI pass list.
-
-**Needs the security reviewer before merge (§ 2.6a).** F10 adds a new
-auto-approve path for integration calls (plan items of kind `mcp`), in
-addition to the Supervisor actions.
-
-**Round 2 (2026-11-10, `5ceb569`): one fix left (N1).** M2 and S1 are fixed
-as asked:
-* the MCP plan claim joins `sessions` and requires `s.agent = owner`, with
-  ownerless sessions matching nothing, in the same statement as the claim;
-* `ha_host_reboot` can never be a plan item.
-
-M1's three checkpoints are right: before gating, in the curated executor and
-in the generic executor. 95 F10 and F3 tests pass locally.
-
-* **N1 (must): dot segments get past `is_supervisor_rest_path`.** It decodes
-  once and checks a prefix, but never resolves `.` or `..`:
-  * `api/states/../hassio/backups/x/restore` → not refused;
-  * `api/./hassio/host/reboot` → not refused;
-  * `api/states/%2e%2e/hassio/x` → not refused;
-  * `api/services/./hassio/x` → not refused;
-  * `api/hassio\backups` → not refused.
-  
-  `urllib.request` sends these paths exactly as given. A reverse proxy in
-  front of HA (nginx, which is what NPM is) resolves dot segments and
-  decodes `%2e`, so the request can still reach `/api/hassio/...`. Fix: in
-  the check, unquote **until stable**, then **refuse** any HA REST path that
-  contains a `.` or `..` segment, a backslash, or a NUL/control character,
-  whatever its prefix. HA has no legitimate API path with those. Only then
-  apply the prefix check. Refusing beats normalising, because the bytes sent
-  must be the bytes checked. Add the five spellings above, and
-  `%252e%252e`, to the table test, through all three checkpoints.
-
-**After N1:** to the security reviewer (§ 2.6a), with the M1 table, N1 and
-the `mcp` plan-claim owner binding as the points to check.
-
-**Round 3 (2026-11-10, `2f0fdf1`): approved by the feature reviewer,
-to security.** `is_supervisor_rest_path` now unquotes until the path stops
-changing. It then refuses any dot segment, backslash or control character,
-whatever the prefix, before the prefix check. I re-probed it with 15
-spellings: every round 2 bypass, plus `%252e%252e`, `..%2f`, `hassio%2f`,
-upper case, a trailing `..` and `%00`. All are refused, while
-`api/states/light.kitchen`, `api/services/light/turn_on` and an encoded
-space still pass. 116 F10 and F3 tests pass locally.
-**Next:** the security reviewer (§ 2.6a). Points to check: the M1 three
-checkpoints and N1, the `mcp` plan-claim owner binding (M2), and
-`ha_host_reboot` never being plan-coverable (S1).
-
-#### Security reviewer sign-off
-
-**Code review (`3a6f65b`), 2026-11-10: changes requested (P1–P3).** I read
-`ha_supervisor.py`, the three checkpoints in `tool_runner.py` and
-`integration_proxy.py`, `session_plans.py`, the `session_plan` MCP tool and
-the approval-mode lookup. I did not run anything.
-
-*The three points I was asked to check hold:*
-
-* **M1 and N1, the path guard.**
-  - The guard runs at all three checkpoints: before gating, in the curated
-    executor and in the generic executor. An already-approved call is
-    re-checked when it runs.
-  - Decoding until the path stops changing, then refusing dot segments,
-    backslashes and control characters whatever the prefix, is the right
-    shape. Refusing beats normalising.
-  - I found no spelling that gets past it through the query string, `;`,
-    repeated encoding or case.
-* **M2, the owner binding.** The plan claim checks the session's owner in
-  the same statement, so an ownerless session or an unauthenticated caller
-  matches nothing.
-* **S1.** `ha_host_reboot` can never be a plan item.
-
-*Must fix:*
-
-* **P1. An operator can approve a plan item without being able to see what
-  it does.**
-  - `_validate_mcp_item` accepts an `args_hash` from the agent with no
-    `args`. Even when `args` are given, only the hash is kept.
-  - The operator's plan card therefore shows `mcp: <integration>.<tool>
-    (<12 hex chars>)`, and they approve bytes they cannot read.
-  - Any tool can be a plan item, including the HA generic write and
-    `call_service`. There, the hidden arguments are an arbitrary path and
-    body.
-  - Fix 1: refuse a bare `args_hash`. `args` are required.
-  - Fix 2: when the plan is proposed, keep a display copy of the arguments
-    for the plan card, with secret-looking keys redacted by the existing
-    scrubber, and match on the hash as now. For a handler tool, also store
-    its preflight summary, for example `addon_update | slug | 1.2 -> 1.3`,
-    and show that.
-  - Fix 3: make plan coverage an allowlist, not one excluded tool. Only the
-    curated F10 actions can be plan items: add-on action, add-on update,
-    Core update, backup create and Core restart. The generic read and write,
-    `call_service`, `ws_write` and the reboot never can. S1 then follows
-    from the allowlist.
-  - Tests:
-    - a bare hash is refused;
-    - the plan card shows the redacted arguments or the summary;
-    - a generic-write or `call_service` item is refused as
-      `not_plan_coverable`.
-* **P2. An agent's "ungated" override switches off `always_gate`.** In
-  `tool_runner`, `approval_mode() == 'ungated'` sets `should_gate = False`
-  after `always_gate` set it to True. The lookup also falls back to the
-  `ha.*`, `ha_*` and `*` wildcards.
-  - Result: an agent whose policy said `ha.*: ungated` before F10 now runs
-    backups, updates, restarts, and reboots once enabled, with no approval
-    card at all.
-  - Fix: on an `always_gate` tool, ignore `ungated`. Plans (P1) are the one
-    way to pre-approve these, and the reboot can never be pre-approved.
-    Audit an ignored override once per agent and tool, so the operator
-    learns why it had no effect.
-  - Tests: `*: ungated`, `ha.*: ungated` and an exact `ha.ha_core_update:
-    ungated` each still queue the call.
-* **P3. The config-check rule for a Core restart is checked only in
-  preflight.** Preflight runs only when the call is queued, so the rule is
-  skipped in three cases:
-  - a plan-claimed restart;
-  - an ungated one (until P2 is fixed);
-  - an approval that arrives long after the check went stale.
-
-  Fix: check "a valid `ha_check_config` within 10 minutes" again inside the
-  restart handler, right before the POST, and refuse with
-  `ha_check_config_stale`. Tests: a plan-claimed restart with no recent
-  check is refused; an approval that arrives after the check expired is
-  refused and nothing is sent.
-
-*Should fix:*
-
-* **S-a. Widen the Supervisor prefix to the whole first segment.** Refuse
-  any path whose first segment starts with `hassio`, which also covers HA's
-  add-on ingress proxy, `hassio_ingress`. Run the check on the full request
-  path, including any path that is part of the integration's own
-  `base_url`, not only on the tool's part. Test: a `hassio_ingress/...`
-  path is refused at all three checkpoints.
-* **S-b. Say where FORBIDDEN stops.** An approved generic HA write to the
-  automation, script or scene config API can define an action that calls
-  any `hassio.*` service, and running it reaches what FORBIDDEN names.
-  Scanning the body cannot catch this, because templates can build the
-  domain name. Document it in § 3: FORBIDDEN covers direct paths, and
-  approving a config write grants admin power. Give those approval cards
-  the same red line as the reboot. P1 already keeps them out of plans.
-
-**Verdict:** changes requested. Once P1–P3 have their tests, I review only
-that diff. F10 must not merge before then.
+_(reviewer)_
 
 ---
 
@@ -5357,6 +5301,41 @@ Follow-ups (S, non-blocking):
 * **S3** Confirmed runbooks are later read by other agents, so a confirmed
   text is effectively an instruction to them. The operator's Confirm is the
   only gate; say so in the review UI ("agents will follow this").
+
+### Round 2 — the reviewer follow-ups S1–S3
+
+Three small changes, each with its test; no schema change and no new tool.
+
+* **S1 — ownership fails closed.** `validate_payload` refused only when the
+  session had an owner and it differed, so an ownerless session accepted a
+  draft from any agent. It now refuses **whenever there is no owner** or the
+  owner differs (`session_not_yours`), matching F3's SR2 rule: a conclusion is
+  read by other agents later, so no one may write one into a session that has
+  nobody to vouch for the caller. The old "an adopted chat id stays usable"
+  rule is retired. Test: `test_f13_ownerless_session_is_refused_closed`, both
+  through `save_conclusion` and through `session_conclude`.
+* **S2 — runbook search matches per term.** `search_runbooks` compared the
+  whole query as one `LIKE '%…%'` over four columns, so "nginx 502" only
+  matched a runbook that contained that exact phrase in one field. The query
+  is split on whitespace (at most 8 terms, `MAX_TERMS`) and every term must
+  match at least one of title / when-to-use / tags / summary — an `AND` of
+  per-term `OR`s, still parameterised. Test:
+  `test_f13_runbook_search_matches_each_term` (terms across fields, an
+  unmatched term excludes, spacing/order/duplicates are harmless).
+* **S3 — the Confirm button says what it does.** The draft card now shows
+  "Agents will follow this once confirmed." next to Confirm
+  (`.cc-hint`, muted, 11 px). A confirmed card does not repeat it. Test: the
+  node harness asserts the hint is in the draft markup and not in the
+  confirmed one.
+
+`bash scripts/verify.sh`: `2333 passed, 7 warnings in 445.03s (0:07:25)`.
+
+**Follow-ups review (2026-11-09): approved and merged.** S1 fails closed for
+ownerless sessions, tested through the core call and the MCP tool. S2's
+per-term `LIKE`s stay parameterised and capped at 8. S3 uses existing tokens
+(`--text-micro`, `--text-quiet`). A user's `%` or `_` in a search term still
+acts as a `LIKE` wildcard. That is harmless (it only widens a search of
+confirmed runbooks), and it is left as it is.
 
 ---
 
@@ -5685,7 +5664,52 @@ _(implementer)_
 
 ### Reviewer notes
 
-_(reviewer)_
+**Pre-implementation notes (2026-11-09).** The outline is sound. Close these
+points in the implementation; each needs a test. F15 starts after F12 is
+merged.
+
+* **P1 (must): no option injection through a parameter.** `shlex.quote`
+  stops shell syntax but not a value starting with `-`. `unit=--help` or
+  `container=-v` is one quoted word that `systemctl` or `docker` still reads
+  as an option. Every type's first character must be alphanumeric:
+  * `unit` `^[A-Za-z0-9][A-Za-z0-9@._-]{0,127}$`;
+  * `container` is a Docker name `^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`, or a
+    vmid `^[0-9]{3,9}$`;
+  * `name` uses the F16 `fqdn` rule (labels of at most 63 characters, no
+    leading `-`, no `..`).
+  
+  Also put `--` before the operand wherever the tool accepts it.
+* **P2 (must): structured sources over parsing prose.** Take state from
+  `systemctl show -p ActiveState,SubState,ActiveEnterTimestamp,NRestarts
+  -- <unit>`, not by parsing `systemctl status`. NRestarts is the restart
+  count. Keep `status` out of the probe entirely, or use it for display only.
+* **P3 (must): say what happens without output capture.** The digest needs F5
+  `tail` output, and every live gateway is on `exit-only`. Pick one:
+  * the probe refuses with `capture_off` and a hint; or
+  * F12's per-request capture override applies to probe requests (only if
+    the F12 R4 rules allow it).
+  
+  Never return an empty digest as if all is well.
+* **P4 (must): don't block the MCP call.** Without F4 `on` (and `on` is
+  locked), every probe waits for approval. `diagnose_*` returns
+  `{status: "pending", plan_id}`, and `probe_result(plan_id)` returns the
+  digest when it is ready. The plan is proposed by the probe's code, not by
+  agent text, and an agent cannot approve it.
+* **P5 (must): scrub before the digest.** `docker logs` and `journalctl`
+  lines can carry tokens. Run the F5 scrubber over each output before
+  parsing, and test that a synthetic token in a log line never reaches the
+  digest.
+* **P6 (should): bounded commands.** `du` over `/var/log` can be slow on a
+  big host. Use `du -x -d 1 -- /var/log`, and rely on F19's time limit once
+  it lands. Until then, document that a probe can take as long as its
+  slowest command.
+* **P7 (should): make the cap testable.** "2,000 tokens" should be a byte or
+  character cap (for example 8,000 characters of JSON), with `truncated: true`
+  and the order things are dropped in (errors beyond the top 10 first, then
+  ports).
+* **P8 (should):** `dns_check` must say which gateway it uses: the one F14's
+  inventory maps the NPM proxy host to, else none (Pi-hole only). Never let
+  the agent name it.
 
 ---
 
@@ -5800,7 +5824,36 @@ _(implementer)_
 
 ### Reviewer notes
 
-_(reviewer)_
+**Pre-implementation notes (2026-11-09).** Close these points in the
+implementation; each needs a test. F17 starts after F15. F16's recipe tools
+are optional, so the preset must work without them.
+
+* **A1 (must): define "read-only `ssh_exec`".** The command is accepted only
+  if F4's `eligible()` would pass it, and anything else is **refused**
+  (`read_only_agent`), not queued for approval. A small model should not be
+  able to flood the operator with write requests. Enforce it on the server
+  from the agent's policy (`ssh_mode: 'read-only'`), never from the tool
+  description.
+* **A2 (must): preset tools that exist.** Build the allowlist by filtering the
+  preset list against the tool registry. `recipe_*` and the probes may not be
+  there yet. Store the preset version on the agent row, so a later preset
+  change never silently widens an existing agent.
+* **A3 (must): `escalate` is agent text.** Cap the summary (2 KiB), rate-limit
+  it (per agent, a few per hour), and render it escaped in the notification
+  and the UI, with no links made clickable. "Always allowed" should mean
+  "not gated", not "not limited".
+* **A4 (must): who may read an escalation.** `get_escalation` is limited to
+  the operator and the agents the **operator** names in settings (for
+  example `escalation_readers: ["hermes"]`), never a list the escalating
+  agent supplies. Test that another agent gets `not_found`, not
+  `forbidden`.
+* **A5 (should): compact descriptions keep the safety words.** Every
+  allowlisted tool has a compact variant of at most 160 characters. A test
+  checks that a tool whose full description says "needs approval" or
+  "read-only" still says so in the compact one.
+* **A6 (should): the eval script never touches a real dashboard.** It refuses
+  a non-loopback base URL and creates its own temp DB, with synthetic hosts
+  only (`192.0.2.0/24`, `*.example.test`).
 
 ---
 
@@ -5842,254 +5895,7 @@ is sent only for unattended rows; old gateway versions are refused for `on`.
 
 ### Implementer notes
 
-**Status: design note only — no code on this branch.** F19 is design first
-and needs the security reviewer's sign-off before any code. It is also one of
-the preconditions for unlocking F4's `on` mode, so it is the next gateway
-change after F12.
-
-#### 1. What is bounded, and what is not
-
-A **run limit** exists only for a row the dashboard approved **without a
-human**: today that is the read lane (`reason = read-lane`), later F15 probes
-and read-only F16 recipes. The row's `reason` is the switch, and it is set by
-the dashboard, never by the gateway.
-
-* A human-approved run (JIT, plan, session override, host override, window,
-  allowlist) keeps today's behaviour: no timeout, no cap. A human saw the
-  command and can watch it. Changing that would be a different feature with
-  its own review.
-* A run limit is **advisory on the dashboard and authoritative on the
-  gateway**: the gateway refuses a limit it cannot parse, ignores one it did
-  not get, and never runs unbounded when it was told to bound.
-* A limit hit is a *completed* run, not a refusal: `status: ran`,
-  `exit_code: 124` for time (or the command's own code for a byte cut), and
-  a marker line. The ticket is burned either way; a bounded run cannot be
-  retried by replaying the ticket.
-
-#### 2. Where the limit travels
-
-The limit is a JSON field next to the payload, **not** part of the ticket
-line. The ticket line is `v2|ts|agent|session|cmd` and is consumed by
-gateways that may predate F19; adding a field there would either break them
-or need a `v3` tag for no benefit. Three responses carry it, all on the
-dashboard side:
-
-* `POST /api/request` → `{"status":"ok","request_id":…,"run_limit":{…}}`
-  when the row it just created is unattended. This is the path the read lane
-  uses (the gateway gets `approved` immediately and runs without polling).
-* `GET /api/request_status/{id}` → `run_limit` while `status` is `approved`,
-  so the polling path and a late claim both see it.
-* `GET /api/ticket/{id}` → the same field beside `ticket`, for a gateway that
-  claims the ticket in one call.
-
-A locked-box ticket claimed from the poller has no limit beside it, by
-construction: those rows were approved by a human (or by a plan), and §1 says
-they keep today's behaviour.
-
-Shape and ranges (defaults 60 s / 1 MiB):
-
-```
-run_limit: {"seconds": 60, "bytes": 1048576}
-seconds  5..300       bytes  65536..8388608
-```
-
-The values live in a `meta` key (`run_limit`) so the operator can set them
-without a deploy, and a settings endpoint (`GET`/`PUT /api/settings/run-limit`,
-session auth) validates the range. A missing key means the defaults; a
-corrupt key also means the defaults (a broken setting must not remove the
-bound). The dashboard never sends a value outside the range; the gateway
-still checks.
-
-#### 3. The gateway: parse, wrap, cap
-
-The limit arrives as a JSON body the gateway already parses for
-`request_id`. Two variables hold it, and `RUN_LIMIT_*` empty means "no limit"
-(human-approved):
-
-```bash
-# F19: run limits for a row the dashboard approved with no human watching.
-# Empty means "no limit" (a human approved this). Anything unusable also
-# means no auto-run: never a partially applied bound.
-RUN_LIMIT_SECS=""
-RUN_LIMIT_BYTES=""
-
-parse_run_limit() {   # $1 = dashboard JSON body
-  local secs="" bytes=""
-  secs=$(printf '%s' "$1" | python3 -c '
-import json, sys
-d = (json.load(sys.stdin) or {}).get("run_limit") or {}
-sys.stdout.write("%d %d" % (int(d.get("seconds") or 0), int(d.get("bytes") or 0)))
-' 2>/dev/null || echo "0 0")
-  set -- $secs
-  case "${1:-}" in ''|*[!0-9]*) return 1 ;; esac
-  case "${2:-}" in ''|*[!0-9]*) return 1 ;; esac
-  if [ "$1" -lt 5 ] || [ "$1" -gt 300 ] || [ "$2" -lt 65536 ] || [ "$2" -gt 8388608 ]; then
-    return 1
-  fi
-  RUN_LIMIT_SECS="$1"
-  RUN_LIMIT_BYTES="$2"
-  return 0
-}
-```
-
-Called right after the `/api/request` response is parsed; a `run_limit` that
-is present but unusable **refuses the call** (`[LOCKED] Invalid run_limit …`)
-instead of running unbounded. A 200 response without the field leaves both
-variables empty (human-approved path).
-
-The run itself is wrapped inside `run_sanitized`, so every run path (read
-lane, window, lockbox, JIT) is bounded by the same code and a future path
-cannot forget it:
-
-```bash
-run_sanitized() {
-  local rc=0 ... time_limited="0" byte_limited="0"
-  local -a run_argv=("$@")
-  if [ -n "$RUN_LIMIT_SECS" ]; then
-    # -k (not --kill-after) is what both GNU and BusyBox timeout understand;
-    # the extra 5 s only decides how long a stuck process gets to die.
-    run_argv=(timeout -k 5 "$RUN_LIMIT_SECS" "${run_argv[@]}")
-    time_limited="1"
-  fi
-  ...
-  if [ -n "$RUN_LIMIT_BYTES" ]; then
-    # F19: cap the stream AFTER sanitize (secrets are still redacted) and
-    # BEFORE the FIFO, so F5 stores exactly the bytes the agent saw. The
-    # pipeline runs under `pipefail`, so read the command's own status from
-    # PIPESTATUS[0]; the byte cut is a separate flag, not a status.
-    { "${run_argv[@]}" 2>&1 | sanitize | head -c $((RUN_LIMIT_BYTES + 1)) \
-        | tee "$ESHU_OUT_FIFO"; } >/dev/null 2>&1
-    rc=${PIPESTATUS[0]}
-    LIMIT_HIT=""
-    if [ -s "$ESHU_OUT_CAP" ] && [ "$(stat -c '%s' "$ESHU_OUT_CAP")" -gt "$RUN_LIMIT_BYTES" ]; then
-      byte_limited="1"
-      LIMIT_HIT="bytes"
-      # Drop the probe byte so the cap is exact.
-      truncate -s "$RUN_LIMIT_BYTES" "$ESHU_OUT_CAP"
-    fi
-  else
-    ...today's branches, unchanged...
-  fi
-  if [ "$time_limited" = "1" ] && [ "$rc" -eq 124 ]; then
-    LIMIT_HIT="time"
-    say "   [ESHU limit: stopped after ${RUN_LIMIT_SECS} s]"
-  fi
-  if [ "$byte_limited" = "1" ]; then
-    say "   [ESHU limit: output cut at ${RUN_LIMIT_BYTES} bytes]"
-  fi
-  ...
-}
-```
-
-Details that matter, and why:
-
-* **`head -c $((bytes + 1))` and a probe byte.** With exactly `bytes`, a stream
-  that happens to end at the cap is indistinguishable from one that was cut.
-  One extra byte distinguishes them; it is dropped before anything is stored
-  or shown, so the cap the operator set is the cap that is kept.
-* **`truncate -s`** (coreutils) may be missing on a minimal host. The
-  fallback for that case is `head -c "$RUN_LIMIT_BYTES" "$ESHU_OUT_CAP" >
-  "$ESHU_OUT_CAP.trim" && mv -f …`; the design note records the fallback so
-  the implementer does not have to invent one. The marker and the F5 row are
-  identical either way.
-* **`pipefail` and `PIPESTATUS[0]`.** The existing code reads `$?` after a
-  `||`, which is the *pipeline's* status under `pipefail`; for a capped run
-  that would report `head`'s or `sed`'s SIGPIPE (141) as the command's exit
-  code. Reading `PIPESTATUS[0]` gives the command's real status, so
-  `[ESHU exit=N]` and the envelope's `exit_code` keep meaning "what the
-  command returned". The SIGPIPE the writer gets when `head` closes is
-  expected and is not reported.
-* **The F5 capture still works.** The FIFO reader is unchanged; it now
-  receives at most `bytes + 1` bytes, so `tail -c 16385` keeps the whole head.
-  `post_exec_result` stores that, and a byte cut marks the row
-  `truncated: true` as it does today. The new field is `limit: time|bytes`
-  (empty when no limit fired), which is a new additive column
-  (`request_results.limit TEXT DEFAULT ''`) and an optional body field on
-  `/api/exec-result`.
-* **`[ESHU exit=N]` in direct mode.** For a time limit N is `124` (GNU and
-  BusyBox timeout both use it), so an SSH agent sees
-  `[ESHU exit=124]` plus `[ESHU limit: stopped after 60 s]`. For a byte cut
-  the sentinel is unchanged (typically `[ESHU exit=0]`) and the marker is the
-  only sign, which is correct: the command was not stopped.
-* **MCP mode.** The markers go through `say`, so they land in the envelope's
-  `messages`; the exit code is the envelope's `exit_code`; a byte cut sets
-  `truncated: true` exactly as a 64 KiB tail would. Nothing new is needed in
-  the envelope format.
-* **The timeout only bounds the run, not the whole call.** `timeout` kills
-  the direct child (`bash -c`), and `-k 5` forces it 5 s later if it ignores
-  SIGTERM. A command that backgrounds a child can still outlive it; that is
-  the same statement F12 §4 makes about killing the local `ssh`, and the
-  reason the dashboard's `timeout` and this limit are separate bounds.
-
-#### 4. Old gateways and old dashboards
-
-* **Old gateway, new dashboard.** The gateway ignores `run_limit` entirely,
-  so nothing is bounded there. The dashboard therefore refuses to *auto-run*
-  an unattended row on a gateway that has not reported the capability
-  `run_limits: "v1"` (a new `gateways` column, sent by the installer in its
-  existing `/api/register`, exactly like F12's
-  `ssh_agent_format`/`ssh_ticket_format`). Instead of approving, the row is
-  created `pending` with `reason = "read-lane-no-limits"` and an audit event
-  `read_lane_no_limits`; the human sees it in the queue with that reason.
-  With F4's `on` hard-locked, this is the second gate that must be green
-  before `on` is unlocked at all.
-* **New gateway, old dashboard.** No `run_limit` in the response → no limit →
-  today's behaviour. The capability is reported but unused.
-* **The capability is reported, not inferred from the version string.**
-  Version strings lie after a dev update and a rollback; a reported
-  capability is what the installer that wrote the script knows. It is stored
-  on the gateway row and shown in the gateway card.
-* **Rollout order.** F19 ships with every gateway on `off` (no lane), the
-  capability starts empty, and the dashboard refuses `on` until every gateway
-  the operator wants in the lane reports `v1`. That is the F4 § 8 gate, and
-  it keeps "old gateway" a state that cannot auto-run.
-
-#### 5. What is deliberately out of scope
-
-* No per-command limits, no priorities, no queue: one fleet-wide pair of
-  numbers, overridable only by the operator's settings.
-* No output limit for a human-approved run: the human can interrupt it, and
-  F5's 16 KiB tail already bounds what is *stored*.
-* No `nice`/`cpulimit`/cgroup: a wall-clock bound and a byte cap are what the
-  residual risk named; CPU accounting is a different feature.
-* No change to the 90 s JIT wait, the 60 s `wait: true` poll or F12's
-  `timeout` — those bound the *conversation*, not the command.
-
-#### 6. Tests to add (final)
-
-Gateway sandbox (`tests/test_f19_limits.py`), with the existing harness:
-
-* a `sleep 10` command with `seconds: 5` is stopped, `exit_code` 124, the
-  marker in `messages` (MCP) and `[ESHU exit=124]` + marker (direct), and the
-  F5 row has `limit: time`;
-* a command printing 2 MiB with `bytes: 65536` keeps exactly 65536 bytes,
-  `truncated` is true, the marker says `output cut at 65536 bytes`, and the F5
-  row has `limit: bytes`;
-* a stream that ends exactly at the cap is **not** marked cut (the probe
-  byte);
-* a human-approved run (no `run_limit`) is unbounded: `sleep 6` finishes and
-  no marker appears;
-* `run_limit` present but out of range / non-numeric / negative → the call is
-  refused and nothing runs;
-* `run_limit` on a 200 response with `status: pending` is ignored (no run);
-* the F5 capture path is untouched for an unlimited run (regex-allowlist and
-  ticket paths).
-
-Dashboard (`tests/test_f19_limits.py`):
-
-* `run_limit` is added to `/api/request` only for `reason = read-lane`
-  (pending rows and human-approved rows get none);
-* `/api/request_status/{id}` and `/api/ticket/{id}` carry it for an
-  unattended approved row;
-* defaults are 60/1048576; a corrupt meta value falls back to the defaults;
-  the settings endpoint rejects 4 s, 301 s, 65535 bytes and 8 MiB + 1;
-* `receive_request` refuses to auto-approve a read-lane row on a gateway
-  without `run_limits: v1` (row pending, reason `read-lane-no-limits`, audit
-  row written);
-* with the capability present, the row is approved as today;
-* `/api/exec-result` stores `limit` and rejects an unknown value.
-
-`bash scripts/verify.sh`: `2331 passed, 7 warnings in 430.08s (0:07:10)` (docs-only; this branch is `feature-roadmap` + the note, so F12's new tests are not in it).
+_(design note goes here first)_
 
 ### Reviewer notes
 
@@ -6136,17 +5942,18 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 5a | X1 | ctx-actions | dashboard | Merged | `fix/x1-ctx-actions` | — | FYI to security reviewer (approve ignored status) |
 | 6 | F5 | exec-results | gateway + dashboard | Merged | `feat/f5-exec-results` | — | |
 | 6a | F18 | request-context | dashboard | Merged | `feat/f18-request-context` | F1, F5, F7, X1 | |
-| 7 | F12 | ssh-exec | dashboard + gateway | Ready (after F5) — design first | `feat/f12-ssh-exec` | F4, F5 | design approval + security reviewer sign-off |
+| 7 | F12 | ssh-exec | dashboard + gateway | **Code round 2: approved by feature reviewer**; merge forward after the CI fix, then security diff check | `feat/f12-ssh-exec` | F4, F5 | security reviewer re-checks the merged gateway bash |
 | 8 | F6 | session-wrapup | dashboard | Merged | `feat/f6-session-wrapup` | F3, F4, F5 | |
 | 9 | F13 | session-conclusions | dashboard + MCP | Merged | `feat/f13-session-conclusions` | F5, F6 | |
 | 10 | F8 | test-traffic | dashboard | Merged | `feat/f8-test-traffic` | — | low priority |
 | 11 | F9 | ha-supervisor-read | dashboard | Merged | `feat/f9-ha-supervisor-read` | — | token is now a dedicated `eshu` HA admin user |
-| 12 | F10 | ha-supervisor-actions | dashboard | **Round 3: M1–M2, S1 and N1 fixed — awaiting security review** | `feat/f10-ha-supervisor-actions` @ `2f0fdf1` | F9, F3, Chunk H | reviewer pass + security reviewer sign-off |
-| 13 | F11 | ha-config-files | dashboard | Ready (after F10) — design first | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | design approval + security reviewer sign-off |
+| 12 | F10 | ha-supervisor-actions | dashboard | **Security code review: changes requested** (P1–P3, `e39d810`) | `feat/f10-ha-supervisor-actions` | F9, F3, Chunk H | security re-reads the P1–P3 diff only |
+| 13 | F11 | ha-config-files | dashboard | **Design round 2: four points** (U1–U4) | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | then security reviewer on the design |
 | 14 | F14 | inventory | dashboard + MCP | Merged | `feat/f14-inventory` | Chunk H | |
-| 15 | F15 | probes | dashboard + MCP | Ready after F12 | `feat/f15-probes` | F4, F12 | |
-| 16 | F16 | recipes | dashboard + MCP | Design first (questions listed) | `feat/f16-recipes` | F3, F12, F13 | design approval + security reviewer sign-off |
-| 17 | F17 | local-agent | dashboard + docs | Ready after F12–F16 | `feat/f17-local-agent` | F12–F16 | |
-| 18 | F19 | unattended-limits | gateway + dashboard | **Design note written** — awaiting review; before F4 `on` is unlocked | `feat/f19-unattended-limits` | F4, F5 | design approval + security reviewer sign-off |
+| 15 | F15 | probes | dashboard + MCP | Ready after F12; pre-implementation notes P1–P8 | `feat/f15-probes` | F4, F12 | |
+| 16 | F16 | recipes | dashboard + MCP | **Security design review: changes requested** (V1–V6, `7964538`) | `feat/f16-recipes` | F3, F12, F13 | security re-reads Round 4 only |
+| 17 | F17 | local-agent | dashboard + docs | Ready after F15; pre-implementation notes A1–A6 | `feat/f17-local-agent` | F12–F16 | |
+| 18 | F19 | unattended-limits | gateway + dashboard | **Design round 2: approved with Q1** (rebase on the new capture), Q2 | `feat/f19-unattended-limits` | F4, F5 | then security re-review of § 3 |
+| — | CI fix | ci-environment | gateway + tests | **Approved by feature reviewer** (round 5); CI green; **to security** (gateway bash) | `fix/ci-environment` | F5 | release precondition (`RELEASE_1.md`) |
 Chunks are done **in the order column**; each new chunk branches from the
 updated `feature-roadmap` after the previous one is merged.
