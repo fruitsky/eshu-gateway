@@ -9323,7 +9323,62 @@ is green.
 
 ### Implementer notes
 
-_(implementer)_
+**Routes.** `GET /api/runbooks?q=&tag=&include_retired=` is operator-only,
+capped at 100 by `list_runbook_payloads`, newest first, and it reuses
+`search_runbooks` — the same term-by-term search and tag match `find_runbooks`
+uses for agents, so the two see the same ranking (tested by comparing the two
+results for the same query). `GET /api/runbooks/{id}` now passes
+`include_retired=True`, because the operator's page must be able to open a
+retired runbook in order to restore it; every agent path still goes through
+`get_runbook_payload()` with the default, which hides a retired row.
+`POST /api/runbooks/{id}/retire` takes `{retired: true|false}`, is audited as
+`runbook_retired` / `runbook_unretired`, and returns the new state.
+
+**Retire is a column, not a delete.** `runbooks.retired_at` (nullable, with
+the usual `PRAGMA table_info` migration), set on retire and cleared on
+restore; a second retire keeps the first timestamp. `search_runbooks` and
+`get_runbook` both take `include_retired=False` as the default, so "hidden
+from agents" is the default everywhere and the operator page is the only
+caller that opts in. The MCP tools (`find_runbooks`, `get_runbook`) are
+untouched — a retired runbook simply is not there, and `get_runbook` still
+answers `not_found` rather than admitting that it exists.
+
+**The page.** `Runbooks` in the sidebar, next to Inventory
+(`VIEWS` in `state.js`): a search box, a tag box with a datalist built from
+the loaded rows, a "show retired" toggle, and one row per runbook with its
+title, `when_to_use`, tags, step count, age and source session. A row opens a
+modal with the steps in order — each command step carries the F1 breakdown
+that `build_steps` stored, rendered with the same `bdBlockHtml` the queue
+uses — the known dead ends, and the source session and conclusion ids. Retire
+and Restore sit on both the row and the modal, behind `customConfirm`.
+
+**Escaping.** Every runbook field is agent-authored. The renderers are split
+into pure builders (`runbookListHtml`, `runbookDetailHtml`) so the escaping is
+testable without a DOM: `tests/fixtures/x2_harness.js` loads the shipped
+`app.js` in the existing stubbed context and returns both strings with
+`<img src=x onerror=alert(1)>` in every field, and the test asserts the raw
+payload appears nowhere and `&lt;img` does. The tag chips and the retired chip
+are escaped the same way; the only unescaped interpolation is the numeric id
+through `idJs()`.
+
+**Layout.** The row is a two-column flex and collapses to a column under
+768 px (the button moves under the text), so the page works at phone width;
+the detail modal is `max-w-2xl` and scrolls inside `62vh`.
+
+Tests, `tests/test_x2_runbooks.py` (20) and the F13 suite unchanged (44
+together): the list needs a session (401), the fields are there, search
+matches the agents' ranking, the tag filter works, newest first, retired
+hidden unless asked; retire hides the runbook from `find_runbooks`,
+`search_runbooks`, `get_runbook`, `get_runbook_payload` and both MCP tools,
+the operator can still open it, un-retire restores it, retire is idempotent,
+an unknown id is `None`/404, and both routes are audited and session-gated;
+the rendered page escapes a hostile payload and still marks a retired row and
+renders steps, breakdown and dead ends.
+
+Compat: one nullable column, additive.
+
+`bash scripts/verify.sh`: `2662 passed, 22 skipped, 7 warnings in 538.62s (0:08:58)`.
+
 
 ### Reviewer notes
 
@@ -9382,7 +9437,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 16 | F15 | probes | dashboard + MCP | Code round 1: changes requested AG1–AG7 (`56d86e3`); **AG1 to security** | `feat/f15-probes` | F4, F12, F14 | main line, not only local-model |
 | 17 | F21 | snapshot-approve | dashboard + Proxmox | Design first | `feat/f21-snapshot-approve` | F7, F14, F2 | + security sign-off (new write path, destructive rollback) |
 | 18 | F23 | change-journal | dashboard | Ready | `feat/f23-change-journal` | F1, F5, F7, F14 | no security gate; can be coded while F21's design is with security |
-| 18a | X2 | runbooks-page | dashboard UI | Ready | `feat/x2-runbooks-page` | F13 | small; no security gate |
+| 18a | X2 | runbooks-page | dashboard UI | **Built: list/search/tag, detail with the F1 breakdown, reversible audited retire** | `feat/x2-runbooks-page` | F13 | small; no security gate |
 | 19 | F22 | change-checks | dashboard + MCP | After F19 merges | `feat/f22-change-checks` | F3, F5, F12, F19 | + security sign-off (the unattended check; AG1's origin rule does not cover it) |
 | 20 | F16 | recipes | dashboard + MCP | Design complete (security Round 4; feature reviewer Round 5 with AA1/AA2); code next after F22 | `feat/f16-recipes` | F3, F12, F13, F19 | main line; steps claim by request id; code comes back to security; auto_run comes back to security |
 | 21 | F24 | content-tripwire | dashboard | Design first | `feat/f24-content-tripwire` | F12, F14 | + security sign-off (retention) |
