@@ -478,3 +478,44 @@ class TestSupervisorRestGuard:
                   if e['event_type'] == 'rest_supervisor_refused']
         assert events
         assert 'hassio/backups' in events[0]['details']
+
+    # N1: a proxy in front of HA resolves dot segments and decodes %2e, so a
+    # path that "starts somewhere else" can still reach /api/hassio. The guard
+    # decodes until stable and refuses dot segments, backslashes and control
+    # characters whatever the prefix; the table runs through all three
+    # checkpoints (pre-gating, curated executor, generic executor).
+    DOT_SPELLINGS = (
+        'api/states/../hassio/backups/x/restore',
+        'api/./hassio/host/reboot',
+        'api/states/%2e%2e/hassio/x',
+        'api/services/./hassio/x',
+        'api/hassio\\backups',
+        'api/services/%252e%252e/hassio/x',
+        '/api/hassio\x00/backups',
+    )
+
+    @pytest.mark.parametrize('path', DOT_SPELLINGS)
+    def test_a_non_canonical_path_is_refused_before_gating(
+            self, ha, mock_upstream, path):
+        out = json.loads(run_tool('ha', 'write',
+                                  {'method': 'POST', 'path': path,
+                                   'data': {'zip': 'x'}}))
+        assert err_code(out) == 'supervisor_rest_refused'
+        assert mock_upstream['requests'] == []
+        assert get_pending_calls() == []
+
+    @pytest.mark.parametrize('path', DOT_SPELLINGS)
+    def test_a_non_canonical_path_is_refused_by_the_generic_executor(self, ha, path):
+        from core.integration_proxy import ProxyError, execute_generic_call
+        with pytest.raises(ProxyError) as exc:
+            execute_generic_call(ha, 'POST', path, data={'zip': 'x'})
+        assert exc.value.status_code == 403
+
+    @pytest.mark.parametrize('path', DOT_SPELLINGS)
+    def test_a_non_canonical_path_is_refused_by_the_curated_executor(self, ha, path):
+        from core.integration_proxy import ProxyError, execute_integration_call
+        tool = {'name': 'probe', 'enabled': 1, 'method': 'POST',
+                'path_template': path, 'params': []}
+        with pytest.raises(ProxyError) as exc:
+            execute_integration_call(ha, tool, {})
+        assert exc.value.status_code == 403

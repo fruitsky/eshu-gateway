@@ -81,15 +81,35 @@ REST_SUPERVISOR_PREFIXES = ('hassio', 'services/hassio')
 
 
 def is_supervisor_rest_path(path) -> bool:
-    """Is this HA REST path the Supervisor proxy or its service domain?
+    """Is this HA REST path the Supervisor proxy, its service domain, or a
+    non-canonical spelling of *any* HA path?
 
     The same request has many spellings — percent-encoded, upper-case, with
-    `//` or an `api/` prefix — so the path is percent-decoded, lowercased,
-    `//`-collapsed and stripped of its leading slash and `api/` prefix before
-    the check. The caller must refuse the request, not normalise it and then
-    send it.
+    `//` or an `api/` prefix — so the path is percent-decoded (repeatedly,
+    N1), lowercased, `//`-collapsed and stripped of its leading slash and
+    `api/` prefix before the Supervisor check.
+
+    N1: a dot segment, a backslash or a control character is refused whatever
+    the prefix is. `urllib` sends the bytes as given, but a reverse proxy in
+    front of HA (nginx/NPM) resolves `..` and decodes `%2e`, so
+    `api/states/../hassio/backups/x/restore` would otherwise reach the
+    Supervisor. HA has no legitimate API path with those, and refusing beats
+    normalising: the bytes sent must be the bytes checked.
     """
-    text = urllib.parse.unquote(str(path or '')).strip().lower()
+    text = str(path or '')
+    # N1: unquote until stable. One pass would let `%252e%252e` become
+    # `%2e%2e` and be decoded again by the proxy.
+    while True:
+        decoded = urllib.parse.unquote(text)
+        if decoded == text:
+            break
+        text = decoded
+    if '\\' in text or any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in text):
+        return True
+    text = text.strip()
+    if any(segment in ('.', '..') for segment in text.split('/')):
+        return True
+    text = text.lower()
     while '//' in text:
         text = text.replace('//', '/')
     text = text.lstrip('/')
