@@ -6702,6 +6702,141 @@ dashboard's own cases are unchanged.
 
 `bash scripts/verify.sh`: `2331 passed, 7 warnings in 426.99s (0:07:06)` (docs only).
 
+### Round 5 — W6, W7 (answered), W8, and the restore script in full
+
+#### W6 — `[ ! -e ]` is not enough
+
+`test -e` follows symlinks, so a symlink planted at `$backup` or `$tmp`
+whose target does not exist passes `[ ! -e ]`; `cp -p "$real" "$backup"` and
+`cat > "$tmp"` then follow it and write, as root, wherever it points. Anything
+that can write into the HA config tree can plant one.
+
+The write script checks **both** existence and symlink-ness, and `set -C`
+(noclobber) makes the `cat` open itself refuse an existing name as a second
+layer:
+
+```bash
+[ ! -e "$backup" ] && [ ! -L "$backup" ] || exit 19
+[ ! -e "$tmp" ] && [ ! -L "$tmp" ] || exit 19
+...
+set -C
+cat > "$tmp" || { set +C; rm -f "$tmp"; exit 16; }
+set +C
+```
+
+The restore script's "copy the current file to `$tmp`" step gets the same
+`[ ! -e ] && [ ! -L ]` check before the copy. Tests, both userlands: a
+dangling symlink at the backup name and at the temp name each give exit 19
+and the symlink's target is never created; the `set -C` layer is exercised by
+creating the temp file between the check and the write.
+
+#### W7 — the `ha` token comes from the fixed s6 file (answered)
+
+The operator's non-interactive check (same shape F11 uses) confirmed:
+`SUPERVISOR_TOKEN` is **unset** in an SSH command, the token lives in
+`/etc/profile.d/homeassistant.sh` (not read) and in
+`/run/s6/container_environment/SUPERVISOR_TOKEN` (`root:root 0644`), and
+`SUPERVISOR_TOKEN=$(cat that file) ha core info` exits 0.
+
+Both scripts load it from that **fixed path**, as a local variable that is
+never exported, before anything is touched:
+
+```bash
+token_file=/run/s6/container_environment/SUPERVISOR_TOKEN
+[ -r "$token_file" ] || exit 20
+SUPERVISOR_TOKEN=$(cat "$token_file") || exit 20
+...
+# only `ha` sees it; the assignment is a command prefix, not an export
+SUPERVISOR_TOKEN="$SUPERVISOR_TOKEN" timeout 100 ha core check 2>&1 \
+  || { cp -p "$backup" "$real" || exit 1; exit 18; }
+```
+
+Exit 20 (the token file is missing or unreadable) happens **before** the
+backup and the write, so nothing is touched; the dashboard maps it to
+`config_ha_token_missing`. The path is a constant in the script, never an
+argument. The token is never printed, never sent to the dashboard and never
+stored in the integration-call row. Tests: a stub `ha` that fails unless
+`SUPERVISOR_TOKEN` equals the content of a temp token file (path substituted
+in the test's copy only); a missing token file gives 20 with the target
+unchanged; the token value appears in no output, DB row or audit row.
+
+#### W8 — F11 logs in as root
+
+The add-on's default SSH user is `hassio` (uid 1000, passwordless sudo via
+`wheel`), and `/homeassistant` is `root:root`, not writable by it, so every
+write would fail at the backup (15). The setup doc tells the operator to set
+the add-on's `ssh.username: root` (open question 3 already chose root with
+protection mode on, LAN only and H7's `from=` restriction). The dashboard
+checks it **once**, on the first `ha_config_list`: the fixed `id -u` template
+must print `0`, otherwise the call is refused with `config_ssh_not_root` and a
+message naming the setting, and `config_json.root_checked` is set only on
+success. No `sudo -n` from the script: it is the same privilege with an extra
+layer, it scrubs the environment, and it depends on the add-on's sudoers.
+Test: `id -u` printing 1000 refuses the list and stores no flag; printing 0
+passes and caches the flag.
+
+#### The restore script in full
+
+```bash
+# RESTORE_SCRIPT — one connection, `set -eu`, BusyBox- and GNU-compatible.
+# Exit codes: 10/11 the directory is not the HA config tree, 12 missing file,
+# 13 symlink/escape, 15 copy failed, 16 restore failed, 18 check failed and the
+# pre-restore content was put back, 19 bad argument, 20 token file missing.
+# 1 is a failed rollback inside the || group; it maps to config_state_unknown.
+sh -c '
+set -eu
+path=$1; backup=$2; tmp=$3
+
+# W1: absolute arguments first; BusyBox realpath parses no options.
+case "$path"   in /*) ;; *) exit 19 ;; esac
+case "$backup" in /*) ;; *) exit 19 ;; esac
+case "$tmp"    in /*) ;; *) exit 19 ;; esac
+
+# W7: the token comes from the fixed s6 file, before anything is touched.
+token_file=/run/s6/container_environment/SUPERVISOR_TOKEN
+[ -r "$token_file" ] || exit 20
+SUPERVISOR_TOKEN=$(cat "$token_file") || exit 20
+
+real=$(realpath "$path") || exit 12
+[ -f "$real" ] || exit 12
+dir=$(dirname "$real")
+[ -d "$dir" ] || exit 11
+case "$dir" in
+  /homeassistant|/homeassistant/packages|/homeassistant/packages/*) ;;
+  *) exit 11 ;;
+esac
+[ "$(realpath "$(dirname "$path")")" = "$dir" ] || exit 13
+[ "$(basename "$real")" = "$(basename "$path")" ] || exit 13
+
+case "$backup" in
+  "$real".eshu-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9].bak) ;;
+  *) exit 19 ;;
+esac
+case "$tmp" in
+  "$real".eshu-tmp-*) ;;
+  *) exit 19 ;;
+esac
+[ "$(dirname "$backup")" = "$dir" ] || exit 19
+[ "$(dirname "$tmp")" = "$dir" ] || exit 19
+[ -f "$backup" ] || exit 19
+
+# W6: a dangling symlink passes `-e`; refuse it explicitly.
+[ ! -e "$tmp" ] && [ ! -L "$tmp" ] || exit 19
+cp -p "$real" "$tmp" || exit 15          # the pre-restore content
+cp -p "$backup" "$real" || exit 16
+# U1/W3: bounded remotely, so this script restores and exits before the
+# dashboard gives up. BusyBox timeout reports 143 (137 with -k).
+SUPERVISOR_TOKEN="$SUPERVISOR_TOKEN" timeout 100 ha core check 2>&1 \
+  || { cp -p "$tmp" "$real" || exit 1; exit 18; }
+printf "ok %s\n" "$(sha256sum "$real" | cut -d" " -f1)"
+' _ "$path" "$backup" "$tmp"
+```
+
+The write script gets the same W7 preamble and the `SUPERVISOR_TOKEN=…` prefix
+on its check, plus the W6 checks and `set -C`.
+
+`bash scripts/verify.sh`: `2331 passed, 7 warnings in 427.47s (0:07:07)` (docs only).
+
 ### Reviewer notes
 
 **Design round 1 (2026-11-09): approved in direction, changes requested.**
@@ -13894,7 +14029,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 10 | F8 | test-traffic | dashboard | Merged | `feat/f8-test-traffic` | — | low priority |
 | 11 | F9 | ha-supervisor-read | dashboard | Merged | `feat/f9-ha-supervisor-read` | — | token is now a dedicated `eshu` HA admin user |
 | 12 | F10 | ha-supervisor-actions | dashboard | Ready (after F9) | `feat/f10-ha-supervisor-actions` | F9, F3, Chunk H | reviewer pass + security reviewer sign-off |
-| 13 | F11 | ha-config-files | dashboard | **Round 4 reviewed: W6 (dangling symlink), W7 (token file), W8 (log in as root) before security** | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | design approval + security reviewer sign-off |
+| 13 | F11 | ha-config-files | dashboard | **Round 5: W6–W8 folded, restore script shown in full — awaiting security review** | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | design approval + security reviewer sign-off |
 | 14 | F14 | inventory | dashboard + MCP | Merged | `feat/f14-inventory` | Chunk H | |
 | 15 | F19 | unattended-limits | gateway + dashboard | **Merged** 2026-11-11 (security sign-off `67bec51`; AF1/AF2 checked) | `feat/f19-unattended-limits` | F4, F5, F12 | AF3 goes on the next gateway branch |
 | 16 | F15 | probes | dashboard + MCP | **Merged** 2026-11-11 (AG1 security decision `eca8982`; AI1 fix merged) | `feat/f15-probes` | F4, F12, F14 | |
