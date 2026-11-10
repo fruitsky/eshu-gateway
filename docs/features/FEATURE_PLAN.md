@@ -6937,20 +6937,62 @@ normal file reads back byte-identically.
 HA's config validation quotes the offending value, and `!secret` is already
 resolved by then. The output goes to the agent and into the call row's 8 KiB
 tail, and the dashboard cannot scrub what it does not know. So the scripts
-redact **before printing**, from the values in `secrets.yaml` on the add-on:
+redact **before printing**, from the values the file's `!secret` can resolve.
+
+**Where the values come from (AB1).** HA resolves `!secret` from the edited
+file's own directory **upward to the config root**, so a file in
+`packages/net/` usually takes its values from `/homeassistant/secrets.yaml`.
+`redact` therefore collects **every** `secrets.yaml` on that path — the file's
+directory, each parent, and `/homeassistant/secrets.yaml` always — instead of
+only `"$dir/secrets.yaml"`. Each candidate is checked with `-f` and `! -L`
+before it is read.
+
+**What counts as a value (AB2).** A plain `key: value` line, and the lines of
+a block scalar (`key: |` or `key: >`, certificates and keys in practice),
+indent stripped, each of length ≥ 4. Values shorter than 4 characters (PINs)
+are **not** redacted; the setup doc states both limits — the 4-character floor
+and that a block scalar is handled line by line (a value that spans several
+lines is redacted only where a line matches).
 
 ```bash
-# Z2: replace each literal secret value that is at least 4 characters long.
-# index() and not a regex: the value is data, never a pattern.
+# Z2/AB1: replace each literal secret value (len >= 4) that the edited file's
+# !secret can resolve. index(), never a regex: the value is data.
+# This is the single definition; the WRITE_SCRIPT, RESTORE_SCRIPT and
+# CHECK_SCRIPT constants inline it unchanged (the program moves to double
+# quotes there because each script is the body of `sh -c '...'`).
 redact() {
-  sec="$dir/secrets.yaml"
-  [ -f "$sec" ] && [ ! -L "$sec" ] || return 0
-  LC_ALL=C awk -v sec="$sec" '
-    BEGIN { while ((getline l < sec) > 0) {
-              if (match(l, /^[A-Za-z0-9_]+:[ \t]*/)) {
-                v = substr(l, RLENGTH + 1); sub(/[ \t]+$/, "", v)
-                gsub(/^["\047]|["\047]$/, "", v)
-                if (length(v) >= 4) s[++n] = v } } }
+  files=""
+  d=$dir
+  while :; do
+    f="$d/secrets.yaml"
+    if [ -f "$f" ] && [ ! -L "$f" ]; then files="$files
+$f"; fi
+    [ "$d" = /homeassistant ] && break
+    d=$(dirname "$d")
+  done
+  [ -n "$files" ] || return 0
+  LC_ALL=C awk -v files="$files" '
+    function add(v) {
+      sub(/^[ \t]+/, "", v); sub(/[ \t]+$/, "", v)
+      gsub(/^["\047]|["\047]$/, "", v)
+      if (length(v) >= 4) s[++n] = v
+    }
+    BEGIN {
+      nf = split(files, F, "\n")
+      for (fi = 1; fi <= nf; fi++) {
+        f = F[fi]; if (f == "") continue
+        inblock = 0
+        while ((getline l < f) > 0) {
+          if (l ~ /^[ \t]*[A-Za-z0-9_]+:[ \t]*[|>][-+]?[ \t]*$/) { inblock = 1; continue }
+          if (inblock) {
+            if (l ~ /^[ \t]+[^ \t]/) { add(l); continue }
+            inblock = 0
+          }
+          if (match(l, /^[A-Za-z0-9_]+:[ \t]*/)) add(substr(l, RLENGTH + 1))
+        }
+        close(f)
+      }
+    }
     { for (i = 1; i <= n; i++)
         while ((p = index($0, s[i])) > 0)
           $0 = substr($0, 1, p - 1) "***" substr($0, p + length(s[i]))
@@ -6958,14 +7000,21 @@ redact() {
 }
 ```
 
-The values are read from the file inside `awk`, never passed on a command line,
-so they do not appear in the add-on's process list. The same function wraps the
-check phase of the write, the check phase of the restore and the whole of
-`ha_config_check`.
+The values are read inside `awk`, never passed on a command line, so they do
+not appear in the add-on's process list, and no `secrets.yaml` is copied. The
+same function wraps the check phase of the write, the check phase of the
+restore and the whole of `ha_config_check`.
 
-Test: a stub `ha` echoes a synthetic secret value; `***` appears instead, and
-the value appears in no tool response, call row or audit row (the call row's
-tail is the redacted text).
+Every value from every file is collected (a union), not first-match: a value
+quoted in the output could come from either definition. Over-redaction of the
+check output is acceptable; an unredacted value is not.
+
+Tests: a stub `ha` echoes a synthetic secret; `***` appears and the value
+appears in no tool response, call row or audit row (the tail is the redacted
+text). **AB1:** a file under `packages/net/` whose only `secrets.yaml` is the
+root one is redacted, and the root file is read even when the file's own
+directory has none. **AB2:** a block-scalar certificate's lines are redacted;
+a 3-character value is not (documented limit), and a 4-character one is.
 
 #### Z3 — the banner also covers what a file can make HA reveal or run
 
@@ -7144,23 +7193,13 @@ chmod "$(stat -c %a "$real")" "$backup" "$tmp" || exit 16
 chown "$(stat -c %u:%g "$real")" "$backup" "$tmp" 2>/dev/null || true
 mv -f "$tmp" "$real" || exit 17
 
-# Z2: the same function as above. The awk program is in double quotes here
-# because the whole script is the body of `sh -c '...'`: `\$0` and `\$1` are
-# escaped once so the inner shell hands awk a literal `$0`/`$1`.
-redact() {
-  sec="$dir/secrets.yaml"
-  [ -f "$sec" ] && [ ! -L "$sec" ] || return 0
-  LC_ALL=C awk -v sec="$sec" "
-    BEGIN { while ((getline l < sec) > 0) {
-              if (match(l, /^[A-Za-z0-9_]+:[ \t]*/)) {
-                v = substr(l, RLENGTH + 1); sub(/[ \t]+$/, \"\", v)
-                gsub(/^[\"\047]|[\"\047]$/, \"\", v)
-                if (length(v) >= 4) s[++n] = v } } }
-    { for (i = 1; i <= n; i++)
-        while ((p = index(\$0, s[i])) > 0)
-          \$0 = substr(\$0, 1, p - 1) \"***\" substr(\$0, p + length(s[i]))
-      print }" "\$1"
-}
+# Z2/AB1: redact() is the function from Z2, unchanged — the same upward
+# secrets.yaml list and the same block-scalar handling. It is inlined into the
+# three script constants; inside `sh -c '...'` the awk program moves to double
+# quotes, with `\$0` and `\$1` escaped once so the inner shell hands awk a
+# literal `$0`/`$1`.
+#
+#   redact "$dir/.eshu-check.$$"
 
 # Z2/Z9: the check runs with only the token; its output is redacted here and
 # the last line is the hash, computed from the file itself.
@@ -7189,7 +7228,7 @@ noclobber with the pre-restore content; create the restore file noclobber with
 computed before the restore and checked again after it, so a restore that
 somehow moved different bytes does not report ok.
 
-`bash scripts/verify.sh`: `2331 passed, 7 warnings in 428.79s (0:07:08)` (docs only).
+`bash scripts/verify.sh`: `2331 passed, 7 warnings in 427.21s (0:07:07)` (docs only).
 
 ### Reviewer notes
 
@@ -14578,7 +14617,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 10 | F8 | test-traffic | dashboard | Merged | `feat/f8-test-traffic` | — | low priority |
 | 11 | F9 | ha-supervisor-read | dashboard | Merged | `feat/f9-ha-supervisor-read` | — | token is now a dedicated `eshu` HA admin user |
 | 12 | F10 | ha-supervisor-actions | dashboard | Ready (after F9) | `feat/f10-ha-supervisor-actions` | F9, F3, Chunk H | reviewer pass + security reviewer sign-off |
-| 13 | F11 | ha-config-files | dashboard | **Round 7: Z1–Z5 folded, Z6–Z9 + Q2/Q4 decided — to security for Z1–Z5** | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | security reads only the Round 7 Z1–Z5 sections |
+| 13 | F11 | ha-config-files | dashboard | **Round 7 + AB1/AB2 (upward `secrets.yaml`, block scalars): Z1–Z5 folded, Z6–Z9 + Q2/Q4 decided — to security for Z1–Z5** | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | security reads only the Round 7 Z1–Z5 sections |
 | 14 | F14 | inventory | dashboard + MCP | Merged | `feat/f14-inventory` | Chunk H | |
 | 15 | F19 | unattended-limits | gateway + dashboard | **Merged** 2026-11-11 (security sign-off `67bec51`; AF1/AF2 checked) | `feat/f19-unattended-limits` | F4, F5, F12 | AF3 goes on the next gateway branch |
 | 16 | F15 | probes | dashboard + MCP | **Merged** 2026-11-11 (AG1 security decision `eca8982`; AI1 fix merged) | `feat/f15-probes` | F4, F12, F14 | |
