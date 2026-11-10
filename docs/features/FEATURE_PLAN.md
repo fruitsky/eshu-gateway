@@ -6762,6 +6762,19 @@ points are answered as asked.
 The code comes back to me after F10 and F12 merge. `auto_run` comes back
 before it is ever enabled.
 
+**Round 5 (feature reviewer, 2026-11-10, `a937f17`): approved; the design is
+complete (security delegated this round to the feature reviewer).** Y1's verb
+allowlist, the one-command rule, the run-time re-check and W2's fixed access
+list (with the red "Public (no access list)") match the conditions. Two
+points to fold at code time, with tests:
+* **AA1 (must): refuse redirections too.** `SEPARATORS` catches `| ; & `
+  `` ` `` and `$(`, but not `>` or `<`: `getent hosts {fqdn} > /etc/hosts` is
+  one command with an allowlisted verb and **writes a file**. Add `[<>]` to
+  the pattern (and to the run-time re-check).
+* **AA2 (should): a slot-bearing `ping` must be bounded.** `ping {host}`
+  with no count runs until the gateway's limit. Require `-c <1–5>` (and `-W`)
+  in the fixed text when the verb is `ping`.
+
 ---
 
 ## Chunk F17 — Local-agent profile · slug `local-agent` · dashboard + docs
