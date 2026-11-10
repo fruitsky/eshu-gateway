@@ -3884,6 +3884,33 @@ plain `sed`) → security re-checks the merged F12 gateway diff → I merge F12.
 * **Merge order:** as the feature reviewer wrote. I check the merged F12
   gateway diff, which picks up B1, before F12 merges.
 
+### Round 7 — N1 (test-only)
+
+**Commit: test change only** (`tests/test_f5_exec_results.py`), plus the
+`RELEASE_1.md` step 6 note the security sign-off made a condition.
+
+* **N1 — the mawk skip is now `mawk` + `tail` only.** In `exit-only` capture
+  `awk` is not in the pipeline, so the mawk case says nothing about mawk: it
+  runs, and the `mode == 'tail'` guard replaces the old `awk_name == 'mawk'`
+  skip. The skip reason now states why (mawk reads stdin in 4 KiB blocks, so
+  the tail ring cannot see the first line early; 10.7 s measured).
+  The matrix here (mawk 1.3.4, no gawk in this container): `mawk`/`exit-only`/
+  **default** runs and passes (about 0.3 s to the disconnect, command gone);
+  `mawk`/`tail` skips; the `gawk` parameters skip as before (not installed);
+  SIGPIPE-ignored keeps its own skip in both modes — that is GNU `sed` on
+  EPIPE, not the awk in the path. On the two F5 files: `58 passed, 21 skipped`
+  with this change, `57 passed, 22 skipped` without it — one case moved from
+  skip to pass, nothing else.
+* **`RELEASE_1.md` step 6** now names the mawk/`tail` residual for anyone
+  turning on `tail` capture, as the sign-off required.
+* **S1 is not done here** (the `tee`-based tail, its own chunk with a bounded
+  wait, per the sign-off); the merge order from the review stands, and F12 is
+  not merged forward on this branch.
+
+`bash scripts/verify.sh`: `2351 passed, 21 skipped, 7 warnings in 430.97s (0:07:10)`
+(gawk is not installed in this container, so the 15 `gawk` parameters skip —
+unchanged by this commit; CI runs them).
+
 ---
 
 ## Chunk X1 — Sidebar actions and pending-only decisions · slug `ctx-actions` · dashboard · BUG
