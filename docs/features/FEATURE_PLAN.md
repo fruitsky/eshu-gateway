@@ -6331,6 +6331,173 @@ tool on another kind is refused (test).
 
 `bash scripts/verify.sh`: `2331 passed, 7 warnings in 428.24s (0:07:08)` (docs only).
 
+### Round 5 — the security conditions Y1 and W2
+
+This is the design of record for the security reviewer's Round 4 conditions
+(`f32285a`). Y1 and W2 are folded in below; the two code-time notes are
+written down here so the code round does not have to rediscover them. The
+security reviewer checks this round; the feature reviewer checks it alone.
+
+#### Y1 — a step with a slot runs one of five lookup verbs, and nothing else
+
+V1 refuses a placeholder that *is* a command word or an argument to an
+executor. That is a deny list, and a deny list has to anticipate `awk`'s
+`system()`, `sed`'s `e`, `tar --to-command` and whatever ships next. Y1 turns
+it around: a step that carries a placeholder must be a single plain lookup,
+with the verb from a fixed list.
+
+```python
+# The only verbs a slot-bearing SSH step may run. Every one of them reads a
+# name and prints an answer; none executes an argument.
+SLOT_VERBS = frozenset({'getent', 'dig', 'host', 'ping', 'nslookup'})
+SEPARATORS = re.compile(r'[|;&`]|\$\(|\n')       # one command, no pipeline
+
+
+def validate_slot_step(template, declared):
+    """Y1: a template with a slot must be one allowlisted lookup."""
+    if not PLACEHOLDER.search(template):
+        return None                     # fixed text; V1/R1 still run on it
+    probe = PLACEHOLDER.sub(SENTINEL, template)
+    bd = cmd_breakdown(probe)           # F1's breakdown, as V1 uses it
+    steps = bd.get('steps') or []
+    op = (steps[0].get('op') or '') if steps else ''
+    if len(steps) != 1 or SEPARATORS.search(probe):
+        raise RecipeParamError(
+            'invalid_step',
+            'a step with a parameter is a single command, with no pipe or '
+            'separator')
+    if op not in SLOT_VERBS:
+        # A wrapper lands here too: `sudo getent …` has op `sudo`.
+        raise RecipeParamError(
+            'invalid_step',
+            'a step with a parameter must run one of %s; %r cannot hold it'
+            % (', '.join(sorted(SLOT_VERBS)), op or 'a command'))
+    return bd
+```
+
+Rules, and where each one runs:
+
+* **The verb is the first word, literally.** The comparison is on the op
+  token, so `/usr/bin/getent`, `./getent`, `awk` and an alias are not
+  `getent` and are refused. `sudo getent …` (op `sudo`), `env X=1 getent …`,
+  `timeout 5 getent …`, `nice getent …`, `sh -c 'getent hosts {fqdn}'` and
+  `xargs getent …` fail the same way — there is no wrapper context to strip,
+  because a wrapper changes the op.
+* **One command, no pipe or separator.** `getent hosts {fqdn} | sh`,
+  `getent hosts {fqdn}; reboot` and `getent hosts {fqdn} && reboot` are
+  refused even though only the first word is a lookup: the step exists to
+  read an answer, and a second command widens what it does without widening
+  what the operator approved.
+* **`EXEC_VERBS` stays as the second check.** V1 still runs first, on every
+  template including fixed ones, so `sh …`, `sudo …`, `env …` and
+  `find -exec` are refused twice, and a slot-free template keeps V1's
+  protection unchanged.
+* **Steps without a slot are untouched.** Their text is fixed, hashed into
+  the version and approved by the operator; Y1 does not restrict them.
+* **The same rule runs on the filled-in bytes at run time.** Before step N
+  executes, the engine re-parses the filled command with F1 and requires
+  `complete`, a single command, and an op in `SLOT_VERBS` when the step
+  declared a slot. Quoting already makes a value one word; this is the check
+  that it did not become the command (or, through a mistake in substitution,
+  a different verb).
+
+Tests: `sudo getent hosts {fqdn}`, `env X=1 getent hosts {fqdn}`,
+`timeout 5 getent hosts {fqdn}`, `sh -c 'getent hosts {fqdn}'`, `awk {x}`,
+`sed {x}`, `getent hosts {fqdn} | sh`, `getent hosts {fqdn}; reboot` and
+`/usr/bin/getent hosts {fqdn}` are each refused; `getent hosts {fqdn}` and
+`dig +short {fqdn}` pass; a slot-free `uptime` step still passes; the
+run-time check is exercised by substituting a value that re-parses to another
+op and asserting the step is refused without running.
+
+#### W2 — the NPM access list is fixed when the version is written
+
+V3 forbids a recipe body from setting `access_list_id`, and in NPM an absent
+id means **no access list**, which means the host is public. NPM picks the
+site by the `Host` header, so on an instance reachable from the internet an
+"internal" name made by `add_internal_fqdn` would be served to anyone who
+sends that header, whatever internal DNS says. W2 therefore makes the access
+list a fixed value of the version, states "public" explicitly, and shows it.
+
+**Representation.** The step argument is `access_list`, chosen at authoring
+time, and the engine maps it to the body's `access_list_id`:
+
+```json
+{"id": "2", "kind": "tool",
+ "call": {"integration": "Nginx Proxy Manager", "tool": "npm_proxy_host_create",
+          "args": {"domain_names": [{"param": "fqdn"}],
+                   "forward_host": {"param": "target_ip"},
+                   "forward_port": {"param": "port"},
+                   "forward_scheme": "http",
+                   "access_list": {"id": 7, "name": "Internal only"}}},
+ "undo": {"kind": "tool",
+          "call": {"integration": "Nginx Proxy Manager",
+                   "tool": "npm_proxy_host_delete",
+                   "args": {"id": {"result": "id"}}}}}
+```
+
+`{"access_list": {"public": true}}` is the other accepted form and sends
+`access_list_id: 0`. The steps around it are unchanged from Round 4
+(`precheck`, `check` with `where`, `undo` by `{"result": "id"}`).
+
+**Validation, at propose and approve (not at run time):**
+
+* the key is **required** on `npm_proxy_host_create`: omission is refused as
+  `recipe_access_list_required`, so "nobody said" can never mean "public";
+* the value is either exactly `{"public": true}` or
+  `{"id": <int, 1 … 2 147 483 647>, "name": <1–80 printable characters, no
+  controls>}`, with no other keys. `{"param": …}`, a bare integer,
+  `{"id": 0}`, `{"public": false}` and unknown keys are refused as
+  `recipe_access_list_invalid` — the list is never a parameter;
+* `RECIPE_TOOLS` keeps `access_list_id` in the body's `forbid` list, so the
+  raw body key can never come from elsewhere in the step;
+* the dashboard verifies the id and name against NPM's access lists
+  (`GET /api/nginx/access-lists`) through the integration, server-side. This
+  is a dashboard check for the operator, **not** a recipe tool and not
+  reachable by an agent. An unknown id, a name that does not match that id,
+  or a failed read refuses the version (`recipe_access_list_unknown`) — fail
+  closed, retried when NPM is reachable.
+
+**Run time.** The engine writes `access_list_id` from the fixed value (the id
+or `0`), never from a parameter. The step's `check` includes
+`"access_list_id": 7` in its `where`, and its read call sets `"full": true`
+(the `proxy_hosts` transform exposes `access_list_id` only under `full`), so
+a host that ends up public fails the step's check even if the write reported
+success.
+
+**Cards.** The version card and the run card show
+`Access list: Internal only (#7)`, or **"Public (no access list)" in red**
+when the version says so. The label is rendered from the approved version
+(escaped like any other value); it is a fixed field, never agent text, and it
+appears on the step and in the run summary, so an approval that creates a
+public host cannot be given without seeing the red line.
+
+Tests: a version without `access_list` is refused; `{"param": …}`,
+`{"id": 0}`, a bare integer and unknown keys are refused; an id/name mismatch
+and an unreachable NPM refuse the version; a run whose created host has
+`access_list_id: 0` fails the check when the version names list 7; the public
+version's card carries the red label; the body sent carries no
+`access_list_id` that did not come from the version.
+
+#### Code-time notes (recorded; no design change)
+
+* **V3 — a tool argument not on that tool's list is refused.** The allowlist
+  in `RECIPE_TOOLS` is the rule; the `forbid` tuple is a second check for the
+  obvious names (`advanced_config`, `locations`, any custom config).
+  Code-round test: a key on neither list (`certificate_id`, `node_id`,
+  `meta`) is refused as `recipe_arg_forbidden`, and so is each `forbid`
+  entry.
+* **V5 — an SSH step is bound to its approval by request id.** When the
+  engine runs step N over SSH, it creates the request with the plan item's
+  `request_id` and claims that item by id, as F19's unattended claim does.
+  Nothing matches on `(host, command)` bytes: an identical direct call
+  arriving at the same moment creates its own request, is queued for the
+  operator, and cannot spend the recipe's item. Test: the same command bytes
+  from the engine and directly at the same time — the engine's request
+  consumes the item, the direct one stays `pending`, and the item is spent
+  exactly once.
+
+`bash scripts/verify.sh`: `2331 passed, 7 warnings in 428.46s (0:07:08)` (docs only).
+
 ### Reviewer notes
 
 **Design round 1 (2026-11-09): approved in direction, changes requested.**
@@ -6763,7 +6930,7 @@ reviewer.**
 Points for the security reviewer: R1/T1 templates, the R2/T3 tool lists, and
 R3/T2 rollback.
 
-| 16 | F16 | recipes | dashboard + MCP | **Round 4: V1–V6 folded — security re-reads only Round 4** | `feat/f16-recipes` | F3, F12, F13 | security re-reads Round 4 only |
+| 16 | F16 | recipes | dashboard + MCP | **Round 5 folded (Y1, W2 + two code-time notes) — security approved Round 4; design closed** | `feat/f16-recipes` | F3, F12, F13 | feature reviewer checks Round 5 alone |
 | 17 | F17 | local-agent | dashboard + docs | Ready after F12–F16 | `feat/f17-local-agent` | F12–F16 | |
 | 18 | F19 | unattended-limits | gateway + dashboard | Design first; before F4 `on` is unlocked | `feat/f19-unattended-limits` | F4, F5 | design approval + security reviewer sign-off |
 Chunks are done **in the order column**; each new chunk branches from the
