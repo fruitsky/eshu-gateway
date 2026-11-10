@@ -5614,6 +5614,21 @@ Changes:
 
 After K1–K3, I review only that diff.
 
+**Security reviewer — K1 severity (2026-11-10, after `9ecd160`):** I accept
+the reachability check. FastMCP generates one function per tool and drops
+undeclared arguments. No Supervisor tool declares `dry_run`, and
+`lovelace_save_config`, the only tool that does, honours it. So K1 cannot be
+reached over MCP today, and nothing live is exposed. **K1 drops from blocker
+to must (defence in depth).**
+
+It still lands before F10 merges, for three reasons:
+* the runner's rule is wrong whatever the transport;
+* an operator can add a `dry_run` parameter to a tool's params;
+* F16's recipe engine will build arguments itself, without going through
+  FastMCP.
+
+K2 and K3 are unchanged.
+
 **K1 reachability (feature reviewer, 2026-11-10).** K1 is right about the code,
 and the fix stands. It cannot be reached over MCP today, though:
 * `_build_tool_fn` gives every integration tool a typed signature built from
