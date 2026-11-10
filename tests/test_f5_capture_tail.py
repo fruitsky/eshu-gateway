@@ -53,8 +53,9 @@ def awk_name(request):
     return request.param
 
 
-def _sandbox(tmp_path, awk_name=None, awk_body=None):
-    """`awk` bound to one implementation (or a stub), a quiet logger, a harness."""
+def _sandbox(tmp_path, awk_name=None, awk_body=None, cap=None):
+    """`awk` bound to one implementation (or a stub), a quiet logger, the
+    harness; `cap` is the byte cap handed to `capture_tail` (None = default)."""
     bindir = tmp_path / 'bin'
     bindir.mkdir()
     if awk_body is not None:
@@ -69,7 +70,8 @@ def _sandbox(tmp_path, awk_name=None, awk_body=None):
                       % (bindir / 'logger.log'))
     logger.chmod(0o755)
     harness = tmp_path / 'harness.sh'
-    harness.write_text(_capture_function() + '\ncapture_tail "$1"\n')
+    tail_call = 'capture_tail "$1"' + (' %d' % cap if cap else '')
+    harness.write_text(_capture_function() + '\n' + tail_call + '\n')
     env = {
         'PATH': '%s:%s' % (bindir, os.environ.get('PATH', '/usr/bin:/bin')),
         'LANG': 'C.UTF-8',
@@ -81,8 +83,8 @@ def _sandbox(tmp_path, awk_name=None, awk_body=None):
 class Capture:
     """Run the extracted function against `data` with `awk` bound to one awk."""
 
-    def __init__(self, tmp_path, awk_name, data, cap_is_dir=False):
-        bindir, harness, env = _sandbox(tmp_path, awk_name)
+    def __init__(self, tmp_path, awk_name, data, cap_is_dir=False, cap=None):
+        bindir, harness, env = _sandbox(tmp_path, awk_name, cap=cap)
         self.log = bindir / 'logger.log'
         self.cap = tmp_path / 'capture.out'
         if cap_is_dir:
@@ -247,6 +249,18 @@ class TestCaptureTail:
         # asserted: `capture_tail` deliberately hides it (C1), so the
         # function's status is 0 either way.
         assert statuses[0] != '0', proc.stdout
+
+    def test_f5_capture_tail_65537_serves_the_mcp_envelope(self, tmp_path, awk_name):
+        """F12: the MCP envelope capture is the same ring at 64 KiB + 1.
+
+        The envelope carries at most 64 KiB; the capture keeps one extra byte
+        so F12 can tell "exactly at the cap" from "cut".
+        """
+        data = b''.join(b'line %06d\n' % i for i in range(160000))   # ~2 MiB
+        run = Capture(tmp_path, awk_name, data, cap=65537)
+        assert run.proc.returncode == 0, run.proc.stderr
+        assert len(run.stored) == 65537
+        assert run.stored == data[-65537:]
 
     def test_f5_capture_tail_does_not_use_mawk_interactive(self):
         """B2: `-W interactive` is rejected; it splits long records.
