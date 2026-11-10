@@ -6410,6 +6410,119 @@ the `from=` line, the explicit pin and the plaintext-at-rest statement.
 
 `bash scripts/verify.sh`: `2331 passed, 7 warnings in 428.60s (0:07:08)` (docs only).
 
+### Round 3 — design after review round 2 (U1–U4)
+
+The H2 single script stands; this section fixes its bounds, its arguments and
+its file modes.
+
+#### U1 — the remote side must finish first
+
+With no pty, killing the SSH client at 120 s does not stop the remote `sh`: it
+finishes `ha core check` and may restore while the dashboard starts its own
+restore — two writers on one file. Three rules replace that:
+
+* the check runs **inside** the script under a shorter remote bound:
+  `timeout 100 ha core check 2>&1` (coreutils or the add-on's BusyBox
+  `timeout`), so the script always restores and exits before the dashboard's
+  120 s;
+* the dashboard **never restores on its own** after a timeout. It reports
+  `config_state_unknown` with the backup name and the old/new hashes;
+* the per-integration lock **stays held** until a follow-up `sha256` read of
+  the path shows which content is in place (the old hash releases it as "not
+  applied"; the new hash as "applied"). Until then, writes and restores are
+  refused with `config_state_unknown`, and the integration page shows the
+  pending backup so the operator can resolve it by hand.
+
+#### U2 — `list` and `write` agree on packages
+
+`list` walks `/homeassistant/packages` recursively, but the write script
+accepted only the directory itself, so `packages/net/x.yaml` was listed and
+every write refused. The accepted directory is now
+`/homeassistant` **or any directory under `/homeassistant/packages/`** (the
+case pattern `/homeassistant/packages|/homeassistant/packages/*`), with the
+same basename-equality rule: `realpath` of the requested directory must be the
+requested directory, and the file's basename must not change. A directory
+that only *looks* similar (`/homeassistant/packages-old`) is refused.
+
+#### U3 — check every argument, map unknown exits
+
+The script trusts `$backup` and `$tmp`. It now requires:
+
+* both in the **same directory** as `$real`;
+* `$backup` to match `<real>.eshu-<10 digits>.bak` and `$tmp` to match
+  `<real>.eshu-tmp-<hex>`;
+* neither to exist (`[ ! -e ]`), so a retry cannot overwrite a previous
+  backup or a symlink planted at the temp name.
+
+Any exit outside 10–18 — including a failed `cp` inside the restore
+`|| { … }` group, which `set -e` turns into `cp`'s own status — maps to
+`config_state_unknown` **with the backup name**. It is never reported as ok
+and never as a clean failure. The dashboard maps only 10–18.
+
+#### U4 — keep the file's mode and owner
+
+`cat > "$tmp"` creates the file under the add-on's umask, so `mv` could change
+the mode of the target. Before the `mv`:
+`chmod --reference="$real" "$tmp"` and `chown --reference="$real" "$tmp"`
+(best effort; the SSH user owns the config tree in practice). A file that was
+0640 stays 0640 after a write.
+
+#### The write script, amended (U1–U4)
+
+```bash
+sh -c '
+set -eu
+path=$1; expect=$2; backup=$3; tmp=$4
+real=$(realpath -e -- "$path") || exit 12
+dir=$(dirname -- "$real")
+case "$dir" in
+  /homeassistant|/homeassistant/packages|/homeassistant/packages/*) ;;
+  *) exit 11 ;;
+esac
+[ "$(realpath -e -- "$(dirname -- "$path")")" = "$dir" ] || exit 13
+[ "$(basename -- "$real")" = "$(basename -- "$path")" ] || exit 13
+case "$backup" in
+  "$real".eshu-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9].bak) ;;
+  *) exit 19 ;;
+esac
+case "$tmp" in
+  "$real".eshu-tmp-*) ;;
+  *) exit 19 ;;
+esac
+[ "$(dirname -- "$backup")" = "$dir" ] || exit 19
+[ "$(dirname -- "$tmp")" = "$dir" ] || exit 19
+[ ! -e "$backup" ] || exit 19
+[ ! -e "$tmp" ] || exit 19
+[ "$(sha256sum -- "$real" | cut -d" " -f1)" = "$expect" ] || exit 14
+cp -p -- "$real" "$backup" || exit 15
+cat > "$tmp" || { rm -f -- "$tmp"; exit 16; }
+chmod --reference="$real" "$tmp" || exit 16
+chown --reference="$real" "$tmp" 2>/dev/null || true
+mv -f -- "$tmp" "$real" || exit 17
+timeout 100 ha core check 2>&1 || { cp -p -- "$backup" "$real" || exit 1; exit 18; }
+printf "ok %s\n" "$(sha256sum -- "$real" | cut -d" " -f1)"
+' _ "$path" "$expect" "$backup" "$tmp"
+```
+
+Exit 19 (a bad argument) and exit 1 (a failed restore) are deliberately
+outside 10–18 for the reasons U3 gives. The restore script uses the same
+argument checks, the same `timeout 100`, and its own second temp copy for the
+"put the previous content back" step.
+
+#### Tests, added
+
+U1: a stub `ha core check` that sleeps past the remote bound is killed by
+`timeout`, the script restores and exits before the client's 120 s; a client
+timeout yields `config_state_unknown` with the backup name and does not start
+a second restore; the lock refuses a write until a `sha256` read resolves it.
+U2: `packages/net/x.yaml` is listed **and** writable; `packages-old/x.yaml`
+and a symlinked packages dir are refused. U3: a backup/tmp outside the
+directory, with the wrong name or already existing is refused; an unknown
+exit maps to `config_state_unknown`. U4: a 0640 file stays 0640 and its owner
+is unchanged.
+
+`bash scripts/verify.sh`: `2331 passed, 7 warnings in 429.52s (0:07:09)` (docs only).
+
 ### Reviewer notes
 
 **Design round 1 (2026-11-09): approved in direction, changes requested.**
@@ -13425,7 +13538,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 10 | F8 | test-traffic | dashboard | Merged | `feat/f8-test-traffic` | — | low priority |
 | 11 | F9 | ha-supervisor-read | dashboard | Merged | `feat/f9-ha-supervisor-read` | — | token is now a dedicated `eshu` HA admin user |
 | 12 | F10 | ha-supervisor-actions | dashboard | Ready (after F9) | `feat/f10-ha-supervisor-actions` | F9, F3, Chunk H | reviewer pass + security reviewer sign-off |
-| 13 | F11 | ha-config-files | dashboard | **Round 2: design revised for H1–H8, open questions answered — awaiting security review** | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | design approval + security reviewer sign-off |
+| 13 | F11 | ha-config-files | dashboard | **Round 3: U1–U4 folded (remote bound, packages, argument checks, modes) — awaiting security review** | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | design approval + security reviewer sign-off |
 | 14 | F14 | inventory | dashboard + MCP | Merged | `feat/f14-inventory` | Chunk H | |
 | 15 | F19 | unattended-limits | gateway + dashboard | **Merged** 2026-11-11 (security sign-off `67bec51`; AF1/AF2 checked) | `feat/f19-unattended-limits` | F4, F5, F12 | AF3 goes on the next gateway branch |
 | 16 | F15 | probes | dashboard + MCP | **Merged** 2026-11-11 (AG1 security decision `eca8982`; AI1 fix merged) | `feat/f15-probes` | F4, F12, F14 | |
