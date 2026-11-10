@@ -6874,6 +6874,323 @@ above and into its test matrix.
 
 `bash scripts/verify.sh`: `2331 passed, 7 warnings in 428.65s (0:07:08)` (docs only).
 
+### Round 7 — the security conditions Z1–Z5 (and Z6–Z9)
+
+**Design only.** Z1–Z5 are folded below; Z6–Z9 are folded as rules with their
+tests; the two open questions are decided. The write and restore scripts are
+restated in full at the end of this round, because Z1–Z4 and Z6–Z9 all touch
+them.
+
+#### Z1 — the read is one fixed script, and refuses links
+
+The read was `realpath` and then `cat` as separate steps (and `sed`/`sha256sum`
+for `secrets.yaml`), so anything that can write into the config tree could
+swap a symlink in between. The read is not gated, and through that gap it
+would return any file root can read — the Supervisor token file among them,
+which skips every F10 gate.
+
+`READ_SCRIPT`, `SECRETS_KEYS_SCRIPT` and `CHECK_SCRIPT` are now constants with
+the write script's preamble, and they read `"$real"` **in the same process**:
+
+```bash
+# READ_SCRIPT — the same preamble as WRITE_SCRIPT, then the read itself.
+# Exit codes: 12 missing, 13 symlink/escape, 19 bad argument, 21 hard link;
+# the bytes go to stdout unchanged.
+sh -c '
+set -eu
+PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH
+path=$1
+case "$path" in /*) ;; *) exit 19 ;; esac
+case "$path" in *.yaml|*.yml) ;; *) exit 19 ;; esac
+[ "$(basename "$path")" != secrets.yaml ] || exit 19
+real=$(realpath "$path") || exit 12
+[ -f "$real" ] || exit 12
+[ ! -L "$real" ] || exit 13
+[ "$(stat -c %h "$real")" = 1 ] || exit 21
+dir=$(dirname "$real")
+case "$dir" in /homeassistant|/homeassistant/packages|/homeassistant/packages/*) ;; *) exit 11 ;; esac
+[ "$(realpath "$(dirname "$path")")" = "$dir" ] || exit 13
+[ "$(basename "$real")" = "$(basename "$path")" ] || exit 13
+cat "$real"
+' _ "$path"
+```
+
+* `SECRETS_KEYS_SCRIPT` is the same script with the last line replaced by the
+  keys-only `sed`, so `secrets.yaml` still never leaves the add-on (H1).
+* The dashboard hashes **the bytes it received** and reports that hash as
+  `sha256`; a file swapped after the read cannot make the reported hash
+  describe different bytes than the content field.
+* **Hard links are refused** (`stat -c %h` > 1, exit 21): a hard link to
+  `secrets.yaml` or to the token file is indistinguishable from the file by
+  path checks, and `cp`/`cat` would follow it. A hard link in the config tree
+  has no legitimate use.
+* The `ha core check` template that `ha_config_check` runs follows the same
+  rule (resolve the config root, refuse a link, then check), and so do the
+  paths the write and restore scripts resolve.
+
+Test, both userlands: a symlink and a hard link to a sentinel file are each
+refused (13 and 21), the sentinel's content appears in no response, and a
+normal file reads back byte-identically.
+
+#### Z2 — `ha core check` output is redacted on the add-on
+
+HA's config validation quotes the offending value, and `!secret` is already
+resolved by then. The output goes to the agent and into the call row's 8 KiB
+tail, and the dashboard cannot scrub what it does not know. So the scripts
+redact **before printing**, from the values in `secrets.yaml` on the add-on:
+
+```bash
+# Z2: replace each literal secret value that is at least 4 characters long.
+# index() and not a regex: the value is data, never a pattern.
+redact() {
+  sec="$dir/secrets.yaml"
+  [ -f "$sec" ] && [ ! -L "$sec" ] || return 0
+  LC_ALL=C awk -v sec="$sec" '
+    BEGIN { while ((getline l < sec) > 0) {
+              if (match(l, /^[A-Za-z0-9_]+:[ \t]*/)) {
+                v = substr(l, RLENGTH + 1); sub(/[ \t]+$/, "", v)
+                gsub(/^["\047]|["\047]$/, "", v)
+                if (length(v) >= 4) s[++n] = v } } }
+    { for (i = 1; i <= n; i++)
+        while ((p = index($0, s[i])) > 0)
+          $0 = substr($0, 1, p - 1) "***" substr($0, p + length(s[i]))
+      print }' "$1"
+}
+```
+
+The values are read from the file inside `awk`, never passed on a command line,
+so they do not appear in the add-on's process list. The same function wraps the
+check phase of the write, the check phase of the restore and the whole of
+`ha_config_check`.
+
+Test: a stub `ha` echoes a synthetic secret value; `***` appears instead, and
+the value appears in no tool response, call row or audit row (the call row's
+tail is the redacted text).
+
+#### Z3 — the banner also covers what a file can make HA reveal or run
+
+The H4 risky-key banner stays and widens:
+
+* **New `!secret` references.** The preflight collects every `!secret <name>`
+  in the proposed content and every one in the current file, and lists the
+  names that are **new** as "can expose these secret values through the HA
+  API". A value placed in a field the API returns (a name, an attribute) would
+  otherwise undo H1 by making the value readable through ordinary read tools.
+* **`!env_var` is refused** outright (`config_env_var_refused`) before
+  approval. HA Core's environment holds its Supervisor token, and HA OS
+  installs have no common need for the tag.
+* **Admin power.** F10's S-b red line (`⚠ Admin power: this config write can
+  define an action that calls any Supervisor (hassio.*) service.`) is shown
+  when **any** of these hold:
+  * the basename is `automations.yaml`, `scripts.yaml` or `scenes.yaml` (their
+    top level is a list, so the key scan sees nothing);
+  * the top-level key scan finds `automation` or `script`;
+  * the text contains `hassio.` anywhere;
+  * H4's risky keys are present (the existing list).
+
+The scan stays structural and key-name-only (no PyYAML); the `!secret` and
+`!env_var` tags are collected from the same top-level walk plus a literal scan
+for the tag names, which is safe because they are tag words, not values.
+
+Tests: a new `!secret` name is listed and an unchanged one is not;
+`!env_var` is refused with `config_env_var_refused`; each of the four
+admin-power triggers shows the red line (including `automations.yaml` with no
+keys at all, and a `hassio.` buried in a block scalar).
+
+#### Z4 — nothing is written through a name that was checked earlier
+
+`cp -p` onto a name that was checked opens that name again: a symlink planted
+between the check and the write is followed, as root. Rules, in both scripts:
+
+* **every new file is created noclobber** — `set -C` and `cat < src > new`,
+  which refuses an existing name or a link as well as `[ ! -e ] && [ ! -L ]`;
+* the mode and owner come from `stat -c` on the source file (W2's lines), never
+  `cp -p`;
+* **every change to `"$real"` is `mv -f` of a new file in the same
+  directory** — `mv` replaces the directory entry and never follows it;
+* `"$tmp"` (the write) and the restore's rollback are that kind of file;
+* the restore's rollback is `mv -f "$tmp" "$real"`: `$tmp` already holds the
+  content from before the restore.
+
+The final scripts are at the end of this section.
+
+Test: a stub `ha` plants a symlink to a sentinel at `$real` after the
+preamble; the write and the restore each end with `$real` replaced by their
+own file (checked by content and by `[ ! -L ]`), and the sentinel is
+unchanged. Both fail on the `cp`-based scripts.
+
+#### Z5 — the check record names the HA integration
+
+F10 reads `ha_check_config_<name of its ha integration>`; F11 runs on an
+`ha_ssh` row with its own name, so "clear before write" would delete a key
+F10 never reads and leave the old `valid` standing.
+
+* The `ha_ssh` row gets an operator-set `config_json.ha_integration`, set at
+  setup and editable only by the operator. It is validated as the name of an
+  **existing integration of kind `ha`**; an unknown name, a disabled one or a
+  non-`ha` kind refuses the save (`config_ha_integration_invalid`).
+* It is **never a tool argument**: `ha_config_*` take a path/backup/content
+  only, and an argument with that name is rejected by the tool's parameter
+  list.
+* H5's clear-before-write, and the post-write check's `valid`, use exactly
+  `ha_check_config_<config_json.ha_integration>` — the same key F10's
+  `ha_core_restart` reads.
+* A write or restore with the binding unset is refused
+  (`config_ha_integration_unset`) before any connection; `list`/`read` still
+  work, so the operator can see the tree while fixing the setup.
+
+Test: after a write, `ha_core_restart` refuses with `ha_check_config_stale`
+until a check passes; after the post-write check, it is accepted; a write with
+the binding unset is refused and opens no connection.
+
+#### Z6–Z9 (folded; the feature reviewer checks these)
+
+* **Z6 — checks inside the scripts.** Every script refuses a `secrets.yaml`
+  basename (exit 19) and requires `*.yaml`/`*.yml`; the dashboard refuses
+  `secrets.yaml` at **any depth** (HA also looks for one next to an included
+  file); every script starts with
+  `PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH`; the command is sent as
+  `/bin/sh -c` with every part `shlex.quote`d, because root's login shell on
+  the add-on would otherwise run the string first.
+* **Z7 — restrict the key line.** The `authorized_keys` line Eshu asks for is
+  `from="<dashboard address>",restrict`, or, if the add-on rejects
+  `restrict`, `no-port-forwarding,no-agent-forwarding,no-X11-forwarding,no-pty`.
+  Without it a port forward from the add-on reaches the Supervisor's network.
+  The setup doc records which form the add-on accepts.
+* **Z8 — settable state is invalidated.** `config_json.root_checked` and the
+  pin's confirmed flag are cleared whenever host, port, user or key changes;
+  `ssh_user` must match `^[a-z_][a-z0-9_-]{0,31}$`; the host is an IP or a
+  plain hostname that does not start with `-`.
+* **Z9 — "ok" means exit 0 and the last line.** A write succeeds only on exit
+  0 **and** a last line `ok <64 hex>` that equals the SHA-256 of the content
+  the engine sent. The output is never scanned for `ok`: the check output
+  comes first and the file can put anything in it.
+
+#### Gating
+
+`ha_config_write` and `ha_config_restore` are `always_gate` and stay out of
+`PLAN_COVERABLE_TOOLS`. With F10's K1, **`ha_config_write` is in
+`DRY_RUN_HANDLERS`** and its dry run opens only a read (Z1) and never a
+write; `ha_config_restore` is **not** in that set. Test: a restore with
+`dry_run: true` still queues a card.
+
+#### Open questions
+
+* **Q2 (pin):** an explicit pin at setup is the default; TOFU is allowed but
+  the pin stays **unconfirmed** until the operator confirms the fingerprint on
+  the card, and a write or restore requires a **confirmed** pin
+  (`ssh_host_unconfirmed`). Reads may run on an unconfirmed pin, so the first
+  connection can be a `list`.
+* **Q4 (pruning):** approved under the note's four conditions — the basename
+  is a positional argument and never part of the script text; the find is
+  `find "$dir" -maxdepth 1 -type f -name …` so links are skipped; it runs only
+  after exit 0; and it never touches the backup this write just made.
+
+#### The write and restore scripts, final
+
+```bash
+# WRITE_SCRIPT — one connection, `set -eu`, BusyBox- and GNU-compatible.
+# Exit codes: 10/11 not the HA config tree, 12 missing file, 13
+# symlink/escape, 14 hash changed, 15 backup failed, 16 write failed, 17 move
+# failed, 18 check failed and the backup was moved back, 19 bad argument,
+# 20 token file missing, 21 hard link. 1 is a failed rollback.
+sh -c '
+set -eu
+PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH
+path=$1; expect=$2; backup=$3; tmp=$4
+
+case "$path"   in /*) ;; *) exit 19 ;; esac
+case "$backup" in /*) ;; *) exit 19 ;; esac
+case "$tmp"    in /*) ;; *) exit 19 ;; esac
+case "$path" in *.yaml|*.yml) ;; *) exit 19 ;; esac
+[ "$(basename "$path")" != secrets.yaml ] || exit 19
+
+token_file=/run/s6/container_environment/SUPERVISOR_TOKEN
+[ -r "$token_file" ] || exit 20
+SUPERVISOR_TOKEN=$(cat "$token_file") || exit 20
+
+real=$(realpath "$path") || exit 12
+[ -f "$real" ] || exit 12
+[ ! -L "$real" ] || exit 13                       # Z1: never a link
+[ "$(stat -c %h "$real")" = 1 ] || exit 21        # Z1: nor a hard link
+dir=$(dirname "$real")
+[ -d "$dir" ] || exit 11
+case "$dir" in
+  /homeassistant|/homeassistant/packages|/homeassistant/packages/*) ;;
+  *) exit 11 ;;
+esac
+[ "$(realpath "$(dirname "$path")")" = "$dir" ] || exit 13
+[ "$(basename "$real")" = "$(basename "$path")" ] || exit 13
+[ "$(basename "$real")" != secrets.yaml ] || exit 19
+
+case "$backup" in
+  "$real".eshu-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9].bak) ;;
+  *) exit 19 ;;
+esac
+case "$tmp" in "$real".eshu-tmp-*) ;; *) exit 19 ;; esac
+[ "$(dirname "$backup")" = "$dir" ] || exit 19
+[ "$(dirname "$tmp")" = "$dir" ] || exit 19
+[ ! -e "$backup" ] && [ ! -L "$backup" ] || exit 19
+[ ! -e "$tmp" ] && [ ! -L "$tmp" ] || exit 19
+
+[ "$(sha256sum "$real" | cut -d" " -f1)" = "$expect" ] || exit 14
+
+# Z4: new files are created noclobber; the target changes only by mv.
+set -C
+cat "$real" > "$backup" || { set +C; rm -f "$backup"; exit 15; }
+cat > "$tmp" || { set +C; rm -f "$tmp"; exit 16; }
+set +C
+chmod "$(stat -c %a "$real")" "$backup" "$tmp" || exit 16
+chown "$(stat -c %u:%g "$real")" "$backup" "$tmp" 2>/dev/null || true
+mv -f "$tmp" "$real" || exit 17
+
+# Z2: the same function as above. The awk program is in double quotes here
+# because the whole script is the body of `sh -c '...'`: `\$0` and `\$1` are
+# escaped once so the inner shell hands awk a literal `$0`/`$1`.
+redact() {
+  sec="$dir/secrets.yaml"
+  [ -f "$sec" ] && [ ! -L "$sec" ] || return 0
+  LC_ALL=C awk -v sec="$sec" "
+    BEGIN { while ((getline l < sec) > 0) {
+              if (match(l, /^[A-Za-z0-9_]+:[ \t]*/)) {
+                v = substr(l, RLENGTH + 1); sub(/[ \t]+$/, \"\", v)
+                gsub(/^[\"\047]|[\"\047]$/, \"\", v)
+                if (length(v) >= 4) s[++n] = v } } }
+    { for (i = 1; i <= n; i++)
+        while ((p = index(\$0, s[i])) > 0)
+          \$0 = substr(\$0, 1, p - 1) \"***\" substr(\$0, p + length(s[i]))
+      print }" "\$1"
+}
+
+# Z2/Z9: the check runs with only the token; its output is redacted here and
+# the last line is the hash, computed from the file itself.
+if ! SUPERVISOR_TOKEN="$SUPERVISOR_TOKEN" timeout 100 ha core check > "$dir/.eshu-check.$$" 2>&1
+then
+  redact "$dir/.eshu-check.$$"; rm -f "$dir/.eshu-check.$$"
+  # Z4: roll the backup in by mv, never by cp onto "$real".
+  rb="$real.eshu-tmp-rb-$$"
+  set -C; cat "$backup" > "$rb"; set +C
+  mv -f "$rb" "$real" || exit 1
+  exit 18
+fi
+redact "$dir/.eshu-check.$$"; rm -f "$dir/.eshu-check.$$"
+printf "ok %s\n" "$(sha256sum "$real" | cut -d" " -f1)"
+' _ "$path" "$expect" "$backup" "$tmp"
+```
+
+`RESTORE_SCRIPT` keeps the same preamble (absolute arguments, Z6's basename
+and extension checks, the token, `realpath`, `-f`, no `-L`, link count 1, the
+accepted directory, basename equality), then: `[ -f "$backup" ] && [ ! -L
+"$backup" ] || exit 19` plus its own link-count check (X1/Z1); create `"$tmp"`
+noclobber with the pre-restore content; create the restore file noclobber with
+`cat "$backup" > "$rb"`, copy the mode/owner with `stat -c`, `mv -f "$rb"
+"$real"`; run the check with `redact`; on failure `mv -f "$tmp" "$real"`
+(exit 18, or exit 1 if that fails). The `ok` line is the backup's hash,
+computed before the restore and checked again after it, so a restore that
+somehow moved different bytes does not report ok.
+
+`bash scripts/verify.sh`: `2331 passed, 7 warnings in 428.79s (0:07:08)` (docs only).
+
 ### Reviewer notes
 
 **Design round 1 (2026-11-09): approved in direction, changes requested.**
@@ -14237,7 +14554,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 10 | F8 | test-traffic | dashboard | Merged | `feat/f8-test-traffic` | — | low priority |
 | 11 | F9 | ha-supervisor-read | dashboard | Merged | `feat/f9-ha-supervisor-read` | — | token is now a dedicated `eshu` HA admin user |
 | 12 | F10 | ha-supervisor-actions | dashboard | Ready (after F9) | `feat/f10-ha-supervisor-actions` | F9, F3, Chunk H | reviewer pass + security reviewer sign-off |
-| 13 | F11 | ha-config-files | dashboard | **Round 5: W6–W8 folded, restore script shown in full — awaiting security review** | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | design approval + security reviewer sign-off |
+| 13 | F11 | ha-config-files | dashboard | **Round 7: Z1–Z5 folded, Z6–Z9 + Q2/Q4 decided — to security for Z1–Z5** | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | security reads only the Round 7 Z1–Z5 sections |
 | 14 | F14 | inventory | dashboard + MCP | Merged | `feat/f14-inventory` | Chunk H | |
 | 15 | F19 | unattended-limits | gateway + dashboard | **Merged** 2026-11-11 (security sign-off `67bec51`; AF1/AF2 checked) | `feat/f19-unattended-limits` | F4, F5, F12 | AF3 goes on the next gateway branch |
 | 16 | F15 | probes | dashboard + MCP | **Merged** 2026-11-11 (AG1 security decision `eca8982`; AI1 fix merged) | `feat/f15-probes` | F4, F12, F14 | |
