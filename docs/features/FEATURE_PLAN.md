@@ -7771,6 +7771,23 @@ are Q2 (writes need a confirmed pin) and Q4.
 After AB1, AB2, AC1 and AC2, the design goes to the security reviewer for
 Z1–Z5.
 
+**AC1/AC2 (feature reviewer, 2026-11-10, `29f7296`): fixed; one line before the
+security reviewer (AE1).** `redact` reads stdin, keeps the shell's arguments
+unescaped, and no check file is created in the config directory.
+
+* **AE1 (must): `out=${out:0:65536}` is bash-only, and it cuts before
+  redacting.** The scripts run under `/bin/sh`: BusyBox `ash` on the add-on,
+  `dash` for the GNU half of the W5 tests, which rejects `${var:off:len}`
+  ("Bad substitution", and under `set -e` the script dies after the check,
+  before the rollback). Cutting first can also split a secret at the boundary
+  and leave its first part unredacted. Use
+  `printf '%s\n' "$out" | redact | head -c 65536` (portable, and the cap
+  comes **after** redaction). Test: a secret that straddles byte 65 536 leaves
+  no prefix of itself in the output.
+
+With AE1 folded, F11 goes to the security reviewer for Z1–Z5 (no further round
+from me).
+
 ---
 
 ## Chunk F12 — SSH through Eshu over MCP (`ssh_exec`) · slug `ssh-exec` · dashboard (+ small gateway change)
