@@ -6904,6 +6904,48 @@ work under both BusyBox and GNU:
 
 After W1–W5 the design goes to the security reviewer, as round 3 said.
 
+**Design round 4 (feature reviewer, 2026-11-10, `67b5373`): W1–W5 are right;
+two points before the security review (W6, W7).** The argument order, the
+BusyBox-only `realpath`, the `stat -c` mode copy, the 18-for-every-check-failure
+rule, the `/homeassistant` list template and the BusyBox CI matrix all hold.
+Running the script under `busybox sh` while writing the note is exactly the
+right check.
+
+* **W6 (must): `[ ! -e ]` does not catch a dangling symlink.** `test -e`
+  follows symlinks, so a symlink planted at the backup or temp name whose
+  target does not exist passes `[ ! -e "$backup" ]` / `[ ! -e "$tmp" ]`. Then
+  `cp -p "$real" "$backup"` and `cat > "$tmp"` follow it and write, as the
+  SSH user (root on the add-on), to wherever it points. U3's stated purpose
+  ("a symlink planted at the temp name") is therefore not met. Anything that
+  can write into the HA config tree can plant one (an integration, another
+  add-on with `config:rw`, a mistaken automation). Fix, in the write **and**
+  restore scripts:
+  * `[ ! -e "$x" ] && [ ! -L "$x" ] || exit 19` for `$backup` and `$tmp`
+    (BusyBox `test` has `-L`);
+  * `set -C` (noclobber) before `cat > "$tmp"`, so the open itself refuses
+    an existing name, as a second layer;
+  * the restore script's "copy the current file to `$tmp`" step gets the
+    same checks.
+
+  Test, both userlands: a dangling symlink at the backup name and at the
+  temp name each give exit 19, and the symlink's target is never created.
+* **W7 (must, an operator check before code): does `ha` work over a
+  non-interactive SSH command?** The operator's check ran `ha` in the add-on's
+  web terminal, an interactive login shell. F11 runs `sh -c '…'` as an SSH
+  command, which does not read the login profile, and the `ha` CLI needs the
+  Supervisor token from the environment. If it is missing there, every
+  `ha core check` fails, every write is restored (safe) and F11 never
+  works. The operator runs one read-only command from a LAN machine with the
+  add-on key; the result goes into the setup doc. If the token is missing,
+  the script must load it from a fixed file the add-on provides (named in
+  the design, never taken from an argument), not from the dashboard.
+* **Nit:** the restore script is described in prose only. Show it in full
+  like the write script, since the security reviewer reads the scripts, not
+  the prose.
+
+After W6, W7 and the nit, to the security reviewer (§ 2.6a), with H1,
+H2/U1/U3/W6 and H4 as the points to check.
+
 ---
 
 ## Chunk F12 — SSH through Eshu over MCP (`ssh_exec`) · slug `ssh-exec` · dashboard (+ small gateway change)
@@ -13808,7 +13850,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 10 | F8 | test-traffic | dashboard | Merged | `feat/f8-test-traffic` | — | low priority |
 | 11 | F9 | ha-supervisor-read | dashboard | Merged | `feat/f9-ha-supervisor-read` | — | token is now a dedicated `eshu` HA admin user |
 | 12 | F10 | ha-supervisor-actions | dashboard | Ready (after F9) | `feat/f10-ha-supervisor-actions` | F9, F3, Chunk H | reviewer pass + security reviewer sign-off |
-| 13 | F11 | ha-config-files | dashboard | **Round 4: W1–W5 folded (BusyBox/GNU-compatible scripts, CI busybox) — awaiting security review** | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | design approval + security reviewer sign-off |
+| 13 | F11 | ha-config-files | dashboard | **Round 4 reviewed: W6 (dangling symlink), W7 (ha token over SSH) before security** | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | design approval + security reviewer sign-off |
 | 14 | F14 | inventory | dashboard + MCP | Merged | `feat/f14-inventory` | Chunk H | |
 | 15 | F19 | unattended-limits | gateway + dashboard | **Merged** 2026-11-11 (security sign-off `67bec51`; AF1/AF2 checked) | `feat/f19-unattended-limits` | F4, F5, F12 | AF3 goes on the next gateway branch |
 | 16 | F15 | probes | dashboard + MCP | **Merged** 2026-11-11 (AG1 security decision `eca8982`; AI1 fix merged) | `feat/f15-probes` | F4, F12, F14 | |
