@@ -53,7 +53,8 @@ def _recv(ws):
         return {'_raw': data}
 
 
-def ha_ws_request(integration: dict, command: str, payload: dict) -> dict:
+def ha_ws_request(integration: dict, command: str, payload: dict,
+                  read_timeout: float = None) -> dict:
     """Run one HA WebSocket command and return its `result`.
 
     Raises ProxyError on missing credential, handshake/auth failure, transport
@@ -64,7 +65,11 @@ def ha_ws_request(integration: dict, command: str, payload: dict) -> dict:
     sslopt = None
     if not integration.get('verify_tls', 1):
         sslopt = {'cert_reqs': ssl.CERT_NONE}
-    ws = websocket.create_connection(_ws_url(integration), timeout=READ_TIMEOUT, sslopt=sslopt)
+    # F10: an add-on or Core update runs for minutes. The caller may raise the
+    # read timeout; the default stays what every read tool has always used.
+    ws = websocket.create_connection(_ws_url(integration),
+                                     timeout=read_timeout or READ_TIMEOUT,
+                                     sslopt=sslopt)
     try:
         msg = _recv(ws)
         if not isinstance(msg, dict) or msg.get('type') != 'auth_required':
@@ -164,7 +169,8 @@ def execute_ws_call(integration: dict, command: str, payload=None,
 def ha_ws_exec(integration: dict, command: str, payload=None, agent: str = '',
                tool_name: str = '', session_id: str = '',
                execution_id: str = '', reason: str = '', approval: str = '',
-               decided_at: int = 0, decided_by: str = ''):
+               decided_at: int = 0, decided_by: str = '',
+               read_timeout: float = None):
     """Run one HA WS command for a curated multi-step handler and return its
     RAW (un-scrubbed) result.
 
@@ -177,7 +183,8 @@ def ha_ws_exec(integration: dict, command: str, payload=None, agent: str = '',
     from db.integrations import record_integration_call
     start = time.time()
     try:
-        result = ha_ws_request(integration, command, payload or {})
+        result = ha_ws_request(integration, command, payload or {},
+                               read_timeout=read_timeout)
         body = json.dumps(result)
         status_code = 200
         error = None

@@ -3940,6 +3940,10 @@ def _plan_payload(plan: dict) -> dict:
     for item in plan.get('items', []):
         row = dict(item)
         row['remaining'] = max(0, int(row.get('max_uses') or 0) - int(row.get('uses') or 0))
+        # P1: an mcp item shows the redacted arguments and the preflight
+        # summary, so the operator approves what the call actually does.
+        row['args'] = row.pop('args_json', '') or ''
+        row['summary'] = row.get('summary') or ''
         row['breakdown'] = None if row.get('removed') else cmd_breakdown(row.get('command') or '')
         items.append(row)
     out['items'] = items

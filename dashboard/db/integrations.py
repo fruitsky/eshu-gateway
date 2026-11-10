@@ -214,6 +214,12 @@ def init_integrations_tables(cursor):
             agent TEXT NOT NULL DEFAULT ''
         )
     ''')
+    # F10: the resolved one-line summary ("update | core_mosquitto | 6.5.1 -> 6.6.0")
+    # the approval card shows, built by the tool's preflight.
+    try:
+        cursor.execute("ALTER TABLE pending_integration_calls ADD COLUMN summary TEXT DEFAULT ''")
+    except Exception:
+        pass
     try:
         cursor.execute("ALTER TABLE pending_integration_calls ADD COLUMN secret_hashes TEXT DEFAULT '{}'")
     except Exception:
@@ -391,16 +397,16 @@ def create_tool(integration_id: int, name: str, description: str, method: str,
                 error_codes: dict = None, path_variants: dict = None,
                 response_hint: str = '', handler: str = '', totals: bool = False,
                 seeded: bool = False, timeout: int = 0,
-                principal_allow=None) -> int:
+                principal_allow=None, enabled: bool = True) -> int:
     with db_conn() as conn:
         cursor = conn.cursor()
         cursor.execute('''
             INSERT INTO integration_tools
                 (integration_id, name, description, method, path_template, params, fields, search_field, example, read_only, enabled, transport, filter_fields, generic, version, strip_envelope, transform, not_implemented, always_gate, error_codes, path_variants, response_hint, handler, totals, seeded, timeout, principal_allow)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (integration_id, name, description, method, path_template,
               json.dumps(params or []), json.dumps(fields or []), search_field or '',
-              example, 1 if read_only else 0,
+              example, 1 if read_only else 0, 1 if enabled else 0,
               transport or 'http', json.dumps(filter_fields or []), 1 if generic else 0,
               version or 'v1', 1 if strip_envelope else 0,
               transform or '', 1 if not_implemented else 0,
@@ -755,17 +761,18 @@ def list_recent_session_summaries(limit: int = 24):
 
 def create_pending_call(integration: str, tool: str, payload: dict, reason: str = '',
                         session_id: str = '', execution_id: str = '',
-                        agent: str = '', session_source: str = '') -> int:
+                        agent: str = '', session_source: str = '',
+                        summary: str = '') -> int:
     with db_conn() as conn:
         cursor = conn.cursor()
         now = int(time.time())
         cursor.execute('''
             INSERT INTO pending_integration_calls
                 (integration, tool, payload, reason, status, session_id,
-                 execution_id, agent, session_source, created_at)
-            VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)
+                 execution_id, agent, session_source, created_at, summary)
+            VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)
         ''', (integration, tool, json.dumps(payload or {}), reason, session_id,
-              execution_id, agent, session_source or '', now))
+              execution_id, agent, session_source or '', now, (summary or '')[:300]))
         conn.commit()
         return cursor.lastrowid
 
