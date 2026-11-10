@@ -4859,6 +4859,35 @@ else; freeze queueing nothing. `tests/test_ha_mcp.py` and
 
 `bash scripts/verify.sh`: `2393 passed, 7 warnings in 458.83s (0:07:38)`.
 
+### Round 3 — N1 (round 2 review): non-canonical paths
+
+**Commit: `2f0fdf1`.**
+
+`is_supervisor_rest_path` now refuses a path **whatever its prefix** when it
+is not canonical:
+
+* it is percent-decoded **until stable** (one pass let `%252e%252e` become
+  `%2e%2e`, which the proxy then decoded);
+* any `.` or `..` segment, a backslash, or a NUL/control character is
+  refused — HA has no legitimate API path with those;
+* only then are `//`, the leading `/` and an `api/` prefix stripped and the
+  Supervisor prefixes checked, as before.
+
+Refusing beats normalising because the bytes sent must be the bytes checked:
+`urllib` sends the path verbatim, and nginx/NPM in front of HA resolves dot
+segments and decodes `%2e`, so `api/states/../hassio/backups/x/restore`
+would otherwise reach the Supervisor.
+
+The table runs seven spellings through **all three checkpoints** (21 tests):
+`api/states/../hassio/backups/x/restore`, `api/./hassio/host/reboot`,
+`api/states/%2e%2e/hassio/x`, `api/services/./hassio/x`,
+`api/hassio\backups`, `api/services/%252e%252e/hassio/x` and a NUL byte.
+`test_a_non_canonical_path_is_refused_before_gating` (no pending call, no
+upstream request), `..._by_the_curated_executor` (`execute_integration_call`)
+and `..._by_the_generic_executor` (`execute_generic_call`) each assert a 403.
+
+`bash scripts/verify.sh`: `2414 passed, 7 warnings in 469.74s (0:07:49)`.
+
 ### Reviewer notes
 
 **Round 1 (2026-11-09, main feature reviewer): changes requested.** 177 F10,
@@ -6005,7 +6034,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 9 | F13 | session-conclusions | dashboard + MCP | Merged | `feat/f13-session-conclusions` | F5, F6 | |
 | 10 | F8 | test-traffic | dashboard | Merged | `feat/f8-test-traffic` | — | low priority |
 | 11 | F9 | ha-supervisor-read | dashboard | Merged | `feat/f9-ha-supervisor-read` | — | token is now a dedicated `eshu` HA admin user |
-| 12 | F10 | ha-supervisor-actions | dashboard | **Round 1: changes requested (M1–M2)** | `feat/f10-ha-supervisor-actions` @ `1e14827` | F9, F3, Chunk H | reviewer pass + security reviewer sign-off |
+| 12 | F10 | ha-supervisor-actions | dashboard | **Round 3: M1–M2, S1 and N1 fixed — awaiting security review** | `feat/f10-ha-supervisor-actions` @ `2f0fdf1` | F9, F3, Chunk H | reviewer pass + security reviewer sign-off |
 | 13 | F11 | ha-config-files | dashboard | Ready (after F10) — design first | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | design approval + security reviewer sign-off |
 | 14 | F14 | inventory | dashboard + MCP | Merged | `feat/f14-inventory` | Chunk H | |
 | 15 | F15 | probes | dashboard + MCP | Ready after F12 | `feat/f15-probes` | F4, F12 | |
