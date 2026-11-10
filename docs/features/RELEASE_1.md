@@ -1,6 +1,6 @@
 # Release 1 — `feature-roadmap` → `master`
 
-Status: **checklist ready, not started.** Each step needs the operator's
+Status: **preconditions met (2026-11-10); release not started.** Each step needs the operator's
 go-ahead. Nothing in this file has been run against the live system except
 the read-only checks under "Checked before release".
 
@@ -27,6 +27,18 @@ Plus the CI fix (`fix/ci-environment`), once it is approved and merged (see
 Not in this release: F10, F11, F12, F15, F16, F17 and F19.
 
 ## Preconditions
+
+**Met on 2026-11-10:**
+* 1: the CI fix was signed off by the security reviewer (D1) and merged in
+  `f2746ef` (2360 passed). GitHub CI is green on the branch.
+* 2: the deploy helper now resets `static/dev/` before it pulls; merged in
+  `afd5ea6` (2362 passed).
+* 3: full suite green at `afd5ea6`.
+
+The buffering fix (`fix/stream-unbuffered`, B1–B4) is **not** a precondition:
+slow commands outliving a disconnect is a known issue that predates this
+release, and the security reviewer agreed it does not block (F5 Reviewer
+notes, D1).
 
 1. `fix/ci-environment` is approved by the feature reviewer (C1–C5), signed
    off by the security reviewer (gateway bash, § 2.6a), and merged. GitHub CI
