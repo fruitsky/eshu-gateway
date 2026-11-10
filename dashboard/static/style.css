@@ -5392,3 +5392,50 @@ body.pol-open .mobile-menu-btn, body.pol-open .mobile-freeze { display: none; }
     border: 1px solid var(--rule-weak);
     border-radius: 3px;
   }
+
+/* ── F23: the change journal modal ─────────────────────────────────────── */
+.host-changes-body {
+  max-height: 60vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.host-change-row {
+  display: grid;
+  grid-template-columns: 6.5em 3.2em 1fr;
+  gap: 8px;
+  align-items: baseline;
+  padding: 5px 6px;
+  border-bottom: 1px solid var(--rule-weak);
+}
+.host-change-row:last-child { border-bottom: 0; }
+.host-change-row:hover { background: var(--bg-hover); }
+.host-change-at { color: var(--text-faint); font-variant-numeric: tabular-nums; }
+.host-change-mark {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  letter-spacing: 0.5px;
+  text-align: center;
+  border: 1px solid var(--rule-weak);
+  border-radius: 3px;
+  color: var(--text-dim);
+  padding: 1px 0;
+}
+.host-change-mark.ssh { color: var(--accent-hover); border-color: var(--accent-ring); }
+.host-change-mark.integration { color: var(--state-auto); border-color: rgba(147, 197, 253, 0.4); }
+.host-change-mark.audit { color: var(--state-approved); border-color: rgba(74, 222, 128, 0.4); }
+.host-change-mark.alert { color: var(--state-denied); border-color: rgba(248, 113, 113, 0.4); }
+.host-change-main { color: var(--text-main); word-break: break-word; }
+.host-change-detail { color: var(--text-muted); }
+.host-change-tie {
+  color: var(--state-pending);
+  border: 1px solid var(--accent-ring);
+  border-radius: 999px;
+  padding: 0 6px;
+  margin-left: 6px;
+  white-space: nowrap;
+}
+.host-change-full { margin-top: 3px; color: var(--text-dim); }
+.host-change-full summary { cursor: pointer; color: var(--text-faint); }
+.host-changes-empty { color: var(--text-muted); padding: 8px 0; }
