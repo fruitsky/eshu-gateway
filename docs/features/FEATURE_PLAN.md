@@ -6944,6 +6944,50 @@ right check.
   the prose.
 
 After W6, W7 and the nit, to the security reviewer (§ 2.6a), with H1,
+
+**W7 answered (feature reviewer, 2026-11-10), plus W8.** Read-only checks over
+a real non-interactive SSH command (`ssh hassio@<ha> '…'`, the add-on key, the
+same shape F11 uses), on HA OS with Advanced SSH & Web Terminal:
+
+| Check | Result |
+|---|---|
+| `SUPERVISOR_TOKEN` in the environment | **unset** |
+| `ha core info` | `Error: unauthorized: missing or invalid API token`, exit 1 |
+| where the login shell gets it | `/etc/profile.d/homeassistant.sh` (`export SUPERVISOR_TOKEN=…`), not read by a non-interactive command |
+| `/run/s6/container_environment/SUPERVISOR_TOKEN` | exists, `root:root 0644` |
+| `SUPERVISOR_TOKEN=$(cat that file) ha core info` | exit **0** |
+| `id` | `uid=1000(hassio)`, groups `wheel`, `hassio` |
+| `/homeassistant`, `configuration.yaml`, `packages/` | `root:root`, **not writable** by `hassio` |
+| `sudo -n true` | succeeds (passwordless sudo through `wheel`) |
+
+* **W7 (must): load the token from the fixed s6 file, for the check only.**
+  In the write and restore scripts:
+  `SUPERVISOR_TOKEN=$(cat /run/s6/container_environment/SUPERVISOR_TOKEN) || exit 20`
+  as a local (not exported) variable, then
+  `SUPERVISOR_TOKEN="$SUPERVISOR_TOKEN" timeout 100 ha core check 2>&1 || { …restore…; exit 18; }`,
+  so only `ha` sees it. The path is a constant in the script, never an
+  argument. The token is never printed, never sent to the dashboard, and
+  never appears in the integration-call row. Exit 20 (token file missing)
+  happens **before** the backup, so nothing is touched; the dashboard maps
+  it to `config_ha_token_missing`. Test: a stub `ha` that fails unless
+  `SUPERVISOR_TOKEN` equals the content of a temp token file (path
+  substituted in the test's copy only); a missing token file gives 20 with
+  the target unchanged; a test asserts the token value appears in no
+  output, DB row or audit row.
+* **W8 (must): F11 must log in as root.** As the add-on ships, the SSH user is
+  `hassio`, which cannot write the config tree; every write would fail at
+  the backup (15). Open question 3 already chose root (protection mode on,
+  LAN only, H7's `from=` restriction). So: the setup doc tells the operator
+  to set the add-on's `ssh.username: root`, and the dashboard checks
+  `id -u` = 0 once, on the first `list`, refusing with
+  `config_ssh_not_root` and a message that names the setting. Do not use
+  `sudo -n` from the script instead: it is the same privilege with an extra
+  layer that scrubs the environment, and it depends on the add-on's sudoers
+  staying as it is. (The `hassio` user has passwordless sudo, so it is
+  root-equivalent anyway; `root` only makes that explicit.)
+
+After W6–W8 and the restore-script nit, to the security reviewer (§ 2.6a),
+with H1, H2/U1/U3/W6, H4 and W7 (token handling) as the points to check.
 H2/U1/U3/W6 and H4 as the points to check.
 
 ---
@@ -13850,7 +13894,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 10 | F8 | test-traffic | dashboard | Merged | `feat/f8-test-traffic` | — | low priority |
 | 11 | F9 | ha-supervisor-read | dashboard | Merged | `feat/f9-ha-supervisor-read` | — | token is now a dedicated `eshu` HA admin user |
 | 12 | F10 | ha-supervisor-actions | dashboard | Ready (after F9) | `feat/f10-ha-supervisor-actions` | F9, F3, Chunk H | reviewer pass + security reviewer sign-off |
-| 13 | F11 | ha-config-files | dashboard | **Round 4 reviewed: W6 (dangling symlink), W7 (ha token over SSH) before security** | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | design approval + security reviewer sign-off |
+| 13 | F11 | ha-config-files | dashboard | **Round 4 reviewed: W6 (dangling symlink), W7 (token file), W8 (log in as root) before security** | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | design approval + security reviewer sign-off |
 | 14 | F14 | inventory | dashboard + MCP | Merged | `feat/f14-inventory` | Chunk H | |
 | 15 | F19 | unattended-limits | gateway + dashboard | **Merged** 2026-11-11 (security sign-off `67bec51`; AF1/AF2 checked) | `feat/f19-unattended-limits` | F4, F5, F12 | AF3 goes on the next gateway branch |
 | 16 | F15 | probes | dashboard + MCP | **Merged** 2026-11-11 (AG1 security decision `eca8982`; AI1 fix merged) | `feat/f15-probes` | F4, F12, F14 | |
