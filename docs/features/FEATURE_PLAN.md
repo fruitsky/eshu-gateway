@@ -6343,6 +6343,33 @@ restrict the arguments (see S3); forced commands do.
 review only that diff, not the whole bash again. F12 must not merge before
 then.
 
+**Code round 2 (feature reviewer, 2026-11-10, `c137e55`): approved, pending
+merge-forward and the security diff check.**
+
+* **The fixes:** M1–M3 and S1–S2 are fixed as asked, and so are the security
+  reviewer's R1–R4 and S1–S4.
+  * The dashboard sends the old `ts|cmd` line to a gateway that has not
+    reported v2, and denies an agent row there, with an audit record.
+  * `wait` re-runs only at `consumed`.
+  * Force-JIT fails closed through one shared constant.
+* **Tests:** 296 F12, installer, gateway-script and session tests pass
+  locally. The implementer's full run is 2484.
+* **Residual race (should, not blocking):** `consumed` is written when the
+  poller *fetches* the ticket, a moment before it writes the lockbox line. A
+  re-run that lands in that gap still files a second request. The window is
+  milliseconds against a 2 s poll interval, so it is rare. If it shows up,
+  `ssh_exec` can wait one more poll interval after seeing `consumed`.
+* **The order from here:**
+  1. `fix/ci-environment` merges first; it is the release blocker.
+  2. This branch is merged forward onto the updated `feature-roadmap`. It
+     conflicts with the CI fix in `eshu-gateway.sh`, both installers and
+     `tests/test_gateway_script.py`: both rewrite the capture code. Keep the
+     CI fix's `capture_tail`/`PIPESTATUS` code and F12's R4 rule in
+     `post_exec_result`, then regenerate the installers.
+  3. The security reviewer checks the merged-forward `eshu-gateway.sh`,
+     installer-template and poller diff once, against `feature-roadmap`.
+  4. Then I merge.
+
 
 ---
 
