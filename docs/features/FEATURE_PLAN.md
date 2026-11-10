@@ -7713,6 +7713,37 @@ least 4 characters to 3).
 
 Z6–Z9, Q2 and Q4 will be checked in the next round, together with AB1/AB2.
 
+**Z6–Z9, Q2 and Q4 (feature reviewer, 2026-11-10, `f6cdbbd`): approved, plus
+two fixes in the final write script (AC1, AC2).** Z6 (fixed `PATH`, `*.yaml`
+only, `secrets.yaml` refused in the script and at any depth on the
+dashboard, `/bin/sh -c` with quoted parts), Z7 (`from=…,restrict`, with the
+spelled-out fallback), Z8 (clearing `root_checked` and the pin confirmation
+on any connection change; user and host patterns), Z9 (exit 0 **and** the last
+line `ok <sha256 of the sent content>`; no scanning) and the gating (`write`
+in `DRY_RUN_HANDLERS` with a read-only dry run, `restore` not) are right. So
+are Q2 (writes need a confirmed pin) and Q4.
+
+* **AC1 (must): `redact` never reads its input.** Inside the
+  double-quoted awk program the last word is `"\$1"`, so the inner shell
+  hands awk the literal file name `$1`. awk then fails to open it and the
+  check output is lost (not leaked, but gone). Only the awk fields (`$0`)
+  need escaping; the file argument must be the shell's `"$1"`. The W5 BusyBox
+  test should assert that a non-secret line of the stub `ha` output survives
+  `redact`.
+* **AC2 (must): the check output file is a Z4 hole.** `> "$dir/.eshu-check.$$"`
+  is a predictable name inside the config directory, created without
+  `set -C`, so a link planted there is written through as root. Do not use a
+  file. Capture the output in a variable and redact it from stdin:
+  `out=$(SUPERVISOR_TOKEN="$SUPERVISOR_TOKEN" timeout 100 ha core check 2>&1) && rc=0 || rc=$?`,
+  then `printf '%s\n' "$out" | redact` (with `redact` reading stdin). The
+  same applies in `RESTORE_SCRIPT` and `ha_config_check`.
+* **Setup-doc note:** the operator's own key added for the 2026-11-10 checks
+  has no `from=`/`restrict`. The doc should say to remove personal keys, or
+  restrict them, once Eshu's key is in place.
+
+After AB1, AB2, AC1 and AC2, the design goes to the security reviewer for
+Z1–Z5.
+
 ---
 
 ## Chunk F12 — SSH through Eshu over MCP (`ssh_exec`) · slug `ssh-exec` · dashboard (+ small gateway change)
