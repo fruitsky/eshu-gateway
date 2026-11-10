@@ -6255,6 +6255,50 @@ This merge brings the branch onto the updated `feature-roadmap` (CI fix
   F12's tests, the F5 capture tests and the gateway-script tests pass.
 * Both installers were regenerated in this commit.
 
+#### Round 9: merged forward again — onto the buffering fix
+
+This merge brings the branch onto `feature-roadmap` at `ef2418f`, which
+contains the line-buffered `sanitize` (`fix/stream-unbuffered`, merge
+`d8d70c2`; security sign-off `f0d5bc8`). The merge commit is `dc3eb01`.
+
+* **`sanitize` is the roadmap's, unchanged.** It runs
+  `"${SANITIZE_CMD[@]}" -e …`: `SANITIZE_CMD=(stdbuf -oL sed -E)` when
+  `stdbuf` is found once on the fixed `PATH` after the environment is
+  scrubbed, `(sed -E)` otherwise with a single syslog line
+  (`BUFFERING: stdbuf is unavailable; …`). The redaction expressions are
+  byte-identical to the branch's old ones, so every sanitize test passes
+  without a change. This is B1; the branch no longer has plain `sed -E`.
+* **The MCP branch is unchanged:**
+  `"$@" 2>&1 | sanitize | capture_tail "$ESHU_MCP_CAP" 65537 >/dev/null`.
+  One in-stream ring, no FIFO, nothing to wait for; the command's own output
+  still never reaches stdout. `capture_tail` keeps the `$2` cap and the
+  `cap + 2` ring from round 8 (the roadmap's copy still has the fixed
+  16 385 cap, so this file's version is the one the merge keeps).
+* **Conflicts and how they were resolved.** `sanitize` itself auto-merged to
+  the roadmap form, so there was no conflict there in the end. Three files
+  did conflict:
+  - `tests/test_f5_capture_tail.py`: `_sandbox` takes both seams —
+    `awk_name`, the roadmap's `awk_body` stub and F12's `cap`; the B2
+    `-W interactive` guard and the 65 537-byte envelope test both stay
+    (they are complementary, not alternatives).
+  - `tests/test_gateway_script.py`: the F12 path and nonce swaps and the
+    CI fix's `stdbuf=False` swap are both kept, `stdbuf` first.
+  - `docs/features/FEATURE_PLAN.md`: the F12 status row, rewritten for this
+    merge.
+* **Not changed here.** B2's `-W interactive` is still not used (F5 round 6
+  measured that it splits or truncates long records). The mawk/`tail`
+  residual noted in the buffering-fix sign-off applies to F5 capture; the
+  MCP path writes the ring to `/dev/null`, so its buffering does not matter.
+* Both installers were regenerated in the merge (`python3
+  dashboard/gen_installer.py`); the embedded gateway in each matches the
+  source.
+
+The security reviewer re-reads the merged gateway diff; the feature reviewer
+merges after that.
+
+`bash scripts/verify.sh`: `2505 passed, 22 skipped, 7 warnings in 464.25s (0:07:44)`
+(gawk is not installed in this container, so its parameters skip here too).
+
 ### Reviewer notes
 
 **Round 1 (2026-11-09): design changes requested. Not ready for the security
