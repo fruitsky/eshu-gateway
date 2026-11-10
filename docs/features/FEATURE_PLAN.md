@@ -6081,6 +6081,40 @@ reviewer before any code.
 (§ 2.6a), especially R1 to R3 and the forbidden/allowed tables. F16 code waits
 for F10 (`mcp` plan items) and F12 (SSH steps) to be merged.
 
+**Design round 2 (2026-11-10, `b2c34f8`): approved in direction, three fixes
+before the security review (T1–T3).** R2–R8 are folded in well:
+* the registry-walk allowlist test;
+* `precheck` plus `created`, so rollback only undoes what the run made;
+* `contains` as equality, with `where` on the same element;
+* `allowed_agents`;
+* `check: "self"`;
+* the `curl` correction.
+
+* **T1 (must): the whole-word check does not refuse glued slots.**
+  Comparing word counts before and after the sentinel replacement passes
+  `echo --host={fqdn}` and `echo x{fqdn}`; both stay one word either way.
+  Checked here: all three of those spellings return `True`. The rule should
+  be: after replacing placeholders with the sentinel, **every token that
+  contains the sentinel must equal it exactly**. Also refuse a **backslash**
+  anywhere in a template. `echo \{fqdn}` passes every current rule, and the
+  `\` then escapes the opening quote that `shlex.quote` adds.
+* **T2 (must): undo needs the created object's id.** NPM's delete tool takes
+  the proxy host `id` (see `npm_seed.py`), not a domain, so step 2's undo
+  `{"domain": {"param": "fqdn"}}` cannot work. Allow an undo argument to
+  reference the step's own stored result, `{"result": "id"}`, a dotted path
+  into the structured response recorded with the run. A missing value makes
+  the rollback of that step fail closed, and the rollback preview shows the
+  value. Test it with a canned create response.
+* **T3 (should): use the registry's real names and shapes.** The Pi-hole read
+  tool is `local_dns_records` (handler `pihole_local_dns_records`), and it
+  returns host records as name → IPs. Write `RECIPE_TOOLS` and the example's
+  `where` clauses against the actual tool names and response shapes. The
+  registry-walk test will catch the names; add one test that runs the step 1
+  check against a canned `local_dns_records` response.
+
+After T1–T3, to the security reviewer (§ 2.6a), with R1/T1 (templates), R2
+(allowlist) and R3/T2 (rollback) as the points to check.
+
 ---
 
 ## Chunk F17 — Local-agent profile · slug `local-agent` · dashboard + docs
