@@ -8709,6 +8709,57 @@ stub and its JIT-body test now expects `run_limits`.
 
 `bash scripts/verify.sh`: `2538 passed, 22 skipped, 7 warnings in 477.75s (0:07:57)`.
 
+**Code round 1 (feature reviewer, 2026-11-10, `90c4df7` / `51fb2a8`): the
+design is implemented faithfully; three must-fixes before the security
+reviewer reads the gateway bash.** Read in full: `parse_run_limit` (three
+answers, `min()` per field, range-checked, `python3 -I`), the capability
+reported per request and only with GNU `timeout`, `run_dir_safe()` shared by
+the F5, F12 and F19 files (W1), `timeout -k 5` and `cap_raw | sanitize |
+cap_visible` with the `bytes + 1` probe, `PIPESTATUS[0]`, the one-round-trip
+claim by id (it always exits through `run_sanitized` → `finish`), and every
+inline interpreter on `python3 -I`. The full suite passes here **with gawk
+installed**: 2555 passed, 5 skipped.
+
+* **AD1 (must): a command that ignores SIGTERM is not marked `time`.** With
+  `-k 5`, GNU `timeout` sends SIGKILL after the grace period and exits **137**,
+  not 124 (checked here: `timeout -k 1 1 bash -c 'trap "" TERM; sleep 5'` →
+  137). The marker test is `rc -eq 124`, so the run that most needed the limit
+  ends with no `limit: time`, no "[ESHU limit: stopped …]" line and no
+  truncation flag. Accept 124 **or** 137 (with the same elapsed-time guard),
+  and add that test.
+* **AD2 (must): CI is red on `51fb2a8` (both Python jobs), although the suite
+  passes locally.** `feature-roadmap` is green on the same runner label, so
+  the difference is F19's. The likely cause: `ubuntu-latest` moved to Ubuntu
+  26 in October 2026, which ships the Rust coreutils (`uutils`) as
+  `timeout`. `timeout --version` then does not say "GNU coreutils", so
+  `RUN_LIMITS_CAP` is empty and every test expecting `run_limits: v1` (and
+  the F4 auto-approval tests) fails. **Confirm from the Actions log first.**
+  If it is that:
+  * the tests must not depend on the runner's `timeout` flavour. Give
+    `GatewaySandbox` a stub `timeout` whose `--version` is chosen per test, and
+    keep one test that a non-GNU `timeout` refuses a limited run;
+  * pin the workflow to `runs-on: ubuntu-24.04`, so the gateway tests do not
+    change under us (this was already on the list);
+  * say in the setup doc that a gateway whose `timeout` is not GNU
+    (Ubuntu 26's default, BusyBox) reports no capability, so its unattended
+    rows stay `pending` (`read-lane-no-limits`). That fails closed, but the
+    operator should know.
+* **AD3 (must): drop `docs/TOOLSHED_PLAN.md` from the branch.** It is not on
+  `feature-roadmap` or `master`; the merge commit `8865712` added it (899
+  lines, a 2026-11-06 draft plan). It has nothing to do with F19, and this
+  repo is public. Remove it in a normal commit, and ask the operator whether
+  the file is theirs and where it belongs.
+* **Nit:** `timeout --version | grep -q …` runs under `pipefail`. The output is
+  small enough that it does not race today, but capture it to a variable
+  first so the check cannot flip on an early `grep` exit.
+* **Noted:** the regenerated `static/dev/eshu-gateway-install.sh` answers the
+  security reviewer's F12 note N-b. Nothing regenerates it in the repo (not
+  `gen_installer.py`), so it will go stale again; make `gen_installer.py`
+  write it in a later change.
+
+After AD1–AD3, the gateway bash (`eshu-gateway.sh` and both installers) goes to
+the security reviewer (§ 2.6a).
+
 ---
 
 ## 7. Backlog (not planned in detail)
