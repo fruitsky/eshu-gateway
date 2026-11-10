@@ -6019,6 +6019,44 @@ Test: a simulated claim failure (the row is `approved`, not `consumed`) makes
 
 `bash scripts/verify.sh`: `2331 passed, 7 warnings in 431.41s (0:07:11)` (docs only).
 
+### Round 4 — Q3 (round 3 review): the MCP capture is bounded
+
+Round 3's MCP branch finished in `tee "$ESHU_MCP_CAP" >/dev/null`, which has
+no cap when no `run_limit` is set — every human-approved MCP run. A large
+output would grow the file on `/run` without limit. Q3 replaces it with the
+same ring F12 now uses:
+
+```bash
+if [ "$ESHU_MCP" = "1" ]; then
+  "${run_argv[@]}" 2>&1 | cap_raw | sanitize | cap_visible \
+    | capture_tail "$ESHU_MCP_CAP" 65537 >/dev/null
+elif [ "$mode" = "tail" ] && [ -n "$ESHU_OUT_TAIL" ]; then
+  "${run_argv[@]}" 2>&1 | cap_raw | sanitize | cap_visible \
+    | capture_tail "$ESHU_OUT_TAIL"
+else
+  "${run_argv[@]}" 2>&1 | cap_raw | sanitize | cap_visible
+fi
+```
+
+`capture_tail` takes the byte cap as `$2` (F12/CI fix) and keeps the last
+`cap` bytes in a ring, so the envelope's 64 KiB rule still holds and a run
+with no `run_limit` cannot fill `/run`. The old `tee` was written by
+`cap_visible` into a file with no bound.
+
+Test, in the F19 suite: 2 MiB of MCP output with **no** `run_limit` leaves an
+`ESHU_MCP_CAP` of at most 65 537 bytes and an envelope of at most 64 KiB
+(the +1 byte is what tells "cut" from "exactly at the cap").
+
+**B4 correction.** The buffering fix (`fix/stream-unbuffered`) puts
+`stdbuf -oL` on `sanitize`, and F19's pipeline uses that `sanitize`
+unchanged. The review also expected mawk to get `-W interactive`; it does
+not, because that option makes mawk split records longer than 4096 bytes
+(measured: a 20 000-byte line becomes five records), which would corrupt the
+agent's stream. The F5 round-6 note records the measurement. F19's time
+limit stays the bound for unattended runs whatever the buffering does.
+
+`bash scripts/verify.sh`: `2331 passed, 7 warnings in 426.61s (0:07:06)` (docs only).
+
 ### Reviewer notes
 
 **Design round 1 (2026-11-09, main feature reviewer): changes requested.** The
@@ -6296,6 +6334,6 @@ trap-removed. Q2's `next_step` for unattended rows, read from the
 
 After Q3, to the security reviewer for § 3 and § 4.
 
-| 18 | F19 | unattended-limits | gateway + dashboard | **Round 3: Q1–Q2 folded (pipeline on the CI fix, unattended re-run) — awaiting security review of §3/§4** | `feat/f19-unattended-limits` | F4, F5 | design approval + security reviewer sign-off |
+| 18 | F19 | unattended-limits | gateway + dashboard | **Round 4: Q3 folded (MCP capture on `capture_tail` 65 537) — awaiting security review** | `feat/f19-unattended-limits` | F4, F5 | design approval + security reviewer sign-off |
 Chunks are done **in the order column**; each new chunk branches from the
 updated `feature-roadmap` after the previous one is merged.
