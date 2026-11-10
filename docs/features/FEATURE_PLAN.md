@@ -6311,6 +6311,18 @@ Rounds 2 and 3 as well as Round 4, because they answer L1–L8.
 (L3, L6, L7 and W1 included) is merged and deployed fleet-wide. The gateway
 bash comes back to me before merge.
 
+**W1 confirmed (feature reviewer, 2026-11-10).** On `feature-roadmap` the
+`/run/eshu` check (a directory, not a symlink, mode 700, owned by
+`ESHU_RUN_OWNER`) runs only inside `if [ "$mode" = "tail" ]`
+(`eshu-gateway.sh`, `run_sanitized`). The Round 3 probe's
+`mktemp -p "$ESHU_RUN_DIR"` runs whenever there is a byte limit, so under
+`exit-only` it would create the file in an unchecked directory. At code time,
+move the four tests into one `run_dir_safe()` helper that the capture, the
+probe and F12's `ESHU_MCP_CAP` all call. A failed check disables capture
+(as today) but **refuses** a limited run, as the security reviewer asked.
+Test: an unsafe `/run/eshu` with a `run_limit` refuses the call and runs
+nothing; with no `run_limit` the call runs as before.
+
 ---
 
 ## 7. Backlog (not planned in detail)
