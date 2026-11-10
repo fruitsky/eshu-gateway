@@ -4974,6 +4974,18 @@ in the generic executor. 95 F10 and F3 tests pass locally.
 **After N1:** to the security reviewer (§ 2.6a), with the M1 table, N1 and
 the `mcp` plan-claim owner binding as the points to check.
 
+**Round 3 (2026-11-10, `2f0fdf1`): approved by the feature reviewer,
+to security.** `is_supervisor_rest_path` now unquotes until the path stops
+changing. It then refuses any dot segment, backslash or control character,
+whatever the prefix, before the prefix check. I re-probed it with 15
+spellings: every round 2 bypass, plus `%252e%252e`, `..%2f`, `hassio%2f`,
+upper case, a trailing `..` and `%00`. All are refused, while
+`api/states/light.kitchen`, `api/services/light/turn_on` and an encoded
+space still pass. 116 F10 and F3 tests pass locally.
+**Next:** the security reviewer (§ 2.6a). Points to check: the M1 three
+checkpoints and N1, the `mcp` plan-claim owner binding (M2), and
+`ha_host_reboot` never being plan-coverable (S1).
+
 ---
 
 ## Chunk F11 — HA config files via the SSH add-on · slug `ha-config-files` · dashboard
