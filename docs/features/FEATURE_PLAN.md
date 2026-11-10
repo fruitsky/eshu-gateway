@@ -5506,6 +5506,39 @@ need another round from me:
   `kind == 'ha'` at validation and at claim, matching F16's V6 rule (kind +
   tool).
 
+### Round 4 — R1 and R2
+
+**Commit: `8f76878`** (`dashboard/db/session_plans.py` and
+`tests/test_f10_ha_supervisor_actions.py`). It is the only code commit the
+security reviewer needs to read: the diff adds R1/R2 on top of `2a2ca70`
+(P1–P3, S-a/S-b), so the P1–P3 diff and R1–R2 are read together.
+
+* **R1 — the claim re-checks the tool.** `claim_mcp_plan_item` returns `None`
+  for anything outside `PLAN_COVERABLE_TOOLS` before it opens the plan, so a
+  row written by a future insert path cannot widen what an approved plan
+  spends. `create_plan` still refuses it first; this is the same allowlist
+  applied at the point of use.
+* **R2 — (kind, tool), not the tool name.** An `mcp` item must name an
+  integration whose row has `kind == 'ha'`, checked in `_validate_mcp_item`
+  and again in `claim_mcp_plan_item`. The kind is read from the integrations
+  row by name, never taken from the caller (the item stores the name and the
+  claim matches the name, so the kind has to come from the same row); an
+  unknown name is not HA and is refused the same way. `create_plan`'s order
+  is unchanged, so a non-curated tool or a bare `args_hash` is still reported
+  as before, and an unknown integration only fails once the item is otherwise
+  valid.
+* **Tests** (`TestPlanCoverage`): validation refuses a custom-kind
+  integration and an unknown one (`not_plan_coverable`, with the name in the
+  message); a row whose `tool` was changed to `write` directly in the table is
+  not claimable, and the same row is claimable after the tool is put back; a
+  row whose `integration` was changed to a custom-kind one is not claimable,
+  and is claimable again once re-pointed at `ha`. The "put it back" halves
+  show each refusal is the new check and not a broken fixture.
+  Tests that create an `mcp` plan item now take the `ha` fixture, since the
+  item needs a real HA integration row.
+
+`bash scripts/verify.sh`: `2462 passed, 14 skipped, 7 warnings in 488.87s (0:08:08)`.
+
 ---
 
 ## Chunk F11 — HA config files via the SSH add-on · slug `ha-config-files` · dashboard
