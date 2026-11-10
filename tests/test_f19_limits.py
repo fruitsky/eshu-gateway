@@ -444,3 +444,78 @@ def test_a_gateway_without_gnu_timeout_refuses_a_limited_run(tmp_path):
     assert 'cannot be enforced' in proc.stdout
     assert not (gw.root / 'ran-marker').exists()
     assert not _result_bodies(gw)
+
+
+# ── AF1/AF2: an unattended row must carry a usable limit ────────────────────
+
+@pytest.mark.parametrize('response', [
+    '{"unattended":true}',
+    '{"unattended":true,"run_limit":null}',
+    '{"unattended":true,"run_limit":{}}',
+    '{"unattended":true,"run_limit":{"seconds":"60","bytes":1048576}}',
+])
+def test_an_unattended_row_without_a_usable_limit_is_invalid(response):
+    out = _parse(response)
+    assert out.stdout.strip().startswith('1|invalid'), out.stdout
+
+
+def test_an_unattended_row_with_a_limit_is_valid():
+    out = _parse('{"unattended":true,"run_limit":{"seconds":60,"bytes":1048576}}')
+    assert out.stdout.strip() == '0|valid|60|1048576'
+
+
+def test_a_human_row_may_omit_the_limit():
+    out = _parse('{"run_limit":null}')
+    assert out.stdout.strip() == '0|absent||'
+
+
+@pytest.mark.parametrize('limit', [
+    '{"seconds":%d,"bytes":1048576}' % (10 ** 30),
+    '{"seconds":60,"bytes":%d}' % (10 ** 30),
+])
+def test_a_huge_value_is_invalid_in_the_parser(limit):
+    """AF2: bash `[ -lt ]` on a value over 2^63 errors, and inside `if` that
+    error counts as false, so the range check lives in the Python."""
+    out = _parse('{"run_limit":%s}' % limit)
+    assert out.stdout.strip().startswith('1|invalid'), out.stdout
+
+
+def test_the_endpoints_never_omit_the_limit_for_an_unattended_row(
+        temp_db, client, gateway_headers):
+    """AF1: a corrupt stored limit is sent as {}, never null or absent."""
+    from main import approve_unattended
+    from db.core import db_conn
+    _agent_ticket_gateway()
+
+    out = approve_unattended('10.0.0.1', 'uptime', 'read-lane', '', '', '',
+                             'agent-a', 'v1')
+    rid = out['request_id']
+    with db_conn() as conn:
+        conn.execute("UPDATE requests SET run_limit = 'not json' WHERE id = ?",
+                     (rid,))
+        conn.commit()
+    status = client.get(f'/api/request_status/{rid}', headers=gateway_headers)
+    assert status.json()['run_limit'] == {}
+    assert status.json()['unattended'] is True
+    ticket = client.get(f'/api/ticket/{rid}', headers=gateway_headers)
+    assert ticket.json()['run_limit'] == {}
+
+
+def test_an_mcp_run_with_a_null_limit_is_refused(tmp_path):
+    gw = _gateway(tmp_path)
+    gw.unattended(None)          # "unattended": true, "run_limit": null
+    cmd = gw.command_script('marker4', 'touch ran-marker\n')
+    proc = gw.run(gw.sign(cmd))
+    assert 'Invalid run_limit' in proc.stdout
+    assert not (gw.root / 'ran-marker').exists()
+
+
+def test_the_poll_path_also_refuses_a_null_limit(tmp_path):
+    """AF1: the direct-SSH poll loop reads the limit from the claim."""
+    gw = _gateway(tmp_path)
+    gw.unattended(None)
+    gw.jit_status('approved')
+    cmd = gw.command_script('marker5', 'touch ran-marker\n')
+    proc = gw.run(cmd)           # unsigned, so the ticket is agent-less
+    assert 'Invalid run_limit' in proc.stdout
+    assert not (gw.root / 'ran-marker').exists()

@@ -573,29 +573,55 @@ parse_run_limit() {   # $1 = dashboard JSON body. 0 = ok (absent or valid)
   local kind="" secs="" bytes="" triple
   triple=$(printf '%s' "$1" | python3 -I -c '
 import json, sys
+
+# AF2: the range check lives here, in the parser, not in bash arithmetic.
+# Bash `[ -lt ]` on an integer over 2^63 errors, and inside an `if` that
+# error counts as false, so a huge value would pass as valid; GNU timeout
+# would then treat it as effectively unbounded.
+SECS_MIN, SECS_MAX = 5, 300
+BYTES_MIN, BYTES_MAX = 65536, 8388608
+
 try:
     doc = json.load(sys.stdin) or {}
 except ValueError:
     print("invalid"); raise SystemExit(0)
+unattended = doc.get("unattended") is True
 rl = doc.get("run_limit")
-if rl is None:
-    print("absent")
-elif not isinstance(rl, dict):
-    print("invalid")
-else:
-    s, b = rl.get("seconds"), rl.get("bytes")
+
+def _valid(value):
+    if not isinstance(value, dict):
+        return None
+    s, b = value.get("seconds"), value.get("bytes")
     if isinstance(s, bool) or isinstance(b, bool) \
             or not isinstance(s, int) or not isinstance(b, int):
+        return None
+    if not (SECS_MIN <= s <= SECS_MAX and BYTES_MIN <= b <= BYTES_MAX):
+        return None
+    return s, b
+
+if rl is None:
+    # AF1: an unattended row must never arrive without a limit; "absent"
+    # means "a human approved this" and is only allowed when it is not
+    # marked unattended. A sentinel object ({} or null) with unattended
+    # true falls through to invalid.
+    print("invalid" if unattended else "absent")
+else:
+    parsed = _valid(rl)
+    if parsed is None:
         print("invalid")
     else:
-        print("valid\t%d\t%d" % (s, b))
+        print("valid\t%d\t%d" % parsed)
 ' 2>/dev/null) || triple="invalid"
   IFS=$'\t' read -r kind secs bytes <<< "$triple"
   case "$kind" in
     absent)
       return 0 ;;
     valid)
+      # Second layer (the Python above is the rule). The digit case keeps a
+      # value that is not plain digits out of `[ -lt ]` entirely.
       case "${secs}${bytes}" in ''|*[!0-9]*) RUN_LIMIT_STATE="invalid"; return 1 ;; esac
+      case "$secs" in ?|??|???) ;; *) RUN_LIMIT_STATE="invalid"; return 1 ;; esac
+      case "$bytes" in ?????|??????|???????) ;; *) RUN_LIMIT_STATE="invalid"; return 1 ;; esac
       if [ "$secs" -lt 5 ] || [ "$secs" -gt 300 ] \
          || [ "$bytes" -lt 65536 ] || [ "$bytes" -gt 8388608 ]; then
         RUN_LIMIT_STATE="invalid"; return 1
@@ -1685,6 +1711,11 @@ while true; do
         elif [ "$CLAIM_CMD" != "$cmd" ]; then
           logger -t eshu-gateway "JIT COMMAND MISMATCH for #$REQUEST_ID — refusing to run"
           say "[LOCKED] Approved command does not match the requested command — refusing to run."
+          finish refused 1
+        elif ! parse_run_limit "$CLAIM_BODY"; then
+          # AF1: the claim response carries the limit. An unattended row
+          # without a usable one is refused here, exactly as on the MCP path.
+          say "[LOCKED] Invalid run_limit from the dashboard — refusing to run."
           finish refused 1
         else
           TICKET_FOUND="yes"

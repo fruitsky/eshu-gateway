@@ -1288,11 +1288,17 @@ def check_request_status(req_id: int, request: Request):
     # F19: an approved unattended row still has to run under its limit, whether
     # it is claimed by the poll loop or by a re-run.
     row = get_request_row(req_id) or {}
-    if row.get('unattended') and status in ('approved', 'consumed') and row.get('run_limit'):
+    if row.get('unattended') and status in ('approved', 'consumed'):
+        # AF1: an unattended row always carries the field. A stored limit that
+        # does not parse becomes an empty dict, which the gateway's parser
+        # refuses — it must never be null or omitted, or the gateway would
+        # read "no limit" for a row the dashboard marked unattended.
         try:
-            out['run_limit'] = json.loads(row['run_limit'])
+            out['run_limit'] = json.loads(row.get('run_limit') or '')
+            if not isinstance(out['run_limit'], dict):
+                out['run_limit'] = {}
         except (TypeError, ValueError):
-            pass
+            out['run_limit'] = {}
         out['unattended'] = True
     return out
 
@@ -1309,11 +1315,15 @@ def claim_ticket_by_id(req_id: int, request: Request):
         # F19: the limit travels beside the ticket, in the same response, so the
         # gateway runs this claim bounded (the poller never gets these rows).
         if ticket.get('unattended'):
+            # AF1: always present, and an unparsable one is an empty dict the
+            # gateway refuses — never null, never omitted.
             out['unattended'] = True
             try:
-                out['run_limit'] = json.loads(ticket.get('run_limit') or '{}')
+                out['run_limit'] = json.loads(ticket.get('run_limit') or '')
+                if not isinstance(out['run_limit'], dict):
+                    out['run_limit'] = {}
             except (TypeError, ValueError):
-                out['run_limit'] = None
+                out['run_limit'] = {}
         return out
     return {"ticket": None}
 
