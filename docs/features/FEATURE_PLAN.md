@@ -5647,6 +5647,55 @@ handlers that implement a dry run, used at both places; the Supervisor
 handler refuses `dry_run`. Add one test that a declared-but-unsupported
 `dry_run` on a Supervisor tool is still gated and frozen.
 
+### Round 5 — K1, K2, K3 and the two nits
+
+**Commit: `a463d31`.** It is the only code commit for this round, laid on top
+of `8f76878` (R1/R2) and `2a2ca70` (P1–P3, S-a/S-b); the security reviewer
+reads this diff next.
+
+* **K1 — a named set of handlers that really dry-run.** `DRY_RUN_HANDLERS`
+  sits next to `HANDLERS` in `core/tool_handlers.py` and holds
+  `ha_lovelace_save_config` only. `tool_runner` asks
+  `_dry_run_exempt(handler, args)`, which is `handler in DRY_RUN_HANDLERS`
+  and the argument, at **both** places: the freeze check and the gate skip.
+  A handler that ignores `dry_run` (the Supervisor action handler, any
+  REST/WS/generic tool) is no longer exempt, so `dry_run: true` cannot run
+  the real action with no card and no freeze. As the second layer,
+  `_h_ha_supervisor_action` refuses a call whose arguments contain `dry_run`
+  with `ha_supervisor_dry_run_unsupported` (400).
+  Tests: each of the six Supervisor tools with `dry_run: true` (the reboot is
+  enabled in the test, since the seed disables it) queues a card and makes no
+  action call — the update preflights' GETs are allowed through — and, with
+  freeze on, is refused `frozen` with nothing queued; the handler refuses
+  `dry_run` directly; a tool whose params declare `dry_run` but whose handler
+  is not in the set stays gated. `ha_lovelace_save_config` keeps its
+  pre-gate dry run (the F9 tests cover it).
+* **K2 — an admin config write is `always_gate`.** `is_admin_config_write`
+  on the request path (automation/script/scene) now ORs into the same
+  `always` flag as `tool.get('always_gate')`: it forces the card even under
+  `gate_mode=destructive` with a non-destructive verb, `ungated` cannot clear
+  it, and the ignored override is audited through `_audit_ignored_ungated`.
+  The red admin-power line is unchanged and now rides on a card that always
+  exists.
+  Tests: `*: ungated` with each of the three prefixes (and a query string)
+  queues a card whose summary starts with the warning; the audit row appears
+  once; the predicate is scoped to those prefixes and not to `/api/states` or
+  `/api/services`.
+* **K3 — the executor checks the base path too.**
+  `execute_integration_call` now calls
+  `is_supervisor_rest_request(integration.get('base_url'), path)` — the same
+  call as the runner and `execute_generic_call`. Test: an `ha` integration
+  whose base URL ends in `/hassio`, a generic tool path `backups`, and the
+  executor refuses with 403 and sends nothing upstream.
+* **Nits.** An mcp item whose redacted argument display would exceed
+  `MAX_ARGS_DISPLAY` (2 000 bytes) is refused with `invalid_args` instead of
+  truncated, so the card never hides a tail that the hash still matches; the
+  test builds a 3 000-byte argument. `_normalise_rest_path`'s docstring now
+  says `None` (what it returns for a non-canonical path) and `''` only for an
+  empty one — code unchanged.
+
+`bash scripts/verify.sh`: `2485 passed, 14 skipped, 7 warnings in 501.02s (0:08:21)`.
+
 ---
 
 ## Chunk F11 — HA config files via the SSH add-on · slug `ha-config-files` · dashboard
