@@ -184,6 +184,15 @@ def _validate_mcp_item(item):
     # the handler's preflight summary when it has one. Both are display only;
     # the call still matches on the hash of the raw arguments.
     display, summary = _mcp_display(integration, tool, raw)
+    if len(display.encode('utf-8')) > MAX_ARGS_DISPLAY:
+        # Nit (K1 review): the card used to truncate the display while the
+        # match used the full arguments, so an operator could approve a tail
+        # they never saw. Refuse instead; the curated actions take short
+        # arguments.
+        raise PlanError('invalid_args',
+                        'the argument display is longer than %d bytes; shorten '
+                        'the arguments so the operator can see all of them'
+                        % MAX_ARGS_DISPLAY)
     label = f"mcp: {integration}.{tool} ({digest[:12]})"
     return {'kind': 'mcp', 'host': '*', 'command': label,
             'integration': integration, 'tool': tool, 'args_hash': digest,
@@ -196,7 +205,7 @@ def _mcp_display(integration_name: str, tool_name: str, args: dict):
     try:
         from core.secret_scrub import scrub_payload
         display = _json.dumps(scrub_payload(args or {}), sort_keys=True,
-                              separators=(',', ':'))[:MAX_ARGS_DISPLAY]
+                              separators=(',', ':'))
     except Exception:
         display = ''
     summary = ''

@@ -1098,6 +1098,12 @@ def _config_check_fresh(integration):
 
 def _h_ha_supervisor_action(integration, tool, args, ctx=None):
     """F10: one fixed Supervisor action, chosen by the tool's name."""
+    if 'dry_run' in (args or {}):
+        # K1: this handler has no dry run — it would run the real action. A
+        # caller that slipped past the runner's exemption reaches here too.
+        return _err('ha_supervisor_dry_run_unsupported',
+                    'dry_run is not supported on Supervisor actions; send the '
+                    'call without it and approve the real action.', 400)
     name = (tool or {}).get('name') or ''
     if name == 'ha_core_restart':
         fresh, _last = _config_check_fresh(integration)
@@ -1173,6 +1179,15 @@ HANDLERS = {
     'commute_override': handle_commute_override,
     'commute_pause': handle_commute_pause,
 }
+
+# K1: the handlers that really implement a `dry_run` themselves. Only these may
+# skip the approval card and the Emergency Freeze on `dry_run: true`; a handler
+# that ignores the flag must never be exempt, because the exemption would let
+# the real action run without either. `ha_supervisor_action` is deliberately
+# absent (it refuses `dry_run` below), as is every REST/WS/generic tool.
+DRY_RUN_HANDLERS = frozenset({
+    'ha_lovelace_save_config',
+})
 
 
 def _preflight_save_config(integration, tool, args, ctx):

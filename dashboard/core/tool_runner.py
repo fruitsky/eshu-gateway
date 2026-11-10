@@ -182,6 +182,20 @@ def _refuse_supervisor_ws(integration, tool, tool_name, args, session_id,
 _UNGATED_OVERRIDE_WARNED = set()
 
 
+def _dry_run_exempt(handler: str, args: dict) -> bool:
+    """K1: does this call really dry-run, i.e. may it skip the gate/freeze?
+
+    Only a handler listed in `DRY_RUN_HANDLERS` implements `dry_run`; for every
+    other tool the argument is just one more field, and treating it as an
+    exemption would run the real action with no card and no freeze."""
+    if not handler or not (args or {}).get('dry_run'):
+        return False
+    # Imported here: tool_handlers imports `_read_only_refusal` from this
+    # module, so a top-level import would be a cycle.
+    from core.tool_handlers import DRY_RUN_HANDLERS
+    return handler in DRY_RUN_HANDLERS
+
+
 def _audit_ignored_ungated(agent_name, integration_name, tool_name):
     """P2: tell the operator once per agent and tool that `ungated` did not win.
 
@@ -471,7 +485,7 @@ def _run_tool(integration_name: str, tool_name: str, args: dict, reason: str = '
     # notion. Only a *handler* dry-run is exempt: `dry_run` is a real argument
     # on curated handlers (they honour it), but on a REST/WS/generic tool it is
     # just one more argument — the same condition the gate below uses.
-    if get_trigger_freeze() and not (handler and args.get('dry_run')):
+    if get_trigger_freeze() and not _dry_run_exempt(handler, args):
         # Imported here: read_policy wraps _read_only_refusal from this module,
         # so a top-level import would be a cycle.
         from core.read_policy import is_read_integration_call
@@ -585,9 +599,16 @@ def _run_tool(integration_name: str, tool_name: str, args: dict, reason: str = '
     method, path = _request_shape(tool, args, transport, generic, handler)
     destructive = is_destructive(method, path)
     gate_mode = (integration.get('gate_mode') or 'destructive').lower()
+    # S-b/K2: an approved write to HA's automation/script/scene config API can
+    # define an action that calls any hassio.* service — the same power a
+    # curated Supervisor action has — so it is gated like `always_gate`.
+    # `ungated` cannot switch it off, and the card carries the red line below.
+    admin_config_write = bool(_ha_path and mutating
+                              and is_admin_config_write(_ha_path))
+    always = bool(tool.get('always_gate')) or admin_config_write
     should_gate = (gate_mode == 'all'
                    or (gate_mode == 'destructive' and destructive)
-                   or bool(tool.get('always_gate')))
+                   or always)
     if agent:
         mode = approval_mode(agent, integration['name'], tool_name)
         if mode == 'gated':
@@ -598,20 +619,18 @@ def _run_tool(integration_name: str, tool_name: str, args: dict, reason: str = '
             # a Supervisor action; a plan is the one way to pre-approve one,
             # and the reboot never can be. The override is audited once per
             # agent and tool so the operator learns why it had no effect.
-            if tool.get('always_gate'):
+            if always:
                 _audit_ignored_ungated(agent_name, integration['name'], tool_name)
             else:
                 should_gate = False
-    # S-b: an approved write to HA's automation/script/scene config API can
-    # define an action that calls any hassio.* service. The path is not
-    # FORBIDDEN, so the card must carry the same red line as the reboot.
     config_warning = ''
-    if _ha_path and mutating and is_admin_config_write(_ha_path):
+    if admin_config_write:
         config_warning = ('⚠ Admin power: this config write can define an action '
                           'that calls any Supervisor (hassio.*) service.')
     # A handler dry-run never writes upstream, so it runs pre-gate regardless
-    # of the tool's or agent's gating policy.
-    if handler and args.get('dry_run'):
+    # of the tool's or agent's gating policy. K1: only a handler that really
+    # implements `dry_run` counts (the same set as the freeze check above).
+    if _dry_run_exempt(handler, args):
         should_gate = False
 
     # F10/F3: an approved Session plan can cover an MCP call. Matching is by

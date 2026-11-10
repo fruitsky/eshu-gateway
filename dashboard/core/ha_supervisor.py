@@ -83,8 +83,8 @@ REST_SUPERVISOR_PREFIXES = ('hassio', 'services/hassio')
 def _normalise_rest_path(path) -> str:
     """Decode-until-stable, then strip the leading slash and an `api/` prefix.
 
-    Returns '' when the path is non-canonical (a dot segment, a backslash or a
-    control character), which every caller refuses.
+    Returns None when the path is non-canonical (a dot segment, a backslash or
+    a control character), which every caller refuses, and '' for an empty one.
     """
     text = str(path or '')
     # N1: unquote until stable. One pass would let `%252e%252e` become

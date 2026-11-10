@@ -751,8 +751,10 @@ def execute_integration_call(integration: dict, tool: dict, args: dict, agent: s
     if (integration.get('kind') or '').lower() == 'ha':
         # Local import: ha_ws imports this module, so a top-level import of
         # ha_supervisor here would be a cycle.
-        from core.ha_supervisor import is_supervisor_rest_path
-        if is_supervisor_rest_path(path):
+        from core.ha_supervisor import is_supervisor_rest_request
+        # K3: the path the request will carry, including the integration's own
+        # base path — the same call the runner and the executor make.
+        if is_supervisor_rest_request(integration.get('base_url'), path):
             raise ProxyError(
                 403, "Supervisor endpoints are not available through "
                      "integration tools; use the curated ha_supervisor_* tools.")

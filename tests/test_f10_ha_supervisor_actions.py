@@ -602,6 +602,18 @@ class TestPlanCoverage:
             assert exc.value.code == 'not_plan_coverable', name
             assert name in exc.value.message
 
+    def test_an_argument_display_over_the_cap_is_refused(self, temp_db, ha):
+        """Nit: the card used to truncate the display while the match used the
+        full arguments, so the operator could approve a tail they never saw."""
+        from db.session_plans import PlanError, create_plan
+        with pytest.raises(PlanError) as exc:
+            create_plan('sess-1', [{'kind': 'mcp', 'integration': 'ha',
+                                    'tool': 'ha_addon_action',
+                                    'args': {'slug': 'core_mosquitto',
+                                             'action': 'restart',
+                                             'note': 'x' * 3000}}])
+        assert exc.value.code == 'invalid_args'
+
     def test_claim_rechecks_the_allowlist(self, ha):
         """R1: a row that skipped validation cannot be spent.
 
@@ -786,3 +798,180 @@ class TestAdminConfigWrite:
         from core.integration_proxy import ProxyError, execute_generic_call
         with pytest.raises(ProxyError):
             execute_generic_call(integration, 'POST', 'backups', data={})
+
+
+class TestDryRunHandlers:
+    """K1: only a handler that really implements `dry_run` may skip the gate.
+
+    `dry_run` on a tool whose handler ignores it is one more argument: the
+    exemption that used to apply to every handler ran the real Supervisor
+    action with no approval card and no freeze.
+    """
+
+    TOOLS = {
+        'ha_addon_action': {'slug': 'core_mosquitto', 'action': 'restart'},
+        'ha_addon_update': {'slug': 'core_mosquitto'},
+        'ha_core_update': {},
+        'ha_backup_create': {},
+        'ha_core_restart': {},
+        'ha_host_reboot': {},
+    }
+
+    def _enable_reboot(self):
+        """The reboot ships disabled; the test enables it so the gate is
+        reachable at all (the registry refuses a disabled tool first)."""
+        from db.core import db_conn
+        with db_conn() as conn:
+            conn.execute("UPDATE integration_tools SET enabled = 1 "
+                         "WHERE name = 'ha_host_reboot'")
+            conn.commit()
+
+    def _fresh_check(self):
+        import time
+        set_meta_json('ha_check_config_ha',
+                      {'result': 'valid', 'at': int(time.time())})
+
+    def _args(self, tool):
+        args = dict(self.TOOLS[tool])
+        args['dry_run'] = True
+        return args
+
+    @pytest.mark.parametrize('tool', sorted(TOOLS))
+    def test_a_supervisor_dry_run_is_still_gated(self, ha, monkeypatch, tool):
+        self._enable_reboot()
+        self._fresh_check()
+        calls = _patch_ws(monkeypatch)    # the update preflight reads versions
+        out = json.loads(run_tool('ha', tool, self._args(tool)))
+        # The update preflights read (GET) the current version; no action call.
+        actions = [c for c in calls
+                   if (c.get('payload') or {}).get('method') != 'get']
+        assert actions == [], (tool, out)
+        # Five tools queue a card; the handler's own `dry_run` refusal is the
+        # second layer and is asserted below. Never a silent run.
+        assert out.get('status') == 'pending', (tool, out)
+        assert [c['tool'] for c in get_pending_calls()] == [tool]
+
+    @pytest.mark.parametrize('tool', sorted(TOOLS))
+    def test_a_supervisor_dry_run_is_still_frozen(self, ha, monkeypatch, tool):
+        self._enable_reboot()
+        self._fresh_check()
+        calls = _patch_ws(monkeypatch)
+        set_trigger_freeze()
+        try:
+            out = json.loads(run_tool('ha', tool, self._args(tool)))
+        finally:
+            clear_trigger_freeze()
+        assert err_code(out) == 'frozen', (tool, out)
+        assert calls == []
+        assert get_pending_calls() == []
+
+    def test_the_supervisor_handler_refuses_dry_run(self, ha, monkeypatch):
+        """Second layer: a call that reaches the handler with `dry_run` in its
+        arguments is refused, not run."""
+        from core.tool_handlers import run_handler
+        calls = _patch_ws(monkeypatch)
+        out = json.loads(run_handler('ha_supervisor_action', ha,
+                                     {'name': 'ha_addon_action'},
+                                     {'dry_run': True}))
+        assert out.get('error') == 'ha_supervisor_dry_run_unsupported', out
+        assert calls == []
+
+    def test_a_declared_dry_run_off_the_list_is_not_exempt(self, ha, monkeypatch):
+        """A tool whose params declare `dry_run` but whose handler does not
+        implement it is still gated; the exemption is the handler set, not the
+        parameter list."""
+        from db.integrations import create_tool, get_integration
+        from core.tool_runner import _dry_run_exempt
+        assert not _dry_run_exempt('ha_supervisor_action', {'dry_run': True})
+        assert _dry_run_exempt('ha_lovelace_save_config', {'dry_run': True})
+        integration = get_integration('ha')
+        create_tool(integration['id'], 'made_up_write',
+                    'a write that declares dry_run', 'POST', 'made_up/restart',
+                    [{'name': 'dry_run', 'type': 'boolean'}], '',
+                    read_only=False, handler='train_plan', always_gate=True)
+        calls = _patch_ws(monkeypatch)
+        out = json.loads(run_tool('ha', 'made_up_write', {'dry_run': True}))
+        assert out.get('status') == 'pending', out
+        assert calls == []
+        assert [c['tool'] for c in get_pending_calls()] == ['made_up_write']
+
+
+class TestAdminConfigWriteGate:
+    """K2: an automation/script/scene write is gated like `always_gate`."""
+
+    def _agent(self):
+        from db.agent_tokens import create_agent_token, get_agent_by_name
+        from core.agent_context import set_current_agent
+        from db.agent_policies import get_agent_policy
+        create_agent_token('agent-a')
+        row = get_agent_by_name('agent-a')
+        set_agent_policy(row['id'], approval={'*': 'ungated'})
+        set_current_agent({'id': row['id'], 'name': 'agent-a',
+                           'policy': get_agent_policy(row['id'])})
+
+    def test_an_ungated_agent_still_gets_the_card(self, ha, mock_upstream):
+        from core import tool_runner
+        tool_runner._UNGATED_OVERRIDE_WARNED.clear()
+        self._agent()
+        out = json.loads(run_tool(
+            'ha', 'write',
+            {'method': 'POST', 'path': '/api/config/automation/config/1',
+             'data': {'alias': 'x'}}))
+        assert out.get('status') == 'pending', out
+        call = get_pending_calls()[0]
+        assert call['summary'].startswith('\u26a0')
+        assert mock_upstream['requests'] == []
+
+    def test_the_ignored_override_is_audited(self, ha, mock_upstream):
+        from core import tool_runner
+        tool_runner._UNGATED_OVERRIDE_WARNED.clear()
+        self._agent()
+        run_tool('ha', 'write',
+                 {'method': 'POST', 'path': '/api/config/automation/config/1',
+                  'data': {'alias': 'x'}})
+        rows = [e for e in get_audit_log()
+                if e['event_type'] == 'mcp_ungated_ignored']
+        assert len(rows) == 1
+
+    @pytest.mark.parametrize('path', [
+        '/api/config/automation/config/1',
+        '/api/config/script/config/2',
+        '/api/config/scene/config/3',
+        '/api/config/automation/config/4?x=1',
+    ])
+    def test_all_three_admin_prefixes_are_forced_gated(self, ha, mock_upstream,
+                                                       path):
+        from core import tool_runner
+        tool_runner._UNGATED_OVERRIDE_WARNED.clear()
+        self._agent()
+        out = json.loads(run_tool('ha', 'write',
+                                  {'method': 'POST', 'path': path,
+                                   'data': {'alias': 'x'}}))
+        assert out.get('status') == 'pending', (path, out)
+        assert get_pending_calls()[0]['summary'].startswith('\u26a0')
+
+    def test_the_predicate_is_scoped_to_the_config_paths(self):
+        from core.ha_supervisor import is_admin_config_write
+        assert is_admin_config_write('/api/config/automation/config/1')
+        assert is_admin_config_write('/api/config/script/config/2')
+        assert is_admin_config_write('/api/config/scene/config/3')
+        assert not is_admin_config_write('/api/states/x')
+        assert not is_admin_config_write('/api/services/script/turn_on')
+
+
+class TestSupervisorPathInExecutor:
+    """K3: the executor checks the path the request carries (base + path)."""
+
+    def test_execute_integration_call_refuses_a_hassio_base_url(self,
+                                                                mock_upstream):
+        from core.integration_proxy import ProxyError, execute_integration_call
+        create_integration('ha_hassio', mock_upstream['base_url'] + '/hassio',
+                           'bearer', 'tok', kind='ha')
+        integration = get_integration('ha_hassio')
+        tool = {'name': 'probe', 'enabled': 1, 'method': 'POST',
+                'path_template': 'backups', 'params': [],
+                'transport': 'http', 'read_only': 0}
+        with pytest.raises(ProxyError) as exc:
+            execute_integration_call(integration, tool, {})
+        assert exc.value.status_code == 403
+        assert mock_upstream['requests'] == []
