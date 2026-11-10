@@ -6275,6 +6275,27 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 15 | F15 | probes | dashboard + MCP | Ready after F12 | `feat/f15-probes` | F4, F12 | |
 | 16 | F16 | recipes | dashboard + MCP | Design first (questions listed) | `feat/f16-recipes` | F3, F12, F13 | design approval + security reviewer sign-off |
 | 17 | F17 | local-agent | dashboard + docs | Ready after F12–F16 | `feat/f17-local-agent` | F12–F16 | |
+**Design round 3 (feature reviewer, 2026-11-10): approved, with one fix (Q3).**
+Q1's redraw on `capture_tail` is right. So is the separate cut probe, which
+holds sanitized bytes only, stays bounded at `bytes + 1` and is
+trap-removed. Q2's `next_step` for unattended rows, read from the
+`unattended` column rather than the reason text, is right too.
+
+* **Q3 (must): the MCP branch must not `tee` to an unbounded file.**
+  `… | cap_visible | tee "$ESHU_MCP_CAP" >/dev/null` has no cap when no
+  `run_limit` is set, which is every human-approved MCP run. A large output
+  would grow `ESHU_MCP_CAP` on `/run` without limit. The security reviewer
+  asked for the same thing on the CI fix: F12's MCP capture moves to the
+  ring, with the 16385 as a parameter. Use `capture_tail "$ESHU_MCP_CAP" 65537`
+  here, so the envelope's 64 KiB rule still holds, with stdout to
+  `/dev/null`. Add a test: 2 MiB of MCP output with no run limit leaves a
+  capture file of at most 65537 bytes.
+* **Build on the buffering fix.** `fix/stream-unbuffered` (B1–B4) puts
+  `stdbuf -oL` on `sanitize`, and mawk gets `-W interactive`. F19's pipeline
+  uses that `sanitize` as it is (B4).
+
+After Q3, to the security reviewer for § 3 and § 4.
+
 | 18 | F19 | unattended-limits | gateway + dashboard | **Round 3: Q1–Q2 folded (pipeline on the CI fix, unattended re-run) — awaiting security review of §3/§4** | `feat/f19-unattended-limits` | F4, F5 | design approval + security reviewer sign-off |
 Chunks are done **in the order column**; each new chunk branches from the
 updated `feature-roadmap` after the previous one is merged.
