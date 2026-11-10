@@ -5168,11 +5168,714 @@ F14 merges second only needs to resolve the docstring.
 
 ### Implementer notes
 
-_(fill in)_
+**Status: implemented, awaiting review.** The acceptance criteria include a
+reviewer security pass (try to reach every FORBIDDEN endpoint), so this note
+lists where to push and what the tests already prove.
+
+**Commit:** the code and tests are in `1e14827` (`feat(f10): HA Supervisor
+actions (approval-gated)`) on `feat/f10-ha-supervisor-actions`. This note is
+a separate docs commit.
+
+#### 1. What was checked against the HA Core source
+
+Checked on 2026-11-09 against `home-assistant/core@dev`:
+
+* `homeassistant/components/hassio/websocket_api.py` — the `supervisor/api`
+  command requires `endpoint` (string) and `method` (string), accepts optional
+  `data` (dict), `params` (dict) and `timeout` (number), is `@require_admin`,
+  and hands `data` to the Supervisor passthrough client; the WS result is
+  `result["data"]`. `hassio/update/addon` requires `addon` (str) **and**
+  `backup` (bool); `hassio/update/core` requires `backup` (bool). Both are
+  `@require_admin` and delegate to `update_helper.update_addon/update_core`.
+* `homeassistant/components/hassio/const.py` — `WS_TYPE_API = "supervisor/api"`.
+* `homeassistant/components/hassio/update.py` / `update_helper.py` — the
+  update WS commands schedule the same work the Supervisor's
+  `/addons/{slug}/update` and `/core/update` endpoints do; the command returns
+  after the Supervisor call completes, which is the source of the timeout note
+  in §5.
+
+**Not verifiable from that source:** the Supervisor itself is closed-source,
+so the REST endpoint names and payloads (`/backups/new/full`,
+`/backups/new/partial`, `/core/restart`, `/host/reboot`,
+`/addons/{slug}/{action}`) come from the Supervisor API docs and this chunk's
+spec, not from HA Core. That is recorded as open question 1 rather than
+assumed silently.
+
+#### 2. The table
+
+`core/ha_supervisor.SUPERVISOR_ACTIONS` maps each tool to one fixed
+(endpoint, method) pair; `WS_ACTIONS` holds the two update commands. The agent
+supplies arguments only, and only as validated placeholders:
+
+| Tool | Fixed target | Arguments | Notes |
+|---|---|---|---|
+| `ha_addon_action` | `POST /addons/{slug}/{action}` via `supervisor/api` | `slug`, `action` | `action` must be one of start/stop/restart (the only `{action}` values in the table) |
+| `ha_addon_update` | WS `hassio/update/addon` | `slug`, `backup` | |
+| `ha_core_update` | WS `hassio/update/core` | `backup` | |
+| `ha_backup_create` | `POST /backups/new/full` or `/partial` | `name`, `partial_addons`, `partial_folders` | the *payload* decides partial vs full; nothing agent-supplied reaches the path |
+| `ha_core_restart` | `POST /core/restart` | — | refused unless a valid `ha_check_config` ran on this integration in the last 10 min |
+| `ha_host_reboot` | `POST /host/reboot` | — | seeded **disabled**; summary is `REBOOTS THE WHOLE HA HOST` and the card renders it in red |
+
+All six are `read_only: False`, `always_gate: True`, `handler:
+ha_supervisor_action`, so each call creates a pending approval and **nothing
+runs before the operator approves it**. Freeze refuses before queueing (the
+generic F9 path, tested). `ha_check_config` now has a handler so its result is
+recorded in `meta` under `ha_check_config_<integration>` (`result`, `at`): a
+valid check on one HA instance never vouches for another.
+
+#### 3. FORBIDDEN
+
+`FORBIDDEN` lists restore (`/backups/`), add-on options/install/uninstall
+(`/addons/`), `/supervisor/options`, `/host/shutdown`, `/store/repositories`,
+`/auth*`, `/security*`, `/os/datadisk*` and `/os/boot-slot`. A table test
+walks every endpoint the read and action tables can produce and every WS
+command, and fails if one starts with a forbidden prefix. The one deliberate
+exception is documented in the test: `/backups/new/full|partial` are the only
+`/backups/` paths reachable, and `/addons/{slug}/{start|stop|restart}` the only
+`/addons/` ones. The generic WS tools remain unable to send
+`supervisor/`/`hassio/` commands at all (F9 R2), and an approved pending call
+runs the *handler*, not a raw command, so that does not change here.
+
+**Where FORBIDDEN stops (S-b).** FORBIDDEN covers *direct* paths. An approved
+generic HA write to the automation, script or scene config API
+(`/api/config/automation|script|scene/config/...`) can define an action that
+calls any `hassio.*` service, and running that action reaches what FORBIDDEN
+names. Scanning the body cannot catch it, because templates can build the
+domain name. Approving such a write therefore grants admin power: the approval
+card carries the same red line as the reboot (the server prefixes the summary
+with `⚠ Admin power: …`), and P1 keeps these tools out of plans entirely.
+
+#### 4. `call_service(domain='hassio')`
+
+Refused with an audited `hassio_domain_refused` (403) before any queue entry,
+unless the agent's own policy lists `hassio` in the `ha_call_service`
+`domain_allow` list — the operator's explicit, audited escape hatch. The
+refusal message points at the F10 tools. Tested both ways, plus the "other
+domains are untouched" case.
+
+#### 5. Preflight, the summary, and timeouts
+
+* Each action is validated by `_preflight_ha_supervisor_action` *before* the
+  approval is created: bad slug, bad action, bad backup name, an update with
+  no version available (`ha_update_not_available`) and a restart without a
+  recent valid check are refused instead of queued.
+* A viable action returns `{'_summary': …}`. `tool_runner` stores it in the new
+  `pending_integration_calls.summary` column, and the approval card renders it
+  (a red line for the reboot). The add-on update summary is
+  `addon_update | <slug> | <current> -> <target>`, read from
+  `/addons/{slug}/info`; core update reads `/core/info`.
+* **Timeouts (found while checking the source):** `supervisor/api` defaults
+  its per-call `timeout` to **10 s**, and updates/backups can run for minutes.
+  The action path therefore sends `timeout: 600` for backups and `120` for the
+  other supervisor/api calls, and raises the WebSocket read timeout to 620 s
+  (backup/update) or 60 s (everything else). Reads keep the 30 s default.
+
+#### 6. Plan items of type `mcp`
+
+`session_plan_items` gains `kind` (`ssh` default, so pre-F10 rows are
+unchanged), `integration`, `tool` and `args_hash`. An `mcp` item is proposed as
+`{kind: "mcp", integration, tool, args: {...}, max_uses}` and the dashboard
+stores the **hash only** — an HA service payload can carry a secret, and a plan
+row is rendered in the UI. Matching in `tool_runner` is integration + tool +
+the exact argument hash, one use per claim, through the same conditional
+UPDATE as the SSH claim; a different argument hash never matches. The SSH
+claim now filters `kind='ssh'`, so the two item types cannot cross-claim.
+
+#### 7. Tests
+
+`tests/test_f10_ha_supervisor_actions.py` (39) covers every case in the chunk:
+right endpoint/payload per action; unknown action and bad slug refused; restart
+without a recent valid check refused and queued after one; the reboot tool
+seeded disabled; the FORBIDDEN table walk; `call_service` with `hassio`
+refused by default and allowed only with an explicit policy; the preflight
+summary; an `mcp` plan item approving exactly one matching call and nothing
+else; freeze queueing nothing. `tests/test_ha_mcp.py` and
+`tests/test_integrations.py` were updated for the six new seeded tools.
+
+`bash scripts/verify.sh`: `2370 passed, 7 warnings in 445.42s (0:07:25)`.
+
+#### Open questions
+
+1. The Supervisor REST payloads (backup create, restart, reboot, add-on
+   action) are closed-source; they come from the Supervisor API docs and this
+   chunk's spec. Please confirm `/backups/new/partial` takes
+   `{name, addons, folders}` against a live Supervisor before this ships.
+2. A slow add-on/Core update can exceed the 620 s read timeout. The Supervisor
+   continues the update; the tool then reports a timeout, which reads as a
+   failure to the agent. Options: a fire-and-poll mode (start, then read
+   `ha_addons`/`ha_core_info` for `version`), or a larger cap. This is a UX
+   decision, not a security one.
+3. The reboot warning is a red meta line driven by the tool name + summary.
+   A dedicated "destructive" card style belongs to the UI pass.
+
+### Round 2 — fixes for reviewer round 1 (M1–M2, S1)
+
+**Commit: `5ceb569`** on `feat/f10-ha-supervisor-actions`.
+
+* **M1 — the generic HA REST tools reached the Supervisor.**
+  `core/ha_supervisor.is_supervisor_rest_path` decodes the path, lowercases it,
+  collapses `//`, strips a leading `/` and an `api/` prefix, and matches
+  `hassio` and `services/hassio` (exact or as a prefix). `core/tool_runner`
+  refuses a HA-kind HTTP call **before gating**, so no approval card is ever
+  created and no upstream request is made; the audit row is
+  `rest_supervisor_refused` with `reason_code='supervisor_rest_refused'`.
+  `execute_integration_call` (rendered curated path) and
+  `execute_generic_call` (the generic path, and the `verify_path` GET) re-check
+  it, so an already-approved pending call is refused too (the F9 R2 shape).
+  Tests, in `TestSupervisorRestGuard`: every spelling (`/api/hassio/…`,
+  `api//HASSIO//…`, `/api/%68assio/…`, `/api/services/hassio/…` and the
+  services spelling with a percent-encoded `h`) is refused by both the generic
+  read and the generic write, with `mock_upstream['requests'] == []` and no
+  pending call; an approved pending call is refused and runs nothing; every
+  FORBIDDEN prefix has a REST spelling; no curated HA template names a
+  Supervisor path; and the refusal is audited.
+  **Checked against HA Core (`components/hassio/http.py`, `dev`,
+  2026-11-09):** `HassIOView` is registered at `/api/hassio/{path:.+}` and
+  both `get` and `post` proxy to the Supervisor. It is admin-only except for
+  the add-on logo/icon paths, and `backups/…`, `addons/<slug>/logs/…` and the
+  log tails have **no timeout** (`NO_TIMEOUT`), so a generic call could also
+  park a request for ever. `/api/services/hassio/<service>` is the ordinary
+  Core service API for the `hassio` domain. The view rejects a path that is
+  not equal to its `unquote`, so HA itself decodes once; the guard refuses
+  rather than normalising-and-sending.
+* **M2 — MCP plan items were not bound to the caller.**
+  `claim_mcp_plan_item` takes the calling agent and joins `sessions` in the
+  same statement as the claim (`s.agent != '' AND s.agent = ?`), so a
+  concurrent ownership change cannot slip between the check and the use, and
+  an ownerless session (or no authenticated agent) matches nothing — F3 SR2's
+  fail-closed rule. `tool_runner` passes the authenticated agent name, not the
+  `mcp` display label. Tests: `test_another_agents_session_is_not_claimable`
+  (B's call is queued for the operator, A's item keeps its use and runs
+  exactly once) and `test_an_ownerless_session_is_not_claimable`.
+* **S1 — `ha_host_reboot` was plan-coverable.**
+  `_validate_mcp_item` refuses an `mcp` item naming `ha_host_reboot` when the
+  plan is proposed (`PlanError('not_plan_coverable')`), so every reboot has its
+  own approval card. Test: `test_host_reboot_is_not_plan_coverable`.
+
+`bash scripts/verify.sh`: `2393 passed, 7 warnings in 458.83s (0:07:38)`.
+
+### Round 3 — N1 (round 2 review): non-canonical paths
+
+**Commit: `2f0fdf1`.**
+
+`is_supervisor_rest_path` now refuses a path **whatever its prefix** when it
+is not canonical:
+
+* it is percent-decoded **until stable** (one pass let `%252e%252e` become
+  `%2e%2e`, which the proxy then decoded);
+* any `.` or `..` segment, a backslash, or a NUL/control character is
+  refused — HA has no legitimate API path with those;
+* only then are `//`, the leading `/` and an `api/` prefix stripped and the
+  Supervisor prefixes checked, as before.
+
+Refusing beats normalising because the bytes sent must be the bytes checked:
+`urllib` sends the path verbatim, and nginx/NPM in front of HA resolves dot
+segments and decodes `%2e`, so `api/states/../hassio/backups/x/restore`
+would otherwise reach the Supervisor.
+
+The table runs seven spellings through **all three checkpoints** (21 tests):
+`api/states/../hassio/backups/x/restore`, `api/./hassio/host/reboot`,
+`api/states/%2e%2e/hassio/x`, `api/services/./hassio/x`,
+`api/hassio\backups`, `api/services/%252e%252e/hassio/x` and a NUL byte.
+`test_a_non_canonical_path_is_refused_before_gating` (no pending call, no
+upstream request), `..._by_the_curated_executor` (`execute_integration_call`)
+and `..._by_the_generic_executor` (`execute_generic_call`) each assert a 403.
+
+`bash scripts/verify.sh`: `2414 passed, 7 warnings in 469.74s (0:07:49)`.
+
+### Round 4 — security code review (P1–P3, S-a, S-b)
+
+**Commit: `2a2ca70`.** The security reviewer re-reads only this diff; each
+point is a separate block in `tool_runner.py`, `session_plans.py`,
+`tool_handlers.py` and `ha_supervisor.py`.
+
+* **P1 — a plan item must be readable, and only curated actions are
+  coverable.** `_validate_mcp_item` now requires `args` (a bare `args_hash` is
+  refused) and matches on the hash of those args; a supplied hash that does
+  not match is refused. It stores a redacted display copy (`args_json`, via
+  the existing scrubber) and, for a handler tool, the preflight `_summary`;
+  `_plan_payload` exposes both to the plan card, which shows the summary and
+  the arguments under the command. Coverage is an allowlist,
+  `PLAN_COVERABLE_TOOLS` = the five curated actions; the generic
+  read/write, `call_service`, `ws_write` and `ha_host_reboot` are refused as
+  `not_plan_coverable` (S1 follows from the allowlist). Tests:
+  `test_a_bare_args_hash_is_refused`,
+  `test_the_plan_card_shows_the_redacted_arguments`,
+  `test_only_the_curated_actions_are_coverable`,
+  `test_every_curated_action_is_coverable`.
+* **P2 — `always_gate` wins over an agent's `ungated`.** The override is
+  ignored on an `always_gate` tool (wildcards included, because the guard is
+  on the tool, not on the lookup), and the ignored override is audited once
+  per agent and tool (`mcp_ungated_ignored`). Tests: every enabled F10 action
+  against `*: ungated`, `ha.*: ungated` and an exact
+  `ha.ha_core_update: ungated` still queues, and the audit row appears once.
+* **P3 — the config check is re-checked at the call.** `_config_check_fresh`
+  is shared by the preflight and by `_h_ha_supervisor_action`, which now
+  refuses a `ha_core_restart` with `ha_check_config_stale` immediately before
+  `run_supervisor_action`. That covers a plan-claimed restart, an approval
+  that arrives after the check expired, and any other path that reaches the
+  handler. Tests: a plan-claimed restart with an expired check is refused and
+  opens no WebSocket; a late approval stores the refusal and sends nothing;
+  the handler refuses directly.
+* **S-a — the Supervisor prefix is the whole first segment.** The guard now
+  refuses any first segment starting with `hassio` (which covers the add-on
+  ingress proxy, `hassio_ingress/...`) and runs on the path the request
+  carries, including the integration's own base path
+  (`is_supervisor_rest_request`). Tests: a `hassio_ingress` spelling through
+  all three checkpoints, and an integration whose `base_url` ends in
+  `/hassio`.
+* **S-b — config writes grant admin power.** §3 documents where FORBIDDEN
+  stops; the server prefixes the approval summary with `⚠ Admin power: …` for
+  an HA write to the automation/script/scene config API, and the integration
+  card renders any summary starting with `⚠` in the danger colour (the same
+  line the reboot gets). Test: the pending call's summary carries the
+  warning.
+
+Both the merged gateway script and this diff keep the CI fix's capture code;
+the F12 merge is separate.
+
+`bash scripts/verify.sh`: `2459 passed, 14 skipped, 7 warnings in 486.12s (0:08:06)`.
 
 ### Reviewer notes
 
-_(reviewer)_
+**Round 1 (2026-11-09, main feature reviewer): changes requested.** 177 F10,
+F9, F3, HA and integration tests pass locally.
+
+*What holds:*
+
+* Every action is always-gated and audited, and freeze blocks it.
+* `SLUG_RE` (`^[a-z0-9_]{1,64}$`) makes path tricks in slugs impossible.
+* Shapers pass only named fields, so `options` never reaches an add-on.
+* `ha_host_reboot` is seeded disabled.
+* `ha_core_restart` needs a recent valid config check.
+* `call_service(domain='hassio')` is refused unless allowed (domain check
+  is trimmed and case-folded).
+
+*Must fix:*
+
+* **M1 The generic HA REST tools reach the Supervisor.** F9 R2 closed
+  `ws_write`, but the HA integration's generic REST `read`/`write` are not
+  checked for:
+  * `/api/hassio/…`, HA Core's Supervisor proxy, which admin tokens can use;
+  * `/api/services/hassio/…`, the same services `call_service` now refuses.
+
+  So "FORBIDDEN endpoints are unreachable from every tool" does not hold:
+  a backup restore or host shutdown is one approval away through the
+  generic write. Fix: in `tool_runner`, for HA-kind integrations, refuse a
+  generic REST call whose normalised path (percent-decoded, lowercased,
+  `//` collapsed, leading `/` and an `api/` prefix stripped) starts with
+  `hassio/` or `services/hassio/`, before gating and when a pending call is
+  approved (mirror F9 R2).
+  * Extend the FORBIDDEN table test to walk **every** HA tool, including the
+    generic read and write, with each spelling.
+  * Confirm against HA Core's `components/hassio/http.py` which `/api/hassio`
+    paths exist, and record it in the notes.
+* **M2 MCP plan items are not bound to the caller.** `claim_mcp_plan_item`
+  matches on `session_id`, integration, tool and the argument hash. But an
+  MCP caller can name **any** session id (`resolve_session` takes the
+  explicit value as is). Agent B could therefore spend agent A's approved
+  "update add-on X" item. Require the session's owner to equal the calling
+  agent (fail closed for ownerless sessions, as in F3's SR2) before
+  claiming. Tests: B cannot claim A's item, and A claims it exactly once.
+
+*Should fix:*
+
+* **S1** `ha_host_reboot` should never be plan-coverable. Each reboot gets
+  its own approval card with the red line. Refuse `mcp` plan items naming
+  it when a plan is proposed.
+* **S2** Answer to the open questions: keep the partial-backup payload
+  behind a "verify against a live instance" note. Raise long-update
+  timeouts as their own setting, not the shared read timeout. The
+  "destructive" card style goes to the UI pass list.
+
+**Needs the security reviewer before merge (§ 2.6a).** F10 adds a new
+auto-approve path for integration calls (plan items of kind `mcp`), in
+addition to the Supervisor actions.
+
+**Round 2 (2026-11-10, `5ceb569`): one fix left (N1).** M2 and S1 are fixed
+as asked:
+* the MCP plan claim joins `sessions` and requires `s.agent = owner`, with
+  ownerless sessions matching nothing, in the same statement as the claim;
+* `ha_host_reboot` can never be a plan item.
+
+M1's three checkpoints are right: before gating, in the curated executor and
+in the generic executor. 95 F10 and F3 tests pass locally.
+
+* **N1 (must): dot segments get past `is_supervisor_rest_path`.** It decodes
+  once and checks a prefix, but never resolves `.` or `..`:
+  * `api/states/../hassio/backups/x/restore` → not refused;
+  * `api/./hassio/host/reboot` → not refused;
+  * `api/states/%2e%2e/hassio/x` → not refused;
+  * `api/services/./hassio/x` → not refused;
+  * `api/hassio\backups` → not refused.
+  
+  `urllib.request` sends these paths exactly as given. A reverse proxy in
+  front of HA (nginx, which is what NPM is) resolves dot segments and
+  decodes `%2e`, so the request can still reach `/api/hassio/...`. Fix: in
+  the check, unquote **until stable**, then **refuse** any HA REST path that
+  contains a `.` or `..` segment, a backslash, or a NUL/control character,
+  whatever its prefix. HA has no legitimate API path with those. Only then
+  apply the prefix check. Refusing beats normalising, because the bytes sent
+  must be the bytes checked. Add the five spellings above, and
+  `%252e%252e`, to the table test, through all three checkpoints.
+
+**After N1:** to the security reviewer (§ 2.6a), with the M1 table, N1 and
+the `mcp` plan-claim owner binding as the points to check.
+
+**Round 3 (2026-11-10, `2f0fdf1`): approved by the feature reviewer,
+to security.** `is_supervisor_rest_path` now unquotes until the path stops
+changing. It then refuses any dot segment, backslash or control character,
+whatever the prefix, before the prefix check. I re-probed it with 15
+spellings: every round 2 bypass, plus `%252e%252e`, `..%2f`, `hassio%2f`,
+upper case, a trailing `..` and `%00`. All are refused, while
+`api/states/light.kitchen`, `api/services/light/turn_on` and an encoded
+space still pass. 116 F10 and F3 tests pass locally.
+**Next:** the security reviewer (§ 2.6a). Points to check: the M1 three
+checkpoints and N1, the `mcp` plan-claim owner binding (M2), and
+`ha_host_reboot` never being plan-coverable (S1).
+
+#### Security reviewer sign-off
+
+**Code review (`3a6f65b`), 2026-11-10: changes requested (P1–P3).** I read
+`ha_supervisor.py`, the three checkpoints in `tool_runner.py` and
+`integration_proxy.py`, `session_plans.py`, the `session_plan` MCP tool and
+the approval-mode lookup. I did not run anything.
+
+*The three points I was asked to check hold:*
+
+* **M1 and N1, the path guard.**
+  - The guard runs at all three checkpoints: before gating, in the curated
+    executor and in the generic executor. An already-approved call is
+    re-checked when it runs.
+  - Decoding until the path stops changing, then refusing dot segments,
+    backslashes and control characters whatever the prefix, is the right
+    shape. Refusing beats normalising.
+  - I found no spelling that gets past it through the query string, `;`,
+    repeated encoding or case.
+* **M2, the owner binding.** The plan claim checks the session's owner in
+  the same statement, so an ownerless session or an unauthenticated caller
+  matches nothing.
+* **S1.** `ha_host_reboot` can never be a plan item.
+
+*Must fix:*
+
+* **P1. An operator can approve a plan item without being able to see what
+  it does.**
+  - `_validate_mcp_item` accepts an `args_hash` from the agent with no
+    `args`. Even when `args` are given, only the hash is kept.
+  - The operator's plan card therefore shows `mcp: <integration>.<tool>
+    (<12 hex chars>)`, and they approve bytes they cannot read.
+  - Any tool can be a plan item, including the HA generic write and
+    `call_service`. There, the hidden arguments are an arbitrary path and
+    body.
+  - Fix 1: refuse a bare `args_hash`. `args` are required.
+  - Fix 2: when the plan is proposed, keep a display copy of the arguments
+    for the plan card, with secret-looking keys redacted by the existing
+    scrubber, and match on the hash as now. For a handler tool, also store
+    its preflight summary, for example `addon_update | slug | 1.2 -> 1.3`,
+    and show that.
+  - Fix 3: make plan coverage an allowlist, not one excluded tool. Only the
+    curated F10 actions can be plan items: add-on action, add-on update,
+    Core update, backup create and Core restart. The generic read and write,
+    `call_service`, `ws_write` and the reboot never can. S1 then follows
+    from the allowlist.
+  - Tests:
+    - a bare hash is refused;
+    - the plan card shows the redacted arguments or the summary;
+    - a generic-write or `call_service` item is refused as
+      `not_plan_coverable`.
+* **P2. An agent's "ungated" override switches off `always_gate`.** In
+  `tool_runner`, `approval_mode() == 'ungated'` sets `should_gate = False`
+  after `always_gate` set it to True. The lookup also falls back to the
+  `ha.*`, `ha_*` and `*` wildcards.
+  - Result: an agent whose policy said `ha.*: ungated` before F10 now runs
+    backups, updates, restarts, and reboots once enabled, with no approval
+    card at all.
+  - Fix: on an `always_gate` tool, ignore `ungated`. Plans (P1) are the one
+    way to pre-approve these, and the reboot can never be pre-approved.
+    Audit an ignored override once per agent and tool, so the operator
+    learns why it had no effect.
+  - Tests: `*: ungated`, `ha.*: ungated` and an exact `ha.ha_core_update:
+    ungated` each still queue the call.
+* **P3. The config-check rule for a Core restart is checked only in
+  preflight.** Preflight runs only when the call is queued, so the rule is
+  skipped in three cases:
+  - a plan-claimed restart;
+  - an ungated one (until P2 is fixed);
+  - an approval that arrives long after the check went stale.
+
+  Fix: check "a valid `ha_check_config` within 10 minutes" again inside the
+  restart handler, right before the POST, and refuse with
+  `ha_check_config_stale`. Tests: a plan-claimed restart with no recent
+  check is refused; an approval that arrives after the check expired is
+  refused and nothing is sent.
+
+*Should fix:*
+
+* **S-a. Widen the Supervisor prefix to the whole first segment.** Refuse
+  any path whose first segment starts with `hassio`, which also covers HA's
+  add-on ingress proxy, `hassio_ingress`. Run the check on the full request
+  path, including any path that is part of the integration's own
+  `base_url`, not only on the tool's part. Test: a `hassio_ingress/...`
+  path is refused at all three checkpoints.
+* **S-b. Say where FORBIDDEN stops.** An approved generic HA write to the
+  automation, script or scene config API can define an action that calls
+  any `hassio.*` service, and running it reaches what FORBIDDEN names.
+  Scanning the body cannot catch this, because templates can build the
+  domain name. Document it in § 3: FORBIDDEN covers direct paths, and
+  approving a config write grants admin power. Give those approval cards
+  the same red line as the reboot. P1 already keeps them out of plans.
+
+**Verdict:** changes requested. Once P1–P3 have their tests, I review only
+that diff. F10 must not merge before then.
+
+**Round 4 code review (feature reviewer, 2026-11-10, `2a2ca70` on `b8b5f48`):
+approved; to the security reviewer for the P1–P3 diff.** CI is green;
+`tests/test_f10_ha_supervisor_actions.py`: 111 passed here.
+
+* **P1:** an `mcp` plan item needs a `dict` of `args` (a bare hash is refused,
+  a supplied hash must match); coverage is an allowlist of the five curated
+  actions; the card shows the scrubbed arguments and the preflight summary,
+  both through `escapeHtml`.
+* **P2:** `ungated` no longer clears `always_gate`, for exact keys and
+  wildcards; the ignored override is audited once per agent and tool.
+* **P3:** `_config_check_fresh` runs in the handler right before the restart,
+  so plan-claimed, ungated and late-approved restarts are refused.
+* **S-a / S-b:** `hassio*` first segments (ingress) are refused, the check
+  includes the integration's base path, and automation/script/scene writes
+  carry the red admin-power line.
+
+Two small hardening points. Fold them with any security changes; they do not
+need another round from me:
+* **R1:** `claim_mcp_plan_item` does not re-check `PLAN_COVERABLE_TOOLS`. Only
+  `create_plan` checks it today, which is enough, but one extra
+  `tool in PLAN_COVERABLE_TOOLS` test at claim time keeps a future insert path
+  from widening coverage.
+* **R2:** the allowlist is by tool name only. Also require the integration's
+  `kind == 'ha'` at validation and at claim, matching F16's V6 rule (kind +
+  tool).
+
+### Round 4 — R1 and R2
+
+**Commit: `8f76878`** (`dashboard/db/session_plans.py` and
+`tests/test_f10_ha_supervisor_actions.py`). It is the only code commit the
+security reviewer needs to read: the diff adds R1/R2 on top of `2a2ca70`
+(P1–P3, S-a/S-b), so the P1–P3 diff and R1–R2 are read together.
+
+* **R1 — the claim re-checks the tool.** `claim_mcp_plan_item` returns `None`
+  for anything outside `PLAN_COVERABLE_TOOLS` before it opens the plan, so a
+  row written by a future insert path cannot widen what an approved plan
+  spends. `create_plan` still refuses it first; this is the same allowlist
+  applied at the point of use.
+* **R2 — (kind, tool), not the tool name.** An `mcp` item must name an
+  integration whose row has `kind == 'ha'`, checked in `_validate_mcp_item`
+  and again in `claim_mcp_plan_item`. The kind is read from the integrations
+  row by name, never taken from the caller (the item stores the name and the
+  claim matches the name, so the kind has to come from the same row); an
+  unknown name is not HA and is refused the same way. `create_plan`'s order
+  is unchanged, so a non-curated tool or a bare `args_hash` is still reported
+  as before, and an unknown integration only fails once the item is otherwise
+  valid.
+* **Tests** (`TestPlanCoverage`): validation refuses a custom-kind
+  integration and an unknown one (`not_plan_coverable`, with the name in the
+  message); a row whose `tool` was changed to `write` directly in the table is
+  not claimable, and the same row is claimable after the tool is put back; a
+  row whose `integration` was changed to a custom-kind one is not claimable,
+  and is claimable again once re-pointed at `ha`. The "put it back" halves
+  show each refusal is the new check and not a broken fixture.
+  Tests that create an `mcp` plan item now take the `ha` fixture, since the
+  item needs a real HA integration row.
+
+`bash scripts/verify.sh`: `2462 passed, 14 skipped, 7 warnings in 488.87s (0:08:08)`.
+
+### Security review — P1–P3 and R1–R2 code (2026-11-10, `2a2ca70` + `8f76878`)
+
+**Verdict: changes requested. One blocker (K1), one must (K2) and one small
+fix (K3).** P1–P3, S-a, S-b, R1 and R2 are done as asked. K1 is in code from
+before this diff. I missed it in my first F10 code review; it was found while
+checking how P2's `always_gate` interacts with the rest of the gate.
+
+What is right:
+* **P1:** a plan item needs its real `args`, and a supplied hash must match
+  them. Coverage is an allowlist of five actions. The card shows the scrubbed
+  arguments and the summary, both escaped.
+* **P2:** an `ungated` override cannot remove `always_gate`, including
+  wildcards, and the ignored override is audited.
+* **P3:** the 10-minute check is repeated in the handler, just before the
+  restart.
+* **R1 and R2:** the claim checks the tool allowlist again and requires an
+  integration of kind `ha`, read from the row.
+* **S-a:** `hassio*` first segments are refused, and the base path is checked
+  at the runner and in `execute_generic_call`.
+* **S-b:** the red line appears on the card.
+
+Changes:
+
+* **K1 (blocker): a handler dry-run skips the gate even when the handler has
+  no dry-run.**
+  * `tool_runner.py:614` sets `should_gate = False` for *any* handler call
+    that carries a truthy `dry_run`. The freeze check at `:474` has the same
+    exemption.
+  * The comment says curated handlers honour `dry_run`. The
+    `ha_supervisor_action` handler, used by all six Supervisor tools including
+    the reboot, does not: `run_supervisor_action` never reads it.
+  * So the exemption skips the approval card and Emergency Freeze, and then
+    runs the real action. `always_gate`, P2 and the plan rules never come into
+    play.
+
+  Fix:
+  * Exempt only handlers that are listed as implementing a dry run, in a
+    named set next to `HANDLERS` (for example `DRY_RUN_HANDLERS`). Use the
+    same set at both places in the runner.
+  * `ha_supervisor_action` is not in that set.
+  * As a second layer, the Supervisor handler refuses a call whose arguments
+    include `dry_run`.
+
+  Test: for each of the six Supervisor tools, a call with `dry_run` set
+  queues a card (or is refused) and makes no Supervisor request, both with
+  and without freeze. F11's `ha_config_write` will rely on the same set, so
+  its dry run must be the one in the set and must open no write.
+* **K2 (must): an automation, script or scene config write can still skip
+  the card.**
+  * S-b adds the red line to the *card*, but an agent policy of `ungated`
+    (exact, `ha.*` or `*`) on the generic write tool means no card is made.
+  * Writing an automation and then triggering it reaches any `hassio.*`
+    service. That is the power P2 keeps gated.
+
+  Fix: treat `is_admin_config_write(path)` like `always_gate`. `ungated` does
+  not clear it, and the override is audited the same way. The generic write
+  is not plan-coverable, so this closes it.
+
+  Test: `ha.*: ungated` plus a write under `config/automation/` queues a card
+  with the red line.
+* **K3 (should, one line): the third S-a check point.**
+  `integration_proxy.py:755` (`execute_integration_call`) still calls
+  `is_supervisor_rest_path(path)` without the base path. Switch it to
+  `is_supervisor_rest_request(integration.get('base_url'), path)`, as at the
+  other two.
+* **Nits:**
+  * `_mcp_display` truncates the argument display at 2000 bytes, while the
+    match uses the full arguments. Refuse an item whose display would be
+    truncated, so the operator never approves a hidden tail. The curated
+    actions take short arguments.
+  * `_normalise_rest_path`'s docstring says it returns `''` for a
+    non-canonical path; it returns `None`.
+
+After K1–K3, I review only that diff.
+
+**Security reviewer — K1 severity (2026-11-10, after `9ecd160`):** I accept
+the reachability check. FastMCP generates one function per tool and drops
+undeclared arguments. No Supervisor tool declares `dry_run`, and
+`lovelace_save_config`, the only tool that does, honours it. So K1 cannot be
+reached over MCP today, and nothing live is exposed. **K1 drops from blocker
+to must (defence in depth).**
+
+It still lands before F10 merges, for three reasons:
+* the runner's rule is wrong whatever the transport;
+* an operator can add a `dry_run` parameter to a tool's params;
+* F16's recipe engine will build arguments itself, without going through
+  FastMCP.
+
+K2 and K3 are unchanged.
+
+**K1 reachability (feature reviewer, 2026-11-10).** K1 is right about the code,
+and the fix stands. It cannot be reached over MCP today, though:
+* `_build_tool_fn` gives every integration tool a typed signature built from
+  its declared `params`. FastMCP (mcp 1.29) **drops undeclared arguments**:
+  calling a tool that declares only `slug` with `{"slug": "x",
+  "dry_run": true}` hands the function `slug` and `session_id` only (checked
+  here).
+* Only one seeded tool declares `dry_run`: `lovelace_save_config`. Its
+  handler honours it, on `master`, on `feature-roadmap` and on F10. None of
+  the six Supervisor tools declares it.
+
+So no live gateway or dashboard is exposed, and Release 1 is not affected.
+K1 is still a real safety net: an operator-edited tool, a future seed, or a
+non-MCP caller could declare or pass `dry_run`. Fix as asked: a named set of
+handlers that implement a dry run, used at both places; the Supervisor
+handler refuses `dry_run`. Add one test that a declared-but-unsupported
+`dry_run` on a Supervisor tool is still gated and frozen.
+
+### Round 5 — K1, K2, K3 and the two nits
+
+**Commit: `a463d31`.** It is the only code commit for this round, laid on top
+of `8f76878` (R1/R2) and `2a2ca70` (P1–P3, S-a/S-b); the security reviewer
+reads this diff next.
+
+* **K1 — a named set of handlers that really dry-run.** `DRY_RUN_HANDLERS`
+  sits next to `HANDLERS` in `core/tool_handlers.py` and holds
+  `ha_lovelace_save_config` only. `tool_runner` asks
+  `_dry_run_exempt(handler, args)`, which is `handler in DRY_RUN_HANDLERS`
+  and the argument, at **both** places: the freeze check and the gate skip.
+  A handler that ignores `dry_run` (the Supervisor action handler, any
+  REST/WS/generic tool) is no longer exempt, so `dry_run: true` cannot run
+  the real action with no card and no freeze. As the second layer,
+  `_h_ha_supervisor_action` refuses a call whose arguments contain `dry_run`
+  with `ha_supervisor_dry_run_unsupported` (400).
+  Tests: each of the six Supervisor tools with `dry_run: true` (the reboot is
+  enabled in the test, since the seed disables it) queues a card and makes no
+  action call — the update preflights' GETs are allowed through — and, with
+  freeze on, is refused `frozen` with nothing queued; the handler refuses
+  `dry_run` directly; a tool whose params declare `dry_run` but whose handler
+  is not in the set stays gated. `ha_lovelace_save_config` keeps its
+  pre-gate dry run (the F9 tests cover it).
+* **K2 — an admin config write is `always_gate`.** `is_admin_config_write`
+  on the request path (automation/script/scene) now ORs into the same
+  `always` flag as `tool.get('always_gate')`: it forces the card even under
+  `gate_mode=destructive` with a non-destructive verb, `ungated` cannot clear
+  it, and the ignored override is audited through `_audit_ignored_ungated`.
+  The red admin-power line is unchanged and now rides on a card that always
+  exists.
+  Tests: `*: ungated` with each of the three prefixes (and a query string)
+  queues a card whose summary starts with the warning; the audit row appears
+  once; the predicate is scoped to those prefixes and not to `/api/states` or
+  `/api/services`.
+* **K3 — the executor checks the base path too.**
+  `execute_integration_call` now calls
+  `is_supervisor_rest_request(integration.get('base_url'), path)` — the same
+  call as the runner and `execute_generic_call`. Test: an `ha` integration
+  whose base URL ends in `/hassio`, a generic tool path `backups`, and the
+  executor refuses with 403 and sends nothing upstream.
+* **Nits.** An mcp item whose redacted argument display would exceed
+  `MAX_ARGS_DISPLAY` (2 000 bytes) is refused with `invalid_args` instead of
+  truncated, so the card never hides a tail that the hash still matches; the
+  test builds a 3 000-byte argument. `_normalise_rest_path`'s docstring now
+  says `None` (what it returns for a non-canonical path) and `''` only for an
+  empty one — code unchanged.
+
+`bash scripts/verify.sh`: `2485 passed, 14 skipped, 7 warnings in 501.02s (0:08:21)`.
+
+**K1–K3 review (feature reviewer, 2026-11-10, `a463d31`): approved; to the
+security reviewer for that diff only.** K1: `DRY_RUN_HANDLERS` (only
+`ha_lovelace_save_config`) behind one `_dry_run_exempt()` at both the freeze
+check and the gate skip, and the Supervisor handler refuses `dry_run`. K2:
+`is_admin_config_write` sets the same `always` flag as `always_gate`, so
+`ungated` cannot skip the card. K3: `execute_integration_call` uses
+`is_supervisor_rest_request`. Both nits are done.
+
+**Security reviewer — K1–K3 (2026-11-10, `a463d31`): approved. F10 may
+merge.**
+* **K1:**
+  * `_dry_run_exempt()` is the only exemption, and it is used at both the
+    freeze check and the gate skip.
+  * `DRY_RUN_HANDLERS` holds only `ha_lovelace_save_config`, whose handler
+    does return before writing on `dry_run`.
+  * The Supervisor handler refuses any call whose arguments include
+    `dry_run`, so a future runner mistake still fails closed.
+  * The tests cover all six Supervisor tools, gated and frozen, plus a
+    handler that declares `dry_run` but is not on the list.
+* **K2:** an admin config write sets the same `always` flag as
+  `always_gate`. `ungated` is audited and ignored, and the red line comes
+  from the same flag. A generic write still can't be covered by a plan, so
+  the card is the only way through.
+* **K3:** all three check points now include the base path.
+* **Nits:**
+  * Over-long plan arguments are refused, not truncated.
+  * The docstring is fixed.
+  * One leftover, which does not block: if `_mcp_display` hits an exception,
+    it returns `''`, which passes the length check and shows no arguments.
+    Refuse the item when the display is empty but `args` is not, on the
+    next F10 touch or F16.
 
 ---
 
@@ -8806,8 +9509,8 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 9 | F13 | session-conclusions | dashboard + MCP | Merged | `feat/f13-session-conclusions` | F5, F6 | |
 | 10 | F8 | test-traffic | dashboard | Merged | `feat/f8-test-traffic` | — | low priority |
 | 11 | F9 | ha-supervisor-read | dashboard | Merged | `feat/f9-ha-supervisor-read` | — | token is now a dedicated `eshu` HA admin user |
-| 12 | F10 | ha-supervisor-actions | dashboard | **R1–R2 added; approved by feature reviewer** (`1ff3106`); security reads P1–P3 + R1–R2 | `feat/f10-ha-supervisor-actions` | F9, F3, Chunk H | security re-reads the P1–P3 diff only |
-| 13 | F11 | ha-config-files | dashboard | **Design round 6 (X1) approved by feature reviewer** (`273999c`); to security for the full design | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | then security reviewer on the design |
+| 12 | F10 | ha-supervisor-actions | dashboard | Merged (security sign-off `f9e2c22`) | `feat/f10-ha-supervisor-actions` | F9, F3, Chunk H | security re-reads the P1–P3 diff only |
+| 13 | F11 | ha-config-files | dashboard | **Round 7 (Z1–Z9) under review; AB1/AB2 to fold** (`81135a4`), then security for Z1–Z5 | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | then security reviewer on the design |
 | 14 | F14 | inventory | dashboard + MCP | Merged | `feat/f14-inventory` | Chunk H | |
 | 15 | F15 | probes | dashboard + MCP | Ready after F12; pre-implementation notes P1–P8 | `feat/f15-probes` | F4, F12 | |
 | 16 | F16 | recipes | dashboard + MCP | **Security approved Round 4 with Y1 + W2**; Round 5 to feature reviewer only | `feat/f16-recipes` | F3, F12, F13 | security re-reads Round 4 only |

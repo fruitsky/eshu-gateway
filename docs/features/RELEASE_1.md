@@ -1,6 +1,31 @@
 # Release 1 — `feature-roadmap` → `master`
 
-Status: **operator go-ahead given 2026-11-10; release in progress.** Each step needs the operator's
+Status: **dashboard deployed 2026-11-10 17:14 UTC at `c8ffe2c`; gateways not
+yet updated (steps 5–7 are the operator's).**
+
+Done on the operator's go-ahead, 2026-11-10:
+* step 1: `master` fast-forwarded `5c0045f..c8ffe2c` (full suite green at the
+  F12 merge apart from one unrelated flaky NPM socket test that passed 5/5 on
+  rerun; GitHub CI green on `c8ffe2c`);
+* step 2: online backup `~/eshu-backups/eshu-pre-release1-20261110-171439.db`
+  (`integrity_check` ok, mode 600) and `pre-release1-commit.txt` (`5c0045f`);
+  the old installer saved as `golden-installer-5c0045f-pre-release1.sh`;
+* step 3: `git checkout -- dashboard/static/dev/`, then the deploy helper (it
+  pulled, re-executed itself as the new version and restarted the unit);
+* step 4 (automated part): unit active and owning :8000, no traceback, both
+  backfills done (1376 commands each), gateway heartbeats and policy fetches
+  200, every parameterless GET route 200/401/422 except `/api/ssh-key`, which
+  is the expected 503 `ssh_key_dir` until `/var/lib/eshu/ssh` exists (the
+  installer treats that as "no dashboard key" and installs as before). MCP
+  clients' stale sessions got the normal 404 after the restart. **The browser
+  click-through in step 4 is still the operator's.**
+* release 1.1 (F10), 18:07 UTC: CI green on `be5e87d`; `master`
+  `c8ffe2c..be5e87d`; backup `eshu-pre-release1.1-20261110-180724.db`
+  (`integrity_check` ok, mode 600) and `pre-release1.1-commit.txt`
+  (`c8ffe2c`); deployed with the new helper (no manual reset needed); unit
+  active, no traceback, routes as before; the HA integration has the five
+  curated actions plus `ha_check_config` enabled and `ha_host_reboot`
+  disabled. Each step needs the operator's
 go-ahead. Nothing in this file has been run against the live system except
 the read-only checks under "Checked before release".
 
@@ -29,7 +54,14 @@ Plus the CI fix (`fix/ci-environment`, merged `f2746ef`), the deploy-helper fix
 line-buffered, so a slow command stops promptly when its caller disconnects;
 signed off by the security reviewer).
 
-Not in this release: F10, F11, F15, F16, F17 and F19.
+**Release 1.1, same day:** F10 HA Supervisor actions (add-on restart/update,
+backups, Core update, restart after a passing config check; every action
+gated, the host reboot disabled by default), merged `5c62898` after the
+security sign-off `f9e2c22`. Full suite 2659 passed; on the private live-DB
+copy its migration only adds `session_plan_items.args_json` and `summary`, and
+the Release 1 code (`c8ffe2c`) still starts on the migrated copy.
+
+Not in this release: F11, F15, F16, F17 and F19.
 
 ## Preconditions
 

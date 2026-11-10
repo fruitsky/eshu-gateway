@@ -19,8 +19,22 @@ import time
 
 from db.core import db_conn
 
+import re
+
 MAX_ITEMS = 50
 MAX_COMMAND_BYTES = 4096
+# P1: only these curated Supervisor actions may be covered by an agent's MCP
+# plan item. The generic read/write, `call_service`, `ws_write` and
+# `ha_host_reboot` never can; the reboot always needs its own card (S1 follows
+# from this allowlist).
+PLAN_COVERABLE_TOOLS = frozenset({
+    'ha_addon_action', 'ha_addon_update', 'ha_core_update',
+    'ha_backup_create', 'ha_core_restart',
+})
+MAX_ARGS_DISPLAY = 2000
+# F10: an `mcp` item names one integration tool; the hash is SHA-256 hex.
+TOOL_RE = re.compile(r'^[A-Za-z0-9_.:-]{1,120}$')
+HASH_RE = re.compile(r'^[0-9a-f]{64}$')
 MAX_NOTE = 500
 DEFAULT_TTL_MINUTES = 60
 MAX_TTL_MINUTES = 240
@@ -57,6 +71,20 @@ def init_session_plans_tables(cursor):
     cursor.execute(
         'CREATE INDEX IF NOT EXISTS idx_session_plan_items_plan '
         'ON session_plan_items(plan_id)')
+    # F10: a plan item is either an SSH command (kind='ssh', the default and
+    # every pre-F10 row) or one MCP tool call (kind='mcp') identified by the
+    # exact argument hash the agent proposed. `command` stays the human label
+    # the plan UI already renders.
+    # P1: `args_json` is the redacted display copy the plan card shows (the
+    # match still uses `args_hash`), and `summary` is the handler preflight
+    # summary when there is one.
+    for col, default in [('kind', "'ssh'"), ('integration', "''"),
+                         ('tool', "''"), ('args_hash', "''"),
+                         ('args_json', "''"), ('summary', "''")]:
+        try:
+            cursor.execute(f"ALTER TABLE session_plan_items ADD COLUMN {col} TEXT DEFAULT {default}")
+        except Exception:
+            pass
 
 
 def _forbidden_command_char(command: str):
@@ -84,6 +112,117 @@ class PlanError(ValueError):
         self.message = message
 
 
+def args_hash(args) -> str:
+    """Stable hash of one MCP call's arguments (sorted keys, compact JSON).
+
+    The plan stores the hash, never the raw arguments: secrets in an argument
+    (an HA service payload can carry a token) must not be copied into a plan
+    row that the UI renders."""
+    import hashlib
+    import json
+    try:
+        body = json.dumps(args or {}, sort_keys=True, separators=(',', ':'),
+                          ensure_ascii=False)
+    except (TypeError, ValueError):
+        raise PlanError('invalid_args', 'args must be JSON-serialisable')
+    return hashlib.sha256(body.encode('utf-8')).hexdigest()
+
+
+def _is_ha_integration(name: str) -> bool:
+    """R2: is `name` an integration of kind 'ha'? Unknown names are not.
+
+    The kind is read from the integrations row, never taken from the caller:
+    an item stores the integration *name*, and that name is what the claim
+    matches, so the kind has to come from the same row."""
+    with db_conn() as conn:
+        row = conn.execute('SELECT kind FROM integrations WHERE name = ?',
+                           (name,)).fetchone()
+    return bool(row) and (row['kind'] or '').strip().lower() == 'ha'
+
+
+def _validate_mcp_item(item):
+    integration = str(item.get('integration') or '').strip()
+    tool = str(item.get('tool') or '').strip()
+    if not integration or not tool:
+        raise PlanError('invalid_items',
+                        "an mcp item needs 'integration' and 'tool'")
+    if not TOOL_RE.match(integration) or not TOOL_RE.match(tool):
+        raise PlanError('invalid_items',
+                        'integration and tool must be plain names')
+    if tool not in PLAN_COVERABLE_TOOLS:
+        # P1: an allowlist, not one excluded tool. The operator must be able to
+        # read what a plan item does; the generic tools take an arbitrary path
+        # and body, so they can never be covered by a plan.
+        raise PlanError('not_plan_coverable',
+                        '%s cannot be covered by a plan; only the curated '
+                        'Supervisor actions can be' % tool)
+    raw = item.get('args')
+    if not isinstance(raw, dict):
+        # P1: a bare args_hash hid the arguments from the operator.
+        raise PlanError('invalid_items',
+                        "an mcp item needs its 'args', not only an args_hash")
+    digest = args_hash(raw)
+    supplied = item.get('args_hash')
+    if supplied is not None and str(supplied).strip().lower() != digest:
+        raise PlanError('invalid_items',
+                        'args_hash does not match args')
+    max_uses = item.get('max_uses', 1)
+    if isinstance(max_uses, bool) or not isinstance(max_uses, int):
+        raise PlanError('invalid_max_uses', 'max_uses must be an integer')
+    if max_uses < 1 or max_uses > MAX_USES:
+        raise PlanError('invalid_max_uses',
+                        f'max_uses must be between 1 and {MAX_USES}')
+    if not _is_ha_integration(integration):
+        # R2: the allowlist above is keyed by tool name, and any integration
+        # can register a tool with the same name. F16's V6 rule keys on
+        # (kind, tool), so an mcp item must name an integration of kind 'ha'.
+        # Checked here and again in claim_mcp_plan_item.
+        raise PlanError('not_plan_coverable',
+                        '%s is not a Home Assistant integration; its tools '
+                        'cannot be covered by a plan' % integration)
+    # P1: the card shows the arguments with secret-looking keys redacted, and
+    # the handler's preflight summary when it has one. Both are display only;
+    # the call still matches on the hash of the raw arguments.
+    display, summary = _mcp_display(integration, tool, raw)
+    if len(display.encode('utf-8')) > MAX_ARGS_DISPLAY:
+        # Nit (K1 review): the card used to truncate the display while the
+        # match used the full arguments, so an operator could approve a tail
+        # they never saw. Refuse instead; the curated actions take short
+        # arguments.
+        raise PlanError('invalid_args',
+                        'the argument display is longer than %d bytes; shorten '
+                        'the arguments so the operator can see all of them'
+                        % MAX_ARGS_DISPLAY)
+    label = f"mcp: {integration}.{tool} ({digest[:12]})"
+    return {'kind': 'mcp', 'host': '*', 'command': label,
+            'integration': integration, 'tool': tool, 'args_hash': digest,
+            'args_json': display, 'summary': summary, 'max_uses': max_uses}
+
+
+def _mcp_display(integration_name: str, tool_name: str, args: dict):
+    """P1: (redacted args JSON, preflight summary) for the plan card."""
+    import json as _json
+    try:
+        from core.secret_scrub import scrub_payload
+        display = _json.dumps(scrub_payload(args or {}), sort_keys=True,
+                              separators=(',', ':'))
+    except Exception:
+        display = ''
+    summary = ''
+    try:
+        from core.tool_handlers import run_preflight
+        from db.integrations import get_integration, get_tool
+        integration = get_integration(integration_name)
+        tool = get_tool(integration_name, tool_name)
+        if integration and tool and tool.get('handler'):
+            pre = run_preflight(tool['handler'], integration, tool, args or {})
+            if isinstance(pre, dict):
+                summary = str(pre.get('_summary') or '')[:300]
+    except Exception:
+        summary = ''
+    return display, summary
+
+
 def validate_items(items):
     """Normalise and validate the proposed items; raises PlanError."""
     if not isinstance(items, (list, tuple)) or not items:
@@ -95,6 +234,12 @@ def validate_items(items):
     for item in items:
         if not isinstance(item, dict):
             raise PlanError('invalid_items', 'each item must be an object')
+        kind = str(item.get('kind') or 'ssh').strip().lower()
+        if kind == 'mcp':
+            normalised.append(_validate_mcp_item(item))
+            continue
+        if kind != 'ssh':
+            raise PlanError('invalid_items', "item kind must be 'ssh' or 'mcp'")
         command = item.get('command')
         if not isinstance(command, str) or not command.strip():
             raise PlanError('invalid_command', 'each item needs a command')
@@ -121,7 +266,9 @@ def validate_items(items):
         if max_uses < 1 or max_uses > MAX_USES:
             raise PlanError('invalid_max_uses',
                             f'max_uses must be between 1 and {MAX_USES}')
-        normalised.append({'host': host, 'command': command, 'max_uses': max_uses})
+        normalised.append({'kind': 'ssh', 'host': host, 'command': command,
+                           'integration': '', 'tool': '', 'args_hash': '',
+                           'max_uses': max_uses})
     return normalised
 
 
@@ -162,9 +309,14 @@ def create_plan(session_id: str, items, note: str = '') -> dict:
         plan_id = cur.lastrowid
         for item in normalised:
             cur.execute('''
-                INSERT INTO session_plan_items (plan_id, host, command, max_uses, uses, removed)
-                VALUES (?, ?, ?, ?, 0, 0)
-            ''', (plan_id, item['host'], item['command'], item['max_uses']))
+                INSERT INTO session_plan_items
+                    (plan_id, host, command, max_uses, uses, removed,
+                     kind, integration, tool, args_hash, args_json, summary)
+                VALUES (?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?)
+            ''', (plan_id, item['host'], item['command'], item['max_uses'],
+                    item.get('kind') or 'ssh', item.get('integration') or '',
+                    item.get('tool') or '', item.get('args_hash') or '',
+                    item.get('args_json') or '', item.get('summary') or ''))
         conn.commit()
     hosts = {item['host'] for item in normalised}
     return {'plan_id': plan_id, 'status': 'proposed', 'session_id': sid,
@@ -319,10 +471,76 @@ def _claim_candidate(conn, session_id: str, host: str, command: str, now: int):
         JOIN session_plans p ON p.id = i.plan_id
         WHERE p.session_id = ? AND p.status = 'approved' AND p.until > ?
           AND i.removed = 0 AND i.uses < i.max_uses
+          AND i.kind = 'ssh'
           AND i.command = ? AND (i.host = ? OR i.host = '*')
         ORDER BY i.id
         LIMIT 1
     ''', (session_id, now, command, host)).fetchone()
+
+
+def _claim_mcp_candidate(conn, session_id: str, owner: str, integration: str,
+                         tool: str, digest: str, now: int):
+    # F10 M2: the caller must own the session. The join makes this the same
+    # statement as the claim, so a concurrent ownership change cannot slip
+    # between the check and the use. An ownerless session matches nothing.
+    return conn.execute('''
+        SELECT i.id, i.plan_id
+        FROM session_plan_items i
+        JOIN session_plans p ON p.id = i.plan_id
+        JOIN sessions s ON s.id = p.session_id
+        WHERE p.session_id = ? AND p.status = 'approved' AND p.until > ?
+          AND s.agent != '' AND s.agent = ?
+          AND i.removed = 0 AND i.uses < i.max_uses
+          AND i.kind = 'mcp' AND i.integration = ? AND i.tool = ?
+          AND i.args_hash = ?
+        ORDER BY i.id
+        LIMIT 1
+    ''', (session_id, now, owner, integration, tool, digest)).fetchone()
+
+
+def claim_mcp_plan_item(session_id: str, integration: str, tool: str,
+                        digest: str, owner: str = '', now: int = None):
+    """F10: consume one use of an approved `mcp` plan item.
+
+    Matching is by integration + tool + the exact argument hash, never by a
+    pattern: an approved plan covers the call the operator saw, not a family of
+    calls. Same conditional UPDATE as the SSH claim.
+
+    M2: the session's owner must be the calling agent. An MCP caller can name
+    any session id, so without this agent B could spend agent A's approved
+    "update add-on X" item. An ownerless session matches nothing (F3 SR2).
+
+    R1: the tool is re-checked against the allowlist here, not only in
+    `create_plan`. R2: so is the integration's kind. `create_plan` is the only
+    writer of `mcp` items today, so both are defence in depth — a future
+    insert path must not be able to widen what an approved plan can spend."""
+    sid = (session_id or '').strip()[:64]
+    owner = (owner or '').strip()[:64]
+    if not sid or not integration or not tool or not digest or not owner:
+        return None
+    if tool not in PLAN_COVERABLE_TOOLS:
+        return None
+    if not _is_ha_integration(integration):
+        return None
+    now = int(now or time.time())
+    expire_plans(now)
+    with db_conn() as conn:
+        cur = conn.cursor()
+        row = _claim_mcp_candidate(conn, sid, owner, integration, tool, digest, now)
+        if not row:
+            return None
+        cur.execute('''
+            UPDATE session_plan_items SET uses = uses + 1
+            WHERE id = ? AND removed = 0 AND uses < max_uses
+              AND plan_id IN (
+                  SELECT id FROM session_plans
+                  WHERE status = 'approved' AND until > ?
+              )
+        ''', (row['id'], now))
+        if cur.rowcount != 1:
+            return None
+        conn.commit()
+        return row['plan_id'], row['id']
 
 
 def claim_plan_item(session_id: str, host: str, command: str, now: int = None):
