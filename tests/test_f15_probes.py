@@ -261,3 +261,95 @@ def test_dns_check_reports_no_record(gateway, monkeypatch):
                         lambda *a, **k: {'body': '{"hosts": []}'})
     out = _run_dns({'name': 'nope.example.test'})
     assert out['digest']['record'] is None
+
+
+# ── AG1: probe plans cover approval-mode agents, agent plans never do ──────
+
+def _approval_agent(name='agent-a'):
+    from core.agent_context import set_current_agent
+    from db.agent_policies import get_agent_policy, set_agent_policy
+    from db.agent_tokens import create_agent_token, get_agent_by_name
+    create_agent_token(name)
+    row = get_agent_by_name(name)
+    set_agent_policy(row['id'], ssh_mode='approval')
+    set_current_agent({'id': row['id'], 'name': name,
+                       'policy': get_agent_policy(row['id'])})
+    return name
+
+
+def _post_command(client, headers, command, sid, agent, force_jit=True):
+    import base64
+    return client.post('/api/request', json={
+        'target_ip': '10.0.0.1',
+        'encoded_command': base64.b64encode(command.encode()).decode(),
+        'session_id': sid, 'agent': agent, 'force_jit': force_jit,
+    }, headers=headers)
+
+
+def test_a_probe_plan_covers_an_approval_mode_agent(gateway, client,
+                                                    gateway_headers):
+    from core.probes import plan_probe
+    from db.session_plans import approve_plan
+    from db.requests import get_request_row
+    from db.sessions import upsert_session
+    agent = _approval_agent()
+    upsert_session('sess-1', agent=agent)
+    out = plan_probe('disk_pressure', {'host': gateway}, 'sess-1')
+    approve_plan(out['plan_id'], ttl_minutes=30)
+    response = _post_command(client, gateway_headers, 'df -h', 'sess-1', agent)
+    body = response.json()
+    assert body.get('plan') is True, body
+    row = get_request_row(body['request_id'])
+    assert row['reason'].endswith(':probe')
+    # The item is spent: the same command is no longer covered.
+    again = _post_command(client, gateway_headers, 'df -h', 'sess-1', agent)
+    assert 'plan' not in again.json()
+
+
+def test_an_agent_plan_does_not_cover_an_approval_mode_agent(
+        gateway, client, gateway_headers):
+    from db.session_plans import approve_plan, create_plan
+    from db.sessions import upsert_session
+    agent = _approval_agent()
+    upsert_session('sess-2', agent=agent)
+    plan = create_plan('sess-2', [{'host': gateway, 'command': 'uptime'}])
+    approve_plan(plan['plan_id'], ttl_minutes=30)
+    response = _post_command(client, gateway_headers, 'uptime', 'sess-2', agent)
+    assert 'plan' not in response.json()
+
+
+def test_another_agents_session_cannot_spend_a_probe_plan(
+        gateway, client, gateway_headers):
+    """AG1 condition 3: the claim checks the session's owner."""
+    from core.probes import plan_probe
+    from db.session_plans import approve_plan
+    from db.sessions import upsert_session
+    _approval_agent('agent-a')
+    upsert_session('sess-a', agent='agent-a')
+    out = plan_probe('disk_pressure', {'host': gateway}, 'sess-a')
+    approve_plan(out['plan_id'], ttl_minutes=30)
+    _approval_agent('agent-b')
+    response = _post_command(client, gateway_headers, 'df -h', 'sess-a',
+                             'agent-b')
+    assert 'plan' not in response.json()
+
+
+def test_a_proposed_origin_field_cannot_make_a_probe_plan(gateway):
+    """AG1 condition 1: origin is server-only; a request field is ignored."""
+    from db.session_plans import create_plan, get_plan
+    from db.sessions import upsert_session
+    upsert_session('sess-3', agent='agent-a')
+    created = create_plan('sess-3', [{'host': gateway, 'command': 'uptime',
+                                      'origin': 'probe'}])
+    assert get_plan(created['plan_id'])['origin'] == 'agent'
+
+
+def test_a_server_plan_must_name_a_specific_host():
+    """AG1 condition 2: an any-host item is an agent-style plan."""
+    from db.session_plans import PlanError, create_plan
+    from db.sessions import upsert_session
+    upsert_session('sess-4', agent='agent-a')
+    with pytest.raises(PlanError) as exc:
+        create_plan('sess-4', [{'host': '*', 'command': 'uptime'}],
+                    origin='probe')
+    assert exc.value.code == 'invalid_host'

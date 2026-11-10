@@ -343,7 +343,7 @@ def plan_probe(name, params, session_id):
     try:
         plan = create_plan(sid, [{'host': p['host'], 'command': c['command'],
                                   'max_uses': 1} for c in cmds],
-                           note='probe:%s' % name)
+                           note='probe:%s' % name, origin='probe')
     except PlanError as exc:
         return {'error': exc.code, 'message': exc.message}
     set_meta_json('probe_plan_%d' % plan['plan_id'],
