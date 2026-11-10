@@ -154,7 +154,8 @@ was run. Step 4 below is that check, done by hand.
 4. **Check the dashboard.** Within 1 minute: the unit is active, the log has no
    traceback, and the log shows the two backfill threads finishing. Open the
    dashboard and check the pending list, one request's sidebar (context
-   sections), the session view, Inventory and the runbook list. Run one
+   sections), the session view, Inventory, and a confirmed conclusion inside a session's view (there is no
+   separate runbook list yet; that is X2). Run one
    approved JIT command through any gateway and confirm it still works on the
    *old* gateway script.
 5. **Update one gateway** (a low-traffic one) by re-running its installer.

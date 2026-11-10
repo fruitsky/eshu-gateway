@@ -54,6 +54,7 @@ dashboard LXC or any gateway until the rollout gate in § 8 passes.**
 | F24 | Warns on the approval card when a write uses a value the agent first saw in untrusted content (a web page, a log line) |
 | F25 | Named secrets per host: a command refers to a key by name, the gateway fills it in, and the agent never sees the value |
 | F26 | Try a new agent or model in shadow mode: its writes are recorded, never run, and compared with what you really approved |
+| X2 | A Runbooks page: list, search and open confirmed runbooks, and retire old ones |
 | F20 | Reserved: the local-agent pass, parked on a local branch until the end |
 
 ## 1. Why — what the live data says
@@ -9265,6 +9266,61 @@ _(reviewer)_
 
 ---
 
+## Chunk X2 — Runbooks page · slug `runbooks-page` · dashboard UI · small
+
+### Goal
+
+F13 runbooks can be found by agents (`find_runbooks`), but the operator can
+only reach one through the session it came from. Give them a page of their
+own.
+
+### Design
+
+* `GET /api/runbooks?q=&tag=`: operator session auth, newest first, capped at
+  100. It reuses `core.conclusions.find_runbooks` for the search, so the
+  operator and the agents see the same ranking.
+* A "Runbooks" entry in the main navigation, next to Inventory. It shows:
+  * a list: title, when to use, tags, step count, source session, created;
+  * a search box and a tag filter;
+  * one click opens the existing runbook view (`GET /api/runbooks/{id}`),
+    with the ordered steps and their F1 breakdown, the known dead ends and a
+    link to the source session.
+* **Retire.** A runbook can be retired with a confirm dialog. Retiring is
+  audited, and a retired runbook is no longer served to agents. It is shown
+  greyed, under a "show retired" toggle. Retire is reversible. There is no
+  hard delete.
+* Everything rendered goes through the existing escaping helpers. Runbook
+  text came from an agent and is untrusted.
+
+### Tests to add
+
+* The list route needs a session (401 without).
+* Search and tag filters work.
+* Retire hides the runbook from `find_runbooks` and `get_runbook` for
+  agents, and un-retire brings it back.
+* Retire is audited.
+* A runbook title containing HTML is rendered escaped (a JS test or a
+  template test, whichever the existing UI tests use).
+
+### Compat impact
+
+One column, `runbooks.retired_at` (nullable). Additive.
+
+### Acceptance criteria
+
+The tests pass; the page works at phone width; and `bash scripts/verify.sh`
+is green.
+
+### Implementer notes
+
+_(implementer)_
+
+### Reviewer notes
+
+_(reviewer)_
+
+---
+
 ## 7. Backlog (not planned in detail)
 
 * Deny with a reason, shown to the agent (cheap; low value given the data).
@@ -9316,6 +9372,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 16 | F15 | probes | dashboard + MCP | Code round 1: changes requested AG1–AG7 (`56d86e3`); **AG1 to security** | `feat/f15-probes` | F4, F12, F14 | main line, not only local-model |
 | 17 | F21 | snapshot-approve | dashboard + Proxmox | Design first | `feat/f21-snapshot-approve` | F7, F14, F2 | + security sign-off (new write path, destructive rollback) |
 | 18 | F23 | change-journal | dashboard | Ready | `feat/f23-change-journal` | F1, F5, F7, F14 | no security gate; can be coded while F21's design is with security |
+| 18a | X2 | runbooks-page | dashboard UI | Ready | `feat/x2-runbooks-page` | F13 | small; no security gate |
 | 19 | F22 | change-checks | dashboard + MCP | After F19 merges and F15's AG1 is decided | `feat/f22-change-checks` | F3, F5, F12, F19, F15 (AG1 rule) | + security sign-off (the unattended check) |
 | 20 | F16 | recipes | dashboard + MCP | Design complete (security Round 4; feature reviewer Round 5 with AA1/AA2); code next after F22 | `feat/f16-recipes` | F3, F12, F13, F19, F15 (AG1 rule) | main line; code comes back to security; auto_run comes back to security |
 | 21 | F24 | content-tripwire | dashboard | Design first | `feat/f24-content-tripwire` | F12, F14 | + security sign-off (retention) |
