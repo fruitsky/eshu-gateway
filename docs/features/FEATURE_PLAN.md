@@ -6023,6 +6023,167 @@ a read-lane verb. Drop `concat`.
 
 `bash scripts/verify.sh`: `2331 passed, 7 warnings in 427.94s (0:07:07)` (docs only).
 
+### Round 3 — design after review round 2 (T1–T3)
+
+Round 2 stands except for the three points below.
+
+#### T1 — whole-word slots, and no backslash
+
+The sentinel word-count test passes `echo --host={fqdn}` and `echo x{fqdn}`:
+both are one word before and after. The rule is per token instead: after
+replacing every placeholder with the sentinel, **every token that contains the
+sentinel must equal it exactly**. A backslash is refused anywhere, because
+`echo \{fqdn}` passes every earlier rule and the `\` then escapes the opening
+quote `shlex.quote` adds.
+
+```python
+def _check_template(template, declared):
+    if any(ch in template for ch in ('$', '`', '\n', '\r', "'", '"', '\\')):
+        raise RecipeParamError(
+            'invalid_step',
+            'SSH templates may not contain $, backticks, newlines, quotes or backslashes')
+    outside = PLACEHOLDER.sub('', template)
+    if '{' in outside or '}' in outside:
+        raise RecipeParamError('invalid_step', 'braces must be declared placeholders')
+    unknown = [n for n in PLACEHOLDER.findall(template) if n not in declared]
+    if unknown:
+        raise RecipeParamError('unknown_param',
+                               'template uses %s' % ', '.join(sorted(set(unknown))))
+    sentinel = 'eshueshusentinel'
+    for token in shlex.split(PLACEHOLDER.sub(sentinel, template)):
+        if sentinel in token and token != sentinel:
+            raise RecipeParamError('invalid_step',
+                                   'a placeholder must be a whole word')
+```
+
+Tests: `echo {fqdn}` and `echo {fqdn} {target_ip}` are accepted;
+`echo --host={fqdn}`, `echo x{fqdn}` and `echo \{fqdn}` are refused, as is a
+template containing a backslash anywhere.
+
+#### T2 — undo arguments may come from the step's own result
+
+NPM's `delete_proxy_host` takes the proxy host `id`, not a domain, so an undo
+cannot be built from the parameters alone. An undo argument may be
+`{"result": "<dotted.path>"}`, resolved against the **structured response
+stored with that step** (`recipe_run_steps.result_json`):
+`{"id": {"result": "id"}}` for `delete_proxy_host`.
+
+* A missing path makes that step's rollback **fail closed**
+  (`rollback_missing_result`): the rollback stops at that step and undoes
+  nothing further, so it cannot guess an id or delete the wrong host.
+* The rollback preview resolves the value from the stored result and shows it
+  (for example "delete proxy host id 7"), so the operator sees exactly what
+  will be removed.
+* The value must be a scalar (`str`/`int`); an object or a list is refused at
+  preview time.
+
+Test with a canned `create_proxy_host` response (`{"id": 7, ...}`): the undo
+is `{"id": {"result": "id"}}`; without the `id` in the response the rollback
+fails closed and the preview marks the step.
+
+#### T3 — the registry's real names and shapes
+
+Checked against `pihole_seed.py`, `npm_seed.py` and the handlers on
+`feature-roadmap`:
+
+* Pi-hole has **no write tool** for local DNS records — the registry has
+  `summary`, `status`, `api_version`, `enable_blocking`, `disable_blocking`
+  and the read `local_dns_records`, whose handler reads
+  `config/dns/hosts` and `config/dns/cnameRecords` and returns
+  `{"hosts": [{"name": ..., "ips": [...]}], "cnames": [...]}`. Generic
+  `write` is forbidden for recipes (R2), so a recipe cannot create the record.
+* NPM has `proxy_hosts` (read, a list with `domain_names`, `forward_host`,
+  `forward_port`), `proxy_host` (read by `id`), `create_proxy_host` (a `body`),
+  `update_proxy_host` and `delete_proxy_host` (both by `id`).
+
+`RECIPE_TOOLS` therefore lists only what exists, and an undo partner is a
+tool a recipe may call **only as the undo of the tool that names it**:
+
+```python
+# tool a step may call -> its undo partner (None = no safe automatic undo)
+RECIPE_TOOLS = {
+    'create_proxy_host': 'delete_proxy_host',
+    'proxy_hosts': None,
+    'local_dns_records': None,
+}
+RECIPE_UNDO_TOOLS = frozenset(t for t in RECIPE_TOOLS.values() if t)
+FORBIDDEN_RECIPE_TOOLS = frozenset({
+    'ha_host_reboot', 'ha_core_restart', 'ha_backup_create', 'ha_addon_update',
+    'ha_core_update', 'ssh_exec', 'write', 'ws_write', 'web_fetch', 'call_service',
+    'enable_blocking', 'disable_blocking', 'update_proxy_host',
+    'recipe_run', 'recipe_rollback',
+})
+```
+
+The registry-walk test asserts every tool in every integration's registry is in
+exactly one of `RECIPE_TOOLS`, `RECIPE_UNDO_TOOLS` and
+`FORBIDDEN_RECIPE_TOOLS`; `delete_proxy_host` is an undo-only tool, so a step
+that tries to call it directly is refused (`recipe_tool_forbidden`).
+
+**The example, reshaped to what exists.** `add_internal_fqdn` no longer
+creates the Pi-hole record: there is no tool for it, and inventing one is a
+Pi-hole integration change, not a recipe feature. The DNS record becomes a
+**run precondition** (checked before the plan is proposed, so a doomed run
+never reaches the approval card); the chunk's title still holds — the recipe
+publishes the name through NPM and verifies it end to end. If a Pi-hole write
+tool lands later, it joins `RECIPE_TOOLS` and step 1 becomes a create with the
+same precheck/check/undo shape.
+
+```json
+{"name": "add_internal_fqdn",
+ "preconditions": [
+   {"kind": "tool",
+    "call": {"integration": "Pi-hole", "tool": "local_dns_records",
+             "args": {}},
+    "pass": {"field": "hosts",
+             "contains": {"where": {"name": {"param": "fqdn"},
+                                    "ips": {"param": "target_ip"}}}}}
+ ],
+ "steps": [
+   {"id": "1", "kind": "tool",
+    "call": {"integration": "Nginx Proxy Manager", "tool": "create_proxy_host",
+             "args": {"body": {"domain_names": [{"param": "fqdn"}],
+                               "forward_scheme": "http",
+                               "forward_host": {"param": "target_ip"},
+                               "forward_port": {"param": "port"}}}},
+    "precheck": {"kind": "tool",
+                 "call": {"integration": "Nginx Proxy Manager",
+                          "tool": "proxy_hosts", "args": {}},
+                 "pass": {"field": "items",
+                          "contains": {"where": {"domain_names": {"param": "fqdn"}}}}},
+    "check": {"kind": "tool",
+              "call": {"integration": "Nginx Proxy Manager",
+                       "tool": "proxy_hosts", "args": {}},
+              "pass": {"field": "items",
+                       "contains": {"where": {"domain_names": {"param": "fqdn"},
+                                              "forward_host": {"param": "target_ip"},
+                                              "forward_port": {"param": "port"}}}}},
+    "undo": {"kind": "tool",
+             "call": {"integration": "Nginx Proxy Manager",
+                      "tool": "delete_proxy_host",
+                      "args": {"id": {"result": "id"}}}}},
+   {"id": "2", "kind": "ssh",
+    "ssh": {"host": {"enum": ["web01.example.test"]},
+            "command": "getent hosts {fqdn}"},
+    "check": "self", "undo": null},
+   {"id": "3", "kind": "ssh",
+    "ssh": {"host": {"enum": ["web01.example.test"]},
+            "command": "curl -fsS -o /dev/null https://{fqdn}/"},
+    "check": "self", "undo": null}
+ ]}
+```
+
+The NPM response shape is the real one (`proxy_hosts` is a list; the created
+host's `id` is what the undo uses). `npm_proxy_host_create` and
+`pihole_local_dns_record_add` from Round 2 do not exist and are gone.
+
+Tests, added: the T1 spellings; the T2 result-slot (present, missing, object);
+the registry walk against the real seeds (it fails on any renamed or invented
+tool); step 1's check and precondition against a canned `local_dns_records`
+response (`hosts: [{name, ips}]`) — including the stale-IP case that must fail.
+
+`bash scripts/verify.sh`: `2331 passed, 7 warnings in 429.13s (0:07:09)` (docs only).
+
 ### Reviewer notes
 
 **Design round 1 (2026-11-09): approved in direction, changes requested.**
@@ -6269,7 +6430,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 13 | F11 | ha-config-files | dashboard | Ready (after F10) — design first | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | design approval + security reviewer sign-off |
 | 14 | F14 | inventory | dashboard + MCP | Merged | `feat/f14-inventory` | Chunk H | |
 | 15 | F15 | probes | dashboard + MCP | Ready after F12 | `feat/f15-probes` | F4, F12 | |
-| 16 | F16 | recipes | dashboard + MCP | **Round 2: design revised for R1–R8 — awaiting security review** | `feat/f16-recipes` | F3, F12, F13 | design approval + security reviewer sign-off |
+| 16 | F16 | recipes | dashboard + MCP | **Round 3: T1–T3 folded (templates, result-slot undo, real tool names) — awaiting security review** | `feat/f16-recipes` | F3, F12, F13 | design approval + security reviewer sign-off |
 | 17 | F17 | local-agent | dashboard + docs | Ready after F12–F16 | `feat/f17-local-agent` | F12–F16 | |
 | 18 | F19 | unattended-limits | gateway + dashboard | Design first; before F4 `on` is unlocked | `feat/f19-unattended-limits` | F4, F5 | design approval + security reviewer sign-off |
 Chunks are done **in the order column**; each new chunk branches from the
