@@ -207,3 +207,38 @@ class TestCaptureTail:
         err = proc.stderr.read()
         assert proc.returncode == 0, err[-2000:]
         assert cap.read_bytes() == b'x' * 16384 + b'\n'
+
+    @pytest.mark.parametrize('sigpipe', ['default', 'ignored'])
+    def test_f5_capture_tail_ends_when_the_agent_disconnects(
+            self, tmp_path, awk_name, sigpipe):
+        """Security sign-off D1: an agent disconnect still ends the command.
+
+        With `tee` gone, the only thing between the command and the agent's
+        closed connection is awk. awk must stop when its write fails, so the
+        command upstream then gets SIGPIPE (or EPIPE) on its next write and the
+        root call ends instead of outliving its caller. sshd gives its children
+        the default SIGPIPE; the `ignored` case covers a parent that set it to
+        SIG_IGN, where the write fails with EPIPE instead of killing awk.
+
+        `yes` stands in for a command that writes for ever; `head -n 1` is the
+        agent reading one line and hanging up.
+        """
+        bindir, harness, env = _sandbox(tmp_path, awk_name)
+        cap = tmp_path / 'capture.out'
+        trap = "trap '' PIPE\n" if sigpipe == 'ignored' else ''
+        script = (trap +
+                  'yes | bash "%s" "%s" | head -n 1 > /dev/null\n'
+                  'echo "rc=${PIPESTATUS[*]}"\n' % (harness, cap))
+        started = time.time()
+        proc = subprocess.run(['bash', '-c', script], capture_output=True,
+                              env=env, timeout=30)
+        elapsed = time.time() - started
+        assert elapsed < 10, '%s kept running %.1f s after the disconnect' % (
+            awk_name, elapsed)
+        statuses = proc.stdout.decode().strip().split('=', 1)[1].split()
+        # The command (`yes`) was stopped by the broken pipe: 141 = SIGPIPE,
+        # or 1 when SIGPIPE is ignored and the write fails with EPIPE. That can
+        # only happen once awk stopped reading. awk's own status is not
+        # asserted: `capture_tail` deliberately hides it (C1), so the
+        # function's status is 0 either way.
+        assert statuses[0] != '0', proc.stdout

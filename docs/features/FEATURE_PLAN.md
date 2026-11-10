@@ -3690,6 +3690,43 @@ to come back to me):*
   - F19's pipeline sketch (`head -c` and `PIPESTATUS`) should be rewritten
     on top of this version.
 
+**D1 check (feature reviewer, 2026-11-10).** I wrote the test myself
+(`test_f5_capture_tail_ends_when_the_agent_disconnects`, under mawk and gawk,
+with SIGPIPE at its default and ignored): a command writing as fast as it can
+(`yes`), with the reader hanging up after one line. awk stops in all four
+cases, so `fflush()` needs no return check. 28 capture tests pass.
+
+The **slow writer from the D1 spec** shows something older than this fix. I
+used a line every 0.1 s and the reader hanging up after line 1, timing until
+the command stops:
+
+| pipeline | command keeps running |
+|---|---|
+| `sanitize \| tee` (F5, what is live today) | 41 s (the whole run) |
+| `sanitize \| capture_tail`, gawk or mawk | 39–41 s |
+| `stdbuf -oL sed … \| mawk -W interactive …` | 0.3 s |
+| `sed -u … \| capture_tail` (gawk) | 0.3 s |
+
+The cause is **`sanitize`**. GNU `sed` block-buffers its output into a pipe,
+so a slow command's first ~4 KB never reaches the closed connection, and the
+command never gets its SIGPIPE until then. That is true in **every** capture
+mode, including `exit-only` (`"$@" | sanitize`), so it is live on every
+gateway today. mawk also block-buffers its *input* from a pipe unless given
+`-W interactive`, which matters once `sed` is fixed. The CI fix is therefore
+**no worse than `tee`**, but the D1 spec as written fails for a reason the CI
+fix did not introduce.
+
+Proposed fix (two lines, gateway bash):
+* `sanitize`: `stdbuf -oL sed -E …`, with plain `sed` if `stdbuf` is
+  missing. That costs 0.8 s per million lines, against 0.1 s today; `sed -u`
+  costs 2.7 s.
+* `capture_tail`: add `-W interactive` when `awk -W version` reports mawk.
+  gawk prints a warning for that option, so detect mawk first; don't pass it
+  blindly.
+* The test exactly as specified (slow writer through `run_sanitized`, gone
+  within 5 s, both awks, both SIGPIPE modes), in `tail` **and** `exit-only`
+  modes.
+
 ---
 
 ## Chunk X1 — Sidebar actions and pending-only decisions · slug `ctx-actions` · dashboard · BUG
