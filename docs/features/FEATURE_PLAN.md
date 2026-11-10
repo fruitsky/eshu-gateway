@@ -3625,6 +3625,71 @@ GitHub CI passes (3.10, 3.12, syntax). **Next:** the security reviewer checks
 the `eshu-gateway.sh` diff `9470cff..1423e77` (`capture_tail`,
 `run_sanitized`, `post_exec_result`). Then I merge.
 
+**Security reviewer sign-off: CI fix (`9470cff..1423e77`,
+`eshu-gateway.sh`), 2026-11-10: approved, with one test required before
+merge.** I read `capture_tail`, `run_sanitized` and `post_exec_result`. I did
+not run anything.
+
+*What holds:*
+
+* **Nothing is left to hang on.** There is no FIFO, no background reader and
+  no `wait`. The capture rides in the stream and is written by `END` in the
+  same process, so the gateway call ends when the pipeline ends.
+* **Exit code.** It comes from `PIPESTATUS[0]` with `set +e` around the
+  pipeline only, and `set -e` is restored straight after. A failing capture
+  can no longer change the command's exit code, and it cannot stop the
+  sentinel or the result post. The `[ESHU exit=N]` tests cover both
+  branches.
+* **The awk program never treats output as code.** Data is used only through
+  `print`, `length` and `substr`. The capture path comes in through `-v` and
+  is a `mktemp` name in the root-only 0700 directory, so nobody else can
+  swap the file under it.
+* **Memory and CPU are bounded.** The ring holds about 16 KiB plus one line,
+  the work grows in step with the output, and dropped slots are freed. The
+  slot count is safe, since no more than 16385 lines can be kept.
+  `LC_ALL=C` makes the cap count bytes.
+* **The capture is best effort.** A write failure reaches syslog, never the
+  agent's stream. `post_exec_result` checks `-f` and falls back to an empty
+  output on any read error.
+
+*Required before merge (the feature reviewer can check it; it does not need
+to come back to me):*
+
+* **D1. A disconnect test.** E1, "an agent disconnect still ends the
+  command", used to rest on `tee`. It now rests on awk dying when it writes
+  to a closed stdout, and no test covers that. A root command that outlives
+  its caller is exactly what this fix exists to prevent.
+  - Test, under mawk and gawk: run a command that writes a line every 0.1 s
+    for 60 s, through `run_sanitized` in `tail` mode. Close the reading end
+    after the first line.
+  - Assert that the gateway process and the command are gone within a few
+    seconds.
+  - Run it twice: once with the default SIGPIPE handling, which is what sshd
+    gives its children, and once with SIGPIPE ignored (`trap '' PIPE` in the
+    harness).
+  - If an awk keeps going in the ignored case, add `if (fflush() < 0) exit 1`.
+    The `fflush()` return check is portable.
+
+*Recorded, not blocking:*
+
+* **Three ways the agent's stream is no longer byte-exact.** In `tail` mode
+  awk now sits in the stream to the agent, which `tee` did not. A missing
+  final newline gets added (C4, accepted). Embedded NUL bytes may be handled
+  differently by different awks. A single huge line is held in memory once
+  more, on top of `sed`'s copy. None of this is a security change. The F19
+  raw byte cap (L5) bounds the memory for unattended runs.
+* **A misleading syslog line.** When awk is killed by a disconnect, the
+  `|| logger` line logs "CAPTURE FAILED". If that proves confusing, log the
+  exit status as well.
+* **Rebasing F12 and F19 onto this fix.**
+  - F12's `run_sanitized` still has the FIFO plus `tail -c 65537` reader for
+    the MCP envelope. When F12 rebases onto this fix, the MCP capture must
+    use this ring too: make the 16385 a parameter and send stdout to
+    `/dev/null` in MCP mode. No second reader may come back.
+  - The F12 rebase of `run_sanitized` comes back to me with F12's R1–R4 diff.
+  - F19's pipeline sketch (`head -c` and `PIPESTATUS`) should be rewritten
+    on top of this version.
+
 ---
 
 ## Chunk X1 — Sidebar actions and pending-only decisions · slug `ctx-actions` · dashboard · BUG
