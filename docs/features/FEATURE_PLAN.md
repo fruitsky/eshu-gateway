@@ -4915,6 +4915,36 @@ F9, F3, HA and integration tests pass locally.
 auto-approve path for integration calls (plan items of kind `mcp`), in
 addition to the Supervisor actions.
 
+**Round 2 (2026-11-10, `5ceb569`): one fix left (N1).** M2 and S1 are fixed
+as asked:
+* the MCP plan claim joins `sessions` and requires `s.agent = owner`, with
+  ownerless sessions matching nothing, in the same statement as the claim;
+* `ha_host_reboot` can never be a plan item.
+
+M1's three checkpoints are right: before gating, in the curated executor and
+in the generic executor. 95 F10 and F3 tests pass locally.
+
+* **N1 (must): dot segments get past `is_supervisor_rest_path`.** It decodes
+  once and checks a prefix, but never resolves `.` or `..`:
+  * `api/states/../hassio/backups/x/restore` → not refused;
+  * `api/./hassio/host/reboot` → not refused;
+  * `api/states/%2e%2e/hassio/x` → not refused;
+  * `api/services/./hassio/x` → not refused;
+  * `api/hassio\backups` → not refused.
+  
+  `urllib.request` sends these paths exactly as given. A reverse proxy in
+  front of HA (nginx, which is what NPM is) resolves dot segments and
+  decodes `%2e`, so the request can still reach `/api/hassio/...`. Fix: in
+  the check, unquote **until stable**, then **refuse** any HA REST path that
+  contains a `.` or `..` segment, a backslash, or a NUL/control character,
+  whatever its prefix. HA has no legitimate API path with those. Only then
+  apply the prefix check. Refusing beats normalising, because the bytes sent
+  must be the bytes checked. Add the five spellings above, and
+  `%252e%252e`, to the table test, through all three checkpoints.
+
+**After N1:** to the security reviewer (§ 2.6a), with the M1 table, N1 and
+the `mcp` plan-claim owner binding as the points to check.
+
 ---
 
 ## Chunk F11 — HA config files via the SSH add-on · slug `ha-config-files` · dashboard
