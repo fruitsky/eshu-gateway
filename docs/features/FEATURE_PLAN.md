@@ -6933,6 +6933,13 @@ input buffering (see the buffering-fix note) does not matter on this path.
   (expect a small conflict at `sanitize`; take the `SANITIZE_CMD` form), then
   the security reviewer re-checks the merged gateway diff, then I merge F12.
 
+**Second merge-forward (feature reviewer, 2026-11-10, `8534f58`): approved; to
+the security reviewer for the merged gateway diff.** CI is green. `sanitize`
+is the roadmap's `"${SANITIZE_CMD[@]}"` form (`stdbuf -oL sed -E`, plain
+`sed` plus one syslog line as fallback). The MCP branch is still
+`capture_tail "$ESHU_MCP_CAP" 65537 >/dev/null`. Both installers embed both.
+After the security check, I merge F12 into `feature-roadmap`.
+
 
 ---
 
