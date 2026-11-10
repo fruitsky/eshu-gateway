@@ -9410,7 +9410,51 @@ settings endpoint's auth, range and audit; `/api/exec-result` storing and
 rejecting `limit`. `tests/test_gateway_script.py` gains the approved/limit
 stub and its JIT-body test now expects `run_limits`.
 
-`bash scripts/verify.sh`: `2538 passed, 22 skipped, 7 warnings in 477.75s (0:07:57)`.
+### Round 6 — code review round 1 (AD1–AD3) and the CI failure
+
+**Code review (feature reviewer, 2026-11-10, `51fb2a8`): three must-fixes.**
+L1–L8, W1 and Q2/Q3 read right; the gateway diff now goes to security.
+
+* **AD1 — a SIGKILLed command exits 137.** `timeout -k 5` sends SIGTERM, then
+  SIGKILL five seconds later for a command that ignores it; timeout then
+  exits **137**, not 124, so a stubborn command's stop was not labelled
+  `limit: time`. Both codes are accepted now, under the same elapsed-time
+  guard (a command that exits 137 on its own, quickly, is not a limit hit).
+  Tests: `trap "" TERM; sleep 30` with a 5 s limit → exit 137, the marker and
+  `limit: time`; `exit 137` immediately → no marker and no `limit`.
+* **AD2 — CI was red because the runner moved to Ubuntu 26.04.** The Actions
+  log for `51fb2a8` (`CI` run 42866594655, jobs 130006465478/82) shows
+  `Image: ubuntu-26.04` and both Python jobs failing on the same two tests:
+  the unattended MCP run came back `refused` with `exit_code 1` instead of
+  `ran`. That is the **L6 capability refusal**: Ubuntu 26 ships uutils
+  `timeout`, whose `--version` does not say "GNU coreutils", so
+  `RUN_LIMITS_CAP` was empty and the gateway correctly refused a limit it
+  cannot enforce. It passed locally on GNU coreutils. Fixes:
+  - `GatewaySandbox` gains a `timeout` stub whose `--version` the test
+    chooses (GNU by default) and which execs the real local `timeout` for
+    behaviour, so the suite no longer depends on the runner's userland;
+  - one test keeps the real case: a non-GNU `timeout --version` refuses a
+    limited run and nothing runs;
+  - `.github/workflows/ci.yml` is pinned to `runs-on: ubuntu-24.04` for both
+    jobs, with the reason in a comment;
+  - **setup note:** a gateway without GNU `timeout` reports no capability, so
+    the dashboard never auto-approves an unattended row there — it stays
+    `pending` with `reason = read-lane-no-limits` and the operator sees it in
+    the queue. That is the fail-closed behaviour, not a bug.
+* **AD3 — `docs/TOOLSHED_PLAN.md` removed.** The `feature-roadmap` merge
+  (`8865712`) carried it onto this branch; it is not on `feature-roadmap`
+  and is not part of F19. It is deleted in its own commit (`4a86f81`) and the
+  local copy is left on disk, untracked, for the operator.
+* **Nit — capture `timeout --version` first.** `TIMEOUT_VERSION=$(timeout
+  --version 2>/dev/null || true)`, then grep the variable, so `pipefail`
+  cannot make the capability question depend on a pipeline's scheduling. The
+  installer template does the same.
+
+The current `feature-roadmap` (F10 merged, `f7201ac`) is merged forward in
+`12e51e7`; the only conflict was this document's F19 note at the end of the
+status table.
+
+`bash scripts/verify.sh`: `2678 passed, 22 skipped, 7 warnings in 561.48s (0:09:21)`.
 
 **Code round 1 (feature reviewer, 2026-11-10, `90c4df7` / `51fb2a8`): the
 design is implemented faithfully; three must-fixes before the security
@@ -9515,7 +9559,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 15 | F15 | probes | dashboard + MCP | Ready after F12; pre-implementation notes P1–P8 | `feat/f15-probes` | F4, F12 | |
 | 16 | F16 | recipes | dashboard + MCP | **Security approved Round 4 with Y1 + W2**; Round 5 to feature reviewer only | `feat/f16-recipes` | F3, F12, F13 | security re-reads Round 4 only |
 | 17 | F17 | local-agent | dashboard + docs | Ready after F15; pre-implementation notes A1–A6 | `feat/f17-local-agent` | F12–F16 | |
-| 18 | F19 | unattended-limits | gateway + dashboard | **Code round 5: W1, Q3, `python3 -I`, L3/L7 per request — to security for the gateway bash** | `feat/f19-unattended-limits` | F4, F5 | security reviews the gateway diff; feature reviewer checks the rest |
+| 18 | F19 | unattended-limits | gateway + dashboard | **Code round 1 review folded (AD1 137, AD2 CI pin + timeout stub, AD3) — to security for the gateway bash** | `feat/f19-unattended-limits` | F4, F5 | security reviews the gateway diff; feature reviewer checks the rest |
 | — | CI fix | ci-environment | gateway + tests | **Approved by feature reviewer** (round 5); CI green; **to security** (gateway bash) | `fix/ci-environment` | F5 | release precondition (`RELEASE_1.md`) |
 
 **Design round 3 (feature reviewer, 2026-11-10): approved, with one fix (Q3).**
