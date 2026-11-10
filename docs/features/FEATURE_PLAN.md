@@ -9507,6 +9507,17 @@ installed**: 2555 passed, 5 skipped.
 After AD1–AD3, the gateway bash (`eshu-gateway.sh` and both installers) goes to
 the security reviewer (§ 2.6a).
 
+**Code round 2 (feature reviewer, 2026-11-10, `f75b40a`): approved; to the
+security reviewer for the gateway bash.** AD1: 124 or 137, with the
+elapsed-time guard, and tests both ways. AD2: the cause was confirmed from the
+Actions log (Ubuntu 26.04 image, uutils `timeout`); the sandbox now stubs
+`timeout --version`, a non-GNU test keeps the refusal, the setup note is
+written, and CI is green. The `ubuntu-24.04` pin is on `feature-roadmap` as
+`6d58006` (pushed over SSH, so no `workflow`-scoped token was needed); drop
+the local `chore/ci-pin-ubuntu-24-04`. AD3: the stray file is removed
+(`4a86f81`). Nit, optional: `case "$TIMEOUT_VERSION" in *'GNU coreutils'*)`
+avoids the last pipe completely.
+
 ---
 
 ## 7. Backlog (not planned in detail)
