@@ -6477,6 +6477,50 @@ security reviewer.
 **Security gate:** after Round 2, the security reviewer reviews the design
 (§ 2.6a). F11 code waits for F10 and F12 to be merged.
 
+**Design round 2 (2026-11-10, `a163811`): approved in direction, four points
+before the security review (U1–U4).** H1, H3, H4, H5 and H7 are done well:
+* secrets stay on the add-on;
+* the root-relative realpath works with `/config` as a symlink;
+* there is a risky-key banner;
+* the check key is cleared before a write;
+* the key is honestly called plaintext at rest.
+
+H2's single script is the right shape.
+
+* **U1 (must): the remote side must finish first.** With no pty, killing the
+  SSH client at 120 s does not stop the remote `sh`. It keeps running
+  `ha core check` and may restore later, while the dashboard's own "restore
+  with the short timeout" runs at the same time: two writers on one file.
+  Run the check *inside* the script under a shorter remote bound
+  (`timeout 100 ha core check`, which the add-on's coreutils or BusyBox
+  supports), so the script always restores and exits itself before the
+  dashboard's 120 s. The dashboard never restores on its own after a
+  timeout. It reports `config_state_unknown` with the backup name, and the
+  per-integration lock stays held until a follow-up `sha256` read shows which
+  content is in place.
+* **U2 (must): list and write must agree on packages.** `list` walks
+  `/homeassistant/packages` recursively, but the write script accepts only a
+  directory equal to `/homeassistant` or `/homeassistant/packages`. A file in
+  `packages/net/x.yaml` is listed but every write is refused. Either allow
+  any directory **under** `/homeassistant/packages/` (the case pattern
+  `/homeassistant/packages|/homeassistant/packages/*`, with the same
+  basename-equality rule), or list `packages` with `-maxdepth 1`. I prefer
+  the first, because split packages are common.
+* **U3 (must): check every argument in the script, and map unknown exits.**
+  The script trusts `$backup` and `$tmp`. Require both to be in the same
+  directory as `$real`, to match the `.eshu-` name patterns, and not to
+  exist yet (`[ ! -e ]`). Any exit code outside 10–18, including a failed
+  restore inside the `|| { … }` group, which `set -e` turns into the `cp`
+  status, maps to `config_state_unknown`, with the backup name. It is never
+  reported as ok or as a clean failure.
+* **U4 (should): keep the file's mode and owner.** `cat > "$tmp"` creates the
+  file with the add-on's umask, so `mv` can change the mode of the target.
+  Use `chmod --reference="$real" "$tmp"` (and `chown --reference`) before the
+  `mv`, or create the temp file under `umask 077` and then copy the mode.
+
+After U1–U4, to the security reviewer (§ 2.6a), with H1, H2/U1/U3 and H4 as
+the points to check.
+
 ---
 
 ## Chunk F12 — SSH through Eshu over MCP (`ssh_exec`) · slug `ssh-exec` · dashboard (+ small gateway change)
