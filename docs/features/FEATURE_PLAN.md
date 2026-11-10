@@ -6536,6 +6536,20 @@ Round 4 section. I will re-read only that section.
 section, I check only that section, and code can start after F10 and F12
 merge.
 
+**Round 4 (feature reviewer, 2026-11-10, `8d58008`): approved; to the security
+reviewer for Round 4 only.** V1–V6 and the smaller points are each answered
+where the security note asked.
+
+One point for the security reviewer to weigh, not a blocker from me:
+* **Y1:** V1 is a deny list of executor verbs. Others also run their
+  arguments or a later word: `awk` and `sed` (via `system()` and the `e`
+  command), `find -ok`, `git -c`, `tar --to-command`, `rsync -e`, `parallel`.
+  The closed parameter types (`fqdn`, `hostname`, `ipv4`, `port`, `int`,
+  `enum`) cannot carry such a payload, so this is defence in depth. Because
+  recipes are curated, the simpler rule is an **allowlist** of verbs that may
+  hold a slot (for example `getent`, `dig`, `host`, `ping`), with every other
+  verb refused when a sentinel is present.
+
 ---
 
 ## Chunk F17 — Local-agent profile · slug `local-agent` · dashboard + docs
