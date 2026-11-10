@@ -48,10 +48,14 @@ class GatewaySandbox:
     """A throwaway installation of the real gateway script."""
 
     def __init__(self, root: Path, target_ip: str = "10.0.0.1",
-                 script: Path = SCRIPT):
+                 script: Path = SCRIPT, stdbuf: bool = True):
         self.root = Path(root)
         self.target_ip = target_ip
         self.source_script = Path(script)
+        # B1: a gateway whose userland has no stdbuf (BusyBox) falls back to
+        # plain sed. The swap below is the only way to exercise that here,
+        # because the system stdbuf is always on PATH.
+        self.stdbuf = stdbuf
         if " " in str(self.root):
             pytest.skip("temporary path contains a space; the script is not quoted")
         self.etc = self.root / "etc"
@@ -211,6 +215,9 @@ printf '%s\\n' "$*" >> "__LOG__"
                 text = swap("/etc/" + name, str(self.etc / name))
         text = swap('FEATURES_DIR="/etc/eshu/features.d"',
                     'FEATURES_DIR="%s"' % self.features, 1)
+        if not self.stdbuf:
+            text = swap('if command -v stdbuf >/dev/null 2>&1; then',
+                        'if false; then', 1)
         if 'ESHU_RUN_DIR="${ESHU_RUN_DIR:-/run/eshu}"' in text:
             text = swap('ESHU_RUN_DIR="${ESHU_RUN_DIR:-/run/eshu}"',
                         'ESHU_RUN_DIR="${ESHU_RUN_DIR:-%s}"' % self.capture_dir, 1)

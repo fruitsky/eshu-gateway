@@ -470,8 +470,25 @@ if [[ ! "$TARGET_IP" =~ ^[0-9A-Fa-f:.]{1,64}$ ]]; then
   exit 1
 fi
 
+# B1: GNU sed block-buffers its output into a pipe, so a slow command's first
+# bytes never reach a closed connection and the command keeps running after its
+# agent hangs up (the D1 check timed 39-41 s). `stdbuf -oL` makes sed
+# line-buffered. It is found once per call on the fixed PATH; without stdbuf
+# (BusyBox) the script falls back to plain sed and says so once, in syslog
+# only — never in the agent's stream.
+STDBUF_BIN=""
+if command -v stdbuf >/dev/null 2>&1; then
+  STDBUF_BIN="stdbuf"
+else
+  logger -t eshu-gateway "BUFFERING: stdbuf is unavailable; a slow command may outlive a disconnect"
+fi
+SANITIZE_CMD=(sed -E)
+if [ -n "$STDBUF_BIN" ]; then
+  SANITIZE_CMD=(stdbuf -oL sed -E)
+fi
+
 sanitize() {
-  sed -E \
+  "${SANITIZE_CMD[@]}" \
     -e 's/("?(API_KEY|PASSWORD|TOKEN|SECRET|KEY)"?[[:space:]]*[:=][[:space:]]*")[^"]+/\1[REDACTED]/gI' \
     -e 's/(API_KEY|PASSWORD|TOKEN|SECRET|KEY)=([^,[:space:]]+)/\1=[REDACTED]/gI' \
     -e 's/(--pass|--password|--key|-p)[=[:space:]][^[:space:]]+/\1=[REDACTED]/gI'
