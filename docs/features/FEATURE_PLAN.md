@@ -7173,6 +7173,166 @@ restore script are all in.
   on the add-on into the HA config. Use `[ -f "$backup" ] && [ ! -L "$backup" ]
   || exit 19`, plus a test.
 
+**Security review — design rounds 1–6 (2026-11-10, `273999c`): changes
+requested, Z1–Z5 must, Z6–Z9 should.**
+
+The shape is right: fixed scripts, one connection, values kept on the
+add-on, a pin before any write, and every unknown exit treated as unknown.
+Most of the remaining risk is in the paths that don't write: the read, the
+check output, and what an approved file can make HA reveal later.
+
+How the points I was asked to check stand:
+* **H1 (secrets stay on the add-on):** right for `secrets.yaml` itself.
+  Z2 and Z3 close two other ways the values can leave the add-on.
+* **H2/U1/U3/W6/X1 (scripts, arguments, symlinks):**
+  * the argument checks are right: absolute first, the same directory, the
+    name patterns, `-L` at both names, `set -C`, and X1 at the backup;
+  * the remote `timeout` and "the dashboard never restores" are right.
+  * Z4 removes the last place where `cp` writes through a name that was
+    checked earlier.
+* **H4 (risky-key banner):** keep it, and widen it as Z3 says.
+* **W7 (the token):** approved:
+  * the path is a constant;
+  * the token is a plain shell variable, never exported, and only `ha` gets
+    it, as a command prefix;
+  * exit 20 comes before anything is touched.
+  The file is `0644`, so the only thing that keeps an agent from it is the
+  read path. That is Z1.
+* **W8 (root, checked at list):** approved, with Z8.
+
+Changes:
+
+* **Z1 (must): the read is a single script with the same preamble as the
+  write.**
+  * §4 still reads with `realpath` and then `cat -- {path}` (or `sed` for
+    `secrets.yaml`, and `sha256sum`) as separate steps. Anything that can
+    write into the config tree can swap in a symlink between the check and
+    the read.
+  * The read is not gated. Through that gap it returns any file root can
+    read, the Supervisor token file among them. That token has the add-on's
+    Supervisor role, which skips every F10 gate.
+
+  Fix: `READ_SCRIPT` and `SECRETS_KEYS_SCRIPT` are constants with the write
+  script's preamble:
+  * absolute arguments;
+  * `realpath` with no options;
+  * the accepted directory;
+  * the basename equality;
+  * `[ -f "$real" ] && [ ! -L "$real" ]`;
+  * a link count of 1 (`[ "$(stat -c %h "$real")" = 1 ]`), so a hard link
+    to `secrets.yaml` or the token file is refused.
+
+  Then read `"$real"` in the same process, and print the hash of the bytes
+  read. Test, in both userlands: a symlink and a hard link to a sentinel file
+  are each refused, and the sentinel's content appears nowhere.
+* **Z2 (must): the check output can carry secret values.**
+  * HA's config validation quotes the offending value, and a value that came
+    from `!secret` is already resolved by then.
+  * The output of `ha core check` goes back to the agent and into the call
+    row's 8 KiB tail. Scrubbing on the dashboard side cannot catch it,
+    because the dashboard never knows the values.
+  * This applies to the write, the restore and `ha_config_check`.
+
+  Fix: the scripts redact before they print. A fixed `awk` step reads the
+  values from `secrets.yaml` on the add-on and replaces each literal
+  occurrence in the check output with `***`, using `index()` and not a
+  regex. Only then does the output leave the add-on.
+
+  Test: a stub `ha` that echoes a synthetic secret value. The value appears
+  in no response, row or audit record, and `***` does.
+* **Z3 (must): the banner must also cover what a file can make HA reveal or
+  run.**
+  * **New `!secret` references.** List every `!secret` name that the
+    proposed content references and the current file does not, on the
+    banner, as "can expose these secret values". A value placed in a
+    field the API returns (a name, an attribute) can then be read through
+    the ordinary HA read tools, which undoes H1.
+  * **`!env_var` is refused** (`config_env_var_refused`). HA Core's
+    environment holds its Supervisor token, and HA OS installs have no
+    common need for the tag.
+  * **Admin power.** Show F10's S-b red line when any of these hold:
+    * the file is `automations.yaml`, `scripts.yaml` or `scenes.yaml` (their
+      top level is a list, so the key scan sees nothing);
+    * the content has a top-level `automation` or `script` key;
+    * the text contains `hassio.`.
+
+  Tests for each.
+* **Z4 (must): nothing writes through a name that was checked earlier.**
+  * `cp -p … "$backup"`, the write's rollback `cp -p "$backup" "$real"`, and
+    the restore's two `cp`s onto `"$real"` and `"$tmp"` all open a name that
+    was checked earlier.
+  * `cp` follows a symlink planted there in the meantime, writing as root.
+
+  Rules:
+  * every new file (backup, temp, second temp) is created with `set -C`
+    (`cat < src > new`), so the shell's exclusive create refuses a name
+    that exists or is a link;
+  * the mode and owner are copied with W2's `stat -c` lines;
+  * every change to `"$real"` is a `mv -f` of such a file in the same
+    directory. `mv` replaces the directory entry and never follows it;
+  * the restore's rollback is just `mv -f "$tmp" "$real"`, because `$tmp`
+    already holds the content from before the restore.
+
+  Test: a symlink to a sentinel placed at `$real` after the preamble (a
+  stub `ha` can do it) is replaced by the restored file, and the sentinel
+  is unchanged.
+* **Z5 (must): the check key must name the HA integration.**
+  * F10 reads `ha_check_config_<name of the ha integration>`, but F11 runs
+    on an `ha_ssh` row with its own name.
+  * Unless that binding is explicit, H5 deletes a key F10 never reads. The
+    old `valid` then stays, and a restart passes on an unchecked file, which
+    is the case H5 exists for.
+
+  Fix: the `ha_ssh` row has an operator-set `config_json.ha_integration`
+  (validated as an existing integration of kind `ha`, never an argument).
+  F11 deletes and writes only that key, and a write is refused if it is
+  unset.
+
+  Test: after a write, the F10 restart is refused until a new check passes.
+* **Z6 (should): checks in the scripts as well.**
+  * Every script refuses a `secrets.yaml` basename (exit 19) and requires
+    `*.yaml|*.yml`.
+  * The dashboard refuses `secrets.yaml` at **any** depth, because HA also
+    looks for a `secrets.yaml` next to an included file.
+  * Every script starts with `PATH=/usr/bin:/bin:/usr/sbin:/sbin`.
+  * The command is sent as `/bin/sh -c`, every part `shlex.quote`d, because
+    root's login shell on the add-on runs the command string first.
+* **Z7 (should): add `restrict` to the key line.** Use
+  `from="<dashboard address>",restrict`, or, if the add-on rejects
+  `restrict`, `no-port-forwarding,no-agent-forwarding,no-X11-forwarding,no-pty`.
+  Without it, a port forward from the add-on reaches the Supervisor's
+  network. The setup doc records which form the add-on accepts.
+* **Z8 (should):**
+  * `root_checked` and the pin's "confirmed" flag are cleared whenever the
+    host, port, user or key changes;
+  * `ssh_user` matches `^[a-z_][a-z0-9_-]{0,31}$`;
+  * the host is an IP or a plain hostname that does not start with `-`.
+* **Z9 (should):** a write counts as successful only on exit 0 *and* a last
+  line `ok <64 hex>` that equals the hash of the content sent. Don't scan the
+  output for `ok`: the check output comes before that line, and it can
+  contain text the file put there.
+
+Gating, and the rest:
+* **Gating:**
+  * `ha_config_write` and `ha_config_restore` are `always_gate` and stay out
+    of `PLAN_COVERABLE_TOOLS`.
+  * With F10's K1, `ha_config_write` is in the dry-run set, and its dry run
+    opens only a read.
+  * `ha_config_restore` is not in that set.
+  * Test: a restore with `dry_run` set still queues a card.
+* **Open question 2:** an explicit pin at setup is the default. TOFU is
+  allowed, but a TOFU pin stays **unconfirmed** until the operator confirms
+  the fingerprint on the card, and a write or restore needs a confirmed pin.
+* **Open question 4:** the prune template is in scope if it meets four
+  conditions:
+  * the basename is a positional argument, never put into the script text;
+  * `find "$dir" -maxdepth 1 -type f -name …` is used (a link is skipped);
+  * it runs only after exit 0;
+  * it never touches the backup this write just made.
+
+After Z1–Z5, I review only those sections. Z6–Z9 can go to the feature
+reviewer.
+
 ---
 
 ## Chunk F12 — SSH through Eshu over MCP (`ssh_exec`) · slug `ssh-exec` · dashboard (+ small gateway change)
