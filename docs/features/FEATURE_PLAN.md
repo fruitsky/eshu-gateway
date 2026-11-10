@@ -5918,6 +5918,107 @@ says so rather than counting it.
 
 `bash scripts/verify.sh`: `2331 passed, 7 warnings in 429.22s (0:07:09)` (docs only; no code on this branch).
 
+### Round 3 — design after review round 2 (Q1–Q2)
+
+Round 2 is the design of record except for §3, which Q1 redraws, and §2/§4 for
+Q2. Both assume the CI fix (`fix/ci-environment`) is merged first: there is no
+FIFO and no second reader.
+
+#### Q1 — redrawn §3 on the new capture code
+
+`fix/ci-environment` replaced `tee` + FIFO + `wait` with one awk,
+`capture_tail "$ESHU_OUT_TAIL"`, under `set +e` with `PIPESTATUS[0]`. Two
+consequences for this note:
+
+* **`capture_tail` keeps the *last* 16 KiB, not the first**, and it appends a
+  newline when the stream has none (C4). It therefore cannot be the cut probe:
+  its size says "the output was at least 16 KiB", not "the cap was hit".
+* **The cut probe is its own file.** `cap_visible` tees the sanitized stream
+  into `ESHU_LIMIT_PROBE` (bounded by `bytes + 1`, in the 0700 run dir,
+  trap-removed); `stat -c '%s'` greater than `bytes` means cut. It holds
+  sanitized bytes only, so it is safe to write; it is never stored as a result.
+
+The probe byte means the agent may see one byte past the cap; the stored tail
+is F5's own 16 KiB and the probe is deleted at exit.
+
+```bash
+cap_raw()     { if [ -n "$RUN_LIMIT_BYTES" ]; then head -c $((RUN_LIMIT_BYTES + 1)); else cat; fi; }
+cap_visible() {
+  if [ -n "$RUN_LIMIT_BYTES" ]; then
+    head -c $((RUN_LIMIT_BYTES + 1)) | tee "$ESHU_LIMIT_PROBE"
+  else
+    cat
+  fi
+}
+
+run_sanitized() {
+  local rc=0 mode ... run_argv=("$@")
+  if [ -n "$RUN_LIMIT_SECS" ]; then
+    run_argv=(timeout -k 5 "$RUN_LIMIT_SECS" "${run_argv[@]}")
+  fi
+  ESHU_LIMIT_PROBE=""
+  if [ -n "$RUN_LIMIT_BYTES" ]; then
+    ESHU_LIMIT_PROBE=$(mktemp -p "$ESHU_RUN_DIR" eshu-limit.XXXXXX) || {
+      say "[LOCKED] The run limit cannot be enforced (no probe file) — refusing."
+      finish refused 1
+    }
+    trap 'rm -f "$ESHU_OUT_TAIL" "$ESHU_MCP_CAP" "$ESHU_LIMIT_PROBE"' EXIT
+  fi
+  set +e
+  if [ "$ESHU_MCP" = "1" ]; then
+    # Q1: the redirect belongs on the stage that feeds the envelope.
+    "${run_argv[@]}" 2>&1 | cap_raw | sanitize | cap_visible \
+      | tee "$ESHU_MCP_CAP" >/dev/null
+  elif [ "$mode" = "tail" ] && [ -n "$ESHU_OUT_TAIL" ]; then
+    "${run_argv[@]}" 2>&1 | cap_raw | sanitize | cap_visible \
+      | capture_tail "$ESHU_OUT_TAIL"      # F5: last 16 KiB, no FIFO
+  else
+    # Direct mode with capture off: the agent is the only consumer.
+    "${run_argv[@]}" 2>&1 | cap_raw | sanitize | cap_visible
+  fi
+  _ps=("${PIPESTATUS[@]}")
+  set -e
+  rc=${_ps[0]}
+  LIMIT_HIT=""
+  if [ -n "$ESHU_LIMIT_PROBE" ] && \
+     [ "$(stat -c '%s' "$ESHU_LIMIT_PROBE")" -gt "$RUN_LIMIT_BYTES" ]; then
+    LIMIT_HIT="bytes"
+  fi
+}
+```
+
+`_ps[0]` is the command's (or `timeout`'s) status; the direct `capture_tail`
+pipeline has the same `PIPESTATUS` shape as the CI fix, so `rc` never becomes
+the trimmer's. The MCP branch keeps F12's rule that the command's own output
+never reaches stdout; the envelope's `truncated` is still F12's 64 KiB rule,
+independent of the run cap.
+
+#### Q2 — `ssh_exec`'s wait loop and unattended rows
+
+An unattended row is never delivered by the poller (L3), so it is consumed
+only when the gateway claims `/api/ticket/{id}` — in the same round trip for
+an MCP call, and on a re-run otherwise. If that claim fails (a network blip),
+the row stays `approved` until it expires, so a `wait` loop that only watches
+for `consumed` would spin until the deadline.
+
+**Decision:** `check_request` says exactly what to do, and `wait` follows it:
+
+* an approved **unattended** row → `next_step = "approved (unattended):
+  re-run now"`; a `consumed` row → "ready to re-run" (as in F12 M2); a plain
+  approved row → "approved, delivering to the gateway — do not re-run yet";
+* `ssh_exec`'s `wait` re-runs at `consumed`, **or** at `approved` when the row
+  is unattended. That re-run claims by id and carries the `run_limit` in the
+  same response, so it cannot race the poller (the poller never receives the
+  row) and a failed claim simply leaves the row approved for the next try;
+* the row exposes `unattended` from the same `requests` row the dashboard
+  already reads (`get_request_row`), so the wait loop does not infer it from
+  the reason text.
+
+Test: a simulated claim failure (the row is `approved`, not `consumed`) makes
+`wait` re-run once with the limit instead of waiting out the deadline.
+
+`bash scripts/verify.sh`: `2331 passed, 7 warnings in 431.41s (0:07:11)` (docs only).
+
 ### Reviewer notes
 
 **Design round 1 (2026-11-09, main feature reviewer): changes requested.** The
@@ -6174,6 +6275,6 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 15 | F15 | probes | dashboard + MCP | Ready after F12 | `feat/f15-probes` | F4, F12 | |
 | 16 | F16 | recipes | dashboard + MCP | Design first (questions listed) | `feat/f16-recipes` | F3, F12, F13 | design approval + security reviewer sign-off |
 | 17 | F17 | local-agent | dashboard + docs | Ready after F12–F16 | `feat/f17-local-agent` | F12–F16 | |
-| 18 | F19 | unattended-limits | gateway + dashboard | **Round 2: design revised for D1–D4, S1 and L1–L8 — awaiting security re-review** | `feat/f19-unattended-limits` | F4, F5 | design approval + security reviewer sign-off |
+| 18 | F19 | unattended-limits | gateway + dashboard | **Round 3: Q1–Q2 folded (pipeline on the CI fix, unattended re-run) — awaiting security review of §3/§4** | `feat/f19-unattended-limits` | F4, F5 | design approval + security reviewer sign-off |
 Chunks are done **in the order column**; each new chunk branches from the
 updated `feature-roadmap` after the previous one is merged.
