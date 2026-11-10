@@ -35,8 +35,6 @@ ESHU_RUN_DIR="${ESHU_RUN_DIR:-/run/eshu}"
 ESHU_RUN_OWNER="${ESHU_RUN_OWNER:-0}"
 ESHU_CAPTURE_FILE="${ESHU_CAPTURE_FILE:-/etc/eshu-capture}"
 ESHU_OUT_TAIL=""
-ESHU_OUT_FIFO=""
-ESHU_TAIL_PID=""
 RESULT_REQUEST_ID=""
 RESULT_PATH="allowlist"
 
@@ -204,6 +202,60 @@ log_window_reject() {
        -d '{"target_ip":"'"$TARGET_IP"'","encoded_command":"'"$enc_cmd"'","status":"window-rejected","reason":"'"$reason"'","token":"'"$ESHU_WINDOW_TOKEN"'","session_id":"'"${ESHU_SESSION_ID:-}"'","execution_id":"'"${ESHU_EXECUTION_ID:-}"'","agent":"'"${ESHU_VERIFIED_AGENT:-}"'"}' >/dev/null 2>&1 &
 }
 
+# F5: pass every line through to the agent AND keep the last 16 KiB of it for
+# the execution result. One process, bounded memory (≈ 16 K + one line).
+#
+# This used to be `tee` into a FIFO with a second `tail` reader. The reader is
+# a child the script must wait for, and on some hosts (GitHub's CI runners,
+# reproducibly) that reader never saw EOF and the call hangs — a gateway call
+# that never returns is a root process that never returns. Fusing the "keep the
+# tail" step into the stream itself removes the second process, the FIFO and
+# the wait; the capture file is written by END, in the same process.
+#
+# C2: a ring of lines with a running byte total, so the cost is linear in the
+# output. (The first version re-copied a growing 16 KiB buffer for every line:
+# 26.6 s for `seq 2000000` with gawk.) 20000 slots is enough because at most
+# 16385 lines can be retained (one empty line costs one byte), so a live slot
+# is never overwritten.
+# C3: LC_ALL=C — the cap counts bytes. In a UTF-8 locale gawk counts
+# characters, and mawk and gawk disagree about invalid byte sequences.
+# C4: portable awk cannot see a missing final newline (only gawk's RT), so a
+# stream that does not end in "\n" stores one extra newline. `tee` was
+# byte-exact; this is accepted and documented in § 2.7 and pinned by a test.
+capture_tail() {   # $1 = capture file, $2 = byte cap (default 16385)
+  # C1: the capture is best effort. If the file cannot be written (tmpfs full,
+  # the path replaced), awk exits non-zero at END — after the agent already got
+  # every line — and no diagnostic is pushed into the agent's stream.
+  local cap_bytes="${2:-16385}"
+  # F12: the MCP envelope needs the last 64 KiB + 1, F5 the last 16 KiB + 1;
+  # one ring serves both. The ring must hold at most cap_bytes lines (a line is
+  # at least one byte), so cap_bytes + 2 slots can never overwrite a live one.
+  LC_ALL=C awk -v cap="$1" -v limit="$cap_bytes" -v ring="$((cap_bytes + 2))" '
+    BEGIN { head = 1 }
+    { print; fflush()
+      n++
+      slot = n % ring
+      line[slot] = $0
+      size[slot] = length($0) + 1
+      total += size[slot]
+      while (n - head >= 1 && total - size[head % ring] >= limit) {
+        # C5: free the slot. Advancing `head` alone kept old lines alive.
+        slot = head % ring
+        total -= size[slot]
+        delete line[slot]
+        delete size[slot]
+        head++
+      } }
+    END {
+      for (i = head; i <= n; i++) {
+        s = line[i % ring]
+        if (i == head && total > limit) s = substr(s, total - limit + 1)
+        printf "%s\n", s > cap
+      }
+      close(cap) }' 2>/dev/null \
+    || logger -t eshu-gateway "CAPTURE FAILED: cannot write the capture file"
+}
+
 capture_mode() {
   # off | exit-only | tail. Anything else (missing file, garbage, a symlink)
   # is exit-only: an unknown value must never turn capture on.
@@ -230,12 +282,13 @@ post_exec_result() {   # $1=rc  $2=duration_ms  $3=mode  $4=path
   # duration only, `tail` stores the tail. The envelope already carried the
   # bytes to the agent; being more auditable does not override an explicit
   # choice to keep output off the dashboard.
-  if [ "$mode" = "tail" ] && [ -n "$out_src" ] && [ -s "$out_src" ]; then
+  if [ "$mode" = "tail" ] && [ -n "$out_src" ] && [ -f "$out_src" ] \
+     && [ -s "$out_src" ]; then
     if [ "$(stat -c '%s' "$out_src")" -gt 16384 ]; then
       truncated="true"
-      enc_out=$(tail -c 16384 "$out_src" | base64 -w 0)
+      enc_out=$(tail -c 16384 "$out_src" | base64 -w 0) || enc_out=""
     else
-      enc_out=$(base64 -w 0 < "$out_src")
+      enc_out=$(base64 -w 0 < "$out_src") || enc_out=""
     fi
   fi
   # JSON body: all interpolated values are internal literals, validated
@@ -261,8 +314,6 @@ run_sanitized() {
   path="${RESULT_PATH:-allowlist}"
   case "$path" in allowlist|window|lockbox|jit) ;; *) path="allowlist" ;; esac
   ESHU_OUT_TAIL=""
-  ESHU_OUT_FIFO=""
-  ESHU_TAIL_PID=""
   # F12: an MCP caller always gets the output inside the envelope, whatever
   # /etc/eshu-capture says. The same safety check as F5 guards the directory.
   if [ "$ESHU_MCP" = "1" ]; then mcp_mode="1"; fi
@@ -287,58 +338,41 @@ run_sanitized() {
           say "[LOCKED] MCP capture file is unavailable — refusing to run."
           finish refused 1
         }
-      fi
-      if [ "$mode" = "tail" ]; then
+      elif [ "$mode" = "tail" ]; then
         ESHU_OUT_TAIL=$(mktemp -p "$ESHU_RUN_DIR" eshu-out.XXXXXX) || {
+          logger -t eshu-gateway "CAPTURE DISABLED: mktemp failed in $ESHU_RUN_DIR"
           mode="exit-only"; ESHU_OUT_TAIL=""; }
       fi
       if [ -n "$ESHU_OUT_TAIL" ] || [ -n "$ESHU_MCP_CAP" ]; then
-        ESHU_OUT_FIFO=$(mktemp -u -p "$ESHU_RUN_DIR" eshu-fifo.XXXXXX)
         # F5: the first EXIT trap in this script. A later one must extend this,
-        # not replace it, or the capture files leak.
-        trap 'rm -f "$ESHU_OUT_TAIL" "$ESHU_OUT_FIFO" "$ESHU_MCP_CAP"' EXIT
-        # 64 KiB + 1 (MCP) / 16 KiB + 1 (F5) tells truncation apart without
-        # counting the stream; the reader only holds the tail, so a runaway
-        # command cannot fill tmpfs, and `wait` makes the read race-free.
-        if mkfifo "$ESHU_OUT_FIFO" 2>/dev/null; then
-          # E1: if `tail` dies, `cat` keeps draining the FIFO, so the writer
-          # never blocks and the agent's stream is never cut.
-          if [ "$mcp_mode" = "1" ]; then
-            { tail -c 65537 > "$ESHU_MCP_CAP" || true; cat > /dev/null; } \
-              < "$ESHU_OUT_FIFO" &
-          else
-            { tail -c 16385 > "$ESHU_OUT_TAIL" || true; cat > /dev/null; } \
-              < "$ESHU_OUT_FIFO" &
-          fi
-          ESHU_TAIL_PID=$!
-        else
-          ESHU_OUT_FIFO=""
-          if [ "$mcp_mode" = "1" ]; then
-            say "[LOCKED] MCP capture FIFO is unavailable — refusing to run."
-            finish refused 1
-          fi
-          mode="exit-only"
-        fi
+        # not replace it, or the capture files leak. The capture is best
+        # effort: a file already gone (or replaced) must not change the call's
+        # exit status or write a diagnostic into the agent's stream.
+        trap 'rm -f "$ESHU_OUT_TAIL" "$ESHU_MCP_CAP" 2>/dev/null || true' EXIT
       fi
     fi
   fi
 
   start_ns=$(date +%s%N)
-  if [ -n "$ESHU_OUT_FIFO" ] && [ -p "$ESHU_OUT_FIFO" ]; then
-    # E1: plain `tee`, so an agent disconnect still ends the command at its
-    # next write; the reader drains whatever tail did not consume. In MCP mode
-    # the command's own stream must not reach stdout — only the envelope does.
-    if [ "$mcp_mode" = "1" ]; then
-      "$@" 2>&1 | sanitize | tee "$ESHU_OUT_FIFO" >/dev/null || rc=$?
-    else
-      "$@" 2>&1 | sanitize | tee "$ESHU_OUT_FIFO" || rc=$?
-    fi
-    wait "$ESHU_TAIL_PID" 2>/dev/null || true
+  # C1: the command's status is the first pipeline element's, never the
+  # filter's. `set -o pipefail` is right for a plain pipeline but wrong here:
+  # under it an unwritable capture file (awk exits 2) turned rc 0 into 2 and
+  # rc 3 into 2, i.e. the trimmer's failure was reported as the command's.
+  # `set +e` keeps `set -e` from exiting before the sentinel and the post.
+  set +e
+  if [ "$mcp_mode" = "1" ]; then
+    # F12 + CI fix: the envelope capture is the same in-stream ring, with the
+    # 64 KiB cap; the command's own stream must not reach stdout.
+    "$@" 2>&1 | sanitize | capture_tail "$ESHU_MCP_CAP" 65537 >/dev/null
+  elif [ "$mode" = "tail" ] && [ -n "$ESHU_OUT_TAIL" ]; then
+    # E1: the capture rides in the stream, so an agent disconnect still ends
+    # the command at its next write, and there is no reader to wait for.
+    "$@" 2>&1 | sanitize | capture_tail "$ESHU_OUT_TAIL"
   else
-    # D8: never leave a reader blocked on open() if we skip the FIFO branch.
-    if [ -n "$ESHU_TAIL_PID" ]; then kill "$ESHU_TAIL_PID" 2>/dev/null || true; fi
-    "$@" 2>&1 | sanitize || rc=$?
+    "$@" 2>&1 | sanitize
   fi
+  rc=${PIPESTATUS[0]}
+  set -e
   end_ns=$(date +%s%N)
   duration_ms=$(( (end_ns - start_ns) / 1000000 ))
 

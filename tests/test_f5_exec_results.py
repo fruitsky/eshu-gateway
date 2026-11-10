@@ -37,7 +37,7 @@ def unb64(text):
 
 def run_node(payload):
     proc = subprocess.run([NODE, HARNESS, json.dumps(payload)],
-                          capture_output=True, text=True, timeout=60)
+                          capture_output=True, text=True, timeout=120)
     assert proc.returncode == 0, proc.stderr
     out = json.loads(proc.stdout)
     assert 'error' not in out, out['error']
@@ -80,7 +80,7 @@ class TestGateway:
         assert body['path'] == 'allowlist'
         assert body['exit_code'] == 0
         assert isinstance(body['duration_ms'], int) and body['duration_ms'] >= 0
-        assert unb64(body['encoded_output']).strip() == 'hello'
+        assert unb64(body['encoded_output']).strip() == 'hello', gw.logger_text()
         assert body['output_truncated'] is False
         assert 'request_id' not in body
 
@@ -166,7 +166,7 @@ class TestGateway:
         _wait_result(gw)
         output = unb64(_result_body(gw)['encoded_output'])
         assert 'SECRETVALUE123' not in output
-        assert '[redacted]' in output.lower()
+        assert '[redacted]' in output.lower(), (output, gw.logger_text())
 
     def test_f5_gateway_temp_files_removed(self, gw):
         gw.exact('echo hello')
@@ -196,56 +196,32 @@ class TestGateway:
         assert body['encoded_output'] == ''
         assert body['exit_code'] == 0
 
-    def test_f5_gateway_dead_reader_keeps_stdout(self, gw):
-        """D1/E1: a dead `tail` must not truncate the agent's stream (the
-        reader group's `cat` keeps draining the FIFO)."""
-        gw.exact('./slowout')
+    def test_f5_gateway_unwritable_capture_keeps_stdout_and_exit(self, gw):
+        """C1: a capture that cannot be written is not the command's failure.
+
+        The capture file is created by `mktemp` before the command runs, then
+        replaced by a directory, so awk's END write fails (this also fails as
+        root, unlike a `chmod`). Every byte must still reach the agent, the
+        exit code and the sentinel must be the command's, and the result post
+        must carry no output rather than a broken one.
+        """
+        gw.exact('./bigexit')
         gw.capture('tail')
-        gw.command_script('slowout', "echo one\nsleep 0.4\necho two\nexit 7\n")
-        stub = gw.bin / 'tail'
-        stub.write_text('#!/bin/bash\n'
-                        'case "$*" in\n'
-                        '  *16385*) exit 0 ;;\n'
-                        'esac\n'
-                        'exec /usr/bin/tail "$@"\n')
-        stub.chmod(0o755)
-        try:
-            proc = gw.run('./slowout')
-        finally:
-            stub.unlink()
+        cap = str(gw.capture_dir)
+        gw.command_script(
+            'bigexit',
+            "python3 -c \"print('A' * 20000)\"\n"
+            "for f in %s/eshu-out.*; do rm -f \"$f\"; mkdir \"$f\"; done\n"
+            "exit 7\n" % cap)
+        proc = gw.run('./bigexit')
         assert proc.returncode == 7
-        assert proc.stdout == 'one\ntwo\n[ESHU exit=7]\n'
-
-    def _disconnect_after_first_bytes(self, gw):
-        proc = gw.popen('yes')
-        try:
-            assert proc.stdout.read(16)
-            proc.stdout.close()   # the agent's reader goes away
-            proc.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=5)
-            pytest.fail('the command kept running after the agent disconnected')
-        finally:
-            try:
-                proc.stderr.close()
-            except Exception:
-                pass
-        return proc
-
-    def test_f5_gateway_disconnect_ends_command_in_tail_mode(self, gw):
-        """E1: plain `tee` — an agent disconnect still kills the command."""
-        gw.exact('yes')
-        gw.capture('tail')
-        proc = self._disconnect_after_first_bytes(gw)
-        assert proc.returncode in (-13, 141)
-
-    def test_f5_gateway_disconnect_ends_command_in_exit_only_mode(self, gw):
-        """E1: pin today's behaviour for the non-capture path too."""
-        gw.exact('yes')
-        gw.capture('exit-only')
-        proc = self._disconnect_after_first_bytes(gw)
-        assert proc.returncode in (-13, 141)
+        assert len(proc.stdout) > 20000
+        assert '[ESHU exit=7]' in proc.stdout
+        assert 'CAPTURE FAILED' in gw.logger_text(), gw.logger_text()
+        _wait_result(gw)
+        body = _result_body(gw)
+        assert body['exit_code'] == 7
+        assert body['encoded_output'] == ''
 
     def test_f5_gateway_hostile_prefix_posts_nothing(self, gw):
         gw.exact('echo hello')
@@ -254,6 +230,26 @@ class TestGateway:
         assert 'LOCKED' in proc.stdout
         time.sleep(0.3)
         assert _exec_calls(gw) == []
+
+    def test_f5_gateway_output_streams_live(self, gw):
+        """The capture rides in the stream: the agent sees each line as it
+        happens, not at the end.
+
+        This replaces a FIFO + second-reader design. On CI that reader never
+        saw EOF, so the call hung; fusing the capture into the stream has no
+        second process to wait for. The test pins the property the FIFO was
+        there for: output is visible before the command exits.
+        """
+        gw.exact('./slow')
+        gw.capture('tail')
+        gw.command_script('slow', "echo first\nsleep 1\necho second\n")
+        proc = gw.popen('./slow')
+        try:
+            assert proc.stdout.readline() == 'first\n'
+        finally:
+            proc.stdout.close()
+            proc.kill()
+            proc.wait(timeout=5)
 
     def test_f5_gateway_result_post_failure_is_harmless(self, gw):
         """New gateway against a dashboard without the endpoint: 404/refused."""

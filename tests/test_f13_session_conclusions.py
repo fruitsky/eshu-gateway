@@ -113,11 +113,21 @@ class TestValidation:
         with pytest.raises(ValueError) as exc:
             save_conclusion(sid, 'intruder', outcome='solved', summary='x')
         assert exc.value.args[0] == 'session_not_yours'
-        # An ownerless session can still take a conclusion (adopted chat id).
+
+    def test_f13_ownerless_session_is_refused_closed(self, temp_db):
+        """S1: no owner means no one can vouch for the caller, so writing a
+        conclusion for it fails closed (the old "adopted chat id" exception is
+        gone: a conclusion is trusted by other agents later)."""
         upsert_session('sess-open', agent='', goal='open')
-        row = save_conclusion('sess-open', 'anyone', outcome='solved',
-                              summary='open session')
-        assert row['status'] == 'draft'
+        with pytest.raises(ValueError) as exc:
+            save_conclusion('sess-open', 'anyone', outcome='solved',
+                            summary='open session')
+        assert exc.value.args[0] == 'session_not_yours'
+        # And through the tool the agent actually calls.
+        with _acting_as(_agent('anyone')):
+            out = json.loads(session_conclude_fn()(
+                outcome='solved', summary='open session', session_id='sess-open'))
+        assert out['error'] == 'session_not_yours'
 
 
 class TestDraftFlow:
@@ -277,6 +287,25 @@ class TestRunbooks:
         assert get_runbook_payload(runbook['id'])['title'] == 'Restart the proxy'
         assert get_runbook_payload(999999) is None
 
+    def test_f13_runbook_search_matches_each_term(self, temp_db):
+        """S2: terms are matched one by one, across fields -- the old query
+        required the whole phrase inside a single column."""
+        sid = _session()
+        row = _save(sid, summary='reload nginx after the certificate renews',
+                    tags=['nginx', 'certificate'], runbook_candidate=True)
+        confirm_conclusion(row['id'], by='operator')
+        promote_conclusion(row['id'], title='Proxy certificate renewal')
+        # Two terms, only one of which is in the title, the other in the
+        # summary.
+        found = find_runbooks('renew proxy')
+        assert found['count'] == 1
+        # A term from the tags and one from the title.
+        assert find_runbooks('nginx renewal')['count'] == 1
+        # Any unmatched term excludes the runbook.
+        assert find_runbooks('renew ssh')['count'] == 0
+        # Order and spacing do not matter; duplicates are harmless.
+        assert find_runbooks('  proxy   renew ')['count'] == 1
+
 
 class TestMcpTools:
 
@@ -393,3 +422,6 @@ class TestUi:
         assert 'Promote to runbook' in out['confirmed']
         assert 'Runbook #7' in out['withRunbook']
         assert 'cc-status cc-rejected' in out['rejected']
+        # S3: the draft says what confirming means; a confirmed one need not.
+        assert 'Agents will follow this once confirmed.' in out['draft']
+        assert 'Agents will follow this once confirmed.' not in out['confirmed']

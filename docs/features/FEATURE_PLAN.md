@@ -213,6 +213,15 @@ The dashboard is deployed first; gateways update later via Build → Edge → Fl
   include a Raspberry Pi 1: no extra `python3` start on the hot path. The
   gateway runs as root via `sudo`; temp files only via `mktemp -p /run/eshu`
   (the private 0700 work dir the poller creates — refuse if it is missing or a symlink).
+* **F5 capture is byte-bounded and best effort.** `capture_tail` runs `awk`
+  with `LC_ALL=C` and keeps the last 16 385 bytes in a ring of lines (linear
+  cost, file written at `END`). The cap counts **bytes**; in a UTF-8 locale
+  gawk counts characters. A stream that does not end in a newline stores one
+  extra newline: portable awk cannot see the missing newline (only gawk's
+  `RT`), so this is accepted rather than emulated — `tee` was byte-exact here.
+  The command's status is `PIPESTATUS[0]` of the stream, never the trimmer's;
+  a capture that cannot be written logs `CAPTURE FAILED` and changes nothing
+  else.
 * No drive-by refactors, renames or reformatting.
 
 ---
@@ -3292,6 +3301,126 @@ Full gate:
 (1779 before this round + 5 new tests: two disconnect, oversized body, no
 audit event, lockbox window.)
 
+### Round 3 — the CI hang in the capture reader (fix)
+
+GitHub's `Run test suite` failed on every push from F5 onward: six gateway
+tests timed out (`exit_zero_posts_result`, `nonzero_exit_posts_result`,
+`agent_output_unchanged`, `sanitize_before_capture`, `temp_files_removed`,
+`result_post_failure_is_harmless`), all of them a `tail`-mode run with under
+16 KiB of output, while the same tests passed on every machine tried here
+(fresh venv with only `requirements-dev.txt`, clean `/etc`, C locale, 6× CPU
+oversubscription, a real Ubuntu 24.04 rootfs as uid 1000).
+
+The reader was the problem: `{ tail …; cat …; } < "$FIFO" &` plus `wait`.
+On the runners it never saw EOF, so the call (and with it the test's
+`subprocess.run`) waited for ever; a gateway call that never returns is a
+root process that never returns. Making the wait bounded and detaching the
+reader's stdio turned the hang into a visibly empty capture and proved the
+reader was the stuck part (`CAPTURE READER WEDGED` in the log).
+
+**The reader is gone.** `capture_tail()` keeps the last 16 KiB + 1 *in the
+stream*: one `awk` that passes every line through to the agent
+(`print; fflush()`), keeps a bounded window in memory, and writes the file at
+`END`. No FIFO, no second process, no wait, so there is nothing that can
+wedge. The properties the FIFO existed for are unchanged and tested: output
+still streams live (`test_f5_gateway_output_streams_live`), the stream is
+still never cut on a disconnect (E1 tests), the stored bytes are still capped
+at 16 KiB, and a failing trimmer cannot change the command's exit code
+(the test now named `test_f5_gateway_unwritable_capture_keeps_stdout_and_exit`,
+see round 4). A capture that cannot
+be set up now logs `CAPTURE DISABLED` with the reason instead of silently
+degrading.
+
+`test_f5_gateway_dead_reader_keeps_stdout` was replaced by the two tests
+above: the reader it guarded no longer exists, and its replacement pins the
+behaviour that matters.
+
+`bash scripts/verify.sh`: `2330 passed, 7 warnings in 431.19s (0:07:11)`.
+
+### Round 4 — CI fix review round 3 (C1–C4)
+
+The reviewer reproduced four problems in `capture_tail()` on synthetic input.
+All four are fixed. The tests now run the function under **mawk and gawk**
+(whichever is installed; a missing one skips with a reason), because that is
+the environment difference that matters for a gateway: Debian and Ubuntu ship
+mawk as `awk`.
+
+* **C1 — the trimmer could change the exit code.** `set -o pipefail` reported
+  awk's status as the command's: an unwritable capture file turned rc 0 into 2
+  and rc 3 into 2. `rc` now comes from `PIPESTATUS[0]` of the stream (`set +e`
+  around the pipeline so `set -e` cannot exit before the sentinel and the
+  post). The non-capture branch takes `PIPESTATUS[0]` too, so a failing
+  `sanitize` can no longer mask the command either. The awk write is best
+  effort: its stderr is not pushed into the agent's stream, a failure logs
+  `CAPTURE FAILED`, the `EXIT` trap is quiet when the file is already gone,
+  and `post_exec_result` reads only a regular file. The old test stubbed
+  `tail`, which the run no longer calls, so it passed without exercising
+  anything; `test_f5_gateway_unwritable_capture_keeps_stdout_and_exit`
+  replaces it. The command replaces the `mktemp`ed capture path with a
+  directory (this fails as root too, unlike a `chmod`), prints 20 000 bytes
+  and exits 7; the test asserts rc 7, the full stream, `[ESHU exit=7]`, the
+  `CAPTURE FAILED` log and an empty stored output.
+* **C2 — quadratic cost.** The 16 KiB buffer was re-copied for every line
+  (26.6 s for `seq 2000000` with gawk). It is now a ring of lines with a
+  running byte total: drop the oldest while the rest is still ≥ 16 385 bytes,
+  trim the first line at `END` to exactly 16 385 bytes. That is
+  byte-identical to `tail -c 16385`, and 200 000 lines take ~0.3 s.
+  `test_f5_capture_tail_is_linear_in_the_output` bounds it at 10 s — loose
+  enough for a slow runner, still an order of magnitude below the quadratic
+  case.
+* **C3 — locale.** The cap is bytes, so awk runs with `LC_ALL=C`. In a UTF-8
+  locale gawk counts characters: the multibyte payload would store 19 835
+  bytes where the cap is 16 385, and mawk and gawk treat invalid byte
+  sequences differently. Payloads: multibyte text and invalid bytes, each
+  compared byte for byte with `tail -c 16385`.
+* **C4 — missing final newline.** Portable awk cannot see it (only gawk's
+  `RT`), so a stream that does not end in "\n" stores one extra newline.
+  Accepted rather than emulated, stated in § 2.7, and pinned by
+  `test_f5_capture_tail_matches_tail_c_16385[no-final-newline-…]`.
+
+**Why the old reader never saw EOF.** Not conclusively established: the
+bounded wait showed the reader blocked in `cat` waiting for EOF, so something
+still held the FIFO's write end after `tee` finished; which process that was
+was never identified. The reader is gone, so the question is closed either
+way.
+
+New file `tests/test_f5_capture_tail.py` lifts the `capture_tail` definition
+out of the script (asserting it is still there, under `LC_ALL=C`) and runs it
+with `awk` bound to each implementation: the cap and byte-exactness over
+varied, huge-single-line, empty-line, multibyte and invalid-byte payloads, the
+stream unchanged, linear cost, the write failure, and no log on success.
+
+Both installers were regenerated in this commit
+(`python3 dashboard/gen_installer.py`).
+
+`bash scripts/verify.sh`: `2352 passed, 7 warnings in 429.69s (0:07:09)`.
+
+### Round 5 — CI fix review round 4 (C5)
+
+* **C5 — dropped ring lines were never freed.** The ring advanced `head` but
+  left `line[head % 20000]` in the array until its slot was reused, so up to
+  20 000 dropped lines stayed resident: 200 MB of output peaked at 395 MB
+  resident instead of 16 KiB. The loop now `delete`s both `line` and `size`
+  for the slot it drops.
+  `test_f5_capture_tail_frees_dropped_lines` streams 2000 × 100 KB lines
+  through the function under `ulimit -v 65536` (64 MB) for each awk, so a leak
+  is fatal rather than slow, and still asserts the stored bytes are
+  `tail -c 16385`. Without the `delete`s the test fails under both awks; the
+  two-awk run takes about 2 s.
+
+Both installers were regenerated in this commit
+(`python3 dashboard/gen_installer.py`).
+
+`bash scripts/verify.sh` (gawk installed): `2354 passed, 7 warnings in 430.48s (0:07:10)`.
+`bash scripts/verify.sh` (gawk absent here, so its parameters skip):
+`2342 passed, 12 skipped, 7 warnings in 433.29s (0:07:13)`.
+
+**A test-oracle note.** On one CI run (`05d72f2`) the *linear* test failed
+while `capture_tail` had stored the correct 16 385 bytes: the oracle, a
+`tail -c 16385` subprocess, returned a 32.5 KB suffix. The test no longer
+depends on a tool it is not testing — `_tail` slices the payload in Python
+(`data[-CAP:]`), which is exactly what `tail -c CAP` means for a byte string.
+
 ### Reviewer notes
 
 **Design round 1 (2026-11-08): approved with changes.** Fold D1–D8 into the
@@ -3424,6 +3553,214 @@ and golden tests pass locally; implementer's full run 1784 passed. Installers
 regenerate with no diff, and `static/dev/` is untouched. No security sign-off
 is needed (§ 2.6a). The backlog keeps the argv exposure of the gateway token
 and of `/api/log`'s command (§ 11).
+
+**CI fix review, round 3 (2026-11-09): changes requested.** The diagnosis is
+good work: the `::error` annotations made GitHub's failure readable, and
+removing the second reader is the right fix. Nothing can wedge now. Four
+problems in `capture_tail()`, all reproduced with synthetic input:
+
+* **C1 (must): the trimmer can change the exit code.** `set -o pipefail` is on,
+  so if `awk` fails, the pipeline reports awk's status, not the command's.
+  An unwritable capture file (tmpfs full, `mktemp` file removed) turns rc 0
+  into 2, and rc 3 into 2. `test_f5_gateway_dead_trimmer_keeps_stdout_and_exit`
+  does not catch it: it stubs `tail`, which the run no longer calls, so it
+  passes without exercising anything. Fix: take the rc from
+  `PIPESTATUS[0]` (with `set +e` around the pipeline), and make the awk END
+  write failure-tolerant. Rewrite the test so the *awk* write fails (for
+  example, the capture path is replaced by a directory before the run) and
+  assert rc, stdout and `[ESHU exit=N]` are the command's.
+* **C2 (must): quadratic cost.** Every line copies the 16 KiB buffer.
+  `seq 2000000` through `capture_tail` takes 26.6 s with gawk and 2.8 s with
+  mawk, against 0.06 s for `cat`. A root process burning CPU on a large
+  `journalctl` or `find` in `tail` mode is a regression. A ring of lines
+  with a running byte total (drop the oldest lines while the total minus the
+  oldest is still over 16385, trim the first line at END) takes 1.7 s with gawk
+  and 1.0 s with mawk, and its file is byte-identical to `tail -c 16385`. Add
+  a test that bounds the time for ~200k lines generously (say < 10 s), so it
+  catches the quadratic case without being flaky.
+* **C3 (must): run awk with `LC_ALL=C`.** In a UTF-8 locale gawk's
+  `length`/`substr` count characters, not bytes, and invalid UTF-8 can be
+  handled differently by mawk and gawk. Bytes are what the cap means.
+  Test with multibyte output and with invalid bytes.
+* **C4 (should): a missing final newline is added.** `printf 'a\nb'` reaches
+  the agent as `a\nb\n`. `tee` was byte-exact. Portable awk cannot see the
+  missing newline (only gawk's `RT`), so either accept it and say so in § 2.7
+  and the F5 notes, or keep the agent's stream byte-exact by other means.
+  Either is fine; pin it with a test.
+
+Also: test under **mawk** as well as gawk. Debian and Ubuntu gateways ship
+mawk as `awk`, and CI images often have gawk. A test that runs the
+capture function under each awk that is installed (skip if absent) is
+enough. If you know why the old reader never saw EOF on the runners, add one
+line about it; it is not blocking.
+
+**Security gate:** this changes the root gateway script, so after C1–C4 the
+security reviewer checks the `capture_tail`/`run_sanitized` diff before merge
+(§ 2.6a). The CI annotation helper in `tests/conftest.py` is fine as it is.
+
+**CI fix review, round 4 (2026-11-09, `cf59287`): one fix left (C5).** C1–C4
+are fixed as asked. rc comes from `PIPESTATUS[0]` under `set +e`; the old
+`tail`-stub test is replaced by a directory-capture test; the ring is linear
+and byte-identical to `tail -c 16385` (checked here under gawk and mawk); and
+the C4 newline is documented and pinned. 163 capture, F5 and gateway tests pass
+locally.
+
+* **C5 (must): dropped ring lines are never freed.** The loop advances
+  `head` but leaves `line[head % 20000]` in the array until its slot is
+  reused, so up to 20000 old lines stay in memory. With 4000 lines of
+  100 KB (400 MB of output), maxrss is **395 MB** under gawk and 393 MB under
+  mawk. Adding `delete line[head % 20000]` before `head++` brings that to
+  **4.3 MB** and 3.1 MB, with the file still byte-identical to `tail -c 16385`.
+  Add a test that bounds memory: for example, 2000 × 100 KB lines through
+  `capture_tail` under `ulimit -v` of about 64 MB must succeed, under each awk.
+  Then this goes to the security reviewer, with the diff `9470cff..` on
+  `eshu-gateway.sh`.
+
+**CI fix review, round 5 (2026-11-10, `1423e77`): approved by the feature
+reviewer, waiting on security.** C5 is fixed: dropped slots are deleted.
+Rechecked here: 4,000 lines of 100 KB peak at 3.9 MB, and `seq 300000` is
+byte-identical to `tail -c 16385` under gawk and mawk. The `ulimit -v` test
+makes a leak fatal. 165 capture, F5 and gateway tests pass locally, and
+GitHub CI passes (3.10, 3.12, syntax). **Next:** the security reviewer checks
+the `eshu-gateway.sh` diff `9470cff..1423e77` (`capture_tail`,
+`run_sanitized`, `post_exec_result`). Then I merge.
+
+**Security reviewer sign-off: CI fix (`9470cff..1423e77`,
+`eshu-gateway.sh`), 2026-11-10: approved, with one test required before
+merge.** I read `capture_tail`, `run_sanitized` and `post_exec_result`. I did
+not run anything.
+
+*What holds:*
+
+* **Nothing is left to hang on.** There is no FIFO, no background reader and
+  no `wait`. The capture rides in the stream and is written by `END` in the
+  same process, so the gateway call ends when the pipeline ends.
+* **Exit code.** It comes from `PIPESTATUS[0]` with `set +e` around the
+  pipeline only, and `set -e` is restored straight after. A failing capture
+  can no longer change the command's exit code, and it cannot stop the
+  sentinel or the result post. The `[ESHU exit=N]` tests cover both
+  branches.
+* **The awk program never treats output as code.** Data is used only through
+  `print`, `length` and `substr`. The capture path comes in through `-v` and
+  is a `mktemp` name in the root-only 0700 directory, so nobody else can
+  swap the file under it.
+* **Memory and CPU are bounded.** The ring holds about 16 KiB plus one line,
+  the work grows in step with the output, and dropped slots are freed. The
+  slot count is safe, since no more than 16385 lines can be kept.
+  `LC_ALL=C` makes the cap count bytes.
+* **The capture is best effort.** A write failure reaches syslog, never the
+  agent's stream. `post_exec_result` checks `-f` and falls back to an empty
+  output on any read error.
+
+*Required before merge (the feature reviewer can check it; it does not need
+to come back to me):*
+
+* **D1. A disconnect test.** E1, "an agent disconnect still ends the
+  command", used to rest on `tee`. It now rests on awk dying when it writes
+  to a closed stdout, and no test covers that. A root command that outlives
+  its caller is exactly what this fix exists to prevent.
+  - Test, under mawk and gawk: run a command that writes a line every 0.1 s
+    for 60 s, through `run_sanitized` in `tail` mode. Close the reading end
+    after the first line.
+  - Assert that the gateway process and the command are gone within a few
+    seconds.
+  - Run it twice: once with the default SIGPIPE handling, which is what sshd
+    gives its children, and once with SIGPIPE ignored (`trap '' PIPE` in the
+    harness).
+  - If an awk keeps going in the ignored case, add `if (fflush() < 0) exit 1`.
+    The `fflush()` return check is portable.
+
+*Recorded, not blocking:*
+
+* **Three ways the agent's stream is no longer byte-exact.** In `tail` mode
+  awk now sits in the stream to the agent, which `tee` did not. A missing
+  final newline gets added (C4, accepted). Embedded NUL bytes may be handled
+  differently by different awks. A single huge line is held in memory once
+  more, on top of `sed`'s copy. None of this is a security change. The F19
+  raw byte cap (L5) bounds the memory for unattended runs.
+* **A misleading syslog line.** When awk is killed by a disconnect, the
+  `|| logger` line logs "CAPTURE FAILED". If that proves confusing, log the
+  exit status as well.
+* **Rebasing F12 and F19 onto this fix.**
+  - F12's `run_sanitized` still has the FIFO plus `tail -c 65537` reader for
+    the MCP envelope. When F12 rebases onto this fix, the MCP capture must
+    use this ring too: make the 16385 a parameter and send stdout to
+    `/dev/null` in MCP mode. No second reader may come back.
+  - The F12 rebase of `run_sanitized` comes back to me with F12's R1–R4 diff.
+  - F19's pipeline sketch (`head -c` and `PIPESTATUS`) should be rewritten
+    on top of this version.
+
+**D1 check (feature reviewer, 2026-11-10).** I wrote the test myself
+(`test_f5_capture_tail_ends_when_the_agent_disconnects`, under mawk and gawk,
+with SIGPIPE at its default and ignored): a command writing as fast as it can
+(`yes`), with the reader hanging up after one line. awk stops in all four
+cases, so `fflush()` needs no return check. 28 capture tests pass.
+
+The **slow writer from the D1 spec** shows something older than this fix. I
+used a line every 0.1 s and the reader hanging up after line 1, timing until
+the command stops:
+
+| pipeline | command keeps running |
+|---|---|
+| `sanitize \| tee` (F5, what is live today) | 41 s (the whole run) |
+| `sanitize \| capture_tail`, gawk or mawk | 39–41 s |
+| `stdbuf -oL sed … \| mawk -W interactive …` | 0.3 s |
+| `sed -u … \| capture_tail` (gawk) | 0.3 s |
+
+The cause is **`sanitize`**. GNU `sed` block-buffers its output into a pipe,
+so a slow command's first ~4 KB never reaches the closed connection, and the
+command never gets its SIGPIPE until then. That is true in **every** capture
+mode, including `exit-only` (`"$@" | sanitize`), so it is live on every
+gateway today. mawk also block-buffers its *input* from a pipe unless given
+`-W interactive`, which matters once `sed` is fixed. The CI fix is therefore
+**no worse than `tee`**, but the D1 spec as written fails for a reason the CI
+fix did not introduce.
+
+Proposed fix (two lines, gateway bash):
+* `sanitize`: `stdbuf -oL sed -E …`, with plain `sed` if `stdbuf` is
+  missing. That costs 0.8 s per million lines, against 0.1 s today; `sed -u`
+  costs 2.7 s.
+* `capture_tail`: add `-W interactive` when `awk -W version` reports mawk.
+  gawk prints a warning for that option, so detect mawk first; don't pass it
+  blindly.
+* The test exactly as specified (slow writer through `run_sanitized`, gone
+  within 5 s, both awks, both SIGPIPE modes), in `tail` **and** `exit-only`
+  modes.
+
+**Security reviewer on the D1 check (2026-11-10, `069cd59`): D1 is met,
+and the CI fix may merge now.** The disconnect test is what I asked for: awk
+stops under mawk and gawk, with SIGPIPE at its default and ignored, so
+`fflush()` needs no return check.
+
+The slow-writer result does not block this merge. It is not a regression:
+`sed` already block-buffered under `tee`, and the table shows the same 41 s
+before and after this fix. The disconnect test in this branch covers what
+the CI fix changed. A command that keeps running after its agent hangs up is
+a resource problem, not a privilege one: the command was already approved.
+It belongs in its own fix.
+
+**The buffering fix: a separate small gateway-bash branch, which comes back
+to me.** The proposed approach is fine. Conditions:
+
+* **B1. Make `sanitize` line-buffered with `stdbuf -oL sed -E …`.** Find
+  `stdbuf` on the fixed `PATH` once per call. When it is missing, fall back
+  to plain `sed` and log once to syslog, never to the agent's stream. The
+  redaction expressions stay exactly as they are. The existing sanitize
+  tests must pass unchanged, which shows line-buffering changes nothing that
+  is redacted.
+* **B2. Pass `-W interactive` only to mawk.** Detect mawk once per call:
+  `awk -W version 2>/dev/null` prints "mawk". Any other output, or an error
+  (BusyBox awk, gawk), means the option is not passed. Test with a stub
+  `awk` that fails on `-W version`.
+* **B3. The slow-writer test, exactly as the D1 spec describes it.** Run it
+  through `run_sanitized` in both `tail` and `exit-only` modes, under both
+  awks and both SIGPIPE modes. The command must be gone within 5 s. Add one
+  case with `stdbuf` absent, which records the slower fallback (no time
+  bound) and asserts that the output and the exit code are still correct.
+* **B4. Carry it forward to F12 and F19.** When F12 rebases, its MCP capture
+  uses the same `sanitize` and the same mawk detection. F19's pipeline (L4
+  and L5) builds on the line-buffered `sanitize`. F19's time limit stays the
+  bound for unattended runs, whatever the buffering does.
 
 ---
 
@@ -5749,6 +6086,26 @@ its connection closes.
 
 `bash scripts/verify.sh`: `2484 passed, 7 warnings in 461.05s (0:07:41)`.
 
+#### Round 8: merged forward — the MCP capture on the CI fix
+
+This merge brings the branch onto the updated `feature-roadmap` (CI fix
+`f2746ef`, deploy helper). The gateway capture is now the CI fix's:
+
+* **No FIFO.** `run_sanitized` has no `mkfifo`, no second reader, no
+  `wait "$ESHU_TAIL_PID"`. F12's MCP branch is
+  `"$@" 2>&1 | sanitize | capture_tail "$ESHU_MCP_CAP" 65537 >/dev/null`, so
+  the envelope capture is the same in-stream ring; the command's output never
+  reaches stdout.
+* **One ring, two caps.** `capture_tail` takes the byte cap as `$2`
+  (default 16 385) and sizes its ring at `cap + 2`; F5 keeps its 16 KiB and
+  the MCP envelope its 64 KiB + 1. In MCP mode only `ESHU_MCP_CAP` is
+  created; `post_exec_result` already reads it for the F5 row when the
+  operator's capture mode is `tail` (R4).
+* **B1 comes with it** (`stdbuf -oL sed` in `sanitize`). B2's `-W interactive`
+  is not used: it splits records longer than 4096 bytes (see F5 round 6).
+  F12's tests, the F5 capture tests and the gateway-script tests pass.
+* Both installers were regenerated in this commit.
+
 ### Reviewer notes
 
 **Round 1 (2026-11-09): design changes requested. Not ready for the security
@@ -6527,6 +6884,41 @@ Follow-ups (S, non-blocking):
   text is effectively an instruction to them. The operator's Confirm is the
   only gate; say so in the review UI ("agents will follow this").
 
+### Round 2 — the reviewer follow-ups S1–S3
+
+Three small changes, each with its test; no schema change and no new tool.
+
+* **S1 — ownership fails closed.** `validate_payload` refused only when the
+  session had an owner and it differed, so an ownerless session accepted a
+  draft from any agent. It now refuses **whenever there is no owner** or the
+  owner differs (`session_not_yours`), matching F3's SR2 rule: a conclusion is
+  read by other agents later, so no one may write one into a session that has
+  nobody to vouch for the caller. The old "an adopted chat id stays usable"
+  rule is retired. Test: `test_f13_ownerless_session_is_refused_closed`, both
+  through `save_conclusion` and through `session_conclude`.
+* **S2 — runbook search matches per term.** `search_runbooks` compared the
+  whole query as one `LIKE '%…%'` over four columns, so "nginx 502" only
+  matched a runbook that contained that exact phrase in one field. The query
+  is split on whitespace (at most 8 terms, `MAX_TERMS`) and every term must
+  match at least one of title / when-to-use / tags / summary — an `AND` of
+  per-term `OR`s, still parameterised. Test:
+  `test_f13_runbook_search_matches_each_term` (terms across fields, an
+  unmatched term excludes, spacing/order/duplicates are harmless).
+* **S3 — the Confirm button says what it does.** The draft card now shows
+  "Agents will follow this once confirmed." next to Confirm
+  (`.cc-hint`, muted, 11 px). A confirmed card does not repeat it. Test: the
+  node harness asserts the hint is in the draft markup and not in the
+  confirmed one.
+
+`bash scripts/verify.sh`: `2333 passed, 7 warnings in 445.03s (0:07:25)`.
+
+**Follow-ups review (2026-11-09): approved and merged.** S1 fails closed for
+ownerless sessions, tested through the core call and the MCP tool. S2's
+per-term `LIKE`s stay parameterised and capped at 8. S3 uses existing tokens
+(`--text-micro`, `--text-quiet`). A user's `%` or `_` in a search term still
+acts as a `LIKE` wildcard. That is harmless (it only widens a search of
+confirmed runbooks), and it is left as it is.
+
 ---
 
 ## Chunks F14–F17 — Local-model support
@@ -6854,7 +7246,52 @@ _(implementer)_
 
 ### Reviewer notes
 
-_(reviewer)_
+**Pre-implementation notes (2026-11-09).** The outline is sound. Close these
+points in the implementation; each needs a test. F15 starts after F12 is
+merged.
+
+* **P1 (must): no option injection through a parameter.** `shlex.quote`
+  stops shell syntax but not a value starting with `-`. `unit=--help` or
+  `container=-v` is one quoted word that `systemctl` or `docker` still reads
+  as an option. Every type's first character must be alphanumeric:
+  * `unit` `^[A-Za-z0-9][A-Za-z0-9@._-]{0,127}$`;
+  * `container` is a Docker name `^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`, or a
+    vmid `^[0-9]{3,9}$`;
+  * `name` uses the F16 `fqdn` rule (labels of at most 63 characters, no
+    leading `-`, no `..`).
+  
+  Also put `--` before the operand wherever the tool accepts it.
+* **P2 (must): structured sources over parsing prose.** Take state from
+  `systemctl show -p ActiveState,SubState,ActiveEnterTimestamp,NRestarts
+  -- <unit>`, not by parsing `systemctl status`. NRestarts is the restart
+  count. Keep `status` out of the probe entirely, or use it for display only.
+* **P3 (must): say what happens without output capture.** The digest needs F5
+  `tail` output, and every live gateway is on `exit-only`. Pick one:
+  * the probe refuses with `capture_off` and a hint; or
+  * F12's per-request capture override applies to probe requests (only if
+    the F12 R4 rules allow it).
+  
+  Never return an empty digest as if all is well.
+* **P4 (must): don't block the MCP call.** Without F4 `on` (and `on` is
+  locked), every probe waits for approval. `diagnose_*` returns
+  `{status: "pending", plan_id}`, and `probe_result(plan_id)` returns the
+  digest when it is ready. The plan is proposed by the probe's code, not by
+  agent text, and an agent cannot approve it.
+* **P5 (must): scrub before the digest.** `docker logs` and `journalctl`
+  lines can carry tokens. Run the F5 scrubber over each output before
+  parsing, and test that a synthetic token in a log line never reaches the
+  digest.
+* **P6 (should): bounded commands.** `du` over `/var/log` can be slow on a
+  big host. Use `du -x -d 1 -- /var/log`, and rely on F19's time limit once
+  it lands. Until then, document that a probe can take as long as its
+  slowest command.
+* **P7 (should): make the cap testable.** "2,000 tokens" should be a byte or
+  character cap (for example 8,000 characters of JSON), with `truncated: true`
+  and the order things are dropped in (errors beyond the top 10 first, then
+  ports).
+* **P8 (should):** `dns_check` must say which gateway it uses: the one F14's
+  inventory maps the NPM proxy host to, else none (Pi-hole only). Never let
+  the agent name it.
 
 ---
 
@@ -6969,7 +7406,36 @@ _(implementer)_
 
 ### Reviewer notes
 
-_(reviewer)_
+**Pre-implementation notes (2026-11-09).** Close these points in the
+implementation; each needs a test. F17 starts after F15. F16's recipe tools
+are optional, so the preset must work without them.
+
+* **A1 (must): define "read-only `ssh_exec`".** The command is accepted only
+  if F4's `eligible()` would pass it, and anything else is **refused**
+  (`read_only_agent`), not queued for approval. A small model should not be
+  able to flood the operator with write requests. Enforce it on the server
+  from the agent's policy (`ssh_mode: 'read-only'`), never from the tool
+  description.
+* **A2 (must): preset tools that exist.** Build the allowlist by filtering the
+  preset list against the tool registry. `recipe_*` and the probes may not be
+  there yet. Store the preset version on the agent row, so a later preset
+  change never silently widens an existing agent.
+* **A3 (must): `escalate` is agent text.** Cap the summary (2 KiB), rate-limit
+  it (per agent, a few per hour), and render it escaped in the notification
+  and the UI, with no links made clickable. "Always allowed" should mean
+  "not gated", not "not limited".
+* **A4 (must): who may read an escalation.** `get_escalation` is limited to
+  the operator and the agents the **operator** names in settings (for
+  example `escalation_readers: ["hermes"]`), never a list the escalating
+  agent supplies. Test that another agent gets `not_found`, not
+  `forbidden`.
+* **A5 (should): compact descriptions keep the safety words.** Every
+  allowlisted tool has a compact variant of at most 160 characters. A test
+  checks that a tool whose full description says "needs approval" or
+  "read-only" still says so in the compact one.
+* **A6 (should): the eval script never touches a real dashboard.** It refuses
+  a non-loopback base URL and creates its own temp DB, with synthetic hosts
+  only (`192.0.2.0/24`, `*.example.test`).
 
 ---
 
@@ -7058,17 +7524,18 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 5a | X1 | ctx-actions | dashboard | Merged | `fix/x1-ctx-actions` | — | FYI to security reviewer (approve ignored status) |
 | 6 | F5 | exec-results | gateway + dashboard | Merged | `feat/f5-exec-results` | — | |
 | 6a | F18 | request-context | dashboard | Merged | `feat/f18-request-context` | F1, F5, F7, X1 | |
-| 7 | F12 | ssh-exec | dashboard + gateway | **Round 2: code round 1 and the bash review fixed (M1–M3, S1–S2, R1–R4, S1–S4); re-review + security diff check** | `feat/f12-ssh-exec` @ `c137e55` | F4, F5 | design approval + security reviewer sign-off |
+| 7 | F12 | ssh-exec | dashboard + gateway | **Merged forward onto the CI fix: MCP capture on `capture_tail` at 65 537 bytes, no FIFO — awaiting the security diff check** | `feat/f12-ssh-exec` | F4, F5 | security reviewer re-checks the merged gateway bash |
 | 8 | F6 | session-wrapup | dashboard | Merged | `feat/f6-session-wrapup` | F3, F4, F5 | |
 | 9 | F13 | session-conclusions | dashboard + MCP | Merged | `feat/f13-session-conclusions` | F5, F6 | |
 | 10 | F8 | test-traffic | dashboard | Merged | `feat/f8-test-traffic` | — | low priority |
 | 11 | F9 | ha-supervisor-read | dashboard | Merged | `feat/f9-ha-supervisor-read` | — | token is now a dedicated `eshu` HA admin user |
-| 12 | F10 | ha-supervisor-actions | dashboard | Ready (after F9) | `feat/f10-ha-supervisor-actions` | F9, F3, Chunk H | reviewer pass + security reviewer sign-off |
-| 13 | F11 | ha-config-files | dashboard | Ready (after F10) — design first | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | design approval + security reviewer sign-off |
+| 12 | F10 | ha-supervisor-actions | dashboard | **Security code review: changes requested** (P1–P3, `e39d810`) | `feat/f10-ha-supervisor-actions` | F9, F3, Chunk H | security re-reads the P1–P3 diff only |
+| 13 | F11 | ha-config-files | dashboard | **Design round 2: four points** (U1–U4) | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | then security reviewer on the design |
 | 14 | F14 | inventory | dashboard + MCP | Merged | `feat/f14-inventory` | Chunk H | |
-| 15 | F15 | probes | dashboard + MCP | Ready after F12 | `feat/f15-probes` | F4, F12 | |
-| 16 | F16 | recipes | dashboard + MCP | Design first (questions listed) | `feat/f16-recipes` | F3, F12, F13 | design approval + security reviewer sign-off |
-| 17 | F17 | local-agent | dashboard + docs | Ready after F12–F16 | `feat/f17-local-agent` | F12–F16 | |
-| 18 | F19 | unattended-limits | gateway + dashboard | Design first; before F4 `on` is unlocked | `feat/f19-unattended-limits` | F4, F5 | design approval + security reviewer sign-off |
+| 15 | F15 | probes | dashboard + MCP | Ready after F12; pre-implementation notes P1–P8 | `feat/f15-probes` | F4, F12 | |
+| 16 | F16 | recipes | dashboard + MCP | **Security design review: changes requested** (V1–V6, `7964538`) | `feat/f16-recipes` | F3, F12, F13 | security re-reads Round 4 only |
+| 17 | F17 | local-agent | dashboard + docs | Ready after F15; pre-implementation notes A1–A6 | `feat/f17-local-agent` | F12–F16 | |
+| 18 | F19 | unattended-limits | gateway + dashboard | **Design round 2: approved with Q1** (rebase on the new capture), Q2 | `feat/f19-unattended-limits` | F4, F5 | then security re-review of § 3 |
+| — | CI fix | ci-environment | gateway + tests | **Approved by feature reviewer** (round 5); CI green; **to security** (gateway bash) | `fix/ci-environment` | F5 | release precondition (`RELEASE_1.md`) |
 Chunks are done **in the order column**; each new chunk branches from the
 updated `feature-roadmap` after the previous one is merged.
