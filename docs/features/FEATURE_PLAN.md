@@ -6184,6 +6184,153 @@ response (`hosts: [{name, ips}]`) — including the stale-IP case that must fail
 
 `bash scripts/verify.sh`: `2331 passed, 7 warnings in 429.13s (0:07:09)` (docs only).
 
+### Round 4 — security design review (V1–V6)
+
+This section is the design of record for the six conditions and the smaller
+points; the security reviewer re-reads only this section.
+
+#### V1 — a placeholder may never become the command or an argument to an executor
+
+A whole, quoted word is still dangerous when it is the **command word**, or
+when the verb runs its arguments. The validator runs F1 on the template with
+the sentinel in place, at **propose and approve** (and again on the filled-in
+bytes at run):
+
+```python
+SENTINEL = 'eshueshusentinel'
+# Verbs that execute their arguments (or a later word). `find` is refused when
+# it carries -exec/-execdir; `ssh` would run the rest on another host.
+EXEC_VERBS = frozenset({
+    'sh', 'bash', 'zsh', 'dash', 'ksh', 'ash', 'busybox', 'eval', 'exec',
+    'env', 'sudo', 'doas', 'xargs', 'timeout', 'nice', 'ionice', 'nohup',
+    'watch', 'ssh', 'flock', 'strace', 'ltrace', 'chroot', 'runuser', 'su',
+})
+
+
+def validate_template(template, declared):
+    _check_template(template, declared)              # R1/T1 rules
+    probe = PLACEHOLDER.sub(SENTINEL, template)
+    bd = cmd_breakdown(probe)
+    for step in bd.get('steps') or []:
+        op = (step.get('op') or '').lower()
+        if op.startswith('eshueshusentinel') or op in EXEC_VERBS:
+            raise RecipeParamError('invalid_step',
+                                   'a placeholder may not be a command or an '
+                                   'argument to %s' % (op or 'a command'))
+        if op == 'find' and any(w in ('-exec', '-execdir')
+                                for w in step.get('text', '').split()):
+            raise RecipeParamError('invalid_step',
+                                   'find -exec cannot take a placeholder')
+    return bd
+```
+
+At **run time** the filled-in command is parsed again with F1 and must still
+be `complete`, and for the future `auto_run` `read_policy` runs on those
+bytes, never on the template. Tests: `{x} --help`, `sudo {x}`, `sh -c {x}`,
+`xargs {x}` and `find . -exec {x} ;` are each refused.
+
+#### V2 — no SSH value may start with `-`
+
+The `fqdn` and `hostname` types use RFC labels (a label may not start or end
+with `-`), and `substitute_command` refuses **any** value whose `str()`
+starts with `-`, whatever its type (a negative `int` included). Tool
+arguments are JSON values and are unaffected.
+
+```
+hostname  ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$
+fqdn      ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$
+```
+
+Tests: a leading-dash `fqdn`, a trailing-dash label, and a negative `int` in
+an SSH slot are each refused.
+
+#### V3 — each allowlisted tool carries its own argument allowlist
+
+`RECIPE_TOOLS` is keyed by `(kind, tool)` (V6) and each entry names the keys a
+recipe may set, which of them may be parameter slots, and what is refused:
+
+```python
+RECIPE_TOOLS = {
+    ('npm', 'create_proxy_host'): {
+        'undo': ('npm', 'delete_proxy_host'),
+        'args': {
+            'body': {
+                'domain_names': ('fqdn', 'list', 16),   # slots, max 16
+                'forward_scheme': ('enum', ('http', 'https')),
+                'forward_host': ('slot', ('ipv4', 'fqdn')),
+                'forward_port': ('slot', ('port',)),
+                'ssl_forced': ('bool',),
+                'block_exploits': ('bool',),
+                'caching_enabled': ('bool',),
+                'allow_websocket_upgrade': ('bool',),
+                'enabled': ('bool',),
+            },
+            'forbid': ('advanced_config', 'locations', 'custom_config',
+                       'access_list_id'),
+        },
+    },
+    ('npm', 'proxy_hosts'): {'read': True},
+    ('pihole', 'local_dns_records'): {'read': True},
+}
+RECIPE_UNDO_TOOLS = frozenset(entry['undo'] for entry in RECIPE_TOOLS.values()
+                              if entry.get('undo'))
+```
+
+`advanced_config` (raw nginx directives), `locations`, any custom-config key
+and `access_list_id` are refused as `recipe_arg_forbidden`; the operator does
+not have to find them in a JSON blob. Test: a body that sets
+`advanced_config` is refused.
+
+#### V4 — an undo checks that it still deletes what the run created
+
+A rollback can come days later, and NPM ids can be reused. Just **before**
+each undo runs (not only at preview), the engine re-reads the object by its
+stored id and compares the fields the run wrote (`domain_names`,
+`forward_host`, `forward_port`). A missing object or a mismatch records
+`rollback_target_changed` and stops that step; nothing is deleted. Test: the
+id is reused by a different host and the rollback deletes nothing.
+
+#### V5 — only the recipe engine can spend a recipe's approvals
+
+Recipe-made plan items are marked, and the ordinary claims never match them:
+
+* `session_plan_items` gains `source` (`''` for an agent plan, `recipe`),
+  `recipe_run_id` and `step_id`;
+* F3's `claim_plan_item` and F10's `claim_mcp_plan_item` add
+  `AND source != 'recipe'`;
+* the engine claims with `claim_recipe_item(run_id, step_id)`, which matches
+  only that run and that step. Executing step N is the only way to spend item
+  N, so a direct call with the exact bytes or arguments is queued for the
+  operator and leaves the item unspent;
+* an undo-only tool (for example `delete_proxy_host`) can enter a plan only
+  from `recipe_rollback`, never from `session_plan` or `recipe_run`.
+
+Tests: a direct call matching a pending step is queued and the item stays
+unspent; a `session_plan` naming `delete_proxy_host` is refused.
+
+#### V6 — key the allowlists by kind as well as tool
+
+`RECIPE_TOOLS`/`FORBIDDEN_RECIPE_TOOLS` use `(kind, tool)` pairs, and at run
+time the resolved integration's kind must equal the pair's kind. A same-named
+tool on another kind is refused (test).
+
+#### Smaller points
+
+* **The worked example broke the T1 rule.** Step 4's `https://{fqdn}/` is a
+  glued slot. The example drops that step: the NPM `proxy_hosts` check and
+  `getent hosts {fqdn}` are the evidence, and an HTTP check needs a
+  URL-typed parameter (the type set is closed). A test runs **every** example
+  document in the note through the validator.
+* **Step results and evidence are stored after the scrubber and capped.** A
+  list response such as `proxy_hosts` carries other hosts' configuration, so
+  the run keeps the matched element plus the fields the undo needs, not the
+  whole list.
+* **`auto_run` comes back to security before it is enabled**, even with F4
+  `on` and F19 in place: it is the step that removes the human from a
+  multi-step change.
+
+`bash scripts/verify.sh`: `2331 passed, 7 warnings in 428.24s (0:07:08)` (docs only).
+
 ### Reviewer notes
 
 **Design round 1 (2026-11-09): approved in direction, changes requested.**
@@ -6557,7 +6704,7 @@ reviewer.**
 Points for the security reviewer: R1/T1 templates, the R2/T3 tool lists, and
 R3/T2 rollback.
 
-| 16 | F16 | recipes | dashboard + MCP | **Round 3: T1–T3 folded (templates, result-slot undo, real tool names) — awaiting security review** | `feat/f16-recipes` | F3, F12, F13 | design approval + security reviewer sign-off |
+| 16 | F16 | recipes | dashboard + MCP | **Round 4: V1–V6 folded — security re-reads only Round 4** | `feat/f16-recipes` | F3, F12, F13 | security re-reads Round 4 only |
 | 17 | F17 | local-agent | dashboard + docs | Ready after F12–F16 | `feat/f17-local-agent` | F12–F16 | |
 | 18 | F19 | unattended-limits | gateway + dashboard | Design first; before F4 `on` is unlocked | `feat/f19-unattended-limits` | F4, F5 | design approval + security reviewer sign-off |
 Chunks are done **in the order column**; each new chunk branches from the
