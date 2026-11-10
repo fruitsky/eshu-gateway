@@ -5605,18 +5605,18 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 5a | X1 | ctx-actions | dashboard | Merged | `fix/x1-ctx-actions` | — | FYI to security reviewer (approve ignored status) |
 | 6 | F5 | exec-results | gateway + dashboard | Merged | `feat/f5-exec-results` | — | |
 | 6a | F18 | request-context | dashboard | Merged | `feat/f18-request-context` | F1, F5, F7, X1 | |
-| 7 | F12 | ssh-exec | dashboard + gateway | Design signed off; **code round 1: changes requested** (M1–M3, S1–S2 + security R1–R4) | `feat/f12-ssh-exec` | F4, F5 | security reviewer re-checks the gateway bash diff |
+| 7 | F12 | ssh-exec | dashboard + gateway | **Code round 2: approved by feature reviewer**; merge forward after the CI fix, then security diff check | `feat/f12-ssh-exec` | F4, F5 | security reviewer re-checks the merged gateway bash |
 | 8 | F6 | session-wrapup | dashboard | Merged | `feat/f6-session-wrapup` | F3, F4, F5 | |
 | 9 | F13 | session-conclusions | dashboard + MCP | Merged | `feat/f13-session-conclusions` | F5, F6 | |
 | 10 | F8 | test-traffic | dashboard | Merged | `feat/f8-test-traffic` | — | low priority |
 | 11 | F9 | ha-supervisor-read | dashboard | Merged | `feat/f9-ha-supervisor-read` | — | token is now a dedicated `eshu` HA admin user |
-| 12 | F10 | ha-supervisor-actions | dashboard | **Code round 1: changes requested** (M1–M2, S1–S2) | `feat/f10-ha-supervisor-actions` | F9, F3, Chunk H | then security reviewer sign-off |
-| 13 | F11 | ha-config-files | dashboard | **Design round 1: changes requested** (H1–H8) | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | then security reviewer sign-off on the design |
+| 12 | F10 | ha-supervisor-actions | dashboard | **Round 2: one fix left** (N1, dot segments) | `feat/f10-ha-supervisor-actions` | F9, F3, Chunk H | then security reviewer sign-off |
+| 13 | F11 | ha-config-files | dashboard | **Design round 2: four points** (U1–U4) | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | then security reviewer on the design |
 | 14 | F14 | inventory | dashboard + MCP | Merged | `feat/f14-inventory` | Chunk H | |
 | 15 | F15 | probes | dashboard + MCP | Ready after F12; pre-implementation notes P1–P8 | `feat/f15-probes` | F4, F12 | |
-| 16 | F16 | recipes | dashboard + MCP | **Design round 1: changes requested** (R1–R8) | `feat/f16-recipes` | F3, F12, F13 | then security reviewer sign-off on the design |
+| 16 | F16 | recipes | dashboard + MCP | **Design round 2: three fixes** (T1–T3) | `feat/f16-recipes` | F3, F12, F13 | then security reviewer on the design |
 | 17 | F17 | local-agent | dashboard + docs | Ready after F15; pre-implementation notes A1–A6 | `feat/f17-local-agent` | F12–F16 | |
-| 18 | F19 | unattended-limits | gateway + dashboard | **Design round 1: changes requested** (D1–D4, S1 + security L1–L8) | `feat/f19-unattended-limits` | F4, F5 | before F4 `on` is unlocked |
-| — | CI fix | ci-environment | gateway + tests | **Round 4: one fix left** (C5); then security reviewer (gateway bash) | `fix/ci-environment` | F5 | release precondition (`RELEASE_1.md`) |
+| 18 | F19 | unattended-limits | gateway + dashboard | **Design round 2: approved with Q1** (rebase on the new capture), Q2 | `feat/f19-unattended-limits` | F4, F5 | then security re-review of § 3 |
+| — | CI fix | ci-environment | gateway + tests | **Approved by feature reviewer** (round 5); CI green; **to security** (gateway bash) | `fix/ci-environment` | F5 | release precondition (`RELEASE_1.md`) |
 Chunks are done **in the order column**; each new chunk branches from the
 updated `feature-roadmap` after the previous one is merged.
