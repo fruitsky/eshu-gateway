@@ -9059,6 +9059,9 @@ Each script is the **body** of one `sh -c` call, quoted with `shlex.quote` by
 the runner. `/homeassistant` is the config root, the token path and
 `timeout 100` are constants.
 
+The three `redact()` bodies are Round 10's (AQ1) and are identical;
+everything else is Round 9's.
+
 **WRITE_SCRIPT**
 
 ```bash
@@ -9147,33 +9150,45 @@ redact() {
   WITHHELD='[ESHU check output withheld: redaction unavailable]'
   # AL2: a symlinked secrets.yaml counts too — HA follows it, so a file may be
   # one. The list is every candidate; a find that failed means the list is not
-  # trustworthy, and so does a candidate we cannot qualify.
+  # trustworthy, and so does a candidate we cannot read.
   rc=0
   list=$(find /homeassistant -xdev -name secrets.yaml \( -type f -o -type l \) 2>/dev/null) || rc=$?
   if [ "$rc" -ne 0 ]; then printf "%s\n" "$WITHHELD"; return 0; fi
-  files=''
+  # AQ1: the bytes are read in the subshell that checked the descriptor, through
+  # that descriptor — awk never opens a name again, so a swap after the check
+  # cannot redirect the read. The combined text is capped at 64 KiB and passed
+  # through the environment, never argv. Any failure withholds.
+  text=''
+  bytes=0
   oldifs=$IFS
   IFS='
 '
   for f in $list; do
     [ -n "$f" ] || continue
     # The name test is only here to avoid a blocking open() on a FIFO; what
-    # qualifies the file is the descriptor check below.
+    # qualifies the file is the descriptor check and the read below.
     if [ ! -f "$f" ]; then printf "%s\n" "$WITHHELD"; return 0; fi
-    # AL2: qualify the *opened* file, in a subshell so a refused open cannot
-    # end this script (dash exits 2 on a failed exec redirection, ash 1).
-    if ! ( exec 9< "$f" 2>/dev/null && [ -f /proc/self/fd/9 ] ); then
+    # A subshell, because a failed exec redirection ends a non-interactive
+    # shell (dash 2, ash 1) — and the read uses fd 9, not the name.
+    if ! body=$( ( exec 9< "$f" 2>/dev/null || exit 1
+                   [ -f /proc/self/fd/9 ] || exit 1
+                   cat /proc/self/fd/9 ) ); then
       printf "%s\n" "$WITHHELD"
       return 0
     fi
-    files="$files
-$f"
+    n=$(printf "%s" "$body" | wc -c) || { printf "%s\n" "$WITHHELD"; return 0; }
+    bytes=$((bytes + n))
+    if [ "$bytes" -gt 65536 ]; then printf "%s\n" "$WITHHELD"; return 0; fi
+    text="$text$body
+"
   done
   IFS=$oldifs
   in=$(cat)
-  # AL3: one awk pass collects every value from every file, sorts longest
-  # first, then replaces. Values never leave awk and never touch argv.
-  printf "%s\n" "$in" | awk -v files="$files" -v withheld="$WITHHELD" '
+  # AL3/AQ1: one awk pass collects every value from the text the subshells read,
+  # sorts longest first, then replaces. Values never leave awk and never touch
+  # argv. awk opens no file now, so there is no getline whose return code could
+  # be mis-read.
+  printf "%s\n" "$in" | ESHU_SECRETS_TEXT="$text" awk -v withheld="$WITHHELD" '
     function hx(c) { return index("0123456789abcdef", tolower(c)) - 1 }
     function hex2(ss) { return hx(substr(ss, 1, 1)) * 16 + hx(substr(ss, 2, 1)) }
     function decode(v,   out, i, c, d) {
@@ -9220,24 +9235,22 @@ $f"
         return
       }
       add1(v)
-      p = index(v, " #")
+      # Nit: a comment may follow a space or a tab; strip at the first one.
+      p = index(v, " #"); q = index(v, "\t#")
+      if (q > 0 && (p == 0 || q < p)) p = q
       if (p > 0) add1(substr(v, 1, p - 1))
     }
     BEGIN {
-      nf = split(files, F, "\n")
+      nf = split(ENVIRON["ESHU_SECRETS_TEXT"], L, "\n")
+      inblock = 0
       for (fi = 1; fi <= nf; fi++) {
-        f = F[fi]; if (f == "") continue
-        inblock = 0
-        while ((getline l < f) > 0) {
-          if (l ~ /^[^ \t#][^:]*:[ \t]*[|>][-+]?[ \t]*$/) { inblock = 1; continue }
-          if (inblock) {
-            if (l ~ /^[ \t]+[^ \t]/) { add(l); continue }
-            inblock = 0
-          }
-          if (match(l, /^[^ \t#][^:]*:[ \t]/)) add(substr(l, RLENGTH + 1))
+        l = L[fi]
+        if (l ~ /^[^ \t#][^:]*:[ \t]*[|>][-+]?[ \t]*$/) { inblock = 1; continue }
+        if (inblock) {
+          if (l ~ /^[ \t]+[^ \t]/) { add(l); continue }
+          inblock = 0
         }
-        if (l < 0) { print withheld; exit 2 }
-        close(f)
+        if (match(l, /^[^ \t#][^:]*:[ \t]/)) add(substr(l, RLENGTH + 1))
       }
       for (i = 1; i <= n; i++)
         for (j = i + 1; j <= n; j++)
@@ -9368,33 +9381,45 @@ redact() {
   WITHHELD='[ESHU check output withheld: redaction unavailable]'
   # AL2: a symlinked secrets.yaml counts too — HA follows it, so a file may be
   # one. The list is every candidate; a find that failed means the list is not
-  # trustworthy, and so does a candidate we cannot qualify.
+  # trustworthy, and so does a candidate we cannot read.
   rc=0
   list=$(find /homeassistant -xdev -name secrets.yaml \( -type f -o -type l \) 2>/dev/null) || rc=$?
   if [ "$rc" -ne 0 ]; then printf "%s\n" "$WITHHELD"; return 0; fi
-  files=''
+  # AQ1: the bytes are read in the subshell that checked the descriptor, through
+  # that descriptor — awk never opens a name again, so a swap after the check
+  # cannot redirect the read. The combined text is capped at 64 KiB and passed
+  # through the environment, never argv. Any failure withholds.
+  text=''
+  bytes=0
   oldifs=$IFS
   IFS='
 '
   for f in $list; do
     [ -n "$f" ] || continue
     # The name test is only here to avoid a blocking open() on a FIFO; what
-    # qualifies the file is the descriptor check below.
+    # qualifies the file is the descriptor check and the read below.
     if [ ! -f "$f" ]; then printf "%s\n" "$WITHHELD"; return 0; fi
-    # AL2: qualify the *opened* file, in a subshell so a refused open cannot
-    # end this script (dash exits 2 on a failed exec redirection, ash 1).
-    if ! ( exec 9< "$f" 2>/dev/null && [ -f /proc/self/fd/9 ] ); then
+    # A subshell, because a failed exec redirection ends a non-interactive
+    # shell (dash 2, ash 1) — and the read uses fd 9, not the name.
+    if ! body=$( ( exec 9< "$f" 2>/dev/null || exit 1
+                   [ -f /proc/self/fd/9 ] || exit 1
+                   cat /proc/self/fd/9 ) ); then
       printf "%s\n" "$WITHHELD"
       return 0
     fi
-    files="$files
-$f"
+    n=$(printf "%s" "$body" | wc -c) || { printf "%s\n" "$WITHHELD"; return 0; }
+    bytes=$((bytes + n))
+    if [ "$bytes" -gt 65536 ]; then printf "%s\n" "$WITHHELD"; return 0; fi
+    text="$text$body
+"
   done
   IFS=$oldifs
   in=$(cat)
-  # AL3: one awk pass collects every value from every file, sorts longest
-  # first, then replaces. Values never leave awk and never touch argv.
-  printf "%s\n" "$in" | awk -v files="$files" -v withheld="$WITHHELD" '
+  # AL3/AQ1: one awk pass collects every value from the text the subshells read,
+  # sorts longest first, then replaces. Values never leave awk and never touch
+  # argv. awk opens no file now, so there is no getline whose return code could
+  # be mis-read.
+  printf "%s\n" "$in" | ESHU_SECRETS_TEXT="$text" awk -v withheld="$WITHHELD" '
     function hx(c) { return index("0123456789abcdef", tolower(c)) - 1 }
     function hex2(ss) { return hx(substr(ss, 1, 1)) * 16 + hx(substr(ss, 2, 1)) }
     function decode(v,   out, i, c, d) {
@@ -9441,24 +9466,22 @@ $f"
         return
       }
       add1(v)
-      p = index(v, " #")
+      # Nit: a comment may follow a space or a tab; strip at the first one.
+      p = index(v, " #"); q = index(v, "\t#")
+      if (q > 0 && (p == 0 || q < p)) p = q
       if (p > 0) add1(substr(v, 1, p - 1))
     }
     BEGIN {
-      nf = split(files, F, "\n")
+      nf = split(ENVIRON["ESHU_SECRETS_TEXT"], L, "\n")
+      inblock = 0
       for (fi = 1; fi <= nf; fi++) {
-        f = F[fi]; if (f == "") continue
-        inblock = 0
-        while ((getline l < f) > 0) {
-          if (l ~ /^[^ \t#][^:]*:[ \t]*[|>][-+]?[ \t]*$/) { inblock = 1; continue }
-          if (inblock) {
-            if (l ~ /^[ \t]+[^ \t]/) { add(l); continue }
-            inblock = 0
-          }
-          if (match(l, /^[^ \t#][^:]*:[ \t]/)) add(substr(l, RLENGTH + 1))
+        l = L[fi]
+        if (l ~ /^[^ \t#][^:]*:[ \t]*[|>][-+]?[ \t]*$/) { inblock = 1; continue }
+        if (inblock) {
+          if (l ~ /^[ \t]+[^ \t]/) { add(l); continue }
+          inblock = 0
         }
-        if (l < 0) { print withheld; exit 2 }
-        close(f)
+        if (match(l, /^[^ \t#][^:]*:[ \t]/)) add(substr(l, RLENGTH + 1))
       }
       for (i = 1; i <= n; i++)
         for (j = i + 1; j <= n; j++)
@@ -9578,33 +9601,45 @@ redact() {
   WITHHELD='[ESHU check output withheld: redaction unavailable]'
   # AL2: a symlinked secrets.yaml counts too — HA follows it, so a file may be
   # one. The list is every candidate; a find that failed means the list is not
-  # trustworthy, and so does a candidate we cannot qualify.
+  # trustworthy, and so does a candidate we cannot read.
   rc=0
   list=$(find /homeassistant -xdev -name secrets.yaml \( -type f -o -type l \) 2>/dev/null) || rc=$?
   if [ "$rc" -ne 0 ]; then printf "%s\n" "$WITHHELD"; return 0; fi
-  files=''
+  # AQ1: the bytes are read in the subshell that checked the descriptor, through
+  # that descriptor — awk never opens a name again, so a swap after the check
+  # cannot redirect the read. The combined text is capped at 64 KiB and passed
+  # through the environment, never argv. Any failure withholds.
+  text=''
+  bytes=0
   oldifs=$IFS
   IFS='
 '
   for f in $list; do
     [ -n "$f" ] || continue
     # The name test is only here to avoid a blocking open() on a FIFO; what
-    # qualifies the file is the descriptor check below.
+    # qualifies the file is the descriptor check and the read below.
     if [ ! -f "$f" ]; then printf "%s\n" "$WITHHELD"; return 0; fi
-    # AL2: qualify the *opened* file, in a subshell so a refused open cannot
-    # end this script (dash exits 2 on a failed exec redirection, ash 1).
-    if ! ( exec 9< "$f" 2>/dev/null && [ -f /proc/self/fd/9 ] ); then
+    # A subshell, because a failed exec redirection ends a non-interactive
+    # shell (dash 2, ash 1) — and the read uses fd 9, not the name.
+    if ! body=$( ( exec 9< "$f" 2>/dev/null || exit 1
+                   [ -f /proc/self/fd/9 ] || exit 1
+                   cat /proc/self/fd/9 ) ); then
       printf "%s\n" "$WITHHELD"
       return 0
     fi
-    files="$files
-$f"
+    n=$(printf "%s" "$body" | wc -c) || { printf "%s\n" "$WITHHELD"; return 0; }
+    bytes=$((bytes + n))
+    if [ "$bytes" -gt 65536 ]; then printf "%s\n" "$WITHHELD"; return 0; fi
+    text="$text$body
+"
   done
   IFS=$oldifs
   in=$(cat)
-  # AL3: one awk pass collects every value from every file, sorts longest
-  # first, then replaces. Values never leave awk and never touch argv.
-  printf "%s\n" "$in" | awk -v files="$files" -v withheld="$WITHHELD" '
+  # AL3/AQ1: one awk pass collects every value from the text the subshells read,
+  # sorts longest first, then replaces. Values never leave awk and never touch
+  # argv. awk opens no file now, so there is no getline whose return code could
+  # be mis-read.
+  printf "%s\n" "$in" | ESHU_SECRETS_TEXT="$text" awk -v withheld="$WITHHELD" '
     function hx(c) { return index("0123456789abcdef", tolower(c)) - 1 }
     function hex2(ss) { return hx(substr(ss, 1, 1)) * 16 + hx(substr(ss, 2, 1)) }
     function decode(v,   out, i, c, d) {
@@ -9651,24 +9686,22 @@ $f"
         return
       }
       add1(v)
-      p = index(v, " #")
+      # Nit: a comment may follow a space or a tab; strip at the first one.
+      p = index(v, " #"); q = index(v, "\t#")
+      if (q > 0 && (p == 0 || q < p)) p = q
       if (p > 0) add1(substr(v, 1, p - 1))
     }
     BEGIN {
-      nf = split(files, F, "\n")
+      nf = split(ENVIRON["ESHU_SECRETS_TEXT"], L, "\n")
+      inblock = 0
       for (fi = 1; fi <= nf; fi++) {
-        f = F[fi]; if (f == "") continue
-        inblock = 0
-        while ((getline l < f) > 0) {
-          if (l ~ /^[^ \t#][^:]*:[ \t]*[|>][-+]?[ \t]*$/) { inblock = 1; continue }
-          if (inblock) {
-            if (l ~ /^[ \t]+[^ \t]/) { add(l); continue }
-            inblock = 0
-          }
-          if (match(l, /^[^ \t#][^:]*:[ \t]/)) add(substr(l, RLENGTH + 1))
+        l = L[fi]
+        if (l ~ /^[^ \t#][^:]*:[ \t]*[|>][-+]?[ \t]*$/) { inblock = 1; continue }
+        if (inblock) {
+          if (l ~ /^[ \t]+[^ \t]/) { add(l); continue }
+          inblock = 0
         }
-        if (l < 0) { print withheld; exit 2 }
-        close(f)
+        if (match(l, /^[^ \t#][^:]*:[ \t]/)) add(substr(l, RLENGTH + 1))
       }
       for (i = 1; i <= n; i++)
         for (j = i + 1; j <= n; j++)
@@ -9796,6 +9829,99 @@ is a hang, not a leak, and the runner's SSH timeout ends it as
     * an ordinary `packages/x.yaml` is accepted.
 * **Nit:** a YAML comment can follow a tab as well as a space. Also strip at
   the first `\t#`, not only at ` #`.
+
+### Round 10 — AQ1, AQ2 and the comment nit (design round)
+
+* **AQ1 — the second open is gone.** `redact()` reads each candidate's bytes
+  in the subshell that opens and qualifies it, through fd 9:
+
+  ```sh
+  if ! body=$( ( exec 9< "$f" 2>/dev/null || exit 1
+                 [ -f /proc/self/fd/9 ] || exit 1
+                 cat /proc/self/fd/9 ) ); then
+    printf "%s\n" "$WITHHELD"
+    return 0
+  fi
+  ```
+
+  No name is opened again. awk gets the combined text in
+  `ENVIRON["ESHU_SECRETS_TEXT"]` — not in argv, not as a file name — and opens
+  no file at all, so there is no `getline` left whose return code could be
+  mis-read; the `if (l < 0)` check is gone with it. A non-zero status from the
+  subshell, a non-regular file at the descriptor, a `cat` error and a `wc`
+  error all print the withheld line and return 0, so a source that vanished or
+  became a directory withholds.
+  * **Cap.** Each body is counted with `wc -c` and the running total must stay
+    at or below 65 536 bytes; the first byte over withholds. That keeps the
+    environment string well under the kernel's per-string limit, and `wc`
+    counting bytes (not `${#body}` characters) means a multi-byte file cannot
+    slip past it.
+  * **The swap the reviewer named.** Once fd 9 is open, the descriptor names
+    the inode: a name swapped for an empty file or a FIFO after that cannot
+    change the read and cannot block it, so the values are still redacted (or
+    the output withheld if the read fails). A swap **before** the open is
+    caught by `[ -f ]`/the open itself and withholds. The tests assert
+    "redacted or withheld", never a clear value, for all three cases.
+  * **The three copies** — `WRITE_SCRIPT` (after its check),
+    `RESTORE_SCRIPT` (after its check) and `CHECK_SCRIPT` — carry the same
+    function.
+  * **Checked under `dash`, BusyBox `ash` and `bash`** on a synthetic tree:
+    quoted and unquoted values, a block scalar, a comment after a space and
+    after a tab, a value at end-of-file with no newline, a symlink to a
+    regular file (redacted), a symlink to `/dev/null` (withheld), a 70 KiB
+    candidate (withheld), no candidate at all (output unchanged), and a
+    directory or FIFO name (withheld).
+
+* **AQ2 — the preflight allowlists the path-valued tags.** §AL4 refused only
+  an `!include` of a `secrets.yaml`. That leaves `.storage/core.config_entries`
+  — JSON is valid YAML, so `!include` loads every stored integration
+  credential as config, and `ha core check` can then quote them — a `../`
+  escape, and an absolute key file. The preflight now checks every decoded
+  path-valued tag, `!include` and the directory argument of all four
+  `!include_dir_list`, `!include_dir_named`, `!include_dir_merge_list` and
+  `!include_dir_merge_named`, against all of:
+  * the string, as YAML decodes it, ends in `.yaml` or `.yml` — file includes
+    only; a directory has no suffix, so the four `!include_dir_*` tags are
+    exempt from this one test. Case-sensitive, as the script's `case` is;
+  * no path segment starts with `.` — that refuses `.storage`, `.git` and
+    `..`, and it runs after the decode, so backslash or `\x2e` spellings
+    cannot hide a segment;
+  * resolved the way HA resolves it — relative to the directory of the file
+    being written (`/homeassistant` for the root `configuration.yaml`), then
+    `posixpath.normpath` — the result is `/homeassistant` itself for a
+    directory include, or under `/homeassistant/` for a file include. An
+    absolute target outside, or a `../` that leaves the tree, is refused;
+  * the basename is not `secrets.yaml` (AL4's existing rule, kept).
+
+  The allowlist refusals use `config_include_refused`; the secrets one keeps
+  `config_secret_include_refused`. The dashboard resolves lexically — it never
+  sees the add-on's filesystem — so a symlink inside the tree that points
+  outside is outside the preflight's reach, and this note says so rather than
+  implying it is checked. The script's `grep` stays as it is, as the reviewer
+  asked: it is the second check for the plain `secrets.yaml` spelling, not the
+  allowlist.
+  * **Tests (design):** `.storage/core.config_entries` refused;
+    `../outside.yaml` refused; `/etc/eshu-key.yaml` refused;
+    `packages/x.txt` refused; `packages/x.yaml` accepted;
+    `!include_dir_merge_named .storage` refused; `!include_dir_list packages`
+    accepted; an `!include` of `secrets.yaml` still refused with the old code.
+
+* **Nit — a tab can start the comment.** `add()` strips at the first of
+  `" #"` and `"\t#"`, whichever comes first:
+
+  ```awk
+  p = index(v, " #"); q = index(v, "\t#")
+  if (q > 0 && (p == 0 || q < p)) p = q
+  if (p > 0) add1(substr(v, 1, p - 1))
+  ```
+
+  So `token: abcdef<TAB># note` contributes `abcdef`, not the comment.
+
+Design text and scripts only; the code round is not started.
+
+`bash scripts/verify.sh`: `2331 passed, 7 warnings in 429.31s (0:07:09)` (docs
+only).
+
 ---
 
 ## Chunk F12 — SSH through Eshu over MCP (`ssh_exec`) · slug `ssh-exec` · dashboard (+ small gateway change)
@@ -16700,7 +16826,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 10 | F8 | test-traffic | dashboard | Merged | `feat/f8-test-traffic` | — | low priority |
 | 11 | F9 | ha-supervisor-read | dashboard | Merged | `feat/f9-ha-supervisor-read` | — | token is now a dedicated `eshu` HA admin user |
 | 12 | F10 | ha-supervisor-actions | dashboard | Ready (after F9) | `feat/f10-ha-supervisor-actions` | F9, F3, Chunk H | reviewer pass + security reviewer sign-off |
-| 13 | F11 | ha-config-files | dashboard | Security round 9 (`323ad00`): AL1/AL3 order+keys/AL5/AL6 and exit codes approved; **AQ1** (`redact` reads through the checked descriptor; `getline` errors withhold) and **AQ2** (`!include` target allowlist) must | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | security re-reads AQ1/AQ2 only |
+| 13 | F11 | ha-config-files | dashboard | Design round 10: **AQ1** (`redact` reads through the checked descriptor, 64 KiB through the environment, no second open) and **AQ2** (`!include` / `!include_dir_*` allowlist) folded; comment-after-tab nit fixed — to security again | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | security re-reads AQ1/AQ2 only |
 | 14 | F14 | inventory | dashboard + MCP | Merged | `feat/f14-inventory` | Chunk H | |
 | 15 | F19 | unattended-limits | gateway + dashboard | **Merged** 2026-11-11 (security sign-off `67bec51`; AF1/AF2 checked) | `feat/f19-unattended-limits` | F4, F5, F12 | AF3 goes on the next gateway branch |
 | 16 | F15 | probes | dashboard + MCP | **Merged** 2026-11-11 (AG1 security decision `eca8982`; AI1 fix merged) | `feat/f15-probes` | F4, F12, F14 | |
