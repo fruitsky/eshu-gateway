@@ -8741,6 +8741,124 @@ bytes it received.
 
 `bash scripts/verify.sh`: `2331 passed, 7 warnings in 432.09s (0:07:12)` (docs only).
 
+_(security reviewer)_
+
+**Security review, round 8 (2026-11-11, at `a92c789`): AH1 and AH3 are
+approved in shape. Four more must-fixes before the design closes: AL1 (check
+each new file before writing to it), AL2 (`redact` must fail closed), AL3
+(collect and replace values correctly) and AL4 (AH4 on parsed YAML). Then I
+re-read only those parts.**
+
+AH1's pattern is right, and the `/proc/self/fd/9` reasoning in `redact` is
+correct. AH3's `umask_for` is right, including the three-digit cut. The
+rollback now reads the backup through fd 4, which closes the token-leak case
+from round 7. The nits are fixed.
+
+* **AL1 (must): check a new file's descriptor before writing a byte to it.**
+  * Under `set -C`, dash and BusyBox `ash` use `O_EXCL` only when the name
+    does not exist. A name that already exists as something other than a
+    regular file is opened for writing without it. The `[ ! -e ] && [ ! -L ]`
+    test before each create leaves a window where the name can be replaced.
+  * Every create then writes **before** its `readlink` check: `cat "$fd3"
+    >&4`, `cat >&5`, `cat "$fd4" >&6`, and the restore's fd 5 and fd 6. A
+    swap in that window sends the bytes, as root, to whatever the name now
+    points at. For fd 5 those bytes are the agent's content.
+  * **Fix:** the checks (`readlink` equals the name, `-f`, link count 1) come
+    directly after each `exec N>` and before any write. A failure closes the
+    descriptor and exits.
+  * The write's rollback (fd 6) has no checks at all today. It gets the same
+    three checks and, after its `mv`, the same `readlink` check as fd 5
+    (exit 1).
+* **AL2 (must): `redact` must fail closed.** In three cases it prints values
+  unredacted:
+  * `list=$(find …) || list=""`: `find` exits non-zero on any error, such as
+    a directory removed during the walk. Every value is then dropped, not
+    only the one it could not reach.
+  * A candidate that fails `readlink`, `-f` or the link-count check is
+    skipped with `continue`, so its values are never added.
+  * `-type f` leaves out a `secrets.yaml` that is a symlink. HA follows it,
+    and some setups use one.
+  * **Fix:**
+    * Collect both `-type f` and `-type l`.
+    * Read each one through its link. A source only adds values to the
+      list, so reading through a link can over-redact but never leak.
+    * Require only that the opened file is a regular file, so a FIFO or a
+      device is refused.
+    * Do the `-f` test on the descriptor after the open, not on the name
+      before it.
+    * If `find` fails, or any candidate can't be opened or read, print no
+      check output. Print one fixed line instead (`check output withheld:
+      redaction unavailable`). The exit code and the status line work as
+      before.
+  * **Tests:** a failing `find`, an unreadable candidate, and a symlinked
+    `secrets.yaml`.
+* **AL3 (must): which values are collected, and the order they are
+  replaced in.**
+  * **Order.** Values are replaced file by file, in list order. A short
+    value that is a substring of a longer one, in the same file or another,
+    is replaced first. The rest of the longer value then no longer matches
+    and stays in the output.
+    * **Fix:** collect every value from every file first. Then replace
+      once, longest value first.
+    * This also replaces the per-file pass, so the output goes through awk
+      once.
+  * **Keys.** `^[A-Za-z0-9_]+:` misses keys with `-` or `.` in them, and
+    quoted keys. All of these are valid secret names.
+    * **Fix:** accept any line that doesn't start with whitespace or `#`
+      and contains `:` followed by a space or tab. Take the value after the
+      first such `:`. Over-collecting is fine.
+    * `SECRETS_KEYS_SCRIPT` uses the same narrow pattern, so it hides those
+      keys from the key list. Widen it the same way.
+  * **A quoted value followed by a comment.** The value is cut at the last
+    character of the line, not at the closing quote. So the decoded form of
+    `"…"  # note` is never added.
+    * **Fix:** end a quoted value at its closing quote, skipping `\"` in
+      double quotes and `''` in single quotes. Ignore anything after it.
+  * **Escapes (should).** Only `\"` and `\\` are decoded. Also decode `\t`,
+    `\n`, `\/` and `\xNN`. State in the setup doc that `\u`/`\U` escapes
+    and multi-line plain scalars are not decoded.
+  * **Tests:** a value inside a longer value, in both orders and across two
+    files; a hyphenated key; a quoted value with a trailing comment.
+* **AL4 (must): AH4's preflight check works on parsed YAML, not lines.**
+  * A line scan can't see every way YAML attaches a tag to a value. It
+    misses:
+    * a tag whose value is on a later line;
+    * a tag spelled another way that resolves to the same one;
+    * a file name written with escapes inside a double-quoted scalar.
+    I'm not writing out examples here. Each of them loads `secrets.yaml`
+    through `!include` and passes `grep`.
+  * **Fix:** the dashboard preflight loads the content with a safe loader
+    that has constructors for HA's tags. For every `!include` it records the
+    target after decoding. It refuses the content with
+    `config_secret_include_refused` if:
+    * any `!include` target's basename is `secrets.yaml`;
+    * the content doesn't parse;
+    * the content has a `%TAG` directive or a verbatim (`!<…>`) tag.
+  * The script's `grep` stays as a second check, but the preflight is the
+    control. The `!env_var` refusal should go through the same parsed
+    check.
+  * **Tests:** one case per shape above. Keep them in the test file, not in
+    this document.
+* **AL5 (should): the restore checks the backup's hash before installing
+  it.**
+  * Today the script installs whatever fd 4 holds, and the dashboard only
+    compares hashes afterwards. By then a changed backup is already live and
+    has passed `ha core check`.
+  * **Fix:** pass the hash the dashboard recorded when it made the backup
+    (it is the write's `expect`). Refuse with 14 before the `mv` if `want`
+    differs.
+* **AL6 (should): `chown` through the descriptor.** `chown uid:gid
+  /proc/$me/fd/N`, without `-h`, follows the magic link to the inode that
+  was opened. `chown -h` on the name changes whatever is at the name now.
+* **Nit: exit codes.** When an `exec` redirection fails, dash exits with 2,
+  not 1. I believe BusyBox `ash` does too. Check this in the matrix.
+  Either way, the dashboard must map **every** code not in the table to
+  `config_state_unknown` (124/125 from `timeout`, 126/127, 2), and the
+  table should say so.
+
+After AL1–AL4, I re-read only `redact`, the create blocks and the preflight.
+AL5 and AL6 can be checked by the feature reviewer.
+
 ---
 
 ## Chunk F12 — SSH through Eshu over MCP (`ssh_exec`) · slug `ssh-exec` · dashboard (+ small gateway change)
@@ -15645,7 +15763,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 10 | F8 | test-traffic | dashboard | Merged | `feat/f8-test-traffic` | — | low priority |
 | 11 | F9 | ha-supervisor-read | dashboard | Merged | `feat/f9-ha-supervisor-read` | — | token is now a dedicated `eshu` HA admin user |
 | 12 | F10 | ha-supervisor-actions | dashboard | Ready (after F9) | `feat/f10-ha-supervisor-actions` | F9, F3, Chunk H | reviewer pass + security reviewer sign-off |
-| 13 | F11 | ha-config-files | dashboard | **Round 8 (AH1–AH4: one open per file via `/proc`, tree-wide `secrets.yaml`, mode by `umask`, `!include secrets.yaml` refused) — to security for a re-read of Z1/Z2/Z4 and the scripts** | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | security re-reads Z1/Z2/Z4 changed parts and the five scripts |
+| 13 | F11 | ha-config-files | dashboard | Security round 8 (`a92c789`): AH1/AH3 approved in shape; **AL1–AL4 must** (check new files before writing, `redact` fails closed, collect and order values, `!include` check on parsed YAML); AL5/AL6 should | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | security re-reads `redact`, the creates and the preflight |
 | 14 | F14 | inventory | dashboard + MCP | Merged | `feat/f14-inventory` | Chunk H | |
 | 15 | F19 | unattended-limits | gateway + dashboard | **Merged** 2026-11-11 (security sign-off `67bec51`; AF1/AF2 checked) | `feat/f19-unattended-limits` | F4, F5, F12 | AF3 goes on the next gateway branch |
 | 16 | F15 | probes | dashboard + MCP | **Merged** 2026-11-11 (AG1 security decision `eca8982`; AI1 fix merged) | `feat/f15-probes` | F4, F12, F14 | |
