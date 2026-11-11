@@ -415,6 +415,9 @@ def on_startup():
         app.router.routes.insert(mcp_idx, Mount(f"/mcp/{ns}", subapp, name=f"mcp_{ns}"))
     # Apply the configured MCP allowed-hosts (DNS-rebinding allowlist)
     refresh_mcp_allowed_hosts()
+    # F16: start approved recipe runs and retire runs whose plan never was.
+    from core.recipes import start_worker as start_recipe_worker
+    start_recipe_worker()
 
 
 _mcp_lifespan_ctxs = []
@@ -887,6 +890,31 @@ def receive_request(payload: GatewayPayload, request: Request):
                 raise HTTPException(
                     status_code=403,
                     detail=f'Encoded payload blocked: the decoded command matched "{match[:60]}".')
+
+    # F16/V5: a recipe SSH step reserved its request row before the engine
+    # called the gateway. Hand that exact row back, once, so the gateway claims
+    # it by request id (as F19's unattended rows are claimed) instead of
+    # opening a card. The row is approved and unattended with a limit; without
+    # `run_limits: v1` nothing is handed out and the engine records not_run.
+    if (not frozen and payload.force_jit and sid
+            and not get_gateway_zero_trust(target_ip)
+            and (payload.run_limits or '').strip() == 'v1'):
+        from db.requests import get_request_row, take_recipe_reservation
+        reserved = take_recipe_reservation(target_ip, cmd, sid, agent, now)
+        if reserved:
+            row = get_request_row(reserved) or {}
+            try:
+                limit = json.loads(row.get('run_limit') or '')
+            except (TypeError, ValueError):
+                limit = {}
+            record_audit_event(
+                'recipe_step_approved', target_ip,
+                details=('Recipe request #%d handed to the gateway (run %s, '
+                         'session %s): %s'
+                         % (reserved, row.get('recipe_run_id'), sid, cmd[:80])))
+            return {"status": "ok", "id": f"{reserved:06d}",
+                    "request_id": reserved, "approved": True,
+                    "run_limit": limit}
 
     # F3: an operator-approved session plan authorises these exact bytes.
     # Order per § 2.6: after the encoded-payload block, before the session
@@ -4161,6 +4189,150 @@ def end_session_plan(plan_id: int, request: Request):
                        details=f"Session plan #{plan_id} for session "
                                f"{plan['session_id']} ended")
     return _plan_payload(plan)
+
+
+# ── F16: recipes ──────────────────────────────────────────────────────
+
+class RecipePreviewPayload(BaseModel):
+    version: int = 0
+    parameters: dict = {}
+
+
+class RecipeRunPayload(BaseModel):
+    parameters: dict = {}
+    session_id: str = ""
+
+
+def _recipe_payload(recipe, with_document=False):
+    from core.recipes import recipe_summary
+    from db.recipes import get_version, list_versions
+    out = recipe_summary(recipe)
+    versions = []
+    for row in list_versions(recipe['id']):
+        versions.append({
+            'version': row['version'], 'content_hash': row['content_hash'],
+            'created_at': row['created_at'], 'approved_at': row['approved_at'],
+            'approved_by': row['approved_by'],
+            'is_current': row['id'] == recipe.get('current_version_id'),
+        })
+    out['versions'] = versions
+    if with_document and recipe.get('current_version_id'):
+        version = get_version(recipe['current_version_id'])
+        out['document'] = version['document'] if version else {}
+    return out
+
+
+@app.get("/api/recipes")
+def list_recipes_route(request: Request):
+    _check_session(request)
+    from db.recipes import list_recipes
+    return [_recipe_payload(recipe) for recipe in list_recipes()]
+
+
+@app.get("/api/recipes/{recipe_id}")
+def get_recipe_route(recipe_id: int, request: Request):
+    _check_session(request)
+    from db.recipes import get_recipe
+    recipe = get_recipe(recipe_id=recipe_id)
+    if not recipe:
+        raise HTTPException(status_code=404, detail="Recipe not found")
+    return _recipe_payload(recipe, with_document=True)
+
+
+@app.post("/api/recipes/{recipe_id}/versions/{version}/approve")
+def approve_recipe_version(recipe_id: int, version: int, request: Request):
+    """Approve one version; any edit is a new, unapproved version."""
+    _check_session(request)
+    from core.recipes import RecipeError, approve
+    try:
+        approved = approve(recipe_id, version, actor='operator')
+    except RecipeError as exc:
+        raise HTTPException(status_code=400, detail=exc.message)
+    return {'version': approved['version'],
+            'content_hash': approved['content_hash'],
+            'approved_at': approved['approved_at']}
+
+
+@app.post("/api/recipes/{recipe_id}/disable")
+def disable_recipe_route(recipe_id: int, request: Request):
+    _check_session(request)
+    from db.recipes import disable_recipe
+    if not disable_recipe(recipe_id):
+        raise HTTPException(status_code=404, detail="Recipe not found")
+    record_audit_event('recipe_disabled', details='Recipe #%d disabled' % recipe_id,
+                       actor='operator')
+    return {'status': 'disabled'}
+
+
+@app.post("/api/recipes/{recipe_id}/preview")
+def preview_recipe_version(recipe_id: int, payload: RecipePreviewPayload,
+                           request: Request):
+    """Render a draft or approved version with the operator's values (Q4)."""
+    _check_session(request)
+    from core.recipes import RecipeError, preview_version
+    from db.recipes import get_recipe
+    recipe = get_recipe(recipe_id=recipe_id)
+    if not recipe:
+        raise HTTPException(status_code=404, detail="Recipe not found")
+    version = payload.version
+    if not version and recipe.get('current_version_id'):
+        from db.recipes import get_version
+        current = get_version(recipe['current_version_id'])
+        version = current['version'] if current else 0
+    try:
+        return preview_version(recipe_id, version, payload.parameters)
+    except RecipeError as exc:
+        raise HTTPException(status_code=400, detail=exc.message)
+
+
+@app.post("/api/recipes/{recipe_id}/run")
+def run_recipe_route(recipe_id: int, payload: RecipeRunPayload, request: Request):
+    """Start an approved recipe: fills the steps into a plan and returns it."""
+    _check_session(request)
+    from core.recipes import RecipeError, start_run
+    from db.recipes import get_recipe
+    recipe = get_recipe(recipe_id=recipe_id)
+    if not recipe:
+        raise HTTPException(status_code=404, detail="Recipe not found")
+    try:
+        result = start_run(recipe['id'], payload.parameters, agent='',
+                           session_id=payload.session_id, operator='operator')
+    except RecipeError as exc:
+        raise HTTPException(status_code=400, detail=exc.message)
+    return result
+
+
+@app.get("/api/recipe-runs")
+def list_recipe_runs_route(request: Request, recipe_id: int = None,
+                           limit: int = 50):
+    _check_session(request)
+    from db.recipes import list_runs
+    return list_runs(recipe_id=recipe_id, limit=max(1, min(int(limit), 200)))
+
+
+@app.get("/api/recipe-runs/{run_id}")
+def get_recipe_run_route(run_id: int, request: Request):
+    _check_session(request)
+    from core.recipes import preview_run
+    from db.recipes import get_run
+    run = get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    data = preview_run(run_id) or {}
+    data['run'] = run
+    return data
+
+
+@app.post("/api/recipe-runs/{run_id}/rollback")
+def rollback_recipe_run(run_id: int, request: Request):
+    """Propose the undo steps of what this run created, in reverse, as a plan."""
+    _check_session(request)
+    from core.recipes import RecipeError, rollback
+    try:
+        result = rollback(run_id, agent='', session_id='')
+    except RecipeError as exc:
+        raise HTTPException(status_code=400, detail=exc.message)
+    return result
 
 
 @app.get("/api/sessions/{sid}/detail")

@@ -48,6 +48,7 @@ OVERRIDE_BUCKETS = ('session-override', 'host-override')
 # approval, the second is a tag on a row a human still cleared.
 KNOWN_REASON_PREFIXES = {
     'session-plan': 'plan',
+    'recipe': 'plan',          # F16: an approved recipe run's SSH step
     'session-override': 'session-override',
     'override': 'host-override',
     'read-lane': 'read-lane',

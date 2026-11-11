@@ -83,6 +83,18 @@ def init_requests_tables(cursor):
                 "ALTER TABLE requests ADD COLUMN run_limit TEXT NOT NULL DEFAULT ''")
         except Exception:
             pass
+    # F16/V5: a recipe SSH step reserves its request row before the engine
+    # calls the gateway; `receive_request` hands that exact row back (by id) to
+    # the gateway, once. A direct call cannot create or hand back a reservation
+    # for a run it does not own, and the plan item is claimed only by the
+    # engine's (run, step) claim.
+    for col, decl in [('recipe_run_id', 'INTEGER NOT NULL DEFAULT 0'),
+                      ('recipe_handed', 'INTEGER NOT NULL DEFAULT 0')]:
+        if col not in existing:
+            try:
+                cursor.execute(f"ALTER TABLE requests ADD COLUMN {col} {decl}")
+            except Exception:
+                pass
 
 TICKET_FORMAT_V2 = 'v2'
 
@@ -431,3 +443,51 @@ def get_session_requests(session_id: str, limit: int = 500):
         ''', (session_id, limit))
         rows = cursor.fetchall()
         return [dict(row) for row in rows]
+
+
+# ── F16: the recipe step's reserved request row ────────────────────────
+
+def create_recipe_request(target_ip: str, command: str, run_id: int,
+                          step_id: str, session_id: str = '', agent: str = '',
+                          run_limit: str = '') -> int:
+    """Create the approved, unattended row a recipe SSH step will run under."""
+    req_id = create_request(
+        target_ip, command, status='approved', ttl=90,
+        reason='recipe:%d:%s' % (int(run_id), step_id),
+        session_id=session_id, agent=agent, unattended=True,
+        run_limit=run_limit)
+    with db_conn() as conn:
+        conn.execute('UPDATE requests SET recipe_run_id = ? WHERE id = ?',
+                     (int(run_id), int(req_id)))
+        conn.commit()
+    return req_id
+
+
+def take_recipe_reservation(target_ip: str, command: str, session_id: str,
+                            agent: str, now=None):
+    """Hand the engine's reserved row to the gateway that asks for it.
+
+    Matched by the exact row the engine created (target, command, session,
+    agent), never by a plan item, and handed out once (`recipe_handed`). A
+    direct call can only be handed a row the engine reserved for a run; it
+    cannot create one, and it never spends the plan item.
+    """
+    now = int(now or time.time())
+    with db_conn() as conn:
+        cur = conn.cursor()
+        row = cur.execute('''
+            SELECT id FROM requests
+            WHERE target_ip = ? AND command = ? AND session_id = ? AND agent = ?
+              AND status = 'approved' AND unattended = 1 AND recipe_handed = 0
+              AND recipe_run_id > 0 AND expires_at > ?
+            ORDER BY id LIMIT 1
+        ''', (target_ip, command, session_id or '', agent or '', now)).fetchone()
+        if not row:
+            return None
+        cur.execute('UPDATE requests SET recipe_handed = 1 '
+                    'WHERE id = ? AND recipe_handed = 0', (row['id'],))
+        if cur.rowcount != 1:
+            conn.rollback()
+            return None
+        conn.commit()
+        return row['id']

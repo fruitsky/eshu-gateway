@@ -307,8 +307,13 @@ def _store_result(request_id: int, exit_code: int, duration_ms: int,
 
 
 def ssh_exec(host: str, command: str, session_id: str = '', timeout=None,
-             wait: bool = False, agent=None) -> dict:
-    """Run one command on one registered gateway, or explain the refusal."""
+             wait: bool = False, agent=None, force_jit=None) -> dict:
+    """Run one command on one registered gateway, or explain the refusal.
+
+    `force_jit=True` can only **add** gating (F16's engine uses it so a recipe
+    step always goes through the reserved row and its run limit); it can never
+    turn a forced JIT off.
+    """
     agent = agent or get_current_agent()
     started = time.time()
 
@@ -383,7 +388,7 @@ def ssh_exec(host: str, command: str, session_id: str = '', timeout=None,
         timeout_s = DEFAULT_TIMEOUT
     timeout_s = max(1, min(timeout_s, MAX_TIMEOUT))
 
-    force_jit = policy['ssh_mode'] == DEFAULT_SSH_MODE
+    force_jit = (policy['ssh_mode'] == DEFAULT_SSH_MODE) or bool(force_jit)
     try:
         command_line = _signed_command(gateway, key_hex, name, session_id or '',
                                        force_jit, command)

@@ -96,6 +96,17 @@ def init_session_plans_tables(cursor):
             cursor.execute(f"ALTER TABLE session_plan_items ADD COLUMN {col} TEXT DEFAULT {default}")
         except Exception:
             pass
+    # F16/V5: recipe-made items are marked and claimed only by the engine's
+    # (run, step) claim; the ordinary SSH and MCP claims never match them.
+    for col, default in [('source', "''"), ('recipe_run_id', '0'),
+                         ('step_id', "''")]:
+        try:
+            cursor.execute(
+                f"ALTER TABLE session_plan_items ADD COLUMN {col} "
+                f"{'TEXT' if col in ('source', 'step_id') else 'INTEGER'} "
+                f"NOT NULL DEFAULT {default}")
+        except Exception:
+            pass
 
 
 def _forbidden_command_char(command: str):
@@ -195,6 +206,11 @@ def _validate_mcp_item(item):
     # the handler's preflight summary when it has one. Both are display only;
     # the call still matches on the hash of the raw arguments.
     display, summary = _mcp_display(integration, tool, raw)
+    if not display and raw:
+        # F10 K1 leftover: an empty display with non-empty arguments means the
+        # operator would approve bytes the card never showed. Refuse.
+        raise PlanError('invalid_args',
+                        'the arguments could not be displayed for review')
     if len(display.encode('utf-8')) > MAX_ARGS_DISPLAY:
         # Nit (K1 review): the card used to truncate the display while the
         # match used the full arguments, so an operator could approve a tail
@@ -495,7 +511,7 @@ def _claim_candidate(conn, session_id: str, host: str, command: str, now: int,
         JOIN session_plans p ON p.id = i.plan_id
         WHERE p.session_id = ? AND p.status = 'approved' AND p.until > ?
           AND i.removed = 0 AND i.uses < i.max_uses
-          AND i.kind = 'ssh'
+          AND i.kind = 'ssh' AND COALESCE(i.source, '') != 'recipe'
           AND i.command = ? AND (i.host = ? OR i.host = '*')
     '''
     params = [session_id, now, command, host]
@@ -526,7 +542,8 @@ def _claim_mcp_candidate(conn, session_id: str, owner: str, integration: str,
         WHERE p.session_id = ? AND p.status = 'approved' AND p.until > ?
           AND s.agent != '' AND s.agent = ?
           AND i.removed = 0 AND i.uses < i.max_uses
-          AND i.kind = 'mcp' AND i.integration = ? AND i.tool = ?
+          AND i.kind = 'mcp' AND COALESCE(i.source, '') != 'recipe'
+          AND i.integration = ? AND i.tool = ?
           AND i.args_hash = ?
         ORDER BY i.id
         LIMIT 1
@@ -613,6 +630,106 @@ def claim_plan_item(session_id: str, host: str, command: str, now: int = None,
         ''', (row['id'], now))
         if cur.rowcount != 1:
             # Another request took the last use between the SELECT and here.
+            conn.rollback()
+            return None
+        conn.commit()
+        return (row['plan_id'], row['id'])
+
+
+# ── F16: recipe plans (V5) ─────────────────────────────────────────────
+
+RECIPE_STEP_MAX_USES = 1
+
+
+def create_recipe_plan(session_id: str, run_id: int, items) -> dict:
+    """Create the run's plan, with engine-built items marked `source='recipe'`.
+
+    The items are not re-validated by `validate_items`: the engine has already
+    checked them against the recipe allowlists (V3/V6), and an `mcp` recipe
+    item names an integration tool outside `PLAN_COVERABLE_TOOLS`. They still
+    land in the same table, so the operator's plan card renders them and the
+    ordinary claims can never match them (V5).
+    """
+    sid = (session_id or '').strip()[:64]
+    if not sid:
+        raise PlanError('invalid_session', 'session_id is required')
+    if not items:
+        raise PlanError('invalid_items', 'a recipe run needs at least one step')
+    now = int(time.time())
+    with db_conn() as conn:
+        cur = conn.cursor()
+        old = [row['id'] for row in cur.execute(
+            "SELECT id FROM session_plans WHERE session_id = ? AND status = 'proposed'",
+            (sid,)).fetchall()]
+        for plan_id in old:
+            cur.execute('DELETE FROM session_plan_items WHERE plan_id = ?', (plan_id,))
+            cur.execute('DELETE FROM session_plans WHERE id = ?', (plan_id,))
+        cur.execute('''
+            INSERT INTO session_plans (session_id, status, created_at, note, origin)
+            VALUES (?, 'proposed', ?, ?, 'recipe')
+        ''', (sid, now, 'recipe run #%d' % int(run_id)))
+        plan_id = cur.lastrowid
+        for item in items:
+            cur.execute('''
+                INSERT INTO session_plan_items
+                    (plan_id, host, command, max_uses, uses, removed,
+                     kind, integration, tool, args_hash, args_json, summary,
+                     source, recipe_run_id, step_id)
+                VALUES (?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, 'recipe', ?, ?)
+            ''', (plan_id, item.get('host') or '*',
+                  item.get('command') or '', int(item.get('max_uses') or 1),
+                  item.get('kind') or 'ssh', item.get('integration') or '',
+                  item.get('tool') or '', item.get('args_hash') or '',
+                  item.get('args_json') or '', item.get('summary') or '',
+                  int(run_id), item.get('step_id') or ''))
+        conn.commit()
+    return {'plan_id': plan_id, 'status': 'proposed', 'session_id': sid,
+            'items': len(items)}
+
+
+def open_plan_for(session_id: str, now: int = None):
+    """The session's proposed/approved plan, if any (one approval at a time)."""
+    now = int(now or time.time())
+    with db_conn() as conn:
+        row = conn.execute('''
+            SELECT id FROM session_plans
+            WHERE session_id = ? AND (status = 'proposed'
+                  OR (status = 'approved' AND until > ?))
+            ORDER BY id DESC LIMIT 1
+        ''', ((session_id or '')[:64], now)).fetchone()
+        return row['id'] if row else None
+
+
+def claim_recipe_item(run_id: int, step_id: str, now: int = None):
+    """V5: consume one use of one recipe run's step item, and nothing else.
+
+    This is the only claim that matches `source='recipe'` items. It names the
+    run and the step, never bytes or arguments, so a direct call with the same
+    command or arguments cannot spend the approval.
+    """
+    now = int(now or time.time())
+    with db_conn() as conn:
+        cur = conn.cursor()
+        row = cur.execute('''
+            SELECT i.id, i.plan_id
+            FROM session_plan_items i
+            JOIN session_plans p ON p.id = i.plan_id
+            WHERE i.recipe_run_id = ? AND i.step_id = ? AND i.source = 'recipe'
+              AND i.removed = 0 AND i.uses < i.max_uses
+              AND p.status = 'approved' AND p.until > ?
+            ORDER BY i.id LIMIT 1
+        ''', (int(run_id), str(step_id), now)).fetchone()
+        if not row:
+            return None
+        cur.execute('''
+            UPDATE session_plan_items SET uses = uses + 1
+            WHERE id = ? AND removed = 0 AND uses < max_uses
+              AND plan_id IN (
+                  SELECT id FROM session_plans
+                  WHERE status = 'approved' AND until > ?
+              )
+        ''', (row['id'], now))
+        if cur.rowcount != 1:
             conn.rollback()
             return None
         conn.commit()
