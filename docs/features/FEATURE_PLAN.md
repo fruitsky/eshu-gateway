@@ -9922,6 +9922,55 @@ Design text and scripts only; the code round is not started.
 `bash scripts/verify.sh`: `2331 passed, 7 warnings in 429.31s (0:07:09)` (docs
 only).
 
+_(security reviewer)_
+
+**Security review, round 10 (2026-11-11, at `e28f498`): AQ1 is approved. AQ2
+is the right mechanism, but its scope is too wide. Two small must-fixes
+remain, AT1 and AT2. Once they are in and the feature reviewer has checked
+them, the design is closed from my side, and the next thing I read is the
+code.**
+
+AQ1 reads each source through the descriptor it checked. It counts bytes,
+not characters. Every failure is withheld, and `getline` is gone. Accepted.
+
+* **AT1 (must): an include may reach only what `ha_config_read` can
+  already read.**
+  * As written, AQ2 accepts any `.yaml` under `/homeassistant` that has no
+    dot segment. That still includes:
+    * `esphome/*.yaml`, which often holds Wi-Fi passwords and API
+      encryption keys as literals, protected only by ESPHome's own
+      `secrets.yaml`, which AH2 does not cover;
+    * `custom_components/` and other add-on folders.
+  * An `!include` of one of these brings its literals into HA's config.
+    `ha core check` can then quote them in its output, and redaction doesn't
+    know them.
+  * **The rule:** the resolved target must be inside the read tool's own
+    scope.
+    * A file include must sit directly in `/homeassistant`, or under
+      `/homeassistant/packages/`.
+    * A directory include must be `/homeassistant/packages` or below it,
+      never `/homeassistant` itself. The `include_dir` loaders recurse, so
+      the root would reach every folder.
+  * That way an include exposes nothing the agent couldn't already read. The
+    `secrets.yaml` refusal stays.
+  * **Tests:**
+    * `esphome/x.yaml` is refused;
+    * `!include_dir_named .` and `!include_dir_named /homeassistant` are
+      refused;
+    * `packages/a/b.yaml` is accepted.
+* **AT2 (must): handle CRLF line endings in `secrets.yaml`.**
+  * A file saved with CRLF endings (common when it is edited over the Samba
+    add-on) splits into lines ending in `\r`. `add1()` trims only spaces
+    and tabs, so the value stored is `value\r`. That never matches the
+    output, which holds the value without the `\r` because HA's loader
+    resolves it that way.
+  * **Fix:** strip one trailing `\r` from each line before parsing. Do the
+    same in `SECRETS_KEYS_SCRIPT`.
+  * **Test:** a CRLF `secrets.yaml` is redacted.
+
+I accept that a symlink inside the tree pointing outside it is out of reach
+of a lexical preflight, as the note says. The agent can't create one.
+
 ---
 
 ## Chunk F12 — SSH through Eshu over MCP (`ssh_exec`) · slug `ssh-exec` · dashboard (+ small gateway change)
@@ -16826,7 +16875,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 10 | F8 | test-traffic | dashboard | Merged | `feat/f8-test-traffic` | — | low priority |
 | 11 | F9 | ha-supervisor-read | dashboard | Merged | `feat/f9-ha-supervisor-read` | — | token is now a dedicated `eshu` HA admin user |
 | 12 | F10 | ha-supervisor-actions | dashboard | Ready (after F9) | `feat/f10-ha-supervisor-actions` | F9, F3, Chunk H | reviewer pass + security reviewer sign-off |
-| 13 | F11 | ha-config-files | dashboard | Design round 10: **AQ1** (`redact` reads through the checked descriptor, 64 KiB through the environment, no second open) and **AQ2** (`!include` / `!include_dir_*` allowlist) folded; comment-after-tab nit fixed — to security again | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | security re-reads AQ1/AQ2 only |
+| 13 | F11 | ha-config-files | dashboard | Security round 10 (`e28f498`): AQ1 approved; **AT1** (include targets limited to the read tool's scope) and **AT2** (CRLF in `secrets.yaml`) must — then the design is closed from security's side | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | feature reviewer checks AT1/AT2; then code, security reviews it |
 | 14 | F14 | inventory | dashboard + MCP | Merged | `feat/f14-inventory` | Chunk H | |
 | 15 | F19 | unattended-limits | gateway + dashboard | **Merged** 2026-11-11 (security sign-off `67bec51`; AF1/AF2 checked) | `feat/f19-unattended-limits` | F4, F5, F12 | AF3 goes on the next gateway branch |
 | 16 | F15 | probes | dashboard + MCP | **Merged** 2026-11-11 (AG1 security decision `eca8982`; AI1 fix merged) | `feat/f15-probes` | F4, F12, F14 | |
