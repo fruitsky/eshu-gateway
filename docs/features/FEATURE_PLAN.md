@@ -10232,11 +10232,130 @@ busiest host in under 1 s (measured, kept out of the repo).
 
 ### Implementer notes
 
-_(implementer)_
+**Built as a modal, not a tab.** There is no per-host page to hang a tab on:
+hosts are rows in the Gateways table and the sidebar views are a fixed list
+(`VIEWS` in `app.js`), so a "Changes" tab would mean a new view, a route and a
+way back to the host. The row now carries a **Changes** chip next to
+**Remove**, and it opens a modal built like the Override one — same
+`.modal-overlay .widget` markup, same open/close helpers, a 7/14/30-day
+select. The request-sidebar link from the design is **not** built; a change row
+in the modal shows its request id and session, which is the same information
+in the other direction.
+
+Backend, `dashboard/core/change_journal.py`:
+
+* **Requests.** One query for `requests` rows on the host in the window
+  (joined to `request_results` for the F5 exit code and `sessions` for the
+  agent/goal), then filtered in Python: `status` in `EXECUTABLE_STATUSES`
+  (`approved`/`consumed`) and F1's `breakdown()` reporting at least one
+  `write` or `unknown` step. The F7 `inner_target` is shown on the row, so a
+  `pct exec 101 …` write on a node names the guest.
+* **Integration writes.** `integration_calls` rows with `outcome='ok'` whose
+  method is `POST`/`PUT`/`PATCH`/`DELETE`, or whose method is `WS` and whose
+  tool is not marked `read_only` (F10's actions are WS; a tool that has since
+  been deleted is not claimed as a change). Plus `audit_log` rows for
+  `AUDIT_CHANGE_EVENTS` — today `version_updated`, the gateway update Eshu
+  performed on that host. **Note for the reviewer:** `audit_log` has no row
+  per integration write; the per-call audit row is `integration_calls`, which
+  is where every executor records one. The constant is the single place to
+  extend when a later chunk starts writing host changes into `audit_log`.
+* **Mapping to a host, through F14.** `host_identities(ip)` is the IP, the
+  names/FQDNs of any inventory entity that claims it, and the names/VMIDs of
+  the guests whose `host` is this host. A call's host is its own
+  `host`/`resolved_ips` when set, else the integration's `base_url`; a Pulse
+  alert is matched on `resourceId`/`resourceName`/`node`/`id`. Matching is
+  boundary-aware, so `192.0.2.10` does not match `192.0.2.100` and vmid `104`
+  does not match `1040`.
+* **Pulse** is read through `core.inventory._call_tool`, which is the same
+  read-policy gate every inventory source goes through — a tool reconfigured
+  as a non-read is refused before anything is sent (tested). The result is
+  cached under the integration name for 60 s and filtered per host and
+  window, so opening two hosts is one upstream read. Any failure degrades to
+  `alerts_error` with the changes still shown.
+* **The tie-in** names the nearest change at or before an alert's
+  `startTime`, within 30 minutes, and counts the others; it is rendered as
+  "+4 min after #1234" and never as a cause.
+
+**Measured** on a synthetic DB (20 000 requests over 40 hosts and 30 days,
+2 000 on the busiest host, 2 000 integration calls, 500 alerts): `changes_for_host`
+takes **28 ms** for 7 days (493 changes, 107 alerts, 233 KB of JSON) and
+**149 ms** for 30 days (2 134 changes, 1.0 MB). The worst case — 2 000
+*distinct* commands on the host in 7 days, so F1 cannot reuse its cache — is
+**256 ms**. That is well inside the 1 s acceptance and the margin is large
+enough that a slower machine does not change the answer, so **no index is
+added**: `idx_requests_inner_target` already covers the `target_ip` prefix, and
+the query over 2 482 host rows takes 8 ms.
+
+The first measurement was 364 ms for 7 days because `integration_changes`
+looked up the integration (and, for WS rows, the tool) once **per call row** —
+an N+1. Both are now one lookup per integration and one per (integration,
+tool) pair; that is where the 13× came from.
+
+Tests, `tests/test_f23_change_journal.py` (29): the write appears; a read,
+another host's write, a never-run row and an out-of-window row do not; the
+unknown step counts; the inner target and the session are named; the command
+is scrubbed and capped; integration writes count, reads/errors/refusals do
+not; a WS write counts and a read-only WS tool does not; the gateway update
+comes from the audit log; an alert 4 minutes after a change is tied, 40
+minutes after is not, and one before is not; the nearest is named and the
+others counted; an alert on another host is not shown; Pulse down, missing and
+non-read all still show the changes; the read is cached; days are clamped; a
+bad host is refused and an unknown one is empty; the identity matcher is
+boundary-aware; the API is operator-only, returns the timeline, clamps 0/999
+and refuses a non-IP.
+
+Compat: read-only. No migration, no new table, no MCP tool.
+
+**Round 1 — AJ1 and AJ2 (2026-11-11).** Both folded in.
+
+* **AJ1.** A name now matches only as a whole label:
+  `(?<![A-Za-z0-9-])name(?![A-Za-z0-9-])`. The IP and vmid rule is unchanged
+  (`(?<![0-9.])…(?![0-9])`), so `192.0.2.10` still does not match
+  `192.0.2.100` and vmid `104` does not match `1040`. Tests: `pve` owns
+  `pve.example.net` and `pve:pve:104` and not `pve3` / `pve-backup` /
+  `pve-backup.example.net`; `web` does not own `webhook.example.net` but does
+  own `web.example.net`.
+* One thing the label rule alone does not fix, found while testing it: a
+  Pulse id is `<cluster>:<node>:<vmid>`, and the first segment is the cluster
+  prefix — usually literally `pve`. With the label rule, a host named `pve`
+  still owned every `pve:*` alert through that prefix, so `pve:pve3:104`
+  stayed on `pve`'s page. The id is now split on `:` and the first segment
+  dropped when there are three or more, so the node and vmid segments are
+  what match; `pve:pve:104` still belongs to `pve`, `pve:pve3:104` does not.
+  This is the same rule for the alert's own `id`, which in Pulse also carries
+  the resource id.
+* **AJ2.** `get_integrations()` without `include_secret`: the journal reads
+  `name` and `base_url` only, so the secret column is never loaded.
+* Round 2 tests: 33 in the file (four new), including an end-to-end case where
+  a guest named `web` sees its own alert and not `webhook`'s.
+
+`bash scripts/verify.sh`: `2798 passed, 22 skipped, 8 warnings in 591.62s (0:09:51)`.
+
+`bash scripts/verify.sh`: `2671 passed, 22 skipped, 7 warnings in 536.11s (0:08:56)`.
+
 
 ### Reviewer notes
 
 _(reviewer)_
+
+**Round 1 (feature reviewer, 2026-11-11, at `bcf5f9a`): changes requested, AJ1–AJ2 (small).**
+
+The three sources, the tie-in, the cache, the read-policy gate and the
+escaping are right, and so is the modal instead of a tab. The timings
+(28 ms over 7 days, 256 ms worst case) are well inside the budget.
+
+* **AJ1 (must): names match as plain substrings.** `_owned` matches a
+  non-numeric identity anywhere in the text. A host whose inventory name is
+  `pve` therefore owns the alerts and integration writes of `pve3` and
+  `pve-backup`, a guest called `web` owns `webhook.example.net`, and a
+  two-letter name like `ha` owns almost everything. That makes false
+  "+N min after" ties. **Fix:** match a name only as a whole label:
+  `(?<![A-Za-z0-9-])name(?![A-Za-z0-9-])`, so `.` may follow, which keeps
+  `name.example.net`. Keep the IP/vmid rule as it is. **Test:** `pve` does
+  not own `pve3` or `pve-backup`, but does own `pve.example.net` and
+  `pve:pve:104`; `web` does not own `webhook.example.net`.
+* **AJ2 (should): `get_integrations(include_secret=True)`.** The journal
+  needs only `name` and `base_url`, so load without secrets.
 
 ---
 

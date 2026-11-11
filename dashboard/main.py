@@ -2833,6 +2833,22 @@ def view_inventory(request: Request, q: str = None):
     return inventory_snapshot(q or '', limit=25)
 
 
+@app.get("/api/hosts/{ip}/changes")
+def host_changes(ip: str, request: Request, days: int = 7):
+    """F23: one host's change journal — Eshu's own changes plus Pulse alerts.
+
+    Operator-only, read-only. `days` is clamped to 1–30; an unparseable value
+    is refused rather than silently replaced, so a typo in a dashboard link
+    does not look like a different range.
+    """
+    _check_session(request)
+    from core.change_journal import changes_for_host
+    try:
+        return changes_for_host(ip, days)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="A host is an IPv4 address")
+
+
 @app.post("/api/inventory/refresh")
 def refresh_inventory_now(request: Request):
     """Refresh every configured source now. Read-only source calls only."""

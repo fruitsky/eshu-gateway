@@ -5233,7 +5233,8 @@ async function fetchGateways() {
       '<td class="px-4 py-2">' + healthCell + '</td>' +
       '<td class="px-4 py-2 gw-spark-cell">' + spark + '</td>' +
       '<td class="px-4 py-2">' + overrideCell + '</td>' +
-      '<td class="px-4 py-2 text-right whitespace-nowrap"><button onclick="openRemoveGatewayModal(' + escJs(g.ip) + ', ' + escJs(g.hostname) + ', ' + isOnline + ')" class="btn btn-deny btn-xs"> Remove</button></td>' +
+      '<td class="px-4 py-2 text-right whitespace-nowrap"><button onclick="openHostChanges(' + escJs(g.ip) + ', ' + escJs(g.hostname) + ')" class="chip-btn" title="What Eshu changed on this host, with its Pulse alerts">Changes</button> ' +
+        '<button onclick="openRemoveGatewayModal(' + escJs(g.ip) + ', ' + escJs(g.hostname) + ', ' + isOnline + ')" class="btn btn-deny btn-xs"> Remove</button></td>' +
       '</tr>';
   }).join('');
   checkOverrideBanner();
@@ -5385,6 +5386,121 @@ async function cancelOverride(ip) {
       fetchGateways();
     } else { showToast('Failed: ' + (data.detail || 'unknown'), 'error'); }
   } catch(e) { showToast('Error: ' + e.message, 'error'); }
+}
+
+// ── F23: the change journal for one host ────────────────────────────────
+var _hostChangesIp = '';
+
+function openHostChanges(ip, hostname) {
+  _hostChangesIp = ip;
+  var title = document.getElementById('host-changes-title');
+  if (title) title.textContent = 'Changes on ' + (hostname || '') + ' (' + ip + ')';
+  var sel = document.getElementById('host-changes-days');
+  if (sel) sel.value = '7';
+  var body = document.getElementById('host-changes-body');
+  if (body) body.innerHTML = '<span class="text-muted">Loading…</span>';
+  var note = document.getElementById('host-changes-alert-note');
+  if (note) { note.textContent = ''; note.classList.add('hidden'); }
+  document.getElementById('host-changes-modal').classList.remove('hidden');
+  fetchHostChanges();
+}
+
+function closeHostChanges() {
+  _hostChangesIp = '';
+  document.getElementById('host-changes-modal').classList.add('hidden');
+}
+
+function reloadHostChanges() { fetchHostChanges(); }
+
+async function fetchHostChanges() {
+  var ip = _hostChangesIp;
+  if (!ip) return;
+  var sel = document.getElementById('host-changes-days');
+  var days = sel ? sel.value : '7';
+  var body = document.getElementById('host-changes-body');
+  try {
+    var res = await authFetch('/api/hosts/' + encodeURIComponent(ip) + '/changes?days=' + encodeURIComponent(days));
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    var data = await res.json();
+    if (_hostChangesIp !== ip) return;      // reopened for another host
+    renderHostChanges(data);
+  } catch (e) {
+    if (body) body.innerHTML = '<span class="text-warning">Could not load the journal: ' + esc(e.message) + '</span>';
+  }
+}
+
+function hostChangeWhen(ts) {
+  if (!ts) return '';
+  var d = new Date(ts * 1000);
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) + ' ' +
+         d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+}
+
+function hostChangeRow(at, mark, main, detail, full) {
+  var html = '<div class="host-change-row">' +
+    '<span class="host-change-at">' + esc(at) + '</span>' +
+    '<span class="host-change-mark ' + esc(mark.cls) + '">' + esc(mark.text) + '</span>' +
+    '<span class="host-change-main">' + main +
+      (detail ? '<div class="host-change-detail">' + detail + '</div>' : '') +
+      (full ? '<details class="host-change-full"><summary>full text</summary><pre>' + esc(full) + '</pre></details>' : '') +
+    '</span></div>';
+  return html;
+}
+
+function renderHostChanges(data) {
+  var body = document.getElementById('host-changes-body');
+  if (!body) return;
+  var counts = document.getElementById('host-changes-count');
+  if (counts) {
+    counts.textContent = data.counts.changes + ' change' + (data.counts.changes === 1 ? '' : 's') +
+      ' · ' + data.counts.alerts + ' alert' + (data.counts.alerts === 1 ? '' : 's') +
+      (data.counts.ties ? ' · ' + data.counts.ties + ' tied' : '');
+  }
+  var note = document.getElementById('host-changes-alert-note');
+  if (note) {
+    note.textContent = data.alerts_error || '';
+    note.classList.toggle('hidden', !data.alerts_error);
+  }
+  var rows = [];
+  (data.changes || []).forEach(function(c) {
+    var mark = { cls: c.kind, text: c.kind === 'ssh' ? 'CHG' : (c.kind === 'audit' ? 'EVT' : 'INT') };
+    var main, detail;
+    if (c.kind === 'ssh') {
+      main = '<strong>#' + esc(c.request_id) + '</strong> <code>' + esc(c.command) + '</code>';
+      var bits = [];
+      if (c.inner_target) bits.push('guest ' + esc(c.inner_target));
+      bits.push('exit ' + (c.exit_code == null ? '—' : esc(c.exit_code)));
+      if (c.agent) bits.push('agent ' + esc(c.agent));
+      if (c.session_id) bits.push('session ' + esc(String(c.session_id).substring(0, 8)));
+      if (c.session_goal) bits.push(esc(c.session_goal));
+      if (c.excluded) bits.push('test traffic');
+      detail = bits.join(' · ');
+    } else if (c.kind === 'audit') {
+      main = '<strong>' + esc(c.label) + '</strong> ' + esc(c.command);
+      detail = c.agent ? 'by ' + esc(c.agent) : '';
+    } else {
+      main = '<strong>' + esc(c.integration) + '</strong> ' + esc(c.method) + ' <code>' + esc(c.command) + '</code>';
+      detail = 'tool ' + esc(c.tool) + (c.agent ? ' · agent ' + esc(c.agent) : '');
+    }
+    var full = (c.command_full && c.command_full !== c.command) ? c.command_full : '';
+    rows.push({ at: c.at, html: hostChangeRow(hostChangeWhen(c.at), mark, main, detail, full) });
+  });
+  (data.alerts || []).forEach(function(a) {
+    var main = '<strong>' + esc(a.level || 'alert') + '</strong> ' + esc(a.message);
+    var bits = [];
+    if (a.resource) bits.push(esc(a.resource));
+    if (a.acknowledged) bits.push('acknowledged');
+    if (a.tie) {
+      bits.push('<span class="host-change-tie">' + esc(a.tie.text) + '</span>' +
+                (a.tie.others ? ' <span class="text-muted">and ' + esc(a.tie.others) + ' earlier</span>' : ''));
+    }
+    rows.push({ at: a.at, html: hostChangeRow(hostChangeWhen(a.at),
+      { cls: 'alert', text: 'ALERT' }, main, bits.join(' · '), '') });
+  });
+  rows.sort(function(x, y) { return y.at - x.at; });
+  body.innerHTML = rows.length
+    ? rows.map(function(r) { return r.html; }).join('')
+    : '<div class="host-changes-empty">No changes or alerts in this range.</div>';
 }
 
 // ── Session Override (narrower than the per-gateway one) ─────────────────
