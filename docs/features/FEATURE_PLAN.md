@@ -9384,6 +9384,17 @@ Compat: one nullable column, additive.
 
 _(reviewer)_
 
+**Round 1 (feature reviewer, 2026-11-11, at `7fea1b0`): approved; merging.**
+
+The behaviour checked:
+* The list reuses F13's search and is operator-only.
+* `get_runbook()` hides a retired runbook by default, so every agent path
+  (`find_runbooks`, `get_runbook`, `core.conclusions` line 215) stays hidden
+  without a flag.
+* Only the operator route passes `include_retired`.
+* Retire is idempotent, reversible and audited.
+* The renderers' escaping is tested against the shipped `app.js`.
+
 ---
 
 ## 7. Backlog (not planned in detail)
