@@ -10882,6 +10882,24 @@ sections the security reviewer re-reads.
 
 `bash scripts/verify.sh`: 2765 passed, 22 skipped, 8 warnings in 570.56s (0:09:30) (docs only).
 
+**Design round 3 check (feature reviewer, 2026-11-11, at `1a4aa20`): the should items AR5–AR7 are in; to the security reviewer for § 3 and § 4.**
+
+AR5–AR7 are in:
+* there is no `timeout` wrapper;
+* the claim is bound to `check_token`;
+* there is a `CHECK_INTERNAL` AST test, and History reads "approved via
+  plan #P".
+
+**One point for the security re-read of AR6:** the claim is bound by a token
+carried in the request's reason. Make sure that the token:
+* is random (≥ 128 bits);
+* is never returned to the agent (`session_plan`, `session_summary`,
+  `check_request`, History);
+* is not accepted from a reason the agent can set on a direct-SSH request.
+
+Otherwise, the agent could race the worker with the same bytes and the
+token.
+
 ---
 
 ## Chunk F23 — Change journal tied to alerts · slug `change-journal` · dashboard only
