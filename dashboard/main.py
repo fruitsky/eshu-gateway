@@ -112,6 +112,7 @@ from schemas import (
     ApprovedWindowPayload, WindowUpdatePayload, WindowRequestPayload,
     NotifyConfigPayload, ExcludeRequestsPayload, InventorySettingsPayload,
     ConclusionReviewPayload, ConclusionEditPayload, RunbookPromotePayload,
+    RunbookRetirePayload,
     SSHHostKeyPayload,
 )
 
@@ -4298,14 +4299,54 @@ def promote_conclusion_endpoint(conclusion_id: int,
     return {'status': 'ok', 'runbook': runbook}
 
 
+@app.get("/api/runbooks")
+def list_runbooks_endpoint(request: Request, q: str = '', tag: str = '',
+                           include_retired: int = 0):
+    """X2: the operator's runbook list, through F13's own search.
+
+    Same ranking as `find_runbooks`, so the operator and the agents agree on
+    what "matches"; a bigger cap (100) because this is a page. A retired
+    runbook is listed only when `include_retired` is set, and it carries the
+    flag so the UI can grey it.
+    """
+    _check_session(request)
+    from core.conclusions import list_runbook_payloads
+    tags = [tag] if tag else []
+    rows = list_runbook_payloads(q, tags, include_retired=bool(include_retired))
+    return {'runbooks': rows, 'count': len(rows),
+            'include_retired': bool(include_retired)}
+
+
 @app.get("/api/runbooks/{runbook_id}")
 def get_runbook_endpoint(runbook_id: int, request: Request):
     _check_session(request)
     from core.conclusions import get_runbook_payload
-    payload = get_runbook_payload(runbook_id)
+    # The operator may open a retired runbook (to un-retire it); an agent
+    # never reaches this route, and `get_runbook_payload()` still hides a
+    # retired row by default for every other caller.
+    payload = get_runbook_payload(runbook_id, include_retired=True)
     if not payload:
         raise HTTPException(status_code=404, detail="not_found")
     return payload
+
+
+@app.post("/api/runbooks/{runbook_id}/retire")
+def retire_runbook_endpoint(runbook_id: int, payload: RunbookRetirePayload,
+                            request: Request):
+    """X2: retire or un-retire a runbook. Audited, reversible, no delete."""
+    _check_session(request)
+    from db.conclusions import set_runbook_retired
+    row = set_runbook_retired(runbook_id, bool(payload.retired))
+    if not row:
+        raise HTTPException(status_code=404, detail="not_found")
+    record_audit_event(
+        'runbook_retired' if payload.retired else 'runbook_unretired',
+        details='Runbook #%d "%s" %s' % (
+            runbook_id, (row.get('title') or '')[:80],
+            'retired' if payload.retired else 'restored'))
+    return {'status': 'ok', 'id': runbook_id,
+            'retired': bool(row.get('retired')),
+            'retired_at': row.get('retired_at') or 0}
 
 
 @app.get("/api/sessions/recent")

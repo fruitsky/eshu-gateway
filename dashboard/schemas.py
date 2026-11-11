@@ -120,6 +120,11 @@ class RunbookPromotePayload(BaseModel):
     title: str = ""
     when_to_use: str = ""
 
+
+class RunbookRetirePayload(BaseModel):
+    """X2: one flag. Retiring is reversible, so there is no reason to delete."""
+    retired: bool = True
+
 class NotifyConfigPayload(BaseModel):
     url: str
     events: str

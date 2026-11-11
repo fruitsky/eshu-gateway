@@ -263,8 +263,8 @@ def find_runbooks(query, tags=None):
     return {'runbooks': items, 'count': len(items), 'more': len(rows) > 5}
 
 
-def get_runbook_payload(runbook_id):
-    row = get_runbook(runbook_id)
+def get_runbook_payload(runbook_id, include_retired=False):
+    row = get_runbook(runbook_id, include_retired=include_retired)
     if not row:
         return None
     return _scrub_payload({
@@ -277,7 +277,33 @@ def get_runbook_payload(runbook_id):
         'steps': row['steps'],
         'dead_ends': row['dead_ends'],
         'created_at': row['created_at'],
+        'retired': row.get('retired', False),
+        'retired_at': row.get('retired_at', 0),
     })
+
+
+def list_runbook_payloads(query='', tags=None, include_retired=False,
+                         limit=100):
+    """The operator's runbook list: the same search agents use, newest first.
+
+    `find_runbooks` caps at 5 and never shows a retired runbook; this is the
+    page, so it takes a bigger cap and, when asked, the retired ones.
+    """
+    rows = search_runbooks(_scrub(query), tags,
+                           limit=max(1, min(int(limit or 100), 100)),
+                           include_retired=bool(include_retired))
+    return [_scrub_payload({
+        'id': row['id'],
+        'session_id': row['session_id'],
+        'conclusion_id': row['conclusion_id'],
+        'title': _scrub(row['title']),
+        'when_to_use': _scrub(row['when_to_use']),
+        'tags': row['tags'],
+        'step_count': len(row['steps']),
+        'created_at': row['created_at'],
+        'retired': row.get('retired', False),
+        'retired_at': row.get('retired_at', 0),
+    }) for row in rows]
 
 
 def scrub_read(rows):

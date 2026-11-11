@@ -81,6 +81,15 @@ def init_conclusions_tables(cursor):
             UNIQUE(conclusion_id)
         )
     ''')
+    # X2: a runbook can be retired (reversibly, audited) without losing it.
+    # NULL means active; the timestamp is when it was retired.
+    existing = {row[1] for row in cursor.execute(
+        "PRAGMA table_info(runbooks)").fetchall()}
+    if 'retired_at' not in existing:
+        try:
+            cursor.execute("ALTER TABLE runbooks ADD COLUMN retired_at INTEGER")
+        except Exception:
+            pass
 
 
 def _loads(value, default):
@@ -110,6 +119,8 @@ def _runbook(row):
     item['tags'] = _loads(item.pop('tags_json', '[]'), [])
     item['steps'] = _loads(item.pop('steps_json', '[]'), [])
     item['dead_ends'] = _loads(item.pop('dead_ends_json', '[]'), [])
+    item['retired_at'] = item.get('retired_at') or 0
+    item['retired'] = bool(item['retired_at'])
     return item
 
 
@@ -312,7 +323,12 @@ def create_runbook(conclusion_id, title: str, when_to_use: str, steps,
         return cursor.fetchone()['id']
 
 
-def get_runbook(runbook_id):
+def get_runbook(runbook_id, include_retired=False):
+    """One runbook. A retired one is invisible unless `include_retired`.
+
+    The default is the agent-facing answer, so `get_runbook_payload` cannot
+    leak a retired runbook by calling this with no arguments.
+    """
     with db_conn() as conn:
         cursor = conn.cursor()
         cursor.execute('''
@@ -323,7 +339,36 @@ def get_runbook(runbook_id):
         row = cursor.fetchone()
         if not row or row['conclusion_status'] != 'confirmed':
             return None
-        return _runbook(row)
+        item = _runbook(row)
+        if item['retired'] and not include_retired:
+            return None
+        return item
+
+
+def set_runbook_retired(runbook_id, retired=True, now=None):
+    """Retire or un-retire one runbook. Returns the new row, or None.
+
+    Reversible and idempotent: retiring twice keeps the first timestamp, and
+    un-retiring clears it.
+    """
+    with db_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT id, retired_at FROM runbooks WHERE id = ?',
+                       (int(runbook_id),))
+        row = cursor.fetchone()
+        if not row:
+            return None
+        if retired:
+            cursor.execute(
+                'UPDATE runbooks SET retired_at = ? WHERE id = ? AND retired_at IS NULL',
+                (int(now or time.time()), int(runbook_id)))
+        else:
+            cursor.execute(
+                'UPDATE runbooks SET retired_at = NULL WHERE id = ?',
+                (int(runbook_id),))
+        conn.commit()
+        cursor.execute('SELECT * FROM runbooks WHERE id = ?', (int(runbook_id),))
+        return _runbook(cursor.fetchone())
 
 
 def list_runbooks_for_session(session_id):
@@ -361,8 +406,10 @@ def search_confirmed(query, limit: int = 5):
         return [_conclusion(row) for row in cursor.fetchall()]
 
 
-def search_runbooks(query, tags=None, limit: int = 5):
+def search_runbooks(query, tags=None, limit: int = 5, include_retired=False):
     where = ["c.status = 'confirmed'"]
+    if not include_retired:
+        where.append('r.retired_at IS NULL')
     params = []
     if query:
         # S2: match per term, not the whole string. "nginx reload" must find a
