@@ -9776,6 +9776,107 @@ AS1–AS6 are in as asked:
   another token's task read;
 * `snapshot_secret` is popped everywhere.
 
+_(security reviewer)_
+
+**Security code review (2026-11-11, at `dbc51a6`; code `639ce4e` +
+`239dc84`): changes requested. AU1–AU3 must. AU4 should. The guards are
+right. I read the AU1–AU3 diff before F21 merges.**
+
+What I checked and accept:
+* **The path guard.** It sits in `_http_roundtrip`, the lowest point.
+  Decode-until-stable, segment matching anywhere, every method except
+  `GET`/`HEAD`, and unnormalisable paths refused on every integration
+  (AS1).
+* **The sentinel and its AST test.**
+* **Internal tools refused in three places:** `run_tool` before gating,
+  MCP registration, and the pending-call executor, reading the flag from
+  the tool table.
+* **The snapshot token.** `snapshot_secret` is popped from every row
+  getter; there is a single getter for it; it is used only on a copy of
+  the integration; every task poll uses it (AS5).
+* **The routes.** Session plus the global CSRF middleware on all of them.
+* **Behaviour.** The freeze is checked before resolving and before
+  approving. The double-click lock. The shared approve function.
+  `dashboard_guest` is required, and also checked at action time.
+  Rollback only from `active`.
+
+* **AU1 (must): `_writes_uncovered()` decides coverage by substring.**
+  * A write step counts as covered if the vmid occurs **anywhere** in its
+    wrapper labels or its text (`inner in context or inner in text`).
+  * So with `inner_target` 101:
+    * a node-side write whose text contains "101" (a path, a port, an
+      argument) is treated as inside the guest;
+    * so is a step wrapped for guest 1010.
+    The card then offers a snapshot that doesn't cover the change.
+  * The test for a node-side write also accepts `snapshot_target_none`, so
+    it can't catch this.
+  * **Fix:**
+    * Record the wrapper's target on each step as structured data, set by
+      the parser where `add_inner(target)` runs, and compare it for
+      equality with the resolved vmid.
+    * Require the breakdown's `inner_targets` to be exactly
+      `[inner_target]`.
+    * Treat a breakdown that isn't `complete` (unparsed or opaque parts) as
+      partial.
+  * **Tests:**
+    * a node-side write containing the digits of the vmid is
+      `snapshot_target_partial`, and nothing else is accepted;
+    * a write wrapped for a vmid that has the target as a prefix is
+      partial;
+    * an incomplete parse is partial.
+* **AU2 (must): AM2's privilege probe isn't built.**
+  * There is no `/access/permissions` call. The offer depends only on a
+    `snapshot_secret` being stored. So:
+    * an operator who stores one all-powerful token in both fields, or who
+      gives the main token `VM.Snapshot.Rollback`, gets the feature with no
+      warning;
+    * every agent-facing guard is then the only layer.
+  * **Fix:**
+    * Add an internal read tool for `GET /access/permissions`.
+    * On the main token: if either snapshot privilege appears on any path,
+      refuse the offer (`snapshot_main_token_privileged`) and show the red
+      warning on the integration page.
+    * On the snapshot token: `VM.Snapshot` must be present (and
+      `VM.Snapshot.Rollback` on PVE 8), or `snapshot_unavailable`.
+    * Also refuse when the two secrets are equal.
+    * Cache the result briefly, run it again at create, and fail closed when
+      the probe errors.
+  * **Tests:**
+    * the main token holding `VM.Snapshot.Rollback`;
+    * identical tokens;
+    * a snapshot token missing `VM.Snapshot`;
+    * a probe error.
+* **AU3 (must): actions must use the row's integration, not the first
+  enabled Proxmox.**
+  * `_recheck`, `rollback` and `delete` call `proxmox_integration()`, which
+    returns the first enabled Proxmox integration. They ignore
+    `row['integration']`. With two clusters, or after a rename or re-enable,
+    the re-check and the action can go to a different cluster than the
+    snapshot lives on.
+  * The name and description check makes a wrong-cluster rollback unlikely,
+    not impossible: the snapshot name is predictable.
+  * The offer has the same problem. An operator node binding is a node
+    *name*, and two clusters can both have a node called `pve`.
+  * **Fix:**
+    * Every action loads `row['integration']` by name, and refuses if it is
+      missing or disabled.
+    * With more than one enabled Proxmox integration, refuse the offer
+      (`snapshot_target_ambiguous`), unless the gateway binding also names
+      the integration.
+  * **Test:** two Proxmox integrations with the same node and vmid. The
+    action goes to the stored one, or is refused.
+* **AU4 (should): smaller points.**
+  * **Description prefix.** The re-check's `startswith('eshu request
+    #%d')` treats `#1` as a prefix of `#12`. Compare up to and including the
+    following space.
+  * **The UPID.** Check its full shape, not only the `UPID:<node>:` prefix:
+    no `/`, `?`, `#` or `..` before it goes into the task path.
+  * **Rollback and delete take a state claim first.** A conditional
+    `UPDATE … SET state='rolling_back'|'deleting' WHERE id=? AND
+    state='active'` (or `failed`, for a delete). Then a rollback and the
+    expiry job can't both pass the re-check on one row. Put the row back if
+    the call fails.
+
 
 ---
 
@@ -10299,7 +10400,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 14 | F14 | inventory | dashboard + MCP | Merged | `feat/f14-inventory` | Chunk H | |
 | 15 | F19 | unattended-limits | gateway + dashboard | Code approved by both reviewers on AF1/AF2 (security `67bec51`); feature reviewer checks AF1/AF2, then merge | `feat/f19-unattended-limits` | F4, F5, F12 | moved ahead of F21–F23: nearly done, and F22 needs it. AF3 goes on the next gateway branch |
 | 16 | F15 | probes | dashboard + MCP | Code round 1: changes requested AG1–AG7 (`56d86e3`); **AG1 to security** | `feat/f15-probes` | F4, F12, F14 | main line, not only local-model |
-| 17 | F21 | snapshot-approve | dashboard + Proxmox | **Code round: AP1 folded, then the whole chunk built** — the unconditional subtree guard in the lowest Proxmox function, five internal tools, a separate snapshot token, the journal, the routes and the sidebar offer; 50 tests with a fake Proxmox | `feat/f21-snapshot-approve` | F7, F14, F2 | feature + security review the code |
+| 17 | F21 | snapshot-approve | dashboard + Proxmox | Security code review (`dbc51a6`): guards approved; **AU1** (coverage by substring), **AU2** (main-token privilege probe missing), **AU3** (actions use the row's integration) must; AU4 should | `feat/f21-snapshot-approve` | F7, F14, F2 | security reads the AU1–AU3 diff, then merge |
 | 18 | F23 | change-journal | dashboard | Ready | `feat/f23-change-journal` | F1, F5, F7, F14 | no security gate; can be coded while F21's design is with security |
 | 18a | X2 | runbooks-page | dashboard UI | Ready | `feat/x2-runbooks-page` | F13 | small; no security gate |
 | 19 | F22 | change-checks | dashboard + MCP | After F19 merges | `feat/f22-change-checks` | F3, F5, F12, F19 | + security sign-off (the unattended check; AG1's origin rule does not cover it) |
