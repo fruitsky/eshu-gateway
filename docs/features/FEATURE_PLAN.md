@@ -10188,7 +10188,8 @@ item.
 reviewer's sign-off on the *unattended* part: a check runs with no human
 watching it, and this note says who may run it, under which identity, with
 what limit, and why it cannot become a second write path. §11 lists the two
-questions for that reviewer.
+questions for that reviewer. **Round 1's AN1–AN5 are folded** (§13 maps them
+to the sections); this revision goes to the security reviewer.
 
 #### 1. What it adds, and why this needs a security decision
 
@@ -10233,53 +10234,89 @@ well (§9).
 
 #### 3. How the check is claimed without a second prompt
 
-**Decision: the check gets its own server-side plan, `origin='check'.`**
+**Decision: the check gets its own server-side plan, `origin='check'`, created
+already approved.**
 
-`core/checks.py` (new, dashboard-side, the only writer) does, for an ssh
-check:
+**3.1 The check plan (AN2).** `core/checks.py` (new, dashboard-side, the only
+writer) creates it with `create_plan(..., origin='check', internal=CHECK_INTERNAL)`:
 
-1. `create_plan(session_id=<the plan's session>, origin='check', items=[one
-   item: host=<the item's host>, command=<the check's exact command>,
-   max_uses=<retries + 1>], note='check for plan #P item #I')`.
-2. `ssh_exec(host, check_command, session_id=<session>, timeout=<=30 s>,
-   wait=False)` in the item's agent context (§4).
-3. The gateway, in `approval` mode, asks `/api/request` with
-   `force_jit=true`. `receive_request` claims the check item:
+* one item: `host` = the item's host, `command` = the check's exact command (or
+  the tool call), `max_uses = retries + 1`;
+* `status='approved'` from the start, **inheriting the parent plan's
+  approval**: `decided_at` = the parent's `decided_at`, `decided_by` = the
+  parent's `decided_by`, `parent_plan_id` = the parent, and `until` =
+  `min(now + 10 min, the parent's until)`. A check plan is never approved by a
+  human and never outlives the plan whose approval it borrows;
+* `note` = `check for plan #P item #I`, so History shows what it belongs to.
 
-   * `plan_origins = ('probe', 'check')` under `force_jit` (the only change
-     to that line), and the reason stays
-     `session-plan:<plan>:<item>:check`;
-   * the claim is the same atomic statement AG1 introduced: `uses <
-     max_uses`, the plan still `approved` and inside its TTL, and the
-     session's owner must be the agent making the call (`_claim_candidate`'s
-     `agent` join). An agent cannot spend another session's check;
-   * `max_uses` is the *only* thing that bounds repetitions: it is
-     `retries + 1`, so a retried check cannot exceed the retries the operator
-     approved, and a duplicated gateway request cannot add a use.
+The inheritance is the reason the check needs no prompt, so it is gated on the
+caller: `create_plan` keeps `proposed` for every other caller and refuses
+`origin='check'` unless the caller passes a module-private
+`CHECK_INTERNAL` sentinel (`db/session_plans.py`) that only `core/checks.py`
+imports. A boolean could be forwarded from stored data; an object cannot.
 
-Why an origin at all, rather than approving the gateway's request by matching
-its bytes:
+**AN2 — it is ended with its parent.** Denying, ending or stopping the parent
+plan ends its check plans in the same transaction (`_decide` and the stop path
+in §8 cascade on `parent_plan_id`), so a check plan cannot outlive the
+authority it borrowed, and a check dispatched after the parent ended claims
+nothing.
 
-* a **claim** proves single use (`uses < max_uses` in the same statement as
-  the SELECT); a **match** cannot — two identical requests, or a retried
-  gateway post, would each be approved, and the check would run twice;
-* the origin keeps the AG1 invariant *auditable*: the set of origins that may
-  cover an approval-mode command is exactly the set of server-side creators
-  (`probe`, `check`), and `receive_request` accepts both by name;
-* the row's reason names the origin, so History shows why no card appeared.
+**3.2 The claim (AN4).** The worker calls `ssh_exec(...)` (§4). In `approval`
+mode the gateway asks `/api/request` with `force_jit=true`, and
+`receive_request` then:
 
-**No second prompt, and the argument for it:** the operator approved the
-check's exact bytes as part of the item — the card renders the check command
-or the tool call, first, on the same card, and approving the plan approves
-it. The check cannot be edited after approval (the item is immutable; a
-change is a new plan), it must pass `is_read_ssh` at proposal *and* at run
-(§6), and it runs under a limit (§5). Asking again would double the
-approvals for every change and stall the plan at the moment the operator has
-moved on — and the second card would show the same bytes the first one did.
+* computes `plan_origins = ('probe',)` as today, and additionally
+  `check_origins = ('check',)` **only when `payload.run_limits == 'v1'`**;
+* tries the check-origin claim first (it is the narrower one), then the probe
+  claim;
+* the claim is AG1's atomic statement: `uses < max_uses`, the plan `approved`
+  and inside its TTL, the session's owner = the calling agent, and the reason
+  `session-plan:<plan>:<item>:check`.
 
-In `normal` mode the gateway does not ask at all, so the dashboard marks the
-check item used itself before dispatching, and the same "once" rule holds
-(§9).
+**AN4 — a gateway that cannot limit never gets the claim.** A request without
+`run_limits: v1` does not reach `claim_plan_item` for the check origin at all,
+so it consumes no use and creates no approved row: the item's `uses` is
+unchanged, the request falls through to a card, `ssh_exec` returns `pending`,
+and the worker records `not_run` / `check_no_limits` (§5).
+
+**AN1 — the order of items.** `_claim_candidate` also refuses a **later** item
+of a plan while an **earlier** item of that plan still has an open check:
+
+```sql
+AND NOT EXISTS (
+  SELECT 1 FROM session_plan_items b
+  WHERE b.plan_id = i.plan_id AND b.removed = 0 AND b.id < i.id
+    AND b.check_json IS NOT NULL AND b.uses > 0
+    AND (b.check_state IS NULL OR b.check_state IN ('pending', 'running'))
+)
+```
+
+An item with a check is *open* from the moment its command is claimed until its
+check is decided. `passed` releases the next item; `failed` and `not_run` stop
+the plan (§8); an item with no check never blocks. Without this rule the check
+would be dispatched after the fact and the agent could have claimed the next
+item during it, so "a failed check stops the remaining items" would be true
+only of the items that had not already run.
+
+**3.3 Why no second prompt, and what bounds the attempts.**
+
+*No second prompt:* the operator approved the check's exact bytes as part of
+the item — the card renders the check command or the tool call under the
+command, and approving the plan approves it. The check cannot be edited after
+approval (the item is immutable; a change is a new plan), it must pass
+`is_read_ssh` at proposal *and* at run (§6), and it runs under a limit (§5).
+Asking again would double the approvals for every change and stall the plan at
+the moment the operator has moved on — and the second card would show the same
+bytes the first one did.
+
+**AN5 — one counter bounds the attempts.** In `normal` mode the gateway does
+not ask the dashboard, and an allowlisted command may never post a request at
+all, so a use count cannot bound the attempts there — and a self-claim would
+spend two uses for one attempt when `receive_request` also claims. The bound is
+therefore **`check_attempts <= retries + 1` on the parent item**, checked by
+the worker before each attempt and incremented after it. `max_uses` stays the
+*claim-side* limit only, and the worker never marks the check item used
+itself.
 
 #### 4. Who runs it, and under which identity
 
@@ -10321,6 +10358,9 @@ as the plain approved row a probe claim creates:
   F19) the check is **`not_run`** with reason `check_limit`: a cut command
   cannot tell us whether the state is good, so it is not a failure and not a
   pass.
+* `ssh_exec` coming back `pending` — the AN4 refusal, or a plain card — is
+  `not_run` with `check_no_limits` when the gateway reported no capability and
+  `check_unclaimed` otherwise, never `passed`.
 
 The tool check has no row and no gateway, so this section does not apply to
 it; it is bounded by its own dashboard timeout (§7).
@@ -10387,7 +10427,9 @@ retries + 1`. A retry only happens on `failed`; `not_run` never retries
 * `_claim_candidate` only matches `p.status='approved'`, so a stopped plan's
   items are **unclaimable**: the next item's command, arriving through the
   real `receive_request`, falls past the plan branch to the normal pending
-  path and becomes a card. That is the point — the plan's authority ends at
+  path and becomes a card. A check that is still open blocks the next item the
+  same way while it runs (AN1, §3.2), so the stop lands before anything after
+  it can run. That is the point — the plan's authority ends at
   the failed check, and nothing after it runs without a fresh human decision.
 * The agent sees it in `session_plan` / `session_summary`: the plan is
   `stopped`, the item carries `check_state` and the reason code, and the
@@ -10399,26 +10441,40 @@ retries + 1`. A retry only happens on `failed`; `not_run` never retries
   "stopped" by the check — it is already over, and the check result is
   recorded on the item without changing the plan's status.
 
-#### 9. Restart safety: a check never runs twice
+#### 9. Off the request thread, and restart safety
 
-Three independent guards, because the failure mode (a check re-run) is
-exactly what makes a "read" expensive or unsafe:
+**AN3 — the check never runs in the F5 handler.** `/api/exec-result` is the
+gateway's own POST. Running `ssh_exec` plus waits and retries there (up to
+240 s, §7) would hold that POST open past its timeout and tie up a worker. So:
 
-1. **Write ahead.** Before dispatching, `core/checks.py` writes
-   `check_state='running'`, `check_token` (a random id), `check_at` and
-   `check_attempts=1` and commits. A dispatch is only attempted after that
-   commit succeeds.
-2. **Startup sweep.** Any item left `running` older than the worst-case bound
-   (§7) becomes **`not_run`** with `check_interrupted`, the plan stops, and
-   it is **never re-dispatched**. The operator can read what happened and
-   approve a new plan; a check whose outcome the dashboard never saw is not
-   evidence that anything passed.
-3. **One use per attempt.** The check item's `max_uses` is `retries + 1` and
-   the claim is atomic, so even a duplicated gateway request cannot exceed
-   the retries the operator approved.
+* the handler writes only `check_state='pending'` (with `check_at` and
+  `check_token`) and returns;
+* a **bounded background worker** does the rest: a `queue.Queue` with two
+  threads started with the app, one check in flight per plan, and a small
+  global cap (2). A full queue leaves the item `pending`, and the startup
+  sweep (§ below) turns it into `not_run` rather than losing it;
+* the worker sets `set_current_agent(<the plan's agent>)` and resets it in a
+  `finally`, so a crashed attempt cannot leak an agent context into the next
+  one;
+* every state transition is a single conditional `UPDATE … WHERE
+  check_state = <expected>` with the item's `check_token`, so two workers (or a
+  restart that raced one) cannot both win.
 
-The token is carried on the result for correlation only; it is not a
-credential and grants nothing.
+A check never runs twice, through four independent guards:
+
+1. **Write ahead.** `pending` is written and committed before the item is
+   enqueued; the worker only picks up a row whose token it read.
+2. **One token, one attempt.** A transition that finds a different token
+   abandons the attempt (it belongs to a previous process), and no new attempt
+   is started for it.
+3. **The startup sweep covers `pending` and `running`.** An item left in
+   either state older than the worst case (§7) becomes **`not_run`** with
+   `check_interrupted`, the plan stops, and it is **never re-dispatched** — a
+   check whose outcome the dashboard never saw is not evidence that anything
+   passed. The operator can read what happened and approve a new plan.
+4. **`check_attempts` (AN5).** The worker refuses to start an attempt when
+   `check_attempts > retries`, so the retries the operator approved are the
+   retries that happen, in `normal` mode too.
 
 #### 10. Storage, UI and MCP
 
@@ -10427,8 +10483,10 @@ credential and grants nothing.
   `check_expected`, `check_attempts`, `check_at`, `check_plan_id`,
   `check_item_id`, `check_token`. All nullable; an item without a check is
   exactly as today.
-* `session_plans` gains `stopped` as a status value, plus `stopped_at` and
-  `stopped_reason` (nullable columns).
+* `session_plans` gains `stopped` as a status value, plus `stopped_at`,
+  `stopped_reason` and `parent_plan_id` (nullable columns; the last one is how
+  a check plan names the plan whose approval it borrows, and how stopping or
+  ending a plan finds its check plans).
 * The plan card (F3) shows each item's check under the command — the exact
   bytes, the `expect`, `wait_s`/`retries` — and its state after the run
   (`passed` in green, `failed`/`not_run` in red with the reason). The session
@@ -10479,13 +10537,40 @@ credential and grants nothing.
   the same; `passed` lets the next item through.
 * **Retries:** a `failed` check retries up to `retries` times and then stops;
   a `not_run` never retries; `max_uses` is `retries + 1`.
-* **Restart:** an item left `running` becomes `not_run` with
+* **Restart:** an item left `running` or `pending` becomes `not_run` with
   `check_interrupted` on startup and is never re-dispatched; a duplicate F5
-  post does not dispatch twice.
+  post does not dispatch twice; a transition with a stale token is abandoned.
+* **Order (AN1):** through the real `receive_request`, a later item's exact
+  bytes arriving while an earlier item's check is `pending` or `running` come
+  back pending and consume nothing; the same bytes after the check `passed`
+  are claimed; a plan whose earlier item has **no** check never blocks.
+* **The check plan (AN2):** it is created `approved` with the parent's
+  approver and `parent_plan_id`, and its `until` is never later than the
+  parent's; `create_plan(origin='check')` without the sentinel is refused and
+  every other origin still gets `proposed`; ending, denying or stopping the
+  parent ends the check plan, and a check dispatched after that claims
+  nothing.
+* **The worker (AN3):** `/api/exec-result` returns with the item `pending`
+  and no `ssh_exec` call; the worker sets and resets the agent context even
+  when the attempt raises; a duplicate enqueue for one token runs once.
+* **No limits (AN4):** an old gateway's request consumes no use and creates
+  no approved row, and the item ends `not_run` / `check_no_limits`.
+* **Attempts (AN5):** `check_attempts` never exceeds `retries + 1` in
+  `normal` mode, and a self-claim cannot spend two uses.
 * **Freeze:** a check runs during a freeze (reads keep working) and the plan
   state is unchanged by it.
 
-`bash scripts/verify.sh`: `2765 passed, 22 skipped, 7 warnings in 572.35s (0:09:32)` (docs only).
+#### 13. What changed in round 2
+
+| item | where | change |
+|---|---|---|
+| AN1 | §3.2, §8 | `_claim_candidate` refuses a later item while an earlier item's check is open (`pending`/`running`), so a check stops the plan *before* the next item can run; `passed` releases it, no check never blocks |
+| AN2 | §3.1 | the check plan is created **approved**, inheriting the parent's approver, `parent_plan_id` and expiry (no later than the parent's), and ended with the parent; `create_plan` refuses `origin='check'` without the private sentinel |
+| AN3 | §9 | the F5 handler only writes `pending`; a bounded queue of two workers runs the check, with `set_current_agent` in a `finally` and token-guarded transitions; the sweep covers `pending` |
+| AN4 | §3.2, §5 | `receive_request` only claims a check origin when the request reports `run_limits: v1`; otherwise nothing is consumed and the item becomes `not_run` / `check_no_limits` |
+| AN5 | §3.3, §9 | `check_attempts <= retries + 1` on the parent item is the bound in every mode; `max_uses` is claim-side only and the worker never self-claims |
+
+`bash scripts/verify.sh`: `2765 passed, 22 skipped, 8 warnings in 570.39s (0:09:30)` (docs only).
 
 ### Implementer notes
 
@@ -12298,7 +12383,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 18c | X3 | integrations-ui | dashboard UI | Requested 2026-11-12; design after F27 is signed off | `feat/x3-integrations-ui` | F27, F10 (P2) | operator walk-through first |
 | 18e | X5 | ui-test-round | dashboard UI | **Implemented** 2026-11-12: six test-round fixes; no endpoint, save path or policy changed | `fix/x5-ui-test-round` | — | six small fixes |
 | 18d | X4 | agents-page | dashboard UI | **Implemented** 2026-11-12: one Agents page (tokens, policy sections, web fetch, activity); Controls renamed Command policy; absent policy fields now keep their stored value | `feat/x4-agents-page` | `fix/agent-ssh-hosts` | rename Controls → Command policy |
-| 19 | F22 | change-checks | dashboard + MCP | **Design note written** — a third server-only origin `check`, the unattended limited row, the read re-check, `expect`, the stop through `receive_request`, restart safety | `feat/f22-change-checks` | F3, F5, F12, F19 | + security sign-off (the unattended check; AG1's origin rule does not cover it) |
+| 19 | F22 | change-checks | dashboard + MCP | **Design round 2: AN1–AN5 folded** — item ordering while a check is open, the check plan created approved (inheriting the parent), a bounded worker, the `run_limits` gate before the claim, `check_attempts` as the bound; to the security reviewer | `feat/f22-change-checks` | F3, F5, F12, F19 | + security sign-off (the unattended check; AG1's origin rule does not cover it) |
 | 20 | F16 | recipes | dashboard + MCP | Design complete (security Round 4; feature reviewer Round 5 with AA1/AA2); code next after F22 | `feat/f16-recipes` | F3, F12, F13, F19 | main line; steps claim by request id; code comes back to security; auto_run comes back to security |
 | 21 | F24 | content-tripwire | dashboard | Design first | `feat/f24-content-tripwire` | F12, F14 | + security sign-off (retention) |
 | 22 | F25 | secrets-broker | gateway + dashboard | Design first | `feat/f25-secrets-broker` | F1, F12, F19; security Chunk 7 before deploy | + security sign-off; gateway bash line by line |
