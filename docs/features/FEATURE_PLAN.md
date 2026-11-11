@@ -9216,6 +9216,39 @@ _(implementer)_
 
 _(security reviewer)_
 
+**Feature reviewer pre-read (2026-11-11, at `72fcab1`): the design is sound, with two fixes for § 4.4 before the security reviewer signs off.**
+
+Target resolution (§ 2), the frozen identity, the exact calls and UPID
+polling (§ 3), the sequence and its failure table (§ 5), the re-check
+against a recycled vmid (§ 6) and the expiry job's "only our own rows"
+rule (§ 7) are all right. The freeze recommendation (§ 8) is reasonable,
+and the decision is the security reviewer's.
+
+* **AK1 (must): the path guard must not depend on "no agent on the stack".**
+  § 4.4 refuses the snapshot subtree only when `current_agent()` is set, and
+  lets every call with no agent context through. An agent-queued generic
+  `write` at `…/snapshot/<name>/rollback` waits as a
+  `pending_integration_calls` row. When the operator approves it, it
+  executes in the operator's request thread, where no agent is on the
+  stack, so it passes the guard. § 4.3 rechecks `internal` on pending rows,
+  but a generic call has no tool row to carry that flag. **Fix:** refuse the
+  subtree's non-GET methods **unconditionally**, and let `core/snapshots.py`
+  through with an explicit argument that only it passes, for example
+  `execute_integration_call(..., snapshot_internal=True)`. That argument is
+  not reachable from `run_tool`, the generic proxy or a stored row. **Test:**
+  an agent queues a generic `POST` at the rollback path, the operator
+  approves it, and it is refused at execution.
+* **AK2 (must): match the rendered path after normalisation, not
+  `^/nodes/…`.**
+  * Proxmox paths are `/api2/json/nodes/…`, and some integrations keep
+    `/api2/json` in the base URL instead of the path. So test the path
+    relative to `api2/json`, whichever side carries it.
+  * Normalise before matching, the way F9's Supervisor rule does:
+    percent-decoding, `//`, `/./`, `..`, a trailing `/` and case.
+  * **Test:** `/api2/json/nodes/pve/lxc/101/snapshot/x/rollback`,
+    `//nodes/pve/lxc/101/snapshot/x/rollback`, and `%2F`- and
+    case-variants are all refused for a non-GET.
+
 
 ---
 
