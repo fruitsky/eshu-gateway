@@ -9725,6 +9725,77 @@ the 65 536-byte straddle and the status line on its own last line.
 `redact` (AL2, AL3), the four create blocks and their `fd_ok` lines (AL1,
 AL6), and the preflight section (AL4). AL5 is one line in the restore plus its
 argument. Everything else is unchanged from round 8.
+
+_(security reviewer)_
+
+**Security review, round 9 (2026-11-11, at `323ad00`): AL1, AL3's ordering
+and keys, AL5, AL6 and the exit-code rule are approved. Two must-fixes
+remain: AQ1 (`redact` reads each file by name a second time, and its error
+check never fires) and AQ2 (`!include` targets need an allowlist). Then I
+re-read only those two parts.**
+
+The create blocks are right:
+* `fd_ok` runs before every write, including the rollback;
+* `chown` goes through the descriptor;
+* the FIFO result in the matrix is the right proof.
+
+A FIFO at a create name with no reader attached makes the open block. That
+is a hang, not a leak, and the runner's SSH timeout ends it as
+`config_state_unknown`. I accept it.
+
+* **AQ1 (must): `redact` must read each source through the descriptor it
+  checked, and must catch read errors.**
+  * **The second open.** Each candidate is checked in a subshell, and that
+    descriptor is closed. Then awk opens the file **by name** again
+    (`getline l < f`). If the name is swapped in between, awk reads
+    something else:
+    * an empty regular file makes the real values silently go missing, and
+      they print in the clear;
+    * a FIFO makes the script hang.
+    This is the same class as AH1.
+  * **The error check never fires.** `if (l < 0)` tests the last *line*
+    read, not `getline`'s return code. So a source that can't be read (it
+    vanished, or is now a directory) ends the loop with nothing added, and
+    no withheld line. That fails open.
+  * **Fix:**
+    * Read each candidate's bytes inside the same subshell that checks it,
+      through that descriptor:
+      `( exec 9< "$f" && [ -f /proc/self/fd/9 ] && cat /proc/self/fd/9 )`.
+    * A non-zero status from that subshell means withhold.
+    * Pass the combined text to awk through the environment
+      (`ENVIRON`), not argv, and not by file name.
+    * Cap the combined size at 64 KiB. Above that, withhold. This keeps it
+      well under the kernel's per-string limit.
+    * In awk, keep `getline`'s return code wherever a file is still read
+      (`while ((r = (getline l < f)) > 0)` … `if (r < 0)`).
+  * **Tests:**
+    * a candidate swapped for an empty file after the check: the values are
+      still redacted, or the output is withheld;
+    * a candidate removed after the check: withheld;
+    * a candidate turned into a directory after the check: withheld.
+* **AQ2 (must): the preflight allowlists `!include` targets, not only
+  refuses `secrets.yaml`.**
+  * HA's `.storage/` files are JSON, and JSON is valid YAML. An `!include`
+    of one loads every stored integration credential as config.
+  * `ha core check` can then quote those values in its errors. Redaction
+    only knows `secrets.yaml` values, so they print in the clear.
+  * A path outside the tree, such as a key file, is the same leak.
+  * **Fix:** after decoding, an `!include` target must meet all of these:
+    * it ends in `.yaml` or `.yml`;
+    * it has no segment that starts with `.`;
+    * it resolves (relative to the file being written, the way HA resolves
+      it) to a path under `/homeassistant`;
+    * it is not `secrets.yaml`.
+  * Apply the same rule to the directory argument of `!include_dir_*`.
+  * The script's `grep` stays as it is.
+  * **Tests:**
+    * a `.storage` target is refused;
+    * a `../` escape is refused;
+    * an absolute path outside the tree is refused;
+    * a non-`.yaml` target is refused;
+    * an ordinary `packages/x.yaml` is accepted.
+* **Nit:** a YAML comment can follow a tab as well as a space. Also strip at
+  the first `\t#`, not only at ` #`.
 ---
 
 ## Chunk F12 — SSH through Eshu over MCP (`ssh_exec`) · slug `ssh-exec` · dashboard (+ small gateway change)
@@ -16629,7 +16700,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 10 | F8 | test-traffic | dashboard | Merged | `feat/f8-test-traffic` | — | low priority |
 | 11 | F9 | ha-supervisor-read | dashboard | Merged | `feat/f9-ha-supervisor-read` | — | token is now a dedicated `eshu` HA admin user |
 | 12 | F10 | ha-supervisor-actions | dashboard | Ready (after F9) | `feat/f10-ha-supervisor-actions` | F9, F3, Chunk H | reviewer pass + security reviewer sign-off |
-| 13 | F11 | ha-config-files | dashboard | **Design round 9: AL1–AL4 and AL5/AL6 folded, exit-code note recorded (dash 2 / ash 1)** — the `fd_ok` checks before every write, fail-closed `redact`, longest-first values, parsed-YAML preflight; to security again | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | security re-reads `redact`, the creates and the preflight |
+| 13 | F11 | ha-config-files | dashboard | Security round 9 (`323ad00`): AL1/AL3 order+keys/AL5/AL6 and exit codes approved; **AQ1** (`redact` reads through the checked descriptor; `getline` errors withhold) and **AQ2** (`!include` target allowlist) must | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | security re-reads AQ1/AQ2 only |
 | 14 | F14 | inventory | dashboard + MCP | Merged | `feat/f14-inventory` | Chunk H | |
 | 15 | F19 | unattended-limits | gateway + dashboard | **Merged** 2026-11-11 (security sign-off `67bec51`; AF1/AF2 checked) | `feat/f19-unattended-limits` | F4, F5, F12 | AF3 goes on the next gateway branch |
 | 16 | F15 | probes | dashboard + MCP | **Merged** 2026-11-11 (AG1 security decision `eca8982`; AI1 fix merged) | `feat/f15-probes` | F4, F12, F14 | |
