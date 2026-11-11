@@ -328,18 +328,30 @@ def get_integrations(include_secret: bool = False):
                 item['snapshot_secret_suffix'] = _suffix(item.get('snapshot_secret'))
                 item.pop('secret', None)
                 item.pop('client_secret', None)
-                item.pop('snapshot_secret', None)
+            # AS6: the second token never travels in a row, not even the
+            # internal `include_secret` variant; `get_snapshot_secret()` is the
+            # only way to read it.
+            item.pop('snapshot_secret', None)
             out.append(item)
         return out
 
 
 def get_integration(name: str):
-    """Full integration row including the secret (internal use only)."""
+    """Full integration row including `secret` (internal use only).
+
+    AS6: `snapshot_secret` is never part of the returned dict — the only way
+    to read it is `get_snapshot_secret()`, so no future serialisation of an
+    integration row can carry the second token.
+    """
     with db_conn() as conn:
         cursor = conn.cursor()
         cursor.execute('SELECT * FROM integrations WHERE name = ?', (name,))
         row = cursor.fetchone()
-        return dict(row) if row else None
+        if not row:
+            return None
+        item = dict(row)
+        item.pop('snapshot_secret', None)
+        return item
 
 
 def get_integration_by_id(integration_id: int):
@@ -347,7 +359,11 @@ def get_integration_by_id(integration_id: int):
         cursor = conn.cursor()
         cursor.execute('SELECT * FROM integrations WHERE id = ?', (integration_id,))
         row = cursor.fetchone()
-        return dict(row) if row else None
+        if not row:
+            return None
+        item = dict(row)
+        item.pop('snapshot_secret', None)
+        return item
 
 
 def update_integration(name: str, base_url: str = None, auth_type: str = None,

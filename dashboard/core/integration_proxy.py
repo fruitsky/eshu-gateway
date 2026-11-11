@@ -688,16 +688,21 @@ def _normalise_path(path) -> str:
     return '/' + text.strip('/')
 
 
-def is_snapshot_path(url_or_path) -> bool:
-    """Is this request inside the snapshot subtree, in any spelling?
+def _path_of(url_or_path) -> str:
+    """The path part of a URL, or the string itself when it is already one.
 
     Only an absolute URL is parsed; a protocol-relative `//nodes/...` is a
     path here, not a host, and `urlparse` would read it as one.
     """
     text = str(url_or_path or '')
     if '://' in text:
-        text = urllib.parse.urlparse(text).path or ''
-    return bool(_SNAPSHOT_PATH_RE.search(_normalise_path(text)))
+        return urllib.parse.urlparse(text).path or ''
+    return text
+
+
+def is_snapshot_path(url_or_path) -> bool:
+    """Is this request inside the snapshot subtree, in any spelling?"""
+    return bool(_SNAPSHOT_PATH_RE.search(_normalise_path(_path_of(url_or_path))))
 
 
 def snapshot_refusal(method, url, snapshot_internal=None):
@@ -706,10 +711,21 @@ def snapshot_refusal(method, url, snapshot_internal=None):
     Every method except GET/HEAD is refused, unconditionally, unless the
     caller holds the sentinel. `snapshot_list` stays available to agents: it
     is a read.
+
+    AS1: a path that cannot be normalised (a dot segment, a backslash or a
+    control character) is refused for every method that changes state, on
+    every integration — a proxy may resolve what the check could not see, and
+    no legitimate tool needs `..`. Failing closed here also means the
+    snapshot rule cannot be evaded by a spelling the normaliser rejects.
     """
     if str(method or 'GET').upper() in _SAFE_METHODS:
         return None
-    if not is_snapshot_path(url):
+    normalised = _normalise_path(_path_of(url))
+    if not normalised:
+        return ('The request path cannot be normalised safely (dot segment, '
+                'backslash or control character), so it is refused for a '
+                'method that changes state.')
+    if not _SNAPSHOT_PATH_RE.search(normalised):
         return None
     if snapshot_internal is SNAPSHOT_INTERNAL:
         return None

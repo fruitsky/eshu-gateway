@@ -17,6 +17,7 @@ import re
 import threading
 import time
 
+from core.approvals import approve_pending_request
 from core.integration_proxy import SNAPSHOT_INTERNAL, ProxyError
 from core.integration_proxy import execute_integration_call
 from db.audit import record_audit_event
@@ -27,7 +28,7 @@ from db.gateways import (
 from db.integrations import get_integration, get_integrations, get_tool
 from db.inventory import get_inventory_items
 from db.misc import get_meta_json, set_meta_json
-from db.requests import (get_request_row, update_request_status_if_pending)
+from db.requests import get_request_row
 from db.snapshots import (
     bump_attempts, create_snapshot, due_snapshots, get_snapshot,
     set_snapshot_state, snapshots_for_request, stale_creating,
@@ -431,6 +432,25 @@ def offer_for_request(request_id):
 
 # ── create, then approve (§5) ──────────────────────────────────────────
 
+def _freeze_reason():
+    """Why a new snapshot is refused while a freeze is on (§8), or ''.
+
+    Two kinds: the operator's fleet freeze (`meta.trigger_freeze`), and the
+    tripwire freeze F24 will set (`meta.tripwire_freeze`). F24 has not shipped,
+    so the second key is normally absent; reading it here means §8's rule is
+    already in place when it does, and the tests can exercise both.
+    """
+    if get_trigger_freeze() is not None:
+        return 'frozen'
+    try:
+        tripwire = get_meta_json('tripwire_freeze', '')
+    except Exception:  # noqa: BLE001 — a freeze probe must not fail a read
+        tripwire = ''
+    if tripwire not in (None, '', 0, '0', False):
+        return 'tripwire_frozen'
+    return ''
+
+
 def _snapshot_name(request_id, now):
     name = 'eshu-r%d-%d' % (int(request_id), int(now))
     return name if _SAFE_NAME.match(name) else ''
@@ -477,6 +497,13 @@ def create_and_approve(request_id, operator=''):
     if row.get('status') != 'pending':
         return {'ok': False, 'reason': 'not_pending',
                 'detail': 'the request was already decided'}
+    # AS2: create is refused while a freeze is on (design §8) — checked before
+    # any resolution, so a frozen system makes no Proxmox call at all.
+    freeze = _freeze_reason()
+    if freeze:
+        return {'ok': False, 'reason': freeze,
+                'detail': 'a freeze is on; no snapshot is created and nothing '
+                          'is approved'}
     resolved = resolve_target(row)
     if not resolved.get('ok'):
         return {'ok': False, 'reason': resolved.get('reason') or 'snapshot_unavailable',
@@ -489,6 +516,13 @@ def create_and_approve(request_id, operator=''):
     target = resolved['target']
     now = int(time.time())
     with _LOCK:
+        # AS4: a double click must not make two snapshots. The check is inside
+        # the lock, so the second caller sees the first caller's row.
+        for existing in snapshots_for_request(request_id):
+            if existing.get('state') in ('creating', 'active'):
+                return {'ok': False, 'reason': 'snapshot_in_progress',
+                        'detail': 'this request already has a snapshot being '
+                                  'made or active'}
         name = _snapshot_name(request_id, now)
         if not name:
             return {'ok': False, 'reason': 'snapshot_bad_name', 'detail': ''}
@@ -519,7 +553,10 @@ def create_and_approve(request_id, operator=''):
         return {'ok': False, 'reason': 'snapshot_bad_upid',
                 'detail': 'the task id did not name the stored node',
                 'snapshot': get_snapshot(snapshot_id)}
-    if not _wait_task(integration, target['node'], upid, poll_timeout()):
+    # AS5: the task was started by the snapshot token, and Proxmox only shows
+    # a task to the user that started it (or someone with Sys.Audit). Poll with
+    # the same token or every snapshot ends `failed` on a real cluster.
+    if not _wait_task(snapshot_integration, target['node'], upid, poll_timeout()):
         set_snapshot_state(snapshot_id, 'failed', error='task_failed_or_timeout')
         record_audit_event('snapshot_create_failed', row.get('target_ip'),
                            details='Request #%d: the task did not finish OK' % request_id,
@@ -529,7 +566,17 @@ def create_and_approve(request_id, operator=''):
                           'the expiry job',
                 'snapshot': get_snapshot(snapshot_id)}
     set_snapshot_state(snapshot_id, 'active')
-    approved = update_request_status_if_pending(request_id, 'approved')
+    # AS2: check again just before approving — a freeze that started while the
+    # snapshot ran must not let the approval through. The snapshot stays on the
+    # guest as an `active` row; the expiry job owns it from here (§7).
+    freeze = _freeze_reason()
+    if freeze:
+        return {'ok': False, 'reason': freeze,
+                'detail': 'a freeze started while the snapshot was being taken; '
+                          'nothing was approved',
+                'snapshot': get_snapshot(snapshot_id)}
+    # AS3: the same path as the plain Approve button.
+    approved = approve_pending_request(request_id) == 'approved'
     record_audit_event('snapshot_created', row.get('target_ip'),
                        details='Request #%d: snapshot %s on %s/%s (%s)'
                                % (request_id, name, target['node'],
@@ -624,7 +671,7 @@ def rollback(snapshot_id, operator=''):
                 'detail': str(exc.message or '')[:200]}
     if not _upid_node(upid, row['node']):
         return {'ok': False, 'reason': 'snapshot_bad_upid'}
-    if not _wait_task(integration, row['node'], upid, poll_timeout()):
+    if not _wait_task(snap_int, row['node'], upid, poll_timeout()):
         return {'ok': False, 'reason': 'snapshot_task_failed',
                 'detail': 'the rollback task did not finish OK'}
     set_snapshot_state(row['id'], 'rolled_back', rolled_back_at=int(time.time()))
@@ -659,7 +706,7 @@ def delete(snapshot_id, operator='', reason='manual', for_expiry=False):
                 'detail': str(exc.message or '')[:200]}
     if upid and not _upid_node(upid, row['node']):
         return {'ok': False, 'reason': 'snapshot_bad_upid'}
-    if upid and not _wait_task(integration, row['node'], upid, poll_timeout()):
+    if upid and not _wait_task(snap_int, row['node'], upid, poll_timeout()):
         return {'ok': False, 'reason': 'snapshot_task_failed'}
     set_snapshot_state(row['id'], 'expired' if reason == 'expiry' else 'deleted',
                        deleted_at=int(time.time()))

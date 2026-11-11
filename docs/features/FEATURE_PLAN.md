@@ -9489,6 +9489,51 @@ rollback/delete 404, settings bounds and the token never being returned.
 
 `bash scripts/verify.sh`: `2692 passed, 22 skipped, 7 warnings in 543.84s (0:09:03)`.
 
+**Code round 2 (AS1–AS6), 2026-11-11.** The six items touch the guard, the
+sequence, the approve path and the token, so they are one commit and the
+tests cover them together.
+
+* **AS1.** `snapshot_refusal()` normalises first and refuses a path it cannot
+  normalise — `_normalise_path` returns `''` for a dot segment, a backslash or
+  a control character — for every non-GET/HEAD method, *before* the subtree
+  test. So the rule is not Proxmox-only and a spelling the normaliser rejects
+  cannot slip through. `_path_of()` is the small shared helper (the subtree
+  test uses it too). Tested: the `..`, `%2e%2e`, backslash and `\x01`
+  spellings of the rollback path for POST/PUT/DELETE/PATCH (GET/HEAD still
+  allowed), a dot segment outside the subtree, and a generic POST whose fake
+  never sees a request.
+* **AS2.** `_freeze_reason()` reads the operator freeze (`meta.trigger_freeze`)
+  and the tripwire freeze (`meta.tripwire_freeze` — the key F24 will set; F24
+  has not shipped, so it is normally absent, and reading it now means §8's
+  rule is in place before the tripwire exists).
+  `create_and_approve()` checks it **before resolving** (no Proxmox call, no
+  snapshot row) and **again just before approving**. A freeze that starts
+  while the snapshot runs leaves the row `active` and the request pending; the
+  expiry job owns that row. Both freezes are tested, plus the mid-flight case
+  by freezing inside the task poll.
+* **AS3.** `core/approvals.py` holds `approve_pending_request()` — the exact
+  body of `POST /api/approve/{id}` (the conditional UPDATE, then the
+  `jit_approved` audit row). The route and F21 call it, so `decided_at` and
+  the audit shape cannot drift. (`requests` has no `decided_by` column; the
+  tables that carry it are `integration_calls` and `session_plans`.) The test
+  approves one request each way and compares the row and the audit detail.
+* **AS4.** The `creating`/`active` check is inside `_LOCK`, so a second
+  simultaneous click returns `snapshot_in_progress` before inserting. The race
+  test holds the first create inside the fake while the second runs.
+* **AS5.** `_wait_task()` takes the snapshot integration in create, rollback
+  and delete (expiry goes through `delete`). The fake Proxmox now records the
+  Authorization that started each task and answers 403 to a read from another
+  one, so a regression to the read-only token fails every create instead of
+  passing quietly. A test also reads a task with the base token and asserts
+  the 403.
+* **AS6.** `get_integration()`, `get_integration_by_id()` and the internal
+  `get_integrations(include_secret=True)` list all drop `snapshot_secret`;
+  `core/snapshots.py` reads it only through `get_snapshot_secret()`.
+
+`tests/test_f21_snapshots.py`: 66 (was 50).
+
+`bash scripts/verify.sh`: `2708 passed, 22 skipped, 7 warnings in 546.37s (0:09:06)`.
+
 
 ---
 

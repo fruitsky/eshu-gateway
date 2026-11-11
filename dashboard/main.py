@@ -1446,14 +1446,18 @@ def request_decoded(req_id: int, request: Request):
 
 @app.post("/api/approve/{req_id}")
 def approve_request(req_id: int, request: Request):
-    """X1: only a `pending` row can be approved; anything else is 409."""
+    """X1: only a `pending` row can be approved; anything else is 409.
+
+    F21 AS3: the body lives in `core/approvals.approve_pending_request()` so
+    "Snapshot, then run" approves through exactly the same path.
+    """
     _check_session(request)
-    row = get_request_row(req_id)
-    if not row:
+    from core.approvals import approve_pending_request
+    result = approve_pending_request(req_id)
+    if result == 'not_found':
         raise HTTPException(status_code=404, detail="Request not found")
-    if not update_request_status_if_pending(req_id, "approved"):
+    if result != 'approved':
         raise HTTPException(status_code=409, detail="not_pending")
-    record_audit_event('jit_approved', details=f'JIT #{req_id} approved')
     return {"status": "ok"}
 
 

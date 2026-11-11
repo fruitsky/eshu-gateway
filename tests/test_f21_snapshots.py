@@ -12,8 +12,11 @@ import io
 import json
 import os
 import re
+import threading
 import time
+import urllib.error
 import urllib.parse
+import urllib.request
 
 import pytest
 
@@ -26,14 +29,22 @@ from core.snapshots import (
     offer_for_request, resolve_target, rollback, set_dashboard_guest, sweep,
 )
 from db.core import db_conn
-from db.gateways import register_gateway, set_gateway_proxmox_bindings
+from db.audit import get_audit_log
+from db.gateways import (
+    clear_trigger_freeze, register_gateway, set_gateway_proxmox_bindings,
+    set_trigger_freeze,
+)
 from db.integrations import (
-    create_integration, get_integration, get_snapshot_secret, get_tool,
-    set_snapshot_secret, set_tools_internal,
+    create_integration, get_integration, get_integration_by_id,
+    get_integrations, get_snapshot_secret, get_tool, set_snapshot_secret,
+    set_tools_internal,
 )
 from db.inventory import replace_source_items
+from db.misc import set_meta_json
 from db.requests import create_request, get_request_row
-from db.snapshots import create_snapshot, get_snapshot, set_snapshot_state
+from db.snapshots import (
+    create_snapshot, get_snapshot, set_snapshot_state, snapshots_for_request,
+)
 from core.proxmox_seed import seed_proxmox_tools
 
 HOST = '192.0.2.10'
@@ -50,6 +61,9 @@ class FakePVE:
         self.snapshots = {}       # (node, vmid) -> [{name, description, snaptime}]
         self.configs = {}         # (type, vmid) -> {'net0': 'ip=192.0.2.20/24'}
         self.tasks = {}           # upid -> {'status': 'stopped', 'exitstatus': 'OK'}
+        self.task_owner = {}      # upid -> the Authorization that started it
+        self.task_seq = 0
+        self.block_create = None  # (started, release) events, for the race test
         self.fail_create = None
         self.fail_task = False
         self.guests = [
@@ -67,6 +81,20 @@ class FakePVE:
                             'disk': 1, 'maxdisk': 100})
         if config_ip:
             self.configs[(type_, vmid)] = {'net0': 'name=eth0,ip=%s/24' % config_ip}
+
+    def _auth(self, req):
+        for key, value in (getattr(req, 'headers', {}) or {}).items():
+            if str(key).lower() == 'authorization':
+                return str(value)
+        return ''
+
+    def _upid(self, kind, req):
+        """A fresh UPID, owned by whoever sent the request (AS5)."""
+        self.task_seq += 1
+        upid = 'UPID:%s:%08X:0000:0000:%s:101:root@pam:' % (
+            NODE, self.task_seq, kind)
+        self.task_owner[upid] = self._auth(req)
+        return upid
 
     def urls(self):
         return [r['url'] for r in self.requests]
@@ -107,24 +135,33 @@ class FakePVE:
                     fields = dict(urllib.parse.parse_qsl(text))
                 if not isinstance(fields, dict):
                     fields = {}
+                if self.block_create:
+                    started, release = self.block_create
+                    started.set()
+                    release.wait(10)
                 self.snapshots.setdefault(key, []).append({
                     'name': fields.get('snapname', 'x'),
                     'description': fields.get('description', ''),
                     'snaptime': int(time.time())})
-                body = 'UPID:%s:0000:0000:0000:snapshot:101:root@pam:' % NODE
+                body = self._upid('snapshot', req)
             else:
                 body = self.snapshots.get(key, [])
         elif re.search(r'/snapshot/[^/]+/rollback$', path):
-            body = 'UPID:%s:0000:0000:0000:rollback:101:root@pam:' % NODE
+            body = self._upid('rollback', req)
         elif re.search(r'/snapshot/[^/]+$', path) and method == 'DELETE':
             match = re.search(r'/(lxc|qemu)/(\d+)/snapshot/([^/]+)$', path)
             key = (NODE, int(match.group(2)))
             self.snapshots[key] = [s for s in self.snapshots.get(key, [])
                                    if s['name'] != match.group(3)]
-            body = 'UPID:%s:0000:0000:0000:delsnapshot:101:root@pam:' % NODE
+            body = self._upid('delsnapshot', req)
         elif '/tasks/' in path and path.endswith('/status'):
             upid = path.rsplit('/tasks/', 1)[1].rsplit('/status', 1)[0]
             upid = urllib.parse.unquote(upid)
+            owner = self.task_owner.get(upid)
+            if owner is not None and self._auth(req) != owner:
+                # AS5: Proxmox only shows a task to the user that started it.
+                raise urllib.error.HTTPError(url, 403, 'task not yours', None,
+                                             io.BytesIO(b''))
             body = ({'status': 'stopped',
                      'exitstatus': 'task ERROR' if self.fail_task else 'OK'}
                     if upid else {'status': 'running'})
@@ -160,8 +197,6 @@ class FakeResponse:
     def __exit__(self, *exc):
         return False
 
-
-import urllib.error  # noqa: E402  (after FakePVE uses it)
 
 
 @pytest.fixture
@@ -613,4 +648,189 @@ class TestApi:
         body = auth_client.get('/api/integrations').json()
         for integration in body if isinstance(body, list) else body.get('integrations', []):
             assert 'snapshot_secret' not in integration
+        assert get_snapshot_secret('pve') == 'PVEAPIToken=eshu=snapshot-token'
+
+
+# ── code round 2 (AS1–AS6) ─────────────────────────────────────────────
+
+class TestRound2:
+
+    # AS1 — an unnormalisable path fails closed for state-changing methods.
+    @pytest.mark.parametrize('path', [
+        '/api2/json/nodes/pve/lxc/101/snapshot/x/rollback/../rollback',
+        '/api2/json/nodes/pve/lxc/101/snapshot/x/rollback/%2e%2e/rollback',
+        '/api2/json/nodes/pve/lxc/101/snapshot/x/rollback\\..\\rollback',
+        '/api2/json/nodes/pve/lxc/101/snapshot/x/roll\x01back',
+    ])
+    def test_a_dot_segment_spelling_is_refused_for_post(self, path):
+        for method in ('POST', 'PUT', 'DELETE', 'PATCH'):
+            assert snapshot_refusal(method, path) is not None, (method, path)
+        # A read stays a read.
+        assert snapshot_refusal('GET', path) is None
+        assert snapshot_refusal('HEAD', path) is None
+
+    def test_a_dot_segment_outside_the_subtree_is_refused_too(self):
+        """AS1 says every integration, not only Proxmox: the rule is about
+        the path, not the subtree."""
+        assert snapshot_refusal('POST', '/api/v3/series/../system/status') is not None
+
+    def test_a_generic_post_with_a_dot_segment_never_reaches_the_wire(self, pve):
+        integration = get_integration('pve')
+        with pytest.raises(ProxyError) as exc:
+            execute_generic_call(integration, 'POST',
+                                 'nodes/pve/status/../resources', data={})
+        assert exc.value.status_code == 403
+        assert pve.requests == []
+
+    # AS2 — create is refused while either freeze is on.
+    def test_create_is_refused_under_an_operator_freeze(self, pve):
+        set_trigger_freeze()
+        try:
+            row = _request()
+            result = create_and_approve(row)
+            assert result['ok'] is False and result['reason'] == 'frozen'
+            assert get_request_row(row)['status'] == 'pending'
+            assert snapshots_for_request(row) == []
+            assert pve.requests == []   # no Proxmox call at all
+        finally:
+            clear_trigger_freeze()
+
+    def test_create_is_refused_under_a_tripwire_freeze(self, pve):
+        set_meta_json('tripwire_freeze', str(int(time.time())))
+        try:
+            row = _request()
+            result = create_and_approve(row)
+            assert result['ok'] is False and result['reason'] == 'tripwire_frozen'
+            assert get_request_row(row)['status'] == 'pending'
+            assert snapshots_for_request(row) == []
+            assert pve.requests == []
+        finally:
+            set_meta_json('tripwire_freeze', '')
+
+    def test_a_freeze_started_during_the_snapshot_approves_nothing(self, pve, monkeypatch):
+        """The second check, just before approving, is the point: a freeze that
+        begins while the snapshot runs must not let the approval through."""
+        import core.snapshots as snaps
+        real = snaps._wait_task
+
+        def freeze_then_poll(*args, **kwargs):
+            ok = real(*args, **kwargs)
+            set_trigger_freeze()
+            return ok
+
+        monkeypatch.setattr(snaps, '_wait_task', freeze_then_poll)
+        try:
+            row = _request()
+            result = create_and_approve(row)
+            assert result['ok'] is False and result['reason'] == 'frozen'
+            assert get_request_row(row)['status'] == 'pending'
+            assert result['snapshot']['state'] == 'active'
+        finally:
+            clear_trigger_freeze()
+
+    # AS3 — one approve path, so the shapes match.
+    def test_a_snapshot_approval_matches_a_plain_one(self, pve):
+        from core.approvals import approve_pending_request
+        plain = _request(command='ls -la /var/log')
+        assert approve_pending_request(plain) == 'approved'
+        snap_row = _request()
+        assert create_and_approve(snap_row)['ok'] is True
+
+        first = get_request_row(plain)
+        second = get_request_row(snap_row)
+        assert first['status'] == second['status'] == 'approved'
+        assert first['decided_at'] and second['decided_at']
+        assert abs(int(second['decided_at']) - int(first['decided_at'])) <= 5
+
+        details = {r['details'] for r in get_audit_log(100)
+                   if r['event_type'] == 'jit_approved'}
+        assert 'JIT #%d approved' % plain in details
+        assert 'JIT #%d approved' % snap_row in details
+
+    def test_a_snapshot_approval_of_a_decided_request_does_not_approve_twice(self, pve):
+        from core.approvals import approve_pending_request
+        row = _request()
+        assert approve_pending_request(row) == 'approved'
+        assert approve_pending_request(row) == 'not_pending'
+        assert approve_pending_request(999999) == 'not_found'
+
+    # AS4 — two concurrent clicks make one snapshot.
+    def test_two_concurrent_clicks_make_one_snapshot(self, pve):
+        row = _request()
+        started = threading.Event()
+        release = threading.Event()
+        pve.block_create = (started, release)
+        results = []
+
+        def click():
+            try:
+                results.append(create_and_approve(row))
+            except Exception as exc:  # noqa: BLE001 — the test asserts on it
+                results.append({'ok': False, 'reason': 'raised: %s' % exc})
+
+        first = threading.Thread(target=click)
+        second = threading.Thread(target=click)
+        first.start()
+        try:
+            assert started.wait(10), 'the first create never reached the fake'
+            second.start()
+            second.join(15)
+        finally:
+            release.set()
+            first.join(15)
+            pve.block_create = None
+
+        assert len(results) == 2, results
+        assert sum(1 for r in results if r.get('ok')) == 1, results
+        assert sum(1 for r in results
+                   if r.get('reason') == 'snapshot_in_progress') == 1, results
+        assert len(snapshots_for_request(row)) == 1
+        assert get_request_row(row)['status'] == 'approved'
+
+    # AS5 — the task poll uses the token that started the task.
+    def test_the_task_poll_uses_the_snapshot_token(self, pve):
+        row = _request()
+        assert create_and_approve(row)['ok'] is True
+        polls = [r for r in pve.requests if '/tasks/' in r['url']]
+        assert polls
+        for poll in polls:
+            assert 'snapshot-token' in poll['headers'].get('Authorization', '')
+
+    def test_rollback_and_delete_poll_with_the_snapshot_token(self, pve):
+        sid = _made(pve)
+        pve.requests.clear()
+        assert rollback(sid)['ok'] is True
+        sid2 = _made(pve)
+        pve.requests.clear()
+        assert delete(sid2)['ok'] is True
+        polls = [r for r in pve.requests if '/tasks/' in r['url']]
+        assert polls
+        for poll in polls:
+            assert 'snapshot-token' in poll['headers'].get('Authorization', '')
+
+    def test_the_fake_refuses_a_task_read_from_another_token(self, pve):
+        """The fake models Proxmox's ownership rule, so a regression to the
+        read-only token would make every create fail, not pass quietly."""
+        row = _request()
+        assert create_and_approve(row)['ok'] is True
+        upid, owner = next(iter(pve.task_owner.items()))
+        assert 'snapshot-token' in owner
+        url = ('https://%s:8006/api2/json/nodes/%s/tasks/%s/status'
+               % (NODE_IP, NODE, urllib.parse.quote(upid, safe='')))
+        request = urllib.request.Request(
+            url, headers={'Authorization': 'PVEAPIToken=eshu=read-token'},
+            method='GET')
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            pve(request)
+        assert exc.value.code == 403
+
+    # AS6 — no single-row read carries the second token.
+    def test_no_integration_row_carries_the_snapshot_secret(self, pve):
+        integration = get_integration('pve')
+        assert 'snapshot_secret' not in integration
+        assert 'snapshot_secret' not in get_integration_by_id(integration['id'])
+        # The internal `include_secret` list is not an exception either.
+        internal = [i for i in get_integrations(include_secret=True)
+                    if i['name'] == 'pve']
+        assert internal and 'snapshot_secret' not in internal[0]
         assert get_snapshot_secret('pve') == 'PVEAPIToken=eshu=snapshot-token'
