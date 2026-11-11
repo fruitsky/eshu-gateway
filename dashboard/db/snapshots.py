@@ -9,10 +9,13 @@ import time
 
 from db.core import db_conn
 
-# creating → active → rolled_back | deleted | expired | gone
-#          ↘ failed ↘ orphaned
-STATES = ('creating', 'active', 'rolled_back', 'deleted', 'expired', 'gone',
-          'failed', 'orphaned')
+# creating → active → rolling_back → rolled_back | deleting → deleted | expired
+#          ↘ failed ↘ gone ↘ orphaned
+# `rolling_back` and `deleting` are transient claims (AU4): a conditional
+# UPDATE takes one, so a rollback and the expiry job cannot both pass the
+# re-check on one row.
+STATES = ('creating', 'active', 'rolling_back', 'rolled_back', 'deleting',
+          'deleted', 'expired', 'gone', 'failed', 'orphaned')
 LIVE_STATES = ('creating', 'active', 'failed')
 
 
@@ -103,6 +106,27 @@ def set_snapshot_state(snapshot_id, state, error=None, **fields):
         cur = conn.cursor()
         cur.execute('UPDATE snapshots SET %s WHERE id = ?' % ', '.join(sets),
                     tuple(params))
+        conn.commit()
+        return cur.rowcount == 1
+
+
+def claim_state(snapshot_id, from_states, to_state) -> bool:
+    """Atomically move one row to `to_state` if it is still in `from_states`.
+
+    AU4: the conditional UPDATE is the claim. Two callers racing on one row
+    (a rollback and the expiry job, or a double click) cannot both win.
+    """
+    if to_state not in STATES:
+        raise ValueError('bad_state')
+    states = list(from_states or ())
+    if not states or any(state not in STATES for state in states):
+        raise ValueError('bad_state')
+    marks = ','.join('?' for _ in states)
+    with db_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            'UPDATE snapshots SET state = ? WHERE id = ? AND state IN (%s)'
+            % marks, tuple([to_state, int(snapshot_id)] + states))
         conn.commit()
         return cur.rowcount == 1
 

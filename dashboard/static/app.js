@@ -9002,11 +9002,86 @@ async function selectIntegration(name) {
     renderIntegrationList();
     var el = document.getElementById('integration-tools-list');
     if (el) el.innerHTML = '<p class="text-muted">Select an integration to view its tools.</p>';
+    var snapEl = document.getElementById('integration-snapshot');
+    if (snapEl) { snapEl.classList.add('hidden'); snapEl.innerHTML = ''; }
     return;
   }
   _selectedIntegration = name;
   renderIntegrationList();
   fetchTools(name);
+  fetchSnapshotState(name);
+}
+
+/* F21 / AM2: the integration page's snapshot panel. The probe result is the
+ * server's; this only draws it, and the red line is the warning the security
+ * review asked for when the main token can snapshot. */
+async function fetchSnapshotState(name) {
+  var box = document.getElementById('integration-snapshot');
+  if (!box) return;
+  var item = null;
+  for (var i = 0; i < _integrationsData.length; i++) {
+    if (_integrationsData[i].name === name) { item = _integrationsData[i]; break; }
+  }
+  if (!item || (item.kind || '').toLowerCase() !== 'proxmox') {
+    box.classList.add('hidden');
+    box.innerHTML = '';
+    return;
+  }
+  box.classList.remove('hidden');
+  box.innerHTML = '<div class="text-xs text-muted">Checking the snapshot token…</div>';
+  try {
+    const res = await authFetch('/api/integrations/' + encodeURIComponent(name) + '/snapshot');
+    if (!res.ok) { box.innerHTML = ''; return; }
+    renderSnapshotState(name, await res.json());
+  } catch (e) {
+    box.innerHTML = '<div class="text-xs text-danger">Snapshot check failed: ' + esc(e.message) + '</div>';
+  }
+}
+
+function renderSnapshotState(name, state) {
+  var box = document.getElementById('integration-snapshot');
+  if (!box) return;
+  var lines = [];
+  lines.push('<div class="text-sm font-semibold">Snapshots (F21)</div>');
+  if (state.main_token_privileged) {
+    lines.push('<div class="text-xs text-danger">The main token can snapshot ' +
+      '(VM.Snapshot / VM.Snapshot.Rollback). Make it read-only and use a ' +
+      'separate snapshot token; the offer stays refused until you do.</div>');
+  }
+  if (!state.configured) {
+    lines.push('<div class="text-xs text-muted">No snapshot token. The ' +
+      '\'Snapshot, then run\' offer is unavailable until one is stored.</div>');
+  } else if (state.available) {
+    lines.push('<div class="text-xs text-success">Snapshot token configured; ' +
+      'snapshots available.</div>');
+  } else {
+    lines.push('<div class="text-xs text-danger">Snapshots unavailable: ' +
+      esc(state.reason || 'unknown') +
+      (state.detail ? ' — ' + esc(state.detail) : '') + '</div>');
+  }
+  lines.push('<div class="flex flex-wrap items-center gap-2 mt-2">' +
+    '<input id="snapshot-token-input" type="password" ' +
+    'placeholder="PVEAPIToken=user@realm!eshu-snapshot=…" autocomplete="off" style="max-width:340px">' +
+    '<button class="btn btn-xs" onclick="saveSnapshotToken(' + escJs(name) + ')">Save token</button>' +
+    '<button class="btn btn-xs btn-muted" onclick="saveSnapshotToken(' + escJs(name) + ', true)">Clear</button>' +
+    '</div>');
+  box.innerHTML = lines.join('');
+}
+
+async function saveSnapshotToken(name, clear) {
+  var input = document.getElementById('snapshot-token-input');
+  var token = clear ? '' : ((input && input.value) || '');
+  if (!clear && !token) { showToast('Paste a token first', 'error'); return; }
+  try {
+    const res = await authFetch('/api/integrations/' + encodeURIComponent(name) + '/snapshot-token',
+      { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: token }) });
+    const data = await res.json();
+    if (!res.ok) { showToast('Failed: ' + (data.detail || res.status), 'error'); return; }
+    if (input) input.value = '';
+    showToast(clear ? 'Snapshot token cleared' : 'Snapshot token saved', 'success');
+    fetchSnapshotState(name);
+  } catch (e) { showToast('Failed: ' + e.message, 'error'); }
 }
 
 async function fetchTools(name) {

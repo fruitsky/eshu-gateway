@@ -82,7 +82,7 @@ class _ParseState:
     """Mutable facts collected while walking one command."""
 
     __slots__ = ('complete', 'flags', 'inner_targets', 'sections', 'section',
-                 'functions')
+                 'functions', 'target')
 
     def __init__(self):
         self.complete = True
@@ -91,6 +91,10 @@ class _ParseState:
         self.sections = []
         self.section = ''
         self.functions = {}
+        # AU1 (F21): the wrapper target (`pct:101`, `qm:201`) the current
+        # statement runs inside, or '' on the node. Saved and restored per
+        # statement, so it is per-step and never a substring match.
+        self.target = ''
 
     def flag(self, name):
         if name not in self.flags:
@@ -1133,6 +1137,7 @@ def _step(text, op, kind, why, ctx, state, extra=None):
         'why': why,
         'section': state.section,
         'context': list(ctx),
+        'inner': state.target,
         'elevated': any(label in ('sudo', 'su', 'runuser') for label in ctx),
     }
     if extra:
@@ -1443,7 +1448,21 @@ def _group_sink(group):
 
 
 def _parse_group(group, ctx, depth, state):
-    """Parse one pipeline group, decoding an encoded payload when there is one."""
+    """Parse one pipeline group, decoding an encoded payload when there is one.
+
+    AU1 (F21): every statement starts from the target this text runs inside
+    (`state.target`), so a wrapped statement cannot leak its target into the
+    next one, while a nested parse (a shell script, a substitution) inherits
+    it.
+    """
+    inherited = state.target
+    try:
+        return _parse_group_body(group, ctx, depth, state, inherited)
+    finally:
+        state.target = inherited
+
+
+def _parse_group_body(group, ctx, depth, state, inherited):
     text = _group_text(group)
     if (depth <= MAX_WRAP_DEPTH and detect_encoded_exec(text)
             and not _has_wrapper(group[0].argv)):
@@ -1488,6 +1507,7 @@ def _parse_group(group, ctx, depth, state):
 
     steps = []
     for st in group:
+        state.target = inherited
         steps.extend(_parse_statement(st, ctx, depth, state))
     return steps
 
@@ -1501,7 +1521,19 @@ def _sub_context(kind, ctx):
 
 
 def _parse_statement(st, ctx, depth, state):
-    """Classify one simple command, unwrapping wrappers and substitutions."""
+    """Classify one simple command, unwrapping wrappers and substitutions.
+
+    AU1 (F21): the caller sets `state.target`; it is restored here, so a
+    wrapper's target applies to this statement's steps and nothing after it.
+    """
+    previous = state.target
+    try:
+        return _parse_statement_body(st, ctx, depth, state)
+    finally:
+        state.target = previous
+
+
+def _parse_statement_body(st, ctx, depth, state):
     argv = list(st.argv)
     ctx = list(ctx)
     heredoc_specs = list(st.heredoc_specs)
@@ -1571,6 +1603,7 @@ def _parse_statement(st, ctx, depth, state):
                         ctx.append(label)
                     if target:
                         state.add_inner(target)
+                        state.target = target
                     depth += 1
                     continue
             if st.heredoc:
@@ -1591,6 +1624,7 @@ def _parse_statement(st, ctx, depth, state):
             ctx.append(label)
         if target:
             state.add_inner(target)
+            state.target = target
         depth += 1
 
     clean_argv, substitutions, unparsed = _extract_substitutions(argv)

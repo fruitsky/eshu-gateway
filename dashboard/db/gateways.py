@@ -24,7 +24,7 @@ def init_gateways_tables(cursor):
         pass
     # F21/AM3: the operator's binding for a node or a guest the cluster cannot
     # establish on its own. Never a name match from DNS.
-    for col in ('proxmox_node', 'proxmox_guest'):
+    for col in ('proxmox_node', 'proxmox_guest', 'proxmox_integration'):
         try:
             cursor.execute(f"ALTER TABLE gateways ADD COLUMN {col} TEXT DEFAULT ''")
         except Exception:
@@ -534,19 +534,22 @@ def get_gateway_proxmox_bindings(ip: str) -> dict:
     """F21: the operator's Proxmox bindings for one gateway ('' when unset)."""
     with db_conn() as conn:
         row = conn.execute(
-            'SELECT proxmox_node, proxmox_guest FROM gateways WHERE ip = ?',
-            (ip,)).fetchone()
+            'SELECT proxmox_node, proxmox_guest, proxmox_integration '
+            'FROM gateways WHERE ip = ?', (ip,)).fetchone()
         if not row:
             return {}
         return {'proxmox_node': row['proxmox_node'] or '',
-                'proxmox_guest': row['proxmox_guest'] or ''}
+                'proxmox_guest': row['proxmox_guest'] or '',
+                'proxmox_integration': row['proxmox_integration'] or ''}
 
 
-def set_gateway_proxmox_bindings(ip: str, node: str = '', guest: str = '') -> bool:
+def set_gateway_proxmox_bindings(ip: str, node: str = '', guest: str = '',
+                                 integration: str = '') -> bool:
     with db_conn() as conn:
         cur = conn.cursor()
         cur.execute(
-            'UPDATE gateways SET proxmox_node = ?, proxmox_guest = ? WHERE ip = ?',
-            ((node or '')[:80], (guest or '')[:80], ip))
+            'UPDATE gateways SET proxmox_node = ?, proxmox_guest = ?, '
+            'proxmox_integration = ? WHERE ip = ?',
+            ((node or '')[:80], (guest or '')[:80], (integration or '')[:80], ip))
         conn.commit()
         return cur.rowcount == 1

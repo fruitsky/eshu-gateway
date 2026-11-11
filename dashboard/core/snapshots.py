@@ -12,6 +12,7 @@ IP (or the operator's `gateways.proxmox_node`), a gateway-as-guest is matched
 only against the guest's own configuration, and every action re-checks the
 row against the live guest before it touches anything.
 """
+import hashlib
 import json
 import re
 import threading
@@ -30,7 +31,7 @@ from db.inventory import get_inventory_items
 from db.misc import get_meta_json, set_meta_json
 from db.requests import get_request_row
 from db.snapshots import (
-    bump_attempts, create_snapshot, due_snapshots, get_snapshot,
+    bump_attempts, claim_state, create_snapshot, due_snapshots, get_snapshot,
     set_snapshot_state, snapshots_for_request, stale_creating,
 )
 
@@ -46,9 +47,29 @@ THIN_POOL_WARN = 85
 MAX_ATTEMPTS = 6
 
 _IPV4 = re.compile(r'^\d{1,3}(?:\.\d{1,3}){3}$')
-_UPID = re.compile(r'^UPID:([^:]+):')
+# AU4: the full UPID shape — UPID:<node>:<pid>:<pstart>:<starttime>:<type>:
+# <id>:<user>: — not only the node prefix. The parser refuses a path
+# separator, a query, a fragment or a `..` anywhere in the string, so the
+# task path cannot be steered from the value.
+_UPID = re.compile(
+    r'^UPID:([^:]+):([0-9A-Fa-f]{8}):([0-9A-Fa-f]{8}):([0-9A-Fa-f]{8}):'
+    r'([A-Za-z][A-Za-z0-9_]*):([^:]*):([^:]*):$')
+_UPID_UNSAFE = re.compile(r'[/?#]|\.\.')
 _IP_IN_CONFIG = re.compile(r'(?:^|[,;\s])ip=([0-9a-zA-Z./:]+)', re.IGNORECASE)
 _SAFE_NAME = re.compile(r'^[a-z][a-z0-9-]{2,}$')
+
+# AU2 (AM2): the probe. Both tokens are read with GET /access/permissions;
+# a snapshot privilege on the main token, or a missing one on the snapshot
+# token, refuses the offer before any target is resolved.
+SNAPSHOT_PRIVILEGE = 'VM.Snapshot'
+ROLLBACK_PRIVILEGE = 'VM.Snapshot.Rollback'
+PROBE_TTL = 60
+_PROBE_CACHE = {}
+
+
+def clear_probe_cache():
+    """Forget the cached probes (a token was set, or a test changed one)."""
+    _PROBE_CACHE.clear()
 
 _LOCK = threading.Lock()
 _STOP = threading.Event()
@@ -85,12 +106,61 @@ def set_dashboard_guest(value):
 
 # ── the Proxmox connection ─────────────────────────────────────────────
 
+def enabled_proxmox_integrations():
+    return [integration for integration in get_integrations(include_secret=True)
+            if (integration.get('kind') or '').lower() == 'proxmox'
+            and integration.get('enabled')]
+
+
 def proxmox_integration():
-    for integration in get_integrations(include_secret=True):
-        if (integration.get('kind') or '').lower() == 'proxmox' \
-                and integration.get('enabled'):
-            return integration
-    return None
+    """The one enabled Proxmox integration, or None (the old single-token
+    behaviour; callers that act on a row use `integration_for_action`)."""
+    found = enabled_proxmox_integrations()
+    return found[0] if len(found) == 1 else None
+
+
+def integration_for_offer(row):
+    """Which Proxmox integration an offer is for (AU3).
+
+    One enabled integration: that one. More than one: the gateway binding
+    must name it, or the offer is refused as ambiguous — two clusters can
+    both have a node called `pve` and the same vmid, and the action would
+    otherwise go to whichever sorted first.
+    """
+    enabled = enabled_proxmox_integrations()
+    if not enabled:
+        return None, 'snapshot_unavailable', 'no enabled Proxmox integration'
+    if len(enabled) == 1:
+        return enabled[0], '', ''
+    bindings = _gateway_bindings(str(row.get('target_ip') or ''))
+    named = (bindings.get('proxmox_integration') or '').strip()
+    if named:
+        for integration in enabled:
+            if integration.get('name') == named:
+                return integration, '', ''
+    return None, 'snapshot_target_ambiguous', (
+        'more than one Proxmox integration is enabled; name one in the '
+        'gateway binding')
+
+
+def integration_for_action(row):
+    """The integration stored on the snapshot row, loaded by name (AU3).
+
+    Never "the first enabled Proxmox integration": after a rename, a
+    re-enable, or with two clusters, that is a different cluster than the
+    snapshot lives on.
+    """
+    name = str(row.get('integration') or '')
+    if not name:
+        return None
+    integration = get_integration(name)
+    if not integration:
+        return None
+    if not integration.get('enabled'):
+        return None
+    if (integration.get('kind') or '').lower() != 'proxmox':
+        return None
+    return integration
 
 
 def _snapshot_integration(base):
@@ -106,6 +176,124 @@ def _snapshot_integration(base):
     copy = dict(base)
     copy['secret'] = token
     return copy
+
+
+def _privileges(data):
+    """Every privilege key with a truthy value, at any depth.
+
+    Proxmox answers `{path: {privilege: 1}}` (and the shape varies a little
+    between versions and with privilege separation), so a recursive walk is
+    the only stable way to ask "does this token hold VM.Snapshot anywhere".
+    """
+    found = set()
+
+    def walk(node):
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if isinstance(value, (dict, list)):
+                    walk(value)
+                elif value and isinstance(key, str):
+                    found.add(key)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(data)
+    return found
+
+
+def _probe_token(integration, which, force=False):
+    """(privileges, version_major, error) for one token, cached briefly."""
+    name = integration.get('name') or ''
+    if which == 'snapshot':
+        from db.integrations import get_snapshot_secret
+        token = get_snapshot_secret(name)
+        if not token:
+            return None, None, 'no snapshot token'
+        target = dict(integration)
+        target['secret'] = token
+    else:
+        token = str(integration.get('secret') or '')
+        if not token:
+            return None, None, 'no main token'
+        target = integration
+    cache_key = (name, which,
+                 hashlib.sha256(token.encode()).hexdigest()[:16])
+    now = time.time()
+    if not force:
+        cached = _PROBE_CACHE.get(cache_key)
+        if cached and cached[0] > now:
+            return cached[1], cached[2], cached[3]
+    try:
+        data = _read(target, 'get_access_permissions', {})
+        version = _read(target, 'get_version', {}) or {}
+    except ProxyError as exc:
+        error = str(exc.message or 'the privilege probe failed')[:120]
+        return None, None, error
+    privileges = _privileges(data)
+    major = _version_major(version)
+    _PROBE_CACHE[cache_key] = (now + PROBE_TTL, privileges, major, '')
+    return privileges, major, ''
+
+
+def _version_major(data):
+    """The PVE major version, or None when it cannot be read. None means
+    "assume 8": the stricter privilege set, so an unreadable version fails
+    closed instead of accepting a token that cannot roll back."""
+    text = ''
+    if isinstance(data, dict):
+        text = str(data.get('version') or data.get('release') or '')
+    elif data is not None:
+        text = str(data)
+    match = re.search(r'(\d+)', text)
+    return int(match.group(1)) if match else None
+
+
+def credential_state(integration, force=False):
+    """AM2's probe, in the order the reviewer asked for.
+
+    Returns {'ok', 'reason', 'detail', 'main_privileged'}.
+    """
+    from db.integrations import get_snapshot_secret
+    main_token = str(integration.get('secret') or '')
+    snapshot_token = get_snapshot_secret(integration.get('name') or '')
+    if not snapshot_token:
+        return {'ok': False, 'reason': 'snapshot_unavailable',
+                'detail': 'the integration has no snapshot token',
+                'main_privileged': False}
+    if main_token and snapshot_token == main_token:
+        return {'ok': False, 'reason': 'snapshot_tokens_identical',
+                'detail': 'the two tokens are the same; create a separate '
+                          'snapshot token', 'main_privileged': False}
+    main, version, error = _probe_token(integration, 'main', force=force)
+    if error:
+        return {'ok': False, 'reason': 'snapshot_unavailable',
+                'detail': 'the main-token probe failed: %s' % error,
+                'main_privileged': False}
+    privileged = bool(main & {SNAPSHOT_PRIVILEGE, ROLLBACK_PRIVILEGE})
+    if privileged:
+        return {'ok': False, 'reason': 'snapshot_main_token_privileged',
+                'detail': 'the main token can snapshot; make it read-only and '
+                          'use a separate snapshot token',
+                'main_privileged': True}
+    snapshot, snap_version, error = _probe_token(integration, 'snapshot',
+                                                 force=force)
+    if error:
+        return {'ok': False, 'reason': 'snapshot_unavailable',
+                'detail': 'the snapshot-token probe failed: %s' % error,
+                'main_privileged': False}
+    need = {SNAPSHOT_PRIVILEGE}
+    # PVE 8 split rollback out; an unreadable version is treated as 8.
+    major = snap_version or version
+    if major is None or major >= 8:
+        need.add(ROLLBACK_PRIVILEGE)
+    missing = sorted(need - snapshot)
+    if missing:
+        return {'ok': False, 'reason': 'snapshot_unavailable',
+                'detail': 'the snapshot token is missing %s'
+                          % ', '.join(missing), 'main_privileged': False}
+    return {'ok': True, 'reason': '', 'detail': '',
+            'main_privileged': False}
 
 
 def _tool(integration, name):
@@ -249,42 +437,76 @@ def _inner_targets(row):
     return data
 
 
-def _writes_uncovered(data, inner):
-    """AO1: the steps the snapshot would not cover, or [] when it covers all.
+WRAPPER_FOR_TYPE = {'lxc': 'pct', 'qemu': 'qm'}
 
-    Case A needs exactly one inner target, equal to the resolved guest, and
-    every write/unknown step carrying it. A step with no wrapper runs on the
-    node and is not covered.
+
+def _request_inner(row):
+    """(kind, vmid) from `requests.inner_target` (`pct:101`), plus tolerance
+    for a bare vmid (rows written before F7's shape settled)."""
+    raw = str(row.get('inner_target') or '')
+    kind, sep, name = raw.partition(':')
+    if not sep:
+        return '', raw
+    return kind, name
+
+
+def _writes_uncovered(data, vmid, kind=''):
+    """AO1/AU1: the steps the snapshot would not cover, or [] when it covers all.
+
+    Coverage is structured, not a substring: the breakdown must be complete,
+    its `inner_targets` must be exactly one entry, that entry's vmid must be
+    the resolved guest's, and **every** write/unknown step must carry that
+    exact target (F1 records it per step as `inner`). A step with no wrapper
+    runs on the node and is not covered; a node write whose text mentions the
+    vmid is not covered either.
     """
-    steps = data.get('steps') or []
+    text_vmid = str(vmid)
+    if not data.get('complete', True):
+        return ['the command could not be parsed completely']
+    targets = [str(t) for t in (data.get('inner_targets') or [])]
+    if len(targets) != 1:
+        return ['the command reaches %d guest targets, not one' % len(targets)]
+    raw = targets[0]
+    target_kind, sep, target_vmid = raw.partition(':')
+    if not sep:
+        target_kind, target_vmid = '', raw
+    if target_vmid != text_vmid:
+        return ['the command runs in guest %s, not %s'
+                % (target_vmid or '?', text_vmid)]
+    if kind and target_kind and target_kind != kind:
+        return ['the command runs in %s %s, not the resolved guest'
+                % (target_kind, target_vmid)]
     uncovered = []
-    for step in steps:
+    for step in data.get('steps') or []:
         if (step.get('kind') or '') not in ('write', 'unknown'):
             continue
-        context = ' '.join(str(c) for c in (step.get('context') or []))
-        text = str(step.get('text') or '')
-        if inner and (inner in context or inner in text):
+        if str(step.get('inner') or '') == raw:
             continue
-        uncovered.append(text[:80])
+        uncovered.append(str(step.get('text') or '')[:80])
     return uncovered
 
 
-def resolve_target(row, integration=None):
+def resolve_target(row, integration=None, force_probe=False):
     """Who would be snapshotted, and why not when there is no answer.
 
     Returns {'ok': bool, 'reason': code, 'detail': str, 'target': {...},
-    'source': str, 'uncovered': [...]}.
+    'source': str, 'uncovered': [...], 'integration': <row>}.
     """
-    integration = integration or proxmox_integration()
-    if not integration:
-        return {'ok': False, 'reason': 'snapshot_unavailable',
-                'detail': 'no enabled Proxmox integration'}
-    if not _snapshot_integration(integration):
-        return {'ok': False, 'reason': 'snapshot_unavailable',
-                'detail': 'the integration has no snapshot token'}
+    if integration is None:
+        integration, reason, detail = integration_for_offer(row)
+        if not integration:
+            return {'ok': False, 'reason': reason, 'detail': detail}
+    # AU2 (AM2): the credential probe comes before any target work. A main
+    # token that can snapshot, two identical tokens, or a probe that errors
+    # refuses the offer; `force_probe` re-runs it at create time.
+    state = credential_state(integration, force=force_probe)
+    if not state['ok']:
+        return {'ok': False, 'reason': state['reason'],
+                'detail': state['detail'],
+                'main_privileged': state.get('main_privileged', False)}
     ip = str(row.get('target_ip') or '')
     bindings = _gateway_bindings(ip)
-    inner = str(row.get('inner_target') or '')
+    inner_kind, inner = _request_inner(row)
     data = _inner_targets(row)
     try:
         guests = _guest_rows(integration)
@@ -301,7 +523,7 @@ def resolve_target(row, integration=None):
         if not guest:
             return {'ok': False, 'reason': 'snapshot_target_none',
                     'detail': 'guest_not_on_node'}
-        uncovered = _writes_uncovered(data, inner)
+        uncovered = _writes_uncovered(data, inner, inner_kind)
         if uncovered:
             return {'ok': False, 'reason': 'snapshot_target_partial',
                     'detail': 'the snapshot would not cover %d step(s)' % len(uncovered),
@@ -309,6 +531,11 @@ def resolve_target(row, integration=None):
         return _target_ok(integration, guest, node, node_source, 'inner-target',
                           ip, row)
 
+    # Case B: the command has no inner target at all. A target recorded on
+    # the row is F7's answer that it does, so the two must agree.
+    if data.get('inner_targets'):
+        return {'ok': False, 'reason': 'snapshot_target_partial',
+                'detail': 'the command reaches a guest but the row records none'}
     bound = (bindings.get('proxmox_guest') or '').strip()
     if bound and '/' in bound:
         node, vmid = bound.split('/', 1)
@@ -423,6 +650,7 @@ def offer_for_request(request_id):
     out['detail'] = resolved.get('detail') or ''
     out['uncovered'] = resolved.get('uncovered') or []
     out['suggest'] = resolved.get('suggest') or ''
+    out['main_token_privileged'] = bool(resolved.get('main_privileged'))
     if resolved.get('ok'):
         out['target'] = resolved['target']
         out['source'] = resolved.get('source') or ''
@@ -456,6 +684,12 @@ def _snapshot_name(request_id, now):
     return name if _SAFE_NAME.match(name) else ''
 
 
+def _marker(request_id):
+    """AU4: the description prefix, including the space after the id, so
+    `#1` is not a prefix of `#12`."""
+    return 'eshu request #%d ' % int(request_id)
+
+
 def _description(request_id, command):
     from core.secret_scrub import scrub_string
     text = scrub_string(command or '')[:80]
@@ -463,7 +697,12 @@ def _description(request_id, command):
 
 
 def _upid_node(upid, node):
-    match = _UPID.match(str(upid or ''))
+    """AU4: the whole UPID shape and the stored node, with no path separator,
+    query, fragment or `..` anywhere (it goes into the task path)."""
+    text = str(upid or '')
+    if _UPID_UNSAFE.search(text):
+        return False
+    match = _UPID.match(text)
     if not match or match.group(1) != node:
         return False
     return True
@@ -504,11 +743,16 @@ def create_and_approve(request_id, operator=''):
         return {'ok': False, 'reason': freeze,
                 'detail': 'a freeze is on; no snapshot is created and nothing '
                           'is approved'}
-    resolved = resolve_target(row)
+    # AU2: the probe runs again at create (never the cached answer), so a
+    # permission change since the card was drawn refuses here.
+    resolved = resolve_target(row, force_probe=True)
     if not resolved.get('ok'):
         return {'ok': False, 'reason': resolved.get('reason') or 'snapshot_unavailable',
                 'detail': resolved.get('detail') or ''}
-    integration = proxmox_integration()
+    integration = resolved.get('integration') or integration_for_offer(row)[0]
+    if not integration:
+        return {'ok': False, 'reason': 'snapshot_integration_missing',
+                'detail': 'the Proxmox integration disappeared'}
     snapshot_integration = _snapshot_integration(integration)
     if not snapshot_integration:
         return {'ok': False, 'reason': 'snapshot_unavailable',
@@ -605,10 +849,11 @@ def _recheck(row, allow_failed=False, for_expiry=False):
     if not for_expiry and row.get('expires_at') \
             and int(row['expires_at']) <= int(time.time()):
         return False, 'snapshot_expired', 'past its expiry'
-    integration = proxmox_integration()
+    integration = integration_for_action(row)
     if not integration:
-        return False, 'snapshot_unavailable', 'no Proxmox integration'
-    ip = ''
+        return False, 'snapshot_integration_missing', (
+            'the Proxmox integration this snapshot was made on is missing '
+            'or disabled')
     try:
         guests = _guest_rows(integration)
     except ProxyError as exc:
@@ -633,11 +878,11 @@ def _recheck(row, allow_failed=False, for_expiry=False):
                         'vmid': int(row['vmid'])}) or []
     except ProxyError as exc:
         return False, 'snapshot_unavailable', str(exc.message or '')[:120]
+    marker = _marker(int(row.get('request_id') or 0))
     for entry in listed:
         if not isinstance(entry, dict) or entry.get('name') != row['name']:
             continue
-        if str(entry.get('description') or '').startswith(
-                'eshu request #%d' % int(row['request_id'] or 0)):
+        if str(entry.get('description') or '').startswith(marker):
             return True, '', ''
         return False, 'snapshot_not_ours', 'the name now holds another snapshot'
     return False, 'snapshot_not_ours', 'the snapshot is not on the guest'
@@ -657,9 +902,15 @@ def rollback(snapshot_id, operator=''):
                            details='Rollback refused for #%d: %s (%s)'
                                    % (row['id'], reason, detail), actor=operator)
         return {'ok': False, 'reason': reason, 'detail': detail}
-    integration = proxmox_integration()
-    snap_int = _snapshot_integration(integration)
+    # AU4: claim the row before the call, so a rollback and the expiry job
+    # cannot both pass the re-check on one row.
+    if not claim_state(row['id'], ('active',), 'rolling_back'):
+        return {'ok': False, 'reason': 'snapshot_state',
+                'detail': 'another action is working on this snapshot'}
+    integration = integration_for_action(row)
+    snap_int = _snapshot_integration(integration) if integration else None
     if not snap_int:
+        set_snapshot_state(row['id'], 'active', error='snapshot_unavailable')
         return {'ok': False, 'reason': 'snapshot_unavailable'}
     try:
         upid = _call(snap_int, 'snapshot_rollback',
@@ -667,11 +918,14 @@ def rollback(snapshot_id, operator=''):
                       'vmid': int(row['vmid']), 'snapname': row['name']},
                      SNAPSHOT_INTERNAL)
     except ProxyError as exc:
+        set_snapshot_state(row['id'], 'active', error='rollback_failed')
         return {'ok': False, 'reason': 'snapshot_rollback_failed',
                 'detail': str(exc.message or '')[:200]}
     if not _upid_node(upid, row['node']):
+        set_snapshot_state(row['id'], 'failed', error='bad_upid')
         return {'ok': False, 'reason': 'snapshot_bad_upid'}
     if not _wait_task(snap_int, row['node'], upid, poll_timeout()):
+        set_snapshot_state(row['id'], 'failed', error='rollback_task_failed')
         return {'ok': False, 'reason': 'snapshot_task_failed',
                 'detail': 'the rollback task did not finish OK'}
     set_snapshot_state(row['id'], 'rolled_back', rolled_back_at=int(time.time()))
@@ -692,9 +946,15 @@ def delete(snapshot_id, operator='', reason='manual', for_expiry=False):
                            details='Delete refused for #%d: %s (%s)'
                                    % (row['id'], why, detail), actor=operator)
         return {'ok': False, 'reason': why, 'detail': detail}
-    integration = proxmox_integration()
-    snap_int = _snapshot_integration(integration)
+    # AU4: claim the row before the call. `failed` rows may be deleted too.
+    previous = str(row.get('state') or 'active')
+    if not claim_state(row['id'], ('active', 'failed'), 'deleting'):
+        return {'ok': False, 'reason': 'snapshot_state',
+                'detail': 'another action is working on this snapshot'}
+    integration = integration_for_action(row)
+    snap_int = _snapshot_integration(integration) if integration else None
     if not snap_int:
+        set_snapshot_state(row['id'], previous, error='snapshot_unavailable')
         return {'ok': False, 'reason': 'snapshot_unavailable'}
     try:
         upid = _call(snap_int, 'snapshot_delete',
@@ -702,11 +962,14 @@ def delete(snapshot_id, operator='', reason='manual', for_expiry=False):
                       'vmid': int(row['vmid']), 'snapname': row['name']},
                      SNAPSHOT_INTERNAL)
     except ProxyError as exc:
+        set_snapshot_state(row['id'], previous, error='delete_failed')
         return {'ok': False, 'reason': 'snapshot_delete_failed',
                 'detail': str(exc.message or '')[:200]}
     if upid and not _upid_node(upid, row['node']):
+        set_snapshot_state(row['id'], 'failed', error='bad_upid')
         return {'ok': False, 'reason': 'snapshot_bad_upid'}
     if upid and not _wait_task(snap_int, row['node'], upid, poll_timeout()):
+        set_snapshot_state(row['id'], 'failed', error='delete_task_failed')
         return {'ok': False, 'reason': 'snapshot_task_failed'}
     set_snapshot_state(row['id'], 'expired' if reason == 'expiry' else 'deleted',
                        deleted_at=int(time.time()))

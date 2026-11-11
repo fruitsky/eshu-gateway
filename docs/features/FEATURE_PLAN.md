@@ -9877,6 +9877,72 @@ What I checked and accept:
     expiry job can't both pass the re-check on one row. Put the row back if
     the call fails.
 
+### Code round 3 — AU1–AU4 (implementer notes)
+
+**Status: AU1–AU4 are in; the security reviewer reads this diff.**
+
+**AU1 — coverage is structured.** F1's parser now records the wrapper
+target on **each step** (`step['inner']`, set where the parser unwraps
+`pct exec` / `qm guest exec`, saved and restored per statement, inherited
+by a nested shell script or substitution). `_writes_uncovered` no longer
+looks for the vmid in a step's labels or text: it requires
+
+* `breakdown['complete']` (an unparsed or opaque part is partial);
+* `breakdown['inner_targets']` to be **exactly one** entry;
+* that entry's vmid to equal the resolved guest's (and its wrapper kind to
+  match the guest type when both are known);
+* every `write`/`unknown` step to carry that exact target string.
+
+A node write whose text happens to contain the vmid, and a step wrapped for
+guest `1010` next to guest `101`, are both `snapshot_target_partial` — the
+tests assert the refusal itself, not a tuple of acceptable reasons.
+
+**One bug found on the way.** `requests.inner_target` holds F7's
+`pct:101` / `qm:201`, and `resolve_target` was comparing it raw with a
+guest vmid, so case A could never have matched on real traffic (the tests
+fed a bare `101`). `_request_inner` now splits the kind off and uses the
+vmid; a bare vmid is still accepted for rows written before that shape.
+
+**AU2 — the privilege probe exists.** Two internal reads,
+`get_access_permissions` (`GET /access/permissions`) and `get_version`
+(`GET /version`, for the PVE 8 split), and `credential_state()`:
+
+* no snapshot token → `snapshot_unavailable`;
+* the two secrets equal → `snapshot_tokens_identical`;
+* the main token listing `VM.Snapshot` **or** `VM.Snapshot.Rollback` on
+  any path (the answer is walked recursively) →
+  `snapshot_main_token_privileged`;
+* the snapshot token missing `VM.Snapshot` (and `VM.Snapshot.Rollback` on
+  PVE 8, or when the version cannot be read) → `snapshot_unavailable`;
+* a probe error → `snapshot_unavailable`: fail closed.
+
+The result is cached for 60 s, keyed by the token's hash, and re-probed
+with `force=True` at create — a permission change between the card and the
+click refuses. The Integrations page now has a snapshot panel (the second
+token's field, save/clear) and the red line when the main token can
+snapshot; `GET /api/integrations/{name}/snapshot` is what it reads.
+
+**AU3 — the row's integration.** `integration_for_action(row)` loads
+`row['integration']` by name and refuses `snapshot_integration_missing`
+when it is missing, disabled or not Proxmox; `_recheck`, `rollback` and
+`delete` use it, never "the first enabled Proxmox". The offer uses
+`integration_for_offer`: with more than one enabled integration it is
+refused as `snapshot_target_ambiguous` unless
+`gateways.proxmox_integration` names one (the binding API now carries
+that field alongside node and guest). Tested with two integrations sharing
+a node and vmid: the rollback goes out on the stored integration's token.
+
+**AU4 — the smaller points.** The description marker is compared with the
+space (`'eshu request #%d '`), so `#1` no longer matches `#12`. `_UPID`
+checks the whole shape (`UPID:<node>:<pid>:<pstart>:<starttime>:<type>:
+<id>:<user>:`) and refuses any `/`, `?`, `#` or `..`. Rollback and delete
+take a conditional `claim_state` (`active` → `rolling_back`; `active` or
+`failed` → `deleting`) before the call, so a second action and the expiry
+job cannot both pass the re-check; a failed call puts the row back
+(`active`) or marks it `failed` when the task itself failed.
+
+`bash scripts/verify.sh`: `2733 passed, 22 skipped, 7 warnings in 546.56s
+(0:09:06)`.
 
 ---
 
@@ -10400,7 +10466,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 14 | F14 | inventory | dashboard + MCP | Merged | `feat/f14-inventory` | Chunk H | |
 | 15 | F19 | unattended-limits | gateway + dashboard | Code approved by both reviewers on AF1/AF2 (security `67bec51`); feature reviewer checks AF1/AF2, then merge | `feat/f19-unattended-limits` | F4, F5, F12 | moved ahead of F21–F23: nearly done, and F22 needs it. AF3 goes on the next gateway branch |
 | 16 | F15 | probes | dashboard + MCP | Code round 1: changes requested AG1–AG7 (`56d86e3`); **AG1 to security** | `feat/f15-probes` | F4, F12, F14 | main line, not only local-model |
-| 17 | F21 | snapshot-approve | dashboard + Proxmox | Security code review (`dbc51a6`): guards approved; **AU1** (coverage by substring), **AU2** (main-token privilege probe missing), **AU3** (actions use the row's integration) must; AU4 should | `feat/f21-snapshot-approve` | F7, F14, F2 | security reads the AU1–AU3 diff, then merge |
+| 17 | F21 | snapshot-approve | dashboard + Proxmox | Code round 3: **AU1** (per-step wrapper target, equality coverage), **AU2** (the two-token privilege probe, red line on the integration page), **AU3** (the row's integration; ambiguity needs the binding), **AU4** (marker, full UPID, state claim) folded | `feat/f21-snapshot-approve` | F7, F14, F2 | security reads the AU1–AU4 diff, then merge |
 | 18 | F23 | change-journal | dashboard | Ready | `feat/f23-change-journal` | F1, F5, F7, F14 | no security gate; can be coded while F21's design is with security |
 | 18a | X2 | runbooks-page | dashboard UI | Ready | `feat/x2-runbooks-page` | F13 | small; no security gate |
 | 19 | F22 | change-checks | dashboard + MCP | After F19 merges | `feat/f22-change-checks` | F3, F5, F12, F19 | + security sign-off (the unattended check; AG1's origin rule does not cover it) |

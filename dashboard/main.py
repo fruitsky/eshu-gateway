@@ -1199,8 +1199,31 @@ def set_snapshot_token(name: str, payload: dict, request: Request):
         raise HTTPException(status_code=404, detail="Integration not found")
     token = str((payload or {}).get('token') or '')[:4000]
     set_snapshot_secret(name, token)
+    from core.snapshots import clear_probe_cache
+    clear_probe_cache()
     record_audit_event('snapshot_token_set', details=f"Snapshot token set on '{name}'")
     return {'status': 'ok', 'configured': bool(token)}
+
+
+@app.get("/api/integrations/{name}/snapshot")
+def integration_snapshot_state(name: str, request: Request):
+    """AM2's probe for the integration page: is a snapshot token configured,
+    can the main token snapshot (red warning), and is the snapshot token
+    missing a privilege."""
+    _check_session(request)
+    from core.snapshots import credential_state
+    from db.integrations import get_integration, get_snapshot_secret
+    integration = get_integration(name)
+    if not integration:
+        raise HTTPException(status_code=404, detail="Integration not found")
+    if (integration.get('kind') or '').lower() != 'proxmox':
+        raise HTTPException(status_code=400, detail="Not a Proxmox integration")
+    state = credential_state(integration)
+    return {'configured': bool(get_snapshot_secret(name)),
+            'available': bool(state.get('ok')),
+            'reason': state.get('reason') or '',
+            'detail': state.get('detail') or '',
+            'main_token_privileged': bool(state.get('main_privileged'))}
 
 
 @app.get("/api/hosts/{ip}/proxmox-bindings")
@@ -1216,11 +1239,15 @@ def put_proxmox_bindings(ip: str, payload: dict, request: Request):
     from db.gateways import set_gateway_proxmox_bindings
     node = str((payload or {}).get('proxmox_node') or '')[:80]
     guest = str((payload or {}).get('proxmox_guest') or '')[:80]
-    if not set_gateway_proxmox_bindings(ip, node, guest):
+    integration = str((payload or {}).get('proxmox_integration') or '')[:80]
+    if not set_gateway_proxmox_bindings(ip, node, guest, integration):
         raise HTTPException(status_code=404, detail="Gateway not found")
     record_audit_event('snapshot_bindings', ip,
-                       details=f'Proxmox bindings: node={node or "-"} guest={guest or "-"}')
-    return {'status': 'ok', 'proxmox_node': node, 'proxmox_guest': guest}
+                       details=f'Proxmox bindings: node={node or "-"} '
+                               f'guest={guest or "-"} '
+                               f'integration={integration or "-"}')
+    return {'status': 'ok', 'proxmox_node': node, 'proxmox_guest': guest,
+            'proxmox_integration': integration}
 
 @app.get("/api/requests/{request_id}/output")
 def request_output(request_id: int, request: Request):
@@ -3920,8 +3947,11 @@ def test_integration_endpoint(name: str, request: Request):
     candidate = None
     for tool in get_tools(integration['id']):
         # Skip not_implemented (v6 stub) tools — they only register so agents
-        # see the roadmap; their placeholder paths don't exist upstream.
-        if not tool.get('enabled') or not tool.get('read_only') or tool.get('not_implemented'):
+        # see the roadmap; their placeholder paths don't exist upstream — and
+        # F21's internal tools, which exist for the dashboard's snapshot code
+        # and are not a connection test.
+        if not tool.get('enabled') or not tool.get('read_only') \
+                or tool.get('not_implemented') or tool.get('internal'):
             continue
         if not any(p.get('required') for p in (tool.get('params') or [])):
             candidate = tool

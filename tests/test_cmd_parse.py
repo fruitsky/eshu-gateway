@@ -98,7 +98,8 @@ class TestShape:
         assert result['version'] == 1
         assert isinstance(result['headline'], str)
         step = result['steps'][0]
-        assert set(step) == {'text', 'op', 'kind', 'why', 'section', 'context', 'elevated'}
+        assert set(step) == {'text', 'op', 'kind', 'why', 'section', 'context',
+                            'inner', 'elevated'}
 
     def test_f1_headline_names_the_write(self):
         from core.cmd_parse import breakdown
