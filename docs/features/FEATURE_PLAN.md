@@ -9654,6 +9654,70 @@ in §4.1–§4.3, the re-check in §6 and the "only our own rows" rule are right
 With AP1 in, the design is closed, and the code round (AO3, the CIDR
 detail, the AST sentinel test) can start. The code goes to both reviewers.
 
+**Code round 1 (feature reviewer, 2026-11-11, at `639ce4e`): changes requested, AS1–AS6. The security reviewer reads the code after these.**
+
+The layers are in the right places:
+* `internal` is enforced at the MCP registry, in `run_tool` before gating,
+  and at pending-call execution;
+* the guard sits in `_http_roundtrip`;
+* the sentinel is keyword-only, and there is an AST test for it;
+* the snapshot token is popped from every list;
+* the tests fake Proxmox at `urlopen`.
+
+Five things are wrong, though, and AS5 would make the feature fail on a real
+cluster.
+
+* **AS1 (must): the path guard fails open on a path it cannot normalise.**
+  `_normalise_path` returns `''` for a dot segment, a backslash or a control
+  character, and `is_snapshot_path('')` is `False`. So
+  `POST …/nodes/pve/lxc/101/snapshot/x/rollback/../rollback` is "not a
+  snapshot path" and goes through, and a server or proxy that resolves dot
+  segments runs the rollback. **Fix:** for a non-GET/HEAD method, an
+  unnormalisable path is refused (on every integration; no legitimate tool
+  needs `..`). **Test:** the `..`, `%2e%2e`, backslash and control-character
+  spellings of the rollback path are all refused for POST.
+* **AS2 (must): "Snapshot, then run" ignores the freeze.**
+  `create_and_approve` never checks it, so during a freeze it creates a
+  snapshot and approves the request. The design (§ 8, accepted by the
+  security reviewer) says create is refused while frozen. **Fix:** check
+  both freeze kinds (operator and tripwire) before resolving, and again
+  just before the approve. **Test:** with each freeze on, the result is a
+  refusal, no snapshot row, and the request still pending.
+* **AS3 (must): approve through the normal approve function, not
+  `update_request_status_if_pending`.** The plain Approve button does more
+  than flip the status:
+  * `decided_at` and `decided_by` (F6 and F18 use them);
+  * the approval audit row;
+  * whatever else that path does today (check `main.py`'s approve route).
+
+  A snapshot-approved request must be indistinguishable from a plain approval
+  plus the snapshot. **Fix:** factor the approve route's body into one
+  function, and call it from both places. **Test:** a snapshot-approved
+  request has the same `decided_at`/`decided_by`/audit shape as a plain
+  approval.
+* **AS4 (must): a double click makes two snapshots.** `_LOCK` covers only
+  the name and the row insert. Two clicks both pass the `pending` check,
+  both insert, and both create. **Fix:** inside the lock, refuse when the
+  request already has a `creating` or `active` snapshot row (or add a unique
+  partial index on `request_id` for those states). **Test:** two concurrent
+  calls make one snapshot.
+* **AS5 (must): the task poll uses the wrong token.**
+  `_wait_task(integration, …)` passes the base (agent-facing, read-only)
+  integration. A Proxmox task's status is readable by the user that started
+  it (the snapshot token's user) or by someone with `Sys.Audit`. With AM2's
+  separate token, the read-only token usually gets 403, so every snapshot
+  ends `failed`, and every rollback and delete would fail the same way. The
+  fake Proxmox does not model task ownership, which is why the tests pass.
+  **Fix:** poll with `snapshot_integration` in create, rollback, delete and
+  expiry. **Test:** make the fake refuse a task read from a token other than
+  the one that created it.
+* **AS6 (should): `get_integration()` now returns `snapshot_secret` to
+  every caller.** That includes the agent-facing call paths (they only read
+  `secret` for auth, so nothing leaks today). Pop it in `get_integration`
+  and `get_integration_by_id`, and have `core/snapshots.py` read it only
+  through `get_snapshot_secret`. Then no future serialisation of an
+  integration dict can carry it.
+
 
 ---
 
