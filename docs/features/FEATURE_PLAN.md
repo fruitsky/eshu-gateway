@@ -10182,6 +10182,311 @@ check path; and on a test gateway, a plan that restarts a unit with an
 `is-active` check shows "passed", and one with a broken unit stops at that
 item.
 
+### F22 design note — Changes carry a check
+
+**Status: design note only.** No code on this branch. It needs the security
+reviewer's sign-off on the *unattended* part: a check runs with no human
+watching it, and this note says who may run it, under which identity, with
+what limit, and why it cannot become a second write path. §11 lists the two
+questions for that reviewer.
+
+#### 1. What it adds, and why this needs a security decision
+
+A plan item may carry one **check**: a read that tells the operator (and the
+agent) whether the change worked. The item and its check are approved
+together, in one click; after the item's command reports exit 0, Eshu runs
+the check, records `passed|failed|not_run|skipped` on the item, and **stops
+the plan** on anything but `passed`.
+
+The security decision is precise and worth stating plainly:
+
+* **F15's AG1 rule does not cover this.** AG1 says that in `approval` mode a
+  command can only be auto-approved from a plan whose `origin` is `probe`,
+  and that only server code writes an origin. A check is not a probe: it is a
+  different caller, on a different schedule, for a different reason.
+* So without a decision, a check would either need **a second prompt** (a
+  fresh card for every check) or it would run as an *agent* plan item, which
+  AG1 forbids and which would be a hole: an agent that can put a "check" on
+  an item could get any read command auto-approved under a plan it wrote.
+* This note asks for the narrow answer: **a third origin, `check`**, written
+  only by dashboard code, with one item, one host, one exact command, bounded
+  uses, an unattended row and F19's run limit. §3 and §4 are the argument.
+
+#### 2. When a check runs
+
+The check is part of the item. The sequence for one item is:
+
+1. the operator approves the plan (the card shows each item **and its
+   check**, so the check's exact bytes are part of the approved text);
+2. the item's command is claimed and runs exactly as today (F3/F12);
+3. the gateway posts the result (F5). **Non-zero exit → no check**:
+   `check_state='skipped'`, the plan stops with the item's own failure;
+4. **exit 0 → the check is dispatched** (§3, §5);
+5. the result is written to the item and the plan either continues or stops
+   (§8).
+
+A duplicate F5 post cannot dispatch twice: `request_results` has
+`request_id` as its primary key and `save_result` is `INSERT OR IGNORE`, so
+the second post returns `False`; the hook dispatches only on the `True` (the
+first result). The item's `check_state` is written ahead of the dispatch as
+well (§9).
+
+#### 3. How the check is claimed without a second prompt
+
+**Decision: the check gets its own server-side plan, `origin='check'.`**
+
+`core/checks.py` (new, dashboard-side, the only writer) does, for an ssh
+check:
+
+1. `create_plan(session_id=<the plan's session>, origin='check', items=[one
+   item: host=<the item's host>, command=<the check's exact command>,
+   max_uses=<retries + 1>], note='check for plan #P item #I')`.
+2. `ssh_exec(host, check_command, session_id=<session>, timeout=<=30 s>,
+   wait=False)` in the item's agent context (§4).
+3. The gateway, in `approval` mode, asks `/api/request` with
+   `force_jit=true`. `receive_request` claims the check item:
+
+   * `plan_origins = ('probe', 'check')` under `force_jit` (the only change
+     to that line), and the reason stays
+     `session-plan:<plan>:<item>:check`;
+   * the claim is the same atomic statement AG1 introduced: `uses <
+     max_uses`, the plan still `approved` and inside its TTL, and the
+     session's owner must be the agent making the call (`_claim_candidate`'s
+     `agent` join). An agent cannot spend another session's check;
+   * `max_uses` is the *only* thing that bounds repetitions: it is
+     `retries + 1`, so a retried check cannot exceed the retries the operator
+     approved, and a duplicated gateway request cannot add a use.
+
+Why an origin at all, rather than approving the gateway's request by matching
+its bytes:
+
+* a **claim** proves single use (`uses < max_uses` in the same statement as
+  the SELECT); a **match** cannot — two identical requests, or a retried
+  gateway post, would each be approved, and the check would run twice;
+* the origin keeps the AG1 invariant *auditable*: the set of origins that may
+  cover an approval-mode command is exactly the set of server-side creators
+  (`probe`, `check`), and `receive_request` accepts both by name;
+* the row's reason names the origin, so History shows why no card appeared.
+
+**No second prompt, and the argument for it:** the operator approved the
+check's exact bytes as part of the item — the card renders the check command
+or the tool call, first, on the same card, and approving the plan approves
+it. The check cannot be edited after approval (the item is immutable; a
+change is a new plan), it must pass `is_read_ssh` at proposal *and* at run
+(§6), and it runs under a limit (§5). Asking again would double the
+approvals for every change and stall the plan at the moment the operator has
+moved on — and the second card would show the same bytes the first one did.
+
+In `normal` mode the gateway does not ask at all, so the dashboard marks the
+check item used itself before dispatching, and the same "once" rule holds
+(§9).
+
+#### 4. Who runs it, and under which identity
+
+* **ssh check:** `ssh_exec(host, command, session_id=<the plan's session>)`
+  from the post-result hook, with `set_current_agent(<the plan's agent>)` for
+  the duration. So:
+  * the agent's own SSH policy applies again at run time (host allowlist,
+    `read_only` mode, session rules) — a tighter policy can only refuse, it
+    can never widen;
+  * the runner signs with that agent's derived key, and the gateway records
+    `agent=<the plan's agent>`;
+  * the identity is **the agent**, not the operator. The operator approved
+    the bytes; the run is attributed to the plan it belongs to, with
+    `unattended=1` and the reason naming the plan, the item and `check`.
+* **tool check:** dashboard-side `run_tool(integration, tool, args)` as the
+  same agent, with the plan's `session_id` and reason
+  `plan-check:<plan>:<item>`. It is a read, so `run_tool`'s read path
+  executes it immediately and writes the normal read call row
+  (`agent=<the plan's agent>`). It needs no gateway and no `run_limits`.
+* **Never the operator's session, never an agent token.** There is no MCP
+  tool for a check and no route: an agent proposes one with the item, and
+  that is the only way one is created.
+
+#### 5. F19: `run_limits: v1` is required, or the check is `not_run`
+
+The claimed row for an ssh check is created **unattended and limited**, not
+as the plain approved row a probe claim creates:
+
+* `unattended=1` and `run_limit` = the operator's F19 defaults (60 s /
+  1 MiB), the same `get_run_limit_settings()` the read lane uses;
+* the request the gateway sends reports `run_limits`; if it is **not `v1`**,
+  the check is **`not_run`** with reason `check_no_limits`, the row is left
+  pending (never approved), the plan **stops** (§8) and `check_no_limits` is
+  audited. Never `passed`: an older gateway would run the check unbounded,
+  and a bound we cannot enforce is not a bound;
+* the check's own `timeout` is `min(30, run_limit.seconds)`, so the command
+  cannot outlive the row's limit;
+* if the gateway reports a limiter stop (`limit: time|bytes` on the result,
+  F19) the check is **`not_run`** with reason `check_limit`: a cut command
+  cannot tell us whether the state is good, so it is not a failure and not a
+  pass.
+
+The tool check has no row and no gateway, so this section does not apply to
+it; it is bounded by its own dashboard timeout (§7).
+
+#### 6. The read policy is checked again at run time
+
+Both kinds re-check at run time, not only at proposal:
+
+* **ssh:** `is_read_ssh(cmd_breakdown(command))` must still pass. F12's
+  runner refuses a write for a `read_only` agent, but a check must be a read
+  for **every** agent, so the check gate is its own: if it fails now (the
+  command's parse changed, or a rule moved), the check is `not_run` with
+  `check_not_a_read`, nothing is sent, and the plan stops.
+* **tool:** `is_read_integration_call(tool, transport, args)` must still
+  pass; a tool reconfigured as a write, disabled or deleted gives `not_run`
+  with `check_not_a_read` / `check_tool_missing` / `check_tool_disabled`.
+
+The proposal-time refusal is unchanged: a write as a check is refused when it
+is proposed, with `check_not_a_read`, before a plan exists.
+
+#### 7. The `expect` comparison, and the bounds
+
+**`expect` is structured, never a regex and never prose.** For a tool check
+it is `{path, op, value}`:
+
+* `path`: one to four dotted parts, each a key name (`[A-Za-z0-9_-]+`) or a
+  decimal list index. No wildcards, no brackets, no `..`. The walk only
+  follows dicts and lists; a path that does not resolve is `not_run` with
+  `expect_path_missing` — a missing value means "we could not tell", which is
+  not "the change did not work";
+* `op`: `eq|ne|in|lt|gt`.
+  * `eq`/`ne`: both sides normalised as JSON scalars (a number stays a
+    number, a string stays a string, `true`/`false` as booleans); a string and
+    a number are **not** coerced into each other — a mismatch is `failed`
+    with both values shown;
+  * `in`: the resolved value must be a list, and the expected value must be
+    one of its members (same normalisation). A non-list is `not_run`
+    (`expect_not_comparable`);
+  * `lt`/`gt`: both sides must be numbers (a numeric string is not one);
+    otherwise `not_run` (`expect_not_comparable`);
+* `value`: a string or a number only. A bool, list, dict or `null` is refused
+  at proposal (`expect_value_type`).
+
+Stored per item: `check_state`, `check_observed` and `check_expected`
+(capped at 200 characters each, scrubbed), `check_exit_code`,
+`check_attempts`, `check_at`, `check_reason` (the code). **The output itself is
+never stored** — the observed value is the only part of it that survives, and
+only when the check is a tool check.
+
+**Bounds:** `wait_s` 0–30 and `retries` 0–3, validated at proposal and
+re-validated at run (the stored values are trusted only after that). The
+wait is applied before the first attempt, and between attempts. The worst case
+is `(retries + 1) × (wait_s + timeout)` — 4 × (30 + 30) = 240 s for an ssh
+check, which is inside a plan's TTL and is bounded again by `max_uses =
+retries + 1`. A retry only happens on `failed`; `not_run` never retries
+(there is nothing to retry: the check could not run).
+
+#### 8. How a failed or `not_run` check stops the plan
+
+* `check_state` is written on the item. On `failed` or `not_run`:
+  `session_plans.status='stopped'`, `stopped_at`, `stopped_reason`
+  (`check_failed:<item>` / `check_not_run:<item>:<code>`), and an audit row
+  `plan_stopped` naming the plan, the item and the state.
+* `_claim_candidate` only matches `p.status='approved'`, so a stopped plan's
+  items are **unclaimable**: the next item's command, arriving through the
+  real `receive_request`, falls past the plan branch to the normal pending
+  path and becomes a card. That is the point — the plan's authority ends at
+  the failed check, and nothing after it runs without a fresh human decision.
+* The agent sees it in `session_plan` / `session_summary`: the plan is
+  `stopped`, the item carries `check_state` and the reason code, and the
+  failed check is named.
+* `passed` continues the plan; the next item is claimed normally. `skipped`
+  (the item's own command failed) also stops the plan, with the item's exit
+  code as the reason, and no check is dispatched.
+* A plan that was denied, ended or expired while the check ran is not
+  "stopped" by the check — it is already over, and the check result is
+  recorded on the item without changing the plan's status.
+
+#### 9. Restart safety: a check never runs twice
+
+Three independent guards, because the failure mode (a check re-run) is
+exactly what makes a "read" expensive or unsafe:
+
+1. **Write ahead.** Before dispatching, `core/checks.py` writes
+   `check_state='running'`, `check_token` (a random id), `check_at` and
+   `check_attempts=1` and commits. A dispatch is only attempted after that
+   commit succeeds.
+2. **Startup sweep.** Any item left `running` older than the worst-case bound
+   (§7) becomes **`not_run`** with `check_interrupted`, the plan stops, and
+   it is **never re-dispatched**. The operator can read what happened and
+   approve a new plan; a check whose outcome the dashboard never saw is not
+   evidence that anything passed.
+3. **One use per attempt.** The check item's `max_uses` is `retries + 1` and
+   the claim is atomic, so even a duplicated gateway request cannot exceed
+   the retries the operator approved.
+
+The token is carried on the result for correlation only; it is not a
+credential and grants nothing.
+
+#### 10. Storage, UI and MCP
+
+* `session_plan_items` gains: `check_json` (the approved check definition),
+  `check_state`, `check_reason`, `check_exit_code`, `check_observed`,
+  `check_expected`, `check_attempts`, `check_at`, `check_plan_id`,
+  `check_item_id`, `check_token`. All nullable; an item without a check is
+  exactly as today.
+* `session_plans` gains `stopped` as a status value, plus `stopped_at` and
+  `stopped_reason` (nullable columns).
+* The plan card (F3) shows each item's check under the command — the exact
+  bytes, the `expect`, `wait_s`/`retries` — and its state after the run
+  (`passed` in green, `failed`/`not_run` in red with the reason). The session
+  card (F13/F6) and the sidebar show the same short line.
+* `session_plan` (MCP) returns `check_state`, `check_reason`,
+  `check_observed` and the plan's `stopped` state; `session_summary` says
+  which item stopped the plan and why.
+* Freeze is not a factor: a check is a read, and reads keep working during a
+  freeze (F9). The *item* it follows was approved before the freeze.
+
+#### 11. What the security reviewer must decide
+
+1. **The origin.** A third server-only origin, `check`, accepted by
+   `receive_request`'s `force_jit` claim beside `probe` (§3). The alternative
+   is a second prompt per check, which this note argues against; if the
+   reviewer prefers the prompt, the design changes only at §3 — the check
+   would be an ordinary pending request, and the plan would wait for the
+   operator.
+2. **The row shape.** The claimed check row is `unattended=1` with the F19
+   limit, and `not_run` when the gateway does not report `run_limits: v1`
+   (§5). A probe claim creates a plain approved row; this one differs
+   deliberately, because a check runs with nobody watching.
+
+#### 12. Tests (outline)
+
+* **Proposal:** a write as a check is refused (`check_not_a_read`); a
+  five-part path, an unknown `op`, a `null`/list/dict `value`, and
+  `wait_s`/`retries` out of range are refused; a valid ssh and a valid tool
+  check are stored on the item.
+* **The claim:** an approval-mode agent's check is claimed from the `check`
+  plan (reason `session-plan:<p>:<i>:check`), the row is `unattended` with a
+  limit, and the agent's owner check applies; an *agent* plan carrying a
+  check item is **not** claimable (the origin narrowing); a second identical
+  gateway request cannot take a second use.
+* **Limits:** a gateway reporting no `run_limits` gives `not_run` and a
+  `check_no_limits` audit, and the row stays pending; a limiter stop gives
+  `not_run`.
+* **The read re-check:** an ssh check whose command stops being a read is
+  `not_run` and nothing is sent; a tool reconfigured as a write, disabled or
+  deleted is `not_run` with its code.
+* **`expect`:** `eq`/`ne` on strings and numbers (no cross-type coercion),
+  `in` on a list, `lt`/`gt` on numbers, a missing path, a non-list for `in`,
+  a non-number for `lt` — each with the right state and the stored
+  observed/expected, and no output stored.
+* **Stopping:** a failed item's check is `skipped` and no check runs; a
+  failed check stops the plan, and the **next item's exact bytes through the
+  real `receive_request`** come back pending (no plan claim); `not_run` does
+  the same; `passed` lets the next item through.
+* **Retries:** a `failed` check retries up to `retries` times and then stops;
+  a `not_run` never retries; `max_uses` is `retries + 1`.
+* **Restart:** an item left `running` becomes `not_run` with
+  `check_interrupted` on startup and is never re-dispatched; a duplicate F5
+  post does not dispatch twice.
+* **Freeze:** a check runs during a freeze (reads keep working) and the plan
+  state is unchanged by it.
+
+`bash scripts/verify.sh`: `2765 passed, 22 skipped, 7 warnings in 572.35s (0:09:32)` (docs only).
+
 ### Implementer notes
 
 _(implementer)_
@@ -11920,7 +12225,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 18c | X3 | integrations-ui | dashboard UI | Requested 2026-11-12; design after F27 is signed off | `feat/x3-integrations-ui` | F27, F10 (P2) | operator walk-through first |
 | 18e | X5 | ui-test-round | dashboard UI | **Implemented** 2026-11-12: six test-round fixes; no endpoint, save path or policy changed | `fix/x5-ui-test-round` | — | six small fixes |
 | 18d | X4 | agents-page | dashboard UI | **Implemented** 2026-11-12: one Agents page (tokens, policy sections, web fetch, activity); Controls renamed Command policy; absent policy fields now keep their stored value | `feat/x4-agents-page` | `fix/agent-ssh-hosts` | rename Controls → Command policy |
-| 19 | F22 | change-checks | dashboard + MCP | After F19 merges | `feat/f22-change-checks` | F3, F5, F12, F19 | + security sign-off (the unattended check; AG1's origin rule does not cover it) |
+| 19 | F22 | change-checks | dashboard + MCP | **Design note written** — a third server-only origin `check`, the unattended limited row, the read re-check, `expect`, the stop through `receive_request`, restart safety | `feat/f22-change-checks` | F3, F5, F12, F19 | + security sign-off (the unattended check; AG1's origin rule does not cover it) |
 | 20 | F16 | recipes | dashboard + MCP | Design complete (security Round 4; feature reviewer Round 5 with AA1/AA2); code next after F22 | `feat/f16-recipes` | F3, F12, F13, F19 | main line; steps claim by request id; code comes back to security; auto_run comes back to security |
 | 21 | F24 | content-tripwire | dashboard | Design first | `feat/f24-content-tripwire` | F12, F14 | + security sign-off (retention) |
 | 22 | F25 | secrets-broker | gateway + dashboard | Design first | `feat/f25-secrets-broker` | F1, F12, F19; security Chunk 7 before deploy | + security sign-off; gateway bash line by line |
