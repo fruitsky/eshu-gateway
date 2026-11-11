@@ -54,6 +54,17 @@ def init_session_plans_tables(cursor):
             note TEXT NOT NULL DEFAULT ''
         )
     ''')
+    # F15/AG1: who created the plan. A probe plan may cover a command for an
+    # agent in `approval` mode (the operator approved the probe's exact bytes
+    # once, through the probe itself); an agent-proposed plan may not.
+    _cols = {row[1] for row in cursor.execute(
+        "PRAGMA table_info(session_plans)").fetchall()}
+    if 'origin' not in _cols:
+        try:
+            cursor.execute(
+                "ALTER TABLE session_plans ADD COLUMN origin TEXT NOT NULL DEFAULT 'agent'")
+        except Exception:
+            pass
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS session_plan_items (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -284,12 +295,21 @@ def _items_for(conn, plan_id):
         (plan_id,)).fetchall()
 
 
-def create_plan(session_id: str, items, note: str = '') -> dict:
+def create_plan(session_id: str, items, note: str = '', origin: str = 'agent') -> dict:
     """Store a new proposed plan, replacing any other proposal for the session."""
     sid = (session_id or '').strip()[:64]
     if not sid:
         raise PlanError('invalid_session', 'session_id is required')
+    origin = origin if origin in ('agent', 'probe', 'recipe') else 'agent'
     normalised = validate_items(items)
+    if origin != 'agent':
+        # AG1 condition 2: server plans are closed and specific. An item that
+        # ranges over every host is an agent-style plan.
+        for item in normalised:
+            if item.get('host') in ('', '*'):
+                raise PlanError(
+                    'invalid_host',
+                    'a plan created by %s must name a specific host' % origin)
     note = (note or '')[:MAX_NOTE]
     now = int(time.time())
     with db_conn() as conn:
@@ -303,9 +323,9 @@ def create_plan(session_id: str, items, note: str = '') -> dict:
             cur.execute('DELETE FROM session_plan_items WHERE plan_id = ?', (plan_id,))
             cur.execute('DELETE FROM session_plans WHERE id = ?', (plan_id,))
         cur.execute('''
-            INSERT INTO session_plans (session_id, status, created_at, note)
-            VALUES (?, 'proposed', ?, ?)
-        ''', (sid, now, note))
+            INSERT INTO session_plans (session_id, status, created_at, note, origin)
+            VALUES (?, 'proposed', ?, ?, ?)
+        ''', (sid, now, note, origin))
         plan_id = cur.lastrowid
         for item in normalised:
             cur.execute('''
@@ -463,9 +483,13 @@ def _decide(plan_id: int, status: str, decided_by: str) -> dict:
     return get_plan(plan_id)
 
 
-def _claim_candidate(conn, session_id: str, host: str, command: str, now: int):
-    """The first item of the session's active plan that still has a use left."""
-    return conn.execute('''
+def _claim_candidate(conn, session_id: str, host: str, command: str, now: int,
+                     origins=None, agent=None):
+    """The first item of the session's active plan that still has a use left.
+
+    AG1: `origins` narrows the claim to plans created by that code (a probe in
+    `approval` mode claims only its own plans)."""
+    sql = '''
         SELECT i.id, i.plan_id
         FROM session_plan_items i
         JOIN session_plans p ON p.id = i.plan_id
@@ -473,9 +497,20 @@ def _claim_candidate(conn, session_id: str, host: str, command: str, now: int):
           AND i.removed = 0 AND i.uses < i.max_uses
           AND i.kind = 'ssh'
           AND i.command = ? AND (i.host = ? OR i.host = '*')
-        ORDER BY i.id
-        LIMIT 1
-    ''', (session_id, now, command, host)).fetchone()
+    '''
+    params = [session_id, now, command, host]
+    if origins:
+        marks = ','.join('?' for _ in origins)
+        sql += ' AND p.origin IN (%s)' % marks
+        params.extend(origins)
+    if agent:
+        # AG1 condition 3: F10's M2 rule for SSH plan claims. Someone holding
+        # another session's id must not spend its probe items.
+        sql += (' AND EXISTS (SELECT 1 FROM sessions s '
+                'WHERE s.id = p.session_id AND s.agent = ?)')
+        params.append(agent)
+    sql += ' ORDER BY i.id LIMIT 1'
+    return conn.execute(sql, tuple(params)).fetchone()
 
 
 def _claim_mcp_candidate(conn, session_id: str, owner: str, integration: str,
@@ -543,7 +578,8 @@ def claim_mcp_plan_item(session_id: str, integration: str, tool: str,
         return row['plan_id'], row['id']
 
 
-def claim_plan_item(session_id: str, host: str, command: str, now: int = None):
+def claim_plan_item(session_id: str, host: str, command: str, now: int = None,
+                    origins=None, agent=''):
     """Atomically consume one use of a matching item.
 
     Returns ``(plan_id, item_id)`` when a use was consumed, else None. The
@@ -561,7 +597,8 @@ def claim_plan_item(session_id: str, host: str, command: str, now: int = None):
     expire_plans(now)
     with db_conn() as conn:
         cur = conn.cursor()
-        row = _claim_candidate(conn, sid, host, command, now)
+        row = _claim_candidate(conn, sid, host, command, now, origins=origins,
+                               agent=(agent or '').strip()[:64])
         if not row:
             return None
         # The plan's state is rechecked in the same statement: End or Deny can

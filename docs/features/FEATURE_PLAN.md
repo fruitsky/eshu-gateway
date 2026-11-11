@@ -8227,7 +8227,57 @@ F12 (runner), F4 (read lane), F5 (outputs), F3 (grouped approval), F14 (for
 
 ### Implementer notes
 
-_(implementer)_
+**Code round 1 (2026-11-10) — `dashboard/core/probes.py`, five MCP tools,
+`tests/test_f15_probes.py` (43 tests).** Probes are code: typed parameters in,
+a fixed command list out, a capped digest back.
+
+**The probes and their commands.** `diagnose_service`:
+`systemctl is-active --no-pager <unit>`, `journalctl -u <unit> -n 200
+--no-pager -o short-iso`, `ss -tlnp`. `diagnose_container`: `docker ps -a
+--no-trunc` + `docker inspect <name>`, or `pct list` + `pct config <vmid>`.
+`disk_pressure`: `df -h`, `df -i`, `du -x -d 1 /var/log`. `dns_check`: the
+Pi-hole record only (P8's "else none").
+**P1** is a per-type first-character rule: `unit` `^[A-Za-z0-9][A-Za-z0-9@._-]
+{0,127}$`, a Docker name `^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$` or a vmid
+`^[0-9]{3,9}$`, an FQDN of lower-cased RFC labels with no `..` and no leading
+dash, and `host` must be a registered gateway IP. Every value is
+`shlex.quote`d, and unknown parameters are refused (`command=id` cannot ride
+along). **P2:** state comes from `systemctl is-active` (a structured word,
+never prose); `systemctl status` is not used at all. **P5:** each output goes
+through `core.secret_scrub.scrub_string` before parsing (test: a synthetic
+`API_KEY` value never reaches the digest). **P6:** the `du` is
+`-x -d 1 /var/log`. **P7:** the digest is capped at 8,000 bytes of
+`json.dumps`, `truncated` is set, and the drop order is errors past the top 10
+first, then ports, then the log/ps lists. **P8:** `dns_check` reports
+`gateway: null` and why, and the agent cannot name a host.
+
+**P3 — no capture dependency.** The digest is built from the F12 envelope's
+output, which the runner returns whatever `/etc/eshu-capture` says, so a
+gateway on `exit-only` still yields a digest. There is no silent empty digest:
+a command that did not run lands in `incomplete` with its reason.
+
+**P4 — one grouped approval.** `diagnose_*` validates, builds the commands,
+and proposes **one** F3 plan (the probe's own code, not agent text) with one
+item per command; the call returns `{status: pending, plan_id}` and creates no
+JIT requests (test). `probe_result(plan_id)` returns `pending` until the
+operator approves; then it runs each command through the F12 runner (the
+approved plan claims them), builds the digest, stores it, and returns it. A
+second `probe_result` returns the stored digest without re-running (test).
+The agent cannot approve a plan.
+
+**Deviation, for the reviewer — probes do not use F4's read lane.** The
+outline says every generated command must pass `read_policy.is_read_ssh`, and
+P2 says to use `systemctl show`. Those conflict: `read_policy` deliberately
+refuses `systemctl show`, `docker logs`, `pct status` and `getent` (its
+`probe class` tests pin `systemctl show nginx` as ineligible), and extending
+the lane is its own reviewed surface. So probes rely on the **grouped
+approval** instead of auto-run: the operator approves the exact commands,
+which is stronger than lane eligibility, and no agent text reaches a shell
+either way. If the reviewer prefers `active_since`/`NRestarts` in the digest,
+it needs `systemctl show` in the lane (a separate change); the digest
+currently carries `state`, `errors`, `ports` and `error_total`.
+
+`bash scripts/verify.sh`: `2685 passed, 22 skipped, 7 warnings in 535.07s (0:08:55)`.
 
 ### Reviewer notes
 
@@ -8277,6 +8327,238 @@ merged.
 * **P8 (should):** `dns_check` must say which gateway it uses: the one F14's
   inventory maps the NPM proxy host to, else none (Pi-hole only). Never let
   the agent name it.
+
+**Code round 1 (feature reviewer, 2026-11-10, at `5eeb5f6`): changes requested, AG1–AG7.**
+
+The typed parameters (P1), the quoting, the cap with its drop order (P7), the
+`du -x -d 1` bound (P6) and the one-plan proposal (P4) are right. The
+read-lane deviation is accepted, with a smaller scope than the notes say
+(see "On the deviation" below). The blocker is that the grouped approval does
+not cover the commands for an agent on the default SSH mode.
+
+* **AG1 (must, blocker): under the default `ssh_mode` (`approval`), the
+  probe's plan never covers its commands.** `ssh_exec` sets `force_jit` when
+  the agent's mode is `approval` (`core/ssh_exec.py`, `force_jit =
+  policy['ssh_mode'] == DEFAULT_SSH_MODE`). `receive_request` then skips the
+  F3 plan check (`main.py`, `if sid and not frozen and not force_jit …`).
+  So for every agent left at the default:
+  * the operator approves the probe's plan;
+  * each command then files its own JIT request;
+  * `probe_result` (`wait=False`) gets `pending` for all of them and returns
+    `refused`.
+
+  The operator is asked 1 + N times, and nothing runs. The test passes only
+  because it replaces `ssh_exec` with a fake. **Fix:** the operator approved
+  these exact bytes once, so the second prompt adds nothing. But letting a
+  plan cover commands in `approval` mode changes what that mode means, so
+  this needs the security reviewer.
+  * **Proposed:** under `approval`, a plan item is claimable only when its
+    plan was created by probe code. That means a server-side `origin='probe'`
+    column, never the free-text `note`; the same rule as F16's V5 for recipe
+    items. `normal` mode keeps today's behaviour.
+  * **Test:** drive the real `receive_request` with an `approval`-mode
+    agent:
+    * one approval, then each command runs once;
+    * an ordinary agent-proposed plan still does not cover it in `approval`
+      mode;
+    * a second `probe_result` runs nothing.
+* **AG2 (must): `probe_result` returns a stored digest before it checks the
+  session** (`probes.py` 402–405 come before the session check at 407). Any
+  agent that guesses a plan id reads another session's digest: journal lines,
+  ports, container lists. **Fix:** move the stored-result read after the
+  session check (and bind it to the agent, as F12 does for tickets). **Test:**
+  a second session gets `probe_not_found` for a finished plan.
+* **AG3 (must): `dns_check` builds its own tool instead of using the
+  registered one.**
+  * It calls `execute_integration_call` with a hand-made tool:
+    * the Pi-hole v5 path `admin/api.php?customdns`;
+    * an integration loaded with `include_secret=False`.
+  * Against a real v6 Pi-hole it cannot authenticate, and the path does not
+    exist.
+  * It also skips the tool's enabled flag and `read_policy`.
+  * **Fix:** call F14's `core.inventory._call_tool(integration,
+    'local_dns_records', {})`. That function is gated by
+    `is_read_integration_call` and uses the v6 handler. Then parse its shape.
+  * **Test:** with the tool disabled, the result says so; the record is
+    found through the real handler with a stubbed upstream.
+* **AG4 (must): `docker inspect` prints JSON, but `_kv` looks for
+  `key=value`.** So `running` and `status` are always empty. The full
+  inspect also carries `Config.Env`, often database passwords that
+  `scrub_string` does not know, and F12 stores the output (`_store_result`).
+  **Fix:**
+  * `docker inspect --format '{{.State.Status}} {{.State.Running}} {{.RestartCount}} {{.State.StartedAt}}' NAME`;
+  * `docker ps -a --filter name=^NAME$ --format '{{.Names}}\t{{.Status}}'`
+    instead of every container's full command line;
+  * the same narrowing for `pct`: `pct status VMID` and `pct config VMID`
+    only.
+
+  **Test:** a stubbed inspect line parses into `status`/`running`/`restarts`,
+  and no `Env` text reaches the digest or the stored output.
+* **AG5 (must): `recent_changes` is almost always empty.**
+  * It keeps rows whose `reason` starts with `jit`, but `reason` is the
+    agent's free text.
+  * It reads `get_all_requests()`: the newest 200 rows from every host.
+  * It does not look at writes at all.
+
+  **Fix:** a SQL query by `target_ip` over the last 24 h, keeping rows that
+  ran (`approved`/`consumed`) and that F1 labels as having a write step. The
+  `command` is shown through `scrub_string`. **Test:** a write on the host
+  appears; a read, another host's write, and a 25-hour-old write do not.
+* **AG6 (should): the journal digest.**
+  * `errors` counts all 200 lines, not errors: add `-p warning`.
+  * `last` is the probe time for every row: use the line's own timestamp.
+  * `_COUNTY` turns hex-looking words (`add`, `bad`, `be`, `cafe`) into
+    `<n>`, so unrelated messages merge. Require at least one digit, or a
+    `0x` prefix.
+* **AG7 (should): `disk_pressure` and `diagnose_service` keep the first
+  `df`/`ss` rows when the cap bites.** Sort `filesystems` by `use_pct`
+  descending and `log_dirs` by size before capping, so the cut drops the
+  least useful rows.
+
+**On the deviation.** The notes say the probes cannot use the read lane
+because P2 needs `systemctl show`. The code uses `systemctl is-active`, which
+already passes `is_read_ssh`. Checked on this branch:
+* **pass:** `systemctl is-active`, `ss -tlnp`, `pct list`, `docker ps -a`,
+  `df -h`, `df -i` and `du -x -d 1 /var/log`;
+* **refused:**
+  * `journalctl … -o short-iso` (`option:-o`);
+  * `pct config` (`subcommand`);
+  * `docker inspect` (`sensitive-path`, which is right, since it dumps the
+    env).
+
+The lane is shadow-only and `on` is locked, so this changes nothing today.
+Keep the grouped approval as the path. Add a test that records which probe
+commands are lane-eligible, so a later change to either side shows up in a
+diff. Dropping `-o short-iso` (and parsing the default format) would bring
+the journal step into the lane; worth doing if AG6 touches that line anyway.
+`active_since`/`NRestarts` are not needed for this round.
+
+**After the fixes:** AG2–AG7 come back to the feature reviewer. AG1 is
+decided by the security reviewer first: DeepSeek should implement the
+proposed rule behind a test, and both reviewers read it.
+
+**Security reviewer — AG1 decision (2026-11-10): the proposed rule is
+accepted, with six conditions.**
+
+Why it's acceptable:
+* `approval` means "a human approves the exact bytes before they run".
+* A plan built by server code from a probe definition (written by the
+  operator), and approved on one card that lists every command, meets that.
+  Asking a second time adds nothing.
+* An agent-proposed plan does not meet it. Its items, hosts and `max_uses`
+  are the agent's choice, and in `approval` mode the operator chose to see
+  each command. So the rule turns on who **wrote** the plan, not on who
+  approved it.
+
+Conditions:
+1. **Origin is written only by server code.**
+   * `session_plans.origin`, `NOT NULL DEFAULT 'agent'`; every existing row
+     is `agent`.
+   * `create_plan()` takes `origin` as a keyword. The MCP `plan_propose`
+     path and every HTTP route hard-code `agent`. No request field, note or
+     item field can set or change it.
+   * Allowed values are a fixed set: `agent`, `probe`, and later `recipe`
+     and `check`.
+   * Test: a proposal that sends `origin: 'probe'` in any field is stored as
+     `agent`.
+2. **A server plan is closed.**
+   * No agent-facing path may add, edit or re-enable an item of a plan whose
+     origin isn't `agent`. The operator may still remove items.
+   * The card shows the origin (for example "probe: disk_usage") and lists
+     every item.
+   * Items name a specific host, never `*`.
+3. **The claim checks the session's owner.**
+   * In `approval` mode a covered claim also requires the session's owner to
+     be the verified agent on the request. This is F10's M2 rule; the SSH
+     `claim_plan_item` does not have it today.
+   * The agent identity is the one the signed prefix carries, which the
+     agent MAC already covers.
+   * Test: agent B, in `approval` mode, sending A's session id with a
+     matching command does not claim A's probe item.
+4. **Nothing else moves.**
+   * Freeze and zero-trust still skip plan coverage.
+   * The encoded-payload block and the blocklists still come first.
+   * The session override and the read lane stay off under `force_jit`.
+   * The change is one branch in `receive_request`: `force_jit` permits a
+     plan claim only when the claimed item's plan origin is in
+     `SERVER_PLAN_ORIGINS`. `normal` mode is unchanged.
+   * The approved request records `session-plan:<plan>:<item>` and the
+     origin in its reason, so the audit shows why no card appeared.
+5. **It is tested with the real `receive_request`.** The cases are the ones
+   AG1 lists, plus conditions 1 and 3.
+6. **`check` (F22) is not decided here.** This rule covers a plan item that
+   the agent's own call claims while the operator's approval is fresh. An
+   item that runs later with no agent call and no human present (F22's
+   check) is an *unattended* run. It goes through F19's
+   `approve_unattended()`, with the limit and the capability, and F22's
+   design review decides whether it may use this origin at all. `recipe`
+   (F16 V5) also still claims by request id, as agreed for F16.
+
+DeepSeek implements this. Both reviewers read the diff.
+
+### Code round 2 — AG1 (own commit) and AG2–AG7
+
+**AG1 — `1bf7233`, on its own, because security decides it.** The security
+reviewer's six conditions are in:
+* `session_plans.origin` is `NOT NULL DEFAULT 'agent'` and only
+  `create_plan(origin=...)` writes it, from `agent|probe|recipe`. The MCP and
+  HTTP proposal paths pass no origin, so a field named `origin` in an item or a
+  request is stored as `agent` (test).
+* A server plan must name a specific host — an item with `*` or `''` is
+  refused as `invalid_host` (condition 2).
+* `receive_request` permits a claim under `force_jit` only for `origin='probe'`
+  plans; an agent plan still never covers a command in `approval` mode, and
+  `normal` mode is unchanged. The claim also requires the session's owner to be
+  the verified agent (F10's M2 rule), and the approved row's reason is
+  `session-plan:<plan>:<item>:probe`, so the audit shows why no card appeared.
+* The plan card shows a small `probe` origin badge (`_plan_payload` carries
+  `origin`).
+* Tests drive the **real** `receive_request`: a probe plan covers each command
+  once (and only once), an agent plan does not, another agent cannot spend the
+  item, no request field can set the origin, and an any-host server plan is
+  refused.
+
+**AG2–AG7 — `bd71c1f`.**
+* **AG2:** `probe_result` checks the plan's session **and its owner** before
+  returning a stored digest; another session gets `probe_not_found`.
+* **AG3:** `dns_check` calls F14's `_call_tool` (exists, enabled, read policy,
+  v6 handler); a missing tool is reported in the digest as an error.
+* **AG4:** `docker inspect --format '{{.State.Status}} {{.State.Running}}
+  {{.RestartCount}} {{.State.StartedAt}}'`, `docker ps -a --filter name=^NAME$`
+  and `pct status`/`pct config` — no `Config.Env`, no every-container listing.
+* **AG5:** `recent_changes` is a SQL query by host over 24 h, keeping rows F1
+  says have a write step, scrubbed.
+* **AG6:** `journalctl … -p warning`, `last` from the line's timestamp, and a
+  hex-looking word only normalises with `0x` or a digit.
+* **AG7:** filesystems sort by use %, log dirs by size, ports by port before
+  the cap drops anything.
+
+`bash scripts/verify.sh`: `2698 passed, 22 skipped, 7 warnings in 537.81s (0:08:57)`.
+
+**Code round 2 (feature reviewer, 2026-11-11, at `153cf74`): approved; merging.**
+
+AG1 meets the security reviewer's six conditions (`eca8982`):
+* the origin is set by server code only, and an `agent` default is what a
+  forged value becomes;
+* a server plan names one specific host;
+* the claim narrows to `origin='probe'` under `force_jit` and checks the
+  session's owner;
+* the reason and the audit row carry the origin;
+* the card shows a badge;
+* the tests drive the real `receive_request`.
+
+AG2–AG7 are in:
+* the stored digest is behind the session and owner check;
+* `dns_check` goes through `_call_tool`;
+* the `inspect` is formatted, with no `Config.Env`;
+* `recent_changes` is a SQL query using F1 writes;
+* the journal uses `-p warning` and the line's own timestamp;
+* the cap sorts first.
+
+* **AI1 (should, next F15 touch): the `docker ps` format is unquoted.**
+  `--format {{.Names}}\t{{.Status}}` reaches the shell bare, so `\t`
+  becomes `t` (`webtUp 3 hours`). Quote it as the `inspect` format is
+  quoted, and test the exact command string.
 
 ---
 
@@ -10321,10 +10603,10 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 13 | F11 | ha-config-files | dashboard | Security round 7 (`9e75cad`): Z3/Z5 approved; **AH1–AH4 must** (descriptor-based reads, wider redaction, modes, refuse `!include secrets.yaml`), then security re-reads the changes | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | then code |
 | 14 | F14 | inventory | dashboard + MCP | Merged | `feat/f14-inventory` | Chunk H | |
 | 15 | F19 | unattended-limits | gateway + dashboard | **Merged** 2026-11-11 (security sign-off `67bec51`; AF1/AF2 checked) | `feat/f19-unattended-limits` | F4, F5, F12 | AF3 goes on the next gateway branch |
-| 16 | F15 | probes | dashboard + MCP | Code round 1: changes requested AG1–AG7 (`56d86e3`); **AG1 to security** | `feat/f15-probes` | F4, F12, F14 | main line, not only local-model |
+| 16 | F15 | probes | dashboard + MCP | **Merged** 2026-11-11 (AG1 security decision `eca8982`) | `feat/f15-probes` | F4, F12, F14 | AI1 docker ps format quoting is a should for the next F15 touch |
 | 17 | F21 | snapshot-approve | dashboard + Proxmox | Design first | `feat/f21-snapshot-approve` | F7, F14, F2 | + security sign-off (new write path, destructive rollback) |
 | 18 | F23 | change-journal | dashboard | Ready | `feat/f23-change-journal` | F1, F5, F7, F14 | no security gate; can be coded while F21's design is with security |
-| 18a | X2 | runbooks-page | dashboard UI | Ready | `feat/x2-runbooks-page` | F13 | small; no security gate |
+| 18a | X2 | runbooks-page | dashboard UI | **Merged** 2026-11-11 | `feat/x2-runbooks-page` | F13 | |
 | 19 | F22 | change-checks | dashboard + MCP | After F19 merges | `feat/f22-change-checks` | F3, F5, F12, F19 | + security sign-off (the unattended check; AG1's origin rule does not cover it) |
 | 20 | F16 | recipes | dashboard + MCP | Design complete (security Round 4; feature reviewer Round 5 with AA1/AA2); code next after F22 | `feat/f16-recipes` | F3, F12, F13, F19 | main line; steps claim by request id; code comes back to security; auto_run comes back to security |
 | 21 | F24 | content-tripwire | dashboard | Design first | `feat/f24-content-tripwire` | F12, F14 | + security sign-off (retention) |

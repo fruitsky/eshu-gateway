@@ -274,8 +274,9 @@ class TestConcurrency:
 
         real = sp._claim_candidate
 
-        def hook(conn, session_id, host, command, now):
-            row = real(conn, session_id, host, command, now)
+        def hook(conn, session_id, host, command, now, origins=None, agent=None):
+            row = real(conn, session_id, host, command, now, origins=origins,
+                       agent=agent)
             # The operator ends the plan between the SELECT and the UPDATE.
             sp.end_plan(plan_id)
             return row

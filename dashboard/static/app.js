@@ -3870,6 +3870,12 @@ function planCardHtml(plan) {
       '<span class="plan-title">Plan #' + Number(plan.id) + '</span>' +
       '<span class="plan-who" title="Who proposed this plan">' + escapeHtml(who) + '</span>' +
       '<span class="plan-goal" title="Session goal">' + escapeHtml(goal) + '</span>' +
+      /* AG1: who wrote the plan. A probe plan covers its commands for an
+         approval-mode agent; an agent plan never does. */
+      (plan.origin && plan.origin !== 'agent'
+        ? '<span class="plan-origin" title="Written by Eshu, not the agent">' +
+          escapeHtml(plan.origin) + '</span>'
+        : '') +
       '<span class="plan-count">' + kept.length + ' change' + (kept.length === 1 ? '' : 's') +
         ' on ' + Number(plan.hosts || 0) + ' host' + (Number(plan.hosts) === 1 ? '' : 's') + '</span>' +
     '</div>' +

@@ -891,25 +891,37 @@ def receive_request(payload: GatewayPayload, request: Request):
     # Order per § 2.6: after the encoded-payload block, before the session
     # override. Freeze, Zero-Trust and the blocklists always win, and a plan
     # only matches a command carrying the session id it was granted for.
-    if sid and not frozen and not force_jit and not get_gateway_zero_trust(target_ip):
+    # AG1 (F15): in the default `approval` mode `force_jit` skips the plan
+    # check, so a probe's grouped approval would never cover its commands.
+    # A plan created by probe code may cover them (the operator approved those
+    # exact bytes through the probe); an agent-proposed plan still may not.
+    # `normal` mode is unchanged.
+    plan_origins = ('probe',) if force_jit else None
+    if sid and not frozen and not get_gateway_zero_trust(target_ip):
         plan_allowed = True
         if require_sessions_enabled():
             # Strict sessions: only a minted, named session can use a plan (the
             # gateway refuses unsigned ids first; this is the dashboard half).
             plan_allowed = not session_problem(sid)
         if plan_allowed:
-            claimed = claim_plan_item(sid, target_ip, cmd, now)
+            claimed = claim_plan_item(sid, target_ip, cmd, now,
+                                      origins=plan_origins,
+                                      agent=(agent if plan_origins else ''))
             if claimed:
                 plan_id, item_id = claimed
+                # AG1 condition 4: the row says which origin covered it, so
+                # the audit shows why no card appeared for an approval-mode
+                # agent.
+                origin = 'probe' if plan_origins else 'agent'
                 req_id = create_request(target_ip, cmd, status="approved",
-                                        reason=f"session-plan:{plan_id}:{item_id}",
+                                        reason=f"session-plan:{plan_id}:{item_id}:{origin}",
                                         session_id=sid, execution_id=eid,
                                         inner_target=_inner_target_for(cmd), agent=agent)
                 update_gateway_last_seen(target_ip)
                 record_audit_event(
                     'jit_plan_approved', target_ip,
-                    details=f'Session plan #{plan_id} item #{item_id} approved JIT '
-                            f'#{req_id}: {cmd[:80]} (session {sid})')
+                    details=f'Session plan #{plan_id} item #{item_id} ({origin}) approved '
+                            f'JIT #{req_id}: {cmd[:80]} (session {sid})')
                 return {"status": "ok", "id": f"{req_id:06d}", "request_id": req_id,
                         "plan": True, "plan_id": plan_id,
                         "message": "Auto-approved via Session Plan"}
@@ -4068,6 +4080,9 @@ def _plan_payload(plan: dict) -> dict:
     session = get_session(plan.get('session_id') or '')
     out['agent'] = session.get('agent') or ''
     out['session_goal'] = session.get('goal') or ''
+    # AG1: the card says who wrote the plan. A `probe` plan may cover its
+    # commands for an agent in approval mode; an `agent` plan may not.
+    out['origin'] = plan.get('origin') or 'agent'
     # SR3: the card says when a plan is only as safe as the session id, so the
     # operator can enable strict sessions before relying on it.
     out['strict_sessions'] = require_sessions_enabled()
