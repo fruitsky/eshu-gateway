@@ -8560,6 +8560,29 @@ AG2–AG7 are in:
   becomes `t` (`webtUp 3 hours`). Quote it as the `inspect` format is
   quoted, and test the exact command string.
 
+**AI1 — `fix/f15-docker-format`, 2026-11-11. Fixed, with the mechanism
+recorded exactly.** The `ps` template is now single-quoted like the
+`inspect` one, and the tab is written as an escape the *shell* must not
+touch: `--format '{{.Names}}\t{{.Status}}'` (in the Python source
+`"\t"`, so the command text holds a backslash and a `t`).
+
+What the old string did, checked rather than guessed: in the Python source
+`'…\t…'` is a **tab**, so the unquoted template was a word separator, not
+a backslash escape. The command split into
+`['docker', 'ps', '-a', '--filter', 'name=^db$', '--format', '{{.Names}}', '{{.Status}}']` —
+docker got `--format {{.Names}}` and `{{.Status}}` as a stray argument. The
+reviewer's `webtUp 3 hours` is the same bug seen from the other side; the
+fix is the same either way.
+
+Tests: `test_the_two_docker_commands_are_exactly_these_strings` pins both
+commands byte for byte (and checks `shlex.split` gives docker one
+`--format` argument); `test_the_ps_format_reaches_a_shell_unchanged` runs
+the real command through `/bin/sh` with a stub `docker` that reports the
+argument it received, so a shell change that splits or unescapes it fails
+the test. 58 tests in the F15 file.
+
+`bash scripts/verify.sh`: `2767 passed, 22 skipped, 8 warnings in 573.07s (0:09:33)`.
+
 ---
 
 ## Chunk F16 — Recipes · slug `recipes` · dashboard + MCP · **design first + security reviewer sign-off**
@@ -10669,7 +10692,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 13 | F11 | ha-config-files | dashboard | Security round 7 (`9e75cad`): Z3/Z5 approved; **AH1–AH4 must** (descriptor-based reads, wider redaction, modes, refuse `!include secrets.yaml`), then security re-reads the changes | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | then code |
 | 14 | F14 | inventory | dashboard + MCP | Merged | `feat/f14-inventory` | Chunk H | |
 | 15 | F19 | unattended-limits | gateway + dashboard | **Merged** 2026-11-11 (security sign-off `67bec51`; AF1/AF2 checked) | `feat/f19-unattended-limits` | F4, F5, F12 | AF3 goes on the next gateway branch |
-| 16 | F15 | probes | dashboard + MCP | **Merged** 2026-11-11 (AG1 security decision `eca8982`) | `feat/f15-probes` | F4, F12, F14 | AI1 docker ps format quoting is a should for the next F15 touch |
+| 16 | F15 | probes | dashboard + MCP | **Merged** 2026-11-11 (AG1 security decision `eca8982`); AI1 (`fix/f15-docker-format`) quotes the `docker ps` format | `feat/f15-probes` + `fix/f15-docker-format` | F4, F12, F14 | — |
 | 17 | F21 | snapshot-approve | dashboard + Proxmox | Design first | `feat/f21-snapshot-approve` | F7, F14, F2 | + security sign-off (new write path, destructive rollback) |
 | 18 | F23 | change-journal | dashboard | Ready | `feat/f23-change-journal` | F1, F5, F7, F14 | no security gate; can be coded while F21's design is with security |
 | 18a | X2 | runbooks-page | dashboard UI | **Merged** 2026-11-11 | `feat/x2-runbooks-page` | F13 | |
