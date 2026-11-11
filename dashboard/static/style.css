@@ -5518,3 +5518,13 @@ body.pol-open .mobile-menu-btn, body.pol-open .mobile-freeze { display: none; }
   .rb-row > button { align-self: flex-end; }
   .runbook-body { max-height: 70vh; }
 }
+
+/* F16: recipes */
+.recipe-meta { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.recipe-params { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 8px; margin: 10px 0; }
+.recipe-steps { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+.recipe-step { border: 1px solid var(--border-color); border-left: 3px solid var(--text-dim); padding: 8px 10px; background: var(--bg-surface); }
+.recipe-step-head { display: flex; gap: 8px; align-items: baseline; margin-bottom: 4px; }
+.recipe-public { color: var(--danger); font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; margin-top: 4px; }
+.recipe-access { color: var(--text-muted); margin-top: 4px; }
+.recipe-run { display: flex; align-items: center; gap: 6px; padding: 2px 0; }

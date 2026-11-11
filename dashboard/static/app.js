@@ -689,6 +689,7 @@ async function switchView(target) {
   if (target === 'integrations') { fetchIntegrations(); }
   if (target === 'inventory') { fetchInventory(); }
   if (target === 'runbooks') { fetchRunbooks(); }
+  if (target === 'recipes') { fetchRecipes(); }
   if (target === 'settings') {
     refreshPasswordUI();
     fetchNotifyConfig();
@@ -10001,4 +10002,275 @@ function onbIntegrationCard(c) {
 function onbOpenIntegrations() {
   closeOnboarding();
   switchView('integrations');
+}
+
+/* ── F16: recipes ────────────────────────────────────────────────────────
+   A recipe is an operator-approved, parameterised procedure. The page lists
+   them; the modal renders a version step by step (the exact commands and the
+   tool calls), shows the red "public" access-list line when that is what the
+   version says, and starts a run whose filled steps become one plan. */
+var _recipeData = null;
+var _recipePreview = null;
+var _recipeRuns = [];
+
+function recipeStatusChip(status) {
+  var map = { approved: 'chip-approved', draft: 'chip-pending', disabled: 'chip-failed' };
+  return '<span class="chip ' + (map[status] || '') + '">' + escapeHtml(status || '') + '</span>';
+}
+
+async function fetchRecipes() {
+  var box = document.getElementById('recipe-results');
+  if (!box) return;
+  try {
+    var res = await authFetch('/api/recipes');
+    var list = await res.json();
+    var count = document.getElementById('recipe-count');
+    if (count) count.textContent = Array.isArray(list) ? list.length : 0;
+    if (!Array.isArray(list) || !list.length) {
+      box.innerHTML = '<p class="text-muted">No recipes yet. An agent submits one with ' +
+        '<code>recipe_propose</code>; you review and approve it here.</p>';
+      return;
+    }
+    box.innerHTML = '<table class="data-table text-xs"><thead><tr>' +
+      '<th>Name</th><th>Status</th><th>Version</th><th>Approved by</th><th></th>' +
+      '</tr></thead><tbody>' +
+      list.map(function (r) {
+        return '<tr><td><strong>' + escapeHtml(r.name) + '</strong></td>' +
+          '<td>' + recipeStatusChip(r.status) + '</td>' +
+          '<td>v' + Number(r.current_version || 0) + ' <span class="text-muted">' +
+            escapeHtml((r.content_hash || '').slice(0, 8)) + '</span></td>' +
+          '<td>' + escapeHtml(r.approved_by || '—') + '</td>' +
+          '<td><button class="btn btn-muted btn-xs" onclick="openRecipe(' + Number(r.id) +
+            ')">Review</button></td></tr>';
+      }).join('') + '</tbody></table>';
+  } catch (e) {
+    box.innerHTML = '<p class="text-muted">Could not load recipes.</p>';
+  }
+}
+
+async function openRecipe(id) {
+  try {
+    var res = await authFetch('/api/recipes/' + Number(id));
+    if (!res.ok) throw new Error('not found');
+    _recipeData = await res.json();
+    _recipePreview = null;
+    _recipeRuns = [];
+    document.getElementById('recipe-modal').classList.remove('hidden');
+    renderRecipeModal();
+    await loadRecipeRuns(id);
+    await previewRecipe(true);
+  } catch (e) {
+    showToast('Could not open the recipe', 'error');
+  }
+}
+
+function closeRecipeModal() {
+  document.getElementById('recipe-modal').classList.add('hidden');
+  _recipeData = null; _recipePreview = null; _recipeRuns = [];
+}
+
+function recipeAccessLine(label) {
+  if (!label) return '';
+  var isPublic = /^Public/i.test(label);
+  return '<div class="' + (isPublic ? 'recipe-public' : 'recipe-access') + '">' +
+    'Access list: ' + escapeHtml(label) + '</div>';
+}
+
+function recipeStepHtml(step) {
+  var title = '<div class="recipe-step-head"><span class="plan-host">' +
+    escapeHtml(step.kind === 'ssh' ? (step.host || '') : (step.integration || '')) + '</span>' +
+    '<strong>' + escapeHtml(step.title || ('step ' + step.id)) + '</strong></div>';
+  var body = '';
+  if (step.kind === 'ssh') {
+    body = '<code class="plan-cmd">' + escapeHtml(step.command || '') + '</code>';
+    if (step.breakdown) {
+      body += bdHeadlineHtml({ id: 0, command: step.command, breakdown: step.breakdown });
+    }
+  } else {
+    body = '<code class="plan-cmd">' + escapeHtml(step.tool || '') + '</code>' +
+      (step.args_display ? '<code class="plan-cmd plan-args">' + escapeHtml(step.args_display) + '</code>' : '');
+  }
+  var check = step.check && step.check !== 'self'
+    ? '<div class="plan-note">check: <code>' + escapeHtml(String(step.check)) + '</code></div>'
+    : (step.check === 'self' ? '<div class="plan-note">check: the step itself</div>' : '');
+  var undo = step.undo ? '<div class="plan-note text-muted">undo: <code>' +
+    escapeHtml(String(step.undo)) + '</code></div>' : '';
+  return '<div class="recipe-step" data-step="' + escapeHtml(String(step.id)) + '">' +
+    title + body + recipeAccessLine(step.access_list) + check + undo + '</div>';
+}
+
+function renderRecipeModal() {
+  var d = _recipeData;
+  if (!d) return;
+  document.getElementById('recipe-modal-title').textContent = 'Recipe · ' + d.name;
+  var doc = d.document || {};
+  var params = doc.parameters || [];
+  var hash = (d.content_hash || '').slice(0, 12);
+  var head = '<div class="recipe-meta">' + recipeStatusChip(d.status) +
+    ' <span class="text-muted">v' + Number(d.current_version || 0) + ' · ' + escapeHtml(hash) +
+    '</span>' + (d.approved_at
+      ? ' <span class="text-muted">approved ' + formatTime(Number(d.approved_at)) +
+        ' by ' + escapeHtml(d.approved_by || 'operator') + '</span>'
+      : ' <span class="text-warning">draft — not runnable</span>') + '</div>' +
+    (doc.description ? '<p class="text-muted">' + escapeHtml(doc.description) + '</p>' : '');
+
+  var inputs = params.map(function (p) {
+    var value = p.example !== undefined ? p.example : '';
+    return '<label class="block text-muted">' + escapeHtml(p.name) +
+      ' <span class="text-xs">(' + escapeHtml(p.type) + ')</span>' +
+      '<input type="text" class="w-full text-sm" id="recipe-param-' + escapeHtml(p.name) +
+        '" value="' + escapeHtml(String(value)) + '"></label>';
+  }).join('');
+  var paramBox = params.length
+    ? '<div class="recipe-params">' + inputs + '</div>' : '';
+
+  var stepsSource = _recipePreview ? _recipePreview.steps : (doc.steps || []);
+  var steps = stepsSource.map(function (step) {
+    if (_recipePreview) return recipeStepHtml(step);
+    // No preview yet: show the template/tool as authored, placeholders intact.
+    var raw = { id: step.id, kind: step.kind, title: step.title || '' };
+    if (step.kind === 'ssh') {
+      raw.host = (step.ssh && step.ssh.host && step.ssh.host.enum) ? step.ssh.host.enum[0] : '';
+      raw.command = step.ssh ? step.ssh.command : '';
+    } else {
+      raw.integration = step.call ? step.call.integration : '';
+      raw.tool = step.call ? step.call.tool : '';
+      raw.args_display = step.call ? JSON.stringify(step.call.args || {}) : '';
+      var al = step.call && step.call.args && step.call.args.body && step.call.args.body.access_list;
+      if (al) raw.access_list = al.public ? 'Public (no access list)' : ((al.name || '') + ' (#' + al.id + ')');
+    }
+    raw.check = typeof step.check === 'string' ? step.check : (step.check ? 'check step' : '');
+    raw.undo = step.undo ? 'undo step' : '';
+    return recipeStepHtml(raw);
+  }).join('');
+
+  var actions = '<div class="flex gap-2 mt-3">' +
+    (params.length ? '<button class="btn btn-muted btn-xs" onclick="previewRecipe(false)">Preview with these values</button>' : '') +
+    (d.status !== 'approved' || !d.approved_at
+      ? '<button class="btn btn-approve btn-xs" onclick="approveRecipeVersion()">Approve v' +
+        Number(d.current_version || 0) + '</button>' : '') +
+    (d.status === 'approved'
+      ? '<button class="btn btn-approve btn-xs" onclick="runRecipe()">Run this recipe</button>' : '') +
+    (d.status !== 'disabled'
+      ? '<button class="btn btn-deny btn-xs" onclick="disableRecipe()">Disable</button>' : '') +
+    '</div>';
+
+  var runs = '<div class="mt-4"><div class="text-xs text-muted mb-1">Runs</div>' +
+    (_recipeRuns.length ? _recipeRuns.map(function (run) {
+      return '<div class="recipe-run"><span class="chip">#' + Number(run.id) + '</span> ' +
+        escapeHtml(run.status) + (run.failed_step ? ' <span class="text-warning">at ' +
+        escapeHtml(run.failed_step) + '</span>' : '') +
+        ' <span class="text-muted">' + formatTime(Number(run.created_at || 0)) + '</span>' +
+        (run.kind === 'run' && (run.status === 'ok' || run.status === 'failed')
+          ? ' <button class="chip-btn" onclick="rollbackRecipeRun(' + Number(run.id) + ')">Roll back</button>' : '') +
+        '</div>';
+    }).join('') : '<div class="text-muted">No runs yet.</div>') + '</div>';
+
+  document.getElementById('recipe-modal-body').innerHTML =
+    head + paramBox + '<div class="recipe-steps">' + steps + '</div>' + actions + runs;
+}
+
+async function previewRecipe(auto) {
+  var d = _recipeData;
+  if (!d) return;
+  var values = {};
+  (d.document.parameters || []).forEach(function (p) {
+    var el = document.getElementById('recipe-param-' + p.name);
+    values[p.name] = el ? el.value : (p.example !== undefined ? p.example : '');
+  });
+  try {
+    var res = await authFetch('/api/recipes/' + Number(d.id) + '/preview', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ version: d.current_version, parameters: values })
+    });
+    var data = await res.json();
+    if (!res.ok) {
+      if (!auto) showToast(data.detail || 'The preview failed', 'error');
+      return;
+    }
+    _recipePreview = data;
+    renderRecipeModal();
+  } catch (e) { /* keep the raw document visible */ }
+}
+
+async function loadRecipeRuns(id) {
+  try {
+    var res = await authFetch('/api/recipe-runs?recipe_id=' + Number(id));
+    _recipeRuns = await res.json();
+    if (Array.isArray(_recipeRuns)) renderRecipeModal();
+  } catch (e) { /* the page keeps working */ }
+}
+
+async function approveRecipeVersion() {
+  var d = _recipeData;
+  if (!d) return;
+  var ok = await customConfirm('Approve version ' + Number(d.current_version) +
+    ' of "' + d.name + '"? Any later edit becomes a new draft that needs its own approval.',
+    { title: 'Approve this recipe version?', confirmLabel: 'Approve version' });
+  if (!ok) return;
+  try {
+    var res = await authFetch('/api/recipes/' + Number(d.id) + '/versions/' +
+      Number(d.current_version) + '/approve', { method: 'POST' });
+    var data = await res.json();
+    if (!res.ok) { showToast(data.detail || 'Could not approve', 'error'); return; }
+    showToast('Recipe version approved', 'success');
+    var refreshed = await authFetch('/api/recipes/' + Number(d.id));
+    _recipeData = await refreshed.json();
+    _recipePreview = null;
+    renderRecipeModal();
+    fetchRecipes();
+  } catch (e) { showToast('Could not approve', 'error'); }
+}
+
+async function runRecipe() {
+  var d = _recipeData;
+  if (!d) return;
+  var values = {};
+  (d.document.parameters || []).forEach(function (p) {
+    var el = document.getElementById('recipe-param-' + p.name);
+    values[p.name] = el ? el.value : '';
+  });
+  var ok = await customConfirm('This fills the steps into one plan. You review and approve ' +
+    'that plan; the engine then runs the steps in order and stops on the first failed check.',
+    { title: 'Run "' + d.name + '"?', confirmLabel: 'Create the plan' });
+  if (!ok) return;
+  try {
+    var res = await authFetch('/api/recipes/' + Number(d.id) + '/run', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ parameters: values })
+    });
+    var data = await res.json();
+    if (!res.ok) { showToast(data.detail || data.message || 'Could not start', 'error'); return; }
+    closeRecipeModal();
+    showToast('Plan #' + data.plan_id + ' created — approve it in the queue', 'success');
+    fetchSessionPlans();
+  } catch (e) { showToast('Could not start the run', 'error'); }
+}
+
+async function rollbackRecipeRun(runId) {
+  var ok = await customConfirm('Undo only the steps this run created, in reverse. ' +
+    'The undo calls become their own plan for you to approve.',
+    { title: 'Roll back run #' + runId + '?', confirmLabel: 'Propose rollback' });
+  if (!ok) return;
+  try {
+    var res = await authFetch('/api/recipe-runs/' + Number(runId) + '/rollback', { method: 'POST' });
+    var data = await res.json();
+    if (!res.ok) { showToast(data.detail || 'Rollback refused', 'error'); return; }
+    showToast('Rollback plan #' + data.plan_id + ' created', 'success');
+    fetchSessionPlans();
+  } catch (e) { showToast('Rollback refused', 'error'); }
+}
+
+async function disableRecipe() {
+  var d = _recipeData;
+  if (!d) return;
+  var ok = await customConfirm('Disable "' + d.name + '"? It stays in the list but cannot run.',
+    { title: 'Disable this recipe?', confirmLabel: 'Disable' });
+  if (!ok) return;
+  try {
+    await authFetch('/api/recipes/' + Number(d.id) + '/disable', { method: 'POST' });
+    closeRecipeModal();
+    fetchRecipes();
+    showToast('Recipe disabled', 'success');
+  } catch (e) { showToast('Could not disable', 'error'); }
 }

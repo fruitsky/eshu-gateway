@@ -10066,6 +10066,74 @@ points to fold at code time, with tests:
 
 ---
 
+### Code round 1 — the engine, the MCP tools and the UI
+
+Built on `feat/f16-recipes` after merging `feature-roadmap` `7d6941c`. Three
+commits, by review area: the engine (validation, plans, execution, rollback),
+the MCP tools, and the UI.
+
+**The engine.** `core/recipe_params.py` holds the closed type set (V2's RFC
+labels, normalisation before matching), the T1 template rules (no quotes,
+backticks, `$`, newlines or backslashes; declared braces only; whole-word
+slots), V1's executor denylist, Y1's five-verb allowlist with the run-time
+re-check, V2's leading-dash refusal and the param/result slot substitution.
+`core/recipe_tools.py` is the `(kind, tool)` allowlist with per-tool argument
+lists (V3/V6), the undo-only set, and the deny set as the second check.
+`core/recipes.py` validates the document (≤10 steps, ≤3 SSH steps, prechecks,
+checks, undos, access list), pins it to a SHA-256 content hash, fills it into
+one F3 plan, claims each item by `(run, step)`, executes the steps in order,
+evaluates the closed predicate set, and rolls back only `created` steps in
+reverse. `db/recipes.py` is the version/run journal; `db/session_plans.py`
+gains `source`, `recipe_run_id` and `step_id`, and excludes `source='recipe'`
+from both ordinary claims.
+
+**V5, as built.** The plan item is claimed only by `claim_recipe_item(run_id,
+step_id)`; no byte or argument match can spend it. The SSH step's *delivery*
+is a reserved request row: the engine creates an approved, unattended row with
+its run limit, bound to the run's session and agent, and `receive_request`
+hands that exact row to the gateway once (by request id) so the gateway claims
+it through `/api/ticket/{id}`. The gateway has no signed field that could carry
+an opaque token, so the row itself is the binding. The reservation is
+single-use and can only be created by the engine; a direct identical call has
+no reservation of its own and is queued as a card, leaving the item unspent.
+The residual window is stated for the reviewer: a direct call that arrives
+between the reservation and the engine's request can be handed that same row —
+the exact bytes the operator approved for the step — and the engine's step is
+then `not_run`, so the plan stops instead of approving anything else.
+`plan_waiting` enforces one run approval per session (R5).
+
+**Tool steps** run through `execute_integration_call` as the run's agent, with
+the freeze checked before every step; **SSH steps** require the gateway's
+`run_limits: v1` (F19) and run under the row's limit with `force_jit=True`
+(which can only add gating). W2: `access_list` is required on
+`create_proxy_host`, `{"public": true}` maps to `access_list_id: 0`, an
+`{id, name}` pair is verified against NPM server-side, and the plan card's
+summary line carries the label (the UI shows the red public line).
+
+**The F10 nit.** `create_plan` now refuses an empty `_mcp_display` with
+non-empty arguments instead of putting an unreadable item on the card.
+
+**auto_run** is locked off: `set_auto_run` always refuses (`auto_run_locked`),
+a document may not carry the key, and the column stays 0.
+
+**The UI** is a Recipes page (list, then a review modal): the version's steps
+with the F1 breakdown for SSH and the arguments for tool calls, the access-list
+line (red when public), the parameter preview, approve/disable, run (creates the
+plan), the run list with statuses, and rollback.
+
+Tests, `tests/test_f16_recipes.py`: 88. They cover the parameter types, the
+template spellings, V1/Y1/AA1/AA2 refusals (including the five allowed
+lookups), V2, the result slot, the document limits, the registry walk, W2's
+required/invalid/unknown access list, draft-vs-approved, allowed_agents, the
+recipe plan's items and the claim exclusions, execution (success, failed
+check, precheck passes, public → 0), the reservation hand-off (once, wrong
+agent/command refused, no `v1` = not handed out), rollback (created only,
+reverse, V4 mismatch), the F10 nit, the API and the MCP tools.
+
+`bash scripts/verify.sh`: 2888 passed, 22 skipped, 7 warnings in 596.28s (0:09:56).
+
+---
+
 ## Chunk F17 — Local-agent profile · slug `local-agent` · dashboard + docs
 
 ### Goal
@@ -12240,7 +12308,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 18 | F23 | change-journal | dashboard | **Merged** 2026-11-11 (AJ1/AJ2) | `feat/f23-change-journal` | F1, F5, F7, F14 | |
 | 18a | X2 | runbooks-page | dashboard UI | **Merged** 2026-11-11 | `feat/x2-runbooks-page` | F13 | |
 | 19 | F22 | change-checks | dashboard + MCP | After F19 merges | `feat/f22-change-checks` | F3, F5, F12, F19 | + security sign-off (the unattended check; AG1's origin rule does not cover it) |
-| 20 | F16 | recipes | dashboard + MCP | Design complete (security Round 4; feature reviewer Round 5 with AA1/AA2); code next after F22 | `feat/f16-recipes` | F3, F12, F13, F19 | main line; steps claim by request id; code comes back to security; auto_run comes back to security |
+| 20 | F16 | recipes | dashboard + MCP | **Code round 1: engine, MCP tools and UI — to security for the recipe path** (V5 claimed by run/step; the SSH row is reserved and handed by request id; auto_run still locked) | `feat/f16-recipes` | F3, F12, F13, F19 | security reviews the recipe/claim path; auto_run comes back before it is enabled |
 | 21 | F24 | content-tripwire | dashboard | Design first | `feat/f24-content-tripwire` | F12, F14 | + security sign-off (retention) |
 | 22 | F25 | secrets-broker | gateway + dashboard | Design first | `feat/f25-secrets-broker` | F1, F12, F19; security Chunk 7 before deploy | + security sign-off; gateway bash line by line |
 | 23 | F26 | agent-shadow | dashboard + MCP | Ready after F16 | `feat/f26-agent-shadow` | F1, F12, F16, F18 | security reads the enforcement points |

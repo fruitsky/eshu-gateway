@@ -103,6 +103,7 @@
     <div class="nav-label">Configure</div>
     <button class="nav-item" id="nav-inventory" onclick="switchView('inventory')"><span>Inventory</span></button>
     <button class="nav-item" id="nav-runbooks" onclick="switchView('runbooks')"><span>Runbooks</span></button>
+    <button class="nav-item" id="nav-recipes" onclick="switchView('recipes')"><span>Recipes</span></button>
     <button class="nav-item" id="nav-controls" onclick="switchView('controls')"><span>Controls</span></button>
     <button class="nav-item" id="nav-settings" onclick="switchView('settings')"><span>Settings</span></button>
     <button class="nav-item" id="nav-logs" onclick="switchView('logs')"><span>Logs</span></button>
@@ -569,6 +570,22 @@
       </div>
     </div>
 
+    <!-- F16: recipes -->
+    <div id="view-recipes" class="hidden w-full" data-ink="section">
+      <div class="hud" data-od-id="recipes-hud">
+        <div class="hud-txt"><b>The rehearsed procedures</b><span class="hud-sub">&middot; one approval, every step</span></div>
+      </div>
+      <div class="widget" data-od-id="recipes-panel">
+        <div class="widget-header">
+          <span>Recipes</span>
+          <span class="chip" id="recipe-count">&mdash;</span>
+          <div class="flex-1"></div>
+          <span class="text-xs text-muted">Drafts come from <code>recipe_propose</code>; only the operator approves a version.</span>
+        </div>
+        <div id="recipe-results"><p class="text-muted">Loading&hellip;</p></div>
+      </div>
+    </div>
+
     <!-- CONTROLS VIEW — Policy -->
     <div id="view-controls" class="hidden w-full" data-ink="panel">
       <div class="hud" data-od-id="policies-hud">
@@ -1016,7 +1033,7 @@
 </main>
 
 <script src="/static/state.js?v=ui3"></script>
-<script src="/static/app.js?v=ui18"></script>
+<script src="/static/app.js?v=ui19"></script>
 
 <!-- Create / Edit Approved Window Modal -->
 <div id="create-window-modal" class="modal-overlay hidden">
@@ -1165,6 +1182,16 @@
 </div>
 
 <!-- Custom Confirm Dialog — system-level actions only; a row confirms in place -->
+<div id="recipe-modal" class="modal-overlay hidden" onclick="if(event.target===this)closeRecipeModal()">
+  <div class="widget max-w-4xl w-full" style="max-height:90vh;overflow:auto">
+    <div class="widget-header">
+      <span id="recipe-modal-title">Recipe</span>
+      <button onclick="closeRecipeModal()" class="modal-close" aria-label="Close">&times;</button>
+    </div>
+    <div id="recipe-modal-body" class="text-xs"></div>
+  </div>
+</div>
+
 <div id="custom-confirm-overlay" class="modal-overlay hidden" onclick="if(event.target===this&&_confirmResolve)_confirmResolve(false)">
   <div class="cf-card" role="dialog" aria-modal="true" aria-labelledby="custom-confirm-title">
     <div class="cf-kicker">Please confirm</div>
