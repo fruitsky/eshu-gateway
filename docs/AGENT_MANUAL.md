@@ -415,6 +415,45 @@ The HA integration's tool names are prefixed with the integration name.
 - Freeze also stops integration writes. If a write is refused as frozen,
   stop and tell the operator.
 
+#### Health-check probes (Release 1.2)
+
+Instead of composing your own diagnostic commands, ask one typed question and
+get a short structured digest back:
+
+- `diagnose_service(params={"host": "<gateway IP>", "unit": "<systemd unit>"}, session_id)`:
+  `is-active` state, the last warnings and errors from the journal
+  (de-duplicated, with counts and last-seen times), and the listening ports.
+- `diagnose_container(params={"host": ..., "container": "<docker name or vmid>"}, session_id)`:
+  for a number, the Proxmox guest's status and config; for a name, the
+  Docker container's state and restart count.
+- `disk_pressure(params={"host": ...}, session_id)`: filesystem use, inode use
+  and the largest `/var/log` directories.
+- `dns_check(params={"name": "<fqdn>"}, session_id)`: the local Pi-hole DNS
+  record. It runs nothing on a gateway and returns at once.
+
+How it works:
+
+1. The first call proposes **one** plan with the probe's exact commands, and
+   returns `{"status": "pending", "plan_id": N}`. The operator sees one card
+   marked as a probe.
+2. After the operator approves it, call `probe_result(plan_id=N,
+   session_id=...)`. It runs the commands and returns the digest. A second
+   call returns the same digest without re-running anything.
+3. While the plan is waiting, `probe_result` says `pending`. If it was denied,
+   `probe_result` says `refused`.
+
+Notes:
+
+- Probes run through `ssh_exec`, so the gateway must be updated for it (see
+  the `ssh_exec` refusal codes above).
+- Parameters are validated. A unit, container or name that does not fit its
+  pattern, or a host that is not a registered gateway, is refused before
+  anything is proposed.
+- A probe's plan covers its own commands even when your SSH mode is
+  `approval`. Your own `session_plan` plans do not.
+- Digests are capped. `"truncated": true` means some rows were dropped (the
+  least useful first). `"incomplete"` lists the steps that did not run.
+
 #### End of a task: summary, then conclusion
 
 1. `session_summary(session_id=<id>)`: what ran, what is pending, which

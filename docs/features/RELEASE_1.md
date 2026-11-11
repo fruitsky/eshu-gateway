@@ -25,7 +25,18 @@ Done on the operator's go-ahead, 2026-11-10:
   (`c8ffe2c`); deployed with the new helper (no manual reset needed); unit
   active, no traceback, routes as before; the HA integration has the five
   curated actions plus `ha_check_config` enabled and `ha_host_reboot`
-  disabled. Each step needs the operator's
+  disabled.
+* release 1.2 (F19, F15, X2, F23), 2026-11-11 20:53 UTC: CI green on
+  `59f5cd9`; `master` `93d2e33..59f5cd9`. On a fresh private copy of the
+  live DB, `init_db()` took 0.11 s, dropped no table, changed no row count,
+  and `integrity_check` was ok (new columns `session_plans.origin`,
+  `runbooks.retired_at`, `requests.unattended`/`run_limit`), and the 1.1
+  code still starts on the migrated copy. Backup
+  `eshu-pre-release1.2-20261111-205325.db` (`integrity_check` ok, mode 600)
+  and `pre-release1.2-commit.txt` (`93d2e33`). Deployed with the helper:
+  unit active, no traceback, new routes answer (401 without a session).
+  The hand checks are in `RELEASE_TESTS.md` (T-RB, T-CJ, T-PRB, T-LIM).
+  Each step needs the operator's
 go-ahead. Nothing in this file has been run against the live system except
 the read-only checks under "Checked before release".
 
