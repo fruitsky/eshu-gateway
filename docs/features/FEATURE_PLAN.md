@@ -10963,6 +10963,78 @@ _(reviewer)_
 
 ---
 
+## Gateway hardening (AF3, tee capture) · branch `fix/gateway-hardening` · gateway bash · **security reviewer sign-off**
+
+Two items left over from earlier sign-offs: AF3 (F19 sign-off, `67bec51`) and
+S1 (buffering-fix sign-off, 2026-11-10). Gateway bash only; no dashboard
+change, so the compat rule (§ 2.3) is not touched.
+
+### Design note (written before the code)
+
+**Part A — AF3.** The session-signature check becomes
+`ESHU_CHECK_SID=… ESHU_CHECK_SIG=… python3 -I - /etc/eshu-session-key /etc/eshu-session-key.prev`.
+Python opens both key files itself (`.strip()`, a missing or unreadable file
+is an empty key, a non-hex key is skipped exactly as before). argv carries only
+the two **paths**. The session id and signature go in the child's environment,
+which `/proc/<pid>/environ` shows only to root (the signature is a session
+credential, and the line is being touched anyway). The comparison
+(`hmac.compare_digest`, current key then `.prev`) is unchanged.
+
+**Part B — S1, the tee capture.** Only `tail` mode changes. Today:
+
+    cmd 2>&1 | cap_raw | sanitize | cap_visible | capture_tail "$ESHU_OUT_TAIL"
+
+After:
+
+    cmd 2>&1 | cap_raw | sanitize | cap_visible \
+      | tee >(capture_job "$ESHU_CAP_PART" "$ESHU_OUT_TAIL" >/dev/null 2>&1)
+
+* `tee`'s stdout is the agent. awk is no longer between the command and the
+  agent, so a disconnect reaches `tee` on its next write (mawk's 4 KiB stdin
+  block no longer matters). Plain `tee`, **not** `tee -p`: `-p` would keep
+  feeding the capture after the agent hangs up, and the command would never
+  see the broken pipe.
+* **The capture can never cut the agent's stream (D1).** `capture_job` runs
+  `capture_tail` (the same ring, same 16 385-byte cap, stdout to `/dev/null`)
+  and then `cat >/dev/null`. If awk ever died early, `cat` drains the rest, so
+  `tee` never gets EPIPE from the capture side.
+* **Temp name, then rename.** Each call gets a private directory
+  (`mktemp -d -p /run/eshu eshu-out.XXXXXX`, 0700). The main shell creates
+  `part` in it before the pipeline. `capture_job` writes the ring into `part`
+  and, only if awk succeeded, renames it with `mv -fT part tail`. Whatever
+  happens, its last step is `rm -rf part`. The result post reads only `tail`,
+  so it sees a complete capture or none.
+* **The bounded wait.** After the pipeline, the main shell waits while `part`
+  still exists: `sleep 0.05`, at most `CAPTURE_WAIT_TICKS=40` times, so
+  **2 s**. Normally `part` is gone in one or two ticks (awk's END plus one
+  `mv`). It is a file poll, not a `wait`: the process substitution is a child
+  of the `tee` pipeline element, not of the script, so the script has no PID
+  to wait for, and an unbounded `wait` is ruled out anyway.
+* **On timeout:** the script writes `CAPTURE TIMEOUT` to syslog and clears
+  `ESHU_OUT_TAIL`, so the result is posted with exit code and duration but no
+  output (the same as `CAPTURE FAILED`). The call returns. The exit code,
+  the sentinel, the F19 limit marker and the agent's stream are not affected.
+  The EXIT trap removes the whole private directory (`rm -rf`). A capture
+  that finishes later cannot create files there, because the directory is gone.
+  The stuck process is not killed: the script has no PID for it (see above).
+  It holds no file descriptor of the agent's channel (its stdout and stderr
+  are `/dev/null`), so it does not keep the SSH session open, and its memory
+  is bounded by the ring.
+* **Unchanged:** the 16 385-byte ring and its tests; F19's
+  `cap_raw | sanitize | cap_visible` and the cut probe; `rc=${PIPESTATUS[0]}`
+  (the command's status, never a filter's); the `[ESHU exit=N]` sentinel,
+  printed by the main shell after the wait, so it is never in the capture;
+  `exit-only` and `off` (no capture process at all).
+* **MCP mode is not changed.** Its stream goes to `/dev/null`, not to the
+  agent, so there is no live stream to take awk out of. The 65 537-byte ring
+  stays the last pipeline element. It is written by END in a process the shell
+  already waits for, so a partial envelope capture cannot be read.
+* `capture_tail` now returns 1 after `CAPTURE FAILED` (it returned the
+  logger's 0), so that `capture_job` can tell a failed write from a good one.
+  Every caller ignores the status (`set +e`, `PIPESTATUS[0]`).
+
+---
+
 ## 7. Backlog (not planned in detail)
 
 * Deny with a reason, shown to the agent (cheap; low value given the data).
