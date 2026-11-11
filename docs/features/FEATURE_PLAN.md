@@ -9279,6 +9279,78 @@ The reviewer accepted the recommendation, so this is the decision of record:
 
 `bash scripts/verify.sh`: `2642 passed, 22 skipped, 7 warnings in 534.37s (0:08:54)` (docs only).
 
+_(security reviewer)_
+
+**Security re-read (2026-11-11, at `98fdb86`): §2, §4 and §7 are approved
+for code. AO1 and AO2 (must) are folded first, and the feature reviewer
+checks them. AO3 and the sentinel test go into the code round. I review the
+code.**
+
+AM1–AM6 are folded as asked:
+* the subtree guard is unconditional, with decode-until-stable;
+* the snapshot token is separate, and the offer is refused when the main
+  token can snapshot;
+* the node comes from `cluster/status`, and the guest only from its own
+  config IPs;
+* `failed` rows go to `gone` or `expired`, and only `active` rows can be
+  rolled back;
+* tickets are checked for expiry before the nonce.
+
+* **The sentinel's placement: acceptable in `core/integration_proxy.py`,
+  with a test.**
+  * The sentinel isn't there to keep dashboard code out. Python can't do
+    that, and that code is trusted. It is there so that data (JSON, SQL, a
+    pending row, forwarded `**kwargs`) can never carry the permission. An
+    `object()` does that wherever it is defined.
+  * Defining it in `snapshots.py` would force the proxy to import
+    `snapshots`, or need a registration hook. Either is more machinery for
+    the same property.
+  * What the placement does risk is a later edit inside the proxy passing it
+    along. The test catches that.
+  * **Test (AST, not grep):** in the dashboard package, the name
+    `SNAPSHOT_INTERNAL` appears only:
+    * in its definition and the one `is` comparison in
+      `integration_proxy.py`;
+    * in `snapshots.py`.
+    The keyword `snapshot_internal=` is passed only from `snapshots.py`.
+    `run_tool`, `execute_generic_call` and the pending-call executor don't
+    accept that parameter, and the test checks their signatures.
+* **AO1 (must): the offer only when the snapshot covers every write in the
+  request.**
+  * F7 records one inner target. A compound command can also write on the
+    node itself, or into a second guest. The card would still say
+    **Snapshot, then run**, and the operator would believe the whole change
+    can be undone.
+  * **Fix:** offer the snapshot only when every `write`/`unknown` step in
+    the `breakdown` is inside the same single inner target (case A), or the
+    whole command runs on the gateway guest (case B). Otherwise refuse with
+    `snapshot_target_partial`, and the card names the steps the snapshot
+    would not cover.
+  * **Tests:** a command that writes in guest 101 and also on the node; a
+    command that touches two guests.
+* **AO2 (must): if we can't tell which guest runs the dashboard, no offer.**
+  * §2.4 still shows the offer, with a warning, when neither the setting nor
+    an address match can identify the dashboard's guest. With DHCP that
+    will be the usual case. A warning line is what an operator clicks past
+    during an incident, and the cost here is the audit trail.
+  * **Fix:** refuse with `snapshot_dashboard_guest_unknown`, and point to
+    the `dashboard_guest` setting. That setting accepts a node/vmid, or "not
+    on this cluster".
+  * Check the setting again at rollback time, not only at offer time.
+  * **Test:** with neither source available, the offer is refused.
+* **AO3 (should, code round): where the path guard runs, and what it
+  matches.**
+  * Match the segment run `nodes/<x>/(qemu|lxc)/<x>/snapshot` anywhere in
+    the normalised path, not only directly after a leading
+    `api2/<segment>/`. A base URL behind a reverse proxy can carry its own
+    prefix in front of `api2`.
+  * Put the guard in the lowest function every Proxmox HTTP request passes
+    through, below `execute_integration_call` and `execute_generic_call`.
+    Then a future executor (probes, F22 checks, F23) can't miss it.
+  * With AM2 in place this is the second layer, which is why it's a should.
+  * Also in the code round, compare only the address part of a CIDR `ip=`
+    in §2.2. `ip=dhcp` never matches.
+
 ### Implementer notes
 
 _(implementer)_
@@ -9945,7 +10017,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 14 | F14 | inventory | dashboard + MCP | Merged | `feat/f14-inventory` | Chunk H | |
 | 15 | F19 | unattended-limits | gateway + dashboard | Code approved by both reviewers on AF1/AF2 (security `67bec51`); feature reviewer checks AF1/AF2, then merge | `feat/f19-unattended-limits` | F4, F5, F12 | moved ahead of F21–F23: nearly done, and F22 needs it. AF3 goes on the next gateway branch |
 | 16 | F15 | probes | dashboard + MCP | Code round 1: changes requested AG1–AG7 (`56d86e3`); **AG1 to security** | `feat/f15-probes` | F4, F12, F14 | main line, not only local-model |
-| 17 | F21 | snapshot-approve | dashboard + Proxmox | **Design round 1: AK1/AK2 and AM1–AM6 folded** — unconditional subtree guard behind a private sentinel, normalised `/api2/<seg>/` matching, a separate snapshot token, node/guest from trusted sources, `snapshot_target_self`, `failed` rows and `gone`; the three questions recorded | `feat/f21-snapshot-approve` | F7, F14, F2 | security re-reads §2, §4, §7, then code |
+| 17 | F21 | snapshot-approve | dashboard + Proxmox | Security re-read (`98fdb86`): §2/§4/§7 **approved for code** once **AO1** (offer only when the snapshot covers every write) and **AO2** (dashboard guest unknown → no offer) are folded; sentinel placement accepted with an AST test; AO3 should in code | `feat/f21-snapshot-approve` | F7, F14, F2 | feature reviewer checks AO1/AO2; then code, security reviews it |
 | 18 | F23 | change-journal | dashboard | Ready | `feat/f23-change-journal` | F1, F5, F7, F14 | no security gate; can be coded while F21's design is with security |
 | 18a | X2 | runbooks-page | dashboard UI | Ready | `feat/x2-runbooks-page` | F13 | small; no security gate |
 | 19 | F22 | change-checks | dashboard + MCP | After F19 merges | `feat/f22-change-checks` | F3, F5, F12, F19 | + security sign-off (the unattended check; AG1's origin rule does not cover it) |
