@@ -10987,13 +10987,28 @@ credential, and the line is being touched anyway). The comparison
 After:
 
     cmd 2>&1 | cap_raw | sanitize | cap_visible \
-      | tee >(capture_job "$ESHU_CAP_PART" "$ESHU_OUT_TAIL" >/dev/null 2>&1)
+      | "${TEE_CMD[@]}" >(exec >/dev/null 2>&1
+                          capture_job "$ESHU_CAP_PART" "$ESHU_OUT_TAIL")
 
 * `tee`'s stdout is the agent. awk is no longer between the command and the
   agent, so a disconnect reaches `tee` on its next write (mawk's 4 KiB stdin
-  block no longer matters). Plain `tee`, **not** `tee -p`: `-p` would keep
-  feeding the capture after the agent hangs up, and the command would never
-  see the broken pipe.
+  block no longer matters). **Never `tee -p`**: `-p` would keep feeding the
+  capture after the agent hangs up, and the command would never see the
+  broken pipe.
+* `TEE_CMD` is `tee --output-error=exit` when the host's tee accepts it
+  (probed once, in `tail` mode only), else plain `tee`. *(Changed during
+  implementation: the first draft said plain `tee`.)* The SIGPIPE-ignored
+  test showed that plain GNU tee, with SIGPIPE ignored, drops the failed
+  stdout and keeps feeding the capture, so `yes` never stopped.
+  `--output-error=exit` exits on EPIPE whatever the signal disposition. With
+  SIGPIPE at its default, which is what sshd gives its children, both forms
+  behave the same.
+* The `exec >/dev/null 2>&1` inside the substitution is required. *(Changed
+  during implementation: the first draft put the redirect on the function
+  call.)* A redirect on the call covers only the function's commands. The
+  substitution's own bash process kept the agent's stdout and stderr open,
+  and the stuck-capture test then hung for 60 s: the SSH channel never saw
+  EOF.
 * **The capture can never cut the agent's stream (D1).** `capture_job` runs
   `capture_tail` (the same ring, same 16 385-byte cap, stdout to `/dev/null`)
   and then `cat >/dev/null`. If awk ever died early, `cat` drains the rest, so
