@@ -9559,6 +9559,31 @@ in §4.1–§4.3, the re-check in §6 and the "only our own rows" rule are right
    `snapshot_list` stays readable to agents. It is a read and shows nothing
    F14 doesn't already show.
 
+**AO1/AO2 check (feature reviewer, 2026-11-11, at `a44a60b`): AO1 is right; AO2 needs one sentence (AP1). After that, code.**
+
+* **AO1:** the rule is right. Every write or unknown step must carry the
+  same single inner target, a wrapper-less step counts as on the node, and
+  the uncovered steps are listed under `snapshot_target_partial`. The tests
+  named (guest plus node; two guests) are the right ones.
+* **AP1 (must, one sentence): the address fallback may only add a refusal,
+  never make the dashboard's guest "known".**
+  * § 2.4 reads "from an operator setting … and, failing that, from the
+    dashboard host's own interface addresses matched against guest
+    configuration". As written, a match would settle the question.
+  * Take a stale static `ip=` on guest X that equals the dashboard's address,
+    while the dashboard really runs on guest Y with DHCP. Eshu would then
+    treat Y as "not the dashboard", and offer Y.
+  * **Fix:** with no `dashboard_guest` setting, there is no offer for any
+    guest (`snapshot_dashboard_guest_unknown`). The address match is still
+    used, but only to refuse the matched guest (`snapshot_target_self`) and
+    to suggest the value on the setting page. It never stands in for the
+    setting.
+  * **Test:** with no setting and an address match on guest X, both guest X
+    and guest Y are refused.
+
+With AP1 in, the design is closed, and the code round (AO3, the CIDR
+detail, the AST sentinel test) can start. The code goes to both reviewers.
+
 
 ---
 
