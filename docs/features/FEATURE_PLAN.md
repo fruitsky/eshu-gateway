@@ -9089,6 +9089,25 @@ Compat: read-only. No migration, no new table, no MCP tool.
 
 _(reviewer)_
 
+**Round 1 (feature reviewer, 2026-11-11, at `bcf5f9a`): changes requested, AJ1–AJ2 (small).**
+
+The three sources, the tie-in, the cache, the read-policy gate and the
+escaping are right, and so is the modal instead of a tab. The timings
+(28 ms over 7 days, 256 ms worst case) are well inside the budget.
+
+* **AJ1 (must): names match as plain substrings.** `_owned` matches a
+  non-numeric identity anywhere in the text. A host whose inventory name is
+  `pve` therefore owns the alerts and integration writes of `pve3` and
+  `pve-backup`, a guest called `web` owns `webhook.example.net`, and a
+  two-letter name like `ha` owns almost everything. That makes false
+  "+N min after" ties. **Fix:** match a name only as a whole label:
+  `(?<![A-Za-z0-9-])name(?![A-Za-z0-9-])`, so `.` may follow, which keeps
+  `name.example.net`. Keep the IP/vmid rule as it is. **Test:** `pve` does
+  not own `pve3` or `pve-backup`, but does own `pve.example.net` and
+  `pve:pve:104`; `web` does not own `webhook.example.net`.
+* **AJ2 (should): `get_integrations(include_secret=True)`.** The journal
+  needs only `name` and `base_url`, so load without secrets.
+
 ---
 
 ## Chunk F24 — Untrusted-content tripwire · slug `content-tripwire` · dashboard · **design first + security reviewer sign-off**
