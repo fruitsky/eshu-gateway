@@ -8859,6 +8859,872 @@ from round 7. The nits are fixed.
 After AL1–AL4, I re-read only `redact`, the create blocks and the preflight.
 AL5 and AL6 can be checked by the feature reviewer.
 
+That round is below (round 9).
+
+### Round 9 — AL1–AL6 and the exit-code note (design round)
+
+**Design only; no code on this branch.** AL1–AL4 (must), AL5/AL6 (should) and
+the exit-code nit are folded below, and the five scripts are restated at the
+end. The scripts were run again under **BusyBox `sh`** and **`dash`**: 82
+checks per userland, 164 in all, each of the new ones failing on the round-8
+text where it should. Where an earlier round and this one disagree, this round
+wins.
+
+#### AL1 — a new file is checked on its descriptor, before a byte is written
+
+**The premise, measured.** Under `set -C`, `dash` and BusyBox `ash` refuse a
+name that exists as a **symlink** (`cannot create … File exists`), but they
+**open a FIFO**: the redirection succeeds and the bytes go into the pipe. The
+matrix proves it: a FIFO planted at the backup name after the `[ ! -e ]`
+check, with a reader attached, receives the requested file's bytes from the
+round-8 script. A FIFO needs no privileges to plant, so this is a real leak of
+the target's content to anyone who can write in the config directory.
+
+**The fix.** The three checks run on the descriptor, straight after its open
+and before any write through it:
+
+```sh
+fd_ok() {
+  [ "$(readlink "$1")" = "$2" ] && [ -f "$1" ] && [ "$(stat -L -c %h "$1")" = 1 ]
+}
+
+umask_for "$fd3"
+set -C
+exec 4> "$backup"
+set +C
+fd4=/proc/$me/fd/4
+fd_ok "$fd4" "$backup" || { exec 4>&-; rm -f "$backup"; exit 15; }
+cat "$fd3" >&4 || { rm -f "$backup"; exit 15; }
+```
+
+* `-f /proc/$$/fd/4` is what refuses a FIFO or a device: the magic link
+  follows to the inode that was opened, so the test is about the object, not
+  the name.
+* the `readlink` test catches a name that was renamed away or replaced after
+  the open;
+* the link count catches a hard link.
+* every create gets it: the backup (fd 4, exit 15), the new content (fd 5,
+  exit 16), **the write's rollback (fd 6, exit 1)** — which had no checks at
+  all before — and the restore's fd 5 and fd 6.
+* the rollback additionally confirms the `mv` installed the inode the
+  descriptor holds: `[ "$(readlink "$fd6")" = "$real" ] || exit 1`, the same
+  check fd 5 gets after its `mv`.
+
+A refused create closes its descriptor and removes the file it created; a
+FIFO has no name to remove, so `rm -f` is a no-op there.
+
+#### AL2 — redaction never fails open
+
+Three failure paths are closed:
+
+* **Symlinked `secrets.yaml`.** `find` now lists `-type f -o -type l`, and the
+  file is read *through* the link. A source only ever *adds* values, so
+  reading through a link can over-redact but cannot leak.
+* **A lost walk.** `find` failing (`|| rc=$?`, not `|| list=""`) withholds:
+  one dropped candidate means every value from it is missing, so the whole
+  output is withheld rather than printed unredacted.
+* **A candidate that cannot be qualified.** Each candidate is opened in a
+  **subshell** and the *opened* file must be regular:
+
+  ```sh
+  if ! ( exec 9< "$f" 2>/dev/null && [ -f /proc/self/fd/9 ] ); then
+    printf "%s\n" "$WITHHELD"; return 0
+  fi
+  ```
+
+  The subshell is not a style choice: a failed `exec` redirection ends a
+  non-interactive shell (dash exits **2**, BusyBox `ash` exits **1**, both
+  measured), so an open in the script body would lose the withheld line and
+  the check output with it. In a subshell the failure is just a non-zero
+  status and the script can withhold.
+* **Failure means "no check output", not "no output".** When anything fails,
+  redaction prints one fixed line instead of the check output:
+
+  ```
+  [ESHU check output withheld: redaction unavailable]
+  ```
+
+  The exit code and the status line are unchanged, so the dashboard still
+  records the write and still reports `ok` or the failed check.
+
+A FIFO named `secrets.yaml` is simply **not a candidate** (`-type f -o -type
+l` excludes it), so it neither blocks nor withholds — HA cannot read it
+either. A symlink to a FIFO or to a directory *is* a candidate and withholds,
+because `-f` on the opened descriptor refuses it.
+
+#### AL3 — which values are collected, and in what order they are replaced
+
+* **One pass, longest first.** Every value from every file is collected
+  first; the list is sorted by length, longest first, and the replacement
+  runs once over the check output. A short value that is a prefix of a longer
+  one can no longer eat the longer one's front and leave the tail printed.
+  The per-file awk calls are gone; the output goes through awk once.
+* **Keys.** A key is any line that does not start with whitespace or `#` and
+  whose first `:` is followed by a space or a tab; the value is everything
+  after that `:`. That accepts `key-with-dash`, `key.with.dots` and
+  `"a quoted key"`. The same rule is in `SECRETS_KEYS_SCRIPT`, which used the
+  narrow `[A-Za-z0-9_]` class and therefore hid those names from the key
+  list.
+* **A quoted value ends at its closing quote.** The scan walks the value,
+  skipping `\"` inside double quotes and `''` inside single quotes, and
+  ignores anything after the closing quote — so `"value"  # note` adds the
+  value (and its decoded form), which round 8 cut at the end of the line.
+* **Escapes (the should).** A double-quoted value also decodes `\n`, `\t`,
+  `\/` and `\xNN`; the setup doc states that `\u`/`\U` and multi-line plain
+  scalars are not decoded.
+* Every form is still added (as written, and decoded), because over-redaction
+  is harmless and a missing value is a leak.
+
+#### AL4 — the `!include` refusal on parsed YAML
+
+The dashboard preflight loads the proposed content with `yaml.SafeLoader`
+plus constructors for HA's tags (`!include`, `!include_dir_*`, `!secret`,
+`!env_var`, `!input`), so the value is known — decoded, as a string — after
+the YAML parser has attached it, instead of being guessed from the raw text.
+It refuses the content with `config_secret_include_refused` when:
+
+* any `!include` target's basename is `secrets.yaml` (after YAML decoding, so
+  an escape inside a double-quoted scalar cannot hide it);
+* the content does not parse (`config_yaml_invalid`);
+* the content carries a `%TAG` directive or a verbatim `!<…>` tag
+  (`config_tag_refused`): both can rename or spell a tag the checker does not
+  know, and HA config has no legitimate use for either.
+
+`!env_var` goes through the same parsed walk (refused as
+`config_env_var_refused`). The script's `grep` stays as a second check — it
+catches the plain spellings even if the preflight is bypassed — but the
+preflight is the control.
+
+The tests for the three shapes live in the test file, not in this document,
+and their fixtures are generic (`foo.yaml`, `secrets.yaml`, a synthetic
+value), because this repository is public.
+
+#### AL5 — the restore checks the backup's hash before installing it
+
+The restore takes a fourth argument, the hash the dashboard recorded when it
+made the backup (the write's `expect`), and refuses with exit 14 before the
+`mv` when the backup's bytes no longer match:
+
+```sh
+want=$(sha256sum "$fd4" | cut -d" " -f1)
+[ "$want" = "$expect" ] || exit 14
+```
+
+Without it, a changed backup was installed and passed `ha core check` before
+the dashboard compared anything.
+
+#### AL6 — `chown` through the descriptor
+
+`chown uid:gid /proc/$$/fd/N` — no `-h` — follows the magic link to the inode
+that was opened. `chown -h` on the name changes whatever is at the name *now*,
+which is the window AL1 closes for writes. Every `chown` in both scripts
+targets a descriptor (`$fd4`, `$fd5`, `$fd6`); the backup's owner comes from
+fd 3, the new content's from fd 3, the rollback's from fd 4.
+
+#### The exit-code nit
+
+A failed `exec` redirection is not in the table, and the two shells disagree:
+
+| shell | exit code on a failed `exec N<` redirection |
+|---|---|
+| `dash` | **2** |
+| BusyBox `ash` | **1** |
+
+Both print nothing and run nothing after it. The scripts therefore do not try
+to convert it, and the dashboard **maps every code that is not in the table to
+`config_state_unknown`** — 2 and 1 included, along with `timeout`'s 124/125,
+126/127 and 130. The table below says so on its first row.
+
+#### Exit codes, as shipped
+
+| code | meaning |
+|---|---|
+| anything not listed below | the dashboard reports `config_state_unknown` (U3): an `exec` redirection failure (dash 2, ash 1), `timeout`'s 124/125, 126/127, 130 |
+| 10, 11 | the directory is not the HA config tree |
+| 12 | the file is missing |
+| 13 | a symlink, an escape from the tree, or the opened file is not the path that was resolved |
+| 14 | the hash changed — the target since the dashboard read it, or the backup since the dashboard made it (AL5) |
+| 15 | the backup could not be created or qualified (write) / the pre-restore copy could not be (restore) |
+| 16 | the new content or the restored file could not be created or qualified |
+| 17 | the `mv` into place failed, or it did not install the inode that was written |
+| 18 | `ha core check` failed and the original content was put back |
+| 19 | a refused argument or file name |
+| 20 | the token file is missing |
+| 21 | a hard link, or another link on a file we just created |
+| 22 | the content is refused — `!include` of a secrets file |
+
+#### The scripts, final
+
+Each script is the **body** of one `sh -c` call, quoted with `shlex.quote` by
+the runner. `/homeassistant` is the config root, the token path and
+`timeout 100` are constants.
+
+**WRITE_SCRIPT**
+
+```bash
+# WRITE_SCRIPT — one sh -c body. Arguments: $1 path, $2 expect, $3 backup,
+# $4 tmp. Exit codes: the table above.
+set -eu
+set -f
+PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH
+me=$$
+umask_for() {
+  m=$(stat -L -c %a "$1")
+  m=${m#"${m%???}"}
+  umask "$(printf "%o" $(( 0777 & ~0$m )))"
+}
+fd_ok() {
+  [ "$(readlink "$1")" = "$2" ] && [ -f "$1" ] && [ "$(stat -L -c %h "$1")" = 1 ]
+}
+path=$1; expect=$2; backup=$3; tmp=$4
+
+case "$path"   in /*) ;; *) exit 19 ;; esac
+case "$backup" in /*) ;; *) exit 19 ;; esac
+case "$tmp"    in /*) ;; *) exit 19 ;; esac
+case "$path" in *.yaml|*.yml) ;; *) exit 19 ;; esac
+[ "$(basename "$path")" != secrets.yaml ] || exit 19
+
+token_file=/run/s6/container_environment/SUPERVISOR_TOKEN
+[ -r "$token_file" ] || exit 20
+SUPERVISOR_TOKEN=$(cat "$token_file") || exit 20
+
+real=$(realpath "$path") || exit 12
+[ -f "$real" ] || exit 12
+dir=$(dirname "$real")
+[ -d "$dir" ] || exit 11
+case "$dir" in
+  /homeassistant|/homeassistant/packages|/homeassistant/packages/*) ;;
+  *) exit 11 ;;
+esac
+[ "$(realpath "$(dirname "$path")")" = "$dir" ] || exit 13
+[ "$(basename "$real")" = "$(basename "$path")" ] || exit 13
+[ "$(basename "$real")" != secrets.yaml ] || exit 19
+
+case "$backup" in
+  "$real".eshu-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9].bak) ;;
+  *) exit 19 ;;
+esac
+case "$tmp" in "$real".eshu-tmp-*) ;; *) exit 19 ;; esac
+[ "$(dirname "$backup")" = "$dir" ] || exit 19
+[ "$(dirname "$tmp")" = "$dir" ] || exit 19
+[ ! -e "$backup" ] && [ ! -L "$backup" ] || exit 19
+[ ! -e "$tmp" ] && [ ! -L "$tmp" ] || exit 19
+
+exec 3< "$real"
+fd3=/proc/$me/fd/3
+[ "$(readlink "$fd3")" = "$real" ] || exit 13
+[ -f "$fd3" ] || exit 12
+[ "$(stat -L -c %h "$fd3")" = 1 ] || exit 21
+
+[ "$(sha256sum "$fd3" | cut -d" " -f1)" = "$expect" ] || exit 14
+
+# AL1: the backup is created and qualified BEFORE it is written through.
+umask_for "$fd3"
+set -C
+exec 4> "$backup"
+set +C
+fd4=/proc/$me/fd/4
+fd_ok "$fd4" "$backup" || { exec 4>&-; rm -f "$backup"; exit 15; }
+cat "$fd3" >&4 || { rm -f "$backup"; exit 15; }
+# AL6: chown the inode the descriptor holds, not whatever the name points at.
+chown "$(stat -L -c %u:%g "$fd3")" "$fd4" 2>/dev/null || true
+
+set -C
+exec 5> "$tmp"
+set +C
+fd5=/proc/$me/fd/5
+fd_ok "$fd5" "$tmp" || { exec 5>&-; rm -f "$tmp"; exit 16; }
+cat >&5 || { exec 5>&-; rm -f "$tmp"; exit 16; }
+chown "$(stat -L -c %u:%g "$fd3")" "$fd5" 2>/dev/null || true
+grep -qE "!include[[:space:]]+.*secrets\.yaml" "$fd5" \
+  && { exec 5>&-; rm -f "$tmp" "$backup"; exit 22; }
+
+mv -f "$tmp" "$real" || exit 17
+[ "$(readlink "$fd5")" = "$real" ] || exit 17
+
+redact() {
+  set -f
+  WITHHELD='[ESHU check output withheld: redaction unavailable]'
+  # AL2: a symlinked secrets.yaml counts too — HA follows it, so a file may be
+  # one. The list is every candidate; a find that failed means the list is not
+  # trustworthy, and so does a candidate we cannot qualify.
+  rc=0
+  list=$(find /homeassistant -xdev -name secrets.yaml \( -type f -o -type l \) 2>/dev/null) || rc=$?
+  if [ "$rc" -ne 0 ]; then printf "%s\n" "$WITHHELD"; return 0; fi
+  files=''
+  oldifs=$IFS
+  IFS='
+'
+  for f in $list; do
+    [ -n "$f" ] || continue
+    # The name test is only here to avoid a blocking open() on a FIFO; what
+    # qualifies the file is the descriptor check below.
+    if [ ! -f "$f" ]; then printf "%s\n" "$WITHHELD"; return 0; fi
+    # AL2: qualify the *opened* file, in a subshell so a refused open cannot
+    # end this script (dash exits 2 on a failed exec redirection, ash 1).
+    if ! ( exec 9< "$f" 2>/dev/null && [ -f /proc/self/fd/9 ] ); then
+      printf "%s\n" "$WITHHELD"
+      return 0
+    fi
+    files="$files
+$f"
+  done
+  IFS=$oldifs
+  in=$(cat)
+  # AL3: one awk pass collects every value from every file, sorts longest
+  # first, then replaces. Values never leave awk and never touch argv.
+  printf "%s\n" "$in" | awk -v files="$files" -v withheld="$WITHHELD" '
+    function hx(c) { return index("0123456789abcdef", tolower(c)) - 1 }
+    function hex2(ss) { return hx(substr(ss, 1, 1)) * 16 + hx(substr(ss, 2, 1)) }
+    function decode(v,   out, i, c, d) {
+      out = ""
+      for (i = 1; i <= length(v); i++) {
+        c = substr(v, i, 1)
+        if (c != "\\") { out = out c; continue }
+        d = substr(v, i + 1, 1); i++
+        if (d == "n") out = out "\n"
+        else if (d == "t") out = out "\t"
+        else if (d == "/") out = out "/"
+        else if (d == "x" && substr(v, i + 1, 2) ~ /^[0-9A-Fa-f][0-9A-Fa-f]$/) {
+          out = out sprintf("%c", hex2(substr(v, i + 1, 2))); i += 2
+        } else out = out d
+      }
+      return out
+    }
+    function add1(v) {
+      sub(/^[ \t]+/, "", v); sub(/[ \t]+$/, "", v)
+      if (length(v) >= 4 && !(v in seen)) { seen[v] = 1; s[++n] = v }
+    }
+    function add(v,   q, i, c, out, closed) {
+      sub(/^[ \t]+/, "", v)
+      if (v == "") return
+      q = substr(v, 1, 1)
+      if (q == "\"" || q == "\047") {
+        out = ""; closed = 0
+        for (i = 2; i <= length(v); i++) {
+          c = substr(v, i, 1)
+          if (q == "\"") {
+            if (c == "\\") { out = out c substr(v, i + 1, 1); i++; continue }
+            if (c == "\"") { closed = 1; break }
+          } else {
+            if (c == "\047") {
+              if (substr(v, i + 1, 1) == "\047") { out = out "\047"; i++; continue }
+              closed = 1; break
+            }
+          }
+          out = out c
+        }
+        add1(v)
+        add1(out)
+        if (closed) add1(decode(out))
+        return
+      }
+      add1(v)
+      p = index(v, " #")
+      if (p > 0) add1(substr(v, 1, p - 1))
+    }
+    BEGIN {
+      nf = split(files, F, "\n")
+      for (fi = 1; fi <= nf; fi++) {
+        f = F[fi]; if (f == "") continue
+        inblock = 0
+        while ((getline l < f) > 0) {
+          if (l ~ /^[^ \t#][^:]*:[ \t]*[|>][-+]?[ \t]*$/) { inblock = 1; continue }
+          if (inblock) {
+            if (l ~ /^[ \t]+[^ \t]/) { add(l); continue }
+            inblock = 0
+          }
+          if (match(l, /^[^ \t#][^:]*:[ \t]/)) add(substr(l, RLENGTH + 1))
+        }
+        if (l < 0) { print withheld; exit 2 }
+        close(f)
+      }
+      for (i = 1; i <= n; i++)
+        for (j = i + 1; j <= n; j++)
+          if (length(s[j]) > length(s[i])) { t = s[i]; s[i] = s[j]; s[j] = t }
+    }
+    { for (i = 1; i <= n; i++)
+        while ((p = index($0, s[i])) > 0)
+          $0 = substr($0, 1, p - 1) "***" substr($0, p + length(s[i]))
+      print }'
+}
+
+crc=0
+out=$(SUPERVISOR_TOKEN="$SUPERVISOR_TOKEN" timeout 100 ha core check 2>&1) || crc=$?
+printf "%s\n" "$out" | redact | head -c 65536
+if [ "$crc" -ne 0 ]; then
+  rb="$real.eshu-tmp-rb-$me"
+  [ ! -e "$rb" ] && [ ! -L "$rb" ] || exit 1
+  umask_for "$fd4"
+  set -C
+  exec 6> "$rb"
+  set +C
+  fd6=/proc/$me/fd/6
+  # AL1: the rollback file is qualified before it is written, and the mv is
+  # confirmed to have installed the inode the descriptor holds.
+  fd_ok "$fd6" "$rb" || { exec 6>&-; rm -f "$rb"; exit 1; }
+  cat "$fd4" >&6 || { rm -f "$rb"; exit 1; }
+  chown "$(stat -L -c %u:%g "$fd4")" "$fd6" 2>/dev/null || true
+  mv -f "$rb" "$real" || exit 1
+  [ "$(readlink "$fd6")" = "$real" ] || exit 1
+  exit 18
+fi
+printf "\n"
+printf "ok %s\n" "$(sha256sum "$fd5" | cut -d" " -f1)"
+```
+
+**RESTORE_SCRIPT**
+
+```bash
+# RESTORE_SCRIPT — $1 path, $2 backup, $3 tmp, $4 the backup's expected
+# hash (AL5).
+set -eu
+set -f
+PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH
+me=$$
+umask_for() {
+  m=$(stat -L -c %a "$1")
+  m=${m#"${m%???}"}
+  umask "$(printf "%o" $(( 0777 & ~0$m )))"
+}
+fd_ok() {
+  [ "$(readlink "$1")" = "$2" ] && [ -f "$1" ] && [ "$(stat -L -c %h "$1")" = 1 ]
+}
+path=$1; backup=$2; tmp=$3; expect=$4
+
+case "$path"   in /*) ;; *) exit 19 ;; esac
+case "$backup" in /*) ;; *) exit 19 ;; esac
+case "$tmp"    in /*) ;; *) exit 19 ;; esac
+case "$path" in *.yaml|*.yml) ;; *) exit 19 ;; esac
+[ "$(basename "$path")" != secrets.yaml ] || exit 19
+
+token_file=/run/s6/container_environment/SUPERVISOR_TOKEN
+[ -r "$token_file" ] || exit 20
+SUPERVISOR_TOKEN=$(cat "$token_file") || exit 20
+
+real=$(realpath "$path") || exit 12
+[ -f "$real" ] || exit 12
+dir=$(dirname "$real")
+[ -d "$dir" ] || exit 11
+case "$dir" in
+  /homeassistant|/homeassistant/packages|/homeassistant/packages/*) ;;
+  *) exit 11 ;;
+esac
+[ "$(realpath "$(dirname "$path")")" = "$dir" ] || exit 13
+[ "$(basename "$real")" = "$(basename "$path")" ] || exit 13
+[ "$(basename "$real")" != secrets.yaml ] || exit 19
+
+case "$backup" in
+  "$real".eshu-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9].bak) ;;
+  *) exit 19 ;;
+esac
+case "$tmp" in "$real".eshu-tmp-*) ;; *) exit 19 ;; esac
+[ "$(dirname "$backup")" = "$dir" ] || exit 19
+[ "$(dirname "$tmp")" = "$dir" ] || exit 19
+[ -f "$backup" ] && [ ! -L "$backup" ] || exit 19
+[ ! -e "$tmp" ] && [ ! -L "$tmp" ] || exit 19
+
+exec 3< "$real"
+fd3=/proc/$me/fd/3
+[ "$(readlink "$fd3")" = "$real" ] || exit 13
+[ -f "$fd3" ] || exit 12
+[ "$(stat -L -c %h "$fd3")" = 1 ] || exit 21
+
+exec 4< "$backup"
+fd4=/proc/$me/fd/4
+[ "$(readlink "$fd4")" = "$backup" ] || exit 19
+[ -f "$fd4" ] || exit 19
+[ "$(stat -L -c %h "$fd4")" = 1 ] || exit 21
+want=$(sha256sum "$fd4" | cut -d" " -f1)
+# AL5: the backup is checked against the hash the dashboard recorded when it
+# made it, before it is installed. Otherwise a changed backup is live before
+# the dashboard compares hashes.
+[ "$want" = "$expect" ] || exit 14
+
+umask_for "$fd3"
+set -C
+exec 5> "$tmp"
+set +C
+fd5=/proc/$me/fd/5
+fd_ok "$fd5" "$tmp" || { exec 5>&-; rm -f "$tmp"; exit 15; }
+cat "$fd3" >&5 || { exec 5>&-; rm -f "$tmp"; exit 15; }
+chown "$(stat -L -c %u:%g "$fd3")" "$fd5" 2>/dev/null || true
+
+rb="$real.eshu-tmp-rb-$me"
+[ ! -e "$rb" ] && [ ! -L "$rb" ] || exit 19
+umask_for "$fd4"
+set -C
+exec 6> "$rb"
+set +C
+fd6=/proc/$me/fd/6
+fd_ok "$fd6" "$rb" || { exec 6>&-; rm -f "$rb"; exit 16; }
+cat "$fd4" >&6 || { exec 6>&-; rm -f "$rb"; exit 16; }
+chown "$(stat -L -c %u:%g "$fd4")" "$fd6" 2>/dev/null || true
+mv -f "$rb" "$real" || exit 16
+[ "$(readlink "$fd6")" = "$real" ] || exit 1
+
+redact() {
+  set -f
+  WITHHELD='[ESHU check output withheld: redaction unavailable]'
+  # AL2: a symlinked secrets.yaml counts too — HA follows it, so a file may be
+  # one. The list is every candidate; a find that failed means the list is not
+  # trustworthy, and so does a candidate we cannot qualify.
+  rc=0
+  list=$(find /homeassistant -xdev -name secrets.yaml \( -type f -o -type l \) 2>/dev/null) || rc=$?
+  if [ "$rc" -ne 0 ]; then printf "%s\n" "$WITHHELD"; return 0; fi
+  files=''
+  oldifs=$IFS
+  IFS='
+'
+  for f in $list; do
+    [ -n "$f" ] || continue
+    # The name test is only here to avoid a blocking open() on a FIFO; what
+    # qualifies the file is the descriptor check below.
+    if [ ! -f "$f" ]; then printf "%s\n" "$WITHHELD"; return 0; fi
+    # AL2: qualify the *opened* file, in a subshell so a refused open cannot
+    # end this script (dash exits 2 on a failed exec redirection, ash 1).
+    if ! ( exec 9< "$f" 2>/dev/null && [ -f /proc/self/fd/9 ] ); then
+      printf "%s\n" "$WITHHELD"
+      return 0
+    fi
+    files="$files
+$f"
+  done
+  IFS=$oldifs
+  in=$(cat)
+  # AL3: one awk pass collects every value from every file, sorts longest
+  # first, then replaces. Values never leave awk and never touch argv.
+  printf "%s\n" "$in" | awk -v files="$files" -v withheld="$WITHHELD" '
+    function hx(c) { return index("0123456789abcdef", tolower(c)) - 1 }
+    function hex2(ss) { return hx(substr(ss, 1, 1)) * 16 + hx(substr(ss, 2, 1)) }
+    function decode(v,   out, i, c, d) {
+      out = ""
+      for (i = 1; i <= length(v); i++) {
+        c = substr(v, i, 1)
+        if (c != "\\") { out = out c; continue }
+        d = substr(v, i + 1, 1); i++
+        if (d == "n") out = out "\n"
+        else if (d == "t") out = out "\t"
+        else if (d == "/") out = out "/"
+        else if (d == "x" && substr(v, i + 1, 2) ~ /^[0-9A-Fa-f][0-9A-Fa-f]$/) {
+          out = out sprintf("%c", hex2(substr(v, i + 1, 2))); i += 2
+        } else out = out d
+      }
+      return out
+    }
+    function add1(v) {
+      sub(/^[ \t]+/, "", v); sub(/[ \t]+$/, "", v)
+      if (length(v) >= 4 && !(v in seen)) { seen[v] = 1; s[++n] = v }
+    }
+    function add(v,   q, i, c, out, closed) {
+      sub(/^[ \t]+/, "", v)
+      if (v == "") return
+      q = substr(v, 1, 1)
+      if (q == "\"" || q == "\047") {
+        out = ""; closed = 0
+        for (i = 2; i <= length(v); i++) {
+          c = substr(v, i, 1)
+          if (q == "\"") {
+            if (c == "\\") { out = out c substr(v, i + 1, 1); i++; continue }
+            if (c == "\"") { closed = 1; break }
+          } else {
+            if (c == "\047") {
+              if (substr(v, i + 1, 1) == "\047") { out = out "\047"; i++; continue }
+              closed = 1; break
+            }
+          }
+          out = out c
+        }
+        add1(v)
+        add1(out)
+        if (closed) add1(decode(out))
+        return
+      }
+      add1(v)
+      p = index(v, " #")
+      if (p > 0) add1(substr(v, 1, p - 1))
+    }
+    BEGIN {
+      nf = split(files, F, "\n")
+      for (fi = 1; fi <= nf; fi++) {
+        f = F[fi]; if (f == "") continue
+        inblock = 0
+        while ((getline l < f) > 0) {
+          if (l ~ /^[^ \t#][^:]*:[ \t]*[|>][-+]?[ \t]*$/) { inblock = 1; continue }
+          if (inblock) {
+            if (l ~ /^[ \t]+[^ \t]/) { add(l); continue }
+            inblock = 0
+          }
+          if (match(l, /^[^ \t#][^:]*:[ \t]/)) add(substr(l, RLENGTH + 1))
+        }
+        if (l < 0) { print withheld; exit 2 }
+        close(f)
+      }
+      for (i = 1; i <= n; i++)
+        for (j = i + 1; j <= n; j++)
+          if (length(s[j]) > length(s[i])) { t = s[i]; s[i] = s[j]; s[j] = t }
+    }
+    { for (i = 1; i <= n; i++)
+        while ((p = index($0, s[i])) > 0)
+          $0 = substr($0, 1, p - 1) "***" substr($0, p + length(s[i]))
+      print }'
+}
+
+crc=0
+out=$(SUPERVISOR_TOKEN="$SUPERVISOR_TOKEN" timeout 100 ha core check 2>&1) || crc=$?
+printf "%s\n" "$out" | redact | head -c 65536
+if [ "$crc" -ne 0 ]; then
+  mv -f "$tmp" "$real" || exit 1
+  [ "$(readlink "$fd5")" = "$real" ] || exit 1
+  exit 18
+fi
+got=$(sha256sum "$fd6" | cut -d" " -f1)
+[ "$got" = "$want" ] || exit 1
+rm -f "$tmp"
+printf "\n"
+printf "ok %s\n" "$got"
+```
+
+**READ_SCRIPT**
+
+```bash
+# READ_SCRIPT — $1 path; the bytes go to stdout unchanged.
+set -eu
+set -f
+PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH
+me=$$
+path=$1
+
+case "$path" in /*) ;; *) exit 19 ;; esac
+case "$path" in *.yaml|*.yml) ;; *) exit 19 ;; esac
+[ "$(basename "$path")" != secrets.yaml ] || exit 19
+
+real=$(realpath "$path") || exit 12
+[ -f "$real" ] || exit 12
+dir=$(dirname "$real")
+[ -d "$dir" ] || exit 11
+case "$dir" in
+  /homeassistant|/homeassistant/packages|/homeassistant/packages/*) ;;
+  *) exit 11 ;;
+esac
+[ "$(realpath "$(dirname "$path")")" = "$dir" ] || exit 13
+[ "$(basename "$real")" = "$(basename "$path")" ] || exit 13
+[ "$(basename "$real")" != secrets.yaml ] || exit 19
+
+exec 3< "$real"
+fd3=/proc/$me/fd/3
+[ "$(readlink "$fd3")" = "$real" ] || exit 13
+[ -f "$fd3" ] || exit 12
+[ "$(stat -L -c %h "$fd3")" = 1 ] || exit 21
+cat "$fd3"
+```
+
+**SECRETS_KEYS_SCRIPT**
+
+```bash
+# SECRETS_KEYS_SCRIPT — READ_SCRIPT's preamble with the key list instead of
+# the content: keys only, never values.
+set -eu
+set -f
+PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH
+me=$$
+path=$1
+
+case "$path" in /*) ;; *) exit 19 ;; esac
+case "$path" in *.yaml|*.yml) ;; *) exit 19 ;; esac
+
+real=$(realpath "$path") || exit 12
+[ -f "$real" ] || exit 12
+dir=$(dirname "$real")
+[ -d "$dir" ] || exit 11
+case "$dir" in
+  /homeassistant|/homeassistant/packages|/homeassistant/packages/*) ;;
+  *) exit 11 ;;
+esac
+[ "$(realpath "$(dirname "$path")")" = "$dir" ] || exit 13
+[ "$(basename "$real")" = "$(basename "$path")" ] || exit 13
+
+exec 3< "$real"
+fd3=/proc/$me/fd/3
+[ "$(readlink "$fd3")" = "$real" ] || exit 13
+[ -f "$fd3" ] || exit 12
+[ "$(stat -L -c %h "$fd3")" = 1 ] || exit 21
+awk '{ if (match($0, /^[^ \t#][^:]*:[ \t]/)) {
+         k = substr($0, 1, RLENGTH - 2)
+         sub(/^[\047"]/, "", k); sub(/[\047"]$/, "", k)
+         print k } }' "$fd3"
+```
+
+**CHECK_SCRIPT**
+
+```bash
+# CHECK_SCRIPT — ha_config_check: no file argument; the whole tree is
+# checked.
+set -eu
+set -f
+PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH
+me=$$
+[ -d /homeassistant ] || exit 11
+[ ! -L /homeassistant ] || exit 13
+[ "$(realpath /homeassistant)" = /homeassistant ] || exit 13
+
+token_file=/run/s6/container_environment/SUPERVISOR_TOKEN
+[ -r "$token_file" ] || exit 20
+SUPERVISOR_TOKEN=$(cat "$token_file") || exit 20
+
+
+redact() {
+  set -f
+  WITHHELD='[ESHU check output withheld: redaction unavailable]'
+  # AL2: a symlinked secrets.yaml counts too — HA follows it, so a file may be
+  # one. The list is every candidate; a find that failed means the list is not
+  # trustworthy, and so does a candidate we cannot qualify.
+  rc=0
+  list=$(find /homeassistant -xdev -name secrets.yaml \( -type f -o -type l \) 2>/dev/null) || rc=$?
+  if [ "$rc" -ne 0 ]; then printf "%s\n" "$WITHHELD"; return 0; fi
+  files=''
+  oldifs=$IFS
+  IFS='
+'
+  for f in $list; do
+    [ -n "$f" ] || continue
+    # The name test is only here to avoid a blocking open() on a FIFO; what
+    # qualifies the file is the descriptor check below.
+    if [ ! -f "$f" ]; then printf "%s\n" "$WITHHELD"; return 0; fi
+    # AL2: qualify the *opened* file, in a subshell so a refused open cannot
+    # end this script (dash exits 2 on a failed exec redirection, ash 1).
+    if ! ( exec 9< "$f" 2>/dev/null && [ -f /proc/self/fd/9 ] ); then
+      printf "%s\n" "$WITHHELD"
+      return 0
+    fi
+    files="$files
+$f"
+  done
+  IFS=$oldifs
+  in=$(cat)
+  # AL3: one awk pass collects every value from every file, sorts longest
+  # first, then replaces. Values never leave awk and never touch argv.
+  printf "%s\n" "$in" | awk -v files="$files" -v withheld="$WITHHELD" '
+    function hx(c) { return index("0123456789abcdef", tolower(c)) - 1 }
+    function hex2(ss) { return hx(substr(ss, 1, 1)) * 16 + hx(substr(ss, 2, 1)) }
+    function decode(v,   out, i, c, d) {
+      out = ""
+      for (i = 1; i <= length(v); i++) {
+        c = substr(v, i, 1)
+        if (c != "\\") { out = out c; continue }
+        d = substr(v, i + 1, 1); i++
+        if (d == "n") out = out "\n"
+        else if (d == "t") out = out "\t"
+        else if (d == "/") out = out "/"
+        else if (d == "x" && substr(v, i + 1, 2) ~ /^[0-9A-Fa-f][0-9A-Fa-f]$/) {
+          out = out sprintf("%c", hex2(substr(v, i + 1, 2))); i += 2
+        } else out = out d
+      }
+      return out
+    }
+    function add1(v) {
+      sub(/^[ \t]+/, "", v); sub(/[ \t]+$/, "", v)
+      if (length(v) >= 4 && !(v in seen)) { seen[v] = 1; s[++n] = v }
+    }
+    function add(v,   q, i, c, out, closed) {
+      sub(/^[ \t]+/, "", v)
+      if (v == "") return
+      q = substr(v, 1, 1)
+      if (q == "\"" || q == "\047") {
+        out = ""; closed = 0
+        for (i = 2; i <= length(v); i++) {
+          c = substr(v, i, 1)
+          if (q == "\"") {
+            if (c == "\\") { out = out c substr(v, i + 1, 1); i++; continue }
+            if (c == "\"") { closed = 1; break }
+          } else {
+            if (c == "\047") {
+              if (substr(v, i + 1, 1) == "\047") { out = out "\047"; i++; continue }
+              closed = 1; break
+            }
+          }
+          out = out c
+        }
+        add1(v)
+        add1(out)
+        if (closed) add1(decode(out))
+        return
+      }
+      add1(v)
+      p = index(v, " #")
+      if (p > 0) add1(substr(v, 1, p - 1))
+    }
+    BEGIN {
+      nf = split(files, F, "\n")
+      for (fi = 1; fi <= nf; fi++) {
+        f = F[fi]; if (f == "") continue
+        inblock = 0
+        while ((getline l < f) > 0) {
+          if (l ~ /^[^ \t#][^:]*:[ \t]*[|>][-+]?[ \t]*$/) { inblock = 1; continue }
+          if (inblock) {
+            if (l ~ /^[ \t]+[^ \t]/) { add(l); continue }
+            inblock = 0
+          }
+          if (match(l, /^[^ \t#][^:]*:[ \t]/)) add(substr(l, RLENGTH + 1))
+        }
+        if (l < 0) { print withheld; exit 2 }
+        close(f)
+      }
+      for (i = 1; i <= n; i++)
+        for (j = i + 1; j <= n; j++)
+          if (length(s[j]) > length(s[i])) { t = s[i]; s[i] = s[j]; s[j] = t }
+    }
+    { for (i = 1; i <= n; i++)
+        while ((p = index($0, s[i])) > 0)
+          $0 = substr($0, 1, p - 1) "***" substr($0, p + length(s[i]))
+      print }'
+}
+
+crc=0
+out=$(SUPERVISOR_TOKEN="$SUPERVISOR_TOKEN" timeout 100 ha core check 2>&1) || crc=$?
+printf "%s\n" "$out" | redact | head -c 65536
+[ "$crc" -eq 0 ] || exit 18
+printf "\n"
+printf "ok check\n"
+```
+
+#### The W5 matrix: what was run
+
+Same harness as round 8 (the shells' applets only, a substituted root, token
+and timeout, a stub `ha`), now with a **FIFO reader**: the reader opens the
+pipe before the script does, so a byte the script writes into it can be
+proved. 82 checks per userland, 164 in all, all green. The new ones:
+
+| case | expected |
+|---|---|
+| a FIFO planted at the backup name after the pre-check, reader attached | 15; the reader gets **nothing** (round 8 gave it the file's bytes) |
+| the same at the temp name | 16; the reader gets no agent content |
+| the same at the rollback name | 1; the reader gets nothing (round 8 had no check on fd 6) |
+| a symlink planted at the backup name before the run | 19 by the `[ ! -e ]` check |
+| the target swapped for a link between `realpath` and the open | 13, nothing printed |
+| a symlinked `secrets.yaml` | its values are redacted |
+| `find` fails | the withheld line, the status line intact |
+| a candidate that is a link to a directory | the withheld line |
+| a FIFO named `secrets.yaml` | not a candidate: no block, no withheld |
+| a value that is a prefix of a longer one, in the same file and across files | the longer value is redacted whole |
+| `hyphen-key`, `dotted.key`, `"quoted key"` | collected from `secrets.yaml` and listed by the keys script |
+| `"value"  # note` | the value and its decoded form are redacted |
+| `\t`, `\xNN` escapes | decoded and redacted |
+| a restore whose backup no longer matches the recorded hash | 14, nothing installed |
+| **text checks** | every `exec N>` is followed by `fd_ok` before any write; every `chown` targets a descriptor; no `chown -h` |
+
+The remaining checks are round 8's, unchanged and still green: the good
+write and restore, the hash mismatch, the failed check and its rollback, the
+hard link, the planted links, the `!include` refusal, the mode preservation,
+the 65 536-byte straddle and the status line on its own last line.
+
+`bash scripts/verify.sh`: `2331 passed, 7 warnings in 433.26s (0:07:13)` (docs only).
+
+#### What the security reviewer should read
+
+`redact` (AL2, AL3), the four create blocks and their `fd_ok` lines (AL1,
+AL6), and the preflight section (AL4). AL5 is one line in the restore plus its
+argument. Everything else is unchanged from round 8.
 ---
 
 ## Chunk F12 — SSH through Eshu over MCP (`ssh_exec`) · slug `ssh-exec` · dashboard (+ small gateway change)
@@ -15763,7 +16629,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 10 | F8 | test-traffic | dashboard | Merged | `feat/f8-test-traffic` | — | low priority |
 | 11 | F9 | ha-supervisor-read | dashboard | Merged | `feat/f9-ha-supervisor-read` | — | token is now a dedicated `eshu` HA admin user |
 | 12 | F10 | ha-supervisor-actions | dashboard | Ready (after F9) | `feat/f10-ha-supervisor-actions` | F9, F3, Chunk H | reviewer pass + security reviewer sign-off |
-| 13 | F11 | ha-config-files | dashboard | Security round 8 (`a92c789`): AH1/AH3 approved in shape; **AL1–AL4 must** (check new files before writing, `redact` fails closed, collect and order values, `!include` check on parsed YAML); AL5/AL6 should | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | security re-reads `redact`, the creates and the preflight |
+| 13 | F11 | ha-config-files | dashboard | **Design round 9: AL1–AL4 and AL5/AL6 folded, exit-code note recorded (dash 2 / ash 1)** — the `fd_ok` checks before every write, fail-closed `redact`, longest-first values, parsed-YAML preflight; to security again | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | security re-reads `redact`, the creates and the preflight |
 | 14 | F14 | inventory | dashboard + MCP | Merged | `feat/f14-inventory` | Chunk H | |
 | 15 | F19 | unattended-limits | gateway + dashboard | **Merged** 2026-11-11 (security sign-off `67bec51`; AF1/AF2 checked) | `feat/f19-unattended-limits` | F4, F5, F12 | AF3 goes on the next gateway branch |
 | 16 | F15 | probes | dashboard + MCP | **Merged** 2026-11-11 (AG1 security decision `eca8982`; AI1 fix merged) | `feat/f15-probes` | F4, F12, F14 | |
