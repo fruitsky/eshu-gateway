@@ -1344,17 +1344,32 @@ if [ -f /etc/eshu-require-session ] && [ "$(cat /etc/eshu-require-session 2>/dev
     # vouch for it in place of ESHU_SESSION_SIG (the dashboard minted both).
     logger -t eshu-gateway "SESSION VOUCHED: agent=$ESHU_VERIFIED_AGENT id=$ESHU_SESSION_ID (signed prefix)"
   elif [ -f /etc/eshu-session-key ]; then
-    SESSION_KEY=$(cat /etc/eshu-session-key 2>/dev/null || echo "")
-    SESSION_KEY_PREV=$(cat /etc/eshu-session-key.prev 2>/dev/null || echo "")
-    if ! python3 - "$ESHU_SESSION_ID" "${ESHU_SESSION_SIG:-}" "$SESSION_KEY" "$SESSION_KEY_PREV" <<'PY'
+    # AF3: a root process's argv is readable by every local user through
+    # /proc, so no key or signature goes there. Python reads the key files
+    # itself (argv carries only their paths); the id and signature travel in
+    # the child's environment, which /proc shows to root only.
+    if ! ESHU_CHECK_SID="$ESHU_SESSION_ID" ESHU_CHECK_SIG="${ESHU_SESSION_SIG:-}" \
+         python3 -I - /etc/eshu-session-key /etc/eshu-session-key.prev <<'PY'
 import hashlib
 import hmac
+import os
 import sys
 
-sid, sig, key, prev = sys.argv[1:5]
+
+def read_key(path):
+    # A missing or unreadable file is an empty key, as `cat || echo ""` was.
+    try:
+        with open(path, encoding="ascii", errors="replace") as handle:
+            return handle.read(4096).strip()
+    except OSError:
+        return ""
+
+
+sid = os.environ.get("ESHU_CHECK_SID", "")
+sig = os.environ.get("ESHU_CHECK_SIG", "")
 if not sid or not sig:
     sys.exit(1)
-for candidate in (key, prev):
+for candidate in (read_key(sys.argv[1]), read_key(sys.argv[2])):
     if not candidate:
         continue
     try:
