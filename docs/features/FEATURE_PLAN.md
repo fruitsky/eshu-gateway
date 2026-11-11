@@ -54,7 +54,7 @@ dashboard LXC or any gateway until the rollout gate in § 8 passes.**
 | F24 | Warns on the approval card when a write uses a value the agent first saw in untrusted content (a web page, a log line) |
 | F25 | Named secrets per host: a command refers to a key by name, the gateway fills it in, and the agent never sees the value |
 | F26 | Try a new agent or model in shadow mode: its writes are recorded, never run, and compared with what you really approved |
-| F27 | Allowances: a standing, narrow pre-approval ("Rowana may switch these lights and plugs off, up to 30 times an hour"), visible, rate-limited and revocable |
+| F27 | Allowances: a standing, narrow pre-approval ("Rowana may switch these lights and plugs off, up to 30 times an hour"), visible, rate-limited and revocable; profiles bundle them so a new agent gets them in one click |
 | X2 | A Runbooks page: list, search and open confirmed runbooks, and retire old ones |
 | F20 | Reserved: the local-agent pass, parked on a local branch until the end |
 
@@ -10843,6 +10843,79 @@ allowance #N". Everything else gets an ordinary card.
   `expect` (for example "only if `sensor.x_power` < 5 W"). SSH-command
   allowances are out of scope; gateway allowlists and the read lane cover
   that ground.
+
+### Decisions agreed with the operator (2026-11-11)
+
+1. **Gate by what is touched, not by the verb**, for HA, NPM, Pi-hole,
+   Proxmox and Omada. One endpoint there covers both harmless and serious
+   actions, and an "additive" action (expose a host, add a DNS record,
+   unlock) can be the dangerous one. The verb-based `destructive` gate mode
+   stays where verbs match the risk: the Arr and media apps. The operator
+   moves Sonarr and Radarr to `destructive` by hand.
+2. **v1 conditions are per entity, with the allowed services per entity**
+   ("lamp: on and off", "heater: off only"). "Off" is not always the safe
+   direction. A whole-domain allowance is refused for `call_service`: an
+   entity list is required.
+3. **v1 scope:**
+   * entity and service lists;
+   * an optional rate cap, time window and expiry;
+   * the never-allowed domains and tools;
+   * the Allowances page, History labels and the stats bucket;
+   * profiles (below).
+4. **The wattage rule is phase 2** ("only if the plug's power sensor reads
+   below X W"). It needs a reliable plug-to-sensor mapping.
+5. **No interim narrow fix.** The household agent's cards are approved by
+   hand until F27 ships.
+6. **The destructive word list is widened** with `stop`, `shutdown`,
+   `reboot`, `disable`, `unlock` and `disarm`, as an extra layer and not as
+   the control. Proxmox `stop_vm` and the like then ask even in
+   `destructive` mode.
+7. **An agent's own confirm-first habit is politeness, not the control.**
+   The allow-list in Eshu is the control.
+
+### Profiles (agreed 2026-11-11)
+
+A **profile** is a named, reusable set of allowance templates, for example
+"Household: lights & plugs" or "Media: add and search". The operator builds
+profiles in the UI and applies them when creating or editing an agent,
+instead of defining the same allowances for every agent.
+
+* **The object.** A profile row holds `id`, `name`, `description`,
+  `version`, `created_by` and `created_at`, plus its templates. Each
+  template has the same shape as an allowance (`integration`, `tool`,
+  `conditions`, limits), minus the agent.
+* **Applying** a profile to an agent creates one allowance per template.
+  Each allowance records `profile_id` and `profile_version`. The agent's page
+  shows which allowances came from which profile.
+* **Editing a profile never changes agents silently.**
+  * Saving makes a new profile version.
+  * The page lists the agents on an older version, with the difference.
+  * The operator presses **Update agents**, for all of them or per agent.
+    This revokes their old allowances and creates the new ones, audited.
+  * A profile edit cannot widen what an agent may do without that second
+    step.
+* **The same rules as allowances.** A template is validated against the
+  tool's seed field (constrainable, required, `never`) and the
+  never-allowable list, when it is saved **and** when it is applied.
+  Applying re-validates, because a seed can tighten between the two.
+* **Built-in starters, optional.** There are no starter profiles with
+  entities: entities are specific to each home. A starter can be a
+  skeleton the operator fills in (for example "Household lights & plugs:
+  pick the entities"). Whether a template may name entities **by HA label**
+  (resolved at call time) instead of by list is a question for the design
+  note and the security reviewer. Labels are convenient, but they make
+  membership dynamic: the note must show that no agent can add a label (a
+  registry write is `ws_write`, which is never allowable).
+* **Removing** a profile from an agent revokes the allowances it created.
+  Deleting a profile is refused while agents use it.
+
+Tests add:
+* applying creates the allowances, with their version;
+* a profile edit leaves existing agents unchanged until Update agents;
+* Update agents revokes the old allowances and creates the new ones;
+* re-validation at apply time refuses a template that a tightened seed no
+  longer allows;
+* removing a profile revokes its allowances.
 
 ### Tests to add (outline)
 
