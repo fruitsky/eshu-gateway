@@ -10900,6 +10900,59 @@ carried in the request's reason. Make sure that the token:
 Otherwise, the agent could race the worker with the same bytes and the
 token.
 
+_(security reviewer)_
+
+**Security re-read (2026-11-11, at `5d37366`): §3 and §4 are approved for
+code, with AV1 (must, the token) and AV2 (should). The feature reviewer
+checks both. I review the code.**
+
+AR1–AR4 are in as asked:
+* the own-item `<=` rule;
+* the server-made link in `approval` mode, with the check shown on the card;
+* the one-item, exact-bytes check plan, closed to edits;
+* the agent's standing re-read before every attempt.
+
+* **AV1 (must): the `check_token`, which answers your three points.**
+  1. **Random, and per attempt.** Use `secrets.token_urlsafe(16)` or longer,
+     and generate a new token for **every attempt**, not once per check. On
+     any decision the token is cleared. A token seen on attempt 1 then can't
+     spend attempt 2's use.
+  2. **Never returned to the agent.**
+     * The reason travels in the request row, and the agent can read its
+       own requests (`check_request`, `session_summary`, request lists).
+     * So `receive_request` strips the token **before** it stores the row.
+       The stored reason is `plan-check:<plan>:<item>`.
+     * The token never appears in `session_plan`, History, the audit log or
+       the dashboard's own log lines.
+     * Compare with `hmac.compare_digest`.
+  3. **Not accepted from a reason the agent can set.**
+     * On direct SSH the agent writes the reason, and `ssh_exec` takes a
+       `reason` argument. A token in the reason is only an obstacle,
+       because it also travels through the gateway host, where processes
+       and logs can be read.
+     * So `receive_request` honours a `plan-check:` token only on a request
+       that F12's dashboard signature covers. The token has to be one of the
+       fields the dashboard key signs, so only the dashboard's own runner can
+       produce it.
+     * Any other request is never parsed for a token: it falls through to a
+       card and consumes nothing. If F12's signed fields don't include the
+       reason today, add a signed `check_token` field rather than reading it
+       from free text.
+  * **Tests:**
+    * the agent's `ssh_exec` with the correct reason and token doesn't
+      claim;
+    * a direct-SSH request with the token doesn't claim;
+    * the stored request row and every MCP read lack the token;
+    * attempt 2 refuses attempt 1's token.
+* **AV2 (should): `approval`-mode cards and the link.**
+  * In `approval` mode every item arrives as a card, so a "stopped" plan
+    doesn't hold anything back by itself. A card that the server links to a
+    plan where an earlier item's check is open, `failed` or `not_run` says
+    so on the card, in red, above Approve.
+  * When the linked card is denied or expires, release the link (clear
+    `check_request_id`). Then a re-sent request for the same item carries
+    its check again, rather than running without one.
+
 ---
 
 ## Chunk F23 — Change journal tied to alerts · slug `change-journal` · dashboard only
@@ -12630,7 +12683,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 18c | X3 | integrations-ui | dashboard UI | Requested 2026-11-12; design after F27 is signed off | `feat/x3-integrations-ui` | F27, F10 (P2) | operator walk-through first |
 | 18e | X5 | ui-test-round | dashboard UI | **Implemented** 2026-11-12: six test-round fixes; no endpoint, save path or policy changed | `fix/x5-ui-test-round` | — | six small fixes |
 | 18d | X4 | agents-page | dashboard UI | **Implemented** 2026-11-12: one Agents page (tokens, policy sections, web fetch, activity); Controls renamed Command policy; absent policy fields now keep their stored value | `feat/x4-agents-page` | `fix/agent-ssh-hosts` | rename Controls → Command policy |
-| 19 | F22 | change-checks | dashboard + MCP | **Design round 3: AR1–AR7 and the output nit folded** — own-item ordering (`<=`), the server-made card link, exact-bytes one-item check plan, agent standing before every attempt, no timeout wrapper, the attempt-bound claim, the sentinel AST test and History; to the feature reviewer (AR5–AR7) | `feat/f22-change-checks` | F3, F5, F12, F19 | feature reviewer checks AR5–AR7; security re-reads §3/§4 |
+| 19 | F22 | change-checks | dashboard + MCP | Security re-read (`5d37366`): §3/§4 **approved for code** with **AV1** (per-attempt random token, stripped before storage, accepted only inside the dashboard-signed request) must and AV2 should | `feat/f22-change-checks` | F3, F5, F12, F19 | feature reviewer checks AV1/AV2; then code, security reviews it |
 | 20 | F16 | recipes | dashboard + MCP | Design complete (security Round 4; feature reviewer Round 5 with AA1/AA2); code next after F22 | `feat/f16-recipes` | F3, F12, F13, F19 | main line; steps claim by request id; code comes back to security; auto_run comes back to security |
 | 21 | F24 | content-tripwire | dashboard | Design first | `feat/f24-content-tripwire` | F12, F14 | + security sign-off (retention) |
 | 22 | F25 | secrets-broker | gateway + dashboard | Design first | `feat/f25-secrets-broker` | F1, F12, F19; security Chunk 7 before deploy | + security sign-off; gateway bash line by line |
