@@ -10132,6 +10132,72 @@ reverse, V4 mismatch), the F10 nit, the API and the MCP tools.
 
 `bash scripts/verify.sh`: 2888 passed, 22 skipped, 7 warnings in 596.28s (0:09:56).
 
+**Code round 1 (feature reviewer, 2026-11-11, at `ed71140`): changes requested, AW1–AW4. The security reviewer reads the code after these.**
+
+Most of it is right, and checked:
+* the closed parameter set and the template rules;
+* V1, Y1 with its run-time re-check, AA1 and AA2;
+* the `(kind, tool)` allowlist;
+* prechecks and preconditions read-checked through `is_read_integration_call`;
+* W2's server-side access-list check;
+* V5's exclusion of recipe items from both ordinary claims;
+* `claim_recipe_item` naming run and step only;
+* the per-step freeze check (run and rollback);
+* `auto_run` locked.
+
+* **AW1 (must, blocker): recipe SSH steps cannot run on a real system.**
+  * `_run_ssh` calls `ssh_exec(..., agent={'name': run['agent']})`. That
+    dict has no `id`, so `agent_ssh_policy` returns an empty
+    `ssh_hosts_allow`, and `host_allowed([])` is `False` ("empty means
+    none"). Every SSH step therefore ends `host_not_allowed`.
+  * The same dict also ignores the agent's real `ssh_mode`. A `read_only`
+    agent's policy would never be consulted if the host check were fixed by
+    hand.
+  * The tests replace `ssh_exec`, which is why they pass.
+  * **Fix:** look up the run's agent (`get_agent_by_name`) and pass the real
+    row. An operator-started run (no agent) needs a stated identity: either
+    refuse SSH steps for operator runs, or use a dedicated server identity.
+    Say which in the notes, and the security reviewer decides.
+  * **Test:** drive `_run_ssh` through the real `ssh_exec`, stubbing only
+    `run_ssh`. With an allowed host, the step reaches the gateway stub. With
+    the host not in the agent's allowlist, it is refused. With a `read_only`
+    agent and a write step, it is refused.
+* **AW2 (must): re-check the agent's standing before every step, as F22's
+  AR4 does.** `_run_tool_call` calls `execute_integration_call` directly,
+  past `run_tool`. That skips:
+  * the agent's `tools_mode` allowlist;
+  * its `arg_policy`;
+  * whether the agent is still enabled and its token not revoked.
+
+  The operator approved the run's exact arguments, so the gate is rightly
+  skipped. But an agent the operator disabled or revoked mid-run must not
+  keep writing. **Fix:** before each step, and each undo step, re-check that
+  the agent exists, is enabled and has an unrevoked token, and that its
+  policy still allows that tool. Otherwise the run stops `stopped` with the
+  reason. **Test:** disable the agent between step 1 and step 2, and step 2
+  does not run.
+* **AW3 (should): a reservation outlives a refused step.**
+  * `_run_ssh` creates the approved, unattended reservation row before
+    calling `ssh_exec`.
+  * If `ssh_exec` refuses before reaching the gateway (any refusal code),
+    the row stays approved for its 90 s TTL.
+  * In that window, a direct call with the same bytes, session and agent is
+    handed it.
+
+  **Fix:** on any result other than `ran`, expire the reservation
+  (`status='expired'` where `recipe_handed = 0`). This also narrows the
+  residual window stated in the notes.
+* **AW4 (should): `create_recipe_plan` defaults a missing host to `'*'`.**
+  An SSH recipe item must always name its host. Refuse an SSH item without
+  one instead of storing a wildcard, even though only the engine's claim can
+  spend it.
+
+**For the security reviewer (stated in the notes):** V5's delivery binding
+is the reserved row matched by `(target, command, session, agent)`, with a
+residual window in which a direct call with the same bytes can be handed
+it. With AW3 the window is only the gap between the reservation and the
+engine's own request.
+
 ---
 
 ## Chunk F17 — Local-agent profile · slug `local-agent` · dashboard + docs
