@@ -8521,6 +8521,31 @@ reviewer's six conditions are in:
 
 `bash scripts/verify.sh`: `2698 passed, 22 skipped, 7 warnings in 537.81s (0:08:57)`.
 
+**Code round 2 (feature reviewer, 2026-11-11, at `153cf74`): approved; merging.**
+
+AG1 meets the security reviewer's six conditions (`eca8982`):
+* the origin is set by server code only, and an `agent` default is what a
+  forged value becomes;
+* a server plan names one specific host;
+* the claim narrows to `origin='probe'` under `force_jit` and checks the
+  session's owner;
+* the reason and the audit row carry the origin;
+* the card shows a badge;
+* the tests drive the real `receive_request`.
+
+AG2–AG7 are in:
+* the stored digest is behind the session and owner check;
+* `dns_check` goes through `_call_tool`;
+* the `inspect` is formatted, with no `Config.Env`;
+* `recent_changes` is a SQL query using F1 writes;
+* the journal uses `-p warning` and the line's own timestamp;
+* the cap sorts first.
+
+* **AI1 (should, next F15 touch): the `docker ps` format is unquoted.**
+  `--format {{.Names}}\t{{.Status}}` reaches the shell bare, so `\t`
+  becomes `t` (`webtUp 3 hours`). Quote it as the `inspect` format is
+  quoted, and test the exact command string.
+
 ---
 
 ## Chunk F16 — Recipes · slug `recipes` · dashboard + MCP · **design first + security reviewer sign-off**
