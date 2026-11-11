@@ -54,6 +54,7 @@ dashboard LXC or any gateway until the rollout gate in § 8 passes.**
 | F24 | Warns on the approval card when a write uses a value the agent first saw in untrusted content (a web page, a log line) |
 | F25 | Named secrets per host: a command refers to a key by name, the gateway fills it in, and the agent never sees the value |
 | F26 | Try a new agent or model in shadow mode: its writes are recorded, never run, and compared with what you really approved |
+| F27 | Allowances: a standing, narrow pre-approval ("Rowana may switch these lights and plugs off, up to 30 times an hour"), visible, rate-limited and revocable |
 | X2 | A Runbooks page: list, search and open confirmed runbooks, and retire old ones |
 | F20 | Reserved: the local-agent pass, parked on a local branch until the end |
 
@@ -10763,6 +10764,132 @@ The behaviour checked:
 
 ---
 
+## Chunk F27 — Allowances · slug `allowances` · dashboard + MCP · **design first + security reviewer sign-off**
+
+Added 2026-11-11 from live use: release 1.1's P2 (always_gate beats an
+agent's `ungated` override) also caught HA `call_service`. A household
+agent's light and switch calls, which ran under an exact `ungated` key plus
+a `domain` arg_policy, now always ask. Rather than narrowing P2 by hand, give
+the operator one sanctioned, visible way to pre-approve a narrow class of
+calls.
+
+### Goal
+
+An **allowance** is a standing, narrow pre-approval: *this agent* may call
+*this tool* with *only these argument values*, within limits, until it is
+revoked. Calls that match run at once and are recorded as "ran under
+allowance #N". Everything else gets an ordinary card.
+
+### Design (to confirm in the design note)
+
+* **The object.** `allowances` rows hold:
+  * `id`, `agent_id`, `integration`, `tool`, `name`;
+  * `conditions`, a JSON object keyed by declared parameter;
+  * `rate_per_hour`, `window` (local `HH:MM-HH:MM`, optional),
+    `expires_at` (optional);
+  * `created_by`, `created_at`, `revoked_at`, `version`.
+
+  Editing makes a new version and revokes the old one. Both are audited.
+* **Conditions are exact.** Per declared parameter (or one dotted path into a
+  `json` parameter, such as `data.entity_id`), there are two forms:
+  * `{"in": [values]}`: exact, type-strict equality;
+  * `{"range": [lo, hi]}`: numbers only, both ends required.
+
+  A string or a list argument (an `entity_id` list) matches only when
+  **every** element is in the set. There are no patterns, prefixes,
+  `contains` or regexes. A parameter the tool did not declare as
+  constrainable cannot carry a condition. An argument the condition does not
+  mention must be absent, or equal to its declared default; otherwise the
+  allowance does not match.
+* **Each tool declares what can be allowed.** A seed field,
+  `allowance: {"constrainable": [...], "required": [...], "never":
+  {param: [values]}}`, says:
+  * which parameters may be constrained;
+  * which **must** be (for `call_service`: `domain`, `service` and
+    `data.entity_id`);
+  * which values can never be allowed (for `call_service`'s `domain`:
+    `script`, `automation`, `shell_command`, `hassio`, `homeassistant`,
+    `python_script`, `rest_command`, `notify`).
+
+  A tool without the field cannot be allowed at all.
+* **Never allowable, whatever the seed says:**
+  * the F10 Supervisor actions and `ha_host_reboot`;
+  * admin config writes (`is_admin_config_write`);
+  * F21's internal tools;
+  * generic `write` / `ws_write`;
+  * any tool the security reviewer adds to that list.
+
+  P2 stays as it is for everything else: an `ungated` override still cannot
+  beat `always_gate`. An allowance is the one way to pre-approve an
+  always-gated tool, and only a seed-declared one.
+* **Where it is decided.** In `run_tool`, after the tool is resolved, the
+  `internal` refusal, `arg_policy` and the freeze check, and before the
+  gate:
+  * if the call would be gated and exactly one **live** allowance matches
+    (not revoked, not expired, inside the window, under the rate), it runs
+    with approval `allowance:<id>`;
+  * the use is counted atomically, under the same rule as plan claims;
+  * **freeze, Zero-Trust and the tripwire freeze always win**;
+  * no match, or a limit hit, means the normal card, never a denial.
+* **Visible.**
+  * An **Allowances** page lists each allowance: agent, tool, conditions in
+    plain words, limits, uses in the last 24 h, and Revoke.
+  * The agent's page lists its allowances too.
+  * History and the call log show "allowance #N (name)".
+  * F6/F18 count it as its own approval bucket.
+  * The agent's tool description gets one line: "calls matching your
+    allowance run without approval".
+* **Phase 2, not in v1:** an "only if" read precondition, using F22's typed
+  `expect` (for example "only if `sensor.x_power` < 5 W"). SSH-command
+  allowances are out of scope; gateway allowlists and the read lane cover
+  that ground.
+
+### Tests to add (outline)
+
+* A matching call runs, with `allowance:<id>` recorded and one use counted.
+* Each of these gets a card, not a denial:
+  * a value outside a set;
+  * an extra argument;
+  * a list with one unlisted element;
+  * a number outside its range;
+  * a type mismatch (`"1"` against `1`);
+  * outside the window;
+  * over the rate;
+  * an expired or revoked allowance.
+* Creating an allowance is refused when:
+  * a parameter is not constrainable;
+  * a required constraint is missing;
+  * a `never` value is in a set;
+  * the tool is in the never-allowable list.
+* Freeze and Zero-Trust beat it.
+* An `ungated` override is still ignored for `always_gate` (P2 unchanged).
+* Concurrent calls at the rate limit count exactly.
+* Editing creates a new version, and the old one stops matching at once.
+
+### Compat impact
+
+Additive: a table, a seed field and an approval bucket. Existing `ungated`
+keys and `arg_policy` behave exactly as now, and the UI shows a hint where
+an allowance would replace one.
+
+### Acceptance criteria
+
+* The design is signed off by the security reviewer.
+* The tests pass.
+* On the live system, a household agent's allowance for listed lights and
+  switches runs `light.turn_off` and `switch.turn_off` on those entities
+  with no card. Any other entity, domain or service still asks.
+
+### Implementer notes
+
+_(implementer)_
+
+### Reviewer notes
+
+_(reviewer)_
+
+---
+
 ## 7. Backlog (not planned in detail)
 
 * Deny with a reason, shown to the agent (cheap; low value given the data).
@@ -10815,6 +10942,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 17 | F21 | snapshot-approve | dashboard + Proxmox | Design first | `feat/f21-snapshot-approve` | F7, F14, F2 | + security sign-off (new write path, destructive rollback) |
 | 18 | F23 | change-journal | dashboard | **Merged** 2026-11-11 (AJ1/AJ2) | `feat/f23-change-journal` | F1, F5, F7, F14 | |
 | 18a | X2 | runbooks-page | dashboard UI | **Merged** 2026-11-11 | `feat/x2-runbooks-page` | F13 | |
+| 18b | F27 | allowances | dashboard + MCP | Design first (from live use: P2 caught HA call_service) | `feat/f27-allowances` | F10 (P2), Chunk H, F18 | + security sign-off; next design after F21/F22 code |
 | 19 | F22 | change-checks | dashboard + MCP | After F19 merges | `feat/f22-change-checks` | F3, F5, F12, F19 | + security sign-off (the unattended check; AG1's origin rule does not cover it) |
 | 20 | F16 | recipes | dashboard + MCP | Design complete (security Round 4; feature reviewer Round 5 with AA1/AA2); code next after F22 | `feat/f16-recipes` | F3, F12, F13, F19 | main line; steps claim by request id; code comes back to security; auto_run comes back to security |
 | 21 | F24 | content-tripwire | dashboard | Design first | `feat/f24-content-tripwire` | F12, F14 | + security sign-off (retention) |
