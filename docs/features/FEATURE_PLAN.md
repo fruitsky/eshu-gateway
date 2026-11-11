@@ -10139,7 +10139,7 @@ change and stops the plan if it fails.
   * an exit of 0 schedules the check.
 * **Who runs it.**
   * An `ssh` check runs through the F12 runner under the item's agent, with
-    reason `plan-check:<plan>:<item>`, and with F19's limits.
+    reason `plan-check:<plan>:<item>:<token>`, and with F19's limits.
   * It is covered by the "operator-approved exact bytes" rule (see the
     shared rules; F15's AG1) and needs no second click.
   * On a gateway without `run_limits: v1`, the check is "not run", and the
@@ -10188,8 +10188,10 @@ item.
 reviewer's sign-off on the *unattended* part: a check runs with no human
 watching it, and this note says who may run it, under which identity, with
 what limit, and why it cannot become a second write path. §11 lists the two
-questions for that reviewer. **Round 1's AN1–AN5 are folded** (§13 maps them
-to the sections); this revision goes to the security reviewer.
+questions for that reviewer. **Round 1's AN1–AN5 and the
+security review's AR1–AR7 (with the output nit) are folded** (§13 and the
+Round 3 section map them to the sections); the feature reviewer checks
+AR5–AR7 and the security reviewer re-reads §3 and §4.
 
 #### 1. What it adds, and why this needs a security decision
 
@@ -10226,6 +10228,32 @@ The check is part of the item. The sequence for one item is:
 5. the result is written to the item and the plan either continues or stops
    (§8).
 
+**AR2 — in `approval` mode the link is made by server code.** Under
+`force_jit` an agent plan's items are not claimable (AG1), so the item's
+command arrives as an ordinary card. The check is still tied to it, and
+nothing the agent sends can make that link:
+
+* when `receive_request` creates the request row, it matches it against the
+  session's approved plans: same session, the item's `host` equal to the
+  request's target (a `*` item never matches — a check needs one exact host),
+  the **whole command equal**, an item that carries a check and has no
+  `check_request_id` yet. A match stamps `requests.plan_item_id` and the
+  item's `check_request_id` in the same transaction. A second request with the
+  same bytes finds the item already linked and gets no check;
+* the card renders the check under the command — the exact bytes, `expect`,
+  `wait_s`/`retries` — so the human approving the write sees exactly what
+  will follow it;
+* the F5 hook reads `plan_item_id` from the request row it just saved, never
+  from the gateway payload. A request without the stamp dispatches no check,
+  and a plan or item id in the agent's arguments is ignored;
+* if the bytes are auto-approved by a policy instead of becoming a card (the
+  read lane, a window), the link is still server-made and the check runs: the
+  plan card showed it when the plan was approved.
+
+So in `approval` mode the human approves the write and the check together on
+the card, and a check cannot be attached to a command the operator did not
+see with it. `requests.plan_item_id` is a nullable column (§10).
+
 A duplicate F5 post cannot dispatch twice: `request_results` has
 `request_id` as its primary key and `save_result` is `INSERT OR IGNORE`, so
 the second post returns `False`; the hook dispatches only on the `True` (the
@@ -10249,6 +10277,15 @@ writer) creates it with `create_plan(..., origin='check', internal=CHECK_INTERNA
   human and never outlives the plan whose approval it borrows;
 * `note` = `check for plan #P item #I`, so History shows what it belongs to.
 
+**AR3 — one item, exact bytes, one host.** A check plan has exactly one item,
+enforced on read as well as on write: any other count is a refusal, not a
+claim. Its claim compares the whole command for equality on that one host
+(`host = ? AND command = ?`) — no pattern, prefix or `*`, whatever F3 allows
+for agent-origin items. `add`, `edit` and `remove` are closed at every agent
+path: a check plan exists only through `CHECK_INTERNAL`, and F3's edit routes
+refuse anything that is not `proposed`. The check is immutable after
+creation, exactly like the item it belongs to.
+
 The inheritance is the reason the check needs no prompt, so it is gated on the
 caller: `create_plan` keeps `proposed` for every other caller and refuses
 `origin='check'` unless the caller passes a module-private
@@ -10271,7 +10308,8 @@ mode the gateway asks `/api/request` with `force_jit=true`, and
   claim;
 * the claim is AG1's atomic statement: `uses < max_uses`, the plan `approved`
   and inside its TTL, the session's owner = the calling agent, and the reason
-  `session-plan:<plan>:<item>:check`.
+  `plan-check:<plan>:<item>:<token>`, whose last field must equal the item's
+  stored `check_token` (AR6).
 
 **AN4 — a gateway that cannot limit never gets the claim.** A request without
 `run_limits: v1` does not reach `claim_plan_item` for the check origin at all,
@@ -10279,24 +10317,37 @@ so it consumes no use and creates no approved row: the item's `uses` is
 unchanged, the request falls through to a card, `ssh_exec` returns `pending`,
 and the worker records `not_run` / `check_no_limits` (§5).
 
+**AR6 — the claim is bound to the worker's attempt.** The reason the worker
+sends is `plan-check:<plan>:<item>:<token>`, where `<token>` is the item's
+`check_token`. `receive_request` claims a `check`-origin item only when that
+token equals the item's stored value; anything else falls through to a card
+and consumes nothing. The F5 handler writes the token when it sets `pending`,
+and the token is never exposed (not in `session_plan`, not in the plan view),
+so an agent that races the same bytes cannot spend the check's use — its
+request carries no token. Without this binding the race could only force
+`check_unclaimed`; with it there is no race.
+
 **AN1 — the order of items.** `_claim_candidate` also refuses a **later** item
 of a plan while an **earlier** item of that plan still has an open check:
 
 ```sql
 AND NOT EXISTS (
   SELECT 1 FROM session_plan_items b
-  WHERE b.plan_id = i.plan_id AND b.removed = 0 AND b.id < i.id
+  WHERE b.plan_id = i.plan_id AND b.removed = 0 AND b.id <= i.id
     AND b.check_json IS NOT NULL AND b.uses > 0
     AND (b.check_state IS NULL OR b.check_state IN ('pending', 'running'))
 )
 ```
 
 An item with a check is *open* from the moment its command is claimed until its
-check is decided. `passed` releases the next item; `failed` and `not_run` stop
-the plan (§8); an item with no check never blocks. Without this rule the check
-would be dispatched after the fact and the agent could have claimed the next
-item during it, so "a failed check stops the remaining items" would be true
-only of the items that had not already run.
+check is decided. **The comparison is `b.id <= i.id`, so the item's own next
+use waits for its own check (AR1):** a two-use write cannot run again while
+the check of its first run is open. `passed` releases the next item; `failed`
+and `not_run` stop the plan (§8); an item with no check never blocks. Without
+this rule the check would be dispatched after the fact and the agent could
+have claimed the next item during it, so "a failed check stops the remaining
+items" would be true only of the items that had not already run — and with
+`<` alone the item's own next use slips through the same gap.
 
 **3.3 Why no second prompt, and what bounds the attempts.**
 
@@ -10333,9 +10384,27 @@ itself.
     `unattended=1` and the reason naming the plan, the item and `check`.
 * **tool check:** dashboard-side `run_tool(integration, tool, args)` as the
   same agent, with the plan's `session_id` and reason
-  `plan-check:<plan>:<item>`. It is a read, so `run_tool`'s read path
+  `plan-check:<plan>:<item>:<token>`. It is a read, so `run_tool`'s read path
   executes it immediately and writes the normal read call row
   (`agent=<the plan's agent>`). It needs no gateway and no `run_limits`.
+* **AR4 — the agent's standing is re-checked before every attempt.** The plan
+  supplies the approval, but the run is the agent's, so the worker re-derives
+  its standing each time, not once at dispatch:
+  * the token row still exists and `revoked = 0` (`agent_tokens`, found by the
+    session's agent name; the token is re-checked, never a cached copy);
+  * the mode is read again from the agent's policy (`get_agent_policy` and its
+    `ssh_mode`; a missing row means `approval`) — the same value the MCP
+    surface uses;
+  * a tripwire freeze that names this agent or this session is the same
+    refusal. F24 has not shipped; when it does, the naming data lives in the
+    freeze it writes and is read here the way §10 reads the operator freeze.
+    An ordinary operator freeze is **not** a refusal: the check is a read, and
+    reads keep working (§10).
+
+  Any failure is `not_run` with `check_agent_inactive`, nothing is sent, and
+  the plan stops (§8). A retry does not skip the check: it runs before every
+  attempt.
+
 * **Never the operator's session, never an agent token.** There is no MCP
   tool for a check and no route: an agent proposes one with the item, and
   that is the only way one is created.
@@ -10352,8 +10421,10 @@ as the plain approved row a probe claim creates:
   pending (never approved), the plan **stops** (§8) and `check_no_limits` is
   audited. Never `passed`: an older gateway would run the check unbounded,
   and a bound we cannot enforce is not a bound;
-* the check's own `timeout` is `min(30, run_limit.seconds)`, so the command
-  cannot outlive the row's limit;
+* **no wrapper (AR5).** The worker does not run `timeout 30 <cmd>`: the bytes
+  that run must be the bytes the operator approved and the parser read. The
+  row's `run_limit` seconds are set to `min(30, the operator's default)`
+  instead, and the gateway's own limiter enforces them;
 * if the gateway reports a limiter stop (`limit: time|bytes` on the result,
   F19) the check is **`not_run`** with reason `check_limit`: a cut command
   cannot tell us whether the state is good, so it is not a failure and not a
@@ -10406,9 +10477,11 @@ it is `{path, op, value}`:
 
 Stored per item: `check_state`, `check_observed` and `check_expected`
 (capped at 200 characters each, scrubbed), `check_exit_code`,
-`check_attempts`, `check_at`, `check_reason` (the code). **The output itself is
-never stored** — the observed value is the only part of it that survives, and
-only when the check is a tool check.
+`check_attempts`, `check_at`, `check_reason` (the code). **The item never copies the
+output**: an ssh check's output is stored in its F5 result row exactly like
+any other request's (F5's cap, scrubbing and retention), and a tool check's
+body lives in its read call row; the item keeps only the observed value, and
+only for a tool check.
 
 **Bounds:** `wait_s` 0–30 and `retries` 0–3, validated at proposal and
 re-validated at run (the stored values are trusted only after that). The
@@ -10481,16 +10554,22 @@ A check never runs twice, through four independent guards:
 * `session_plan_items` gains: `check_json` (the approved check definition),
   `check_state`, `check_reason`, `check_exit_code`, `check_observed`,
   `check_expected`, `check_attempts`, `check_at`, `check_plan_id`,
-  `check_item_id`, `check_token`. All nullable; an item without a check is
-  exactly as today.
+  `check_item_id`, `check_request_id`, `check_token`. All nullable; an item
+  without a check is exactly as today.
 * `session_plans` gains `stopped` as a status value, plus `stopped_at`,
   `stopped_reason` and `parent_plan_id` (nullable columns; the last one is how
   a check plan names the plan whose approval it borrows, and how stopping or
   ending a plan finds its check plans).
+* `requests` gains `plan_item_id` (nullable): the approval-mode link AR2
+  stamps when the card is created. The F5 hook reads it from the row.
 * The plan card (F3) shows each item's check under the command — the exact
   bytes, the `expect`, `wait_s`/`retries` — and its state after the run
   (`passed` in green, `failed`/`not_run` in red with the reason). The session
   card (F13/F6) and the sidebar show the same short line.
+* **History (AR7).** A check plan is shown as **approved via plan #P** (from
+  `origin='check'` and `parent_plan_id`), not as a fresh human decision; the
+  parent's approver is named as the source. `check_token` is never exposed —
+  not in `session_plan`, not in the plan view.
 * `session_plan` (MCP) returns `check_state`, `check_reason`,
   `check_observed` and the plan's `stopped` state; `session_summary` says
   which item stopped the plan and why.
@@ -10557,8 +10636,23 @@ A check never runs twice, through four independent guards:
   no approved row, and the item ends `not_run` / `check_no_limits`.
 * **Attempts (AN5):** `check_attempts` never exceeds `retries + 1` in
   `normal` mode, and a self-claim cannot spend two uses.
-* **Freeze:** a check runs during a freeze (reads keep working) and the plan
-  state is unchanged by it.
+* **Round 3 (AR1–AR7):** a two-use write whose check is `running` — its second
+  claim comes back pending (`b.id <= i.id`); in `approval` mode a card for an
+  approved item's exact bytes carries the check and shows its bytes, a second
+  identical request gets no check, a different session or different bytes gets
+  no link, and an agent-supplied plan/item id is ignored; a check plan with
+  two items is refused, and a prefix or wildcard does not claim; `add`,
+  `edit` and `remove` on a check plan are refused; a revoked token, a changed
+  mode or a tripwire freeze naming the agent or session gives `not_run` /
+  `check_agent_inactive` and stops the plan before an attempt and before a
+  retry, while an operator freeze alone still runs the check; the bytes that
+  run equal the approved bytes and the row's `run_limit` is
+  `min(30, default)`; an agent's racing request cannot claim the check (no
+  token) and a wrong token consumes nothing; the `CHECK_INTERNAL` AST test
+  passes; History reads `approved via plan #P`; the item has no output
+  column, while the F5 row keeps the ssh output like any request's.
+* **Freeze:** a check runs during an operator freeze (reads keep working) and
+  the plan state is unchanged by it.
 
 #### 13. What changed in round 2
 
@@ -10741,6 +10835,52 @@ AR1–AR4 close the gaps in that argument.
 * **Nit:** §7 says the check's "output itself is never stored". For an ssh
   check, the F5 result row stores it like any request's output. That is
   fine for an approved read, but correct the sentence.
+
+### Design round 3 — AR1–AR7 and the output nit (design round)
+
+AR1–AR4 are folded into the sections the reviewer names; AR5–AR7 and the nit
+are folded too, for the feature reviewer's check. §3 and §4 are the two
+sections the security reviewer re-reads.
+
+* **AR1 (§3.2, §8).** `b.id <= i.id`, so an item's own next use waits for its
+  own check. Test: a two-use write with a running check comes back pending.
+* **AR2 (§2, §10).** In `approval` mode the card links the item to its check
+  by a server-side match (same session, host and whole command; one item, one
+  link), `requests.plan_item_id` carries it, the F5 hook reads it from the
+  row, the card shows the check's bytes, and the agent can neither make nor
+  forge the link. The review's alternative — checks only after items from
+  server-origin plans — would drop checks from the mode the feature exists
+  for, so it is not taken.
+* **AR3 (§3.1).** One item, exact bytes on one host; no pattern or prefix;
+  the check plan is closed to `add`, `edit` and `remove` at every agent path.
+* **AR4 (§4).** Before every attempt: the token exists and is not revoked,
+  the mode is re-read from the policy, and a tripwire freeze naming the agent
+  or its session refuses — `not_run` / `check_agent_inactive`, plan stopped.
+  An operator freeze alone does not stop a read.
+* **AR5 (§5).** No `timeout` wrapper: the row's `run_limit` is
+  `min(30, default)` and the approved bytes run unchanged.
+* **AR6 (§3.2).** The claim's reason carries the item's `check_token`, and
+  only an exact match claims a `check`-origin item; an agent's racing request
+  cannot spend the use.
+* **AR7 (§10, §12).** `CHECK_INTERNAL` gets the F21-style AST test
+  (definition, one comparison, `core/checks.py` only); History shows a check
+  plan as "approved via plan #P"; `check_token` is never exposed.
+* **Nit (§7).** The output sentence now says the F5 result row keeps an ssh
+  check's output like any request's, and the item keeps only the observed
+  value.
+
+| item | where | change |
+|---|---|---|
+| AR1 | §3.2, §8 | `b.id <= i.id`; the item's own next use waits for its check |
+| AR2 | §2, §10 | server-made card link, `requests.plan_item_id`, the check on the card; the agent cannot create the link |
+| AR3 | §3.1 | one item, exact bytes on one host, no pattern, closed to edits |
+| AR4 | §4 | agent standing re-read before every attempt; a tripwire freeze naming the agent/session is `check_agent_inactive` |
+| AR5 | §5 | no `timeout` wrapper; `run_limit` = `min(30, default)` |
+| AR6 | §3.2 | the claim's reason carries `check_token`; exact match only |
+| AR7 | §10, §12 | sentinel AST test; History "approved via plan #P"; the token is never exposed |
+| Nit | §7 | the F5 row keeps the ssh output; the item keeps only the observed value |
+
+`bash scripts/verify.sh`: 2765 passed, 22 skipped, 8 warnings in 570.56s (0:09:30) (docs only).
 
 ---
 
@@ -12472,7 +12612,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 18c | X3 | integrations-ui | dashboard UI | Requested 2026-11-12; design after F27 is signed off | `feat/x3-integrations-ui` | F27, F10 (P2) | operator walk-through first |
 | 18e | X5 | ui-test-round | dashboard UI | **Implemented** 2026-11-12: six test-round fixes; no endpoint, save path or policy changed | `fix/x5-ui-test-round` | — | six small fixes |
 | 18d | X4 | agents-page | dashboard UI | **Implemented** 2026-11-12: one Agents page (tokens, policy sections, web fetch, activity); Controls renamed Command policy; absent policy fields now keep their stored value | `feat/x4-agents-page` | `fix/agent-ssh-hosts` | rename Controls → Command policy |
-| 19 | F22 | change-checks | dashboard + MCP | Security review (`96159d0`): `check` origin and unattended row shape **accepted** on **AR1–AR4 must** (own item blocked while its check is open, approval-mode link server-made, exact-bytes one-item check plan, agent standing re-checked); AR5–AR7 should | `feat/f22-change-checks` | F3, F5, F12, F19 | security re-reads §3/§4 after the fold |
+| 19 | F22 | change-checks | dashboard + MCP | **Design round 3: AR1–AR7 and the output nit folded** — own-item ordering (`<=`), the server-made card link, exact-bytes one-item check plan, agent standing before every attempt, no timeout wrapper, the attempt-bound claim, the sentinel AST test and History; to the feature reviewer (AR5–AR7) | `feat/f22-change-checks` | F3, F5, F12, F19 | feature reviewer checks AR5–AR7; security re-reads §3/§4 |
 | 20 | F16 | recipes | dashboard + MCP | Design complete (security Round 4; feature reviewer Round 5 with AA1/AA2); code next after F22 | `feat/f16-recipes` | F3, F12, F13, F19 | main line; steps claim by request id; code comes back to security; auto_run comes back to security |
 | 21 | F24 | content-tripwire | dashboard | Design first | `feat/f24-content-tripwire` | F12, F14 | + security sign-off (retention) |
 | 22 | F25 | secrets-broker | gateway + dashboard | Design first | `feat/f25-secrets-broker` | F1, F12, F19; security Chunk 7 before deploy | + security sign-off; gateway bash line by line |
