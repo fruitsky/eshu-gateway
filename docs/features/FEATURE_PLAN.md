@@ -10495,6 +10495,79 @@ _(implementer)_
 
 _(reviewer)_
 
+**Design round 1 (feature reviewer, 2026-11-11, at `93af9f2`): changes requested, AN1–AN5. Then to the security reviewer.**
+
+The shape is right:
+* a check is approved with its item, re-checked as a read at run time,
+  and limited by F19;
+* `not_run` is never `passed`;
+* `expect` is strict about types;
+* a restart never re-dispatches;
+* a stopped plan's items fall through to a card.
+
+Three gaps would break the core promise, though.
+
+* **AN1 (must): the order of items. A check stops the plan only if the next
+  item waits for it.**
+  * A check is dispatched after F5's post and can take up to 240 s.
+  * Nothing stops the agent from claiming item 2 in the meantime: the plan
+    is `approved`, and item 2 has a use left.
+  * So "a failed check stops the remaining items" is too late for any item
+    the agent ran during the check.
+
+  **Fix:**
+  * While any item of the plan has `check_state` in `pending|running`, or
+    has run with exit 0 and its check is not yet decided, `_claim_candidate`
+    does not return a **later** item of that plan (by item order). Those
+    items fall through to a card, exactly like a stopped plan.
+  * An item whose check `passed` releases the next item.
+  * An item with no check releases it at once, as today.
+
+  **Test:** through the real `receive_request`, item 2's exact bytes arrive
+  while item 1's check is `running`, and they come back pending.
+* **AN2 (must): the check plan is created `proposed`, and only an approved
+  plan can be claimed.**
+  * § 3 calls `create_plan(origin='check')` and then dispatches, but
+    `_claim_candidate` matches `p.status='approved'` only. As written, every
+    check claims nothing.
+  * **Say how it becomes approved without a human.** It is created already
+    approved, inheriting the parent plan's approval:
+    * `decided_by` is the parent's approver, with `parent_plan_id` stored;
+    * its expiry is no later than the parent's;
+    * it is ended when the parent is denied, ended or stopped.
+  * Only `core/checks.py` may create a plan in that state; `create_plan`
+    keeps `proposed` for every other caller.
+  * **Test:** a check plan whose parent was ended before dispatch claims
+    nothing.
+* **AN3 (must): the check runs off the request thread.** The "post-result
+  hook" is F5's `/api/exec-result` handler, which is the gateway's own POST.
+  Running `ssh_exec` plus waits and retries there (up to 240 s) holds that
+  POST open past its timeout, and blocks a worker. **Fix:**
+  * dispatch to a bounded background worker (one per plan, a small global
+    cap);
+  * the handler only writes `check_state='pending'` and returns;
+  * `set_current_agent` is set and reset inside the worker, in a `finally`.
+
+  The startup sweep (§ 9) then also covers `pending`.
+* **AN4 (must): refuse the claim when the gateway cannot limit.**
+  * § 5 says the row "is left pending" when the request reports no
+    `run_limits: v1`, but the claim happens in `receive_request`. Check the
+    capability there, **before** `claim_plan_item`: a `check`-origin claim
+    from a request without `run_limits: v1` does not consume a use and
+    creates no approved row.
+  * The worker records `not_run` / `check_no_limits` when `ssh_exec` comes
+    back pending.
+  * **Test:** with an old gateway, the item's `uses` is unchanged.
+* **AN5 (should): one counter bounds the attempts.**
+  * In `normal` mode the design marks the item used before dispatch. But
+    `receive_request` also claims from any origin in `normal` mode (it
+    passes `origins=None`), so one attempt can spend two uses. And an
+    allowlisted check command never posts a request at all, so it spends
+    none.
+  * Make `check_attempts <= retries + 1` on the parent item the bound,
+    checked in the worker before each attempt, and leave `max_uses` as the
+    claim-side limit only.
+
 ---
 
 ## Chunk F23 — Change journal tied to alerts · slug `change-journal` · dashboard only
