@@ -5392,3 +5392,24 @@ body.pol-open .mobile-menu-btn, body.pol-open .mobile-freeze { display: none; }
     border: 1px solid var(--rule-weak);
     border-radius: 3px;
   }
+
+/* ── F21: the snapshot offer in the request sidebar ───────────────────── */
+.snap-block {
+  border-top: 1px solid var(--rule-weak);
+  padding-top: 6px;
+  margin-top: 6px;
+  font-size: 12px;
+}
+.snap-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  padding: 2px 0;
+}
+.snap-uncovered {
+  color: var(--state-blocked);
+  list-style: disc inside;
+  padding-left: 4px;
+  margin: 2px 0;
+}

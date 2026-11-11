@@ -27,7 +27,7 @@ PROXMOX_SEED_TOOLS = [
         "params": [
             {"name": "type", "type": "string", "description": "Filter by resource type: vm, storage, node, or sdn. Omit for all.", "required": False},
         ],
-        "fields": ["id", "type", "node", "status", "name", "vmid"],
+        "fields": ["id", "type", "node", "status", "name", "vmid", "disk", "maxdisk", "mem", "maxmem"],
         "example": '[{"id": "qemu/100", "type": "qemu", "node": "pve", "status": "running", "name": "my-vm"}]',
         "read_only": True,
     },
@@ -206,6 +206,108 @@ PROXMOX_SEED_TOOLS = [
         "example": '{"data": "UPID:pve:00001239:..."}',
         "read_only": False,
     },
+    # ── F21: snapshot tools. Internal: dashboard code only (§4 of the design).
+    {
+        "name": "get_cluster_status",
+        "description": "Cluster status: the node rows with their name and IP. Used to identify a Proxmox node by address, never by DNS name.",
+        "method": "GET",
+        "path_template": "/cluster/status",
+        "params": [],
+        "fields": ["type", "name", "ip", "online", "nodeid", "local"],
+        "example": '[{"type": "node", "name": "pve", "ip": "192.0.2.50", "online": 1}]',
+        "read_only": True,
+        "internal": True,
+    },
+    {
+        "name": "get_container_config",
+        "description": "Configuration of one LXC container, including its net* entries. Dashboard code only.",
+        "method": "GET",
+        "path_template": "/nodes/{node}/lxc/{vmid}/config",
+        "params": [
+            {"name": "node", "type": "string", "description": "Node name.", "required": True},
+            {"name": "vmid", "type": "integer", "description": "Container id.", "required": True},
+        ],
+        "fields": ["hostname", "net0", "net1", "net2", "net3"],
+        "example": '{"hostname": "web01", "net0": "name=eth0,ip=192.0.2.20/24"}',
+        "read_only": True,
+        "internal": True,
+    },
+    {
+        "name": "get_task_status",
+        "description": "Status of one cluster task by UPID: running or stopped, and its exit status. Dashboard code only.",
+        "method": "GET",
+        "path_template": "/nodes/{node}/tasks/{upid}/status",
+        "params": [
+            {"name": "node", "type": "string", "description": "Node name.", "required": True},
+            {"name": "upid", "type": "string", "description": "The URL-encoded UPID.", "required": True},
+        ],
+        "fields": ["status", "exitstatus", "type", "id"],
+        "example": '{"status": "stopped", "exitstatus": "OK"}',
+        "read_only": True,
+        "internal": True,
+    },
+    {
+        "name": "snapshot_create",
+        "description": "Create a snapshot of one guest. Dashboard code only.",
+        "method": "POST",
+        "path_template": "/nodes/{node}/{type}/{vmid}/snapshot",
+        "params": [
+            {"name": "node", "type": "string", "description": "Node name.", "required": True},
+            {"name": "type", "type": "string", "description": "qemu or lxc.", "required": True},
+            {"name": "vmid", "type": "integer", "description": "Guest id.", "required": True},
+            {"name": "snapname", "type": "string", "description": "Snapshot name.", "required": True},
+            {"name": "description", "type": "string", "description": "Snapshot description.", "required": False},
+            {"name": "vmstate", "type": "integer", "description": "0 (disk only).", "required": False},
+        ],
+        "example": '"UPID:pve:00001239:0001A2B3:...:snapshot:101:root@pam:"',
+        "read_only": False,
+        "internal": True,
+    },
+    {
+        "name": "snapshot_list",
+        "description": "List a guest's snapshots. Dashboard code only.",
+        "method": "GET",
+        "path_template": "/nodes/{node}/{type}/{vmid}/snapshot",
+        "params": [
+            {"name": "node", "type": "string", "description": "Node name.", "required": True},
+            {"name": "type", "type": "string", "description": "qemu or lxc.", "required": True},
+            {"name": "vmid", "type": "integer", "description": "Guest id.", "required": True},
+        ],
+        "fields": ["name", "description", "snaptime", "parent"],
+        "example": '[{"name": "eshu-r12-1700000000", "description": "eshu request #12", "snaptime": 1700000000}]',
+        "read_only": True,
+        "internal": True,
+    },
+    {
+        "name": "snapshot_rollback",
+        "description": "Roll a guest back to a snapshot. Dashboard code only.",
+        "method": "POST",
+        "path_template": "/nodes/{node}/{type}/{vmid}/snapshot/{snapname}/rollback",
+        "params": [
+            {"name": "node", "type": "string", "description": "Node name.", "required": True},
+            {"name": "type", "type": "string", "description": "qemu or lxc.", "required": True},
+            {"name": "vmid", "type": "integer", "description": "Guest id.", "required": True},
+            {"name": "snapname", "type": "string", "description": "Snapshot name.", "required": True},
+        ],
+        "example": '"UPID:pve:00001239:...:rollback:101:root@pam:"',
+        "read_only": False,
+        "internal": True,
+    },
+    {
+        "name": "snapshot_delete",
+        "description": "Delete a guest snapshot. Dashboard code only.",
+        "method": "DELETE",
+        "path_template": "/nodes/{node}/{type}/{vmid}/snapshot/{snapname}",
+        "params": [
+            {"name": "node", "type": "string", "description": "Node name.", "required": True},
+            {"name": "type", "type": "string", "description": "qemu or lxc.", "required": True},
+            {"name": "vmid", "type": "integer", "description": "Guest id.", "required": True},
+            {"name": "snapname", "type": "string", "description": "Snapshot name.", "required": True},
+        ],
+        "example": '"UPID:pve:00001239:...:delsnapshot:101:root@pam:"',
+        "read_only": False,
+        "internal": True,
+    },
 ]
 
 
@@ -247,4 +349,10 @@ def seed_proxmox_tools(integration_id: int):
                 seeded=True,
             )
             created += 1
+    # F21: the snapshot tools and the cluster-status read exist for dashboard
+    # code only. Marking them here keeps every other seed untouched and makes
+    # the flag idempotent on re-seed.
+    from db.integrations import set_tools_internal
+    internal = [t['name'] for t in PROXMOX_SEED_TOOLS if t.get('internal')]
+    set_tools_internal(integration_id, internal, True)
     return created, updated

@@ -60,6 +60,7 @@ def init_db():
     from db.overrides import init_session_overrides_tables
     from db.inventory import init_inventory_tables
     from db.conclusions import init_conclusions_tables
+    from db.snapshots import init_snapshots_tables
 
     init_requests_tables(cursor)
     init_gateways_tables(cursor)
@@ -81,6 +82,7 @@ def init_db():
     init_session_overrides_tables(cursor)
     init_inventory_tables(cursor)
     init_conclusions_tables(cursor)
+    init_snapshots_tables(cursor)
 
     conn.commit()
     conn.close()

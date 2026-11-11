@@ -8959,6 +8959,11 @@ operator setting (`dashboard_guest` = node/vmid, or the explicit value
 `not on this cluster`) and, failing that, from the dashboard host's own
 interface addresses matched against guest configuration as in §2.2.
 
+* **the address match never stands in for the setting (AP1):** with no
+  `dashboard_guest` setting there is **no offer for any guest**
+  (`snapshot_dashboard_guest_unknown`); the match is still used, but only to
+  refuse the guest it names (`snapshot_target_self`) and to suggest the value
+  on the setting page;
 * the resolved guest is that guest → `snapshot_target_self`;
 * neither source can say → **`snapshot_dashboard_guest_unknown`, and no
   offer** (AO2). With DHCP this is the usual case, and a warning line is
@@ -9418,7 +9423,72 @@ AM1–AM6 are folded as asked:
 
 ### Implementer notes
 
-_(implementer)_
+**Code round, 2026-11-11 — one commit, because the tests cover the routes and
+the journal as one unit.** What is in it:
+
+* **The guard (AO3, AK1, AK2, AM1).** `core/integration_proxy.py` gains
+  `SNAPSHOT_INTERNAL = object()`, `is_snapshot_path()` and
+  `snapshot_refusal()`, and the refusal runs in `_http_roundtrip` — the lowest
+  function every Proxmox HTTP request passes through, so a future executor
+  cannot miss it. The path is normalised the way F9 does (decode-until-stable,
+  no dot segments, lower-case, `//` collapsed) and the segment run
+  `nodes/<x>/(qemu|lxc)/<x>/snapshot` is matched **anywhere** in it, so a base
+  URL behind a reverse proxy still matches. Every method but `GET`/`HEAD` is
+  refused unless the caller passes the sentinel; `execute_integration_call`
+  has a keyword-only `snapshot_internal=None` and `execute_generic_call` has
+  no such parameter at all.
+* **The tools (AM1, AM2).** `integration_tools.internal` (new column) plus
+  five internal tools seeded by `proxmox_seed`: `snapshot_create`,
+  `snapshot_list`, `snapshot_rollback`, `snapshot_delete`, and the reads the
+  resolution needs (`get_cluster_status`, `get_container_config`,
+  `get_task_status`). `_register_tools` skips `internal` tools, so no MCP
+  surface ever lists one; `run_tool` refuses by name before gating and before
+  a pending row exists (`internal_tool_refused`); the pending-call executor
+  refuses a row whose tool is internal, reading the flag from the table.
+  `integrations.snapshot_secret` is a second secret, masked like `secret`
+  (with a `snapshot_secret_suffix`), read only by `core/snapshots.py`, which
+  calls with a copy of the row whose `secret` is that token.
+* **The journal.** `db/snapshots.py` (table, states, expiry queries) and
+  `core/snapshots.py` (resolution, `create_and_approve`, `rollback`, `delete`,
+  `sweep`, the 600 s expiry thread started with the app). The resolution is
+  the design's: the node from `cluster/status` by IP or the operator's
+  `gateways.proxmox_node`; a gateway-as-guest only from the guest's **own**
+  config (`net*`/`ipconfig*`, address part only, so `ip=dhcp` never matches);
+  AO1's partial refusal; AP1's "no setting, no offer"; AM4's self refusal at
+  offer **and** rollback time; AM5's `expires_at` on every row and `gone` for
+  a snapshot that is no longer on the guest.
+* **Routes.** `GET /api/requests/{id}/snapshot` (the offer), `POST
+  /api/requests/{id}/snapshot-approve`, `POST /api/snapshots/{id}/rollback`,
+  `POST /api/snapshots/{id}/delete`, the settings pair, the snapshot-token
+  setter and the two gateway-binding routes. The request context (F18) now
+  carries the offer, so the sidebar shows it and the **Snapshot, then run**
+  button without a second poll.
+* **The AST test.** In the dashboard package `SNAPSHOT_INTERNAL` appears only
+  as its definition and the one `is` comparison in the proxy, and in
+  `snapshots.py`; the keyword is passed only from there.
+
+Tests, `tests/test_f21_snapshots.py` (50) with a fake Proxmox at the
+`urlopen` layer, so the guard, the auth header, the tool path and the JSON
+parse all run for real. They cover: the guard's seven spellings × four
+methods, GET/HEAD allowed, the sentinel (and `True`/a string refused), other
+paths unmatched, a generic POST refused before anything is sent; the five
+internal tools marked, `run_tool` refusing them, the MCP registry not listing
+them, a queued row refused at execution, and the AST check; the offer for an
+inner target, a read (no offer), a node command (partial), two guests
+(partial, uncovered listed), a gateway guest found from its own config, an
+inventory IP claim alone not enough, a node name alone not enough, AP1's two
+refusals (`self` for the matched guest, `unknown` for the other), `none` as
+the setting, the dashboard-guest setting, and the full-disk warning; the
+sequence (create, approve, exact name and description, the snapshot token on
+the wire), a failed create and a failed task each approving nothing, a request
+decided meanwhile, and no token = no offer; rollback success, a failed row not
+rollable, a recycled vmid, a replaced snapshot name, an expired row, delete,
+and a failed row deletable; expiry deleting only its own expired rows, `gone`,
+and the `creating` sweep; and the API's session gate, offer, approve,
+rollback/delete 404, settings bounds and the token never being returned.
+
+`bash scripts/verify.sh`: `2692 passed, 22 skipped, 7 warnings in 543.84s (0:09:03)`.
+
 
 ---
 
@@ -10107,7 +10177,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 14 | F14 | inventory | dashboard + MCP | Merged | `feat/f14-inventory` | Chunk H | |
 | 15 | F19 | unattended-limits | gateway + dashboard | Code approved by both reviewers on AF1/AF2 (security `67bec51`); feature reviewer checks AF1/AF2, then merge | `feat/f19-unattended-limits` | F4, F5, F12 | moved ahead of F21–F23: nearly done, and F22 needs it. AF3 goes on the next gateway branch |
 | 16 | F15 | probes | dashboard + MCP | Code round 1: changes requested AG1–AG7 (`56d86e3`); **AG1 to security** | `feat/f15-probes` | F4, F12, F14 | main line, not only local-model |
-| 17 | F21 | snapshot-approve | dashboard + Proxmox | **Design round 2: AO1/AO2 folded** (offer only when every write is covered, `snapshot_target_partial`; unknown dashboard guest refuses) and AO3 + the AST sentinel test written into the code round; §2/§4/§7 approved for code at `98fdb86` | `feat/f21-snapshot-approve` | F7, F14, F2 | feature reviewer checks AO1/AO2; then code, security reviews it |
+| 17 | F21 | snapshot-approve | dashboard + Proxmox | **Code round: AP1 folded, then the whole chunk built** — the unconditional subtree guard in the lowest Proxmox function, five internal tools, a separate snapshot token, the journal, the routes and the sidebar offer; 50 tests with a fake Proxmox | `feat/f21-snapshot-approve` | F7, F14, F2 | feature + security review the code |
 | 18 | F23 | change-journal | dashboard | Ready | `feat/f23-change-journal` | F1, F5, F7, F14 | no security gate; can be coded while F21's design is with security |
 | 18a | X2 | runbooks-page | dashboard UI | Ready | `feat/x2-runbooks-page` | F13 | small; no security gate |
 | 19 | F22 | change-checks | dashboard + MCP | After F19 merges | `feat/f22-change-checks` | F3, F5, F12, F19 | + security sign-off (the unattended check; AG1's origin rule does not cover it) |

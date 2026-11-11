@@ -214,6 +214,21 @@ def init_integrations_tables(cursor):
             agent TEXT NOT NULL DEFAULT ''
         )
     ''')
+    # F21: an internal tool exists for dashboard code only. The column is the
+    # first of the two layers that keep the four snapshot tools away from
+    # agents (the sentinel in core/integration_proxy.py is the second).
+    try:
+        cursor.execute(
+            "ALTER TABLE integration_tools ADD COLUMN internal INTEGER NOT NULL DEFAULT 0")
+    except Exception:
+        pass
+    # F21/AM2: a second Proxmox token, used only by core/snapshots.py, so the
+    # token every agent-facing call uses stays read-only.
+    try:
+        cursor.execute(
+            "ALTER TABLE integrations ADD COLUMN snapshot_secret TEXT NOT NULL DEFAULT ''")
+    except Exception:
+        pass
     # F10: the resolved one-line summary ("update | core_mosquitto | 6.5.1 -> 6.6.0")
     # the approval card shows, built by the tool's preflight.
     try:
@@ -310,8 +325,10 @@ def get_integrations(include_secret: bool = False):
             if not include_secret:
                 item['secret_suffix'] = _suffix(item.get('secret'))
                 item['client_secret_suffix'] = _suffix(item.get('client_secret'))
+                item['snapshot_secret_suffix'] = _suffix(item.get('snapshot_secret'))
                 item.pop('secret', None)
                 item.pop('client_secret', None)
+                item.pop('snapshot_secret', None)
             out.append(item)
         return out
 
@@ -924,3 +941,44 @@ def mask_sensitive_args(payload: dict, tool: dict) -> dict:
         if key in out and out[key]:
             out[key] = '[redacted]'
     return out
+
+
+# ── F21: internal tools and the snapshot token ─────────────────────────
+
+def set_tools_internal(integration_id: int, names, internal: bool = True) -> int:
+    """Mark named tools internal (or not). Returns how many rows changed."""
+    names = [str(n) for n in (names or []) if n]
+    if not names:
+        return 0
+    with db_conn() as conn:
+        cur = conn.cursor()
+        marks = ','.join('?' for _ in names)
+        cur.execute(
+            'UPDATE integration_tools SET internal = ? '
+            'WHERE integration_id = ? AND name IN (%s)' % marks,
+            tuple([1 if internal else 0, int(integration_id)] + names))
+        conn.commit()
+        return cur.rowcount
+
+
+def is_internal_tool(integration_name: str, tool_name: str) -> bool:
+    tool = get_tool(integration_name, tool_name)
+    return bool(tool and tool.get('internal'))
+
+
+def set_snapshot_secret(integration_name: str, secret: str) -> bool:
+    """Store the snapshot token. Never returned by any list."""
+    with db_conn() as conn:
+        cur = conn.cursor()
+        cur.execute('UPDATE integrations SET snapshot_secret = ? WHERE name = ?',
+                    ((secret or '')[:4000], integration_name))
+        conn.commit()
+        return cur.rowcount == 1
+
+
+def get_snapshot_secret(integration_name: str) -> str:
+    with db_conn() as conn:
+        row = conn.execute(
+            'SELECT snapshot_secret FROM integrations WHERE name = ?',
+            (integration_name,)).fetchone()
+        return (row['snapshot_secret'] if row else '') or ''

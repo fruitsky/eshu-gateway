@@ -127,9 +127,11 @@ class TestProxmoxSeed:
         r = auth_client.post("/api/integrations/proxmox/seed")
         assert r.status_code == 200
         data = r.json()
-        assert data["created"] == 18  # 16 curated + generic read/write
+        # 16 curated + generic read/write + the 7 F21 internal tools
+        # (snapshot create/list/rollback/delete and three reads).
+        assert data["created"] == 25
         tools = auth_client.get("/api/integrations/proxmox/tools").json()
-        assert len(tools) == 18
+        assert len(tools) == 25
         names = {t["name"] for t in tools}
         assert "list_vms" in names
         assert "start_vm" in names
@@ -137,7 +139,7 @@ class TestProxmoxSeed:
         # Seeding again is idempotent (updates in place)
         r2 = auth_client.post("/api/integrations/proxmox/seed")
         assert r2.json()["created"] == 0
-        assert r2.json()["updated"] == 18
+        assert r2.json()["updated"] == 25
 
     def test_toggle_tool(self, auth_client):
         auth_client.post("/api/integrations", json={
@@ -214,7 +216,7 @@ class TestReseed:
         create_integration("ha", "https://ha.local/api", "bearer", "tok", kind="ha")
         create_integration("custom", "https://x.local/api", "none", "")
         reseed_all_integrations()
-        assert len(get_tools(1)) == 18  # proxmox + generic read/write
+        assert len(get_tools(1)) == 25  # proxmox + generic + the F21 internal tools
         # 30 ha curated (14 + F9's 10 + F10's 6 actions) + the 4 generic tools
         assert len(get_tools(2)) == 34
         assert {t["name"] for t in get_tools(3)} == {'read', 'write'}  # custom: generic floor only

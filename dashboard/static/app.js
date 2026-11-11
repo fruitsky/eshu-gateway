@@ -67,6 +67,7 @@ var _activeSessionHostIp = '';
    only when the panel opens. Every agent string is escaped here; a section's
    open/closed state lives in localStorage (best effort). */
 var _ctxReq = null;
+var _ctxSnapshot = null;
 
 function ctxCut(text) {
   return String(text == null ? '' : text).slice(0, 300);
@@ -155,6 +156,8 @@ function ctxHostBody(d) {
 }
 
 function renderRequestContext(data) {
+  var snapEl = document.getElementById('ctx-snapshot');
+  if (snapEl) snapEl.innerHTML = snapshotOfferHtml(data.snapshot || null);
   var el = document.getElementById('ctx-context');
   if (!el) return;
   el.innerHTML =
@@ -174,6 +177,8 @@ function loadRequestContext(requestId, command) {
   }).then(function (data) {
     if (!data || !_ctxReq || String(_ctxReq.id) !== String(requestId)) return;
     data.request_command = command || (_ctxReq && _ctxReq.command) || '';
+    _ctxSnapshot = data.snapshot || null;
+    renderContextActions(_ctxReq);
     renderRequestContext(data);
   }).catch(function () {
     if (el && _ctxReq && String(_ctxReq.id) === String(requestId)) {
@@ -210,7 +215,11 @@ function contextActionsHtml(req) {
       '<button onclick="denyWindowReq(' + idJs(req.id) + ')" class="btn btn-deny btn-sm" style="flex:1">Deny</button>';
   }
   if (req.status === 'pending') {
+    var snap = (_ctxSnapshot && _ctxSnapshot.available)
+      ? '<button onclick="snapshotApprove(' + idJs(req.id) + ')" class="btn btn-muted btn-sm" style="flex:1">Snapshot, then run</button>'
+      : '';
     return '<button data-ctx-approve="1" onclick="handleAction(' + idJs(req.id) + ',\'approve\')" class="btn btn-approve btn-sm" style="flex:1">' + contextApproveLabel(req) + '</button>' +
+      snap +
       '<button onclick="handleAction(' + idJs(req.id) + ',\'deny\')" class="btn btn-deny btn-sm" style="flex:1">Deny</button>';
   }
   return '<button onclick="closeContextPanel()" class="btn btn-muted btn-sm" style="flex:1">Close</button>';
@@ -219,6 +228,91 @@ function contextActionsHtml(req) {
 function renderContextActions(req) {
   var el = document.getElementById('ctx-actions');
   if (el) el.innerHTML = contextActionsHtml(req);
+}
+
+/* F21: the snapshot offer, and the second approve. Every field is escaped;
+   the command text in `uncovered` is agent-authored. */
+function snapshotOfferHtml(offer) {
+  if (!offer) return '';
+  var rows = (offer.existing || []).map(function (s) {
+    var live = s.state === 'active';
+    return '<div class="snap-row">' +
+      '<code>' + esc(s.name || '') + '</code> ' +
+      '<span class="text-muted">' + esc(s.state || '') + ' on ' +
+      esc(String(s.node || '')) + '/' + esc(String(s.vmid || '')) + '</span> ' +
+      (live ? '<button class="chip-btn" onclick="snapshotRollback(' + idJs(s.id) + ')">Roll back</button> ' +
+              '<button class="chip-btn danger" onclick="snapshotDelete(' + idJs(s.id) + ')">Delete</button>' : '') +
+      '</div>';
+  }).join('');
+  if (!offer.available) {
+    var why = offer.reason === 'not_pending' ? ''
+      : '<div class="text-muted text-xs">No snapshot offer: ' + esc(offer.reason || '') +
+        (offer.detail ? ' — ' + esc(offer.detail) : '') + '</div>';
+    return (rows ? '<div class="snap-block"><div class="text-xs">Snapshots</div>' + rows + '</div>' : '') + why;
+  }
+  var t = offer.target || {};
+  var warn = (offer.warnings || []).map(function (w) {
+    return '<div class="text-warning text-xs">' + esc(w) + '</div>';
+  }).join('');
+  var uncovered = (offer.uncovered || []).map(function (u) {
+    return '<li>' + esc(u) + '</li>';
+  }).join('');
+  return '<div class="snap-block">' +
+    '<div class="text-xs">Snapshot ' + esc(String(t.node || '')) + '/' +
+      esc(String(t.vmid || '')) + ' (' + esc(String(t.type || '')) + ')' +
+      (offer.source ? ' <span class="text-muted">· via ' + esc(offer.source) + '</span>' : '') +
+    '</div>' + warn +
+    (uncovered ? '<ul class="snap-uncovered">' + uncovered + '</ul>' : '') +
+    rows + '</div>';
+}
+
+function snapshotApprove(id) {
+  customConfirm('A snapshot of this guest is taken first, then the command is '
+    + 'approved. If the snapshot fails, nothing is approved.',
+    { title: 'Snapshot, then run #' + id + '?', confirmLabel: 'Snapshot and approve' })
+    .then(function (ok) {
+      if (!ok) return;
+      return authFetch('/api/requests/' + Number(id) + '/snapshot-approve', { method: 'POST' })
+        .then(function (res) { return res.json(); })
+        .then(function (data) {
+          showToast(data.ok ? 'Snapshot taken; request approved'
+                            : 'Snapshot failed: ' + (data.reason || 'unknown'),
+                    data.ok ? 'success' : 'error');
+          fetchRequests();
+          if (_ctxReq && String(_ctxReq.id) === String(id)) openContextPanel(id);
+        });
+    }).catch(function (e) { showToast('Snapshot failed: ' + e.message, 'error'); });
+}
+
+function snapshotRollback(sid) {
+  customConfirm('The guest\'s disks return to the snapshot. A running guest is '
+    + 'stopped and started again.',
+    { title: 'Roll back snapshot #' + sid + '?', confirmLabel: 'Roll back' })
+    .then(function (ok) {
+      if (!ok) return;
+      return authFetch('/api/snapshots/' + Number(sid) + '/rollback', { method: 'POST' })
+        .then(function (res) { return res.json(); })
+        .then(function (data) {
+          showToast(data.ok ? 'Rolled back' : 'Refused: ' + (data.reason || ''),
+                    data.ok ? 'success' : 'error');
+          if (_ctxReq) openContextPanel(_ctxReq.id);
+        });
+    }).catch(function (e) { showToast('Rollback failed: ' + e.message, 'error'); });
+}
+
+function snapshotDelete(sid) {
+  customConfirm('The snapshot is deleted. The guest is not changed.',
+    { title: 'Delete snapshot #' + sid + '?', confirmLabel: 'Delete' })
+    .then(function (ok) {
+      if (!ok) return;
+      return authFetch('/api/snapshots/' + Number(sid) + '/delete', { method: 'POST' })
+        .then(function (res) { return res.json(); })
+        .then(function (data) {
+          showToast(data.ok ? 'Snapshot deleted' : 'Refused: ' + (data.reason || ''),
+                    data.ok ? 'success' : 'error');
+          if (_ctxReq) openContextPanel(_ctxReq.id);
+        });
+    }).catch(function (e) { showToast('Delete failed: ' + e.message, 'error'); });
 }
 
 /* When the arming press happens while the sidebar shows the request, the
@@ -346,6 +440,7 @@ function openContextPanel(reqId) {
   }
 
   // Action buttons (X1: dispatch on the request type first)
+  _ctxSnapshot = null;
   renderContextActions(req);
 
   // F18: the context sections are fetched only when the panel opens.

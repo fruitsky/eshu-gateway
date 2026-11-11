@@ -448,6 +448,20 @@ def _run_tool(integration_name: str, tool_name: str, args: dict, reason: str = '
     tool = get_tool(integration_name, tool_name)
     if not tool or not tool.get('enabled'):
         return _error("Tool not found or disabled", 404)
+    if tool.get('internal'):
+        # F21: internal tools are dashboard code only. The refusal is here,
+        # before gating and before any pending row can be created, so a
+        # guessed name cannot even queue a call for a human to approve.
+        try:
+            record_audit_event(
+                'internal_tool_refused',
+                details=f"{integration_name}.{tool_name}: internal tool refused "
+                        f"for agent {(get_current_agent() or {}).get('name') or '-'}",
+                actor=(get_current_agent() or {}).get('name') or '')
+        except Exception:
+            pass
+        return _error("This tool is reserved for dashboard code and is not "
+                      "available to agents.", 403)
 
     args = args or {}
     # Phase 2: MCP tool calls accept structured session_id / execution_id so the

@@ -22,6 +22,13 @@ def init_gateways_tables(cursor):
         cursor.execute("ALTER TABLE gateways ADD COLUMN capture_output TEXT DEFAULT 'exit-only'")
     except Exception:
         pass
+    # F21/AM3: the operator's binding for a node or a guest the cluster cannot
+    # establish on its own. Never a name match from DNS.
+    for col in ('proxmox_node', 'proxmox_guest'):
+        try:
+            cursor.execute(f"ALTER TABLE gateways ADD COLUMN {col} TEXT DEFAULT ''")
+        except Exception:
+            pass
     # F4: the read-only lane (off | shadow | on). Default off everywhere.
     try:
         cursor.execute("ALTER TABLE gateways ADD COLUMN read_lane TEXT DEFAULT 'off'")
@@ -521,3 +528,25 @@ def set_gateway_ssh_capabilities(ip: str, agent_format: str, ticket_format: str)
             'UPDATE gateways SET ssh_agent_format = ?, ssh_ticket_format = ? WHERE ip = ?',
             (agent_format or '', ticket_format or '', ip))
         conn.commit()
+
+
+def get_gateway_proxmox_bindings(ip: str) -> dict:
+    """F21: the operator's Proxmox bindings for one gateway ('' when unset)."""
+    with db_conn() as conn:
+        row = conn.execute(
+            'SELECT proxmox_node, proxmox_guest FROM gateways WHERE ip = ?',
+            (ip,)).fetchone()
+        if not row:
+            return {}
+        return {'proxmox_node': row['proxmox_node'] or '',
+                'proxmox_guest': row['proxmox_guest'] or ''}
+
+
+def set_gateway_proxmox_bindings(ip: str, node: str = '', guest: str = '') -> bool:
+    with db_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            'UPDATE gateways SET proxmox_node = ?, proxmox_guest = ? WHERE ip = ?',
+            ((node or '')[:80], (guest or '')[:80], ip))
+        conn.commit()
+        return cur.rowcount == 1

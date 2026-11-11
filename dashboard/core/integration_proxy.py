@@ -644,8 +644,83 @@ def _apply_shaping(body: str, tool: dict, args: dict, integration: dict = None) 
     return body
 
 
+# ── F21: the snapshot subtree ───────────────────────────────────────────
+#
+# Proxmox exposes snapshot create/rollback/delete under
+# `/nodes/<node>/(qemu|lxc)/<vmid>/snapshot...`. Those calls exist for
+# `core/snapshots.py` only: the four tools are `internal`, every agent path
+# refuses them by name, and this guard is the second layer — it refuses the
+# subtree by *path*, so a hand-written tool, a generic call, or a pending row
+# cannot reach it either.
+#
+# The permission to pass is a module-private object, not a boolean: JSON, SQL,
+# a pending row's payload and a forwarded `**kwargs` can all carry `True`, and
+# none of them can carry an `object()`.
+SNAPSHOT_INTERNAL = object()
+
+# The segment run, matched anywhere in the normalised path: a base URL behind a
+# reverse proxy can carry its own prefix in front of `api2`.
+_SNAPSHOT_PATH_RE = re.compile(
+    r'(^|/)nodes/[^/]+/(?:qemu|lxc)/[0-9]+/snapshot(?:/|$)')
+
+_SAFE_METHODS = ('GET', 'HEAD')
+
+
+def _normalise_path(path) -> str:
+    """Decode-until-stable, no dot segments, lower-case, `//` collapsed.
+
+    The same rules F9's Supervisor guard uses: the bytes sent must be the
+    bytes checked, so a spelling a proxy would resolve cannot slip past.
+    """
+    text = str(path or '')
+    while True:
+        decoded = urllib.parse.unquote(text)
+        if decoded == text:
+            break
+        text = decoded
+    if '\\' in text or any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in text):
+        return ''
+    if any(segment in ('.', '..') for segment in text.split('/')):
+        return ''
+    text = text.lower()
+    while '//' in text:
+        text = text.replace('//', '/')
+    return '/' + text.strip('/')
+
+
+def is_snapshot_path(url_or_path) -> bool:
+    """Is this request inside the snapshot subtree, in any spelling?
+
+    Only an absolute URL is parsed; a protocol-relative `//nodes/...` is a
+    path here, not a host, and `urlparse` would read it as one.
+    """
+    text = str(url_or_path or '')
+    if '://' in text:
+        text = urllib.parse.urlparse(text).path or ''
+    return bool(_SNAPSHOT_PATH_RE.search(_normalise_path(text)))
+
+
+def snapshot_refusal(method, url, snapshot_internal=None):
+    """None when the call may run, else the refusal message.
+
+    Every method except GET/HEAD is refused, unconditionally, unless the
+    caller holds the sentinel. `snapshot_list` stays available to agents: it
+    is a read.
+    """
+    if str(method or 'GET').upper() in _SAFE_METHODS:
+        return None
+    if not is_snapshot_path(url):
+        return None
+    if snapshot_internal is SNAPSHOT_INTERNAL:
+        return None
+    return ('The Proxmox snapshot path is reserved for dashboard code: '
+            'snapshot create, rollback and delete are not available through '
+            'integration tools.')
+
+
 def _http_roundtrip(integration: dict, url: str, body_bytes, headers: dict, method: str,
-                    max_bytes: int = MAX_BODY_BYTES, timeout: int = None):
+                    max_bytes: int = MAX_BODY_BYTES, timeout: int = None,
+                    snapshot_internal=None):
     """Perform the HTTP request with the OAuth2 401-retry. Returns
     (status_code, body, truncated, error, latency_ms, outcome, resp_headers).
 
@@ -655,6 +730,11 @@ def _http_roundtrip(integration: dict, url: str, body_bytes, headers: dict, meth
     release search, which round-trips indexers for up to ~60s).
     `resp_headers` is a small dict ({content-length, content-type}) from the
     response on success — used for HEAD metadata — else None."""
+    # F21/AO3: the lowest function every Proxmox HTTP request passes through,
+    # so a future executor (probes, F22 checks, F23) cannot miss the guard.
+    refusal = snapshot_refusal(method, url, snapshot_internal)
+    if refusal:
+        raise ProxyError(403, refusal)
     timeout = timeout or DEFAULT_TIMEOUT
     auth_type = (integration.get('auth_type') or 'none').lower()
     start = time.time()
@@ -732,7 +812,8 @@ def _http_roundtrip(integration: dict, url: str, body_bytes, headers: dict, meth
 def execute_integration_call(integration: dict, tool: dict, args: dict, agent: str = '',
                              session_id: str = '', execution_id: str = '',
                              reason: str = '', approval: str = '',
-                             decided_at: int = 0, decided_by: str = '') -> dict:
+                             decided_at: int = 0, decided_by: str = '',
+                             *, snapshot_internal=None) -> dict:
     """Forward a call to the integration and return a JSON-safe result dict.
     Raises ProxyError for policy rejections (SSRF guard, etc.)."""
     if not integration or not integration.get('enabled'):
@@ -797,6 +878,7 @@ def execute_integration_call(integration: dict, tool: dict, args: dict, agent: s
     status_code, body, truncated, error, latency_ms, outcome, _resp_headers = _http_roundtrip(
         integration, url, body_bytes, headers, method,
         max_bytes=TRANSFORM_MAX_BODY_BYTES if tool.get('transform') else MAX_BODY_BYTES,
+        snapshot_internal=snapshot_internal,
         timeout=tool.get('timeout') or None)
 
     # Surface upstream logical errors (Omada errorCode != 0, Pulse {"error": ...})

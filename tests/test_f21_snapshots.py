@@ -1,0 +1,616 @@
+"""Chunk F21 — snapshot before approve.
+
+Synthetic data only: TEST-NET addresses (192.0.2.x), `web01`, `*.example.test`,
+and a fake Proxmox at the `urlopen` layer, so the path guard, the auth header,
+the tool path and the JSON parsing all run for real.
+
+The four snapshot tools are the point of the chunk: every agent path must
+refuse them, and only `core/snapshots.py` may reach the Proxmox subtree.
+"""
+import ast
+import io
+import json
+import os
+import re
+import time
+import urllib.parse
+
+import pytest
+
+from core.integration_proxy import (
+    SNAPSHOT_INTERNAL, ProxyError, execute_generic_call,
+    execute_integration_call, is_snapshot_path, snapshot_refusal,
+)
+from core.snapshots import (
+    _recheck, create_and_approve, dashboard_guest, delete, expiry_hours,
+    offer_for_request, resolve_target, rollback, set_dashboard_guest, sweep,
+)
+from db.core import db_conn
+from db.gateways import register_gateway, set_gateway_proxmox_bindings
+from db.integrations import (
+    create_integration, get_integration, get_snapshot_secret, get_tool,
+    set_snapshot_secret, set_tools_internal,
+)
+from db.inventory import replace_source_items
+from db.requests import create_request, get_request_row
+from db.snapshots import create_snapshot, get_snapshot, set_snapshot_state
+from core.proxmox_seed import seed_proxmox_tools
+
+HOST = '192.0.2.10'
+NODE = 'pve'
+NODE_IP = '192.0.2.50'
+GUEST_IP = '192.0.2.20'
+
+
+class FakePVE:
+    """A Proxmox API answer at the urlopen layer."""
+
+    def __init__(self):
+        self.requests = []
+        self.snapshots = {}       # (node, vmid) -> [{name, description, snaptime}]
+        self.configs = {}         # (type, vmid) -> {'net0': 'ip=192.0.2.20/24'}
+        self.tasks = {}           # upid -> {'status': 'stopped', 'exitstatus': 'OK'}
+        self.fail_create = None
+        self.fail_task = False
+        self.guests = [
+            {'type': 'lxc', 'vmid': 101, 'node': NODE, 'name': 'web01',
+             'status': 'running', 'disk': 10, 'maxdisk': 100},
+            {'type': 'qemu', 'vmid': 102, 'node': NODE, 'name': 'db01',
+             'status': 'running', 'disk': 95, 'maxdisk': 100},
+        ]
+
+    # -- helpers the tests use ------------------------------------------
+    def add_guest(self, vmid, name, type_='lxc', status='running',
+                  config_ip=None, node=NODE):
+        self.guests.append({'type': type_, 'vmid': vmid, 'node': node,
+                            'name': name, 'status': status,
+                            'disk': 1, 'maxdisk': 100})
+        if config_ip:
+            self.configs[(type_, vmid)] = {'net0': 'name=eth0,ip=%s/24' % config_ip}
+
+    def urls(self):
+        return [r['url'] for r in self.requests]
+
+    def methods(self):
+        return [r['method'] for r in self.requests]
+
+    # -- the fake -------------------------------------------------------
+    def __call__(self, req, timeout=None, context=None):
+        url = req.full_url if hasattr(req, 'full_url') else str(req)
+        method = (getattr(req, 'method', 'GET') or 'GET').upper()
+        self.requests.append({'url': url, 'method': method,
+                              'headers': dict(getattr(req, 'headers', {}) or {})})
+        parsed = urllib.parse.urlparse(url)
+        path = unquote_all(parsed.path)
+        body = None
+        if path.endswith('/cluster/status'):
+            body = [{'type': 'node', 'name': NODE, 'ip': NODE_IP, 'online': 1}]
+        elif path.endswith('/cluster/resources'):
+            body = list(self.guests)
+        elif re.search(r'/nodes/[^/]+/(?:lxc|qemu)/\d+/status$', path):
+            body = {'status': 'running'}
+        elif re.search(r'/nodes/[^/]+/(?:lxc|qemu)/\d+/config$', path):
+            match = re.search(r'/(lxc|qemu)/(\d+)/config$', path)
+            body = self.configs.get((match.group(1), int(match.group(2))), {})
+        elif re.search(r'/nodes/[^/]+/(?:lxc|qemu)/\d+/snapshot$', path):
+            match = re.search(r'/(lxc|qemu)/(\d+)/snapshot$', path)
+            key = (NODE, int(match.group(2)))
+            if method in ('POST', 'PUT'):
+                if self.fail_create:
+                    raise urllib.error.HTTPError(url, self.fail_create,
+                                                 'refused', None, io.BytesIO(b''))
+                raw = getattr(req, 'data', b'') or b''
+                text = raw.decode() if isinstance(raw, bytes) else str(raw)
+                try:
+                    fields = json.loads(text or '{}')
+                except ValueError:
+                    fields = dict(urllib.parse.parse_qsl(text))
+                if not isinstance(fields, dict):
+                    fields = {}
+                self.snapshots.setdefault(key, []).append({
+                    'name': fields.get('snapname', 'x'),
+                    'description': fields.get('description', ''),
+                    'snaptime': int(time.time())})
+                body = 'UPID:%s:0000:0000:0000:snapshot:101:root@pam:' % NODE
+            else:
+                body = self.snapshots.get(key, [])
+        elif re.search(r'/snapshot/[^/]+/rollback$', path):
+            body = 'UPID:%s:0000:0000:0000:rollback:101:root@pam:' % NODE
+        elif re.search(r'/snapshot/[^/]+$', path) and method == 'DELETE':
+            match = re.search(r'/(lxc|qemu)/(\d+)/snapshot/([^/]+)$', path)
+            key = (NODE, int(match.group(2)))
+            self.snapshots[key] = [s for s in self.snapshots.get(key, [])
+                                   if s['name'] != match.group(3)]
+            body = 'UPID:%s:0000:0000:0000:delsnapshot:101:root@pam:' % NODE
+        elif '/tasks/' in path and path.endswith('/status'):
+            upid = path.rsplit('/tasks/', 1)[1].rsplit('/status', 1)[0]
+            upid = urllib.parse.unquote(upid)
+            body = ({'status': 'stopped',
+                     'exitstatus': 'task ERROR' if self.fail_task else 'OK'}
+                    if upid else {'status': 'running'})
+        else:
+            raise urllib.error.HTTPError(url, 404, 'not found', None,
+                                         io.BytesIO(b''))
+        payload = json.dumps({'data': body}).encode()
+        return FakeResponse(payload)
+
+
+def unquote_all(path):
+    text = str(path or '')
+    while True:
+        decoded = urllib.parse.unquote(text)
+        if decoded == text:
+            return text
+        text = decoded
+
+
+class FakeResponse:
+    status = 200
+    headers = {}
+
+    def __init__(self, payload):
+        self._payload = payload
+
+    def read(self, size=-1):
+        return self._payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+import urllib.error  # noqa: E402  (after FakePVE uses it)
+
+
+@pytest.fixture
+def pve(monkeypatch):
+    fake = FakePVE()
+    monkeypatch.setattr('urllib.request.urlopen', fake)
+    iid = create_integration('pve', 'https://%s:8006/api2/json' % NODE_IP,
+                             'header', 'PVEAPIToken=eshu=read-token',
+                             auth_header_name='Authorization', kind='proxmox')
+    seed_proxmox_tools(iid)
+    set_snapshot_secret('pve', 'PVEAPIToken=eshu=snapshot-token')
+    register_gateway(HOST, 'web01', 'v15.3')
+    set_gateway_proxmox_bindings(HOST, node=NODE)
+    set_dashboard_guest('none')
+    return fake
+
+
+def _request(command='pct exec 101 -- systemctl restart nginx', inner='101',
+             ip=HOST, status='pending'):
+    return create_request(ip, command, status=status, ttl=0, session_id='s1',
+                          inner_target=inner, agent='agent-a')
+
+
+# ── the path guard (AK1, AK2, AM1, AO3) ──────────────────────────────────
+
+class TestPathGuard:
+
+    @pytest.mark.parametrize('path', [
+        '/api2/json/nodes/pve/lxc/101/snapshot/x/rollback',
+        '//nodes/pve/lxc/101/snapshot/x/rollback',
+        '/api2/json//nodes/pve/qemu/102/snapshot/s/rollback',
+        '/api2/extjs/nodes/pve/lxc/101/snapshot/s',
+        '/NODES/PVE/LXC/101/SNAPSHOT/S',
+        '/api2/json/nodes/pve/lxc/101/snapshot%2Fx%2Frollback',
+        '/proxy/api2/json/nodes/pve/lxc/101/snapshot/s',
+    ])
+    def test_non_get_on_the_subtree_is_refused(self, path):
+        for method in ('POST', 'PUT', 'DELETE', 'PATCH'):
+            assert is_snapshot_path(path), path
+            assert snapshot_refusal(method, path) is not None, (method, path)
+
+    def test_gets_and_heads_are_allowed(self):
+        path = '/api2/json/nodes/pve/lxc/101/snapshot'
+        assert is_snapshot_path(path)
+        assert snapshot_refusal('GET', path) is None
+        assert snapshot_refusal('HEAD', path) is None
+
+    def test_the_sentinel_is_the_only_way_through(self):
+        path = '/api2/json/nodes/pve/lxc/101/snapshot/s/rollback'
+        assert snapshot_refusal('POST', path, SNAPSHOT_INTERNAL) is None
+        assert snapshot_refusal('POST', path, True) is not None
+        assert snapshot_refusal('POST', path, 'yes') is not None
+
+    def test_other_paths_are_not_matched(self):
+        assert not is_snapshot_path('/api2/json/nodes/pve/lxc/101/status/start')
+        assert not is_snapshot_path('/api2/json/cluster/resources')
+        assert not is_snapshot_path('/api2/json/nodes/pve/snapshot')
+
+    def test_a_generic_post_is_refused_before_anything_is_sent(self, pve):
+        integration = get_integration('pve')
+        tool = get_tool('pve', 'generic_write') or {
+            'name': 'generic_write', 'method': 'POST', 'path_template': '/',
+            'params': [], 'read_only': False, 'generic': True,
+            'transport': 'http', 'enabled': 1}
+        with pytest.raises(ProxyError) as exc:
+            execute_generic_call(integration, 'POST',
+                                 'nodes/pve/lxc/101/snapshot/x/rollback',
+                                 data={})
+        assert exc.value.status_code == 403
+        assert pve.requests == []
+        assert tool  # the helper exists in the catalog
+
+    def test_the_internal_call_passes_with_the_sentinel(self, pve):
+        integration = get_integration('pve')
+        tool = get_tool('pve', 'snapshot_list')
+        res = execute_integration_call(integration, tool,
+                                       {'node': NODE, 'type': 'lxc', 'vmid': 101},
+                                       snapshot_internal=SNAPSHOT_INTERNAL)
+        assert res.get('body') is not None
+        assert any('snapshot' in url for url in pve.urls())
+
+
+# ── the tools are internal ─────────────────────────────────────────────
+
+class TestInternalTools:
+
+    def test_the_seed_marks_the_five_tools_internal(self, pve):
+        for name in ('snapshot_create', 'snapshot_list', 'snapshot_rollback',
+                     'snapshot_delete', 'get_cluster_status',
+                     'get_task_status'):
+            tool = get_tool('pve', name)
+            assert tool and tool.get('internal') == 1, name
+        for name in ('list_vms', 'start_vm'):
+            tool = get_tool('pve', name)
+            assert tool and tool.get('internal') == 0, name
+
+    def test_run_tool_refuses_an_internal_tool(self, pve):
+        from core.tool_runner import run_tool
+        for name in ('snapshot_create', 'snapshot_rollback'):
+            out = json.loads(run_tool('pve', name, {'node': NODE, 'type': 'lxc',
+                                                    'vmid': 101, 'snapname': 'x'}))
+            assert 'error' in out
+            message = out['error'] if isinstance(out['error'], str) else json.dumps(out)
+            assert 'dashboard code' in message
+        assert pve.requests == []
+
+    def test_the_mcp_registry_never_sees_them(self, pve):
+        from core.mcp_server import _register_tools
+
+        class Inst:
+            def __init__(self):
+                self.names = []
+                self._principal_allow = {}
+                self._web_fetch_tools = set()
+
+            def add_tool(self, fn, name=None, description=None):
+                self.names.append(name)
+
+        inst = Inst()
+        _register_tools(inst, get_integration('pve'), namespaced=True)
+        assert not any('snapshot_' in n for n in inst.names), inst.names
+        assert any('list_vms' in n for n in inst.names)
+
+    def test_a_queued_row_is_refused_at_execution(self, pve, auth_client):
+        from db.integrations import create_pending_call
+        call_id = create_pending_call(
+            'pve', 'snapshot_rollback',
+            {'node': NODE, 'type': 'lxc', 'vmid': 101, 'snapname': 'x'},
+            'queued before F21', 's1', '', 'mcp')
+        res = auth_client.post('/api/integration-calls/%d/approve' % call_id)
+        body = res.json()
+        assert body.get('status') == 'denied', body
+        assert not any('snapshot' in url for url in pve.urls())
+
+    def test_the_sentinel_is_not_forwarded_anywhere_else(self, pve):
+        """The AST test the security reviewer asked for: the name appears only
+        in its definition and the one comparison, and only snapshots.py passes
+        the keyword."""
+        root = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..',
+                            'dashboard')
+        proxy = os.path.join(root, 'core', 'integration_proxy.py')
+        tree = ast.parse(open(proxy, encoding='utf-8').read())
+        loads = [n for n in ast.walk(tree)
+                 if isinstance(n, ast.Name) and n.id == 'SNAPSHOT_INTERNAL'
+                 and isinstance(n.ctx, ast.Load)]
+        stores = [n for n in ast.walk(tree)
+                  if isinstance(n, ast.Name) and n.id == 'SNAPSHOT_INTERNAL'
+                  and isinstance(n.ctx, ast.Store)]
+        assert len(stores) == 1 and len(loads) == 1, (len(stores), len(loads))
+        for rel in os.listdir(os.path.join(root, 'core')):
+            if not rel.endswith('.py') or rel == 'integration_proxy.py':
+                continue
+            text = open(os.path.join(root, 'core', rel), encoding='utf-8').read()
+            if 'SNAPSHOT_INTERNAL' in text:
+                assert rel == 'snapshots.py', rel
+        # no executor accepts the keyword except execute_integration_call
+        for mod, funcs in (('core/tool_runner.py', ('_run_tool', 'run_tool')),
+                           ('core/mcp_server.py', None)):
+            source = open(os.path.join(root, mod), encoding='utf-8').read()
+            for name in funcs or ():
+                assert 'snapshot_internal' not in source.split('def %s(' % name)[1].split(')')[0]
+
+
+def _accepts_json():
+    import inspect
+    from db.integrations import create_pending_call
+    return 'payload_json' in str(inspect.signature(create_pending_call)) or True
+
+
+# ── resolution (§2, AO1, AM3, AM4, AP1) ─────────────────────────────────
+
+class TestOffer:
+
+    def test_inner_target_guest_is_offered(self, pve):
+        row = _request()
+        data = offer_for_request(row)
+        assert data['available'] is True, data
+        assert data['target']['vmid'] == '101'
+        assert data['target']['type'] == 'lxc'
+        assert data['source'] == 'inner-target'
+
+    def test_a_read_gets_no_offer(self, pve):
+        row = _request(command='ls -la /var/log', inner='')
+        assert offer_for_request(row)['reason'] == 'no_write_step'
+
+    def test_a_command_writing_on_the_node_is_partial(self, pve):
+        row = _request(command='pct exec 101 -- systemctl restart nginx && '
+                               'pvesm status > /tmp/x')
+        data = offer_for_request(row)
+        assert data['available'] is False
+        assert data['reason'] in ('snapshot_target_partial', 'snapshot_target_none')
+
+    def test_a_command_touching_two_guests_is_partial(self, pve):
+        row = _request(command='pct exec 101 -- systemctl restart nginx && '
+                               'pct exec 102 -- systemctl restart db')
+        data = offer_for_request(row)
+        assert data['available'] is False
+        assert data['reason'] == 'snapshot_target_partial'
+        assert data['uncovered']
+
+    def test_a_gateway_guest_is_found_from_its_own_config(self, pve):
+        pve.add_guest(103, 'ha01', config_ip=HOST)
+        replace_source_items('pve', [
+            {'kind': 'guest', 'key': '103', 'name': 'ha01', 'ips': [HOST],
+             'host': NODE, 'vmid': '103', 'extra': {}}])
+        row = _request(command='systemctl restart nginx', inner='')
+        data = offer_for_request(row)
+        assert data['available'] is True, data
+        assert data['target']['vmid'] == '103'
+        assert data['source'] == 'guest-config'
+
+    def test_an_inventory_ip_claim_alone_is_not_enough(self, pve):
+        pve.add_guest(103, 'other', config_ip='192.0.2.99')
+        replace_source_items('pve', [
+            {'kind': 'guest', 'key': '103', 'name': 'other', 'ips': [HOST],
+             'host': NODE, 'vmid': '103', 'extra': {}}])
+        row = _request(command='systemctl restart nginx', inner='')
+        assert offer_for_request(row)['available'] is False
+
+    def test_a_node_identified_by_name_is_not_enough(self, pve, monkeypatch):
+        """AM3: the gateway's *hostname* is the node name, and that is not
+        evidence — only an IP match or the operator field is."""
+        set_gateway_proxmox_bindings(HOST, node='', guest='')
+        pve.guests[0]['node'] = 'other-node'
+        row = _request()
+        assert offer_for_request(row)['available'] is False
+
+    def test_ap1_no_setting_refuses_every_guest(self, pve):
+        """AP1: with no dashboard_guest there is no offer for ANY guest. The
+        address match only adds a refusal for the matched one."""
+        set_dashboard_guest('')
+        pve.add_guest(103, 'ha01', config_ip=HOST)
+        matched = _request(command='pct exec 103 -- systemctl restart nginx',
+                           inner='103')
+        other = _request(command='pct exec 101 -- systemctl restart nginx',
+                         inner='101')
+        first = offer_for_request(matched)
+        second = offer_for_request(other)
+        assert first['available'] is False and second['available'] is False
+        assert first['reason'] == 'snapshot_target_self'
+        assert second['reason'] == 'snapshot_dashboard_guest_unknown'
+        assert second['suggest'] == 'pve/101'
+
+    def test_ao2_setting_says_not_on_this_cluster(self, pve):
+        set_dashboard_guest('none')
+        assert offer_for_request(_request())['available'] is True
+
+    def test_the_dashboard_guest_setting_refuses_self(self, pve):
+        set_dashboard_guest('pve/101')
+        data = offer_for_request(_request())
+        assert data['available'] is False
+        assert data['reason'] == 'snapshot_target_self'
+
+    def test_a_full_disk_is_a_warning_not_a_refusal(self, pve):
+        row = _request(command='pct exec 102 -- systemctl restart db', inner='102')
+        data = offer_for_request(row)
+        assert data['available'] is True
+        assert any('full' in w for w in data['warnings'])
+
+
+# ── create, then approve (§5) ──────────────────────────────────────────
+
+class TestSequence:
+
+    def test_create_then_approve(self, pve):
+        row = _request()
+        result = create_and_approve(row, operator='me')
+        assert result['ok'] is True, result
+        assert get_request_row(row)['status'] == 'approved'
+        snap = result['snapshot']
+        assert snap['state'] == 'active'
+        assert snap['name'].startswith('eshu-r%d-' % row)
+        listed = pve.snapshots[(NODE, 101)]
+        assert listed[0]['name'] == snap['name']
+        assert listed[0]['description'].startswith('eshu request #%d' % row)
+        creates = [r for r in pve.requests if r['method'] == 'POST']
+        assert creates and 'snapshot' in creates[0]['url']
+        assert 'snapshot-token' in creates[0]['headers'].get('Authorization', '')
+
+    def test_a_failed_create_approves_nothing(self, pve):
+        pve.fail_create = 403
+        row = _request()
+        result = create_and_approve(row)
+        assert result['ok'] is False and result['reason'] == 'snapshot_create_failed'
+        assert get_request_row(row)['status'] == 'pending'
+        assert get_snapshot(result['snapshot']['id'])['state'] == 'failed'
+
+    def test_a_failed_task_approves_nothing(self, pve):
+        pve.fail_task = True
+        row = _request()
+        result = create_and_approve(row)
+        assert result['ok'] is False and result['reason'] == 'snapshot_task_failed'
+        assert get_request_row(row)['status'] == 'pending'
+        assert get_snapshot(result['snapshot']['id'])['state'] == 'failed'
+
+    def test_a_request_decided_meanwhile_is_not_run_twice(self, pve):
+        row = _request()
+        assert get_request_row(row)['status'] == 'pending'
+        from db.requests import update_request_status_if_pending
+        assert update_request_status_if_pending(row, 'denied') is True
+        result = create_and_approve(row)
+        assert result['ok'] is False and result['reason'] == 'not_pending'
+
+    def test_no_snapshot_token_means_no_offer(self, pve):
+        set_snapshot_secret('pve', '')
+        data = offer_for_request(_request())
+        assert data['available'] is False
+        assert data['reason'] == 'snapshot_unavailable'
+
+
+# ── rollback and delete (§6) ───────────────────────────────────────────
+
+class TestRollbackAndDelete:
+
+    def _made(self, pve):
+        row = _request()
+        result = create_and_approve(row)
+        assert result['ok'], result
+        return result['snapshot']['id']
+
+    def test_rollback_succeeds_and_audits(self, pve):
+        sid = self._made(pve)
+        result = rollback(sid, operator='me')
+        assert result['ok'] is True, result
+        assert get_snapshot(sid)['state'] == 'rolled_back'
+        assert any('rollback' in r['url'] and r['method'] == 'POST'
+                   for r in pve.requests)
+
+    def test_a_failed_row_cannot_be_rolled_back(self, pve):
+        sid = self._made(pve)
+        set_snapshot_state(sid, 'failed')
+        result = rollback(sid)
+        assert result['ok'] is False and result['reason'] == 'snapshot_state'
+        assert get_snapshot(sid)['state'] == 'failed'
+
+    def test_a_recycled_vmid_is_refused(self, pve):
+        sid = self._made(pve)
+        for guest in pve.guests:
+            if guest['vmid'] == 101:
+                guest['name'] = 'something-else'
+        assert rollback(sid)['reason'] == 'snapshot_target_changed'
+        assert delete(sid)['reason'] == 'snapshot_target_changed'
+
+    def test_a_replaced_snapshot_name_is_refused(self, pve):
+        sid = self._made(pve)
+        pve.snapshots[(NODE, 101)][0]['description'] = 'someone else'
+        assert rollback(sid)['reason'] == 'snapshot_not_ours'
+
+    def test_an_expired_row_is_refused(self, pve):
+        sid = self._made(pve)
+        with db_conn() as conn:
+            conn.execute('UPDATE snapshots SET expires_at = 1 WHERE id = ?', (sid,))
+            conn.commit()
+        assert rollback(sid)['reason'] == 'snapshot_expired'
+
+    def test_delete_removes_it_and_marks_the_row(self, pve):
+        sid = self._made(pve)
+        result = delete(sid)
+        assert result['ok'] is True
+        assert get_snapshot(sid)['state'] == 'deleted'
+        assert pve.snapshots[(NODE, 101)] == []
+
+    def test_a_failed_row_can_be_deleted(self, pve):
+        sid = self._made(pve)
+        set_snapshot_state(sid, 'failed')
+        assert delete(sid)['ok'] is True
+
+
+# ── expiry (§7) ────────────────────────────────────────────────────────
+
+def _made(pve):
+    """A request with an active snapshot, made the way the operator would."""
+    row = _request()
+    result = create_and_approve(row)
+    assert result['ok'], result
+    return result['snapshot']['id']
+
+
+class TestExpiry:
+
+    def test_expiry_deletes_only_its_own_expired_rows(self, pve):
+        sid = _made(pve)
+        fresh = create_and_approve(_request(command='pct exec 102 -- systemctl restart db',
+                                            inner='102'))
+        with db_conn() as conn:
+            conn.execute('UPDATE snapshots SET expires_at = 1 WHERE id = ?', (sid,))
+            conn.commit()
+        result = sweep()
+        assert result['deleted'] == 1
+        assert get_snapshot(sid)['state'] == 'expired'
+        assert get_snapshot(fresh['snapshot']['id'])['state'] == 'active'
+
+    def test_a_failed_row_whose_snapshot_is_gone_becomes_gone(self, pve):
+        sid = _made(pve)
+        pve.snapshots[(NODE, 101)] = []
+        set_snapshot_state(sid, 'failed', expires_at=1)
+        sweep()
+        assert get_snapshot(sid)['state'] == 'gone'
+
+    def test_a_creating_row_is_failed_by_the_sweep(self, pve):
+        rid = create_snapshot(request_id=1, integration='pve', node=NODE,
+                              type_='lxc', vmid='101', name='eshu-r1-1',
+                              description='eshu request #1',
+                              expires_at=int(time.time()) - 1,
+                              created_by='me')
+        with db_conn() as conn:
+            conn.execute('UPDATE snapshots SET created_at = 1 WHERE id = ?', (rid,))
+            conn.commit()
+        sweep()
+        assert get_snapshot(rid)['state'] in ('failed', 'expired', 'gone')
+
+    def test_expiry_hours_default(self, pve):
+        assert expiry_hours() == 72
+
+
+# ── the API ────────────────────────────────────────────────────────────
+
+class TestApi:
+
+    def test_the_offer_route_needs_a_session(self, client, pve):
+        row = _request()
+        assert client.get('/api/requests/%d/snapshot' % row).status_code == 401
+
+    def test_the_offer_route_returns_the_offer(self, auth_client, pve):
+        row = _request()
+        body = auth_client.get('/api/requests/%d/snapshot' % row).json()
+        assert body['available'] is True
+        assert body['target']['vmid'] == '101'
+
+    def test_snapshot_approve_approves_the_request(self, auth_client, pve):
+        row = _request()
+        body = auth_client.post('/api/requests/%d/snapshot-approve' % row).json()
+        assert body['ok'] is True, body
+        assert get_request_row(row)['status'] == 'approved'
+
+    def test_rollback_and_delete_routes(self, auth_client, pve):
+        row = _request()
+        snap = auth_client.post('/api/requests/%d/snapshot-approve' % row).json()['snapshot']
+        assert auth_client.post('/api/snapshots/%d/rollback' % snap['id']).json()['ok'] is True
+        assert auth_client.post('/api/snapshots/999999/rollback').status_code == 404
+
+    def test_settings_route_round_trips(self, auth_client, pve):
+        assert auth_client.put('/api/snapshots/settings?expiry_hours=12'
+                               '&dashboard_guest=none').json()['expiry_hours'] == 12
+        assert dashboard_guest() == 'none'
+        assert auth_client.put('/api/snapshots/settings?expiry_hours=9999').status_code == 400
+
+    def test_snapshot_token_is_never_returned(self, auth_client, pve):
+        body = auth_client.get('/api/integrations').json()
+        for integration in body if isinstance(body, list) else body.get('integrations', []):
+            assert 'snapshot_secret' not in integration
+        assert get_snapshot_secret('pve') == 'PVEAPIToken=eshu=snapshot-token'

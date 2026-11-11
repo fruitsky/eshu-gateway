@@ -279,6 +279,10 @@ def _register_tools(inst, integration, namespaced: bool) -> list:
         web_fetch_tools = inst._web_fetch_tools
     registered = []
     for tool in get_enabled_tools(integration['id']):
+        # F21: an internal tool exists for dashboard code only, so it is never
+        # registered on any MCP surface — an agent cannot see a name to try.
+        if tool.get('internal'):
+            continue
         mcp_name = f"{ns}_{tool['name']}" if namespaced else tool['name']
         try:
             fn = _build_tool_fn(integration['name'], tool)

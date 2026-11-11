@@ -380,6 +380,10 @@ def on_startup():
     # one interval first, so a boot never fires source calls while starting.
     from core.inventory import start_inventory_loop
     start_inventory_loop()
+    # F21: the snapshot journal's expiry job (own expired snapshots only,
+    # re-checked before every delete).
+    from core.snapshots import start_expiry_job
+    start_expiry_job()
     # Start background gap scanner (learning suggestions)
     from core.learning import refresh_gaps, _gaps_loop
     refresh_gaps()
@@ -1093,8 +1097,130 @@ def request_context(request_id: int, request: Request):
     data = build_context(request_id)
     if not data:
         raise HTTPException(status_code=404, detail="Request not found")
+    # F21: the sidebar is where the operator decides, so the snapshot offer
+    # (or the reason there is none) travels with the context. It is computed
+    # on demand, like the rest of this payload, and never in the 3 s poll.
+    try:
+        from core.snapshots import offer_for_request
+        data['snapshot'] = offer_for_request(request_id)
+    except Exception:  # noqa: BLE001 — the context must not fail on a probe
+        data['snapshot'] = None
     return data
 
+
+
+# ── F21: snapshot before approve ──────────────────────────────────────
+
+class SnapshotApprovePayload(BaseModel):
+    pass
+
+
+@app.get("/api/requests/{request_id}/snapshot")
+def request_snapshot_offer(request_id: int, request: Request):
+    """The offer for one pending request: available or the reason, plus the
+    snapshots the request already has."""
+    _check_session(request)
+    from core.snapshots import offer_for_request
+    data = offer_for_request(request_id)
+    if data is None:
+        raise HTTPException(status_code=404, detail="Request not found")
+    return data
+
+
+@app.post("/api/requests/{request_id}/snapshot-approve")
+def request_snapshot_approve(request_id: int, request: Request):
+    """Snapshot, then run. A failed snapshot approves nothing."""
+    _check_session(request)
+    from core.snapshots import create_and_approve
+    result = create_and_approve(request_id)
+    if not result.get('ok') and result.get('reason') == 'not_found':
+        raise HTTPException(status_code=404, detail="Request not found")
+    return result
+
+
+@app.post("/api/snapshots/{snapshot_id}/rollback")
+def snapshot_rollback(snapshot_id: int, request: Request):
+    _check_session(request)
+    from core.snapshots import rollback
+    result = rollback(snapshot_id)
+    if result.get('reason') == 'not_found':
+        raise HTTPException(status_code=404, detail="Snapshot not found")
+    return result
+
+
+@app.post("/api/snapshots/{snapshot_id}/delete")
+def snapshot_delete(snapshot_id: int, request: Request):
+    _check_session(request)
+    from core.snapshots import delete
+    result = delete(snapshot_id)
+    if result.get('reason') == 'not_found':
+        raise HTTPException(status_code=404, detail="Snapshot not found")
+    return result
+
+
+@app.get("/api/snapshots/settings")
+def snapshot_settings(request: Request):
+    _check_session(request)
+    from core.snapshots import dashboard_guest, expiry_hours, poll_timeout
+    return {'expiry_hours': expiry_hours(), 'poll_timeout_s': poll_timeout(),
+            'dashboard_guest': dashboard_guest()}
+
+
+@app.put("/api/snapshots/settings")
+def snapshot_settings_update(request: Request,
+                             expiry_hours: int = None,
+                             poll_timeout_s: int = None,
+                             dashboard_guest: str = None):
+    _check_session(request)
+    from core.snapshots import (MAX_EXPIRY_HOURS, MAX_POLL_TIMEOUT,
+                                set_dashboard_guest)
+    from db.misc import set_meta_json
+    if expiry_hours is not None:
+        if not 1 <= int(expiry_hours) <= MAX_EXPIRY_HOURS:
+            raise HTTPException(status_code=400, detail="expiry_hours out of range")
+        set_meta_json('snapshot_expiry_hours', int(expiry_hours))
+    if poll_timeout_s is not None:
+        if not 30 <= int(poll_timeout_s) <= MAX_POLL_TIMEOUT:
+            raise HTTPException(status_code=400, detail="poll_timeout_s out of range")
+        set_meta_json('snapshot_poll_timeout_s', int(poll_timeout_s))
+    if dashboard_guest is not None:
+        set_dashboard_guest(dashboard_guest)
+    record_audit_event('snapshot_settings', details='Snapshot settings updated')
+    return snapshot_settings(request)
+
+
+@app.post("/api/integrations/{name}/snapshot-token")
+def set_snapshot_token(name: str, payload: dict, request: Request):
+    """Store the second Proxmox token (AM2). Masked like every other secret."""
+    _check_session(request)
+    from db.integrations import get_integration, set_snapshot_secret
+    integration = get_integration(name)
+    if not integration:
+        raise HTTPException(status_code=404, detail="Integration not found")
+    token = str((payload or {}).get('token') or '')[:4000]
+    set_snapshot_secret(name, token)
+    record_audit_event('snapshot_token_set', details=f"Snapshot token set on '{name}'")
+    return {'status': 'ok', 'configured': bool(token)}
+
+
+@app.get("/api/hosts/{ip}/proxmox-bindings")
+def get_proxmox_bindings(ip: str, request: Request):
+    _check_session(request)
+    from db.gateways import get_gateway_proxmox_bindings
+    return get_gateway_proxmox_bindings(ip)
+
+
+@app.put("/api/hosts/{ip}/proxmox-bindings")
+def put_proxmox_bindings(ip: str, payload: dict, request: Request):
+    _check_session(request)
+    from db.gateways import set_gateway_proxmox_bindings
+    node = str((payload or {}).get('proxmox_node') or '')[:80]
+    guest = str((payload or {}).get('proxmox_guest') or '')[:80]
+    if not set_gateway_proxmox_bindings(ip, node, guest):
+        raise HTTPException(status_code=404, detail="Gateway not found")
+    record_audit_event('snapshot_bindings', ip,
+                       details=f'Proxmox bindings: node={node or "-"} guest={guest or "-"}')
+    return {'status': 'ok', 'proxmox_node': node, 'proxmox_guest': guest}
 
 @app.get("/api/requests/{request_id}/output")
 def request_output(request_id: int, request: Request):
@@ -4273,6 +4399,17 @@ def approve_integration_call(call_id: int, request: Request):
     tool = get_tool(call['integration'], call['tool'])
     if not integration or not tool:
         raise HTTPException(status_code=404, detail="Integration or tool missing")
+    # F21: a row queued before internal tools existed is refused here too, at
+    # execution time — the flag is read from the tool table, not from the row.
+    if tool.get('internal'):
+        set_pending_call_status(call_id, 'denied', '')
+        record_audit_event(
+            'internal_tool_refused', call['integration'],
+            details=f"Pending call #{call_id} ({call['integration']}.{call['tool']}) "
+                    f"refused at execution: internal tool",
+            actor='operator')
+        return {"status": "denied", "id": call_id,
+                "reason": "This tool is reserved for dashboard code."}
     payload = call['payload']
     decided_at = int(time.time())
 
