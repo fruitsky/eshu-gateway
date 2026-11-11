@@ -9763,6 +9763,19 @@ cluster.
   through `get_snapshot_secret`. Then no future serialisation of an
   integration dict can carry it.
 
+**Code round 2 (feature reviewer, 2026-11-11, at `239dc84`): approved; to the security reviewer for the code.**
+
+AS1–AS6 are in as asked:
+* an unnormalisable path is refused for every state-changing method, before
+  the subtree test;
+* both freeze kinds are checked before resolving and again before the
+  approve;
+* one `approve_pending_request()` is shared by both buttons;
+* the `creating|active` check is inside the lock;
+* every task poll uses the snapshot token, and the fake now refuses
+  another token's task read;
+* `snapshot_secret` is popped everywhere.
+
 
 ---
 
