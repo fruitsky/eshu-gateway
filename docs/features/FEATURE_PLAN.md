@@ -8927,6 +8927,23 @@ the operator rolls back the wrong machine.
 The offer card says **which source matched** — "the guest's `net0` says
 192.0.2.10" or "operator binding: pve/103" — so the operator can see why.
 
+**2.2a Every write must be covered (AO1).** F7 records **one** inner target,
+but a compound command can write on the node as well, or into a second guest.
+The card would still say *Snapshot, then run* and the operator would believe
+the whole change can be undone. So the offer is shown only when every
+`write`/`unknown` step of the `breakdown` is covered:
+
+* **case A:** every such step is inside the same single inner target — F1's
+  `inner_targets` list has exactly one entry, it equals the resolved guest's
+  vmid, and every write step carries it in its `context` (a step with no
+  wrapper is on the node and is *not* covered);
+* **case B:** no inner target at all and the whole command runs on the
+  gateway guest.
+
+Otherwise the offer is refused with `snapshot_target_partial`, and the card
+lists the steps the snapshot would **not** cover (host, and the step's text),
+so the operator can split the request instead of trusting a partial undo.
+
 **2.3 The type and status.** The `get_cluster_resources` row for
 `(node, vmid)` gives `type` (`qemu`/`lxc`) and `status`. The type comes from
 the API row, never from the command word (`pct` vs `qm` is a hint, not a
@@ -8934,15 +8951,23 @@ fact). A guest the inventory knows but the cluster does not →
 `snapshot_target_gone`. A guest that is not running gets the offer with a
 note: the snapshot restores its disks only.
 
-**2.4 Never the dashboard's own guest (AM4).** Rolling back the guest that
-runs the dashboard reverts Eshu's database: the audit rows written since the
-snapshot disappear — including the rollback's own row — and approvals, plan
-state and the nonce store reset. The offer is refused for it
-(`snapshot_target_self`). "Which guest is that" comes from an operator
-setting (`dashboard_guest` = node/vmid) and, failing that, from the
-dashboard host's own interface addresses matched against guest configuration
-as in §2.2. If neither can say, the offer is shown (the setting is what makes
-the check exact), but the card carries a warning line naming the risk.
+**2.4 Never the dashboard's own guest (AM4, AO2).** Rolling back the guest
+that runs the dashboard reverts Eshu's database: the audit rows written since
+the snapshot disappear — including the rollback's own row — and approvals,
+plan state and the nonce store reset. "Which guest is that" comes from an
+operator setting (`dashboard_guest` = node/vmid, or the explicit value
+`not on this cluster`) and, failing that, from the dashboard host's own
+interface addresses matched against guest configuration as in §2.2.
+
+* the resolved guest is that guest → `snapshot_target_self`;
+* neither source can say → **`snapshot_dashboard_guest_unknown`, and no
+  offer** (AO2). With DHCP this is the usual case, and a warning line is
+  exactly what an operator clicks past during an incident — the cost of
+  getting it wrong is the audit trail, so the offer waits until the setting
+  exists. The refusal names the setting;
+* the setting is checked again **at rollback time**, not only at offer time:
+  a dashboard guest set after the snapshot was made is refused
+  (`snapshot_target_self`) by §6's re-check, which gains this step.
 
 **2.5 The identity is frozen.** `node`, `type`, `vmid` and the guest's
 `name`/`ips` are copied onto the snapshot row at creation. Every later action
@@ -8952,9 +8977,11 @@ A Proxmox host command with no inner target (e.g. `pvesm status` on the node)
 gets **no** offer: a snapshot would not cover it.
 
 Reason codes: `snapshot_target_none`, `snapshot_target_ambiguous`,
-`snapshot_target_gone`, `snapshot_target_self`, `snapshot_unavailable` (no
-snapshot token or tools, or the privilege probe failed). The card shows the
-reason instead of the button.
+`snapshot_target_gone`, `snapshot_target_self`,
+`snapshot_dashboard_guest_unknown`, `snapshot_target_partial`,
+`snapshot_unavailable` (no snapshot token or tools, or the privilege probe
+failed). The card shows the reason instead of the button, and for a partial
+one the steps the snapshot would not cover.
 
 #### 3. The Proxmox API calls, exactly
 
@@ -9111,6 +9138,8 @@ acting. The re-check, in this order, all from the stored row:
 
 1. the row's state is `active` for a rollback; `active` or `failed` for a
    delete (AM5);
+1a. the guest is still not the dashboard's own: §2.4 is re-run, including the
+   `dashboard_guest` setting as it stands **now** (AO2);
 2. the stored node/type/vmid still resolve to a Proxmox guest **whose
    inventory row still matches**: same `vmid`, and the same `name`/`ips`
    recorded at creation. A recycled vmid — a guest deleted and another created
@@ -9189,6 +9218,36 @@ The reviewer accepted the recommendation, so this is the decision of record:
 * Tests: both kinds of freeze — the operator's and the tripwire's — allow a
   rollback, refuse a create, and let a delete and the expiry run through.
 
+#### 8a. Carried into the code round (AO3 and the sentinel test)
+
+The reviewer accepted the design and put four items in the code round:
+
+* **AO3 — where the path guard runs, and what it matches.**
+  * the guard matches the segment run `nodes/<x>/(qemu|lxc)/<x>/snapshot`
+    **anywhere** in the normalised path, not only directly after a leading
+    `api2/<segment>/`: a base URL behind a reverse proxy can carry its own
+    prefix in front of `api2`. §4.4's normalisation is unchanged; only the
+    anchoring moves.
+  * the guard lives in the **lowest** function every Proxmox HTTP request
+    passes through — below `execute_integration_call` and
+    `execute_generic_call` — so a future executor (probes, F22 checks, F23)
+    cannot miss it.
+  * with AM2's separate token this is the second layer, which is why it is a
+    *should*.
+* **The CIDR detail:** §2.2 compares only the **address** part of an `ip=`
+  value, so `ip=192.0.2.10/24` matches 192.0.2.10 and `ip=dhcp` never
+  matches anything.
+* **The sentinel test (AST, not grep).** In the dashboard package
+  `SNAPSHOT_INTERNAL` appears only in its definition and the one `is`
+  comparison in `core/integration_proxy.py`, and in `core/snapshots.py`; the
+  keyword `snapshot_internal=` is passed only from `snapshots.py`; and
+  `run_tool`, `execute_generic_call` and the pending-call executor do not
+  accept the parameter (their signatures are asserted). The sentinel's
+  placement in the proxy is accepted because it exists to make the permission
+  impossible to carry in data, not to keep dashboard code out.
+
+`bash scripts/verify.sh`: `2642 passed, 22 skipped, 7 warnings in 534.74s (0:08:54)` (docs only).
+
 #### 9. Storage and UI
 
 * Table `snapshots`: `id`, `request_id`, `plan_id` (nullable, for F22 later),
@@ -9217,7 +9276,13 @@ The reviewer accepted the recommendation, so this is the decision of record:
 
 * **The offer:** `pct exec 101` on a node gets it; a gateway whose IP is in a
   guest's own `net0`/`ipconfig0` gets it; the operator bindings work as
-  fallbacks. Each refusal has its reason code:
+  fallbacks. **AO1:** a command that writes in guest 101 *and* on the node,
+  and one that touches two guests, are refused with
+  `snapshot_target_partial` and the uncovered steps are named; a single guest
+  whose every write step carries its vmid is offered. **AO2:** with neither
+  the setting nor an address match, the offer is refused with
+  `snapshot_dashboard_guest_unknown`; setting `dashboard_guest` after the
+  snapshot makes the rollback refuse. Each refusal has its reason code:
   * no `cluster/status` row and no binding → `snapshot_target_none`;
   * the IP appears in two guests' configs, or two guests share the vmid →
     `snapshot_target_ambiguous`;
@@ -10017,7 +10082,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 14 | F14 | inventory | dashboard + MCP | Merged | `feat/f14-inventory` | Chunk H | |
 | 15 | F19 | unattended-limits | gateway + dashboard | Code approved by both reviewers on AF1/AF2 (security `67bec51`); feature reviewer checks AF1/AF2, then merge | `feat/f19-unattended-limits` | F4, F5, F12 | moved ahead of F21–F23: nearly done, and F22 needs it. AF3 goes on the next gateway branch |
 | 16 | F15 | probes | dashboard + MCP | Code round 1: changes requested AG1–AG7 (`56d86e3`); **AG1 to security** | `feat/f15-probes` | F4, F12, F14 | main line, not only local-model |
-| 17 | F21 | snapshot-approve | dashboard + Proxmox | Security re-read (`98fdb86`): §2/§4/§7 **approved for code** once **AO1** (offer only when the snapshot covers every write) and **AO2** (dashboard guest unknown → no offer) are folded; sentinel placement accepted with an AST test; AO3 should in code | `feat/f21-snapshot-approve` | F7, F14, F2 | feature reviewer checks AO1/AO2; then code, security reviews it |
+| 17 | F21 | snapshot-approve | dashboard + Proxmox | **Design round 2: AO1/AO2 folded** (offer only when every write is covered, `snapshot_target_partial`; unknown dashboard guest refuses) and AO3 + the AST sentinel test written into the code round; §2/§4/§7 approved for code at `98fdb86` | `feat/f21-snapshot-approve` | F7, F14, F2 | feature reviewer checks AO1/AO2; then code, security reviews it |
 | 18 | F23 | change-journal | dashboard | Ready | `feat/f23-change-journal` | F1, F5, F7, F14 | no security gate; can be coded while F21's design is with security |
 | 18a | X2 | runbooks-page | dashboard UI | Ready | `feat/x2-runbooks-page` | F13 | small; no security gate |
 | 19 | F22 | change-checks | dashboard + MCP | After F19 merges | `feat/f22-change-checks` | F3, F5, F12, F19 | + security sign-off (the unattended check; AG1's origin rule does not cover it) |
