@@ -131,9 +131,13 @@ def commands(name, params):
         # know) and one named container, not every command line on the host.
         fields = ('{{.State.Status}} {{.State.Running}} '
                   '{{.RestartCount}} {{.State.StartedAt}}')
+        # P1/AI1: the format is single-quoted exactly like the inspect one,
+        # and the tab is written as an escape the *shell* must not touch.
+        # Unquoted, the tab split the template into two words, so docker got
+        # `--format {{.Names}}` and `{{.Status}}` as a separate argument.
         return [{'label': 'ps',
-                 'command': ('docker ps -a --filter name=^%s$ '
-                             '--format {{.Names}}\t{{.Status}}' % value)},
+                 'command': ("docker ps -a --filter name=^%s$ "
+                             "--format '{{.Names}}\\t{{.Status}}'" % value)},
                 {'label': 'inspect',
                  'command': "docker inspect --format '%s' %s" % (fields, value)}]
     if name == 'disk_pressure':

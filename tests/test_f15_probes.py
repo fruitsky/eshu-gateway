@@ -408,6 +408,55 @@ def test_container_commands_are_narrow(gateway):
     assert cmds == ['pct status 101', 'pct config 101']
 
 
+def _backslash_t():
+    """One backslash and a `t` — written this way so no layer of quoting in
+    the test file can turn it into a tab or a doubled backslash."""
+    return chr(92) + 't'
+
+
+def test_the_two_docker_commands_are_exactly_these_strings(gateway):
+    """AI1: both `--format` values are single-quoted, so the shell passes the
+    template through unchanged. Unquoted, a backslash-t loses its backslash
+    to the shell and docker prints `t` instead of a tab."""
+    import shlex
+    from core.probes import commands, validate
+    params = validate('diagnose_container', {'host': gateway,
+                                             'container': 'db'})
+    cmds = [c['command'] for c in commands('diagnose_container', params)]
+    bt = _backslash_t()
+    assert cmds[0] == ("docker ps -a --filter name=^db$ --format "
+                       "'{{.Names}}" + bt + "{{.Status}}'")
+    assert cmds[1] == ("docker inspect --format '{{.State.Status}} "
+                       "{{.State.Running}} {{.RestartCount}} "
+                       "{{.State.StartedAt}}' db")
+    argv = shlex.split(cmds[0])
+    assert argv[argv.index('--format') + 1] == '{{.Names}}' + bt + '{{.Status}}'
+
+
+def test_the_ps_format_reaches_a_shell_unchanged(gateway, tmp_path):
+    """The bug AI1 fixes, shown the way it happened: run the command through
+    `sh` with a stub `docker` that reports the `--format` argument it got."""
+    import subprocess
+    from core.probes import commands, validate
+    params = validate('diagnose_container', {'host': gateway,
+                                             'container': 'db'})
+    ps = [c['command'] for c in commands('diagnose_container', params)][0]
+    bindir = tmp_path / 'bin'
+    bindir.mkdir()
+    stub = bindir / 'docker'
+    stub.write_text(
+        '#!/bin/sh\n'
+        'for a in "$@"; do case "$a" in *"{{.Names}}"*) fmt=$a ;; esac; done\n'
+        "printf '%s' \"$fmt\"\n")
+    stub.chmod(0o755)
+    proc = subprocess.run(['/bin/sh', '-c', ps],
+                          env={'PATH': str(bindir) + ':/usr/bin:/bin'},
+                          capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == '{{.Names}}' + _backslash_t() + '{{.Status}}', \
+        repr(proc.stdout)
+
+
 def test_the_formatted_inspect_parses():
     from core.probes import build_digest
     digest = build_digest('diagnose_container', {
