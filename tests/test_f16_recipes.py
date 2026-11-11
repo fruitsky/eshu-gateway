@@ -738,6 +738,34 @@ class TestApi:
         assert body['plan_id']
 
 
+class TestMcp:
+    def test_the_recipe_tools_are_registered(self, env):
+        from core.mcp_server import mcp
+        names = {tool.name for tool in asyncio.run(mcp.list_tools())}
+        for name in ('recipe_list', 'recipe_get', 'recipe_propose',
+                     'recipe_run', 'recipe_run_status', 'recipe_rollback'):
+            assert name in names, name
+
+    def test_propose_then_run(self, env, run_env):
+        from core.agent_context import reset_current_agent, set_current_agent
+        from core.mcp_server import recipe_propose_fn, recipe_run_fn
+        token = set_current_agent({'name': 'hermes'})
+        try:
+            out = json.loads(recipe_propose_fn()(doc()))
+            assert out['status'] == 'draft'
+            refused = json.loads(recipe_run_fn()('add_internal_fqdn', {
+                'fqdn': 'app.example.test', 'target_ip': '192.0.2.10',
+                'port': 443}, 's1'))
+            assert refused['error'] == 'recipe_not_approved'
+            recipe = get_recipe(name='add_internal_fqdn')
+            approve(recipe['id'], 1)
+            out = json.loads(recipe_run_fn()('add_internal_fqdn', {
+                'fqdn': 'app.example.test', 'target_ip': '192.0.2.10',
+                'port': 443}, 's1'))
+            assert out['plan_id']
+        finally:
+            reset_current_agent(token)
+
 
 # ── the reserved SSH row (V5's delivery side) ─────────────────────────
 

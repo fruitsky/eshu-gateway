@@ -1002,6 +1002,164 @@ mcp.add_tool(session_conclude_fn(), name="session_conclude", description=SESSION
 mcp.add_tool(find_runbooks_fn(), name="find_runbooks", description=FIND_RUNBOOKS_DESC)
 mcp.add_tool(similar_incidents_fn(), name="similar_incidents", description=SIMILAR_INCIDENTS_DESC)
 mcp.add_tool(get_runbook_fn(), name="get_runbook", description=GET_RUNBOOK_DESC)
+
+# ── F16: recipe tools ──────────────────────────────────────────────────
+
+RECIPE_LIST_DESC = (
+    "List the recipes Eshu knows: name, status (draft/approved/disabled), "
+    "current version and content hash, and who approved it. A recipe is an "
+    "operator-approved, parameterised procedure; only an approved version can "
+    "run."
+)
+
+RECIPE_GET_DESC = (
+    "Read one recipe: its status, its approved version and content hash, and "
+    "the full step document (parameters, preconditions, steps, checks and "
+    "undos). A draft cannot run."
+)
+
+
+def recipe_list_fn():
+    def _recipe_list() -> str:
+        from core.recipes import recipe_summary
+        from db.recipes import list_recipes
+        return json.dumps([recipe_summary(recipe) for recipe in list_recipes()])
+    return _recipe_list
+
+
+def recipe_get_fn():
+    def _recipe_get(name: str) -> str:
+        from core.recipes import recipe_summary
+        from db.recipes import get_recipe, get_version, list_versions
+        recipe = get_recipe(name=(name or '').strip())
+        if not recipe:
+            return json.dumps({'error': 'not_found',
+                               'message': 'No recipe with that name.'})
+        version = get_version(recipe['current_version_id']) \
+            if recipe.get('current_version_id') else None
+        out = recipe_summary(recipe)
+        out['document'] = version['document'] if version else {}
+        out['versions'] = [{'version': row['version'],
+                            'content_hash': row['content_hash'],
+                            'approved_at': row['approved_at'],
+                            'approved_by': row['approved_by']}
+                           for row in list_versions(recipe['id'])]
+        return json.dumps(out)
+    return _recipe_get
+
+
+RECIPE_PROPOSE_DESC = (
+    "Submit a recipe draft for operator review. The document is validated "
+    "(typed parameters, SSH template rules, the tool allowlist, checks, "
+    "undos); it is stored as a draft and can never run until the operator "
+    "approves that exact version. The operator approves; an agent cannot."
+)
+
+
+def recipe_propose_fn():
+    def _recipe_propose(recipe: dict) -> str:
+        from core.recipes import RecipeError, propose
+        from db.recipes import RecipeError as DbRecipeError
+        agent = current_agent_name()
+        try:
+            result = propose(recipe or {}, owner=agent, agent=agent)
+        except (RecipeError, DbRecipeError) as exc:
+            return json.dumps({'error': exc.code, 'message': exc.message})
+        return json.dumps({'status': 'draft',
+                           'recipe_id': result['recipe_id'],
+                           'version': result['version'],
+                           'content_hash': result['content_hash'],
+                           'message': ('Submitted for operator review. It cannot '
+                                       'run until the operator approves this '
+                                       'version.')})
+    return _recipe_propose
+
+
+RECIPE_RUN_DESC = (
+    "Run an approved recipe with typed parameters. The filled-in steps "
+    "(commands, tool calls, checks and undos) are written into one session "
+    "plan and returned; the operator approves that plan once and the engine "
+    "runs the steps in order. Check recipe_run_status for the result."
+)
+
+
+def recipe_run_fn():
+    def _recipe_run(name: str, parameters: dict = None,
+                    session_id: str = "") -> str:
+        from core.recipes import RecipeError, start_run
+        from core.tool_runner import resolve_session
+        from db.recipes import RecipeError as DbRecipeError
+        sid, _source = resolve_session((session_id or '')[:64])
+        try:
+            result = start_run((name or '').strip(), parameters or {},
+                               agent=current_agent_name(), session_id=sid)
+        except (RecipeError, DbRecipeError) as exc:
+            return json.dumps({'error': exc.code, 'message': exc.message})
+        return json.dumps(result)
+    return _recipe_run
+
+
+RECIPE_RUN_STATUS_DESC = (
+    "Check one recipe run: status, the failed step, and each step's state "
+    "(pending/running/ok/failed/skipped/already-present) with its check "
+    "result. Only the run's own agent can read it."
+)
+
+
+def recipe_run_status_fn():
+    def _recipe_run_status(run_id: int) -> str:
+        from core.recipes import preview_run
+        from db.recipes import get_run
+        run = get_run(int(run_id)) if str(run_id).lstrip('-').isdigit() else None
+        if not run:
+            return json.dumps({'error': 'not_found', 'message': 'No such run.'})
+        owner = (run.get('agent') or '').strip()
+        caller = current_agent_name()
+        if owner and caller and owner != caller:
+            return json.dumps({'error': 'not_found', 'message': 'No such run.'})
+        data = preview_run(run['id']) or {}
+        data['run'] = {'id': run['id'], 'status': run['status'],
+                       'failed_step': run.get('failed_step') or '',
+                       'plan_id': run.get('plan_id') or 0}
+        return json.dumps(data)
+    return _recipe_run_status
+
+
+RECIPE_ROLLBACK_DESC = (
+    "Propose the undo steps of a finished recipe run: only the steps that "
+    "created something, in reverse, as its own plan. The operator approves "
+    "that plan; the engine re-reads each object before deleting it and stops "
+    "if it changed."
+)
+
+
+def recipe_rollback_fn():
+    def _recipe_rollback(run_id: int) -> str:
+        from core.recipes import RecipeError, rollback
+        from db.recipes import RecipeError as DbRecipeError, get_run
+        run = get_run(int(run_id)) if str(run_id).lstrip('-').isdigit() else None
+        if not run:
+            return json.dumps({'error': 'not_found', 'message': 'No such run.'})
+        owner = (run.get('agent') or '').strip()
+        caller = current_agent_name()
+        if owner and caller and owner != caller:
+            return json.dumps({'error': 'not_found', 'message': 'No such run.'})
+        try:
+            result = rollback(run['id'], agent=caller,
+                              session_id=run.get('session_id') or '')
+        except (RecipeError, DbRecipeError) as exc:
+            return json.dumps({'error': exc.code, 'message': exc.message})
+        return json.dumps(result)
+    return _recipe_rollback
+
+
+mcp.add_tool(recipe_list_fn(), name="recipe_list", description=RECIPE_LIST_DESC)
+mcp.add_tool(recipe_get_fn(), name="recipe_get", description=RECIPE_GET_DESC)
+mcp.add_tool(recipe_propose_fn(), name="recipe_propose", description=RECIPE_PROPOSE_DESC)
+mcp.add_tool(recipe_run_fn(), name="recipe_run", description=RECIPE_RUN_DESC)
+mcp.add_tool(recipe_run_status_fn(), name="recipe_run_status", description=RECIPE_RUN_STATUS_DESC)
+mcp.add_tool(recipe_rollback_fn(), name="recipe_rollback", description=RECIPE_ROLLBACK_DESC)
+
 DIAGNOSE_DESC = (
     "Ask one question about one host and get a short structured digest back "
     "(state, errors, ports, disk) instead of raw logs. The host is a registered "
