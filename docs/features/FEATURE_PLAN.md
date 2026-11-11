@@ -9971,6 +9971,91 @@ not characters. Every failure is withheld, and `getline` is gone. Accepted.
 I accept that a symlink inside the tree pointing outside it is out of reach
 of a lexical preflight, as the note says. The agent can't create one.
 
+### Round 11 — AT1 and AT2 (design round)
+
+**Status: design text only — the code round is still not started.** Two
+must-fixes, both in the preflight/collector this note already describes.
+
+#### AT1 — an include may reach only what `ha_config_read` can already read
+
+AQ2's scope test was "the resolved target is `/homeassistant` or under it".
+That is wider than the read tool: `ha_config_list` and `ha_config_read` see
+`*.yaml` directly in `/homeassistant` and everything under
+`/homeassistant/packages`, and nothing else. So `esphome/*.yaml` —
+Wi-Fi passwords and API encryption keys as literals, kept out of HA's
+`secrets.yaml` and so out of AH2's redaction — and `custom_components/`
+and the other add-on folders were still includable, and `ha core check` can
+quote their literals in an error. The preflight now enforces the read
+tool's own scope, in two shapes:
+
+* **A file include** (`!include`): the decoded target, resolved the way HA
+  resolves it (relative to the directory of the file being written, then
+  `posixpath.normpath`, one trailing slash allowed for the directory form)
+  must have `/homeassistant` as its dirname, or `/homeassistant/packages`
+  or one of its descendants as its dirname. So `foo.yaml` (the config root)
+  and `packages/a/b.yaml` are accepted; `esphome/x.yaml`,
+  `custom_components/x.yaml` and `www/x.yaml` are refused.
+* **A directory include** (the argument of all four `!include_dir_list`,
+  `!include_dir_named`, `!include_dir_merge_list`,
+  `!include_dir_merge_named`): the same resolved path must be
+  `/homeassistant/packages` or below it. `/homeassistant` itself is
+  refused — the loaders recurse, so the root would walk every folder,
+  `esphome/` and `custom_components/` included — and so is every argument
+  that normalises to the root: `.`, `./`, the empty string, or a path whose
+  `..` segments come back to it. `packages` and `packages/sub` are
+  accepted, as is an absolute `/homeassistant/packages/sub`.
+
+The rest of AQ2 stands: for a file include the target ends in `.yaml` or
+`.yml` (case-sensitive); no path segment starts with `.` (so `.storage`,
+`.git` and `..` are out, tested after decoding); the basename is not
+`secrets.yaml` (AL4, kept). Directory includes are still exempt from the
+suffix test — a directory has no suffix — but not from the scope test.
+
+The refusals keep the two codes: `config_include_refused` for the scope and
+shape tests, `config_secret_include_refused` for `secrets.yaml`. The check
+stays lexical, in the dashboard's preflight; the script's `grep` is
+unchanged. A symlink inside the tree that points outside stays out of the
+preflight's reach, as accepted last round.
+
+**Tests:** `esphome/x.yaml` refused; `custom_components/x.yaml` refused;
+`!include_dir_named .` refused; `!include_dir_named /homeassistant`
+refused; `packages/a/b.yaml` accepted. The AQ2 set still behaves:
+`.storage/core.config_entries`, `../outside.yaml`, `/etc/eshu-key.yaml` and
+`packages/x.txt` refused; `packages/x.yaml` and `!include_dir_list packages`
+accepted; an `!include` of `secrets.yaml` refused with the old code.
+
+#### AT2 — CRLF in `secrets.yaml`
+
+The value collector splits the combined text on `\n`, so a file saved with
+CRLF endings (common when it is edited over the Samba add-on) leaves a `\r`
+at the end of every line. `add1()` trims only spaces and tabs, so the value
+stored is `token\r`, which never matches the output, where HA's loader
+gives `token`. One line, in the `BEGIN` block of the collector, after the
+`split` and **before** the block-scalar and key tests:
+
+```awk
+l = L[fi]
+sub(/\r$/, "", l)      # AT2: CRLF line ending
+```
+
+The same line goes at the top of `SECRETS_KEYS_SCRIPT`'s action, before
+`match`, so a CRLF file yields `token` in the key list rather than
+`token\r`. Exactly one `\r` is stripped, and only at the end of a line: a
+value that ends in `\r` in the middle of a line is left alone. The rest of
+the collector and the scripts are §Round 10's, unchanged; this note adds
+the one line to both places rather than re-pasting them.
+
+**Tests:** a `secrets.yaml` with CRLF endings — a plain value, a quoted
+value and a block scalar — is redacted; the keys script prints the keys
+without `\r`; the same file with LF endings behaves exactly as before.
+
+**What the security reviewer should read:** the scope predicate in the
+preflight (AT1) and the one `sub` line in each of the two places (AT2).
+Everything else is round 10's.
+
+`bash scripts/verify.sh`: `2331 passed, 7 warnings in 428.21s (0:07:08)` (docs
+only).
+
 ---
 
 ## Chunk F12 — SSH through Eshu over MCP (`ssh_exec`) · slug `ssh-exec` · dashboard (+ small gateway change)
@@ -16875,7 +16960,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 10 | F8 | test-traffic | dashboard | Merged | `feat/f8-test-traffic` | — | low priority |
 | 11 | F9 | ha-supervisor-read | dashboard | Merged | `feat/f9-ha-supervisor-read` | — | token is now a dedicated `eshu` HA admin user |
 | 12 | F10 | ha-supervisor-actions | dashboard | Ready (after F9) | `feat/f10-ha-supervisor-actions` | F9, F3, Chunk H | reviewer pass + security reviewer sign-off |
-| 13 | F11 | ha-config-files | dashboard | Security round 10 (`e28f498`): AQ1 approved; **AT1** (include targets limited to the read tool's scope) and **AT2** (CRLF in `secrets.yaml`) must — then the design is closed from security's side | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | feature reviewer checks AT1/AT2; then code, security reviews it |
+| 13 | F11 | ha-config-files | dashboard | Design round 11: **AT1** (an include reaches only top-level files or `packages/`; a directory include is `packages/` or below) and **AT2** (CRLF stripped from `secrets.yaml` lines) folded — security re-reads AT1/AT2, then the design is closed from their side | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | security re-reads AT1/AT2; then the code round |
 | 14 | F14 | inventory | dashboard + MCP | Merged | `feat/f14-inventory` | Chunk H | |
 | 15 | F19 | unattended-limits | gateway + dashboard | **Merged** 2026-11-11 (security sign-off `67bec51`; AF1/AF2 checked) | `feat/f19-unattended-limits` | F4, F5, F12 | AF3 goes on the next gateway branch |
 | 16 | F15 | probes | dashboard + MCP | **Merged** 2026-11-11 (AG1 security decision `eca8982`; AI1 fix merged) | `feat/f15-probes` | F4, F12, F14 | |
