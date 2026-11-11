@@ -9249,6 +9249,106 @@ and the decision is the security reviewer's.
     `//nodes/pve/lxc/101/snapshot/x/rollback`, and `%2F`- and
     case-variants are all refused for a non-GET.
 
+_(security reviewer)_
+
+**Security review (2026-11-11, at `5c48cd7`): approved as a design, on the
+condition that AK1, AK2 and AM1–AM5 are folded in. The three questions are
+answered below. After that I re-read only §2, §4 and §7.**
+
+I agree with AK1 and AK2 and add two points to them (AM1). The tool hiding
+in §4.1–§4.3, the re-check in §6 and the "only our own rows" rule are right.
+
+* **AM1 (must): AK1 and AK2, tightened.**
+  * **Methods.** Refuse every method except `GET` and `HEAD` on the
+    snapshot subtree, not only create, rollback and delete. The subtree also
+    holds the `PUT` that edits a snapshot's description, and §6 relies on
+    that description to recognise its own snapshots.
+  * **Format prefix.** Proxmox serves the same API under more than one
+    format prefix after `/api2/`, not only `json`. Match against the path
+    after `/api2/<any segment>/`, whether that part comes from the base URL
+    or from the path.
+  * **AK1's way through.** Make it a module-private sentinel object that
+    only `core/snapshots.py` holds, not a `bool`. Then no code that forwards
+    keyword arguments from stored data can set it.
+* **AM2 (must): a separate Proxmox token for snapshots.**
+  * The integration stores a second secret, `snapshot_token`. Only
+    `core/snapshots.py` uses it.
+  * Only that token gets `VM.Snapshot`, `VM.Snapshot.Rollback` and
+    `VM.Audit`. The token every agent-facing call uses stays read-only.
+  * The setup doc says so. The privilege probe reads `/access/permissions`
+    for the main token and warns on the integration page if that token
+    holds either snapshot privilege.
+  * With this in place, a bug in any of the §4 guards can't roll a guest
+    back, because the agent-facing token can't do it. The guards stay, as
+    the second layer.
+  * No `snapshot_token` means `snapshot_unavailable`.
+* **AM3 (must): the node and the guest come from sources nothing on the
+  network can steer.**
+  * **The node.** Today §2.1 matches the node by name against "any entity's
+    `name`/`fqdns` that claims [the gateway's] IP". DNS and DHCP-backed
+    entities can be changed by any host on the network. A wrong node means
+    the operator rolls back the wrong guest.
+    * **Fix:** the node is the `/cluster/status` entry whose `ip` equals
+      the gateway's `target_ip`. If there is none, use an operator-set
+      "Proxmox node" field on the gateway row. Never use a match by name.
+  * **Case B (the gateway is itself a guest).** IPs reported by the guest
+    agent are chosen by the guest. A guest that falsely claims the
+    gateway's IP gets the snapshot, and the real target runs with no
+    snapshot.
+    * **Fix:** match only on IPs from the guest's own config (LXC `net*`
+      `ip=`, or a qemu cloud-init `ipconfig*`), or on an operator-set
+      binding. The card says which source matched.
+* **AM4 (must): no offer for the guest that runs the dashboard.**
+  * Rolling that guest back reverts the dashboard's database. That removes
+    the audit rows written since the snapshot, including the rollback's own
+    row, and resets approvals and plan state.
+  * **Fix:** refuse the offer for the dashboard's own guest
+    (`snapshot_target_self`). Work out which guest that is from an
+    operator setting, and from the dashboard host's IPs matched against
+    guest config.
+  * A gateway guest's rollback also reverts its F12 nonce store. That is
+    safe only because a ticket expires long before any snapshot can be
+    rolled back. Say so in §6 and test that an old ticket is refused by its
+    expiry alone.
+* **AM5 (must): what happens to a `failed` row.**
+  * §5 says a timed-out snapshot is "left to the expiry job", but §7 only
+    reads `state='active'`. A snapshot that finished after the timeout would
+    then never be deleted and would fill the thin pool.
+    * **Fix:** give every row an `expires_at` when it is created. The expiry
+      job also handles `failed` rows past expiry: it runs the §6 re-check,
+      deletes the snapshot if it is found, and sets `expired`. If no
+      snapshot is found it sets `gone`.
+  * §6 step 1 lets a `failed` row be rolled back, even though its create
+    task was never seen to finish.
+    * **Fix:** only an `active` row can be rolled back. A `failed` row
+      offers **Delete** only.
+* **AM6 (should): smaller points.**
+  * Check the UPID's shape before polling: it must start with `UPID:<the
+    stored node>:`. Otherwise refuse.
+  * The confirm and the card say what a snapshot does not cover: bind
+    mounts, passthrough disks, and anything outside the guest.
+  * The startup sweep's `creating` → `failed` sets `expires_at` (AM5).
+
+**The three questions (§11).**
+
+1. **Freeze: the recommendation is accepted.** During a freeze:
+   * **Rollback is allowed.** The confirm names the freeze, the audit row
+     records it, and the card carries the F9 red line.
+   * **Create is refused.**
+   * **Delete and the expiry job keep running.**
+
+   This is acceptable because rollback has no agent path at all (§4, AM1,
+   AM2): the only caller is the operator's session, and a freeze is there to
+   stop agent-driven change. If F24's tripwire freezes the system because a
+   session looks compromised, that session is an agent session, so this
+   door is still closed to it. Test both kinds of freeze.
+2. **A timeout in mid-flight: accepted.** Never delete while the task may
+   still be running. With AM5, the expiry job deletes it later.
+3. **The path guard's scope: the whole subtree.** Every method except `GET`
+   and `HEAD` is refused unconditionally, under any format prefix (AM1).
+   `snapshot_list` stays readable to agents. It is a read and shows nothing
+   F14 doesn't already show.
+
 
 ---
 
@@ -9772,7 +9872,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 14 | F14 | inventory | dashboard + MCP | Merged | `feat/f14-inventory` | Chunk H | |
 | 15 | F19 | unattended-limits | gateway + dashboard | Code approved by both reviewers on AF1/AF2 (security `67bec51`); feature reviewer checks AF1/AF2, then merge | `feat/f19-unattended-limits` | F4, F5, F12 | moved ahead of F21–F23: nearly done, and F22 needs it. AF3 goes on the next gateway branch |
 | 16 | F15 | probes | dashboard + MCP | Code round 1: changes requested AG1–AG7 (`56d86e3`); **AG1 to security** | `feat/f15-probes` | F4, F12, F14 | main line, not only local-model |
-| 17 | F21 | snapshot-approve | dashboard + Proxmox | **Design note written (target resolution, the four internal tools on five paths, the sequence, the re-check, expiry, freeze answer)** | `feat/f21-snapshot-approve` | F7, F14, F2 | + security sign-off (new write path, destructive rollback) |
+| 17 | F21 | snapshot-approve | dashboard + Proxmox | Security review (`5c48cd7`): design approved on AK1/AK2 + **AM1–AM5 must** (methods and format prefixes, separate snapshot token, node/guest from trusted sources, no offer for the dashboard guest, `failed` rows); freeze recommendation accepted | `feat/f21-snapshot-approve` | F7, F14, F2 | security re-reads §2, §4, §7, then code |
 | 18 | F23 | change-journal | dashboard | Ready | `feat/f23-change-journal` | F1, F5, F7, F14 | no security gate; can be coded while F21's design is with security |
 | 18a | X2 | runbooks-page | dashboard UI | Ready | `feat/x2-runbooks-page` | F13 | small; no security gate |
 | 19 | F22 | change-checks | dashboard + MCP | After F19 merges | `feat/f22-change-checks` | F3, F5, F12, F19 | + security sign-off (the unattended check; AG1's origin rule does not cover it) |
