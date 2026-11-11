@@ -10653,6 +10653,95 @@ Three gaps would break the core promise, though.
     checked in the worker before each attempt, and leave `max_uses` as the
     claim-side limit only.
 
+_(security reviewer)_
+
+**Security review (2026-11-11, at `96159d0`): both §11 questions are
+accepted, on AR1–AR4 (must). AR5–AR7 are should-fixes. After the fold, the
+feature reviewer checks AR5–AR7, and I re-read §3 and §4.**
+
+**§11.1, the `check` origin: accepted, with conditions.** In `approval` mode
+a human approves the exact bytes before they run. A check meets that only
+because:
+* its bytes are shown on the plan card and can't change afterwards;
+* it is a read when proposed and again at run time;
+* the dashboard dispatches it, not the agent;
+* it runs once per approved attempt, under F19's limit.
+
+All of AG1's six conditions apply to `check` exactly as they do to `probe`:
+* only server code sets the origin;
+* agents can't edit the plan;
+* the claim checks the session owner;
+* nothing else moves;
+* it is tested with the real `receive_request`.
+
+AR1–AR4 close the gaps in that argument.
+
+**§11.2, the row shape: accepted.**
+* The row is `unattended=1` with the F19 limit.
+* Without `run_limits: v1`, the check is `not_run`, nothing is consumed and
+  no row is approved.
+* At the gateway, AF1 still applies: an unattended row whose limit is
+  missing or invalid is refused.
+
+* **AR1 (must): AN1's rule must also cover the item itself.**
+  * The `NOT EXISTS` clause compares `b.id < i.id`. So an item with
+    `max_uses > 1` can be claimed again, and its write run again, while its
+    own check is still open.
+  * **Fix:** use `b.id <= i.id`.
+  * **Test:** a two-use write item whose check is `running`. Its second
+    claim comes back pending.
+* **AR2 (must): say how the item's run is tied to its check in `approval`
+  mode.**
+  * Under `force_jit`, an agent-origin plan's items are not claimable (AG1).
+    So in `approval` mode the item's command arrives as an ordinary card,
+    and §2 doesn't say how its exit 0 is linked back to the plan item.
+  * Either:
+    * the link is made by server code when the card is created: same
+      session, host and exact bytes as an approved item that carries a
+      check. That card shows "a check will run after this" with the check's
+      bytes, so the human approving the write sees what follows it.
+  * Or:
+    * checks run in `approval` mode only after items claimed from a
+      server-origin plan, and the note says so.
+  * Either way, nothing the agent sends can create the link.
+* **AR3 (must): the check item matches exact bytes on an exact host.**
+  * The claim of a check-origin item compares the whole command for
+    equality on the one host. There is no pattern, prefix or `*` matching,
+    whatever F3 allows for agent items.
+  * The check plan has exactly one item, and it is closed to `add`, `edit`
+    and `remove` through every agent path.
+* **AR4 (must): re-check the agent's standing at run time.**
+  * Before every attempt, the worker confirms that the plan's agent is still
+    enabled, its token is not revoked, and its mode is re-derived from its
+    own policy.
+  * If not, the check is `not_run` with `check_agent_inactive`, and the
+    plan stops.
+  * A freeze from the F24 tripwire that names this agent or its session has
+    the same effect. Ordinary reads during an operator freeze still run,
+    as §10 says.
+* **AR5 (should): don't wrap the command.**
+  * If "the check's own `timeout`" means running `timeout 30 <cmd>`, the
+    bytes that run are not the bytes approved and parsed.
+  * Set the row's `run_limit` seconds to `min(30, default)` instead, and run
+    the approved bytes unchanged.
+* **AR6 (should): the agent can race the worker for the check plan's uses.**
+  It can send the same bytes in the same session. It gains nothing it was
+  not approved for (its own run is also a limited unattended row), but it
+  can force `check_unclaimed`.
+  * If the plumbing allows, bind the claim to the worker's attempt: the
+    attempt's `check_token` travels in the dashboard-built request.
+  * Otherwise, test that a raced use ends `not_run` / `check_unclaimed` and
+    that the plan stops.
+* **AR7 (should): the sentinel and the audit.**
+  * `CHECK_INTERNAL` gets the same AST test as F21's sentinel: it is
+    referenced only by its definition, its comparison and
+    `core/checks.py`.
+  * History shows a check plan as "approved via plan #P". It must not read
+    as a fresh human decision.
+* **Nit:** §7 says the check's "output itself is never stored". For an ssh
+  check, the F5 result row stores it like any request's output. That is
+  fine for an approved read, but correct the sentence.
+
 ---
 
 ## Chunk F23 — Change journal tied to alerts · slug `change-journal` · dashboard only
@@ -12383,7 +12472,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 18c | X3 | integrations-ui | dashboard UI | Requested 2026-11-12; design after F27 is signed off | `feat/x3-integrations-ui` | F27, F10 (P2) | operator walk-through first |
 | 18e | X5 | ui-test-round | dashboard UI | **Implemented** 2026-11-12: six test-round fixes; no endpoint, save path or policy changed | `fix/x5-ui-test-round` | — | six small fixes |
 | 18d | X4 | agents-page | dashboard UI | **Implemented** 2026-11-12: one Agents page (tokens, policy sections, web fetch, activity); Controls renamed Command policy; absent policy fields now keep their stored value | `feat/x4-agents-page` | `fix/agent-ssh-hosts` | rename Controls → Command policy |
-| 19 | F22 | change-checks | dashboard + MCP | **Design round 2: AN1–AN5 folded** — item ordering while a check is open, the check plan created approved (inheriting the parent), a bounded worker, the `run_limits` gate before the claim, `check_attempts` as the bound; to the security reviewer | `feat/f22-change-checks` | F3, F5, F12, F19 | + security sign-off (the unattended check; AG1's origin rule does not cover it) |
+| 19 | F22 | change-checks | dashboard + MCP | Security review (`96159d0`): `check` origin and unattended row shape **accepted** on **AR1–AR4 must** (own item blocked while its check is open, approval-mode link server-made, exact-bytes one-item check plan, agent standing re-checked); AR5–AR7 should | `feat/f22-change-checks` | F3, F5, F12, F19 | security re-reads §3/§4 after the fold |
 | 20 | F16 | recipes | dashboard + MCP | Design complete (security Round 4; feature reviewer Round 5 with AA1/AA2); code next after F22 | `feat/f16-recipes` | F3, F12, F13, F19 | main line; steps claim by request id; code comes back to security; auto_run comes back to security |
 | 21 | F24 | content-tripwire | dashboard | Design first | `feat/f24-content-tripwire` | F12, F14 | + security sign-off (retention) |
 | 22 | F25 | secrets-broker | gateway + dashboard | Design first | `feat/f25-secrets-broker` | F1, F12, F19; security Chunk 7 before deploy | + security sign-off; gateway bash line by line |
