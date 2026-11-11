@@ -10306,6 +10306,31 @@ and refuses a non-IP.
 
 Compat: read-only. No migration, no new table, no MCP tool.
 
+**Round 1 — AJ1 and AJ2 (2026-11-11).** Both folded in.
+
+* **AJ1.** A name now matches only as a whole label:
+  `(?<![A-Za-z0-9-])name(?![A-Za-z0-9-])`. The IP and vmid rule is unchanged
+  (`(?<![0-9.])…(?![0-9])`), so `192.0.2.10` still does not match
+  `192.0.2.100` and vmid `104` does not match `1040`. Tests: `pve` owns
+  `pve.example.net` and `pve:pve:104` and not `pve3` / `pve-backup` /
+  `pve-backup.example.net`; `web` does not own `webhook.example.net` but does
+  own `web.example.net`.
+* One thing the label rule alone does not fix, found while testing it: a
+  Pulse id is `<cluster>:<node>:<vmid>`, and the first segment is the cluster
+  prefix — usually literally `pve`. With the label rule, a host named `pve`
+  still owned every `pve:*` alert through that prefix, so `pve:pve3:104`
+  stayed on `pve`'s page. The id is now split on `:` and the first segment
+  dropped when there are three or more, so the node and vmid segments are
+  what match; `pve:pve:104` still belongs to `pve`, `pve:pve3:104` does not.
+  This is the same rule for the alert's own `id`, which in Pulse also carries
+  the resource id.
+* **AJ2.** `get_integrations()` without `include_secret`: the journal reads
+  `name` and `base_url` only, so the secret column is never loaded.
+* Round 2 tests: 33 in the file (four new), including an end-to-end case where
+  a guest named `web` sees its own alert and not `webhook`'s.
+
+`bash scripts/verify.sh`: `2798 passed, 22 skipped, 8 warnings in 591.62s (0:09:51)`.
+
 `bash scripts/verify.sh`: `2671 passed, 22 skipped, 7 warnings in 536.11s (0:08:56)`.
 
 

@@ -12,7 +12,8 @@ import pytest
 
 from core.change_journal import (
     ALERT_CACHE_TTL, AUDIT_CHANGE_EVENTS, CMD_CHARS, DEFAULT_DAYS, MAX_DAYS,
-    attach_ties, changes_for_host, clamp_days, host_identities, _alert_start,
+    _alert_parts, attach_ties, changes_for_host, clamp_days,
+    host_identities, _alert_start,
     _owned, reset_alert_cache,
 )
 from db.audit import record_audit_event
@@ -321,6 +322,42 @@ class TestAlertTieIn:
         assert _alert_start('not a date') == 0
 
 
+class TestFalseTies:
+
+    def test_f23_a_short_name_does_not_own_a_longer_one(self, monkeypatch):
+        """AJ1 end to end: a guest named `web` must not own `webhook`'s alert,
+        which is what made a false "+N min after" tie possible."""
+        replace_source_items('pve', [
+            {'kind': 'guest', 'key': '103', 'name': 'web', 'ips': [HOST],
+             'host': 'pve01', 'vmid': '103', 'extra': {}},
+        ])
+        _pulse(monkeypatch, [
+            _alert('sibling', _iso(NOW - 60), resource='webhook.example.net',
+                   resource_id='pve:pve01:200'),
+            _alert('own', _iso(NOW - 120), resource='web',
+                   resource_id='pve:pve01:103'),
+        ])
+        data = changes_for_host(HOST, days=7, now=NOW)
+        assert [a['id'] for a in data['alerts']] == ['own']
+
+    def test_f23_the_cluster_prefix_is_not_a_host_part(self):
+        # `pve:pve3:104` is pve3's alert, not the `pve` host's.
+        sibling = _alert('s', _iso(NOW), resource='pve3',
+                         resource_id='pve:pve3:104')
+        assert 'pve' not in _alert_parts(sibling)
+        assert 'pve3' in _alert_parts(sibling)
+        own = _alert('o', _iso(NOW), resource='pve', resource_id='pve:pve:104')
+        assert 'pve' in _alert_parts(own)
+
+    def test_f23_a_pve_write_on_pve3_is_not_shown_on_pve(self, monkeypatch):
+        create_integration('pve', 'https://%s:8006/api2/json' % HOST, 'token', 'x',
+                           kind='proxmox')
+        _pulse(monkeypatch, [])
+        # A call whose host is `pve3`: the same base URL, a different node column.
+        _call('pve', 'start_vm', 'POST', '/x', host='pve3')
+        assert changes_for_host(HOST, days=7, now=NOW)['changes'] == []
+
+
 class TestPulseAvailability:
 
     def test_f23_pulse_down_still_shows_changes(self, monkeypatch):
@@ -386,6 +423,24 @@ class TestArguments:
         assert _owned('https://192.0.2.100/api', keys) is False
         assert _owned('pve:pve01:103', keys) is True
         assert _owned('pve:pve01:1030', keys) is False
+
+    def test_f23_a_name_matches_only_as_a_whole_label(self):
+        # AJ1: `pve` owns a label of its own, not every name that starts with it.
+        pve = {'pve'}
+        assert _owned('pve3', pve) is False
+        assert _owned('pve-backup', pve) is False
+        assert _owned('pve-backup.example.net', pve) is False
+        assert _owned('pve.example.net', pve) is True
+        assert _owned('https://pve.example.net:8006/', pve) is True
+        assert _owned('pve:pve:104', pve) is True
+        assert _owned('node pve is online', pve) is True
+        web = {'web'}
+        assert _owned('webhook.example.net', web) is False
+        assert _owned('web.example.net', web) is True
+        # The IP and vmid rule is unchanged.
+        assert _owned('192.0.2.100', {'192.0.2.10'}) is False
+        assert _owned('1040', {'104'}) is False
+        assert _owned('qemu/104', {'104'}) is True
 
 
 class TestApi:

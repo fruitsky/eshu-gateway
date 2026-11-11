@@ -110,11 +110,16 @@ def host_identities(ip, items=None):
 
 
 def _key_pattern(key):
-    """A key matches on its own, not as part of a longer number or name.
+    """A key matches on its own, never as part of a longer number or name.
 
-    `192.0.2.10` must not match `192.0.2.100`, and vmid `104` must not match
-    `1040`; a name is a plain substring, because a name is usually a prefix of
-    an FQDN.
+    An IP and a vmid are bounded by digits and dots (`192.0.2.10` does not
+    match `192.0.2.100`, `104` does not match `1040`). A **name** is bounded
+    by the characters a hostname label can contain — `(?<![A-Za-z0-9-])name
+    (?![A-Za-z0-9-])` — so `pve` owns `pve.example.net` (a dot may follow)
+    and `pve:pve:104`, but not `pve3` or `pve-backup`, and `web` does not own
+    `webhook.example.net`. A plain substring match made every short name own
+    everything that started with it, which is how a false "+N min after" tie
+    was possible.
     """
     pattern = _OWNED_CACHE.get(key)
     if pattern is not None:
@@ -123,7 +128,8 @@ def _key_pattern(key):
     if _IPV4_RE.match(key) or key.isdigit():
         pattern = re.compile(r'(?<![0-9.])' + escaped + r'(?![0-9])')
     else:
-        pattern = re.compile(escaped)
+        pattern = re.compile(r'(?<![A-Za-z0-9-])' + escaped
+                             + r'(?![A-Za-z0-9-])')
     _OWNED_CACHE[key] = pattern
     return pattern
 
@@ -282,7 +288,9 @@ def integration_changes(ip, since, until, identities=None, conn=None):
             audits = [dict(r) for r in own.execute(_SQL_AUDIT, sql).fetchall()]
     # One integration lookup and at most one tool lookup per pair, not per
     # row: a busy host can have thousands of calls in a 30-day window.
-    integrations = {i['name']: i for i in get_integrations(include_secret=True)}
+    # AJ2: the journal needs only `name` and `base_url`, so it never asks
+    # for the secret column.
+    integrations = {i['name']: i for i in get_integrations()}
     tools = {}
     out = []
     for row in calls:
@@ -342,6 +350,32 @@ def integration_changes(ip, since, until, identities=None, conn=None):
 
 
 # ── source 3: Pulse alerts ──────────────────────────────────────────────
+
+def _alert_parts(row):
+    """The strings one alert may be matched on.
+
+    A monitoring id is `<cluster>:<node>:<vmid>` (Pulse), and the first
+    segment is the cluster or integration prefix — often literally `pve` —
+    never the host. It is dropped, so a host named `pve` does not own every
+    `pve:*` alert; the node and vmid segments stay, which is what makes
+    `pve:pve:104` belong to the host `pve`.
+    """
+    parts = []
+    for key in ('resourceId', 'id'):
+        text = str(row.get(key) or '')
+        if not text:
+            continue
+        bits = [b for b in text.split(':') if b]
+        if len(bits) >= 3:
+            bits = bits[1:]
+        parts.extend(bits)
+    for key in ('resourceName', 'node'):
+        text = str(row.get(key) or '')
+        if text:
+            parts.append(text)
+    return parts
+
+
 
 def _alert_start(value):
     """Pulse's `startTime` is ISO-8601 (`2026-08-02T12:07:00.622Z`). Accept an
@@ -406,9 +440,7 @@ def pulse_alerts(identities, since, until, now=None):
         start = _alert_start(row.get('startTime'))
         if not start or start < since or start > until:
             continue
-        identity = ' '.join(str(row.get(k) or '') for k in
-                            ('resourceId', 'resourceName', 'node', 'id'))
-        if not _owned(identity, identities):
+        if not any(_owned(part, identities) for part in _alert_parts(row)):
             continue
         out.append({
             'id': str(row.get('id') or ''),
