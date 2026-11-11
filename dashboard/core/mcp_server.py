@@ -600,11 +600,19 @@ def check_request_fn():
         # M2: say when a re-run is safe. The lockbox only holds the ticket
         # once the poller has consumed the row; re-running at `approved`
         # races that poll and files a second JIT request.
-        next_step = {
-            'pending': 'waiting for operator approval',
-            'approved': 'approved, delivering to the gateway — do not re-run yet',
-            'consumed': 'ready to re-run: call ssh_exec again with the same arguments',
-        }.get(status, '')
+        unattended = bool(row.get('unattended'))
+        if status == 'approved' and unattended:
+            # F19/Q2: nothing else will consume this row (the poller skips it),
+            # and the re-run claims it by id with its limit, so waiting for
+            # `consumed` would only spin to the deadline.
+            next_step = ('approved (unattended): re-run now — the re-run claims '
+                         'it by id with its run limit')
+        else:
+            next_step = {
+                'pending': 'waiting for operator approval',
+                'approved': 'approved, delivering to the gateway — do not re-run yet',
+                'consumed': 'ready to re-run: call ssh_exec again with the same arguments',
+            }.get(status, '')
         return json.dumps({
             'id': request_id,
             'kind': 'ssh',
@@ -613,6 +621,7 @@ def check_request_fn():
             'target_ip': row.get('target_ip') or '',
             'session_id': owner,
             'expires_at': expires_at,
+            'unattended': unattended,
             'next_step': next_step,
         })
     return _check_request

@@ -48,10 +48,17 @@ class GatewaySandbox:
     """A throwaway installation of the real gateway script."""
 
     def __init__(self, root: Path, target_ip: str = "10.0.0.1",
-                 script: Path = SCRIPT, stdbuf: bool = True):
+                 script: Path = SCRIPT, stdbuf: bool = True,
+                 timeout_version: str = "timeout (GNU coreutils) 9.4"):
         self.root = Path(root)
         self.target_ip = target_ip
         self.source_script = Path(script)
+        # F19/AD2: the host's `timeout` decides the run-limit capability. CI
+        # runners move between GNU coreutils, uutils and BusyBox, so the
+        # sandbox binds a stub whose --version the test chooses and whose
+        # behaviour is the real local timeout.
+        self.timeout_version = timeout_version
+        self._real_timeout = shutil.which("timeout") or "/usr/bin/timeout"
         # B1: a gateway whose userland has no stdbuf (BusyBox) falls back to
         # plain sed. The swap below is the only way to exercise that here,
         # because the system stdbuf is always on PATH.
@@ -83,6 +90,10 @@ class GatewaySandbox:
         self.claim_mode_file = self.root / "claim-mode"
         self.window_claim_file = self.root / "window-claim"
         self.exec_fail_file = self.root / "exec-fail"
+        # F19: when present, /api/request answers approved with this limit,
+        # and /api/ticket returns it beside the ticket.
+        self.approved_file = self.root / "unattended-approved"
+        self.limit_file = self.root / "run-limit.json"
         self.window_claim_file.write_text("200")
         self.ticket_file = self.run_dir / "eshu.tickets"
 
@@ -147,7 +158,15 @@ case "$url" in
       429) printf '{"error":"rate_limited"}\\n429\\n' ;;
       403) printf '{"detail":"Encoded payload blocked: the decoded command matched a blocklist pattern."}\\n403\\n' ;;
       fail) exit 7 ;;
-      *) printf '{"id":"000123"}\\n200\\n' ;;
+      *)
+        # F19: an unattended row comes back approved, with its limit.
+        if [ -f "__APPROVED__" ]; then
+          printf '{"id":"000123","request_id":123,"approved":true,"run_limit":%s}\\n200\\n' \
+            "$(cat "__LIMIT__" 2>/dev/null || echo '{}')"
+        else
+          printf '{"id":"000123"}\\n200\\n'
+        fi
+        ;;
     esac
     ;;
   */api/request_status/*)
@@ -168,12 +187,24 @@ case "$url" in
       null) printf '{"ticket":null}\\n' ;;
       mismatch) printf '{"ticket":"123|some other command"}\\n' ;;
       *)
-        # Mirror the real dashboard: the ticket is "<created_at>|<command>"
-        # for the command in the JIT request that just came through.
-        req_cmd=$(awk -F'\\t' '$2 ~ /\\/api\\/request$/ { data=$3 } END { print data }' "$LOG" \\
-          | python3 -c 'import base64,json,sys; print(base64.b64decode(json.load(sys.stdin)["encoded_command"]).decode())')
-        printf '%s' "$req_cmd" \\
-          | python3 -c 'import json,sys; print(json.dumps({"ticket": "123|" + sys.stdin.read()}, separators=(",", ":")))'
+        # Mirror the real dashboard: "<created_at>|<command>" for an unsigned
+        # caller, v2|ts|agent|session|cmd for a signed one (F12 M1), and the
+        # F19 limit beside the ticket for an unattended row.
+        req_json=$(awk -F'\t' '$2 ~ /\/api\/request$/ { data=$3 } END { print data }' "$LOG")
+        printf '%s' "$req_json" | python3 -c '
+import base64, json, os, sys
+doc = json.load(sys.stdin)
+cmd = base64.b64decode(doc["encoded_command"]).decode()
+agent = doc.get("agent") or ""
+session = doc.get("session_id") or ""
+ticket = ("v2|123|%s|%s|%s" % (agent, session, cmd)) if agent else ("123|" + cmd)
+out = {"ticket": ticket}
+limit_path = "__LIMIT__"
+if os.path.exists(limit_path):
+    out["unattended"] = True
+    with open(limit_path) as fh:
+        out["run_limit"] = json.load(fh)
+print(json.dumps(out, separators=(",", ":")))'
         ;;
     esac
     ;;
@@ -185,13 +216,25 @@ esac
                     .replace("__MODE__", str(self.request_mode_file))
                     .replace("__CLAIM__", str(self.claim_mode_file))
                     .replace("__WINDOW_CLAIM__", str(self.window_claim_file))
-                    .replace("__EXECFAIL__", str(self.exec_fail_file)))
+                    .replace("__EXECFAIL__", str(self.exec_fail_file))
+                    .replace("__APPROVED__", str(self.approved_file))
+                    .replace("__LIMIT__", str(self.limit_file)))
         self._executable(self.bin / "curl", curl)
 
         logger = '''#!/bin/bash
 printf '%s\\n' "$*" >> "__LOG__"
 '''.replace("__LOG__", str(self.logger_log))
         self._executable(self.bin / "logger", logger)
+
+        timeout = '''#!/bin/bash
+if [ "$1" = "--version" ]; then
+  printf '%s\\n' "__VERSION__"
+  exit 0
+fi
+exec "__REAL__" "$@"
+'''.replace("__VERSION__", self.timeout_version).replace(
+            "__REAL__", self._real_timeout)
+        self._executable(self.bin / "timeout", timeout)
 
     @staticmethod
     def _executable(path: Path, body: str):
@@ -308,6 +351,18 @@ printf '%s\\n' "$*" >> "__LOG__"
         return subprocess.Popen(
             ["bash", str(self.script)] + list(args or []), cwd=str(self.root),
             env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+    def unattended(self, limit: dict, on: bool = True):
+        """F19: answer /api/request with an approved unattended row."""
+        if on:
+            self.limit_file.write_text(json.dumps(limit))
+            self.approved_file.write_text("1")
+        else:
+            for path in (self.limit_file, self.approved_file):
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
 
     def zero_trust(self, on: bool):
         (self.etc / "eshu-zero-trust").write_text("1" if on else "")
@@ -1004,7 +1059,9 @@ def test_sec_chunk1_jit_request_body_is_well_formed(gw):
             payload = json.loads(raw)
             assert set(payload) == {
                 "target_ip", "encoded_command", "session_id", "execution_id",
-                "agent", "force_jit"}
+                "agent", "force_jit", "run_limits"}
+            # F19: '' or 'v1' — the capability this running script reports.
+            assert payload["run_limits"] in ("", "v1")
 
 
 def test_sec_chunk1_window_reject_body_is_well_formed(gw):

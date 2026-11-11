@@ -8711,9 +8711,951 @@ Dashboard (`tests/test_f19_limits.py`):
 
 `bash scripts/verify.sh`: `2331 passed, 7 warnings in 430.08s (0:07:10)` (docs-only; this branch is `feature-roadmap` + the note, so F12's new tests are not in it).
 
+### Round 2 — design after review round 1 (D1–D4, S1, L1–L8)
+
+This section is the design of record where it differs from §1–§6 above; the
+parts it does not repeat still stand. It folds the feature review (D1–D4, S1)
+and the security review (L1–L8) together, as the reviewers asked.
+
+#### 1. Scope: bounded by default (L1)
+
+The dashboard sends a `run_limit` for **every row it approves without a human
+approving that exact command** — not only `read-lane`. A new auto-approval
+path must go through one helper (`approve_unattended()` in `main.py`), which
+sets `requests.unattended = 1`; a test walks the auto-approval reasons and
+fails if an unattended row ends up without a limit.
+
+Named exemptions (unchanged behaviour, accepted risk): a JIT click, an F3 plan
+item, a session override and a host override. Each is a human decision about
+this run (or a run the operator deliberately allowed), and they may
+legitimately take a long time. The gateway-local paths (exact and regex
+allowlists, approved windows) never receive a limit and are unchanged.
+
+#### 2. Travel, stickiness and the capability (L2, L7)
+
+The field still travels in three responses, but two rules change:
+
+* **L7: the capability is per request, not only per gateway.** The gateway
+  sends `"run_limits":"v1"` in the `/api/request` body, and the dashboard
+  auto-approves an unattended row only when that request carries it. A
+  self-update or a rollback can change the script without re-registering, so
+  the stored `gateways.run_limits` column is for the card only — never the
+  decision.
+* **L2: once set, it stays.** `parse_run_limit` returns three results —
+  absent, valid, invalid — not 1/0. The first valid limit seen applies; a
+  later response that omits the field does not clear it; two different limits
+  combine with `min()` per field. The round-1 sketch split `"60 1048576"`
+  with `set -- $secs`, which never splits because the script sets `IFS` to
+  newline and tab; the triple is tab-separated and read with `read -r`.
+
+```bash
+RUN_LIMIT_SECS=""; RUN_LIMIT_BYTES=""; RUN_LIMIT_STATE="absent"   # absent|valid|invalid
+
+parse_run_limit() {   # $1 = JSON body. 0 = ok (absent or valid), 1 = invalid
+  local kind="" secs="" bytes="" triple
+  triple=$(printf '%s' "$1" | python3 -c '
+import json, sys
+doc = json.load(sys.stdin) or {}
+rl = doc.get("run_limit")
+if rl is None:
+    print("absent")
+elif not isinstance(rl, dict):
+    print("invalid")
+else:
+    s, b = rl.get("seconds"), rl.get("bytes")
+    if isinstance(s, bool) or isinstance(b, bool) or not isinstance(s, int) or not isinstance(b, int):
+        print("invalid")
+    else:
+        print("valid\t%d\t%d" % (s, b))
+' 2>/dev/null) || triple="invalid"
+  IFS=$'\t' read -r kind secs bytes <<< "$triple"
+  case "$kind" in
+    absent)
+      # L2: a later response without the field does not clear an earlier limit.
+      return 0 ;;
+    valid)
+      case "${secs}${bytes}" in ''|*[!0-9]*) RUN_LIMIT_STATE="invalid"; return 1 ;; esac
+      if [ "$secs" -lt 5 ] || [ "$secs" -gt 300 ] || \
+         [ "$bytes" -lt 65536 ] || [ "$bytes" -gt 8388608 ]; then
+        RUN_LIMIT_STATE="invalid"; return 1
+      fi
+      if [ "$RUN_LIMIT_STATE" = "valid" ]; then   # L2: the smaller one wins
+        [ "$secs" -lt "$RUN_LIMIT_SECS" ] && RUN_LIMIT_SECS="$secs"
+        [ "$bytes" -lt "$RUN_LIMIT_BYTES" ] && RUN_LIMIT_BYTES="$bytes"
+      else
+        RUN_LIMIT_SECS="$secs"; RUN_LIMIT_BYTES="$bytes"
+      fi
+      RUN_LIMIT_STATE="valid"; return 0 ;;
+    *) RUN_LIMIT_STATE="invalid"; return 1 ;;
+  esac
+}
+```
+
+A response with the field absent leaves the state as it was; a present but
+unusable value refuses the call (`[LOCKED] Invalid run_limit …`), because a
+half-applied bound is worse than no auto-run.
+
+#### 3. The gateway pipeline (D1, D2, D3, L4, L5, S1, L6)
+
+* **D1/L4: only MCP mode discards stdout.** The round-1 sketch sent the whole
+  group to `/dev/null`, so a direct-SSH agent would have seen nothing. The
+  redirect belongs on the `tee` of the MCP branch only.
+* **D3/L4: survive `set -e` and keep `PIPESTATUS`.** The pipeline runs with
+  errexit off, `_ps=("${PIPESTATUS[@]}")` is taken in the next statement, and
+  `rc=${_ps[0]}`. A `|| true` would clear `PIPESTATUS` and turn a 124 into 0.
+* **L5: cap the raw stream before `sanitize` too.** `sanitize` is `sed`, which
+  holds one line until it sees a newline; a newline-free pseudo-file would
+  grow its memory without limit. A `head -c $((bytes + 1))` sits before
+  `sanitize` as well as after it. **Decision on cut detection:** the marker
+  and `limit: bytes` are decided from the **visible** (post-`sanitize`)
+  stream, which is what the agent saw; the raw cap is a memory bound only and
+  is never written to disk unsanitized. Redaction can shorten a raw-cut
+  stream below the cap, in which case the agent did not see a cut and no
+  marker is shown — the bytes are still bounded, and this is recorded as an
+  accepted imprecision rather than writing secrets to a probe file.
+* **L6/S1: the time bound must cover the whole call.** GNU `timeout` (without
+  `--foreground`) signals the command's process group, so ordinary background
+  children die with it; only a child that calls `setsid` escapes. BusyBox
+  `timeout` signals only the direct child, so a grandchild holding the pipe
+  could hold the call — and its ticket — past the limit. **Decision:** GNU
+  `timeout` is part of the capability. The gateway reports
+  `run_limits: v1` only when `timeout --version` names GNU coreutils, and it
+  refuses a `run_limit` it receives without it (never a partial bound). The
+  BusyBox stub test asserts the refusal, not a best-effort run.
+* **D2 and the exit code.** A byte cut normally kills the writer with
+  SIGPIPE, so `_ps[0]` is `141`, not 0; report it. `limit: bytes` and the
+  marker say the output was cut, so the agent does not read 141 as the
+  command's own choice. `limit: time` is set only when `rc == 124` **and**
+  the elapsed time is at least the limit (a command may exit 124 by itself).
+  The `[ESHU exit=N]` sentinel and the envelope's `exit_code` keep the real
+  value.
+
+```bash
+cap_raw()     { if [ -n "$RUN_LIMIT_BYTES" ]; then head -c $((RUN_LIMIT_BYTES + 1)); else cat; fi; }
+cap_visible() { if [ -n "$RUN_LIMIT_BYTES" ]; then head -c $((RUN_LIMIT_BYTES + 1)); else cat; fi; }
+
+run_sanitized() {
+  local rc=0 ... run_argv=("$@")
+  if [ -n "$RUN_LIMIT_SECS" ]; then
+    # -k, not --kill-after: both timeouts understand it. GNU signals the group.
+    run_argv=(timeout -k 5 "$RUN_LIMIT_SECS" "${run_argv[@]}")
+  fi
+  set +e
+  if [ -n "$ESHU_OUT_FIFO" ] && [ -p "$ESHU_OUT_FIFO" ]; then
+    if [ "$ESHU_MCP" = "1" ]; then
+      "${run_argv[@]}" 2>&1 | cap_raw | sanitize | cap_visible \
+        | tee "$ESHU_OUT_FIFO" >/dev/null
+    else                                  # D1: the direct agent still sees it
+      "${run_argv[@]}" 2>&1 | cap_raw | sanitize | cap_visible \
+        | tee "$ESHU_OUT_FIFO"
+    fi
+    _ps=("${PIPESTATUS[@]}")
+    wait "$ESHU_TAIL_PID" 2>/dev/null || true
+  else
+    "${run_argv[@]}" 2>&1 | cap_raw | sanitize | cap_visible
+    _ps=("${PIPESTATUS[@]}")
+  fi
+  set -e
+  rc=${_ps[0]}                            # the command's (or timeout's) status
+}
+```
+
+The probe byte (`bytes + 1`) is how "cut" is told from "ended exactly at the
+cap": the visible cap writes one extra byte into the F5 capture, which is
+then checked with `stat` and trimmed to `bytes` before it is stored. The agent
+may therefore see one byte past the cap; the stored output never does. When
+capture is `off` the bytes are still bounded and the marker is omitted
+(nothing to inspect); MCP always captures to build the envelope, so an MCP
+run always reports it.
+
+#### 4. Every route that can run an unattended row carries its limit (D4, L3)
+
+The round-1 note's "a lockbox ticket has no limit by construction" was wrong:
+`update_ticket_consumed_by_ip` deposits any `approved` row, read-lane ones
+included, and a lockbox claim then runs before any `/api/request` response is
+read. Both halves are fixed:
+
+* **The poller never receives an unattended row.**
+  `update_ticket_consumed_by_ip` skips `unattended = 1` rows, so they can only
+  be claimed through `/api/ticket/{id}`, which carries the limit. A ticket
+  line stays `v2|ts|agent|session|cmd`: no new tag, no capability negotiation
+  for the line itself.
+* **MCP claims it in the same round trip.** When `/api/request` answers 200
+  with the row already `approved` (the read lane), the gateway claims
+  `/api/ticket/{id}`, reads `run_limit` beside the ticket, and runs bounded
+  immediately instead of returning `pending`. That also removes one case of
+  F12's M2 race.
+* **A direct retry after the 90 s wait** claims through `/api/ticket/{id}`
+  too, so it gets the limit from the same response.
+
+Tests, one per route: a lagging poller never sees the row in `/api/poll`; an
+MCP read-lane call runs bounded in one round trip; a direct retry gets the
+limit from the ticket response. The alternative (a lockbox line carrying the
+limit) needs a new tag and is rejected for that reason.
+
+#### 5. The settings endpoint (L8)
+
+`PUT /api/settings/run-limit` uses the ordinary operator session login and
+CSRF protection (the `_check_session` + `X-Eshu-CSRF` path every other
+settings write uses), records an audit row with the old and the new values,
+and is reachable by no MCP tool and no gateway token. The values live in the
+`run_limit` meta key; a missing or corrupt value falls back to 60 s / 1 MiB.
+The gateway keeps its own hard-coded range check, as §2 already says. Tests:
+no session → 401/403; a change writes an audit row with both values.
+
+#### 6. Tests (the Round-1 list, amended)
+
+* Gateway: a 5 s limit stops `sleep 10` with rc 124, the marker, and
+  `limit: time`; a 64 KiB limit on 2 MiB keeps exactly 65 536 bytes, sets
+  `limit: bytes` and `truncated: true`; a stream that ends exactly at the cap
+  is not marked cut; a byte cut reports the real `141`; a command that exits
+  124 on its own is not marked `limit: time`; a human-approved run is
+  unbounded; out-of-range or non-numeric values refuse the call and run
+  nothing; a limit without GNU `timeout` is refused (BusyBox stub); a capped
+  run and a failing command still produce the envelope, the F5 row and the
+  right exit code; a newline-free stream larger than the cap is cut at the
+  cap and `sed` never holds more.
+* Dashboard: a limit for every auto-approval reason (the generated test);
+  absent-then-present and present-then-absent across responses; two limits
+  combine to the smaller; corrupt values fall back or refuse; the settings
+  endpoint's auth and audit; an unattended row never appears in `/api/poll`;
+  a request without the per-request capability gets `read-lane-no-limits`
+  even when the stored column says v1.
+
+#### 7. What stays out of scope, and one accepted risk
+
+§5 stands. In addition: over a plain-HTTP `dashboard_url` a network attacker
+could drop `run_limit` from a response, but such an attacker can already forge
+an approval on that path; F19 is not protection against that, and the note
+says so rather than counting it.
+
+`bash scripts/verify.sh`: `2331 passed, 7 warnings in 429.22s (0:07:09)` (docs only; no code on this branch).
+
+### Round 3 — design after review round 2 (Q1–Q2)
+
+Round 2 is the design of record except for §3, which Q1 redraws, and §2/§4 for
+Q2. Both assume the CI fix (`fix/ci-environment`) is merged first: there is no
+FIFO and no second reader.
+
+#### Q1 — redrawn §3 on the new capture code
+
+`fix/ci-environment` replaced `tee` + FIFO + `wait` with one awk,
+`capture_tail "$ESHU_OUT_TAIL"`, under `set +e` with `PIPESTATUS[0]`. Two
+consequences for this note:
+
+* **`capture_tail` keeps the *last* 16 KiB, not the first**, and it appends a
+  newline when the stream has none (C4). It therefore cannot be the cut probe:
+  its size says "the output was at least 16 KiB", not "the cap was hit".
+* **The cut probe is its own file.** `cap_visible` tees the sanitized stream
+  into `ESHU_LIMIT_PROBE` (bounded by `bytes + 1`, in the 0700 run dir,
+  trap-removed); `stat -c '%s'` greater than `bytes` means cut. It holds
+  sanitized bytes only, so it is safe to write; it is never stored as a result.
+
+The probe byte means the agent may see one byte past the cap; the stored tail
+is F5's own 16 KiB and the probe is deleted at exit.
+
+```bash
+cap_raw()     { if [ -n "$RUN_LIMIT_BYTES" ]; then head -c $((RUN_LIMIT_BYTES + 1)); else cat; fi; }
+cap_visible() {
+  if [ -n "$RUN_LIMIT_BYTES" ]; then
+    head -c $((RUN_LIMIT_BYTES + 1)) | tee "$ESHU_LIMIT_PROBE"
+  else
+    cat
+  fi
+}
+
+run_sanitized() {
+  local rc=0 mode ... run_argv=("$@")
+  if [ -n "$RUN_LIMIT_SECS" ]; then
+    run_argv=(timeout -k 5 "$RUN_LIMIT_SECS" "${run_argv[@]}")
+  fi
+  ESHU_LIMIT_PROBE=""
+  if [ -n "$RUN_LIMIT_BYTES" ]; then
+    ESHU_LIMIT_PROBE=$(mktemp -p "$ESHU_RUN_DIR" eshu-limit.XXXXXX) || {
+      say "[LOCKED] The run limit cannot be enforced (no probe file) — refusing."
+      finish refused 1
+    }
+    trap 'rm -f "$ESHU_OUT_TAIL" "$ESHU_MCP_CAP" "$ESHU_LIMIT_PROBE"' EXIT
+  fi
+  set +e
+  if [ "$ESHU_MCP" = "1" ]; then
+    # Q1: the redirect belongs on the stage that feeds the envelope.
+    "${run_argv[@]}" 2>&1 | cap_raw | sanitize | cap_visible \
+      | tee "$ESHU_MCP_CAP" >/dev/null
+  elif [ "$mode" = "tail" ] && [ -n "$ESHU_OUT_TAIL" ]; then
+    "${run_argv[@]}" 2>&1 | cap_raw | sanitize | cap_visible \
+      | capture_tail "$ESHU_OUT_TAIL"      # F5: last 16 KiB, no FIFO
+  else
+    # Direct mode with capture off: the agent is the only consumer.
+    "${run_argv[@]}" 2>&1 | cap_raw | sanitize | cap_visible
+  fi
+  _ps=("${PIPESTATUS[@]}")
+  set -e
+  rc=${_ps[0]}
+  LIMIT_HIT=""
+  if [ -n "$ESHU_LIMIT_PROBE" ] && \
+     [ "$(stat -c '%s' "$ESHU_LIMIT_PROBE")" -gt "$RUN_LIMIT_BYTES" ]; then
+    LIMIT_HIT="bytes"
+  fi
+}
+```
+
+`_ps[0]` is the command's (or `timeout`'s) status; the direct `capture_tail`
+pipeline has the same `PIPESTATUS` shape as the CI fix, so `rc` never becomes
+the trimmer's. The MCP branch keeps F12's rule that the command's own output
+never reaches stdout; the envelope's `truncated` is still F12's 64 KiB rule,
+independent of the run cap.
+
+#### Q2 — `ssh_exec`'s wait loop and unattended rows
+
+An unattended row is never delivered by the poller (L3), so it is consumed
+only when the gateway claims `/api/ticket/{id}` — in the same round trip for
+an MCP call, and on a re-run otherwise. If that claim fails (a network blip),
+the row stays `approved` until it expires, so a `wait` loop that only watches
+for `consumed` would spin until the deadline.
+
+**Decision:** `check_request` says exactly what to do, and `wait` follows it:
+
+* an approved **unattended** row → `next_step = "approved (unattended):
+  re-run now"`; a `consumed` row → "ready to re-run" (as in F12 M2); a plain
+  approved row → "approved, delivering to the gateway — do not re-run yet";
+* `ssh_exec`'s `wait` re-runs at `consumed`, **or** at `approved` when the row
+  is unattended. That re-run claims by id and carries the `run_limit` in the
+  same response, so it cannot race the poller (the poller never receives the
+  row) and a failed claim simply leaves the row approved for the next try;
+* the row exposes `unattended` from the same `requests` row the dashboard
+  already reads (`get_request_row`), so the wait loop does not infer it from
+  the reason text.
+
+Test: a simulated claim failure (the row is `approved`, not `consumed`) makes
+`wait` re-run once with the limit instead of waiting out the deadline.
+
+`bash scripts/verify.sh`: `2331 passed, 7 warnings in 431.41s (0:07:11)` (docs only).
+
+### Round 4 — Q3 (round 3 review): the MCP capture is bounded
+
+Round 3's MCP branch finished in `tee "$ESHU_MCP_CAP" >/dev/null`, which has
+no cap when no `run_limit` is set — every human-approved MCP run. A large
+output would grow the file on `/run` without limit. Q3 replaces it with the
+same ring F12 now uses:
+
+```bash
+if [ "$ESHU_MCP" = "1" ]; then
+  "${run_argv[@]}" 2>&1 | cap_raw | sanitize | cap_visible \
+    | capture_tail "$ESHU_MCP_CAP" 65537 >/dev/null
+elif [ "$mode" = "tail" ] && [ -n "$ESHU_OUT_TAIL" ]; then
+  "${run_argv[@]}" 2>&1 | cap_raw | sanitize | cap_visible \
+    | capture_tail "$ESHU_OUT_TAIL"
+else
+  "${run_argv[@]}" 2>&1 | cap_raw | sanitize | cap_visible
+fi
+```
+
+`capture_tail` takes the byte cap as `$2` (F12/CI fix) and keeps the last
+`cap` bytes in a ring, so the envelope's 64 KiB rule still holds and a run
+with no `run_limit` cannot fill `/run`. The old `tee` was written by
+`cap_visible` into a file with no bound.
+
+Test, in the F19 suite: 2 MiB of MCP output with **no** `run_limit` leaves an
+`ESHU_MCP_CAP` of at most 65 537 bytes and an envelope of at most 64 KiB
+(the +1 byte is what tells "cut" from "exactly at the cap").
+
+**B4 correction.** The buffering fix (`fix/stream-unbuffered`) puts
+`stdbuf -oL` on `sanitize`, and F19's pipeline uses that `sanitize`
+unchanged. The review also expected mawk to get `-W interactive`; it does
+not, because that option makes mawk split records longer than 4096 bytes
+(measured: a 20 000-byte line becomes five records), which would corrupt the
+agent's stream. The F5 round-6 note records the measurement. F19's time
+limit stays the bound for unattended runs whatever the buffering does.
+
+`bash scripts/verify.sh`: `2331 passed, 7 warnings in 426.61s (0:07:06)` (docs only).
+
 ### Reviewer notes
 
-_(reviewer)_
+**Design round 1 (2026-11-09, main feature reviewer): changes requested.** The
+shape is right:
+* limits apply only to rows approved with nobody watching, keyed by the
+  dashboard's `reason`;
+* a present-but-unusable limit refuses the call;
+* a reported `run_limits: v1` capability, not a version string, gates
+  auto-run;
+* the probe byte tells "cut" apart from "ended exactly at the cap".
+
+Four pieces of the bash or the flow would misbehave:
+
+* **D1 In direct mode the agent would see nothing.** The capped pipeline
+  ends `| tee "$ESHU_OUT_FIFO"; } >/dev/null`, which throws away the stdout
+  the agent reads. `>/dev/null` belongs only to MCP mode (F12's rule). In
+  direct mode, tee must still write to stdout.
+* **D2 A byte cut reports 141, not 0.** When `head` closes after
+  `bytes+1`, the writer gets SIGPIPE, so `PIPESTATUS[0]` is `141` (or the
+  shell's status after `sanitize` dies). The note says the sentinel stays
+  "typically `[ESHU exit=0]`". Decide one rule and test it. My suggestion:
+  report the real `141`, add the `[ESHU limit: output cut …]` marker, and
+  set `limit: bytes`, so the agent knows the command did not finish on its
+  own.
+* **D3 `set -e` aborts the script.** The new pipeline has no `||` guard.
+  Under `set -eo pipefail`, a non-zero pipeline (124 or 141) exits the
+  gateway before the marker, `post_exec_result` or the envelope. Use
+  `set +e; …pipeline…; _ps=("${PIPESTATUS[@]}"); set -e`, then read
+  `_ps[0]`. A `|| true` would overwrite `PIPESTATUS`. Add a test that the
+  marker and the F5 row appear after a time stop and after a byte cut.
+* **D4 The lockbox path runs unattended rows unbounded.** §2 says a
+  lockbox ticket "has no limit by construction: those rows were approved by
+  a human". That is not true. `update_ticket_consumed_by_ip` (the poller)
+  deposits **any** `approved` row, read-lane ones included, and a lockbox
+  claim then runs with no `run_limit`. This happens whenever the poller beats
+  the gateway's JIT poll, when a direct agent reconnects, and always in F12
+  MCP mode, where the gateway returns `pending` at once and the re-run
+  claims from the lockbox. Fix both halves:
+  * The poller never receives an unattended row:
+    `update_ticket_consumed_by_ip` skips `reason IN ('read-lane', …)`, so
+    those rows can only be claimed through `/api/ticket/{id}`, which carries
+    the limit.
+  * In MCP mode, when `/api/request` answers with the row already
+    `approved` (the read lane), the gateway claims it through
+    `/api/ticket/{id}` and runs it with its limit straight away, instead of
+    returning `pending`. That also removes one case of F12's M2 race.
+  * Tests: an unattended row never appears in `/api/poll`; an MCP read-lane
+    call runs bounded in one round trip.
+
+*Should fix:*
+
+* **S1** On GNU `timeout`: without `--foreground` it signals the command's
+  **process group**, so ordinary background children are stopped too. Only
+  a child that calls `setsid` escapes. Correct §3's last bullet, and say
+  that BusyBox `timeout` signals only the child, so the capability check
+  must be specific to GNU `timeout`.
+
+This goes to the security reviewer too (§ 2.6a). They are reviewing the same
+note in parallel, so fold in both sets of findings together.
+
+#### Security reviewer sign-off
+
+**Design review (4d18218), 2026-11-09: changes requested on the design.**
+The approach is sound: the limit is set by the dashboard, enforced by the
+gateway, and refuses to run when the value is broken. Eight conditions must
+be in the note before code starts. L3 is the important one, because without
+it the limit can be skipped. I will re-read only the sections that change.
+
+* **L1. Bounded by default, with a list of exemptions.** As written, a
+  limit applies only where `reason = read-lane`. F15, F16 and any later
+  path would each need to remember to add themselves.
+  - Turn this around: the dashboard sends a `run_limit` for every row it
+    approves without a human approving that exact command.
+  - Name the exemptions in the note as an accepted risk: a JIT click, plans,
+    session overrides and host overrides, because they can legitimately run
+    for a long time.
+  - The gateway-local paths (the allowlists and windows) stay as they are.
+  - Test: a row with any new auto-approval reason gets a limit.
+* **L2. Once a limit is set, it stays.** It can arrive on three responses.
+  - The first limit seen applies to the whole call. A later response that
+    leaves it out does not clear it, and two different limits mean the
+    smaller one applies.
+  - `parse_run_limit` must return three different results: absent, valid or
+    invalid. Today it returns 1 both when the field is missing and when it
+    is broken.
+  - The sketch splits `"60 1048576"` with `set -- $secs`, but the script
+    sets `IFS` to newline and tab, so that split never happens. Use
+    `read -r` with a tab separator.
+  - Tests: the limit is absent on one response and present on another; a
+    present but broken limit is refused.
+* **L3. Every path that can run an unattended row carries its limit.** The
+  note's claim that a lockbox ticket "has no limit by construction" is
+  wrong for read-lane rows. The poller can move an approved read-lane row
+  into the lockbox. Stage 5 then runs it *before* any `/api/request`
+  response is read, with no limit. Three routes lead there:
+  - the MCP re-run: F12 returns `pending` and calls again, and the feature
+    reviewer's M2 makes that re-run wait for `consumed`;
+  - a direct retry after the 90-second wait;
+  - a poller that gets there first.
+
+  Pick one fix and write it down. I recommend these two together:
+  - `/api/poll` never puts an unattended row in the lockbox. The row is
+    claimed only through `/api/ticket/{id}`, which carries the limit.
+  - In MCP mode, a row that the `/api/request` response shows as already
+    approved is claimed and run in the same call instead of returning
+    `pending`.
+
+  The alternative is a lockbox line that carries the limit, which means a
+  new ticket tag and a capability check. Tests, for each route: a lagging
+  poller, an MCP re-run and a direct retry. None of them runs a read-lane
+  row without its limit.
+* **L4. The pipeline must survive `set -e` and keep direct-mode output.**
+  - The sketch sends the whole group to `/dev/null`, so a direct-SSH agent
+    would see nothing. Only MCP mode should discard stdout.
+  - The sketch has no `||` and runs under `set -eo pipefail`, so any
+    non-zero exit, or the SIGPIPE when `head` closes, would end the gateway
+    before the envelope and the F5 row are written.
+  - Copy `PIPESTATUS` in the same statement as the pipeline, with errexit
+    switched off around it.
+  - Test: a capped run and a failing command both still produce the
+    envelope, the F5 row and the right exit code.
+* **L5. Cap the raw stream before `sanitize` as well.** `sanitize` is
+  `sed`, which holds a whole line in memory until it sees a newline. A long
+  stream with no newlines, which some pseudo-files under the read-lane trees
+  can produce, grows `sed`'s memory without limit until the timer fires.
+  - Put a `head -c` (bytes + 1) before `sanitize` as well as after it.
+  - Decide whether the output was cut from the raw stream, because redaction
+    changes lengths.
+  - Test: a newline-free stream larger than the cap is cut at the cap, and
+    `sed` never holds more than the cap.
+* **L6. The time limit bounds the whole call, not just its direct child.**
+  GNU `timeout` signals the process group. BusyBox `timeout` signals only
+  the child, so a grandchild that keeps the pipe open would hold the call,
+  and the ticket's run, past the limit.
+  - Requirement: when the limit fires, the call returns within the limit
+    plus the kill grace plus a few seconds, and nothing the run started is
+    left running.
+  - Test with a stub `timeout` that behaves like BusyBox's.
+* **L7. The script that is running reports the capability on each request,
+  not just at registration.** A poller self-update or a rollback can change
+  the script without re-registering, and then the stored `run_limits: v1`
+  is stale.
+  - The gateway sends `"run_limits":"v1"` in the `/api/request` body.
+  - The dashboard auto-approves an unattended row only when that request
+    carries it.
+  - Keep the stored column for the gateway card.
+  - Test: a request without the field gets `read-lane-no-limits` even when
+    the gateway row says v1.
+* **L8. The settings endpoint is for operators only.**
+  - `PUT /api/settings/run-limit` uses the same session login and CSRF
+    protection as the other operator settings, and every change is audited
+    with the old and new values.
+  - No MCP tool and no gateway token can reach it.
+  - The gateway keeps its own hard-coded range check, as the sketch already
+    does.
+  - Tests: no session means 401 or 403; a change writes an audit row.
+
+*Smaller points:*
+
+* A command can exit 124 on its own, so mark `time` only when
+  `rc == 124` and the time elapsed is at least the limit.
+* A byte cut normally ends the command with SIGPIPE (141), not 0. The note
+  should say so. It also means the byte cap stops a runaway command, which
+  is the point.
+* Over plain-HTTP `dashboard_url`, a network attacker could drop
+  `run_limit`, but they could already forge an approval there. Nothing new;
+  I mention it so nobody counts F19 as protection on that path.
+
+**For the F4 `on` gate:** F19 meets the fourth precondition only once L3
+and L7 are implemented, merged and deployed fleet-wide. Without L3, the
+lockbox route runs read-lane commands with no limit.
+
+**Design round 2 (feature reviewer, 2026-11-10, `39ed243`): approved, with
+one change before code (Q1).** D1–D4 and S1 are folded in correctly:
+* direct-mode output kept;
+* `PIPESTATUS` copied with errexit off;
+* the real 141 reported;
+* `limit: time` only for 124 plus elapsed time;
+* the poller never gets an unattended row, so every route carries the limit.
+
+* **Q1 (must): base the pipeline on the new capture code.** The § 3 sketch
+  still uses `ESHU_OUT_FIFO`/`tee`/`wait "$ESHU_TAIL_PID"`. The CI fix
+  (`fix/ci-environment`, merging before this) removes the FIFO and the
+  second reader: capture is now `… | sanitize | capture_tail "$ESHU_OUT_TAIL"`,
+  with `set +e` and `PIPESTATUS[0]`. Redraw § 3 on that code, and on F12's
+  MCP envelope capture (`ESHU_MCP_CAP`) if F12 merges first:
+  `"${run_argv[@]}" 2>&1 | cap_raw | sanitize | cap_visible | capture_tail …`.
+  * `capture_tail` keeps the last 16 KiB, not the first. Say how the
+    `bytes + 1` cut probe now works: count the visible bytes in
+    `cap_visible`, or compare the stored size with `stat`. Remember that
+    `capture_tail` adds a newline when the stream has none (C4).
+  * In MCP mode, the stdout redirect goes on the stage that feeds the
+    envelope, not on a `tee`.
+* **Q2 (should): `ssh_exec`'s wait loop and unattended rows.** F12's `wait`
+  re-runs at `consumed`. An unattended row is now consumed only through
+  `/api/ticket/{id}` in the same round trip. If that claim fails (for
+  example, a network blip), `wait` sees `approved` until the row expires.
+  Say what the agent gets: I suggest `check_request` shows
+  `approved (unattended): re-run now`, because the re-run claims by id and
+  carries the limit, so it cannot race the poller.
+
+After Q1, to the security reviewer, for the sections that change (§ 3, plus
+§ 4 if Q2 changes it).
+
+**Design round 4 (feature reviewer, 2026-11-10, `9b355a4`): approved; to the
+security reviewer (§ 2.6a).** Q3 is folded: the MCP branch ends in
+`capture_tail "$ESHU_MCP_CAP" 65537 >/dev/null`, with the 2 MiB / no
+`run_limit` test. The B4 correction is right (no `-W interactive`; on a newer
+mawk it truncates rather than splits). As the round 4 note says, F19's time
+limit, not buffering, is the bound for unattended runs.
+
+**Design review of Rounds 2–4 (`2286b43`), 2026-11-10: approved.** I read
+Rounds 2 and 3 as well as Round 4, because they answer L1–L8.
+
+* **L1:** one `approve_unattended()` helper, and a generated test that fails
+  when an unattended row has no limit. The exemptions are named.
+* **L2:** absent, valid and invalid are distinct; a limit stays once set;
+  the smaller value wins; the field is read with a tab separator.
+* **L3:** the poller never receives an unattended row. MCP claims through
+  `/api/ticket/{id}` in the same round trip, and the Q2 wait rule follows
+  `unattended`.
+* **L4:** errexit is off around the pipeline only, and `PIPESTATUS` is
+  copied in the next statement.
+* **L5:** there is a raw cap before `sanitize`. Deciding a cut on the
+  visible stream is a sensible trade, and no unsanitized bytes are written.
+* **L6:** GNU `timeout` is part of the capability, and a limit received
+  without it is refused rather than half-applied. One gap remains: a
+  process that calls `setsid` escapes the group kill. No read-lane verb can
+  do that today. Any later unattended path (F15 probes, F16 `auto_run`)
+  must keep that true.
+* **L7:** the capability travels on each request, so the stored column is
+  for display only.
+* **L8:** the operator session, CSRF and audit, with no MCP or token
+  access.
+* **Q3:** the MCP capture goes through `capture_tail` at 65537, so a
+  human-approved MCP run cannot fill `/run`. One thing to state plainly in
+  the design: in MCP mode nothing reaches the SSH channel until the
+  envelope, so a dropped connection is not noticed while a human-approved
+  MCP run is still going. That is F12's accepted §4 risk, and F19 bounds it
+  only for unattended rows.
+
+*One condition at code time (the feature reviewer can check it):*
+
+* **W1. The probe file uses the same directory check as the capture.**
+  Round 3 runs `mktemp -p "$ESHU_RUN_DIR"` for the probe whenever there is a
+  byte limit. Under `exit-only`, the directory check in `run_sanitized` is
+  skipped. Apply the same check (0700, owned by root, not a symlink) before
+  creating the probe, and refuse the call if it fails. Test: an unsafe
+  `/run/eshu` with a `run_limit` refuses the call and runs nothing.
+
+**For the F4 `on` gate:** F19 meets the fourth precondition once this code
+(L3, L6, L7 and W1 included) is merged and deployed fleet-wide. The gateway
+bash comes back to me before merge.
+
+**W1 confirmed (feature reviewer, 2026-11-10).** On `feature-roadmap` the
+`/run/eshu` check (a directory, not a symlink, mode 700, owned by
+`ESHU_RUN_OWNER`) runs only inside `if [ "$mode" = "tail" ]`
+(`eshu-gateway.sh`, `run_sanitized`). The Round 3 probe's
+`mktemp -p "$ESHU_RUN_DIR"` runs whenever there is a byte limit, so under
+`exit-only` it would create the file in an unchecked directory. At code time,
+move the four tests into one `run_dir_safe()` helper that the capture, the
+probe and F12's `ESHU_MCP_CAP` all call. A failed check disables capture
+(as today) but **refuses** a limited run, as the security reviewer asked.
+Test: an unsafe `/run/eshu` with a `run_limit` refuses the call and runs
+nothing; with no `run_limit` the call runs as before.
+
+### Round 5 — implementation (code round)
+
+**Branch `feat/f19-unattended-limits`, on top of `feature-roadmap` at
+`c0954cc`** (merge `8865712`). The gateway bash is the part that goes to the
+security reviewer before merge.
+
+**Gateway (`dashboard/eshu-gateway.sh`, installers regenerated).**
+
+* **The limit travels and is parsed three ways (L2).** `parse_run_limit` uses
+  `python3 -I -c` and prints `absent`, `valid	<s>	<b>` or `invalid`; a later
+  response without the field keeps the first limit, two limits take the
+  smaller per field, and a present but unusable one refuses the call
+  (`[LOCKED] Invalid run_limit …`). Out of range (5–300 s, 65 536–8 388 608
+  bytes), non-integer, boolean, list and non-JSON are all `invalid`.
+* **Capability (L6/L7).** `RUN_LIMITS_CAP=v1` only when
+  `timeout --version` names GNU coreutils; it is sent on **every**
+  `/api/request` as `"run_limits"`, and a limit received without it is refused
+  (never half-applied). The installer reports the same value at `/api/register`
+  (an absent field keeps the stored value; the column is display only).
+* **W1.** One `run_dir_safe()` (directory, not a symlink, mode 700, owner
+  `ESHU_RUN_OWNER`) is used by the F5 tail capture, F12's `ESHU_MCP_CAP` and
+  the F19 probe. An unsafe directory still disables `tail` capture and still
+  refuses an MCP capture; with a byte limit it now **refuses the run**.
+* **Pipeline.** `run_argv` gets `timeout -k 5 <secs>` when a time limit is
+  set; each branch is
+  `… | cap_raw | sanitize | cap_visible [| capture_tail …]` under
+  `set +e`, with `rc=${PIPESTATUS[0]}`. `cap_raw` bounds `sed`'s input (L5);
+  `cap_visible` tees the sanitized stream into `ESHU_LIMIT_PROBE` at
+  `bytes + 1`. The marker and `limit: bytes` are decided from that probe
+  (`stat` > bytes), never by scanning the output; `time` needs `rc == 124`
+  **and** elapsed ≥ the limit. The command's real status (141 after a byte
+  cut, 124 after a stop) is what `[ESHU exit=N]` and the envelope carry.
+* **Q3.** The MCP branch is
+  `… | capture_tail "$ESHU_MCP_CAP" 65537 >/dev/null`: one in-stream ring, no
+  unbounded `tee`, and a human-approved MCP run cannot fill `/run`.
+* **L3, one round trip.** When `/api/request` answers `approved` (the
+  unattended path), an MCP call claims `/api/ticket/{id}` immediately, reads
+  `run_limit` beside the ticket, and runs bounded instead of returning
+  `pending`. The ticket parse is now one `parse_claim_body()` used by both
+  that path and the poll loop, and it understands the `v2|ts|agent|session|cmd`
+  line the stub and the dashboard use.
+* **`python3 -I`** on every inline interpreter in the gateway (the F12
+  security note): no user site-packages and no `PYTHONPATH` reach a script
+  that parses dashboard JSON.
+* **F5 row.** `/api/exec-result` gains `"limit":"time|bytes"` and a byte cut
+  sets `output_truncated` even when the stored tail is short.
+
+**Dashboard.**
+
+* `requests.unattended` and `requests.run_limit` (JSON), additive migrations;
+  `request_results.limit_kind`; `gateways.run_limits` (display only).
+* `approve_unattended()` in `main.py` is the only auto-approval path: it
+  creates the row **approved** with the limit only when the *request* reports
+  `run_limits: v1`; otherwise the row is `pending` with
+  `reason = read-lane-no-limits` and a `read_lane_no_limits` audit row (L7 —
+  the stored column never decides). The read lane calls it.
+* `/api/request` returns `approved`, `unattended` and `run_limit`;
+  `/api/request_status/{id}` and `/api/ticket/{id}` return the limit beside
+  the ticket (the ticket marks the row consumed in the same call).
+* `update_ticket_consumed_by_ip` skips `unattended = 1`, so the poller never
+  receives one (L3).
+* `GET`/`PUT /api/settings/run-limit`: operator session + CSRF, range-checked,
+  audited with the old and new values (L8). Defaults 60 s / 1 MiB; a corrupt
+  meta value falls back to them.
+* `check_request` returns `unattended` and says
+  `approved (unattended): re-run now …`; `ssh_exec`'s `wait` re-runs at
+  `approved` for such a row instead of waiting for `consumed` (Q2).
+
+**`dashboard/static/dev/eshu-gateway-install.sh`.** It is a **committed**
+file (served as `dev_installer_url` to dev-mode gateways, and rewritten on
+the host by a dev push; `scripts/deploy-dashboard.sh` resets it) and it was
+stale: 1 281 lines with no F12 code and no `SANITIZE_CMD`. It is regenerated
+from the current `static/` installer in this round; `gen_installer.py` does
+not write it, so a dev push or this copy is what keeps it current.
+
+**Tests (`tests/test_f19_limits.py`, 32).** Gateway: the parser's three
+answers, stickiness, `min()` combination and eight unusable values; the
+directory check (700, 755, symlink, missing, foreign owner); an MCP
+unattended run capped at 65 536 bytes with the marker and `limit: bytes`; a
+5 s stop (exit 124, marker, `limit: time`); an allowlisted run with no limit
+and no field; an unusable limit refusing; an unsafe run directory refusing a
+limited run. Dashboard: defaults and corrupt fallback; approved-with-limit vs
+pending-without-capability (and the audit row); the poller skipping the row;
+the ticket carrying it; both endpoints; the stored column not deciding; the
+settings endpoint's auth, range and audit; `/api/exec-result` storing and
+rejecting `limit`. `tests/test_gateway_script.py` gains the approved/limit
+stub and its JIT-body test now expects `run_limits`.
+
+### Round 6 — code review round 1 (AD1–AD3) and the CI failure
+
+**Code review (feature reviewer, 2026-11-10, `51fb2a8`): three must-fixes.**
+L1–L8, W1 and Q2/Q3 read right; the gateway diff now goes to security.
+
+* **AD1 — a SIGKILLed command exits 137.** `timeout -k 5` sends SIGTERM, then
+  SIGKILL five seconds later for a command that ignores it; timeout then
+  exits **137**, not 124, so a stubborn command's stop was not labelled
+  `limit: time`. Both codes are accepted now, under the same elapsed-time
+  guard (a command that exits 137 on its own, quickly, is not a limit hit).
+  Tests: `trap "" TERM; sleep 30` with a 5 s limit → exit 137, the marker and
+  `limit: time`; `exit 137` immediately → no marker and no `limit`.
+* **AD2 — CI was red because the runner moved to Ubuntu 26.04.** The Actions
+  log for `51fb2a8` (`CI` run 42866594655, jobs 130006465478/82) shows
+  `Image: ubuntu-26.04` and both Python jobs failing on the same two tests:
+  the unattended MCP run came back `refused` with `exit_code 1` instead of
+  `ran`. That is the **L6 capability refusal**: Ubuntu 26 ships uutils
+  `timeout`, whose `--version` does not say "GNU coreutils", so
+  `RUN_LIMITS_CAP` was empty and the gateway correctly refused a limit it
+  cannot enforce. It passed locally on GNU coreutils. Fixes:
+  - `GatewaySandbox` gains a `timeout` stub whose `--version` the test
+    chooses (GNU by default) and which execs the real local `timeout` for
+    behaviour, so the suite no longer depends on the runner's userland;
+  - one test keeps the real case: a non-GNU `timeout --version` refuses a
+    limited run and nothing runs;
+  - `.github/workflows/ci.yml` is pinned to `runs-on: ubuntu-24.04` for both
+    jobs, with the reason in a comment;
+  - **setup note:** a gateway without GNU `timeout` reports no capability, so
+    the dashboard never auto-approves an unattended row there — it stays
+    `pending` with `reason = read-lane-no-limits` and the operator sees it in
+    the queue. That is the fail-closed behaviour, not a bug.
+* **AD3 — `docs/TOOLSHED_PLAN.md` removed.** The `feature-roadmap` merge
+  (`8865712`) carried it onto this branch; it is not on `feature-roadmap`
+  and is not part of F19. It is deleted in its own commit (`4a86f81`) and the
+  local copy is left on disk, untracked, for the operator.
+* **Nit — capture `timeout --version` first.** `TIMEOUT_VERSION=$(timeout
+  --version 2>/dev/null || true)`, then grep the variable, so `pipefail`
+  cannot make the capability question depend on a pipeline's scheduling. The
+  installer template does the same.
+
+The current `feature-roadmap` (F10 merged, `f7201ac`) is merged forward in
+`12e51e7`; the only conflict was this document's F19 note at the end of the
+status table.
+
+`bash scripts/verify.sh`: `2678 passed, 22 skipped, 7 warnings in 561.48s (0:09:21)`.
+
+### Round 7 — security's AF1 and AF2
+
+**Security approved the gateway bash on two conditions; the feature reviewer
+checks them here. AF3 is deliberately not on this branch** — it belongs to the
+next gateway-bash branch (the session-signature check still passes the key in
+argv).
+
+* **AF1 — an unattended row must never run without a limit.** Three changes:
+  - the gateway's parser now reads `unattended: true` with a missing, `null`
+    or unusable `run_limit` as **invalid**, not as "absent" (absent means "a
+    human approved this" and only applies without the marker);
+  - the direct-SSH poll loop runs `parse_run_limit "$CLAIM_BODY"` after a
+    claim, exactly as the MCP path does, so a corrupt limit in the claim is
+    refused before anything runs;
+  - `/api/ticket` and `/api/request_status` always send `run_limit` for an
+    unattended row. A stored value that does not parse is sent as `{}`, which
+    the gateway refuses — never `null`, never omitted.
+  Tests: the parser refuses `unattended` with no limit, `null`, `{}` or a
+  non-dict; the endpoints send `{}` for a corrupt stored limit; an MCP run
+  and a poll-path run whose claim carries `"run_limit": null` are both refused
+  and nothing runs.
+* **AF2 — the range check lives in the Python.** `5 <= seconds <= 300` and
+  `65 536 <= bytes <= 8 388 608` are checked where the JSON is parsed. Bash
+  `[ -lt ]` on an integer above 2^63 errors, and inside `if` that error counts
+  as false, so a huge value used to pass as `valid` and GNU `timeout` would
+  treat it as effectively unbounded. The bash layer stays as a second check
+  with a digit-length guard, so no oversized word ever reaches `[ -lt ]`.
+  Test: `seconds: 10**30` and `bytes: 10**30` are refused.
+
+`bash scripts/verify.sh`: `2689 passed, 22 skipped, 7 warnings in 564.62s (0:09:24)`.
+
+**Code round 1 (feature reviewer, 2026-11-10, `90c4df7` / `51fb2a8`): the
+design is implemented faithfully; three must-fixes before the security
+reviewer reads the gateway bash.** Read in full: `parse_run_limit` (three
+answers, `min()` per field, range-checked, `python3 -I`), the capability
+reported per request and only with GNU `timeout`, `run_dir_safe()` shared by
+the F5, F12 and F19 files (W1), `timeout -k 5` and `cap_raw | sanitize |
+cap_visible` with the `bytes + 1` probe, `PIPESTATUS[0]`, the one-round-trip
+claim by id (it always exits through `run_sanitized` → `finish`), and every
+inline interpreter on `python3 -I`. The full suite passes here **with gawk
+installed**: 2555 passed, 5 skipped.
+
+* **AD1 (must): a command that ignores SIGTERM is not marked `time`.** With
+  `-k 5`, GNU `timeout` sends SIGKILL after the grace period and exits **137**,
+  not 124 (checked here: `timeout -k 1 1 bash -c 'trap "" TERM; sleep 5'` →
+  137). The marker test is `rc -eq 124`, so the run that most needed the limit
+  ends with no `limit: time`, no "[ESHU limit: stopped …]" line and no
+  truncation flag. Accept 124 **or** 137 (with the same elapsed-time guard),
+  and add that test.
+* **AD2 (must): CI is red on `51fb2a8` (both Python jobs), although the suite
+  passes locally.** `feature-roadmap` is green on the same runner label, so
+  the difference is F19's. The likely cause: `ubuntu-latest` moved to Ubuntu
+  26 in October 2026, which ships the Rust coreutils (`uutils`) as
+  `timeout`. `timeout --version` then does not say "GNU coreutils", so
+  `RUN_LIMITS_CAP` is empty and every test expecting `run_limits: v1` (and
+  the F4 auto-approval tests) fails. **Confirm from the Actions log first.**
+  If it is that:
+  * the tests must not depend on the runner's `timeout` flavour. Give
+    `GatewaySandbox` a stub `timeout` whose `--version` is chosen per test, and
+    keep one test that a non-GNU `timeout` refuses a limited run;
+  * pin the workflow to `runs-on: ubuntu-24.04`, so the gateway tests do not
+    change under us (this was already on the list);
+  * say in the setup doc that a gateway whose `timeout` is not GNU
+    (Ubuntu 26's default, BusyBox) reports no capability, so its unattended
+    rows stay `pending` (`read-lane-no-limits`). That fails closed, but the
+    operator should know.
+* **AD3 (must): drop `docs/TOOLSHED_PLAN.md` from the branch.** It is not on
+  `feature-roadmap` or `master`; the merge commit `8865712` added it (899
+  lines, a 2026-11-06 draft plan). It has nothing to do with F19, and this
+  repo is public. Remove it in a normal commit, and ask the operator whether
+  the file is theirs and where it belongs.
+* **Nit:** `timeout --version | grep -q …` runs under `pipefail`. The output is
+  small enough that it does not race today, but capture it to a variable
+  first so the check cannot flip on an early `grep` exit.
+* **Noted:** the regenerated `static/dev/eshu-gateway-install.sh` answers the
+  security reviewer's F12 note N-b. Nothing regenerates it in the repo (not
+  `gen_installer.py`), so it will go stale again; make `gen_installer.py`
+  write it in a later change.
+
+After AD1–AD3, the gateway bash (`eshu-gateway.sh` and both installers) goes to
+the security reviewer (§ 2.6a).
+
+**Code round 2 (feature reviewer, 2026-11-10, `f75b40a`): approved; to the
+security reviewer for the gateway bash.** AD1: 124 or 137, with the
+elapsed-time guard, and tests both ways. AD2: the cause was confirmed from the
+Actions log (Ubuntu 26.04 image, uutils `timeout`); the sandbox now stubs
+`timeout --version`, a non-GNU test keeps the refusal, the setup note is
+written, and CI is green. The `ubuntu-24.04` pin is on `feature-roadmap` as
+`6d58006` (pushed over SSH, so no `workflow`-scoped token was needed); drop
+the local `chore/ci-pin-ubuntu-24-04`. AD3: the stray file is removed
+(`4a86f81`). Nit, optional: `case "$TIMEOUT_VERSION" in *'GNU coreutils'*)`
+avoids the last pipe completely.
+
+**Security reviewer — gateway bash (2026-11-10, `90c4df7` + `6b30707`):
+approved on two small conditions (AF1, AF2). The feature reviewer checks them
+with their tests; they don't need to come back to me.**
+
+What is right:
+* **Run limits:** three parse results, `min()` per field, and the first
+  limit sticks.
+* **The capability:**
+  * it is GNU `timeout` only and reported on every request;
+  * a limit on a gateway without GNU `timeout` is refused, not half-applied;
+  * uutils and BusyBox report none, so their unattended rows stay pending.
+* **W1:** one `run_dir_safe()` covers the F5, F12 and F19 files. The probe is
+  created only after the check passes, and an unsafe directory refuses a
+  limited run.
+* **The pipeline:**
+  * `cap_raw` bounds the raw stream before `sed` sees it;
+  * the probe holds only sanitized bytes, at most `bytes + 1`;
+  * the exit code comes from `PIPESTATUS[0]`;
+  * a time stop is 124 or 137 plus the elapsed-time guard, and "cut" is
+    decided by the probe's size, never by scanning the output.
+* **L3:** the MCP branch claims by id in the same round trip, checks the
+  command and ticket owner, and exits through `finish`. The poller never
+  gets these rows.
+* **N-b:** the three installers embed the script byte for byte, and the dev
+  installer now has F12 and F19.
+
+Conditions:
+* **AF1 (must): a row marked unattended with no usable limit must refuse,
+  not run without a limit.**
+  * `parse_run_limit` reads a missing or `null` `run_limit` as "absent",
+    which correctly means "a human approved this".
+  * But `/api/ticket` sends `run_limit: null` beside `unattended: true` when
+    the stored limit does not parse. `/api/request_status` drops the field
+    in the same case (`except …: pass`) while still sending
+    `unattended: true`.
+  * Either way the gateway runs without a limit, though the dashboard has
+    said this is an unattended row.
+
+  Fix, on both sides:
+  * the gateway's parser answers `invalid` when `unattended is True` and the
+    limit is not a valid dict;
+  * the poll loop also runs `parse_run_limit "$CLAIM_BODY"` after a claim,
+    as the MCP branch does;
+  * both endpoints send a marker the gateway refuses (an empty dict, for
+    example), never `null` and never nothing.
+
+  Test: an unattended row whose stored limit is corrupt is refused on the
+  MCP path and on the poll path.
+* **AF2 (must): do the range check in Python.**
+  * Python prints any size of integer. Bash `[ -lt ]` on a value over 2^63
+    fails with an error, and inside `if`/`||` that error counts as false. So
+    `[ "$secs" -lt 5 ] || [ "$secs" -gt 300 ]` lets a huge value through as
+    `valid`.
+  * GNU `timeout` treats a huge duration as effectively unbounded.
+  * Only the dashboard can send it, but L2's rule is "unparsable refuses".
+
+  Fix: check `5 <= s <= 300` and `65536 <= b <= 8388608` in the Python
+  that already parses the JSON, and keep the bash checks as a second layer.
+
+  Test: `seconds: 10**30` is refused.
+
+Should, on the next gateway-bash branch:
+* **AF3:** the session-signature check (around line 848) is still
+  `python3 -` with `SESSION_KEY` and `SESSION_KEY_PREV` passed in **argv**.
+  * Make it `python3 -I`, which the "all interpreters are `-I`" claim needs.
+  * Have Python read `/etc/eshu-session-key` and the `.prev` file itself.
+    A root process's argv can be read by every local user through `/proc`,
+    so the session key is exposed for the length of the check. This is from
+    before F19, but the line is being touched anyway.
+* **For the record:** a process that calls `setsid` still escapes the time
+  limit (the byte limit still holds). No read-lane verb does this, as
+  recorded in the design review.
+
+_(Moved here from § 9 at the merge, 2026-11-11.)_ **Design round 3 (feature reviewer, 2026-11-10): approved, with one fix (Q3).**
+Q1's redraw on `capture_tail` is right. So is the separate cut probe, which
+holds sanitized bytes only, stays bounded at `bytes + 1` and is
+trap-removed. Q2's `next_step` for unattended rows, read from the
+`unattended` column rather than the reason text, is right too.
+
+* **Q3 (must): the MCP branch must not `tee` to an unbounded file.**
+  `… | cap_visible | tee "$ESHU_MCP_CAP" >/dev/null` has no cap when no
+  `run_limit` is set, which is every human-approved MCP run. A large output
+  would grow `ESHU_MCP_CAP` on `/run` without limit. The security reviewer
+  asked for the same thing on the CI fix: F12's MCP capture moves to the
+  ring, with the 16385 as a parameter. Use `capture_tail "$ESHU_MCP_CAP" 65537`
+  here, so the envelope's 64 KiB rule still holds, with stdout to
+  `/dev/null`. Add a test: 2 MiB of MCP output with no run limit leaves a
+  capture file of at most 65537 bytes.
+* **Build on the buffering fix.** `fix/stream-unbuffered` (B1–B4) puts
+  `stdbuf -oL` on `sanitize`, and mawk gets `-W interactive`. F19's pipeline
+  uses that `sanitize` as it is (B4).
+
+After Q3, to the security reviewer for § 3 and § 4.
 
 ---
 
@@ -9378,7 +10320,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 12 | F10 | ha-supervisor-actions | dashboard | Merged (security sign-off `f9e2c22`) | `feat/f10-ha-supervisor-actions` | F9, F3, Chunk H | security re-reads the P1–P3 diff only |
 | 13 | F11 | ha-config-files | dashboard | Security round 7 (`9e75cad`): Z3/Z5 approved; **AH1–AH4 must** (descriptor-based reads, wider redaction, modes, refuse `!include secrets.yaml`), then security re-reads the changes | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | then code |
 | 14 | F14 | inventory | dashboard + MCP | Merged | `feat/f14-inventory` | Chunk H | |
-| 15 | F19 | unattended-limits | gateway + dashboard | Code approved by both reviewers on AF1/AF2 (security `67bec51`); feature reviewer checks AF1/AF2, then merge | `feat/f19-unattended-limits` | F4, F5, F12 | moved ahead of F21–F23: nearly done, and F22 needs it. AF3 goes on the next gateway branch |
+| 15 | F19 | unattended-limits | gateway + dashboard | **Merged** 2026-11-11 (security sign-off `67bec51`; AF1/AF2 checked) | `feat/f19-unattended-limits` | F4, F5, F12 | AF3 goes on the next gateway branch |
 | 16 | F15 | probes | dashboard + MCP | Code round 1: changes requested AG1–AG7 (`56d86e3`); **AG1 to security** | `feat/f15-probes` | F4, F12, F14 | main line, not only local-model |
 | 17 | F21 | snapshot-approve | dashboard + Proxmox | Design first | `feat/f21-snapshot-approve` | F7, F14, F2 | + security sign-off (new write path, destructive rollback) |
 | 18 | F23 | change-journal | dashboard | Ready | `feat/f23-change-journal` | F1, F5, F7, F14 | no security gate; can be coded while F21's design is with security |

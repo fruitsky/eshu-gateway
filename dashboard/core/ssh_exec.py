@@ -31,9 +31,16 @@ from db.gateways import (
     get_gateway, get_gateways, get_gateway_ssh_host_key,
     get_gateway_ssh_key_derived,
 )
-from db.requests import get_request_status
+from db.requests import get_request_row, get_request_status
 from db.sessions import get_session
 
+def _row_was_unattended(request_id: int) -> bool:
+    """F19: was this row approved without a human deciding on this command?"""
+    try:
+        row = get_request_row(request_id) or {}
+    except Exception:
+        return False
+    return bool(row.get('unattended'))
 # The gateway's own limits (§2, §8).
 MAX_COMMAND = 8192
 MAX_OUTPUT = 65536
@@ -433,6 +440,14 @@ def ssh_exec(host: str, command: str, session_id: str = '', timeout=None,
                 if current in ('denied', 'expired', 'abandoned'):
                     _audit('denied', gateway)
                     return refused(current, request_id=request_id, message=reason)
+                if current == 'approved' and _row_was_unattended(request_id):
+                    # F19/L3: an unattended row is never handed to the poller;
+                    # it is claimed by id, and the re-run gets the limit from
+                    # the same response. Waiting for `consumed` here would spin
+                    # to the deadline because nothing else can consume it.
+                    _audit('wait-unattended', gateway)
+                    return ssh_exec(host, command, session_id=session_id,
+                                    timeout=timeout, wait=False, agent=agent)
                 if current == 'consumed':
                     # M2: the ticket is claimable only after the poller has
                     # taken it — that is what flips the row to `consumed` and

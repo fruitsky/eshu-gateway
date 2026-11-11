@@ -43,9 +43,12 @@ def gateway(auth_client):
     return auth_client, {'X-Gateway-Token': 'tok-1'}
 
 
-def _jit(client, headers, command, ip='10.0.0.1'):
+def _jit(client, headers, command, ip='10.0.0.1', run_limits='v1'):
+    # F19: an auto-approved (read-lane) row needs the per-request capability;
+    # a real F19 gateway sends it, so the default here is v1.
     response = client.post('/api/request', json={
         'target_ip': ip, 'encoded_command': b64(command),
+        'run_limits': run_limits,
     }, headers=headers)
     assert response.status_code == 200, response.text
     return response.json()

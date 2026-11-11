@@ -67,6 +67,8 @@ from db.gateways import (
     set_gateway_ssh_host_key,
     get_gateway_ssh_capabilities,
     set_gateway_ssh_capabilities,
+    set_gateway_run_limits,
+    get_gateway_run_limits,
     get_gateway_ssh_key_derived,
     get_dev_gateways,
     update_gateway_windows_count,

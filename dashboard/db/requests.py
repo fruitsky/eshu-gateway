@@ -65,6 +65,24 @@ def init_requests_tables(cursor):
             cursor.execute("ALTER TABLE requests ADD COLUMN agent TEXT DEFAULT ''")
         except Exception:
             pass
+    # F19: 1 when the dashboard approved this row without a human deciding on
+    # this exact command. Such a row carries a run_limit and is never handed to
+    # the poller; it can only be claimed through /api/ticket/{id}, which sends
+    # the limit. Existing rows are human-approved, so 0.
+    if 'unattended' not in existing:
+        try:
+            cursor.execute(
+                "ALTER TABLE requests ADD COLUMN unattended INTEGER NOT NULL DEFAULT 0")
+        except Exception:
+            pass
+    # F19: the JSON limit this row runs under ({seconds, bytes}); '' when the
+    # row is not unattended.
+    if 'run_limit' not in existing:
+        try:
+            cursor.execute(
+                "ALTER TABLE requests ADD COLUMN run_limit TEXT NOT NULL DEFAULT ''")
+        except Exception:
+            pass
 
 TICKET_FORMAT_V2 = 'v2'
 
@@ -110,7 +128,7 @@ def _refuse_agent_ticket(req_id, target_ip: str) -> None:
         pass
 
 
-def create_request(target_ip: str, command: str, status: str = 'pending', ttl: int = 90, reason: str = '', session_id: str = '', execution_id: str = '', inner_target: str = '', agent: str = ''):
+def create_request(target_ip: str, command: str, status: str = 'pending', ttl: int = 90, reason: str = '', session_id: str = '', execution_id: str = '', inner_target: str = '', agent: str = '', unattended: bool = False, run_limit: str = ''):
     # F18: compute both fingerprints for every new row (no extra call site).
     try:
         from core.fingerprint import fingerprints
@@ -128,9 +146,9 @@ def create_request(target_ip: str, command: str, status: str = 'pending', ttl: i
         # waiting time.
         decided_at = created_at if status != 'pending' else None
         cursor.execute('''
-            INSERT INTO requests (target_ip, command, status, created_at, expires_at, reason, session_id, execution_id, inner_target, command_sha, shape_sha, decided_at, agent)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (target_ip, command, status, created_at, expires_at, reason, session_id, execution_id, inner_target or '', cmd_sha, shape_sha, decided_at, (agent or '')[:64]))
+            INSERT INTO requests (target_ip, command, status, created_at, expires_at, reason, session_id, execution_id, inner_target, command_sha, shape_sha, decided_at, agent, unattended, run_limit)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (target_ip, command, status, created_at, expires_at, reason, session_id, execution_id, inner_target or '', cmd_sha, shape_sha, decided_at, (agent or '')[:64], 1 if unattended else 0, (run_limit or '')[:2000]))
         conn.commit()
         return cursor.lastrowid
 
@@ -206,6 +224,7 @@ def update_ticket_consumed_by_ip(target_ip: str):
             SELECT id, created_at, expires_at, command, agent, session_id
             FROM requests
             WHERE target_ip = ? AND status = 'approved' AND expires_at > ?
+              AND unattended = 0
             ORDER BY id ASC
             LIMIT 1
         ''', (target_ip, now - expired_ago))
@@ -333,7 +352,7 @@ def get_ticket_by_request_id(req_id: int):
     target_ip = ''
     with db_conn() as conn:
         cursor = conn.cursor()
-        cursor.execute('SELECT command, created_at, status, agent, session_id, target_ip FROM requests WHERE id = ? AND status IN ("approved", "consumed")', (req_id,))
+        cursor.execute('SELECT command, created_at, status, agent, session_id, target_ip, unattended, run_limit FROM requests WHERE id = ? AND status IN ("approved", "consumed")', (req_id,))
         row = cursor.fetchone()
         if row:
             target_ip = row['target_ip']
@@ -353,7 +372,9 @@ def get_ticket_by_request_id(req_id: int):
                     now = int(time.time())
                     cursor.execute("UPDATE requests SET status = 'consumed', expires_at = ? WHERE id = ?", (now, req_id))
                     conn.commit()
-                ticket = {"command": row['command'], "ticket": ticket_line(row, fmt)}
+                ticket = {"command": row['command'], "ticket": ticket_line(row, fmt),
+                          "unattended": 1 if row['unattended'] else 0,
+                          "run_limit": row['run_limit'] or ''}
     if refused is not None:
         _refuse_agent_ticket(refused, target_ip)
     return ticket
