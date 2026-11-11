@@ -102,6 +102,7 @@
   <div class="nav-section">
     <div class="nav-label">Configure</div>
     <button class="nav-item" id="nav-inventory" onclick="switchView('inventory')"><span>Inventory</span></button>
+    <button class="nav-item" id="nav-runbooks" onclick="switchView('runbooks')"><span>Runbooks</span></button>
     <button class="nav-item" id="nav-controls" onclick="switchView('controls')"><span>Controls</span></button>
     <button class="nav-item" id="nav-settings" onclick="switchView('settings')"><span>Settings</span></button>
     <button class="nav-item" id="nav-logs" onclick="switchView('logs')"><span>Logs</span></button>
@@ -544,6 +545,27 @@
         <input type="text" id="inv-search" placeholder="Where is…? name, IP, FQDN, vmid, MAC" class="w-full text-sm mb-3" oninput="debouncedInventorySearch()" data-od-id="inventory-search">
         <div id="inv-sources" class="inv-sources"></div>
         <div id="inv-results"><p class="text-muted">Loading…</p></div>
+      </div>
+    </div>
+
+    <!-- X2: the runbooks page -->
+    <div id="view-runbooks" class="hidden w-full" data-ink="section">
+      <div class="hud" data-od-id="runbooks-hud">
+        <div class="hud-txt"><b>The field notes</b><span class="hud-sub">&middot; what worked, in order</span></div>
+      </div>
+      <div class="widget" data-od-id="runbooks-panel">
+        <div class="widget-header">
+          <span>Runbooks</span>
+          <span class="chip" id="rb-count">&mdash;</span>
+          <div class="flex-1"></div>
+          <label class="text-xs text-muted" for="rb-show-retired"><input type="checkbox" id="rb-show-retired" onchange="fetchRunbooks()"> show retired</label>
+        </div>
+        <div class="flex items-center gap-2 mb-3">
+          <input type="text" id="rb-search" placeholder="Search title, when to use, summary" class="flex-1 text-sm" oninput="debouncedRunbookSearch()" data-od-id="runbooks-search">
+          <input type="text" id="rb-tag" list="rb-tags" placeholder="tag" class="w-32 text-sm" oninput="debouncedRunbookSearch()" data-od-id="runbooks-tag">
+          <datalist id="rb-tags"></datalist>
+        </div>
+        <div id="rb-results" data-od-id="runbooks-list"><p class="text-muted">Loading&hellip;</p></div>
       </div>
     </div>
 
@@ -1219,6 +1241,19 @@
     </div>
     <div id="host-changes-alert-note" class="text-xs text-warning mb-2 hidden"></div>
     <div id="host-changes-body" class="host-changes-body text-xs"></div>
+  </div>
+</div>
+
+
+<!-- X2: one runbook -->
+<div id="runbook-modal" class="modal-overlay hidden" onclick="if(event.target===this)closeRunbook()">
+  <div class="widget max-w-2xl w-full">
+    <div class="widget-header">
+      <span id="runbook-modal-title">Runbook</span>
+      <button onclick="closeRunbook()" class="modal-close" aria-label="Close">&times;</button>
+    </div>
+    <div id="runbook-modal-body" class="runbook-body text-xs"></div>
+    <div id="runbook-modal-actions" class="flex justify-end gap-2 mt-3"></div>
   </div>
 </div>
 

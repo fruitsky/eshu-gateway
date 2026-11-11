@@ -600,11 +600,19 @@ def check_request_fn():
         # M2: say when a re-run is safe. The lockbox only holds the ticket
         # once the poller has consumed the row; re-running at `approved`
         # races that poll and files a second JIT request.
-        next_step = {
-            'pending': 'waiting for operator approval',
-            'approved': 'approved, delivering to the gateway — do not re-run yet',
-            'consumed': 'ready to re-run: call ssh_exec again with the same arguments',
-        }.get(status, '')
+        unattended = bool(row.get('unattended'))
+        if status == 'approved' and unattended:
+            # F19/Q2: nothing else will consume this row (the poller skips it),
+            # and the re-run claims it by id with its limit, so waiting for
+            # `consumed` would only spin to the deadline.
+            next_step = ('approved (unattended): re-run now — the re-run claims '
+                         'it by id with its run limit')
+        else:
+            next_step = {
+                'pending': 'waiting for operator approval',
+                'approved': 'approved, delivering to the gateway — do not re-run yet',
+                'consumed': 'ready to re-run: call ssh_exec again with the same arguments',
+            }.get(status, '')
         return json.dumps({
             'id': request_id,
             'kind': 'ssh',
@@ -613,6 +621,7 @@ def check_request_fn():
             'target_ip': row.get('target_ip') or '',
             'session_id': owner,
             'expires_at': expires_at,
+            'unattended': unattended,
             'next_step': next_step,
         })
     return _check_request
@@ -993,6 +1002,48 @@ mcp.add_tool(session_conclude_fn(), name="session_conclude", description=SESSION
 mcp.add_tool(find_runbooks_fn(), name="find_runbooks", description=FIND_RUNBOOKS_DESC)
 mcp.add_tool(similar_incidents_fn(), name="similar_incidents", description=SIMILAR_INCIDENTS_DESC)
 mcp.add_tool(get_runbook_fn(), name="get_runbook", description=GET_RUNBOOK_DESC)
+DIAGNOSE_DESC = (
+    "Ask one question about one host and get a short structured digest back "
+    "(state, errors, ports, disk) instead of raw logs. The host is a registered "
+    "gateway; the unit/container/name is typed and validated. The first call "
+    "proposes ONE grouped approval plan; after the operator approves it, call "
+    "probe_result(plan_id) for the digest."
+)
+
+
+def diagnose_fn(probe_name):
+    def _diagnose(params: dict = None, session_id: str = "") -> str:
+        from core.probes import plan_probe
+        return json.dumps(plan_probe(probe_name, params or {},
+                                     session_id=session_id))
+    return _diagnose
+
+
+def probe_result_fn():
+    def _probe_result(plan_id: int, session_id: str = "") -> str:
+        from core.probes import probe_result
+        return json.dumps(probe_result(plan_id, session_id=session_id))
+    return _probe_result
+
+
+mcp.add_tool(diagnose_fn('diagnose_service'), name="diagnose_service",
+             description=("Service on a gateway: is-active state, the last "
+                          "200 journal lines de-duplicated, listening ports. "
+                          "One grouped approval, then probe_result."))
+mcp.add_tool(diagnose_fn('diagnose_container'), name="diagnose_container",
+             description=("Docker container or Proxmox guest on a gateway: "
+                          "ps/inspect or pct list/config. One grouped approval, "
+                          "then probe_result."))
+mcp.add_tool(diagnose_fn('disk_pressure'), name="disk_pressure",
+             description=("Filesystem and inode use plus the largest /var/log "
+                          "directories on a gateway. One grouped approval, then "
+                          "probe_result."))
+mcp.add_tool(diagnose_fn('dns_check'), name="dns_check",
+             description=("The local Pi-hole DNS record for an FQDN. Runs no "
+                          "gateway command; returns the record when present."))
+mcp.add_tool(probe_result_fn(), name="probe_result",
+             description=("The digest of an approved probe plan. Pending while "
+                          "the operator has not approved it."))
 mcp.add_tool(whereis_fn(), name="whereis", description=WHEREIS_DESC)
 mcp.add_tool(ssh_exec_fn(), name="ssh_exec", description=SSH_EXEC_DESC)
 mcp.add_tool(session_plan_fn(), name="session_plan", description=SESSION_PLAN_DESC)

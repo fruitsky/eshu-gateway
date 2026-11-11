@@ -40,6 +40,16 @@ def init_exec_results_tables(cursor):
             created_at INTEGER NOT NULL
         )
     ''')
+    # F19: which run limit fired ('time', 'bytes' or ''). Additive: a row from
+    # before this column reads as '' (no limit).
+    _cols = {row[1] for row in cursor.execute(
+        "PRAGMA table_info(request_results)").fetchall()}
+    if 'limit_kind' not in _cols:
+        try:
+            cursor.execute(
+                "ALTER TABLE request_results ADD COLUMN limit_kind TEXT DEFAULT ''")
+        except Exception:
+            pass
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS exec_result_orphans (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -63,15 +73,19 @@ def cmd_sha(command: str) -> str:
 
 
 def save_result(request_id: int, exit_code: int, duration_ms: int,
-                output: str = '', truncated: bool = False, now: int = None) -> bool:
+                output: str = '', truncated: bool = False, now: int = None,
+                limit_kind: str = '') -> bool:
     """Store the first result for a request. False if one already exists (D4)."""
+    limit_kind = limit_kind if limit_kind in ('', 'time', 'bytes') else ''
     with db_conn() as conn:
         cur = conn.execute('''
             INSERT OR IGNORE INTO request_results
-                (request_id, exit_code, duration_ms, output, truncated, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+                (request_id, exit_code, duration_ms, output, truncated,
+                 created_at, limit_kind)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
         ''', (int(request_id), int(exit_code), max(0, int(duration_ms)),
-              output or '', 1 if truncated else 0, int(now or time.time())))
+              output or '', 1 if truncated else 0, int(now or time.time()),
+              limit_kind))
         conn.commit()
         return cur.rowcount == 1
 

@@ -56,7 +56,7 @@ from database import (
     set_gateway_read_lane,
     get_gateway_ssh_mode, set_gateway_ssh_mode, get_gateway_ssh_host_key,
     set_gateway_ssh_host_key, get_gateway_ssh_capabilities,
-    set_gateway_ssh_capabilities,
+    set_gateway_ssh_capabilities, set_gateway_run_limits, get_gateway_run_limits,
     set_override, clear_override, get_override_active,
     create_approved_window, get_approved_windows, get_active_approved_windows,
     delete_approved_window, toggle_approved_window,
@@ -85,7 +85,8 @@ from database import (
 from db.agent_policies import (
     DEFAULT_SSH_MODE, get_agent_policy, set_agent_policy, get_agent_policies_map,
 )
-from db.misc import get_meta_json, set_meta_json
+from db.misc import (get_meta_json, set_meta_json, get_run_limit_settings,
+                         set_run_limit_settings, run_limit_problem)
 from db.web_fetch import (
     delete_web_fetch_policy, get_web_fetch_policies, get_web_fetch_policy,
     get_web_fetch_stats, set_web_fetch_policy,
@@ -111,6 +112,7 @@ from schemas import (
     ApprovedWindowPayload, WindowUpdatePayload, WindowRequestPayload,
     NotifyConfigPayload, ExcludeRequestsPayload, InventorySettingsPayload,
     ConclusionReviewPayload, ConclusionEditPayload, RunbookPromotePayload,
+    RunbookRetirePayload,
     SSHHostKeyPayload,
 )
 
@@ -585,6 +587,9 @@ class GatewayPayload(BaseModel):
     # these local copies shadow the import, so both must stay in step).
     agent: str = ""
     force_jit: bool = False
+    # F19: the script that is running reports the run-limit capability on each
+    # request (L7: the stored column can be stale after a self-update).
+    run_limits: str = ""
 
 class RegisterPayload(BaseModel):
     ip: str
@@ -593,6 +598,10 @@ class RegisterPayload(BaseModel):
     ssh_host_key: str = ""
     ssh_agent_format: str = ""
     ssh_ticket_format: str = ""
+    # F19: '' or 'v1'; stored for the gateway card, never for the decision.
+    # None means "not reported" (an older installer or the poller), which keeps
+    # the stored value instead of clearing it.
+    run_limits: Optional[str] = None
 
 class PolicyPayload(BaseModel):
     type: str
@@ -758,6 +767,11 @@ def register(payload: RegisterPayload, request: Request):
         payload.ip,
         _clean_ssh_capability(payload.ssh_agent_format, SSH_AGENT_FORMATS),
         _clean_ssh_capability(payload.ssh_ticket_format, SSH_TICKET_FORMATS))
+    # F19: the installer reports the capability it just wrote. Display only
+    # (the auto-run decision reads the per-request field).
+    if payload.run_limits is not None:
+        set_gateway_run_limits(payload.ip,
+                               _clean_ssh_capability(payload.run_limits, {'v1'}))
     # Clear any stale uninstall trigger — re-enrollment cancels pending uninstalls
     clear_trigger_uninstall(payload.ip)
     
@@ -772,6 +786,42 @@ def register(payload: RegisterPayload, request: Request):
     
     return {"status": "ok", "gateway_token": existing_token,
             "ssh_mode": get_gateway_ssh_mode(payload.ip)}
+
+
+def approve_unattended(target_ip: str, cmd: str, reason: str, sid: str,
+                       eid: str, inner_target: str, agent: str,
+                       capability: str) -> dict:
+    """F19: the one way a row is approved without a human deciding on it.
+
+    Such a row always carries a run limit, and it is created approved only when
+    the gateway *that is asking* reports the capability on this request (L7).
+    An older gateway ignores the field and would run unbounded, so its row is
+    left pending for a human instead of being approved.
+    """
+    if (capability or "").strip() != "v1":
+        req_id = create_request(target_ip, cmd, status="pending",
+                                reason=reason + "-no-limits", session_id=sid,
+                                execution_id=eid, inner_target=inner_target,
+                                agent=agent)
+        record_audit_event(
+            "read_lane_no_limits", target_ip,
+            details=("JIT #%d would auto-run (%s) but the gateway does not "
+                     "report run_limits v1: %s" % (req_id, reason, cmd[:80])))
+        return {"status": "ok", "id": f"{req_id:06d}", "request_id": req_id}
+    limit = get_run_limit_settings()
+    req_id = create_request(target_ip, cmd, status="approved", reason=reason,
+                            session_id=sid, execution_id=eid,
+                            inner_target=inner_target, agent=agent,
+                            unattended=True,
+                            run_limit=json.dumps(limit, separators=(",", ":")))
+    record_audit_event(
+        "jit_unattended_approved", target_ip,
+        details=("Unattended (%s) JIT #%d approved with a %d s / %d byte "
+                 "limit: %s" % (reason, req_id, limit["seconds"],
+                                limit["bytes"], cmd[:80])))
+    return {"status": "ok", "id": f"{req_id:06d}", "request_id": req_id,
+            "approved": True, "unattended": True, "run_limit": limit}
+
 
 @app.post("/api/request")
 def receive_request(payload: GatewayPayload, request: Request):
@@ -842,25 +892,37 @@ def receive_request(payload: GatewayPayload, request: Request):
     # Order per § 2.6: after the encoded-payload block, before the session
     # override. Freeze, Zero-Trust and the blocklists always win, and a plan
     # only matches a command carrying the session id it was granted for.
-    if sid and not frozen and not force_jit and not get_gateway_zero_trust(target_ip):
+    # AG1 (F15): in the default `approval` mode `force_jit` skips the plan
+    # check, so a probe's grouped approval would never cover its commands.
+    # A plan created by probe code may cover them (the operator approved those
+    # exact bytes through the probe); an agent-proposed plan still may not.
+    # `normal` mode is unchanged.
+    plan_origins = ('probe',) if force_jit else None
+    if sid and not frozen and not get_gateway_zero_trust(target_ip):
         plan_allowed = True
         if require_sessions_enabled():
             # Strict sessions: only a minted, named session can use a plan (the
             # gateway refuses unsigned ids first; this is the dashboard half).
             plan_allowed = not session_problem(sid)
         if plan_allowed:
-            claimed = claim_plan_item(sid, target_ip, cmd, now)
+            claimed = claim_plan_item(sid, target_ip, cmd, now,
+                                      origins=plan_origins,
+                                      agent=(agent if plan_origins else ''))
             if claimed:
                 plan_id, item_id = claimed
+                # AG1 condition 4: the row says which origin covered it, so
+                # the audit shows why no card appeared for an approval-mode
+                # agent.
+                origin = 'probe' if plan_origins else 'agent'
                 req_id = create_request(target_ip, cmd, status="approved",
-                                        reason=f"session-plan:{plan_id}:{item_id}",
+                                        reason=f"session-plan:{plan_id}:{item_id}:{origin}",
                                         session_id=sid, execution_id=eid,
                                         inner_target=_inner_target_for(cmd), agent=agent)
                 update_gateway_last_seen(target_ip)
                 record_audit_event(
                     'jit_plan_approved', target_ip,
-                    details=f'Session plan #{plan_id} item #{item_id} approved JIT '
-                            f'#{req_id}: {cmd[:80]} (session {sid})')
+                    details=f'Session plan #{plan_id} item #{item_id} ({origin}) approved '
+                            f'JIT #{req_id}: {cmd[:80]} (session {sid})')
                 return {"status": "ok", "id": f"{req_id:06d}", "request_id": req_id,
                         "plan": True, "plan_id": plan_id,
                         "message": "Auto-approved via Session Plan"}
@@ -905,17 +967,19 @@ def receive_request(payload: GatewayPayload, request: Request):
                 cmd_breakdown(cmd), _verdict, cmd, lane_mode, frozen,
                 get_gateway_zero_trust(target_ip))
             if _ok and lane_mode == 'on':
-                req_id = create_request(target_ip, cmd, status="approved",
-                                        reason="read-lane", session_id=sid,
-                                        execution_id=eid,
-                                        inner_target=_inner_target_for(cmd), agent=agent)
+                # F19: through the one unattended helper, so the row carries a
+                # limit (or stays pending on a gateway too old to enforce one).
+                result = approve_unattended(
+                    target_ip, cmd, 'read-lane', sid, eid,
+                    _inner_target_for(cmd), agent, payload.run_limits)
                 update_gateway_last_seen(target_ip)
-                record_audit_event(
-                    'jit_read_lane_approved', target_ip,
-                    details=f'Read-only lane auto-approved JIT #{req_id}: {cmd[:80]}')
-                return {"status": "ok", "id": f"{req_id:06d}", "request_id": req_id,
-                        "read_lane": "on",
-                        "message": "Auto-approved: read-only command"}
+                if result.get('approved'):
+                    record_audit_event(
+                        'jit_read_lane_approved', target_ip,
+                        details=f'Read-only lane auto-approved JIT #{result["request_id"]}: {cmd[:80]}')
+                    result.update({'read_lane': 'on',
+                                   'message': 'Auto-approved: read-only command'})
+                return result
             if _ok:
                 read_lane_reason = 'read-lane-shadow'
 
@@ -1009,6 +1073,8 @@ class ExecResultPayload(BaseModel):
     encoded_output: str = Field(default='', max_length=24576)
     output_truncated: bool = False
     request_id: int = None
+    # F19: 'time', 'bytes' or '' — which run limit fired, if any.
+    limit: str = ''
 
 
 def _decode_exec_output(encoded: str):
@@ -1048,6 +1114,8 @@ def receive_exec_result(payload: ExecResultPayload, request: Request):
         raise HTTPException(status_code=400, detail="Invalid exit_code")
     if payload.duration_ms < 0 or payload.duration_ms > 86400000:
         raise HTTPException(status_code=400, detail="Invalid duration_ms")
+    if payload.limit not in ('', 'time', 'bytes'):
+        raise HTTPException(status_code=400, detail="Invalid limit")
 
     cmd = decode_cmd(payload.encoded_command)
     output, truncated = _decode_exec_output(payload.encoded_output)
@@ -1062,7 +1130,8 @@ def receive_exec_result(payload: ExecResultPayload, request: Request):
         if row.get('status') not in EXECUTABLE_STATUSES:
             raise HTTPException(status_code=400, detail="Request is not executable")
         stored = save_result(payload.request_id, payload.exit_code,
-                             payload.duration_ms, output, truncated)
+                             payload.duration_ms, output, truncated,
+                             limit_kind=payload.limit)
         return {"status": "ok", "attached": stored, "request_id": payload.request_id,
                 "reason": None if stored else "already_has_result"}
 
@@ -1073,7 +1142,7 @@ def receive_exec_result(payload: ExecResultPayload, request: Request):
     match = find_match_request(target_ip, cmd, PATH_STATUSES[payload.path], since)
     if match:
         stored = save_result(match, payload.exit_code, payload.duration_ms,
-                             output, truncated)
+                             output, truncated, limit_kind=payload.limit)
         return {"status": "ok", "attached": stored, "request_id": match,
                 "reason": None if stored else "already_has_result"}
 
@@ -1228,7 +1297,23 @@ def check_request_status(req_id: int, request: Request):
     status = get_request_status(req_id)
     if status is None:
         raise HTTPException(status_code=404, detail="Request not found")
-    return {"id": req_id, "status": status}
+    out = {"id": req_id, "status": status}
+    # F19: an approved unattended row still has to run under its limit, whether
+    # it is claimed by the poll loop or by a re-run.
+    row = get_request_row(req_id) or {}
+    if row.get('unattended') and status in ('approved', 'consumed'):
+        # AF1: an unattended row always carries the field. A stored limit that
+        # does not parse becomes an empty dict, which the gateway's parser
+        # refuses — it must never be null or omitted, or the gateway would
+        # read "no limit" for a row the dashboard marked unattended.
+        try:
+            out['run_limit'] = json.loads(row.get('run_limit') or '')
+            if not isinstance(out['run_limit'], dict):
+                out['run_limit'] = {}
+        except (TypeError, ValueError):
+            out['run_limit'] = {}
+        out['unattended'] = True
+    return out
 
 @app.get("/api/ticket/{req_id}")
 def claim_ticket_by_id(req_id: int, request: Request):
@@ -1239,7 +1324,20 @@ def claim_ticket_by_id(req_id: int, request: Request):
     ticket = get_ticket_by_request_id(req_id)
     if ticket:
         record_audit_event('jit_consumed', details=f'JIT #{req_id} ticket claimed via /api/ticket')
-        return {"ticket": ticket['ticket']}
+        out = {"ticket": ticket['ticket']}
+        # F19: the limit travels beside the ticket, in the same response, so the
+        # gateway runs this claim bounded (the poller never gets these rows).
+        if ticket.get('unattended'):
+            # AF1: always present, and an unparsable one is an empty dict the
+            # gateway refuses — never null, never omitted.
+            out['unattended'] = True
+            try:
+                out['run_limit'] = json.loads(ticket.get('run_limit') or '')
+                if not isinstance(out['run_limit'], dict):
+                    out['run_limit'] = {}
+            except (TypeError, ValueError):
+                out['run_limit'] = {}
+        return out
     return {"ticket": None}
 
 # ── Dashboard Endpoints (AUTH PROTECTED — sensitive operations) ─────────
@@ -3335,6 +3433,35 @@ def get_dev_tools_endpoint(request: Request):
     _check_session(request)
     return {"enabled": get_dev_tools_enabled()}
 
+class RunLimitPayload(BaseModel):
+    seconds: int
+    bytes: int
+
+
+@app.get("/api/settings/run-limit")
+def get_run_limit_endpoint(request: Request):
+    """F19: the limit unattended runs get. Operator session only."""
+    _check_session(request)
+    return get_run_limit_settings()
+
+
+@app.put("/api/settings/run-limit")
+def set_run_limit_endpoint(payload: RunLimitPayload, request: Request):
+    """F19: fleet-wide limits. Session + CSRF (the middleware), audited with
+    the old and the new values; no MCP tool and no gateway token reaches it."""
+    _check_session(request)
+    problem = run_limit_problem(payload.seconds, payload.bytes)
+    if problem:
+        raise HTTPException(status_code=400, detail=problem)
+    old = get_run_limit_settings()
+    set_run_limit_settings(payload.seconds, payload.bytes)
+    record_audit_event(
+        "run_limit_changed",
+        details=("Run limit %d s / %d bytes -> %d s / %d bytes"
+                 % (old["seconds"], old["bytes"], payload.seconds, payload.bytes)))
+    return get_run_limit_settings()
+
+
 @app.put("/api/settings/dev-tools")
 def set_dev_tools_endpoint(payload: DevToolsPayload, request: Request):
     _check_session(request)
@@ -3970,6 +4097,9 @@ def _plan_payload(plan: dict) -> dict:
     session = get_session(plan.get('session_id') or '')
     out['agent'] = session.get('agent') or ''
     out['session_goal'] = session.get('goal') or ''
+    # AG1: the card says who wrote the plan. A `probe` plan may cover its
+    # commands for an agent in approval mode; an `agent` plan may not.
+    out['origin'] = plan.get('origin') or 'agent'
     # SR3: the card says when a plan is only as safe as the session id, so the
     # operator can enable strict sessions before relying on it.
     out['strict_sessions'] = require_sessions_enabled()
@@ -4185,14 +4315,54 @@ def promote_conclusion_endpoint(conclusion_id: int,
     return {'status': 'ok', 'runbook': runbook}
 
 
+@app.get("/api/runbooks")
+def list_runbooks_endpoint(request: Request, q: str = '', tag: str = '',
+                           include_retired: int = 0):
+    """X2: the operator's runbook list, through F13's own search.
+
+    Same ranking as `find_runbooks`, so the operator and the agents agree on
+    what "matches"; a bigger cap (100) because this is a page. A retired
+    runbook is listed only when `include_retired` is set, and it carries the
+    flag so the UI can grey it.
+    """
+    _check_session(request)
+    from core.conclusions import list_runbook_payloads
+    tags = [tag] if tag else []
+    rows = list_runbook_payloads(q, tags, include_retired=bool(include_retired))
+    return {'runbooks': rows, 'count': len(rows),
+            'include_retired': bool(include_retired)}
+
+
 @app.get("/api/runbooks/{runbook_id}")
 def get_runbook_endpoint(runbook_id: int, request: Request):
     _check_session(request)
     from core.conclusions import get_runbook_payload
-    payload = get_runbook_payload(runbook_id)
+    # The operator may open a retired runbook (to un-retire it); an agent
+    # never reaches this route, and `get_runbook_payload()` still hides a
+    # retired row by default for every other caller.
+    payload = get_runbook_payload(runbook_id, include_retired=True)
     if not payload:
         raise HTTPException(status_code=404, detail="not_found")
     return payload
+
+
+@app.post("/api/runbooks/{runbook_id}/retire")
+def retire_runbook_endpoint(runbook_id: int, payload: RunbookRetirePayload,
+                            request: Request):
+    """X2: retire or un-retire a runbook. Audited, reversible, no delete."""
+    _check_session(request)
+    from db.conclusions import set_runbook_retired
+    row = set_runbook_retired(runbook_id, bool(payload.retired))
+    if not row:
+        raise HTTPException(status_code=404, detail="not_found")
+    record_audit_event(
+        'runbook_retired' if payload.retired else 'runbook_unretired',
+        details='Runbook #%d "%s" %s' % (
+            runbook_id, (row.get('title') or '')[:80],
+            'retired' if payload.retired else 'restored'))
+    return {'status': 'ok', 'id': runbook_id,
+            'retired': bool(row.get('retired')),
+            'retired_at': row.get('retired_at') or 0}
 
 
 @app.get("/api/sessions/recent")

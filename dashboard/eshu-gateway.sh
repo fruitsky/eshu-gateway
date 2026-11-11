@@ -61,6 +61,116 @@ ESHU_MCP_CAP=""
 ESHU_VERIFIED_AGENT=""
 SIG_STATE="none"
 
+# F19: run limits for a row the dashboard approved with no human watching.
+# Empty means "no limit" (a human approved this). A limit the gateway cannot
+# enforce, or cannot parse, refuses the call: never a partially applied bound.
+RUN_LIMIT_SECS=""
+RUN_LIMIT_BYTES=""
+RUN_LIMIT_STATE="absent"        # absent | valid | invalid
+RUN_LIMIT_HIT=""                # '' | time | bytes (what fired)
+ESHU_LIMIT_PROBE=""
+# L6: the time bound is only correct with GNU timeout (it signals the process
+# group; BusyBox signals only the direct child). The capability is reported on
+# every request, so a self-updated or rolled-back script is never trusted
+# because a row still says v1.
+RUN_LIMITS_CAP=""
+# Captured first: under `set -o pipefail` a `timeout --version | grep` pipeline
+# reports grep's failure too, and the "is it GNU?" question must not depend on
+# how the two ends of a pipe are scheduled.
+TIMEOUT_VERSION=$(timeout --version 2>/dev/null || true)
+if printf '%s' "$TIMEOUT_VERSION" | grep -q 'GNU coreutils'; then
+  RUN_LIMITS_CAP="v1"
+fi
+
+# W1: one directory check for every file this script creates under /run.
+# Deliberately not a `mkdir`: the poller owns the directory's creation.
+run_dir_safe() {
+  [ -d "$ESHU_RUN_DIR" ] && [ ! -L "$ESHU_RUN_DIR" ] \
+    && [ "$(stat -c '%a' "$ESHU_RUN_DIR" 2>/dev/null)" = "700" ] \
+    && [ "$(stat -c '%u' "$ESHU_RUN_DIR" 2>/dev/null)" = "$ESHU_RUN_OWNER" ]
+}
+
+# L2: three answers, not two. A later response that omits the field does not
+# clear an earlier limit, and two limits combine per field with min().
+# `python3 -I`: no user site-packages, no PYTHONPATH — the interpreter that
+# parses dashboard JSON must not import anything from the environment.
+parse_run_limit() {   # $1 = dashboard JSON body. 0 = ok (absent or valid)
+  local kind="" secs="" bytes="" triple
+  triple=$(printf '%s' "$1" | python3 -I -c '
+import json, sys
+
+# AF2: the range check lives here, in the parser, not in bash arithmetic.
+# Bash `[ -lt ]` on an integer over 2^63 errors, and inside an `if` that
+# error counts as false, so a huge value would pass as valid; GNU timeout
+# would then treat it as effectively unbounded.
+SECS_MIN, SECS_MAX = 5, 300
+BYTES_MIN, BYTES_MAX = 65536, 8388608
+
+try:
+    doc = json.load(sys.stdin) or {}
+except ValueError:
+    print("invalid"); raise SystemExit(0)
+unattended = doc.get("unattended") is True
+rl = doc.get("run_limit")
+
+def _valid(value):
+    if not isinstance(value, dict):
+        return None
+    s, b = value.get("seconds"), value.get("bytes")
+    if isinstance(s, bool) or isinstance(b, bool) \
+            or not isinstance(s, int) or not isinstance(b, int):
+        return None
+    if not (SECS_MIN <= s <= SECS_MAX and BYTES_MIN <= b <= BYTES_MAX):
+        return None
+    return s, b
+
+if rl is None:
+    # AF1: an unattended row must never arrive without a limit; "absent"
+    # means "a human approved this" and is only allowed when it is not
+    # marked unattended. A sentinel object ({} or null) with unattended
+    # true falls through to invalid.
+    print("invalid" if unattended else "absent")
+else:
+    parsed = _valid(rl)
+    if parsed is None:
+        print("invalid")
+    else:
+        print("valid\t%d\t%d" % parsed)
+' 2>/dev/null) || triple="invalid"
+  IFS=$'\t' read -r kind secs bytes <<< "$triple"
+  case "$kind" in
+    absent)
+      return 0 ;;
+    valid)
+      # Second layer (the Python above is the rule). The digit case keeps a
+      # value that is not plain digits out of `[ -lt ]` entirely.
+      case "${secs}${bytes}" in ''|*[!0-9]*) RUN_LIMIT_STATE="invalid"; return 1 ;; esac
+      case "$secs" in ?|??|???) ;; *) RUN_LIMIT_STATE="invalid"; return 1 ;; esac
+      case "$bytes" in ?????|??????|???????) ;; *) RUN_LIMIT_STATE="invalid"; return 1 ;; esac
+      if [ "$secs" -lt 5 ] || [ "$secs" -gt 300 ] \
+         || [ "$bytes" -lt 65536 ] || [ "$bytes" -gt 8388608 ]; then
+        RUN_LIMIT_STATE="invalid"; return 1
+      fi
+      if [ "$RUN_LIMIT_STATE" = "valid" ]; then
+        [ "$secs" -lt "$RUN_LIMIT_SECS" ] && RUN_LIMIT_SECS="$secs"
+        [ "$bytes" -lt "$RUN_LIMIT_BYTES" ] && RUN_LIMIT_BYTES="$bytes"
+      else
+        RUN_LIMIT_SECS="$secs"; RUN_LIMIT_BYTES="$bytes"
+      fi
+      RUN_LIMIT_STATE="valid"; return 0 ;;
+    *) RUN_LIMIT_STATE="invalid"; return 1 ;;
+  esac
+}
+
+cap_raw()     { if [ -n "$RUN_LIMIT_BYTES" ]; then head -c $((RUN_LIMIT_BYTES + 1)); else cat; fi; }
+cap_visible() {
+  if [ -n "$RUN_LIMIT_BYTES" ]; then
+    head -c $((RUN_LIMIT_BYTES + 1)) | tee "$ESHU_LIMIT_PROBE"
+  else
+    cat
+  fi
+}
+
 # TARGET_IP is baked in by the installer and interpolated into JSON bodies.
 # Refuse to run if it is not a bare IP (checked once, before any dashboard call).
 if [[ ! "$TARGET_IP" =~ ^[0-9A-Fa-f:.]{1,64}$ ]]; then
@@ -299,6 +409,8 @@ post_exec_result() {   # $1=rc  $2=duration_ms  $3=mode  $4=path
   # duration only, `tail` stores the tail. The envelope already carried the
   # bytes to the agent; being more auditable does not override an explicit
   # choice to keep output off the dashboard.
+  # F19: a byte cut is a truncated result even when the stored tail is short.
+  if [ "${RUN_LIMIT_HIT:-}" = "bytes" ]; then truncated="true"; fi
   if [ "$mode" = "tail" ] && [ -n "$out_src" ] && [ -f "$out_src" ] \
      && [ -s "$out_src" ]; then
     if [ "$(stat -c '%s' "$out_src")" -gt 16384 ]; then
@@ -316,7 +428,10 @@ post_exec_result() {   # $1=rc  $2=duration_ms  $3=mode  $4=path
     ''|*[!0-9]*) rid="" ;;
     *) rid=',"request_id":'"${RESULT_REQUEST_ID}" ;;
   esac
-  body='{"target_ip":"'"$TARGET_IP"'","encoded_command":"'"$enc_cmd"'","path":"'"$path"'","exit_code":'"$rc"',"duration_ms":'"$duration_ms"',"encoded_output":"'"$enc_out"'","output_truncated":'"$truncated"''"$rid"'}'
+  # F19: the limit marker travels beside the result; only the three literal
+  # values are ever interpolated.
+  case "${RUN_LIMIT_HIT:-}" in time|bytes) limit_field=',"limit":"'"$RUN_LIMIT_HIT"'"' ;; *) limit_field="" ;; esac
+  body='{"target_ip":"'"$TARGET_IP"'","encoded_command":"'"$enc_cmd"'","path":"'"$path"'","exit_code":'"$rc"',"duration_ms":'"$duration_ms"',"encoded_output":"'"$enc_out"'","output_truncated":'"$truncated"''"$rid"''"$limit_field"'}'
   # D2: the body (up to ~22 KB) goes on stdin, never into argv.
   { printf '%s' "$body" | curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s \
          -X POST "$DASHBOARD_URL/api/exec-result" \
@@ -327,20 +442,37 @@ post_exec_result() {   # $1=rc  $2=duration_ms  $3=mode  $4=path
 
 run_sanitized() {
   local rc=0 mode start_ns end_ns duration_ms path mcp_mode="0"
+  local -a run_argv=("$@")
   mode=$(capture_mode)
   path="${RESULT_PATH:-allowlist}"
   case "$path" in allowlist|window|lockbox|jit) ;; *) path="allowlist" ;; esac
   ESHU_OUT_TAIL=""
+  ESHU_LIMIT_PROBE=""
+  RUN_LIMIT_HIT=""
+  if [ "$ESHU_MCP" = "1" ]; then mcp_mode="1"; fi
+
+  # L6: a limit without GNU timeout would bound only the direct child (BusyBox
+  # signals no process group), so it is refused rather than half-applied.
+  if [ -n "$RUN_LIMIT_SECS" ] && [ "$RUN_LIMITS_CAP" != "v1" ]; then
+    say "[LOCKED] The run limit cannot be enforced on this gateway (no GNU timeout) — refusing to run."
+    finish refused 1
+  fi
+  if [ -n "$RUN_LIMIT_SECS" ]; then
+    # -k, not --kill-after: both GNU and BusyBox understand it.
+    run_argv=(timeout -k 5 "$RUN_LIMIT_SECS" "${run_argv[@]}")
+  fi
+
+  # W1: the byte limit needs a private file whether or not capture is on, so
+  # the directory is checked before anything is created in it.
+  if [ -n "$RUN_LIMIT_BYTES" ] && ! run_dir_safe; then
+    say "[LOCKED] The run limit cannot be enforced (unsafe $ESHU_RUN_DIR) — refusing to run."
+    finish refused 1
+  fi
+
   # F12: an MCP caller always gets the output inside the envelope, whatever
   # /etc/eshu-capture says. The same safety check as F5 guards the directory.
-  if [ "$ESHU_MCP" = "1" ]; then mcp_mode="1"; fi
   if [ "$mode" = "tail" ] || [ "$mcp_mode" = "1" ]; then
-    # § 2.7 / D7: only the poller's private 0700 root-owned work dir; refuse a
-    # missing, symlinked, foreign-mode or foreign-owner one instead of writing
-    # capture files somewhere else. Never create the dir here.
-    if [ ! -d "$ESHU_RUN_DIR" ] || [ -L "$ESHU_RUN_DIR" ] \
-       || [ "$(stat -c '%a' "$ESHU_RUN_DIR")" != "700" ] \
-       || [ "$(stat -c '%u' "$ESHU_RUN_DIR")" != "$ESHU_RUN_OWNER" ]; then
+    if ! run_dir_safe; then
       logger -t eshu-gateway "CAPTURE DISABLED: unsafe $ESHU_RUN_DIR"
       if [ "$mcp_mode" = "1" ]; then
         # The envelope must carry the output; without a safe directory it
@@ -360,14 +492,24 @@ run_sanitized() {
           logger -t eshu-gateway "CAPTURE DISABLED: mktemp failed in $ESHU_RUN_DIR"
           mode="exit-only"; ESHU_OUT_TAIL=""; }
       fi
-      if [ -n "$ESHU_OUT_TAIL" ] || [ -n "$ESHU_MCP_CAP" ]; then
-        # F5: the first EXIT trap in this script. A later one must extend this,
-        # not replace it, or the capture files leak. The capture is best
-        # effort: a file already gone (or replaced) must not change the call's
-        # exit status or write a diagnostic into the agent's stream.
-        trap 'rm -f "$ESHU_OUT_TAIL" "$ESHU_MCP_CAP" 2>/dev/null || true' EXIT
-      fi
     fi
+  fi
+
+  # F19: the cut probe. Sanitized bytes only, bounded at bytes + 1, never
+  # stored as a result. It exists so "cut" is distinguishable from "ended
+  # exactly at the cap" without confusing F5's last-16-KiB capture for a probe.
+  if [ -n "$RUN_LIMIT_BYTES" ]; then
+    ESHU_LIMIT_PROBE=$(mktemp -p "$ESHU_RUN_DIR" eshu-limit.XXXXXX) || {
+      say "[LOCKED] The run limit cannot be enforced (no probe file) — refusing to run."
+      finish refused 1
+    }
+  fi
+
+  if [ -n "$ESHU_OUT_TAIL" ] || [ -n "$ESHU_MCP_CAP" ] || [ -n "$ESHU_LIMIT_PROBE" ]; then
+    # F5/F19: the first EXIT trap in this script. A later one must extend this,
+    # not replace it, or the files leak. Best effort: a file already gone must
+    # not change the call's exit status or write into the agent's stream.
+    trap 'rm -f "$ESHU_OUT_TAIL" "$ESHU_MCP_CAP" "$ESHU_LIMIT_PROBE" 2>/dev/null || true' EXIT
   fi
 
   start_ns=$(date +%s%N)
@@ -376,22 +518,54 @@ run_sanitized() {
   # under it an unwritable capture file (awk exits 2) turned rc 0 into 2 and
   # rc 3 into 2, i.e. the trimmer's failure was reported as the command's.
   # `set +e` keeps `set -e` from exiting before the sentinel and the post.
+  # F19: cap_raw bounds the raw stream before `sed` can hold a newline-free
+  # line in memory; cap_visible is what the agent sees and what decides the
+  # marker (redaction can shorten a cut stream, which is an accepted
+  # imprecision — no unsanitized byte is ever written).
   set +e
   if [ "$mcp_mode" = "1" ]; then
-    # F12 + CI fix: the envelope capture is the same in-stream ring, with the
-    # 64 KiB cap; the command's own stream must not reach stdout.
-    "$@" 2>&1 | sanitize | capture_tail "$ESHU_MCP_CAP" 65537 >/dev/null
+    # F12 + CI fix + Q3: the envelope capture is the same in-stream ring at
+    # 65 537 bytes; the command's own stream must not reach stdout.
+    "${run_argv[@]}" 2>&1 | cap_raw | sanitize | cap_visible \
+      | capture_tail "$ESHU_MCP_CAP" 65537 >/dev/null
   elif [ "$mode" = "tail" ] && [ -n "$ESHU_OUT_TAIL" ]; then
     # E1: the capture rides in the stream, so an agent disconnect still ends
     # the command at its next write, and there is no reader to wait for.
-    "$@" 2>&1 | sanitize | capture_tail "$ESHU_OUT_TAIL"
+    "${run_argv[@]}" 2>&1 | cap_raw | sanitize | cap_visible \
+      | capture_tail "$ESHU_OUT_TAIL"
   else
-    "$@" 2>&1 | sanitize
+    "${run_argv[@]}" 2>&1 | cap_raw | sanitize | cap_visible
   fi
   rc=${PIPESTATUS[0]}
   set -e
   end_ns=$(date +%s%N)
   duration_ms=$(( (end_ns - start_ns) / 1000000 ))
+
+  # F19: which limit fired. `time` needs rc 124 AND the elapsed time, because a
+  # command may exit 124 by itself. `bytes` is the probe byte: one byte over
+  # the cap means the stream was cut; never scanning the output for a marker
+  # the file itself could contain.
+  if [ -n "$RUN_LIMIT_BYTES" ] && [ -s "$ESHU_LIMIT_PROBE" ] \
+     && [ "$(stat -c '%s' "$ESHU_LIMIT_PROBE")" -gt "$RUN_LIMIT_BYTES" ]; then
+    RUN_LIMIT_HIT="bytes"
+  fi
+  # AD1: `timeout -k 5` SIGKILLs a command that ignores SIGTERM, and then
+  # timeout exits 137, not 124. Both mean the limit fired; the elapsed-time
+  # guard still keeps a command that exits 124/137 on its own from being
+  # labelled a limit hit.
+  case "$rc" in
+    124|137)
+      if [ -n "$RUN_LIMIT_SECS" ] \
+         && [ "$duration_ms" -ge $(( RUN_LIMIT_SECS * 1000 - 200 )) ]; then
+        RUN_LIMIT_HIT="time"
+      fi
+      ;;
+  esac
+  if [ "$RUN_LIMIT_HIT" = "time" ]; then
+    say "   [ESHU limit: stopped after ${RUN_LIMIT_SECS} s]"
+  elif [ "$RUN_LIMIT_HIT" = "bytes" ]; then
+    say "   [ESHU limit: output cut at ${RUN_LIMIT_BYTES} bytes]"
+  fi
 
   # The exit sentinel is a direct-SSH affordance. In MCP mode the exit code is
   # a field in the envelope, not a stdout line.
@@ -512,7 +686,7 @@ if [ "$MANIFEST_PRESENT" = "1" ] && [ -z "$prefix_refusal" ]; then
         "$(printf '%s' "$cmd" | sha256sum | cut -d' ' -f1)")
       # `-c`, not a heredoc: the canonical has to arrive on stdin, and a
       # heredoc would take stdin for the program itself.
-      if printf '%s' "$canonical" | python3 -c '
+      if printf '%s' "$canonical" | python3 -I -c '
 import hashlib
 import hmac
 import sys
@@ -851,6 +1025,52 @@ ticket_allowed() {   # $1 = ticket agent, $2 = ticket session
   fi
 }
 
+# F19/L3: an unattended row is claimed by id, in the same round trip as the
+# request response, so the limit travels with it. The poller never gets one.
+parse_claim_body() {   # $1 = /api/ticket JSON body; sets CLAIM_AGENT/SESSION/CMD
+  local line
+  line=$(printf '%s' "$1" | python3 -I -c '
+import json
+import sys
+
+ticket = json.load(sys.stdin).get("ticket") or ""
+if not isinstance(ticket, str) or "|" not in ticket:
+    sys.exit(1)
+parts = ticket.split("|", 4)
+if parts[0] == "v2":
+    if len(parts) < 5:
+        sys.exit(1)
+    _, ts, agent, session, command = parts
+else:
+    ts, command = ticket.split("|", 1)
+    agent = session = ""
+sys.stdout.write("\x1f".join([agent, session, command]))
+' 2>/dev/null) || return 1
+  CLAIM_AGENT=""; CLAIM_SESSION=""; CLAIM_CMD=""
+  IFS=$'\x1f' read -r CLAIM_AGENT CLAIM_SESSION CLAIM_CMD <<< "$line" || return 1
+  return 0
+}
+
+response_is_approved() {   # $1 = /api/request JSON body
+  printf '%s' "$1" | python3 -I -c '
+import json, sys
+try:
+    doc = json.load(sys.stdin) or {}
+except ValueError:
+    raise SystemExit(1)
+sys.exit(0 if doc.get("approved") is True else 1)' 2>/dev/null
+}
+
+claim_ticket_by_id() {   # $1 = request id; 0 when the ticket is ours
+  CLAIM_BODY=$(curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s \
+    -H "X-Gateway-Token: ${GATEWAY_TOKEN:-}" "$DASHBOARD_URL/api/ticket/$1" 2>/dev/null || true)
+  case "$CLAIM_BODY" in *'"ticket":"'*) ;; *) return 1 ;; esac
+  parse_claim_body "$CLAIM_BODY" || return 1
+  [ "$CLAIM_CMD" = "$cmd" ] || return 1
+  ticket_allowed "$CLAIM_AGENT" "$CLAIM_SESSION" || return 1
+  return 0
+}
+
 claim_lockbox_ticket() {
   [ -f "$TICKETS_FILE" ] || return 1
 
@@ -911,7 +1131,7 @@ enc_req=$(echo -n "$cmd" | base64 -w 0)
 RESPONSE=$(curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -w "\n%{http_code}" -X POST "$DASHBOARD_URL/api/request" \
      -H "X-Gateway-Token: ${GATEWAY_TOKEN:-}" \
      -H "Content-Type: application/json" \
-     -d '{"target_ip":"'"$TARGET_IP"'","encoded_command":"'"$enc_req"'","session_id":"'"${ESHU_SESSION_ID:-}"'","execution_id":"'"${ESHU_EXECUTION_ID:-}"'","agent":"'"${ESHU_VERIFIED_AGENT:-}"'","force_jit":'"$([ "$ESHU_FORCE_JIT" = "1" ] && echo true || echo false)"'}' 2>&1 || echo "CURL_FAILED")
+     -d '{"target_ip":"'"$TARGET_IP"'","encoded_command":"'"$enc_req"'","session_id":"'"${ESHU_SESSION_ID:-}"'","execution_id":"'"${ESHU_EXECUTION_ID:-}"'","agent":"'"${ESHU_VERIFIED_AGENT:-}"'","force_jit":'"$([ "$ESHU_FORCE_JIT" = "1" ] && echo true || echo false)"',"run_limits":"'"$RUN_LIMITS_CAP"'"}' 2>&1 || echo "CURL_FAILED")
 
 HTTP_STATUS=$(echo "$RESPONSE" | tail -n1)
 if [ "${HTTP_STATUS:-}" = "429" ]; then
@@ -920,7 +1140,7 @@ if [ "${HTTP_STATUS:-}" = "429" ]; then
   finish refused 1
 fi
 if [ "${HTTP_STATUS:-}" = "403" ]; then
-  ENC_MSG=$(echo "$RESPONSE" | head -n1 | python3 -c "import sys, json; print(json.load(sys.stdin).get('detail', 'Encoded payload blocked.'))" 2>/dev/null || echo "Encoded payload blocked.")
+  ENC_MSG=$(echo "$RESPONSE" | head -n1 | python3 -I -c "import sys, json; print(json.load(sys.stdin).get('detail', 'Encoded payload blocked.'))" 2>/dev/null || echo "Encoded payload blocked.")
   logger -t eshu-gateway "ENCODED PAYLOAD BLOCKED: $ENC_MSG"
   say "[LOCKED] $ENC_MSG [Gateway $GATEWAY_VERSION]"
   finish refused 1
@@ -933,13 +1153,34 @@ fi
 
 # The API returns `request_id` (int) and `id` (zero-padded display) — prefer the
 # integer, fall back to the old padded id for older dashboards.
-REQUEST_ID=$(echo "$RESPONSE" | head -n1 | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('request_id', d.get('id', 'unknown')))" 2>/dev/null || echo "unknown")
+REQUEST_ID=$(echo "$RESPONSE" | head -n1 | python3 -I -c "import sys, json; d=json.load(sys.stdin); print(d.get('request_id', d.get('id', 'unknown')))" 2>/dev/null || echo "unknown")
 REQUEST_ID_INT=$(printf '%s' "$REQUEST_ID" | sed 's/^0*//')
 case "$REQUEST_ID_INT" in
   ''|*[!0-9]*) DISPLAY_ID="$REQUEST_ID"; REQUEST_HINT="" ;;
   *) DISPLAY_ID=$(printf '%06d' "$REQUEST_ID_INT"); REQUEST_HINT=" Poll check_request($REQUEST_ID_INT) if this client disconnects." ;;
 esac
+# F19/L2: the first limit seen applies to the whole call; an absent field
+# leaves it as it was. A present but broken one refuses the call.
+if ! parse_run_limit "$(printf '%s' "$RESPONSE" | head -n1)"; then
+  say "[LOCKED] Invalid run_limit from the dashboard — refusing to run."
+  finish refused 1
+fi
+
 if [ "$ESHU_MCP" = "1" ]; then
+  # F19/L3: an approved unattended row is claimed here, in the same round
+  # trip, so it runs bounded instead of being left for the poller (which never
+  # receives these rows) or a re-run. The limit comes beside the ticket.
+  if response_is_approved "$(printf '%s' "$RESPONSE" | head -n1)" \
+     && claim_ticket_by_id "$REQUEST_ID_INT"; then
+    if ! parse_run_limit "$CLAIM_BODY"; then
+      say "[LOCKED] Invalid run_limit from the dashboard — refusing to run."
+      finish refused 1
+    fi
+    logger -t eshu-gateway "JIT UNATTENDED CLAIMED IN ONE ROUND TRIP: $cmd"
+    RESULT_PATH="jit"
+    RESULT_REQUEST_ID="$REQUEST_ID_INT"
+    run_sanitized bash -c "$cmd"
+  fi
   # §7: an MCP call cannot hang for minutes. The dashboard polls its own row
   # (wait=true) and calls ssh_exec again once approved; the ticket is waiting.
   say "JIT request #$DISPLAY_ID sent to Dashboard. Poll check_request($REQUEST_ID_INT) and call ssh_exec again once approved."
@@ -960,12 +1201,17 @@ while true; do
 
   # Check if operator denied or approved this request (single status API call)
   STATUS_RESP=$(curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -H "X-Gateway-Token: ${GATEWAY_TOKEN:-}" "$DASHBOARD_URL/api/request_status/$REQUEST_ID" 2>/dev/null || echo "")
-  REQ_STATUS=$(echo "$STATUS_RESP" | python3 -c "import sys, json; print(json.load(sys.stdin).get('status','pending'))" 2>/dev/null || echo "pending")
+  REQ_STATUS=$(echo "$STATUS_RESP" | python3 -I -c "import sys, json; print(json.load(sys.stdin).get('status','pending'))" 2>/dev/null || echo "pending")
   if [ "$REQ_STATUS" = "denied" ]; then
     say "   [DENIED] JIT request #$DISPLAY_ID was denied by operator."
     finish refused 1
   fi
   if [ "$REQ_STATUS" = "approved" ]; then
+    # F19: a re-run can carry the limit on the status response as well.
+    if ! parse_run_limit "$STATUS_RESP"; then
+      say "[LOCKED] Invalid run_limit from the dashboard — refusing to run."
+      finish refused 1
+    fi
     # Claim the ticket BEFORE executing. If the claim fails (slow link, 4xx),
     # executing anyway would leave the request "approved" with no jit_consumed
     # audit — exactly how #2393 ran unrecorded. Retry on the next poll instead.
@@ -980,29 +1226,7 @@ while true; do
         CLAIM_PARSE_OK="no"
         # G5: parse the tag, then compare the agent/session and the command
         # separately. The command is the last field, so its own `|` survives.
-        CLAIM_LINE=$(printf '%s' "$CLAIM_BODY" | python3 -c '
-import json
-import sys
-
-ticket = json.load(sys.stdin).get("ticket") or ""
-if not isinstance(ticket, str) or "|" not in ticket:
-    sys.exit(1)
-parts = ticket.split("|", 4)
-if parts[0] == "v2":
-    if len(parts) < 5:
-        sys.exit(1)
-    _, ts, agent, session, command = parts
-else:
-    ts, command = ticket.split("|", 1)
-    agent = session = ""
-sys.stdout.write("\x1f".join([agent, session, command]))
-' 2>/dev/null) && CLAIM_PARSE_OK="yes"
-        CLAIM_AGENT=""
-        CLAIM_SESSION=""
-        CLAIM_CMD=""
-        if [ "$CLAIM_PARSE_OK" = "yes" ]; then
-          IFS=$'\x1f' read -r CLAIM_AGENT CLAIM_SESSION CLAIM_CMD <<< "$CLAIM_LINE" || CLAIM_PARSE_OK="no"
-        fi
+        if parse_claim_body "$CLAIM_BODY"; then CLAIM_PARSE_OK="yes"; fi
         if [ "$CLAIM_PARSE_OK" != "yes" ]; then
           logger -t eshu-gateway "JIT CLAIM FAILED for #$REQUEST_ID — malformed ticket, will retry"
         elif ! ticket_allowed "$CLAIM_AGENT" "$CLAIM_SESSION"; then
@@ -1012,6 +1236,11 @@ sys.stdout.write("\x1f".join([agent, session, command]))
         elif [ "$CLAIM_CMD" != "$cmd" ]; then
           logger -t eshu-gateway "JIT COMMAND MISMATCH for #$REQUEST_ID — refusing to run"
           say "[LOCKED] Approved command does not match the requested command — refusing to run."
+          finish refused 1
+        elif ! parse_run_limit "$CLAIM_BODY"; then
+          # AF1: the claim response carries the limit. An unattended row
+          # without a usable one is refused here, exactly as on the MCP path.
+          say "[LOCKED] Invalid run_limit from the dashboard — refusing to run."
           finish refused 1
         else
           TICKET_FOUND="yes"
