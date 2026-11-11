@@ -8852,9 +8852,12 @@ snapshot state; and an expired snapshot is deleted by the job.
 
 ### F21 design note — Snapshot before approve
 
-**Status: design note only.** No code on this branch. It needs the security
-reviewer's sign-off (the dashboard gains a credential that can roll a guest
-back), and the three questions at the end are for that reviewer.
+**Status: design note only.** No code on this branch. This revision folds
+AK1 and AK2 (feature pre-read, `5c48cd7`) and AM1–AM6 (security review,
+`f69dbcd`) and records the three §11 decisions the reviewer made. The parts
+the reviewer approved are unchanged in substance; §2, §4 and §7 are the ones
+rewritten, which is what the reviewer said they would re-read. §12 lists every
+change so nothing has to be found by diffing.
 
 #### 1. What this adds, and the trust change
 
@@ -8873,10 +8876,11 @@ The trust change is narrow but real:
   (which is mostly harmless but wastes thin-pool space), and above all not to
   roll back or delete.
 
-Everything below is written so that the four tools exist only for the
-dashboard's own code: every agent-facing path either does not know they exist
-or refuses them by name, and a second, independent guard refuses the Proxmox
-snapshot API itself to any caller running under an agent.
+Two things make that last point structural rather than a promise. The four
+tools are internal and every agent-facing path refuses them by name (§4), and
+the **credential that can snapshot is a separate token** (§4.6, AM2) that the
+agent-facing code never holds. A bug in any one of the five guards is then
+still not enough to roll a guest back.
 
 #### 2. Resolving the target guest
 
@@ -8886,52 +8890,80 @@ one `write` or `unknown` step (`core.cmd_parse.breakdown`). Two shapes:
 * **A — the F7 inner target.** The command wraps a guest:
   `pct exec <vmid> …` / `pct push|pull …` / `qm guest exec <vmid> …`. The
   request row already carries `inner_target` (F7), and `target_ip` is the node.
-* **B — the gateway is itself a guest.** No inner target, but F14's inventory
-  maps the gateway's IP to exactly one Proxmox guest row.
+* **B — the gateway is itself a guest.** No inner target, and the gateway's
+  IP is provably the guest's.
 
-F14's Proxmox source stores **guests only** (`inventory_items` rows with
-`source='proxmox'`, `kind='guest'`, a `vmid`, `host` = the node name, `ips`,
-and `extra.type`/`extra.status`) — it skips the cluster's node rows. The live
-cluster read is therefore part of the resolution, not an extra: one
-`get_cluster_resources` call per offer request, through
-`read_policy.is_read_integration_call` exactly as F14 reads it.
+Every step below uses a source the network cannot steer (AM3). A DNS or DHCP
+record is **never** used to decide which guest is meant: the wrong guest means
+the operator rolls back the wrong machine.
 
-1. **The node.** The cluster rows with `type='node'` give the node names. The
-   gateway is a node when exactly one node name matches something the
-   inventory knows for the gateway: its registered `hostname`, or any
-   entity's `name`/`fqdns` that claims its IP. Zero or two matches → no offer,
-   `snapshot_target_none` / `snapshot_target_ambiguous`.
-2. **The guest.**
-   * Case A: the inventory guest row whose `vmid` equals `inner_target` **and**
-     whose `host` is that node.
-   * Case B: the inventory guest row whose `ips` contains the gateway's IP.
-   * Zero matches → `snapshot_target_none`; more than one (a vm and a
-     container with the same number, or the IP on two guests) →
-     `snapshot_target_ambiguous`.
-3. **The type and status.** The cluster row for `(node, vmid)` gives `type`
-   (`qemu` or `lxc`) and `status`. The type is taken from the API row,
-   **never** guessed from the command word (`pct` vs `qm` is a hint, not a
-   fact). A guest the inventory knows but the cluster does not →
-   `snapshot_target_gone`, no offer. A guest that is not running gets the
-   offer with a note: the snapshot restores its disks only.
-4. **The identity is frozen.** `node`, `type`, `vmid`, and the guest's
-   `name`/`ips` from the inventory are copied onto the snapshot row **at
-   creation**. Every later action compares against them; see §6.
+**2.1 The node — from the cluster, or from the operator.**
+
+1. `GET /api2/json/cluster/status` (a new **internal read** tool,
+   `get_cluster_status`) returns the node rows with `name` and `ip`. The node
+   is the row whose `ip` equals the request's `target_ip`. The gateway's
+   registered name is not consulted — a name can be re-pointed.
+2. If no row matches by IP, the operator-set `gateways.proxmox_node` (a field
+   on the gateways page) is used. It is validated as a node name seen in
+   `cluster/status` when it is saved, and re-checked at offer time.
+3. Neither → no offer, `snapshot_target_none` (detail: `node_not_identified`).
+
+**2.2 The guest.**
+
+* Case A: the inventory guest row (`source='proxmox'`, `kind='guest'`) whose
+  `vmid` equals `inner_target` **and** whose `host` is the node from §2.1.
+* Case B: the gateway's IP must appear in the guest's **own configuration** —
+  for LXC, the `ip=` of its `net*` entries; for qemu, the `ip=` of an
+  `ipconfig*` (cloud-init) entry — read with `get_container_status` /
+  `get_vm_config` through the read path. An IP the guest *reports* (a DHCP
+  lease, an ARP entry, an inventory item that came from Pi-hole or Omada) is
+  **not** evidence: a guest that claims the dashboard's IP would otherwise get
+  someone else's snapshot. An operator-set binding
+  (`gateways.proxmox_guest` = node/vmid) is the fallback.
+* Zero matches → `snapshot_target_none`; more than one (two guests with the
+  same vmid on different nodes, or the IP in two guests' configs) →
+  `snapshot_target_ambiguous`.
+
+The offer card says **which source matched** — "the guest's `net0` says
+192.0.2.10" or "operator binding: pve/103" — so the operator can see why.
+
+**2.3 The type and status.** The `get_cluster_resources` row for
+`(node, vmid)` gives `type` (`qemu`/`lxc`) and `status`. The type comes from
+the API row, never from the command word (`pct` vs `qm` is a hint, not a
+fact). A guest the inventory knows but the cluster does not →
+`snapshot_target_gone`. A guest that is not running gets the offer with a
+note: the snapshot restores its disks only.
+
+**2.4 Never the dashboard's own guest (AM4).** Rolling back the guest that
+runs the dashboard reverts Eshu's database: the audit rows written since the
+snapshot disappear — including the rollback's own row — and approvals, plan
+state and the nonce store reset. The offer is refused for it
+(`snapshot_target_self`). "Which guest is that" comes from an operator
+setting (`dashboard_guest` = node/vmid) and, failing that, from the
+dashboard host's own interface addresses matched against guest configuration
+as in §2.2. If neither can say, the offer is shown (the setting is what makes
+the check exact), but the card carries a warning line naming the risk.
+
+**2.5 The identity is frozen.** `node`, `type`, `vmid` and the guest's
+`name`/`ips` are copied onto the snapshot row at creation. Every later action
+compares against them; see §6.
 
 A Proxmox host command with no inner target (e.g. `pvesm status` on the node)
 gets **no** offer: a snapshot would not cover it.
 
 Reason codes: `snapshot_target_none`, `snapshot_target_ambiguous`,
-`snapshot_target_gone`, `snapshot_unavailable` (no snapshot tools on the
-integration, or the privilege probe failed). The card shows the reason
-instead of the button, so the operator is never left guessing.
+`snapshot_target_gone`, `snapshot_target_self`, `snapshot_unavailable` (no
+snapshot token or tools, or the privilege probe failed). The card shows the
+reason instead of the button.
 
 #### 3. The Proxmox API calls, exactly
 
-All four are `internal` tools seeded on the `proxmox` kind (§4), called by
-`core/snapshots.py` with `execute_integration_call()` — the same executor
-every other integration call uses, so the SSRF guard, auth and audit row are
-unchanged.
+The four write tools are `internal` (§4) and are seeded on the `proxmox`
+kind. Two read tools support the resolution and are also `internal`:
+`get_cluster_status` (§2.1) and the existing `get_vm_config` /
+`get_container_status` used for the guest's own IPs (§2.2). All calls go
+through `execute_integration_call()`, so the SSRF guard, auth and the audit
+row are unchanged.
 
 | tool | call | body / params | returns |
 |---|---|---|---|
@@ -8943,121 +8975,133 @@ unchanged.
 * `snapname` is built by the dashboard, never by an agent:
   `eshu-r<request id>-<unix ts>` (matches PVE's `^[a-z][a-z0-9-]{2,}`).
 * `description` is `eshu request #<id>` plus the **scrubbed** first 80
-  characters of the command (`core.secret_scrub.scrub_string`). It is also
-  the marker the re-check looks for (§6).
-* `vmstate=0`: a memory snapshot would need `VM.Snapshot` **and** a large
-  disk write per guest, and the point here is the disk.
-* **Polling.** `POST` returns a UPID; the dashboard polls
-  `GET /api2/json/nodes/{node}/tasks/{upid}/status` every 2 s until
-  `status == 'stopped'`, then reads `exitstatus`: `OK` is success, anything
-  else is a failure. The UPID is URL-encoded in the path (it contains `:` and
-  `!`). Bounded by `snapshot_poll_timeout_s` (default 120 s, range 30–600).
-  A timeout is **not** success: the row is marked `failed` and the request
-  stays pending (§5).
+  characters of the command (`core.secret_scrub.scrub_string`). It is the
+  marker the re-check looks for (§6).
+* `vmstate=0`: a memory snapshot needs much more from the pool, and the point
+  here is the disk.
+* **UPID shape before polling (AM6).** A `POST` must return a string starting
+  with `UPID:<the stored node>:`; anything else is refused as a bad response
+  and the row is `failed`. The UPID is URL-encoded in the task path (it
+  contains `:` and `!`), and it is never parsed for anything but the node
+  prefix and the task's own status.
+* **Polling.** `GET /api2/json/nodes/{node}/tasks/{upid}/status` every 2 s
+  until `status == 'stopped'`, then `exitstatus`: `OK` is success. Bounded by
+  `snapshot_poll_timeout_s` (default 120, range 30–600). A timeout is **not**
+  success (§5), and nothing is deleted while the task may still be running
+  (§7).
 * The task status read is allowed because the token's **user** owns the task
   it just created.
-
-**Privileges** (on `/vms/{vmid}`, or a pool/path that covers it):
-
-* `VM.Snapshot` — create and delete.
-* `VM.Snapshot.Rollback` — rollback (PVE 8; on PVE 7 the one
-  `VM.Snapshot` covers it, and granting `VM.Snapshot.Rollback` fails with
-  "no such privilege").
-* `VM.Audit` — the snapshot list and `get_cluster_resources` (F14 already
-  needs it for the inventory).
-* If the token has **privilege separation** on, the privileges must be on the
-  token itself, not only on its user.
-
-The integration page gains a **Snapshots** line: a one-shot
-`snapshot_list` against a known guest decides "available" or "unavailable
-(needs VM.Snapshot …)". A refused create becomes that message, **never** a
-confusing approval failure. When the probe has never run, the button is not
-offered (fail closed: no probe, no snapshot).
+* **Privileges**, on the **snapshot token** only (§4.6): `VM.Snapshot` for
+  create and delete, `VM.Snapshot.Rollback` for rollback (PVE 8; on PVE 7 the
+  one `VM.Snapshot` covers it and granting `.Rollback` fails with "no such
+  privilege"), and `VM.Audit` for the snapshot list, the guest config and
+  `cluster/status`. If the token has privilege separation on, the privileges
+  must be on the token itself.
 
 #### 4. Keeping the four tools away from agents
 
-A new column on `integration_tools`: `internal INTEGER NOT NULL DEFAULT 0`.
-The Proxmox seed inserts the four with `internal=1` and `read_only=0`. Five
-independent refusals, each with a test:
+A new column on `integration_tools`: `internal INTEGER NOT NULL DEFAULT 0`,
+and `read_only` as today. The six refusals:
 
-1. **The MCP tool list.** `tools/list` (and the dashboard's tool table, and
-   `describe_tool`) project `internal=0` only. An agent cannot see a name it
-   could try. The dashboard's Integrations page still lists them, read-only,
-   with an `internal` chip, so the operator can see what exists — but the
-   toggle and delete buttons are refused for them (`internal_tool_readonly`).
-2. **`run_tool`.** The choke point every agent call passes: after the tool row
-   is resolved and **before** gating, before a `pending_integration_calls` row
-   is created, and before any execution, `if tool['internal']: refuse
-   'tool_internal'` (audited as `internal_tool_refused`, with the agent and
-   the tool). This also covers a name the agent guessed.
-3. **Hidden-tool calls.** Three shapes reach the executor with a tool name:
-   MCP `run_tool` (covered by 2), a claim/queue path that stores a tool name
-   (F22's `check`, F3's plan items, F15's probe params), and the operator-side
-   execution of a `pending_integration_calls` row. The last two are checked
-   again where they execute; a pending row is refused at execution time even
-   if it was queued before this shipped, because the *executor* checks
-   `internal` too.
-4. **The generic proxy.** `execute_generic_call` never reads
-   `integration_tools`, so a hand-written tool (or a generic call) could aim
-   at the same URL. A Proxmox-kind integration therefore refuses any
-   request whose rendered path matches
-   `^/nodes/[^/]+/(qemu|lxc)/[0-9]+/snapshot(/|$)` — in both
-   `execute_integration_call` and `execute_generic_call`, with the same shape
-   as F9's Supervisor path rule. The refusal happens **only when an agent is
-   on the stack** (`core.agent_context.current_agent()` non-empty): the
-   dashboard's own calls run in a request/worker thread with no agent
-   context. A custom read tool that lists snapshots stays allowed; create,
-   rollback and delete do not.
-5. **The dashboard routes.** Create/rollback/delete are `POST` routes behind
-   `_check_session` and the CSRF check every other operator POST uses; there
-   is no agent-token path to them, and no MCP tool wraps them.
-
-A test per path: as an agent with a valid token, try `run_tool` on each of the
-four names (refused, nothing sent, audit row), try a guessed name, try a
-generic `POST` at the snapshot path (refused by the path guard), and try to
-execute a pending call row created by hand for `snapshot_rollback` (refused at
-execution).
+1. **The MCP tool list.** `tools/list`, `describe_tool` and the dashboard's
+   tool table project `internal=0` only. The Integrations page still lists an
+   internal tool, read-only, with an `internal` chip; toggle and delete are
+   refused (`internal_tool_readonly`).
+2. **`run_tool`.** After the tool row is resolved and **before** gating,
+   before a `pending_integration_calls` row is created and before any
+   execution: `if tool['internal']: refuse 'tool_internal'`, audited as
+   `internal_tool_refused` with the agent and the tool. A guessed name hits
+   the same line.
+3. **Hidden-tool and queued calls.** A stored tool name (F22's check, F3 plan
+   items, F15 probe params) and the operator-side execution of a
+   `pending_integration_calls` row are checked again where they execute, so a
+   row queued before this shipped is refused at execution time.
+4. **The snapshot subtree — unconditional (AK1, AM1, AK2).** A generic call
+   has no tool row to carry `internal`, so a second, path-level guard runs in
+   both `execute_integration_call` and `execute_generic_call`:
+   * It joins the integration's base URL and the rendered path **exactly as
+     the request will be sent**, then normalises the way F9's Supervisor rule
+     does: percent-decode until stable, refuse a backslash or a control
+     character, refuse a `.`/`..` segment, lower-case, collapse `//`, strip
+     the leading `/`.
+   * It then strips the format prefix **after `/api2/`, whatever the segment
+     is** (`json`, `extjs`, …), whether that prefix arrived in the base URL
+     or in the path (AM1). What remains is matched against
+     `nodes/<node>/(qemu|lxc)/<vmid>/snapshot`.
+   * A match refuses **every method except `GET` and `HEAD`**, with no
+     exception for an absent agent context (AK1). That covers create,
+     rollback, delete **and** the `PUT` that edits a snapshot's description —
+     which §6 relies on being untouched.
+   * The one way through is a **module-private sentinel**, not a boolean:
+     `SNAPSHOT_INTERNAL = object()` in `core/integration_proxy.py`, and
+     `execute_integration_call(..., *, snapshot_internal=None)` refuses unless
+     `snapshot_internal is SNAPSHOT_INTERNAL`. Only `core/snapshots.py`
+     imports it. A boolean could be forwarded from stored data; an object
+     cannot come from JSON or SQL, `run_tool` and `execute_generic_call` do
+     not have the parameter at all, and a pending call's payload is data.
+   * The guard runs *before* the request is built, so a refused call sends
+     nothing and writes no call row beyond the refusal audit.
+   * Tests: an **agent-queued generic `POST` at the rollback path, approved
+     by the operator, is refused at execution** (the case that motivated
+     AK1); and
+     `/api2/json/nodes/pve/lxc/101/snapshot/x/rollback`,
+     `//nodes/pve/lxc/101/snapshot/x/rollback`,
+     `/api2/json//nodes/pve/qemu/102/snapshot/s/rollback`,
+     `%2F`-encoded variants, `/api2/extjs/nodes/…`, and `NODES/PVE/…` are all
+     refused for a non-`GET`, while `GET` on the same paths is allowed.
+5. **The dashboard routes.** Create, rollback and delete are `POST` routes
+   behind `_check_session` and the CSRF check every other operator POST uses;
+   no MCP tool wraps them, and there is no agent-token path to them.
+6. **A separate credential (AM2).** The integration stores a second secret,
+   `snapshot_secret`, used **only** by `core/snapshots.py` (a copy of the
+   integration row with `secret` swapped for it). Only that token gets
+   `VM.Snapshot`, `VM.Snapshot.Rollback` and `VM.Audit`; the token every
+   agent-facing call uses stays read-only (`VM.Audit` at most). The setup doc
+   says to create two tokens on the Proxmox side and to keep the main one
+   read-only. `GET /access/permissions` with the **main** token must not list
+   either snapshot privilege — the integration page shows a red "main token
+   can snapshot" warning if it does — and the same call with the snapshot
+   token must list both, else `snapshot_unavailable`. No `snapshot_secret` →
+   `snapshot_unavailable`. With this in place a bug in any of the five guards
+   still cannot roll a guest back.
 
 #### 5. "Snapshot, then run"
 
 The card for an eligible request shows a second button next to **Approve**:
 **Snapshot, then run**. The sequence:
 
-1. The operator clicks it; a confirm dialog names the guest, its node and what
-   a rollback would do.
+1. The operator clicks it; the confirm dialog names the guest, its node, and
+   what a rollback would do — including what a snapshot does **not** cover:
+   bind mounts, passthrough disks, and anything outside the guest (AM6).
 2. The dashboard **re-resolves** the target (§2) — a stale card is refused
    rather than acted on — and takes a per-request lock so a double click does
    not create two snapshots.
-3. It writes the `snapshots` row with `state='creating'` **before** calling
-   Proxmox, so a crash leaves a record of what may exist.
-4. `snapshot_create` → UPID → poll (§3). A create refusal or a task failure
-   sets `state='failed'`, shows the error on the card, and **approves
-   nothing**: the request is still pending, and the operator can use the
-   plain **Approve**.
-5. On `OK`, `state='active'` with `expires_at = now + expiry`, then the normal
-   approve path runs: `UPDATE requests SET status='approved' WHERE id=? AND
-   status='pending'` (the F2 pending-only rule). Only that one row changes.
-   The gateway picks it up exactly as for a plain approval — no new delivery
-   path.
-6. If the approve update finds the row no longer pending (someone else
-   approved or denied it while the snapshot ran), the snapshot stays `active`
-   and the card says so; nothing is run twice.
-
-Failure cases, each tested with a stubbed Proxmox:
+3. It writes the `snapshots` row with `state='creating'` and `expires_at` set
+   **before** calling Proxmox, so a crash leaves a record of what may exist
+   (AM5).
+4. `snapshot_create` → the UPID shape check (§3) → poll. A create refusal, a
+   bad UPID or a task failure sets `state='failed'` (with `expires_at` kept),
+   shows the error, and **approves nothing**: the request is still pending and
+   the operator can use the plain **Approve**.
+5. On `OK`, `state='active'`, then the normal approve path runs:
+   `UPDATE requests SET status='approved' WHERE id=? AND status='pending'`
+   (the F2 pending-only rule). Only that row changes; the gateway picks it up
+   exactly as for a plain approval.
+6. If the approve update finds the row no longer pending, the snapshot stays
+   `active` and the card says so; nothing runs twice.
 
 | case | request | snapshot row | operator sees |
 |---|---|---|---|
 | resolve fails | pending | none | the reason code, no button |
 | create refused (403) | pending | `failed` | "snapshots unavailable (…)", Approve still works |
-| create 5xx / bad JSON | pending | `failed` | the error, request pending |
+| create 5xx / bad JSON / bad UPID | pending | `failed` | the error, request pending |
 | task `exitstatus != OK` | pending | `failed` | the exit status, request pending |
-| poll timeout | pending | `failed` (the task may still be running) | a note that the snapshot may exist and is left to the expiry job |
-| crash between create and poll | pending | `creating` | a startup sweep marks stale `creating` rows `failed` (no delete attempt) |
+| poll timeout | pending | `failed` (the task may still be running) | a note that the snapshot may exist; the expiry job deletes it after the re-check (§7) |
+| crash between create and poll | pending | `creating` | a startup sweep marks stale `creating` rows `failed`, keeping `expires_at` (AM6) |
 | approve raced | approved by someone else | `active` | "the request was already decided" |
 
-A `creating` row that never resolves is marked `failed` on the next dashboard
-start, once it is older than the poll timeout. It is **not** deleted there:
-deleting needs a re-check, and the expiry job owns that.
+A `failed` row is **not** rolled back (§6): its create task was never seen to
+finish, so it offers **Delete** only (AM5).
 
 #### 6. Rollback and delete
 
@@ -9065,99 +9109,104 @@ Both are operator-only (`_check_session` + CSRF), both take a snapshot **row
 id**, never a vmid or a name from the browser, and both re-verify before
 acting. The re-check, in this order, all from the stored row:
 
-1. the row's state is `active` or `failed`;
+1. the row's state is `active` for a rollback; `active` or `failed` for a
+   delete (AM5);
 2. the stored node/type/vmid still resolve to a Proxmox guest **whose
-   inventory row still matches**: same `vmid`, and the same `name`/`ips` that
-   were recorded at creation. A recycled vmid (a guest deleted and another
-   created with the same number — the F16 lesson) shows a different name or
-   IP and is refused with `snapshot_target_changed`;
+   inventory row still matches**: same `vmid`, and the same `name`/`ips`
+   recorded at creation. A recycled vmid — a guest deleted and another created
+   with the same number (the F16 lesson) — shows a different name or IP and is
+   refused with `snapshot_target_changed`;
 3. `snapshot_list` on that guest still contains a snapshot whose `name` is the
-   stored name **and** whose `description` starts with `eshu request #<id>`.
-   A name that now belongs to another snapshot, or a snapshot someone edited,
-   is refused (`snapshot_not_ours`);
+   stored name **and** whose `description` starts with `eshu request #<id>`;
+   a name that now belongs to another snapshot, or an edited description, is
+   refused (`snapshot_not_ours`);
 4. the stored `expires_at` has not passed.
 
 Then:
 
-* **Roll back** → `snapshot_rollback`, poll the task the same way, set
-  `state='rolled_back'`, audit `snapshot_rolled_back`, and show the result on
-  the request. The confirm says that the guest's disks return to the snapshot
-  time and that a running LXC/qemu guest is stopped and started again.
-* **Delete** → `snapshot_delete`, poll, set `state='deleted'`, audit
+* **Roll back** → `snapshot_rollback` (UPID check, poll), `state='rolled_back'`,
+  audit `snapshot_rolled_back`, result on the request. The confirm says the
+  guest's disks return to the snapshot time and that a running guest is
+  stopped and started again.
+* **Delete** → `snapshot_delete` (UPID check, poll), `state='deleted'`, audit
   `snapshot_deleted`.
 
 A refusal touches nothing, audits `snapshot_refused` with the reason, and
 shows it. A rollback that succeeds does **not** re-run or re-approve the
-request: the operator decides what to do next.
+request.
+
+**Rolling back a gateway guest (AM4).** That reverts the gateway's files,
+including F12's nonce store (G4). A replayed ticket would be re-answerable
+once, which is why the ticket's own expiry is checked **first**: a ticket is
+short-lived (90 s by default) and a snapshot cannot be rolled back before the
+operator has seen the request, approved the snapshot, and the run finished.
+The code round keeps that order (expiry before the nonce), and the test is
+that a ticket older than its TTL is refused **by expiry alone**, with the
+nonce store empty.
 
 #### 7. The expiry job
 
 A background thread (`start_snapshot_expiry()`, 600 s, started with the
-inventory loop), reading `snapshots` for `state='active' AND expires_at <=
-now`, and for each row: the same re-check as §6, then `snapshot_delete`, poll,
-`state='expired'`. A row that fails the re-check is left alone and retried;
-after 6 consecutive failures it becomes `orphaned` with `last_error`, and the
-operator sees it on the page.
+inventory loop) reading the rows it owns:
 
-The job never lists the cluster and never deletes anything it cannot match to
+* `state='active' AND expires_at <= now` — delete (§6's re-check, then
+  `snapshot_delete`, `expired`);
+* `state='failed' AND expires_at <= now` — the create task may have finished
+  after the timeout, so it runs the same re-check: **found** → delete →
+  `expired`; **not found** → `gone` (AM5). This is what stops a late snapshot
+  from filling the thin pool.
+* `state='creating'` older than the poll timeout → `failed`, keeping
+  `expires_at` (AM6), and the next run handles it as above.
+
+A row that fails the re-check is left alone and retried; after 6 consecutive
+failures it becomes `orphaned` with `last_error`, and the page shows it.
+
+The job never lists the cluster, and never deletes anything it cannot match to
 its own row and its own description, so it cannot delete a human's snapshot.
-It writes one audit row per run **only when it deleted something** (a summary
-count), not one per tick.
+One audit row per run **only when it deleted something**.
 
 Setting: `snapshot_expiry_hours`, default **72**, range **1–336** (1 h–14 d),
-validated in `db/misc.py` like F19's limits; a new snapshot takes the value at
-creation, so changing the setting never shortens a snapshot that already
-exists.
+validated in `db/misc.py` like F19's limits. Every row takes the value at
+creation, so changing the setting never shortens an existing snapshot.
 
-#### 8. The freeze question — recommended answer
+#### 8. Freeze
 
-**Recommendation: during a freeze, rollback is allowed; create and delete are
-allowed or refused as follows — create refused, delete allowed, expiry job
-keeps running.**
+The reviewer accepted the recommendation, so this is the decision of record:
 
-The argument:
-
-* A freeze exists to stop *new* change while an incident is being understood
-  (F9: "SSH and integration writes are paused"). A rollback is not new
-  change: it is the documented way **back** to a state Eshu itself recorded,
-  and it is the one button an operator needs when a change turns out to be the
-  incident. Refusing it during a freeze strands them with a broken guest and
-  forbids the recovery the feature exists for. The freeze would then be
-  protecting the damage.
-* It is still a write to the guest's disks, so it is not silent: the confirm
-  dialog names the freeze, the action is audited with the freeze state, and
-  the card carries the F9 red line.
-* **Create is refused** while frozen: it exists only to precede an approval,
-  and no approval happens during a freeze.
-* **Delete is allowed**: it removes a snapshot Eshu made, frees thin-pool
-  space (which is what makes a rollback possible at all), and cannot make
-  anything worse. The expiry job likewise keeps running — pausing it during an
-  incident would let snapshots fill the pool exactly when the operator may
-  need to roll back.
-* No agent path exists either way, so a freeze cannot be bypassed through
-  this door: the only caller is the operator's session.
-
-If the reviewer prefers the stricter answer (everything refused while frozen,
-including rollback), the design supports it — the check is one line in
-`core/snapshots.py` — but it should then say what the operator does instead
-when a frozen host needs to go back, because the answer cannot be "unfreeze
-first": unfreezing is itself the action the freeze is guarding.
+* **Rollback is allowed** with a freeze on. A freeze stops *new* change; a
+  rollback is the documented way **back** to a state Eshu recorded, and
+  refusing it strands the operator with a broken guest and forbids the
+  recovery the feature exists for. The confirm names the freeze, the audit row
+  records it, and the card carries the F9 red line.
+* **Create is refused** — it exists only to precede an approval, and no
+  approval happens during a freeze.
+* **Delete and the expiry job keep running** — they only remove Eshu's own
+  snapshots and free the thin-pool space a rollback needs.
+* It is acceptable because rollback has **no agent path** (§4, §4.6): the
+  only caller is the operator's session. If F24's tripwire freezes the system
+  because an *agent session* looks compromised, that session still has no door
+  here.
+* Tests: both kinds of freeze — the operator's and the tripwire's — allow a
+  rollback, refuse a create, and let a delete and the expiry run through.
 
 #### 9. Storage and UI
 
 * Table `snapshots`: `id`, `request_id`, `plan_id` (nullable, for F22 later),
   `integration`, `node`, `type`, `vmid`, `name`, `description`, `guest_name`,
-  `guest_ips`, `created_at`, `expires_at`, `state`
-  (`creating|active|rolled_back|deleted|expired|failed|orphaned`),
+  `guest_ips`, `target_source` (which §2.2 source matched), `created_at`,
+  `expires_at` (**always set**, AM5), `state`
+  (`creating|active|rolled_back|deleted|expired|gone|failed|orphaned`),
   `created_by`, `rolled_back_at`, `deleted_at`, `attempts`, `last_error`.
   Two indexes: `(request_id)`, `(state, expires_at)`.
-* The approval card (F2) and the request sidebar (F18) show: the snapshot name,
-  its age, its expiry, and the two buttons. The card is where the second
-  approve lives, so the operator sees the diff, the risk banner and the
-  snapshot offer together.
-* The page listed in the design gets no separate route in this chunk: the two
-  buttons and a `/api/snapshots/{request_id}` read are enough; a
-  "Snapshots" section belongs to the maintenance page if one is ever built.
+* `integrations`: a second secret column `snapshot_secret`, masked like
+  `secret` (a `snapshot_suffix` for display), never returned by the API, and
+  used only by `core/snapshots.py` (AM2).
+* `gateways`: `proxmox_node` and `proxmox_guest`, both operator-set, both
+  re-checked at offer time (§2).
+* Meta setting `dashboard_guest`, for §2.4.
+* The approval card (F2) and the request sidebar (F18) show the snapshot name,
+  its age, its expiry and the two buttons; the card is where the second
+  approve lives, so diff, risk banner and the offer are seen together.
 * Thin pool: `get_cluster_resources` gains `disk`, `maxdisk`, `mem`,
   `maxmem` in its projected `fields` (the API already returns them), and a
   guest above **85 %** disk use gets the offer with a warning line: a
@@ -9166,45 +9215,69 @@ first": unfreezing is itself the action the freeze is guarding.
 
 #### 10. Tests (outline, stubbed Proxmox throughout)
 
-* **The offer:** `pct exec 101` on a node gets it; a gateway that is one guest
-  gets it; no inventory match, two matches, an ambiguous vmid, a node command
-  with no inner target, and a guest missing from the cluster do not (each with
-  its reason code).
-* **The privilege probe:** unavailable → no button, never a failed approval.
-* **The sequence:** success creates with the exact name and description, poll,
-  then approves (and the request row is the only thing that changed); a
-  create refusal, a task error, a timeout and a crash each leave the request
-  pending and the row `failed`/`creating`.
-* **Every agent path:** the four names through `run_tool`, a guessed name, a
-  generic `POST` at the snapshot path, and a hand-made pending row for
-  `snapshot_rollback` — each refused, nothing sent, audit row present; and
-  `tools/list` does not contain the four names.
+* **The offer:** `pct exec 101` on a node gets it; a gateway whose IP is in a
+  guest's own `net0`/`ipconfig0` gets it; the operator bindings work as
+  fallbacks. Each refusal has its reason code:
+  * no `cluster/status` row and no binding → `snapshot_target_none`;
+  * the IP appears in two guests' configs, or two guests share the vmid →
+    `snapshot_target_ambiguous`;
+  * the inventory guest is gone from the cluster → `snapshot_target_gone`;
+  * the resolved guest is the dashboard's own → `snapshot_target_self`;
+  * a DNS/Pi-hole/Omada IP claim alone → not matched (AM3);
+  * a node matched by name only → not matched (AM3).
+* **The credential (AM2):** no `snapshot_secret` → no offer; the probe with
+  the main token listing a snapshot privilege → the red warning and the offer
+  refused; the probe with the snapshot token missing a privilege →
+  `snapshot_unavailable`.
+* **The sequence:** success creates with the exact name and description,
+  checks the UPID, polls, then approves (only the request row changes); a
+  create refusal, a bad UPID, a task error, a timeout and a crash each leave
+  the request pending with the row `failed`/`creating` and `expires_at` set.
+* **Every agent path:** `run_tool` on each internal name and a guessed name;
+  `tools/list` without them; a **generic `POST` queued by an agent and
+  approved by the operator, refused at execution**; a hand-made
+  `pending_integration_calls` row for `snapshot_rollback`, refused at
+  execution; the path guard on all of AK2's spellings, with `GET` still
+  allowed; `PUT` on the description refused.
 * **Rollback/delete:** an agent token and a missing CSRF token are refused; a
-  gone snapshot, a renamed one, an edited description, a recycled vmid (same
-  vmid, different name/IP) and an expired row are each refused by the
-  re-check and touch nothing; a good one rolls back and audits.
-* **Expiry:** deletes only `active` + expired rows that pass the re-check;
-  leaves one that fails it; makes one `orphaned` after the retry limit; never
-  deletes a snapshot it cannot match.
-* **Freeze:** with a freeze on, rollback is allowed and audited with the
-  freeze named, create is refused, delete and the expiry job run.
+  `failed` row is not rollable but is deletable; a gone, renamed, re-described
+  or expired row is refused by the re-check; a recycled vmid is refused; a
+  good rollback audits.
+* **Expiry:** deletes `active` and `failed` rows that pass the re-check; marks
+  a not-found snapshot `gone`; leaves one that fails the re-check and makes it
+  `orphaned` after the limit; a `creating` row becomes `failed` with
+  `expires_at`; never deletes a snapshot it cannot match.
+* **Freeze:** both freeze kinds — rollback allowed and audited with the freeze
+  named, create refused, delete and expiry run.
+* **The nonce note (AM4):** a F12 ticket older than its TTL is refused by
+  expiry alone with an empty nonce store.
 
-#### 11. What the security reviewer must decide
+#### 11. The three questions, answered
 
-1. **The freeze answer** — the recommendation in §8 (rollback allowed; create
-   refused; delete and expiry allowed). If the reviewer wants everything
-   refused, say what the operator does instead.
-2. **The timeout-mid-flight rule** — the snapshot is left for the expiry job
-   rather than deleted on timeout (§5). Deleting during a possibly running
-   task is the one thing this note deliberately does not do.
-3. **The path guard's scope** — agents are refused the whole
-   `/nodes/{node}/{type}/{vmid}/snapshot` subtree on a Proxmox integration
-   (§4.4). A narrower rule (only create/rollback/delete) would still leave
-   `snapshot_list` readable, which the note leaves allowed on purpose: it is
-   a read, and F14 already exposes far more. Confirm, or ask for the whole
-   subtree.
+1. **Freeze:** accepted as recommended — rollback allowed, create refused,
+   delete and expiry run (§8). Tested for both freeze kinds.
+2. **A timeout in mid-flight:** accepted — nothing is deleted while the task
+   may still be running. AM5 makes the expiry job the owner of that snapshot,
+   for `failed` rows too (§5, §7).
+3. **The path guard's scope:** the whole subtree. Every method except `GET`
+   and `HEAD` is refused unconditionally, under any format prefix (AM1,
+   §4.4). `snapshot_list` stays readable to agents: it is a read and shows
+   nothing F14 does not already show.
 
-`bash scripts/verify.sh`: `2642 passed, 22 skipped, 7 warnings in 533.90s (0:08:53)` (docs only).
+#### 12. What changed in this round
+
+| item | where | change |
+|---|---|---|
+| AK1 | §4.4 | the subtree refusal is unconditional for non-`GET`/`HEAD`; the way through is a module-private sentinel, not a boolean or a "no agent on the stack" test |
+| AK2 | §4.4 | the rendered path is normalised (decode-until-stable, no dot segments, lower-case, `//` collapsed) and matched after `/api2/<segment>/`, whichever side carried it |
+| AM1 | §4.4 | all methods but `GET`/`HEAD` refused (including the description `PUT`); any format prefix; sentinel object instead of `bool` |
+| AM2 | §4.6, §9 | a separate `snapshot_secret`, used only by `core/snapshots.py`; the agent-facing token stays read-only; the probe warns when the main token can snapshot |
+| AM3 | §2.1, §2.2 | the node comes from `cluster/status`' IP or the operator's field, never a name; a gateway-as-guest matches only the guest's own config IPs; the card names the source |
+| AM4 | §2.4, §6 | no offer for the dashboard's own guest (`snapshot_target_self`); the gateway-guest nonce reset is safe because ticket expiry is checked first, and that is tested |
+| AM5 | §5, §6, §7 | `expires_at` on every row; the expiry job handles `failed` rows (`expired`/`gone`); only `active` rows roll back, `failed` rows offer Delete only |
+| AM6 | §3, §5, §7 | the UPID must start with `UPID:<stored node>:`; the confirm says what a snapshot does not cover; the startup sweep keeps `expires_at` |
+
+`bash scripts/verify.sh`: `2642 passed, 22 skipped, 7 warnings in 534.37s (0:08:54)` (docs only).
 
 ### Implementer notes
 
@@ -9872,7 +9945,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 14 | F14 | inventory | dashboard + MCP | Merged | `feat/f14-inventory` | Chunk H | |
 | 15 | F19 | unattended-limits | gateway + dashboard | Code approved by both reviewers on AF1/AF2 (security `67bec51`); feature reviewer checks AF1/AF2, then merge | `feat/f19-unattended-limits` | F4, F5, F12 | moved ahead of F21–F23: nearly done, and F22 needs it. AF3 goes on the next gateway branch |
 | 16 | F15 | probes | dashboard + MCP | Code round 1: changes requested AG1–AG7 (`56d86e3`); **AG1 to security** | `feat/f15-probes` | F4, F12, F14 | main line, not only local-model |
-| 17 | F21 | snapshot-approve | dashboard + Proxmox | Security review (`5c48cd7`): design approved on AK1/AK2 + **AM1–AM5 must** (methods and format prefixes, separate snapshot token, node/guest from trusted sources, no offer for the dashboard guest, `failed` rows); freeze recommendation accepted | `feat/f21-snapshot-approve` | F7, F14, F2 | security re-reads §2, §4, §7, then code |
+| 17 | F21 | snapshot-approve | dashboard + Proxmox | **Design round 1: AK1/AK2 and AM1–AM6 folded** — unconditional subtree guard behind a private sentinel, normalised `/api2/<seg>/` matching, a separate snapshot token, node/guest from trusted sources, `snapshot_target_self`, `failed` rows and `gone`; the three questions recorded | `feat/f21-snapshot-approve` | F7, F14, F2 | security re-reads §2, §4, §7, then code |
 | 18 | F23 | change-journal | dashboard | Ready | `feat/f23-change-journal` | F1, F5, F7, F14 | no security gate; can be coded while F21's design is with security |
 | 18a | X2 | runbooks-page | dashboard UI | Ready | `feat/x2-runbooks-page` | F13 | small; no security gate |
 | 19 | F22 | change-checks | dashboard + MCP | After F19 merges | `feat/f22-change-checks` | F3, F5, F12, F19 | + security sign-off (the unattended check; AG1's origin rule does not cover it) |
