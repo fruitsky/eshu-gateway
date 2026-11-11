@@ -463,6 +463,22 @@ def create_recipe_request(target_ip: str, command: str, run_id: int,
     return req_id
 
 
+def expire_recipe_reservation(req_id: int) -> bool:
+    """AW3: drop a reservation the engine never got to use.
+
+    Only an unhanded, still-approved row of this recipe run is expired; a row
+    the gateway already took (`recipe_handed = 1`) belongs to the normal
+    ticket flow and is left alone.
+    """
+    with db_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("UPDATE requests SET status = 'expired' "
+                    "WHERE id = ? AND recipe_handed = 0 AND status = 'approved'",
+                    (int(req_id),))
+        conn.commit()
+        return cur.rowcount == 1
+
+
 def take_recipe_reservation(target_ip: str, command: str, session_id: str,
                             agent: str, now=None):
     """Hand the engine's reserved row to the gateway that asks for it.

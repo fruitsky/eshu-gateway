@@ -21,13 +21,21 @@ from core.recipes import (
     RecipeError, approve, execute_rollback, execute_run, propose, rollback,
     start_run, validate_document,
 )
+from db.agent_policies import set_agent_policy
+from db.agent_tokens import (
+    create_agent_token, get_agent_by_name, revoke_agent_token,
+)
 from db.core import db_conn
-from db.gateways import register_gateway, set_gateway_run_limits
+from db.gateways import (
+    register_gateway, set_gateway_run_limits, set_gateway_ssh_capabilities,
+    set_gateway_ssh_host_key, set_gateway_token,
+)
 from db.integrations import create_integration, create_tool, get_tool
 from db.recipes import get_recipe, get_run, get_version_by_number, list_runs
+from db.requests import get_request_row
 from db.session_plans import (
     PlanError, approve_plan, claim_mcp_plan_item, claim_plan_item,
-    claim_recipe_item, create_plan, get_plan,
+    claim_recipe_item, create_plan, create_recipe_plan, get_plan,
 )
 from db.sessions import upsert_session
 from core.npm_seed import seed_npm_tools
@@ -51,6 +59,11 @@ def env(monkeypatch, temp_db):
     seed_pihole_tools(pihole)
     register_gateway(HOST, GW, 'v15.3')
     set_gateway_run_limits(HOST, 'v1')
+    # AW1/AW2: a run started by an agent has a real agent row, and the engine
+    # re-reads it before every step.
+    create_agent_token('hermes')
+    hermes = get_agent_by_name('hermes')
+    set_agent_policy(hermes['id'], ssh_hosts_allow=[GW], ssh_mode='approval')
     import core.recipes as recipes
     monkeypatch.setattr(recipes, 'verify_access_list',
                         lambda integration, access: access)
@@ -116,6 +129,16 @@ def doc(name='add_internal_fqdn', **overrides):
 
 def approved(name='add_internal_fqdn', **overrides):
     propose(doc(name, **overrides), owner='operator')
+    recipe = get_recipe(name=name)
+    approve(recipe['id'], 1, actor='operator')
+    return recipe['id']
+
+
+def approved_tool_only(name='npm_only'):
+    """A recipe with one tool step: what an operator-started run may be."""
+    d = doc(name)
+    d['steps'] = d['steps'][:1]
+    propose(d, owner='operator')
     recipe = get_recipe(name=name)
     approve(recipe['id'], 1, actor='operator')
     return recipe['id']
@@ -467,12 +490,26 @@ class TestApproval:
         assert exc.value.code == 'recipe_agent_not_allowed'
 
     def test_the_operator_may_always_run(self, env, run_env):
-        recipe_id = approved()
-        out = start_run(recipe_id, {'fqdn': 'app.example.test',
-                                    'target_ip': '192.0.2.10', 'port': 443},
+        # AW1: an operator-started run has no agent identity, so it may run a
+        # tool-only recipe and never an SSH step.
+        d = doc()
+        d['steps'] = d['steps'][:1]
+        propose(d, owner='operator')
+        recipe = get_recipe(name='add_internal_fqdn')
+        approve(recipe['id'], 1, actor='operator')
+        out = start_run(recipe['id'], {'fqdn': 'app.example.test',
+                                       'target_ip': '192.0.2.10', 'port': 443},
                         agent='', session_id='s1')
         assert out['status'] == 'pending'
         assert out['plan_id']
+
+    def test_an_operator_run_with_an_ssh_step_is_refused(self, env, run_env):
+        recipe_id = approved()
+        with pytest.raises(RecipeError) as exc:
+            start_run(recipe_id, {'fqdn': 'app.example.test',
+                                  'target_ip': '192.0.2.10', 'port': 443},
+                      agent='', session_id='s1')
+        assert exc.value.code == 'recipe_operator_ssh'
 
     def test_the_plan_items_are_recipe_sourced(self, env, run_env):
         recipe_id = approved()
@@ -719,6 +756,14 @@ class TestApi:
         steps = preview.json()['steps']
         assert steps[1]['command'] == 'getent hosts app.example.test'
         assert steps[0]['args']['body']['access_list_id'] == 7
+        # AW1: the dashboard run route starts as the operator, so it may run a
+        # tool-only recipe; the SSH-bearing one is refused with a clear reason.
+        refused = auth_client.post('/api/recipes/%d/run' % rid, json={
+            'parameters': {'fqdn': 'app.example.test', 'target_ip': '192.0.2.10',
+                           'port': 443}})
+        assert refused.status_code == 400
+        assert 'operator-started run cannot use SSH steps' in refused.text
+        rid = approved_tool_only()
         run = auth_client.post('/api/recipes/%d/run' % rid, json={
             'parameters': {'fqdn': 'app.example.test', 'target_ip': '192.0.2.10',
                            'port': 443}})
@@ -728,7 +773,7 @@ class TestApi:
         assert runs and runs[0]['status'] == 'pending'
 
     def test_rollback_route(self, auth_client, env, run_env):
-        rid = approved()
+        rid = approved_tool_only()
         run = auth_client.post('/api/recipes/%d/run' % rid, json={
             'parameters': {'fqdn': 'app.example.test', 'target_ip': '192.0.2.10',
                            'port': 443}}).json()
@@ -838,3 +883,225 @@ class TestPlanGate:
         execute_run(out['run_id'])
         assert get_run(out['run_id'])['status'] == 'pending'
         assert not [c for c in run_env.tool_calls if c[3] != 'precondition']
+
+
+# ── code round 1: AW1–AW4 ──────────────────────────────────────────────
+
+import base64
+
+from core import ssh_exec as sx
+
+
+HOST_KEY = ('ssh-ed25519 ' + base64.b64encode(b'0' * 32).decode()
+            + ' root@web01')
+
+
+def ssh_doc(command='getent hosts {fqdn}', name='resolve_it'):
+    """A recipe whose only step is an SSH command."""
+    d = doc(name)
+    d['steps'] = [d['steps'][1]]
+    d['steps'][0]['ssh']['command'] = command
+    d['preconditions'] = []
+    return d
+
+
+def _ready_gateway():
+    from db.gateways import (
+        set_gateway_ssh_capabilities, set_gateway_ssh_host_key,
+        set_gateway_token,
+    )
+    set_gateway_token(HOST, 'eshu-test-token')
+    set_gateway_ssh_host_key(HOST, HOST_KEY)
+    set_gateway_ssh_capabilities(HOST, sx.AGENT_FORMAT, sx.TICKET_FORMAT)
+
+
+def _stub_runner(monkeypatch, status='ran', exit_code=0):
+    """Stub only the SSH runner, so `ssh_exec` runs for real."""
+    calls = []
+
+    def fake(gateway, command_line, known_hosts, key_path, timeout):
+        calls.append({'gateway': gateway, 'command_line': command_line})
+        envelope = {'status': status, 'request_id': 70,
+                    'exit_code': exit_code,
+                    'output_b64': base64.b64encode(b'192.0.2.10\n').decode(),
+                    'truncated': False, 'messages': []}
+        return {'rc': 0,
+                'stdout': sx.ENVELOPE_PREFIX + json.dumps(envelope),
+                'stderr': '', 'timed_out': False}
+
+    monkeypatch.setattr(sx, 'run_ssh', fake)
+    monkeypatch.setattr(sx.ssh_keys, 'write_known_hosts',
+                        lambda ip, key: '/tmp/kh.' + ip)
+    monkeypatch.setattr(sx.ssh_keys, 'ensure_key_pair', lambda: '/tmp/key')
+    return calls
+
+
+def _run_ssh_recipe(monkeypatch, command='getent hosts {fqdn}',
+                    tool_stub=None):
+    upsert_session('s1', agent='hermes', goal='resolve the name')
+    d = ssh_doc(command)
+    propose(d, owner='operator')
+    recipe = get_recipe(name=d['name'])
+    approve(recipe['id'], 1, actor='operator')
+    out = start_run(recipe['id'], {'fqdn': 'app.example.test',
+                                   'target_ip': '192.0.2.10', 'port': 443},
+                    agent='hermes', session_id='s1')
+    approve_plan(out['plan_id'])
+    execute_run(out['run_id'])
+    return get_run(out['run_id']), out
+
+
+def _hermes():
+    return get_agent_by_name('hermes')
+
+
+class TestAgentIdentity:
+    """AW1: the SSH step runs as the real agent, through the real ssh_exec."""
+
+    def test_an_allowed_host_reaches_the_gateway(self, env, monkeypatch):
+        _ready_gateway()
+        calls = _stub_runner(monkeypatch)
+        run, out = _run_ssh_recipe(monkeypatch)
+        assert run['status'] == 'ok', (run['failed_step'],
+                                       [st['error'] for st in run['steps']])
+        assert len(calls) == 1
+        assert 'getent hosts app.example.test' in calls[0]['command_line']
+        assert 'hermes' in calls[0]['command_line']
+        step = [s for s in run['steps'] if s['step_id'] == '2'][0]
+        assert step['status'] == 'ok'
+        assert step['request_id']
+        # The reservation was handed to the gateway in the stub's envelope.
+        row = get_request_row(step['request_id'])
+        assert row['status'] == 'approved'
+        assert row['recipe_run_id'] == out['run_id']
+
+    def test_a_host_outside_the_agents_allowlist_is_refused(self, env,
+                                                            monkeypatch):
+        _ready_gateway()
+        calls = _stub_runner(monkeypatch)
+        set_agent_policy(_hermes()['id'],
+                         ssh_hosts_allow=['other.example.test'])
+        run, out = _run_ssh_recipe(monkeypatch)
+        assert run['status'] == 'failed'
+        assert run['failed_step'] == '2'
+        assert calls == []
+        step = [s for s in run['steps'] if s['step_id'] == '2'][0]
+        assert 'no SSH access' in step['error']
+        # AW3: the reservation the engine made is expired, not claimable.
+        row = get_request_row(step['request_id'])
+        assert row['status'] == 'expired'
+        assert row['recipe_handed'] == 0
+
+    def test_a_read_only_agent_may_not_run_a_write_step(self, env, monkeypatch):
+        _ready_gateway()
+        calls = _stub_runner(monkeypatch)
+        set_agent_policy(_hermes()['id'], ssh_hosts_allow=[GW],
+                         ssh_mode='read_only')
+        run, out = _run_ssh_recipe(monkeypatch,
+                                   command='systemctl restart nginx')
+        assert run['status'] == 'failed'
+        assert calls == []
+        step = [s for s in run['steps'] if s['step_id'] == '2'][0]
+        assert 'read-only' in step['error'].lower()
+        assert get_request_row(step['request_id'])['status'] == 'expired'
+
+    def test_an_operator_run_cannot_use_ssh(self, env, monkeypatch):
+        with pytest.raises(RecipeError) as exc:
+            start_run(approved(), {'fqdn': 'app.example.test',
+                                   'target_ip': '192.0.2.10', 'port': 443},
+                      agent='', session_id='s1')
+        assert exc.value.code == 'recipe_operator_ssh'
+
+
+class TestAgentStanding:
+    """AW2: the agent's standing is re-read before every step."""
+
+    def test_a_revoked_agent_stops_the_second_step(self, env, run_env):
+        recipe_id = approved()
+        real = run_env.tool
+
+        def first_then_revoke(run, integration, tool, args, step_id):
+            value = real(run, integration, tool, args, step_id)
+            if tool == 'create_proxy_host':
+                revoke_agent_token(_hermes()['id'])
+            return value
+
+        import core.recipes as recipes
+        original = recipes._run_tool_call
+        recipes._run_tool_call = first_then_revoke
+        try:
+            out = start_run(recipe_id, {'fqdn': 'app.example.test',
+                                        'target_ip': '192.0.2.10',
+                                        'port': 443}, agent='hermes',
+                            session_id='s1')
+            approve_plan(out['plan_id'])
+            execute_run(out['run_id'])
+        finally:
+            recipes._run_tool_call = original
+        run = get_run(out['run_id'])
+        assert run['status'] == 'stopped'
+        assert run['failed_step'] == '2'
+        assert run_env.ssh_calls == []
+        step = [s for s in run['steps'] if s['step_id'] == '2'][0]
+        assert step['status'] == 'failed'
+        assert 'revoked' in step['error']
+
+    def test_a_tightened_tool_allowlist_stops_the_next_step(self, env,
+                                                            run_env):
+        d = doc('two_tools')
+        d['preconditions'] = []
+        d['steps'] = [
+            d['steps'][0],
+            {'id': '2', 'kind': 'tool', 'title': 'DNS records',
+             'call': {'integration': 'Pi-hole', 'tool': 'local_dns_records',
+                      'args': {}},
+             'check': None, 'undo': None},
+        ]
+        propose(d, owner='operator')
+        recipe = get_recipe(name='two_tools')
+        approve(recipe['id'], 1, actor='operator')
+        set_agent_policy(_hermes()['id'], tools_mode='allowlist',
+                         tools=['nginx_proxy_manager_create_proxy_host'])
+        out = start_run(recipe['id'], {'fqdn': 'app.example.test',
+                                       'target_ip': '192.0.2.10',
+                                       'port': 443}, agent='hermes',
+                        session_id='s1')
+        approve_plan(out['plan_id'])
+        execute_run(out['run_id'])
+        run = get_run(out['run_id'])
+        assert run['status'] == 'stopped'
+        assert run['failed_step'] == '2'
+        step = [s for s in run['steps'] if s['step_id'] == '2'][0]
+        assert 'allowlist' in step['error']
+
+    def test_the_standing_check_precedes_the_claim(self, env, run_env):
+        """A revoked agent must not spend the step's approval."""
+        recipe_id = approved()
+        revoke_agent_token(_hermes()['id'])
+        out = start_run(recipe_id, {'fqdn': 'app.example.test',
+                                    'target_ip': '192.0.2.10', 'port': 443},
+                        agent='hermes', session_id='s1')
+        approve_plan(out['plan_id'])
+        execute_run(out['run_id'])
+        run = get_run(out['run_id'])
+        assert run['status'] == 'stopped'
+        plan = get_plan(out['plan_id'])
+        assert all(item['uses'] == 0 for item in plan['items'])
+
+
+class TestReservationAndPlanItems:
+    """AW3/AW4."""
+
+    def test_an_ssh_plan_item_must_name_its_host(self, env):
+        with pytest.raises(PlanError) as exc:
+            create_recipe_plan('s1', 1, [
+                {'kind': 'ssh', 'command': 'uptime', 'step_id': '1'}])
+        assert exc.value.code == 'recipe_item_host'
+        with pytest.raises(PlanError) as exc:
+            create_recipe_plan('s1', 1, [
+                {'kind': 'ssh', 'command': 'uptime', 'host': '*',
+                 'step_id': '1'}])
+        assert exc.value.code == 'recipe_item_host'
+        plan = create_recipe_plan('s1', 1, [
+            {'kind': 'ssh', 'command': 'uptime', 'host': GW, 'step_id': '1'}])
+        assert plan['items'] == 1

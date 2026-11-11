@@ -10198,6 +10198,67 @@ residual window in which a direct call with the same bytes can be handed
 it. With AW3 the window is only the gap between the reservation and the
 engine's own request.
 
+### Code round 2 — AW1–AW4 (implementer notes)
+
+**Status: AW1–AW4 are in. One decision is for the security reviewer: an
+operator-started run cannot use SSH steps (below).**
+
+**AW1 — the SSH step runs as the real agent.** `_run_ssh` no longer invents
+`{'name': ...}`: it loads the run's agent row (`get_agent_by_name`) with its
+current policy and passes it to the real `ssh_exec`, so
+`agent_ssh_policy` sees the id, `ssh_hosts_allow` is the operator's list,
+and a `read_only` agent's mode is consulted. `recipe_runs` gains an
+`origin` column (`agent` / `operator`), written at `start_run`.
+
+* **Decision for the security reviewer.** An **operator-started run cannot
+  use SSH steps**. It has no agent identity, so the alternatives were a
+  made-up host allowlist or a new server identity — both would bypass the
+  per-agent host list the operator set. The run is refused at `start_run`
+  with `recipe_operator_ssh` (before a precondition runs), and `_run_ssh`
+  refuses again if such a step ever reaches it. Everything else about an
+  operator run is unchanged: tool-only recipes still run.
+* **Tests, through the real `ssh_exec`, stubbing only `run_ssh`:**
+  * an allowed host reaches the gateway stub, and the signed line names
+    `hermes`;
+  * a host outside the agent's allowlist is refused (`no SSH access`);
+  * a `read_only` agent with a write step (`systemctl restart nginx`) is
+    refused;
+  * an operator run with an SSH step is `recipe_operator_ssh`.
+
+**AW2 — the agent's standing is re-read before every step.** A new
+`_agent_standing(run, integration, tool, args)`:
+
+* an operator run has no agent to re-check (tool steps only; SSH is refused
+  at start);
+* an agent run must still resolve (`recipe_agent_unknown`), must not be
+  revoked (`recipe_agent_revoked`), and `evaluate_call` must still allow the
+  tool and the arguments (`recipe_agent_policy`) — the tools allowlist,
+  `principal_allow` and `arg_policy` all apply.
+
+It runs in the execute loop **before `claim_recipe_item`**, so a revoked
+agent does not spend the approval it can no longer use, and in the rollback
+loop before each undo step. `_run_tool_call` also checks, so a test that
+stubs it still cannot skip the rule. Tests: the agent is revoked after step
+1 — step 2 does not run and the run is `stopped`; a tightened tools
+allowlist stops the next step; with the agent revoked before the run, no
+plan item is used.
+
+**AW3 — a refused step expires its reservation.** On any `ssh_exec` result
+other than `ran` — a refusal, `pending` (the gateway did not claim it), or
+an exception — `expire_recipe_reservation` sets the row `expired` where
+`recipe_handed = 0`, so it cannot be handed to a direct call for its 90 s
+TTL. The AW1 refusal tests assert the row is `expired` and unhanded. This
+narrows V5's residual window to the gap between the reservation and the
+engine's own request.
+
+**AW4 — an SSH plan item names its host.** `create_recipe_plan` refuses an
+SSH item whose host is missing, empty or `'*'` (`recipe_item_host`), before
+any row is written; a tool item keeps `'*'` because it names an integration
+tool, not a gateway.
+
+`bash scripts/verify.sh`: `2897 passed, 22 skipped, 8 warnings in 588.02s
+(0:09:48)`.
+
 ---
 
 ## Chunk F17 — Local-agent profile · slug `local-agent` · dashboard + docs
@@ -12374,7 +12435,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 18 | F23 | change-journal | dashboard | **Merged** 2026-11-11 (AJ1/AJ2) | `feat/f23-change-journal` | F1, F5, F7, F14 | |
 | 18a | X2 | runbooks-page | dashboard UI | **Merged** 2026-11-11 | `feat/x2-runbooks-page` | F13 | |
 | 19 | F22 | change-checks | dashboard + MCP | After F19 merges | `feat/f22-change-checks` | F3, F5, F12, F19 | + security sign-off (the unattended check; AG1's origin rule does not cover it) |
-| 20 | F16 | recipes | dashboard + MCP | **Code round 1: engine, MCP tools and UI — to security for the recipe path** (V5 claimed by run/step; the SSH row is reserved and handed by request id; auto_run still locked) | `feat/f16-recipes` | F3, F12, F13, F19 | security reviews the recipe/claim path; auto_run comes back before it is enabled |
+| 20 | F16 | recipes | dashboard + MCP | Code round 2: **AW1** (the SSH step runs as the real agent; operator runs refuse SSH), **AW2** (the agent's standing before every step and undo step), **AW3** (a refused step expires its reservation), **AW4** (an SSH item must name its host) folded | `feat/f16-recipes` | F3, F12, F13, F19 | security reviews AW1's operator decision and the recipe/claim path; auto_run comes back before it is enabled |
 | 21 | F24 | content-tripwire | dashboard | Design first | `feat/f24-content-tripwire` | F12, F14 | + security sign-off (retention) |
 | 22 | F25 | secrets-broker | gateway + dashboard | Design first | `feat/f25-secrets-broker` | F1, F12, F19; security Chunk 7 before deploy | + security sign-off; gateway bash line by line |
 | 23 | F26 | agent-shadow | dashboard + MCP | Ready after F16 | `feat/f26-agent-shadow` | F1, F12, F16, F18 | security reads the enforcement points |

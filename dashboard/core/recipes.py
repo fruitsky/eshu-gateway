@@ -34,7 +34,9 @@ from db.recipes import (
     pending_runs_for_approved_plans, set_run, set_step,
 )
 from db.exec_results import get_result
-from db.requests import create_recipe_request, get_request_row
+from db.requests import (
+    create_recipe_request, expire_recipe_reservation, get_request_row,
+)
 from db.session_plans import claim_recipe_item, create_recipe_plan, get_plan
 
 NAME_RE = re.compile(r'^[a-z][a-z0-9_]{2,63}$')
@@ -600,9 +602,55 @@ def _same(a, b):
     return type(a) is type(b) and a == b
 
 
+def _agent_row(name):
+    """The run's agent, with its current policy (AW1/AW2)."""
+    if not name:
+        return None
+    from db.agent_policies import get_agent_policy
+    from db.agent_tokens import get_agent_by_name
+    agent = get_agent_by_name(name)
+    if not agent:
+        return None
+    agent['policy'] = get_agent_policy(agent['id'])
+    return agent
+
+
+def _agent_standing(run, integration_name='', tool_name='', args=None,
+                    tool=None, integration=None):
+    """AW2: the agent's standing, re-read before every step and undo step.
+
+    The operator approved the run's exact arguments, so the *approval* gate is
+    correctly skipped — but an agent the operator disabled, revoked or
+    restricted after the approval must not keep writing. Returns the agent row
+    (or None for an operator-started run, which has no agent identity).
+    """
+    if (run.get('origin') or 'agent') == 'operator':
+        return None
+    name = (run.get('agent') or '').strip()
+    agent = _agent_row(name)
+    if not agent:
+        _fail('recipe_agent_unknown',
+              'the agent %r no longer exists; the run stops' % name)
+    if agent.get('revoked'):
+        _fail('recipe_agent_revoked',
+              'the agent %r was revoked; the run stops' % name)
+    if integration_name:
+        from core.agent_policy import evaluate_call
+        allowed, why = evaluate_call(agent, integration_name, tool_name,
+                                     args or {}, tool, integration)
+        if not allowed:
+            _fail('recipe_agent_policy',
+                  'the agent may no longer call %s.%s: %s'
+                  % (integration_name, tool_name, why or 'refused'))
+    return agent
+
+
 def _run_tool_call(run, integration_name, tool_name, args, step_id):
     integration = get_integration(integration_name)
     tool = get_tool(integration_name, tool_name)
+    # AW2: before the call itself, not only before the step — a caller that
+    # stubs this function is a test, and the loop re-checks as well.
+    _agent_standing(run, integration_name, tool_name, args, tool, integration)
     if not integration or not integration.get('enabled') or not tool \
             or not tool.get('enabled'):
         _fail('recipe_tool_missing', '%s.%s is missing or disabled'
@@ -636,25 +684,42 @@ def _run_ssh(command, host, run, step_id, had_slot=False):
     if (get_gateway_run_limits(ip) or '').strip() != 'v1':
         _fail('recipe_no_limits',
               'the gateway does not report run_limits v1; the step cannot run bounded')
+    # AW1: an SSH step needs an agent identity, because the per-agent host
+    # allowlist and ssh_mode are what bound a command the engine runs without
+    # the operator watching. An operator-started run has none, so it is
+    # refused at start and again here; it does not get a made-up identity.
+    if (run.get('origin') or 'agent') == 'operator':
+        _fail('recipe_operator_ssh',
+              'an operator-started run cannot use SSH steps; start it as an '
+              'agent so the step has a host allowlist')
+    agent = _agent_standing(run)
     req_id = create_recipe_request(
         ip, command, int(run['id']), step_id,
         session_id=run.get('session_id') or '',
         agent=run.get('agent') or '',
         run_limit=json.dumps(limit, separators=(',', ':')))
-    agent = {'name': run.get('agent') or 'recipe'}
+
+    def _expire_reservation():
+        # AW3: a reservation the engine never got to use must not stay
+        # claimable for its 90 s TTL.
+        expire_recipe_reservation(req_id)
+
     try:
         result = ssh_exec(_gateway_ip(host), command,
                           session_id=run.get('session_id') or '',
                           timeout=STEP_TIMEOUT, wait=False, agent=agent,
                           force_jit=True)
     except Exception as exc:  # noqa: BLE001 — a runner failure is a step failure
+        _expire_reservation()
         _fail('recipe_step_failed', str(exc)[:200])
     finally:
         set_step(run['id'], step_id, request_id=req_id)
     if result.get('status') == 'pending':
+        _expire_reservation()
         _fail('recipe_step_failed',
               'the gateway did not claim the reserved request')
     if result.get('status') != 'ran':
+        _expire_reservation()
         _fail('recipe_step_failed',
               str(result.get('message') or result.get('reason') or 'not run'))
     return result.get('exit_code'), result.get('output') or ''
@@ -719,9 +784,22 @@ def start_run(recipe_name, params, agent='', session_id='', operator=''):
         filled = _filled(document, values)
     except RecipeParamError as exc:
         _fail(exc.code, exc.message)
+    # AW1: an operator-started run has no agent identity, so an SSH step in
+    # it can never run. Refused at start, before a precondition runs and
+    # before the operator is shown a plan whose step could not happen.
+    origin = 'agent' if agent else 'operator'
+    if origin == 'operator':
+        for step in filled['steps']:
+            if step['kind'] == 'ssh' or (
+                    isinstance(step.get('check'), dict)
+                    and step['check'].get('kind') == 'ssh'):
+                _fail('recipe_operator_ssh',
+                      'an operator-started run cannot use SSH steps; start it '
+                      'as an agent so the step has a host allowlist')
     for pre in filled.get('preconditions') or []:
         value, _, _ = _run_tool_call(
-            {'id': 0, 'agent': agent or operator or 'operator'},
+            {'id': 0, 'agent': agent or operator or 'operator',
+             'origin': 'agent' if agent else 'operator'},
             pre['call']['integration'], pre['call']['tool'],
             _args_for_execution(pre['call']), 'precondition')
         if not evaluate_pass(pre['pass'], value=value):
@@ -734,7 +812,7 @@ def start_run(recipe_name, params, agent='', session_id='', operator=''):
         # than replacing (or queueing behind) the plan the operator is reading.
         _fail('plan_waiting', 'this session already has a plan awaiting approval')
     run_id = create_run(recipe, version, sid, agent or operator or '',
-                        values, kind='run')
+                        values, kind='run', origin=origin)
     for step in filled['steps']:
         add_run_step(run_id, step['id'], step['kind'], step.get('title') or '')
         if isinstance(step.get('check'), dict) and step['check'].get('kind') == 'ssh':
@@ -841,6 +919,21 @@ def _execute_run_locked(run_id):
         if get_trigger_freeze() is not None:
             _stop_run(run, 'stopped', step_id, 'a freeze is on')
             return
+        # AW2: the standing check comes before the item is claimed, so a
+        # revoked agent does not spend the approval it can no longer use.
+        try:
+            if step['kind'] == 'ssh':
+                _agent_standing(run)
+            else:
+                _agent_standing(run, step['call']['integration'],
+                                step['call']['tool'],
+                                _args_for_execution(step['call']))
+        except (RecipeError, RecipeParamError) as exc:
+            set_step(run['id'], step_id, status='failed',
+                     error=getattr(exc, 'message', str(exc))[:300])
+            _stop_run(run, 'stopped', step_id,
+                      getattr(exc, 'message', str(exc)))
+            return
         if not claim_recipe_item(run['id'], step_id):
             _stop_run(run, 'stopped', step_id, 'the step item is not claimable')
             return
@@ -940,7 +1033,8 @@ def rollback(run_id, agent='', session_id=''):
     if not undo_steps:
         _fail('rollback_nothing', 'no step of this run can be undone')
     rb_run = create_run(recipe, version, run['session_id'], run['agent'] or agent,
-                        run['parameters'], kind='rollback', of_run_id=run['id'])
+                        run['parameters'], kind='rollback', of_run_id=run['id'],
+                        origin=run.get('origin') or 'agent')
     for undo in undo_steps:
         add_run_step(rb_run, undo['step_id'], 'tool', undo['title'])
     items = [{'kind': 'mcp', 'host': '*', 'command': 'undo: %s' % u['title'],
@@ -982,6 +1076,15 @@ def _execute_rollback_locked(run_id):
         undo = (source or {}).get('undo') or {}
         if get_trigger_freeze() is not None:
             _stop_run(run, 'stopped', step['step_id'], 'a freeze is on')
+            return
+        try:
+            _agent_standing(run, (undo.get('call') or {}).get('integration')
+                            or '', (undo.get('call') or {}).get('tool') or '')
+        except (RecipeError, RecipeParamError) as exc:
+            set_step(run['id'], step['step_id'], status='failed',
+                     error=getattr(exc, 'message', str(exc))[:300])
+            _stop_run(run, 'stopped', step['step_id'],
+                      getattr(exc, 'message', str(exc)))
             return
         if not claim_recipe_item(run['id'], step['step_id']):
             _stop_run(run, 'stopped', step['step_id'], 'the undo item is not claimable')

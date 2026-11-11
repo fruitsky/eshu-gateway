@@ -58,6 +58,7 @@ def init_recipes_tables(cursor):
             of_run_id INTEGER NOT NULL DEFAULT 0,
             session_id TEXT NOT NULL DEFAULT '',
             agent TEXT NOT NULL DEFAULT '',
+            origin TEXT NOT NULL DEFAULT 'agent',
             plan_id INTEGER NOT NULL DEFAULT 0,
             status TEXT NOT NULL DEFAULT 'pending',
             parameters_json TEXT NOT NULL DEFAULT '{}',
@@ -85,6 +86,13 @@ def init_recipes_tables(cursor):
     ''')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_recipe_versions_recipe '
                    'ON recipe_versions(recipe_id, version)')
+    # F16 AW1: an operator-started run has no agent identity to bound an SSH
+    # step, so the origin is recorded; pre-existing rows are agent-started.
+    try:
+        cursor.execute("ALTER TABLE recipe_runs ADD COLUMN origin TEXT "
+                       "NOT NULL DEFAULT 'agent'")
+    except Exception:
+        pass
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_recipe_runs_recipe '
                    'ON recipe_runs(recipe_id, created_at)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_recipe_runs_status '
@@ -243,18 +251,19 @@ def set_auto_run(recipe_id, enabled):
 # ── runs ───────────────────────────────────────────────────────────────
 
 def create_run(recipe, version, session_id, agent, parameters, kind='run',
-               of_run_id=0):
+               of_run_id=0, origin='agent'):
     now = int(time.time())
+    origin = 'operator' if origin == 'operator' else 'agent'
     with db_conn() as conn:
         cur = conn.cursor()
         cur.execute('''
             INSERT INTO recipe_runs (recipe_id, version_id, content_hash, kind,
-                                     of_run_id, session_id, agent, status,
+                                     of_run_id, session_id, agent, origin, status,
                                      parameters_json, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
         ''', (int(recipe['id']), int(version['id']), version['content_hash'],
               kind, int(of_run_id or 0), (session_id or '')[:64],
-              (agent or '')[:64],
+              (agent or '')[:64], origin,
               json.dumps(parameters, sort_keys=True, separators=(',', ':')),
               now))
         run_id = cur.lastrowid

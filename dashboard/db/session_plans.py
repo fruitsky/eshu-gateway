@@ -655,6 +655,15 @@ def create_recipe_plan(session_id: str, run_id: int, items) -> dict:
         raise PlanError('invalid_session', 'session_id is required')
     if not items:
         raise PlanError('invalid_items', 'a recipe run needs at least one step')
+    # AW4: an SSH item always names its host. A missing host is refused, never
+    # stored as '*': the engine's claim is the only thing that can spend the
+    # item, but the plan card and the audit row must still say where it ran.
+    for item in items:
+        if (item.get('kind') or '') == 'ssh':
+            host = str(item.get('host') or '').strip()
+            if not host or host == '*':
+                raise PlanError('recipe_item_host',
+                                'an SSH step must name its host')
     now = int(time.time())
     with db_conn() as conn:
         cur = conn.cursor()
