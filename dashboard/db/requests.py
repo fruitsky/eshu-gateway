@@ -59,8 +59,76 @@ def init_requests_tables(cursor):
             cursor.execute("ALTER TABLE requests ADD COLUMN excluded INTEGER DEFAULT 0")
         except Exception:
             pass
+    # F12: the MCP agent that asked for this command ('' = direct SSH).
+    if 'agent' not in existing:
+        try:
+            cursor.execute("ALTER TABLE requests ADD COLUMN agent TEXT DEFAULT ''")
+        except Exception:
+            pass
+    # F19: 1 when the dashboard approved this row without a human deciding on
+    # this exact command. Such a row carries a run_limit and is never handed to
+    # the poller; it can only be claimed through /api/ticket/{id}, which sends
+    # the limit. Existing rows are human-approved, so 0.
+    if 'unattended' not in existing:
+        try:
+            cursor.execute(
+                "ALTER TABLE requests ADD COLUMN unattended INTEGER NOT NULL DEFAULT 0")
+        except Exception:
+            pass
+    # F19: the JSON limit this row runs under ({seconds, bytes}); '' when the
+    # row is not unattended.
+    if 'run_limit' not in existing:
+        try:
+            cursor.execute(
+                "ALTER TABLE requests ADD COLUMN run_limit TEXT NOT NULL DEFAULT ''")
+        except Exception:
+            pass
 
-def create_request(target_ip: str, command: str, status: str = 'pending', ttl: int = 90, reason: str = '', session_id: str = '', execution_id: str = '', inner_target: str = ''):
+TICKET_FORMAT_V2 = 'v2'
+
+
+def gateway_ticket_format(ip: str) -> str:
+    """The lockbox format this gateway reported at registration ('' = old)."""
+    from db.gateways import get_gateway_ssh_capabilities
+    return (get_gateway_ssh_capabilities(ip).get('ssh_ticket_format') or '').strip()
+
+
+def ticket_line(row, ticket_format: str = '') -> str:
+    """F12 G5: the lockbox line, in the format this gateway understands (M1).
+
+    A v2 line is `v2|ts|agent|session|cmd`: `v2` first so the format is never
+    guessed from the number of `|`, and the command last so a `|` inside it
+    survives. An old gateway splits on the first `|` and expects `ts|cmd`, so
+    it gets exactly that; handing it a v2 line would make every approved
+    command fail with "does not match".
+    """
+    agent = (row['agent'] if 'agent' in row.keys() else '') or ''
+    session = (row['session_id'] if 'session_id' in row.keys() else '') or ''
+    if (ticket_format or '').strip() == TICKET_FORMAT_V2:
+        return f"v2|{row['created_at']}|{agent}|{session}|{row['command']}"
+    return f"{row['created_at']}|{row['command']}"
+
+
+def _refuse_agent_ticket(req_id, target_ip: str) -> None:
+    """M1: an agent row is never issued in the old format.
+
+    The old `ts|cmd` line has no agent field, so the gateway's `ticket_allowed`
+    would treat it as agent-less and an unsigned direct caller could claim the
+    agent's approved command. Deny the row instead: the agent's `wait` and
+    `check_request` then see a terminal state rather than a 90-second timeout,
+    and the audit log records why it never ran.
+    """
+    try:
+        from db.audit import record_audit_event
+        record_audit_event(
+            'jit_refused', target_ip,
+            details=(f"JIT #{req_id} not delivered: agent ticket on a "
+                     f"gateway that has not reported {TICKET_FORMAT_V2}"))
+    except Exception:
+        pass
+
+
+def create_request(target_ip: str, command: str, status: str = 'pending', ttl: int = 90, reason: str = '', session_id: str = '', execution_id: str = '', inner_target: str = '', agent: str = '', unattended: bool = False, run_limit: str = ''):
     # F18: compute both fingerprints for every new row (no extra call site).
     try:
         from core.fingerprint import fingerprints
@@ -78,9 +146,9 @@ def create_request(target_ip: str, command: str, status: str = 'pending', ttl: i
         # waiting time.
         decided_at = created_at if status != 'pending' else None
         cursor.execute('''
-            INSERT INTO requests (target_ip, command, status, created_at, expires_at, reason, session_id, execution_id, inner_target, command_sha, shape_sha, decided_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (target_ip, command, status, created_at, expires_at, reason, session_id, execution_id, inner_target or '', cmd_sha, shape_sha, decided_at))
+            INSERT INTO requests (target_ip, command, status, created_at, expires_at, reason, session_id, execution_id, inner_target, command_sha, shape_sha, decided_at, agent, unattended, run_limit)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (target_ip, command, status, created_at, expires_at, reason, session_id, execution_id, inner_target or '', cmd_sha, shape_sha, decided_at, (agent or '')[:64], 1 if unattended else 0, (run_limit or '')[:2000]))
         conn.commit()
         return cursor.lastrowid
 
@@ -145,23 +213,39 @@ def update_request_status_if_pending(req_id: int, status: str) -> bool:
         return cursor.rowcount == 1
 
 def update_ticket_consumed_by_ip(target_ip: str):
+    fmt = gateway_ticket_format(target_ip)
+    ticket = None
+    refused = None
     with db_conn() as conn:
         cursor = conn.cursor()
         now = int(time.time())
         expired_ago = 60
         cursor.execute('''
-            SELECT id, created_at, expires_at, command FROM requests
+            SELECT id, created_at, expires_at, command, agent, session_id
+            FROM requests
             WHERE target_ip = ? AND status = 'approved' AND expires_at > ?
+              AND unattended = 0
+            ORDER BY id ASC
             LIMIT 1
         ''', (target_ip, now - expired_ago))
         row = cursor.fetchone()
         if row:
             req_id = row['id']
-            cursor.execute("UPDATE requests SET status = 'consumed', expires_at = ? WHERE id = ?", (now, req_id))
-            conn.commit()
-            ticket_ts = row['created_at']
-            return f"{ticket_ts}|{row['command']}"
-        return None
+            if (row['agent'] or '') and fmt != TICKET_FORMAT_V2:
+                # M1: fail closed. An agent ticket in the old format would be
+                # claimable by an unsigned caller; deny it instead.
+                cursor.execute(
+                    "UPDATE requests SET status = 'denied', decided_at = ? "
+                    "WHERE id = ? AND status = 'approved'", (now, req_id))
+                conn.commit()
+                refused = req_id
+            else:
+                cursor.execute("UPDATE requests SET status = 'consumed', expires_at = ? WHERE id = ?", (now, req_id))
+                conn.commit()
+                ticket = ticket_line(row, fmt)
+    if refused is not None:
+        _refuse_agent_ticket(refused, target_ip)
+    return ticket
 
 def get_all_requests(session_id: str = None, inner_target: str = None):
     """Newest 200 requests, optionally narrowed to one session or inner target.
@@ -263,17 +347,37 @@ def count_denied(command: str):
         return row[0] if row else 0
 
 def get_ticket_by_request_id(req_id: int):
+    ticket = None
+    refused = None
+    target_ip = ''
     with db_conn() as conn:
         cursor = conn.cursor()
-        cursor.execute('SELECT command, created_at, status FROM requests WHERE id = ? AND status IN ("approved", "consumed")', (req_id,))
+        cursor.execute('SELECT command, created_at, status, agent, session_id, target_ip, unattended, run_limit FROM requests WHERE id = ? AND status IN ("approved", "consumed")', (req_id,))
         row = cursor.fetchone()
         if row:
-            if row['status'] == 'approved':
-                now = int(time.time())
-                cursor.execute("UPDATE requests SET status = 'consumed', expires_at = ? WHERE id = ?", (now, req_id))
-                conn.commit()
-            return {"command": row['command'], "ticket": f"{row['created_at']}|{row['command']}"}
-        return None
+            target_ip = row['target_ip']
+            fmt = gateway_ticket_format(target_ip)
+            if (row['agent'] or '') and fmt != TICKET_FORMAT_V2:
+                # M1: same fail-closed rule as the poller path. Deny a row
+                # that is still approved; a consumed one is just not re-issued.
+                if row['status'] == 'approved':
+                    now = int(time.time())
+                    cursor.execute(
+                        "UPDATE requests SET status = 'denied', decided_at = ? "
+                        "WHERE id = ? AND status = 'approved'", (now, req_id))
+                    conn.commit()
+                    refused = req_id
+            else:
+                if row['status'] == 'approved':
+                    now = int(time.time())
+                    cursor.execute("UPDATE requests SET status = 'consumed', expires_at = ? WHERE id = ?", (now, req_id))
+                    conn.commit()
+                ticket = {"command": row['command'], "ticket": ticket_line(row, fmt),
+                          "unattended": 1 if row['unattended'] else 0,
+                          "run_limit": row['run_limit'] or ''}
+    if refused is not None:
+        _refuse_agent_ticket(refused, target_ip)
+    return ticket
 
 def delete_old_requests(before_ts: int):
     with db_conn() as conn:

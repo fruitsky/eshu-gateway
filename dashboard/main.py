@@ -54,6 +54,9 @@ from database import (
     get_gateway_capture_output, set_gateway_capture_output,
     get_gateway_read_lane, read_lane_on_enabled, read_lane_ready,
     set_gateway_read_lane,
+    get_gateway_ssh_mode, set_gateway_ssh_mode, get_gateway_ssh_host_key,
+    set_gateway_ssh_host_key, get_gateway_ssh_capabilities,
+    set_gateway_ssh_capabilities, set_gateway_run_limits, get_gateway_run_limits,
     set_override, clear_override, get_override_active,
     create_approved_window, get_approved_windows, get_active_approved_windows,
     delete_approved_window, toggle_approved_window,
@@ -80,9 +83,10 @@ from database import (
     revoke_agent_token, delete_agent_token,
 )
 from db.agent_policies import (
-    get_agent_policy, set_agent_policy, get_agent_policies_map,
+    DEFAULT_SSH_MODE, get_agent_policy, set_agent_policy, get_agent_policies_map,
 )
-from db.misc import get_meta_json, set_meta_json
+from db.misc import (get_meta_json, set_meta_json, get_run_limit_settings,
+                         set_run_limit_settings, run_limit_problem)
 from db.web_fetch import (
     delete_web_fetch_policy, get_web_fetch_policies, get_web_fetch_policy,
     get_web_fetch_stats, set_web_fetch_policy,
@@ -108,6 +112,8 @@ from schemas import (
     ApprovedWindowPayload, WindowUpdatePayload, WindowRequestPayload,
     NotifyConfigPayload, ExcludeRequestsPayload, InventorySettingsPayload,
     ConclusionReviewPayload, ConclusionEditPayload, RunbookPromotePayload,
+    RunbookRetirePayload,
+    SSHHostKeyPayload,
 )
 
 from core.session import (
@@ -577,11 +583,25 @@ class GatewayPayload(BaseModel):
     token: str = ""
     session_id: str = ""
     execution_id: str = ""
+    # F12: attribution and gating for an MCP-run command (mirrors schemas.py;
+    # these local copies shadow the import, so both must stay in step).
+    agent: str = ""
+    force_jit: bool = False
+    # F19: the script that is running reports the run-limit capability on each
+    # request (L7: the stored column can be stale after a self-update).
+    run_limits: str = ""
 
 class RegisterPayload(BaseModel):
     ip: str
     hostname: str
     version: str = "v6.0"
+    ssh_host_key: str = ""
+    ssh_agent_format: str = ""
+    ssh_ticket_format: str = ""
+    # F19: '' or 'v1'; stored for the gateway card, never for the decision.
+    # None means "not reported" (an older installer or the poller), which keeps
+    # the stored value instead of clearing it.
+    run_limits: Optional[str] = None
 
 class PolicyPayload(BaseModel):
     type: str
@@ -656,6 +676,41 @@ def _validate_gateway_identity(ip: str, hostname: str) -> None:
         raise HTTPException(status_code=400, detail="Invalid gateway hostname")
 
 
+SSH_AGENT_FORMATS = ('eshu-ssh-agent-v1',)
+SSH_TICKET_FORMATS = ('v2',)
+
+
+def _clean_ssh_capability(value, allowed) -> str:
+    """Only a format this dashboard knows is stored; anything else is ''."""
+    value = (value or '').strip()
+    return value if value in allowed else ''
+
+
+def _pin_ssh_host_key(ip: str, hostname: str, key_line: str) -> None:
+    """Pin on first sight, audit a change, never re-pin silently (F12 R6/G7).
+
+    The key line arrives in the token-authenticated registration, so it is
+    the gateway speaking for itself; a *change* is a fact to record, not a
+    reason to start trusting a different key.
+    """
+    from core.ssh_keys import fingerprint, parse_public_key
+    key_line = (key_line or '').strip()
+    if not key_line:
+        return
+    if parse_public_key(key_line) is None:
+        raise HTTPException(status_code=400, detail="Invalid ssh_host_key")
+    current = get_gateway_ssh_host_key(ip)
+    if not current:
+        set_gateway_ssh_host_key(ip, key_line)
+        record_audit_event('ssh_host_key_pinned', ip, hostname,
+                           f"SSH host key pinned: {fingerprint(key_line)}")
+    elif fingerprint(current) != fingerprint(key_line):
+        record_audit_event('ssh_host_key_changed', ip, hostname,
+                           f"SSH host key changed on the gateway: pinned "
+                           f"{fingerprint(current)}, reported {fingerprint(key_line)}. "
+                           f"The pin is unchanged; re-pin it explicitly.")
+
+
 @app.post("/api/register")
 def register(payload: RegisterPayload, request: Request):
     _validate_gateway_identity(payload.ip, payload.hostname)
@@ -704,6 +759,19 @@ def register(payload: RegisterPayload, request: Request):
     if payload.version == DASHBOARD_VERSION:
         update_gateway_last_updated(payload.ip)
     register_gateway(payload.ip, payload.hostname, payload.version)
+    # F12: the same installer writes the gateway and the poller, so the pair of
+    # formats it reports is the pair it installed. Stored for the fail-closed
+    # check in ssh_exec (§9); absent fields clear them.
+    _pin_ssh_host_key(payload.ip, payload.hostname, payload.ssh_host_key)
+    set_gateway_ssh_capabilities(
+        payload.ip,
+        _clean_ssh_capability(payload.ssh_agent_format, SSH_AGENT_FORMATS),
+        _clean_ssh_capability(payload.ssh_ticket_format, SSH_TICKET_FORMATS))
+    # F19: the installer reports the capability it just wrote. Display only
+    # (the auto-run decision reads the per-request field).
+    if payload.run_limits is not None:
+        set_gateway_run_limits(payload.ip,
+                               _clean_ssh_capability(payload.run_limits, {'v1'}))
     # Clear any stale uninstall trigger — re-enrollment cancels pending uninstalls
     clear_trigger_uninstall(payload.ip)
     
@@ -716,7 +784,44 @@ def register(payload: RegisterPayload, request: Request):
         existing_token = secrets.token_hex(32)
         set_gateway_token(payload.ip, existing_token)
     
-    return {"status": "ok", "gateway_token": existing_token}
+    return {"status": "ok", "gateway_token": existing_token,
+            "ssh_mode": get_gateway_ssh_mode(payload.ip)}
+
+
+def approve_unattended(target_ip: str, cmd: str, reason: str, sid: str,
+                       eid: str, inner_target: str, agent: str,
+                       capability: str) -> dict:
+    """F19: the one way a row is approved without a human deciding on it.
+
+    Such a row always carries a run limit, and it is created approved only when
+    the gateway *that is asking* reports the capability on this request (L7).
+    An older gateway ignores the field and would run unbounded, so its row is
+    left pending for a human instead of being approved.
+    """
+    if (capability or "").strip() != "v1":
+        req_id = create_request(target_ip, cmd, status="pending",
+                                reason=reason + "-no-limits", session_id=sid,
+                                execution_id=eid, inner_target=inner_target,
+                                agent=agent)
+        record_audit_event(
+            "read_lane_no_limits", target_ip,
+            details=("JIT #%d would auto-run (%s) but the gateway does not "
+                     "report run_limits v1: %s" % (req_id, reason, cmd[:80])))
+        return {"status": "ok", "id": f"{req_id:06d}", "request_id": req_id}
+    limit = get_run_limit_settings()
+    req_id = create_request(target_ip, cmd, status="approved", reason=reason,
+                            session_id=sid, execution_id=eid,
+                            inner_target=inner_target, agent=agent,
+                            unattended=True,
+                            run_limit=json.dumps(limit, separators=(",", ":")))
+    record_audit_event(
+        "jit_unattended_approved", target_ip,
+        details=("Unattended (%s) JIT #%d approved with a %d s / %d byte "
+                 "limit: %s" % (reason, req_id, limit["seconds"],
+                                limit["bytes"], cmd[:80])))
+    return {"status": "ok", "id": f"{req_id:06d}", "request_id": req_id,
+            "approved": True, "unattended": True, "run_limit": limit}
+
 
 @app.post("/api/request")
 def receive_request(payload: GatewayPayload, request: Request):
@@ -730,6 +835,29 @@ def receive_request(payload: GatewayPayload, request: Request):
 
     _check_rate_limit(target_ip)
     cmd = decode_cmd(payload.encoded_command)
+
+    # F12: an MCP command is attributed to the agent that asked for it, and a
+    # forced JIT may only *add* gating. The value is validated here even though
+    # the gateway checked it: an old gateway forwards whatever it parsed.
+    agent = (payload.agent or '').strip()[:64]
+    if agent and not re.fullmatch(r'[A-Za-z0-9_.:-]{1,64}', agent):
+        raise HTTPException(status_code=400, detail="Invalid agent")
+    force_jit = bool(payload.force_jit)
+    if agent and not force_jit:
+        # M3: re-derive the mode from the agent's own policy so a gateway (or
+        # a prefix) cannot downgrade an `approval` agent to auto-run — and
+        # fail closed when the policy cannot be read at all. An unknown agent,
+        # an error and an unset mode all mean DEFAULT_SSH_MODE (approval),
+        # the same constant core.ssh_exec uses for the outbound call.
+        try:
+            _agent_row = get_agent_by_name(agent)
+            _mode = DEFAULT_SSH_MODE
+            if _agent_row:
+                _mode = (get_agent_policy(_agent_row['id']).get('ssh_mode')
+                         or DEFAULT_SSH_MODE)
+            force_jit = (_mode == DEFAULT_SSH_MODE)
+        except Exception:
+            force_jit = True
 
     now = int(time.time())
     sid = (payload.session_id or '')[:64]
@@ -751,7 +879,7 @@ def receive_request(payload: GatewayPayload, request: Request):
                 create_request(target_ip, cmd, status="blocked",
                                reason="encoded-payload:%s" % match[:40],
                                session_id=sid, execution_id=eid,
-                               inner_target=_inner_target_for(cmd))
+                               inner_target=_inner_target_for(cmd), agent=agent)
                 update_gateway_last_seen(target_ip)
                 record_audit_event(
                     'encoded_payload_blocked', target_ip,
@@ -764,6 +892,12 @@ def receive_request(payload: GatewayPayload, request: Request):
     # Order per § 2.6: after the encoded-payload block, before the session
     # override. Freeze, Zero-Trust and the blocklists always win, and a plan
     # only matches a command carrying the session id it was granted for.
+    # AG1 (F15): in the default `approval` mode `force_jit` skips the plan
+    # check, so a probe's grouped approval would never cover its commands.
+    # A plan created by probe code may cover them (the operator approved those
+    # exact bytes through the probe); an agent-proposed plan still may not.
+    # `normal` mode is unchanged.
+    plan_origins = ('probe',) if force_jit else None
     if sid and not frozen and not get_gateway_zero_trust(target_ip):
         plan_allowed = True
         if require_sessions_enabled():
@@ -771,31 +905,37 @@ def receive_request(payload: GatewayPayload, request: Request):
             # gateway refuses unsigned ids first; this is the dashboard half).
             plan_allowed = not session_problem(sid)
         if plan_allowed:
-            claimed = claim_plan_item(sid, target_ip, cmd, now)
+            claimed = claim_plan_item(sid, target_ip, cmd, now,
+                                      origins=plan_origins,
+                                      agent=(agent if plan_origins else ''))
             if claimed:
                 plan_id, item_id = claimed
+                # AG1 condition 4: the row says which origin covered it, so
+                # the audit shows why no card appeared for an approval-mode
+                # agent.
+                origin = 'probe' if plan_origins else 'agent'
                 req_id = create_request(target_ip, cmd, status="approved",
-                                        reason=f"session-plan:{plan_id}:{item_id}",
+                                        reason=f"session-plan:{plan_id}:{item_id}:{origin}",
                                         session_id=sid, execution_id=eid,
-                                        inner_target=_inner_target_for(cmd))
+                                        inner_target=_inner_target_for(cmd), agent=agent)
                 update_gateway_last_seen(target_ip)
                 record_audit_event(
                     'jit_plan_approved', target_ip,
-                    details=f'Session plan #{plan_id} item #{item_id} approved JIT '
-                            f'#{req_id}: {cmd[:80]} (session {sid})')
+                    details=f'Session plan #{plan_id} item #{item_id} ({origin}) approved '
+                            f'JIT #{req_id}: {cmd[:80]} (session {sid})')
                 return {"status": "ok", "id": f"{req_id:06d}", "request_id": req_id,
                         "plan": True, "plan_id": plan_id,
                         "message": "Auto-approved via Session Plan"}
 
     # Session override next: narrower than the host-wide one, and it only
     # covers commands carrying the id it was granted for. Zero-Trust wins.
-    if sid and not frozen:
+    if sid and not frozen and not force_jit:
         ov = get_session_override(sid, target_ip, now)
         if ov and not get_gateway_zero_trust(target_ip):
             req_id = create_request(target_ip, cmd, status="approved",
                                     reason="session-override:%d" % ov["id"],
                                     session_id=sid, execution_id=eid,
-                                    inner_target=_inner_target_for(cmd))
+                                    inner_target=_inner_target_for(cmd), agent=agent)
             update_gateway_last_seen(target_ip)
             scope = ov["target_ip"] or "any host"
             record_audit_event(
@@ -811,7 +951,7 @@ def receive_request(payload: GatewayPayload, request: Request):
     # in shadow the request stays pending but is tagged, in on it auto-approves.
     # It sits after F3 plans and the session override, before the host override.
     read_lane_reason = ''
-    if not frozen and not get_gateway_zero_trust(target_ip):
+    if not frozen and not force_jit and not get_gateway_zero_trust(target_ip):
         lane_mode = get_gateway_read_lane(target_ip)
         if lane_mode == 'on' and not read_lane_on_enabled():
             # Round 5: the hard lock also covers a stored `on`. If the meta
@@ -827,17 +967,19 @@ def receive_request(payload: GatewayPayload, request: Request):
                 cmd_breakdown(cmd), _verdict, cmd, lane_mode, frozen,
                 get_gateway_zero_trust(target_ip))
             if _ok and lane_mode == 'on':
-                req_id = create_request(target_ip, cmd, status="approved",
-                                        reason="read-lane", session_id=sid,
-                                        execution_id=eid,
-                                        inner_target=_inner_target_for(cmd))
+                # F19: through the one unattended helper, so the row carries a
+                # limit (or stays pending on a gateway too old to enforce one).
+                result = approve_unattended(
+                    target_ip, cmd, 'read-lane', sid, eid,
+                    _inner_target_for(cmd), agent, payload.run_limits)
                 update_gateway_last_seen(target_ip)
-                record_audit_event(
-                    'jit_read_lane_approved', target_ip,
-                    details=f'Read-only lane auto-approved JIT #{req_id}: {cmd[:80]}')
-                return {"status": "ok", "id": f"{req_id:06d}", "request_id": req_id,
-                        "read_lane": "on",
-                        "message": "Auto-approved: read-only command"}
+                if result.get('approved'):
+                    record_audit_event(
+                        'jit_read_lane_approved', target_ip,
+                        details=f'Read-only lane auto-approved JIT #{result["request_id"]}: {cmd[:80]}')
+                    result.update({'read_lane': 'on',
+                                   'message': 'Auto-approved: read-only command'})
+                return result
             if _ok:
                 read_lane_reason = 'read-lane-shadow'
 
@@ -848,18 +990,19 @@ def receive_request(payload: GatewayPayload, request: Request):
     row = cursor.fetchone()
     conn.close()
     if row and row['override_until'] and row['override_until'] > now \
-            and not frozen and not get_gateway_zero_trust(target_ip):
+            and not frozen and not force_jit and not get_gateway_zero_trust(target_ip):
         req_id = create_request(target_ip, cmd, status="approved", reason="override",
                                 session_id=sid, execution_id=eid,
-                                inner_target=_inner_target_for(cmd))
+                                inner_target=_inner_target_for(cmd), agent=agent)
         update_gateway_last_seen(target_ip)
         record_audit_event('jit_override_approved', target_ip, details=f'Override auto-approved JIT #{req_id}: {cmd[:80]} (reason: {row["override_reason"][:60]})')
         return {"status": "ok", "id": f"{req_id:06d}", "request_id": req_id, "override": True,
                 "scope": "host", "message": "Auto-approved via Override Mode"}
 
     req_id = create_request(target_ip, cmd, status="pending", session_id=sid,
-                            execution_id=eid, reason=read_lane_reason,
-                            inner_target=_inner_target_for(cmd))
+                            execution_id=eid,
+                            reason=('force-jit' if force_jit else read_lane_reason),
+                            inner_target=_inner_target_for(cmd), agent=agent)
     update_gateway_last_seen(target_ip)
     send_notify('jit', 'JIT Approval Required', f'`{cmd[:80]}` on {target_ip}')
     record_audit_event('jit_created', target_ip, details=f'JIT #{req_id}: {cmd[:80]}')
@@ -890,10 +1033,13 @@ def receive_log(payload: GatewayPayload, request: Request):
     reason = (payload.reason or '')[:200]
     token = (payload.token or '')[:64]
     cmd = decode_cmd(payload.encoded_command)
+    log_agent = (payload.agent or '').strip()[:64]
+    if log_agent and not re.fullmatch(r'[A-Za-z0-9_.:-]{1,64}', log_agent):
+        raise HTTPException(status_code=400, detail="Invalid agent")
     req_id = create_request(target_ip, cmd, status=payload.status, ttl=0, reason=reason,
                             session_id=(payload.session_id or '')[:64],
                             execution_id=(payload.execution_id or '')[:64],
-                            inner_target=_inner_target_for(cmd))
+                            inner_target=_inner_target_for(cmd), agent=log_agent)
     # F5: an exec result can arrive before this row exists (both are background
     # curls). Attach the waiting orphan now.
     if payload.status in ('auto-approved', 'window-approved'):
@@ -927,6 +1073,8 @@ class ExecResultPayload(BaseModel):
     encoded_output: str = Field(default='', max_length=24576)
     output_truncated: bool = False
     request_id: int = None
+    # F19: 'time', 'bytes' or '' — which run limit fired, if any.
+    limit: str = ''
 
 
 def _decode_exec_output(encoded: str):
@@ -966,6 +1114,8 @@ def receive_exec_result(payload: ExecResultPayload, request: Request):
         raise HTTPException(status_code=400, detail="Invalid exit_code")
     if payload.duration_ms < 0 or payload.duration_ms > 86400000:
         raise HTTPException(status_code=400, detail="Invalid duration_ms")
+    if payload.limit not in ('', 'time', 'bytes'):
+        raise HTTPException(status_code=400, detail="Invalid limit")
 
     cmd = decode_cmd(payload.encoded_command)
     output, truncated = _decode_exec_output(payload.encoded_output)
@@ -980,7 +1130,8 @@ def receive_exec_result(payload: ExecResultPayload, request: Request):
         if row.get('status') not in EXECUTABLE_STATUSES:
             raise HTTPException(status_code=400, detail="Request is not executable")
         stored = save_result(payload.request_id, payload.exit_code,
-                             payload.duration_ms, output, truncated)
+                             payload.duration_ms, output, truncated,
+                             limit_kind=payload.limit)
         return {"status": "ok", "attached": stored, "request_id": payload.request_id,
                 "reason": None if stored else "already_has_result"}
 
@@ -991,7 +1142,7 @@ def receive_exec_result(payload: ExecResultPayload, request: Request):
     match = find_match_request(target_ip, cmd, PATH_STATUSES[payload.path], since)
     if match:
         stored = save_result(match, payload.exit_code, payload.duration_ms,
-                             output, truncated)
+                             output, truncated, limit_kind=payload.limit)
         return {"status": "ok", "attached": stored, "request_id": match,
                 "reason": None if stored else "already_has_result"}
 
@@ -1035,6 +1186,7 @@ class HeartbeatPayload(BaseModel):
     poller_ok: int = 0
     gateway_ok: int = 0
     can_reach: int = 0
+    ssh_host_key: str = ""
 
 @app.post("/api/gateway-heartbeat")
 def receive_heartbeat(payload: HeartbeatPayload, request: Request):
@@ -1045,6 +1197,18 @@ def receive_heartbeat(payload: HeartbeatPayload, request: Request):
     update_gateway_last_seen(payload.ip)
     update_gateway_heartbeat(payload.ip, payload.hostname,
                              payload.poller_ok, payload.gateway_ok, payload.can_reach)
+    # F12: a heartbeat can report a new host key, but it never moves the pin —
+    # only an explicit, audited operator action does (design §4, R6).
+    if (payload.ssh_host_key or '').strip():
+        from core.ssh_keys import fingerprint
+        current = get_gateway_ssh_host_key(payload.ip)
+        reported = (payload.ssh_host_key or '').strip()
+        if current and fingerprint(current) != fingerprint(reported):
+            record_audit_event(
+                'ssh_host_key_changed', payload.ip, payload.hostname,
+                f"SSH host key changed on the gateway: pinned "
+                f"{fingerprint(current)}, reported {fingerprint(reported)}. "
+                f"The pin is unchanged; re-pin it explicitly.")
     return {"status": "ok"}
 
 
@@ -1088,6 +1252,9 @@ def fetch_policy(target_ip: str, request: Request):
     policies['zero_trust'] = 1 if get_gateway_zero_trust(resolved_ip) else 0
     # F5: per-gateway output capture (off | exit-only | tail).
     policies['capture_output'] = get_gateway_capture_output(resolved_ip)
+    # F12: direct+mcp | mcp_only. The poller writes /etc/eshu-ssh-mode, which
+    # is the gateway's own enforcement point for the shared key.
+    policies['ssh_mode'] = get_gateway_ssh_mode(resolved_ip)
 
     # Fleet Run — inject pending command into the selected gateways' policy response
     fleet_cmd = get_injectable_fleet_cmd(resolved_ip)
@@ -1130,7 +1297,23 @@ def check_request_status(req_id: int, request: Request):
     status = get_request_status(req_id)
     if status is None:
         raise HTTPException(status_code=404, detail="Request not found")
-    return {"id": req_id, "status": status}
+    out = {"id": req_id, "status": status}
+    # F19: an approved unattended row still has to run under its limit, whether
+    # it is claimed by the poll loop or by a re-run.
+    row = get_request_row(req_id) or {}
+    if row.get('unattended') and status in ('approved', 'consumed'):
+        # AF1: an unattended row always carries the field. A stored limit that
+        # does not parse becomes an empty dict, which the gateway's parser
+        # refuses — it must never be null or omitted, or the gateway would
+        # read "no limit" for a row the dashboard marked unattended.
+        try:
+            out['run_limit'] = json.loads(row.get('run_limit') or '')
+            if not isinstance(out['run_limit'], dict):
+                out['run_limit'] = {}
+        except (TypeError, ValueError):
+            out['run_limit'] = {}
+        out['unattended'] = True
+    return out
 
 @app.get("/api/ticket/{req_id}")
 def claim_ticket_by_id(req_id: int, request: Request):
@@ -1141,7 +1324,20 @@ def claim_ticket_by_id(req_id: int, request: Request):
     ticket = get_ticket_by_request_id(req_id)
     if ticket:
         record_audit_event('jit_consumed', details=f'JIT #{req_id} ticket claimed via /api/ticket')
-        return {"ticket": ticket['ticket']}
+        out = {"ticket": ticket['ticket']}
+        # F19: the limit travels beside the ticket, in the same response, so the
+        # gateway runs this claim bounded (the poller never gets these rows).
+        if ticket.get('unattended'):
+            # AF1: always present, and an unparsable one is an empty dict the
+            # gateway refuses — never null, never omitted.
+            out['unattended'] = True
+            try:
+                out['run_limit'] = json.loads(ticket.get('run_limit') or '')
+                if not isinstance(out['run_limit'], dict):
+                    out['run_limit'] = {}
+            except (TypeError, ValueError):
+                out['run_limit'] = {}
+        return out
     return {"ticket": None}
 
 # ── Dashboard Endpoints (AUTH PROTECTED — sensitive operations) ─────────
@@ -2637,6 +2833,22 @@ def view_inventory(request: Request, q: str = None):
     return inventory_snapshot(q or '', limit=25)
 
 
+@app.get("/api/hosts/{ip}/changes")
+def host_changes(ip: str, request: Request, days: int = 7):
+    """F23: one host's change journal — Eshu's own changes plus Pulse alerts.
+
+    Operator-only, read-only. `days` is clamped to 1–30; an unparseable value
+    is refused rather than silently replaced, so a typo in a dashboard link
+    does not look like a different range.
+    """
+    _check_session(request)
+    from core.change_journal import changes_for_host
+    try:
+        return changes_for_host(ip, days)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="A host is an IPv4 address")
+
+
 @app.post("/api/inventory/refresh")
 def refresh_inventory_now(request: Request):
     """Refresh every configured source now. Read-only source calls only."""
@@ -2792,6 +3004,57 @@ def set_gw_read_lane(ip: str, payload: ReadLanePayload, request: Request):
     record_audit_event('read_lane_' + mode, ip,
                        details=f"Read-only lane set to '{mode}'")
     return {"status": "ok", "ip": ip, "read_lane": mode}
+
+
+class SSHSettingsPayload(BaseModel):
+    mode: str = 'direct+mcp'
+
+
+@app.get("/api/ssh-key")
+def serve_dashboard_ssh_key():
+    """F12: the dashboard's public SSH key.
+
+    Public on purpose: it is a public key, and the installer has to fetch it
+    before it holds any credential. It returns nothing else — no tokens, no
+    fingerprints of private material.
+    """
+    from core.ssh_keys import KeyError_, fingerprint, public_key_line
+    try:
+        line = public_key_line()
+    except KeyError_ as exc:
+        raise HTTPException(status_code=503, detail=f"ssh key unavailable: {exc.code}")
+    return {"public_key": line, "fingerprint": fingerprint(line)}
+
+
+@app.put("/api/gateways/{ip}/ssh-mode")
+def set_gw_ssh_mode(ip: str, payload: SSHSettingsPayload, request: Request):
+    """F12: direct+mcp (default) or mcp_only (the shared key is retired)."""
+    _check_session(request)
+    mode = set_gateway_ssh_mode(ip, payload.mode)
+    record_audit_event('ssh_mode_' + mode, ip,
+                       details=f"SSH mode set to '{mode}'")
+    return {"status": "ok", "ip": ip, "ssh_mode": mode}
+
+
+@app.post("/api/gateways/{ip}/ssh-host-key")
+def repin_ssh_host_key(ip: str, payload: SSHHostKeyPayload, request: Request):
+    """F12 R6: the explicit, audited re-pin. Nothing else moves a pin."""
+    _check_session(request)
+    from core.ssh_keys import fingerprint, parse_public_key
+    key_line = (payload.ssh_host_key or '').strip()
+    if parse_public_key(key_line) is None:
+        raise HTTPException(status_code=400, detail="Invalid ssh_host_key")
+    gateway = get_gateway(ip)
+    if not gateway:
+        raise HTTPException(status_code=404, detail="Gateway not found")
+    previous = get_gateway_ssh_host_key(ip)
+    set_gateway_ssh_host_key(ip, key_line)
+    record_audit_event(
+        'ssh_host_key_repinned', ip, gateway.get('hostname') or '',
+        f"SSH host key re-pinned by the operator: "
+        f"{fingerprint(previous) or '(none)'} -> {fingerprint(key_line)}")
+    return {"status": "ok", "ip": ip, "ssh_host_key": key_line,
+            "fingerprint": fingerprint(key_line)}
 
 
 @app.post("/api/gateways/{ip}/capture")
@@ -3169,6 +3432,35 @@ class DevToolsPayload(BaseModel):
 def get_dev_tools_endpoint(request: Request):
     _check_session(request)
     return {"enabled": get_dev_tools_enabled()}
+
+class RunLimitPayload(BaseModel):
+    seconds: int
+    bytes: int
+
+
+@app.get("/api/settings/run-limit")
+def get_run_limit_endpoint(request: Request):
+    """F19: the limit unattended runs get. Operator session only."""
+    _check_session(request)
+    return get_run_limit_settings()
+
+
+@app.put("/api/settings/run-limit")
+def set_run_limit_endpoint(payload: RunLimitPayload, request: Request):
+    """F19: fleet-wide limits. Session + CSRF (the middleware), audited with
+    the old and the new values; no MCP tool and no gateway token reaches it."""
+    _check_session(request)
+    problem = run_limit_problem(payload.seconds, payload.bytes)
+    if problem:
+        raise HTTPException(status_code=400, detail=problem)
+    old = get_run_limit_settings()
+    set_run_limit_settings(payload.seconds, payload.bytes)
+    record_audit_event(
+        "run_limit_changed",
+        details=("Run limit %d s / %d bytes -> %d s / %d bytes"
+                 % (old["seconds"], old["bytes"], payload.seconds, payload.bytes)))
+    return get_run_limit_settings()
+
 
 @app.put("/api/settings/dev-tools")
 def set_dev_tools_endpoint(payload: DevToolsPayload, request: Request):
@@ -3791,6 +4083,10 @@ def _plan_payload(plan: dict) -> dict:
     for item in plan.get('items', []):
         row = dict(item)
         row['remaining'] = max(0, int(row.get('max_uses') or 0) - int(row.get('uses') or 0))
+        # P1: an mcp item shows the redacted arguments and the preflight
+        # summary, so the operator approves what the call actually does.
+        row['args'] = row.pop('args_json', '') or ''
+        row['summary'] = row.get('summary') or ''
         row['breakdown'] = None if row.get('removed') else cmd_breakdown(row.get('command') or '')
         items.append(row)
     out['items'] = items
@@ -3801,6 +4097,9 @@ def _plan_payload(plan: dict) -> dict:
     session = get_session(plan.get('session_id') or '')
     out['agent'] = session.get('agent') or ''
     out['session_goal'] = session.get('goal') or ''
+    # AG1: the card says who wrote the plan. A `probe` plan may cover its
+    # commands for an agent in approval mode; an `agent` plan may not.
+    out['origin'] = plan.get('origin') or 'agent'
     # SR3: the card says when a plan is only as safe as the session id, so the
     # operator can enable strict sessions before relying on it.
     out['strict_sessions'] = require_sessions_enabled()
@@ -4016,14 +4315,54 @@ def promote_conclusion_endpoint(conclusion_id: int,
     return {'status': 'ok', 'runbook': runbook}
 
 
+@app.get("/api/runbooks")
+def list_runbooks_endpoint(request: Request, q: str = '', tag: str = '',
+                           include_retired: int = 0):
+    """X2: the operator's runbook list, through F13's own search.
+
+    Same ranking as `find_runbooks`, so the operator and the agents agree on
+    what "matches"; a bigger cap (100) because this is a page. A retired
+    runbook is listed only when `include_retired` is set, and it carries the
+    flag so the UI can grey it.
+    """
+    _check_session(request)
+    from core.conclusions import list_runbook_payloads
+    tags = [tag] if tag else []
+    rows = list_runbook_payloads(q, tags, include_retired=bool(include_retired))
+    return {'runbooks': rows, 'count': len(rows),
+            'include_retired': bool(include_retired)}
+
+
 @app.get("/api/runbooks/{runbook_id}")
 def get_runbook_endpoint(runbook_id: int, request: Request):
     _check_session(request)
     from core.conclusions import get_runbook_payload
-    payload = get_runbook_payload(runbook_id)
+    # The operator may open a retired runbook (to un-retire it); an agent
+    # never reaches this route, and `get_runbook_payload()` still hides a
+    # retired row by default for every other caller.
+    payload = get_runbook_payload(runbook_id, include_retired=True)
     if not payload:
         raise HTTPException(status_code=404, detail="not_found")
     return payload
+
+
+@app.post("/api/runbooks/{runbook_id}/retire")
+def retire_runbook_endpoint(runbook_id: int, payload: RunbookRetirePayload,
+                            request: Request):
+    """X2: retire or un-retire a runbook. Audited, reversible, no delete."""
+    _check_session(request)
+    from db.conclusions import set_runbook_retired
+    row = set_runbook_retired(runbook_id, bool(payload.retired))
+    if not row:
+        raise HTTPException(status_code=404, detail="not_found")
+    record_audit_event(
+        'runbook_retired' if payload.retired else 'runbook_unretired',
+        details='Runbook #%d "%s" %s' % (
+            runbook_id, (row.get('title') or '')[:80],
+            'retired' if payload.retired else 'restored'))
+    return {'status': 'ok', 'id': runbook_id,
+            'retired': bool(row.get('retired')),
+            'retired_at': row.get('retired_at') or 0}
 
 
 @app.get("/api/sessions/recent")

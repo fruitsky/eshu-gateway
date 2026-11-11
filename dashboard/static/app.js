@@ -688,6 +688,7 @@ async function switchView(target) {
   if (target === 'fleet') { fetchFleetCommands(); }
   if (target === 'integrations') { fetchIntegrations(); }
   if (target === 'inventory') { fetchInventory(); }
+  if (target === 'runbooks') { fetchRunbooks(); }
   if (target === 'settings') {
     refreshPasswordUI();
     fetchNotifyConfig();
@@ -3036,7 +3037,9 @@ function conclusionHtml(c, runbookId) {
       '<button class="btn btn-muted btn-xs" onclick="cancelConclusionEdit(' +
       Number(c.id) + ')">Cancel</button>';
   } else if (c.status === 'draft') {
-    actions = '<button class="btn btn-approve btn-xs" onclick="confirmConclusion(' +
+    // F13 S3: say what confirming means; the text is served to other agents.
+    actions = '<span class="cc-hint">Agents will follow this once confirmed.</span>' +
+      '<button class="btn btn-approve btn-xs" onclick="confirmConclusion(' +
       Number(c.id) + ')">Confirm</button>' +
       '<button class="btn btn-muted btn-xs" onclick="startConclusionEdit(' +
       Number(c.id) + ')">Edit</button>' +
@@ -3842,6 +3845,12 @@ function planItemHtml(plan, item) {
           Number(item.max_uses || 1) + '</span>' +
       '</div>' +
       '<code class="plan-cmd">' + escapeHtml(item.command || '') + '</code>' +
+      /* P1: the redacted arguments (and the preflight summary when there is
+         one) are on the card, so an mcp item is not just a hash. */
+      (item.summary
+        ? '<div class="plan-note">' + escapeHtml(item.summary) + '</div>' : '') +
+      (item.args
+        ? '<code class="plan-cmd plan-args">' + escapeHtml(item.args) + '</code>' : '') +
       bdHeadlineHtml(row) +
       bdBodyHtml(row, { raw: false }) +
     '</div></div>';
@@ -3862,6 +3871,12 @@ function planCardHtml(plan) {
       '<span class="plan-title">Plan #' + Number(plan.id) + '</span>' +
       '<span class="plan-who" title="Who proposed this plan">' + escapeHtml(who) + '</span>' +
       '<span class="plan-goal" title="Session goal">' + escapeHtml(goal) + '</span>' +
+      /* AG1: who wrote the plan. A probe plan covers its commands for an
+         approval-mode agent; an agent plan never does. */
+      (plan.origin && plan.origin !== 'agent'
+        ? '<span class="plan-origin" title="Written by Eshu, not the agent">' +
+          escapeHtml(plan.origin) + '</span>'
+        : '') +
       '<span class="plan-count">' + kept.length + ' change' + (kept.length === 1 ? '' : 's') +
         ' on ' + Number(plan.hosts || 0) + ' host' + (Number(plan.hosts) === 1 ? '' : 's') + '</span>' +
     '</div>' +
@@ -4004,6 +4019,9 @@ function renderJitItem(item) {
           '<div class="jit-meta">' +
             '<span class="jit-meta-item">#' + esc(String(Number(c.id)).padStart(6,'0')) + '</span>' +
             '<span class="jit-meta-item">API call</span>' +
+            (c.summary && (c.tool === 'ha_host_reboot' || c.summary.indexOf('\u26a0') === 0)
+              ? '<span class="jit-meta-item" style="color:var(--danger)">' + escapeHtml(c.summary) + '</span>'
+              : (c.summary ? '<span class="jit-meta-item">' + escapeHtml(c.summary) + '</span>' : '')) +
             (c.agent ? '<span class="jit-meta-item">agent ' + escapeHtml(c.agent) + '</span>' : '') +
             (c.reason ? '<span class="jit-meta-item">\u201c' + escapeHtml(c.reason) + '\u201d</span>' : '') +
           '</div>' +
@@ -5215,7 +5233,8 @@ async function fetchGateways() {
       '<td class="px-4 py-2">' + healthCell + '</td>' +
       '<td class="px-4 py-2 gw-spark-cell">' + spark + '</td>' +
       '<td class="px-4 py-2">' + overrideCell + '</td>' +
-      '<td class="px-4 py-2 text-right whitespace-nowrap"><button onclick="openRemoveGatewayModal(' + escJs(g.ip) + ', ' + escJs(g.hostname) + ', ' + isOnline + ')" class="btn btn-deny btn-xs"> Remove</button></td>' +
+      '<td class="px-4 py-2 text-right whitespace-nowrap"><button onclick="openHostChanges(' + escJs(g.ip) + ', ' + escJs(g.hostname) + ')" class="chip-btn" title="What Eshu changed on this host, with its Pulse alerts">Changes</button> ' +
+        '<button onclick="openRemoveGatewayModal(' + escJs(g.ip) + ', ' + escJs(g.hostname) + ', ' + isOnline + ')" class="btn btn-deny btn-xs"> Remove</button></td>' +
       '</tr>';
   }).join('');
   checkOverrideBanner();
@@ -5367,6 +5386,121 @@ async function cancelOverride(ip) {
       fetchGateways();
     } else { showToast('Failed: ' + (data.detail || 'unknown'), 'error'); }
   } catch(e) { showToast('Error: ' + e.message, 'error'); }
+}
+
+// ── F23: the change journal for one host ────────────────────────────────
+var _hostChangesIp = '';
+
+function openHostChanges(ip, hostname) {
+  _hostChangesIp = ip;
+  var title = document.getElementById('host-changes-title');
+  if (title) title.textContent = 'Changes on ' + (hostname || '') + ' (' + ip + ')';
+  var sel = document.getElementById('host-changes-days');
+  if (sel) sel.value = '7';
+  var body = document.getElementById('host-changes-body');
+  if (body) body.innerHTML = '<span class="text-muted">Loading…</span>';
+  var note = document.getElementById('host-changes-alert-note');
+  if (note) { note.textContent = ''; note.classList.add('hidden'); }
+  document.getElementById('host-changes-modal').classList.remove('hidden');
+  fetchHostChanges();
+}
+
+function closeHostChanges() {
+  _hostChangesIp = '';
+  document.getElementById('host-changes-modal').classList.add('hidden');
+}
+
+function reloadHostChanges() { fetchHostChanges(); }
+
+async function fetchHostChanges() {
+  var ip = _hostChangesIp;
+  if (!ip) return;
+  var sel = document.getElementById('host-changes-days');
+  var days = sel ? sel.value : '7';
+  var body = document.getElementById('host-changes-body');
+  try {
+    var res = await authFetch('/api/hosts/' + encodeURIComponent(ip) + '/changes?days=' + encodeURIComponent(days));
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    var data = await res.json();
+    if (_hostChangesIp !== ip) return;      // reopened for another host
+    renderHostChanges(data);
+  } catch (e) {
+    if (body) body.innerHTML = '<span class="text-warning">Could not load the journal: ' + esc(e.message) + '</span>';
+  }
+}
+
+function hostChangeWhen(ts) {
+  if (!ts) return '';
+  var d = new Date(ts * 1000);
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) + ' ' +
+         d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+}
+
+function hostChangeRow(at, mark, main, detail, full) {
+  var html = '<div class="host-change-row">' +
+    '<span class="host-change-at">' + esc(at) + '</span>' +
+    '<span class="host-change-mark ' + esc(mark.cls) + '">' + esc(mark.text) + '</span>' +
+    '<span class="host-change-main">' + main +
+      (detail ? '<div class="host-change-detail">' + detail + '</div>' : '') +
+      (full ? '<details class="host-change-full"><summary>full text</summary><pre>' + esc(full) + '</pre></details>' : '') +
+    '</span></div>';
+  return html;
+}
+
+function renderHostChanges(data) {
+  var body = document.getElementById('host-changes-body');
+  if (!body) return;
+  var counts = document.getElementById('host-changes-count');
+  if (counts) {
+    counts.textContent = data.counts.changes + ' change' + (data.counts.changes === 1 ? '' : 's') +
+      ' · ' + data.counts.alerts + ' alert' + (data.counts.alerts === 1 ? '' : 's') +
+      (data.counts.ties ? ' · ' + data.counts.ties + ' tied' : '');
+  }
+  var note = document.getElementById('host-changes-alert-note');
+  if (note) {
+    note.textContent = data.alerts_error || '';
+    note.classList.toggle('hidden', !data.alerts_error);
+  }
+  var rows = [];
+  (data.changes || []).forEach(function(c) {
+    var mark = { cls: c.kind, text: c.kind === 'ssh' ? 'CHG' : (c.kind === 'audit' ? 'EVT' : 'INT') };
+    var main, detail;
+    if (c.kind === 'ssh') {
+      main = '<strong>#' + esc(c.request_id) + '</strong> <code>' + esc(c.command) + '</code>';
+      var bits = [];
+      if (c.inner_target) bits.push('guest ' + esc(c.inner_target));
+      bits.push('exit ' + (c.exit_code == null ? '—' : esc(c.exit_code)));
+      if (c.agent) bits.push('agent ' + esc(c.agent));
+      if (c.session_id) bits.push('session ' + esc(String(c.session_id).substring(0, 8)));
+      if (c.session_goal) bits.push(esc(c.session_goal));
+      if (c.excluded) bits.push('test traffic');
+      detail = bits.join(' · ');
+    } else if (c.kind === 'audit') {
+      main = '<strong>' + esc(c.label) + '</strong> ' + esc(c.command);
+      detail = c.agent ? 'by ' + esc(c.agent) : '';
+    } else {
+      main = '<strong>' + esc(c.integration) + '</strong> ' + esc(c.method) + ' <code>' + esc(c.command) + '</code>';
+      detail = 'tool ' + esc(c.tool) + (c.agent ? ' · agent ' + esc(c.agent) : '');
+    }
+    var full = (c.command_full && c.command_full !== c.command) ? c.command_full : '';
+    rows.push({ at: c.at, html: hostChangeRow(hostChangeWhen(c.at), mark, main, detail, full) });
+  });
+  (data.alerts || []).forEach(function(a) {
+    var main = '<strong>' + esc(a.level || 'alert') + '</strong> ' + esc(a.message);
+    var bits = [];
+    if (a.resource) bits.push(esc(a.resource));
+    if (a.acknowledged) bits.push('acknowledged');
+    if (a.tie) {
+      bits.push('<span class="host-change-tie">' + esc(a.tie.text) + '</span>' +
+                (a.tie.others ? ' <span class="text-muted">and ' + esc(a.tie.others) + ' earlier</span>' : ''));
+    }
+    rows.push({ at: a.at, html: hostChangeRow(hostChangeWhen(a.at),
+      { cls: 'alert', text: 'ALERT' }, main, bits.join(' · '), '') });
+  });
+  rows.sort(function(x, y) { return y.at - x.at; });
+  body.innerHTML = rows.length
+    ? rows.map(function(r) { return r.html; }).join('')
+    : '<div class="host-changes-empty">No changes or alerts in this range.</div>';
 }
 
 // ── Session Override (narrower than the per-gateway one) ─────────────────
@@ -7758,6 +7892,198 @@ function renderStatistics() {
   renderStatsReadLane(d);
   renderStatsCats(d);
   renderStatsDenied(d);
+}
+
+/* ── X2: the runbooks page ────────────────────────────────────────────────
+   F13 runbooks, searchable by the operator with the same ranking the agents
+   get. Everything below is agent-authored text: every value goes through
+   esc() before it reaches innerHTML. */
+var _rbSearchTimer = null;
+var _rbRows = [];
+var _rbOpenId = 0;
+
+function debouncedRunbookSearch() {
+  clearTimeout(_rbSearchTimer);
+  _rbSearchTimer = setTimeout(fetchRunbooks, 250);
+}
+
+function runbookQuery() {
+  var q = document.getElementById('rb-search');
+  var tag = document.getElementById('rb-tag');
+  var retired = document.getElementById('rb-show-retired');
+  var url = '/api/runbooks?include_retired=' + (retired && retired.checked ? 1 : 0);
+  if (q && q.value.trim()) url += '&q=' + encodeURIComponent(q.value.trim());
+  if (tag && tag.value.trim()) url += '&tag=' + encodeURIComponent(tag.value.trim());
+  return url;
+}
+
+async function fetchRunbooks() {
+  var holder = document.getElementById('rb-results');
+  try {
+    var res = await authFetch(runbookQuery());
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    var data = await res.json();
+    _rbRows = data.runbooks || [];
+    renderRunbookList(_rbRows);
+  } catch (e) {
+    if (holder) holder.innerHTML = '<p class="text-warning">Could not load runbooks: ' + esc(e.message) + '</p>';
+  }
+}
+
+function runbookTagsHtml(tags) {
+  return (tags || []).map(function(t) {
+    return '<span class="rb-tag">' + esc(t) + '</span>';
+  }).join('');
+}
+
+function renderRunbookList(rows) {
+  var holder = document.getElementById('rb-results');
+  var count = document.getElementById('rb-count');
+  if (count) count.textContent = rows.length + (rows.length === 1 ? ' runbook' : ' runbooks');
+  var tags = {};
+  rows.forEach(function(r) { (r.tags || []).forEach(function(t) { tags[t] = 1; }); });
+  var dl = document.getElementById('rb-tags');
+  if (dl) {
+    dl.innerHTML = Object.keys(tags).sort().map(function(t) {
+      return '<option value="' + esc(t) + '"></option>';
+    }).join('');
+  }
+  if (!holder) return;
+  holder.innerHTML = runbookListHtml(rows);
+}
+
+function runbookListHtml(rows) {
+  if (!rows || !rows.length) {
+    return '<p class="text-muted">No runbooks match. Agents get one by promoting a confirmed conclusion.</p>';
+  }
+  var now = Math.floor(Date.now() / 1000);
+  return rows.map(function(r) {
+    var retired = !!r.retired;
+    var detail = [];
+    if (r.step_count != null) detail.push(r.step_count + ' step' + (r.step_count === 1 ? '' : 's'));
+    if (r.created_at) detail.push(formatAgo(now - r.created_at));
+    if (r.session_id) detail.push('session ' + esc(String(r.session_id).substring(0, 8)));
+    return '<div class="rb-row' + (retired ? ' rb-retired' : '') + '" role="button" tabindex="0" ' +
+        'onclick="openRunbook(' + idJs(r.id) + ')" ' +
+        'onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();openRunbook(' + idJs(r.id) + ');}">' +
+      '<div class="rb-row-main">' +
+        '<div class="rb-row-title">' + esc(r.title || '(untitled)') +
+          (retired ? ' <span class="rb-retired-chip">retired</span>' : '') + '</div>' +
+        '<div class="rb-row-when">' + esc(r.when_to_use || '') + '</div>' +
+        '<div class="rb-row-meta">' + runbookTagsHtml(r.tags) +
+          '<span class="text-muted">' + detail.join(' \u00b7 ') + '</span></div>' +
+      '</div>' +
+      '<button class="btn btn-muted btn-xs" onclick="event.stopPropagation();' +
+        'toggleRunbookRetired(' + idJs(r.id) + ',' + (retired ? 'false' : 'true') + ')">' +
+        (retired ? 'Restore' : 'Retire') + '</button>' +
+    '</div>';
+  }).join('');
+}
+
+function runbookStepHtml(step, index) {
+  if (!step || typeof step !== 'object') return '';
+  if (step.kind === 'command') {
+    var host = step.host ? '<span class="rb-step-host">' + esc(step.host) + '</span>' : '';
+    var bd = (step.breakdown && step.breakdown.steps) ? bdBlockHtml(
+      { id: 'rb-step-' + index, command: step.command || '', breakdown: step.breakdown },
+      { raw: false }) : '';
+    return '<div class="rb-step">' +
+      '<div class="rb-step-head">' + host + '<code class="rb-step-cmd">' + esc(step.command || '') + '</code></div>' +
+      (bd ? '<div class="rb-step-bd">' + bd + '</div>' : '') +
+      (step.note ? '<div class="rb-step-note">' + esc(step.note) + '</div>' : '') +
+    '</div>';
+  }
+  if (step.kind === 'tool') {
+    return '<div class="rb-step">' +
+      '<div class="rb-step-head"><span class="rb-step-host">' + esc(step.integration || '') + '</span>' +
+      '<code class="rb-step-cmd">' + esc(step.tool || '') + '</code>' +
+      '<span class="text-muted">' + esc(step.method || '') + ' ' + esc(step.path || '') + '</span></div>' +
+      (step.note ? '<div class="rb-step-note">' + esc(step.note) + '</div>' : '') +
+    '</div>';
+  }
+  return '<div class="rb-step"><div class="rb-step-note">' + esc(step.text || '') + '</div></div>';
+}
+
+function renderRunbook(rb) {
+  var body = document.getElementById('runbook-modal-body');
+  var actions = document.getElementById('runbook-modal-actions');
+  var title = document.getElementById('runbook-modal-title');
+  if (!body) return;
+  if (title) title.textContent = 'Runbook #' + rb.id;
+  body.innerHTML = runbookDetailHtml(rb);
+  if (actions) {
+    actions.innerHTML = '<button class="btn btn-muted btn-sm" onclick="closeRunbook()">Close</button>' +
+      '<button class="btn btn-sm" onclick="toggleRunbookRetired(' + idJs(rb.id) + ',' +
+        (rb.retired ? 'false' : 'true') + ')">' + (rb.retired ? 'Restore' : 'Retire') + '</button>';
+  }
+}
+
+function runbookDetailHtml(rb) {
+  var created = rb.created_at
+    ? new Date(rb.created_at * 1000).toLocaleString() : '';
+  var meta = [];
+  if (created) meta.push('created ' + esc(created));
+  if (rb.session_id) meta.push('session ' + esc(String(rb.session_id).substring(0, 8)));
+  if (rb.conclusion_id) meta.push('conclusion #' + esc(rb.conclusion_id));
+  var steps = (rb.steps || []);
+  var dead = (rb.dead_ends || []);
+  return '<h3 class="rb-title">' + esc(rb.title || '(untitled)') +
+      (rb.retired ? ' <span class="rb-retired-chip">retired</span>' : '') + '</h3>' +
+    '<p class="text-muted">' + meta.join(' \u00b7 ') + '</p>' +
+    (rb.when_to_use ? '<p class="rb-when">' + esc(rb.when_to_use) + '</p>' : '') +
+    '<div class="rb-row-meta">' + runbookTagsHtml(rb.tags) + '</div>' +
+    '<h4 class="rb-h">Steps (' + steps.length + ')</h4>' +
+    (steps.length ? steps.map(runbookStepHtml).join('') : '<p class="text-muted">No steps recorded.</p>') +
+    (dead.length ? '<h4 class="rb-h">Known dead ends</h4>' +
+      dead.map(function(d) {
+        return '<div class="rb-dead-end">' + esc(d.note || '') +
+          (d.ref ? ' <span class="text-muted">(' + esc(d.ref) + ')</span>' : '') + '</div>';
+      }).join('') : '');
+}
+
+async function openRunbook(id) {
+  _rbOpenId = id;
+  var body = document.getElementById('runbook-modal-body');
+  if (body) body.innerHTML = '<p class="text-muted">Loading\u2026</p>';
+  document.getElementById('runbook-modal').classList.remove('hidden');
+  try {
+    var res = await authFetch('/api/runbooks/' + encodeURIComponent(id));
+    if (!res.ok) throw new Error(res.status === 404 ? 'not found (or retired)' : 'HTTP ' + res.status);
+    var rb = await res.json();
+    if (_rbOpenId !== id) return;             // reopened for another runbook
+    renderRunbook(rb);
+  } catch (e) {
+    if (body) body.innerHTML = '<p class="text-warning">Could not open the runbook: ' + esc(e.message) + '</p>';
+  }
+}
+
+function closeRunbook() {
+  _rbOpenId = 0;
+  document.getElementById('runbook-modal').classList.add('hidden');
+}
+
+async function toggleRunbookRetired(id, retire) {
+  var ok = await customConfirm(
+    retire
+      ? 'Agents will no longer find this runbook. Nothing is deleted and you can restore it.'
+      : 'Agents will find this runbook again.',
+    { title: retire ? 'Retire runbook #' + id + '?' : 'Restore runbook #' + id + '?',
+      confirmLabel: retire ? 'Retire' : 'Restore',
+      danger: retire });
+  if (!ok) return;
+  try {
+    var res = await authFetch('/api/runbooks/' + encodeURIComponent(id) + '/retire', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ retired: !!retire })
+    });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    showToast('Runbook #' + id + (retire ? ' retired' : ' restored'), 'success');
+    fetchRunbooks();
+    if (_rbOpenId === id) openRunbook(id);
+  } catch (e) {
+    showToast('Could not change the runbook: ' + e.message, 'error');
+  }
 }
 
 /* ── F14: the inventory ──────────────────────────────────────────────────

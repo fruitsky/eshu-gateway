@@ -597,6 +597,22 @@ def check_request_fn():
             status = 'expired'
         elif status == 'approved' and expires_at and expires_at + 60 < now:
             status = 'abandoned'
+        # M2: say when a re-run is safe. The lockbox only holds the ticket
+        # once the poller has consumed the row; re-running at `approved`
+        # races that poll and files a second JIT request.
+        unattended = bool(row.get('unattended'))
+        if status == 'approved' and unattended:
+            # F19/Q2: nothing else will consume this row (the poller skips it),
+            # and the re-run claims it by id with its limit, so waiting for
+            # `consumed` would only spin to the deadline.
+            next_step = ('approved (unattended): re-run now — the re-run claims '
+                         'it by id with its run limit')
+        else:
+            next_step = {
+                'pending': 'waiting for operator approval',
+                'approved': 'approved, delivering to the gateway — do not re-run yet',
+                'consumed': 'ready to re-run: call ssh_exec again with the same arguments',
+            }.get(status, '')
         return json.dumps({
             'id': request_id,
             'kind': 'ssh',
@@ -605,6 +621,8 @@ def check_request_fn():
             'target_ip': row.get('target_ip') or '',
             'session_id': owner,
             'expires_at': expires_at,
+            'unattended': unattended,
+            'next_step': next_step,
         })
     return _check_request
 
@@ -802,6 +820,30 @@ def session_conclude_fn():
     return _session_conclude
 
 
+SSH_EXEC_DESC = (
+    "Run one command over SSH on a registered gateway as this agent, without "
+    "holding an SSH key. `host` is a gateway IP or hostname Eshu knows (never "
+    "user@host, a port or an -o option) and `command` is sent byte-for-byte. "
+    "The gateway's policy still decides: freeze, blocklists, allowlists, "
+    "Zero-Trust and JIT all apply, and this agent's ssh_mode may force every "
+    "command to approval. Returns {status: ran|pending|refused, request_id, "
+    "exit_code?, output? (tail, <=64 KiB), truncated?, reason?}. When the "
+    "status is pending, poll check_request(request_id) and call ssh_exec again "
+    "with the same arguments once check_request says `consumed` (the ticket is "
+    "in the lockbox then; `approved` means it is still being delivered). "
+    "wait=true polls here for up to 60 s."
+)
+
+
+def ssh_exec_fn():
+    def _ssh_exec(host: str, command: str, session_id: str = "",
+                  timeout: int = 60, wait: bool = False) -> str:
+        from core.ssh_exec import as_json, ssh_exec
+        return as_json(ssh_exec(host, command, session_id=session_id,
+                                timeout=timeout, wait=wait))
+    return _ssh_exec
+
+
 def find_runbooks_fn():
     def _find_runbooks(query: str = "", tags=None) -> str:
         from core.conclusions import as_json, find_runbooks
@@ -836,9 +878,12 @@ SESSION_PLAN_DESC = (
     "then call this with the exact commands you intend to run: "
     '{"host": "<gateway ip>" or "*", "command": "<exact text>", "max_uses": 1}. '
     "Matching is byte-exact after trimming whitespace — no patterns, no "
-    "prefixes. Up to 50 items, each under 4 kB. Returns plan_id in status "
-    "'proposed'; the operator approves (possibly a subset, with a TTL of up to "
-    "4 hours) in the dashboard. Poll check_plan(plan_id) for its state."
+    "prefixes. An MCP call can be covered too: "
+    '{"kind": "mcp", "integration": "Home Assistant", "tool": "ha_addon_update", '
+    '"args": {...}, "max_uses": 1} — matching is by the exact argument hash, '
+    "one use per call. Up to 50 items, each under 4 kB. Returns plan_id in "
+    "status 'proposed'; the operator approves (possibly a subset, with a TTL "
+    "of up to 4 hours) in the dashboard. Poll check_plan(plan_id) for its state."
 )
 
 
@@ -957,6 +1002,49 @@ mcp.add_tool(session_conclude_fn(), name="session_conclude", description=SESSION
 mcp.add_tool(find_runbooks_fn(), name="find_runbooks", description=FIND_RUNBOOKS_DESC)
 mcp.add_tool(similar_incidents_fn(), name="similar_incidents", description=SIMILAR_INCIDENTS_DESC)
 mcp.add_tool(get_runbook_fn(), name="get_runbook", description=GET_RUNBOOK_DESC)
+DIAGNOSE_DESC = (
+    "Ask one question about one host and get a short structured digest back "
+    "(state, errors, ports, disk) instead of raw logs. The host is a registered "
+    "gateway; the unit/container/name is typed and validated. The first call "
+    "proposes ONE grouped approval plan; after the operator approves it, call "
+    "probe_result(plan_id) for the digest."
+)
+
+
+def diagnose_fn(probe_name):
+    def _diagnose(params: dict = None, session_id: str = "") -> str:
+        from core.probes import plan_probe
+        return json.dumps(plan_probe(probe_name, params or {},
+                                     session_id=session_id))
+    return _diagnose
+
+
+def probe_result_fn():
+    def _probe_result(plan_id: int, session_id: str = "") -> str:
+        from core.probes import probe_result
+        return json.dumps(probe_result(plan_id, session_id=session_id))
+    return _probe_result
+
+
+mcp.add_tool(diagnose_fn('diagnose_service'), name="diagnose_service",
+             description=("Service on a gateway: is-active state, the last "
+                          "200 journal lines de-duplicated, listening ports. "
+                          "One grouped approval, then probe_result."))
+mcp.add_tool(diagnose_fn('diagnose_container'), name="diagnose_container",
+             description=("Docker container or Proxmox guest on a gateway: "
+                          "ps/inspect or pct list/config. One grouped approval, "
+                          "then probe_result."))
+mcp.add_tool(diagnose_fn('disk_pressure'), name="disk_pressure",
+             description=("Filesystem and inode use plus the largest /var/log "
+                          "directories on a gateway. One grouped approval, then "
+                          "probe_result."))
+mcp.add_tool(diagnose_fn('dns_check'), name="dns_check",
+             description=("The local Pi-hole DNS record for an FQDN. Runs no "
+                          "gateway command; returns the record when present."))
+mcp.add_tool(probe_result_fn(), name="probe_result",
+             description=("The digest of an approved probe plan. Pending while "
+                          "the operator has not approved it."))
 mcp.add_tool(whereis_fn(), name="whereis", description=WHEREIS_DESC)
+mcp.add_tool(ssh_exec_fn(), name="ssh_exec", description=SSH_EXEC_DESC)
 mcp.add_tool(session_plan_fn(), name="session_plan", description=SESSION_PLAN_DESC)
 mcp.add_tool(check_plan_fn(), name="check_plan", description=CHECK_PLAN_DESC)

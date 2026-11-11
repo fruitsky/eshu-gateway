@@ -5367,6 +5367,13 @@ body.pol-open .mobile-menu-btn, body.pol-open .mobile-freeze { display: none; }
     color: var(--accent);
   }
   .cc-note { color: var(--text-muted); font-style: italic; }
+  /* F13 S3: what Confirm actually does -- the conclusion is served to
+     other agents, not just filed. */
+  .cc-hint {
+    margin-right: auto;
+    font-size: var(--text-micro);
+    color: var(--text-quiet);
+  }
   .cc-actions { display: flex; align-items: center; gap: 6px; margin-top: 8px; }
   .cc-runbook {
     font-family: 'JetBrains Mono', monospace;
@@ -5385,3 +5392,129 @@ body.pol-open .mobile-menu-btn, body.pol-open .mobile-freeze { display: none; }
     border: 1px solid var(--rule-weak);
     border-radius: 3px;
   }
+
+/* ── F23: the change journal modal ─────────────────────────────────────── */
+.host-changes-body {
+  max-height: 60vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.host-change-row {
+  display: grid;
+  grid-template-columns: 6.5em 3.2em 1fr;
+  gap: 8px;
+  align-items: baseline;
+  padding: 5px 6px;
+  border-bottom: 1px solid var(--rule-weak);
+}
+.host-change-row:last-child { border-bottom: 0; }
+.host-change-row:hover { background: var(--bg-hover); }
+.host-change-at { color: var(--text-faint); font-variant-numeric: tabular-nums; }
+.host-change-mark {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  letter-spacing: 0.5px;
+  text-align: center;
+  border: 1px solid var(--rule-weak);
+  border-radius: 3px;
+  color: var(--text-dim);
+  padding: 1px 0;
+}
+.host-change-mark.ssh { color: var(--accent-hover); border-color: var(--accent-ring); }
+.host-change-mark.integration { color: var(--state-auto); border-color: rgba(147, 197, 253, 0.4); }
+.host-change-mark.audit { color: var(--state-approved); border-color: rgba(74, 222, 128, 0.4); }
+.host-change-mark.alert { color: var(--state-denied); border-color: rgba(248, 113, 113, 0.4); }
+.host-change-main { color: var(--text-main); word-break: break-word; }
+.host-change-detail { color: var(--text-muted); }
+.host-change-tie {
+  color: var(--state-pending);
+  border: 1px solid var(--accent-ring);
+  border-radius: 999px;
+  padding: 0 6px;
+  margin-left: 6px;
+  white-space: nowrap;
+}
+.host-change-full { margin-top: 3px; color: var(--text-dim); }
+.host-change-full summary { cursor: pointer; color: var(--text-faint); }
+.host-changes-empty { color: var(--text-muted); padding: 8px 0; }
+
+/* ── X2: the runbooks page ─────────────────────────────────────────────── */
+.rb-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 10px 8px;
+  border-bottom: 1px solid var(--rule-weak);
+  cursor: pointer;
+}
+.rb-row:last-child { border-bottom: 0; }
+.rb-row:hover, .rb-row:focus-visible { background: var(--bg-hover); }
+.rb-row.rb-retired { opacity: 0.55; }
+.rb-row-main { flex: 1; min-width: 0; }
+.rb-row-title {
+  color: var(--text-main);
+  font-size: 14px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.rb-row-when {
+  color: var(--text-muted);
+  font-size: 12px;
+  margin-top: 2px;
+  overflow-wrap: anywhere;
+}
+.rb-row-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 5px;
+  font-size: 11px;
+}
+.rb-tag {
+  color: var(--accent-hover);
+  border: 1px solid var(--accent-tint);
+  background: var(--accent-wash);
+  border-radius: 999px;
+  padding: 0 7px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+}
+.rb-retired-chip {
+  color: var(--state-denied);
+  border: 1px solid rgba(248, 113, 113, 0.4);
+  border-radius: 999px;
+  padding: 0 7px;
+  font-size: 11px;
+  font-weight: 400;
+  white-space: nowrap;
+}
+.runbook-body { max-height: 62vh; overflow-y: auto; }
+.rb-title { color: var(--text-main); font-size: 16px; font-weight: 600; margin-bottom: 2px; overflow-wrap: anywhere; }
+.rb-when { color: var(--text-dim); font-size: 12px; margin: 6px 0; overflow-wrap: anywhere; }
+.rb-h {
+  color: var(--text-muted);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  margin: 14px 0 6px;
+}
+.rb-step {
+  border-left: 2px solid var(--rule-weak);
+  padding: 4px 0 4px 10px;
+  margin-bottom: 6px;
+}
+.rb-step-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; }
+.rb-step-host { color: var(--text-faint); font-size: 11px; }
+.rb-step-cmd { color: var(--text-main); font-size: 12px; overflow-wrap: anywhere; }
+.rb-step-bd { margin-top: 2px; }
+.rb-step-note { color: var(--text-muted); font-size: 12px; margin-top: 2px; overflow-wrap: anywhere; }
+.rb-dead-end { color: var(--state-blocked); font-size: 12px; padding: 2px 0; overflow-wrap: anywhere; }
+@media (max-width: 768px) {
+  .rb-row { flex-direction: column; gap: 6px; }
+  .rb-row > button { align-self: flex-end; }
+  .runbook-body { max-height: 70vh; }
+}

