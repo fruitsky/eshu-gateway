@@ -10763,6 +10763,106 @@ The behaviour checked:
 
 ---
 
+## Hotfix — installer re-registration (RR1) · branch `fix/installer-reregister` · installer · **security reviewer sign-off**
+
+The fix is described in commit `2da685e`: the existing token is loaded
+before `/api/register`, there is one `register_gateway()` reading the HTTP
+status, and `ssh_mode` is taken only from a 200.
+
+### Reviewer notes (security reviewer, 2026-11-12, at `2da685e`)
+
+**Approved once BE1 and BE2 are in. Both are small.** The three changed
+installers carry identical hunks.
+
+What I checked:
+* **The token is charset-checked before it reaches a `-H` argument.** That
+  also stops header injection from a tampered token line.
+* **The 401 retry cannot take over a known gateway.** `/api/register`
+  refuses a no-token registration for any IP it already knows, whatever
+  enrollment token comes with it. So the retry succeeds only for a gateway
+  that was removed from the dashboard, which is what it is meant for.
+* **A failed call keeps the old token,** and `/etc/eshu-token` is written
+  only when there is a token.
+* **The status line cannot be spoofed:** curl appends it after the body.
+* **A rejected token in a 200 keeps the old one.**
+
+**BE1 (must, RR-b): a failed registration must not widen SSH access.**
+* On a non-200 answer, `GATEWAY_SSH_MODE` falls back to `direct+mcp`. A
+  reinstall then writes the shared `eshu-gateway-key` line back onto an
+  `mcp_only` gateway.
+* Anyone who can make the dashboard unreachable for 15 s during a reinstall
+  gets direct mode back. That is fail-open.
+* Fix: when the registration did not return 200, skip the `authorized_keys`
+  rewrite entirely. Leave the file exactly as it is and print why.
+  * On a reinstall the gateway keeps the keys it had.
+  * On a fresh install it gets none and is unreachable until a re-run
+    succeeds, which fails closed.
+* Test: a reinstall of an `mcp_only` gateway with a stub returning 401 or
+  000 leaves `authorized_keys` byte-identical.
+* **Operator check, outside the repo:** until this fix, every reinstall got
+  a 401, so every `mcp_only` gateway reinstalled since the registration
+  auth change may have the shared line back. List the `mcp_only` gateways
+  and look for an `eshu-gateway-key` line in each one's `authorized_keys`.
+
+**BE2 (must, release): regenerate `dashboard/static/dev/eshu-gateway-install.sh`
+in this branch.**
+* It is not in the diff, so it still has the old order.
+* `deploy-dashboard.sh` resets `static/dev/` to the committed copy, so the
+  first dev update after the deploy still gets 401. That is the release
+  test that found the bug.
+* Worse, `/api/dev/promote` copies the dev installer over the golden one
+  and the source file. A promote made before anyone presses "Seed Edge"
+  would put the bug back into the fleet installer.
+* `fix/gateway-hardening` regenerated all three copies. Do the same here.
+
+**RR-a: recorded, not fixed in this hotfix. BE3 (should, own chunk).**
+* The gateway token in a curl `-H` argument is visible in `/proc` while
+  the call runs. But the gateway script and the poller send it the same way
+  on every ticket, result and status call (in the gateway script alone:
+  tickets, results, request status). Fixing only the installer would close
+  one of many windows.
+* Move every curl header that holds a secret to `-H @file`, from a 0600 file
+  or a process substitution, across the installer, the gateway and the
+  poller. The secrets are the gateway token and the enrollment token.
+  `-H @file` needs curl ≥ 7.55; if older curl matters, use `-K -` with the
+  headers on stdin.
+* Scope it like AF3, with a test that no curl argv carries a token.
+
+**RR-c: yes, in principle, as its own small change after this hotfix
+(BE4).** The update installer is already fetched from the dashboard and
+runs as root, so a dashboard key line adds no trust the update does not
+already have. Conditions:
+* **Only the dashboard line changes.**
+  * Only a line with the exact `--dashboard-key` forced-command prefix and
+    the ` eshu-dashboard` comment is replaced or added.
+  * Every other line is left byte-identical, including the `eshu-gateway-key`
+    line (or its absence on `mcp_only`).
+* **Keep `from=`.** `ALLOWED_SSH_FROM` is not known on update. Take `from=`
+  from the existing Eshu lines. If the existing lines carry a `from=` that
+  cannot be parsed, change nothing. A dashboard line must never be less
+  restricted than the gateway line beside it.
+* **Validate the key.** It must be one line in the form
+  `ssh-ed25519 <base64>`, with no options of its own. An empty key leaves
+  the existing line in place; it does not delete it.
+* **Only after a 200 registration** (BE1's rule).
+* **Write safely.** This runs as root in a directory the gateway user owns.
+  * Create the temp file with `mktemp` in `.ssh/` (O_EXCL, so a planted
+    symlink is never followed), then `mv` it into place.
+  * Refuse when `.ssh` or `authorized_keys` is a symlink, or not owned by
+    the user.
+  * The install path's fixed `authorized_keys.tmp` name has the same
+    planted-symlink problem today. Fix it in the same change.
+
+**The two dev gateway tokens printed during diagnosis:** a model session's
+context leaves the machine, so treat both as exposed. Rotate them now by
+remove and re-enrol: they are dev gateways, and that is cheap. The
+token-rotation action belongs in the backlog. Shape:
+* the dashboard mints a new token;
+* the token reaches the gateway only over its authenticated update channel;
+* the old token stays valid until the gateway's first call with the new one,
+  within a bounded grace period;
+* it is audited, and the token is never shown.
+
 ## 7. Backlog (not planned in detail)
 
 * Deny with a reason, shown to the agent (cheap; low value given the data).
