@@ -12854,6 +12854,37 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 16 | F15 | probes | dashboard + MCP | **Merged** 2026-11-11 (AG1 security decision `eca8982`; AI1 fix merged) | `feat/f15-probes` | F4, F12, F14 | |
 | 17 | F21 | snapshot-approve | dashboard + Proxmox | Design first | `feat/f21-snapshot-approve` | F7, F14, F2 | + security sign-off (new write path, destructive rollback) |
 | 18 | F23 | change-journal | dashboard | **Merged** 2026-11-11 (AJ1/AJ2) | `feat/f23-change-journal` | F1, F5, F7, F14 | |
+
+### Reviewer notes (security reviewer, 2026-11-12, gateway hunk at `33a1a20`)
+
+**The gateway hunk is approved**, and so is the request-path code that
+consumes it.
+* **The prefix.** `ESHU_CHECK_TOKEN` is in the prefix parser's key list, is
+  charset-checked, takes part in the duplicate-key refusal, and makes
+  `MANIFEST_PRESENT=1`. A bare token without a full signature is therefore
+  refused (G2).
+* **The canonical form.** `v2` is a separate canonical: the version line
+  differs and every field is newline-separated with a charset that has no
+  newline. So a `v1` signature can never verify as `v2`, and no field can
+  slide into another.
+* **The token's path.** Only `ESHU_CHECK_TOKEN_VERIFIED`, set after the MAC
+  verified, is posted, and both variables are cleared at the top of the
+  script.
+* **Old gateways.** A gateway older than F22 sees an unknown prefix word,
+  treats it as part of the command, and fails the signature. That fails
+  closed.
+* **Dashboard side.** The token is honoured only with `force_jit`, outside
+  a freeze, on a non-Zero-Trust gateway that can limit runs. The claim
+  compares it with the item's stored token and also needs the owning agent.
+  The stored reason is `plan-check:<plan>:<item>`, with no token. A denied
+  card releases the link (AV2).
+* **Installers.** All four are regenerated, and the test rebuilds them from
+  the generator's inputs.
+
+**When this rebases onto `fix/secret-headers`:** keep the `check_token` body
+off argv (BE3's BH3): `--data-binary @-` for the body and
+`-H @<(gateway_header)` for the header. That is a should, not a blocker for
+this merge.
 | 18a | X2 | runbooks-page | dashboard UI | **Merged** 2026-11-11 | `feat/x2-runbooks-page` | F13 | |
 | 18b | F27 | allowances | dashboard + MCP | Design first (from live use: P2 caught HA call_service) | `feat/f27-allowances` | F10 (P2), Chunk H, F18 | + security sign-off; next design after F21/F22 code |
 | 18c | X3 | integrations-ui | dashboard UI | Requested 2026-11-12; design after F27 is signed off | `feat/x3-integrations-ui` | F27, F10 (P2) | operator walk-through first |
