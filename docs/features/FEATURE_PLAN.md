@@ -10863,6 +10863,26 @@ token-rotation action belongs in the backlog. Shape:
   within a bounded grace period;
 * it is audited, and the token is never shown.
 
+### Reviewer notes (security reviewer, 2026-11-12, re-read at `f67e136`)
+
+**BE1 and BE2 are in. Approved for merge and deploy** on the operator's
+go-ahead.
+
+* **BE1.**
+  * `REGISTER_OK` is cleared before the call and set only on a 200, so it
+    cannot come in from the environment.
+  * The key block runs only when it is `1`. A missing `DASHBOARD_URL`
+    therefore also leaves `authorized_keys` alone, which fails closed.
+  * The failure branch no longer sets a mode, and `GATEWAY_SSH_MODE` is
+    initialised at the top of the script, never taken from the environment.
+* **BE2.** All four installer files are byte-identical, and a test enforces
+  it.
+* **The live check** (no `mcp_only` gateway, nothing to repair) closes
+  BE1's operator item.
+* **After the deploy:** rotate the two exposed dev tokens by re-enrolling
+  those gateways with the fixed installer, as planned. BE3, BE4 and token
+  rotation go into the plan as their own chunks at merge.
+
 ## 7. Backlog (not planned in detail)
 
 * Deny with a reason, shown to the agent (cheap; low value given the data).
