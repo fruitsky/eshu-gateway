@@ -112,6 +112,10 @@ while [ $# -gt 0 ]; do
     *) url="$1"; shift ;;
   esac
 done
+# Real curl refuses a URL with whitespace or a newline (exit 3, nothing
+# sent). The stub must too, or a malformed poll URL passes the tests while
+# no gateway ever polls (the WC="0\\n0" bug).
+case "$url" in *[[:space:]]*) printf 'MALFORMED\\t%s\\n' "$out" >> "$LOG"; exit 3 ;; esac
 printf '%s\\t%s\\n' "$url" "$out" >> "$LOG"
 body=""; code="200"
 case "$url" in
@@ -459,3 +463,30 @@ def test_ticket_with_json_whitespace_is_not_missed(poller):
 
     assert poller.python_calls() == before + 1
     assert (poller.run_dir / "eshu.tickets").read_text().strip() == ticket
+
+
+def test_ticket_poll_url_is_valid_with_an_empty_windows_file(poller):
+    """`grep -c` prints 0 AND exits 1 on an empty file, so `|| echo 0` made
+    WC "0\\n0"; curl refused the URL and no approved ticket was ever
+    fetched (ssh_exec stuck at `approved`, 1.2 test round)."""
+    poller.policy(policy_body())
+    poller.run()
+    assert poller.read("eshu-windows.txt") == ""
+    ticket = "%d|echo ticketed" % int(time.time())
+    poller.ticket(ticket)
+    poller.run()
+    urls = [u for u, _ in poller.curl_out_pairs()]
+    assert "MALFORMED" not in urls
+    assert any(u.endswith("/api/poll/" + u.split("/api/poll/")[-1]) and "wc=0" in u
+               for u in urls if "/api/poll/" in u)
+    assert (poller.run_dir / "eshu.tickets").read_text().strip() == ticket
+
+
+def test_ticket_poll_counts_windows(poller):
+    body = policy_body(approved_windows=[
+        {"token": "t1", "command": "uptime"}, {"token": "t2", "command": "df -h"}])
+    poller.policy(body)
+    poller.run()
+    poller.run()
+    polls = [u for u, _ in poller.curl_out_pairs() if "/api/poll/" in u]
+    assert polls and polls[-1].endswith("wc=2")

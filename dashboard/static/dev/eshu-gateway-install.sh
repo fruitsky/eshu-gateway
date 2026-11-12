@@ -2209,7 +2209,11 @@ with open('/etc/eshu-windows.txt.tmp', 'w') as f:
   rm -f "$POLICY_FILE"
 
   # 2. Poll for JIT Tickets
-  WC=$(grep -c . /etc/eshu-windows.txt 2>/dev/null || echo 0)
+  # `grep -c` prints 0 AND exits 1 on an empty file, so the old
+  # `|| echo 0` made WC "0<newline>0": curl refused the URL (exit 3) and no
+  # approved ticket was ever fetched. Take grep's count alone, digits only.
+  WC=$(grep -c . /etc/eshu-windows.txt 2>/dev/null) || true
+  case "$WC" in ''|*[!0-9]*) WC=0 ;; esac
   TICKET_FILE=$(mktemp -p "$ESHU_WORK" ticket.XXXXXX)
   curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -H "X-Gateway-Token: $GATEWAY_TOKEN" "$DASHBOARD_URL/api/poll/$TARGET_IP?wc=$WC" > "$TICKET_FILE"
   # Only start python when the response actually carries a ticket string. The
