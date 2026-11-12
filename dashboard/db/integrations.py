@@ -41,6 +41,13 @@ def init_integrations_tables(cursor):
         cursor.execute("ALTER TABLE integrations ADD COLUMN token_url TEXT DEFAULT ''")
     except Exception:
         pass
+    # F11: per-integration settings that are not credentials (the HA SSH user,
+    # port, pinned host key and its fingerprint). Additive on existing DBs.
+    try:
+        cursor.execute(
+            "ALTER TABLE integrations ADD COLUMN config_json TEXT NOT NULL DEFAULT '{}'")
+    except Exception:
+        pass
     try:
         cursor.execute("ALTER TABLE integrations ADD COLUMN verify_tls INTEGER DEFAULT 1")
     except Exception:
@@ -323,6 +330,29 @@ def get_integration(name: str):
         cursor.execute('SELECT * FROM integrations WHERE name = ?', (name,))
         row = cursor.fetchone()
         return dict(row) if row else None
+
+
+def get_integration_config(integration) -> dict:
+    """F11: the non-secret per-integration settings (`config_json`)."""
+    raw = (integration or {}).get('config_json') or '{}'
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def set_integration_config(integration, updates: dict) -> dict:
+    """Merge `updates` into the integration's config_json and return the result."""
+    current = get_integration_config(integration)
+    merged = dict(current)
+    merged.update(updates or {})
+    with db_conn() as conn:
+        conn.execute('UPDATE integrations SET config_json = ? WHERE id = ?',
+                     (json.dumps(merged, separators=(',', ':')),
+                      int((integration or {}).get('id') or 0)))
+        conn.commit()
+    return merged
 
 
 def get_integration_by_id(integration_id: int):
