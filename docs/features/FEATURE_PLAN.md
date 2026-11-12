@@ -11686,8 +11686,8 @@ SIGPIPE and the pipeline would report failure on a match. Tests:
 `test_bj1_a_leading_from_on_every_line_still_updates`; the earlier BH1 tests
 still pass. Installers regenerated.
 
-`bash scripts/verify.sh`: `2857 passed, 26 skipped, 8 warnings in 583.39s
-(0:09:43)`.
+`bash scripts/verify.sh`: `2895 passed, 26 skipped, 8 warnings in 598.20s
+(0:09:58)` (after the stack rebase onto `fix/lockbox-bi`).
 
 #### Security re-read (2026-11-12, at `cab1399`): BJ1 approved
 
