@@ -10883,6 +10883,48 @@ go-ahead.
   those gateways with the fixed installer, as planned. BE3, BE4 and token
   rotation go into the plan as their own chunks at merge.
 
+## Fix — agent SSH hosts and mode (F12 follow-up) · branch `fix/agent-ssh-hosts` · dashboard · security read
+
+### Reviewer notes (security reviewer, 2026-11-12, at `67a0b75`)
+
+**Approved for deploy.** BF1 is a should for this branch; BF2 is a should
+for later.
+
+What I checked:
+* **Keep-on-save.** `None` keeps the stored values, `[]` clears, and both go
+  through the same `validate_policy`. Both callers of `set_agent_policy`
+  (the policy PUT and the web-fetch sync) now keep the SSH fields, which was
+  the bug.
+* **Who can set the fields.** No agent-reachable path sets them. The only
+  route is the session-authenticated PUT, and an MCP or agent token never
+  reaches it.
+* **Validation.** `_validate_ssh_hosts` refuses anything outside
+  `[A-Za-z0-9_.:-]`, so `user@` and a leading `-o` cannot be written. The
+  mode is limited to the three values.
+* **Audit.** The audit row records a mode or host change.
+* **UI escaping.** Gateway names are rendered through `esc`/`escJs`, and the
+  "also kept" entries through `textContent`. Ticking a gateway stores its
+  IP, not its hostname.
+
+**BF1 (should, this branch): confirm `*`.** `*` is not "every gateway I
+see now". It also covers every gateway enrolled later, and in `normal` mode
+that means allowlisted commands run on all of them without a card.
+* Ticking `*` opens a confirm that says exactly that.
+* The agent row's summary shows "SSH any gateway" in the warning colour.
+* A plain checkbox is fine for single gateways.
+
+**BF2 (should, later F12 change): match host entries by IP, not by
+self-reported hostname.**
+* `host_allowed` also matches an entry against the gateway's `hostname`.
+  That hostname is whatever the gateway last sent to `/api/register`.
+* So a compromised gateway that re-registers under another gateway's name
+  satisfies an agent's hostname entry for that other gateway. An agent
+  limited to one host can then be pointed at the hostile one, and its
+  commands go to the attacker.
+* The new UI already writes IPs, which is the right direction. Next step:
+  `host_allowed` matches IP entries only (or a hostname only when it is
+  pinned at enrolment), and the modal offers to convert a kept hostname
+  entry to its gateway's IP.
 ## 7. Backlog (not planned in detail)
 
 * Deny with a reason, shown to the agent (cheap; low value given the data).
