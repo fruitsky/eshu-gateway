@@ -475,7 +475,11 @@ def _run_dns(p):
                           {'params': p, 'record': record,
                            'recent_changes': []})
     if reason:
+        # D18: a failed lookup is an error, not a successful run with no
+        # record — the two looked identical to the agent.
         digest['error'] = reason
+        return {'status': 'error', 'probe': 'dns_check',
+                'error': reason, 'digest': digest}
     return {'status': 'ran', 'probe': 'dns_check', 'digest': digest}
 
 

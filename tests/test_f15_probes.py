@@ -267,6 +267,26 @@ def test_probe_result_is_pending_while_the_ticket_is_delivered(gateway, monkeypa
     assert 'probe_result' in res['next_step']
 
 
+def test_a_failed_dns_lookup_is_an_error_status(gateway, monkeypatch):
+    """D18: a failed lookup must not read as a successful run."""
+    from core.probes import _run_dns
+    from db.integrations import create_integration
+
+    create_integration('Pi-hole', 'http://192.0.2.10', 'none', '',
+                       kind='pihole')
+
+    class Boom(Exception):
+        pass
+
+    def fake_call(integration, tool_name, args):
+        raise Boom('pihole unreachable')
+
+    monkeypatch.setattr('core.inventory._call_tool', fake_call)
+    out = _run_dns({'name': 'app.example.test'})
+    assert out['status'] == 'error', out
+    assert out['error']
+
+
 def test_the_dns_record_is_found(gateway, monkeypatch):
     """AG3: through F14's gated reader, not a hand-built tool."""
     from core.probes import _run_dns

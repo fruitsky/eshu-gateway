@@ -31,6 +31,21 @@ MAX_TAG_CHARS = 40
 MAX_FOLLOW_UPS = 20
 MAX_STEPS = 20
 MAX_INCIDENT_CHARS = 6000          # ~1,500 tokens
+
+# X6/D14: the too_many_* / *_not_a_list errors name the limit, so the agent
+# can fix its call instead of guessing.
+LIMIT_HINTS = {
+    'too_many_tags': 'at most %d tags' % MAX_TAGS,
+    'too_many_follow_ups': 'at most %d follow-ups' % MAX_FOLLOW_UPS,
+    'worked_too_many': 'at most %d worked items' % MAX_ITEMS,
+    'did_not_work_too_many': 'at most %d did_not_work items' % MAX_ITEMS,
+    'tags_not_a_list': 'tags must be an array of strings',
+    'follow_ups_not_a_list': 'follow_ups must be an array of strings',
+    'worked_not_a_list': 'worked must be an array',
+    'did_not_work_not_a_list': 'did_not_work must be an array',
+    'summary_too_long': 'summary must be at most %d characters' % MAX_TEXT,
+    'title_too_long': 'title must be at most 200 characters',
+}
 REF_RE = re.compile(r'^(req|call):([0-9]{1,12})$')
 
 
@@ -95,7 +110,8 @@ def _call_row(call_id):
 
 def validate_payload(session_id, agent, outcome, summary, worked=None,
                      did_not_work=None, root_cause='', fix='',
-                     follow_ups=None, tags=None, runbook_candidate=False):
+                     follow_ups=None, tags=None, runbook_candidate=False,
+                     title=''):
     """Return the scrubbed payload, or raise ValueError(code)."""
     session = get_session(session_id)
     if not session:
@@ -112,6 +128,13 @@ def validate_payload(session_id, agent, outcome, summary, worked=None,
     summary_text = _require_text('summary', summary)
     if not summary_text.strip():
         raise ValueError('summary_required')
+    # X6/D14: the list fields are arrays, never a bare string (which would
+    # iterate into characters and silently store one tag per letter).
+    if tags is not None and not isinstance(tags, list):
+        raise ValueError('tags_not_a_list')
+    if follow_ups is not None and not isinstance(follow_ups, list):
+        raise ValueError('follow_ups_not_a_list')
+    title_text = _require_text('title', title, 200)
     tag_list = []
     for tag in (tags or []):
         tag = _scrub(tag).strip()[:MAX_TAG_CHARS]
@@ -123,6 +146,7 @@ def validate_payload(session_id, agent, outcome, summary, worked=None,
     if len(follow) > MAX_FOLLOW_UPS:
         raise ValueError('too_many_follow_ups')
     return {
+        'title': title_text,
         'outcome': outcome,
         'summary': summary_text,
         'worked': _normalise_items(session_id, worked, 'worked'),
@@ -199,7 +223,9 @@ def promote_conclusion(conclusion_id, title='', when_to_use='', by='',
     if not item:
         raise ConclusionError('not_found', 'No conclusion with that id.')
     steps, dead_ends = build_steps(item['session_id'], item)
-    title = (title or item['summary'] or '').strip()[:200]
+    # X6/D14: the conclusion's own title beats the (possibly cut) summary;
+    # an operator-supplied title still wins over both.
+    title = (title or item.get('title') or item['summary'] or '').strip()[:200]
     if not title:
         title = 'Session %s' % (item['session_id'][:12] or item['id'])
     when = (when_to_use or '').strip()[:2000]

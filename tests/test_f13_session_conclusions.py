@@ -141,14 +141,18 @@ class TestDraftFlow:
         assert second['summary'] == 'second'
         assert len(list_for_session(sid)) == 1
 
-    def test_f13_a_confirmed_conclusion_is_final(self, temp_db):
+    def test_f13_a_confirmed_conclusion_stays_and_a_new_draft_is_added(self, temp_db):
+        """X6/D15: the confirmed row is final, but it must not block a later
+        conclusion — the new one is a separate draft for the operator."""
         sid = _session()
         row = _save(sid)
         confirm_conclusion(row['id'], note='looks right', by='operator')
-        with pytest.raises(ConclusionError) as exc:
-            _save(sid, summary='rewrite')
-        assert exc.value.code == 'already_confirmed'
+        again = _save(sid, summary='rewrite')
+        assert again['id'] != row['id']
+        assert again['status'] == 'draft'
+        assert again['summary'] == 'rewrite'
         assert get_conclusion(row['id'])['status'] == 'confirmed'
+        assert len(list_for_session(sid)) == 2
 
     def test_f13_reject_then_draft_again(self, temp_db):
         sid = _session()

@@ -152,3 +152,137 @@ class TestD6RequestReuse:
         third = post()
         assert third.get('reused') is True
         assert third['request_id'] == first['request_id']
+
+
+class TestSessionConcludeTitleAndLimits:
+    """D14: a title for promoted runbooks, typed list fields, limit messages."""
+
+    def _session(self, sid='sess-x6t', agent='a14'):
+        from db.sessions import upsert_session
+        upsert_session(sid, agent=agent, goal='g')
+        return sid
+
+    def test_a_title_is_stored_and_used_by_a_promoted_runbook(self):
+        from core.conclusions import promote_conclusion, save_conclusion
+        from db.conclusions import confirm_conclusion
+        sid = self._session()
+        row = save_conclusion(sid, 'a14', outcome='solved', summary='fixed',
+                              title='Proxy upstream fix', runbook_candidate=True)
+        assert row['title'] == 'Proxy upstream fix'
+        confirm_conclusion(row['id'], by='operator')
+        runbook = promote_conclusion(row['id'], by='operator')
+        assert runbook['title'] == 'Proxy upstream fix'
+
+    def test_a_string_instead_of_an_array_is_refused_with_a_message(self):
+        from core.agent_context import set_current_agent
+        from core.mcp_server import session_conclude_fn
+        set_current_agent({'id': 1, 'name': 'a14'})
+        sid = self._session()
+        out = json.loads(session_conclude_fn()(
+            'solved', 'summary', tags='tag1', session_id=sid))
+        assert out['error'] == 'tags_not_a_list'
+        assert 'array' in out['message']
+        out = json.loads(session_conclude_fn()(
+            'solved', 'summary', follow_ups='next', session_id=sid))
+        assert out['error'] == 'follow_ups_not_a_list'
+
+    def test_too_many_tags_states_the_limit(self):
+        from core.agent_context import set_current_agent
+        from core.mcp_server import session_conclude_fn
+        set_current_agent({'id': 1, 'name': 'a14'})
+        sid = self._session('sess-x6u')
+        out = json.loads(session_conclude_fn()(
+            'solved', 'summary', tags=['t%d' % i for i in range(25)],
+            session_id=sid))
+        assert out['error'] == 'too_many_tags'
+        assert '20' in out['message']
+
+    def test_a_long_title_states_the_limit(self):
+        from core.agent_context import set_current_agent
+        from core.mcp_server import session_conclude_fn
+        set_current_agent({'id': 1, 'name': 'a14'})
+        sid = self._session('sess-x6v')
+        out = json.loads(session_conclude_fn()(
+            'solved', 'summary', title='x' * 201, session_id=sid))
+        assert out['error'] == 'title_too_long'
+        assert '200' in out['message']
+
+
+class TestInnerTarget:
+    """D11: `pct exec <vmid> -- …` must record its inner target on the row."""
+
+    def test_a_window_approved_row_keeps_the_inner_target(self, auth_client,
+                                                          gateway_headers):
+        import base64
+        import time
+        now = int(time.time())
+        cmd = 'pct exec 102 -- systemctl restart nginx'
+        r = auth_client.post('/api/approved-windows', json={
+            'target_ip': '10.0.0.1', 'command': cmd, 'match_type': 'exact',
+            'window_start': now - 10, 'window_end': now + 3600,
+            'max_executions': 1,
+        })
+        token = r.json()['token']
+        assert auth_client.post(f'/api/approved-windows/execute/{token}',
+                                headers=gateway_headers).status_code == 200
+        from db.requests import get_all_requests
+        row = [x for x in get_all_requests() if x['command'] == cmd][0]
+        assert row['inner_target'] == 'pct:102'
+
+    def test_check_request_returns_the_inner_target(self):
+        from core.mcp_server import check_request_fn
+        from db.requests import create_request
+        rid = create_request('10.0.0.1', 'pct exec 102 -- uptime',
+                             status='approved', ttl=90,
+                             session_id='chat-x6', inner_target='pct:102')
+        out = json.loads(check_request_fn()(rid, session_id='chat-x6'))
+        assert out['inner_target'] == 'pct:102'
+
+
+class TestConfirmedConclusionMigration:
+    """D15: an existing database with UNIQUE(session_id, agent) is rebuilt."""
+
+    def test_the_unique_index_is_gone_and_rows_are_kept(self, temp_db):
+        from core.conclusions import save_conclusion
+        from db.conclusions import init_conclusions_tables, list_for_session
+        from db.core import db_conn
+        with db_conn() as conn:
+            cur = conn.cursor()
+            cur.execute('DROP TABLE session_conclusions')
+            cur.execute('''
+                CREATE TABLE session_conclusions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL,
+                    agent TEXT NOT NULL DEFAULT '',
+                    goal TEXT NOT NULL DEFAULT '',
+                    outcome TEXT NOT NULL DEFAULT 'partial',
+                    summary TEXT NOT NULL DEFAULT '',
+                    worked_json TEXT NOT NULL DEFAULT '[]',
+                    did_not_work_json TEXT NOT NULL DEFAULT '[]',
+                    root_cause TEXT NOT NULL DEFAULT '',
+                    fix TEXT NOT NULL DEFAULT '',
+                    follow_ups_json TEXT NOT NULL DEFAULT '[]',
+                    tags_json TEXT NOT NULL DEFAULT '[]',
+                    runbook_candidate INTEGER NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL DEFAULT 'draft',
+                    operator_note TEXT NOT NULL DEFAULT '',
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    confirmed_at INTEGER,
+                    confirmed_by TEXT NOT NULL DEFAULT '',
+                    UNIQUE(session_id, agent)
+                )
+            ''')
+            cur.execute(
+                "INSERT INTO session_conclusions (session_id, agent, summary, "
+                "status, created_at, updated_at) VALUES ('s1', 'a1', 'old', "
+                "'confirmed', 1, 1)")
+            conn.commit()
+            init_conclusions_tables(cur)
+            conn.commit()
+        assert [r['summary'] for r in list_for_session('s1')] == ['old']
+        # The old constraint is gone: a second row for the same pair is kept.
+        from db.sessions import upsert_session
+        upsert_session('s1', agent='a1', goal='g')
+        save_conclusion('s1', 'a1', outcome='solved', summary='new')
+        assert len(list_for_session('s1')) == 2

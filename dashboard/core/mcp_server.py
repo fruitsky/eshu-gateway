@@ -636,6 +636,7 @@ def check_request_fn():
             'status': status,
             'command': row.get('command') or '',
             'target_ip': row.get('target_ip') or '',
+            'inner_target': row.get('inner_target') or '',
             'session_id': owner,
             'expires_at': expires_at,
             'unattended': unattended,
@@ -767,7 +768,10 @@ def session_summary_fn():
 SESSION_CONCLUDE_DESC = (
     "Close a Session with what it meant: outcome (solved/partial/failed/"
     "abandoned), a short summary, what worked and what did not, the root cause "
-    "and the fix. Cite evidence with worked/did_not_work items like "
+    "and the fix. `title` is a short name for a promoted runbook (optional; "
+    "the summary is used otherwise). `worked`, `did_not_work`, `follow_ups` "
+    "and `tags` are arrays (at most 50 items, 20 follow-ups, 20 tags). Cite "
+    "evidence with worked/did_not_work items like "
     '{"ref": "req:2594", "note": "..."} or {"ref": "call:412", "note": "..."}; '
     "a ref must belong to this session. The conclusion is saved as a draft for "
     "the operator to confirm, edit or reject — only confirmed conclusions are "
@@ -802,8 +806,8 @@ def session_conclude_fn():
                           did_not_work=None, root_cause: str = "",
                           fix: str = "", follow_ups=None, tags=None,
                           runbook_candidate: bool = False,
-                          session_id: str = "") -> str:
-        from core.conclusions import as_json, save_conclusion
+                          session_id: str = "", title: str = "") -> str:
+        from core.conclusions import LIMIT_HINTS, as_json, save_conclusion
         from db.conclusions import ConclusionError
         sid = (session_id or '').strip()[:64]
         if not sid:
@@ -820,10 +824,14 @@ def session_conclude_fn():
                 sid, agent, outcome=outcome, summary=summary, worked=worked,
                 did_not_work=did_not_work, root_cause=root_cause, fix=fix,
                 follow_ups=follow_ups, tags=tags,
-                runbook_candidate=runbook_candidate)
+                runbook_candidate=runbook_candidate, title=title)
         except ValueError as exc:
-            return as_json({'error': exc.args[0] if exc.args else 'invalid',
-                            'session_id': sid})
+            code = exc.args[0] if exc.args else 'invalid'
+            out = {'error': code, 'session_id': sid}
+            hint = LIMIT_HINTS.get(str(code))
+            if hint:
+                out['message'] = hint
+            return as_json(out)
         except ConclusionError as exc:
             return as_json({'error': exc.code, 'message': exc.message,
                             'session_id': sid})
@@ -831,6 +839,7 @@ def session_conclude_fn():
             'id': row['id'],
             'status': row['status'],
             'session_id': sid,
+            'title': row.get('title') or '',
             'message': 'Draft saved. The operator reviews it; only a confirmed '
                        'conclusion is served to agents.',
         })

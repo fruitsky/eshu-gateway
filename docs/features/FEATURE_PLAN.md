@@ -11238,11 +11238,40 @@ change, with security sign-off.
 * **D16, part a.** `get_runbook()` without an id is `validation_error` with the
   parameter named, not `not_found`; an unknown id is still `not_found`.
 
-Remaining in part 2: D11 (inner target on the card and `check_request`),
-D12 (`ha_addons`/`ha_backups` Supervisor `data` unwrap), D14 (`title`, typed
-list fields, limit messages), D15 (a new draft after a confirmed conclusion),
-D16 part b (`whereis <vmid>` duplicate guest stub), D18 (`dns_check` error
-status and the Pi-hole v6 inventory shape).
+**X6 part 2 (same branch).**
+
+* **D11.** The inner target is now recorded on the rows that missed it: the
+  `window-approved`, `window-rejected` and `fleet-run` history rows (the
+  approval and JIT paths already had it), and `check_request` returns
+  `inner_target`. The card already rendered the chip; it was the row that was
+  empty for those paths. The parsing itself handles every `pct exec <vmid> --`
+  shape tested, so the "no inner target" report was a missing call site, not
+  a parser bug.
+* **D12.** `/addons` and `/backups` wrap their list in `data`; the shaper now
+  unwraps `data[<shape>]` (and a bare `{<shape>: [...]}`) for those two, and
+  leaves the dict reads alone. The add-on `options` field is still dropped by
+  the whitelist.
+* **D14.** `session_conclude` takes `title` (stored on a new `title` column,
+  used by a promoted runbook before the summary). `tags` and `follow_ups`
+  must be arrays (`tags_not_a_list` / `follow_ups_not_a_list`), and the
+  `too_many_*` / `*_too_long` errors carry a `message` naming the limit.
+* **D15.** A confirmed conclusion no longer blocks a later one: the confirmed
+  row stays and a new draft is inserted for the operator (the newest row is
+  the one `get_for_agent` returns). `UNIQUE(session_id, agent)` is gone from
+  new databases and is migrated away on startup (table rebuild, ids and FTS
+  preserved); the old `already_confirmed` refusal is retired.
+* **D16b.** A `pct exec <vmid>` row leaves a vmid-only guest stub in the
+  inventory; when the Proxmox source knows that vmid, the stub is dropped, so
+  `whereis <vmid>` has one named answer.
+* **D18a.** A failed DNS lookup returns `status: error` (with the reason),
+  not `ran` with no record.
+* **D18b (open).** The Pi-hole v6 `bad_json` in the inventory source is not
+  reproduced from the handler path (the v6 `config.dns.hosts` shape is
+  handled and the handler returns JSON); it needs a captured failing response
+  from the operator's instance before changing the parser.
+
+`bash scripts/verify.sh`: `2866 passed, 26 skipped, 7 warnings in 586.40s
+(0:09:46)`.
 
 Tests: `tests/test_x6_agent_api.py` (12) plus the probe hostname/pending
 tests in `tests/test_f15_probes.py` and the updated F3 boundary test.
@@ -12023,7 +12052,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 18c | X3 | integrations-ui | dashboard UI | Requested 2026-11-12; design after F27 is signed off | `feat/x3-integrations-ui` | F27, F10 (P2) | operator walk-through first |
 | 18d | X4 | agents-page | dashboard UI | **Implemented** 2026-11-12: one Agents page (tokens, policy sections, web fetch, activity); Controls renamed Command policy; absent policy fields now keep their stored value | `feat/x4-agents-page` | `fix/agent-ssh-hosts` | rename Controls → Command policy |
 | 18e | X5 | ui-test-round | dashboard UI | **Implemented** 2026-11-12: six test-round fixes; no endpoint, save path or policy changed | `fix/x5-ui-test-round` | — | six small fixes |
-| 18f | X6 | agent-api-round | dashboard | **Part 1**: D3/D4, D6, D7, D8 (test), D9, D10, D16a; part 2 (D11, D12, D14, D15, D16b, D18) next | `fix/x6-agent-api-round` | — | 12 items; D1 fixed separately |
+| 18f | X6 | agent-api-round | dashboard | **Code round**: D3/D4, D6, D7, D8 (test), D9, D10, D11, D12, D14, D15, D16a/b, D18a/b | `fix/x6-agent-api-round` | — | 12 items; D1 fixed separately |
 | 19 | F22 | change-checks | dashboard + MCP | After F19 merges | `feat/f22-change-checks` | F3, F5, F12, F19 | + security sign-off (the unattended check; AG1's origin rule does not cover it) |
 | 20 | F16 | recipes | dashboard + MCP | Design complete (security Round 4; feature reviewer Round 5 with AA1/AA2); code next after F22 | `feat/f16-recipes` | F3, F12, F13, F19 | main line; steps claim by request id; code comes back to security; auto_run comes back to security |
 | 21 | F24 | content-tripwire | dashboard | Design first | `feat/f24-content-tripwire` | F12, F14 | + security sign-off (retention) |

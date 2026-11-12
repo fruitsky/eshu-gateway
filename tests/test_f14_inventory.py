@@ -186,6 +186,22 @@ class TestWhereis:
             assert result['count'] == 1, query
             assert result['entities'][0]['name'] == 'guest-a', query
 
+    def test_f14_whereis_vmid_drops_the_nameless_inner_stub(self):
+        """D16b: a past `pct exec 102` leaves a vmid-only guest row; the real
+        Proxmox guest (with its name) is the one answer."""
+        replace_source_items('proxmox', [
+            {'source': 'proxmox', 'kind': 'guest', 'key': 'lxc/102',
+             'name': 'dns', 'ips': [], 'fqdns': [], 'vmid': '102',
+             'host': 'pve1', 'extra': {'type': 'lxc'}}])
+        replace_source_items('eshu', [
+            {'source': 'eshu', 'kind': 'guest', 'key': 'inner:192.0.2.10:pct:102',
+             'name': '102', 'ips': [], 'fqdns': [], 'vmid': '102',
+             'host': '192.0.2.10',
+             'extra': {'inner_target': 'pct:102', 'requests': 3}}])
+        result = whereis('102')
+        assert result['count'] == 1, result['entities']
+        assert result['entities'][0]['name'] == 'dns'
+
     def test_f14_whereis_with_no_match(self):
         assert whereis('nothing-here')['count'] == 0
 

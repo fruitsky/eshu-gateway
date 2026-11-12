@@ -1795,7 +1795,9 @@ def submit_fleet_command(payload: FleetCommandPayload, request: Request):
                        (" (blacklist override)" if blacklisted else ""))
     # Surface in the main Dashboard history (one row per target gateway)
     for ip in targets:
-        create_request(ip, command, status='fleet-run', ttl=0, reason=payload.reason.strip())
+        create_request(ip, command, status='fleet-run', ttl=0,
+                       reason=payload.reason.strip(),
+                       inner_target=_inner_target_for(command))
     return {"status": "ok", "id": cmd_id, "dispatched": True, "gateway_count": len(targets)}
 
 @app.get("/api/fleet/commands")
@@ -3244,12 +3246,17 @@ def window_execute(token: str, request: Request):
     if not ok:
         # Log the rejection server-side (token exists but window disabled/exhausted/expired)
         if target:
-            create_request(target['target_ip'], target['command'], status='window-rejected', ttl=0, reason='exhausted or disabled')
+            create_request(target['target_ip'], target['command'],
+                           status='window-rejected', ttl=0,
+                           reason='exhausted or disabled',
+                           inner_target=_inner_target_for(target['command']))
             record_window_execution(target['id'], token, target['target_ip'], target['command'], 0, 'exhausted or disabled')
         raise HTTPException(status_code=404, detail="Invalid or expired window token")
     # Log as a request row for queue visibility
     if target:
-        create_request(target['target_ip'], target['command'], status='window-approved', ttl=0)
+        create_request(target['target_ip'], target['command'],
+                       status='window-approved', ttl=0,
+                       inner_target=_inner_target_for(target['command']))
         record_audit_event("window_claimed", target['target_ip'],
                            details=f"Token {token} claimed for '{target['command'][:60]}'")
         record_window_execution(target['id'], token, target['target_ip'], target['command'])

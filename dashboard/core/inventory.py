@@ -457,6 +457,7 @@ def build_entities(items=None, stale=None, now=None, allowed=None):
     items = list(get_inventory_items() if items is None else items)
     if allowed is not None:
         items = [item for item in items if item.get('source') in allowed]
+    items = _drop_guest_stubs(items)
     stale = stale_sources(now) if stale is None else stale
     parent = list(range(len(items)))
 
@@ -484,6 +485,35 @@ def build_entities(items=None, stale=None, now=None, allowed=None):
         grouped.setdefault(find(index), []).append(item)
 
     return [_entity(members, stale) for members in grouped.values()]
+
+
+def _drop_guest_stubs(items):
+    """Drop the nameless guest stub a past `pct exec <vmid>` left behind.
+
+    The inner-target rows Eshu derives from its own requests name a guest by
+    its vmid only (there is no name in `pct exec 102 -- ...`). When the
+    Proxmox source also knows that vmid, the stub is a second, nameless
+    entity for the same guest — `whereis 102` returned both. The real row
+    (the one that carries a type/name from Proxmox) wins; the stub is only
+    dropped when a real guest with that vmid exists.
+    """
+    real = {
+        str(item.get('vmid') or '')
+        for item in items
+        if item.get('kind') == 'guest'
+        and (item.get('extra') or {}).get('type')
+        and str(item.get('vmid') or '')
+    }
+    if not real:
+        return items
+    kept = []
+    for item in items:
+        extra = item.get('extra') or {}
+        if (item.get('kind') == 'guest' and 'inner_target' in extra
+                and str(item.get('vmid') or '') in real):
+            continue
+        kept.append(item)
+    return kept
 
 
 def _entity(members, stale):
