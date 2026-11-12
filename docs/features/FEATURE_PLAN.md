@@ -12746,7 +12746,8 @@ token and the runner shifted every later argument. It now treats `:` like `.`
 runner is served statically, so the four installers do not change; they were
 regenerated to confirm it.
 
-`bash scripts/verify.sh`: GATE_COUNT_NIT
+`bash scripts/verify.sh`: `2902 passed, 26 skipped, 8 warnings in 599.71s
+(0:09:59)`.
 
 **BG1 — the curl floor.** `-H @-` (and `-H @file`) needs curl 7.55. Older
 curl accepts the argument shape and silently sends no header, so the token
@@ -13150,6 +13151,10 @@ self-reported hostname.**
   so this is not exploitable today. Still, `esc()` it or build text nodes,
   so the rule does not depend on the validator.
 
+#### Security re-read (2026-11-12, at `44375f3`): the nit is fixed; approved
+
+The kept entries now go through `esc()`. BF2 can merge.
+
 ## Fix — poller ticket poll URL · branch `fix/poller-ticket-poll` · poller · security sign-off
 
 **Security review (2026-11-12, at `f0affc7`): the fix is approved. It
@@ -13431,16 +13436,8 @@ four follow-ups are the ones above.
   runs `find /proc/self/fd -maxdepth 1 -name 9` through a real lockbox claim
   and asserts the path is absent.
 
-<<<<<<< HEAD
-`bash scripts/verify.sh`: GATE_COUNT
-
-#### Security re-read (2026-11-12, at `44375f3`): the nit is fixed; approved
-
-The kept entries now go through `esc()`. BF2 can merge.
-=======
 `bash scripts/verify.sh`: `2886 passed, 26 skipped, 8 warnings in 604.20s
 (0:10:04)`.
->>>>>>> 97288e2
 
 ## 7. Backlog (not planned in detail)
 
