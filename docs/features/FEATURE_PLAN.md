@@ -11802,6 +11802,68 @@ a test-only change.
 * (The npm 401 retry and the audit-ordering flakes were made deterministic on
   `fix/flaky-tests`, approved and pending merge.)
 
+#### Security review (2026-11-12, at `32ce1b0`): BI1–BI3 approved; no musts
+
+* **BI1.** Both consume paths deny a CR/LF command. Each denial is
+  conditional and writes a `jit_refused` row. The poller refuses a ticket
+  that breaks a line. The gateway claim and the cleanup drop:
+  * CR lines;
+  * non-numeric stamps;
+  * stamps more than 5 s ahead.
+
+  Deny-at-poll with no v3 format is fine. The by-id path could never run
+  a multi-line command anyway, because `parse_claim_body` reads one line,
+  so the mismatch check refused it.
+* **BI2.**
+  * The gateway and the poller lock the same file, `/run/eshu/eshu.tickets.lock`.
+  * Every read happens inside the lock, and so do the cleanup, the append
+    and the startup `rm`.
+  * With no `flock`, no write happens.
+  * The gateway's temp file is in the run dir.
+  * Both consumes are `status='approved'` with `rowcount == 1`, and
+    `/api/ticket` no longer issues `consumed` rows.
+  * `ESHU_RUN_DIR` cannot be set by the caller, because the gateway's
+    environment scrub removes it.
+* **BI3.** The ticket is stamped at delivery, and the poll path has no
+  grace.
+* The three installer copies are identical.
+
+**BK1 (should): one expiry rule.**
+* The poll path now stops at `expires_at`.
+* `get_ticket_by_request_id` has no expiry check at all. It delivers an
+  `approved` row until the sweep (`expire_stale_requests`) marks it
+  abandoned at `expires_at + 60`, plus the sweep interval.
+* `check_request` (`mcp_server.py`) also still reports `approved` until
+  `+ 60`.
+* Fix: give the by-id path, the sweep and `check_request` the same
+  boundary as the poll path. An approval then has one lifetime whichever
+  way it is fetched.
+* If late approvals turn out to be too tight, extend `expires_at` when
+  the card is approved, for example to `decided_at + 60`. Do not bring
+  back a grace in one path only.
+
+**BK2 (should): refuse CR/LF before a human sees the card.**
+* Today the row is denied after the operator approved it, so the approval
+  is wasted.
+* `ssh_exec` (which lists `\n` in `CONTROL_ALLOWED`) and `/api/request`
+  should refuse a CR/LF command up front, with a clear message. Keep the
+  deny at consume as the second check.
+
+**BK3 (should): `remove_claimed_ticket` now burns an unrelated approval.**
+* With BI2, an approval is delivered exactly once: either by id or to the
+  lockbox.
+* After a by-id claim, or a `consumed` lockbox claim, the JIT path still
+  calls `remove_claimed_ticket`. That removes a line for the same command
+  and agent that belongs to a different approval.
+* This fails closed, but it is wrong. Drop the call.
+
+**BK4 (nit): close fd 9 after the ticket lock.**
+* `tickets_unlock` releases the lock but leaves fd 9 open, so the
+  approved command inherits a writable fd on the lock file.
+* The command could `flock` it and stall every later claim.
+* Close it with `exec 9>&-` in `tickets_unlock` and on the lock-failure
+  return, as the nonce helper does.
+
 ## 7. Backlog (not planned in detail)
 
 * Deny with a reason, shown to the agent (cheap; low value given the data).
