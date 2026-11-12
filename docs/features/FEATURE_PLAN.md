@@ -12494,6 +12494,10 @@ four follow-ups are the ones above.
 
 `bash scripts/verify.sh`: GATE_COUNT
 
+#### Security re-read (2026-11-12, at `44375f3`): the nit is fixed; approved
+
+The kept entries now go through `esc()`. BF2 can merge.
+
 ## 7. Backlog (not planned in detail)
 
 * Deny with a reason, shown to the agent (cheap; low value given the data).
