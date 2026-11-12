@@ -11027,6 +11027,29 @@ AR1–AR4 are in as asked:
     `check_request_id`). Then a re-sent request for the same item carries
     its check again, rather than running without one.
 
+### Reviewer notes (main feature reviewer, 2026-11-12, code round 1)
+
+The shape is right:
+* the token is a fresh `token_urlsafe(24)` (192 bits) per attempt, rotated on retry, and inside the v2 MAC;
+* v1 bytes are unchanged when there is no token;
+* an old gateway refuses the unknown key, so the check ends `not_run`;
+* the claim is bound to the token, a one-item `check` plan, the exact host and the exact command;
+* the stored reason is `plan-check:<plan>:<item>`;
+* `check_token` is not a parameter of the MCP `ssh_exec` tool, so an agent cannot pass one.
+
+The three refinements are accepted: only ssh checks get a plan, a non-empty `tripwire_freeze` is read strictly as `check_frozen` until F24, and `force_jit` only adds gating. **This chunk now changes gateway bash, so the security reviewer signs off the gateway hunk as well (§ 2.6a).**
+
+* **AY1 (must): the installers were not regenerated.** `dashboard/eshu-gateway.sh` gained `ESHU_CHECK_TOKEN`, but `dashboard/eshu-gateway-install.sh` and `dashboard/static/eshu-gateway-install.sh` do not contain it, so a gateway installed from this branch would refuse every check prefix. Regenerate all three (§ 2.2), and add a test that each installer embeds the gateway script byte for byte, if `verify.sh` does not already check it. It passed with them out of date.
+* **AY2 (should): the gateway forwards a token only from a verified signed prefix.**
+  * Today `check_token` is posted whenever `ESHU_CHECK_TOKEN` is set. The dashboard is safe only because it also requires `force_jit`, which happens to be a manifest key.
+  * Make it explicit:
+    * add `ESHU_CHECK_TOKEN` to the `MANIFEST_PRESENT` trigger, so a token without a full signed prefix is refused;
+    * post `check_token` only when the signature verified;
+    * on the dashboard, honour it only when the verified agent equals the check plan's agent.
+  * Test: a prefix with only `ESHU_CHECK_TOKEN` is refused by the gateway.
+* **AY3 (should): the owner check.** `_claim_check_candidate` has no agent condition, while `claim_plan_item` checks the session's owner (AG1). The token already binds the claim, but add `p.agent = ?` so every claim path carries the same rule.
+* **Merge order:** `fix/gateway-hardening` goes first (it is ready for security). This branch then rebases, re-adds its two gateway hunks and regenerates the installers. `ssh_exec(force_jit=)` is in both F16 and F22: the second to merge keeps one definition with the semantics "can only add gating", and both test sets must pass.
+
 ---
 
 ## Chunk F23 — Change journal tied to alerts · slug `change-journal` · dashboard only
