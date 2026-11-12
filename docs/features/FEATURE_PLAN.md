@@ -11592,6 +11592,10 @@ beyond BD1's token matching.
 Next: DeepSeek folds the label shape, AZ1–AZ5 and BD1–BD5 into the note,
 then security re-reads §2–§5 and the label section.
 
+### Reviewer notes (main feature reviewer, 2026-11-12, design round 2)
+
+AZ1–AZ5 and BD1–BD5 are folded in, and the label shape matches the relayed answer. From the feature side, the `only` list is a sensible household starting point; the operator confirms it (it is theirs, decision 3). AZ6 (`restart`) is still with the operator. To the security reviewer for the `only` list, the AZ2 fallback, and the note as a whole.
+
 ---
 
 ## 7. Backlog (not planned in detail)
