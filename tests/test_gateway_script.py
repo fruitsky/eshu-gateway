@@ -1130,16 +1130,32 @@ def test_f22_a_token_without_a_signed_prefix_is_refused(gw):
 
 
 def test_f22_installers_embed_the_gateway_byte_for_byte():
-    """AY1: the generated installers are the source, not a stale copy."""
+    """AY1/BE2: the four installer files are one generated text.
+
+    The template plus the three sources is the generator's output; every
+    committed installer must be exactly that, and the dev copy (which the
+    deploy resets and a promote copies over the fleet installer) must not
+    lag behind.
+    """
     repo = Path(__file__).resolve().parent.parent
-    gateway = (repo / "dashboard" / "eshu-gateway.sh").read_text(
-        encoding="utf-8").rstrip("\n")
-    assert "ESHU_CHECK_TOKEN" in gateway
+    dashboard = repo / "dashboard"
+
+    def read(name):
+        return (dashboard / name).read_text(encoding="utf-8")
+
+    gateway = read("eshu-gateway.sh").rstrip("\n")
+    template = read("eshu-installer-template.sh")
+    generated = template.replace("__GATEWAY_CONTENT__", gateway)
+    generated = generated.replace("__POLLER_CONTENT__",
+                                  read("eshu-poller.sh").rstrip("\n"))
+    generated = generated.replace("__LOGGER_CONTENT__",
+                                  read("eshu-logger.sh").rstrip("\n"))
+    assert "ESHU_CHECK_TOKEN" in generated
     for rel in ("dashboard/eshu-gateway-install.sh",
                 "dashboard/static/eshu-gateway-install.sh",
                 "dashboard/static/dev/eshu-gateway-install.sh"):
         text = (repo / rel).read_text(encoding="utf-8")
-        assert gateway in text, "%s does not embed the current gateway" % rel
+        assert text == generated, "%s is not the generated installer" % rel
 
 
 def test_f22_a_signed_check_token_reaches_the_request_body(gw):

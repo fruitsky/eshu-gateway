@@ -11093,6 +11093,31 @@ claims pass the owner explicitly.
 `bash scripts/verify.sh`: `2827 passed, 22 skipped, 7 warnings in 599.59s
 (0:09:59)`.
 
+### Code round 3 — rebase onto `1865321` (implementer notes)
+
+**Status: rebased; to the security reviewer.** The branch is now based on
+`1865321` (the roadmap with `fix/gateway-hardening`'s AF3, the tee capture
+and the RR1 installer hotfix merged), not on `363b8d1`. The two gateway
+hunks (`ESHU_CHECK_TOKEN` and the v2 canonical/body) sit on top of the
+hardening branch's gateway script, and AF3/S1/the tee capture are
+untouched; the diff against the roadmap is the 22 F22 lines in
+`eshu-gateway.sh` plus the F22 code.
+
+* **Installers, four files.** `python3 dashboard/gen_installer.py` was run
+  on the rebased tree, and the generated installer was copied over
+  `dashboard/static/dev/eshu-gateway-install.sh`. The four files are the
+  template (`dashboard/eshu-installer-template.sh`) and the three generated
+  copies; the three are byte-identical and all carry
+  `ESHU_CHECK_TOKEN`, RR1 and AF3. `test_f22_installers_embed_the_gateway_byte_for_byte`
+  now rebuilds the generator's output from the template + the three
+  sources and requires every committed installer to equal it, so a stale
+  copy (including the dev one the deploy resets) fails the gate.
+  `tests/test_gateway_hardening.py` and `tests/test_installer.py`
+  (including BE2) pass.
+
+`bash scripts/verify.sh`: `2893 passed, 26 skipped, 7 warnings in 607.69s
+(0:10:07)`.
+
 ### Reviewer notes (main feature reviewer, 2026-11-12, code round 2)
 
 **AY1–AY3: approved from the feature side.**
@@ -12834,7 +12859,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 18c | X3 | integrations-ui | dashboard UI | Requested 2026-11-12; design after F27 is signed off | `feat/x3-integrations-ui` | F27, F10 (P2) | operator walk-through first |
 | 18e | X5 | ui-test-round | dashboard UI | **Implemented** 2026-11-12: six test-round fixes; no endpoint, save path or policy changed | `fix/x5-ui-test-round` | — | six small fixes |
 | 18d | X4 | agents-page | dashboard UI | **Implemented** 2026-11-12: one Agents page (tokens, policy sections, web fetch, activity); Controls renamed Command policy; absent policy fields now keep their stored value | `feat/x4-agents-page` | `fix/agent-ssh-hosts` | rename Controls → Command policy |
-| 19 | F22 | change-checks | dashboard + MCP | Code round 2: **AY1** (all three installers regenerated, with a byte-for-byte test), **AY2** (the token joins the manifest trigger; only a verified prefix posts it; the claim needs the verified agent), **AY3** (the owner condition on the check claim) folded | `feat/f22-change-checks` | F3, F5, F12, F19 | security reviews the gateway hunk and the code; merge after `fix/gateway-hardening` |
+| 19 | F22 | change-checks | dashboard + MCP | Code round 3: **rebased onto `1865321`** with the hardening branch's AF3/tee and RR1's installer changes kept, and all four installer files regenerated (the test rebuilds the generator's output) | `feat/f22-change-checks` | F3, F5, F12, F19 | security reviews the gateway hunk and the code |
 | 20 | F16 | recipes | dashboard + MCP | Design complete (security Round 4; feature reviewer Round 5 with AA1/AA2); code next after F22 | `feat/f16-recipes` | F3, F12, F13, F19 | main line; steps claim by request id; code comes back to security; auto_run comes back to security |
 | 21 | F24 | content-tripwire | dashboard | Design first | `feat/f24-content-tripwire` | F12, F14 | + security sign-off (retention) |
 | 22 | F25 | secrets-broker | gateway + dashboard | Design first | `feat/f25-secrets-broker` | F1, F12, F19; security Chunk 7 before deploy | + security sign-off; gateway bash line by line |
