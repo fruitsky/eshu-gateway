@@ -5110,7 +5110,81 @@ body.pol-open .mobile-menu-btn, body.pol-open .mobile-freeze { display: none; }
 .pol-foot-note.warn { color: var(--accent); }
 .pol-spacer { flex: 1; }
 
+/* ── X4: the Agents page ────────────────────────────────────────────────
+   The policy card moved out of the modal and into the page. It keeps its
+   rail, but grows with its content instead of holding a fixed height with
+   an inner scroll, so each section's Save sits at the end of its section. */
+.pol-card-paged {
+  width: 100%; height: auto; max-height: none;
+  background: transparent; border: none; border-radius: 0;
+  box-shadow: none;
+  animation: none;
+}
+.pol-card-paged .pol-head { padding: 0 0 4px; }
+.pol-card-paged .pol-title { font-size: 26px; }
+.pol-card-paged .pol-rail { padding: 14px 0 0; flex-wrap: wrap; gap: 0 4px; }
+.pol-card-paged .pol-body { overflow: visible; padding: 18px 0 0; }
+.pol-card-paged .pol-foot { padding: 14px 0 0; flex-wrap: wrap; }
+.pol-save-row {
+  display: flex; align-items: center; justify-content: flex-end; gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 16px; padding-top: 12px;
+  border-top: 1px solid var(--rule-weak);
+}
+
+.agent-row {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 12px; padding: 10px 12px;
+  border: 1px solid var(--rule-weak); border-radius: 2px;
+  cursor: pointer;
+}
+.agent-row:hover, .agent-row:focus-visible { background: var(--bg-hover); outline: none; }
+.agent-row-revoked { opacity: 0.65; }
+.agent-row-main { min-width: 0; flex: 1; }
+.agent-row-name {
+  font-size: var(--text-sm); color: var(--text-main);
+  display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+}
+.agent-on {
+  font-family: 'JetBrains Mono', monospace; font-size: 11px;
+  letter-spacing: .8px; text-transform: uppercase; color: var(--state-approved);
+}
+.agent-row-bits { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
+.agent-bit {
+  font-family: 'JetBrains Mono', monospace; font-size: 11px;
+  color: var(--text-muted);
+  border: 1px solid var(--rule-weak); border-radius: 3px;
+  padding: 0 6px; white-space: nowrap;
+}
+.agent-bit.muted { color: var(--text-quiet); }
+.agent-bit.warn { color: var(--status-warning); border-color: var(--accent-line); }
+.agent-ssh-any { color: var(--status-warning); }
+
+.agent-act-sec { margin-bottom: 14px; }
+.agent-act-sec:last-child { margin-bottom: 0; }
+.agent-act-h {
+  font-family: 'JetBrains Mono', monospace; font-size: 11px;
+  letter-spacing: 1.2px; text-transform: uppercase; color: var(--text-muted);
+  margin-bottom: 6px;
+}
+.agent-act-row {
+  display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 10px;
+  padding: 6px 0; border-bottom: 1px solid var(--rule-weak);
+}
+.agent-act-row:last-child { border-bottom: 0; }
+.agent-act-main { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.agent-act-main code { color: var(--text-main); }
+.agent-act-link {
+  background: none; border: none; padding: 0; cursor: pointer;
+  font-family: 'JetBrains Mono', monospace; font-size: 11px;
+  color: var(--accent-hover); border-bottom: 1px dotted var(--accent-line);
+}
+.agent-act-link:hover { color: var(--accent); }
+
 @media (max-width: 768px) {
+  .agent-row { flex-direction: column; }
+  .pol-card-paged .pol-tab { flex: 1 1 45%; }
+
   .pol-card { width: 100%; height: 100%; max-height: 100%; border: none; border-radius: 0; }
   .pol-head { padding: 20px 18px 0; }
   .pol-title { font-size: 28px; }

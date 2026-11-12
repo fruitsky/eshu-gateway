@@ -689,6 +689,7 @@ async function switchView(target) {
   if (target === 'integrations') { fetchIntegrations(); }
   if (target === 'inventory') { fetchInventory(); }
   if (target === 'runbooks') { fetchRunbooks(); }
+  if (target === 'agents') { fetchAgentTokens(); }
   if (target === 'settings') {
     refreshPasswordUI();
     fetchNotifyConfig();
@@ -8618,32 +8619,71 @@ async function fetchAgentTokens() {
     if (!res.ok) return;
     const agents = await res.json();
     _agentsData = agents;
+    if (!(_webFetchPolicies || []).length) { await fetchWebFetchPolicies(); }
+    (agents || []).forEach(function(a) {
+      var name = (a.name || '').toLowerCase();
+      a.web_fetch = (_webFetchPolicies || []).find(function(p) {
+        return (p.principal || '').toLowerCase() === name;
+      }) || null;
+    });
+    var hud = document.getElementById('agents-hud-sum');
+    if (hud) hud.innerHTML = '<span><span class="n">' + agents.length + '</span> token' + (agents.length === 1 ? '' : 's') + '</span>';
     refreshWebFetchPrincipals();
     if (!agents.length) { el.innerHTML = '<p class="text-muted">No agent tokens yet.</p>'; return; }
     el.innerHTML = agents.map(function(a) {
       var used = a.last_used_at ? new Date(a.last_used_at * 1000).toLocaleString() : 'never';
-      var p = a.policy || {};
-      var summary = p.tools_mode === 'allowlist'
-        ? ((p.tools || []).length + ' allowed tool' + ((p.tools || []).length === 1 ? '' : 's'))
-        : 'all tools';
-      if (p.rate_limit_per_min) summary += ' · ' + p.rate_limit_per_min + '/min';
-      var sshHosts = p.ssh_hosts_allow || [];
-      var sshAny = sshHosts.indexOf('*') !== -1;
-      var sshText = 'SSH ' + (sshAny ? 'any gateway'
-        : sshHosts.length ? sshHosts.length + ' gateway' + (sshHosts.length === 1 ? '' : 's') : 'off');
-      return '<div class="agent-row">' +
-        '<div><div class="text-sm">' + esc(a.name) + (a.revoked ? ' <span class="text-danger">(revoked)</span>' : '') + '</div>' +
-        '<div class="text-xs text-muted">last used: ' + used + ' · ' + esc(summary) + ' · ' +
-        (sshAny ? '<span class="agent-ssh-any">' + esc(sshText) + '</span>' : esc(sshText)) + '</div></div>' +
-        '<div class="flex items-center gap-1">' +
-        '<button onclick="openAgentPolicy(' + idJs(a.id) + ')" class="btn btn-xs">Policy</button>' +
+      var bits = agentSummaryBits(a);
+      return '<div class="agent-row' + (a.revoked ? ' agent-row-revoked' : '') + '" ' +
+          'onclick="openAgentDetail(' + idJs(a.id) + ')" role="button" tabindex="0" ' +
+          'onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();openAgentDetail(' + idJs(a.id) + ');}">' +
+        '<div class="agent-row-main">' +
+          '<div class="agent-row-name">' + esc(a.name) +
+            (a.revoked ? ' <span class="text-danger">(revoked)</span>' : ' <span class="agent-on">active</span>') + '</div>' +
+          '<div class="text-xs text-muted">last used: ' + esc(used) + '</div>' +
+          '<div class="agent-row-bits">' + bits.join('') + '</div>' +
+        '</div>' +
+        '<div class="flex items-center gap-1" onclick="event.stopPropagation()">' +
+        '<button onclick="openAgentDetail(' + idJs(a.id) + ')" class="btn btn-xs">Open</button>' +
         (a.revoked ? '' : '<button onclick="revokeAgentToken(this, ' + idJs(a.id) + ')" class="btn btn-xs btn-muted">Revoke</button>') +
         '<button onclick="deleteAgentToken(this, ' + idJs(a.id) + ')" class="btn btn-xs btn-muted">Delete</button></div></div>';
     }).join('');
   } catch(e) {}
 }
 
-async function openAgentPolicy(id) {
+/* X4: the four numbers that say what a token may do, at a glance. */
+function agentSummaryBits(agent) {
+  var p = agent.policy || {};
+  var bits = [];
+  if ((p.tools_mode || 'all') === 'allowlist') {
+    var n = (p.tools || []).length;
+    bits.push('<span class="agent-bit">tools ' + n + '</span>');
+  } else {
+    bits.push('<span class="agent-bit">all tools</span>');
+  }
+  bits.push('<span class="agent-bit">' + (p.rate_limit_per_min || 0) + '/min</span>');
+  var hosts = p.ssh_hosts_allow || [];
+  var any = hosts.indexOf('*') !== -1;
+  var ssh = any ? 'SSH any gateway'
+    : hosts.length ? 'SSH ' + hosts.length + ' gateway' + (hosts.length === 1 ? '' : 's')
+    : 'SSH off';
+  bits.push('<span class="agent-bit' + (any ? ' warn' : '') + '">' + esc(ssh) +
+    (hosts.length ? ' \u00b7 ' + esc(p.ssh_mode || 'approval') : '') + '</span>');
+  var wf = agent.web_fetch;
+  bits.push('<span class="agent-bit' + (wf && wf.enabled ? '' : ' muted') + '">web ' +
+    (wf && wf.enabled ? ((wf.allow || []).length + ' domain' + ((wf.allow || []).length === 1 ? '' : 's')) : 'off') + '</span>');
+  return bits;
+}
+
+function backToAgents() {
+  var detail = document.getElementById('agent-detail');
+  var list = document.getElementById('agents-list-view');
+  if (detail) detail.classList.add('hidden');
+  if (list) list.classList.remove('hidden');
+  _agentDetailId = null;
+  fetchAgentTokens();
+}
+
+async function openAgentDetail(id) {
   const agent = (_agentsData || []).find(function(a) { return a.id === id; });
   if (!agent) return;
   try {
@@ -8661,16 +8701,46 @@ async function openAgentPolicy(id) {
         if (gRes.ok) _allGateways = await gRes.json();
       } catch(e) {}
     }
+    _agentDetailId = id;
     renderAgentPolicy(agent);
-    document.getElementById('agent-policy-modal').classList.remove('hidden');
-    document.body.classList.add('pol-open');
-    setTimeout(function () { var c = document.querySelector('.pol-card'); if (c) c.focus(); }, 30);
+    renderAgentDetailHeader(agent);
+    var list = document.getElementById('agents-list-view');
+    var detail = document.getElementById('agent-detail');
+    if (list) list.classList.add('hidden');
+    if (detail) detail.classList.remove('hidden');
+    switchView('agents');
+    // Web fetch is per principal: point its existing panel at this agent.
+    refreshWebFetchPrincipals();
+    var wf = document.getElementById('wf-principal');
+    if (wf) { wf.value = agent.name; loadWebFetchPolicy(); }
+    renderAgentActivity(agent);
   } catch(e) { showToast('Failed: ' + e.message, 'error'); }
 }
 
+/* Kept for older call sites; the detail page replaced the modal. */
+function openAgentPolicy(id) { return openAgentDetail(id); }
+
+function renderAgentDetailHeader(agent) {
+  var name = document.getElementById('agent-detail-name');
+  if (name) name.textContent = agent.name || 'Agent';
+  var meta = document.getElementById('agent-detail-meta');
+  if (meta) {
+    var used = agent.last_used_at ? new Date(agent.last_used_at * 1000).toLocaleString() : 'never';
+    meta.innerHTML = 'token id ' + Number(agent.id) + ' \u00b7 created ' +
+      (agent.created_at ? new Date(agent.created_at * 1000).toLocaleString() : 'unknown') +
+      ' \u00b7 last used ' + esc(used) +
+      (agent.revoked ? ' \u00b7 <span class="text-danger">revoked</span>' : '');
+  }
+  var actions = document.getElementById('agent-detail-actions');
+  if (actions) {
+    actions.innerHTML = (agent.revoked ? '' :
+        '<button onclick="revokeAgentToken(this, ' + idJs(agent.id) + ')" class="btn btn-sm btn-muted">Revoke token</button>') +
+      '<button onclick="deleteAgentToken(this, ' + idJs(agent.id) + ')" class="btn btn-sm btn-deny">Delete token</button>';
+  }
+}
+
 function closeAgentPolicyModal() {
-  document.getElementById('agent-policy-modal').classList.add('hidden');
-  document.body.classList.remove('pol-open');
+  backToAgents();
 }
 
 function _splitList(value) {
@@ -8681,6 +8751,7 @@ function _splitList(value) {
    Tools, the argument rules on Rules, raw JSON on Advanced. The selection is
    held in a Set so filtering and per-integration All/None can redraw the
    chips without losing what is ticked. */
+var _agentDetailId = null;
 var _agentPolicySelected = null;
 var _agentPolicyMode = 'all';
 var _agentPolicyTab = 'tools';
@@ -9055,20 +9126,127 @@ function collectAgentPolicy() {
   };
 }
 
-async function saveAgentPolicy() {
+/* X4: each section sends only its own keys. The API keeps every field the
+   payload omits, so Save tools cannot clear SSH, the rate limit or the
+   argument rules. */
+function agentSectionPayload(kind) {
+  if (kind === 'advanced') {
+    let doc;
+    try {
+      doc = JSON.parse(document.getElementById('agent-policy-json').value || '{}');
+    } catch(e) {
+      showToast('Advanced JSON is invalid: ' + e.message, 'error');
+      return null;
+    }
+    return { arg_policy: doc.arg_policy || {}, approval: doc.approval || {} };
+  }
+  const all = collectAgentPolicy();
+  if (!all) return null;
+  if (kind === 'tools') return { tools_mode: all.tools_mode, tools: all.tools };
+  if (kind === 'rules') return {
+    arg_policy: all.arg_policy, approval: all.approval,
+    rate_limit_per_min: all.rate_limit_per_min
+  };
+  if (kind === 'ssh') return { ssh_hosts_allow: all.ssh_hosts_allow, ssh_mode: all.ssh_mode };
+  return all;
+}
+
+async function saveAgentSection(kind) {
   if (!_agentPolicy || !_agentPolicy.agent_id) { showToast('No agent selected', 'error'); return; }
-  const payload = collectAgentPolicy();
+  const payload = agentSectionPayload(kind);
   if (!payload) return;
+  const labels = { tools: 'Tools', rules: 'Rules', ssh: 'SSH', advanced: 'Advanced' };
   try {
     const res = await authFetch('/api/agents/' + _agentPolicy.agent_id + '/policy', {
       method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
     });
     const data = await res.json().catch(function() { return {}; });
     if (!res.ok) { showToast('' + (data.detail || 'Failed'), 'error'); return; }
-    showToast('Agent policy saved', 'success');
-    closeAgentPolicyModal();
+    _agentPolicy = data;
+    // Re-render from what the server stored, keeping the tab the operator is on.
+    const agent = (_agentsData || []).find(function(a) { return a.id === _agentPolicy.agent_id; }) || {};
+    renderAgentPolicy(Object.assign({}, agent, {name: (agent.name || document.getElementById('agent-policy-title').textContent)}));
+    setAgentPolicyTab(_agentPolicyTab);
+    showToast((labels[kind] || 'Section') + ' saved', 'success');
     fetchAgentTokens();
   } catch(e) { showToast('Failed: ' + e.message, 'error'); }
+}
+
+async function saveAgentPolicy() {
+  return saveAgentSection(null);
+}
+
+function openHistoryForSession(sid) {
+  if (!sid) return;
+  setHistorySession(sid, true);
+  switchView('history');
+  fetchRequests();
+  fetchIntegrationCalls();
+}
+
+/* X4: read-only. The same rows History shows, filtered to this agent: the
+   sessions it opened (requests are joined through those ids), the newest
+   commands, the newest proxied calls. Nothing here writes. */
+async function renderAgentActivity(agent) {
+  const box = document.getElementById('agent-activity-body');
+  if (!box) return;
+  box.innerHTML = '<p class="text-muted">Loading\u2026</p>';
+  try {
+    const res = await authFetch('/api/agents/' + agent.id + '/activity');
+    if (!res.ok) { box.innerHTML = '<p class="text-muted">Could not load activity.</p>'; return; }
+    const data = await res.json();
+    const sessions = data.sessions || [];
+    const reqs = data.requests || [];
+    const calls = data.calls || [];
+    if (!sessions.length && !reqs.length && !calls.length) {
+      box.innerHTML = '<p class="text-muted">No activity yet. Commands and calls appear here once this agent runs something.</p>';
+      return;
+    }
+    let html = '';
+    const open = sessions.filter(function(x) { return !x.ended_at; });
+    if (sessions.length) {
+      html += '<div class="agent-act-sec"><div class="agent-act-h">Sessions' +
+        (open.length ? ' <span class="agent-bit">' + open.length + ' open</span>' : '') + '</div>' +
+        sessions.map(function(x) {
+          const sid = String(x.id || '');
+          const goal = x.goal ? esc(x.goal) : '<span class="text-muted">(no goal)</span>';
+          return '<div class="agent-act-row">' +
+            '<button class="agent-act-link" onclick="openHistoryForSession(' + escJs(sid) + ')" title="Open in History">' +
+              esc(sid.substring(0, 12)) + '</button>' +
+            '<span class="agent-act-main">' + goal + '</span>' +
+            '<span class="agent-bit' + (x.ended_at ? ' muted' : '') + '">' +
+              (x.ended_at ? 'closed' : 'open') + '</span>' +
+            '<span class="text-muted">' + formatAgo(Math.floor(Date.now() / 1000) - (x.last_seen || 0)) + ' ago</span>' +
+          '</div>';
+        }).join('') + '</div>';
+    }
+    if (reqs.length) {
+      html += '<div class="agent-act-sec"><div class="agent-act-h">Last commands</div>' +
+        reqs.map(function(r) {
+          const host = r.hostname || r.target_ip || '';
+          return '<div class="agent-act-row">' +
+            '<span class="text-muted">' + formatTime(r.created_at) + '</span>' +
+            '<span class="agent-act-main"><code>' + esc(r.command || '') + '</code></span>' +
+            '<span class="agent-bit">' + esc(r.status || '') + '</span>' +
+            '<span class="text-muted">' + esc(host) + '</span>' +
+          '</div>';
+        }).join('') + '</div>';
+    }
+    if (calls.length) {
+      html += '<div class="agent-act-sec"><div class="agent-act-h">Last proxied calls</div>' +
+        calls.map(function(c) {
+          return '<div class="agent-act-row">' +
+            '<span class="text-muted">' + formatTime(c.created_at) + '</span>' +
+            '<span class="agent-act-main">' + esc(c.integration || '') + ' / ' + esc(c.tool || '') + '</span>' +
+            '<span class="agent-bit">' + esc(c.approval || c.outcome || '') + '</span>' +
+            '<span class="text-muted">' + esc(c.method || '') + ' ' + esc(c.path || '') + '</span>' +
+          '</div>';
+        }).join('') + '</div>';
+    }
+    box.innerHTML = html;
+  } catch(e) {
+    box.innerHTML = '<p class="text-muted">Could not load activity.</p>';
+  }
 }
 
 async function revokeAgentToken(btn, id) {
