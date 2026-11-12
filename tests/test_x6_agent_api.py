@@ -123,7 +123,10 @@ class TestSupersededPlans:
         first = plan_probe('disk_pressure', {'host': '10.0.0.1'}, 'sess-x6e')
         second = create_plan('sess-x6e', [{'host': '10.0.0.1',
                                            'command': 'uptime', 'max_uses': 1}])
-        out = json.loads(probe_result_fn()(first['plan_id'], 'sess-x6e'))
+        import asyncio
+        # ssh_exec/probe_result run off the event loop on master (6a48ee1).
+        out = json.loads(asyncio.run(
+            probe_result_fn()(first['plan_id'], 'sess-x6e')))
         assert out['status'] == 'superseded', out
         assert out['superseded_by'] == second['plan_id']
 

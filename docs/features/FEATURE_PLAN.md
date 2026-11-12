@@ -11284,8 +11284,9 @@ change, with security sign-off.
   the intended passthrough (they take their path/command from the
   integration at seed time).
 
-`bash scripts/verify.sh`: `2866 passed, 26 skipped, 7 warnings in 586.40s
-(0:09:46)`.
+`bash scripts/verify.sh`: `2909 passed, 26 skipped, 8 warnings in 604.62s
+(0:10:04)` (after the rebase onto `fix/lockbox-bi`: D6's `find_live_request`
+sits beside BI2's conditional consumes).
 
 Tests: `tests/test_x6_agent_api.py` (12) plus the probe hostname/pending
 tests in `tests/test_f15_probes.py` and the updated F3 boundary test.
