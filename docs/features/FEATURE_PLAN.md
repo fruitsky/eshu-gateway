@@ -11138,6 +11138,21 @@ byte-identical at the base `7d7f3b8`).
 
 _(reviewer)_
 
+### Reviewer notes (main feature reviewer, 2026-11-12, code round 1)
+
+**Approved from the feature side; to the security reviewer (gateway bash, § 2.6a).** Rechecked locally: the three installers carry the gateway script byte for byte, every `python3` in the gateway runs with `-I`, and `tests/test_gateway_hardening.py` plus `tests/test_f5_exec_results.py` pass (65 passed, 4 skipped; mawk and gawk both present).
+
+What I checked:
+* AF3: argv holds only the two key paths; the id and signature go through the child's environment (readable by the same uid and root only). A missing or unreadable key file is an empty key, so it fails closed exactly as `cat || echo ""` did. Taking the signature off argv as well is right.
+* S1: awk is out of the agent's stream, `part` exists before `tee` starts (so the poll cannot see "done" too early), only a finished ring is renamed to `tail`, `duration_ms` is taken before the wait, and a timeout posts no output instead of a partial one. The `exec >/dev/null 2>&1` inside the substitution is the real fix for the 60 s hold; good that the test caught it.
+
+For the security reviewer to rule on (none blocks from my side):
+* AX1: **a stuck capture is not killed on timeout.** It holds no part of the agent's channel and its memory is bounded, but each stuck call leaves a root process behind. A cheap fix: `capture_job` writes its `$BASHPID` into the private directory and the timeout path kills that process group. Your call whether this is a must or a recorded residual.
+* AX2: **hosts without `tee --output-error`** (coreutils < 8.24, BusyBox) fall back to plain `tee` silently. With SIGPIPE at its default (the sshd case) that behaves the same; with SIGPIPE ignored, the command runs to completion after a disconnect, as it did before the buffering fix. `mv -T` is GNU too, so BusyBox gets CAPTURE FAILED and no output, which is safe.
+* AX3 (should, feature side): the `GatewaySandbox.run` TypeError on timeout hides the diagnostic report. Fix it in this branch if it is a one-liner, otherwise in the next test-harness change.
+
+At merge (reviewer): `RELEASE_1.md` step 6 gets "the mawk delay applies only to gateways installed before this fix".
+
 ---
 
 ## 7. Backlog (not planned in detail)
