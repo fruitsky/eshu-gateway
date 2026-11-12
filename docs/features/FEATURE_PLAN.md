@@ -10310,6 +10310,17 @@ rollback stops at that step with the real `id` in the recorded args.
 `bash scripts/verify.sh`: `2902 passed, 22 skipped, 8 warnings in 591.92s
 (0:09:51)`.
 
+### Reviewer notes (main feature reviewer, 2026-11-12, code round 3)
+
+**Approved from the feature side; to the security reviewer.**
+* AW5: the origin is explicit, and a missing or unknown origin is refused. The MCP tool always passes `agent`, and a caller with no agent row is refused before any precondition runs and before any run or plan row is written.
+* AW6: the undo's substituted arguments are computed before the standing check and reused for the call, so the policy judges the bytes that are sent.
+
+For the security reviewer:
+* the operator-started-run decision (SSH steps refused, `recipe_operator_ssh`);
+* AW1's real-`ssh_exec` tests;
+* the per-step standing check (AW2).
+
 ---
 
 ## Chunk F17 — Local-agent profile · slug `local-agent` · dashboard + docs
