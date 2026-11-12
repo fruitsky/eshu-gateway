@@ -4,6 +4,7 @@ Tools are registered dynamically from the `integration_tools` table so the MCP
 surface stays in sync with the operator's catalog. Read-only tools forward
 immediately; mutating tools create a pending call and require operator approval.
 """
+import asyncio
 import json
 import re
 import time
@@ -835,12 +836,21 @@ SSH_EXEC_DESC = (
 )
 
 
+# FastMCP calls a plain (non-async) tool directly on the event loop, which is
+# the dashboard's own loop. ssh_exec blocks for the whole SSH call, and the
+# gateway at the other end calls back into this dashboard (/api/request,
+# /api/ticket) before it answers. On the loop, that callback cannot be served
+# until the gateway's curl gives up: "JIT Dashboard is unreachable". So every
+# tool that runs SSH goes to a worker thread. asyncio.to_thread copies the
+# context, so the bound agent (core.agent_context) travels with it.
 def ssh_exec_fn():
-    def _ssh_exec(host: str, command: str, session_id: str = "",
-                  timeout: int = 60, wait: bool = False) -> str:
+    async def _ssh_exec(host: str, command: str, session_id: str = "",
+                        timeout: int = 60, wait: bool = False) -> str:
         from core.ssh_exec import as_json, ssh_exec
-        return as_json(ssh_exec(host, command, session_id=session_id,
-                                timeout=timeout, wait=wait))
+        res = await asyncio.to_thread(ssh_exec, host, command,
+                                      session_id=session_id,
+                                      timeout=timeout, wait=wait)
+        return as_json(res)
     return _ssh_exec
 
 
@@ -1020,9 +1030,12 @@ def diagnose_fn(probe_name):
 
 
 def probe_result_fn():
-    def _probe_result(plan_id: int, session_id: str = "") -> str:
+    # Runs the probe's commands through ssh_exec: off the loop, as above.
+    async def _probe_result(plan_id: int, session_id: str = "") -> str:
         from core.probes import probe_result
-        return json.dumps(probe_result(plan_id, session_id=session_id))
+        res = await asyncio.to_thread(probe_result, plan_id,
+                                      session_id=session_id)
+        return json.dumps(res)
     return _probe_result
 
 
