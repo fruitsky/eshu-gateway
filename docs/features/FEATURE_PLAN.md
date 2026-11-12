@@ -11296,6 +11296,31 @@ tests in `tests/test_f15_probes.py` and the updated F3 boundary test.
 
 ---
 
+#### Security ruling on D6 (2026-11-12, at `72f2598`)
+
+**BK5: take the recommendation. Reuse an approved row only when both
+`agent` and `session_id` are non-empty.**
+* For a signed caller, the gateway's `ticket_allowed` binds the claim to
+  the same agent and session, so returning the existing id hands the
+  approval back to the caller the operator approved.
+* For an unsigned caller, `agent=''` and `session=''` match every
+  unsigned caller of the same command on that host. Reuse would let a
+  different direct-SSH user ride on someone else's approval.
+  * BI2 keeps it to one run, but the operator approved the person who
+    asked, not whoever asks first.
+  * The v1 lockbox has the same weakness by design. That is no reason to
+    add a second path with it.
+* Unsigned callers always get a fresh card.
+* Also keep `find_live_request` where it is now: after every refusal
+  (freeze, zero-trust, block rules, override). A reused id must never skip
+  a check that a new card would hit.
+* Its expiry boundary should be the one in BK1.
+* Tests:
+  * a signed re-run reuses the row;
+  * an unsigned re-run of the same bytes gets a new id;
+  * a different agent or session gets a new id.
+* I'll read the stacked X6 when it lands on `fix/lockbox-bi`.
+
 ## Gateway hardening (AF3, tee capture) · branch `fix/gateway-hardening` · gateway bash · **security reviewer sign-off**
 
 Two items left over from earlier sign-offs: AF3 (F19 sign-off, `67bec51`) and
