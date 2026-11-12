@@ -11149,6 +11149,68 @@ freeze copy, table columns/sticky/disclosure).
 
 ---
 
+## Chunk X6 — agent API fixes from the Release 1.2 test round · slug `agent-api-round` · dashboard
+
+From the agent's test report of 2026-11-12, triaged by the feature reviewer.
+The labels are the report's (D1–D18). Live details stay outside the repo.
+
+**Already fixed, not in X6:**
+* D1, part 1: `ssh_exec`/`probe_result` ran on the event loop, so the
+  gateway's callback timed out. Fixed in `6a48ee1` and deployed.
+* D1, part 2: the poller's ticket-poll URL was malformed (`WC="0\n0"`), so no
+  approved ticket ever reached the lockbox. Fixed in `fix/poller-ticket-poll`
+  (`f0affc7`); this is gateway-side and needs security's sign-off and a rollout.
+
+**Not defects:**
+* D2: the "non-gateway" host was in fact a registered gateway.
+* D5: `wait=true` did wait 60 s; the ticket never reached `consumed` (D1).
+* D17: a disabled `ha_host_reboot` is withheld from the registry. This is
+  correct; the T-HA-4 wording is fixed.
+
+**X6 scope (dashboard only):**
+1. **D3/D4:** `check_request(id)` without `session_id` must not say "not
+   found" for a request that exists. Say `session_id required`, or infer it
+   from the transport's bound session as other tools do. `check_approval`'s
+   `wrong_namespace` hint names the full call.
+2. **D6:** `probe_result` returns `pending`, never `refused`, while a ticket
+   is waiting, and its next-step text names `probe_result`. The `ssh_exec`
+   pending hint and `check_request`'s `approved` text agree: re-run only at
+   `consumed`. A re-run while the matching request is still `approved`
+   returns `pending` with the same id instead of minting a duplicate.
+3. **D7:** a plan replaced by a newer proposal reads `superseded` (with the
+   new plan id) in `check_plan` and `probe_result`, not `not_found`. Keep
+   the row with status `superseded` instead of deleting it.
+4. **D8:** `session_summary` counts the session's MCP and integration calls
+   (`mcp_calls`) and plan-claimed requests (`by_approval.plan`). Add a test
+   with one of each.
+5. **D9:** probes accept a gateway hostname, as `ssh_exec` does. It is
+   resolved to the gateway's IP at planning time and the IP is stored (in
+   line with security's BF2: IP-only matching).
+6. **D10:** the `diagnose_container` description and the agent manual name
+   the `container` parameter (a vmid or a Docker name), with an example.
+7. **D11:** the inner target (F7) is shown on the approval card and returned
+   by `check_request` for `pct exec <vmid> -- …`. A test request of exactly
+   that shape recorded no inner target; find out why.
+8. **D12:** `ha_addons` and `ha_backups` return `{}` while the other
+   Supervisor reads work. Find the unwrap bug (Supervisor wraps the payload in
+   `data`) and add a test with a recorded response shape.
+9. **D14:** `session_conclude` gets a `title`, which a promoted runbook uses
+   instead of the cut summary. List fields are typed as arrays, and the
+   `too_many_*` errors state the limit.
+10. **D15:** a confirmed conclusion must not block a later
+    `session_conclude`. The new one is added as a draft for the operator.
+11. **D16:** `get_runbook` without `runbook_id` is a validation error, not
+    `not_found`. `whereis <vmid>` drops the nameless duplicate guest stub.
+12. **D18:** `dns_check` returns `status: error`, not `ran`, when the lookup
+    failed. Separately, find out why the Pi-hole inventory sources fail
+    with `bad_json`; it is probably the v6 response shape.
+
+**Later, gateway-side:** D13 (a plan-granted command says "covered by plan
+#N" instead of printing the human-approval stream) goes with the next gateway
+change, with security sign-off.
+
+---
+
 ## Gateway hardening (AF3, tee capture) · branch `fix/gateway-hardening` · gateway bash · **security reviewer sign-off**
 
 Two items left over from earlier sign-offs: AF3 (F19 sign-off, `67bec51`) and
@@ -11918,8 +11980,9 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 18a | X2 | runbooks-page | dashboard UI | **Merged** 2026-11-11 | `feat/x2-runbooks-page` | F13 | |
 | 18b | F27 | allowances | dashboard + MCP | Design first (from live use: P2 caught HA call_service) | `feat/f27-allowances` | F10 (P2), Chunk H, F18 | + security sign-off; next design after F21/F22 code |
 | 18c | X3 | integrations-ui | dashboard UI | Requested 2026-11-12; design after F27 is signed off | `feat/x3-integrations-ui` | F27, F10 (P2) | operator walk-through first |
-| 18e | X5 | ui-test-round | dashboard UI | **Implemented** 2026-11-12: six test-round fixes; no endpoint, save path or policy changed | `fix/x5-ui-test-round` | — | six small fixes |
 | 18d | X4 | agents-page | dashboard UI | **Implemented** 2026-11-12: one Agents page (tokens, policy sections, web fetch, activity); Controls renamed Command policy; absent policy fields now keep their stored value | `feat/x4-agents-page` | `fix/agent-ssh-hosts` | rename Controls → Command policy |
+| 18e | X5 | ui-test-round | dashboard UI | **Implemented** 2026-11-12: six test-round fixes; no endpoint, save path or policy changed | `fix/x5-ui-test-round` | — | six small fixes |
+| 18f | X6 | agent-api-round | dashboard | From the 1.2 test round 2026-11-12; ready for code | `fix/x6-agent-api-round` | — | 12 items; D1 fixed separately |
 | 19 | F22 | change-checks | dashboard + MCP | After F19 merges | `feat/f22-change-checks` | F3, F5, F12, F19 | + security sign-off (the unattended check; AG1's origin rule does not cover it) |
 | 20 | F16 | recipes | dashboard + MCP | Design complete (security Round 4; feature reviewer Round 5 with AA1/AA2); code next after F22 | `feat/f16-recipes` | F3, F12, F13, F19 | main line; steps claim by request id; code comes back to security; auto_run comes back to security |
 | 21 | F24 | content-tripwire | dashboard | Design first | `feat/f24-content-tripwire` | F12, F14 | + security sign-off (retention) |

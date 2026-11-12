@@ -140,7 +140,8 @@ reviewer. Never paste live IPs, hostnames or output into this file.
    approval, the backup exists in HA. Delete it in HA afterwards.
 3. **H.** `ha_core_restart` with **no** check in the last 10 minutes.
    **Expect:** refused before any card.
-4. **H.** `ha_host_reboot`. **Expect:** it is not available (disabled).
+4. **H.** `ha_host_reboot`. **Expect:** it is not in the tool list at all
+   (disabled tools are withheld, not refused).
 5. **H+O (optional, at a quiet time).** `ha_addon_action` restart of a
    harmless add-on. **Expect:** the card names the add-on, and it restarts
    after approval.
