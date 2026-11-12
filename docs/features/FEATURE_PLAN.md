@@ -10953,9 +10953,439 @@ an allowance would replace one.
   switches runs `light.turn_off` and `switch.turn_off` on those entities
   with no card. Any other entity, domain or service still asks.
 
-### Implementer notes
+### Implementer notes — design note (for the security reviewer)
 
-_(implementer)_
+**Status: design note only.** No table, seed field, route or UI exists yet.
+This note fixes the shapes the operator's seven decisions left open: the
+condition grammar, the per-entity services for `call_service`, the seed
+field, the never-allowable list, the point in `run_tool` where an allowance
+is consulted, the atomic rate count, versioning and visibility, and
+profiles. It ends with one question for the reviewer (HA labels) and two
+smaller decisions I had to make; each is marked.
+
+#### 1. The object
+
+```
+allowances
+  id                INTEGER PK
+  agent_id          INTEGER        -- agent_tokens.id, never a name
+  integration       TEXT           -- the integration name (as tools use it)
+  tool              TEXT
+  name              TEXT           -- operator-facing, e.g. "Living-room lamp"
+  conditions_json   TEXT           -- the exact conditions (§2)
+  rate_per_hour     INTEGER        -- 0 = no cap (uses are still recorded)
+  window            TEXT           -- '' or 'HH:MM-HH:MM', local time
+  expires_at        INTEGER        -- 0 = never
+  version           INTEGER        -- starts at 1
+  created_by        TEXT
+  created_at        INTEGER
+  revoked_at        INTEGER        -- 0 = live; the only way a version dies
+  profile_id        INTEGER        -- 0 for a hand-made allowance
+  profile_version   INTEGER        -- 0 for a hand-made allowance
+```
+
+* **Edit = new version.** Saving an edit inserts `version + 1` (a new row)
+  and sets `revoked_at` on the old one, in one transaction. Only a row with
+  `revoked_at = 0` can match, so the old version stops matching at once —
+  a concurrent call that already matched is still recorded under the version
+  it used.
+* **Revoke** sets `revoked_at`; it never deletes, so History keeps the id
+  and name.
+* **Both are audited** (`allowance_created`, `allowance_edited`,
+  `allowance_revoked`), with the version in the details.
+* The agent is `agent_id`; a renamed token keeps its allowances, and deleting
+  a token revokes them (`allowance_revoked`, reason `agent_deleted`).
+
+Uses are a separate table, never a counter on the allowance:
+
+```
+allowance_uses
+  id            INTEGER PK
+  allowance_id  INTEGER
+  used_at       INTEGER
+  call_ref      TEXT            -- the request/call id the use became
+```
+
+#### 2. Conditions are exact, and they are the only control
+
+`conditions_json` is a JSON object. Keys are **parameter paths**:
+
+* a declared parameter name (`domain`, `service`, `id`, `vmid`);
+* or one dotted path into a `json` parameter (`data.entity_id`) — one level
+  of nesting is enough for `call_service`; deeper paths are refused in v1.
+
+Only paths the **seed declares constrainable** may appear (§3). A tool
+without the field cannot be allowed at all.
+
+Two forms, and only these two:
+
+* `{"in": [v1, v2, ...]}` — a non-empty list of at most 64 JSON scalars
+  (string, integer, number, boolean). **Type-strict:** `1` never matches
+  `"1"`, `true` never matches `1`; a number matches a number numerically
+  (`1` matches `1.0`), and a string must be byte-identical (no trimming, no
+  case folding — HA entity ids and domains are lowercase, and a
+  case-insensitive rule would authorise a different string than the one the
+  operator read on the card).
+* `{"range": [lo, hi]}` — exactly two numbers, `lo <= hi`, both ends
+  required, **inclusive**, and only for a parameter the seed declares as
+  `integer` or `number`. A boolean is never a number.
+
+Nothing else: no `not`, `prefix`, `contains`, `regex`, `gt`, `lt`, and no
+object or array as a set member. `in` and `range` in one condition is
+refused.
+
+**Matching one call:**
+
+1. Decode the argument value from the call's `args` (JSON-decoded; a form
+   value is the string it is).
+2. If the value is a **list**, every element must match the condition and
+   the list must be non-empty. One unlisted element fails the match. A mixed
+   list (string and number) can only match a set that holds both types.
+3. If it is a scalar, it must match.
+4. A condition key whose value is absent from the call fails the match.
+
+**Absent or default, for everything not mentioned.** For every declared
+parameter of the tool that no condition names, the call must either omit it
+or pass exactly its declared `default` (type-strict). Otherwise the
+allowance does not match. This is what stops "`light.turn_off` on
+`light.a`" from also allowing `transition: 60` or a `target` the operator
+never saw.
+
+* For a `json` parameter that a condition reaches into (`data.entity_id`),
+  the object may contain **only** the keys the conditions name and the keys
+  the seed declares defaults for. `call_service` declares no defaults for
+  `data`, so in v1 a `data` object may hold only `entity_id` (a string or a
+  list of strings). `data: {"entity_id": "light.a", "brightness": 128}`
+  gets a card — that is a limit of v1, stated here, not a bug. Phase 2's
+  "only if" and a later argument design can widen it.
+* An argument key the tool never declared makes the call unmatched (an
+  undeclared key is passed through by some transports).
+
+**Validation, at save, at apply and at match.** A condition that fails any
+rule above is refused when the allowance (or profile template) is saved and
+again when a profile is applied. At match time the engine re-validates the
+stored conditions against the *current* seed: a condition on a parameter
+that is no longer constrainable, or a value that is now under `never`, makes
+the allowance unmatchable (the call gets an ordinary card), and one audit
+row per allowance per hour says so (`allowance_invalid`). Fail closed, never
+fail open.
+
+#### 3. The seed field, and `call_service`'s values
+
+`integration_tools` gains one JSON column, `allowance_json`, set from the
+seed:
+
+```json
+"allowance": {
+  "constrainable": ["domain", "service", "data.entity_id"],
+  "required": ["domain", "service", "data.entity_id"],
+  "never": {
+    "domain": ["script", "automation", "shell_command", "hassio",
+               "homeassistant", "python_script", "rest_command", "notify"],
+    "service": ["stop", "shutdown", "reboot", "disable", "unlock", "disarm"]
+  }
+}
+```
+
+That is `call_service`'s field, and the only one in the seeds for v1.
+
+* `constrainable` — the only condition keys allowed. A condition on anything
+  else (`data.brightness`, `target`) is refused at save.
+* `required` — every one must be a condition key. For `call_service` that is
+  `domain`, `service` and `data.entity_id`: **a whole-domain allowance is
+  refused**. The operator's decision 2 is per entity, so the unit is one
+  allowance = one entity set × one service set; "heater: off only" is a
+  second allowance with `service: ["turn_off"]` and the heater entity. The
+  Allowances page shows both rows side by side, which is also what makes the
+  card reviewable.
+* `never` — per path, values that may not appear in `in` (normalised with
+  `.strip().lower()` for strings before comparing, so `Hassio` is refused
+  as `hassio`). `range` is refused on a path that has a `never` list. The
+  `service` list is the operator's widened destructive vocabulary (§10):
+  an allowance may not pre-approve `lock.unlock` or
+  `alarm_control_panel.disarm` even though both are ordinary
+  `call_service` calls.
+* **A tool with a `handler` is not allowable in v1.** A curated handler can
+  act on more than its declared arguments (the F10 actions are the extreme
+  case), and the condition engine cannot see inside it. That also means the
+  NPM proxy-host and Pi-hole DNS handlers are outside v1; the plain HTTP
+  tools are not.
+* Missing `allowance_json`, an empty `constrainable`, or `required` not a
+  subset of `constrainable` → the tool cannot be allowed.
+
+#### 4. Never allowable, whatever a seed says
+
+The check runs at save, at apply and at match:
+
+1. the F10 Supervisor actions by name (`ha_addon_action`,
+   `ha_addon_update`, `ha_core_update`, `ha_backup_create`,
+   `ha_core_restart`, `ha_host_reboot`) and any tool whose handler is
+   `ha_supervisor_action`;
+2. an HA admin config write (`is_admin_config_write`: `config/automation`,
+   `config/script`, `config/scene`);
+3. F21's internal tools — the four snapshot writes and the five internal
+   reads (`integration_tools.internal = 1`);
+4. the generic `write` and `ws_write` tools (`generic` and not `read_only`);
+5. any tool with a `handler` (§3);
+6. any tool with `always_gate` that has no seed `allowance` field — the
+   general rule, so a later `always_gate` tool is not allowable by accident;
+7. any tool the security reviewer adds to this list (the list lives in one
+   module constant so an addition is one line and one test).
+
+#### 5. Where it is decided
+
+In `_run_tool`, in this order — the allowance check is **after** every
+existing refusal and **before** the gate:
+
+1. integration and tool resolved, `enabled` checked;
+2. `evaluate_call` (the agent's tool allowlist, `principal_allow`,
+   `arg_policy`) — unchanged;
+3. `not_implemented`;
+4. the F9 freeze refusal (reads pass, writes refuse);
+5. the hassio-domain refusal, the read-only-passthrough refusal, the
+   Supervisor WS and REST refusals, the HA path guard;
+6. **the allowance check** (new): if the call is mutating, the agent exists,
+   the tool is allowable, and exactly one live allowance matches (§2), the
+   call runs with `approval='allowance:<id>'`;
+7. otherwise the existing gate: `destructive` / `all` / `always_gate` /
+   the agent's `gated`|`ungated` override, then the plan claim, then the
+   card.
+
+**The winners, precisely.**
+
+* **A freeze** has already refused the write at step 4, before the allowance
+  is read. An allowance cannot make a frozen write run.
+* **The tripwire freeze** (F24, `meta.tripwire_freeze`) is read in the same
+  place and refuses the same way; the allowance check never runs while it is
+  set. (F24 has not shipped; the key is read here so F27 is already correct
+  when it does. Same pattern as F21's.)
+* **Zero-Trust** is a **gateway** property (`gateways.zero_trust`), enforced
+  by the gateway for SSH and recipe steps. A tool call names an integration,
+  not a gateway, so there is no Zero-Trust decision in its path to override
+  — and v1 has no SSH allowances, so no allowance can reach one. This is
+  the honest statement of the rule: an allowance cannot beat Zero-Trust
+  because it never sees it. If a later chunk gives a tool call a gateway
+  context, the allowance check reads it first and refuses.
+* **No match, an ambiguous match, a rate hit, a window miss, an expired or a
+  revoked allowance → the ordinary card.** Never a denial: an allowance is a
+  pre-approval, and its absence must not turn into a new refusal the
+  operator did not ask for.
+
+**Two smaller decisions I had to make (flag to the reviewer):**
+
+* **More than one live allowance matches.** The plan says "exactly one"; I
+  read that strictly: the call gets a card, and one audit row
+  (`allowance_ambiguous`) names the ids. Picking the lowest id would hide an
+  operator mistake, and picking "the most specific" invents a precedence
+  rule nobody reviewed. Say if you would rather have "lowest id wins with an
+  audit row".
+* **A matching allowance on a call that would not have been gated.** It is
+  simply not consulted: the call runs normally (`auto`), and no use is
+  counted. The allowance is not an extra gate.
+
+#### 6. Rate counting is atomic
+
+* The rate is "uses of this allowance in the last hour", counted from
+  `allowance_uses` (`used_at > now - 3600`), plus the window and
+  `expires_at`.
+* Check and record are **one transaction**: a single connection with
+  `BEGIN IMMEDIATE` reads the count, compares it with `rate_per_hour`, and
+  inserts the use. SQLite serialises the writers, so two concurrent calls
+  cannot both see "one below the limit" and both insert; the loser re-reads
+  and gets a card. The same rule as plan claims (a conditional write, not a
+  read-then-write on a plain connection).
+* The use is recorded **before** the upstream call, with the call reference
+  written after it returns. A call that then fails still counts: a failure
+  must not buy an unbounded retry loop. (The audit row is
+  `allowance_used`, with the id, version, name and the call reference.)
+* `rate_per_hour = 0` means no cap; uses are still recorded so the page's
+  "uses in the last 24 h" is true.
+* **Window** is local time, one `HH:MM-HH:MM`, start inclusive, end
+  exclusive, `start > end` crossing midnight; outside it the call gets a
+  card. Two windows are not in v1.
+* **Expiry** is an epoch; `0` means never. An expired allowance stops
+  matching; it is not auto-revoked (the page shows it as expired, the
+  operator decides).
+
+#### 7. Profiles
+
+```
+allowance_profiles  id, name UNIQUE, description, version, created_by,
+                    created_at, updated_at, deleted_at
+allowance_profile_templates
+                    id, profile_id, profile_version, integration, tool,
+                    conditions_json, rate_per_hour, window, expires_at, name
+```
+
+* **Saving a profile edit inserts a new `version` and new template rows.** It
+  never touches any agent's allowances. The page lists, per profile, how many
+  agents are on an older version.
+* **"Update agents" is an explicit step** — for all listed agents or one at a
+  time. It revokes each agent's allowances that came from that profile
+  (`profile_id` + an older `profile_version`) and creates the new ones from
+  the new templates, in one transaction, audited (`allowance_profile_applied`).
+  A profile edit therefore cannot widen what an agent may do without the
+  operator pressing the button that says what it will do.
+* **Applied allowances carry `profile_id` and `profile_version`**, so the
+  agent's page says "Household lights (profile v3)" and History can too.
+* **Re-validation at apply time.** Every template is validated exactly like a
+  hand-made allowance (§2–§4) when it is saved and again when it is applied:
+  a seed that tightened between the two refuses the apply with the failing
+  template named, before anything is revoked.
+* **Removing a profile from an agent revokes the allowances it created**
+  (audited; hand-made allowances are untouched). **Deleting a profile is
+  refused while any agent is on it.**
+* The profile itself has no never-allowable shortcut: it is a template
+  factory, and every template goes through the same rules.
+
+#### 8. What the operator and the agent see
+
+* **Allowances page** (nav item, beside Agents): one row per live allowance —
+  agent, `integration.tool`, conditions in plain words ("`light.living_room`
+  and `light.kitchen`; `turn_on`, `turn_off`"), rate, window, expiry, uses
+  in the last 24 h, version, and Revoke. An "expired"/"revoked" filter
+  shows the rest.
+* **The agent's page** lists its allowances and which profile made them, and
+  the same Revoke.
+* **History and the call log** show `allowance #N (name)` in the approval
+  column (and the version in the details line), so a call that ran without a
+  card is never blank.
+* **F6/F18** count it as its own approval bucket, `allowance`, alongside
+  `manual`, `plan`, `unattended` and `auto`. Statistics shows it.
+* **The agent's tool description** gets one added line: "Calls matching one
+  of your allowances run without approval." It does not list the values —
+  the tool description is not the place to leak an entity list, and the
+  allowance is the operator's object, not the agent's.
+* **Where an `ungated` override is currently used**, the agent page shows a
+  hint: "an allowance replaces this, and is visible".
+
+#### 9. P2 does not change
+
+`always_gate` still beats an agent's `ungated` override, exactly as now,
+including `call_service`, the Supervisor actions and admin config writes. An
+allowance is the **one** sanctioned way to pre-approve an always-gated tool,
+and only for a tool that declares the seed field. The `ungated` override is
+not widened, not narrowed, and not consulted by the allowance path. HA
+`call_service` keeps `always_gate`; no seed flag is removed to make F27
+work.
+
+#### 10. The widened destructive word list
+
+`DESTRUCTIVE_VERBS` gains `stop`, `shutdown`, `reboot`, `disable`, `unlock`,
+`disarm` (and keeps `delete`, `remove`, `purge`, `format`, `reset`). It is
+matched, as now, against the **rendered path** (and the WS command), with
+word boundaries and case-insensitive. Decision 6: it is an extra layer, not
+the control — the control is the gate mode plus allowances. It also changes
+which tools ask under `gate_mode='destructive'`; the effect per seeded
+integration:
+
+| seed | tool / rendered path | before | after |
+|---|---|---|---|
+| HA | `call_service` with `service` `unlock`, `disarm`, `stop`, `shutdown`, `reboot`, `disable` (rendered `/services/{domain}/{service}`) | `always_gate` already asks; the words now also mark it destructive on the card | no gate change; the **card label** is right, and `never.service` keeps these out of allowances |
+| HA | `ha_host_reboot`, `ha_core_restart`, the other Supervisor actions | `always_gate` | unchanged (never allowable) |
+| Proxmox | `stop_vm` (`/status/stop`), `stop_container` | auto-run under `destructive` | **now asks** |
+| Proxmox | `shutdown_vm` (`/status/shutdown`), `reboot_vm` (`/status/reboot`) | auto-run under `destructive` | **now asks** |
+| Proxmox | `start_vm`, `start_container` | auto-run | unchanged (`start` is not in the list) |
+| Pi-hole | `disable_blocking` (`api.php?disable`) | auto-run under `destructive` | **now asks** |
+| Pi-hole | `enable_blocking` (`api.php?enable`) | auto-run | unchanged |
+| Jellyfin | `stop_task` (`/ScheduledTasks/Running/{id}/...`), `stop_transcodes` (`/Sessions/...`) | auto-run | **now asks** |
+| Jellyfin | `restart` (`/System/Restart`) | auto-run under `destructive` | **unchanged** — `restart` is not in the agreed list; say if you want it (`reboot` does not match it) |
+| NPM | no seeded tool whose path contains a widened word (`proxy_hosts`, `create_proxy_host`, `update_proxy_host`, `delete_proxy_host` — `delete` was already destructive) | — | unchanged |
+| Omada | `block_client` (`.../block`), the site/SSID tools | auto-run | unchanged (`block` is not in the list) |
+| Pulse | `add_node`, `update_node` (writes) | auto-run under `destructive` | unchanged |
+| Seerr | `request_create` only | auto-run | unchanged |
+| Arr (Sonarr/Radarr/Prowlarr/Bazarr) | their writes are `always_gate` or `delete`, and decision 1 leaves them on the verb mode | always-gate / destructive | unchanged; the operator moves Sonarr and Radarr to `destructive` by hand |
+| Commute / Train | read-only or `always_gate: false` cache writers | auto-run | unchanged |
+| Web fetch | read-only | — | unchanged |
+
+Decision 1 — the five integrations gated by what is touched — is a
+`gate_mode='all'` change on those integrations (HA, NPM, Pi-hole, Proxmox,
+Omada), made by the operator or by the seed profile; it is not part of the
+allowance engine. Under `all`, the widened list changes nothing (every write
+asks), which is the point of doing both: the word list helps installations
+that stay on `destructive`, and `all` covers the rest.
+
+#### 11. Phase 2, named and not designed
+
+The **wattage rule**: "only if the plug's power sensor reads below X W" is a
+phase-2 read precondition built on F22's typed `expect` plus a reliable
+plug-to-sensor mapping. It is not in v1, no field for it is added here, and
+the conditions object does not grow a `read` key.
+
+SSH-command allowances remain out of scope: gateway allowlists, the read
+lane and Zero-Trust cover that ground.
+
+#### 12. The one question for the reviewer: HA labels
+
+The plan asks whether a template may name entities **by HA label** instead
+of by a list. Both options, exactly:
+
+* **Option A (my recommendation): entity lists only in v1.** An allowance
+  names `light.living_room`, `light.kitchen`. The set is static, shown in
+  plain words on the page and on the card, and a new entity is never covered
+  until the operator edits the allowance (which is a new version and an
+  audit row). No HA read at call time, no new failure mode. The cost: a new
+  bulb needs an edit.
+* **Option B: label names, resolved at call time.** A condition value like
+  `{"label": "kitchen_lights"}` is resolved through HA at match time, and
+  the call matches when every entity in it carries the label. The security
+  properties have to be proved, not assumed:
+  * **No agent can add a label.** A label is assigned by a registry write to
+    `/api/config/entity_registry/...` (`ws_write`), which is never allowable
+    (§4.4) — and even a gated approval of one would be visible. This part is
+    sound *if* the never-allowable list is complete, which is why the list
+    is a hard-coded constant and not only a seed.
+  * **Membership is dynamic anyway.** A human, an automation or a
+    non-Eshu integration can put a new entity in the label; the allowance
+    then covers an entity the operator never reviewed. Failing closed means
+    a resolution error gets a card, but a *successful* resolution of a
+    widened label is the hole.
+  * **The call needs a read.** Resolution is an HA read per call (or a
+    cached one); a slow or ambiguous read must fail closed, and the card
+    must show the resolved list, not the label name.
+  * **The value grammar grows.** `{"label": …}` is a third condition form,
+    which contradicts §2's "two forms, and only these two"; it needs its
+    own exact rules (one label or a set? a label plus an explicit entity
+    list? what about disabled entities?).
+  My reading: Option B is a separate design round with F22's read
+  precondition, not a v1 flag. If the reviewer wants labels, I would rather
+  build them as Option B on top of the "only if" mechanism, with the
+  resolved membership shown and stored, than bolt a dynamic set onto the
+  static one.
+
+#### 13. Tests this design adds
+
+* Matching: a matching call runs with `allowance:<id>`, one use recorded,
+  the audit row and the History label; a list argument whose every element
+  is listed; a number inside its range.
+* Every miss gets a card, not a denial: a value outside the set; an extra
+  argument; a list with one unlisted element; a number outside the range; a
+  type mismatch (`"1"` vs `1`, `true` vs `1`); a case-mismatched string; an
+  omitted required path; `data` with a second key; outside the window; over
+  the rate; an expired allowance; a revoked one.
+* Refusals at save and at apply: a non-constrainable path; a missing
+  required path (a whole-domain `call_service` allowance); a `never` domain
+  or service; `in` and `range` together; a handler tool; the F10 names; a
+  generic write; an internal tool.
+* The winners: freeze refuses before the check; the tripwire key does the
+  same; P2 still ignores `ungated` for `always_gate` even with a matching
+  allowance for something else.
+* Atomicity: concurrent calls at the rate limit produce exactly the allowed
+  number of `allowance_uses` rows (threads, one SQLite file).
+* Versioning: an edit stops the old version matching at once and the new one
+  matches; revoke stops matching and leaves the History rows.
+* Profiles: apply creates the allowances with their version; an edit leaves
+  agents alone until Update agents; Update agents revokes and recreates; a
+  re-validation failure refuses the apply and revokes nothing; removing a
+  profile revokes its allowances; deleting a profile in use is refused.
+* The widened list: `is_destructive` for each of the six words in a path
+  (`/status/stop`, `/status/shutdown`, `/status/reboot`, `api.php?disable`,
+  `/services/lock/unlock`, `/services/alarm_control_panel/disarm`) and the
+  two negatives (`/status/start`, `api.php?enable`); and that a card, not a
+  denial, is what an unmatched `always_gate` call still gets.
+
+`bash scripts/verify.sh`: `2800 passed, 22 skipped, 7 warnings in 572.82s
+(0:09:32)`.
 
 ### Reviewer notes
 
@@ -11015,7 +11445,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 17 | F21 | snapshot-approve | dashboard + Proxmox | Design first | `feat/f21-snapshot-approve` | F7, F14, F2 | + security sign-off (new write path, destructive rollback) |
 | 18 | F23 | change-journal | dashboard | **Merged** 2026-11-11 (AJ1/AJ2) | `feat/f23-change-journal` | F1, F5, F7, F14 | |
 | 18a | X2 | runbooks-page | dashboard UI | **Merged** 2026-11-11 | `feat/x2-runbooks-page` | F13 | |
-| 18b | F27 | allowances | dashboard + MCP | Design first (from live use: P2 caught HA call_service) | `feat/f27-allowances` | F10 (P2), Chunk H, F18 | + security sign-off; next design after F21/F22 code |
+| 18b | F27 | allowances | dashboard + MCP | **Design note for security** (condition grammar, the seed field and `call_service`'s values, never-allowable list, the decision point, atomic rate, profiles, the widened word list per integration); one question left: HA labels | `feat/f27-allowances` | F10 (P2), Chunk H, F18 | security reviews the note; the code waits for the answer on labels |
 | 19 | F22 | change-checks | dashboard + MCP | After F19 merges | `feat/f22-change-checks` | F3, F5, F12, F19 | + security sign-off (the unattended check; AG1's origin rule does not cover it) |
 | 20 | F16 | recipes | dashboard + MCP | Design complete (security Round 4; feature reviewer Round 5 with AA1/AA2); code next after F22 | `feat/f16-recipes` | F3, F12, F13, F19 | main line; steps claim by request id; code comes back to security; auto_run comes back to security |
 | 21 | F24 | content-tripwire | dashboard | Design first | `feat/f24-content-tripwire` | F12, F14 | + security sign-off (retention) |
