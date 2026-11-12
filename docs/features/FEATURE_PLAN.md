@@ -11731,6 +11731,29 @@ plain carry no token.
 `bash scripts/verify.sh`: `2898 passed, 26 skipped, 7 warnings in 587.66s
 (0:09:47)`.
 
+#### Security re-read (2026-11-12, at `46bc261`): BJ2 and BJ3 approved
+
+* The window claim sends the gateway token as `-H @<(...)` and the window
+  token in a stdin JSON body, to a new `/api/approved-windows/execute`.
+  The path-token route stays for old gateways, and both share
+  `_window_execute`.
+* The fleet runner reads `/etc/eshu-token` as root, and the poller no
+  longer passes the token to `systemd-run`. Python gets it through the
+  environment, not argv. The shell variable is not exported, so the fleet
+  command does not inherit it.
+* The logs show only the first 8 characters of a window token.
+* After the rebase, the poll line keeps both the digits-only `WC` and
+  `-H @-`. The three installer copies are identical.
+* **Nit:** the runner tells the old argument shape from the new one by
+  "`$2` contains a dot". An IPv6 `TARGET_IP` has no dot, so it would be
+  read as the old shape and the fields would shift. Use
+  `case "$2" in *.*|*:*)`; a token cannot contain either character.
+  Argument counts don't work for this, because the six-argument old-old
+  shape and the new shape are the same length.
+* Still to come: the stack onto `fix/lockbox-bi`, because of the conflict
+  in the generated installers. I'll re-check the copies and the poll line
+  there.
+
 ### BE4 — refresh the dashboard key on update · branch `fix/update-dashboard-key`
 
 An update today never writes `authorized_keys`, so F12's dashboard key reaches a gateway only on reinstall. The security reviewer's conditions:
