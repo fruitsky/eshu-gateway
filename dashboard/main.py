@@ -3555,6 +3555,9 @@ class AgentPolicyPayload(BaseModel):
     arg_policy: dict = {}
     approval: dict = {}
     rate_limit_per_min: int = 0
+    # F12: None keeps the stored value; [] clears the host list.
+    ssh_hosts_allow: list | None = None
+    ssh_mode: str | None = None
 
 
 class CommuteDuePayload(BaseModel):
@@ -3677,6 +3680,7 @@ def set_agent_policy_endpoint(agent_id: int, payload: AgentPolicyPayload,
     agent = get_agent(agent_id)
     if not agent:
         raise HTTPException(status_code=404, detail="Agent token not found")
+    before = get_agent_policy(agent_id)
     try:
         policy = set_agent_policy(
             agent_id,
@@ -3685,14 +3689,21 @@ def set_agent_policy_endpoint(agent_id: int, payload: AgentPolicyPayload,
             arg_policy=payload.arg_policy,
             approval=payload.approval,
             rate_limit_per_min=payload.rate_limit_per_min,
+            ssh_hosts_allow=payload.ssh_hosts_allow,
+            ssh_mode=payload.ssh_mode,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    ssh_note = ''
+    if (policy['ssh_hosts_allow'] != before['ssh_hosts_allow']
+            or policy['ssh_mode'] != before['ssh_mode']):
+        ssh_note = (f", ssh_mode={policy['ssh_mode']}, ssh_hosts="
+                    f"{','.join(policy['ssh_hosts_allow']) or 'none'}")
     record_audit_event(
         "agent_policy_updated",
         details=f"Policy for agent '{agent['name']}' updated "
                 f"(tools_mode={policy['tools_mode']}, "
-                f"rate_limit={policy['rate_limit_per_min']})")
+                f"rate_limit={policy['rate_limit_per_min']}{ssh_note})")
     _sync_web_fetch_access()
     return get_agent_policy(agent_id)
 

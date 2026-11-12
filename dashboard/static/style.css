@@ -5518,3 +5518,22 @@ body.pol-open .mobile-menu-btn, body.pol-open .mobile-freeze { display: none; }
   .rb-row > button { align-self: flex-end; }
   .runbook-body { max-height: 70vh; }
 }
+
+/* Agent policy · SSH tab */
+.pol-checks { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 6px 14px; margin-top: 8px; }
+.pol-check {
+  display: flex; align-items: center; gap: 9px; cursor: pointer; min-width: 0;
+  font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--text-main);
+}
+.pol-check input { accent-color: var(--accent); flex: none; }
+.pol-check .pol-check-ip { color: var(--text-faint); font-size: 11px; }
+.pol-check span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pol-check-any { margin-top: 8px; }
+.pol-checks.is-any { opacity: .45; pointer-events: none; }
+#pol-pane-ssh .pol-field { margin: 14px 0 18px; }
+.pol-confirm {
+  margin: 10px 0 6px; padding: 12px 14px; border: 1px solid var(--status-warning);
+  border-radius: 2px; display: flex; flex-direction: column; gap: 10px;
+  font-family: 'Space Grotesk', sans-serif; font-size: 13px; line-height: 1.6; color: var(--text-main);
+}
+.agent-ssh-any { color: var(--status-warning); }
