@@ -10259,6 +10259,20 @@ tool, not a gateway.
 `bash scripts/verify.sh`: `2897 passed, 22 skipped, 8 warnings in 588.02s
 (0:09:48)`.
 
+### Reviewer notes (main feature reviewer, 2026-11-12, code round 2)
+
+AW1–AW4 are fixed as asked. The SSH step now passes the real agent row, so the host allowlist and `read_only` apply, and the AW1 tests drive the real `ssh_exec`. The standing check runs before each item is claimed. The reservation is expired on every result except `ran`, and a host-less SSH item is refused. **Refusing SSH steps in an operator-started run is the right choice**; the security reviewer should confirm it. One must before this goes to security:
+
+* **AW5 (must): the origin comes from the caller, not from an empty agent name.** `start_run` sets `origin = 'agent' if agent else 'operator'`. `recipe_run` over MCP passes `current_agent_name()`, which is `''` for a caller with no agent identity, such as a legacy MCP token. Such a run is recorded as **operator**-started, and its tool steps and undo steps then skip `_agent_standing` and every agent policy. An MCP caller must never get the operator's standing. Fix:
+  * `start_run(..., origin=)` is explicit;
+  * `dashboard/main.py`'s route passes `origin='operator'`, and the MCP tool passes `origin='agent'`;
+  * an `agent` origin with no resolvable agent row is refused (`recipe_no_agent`) before any precondition runs.
+
+  Test: the MCP `recipe_run` with no current agent is refused, and no run row or plan is created.
+* **AW6 (should): the undo standing check passes no arguments.** `_execute_rollback_locked` calls `_agent_standing(run, integration, tool)`, so `evaluate_call` sees `{}`. An arg_policy that limits the undo tool's arguments is then judged on nothing. Pass `_args_for_execution(undo['call'])`, as the forward loop does. Test: an arg_policy that refuses the undo's real arguments stops the rollback.
+
+After AW5 and AW6: to the security reviewer, with the operator-run SSH decision flagged.
+
 ---
 
 ## Chunk F17 — Local-agent profile · slug `local-agent` · dashboard + docs
