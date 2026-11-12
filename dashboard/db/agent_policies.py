@@ -173,7 +173,17 @@ def get_agent_policies_map():
 
 def set_agent_policy(agent_id, tools_mode='all', tools=None, arg_policy=None,
                      approval=None, rate_limit_per_min=0, ssh_hosts_allow=None,
-                     ssh_mode=DEFAULT_SSH_MODE):
+                     ssh_mode=None):
+    """Replace one agent's policy. `ssh_hosts_allow` and `ssh_mode` left as
+    None keep the stored values, so a save that only edits tools (the policy
+    modal's older callers, the web-fetch sync) never wipes SSH access. Pass
+    [] to clear the host list."""
+    if ssh_hosts_allow is None or ssh_mode is None:
+        current = get_agent_policy(agent_id)
+        if ssh_hosts_allow is None:
+            ssh_hosts_allow = current['ssh_hosts_allow']
+        if ssh_mode is None:
+            ssh_mode = current['ssh_mode']
     clean = validate_policy(tools_mode, tools, arg_policy, approval,
                             rate_limit_per_min, ssh_hosts_allow, ssh_mode)
     with db_conn() as conn:

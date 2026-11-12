@@ -8608,6 +8608,9 @@ async function fetchAgentTokens() {
         ? ((p.tools || []).length + ' allowed tool' + ((p.tools || []).length === 1 ? '' : 's'))
         : 'all tools';
       if (p.rate_limit_per_min) summary += ' · ' + p.rate_limit_per_min + '/min';
+      var sshHosts = p.ssh_hosts_allow || [];
+      summary += ' · SSH ' + (sshHosts.indexOf('*') !== -1 ? 'any gateway'
+        : sshHosts.length ? sshHosts.length + ' gateway' + (sshHosts.length === 1 ? '' : 's') : 'off');
       return '<div class="agent-row">' +
         '<div><div class="text-sm">' + esc(a.name) + (a.revoked ? ' <span class="text-danger">(revoked)</span>' : '') + '</div>' +
         '<div class="text-xs text-muted">last used: ' + used + ' · ' + esc(summary) + '</div></div>' +
@@ -8631,6 +8634,12 @@ async function openAgentPolicy(id) {
     _agentPolicy = await pRes.json();
     const tools = await tRes.json();
     _agentPolicyTools = tools.integrations || [];
+    if (!_agentSshGateways().length) {
+      try {
+        const gRes = await authFetch('/api/gateways');
+        if (gRes.ok) _allGateways = await gRes.json();
+      } catch(e) {}
+    }
     renderAgentPolicy(agent);
     document.getElementById('agent-policy-modal').classList.remove('hidden');
     document.body.classList.add('pol-open');
@@ -8676,13 +8685,101 @@ function renderAgentPolicy(agent) {
   const filterEl = document.getElementById('pol-tool-filter');
   if (filterEl) filterEl.value = '';
   agentPolicyFilter('');
+  _agentSshHosts = (p.ssh_hosts_allow || []).slice();
+  setAgentSshMode(p.ssh_mode || 'approval');
+  renderAgentSshHosts();
   setAgentPolicyTab('tools');
   setAgentToolsMode(p.tools_mode === 'allowlist' ? 'allowlist' : 'all');
 }
 
+/* F12: the SSH tab. The host list is held as the stored strings (gateway IPs
+   or hostnames, or '*'); a gateway is ticked when its IP or hostname is in
+   the list, and ticking adds its IP. Entries that match no current gateway
+   are kept and shown, so a save never drops them silently. */
+var _agentSshHosts = [];
+var _agentSshMode = 'approval';
+var AGENT_SSH_MODE_HINTS = {
+  read_only: 'Only plain reads are sent; anything that writes is refused before it reaches the gateway.',
+  approval: 'Every command asks for approval, even ones the gateway would allow. The safest choice.',
+  normal: 'The gateway decides as for any SSH command: allowlisted commands run, the rest ask.'
+};
+
+function setAgentSshMode(mode) {
+  _agentSshMode = AGENT_SSH_MODE_HINTS[mode] ? mode : 'approval';
+  document.querySelectorAll('#agent-ssh-mode-seg button').forEach(function(btn) {
+    const on = btn.getAttribute('data-val') === _agentSshMode;
+    btn.classList.toggle('active', on);
+    btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+  });
+  const hint = document.getElementById('agent-ssh-mode-hint');
+  if (hint) hint.textContent = AGENT_SSH_MODE_HINTS[_agentSshMode];
+  updateAgentSshCount();
+}
+
+function _agentSshGateways() {
+  var gws = (_gatewaysData && _gatewaysData.length) ? _gatewaysData : (_allGateways || []);
+  return gws.filter(function(g) { return g && g.ip; }).slice().sort(function(a, b) {
+    return (a.hostname || a.ip).localeCompare(b.hostname || b.ip);
+  });
+}
+
+function _agentSshHas(value) {
+  var v = (value || '').toLowerCase();
+  return !!v && _agentSshHosts.some(function(h) { return h.toLowerCase() === v; });
+}
+
+function renderAgentSshHosts() {
+  const box = document.getElementById('agent-ssh-hosts');
+  if (!box) return;
+  const any = _agentSshHas('*');
+  const anyEl = document.getElementById('agent-ssh-any');
+  if (anyEl) anyEl.checked = any;
+  const gws = _agentSshGateways();
+  box.classList.toggle('is-any', any);
+  box.innerHTML = gws.length ? gws.map(function(g) {
+    const on = _agentSshHas(g.ip) || _agentSshHas(g.hostname);
+    return '<label class="pol-check"><input type="checkbox" ' + (on ? 'checked ' : '') +
+      'onchange="toggleAgentSshHost(' + escJs(g.ip) + ', this.checked)">' +
+      '<span>' + esc(g.hostname || g.ip) + ' <span class="pol-check-ip">' + esc(g.ip) + '</span></span></label>';
+  }).join('') : '<p class="pol-hint">No gateways loaded. Open the Gateways page once, then reopen this policy.</p>';
+  const known = {};
+  gws.forEach(function(g) {
+    known[(g.ip || '').toLowerCase()] = 1;
+    if (g.hostname) known[g.hostname.toLowerCase()] = 1;
+  });
+  const extra = _agentSshHosts.filter(function(h) { return h !== '*' && !known[h.toLowerCase()]; });
+  const extraEl = document.getElementById('agent-ssh-extra');
+  if (extraEl) extraEl.textContent = extra.length
+    ? 'Also kept (not a current gateway): ' + extra.join(', ')
+    : '';
+  updateAgentSshCount();
+}
+
+function toggleAgentSshHost(ip, on) {
+  const g = _agentSshGateways().find(function(x) { return x.ip === ip; }) || { ip: ip };
+  const drop = [(g.ip || '').toLowerCase(), (g.hostname || '').toLowerCase()];
+  _agentSshHosts = _agentSshHosts.filter(function(h) { return drop.indexOf(h.toLowerCase()) === -1; });
+  if (on) _agentSshHosts.push(g.ip);
+  renderAgentSshHosts();
+}
+
+function toggleAgentSshAny(on) {
+  _agentSshHosts = _agentSshHosts.filter(function(h) { return h !== '*'; });
+  if (on) _agentSshHosts.push('*');
+  renderAgentSshHosts();
+}
+
+function updateAgentSshCount() {
+  const el = document.getElementById('pol-tab-ssh-n');
+  if (!el) return;
+  if (_agentSshHas('*')) { el.textContent = 'any gateway'; return; }
+  const n = _agentSshHosts.length;
+  el.textContent = n ? n + ' gateway' + (n === 1 ? '' : 's') : 'off';
+}
+
 function setAgentPolicyTab(name) {
   _agentPolicyTab = name;
-  ['tools', 'rules', 'advanced'].forEach(function(t) {
+  ['tools', 'rules', 'ssh', 'advanced'].forEach(function(t) {
     const pane = document.getElementById('pol-pane-' + t);
     const btn = document.getElementById('pol-tab-' + t);
     if (pane) pane.classList.toggle('hidden', t !== name);
@@ -8910,7 +9007,9 @@ function collectAgentPolicy() {
     tools: tools,
     arg_policy: argPolicy,
     approval: approval,
-    rate_limit_per_min: isNaN(rate) ? 0 : rate
+    rate_limit_per_min: isNaN(rate) ? 0 : rate,
+    ssh_hosts_allow: _agentSshHosts.slice(),
+    ssh_mode: _agentSshMode
   };
 }
 
