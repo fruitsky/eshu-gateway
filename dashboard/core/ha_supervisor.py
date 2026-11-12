@@ -224,9 +224,31 @@ def _pick(row, fields):
     return {key: row[key] for key in fields if key in row}
 
 
+def _payload(shape, data):
+    """D12: the Supervisor wraps a response in `data`.
+
+    A dict-shaped read (`/core/info`) has its fields at the top of the
+    reply, but the list-shaped reads (`/addons`, `/backups`) put the list at
+    `data['data'][<shape>]`. Shaping the wrapper returned `{}` for both.
+    """
+    if not isinstance(data, dict):
+        return data
+    inner = data.get('data')
+    if isinstance(inner, dict):
+        rows = inner.get(shape)
+        if isinstance(rows, list):
+            return rows
+        return inner
+    rows = data.get(shape)
+    if shape in ('addons', 'backups') and isinstance(rows, list):
+        return rows
+    return data
+
+
 def _shape(shape, data):
     """Whitelist fields. Lists are shaped per row and capped, so one huge
     Supervisor response cannot flood a model's context."""
+    data = _payload(shape, data)
     fields = _SHAPES.get(shape, ())
     if isinstance(data, list):
         return [_pick(row, fields) for row in data[:200]]

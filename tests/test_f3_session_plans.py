@@ -114,8 +114,10 @@ class TestApproval:
         assert _audit_events('jit_plan_approved'), 'expected a jit_plan_approved audit event'
 
         # max_uses=1 is spent: the same command needs a normal JIT now.
+        # (D6/BK5: this caller is unsigned, so it never reuses the live row.)
         second = _request(client, web01, 'uptime', sid)
         assert 'plan' not in second
+        assert second['request_id'] != first['request_id']
         assert _row_for('uptime')['status'] == 'pending'
 
     def test_f3_plan_approve_subset_removed_item_pends(self, gateways):

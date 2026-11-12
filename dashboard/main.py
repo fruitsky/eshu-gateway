@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field
 
 from database import (
     init_db, create_request, update_request_status, 
-    update_ticket_consumed_by_ip, update_request_status_if_pending, get_all_requests, get_request_row, get_pending_request_by_cmd,
+    update_ticket_consumed_by_ip, update_request_status_if_pending, get_all_requests, get_request_row, get_pending_request_by_cmd, find_live_request,
     get_request_status, get_request_command, count_denied, get_ticket_by_request_id, delete_old_requests,
     get_session_requests, get_request_target_ip, mark_requests_excluded,
     register_gateway, get_gateways, get_gateway, update_gateway_last_seen,
@@ -1008,6 +1008,15 @@ def receive_request(payload: GatewayPayload, request: Request):
         return {"status": "ok", "id": f"{req_id:06d}", "request_id": req_id, "override": True,
                 "scope": "host", "message": "Auto-approved via Override Mode"}
 
+    # D6: a re-run while the first request is still live returns that id, so
+    # one command cannot stack several identical cards (the agent then polls
+    # the same id until it is consumed).
+    live = find_live_request(target_ip, cmd, sid, agent)
+    if live:
+        update_gateway_last_seen(target_ip)
+        return {"status": "ok", "id": f"{live['id']:06d}",
+                "request_id": live['id'], "reused": True,
+                "message": "This command is already waiting on the same id"}
     req_id = create_request(target_ip, cmd, status="pending", session_id=sid,
                             execution_id=eid,
                             reason=('force-jit' if force_jit else read_lane_reason),
@@ -1795,7 +1804,9 @@ def submit_fleet_command(payload: FleetCommandPayload, request: Request):
                        (" (blacklist override)" if blacklisted else ""))
     # Surface in the main Dashboard history (one row per target gateway)
     for ip in targets:
-        create_request(ip, command, status='fleet-run', ttl=0, reason=payload.reason.strip())
+        create_request(ip, command, status='fleet-run', ttl=0,
+                       reason=payload.reason.strip(),
+                       inner_target=_inner_target_for(command))
     return {"status": "ok", "id": cmd_id, "dispatched": True, "gateway_count": len(targets)}
 
 @app.get("/api/fleet/commands")
@@ -3262,12 +3273,17 @@ def _window_execute(token: str, request: Request):
     if not ok:
         # Log the rejection server-side (token exists but window disabled/exhausted/expired)
         if target:
-            create_request(target['target_ip'], target['command'], status='window-rejected', ttl=0, reason='exhausted or disabled')
+            create_request(target['target_ip'], target['command'],
+                           status='window-rejected', ttl=0,
+                           reason='exhausted or disabled',
+                           inner_target=_inner_target_for(target['command']))
             record_window_execution(target['id'], token, target['target_ip'], target['command'], 0, 'exhausted or disabled')
         raise HTTPException(status_code=404, detail="Invalid or expired window token")
     # Log as a request row for queue visibility
     if target:
-        create_request(target['target_ip'], target['command'], status='window-approved', ttl=0)
+        create_request(target['target_ip'], target['command'],
+                       status='window-approved', ttl=0,
+                       inner_target=_inner_target_for(target['command']))
         record_audit_event("window_claimed", target['target_ip'],
                            details=f"Token {token} claimed for '{target['command'][:60]}'")
         record_window_execution(target['id'], token, target['target_ip'], target['command'])

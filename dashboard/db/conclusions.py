@@ -31,6 +31,63 @@ class ConclusionError(Exception):
         self.message = message or code
 
 
+def _has_unique_session_agent(cursor) -> bool:
+    """Does the table still carry UNIQUE(session_id, agent)?"""
+    for index in cursor.execute(
+            "PRAGMA index_list('session_conclusions')").fetchall():
+        # (seq, name, unique, origin, partial)
+        if not index[2] or index[3] != 'u':
+            continue
+        cols = [row[2] for row in cursor.execute(
+            "PRAGMA index_info('%s')" % index[1]).fetchall()]
+        if cols == ['session_id', 'agent']:
+            return True
+    return False
+
+
+def _drop_unique_session_agent(cursor):
+    """Rebuild session_conclusions without the unique pair constraint."""
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS session_conclusions_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            agent TEXT NOT NULL DEFAULT '',
+            goal TEXT NOT NULL DEFAULT '',
+            title TEXT NOT NULL DEFAULT '',
+            outcome TEXT NOT NULL DEFAULT 'partial',
+            summary TEXT NOT NULL DEFAULT '',
+            worked_json TEXT NOT NULL DEFAULT '[]',
+            did_not_work_json TEXT NOT NULL DEFAULT '[]',
+            root_cause TEXT NOT NULL DEFAULT '',
+            fix TEXT NOT NULL DEFAULT '',
+            follow_ups_json TEXT NOT NULL DEFAULT '[]',
+            tags_json TEXT NOT NULL DEFAULT '[]',
+            runbook_candidate INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'draft',
+            operator_note TEXT NOT NULL DEFAULT '',
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            confirmed_at INTEGER,
+            confirmed_by TEXT NOT NULL DEFAULT ''
+        )
+    ''')
+    cursor.execute('''
+        INSERT OR IGNORE INTO session_conclusions_new
+            (id, session_id, agent, goal, title, outcome, summary, worked_json,
+             did_not_work_json, root_cause, fix, follow_ups_json, tags_json,
+             runbook_candidate, status, operator_note, created_at, updated_at,
+             confirmed_at, confirmed_by)
+        SELECT id, session_id, agent, goal,
+               COALESCE(title, ''), outcome, summary, worked_json,
+               did_not_work_json, root_cause, fix, follow_ups_json, tags_json,
+               runbook_candidate, status, operator_note, created_at, updated_at,
+               confirmed_at, confirmed_by
+        FROM session_conclusions
+    ''')
+    cursor.execute('DROP TABLE session_conclusions')
+    cursor.execute('ALTER TABLE session_conclusions_new RENAME TO session_conclusions')
+
+
 def init_conclusions_tables(cursor):
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS session_conclusions (
@@ -52,10 +109,24 @@ def init_conclusions_tables(cursor):
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL,
             confirmed_at INTEGER,
-            confirmed_by TEXT NOT NULL DEFAULT '',
-            UNIQUE(session_id, agent)
+            confirmed_by TEXT NOT NULL DEFAULT ''
         )
     ''')
+    # X6/D14: a short title, used by a promoted runbook instead of the cut
+    # summary. Additive on existing databases.
+    _cols = {row[1] for row in cursor.execute(
+        "PRAGMA table_info(session_conclusions)").fetchall()}
+    if 'title' not in _cols:
+        try:
+            cursor.execute(
+                "ALTER TABLE session_conclusions ADD COLUMN title TEXT NOT NULL DEFAULT ''")
+        except Exception:
+            pass
+    # X6/D15: a confirmed conclusion must not block a later one from the same
+    # agent. Older databases carry UNIQUE(session_id, agent); rebuild the table
+    # without it, preserving ids (the FTS rows are keyed by rowid).
+    if _has_unique_session_agent(cursor):
+        _drop_unique_session_agent(cursor)
     cursor.execute(
         'CREATE INDEX IF NOT EXISTS idx_conclusions_session '
         'ON session_conclusions(session_id)')
@@ -147,7 +218,8 @@ def get_for_agent(session_id, agent):
     with db_conn() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            'SELECT * FROM session_conclusions WHERE session_id = ? AND agent = ?',
+            'SELECT * FROM session_conclusions WHERE session_id = ? AND agent = ? '
+            'ORDER BY id DESC LIMIT 1',
             ((session_id or '')[:64], (agent or '')[:64]))
         return _conclusion(cursor.fetchone())
 
@@ -175,9 +247,9 @@ def upsert_draft(session_id: str, agent: str, goal: str, payload: dict,
     owner = (agent or '')[:64]
     existing = get_for_agent(sid, owner)
     if existing and existing['status'] == 'confirmed':
-        raise ConclusionError(
-            'already_confirmed',
-            'This session already has a confirmed conclusion from this agent.')
+        # X6/D15: the confirmed conclusion is final and stays; a later
+        # conclude adds a new draft for the operator instead of erroring.
+        existing = None
     with db_conn() as conn:
         cursor = conn.cursor()
         values = (
@@ -195,25 +267,27 @@ def upsert_draft(session_id: str, agent: str, goal: str, payload: dict,
             now,
         )
         if existing:
+            title = (payload.get('title') or '')[:200]
             cursor.execute('''
                 UPDATE session_conclusions SET
-                    outcome = ?, summary = ?, worked_json = ?,
+                    title = ?, outcome = ?, summary = ?, worked_json = ?,
                     did_not_work_json = ?, root_cause = ?, fix = ?,
                     follow_ups_json = ?, tags_json = ?,
                     runbook_candidate = ?, updated_at = ?,
                     status = 'draft', operator_note = '',
                     confirmed_at = NULL, confirmed_by = ''
                 WHERE id = ?
-            ''', values + (existing['id'],))
+            ''', (title,) + values + (existing['id'],))
             conclusion_id = existing['id']
         else:
             cursor.execute('''
                 INSERT INTO session_conclusions
-                    (session_id, agent, goal, outcome, summary, worked_json,
+                    (session_id, agent, goal, title, outcome, summary, worked_json,
                      did_not_work_json, root_cause, fix, follow_ups_json,
                      tags_json, runbook_candidate, status, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?)
-            ''', (sid, owner, (goal or '')[:160]) + values[:9] + (now, now))
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?)
+            ''', (sid, owner, (goal or '')[:160],
+                   (payload.get('title') or '')[:200]) + values[:9] + (now, now))
             conclusion_id = cursor.lastrowid
         _fts_sync(cursor, conclusion_id, payload.get('summary'),
                   payload.get('root_cause'), payload.get('fix'),

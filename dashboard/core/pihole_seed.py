@@ -125,6 +125,7 @@ def seed_pihole_tools(integration_id: int):
                 always_gate=tool.get('always_gate'),
                 path_variants=tool.get('path_variants'),
                 response_hint=tool.get('response_hint'),
+                handler=tool.get('handler') or '',
                 example=tool['example'],
                 read_only=tool['read_only'],
                 seeded=True,
@@ -146,6 +147,7 @@ def seed_pihole_tools(integration_id: int):
                 always_gate=bool(tool.get('always_gate')),
                 path_variants=tool.get('path_variants') or None,
                 response_hint=tool.get('response_hint') or '',
+                handler=tool.get('handler') or '',
                 seeded=True,
             )
             created += 1

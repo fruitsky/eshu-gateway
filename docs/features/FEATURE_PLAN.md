@@ -11184,6 +11184,188 @@ and it passes.
 
 ---
 
+## Chunk X6 — agent API fixes from the Release 1.2 test round · slug `agent-api-round` · dashboard
+
+From the agent's test report of 2026-11-12, triaged by the feature reviewer.
+The labels are the report's (D1–D18). Live details stay outside the repo.
+
+**Already fixed, not in X6:**
+* D1, part 1: `ssh_exec`/`probe_result` ran on the event loop, so the
+  gateway's callback timed out. Fixed in `6a48ee1` and deployed.
+* D1, part 2: the poller's ticket-poll URL was malformed (`WC="0\n0"`), so no
+  approved ticket ever reached the lockbox. Fixed in `fix/poller-ticket-poll`
+  (`f0affc7`); this is gateway-side and needs security's sign-off and a rollout.
+
+**Not defects:**
+* D2: the "non-gateway" host was in fact a registered gateway.
+* D5: `wait=true` did wait 60 s; the ticket never reached `consumed` (D1).
+* D17: a disabled `ha_host_reboot` is withheld from the registry. This is
+  correct; the T-HA-4 wording is fixed.
+
+**X6 scope (dashboard only):**
+1. **D3/D4:** `check_request(id)` without `session_id` must not say "not
+   found" for a request that exists. Say `session_id required`, or infer it
+   from the transport's bound session as other tools do. `check_approval`'s
+   `wrong_namespace` hint names the full call.
+2. **D6:** `probe_result` returns `pending`, never `refused`, while a ticket
+   is waiting, and its next-step text names `probe_result`. The `ssh_exec`
+   pending hint and `check_request`'s `approved` text agree: re-run only at
+   `consumed`. A re-run while the matching request is still `approved`
+   returns `pending` with the same id instead of minting a duplicate.
+3. **D7:** a plan replaced by a newer proposal reads `superseded` (with the
+   new plan id) in `check_plan` and `probe_result`, not `not_found`. Keep
+   the row with status `superseded` instead of deleting it.
+4. **D8:** `session_summary` counts the session's MCP and integration calls
+   (`mcp_calls`) and plan-claimed requests (`by_approval.plan`). Add a test
+   with one of each.
+5. **D9:** probes accept a gateway hostname, as `ssh_exec` does. It is
+   resolved to the gateway's IP at planning time and the IP is stored (in
+   line with security's BF2: IP-only matching).
+6. **D10:** the `diagnose_container` description and the agent manual name
+   the `container` parameter (a vmid or a Docker name), with an example.
+7. **D11:** the inner target (F7) is shown on the approval card and returned
+   by `check_request` for `pct exec <vmid> -- …`. A test request of exactly
+   that shape recorded no inner target; find out why.
+8. **D12:** `ha_addons` and `ha_backups` return `{}` while the other
+   Supervisor reads work. Find the unwrap bug (Supervisor wraps the payload in
+   `data`) and add a test with a recorded response shape.
+9. **D14:** `session_conclude` gets a `title`, which a promoted runbook uses
+   instead of the cut summary. List fields are typed as arrays, and the
+   `too_many_*` errors state the limit.
+10. **D15:** a confirmed conclusion must not block a later
+    `session_conclude`. The new one is added as a draft for the operator.
+11. **D16:** `get_runbook` without `runbook_id` is a validation error, not
+    `not_found`. `whereis <vmid>` drops the nameless duplicate guest stub.
+12. **D18:** `dns_check` returns `status: error`, not `ran`, when the lookup
+    failed. Separately, find out why the Pi-hole inventory sources fail
+    with `bad_json`; it is probably the v6 response shape.
+
+**Later, gateway-side:** D13 (a plan-granted command says "covered by plan
+#N" instead of printing the human-approval stream) goes with the next gateway
+change, with security sign-off.
+
+**Implementer notes (X6 part 1, 2026-11-12).** Branch
+`fix/x6-agent-api-round` from `feature-roadmap` (`a9d3572`). Part 1:
+
+* **D3/D4.** `check_request(id)` with no session on the connection now returns
+  `session_id_required` (with the id) for an owned request, not `not found`;
+  an explicit wrong session is still `not found`, and an unowned row is still
+  readable as before. `check_approval`'s `wrong_namespace` hint names the full
+  call: `check_request(request_id=N, session_id="<id>")`.
+* **D6.** `probe_result` returns `pending` (with a `next_step` naming
+  `probe_result`) while every ticket of an approved plan is still in flight,
+  instead of `refused`; it caches the digest once something runs. A re-run
+  while an identical `approved` row is still being delivered returns that row's id
+  (`reused: true`) instead of filing a duplicate card. Per security's BK5
+  ruling (below) only a **signed** caller (both `agent` and `session_id` set)
+  reuses an approved row; an unsigned re-run always gets a fresh card, because
+  every unsigned caller of the same bytes on that host would otherwise match
+  it. The reuse sits after every refusal in `receive_request`, and its expiry
+  boundary is the poll path's (`expires_at > now`).
+* **D7.** A proposal replaced by a newer one is kept as `superseded` with a
+  `superseded_by` id (new column, additive migration) instead of deleted.
+  `check_plan` and `probe_result` return `status: superseded` and the new id.
+* **D8.** `session_summary` already counted `mcp_calls` and `by_approval.plan`
+  through the one bucket mapping; a test now inserts one integration call and
+  one `session-plan:` request and asserts both.
+* **D9.** Probe hosts accept a gateway hostname as `ssh_exec` does; it is
+  resolved at validation time and the plan stores the gateway's **IP** (BF2:
+  IP-only matching). An ambiguous hostname is refused.
+* **D10.** The `diagnose_container` description names the `container`
+  parameter (docker name or numeric vmid) and shows one example of each.
+* **D16, part a.** `get_runbook()` without an id is `validation_error` with the
+  parameter named, not `not_found`; an unknown id is still `not_found`.
+
+**X6 part 2 (same branch).**
+
+* **D11.** The inner target is now recorded on the rows that missed it: the
+  `window-approved`, `window-rejected` and `fleet-run` history rows (the
+  approval and JIT paths already had it), and `check_request` returns
+  `inner_target`. The card already rendered the chip; it was the row that was
+  empty for those paths. The parsing itself handles every `pct exec <vmid> --`
+  shape tested, so the "no inner target" report was a missing call site, not
+  a parser bug.
+* **D12.** `/addons` and `/backups` wrap their list in `data`; the shaper now
+  unwraps `data[<shape>]` (and a bare `{<shape>: [...]}`) for those two, and
+  leaves the dict reads alone. The add-on `options` field is still dropped by
+  the whitelist.
+* **D14.** `session_conclude` takes `title` (stored on a new `title` column,
+  used by a promoted runbook before the summary). `tags` and `follow_ups`
+  must be arrays (`tags_not_a_list` / `follow_ups_not_a_list`), and the
+  `too_many_*` / `*_too_long` errors carry a `message` naming the limit.
+* **D15.** A confirmed conclusion no longer blocks a later one: the confirmed
+  row stays and a new draft is inserted for the operator (the newest row is
+  the one `get_for_agent` returns). `UNIQUE(session_id, agent)` is gone from
+  new databases and is migrated away on startup (table rebuild, ids and FTS
+  preserved); the old `already_confirmed` refusal is retired.
+* **D16b.** A `pct exec <vmid>` row leaves a vmid-only guest stub in the
+  inventory; when the Proxmox source knows that vmid, the stub is dropped, so
+  `whereis <vmid>` has one named answer.
+* **D18a.** A failed DNS lookup returns `status: error` (with the reason),
+  not `ran` with no record.
+* **D18b (root cause found and fixed).** `seed_pihole_tools` never passed
+  `handler` to `create_tool`/`update_tool`, so a live install's
+  `local_dns_records` row had `handler=''` and `path_template=''`; the call
+  went to the integration's base URL (Pi-hole's HTML login page) and the
+  inventory recorded `bad_json`. The earlier tests created the tool with the
+  handler set, so they could not see it. Both calls now pass
+  `handler=tool.get('handler')` (the other seeders' pattern), and a re-seed
+  repairs a row the old seeder left empty. Tests:
+  `tests/test_x6_pihole_seed.py` — a fresh seed has the handler, a re-seed
+  repairs the legacy row, and the inventory source runs the seeded tool
+  through `_call_tool` with a recorded v6 response. The audit the reviewer
+  asked for is the same file's last test: every seeder is run on a fresh
+  integration and every resulting tool must have a handler or a
+  `path_template`. It reports **none** with both empty; the curated catalogs
+  with an empty `path_template` (commute, the HA Lovelace tools, web fetch,
+  train, generic passthrough) all carry a handler, and the generic tools are
+  the intended passthrough (they take their path/command from the
+  integration at seed time).
+
+**BK5 (security ruling, 2026-11-12).** Taken: `find_live_request` returns
+nothing unless both `agent` and `session_id` are non-empty, so an unsigned
+re-run always gets a new card; tests cover a signed reuse, an unsigned fresh
+card, a different agent/session, and the two-identical-pending-cards case.
+`test_f3_session_plans` is back to its original boundary: its caller is
+unsigned, so a spent plan's re-run is a new pending card.
+
+`bash scripts/verify.sh`: `2904 passed, 26 skipped, 7 warnings in 603.53s
+(0:10:03)` (after the rebase onto `fix/lockbox-bi` at security's `ec18660`
+and the BK5 ruling).
+
+Tests: `tests/test_x6_agent_api.py` (12) plus the probe hostname/pending
+tests in `tests/test_f15_probes.py` and the updated F3 boundary test.
+
+`bash scripts/verify.sh`: `2854 passed, 26 skipped, 7 warnings in 581.01s
+(0:09:41)`.
+
+---
+
+#### Security ruling on D6 (2026-11-12, at `72f2598`)
+
+**BK5: take the recommendation. Reuse an approved row only when both
+`agent` and `session_id` are non-empty.**
+* For a signed caller, the gateway's `ticket_allowed` binds the claim to
+  the same agent and session, so returning the existing id hands the
+  approval back to the caller the operator approved.
+* For an unsigned caller, `agent=''` and `session=''` match every
+  unsigned caller of the same command on that host. Reuse would let a
+  different direct-SSH user ride on someone else's approval.
+  * BI2 keeps it to one run, but the operator approved the person who
+    asked, not whoever asks first.
+  * The v1 lockbox has the same weakness by design. That is no reason to
+    add a second path with it.
+* Unsigned callers always get a fresh card.
+* Also keep `find_live_request` where it is now: after every refusal
+  (freeze, zero-trust, block rules, override). A reused id must never skip
+  a check that a new card would hit.
+* Its expiry boundary should be the one in BK1.
+* Tests:
+  * a signed re-run reuses the row;
+  * an unsigned re-run of the same bytes gets a new id;
+  * a different agent or session gets a new id.
+* I'll read the stacked X6 when it lands on `fix/lockbox-bi`.
+
 ## Gateway hardening (AF3, tee capture) · branch `fix/gateway-hardening` · gateway bash · **security reviewer sign-off**
 
 Two items left over from earlier sign-offs: AF3 (F19 sign-off, `67bec51`) and
@@ -12343,8 +12525,9 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 18a | X2 | runbooks-page | dashboard UI | **Merged** 2026-11-11 | `feat/x2-runbooks-page` | F13 | |
 | 18b | F27 | allowances | dashboard + MCP | Design first (from live use: P2 caught HA call_service) | `feat/f27-allowances` | F10 (P2), Chunk H, F18 | + security sign-off; next design after F21/F22 code |
 | 18c | X3 | integrations-ui | dashboard UI | Requested 2026-11-12; design after F27 is signed off | `feat/x3-integrations-ui` | F27, F10 (P2) | operator walk-through first |
-| 18e | X5 | ui-test-round | dashboard UI | **Implemented** 2026-11-12: six test-round fixes; no endpoint, save path or policy changed | `fix/x5-ui-test-round` | — | six small fixes |
 | 18d | X4 | agents-page | dashboard UI | **Implemented** 2026-11-12: one Agents page (tokens, policy sections, web fetch, activity); Controls renamed Command policy; absent policy fields now keep their stored value | `feat/x4-agents-page` | `fix/agent-ssh-hosts` | rename Controls → Command policy |
+| 18e | X5 | ui-test-round | dashboard UI | **Implemented** 2026-11-12: six test-round fixes; no endpoint, save path or policy changed | `fix/x5-ui-test-round` | — | six small fixes |
+| 18f | X6 | agent-api-round | dashboard | **Code round**: D3/D4, D6, D7, D8 (test), D9, D10, D11, D12, D14, D15, D16a/b, D18a/b | `fix/x6-agent-api-round` | — | 12 items; D1 fixed separately |
 | 19 | F22 | change-checks | dashboard + MCP | After F19 merges | `feat/f22-change-checks` | F3, F5, F12, F19 | + security sign-off (the unattended check; AG1's origin rule does not cover it) |
 | 20 | F16 | recipes | dashboard + MCP | Design complete (security Round 4; feature reviewer Round 5 with AA1/AA2); code next after F22 | `feat/f16-recipes` | F3, F12, F13, F19 | main line; steps claim by request id; code comes back to security; auto_run comes back to security |
 | 21 | F24 | content-tripwire | dashboard | Design first | `feat/f24-content-tripwire` | F12, F14 | + security sign-off (retention) |

@@ -64,6 +64,44 @@ def err_code(out):
     return err
 
 
+class TestSupervisorListReads:
+    """D12: /addons and /backups wrap their list in `data`."""
+
+    def test_addons_unwraps_the_supervisor_envelope(self, ha, monkeypatch):
+        from core.ha_supervisor import run_supervisor_read
+        payload = {'result': 'ok', 'data': {'addons': [
+            {'name': 'Mosquitto broker', 'slug': 'core_mosquitto',
+             'state': 'started', 'version': '6.4.1',
+             'options': {'password': 'secret'}},
+        ]}}
+        _patch_ws(monkeypatch, payload)
+        out = json.loads(run_supervisor_read(
+            ha, 'ha_addons', {}, {'agent': ''}))
+        assert isinstance(out, list) and out, out
+        assert out[0]['slug'] == 'core_mosquitto'
+        assert 'options' not in out[0]
+
+    def test_backups_unwraps_the_supervisor_envelope(self, ha, monkeypatch):
+        from core.ha_supervisor import run_supervisor_read
+        payload = {'result': 'ok', 'data': {'backups': [
+            {'name': 'nightly', 'slug': 'abc123', 'type': 'full',
+             'size': 1.2, 'location': 'backup'},
+        ]}}
+        _patch_ws(monkeypatch, payload)
+        out = json.loads(run_supervisor_read(
+            ha, 'ha_backups', {}, {'agent': ''}))
+        assert isinstance(out, list) and out, out
+        assert out[0]['slug'] == 'abc123'
+
+    def test_a_dict_read_is_unchanged(self, ha, monkeypatch):
+        from core.ha_supervisor import run_supervisor_read
+        _patch_ws(monkeypatch, {'result': 'ok', 'data': {'version': '2025.1',
+                                                         'healthy': True}})
+        out = json.loads(run_supervisor_read(
+            ha, 'ha_supervisor_info', {}, {'agent': ''}))
+        assert out['version'] == '2025.1'
+
+
 class TestEndpointTable:
     def test_actions_are_a_separate_table(self):
         assert SUPERVISOR_ACTIONS

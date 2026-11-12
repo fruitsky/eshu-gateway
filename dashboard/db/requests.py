@@ -345,6 +345,32 @@ def requests_for_sessions(session_ids, limit: int = 20):
             list(ids) + [limit])
         return [dict(row) for row in cursor.fetchall()]
 
+def find_live_request(target_ip: str, command: str, session_id: str = '',
+                      agent: str = ''):
+    """D6/BK5: an identical request that is approved and still being delivered.
+
+    Only a signed caller reuses one: `ticket_allowed` binds the claim to that
+    agent and session, so returning the id hands the operator's approval back
+    to the caller it was granted to. An unsigned caller (`agent=''`, and
+    usually no session) matches every other unsigned caller of the same bytes
+    on that host; reuse would let someone else ride on an approval the
+    operator gave to a different person. Unsigned callers always get a fresh
+    card (BI2 still keeps it to one run).
+    """
+    sid = (session_id or '')[:64]
+    who = (agent or '')[:64]
+    if not sid or not who:
+        return None
+    with db_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            'SELECT * FROM requests WHERE target_ip = ? AND command = ? '
+            "AND session_id = ? AND agent = ? AND status = 'approved' "
+            'AND expires_at > ? ORDER BY id DESC LIMIT 1',
+            (target_ip, command, sid, who, int(time.time())))
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
 
 def get_pending_request_by_cmd(target_ip: str, command: str):
     with db_conn() as conn:
