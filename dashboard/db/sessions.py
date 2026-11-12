@@ -91,6 +91,25 @@ def get_session_meta_map(session_ids) -> dict:
     return out
 
 
+def list_sessions_for_agent(agent: str, limit: int = 10):
+    """X4: an agent's sessions, newest activity first (for its Activity card).
+
+    `open_only` is left to the caller: the row carries `ended_at`, so the UI
+    can show open sessions and recent ones from the same list.
+    """
+    name = (agent or '')[:64]
+    if not name:
+        return []
+    limit = max(1, min(int(limit or 10), 50))
+    with db_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            'SELECT id, agent, goal, source, started_at, last_seen, ended_at '
+            'FROM sessions WHERE agent = ? ORDER BY last_seen DESC LIMIT ?',
+            (name, limit))
+        return [dict(row) for row in cur.fetchall()]
+
+
 def get_session_summary(session_id: str) -> dict:
     """What this session did: SSH commands by outcome, MCP calls, decisions."""
     sid = (session_id or '')[:64]

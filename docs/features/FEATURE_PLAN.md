@@ -11023,6 +11023,55 @@ onboarding and tool configuration only.
 X3 (what each approval choice really does) builds on this page once F27 is
 signed off; X4 does not change approval wording.
 
+**Implementer notes (X4).**
+
+* **Agents** is a new nav item next to Inventory and Runbooks, and a new
+  `#view-agents`. The list is one row per token with name, active/revoked,
+  last used, and four chips: tools (all or N), rate limit, SSH (off, N or any
+  + mode) and web fetch (off or N domains). The token create box and the
+  token list moved here from Integrations (in this codebase the tokens lived
+  there, not in Settings; both Integrations and Settings now carry a
+  one-line link to Agents).
+* **Detail** (opening a row) holds: the token's identity and Revoke/Delete;
+  the policy card; the per-agent web fetch panel; and Activity. The policy
+  card is the old modal's card, moved into the page (`pol-card-paged`): the
+  same rail and the same four panes (Tools, Rules, SSH, Advanced), the same
+  field ids and the same loaders (`openAgentDetail` replaces
+  `openAgentPolicy`, which stays as an alias). Each pane now ends with its
+  own Save, and there is no modal left to close.
+* **Save isolation.** The page sends one section at a time, and the endpoint
+  now honours absent fields for every field, not only SSH: `AgentPolicyPayload`
+  is all-optional and `set_agent_policy` reads the stored row for anything
+  `None` (the SSH behaviour, extended). So Save tools cannot clear SSH, the
+  rate limit, the argument rules or the web fetch policy, and Save SSH cannot
+  clear tools. `[]` / `{}` still clear a list or a map explicitly. This is
+  the one contract change; every existing caller sends all fields, and the
+  older "an absent SSH field keeps the stored value" test still passes.
+* **Web** is the existing `#wf-policy-widget` moved out of Controls, through
+  the same `PUT /api/web-fetch-policies/<principal>` (so
+  `_sync_web_fetch_access` still runs). Opening an agent points its
+  principal select at that agent. Controls keeps a one-line pointer where
+  the widget was.
+* **Activity** is read-only: a new `GET /api/agents/{id}/activity` returns
+  the agent's sessions (`sessions.agent`), its newest 20 requests (joined
+  through those session ids) and its newest 20 proxied calls
+  (`integration_calls.agent`). The page renders sessions with an "open" mark
+  and a link into History (`setHistorySession` + `switchView('history')`);
+  it writes nothing.
+* **Controls → Command policy**: the nav label and the page title (the HUD)
+  are renamed; the view id stays `controls`, so deep links keep working.
+* **Layout:** measured in headless Chromium against the real stylesheet at
+  1440×900 and 390×844: `document.scrollWidth == innerWidth` in both, no
+  horizontal scroll, the policy rail wraps on a phone and the agent rows
+  stack.
+* **Tests:** `tests/test_x4_agents_page.py` (10) — Tools↔SSH, Tools↔Rules,
+  SSH↔Tools, Tools↔Web and Web↔Tools isolation through the API, the activity
+  endpoint's shape and 404, the nav rename, the single Agents view, and the
+  per-section payloads the page sends.
+
+`bash scripts/verify.sh`: `2849 passed, 26 skipped, 7 warnings in 581.80s
+(0:09:41)`.
+
 ---
 
 ## Chunk X5 — UI fixes from the Release 1.2 test round · slug `ui-test-round` · dashboard UI
@@ -11573,7 +11622,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 18a | X2 | runbooks-page | dashboard UI | **Merged** 2026-11-11 | `feat/x2-runbooks-page` | F13 | |
 | 18b | F27 | allowances | dashboard + MCP | Design first (from live use: P2 caught HA call_service) | `feat/f27-allowances` | F10 (P2), Chunk H, F18 | + security sign-off; next design after F21/F22 code |
 | 18c | X3 | integrations-ui | dashboard UI | Requested 2026-11-12; design after F27 is signed off | `feat/x3-integrations-ui` | F27, F10 (P2) | operator walk-through first |
-| 18d | X4 | agents-page | dashboard UI | Requested 2026-11-12; ready for code | `feat/x4-agents-page` | `fix/agent-ssh-hosts` | rename Controls → Command policy |
+| 18d | X4 | agents-page | dashboard UI | **Implemented** 2026-11-12: one Agents page (tokens, policy sections, web fetch, activity); Controls renamed Command policy; absent policy fields now keep their stored value | `feat/x4-agents-page` | `fix/agent-ssh-hosts` | rename Controls → Command policy |
 | 18e | X5 | ui-test-round | dashboard UI | Found in the 1.2 test round 2026-11-12; ready for code | `fix/x5-ui-test-round` | — | six small fixes |
 | 19 | F22 | change-checks | dashboard + MCP | After F19 merges | `feat/f22-change-checks` | F3, F5, F12, F19 | + security sign-off (the unattended check; AG1's origin rule does not cover it) |
 | 20 | F16 | recipes | dashboard + MCP | Design complete (security Round 4; feature reviewer Round 5 with AA1/AA2); code next after F22 | `feat/f16-recipes` | F3, F12, F13, F19 | main line; steps claim by request id; code comes back to security; auto_run comes back to security |

@@ -3550,12 +3550,13 @@ class AgentTokenPayload(BaseModel):
 
 
 class AgentPolicyPayload(BaseModel):
-    tools_mode: str = 'all'
-    tools: list = []
-    arg_policy: dict = {}
-    approval: dict = {}
-    rate_limit_per_min: int = 0
-    # F12: None keeps the stored value; [] clears the host list.
+    # X4: every field is optional and None keeps the stored value, so a page
+    # that saves one section cannot reset another. Pass [] / {} to clear.
+    tools_mode: str | None = None
+    tools: list | None = None
+    arg_policy: dict | None = None
+    approval: dict | None = None
+    rate_limit_per_min: int | None = None
     ssh_hosts_allow: list | None = None
     ssh_mode: str | None = None
 
@@ -3706,6 +3707,46 @@ def set_agent_policy_endpoint(agent_id: int, payload: AgentPolicyPayload,
                 f"rate_limit={policy['rate_limit_per_min']}{ssh_note})")
     _sync_web_fetch_access()
     return get_agent_policy(agent_id)
+
+
+@app.get("/api/agents/{agent_id}/activity")
+def agent_activity_endpoint(agent_id: int, request: Request):
+    """X4: one agent's last activity, read-only.
+
+    Requests and integration calls are joined through the session ids the
+    agent opened (`sessions.agent`); integration calls also carry the agent
+    name directly. Nothing here writes, and the rows are the same ones
+    History shows."""
+    _check_session(request)
+    agent = get_agent(agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent token not found")
+    from db.core import db_conn
+    from db.sessions import list_sessions_for_agent
+    from db.requests import requests_for_sessions
+    name = agent.get('name') or ''
+    sessions = list_sessions_for_agent(name, limit=12) if name else []
+    sids = [s['id'] for s in sessions]
+    reqs = requests_for_sessions(sids, limit=20) if sids else []
+    calls = []
+    with db_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            'SELECT id, integration, tool, method, path, status_code, outcome, '
+            'approval, session_id, created_at FROM integration_calls '
+            'WHERE agent = ? ORDER BY id DESC LIMIT 20', (name,))
+        calls = [dict(row) for row in cur.fetchall()]
+    return {
+        'agent': {'id': agent_id, 'name': name, 'revoked': agent.get('revoked')},
+        'sessions': sessions,
+        'requests': [{
+            'id': r['id'], 'target_ip': r.get('target_ip'),
+            'hostname': r.get('hostname') or '', 'command': r.get('command') or '',
+            'status': r.get('status'), 'created_at': r.get('created_at'),
+            'session_id': r.get('session_id') or '',
+        } for r in reqs],
+        'calls': calls,
+    }
 
 
 COMMUTE_READ_AGENTS = {"rowana-household", "hermes", "commute-cron"}

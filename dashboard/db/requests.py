@@ -275,6 +275,25 @@ def get_all_requests(session_id: str = None, inner_target: str = None):
         rows = cursor.fetchall()
         return [dict(row) for row in rows]
 
+def requests_for_sessions(session_ids, limit: int = 20):
+    """X4: the newest rows for a set of sessions, one query (agent activity)."""
+    ids = [str(s)[:64] for s in (session_ids or []) if s]
+    if not ids:
+        return []
+    limit = max(1, min(int(limit or 20), 100))
+    ph = ','.join('?' * len(ids))
+    with db_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            'SELECT r.*, g.hostname FROM requests r '
+            'LEFT JOIN gateways g ON r.target_ip = g.ip '
+            'WHERE r.session_id IN (' + ph + ') '
+            'AND r.status NOT IN (\'integration-approved\', \'integration-denied\') '
+            'ORDER BY r.created_at DESC, r.id DESC LIMIT ?',
+            list(ids) + [limit])
+        return [dict(row) for row in cursor.fetchall()]
+
+
 def get_pending_request_by_cmd(target_ip: str, command: str):
     with db_conn() as conn:
         cursor = conn.cursor()

@@ -171,19 +171,33 @@ def get_agent_policies_map():
         return {row['agent_id']: _row_to_policy(row) for row in cursor.fetchall()}
 
 
-def set_agent_policy(agent_id, tools_mode='all', tools=None, arg_policy=None,
-                     approval=None, rate_limit_per_min=0, ssh_hosts_allow=None,
+def set_agent_policy(agent_id, tools_mode=None, tools=None, arg_policy=None,
+                     approval=None, rate_limit_per_min=None, ssh_hosts_allow=None,
                      ssh_mode=None):
-    """Replace one agent's policy. `ssh_hosts_allow` and `ssh_mode` left as
-    None keep the stored values, so a save that only edits tools (the policy
-    modal's older callers, the web-fetch sync) never wipes SSH access. Pass
-    [] to clear the host list."""
-    if ssh_hosts_allow is None or ssh_mode is None:
-        current = get_agent_policy(agent_id)
-        if ssh_hosts_allow is None:
-            ssh_hosts_allow = current['ssh_hosts_allow']
-        if ssh_mode is None:
-            ssh_mode = current['ssh_mode']
+    """Update one agent's policy; a `None` field keeps its stored value.
+
+    X4: the Agents page saves one section at a time, so each call must be
+    unable to touch the other sections. Nothing here is a partial JSON merge:
+    a field the caller sends replaces that field, a field left out is read
+    back from the stored row. Pass `[]` / `{}` to clear a list or a map, and
+    the empty string is never special. (The SSH fields already worked this
+    way; every field now does, so a Tools save can never wipe SSH or the
+    rate limit.)"""
+    current = get_agent_policy(agent_id)
+    if tools_mode is None:
+        tools_mode = current['tools_mode']
+    if tools is None:
+        tools = current['tools']
+    if arg_policy is None:
+        arg_policy = current['arg_policy']
+    if approval is None:
+        approval = current['approval']
+    if rate_limit_per_min is None:
+        rate_limit_per_min = current['rate_limit_per_min']
+    if ssh_hosts_allow is None:
+        ssh_hosts_allow = current['ssh_hosts_allow']
+    if ssh_mode is None:
+        ssh_mode = current['ssh_mode']
     clean = validate_policy(tools_mode, tools, arg_policy, approval,
                             rate_limit_per_min, ssh_hosts_allow, ssh_mode)
     with db_conn() as conn:
