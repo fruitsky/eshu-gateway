@@ -65,6 +65,15 @@ def init_session_plans_tables(cursor):
                 "ALTER TABLE session_plans ADD COLUMN origin TEXT NOT NULL DEFAULT 'agent'")
         except Exception:
             pass
+    # X6/D7: a proposal replaced by a newer one is kept as `superseded` (with
+    # the new plan's id) so check_plan/probe_result can say what happened
+    # instead of "not found".
+    if 'superseded_by' not in _cols:
+        try:
+            cursor.execute(
+                "ALTER TABLE session_plans ADD COLUMN superseded_by INTEGER NOT NULL DEFAULT 0")
+        except Exception:
+            pass
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS session_plan_items (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -314,19 +323,25 @@ def create_plan(session_id: str, items, note: str = '', origin: str = 'agent') -
     now = int(time.time())
     with db_conn() as conn:
         cur = conn.cursor()
-        # One proposal per session: drop the previous proposed plan (its audit
-        # event stays in the log).
+        # One proposal per session: the previous proposal becomes
+        # `superseded` (D7), keeping its row and items, so a poll of the old
+        # id can report what replaced it instead of "not found".
         old = [row['id'] for row in cur.execute(
             "SELECT id FROM session_plans WHERE session_id = ? AND status = 'proposed'",
             (sid,)).fetchall()]
-        for plan_id in old:
-            cur.execute('DELETE FROM session_plan_items WHERE plan_id = ?', (plan_id,))
-            cur.execute('DELETE FROM session_plans WHERE id = ?', (plan_id,))
+        for old_id in old:
+            cur.execute(
+                "UPDATE session_plans SET status = 'superseded' WHERE id = ?",
+                (old_id,))
         cur.execute('''
             INSERT INTO session_plans (session_id, status, created_at, note, origin)
             VALUES (?, 'proposed', ?, ?, ?)
         ''', (sid, now, note, origin))
         plan_id = cur.lastrowid
+        for old_id in old:
+            cur.execute(
+                "UPDATE session_plans SET superseded_by = ? WHERE id = ?",
+                (plan_id, old_id))
         for item in normalised:
             cur.execute('''
                 INSERT INTO session_plan_items

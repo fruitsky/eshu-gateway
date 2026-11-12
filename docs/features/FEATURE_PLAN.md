@@ -11209,6 +11209,47 @@ The labels are the report's (D1–D18). Live details stay outside the repo.
 #N" instead of printing the human-approval stream) goes with the next gateway
 change, with security sign-off.
 
+**Implementer notes (X6 part 1, 2026-11-12).** Branch
+`fix/x6-agent-api-round` from `feature-roadmap` (`a9d3572`). Part 1:
+
+* **D3/D4.** `check_request(id)` with no session on the connection now returns
+  `session_id_required` (with the id) for an owned request, not `not found`;
+  an explicit wrong session is still `not found`, and an unowned row is still
+  readable as before. `check_approval`'s `wrong_namespace` hint names the full
+  call: `check_request(request_id=N, session_id="<id>")`.
+* **D6.** `probe_result` returns `pending` (with a `next_step` naming
+  `probe_result`) while every ticket of an approved plan is still in flight,
+  instead of `refused`; it caches the digest once something runs. A re-run
+  while an identical `approved` row is still being delivered returns that row's id
+  (`reused: true`) instead of filing a duplicate card. `test_f3_session_plans`'s
+  `test_f3_plan_approves_once_then_pends` shows the boundary: the live row is
+  reused, and a new JIT card appears only after the first row is `consumed`.
+* **D7.** A proposal replaced by a newer one is kept as `superseded` with a
+  `superseded_by` id (new column, additive migration) instead of deleted.
+  `check_plan` and `probe_result` return `status: superseded` and the new id.
+* **D8.** `session_summary` already counted `mcp_calls` and `by_approval.plan`
+  through the one bucket mapping; a test now inserts one integration call and
+  one `session-plan:` request and asserts both.
+* **D9.** Probe hosts accept a gateway hostname as `ssh_exec` does; it is
+  resolved at validation time and the plan stores the gateway's **IP** (BF2:
+  IP-only matching). An ambiguous hostname is refused.
+* **D10.** The `diagnose_container` description names the `container`
+  parameter (docker name or numeric vmid) and shows one example of each.
+* **D16, part a.** `get_runbook()` without an id is `validation_error` with the
+  parameter named, not `not_found`; an unknown id is still `not_found`.
+
+Remaining in part 2: D11 (inner target on the card and `check_request`),
+D12 (`ha_addons`/`ha_backups` Supervisor `data` unwrap), D14 (`title`, typed
+list fields, limit messages), D15 (a new draft after a confirmed conclusion),
+D16 part b (`whereis <vmid>` duplicate guest stub), D18 (`dns_check` error
+status and the Pi-hole v6 inventory shape).
+
+Tests: `tests/test_x6_agent_api.py` (12) plus the probe hostname/pending
+tests in `tests/test_f15_probes.py` and the updated F3 boundary test.
+
+`bash scripts/verify.sh`: `2854 passed, 26 skipped, 7 warnings in 581.01s
+(0:09:41)`.
+
 ---
 
 ## Gateway hardening (AF3, tee capture) · branch `fix/gateway-hardening` · gateway bash · **security reviewer sign-off**
@@ -11982,7 +12023,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 18c | X3 | integrations-ui | dashboard UI | Requested 2026-11-12; design after F27 is signed off | `feat/x3-integrations-ui` | F27, F10 (P2) | operator walk-through first |
 | 18d | X4 | agents-page | dashboard UI | **Implemented** 2026-11-12: one Agents page (tokens, policy sections, web fetch, activity); Controls renamed Command policy; absent policy fields now keep their stored value | `feat/x4-agents-page` | `fix/agent-ssh-hosts` | rename Controls → Command policy |
 | 18e | X5 | ui-test-round | dashboard UI | **Implemented** 2026-11-12: six test-round fixes; no endpoint, save path or policy changed | `fix/x5-ui-test-round` | — | six small fixes |
-| 18f | X6 | agent-api-round | dashboard | From the 1.2 test round 2026-11-12; ready for code | `fix/x6-agent-api-round` | — | 12 items; D1 fixed separately |
+| 18f | X6 | agent-api-round | dashboard | **Part 1**: D3/D4, D6, D7, D8 (test), D9, D10, D16a; part 2 (D11, D12, D14, D15, D16b, D18) next | `fix/x6-agent-api-round` | — | 12 items; D1 fixed separately |
 | 19 | F22 | change-checks | dashboard + MCP | After F19 merges | `feat/f22-change-checks` | F3, F5, F12, F19 | + security sign-off (the unattended check; AG1's origin rule does not cover it) |
 | 20 | F16 | recipes | dashboard + MCP | Design complete (security Round 4; feature reviewer Round 5 with AA1/AA2); code next after F22 | `feat/f16-recipes` | F3, F12, F13, F19 | main line; steps claim by request id; code comes back to security; auto_run comes back to security |
 | 21 | F24 | content-tripwire | dashboard | Design first | `feat/f24-content-tripwire` | F12, F14 | + security sign-off (retention) |

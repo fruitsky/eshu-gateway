@@ -113,9 +113,17 @@ class TestApproval:
         assert row['reason'].startswith('session-plan:%d:' % plan_id)
         assert _audit_events('jit_plan_approved'), 'expected a jit_plan_approved audit event'
 
-        # max_uses=1 is spent: the same command needs a normal JIT now.
+        # max_uses=1 is spent. D6: while the first approval is still live,
+        # a re-run returns that id instead of a duplicate card.
         second = _request(client, web01, 'uptime', sid)
         assert 'plan' not in second
+        assert second['request_id'] == first['request_id']
+        assert _row_for('uptime')['status'] == 'approved'
+        # Once the first is consumed, the same command is a normal JIT row.
+        from db.requests import update_request_status
+        update_request_status(first['request_id'], 'consumed')
+        third = _request(client, web01, 'uptime', sid)
+        assert third['request_id'] != first['request_id']
         assert _row_for('uptime')['status'] == 'pending'
 
     def test_f3_plan_approve_subset_removed_item_pends(self, gateways):

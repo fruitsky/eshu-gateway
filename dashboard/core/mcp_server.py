@@ -545,7 +545,9 @@ def check_approval_fn():
                     'kind': 'ssh',
                     'id': call_id,
                     'message': ('This id is an SSH gateway JIT request, not an '
-                                'MCP approval. Use check_request(%d).' % call_id),
+                                'MCP approval. Use '
+                                'check_request(request_id=%d, session_id="<id>").'
+                                % call_id),
                 })
             return '{"error": "not found", "id": %d}' % call_id
         owner = (call.get('agent') or '').strip()
@@ -585,10 +587,24 @@ def check_request_fn():
             return json.dumps({'error': 'not found', 'id': request_id})
         owner = (row.get('session_id') or '').strip()
         sid = (session_id or '').strip()[:64]
+        source = 'caller'
         if not sid:
             from core.tool_runner import resolve_session
-            sid, _source = resolve_session('')
+            sid, source = resolve_session('')
         if owner and owner != sid:
+            if source != 'caller' and not session_id:
+                # D3/D4: the request exists, but this connection never named
+                # the session that owns it. "not found" reads as a deleted or
+                # mistyped id; ask for the one field that makes the read
+                # possible instead.
+                return json.dumps({
+                    'error': 'session_id_required',
+                    'id': request_id,
+                    'kind': 'ssh',
+                    'message': ('This request belongs to a session. Pass '
+                                'session_id=<the id from session_begin> to '
+                                'check_request.'),
+                })
             return json.dumps({'error': 'not found', 'id': request_id})
         status = row.get('status') or 'unknown'
         expires_at = int(row.get('expires_at') or 0)
@@ -872,9 +888,16 @@ def get_runbook_fn():
     def _get_runbook(runbook_id: int = 0) -> str:
         from core.conclusions import as_json, get_runbook_payload
         try:
-            payload = get_runbook_payload(int(runbook_id))
+            number = int(runbook_id)
         except (TypeError, ValueError):
-            payload = None
+            number = 0
+        if number <= 0:
+            return as_json({
+                'error': 'validation_error',
+                'message': ('runbook_id is required: pass the id from '
+                            'find_runbooks or similar_incidents.'),
+            })
+        payload = get_runbook_payload(number)
         if not payload:
             return as_json({'error': 'not_found',
                             'message': 'No confirmed runbook with that id.'})
@@ -986,6 +1009,17 @@ def check_plan_fn():
                 'error': 'session_not_yours',
                 'message': 'That plan belongs to another agent\'s session.',
             })
+        if plan.get('status') == 'superseded':
+            # D7: the plan was replaced by a newer proposal. Say so, with the
+            # new id, instead of "not found" (the operator did not deny it).
+            return json.dumps({
+                'plan_id': plan['id'],
+                'session_id': plan['session_id'],
+                'status': 'superseded',
+                'superseded_by': plan.get('superseded_by') or 0,
+                'message': ('A newer plan replaced this one. Poll '
+                            'check_plan(%d).' % (plan.get('superseded_by') or 0)),
+            })
         items = [{
             'id': item['id'],
             'host': item['host'],
@@ -1045,8 +1079,14 @@ mcp.add_tool(diagnose_fn('diagnose_service'), name="diagnose_service",
                           "One grouped approval, then probe_result."))
 mcp.add_tool(diagnose_fn('diagnose_container'), name="diagnose_container",
              description=("Docker container or Proxmox guest on a gateway: "
-                          "ps/inspect or pct list/config. One grouped approval, "
-                          "then probe_result."))
+                          "ps/inspect or pct list/config. Pass it as "
+                          'params={"host": "<gateway IP or hostname>", '
+                          '"container": "<docker name or numeric vmid>"}, e.g. '
+                          'params={"host": "192.0.2.10", "container": "102"} '
+                          "for a Proxmox guest or "
+                          'params={"host": "192.0.2.10", "container": "web"} '
+                          "for a Docker container. One grouped approval, then "
+                          "probe_result."))
 mcp.add_tool(diagnose_fn('disk_pressure'), name="disk_pressure",
              description=("Filesystem and inode use plus the largest /var/log "
                           "directories on a gateway. One grouped approval, then "

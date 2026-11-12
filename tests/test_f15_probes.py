@@ -61,6 +61,23 @@ def test_an_unknown_host_is_refused(temp_db):
     assert exc.value.code == 'probe_unknown_host'
 
 
+def test_a_gateway_hostname_is_resolved_and_stored_as_the_ip(gateway):
+    """D9: probes accept a hostname and plan against the gateway's IP."""
+    from core.probes import validate
+    assert validate('disk_pressure', {'host': 'web01'})['host'] == '10.0.0.1'
+    assert validate('disk_pressure', {'host': 'WEB01'})['host'] == '10.0.0.1'
+
+
+def test_an_ambiguous_or_unknown_hostname_is_refused(temp_db):
+    from db.gateways import register_gateway
+    from core.probes import ProbeError, validate
+    register_gateway('10.0.0.2', 'dup', 'v15.3')
+    register_gateway('10.0.0.3', 'dup', 'v15.3')
+    with pytest.raises(ProbeError) as exc:
+        validate('disk_pressure', {'host': 'dup'})
+    assert exc.value.code == 'probe_unknown_host'
+
+
 def test_unknown_parameters_are_refused(gateway):
     from core.probes import ProbeError, validate
     with pytest.raises(ProbeError) as exc:
@@ -232,6 +249,22 @@ def test_probe_result_runs_the_commands_after_approval(gateway, monkeypatch):
     seen.clear()
     again = probe_result(out['plan_id'], 'sess-1')
     assert seen == [] and again['digest'] == digest
+
+
+def test_probe_result_is_pending_while_the_ticket_is_delivered(gateway, monkeypatch):
+    """D6: an approved plan whose ticket is still in flight is pending, not
+    refused, and says to call probe_result again."""
+    from core.probes import plan_probe, probe_result
+    from db.session_plans import approve_plan
+    from db.sessions import upsert_session
+    upsert_session('sess-1', agent='agent-a')
+    out = plan_probe('disk_pressure', {'host': gateway}, 'sess-1')
+    approve_plan(out['plan_id'], ttl_minutes=30)
+    monkeypatch.setattr('core.ssh_exec.ssh_exec',
+                        lambda *a, **k: {'status': 'pending', 'request_id': 7})
+    res = probe_result(out['plan_id'], 'sess-1')
+    assert res['status'] == 'pending', res
+    assert 'probe_result' in res['next_step']
 
 
 def test_the_dns_record_is_found(gateway, monkeypatch):

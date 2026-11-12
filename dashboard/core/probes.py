@@ -69,13 +69,21 @@ def _name(value):
 
 
 def _host(value):
+    """A registered gateway, by IP or by a unique hostname.
+
+    D9: `ssh_exec` already resolves a hostname; probes do the same, and store
+    the **IP** in the plan, so the plan and its commands carry the same value
+    `host_allowed` matches (security's BF2: IP only)."""
     text = str(value or '').strip()
-    if not IP_RE.match(text):
-        raise ProbeError('probe_invalid_param', 'host must be a gateway IP')
-    from db.gateways import get_gateway
-    if not get_gateway(text):
-        raise ProbeError('probe_unknown_host', '%s is not a registered gateway' % text)
-    return text
+    if not text:
+        raise ProbeError('probe_invalid_param',
+                         'host must be a gateway IP or hostname')
+    from core.ssh_exec import resolve_gateway
+    gateway = resolve_gateway(text)
+    if not gateway:
+        raise ProbeError('probe_unknown_host',
+                         '%s is not a registered gateway' % text)
+    return gateway.get('ip') or text
 
 
 PARAMS = {'host': _host, 'unit': _unit, 'container': _container, 'name': _name}
@@ -504,18 +512,38 @@ def probe_result(plan_id, session_id=''):
         return {'status': 'pending', 'plan_id': int(plan_id),
                 'probe': meta.get('probe'),
                 'next_step': 'Waiting for the operator to approve the plan.'}
+    if plan.get('status') == 'superseded':
+        # D7: a newer proposal replaced this plan; the operator did not deny
+        # it. Point at the new id rather than calling it a refusal.
+        return {'status': 'superseded', 'plan_id': int(plan_id),
+                'probe': meta.get('probe'),
+                'superseded_by': plan.get('superseded_by') or 0,
+                'next_step': ('A newer plan replaced this one. Call probe_result(%d) '
+                              'once it is approved.' % (plan.get('superseded_by') or 0))}
     if plan.get('status') != 'approved':
         return {'status': 'refused', 'plan_id': int(plan_id),
                 'probe': meta.get('probe'),
                 'reason': 'plan is %s' % plan.get('status')}
-    outputs, problems = {}, []
+    outputs, problems, waiting = {}, [], 0
     for label, command in zip(meta.get('labels') or [], meta.get('commands') or []):
         res = _run_one(meta['params'].get('host'), command,
                        session_id=session_id)
+        if res.get('status') == 'pending':
+            # D6: the plan is approved but the ticket has not reached the
+            # gateway yet. That is not a refusal; the same call will return
+            # the digest once the ticket is claimable.
+            waiting += 1
+            continue
         if res.get('status') != 'ran':
             problems.append(res.get('reason') or res.get('error') or 'refused')
             continue
         outputs[label] = res.get('output') or ''
+    if not outputs and waiting:
+        return {'status': 'pending', 'plan_id': int(plan_id),
+                'probe': meta.get('probe'),
+                'next_step': ('The plan is approved; its ticket is still being '
+                              'delivered to the gateway. Call probe_result(%d) '
+                              'again in a few seconds.' % int(plan_id))}
     if not outputs:
         return {'status': 'refused', 'plan_id': int(plan_id),
                 'probe': meta.get('probe'),

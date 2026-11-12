@@ -345,6 +345,24 @@ def requests_for_sessions(session_ids, limit: int = 20):
             list(ids) + [limit])
         return [dict(row) for row in cursor.fetchall()]
 
+def find_live_request(target_ip: str, command: str, session_id: str = '',
+                      agent: str = ''):
+    """D6: an identical request that is approved and still being delivered.
+
+    A re-run while the first request is still live must return the same id
+    (the gateway then polls it), not file a second card for the same bytes.
+    """
+    with db_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            'SELECT * FROM requests WHERE target_ip = ? AND command = ? '
+            "AND session_id = ? AND agent = ? AND status = 'approved' "
+            'AND expires_at > ? ORDER BY id DESC LIMIT 1',
+            (target_ip, command, (session_id or '')[:64], (agent or '')[:64],
+             int(time.time())))
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
 
 def get_pending_request_by_cmd(target_ip: str, command: str):
     with db_conn() as conn:

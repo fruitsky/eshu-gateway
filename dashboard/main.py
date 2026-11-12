@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field
 
 from database import (
     init_db, create_request, update_request_status, 
-    update_ticket_consumed_by_ip, update_request_status_if_pending, get_all_requests, get_request_row, get_pending_request_by_cmd,
+    update_ticket_consumed_by_ip, update_request_status_if_pending, get_all_requests, get_request_row, get_pending_request_by_cmd, find_live_request,
     get_request_status, get_request_command, count_denied, get_ticket_by_request_id, delete_old_requests,
     get_session_requests, get_request_target_ip, mark_requests_excluded,
     register_gateway, get_gateways, get_gateway, update_gateway_last_seen,
@@ -999,6 +999,15 @@ def receive_request(payload: GatewayPayload, request: Request):
         return {"status": "ok", "id": f"{req_id:06d}", "request_id": req_id, "override": True,
                 "scope": "host", "message": "Auto-approved via Override Mode"}
 
+    # D6: a re-run while the first request is still live returns that id, so
+    # one command cannot stack several identical cards (the agent then polls
+    # the same id until it is consumed).
+    live = find_live_request(target_ip, cmd, sid, agent)
+    if live:
+        update_gateway_last_seen(target_ip)
+        return {"status": "ok", "id": f"{live['id']:06d}",
+                "request_id": live['id'], "reused": True,
+                "message": "This command is already waiting on the same id"}
     req_id = create_request(target_ip, cmd, status="pending", session_id=sid,
                             execution_id=eid,
                             reason=('force-jit' if force_jit else read_lane_reason),
