@@ -450,7 +450,7 @@ exec "__REAL__" "$@"
             # A hang is the interesting failure: show what every process in
             # the sandbox is waiting on, so a CI-only hang explains itself.
             pytest.fail(self._hang_report() + '\n--- stdout ---\n'
-                        + (exc.stdout or '')[-2000:])
+                        + os.fsdecode(exc.stdout or b'')[-2000:])
         time.sleep(0.15)  # let the backgrounded /api/log stub finish
         return proc
 
