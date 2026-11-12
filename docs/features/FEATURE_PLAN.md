@@ -11559,6 +11559,37 @@ An update today never writes `authorized_keys`, so F12's dashboard key reaches a
 * run only after a 200 registration (BE1's `REGISTER_OK`);
 * make the temp file with `mktemp`, and refuse a symlinked `.ssh` or `authorized_keys`. The install path's fixed `.tmp` name has the same symlink problem today, so fix it in the same change.
 
+**Implementer notes (BE4).** `--update` now refreshes the dashboard line,
+after `REGISTER_OK=1` only:
+
+* `ak_from` reads the `from=` of the existing `eshu-dashboard` line, else of
+  the `eshu-gateway-key` line, so the refreshed line keeps the operator's
+  restriction; with none it has no `from=`.
+* `ak_replace` writes through `mktemp "$dir/.authorized_keys.XXXXXX"` in the
+  same directory and `mv`s it into place. A symlinked `.ssh` or
+  `authorized_keys` is refused with a message and the file is left alone; an
+  unreadable file is refused too.
+* The key must match `^ssh-ed25519 [A-Za-z0-9+/=]+( …)?$` on one line. An
+  empty or malformed key changes nothing (with a warning for the malformed
+  case).
+* Only lines ending ` eshu-dashboard` are removed; every other line keeps its
+  bytes and its order.
+* The install path uses the same `ak_replace`; its fixed
+  `authorized_keys.tmp` name is gone. The uninstall/legacy-cleanup paths (the
+  `grep -v` writes) use a new `eshu_safe_replace` with a private temp in the
+  target's directory, refusing a symlinked target and keeping the owner and
+  mode.
+* Tests run the real block as the BE1 tests do: update replaces only the
+  dashboard line and keeps the gateway line byte-identical; `from=` comes
+  from the dashboard line, or from the gateway line when there is none; no
+  200, an empty key and three malformed keys change nothing; a symlinked
+  `authorized_keys` and a symlinked `.ssh` are refused; a planted
+  `authorized_keys.tmp` symlink is not followed; `eshu_safe_replace` refuses
+  a symlinked target and preserves a normal file's mode.
+
+`bash scripts/verify.sh`: `2842 passed, 26 skipped, 7 warnings in 581.63s
+(0:09:41)`.
+
 ### GT1 — gateway token rotation · branch `feat/gateway-token-rotation` · design first
 
 The dashboard has no rotate action today; the only way to rotate a token is to remove and re-enrol the gateway. Design:
@@ -11932,7 +11963,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | — | Gateway hardening | gateway-hardening | gateway | **Merged** 2026-11-12 (AF3 + S1 tee capture; security `c15664e`; AX1/AX2 residuals; BA1 for the next F5/F19 change) | `fix/gateway-hardening` | F19, Buffering | |
 | — | Installer hotfix | installer-reregister | installer | **Merged and deployed** 2026-11-12 (`d6a38bb`; security `d6a38bb`): re-register presents the existing token; keys only after a 200 | `fix/installer-reregister` | F12 | |
 | — | BE3 | secret-headers | gateway + installer + poller | Planned (security ruling RR-a) | `fix/secret-headers` | RR1 | + security sign-off |
-| — | BE4 | update-dashboard-key | installer | Planned (security ruling RR-c) | `fix/update-dashboard-key` | RR1 | + security sign-off |
+| — | BE4 | update-dashboard-key | installer | **Implemented**: `--update` refreshes only the `eshu-dashboard` line after a 200, copies its `from=`, refuses symlinks, uses `mktemp`; the fixed `.tmp` name is gone everywhere | `fix/update-dashboard-key` | RR1 | security sign-off |
 | — | GT1 | gateway-token-rotation | dashboard + poller | Design first | `feat/gateway-token-rotation` | RR1 | + security sign-off |
 
 Chunks are done **in the order column**; each new chunk branches from the
