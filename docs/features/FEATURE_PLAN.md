@@ -10233,6 +10233,32 @@ refusals and audit, not yet shown on the integration page.
 `bash scripts/verify.sh`: `3023 passed, 26 skipped, 7 warnings in 630.05s
 (0:10:30)`.
 
+**BusyBox test gap closed (2026-11-13).** Part 2's tests asserted the script
+text; nothing executed the six fixed scripts (list, write, restore, the
+verify/read one-liners and the check command) under the add-on's real shell.
+`tests/test_f11_ha_busybox.py` now runs each of them with `busybox sh -c`
+against a throwaway `/homeassistant` tree, with every applet linked from the
+busybox binary and `ha` stubbed to pass (exit 0) or fail (exit 1):
+
+* success: bytes, mode 0640, uid/gid preserved, `.eshu-*.bak` holds the old
+  bytes and the temp file is gone;
+* exit 18 rollback: bytes, mode and owner are the original ones again and the
+  backup is kept;
+* refusals: a path outside the tree, a symlinked file (basename changes) and a
+  symlinked directory (exit 11/13), with the target untouched;
+* AT2: a CRLF payload written from stdin lands byte-for-byte;
+* restore: success puts the backup back and rechecks; a failed check puts the
+  current bytes back and exits 18;
+* verify/read/check: `realpath`+`stat -c %F`, `head -c N --`, and
+  `timeout 100 ha core check` behave under ash.
+
+12 tests. BusyBox 1.36.1 is installed here, so they ran (12 passed in 0.68 s);
+where it is absent the module skips with "BusyBox is not installed; run these
+under ash where it is (apt install busybox)". No design change.
+
+`bash scripts/verify.sh`: `3035 passed, 26 skipped, 8 warnings in 629.23s
+(0:10:29)` (12 more than part 2: the BusyBox module ran here).
+
 ---
 
 ## Chunk F12 — SSH through Eshu over MCP (`ssh_exec`) · slug `ssh-exec` · dashboard (+ small gateway change)
