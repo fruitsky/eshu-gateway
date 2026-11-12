@@ -10094,6 +10094,54 @@ Code-round checks I will make:
   the keys script;
 * the tests cover CRLF with a block scalar.
 
+### Code round, part 1 — the preflight (implementer notes)
+
+**Status: part 1 pushed; the transport, the six scripts, the tools and the
+live path are not in yet.** This commit is the dashboard-side preflight and
+the path policy, which is where AT1 and BC1 live, so the security reviewer
+can read the rule that matters before the transport exists.
+
+* `core/ha_config_preflight.py`:
+  * `check_write_path` maps `/config` to the add-on's `/homeassistant`,
+    refuses dot/empty segments, non-`.yaml`/`.yml`, anything outside the two
+    roots, and `secrets.yaml` (`config_secret_refused`).
+  * `validate_write` refuses `%TAG`/verbatim tags (`config_tag_refused`),
+    `!env_var` (`config_env_var_refused`), over 256 KiB
+    (`config_too_large`), and tab indentation (`config_yaml_invalid`).
+  * includes are decoded (quoted scalars, `\xNN`/`\uNNNN`/`\\`), then
+    `normpath`ed **after** the join against the including file's directory.
+    An absolute target is refused (`config_include_refused`, BC1); a dot
+    segment is refused before the join (`.storage`, `..`, `./x`); a file
+    include must end `.yaml`/`.yml` and resolve to a top-level file or under
+    `packages/` (AT1); a directory include must resolve to `packages/` or
+    below, never the root (AT1). `secrets.yaml` keeps
+    `config_secret_include_refused`.
+  * the risky top-level keys (H4) and the `homeassistant.auth_providers`
+    key are returned for the card; `unified_diff` renders the dry-run diff.
+* **One deviates-from-text decision to flag.** The design's AL4/AQ2/AT1 text
+  says the preflight loads the content with `yaml.SafeLoader`, but H4
+  decided against a new Python package (§2.7) and this repository has no
+  PyYAML. So the preflight is H4's structural scan
+  (`core/ha_config_yaml.py` in the design): comments stripped, top-level
+  keys at indentation 0 (quoted spellings decoded), values never
+  interpreted, tags collected anywhere outside quotes and block scalars,
+  indentation tracked so a block scalar's content is not a key. The one
+  invalid form it can name is tab indentation; `ha core check` after the
+  write remains the validity check, with the automatic restore. If the
+  reviewer wants the SafeLoader version, it is one dependency and one
+  function — the refusals above are the same either way.
+* Tests (`tests/test_f11_ha_config_preflight.py`, 59): the accepted and
+  refused paths; AT1 (`esphome`, `custom_components`, a directory include of
+  `.`, `packages/..`, the root, absolute `/homeassistant`); BC1 (absolute
+  targets refused); resolution relative to the including file; dot
+  segments; `secrets.yaml`; `%TAG`, a verbatim tag, `!env_var`, a tab
+  indent; size; every risky key in its quoted and spaced spellings, not
+  behind a comment and not inside a block scalar; the digest, size and the
+  diff.
+
+`bash scripts/verify.sh`: `2890 passed, 26 skipped, 8 warnings in 584.01s
+(0:09:44)`.
+
 ---
 
 ## Chunk F12 — SSH through Eshu over MCP (`ssh_exec`) · slug `ssh-exec` · dashboard (+ small gateway change)
@@ -16998,7 +17046,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 10 | F8 | test-traffic | dashboard | Merged | `feat/f8-test-traffic` | — | low priority |
 | 11 | F9 | ha-supervisor-read | dashboard | Merged | `feat/f9-ha-supervisor-read` | — | token is now a dedicated `eshu` HA admin user |
 | 12 | F10 | ha-supervisor-actions | dashboard | Ready (after F9) | `feat/f10-ha-supervisor-actions` | F9, F3, Chunk H | reviewer pass + security reviewer sign-off |
-| 13 | F11 | ha-config-files | dashboard | Security round 11 (`c3dee71`): **AT1 and AT2 approved; the design is closed from security's side** (BC1 nit for the code round: relative include targets only) | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | code round; security reviews it |
+| 13 | F11 | ha-config-files | dashboard | Code round **part 1**: the preflight and path policy (AT1, BC1, the include/`env_var`/tag refusals, H4 risky keys) — on the rebased branch; the transport, six scripts, tools and live tests are next | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | security reads the preflight; part 2 (transport/tools) follows |
 | 14 | F14 | inventory | dashboard + MCP | Merged | `feat/f14-inventory` | Chunk H | |
 | 15 | F19 | unattended-limits | gateway + dashboard | **Merged** 2026-11-11 (security sign-off `67bec51`; AF1/AF2 checked) | `feat/f19-unattended-limits` | F4, F5, F12 | AF3 goes on the next gateway branch |
 | 16 | F15 | probes | dashboard + MCP | **Merged** 2026-11-11 (AG1 security decision `eca8982`; AI1 fix merged) | `feat/f15-probes` | F4, F12, F14 | |
