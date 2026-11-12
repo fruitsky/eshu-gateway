@@ -12188,6 +12188,29 @@ self-reported hostname.**
   `host_allowed` matches IP entries only (or a hostname only when it is
   pinned at enrolment), and the modal offers to convert a kept hostname
   entry to its gateway's IP.
+
+`bash scripts/verify.sh`: `2843 passed, 26 skipped, 7 warnings in 580.33s
+(0:09:40)`.
+#### Security re-read (2026-11-12, at `d40cc43`): BF2 approved
+
+* `host_allowed` matches only `*` or the gateway's IP. The gateway's
+  hostname is no longer used for a match. `ssh_exec` is the only caller,
+  and nothing is relaxed.
+* A hostname entry gets `host_not_allowed` with the conversion message,
+  and the audit status is `hostname_entry_ignored`. The message shows the
+  self-reported hostname back to the agent. That is fine, because it is
+  only text.
+* The modal offers to convert an entry only when exactly one current
+  gateway has that hostname. The conversion goes through the operator's
+  Save, and the arrow shows the target IP.
+  * The mapping still trusts the hostname at the moment of conversion. If
+    A is gone and B now uses A's name, the button offers B's IP.
+  * The IP shown is the operator's check. Nothing more is needed.
+* **Nit:** `agent-ssh-extra` moved from `textContent` to `innerHTML`, and
+  `extra.join(', ')` is not escaped. Entries are charset-checked on write,
+  so this is not exploitable today. Still, `esc()` it or build text nodes,
+  so the rule does not depend on the validator.
+
 ## Fix — poller ticket poll URL · branch `fix/poller-ticket-poll` · poller · security sign-off
 
 **Security review (2026-11-12, at `f0affc7`): the fix is approved. It
