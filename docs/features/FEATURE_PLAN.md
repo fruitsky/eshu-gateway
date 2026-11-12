@@ -11649,6 +11649,30 @@ installer change, as the note says.
 `bash scripts/verify.sh`: `2855 passed, 26 skipped, 7 warnings in 578.58s
 (0:09:38)`. All four installers regenerated.
 
+#### Security re-read (2026-11-12, at `357130b`): BH1 is nearly there; BJ1 is a must
+
+* The case with no Eshu line now leaves the file alone with a note, and
+  the tests cover it. Good.
+* The `|| true` on the `ak_from` pipe and the symlink checks are good.
+* **BJ1 (must):** the "unreadable `from=`" check looks only at the first
+  Eshu line (`grep -m1`).
+  * Suppose the first Eshu line has no `from=` and a later one has a
+    `from=` that `ak_from` cannot read. For example, the gateway-key line
+    is unrestricted while the operator restricted the dashboard line by
+    hand, with its options in another order.
+  * `AK_DASH_FROM` is then empty, the check passes, and the dashboard line
+    is rewritten with no `from=`. The restriction the operator added is
+    gone.
+  * A related case: when only the dashboard line's `from=` fails to parse,
+    the fallback copies the gateway line's `from=`, which may be wider.
+  * Rule: if any Eshu line has a `from=` that is not in the parseable
+    leading form, change nothing. For example, refuse when
+    `grep '/usr/local/bin/eshu-gateway.sh' | grep -v '^from="[^"]*",' |
+    grep -q 'from='` matches.
+  * Test: an unrestricted gateway-key line first, then a dashboard line
+    with a non-leading `from=`. The file must stay unchanged.
+* BH2 is still a should, for later.
+
 ### GT1 — gateway token rotation · branch `feat/gateway-token-rotation` · design first
 
 The dashboard has no rotate action today; the only way to rotate a token is to remove and re-enrol the gateway. Design:
