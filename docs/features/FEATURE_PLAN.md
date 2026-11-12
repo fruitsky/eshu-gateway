@@ -11265,10 +11265,24 @@ change, with security sign-off.
   `whereis <vmid>` has one named answer.
 * **D18a.** A failed DNS lookup returns `status: error` (with the reason),
   not `ran` with no record.
-* **D18b (open).** The Pi-hole v6 `bad_json` in the inventory source is not
-  reproduced from the handler path (the v6 `config.dns.hosts` shape is
-  handled and the handler returns JSON); it needs a captured failing response
-  from the operator's instance before changing the parser.
+* **D18b (root cause found and fixed).** `seed_pihole_tools` never passed
+  `handler` to `create_tool`/`update_tool`, so a live install's
+  `local_dns_records` row had `handler=''` and `path_template=''`; the call
+  went to the integration's base URL (Pi-hole's HTML login page) and the
+  inventory recorded `bad_json`. The earlier tests created the tool with the
+  handler set, so they could not see it. Both calls now pass
+  `handler=tool.get('handler')` (the other seeders' pattern), and a re-seed
+  repairs a row the old seeder left empty. Tests:
+  `tests/test_x6_pihole_seed.py` — a fresh seed has the handler, a re-seed
+  repairs the legacy row, and the inventory source runs the seeded tool
+  through `_call_tool` with a recorded v6 response. The audit the reviewer
+  asked for is the same file's last test: every seeder is run on a fresh
+  integration and every resulting tool must have a handler or a
+  `path_template`. It reports **none** with both empty; the curated catalogs
+  with an empty `path_template` (commute, the HA Lovelace tools, web fetch,
+  train, generic passthrough) all carry a handler, and the generic tools are
+  the intended passthrough (they take their path/command from the
+  integration at seed time).
 
 `bash scripts/verify.sh`: `2866 passed, 26 skipped, 7 warnings in 586.40s
 (0:09:46)`.
