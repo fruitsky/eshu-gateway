@@ -375,9 +375,10 @@ def get_request_row(req_id: int):
 def expire_stale_requests(now_ts: int = None):
     """Move timed-out JIT rows to terminal states without deleting them.
 
-    `expired`  = never approved within the 90s TTL.
-    `abandoned`= approved but not claimed within the TTL + the 60s grace used by
-                 update_ticket_consumed_by_ip (so a late poll can still claim it).
+    BK1: one expiry rule. A row is approved only until `expires_at`, everywhere
+    — the by-id claim, the per-IP poll and this sweep all use the same instant,
+    with no extra grace. `expired` = never approved within the TTL;
+    `abandoned` = approved but not claimed before `expires_at`.
 
     Returns (expired_ids, abandoned_ids). The rows and their commands stay for
     the audit trail; only the status changes."""
@@ -388,11 +389,11 @@ def expire_stale_requests(now_ts: int = None):
         expired = [row['id'] for row in cursor.fetchall()]
         cursor.execute("UPDATE requests SET status = 'expired', decided_at = ? "
                        "WHERE status = 'pending' AND expires_at < ?", (now, now))
-        cursor.execute("SELECT id FROM requests WHERE status = 'approved' AND expires_at < ?", (now - 60,))
+        cursor.execute("SELECT id FROM requests WHERE status = 'approved' AND expires_at < ?", (now,))
         abandoned = [row['id'] for row in cursor.fetchall()]
         cursor.execute("UPDATE requests SET status = 'abandoned', "
                        "decided_at = COALESCE(decided_at, ?) "
-                       "WHERE status = 'approved' AND expires_at < ?", (now, now - 60))
+                       "WHERE status = 'approved' AND expires_at < ?", (now, now))
         conn.commit()
         return expired, abandoned
 
@@ -427,12 +428,14 @@ def get_ticket_by_request_id(req_id: int):
         # BI2: an approved row only. A consumed row is spent; the gateway
         # already handles that state through the lockbox claim, and handing
         # the same approval out again is how one approval ran twice.
-        cursor.execute('SELECT command, created_at, status, agent, session_id, target_ip, unattended, run_limit FROM requests WHERE id = ? AND status = "approved"', (req_id,))
+        # BK1: and only until `expires_at` — the same rule the sweep and the
+        # per-IP poll use. An expired approval is never delivered by id.
+        now = int(time.time())
+        cursor.execute('SELECT command, created_at, status, agent, session_id, target_ip, unattended, run_limit FROM requests WHERE id = ? AND status = "approved" AND expires_at > ?', (req_id, now))
         row = cursor.fetchone()
         if row:
             target_ip = row['target_ip']
             fmt = gateway_ticket_format(target_ip)
-            now = int(time.time())
             if (row['agent'] or '') and fmt != TICKET_FORMAT_V2:
                 refused = req_id
                 cursor.execute(

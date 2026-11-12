@@ -60,7 +60,7 @@ HOST_RE = re.compile(r'[A-Za-z0-9_.:-]{1,253}')
 IP_RE = re.compile(r'[0-9A-Fa-f:.]{1,64}')
 AGENT_NAME_RE = re.compile(r'[A-Za-z0-9_.:-]{1,64}')
 SESSION_ID_RE = re.compile(r'[A-Za-z0-9_-]{1,64}')
-CONTROL_ALLOWED = frozenset('\t\n')
+CONTROL_ALLOWED = frozenset('\t')
 
 
 def as_json(value) -> str:
@@ -85,6 +85,11 @@ def command_problem(command: str) -> str:
         return 'invalid-encoding'
     if size > MAX_COMMAND:
         return 'command-too-long'
+    # BK2: one line, one command. The gateway runs `bash -c`, so a CR or LF
+    # would let a second command ride along that no operator saw on the card.
+    # Refuse before anything is signed or any SSH connection is opened.
+    if '\n' in command or '\r' in command:
+        return 'multiline_command'
     # G3: the gateway trims before it hashes, so the dashboard must refuse
     # anything the trim would change instead of signing other bytes.
     if command != command.strip():

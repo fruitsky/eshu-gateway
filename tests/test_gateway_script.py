@@ -158,6 +158,7 @@ case "$url" in
     case "$mode" in
       429) printf '{"error":"rate_limited"}\\n429\\n' ;;
       403) printf '{"detail":"Encoded payload blocked: the decoded command matched a blocklist pattern."}\\n403\\n' ;;
+      400) printf '{"detail":"multiline_command: the command contains a line break; send it as a single line."}\\n400\\n' ;;
       fail) exit 7 ;;
       *)
         # F19: an unattended row comes back approved, with its limit.
@@ -745,6 +746,38 @@ def test_jit_consumed_claims_the_lockbox_ticket(gw):
     assert not any(c["url"].endswith("/api/ticket/") for c in gw.curl_calls())
 
 
+def test_bk3_two_approvals_of_the_same_command_each_run_once(gw):
+    # Each approval is delivered exactly once. A second removal pass used to
+    # delete the other live approval's line, so its run timed out.
+    now = int(time.time())
+    gw.tickets("%d|echo twice" % now, "%d|echo twice" % (now - 1))
+    gw.jit_status("consumed")
+    first = gw.run("echo twice")
+    assert "twice" in first.stdout and first.returncode == 0
+    second = gw.run("echo twice")
+    assert "twice" in second.stdout and second.returncode == 0
+    assert not gw.ticket_file.read_text().strip()
+
+
+def test_bk4_the_approved_command_does_not_inherit_the_ticket_lock(gw):
+    if not os.path.isdir("/proc/self/fd"):
+        pytest.skip("no /proc/self/fd on this platform")
+    # No `|` in the command: the ticket parser splits on it.
+    cmd = "find /proc/self/fd -maxdepth 1 -name 9 -print"
+    gw.tickets("%d|%s" % (int(time.time()), cmd))
+    proc = gw.run(cmd)
+    assert "/proc/self/fd/9" not in proc.stdout
+    assert proc.returncode == 0
+
+
+def test_bk2_a_refused_request_shows_the_dashboard_reason(gw):
+    gw.request_mode("400")
+    proc = gw.run("echo one")
+    assert "multiline_command" in proc.stdout
+    assert "unreachable" not in proc.stdout
+    assert proc.returncode == 1
+
+
 def test_failed_claim_does_not_execute(gw):
     # A failed /api/ticket claim must not run the command: the dashboard would
     # keep the request "approved" with no jit_consumed audit (bug #2393).
@@ -1113,9 +1146,15 @@ def test_bi2_the_claim_locks_and_uses_a_run_dir_temp():
     claim = text[text.index('claim_lockbox_ticket() {'):]
     claim = claim[:claim.index('\n}\n')]
     assert claim.index('tickets_lock') < claim.index('mv -f')
-    remove = text[text.index('remove_claimed_ticket() {'):]
-    remove = remove[:remove.index('\n}\n')]
-    assert 'tickets_lock' in remove and 'tickets_unlock' in remove
+    # BK3: the claim-and-burn is the only remover. A second pass that deleted
+    # another approval's line for the same command is gone.
+    assert 'remove_claimed_ticket' not in text
+    # BK4: fd 9 is closed on both the unlock and the lock-failure return, so
+    # no later command inherits a writable descriptor on the lock file.
+    unlock = text[text.index('tickets_unlock() {'):]
+    unlock = unlock[:unlock.index('\n}\n')]
+    assert 'exec 9>&-' in unlock
+    assert 'flock -w 5 9 || { exec 9>&-; return 1; }' in text
 
 
 def test_sec_chunk1_window_reject_body_is_well_formed(gw):

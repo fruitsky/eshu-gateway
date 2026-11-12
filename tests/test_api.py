@@ -7,6 +7,16 @@ def b64(s):
 
 class TestJitLifecycle:
 
+    def test_bk2_a_line_break_is_refused_before_a_row_exists(self, auth_client, gateway_headers):
+        for raw in ("echo one\necho two", "echo one\recho two"):
+            r = auth_client.post("/api/request", json={
+                "target_ip": "10.0.0.1",
+                "encoded_command": b64(raw),
+            }, headers=gateway_headers)
+            assert r.status_code == 400
+            assert "multiline_command" in r.json()["detail"]
+        assert auth_client.get("/api/requests").json() == []
+
     def test_submit_jit_request(self, auth_client, gateway_headers):
         r = auth_client.post("/api/request", json={
             "target_ip": "10.0.0.1",

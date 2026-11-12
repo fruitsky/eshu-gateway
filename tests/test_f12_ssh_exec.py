@@ -110,15 +110,18 @@ class TestSharedVector:
 class TestCommandBytes:
     """G3 and the `ESHU_` lookalike rule (G2)."""
 
-    @pytest.mark.parametrize('command', ['uptime', 'df -h', 'a\tb', 'a\nb'])
+    @pytest.mark.parametrize('command', ['uptime', 'df -h', 'a\tb'])
     def test_acceptable(self, command):
         assert sx.command_problem(command) == ''
 
     @pytest.mark.parametrize('command,reason', [
         (' uptime', 'command-whitespace'),
         ('uptime ', 'command-whitespace'),
-        ('uptime\n', 'command-whitespace'),
-        ('up\rtime', 'command-control-character'),
+        # BK2: a line break is refused up front; it is never signed or sent.
+        ('uptime\n', 'multiline_command'),
+        ('a\nb', 'multiline_command'),
+        ('a\r\nb', 'multiline_command'),
+        ('up\rtime', 'multiline_command'),
         ('up\x00time', 'command-control-character'),
         ('', 'empty-command'),
         ('ESHU_AGENT=x uptime', 'command-prefix-lookalike'),

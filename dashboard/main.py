@@ -836,6 +836,15 @@ def receive_request(payload: GatewayPayload, request: Request):
     _check_rate_limit(target_ip)
     cmd = decode_cmd(payload.encoded_command)
 
+    # BK2: a command is one line. Refuse before any policy, plan, override or
+    # row can turn it into a card or an approval the operator never saw whole;
+    # the gateway runs `bash -c`, so a CR or LF is a second command.
+    if '\n' in cmd or '\r' in cmd:
+        raise HTTPException(
+            status_code=400,
+            detail='multiline_command: the command contains a line break; '
+                   'send it as a single line.')
+
     # F12: an MCP command is attributed to the agent that asked for it, and a
     # forced JIT may only *add* gating. The value is validated here even though
     # the gateway checked it: an old gateway forwards whatever it parsed.
