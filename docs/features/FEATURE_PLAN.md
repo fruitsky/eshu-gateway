@@ -10963,6 +10963,26 @@ _(reviewer)_
 
 ---
 
+## Chunk X3 — Integrations page and agent policy modal pass · slug `integrations-ui` · dashboard UI · after F27
+
+### Goal
+
+The operator asked for a pass over the **Integrations** page and the **agent policy modal** (the per-integration approval controls). Since F10's P2, an `ungated` override is silently ignored for `always_gate` tools. F27 adds allowances, and the destructive word list is widening. The screens should say plainly what will ask and what will not. This is the Rowana case: a toggle said "Ungated", and the call still asked.
+
+### Design (to be written after F27's design is signed off)
+
+* **Agent policy modal:**
+  * per integration, show what each choice really does for this agent: "asks for every write", "asks for destructive writes", or "runs";
+  * mark the tools where `ungated` has no effect (`always_gate`) and link to that tool's allowances;
+  * no control may offer something the engine ignores. Hide or disable `Ungated` for an always-gated tool, with the reason.
+* **Integrations page:**
+  * each integration shows its `gate_mode` in words, its count of `always_gate` tools, and the number of live allowances and profiles that use it;
+  * a "what asks" preview lists the tools and whether each one asks under the current mode, using the same function as `run_tool` (no second copy of the rule).
+* **Copy:** one short explanation, shared by the modal and the page, of gate mode, always-gate, an agent override and allowances, and of which one wins.
+* **Tests:** the preview matches `run_tool`'s decision for every seeded tool under both modes, and the modal never renders an `Ungated` that would be ignored.
+
+The feature reviewer walks both screens with the operator before the design is written (see `RELEASE_TESTS.md`, to be added).
+
 ## 7. Backlog (not planned in detail)
 
 * Deny with a reason, shown to the agent (cheap; low value given the data).
@@ -11016,6 +11036,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 18 | F23 | change-journal | dashboard | **Merged** 2026-11-11 (AJ1/AJ2) | `feat/f23-change-journal` | F1, F5, F7, F14 | |
 | 18a | X2 | runbooks-page | dashboard UI | **Merged** 2026-11-11 | `feat/x2-runbooks-page` | F13 | |
 | 18b | F27 | allowances | dashboard + MCP | Design first (from live use: P2 caught HA call_service) | `feat/f27-allowances` | F10 (P2), Chunk H, F18 | + security sign-off; next design after F21/F22 code |
+| 18c | X3 | integrations-ui | dashboard UI | Requested 2026-11-12; design after F27 is signed off | `feat/x3-integrations-ui` | F27, F10 (P2) | operator walk-through first |
 | 19 | F22 | change-checks | dashboard + MCP | After F19 merges | `feat/f22-change-checks` | F3, F5, F12, F19 | + security sign-off (the unattended check; AG1's origin rule does not cover it) |
 | 20 | F16 | recipes | dashboard + MCP | Design complete (security Round 4; feature reviewer Round 5 with AA1/AA2); code next after F22 | `feat/f16-recipes` | F3, F12, F13, F19 | main line; steps claim by request id; code comes back to security; auto_run comes back to security |
 | 21 | F24 | content-tripwire | dashboard | Design first | `feat/f24-content-tripwire` | F12, F14 | + security sign-off (retention) |
