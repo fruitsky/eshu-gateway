@@ -9944,6 +9944,21 @@ job cannot both pass the re-check; a failed call puts the row back
 `bash scripts/verify.sh`: `2733 passed, 22 skipped, 7 warnings in 546.56s
 (0:09:06)`.
 
+### Reviewer notes (main feature reviewer, 2026-11-12, code round 3)
+
+**AU1–AU4: approved from the feature side, with one should (AU5). To the security reviewer for the code sign-off.**
+
+* AU1: coverage is now the per-step `inner` from F1, compared for equality, with a complete parse and exactly one `inner_targets` entry required. Case B refuses a command that reaches a guest when the row records none. The `pct:101`-against-`101` bug DeepSeek found was real: case A could never match on live traffic.
+* AU2: the probe runs in the order asked (no token, identical tokens, main-token probe error, main token privileged, snapshot-token probe error, missing privilege). It is forced at create time. An unreadable PVE version is treated as 8, which fails closed. The privilege walk counts a privilege on *any* path. That over-refuses the main token (safe), and may accept a snapshot token whose privilege is on another path; Proxmox then refuses the call itself, so that is also safe.
+* AU3: the actions load the row's integration by name and refuse when it is missing, disabled or not Proxmox. With two clusters the offer needs the binding.
+* AU4: `_marker` includes the space (`#1 ` cannot match `#12`), the UPID is matched in full with `/ ? # ..` refused, and the conditional claim is in place.
+* **AU5 (should): a claim can be stranded.** `rolling_back` and `deleting` are set before the Proxmox call. Only `ProxyError` and the task results put them back. An unexpected exception or a restart mid-call leaves the row in a state that no job owns: it is not in `LIVE_STATES`, so the expiry job never deletes the snapshot, and the operator's buttons refuse it. Fix:
+  * wrap each claimed section in `try/finally`, so a row still in its claim state goes to `failed` (deletable, never rollback-able);
+  * record `claimed_at`;
+  * have the startup sweep move a claim older than the poll timeout to `failed`.
+
+  Test: an exception raised inside the rollback call leaves the row `failed`, and a stale `deleting` row is swept.
+
 ---
 
 ## Chunk F22 — Changes carry a check · slug `change-checks` · dashboard + MCP · **security reviewer signs off the unattended check**
