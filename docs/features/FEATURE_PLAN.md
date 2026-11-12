@@ -11864,6 +11864,40 @@ a test-only change.
 * Close it with `exec 9>&-` in `tickets_unlock` and on the lock-failure
   return, as the nonce helper does.
 
+**BK1–BK4 implemented (2026-11-13, `fix/lockbox-bi`).** No design change; the
+four follow-ups are the ones above.
+
+* **BK1 — one expiry rule.** `get_ticket_by_request_id` now selects
+  `status='approved' AND expires_at > now`, so the by-id claim stops at the
+  same instant as the per-IP poll. `expire_stale_requests` drops the `- 60`
+  grace on the `approved` sweep, and `check_request` reports a row abandoned
+  at `expires_at + 1` rather than `expires_at + 60`. Tests use a fixed clock
+  at `expires_at - 1` (live) and `expires_at + 1` (refused/abandoned) for all
+  three paths: `test_bk1_claim_by_id_refuses_a_row_past_expires_at`,
+  `test_bk1_the_sweep_abandons_at_expires_at` and the `check_request` case in
+  `tests/test_sessions.py`. An expired row is left `approved` until the sweep
+  marks it `abandoned`; it is never delivered.
+* **BK2 — refuse CR/LF up front.** `ssh_exec.command_problem` returns
+  `multiline_command` before signing, before any SSH connection (newline left
+  `CONTROL_ALLOWED`; tab stays). `/api/request` raises 400 with
+  `multiline_command: the command contains a line break; send it as a single
+  line.` straight after decoding, before the rate-limit/policy/plan/override
+  paths and before `create_request`, so no row and no card exists. The
+  gateway now prints a 400's `detail` instead of "unreachable". The consume
+  time deny stays as the second check.
+* **BK3 — no second removal.** The `remove_claimed_ticket` call (and the
+  now-dead function) is gone from the JIT tail; `claim_lockbox_ticket` is the
+  only remover. `test_bk3_two_approvals_of_the_same_command_each_run_once`
+  leaves two live lines for one command and asserts both runs execute.
+* **BK4 — no inherited lock.** `tickets_unlock` does `exec 9>&-` after
+  `flock -u`, and the `flock -w 5` failure path closes it too, in both the
+  gateway and the poller. `test_bk4_the_approved_command_does_not_inherit_the_ticket_lock`
+  runs `find /proc/self/fd -maxdepth 1 -name 9` through a real lockbox claim
+  and asserts the path is absent.
+
+`bash scripts/verify.sh`: `2886 passed, 26 skipped, 8 warnings in 604.20s
+(0:10:04)`.
+
 ## 7. Backlog (not planned in detail)
 
 * Deny with a reason, shown to the agent (cheap; low value given the data).

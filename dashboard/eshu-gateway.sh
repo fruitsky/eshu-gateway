@@ -1178,12 +1178,15 @@ tickets_lock() {
   fi
   command -v flock >/dev/null 2>&1 || return 1
   exec 9>>"$TICKETS_LOCK" || return 1
-  flock -w 5 9 || return 1
+  flock -w 5 9 || { exec 9>&-; return 1; }
   return 0
 }
 
 tickets_unlock() {
   flock -u 9 2>/dev/null || true
+  # BK4: close the descriptor too, so a command run after the claim cannot
+  # inherit the lock (the nonce helper does the same).
+  exec 9>&-
 }
 
 # BI1: a lockbox line is one line. A CR inside it means the dashboard tried to
@@ -1228,28 +1231,6 @@ claim_lockbox_ticket() {
   [ "$matched" = "yes" ]
 }
 
-remove_claimed_ticket() {
-  local tmp removed="no" line
-  [ -f "$TICKETS_FILE" ] || return 0
-  tmp=$(mktemp -p "$ESHU_RUN_DIR" eshu-tickets.XXXXXX) || return 0
-  if ! tickets_lock; then
-    rm -f "$tmp"
-    return 0
-  fi
-  while IFS= read -r line || [ -n "${line:-}" ]; do
-    [ -z "${line:-}" ] && continue
-    case "$line" in *$'\r'*) continue ;; esac
-    parse_ticket_line "$line"
-    if [ "$removed" = "no" ] && [ "$T_CMD" = "$cmd" ] && ticket_allowed "$T_AGENT" "$T_SESSION"; then
-      removed="yes"
-    else
-      printf '%s\n' "$line" >> "$tmp"
-    fi
-  done < "$TICKETS_FILE"
-  mv -f "$tmp" "$TICKETS_FILE"
-  chmod 600 "$TICKETS_FILE"
-  tickets_unlock
-}
 
 if claim_lockbox_ticket; then
   logger -t eshu-gateway "JIT TICKET CLAIMED AND BURNED FOR: $cmd"
@@ -1279,6 +1260,14 @@ if [ "${HTTP_STATUS:-}" = "403" ]; then
   ENC_MSG=$(echo "$RESPONSE" | head -n1 | python3 -I -c "import sys, json; print(json.load(sys.stdin).get('detail', 'Encoded payload blocked.'))" 2>/dev/null || echo "Encoded payload blocked.")
   logger -t eshu-gateway "ENCODED PAYLOAD BLOCKED: $ENC_MSG"
   say "[LOCKED] $ENC_MSG [Gateway $GATEWAY_VERSION]"
+  finish refused 1
+fi
+# BK2: the dashboard refuses a malformed request (a line break in the command)
+# before it creates a row. Show its reason instead of "unreachable".
+if [ "${HTTP_STATUS:-}" = "400" ]; then
+  REQ_MSG=$(echo "$RESPONSE" | head -n1 | python3 -I -c "import sys, json; d=json.load(sys.stdin).get('detail', 'Request refused.'); print(d if isinstance(d, str) else d.get('message', 'Request refused.'))" 2>/dev/null || echo "Request refused.")
+  logger -t eshu-gateway "JIT REQUEST REFUSED: $REQ_MSG"
+  say "[LOCKED] $REQ_MSG [Gateway $GATEWAY_VERSION]"
   finish refused 1
 fi
 if [ "${HTTP_STATUS:-}" != "200" ]; then
@@ -1411,8 +1400,6 @@ done
 if [ "$TICKET_FOUND" = "yes" ]; then
   say "   [OK] Approved! Executing command now..."
   logger -t eshu-gateway "JIT AUTO-POLL: Ticket approved, executing: $cmd"
-  # Remove consumed ticket from lockbox (awk-based, no nested loop)
-  remove_claimed_ticket
   RESULT_PATH="jit"
   RESULT_REQUEST_ID="$REQUEST_ID_INT"
   run_sanitized bash -c "$cmd"

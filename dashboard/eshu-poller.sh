@@ -51,11 +51,14 @@ tickets_lock() {
     return 1
   }
   exec 9>>"$TICKETS_LOCK" || return 1
-  flock -w 5 9 || return 1
+  flock -w 5 9 || { exec 9>&-; return 1; }
   return 0
 }
 tickets_unlock() {
   flock -u 9 2>/dev/null || true
+  # BK4: close the descriptor too, so a command run after the claim cannot
+  # inherit the lock (the nonce helper does the same).
+  exec 9>&-
 }
 
 # Clean expired lockbox tickets (older than 90s). BI1: a CR anywhere, a

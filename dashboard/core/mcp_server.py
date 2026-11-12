@@ -593,10 +593,12 @@ def check_request_fn():
         status = row.get('status') or 'unknown'
         expires_at = int(row.get('expires_at') or 0)
         now = int(time.time())
-        # Derive a terminal state even before the 30s sweep runs.
+        # Derive a terminal state even before the 30s sweep runs. BK1: one
+        # expiry rule — an approved row is live only until `expires_at`, with
+        # no extra grace, the same instant the claim paths enforce.
         if status == 'pending' and expires_at and expires_at < now:
             status = 'expired'
-        elif status == 'approved' and expires_at and expires_at + 60 < now:
+        elif status == 'approved' and expires_at and expires_at < now:
             status = 'abandoned'
         # M2: say when a re-run is safe. The lockbox only holds the ticket
         # once the poller has consumed the row; re-running at `approved`
