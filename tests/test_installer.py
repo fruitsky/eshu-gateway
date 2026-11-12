@@ -424,3 +424,84 @@ def test_rr1_token_is_loaded_before_the_first_registration():
     call = src.index('register_gateway "${GATEWAY_TOKEN:-}"')
     assert load < call
     assert src.count("/api/register") == 1
+
+
+# ── BE1: a failed registration never rewrites authorized_keys ─────────────
+
+def _key_block(template, home):
+    start = template.index("# SSH key setup only for install/reinstall")
+    end = template.index('\necho ""\necho "✅ Gateway', start)
+    return template[start:end].replace("/home/$USER", str(home))
+
+
+def _run_keys(tmp_path, register_ok, ssh_mode, mode="reinstall"):
+    template = _read("dashboard/eshu-installer-template.sh")
+    home = tmp_path / "home"
+    (home / ".ssh").mkdir(parents=True)
+    ak = home / ".ssh" / "authorized_keys"
+    original = ("ssh-ed25519 AAAAother operator-key\n"
+                'command="/usr/bin/sudo /usr/local/bin/eshu-gateway.sh",restrict '
+                "ssh-ed25519 AAAAold eshu-gateway-key\n")
+    ak.write_text(original)
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    _stub(bindir, "chown", "exit 0")
+    harness = tmp_path / "keys.sh"
+    harness.write_text("""
+USER="eshu-gateway"; mode="%s"
+REGISTER_OK="%s"; REGISTER_STATUS="%s"
+GATEWAY_SSH_MODE="%s"; ALLOWED_SSH_FROM=""
+GATEWAY_PUB_KEY="ssh-ed25519 AAAAnew"
+DASHBOARD_SSH_PUB="ssh-ed25519 AAAAdash"
+%s
+""" % (mode, register_ok, "200" if register_ok else "000", ssh_mode,
+       _key_block(template, home)))
+    env = {"PATH": "%s:%s" % (bindir, os.environ.get("PATH", "/usr/bin:/bin"))}
+    proc = subprocess.run(["bash", str(harness)], capture_output=True,
+                          text=True, env=env, timeout=60, stdin=subprocess.DEVNULL)
+    return proc, original, ak.read_text()
+
+
+def test_be1_failed_registration_leaves_authorized_keys_untouched(tmp_path):
+    proc, original, after = _run_keys(tmp_path, "", "direct+mcp")
+    assert proc.returncode == 0, proc.stderr
+    assert after == original
+    assert "SSH keys were NOT changed" in proc.stdout
+
+
+def test_be1_failed_registration_never_restores_the_shared_line(tmp_path):
+    """The attack: make the dashboard unreachable during a reinstall of an
+    mcp_only gateway. The default mode must not bring the shared key back."""
+    proc, original, after = _run_keys(tmp_path, "", "direct+mcp")
+    assert "AAAAnew" not in after
+
+
+def test_be1_successful_registration_writes_the_keys(tmp_path):
+    proc, _, after = _run_keys(tmp_path, "1", "direct+mcp")
+    assert proc.returncode == 0, proc.stderr
+    assert "operator-key" in after                 # foreign lines are kept
+    assert "AAAAold" not in after                  # our old line is replaced
+    assert "AAAAnew eshu-gateway-key" in after
+    assert "AAAAdash eshu-dashboard" in after
+
+
+def test_be1_mcp_only_after_a_200_gets_no_shared_line(tmp_path):
+    proc, _, after = _run_keys(tmp_path, "1", "mcp_only")
+    assert "eshu-gateway-key" not in after
+    assert "AAAAdash eshu-dashboard" in after
+
+
+def test_be1_a_failed_registration_does_not_set_ssh_mode(tmp_path):
+    src = _read("dashboard/eshu-installer-template.sh")
+    block = src[src.index("REGISTER_OK=\"\"\nif [ -n \"$DASHBOARD_URL\" ]"):
+                src.index("# SSH key setup only for install/reinstall")]
+    failure = block[block.index("  else\n    # Keep the token"):]
+    assert "GATEWAY_SSH_MODE=" not in failure.split("\n  fi\n")[0]
+
+
+def test_be2_dev_installer_carries_the_fix():
+    """BE2: the deploy resets static/dev to the committed copy and a promote
+    copies it over the fleet installer, so it must never lag behind."""
+    dev = _read("dashboard/static/dev/eshu-gateway-install.sh")
+    assert dev == _read("dashboard/eshu-gateway-install.sh")
+    assert "# RR1: the existing token is loaded BEFORE registering." in dev

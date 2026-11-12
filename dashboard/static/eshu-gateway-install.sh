@@ -465,6 +465,7 @@ register_gateway() {   # $1 = the X-Gateway-Token to present ('' for none)
 
 REGISTER_RESPONSE=""
 REGISTER_STATUS=""
+REGISTER_OK=""
 if [ -n "$DASHBOARD_URL" ]; then
   if [ "$mode" != "upgrade" ]; then echo "Registering Gateway with Dashboard..."; fi
   register_gateway "${GATEWAY_TOKEN:-}"
@@ -476,6 +477,7 @@ if [ -n "$DASHBOARD_URL" ]; then
     register_gateway ""
   fi
   if [ "$REGISTER_STATUS" = "200" ]; then
+    REGISTER_OK="1"
     NEW_TOKEN=$(printf '%s' "$REGISTER_RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); t=d.get('gateway_token'); print(t if t and t!='None' else '')" 2>/dev/null || echo "")
     if _valid_token "$NEW_TOKEN"; then
       GATEWAY_TOKEN="$NEW_TOKEN"
@@ -488,7 +490,6 @@ if [ -n "$DASHBOARD_URL" ]; then
     echo "   WARNING: the dashboard refused or did not answer the registration (HTTP $REGISTER_STATUS)."
     echo "            Its host-key pin and capabilities were not updated; ssh_exec"
     echo "            may refuse this gateway until a registration succeeds."
-    GATEWAY_SSH_MODE="direct+mcp"
   fi
   case "$GATEWAY_SSH_MODE" in mcp_only) ;; *) GATEWAY_SSH_MODE="direct+mcp" ;; esac
 fi
@@ -2331,8 +2332,19 @@ fi
 
 write_gateway; write_logger; write_sudoers; write_poller
 
-# SSH key setup only for install/reinstall (skip on update)
-if [ "$mode" = "install" ] || [ "$mode" = "reinstall" ]; then
+# SSH key setup only for install/reinstall (skip on update).
+# BE1: and only after a registration that returned 200. ssh_mode comes from
+# that answer; without it the installer cannot know whether the shared key
+# line is allowed (an mcp_only gateway must not get it back because the
+# dashboard was unreachable for a moment), so authorized_keys is left exactly
+# as it is. A fresh install then has no keys at all: it fails closed.
+if { [ "$mode" = "install" ] || [ "$mode" = "reinstall" ]; } && [ "${REGISTER_OK:-}" != "1" ]; then
+  echo ""
+  echo "   WARNING: registration did not succeed (HTTP ${REGISTER_STATUS:-none}), so the"
+  echo "            SSH keys were NOT changed. Re-run the installer once the"
+  echo "            dashboard accepts the registration."
+fi
+if { [ "$mode" = "install" ] || [ "$mode" = "reinstall" ]; } && [ "${REGISTER_OK:-}" = "1" ]; then
   echo ""
   if [ -z "$GATEWAY_PUB_KEY" ]; then read -r -p "Enter SSH pubkey for ESHU GATEWAY: " GATEWAY_PUB_KEY; fi
 
