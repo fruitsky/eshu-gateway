@@ -32,7 +32,11 @@ def record_audit_event(event_type: str, gateway_ip: str = None, hostname: str = 
 def get_audit_log(limit: int = 200):
     with db_conn() as conn:
         cursor = conn.cursor()
-        cursor.execute('SELECT * FROM audit_log ORDER BY timestamp DESC LIMIT ?', (limit,))
+        # F22-flake: timestamps are whole seconds, so two events in one second
+        # used to come back in insertion order. The id tie-break makes
+        # "newest first" deterministic.
+        cursor.execute('SELECT * FROM audit_log ORDER BY timestamp DESC, id DESC '
+                       'LIMIT ?', (limit,))
         rows = cursor.fetchall()
         return [dict(row) for row in rows]
 

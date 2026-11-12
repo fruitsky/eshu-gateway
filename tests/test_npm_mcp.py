@@ -43,6 +43,13 @@ def npm_upstream():
             self.wfile.write(body)
 
         def do_POST(self):
+            # Drain the request body first. BaseHTTPRequestHandler does not,
+            # and closing a socket with an unread body makes the kernel send
+            # RST; the client's read of the response can then fail with
+            # ConnectionResetError (the full-run flake).
+            length = int(self.headers.get('Content-Length') or 0)
+            if length:
+                self.rfile.read(length)
             p = self._path()
             if p == '/api/tokens':
                 state['logins'] += 1

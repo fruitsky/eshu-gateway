@@ -10192,6 +10192,24 @@ _(reviewer)_
 
 ---
 
+### Test-only follow-up: two flakes made deterministic (branch `fix/flaky-tests`)
+
+Not part of F22; a separate branch. Both failures were in the test harness
+or the query, not the product:
+
+* **`test_npm_mcp.py::TestSessionManager::test_401_triggers_relogin_and_retry`.**
+  The mock's `do_POST` never read the request body. Closing a socket with
+  unread bytes queued makes the kernel send RST, and under load the RST can
+  beat the client's read of the response — `ConnectionResetError`. The
+  handler now drains `Content-Length` bytes before answering. The assertions
+  are unchanged.
+* **`test_db_audit.py::test_audit_log_ordering`.** Audit timestamps are whole
+  seconds, so two rows in one second came back in insertion order and
+  "newest first" depended on the clock granularity. `get_audit_log` (and
+  `search_audit_log`) now order by `timestamp DESC, id DESC`; the
+  assertion is the same one, and it is deterministic at any sleep length.
+
+
 ## Chunk F23 — Change journal tied to alerts · slug `change-journal` · dashboard only
 
 ### Goal
@@ -11587,6 +11605,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | — | Gateway hardening | gateway-hardening | gateway | **Merged** 2026-11-12 (AF3 + S1 tee capture; security `c15664e`; AX1/AX2 residuals; BA1 for the next F5/F19 change) | `fix/gateway-hardening` | F19, Buffering | |
 | — | Installer hotfix | installer-reregister | installer | **Merged and deployed** 2026-11-12 (`d6a38bb`; security `d6a38bb`): re-register presents the existing token; keys only after a 200 | `fix/installer-reregister` | F12 | |
 | — | BE3 | secret-headers | gateway + installer + poller | Planned (security ruling RR-a) | `fix/secret-headers` | RR1 | + security sign-off |
+| — | Flakes | flaky-tests | tests | Fixed: the npm mock drains its POST body (a closed socket with unread bytes sent RST, which failed the 401 retry under load), and the audit log breaks same-second ties by id | `fix/flaky-tests` | — | test-only; no security gate |
 | — | BE4 | update-dashboard-key | installer | Planned (security ruling RR-c) | `fix/update-dashboard-key` | RR1 | + security sign-off |
 | — | GT1 | gateway-token-rotation | dashboard + poller | Design first | `feat/gateway-token-rotation` | RR1 | + security sign-off |
 
