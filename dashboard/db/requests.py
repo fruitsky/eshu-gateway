@@ -93,7 +93,7 @@ def gateway_ticket_format(ip: str) -> str:
     return (get_gateway_ssh_capabilities(ip).get('ssh_ticket_format') or '').strip()
 
 
-def ticket_line(row, ticket_format: str = '') -> str:
+def ticket_line(row, ticket_format: str = '', ts: int = None) -> str:
     """F12 G5: the lockbox line, in the format this gateway understands (M1).
 
     A v2 line is `v2|ts|agent|session|cmd`: `v2` first so the format is never
@@ -101,12 +101,43 @@ def ticket_line(row, ticket_format: str = '') -> str:
     survives. An old gateway splits on the first `|` and expects `ts|cmd`, so
     it gets exactly that; handing it a v2 line would make every approved
     command fail with "does not match".
+
+    BI3: `ts` is the time the ticket is delivered, not the request's
+    `created_at`. The gateway honours the stamp for 90 seconds, so a card
+    approved late in its life used to be marked consumed with a line that had
+    already expired; the command could not run. Default to `created_at` only
+    for the tests and callers that ask for the old behaviour explicitly.
     """
     agent = (row['agent'] if 'agent' in row.keys() else '') or ''
     session = (row['session_id'] if 'session_id' in row.keys() else '') or ''
+    stamp = int(ts) if ts is not None else row['created_at']
     if (ticket_format or '').strip() == TICKET_FORMAT_V2:
-        return f"v2|{row['created_at']}|{agent}|{session}|{row['command']}"
-    return f"{row['created_at']}|{row['command']}"
+        return f"v2|{stamp}|{agent}|{session}|{row['command']}"
+    return f"{stamp}|{row['command']}"
+
+
+def _has_line_break(command) -> bool:
+    """BI1: a lockbox line is line-based, so a command with CR or LF in it
+    would become several lines — the later ones unsigned, unbound and (with a
+    future stamp inside the command) never expiring."""
+    return '\n' in (command or '') or '\r' in (command or '')
+
+
+def _refuse_line_break_ticket(req_id, target_ip: str) -> None:
+    """BI1: never deliver a line-breaking command through the lockbox.
+
+    The row is denied (terminal, like M1's agent-on-old-format refusal) and
+    the audit log says why, instead of an approval that can never run and a
+    History row that says "consumed" for it.
+    """
+    try:
+        from db.audit import record_audit_event
+        record_audit_event(
+            'jit_refused', target_ip,
+            details=(f"JIT #{req_id} not delivered: the command contains a "
+                     f"line break and cannot be one lockbox line"))
+    except Exception:
+        pass
 
 
 def _refuse_agent_ticket(req_id, target_ip: str) -> None:
@@ -216,10 +247,12 @@ def update_ticket_consumed_by_ip(target_ip: str):
     fmt = gateway_ticket_format(target_ip)
     ticket = None
     refused = None
+    line_break = None
     with db_conn() as conn:
         cursor = conn.cursor()
         now = int(time.time())
-        expired_ago = 60
+        # BI3: no 60 s grace. A row past `expires_at` may not be delivered, so
+        # it is never marked consumed for a command the gateway would drop.
         cursor.execute('''
             SELECT id, created_at, expires_at, command, agent, session_id
             FROM requests
@@ -227,7 +260,7 @@ def update_ticket_consumed_by_ip(target_ip: str):
               AND unattended = 0
             ORDER BY id ASC
             LIMIT 1
-        ''', (target_ip, now - expired_ago))
+        ''', (target_ip, now))
         row = cursor.fetchone()
         if row:
             req_id = row['id']
@@ -237,14 +270,33 @@ def update_ticket_consumed_by_ip(target_ip: str):
                 cursor.execute(
                     "UPDATE requests SET status = 'denied', decided_at = ? "
                     "WHERE id = ? AND status = 'approved'", (now, req_id))
+                if cursor.rowcount == 1:
+                    refused = req_id
                 conn.commit()
-                refused = req_id
+            elif _has_line_break(row['command']):
+                # BI1: deny, with an audit reason, rather than issue several
+                # lines. The condition keeps the one-winner rule too.
+                cursor.execute(
+                    "UPDATE requests SET status = 'denied', decided_at = ? "
+                    "WHERE id = ? AND status = 'approved'", (now, req_id))
+                if cursor.rowcount == 1:
+                    line_break = req_id
+                conn.commit()
             else:
-                cursor.execute("UPDATE requests SET status = 'consumed', expires_at = ? WHERE id = ?", (now, req_id))
+                # BI2: one approval, one run. Two pollers (or a poll and a
+                # by-id claim) both selected this row; only the process whose
+                # conditional UPDATE changes a row may deliver it.
+                cursor.execute(
+                    "UPDATE requests SET status = 'consumed', expires_at = ? "
+                    "WHERE id = ? AND status = 'approved'", (now, req_id))
+                won = cursor.rowcount == 1
                 conn.commit()
-                ticket = ticket_line(row, fmt)
+                if won:
+                    ticket = ticket_line(row, fmt, now)
     if refused is not None:
         _refuse_agent_ticket(refused, target_ip)
+    if line_break is not None:
+        _refuse_line_break_ticket(line_break, target_ip)
     return ticket
 
 def get_all_requests(session_id: str = None, inner_target: str = None):
@@ -368,34 +420,49 @@ def count_denied(command: str):
 def get_ticket_by_request_id(req_id: int):
     ticket = None
     refused = None
+    line_break = None
     target_ip = ''
     with db_conn() as conn:
         cursor = conn.cursor()
-        cursor.execute('SELECT command, created_at, status, agent, session_id, target_ip, unattended, run_limit FROM requests WHERE id = ? AND status IN ("approved", "consumed")', (req_id,))
+        # BI2: an approved row only. A consumed row is spent; the gateway
+        # already handles that state through the lockbox claim, and handing
+        # the same approval out again is how one approval ran twice.
+        cursor.execute('SELECT command, created_at, status, agent, session_id, target_ip, unattended, run_limit FROM requests WHERE id = ? AND status = "approved"', (req_id,))
         row = cursor.fetchone()
         if row:
             target_ip = row['target_ip']
             fmt = gateway_ticket_format(target_ip)
+            now = int(time.time())
             if (row['agent'] or '') and fmt != TICKET_FORMAT_V2:
-                # M1: same fail-closed rule as the poller path. Deny a row
-                # that is still approved; a consumed one is just not re-issued.
-                if row['status'] == 'approved':
-                    now = int(time.time())
-                    cursor.execute(
-                        "UPDATE requests SET status = 'denied', decided_at = ? "
-                        "WHERE id = ? AND status = 'approved'", (now, req_id))
-                    conn.commit()
-                    refused = req_id
+                refused = req_id
+                cursor.execute(
+                    "UPDATE requests SET status = 'denied', decided_at = ? "
+                    "WHERE id = ? AND status = 'approved'", (now, req_id))
+                if cursor.rowcount != 1:
+                    refused = None
+                conn.commit()
+            elif _has_line_break(row['command']):
+                line_break = req_id
+                cursor.execute(
+                    "UPDATE requests SET status = 'denied', decided_at = ? "
+                    "WHERE id = ? AND status = 'approved'", (now, req_id))
+                if cursor.rowcount != 1:
+                    line_break = None
+                conn.commit()
             else:
-                if row['status'] == 'approved':
-                    now = int(time.time())
-                    cursor.execute("UPDATE requests SET status = 'consumed', expires_at = ? WHERE id = ?", (now, req_id))
-                    conn.commit()
-                ticket = {"command": row['command'], "ticket": ticket_line(row, fmt),
-                          "unattended": 1 if row['unattended'] else 0,
-                          "run_limit": row['run_limit'] or ''}
+                cursor.execute(
+                    "UPDATE requests SET status = 'consumed', expires_at = ? "
+                    "WHERE id = ? AND status = 'approved'", (now, req_id))
+                if cursor.rowcount == 1:
+                    ticket = {"command": row['command'],
+                              "ticket": ticket_line(row, fmt, now),
+                              "unattended": 1 if row['unattended'] else 0,
+                              "run_limit": row['run_limit'] or ''}
+                conn.commit()
     if refused is not None:
         _refuse_agent_ticket(refused, target_ip)
+    if line_break is not None:
+        _refuse_line_break_ticket(line_break, target_ip)
     return ticket
 
 def delete_old_requests(before_ts: int):

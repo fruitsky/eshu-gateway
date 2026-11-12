@@ -11735,6 +11735,73 @@ Rollout: merge, deploy the dashboard, update n8n only, and retest. That is
 fine as planned. BI1 and BI2 land before the fleet update. I'd like to read
 those diffs. BI3 can go with them or after.
 
+**BI1–BI3 implemented (branch `fix/lockbox-bi`, from master after the X4/X5
+merge).**
+
+* **BI1 (line breaks).** Chosen: deny at poll time, not a v3 base64 line.
+  Both consume paths (`update_ticket_consumed_by_ip` and
+  `get_ticket_by_request_id`) refuse a command containing CR or LF with the
+  same conditional `UPDATE ... WHERE id = ? AND status = 'approved'`, set it
+  to `denied`, and record `jit_refused` with "the command contains a line
+  break and cannot be one lockbox line". A denied row cannot become several
+  lines later, and the agent sees a terminal state instead of a consumed row
+  that never ran. The reason a v3 line was not needed: it would require the
+  gateway, the poller and the dashboard to switch formats in lock-step on
+  every gateway before the fleet update, while the refusal covers the same
+  escape (an approved multi-line command) with no format change.
+  The poller is the second check: a `ticket` string containing CR or LF is
+  logged and not appended. Both scripts also drop a CR line, a non-numeric
+  stamp, and a stamp more than 5 seconds in the future when they read the
+  file (the gateway's claim and the poller's cleanup), so a future-dated
+  forged line can neither be kept nor claimed.
+* **BI2(a) (one run).** `flock` on `$ESHU_RUN_DIR/eshu.tickets.lock` around
+  every read-modify-write: the gateway's claim and remove, the poller's
+  `clean_tickets`, its append, and its startup removal. The gateway's temp
+  file is `mktemp -p "$ESHU_RUN_DIR"` so the `mv` is a rename, not a copy
+  out of `/tmp`. The poller reads the file *inside* the lock (`clean_tickets`
+  is a function now), so a copy taken before a claim cannot be moved back.
+  A host without `flock` (it ships with util-linux on every systemd host)
+  fails closed: the gateway does not claim (the command goes through JIT)
+  and the poller does not write the lockbox.
+* **BI2(b) (one delivery).** Both consumes use
+  `UPDATE ... SET status = 'consumed' ... WHERE id = ? AND status =
+  'approved'` and deliver only when `rowcount == 1`; M1's deny is
+  conditional the same way. `/api/ticket/{id}` reads `status = 'approved'`
+  only, so a consumed row is never re-issued.
+* **BI3 (live stamp).** `ticket_line` takes the delivery time (`ts`) and both
+  consumers pass `now`; the poll path is `expires_at > now` with no 60-second
+  grace. A late approval is delivered with a fresh stamp, so it can run; a
+  row past its expiry is not marked consumed at all.
+* **Tests.** `tests/test_lockbox_bi.py` (10): multi-line refused on both
+  paths, with the audit row; a CR-only command refused; a v2 agent ticket
+  refused with the line-break reason; poll-vs-by-id and three-poller races
+  deliver exactly once; the stamp is delivery time; a 500-second-old
+  approval still runs; a row 30 s past expiry is not consumed; the old
+  `ticket_line` default. Gateway (`test_gateway_script.py`): a future-stamped
+  line is neither kept nor claimed, a CR line is dropped, two concurrent
+  claims of one ticket run once (marker written once), and the claim's lock
+  and run-dir temp are pinned. Poller (`test_poller.py`): a line-breaking
+  ticket from `/api/poll` is refused and logged; the extracted
+  `clean_tickets` drops future, expired and CR lines and keeps a fresh one;
+  a cleanup started before a claim cannot resurrect the claimed line.
+* All four installers regenerated from template + gateway + poller.
+
+`bash scripts/verify.sh`: `2878 passed, 26 skipped, 7 warnings in 595.35s
+(0:09:55)`.
+
+### Known flaky tests (reviewer list)
+
+Tests that can fail on their own, recorded here so a red run is not chased as
+a new regression. They are not weakened to make them pass; each is fixed in
+a test-only change.
+
+* `tests/test_f19_limits.py::test_the_time_limit_stops_the_command` — fails
+  about 1 run in 5 on its own (added 2026-11-12). The timeout behaviour under
+  test is in `dashboard/eshu-gateway.sh`; the test's own timing bound is
+  `elapsed < 12` for a 5-second limit.
+* (The npm 401 retry and the audit-ordering flakes were made deterministic on
+  `fix/flaky-tests`, approved and pending merge.)
+
 ## 7. Backlog (not planned in detail)
 
 * Deny with a reason, shown to the agent (cheap; low value given the data).

@@ -39,6 +39,46 @@ if [ "$WORK_UID" != "0" ] || [ "$WORK_MODE" != "700" ]; then
 fi
 umask 077
 
+# BI2: the lockbox file is shared with the gateway. Every read-modify-write
+# and the append hold flock on one file in this root-only 0700 directory, so
+# a cleanup cannot move back a copy taken before a claim, and two writers
+# cannot interleave. A host without flock skips lockbox writes (fail closed,
+# no double runs) instead of writing unlocked.
+TICKETS_LOCK="$ESHU_WORK/eshu.tickets.lock"
+tickets_lock() {
+  command -v flock >/dev/null 2>&1 || {
+    logger -t eshu-poller "flock missing — refusing lockbox writes"
+    return 1
+  }
+  exec 9>>"$TICKETS_LOCK" || return 1
+  flock -w 5 9 || return 1
+  return 0
+}
+tickets_unlock() {
+  flock -u 9 2>/dev/null || true
+}
+
+# Clean expired lockbox tickets (older than 90s). BI1: a CR anywhere, a
+# non-numeric stamp and a stamp more than a few seconds in the future are not
+# tickets. BI2: the file is read while the lock is held, not before it — a
+# copy taken outside the lock could resurrect a ticket the gateway claimed.
+clean_tickets() {
+  [ -f /var/run/eshu.tickets ] && [ -s /var/run/eshu.tickets ] || return 0
+  local now
+  now=$(date +%s)
+  tickets_lock || return 0
+  # F12 G5: a v2 line is `v2|ts|agent|session|cmd`; the timestamp is $2.
+  # Reading $1 as the timestamp would delete every v2 ticket as stale.
+  awk -F'|' -v now="$now" '
+    index($0, "\r") { next }
+    $1 == "v2" { if ($2 ~ /^[0-9]+$/ && $2 <= now + 5 && ($2 + 90) >= now) print; next }
+    { if ($1 ~ /^[0-9]+$/ && $1 <= now + 5 && ($1 + 90) >= now) print }
+  ' /var/run/eshu.tickets > "$ESHU_WORK/eshu.tickets.clean.$$"
+  mv -f "$ESHU_WORK/eshu.tickets.clean.$$" /var/run/eshu.tickets
+  chmod 600 /var/run/eshu.tickets
+  tickets_unlock
+}
+
 # Policy sync stamp. When the dashboard returns the exact same policy body and
 # every synced file is still present, skip the parse/write block entirely. That
 # replaces ~16 short-lived python3 starts per cycle (roughly a third of a Pi 1
@@ -95,25 +135,18 @@ if [ -f "$TRIGGER_FILE" ]; then
   LAST_TRIGGER_ID=$(cat "$TRIGGER_FILE" 2>/dev/null || echo "0")
 fi
 
-# Clear stale tickets from previous sessions
+# Clear stale tickets from previous sessions (under the lock: a gateway may be
+# claiming from the same file right now)
 if [ -f /var/run/eshu.tickets ]; then
-  rm -f /var/run/eshu.tickets
+  if tickets_lock; then
+    rm -f /var/run/eshu.tickets
+    tickets_unlock
+  fi
 fi
 
 while true; do
   POLICY_FILE=$(mktemp -p "$ESHU_WORK" policy.XXXXXX)
-  # Clean expired lockbox tickets (older than 90s)
-  if [ -f /var/run/eshu.tickets ] && [ -s /var/run/eshu.tickets ]; then
-    NOW=$(date +%s)
-    # F12 G5: a v2 line is `v2|ts|agent|session|cmd`; the timestamp is $2.
-    # Reading $1 as the timestamp would delete every v2 ticket as stale.
-    awk -F'|' -v now="$NOW" '
-      $1 == "v2" { if (($2 + 90) >= now) print; next }
-      { if (($1 + 90) >= now) print }
-    ' /var/run/eshu.tickets > /var/run/eshu.tickets.tmp
-    mv -f /var/run/eshu.tickets.tmp /var/run/eshu.tickets
-    chmod 600 /var/run/eshu.tickets
-  fi
+  clean_tickets
 
   # 1. Sync Central Policies
   HTTP_CODE=$(curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -w "%{http_code}" -o "$POLICY_FILE" \
@@ -394,8 +427,21 @@ with open('/etc/eshu-windows.txt.tmp', 'w') as f:
   if [ -s "$TICKET_FILE" ] && grep -qE '"ticket"[[:space:]]*:[[:space:]]*"' "$TICKET_FILE"; then
     TICKET=$(python3 -c "import sys, json; print(json.load(sys.stdin).get('ticket') or '')" < "$TICKET_FILE" 2>/dev/null)
     if [ -n "$TICKET" ] && [ "$TICKET" != "null" ]; then
-      echo "$TICKET" >> /var/run/eshu.tickets
-      chmod 600 /var/run/eshu.tickets
+      # BI1: a ticket is one line. The dashboard refuses these now; this is
+      # the second check, so a malformed or hostile response cannot add
+      # several lines to the lockbox either.
+      case "$TICKET" in
+        *$'\n'*|*$'\r'*)
+          logger -t eshu-poller "refused a lockbox ticket containing a line break"
+          ;;
+        *)
+          if tickets_lock; then
+            printf '%s\n' "$TICKET" >> /var/run/eshu.tickets
+            chmod 600 /var/run/eshu.tickets
+            tickets_unlock
+          fi
+          ;;
+      esac
     fi
   fi
   rm -f "$TICKET_FILE"

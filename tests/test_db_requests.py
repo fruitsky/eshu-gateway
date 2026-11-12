@@ -65,13 +65,12 @@ def test_get_ticket_by_request_id_returns_none_for_pending():
 
 
 def test_get_ticket_by_request_id_already_consumed():
+    """BI2: a consumed row is spent; the by-id path never re-issues it."""
     from db.requests import create_request, update_request_status, get_ticket_by_request_id
     rid = create_request("10.0.0.1", "uptime")
     update_request_status(rid, "approved")
-    get_ticket_by_request_id(rid)
-    ticket2 = get_ticket_by_request_id(rid)
-    assert ticket2 is not None
-    assert "uptime" in ticket2["ticket"]
+    assert get_ticket_by_request_id(rid) is not None
+    assert get_ticket_by_request_id(rid) is None
 
 
 def test_update_ticket_consumed_by_ip():

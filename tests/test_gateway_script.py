@@ -26,6 +26,7 @@ import json
 import os
 import shutil
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -1062,6 +1063,59 @@ def test_sec_chunk1_jit_request_body_is_well_formed(gw):
                 "agent", "force_jit", "run_limits"}
             # F19: '' or 'v1' — the capability this running script reports.
             assert payload["run_limits"] in ("", "v1")
+
+
+def test_bi1_a_future_stamped_ticket_is_neither_kept_nor_claimed(gw):
+    """BI1: a stamp in the future never expires, so it is not a ticket."""
+    gw.ticket_file.write_text('v2|%d|||echo future-line\n' % (int(time.time()) + 3600))
+    proc = gw.run('echo future-line')
+    assert 'JIT TICKET CLAIMED' not in gw.logger_text()
+    assert 'future-line' not in proc.stdout
+    assert gw.ticket_file.read_text() == ''
+
+
+def test_bi1_a_cr_line_is_dropped(gw):
+    gw.ticket_file.write_text('v2|%d|||echo cr-line\r\n' % int(time.time()))
+    proc = gw.run('echo cr-line')
+    assert 'JIT TICKET CLAIMED' not in gw.logger_text()
+    assert 'cr-line' not in proc.stdout
+    assert gw.ticket_file.read_text() == ''
+
+
+def test_bi2_two_concurrent_claims_of_one_ticket_run_once(gw, tmp_path):
+    """BI2(a): the gateway holds a lock across the read-modify-write."""
+    marker = tmp_path / 'bi2-marker'
+    cmd = 'printf x >> %s' % marker
+    gw.ticket_file.write_text('v2|%d|||%s\n' % (int(time.time()), cmd))
+    seen = []
+
+    def claim():
+        seen.append(gw.run(cmd))
+
+    threads = [threading.Thread(target=claim) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert marker.exists(), [p.stdout for p in seen]
+    assert marker.read_text() == 'x'
+    assert gw.ticket_file.read_text() == ''
+
+
+def test_bi2_the_claim_locks_and_uses_a_run_dir_temp():
+    text = SCRIPT.read_text()
+    assert 'TICKETS_LOCK="$ESHU_RUN_DIR/eshu.tickets.lock"' in text
+    assert 'flock -w 5 9' in text
+    # The temp file is on the same filesystem as the lockbox, never /tmp.
+    assert 'mktemp -p "$ESHU_RUN_DIR" eshu-tickets.XXXXXX' in text
+    assert 'tmp=$(mktemp)' not in text
+    # Every writer path takes the lock.
+    claim = text[text.index('claim_lockbox_ticket() {'):]
+    claim = claim[:claim.index('\n}\n')]
+    assert claim.index('tickets_lock') < claim.index('mv -f')
+    remove = text[text.index('remove_claimed_ticket() {'):]
+    remove = remove[:remove.index('\n}\n')]
+    assert 'tickets_lock' in remove and 'tickets_unlock' in remove
 
 
 def test_sec_chunk1_window_reject_body_is_well_formed(gw):

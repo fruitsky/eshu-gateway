@@ -482,6 +482,85 @@ def test_ticket_poll_url_is_valid_with_an_empty_windows_file(poller):
     assert (poller.run_dir / "eshu.tickets").read_text().strip() == ticket
 
 
+def test_bi1_a_ticket_with_a_line_break_is_refused(poller):
+    """BI1: the dashboard refuses these; the poller is the second check."""
+    poller.policy(policy_body())
+    poller.run()
+    ticket = "%d|echo one\necho two" % int(time.time())
+    poller.ticket(ticket)
+    poller.run()
+    tickets = poller.run_dir / "eshu.tickets"
+    assert not tickets.exists() or "echo two" not in tickets.read_text()
+    assert "line break" in poller.logger_text()
+
+
+def _clean_harness(tmp_path, tickets_text, tickets_path=None):
+    """The poller's real clean_tickets(), with the file path relocated."""
+    src = POLLER.read_text()
+    start = src.index('TICKETS_LOCK="$ESHU_WORK/eshu.tickets.lock"')
+    end = src.index('\n# Policy sync stamp.', start)
+    tickets = tickets_path or (tmp_path / "tickets")
+    block = src[start:end].replace("/var/run/eshu.tickets", str(tickets))
+    work = tmp_path / "run-eshu"
+    work.mkdir(mode=0o700, exist_ok=True)
+    if tickets_text is not None:
+        tickets.write_text(tickets_text)
+    harness = tmp_path / "clean.sh"
+    harness.write_text(
+        "#!/bin/bash\nset -euo pipefail\n"
+        'ESHU_WORK="%s"\nlogger() { :; }\n%s\nclean_tickets\n' % (work, block))
+    return subprocess.run(["bash", str(harness)], capture_output=True,
+                          text=True, timeout=60), tickets
+
+
+def test_bi1_cleanup_drops_a_future_dated_line(tmp_path):
+    now = int(time.time())
+    proc, tickets = _clean_harness(
+        tmp_path, "v2|%d|||echo future\nv2|%d|||echo fresh\n" % (now + 3600, now))
+    assert proc.returncode == 0, proc.stderr
+    assert tickets.read_text().strip() == "v2|%d|||echo fresh" % now
+
+
+def test_bi1_cleanup_drops_an_expired_line(tmp_path):
+    now = int(time.time())
+    proc, tickets = _clean_harness(
+        tmp_path, "v2|%d|||echo old\n" % (now - 3600))
+    assert proc.returncode == 0, proc.stderr
+    assert tickets.read_text() == ""
+
+
+def test_bi1_cleanup_drops_a_cr_line(tmp_path):
+    now = int(time.time())
+    proc, tickets = _clean_harness(tmp_path, "v2|%d|||echo x\r\n" % now)
+    assert proc.returncode == 0, proc.stderr
+    assert tickets.read_text() == ""
+
+
+def test_bi2_a_cleanup_cannot_resurrect_a_claimed_line(tmp_path):
+    """BI2(a): the read happens under the lock, not before it.
+
+    A claim holds the lock and removes the line; a cleanup that started
+    earlier must not rewrite its pre-claim copy afterwards.
+    """
+    now = int(time.time())
+    work = tmp_path / "run-eshu"
+    work.mkdir(mode=0o700, exist_ok=True)
+    tickets = tmp_path / "tickets"
+    tickets.write_text("v2|%d|||echo claimed\n" % now)
+    lock = work / "eshu.tickets.lock"
+    holder = subprocess.Popen([
+        "bash", "-c",
+        'exec 9>>"%s"; flock -w 5 9; sleep 0.5; : > "%s"; flock -u 9'
+        % (lock, tickets)])
+    try:
+        time.sleep(0.15)
+        proc, tickets = _clean_harness(tmp_path, None, tickets_path=tickets)
+        assert proc.returncode == 0, proc.stderr
+    finally:
+        holder.wait(timeout=20)
+    assert tickets.read_text() == ""
+
+
 def test_ticket_poll_counts_windows(poller):
     body = policy_body(approved_windows=[
         {"token": "t1", "command": "uptime"}, {"token": "t2", "command": "df -h"}])
