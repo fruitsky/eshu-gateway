@@ -8741,7 +8741,7 @@ or output cap of its own. The same applies to F15 probes and read-only F16
 recipes. Any command that runs with no human watching should have a hard
 bound at the gateway.
 
-### Design (to confirm in the design note)
+### Original outline (kept for the record; the design note above is the specification)
 
 * The dashboard's `request_status` / ticket response for rows approved with
   no human (`reason` = `read-lane`, later probe or recipe runs) adds
@@ -10391,6 +10391,129 @@ Content an agent reads is untrusted: a web page, a log line, a device name.
 When a later write request uses a value that first appeared in that content,
 the approval card says so. This catches the shape of a prompt injection
 without blocking anything.
+
+### Design note (2026-11-13, before the code)
+
+**Goal.** Give the operator one extra piece of evidence on a card they are
+about to approve: *this value first appeared in content the agent read, not in
+anything you wrote or Eshu already knew.* The operator still decides. No
+request changes status because of a flag, and no command is delayed.
+
+**Threat.** The target is the ordinary prompt injection: a page, a log line, a
+device name or a tool response contains text that persuades the agent to use an
+attacker-supplied value in a later write — a URL, a path, a host, a token-like
+string. The tripwire does not try to detect *instructions*; it detects the
+**movement of a value** from untrusted content into a write.
+
+Evasion is cheap and expected: encoding the value, splitting it, or having the
+agent reassemble it defeats a hash match. This is a tripwire for the common
+case, not a guarantee. The card copy must say "first appeared in …", never
+"this is safe" or "this is an injection".
+
+What it is not: a sandbox, a policy, or a second approval. It never blocks, and
+it never freezes an agent by itself. (F22's AR4 reads an optional
+`meta.tripwire_freeze`; F24 does not write one — see the open questions.)
+
+**Design.**
+* **Collect — only what Eshu returns to the agent.** One hook per read surface,
+  called with the session id and the body: F12 `ssh_exec` output, integration
+  read/proxy response bodies, `web_fetch` results, F15 probe digests. A tool
+  result that is itself an approval or an operator message is not untrusted and
+  is not collected. The hook is best-effort: an error in it is logged and never
+  fails the read.
+* **Candidates.** Extract IPs, hostnames/FQDNs, URLs, absolute paths and
+  e-mail-like strings, plus any run of ≥12 characters with no whitespace.
+  Normalise case and trailing punctuation before hashing; keep the kind. Values
+  shorter than 8 characters are not collected (too many collisions, no signal).
+* **Store.** Table `content_tripwire(session_id, value_hash, kind, first_seen,
+  source)`; `value_hash` is HMAC-SHA256 of the normalised value under a
+  per-install key. The raw value is never written, logged or audited.
+* **Compare.** When `/api/request` creates a card, or a write tool call is
+  queued (F11 `ha_config_write`, F16 steps), extract the same candidates from
+  the command/arguments, hash them, and look them up for that session. A
+  candidate is **flagged** only when all of these hold:
+  1. it was first seen in collected untrusted content;
+  2. it does not appear in the operator's own text (the F3 plan note/items, the
+     F11 diff the operator saw, the F2 command the operator edited);
+  3. it is not on the target host's F14 inventory (an IP, hostname or path Eshu
+     already records for that host is not evidence of anything);
+  4. its `first_seen` is before the request (never flag a value that appeared
+     after the write was queued).
+* **Flag, don't block.** The request row gets `tripwire` JSON: a list of
+  `{kind, source, first_seen, age_s}` — never the value. Status, TTL and
+  approvals are untouched. The audit event `content_tripwire_flag` records the
+  same fields.
+* **One writer, one reader.** `core/tripwire.py` owns collect/compare/flag;
+  `db/tripwire.py` owns the table. `request_context` gains a `tripwire` field
+  in the existing context payload so the card and the history row share it.
+
+**Data.**
+* Hashes only; the source kind (`ssh`, `integration`, `web_fetch`, `probe`) and
+  `first_seen`. No command text, no URL, no session transcript.
+* Cap: 5,000 hashes per session, oldest dropped first; a collect call that
+  would exceed the cap evicts in one statement, not a row-by-row loop.
+* Lifetime: session end + 24 h. A background job (the existing 30 s sweep, or a
+  daily one) deletes expired rows; the deletion is audited once per run with a
+  count only.
+* The HMAC key is generated on first use beside the session-signing key, kept
+  `0600` on the dashboard host, and never put in an export, a backup bundle,
+  an installer or a gateway. Rotation is silent: the old hashes stop matching
+  and the rows remain advisory.
+
+**UI.**
+* On the F2 card and the F11/F16 write card: one yellow line under the command,
+  e.g. `first appeared in web_fetch output 6 min ago`. At most three flags are
+  shown; the rest are "and 2 more". The value itself is not repeated (it is
+  already in the command above); the kind and the source say where to look.
+  The line is informational: Approve/Deny are unchanged, and the card's status
+  chip does not change.
+* The history row and the session modal show the same line from the stored
+  context; the audit row is `content_tripwire_flag`.
+* Never a badge on the queue, never a toast, never a sound: a flag that makes
+  noise on every second card gets ignored. If the measured flag rate is high,
+  the answer is a tighter candidate rule, not a louder UI.
+* Copy must not imply certainty: "first appeared in" and the source, nothing
+  like "injection detected".
+
+**Tests.**
+* A URL first seen in `web_fetch` output and then used in a write command is
+  flagged; the same URL in the F3 plan text is not; an F14 inventory IP is not;
+  a read is never flagged.
+* The table holds only `value_hash` (an inspection test: no raw URL/IP/path
+  appears in any column, in the serialized card context, or in the audit row).
+* Expiry deletes the session's rows; the cap drops the oldest first.
+* A flag never changes a request's status, TTL or approval outcome (the same
+  request with and without a flag follows the identical path).
+* A value seen *after* the write was queued is not flagged.
+* Collect failure (exception, oversized body) leaves the read unaffected and
+  records a warning.
+* The card text escapes and truncates; a hostile value cannot inject HTML into
+  the line (the line names only kind/source/age, so this is mostly a test of
+  the "no value on the card" rule).
+
+**Open questions for security.**
+1. **Retention and backups.** 24 h after session end, hashes only. Is that
+   enough, and should the cleanup job be daily rather than per-sweep? Does the
+   dashboard's own DB backup need to exclude the table, or is a hash column
+   acceptable in it?
+2. **Key rotation.** Silent invalidation is proposed. Do you want an explicit
+   rotate action (and therefore a way to clear the table), or is "old hashes
+   stop matching" acceptable?
+3. **Candidate set.** Is any of the five kinds (IP/host/URL/path/e-mail + long
+   token) too noisy or too narrow for the live traffic? The ≥12-character rule
+   is arbitrary; the note proposes 8 as the floor and 12 for the "token" kind.
+4. **Inventory exemption.** Exempting anything on the host's F14 record is the
+   main noise control, but a compromised inventory is itself untrusted. Should
+   the exemption be limited to values that were on the record *before* the
+   session started?
+5. **F22 interplay.** F22's AR4 already reads an optional
+   `meta.tripwire_freeze` for the agent/session. F24 does not write one (show,
+   never block). If you want a freeze, it should be an explicit operator button
+   on the flag (never automatic), and the note needs its naming shape and its
+   unfreeze path. Confirm none for now.
+6. **Scope.** Should read-only tool calls be flagged too (they cannot write, so
+   they cannot exfiltrate through Eshu), or is the card only for writes? The
+   proposal is writes only; reads would add noise without a decision to make.
 
 ### Design (to confirm in the design note)
 
