@@ -8850,22 +8850,71 @@ function renderAgentSshHosts() {
   const gws = _agentSshGateways();
   box.classList.toggle('is-any', any);
   box.innerHTML = gws.length ? gws.map(function(g) {
-    const on = _agentSshHas(g.ip) || _agentSshHas(g.hostname);
+    /* BF2: only the IP is matched; a hostname entry stays stored but is
+       ignored, so it must not make the IP checkbox look ticked. */
+    const on = _agentSshHas(g.ip);
     return '<label class="pol-check"><input type="checkbox" ' + (on ? 'checked ' : '') +
       'onchange="toggleAgentSshHost(' + escJs(g.ip) + ', this.checked)">' +
       '<span>' + esc(g.hostname || g.ip) + ' <span class="pol-check-ip">' + esc(g.ip) + '</span></span></label>';
   }).join('') : '<p class="pol-hint">No gateways loaded. Open the Gateways page once, then reopen this policy.</p>';
   const known = {};
-  gws.forEach(function(g) {
-    known[(g.ip || '').toLowerCase()] = 1;
-    if (g.hostname) known[g.hostname.toLowerCase()] = 1;
-  });
+  gws.forEach(function(g) { known[(g.ip || '').toLowerCase()] = 1; });
   const extra = _agentSshHosts.filter(function(h) { return h !== '*' && !known[h.toLowerCase()]; });
+  const blocked = _agentSshBlockedNames();
   const extraEl = document.getElementById('agent-ssh-extra');
-  if (extraEl) extraEl.textContent = extra.length
-    ? 'Also kept (not a current gateway): ' + extra.join(', ')
-    : '';
+  if (extraEl) {
+    /* Security nit: escape the entries even though they are charset-checked
+       on write, so the rule does not depend on the validator. */
+    let text = extra.length
+      ? 'Also kept (not a current gateway IP): ' + extra.map(esc).join(', ')
+      : '';
+    if (blocked.length) {
+      text += (text ? ' ' : '') + 'Hostname entries are not matched (a gateway could register under any name): ' +
+        blocked.map(function(b) { return esc(b.name) + ' \u2192 ' + esc(b.ip); }).join(', ') +
+        '. ';
+    }
+    extraEl.innerHTML = text;
+    if (blocked.length) {
+      const btn = document.createElement('button');
+      btn.className = 'btn btn-xs';
+      btn.textContent = 'Convert hostnames to IPs';
+      btn.onclick = convertAgentSshHostnames;
+      extraEl.appendChild(btn);
+    }
+  }
   updateAgentSshCount();
+}
+
+/* BF2: hostname entries that a gateway's current hostname resolves to. A
+   hostname is not matched at call time, so the page offers to rewrite it. */
+function _agentSshBlockedNames() {
+  const out = [];
+  _agentSshHosts.forEach(function(h) {
+    // `*` and an IPv4 address are matched; anything else is a hostname.
+    if (h === '*' || /^[0-9.]+$/.test(h)) return;
+    const lower = h.toLowerCase();
+    const matches = _agentSshGateways().filter(function(g) {
+      return (g.hostname || '').toLowerCase() === lower;
+    });
+    if (matches.length === 1) out.push({ name: h, ip: matches[0].ip });
+  });
+  return out;
+}
+
+async function convertAgentSshHostnames() {
+  const blocked = _agentSshBlockedNames();
+  if (!blocked.length) return;
+  const map = {};
+  blocked.forEach(function(b) { map[b.name.toLowerCase()] = b.ip; });
+  const seen = {};
+  const next = [];
+  _agentSshHosts.forEach(function(h) {
+    const mapped = map[h.toLowerCase()] || h;
+    if (!seen[mapped.toLowerCase()]) { seen[mapped.toLowerCase()] = 1; next.push(mapped); }
+  });
+  _agentSshHosts = next;
+  renderAgentSshHosts();
+  showToast('Hostname entries rewritten to gateway IPs — press Save SSH to store them.', 'success');
 }
 
 function toggleAgentSshHost(ip, on) {
@@ -8905,8 +8954,17 @@ function updateAgentSshCount() {
   const el = document.getElementById('pol-tab-ssh-n');
   if (!el) return;
   if (_agentSshHas('*')) { el.textContent = 'any gateway'; return; }
-  const n = _agentSshHosts.length;
-  el.textContent = n ? n + ' gateway' + (n === 1 ? '' : 's') : 'off';
+  /* BF2: hostname entries are kept but not matched, so they do not count. */
+  const ips = {};
+  _agentSshGateways().forEach(function(g) { ips[(g.ip || '').toLowerCase()] = 1; });
+  const n = _agentSshHosts.filter(function(h) {
+    return h !== '*' && ips[h.toLowerCase()];
+  }).length;
+  const ignored = _agentSshHosts.filter(function(h) {
+    return h !== '*' && !ips[h.toLowerCase()];
+  }).length;
+  el.textContent = (n ? n + ' gateway' + (n === 1 ? '' : 's') : 'off') +
+    (ignored ? ' \u00b7 ' + ignored + ' ignored' : '');
 }
 
 function setAgentPolicyTab(name) {

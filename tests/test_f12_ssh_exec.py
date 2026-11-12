@@ -144,11 +144,19 @@ class TestHostAndPolicy:
         for host in ('-o ProxyCommand=x', 'root@192.0.2.10', '192.0.2.10:22'):
             assert sx.ssh_exec(host, 'uptime', agent=AGENT)['reason'] == 'unknown_host'
 
-    def test_hostname_resolves_uniquely(self, stub):
+    def test_hostname_resolves_but_a_hostname_entry_does_not_match(self, stub):
+        """BF2: the request still resolves by hostname, but the allowlist is
+        IP-only — a gateway's hostname is whatever it last registered, so a
+        hostname entry could point at a different, hostile gateway."""
         _gateway()
         set_agent_policy(1, ssh_hosts_allow=[HOST], ssh_mode='normal')
         out = sx.ssh_exec(HOST, 'uptime', agent=AGENT)
-        assert out['status'] == 'ran'
+        assert out['status'] == 'refused'
+        assert out['reason'] == 'host_not_allowed'
+        assert 'hostname' in out['message'].lower()
+        # The same request is allowed once the entry names the gateway's IP.
+        set_agent_policy(1, ssh_hosts_allow=[IP], ssh_mode='normal')
+        assert sx.ssh_exec(HOST, 'uptime', agent=AGENT)['status'] == 'ran'
 
     def test_no_hosts_means_none(self, stub):
         _gateway()
