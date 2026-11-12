@@ -11689,6 +11689,15 @@ still pass. Installers regenerated.
 `bash scripts/verify.sh`: `2857 passed, 26 skipped, 8 warnings in 583.39s
 (0:09:43)`.
 
+#### Security re-read (2026-11-12, at `cab1399`): BJ1 approved
+
+* Every Eshu line is checked now. Any line whose `from=` is not in the
+  leading `from="...",` form makes the update change nothing.
+* That also covers the case where the dashboard line fails to parse and
+  the gateway line's wider `from=` would have been copied.
+* Leaving out `grep -q` is the right call under `pipefail`.
+* BE4 can merge. BH2 (write as the user) is still a should, for later.
+
 ### GT1 — gateway token rotation · branch `feat/gateway-token-rotation` · design first
 
 The dashboard has no rotate action today; the only way to rotate a token is to remove and re-enrol the gateway. Design:
