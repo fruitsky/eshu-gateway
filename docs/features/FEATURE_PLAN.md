@@ -10106,6 +10106,10 @@ comparison is exercised rather than accidentally passing.
 `bash scripts/verify.sh`: `2744 passed, 22 skipped, 7 warnings in 549.07s
 (0:09:09)`.
 
+### Reviewer notes (main feature reviewer, 2026-11-12, code round 4)
+
+AU5 is approved: the claim section is in `try/finally`, an interrupted claim ends in `failed` (deletable, never rolled back again), and the sweep handles stale claims, with an audit line saying the action may have run. BB1, BB3 and the nits are the security reviewer's to read; F21 merges after their BB1 sign-off.
+
 ---
 
 ## Chunk F22 — Changes carry a check · slug `change-checks` · dashboard + MCP · **security reviewer signs off the unattended check**
