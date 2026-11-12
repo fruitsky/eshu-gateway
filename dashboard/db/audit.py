@@ -48,7 +48,7 @@ def search_audit_log(query: str, limit: int = 200):
             SELECT * FROM audit_log
             WHERE event_type LIKE ? OR gateway_ip LIKE ? OR hostname LIKE ?
                OR details LIKE ? OR actor LIKE ?
-            ORDER BY timestamp DESC LIMIT ?
+            ORDER BY timestamp DESC, id DESC LIMIT ?
         ''', (pattern, pattern, pattern, pattern, pattern, limit))
         rows = cursor.fetchall()
         return [dict(row) for row in rows]

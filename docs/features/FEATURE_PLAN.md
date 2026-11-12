@@ -10205,9 +10205,11 @@ or the query, not the product:
   are unchanged.
 * **`test_db_audit.py::test_audit_log_ordering`.** Audit timestamps are whole
   seconds, so two rows in one second came back in insertion order and
-  "newest first" depended on the clock granularity. `get_audit_log` (and
-  `search_audit_log`) now order by `timestamp DESC, id DESC`; the
-  assertion is the same one, and it is deterministic at any sleep length.
+  "newest first" depended on the clock granularity. `get_audit_log` and
+  `search_audit_log` now order by `timestamp DESC, id DESC`; the tests in
+  `tests/test_db_audit.py` insert two rows in the same second and assert
+  both queries return the newer id first, with no sleep. (BG3: the first
+  round had only changed `get_audit_log`.)
 
 
 ## Chunk F23 — Change journal tied to alerts · slug `change-journal` · dashboard only
