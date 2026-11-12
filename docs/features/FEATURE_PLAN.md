@@ -10925,6 +10925,127 @@ self-reported hostname.**
   `host_allowed` matches IP entries only (or a hostname only when it is
   pinned at enrolment), and the modal offers to convert a kept hostname
   entry to its gateway's IP.
+## Fix — poller ticket poll URL · branch `fix/poller-ticket-poll` · poller · security sign-off
+
+**Security review (2026-11-12, at `f0affc7`): the fix is approved. It
+makes the lockbox path live for the first time, and that path has two
+musts (BI1, BI2) to land before the fleet update. The n8n-only retest can
+go ahead without them.**
+
+The fix is correct:
+* `grep -c` alone, `|| true`, then a digits-only `case`. `WC` can only
+  be a number, and the dashboard's `wc: int` refuses anything else anyway.
+* The old bug only hit an empty windows file (`grep -c` exits 1 and
+  prints 0). With one or more windows, the old line worked. That matches
+  "one poller consumption ever".
+* All three installer copies are byte-identical and carry the change. The
+  template takes the poller through its placeholder.
+* The curl stub now refuses whitespace in a URL, as real curl does, so a
+  malformed URL fails the tests instead of passing them.
+
+Lockbox review: the ticket format, the 90-second cleanup, the dashboard's
+consume, and the gateway's claim-and-burn.
+
+**BI1 (must, before the fleet): no raw line break may reach
+`/var/run/eshu.tickets`, and a ticket timestamp may not be in the
+future.**
+* `ssh_exec` allows `\n` in a command (`CONTROL_ALLOWED`). `ticket_line`
+  writes the command raw as the last field, and the poller appends the
+  ticket with `echo`.
+* An approved multi-line command therefore becomes several lockbox lines.
+  Every line after the first has no `v2` tag, so it parses as an old
+  `ts|cmd` line:
+  * its timestamp and command come from the command text;
+  * it has no agent, so an unsigned direct caller can claim it, which
+    defeats M1's agent binding;
+  * a future timestamp passes both the gateway's `now - T_TS <= 90` and
+    the poller's cleanup, so the line never expires.
+* The only safeguard is the human reading the multi-line card. That is
+  not enough for a forged, non-expiring, unbound ticket.
+* Fix, all of:
+  * the dashboard never issues a lockbox line whose command contains CR
+    or LF. Either refuse such a row on the poll path (deny it with an
+    audit reason, as M1 does), or carry the command in a `v3` line as
+    base64;
+  * the poller drops a ticket containing CR or LF, as a second check;
+  * the gateway and the poller's cleanup both treat a timestamp more than
+    a few seconds in the future as invalid.
+* Tests:
+  * an approved two-line command yields no lockbox line, or exactly one
+    line that decodes to the whole command;
+  * a future-dated line is neither kept by the cleanup nor claimed.
+
+**BI2 (must, before the fleet): one approval, one run.**
+* **No lock on the gateway side.** Writes to the lockbox file come from
+  three places, and none of them takes a lock:
+  * the poller's cleanup (read, rewrite, `mv`);
+  * its `echo >>` append;
+  * the gateway's `claim_lockbox_ticket` and `remove_claimed_ticket`.
+
+  Two gateway sessions with the same command can both read the line
+  before either rewrites, so both run it. The poller's cleanup can also
+  `mv` back a copy taken before a claim, which brings a burned ticket
+  back for up to 90 seconds.
+
+  Fix: hold `flock` on a lock file in the root-only `/run/eshu` around
+  every read-modify-write and the append, in both scripts. Make the
+  gateway's temp file with `mktemp -p /run/eshu`, so the `mv` is a
+  rename on the same filesystem, not a copy out of `/tmp`.
+* **Two delivery paths on the dashboard.**
+  * `update_ticket_consumed_by_ip` does a `SELECT`, then an
+    unconditional `UPDATE`.
+  * `get_ticket_by_request_id` hands out a ticket for a row that is
+    already `consumed`.
+
+  So the poller and `/api/ticket/{id}` can both deliver the same
+  approval. The interactive loop's `remove_claimed_ticket` does not
+  close this: the poller's append can land after it. The second copy then
+  waits in the lockbox for the next identical command.
+
+  Fix:
+  * both consumes use `... WHERE id = ? AND status = 'approved'` and
+    deliver only when `rowcount == 1`;
+  * `/api/ticket/{id}` stops issuing for `consumed`. The gateway's loop
+    already handles `consumed` through the lockbox claim.
+* Tests:
+  * two concurrent claims of one line: exactly one runs;
+  * a poll and an `/api/ticket` call on one approved row: exactly one gets
+    the ticket;
+  * a cleanup interleaved with a claim does not bring the line back.
+
+**BI3 (should): a ticket can arrive already dead and still be recorded as
+consumed.**
+* The line's timestamp is the request's `created_at`. The gateway honours
+  it for 90 seconds, and a pending card also lives 90 seconds.
+* The poll path delivers an approved row until `expires_at + 60`, and the
+  poller only polls every 30 seconds.
+* So a card approved late in its life is marked `consumed` (with a
+  `jit_consumed` audit row) when the line is already past 90 seconds. The
+  gateway and the cleanup then drop it. This fails closed, but History
+  and the audit log say "consumed" for a command that never ran, and the
+  agent's re-run opens a fresh card.
+* Fix: stamp the line with the time it is delivered, and stop delivering
+  it once `expires_at` has passed (drop the 60-second grace on this
+  path). An approval can then be used at most 90 seconds after delivery,
+  and at most `ttl + 90` after the card was created.
+* Expect this one in the n8n retest if an approval is slow.
+
+Checked and fine:
+* The v2 format: `v2` first, the command last, so a `|` inside the command
+  survives. Agent names are limited to `[A-Za-z0-9_.:-]`, and session IDs
+  are charset-checked, so neither can shift a field.
+* An agent row is never issued in the old format (M1, on both paths).
+* `ticket_allowed`: a signed caller claims only its own agent and
+  session, and an unsigned caller only claims agent-less lines.
+* The cleanup reads `$2` for v2 lines.
+* The file stays root `0600`. The gateway runs it as root through its
+  sudoers entry, and the environment scrub leaves `TMPDIR` unset.
+* The dashboard checks the gateway token against the IP for `/api/poll`.
+
+Rollout: merge, deploy the dashboard, update n8n only, and retest. That is
+fine as planned. BI1 and BI2 land before the fleet update. I'd like to read
+those diffs. BI3 can go with them or after.
+
 ## 7. Backlog (not planned in detail)
 
 * Deny with a reason, shown to the agent (cheap; low value given the data).
