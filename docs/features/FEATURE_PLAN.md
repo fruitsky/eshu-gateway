@@ -11221,9 +11221,12 @@ change, with security sign-off.
   `probe_result`) while every ticket of an approved plan is still in flight,
   instead of `refused`; it caches the digest once something runs. A re-run
   while an identical `approved` row is still being delivered returns that row's id
-  (`reused: true`) instead of filing a duplicate card. `test_f3_session_plans`'s
-  `test_f3_plan_approves_once_then_pends` shows the boundary: the live row is
-  reused, and a new JIT card appears only after the first row is `consumed`.
+  (`reused: true`) instead of filing a duplicate card. Per security's BK5
+  ruling (below) only a **signed** caller (both `agent` and `session_id` set)
+  reuses an approved row; an unsigned re-run always gets a fresh card, because
+  every unsigned caller of the same bytes on that host would otherwise match
+  it. The reuse sits after every refusal in `receive_request`, and its expiry
+  boundary is the poll path's (`expires_at > now`).
 * **D7.** A proposal replaced by a newer one is kept as `superseded` with a
   `superseded_by` id (new column, additive migration) instead of deleted.
   `check_plan` and `probe_result` return `status: superseded` and the new id.
@@ -11284,9 +11287,16 @@ change, with security sign-off.
   the intended passthrough (they take their path/command from the
   integration at seed time).
 
-`bash scripts/verify.sh`: `2909 passed, 26 skipped, 8 warnings in 604.62s
-(0:10:04)` (after the rebase onto `fix/lockbox-bi`: D6's `find_live_request`
-sits beside BI2's conditional consumes).
+**BK5 (security ruling, 2026-11-12).** Taken: `find_live_request` returns
+nothing unless both `agent` and `session_id` are non-empty, so an unsigned
+re-run always gets a new card; tests cover a signed reuse, an unsigned fresh
+card, a different agent/session, and the two-identical-pending-cards case.
+`test_f3_session_plans` is back to its original boundary: its caller is
+unsigned, so a spent plan's re-run is a new pending card.
+
+`bash scripts/verify.sh`: `2904 passed, 26 skipped, 7 warnings in 603.53s
+(0:10:03)` (after the rebase onto `fix/lockbox-bi` at security's `ec18660`
+and the BK5 ruling).
 
 Tests: `tests/test_x6_agent_api.py` (12) plus the probe hostname/pending
 tests in `tests/test_f15_probes.py` and the updated F3 boundary test.
