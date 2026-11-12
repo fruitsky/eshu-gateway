@@ -422,47 +422,75 @@ SSH_REG_CAPS='"ssh_host_key":"'"$HOST_KEY_LINE"'","ssh_ticket_format":"v2","run_
 if [ "$mode" != "upgrade" ] || [ -f /etc/eshu-token ]; then
   SSH_REG_CAPS='"ssh_host_key":"'"$HOST_KEY_LINE"'","ssh_agent_format":"eshu-ssh-agent-v1","ssh_ticket_format":"v2","run_limits":"'"$RUN_LIMITS_CAP"'"'
 fi
-REGISTER_RESPONSE=""
-if [ "$mode" != "upgrade" ]; then
-  echo "Registering Gateway with Dashboard..."
-  REGISTER_RESPONSE=$(curl --connect-timeout 3 -m 15 -s -X POST "$DASHBOARD_URL/api/register" \
-       -H "Content-Type: application/json" \
-       -H "X-Gateway-Token: ${GATEWAY_TOKEN:-}" \
-       -H "X-Enrollment-Token: ${ESHU_ENROLL_TOKEN:-}" \
-       -d '{"ip":"'"$TARGET_IP"'","hostname":"'"$HOST_NAME"'","version":"'"$GATEWAY_VERSION"'",'"$SSH_REG_CAPS"'}')
-  GATEWAY_TOKEN=$(echo "$REGISTER_RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); t=d.get('gateway_token'); print(t if t and t!='None' else '')" 2>/dev/null || echo "")
-  if [ -n "$GATEWAY_TOKEN" ]; then
-    echo "   Gateway API token received (v15+ auth)"
-  fi
-  GATEWAY_SSH_MODE=$(echo "$REGISTER_RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('ssh_mode','direct+mcp'))" 2>/dev/null || echo "direct+mcp")
-  case "$GATEWAY_SSH_MODE" in mcp_only) ;; *) GATEWAY_SSH_MODE="direct+mcp" ;; esac
-fi
-
-# Always re-register on update to report new version (and get token if missing)
-if [ "$mode" = "upgrade" ] && [ -n "$DASHBOARD_URL" ]; then
-  REGISTER_RESPONSE=$(curl --connect-timeout 3 -m 15 -s -X POST "$DASHBOARD_URL/api/register" \
-       -H "Content-Type: application/json" \
-       -H "X-Gateway-Token: ${GATEWAY_TOKEN:-}" \
-       -H "X-Enrollment-Token: ${ESHU_ENROLL_TOKEN:-}" \
-       -d '{"ip":"'"$TARGET_IP"'","hostname":"'"$HOST_NAME"'","version":"'"$GATEWAY_VERSION"'",'"$SSH_REG_CAPS"'}')
-  GATEWAY_TOKEN=$(echo "$REGISTER_RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); t=d.get('gateway_token'); print(t if t and t!='None' else '')" 2>/dev/null || echo "")
-  if [ -n "$GATEWAY_TOKEN" ]; then
-    echo "   Gateway API token received (v15+ auth)"
-  fi
-  GATEWAY_SSH_MODE=$(echo "$REGISTER_RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('ssh_mode','direct+mcp'))" 2>/dev/null || echo "direct+mcp")
-  case "$GATEWAY_SSH_MODE" in mcp_only) ;; *) GATEWAY_SSH_MODE="direct+mcp" ;; esac
-fi
-
-# Check for existing token in current gateway script (survives upgrades)
-# Explicitly reject "None" — the literal string from the v15.0 DEFAULT None migration bug
-if [ -z "${GATEWAY_TOKEN:-}" ] || [ "${GATEWAY_TOKEN:-}" = "None" ]; then
+# RR1: the existing token is loaded BEFORE registering. A gateway the
+# dashboard already knows must present its own X-Gateway-Token to
+# re-register; the old order sent an empty one, got 401 on every update and
+# reinstall, and so never reported its host-key pin or run_limits (ssh_exec
+# then refused it as ssh_host_unpinned). Same source as before (the installed
+# gateway script), then /etc/eshu-token. "None" is the v15.0 migration bug and
+# "__GATEWAY_TOKEN__" an unsubstituted template; neither is a token.
+_valid_token() {
+  case "${1:-}" in ""|None|__GATEWAY_TOKEN__) return 1 ;; esac
+  printf '%s' "$1" | grep -qE '^[A-Za-z0-9_-]{16,128}$'
+}
+if ! _valid_token "${GATEWAY_TOKEN:-}"; then
+  GATEWAY_TOKEN=""
   if [ -f "$GATEWAY" ]; then
-    EXISTING_TOKEN=$(grep -oP 'GATEWAY_TOKEN="\K[^"]+' "$GATEWAY" 2>/dev/null || echo "")
-    if [ -n "$EXISTING_TOKEN" ] && [ "$EXISTING_TOKEN" != "None" ]; then
-      GATEWAY_TOKEN="$EXISTING_TOKEN"
-      echo "   Reusing existing gateway API token"
-    fi
+    EXISTING_TOKEN=$(grep -oP '^GATEWAY_TOKEN="\K[^"]+' "$GATEWAY" 2>/dev/null | head -n1 || true)
+    if _valid_token "$EXISTING_TOKEN"; then GATEWAY_TOKEN="$EXISTING_TOKEN"; fi
   fi
+  if [ -z "$GATEWAY_TOKEN" ] && [ -f /etc/eshu-token ]; then
+    EXISTING_TOKEN=$(head -n1 /etc/eshu-token 2>/dev/null | tr -d '[:space:]' || true)
+    if _valid_token "$EXISTING_TOKEN"; then GATEWAY_TOKEN="$EXISTING_TOKEN"; fi
+  fi
+  EXISTING_TOKEN=""
+  if [ -n "$GATEWAY_TOKEN" ]; then echo "   Reusing existing gateway API token"; fi
+fi
+
+# RR1: one registration call for install, reinstall and update. Sets
+# REGISTER_STATUS (the HTTP code, 000 when unreachable) and REGISTER_RESPONSE.
+register_gateway() {   # $1 = the X-Gateway-Token to present ('' for none)
+  local out
+  out=$(curl --connect-timeout 3 -m 15 -s -w '\n%{http_code}' -X POST "$DASHBOARD_URL/api/register" \
+       -H "Content-Type: application/json" \
+       -H "X-Gateway-Token: ${1:-}" \
+       -H "X-Enrollment-Token: ${ESHU_ENROLL_TOKEN:-}" \
+       -d '{"ip":"'"$TARGET_IP"'","hostname":"'"$HOST_NAME"'","version":"'"$GATEWAY_VERSION"'",'"$SSH_REG_CAPS"'}' 2>/dev/null) \
+    || out=""
+  case "$out" in
+    *$'\n'[0-9][0-9][0-9]) REGISTER_STATUS="${out##*$'\n'}"; REGISTER_RESPONSE="${out%$'\n'*}" ;;
+    *) REGISTER_STATUS="000"; REGISTER_RESPONSE="" ;;
+  esac
+}
+
+REGISTER_RESPONSE=""
+REGISTER_STATUS=""
+if [ -n "$DASHBOARD_URL" ]; then
+  if [ "$mode" != "upgrade" ]; then echo "Registering Gateway with Dashboard..."; fi
+  register_gateway "${GATEWAY_TOKEN:-}"
+  # A token left behind by an earlier install whose gateway was since removed
+  # from the dashboard is no longer valid. With an enrollment token, register
+  # once more as a new gateway; the dashboard decides, the installer never
+  # guesses.
+  if [ "$REGISTER_STATUS" = "401" ] && [ -n "${GATEWAY_TOKEN:-}" ] && [ -n "${ESHU_ENROLL_TOKEN:-}" ]; then
+    register_gateway ""
+  fi
+  if [ "$REGISTER_STATUS" = "200" ]; then
+    NEW_TOKEN=$(printf '%s' "$REGISTER_RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); t=d.get('gateway_token'); print(t if t and t!='None' else '')" 2>/dev/null || echo "")
+    if _valid_token "$NEW_TOKEN"; then
+      GATEWAY_TOKEN="$NEW_TOKEN"
+      echo "   Gateway API token received (v15+ auth)"
+    fi
+    NEW_TOKEN=""
+    GATEWAY_SSH_MODE=$(printf '%s' "$REGISTER_RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('ssh_mode','direct+mcp'))" 2>/dev/null || echo "direct+mcp")
+  else
+    # Keep the token we have: a failed call must never blank it.
+    echo "   WARNING: the dashboard refused or did not answer the registration (HTTP $REGISTER_STATUS)."
+    echo "            Its host-key pin and capabilities were not updated; ssh_exec"
+    echo "            may refuse this gateway until a registration succeeds."
+    GATEWAY_SSH_MODE="direct+mcp"
+  fi
+  case "$GATEWAY_SSH_MODE" in mcp_only) ;; *) GATEWAY_SSH_MODE="direct+mcp" ;; esac
 fi
 
 write_gateway() {

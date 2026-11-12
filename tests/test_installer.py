@@ -144,7 +144,7 @@ def test_f12_register_reports_pin_and_capabilities():
     assert '"ssh_ticket_format":"v2"' in src
     # S1: one capability string, used by both registration paths, and the
     # agent format is only claimed when the token file exists on an upgrade.
-    assert src.count('\'"$SSH_REG_CAPS"\'') == 2
+    assert src.count('\'"$SSH_REG_CAPS"\'') == 1   # RR1: one register_gateway
     assert '[ -f /etc/eshu-token ]' in src
     assert src.count('"ssh_agent_format"') == 1
 
@@ -269,3 +269,158 @@ def test_f12_poller_token_rotation_uses_umask_077():
     write = ("( umask 077; printf '%s\\n' \"$NEW_TOKEN\" > "
              "/etc/eshu-token.tmp )")
     assert poller.count(write) == 2
+
+
+# ── RR1: re-registration presents the existing token ─────────────────────
+
+def _register_block(template, token_file):
+    start = template.index("# RR1: the existing token is loaded BEFORE registering.")
+    end = template.index("\nwrite_gateway() {", start)
+    return template[start:end].replace("/etc/eshu-token", str(token_file))
+
+
+def _run_register(tmp_path, responses, script_token=None, env_token="",
+                  enroll="", file_token=None, mode="upgrade"):
+    """Run the real block with a stub curl.
+
+    `responses` is one "<body>\n<code>" per call ("" = curl fails). Returns
+    (proc, calls, final_token) where calls is a list of argv lists.
+    """
+    template = _read("dashboard/eshu-installer-template.sh")
+    token_file = tmp_path / "eshu-token"
+    if file_token is not None:
+        token_file.write_text(file_token + "\n")
+    gateway = tmp_path / "eshu-gateway.sh"
+    if script_token is not None:
+        gateway.write_text('#!/bin/bash\nGATEWAY_TOKEN="%s"\n' % script_token)
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    replies = tmp_path / "replies"
+    replies.mkdir()
+    for i, reply in enumerate(responses):
+        (replies / str(i)).write_text(reply)
+    log = tmp_path / "calls"
+    _stub(bindir, "curl", r"""
+n=$(ls "%(log)s".* 2>/dev/null | wc -l)
+for a in "$@"; do printf '%%s\n' "$a"; done > "%(log)s.$n"
+[ -s "%(replies)s/$n" ] || exit 7
+cat "%(replies)s/$n"
+""" % {"log": log, "replies": replies})
+    harness = tmp_path / "harness.sh"
+    harness.write_text("""
+GATEWAY="%s"
+GATEWAY_TOKEN="%s"
+ESHU_ENROLL_TOKEN="%s"
+DASHBOARD_URL="http://dashboard.test"
+TARGET_IP="192.0.2.10"; HOST_NAME="gw"; GATEWAY_VERSION="v-test"
+SSH_REG_CAPS='"run_limits":"v1"'
+GATEWAY_SSH_MODE="direct+mcp"
+mode="%s"
+%s
+printf 'FINAL=%%s\nMODE=%%s\n' "$GATEWAY_TOKEN" "$GATEWAY_SSH_MODE"
+""" % (gateway, env_token, enroll, mode, _register_block(template, token_file)))
+    env = {"PATH": "%s:%s" % (bindir, os.environ.get("PATH", "/usr/bin:/bin"))}
+    proc = subprocess.run(["bash", str(harness)], capture_output=True,
+                          text=True, env=env, timeout=60)
+    calls = []
+    i = 0
+    while (tmp_path / ("calls.%d" % i)).exists():
+        calls.append((tmp_path / ("calls.%d" % i)).read_text().splitlines())
+        i += 1
+    final = re.search(r"^FINAL=(.*)$", proc.stdout, re.M).group(1)
+    return proc, calls, final
+
+
+TOK = "a" * 64
+NEW = "b" * 64
+
+
+def _header(call, name):
+    return [a for a in call if a.startswith(name + ":")]
+
+
+def test_rr1_update_presents_the_installed_token(tmp_path):
+    """The bug: an update registered with an empty token and got 401."""
+    proc, calls, final = _run_register(
+        tmp_path, ['{"status":"ok","gateway_token":"%s"}\n200' % TOK],
+        script_token=TOK)
+    assert proc.returncode == 0, proc.stderr
+    assert len(calls) == 1
+    assert _header(calls[0], "X-Gateway-Token") == ["X-Gateway-Token: " + TOK]
+    assert final == TOK
+    assert "WARNING" not in proc.stdout
+
+
+def test_rr1_reinstall_presents_the_installed_token(tmp_path):
+    proc, calls, final = _run_register(
+        tmp_path, ['{"status":"ok","gateway_token":"%s"}\n200' % TOK],
+        script_token=TOK, mode="reinstall")
+    assert _header(calls[0], "X-Gateway-Token") == ["X-Gateway-Token: " + TOK]
+    assert final == TOK
+
+
+def test_rr1_token_file_is_the_fallback(tmp_path):
+    proc, calls, final = _run_register(
+        tmp_path, ['{"status":"ok","gateway_token":"%s"}\n200' % TOK],
+        script_token="__GATEWAY_TOKEN__", file_token=TOK)
+    assert _header(calls[0], "X-Gateway-Token") == ["X-Gateway-Token: " + TOK]
+    assert final == TOK
+
+
+def test_rr1_none_and_garbage_are_never_sent(tmp_path):
+    proc, calls, final = _run_register(
+        tmp_path, ['{"detail":"x"}\n401'], script_token="None",
+        file_token="not a token; rm -rf /")
+    assert _header(calls[0], "X-Gateway-Token") == ["X-Gateway-Token: "]
+    assert final == ""
+
+
+def test_rr1_a_refused_registration_keeps_the_token_and_warns(tmp_path):
+    proc, calls, final = _run_register(
+        tmp_path, ['{"detail":"no"}\n401'], script_token=TOK)
+    assert len(calls) == 1            # no enrollment token: no second try
+    assert final == TOK
+    assert "WARNING" in proc.stdout and "HTTP 401" in proc.stdout
+
+
+def test_rr1_an_unreachable_dashboard_keeps_the_token_and_warns(tmp_path):
+    proc, calls, final = _run_register(tmp_path, [""], script_token=TOK)
+    assert final == TOK
+    assert "HTTP 000" in proc.stdout
+
+
+def test_rr1_stale_token_retries_once_with_the_enrollment_token(tmp_path):
+    """A leftover token from a gateway the operator removed: the enrollment
+    token decides, and the new token replaces the stale one."""
+    proc, calls, final = _run_register(
+        tmp_path,
+        ['{"detail":"bad token"}\n401',
+         '{"status":"ok","gateway_token":"%s"}\n200' % NEW],
+        script_token=TOK, enroll="enroll-123", mode="reinstall")
+    assert len(calls) == 2
+    assert _header(calls[0], "X-Gateway-Token") == ["X-Gateway-Token: " + TOK]
+    assert _header(calls[1], "X-Gateway-Token") == ["X-Gateway-Token: "]
+    assert _header(calls[1], "X-Enrollment-Token") == ["X-Enrollment-Token: enroll-123"]
+    assert final == NEW
+
+
+def test_rr1_a_200_without_a_valid_token_keeps_ours(tmp_path):
+    proc, calls, final = _run_register(
+        tmp_path, ['{"status":"ok","gateway_token":"None"}\n200'],
+        script_token=TOK)
+    assert final == TOK
+
+
+def test_rr1_ssh_mode_comes_only_from_a_successful_answer(tmp_path):
+    proc, calls, _ = _run_register(
+        tmp_path, ['{"status":"ok","gateway_token":"%s","ssh_mode":"mcp_only"}\n200' % TOK],
+        script_token=TOK, mode="reinstall")
+    assert "MODE=mcp_only" in proc.stdout
+
+
+def test_rr1_token_is_loaded_before_the_first_registration():
+    src = _read("dashboard/eshu-installer-template.sh")
+    load = src.index("# RR1: the existing token is loaded BEFORE registering.")
+    call = src.index('register_gateway "${GATEWAY_TOKEN:-}"')
+    assert load < call
+    assert src.count("/api/register") == 1
