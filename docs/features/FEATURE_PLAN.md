@@ -9959,6 +9959,94 @@ job cannot both pass the re-check; a failed call puts the row back
 
   Test: an exception raised inside the rollback call leaves the row `failed`, and a stale `deleting` row is swept.
 
+### Reviewer notes (security reviewer, 2026-11-12, code round 3 at `f3a19f5`)
+
+**AU2, AU3 and AU4 approved. AU1 has one must left (BB1). AU5 agreed as a
+should, with the recovery state stated.** F21 does not merge until BB1 is
+in and I have read that diff.
+
+**BB1 (must): the node shell's own work on a wrapper line is tagged as the
+guest's.**
+* `_parse_statement_body` sets `state.target` while it unwraps `pct exec` or
+  `qm guest exec`. Every step it then emits for that statement carries the
+  guest target, including the parts the **node** shell performs before
+  `pct` runs:
+  * a write redirection on the wrapper line (the `targets` branch). The node
+    writes the file; the guest never sees it;
+  * a command or process substitution in the wrapped command's arguments,
+    in a redirection word, or in an unquoted heredoc body. The node expands
+    these before `pct` is started;
+  * the redirection suffix that the shell branch appends to a
+    `bash -c` script (`script + _redirect_suffix(st)`). That suffix is
+    parsed inside the guest's context, but it belongs to the node.
+* AO1's rule is "offer only when the snapshot covers every write". With this
+  bug, a single statement that writes a node file through a redirection
+  looks fully covered. The card then offers "snapshot and approve" for a
+  change the snapshot cannot undo.
+* Fix: tag a step with the place that runs it.
+  * The wrapped command's own step (and a parsed `-c` script without the
+    outer suffix) gets the wrapper's target.
+  * Redirections on the statement, substitutions in its words and
+    redirection targets, unquoted heredoc substitutions and the outer
+    redirection suffix get the target the statement started with
+    (`previous` / `inherited`). On the node that is `''`, which
+    `_writes_uncovered` already counts as uncovered.
+  * Parse the `-c` script without the suffix, and emit the suffix's writes
+    as separate outer steps.
+* Tests, as prose (no command text in the plan):
+  * a wrapped read with a write redirection on the same line gives `partial`;
+  * a wrapped read whose argument holds a command substitution that writes
+    gives `partial`;
+  * a wrapped shell `-c` script with an outer redirection gives `partial`;
+  * the same write inside the quoted `-c` script stays covered.
+* This is also an F1 fact (where a step runs), so check that the F4 read
+  lane and the F7 inner-target display still read the new tagging the way
+  they expect. Neither uses `inner` today.
+
+**AU5 / BB2 (should): agreed, and recovery goes to `failed`, never back to
+`active`.**
+* A claim stranded by an exception or a restart may mean the Proxmox call
+  was sent. Going back to `active` would offer Rollback again, and a second
+  rollback silently discards whatever changed after the first.
+* `failed` allows delete only, which is the safe state.
+* The sweep's audit line says "interrupted; the action may have run; check
+  the guest".
+
+**BB3 (should): the main token can be one ACL edit away from snapshotting.**
+* `credential_state` refuses a main token that holds `VM.Snapshot` or
+  `VM.Snapshot.Rollback`.
+* A main token with `Permissions.Modify` (or `User.Modify` on its own user,
+  for a token without privilege separation) can grant itself either one.
+  Through an approved write tool, the agent can then reach it.
+* Add both to the main-token refusal set, with the same red warning on the
+  integration page.
+
+**Nits:**
+* `WRAPPER_FOR_TYPE` is defined and never used. Either compare the
+  wrapper's kind with the resolved guest's `type` in `_writes_uncovered`, or
+  delete it. vmids are unique per cluster, so this is tidiness, not a gap.
+* `_UPID`: the `id` and `user` fields are `[^:]*`. Narrowing them to
+  `[A-Za-z0-9@!._-]*` also keeps `%` and whitespace out of the task path.
+  Proxmox produces the value, so this is defence in depth.
+* The identical-token check compares the whole secret string. Comparing the
+  token ID (`user@realm!name`, the part before `=`) as well also catches the
+  same token pasted twice with different whitespace.
+
+Approved as written:
+* AU2: the probe order, the forced probe at create, an unreadable version
+  treated as 8, errors not cached, and the cache cleared when a token is
+  set. The any-path walk errs the safe way on both tokens, as the feature
+  reviewer says. The two new tools are `internal`, and the MCP surface, the
+  tool runner and the HTTP route each refuse an internal tool.
+* AU3: `integration_for_action` loads by the stored name and refuses a
+  missing, disabled or non-Proxmox integration. With more than one enabled,
+  the offer needs the binding. `proxmox_integration()` now returns None in
+  that case and has no caller outside `core/snapshots.py`.
+* AU4: `_marker` with the space, the full UPID shape, and `claim_state` as a
+  conditional UPDATE with states checked against `STATES`. Rollback claims
+  from `active` only. Delete claims from `active` or `failed`. A bad UPID or
+  a failed task leaves `failed`.
+
 ---
 
 ## Chunk F22 — Changes carry a check · slug `change-checks` · dashboard + MCP · **security reviewer signs off the unattended check**
