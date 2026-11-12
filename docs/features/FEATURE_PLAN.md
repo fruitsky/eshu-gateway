@@ -11052,6 +11052,52 @@ Found by the operator on 2026-11-12. These are small, independent fixes:
    container, with Changes/Remove always reachable. Collapse the read-lane
    and capture selects into the details view if needed.
 
+**Implementer notes (X5).**
+
+1. The card is now header / `.session-modal-body` / `.session-modal-footer`.
+   The body (conclusion, plan block, commands) scrolls with `min-height: 0`;
+   the card is `overflow: hidden`; the id row is a pinned footer outside the
+   scroll area, and opening a session resets the body to the top. Confirm /
+   Edit / Reject travel with the conclusion inside the body and stay inside
+   the card.
+2. The plans widget moved out of the top of the feed and into
+   `#jit-pending-widget`, after `#jit-tickets`: the same area as the pending
+   requests, below the starfield and the queue, as a ruled section
+   (`#view-home .plans-in-jit`) rather than a second card over the sky. No
+   fetch or endpoint changed.
+3. The chip had the bucket's **solid fill** (`appr-<key>` is a legend
+   swatch), so the label sat at 2.29:1 on the worst bucket and zero chips
+   were worse with the old 45% opacity. The colour is a 6px dot now, the chip
+   is ink on the surface: `--text-dim` 6.35:1, zero uses `--text-muted`
+   5.58:1 on `--bg-surface` (6.06:1 on `--bg-base`). There is no light
+   theme in the stylesheet; the token check and a computed-contrast test pin
+   the floor.
+4. Each `.rb-step` is a card (`--bg-base`, hairline, amber left rule, 8/10
+   padding, 10px gap); the host is a mono chip in `--text-main` on
+   `--bg-stripe` (11.7:1) instead of `--text-faint` (3.1:1); the outcome/note
+   line gets its own dashed rule, `--text-dim` and italic, so it cannot be
+   read as part of the command.
+5. The engine has **no per-gateway freeze** (`/api/freeze` sets one fleet
+   flag that every poller mirrors to `/etc/eshu-freeze`), so the dialog now
+   says it is fleet-wide, that there is no per-gateway freeze, and that the
+   alternative is on the gateway's own row (Zero-Trust, or Remove). The
+   Gateways page carries the same one-line pointer above the table.
+6. Nine columns were rendered under `colspan="8"` fallbacks; both are 9 now.
+   The right-edge mask is removed for this table and the Actions column is
+   `position: sticky; right: 0`, so Changes/Remove stay reachable while the
+   table scrolls inside `.table-wrap`. The read-lane and capture selects are
+   a `<details>` disclosure whose summary reads `RL off · tail`; the selects
+   are unchanged inside it.
+
+Verified at 1440×900 in headless Chromium against the real stylesheet:
+`document.scrollWidth == 1440`, `.table-wrap` 1136 client / 1338 scroll, the
+Actions cell pinned at 1251–1408. Tests: `tests/test_x5_ui_fixes.py` (6
+tests: contrast, modal order/overflow, plans placement, runbook card rules,
+freeze copy, table columns/sticky/disclosure).
+
+`bash scripts/verify.sh`: `2845 passed, 26 skipped, 8 warnings in 581.93s
+(0:09:41)`.
+
 ---
 
 ## Gateway hardening (AF3, tee capture) · branch `fix/gateway-hardening` · gateway bash · **security reviewer sign-off**
@@ -11574,7 +11620,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 18b | F27 | allowances | dashboard + MCP | Design first (from live use: P2 caught HA call_service) | `feat/f27-allowances` | F10 (P2), Chunk H, F18 | + security sign-off; next design after F21/F22 code |
 | 18c | X3 | integrations-ui | dashboard UI | Requested 2026-11-12; design after F27 is signed off | `feat/x3-integrations-ui` | F27, F10 (P2) | operator walk-through first |
 | 18d | X4 | agents-page | dashboard UI | Requested 2026-11-12; ready for code | `feat/x4-agents-page` | `fix/agent-ssh-hosts` | rename Controls → Command policy |
-| 18e | X5 | ui-test-round | dashboard UI | Found in the 1.2 test round 2026-11-12; ready for code | `fix/x5-ui-test-round` | — | six small fixes |
+| 18e | X5 | ui-test-round | dashboard UI | **Implemented** 2026-11-12: six test-round fixes; no endpoint, save path or policy changed | `fix/x5-ui-test-round` | — | six small fixes |
 | 19 | F22 | change-checks | dashboard + MCP | After F19 merges | `feat/f22-change-checks` | F3, F5, F12, F19 | + security sign-off (the unattended check; AG1's origin rule does not cover it) |
 | 20 | F16 | recipes | dashboard + MCP | Design complete (security Round 4; feature reviewer Round 5 with AA1/AA2); code next after F22 | `feat/f16-recipes` | F3, F12, F13, F19 | main line; steps claim by request id; code comes back to security; auto_run comes back to security |
 | 21 | F24 | content-tripwire | dashboard | Design first | `feat/f24-content-tripwire` | F12, F14 | + security sign-off (retention) |

@@ -2845,9 +2845,14 @@ function fmtDuration(seconds) {
 
 function approvalChipHtml(key, label, count) {
   var n = Math.max(0, parseInt(count, 10) || 0);
-  return '<span class="appr-chip appr-' + key + (n ? '' : ' zero') + '" title="' +
-    escapeHtml(n + ' cleared by ' + label) + '">' + escapeHtml(label) +
-    ' <b>' + n + '</b></span>';
+  /* X5: the chip used to take the bucket's fill colour (`.appr-<key>` is a
+     solid legend swatch), which put the label at ~2:1 on several buckets and
+     made a zero chip unreadable. The colour lives in a dot now; the chip
+     itself is ink on the surface, muted when the count is zero. */
+  return '<span class="appr-chip' + (n ? '' : ' zero') + '" title="' +
+    escapeHtml(n + ' cleared by ' + label) + '">' +
+    '<i class="appr-dot appr-' + key + (n ? '' : ' zero') + '" aria-hidden="true"></i>' +
+    escapeHtml(label) + ' <b>' + n + '</b></span>';
 }
 
 function sessionSummaryHtml(sum) {
@@ -3193,6 +3198,9 @@ async function openSessionModal(sid) {
   metaEl.innerHTML = '<span class="sm-muted">loading\u2026</span>';
   cmdsEl.innerHTML = '<div class="sm-mcp-none">loading session\u2026</div>';
   modal.classList.remove('hidden');
+  // X5: a long conclusion scrolls inside the card; start at the top.
+  var bodyEl = document.getElementById('sm-body');
+  if (bodyEl) bodyEl.scrollTop = 0;
   _activeSessionSid = sid;
   var idEl = document.getElementById('sm-id');
   if (idEl) idEl.textContent = sid;
@@ -5145,7 +5153,7 @@ async function fetchGateways() {
   });
   const tbody = document.getElementById('gateways-table-body');
   if (!tbody) return;
-  if (data.length === 0) { tbody.innerHTML = '<tr><td colspan="8" class="px-4 py-3 text-muted">No gateways registered.</td></tr>'; return; }
+  if (data.length === 0) { tbody.innerHTML = '<tr><td colspan="9" class="px-4 py-3 text-muted">No gateways registered.</td></tr>'; return; }
   const now = Math.floor(Date.now() / 1000);
   tbody.innerHTML = data.map(function(g) {
     const diff = now - g.last_seen, isOnline = gwIsOnline(g);
@@ -5222,7 +5230,18 @@ async function fetchGateways() {
       } else {
         overrideControl = '<button onclick="openOverrideModal(' + escJs(g.ip) + ',' + escJs(g.hostname) + ')" class="chip-btn ovr" title="Override Mode — auto-approve all JIT for a set duration">Override</button>';
       }
-      overrideCell = '<div class="flex items-center gap-2">' + overrideControl + ztBtn + capSelect + readSelect + '</div>';
+      /* X5: the two selects were most of the table's width and pushed
+         Changes/Remove out of view at 100% zoom. They live in a disclosure
+         now; the cell shows their current state in one short line. */
+      var modesLabel = (readMode === 'off' ? 'RL off' : 'RL ' + readMode) +
+        ' \u00b7 ' + (capMode === 'tail' ? 'tail' : (capMode === 'exit-only' ? 'exit' : 'capture off'));
+      var modesExtra = '<details class="gw-modes-extra">' +
+        '<summary class="gw-modes-sum" title="Read-only lane and output capture for this gateway">' + escapeHtml(modesLabel) + '</summary>' +
+        '<div class="gw-modes-pop">' +
+          '<label class="gw-modes-row"><span>Read lane</span>' + readSelect + '</label>' +
+          '<label class="gw-modes-row"><span>Capture</span>' + capSelect + '</label>' +
+        '</div></details>';
+      overrideCell = '<div class="flex items-center gap-2">' + overrideControl + ztBtn + modesExtra + '</div>';
     }
     return '<tr>' +
       '<td class="px-4 py-2 whitespace-nowrap">' + statusCell + '</td>' +
@@ -5696,7 +5715,7 @@ async function toggleFreezeFromSidebar() {
 }
 
 async function triggerFreeze() {
-  if (!(await customConfirm('Every gateway will reject ALL commands — including whitelisted and approved-window commands — until you unfreeze. This takes effect within 30s.', { title: 'Freeze the entire fleet?', confirmLabel: 'Freeze fleet' }))) return;
+  if (!(await customConfirm('Freeze is fleet-wide: every gateway rejects ALL commands — including whitelisted and approved-window commands — until you unfreeze. It takes effect within 30s. There is no per-gateway freeze; to stop one gateway, use its row on Gateways (turn on Zero-Trust so nothing runs without approval, or Remove it).', { title: 'Freeze the entire fleet?', confirmLabel: 'Freeze fleet' }))) return;
   var btn = document.getElementById('freeze-btn');
   if (btn) { btn.disabled = true; btn.textContent = 'Freezing...'; }
   try {
