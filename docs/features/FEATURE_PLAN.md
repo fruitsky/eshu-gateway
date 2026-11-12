@@ -11050,6 +11050,49 @@ The three refinements are accepted: only ssh checks get a plan, a non-empty `tri
 * **AY3 (should): the owner check.** `_claim_check_candidate` has no agent condition, while `claim_plan_item` checks the session's owner (AG1). The token already binds the claim, but add `p.agent = ?` so every claim path carries the same rule.
 * **Merge order:** `fix/gateway-hardening` goes first (it is ready for security). This branch then rebases, re-adds its two gateway hunks and regenerates the installers. `ssh_exec(force_jit=)` is in both F16 and F22: the second to merge keeps one definition with the semantics "can only add gating", and both test sets must pass.
 
+### Code round 2 — AY1–AY3 (implementer notes)
+
+**Status: AY1, AY2 and AY3 are in. Not rebased on `fix/gateway-hardening`, as
+asked.** The two gateway hunks stay: the `ESHU_CHECK_TOKEN` key and its
+charset check, and the v2 canonical/body. When that branch merges, this one
+re-adds them and regenerates the installers again.
+
+**AY1 — the installers are regenerated.** `python3 dashboard/gen_installer.py`
+was run after the gateway change, so `dashboard/eshu-gateway-install.sh` and
+`dashboard/static/eshu-gateway-install.sh` both carry `ESHU_CHECK_TOKEN` (8
+occurrences each), and `dashboard/static/dev/eshu-gateway-install.sh` is
+written from the same bytes, as it is on this branch (the Edge pipeline
+rewrites it at runtime). The new test
+`test_f22_installers_embed_the_gateway_byte_for_byte` reads
+`dashboard/eshu-gateway.sh`, asserts the token is in it, and asserts that
+whole text appears in each of the three installers — so a source change
+with stale installers now fails the gate.
+
+**AY2 — only a verified prefix can carry a token.**
+
+* `ESHU_CHECK_TOKEN` is in the `MANIFEST_PRESENT` trigger, so a token with
+  no full signed prefix is an incomplete manifest and is refused (the
+  new gateway test posts only that key and no request reaches the
+  dashboard).
+* The prefix is parsed and the v2 canonical is computed as before (the
+  token must be in the MAC), but the request body now posts
+  `ESHU_CHECK_TOKEN_VERIFIED`, which is set only in the `SIG_STATE="ok"`
+  branch after the MAC verified. A failed signature forwards nothing.
+* The token is initialised at the top with the other prefix state, so
+  `set -u` is safe when a normal signed prefix carries no token.
+
+**AY2/AY3 — the dashboard honours it only for the plan's agent.**
+`claim_check_item(..., owner=agent)` passes the request's verified agent,
+and `_claim_check_candidate` requires the check plan's session owner to be
+that agent — the same rule `claim_plan_item` (AG1) applies. There is no
+`session_plans.agent` column; a plan's agent is its session's owner, so
+the condition is the `sessions` EXISTS join rather than `p.agent = ?`.
+Tests: a claim sent as `agent-b` consumes nothing, and the existing token
+claims pass the owner explicitly.
+
+`bash scripts/verify.sh`: `2827 passed, 22 skipped, 7 warnings in 599.59s
+(0:09:59)`.
+
 ---
 
 ## Chunk F23 — Change journal tied to alerts · slug `change-journal` · dashboard only
@@ -12780,7 +12823,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 18c | X3 | integrations-ui | dashboard UI | Requested 2026-11-12; design after F27 is signed off | `feat/x3-integrations-ui` | F27, F10 (P2) | operator walk-through first |
 | 18e | X5 | ui-test-round | dashboard UI | **Implemented** 2026-11-12: six test-round fixes; no endpoint, save path or policy changed | `fix/x5-ui-test-round` | — | six small fixes |
 | 18d | X4 | agents-page | dashboard UI | **Implemented** 2026-11-12: one Agents page (tokens, policy sections, web fetch, activity); Controls renamed Command policy; absent policy fields now keep their stored value | `feat/x4-agents-page` | `fix/agent-ssh-hosts` | rename Controls → Command policy |
-| 19 | F22 | change-checks | dashboard + MCP | **Code round 1: §3/§4 built with AV1 (a per-attempt token in the signed v2 prefix; stripped from the row and every view) and AV2 (the red card line; deny/expiry release the link)** | `feat/f22-change-checks` | F3, F5, F12, F19 | feature reviewer checks AV1/AV2; security reviews the code |
+| 19 | F22 | change-checks | dashboard + MCP | Code round 2: **AY1** (all three installers regenerated, with a byte-for-byte test), **AY2** (the token joins the manifest trigger; only a verified prefix posts it; the claim needs the verified agent), **AY3** (the owner condition on the check claim) folded | `feat/f22-change-checks` | F3, F5, F12, F19 | security reviews the gateway hunk and the code; merge after `fix/gateway-hardening` |
 | 20 | F16 | recipes | dashboard + MCP | Design complete (security Round 4; feature reviewer Round 5 with AA1/AA2); code next after F22 | `feat/f16-recipes` | F3, F12, F13, F19 | main line; steps claim by request id; code comes back to security; auto_run comes back to security |
 | 21 | F24 | content-tripwire | dashboard | Design first | `feat/f24-content-tripwire` | F12, F14 | + security sign-off (retention) |
 | 22 | F25 | secrets-broker | gateway + dashboard | Design first | `feat/f25-secrets-broker` | F1, F12, F19; security Chunk 7 before deploy | + security sign-off; gateway bash line by line |

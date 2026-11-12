@@ -980,7 +980,8 @@ def claim_mcp_plan_item(session_id: str, integration: str, tool: str,
         return row['plan_id'], row['id']
 
 
-def _claim_check_candidate(conn, session_id, host, command, check_token, now):
+def _claim_check_candidate(conn, session_id, host, command, check_token,
+                           owner, now):
     """F22/AR6: the one-item check plan's claim, bound to the attempt token.
 
     A check plan is exactly one item on one host with the exact command; a
@@ -997,14 +998,17 @@ def _claim_check_candidate(conn, session_id, host, command, check_token, now):
           AND i.kind = 'ssh'
           AND i.command = ? AND i.host = ?
           AND i.check_token != '' AND i.check_token = ?
+          AND EXISTS (SELECT 1 FROM sessions s
+                      WHERE s.id = p.session_id AND s.agent != ''
+                        AND s.agent = ?)
           AND (SELECT COUNT(*) FROM session_plan_items x
                WHERE x.plan_id = i.plan_id AND x.removed = 0) = 1
         ORDER BY i.id LIMIT 1
-    ''', (session_id, now, command, host, check_token)).fetchone()
+    ''', (session_id, now, command, host, check_token, owner)).fetchone()
 
 
 def claim_check_item(session_id: str, host: str, command: str,
-                     check_token: str, now: int = None):
+                     check_token: str, owner: str = '', now: int = None):
     """F22: consume one use of the check plan's single item.
 
     Only `core/checks.py` builds a check plan; this is the one claim that
@@ -1013,14 +1017,15 @@ def claim_check_item(session_id: str, host: str, command: str,
     """
     sid = (session_id or '').strip()[:64]
     token = (check_token or '').strip()
-    if not sid or not token:
+    owner = (owner or '').strip()[:64]
+    if not sid or not token or not owner:
         return None
     now = int(now or time.time())
     expire_plans(now)
     with db_conn() as conn:
         cur = conn.cursor()
         row = _claim_check_candidate(conn, sid, (host or '').strip(),
-                                     command or '', token, now)
+                                     command or '', token, owner, now)
         if not row:
             return None
         cur.execute('''

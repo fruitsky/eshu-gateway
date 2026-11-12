@@ -912,7 +912,10 @@ def receive_request(payload: GatewayPayload, request: Request):
         try:
             from core.checks import check_row_limit
             from db.session_plans import claim_check_item
-            claimed = claim_check_item(sid, target_ip, cmd, check_token, now)
+            # AY3: the claim also needs the verified agent to be the check
+            # plan's agent, the same owner rule every other claim carries.
+            claimed = claim_check_item(sid, target_ip, cmd, check_token,
+                                       owner=agent, now=now)
             if claimed:
                 check_plan_id, check_item_id, parent_item_id = claimed
                 limit_text, _limit_seconds = check_row_limit()

@@ -1119,6 +1119,29 @@ def test_bi2_the_claim_locks_and_uses_a_run_dir_temp():
     remove = remove[:remove.index('\n}\n')]
     assert 'tickets_lock' in remove and 'tickets_unlock' in remove
 
+
+def test_f22_a_token_without_a_signed_prefix_is_refused(gw):
+    """AY2: ESHU_CHECK_TOKEN joins the manifest trigger, so a token on its
+    own is an incomplete prefix and never reaches the dashboard."""
+    gw.jit_status("denied")
+    gw.run("ESHU_CHECK_TOKEN=" + "a" * 32 + " echo hello")
+    assert not [c for c in gw.curl_calls()
+                if c["url"].endswith("/api/request")]
+
+
+def test_f22_installers_embed_the_gateway_byte_for_byte():
+    """AY1: the generated installers are the source, not a stale copy."""
+    repo = Path(__file__).resolve().parent.parent
+    gateway = (repo / "dashboard" / "eshu-gateway.sh").read_text(
+        encoding="utf-8").rstrip("\n")
+    assert "ESHU_CHECK_TOKEN" in gateway
+    for rel in ("dashboard/eshu-gateway-install.sh",
+                "dashboard/static/eshu-gateway-install.sh",
+                "dashboard/static/dev/eshu-gateway-install.sh"):
+        text = (repo / rel).read_text(encoding="utf-8")
+        assert gateway in text, "%s does not embed the current gateway" % rel
+
+
 def test_f22_a_signed_check_token_reaches_the_request_body(gw):
     """AV1: the check token is a v2 signed field, so the gateway accepts it
     and forwards it; a token added after signing is refused."""

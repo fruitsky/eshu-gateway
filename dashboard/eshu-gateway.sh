@@ -59,6 +59,7 @@ ESHU_NONCE_FILE="$ESHU_NONCE_DIR/nonces"
 ESHU_AGENT=""; ESHU_AGENT_SIG=""; ESHU_TS=""; ESHU_NONCE=""
 ESHU_SESSION_ID=""; ESHU_SESSION_SIG=""; ESHU_EXECUTION_ID=""
 ESHU_WINDOW_TOKEN=""; ESHU_MCP=""; ESHU_FORCE_JIT=""
+ESHU_CHECK_TOKEN=""; ESHU_CHECK_TOKEN_VERIFIED=""
 ESHU_MSG_JSON=""
 ESHU_MCP_CAP=""
 ESHU_VERIFIED_AGENT=""
@@ -737,7 +738,7 @@ fi
 
 # G2: the six identity keys require a full, valid signature in every ssh_mode.
 MANIFEST_PRESENT="0"
-if [ -n "${ESHU_AGENT}${ESHU_AGENT_SIG}${ESHU_TS}${ESHU_NONCE}${ESHU_MCP}${ESHU_FORCE_JIT}" ]; then
+if [ -n "${ESHU_AGENT}${ESHU_AGENT_SIG}${ESHU_TS}${ESHU_NONCE}${ESHU_MCP}${ESHU_FORCE_JIT}${ESHU_CHECK_TOKEN}" ]; then
   MANIFEST_PRESENT="1"
 fi
 if [ -z "$ESHU_MCP" ]; then ESHU_MCP="0"; fi
@@ -792,6 +793,9 @@ sys.exit(0 if hmac.compare_digest(sig, want) else 1)
       then
         SIG_STATE="ok"
         ESHU_VERIFIED_AGENT="$ESHU_AGENT"
+        # AY2: the token is forwarded only after the MAC verified. It is a
+        # signed v2 field, never a value a bare prefix can set.
+        ESHU_CHECK_TOKEN_VERIFIED="$ESHU_CHECK_TOKEN"
       else
         SIG_STATE="bad"
         prefix_refusal="Invalid ESHU_AGENT_SIG — the signature does not cover this command on this gateway."
@@ -1278,7 +1282,7 @@ enc_req=$(echo -n "$cmd" | base64 -w 0)
 RESPONSE=$(curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -w "\n%{http_code}" -X POST "$DASHBOARD_URL/api/request" \
      -H "X-Gateway-Token: ${GATEWAY_TOKEN:-}" \
      -H "Content-Type: application/json" \
-     -d '{"target_ip":"'"$TARGET_IP"'","encoded_command":"'"$enc_req"'","session_id":"'"${ESHU_SESSION_ID:-}"'","execution_id":"'"${ESHU_EXECUTION_ID:-}"'","agent":"'"${ESHU_VERIFIED_AGENT:-}"'","force_jit":'"$([ "$ESHU_FORCE_JIT" = "1" ] && echo true || echo false)"',"run_limits":"'"$RUN_LIMITS_CAP"'","check_token":"'"${ESHU_CHECK_TOKEN:-}"'"}' 2>&1 || echo "CURL_FAILED")
+     -d '{"target_ip":"'"$TARGET_IP"'","encoded_command":"'"$enc_req"'","session_id":"'"${ESHU_SESSION_ID:-}"'","execution_id":"'"${ESHU_EXECUTION_ID:-}"'","agent":"'"${ESHU_VERIFIED_AGENT:-}"'","force_jit":'"$([ "$ESHU_FORCE_JIT" = "1" ] && echo true || echo false)"',"run_limits":"'"$RUN_LIMITS_CAP"'","check_token":"'"${ESHU_CHECK_TOKEN_VERIFIED:-}"'"}' 2>&1 || echo "CURL_FAILED")
 
 HTTP_STATUS=$(echo "$RESPONSE" | tail -n1)
 if [ "${HTTP_STATUS:-}" = "429" ]; then

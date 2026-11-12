@@ -292,9 +292,9 @@ class TestCheckPlan:
         token = 'a' * 32
         set_check_item_token(created['plan_id'], token)
         assert claim_check_item(SESSION, IP, 'systemctl is-active nginx',
-                                token) is not None
+                                token, owner='agent-a') is not None
         assert claim_check_item(SESSION, IP, 'systemctl is-active nginx',
-                                token) is None
+                                token, owner='agent-a') is None
 
 
 def _armed(client, check=None):
@@ -380,6 +380,15 @@ class TestToken:
         second = _post(auth_client, 'systemctl is-active nginx',
                        check_token=first).json()
         assert 'plan' not in second
+
+    def test_a_claim_needs_the_verified_agent(self, auth_client, env):
+        # AY2/AY3: the verified agent must be the check plan's agent.
+        plan, item, created = _armed(auth_client)
+        response = _post(auth_client, 'systemctl is-active nginx',
+                         check_token=item['check_token'],
+                         agent='agent-b').json()
+        assert 'plan' not in response
+        assert get_plan(created['plan_id'])['items'][0]['uses'] == 0
 
     def test_a_gateway_without_limits_never_claims(self, auth_client, env):
         plan, item, created = _armed(auth_client)
