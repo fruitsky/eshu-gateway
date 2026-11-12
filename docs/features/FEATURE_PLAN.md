@@ -11153,6 +11153,83 @@ For the security reviewer to rule on (none blocks from my side):
 
 At merge (reviewer): `RELEASE_1.md` step 6 gets "the mawk delay applies only to gateways installed before this fix".
 
+### Reviewer notes (security reviewer, 2026-11-12, code round 1 at `896e59a`)
+
+**Approved for merge. No must items.** I read the gateway hunk and checked
+that the three installers carry the same changed lines as `eshu-gateway.sh`.
+
+What I checked:
+* **AF3.**
+  * argv holds `-I -` and the two key paths only.
+  * The id and signature are prefix assignments on the `python3` call. They
+    are not exported to the shell or to the command that runs later.
+  * `-I` and the fixed `PATH` (line 5) leave no interpreter search path an
+    agent can steer.
+  * A missing or unreadable key is empty and skipped, a non-hex key is
+    skipped, and a non-ASCII signature makes `compare_digest` raise, which
+    exits non-zero. All three fail closed.
+  * `.strip()` is a little wider than `$(cat)` (it also strips leading
+    blanks). That is harmless for a hex key.
+* **S1.**
+  * The private directory comes from `mktemp -d` (0700, root), so the
+    `mv -fT part tail` and the `rm -rf` act inside a directory no other
+    user can write. There is no symlink race.
+  * `ESHU_CAP_DIR` is reset at the top of `run_sanitized` and set only from
+    `mktemp -d`, so the trap's `rm -rf` cannot be pointed elsewhere.
+  * `part` exists before the pipeline, and the post reads only `tail`, so a
+    partial ring is never posted.
+  * Only `tee` holds the substitution's write end, so the capture sees EOF
+    when `tee` exits.
+  * The `exec >/dev/null 2>&1` keeps the capture off the SSH channel.
+
+**AX1: recorded residual, not a must. Do not use the suggested
+process-group kill.**
+* Only an awk that never ends can leave the capture behind. Agent output
+  cannot cause that: the ring is linear, and `cap_visible` bounds the input
+  first. So the leftover root process needs a broken awk, not a hostile
+  agent.
+* The gateway runs without job control. The capture, the command and the
+  gateway script itself all share one process group, so
+  `kill -- -<pgid>` would kill the gateway along with the capture.
+* If you want the kill anyway (a should, not needed for this merge):
+  * `capture_job` writes `$BASHPID` to `pid` in the private directory.
+  * On timeout the main shell kills that PID and its children
+    (`pkill -P`, then `kill`), never a group.
+  * It does this before the EXIT trap removes the directory.
+  * The PID is safe to trust because only root can write the directory, and
+    the process is still alive when it is read.
+* Record the residual in § 2.7 in one line: "after a capture timeout, a
+  stuck capture process may remain; it holds no agent fd and at most 16 KiB".
+
+**AX2: recorded residual, not a must.**
+* Plain `tee` with SIGPIPE ignored lets an approved command run on after a
+  disconnect. It still ends at its F19 time limit and stays inside its
+  approval, so nothing new is granted. It is the same behaviour as before
+  the fix.
+* sshd starts the gateway with SIGPIPE at its default, so the fallback
+  matters only for an unusual parent.
+* Keeping the fallback silent is right (compare N2).
+* Add one line to § 2.7's dependency list: "coreutils ≥ 8.24
+  (`tee --output-error`, `mv -T`) for the tail capture; older or BusyBox
+  hosts get no tail capture or no stop-on-disconnect with SIGPIPE ignored".
+
+**AX3:** feature side; fixed in `5c1e290`, no security view.
+
+**BA1 (should, later chunk, dashboard side): show a missing capture as
+missing.**
+* On `CAPTURE TIMEOUT` or `CAPTURE FAILED` the gateway posts
+  `"encoded_output":""`. The dashboard then shows a command that printed
+  nothing, not one whose output was lost.
+* An agent cannot force either event today, so this is not exploitable now.
+  But an empty result row should not be what the operator reads as
+  "it printed nothing".
+* Fix: a literal field, `"capture":"missing"` (one fixed value, like
+  `limit`), that the dashboard renders as "output not captured".
+* Not in this branch, because the branch makes no dashboard change. Put it
+  in the next F5 or F19 change.
+
+At merge: the feature reviewer's `RELEASE_1.md` step 6 line, as noted.
+
 ---
 
 ## 7. Backlog (not planned in detail)
