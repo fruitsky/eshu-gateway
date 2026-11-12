@@ -11728,8 +11728,9 @@ plain carry no token.
 * The installers are regenerated with the rebased poller (`WC` and
   `-H @-` both present) and the new fleet call.
 
-`bash scripts/verify.sh`: `2898 passed, 26 skipped, 7 warnings in 587.66s
-(0:09:47)`.
+`bash scripts/verify.sh`: `2901 passed, 26 skipped, 7 warnings in 604.17s
+(0:10:04)` (after the stack rebase onto `fix/lockbox-bi`; the branch carries
+only the BE3 changes now, and the installers were regenerated from this tree).
 
 #### Security re-read (2026-11-12, at `46bc261`): BJ2 and BJ3 approved
 
