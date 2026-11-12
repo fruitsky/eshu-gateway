@@ -2613,16 +2613,28 @@ if [ "$mode" = "update" ] && [ "${REGISTER_OK:-}" = "1" ]; then
       # to the internet is worse than a missing one.
       AK_ESH_LINE=""
       AK_DASH_FROM=""
+      AK_BAD_FROM=""
       if [ -f "$AK_FILE" ]; then
         AK_ESH_LINE=$(grep -m1 '/usr/local/bin/eshu-gateway.sh' "$AK_FILE" 2>/dev/null || true)
         AK_DASH_FROM=$(ak_from "$AK_FILE" eshu-dashboard)
         [ -n "$AK_DASH_FROM" ] || AK_DASH_FROM=$(ak_from "$AK_FILE" eshu-gateway-key)
+        # BJ1: look at every Eshu line, not only the first. One line whose
+        # from= is not in the leading `from="...,` form means we cannot know
+        # the operator's intent (for example, the gateway line is unrestricted
+        # while a hand-edited dashboard line is restricted), so nothing is
+        # written. `grep -q` is avoided on purpose: under `set -o pipefail` an
+        # early exit gives the upstream grep SIGPIPE and the pipeline fails
+        # even when the pattern matched.
+        AK_BAD_LINES=$(grep '/usr/local/bin/eshu-gateway.sh' "$AK_FILE" 2>/dev/null \
+                       | grep -v '^from="[^"]*",' || true)
+        case "$AK_BAD_LINES" in
+          *from=*) AK_BAD_FROM="1" ;;
+        esac
       fi
       if [ -z "$AK_ESH_LINE" ]; then
         echo "   NOTE: no Eshu SSH line was found in $AK_FILE;"
         echo "         reinstall to add the dashboard key."
-      elif [ -z "$AK_DASH_FROM" ] \
-           && printf '%s' "$AK_ESH_LINE" | grep -q 'from='; then
+      elif [ -n "$AK_BAD_FROM" ]; then
         echo "   WARNING: an Eshu SSH line has a from= that could not be read;"
         echo "            authorized_keys was not changed."
       else

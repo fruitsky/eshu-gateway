@@ -643,6 +643,40 @@ def test_bh1_an_unreadable_from_is_refused(tmp_path):
     assert "could not be read" in proc.stdout
 
 
+def test_bj1_a_later_unreadable_from_also_refuses(tmp_path):
+    """BJ1: the check is on every Eshu line, not just the first.
+
+    The gateway line is unrestricted; the dashboard line was restricted by
+    hand with its options in another order. Rewriting the dashboard line
+    without its from= would drop that restriction.
+    """
+    original = (
+        'command="/usr/bin/sudo /usr/local/bin/eshu-gateway.sh",restrict '
+        'ssh-ed25519 AAAAold eshu-gateway-key\n'
+        'command="/usr/bin/sudo /usr/local/bin/eshu-gateway.sh --dashboard-key",'
+        'from="192.0.2.0/24",restrict ssh-ed25519 AAAAdash eshu-dashboard\n')
+    proc, _, after = _run_keys(tmp_path, "1", "direct+mcp", mode="update",
+                               original=original)
+    assert proc.returncode == 0, proc.stderr
+    assert after == original
+    assert "could not be read" in proc.stdout
+
+
+def test_bj1_a_leading_from_on_every_line_still_updates(tmp_path):
+    """The legal case: both Eshu lines lead with a parseable from=."""
+    original = (
+        'from="192.0.2.0/24",command="/usr/bin/sudo /usr/local/bin/eshu-gateway.sh",'
+        'restrict ssh-ed25519 AAAAold eshu-gateway-key\n'
+        'from="192.0.2.0/24",command="/usr/bin/sudo /usr/local/bin/eshu-gateway.sh '
+        '--dashboard-key",restrict ssh-ed25519 AAAAdash eshu-dashboard\n')
+    proc, _, after = _run_keys(tmp_path, "1", "direct+mcp", mode="update",
+                               original=original)
+    assert proc.returncode == 0, proc.stderr
+    assert "could not be read" not in proc.stdout
+    assert 'from="192.0.2.0/24"' in after
+    assert after.count("eshu-dashboard") == 1
+
+
 def test_bh1_no_eshu_line_means_no_change(tmp_path):
     """BH1: an old mcp_only install has no Eshu line to copy from= out of."""
     proc, _, after = _run_keys(tmp_path, "1", "mcp_only", mode="update",

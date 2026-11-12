@@ -11673,6 +11673,22 @@ installer change, as the note says.
     with a non-leading `from=`. The file must stay unchanged.
 * BH2 is still a should, for later.
 
+**BJ1 implemented (2026-11-12).** The check is over every Eshu line now: it
+collects the lines containing `/usr/local/bin/eshu-gateway.sh`, drops the ones
+whose `from=` is in the leading `from="...,` form, and if any remaining line
+contains `from=` the file is left alone with the warning. That covers both
+the "first line unrestricted, later dashboard line restricted by hand" case
+and the fallback that copied a wider gateway `from=` when the dashboard
+line's own was unreadable. `grep -q` is deliberately not used in the
+pipeline: under `set -o pipefail` its early exit gives the upstream `grep`
+SIGPIPE and the pipeline would report failure on a match. Tests:
+`test_bj1_a_later_unreadable_from_also_refuses` (file byte-identical) and
+`test_bj1_a_leading_from_on_every_line_still_updates`; the earlier BH1 tests
+still pass. Installers regenerated.
+
+`bash scripts/verify.sh`: `2857 passed, 26 skipped, 8 warnings in 583.39s
+(0:09:43)`.
+
 ### GT1 — gateway token rotation · branch `feat/gateway-token-rotation` · design first
 
 The dashboard has no rotate action today; the only way to rotate a token is to remove and re-enrol the gateway. Design:
