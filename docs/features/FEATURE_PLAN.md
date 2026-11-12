@@ -11391,6 +11391,40 @@ of by a list. Both options, exactly:
 
 _(reviewer)_
 
+### Reviewer notes (main feature reviewer, 2026-11-12, design round 1)
+
+A clear note, and it follows the seven decisions. I agree with both of the smaller decisions: an ambiguous match gets a card plus `allowance_ambiguous`, and an allowance is not consulted when the call would not be gated. The security reviewer has already answered the label question in chat (relayed below, to be confirmed in their review), so the next round can fold it in.
+
+**The security reviewer's answer on labels (relayed 2026-11-12): neither A nor B as written; "resolve at apply time".**
+* A label may be used to *write* a template.
+* When the template is applied ("Update agents"), the label is resolved to an entity list. That list is stored on the allowance and shown, and calls match the stored list, never the label.
+* A periodic refresh re-resolves the label:
+  * an entity that has left the label drops out at once;
+  * an entity that has joined is held until the operator accepts it in one click ("label X now also includes Y"); until then a call to it gets a card.
+* The never domains and values are filtered after resolution. A `script.*` or `automation.*` entity carrying the label is excluded and shown as excluded.
+* Services are stated per domain in a label template.
+* The match is on the label **ID**, not its display name. A failed registry read means a card.
+
+This keeps §2's "two forms" for *matching*. The label exists only in the template and in the refresh.
+
+**AZ1 (must, from the security reviewer): the call's target must be plain entity ids.** `call_service` also accepts `area_id`, `device_id` and `label_id`, which HA expands when the call runs. The allowance matches only when the target is a plain entity-id string or list that is a subset of the stored list, and any expanding key gets a card. §2 already allows only `entity_id` in `data`. State it as a named rule with a test for each expanding key, in `data` and in a top-level `target`.
+
+**AZ2 (must, from the security reviewer): F11 can redefine an allowed entity.** An approved config write can turn `switch.x` into a template switch backed by a script or a `shell_command`. Either:
+* an F11 write to a file that defines an allowed entity suspends that allowance until it is re-confirmed (preferred, if entities can be mapped to their defining files), or
+* entities defined in YAML inside F11's write scope cannot be allowed at all.
+
+Say which, and how the mapping is done.
+
+**AZ3 (should): say plainly that v1 is HA only.** Only `call_service` carries the seed field, and handler tools are not allowable (§3), so the NPM and Pi-hole handlers are out. Under decision 1 the other four integrations then have no allowable tool in v1: every write asks. Add one sentence and one row per integration to the status line, so the operator is not surprised. A later chunk can give each seed its own field.
+
+**AZ4 (should): local time.** The window is the dashboard host's local time. State that, show the zone on the page, and test across midnight and a DST change (§6 already covers the midnight case).
+
+**AZ5 (should): a revoked or deleted agent token stops matching at once.** The token-deleted case is covered; add revoked, as F16 AW2 did.
+
+**AZ6 (operator question, asked by the reviewer): `restart`.** Jellyfin's `/System/Restart` still auto-runs under `destructive`. Adding `restart` to the list would also mark HA `homeassistant.restart` (already a never domain) and any later restart path. Waiting for the operator's answer.
+
+Next: DeepSeek folds the label shape, AZ1–AZ5 (and AZ6 once answered) into the note; then the security reviewer reviews the note.
+
 ---
 
 ## 7. Backlog (not planned in detail)
