@@ -73,3 +73,18 @@ def test_ssh_change_is_audited(auth_client):
     auth_client.put(f'/api/agents/{aid}/policy', json={'ssh_hosts_allow': ['10.0.0.9']})
     rows = [r for r in get_audit_log(limit=20) if r.get('event_type') == 'agent_policy_updated']
     assert any('ssh_hosts=10.0.0.9' in (r.get('details') or '') for r in rows)
+
+
+def test_any_gateway_asks_first_in_the_ui():
+    """Security BF1: ticking '*' shows a confirmation that says it also
+    covers gateways enrolled later; only the confirm button stores it."""
+    import pathlib
+    static = pathlib.Path(__file__).resolve().parent.parent / 'dashboard' / 'static'
+    html = (static / 'index.html').read_text()
+    js = (static / 'app.js').read_text()
+    assert 'every gateway enrolled later' in html
+    assert 'confirmAgentSshAny(true)' in html
+    toggle = js.split('function toggleAgentSshAny(on) {', 1)[1].split('\n}', 1)[0]
+    first_push = toggle.find("_agentSshHosts.push('*')")
+    assert toggle.find('classList.remove(\'hidden\')') < first_push
+    assert 'agent-ssh-any' in js.split('function fetchAgentTokens', 1)[-1] or 'agent-ssh-any' in js

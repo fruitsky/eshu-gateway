@@ -23,7 +23,7 @@
 <link rel="preload" href="/static/fonts/instrument-serif-regular-latin.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="preload" href="/static/fonts/jetbrains-mono-var-latin.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="/static/fonts.css?v=2">
-<link rel="stylesheet" href="/static/style.css?v=ui12">
+<link rel="stylesheet" href="/static/style.css?v=ui13">
 
 </head>
 <body>
@@ -1016,7 +1016,7 @@
 </main>
 
 <script src="/static/state.js?v=ui3"></script>
-<script src="/static/app.js?v=ui19"></script>
+<script src="/static/app.js?v=ui20"></script>
 
 <!-- Create / Edit Approved Window Modal -->
 <div id="create-window-modal" class="modal-overlay hidden">
@@ -1511,6 +1511,13 @@
           <input type="checkbox" id="agent-ssh-any" onchange="toggleAgentSshAny(this.checked)">
           <span>Any registered gateway <code>*</code></span>
         </label>
+        <div id="agent-ssh-any-confirm" class="pol-confirm hidden" role="alertdialog" aria-labelledby="agent-ssh-any-q">
+          <p id="agent-ssh-any-q"><strong>Allow this agent on any gateway?</strong> <code>*</code> is not just the gateways listed here: it also covers every gateway enrolled later. In <em>Gateway policy</em> mode, allowlisted commands then run on all of them without a card.</p>
+          <span class="pol-inline">
+            <button type="button" class="btn btn-sm btn-deny" onclick="confirmAgentSshAny(true)">Allow any gateway</button>
+            <button type="button" class="btn btn-sm btn-muted" onclick="confirmAgentSshAny(false)">Cancel</button>
+          </span>
+        </div>
         <div id="agent-ssh-hosts" class="pol-checks"></div>
         <div id="agent-ssh-extra" class="pol-hint"></div>
       </section>

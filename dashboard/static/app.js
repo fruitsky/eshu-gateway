@@ -8609,11 +8609,13 @@ async function fetchAgentTokens() {
         : 'all tools';
       if (p.rate_limit_per_min) summary += ' · ' + p.rate_limit_per_min + '/min';
       var sshHosts = p.ssh_hosts_allow || [];
-      summary += ' · SSH ' + (sshHosts.indexOf('*') !== -1 ? 'any gateway'
+      var sshAny = sshHosts.indexOf('*') !== -1;
+      var sshText = 'SSH ' + (sshAny ? 'any gateway'
         : sshHosts.length ? sshHosts.length + ' gateway' + (sshHosts.length === 1 ? '' : 's') : 'off');
       return '<div class="agent-row">' +
         '<div><div class="text-sm">' + esc(a.name) + (a.revoked ? ' <span class="text-danger">(revoked)</span>' : '') + '</div>' +
-        '<div class="text-xs text-muted">last used: ' + used + ' · ' + esc(summary) + '</div></div>' +
+        '<div class="text-xs text-muted">last used: ' + used + ' · ' + esc(summary) + ' · ' +
+        (sshAny ? '<span class="agent-ssh-any">' + esc(sshText) + '</span>' : esc(sshText)) + '</div></div>' +
         '<div class="flex items-center gap-1">' +
         '<button onclick="openAgentPolicy(' + idJs(a.id) + ')" class="btn btn-xs">Policy</button>' +
         (a.revoked ? '' : '<button onclick="revokeAgentToken(this, ' + idJs(a.id) + ')" class="btn btn-xs btn-muted">Revoke</button>') +
@@ -8686,6 +8688,8 @@ function renderAgentPolicy(agent) {
   if (filterEl) filterEl.value = '';
   agentPolicyFilter('');
   _agentSshHosts = (p.ssh_hosts_allow || []).slice();
+  const anyBox = document.getElementById('agent-ssh-any-confirm');
+  if (anyBox) anyBox.classList.add('hidden');
   setAgentSshMode(p.ssh_mode || 'approval');
   renderAgentSshHosts();
   setAgentPolicyTab('tools');
@@ -8763,9 +8767,28 @@ function toggleAgentSshHost(ip, on) {
   renderAgentSshHosts();
 }
 
+/* Security BF1: '*' also covers every gateway enrolled later, so ticking it
+   asks first, in words; unticking does not. */
 function toggleAgentSshAny(on) {
+  const box = document.getElementById('agent-ssh-any-confirm');
+  if (on && !_agentSshHas('*')) {
+    const anyEl = document.getElementById('agent-ssh-any');
+    if (anyEl) anyEl.checked = false;
+    if (box) box.classList.remove('hidden');
+    return;
+  }
+  if (box) box.classList.add('hidden');
   _agentSshHosts = _agentSshHosts.filter(function(h) { return h !== '*'; });
   if (on) _agentSshHosts.push('*');
+  renderAgentSshHosts();
+}
+
+function confirmAgentSshAny(yes) {
+  const box = document.getElementById('agent-ssh-any-confirm');
+  if (box) box.classList.add('hidden');
+  if (!yes) return;
+  _agentSshHosts = _agentSshHosts.filter(function(h) { return h !== '*'; });
+  _agentSshHosts.push('*');
   renderAgentSshHosts();
 }
 

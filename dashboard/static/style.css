@@ -5531,3 +5531,9 @@ body.pol-open .mobile-menu-btn, body.pol-open .mobile-freeze { display: none; }
 .pol-check-any { margin-top: 8px; }
 .pol-checks.is-any { opacity: .45; pointer-events: none; }
 #pol-pane-ssh .pol-field { margin: 14px 0 18px; }
+.pol-confirm {
+  margin: 10px 0 6px; padding: 12px 14px; border: 1px solid var(--status-warning);
+  border-radius: 2px; display: flex; flex-direction: column; gap: 10px;
+  font-family: 'Space Grotesk', sans-serif; font-size: 13px; line-height: 1.6; color: var(--text-main);
+}
+.agent-ssh-any { color: var(--status-warning); }
