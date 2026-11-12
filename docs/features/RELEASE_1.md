@@ -175,7 +175,8 @@ was run. Step 4 below is that check, done by hand.
 6. **Optional, on that gateway only:** set capture to `tail`, run a command
    with large output (for example `journalctl -n 20000`), and confirm the
    result appears in the request's sidebar and the call returns promptly. Then
-   set it back, or keep it if wanted. **On a host whose `awk` is `mawk`**
+   set it back, or keep it if wanted. **On a gateway installed before the
+   gateway-hardening fix, on a host whose `awk` is `mawk`**
    (`awk -W version`): `tail` capture puts `mawk` in the output stream, and it
    reads stdin in 4 KiB blocks, so a *slow* command can outlive an agent
    disconnect until 4 KiB accumulate (measured 10.7 s). `exit-only` has no

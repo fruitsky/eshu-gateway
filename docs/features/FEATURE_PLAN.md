@@ -10983,6 +10983,277 @@ The operator asked for a pass over the **Integrations** page and the **agent pol
 
 The feature reviewer walks both screens with the operator before the design is written (see `RELEASE_TESTS.md`, to be added).
 
+---
+
+## Gateway hardening (AF3, tee capture) · branch `fix/gateway-hardening` · gateway bash · **security reviewer sign-off**
+
+Two items left over from earlier sign-offs: AF3 (F19 sign-off, `67bec51`) and
+S1 (buffering-fix sign-off, 2026-11-10). Gateway bash only; no dashboard
+change, so the compat rule (§ 2.3) is not touched.
+
+### Design note (written before the code)
+
+**Part A — AF3.** The session-signature check becomes
+`ESHU_CHECK_SID=… ESHU_CHECK_SIG=… python3 -I - /etc/eshu-session-key /etc/eshu-session-key.prev`.
+Python opens both key files itself (`.strip()`, a missing or unreadable file
+is an empty key, a non-hex key is skipped exactly as before). argv carries only
+the two **paths**. The session id and signature go in the child's environment,
+which `/proc/<pid>/environ` shows only to root (the signature is a session
+credential, and the line is being touched anyway). The comparison
+(`hmac.compare_digest`, current key then `.prev`) is unchanged.
+
+**Part B — S1, the tee capture.** Only `tail` mode changes. Today:
+
+    cmd 2>&1 | cap_raw | sanitize | cap_visible | capture_tail "$ESHU_OUT_TAIL"
+
+After:
+
+    cmd 2>&1 | cap_raw | sanitize | cap_visible \
+      | "${TEE_CMD[@]}" >(exec >/dev/null 2>&1
+                          capture_job "$ESHU_CAP_PART" "$ESHU_OUT_TAIL")
+
+* `tee`'s stdout is the agent. awk is no longer between the command and the
+  agent, so a disconnect reaches `tee` on its next write (mawk's 4 KiB stdin
+  block no longer matters). **Never `tee -p`**: `-p` would keep feeding the
+  capture after the agent hangs up, and the command would never see the
+  broken pipe.
+* `TEE_CMD` is `tee --output-error=exit` when the host's tee accepts it
+  (probed once, in `tail` mode only), else plain `tee`. *(Changed during
+  implementation: the first draft said plain `tee`.)* The SIGPIPE-ignored
+  test showed that plain GNU tee, with SIGPIPE ignored, drops the failed
+  stdout and keeps feeding the capture, so `yes` never stopped.
+  `--output-error=exit` exits on EPIPE whatever the signal disposition. With
+  SIGPIPE at its default, which is what sshd gives its children, both forms
+  behave the same.
+* The `exec >/dev/null 2>&1` inside the substitution is required. *(Changed
+  during implementation: the first draft put the redirect on the function
+  call.)* A redirect on the call covers only the function's commands. The
+  substitution's own bash process kept the agent's stdout and stderr open,
+  and the stuck-capture test then hung for 60 s: the SSH channel never saw
+  EOF.
+* **The capture can never cut the agent's stream (D1).** `capture_job` runs
+  `capture_tail` (the same ring, same 16 385-byte cap, stdout to `/dev/null`)
+  and then `cat >/dev/null`. If awk ever died early, `cat` drains the rest, so
+  `tee` never gets EPIPE from the capture side.
+* **Temp name, then rename.** Each call gets a private directory
+  (`mktemp -d -p /run/eshu eshu-out.XXXXXX`, 0700). The main shell creates
+  `part` in it before the pipeline. `capture_job` writes the ring into `part`
+  and, only if awk succeeded, renames it with `mv -fT part tail`. Whatever
+  happens, its last step is `rm -rf part`. The result post reads only `tail`,
+  so it sees a complete capture or none.
+* **The bounded wait.** After the pipeline, the main shell waits while `part`
+  still exists: `sleep 0.05`, at most `CAPTURE_WAIT_TICKS=40` times, so
+  **2 s**. Normally `part` is gone in one or two ticks (awk's END plus one
+  `mv`). It is a file poll, not a `wait`: the process substitution is a child
+  of the `tee` pipeline element, not of the script, so the script has no PID
+  to wait for, and an unbounded `wait` is ruled out anyway.
+* **On timeout:** the script writes `CAPTURE TIMEOUT` to syslog and clears
+  `ESHU_OUT_TAIL`, so the result is posted with exit code and duration but no
+  output (the same as `CAPTURE FAILED`). The call returns. The exit code,
+  the sentinel, the F19 limit marker and the agent's stream are not affected.
+  The EXIT trap removes the whole private directory (`rm -rf`). A capture
+  that finishes later cannot create files there, because the directory is gone.
+  The stuck process is not killed: the script has no PID for it (see above).
+  It holds no file descriptor of the agent's channel (its stdout and stderr
+  are `/dev/null`), so it does not keep the SSH session open, and its memory
+  is bounded by the ring.
+* **Unchanged:** the 16 385-byte ring and its tests; F19's
+  `cap_raw | sanitize | cap_visible` and the cut probe; `rc=${PIPESTATUS[0]}`
+  (the command's status, never a filter's); the `[ESHU exit=N]` sentinel,
+  printed by the main shell after the wait, so it is never in the capture;
+  `exit-only` and `off` (no capture process at all).
+* **MCP mode is not changed.** Its stream goes to `/dev/null`, not to the
+  agent, so there is no live stream to take awk out of. The 65 537-byte ring
+  stays the last pipeline element. It is written by END in a process the shell
+  already waits for, so a partial envelope capture cannot be read.
+* `capture_tail` now returns 1 after `CAPTURE FAILED` (it returned the
+  logger's 0), so that `capture_job` can tell a failed write from a good one.
+  Every caller ignores the status (`set +e`, `PIPESTATUS[0]`).
+
+### Implementer notes
+
+**Commits:** `3d21d48` design note · `d45c64d` AF3 · `3f73027` S1 (the tee
+capture) · `de9773a` design-note corrections. All three installers carry the
+same gateway script (`static/dev/` copied from the generated one, as it was
+byte-identical at the base `7d7f3b8`).
+
+**Tests** (new file `tests/test_gateway_hardening.py`, plus two changed F5 tests):
+
+* `test_af3_session_check_keeps_keys_out_of_argv[valid|invalid]`: a
+  `python3` stub on the sandbox PATH records every interpreter argv. The
+  session check's argv is exactly `-I - <key path> <prev path>`. No call
+  carries the key, the prev key or the signature. A valid signature runs the
+  command and an invalid one is refused.
+* `test_af3_previous_key_and_trailing_newlines_still_verify`: keys written
+  with a newline verify, both current and `.prev` (the `$(cat …)` strip is
+  kept).
+* `test_af3_missing_prev_key_and_garbage_key_fail_closed`: a non-hex key and
+  no `.prev` refuse.
+* `test_af3_every_python3_in_the_gateway_is_isolated`: every `python3` call
+  in the source is `python3 -I`.
+* `test_s1_stuck_capture_does_not_hold_the_call[empty|PARTIAL]`: an `awk`
+  stub reads its input, optionally writes a partial capture, then sleeps
+  600 s. The call returns within the bound plus slack, with the command's
+  stdout, exit code and sentinel. `CAPTURE TIMEOUT` is logged, the result is
+  posted with no output (the half-written part is never posted), and the run
+  directory is empty afterwards. This test hung for 60 s before the
+  `exec >/dev/null 2>&1` fix.
+* `test_s1_tail_capture_is_complete_and_inside_the_bound[mawk|gawk]`: 20 000
+  lines. No timeout, the posted tail is the last 16 KiB of what the agent
+  saw, and the directory is removed.
+* `test_s1_tail_mode_has_no_awk_in_the_stream`: source guard. The branch ends
+  in `"${TEE_CMD[@]}" >(exec >/dev/null 2>&1 … capture_job …)`, with no
+  `capture_tail` in the stream and no `tee -p`.
+* `test_s1_tee_capture_ends_when_the_agent_disconnects[mawk|gawk × default|ignored]`:
+  function level, `yes | tee-shape | head -n 1`. The writer is stopped in
+  every case, and the capture still completes (≤ 16 385 bytes). With plain
+  tee the `ignored` cases hung, which is why `--output-error=exit` is used.
+* `test_s1_tee_capture_is_the_visible_stream[mawk|gawk]`: the agent gets every
+  byte, and the capture is exactly the last 16 385 of them.
+* `test_s1_capture_that_dies_never_cuts_the_stream`: an awk that exits at once
+  does not cut 1 MB of output (the `cat` drain). Nothing is renamed and
+  `CAPTURE FAILED` is logged.
+* `test_s1_capture_rename_refuses_a_directory[mawk|gawk]`: `mv -T` does not
+  move the capture into a `tail` directory. The failure is logged and `part`
+  is removed.
+* `test_f5_gateway_slow_writer_dies_with_the_agent`: the mawk + `tail` skip
+  is removed. This is the "slow writer under mawk stops promptly" test. It
+  now also bounds the time to the first line (< 10 s). Without that bound
+  the **old** pipeline passed after 62 s, because the disconnect clock
+  started only once mawk released the first line. Checked: it fails on the
+  base script (62.2 s) and passes here. SIGPIPE-ignored keeps its skip (GNU
+  `sed`, not awk).
+* `test_f5_gateway_unwritable_capture_keeps_stdout_and_exit`: replaces
+  `eshu-out.*/part`, the file awk now writes, so the same END-write failure
+  is injected.
+
+**Unsure / for the reviewers:**
+
+* **`tee --output-error=exit`** is a GNU coreutils ≥ 8.24 option. It is
+  probed once per `tail` call, which costs one extra `tee` process only in
+  `tail` mode. A host without it falls back to plain `tee`, which differs
+  only with SIGPIPE ignored. The fallback is silent. I did not add a syslog
+  line, to avoid one per call (compare N2).
+* **`mv -fT`** is also GNU. Without `-T` a `tail` directory would swallow the
+  capture. BusyBox `mv` may lack it, and then `tail` capture always logs
+  `CAPTURE FAILED` and posts no output. That is safe but useless, and § 2.7
+  already lists coreutils as a dependency.
+* **The stuck process is not killed** on timeout. The script has no PID for
+  it, because the process substitution belongs to the `tee` pipeline element.
+  It holds no fd of the agent's channel, its memory is bounded by the ring,
+  and its directory is gone. There is one narrow race: if the EXIT trap's
+  `rm -rf` runs while a late awk recreates `part`, one ≤ 16 KiB directory can
+  be left in `/run/eshu`. This happens only after a timeout.
+* The session **signature** also moved off argv, not only the keys. It is
+  the same exposure and the same line, and it costs nothing.
+* **MCP mode is unchanged** (no live stream; see the design note).
+* **Out of scope, not fixed:** `GatewaySandbox.run`'s hang report raises
+  `TypeError` (bytes + str) when `TimeoutExpired.stdout` is bytes, so a hang
+  shows as a TypeError rather than the report. I saw this while debugging.
+* **`RELEASE_1.md` step 6** still describes the mawk/`tail` residual. It is
+  correct for gateways older than this branch. Whether to reword it depends
+  on which gateway version the release ships, so I left it for the reviewer.
+
+`bash scripts/verify.sh`: `2837 passed, 4 skipped, 7 warnings in 681.30s (0:11:21)` (mawk and gawk both installed here, so the awk matrix ran in full).
+
+### Reviewer notes
+
+_(reviewer)_
+
+### Reviewer notes (main feature reviewer, 2026-11-12, code round 1)
+
+**Approved from the feature side; to the security reviewer (gateway bash, § 2.6a).** Rechecked locally: the three installers carry the gateway script byte for byte, every `python3` in the gateway runs with `-I`, and `tests/test_gateway_hardening.py` plus `tests/test_f5_exec_results.py` pass (65 passed, 4 skipped; mawk and gawk both present).
+
+What I checked:
+* AF3: argv holds only the two key paths; the id and signature go through the child's environment (readable by the same uid and root only). A missing or unreadable key file is an empty key, so it fails closed exactly as `cat || echo ""` did. Taking the signature off argv as well is right.
+* S1: awk is out of the agent's stream, `part` exists before `tee` starts (so the poll cannot see "done" too early), only a finished ring is renamed to `tail`, `duration_ms` is taken before the wait, and a timeout posts no output instead of a partial one. The `exec >/dev/null 2>&1` inside the substitution is the real fix for the 60 s hold; good that the test caught it.
+
+For the security reviewer to rule on (none blocks from my side):
+* AX1: **a stuck capture is not killed on timeout.** It holds no part of the agent's channel and its memory is bounded, but each stuck call leaves a root process behind. A cheap fix: `capture_job` writes its `$BASHPID` into the private directory and the timeout path kills that process group. Your call whether this is a must or a recorded residual.
+* AX2: **hosts without `tee --output-error`** (coreutils < 8.24, BusyBox) fall back to plain `tee` silently. With SIGPIPE at its default (the sshd case) that behaves the same; with SIGPIPE ignored, the command runs to completion after a disconnect, as it did before the buffering fix. `mv -T` is GNU too, so BusyBox gets CAPTURE FAILED and no output, which is safe.
+* AX3 (should, feature side): the `GatewaySandbox.run` TypeError on timeout hides the diagnostic report. Fix it in this branch if it is a one-liner, otherwise in the next test-harness change.
+
+At merge (reviewer): `RELEASE_1.md` step 6 gets "the mawk delay applies only to gateways installed before this fix".
+
+### Reviewer notes (security reviewer, 2026-11-12, code round 1 at `896e59a`)
+
+**Approved for merge. No must items.** I read the gateway hunk and checked
+that the three installers carry the same changed lines as `eshu-gateway.sh`.
+
+What I checked:
+* **AF3.**
+  * argv holds `-I -` and the two key paths only.
+  * The id and signature are prefix assignments on the `python3` call. They
+    are not exported to the shell or to the command that runs later.
+  * `-I` and the fixed `PATH` (line 5) leave no interpreter search path an
+    agent can steer.
+  * A missing or unreadable key is empty and skipped, a non-hex key is
+    skipped, and a non-ASCII signature makes `compare_digest` raise, which
+    exits non-zero. All three fail closed.
+  * `.strip()` is a little wider than `$(cat)` (it also strips leading
+    blanks). That is harmless for a hex key.
+* **S1.**
+  * The private directory comes from `mktemp -d` (0700, root), so the
+    `mv -fT part tail` and the `rm -rf` act inside a directory no other
+    user can write. There is no symlink race.
+  * `ESHU_CAP_DIR` is reset at the top of `run_sanitized` and set only from
+    `mktemp -d`, so the trap's `rm -rf` cannot be pointed elsewhere.
+  * `part` exists before the pipeline, and the post reads only `tail`, so a
+    partial ring is never posted.
+  * Only `tee` holds the substitution's write end, so the capture sees EOF
+    when `tee` exits.
+  * The `exec >/dev/null 2>&1` keeps the capture off the SSH channel.
+
+**AX1: recorded residual, not a must. Do not use the suggested
+process-group kill.**
+* Only an awk that never ends can leave the capture behind. Agent output
+  cannot cause that: the ring is linear, and `cap_visible` bounds the input
+  first. So the leftover root process needs a broken awk, not a hostile
+  agent.
+* The gateway runs without job control. The capture, the command and the
+  gateway script itself all share one process group, so
+  `kill -- -<pgid>` would kill the gateway along with the capture.
+* If you want the kill anyway (a should, not needed for this merge):
+  * `capture_job` writes `$BASHPID` to `pid` in the private directory.
+  * On timeout the main shell kills that PID and its children
+    (`pkill -P`, then `kill`), never a group.
+  * It does this before the EXIT trap removes the directory.
+  * The PID is safe to trust because only root can write the directory, and
+    the process is still alive when it is read.
+* Record the residual in § 2.7 in one line: "after a capture timeout, a
+  stuck capture process may remain; it holds no agent fd and at most 16 KiB".
+
+**AX2: recorded residual, not a must.**
+* Plain `tee` with SIGPIPE ignored lets an approved command run on after a
+  disconnect. It still ends at its F19 time limit and stays inside its
+  approval, so nothing new is granted. It is the same behaviour as before
+  the fix.
+* sshd starts the gateway with SIGPIPE at its default, so the fallback
+  matters only for an unusual parent.
+* Keeping the fallback silent is right (compare N2).
+* Add one line to § 2.7's dependency list: "coreutils ≥ 8.24
+  (`tee --output-error`, `mv -T`) for the tail capture; older or BusyBox
+  hosts get no tail capture or no stop-on-disconnect with SIGPIPE ignored".
+
+**AX3:** feature side; fixed in `5c1e290`, no security view.
+
+**BA1 (should, later chunk, dashboard side): show a missing capture as
+missing.**
+* On `CAPTURE TIMEOUT` or `CAPTURE FAILED` the gateway posts
+  `"encoded_output":""`. The dashboard then shows a command that printed
+  nothing, not one whose output was lost.
+* An agent cannot force either event today, so this is not exploitable now.
+  But an empty result row should not be what the operator reads as
+  "it printed nothing".
+* Fix: a literal field, `"capture":"missing"` (one fixed value, like
+  `limit`), that the dashboard renders as "output not captured".
+* Not in this branch, because the branch makes no dashboard change. Put it
+  in the next F5 or F19 change.
+
+At merge: the feature reviewer's `RELEASE_1.md` step 6 line, as noted.
+
+---
+
 ## 7. Backlog (not planned in detail)
 
 * Deny with a reason, shown to the agent (cheap; low value given the data).
@@ -11045,7 +11316,8 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 24 | F20 | local-agent-pass | docs | Parked | `docs/local-agent-pass` (local, unpushed) | — | experiment; last |
 | 25 | F17 | local-agent | dashboard + docs | After F20; pre-implementation notes A1–A6 | `feat/f17-local-agent` | F12–F16, F26 | experiment; last |
 | — | CI fix | ci-environment | gateway + tests | Merged (`f2746ef`); CI pinned to ubuntu-24.04 (`6d58006`) | `fix/ci-environment` | F5 | |
-| — | Buffering | stream-unbuffered | gateway | Merged (`d8d70c2`); S1 tee fix later | `fix/stream-unbuffered` | F5 | |
+| — | Buffering | stream-unbuffered | gateway | Merged (`d8d70c2`); S1 tee fix done in Gateway hardening | `fix/stream-unbuffered` | F5 | |
+| — | Gateway hardening | gateway-hardening | gateway | **Merged** 2026-11-12 (AF3 + S1 tee capture; security `c15664e`; AX1/AX2 residuals; BA1 for the next F5/F19 change) | `fix/gateway-hardening` | F19, Buffering | |
 
 Chunks are done **in the order column**; each new chunk branches from the
 updated `feature-roadmap` after the previous one is merged. A design-first
