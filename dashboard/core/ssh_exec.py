@@ -120,16 +120,27 @@ def resolve_gateway(host: str):
     return matches[0] if len(matches) == 1 else None
 
 
-def host_allowed(hosts, gateway: dict, host: str) -> bool:
-    """`ssh_hosts_allow`: empty means none (opt-in), `*` means any gateway."""
-    hosts = [str(h).strip() for h in (hosts or []) if str(h).strip()]
+def host_allowed(hosts, gateway: dict, host: str = '') -> bool:
+    """`ssh_hosts_allow`: empty means none (opt-in), `*` means any gateway.
+
+    BF2: only the gateway's IP matches, plus `*`.
+
+    The gateway's hostname is whatever it last sent to `/api/register`, so a
+    compromised gateway B can re-register under gateway A's name and satisfy
+    an agent entry that was written for A; the agent's commands then go to B.
+    A hostname in the agent's list is therefore stored but never matched. The
+    policy modal offers to rewrite known hostnames to their gateway IP; the
+    refusal below names the entry when it would have matched this way.
+    """
+    hosts = [str(h).strip().lower() for h in (hosts or []) if str(h).strip()]
     if not hosts:
         return False
     if '*' in hosts:
         return True
-    wanted = {(gateway.get('ip') or '').lower(),
-              (gateway.get('hostname') or '').lower(), (host or '').lower()}
-    return any(h.lower() in wanted for h in hosts)
+    ip = (gateway.get('ip') or '').strip().lower()
+    if not ip:
+        return False
+    return ip in hosts
 
 
 def agent_ssh_policy(agent) -> dict:
@@ -348,6 +359,18 @@ def ssh_exec(host: str, command: str, session_id: str = '', timeout=None,
 
     policy = agent_ssh_policy(agent)
     if not host_allowed(policy['ssh_hosts_allow'], gateway, host):
+        # BF2: say why a hostname entry no longer works, and where to fix it,
+        # instead of the generic "no SSH access" that looks like a mistake.
+        entries = {str(h).strip().lower() for h in policy['ssh_hosts_allow'] if str(h).strip()}
+        gw_name = (gateway.get('hostname') or '').strip()
+        if gw_name and gw_name.lower() in entries:
+            _audit('hostname_entry_ignored', gateway)
+            return refused(
+                'host_not_allowed',
+                message=(f"this agent's host list names {gw_name} by hostname. Only a "
+                         f"gateway IP is matched, because a gateway can register under "
+                         f"another gateway's name; convert that entry to "
+                         f"{gateway.get('ip')} on the agent's SSH tab."))
         _audit('host_not_allowed', gateway)
         return refused('host_not_allowed',
                        message=f"this agent has no SSH access to {gateway.get('ip')}.")
