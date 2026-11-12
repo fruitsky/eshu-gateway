@@ -32,6 +32,9 @@ JIT_WAIT_SECONDS="${ESHU_JIT_WAIT:-90}"
 # leaves unread, and a disconnect still ends the command at its next write
 # (plain `tee` — `-p` would keep it alive after the agent is gone).
 ESHU_RUN_DIR="${ESHU_RUN_DIR:-/run/eshu}"
+# BI2: every lockbox read-modify-write (this script's claim/remove and the
+# poller's cleanup/append) holds flock on one file in the root-only run dir.
+TICKETS_LOCK="$ESHU_RUN_DIR/eshu.tickets.lock"
 ESHU_RUN_OWNER="${ESHU_RUN_OWNER:-0}"
 ESHU_CAPTURE_FILE="${ESHU_CAPTURE_FILE:-/etc/eshu-capture}"
 ESHU_OUT_TAIL=""
@@ -1163,49 +1166,71 @@ claim_ticket_by_id() {   # $1 = request id; 0 when the ticket is ours
   return 0
 }
 
+# BI2: the lockbox file is written by this script and by the poller. A read,
+# rewrite and rename without a lock lets two claims both take the same line,
+# and lets the poller's cleanup move back a copy taken before a claim. The
+# lock lives in the root-only 0700 run dir; `flock` (util-linux, present on
+# every systemd host) is required to claim at all — without it, fail closed
+# and let the command go through JIT instead.
+tickets_lock() {
+  if [ ! -d "$ESHU_RUN_DIR" ]; then
+    install -d -m 0700 "$ESHU_RUN_DIR" 2>/dev/null || return 1
+  fi
+  command -v flock >/dev/null 2>&1 || return 1
+  exec 9>>"$TICKETS_LOCK" || return 1
+  flock -w 5 9 || { exec 9>&-; return 1; }
+  return 0
+}
+
+tickets_unlock() {
+  flock -u 9 2>/dev/null || true
+  # BK4: close the descriptor too, so a command run after the claim cannot
+  # inherit the lock (the nonce helper does the same).
+  exec 9>&-
+}
+
+# BI1: a lockbox line is one line. A CR inside it means the dashboard tried to
+# put a line break into the file; a stamp more than a few seconds ahead is not
+# a real ticket (and a negative age would never expire).
+ticket_line_valid() {   # $1 = ts
+  local now
+  now=$(date +%s)
+  case "$1" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$1" -le $(( now + 5 )) ] && [ $(( now - $1 )) -le 90 ]
+}
+
 claim_lockbox_ticket() {
   [ -f "$TICKETS_FILE" ] || return 1
 
   local now tmp matched="no" line
   now=$(date +%s)
-  tmp=$(mktemp)
+  # BI2: the temp file is created in the same root-only directory as the real
+  # one, so `mv` is a rename on the same filesystem, not a copy out of /tmp.
+  tmp=$(mktemp -p "$ESHU_RUN_DIR" eshu-tickets.XXXXXX) || return 1
+  if ! tickets_lock; then
+    rm -f "$tmp"
+    logger -t eshu-gateway "LOCKBOX LOCK UNAVAILABLE — refusing the claim (command will go through JIT)"
+    return 1
+  fi
   while IFS= read -r line || [ -n "${line:-}" ]; do
     [ -z "${line:-}" ] && continue
+    case "$line" in *$'\r'*) continue ;; esac
     parse_ticket_line "$line"
-    case "$T_TS" in
-      ''|*[!0-9]*) continue ;;
-    esac
-    if [ $(( now - T_TS )) -le 90 ]; then
-      if [ "$matched" = "no" ] && [ "$T_CMD" = "$cmd" ] && ticket_allowed "$T_AGENT" "$T_SESSION"; then
-        matched="yes"
-      else
-        printf '%s\n' "$line" >> "$tmp"
-      fi
-    fi
-  done < "$TICKETS_FILE"
-
-  mv -f "$tmp" "$TICKETS_FILE"
-  chmod 600 "$TICKETS_FILE"
-
-  [ "$matched" = "yes" ]
-}
-
-remove_claimed_ticket() {
-  local tmp removed="no" line
-  [ -f "$TICKETS_FILE" ] || return 0
-  tmp=$(mktemp)
-  while IFS= read -r line || [ -n "${line:-}" ]; do
-    [ -z "${line:-}" ] && continue
-    parse_ticket_line "$line"
-    if [ "$removed" = "no" ] && [ "$T_CMD" = "$cmd" ] && ticket_allowed "$T_AGENT" "$T_SESSION"; then
-      removed="yes"
+    ticket_line_valid "$T_TS" || continue
+    if [ "$matched" = "no" ] && [ "$T_CMD" = "$cmd" ] && ticket_allowed "$T_AGENT" "$T_SESSION"; then
+      matched="yes"
     else
       printf '%s\n' "$line" >> "$tmp"
     fi
   done < "$TICKETS_FILE"
+
   mv -f "$tmp" "$TICKETS_FILE"
   chmod 600 "$TICKETS_FILE"
+  tickets_unlock
+
+  [ "$matched" = "yes" ]
 }
+
 
 if claim_lockbox_ticket; then
   logger -t eshu-gateway "JIT TICKET CLAIMED AND BURNED FOR: $cmd"
@@ -1235,6 +1260,14 @@ if [ "${HTTP_STATUS:-}" = "403" ]; then
   ENC_MSG=$(echo "$RESPONSE" | head -n1 | python3 -I -c "import sys, json; print(json.load(sys.stdin).get('detail', 'Encoded payload blocked.'))" 2>/dev/null || echo "Encoded payload blocked.")
   logger -t eshu-gateway "ENCODED PAYLOAD BLOCKED: $ENC_MSG"
   say "[LOCKED] $ENC_MSG [Gateway $GATEWAY_VERSION]"
+  finish refused 1
+fi
+# BK2: the dashboard refuses a malformed request (a line break in the command)
+# before it creates a row. Show its reason instead of "unreachable".
+if [ "${HTTP_STATUS:-}" = "400" ]; then
+  REQ_MSG=$(echo "$RESPONSE" | head -n1 | python3 -I -c "import sys, json; d=json.load(sys.stdin).get('detail', 'Request refused.'); print(d if isinstance(d, str) else d.get('message', 'Request refused.'))" 2>/dev/null || echo "Request refused.")
+  logger -t eshu-gateway "JIT REQUEST REFUSED: $REQ_MSG"
+  say "[LOCKED] $REQ_MSG [Gateway $GATEWAY_VERSION]"
   finish refused 1
 fi
 if [ "${HTTP_STATUS:-}" != "200" ]; then
@@ -1367,8 +1400,6 @@ done
 if [ "$TICKET_FOUND" = "yes" ]; then
   say "   [OK] Approved! Executing command now..."
   logger -t eshu-gateway "JIT AUTO-POLL: Ticket approved, executing: $cmd"
-  # Remove consumed ticket from lockbox (awk-based, no nested loop)
-  remove_claimed_ticket
   RESULT_PATH="jit"
   RESULT_REQUEST_ID="$REQUEST_ID_INT"
   run_sanitized bash -c "$cmd"

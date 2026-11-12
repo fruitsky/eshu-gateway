@@ -65,13 +65,52 @@ def test_get_ticket_by_request_id_returns_none_for_pending():
 
 
 def test_get_ticket_by_request_id_already_consumed():
+    """BI2: a consumed row is spent; the by-id path never re-issues it."""
     from db.requests import create_request, update_request_status, get_ticket_by_request_id
     rid = create_request("10.0.0.1", "uptime")
     update_request_status(rid, "approved")
-    get_ticket_by_request_id(rid)
-    ticket2 = get_ticket_by_request_id(rid)
-    assert ticket2 is not None
-    assert "uptime" in ticket2["ticket"]
+    assert get_ticket_by_request_id(rid) is not None
+    assert get_ticket_by_request_id(rid) is None
+
+
+def _set_expiry(rid, expires_at):
+    from db.core import db_conn
+    with db_conn() as conn:
+        conn.execute("UPDATE requests SET expires_at = ? WHERE id = ?", (expires_at, rid))
+        conn.commit()
+
+
+def test_bk1_claim_by_id_refuses_a_row_past_expires_at(monkeypatch):
+    """One expiry rule: a row is approved only until expires_at."""
+    import db.requests as req
+    base = 1_800_000_000
+    rid = req.create_request("10.0.0.5", "uptime")
+    req.update_request_status(rid, "approved")
+    _set_expiry(rid, base)
+
+    monkeypatch.setattr(req.time, "time", lambda: base + 1)   # expires_at + 1
+    assert req.get_ticket_by_request_id(rid) is None
+    assert req.get_request_status(rid) == "approved"
+
+    monkeypatch.setattr(req.time, "time", lambda: base - 1)   # expires_at - 1
+    ticket = req.get_ticket_by_request_id(rid)
+    assert ticket is not None and "uptime" in ticket["ticket"]
+    assert req.get_request_status(rid) == "consumed"
+
+
+def test_bk1_the_sweep_abandons_at_expires_at(monkeypatch):
+    import db.requests as req
+    base = 1_800_000_000
+    rid = req.create_request("10.0.0.5", "uptime")
+    req.update_request_status(rid, "approved")
+    _set_expiry(rid, base)
+
+    assert req.expire_stale_requests(now_ts=base - 1) == ([], [])
+    assert req.get_request_status(rid) == "approved"
+
+    expired, abandoned = req.expire_stale_requests(now_ts=base + 1)
+    assert expired == [] and abandoned == [rid]
+    assert req.get_request_status(rid) == "abandoned"
 
 
 def test_update_ticket_consumed_by_ip():

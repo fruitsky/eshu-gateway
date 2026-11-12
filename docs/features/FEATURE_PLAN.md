@@ -11770,6 +11770,168 @@ Rollout: merge, deploy the dashboard, update n8n only, and retest. That is
 fine as planned. BI1 and BI2 land before the fleet update. I'd like to read
 those diffs. BI3 can go with them or after.
 
+**BI1–BI3 implemented (branch `fix/lockbox-bi`, from master after the X4/X5
+merge).**
+
+* **BI1 (line breaks).** Chosen: deny at poll time, not a v3 base64 line.
+  Both consume paths (`update_ticket_consumed_by_ip` and
+  `get_ticket_by_request_id`) refuse a command containing CR or LF with the
+  same conditional `UPDATE ... WHERE id = ? AND status = 'approved'`, set it
+  to `denied`, and record `jit_refused` with "the command contains a line
+  break and cannot be one lockbox line". A denied row cannot become several
+  lines later, and the agent sees a terminal state instead of a consumed row
+  that never ran. The reason a v3 line was not needed: it would require the
+  gateway, the poller and the dashboard to switch formats in lock-step on
+  every gateway before the fleet update, while the refusal covers the same
+  escape (an approved multi-line command) with no format change.
+  The poller is the second check: a `ticket` string containing CR or LF is
+  logged and not appended. Both scripts also drop a CR line, a non-numeric
+  stamp, and a stamp more than 5 seconds in the future when they read the
+  file (the gateway's claim and the poller's cleanup), so a future-dated
+  forged line can neither be kept nor claimed.
+* **BI2(a) (one run).** `flock` on `$ESHU_RUN_DIR/eshu.tickets.lock` around
+  every read-modify-write: the gateway's claim and remove, the poller's
+  `clean_tickets`, its append, and its startup removal. The gateway's temp
+  file is `mktemp -p "$ESHU_RUN_DIR"` so the `mv` is a rename, not a copy
+  out of `/tmp`. The poller reads the file *inside* the lock (`clean_tickets`
+  is a function now), so a copy taken before a claim cannot be moved back.
+  A host without `flock` (it ships with util-linux on every systemd host)
+  fails closed: the gateway does not claim (the command goes through JIT)
+  and the poller does not write the lockbox.
+* **BI2(b) (one delivery).** Both consumes use
+  `UPDATE ... SET status = 'consumed' ... WHERE id = ? AND status =
+  'approved'` and deliver only when `rowcount == 1`; M1's deny is
+  conditional the same way. `/api/ticket/{id}` reads `status = 'approved'`
+  only, so a consumed row is never re-issued.
+* **BI3 (live stamp).** `ticket_line` takes the delivery time (`ts`) and both
+  consumers pass `now`; the poll path is `expires_at > now` with no 60-second
+  grace. A late approval is delivered with a fresh stamp, so it can run; a
+  row past its expiry is not marked consumed at all.
+* **Tests.** `tests/test_lockbox_bi.py` (10): multi-line refused on both
+  paths, with the audit row; a CR-only command refused; a v2 agent ticket
+  refused with the line-break reason; poll-vs-by-id and three-poller races
+  deliver exactly once; the stamp is delivery time; a 500-second-old
+  approval still runs; a row 30 s past expiry is not consumed; the old
+  `ticket_line` default. Gateway (`test_gateway_script.py`): a future-stamped
+  line is neither kept nor claimed, a CR line is dropped, two concurrent
+  claims of one ticket run once (marker written once), and the claim's lock
+  and run-dir temp are pinned. Poller (`test_poller.py`): a line-breaking
+  ticket from `/api/poll` is refused and logged; the extracted
+  `clean_tickets` drops future, expired and CR lines and keeps a fresh one;
+  a cleanup started before a claim cannot resurrect the claimed line.
+* All four installers regenerated from template + gateway + poller.
+
+`bash scripts/verify.sh`: `2878 passed, 26 skipped, 7 warnings in 595.35s
+(0:09:55)`.
+
+### Known flaky tests (reviewer list)
+
+Tests that can fail on their own, recorded here so a red run is not chased as
+a new regression. They are not weakened to make them pass; each is fixed in
+a test-only change.
+
+* `tests/test_f19_limits.py::test_the_time_limit_stops_the_command` — fails
+  about 1 run in 5 on its own (added 2026-11-12). The timeout behaviour under
+  test is in `dashboard/eshu-gateway.sh`; the test's own timing bound is
+  `elapsed < 12` for a 5-second limit.
+* (The npm 401 retry and the audit-ordering flakes were made deterministic on
+  `fix/flaky-tests`, approved and pending merge.)
+
+#### Security review (2026-11-12, at `32ce1b0`): BI1–BI3 approved; no musts
+
+* **BI1.** Both consume paths deny a CR/LF command. Each denial is
+  conditional and writes a `jit_refused` row. The poller refuses a ticket
+  that breaks a line. The gateway claim and the cleanup drop:
+  * CR lines;
+  * non-numeric stamps;
+  * stamps more than 5 s ahead.
+
+  Deny-at-poll with no v3 format is fine. The by-id path could never run
+  a multi-line command anyway, because `parse_claim_body` reads one line,
+  so the mismatch check refused it.
+* **BI2.**
+  * The gateway and the poller lock the same file, `/run/eshu/eshu.tickets.lock`.
+  * Every read happens inside the lock, and so do the cleanup, the append
+    and the startup `rm`.
+  * With no `flock`, no write happens.
+  * The gateway's temp file is in the run dir.
+  * Both consumes are `status='approved'` with `rowcount == 1`, and
+    `/api/ticket` no longer issues `consumed` rows.
+  * `ESHU_RUN_DIR` cannot be set by the caller, because the gateway's
+    environment scrub removes it.
+* **BI3.** The ticket is stamped at delivery, and the poll path has no
+  grace.
+* The three installer copies are identical.
+
+**BK1 (should): one expiry rule.**
+* The poll path now stops at `expires_at`.
+* `get_ticket_by_request_id` has no expiry check at all. It delivers an
+  `approved` row until the sweep (`expire_stale_requests`) marks it
+  abandoned at `expires_at + 60`, plus the sweep interval.
+* `check_request` (`mcp_server.py`) also still reports `approved` until
+  `+ 60`.
+* Fix: give the by-id path, the sweep and `check_request` the same
+  boundary as the poll path. An approval then has one lifetime whichever
+  way it is fetched.
+* If late approvals turn out to be too tight, extend `expires_at` when
+  the card is approved, for example to `decided_at + 60`. Do not bring
+  back a grace in one path only.
+
+**BK2 (should): refuse CR/LF before a human sees the card.**
+* Today the row is denied after the operator approved it, so the approval
+  is wasted.
+* `ssh_exec` (which lists `\n` in `CONTROL_ALLOWED`) and `/api/request`
+  should refuse a CR/LF command up front, with a clear message. Keep the
+  deny at consume as the second check.
+
+**BK3 (should): `remove_claimed_ticket` now burns an unrelated approval.**
+* With BI2, an approval is delivered exactly once: either by id or to the
+  lockbox.
+* After a by-id claim, or a `consumed` lockbox claim, the JIT path still
+  calls `remove_claimed_ticket`. That removes a line for the same command
+  and agent that belongs to a different approval.
+* This fails closed, but it is wrong. Drop the call.
+
+**BK4 (nit): close fd 9 after the ticket lock.**
+* `tickets_unlock` releases the lock but leaves fd 9 open, so the
+  approved command inherits a writable fd on the lock file.
+* The command could `flock` it and stall every later claim.
+* Close it with `exec 9>&-` in `tickets_unlock` and on the lock-failure
+  return, as the nonce helper does.
+
+**BK1–BK4 implemented (2026-11-13, `fix/lockbox-bi`).** No design change; the
+four follow-ups are the ones above.
+
+* **BK1 — one expiry rule.** `get_ticket_by_request_id` now selects
+  `status='approved' AND expires_at > now`, so the by-id claim stops at the
+  same instant as the per-IP poll. `expire_stale_requests` drops the `- 60`
+  grace on the `approved` sweep, and `check_request` reports a row abandoned
+  at `expires_at + 1` rather than `expires_at + 60`. Tests use a fixed clock
+  at `expires_at - 1` (live) and `expires_at + 1` (refused/abandoned) for all
+  three paths: `test_bk1_claim_by_id_refuses_a_row_past_expires_at`,
+  `test_bk1_the_sweep_abandons_at_expires_at` and the `check_request` case in
+  `tests/test_sessions.py`. An expired row is left `approved` until the sweep
+  marks it `abandoned`; it is never delivered.
+* **BK2 — refuse CR/LF up front.** `ssh_exec.command_problem` returns
+  `multiline_command` before signing, before any SSH connection (newline left
+  `CONTROL_ALLOWED`; tab stays). `/api/request` raises 400 with
+  `multiline_command: the command contains a line break; send it as a single
+  line.` straight after decoding, before the rate-limit/policy/plan/override
+  paths and before `create_request`, so no row and no card exists. The
+  gateway now prints a 400's `detail` instead of "unreachable". The consume
+  time deny stays as the second check.
+* **BK3 — no second removal.** The `remove_claimed_ticket` call (and the
+  now-dead function) is gone from the JIT tail; `claim_lockbox_ticket` is the
+  only remover. `test_bk3_two_approvals_of_the_same_command_each_run_once`
+  leaves two live lines for one command and asserts both runs execute.
+* **BK4 — no inherited lock.** `tickets_unlock` does `exec 9>&-` after
+  `flock -u`, and the `flock -w 5` failure path closes it too, in both the
+  gateway and the poller. `test_bk4_the_approved_command_does_not_inherit_the_ticket_lock`
+  runs `find /proc/self/fd -maxdepth 1 -name 9` through a real lockbox claim
+  and asserts the path is absent.
+
+`bash scripts/verify.sh`: GATE_COUNT
+
 ## 7. Backlog (not planned in detail)
 
 * Deny with a reason, shown to the agent (cheap; low value given the data).

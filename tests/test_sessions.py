@@ -444,6 +444,24 @@ class TestSshRequestLookup:
         out = json.loads(check_request_fn()(rid))
         assert "re-run" in out["next_step"]
 
+    def test_bk1_approved_is_abandoned_at_expires_at_not_sixty_seconds_later(self, monkeypatch):
+        import db.requests as req
+        from db.core import db_conn
+        base = 1_800_000_000
+        rid = create_request("10.0.0.7", "approved but unclaimed",
+                             status="approved", ttl=90)
+        with db_conn() as conn:
+            conn.execute("UPDATE requests SET expires_at = ? WHERE id = ?", (base, rid))
+            conn.commit()
+        # expires_at - 1: still live.
+        monkeypatch.setattr(req.time, "time", lambda: base - 1)
+        out = json.loads(check_request_fn()(rid))
+        assert out["status"] == "approved"
+        # expires_at + 1: abandoned, with no extra 60 s grace.
+        monkeypatch.setattr(req.time, "time", lambda: base + 1)
+        out = json.loads(check_request_fn()(rid))
+        assert out["status"] == "abandoned"
+
     def test_terminal_state_is_derived_before_the_sweep(self):
         import time
         now = int(time.time())
