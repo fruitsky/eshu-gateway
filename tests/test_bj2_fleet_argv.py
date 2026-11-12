@@ -68,6 +68,18 @@ def test_bj2_the_old_poller_argument_shape_still_runs(tmp_path):
     assert "192.0.2.10" in argv_lines[0]
 
 
+def test_bj2_an_ipv6_target_is_an_address_not_a_token(tmp_path):
+    """A colon means IPv6, so the new poller's shape must still be recognised."""
+    script, bindir, seen, cmd, out, token = _harness(tmp_path)
+    proc = _run(script, bindir, tmp_path, "http://dash.test", "2001:db8::5",
+                "9", "5", str(cmd), str(out))
+    assert proc.returncode == 0, proc.stderr
+    argv_lines = [l for l in seen.read_text().splitlines() if l.startswith("ARGV:")]
+    assert argv_lines
+    assert "2001:db8::5" in argv_lines[0]
+    assert "9" in argv_lines[0]
+
+
 def test_bj2_the_runner_refuses_without_a_token_file(tmp_path):
     script, bindir, seen, cmd, out, _token = _harness(tmp_path)
     (tmp_path / "eshu-token").unlink()
