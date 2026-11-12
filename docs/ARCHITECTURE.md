@@ -135,7 +135,13 @@ the operator's intent byte-for-byte.
 
 ## Gateway nodes
 
-Requirements: Linux, `bash`, `curl`, `python3`, `systemd`, `sshd`.  
+Requirements: Linux, `bash`, `curl` 7.55 or newer, `python3`, `systemd`, `sshd`.  
+`curl` 7.55 is a hard requirement: the gateway sends its token in a request
+header read from stdin (`curl -H @-`, and a private process substitution for
+the result post), which older curl accepts but silently drops — the call then
+goes out unauthenticated and gets 401. The installer checks `curl --version`
+in install, reinstall and update and stops with the found version, before it
+changes anything (`--uninstall` is exempt, so a gateway can still be removed).
 Optional, GNU coreutils 8.24 or later: `tail` capture stops a command promptly
 after an agent disconnects (`tee --output-error`, `mv -T`), and F19 run limits
 need GNU `timeout`. Without them, `tail` capture posts no output and the

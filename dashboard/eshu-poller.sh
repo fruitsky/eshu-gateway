@@ -4,6 +4,14 @@ DASHBOARD_URL="__DASHBOARD_URL__"
 TARGET_IP="__TARGET_IP__"
 HOST_NAME="__HOST_NAME__"
 GATEWAY_TOKEN="__GATEWAY_TOKEN__"
+
+# BE3: token headers never go into curl's argv (readable in /proc by any
+# local user). printf is a builtin and curl reads the header lines from stdin.
+gateway_header() { printf 'X-Gateway-Token: %s\n' "${GATEWAY_TOKEN:-}"; }
+register_headers() {
+  printf 'X-Gateway-Token: %s\n' "${GATEWAY_TOKEN:-}"
+  printf 'X-Enrollment-Token: %s\n' "${ESHU_ENROLL_TOKEN:-}"
+}
 POLL_INTERVAL=30
 
 # Runtime config. The installer bakes a URL, but /etc/eshu/dashboard_url wins so
@@ -149,8 +157,8 @@ while true; do
   clean_tickets
 
   # 1. Sync Central Policies
-  HTTP_CODE=$(curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -w "%{http_code}" -o "$POLICY_FILE" \
-       -H "X-Gateway-Token: $GATEWAY_TOKEN" \
+  HTTP_CODE=$(gateway_header | curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -w "%{http_code}" -o "$POLICY_FILE" \
+       -H @- \
        "$DASHBOARD_URL/api/policy/$TARGET_IP")
   POLICY_HASH=""
   POLICY_STALE="1"
@@ -263,8 +271,10 @@ while true; do
         # Persist the ID only on a successful launch. The runner pings 'running'
         # immediately, which stops the dashboard re-injecting — so a crash before
         # this echo can never cause a double execution.
+        # BJ2: no token in the unit's ExecStart (world-readable through
+        # `systemctl show`); the runner reads /etc/eshu-token as root.
         if systemd-run --unit="eshu-fleet-$FLEET_CMD_ID" --collect \
-            bash "$FLEET_RUNNER" "$DASHBOARD_URL" "$GATEWAY_TOKEN" "$TARGET_IP" "$FLEET_CMD_ID" "$FLEET_CMD_TIMEOUT" "$FLEET_CMD_FILE" "$FLEET_OUT_FILE" >/dev/null 2>&1; then
+            bash "$FLEET_RUNNER" "$DASHBOARD_URL" "$TARGET_IP" "$FLEET_CMD_ID" "$FLEET_CMD_TIMEOUT" "$FLEET_CMD_FILE" "$FLEET_OUT_FILE" >/dev/null 2>&1; then
           echo "$FLEET_CMD_ID" > /var/run/eshu.last_fleet_cmd
         else
           logger -t eshu-poller "Fleet command #$FLEET_CMD_ID launch failed — will retry"
@@ -305,8 +315,8 @@ with open('/etc/eshu-windows.txt.tmp', 'w') as f:
         systemd-run --unit=eshu-uninstall --collect \
           bash "$UNINSTALL_FILE" --uninstall --yes "$DASHBOARD_URL" >/dev/null 2>&1 || true
         # Clear trigger so the restarted poller doesn't re-spawn uninstalls
-        curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -X POST "$DASHBOARD_URL/api/uninstall-started/$TARGET_IP" \
-             -H "X-Gateway-Token: $GATEWAY_TOKEN" >/dev/null 2>&1 || true
+        gateway_header | curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -X POST "$DASHBOARD_URL/api/uninstall-started/$TARGET_IP" \
+             -H @- >/dev/null 2>&1 || true
         rm -f "$UNINSTALL_FILE"
       fi
       exit 0
@@ -327,10 +337,9 @@ with open('/etc/eshu-windows.txt.tmp', 'w') as f:
         sudo bash "$UPDATE_FILE" --update 2>&1 | logger -t eshu-poller
         # Register with the version from the updated installer
         NEW_VER=$(curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s "$DASHBOARD_URL/api/version" 2>/dev/null | python3 -c "import sys, json; print(json.load(sys.stdin).get('version','$DASH_VER'))" 2>/dev/null || echo "$DASH_VER")
-        REG_RESP=$(curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -X POST "$DASHBOARD_URL/api/register" \
+        REG_RESP=$(register_headers | curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -X POST "$DASHBOARD_URL/api/register" \
+             -H @- \
              -H "Content-Type: application/json" \
-             -H "X-Gateway-Token: ${GATEWAY_TOKEN:-}" \
-             -H "X-Enrollment-Token: ${ESHU_ENROLL_TOKEN:-}" \
              -d '{"ip":"'"$TARGET_IP"'","hostname":"'"$HOST_NAME"'","version":"'"$NEW_VER"'"}' 2>/dev/null || echo "")
         NEW_TOKEN=$(echo "$REG_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('gateway_token',''))" 2>/dev/null || echo "")
         if [ -n "$NEW_TOKEN" ] && [ "$NEW_TOKEN" != "None" ]; then
@@ -382,10 +391,9 @@ with open('/etc/eshu-windows.txt.tmp', 'w') as f:
         rm -f "$DEV_UPDATE_FILE"
         # Re-register with updated version
         NEW_VER=$(curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s "$DASHBOARD_URL/api/version" 2>/dev/null | python3 -c "import sys, json; print(json.load(sys.stdin).get('version','$DASH_VER'))" 2>/dev/null || echo "$DASH_VER")
-        REG_RESP=$(curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -X POST "$DASHBOARD_URL/api/register" \
+        REG_RESP=$(register_headers | curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -X POST "$DASHBOARD_URL/api/register" \
+             -H @- \
              -H "Content-Type: application/json" \
-             -H "X-Gateway-Token: ${GATEWAY_TOKEN:-}" \
-             -H "X-Enrollment-Token: ${ESHU_ENROLL_TOKEN:-}" \
              -d '{"ip":"'"$TARGET_IP"'","hostname":"'"$HOST_NAME"'","version":"'"$NEW_VER"'"}' 2>/dev/null || echo "")
         NEW_TOKEN=$(echo "$REG_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('gateway_token',''))" 2>/dev/null || echo "")
         if [ -n "$NEW_TOKEN" ] && [ "$NEW_TOKEN" != "None" ]; then
@@ -420,7 +428,7 @@ with open('/etc/eshu-windows.txt.tmp', 'w') as f:
   WC=$(grep -c . /etc/eshu-windows.txt 2>/dev/null) || true
   case "$WC" in ''|*[!0-9]*) WC=0 ;; esac
   TICKET_FILE=$(mktemp -p "$ESHU_WORK" ticket.XXXXXX)
-  curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -H "X-Gateway-Token: $GATEWAY_TOKEN" "$DASHBOARD_URL/api/poll/$TARGET_IP?wc=$WC" > "$TICKET_FILE"
+  gateway_header | curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -H @- "$DASHBOARD_URL/api/poll/$TARGET_IP?wc=$WC" > "$TICKET_FILE"
   # Only start python when the response actually carries a ticket string. The
   # endpoint always returns {"ticket":null,...}, and parsing that every cycle
   # would keep one unnecessary interpreter start on the loop.
