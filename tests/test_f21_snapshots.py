@@ -234,10 +234,10 @@ def pve(monkeypatch):
     fake = FakePVE()
     monkeypatch.setattr('urllib.request.urlopen', fake)
     iid = create_integration('pve', 'https://%s:8006/api2/json' % NODE_IP,
-                             'header', 'PVEAPIToken=eshu=read-token',
+                             'header', 'PVEAPIToken=eshu-main=read-token',
                              auth_header_name='Authorization', kind='proxmox')
     seed_proxmox_tools(iid)
-    set_snapshot_secret('pve', 'PVEAPIToken=eshu=snapshot-token')
+    set_snapshot_secret('pve', 'PVEAPIToken=eshu-snap=snapshot-token')
     register_gateway(HOST, 'web01', 'v15.3')
     set_gateway_proxmox_bindings(HOST, node=NODE)
     set_dashboard_guest('none')
@@ -422,7 +422,7 @@ class TestOffer:
 
     def test_a_command_touching_two_guests_is_partial(self, pve):
         row = _request(command='pct exec 101 -- systemctl restart nginx && '
-                               'pct exec 102 -- systemctl restart db')
+                               'qm guest exec 102 -- systemctl restart db')
         data = offer_for_request(row)
         assert data['available'] is False
         assert data['reason'] == 'snapshot_target_partial'
@@ -482,7 +482,7 @@ class TestOffer:
         assert data['reason'] == 'snapshot_target_self'
 
     def test_a_full_disk_is_a_warning_not_a_refusal(self, pve):
-        row = _request(command='pct exec 102 -- systemctl restart db', inner='102')
+        row = _request(command='qm guest exec 102 -- systemctl restart db', inner='102')
         data = offer_for_request(row)
         assert data['available'] is True
         assert any('full' in w for w in data['warnings'])
@@ -610,7 +610,7 @@ class TestExpiry:
 
     def test_expiry_deletes_only_its_own_expired_rows(self, pve):
         sid = _made(pve)
-        fresh = create_and_approve(_request(command='pct exec 102 -- systemctl restart db',
+        fresh = create_and_approve(_request(command='qm guest exec 102 -- systemctl restart db',
                                             inner='102'))
         with db_conn() as conn:
             conn.execute('UPDATE snapshots SET expires_at = 1 WHERE id = ?', (sid,))
@@ -679,7 +679,7 @@ class TestApi:
         body = auth_client.get('/api/integrations').json()
         for integration in body if isinstance(body, list) else body.get('integrations', []):
             assert 'snapshot_secret' not in integration
-        assert get_snapshot_secret('pve') == 'PVEAPIToken=eshu=snapshot-token'
+        assert get_snapshot_secret('pve') == 'PVEAPIToken=eshu-snap=snapshot-token'
 
 
 # ── code round 2 (AS1–AS6) ─────────────────────────────────────────────
@@ -849,7 +849,7 @@ class TestRound2:
         url = ('https://%s:8006/api2/json/nodes/%s/tasks/%s/status'
                % (NODE_IP, NODE, urllib.parse.quote(upid, safe='')))
         request = urllib.request.Request(
-            url, headers={'Authorization': 'PVEAPIToken=eshu=read-token'},
+            url, headers={'Authorization': 'PVEAPIToken=eshu-main=read-token'},
             method='GET')
         with pytest.raises(urllib.error.HTTPError) as exc:
             pve(request)
@@ -864,7 +864,7 @@ class TestRound2:
         internal = [i for i in get_integrations(include_secret=True)
                     if i['name'] == 'pve']
         assert internal and 'snapshot_secret' not in internal[0]
-        assert get_snapshot_secret('pve') == 'PVEAPIToken=eshu=snapshot-token'
+        assert get_snapshot_secret('pve') == 'PVEAPIToken=eshu-snap=snapshot-token'
 
 
 # ── code round 3 (AU1–AU4) ─────────────────────────────────────────────
@@ -911,6 +911,36 @@ class TestCoverageStructured:
         assert data['reason'] == 'snapshot_target_partial'
         assert data['uncovered']
 
+    def test_a_wrapper_line_redirection_is_not_covered(self, pve):
+        # BB1: the node's shell performs the redirection; the guest never
+        # sees it.
+        row = _request(command='pct exec 101 -- systemctl restart nginx '
+                               '> /tmp/node.log', inner='101')
+        data = offer_for_request(row)
+        assert data['available'] is False
+        assert data['reason'] == 'snapshot_target_partial'
+        assert data['uncovered']
+
+    def test_a_substitution_in_the_wrapped_word_is_not_covered(self, pve):
+        # BB1: the node expands the substitution before pct starts.
+        row = _request(command='pct exec 101 -- systemctl restart nginx '
+                               '$(echo x > /tmp/y)', inner='101')
+        data = offer_for_request(row)
+        assert data['available'] is False
+        assert data['reason'] == 'snapshot_target_partial'
+
+    def test_a_redirect_after_a_wrapped_shell_script_is_not_covered(self, pve):
+        row = _request(command="pct exec 101 -- bash -c 'systemctl restart "
+                               "nginx' > /tmp/node.log", inner='101')
+        data = offer_for_request(row)
+        assert data['available'] is False
+        assert data['reason'] == 'snapshot_target_partial'
+
+    def test_a_write_inside_the_quoted_script_stays_covered(self, pve):
+        row = _request(command="pct exec 101 -- bash -c 'systemctl restart "
+                               "nginx > /tmp/guest.log'", inner='101')
+        assert offer_for_request(row)['available'] is True
+
     def test_a_covered_write_still_gets_the_offer(self, pve):
         row = _request(command='pct exec 101 -- systemctl restart nginx',
                        inner='101')
@@ -926,6 +956,23 @@ class TestCredentialProbe:
         assert data['available'] is False
         assert data['reason'] == 'snapshot_main_token_privileged'
         assert data['main_token_privileged'] is True
+
+    def test_the_main_token_holding_permissions_modify_is_refused(self, pve):
+        # BB3: one ACL edit away from granting itself VM.Snapshot.
+        _reprobe(pve, main={'/': {'VM.Audit': 1, 'Permissions.Modify': 1}})
+        data = offer_for_request(_request())
+        assert data['available'] is False
+        assert data['reason'] == 'snapshot_main_token_privileged'
+        assert 'Permissions.Modify' in data['detail']
+        _reprobe(pve, main={'/': {'User.Modify': 1}})
+        assert offer_for_request(_request())['reason'] == \
+            'snapshot_main_token_privileged'
+
+    def test_the_same_token_pasted_with_spaces_is_still_identical(self, pve):
+        set_snapshot_secret('pve', ' ' + get_integration('pve')['secret'] + ' ')
+        clear_probe_cache()
+        assert offer_for_request(_request())['reason'] == \
+            'snapshot_tokens_identical'
 
     def test_the_main_token_holding_snapshot_refuses_the_offer(self, pve):
         _reprobe(pve, main={'/vms/101': {'VM.Snapshot': 1}})
@@ -995,10 +1042,10 @@ class TestTheRowsIntegration:
     def _second(self, pve):
         second = create_integration(
             'pve2', 'https://192.0.2.51:8006/api2/json', 'header',
-            'PVEAPIToken=eshu=read-two',
+            'PVEAPIToken=eshu-two-main=read-two',
             auth_header_name='Authorization', kind='proxmox')
         seed_proxmox_tools(second)
-        set_snapshot_secret('pve2', 'PVEAPIToken=eshu=snapshot-two')
+        set_snapshot_secret('pve2', 'PVEAPIToken=eshu-two-snap=snapshot-two')
         clear_probe_cache()
         return second
 
@@ -1096,3 +1143,67 @@ class TestSmallerPoints:
         assert get_snapshot(sid)['state'] == 'active'
         pve.fail_delete = None
         assert delete(sid)['ok'] is True
+
+
+# ── code round 4: AU5 (a claim can be stranded) ────────────────────────
+
+class TestStrandedClaim:
+    def test_an_exception_in_the_rollback_call_fails_the_row(self, pve,
+                                                             monkeypatch):
+        import core.snapshots as snaps
+        sid = _made(pve)
+        real = snaps._call
+
+        def raising(integration, name, args, *a, **kw):
+            if name == 'snapshot_rollback':
+                raise RuntimeError('boom')
+            return real(integration, name, args, *a, **kw)
+
+        monkeypatch.setattr(snaps, '_call', raising)
+        with pytest.raises(RuntimeError):
+            rollback(sid)
+        fresh = get_snapshot(sid)
+        assert fresh['state'] == 'failed'
+        assert fresh['last_error'] == 'rollback_interrupted'
+        # `failed` is deletable, so the operator is not stuck.
+        monkeypatch.setattr(snaps, '_call', real)
+        assert delete(sid)['ok'] is True
+
+    def test_an_exception_in_the_delete_call_fails_the_row(self, pve,
+                                                           monkeypatch):
+        import core.snapshots as snaps
+        sid = _made(pve)
+        real = snaps._call
+
+        def raising(integration, name, args, *a, **kw):
+            if name == 'snapshot_delete':
+                raise RuntimeError('boom')
+            return real(integration, name, args, *a, **kw)
+
+        monkeypatch.setattr(snaps, '_call', raising)
+        with pytest.raises(RuntimeError):
+            delete(sid)
+        assert get_snapshot(sid)['state'] == 'failed'
+
+    def test_a_stale_delete_claim_is_swept_to_failed(self, pve):
+        sid = _made(pve)
+        assert claim_state(sid, ('active',), 'deleting', now=1) is True
+        assert get_snapshot(sid)['claimed_at'] == 1
+        sweep()
+        fresh = get_snapshot(sid)
+        assert fresh['state'] == 'failed'
+        assert fresh['last_error'] == 'claim_interrupted'
+        assert any(e['event_type'] == 'snapshot_claim_interrupted'
+                   for e in get_audit_log())
+
+    def test_a_stale_rollback_claim_is_swept_to_failed(self, pve):
+        sid = _made(pve)
+        assert claim_state(sid, ('active',), 'rolling_back', now=1) is True
+        sweep()
+        assert get_snapshot(sid)['state'] == 'failed'
+
+    def test_a_fresh_claim_is_left_alone(self, pve):
+        sid = _made(pve)
+        assert claim_state(sid, ('active',), 'deleting') is True
+        sweep()
+        assert get_snapshot(sid)['state'] == 'deleting'

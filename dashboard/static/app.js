@@ -9045,7 +9045,8 @@ function renderSnapshotState(name, state) {
   lines.push('<div class="text-sm font-semibold">Snapshots (F21)</div>');
   if (state.main_token_privileged) {
     lines.push('<div class="text-xs text-danger">The main token can snapshot ' +
-      '(VM.Snapshot / VM.Snapshot.Rollback). Make it read-only and use a ' +
+      'or grant itself the right (VM.Snapshot, VM.Snapshot.Rollback, ' +
+      'Permissions.Modify or User.Modify). Make it read-only and use a ' +
       'separate snapshot token; the offer stays refused until you do.</div>');
   }
   if (!state.configured) {

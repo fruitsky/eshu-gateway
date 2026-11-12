@@ -1528,12 +1528,13 @@ def _parse_statement(st, ctx, depth, state):
     """
     previous = state.target
     try:
-        return _parse_statement_body(st, ctx, depth, state)
+        return _parse_statement_body(st, ctx, depth, state,
+                                     outer_target=previous)
     finally:
         state.target = previous
 
 
-def _parse_statement_body(st, ctx, depth, state):
+def _parse_statement_body(st, ctx, depth, state, outer_target=''):
     argv = list(st.argv)
     ctx = list(ctx)
     heredoc_specs = list(st.heredoc_specs)
@@ -1559,11 +1560,19 @@ def _parse_statement_body(st, ctx, depth, state):
 
     if argv[0] in _KEYWORDS_DROP:
         # `for i in …; do …; done`: the header executes nothing, but a
-        # substitution inside it does, so keep those steps.
+        # substitution inside it does, so keep those steps. BB1: a header
+        # substitution runs where the statement started (the node when the
+        # statement is a wrapper line), not inside the wrapper.
         _clean, header_subs, _bad = _extract_substitutions(argv)
         steps = []
-        for _kind, text in header_subs:
-            steps.extend(_parse_text(text, ctx + ['subst'], depth + 1, state))
+        saved = state.target
+        try:
+            state.target = outer_target
+            for _kind, text in header_subs:
+                steps.extend(_parse_text(text, ctx + ['subst'], depth + 1,
+                                         state))
+        finally:
+            state.target = saved
         return steps
 
     if argv[0] in _KEYWORDS_TRIM:
@@ -1593,8 +1602,20 @@ def _parse_statement_body(st, ctx, depth, state):
                 script, label = _runuser_script(argv)
             if script is not None:
                 ctx.append(label)
-                script = script + _redirect_suffix(st)
-                return _parse_text(script, ctx, depth + 1, state, first_op=st.op)
+                # BB1: the script runs inside the wrapper; the statement's own
+                # redirection is performed by the place the statement started.
+                script_steps = _parse_text(script, ctx, depth + 1, state,
+                                           first_op=st.op)
+                suffix = _redirect_suffix(st)
+                if not suffix:
+                    return script_steps
+                saved = state.target
+                try:
+                    state.target = outer_target
+                    suffix_steps = _parse_text(suffix, ctx, depth + 1, state)
+                finally:
+                    state.target = saved
+                return script_steps + suffix_steps
             if verb == 'runuser':
                 unwrapped = _unwrap(argv, state)
                 if unwrapped is not None:
@@ -1646,13 +1667,20 @@ def _parse_statement_body(st, ctx, depth, state):
 
     if not assignments:
         steps = []
-        for sub_kind, text in substitutions + extra_subs:
-            steps.extend(_parse_text(text, _sub_context(sub_kind, ctx), depth + 1, state))
-        targets = _write_targets(st)
+        saved = state.target
+        try:
+            state.target = outer_target
+            for sub_kind, text in substitutions + extra_subs:
+                steps.extend(_parse_text(text, _sub_context(sub_kind, ctx),
+                                         depth + 1, state))
+            targets = _write_targets(st)
+            if targets:
+                state.flag('redirect-to-file')
+                steps.append(_step(st.text, st.op, WRITE,
+                                   f'redirect to {targets[0][1]}', ctx, state))
+        finally:
+            state.target = saved
         if targets:
-            state.flag('redirect-to-file')
-            steps.append(_step(st.text, st.op, WRITE,
-                               f'redirect to {targets[0][1]}', ctx, state))
             return steps
         if dangerous_env:
             steps.append(_step(st.text, st.op, UNKNOWN,
@@ -1693,10 +1721,16 @@ def _parse_statement_body(st, ctx, depth, state):
 
     sub_steps = []
     had_output_sink = False
-    for sub_kind, text in substitutions + extra_subs:
-        sub_steps.extend(_parse_text(text, _sub_context(sub_kind, ctx), depth + 1, state))
-        if sub_kind == 'procsubst-out':
-            had_output_sink = True
+    saved = state.target
+    try:
+        state.target = outer_target
+        for sub_kind, text in substitutions + extra_subs:
+            sub_steps.extend(_parse_text(text, _sub_context(sub_kind, ctx),
+                                         depth + 1, state))
+            if sub_kind == 'procsubst-out':
+                had_output_sink = True
+    finally:
+        state.target = saved
     for sub in sub_steps:
         merged = cmd_rules.worst(kind, sub['kind'])
         if merged != kind:
@@ -1732,7 +1766,23 @@ def _parse_statement_body(st, ctx, depth, state):
         extra['input_redirects'] = input_redirects
     if st.background:
         extra['background'] = True
-    return [_step(text, st.op, kind, why, ctx, state, extra or None)] + sub_steps
+    main_step = _step(text, st.op, kind, why, ctx, state, extra or None)
+    out = [main_step] + sub_steps
+    targets_seen = _write_targets(st)
+    if targets_seen and state.target and state.target != outer_target:
+        # BB1: a redirection on a wrapper line is performed by the place the
+        # statement started (the node), not by the wrapper's guest. It gets
+        # its own step with that target, so coverage counts it as uncovered.
+        op, redir_target = targets_seen[0]
+        saved = state.target
+        try:
+            state.target = outer_target
+            out.append(_step(
+                '%s %s' % (op, shlex.quote(redir_target)), st.op, WRITE,
+                f'redirect to {redir_target}', ctx, state))
+        finally:
+            state.target = saved
+    return out
 
 
 # ── Result ──────────────────────────────────────────────────────────────────

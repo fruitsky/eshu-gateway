@@ -10047,6 +10047,65 @@ Approved as written:
   from `active` only. Delete claims from `active` or `failed`. A bad UPID or
   a failed task leaves `failed`.
 
+### Code round 4 — AU5, BB1 and BB3 (implementer notes)
+
+**Status: AU5, BB1 and BB3 are in, with the three nits. To the security
+reviewer for the diff.**
+
+**AU5 / BB2 — a claim is never stranded.** `snapshots.claimed_at` is written
+by `claim_state`. The rollback and delete sections are wrapped in
+`try/finally`: if the row is still in its claim state when the section ends
+(an exception, or a crash the process does not survive), it goes to
+**`failed`** with `rollback_interrupted` / `delete_interrupted` and the audit
+line "the action may have run, check the guest". Never back to `active`:
+the call may have reached Proxmox, and a second rollback would silently
+discard whatever changed after the first. `failed` allows delete only.
+The startup/periodic sweep moves a claim older than `poll_timeout()` to
+`failed` the same way. Tests: an exception in the rollback call and in the
+delete call each leave `failed` (and a delete still works afterwards), a
+stale `deleting` and a stale `rolling_back` are swept, a fresh claim is
+left alone.
+
+**BB1 — a step is tagged with the place that runs it.** The parser now
+distinguishes the wrapper's guest from the shell that started the statement:
+
+* the wrapped command's own step (and a parsed `-c` script) carries the
+  wrapper's target;
+* a redirection **on the wrapper line** gets its own write step with the
+  statement's starting target (the node, `''`), so `_writes_uncovered`
+  counts it; the main step no longer hides it;
+* substitutions in the wrapped command's words, in a redirection word and in
+  an unquoted heredoc body are parsed with the starting target (the node
+  expands them before the wrapper runs);
+* the shell branch parses `-c` **without** the outer `_redirect_suffix`, and
+  emits the suffix as separate starting-target steps.
+
+Tests: a wrapped read with a node redirection, a wrapped read with a
+writing substitution, and a wrapped `-c` script with an outer redirection
+are all `snapshot_target_partial`; the same write **inside** the quoted `-c`
+script stays covered. F4 and F7 do not read `inner`; the read lane and the
+inner-target display are unchanged (their suites are green). The nit is
+taken too: the wrapper kind is now compared with the resolved guest's
+`type` through `WRAPPER_FOR_TYPE`, which is no longer dead code. That
+caught two tests that wrapped a qemu guest with `pct`; they now use
+`qm guest exec`, as the cluster would.
+
+**BB3 — a token one edit away is refused.** The main token's refusal set is
+now `VM.Snapshot`, `VM.Snapshot.Rollback`, **`Permissions.Modify`** and
+**`User.Modify`** (a token that can grant itself either snapshot privilege),
+with the same red warning; the text names the privilege found. Tests for
+both grant privileges.
+
+**Nits.** The UPID `id`/`user` fields are narrowed to
+`[A-Za-z0-9@!._-]*`. Identical tokens are compared by whole string **and by
+token id** (`user@realm!name`, the part before the first `=`), so the same
+token pasted twice with different whitespace is still refused — the fake
+tokens in the tests were made realistic (`eshu-main` / `eshu-snap`) so the
+comparison is exercised rather than accidentally passing.
+
+`bash scripts/verify.sh`: `2744 passed, 22 skipped, 7 warnings in 549.07s
+(0:09:09)`.
+
 ---
 
 ## Chunk F22 — Changes carry a check · slug `change-checks` · dashboard + MCP · **security reviewer signs off the unattended check**
@@ -10569,7 +10628,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 14 | F14 | inventory | dashboard + MCP | Merged | `feat/f14-inventory` | Chunk H | |
 | 15 | F19 | unattended-limits | gateway + dashboard | Code approved by both reviewers on AF1/AF2 (security `67bec51`); feature reviewer checks AF1/AF2, then merge | `feat/f19-unattended-limits` | F4, F5, F12 | moved ahead of F21–F23: nearly done, and F22 needs it. AF3 goes on the next gateway branch |
 | 16 | F15 | probes | dashboard + MCP | Code round 1: changes requested AG1–AG7 (`56d86e3`); **AG1 to security** | `feat/f15-probes` | F4, F12, F14 | main line, not only local-model |
-| 17 | F21 | snapshot-approve | dashboard + Proxmox | Code round 3: **AU1** (per-step wrapper target, equality coverage), **AU2** (the two-token privilege probe, red line on the integration page), **AU3** (the row's integration; ambiguity needs the binding), **AU4** (marker, full UPID, state claim) folded | `feat/f21-snapshot-approve` | F7, F14, F2 | security reads the AU1–AU4 diff, then merge |
+| 17 | F21 | snapshot-approve | dashboard + Proxmox | Code round 4: **AU5** (claims wrapped; `claimed_at`; a stale claim sweeps to `failed`), **BB1** (a step is tagged with where it runs: wrapper line redirections/substitutions are the node's), **BB3** (Permissions/User.Modify in the main-token refusal) and the nits folded | `feat/f21-snapshot-approve` | F7, F14, F2 | security reads the AU5/BB1/BB3 diff, then merge |
 | 18 | F23 | change-journal | dashboard | Ready | `feat/f23-change-journal` | F1, F5, F7, F14 | no security gate; can be coded while F21's design is with security |
 | 18a | X2 | runbooks-page | dashboard UI | Ready | `feat/x2-runbooks-page` | F13 | small; no security gate |
 | 19 | F22 | change-checks | dashboard + MCP | After F19 merges | `feat/f22-change-checks` | F3, F5, F12, F19 | + security sign-off (the unattended check; AG1's origin rule does not cover it) |

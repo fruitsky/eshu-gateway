@@ -32,7 +32,7 @@ from db.misc import get_meta_json, set_meta_json
 from db.requests import get_request_row
 from db.snapshots import (
     bump_attempts, claim_state, create_snapshot, due_snapshots, get_snapshot,
-    set_snapshot_state, snapshots_for_request, stale_creating,
+    set_snapshot_state, snapshots_for_request, stale_claims, stale_creating,
 )
 
 POLL_INTERVAL = 2
@@ -53,7 +53,8 @@ _IPV4 = re.compile(r'^\d{1,3}(?:\.\d{1,3}){3}$')
 # task path cannot be steered from the value.
 _UPID = re.compile(
     r'^UPID:([^:]+):([0-9A-Fa-f]{8}):([0-9A-Fa-f]{8}):([0-9A-Fa-f]{8}):'
-    r'([A-Za-z][A-Za-z0-9_]*):([^:]*):([^:]*):$')
+    r'([A-Za-z][A-Za-z0-9_]*):([A-Za-z0-9@!._-]*):'
+    r'([A-Za-z0-9@!._-]*):$')
 _UPID_UNSAFE = re.compile(r'[/?#]|\.\.')
 _IP_IN_CONFIG = re.compile(r'(?:^|[,;\s])ip=([0-9a-zA-Z./:]+)', re.IGNORECASE)
 _SAFE_NAME = re.compile(r'^[a-z][a-z0-9-]{2,}$')
@@ -63,6 +64,12 @@ _SAFE_NAME = re.compile(r'^[a-z][a-z0-9-]{2,}$')
 # token, refuses the offer before any target is resolved.
 SNAPSHOT_PRIVILEGE = 'VM.Snapshot'
 ROLLBACK_PRIVILEGE = 'VM.Snapshot.Rollback'
+# BB3: a main token that can grant itself either privilege is one ACL edit
+# away from snapshotting, and an agent reaches that edit through an approved
+# generic write. Refused with the same red warning.
+PRIVILEGE_GRANT_PRIVILEGES = ('Permissions.Modify', 'User.Modify')
+MAIN_TOKEN_REFUSED_PRIVILEGES = frozenset(
+    (SNAPSHOT_PRIVILEGE, ROLLBACK_PRIVILEGE) + PRIVILEGE_GRANT_PRIVILEGES)
 PROBE_TTL = 60
 _PROBE_CACHE = {}
 
@@ -249,6 +256,23 @@ def _version_major(data):
     return int(match.group(1)) if match else None
 
 
+def _token_id(secret):
+    """`user@realm!name` from a `PVEAPIToken=…` secret, or ''."""
+    parts = str(secret or '').strip().split('=')
+    return parts[1].strip() if len(parts) >= 2 else ''
+
+
+def _same_token(a, b):
+    """Whole-string or token-id equality (the same token pasted twice)."""
+    a, b = str(a or '').strip(), str(b or '').strip()
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    ident_a, ident_b = _token_id(a), _token_id(b)
+    return bool(ident_a) and ident_a == ident_b
+
+
 def credential_state(integration, force=False):
     """AM2's probe, in the order the reviewer asked for.
 
@@ -261,7 +285,7 @@ def credential_state(integration, force=False):
         return {'ok': False, 'reason': 'snapshot_unavailable',
                 'detail': 'the integration has no snapshot token',
                 'main_privileged': False}
-    if main_token and snapshot_token == main_token:
+    if main_token and _same_token(main_token, snapshot_token):
         return {'ok': False, 'reason': 'snapshot_tokens_identical',
                 'detail': 'the two tokens are the same; create a separate '
                           'snapshot token', 'main_privileged': False}
@@ -270,11 +294,11 @@ def credential_state(integration, force=False):
         return {'ok': False, 'reason': 'snapshot_unavailable',
                 'detail': 'the main-token probe failed: %s' % error,
                 'main_privileged': False}
-    privileged = bool(main & {SNAPSHOT_PRIVILEGE, ROLLBACK_PRIVILEGE})
-    if privileged:
+    granted = sorted(main & MAIN_TOKEN_REFUSED_PRIVILEGES)
+    if granted:
         return {'ok': False, 'reason': 'snapshot_main_token_privileged',
-                'detail': 'the main token can snapshot; make it read-only and '
-                          'use a separate snapshot token',
+                'detail': 'the main token holds %s; make it read-only and '
+                          'use a separate snapshot token' % ', '.join(granted),
                 'main_privileged': True}
     snapshot, snap_version, error = _probe_token(integration, 'snapshot',
                                                  force=force)
@@ -506,7 +530,7 @@ def resolve_target(row, integration=None, force_probe=False):
                 'main_privileged': state.get('main_privileged', False)}
     ip = str(row.get('target_ip') or '')
     bindings = _gateway_bindings(ip)
-    inner_kind, inner = _request_inner(row)
+    _inner_kind, inner = _request_inner(row)
     data = _inner_targets(row)
     try:
         guests = _guest_rows(integration)
@@ -523,7 +547,10 @@ def resolve_target(row, integration=None, force_probe=False):
         if not guest:
             return {'ok': False, 'reason': 'snapshot_target_none',
                     'detail': 'guest_not_on_node'}
-        uncovered = _writes_uncovered(data, inner, inner_kind)
+        # Nit: the wrapper kind is compared with the resolved guest's type,
+        # not with whatever the row recorded.
+        uncovered = _writes_uncovered(
+            data, inner, WRAPPER_FOR_TYPE.get(str(guest.get('type') or ''), ''))
         if uncovered:
             return {'ok': False, 'reason': 'snapshot_target_partial',
                     'detail': 'the snapshot would not cover %d step(s)' % len(uncovered),
@@ -888,6 +915,20 @@ def _recheck(row, allow_failed=False, for_expiry=False):
     return False, 'snapshot_not_ours', 'the snapshot is not on the guest'
 
 
+def _release_claim(snapshot_id, claim: str, error: str):
+    """AU5: a row still in its claim state after the section ends is failed."""
+    try:
+        fresh = get_snapshot(int(snapshot_id))
+        if fresh and fresh.get('state') == claim:
+            set_snapshot_state(snapshot_id, 'failed', error=error)
+            record_audit_event(
+                'snapshot_claim_interrupted', '',
+                details=('Snapshot #%s was left %s by an interruption; the '
+                         'action may have run, check the guest' % (snapshot_id, claim)))
+    except Exception:
+        pass
+
+
 def rollback(snapshot_id, operator=''):
     row = get_snapshot(int(snapshot_id))
     if not row:
@@ -909,26 +950,33 @@ def rollback(snapshot_id, operator=''):
                 'detail': 'another action is working on this snapshot'}
     integration = integration_for_action(row)
     snap_int = _snapshot_integration(integration) if integration else None
-    if not snap_int:
-        set_snapshot_state(row['id'], 'active', error='snapshot_unavailable')
-        return {'ok': False, 'reason': 'snapshot_unavailable'}
     try:
-        upid = _call(snap_int, 'snapshot_rollback',
-                     {'node': row['node'], 'type': row['type'],
-                      'vmid': int(row['vmid']), 'snapname': row['name']},
-                     SNAPSHOT_INTERNAL)
-    except ProxyError as exc:
-        set_snapshot_state(row['id'], 'active', error='rollback_failed')
-        return {'ok': False, 'reason': 'snapshot_rollback_failed',
-                'detail': str(exc.message or '')[:200]}
-    if not _upid_node(upid, row['node']):
-        set_snapshot_state(row['id'], 'failed', error='bad_upid')
-        return {'ok': False, 'reason': 'snapshot_bad_upid'}
-    if not _wait_task(snap_int, row['node'], upid, poll_timeout()):
-        set_snapshot_state(row['id'], 'failed', error='rollback_task_failed')
-        return {'ok': False, 'reason': 'snapshot_task_failed',
-                'detail': 'the rollback task did not finish OK'}
-    set_snapshot_state(row['id'], 'rolled_back', rolled_back_at=int(time.time()))
+        if not snap_int:
+            set_snapshot_state(row['id'], 'active', error='snapshot_unavailable')
+            return {'ok': False, 'reason': 'snapshot_unavailable'}
+        try:
+            upid = _call(snap_int, 'snapshot_rollback',
+                         {'node': row['node'], 'type': row['type'],
+                          'vmid': int(row['vmid']), 'snapname': row['name']},
+                         SNAPSHOT_INTERNAL)
+        except ProxyError as exc:
+            set_snapshot_state(row['id'], 'active', error='rollback_failed')
+            return {'ok': False, 'reason': 'snapshot_rollback_failed',
+                    'detail': str(exc.message or '')[:200]}
+        if not _upid_node(upid, row['node']):
+            set_snapshot_state(row['id'], 'failed', error='bad_upid')
+            return {'ok': False, 'reason': 'snapshot_bad_upid'}
+        if not _wait_task(snap_int, row['node'], upid, poll_timeout()):
+            set_snapshot_state(row['id'], 'failed', error='rollback_task_failed')
+            return {'ok': False, 'reason': 'snapshot_task_failed',
+                    'detail': 'the rollback task did not finish OK'}
+        set_snapshot_state(row['id'], 'rolled_back',
+                           rolled_back_at=int(time.time()))
+    finally:
+        # AU5/BB2: an unexpected exception or a crash mid-call must not leave
+        # the row in its claim state. `failed` is deletable, never
+        # rollback-able: the call may have reached Proxmox.
+        _release_claim(row['id'], 'rolling_back', 'rollback_interrupted')
     record_audit_event('snapshot_rolled_back', '',
                        details='Request #%s: %s rolled back %s/%s to %s'
                                % (row.get('request_id'), operator, row['node'],
@@ -953,26 +1001,29 @@ def delete(snapshot_id, operator='', reason='manual', for_expiry=False):
                 'detail': 'another action is working on this snapshot'}
     integration = integration_for_action(row)
     snap_int = _snapshot_integration(integration) if integration else None
-    if not snap_int:
-        set_snapshot_state(row['id'], previous, error='snapshot_unavailable')
-        return {'ok': False, 'reason': 'snapshot_unavailable'}
     try:
-        upid = _call(snap_int, 'snapshot_delete',
-                     {'node': row['node'], 'type': row['type'],
-                      'vmid': int(row['vmid']), 'snapname': row['name']},
-                     SNAPSHOT_INTERNAL)
-    except ProxyError as exc:
-        set_snapshot_state(row['id'], previous, error='delete_failed')
-        return {'ok': False, 'reason': 'snapshot_delete_failed',
-                'detail': str(exc.message or '')[:200]}
-    if upid and not _upid_node(upid, row['node']):
-        set_snapshot_state(row['id'], 'failed', error='bad_upid')
-        return {'ok': False, 'reason': 'snapshot_bad_upid'}
-    if upid and not _wait_task(snap_int, row['node'], upid, poll_timeout()):
-        set_snapshot_state(row['id'], 'failed', error='delete_task_failed')
-        return {'ok': False, 'reason': 'snapshot_task_failed'}
-    set_snapshot_state(row['id'], 'expired' if reason == 'expiry' else 'deleted',
-                       deleted_at=int(time.time()))
+        if not snap_int:
+            set_snapshot_state(row['id'], previous, error='snapshot_unavailable')
+            return {'ok': False, 'reason': 'snapshot_unavailable'}
+        try:
+            upid = _call(snap_int, 'snapshot_delete',
+                         {'node': row['node'], 'type': row['type'],
+                          'vmid': int(row['vmid']), 'snapname': row['name']},
+                         SNAPSHOT_INTERNAL)
+        except ProxyError as exc:
+            set_snapshot_state(row['id'], previous, error='delete_failed')
+            return {'ok': False, 'reason': 'snapshot_delete_failed',
+                    'detail': str(exc.message or '')[:200]}
+        if upid and not _upid_node(upid, row['node']):
+            set_snapshot_state(row['id'], 'failed', error='bad_upid')
+            return {'ok': False, 'reason': 'snapshot_bad_upid'}
+        if upid and not _wait_task(snap_int, row['node'], upid, poll_timeout()):
+            set_snapshot_state(row['id'], 'failed', error='delete_task_failed')
+            return {'ok': False, 'reason': 'snapshot_task_failed'}
+        set_snapshot_state(row['id'], 'expired' if reason == 'expiry'
+                           else 'deleted', deleted_at=int(time.time()))
+    finally:
+        _release_claim(row['id'], 'deleting', 'delete_interrupted')
     record_audit_event('snapshot_deleted', '',
                        details='Snapshot #%d (%s on %s/%s) deleted by %s'
                                % (row['id'], row['name'], row['node'],
@@ -991,6 +1042,14 @@ def sweep(now=None, operator='expiry'):
     """
     now = int(now or time.time())
     deleted = 0
+    # AU5/BB2: a claim older than the poll timeout may have sent its call, so
+    # it ends `failed` (delete only) and says so in the audit.
+    for row in stale_claims(poll_timeout(), now=now):
+        set_snapshot_state(row['id'], 'failed', error='claim_interrupted')
+        record_audit_event(
+            'snapshot_claim_interrupted', '',
+            details=('Snapshot #%d was left %s; the action may have run, '
+                     'check the guest' % (row['id'], row['state'])))
     for row in stale_creating(SWEEP_OLDER_THAN, now=now):
         set_snapshot_state(row['id'], 'failed', error='create_interrupted')
     for row in due_snapshots(now=now):

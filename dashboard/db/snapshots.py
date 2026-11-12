@@ -40,12 +40,20 @@ def init_snapshots_tables(cursor):
             created_by TEXT NOT NULL DEFAULT '',
             rolled_back_at INTEGER NOT NULL DEFAULT 0,
             deleted_at INTEGER NOT NULL DEFAULT 0,
+            claimed_at INTEGER NOT NULL DEFAULT 0,
             attempts INTEGER NOT NULL DEFAULT 0,
             last_error TEXT NOT NULL DEFAULT ''
         )
     ''')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_snapshots_request '
                    'ON snapshots(request_id)')
+    # AU5/BB2: when a `rolling_back`/`deleting` claim was taken, so a claim
+    # stranded by a restart can be found and moved to `failed`.
+    try:
+        cursor.execute("ALTER TABLE snapshots ADD COLUMN claimed_at "
+                       "INTEGER NOT NULL DEFAULT 0")
+    except Exception:
+        pass
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_snapshots_state '
                    'ON snapshots(state, expires_at)')
 
@@ -110,7 +118,7 @@ def set_snapshot_state(snapshot_id, state, error=None, **fields):
         return cur.rowcount == 1
 
 
-def claim_state(snapshot_id, from_states, to_state) -> bool:
+def claim_state(snapshot_id, from_states, to_state, now=None) -> bool:
     """Atomically move one row to `to_state` if it is still in `from_states`.
 
     AU4: the conditional UPDATE is the claim. Two callers racing on one row
@@ -122,11 +130,13 @@ def claim_state(snapshot_id, from_states, to_state) -> bool:
     if not states or any(state not in STATES for state in states):
         raise ValueError('bad_state')
     marks = ','.join('?' for _ in states)
+    now = int(now or time.time())
     with db_conn() as conn:
         cur = conn.cursor()
         cur.execute(
-            'UPDATE snapshots SET state = ? WHERE id = ? AND state IN (%s)'
-            % marks, tuple([to_state, int(snapshot_id)] + states))
+            'UPDATE snapshots SET state = ?, claimed_at = ? '
+            'WHERE id = ? AND state IN (%s)'
+            % marks, tuple([to_state, now, int(snapshot_id)] + states))
         conn.commit()
         return cur.rowcount == 1
 
@@ -140,6 +150,20 @@ def due_snapshots(now=None, limit=20):
             "AND expires_at > 0 AND expires_at <= ? ORDER BY expires_at "
             "LIMIT ?", (now, int(limit))).fetchall()
         return [dict(r) for r in rows]
+
+
+def stale_claims(older_than: int, now=None):
+    """Rows still in a claim state taken longer ago than the poll timeout.
+
+    AU5/BB2: the claim may mean the Proxmox call was sent, so the safe end is
+    `failed` (delete only), never back to `active`.
+    """
+    now = int(now or time.time())
+    with db_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM snapshots WHERE state IN ('rolling_back', 'deleting') "
+            "AND claimed_at > 0 AND claimed_at <= ?", (now - int(older_than),)).fetchall()
+        return [dict(row) for row in rows]
 
 
 def stale_creating(older_than, now=None):
