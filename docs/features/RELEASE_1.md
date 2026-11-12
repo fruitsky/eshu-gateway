@@ -36,6 +36,15 @@ Done on the operator's go-ahead, 2026-11-10:
   and `pre-release1.2-commit.txt` (`93d2e33`). Deployed with the helper:
   unit active, no traceback, new routes answer (401 without a session).
   The hand checks are in `RELEASE_TESTS.md` (T-RB, T-CJ, T-PRB, T-LIM).
+* installer hotfix RR1, 2026-11-12 10:55 UTC: found in release testing. On
+  update and reinstall, the installer registered before it loaded the
+  gateway's token, so every known gateway got a 401 and never pinned its
+  host key (`ssh_exec` then refused it as `ssh_host_unpinned`). Security
+  sign-off `d6a38bb`; `master` `7d6941c..d6a38bb` (installers and tests only,
+  no dashboard code and no migration). Backup `eshu-pre-rr1-*.db`
+  (`integrity_check` ok, mode 600) and `pre-rr1-commit.txt` (`7d6941c`).
+  Deployed with the helper: unit active, no traceback, and all three served
+  installers carry the fix.
   Each step needs the operator's
 go-ahead. Nothing in this file has been run against the live system except
 the read-only checks under "Checked before release".

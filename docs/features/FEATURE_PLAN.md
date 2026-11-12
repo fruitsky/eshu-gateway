@@ -11254,6 +11254,159 @@ At merge: the feature reviewer's `RELEASE_1.md` step 6 line, as noted.
 
 ---
 
+---
+
+## Hotfix — installer re-registration (RR1) · branch `fix/installer-reregister` · installer · **security reviewer sign-off**
+
+The fix is described in commit `2da685e`: the existing token is loaded
+before `/api/register`, there is one `register_gateway()` reading the HTTP
+status, and `ssh_mode` is taken only from a 200.
+
+### Reviewer notes (security reviewer, 2026-11-12, at `2da685e`)
+
+**Approved once BE1 and BE2 are in. Both are small.** The three changed
+installers carry identical hunks.
+
+What I checked:
+* **The token is charset-checked before it reaches a `-H` argument.** That
+  also stops header injection from a tampered token line.
+* **The 401 retry cannot take over a known gateway.** `/api/register`
+  refuses a no-token registration for any IP it already knows, whatever
+  enrollment token comes with it. So the retry succeeds only for a gateway
+  that was removed from the dashboard, which is what it is meant for.
+* **A failed call keeps the old token,** and `/etc/eshu-token` is written
+  only when there is a token.
+* **The status line cannot be spoofed:** curl appends it after the body.
+* **A rejected token in a 200 keeps the old one.**
+
+**BE1 (must, RR-b): a failed registration must not widen SSH access.**
+* On a non-200 answer, `GATEWAY_SSH_MODE` falls back to `direct+mcp`. A
+  reinstall then writes the shared `eshu-gateway-key` line back onto an
+  `mcp_only` gateway.
+* Anyone who can make the dashboard unreachable for 15 s during a reinstall
+  gets direct mode back. That is fail-open.
+* Fix: when the registration did not return 200, skip the `authorized_keys`
+  rewrite entirely. Leave the file exactly as it is and print why.
+  * On a reinstall the gateway keeps the keys it had.
+  * On a fresh install it gets none and is unreachable until a re-run
+    succeeds, which fails closed.
+* Test: a reinstall of an `mcp_only` gateway with a stub returning 401 or
+  000 leaves `authorized_keys` byte-identical.
+* **Operator check, outside the repo:** until this fix, every reinstall got
+  a 401, so every `mcp_only` gateway reinstalled since the registration
+  auth change may have the shared line back. List the `mcp_only` gateways
+  and look for an `eshu-gateway-key` line in each one's `authorized_keys`.
+
+**BE2 (must, release): regenerate `dashboard/static/dev/eshu-gateway-install.sh`
+in this branch.**
+* It is not in the diff, so it still has the old order.
+* `deploy-dashboard.sh` resets `static/dev/` to the committed copy, so the
+  first dev update after the deploy still gets 401. That is the release
+  test that found the bug.
+* Worse, `/api/dev/promote` copies the dev installer over the golden one
+  and the source file. A promote made before anyone presses "Seed Edge"
+  would put the bug back into the fleet installer.
+* `fix/gateway-hardening` regenerated all three copies. Do the same here.
+
+**RR-a: recorded, not fixed in this hotfix. BE3 (should, own chunk).**
+* The gateway token in a curl `-H` argument is visible in `/proc` while
+  the call runs. But the gateway script and the poller send it the same way
+  on every ticket, result and status call (in the gateway script alone:
+  tickets, results, request status). Fixing only the installer would close
+  one of many windows.
+* Move every curl header that holds a secret to `-H @file`, from a 0600 file
+  or a process substitution, across the installer, the gateway and the
+  poller. The secrets are the gateway token and the enrollment token.
+  `-H @file` needs curl ≥ 7.55; if older curl matters, use `-K -` with the
+  headers on stdin.
+* Scope it like AF3, with a test that no curl argv carries a token.
+
+**RR-c: yes, in principle, as its own small change after this hotfix
+(BE4).** The update installer is already fetched from the dashboard and
+runs as root, so a dashboard key line adds no trust the update does not
+already have. Conditions:
+* **Only the dashboard line changes.**
+  * Only a line with the exact `--dashboard-key` forced-command prefix and
+    the ` eshu-dashboard` comment is replaced or added.
+  * Every other line is left byte-identical, including the `eshu-gateway-key`
+    line (or its absence on `mcp_only`).
+* **Keep `from=`.** `ALLOWED_SSH_FROM` is not known on update. Take `from=`
+  from the existing Eshu lines. If the existing lines carry a `from=` that
+  cannot be parsed, change nothing. A dashboard line must never be less
+  restricted than the gateway line beside it.
+* **Validate the key.** It must be one line in the form
+  `ssh-ed25519 <base64>`, with no options of its own. An empty key leaves
+  the existing line in place; it does not delete it.
+* **Only after a 200 registration** (BE1's rule).
+* **Write safely.** This runs as root in a directory the gateway user owns.
+  * Create the temp file with `mktemp` in `.ssh/` (O_EXCL, so a planted
+    symlink is never followed), then `mv` it into place.
+  * Refuse when `.ssh` or `authorized_keys` is a symlink, or not owned by
+    the user.
+  * The install path's fixed `authorized_keys.tmp` name has the same
+    planted-symlink problem today. Fix it in the same change.
+
+**The two dev gateway tokens printed during diagnosis:** a model session's
+context leaves the machine, so treat both as exposed. Rotate them now by
+remove and re-enrol: they are dev gateways, and that is cheap. The
+token-rotation action belongs in the backlog. Shape:
+* the dashboard mints a new token;
+* the token reaches the gateway only over its authenticated update channel;
+* the old token stays valid until the gateway's first call with the new one,
+  within a bounded grace period;
+* it is audited, and the token is never shown.
+
+### Reviewer notes (security reviewer, 2026-11-12, re-read at `f67e136`)
+
+**BE1 and BE2 are in. Approved for merge and deploy** on the operator's
+go-ahead.
+
+* **BE1.**
+  * `REGISTER_OK` is cleared before the call and set only on a 200, so it
+    cannot come in from the environment.
+  * The key block runs only when it is `1`. A missing `DASHBOARD_URL`
+    therefore also leaves `authorized_keys` alone, which fails closed.
+  * The failure branch no longer sets a mode, and `GATEWAY_SSH_MODE` is
+    initialised at the top of the script, never taken from the environment.
+* **BE2.** All four installer files are byte-identical, and a test enforces
+  it.
+* **The live check** (no `mcp_only` gateway, nothing to repair) closes
+  BE1's operator item.
+* **After the deploy:** rotate the two exposed dev tokens by re-enrolling
+  those gateways with the fixed installer, as planned. BE3, BE4 and token
+  rotation go into the plan as their own chunks at merge.
+
+## Follow-ups from the RR1 hotfix (security reviewer rulings, 2026-11-12)
+
+Three small chunks. Each one touches gateway-side scripts, so each needs the **security reviewer's sign-off** (§ 2.6a).
+
+### BE3 — secret headers off argv · branch `fix/secret-headers`
+
+* Every `curl` that sends a token (`X-Gateway-Token`, `X-Enrollment-Token`) takes its headers from a root-only file or a here-string (`-H @file` or `-H @-`), never from argv. This covers the installer, the gateway script and the poller.
+* Test: a stub `curl` records argv for every call path and asserts that no token appears in it.
+* Why: argv is readable by any local user through `/proc` while the call runs (RR-a, recorded as a residual).
+
+### BE4 — refresh the dashboard key on update · branch `fix/update-dashboard-key`
+
+An update today never writes `authorized_keys`, so F12's dashboard key reaches a gateway only on reinstall. The security reviewer's conditions:
+* add or replace **only** the `eshu-dashboard` line; every other line stays byte-identical;
+* copy `from=` from the existing Eshu lines, and change nothing if they cannot be read;
+* the key must be a single `ssh-ed25519` line, and an empty key leaves the existing line alone;
+* run only after a 200 registration (BE1's `REGISTER_OK`);
+* make the temp file with `mktemp`, and refuse a symlinked `.ssh` or `authorized_keys`. The install path's fixed `.tmp` name has the same symlink problem today, so fix it in the same change.
+
+### GT1 — gateway token rotation · branch `feat/gateway-token-rotation` · design first
+
+The dashboard has no rotate action today; the only way to rotate a token is to remove and re-enrol the gateway. Design:
+* the dashboard mints the new token and delivers it over the gateway's authenticated update channel;
+* the old token stays valid for a short grace period;
+* the rotation writes an audit entry;
+* the token is never shown in the UI.
+
+The gateway side needs the security reviewer's sign-off.
+
+---
+
 ## 7. Backlog (not planned in detail)
 
 * Deny with a reason, shown to the agent (cheap; low value given the data).
@@ -11318,6 +11471,10 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | — | CI fix | ci-environment | gateway + tests | Merged (`f2746ef`); CI pinned to ubuntu-24.04 (`6d58006`) | `fix/ci-environment` | F5 | |
 | — | Buffering | stream-unbuffered | gateway | Merged (`d8d70c2`); S1 tee fix done in Gateway hardening | `fix/stream-unbuffered` | F5 | |
 | — | Gateway hardening | gateway-hardening | gateway | **Merged** 2026-11-12 (AF3 + S1 tee capture; security `c15664e`; AX1/AX2 residuals; BA1 for the next F5/F19 change) | `fix/gateway-hardening` | F19, Buffering | |
+| — | Installer hotfix | installer-reregister | installer | **Merged and deployed** 2026-11-12 (`d6a38bb`; security `d6a38bb`): re-register presents the existing token; keys only after a 200 | `fix/installer-reregister` | F12 | |
+| — | BE3 | secret-headers | gateway + installer + poller | Planned (security ruling RR-a) | `fix/secret-headers` | RR1 | + security sign-off |
+| — | BE4 | update-dashboard-key | installer | Planned (security ruling RR-c) | `fix/update-dashboard-key` | RR1 | + security sign-off |
+| — | GT1 | gateway-token-rotation | dashboard + poller | Design first | `feat/gateway-token-rotation` | RR1 | + security sign-off |
 
 Chunks are done **in the order column**; each new chunk branches from the
 updated `feature-roadmap` after the previous one is merged. A design-first
