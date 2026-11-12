@@ -590,6 +590,9 @@ class GatewayPayload(BaseModel):
     # F19: the script that is running reports the run-limit capability on each
     # request (L7: the stored column can be stale after a self-update).
     run_limits: str = ""
+    # F22/AV1: the plan check's per-attempt token. It is a *signed* v2 prefix
+    # field, so the gateway only forwards one the dashboard's runner signed.
+    check_token: str = ""
 
 class RegisterPayload(BaseModel):
     ip: str
@@ -906,6 +909,46 @@ def receive_request(payload: GatewayPayload, request: Request):
     # A plan created by probe code may cover them (the operator approved those
     # exact bytes through the probe); an agent-proposed plan still may not.
     # `normal` mode is unchanged.
+    # F22/AV1/AN4: an unattended check. Tried before the probe claim (it is
+    # the narrower one) and only for a request the dashboard's own runner
+    # signed (force_jit) that carries a per-attempt token; a gateway that
+    # cannot limit never gets the claim, so it consumes nothing and the check
+    # ends `not_run`. The token itself is never stored in the request row.
+    check_token = (payload.check_token or '') if force_jit else ''
+    if sid and check_token and not frozen \
+            and not get_gateway_zero_trust(target_ip) \
+            and (payload.run_limits or '') == 'v1':
+        try:
+            from core.checks import check_row_limit
+            from db.session_plans import claim_check_item
+            # AY3: the claim also needs the verified agent to be the check
+            # plan's agent, the same owner rule every other claim carries.
+            claimed = claim_check_item(sid, target_ip, cmd, check_token,
+                                       owner=agent, now=now)
+            if claimed:
+                check_plan_id, check_item_id, parent_item_id = claimed
+                limit_text, _limit_seconds = check_row_limit()
+                req_id = create_request(
+                    target_ip, cmd, status="approved",
+                    reason='plan-check:%d:%d' % (check_plan_id, check_item_id),
+                    session_id=sid, execution_id=eid,
+                    inner_target=_inner_target_for(cmd), agent=agent,
+                    unattended=True, run_limit=limit_text,
+                    plan_item_id=parent_item_id)
+                update_gateway_last_seen(target_ip)
+                record_audit_event(
+                    'jit_check_approved', target_ip,
+                    details=f'Plan check #{check_plan_id} item #{check_item_id} '
+                            f'approved JIT #{req_id}: {cmd[:80]} (session {sid})')
+                return {"status": "ok", "id": f"{req_id:06d}",
+                        "request_id": req_id, "plan": True,
+                        "plan_id": check_plan_id,
+                        "message": "Auto-approved: plan check"}
+        except Exception:
+            # A check must never break the request path; falling through makes
+            # it a card, and the worker records `not_run`.
+            pass
+
     plan_origins = ('probe',) if force_jit else None
     if sid and not frozen and not get_gateway_zero_trust(target_ip):
         plan_allowed = True
@@ -926,7 +969,8 @@ def receive_request(payload: GatewayPayload, request: Request):
                 req_id = create_request(target_ip, cmd, status="approved",
                                         reason=f"session-plan:{plan_id}:{item_id}:{origin}",
                                         session_id=sid, execution_id=eid,
-                                        inner_target=_inner_target_for(cmd), agent=agent)
+                                        inner_target=_inner_target_for(cmd), agent=agent,
+                                        plan_item_id=item_id)
                 update_gateway_last_seen(target_ip)
                 record_audit_event(
                     'jit_plan_approved', target_ip,
@@ -1021,6 +1065,18 @@ def receive_request(payload: GatewayPayload, request: Request):
                             execution_id=eid,
                             reason=('force-jit' if force_jit else read_lane_reason),
                             inner_target=_inner_target_for(cmd), agent=agent)
+    # F22/AR2: in `approval` mode the check is linked when the card is made,
+    # by server code only — the session, one exact host, the whole command and
+    # an item that carries a check. Nothing the agent sends can make the link.
+    if sid and not frozen:
+        try:
+            from db.requests import set_request_plan_item
+            from db.session_plans import link_check_card
+            linked = link_check_card(sid, target_ip, cmd, req_id, now)
+            if linked:
+                set_request_plan_item(req_id, linked)
+        except Exception:
+            pass
     update_gateway_last_seen(target_ip)
     send_notify('jit', 'JIT Approval Required', f'`{cmd[:80]}` on {target_ip}')
     record_audit_event('jit_created', target_ip, details=f'JIT #{req_id}: {cmd[:80]}')
@@ -1109,6 +1165,16 @@ def _decode_exec_output(encoded: str):
     return raw.decode('utf-8', 'replace'), truncated
 
 
+def _dispatch_plan_check(request_id: int, exit_code: int, limit_kind: str):
+    """F22 §9: hand the check to the worker; never run it on this POST."""
+    try:
+        from core.checks import on_result
+        on_result(int(request_id), int(exit_code), limit_kind or '')
+    except Exception as exc:  # noqa: BLE001 — a result must still be stored
+        print('[checks] dispatch failed for %s: %s' % (request_id, exc),
+              flush=True)
+
+
 @app.post("/api/exec-result")
 def receive_exec_result(payload: ExecResultPayload, request: Request):
     """F5: the gateway posts exit code, duration and the sanitized output tail.
@@ -1150,6 +1216,9 @@ def receive_exec_result(payload: ExecResultPayload, request: Request):
         stored = save_result(payload.request_id, payload.exit_code,
                              payload.duration_ms, output, truncated,
                              limit_kind=payload.limit)
+        if stored:
+            _dispatch_plan_check(payload.request_id, payload.exit_code,
+                                 payload.limit)
         return {"status": "ok", "attached": stored, "request_id": payload.request_id,
                 "reason": None if stored else "already_has_result"}
 
@@ -1161,6 +1230,8 @@ def receive_exec_result(payload: ExecResultPayload, request: Request):
     if match:
         stored = save_result(match, payload.exit_code, payload.duration_ms,
                              output, truncated, limit_kind=payload.limit)
+        if stored:
+            _dispatch_plan_check(match, payload.exit_code, payload.limit)
         return {"status": "ok", "attached": stored, "request_id": match,
                 "reason": None if stored else "already_has_result"}
 
@@ -1457,6 +1528,14 @@ def deny_request(req_id: int, request: Request):
     command = row.get('command') or ''
     if not update_request_status_if_pending(req_id, "denied"):
         raise HTTPException(status_code=409, detail="not_pending")
+    # F22/AV2: a denied card gives its plan item's check link back, so a
+    # re-sent request for the same bytes carries its check again.
+    try:
+        if row.get('plan_item_id'):
+            from db.session_plans import release_check_link
+            release_check_link(row['plan_item_id'])
+    except Exception:
+        pass
     record_audit_event('jit_denied', details=f'JIT #{req_id} denied')
     deny_count = count_denied(command) if command else 0
     return {"status": "ok", "deny_count": deny_count, "command": command}

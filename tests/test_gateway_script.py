@@ -415,7 +415,8 @@ exec "__REAL__" "$@"
         self.token_file.write_text(value + "\n")
 
     def sign(self, command: str, agent: str = "agent-a", session: str = "",
-             force_jit: str = "0", ts: int = None, nonce: str = None):
+             force_jit: str = "0", ts: int = None, nonce: str = None,
+             check_token: str = ""):
         """Build the signed prefix exactly as core/ssh_crypto.py does."""
         import secrets as _secrets
         ts = str(ts if ts is not None else int(time.time()))
@@ -426,10 +427,11 @@ exec "__REAL__" "$@"
         key = ssh_crypto.derive_key((self.etc / "eshu-token").read_text().strip())
         canonical = ssh_crypto.canonical(
             command, agent, session=session, mcp="1", force_jit=force_jit,
-            ts=ts, nonce=nonce, gateway_ip=self.target_ip)
+            ts=ts, nonce=nonce, gateway_ip=self.target_ip,
+            check_token=check_token)
         signature = ssh_crypto.sign(key, canonical)
         return ssh_crypto.prefix_line(agent, session, force_jit, ts, nonce,
-                                      signature) + command
+                                      signature, check_token=check_token) + command
 
     def command_script(self, name: str, body: str) -> str:
         """Write an executable test command (no shell metacharacters)."""
@@ -1122,7 +1124,7 @@ def test_sec_chunk1_jit_request_body_is_well_formed(gw):
             payload = json.loads(raw)
             assert set(payload) == {
                 "target_ip", "encoded_command", "session_id", "execution_id",
-                "agent", "force_jit", "run_limits"}
+                "agent", "force_jit", "run_limits", "check_token"}
             # F19: '' or 'v1' — the capability this running script reports.
             assert payload["run_limits"] in ("", "v1")
 
@@ -1234,6 +1236,69 @@ def test_bg2_the_result_post_writes_no_tmp_file():
     assert "-H @<(gateway_header)" in text
     assert "hdr=$(umask 077; mktemp)" not in text
     assert 'rm -f "$hdr"' not in text
+
+
+def test_f22_a_token_without_a_signed_prefix_is_refused(gw):
+    """AY2: ESHU_CHECK_TOKEN joins the manifest trigger, so a token on its
+    own is an incomplete prefix and never reaches the dashboard."""
+    gw.jit_status("denied")
+    gw.run("ESHU_CHECK_TOKEN=" + "a" * 32 + " echo hello")
+    assert not [c for c in gw.curl_calls()
+                if c["url"].endswith("/api/request")]
+
+
+def test_f22_installers_embed_the_gateway_byte_for_byte():
+    """AY1/BE2: the four installer files are one generated text.
+
+    The template plus the three sources is the generator's output; every
+    committed installer must be exactly that, and the dev copy (which the
+    deploy resets and a promote copies over the fleet installer) must not
+    lag behind.
+    """
+    repo = Path(__file__).resolve().parent.parent
+    dashboard = repo / "dashboard"
+
+    def read(name):
+        return (dashboard / name).read_text(encoding="utf-8")
+
+    gateway = read("eshu-gateway.sh").rstrip("\n")
+    template = read("eshu-installer-template.sh")
+    generated = template.replace("__GATEWAY_CONTENT__", gateway)
+    generated = generated.replace("__POLLER_CONTENT__",
+                                  read("eshu-poller.sh").rstrip("\n"))
+    generated = generated.replace("__LOGGER_CONTENT__",
+                                  read("eshu-logger.sh").rstrip("\n"))
+    assert "ESHU_CHECK_TOKEN" in generated
+    for rel in ("dashboard/eshu-gateway-install.sh",
+                "dashboard/static/eshu-gateway-install.sh",
+                "dashboard/static/dev/eshu-gateway-install.sh"):
+        text = (repo / rel).read_text(encoding="utf-8")
+        assert text == generated, "%s is not the generated installer" % rel
+
+
+def test_f22_a_signed_check_token_reaches_the_request_body(gw):
+    """AV1: the check token is a v2 signed field, so the gateway accepts it
+    and forwards it; a token added after signing is refused."""
+    gw.jit_status("denied")
+    token = "a" * 32
+    gw.run(gw.sign("echo hello", force_jit="1", check_token=token))
+    assert gw.wait_for(lambda calls: any(
+        c["url"].endswith("/api/request") for c in calls))
+    seen = []
+    for call, raw in zip(gw.curl_calls(), gw.raw_bodies()):
+        if call["url"].endswith("/api/request"):
+            seen.append(json.loads(raw)["check_token"])
+    assert seen and seen[-1] == token
+
+
+def test_f22_a_token_outside_the_signature_is_refused(gw):
+    gw.jit_status("denied")
+    prefix = gw.sign("echo hello", force_jit="1")
+    forged = prefix.replace(
+        "ESHU_FORCE_JIT=1", "ESHU_FORCE_JIT=1 ESHU_CHECK_TOKEN=" + "b" * 32)
+    gw.run(forged)
+    assert not [c for c in gw.curl_calls()
+                if c["url"].endswith("/api/request")]
 
 
 def test_sec_chunk1_window_reject_body_is_well_formed(gw):

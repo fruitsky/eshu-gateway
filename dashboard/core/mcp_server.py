@@ -1039,6 +1039,12 @@ def check_plan_fn():
             'uses': item['uses'],
             'remaining': max(0, item['max_uses'] - item['uses']),
             'removed': bool(item['removed']),
+            # F22: the check the operator approved with this item, and how it
+            # ended. AV1: the attempt token is never part of this payload.
+            'check': item.get('check'),
+            'check_state': item.get('check_state') or '',
+            'check_reason': item.get('check_reason') or '',
+            'check_observed': item.get('check_observed') or '',
         } for item in plan['items']]
         return json.dumps({
             'plan_id': plan['id'],
@@ -1046,6 +1052,7 @@ def check_plan_fn():
             'status': plan['status'],
             'until': plan['until'],
             'note': plan['note'],
+            'stopped_reason': plan.get('stopped_reason') or '',
             'items': items,
         })
     return _check_plan

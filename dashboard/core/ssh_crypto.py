@@ -27,6 +27,10 @@ TS_RE = re.compile(r'[0-9]{1,12}')
 NONCE_RE = re.compile(r'[0-9a-f]{16,64}')
 GATEWAY_RE = re.compile(r'[A-Za-z0-9_.:-]{1,64}')
 SIG_RE = re.compile(r'[0-9a-f]{64}')
+# F22/AV1: the check token. base64url (`secrets.token_urlsafe`), 16-128 chars.
+# It is a *signed* field on the v2 canonical form, so only the dashboard's own
+# runner can produce a request that carries it.
+CHECK_TOKEN_RE = re.compile(r'[A-Za-z0-9_-]{16,128}')
 
 
 def derive_key(token: str) -> str:
@@ -46,11 +50,17 @@ def command_sha(command: str) -> str:
 
 
 def canonical(command, agent, session='', mcp='1', force_jit='0', ts='0',
-              nonce='', gateway_ip=''):
+              nonce='', gateway_ip='', check_token=''):
     """The one-field-per-line, version-first canonical form (§5 A2).
 
     Raises ValueError for a value outside its charset. The caller has already
     validated the command bytes (G3); this only guards the prefix fields.
+
+    F22/AV1: a non-empty `check_token` switches to `v2`, which inserts the
+    token before the command hash. With no token the bytes are exactly v1's,
+    so every existing call and the shared vector are unchanged; an old gateway
+    does not know the `ESHU_CHECK_TOKEN` key and refuses the prefix, which
+    makes a check `not_run` rather than unbound.
     """
     fields = {
         'agent': (agent, AGENT_RE),
@@ -64,6 +74,14 @@ def canonical(command, agent, session='', mcp='1', force_jit='0', ts='0',
     for name, (value, pattern) in fields.items():
         if not pattern.fullmatch(value or ''):
             raise ValueError(f'invalid {name}')
+    if check_token:
+        if not CHECK_TOKEN_RE.fullmatch(check_token):
+            raise ValueError('invalid check_token')
+        return '\n'.join(['v2', fields['agent'][0], fields['session'][0],
+                          fields['mcp'][0], fields['force_jit'][0],
+                          fields['ts'][0], fields['nonce'][0],
+                          fields['gateway'][0], check_token,
+                          command_sha(command)])
     return '\n'.join([CANONICAL_VERSION, fields['agent'][0],
                       fields['session'][0], fields['mcp'][0],
                       fields['force_jit'][0], fields['ts'][0],
@@ -83,7 +101,8 @@ def sign(key_hex: str, canonical_text: str) -> str:
                     hashlib.sha256).hexdigest()
 
 
-def prefix_line(agent, session, force_jit, ts, nonce, signature):
+def prefix_line(agent, session, force_jit, ts, nonce, signature,
+                check_token=''):
     """The ssh prefix, ending with a space so the command follows directly."""
     parts = [f'ESHU_AGENT={agent}', f'ESHU_AGENT_SIG={signature}',
              f'ESHU_TS={ts}', f'ESHU_NONCE={nonce}', 'ESHU_MCP=1']
@@ -91,4 +110,6 @@ def prefix_line(agent, session, force_jit, ts, nonce, signature):
         parts.append('ESHU_FORCE_JIT=1')
     if session:
         parts.append(f'ESHU_SESSION_ID={session}')
+    if check_token:
+        parts.append(f'ESHU_CHECK_TOKEN={check_token}')
     return ' '.join(parts) + ' '

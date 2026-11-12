@@ -48,6 +48,9 @@ OVERRIDE_BUCKETS = ('session-override', 'host-override')
 # approval, the second is a tag on a row a human still cleared.
 KNOWN_REASON_PREFIXES = {
     'session-plan': 'plan',
+    # F22: a plan check inherits the plan's approval, so it lands in the same
+    # bucket; the id it names is the one-item check plan, not a new decision.
+    'plan-check': 'plan',
     'session-override': 'session-override',
     'override': 'host-override',
     'read-lane': 'read-lane',

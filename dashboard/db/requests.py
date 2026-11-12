@@ -40,6 +40,13 @@ def init_requests_tables(cursor):
                 cursor.execute(f"ALTER TABLE requests ADD COLUMN {col} TEXT")
             except Exception:
                 pass
+    # F22/AR2: the plan item whose approved check follows this card. Nullable:
+    # NULL/0 means no link, and the F5 hook then dispatches nothing.
+    if 'plan_item_id' not in existing:
+        try:
+            cursor.execute("ALTER TABLE requests ADD COLUMN plan_item_id INTEGER")
+        except Exception:
+            pass
     # F6: when the row stopped waiting (approved, denied or expired). Nullable
     # so pre-F6 rows stay unknown rather than being given a made-up wait.
     if 'decided_at' not in existing:
@@ -159,7 +166,7 @@ def _refuse_agent_ticket(req_id, target_ip: str) -> None:
         pass
 
 
-def create_request(target_ip: str, command: str, status: str = 'pending', ttl: int = 90, reason: str = '', session_id: str = '', execution_id: str = '', inner_target: str = '', agent: str = '', unattended: bool = False, run_limit: str = ''):
+def create_request(target_ip: str, command: str, status: str = 'pending', ttl: int = 90, reason: str = '', session_id: str = '', execution_id: str = '', inner_target: str = '', agent: str = '', unattended: bool = False, run_limit: str = '', plan_item_id=None):
     # F18: compute both fingerprints for every new row (no extra call site).
     try:
         from core.fingerprint import fingerprints
@@ -177,11 +184,21 @@ def create_request(target_ip: str, command: str, status: str = 'pending', ttl: i
         # waiting time.
         decided_at = created_at if status != 'pending' else None
         cursor.execute('''
-            INSERT INTO requests (target_ip, command, status, created_at, expires_at, reason, session_id, execution_id, inner_target, command_sha, shape_sha, decided_at, agent, unattended, run_limit)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (target_ip, command, status, created_at, expires_at, reason, session_id, execution_id, inner_target or '', cmd_sha, shape_sha, decided_at, (agent or '')[:64], 1 if unattended else 0, (run_limit or '')[:2000]))
+            INSERT INTO requests (target_ip, command, status, created_at, expires_at, reason, session_id, execution_id, inner_target, command_sha, shape_sha, decided_at, agent, unattended, run_limit, plan_item_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (target_ip, command, status, created_at, expires_at, reason, session_id, execution_id, inner_target or '', cmd_sha, shape_sha, decided_at, (agent or '')[:64], 1 if unattended else 0, (run_limit or '')[:2000], int(plan_item_id) if plan_item_id else None))
         conn.commit()
         return cursor.lastrowid
+
+def set_request_plan_item(request_id: int, plan_item_id: int) -> bool:
+    """F22/AR2: stamp the plan item whose check follows this request."""
+    with db_conn() as conn:
+        cur = conn.cursor()
+        cur.execute('UPDATE requests SET plan_item_id = ? WHERE id = ?',
+                    (int(plan_item_id), int(request_id)))
+        conn.commit()
+        return cur.rowcount == 1
+
 
 def mark_requests_excluded(ids=None, session_id: str = '') -> int:
     """F8: flag rows as test traffic. Idempotent; returns newly flagged rows.
@@ -411,8 +428,10 @@ def expire_stale_requests(now_ts: int = None):
     now = int(now_ts or time.time())
     with db_conn() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT id FROM requests WHERE status = 'pending' AND expires_at < ?", (now,))
-        expired = [row['id'] for row in cursor.fetchall()]
+        cursor.execute("SELECT id, plan_item_id FROM requests "
+                       "WHERE status = 'pending' AND expires_at < ?", (now,))
+        expired_rows = cursor.fetchall()
+        expired = [row['id'] for row in expired_rows]
         cursor.execute("UPDATE requests SET status = 'expired', decided_at = ? "
                        "WHERE status = 'pending' AND expires_at < ?", (now, now))
         cursor.execute("SELECT id FROM requests WHERE status = 'approved' AND expires_at < ?", (now,))
@@ -421,6 +440,14 @@ def expire_stale_requests(now_ts: int = None):
                        "decided_at = COALESCE(decided_at, ?) "
                        "WHERE status = 'approved' AND expires_at < ?", (now, now))
         conn.commit()
+        # F22/AV2: an expired card releases the plan item's check link too.
+        try:
+            from db.session_plans import release_check_link
+            for row in expired_rows:
+                if row['plan_item_id']:
+                    release_check_link(row['plan_item_id'])
+        except Exception:
+            pass
         return expired, abandoned
 
 def get_request_command(req_id: int):

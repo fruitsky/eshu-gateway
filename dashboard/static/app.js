@@ -154,10 +154,18 @@ function ctxHostBody(d) {
     ' \u00b7 failed 24h ' + Number(h.failed_24h || 0) + '</div>';
 }
 
+function ctxCheckWarningBody(data) {
+  var warn = data && data.check_warning;
+  if (!warn) return '';
+  return '<div class="text-xs text-danger">' + escapeHtml(warn.text || '') + '</div>';
+}
+
 function renderRequestContext(data) {
   var el = document.getElementById('ctx-context');
   if (!el) return;
   el.innerHTML =
+    (data && data.check_warning
+      ? ctxSectionHtml('check', 'Plan check', ctxCheckWarningBody(data)) : '') +
     ctxSectionHtml('waiting', 'Why it is waiting for you', ctxWaitingBody(data)) +
     ctxSectionHtml('session', 'This session', ctxSessionBody(data)) +
     ctxSectionHtml('seen', 'Seen before', ctxSeenBody(data)) +
@@ -3873,9 +3881,34 @@ function planItemHtml(plan, item) {
         ? '<div class="plan-note">' + escapeHtml(item.summary) + '</div>' : '') +
       (item.args
         ? '<code class="plan-cmd plan-args">' + escapeHtml(item.args) + '</code>' : '') +
+      /* F22: the check the operator approves with this item, and how it ended. */
+      planCheckHtml(item) +
       bdHeadlineHtml(row) +
       bdBodyHtml(row, { raw: false }) +
     '</div></div>';
+}
+
+function planCheckHtml(item) {
+  var chk = item.check;
+  if (!chk) return '';
+  var state = String(item.check_state || '');
+  var label = chk.kind === 'ssh'
+    ? 'check: ' + (chk.command || '')
+    : 'check: ' + (chk.integration || '') + '.' + (chk.tool || '') +
+      ' ' + JSON.stringify(chk.expect || {});
+  var bits = [label];
+  if (chk.wait_s) bits.push('wait ' + Number(chk.wait_s) + 's');
+  if (chk.retries) bits.push('retries ' + Number(chk.retries));
+  var cls = 'plan-check';
+  var tail = '';
+  if (state === 'passed') { cls += ' plan-check-ok'; tail = ' \u2014 passed'; }
+  else if (state === 'failed') { cls += ' plan-check-bad'; tail = ' \u2014 failed'; }
+  else if (state === 'not_run') { cls += ' plan-check-bad'; tail = ' \u2014 not run'; }
+  else if (state === 'skipped') { cls += ' plan-check-bad'; tail = ' \u2014 skipped'; }
+  else if (state === 'pending' || state === 'running') { cls += ' plan-check-open'; tail = ' \u2014 running'; }
+  var why = (state === 'failed' || state === 'not_run') && item.check_reason
+    ? ' <span class="plan-check-why">' + escapeHtml(item.check_reason) + '</span>' : '';
+  return '<div class="' + cls + '">' + escapeHtml(bits.join(' \u00b7 ')) + tail + why + '</div>';
 }
 
 function planCardHtml(plan) {
