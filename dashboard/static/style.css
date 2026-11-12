@@ -3926,7 +3926,17 @@ input::placeholder, textarea::placeholder { color: var(--text-muted); }
   padding: 14px 0 0;
   border-top: 1px solid var(--rule-weak);
 }
+/* X5-r: the widget is moved into the empty state's flow (under the queue while
+   something waits, under the headline when idle) so its Approve button is on
+   screen without scrolling. The slot is a flex child and must span the feed,
+   and vanish when empty or when the widget itself is hidden. */
+#view-home .cc-plans-slot { align-self: stretch; width: 100%; }
+#view-home .cc-plans-slot:empty { display: none; }
 #view-home .plans-in-jit .widget-header { margin-bottom: 10px; }
+/* The pending widget becomes borderless (`.flat`) and hides its own header, but
+   that rule also reaches the plan section's header. The plan header is the one
+   label that says what the card below is, so keep it. */
+#view-home .plans-in-jit > .widget-header { display: flex; }
 
 /* The decision, as a ledger entry: brackets, no card. */
 #view-home .ccq-hero .jit-ticket {

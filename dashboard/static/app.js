@@ -2432,8 +2432,15 @@ function renderEmptyState(total) {
       '<div class="const-legend" id="const-legend"></div>' +
     '</div>' +
     '<div class="cc-queue' + (total > 0 ? ' show' : '') + '" id="cc-queue"></div>' +
+    /* X5-r: a plan is a pending decision like a JIT, so its card belongs in
+       this flow — but the empty state is taller than a phone, so a card after
+       the sessions list was below the fold and the Approve button could not be
+       reached. The plan widget is moved into one of these slots: under the
+       queue when there is something waiting, under the headline when idle. */
+    '<div class="cc-plans-slot" id="cc-plans-slot-queue"></div>' +
     '<div class="cc-empty-headline">' + headline + '</div>' +
     '<div class="cc-empty-sub">' + sub + '</div>' +
+    '<div class="cc-plans-slot" id="cc-plans-slot-idle"></div>' +
     tickerHtml +
     attentionHtml +
     sessionsHtml +
@@ -3764,11 +3771,17 @@ function renderJitTickets() {
   var sig = emptyStateSignature() + '|' + total;
   if (container.dataset.sig === sig && container.firstElementChild) return;
   container.dataset.sig = sig;
+  /* Keep the plan widget across the re-render: it lives outside this container
+     on first paint and inside a slot after it, and innerHTML detaches it. */
+  var plansEl = document.getElementById('plans-widget');
   container.innerHTML = renderEmptyState(total);
   buildStaticSky();
   buildStarfield(_layout);
   initSkyParallax();
   if (total > 0) renderQueue(allItems);
+  var slot = document.getElementById(total > 0 ? 'cc-plans-slot-queue' : 'cc-plans-slot-idle');
+  if (plansEl && slot) slot.appendChild(plansEl);
+  renderPlans();
   refreshRecentSessions();
 }
 
@@ -3917,9 +3930,14 @@ function renderPlans() {
   var list = document.getElementById('plans-list');
   var count = document.getElementById('plans-count');
   if (!widget || !list) return;
+  /* The slot the widget was moved into is a flex child: hide it too, or its
+     gap stays on the page when there is no plan to show. */
+  var slot = widget.parentElement;
+  if (slot && !slot.classList.contains('cc-plans-slot')) slot = null;
   var plans = _sessionPlans || [];
   if (!plans.length) {
     widget.classList.add('hidden');
+    if (slot) slot.classList.add('hidden');
     list.innerHTML = '';
     if (count) count.textContent = '';
     _planDisplayed = {};
@@ -3937,6 +3955,7 @@ function renderPlans() {
   });
   _planDisplayed = nextDisplayed;
   widget.classList.remove('hidden');
+  if (slot) slot.classList.remove('hidden');
   if (count) count.textContent = plans.length + ' waiting';
   list.innerHTML = plans.map(planCardHtml).join('');
 }

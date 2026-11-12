@@ -11147,6 +11147,41 @@ freeze copy, table columns/sticky/disclosure).
 `bash scripts/verify.sh`: `2845 passed, 26 skipped, 8 warnings in 581.93s
 (0:09:41)`.
 
+**Regression fix (X5-r, `fix/plans-widget-visible`, 2026-11-13).**
+
+Deployed 21:0x on 2026-11-12: session plans stopped appearing. The endpoint
+returned them and the page polled, but X5 had put the plans widget after the
+whole empty state inside the borderless pending widget. With no JITs the empty
+state (starfield + headline + sessions) is taller than a laptop viewport, so the
+card opened below the fold — and on a phone even its Approve button was outside
+the viewport, so no plan could be approved and probes/plans stayed blocked.
+Measured before the fix at 1440×900: widget top 744px, Approve at 921px.
+
+The widget is now placed in the pending flow by `renderJitTickets`: it is moved
+into `#cc-plans-slot-queue` (immediately under `#cc-queue`) when something is
+waiting, and into `#cc-plans-slot-idle` (under the headline/sub, before the
+ticker, attention strip and recent sessions) when idle. The widget is captured
+before the empty state is re-rendered and re-appended, and `renderPlans()` runs
+after the move; the slot hides with the widget. X5's intent is unchanged: the
+card is still inside the pending widget, below the starfield. The plan section
+header is restored — `.widget.flat .widget-header` was hiding it.
+
+Verified in headless Chromium against the real stylesheet and app, at 1440×900
+and 390×844, for one proposed plan with zero JITs and with one pending JIT: the
+card and its Approve button are fully inside the viewport, `elementFromPoint` at
+the button's centre returns the button, the card does not intersect the
+starfield, and its DOM position is queue → plan → recent sessions. Approve sits
+at y≈758/669 (desktop) and 734/678 (phone) in the two states.
+
+Tests: `tests/test_x5_plans_visible.py` (three structural checks plus the
+browser render, which skips with a reason when node/playwright is absent;
+`ESHU_PLAYWRIGHT_MODULES` points it at a node_modules that has playwright).
+
+`bash scripts/verify.sh`: `2862 passed, 27 skipped, 8 warnings in 584.69s
+(0:09:44)`. The browser render skips in the gate (no playwright on PATH,
++1 skip); run locally with `ESHU_PLAYWRIGHT_MODULES=/opt/dsh/pw/node_modules`
+and it passes.
+
 ---
 
 ## Gateway hardening (AF3, tee capture) · branch `fix/gateway-hardening` · gateway bash · **security reviewer sign-off**
