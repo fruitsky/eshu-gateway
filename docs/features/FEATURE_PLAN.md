@@ -11115,7 +11115,7 @@ untouched; the diff against the roadmap is the 22 F22 lines in
   `tests/test_gateway_hardening.py` and `tests/test_installer.py`
   (including BE2) pass.
 
-`bash scripts/verify.sh`: `2893 passed, 26 skipped, 7 warnings in 607.69s
+`bash scripts/verify.sh`: `2940 passed, 26 skipped, 7 warnings in 624.14s
 (0:10:07)`.
 
 ### Reviewer notes (main feature reviewer, 2026-11-12, code round 2)
