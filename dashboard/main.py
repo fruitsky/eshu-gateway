@@ -4296,7 +4296,8 @@ def run_recipe_route(recipe_id: int, payload: RecipeRunPayload, request: Request
         raise HTTPException(status_code=404, detail="Recipe not found")
     try:
         result = start_run(recipe['id'], payload.parameters, agent='',
-                           session_id=payload.session_id, operator='operator')
+                           session_id=payload.session_id, operator='operator',
+                           origin='operator')
     except RecipeError as exc:
         raise HTTPException(status_code=400, detail=exc.message)
     return result

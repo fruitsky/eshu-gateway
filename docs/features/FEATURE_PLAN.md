@@ -10273,6 +10273,43 @@ AW1–AW4 are fixed as asked. The SSH step now passes the real agent row, so the
 
 After AW5 and AW6: to the security reviewer, with the operator-run SSH decision flagged.
 
+### Code round 3 — AW5 and AW6 (implementer notes)
+
+**Status: AW5 and AW6 are in; to the security reviewer with the
+operator-run SSH decision flagged.**
+
+**AW5 — the origin is the caller's.** `start_run(..., origin=)` has no
+inference and no default: a missing or unknown value is
+`recipe_origin_required`. `dashboard/main.py`'s run route passes
+`origin='operator'`; the MCP `recipe_run` passes `origin='agent'` with
+`current_agent_name()`. For an `agent` origin the agent row must resolve
+(`_agent_row`, the same lookup the step check uses) *before* anything runs
+or is written: no agent name or no token row → `recipe_no_agent`, before
+the preconditions, before `create_run` and before `create_recipe_plan`. The
+recipe's `allowed_agents` is then checked as before, and
+`recipe_agent_not_allowed` is only reachable for a real agent that the
+recipe does not name.
+
+Tests: MCP `recipe_run` with no current agent is refused with
+`recipe_no_agent`, and the run list and the session's plan list are both
+empty; an `agent` origin naming a ghost is refused; a call with no origin
+is `recipe_origin_required`; the origin is recorded on the run row.
+
+**AW6 — the undo check sees the undo's arguments.** The stored result is
+parsed and `substitute_args` runs *before* the standing check, so
+`evaluate_call` gets the arguments the undo will actually send
+(`{'id': 7}`), not `{}` and not the unsubstituted template. A failure in
+the substitution is a step failure, not a standing refusal. One deliberate
+step beyond the note's wording: the reviewer named
+`_args_for_execution(undo['call'])`, which still carries the
+`{'result': 'id'}` slot; the substituted arguments are what the call will
+send, so they are what the policy must judge. Test: a patched
+`evaluate_call` records the undo's arguments and refuses them; the
+rollback stops at that step with the real `id` in the recorded args.
+
+`bash scripts/verify.sh`: `2902 passed, 22 skipped, 8 warnings in 591.92s
+(0:09:51)`.
+
 ---
 
 ## Chunk F17 — Local-agent profile · slug `local-agent` · dashboard + docs
@@ -12449,7 +12486,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 18 | F23 | change-journal | dashboard | **Merged** 2026-11-11 (AJ1/AJ2) | `feat/f23-change-journal` | F1, F5, F7, F14 | |
 | 18a | X2 | runbooks-page | dashboard UI | **Merged** 2026-11-11 | `feat/x2-runbooks-page` | F13 | |
 | 19 | F22 | change-checks | dashboard + MCP | After F19 merges | `feat/f22-change-checks` | F3, F5, F12, F19 | + security sign-off (the unattended check; AG1's origin rule does not cover it) |
-| 20 | F16 | recipes | dashboard + MCP | Code round 2: **AW1** (the SSH step runs as the real agent; operator runs refuse SSH), **AW2** (the agent's standing before every step and undo step), **AW3** (a refused step expires its reservation), **AW4** (an SSH item must name its host) folded | `feat/f16-recipes` | F3, F12, F13, F19 | security reviews AW1's operator decision and the recipe/claim path; auto_run comes back before it is enabled |
+| 20 | F16 | recipes | dashboard + MCP | Code round 3: **AW5** (the origin is explicit: the route `operator`, MCP `agent`, `recipe_no_agent` before any precondition) and **AW6** (the undo check gets the undo's real arguments) folded | `feat/f16-recipes` | F3, F12, F13, F19 | security reviews AW1's operator decision and the recipe/claim path; auto_run comes back before it is enabled |
 | 21 | F24 | content-tripwire | dashboard | Design first | `feat/f24-content-tripwire` | F12, F14 | + security sign-off (retention) |
 | 22 | F25 | secrets-broker | gateway + dashboard | Design first | `feat/f25-secrets-broker` | F1, F12, F19; security Chunk 7 before deploy | + security sign-off; gateway bash line by line |
 | 23 | F26 | agent-shadow | dashboard + MCP | Ready after F16 | `feat/f26-agent-shadow` | F1, F12, F16, F18 | security reads the enforcement points |

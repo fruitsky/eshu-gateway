@@ -1091,8 +1091,11 @@ def recipe_run_fn():
         from db.recipes import RecipeError as DbRecipeError
         sid, _source = resolve_session((session_id or '')[:64])
         try:
+            # AW5: the origin is this caller's, so a caller without an agent
+            # identity is refused rather than given the operator's standing.
             result = start_run((name or '').strip(), parameters or {},
-                               agent=current_agent_name(), session_id=sid)
+                               agent=current_agent_name(), session_id=sid,
+                               origin='agent')
         except (RecipeError, DbRecipeError) as exc:
             return json.dumps({'error': exc.code, 'message': exc.message})
         return json.dumps(result)

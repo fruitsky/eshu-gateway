@@ -763,7 +763,18 @@ def _trim(value, params):
 
 # ── the run ────────────────────────────────────────────────────────────
 
-def start_run(recipe_name, params, agent='', session_id='', operator=''):
+def start_run(recipe_name, params, agent='', session_id='', operator='',
+              origin=''):
+    """Propose one run of an approved recipe.
+
+    AW5: `origin` is the caller's, never inferred from an empty agent name.
+    An MCP caller with no agent identity must pass `origin='agent'` and is
+    refused (`recipe_no_agent`); the operator's dashboard route passes
+    `origin='operator'`, and that standing is never available to MCP.
+    """
+    if origin not in ('agent', 'operator'):
+        _fail('recipe_origin_required',
+              "start_run needs origin='agent' or 'operator'")
     recipe = get_recipe(name=recipe_name) if not str(recipe_name).isdigit() \
         else get_recipe(recipe_id=recipe_name)
     if not recipe:
@@ -775,9 +786,20 @@ def start_run(recipe_name, params, agent='', session_id='', operator=''):
         _fail('recipe_not_approved', 'the current version is not approved')
     document = validate_document(version['document'], remote=False)
     allowed = document.get('allowed_agents') or []
-    if agent and agent not in allowed:
-        _fail('recipe_agent_not_allowed', 'this recipe is not available to that agent')
-    if not agent and allowed:
+    if origin == 'agent':
+        # AW5: the caller's standing is the agent's. Without a resolvable
+        # row there is no host allowlist and no policy, so refuse before any
+        # precondition runs and before a run or plan row exists.
+        if not (agent or '').strip():
+            _fail('recipe_no_agent',
+                  'no agent identity on this call; use an agent token')
+        if not _agent_row(agent):
+            _fail('recipe_no_agent',
+                  'the agent %r has no token row' % agent)
+        if allowed and agent not in allowed:
+            _fail('recipe_agent_not_allowed',
+                  'this recipe is not available to that agent')
+    elif allowed:
         pass  # the operator may always start an approved recipe
     try:
         values = resolve_values(document, params)
@@ -787,7 +809,6 @@ def start_run(recipe_name, params, agent='', session_id='', operator=''):
     # AW1: an operator-started run has no agent identity, so an SSH step in
     # it can never run. Refused at start, before a precondition runs and
     # before the operator is shown a plan whose step could not happen.
-    origin = 'agent' if agent else 'operator'
     if origin == 'operator':
         for step in filled['steps']:
             if step['kind'] == 'ssh' or (
@@ -799,7 +820,7 @@ def start_run(recipe_name, params, agent='', session_id='', operator=''):
     for pre in filled.get('preconditions') or []:
         value, _, _ = _run_tool_call(
             {'id': 0, 'agent': agent or operator or 'operator',
-             'origin': 'agent' if agent else 'operator'},
+             'origin': origin},
             pre['call']['integration'], pre['call']['tool'],
             _args_for_execution(pre['call']), 'precondition')
         if not evaluate_pass(pre['pass'], value=value):
@@ -1077,9 +1098,27 @@ def _execute_rollback_locked(run_id):
         if get_trigger_freeze() is not None:
             _stop_run(run, 'stopped', step['step_id'], 'a freeze is on')
             return
+        stored = [s for s in original['steps'] if s['step_id'] == step['step_id']]
+        try:
+            result = json.loads((stored[0].get('result_json')
+                                 if stored else '') or '{}')
+        except ValueError:
+            result = {}
+        try:
+            # AW6: the undo's real arguments (the stored result substituted
+            # in), so an arg_policy that limits them is judged on the call
+            # that is about to run.
+            args = substitute_args(undo.get('call', {}).get('args') or {},
+                                   original['parameters'], results=result)
+        except RecipeParamError as exc:
+            set_step(run['id'], step['step_id'], status='failed',
+                     error=exc.message[:300])
+            _stop_run(run, 'stopped', step['step_id'], exc.message)
+            return
         try:
             _agent_standing(run, (undo.get('call') or {}).get('integration')
-                            or '', (undo.get('call') or {}).get('tool') or '')
+                            or '', (undo.get('call') or {}).get('tool') or '',
+                            args)
         except (RecipeError, RecipeParamError) as exc:
             set_step(run['id'], step['step_id'], status='failed',
                      error=getattr(exc, 'message', str(exc))[:300])
@@ -1090,15 +1129,8 @@ def _execute_rollback_locked(run_id):
             _stop_run(run, 'stopped', step['step_id'], 'the undo item is not claimable')
             return
         set_step(run['id'], step['step_id'], status='running')
-        stored = [s for s in original['steps'] if s['step_id'] == step['step_id']]
-        try:
-            result = json.loads((stored[0].get('result_json') if stored else '') or '{}')
-        except ValueError:
-            result = {}
         try:
             v4_check(undo, result, source, run)
-            args = substitute_args(undo['call']['args'], original['parameters'],
-                                   results=result)
             _run_tool_call(run, undo['call']['integration'],
                            undo['call']['tool'], args, step['step_id'])
             set_step(run['id'], step['step_id'], status='ok', check_state='passed')

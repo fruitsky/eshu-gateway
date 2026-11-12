@@ -466,7 +466,8 @@ class TestApproval:
         with pytest.raises(RecipeError) as exc:
             start_run('add_internal_fqdn',
                       {'fqdn': 'app.example.test', 'target_ip': '192.0.2.10',
-                       'port': 443}, agent='hermes', session_id='s1')
+                       'port': 443}, agent='hermes', session_id='s1',
+                        origin='agent')
         assert exc.value.code == 'recipe_not_approved'
 
     def test_an_edit_creates_a_new_draft(self, env):
@@ -483,10 +484,14 @@ class TestApproval:
 
     def test_an_agent_may_only_run_a_recipe_that_names_it(self, env, run_env):
         recipe_id = approved()
+        # AW5: the caller must be a real agent first; then the recipe's own
+        # allowed_agents list decides.
+        create_agent_token('someone-else')
         with pytest.raises(RecipeError) as exc:
             start_run(recipe_id, {'fqdn': 'app.example.test',
                                   'target_ip': '192.0.2.10', 'port': 443},
-                      agent='someone-else', session_id='s1')
+                      agent='someone-else', session_id='s1',
+                        origin='agent')
         assert exc.value.code == 'recipe_agent_not_allowed'
 
     def test_the_operator_may_always_run(self, env, run_env):
@@ -499,7 +504,8 @@ class TestApproval:
         approve(recipe['id'], 1, actor='operator')
         out = start_run(recipe['id'], {'fqdn': 'app.example.test',
                                        'target_ip': '192.0.2.10', 'port': 443},
-                        agent='', session_id='s1')
+                        agent='', session_id='s1',
+                        origin='operator')
         assert out['status'] == 'pending'
         assert out['plan_id']
 
@@ -508,14 +514,16 @@ class TestApproval:
         with pytest.raises(RecipeError) as exc:
             start_run(recipe_id, {'fqdn': 'app.example.test',
                                   'target_ip': '192.0.2.10', 'port': 443},
-                      agent='', session_id='s1')
+                      agent='', session_id='s1',
+                        origin='operator')
         assert exc.value.code == 'recipe_operator_ssh'
 
     def test_the_plan_items_are_recipe_sourced(self, env, run_env):
         recipe_id = approved()
         out = start_run(recipe_id, {'fqdn': 'app.example.test',
                                     'target_ip': '192.0.2.10', 'port': 443},
-                        agent='hermes', session_id='s1')
+                        agent='hermes', session_id='s1',
+                        origin='agent')
         plan = get_plan(out['plan_id'])
         assert plan['origin'] == 'recipe'
         for item in plan['items']:
@@ -528,7 +536,8 @@ class TestApproval:
         recipe_id = approved()
         out = start_run(recipe_id, {'fqdn': 'app.example.test',
                                     'target_ip': '192.0.2.10', 'port': 443},
-                        agent='hermes', session_id='s1')
+                        agent='hermes', session_id='s1',
+                        origin='agent')
         plan = get_plan(out['plan_id'])
         _approve_plan(plan['id'])
         ssh_item = [i for i in plan['items'] if i['kind'] == 'ssh'][0]
@@ -541,7 +550,8 @@ class TestApproval:
         recipe_id = approved()
         out = start_run(recipe_id, {'fqdn': 'app.example.test',
                                     'target_ip': '192.0.2.10', 'port': 443},
-                        agent='hermes', session_id='s1')
+                        agent='hermes', session_id='s1',
+                        origin='agent')
         _approve_plan(out['plan_id'])
         assert claim_recipe_item(out['run_id'], '1')
         assert claim_recipe_item(out['run_id'], '1') is None
@@ -551,9 +561,9 @@ class TestApproval:
         recipe_id = approved()
         params = {'fqdn': 'app.example.test', 'target_ip': '192.0.2.10',
                   'port': 443}
-        first = start_run(recipe_id, params, agent='hermes', session_id='s1')
+        first = start_run(recipe_id, params, agent='hermes', session_id='s1', origin='agent')
         with pytest.raises(RecipeError) as exc:
-            start_run(recipe_id, params, agent='hermes', session_id='s1')
+            start_run(recipe_id, params, agent='hermes', session_id='s1', origin='agent')
         assert exc.value.code == 'plan_waiting'
         assert get_plan(first['plan_id']) is not None
 
@@ -573,7 +583,8 @@ class TestExecution:
         recipe_id = approved()
         out = start_run(recipe_id, {'fqdn': 'app.example.test',
                                     'target_ip': '192.0.2.10', 'port': 443},
-                        agent='hermes', session_id='s1')
+                        agent='hermes', session_id='s1',
+                        origin='agent')
         _approve_plan(out['plan_id'])
         execute_run(out['run_id'])
         return get_run(out['run_id']), out, recipe_id
@@ -623,7 +634,8 @@ class TestExecution:
         approve(recipe['id'], 1)
         out = start_run(recipe['id'], {'fqdn': 'app.example.test',
                                        'target_ip': '192.0.2.10', 'port': 443},
-                        agent='hermes', session_id='s1')
+                        agent='hermes', session_id='s1',
+                        origin='agent')
         _approve_plan(out['plan_id'])
         execute_run(out['run_id'])
         create = [c for c in run_env.tool_calls if c[1] == 'create_proxy_host'][0]
@@ -644,7 +656,8 @@ class TestExecution:
         recipe_id = approved()
         out = start_run(recipe_id, {'fqdn': 'app.example.test',
                                     'target_ip': '192.0.2.10', 'port': 443},
-                        agent='hermes', session_id='s1')
+                        agent='hermes', session_id='s1',
+                        origin='agent')
         _approve_plan(out['plan_id'])
         execute_run(out['run_id'])
         before = len(run_env.tool_calls)
@@ -659,7 +672,8 @@ class TestRollback:
         recipe_id = approved()
         out = start_run(recipe_id, {'fqdn': 'app.example.test',
                                     'target_ip': '192.0.2.10', 'port': 443},
-                        agent='hermes', session_id='s1')
+                        agent='hermes', session_id='s1',
+                        origin='agent')
         _approve_plan(out['plan_id'])
         execute_run(out['run_id'])
         return out['run_id']
@@ -697,7 +711,8 @@ class TestRollback:
         recipe_id = approved()
         out = start_run(recipe_id, {'fqdn': 'app.example.test',
                                     'target_ip': '192.0.2.10', 'port': 443},
-                        agent='hermes', session_id='s1')
+                        agent='hermes', session_id='s1',
+                        origin='agent')
         _approve_plan(out['plan_id'])
         execute_run(out['run_id'])
         # Mark every step as pre-existing, then try a rollback.
@@ -879,7 +894,8 @@ class TestPlanGate:
         recipe_id = approved()
         out = start_run(recipe_id, {'fqdn': 'app.example.test',
                                     'target_ip': '192.0.2.10', 'port': 443},
-                        agent='hermes', session_id='s1')
+                        agent='hermes', session_id='s1',
+                        origin='agent')
         execute_run(out['run_id'])
         assert get_run(out['run_id'])['status'] == 'pending'
         assert not [c for c in run_env.tool_calls if c[3] != 'precondition']
@@ -945,7 +961,8 @@ def _run_ssh_recipe(monkeypatch, command='getent hosts {fqdn}',
     approve(recipe['id'], 1, actor='operator')
     out = start_run(recipe['id'], {'fqdn': 'app.example.test',
                                    'target_ip': '192.0.2.10', 'port': 443},
-                    agent='hermes', session_id='s1')
+                    agent='hermes', session_id='s1',
+                        origin='agent')
     approve_plan(out['plan_id'])
     execute_run(out['run_id'])
     return get_run(out['run_id']), out
@@ -1009,7 +1026,8 @@ class TestAgentIdentity:
         with pytest.raises(RecipeError) as exc:
             start_run(approved(), {'fqdn': 'app.example.test',
                                    'target_ip': '192.0.2.10', 'port': 443},
-                      agent='', session_id='s1')
+                      agent='', session_id='s1',
+                        origin='operator')
         assert exc.value.code == 'recipe_operator_ssh'
 
 
@@ -1033,7 +1051,8 @@ class TestAgentStanding:
             out = start_run(recipe_id, {'fqdn': 'app.example.test',
                                         'target_ip': '192.0.2.10',
                                         'port': 443}, agent='hermes',
-                            session_id='s1')
+                            session_id='s1',
+                        origin='agent')
             approve_plan(out['plan_id'])
             execute_run(out['run_id'])
         finally:
@@ -1065,7 +1084,8 @@ class TestAgentStanding:
         out = start_run(recipe['id'], {'fqdn': 'app.example.test',
                                        'target_ip': '192.0.2.10',
                                        'port': 443}, agent='hermes',
-                        session_id='s1')
+                        session_id='s1',
+                        origin='agent')
         approve_plan(out['plan_id'])
         execute_run(out['run_id'])
         run = get_run(out['run_id'])
@@ -1080,7 +1100,8 @@ class TestAgentStanding:
         revoke_agent_token(_hermes()['id'])
         out = start_run(recipe_id, {'fqdn': 'app.example.test',
                                     'target_ip': '192.0.2.10', 'port': 443},
-                        agent='hermes', session_id='s1')
+                        agent='hermes', session_id='s1',
+                        origin='agent')
         approve_plan(out['plan_id'])
         execute_run(out['run_id'])
         run = get_run(out['run_id'])
@@ -1105,3 +1126,79 @@ class TestReservationAndPlanItems:
         plan = create_recipe_plan('s1', 1, [
             {'kind': 'ssh', 'command': 'uptime', 'host': GW, 'step_id': '1'}])
         assert plan['items'] == 1
+
+
+# ── code round 3: AW5, AW6 ─────────────────────────────────────────────
+
+class TestExplicitOrigin:
+    """AW5: the origin is the caller's, never inferred from an empty agent."""
+
+    def test_the_mcp_tool_without_an_agent_is_refused(self, env, run_env):
+        from core.agent_context import reset_current_agent
+        from core.mcp_server import recipe_run_fn
+        from db.recipes import list_runs
+        from db.session_plans import list_plans
+        recipe_id = approved()
+        # No current agent, as for a caller with no agent identity.
+        out = json.loads(recipe_run_fn()('add_internal_fqdn', {
+            'fqdn': 'app.example.test', 'target_ip': '192.0.2.10',
+            'port': 443}, 's1'))
+        assert out['error'] == 'recipe_no_agent'
+        assert list_runs(recipe_id=recipe_id) == []
+        assert list_plans(session_id='s1') == []
+
+    def test_an_agent_origin_with_no_row_is_refused(self, env, run_env):
+        recipe_id = approved()
+        with pytest.raises(RecipeError) as exc:
+            start_run(recipe_id, {'fqdn': 'app.example.test',
+                                  'target_ip': '192.0.2.10', 'port': 443},
+                      agent='ghost', session_id='s1', origin='agent')
+        assert exc.value.code == 'recipe_no_agent'
+
+    def test_the_origin_is_required(self, env, run_env):
+        recipe_id = approved()
+        with pytest.raises(RecipeError) as exc:
+            start_run(recipe_id, {'fqdn': 'app.example.test',
+                                  'target_ip': '192.0.2.10', 'port': 443},
+                      agent='hermes', session_id='s1')
+        assert exc.value.code == 'recipe_origin_required'
+
+    def test_the_origin_is_recorded_on_the_run(self, env, run_env):
+        recipe_id = approved()
+        out = start_run(recipe_id, {'fqdn': 'app.example.test',
+                                    'target_ip': '192.0.2.10', 'port': 443},
+                        agent='hermes', session_id='s1', origin='agent')
+        assert get_run(out['run_id'])['origin'] == 'agent'
+
+
+class TestUndoStanding:
+    """AW6: the undo's standing check sees its real arguments."""
+
+    def test_an_arg_policy_that_refuses_the_undo_stops_it(self, env, run_env,
+                                                          monkeypatch):
+        recipe_id = approved()
+        out = start_run(recipe_id, {'fqdn': 'app.example.test',
+                                    'target_ip': '192.0.2.10', 'port': 443},
+                        agent='hermes', session_id='s1', origin='agent')
+        approve_plan(out['plan_id'])
+        execute_run(out['run_id'])
+        assert get_run(out['run_id'])['status'] == 'ok'
+        seen = []
+
+        def policy(agent, integration, tool, args, tool_row=None,
+                   integration_row=None):
+            seen.append({'tool': tool, 'args': dict(args or {})})
+            if tool == 'delete_proxy_host':
+                return False, 'undo arguments are not allowed'
+            return True, ''
+
+        monkeypatch.setattr('core.agent_policy.evaluate_call', policy)
+        rb = rollback(out['run_id'], agent='hermes', session_id='s1')
+        approve_plan(rb['plan_id'])
+        execute_rollback(rb['rollback_run_id'])
+        undo_calls = [c for c in seen if c['tool'] == 'delete_proxy_host']
+        assert undo_calls and undo_calls[0]['args'].get('id') == 7
+        failed = get_run(rb['rollback_run_id'])
+        assert failed['status'] == 'stopped'
+        step = [s for s in failed['steps'] if s['step_id'] == '1'][0]
+        assert 'arg' in step['error'] or 'allowed' in step['error']
