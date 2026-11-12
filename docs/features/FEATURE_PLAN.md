@@ -11425,6 +11425,126 @@ Say which, and how the mapping is done.
 
 Next: DeepSeek folds the label shape, AZ1–AZ5 (and AZ6 once answered) into the note; then the security reviewer reviews the note.
 
+### Reviewer notes (security reviewer, 2026-11-12, design round 1 at `ae67874`)
+
+**The relayed label shape is what I meant.** One addition to it: BD5's
+registry-ID pin applies to label-resolved entities too. AZ1 and AZ2 stand
+as relayed, with the additions below.
+
+The rest of the core is right and I accept it:
+* two exact condition forms;
+* absent-or-default for everything not named;
+* `data` limited to `entity_id`;
+* handler tools out;
+* the decision point after every refusal;
+* the rate check and the insert in one `BEGIN IMMEDIATE`;
+* a use counted before the call;
+* an edit is a new version;
+* every miss is a card, not a denial;
+* ambiguous matches get a card;
+* P2 is unchanged.
+
+Five items need folding before the code round.
+
+**BD1 (must): the `never` lists miss real HA services. Make `call_service`'s
+domains and services an allowlist.**
+* HA's service is `alarm_control_panel.alarm_disarm`, not `disarm`. The
+  `never.service` check compares whole values, so `alarm_disarm` is not
+  refused.
+* `DESTRUCTIVE_VERBS` misses it too. `_DESTRUCTIVE_RE` uses `\b`, and `_`
+  is a word character, so `\bdisarm\b` does not match inside `alarm_disarm`.
+  The §13 test uses a path HA does not have, which is why it passes.
+* `lock.open` unlatches a door just as `unlock` does, and it is not listed.
+* The domain denylist cannot keep up with HA's surface. The following are
+  all callable with a `data` that holds only `entity_id`, or with none at
+  all:
+  * `update.install`, which installs firmware or a Core update;
+  * `recorder.purge` / `purge_entities`, which delete HA's own history;
+  * the integration-management services of `zha` / `zwave_js`;
+  * `pyscript.*`, and other custom integrations' services, which run code
+    that is defined elsewhere.
+
+  A new custom integration adds services that a denylist written today has
+  never heard of.
+* **The shape I would accept:**
+  * The seed field carries `only`: a map from entity domain to its allowed
+    services. For example: `light`, `switch`, `fan` and `input_boolean`
+    with `turn_on`/`turn_off`/`toggle`; `cover` with open/close/stop;
+    `media_player`; `climate` with its non-data services. The exact list is
+    the operator's.
+  * A domain or service outside `only` is refused at save, at apply and at
+    match.
+  * `never` stays as a second check, matched on `_`-separated tokens, so
+    `alarm_disarm` contains `disarm`. `lock.open` and the domains `update`
+    and `recorder` are added to it.
+  * A label template's "services per domain" then picks from `only`, never
+    beyond it.
+* Also fix `_DESTRUCTIVE_RE` so `_` counts as a separator, and test it with
+  real service names: `alarm_disarm`, `lock.unlock`, `lock.open`. This is
+  card labelling only, since `call_service` is always gated, but the
+  label should be right.
+
+**BD2 (must): an "always ask" setting on the agent beats the allowance.**
+* §5 reads the allowance at step 6, but the agent's `gated` override at
+  step 7. So an operator who sets an agent to `gated` because they want to
+  see everything it does still gets allowance auto-runs.
+* That contradicts the rule F12 and F22 already use: `force_jit` / approval
+  mode skips every auto path (the read lane, the plan claim, overrides).
+* Read the agent's `gated` override, and any approval mode that applies to
+  tool calls, before the allowance. When either is set, the allowance is not
+  consulted, and nothing is counted or audited as a use.
+* Test: a `gated` agent with a matching allowance gets a card.
+
+**BD3 (must, with AZ5): the agent is the verified token, read for every
+call.**
+* An allowance matches only when the call's agent is the MCP token
+  `_run_tool` authenticated, looked up by `agent_tokens.id` with
+  `revoked = 0` on every call (never a cached copy).
+* No agent name, session or header from the call's arguments counts.
+* A call with no agent identity never matches. That is F16's AW5 shape: a
+  caller with no agent must not be read as anyone, least of all the
+  operator.
+* Test: a call with no identity gets a card, and so does a revoked token.
+
+**BD4 (should): validate the values themselves at save.**
+* `domain` and `service` are rendered into the URL path, so each listed
+  value must match `^[a-z0-9_]+$`.
+* Each `entity_id` must match `^[a-z0-9_]+\.[a-z0-9_]+$`, and its domain
+  prefix must be one of the allowance's `domain` values. That also refuses
+  HA's comma-separated string form and `all` / `none`.
+* AZ1's rule must name `entity_id: all` and `none` explicitly beside
+  `area_id`, `device_id` and `label_id`. All five expand when the call runs.
+
+**BD5 (should): pin each entity to its registry entry, and widen AZ2.**
+* An entity ID can be reused: delete a plug, and a new device can be renamed
+  to the same `switch.heater`.
+* Store the entity registry's `id` beside each entity ID when the
+  allowance is saved, and again when a label is resolved. Calls still match
+  on the entity ID with no HA read. The refresh (the same job as the label
+  refresh) suspends an entity whose registry entry changed or disappeared,
+  until the operator accepts it again.
+* AZ2's suspension should cover any approved write that redefines the
+  entity, not only an F11 YAML write: for example an options-flow or
+  config-entry write for the entity's `config_entry_id` (a template helper
+  created in the UI). The registry gives the mapping for those.
+* For YAML-defined entities: if F11 cannot map an entity to its file
+  reliably, take AZ2's second branch and make entities defined in YAML
+  inside F11's write scope not allowable.
+
+**Accepted residual, to state in the note:** an allowed call changes an
+entity's state, and HA automations triggered by that state run as HA
+decides. "Turn on `light.x`" can start an automation that does anything.
+The allowance cannot see that, and the operator owns their automations. Say
+so on the Allowances page in one line.
+
+The two smaller decisions are agreed: an ambiguous match gets a card, and an
+allowance is not consulted for a call that would not be gated. AZ3, AZ4 and
+AZ6 are the feature side's; I have no security view on AZ6's `restart`
+beyond BD1's token matching.
+
+Next: DeepSeek folds the label shape, AZ1–AZ5 and BD1–BD5 into the note,
+then security re-reads §2–§5 and the label section.
+
 ---
 
 ## 7. Backlog (not planned in detail)
@@ -11479,7 +11599,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 17 | F21 | snapshot-approve | dashboard + Proxmox | Design first | `feat/f21-snapshot-approve` | F7, F14, F2 | + security sign-off (new write path, destructive rollback) |
 | 18 | F23 | change-journal | dashboard | **Merged** 2026-11-11 (AJ1/AJ2) | `feat/f23-change-journal` | F1, F5, F7, F14 | |
 | 18a | X2 | runbooks-page | dashboard UI | **Merged** 2026-11-11 | `feat/x2-runbooks-page` | F13 | |
-| 18b | F27 | allowances | dashboard + MCP | **Design note for security** (condition grammar, the seed field and `call_service`'s values, never-allowable list, the decision point, atomic rate, profiles, the widened word list per integration); one question left: HA labels | `feat/f27-allowances` | F10 (P2), Chunk H, F18 | security reviews the note; the code waits for the answer on labels |
+| 18b | F27 | allowances | dashboard + MCP | **Design round 1 reviewed** (feature AZ1–AZ6; security BD1–BD3 must: a domain/service allowlist for `call_service` (`alarm_disarm`, `lock.open`, `update`, `recorder` were missed), the agent's `gated` override beats an allowance, identity from the verified token only; BD4–BD5 should); the label shape is confirmed (resolve at apply time) | `feat/f27-allowances` | F10 (P2), Chunk H, F18 | DeepSeek folds AZ1–AZ5 and BD1–BD5; security re-reads §2–§5 and labels |
 | 19 | F22 | change-checks | dashboard + MCP | After F19 merges | `feat/f22-change-checks` | F3, F5, F12, F19 | + security sign-off (the unattended check; AG1's origin rule does not cover it) |
 | 20 | F16 | recipes | dashboard + MCP | Design complete (security Round 4; feature reviewer Round 5 with AA1/AA2); code next after F22 | `feat/f16-recipes` | F3, F12, F13, F19 | main line; steps claim by request id; code comes back to security; auto_run comes back to security |
 | 21 | F24 | content-tripwire | dashboard | Design first | `feat/f24-content-tripwire` | F12, F14 | + security sign-off (retention) |
