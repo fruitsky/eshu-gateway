@@ -15,6 +15,7 @@ The approval path claims a use with a single conditional UPDATE
 the same last use cannot both be approved.
 """
 import ipaddress
+import json
 import time
 
 from db.core import db_conn
@@ -38,6 +39,9 @@ HASH_RE = re.compile(r'^[0-9a-f]{64}$')
 MAX_NOTE = 500
 DEFAULT_TTL_MINUTES = 60
 MAX_TTL_MINUTES = 240
+# F22: a check plan borrows the parent's approval for at most ten minutes.
+CHECK_TTL_SECONDS = 600
+OPEN_CHECK_STATES = ('pending', 'running')
 MAX_USES = 100
 
 
@@ -51,7 +55,10 @@ def init_session_plans_tables(cursor):
             decided_at INTEGER NOT NULL DEFAULT 0,
             decided_by TEXT NOT NULL DEFAULT '',
             until INTEGER NOT NULL DEFAULT 0,
-            note TEXT NOT NULL DEFAULT ''
+            note TEXT NOT NULL DEFAULT '',
+            parent_plan_id INTEGER NOT NULL DEFAULT 0,
+            stopped_at INTEGER NOT NULL DEFAULT 0,
+            stopped_reason TEXT NOT NULL DEFAULT ''
         )
     ''')
     # F15/AG1: who created the plan. A probe plan may cover a command for an
@@ -91,9 +98,33 @@ def init_session_plans_tables(cursor):
     # summary when there is one.
     for col, default in [('kind', "'ssh'"), ('integration', "''"),
                          ('tool', "''"), ('args_hash', "''"),
-                         ('args_json', "''"), ('summary', "''")]:
+                         ('args_json', "''"), ('summary', "''"),
+                         ('check_json', "''"), ('check_state', "''"),
+                         ('check_reason', "''"), ('check_observed', "''"),
+                         ('check_expected', "''"), ('check_token', "''")]:
         try:
             cursor.execute(f"ALTER TABLE session_plan_items ADD COLUMN {col} TEXT DEFAULT {default}")
+        except Exception:
+            pass
+    # F22: the check's numeric bookkeeping. `check_plan_id`/`check_item_id`
+    # name the one-item plan the check borrows (AN2); `check_request_id` is
+    # the approval-mode card link (AR2); `check_attempts` is the bound (AN5).
+    for col, default in [('check_exit_code', 0), ('check_attempts', 0),
+                         ('check_at', 0), ('check_plan_id', 0),
+                         ('check_item_id', 0), ('check_request_id', 0),
+                         ('parent_item_id', 0)]:
+        try:
+            cursor.execute(
+                f"ALTER TABLE session_plan_items ADD COLUMN {col} INTEGER DEFAULT {default}")
+        except Exception:
+            pass
+    # F22 §10: the parent plan's new state and the link a check plan names.
+    for col, default in [('parent_plan_id', 0), ('stopped_at', 0),
+                         ('stopped_reason', "''")]:
+        try:
+            cursor.execute(
+                f"ALTER TABLE session_plans ADD COLUMN {col} "
+                + ("INTEGER DEFAULT 0" if default == 0 else "TEXT DEFAULT ''"))
         except Exception:
             pass
 
@@ -112,6 +143,12 @@ def _forbidden_command_char(command: str):
         if ord(ch) < 0x20 or ord(ch) == 0x7f or ch.isspace():
             return ch
     return None
+
+
+# F22/AN2: the private sentinel `create_plan` requires for a `check` origin.
+# A boolean could be forwarded from stored data; an object cannot, and only
+# `core/checks.py` imports it.
+CHECK_INTERNAL = object()
 
 
 class PlanError(ValueError):
@@ -207,7 +244,8 @@ def _validate_mcp_item(item):
     label = f"mcp: {integration}.{tool} ({digest[:12]})"
     return {'kind': 'mcp', 'host': '*', 'command': label,
             'integration': integration, 'tool': tool, 'args_hash': digest,
-            'args_json': display, 'summary': summary, 'max_uses': max_uses}
+            'args_json': display, 'summary': summary, 'max_uses': max_uses,
+            'check_json': _check_json(item.get('check'))}
 
 
 def _mcp_display(integration_name: str, tool_name: str, args: dict):
@@ -279,13 +317,46 @@ def validate_items(items):
                             f'max_uses must be between 1 and {MAX_USES}')
         normalised.append({'kind': 'ssh', 'host': host, 'command': command,
                            'integration': '', 'tool': '', 'args_hash': '',
-                           'max_uses': max_uses})
+                           'max_uses': max_uses,
+                           'check_json': _check_json(item.get('check'))})
     return normalised
+
+
+def _check_json(raw):
+    """F22: validate one item's check and store it canonically, or ''.
+
+    A check on an item is the operator's approved follow-up, so its shape is
+    closed and its bytes are checked here (the read policy is checked here and
+    again at run time)."""
+    if raw is None:
+        return ''
+    import json as _json
+    from core.checks import validate_check
+    try:
+        clean = validate_check(raw)
+    except PlanError:
+        raise
+    except Exception as exc:  # RecipeError/CheckError both carry a code
+        code = getattr(exc, 'code', 'invalid_check')
+        raise PlanError(code, getattr(exc, 'message', str(exc)))
+    return _json.dumps(clean, sort_keys=True, separators=(',', ':'))
 
 
 def _row_to_plan(row, items):
     plan = dict(row)
-    plan['items'] = [dict(item) for item in items]
+    out = []
+    for item in items:
+        entry = dict(item)
+        # AV1: the check token is never exposed — not in a plan view, not to
+        # the agent, not in History.
+        entry.pop('check_token', None)
+        raw = entry.pop('check_json', '') or ''
+        try:
+            entry['check'] = json.loads(raw) if raw else None
+        except ValueError:
+            entry['check'] = None
+        out.append(entry)
+    plan['items'] = out
     return plan
 
 
@@ -295,13 +366,30 @@ def _items_for(conn, plan_id):
         (plan_id,)).fetchall()
 
 
-def create_plan(session_id: str, items, note: str = '', origin: str = 'agent') -> dict:
-    """Store a new proposed plan, replacing any other proposal for the session."""
+def create_plan(session_id: str, items, note: str = '', origin: str = 'agent',
+                internal=None, parent=None) -> dict:
+    """Store a new plan. Every origin but `check` starts `proposed`.
+
+    F22/AN2: `origin='check'` is the one-item plan a check borrows; it is
+    created already approved, from the parent plan's decision, and only
+    `core/checks.py` (which holds `CHECK_INTERNAL`) may create one.
+    """
     sid = (session_id or '').strip()[:64]
     if not sid:
         raise PlanError('invalid_session', 'session_id is required')
-    origin = origin if origin in ('agent', 'probe', 'recipe') else 'agent'
+    origin = origin if origin in ('agent', 'probe', 'recipe', 'check') else 'agent'
+    if origin == 'check':
+        if internal is not CHECK_INTERNAL:
+            raise PlanError('invalid_origin',
+                            'a check plan may only be created by check code')
+        if parent is None:
+            raise PlanError('invalid_origin', 'a check plan needs its parent')
+        if isinstance(items, (list, tuple)) and len(items) != 1:
+            raise PlanError('check_items',
+                            'a check plan holds exactly one item')
     normalised = validate_items(items)
+    if origin == 'check' and normalised and normalised[0].get('check_json'):
+        raise PlanError('check_items', 'a check plan item carries no check')
     if origin != 'agent':
         # AG1 condition 2: server plans are closed and specific. An item that
         # ranges over every host is an agent-style plan.
@@ -312,35 +400,57 @@ def create_plan(session_id: str, items, note: str = '', origin: str = 'agent') -
                     'a plan created by %s must name a specific host' % origin)
     note = (note or '')[:MAX_NOTE]
     now = int(time.time())
+    if origin == 'check':
+        # AN2: never approved by a human, never outlives the plan it borrows.
+        parent_until = int(parent.get('until') or 0)
+        until = min(now + CHECK_TTL_SECONDS, parent_until) if parent_until \
+            else now + CHECK_TTL_SECONDS
+        status = 'approved'
+        decided_at = int(parent.get('decided_at') or 0)
+        decided_by = (parent.get('decided_by') or '')[:64]
+        parent_plan_id = int(parent.get('id') or 0)
+    else:
+        status, decided_at, decided_by, parent_plan_id, until = \
+            'proposed', 0, '', 0, 0
     with db_conn() as conn:
         cur = conn.cursor()
         # One proposal per session: drop the previous proposed plan (its audit
-        # event stays in the log).
-        old = [row['id'] for row in cur.execute(
-            "SELECT id FROM session_plans WHERE session_id = ? AND status = 'proposed'",
-            (sid,)).fetchall()]
-        for plan_id in old:
-            cur.execute('DELETE FROM session_plan_items WHERE plan_id = ?', (plan_id,))
-            cur.execute('DELETE FROM session_plans WHERE id = ?', (plan_id,))
+        # event stays in the log). A check plan never replaces a proposal.
+        if origin != 'check':
+            old = [row['id'] for row in cur.execute(
+                "SELECT id FROM session_plans WHERE session_id = ? AND status = 'proposed'",
+                (sid,)).fetchall()]
+            for plan_id in old:
+                cur.execute('DELETE FROM session_plan_items WHERE plan_id = ?', (plan_id,))
+                cur.execute('DELETE FROM session_plans WHERE id = ?', (plan_id,))
         cur.execute('''
-            INSERT INTO session_plans (session_id, status, created_at, note, origin)
-            VALUES (?, 'proposed', ?, ?, ?)
-        ''', (sid, now, note, origin))
+            INSERT INTO session_plans (session_id, status, created_at, note,
+                                       origin, decided_at, decided_by, until,
+                                       parent_plan_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (sid, status, now, note, origin, decided_at, decided_by, until,
+              parent_plan_id))
         plan_id = cur.lastrowid
+        first_item_id = 0
         for item in normalised:
             cur.execute('''
                 INSERT INTO session_plan_items
                     (plan_id, host, command, max_uses, uses, removed,
-                     kind, integration, tool, args_hash, args_json, summary)
-                VALUES (?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?)
+                     kind, integration, tool, args_hash, args_json, summary,
+                     check_json)
+                VALUES (?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?)
             ''', (plan_id, item['host'], item['command'], item['max_uses'],
                     item.get('kind') or 'ssh', item.get('integration') or '',
                     item.get('tool') or '', item.get('args_hash') or '',
-                    item.get('args_json') or '', item.get('summary') or ''))
+                    item.get('args_json') or '', item.get('summary') or '',
+                    item.get('check_json') or ''))
+            if not first_item_id:
+                first_item_id = cur.lastrowid
         conn.commit()
     hosts = {item['host'] for item in normalised}
-    return {'plan_id': plan_id, 'status': 'proposed', 'session_id': sid,
-            'items': len(normalised), 'hosts': len(hosts)}
+    return {'plan_id': plan_id, 'status': status, 'session_id': sid,
+            'items': len(normalised), 'hosts': len(hosts),
+            'item_id': first_item_id}
 
 
 def get_plan(plan_id: int):
@@ -479,8 +589,287 @@ def _decide(plan_id: int, status: str, decided_by: str) -> dict:
             UPDATE session_plans SET status = ?, decided_at = ?, decided_by = ?
             WHERE id = ?
         ''', (status, now, (decided_by or 'operator')[:64], plan_id))
+        # AN2: a check plan ends with the plan whose approval it borrowed, in
+        # the same transaction, so a dispatched check claims nothing.
+        _end_child_plans(cur, plan_id, now)
         conn.commit()
     return get_plan(plan_id)
+
+
+def stop_plan(plan_id: int, reason: str, now: int = None) -> dict:
+    """F22 §8: a failed or not-run check ends the plan's authority.
+
+    The status is `stopped` (a new value; `_claim_candidate` only matches
+    `approved`), and any check plan that borrowed this plan's approval ends
+    with it in the same transaction (AN2)."""
+    plan_id = int(plan_id)
+    now = int(now or time.time())
+    with db_conn() as conn:
+        cur = conn.cursor()
+        plan = cur.execute('SELECT * FROM session_plans WHERE id = ?',
+                           (plan_id,)).fetchone()
+        if not plan:
+            raise PlanError('not_found', 'plan not found')
+        cur.execute('''
+            UPDATE session_plans
+            SET status = 'stopped', stopped_at = ?, stopped_reason = ?
+            WHERE id = ? AND status = 'approved'
+        ''', (now, (reason or '')[:300], plan_id))
+        _end_child_plans(cur, plan_id, now)
+        conn.commit()
+    return get_plan(plan_id)
+
+
+def _end_child_plans(cur, plan_id: int, now: int):
+    """AN2: a plan's check plans never outlive the authority they borrowed."""
+    cur.execute('''
+        UPDATE session_plans SET status = 'ended', decided_at = ?
+        WHERE parent_plan_id = ? AND status IN ('proposed', 'approved')
+    ''', (now, int(plan_id)))
+
+
+def link_check_card(session_id: str, target_ip: str, command: str,
+                    request_id: int, now: int = None):
+    """F22/AR2: tie an approval-mode card to the item whose check follows it.
+
+    Server-side only: the match is the session, one exact host, the whole
+    command, an item that carries a check and has no card yet. A `*` item
+    never matches — a check needs one exact host. Returns the item id, or
+    None (no link, no check).
+    """
+    sid = (session_id or '').strip()[:64]
+    if not sid:
+        return None
+    now = int(now or time.time())
+    host = (target_ip or '').strip()
+    if not host or host == '*':
+        return None
+    with db_conn() as conn:
+        cur = conn.cursor()
+        row = cur.execute('''
+            SELECT i.id
+            FROM session_plan_items i
+            JOIN session_plans p ON p.id = i.plan_id
+            WHERE p.session_id = ? AND p.status = 'approved' AND p.until > ?
+              AND p.origin != 'check'
+              AND i.removed = 0 AND i.kind = 'ssh'
+              AND i.host = ? AND i.command = ?
+              AND i.check_json != '' AND i.check_request_id = 0
+            ORDER BY i.id LIMIT 1
+        ''', (sid, now, host, command or '')).fetchone()
+        if not row:
+            return None
+        cur.execute('UPDATE session_plan_items SET check_request_id = ? '
+                    'WHERE id = ? AND check_request_id = 0',
+                    (int(request_id), row['id']))
+        if cur.rowcount != 1:
+            conn.rollback()
+            return None
+        conn.commit()
+        return row['id']
+
+
+def set_check_pending(item_id: int, token: str, now: int = None) -> bool:
+    """F22 §9: write `pending` (with the attempt token) before dispatching.
+
+    Conditional on the item having no state yet, so a duplicate F5 post (or a
+    second result) cannot dispatch the check twice."""
+    now = int(now or time.time())
+    with db_conn() as conn:
+        cur = conn.cursor()
+        cur.execute('''
+            UPDATE session_plan_items
+            SET check_state = 'pending', check_token = ?, check_at = ?
+            WHERE id = ? AND check_state = '' AND check_json != ''
+        ''', ((token or '')[:128], now, int(item_id)))
+        conn.commit()
+        return cur.rowcount == 1
+
+
+def set_check_running(item_id: int, token: str, plan_id: int,
+                      check_plan_id: int = 0, check_item_id: int = 0,
+                      now: int = None) -> bool:
+    """Move `pending` to `running`, bound to the token the worker read."""
+    now = int(now or time.time())
+    with db_conn() as conn:
+        cur = conn.cursor()
+        cur.execute('''
+            UPDATE session_plan_items
+            SET check_state = 'running', check_at = ?,
+                check_plan_id = ?, check_item_id = ?
+            WHERE id = ? AND check_state = 'pending' AND check_token = ?
+        ''', (now, int(check_plan_id or 0), int(check_item_id or 0),
+              int(item_id), (token or '')[:128]))
+        conn.commit()
+        return cur.rowcount == 1
+
+
+def bump_check_attempt(item_id: int, token: str, limit: int) -> bool:
+    """AN5: `check_attempts <= retries + 1`, in every mode."""
+    with db_conn() as conn:
+        cur = conn.cursor()
+        cur.execute('''
+            UPDATE session_plan_items
+            SET check_attempts = check_attempts + 1
+            WHERE id = ? AND check_token = ? AND check_attempts < ?
+        ''', (int(item_id), (token or '')[:128], int(limit)))
+        conn.commit()
+        return cur.rowcount == 1
+
+
+def finish_check_unclaimed(item_id: int, state: str, reason: str = '') -> bool:
+    """A check that ends before an attempt (a limiter stop, an item failure).
+
+    Written only while the item has no attempt token."""
+    if state not in ('not_run', 'skipped'):
+        raise PlanError('bad_state', 'only not_run/skipped end without a token')
+    with db_conn() as conn:
+        cur = conn.cursor()
+        cur.execute('''
+            UPDATE session_plan_items
+            SET check_state = ?, check_reason = ?
+            WHERE id = ? AND check_state = '' AND check_json != ''
+        ''', (state, (reason or '')[:80], int(item_id)))
+        conn.commit()
+        return cur.rowcount == 1
+
+
+def finish_check(item_id: int, token: str, state: str, reason: str = '',
+                 exit_code=None, observed=None, expected=None) -> bool:
+    """Write the final state once, bound to the attempt token.
+
+    A different token means the attempt belongs to a previous process and is
+    abandoned, not honoured (§9, guard 2)."""
+    if state not in ('passed', 'failed', 'not_run', 'skipped'):
+        raise PlanError('bad_state', 'a check ends passed/failed/not_run/skipped')
+    args = [state, (reason or '')[:80],
+            -1 if exit_code is None else int(exit_code),
+            _cap(observed), _cap(expected), int(item_id), (token or '')[:128]]
+    with db_conn() as conn:
+        cur = conn.cursor()
+        cur.execute('''
+            UPDATE session_plan_items
+            SET check_state = ?, check_reason = ?, check_exit_code = ?,
+                check_observed = ?, check_expected = ?
+            WHERE id = ? AND check_token = ?
+              AND check_state IN ('pending', 'running')
+        ''', tuple(args))
+        conn.commit()
+        return cur.rowcount == 1
+
+
+def _cap(value):
+    if value is None:
+        return ''
+    import json as _json
+    try:
+        text = _json.dumps(value, sort_keys=True, separators=(',', ':'))
+    except (TypeError, ValueError):
+        text = str(value)
+    return text[:200]
+
+
+def interrupted_checks(older_than: int, now: int = None):
+    """F22 §9: items left pending/running by a crash, older than the worst
+    case. They become not_run; they are never re-dispatched."""
+    now = int(now or time.time())
+    with db_conn() as conn:
+        rows = conn.execute('''
+            SELECT i.*, p.status AS plan_status
+            FROM session_plan_items i
+            JOIN session_plans p ON p.id = i.plan_id
+            WHERE i.check_json != ''
+              AND i.check_state IN ('pending', 'running')
+              AND i.check_at <= ?
+        ''', (now - int(older_than),)).fetchall()
+        return [dict(row) for row in rows]
+
+
+def get_plan_item(item_id: int):
+    with db_conn() as conn:
+        row = conn.execute('SELECT * FROM session_plan_items WHERE id = ?',
+                           (int(item_id),)).fetchone()
+        return dict(row) if row else None
+
+
+def set_check_skipped(item_id: int) -> bool:
+    """The item's own command failed: the check never runs."""
+    with db_conn() as conn:
+        cur = conn.cursor()
+        cur.execute('''
+            UPDATE session_plan_items
+            SET check_state = 'skipped', check_reason = 'item_failed'
+            WHERE id = ? AND check_state = '' AND check_json != ''
+        ''', (int(item_id),))
+        conn.commit()
+        return cur.rowcount == 1
+
+
+def rotate_check_token(item_id: int, old_token: str, new_token: str) -> bool:
+    """AV1: a new random token for every attempt, conditional on the old one."""
+    if not _token_ok(new_token):
+        return False
+    with db_conn() as conn:
+        cur = conn.cursor()
+        cur.execute('''
+            UPDATE session_plan_items SET check_token = ?
+            WHERE id = ? AND check_state = 'running' AND check_token = ?
+        ''', (new_token, int(item_id), (old_token or '')[:128]))
+        conn.commit()
+        return cur.rowcount == 1
+
+
+def _token_ok(token):
+    import re as _re
+    return bool(_re.fullmatch(r'[A-Za-z0-9_-]{16,128}', token or ''))
+
+
+def set_check_item_token(plan_id: int, token: str) -> bool:
+    """The check plan's single item carries the attempt's token (AR6)."""
+    if not _token_ok(token):
+        return False
+    with db_conn() as conn:
+        cur = conn.cursor()
+        cur.execute('UPDATE session_plan_items SET check_token = ? '
+                    'WHERE plan_id = ? AND removed = 0',
+                    (token, int(plan_id)))
+        conn.commit()
+        return cur.rowcount == 1
+
+
+def set_check_item_parent(plan_id: int, parent_item_id: int) -> bool:
+    with db_conn() as conn:
+        cur = conn.cursor()
+        cur.execute('UPDATE session_plan_items SET parent_item_id = ? '
+                    'WHERE plan_id = ? AND removed = 0',
+                    (int(parent_item_id), int(plan_id)))
+        conn.commit()
+        return cur.rowcount == 1
+
+
+def release_check_link(plan_item_id: int) -> bool:
+    """AV2: a denied or expired card gives its item's link back.
+
+    The item never ran, so a re-sent request for the same bytes must carry its
+    check again rather than run without one."""
+    with db_conn() as conn:
+        cur = conn.cursor()
+        cur.execute('''
+            UPDATE session_plan_items SET check_request_id = 0
+            WHERE id = ? AND check_state = ''
+        ''', (int(plan_item_id or 0),))
+        conn.commit()
+        return cur.rowcount == 1
+
+
+def set_check_plan_refs(item_id: int, plan_id: int, check_item_id: int) -> bool:
+    with db_conn() as conn:
+        cur = conn.cursor()
+        cur.execute('UPDATE session_plan_items SET check_plan_id = ?, '
+                    'check_item_id = ? WHERE id = ?',
+                    (int(plan_id), int(check_item_id), int(item_id)))
+        conn.commit()
+        return cur.rowcount == 1
 
 
 def _claim_candidate(conn, session_id: str, host: str, command: str, now: int,
@@ -494,9 +883,22 @@ def _claim_candidate(conn, session_id: str, host: str, command: str, now: int,
         FROM session_plan_items i
         JOIN session_plans p ON p.id = i.plan_id
         WHERE p.session_id = ? AND p.status = 'approved' AND p.until > ?
+          AND p.origin != 'check'
           AND i.removed = 0 AND i.uses < i.max_uses
           AND i.kind = 'ssh'
           AND i.command = ? AND (i.host = ? OR i.host = '*')
+    '''
+    # F22/AN1: a later item (and an item's own next use) waits while an
+    # earlier item of the same plan still has an open check. `b.id <= i.id`
+    # is deliberate: a two-use write cannot run again while its own check is
+    # open, and `uses > 0` means "the command was claimed".
+    sql += '''
+          AND NOT EXISTS (
+            SELECT 1 FROM session_plan_items b
+            WHERE b.plan_id = i.plan_id AND b.removed = 0 AND b.id <= i.id
+              AND b.check_json != '' AND b.uses > 0
+              AND (b.check_state = '' OR b.check_state IN ('pending', 'running'))
+          )
     '''
     params = [session_id, now, command, host]
     if origins:
@@ -576,6 +978,64 @@ def claim_mcp_plan_item(session_id: str, integration: str, tool: str,
             return None
         conn.commit()
         return row['plan_id'], row['id']
+
+
+def _claim_check_candidate(conn, session_id, host, command, check_token, now):
+    """F22/AR6: the one-item check plan's claim, bound to the attempt token.
+
+    A check plan is exactly one item on one host with the exact command; a
+    second item or a wildcard host is a refusal, not a claim (AR3)."""
+    if not check_token:
+        return None
+    return conn.execute('''
+        SELECT i.id, i.plan_id, i.parent_item_id
+        FROM session_plan_items i
+        JOIN session_plans p ON p.id = i.plan_id
+        WHERE p.session_id = ? AND p.status = 'approved' AND p.until > ?
+          AND p.origin = 'check' AND p.parent_plan_id > 0
+          AND i.removed = 0 AND i.uses < i.max_uses
+          AND i.kind = 'ssh'
+          AND i.command = ? AND i.host = ?
+          AND i.check_token != '' AND i.check_token = ?
+          AND (SELECT COUNT(*) FROM session_plan_items x
+               WHERE x.plan_id = i.plan_id AND x.removed = 0) = 1
+        ORDER BY i.id LIMIT 1
+    ''', (session_id, now, command, host, check_token)).fetchone()
+
+
+def claim_check_item(session_id: str, host: str, command: str,
+                     check_token: str, now: int = None):
+    """F22: consume one use of the check plan's single item.
+
+    Only `core/checks.py` builds a check plan; this is the one claim that
+    matches it. The token is the attempt's (per-attempt, AV1), so the use is
+    spent by the attempt the worker started and by nothing else.
+    """
+    sid = (session_id or '').strip()[:64]
+    token = (check_token or '').strip()
+    if not sid or not token:
+        return None
+    now = int(now or time.time())
+    expire_plans(now)
+    with db_conn() as conn:
+        cur = conn.cursor()
+        row = _claim_check_candidate(conn, sid, (host or '').strip(),
+                                     command or '', token, now)
+        if not row:
+            return None
+        cur.execute('''
+            UPDATE session_plan_items SET uses = uses + 1
+            WHERE id = ? AND removed = 0 AND uses < max_uses
+              AND plan_id IN (
+                  SELECT id FROM session_plans
+                  WHERE status = 'approved' AND until > ?
+              )
+        ''', (row['id'], now))
+        if cur.rowcount != 1:
+            conn.rollback()
+            return None
+        conn.commit()
+        return (row['plan_id'], row['id'], int(row['parent_item_id'] or 0))
 
 
 def claim_plan_item(session_id: str, host: str, command: str, now: int = None,

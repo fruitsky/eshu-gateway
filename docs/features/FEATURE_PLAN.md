@@ -10668,7 +10668,81 @@ A check never runs twice, through four independent guards:
 
 ### Implementer notes
 
-_(implementer)_
+**Code round 1 — §3 and §4 built, with AV1 and AV2. Status: to both reviewers.**
+
+**What shipped.** `core/checks.py` (validation, the F5 hook, the worker, the
+expect comparison, the sweep), the `check_*` columns on
+`session_plan_items`, `parent_plan_id`/`stopped_*` on `session_plans`,
+`requests.plan_item_id`, the `check` origin and its sentinel
+(`db.session_plans.CHECK_INTERNAL`), the plan claim's AN1 rule, the
+approval-mode link, the UI (the check under each plan item, its state, and
+the red card line), and `check_plan`'s output. One commit, no code outside
+this chunk except the two small ssh_crypto/ssh_exec additions AV1 needs.
+
+**AV1 — the token.**
+
+* **Per attempt, random.** `secrets.token_urlsafe(24)` (144 bits), a new one
+  for **every** attempt (`rotate_check_token`, conditional on
+  `check_state='running'` and the previous token). The token is stored only
+  on plan rows: the parent item's `check_token` and the one-item check
+  plan's item. An attempt's claim matches `check_token` equality, so an
+  earlier attempt's token cannot spend a later attempt.
+* **Never returned.** The request row's reason is
+  `plan-check:<check_plan>:<check_item>`; the token is not in it. The plan
+  row getter pops `check_token` (`_row_to_plan`), so no plan view, no
+  `check_plan`, no `session_summary` and no audit row carries it (tests
+  assert this for each).
+* **Only inside the dashboard's signature.** The design's escape hatch is
+  used: F12's signed fields gained a **`check_token`** field (canonical
+  **v2** when it is present; a call without it is byte-for-byte v1, so
+  every existing signature and the shared vector are unchanged). The
+  gateway parses `ESHU_CHECK_TOKEN` (base64url 16–128), puts it in the v2
+  canonical, and forwards it in the `/api/request` body;
+  `receive_request` honours it **only** when `force_jit` is true (a
+  dashboard-signed request) and the token matches. A direct SSH request
+  with the token claims nothing. An older gateway does not know the prefix
+  key and refuses the call, so the check ends `not_run` — fail closed, and
+  no compatibility risk for ordinary calls.
+* **Tests:** the direct-SSH request does not claim; the signed one does and
+  the stored row has `plan-check` (no token); attempt 1's token cannot
+  spend attempt 2; a wrong token consumes nothing; a gateway without
+  `run_limits: v1` consumes nothing; the audit row has no token.
+
+**AV2 — the card.** `checks.card_warning(request_id)` reads the plan behind
+a linked card and returns `open` (pending/running) or the earlier check's
+`failed`/`not_run`, with the text; `/api/requests/{id}/context` carries it
+and the sidebar renders it as a red section **above** the Approve buttons.
+A denied card (`/api/deny`) and an expired one (`expire_stale_requests`)
+release the item's `check_request_id`, so a re-sent request for the same
+bytes carries its check again.
+
+**Refinements to state for the reviewer.**
+
+* **Only ssh checks get a check plan.** A tool check runs through
+  `run_tool`'s read path under the plan's agent: a read auto-runs, so an
+  approved one-item plan for it would buy nothing. §3.1's "or the tool
+  call" is therefore implemented as "ssh only"; the stop and the storage
+  are identical.
+* **An ordinary claim never matches a check plan.** `_claim_candidate`
+  excludes `origin='check'` for every caller; a check plan is spent only by
+  `claim_check_item` with the attempt's token (AR3).
+* **The tripwire is read strictly.** AR4 says a tripwire freeze that names
+  the agent or session refuses. F24 has not shipped and the key has no
+  naming data yet, so **any** non-empty `meta.tripwire_freeze` makes the
+  check `not_run` / `check_frozen`. Stricter than the note on purpose; F24
+  can narrow it. Please confirm.
+* **`ssh_exec` gained `force_jit`** (a forced JIT can only add gating), so a
+  `normal`-mode agent's check still goes through the dashboard's claim. F16
+  adds the same parameter on its branch.
+* **A check plan is created by the worker, not the hook**, so the claim has
+  a plan to match before `ssh_exec` runs; the hook only writes `pending`
+  and enqueues (§9). An enqueue onto a full queue leaves `pending`, and the
+  sweep (startup and every worker idle cycle) makes it `not_run`.
+* **`check_attempts` bounds both modes**; `max_uses = retries + 1` on the
+  check plan; a `not_run` never retries.
+
+`bash scripts/verify.sh`: `2824 passed, 22 skipped, 7 warnings in 595.39s
+(0:09:55)`.
 
 ### Reviewer notes
 
@@ -12683,7 +12757,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 18c | X3 | integrations-ui | dashboard UI | Requested 2026-11-12; design after F27 is signed off | `feat/x3-integrations-ui` | F27, F10 (P2) | operator walk-through first |
 | 18e | X5 | ui-test-round | dashboard UI | **Implemented** 2026-11-12: six test-round fixes; no endpoint, save path or policy changed | `fix/x5-ui-test-round` | — | six small fixes |
 | 18d | X4 | agents-page | dashboard UI | **Implemented** 2026-11-12: one Agents page (tokens, policy sections, web fetch, activity); Controls renamed Command policy; absent policy fields now keep their stored value | `feat/x4-agents-page` | `fix/agent-ssh-hosts` | rename Controls → Command policy |
-| 19 | F22 | change-checks | dashboard + MCP | Security re-read (`5d37366`): §3/§4 **approved for code** with **AV1** (per-attempt random token, stripped before storage, accepted only inside the dashboard-signed request) must and AV2 should | `feat/f22-change-checks` | F3, F5, F12, F19 | feature reviewer checks AV1/AV2; then code, security reviews it |
+| 19 | F22 | change-checks | dashboard + MCP | **Code round 1: §3/§4 built with AV1 (a per-attempt token in the signed v2 prefix; stripped from the row and every view) and AV2 (the red card line; deny/expiry release the link)** | `feat/f22-change-checks` | F3, F5, F12, F19 | feature reviewer checks AV1/AV2; security reviews the code |
 | 20 | F16 | recipes | dashboard + MCP | Design complete (security Round 4; feature reviewer Round 5 with AA1/AA2); code next after F22 | `feat/f16-recipes` | F3, F12, F13, F19 | main line; steps claim by request id; code comes back to security; auto_run comes back to security |
 | 21 | F24 | content-tripwire | dashboard | Design first | `feat/f24-content-tripwire` | F12, F14 | + security sign-off (retention) |
 | 22 | F25 | secrets-broker | gateway + dashboard | Design first | `feat/f25-secrets-broker` | F1, F12, F19; security Chunk 7 before deploy | + security sign-off; gateway bash line by line |

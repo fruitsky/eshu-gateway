@@ -284,16 +284,18 @@ def decode_output(envelope: dict) -> dict:
 # ── the tool ────────────────────────────────────────────────────────────
 
 def _signed_command(gateway: dict, key_hex: str, agent_name: str,
-                    session_id: str, force_jit: bool, command: str) -> str:
+                    session_id: str, force_jit: bool, command: str,
+                    check_token: str = '') -> str:
     ts = str(int(time.time()))
     nonce = secrets.token_hex(16)
     canonical = ssh_crypto.canonical(
         command, agent_name, session=session_id, mcp='1',
         force_jit='1' if force_jit else '0', ts=ts, nonce=nonce,
-        gateway_ip=gateway.get('ip') or '')
+        gateway_ip=gateway.get('ip') or '', check_token=check_token)
     signature = ssh_crypto.sign(key_hex, canonical)
     return ssh_crypto.prefix_line(agent_name, session_id, force_jit, ts,
-                                  nonce, signature) + command
+                                  nonce, signature,
+                                  check_token=check_token) + command
 
 
 def _store_result(request_id: int, exit_code: int, duration_ms: int,
@@ -307,8 +309,14 @@ def _store_result(request_id: int, exit_code: int, duration_ms: int,
 
 
 def ssh_exec(host: str, command: str, session_id: str = '', timeout=None,
-             wait: bool = False, agent=None) -> dict:
-    """Run one command on one registered gateway, or explain the refusal."""
+             wait: bool = False, agent=None, force_jit=None,
+             check_token: str = '') -> dict:
+    """Run one command on one registered gateway, or explain the refusal.
+
+    `force_jit=True` can only **add** gating (F22's check runs through the
+    dashboard's claim even for a `normal`-mode agent); it can never turn a
+    forced JIT off. `check_token` is the check's per-attempt signed field.
+    """
     agent = agent or get_current_agent()
     started = time.time()
 
@@ -383,10 +391,14 @@ def ssh_exec(host: str, command: str, session_id: str = '', timeout=None,
         timeout_s = DEFAULT_TIMEOUT
     timeout_s = max(1, min(timeout_s, MAX_TIMEOUT))
 
-    force_jit = policy['ssh_mode'] == DEFAULT_SSH_MODE
+    force_jit = (policy['ssh_mode'] == DEFAULT_SSH_MODE) or bool(force_jit)
     try:
+        # F22/AV1: a plan check passes its per-attempt token, which becomes a
+        # signed v2 field. One attempt, one token; anything else is refused by
+        # the gateway's parser or by the dashboard before it lands here.
         command_line = _signed_command(gateway, key_hex, name, session_id or '',
-                                       force_jit, command)
+                                       force_jit, command,
+                                       check_token=check_token or '')
     except ValueError:
         _audit('signing_failed', gateway)
         return refused('signing_failed')

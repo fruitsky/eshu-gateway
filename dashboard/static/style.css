@@ -5710,3 +5710,10 @@ body.pol-open .mobile-menu-btn, body.pol-open .mobile-freeze { display: none; }
   font-family: 'Space Grotesk', sans-serif; font-size: 13px; line-height: 1.6; color: var(--text-main);
 }
 .agent-ssh-any { color: var(--status-warning); }
+
+/* F22: a plan item's check, and its result. */
+.plan-check { font-size: 11px; color: var(--text-muted); margin-top: 4px; }
+.plan-check-ok { color: #7bb08a; }
+.plan-check-bad { color: var(--danger); }
+.plan-check-open { color: var(--accent); }
+.plan-check-why { color: var(--danger); }

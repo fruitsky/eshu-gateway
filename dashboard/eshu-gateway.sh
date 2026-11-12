@@ -675,7 +675,7 @@ while :; do
   _name="${_word%%=*}"
   _value="${_word#*=}"
   case "$_name" in
-    ESHU_WINDOW_TOKEN|ESHU_SESSION_ID|ESHU_SESSION_SIG|ESHU_EXECUTION_ID|ESHU_AGENT|ESHU_AGENT_SIG|ESHU_TS|ESHU_NONCE|ESHU_MCP|ESHU_FORCE_JIT) ;;
+    ESHU_WINDOW_TOKEN|ESHU_SESSION_ID|ESHU_SESSION_SIG|ESHU_EXECUTION_ID|ESHU_AGENT|ESHU_AGENT_SIG|ESHU_TS|ESHU_NONCE|ESHU_MCP|ESHU_FORCE_JIT|ESHU_CHECK_TOKEN) ;;
     *) break ;;
   esac
   case "$_seen_keys" in *" $_name "*) _duplicate_prefix="1"; break ;; esac
@@ -731,6 +731,8 @@ if [ -z "$prefix_refusal" ]; then
   check_charset "NONCE" "${ESHU_NONCE:-}" '^[0-9a-f]{16,64}$' "16-64 lowercase hex characters"
   check_charset "MCP" "${ESHU_MCP:-}" '^[01]$' "0 or 1"
   check_charset "FORCE_JIT" "${ESHU_FORCE_JIT:-}" '^[01]$' "0 or 1"
+  # F22/AV1: the plan check's per-attempt token. base64url, 16-128 chars.
+  check_charset "CHECK_TOKEN" "${ESHU_CHECK_TOKEN:-}" '^[A-Za-z0-9_-]{16,128}$' "16-128 base64url characters"
 fi
 
 # G2: the six identity keys require a full, valid signature in every ssh_mode.
@@ -760,10 +762,19 @@ if [ "$MANIFEST_PRESENT" = "1" ] && [ -z "$prefix_refusal" ]; then
       SIG_STATE="bad"
       prefix_refusal="Stale ESHU_TS — the signed prefix is outside the +/-300 s window."
     else
-      canonical=$(printf 'v1\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s' \
-        "$ESHU_AGENT" "${ESHU_SESSION_ID:-}" "$ESHU_MCP" "$ESHU_FORCE_JIT" \
-        "$ESHU_TS" "$ESHU_NONCE" "$TARGET_IP" \
-        "$(printf '%s' "$cmd" | sha256sum | cut -d' ' -f1)")
+      cmd_hash=$(printf '%s' "$cmd" | sha256sum | cut -d' ' -f1)
+      if [ -n "${ESHU_CHECK_TOKEN:-}" ]; then
+        # F22/AV1: the v2 canonical form inserts the signed check token
+        # before the command hash. The token is inside the MAC, so only the
+        # dashboard's own runner can produce a request that carries it.
+        canonical=$(printf 'v2\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s' \
+          "$ESHU_AGENT" "${ESHU_SESSION_ID:-}" "$ESHU_MCP" "$ESHU_FORCE_JIT" \
+          "$ESHU_TS" "$ESHU_NONCE" "$TARGET_IP" "$ESHU_CHECK_TOKEN" "$cmd_hash")
+      else
+        canonical=$(printf 'v1\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s' \
+          "$ESHU_AGENT" "${ESHU_SESSION_ID:-}" "$ESHU_MCP" "$ESHU_FORCE_JIT" \
+          "$ESHU_TS" "$ESHU_NONCE" "$TARGET_IP" "$cmd_hash")
+      fi
       # `-c`, not a heredoc: the canonical has to arrive on stdin, and a
       # heredoc would take stdin for the program itself.
       if printf '%s' "$canonical" | python3 -I -c '
@@ -1267,7 +1278,7 @@ enc_req=$(echo -n "$cmd" | base64 -w 0)
 RESPONSE=$(curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -w "\n%{http_code}" -X POST "$DASHBOARD_URL/api/request" \
      -H "X-Gateway-Token: ${GATEWAY_TOKEN:-}" \
      -H "Content-Type: application/json" \
-     -d '{"target_ip":"'"$TARGET_IP"'","encoded_command":"'"$enc_req"'","session_id":"'"${ESHU_SESSION_ID:-}"'","execution_id":"'"${ESHU_EXECUTION_ID:-}"'","agent":"'"${ESHU_VERIFIED_AGENT:-}"'","force_jit":'"$([ "$ESHU_FORCE_JIT" = "1" ] && echo true || echo false)"',"run_limits":"'"$RUN_LIMITS_CAP"'"}' 2>&1 || echo "CURL_FAILED")
+     -d '{"target_ip":"'"$TARGET_IP"'","encoded_command":"'"$enc_req"'","session_id":"'"${ESHU_SESSION_ID:-}"'","execution_id":"'"${ESHU_EXECUTION_ID:-}"'","agent":"'"${ESHU_VERIFIED_AGENT:-}"'","force_jit":'"$([ "$ESHU_FORCE_JIT" = "1" ] && echo true || echo false)"',"run_limits":"'"$RUN_LIMITS_CAP"'","check_token":"'"${ESHU_CHECK_TOKEN:-}"'"}' 2>&1 || echo "CURL_FAILED")
 
 HTTP_STATUS=$(echo "$RESPONSE" | tail -n1)
 if [ "${HTTP_STATUS:-}" = "429" ]; then

@@ -397,7 +397,8 @@ exec "__REAL__" "$@"
         self.token_file.write_text(value + "\n")
 
     def sign(self, command: str, agent: str = "agent-a", session: str = "",
-             force_jit: str = "0", ts: int = None, nonce: str = None):
+             force_jit: str = "0", ts: int = None, nonce: str = None,
+             check_token: str = ""):
         """Build the signed prefix exactly as core/ssh_crypto.py does."""
         import secrets as _secrets
         ts = str(ts if ts is not None else int(time.time()))
@@ -408,10 +409,11 @@ exec "__REAL__" "$@"
         key = ssh_crypto.derive_key((self.etc / "eshu-token").read_text().strip())
         canonical = ssh_crypto.canonical(
             command, agent, session=session, mcp="1", force_jit=force_jit,
-            ts=ts, nonce=nonce, gateway_ip=self.target_ip)
+            ts=ts, nonce=nonce, gateway_ip=self.target_ip,
+            check_token=check_token)
         signature = ssh_crypto.sign(key, canonical)
         return ssh_crypto.prefix_line(agent, session, force_jit, ts, nonce,
-                                      signature) + command
+                                      signature, check_token=check_token) + command
 
     def command_script(self, name: str, body: str) -> str:
         """Write an executable test command (no shell metacharacters)."""
@@ -1060,7 +1062,7 @@ def test_sec_chunk1_jit_request_body_is_well_formed(gw):
             payload = json.loads(raw)
             assert set(payload) == {
                 "target_ip", "encoded_command", "session_id", "execution_id",
-                "agent", "force_jit", "run_limits"}
+                "agent", "force_jit", "run_limits", "check_token"}
             # F19: '' or 'v1' — the capability this running script reports.
             assert payload["run_limits"] in ("", "v1")
 
@@ -1116,6 +1118,30 @@ def test_bi2_the_claim_locks_and_uses_a_run_dir_temp():
     remove = text[text.index('remove_claimed_ticket() {'):]
     remove = remove[:remove.index('\n}\n')]
     assert 'tickets_lock' in remove and 'tickets_unlock' in remove
+
+def test_f22_a_signed_check_token_reaches_the_request_body(gw):
+    """AV1: the check token is a v2 signed field, so the gateway accepts it
+    and forwards it; a token added after signing is refused."""
+    gw.jit_status("denied")
+    token = "a" * 32
+    gw.run(gw.sign("echo hello", force_jit="1", check_token=token))
+    assert gw.wait_for(lambda calls: any(
+        c["url"].endswith("/api/request") for c in calls))
+    seen = []
+    for call, raw in zip(gw.curl_calls(), gw.raw_bodies()):
+        if call["url"].endswith("/api/request"):
+            seen.append(json.loads(raw)["check_token"])
+    assert seen and seen[-1] == token
+
+
+def test_f22_a_token_outside_the_signature_is_refused(gw):
+    gw.jit_status("denied")
+    prefix = gw.sign("echo hello", force_jit="1")
+    forged = prefix.replace(
+        "ESHU_FORCE_JIT=1", "ESHU_FORCE_JIT=1 ESHU_CHECK_TOKEN=" + "b" * 32)
+    gw.run(forged)
+    assert not [c for c in gw.curl_calls()
+                if c["url"].endswith("/api/request")]
 
 
 def test_sec_chunk1_window_reject_body_is_well_formed(gw):

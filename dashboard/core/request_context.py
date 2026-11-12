@@ -253,4 +253,15 @@ def build_context(request_id: int):
         'seen': _seen_section(row),
         'like': _like_section(row, bd),
         'host': _host_section(row),
+        # F22/AV2: the card says, in red, when an earlier change in the same
+        # plan has a check open or failed.
+        'check_warning': _check_warning(int(request_id)),
     }
+
+
+def _check_warning(request_id):
+    try:
+        from core.checks import card_warning
+        return card_warning(request_id)
+    except Exception:
+        return None
