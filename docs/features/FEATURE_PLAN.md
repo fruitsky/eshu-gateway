@@ -13431,11 +13431,16 @@ four follow-ups are the ones above.
   runs `find /proc/self/fd -maxdepth 1 -name 9` through a real lockbox claim
   and asserts the path is absent.
 
+<<<<<<< HEAD
 `bash scripts/verify.sh`: GATE_COUNT
 
 #### Security re-read (2026-11-12, at `44375f3`): the nit is fixed; approved
 
 The kept entries now go through `esc()`. BF2 can merge.
+=======
+`bash scripts/verify.sh`: `2886 passed, 26 skipped, 8 warnings in 604.20s
+(0:10:04)`.
+>>>>>>> 97288e2
 
 ## 7. Backlog (not planned in detail)
 
