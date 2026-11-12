@@ -626,6 +626,52 @@ def test_be4_a_symlinked_ssh_directory_is_refused(tmp_path):
     assert "REFUSED" in proc.stdout
 
 
+def test_bh1_an_unreadable_from_is_refused(tmp_path):
+    """BH1: a from= that ak_from cannot parse must not become unrestricted.
+
+    The line keeps its from= after command=; ak_from only reads a from= that
+    starts the line. Writing the dashboard key without it would open the
+    gateway to every source.
+    """
+    weird = ('command="/usr/bin/sudo /usr/local/bin/eshu-gateway.sh",'
+             'from="192.0.2.0/24",restrict '
+             'ssh-ed25519 AAAAold eshu-gateway-key\n')
+    proc, _, after = _run_keys(tmp_path, "1", "direct+mcp", mode="update",
+                               original=weird)
+    assert proc.returncode == 0, proc.stderr
+    assert after == weird
+    assert "could not be read" in proc.stdout
+
+
+def test_bh1_no_eshu_line_means_no_change(tmp_path):
+    """BH1: an old mcp_only install has no Eshu line to copy from= out of."""
+    proc, _, after = _run_keys(tmp_path, "1", "mcp_only", mode="update",
+                               original="")
+    assert proc.returncode == 0, proc.stderr
+    assert after == ""
+    assert "reinstall to add the dashboard key" in proc.stdout
+
+
+def test_bh1_only_foreign_lines_means_no_change(tmp_path):
+    proc, _, after = _run_keys(tmp_path, "1", "direct+mcp", mode="update",
+                               original="ssh-ed25519 AAAAother operator-key\n")
+    assert proc.returncode == 0, proc.stderr
+    assert after == "ssh-ed25519 AAAAother operator-key\n"
+    assert "reinstall to add the dashboard key" in proc.stdout
+
+
+def test_bh1_a_gateway_line_without_from_stays_unrestricted(tmp_path):
+    """The legal case: the Eshu line has no from=, so there is nothing to
+    copy and the dashboard line is written without one."""
+    original = ('command="/usr/bin/sudo /usr/local/bin/eshu-gateway.sh",restrict '
+                'ssh-ed25519 AAAAold eshu-gateway-key\n')
+    proc, _, after = _run_keys(tmp_path, "1", "direct+mcp", mode="update",
+                               original=original)
+    assert proc.returncode == 0, proc.stderr
+    assert "from=" not in after
+    assert "AAAAdash eshu-dashboard" in after
+
+
 def test_be4_the_install_path_does_not_use_a_planted_tmp_symlink(tmp_path):
     template = _read("dashboard/eshu-installer-template.sh")
     home = tmp_path / "home"

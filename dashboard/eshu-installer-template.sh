@@ -646,7 +646,9 @@ write_gateway; write_logger; write_sudoers; write_poller
 # BE4: the `from=` of the existing Eshu lines, so a refreshed dashboard line
 # keeps the restriction the operator set. Empty when there is none.
 ak_from() {   # $1 = file  $2 = comment
-  sed -n "s/^from=\"\([^\"]*\)\".* $2\$/\1/p" "$1" 2>/dev/null | head -n 1
+  # `|| true`: with `set -o pipefail`, sed can see SIGPIPE when head stops
+  # after the first match; that must not abort the installer.
+  sed -n "s/^from=\"\([^\"]*\)\".* $2\$/\1/p" "$1" 2>/dev/null | head -n 1 || true
 }
 
 # BE4: replace authorized_keys through a private temp in the same directory.
@@ -687,23 +689,42 @@ if [ "$mode" = "update" ] && [ "${REGISTER_OK:-}" = "1" ]; then
     echo "   WARNING: the dashboard key is not a single ssh-ed25519 line;"
     echo "            authorized_keys was not changed."
   else
-    AK_FILE="/home/$USER/.ssh/authorized_keys"
-    if [ -e "$AK_FILE" ] && [ ! -r "$AK_FILE" ]; then
+    AK_DIR="/home/$USER/.ssh"
+    AK_FILE="$AK_DIR/authorized_keys"
+    if [ -L "$AK_DIR" ] || { [ -e "$AK_FILE" ] && [ -L "$AK_FILE" ]; }; then
+      echo "   REFUSED: $AK_DIR or $AK_FILE is a symlink; authorized_keys not changed."
+    elif [ -e "$AK_FILE" ] && [ ! -r "$AK_FILE" ]; then
       echo "   REFUSED: $AK_FILE is not readable; authorized_keys not changed."
     else
+      # BH1: an unreadable `from=` must not silently become an unrestricted
+      # line. If an Eshu line carries a from= that ak_from cannot parse, or if
+      # there is no Eshu line at all (an old mcp_only install), leave the file
+      # alone: we cannot know the operator's intent, and a dashboard key open
+      # to the internet is worse than a missing one.
+      AK_ESH_LINE=""
       AK_DASH_FROM=""
       if [ -f "$AK_FILE" ]; then
+        AK_ESH_LINE=$(grep -m1 '/usr/local/bin/eshu-gateway.sh' "$AK_FILE" 2>/dev/null || true)
         AK_DASH_FROM=$(ak_from "$AK_FILE" eshu-dashboard)
         [ -n "$AK_DASH_FROM" ] || AK_DASH_FROM=$(ak_from "$AK_FILE" eshu-gateway-key)
       fi
-      AK_DASH='command="/usr/bin/sudo /usr/local/bin/eshu-gateway.sh --dashboard-key",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty,restrict'
-      if [ -n "$AK_DASH_FROM" ]; then AK_DASH='from="'"$AK_DASH_FROM"'",'"$AK_DASH"; fi
-      {
-        if [ -f "$AK_FILE" ]; then
-          grep -v ' eshu-dashboard$' "$AK_FILE" || true
-        fi
-        printf '%s %s eshu-dashboard\n' "$AK_DASH" "$DASHBOARD_SSH_PUB"
-      } | ak_replace
+      if [ -z "$AK_ESH_LINE" ]; then
+        echo "   NOTE: no Eshu SSH line was found in $AK_FILE;"
+        echo "         reinstall to add the dashboard key."
+      elif [ -z "$AK_DASH_FROM" ] \
+           && printf '%s' "$AK_ESH_LINE" | grep -q 'from='; then
+        echo "   WARNING: an Eshu SSH line has a from= that could not be read;"
+        echo "            authorized_keys was not changed."
+      else
+        AK_DASH='command="/usr/bin/sudo /usr/local/bin/eshu-gateway.sh --dashboard-key",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty,restrict'
+        if [ -n "$AK_DASH_FROM" ]; then AK_DASH='from="'"$AK_DASH_FROM"'",'"$AK_DASH"; fi
+        {
+          if [ -f "$AK_FILE" ]; then
+            grep -v ' eshu-dashboard$' "$AK_FILE" || true
+          fi
+          printf '%s %s eshu-dashboard\n' "$AK_DASH" "$DASHBOARD_SSH_PUB"
+        } | ak_replace
+      fi
     fi
   fi
 fi
