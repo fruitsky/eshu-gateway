@@ -19,6 +19,32 @@ GATEWAY_PUB_KEY=""
 DASHBOARD_URL=""
 GATEWAY_SSH_MODE="direct+mcp"
 
+# BE4: replace a file through a private temp in its own directory, refusing a
+# planted symlink at the file. stdin is the new content; the owner and mode of
+# an existing file are kept, and a new file takes the directory's owner.
+eshu_safe_replace() {   # $1 = file
+  local _f _dir _tmp _owner _mode
+  _f="$1"; _dir=$(dirname "$_f")
+  if [ -L "$_f" ]; then
+    echo "REFUSED: $_f is a symlink; not changed."
+    cat >/dev/null
+    return 1
+  fi
+  [ -d "$_dir" ] || { cat >/dev/null; return 1; }
+  if [ -e "$_f" ]; then
+    _owner=$(stat -c '%u:%g' "$_f" 2>/dev/null) || _owner=""
+    _mode=$(stat -c '%a' "$_f" 2>/dev/null) || _mode=""
+  else
+    _owner=$(stat -c '%u:%g' "$_dir" 2>/dev/null) || _owner=""
+    _mode="600"
+  fi
+  _tmp=$(mktemp "$_dir/.$(basename "$_f").XXXXXX") || { cat >/dev/null; return 1; }
+  if ! cat > "$_tmp"; then rm -f "$_tmp"; return 1; fi
+  [ -n "$_owner" ] && chown "$_owner" "$_tmp" 2>/dev/null || true
+  [ -n "$_mode" ] && chmod "$_mode" "$_tmp" 2>/dev/null || true
+  mv -f "$_tmp" "$_f"
+}
+
 if [[ "${1:-}" == "--reinstall" ]]; then REINSTALL="yes"; shift || true; fi
 if [[ "${1:-}" == "--update" ]]; then UPDATE="yes"; shift || true; fi
 if [[ "${1:-}" == "--uninstall" ]]; then UNINSTALL="yes"; shift || true; fi
@@ -164,8 +190,8 @@ if [ "$UNINSTALL" = "yes" ]; then
   
   echo "Cleaning Eshu SSH keys..."
   if [ -f /root/.ssh/authorized_keys ]; then
-    grep -v "eshu-gateway" /root/.ssh/authorized_keys > /root/.ssh/authorized_keys.tmp 2>/dev/null || true
-    mv -f /root/.ssh/authorized_keys.tmp /root/.ssh/authorized_keys
+    { grep -v "eshu-gateway" /root/.ssh/authorized_keys 2>/dev/null || true; } \
+      | eshu_safe_replace /root/.ssh/authorized_keys || true
   fi
   _report "cleaning_keys" "Eshu SSH authorized_keys cleaned"
   sleep 1
@@ -191,8 +217,8 @@ if [ "$UNINSTALL" = "yes" ]; then
   rm -f /var/run/hermes.tickets /var/run/hermes.last_trigger
 
   if [ -f /root/.ssh/authorized_keys ]; then
-    grep -v "hermes-diag" /root/.ssh/authorized_keys > /root/.ssh/authorized_keys.tmp 2>/dev/null || true
-    mv -f /root/.ssh/authorized_keys.tmp /root/.ssh/authorized_keys
+    { grep -v "hermes-diag" /root/.ssh/authorized_keys 2>/dev/null || true; } \
+      | eshu_safe_replace /root/.ssh/authorized_keys || true
   fi
 
   _report "cleaning_legacy" "Legacy Hermes files removed"
@@ -292,8 +318,8 @@ if [ "$MIGRATE_HERMES" = "yes" ]; then
 
   # Clean legacy SSH keys
   if [ -f /root/.ssh/authorized_keys ]; then
-    grep -v "hermes-diag" /root/.ssh/authorized_keys > /root/.ssh/authorized_keys.tmp 2>/dev/null || true
-    mv -f /root/.ssh/authorized_keys.tmp /root/.ssh/authorized_keys
+    { grep -v "hermes-diag" /root/.ssh/authorized_keys 2>/dev/null || true; } \
+      | eshu_safe_replace /root/.ssh/authorized_keys || true
   fi
   _migrate_report "cleaning_keys" "Legacy Hermes SSH keys cleaned"
   sleep 1
@@ -320,9 +346,8 @@ if id -u hermes-diag &>/dev/null || [ -f /usr/local/bin/hermes-diag.sh ] || [ -f
   rm -f /etc/hermes-exact.txt /etc/hermes-rwhite.txt /etc/hermes-rblack.txt
   rm -f /var/run/hermes.tickets /var/run/hermes.last_trigger
   if [ -f /root/.ssh/authorized_keys ]; then
-    AK_CLEAN=$(mktemp)
-    grep -v "hermes-diag" /root/.ssh/authorized_keys > "$AK_CLEAN" 2>/dev/null || true
-    mv -f "$AK_CLEAN" /root/.ssh/authorized_keys 2>/dev/null || true
+    { grep -v "hermes-diag" /root/.ssh/authorized_keys 2>/dev/null || true; } \
+      | eshu_safe_replace /root/.ssh/authorized_keys || true
   fi
   echo "✅  Legacy Hermes cleaned. Proceeding with Eshu install..."
 fi
@@ -614,6 +639,108 @@ write_gateway; write_logger; write_sudoers; write_poller
 # line is allowed (an mcp_only gateway must not get it back because the
 # dashboard was unreachable for a moment), so authorized_keys is left exactly
 # as it is. A fresh install then has no keys at all: it fails closed.
+#
+# BE4: an update now refreshes ONLY the `eshu-dashboard` line, and only after
+# a 200 too. The shared gateway line is never touched on update.
+
+# BE4: the `from=` of the existing Eshu lines, so a refreshed dashboard line
+# keeps the restriction the operator set. Empty when there is none.
+ak_from() {   # $1 = file  $2 = comment
+  # `|| true`: with `set -o pipefail`, sed can see SIGPIPE when head stops
+  # after the first match; that must not abort the installer.
+  sed -n "s/^from=\"\([^\"]*\)\".* $2\$/\1/p" "$1" 2>/dev/null | head -n 1 || true
+}
+
+# BE4: replace authorized_keys through a private temp in the same directory.
+# A planted symlink at the directory or the file is refused; the fixed
+# `.tmp` name an attacker could pre-create is gone.
+ak_replace() {   # stdin = the new file
+  local ak_home ak_dir ak_file ak_tmp
+  ak_home="/home/$USER"; ak_dir="$ak_home/.ssh"; ak_file="$ak_dir/authorized_keys"
+  if [ -L "$ak_dir" ] || { [ -e "$ak_file" ] && [ -L "$ak_file" ]; }; then
+    echo "   REFUSED: $ak_dir or $ak_file is a symlink; authorized_keys not changed."
+    cat >/dev/null
+    return 1
+  fi
+  mkdir -p "$ak_dir" 2>/dev/null || true
+  if [ -L "$ak_dir" ]; then
+    echo "   REFUSED: $ak_dir is a symlink; authorized_keys not changed."
+    cat >/dev/null
+    return 1
+  fi
+  ak_tmp=$(mktemp "$ak_dir/.authorized_keys.XXXXXX") || { cat >/dev/null; return 1; }
+  cat > "$ak_tmp"
+  chown "$USER:$USER" "$ak_tmp" 2>/dev/null || true
+  chmod 600 "$ak_tmp"
+  if ! mv -f "$ak_tmp" "$ak_file"; then
+    rm -f "$ak_tmp"
+    echo "   REFUSED: could not replace $ak_file; it was not changed."
+    return 1
+  fi
+  chown "$USER:$USER" "$ak_dir" 2>/dev/null || true
+  chmod 700 "$ak_dir"
+}
+
+if [ "$mode" = "update" ] && [ "${REGISTER_OK:-}" = "1" ]; then
+  # BE4: one ssh-ed25519 line only; empty or malformed leaves the file alone.
+  if [ -z "${DASHBOARD_SSH_PUB:-}" ]; then
+    :
+  elif ! [[ "$DASHBOARD_SSH_PUB" =~ ^ssh-ed25519\ [A-Za-z0-9+/=]+(\ [^[:cntrl:]]*)?$ ]]; then
+    echo "   WARNING: the dashboard key is not a single ssh-ed25519 line;"
+    echo "            authorized_keys was not changed."
+  else
+    AK_DIR="/home/$USER/.ssh"
+    AK_FILE="$AK_DIR/authorized_keys"
+    if [ -L "$AK_DIR" ] || { [ -e "$AK_FILE" ] && [ -L "$AK_FILE" ]; }; then
+      echo "   REFUSED: $AK_DIR or $AK_FILE is a symlink; authorized_keys not changed."
+    elif [ -e "$AK_FILE" ] && [ ! -r "$AK_FILE" ]; then
+      echo "   REFUSED: $AK_FILE is not readable; authorized_keys not changed."
+    else
+      # BH1: an unreadable `from=` must not silently become an unrestricted
+      # line. If an Eshu line carries a from= that ak_from cannot parse, or if
+      # there is no Eshu line at all (an old mcp_only install), leave the file
+      # alone: we cannot know the operator's intent, and a dashboard key open
+      # to the internet is worse than a missing one.
+      AK_ESH_LINE=""
+      AK_DASH_FROM=""
+      AK_BAD_FROM=""
+      if [ -f "$AK_FILE" ]; then
+        AK_ESH_LINE=$(grep -m1 '/usr/local/bin/eshu-gateway.sh' "$AK_FILE" 2>/dev/null || true)
+        AK_DASH_FROM=$(ak_from "$AK_FILE" eshu-dashboard)
+        [ -n "$AK_DASH_FROM" ] || AK_DASH_FROM=$(ak_from "$AK_FILE" eshu-gateway-key)
+        # BJ1: look at every Eshu line, not only the first. One line whose
+        # from= is not in the leading `from="...,` form means we cannot know
+        # the operator's intent (for example, the gateway line is unrestricted
+        # while a hand-edited dashboard line is restricted), so nothing is
+        # written. `grep -q` is avoided on purpose: under `set -o pipefail` an
+        # early exit gives the upstream grep SIGPIPE and the pipeline fails
+        # even when the pattern matched.
+        AK_BAD_LINES=$(grep '/usr/local/bin/eshu-gateway.sh' "$AK_FILE" 2>/dev/null \
+                       | grep -v '^from="[^"]*",' || true)
+        case "$AK_BAD_LINES" in
+          *from=*) AK_BAD_FROM="1" ;;
+        esac
+      fi
+      if [ -z "$AK_ESH_LINE" ]; then
+        echo "   NOTE: no Eshu SSH line was found in $AK_FILE;"
+        echo "         reinstall to add the dashboard key."
+      elif [ -n "$AK_BAD_FROM" ]; then
+        echo "   WARNING: an Eshu SSH line has a from= that could not be read;"
+        echo "            authorized_keys was not changed."
+      else
+        AK_DASH='command="/usr/bin/sudo /usr/local/bin/eshu-gateway.sh --dashboard-key",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty,restrict'
+        if [ -n "$AK_DASH_FROM" ]; then AK_DASH='from="'"$AK_DASH_FROM"'",'"$AK_DASH"; fi
+        {
+          if [ -f "$AK_FILE" ]; then
+            grep -v ' eshu-dashboard$' "$AK_FILE" || true
+          fi
+          printf '%s %s eshu-dashboard\n' "$AK_DASH" "$DASHBOARD_SSH_PUB"
+        } | ak_replace
+      fi
+    fi
+  fi
+fi
+
 if { [ "$mode" = "install" ] || [ "$mode" = "reinstall" ]; } && [ "${REGISTER_OK:-}" != "1" ]; then
   echo ""
   echo "   WARNING: registration did not succeed (HTTP ${REGISTER_STATUS:-none}), so the"
@@ -628,6 +755,9 @@ if { [ "$mode" = "install" ] || [ "$mode" = "reinstall" ]; } && [ "${REGISTER_OK
     echo "ERROR: The Eshu Gateway SSH key is required. Aborting."; exit 1
   fi
 
+  if [ -L "/home/$USER/.ssh" ]; then
+    echo "   REFUSED: /home/$USER/.ssh is a symlink; authorized_keys not changed."
+  else
   mkdir -p "/home/$USER/.ssh"; chmod 700 "/home/$USER/.ssh"
   # F12: two lines, each with its own comment (eshu-gateway-key, eshu-dashboard),
   # so a re-run replaces them by comment instead of appending duplicates. The
@@ -650,9 +780,10 @@ if { [ "$mode" = "install" ] || [ "$mode" = "reinstall" ]; } && [ "${REGISTER_OK
     if [ -n "$DASHBOARD_SSH_PUB" ]; then
       printf '%s %s eshu-dashboard\n' "$AK_DASH" "$DASHBOARD_SSH_PUB"
     fi
-  } > "$AK_FILE.tmp"
-  mv -f "$AK_FILE.tmp" "$AK_FILE"
-  chown -R "$USER":"$USER" "/home/$USER/.ssh"; chmod 600 "$AK_FILE"
+  } | ak_replace
+  chown -R "$USER":"$USER" "/home/$USER/.ssh" 2>/dev/null || true
+  chmod 600 "$AK_FILE" 2>/dev/null || true
+  fi
 fi
 
 echo ""

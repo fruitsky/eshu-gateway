@@ -11594,6 +11594,145 @@ An update today never writes `authorized_keys`, so F12's dashboard key reaches a
 * run only after a 200 registration (BE1's `REGISTER_OK`);
 * make the temp file with `mktemp`, and refuse a symlinked `.ssh` or `authorized_keys`. The install path's fixed `.tmp` name has the same symlink problem today, so fix it in the same change.
 
+**Implementer notes (BE4).** `--update` now refreshes the dashboard line,
+after `REGISTER_OK=1` only:
+
+* `ak_from` reads the `from=` of the existing `eshu-dashboard` line, else of
+  the `eshu-gateway-key` line, so the refreshed line keeps the operator's
+  restriction; with none it has no `from=`.
+* `ak_replace` writes through `mktemp "$dir/.authorized_keys.XXXXXX"` in the
+  same directory and `mv`s it into place. A symlinked `.ssh` or
+  `authorized_keys` is refused with a message and the file is left alone; an
+  unreadable file is refused too.
+* The key must match `^ssh-ed25519 [A-Za-z0-9+/=]+( …)?$` on one line. An
+  empty or malformed key changes nothing (with a warning for the malformed
+  case).
+* Only lines ending ` eshu-dashboard` are removed; every other line keeps its
+  bytes and its order.
+* The install path uses the same `ak_replace`; its fixed
+  `authorized_keys.tmp` name is gone. The uninstall/legacy-cleanup paths (the
+  `grep -v` writes) use a new `eshu_safe_replace` with a private temp in the
+  target's directory, refusing a symlinked target and keeping the owner and
+  mode.
+* Tests run the real block as the BE1 tests do: update replaces only the
+  dashboard line and keeps the gateway line byte-identical; `from=` comes
+  from the dashboard line, or from the gateway line when there is none; no
+  200, an empty key and three malformed keys change nothing; a symlinked
+  `authorized_keys` and a symlinked `.ssh` are refused; a planted
+  `authorized_keys.tmp` symlink is not followed; `eshu_safe_replace` refuses
+  a symlinked target and preserves a normal file's mode.
+
+`bash scripts/verify.sh`: `2842 passed, 26 skipped, 7 warnings in 581.63s
+(0:09:41)`.
+
+**Reviewer notes (security reviewer, 2026-11-12, at `b5008d5`).** Approved
+once BH1 is in. The rest meets the conditions:
+* only lines ending ` eshu-dashboard` are replaced;
+* the gateway line stays byte-identical;
+* only after `REGISTER_OK=1`;
+* a single `ssh-ed25519` line, with no options possible (options come only
+  before the key type, and the comment cannot hold a control character or a
+  newline);
+* an empty key changes nothing;
+* `mktemp` in the target's directory, and symlinks are refused;
+* `eshu_safe_replace` for the root-owned cleanup paths.
+
+* **BH1 (must): no `from=` source means no change, not an unrestricted line.**
+  * The condition was "copy `from=` from the existing Eshu lines, and change
+    nothing if they cannot be read". The implementation writes a line with
+    no `from=` in two cases:
+    * the existing lines carry a `from=` that `ak_from` cannot parse (it
+      reads only a line that *starts* with `from="`, so a hand-edited line
+      with `from=` after `command=` is missed);
+    * there is no Eshu line at all, such as an `mcp_only` gateway installed
+      before F12. Its `ALLOWED_SSH_FROM` is not recorded anywhere the update
+      can see.
+  * In both cases the dashboard key would work from anywhere, while the
+    operator may have restricted the gateway.
+  * Fix:
+    * if any line containing `/usr/local/bin/eshu-gateway.sh` holds `from=`
+      and `ak_from` returned nothing, change nothing and warn;
+    * if no Eshu line exists, change nothing and print "reinstall to add
+      the dashboard key".
+  * Tests: a `from=` after `command=` refuses; an empty file (or one with
+    only foreign lines) refuses; the existing cases still pass.
+* **BH2 (should, later): do the user-side write as the user.**
+  * `ak_replace` checks for a symlinked `.ssh`, then calls `mktemp`, `mv`
+    and `chmod 700` on it as root. The gateway user owns `/home/$USER`, so
+    between the check and the write it can swap `.ssh` for a symlink.
+    `mv` and `chmod` then act on the target as root: for example, replacing
+    root's `authorized_keys` or changing a system directory's mode.
+  * This needs code execution as that user, which its `restrict`ed forced
+    command does not give, so it is not a must.
+  * The clean fix is to run the `mktemp`/`cat`/`mv` through
+    `runuser -u "$USER" --`, so a symlink can only reach what the user could
+    already write. Do it in the next installer change.
+
+**BH1 implemented (2026-11-12).** The update branch now reads the first Eshu
+line (`grep -m1 '/usr/local/bin/eshu-gateway.sh'`). If that line holds
+`from=` and `ak_from` returned nothing, it refuses and warns; if there is no
+Eshu line, it refuses with "reinstall to add the dashboard key"; a line that
+genuinely has no `from=` still gets an unrestricted dashboard line, as
+before. The symlink refusal now runs before the content is read (so a
+symlinked `authorized_keys` keeps its own REFUSED message). `ak_from` ends
+`|| true` so a SIGPIPE from `head` cannot abort the installer under
+`set -o pipefail`. Tests: `from=` after `command=` refused and byte-identical;
+empty file and foreign-lines-only refused; a no-`from=` gateway line still
+written unrestricted; the BE4 cases unchanged. BH2 is left for the next
+installer change, as the note says.
+
+`bash scripts/verify.sh`: `2855 passed, 26 skipped, 7 warnings in 578.58s
+(0:09:38)`. All four installers regenerated.
+
+#### Security re-read (2026-11-12, at `357130b`): BH1 is nearly there; BJ1 is a must
+
+* The case with no Eshu line now leaves the file alone with a note, and
+  the tests cover it. Good.
+* The `|| true` on the `ak_from` pipe and the symlink checks are good.
+* **BJ1 (must):** the "unreadable `from=`" check looks only at the first
+  Eshu line (`grep -m1`).
+  * Suppose the first Eshu line has no `from=` and a later one has a
+    `from=` that `ak_from` cannot read. For example, the gateway-key line
+    is unrestricted while the operator restricted the dashboard line by
+    hand, with its options in another order.
+  * `AK_DASH_FROM` is then empty, the check passes, and the dashboard line
+    is rewritten with no `from=`. The restriction the operator added is
+    gone.
+  * A related case: when only the dashboard line's `from=` fails to parse,
+    the fallback copies the gateway line's `from=`, which may be wider.
+  * Rule: if any Eshu line has a `from=` that is not in the parseable
+    leading form, change nothing. For example, refuse when
+    `grep '/usr/local/bin/eshu-gateway.sh' | grep -v '^from="[^"]*",' |
+    grep -q 'from='` matches.
+  * Test: an unrestricted gateway-key line first, then a dashboard line
+    with a non-leading `from=`. The file must stay unchanged.
+* BH2 is still a should, for later.
+
+**BJ1 implemented (2026-11-12).** The check is over every Eshu line now: it
+collects the lines containing `/usr/local/bin/eshu-gateway.sh`, drops the ones
+whose `from=` is in the leading `from="...,` form, and if any remaining line
+contains `from=` the file is left alone with the warning. That covers both
+the "first line unrestricted, later dashboard line restricted by hand" case
+and the fallback that copied a wider gateway `from=` when the dashboard
+line's own was unreadable. `grep -q` is deliberately not used in the
+pipeline: under `set -o pipefail` its early exit gives the upstream `grep`
+SIGPIPE and the pipeline would report failure on a match. Tests:
+`test_bj1_a_later_unreadable_from_also_refuses` (file byte-identical) and
+`test_bj1_a_leading_from_on_every_line_still_updates`; the earlier BH1 tests
+still pass. Installers regenerated.
+
+`bash scripts/verify.sh`: `2895 passed, 26 skipped, 8 warnings in 598.20s
+(0:09:58)` (after the stack rebase onto `fix/lockbox-bi`).
+
+#### Security re-read (2026-11-12, at `cab1399`): BJ1 approved
+
+* Every Eshu line is checked now. Any line whose `from=` is not in the
+  leading `from="...",` form makes the update change nothing.
+* That also covers the case where the dashboard line fails to parse and
+  the gateway line's wider `from=` would have been copied.
+* Leaving out `grep -q` is the right call under `pipefail`.
+* BE4 can merge. BH2 (write as the user) is still a should, for later.
+
 ### GT1 — gateway token rotation · branch `feat/gateway-token-rotation` · design first
 
 The dashboard has no rotate action today; the only way to rotate a token is to remove and re-enrol the gateway. Design:
@@ -12000,7 +12139,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | — | Gateway hardening | gateway-hardening | gateway | **Merged** 2026-11-12 (AF3 + S1 tee capture; security `c15664e`; AX1/AX2 residuals; BA1 for the next F5/F19 change) | `fix/gateway-hardening` | F19, Buffering | |
 | — | Installer hotfix | installer-reregister | installer | **Merged and deployed** 2026-11-12 (`d6a38bb`; security `d6a38bb`): re-register presents the existing token; keys only after a 200 | `fix/installer-reregister` | F12 | |
 | — | BE3 | secret-headers | gateway + installer + poller | Planned (security ruling RR-a) | `fix/secret-headers` | RR1 | + security sign-off |
-| — | BE4 | update-dashboard-key | installer | Planned (security ruling RR-c) | `fix/update-dashboard-key` | RR1 | + security sign-off |
+| — | BE4 | update-dashboard-key | installer | **Implemented**: `--update` refreshes only the `eshu-dashboard` line after a 200, copies its `from=`, refuses symlinks, uses `mktemp`; the fixed `.tmp` name is gone everywhere | `fix/update-dashboard-key` | RR1 | security sign-off |
 | — | GT1 | gateway-token-rotation | dashboard + poller | Design first | `feat/gateway-token-rotation` | RR1 | + security sign-off |
 
 Chunks are done **in the order column**; each new chunk branches from the

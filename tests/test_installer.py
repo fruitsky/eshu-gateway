@@ -434,14 +434,16 @@ def _key_block(template, home):
     return template[start:end].replace("/home/$USER", str(home))
 
 
-def _run_keys(tmp_path, register_ok, ssh_mode, mode="reinstall"):
+def _run_keys(tmp_path, register_ok, ssh_mode, mode="reinstall",
+              dash_pub="ssh-ed25519 AAAAdash", original=None):
     template = _read("dashboard/eshu-installer-template.sh")
     home = tmp_path / "home"
     (home / ".ssh").mkdir(parents=True)
     ak = home / ".ssh" / "authorized_keys"
-    original = ("ssh-ed25519 AAAAother operator-key\n"
-                'command="/usr/bin/sudo /usr/local/bin/eshu-gateway.sh",restrict '
-                "ssh-ed25519 AAAAold eshu-gateway-key\n")
+    if original is None:
+        original = ("ssh-ed25519 AAAAother operator-key\n"
+                    'command="/usr/bin/sudo /usr/local/bin/eshu-gateway.sh",restrict '
+                    "ssh-ed25519 AAAAold eshu-gateway-key\n")
     ak.write_text(original)
     bindir = tmp_path / "bin"
     bindir.mkdir()
@@ -452,10 +454,10 @@ USER="eshu-gateway"; mode="%s"
 REGISTER_OK="%s"; REGISTER_STATUS="%s"
 GATEWAY_SSH_MODE="%s"; ALLOWED_SSH_FROM=""
 GATEWAY_PUB_KEY="ssh-ed25519 AAAAnew"
-DASHBOARD_SSH_PUB="ssh-ed25519 AAAAdash"
+DASHBOARD_SSH_PUB="%s"
 %s
 """ % (mode, register_ok, "200" if register_ok else "000", ssh_mode,
-       _key_block(template, home)))
+       dash_pub, _key_block(template, home)))
     env = {"PATH": "%s:%s" % (bindir, os.environ.get("PATH", "/usr/bin:/bin"))}
     proc = subprocess.run(["bash", str(harness)], capture_output=True,
                           text=True, env=env, timeout=60, stdin=subprocess.DEVNULL)
@@ -505,3 +507,256 @@ def test_be2_dev_installer_carries_the_fix():
     dev = _read("dashboard/static/dev/eshu-gateway-install.sh")
     assert dev == _read("dashboard/eshu-gateway-install.sh")
     assert "# RR1: the existing token is loaded BEFORE registering." in dev
+
+
+# ── BE4: refresh only the eshu-dashboard line on update ────────────────────
+
+OLD_DASH = ('from="10.0.0.0/8",'
+            'command="/usr/bin/sudo /usr/local/bin/eshu-gateway.sh '
+            '--dashboard-key",restrict ssh-ed25519 AAAAolddash eshu-dashboard\n')
+OLD_GW = ('from="192.0.2.0/24",'
+          'command="/usr/bin/sudo /usr/local/bin/eshu-gateway.sh",restrict '
+          'ssh-ed25519 AAAAold eshu-gateway-key\n')
+
+
+def test_be4_update_replaces_only_the_dashboard_line(tmp_path):
+    original = "ssh-ed25519 AAAAother operator-key\n" + OLD_GW + OLD_DASH
+    proc, _, after = _run_keys(tmp_path, "1", "direct+mcp", mode="update",
+                               original=original)
+    assert proc.returncode == 0, proc.stderr
+    # Every line that is not ours is byte-identical, and so is the shared line.
+    assert "ssh-ed25519 AAAAother operator-key\n" in after
+    assert OLD_GW in after
+    assert "AAAAolddash" not in after
+    assert "AAAAdash eshu-dashboard" in after
+    # Only two lines changed: the old dashboard line went, the new one came.
+    assert len(after.splitlines()) == 3
+    assert after.count("eshu-dashboard") == 1
+
+
+def test_be4_update_copies_the_dashboard_lines_from(tmp_path):
+    original = OLD_GW + OLD_DASH
+    _, _, after = _run_keys(tmp_path, "1", "direct+mcp", mode="update",
+                            original=original)
+    dash = [line for line in after.splitlines() if line.endswith("eshu-dashboard")][0]
+    assert dash.startswith('from="10.0.0.0/8",')
+
+
+def test_be4_update_copies_from_from_the_gateway_line_when_there_is_none(
+        tmp_path):
+    original = "ssh-ed25519 AAAAother operator-key\n" + OLD_GW
+    _, _, after = _run_keys(tmp_path, "1", "direct+mcp", mode="update",
+                            original=original)
+    dash = [line for line in after.splitlines() if line.endswith("eshu-dashboard")][0]
+    assert dash.startswith('from="192.0.2.0/24",')
+
+
+def test_be4_update_without_a_200_changes_nothing(tmp_path):
+    original = OLD_GW + OLD_DASH
+    _, _, after = _run_keys(tmp_path, "", "direct+mcp", mode="update",
+                            original=original)
+    assert after == original
+
+
+def test_be4_update_with_an_empty_key_changes_nothing(tmp_path):
+    original = OLD_GW + OLD_DASH
+    proc, _, after = _run_keys(tmp_path, "1", "direct+mcp", mode="update",
+                               dash_pub="", original=original)
+    assert proc.returncode == 0, proc.stderr
+    assert after == original
+
+
+def test_be4_update_with_a_malformed_key_changes_nothing(tmp_path):
+    original = OLD_GW + OLD_DASH
+    for index, bad in enumerate(("not-a-key",
+                                 "ssh-ed25519 AAAA\ncommand=/bin/sh eshu-dashboard",
+                                 "ssh-rsa AAAAx eshu-dashboard")):
+        sub = tmp_path / ("case%d" % index)
+        sub.mkdir()
+        _, _, after = _run_keys(sub, "1", "direct+mcp", mode="update",
+                                dash_pub=bad, original=original)
+        assert after == original, bad
+
+
+def _block_harness(tmp_path, block):
+    bindir = tmp_path / "bin"
+    bindir.mkdir(exist_ok=True)
+    _stub(bindir, "chown", "exit 0")
+    harness = tmp_path / "block.sh"
+    harness.write_text('USER="eshu-gateway"\n' + block + "\n")
+    env = {"PATH": "%s:%s" % (bindir, os.environ.get("PATH", "/usr/bin:/bin"))}
+    return subprocess.run(["bash", str(harness)], capture_output=True,
+                          text=True, env=env, timeout=60,
+                          stdin=subprocess.DEVNULL)
+
+
+def test_be4_a_symlinked_authorized_keys_is_refused(tmp_path):
+    template = _read("dashboard/eshu-installer-template.sh")
+    home = tmp_path / "home"
+    (home / ".ssh").mkdir(parents=True)
+    victim = tmp_path / "victim"
+    victim.write_text("do not touch\n")
+    (home / ".ssh" / "authorized_keys").symlink_to(victim)
+    block = _key_block(template, home)
+    proc = _block_harness(tmp_path, 'mode="update"\nREGISTER_OK="1"\n'
+                                    'DASHBOARD_SSH_PUB="ssh-ed25519 AAAAdash"\n'
+                                    + block)
+    assert proc.returncode == 0, proc.stderr
+    assert victim.read_text() == "do not touch\n"
+    assert (home / ".ssh" / "authorized_keys").is_symlink()
+    assert "REFUSED" in proc.stdout
+
+
+def test_be4_a_symlinked_ssh_directory_is_refused(tmp_path):
+    template = _read("dashboard/eshu-installer-template.sh")
+    real = tmp_path / "elsewhere"
+    real.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".ssh").symlink_to(real)
+    block = _key_block(template, home)
+    proc = _block_harness(tmp_path, 'mode="reinstall"\nREGISTER_OK="1"\n'
+                                    'GATEWAY_SSH_MODE="direct+mcp"\n'
+                                    'ALLOWED_SSH_FROM=""\n'
+                                    'GATEWAY_PUB_KEY="ssh-ed25519 AAAAnew"\n'
+                                    'DASHBOARD_SSH_PUB="ssh-ed25519 AAAAdash"\n'
+                                    + block)
+    assert proc.returncode == 0, proc.stderr
+    assert not (real / "authorized_keys").exists()
+    assert "REFUSED" in proc.stdout
+
+
+def test_bh1_an_unreadable_from_is_refused(tmp_path):
+    """BH1: a from= that ak_from cannot parse must not become unrestricted.
+
+    The line keeps its from= after command=; ak_from only reads a from= that
+    starts the line. Writing the dashboard key without it would open the
+    gateway to every source.
+    """
+    weird = ('command="/usr/bin/sudo /usr/local/bin/eshu-gateway.sh",'
+             'from="192.0.2.0/24",restrict '
+             'ssh-ed25519 AAAAold eshu-gateway-key\n')
+    proc, _, after = _run_keys(tmp_path, "1", "direct+mcp", mode="update",
+                               original=weird)
+    assert proc.returncode == 0, proc.stderr
+    assert after == weird
+    assert "could not be read" in proc.stdout
+
+
+def test_bj1_a_later_unreadable_from_also_refuses(tmp_path):
+    """BJ1: the check is on every Eshu line, not just the first.
+
+    The gateway line is unrestricted; the dashboard line was restricted by
+    hand with its options in another order. Rewriting the dashboard line
+    without its from= would drop that restriction.
+    """
+    original = (
+        'command="/usr/bin/sudo /usr/local/bin/eshu-gateway.sh",restrict '
+        'ssh-ed25519 AAAAold eshu-gateway-key\n'
+        'command="/usr/bin/sudo /usr/local/bin/eshu-gateway.sh --dashboard-key",'
+        'from="192.0.2.0/24",restrict ssh-ed25519 AAAAdash eshu-dashboard\n')
+    proc, _, after = _run_keys(tmp_path, "1", "direct+mcp", mode="update",
+                               original=original)
+    assert proc.returncode == 0, proc.stderr
+    assert after == original
+    assert "could not be read" in proc.stdout
+
+
+def test_bj1_a_leading_from_on_every_line_still_updates(tmp_path):
+    """The legal case: both Eshu lines lead with a parseable from=."""
+    original = (
+        'from="192.0.2.0/24",command="/usr/bin/sudo /usr/local/bin/eshu-gateway.sh",'
+        'restrict ssh-ed25519 AAAAold eshu-gateway-key\n'
+        'from="192.0.2.0/24",command="/usr/bin/sudo /usr/local/bin/eshu-gateway.sh '
+        '--dashboard-key",restrict ssh-ed25519 AAAAdash eshu-dashboard\n')
+    proc, _, after = _run_keys(tmp_path, "1", "direct+mcp", mode="update",
+                               original=original)
+    assert proc.returncode == 0, proc.stderr
+    assert "could not be read" not in proc.stdout
+    assert 'from="192.0.2.0/24"' in after
+    assert after.count("eshu-dashboard") == 1
+
+
+def test_bh1_no_eshu_line_means_no_change(tmp_path):
+    """BH1: an old mcp_only install has no Eshu line to copy from= out of."""
+    proc, _, after = _run_keys(tmp_path, "1", "mcp_only", mode="update",
+                               original="")
+    assert proc.returncode == 0, proc.stderr
+    assert after == ""
+    assert "reinstall to add the dashboard key" in proc.stdout
+
+
+def test_bh1_only_foreign_lines_means_no_change(tmp_path):
+    proc, _, after = _run_keys(tmp_path, "1", "direct+mcp", mode="update",
+                               original="ssh-ed25519 AAAAother operator-key\n")
+    assert proc.returncode == 0, proc.stderr
+    assert after == "ssh-ed25519 AAAAother operator-key\n"
+    assert "reinstall to add the dashboard key" in proc.stdout
+
+
+def test_bh1_a_gateway_line_without_from_stays_unrestricted(tmp_path):
+    """The legal case: the Eshu line has no from=, so there is nothing to
+    copy and the dashboard line is written without one."""
+    original = ('command="/usr/bin/sudo /usr/local/bin/eshu-gateway.sh",restrict '
+                'ssh-ed25519 AAAAold eshu-gateway-key\n')
+    proc, _, after = _run_keys(tmp_path, "1", "direct+mcp", mode="update",
+                               original=original)
+    assert proc.returncode == 0, proc.stderr
+    assert "from=" not in after
+    assert "AAAAdash eshu-dashboard" in after
+
+
+def test_be4_the_install_path_does_not_use_a_planted_tmp_symlink(tmp_path):
+    template = _read("dashboard/eshu-installer-template.sh")
+    home = tmp_path / "home"
+    (home / ".ssh").mkdir(parents=True)
+    victim = tmp_path / "victim"
+    victim.write_text("do not touch\n")
+    (home / ".ssh" / "authorized_keys.tmp").symlink_to(victim)
+    block = _key_block(template, home)
+    proc = _block_harness(tmp_path, 'mode="reinstall"\nREGISTER_OK="1"\n'
+                                    'GATEWAY_SSH_MODE="direct+mcp"\n'
+                                    'ALLOWED_SSH_FROM=""\n'
+                                    'GATEWAY_PUB_KEY="ssh-ed25519 AAAAnew"\n'
+                                    'DASHBOARD_SSH_PUB="ssh-ed25519 AAAAdash"\n'
+                                    + block)
+    assert proc.returncode == 0, proc.stderr
+    assert victim.read_text() == "do not touch\n"
+    text = (home / ".ssh" / "authorized_keys").read_text()
+    assert "AAAAnew eshu-gateway-key" in text
+    assert "AAAAdash eshu-dashboard" in text
+
+
+def test_be4_no_fixed_authorized_keys_tmp_name_remains():
+    src = _read("dashboard/eshu-installer-template.sh")
+    assert "authorized_keys.tmp" not in src
+    assert "mktemp \"$ak_dir/.authorized_keys" in src
+    assert "eshu_safe_replace" in src
+
+
+def test_be4_safe_replace_refuses_a_symlinked_target(tmp_path):
+    src = _read("dashboard/eshu-installer-template.sh")
+    start = src.index("# BE4: replace a file through a private temp")
+    end = src.index("\n}\n", src.index("eshu_safe_replace()")) + 3
+    helper = src[start:end]
+    victim = tmp_path / "victim"
+    victim.write_text("do not touch\n")
+    link = tmp_path / "ak"
+    link.symlink_to(victim)
+    harness = tmp_path / "helper.sh"
+    harness.write_text("#!/bin/bash\n" + helper +
+                       '\necho "new" | eshu_safe_replace "%s"\n' % link)
+    proc = subprocess.run(["bash", str(harness)], capture_output=True,
+                          text=True, timeout=30, stdin=subprocess.DEVNULL)
+    assert victim.read_text() == "do not touch\n"
+    assert link.is_symlink()
+    # And a normal file is replaced in place, keeping its mode.
+    target = tmp_path / "plain"
+    target.write_text("old\n")
+    target.chmod(0o600)
+    harness.write_text("#!/bin/bash\n" + helper +
+                       '\necho "new" | eshu_safe_replace "%s"\n' % target)
+    subprocess.run(["bash", str(harness)], capture_output=True, text=True,
+                   timeout=30, stdin=subprocess.DEVNULL)
+    assert target.read_text() == "new\n"
+    assert oct(target.stat().st_mode & 0o777) == "0o600"
