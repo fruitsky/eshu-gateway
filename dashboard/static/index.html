@@ -166,16 +166,6 @@
 
           <!-- Feed -->
           <div class="cc-feed-scroll" id="cc-feed-scroll">
-            <!-- Session plans awaiting approval (F3) -->
-            <div id="plans-widget" class="widget hidden">
-              <div class="widget-header">
-                <span style="display:flex;align-items:center;gap:8px">
-                  <span style="font-size:14px">&#128203;</span> Plans awaiting approval
-                </span>
-                <span id="plans-count" class="text-sm text-muted"></span>
-              </div>
-              <div id="plans-list"></div>
-            </div>
             <!-- Pending JIT Widget -->
             <div id="jit-pending-widget" class="widget glow">
               <div class="widget-header">
@@ -186,6 +176,17 @@
                 <span id="jit-new-badge" class="new-badge hidden">New</span>
               </div>
               <div id="jit-tickets"><p class="text-muted">No pending requests — all clear.</p></div>
+              <!-- X5: session plans are pending items too, so they live in the
+                   JIT list area (after the queue), not above the starfield. -->
+              <div id="plans-widget" class="plans-in-jit hidden">
+                <div class="widget-header">
+                  <span style="display:flex;align-items:center;gap:8px">
+                    <span style="font-size:14px">&#128203;</span> Plans awaiting approval
+                  </span>
+                  <span id="plans-count" class="text-sm text-muted"></span>
+                </div>
+                <div id="plans-list"></div>
+              </div>
             </div>
           </div>
         </div>
@@ -396,9 +397,10 @@
       </details>
       <div class="widget mt-5" data-od-id="gateway-table">
         <div class="widget-header">Active Gateways</div>
+        <p class="text-xs text-muted gateway-freeze-hint">Freeze is fleet-wide (sidebar). To stop one gateway, use its Zero-Trust or Remove control below.</p>
         <div class="table-wrap"><table>
           <thead><tr><th>Status</th><th>Gateway</th><th>IP</th><th>Enrolled</th><th>Policy</th><th>Health<span class="th-key">poller · gateway · reach · token</span></th><th>24h</th><th>Modes</th><th class="text-right">Actions</th></tr></thead>
-          <tbody id="gateways-table-body"><tr><td colspan="8" class="px-4 py-3 text-muted">Loading...</td></tr></tbody>
+          <tbody id="gateways-table-body"><tr><td colspan="9" class="px-4 py-3 text-muted">Loading...</td></tr></tbody>
         </table></div>
       </div>
     </div>
@@ -1591,14 +1593,20 @@
       <div class="session-modal-meta" id="sm-meta"></div>
       <div class="session-summary hidden" id="sm-summary"></div>
       <div class="sm-test-hint hidden" id="sm-test-hint"></div>
+    </div>
+    <!-- X5: the conclusion and the commands scroll inside the card; a long
+         conclusion can no longer push the footer outside the modal. -->
+    <div class="session-modal-body" id="sm-body">
       <div class="session-conclusion hidden" id="sm-conclusion"></div>
+      <div class="session-plan hidden" id="sm-plan"></div>
+      <div class="session-modal-commands" id="sm-commands"></div>
+    </div>
+    <div class="session-modal-footer">
       <div class="session-modal-id">
         <code id="sm-id"></code>
         <button onclick="copySessionId()" class="btn btn-muted btn-xs" title="Copy the full session id">Copy id</button>
       </div>
     </div>
-    <div class="session-plan hidden" id="sm-plan"></div>
-    <div class="session-modal-commands" id="sm-commands"></div>
   </div>
 </div>
 

@@ -136,6 +136,10 @@ the operator's intent byte-for-byte.
 ## Gateway nodes
 
 Requirements: Linux, `bash`, `curl`, `python3`, `systemd`, `sshd`.  
+Optional, GNU coreutils 8.24 or later: `tail` capture stops a command promptly
+after an agent disconnects (`tee --output-error`, `mv -T`), and F19 run limits
+need GNU `timeout`. Without them, `tail` capture posts no output and the
+gateway does not report `run_limits: v1`; everything else works.  
 Network: Gateway must reach the dashboard on port 8000 (HTTP). No inbound
 ports needed.
 

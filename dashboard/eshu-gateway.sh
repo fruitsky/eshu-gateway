@@ -338,6 +338,9 @@ log_window_reject() {
 # that never returns is a root process that never returns. Fusing the "keep the
 # tail" step into the stream itself removes the second process, the FIFO and
 # the wait; the capture file is written by END, in the same process.
+# S1: the MCP envelope still uses the ring that way (its stream goes to
+# /dev/null, not to the agent). `tail` mode now feeds the ring a `tee` copy
+# again, through capture_job below, with a bounded poll in place of the wait.
 #
 # C2: a ring of lines with a running byte total, so the cost is linear in the
 # output. (The first version re-copied a growing 16 KiB buffer for every line:
@@ -380,7 +383,42 @@ capture_tail() {   # $1 = capture file, $2 = byte cap (default 16385)
         printf "%s\n", s > cap
       }
       close(cap) }' 2>/dev/null \
-    || logger -t eshu-gateway "CAPTURE FAILED: cannot write the capture file"
+    || { logger -t eshu-gateway "CAPTURE FAILED: cannot write the capture file"
+         return 1; }
+}
+
+# S1 (tee capture): in `tail` mode the capture is a copy of the visible stream,
+# not a step in it. awk in the stream held a slow writer after the agent hung
+# up (mawk reads stdin in 4 KiB blocks: 10.7 s measured); `tee` writes as it
+# reads, so the disconnect reaches the command at its next write.
+# This runs in a process substitution, with stdout and stderr on /dev/null so
+# it never holds the agent's channel open. The ring writes `part`; only a
+# complete capture is renamed to `tail`, the one name the result post reads.
+# `cat` drains anything left if awk stopped early, so `tee` never sees EPIPE
+# from this side and the agent's stream is never cut (D1). Its last step is
+# always removing `part`: that is the "done" signal run_sanitized polls for.
+capture_job() {   # $1 = part file, $2 = final file
+  if capture_tail "$1" >/dev/null; then
+    mv -fT "$1" "$2" 2>/dev/null \
+      || logger -t eshu-gateway "CAPTURE FAILED: cannot rename the capture file"
+  fi
+  cat >/dev/null
+  rm -rf -- "$1" 2>/dev/null
+}
+
+# S1: the bounded wait for capture_job. A file poll, never `wait`: the process
+# substitution is a child of the `tee` pipeline element, not of this script,
+# and a capture that never finishes must not hold a root call (the CI-hang
+# shape). 40 ticks of 0.05 s = 2 s; a normal capture is done in a tick or two.
+CAPTURE_WAIT_TICKS=40
+capture_wait() {   # $1 = part file; 0 when the capture finished in time
+  local ticks=0
+  while [ -e "$1" ] || [ -L "$1" ]; do
+    if [ "$ticks" -ge "$CAPTURE_WAIT_TICKS" ]; then return 1; fi
+    sleep 0.05
+    ticks=$((ticks + 1))
+  done
+  return 0
 }
 
 capture_mode() {
@@ -447,6 +485,8 @@ run_sanitized() {
   path="${RESULT_PATH:-allowlist}"
   case "$path" in allowlist|window|lockbox|jit) ;; *) path="allowlist" ;; esac
   ESHU_OUT_TAIL=""
+  ESHU_CAP_DIR=""
+  ESHU_CAP_PART=""
   ESHU_LIMIT_PROBE=""
   RUN_LIMIT_HIT=""
   if [ "$ESHU_MCP" = "1" ]; then mcp_mode="1"; fi
@@ -488,9 +528,31 @@ run_sanitized() {
           finish refused 1
         }
       elif [ "$mode" = "tail" ]; then
-        ESHU_OUT_TAIL=$(mktemp -p "$ESHU_RUN_DIR" eshu-out.XXXXXX) || {
+        # S1: a private 0700 directory per call. `part` is where the ring
+        # writes, `tail` appears only by rename. The EXIT trap removes the
+        # directory, so a capture that finishes after the bounded wait has
+        # nowhere left to write.
+        if ESHU_CAP_DIR=$(mktemp -d -p "$ESHU_RUN_DIR" eshu-out.XXXXXX) \
+           && : > "$ESHU_CAP_DIR/part"; then
+          ESHU_CAP_PART="$ESHU_CAP_DIR/part"
+          ESHU_OUT_TAIL="$ESHU_CAP_DIR/tail"
+          # S1: plain tee drops a failed output and carries on when SIGPIPE
+          # is ignored, so after a disconnect it would feed the capture for
+          # ever. `--output-error=exit` (coreutils >= 8.24) exits on EPIPE
+          # whatever the signal disposition; capture_job drains its side, so
+          # the capture pipe itself never fails. Probed only in tail mode;
+          # an older tee falls back to plain tee (the sshd case, SIGPIPE at
+          # its default, behaves the same).
+          TEE_CMD=(tee)
+          if tee --output-error=exit </dev/null >/dev/null 2>&1; then
+            TEE_CMD=(tee --output-error=exit)
+          fi
+        else
           logger -t eshu-gateway "CAPTURE DISABLED: mktemp failed in $ESHU_RUN_DIR"
-          mode="exit-only"; ESHU_OUT_TAIL=""; }
+          mode="exit-only"; ESHU_OUT_TAIL=""; ESHU_CAP_PART=""
+          if [ -n "$ESHU_CAP_DIR" ]; then rm -rf -- "$ESHU_CAP_DIR" 2>/dev/null || true; fi
+          ESHU_CAP_DIR=""
+        fi
       fi
     fi
   fi
@@ -505,11 +567,13 @@ run_sanitized() {
     }
   fi
 
-  if [ -n "$ESHU_OUT_TAIL" ] || [ -n "$ESHU_MCP_CAP" ] || [ -n "$ESHU_LIMIT_PROBE" ]; then
+  if [ -n "$ESHU_CAP_DIR" ] || [ -n "$ESHU_MCP_CAP" ] || [ -n "$ESHU_LIMIT_PROBE" ]; then
     # F5/F19: the first EXIT trap in this script. A later one must extend this,
     # not replace it, or the files leak. Best effort: a file already gone must
     # not change the call's exit status or write into the agent's stream.
-    trap 'rm -f "$ESHU_OUT_TAIL" "$ESHU_MCP_CAP" "$ESHU_LIMIT_PROBE" 2>/dev/null || true' EXIT
+    # S1: ESHU_CAP_DIR is only ever a mktemp -d result or empty.
+    trap 'rm -f "$ESHU_MCP_CAP" "$ESHU_LIMIT_PROBE" 2>/dev/null || true
+          if [ -n "$ESHU_CAP_DIR" ]; then rm -rf -- "$ESHU_CAP_DIR" 2>/dev/null || true; fi' EXIT
   fi
 
   start_ns=$(date +%s%N)
@@ -529,10 +593,15 @@ run_sanitized() {
     "${run_argv[@]}" 2>&1 | cap_raw | sanitize | cap_visible \
       | capture_tail "$ESHU_MCP_CAP" 65537 >/dev/null
   elif [ "$mode" = "tail" ] && [ -n "$ESHU_OUT_TAIL" ]; then
-    # E1: the capture rides in the stream, so an agent disconnect still ends
-    # the command at its next write, and there is no reader to wait for.
+    # S1: the agent reads tee's stdout; the capture reads a copy. Never
+    # `tee -p`: it would keep feeding the capture after the agent hangs up,
+    # and the command would never see the broken pipe. The `exec` moves the
+    # substitution's OWN stdout/stderr off the agent's channel: a redirect on
+    # the function call alone leaves the subshell holding them, and a stuck
+    # capture would then keep the SSH session open.
     "${run_argv[@]}" 2>&1 | cap_raw | sanitize | cap_visible \
-      | capture_tail "$ESHU_OUT_TAIL"
+      | "${TEE_CMD[@]}" >(exec >/dev/null 2>&1
+                          capture_job "$ESHU_CAP_PART" "$ESHU_OUT_TAIL")
   else
     "${run_argv[@]}" 2>&1 | cap_raw | sanitize | cap_visible
   fi
@@ -540,6 +609,14 @@ run_sanitized() {
   set -e
   end_ns=$(date +%s%N)
   duration_ms=$(( (end_ns - start_ns) / 1000000 ))
+
+  # S1: bounded wait for the tee copy. On timeout the result is posted with
+  # no output (as for CAPTURE FAILED); rc, the sentinel and the stream are
+  # already the command's. duration_ms is taken before the wait on purpose.
+  if [ -n "$ESHU_CAP_PART" ] && ! capture_wait "$ESHU_CAP_PART"; then
+    logger -t eshu-gateway "CAPTURE TIMEOUT: posting the result without output"
+    ESHU_OUT_TAIL=""
+  fi
 
   # F19: which limit fired. `time` needs rc 124 AND the elapsed time, because a
   # command may exit 124 by itself. `bytes` is the probe byte: one byte over
@@ -869,17 +946,32 @@ if [ -f /etc/eshu-require-session ] && [ "$(cat /etc/eshu-require-session 2>/dev
     # vouch for it in place of ESHU_SESSION_SIG (the dashboard minted both).
     logger -t eshu-gateway "SESSION VOUCHED: agent=$ESHU_VERIFIED_AGENT id=$ESHU_SESSION_ID (signed prefix)"
   elif [ -f /etc/eshu-session-key ]; then
-    SESSION_KEY=$(cat /etc/eshu-session-key 2>/dev/null || echo "")
-    SESSION_KEY_PREV=$(cat /etc/eshu-session-key.prev 2>/dev/null || echo "")
-    if ! python3 - "$ESHU_SESSION_ID" "${ESHU_SESSION_SIG:-}" "$SESSION_KEY" "$SESSION_KEY_PREV" <<'PY'
+    # AF3: a root process's argv is readable by every local user through
+    # /proc, so no key or signature goes there. Python reads the key files
+    # itself (argv carries only their paths); the id and signature travel in
+    # the child's environment, which /proc shows to root only.
+    if ! ESHU_CHECK_SID="$ESHU_SESSION_ID" ESHU_CHECK_SIG="${ESHU_SESSION_SIG:-}" \
+         python3 -I - /etc/eshu-session-key /etc/eshu-session-key.prev <<'PY'
 import hashlib
 import hmac
+import os
 import sys
 
-sid, sig, key, prev = sys.argv[1:5]
+
+def read_key(path):
+    # A missing or unreadable file is an empty key, as `cat || echo ""` was.
+    try:
+        with open(path, encoding="ascii", errors="replace") as handle:
+            return handle.read(4096).strip()
+    except OSError:
+        return ""
+
+
+sid = os.environ.get("ESHU_CHECK_SID", "")
+sig = os.environ.get("ESHU_CHECK_SIG", "")
 if not sid or not sig:
     sys.exit(1)
-for candidate in (key, prev):
+for candidate in (read_key(sys.argv[1]), read_key(sys.argv[2])):
     if not candidate:
         continue
     try:

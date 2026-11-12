@@ -54,6 +54,7 @@ dashboard LXC or any gateway until the rollout gate in § 8 passes.**
 | F24 | Warns on the approval card when a write uses a value the agent first saw in untrusted content (a web page, a log line) |
 | F25 | Named secrets per host: a command refers to a key by name, the gateway fills it in, and the agent never sees the value |
 | F26 | Try a new agent or model in shadow mode: its writes are recorded, never run, and compared with what you really approved |
+| F27 | Allowances: a standing, narrow pre-approval ("Rowana may switch these lights and plugs off, up to 30 times an hour"), visible, rate-limited and revocable; profiles bundle them so a new agent gets them in one click |
 | X2 | A Runbooks page: list, search and open confirmed runbooks, and retire old ones |
 | F20 | Reserved: the local-agent pass, parked on a local branch until the end |
 
@@ -10763,6 +10764,613 @@ The behaviour checked:
 
 ---
 
+## Chunk F27 — Allowances · slug `allowances` · dashboard + MCP · **design first + security reviewer sign-off**
+
+Added 2026-11-11 from live use: release 1.1's P2 (always_gate beats an
+agent's `ungated` override) also caught HA `call_service`. A household
+agent's light and switch calls, which ran under an exact `ungated` key plus
+a `domain` arg_policy, now always ask. Rather than narrowing P2 by hand, give
+the operator one sanctioned, visible way to pre-approve a narrow class of
+calls.
+
+### Goal
+
+An **allowance** is a standing, narrow pre-approval: *this agent* may call
+*this tool* with *only these argument values*, within limits, until it is
+revoked. Calls that match run at once and are recorded as "ran under
+allowance #N". Everything else gets an ordinary card.
+
+### Design (to confirm in the design note)
+
+* **The object.** `allowances` rows hold:
+  * `id`, `agent_id`, `integration`, `tool`, `name`;
+  * `conditions`, a JSON object keyed by declared parameter;
+  * `rate_per_hour`, `window` (local `HH:MM-HH:MM`, optional),
+    `expires_at` (optional);
+  * `created_by`, `created_at`, `revoked_at`, `version`.
+
+  Editing makes a new version and revokes the old one. Both are audited.
+* **Conditions are exact.** Per declared parameter (or one dotted path into a
+  `json` parameter, such as `data.entity_id`), there are two forms:
+  * `{"in": [values]}`: exact, type-strict equality;
+  * `{"range": [lo, hi]}`: numbers only, both ends required.
+
+  A string or a list argument (an `entity_id` list) matches only when
+  **every** element is in the set. There are no patterns, prefixes,
+  `contains` or regexes. A parameter the tool did not declare as
+  constrainable cannot carry a condition. An argument the condition does not
+  mention must be absent, or equal to its declared default; otherwise the
+  allowance does not match.
+* **Each tool declares what can be allowed.** A seed field,
+  `allowance: {"constrainable": [...], "required": [...], "never":
+  {param: [values]}}`, says:
+  * which parameters may be constrained;
+  * which **must** be (for `call_service`: `domain`, `service` and
+    `data.entity_id`);
+  * which values can never be allowed (for `call_service`'s `domain`:
+    `script`, `automation`, `shell_command`, `hassio`, `homeassistant`,
+    `python_script`, `rest_command`, `notify`).
+
+  A tool without the field cannot be allowed at all.
+* **Never allowable, whatever the seed says:**
+  * the F10 Supervisor actions and `ha_host_reboot`;
+  * admin config writes (`is_admin_config_write`);
+  * F21's internal tools;
+  * generic `write` / `ws_write`;
+  * any tool the security reviewer adds to that list.
+
+  P2 stays as it is for everything else: an `ungated` override still cannot
+  beat `always_gate`. An allowance is the one way to pre-approve an
+  always-gated tool, and only a seed-declared one.
+* **Where it is decided.** In `run_tool`, after the tool is resolved, the
+  `internal` refusal, `arg_policy` and the freeze check, and before the
+  gate:
+  * if the call would be gated and exactly one **live** allowance matches
+    (not revoked, not expired, inside the window, under the rate), it runs
+    with approval `allowance:<id>`;
+  * the use is counted atomically, under the same rule as plan claims;
+  * **freeze, Zero-Trust and the tripwire freeze always win**;
+  * no match, or a limit hit, means the normal card, never a denial.
+* **Visible.**
+  * An **Allowances** page lists each allowance: agent, tool, conditions in
+    plain words, limits, uses in the last 24 h, and Revoke.
+  * The agent's page lists its allowances too.
+  * History and the call log show "allowance #N (name)".
+  * F6/F18 count it as its own approval bucket.
+  * The agent's tool description gets one line: "calls matching your
+    allowance run without approval".
+* **Phase 2, not in v1:** an "only if" read precondition, using F22's typed
+  `expect` (for example "only if `sensor.x_power` < 5 W"). SSH-command
+  allowances are out of scope; gateway allowlists and the read lane cover
+  that ground.
+
+### Decisions agreed with the operator (2026-11-11)
+
+1. **Gate by what is touched, not by the verb**, for HA, NPM, Pi-hole,
+   Proxmox and Omada. One endpoint there covers both harmless and serious
+   actions, and an "additive" action (expose a host, add a DNS record,
+   unlock) can be the dangerous one. The verb-based `destructive` gate mode
+   stays where verbs match the risk: the Arr and media apps. The operator
+   moves Sonarr and Radarr to `destructive` by hand.
+2. **v1 conditions are per entity, with the allowed services per entity**
+   ("lamp: on and off", "heater: off only"). "Off" is not always the safe
+   direction. A whole-domain allowance is refused for `call_service`: an
+   entity list is required.
+3. **v1 scope:**
+   * entity and service lists;
+   * an optional rate cap, time window and expiry;
+   * the never-allowed domains and tools;
+   * the Allowances page, History labels and the stats bucket;
+   * profiles (below).
+4. **The wattage rule is phase 2** ("only if the plug's power sensor reads
+   below X W"). It needs a reliable plug-to-sensor mapping.
+5. **No interim narrow fix.** The household agent's cards are approved by
+   hand until F27 ships.
+6. **The destructive word list is widened** with `stop`, `shutdown`,
+   `reboot`, `disable`, `unlock` and `disarm`, as an extra layer and not as
+   the control. Proxmox `stop_vm` and the like then ask even in
+   `destructive` mode.
+7. **An agent's own confirm-first habit is politeness, not the control.**
+   The allow-list in Eshu is the control.
+
+### Profiles (agreed 2026-11-11)
+
+A **profile** is a named, reusable set of allowance templates, for example
+"Household: lights & plugs" or "Media: add and search". The operator builds
+profiles in the UI and applies them when creating or editing an agent,
+instead of defining the same allowances for every agent.
+
+* **The object.** A profile row holds `id`, `name`, `description`,
+  `version`, `created_by` and `created_at`, plus its templates. Each
+  template has the same shape as an allowance (`integration`, `tool`,
+  `conditions`, limits), minus the agent.
+* **Applying** a profile to an agent creates one allowance per template.
+  Each allowance records `profile_id` and `profile_version`. The agent's page
+  shows which allowances came from which profile.
+* **Editing a profile never changes agents silently.**
+  * Saving makes a new profile version.
+  * The page lists the agents on an older version, with the difference.
+  * The operator presses **Update agents**, for all of them or per agent.
+    This revokes their old allowances and creates the new ones, audited.
+  * A profile edit cannot widen what an agent may do without that second
+    step.
+* **The same rules as allowances.** A template is validated against the
+  tool's seed field (constrainable, required, `never`) and the
+  never-allowable list, when it is saved **and** when it is applied.
+  Applying re-validates, because a seed can tighten between the two.
+* **Built-in starters, optional.** There are no starter profiles with
+  entities: entities are specific to each home. A starter can be a
+  skeleton the operator fills in (for example "Household lights & plugs:
+  pick the entities"). Whether a template may name entities **by HA label**
+  (resolved at call time) instead of by list is a question for the design
+  note and the security reviewer. Labels are convenient, but they make
+  membership dynamic: the note must show that no agent can add a label (a
+  registry write is `ws_write`, which is never allowable).
+* **Removing** a profile from an agent revokes the allowances it created.
+  Deleting a profile is refused while agents use it.
+
+Tests add:
+* applying creates the allowances, with their version;
+* a profile edit leaves existing agents unchanged until Update agents;
+* Update agents revokes the old allowances and creates the new ones;
+* re-validation at apply time refuses a template that a tightened seed no
+  longer allows;
+* removing a profile revokes its allowances.
+
+### Tests to add (outline)
+
+* A matching call runs, with `allowance:<id>` recorded and one use counted.
+* Each of these gets a card, not a denial:
+  * a value outside a set;
+  * an extra argument;
+  * a list with one unlisted element;
+  * a number outside its range;
+  * a type mismatch (`"1"` against `1`);
+  * outside the window;
+  * over the rate;
+  * an expired or revoked allowance.
+* Creating an allowance is refused when:
+  * a parameter is not constrainable;
+  * a required constraint is missing;
+  * a `never` value is in a set;
+  * the tool is in the never-allowable list.
+* Freeze and Zero-Trust beat it.
+* An `ungated` override is still ignored for `always_gate` (P2 unchanged).
+* Concurrent calls at the rate limit count exactly.
+* Editing creates a new version, and the old one stops matching at once.
+
+### Compat impact
+
+Additive: a table, a seed field and an approval bucket. Existing `ungated`
+keys and `arg_policy` behave exactly as now, and the UI shows a hint where
+an allowance would replace one.
+
+### Acceptance criteria
+
+* The design is signed off by the security reviewer.
+* The tests pass.
+* On the live system, a household agent's allowance for listed lights and
+  switches runs `light.turn_off` and `switch.turn_off` on those entities
+  with no card. Any other entity, domain or service still asks.
+
+### Implementer notes
+
+_(implementer)_
+
+### Reviewer notes
+
+_(reviewer)_
+
+---
+
+## Chunk X3 — Integrations page and agent policy modal pass · slug `integrations-ui` · dashboard UI · after F27
+
+### Goal
+
+The operator asked for a pass over the **Integrations** page and the **agent policy modal** (the per-integration approval controls). Since F10's P2, an `ungated` override is silently ignored for `always_gate` tools. F27 adds allowances, and the destructive word list is widening. The screens should say plainly what will ask and what will not. This is the Rowana case: a toggle said "Ungated", and the call still asked.
+
+### Design (to be written after F27's design is signed off)
+
+* **Agent policy modal:**
+  * per integration, show what each choice really does for this agent: "asks for every write", "asks for destructive writes", or "runs";
+  * mark the tools where `ungated` has no effect (`always_gate`) and link to that tool's allowances;
+  * no control may offer something the engine ignores. Hide or disable `Ungated` for an always-gated tool, with the reason.
+* **Integrations page:**
+  * each integration shows its `gate_mode` in words, its count of `always_gate` tools, and the number of live allowances and profiles that use it;
+  * a "what asks" preview lists the tools and whether each one asks under the current mode, using the same function as `run_tool` (no second copy of the rule).
+* **Copy:** one short explanation, shared by the modal and the page, of gate mode, always-gate, an agent override and allowances, and of which one wins.
+* **Tests:** the preview matches `run_tool`'s decision for every seeded tool under both modes, and the modal never renders an `Ungated` that would be ignored.
+
+The feature reviewer walks both screens with the operator before the design is written (see `RELEASE_TESTS.md`, to be added).
+
+---
+
+## Chunk X4 — Agents page; Controls becomes Command policy · slug `agents-page` · dashboard UI · no semantics change
+
+### Goal
+
+Everything about one agent sits in one place. Today it is spread over
+Settings (tokens and the policy modal), Controls (the web-fetch allowlist)
+and, since `fix/agent-ssh-hosts`, the modal's SSH tab. Integrations keeps
+onboarding and tool configuration only.
+
+### Scope
+
+* **Agents** in the main navigation (next to Inventory and Runbooks).
+* **List:** one row per token. It shows the name, active/revoked, last used,
+  and a summary: tools (all or N), rate limit, SSH (off, N gateways or any, plus
+  the mode), and web fetch (on or off).
+* **Detail**, with sections that save through the **existing** endpoints:
+  * Token: create, revoke and delete, moved from Settings, which keeps a link.
+  * Tools, Rules (argument rules, approval and rate limit), SSH and Advanced:
+    the current modal's tabs.
+  * Web: the per-agent web-fetch allowlist, moved from Controls through the
+    same endpoint, so `_sync_web_fetch_access` still runs.
+  * Activity (read-only): the last 20 requests and integration calls, and
+    the agent's open sessions, linked to History.
+* **Controls → Command policy.** Rename the navigation item and the page
+  title. After the web-fetch move, the page holds only the fleet-wide SSH
+  command rules: the exact and regex allowlists, the blocklist and the tester.
+  "SSH allowlist" would undersell the blocklist. Leave a one-line pointer
+  where the web section was. The view id may stay `controls`; deep links
+  keep working.
+* **Save isolation:** saving one section never resets another. There is a
+  test both ways (Tools ↔ SSH, Tools ↔ Web).
+* **Layout:** no horizontal scroll at phone width or at 100% zoom on a
+  1440 px viewport.
+
+**Out of scope:** what any setting means, new permissions, gateway scripts.
+X3 (what each approval choice really does) builds on this page once F27 is
+signed off; X4 does not change approval wording.
+
+---
+
+## Chunk X5 — UI fixes from the Release 1.2 test round · slug `ui-test-round` · dashboard UI
+
+Found by the operator on 2026-11-12. These are small, independent fixes:
+
+1. **Session modal:** a long conclusion overflows the modal. The body must
+   scroll inside the card, and the footer (Confirm/Edit/Reject, the id)
+   stays in the card.
+2. **Plans on the Approvals view:** pending plans render **above** the
+   starfield. They belong in the JIT list area, with the other pending items.
+3. **Session modal "How approved" chips:** the zero-count chips (fleet lane,
+   session override, host override, window, fleet run) are unreadable: dark
+   text on dark fill. Use the muted text token for zero, and keep contrast at
+   4.5:1 or above for every chip in both themes.
+4. **Runbook modal:** too little contrast and separation. Give each step a
+   clear card or rule with spacing, show the host as a readable label rather
+   than faint grey, and make the outcome line visibly distinct from the
+   command.
+5. **Per-gateway freeze:** the operator could not find how to freeze one
+   gateway and froze the fleet. Either add a Freeze control on the gateway row
+   or details, if the engine supports a per-gateway freeze, or say in
+   the freeze dialog that it is fleet-wide and where the per-gateway
+   alternative is.
+6. **Gateways table at 100% zoom** (Surface Laptop 7): the Modes and Actions
+   columns are clipped. The table must fit, or scroll inside its own
+   container, with Changes/Remove always reachable. Collapse the read-lane
+   and capture selects into the details view if needed.
+
+**Implementer notes (X5).**
+
+1. The card is now header / `.session-modal-body` / `.session-modal-footer`.
+   The body (conclusion, plan block, commands) scrolls with `min-height: 0`;
+   the card is `overflow: hidden`; the id row is a pinned footer outside the
+   scroll area, and opening a session resets the body to the top. Confirm /
+   Edit / Reject travel with the conclusion inside the body and stay inside
+   the card.
+2. The plans widget moved out of the top of the feed and into
+   `#jit-pending-widget`, after `#jit-tickets`: the same area as the pending
+   requests, below the starfield and the queue, as a ruled section
+   (`#view-home .plans-in-jit`) rather than a second card over the sky. No
+   fetch or endpoint changed.
+3. The chip had the bucket's **solid fill** (`appr-<key>` is a legend
+   swatch), so the label sat at 2.29:1 on the worst bucket and zero chips
+   were worse with the old 45% opacity. The colour is a 6px dot now, the chip
+   is ink on the surface: `--text-dim` 6.35:1, zero uses `--text-muted`
+   5.58:1 on `--bg-surface` (6.06:1 on `--bg-base`). There is no light
+   theme in the stylesheet; the token check and a computed-contrast test pin
+   the floor.
+4. Each `.rb-step` is a card (`--bg-base`, hairline, amber left rule, 8/10
+   padding, 10px gap); the host is a mono chip in `--text-main` on
+   `--bg-stripe` (11.7:1) instead of `--text-faint` (3.1:1); the outcome/note
+   line gets its own dashed rule, `--text-dim` and italic, so it cannot be
+   read as part of the command.
+5. The engine has **no per-gateway freeze** (`/api/freeze` sets one fleet
+   flag that every poller mirrors to `/etc/eshu-freeze`), so the dialog now
+   says it is fleet-wide, that there is no per-gateway freeze, and that the
+   alternative is on the gateway's own row (Zero-Trust, or Remove). The
+   Gateways page carries the same one-line pointer above the table.
+6. Nine columns were rendered under `colspan="8"` fallbacks; both are 9 now.
+   The right-edge mask is removed for this table and the Actions column is
+   `position: sticky; right: 0`, so Changes/Remove stay reachable while the
+   table scrolls inside `.table-wrap`. The read-lane and capture selects are
+   a `<details>` disclosure whose summary reads `RL off · tail`; the selects
+   are unchanged inside it.
+
+Verified at 1440×900 in headless Chromium against the real stylesheet:
+`document.scrollWidth == 1440`, `.table-wrap` 1136 client / 1338 scroll, the
+Actions cell pinned at 1251–1408. Tests: `tests/test_x5_ui_fixes.py` (6
+tests: contrast, modal order/overflow, plans placement, runbook card rules,
+freeze copy, table columns/sticky/disclosure).
+
+`bash scripts/verify.sh`: `2845 passed, 26 skipped, 8 warnings in 581.93s
+(0:09:41)`.
+
+---
+
+## Gateway hardening (AF3, tee capture) · branch `fix/gateway-hardening` · gateway bash · **security reviewer sign-off**
+
+Two items left over from earlier sign-offs: AF3 (F19 sign-off, `67bec51`) and
+S1 (buffering-fix sign-off, 2026-11-10). Gateway bash only; no dashboard
+change, so the compat rule (§ 2.3) is not touched.
+
+### Design note (written before the code)
+
+**Part A — AF3.** The session-signature check becomes
+`ESHU_CHECK_SID=… ESHU_CHECK_SIG=… python3 -I - /etc/eshu-session-key /etc/eshu-session-key.prev`.
+Python opens both key files itself (`.strip()`, a missing or unreadable file
+is an empty key, a non-hex key is skipped exactly as before). argv carries only
+the two **paths**. The session id and signature go in the child's environment,
+which `/proc/<pid>/environ` shows only to root (the signature is a session
+credential, and the line is being touched anyway). The comparison
+(`hmac.compare_digest`, current key then `.prev`) is unchanged.
+
+**Part B — S1, the tee capture.** Only `tail` mode changes. Today:
+
+    cmd 2>&1 | cap_raw | sanitize | cap_visible | capture_tail "$ESHU_OUT_TAIL"
+
+After:
+
+    cmd 2>&1 | cap_raw | sanitize | cap_visible \
+      | "${TEE_CMD[@]}" >(exec >/dev/null 2>&1
+                          capture_job "$ESHU_CAP_PART" "$ESHU_OUT_TAIL")
+
+* `tee`'s stdout is the agent. awk is no longer between the command and the
+  agent, so a disconnect reaches `tee` on its next write (mawk's 4 KiB stdin
+  block no longer matters). **Never `tee -p`**: `-p` would keep feeding the
+  capture after the agent hangs up, and the command would never see the
+  broken pipe.
+* `TEE_CMD` is `tee --output-error=exit` when the host's tee accepts it
+  (probed once, in `tail` mode only), else plain `tee`. *(Changed during
+  implementation: the first draft said plain `tee`.)* The SIGPIPE-ignored
+  test showed that plain GNU tee, with SIGPIPE ignored, drops the failed
+  stdout and keeps feeding the capture, so `yes` never stopped.
+  `--output-error=exit` exits on EPIPE whatever the signal disposition. With
+  SIGPIPE at its default, which is what sshd gives its children, both forms
+  behave the same.
+* The `exec >/dev/null 2>&1` inside the substitution is required. *(Changed
+  during implementation: the first draft put the redirect on the function
+  call.)* A redirect on the call covers only the function's commands. The
+  substitution's own bash process kept the agent's stdout and stderr open,
+  and the stuck-capture test then hung for 60 s: the SSH channel never saw
+  EOF.
+* **The capture can never cut the agent's stream (D1).** `capture_job` runs
+  `capture_tail` (the same ring, same 16 385-byte cap, stdout to `/dev/null`)
+  and then `cat >/dev/null`. If awk ever died early, `cat` drains the rest, so
+  `tee` never gets EPIPE from the capture side.
+* **Temp name, then rename.** Each call gets a private directory
+  (`mktemp -d -p /run/eshu eshu-out.XXXXXX`, 0700). The main shell creates
+  `part` in it before the pipeline. `capture_job` writes the ring into `part`
+  and, only if awk succeeded, renames it with `mv -fT part tail`. Whatever
+  happens, its last step is `rm -rf part`. The result post reads only `tail`,
+  so it sees a complete capture or none.
+* **The bounded wait.** After the pipeline, the main shell waits while `part`
+  still exists: `sleep 0.05`, at most `CAPTURE_WAIT_TICKS=40` times, so
+  **2 s**. Normally `part` is gone in one or two ticks (awk's END plus one
+  `mv`). It is a file poll, not a `wait`: the process substitution is a child
+  of the `tee` pipeline element, not of the script, so the script has no PID
+  to wait for, and an unbounded `wait` is ruled out anyway.
+* **On timeout:** the script writes `CAPTURE TIMEOUT` to syslog and clears
+  `ESHU_OUT_TAIL`, so the result is posted with exit code and duration but no
+  output (the same as `CAPTURE FAILED`). The call returns. The exit code,
+  the sentinel, the F19 limit marker and the agent's stream are not affected.
+  The EXIT trap removes the whole private directory (`rm -rf`). A capture
+  that finishes later cannot create files there, because the directory is gone.
+  The stuck process is not killed: the script has no PID for it (see above).
+  It holds no file descriptor of the agent's channel (its stdout and stderr
+  are `/dev/null`), so it does not keep the SSH session open, and its memory
+  is bounded by the ring.
+* **Unchanged:** the 16 385-byte ring and its tests; F19's
+  `cap_raw | sanitize | cap_visible` and the cut probe; `rc=${PIPESTATUS[0]}`
+  (the command's status, never a filter's); the `[ESHU exit=N]` sentinel,
+  printed by the main shell after the wait, so it is never in the capture;
+  `exit-only` and `off` (no capture process at all).
+* **MCP mode is not changed.** Its stream goes to `/dev/null`, not to the
+  agent, so there is no live stream to take awk out of. The 65 537-byte ring
+  stays the last pipeline element. It is written by END in a process the shell
+  already waits for, so a partial envelope capture cannot be read.
+* `capture_tail` now returns 1 after `CAPTURE FAILED` (it returned the
+  logger's 0), so that `capture_job` can tell a failed write from a good one.
+  Every caller ignores the status (`set +e`, `PIPESTATUS[0]`).
+
+### Implementer notes
+
+**Commits:** `3d21d48` design note · `d45c64d` AF3 · `3f73027` S1 (the tee
+capture) · `de9773a` design-note corrections. All three installers carry the
+same gateway script (`static/dev/` copied from the generated one, as it was
+byte-identical at the base `7d7f3b8`).
+
+**Tests** (new file `tests/test_gateway_hardening.py`, plus two changed F5 tests):
+
+* `test_af3_session_check_keeps_keys_out_of_argv[valid|invalid]`: a
+  `python3` stub on the sandbox PATH records every interpreter argv. The
+  session check's argv is exactly `-I - <key path> <prev path>`. No call
+  carries the key, the prev key or the signature. A valid signature runs the
+  command and an invalid one is refused.
+* `test_af3_previous_key_and_trailing_newlines_still_verify`: keys written
+  with a newline verify, both current and `.prev` (the `$(cat …)` strip is
+  kept).
+* `test_af3_missing_prev_key_and_garbage_key_fail_closed`: a non-hex key and
+  no `.prev` refuse.
+* `test_af3_every_python3_in_the_gateway_is_isolated`: every `python3` call
+  in the source is `python3 -I`.
+* `test_s1_stuck_capture_does_not_hold_the_call[empty|PARTIAL]`: an `awk`
+  stub reads its input, optionally writes a partial capture, then sleeps
+  600 s. The call returns within the bound plus slack, with the command's
+  stdout, exit code and sentinel. `CAPTURE TIMEOUT` is logged, the result is
+  posted with no output (the half-written part is never posted), and the run
+  directory is empty afterwards. This test hung for 60 s before the
+  `exec >/dev/null 2>&1` fix.
+* `test_s1_tail_capture_is_complete_and_inside_the_bound[mawk|gawk]`: 20 000
+  lines. No timeout, the posted tail is the last 16 KiB of what the agent
+  saw, and the directory is removed.
+* `test_s1_tail_mode_has_no_awk_in_the_stream`: source guard. The branch ends
+  in `"${TEE_CMD[@]}" >(exec >/dev/null 2>&1 … capture_job …)`, with no
+  `capture_tail` in the stream and no `tee -p`.
+* `test_s1_tee_capture_ends_when_the_agent_disconnects[mawk|gawk × default|ignored]`:
+  function level, `yes | tee-shape | head -n 1`. The writer is stopped in
+  every case, and the capture still completes (≤ 16 385 bytes). With plain
+  tee the `ignored` cases hung, which is why `--output-error=exit` is used.
+* `test_s1_tee_capture_is_the_visible_stream[mawk|gawk]`: the agent gets every
+  byte, and the capture is exactly the last 16 385 of them.
+* `test_s1_capture_that_dies_never_cuts_the_stream`: an awk that exits at once
+  does not cut 1 MB of output (the `cat` drain). Nothing is renamed and
+  `CAPTURE FAILED` is logged.
+* `test_s1_capture_rename_refuses_a_directory[mawk|gawk]`: `mv -T` does not
+  move the capture into a `tail` directory. The failure is logged and `part`
+  is removed.
+* `test_f5_gateway_slow_writer_dies_with_the_agent`: the mawk + `tail` skip
+  is removed. This is the "slow writer under mawk stops promptly" test. It
+  now also bounds the time to the first line (< 10 s). Without that bound
+  the **old** pipeline passed after 62 s, because the disconnect clock
+  started only once mawk released the first line. Checked: it fails on the
+  base script (62.2 s) and passes here. SIGPIPE-ignored keeps its skip (GNU
+  `sed`, not awk).
+* `test_f5_gateway_unwritable_capture_keeps_stdout_and_exit`: replaces
+  `eshu-out.*/part`, the file awk now writes, so the same END-write failure
+  is injected.
+
+**Unsure / for the reviewers:**
+
+* **`tee --output-error=exit`** is a GNU coreutils ≥ 8.24 option. It is
+  probed once per `tail` call, which costs one extra `tee` process only in
+  `tail` mode. A host without it falls back to plain `tee`, which differs
+  only with SIGPIPE ignored. The fallback is silent. I did not add a syslog
+  line, to avoid one per call (compare N2).
+* **`mv -fT`** is also GNU. Without `-T` a `tail` directory would swallow the
+  capture. BusyBox `mv` may lack it, and then `tail` capture always logs
+  `CAPTURE FAILED` and posts no output. That is safe but useless, and § 2.7
+  already lists coreutils as a dependency.
+* **The stuck process is not killed** on timeout. The script has no PID for
+  it, because the process substitution belongs to the `tee` pipeline element.
+  It holds no fd of the agent's channel, its memory is bounded by the ring,
+  and its directory is gone. There is one narrow race: if the EXIT trap's
+  `rm -rf` runs while a late awk recreates `part`, one ≤ 16 KiB directory can
+  be left in `/run/eshu`. This happens only after a timeout.
+* The session **signature** also moved off argv, not only the keys. It is
+  the same exposure and the same line, and it costs nothing.
+* **MCP mode is unchanged** (no live stream; see the design note).
+* **Out of scope, not fixed:** `GatewaySandbox.run`'s hang report raises
+  `TypeError` (bytes + str) when `TimeoutExpired.stdout` is bytes, so a hang
+  shows as a TypeError rather than the report. I saw this while debugging.
+* **`RELEASE_1.md` step 6** still describes the mawk/`tail` residual. It is
+  correct for gateways older than this branch. Whether to reword it depends
+  on which gateway version the release ships, so I left it for the reviewer.
+
+`bash scripts/verify.sh`: `2837 passed, 4 skipped, 7 warnings in 681.30s (0:11:21)` (mawk and gawk both installed here, so the awk matrix ran in full).
+
+### Reviewer notes
+
+_(reviewer)_
+
+### Reviewer notes (main feature reviewer, 2026-11-12, code round 1)
+
+**Approved from the feature side; to the security reviewer (gateway bash, § 2.6a).** Rechecked locally: the three installers carry the gateway script byte for byte, every `python3` in the gateway runs with `-I`, and `tests/test_gateway_hardening.py` plus `tests/test_f5_exec_results.py` pass (65 passed, 4 skipped; mawk and gawk both present).
+
+What I checked:
+* AF3: argv holds only the two key paths; the id and signature go through the child's environment (readable by the same uid and root only). A missing or unreadable key file is an empty key, so it fails closed exactly as `cat || echo ""` did. Taking the signature off argv as well is right.
+* S1: awk is out of the agent's stream, `part` exists before `tee` starts (so the poll cannot see "done" too early), only a finished ring is renamed to `tail`, `duration_ms` is taken before the wait, and a timeout posts no output instead of a partial one. The `exec >/dev/null 2>&1` inside the substitution is the real fix for the 60 s hold; good that the test caught it.
+
+For the security reviewer to rule on (none blocks from my side):
+* AX1: **a stuck capture is not killed on timeout.** It holds no part of the agent's channel and its memory is bounded, but each stuck call leaves a root process behind. A cheap fix: `capture_job` writes its `$BASHPID` into the private directory and the timeout path kills that process group. Your call whether this is a must or a recorded residual.
+* AX2: **hosts without `tee --output-error`** (coreutils < 8.24, BusyBox) fall back to plain `tee` silently. With SIGPIPE at its default (the sshd case) that behaves the same; with SIGPIPE ignored, the command runs to completion after a disconnect, as it did before the buffering fix. `mv -T` is GNU too, so BusyBox gets CAPTURE FAILED and no output, which is safe.
+* AX3 (should, feature side): the `GatewaySandbox.run` TypeError on timeout hides the diagnostic report. Fix it in this branch if it is a one-liner, otherwise in the next test-harness change.
+
+At merge (reviewer): `RELEASE_1.md` step 6 gets "the mawk delay applies only to gateways installed before this fix".
+
+### Reviewer notes (security reviewer, 2026-11-12, code round 1 at `896e59a`)
+
+**Approved for merge. No must items.** I read the gateway hunk and checked
+that the three installers carry the same changed lines as `eshu-gateway.sh`.
+
+What I checked:
+* **AF3.**
+  * argv holds `-I -` and the two key paths only.
+  * The id and signature are prefix assignments on the `python3` call. They
+    are not exported to the shell or to the command that runs later.
+  * `-I` and the fixed `PATH` (line 5) leave no interpreter search path an
+    agent can steer.
+  * A missing or unreadable key is empty and skipped, a non-hex key is
+    skipped, and a non-ASCII signature makes `compare_digest` raise, which
+    exits non-zero. All three fail closed.
+  * `.strip()` is a little wider than `$(cat)` (it also strips leading
+    blanks). That is harmless for a hex key.
+* **S1.**
+  * The private directory comes from `mktemp -d` (0700, root), so the
+    `mv -fT part tail` and the `rm -rf` act inside a directory no other
+    user can write. There is no symlink race.
+  * `ESHU_CAP_DIR` is reset at the top of `run_sanitized` and set only from
+    `mktemp -d`, so the trap's `rm -rf` cannot be pointed elsewhere.
+  * `part` exists before the pipeline, and the post reads only `tail`, so a
+    partial ring is never posted.
+  * Only `tee` holds the substitution's write end, so the capture sees EOF
+    when `tee` exits.
+  * The `exec >/dev/null 2>&1` keeps the capture off the SSH channel.
+
+**AX1: recorded residual, not a must. Do not use the suggested
+process-group kill.**
+* Only an awk that never ends can leave the capture behind. Agent output
+  cannot cause that: the ring is linear, and `cap_visible` bounds the input
+  first. So the leftover root process needs a broken awk, not a hostile
+  agent.
+* The gateway runs without job control. The capture, the command and the
+  gateway script itself all share one process group, so
+  `kill -- -<pgid>` would kill the gateway along with the capture.
+* If you want the kill anyway (a should, not needed for this merge):
+  * `capture_job` writes `$BASHPID` to `pid` in the private directory.
+  * On timeout the main shell kills that PID and its children
+    (`pkill -P`, then `kill`), never a group.
+  * It does this before the EXIT trap removes the directory.
+  * The PID is safe to trust because only root can write the directory, and
+    the process is still alive when it is read.
+* Record the residual in § 2.7 in one line: "after a capture timeout, a
+  stuck capture process may remain; it holds no agent fd and at most 16 KiB".
+
+**AX2: recorded residual, not a must.**
+* Plain `tee` with SIGPIPE ignored lets an approved command run on after a
+  disconnect. It still ends at its F19 time limit and stays inside its
+  approval, so nothing new is granted. It is the same behaviour as before
+  the fix.
+* sshd starts the gateway with SIGPIPE at its default, so the fallback
+  matters only for an unusual parent.
+* Keeping the fallback silent is right (compare N2).
+* Add one line to § 2.7's dependency list: "coreutils ≥ 8.24
+  (`tee --output-error`, `mv -T`) for the tail capture; older or BusyBox
+  hosts get no tail capture or no stop-on-disconnect with SIGPIPE ignored".
+
+**AX3:** feature side; fixed in `5c1e290`, no security view.
+
+**BA1 (should, later chunk, dashboard side): show a missing capture as
+missing.**
+* On `CAPTURE TIMEOUT` or `CAPTURE FAILED` the gateway posts
+  `"encoded_output":""`. The dashboard then shows a command that printed
+  nothing, not one whose output was lost.
+* An agent cannot force either event today, so this is not exploitable now.
+  But an empty result row should not be what the operator reads as
+  "it printed nothing".
+* Fix: a literal field, `"capture":"missing"` (one fixed value, like
+  `limit`), that the dashboard renders as "output not captured".
+* Not in this branch, because the branch makes no dashboard change. Put it
+  in the next F5 or F19 change.
+
+At merge: the feature reviewer's `RELEASE_1.md` step 6 line, as noted.
+
+---
+
+---
+
 ## Hotfix — installer re-registration (RR1) · branch `fix/installer-reregister` · installer · **security reviewer sign-off**
 
 The fix is described in commit `2da685e`: the existing token is loaded
@@ -10882,6 +11490,38 @@ go-ahead.
 * **After the deploy:** rotate the two exposed dev tokens by re-enrolling
   those gateways with the fixed installer, as planned. BE3, BE4 and token
   rotation go into the plan as their own chunks at merge.
+
+## Follow-ups from the RR1 hotfix (security reviewer rulings, 2026-11-12)
+
+Three small chunks. Each one touches gateway-side scripts, so each needs the **security reviewer's sign-off** (§ 2.6a).
+
+### BE3 — secret headers off argv · branch `fix/secret-headers`
+
+* Every `curl` that sends a token (`X-Gateway-Token`, `X-Enrollment-Token`) takes its headers from a root-only file or a here-string (`-H @file` or `-H @-`), never from argv. This covers the installer, the gateway script and the poller.
+* Test: a stub `curl` records argv for every call path and asserts that no token appears in it.
+* Why: argv is readable by any local user through `/proc` while the call runs (RR-a, recorded as a residual).
+
+### BE4 — refresh the dashboard key on update · branch `fix/update-dashboard-key`
+
+An update today never writes `authorized_keys`, so F12's dashboard key reaches a gateway only on reinstall. The security reviewer's conditions:
+* add or replace **only** the `eshu-dashboard` line; every other line stays byte-identical;
+* copy `from=` from the existing Eshu lines, and change nothing if they cannot be read;
+* the key must be a single `ssh-ed25519` line, and an empty key leaves the existing line alone;
+* run only after a 200 registration (BE1's `REGISTER_OK`);
+* make the temp file with `mktemp`, and refuse a symlinked `.ssh` or `authorized_keys`. The install path's fixed `.tmp` name has the same symlink problem today, so fix it in the same change.
+
+### GT1 — gateway token rotation · branch `feat/gateway-token-rotation` · design first
+
+The dashboard has no rotate action today; the only way to rotate a token is to remove and re-enrol the gateway. Design:
+* the dashboard mints the new token and delivers it over the gateway's authenticated update channel;
+* the old token stays valid for a short grace period;
+* the rotation writes an audit entry;
+* the token is never shown in the UI.
+
+The gateway side needs the security reviewer's sign-off.
+
+---
+
 
 ## Fix — agent SSH hosts and mode (F12 follow-up) · branch `fix/agent-ssh-hosts` · dashboard · security read
 
@@ -11098,6 +11738,10 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 17 | F21 | snapshot-approve | dashboard + Proxmox | Design first | `feat/f21-snapshot-approve` | F7, F14, F2 | + security sign-off (new write path, destructive rollback) |
 | 18 | F23 | change-journal | dashboard | **Merged** 2026-11-11 (AJ1/AJ2) | `feat/f23-change-journal` | F1, F5, F7, F14 | |
 | 18a | X2 | runbooks-page | dashboard UI | **Merged** 2026-11-11 | `feat/x2-runbooks-page` | F13 | |
+| 18b | F27 | allowances | dashboard + MCP | Design first (from live use: P2 caught HA call_service) | `feat/f27-allowances` | F10 (P2), Chunk H, F18 | + security sign-off; next design after F21/F22 code |
+| 18c | X3 | integrations-ui | dashboard UI | Requested 2026-11-12; design after F27 is signed off | `feat/x3-integrations-ui` | F27, F10 (P2) | operator walk-through first |
+| 18d | X4 | agents-page | dashboard UI | Requested 2026-11-12; ready for code | `feat/x4-agents-page` | `fix/agent-ssh-hosts` | rename Controls → Command policy |
+| 18e | X5 | ui-test-round | dashboard UI | **Implemented** 2026-11-12: six test-round fixes; no endpoint, save path or policy changed | `fix/x5-ui-test-round` | — | six small fixes |
 | 19 | F22 | change-checks | dashboard + MCP | After F19 merges | `feat/f22-change-checks` | F3, F5, F12, F19 | + security sign-off (the unattended check; AG1's origin rule does not cover it) |
 | 20 | F16 | recipes | dashboard + MCP | Design complete (security Round 4; feature reviewer Round 5 with AA1/AA2); code next after F22 | `feat/f16-recipes` | F3, F12, F13, F19 | main line; steps claim by request id; code comes back to security; auto_run comes back to security |
 | 21 | F24 | content-tripwire | dashboard | Design first | `feat/f24-content-tripwire` | F12, F14 | + security sign-off (retention) |
@@ -11106,7 +11750,12 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 24 | F20 | local-agent-pass | docs | Parked | `docs/local-agent-pass` (local, unpushed) | — | experiment; last |
 | 25 | F17 | local-agent | dashboard + docs | After F20; pre-implementation notes A1–A6 | `feat/f17-local-agent` | F12–F16, F26 | experiment; last |
 | — | CI fix | ci-environment | gateway + tests | Merged (`f2746ef`); CI pinned to ubuntu-24.04 (`6d58006`) | `fix/ci-environment` | F5 | |
-| — | Buffering | stream-unbuffered | gateway | Merged (`d8d70c2`); S1 tee fix later | `fix/stream-unbuffered` | F5 | |
+| — | Buffering | stream-unbuffered | gateway | Merged (`d8d70c2`); S1 tee fix done in Gateway hardening | `fix/stream-unbuffered` | F5 | |
+| — | Gateway hardening | gateway-hardening | gateway | **Merged** 2026-11-12 (AF3 + S1 tee capture; security `c15664e`; AX1/AX2 residuals; BA1 for the next F5/F19 change) | `fix/gateway-hardening` | F19, Buffering | |
+| — | Installer hotfix | installer-reregister | installer | **Merged and deployed** 2026-11-12 (`d6a38bb`; security `d6a38bb`): re-register presents the existing token; keys only after a 200 | `fix/installer-reregister` | F12 | |
+| — | BE3 | secret-headers | gateway + installer + poller | Planned (security ruling RR-a) | `fix/secret-headers` | RR1 | + security sign-off |
+| — | BE4 | update-dashboard-key | installer | Planned (security ruling RR-c) | `fix/update-dashboard-key` | RR1 | + security sign-off |
+| — | GT1 | gateway-token-rotation | dashboard + poller | Design first | `feat/gateway-token-rotation` | RR1 | + security sign-off |
 
 Chunks are done **in the order column**; each new chunk branches from the
 updated `feature-roadmap` after the previous one is merged. A design-first

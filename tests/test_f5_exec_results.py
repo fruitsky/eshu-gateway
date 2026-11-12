@@ -200,11 +200,15 @@ class TestGateway:
     def test_f5_gateway_unwritable_capture_keeps_stdout_and_exit(self, gw):
         """C1: a capture that cannot be written is not the command's failure.
 
-        The capture file is created by `mktemp` before the command runs, then
-        replaced by a directory, so awk's END write fails (this also fails as
-        root, unlike a `chmod`). Every byte must still reach the agent, the
-        exit code and the sentinel must be the command's, and the result post
-        must carry no output rather than a broken one.
+        The capture file is created before the command runs, then replaced by
+        a directory, so awk's END write fails (this also fails as root, unlike
+        a `chmod`). Every byte must still reach the agent, the exit code and
+        the sentinel must be the command's, and the result post must carry no
+        output rather than a broken one.
+
+        S1: the ring now writes `part` inside a private `eshu-out.*`
+        directory (renamed to `tail` when complete), so the file replaced here
+        is that `part`; the failure injected is the same END write.
         """
         gw.exact('./bigexit')
         gw.capture('tail')
@@ -212,7 +216,7 @@ class TestGateway:
         gw.command_script(
             'bigexit',
             "python3 -c \"print('A' * 20000)\"\n"
-            "for f in %s/eshu-out.*; do rm -f \"$f\"; mkdir \"$f\"; done\n"
+            "for f in %s/eshu-out.*/part; do rm -f \"$f\"; mkdir \"$f\"; done\n"
             "exit 7\n" % cap)
         proc = gw.run('./bigexit')
         assert proc.returncode == 7
@@ -294,13 +298,11 @@ class TestStreamBuffering:
     @pytest.mark.parametrize('sigpipe', ['default', 'ignored'])
     def test_f5_gateway_slow_writer_dies_with_the_agent(
             self, tmp_path, awk_name, mode, sigpipe):
-        if awk_name == 'mawk' and mode == 'tail':
-            # N1: awk is not in the pipeline in exit-only mode (B1's fix is
-            # sed-side), so that case runs under mawk too. In tail mode mawk
-            # holds stdin in a 4 KiB buffer (B2 note); `-W interactive` would
-            # stream but corrupts long records, so the ring waits for 4 KiB.
-            pytest.skip('mawk reads stdin in 4 KiB blocks, so the tail ring '
-                        'cannot see the first line early (10.7 s measured)')
+        # S1: mawk + tail used to skip here (mawk reads stdin in 4 KiB blocks,
+        # so the in-stream ring held a slow writer for 10.7 s). The ring now
+        # reads a `tee` copy, so the agent's stream has no awk in it and the
+        # mawk/tail case runs: it is the "slow writer under mawk stops
+        # promptly" test.
         if sigpipe == 'ignored':
             pytest.skip('with SIGPIPE ignored GNU sed keeps reading after '
                         'EPIPE, so no buffering change can bound the command; '
@@ -333,6 +335,7 @@ class TestStreamBuffering:
         # stderr to DEVNULL: with SIGPIPE ignored, sed's per-line write errors
         # would fill an undrained pipe and block the very hang this test looks
         # for.
+        launched = time.monotonic()
         proc = subprocess.Popen(['bash', '-c', wrapper, '_', str(gw.script)],
                                 cwd=str(gw.root), env=env,
                                 stdout=subprocess.PIPE,
@@ -342,6 +345,13 @@ class TestStreamBuffering:
             first = proc.stdout.readline()
             assert first.strip() == 'line 0', first
             started = time.monotonic()
+            # S1: the first line must reach the agent at once. With the ring
+            # in the stream, mawk held it until 4 KiB had built up (about
+            # 60 s for this writer), and the disconnect check below only
+            # starts after it, so without this bound the old pipeline passed.
+            assert started - launched < 10, (
+                '%s/%s: the first line took %.1f s to reach the agent' % (
+                    awk_name, mode, started - launched))
             proc.stdout.close()
             proc.wait(timeout=30)
         finally:
