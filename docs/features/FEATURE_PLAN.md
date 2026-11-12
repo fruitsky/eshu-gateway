@@ -11093,6 +11093,17 @@ claims pass the owner explicitly.
 `bash scripts/verify.sh`: `2827 passed, 22 skipped, 7 warnings in 599.59s
 (0:09:59)`.
 
+### Reviewer notes (main feature reviewer, 2026-11-12, code round 2)
+
+**AY1–AY3: approved from the feature side.**
+* AY1: the installers are regenerated, and a test now holds all three to the gateway script byte for byte.
+* AY2: `ESHU_CHECK_TOKEN` triggers the full signed-prefix rule. Only `ESHU_CHECK_TOKEN_VERIFIED`, set in the `SIG_STATE=ok` branch, is posted, and both variables are cleared at the top of the script, so an inherited environment cannot set them.
+* AY3: the owner join matches `claim_plan_item`'s rule.
+
+**Next:**
+1. Rebase on `feature-roadmap` once `fix/gateway-hardening` is merged there. Keep both sides' gateway changes, regenerate the installers, run verify.sh, and push.
+2. Then the security reviewer reads the gateway hunk and the chunk (§ 2.6a).
+
 ---
 
 ## Chunk F23 — Change journal tied to alerts · slug `change-journal` · dashboard only
