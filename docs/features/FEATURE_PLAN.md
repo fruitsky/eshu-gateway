@@ -11590,6 +11590,49 @@ after `REGISTER_OK=1` only:
 `bash scripts/verify.sh`: `2842 passed, 26 skipped, 7 warnings in 581.63s
 (0:09:41)`.
 
+**Reviewer notes (security reviewer, 2026-11-12, at `b5008d5`).** Approved
+once BH1 is in. The rest meets the conditions:
+* only lines ending ` eshu-dashboard` are replaced;
+* the gateway line stays byte-identical;
+* only after `REGISTER_OK=1`;
+* a single `ssh-ed25519` line, with no options possible (options come only
+  before the key type, and the comment cannot hold a control character or a
+  newline);
+* an empty key changes nothing;
+* `mktemp` in the target's directory, and symlinks are refused;
+* `eshu_safe_replace` for the root-owned cleanup paths.
+
+* **BH1 (must): no `from=` source means no change, not an unrestricted line.**
+  * The condition was "copy `from=` from the existing Eshu lines, and change
+    nothing if they cannot be read". The implementation writes a line with
+    no `from=` in two cases:
+    * the existing lines carry a `from=` that `ak_from` cannot parse (it
+      reads only a line that *starts* with `from="`, so a hand-edited line
+      with `from=` after `command=` is missed);
+    * there is no Eshu line at all, such as an `mcp_only` gateway installed
+      before F12. Its `ALLOWED_SSH_FROM` is not recorded anywhere the update
+      can see.
+  * In both cases the dashboard key would work from anywhere, while the
+    operator may have restricted the gateway.
+  * Fix:
+    * if any line containing `/usr/local/bin/eshu-gateway.sh` holds `from=`
+      and `ak_from` returned nothing, change nothing and warn;
+    * if no Eshu line exists, change nothing and print "reinstall to add
+      the dashboard key".
+  * Tests: a `from=` after `command=` refuses; an empty file (or one with
+    only foreign lines) refuses; the existing cases still pass.
+* **BH2 (should, later): do the user-side write as the user.**
+  * `ak_replace` checks for a symlinked `.ssh`, then calls `mktemp`, `mv`
+    and `chmod 700` on it as root. The gateway user owns `/home/$USER`, so
+    between the check and the write it can swap `.ssh` for a symlink.
+    `mv` and `chmod` then act on the target as root: for example, replacing
+    root's `authorized_keys` or changing a system directory's mode.
+  * This needs code execution as that user, which its `restrict`ed forced
+    command does not give, so it is not a must.
+  * The clean fix is to run the `mktemp`/`cat`/`mv` through
+    `runuser -u "$USER" --`, so a symlink can only reach what the user could
+    already write. Do it in the next installer change.
+
 ### GT1 — gateway token rotation · branch `feat/gateway-token-rotation` · design first
 
 The dashboard has no rotate action today; the only way to rotate a token is to remove and re-enrol the gateway. Design:
