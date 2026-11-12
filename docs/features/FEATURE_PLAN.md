@@ -11633,6 +11633,22 @@ once BH1 is in. The rest meets the conditions:
     `runuser -u "$USER" --`, so a symlink can only reach what the user could
     already write. Do it in the next installer change.
 
+**BH1 implemented (2026-11-12).** The update branch now reads the first Eshu
+line (`grep -m1 '/usr/local/bin/eshu-gateway.sh'`). If that line holds
+`from=` and `ak_from` returned nothing, it refuses and warns; if there is no
+Eshu line, it refuses with "reinstall to add the dashboard key"; a line that
+genuinely has no `from=` still gets an unrestricted dashboard line, as
+before. The symlink refusal now runs before the content is read (so a
+symlinked `authorized_keys` keeps its own REFUSED message). `ak_from` ends
+`|| true` so a SIGPIPE from `head` cannot abort the installer under
+`set -o pipefail`. Tests: `from=` after `command=` refused and byte-identical;
+empty file and foreign-lines-only refused; a no-`from=` gateway line still
+written unrestricted; the BE4 cases unchanged. BH2 is left for the next
+installer change, as the note says.
+
+`bash scripts/verify.sh`: `2855 passed, 26 skipped, 7 warnings in 578.58s
+(0:09:38)`. All four installers regenerated.
+
 ### GT1 — gateway token rotation · branch `feat/gateway-token-rotation` · design first
 
 The dashboard has no rotate action today; the only way to rotate a token is to remove and re-enrol the gateway. Design:
