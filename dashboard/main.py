@@ -3226,11 +3226,29 @@ def toggle_window(window_id: int, request: Request):
                        details=f"Window #{window_id} {'enabled' if new_state else 'disabled'}")
     return {"status": "ok", "id": window_id, "enabled": new_state}
 
+class WindowClaimPayload(BaseModel):
+    # BJ2: the new gateways send the token here, not in the URL, so it is not
+    # in curl's argv (or in any access log's path).
+    window_token: str = ''
+
+
+@app.post("/api/approved-windows/execute")
+def window_execute_body(payload: WindowClaimPayload, request: Request):
+    """Window claim with the token in the body (BJ2). Same rules as below."""
+    return _window_execute(payload.window_token, request)
+
+
 @app.post("/api/approved-windows/execute/{token}")
 def window_execute(token: str, request: Request):
     """Called by the gateway to increment execution count when a window token is used.
     Returns 200 if the token is valid and within its window, 404 otherwise.
-    Logs the claim as a request row for visibility in the main queue."""
+    Logs the claim as a request row for visibility in the main queue.
+
+    Kept for gateways installed before BJ2's body-token change."""
+    return _window_execute(token, request)
+
+
+def _window_execute(token: str, request: Request):
     token_ip, _ = _resolve_gateway_token(request)
     if not token_ip:
         raise HTTPException(status_code=401, detail="Gateway token required for window execution")

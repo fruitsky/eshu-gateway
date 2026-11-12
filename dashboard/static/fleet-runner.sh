@@ -3,16 +3,38 @@
 # for Fleet Run (P1b). Runs a fleet command as root with a timeout, then posts
 # the result back to the dashboard.
 #
-# Args: DASHBOARD_URL GATEWAY_TOKEN TARGET_IP CMD_ID TIMEOUT CMD_FILE
+# Args: DASHBOARD_URL TARGET_IP CMD_ID TIMEOUT CMD_FILE [OUT_FILE]
+#
+# BJ2: the gateway token is NOT an argument. The runner runs as root, so it
+# reads the token from /etc/eshu-token (0600) instead: a transient unit's
+# ExecStart can be read by any local user through `systemctl show` for as
+# long as the unit exists, and python argv is readable in /proc. The token
+# reaches python through the environment, which only root can read.
 set -u
 
 DASHBOARD_URL="$1"
-GATEWAY_TOKEN="$2"
-TARGET_IP="$3"
-CMD_ID="$4"
-TIMEOUT="${5:-180}"
-CMD_FILE="$6"
-OUT_FILE="${7:-}"
+# Older pollers passed the token as $2. Accept that shape for the one update
+# cycle before the installer replaces them, but never use the argument: an IP
+# contains a dot or a colon (IPv4/IPv6), a token has neither, so the two
+# shapes are distinguishable.
+if [ -n "${2:-}" ] && [ "${2#*[.:]}" != "$2" ]; then
+  TARGET_IP="$2"
+  CMD_ID="$3"
+  TIMEOUT="${4:-180}"
+  CMD_FILE="$5"
+  OUT_FILE="${6:-}"
+else
+  TARGET_IP="$3"
+  CMD_ID="$4"
+  TIMEOUT="${5:-180}"
+  CMD_FILE="$6"
+  OUT_FILE="${7:-}"
+fi
+GATEWAY_TOKEN=$(head -n1 /etc/eshu-token 2>/dev/null | tr -d '[:space:]')
+if [ -z "$GATEWAY_TOKEN" ]; then
+  echo "No /etc/eshu-token on this gateway; refusing to run the fleet command." >&2
+  exit 1
+fi
 if [ -z "$OUT_FILE" ]; then
   # Older poller (six args) compatibility: a random sibling of the command
   # file, never a fixed path in a world-writable directory.
@@ -23,9 +45,12 @@ post_result() {
   local status="$1" exit_code="$2" out_file="$3"
   # The heredoc below is python's program (python3 - reads stdin as the script),
   # so the command output is passed as a FILE ARG — stdin cannot carry it.
-  python3 - "$DASHBOARD_URL" "$GATEWAY_TOKEN" "$TARGET_IP" "$CMD_ID" "$status" "$exit_code" "$out_file" <<'PYEOF'
+  # BJ2: the token is in the environment, not argv. /proc/<pid>/environ is
+  # root-only; argv is world-readable while the call runs.
+  ESHU_FLEET_TOKEN="$GATEWAY_TOKEN" python3 - "$DASHBOARD_URL" "$TARGET_IP" "$CMD_ID" "$status" "$exit_code" "$out_file" <<'PYEOF'
 import os, sys, json, urllib.request
-url, tok, ip, cid, status, exit_code, out_file = sys.argv[1:8]
+url, ip, cid, status, exit_code, out_file = sys.argv[1:7]
+tok = os.environ.get("ESHU_FLEET_TOKEN", "")
 output = ""
 truncated = False
 try:

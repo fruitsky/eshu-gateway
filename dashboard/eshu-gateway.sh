@@ -61,6 +61,13 @@ ESHU_SESSION_ID=""; ESHU_SESSION_SIG=""; ESHU_EXECUTION_ID=""
 ESHU_WINDOW_TOKEN=""; ESHU_MCP=""; ESHU_FORCE_JIT=""
 ESHU_MSG_JSON=""
 ESHU_MCP_CAP=""
+
+# BE3: the gateway token must never be a curl argv element — any local user
+# can read /proc/<pid>/cmdline while the call runs. The header travels on
+# stdin; printf is a shell builtin, so the value never leaves this shell.
+gateway_header() {
+  printf 'X-Gateway-Token: %s\n' "${GATEWAY_TOKEN:-}"
+}
 ESHU_VERIFIED_AGENT=""
 SIG_STATE="none"
 
@@ -312,10 +319,10 @@ log_auto_approve() {
   # values are checked after parsing (both against strict charsets), status is
   # an internal literal and enc_cmd is base64. Any new field must be validated
   # to a safe charset or JSON-escaped before it is added here.
-  curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -X POST "$DASHBOARD_URL/api/log" \
-       -H "X-Gateway-Token: ${GATEWAY_TOKEN:-}" \
+  { gateway_header | curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -X POST "$DASHBOARD_URL/api/log" \
+       -H @- \
        -H "Content-Type: application/json" \
-       -d '{"target_ip":"'"$TARGET_IP"'","encoded_command":"'"$enc_cmd"'","status":"'"$status"'","session_id":"'"${ESHU_SESSION_ID:-}"'","execution_id":"'"${ESHU_EXECUTION_ID:-}"'","agent":"'"${ESHU_VERIFIED_AGENT:-}"'"}' >/dev/null 2>&1 &
+       -d '{"target_ip":"'"$TARGET_IP"'","encoded_command":"'"$enc_cmd"'","status":"'"$status"'","session_id":"'"${ESHU_SESSION_ID:-}"'","execution_id":"'"${ESHU_EXECUTION_ID:-}"'","agent":"'"${ESHU_VERIFIED_AGENT:-}"'"}' ; } >/dev/null 2>&1 &
 }
 
 log_window_reject() {
@@ -326,10 +333,15 @@ log_window_reject() {
   # enc_cmd is base64, and reason is an internal literal supplied by a feature
   # script. Any new field (or a reason that ever becomes external input) must
   # be validated to a safe charset or JSON-escaped before it is added here.
-  curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -X POST "$DASHBOARD_URL/api/log" \
-       -H "X-Gateway-Token: ${GATEWAY_TOKEN:-}" \
+  # BH3: the window token is a credential, so the body (which carries it) goes
+  # on stdin, never in argv; the header uses a private process substitution for
+  # the same reason.
+  local body
+  body='{"target_ip":"'"$TARGET_IP"'","encoded_command":"'"$enc_cmd"'","status":"window-rejected","reason":"'"$reason"'","token":"'"$ESHU_WINDOW_TOKEN"'","session_id":"'"${ESHU_SESSION_ID:-}"'","execution_id":"'"${ESHU_EXECUTION_ID:-}"'","agent":"'"${ESHU_VERIFIED_AGENT:-}"'"}'
+  printf '%s' "$body" | curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -X POST "$DASHBOARD_URL/api/log" \
+       -H @<(gateway_header) \
        -H "Content-Type: application/json" \
-       -d '{"target_ip":"'"$TARGET_IP"'","encoded_command":"'"$enc_cmd"'","status":"window-rejected","reason":"'"$reason"'","token":"'"$ESHU_WINDOW_TOKEN"'","session_id":"'"${ESHU_SESSION_ID:-}"'","execution_id":"'"${ESHU_EXECUTION_ID:-}"'","agent":"'"${ESHU_VERIFIED_AGENT:-}"'"}' >/dev/null 2>&1 &
+       --data-binary @- >/dev/null 2>&1 &
 }
 
 # F5: pass every line through to the agent AND keep the last 16 KiB of it for
@@ -473,12 +485,15 @@ post_exec_result() {   # $1=rc  $2=duration_ms  $3=mode  $4=path
   # values are ever interpolated.
   case "${RUN_LIMIT_HIT:-}" in time|bytes) limit_field=',"limit":"'"$RUN_LIMIT_HIT"'"' ;; *) limit_field="" ;; esac
   body='{"target_ip":"'"$TARGET_IP"'","encoded_command":"'"$enc_cmd"'","path":"'"$path"'","exit_code":'"$rc"',"duration_ms":'"$duration_ms"',"encoded_output":"'"$enc_out"'","output_truncated":'"$truncated"''"$rid"''"$limit_field"'}'
-  # D2: the body (up to ~22 KB) goes on stdin, never into argv.
-  { printf '%s' "$body" | curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s \
-         -X POST "$DASHBOARD_URL/api/exec-result" \
-         -H "X-Gateway-Token: ${GATEWAY_TOKEN:-}" \
-         -H "Content-Type: application/json" \
-         --data-binary @- ; } >/dev/null 2>&1 &
+  # D2: the body (up to ~22 KB) goes on stdin, never into argv. BG2: the token
+  # header is a private process substitution, not a named file in /tmp: it
+  # exists only for curl's read, holds no name another process can race, and
+  # needs no cleanup (the old mktemp file is gone).
+  printf '%s' "$body" | curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s \
+       -X POST "$DASHBOARD_URL/api/exec-result" \
+       -H @<(gateway_header) \
+       -H "Content-Type: application/json" \
+       --data-binary @- >/dev/null 2>&1 &
 }
 
 run_sanitized() {
@@ -1157,8 +1172,8 @@ sys.exit(0 if doc.get("approved") is True else 1)' 2>/dev/null
 }
 
 claim_ticket_by_id() {   # $1 = request id; 0 when the ticket is ours
-  CLAIM_BODY=$(curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s \
-    -H "X-Gateway-Token: ${GATEWAY_TOKEN:-}" "$DASHBOARD_URL/api/ticket/$1" 2>/dev/null || true)
+  CLAIM_BODY=$(gateway_header | curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s \
+    -H @- "$DASHBOARD_URL/api/ticket/$1" 2>/dev/null || true)
   case "$CLAIM_BODY" in *'"ticket":"'*) ;; *) return 1 ;; esac
   parse_claim_body "$CLAIM_BODY" || return 1
   [ "$CLAIM_CMD" = "$cmd" ] || return 1
@@ -1245,8 +1260,8 @@ enc_req=$(echo -n "$cmd" | base64 -w 0)
 # Safe concatenation: TARGET_IP and the ESHU_* prefix values are validated
 # (startup/prefix checks), and enc_req is base64. Any new field must be
 # validated to a safe charset or JSON-escaped before it is added here.
-RESPONSE=$(curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -w "\n%{http_code}" -X POST "$DASHBOARD_URL/api/request" \
-     -H "X-Gateway-Token: ${GATEWAY_TOKEN:-}" \
+RESPONSE=$(gateway_header | curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -w "\n%{http_code}" -X POST "$DASHBOARD_URL/api/request" \
+     -H @- \
      -H "Content-Type: application/json" \
      -d '{"target_ip":"'"$TARGET_IP"'","encoded_command":"'"$enc_req"'","session_id":"'"${ESHU_SESSION_ID:-}"'","execution_id":"'"${ESHU_EXECUTION_ID:-}"'","agent":"'"${ESHU_VERIFIED_AGENT:-}"'","force_jit":'"$([ "$ESHU_FORCE_JIT" = "1" ] && echo true || echo false)"',"run_limits":"'"$RUN_LIMITS_CAP"'"}' 2>&1 || echo "CURL_FAILED")
 
@@ -1325,7 +1340,7 @@ while true; do
   fi
 
   # Check if operator denied or approved this request (single status API call)
-  STATUS_RESP=$(curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -H "X-Gateway-Token: ${GATEWAY_TOKEN:-}" "$DASHBOARD_URL/api/request_status/$REQUEST_ID" 2>/dev/null || echo "")
+  STATUS_RESP=$(gateway_header | curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -H @- "$DASHBOARD_URL/api/request_status/$REQUEST_ID" 2>/dev/null || echo "")
   REQ_STATUS=$(echo "$STATUS_RESP" | python3 -I -c "import sys, json; print(json.load(sys.stdin).get('status','pending'))" 2>/dev/null || echo "pending")
   if [ "$REQ_STATUS" = "denied" ]; then
     say "   [DENIED] JIT request #$DISPLAY_ID was denied by operator."
@@ -1340,8 +1355,8 @@ while true; do
     # Claim the ticket BEFORE executing. If the claim fails (slow link, 4xx),
     # executing anyway would leave the request "approved" with no jit_consumed
     # audit — exactly how #2393 ran unrecorded. Retry on the next poll instead.
-    CLAIM_BODY=$(curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s \
-      -H "X-Gateway-Token: ${GATEWAY_TOKEN:-}" "$DASHBOARD_URL/api/ticket/$REQUEST_ID" 2>/dev/null || true)
+    CLAIM_BODY=$(gateway_header | curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s \
+      -H @- "$DASHBOARD_URL/api/ticket/$REQUEST_ID" 2>/dev/null || true)
     case "$CLAIM_BODY" in
       *'"ticket":"'*)
         # The ticket is "<created_at>|<command>" (db/requests.py). Require the

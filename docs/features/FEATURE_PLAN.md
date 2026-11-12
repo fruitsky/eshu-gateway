@@ -11585,6 +11585,224 @@ Three small chunks. Each one touches gateway-side scripts, so each needs the **s
 * Test: a stub `curl` records argv for every call path and asserts that no token appears in it.
 * Why: argv is readable by any local user through `/proc` while the call runs (RR-a, recorded as a residual).
 
+**Implementer notes (BE3).** Every token header now travels on stdin
+(`-H @-`); `printf` is a shell builtin, so the value never becomes an argv
+element.
+
+* **Gateway** (`eshu-gateway.sh`): `gateway_header` emits the one header and
+  every call pipes it: the two `/api/log` calls, the JIT `/api/request`,
+  `/api/request_status`, both ticket claims and the result post. The result
+  post puts its body on stdin; BG2 gives it a private process substitution
+  (`-H @<(gateway_header)`) instead of the first round's `mktemp` file in
+  `/tmp`, so there is no name to race and nothing to remove.
+* **Poller**: `gateway_header`/`register_headers` for the policy sync, the
+  ticket poll, the uninstall-started post and both re-register calls.
+* **Logger**: `gateway_header` for the heartbeat.
+* **Installer**: the uninstall progress report and `register_gateway` build
+  their header lines inline (`printf … | curl -H @-`), so the extracted test
+  blocks stay self-contained.
+* Tests: the gateway and poller curl stubs now record each call's argv (and
+  drain/keep the stdin headers), the installer stub keeps the headers it
+  receives on stdin, and one test per script walks the recorded argv for the
+  token and both header names; the gateway test covers request, status,
+  ticket, result and the window-reject log. A text test in `test_poller.py`
+  refuses a new `-H "X-Gateway-Token`/`X-Enrollment-Token` anywhere in the
+  four scripts. The four installers are regenerated.
+
+`bash scripts/verify.sh`: `2889 passed, 26 skipped, 7 warnings in 586.66s
+(0:09:46)` (after the rebase onto master, which brought the poller ticket-poll
+fix; the poller test file keeps both sides: the `WC`/whitespace-stub tests and
+the BE3 argv tests).
+
+**Nit — IPv6 in the old-shape check (2026-11-13).** The fleet runner tells the
+new poller's argv from the old one by whether `$2` looks like an address: the
+old shape put the token there, the new shape puts `TARGET_IP`. The test was
+`${2#*.} != $2`, so an IPv6 target (`2001:db8::5`, no dot) was read as an old
+token and the runner shifted every later argument. It now treats `:` like `.`
+(`${2#*[.:]}`); a token contains neither. Tests:
+`tests/test_bj2_fleet_argv.py::test_bj2_an_ipv6_target_is_an_address_not_a_token`
+(the address and command id reach python) alongside the old-shape test. The
+runner is served statically, so the four installers do not change; they were
+regenerated to confirm it.
+
+`bash scripts/verify.sh`: GATE_COUNT_NIT
+
+**BG1 — the curl floor.** `-H @-` (and `-H @file`) needs curl 7.55. Older
+curl accepts the argument shape and silently sends no header, so the token
+never leaves the host and every registration or poll 401s with no clue. The
+installer now checks `curl --version` in `check_curl_version` right after the
+systemd preflight — before the uninstall branch, the Hermes migration, the
+mode split, `useradd` or any file write — for install, reinstall, update and
+migrate; `--uninstall` is exempt so a gateway can still be removed on a host
+we no longer install to. The refusal prints the found version, the reason and
+"Nothing on this host has been changed". Tests stub `curl --version` with
+7.52.0 and 7.50.1 (refused, version in the message), 7.55.0 and 8.5.0
+(accepted), a PATH with no curl (refused as not found), and a static check
+that the call site sits before every write. `docs/ARCHITECTURE.md`'s Gateway
+nodes section now states the 7.55 floor next to the coreutils note.
+
+**BG2 — no header file in `/tmp`.** The result post's `mktemp` header file
+became `-H @<(gateway_header)`: the header exists only as the FIFO curl reads,
+has no name to race and needs no `rm`. The gateway is bash
+(`#!/bin/bash`), so process substitution is available; the stub curl records
+header-file content separately (`curl-headers.log`, never argv), and a test
+asserts the token arrives that way for `/api/exec-result` while its argv stays
+token-free and free of `mktemp`.
+
+**Reviewer notes (security reviewer, 2026-11-12, at `e891921`).** Approved
+once BG1 is in. I checked that no token remains in curl's argv in the
+gateway, poller, logger or installer, and that the downloads that stay
+plain carry no token.
+
+* **BG1 (the feature reviewer's must): agreed. Two points on how to do it.**
+  * The installer checks `curl --version` (≥ 7.55) **before it writes
+    anything**. An update on an old host then refuses and leaves the running
+    gateway and poller exactly as they were. They keep working on argv
+    headers, which is the old state, not a 401 outage.
+  * Test: a stub curl reporting 7.54 leaves every installed file
+    byte-identical.
+* **BG2 (should): agreed, and use a process substitution.**
+  * `-H @<(gateway_header)` writes no file at all. A killed background
+    subshell can no longer leave a token file behind, even a 0600 root one.
+  * The `mktemp` file is safe as written (O_EXCL, 0600, root), so this is
+    tidiness, not a hole.
+* **BH3 (should, this branch or the next): secret values in `-d` bodies
+  are argv too.**
+  * `log_window_reject` puts `ESHU_WINDOW_TOKEN` in its `-d` argument.
+  * After F22 rebases onto this branch, `/api/request`'s `-d` carries
+    `check_token`.
+  * Both are short-lived, and the check token is single-use and bound to
+    the command and host, so neither is a must.
+  * Fix: a body with a secret goes in with `--data-binary @-` on stdin, and
+    the header in with `-H @<(gateway_header)`. That is the same split
+    `post_exec_result` already makes.
+  * Extend the argv test to the window token and the check token.
+
+**BG1/BG2/BH3 in the code (2026-11-12).**
+
+* BG1 is `check_curl_version`, called right after the systemd preflight and
+  before the uninstall branch, the Hermes migration, the mode split,
+  `useradd` and every write; `--uninstall` is exempt so a gateway can still
+  be removed. Tests cover 7.52.0, 7.54.0 and 7.50.1 (refused with the
+  version and "Nothing on this host has been changed"), 7.55.0 and 8.5.0
+  (accepted), and a PATH without curl (refused as not found). Security's
+  "a 7.54 host keeps every installed file byte-identical" is proved by
+  `test_bg1_no_write_can_run_before_the_check`: it walks the template up to
+  the call site (skipping function definitions) and finds no `mkdir`,
+  `useradd`, `chown`, `chmod`, `rm`, `mv`, `cp`, `install -`,
+  `systemctl enable/start/daemon-reload`, `eshu_safe_replace`,
+  `write_gateway` or `cat >` there, so a 7.54 run cannot have written
+  anything before it refuses.
+* BG2 is `-H @<(gateway_header)` for the result post, as recommended: no
+  file, no name, no `rm`. The gateway is bash, so process substitution is
+  available. The stub curl reads a header file handed by path into
+  `curl-headers.log` (never argv), and a test asserts
+  `X-Gateway-Token: test-token` arrives that way while the argv line holds
+  neither the token nor `mktemp`.
+* BH3 (this branch): `log_window_reject` no longer puts
+  `ESHU_WINDOW_TOKEN` in its `-d` argument; the body goes in with
+  `--data-binary @-` and the header with `-H @<(gateway_header)`. The
+  gateway argv test now also refuses `WinToken123`. The `/api/request`
+  `check_token` half belongs to F22, which is with security; it will be
+  moved the same way when F22 rebases onto this branch.
+* All four installers regenerated.
+
+#### Security re-read (2026-11-12, at `c79e6a2`): BG1, BG2 and BH3 are in; BJ2 is a must
+
+* **BG1:** `check_curl_version` runs before anything is written, in every
+  mode except uninstall. A missing curl or one older than 7.55 exits with
+  "nothing on this host has been changed". The poller's `--update` runs
+  the same script, so an old host keeps its running gateway. Good.
+* **BG2:** the result post uses `-H @<(gateway_header)`, so the `/tmp`
+  file is gone.
+* **BH3:** the `log_window_reject` body goes on stdin with
+  `--data-binary @-`.
+* The three installer copies are identical.
+* **BJ2 (must, this branch): two scripts outside the four that were
+  swept still put the gateway token in argv.**
+  * `static/features/approved_windows.sh` sends the window claim with
+    `-H "X-Gateway-Token: ${GATEWAY_TOKEN:-}"`. That is in curl's argv on
+    every window run, and the window token is in the URL path, which is
+    in argv too.
+  * The poller starts the fleet runner with
+    `systemd-run ... bash fleet-runner.sh "$DASHBOARD_URL" "$GATEWAY_TOKEN" ...`.
+    The runner then passes the token to `python3` in argv as well.
+    * A transient unit's `ExecStart` can be read by any local user through
+      `systemctl show`, for as long as the unit exists. That is worse than
+      a few seconds in `/proc`.
+  * Fix:
+    * the runner reads the token from `/etc/eshu-token` (root `0600`; the
+      runner runs as root), and the token is dropped from its arguments;
+    * the window claim uses `-H @<(gateway_header)` (it runs inside the
+      gateway) and sends the window token in a stdin body. Keep the
+      path-token endpoint for old gateways until the fleet is updated.
+  * Tests: the same argv assertions the gateway tests use, for both
+    scripts. Also: no `GATEWAY_TOKEN` in the `systemd-run` arguments.
+* **BJ3 (should):** `approved_windows.sh` logs `token=$ESHU_WINDOW_TOKEN`
+  to syslog on the fail-open path. Log the first 8 characters, or a hash.
+* **Rebase onto master:** the poll line must keep both changes. That is
+  the digits-only `WC` from `fix/poller-ticket-poll` and
+  `gateway_header | curl ... -H @-`. Regenerate the installers after the
+  rebase.
+
+**BJ2/BJ3 implemented (2026-11-12).**
+
+* **Window claim.** `approved_windows.sh` posts to
+  `/api/approved-windows/execute` (no token in the URL) with
+  `{"window_token": …}` on stdin (`--data-binary @-`) and the gateway
+  header from `-H @<(printf …)`, so neither token is in curl's argv. The
+  dashboard keeps the old path-token route for gateways installed before
+  this change; both routes call one `_window_execute`, so the claim,
+  IP check, counter and audit are identical. The window token is still
+  charset-validated by the gateway's prefix check, so it is safe in JSON.
+* **Fleet Run.** The runner no longer takes the token as an argument: it
+  reads `/etc/eshu-token` (root 0600) and passes it to python in
+  `ESHU_FLEET_TOKEN` (environment, root-only in `/proc`), not argv. The
+  poller's `systemd-run` ExecStart no longer contains it. The runner
+  accepts the old poller's argument shape (a token has no dot, an IP does)
+  for the one update cycle before the installer replaces the poller, but
+  never uses the argument. A missing token file refuses the run.
+* **BJ3.** Every window log line uses `${ESHU_WINDOW_TOKEN:0:8}`, never the
+  whole token.
+* **Tests.** `test_gateway_script.py`: the window claim's argv holds
+  neither token, the body carries `window_token`, the header still
+  arrives, and the script no longer logs the full token.
+  `test_window_read.py`: the body-token claim works and burns once; the
+  path form still works; the script has no path token. `test_poller.py`:
+  the fleet unit's `systemd-run` args contain no token and still carry the
+  IP and both file paths. `tests/test_bj2_fleet_argv.py`: the runner's
+  python argv has no token (environment does), the old argument shape
+  still runs, and a missing token file refuses.
+* The installers are regenerated with the rebased poller (`WC` and
+  `-H @-` both present) and the new fleet call.
+
+`bash scripts/verify.sh`: `2901 passed, 26 skipped, 7 warnings in 604.17s
+(0:10:04)` (after the stack rebase onto `fix/lockbox-bi`; the branch carries
+only the BE3 changes now, and the installers were regenerated from this tree).
+
+#### Security re-read (2026-11-12, at `46bc261`): BJ2 and BJ3 approved
+
+* The window claim sends the gateway token as `-H @<(...)` and the window
+  token in a stdin JSON body, to a new `/api/approved-windows/execute`.
+  The path-token route stays for old gateways, and both share
+  `_window_execute`.
+* The fleet runner reads `/etc/eshu-token` as root, and the poller no
+  longer passes the token to `systemd-run`. Python gets it through the
+  environment, not argv. The shell variable is not exported, so the fleet
+  command does not inherit it.
+* The logs show only the first 8 characters of a window token.
+* After the rebase, the poll line keeps both the digits-only `WC` and
+  `-H @-`. The three installer copies are identical.
+* **Nit:** the runner tells the old argument shape from the new one by
+  "`$2` contains a dot". An IPv6 `TARGET_IP` has no dot, so it would be
+  read as the old shape and the fields would shift. Use
+  `case "$2" in *.*|*:*)`; a token cannot contain either character.
+  Argument counts don't work for this, because the six-argument old-old
+  shape and the new shape are the same length.
+* Still to come: the stack onto `fix/lockbox-bi`, because of the conflict
+  in the generated installers. I'll re-check the copies and the poll line
+  there.
+
 ### BE4 — refresh the dashboard key on update · branch `fix/update-dashboard-key`
 
 An update today never writes `authorized_keys`, so F12's dashboard key reaches a gateway only on reinstall. The security reviewer's conditions:
@@ -12138,7 +12356,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | — | Buffering | stream-unbuffered | gateway | Merged (`d8d70c2`); S1 tee fix done in Gateway hardening | `fix/stream-unbuffered` | F5 | |
 | — | Gateway hardening | gateway-hardening | gateway | **Merged** 2026-11-12 (AF3 + S1 tee capture; security `c15664e`; AX1/AX2 residuals; BA1 for the next F5/F19 change) | `fix/gateway-hardening` | F19, Buffering | |
 | — | Installer hotfix | installer-reregister | installer | **Merged and deployed** 2026-11-12 (`d6a38bb`; security `d6a38bb`): re-register presents the existing token; keys only after a 200 | `fix/installer-reregister` | F12 | |
-| — | BE3 | secret-headers | gateway + installer + poller | Planned (security ruling RR-a) | `fix/secret-headers` | RR1 | + security sign-off |
+| — | BE3 | secret-headers | gateway + installer + poller | **Implemented**: every token header goes on stdin (`-H @-`), the result post uses a private header file, and argv is asserted token-free in all three stub harnesses | `fix/secret-headers` | RR1 | security sign-off |
 | — | BE4 | update-dashboard-key | installer | **Implemented**: `--update` refreshes only the `eshu-dashboard` line after a 200, copies its `from=`, refuses symlinks, uses `mktemp`; the fixed `.tmp` name is gone everywhere | `fix/update-dashboard-key` | RR1 | security sign-off |
 | — | GT1 | gateway-token-rotation | dashboard + poller | Design first | `feat/gateway-token-rotation` | RR1 | + security sign-off |
 

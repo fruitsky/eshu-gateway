@@ -77,6 +77,9 @@ class GatewaySandbox:
                           self.nonce_dir):
             directory.mkdir(parents=True, exist_ok=True)
         os.chmod(self.nonce_dir, 0o700)
+        self.curl_argv_log = self.root / "curl-argv.log"
+        # BG2: header files handed to curl by path (only the result post).
+        self.curl_header_log = self.root / "curl-headers.log"
         self.token_file = self.etc / "eshu-token"
         self.token_file.write_text("test-token\n")
         # F5: the poller's private work dir (0700, owner-checked before use).
@@ -130,6 +133,8 @@ class GatewaySandbox:
     def _write_stubs(self):
         curl = '''#!/bin/bash
 LOG="__LOG__"
+ARGLOG="__ARGLOG__"
+printf '%s\\n' "$*" >> "$ARGLOG"
 STATUS_FILE="__STATUS__"
 REQUEST_MODE="__MODE__"
 CLAIM_MODE="__CLAIM__"
@@ -144,7 +149,17 @@ while [ $# -gt 0 ]; do
         *) data="$2" ;;
       esac
       shift 2 ;;
-    -H|-m|-o|-w) shift 2 ;;
+    -H)
+      # BE3: the token header arrives on stdin now; drain it so the writer
+      # does not see EPIPE. BG2: the result post passes a process
+      # substitution (a FIFO path); read it and keep the content in a
+      # separate log, never in argv.
+      case "$2" in
+        @-) cat >/dev/null ;;
+        @*) cat "${2#@}" >> "__HDRLOG__" 2>/dev/null ;;
+      esac
+      shift 2 ;;
+    -m|-o|-w) shift 2 ;;
     --connect-timeout) shift 2 ;;
     -s) shift ;;
     -*) shift ;;
@@ -178,7 +193,7 @@ case "$url" in
     # F5: simulate an old dashboard / dropped connection for the result post.
     if [ -f "__EXECFAIL__" ]; then exit 7; fi
     ;;
-  */api/approved-windows/execute/*)
+  */api/approved-windows/execute|*/api/approved-windows/execute/*)
     mode=$(cat "__WINDOW_CLAIM__" 2>/dev/null || echo 200)
     if [ "$mode" = "exit" ]; then exit 7; fi
     printf '%s' "$mode"
@@ -214,6 +229,8 @@ print(json.dumps(out, separators=(",", ":")))'
 esac
 '''
         curl = (curl.replace("__LOG__", str(self.curl_log))
+                    .replace("__ARGLOG__", str(self.curl_argv_log))
+                    .replace("__HDRLOG__", str(self.curl_header_log))
                     .replace("__STATUS__", str(self.status_file))
                     .replace("__MODE__", str(self.request_mode_file))
                     .replace("__CLAIM__", str(self.claim_mode_file))
@@ -506,6 +523,18 @@ exec "__REAL__" "$@"
                 payload = {}
             calls.append({"method": method, "url": url, "data": payload})
         return calls
+
+    def header_text(self):
+        """The content of every header file a curl call was given by path."""
+        if not self.curl_header_log.exists():
+            return ""
+        return self.curl_header_log.read_text()
+
+    def argv_calls(self):
+        """Every curl invocation's argv, one line per call (BE3)."""
+        if not self.curl_argv_log.exists():
+            return []
+        return self.curl_argv_log.read_text().splitlines()
 
     def raw_bodies(self):
         """The literal ``-d`` argument of every recorded call (unparsed)."""
@@ -1156,6 +1185,56 @@ def test_bi2_the_claim_locks_and_uses_a_run_dir_temp():
     assert 'exec 9>&-' in unlock
     assert 'flock -w 5 9 || { exec 9>&-; return 1; }' in text
 
+def test_be3_the_gateway_token_is_never_in_curl_argv(gw):
+    """BE3: every gateway call keeps the token off argv (world-readable in
+    /proc while the call runs). The request, status, ticket and result paths
+    and the window-reject log path must all pass."""
+    gw.jit_status("approved")
+    gw.run("echo be3-jit")
+    gw.feature("window.sh", 'log_window_reject "$cmd" "unknown window token"\n')
+    gw.jit_status("denied")
+    gw.run("ESHU_SESSION_ID=sess-1 ESHU_WINDOW_TOKEN=WinToken123 echo be3-w")
+    assert gw.wait_for(lambda calls: any(
+        c["url"].endswith("/api/log") for c in calls))
+    args = gw.argv_calls()
+    assert args, "no curl call recorded"
+    assert any("/api/request" in line for line in args)
+    assert any("/api/log" in line for line in args)
+    assert any("/api/ticket/" in line for line in args)
+    assert any("/api/exec-result" in line for line in args)
+    for line in args:
+        assert "test-token" not in line, line
+        assert "X-Gateway-Token" not in line, line
+        assert "X-Enrollment-Token" not in line, line
+        # BH3: the window token is a credential in a JSON body, not argv.
+        assert "WinToken123" not in line, line
+
+
+def test_bg2_the_result_token_header_is_a_private_fifo(gw):
+    """BG2: the result post reads its header from a process substitution.
+
+    No named file in /tmp to race, so the header must still arrive: the stub
+    records the content of every header file curl was given by path, and the
+    argv line stays token-free.
+    """
+    gw.jit_status("approved")
+    gw.run("echo bg2")
+    assert gw.wait_for(lambda calls: any(
+        c["url"].endswith("/api/exec-result") for c in calls))
+    assert "X-Gateway-Token: test-token" in gw.header_text()
+    line = [l for l in gw.argv_calls() if "/api/exec-result" in l][0]
+    assert "test-token" not in line
+    assert "X-Gateway-Token" not in line
+    assert "mktemp" not in line
+
+
+def test_bg2_the_result_post_writes_no_tmp_file():
+    """BG2: the old `mktemp` header file is gone from the shipped script."""
+    text = SCRIPT.read_text()
+    assert "-H @<(gateway_header)" in text
+    assert "hdr=$(umask 077; mktemp)" not in text
+    assert 'rm -f "$hdr"' not in text
+
 
 def test_sec_chunk1_window_reject_body_is_well_formed(gw):
     gw.feature("window.sh", 'log_window_reject "$cmd" "unknown window token"\n')
@@ -1306,6 +1385,31 @@ def test_sec_chunk2_prefix_window_metachar_is_rejected(gw):
     assert not any(c["url"].endswith("/api/request")
                    for c in gw.curl_calls())
     assert "APPROVED WINDOW MATCH" not in gw.logger_text()
+
+
+def test_bj2_the_window_claim_keeps_both_tokens_off_argv(gw):
+    """BJ2: the gateway token and the window token are not in curl's argv."""
+    gw.approved_windows("wintok|echo window-ok|0|0|0|0|0|exact")
+    proc = gw.run("ESHU_WINDOW_TOKEN=wintok echo window-ok")
+    assert "window-ok" in proc.stdout
+    assert gw.wait_for(lambda calls: any(
+        c["url"].endswith("/api/approved-windows/execute") for c in calls))
+    argv = gw.argv_calls()
+    for line in argv:
+        assert "test-token" not in line, line
+        assert "wintok" not in line, line
+        assert "X-Gateway-Token" not in line, line
+    # The token travels in the body, and the header still arrives.
+    claim = [c for c in gw.curl_calls()
+             if c["url"].endswith("/api/approved-windows/execute")][0]
+    assert claim["data"].get("window_token") == "wintok"
+    assert "X-Gateway-Token: test-token" in gw.header_text()
+
+
+def test_bj3_the_window_token_is_not_logged_in_full(gw):
+    src = (REPO / "dashboard" / "static" / "features" / "approved_windows.sh").read_text()
+    assert "token=$ESHU_WINDOW_TOKEN" not in src
+    assert "${ESHU_WINDOW_TOKEN:0:8}" in src
 
 
 # ── Chunk 5: window claim fails open only on network loss ─────────────────

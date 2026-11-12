@@ -88,6 +88,46 @@ if ! command -v systemctl >/dev/null 2>&1; then
   exit 1
 fi
 
+# BG1: every authenticated call now sends its token in a header read from
+# stdin (`curl -H @-`, and a private process substitution for the result
+# post). `-H @filename` needs curl 7.55. Older curl accepts the argument
+# shape but silently drops the header, so the token never leaves the host and
+# every registration/poll would 401 with no hint why. Checked once, in every
+# mode that writes to the host, before anything is changed. Uninstall is
+# exempt: removing a gateway must keep working on hosts we no longer install
+# to.
+check_curl_version() {
+  local line ver major minor
+  line=$(curl --version 2>/dev/null | head -n1 || true)
+  ver=${line#curl }; ver=${ver%% *}
+  major=${ver%%.*}
+  minor=${ver#*.}; minor=${minor%%.*}
+  if ! printf '%s' "$major" | grep -qE '^[0-9]+$' \
+     || ! printf '%s' "$minor" | grep -qE '^[0-9]+$'; then
+    echo ""
+    echo "❌ Eshu Gateway requires curl 7.55 or newer, and curl was not found."
+    echo "   Install curl (Debian/Ubuntu: apt-get install curl) and re-run."
+    echo "   Nothing on this host has been changed."
+    echo ""
+    return 1
+  fi
+  if [ "$major" -lt 7 ] || { [ "$major" -eq 7 ] && [ "$minor" -lt 55 ]; }; then
+    echo ""
+    echo "❌ Eshu Gateway requires curl 7.55 or newer; this host has curl $ver."
+    echo "   The gateway reads its token header from stdin (curl -H @-), which"
+    echo "   older curl accepts but silently drops: every call would get 401."
+    echo "   Upgrade curl (Debian/Ubuntu: apt-get update && apt-get install curl)"
+    echo "   and re-run. Nothing on this host has been changed."
+    echo ""
+    return 1
+  fi
+  return 0
+}
+
+if [ "$UNINSTALL" != "yes" ]; then
+  if ! check_curl_version; then exit 1; fi
+fi
+
 # Handle --uninstall immediately before any other logic
 if [ "$UNINSTALL" = "yes" ]; then
   # Extract DASHBOARD_URL from existing gateway script if not provided
@@ -126,10 +166,11 @@ if [ "$UNINSTALL" = "yes" ]; then
     local step="$1"
     local message="${2:-}"
     if [ -n "$DASHBOARD_URL" ]; then
-      curl -m 3 -s -X POST "$DASHBOARD_URL/api/uninstall-progress" \
+      { printf 'X-Gateway-Token: %s\n' "${GATEWAY_TOKEN:-}" \
+          | curl -m 3 -s -X POST "$DASHBOARD_URL/api/uninstall-progress" \
+        -H @- \
         -H "Content-Type: application/json" \
-        -H "X-Gateway-Token: ${GATEWAY_TOKEN:-}" \
-        -d "{\"ip\":\"$TARGET_IP\",\"step\":\"$step\",\"message\":\"$message\"}" >/dev/null 2>&1 || true
+        -d "{\"ip\":\"$TARGET_IP\",\"step\":\"$step\",\"message\":\"$message\"}" ; } >/dev/null 2>&1 || true
     fi
   }
   
@@ -476,10 +517,11 @@ fi
 # REGISTER_STATUS (the HTTP code, 000 when unreachable) and REGISTER_RESPONSE.
 register_gateway() {   # $1 = the X-Gateway-Token to present ('' for none)
   local out
-  out=$(curl --connect-timeout 3 -m 15 -s -w '\n%{http_code}' -X POST "$DASHBOARD_URL/api/register" \
+  out=$({ printf 'X-Gateway-Token: %s\n' "${1:-}"
+           printf 'X-Enrollment-Token: %s\n' "${ESHU_ENROLL_TOKEN:-}" ; } \
+         | curl --connect-timeout 3 -m 15 -s -w '\n%{http_code}' -X POST "$DASHBOARD_URL/api/register" \
+       -H @- \
        -H "Content-Type: application/json" \
-       -H "X-Gateway-Token: ${1:-}" \
-       -H "X-Enrollment-Token: ${ESHU_ENROLL_TOKEN:-}" \
        -d '{"ip":"'"$TARGET_IP"'","hostname":"'"$HOST_NAME"'","version":"'"$GATEWAY_VERSION"'",'"$SSH_REG_CAPS"'}' 2>/dev/null) \
     || out=""
   case "$out" in
@@ -590,6 +632,13 @@ ESHU_SESSION_ID=""; ESHU_SESSION_SIG=""; ESHU_EXECUTION_ID=""
 ESHU_WINDOW_TOKEN=""; ESHU_MCP=""; ESHU_FORCE_JIT=""
 ESHU_MSG_JSON=""
 ESHU_MCP_CAP=""
+
+# BE3: the gateway token must never be a curl argv element — any local user
+# can read /proc/<pid>/cmdline while the call runs. The header travels on
+# stdin; printf is a shell builtin, so the value never leaves this shell.
+gateway_header() {
+  printf 'X-Gateway-Token: %s\n' "${GATEWAY_TOKEN:-}"
+}
 ESHU_VERIFIED_AGENT=""
 SIG_STATE="none"
 
@@ -841,10 +890,10 @@ log_auto_approve() {
   # values are checked after parsing (both against strict charsets), status is
   # an internal literal and enc_cmd is base64. Any new field must be validated
   # to a safe charset or JSON-escaped before it is added here.
-  curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -X POST "$DASHBOARD_URL/api/log" \
-       -H "X-Gateway-Token: ${GATEWAY_TOKEN:-}" \
+  { gateway_header | curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -X POST "$DASHBOARD_URL/api/log" \
+       -H @- \
        -H "Content-Type: application/json" \
-       -d '{"target_ip":"'"$TARGET_IP"'","encoded_command":"'"$enc_cmd"'","status":"'"$status"'","session_id":"'"${ESHU_SESSION_ID:-}"'","execution_id":"'"${ESHU_EXECUTION_ID:-}"'","agent":"'"${ESHU_VERIFIED_AGENT:-}"'"}' >/dev/null 2>&1 &
+       -d '{"target_ip":"'"$TARGET_IP"'","encoded_command":"'"$enc_cmd"'","status":"'"$status"'","session_id":"'"${ESHU_SESSION_ID:-}"'","execution_id":"'"${ESHU_EXECUTION_ID:-}"'","agent":"'"${ESHU_VERIFIED_AGENT:-}"'"}' ; } >/dev/null 2>&1 &
 }
 
 log_window_reject() {
@@ -855,10 +904,15 @@ log_window_reject() {
   # enc_cmd is base64, and reason is an internal literal supplied by a feature
   # script. Any new field (or a reason that ever becomes external input) must
   # be validated to a safe charset or JSON-escaped before it is added here.
-  curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -X POST "$DASHBOARD_URL/api/log" \
-       -H "X-Gateway-Token: ${GATEWAY_TOKEN:-}" \
+  # BH3: the window token is a credential, so the body (which carries it) goes
+  # on stdin, never in argv; the header uses a private process substitution for
+  # the same reason.
+  local body
+  body='{"target_ip":"'"$TARGET_IP"'","encoded_command":"'"$enc_cmd"'","status":"window-rejected","reason":"'"$reason"'","token":"'"$ESHU_WINDOW_TOKEN"'","session_id":"'"${ESHU_SESSION_ID:-}"'","execution_id":"'"${ESHU_EXECUTION_ID:-}"'","agent":"'"${ESHU_VERIFIED_AGENT:-}"'"}'
+  printf '%s' "$body" | curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -X POST "$DASHBOARD_URL/api/log" \
+       -H @<(gateway_header) \
        -H "Content-Type: application/json" \
-       -d '{"target_ip":"'"$TARGET_IP"'","encoded_command":"'"$enc_cmd"'","status":"window-rejected","reason":"'"$reason"'","token":"'"$ESHU_WINDOW_TOKEN"'","session_id":"'"${ESHU_SESSION_ID:-}"'","execution_id":"'"${ESHU_EXECUTION_ID:-}"'","agent":"'"${ESHU_VERIFIED_AGENT:-}"'"}' >/dev/null 2>&1 &
+       --data-binary @- >/dev/null 2>&1 &
 }
 
 # F5: pass every line through to the agent AND keep the last 16 KiB of it for
@@ -1002,12 +1056,15 @@ post_exec_result() {   # $1=rc  $2=duration_ms  $3=mode  $4=path
   # values are ever interpolated.
   case "${RUN_LIMIT_HIT:-}" in time|bytes) limit_field=',"limit":"'"$RUN_LIMIT_HIT"'"' ;; *) limit_field="" ;; esac
   body='{"target_ip":"'"$TARGET_IP"'","encoded_command":"'"$enc_cmd"'","path":"'"$path"'","exit_code":'"$rc"',"duration_ms":'"$duration_ms"',"encoded_output":"'"$enc_out"'","output_truncated":'"$truncated"''"$rid"''"$limit_field"'}'
-  # D2: the body (up to ~22 KB) goes on stdin, never into argv.
-  { printf '%s' "$body" | curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s \
-         -X POST "$DASHBOARD_URL/api/exec-result" \
-         -H "X-Gateway-Token: ${GATEWAY_TOKEN:-}" \
-         -H "Content-Type: application/json" \
-         --data-binary @- ; } >/dev/null 2>&1 &
+  # D2: the body (up to ~22 KB) goes on stdin, never into argv. BG2: the token
+  # header is a private process substitution, not a named file in /tmp: it
+  # exists only for curl's read, holds no name another process can race, and
+  # needs no cleanup (the old mktemp file is gone).
+  printf '%s' "$body" | curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s \
+       -X POST "$DASHBOARD_URL/api/exec-result" \
+       -H @<(gateway_header) \
+       -H "Content-Type: application/json" \
+       --data-binary @- >/dev/null 2>&1 &
 }
 
 run_sanitized() {
@@ -1686,8 +1743,8 @@ sys.exit(0 if doc.get("approved") is True else 1)' 2>/dev/null
 }
 
 claim_ticket_by_id() {   # $1 = request id; 0 when the ticket is ours
-  CLAIM_BODY=$(curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s \
-    -H "X-Gateway-Token: ${GATEWAY_TOKEN:-}" "$DASHBOARD_URL/api/ticket/$1" 2>/dev/null || true)
+  CLAIM_BODY=$(gateway_header | curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s \
+    -H @- "$DASHBOARD_URL/api/ticket/$1" 2>/dev/null || true)
   case "$CLAIM_BODY" in *'"ticket":"'*) ;; *) return 1 ;; esac
   parse_claim_body "$CLAIM_BODY" || return 1
   [ "$CLAIM_CMD" = "$cmd" ] || return 1
@@ -1774,8 +1831,8 @@ enc_req=$(echo -n "$cmd" | base64 -w 0)
 # Safe concatenation: TARGET_IP and the ESHU_* prefix values are validated
 # (startup/prefix checks), and enc_req is base64. Any new field must be
 # validated to a safe charset or JSON-escaped before it is added here.
-RESPONSE=$(curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -w "\n%{http_code}" -X POST "$DASHBOARD_URL/api/request" \
-     -H "X-Gateway-Token: ${GATEWAY_TOKEN:-}" \
+RESPONSE=$(gateway_header | curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -w "\n%{http_code}" -X POST "$DASHBOARD_URL/api/request" \
+     -H @- \
      -H "Content-Type: application/json" \
      -d '{"target_ip":"'"$TARGET_IP"'","encoded_command":"'"$enc_req"'","session_id":"'"${ESHU_SESSION_ID:-}"'","execution_id":"'"${ESHU_EXECUTION_ID:-}"'","agent":"'"${ESHU_VERIFIED_AGENT:-}"'","force_jit":'"$([ "$ESHU_FORCE_JIT" = "1" ] && echo true || echo false)"',"run_limits":"'"$RUN_LIMITS_CAP"'"}' 2>&1 || echo "CURL_FAILED")
 
@@ -1854,7 +1911,7 @@ while true; do
   fi
 
   # Check if operator denied or approved this request (single status API call)
-  STATUS_RESP=$(curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -H "X-Gateway-Token: ${GATEWAY_TOKEN:-}" "$DASHBOARD_URL/api/request_status/$REQUEST_ID" 2>/dev/null || echo "")
+  STATUS_RESP=$(gateway_header | curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -H @- "$DASHBOARD_URL/api/request_status/$REQUEST_ID" 2>/dev/null || echo "")
   REQ_STATUS=$(echo "$STATUS_RESP" | python3 -I -c "import sys, json; print(json.load(sys.stdin).get('status','pending'))" 2>/dev/null || echo "pending")
   if [ "$REQ_STATUS" = "denied" ]; then
     say "   [DENIED] JIT request #$DISPLAY_ID was denied by operator."
@@ -1869,8 +1926,8 @@ while true; do
     # Claim the ticket BEFORE executing. If the claim fails (slow link, 4xx),
     # executing anyway would leave the request "approved" with no jit_consumed
     # audit — exactly how #2393 ran unrecorded. Retry on the next poll instead.
-    CLAIM_BODY=$(curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s \
-      -H "X-Gateway-Token: ${GATEWAY_TOKEN:-}" "$DASHBOARD_URL/api/ticket/$REQUEST_ID" 2>/dev/null || true)
+    CLAIM_BODY=$(gateway_header | curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s \
+      -H @- "$DASHBOARD_URL/api/ticket/$REQUEST_ID" 2>/dev/null || true)
     case "$CLAIM_BODY" in
       *'"ticket":"'*)
         # The ticket is "<created_at>|<command>" (db/requests.py). Require the
@@ -1980,6 +2037,14 @@ DASHBOARD_URL="__DASHBOARD_URL__"
 TARGET_IP="__TARGET_IP__"
 HOST_NAME="__HOST_NAME__"
 GATEWAY_TOKEN="__GATEWAY_TOKEN__"
+
+# BE3: token headers never go into curl's argv (readable in /proc by any
+# local user). printf is a builtin and curl reads the header lines from stdin.
+gateway_header() { printf 'X-Gateway-Token: %s\n' "${GATEWAY_TOKEN:-}"; }
+register_headers() {
+  printf 'X-Gateway-Token: %s\n' "${GATEWAY_TOKEN:-}"
+  printf 'X-Enrollment-Token: %s\n' "${ESHU_ENROLL_TOKEN:-}"
+}
 POLL_INTERVAL=30
 
 # Runtime config. The installer bakes a URL, but /etc/eshu/dashboard_url wins so
@@ -2128,8 +2193,8 @@ while true; do
   clean_tickets
 
   # 1. Sync Central Policies
-  HTTP_CODE=$(curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -w "%{http_code}" -o "$POLICY_FILE" \
-       -H "X-Gateway-Token: $GATEWAY_TOKEN" \
+  HTTP_CODE=$(gateway_header | curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -w "%{http_code}" -o "$POLICY_FILE" \
+       -H @- \
        "$DASHBOARD_URL/api/policy/$TARGET_IP")
   POLICY_HASH=""
   POLICY_STALE="1"
@@ -2242,8 +2307,10 @@ while true; do
         # Persist the ID only on a successful launch. The runner pings 'running'
         # immediately, which stops the dashboard re-injecting — so a crash before
         # this echo can never cause a double execution.
+        # BJ2: no token in the unit's ExecStart (world-readable through
+        # `systemctl show`); the runner reads /etc/eshu-token as root.
         if systemd-run --unit="eshu-fleet-$FLEET_CMD_ID" --collect \
-            bash "$FLEET_RUNNER" "$DASHBOARD_URL" "$GATEWAY_TOKEN" "$TARGET_IP" "$FLEET_CMD_ID" "$FLEET_CMD_TIMEOUT" "$FLEET_CMD_FILE" "$FLEET_OUT_FILE" >/dev/null 2>&1; then
+            bash "$FLEET_RUNNER" "$DASHBOARD_URL" "$TARGET_IP" "$FLEET_CMD_ID" "$FLEET_CMD_TIMEOUT" "$FLEET_CMD_FILE" "$FLEET_OUT_FILE" >/dev/null 2>&1; then
           echo "$FLEET_CMD_ID" > /var/run/eshu.last_fleet_cmd
         else
           logger -t eshu-poller "Fleet command #$FLEET_CMD_ID launch failed — will retry"
@@ -2284,8 +2351,8 @@ with open('/etc/eshu-windows.txt.tmp', 'w') as f:
         systemd-run --unit=eshu-uninstall --collect \
           bash "$UNINSTALL_FILE" --uninstall --yes "$DASHBOARD_URL" >/dev/null 2>&1 || true
         # Clear trigger so the restarted poller doesn't re-spawn uninstalls
-        curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -X POST "$DASHBOARD_URL/api/uninstall-started/$TARGET_IP" \
-             -H "X-Gateway-Token: $GATEWAY_TOKEN" >/dev/null 2>&1 || true
+        gateway_header | curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -X POST "$DASHBOARD_URL/api/uninstall-started/$TARGET_IP" \
+             -H @- >/dev/null 2>&1 || true
         rm -f "$UNINSTALL_FILE"
       fi
       exit 0
@@ -2306,10 +2373,9 @@ with open('/etc/eshu-windows.txt.tmp', 'w') as f:
         sudo bash "$UPDATE_FILE" --update 2>&1 | logger -t eshu-poller
         # Register with the version from the updated installer
         NEW_VER=$(curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s "$DASHBOARD_URL/api/version" 2>/dev/null | python3 -c "import sys, json; print(json.load(sys.stdin).get('version','$DASH_VER'))" 2>/dev/null || echo "$DASH_VER")
-        REG_RESP=$(curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -X POST "$DASHBOARD_URL/api/register" \
+        REG_RESP=$(register_headers | curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -X POST "$DASHBOARD_URL/api/register" \
+             -H @- \
              -H "Content-Type: application/json" \
-             -H "X-Gateway-Token: ${GATEWAY_TOKEN:-}" \
-             -H "X-Enrollment-Token: ${ESHU_ENROLL_TOKEN:-}" \
              -d '{"ip":"'"$TARGET_IP"'","hostname":"'"$HOST_NAME"'","version":"'"$NEW_VER"'"}' 2>/dev/null || echo "")
         NEW_TOKEN=$(echo "$REG_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('gateway_token',''))" 2>/dev/null || echo "")
         if [ -n "$NEW_TOKEN" ] && [ "$NEW_TOKEN" != "None" ]; then
@@ -2361,10 +2427,9 @@ with open('/etc/eshu-windows.txt.tmp', 'w') as f:
         rm -f "$DEV_UPDATE_FILE"
         # Re-register with updated version
         NEW_VER=$(curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s "$DASHBOARD_URL/api/version" 2>/dev/null | python3 -c "import sys, json; print(json.load(sys.stdin).get('version','$DASH_VER'))" 2>/dev/null || echo "$DASH_VER")
-        REG_RESP=$(curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -X POST "$DASHBOARD_URL/api/register" \
+        REG_RESP=$(register_headers | curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -X POST "$DASHBOARD_URL/api/register" \
+             -H @- \
              -H "Content-Type: application/json" \
-             -H "X-Gateway-Token: ${GATEWAY_TOKEN:-}" \
-             -H "X-Enrollment-Token: ${ESHU_ENROLL_TOKEN:-}" \
              -d '{"ip":"'"$TARGET_IP"'","hostname":"'"$HOST_NAME"'","version":"'"$NEW_VER"'"}' 2>/dev/null || echo "")
         NEW_TOKEN=$(echo "$REG_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('gateway_token',''))" 2>/dev/null || echo "")
         if [ -n "$NEW_TOKEN" ] && [ "$NEW_TOKEN" != "None" ]; then
@@ -2399,7 +2464,7 @@ with open('/etc/eshu-windows.txt.tmp', 'w') as f:
   WC=$(grep -c . /etc/eshu-windows.txt 2>/dev/null) || true
   case "$WC" in ''|*[!0-9]*) WC=0 ;; esac
   TICKET_FILE=$(mktemp -p "$ESHU_WORK" ticket.XXXXXX)
-  curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -H "X-Gateway-Token: $GATEWAY_TOKEN" "$DASHBOARD_URL/api/poll/$TARGET_IP?wc=$WC" > "$TICKET_FILE"
+  gateway_header | curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -H @- "$DASHBOARD_URL/api/poll/$TARGET_IP?wc=$WC" > "$TICKET_FILE"
   # Only start python when the response actually carries a ticket string. The
   # endpoint always returns {"ticket":null,...}, and parsing that every cycle
   # would keep one unnecessary interpreter start on the loop.
@@ -2478,6 +2543,9 @@ INTERVAL=30
 HTTP_TIMEOUT="${ESHU_HTTP_TIMEOUT:-10}"
 HTTP_CONNECT_TIMEOUT="${ESHU_HTTP_CONNECT_TIMEOUT:-3}"
 
+# BE3: the token header goes on stdin, never in curl's argv.
+gateway_header() { printf 'X-Gateway-Token: %s\n' "${GATEWAY_TOKEN:-}"; }
+
 while true; do
     POLLER_OK=0; GATEWAY_OK=0; CAN_REACH=0
 
@@ -2490,10 +2558,10 @@ while true; do
 
     logger -t eshu-logger "Heartbeat: poller=$POLLER_OK gw=$GATEWAY_OK reach=$CAN_REACH"
 
-    curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -X POST "$DASHBOARD_URL/api/gateway-heartbeat" \
+    { gateway_header | curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -X POST "$DASHBOARD_URL/api/gateway-heartbeat" \
+        -H @- \
         -H "Content-Type: application/json" \
-        -H "X-Gateway-Token: ${GATEWAY_TOKEN:-}" \
-        -d "{\"ip\":\"$TARGET_IP\",\"hostname\":\"$HOST_NAME\",\"poller_ok\":$POLLER_OK,\"gateway_ok\":$GATEWAY_OK,\"can_reach\":$CAN_REACH}" \
+        -d "{\"ip\":\"$TARGET_IP\",\"hostname\":\"$HOST_NAME\",\"poller_ok\":$POLLER_OK,\"gateway_ok\":$GATEWAY_OK,\"can_reach\":$CAN_REACH}" ; } \
         >/dev/null 2>&1 || true
 
     sleep "$INTERVAL"

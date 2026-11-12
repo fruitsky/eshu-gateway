@@ -88,6 +88,46 @@ if ! command -v systemctl >/dev/null 2>&1; then
   exit 1
 fi
 
+# BG1: every authenticated call now sends its token in a header read from
+# stdin (`curl -H @-`, and a private process substitution for the result
+# post). `-H @filename` needs curl 7.55. Older curl accepts the argument
+# shape but silently drops the header, so the token never leaves the host and
+# every registration/poll would 401 with no hint why. Checked once, in every
+# mode that writes to the host, before anything is changed. Uninstall is
+# exempt: removing a gateway must keep working on hosts we no longer install
+# to.
+check_curl_version() {
+  local line ver major minor
+  line=$(curl --version 2>/dev/null | head -n1 || true)
+  ver=${line#curl }; ver=${ver%% *}
+  major=${ver%%.*}
+  minor=${ver#*.}; minor=${minor%%.*}
+  if ! printf '%s' "$major" | grep -qE '^[0-9]+$' \
+     || ! printf '%s' "$minor" | grep -qE '^[0-9]+$'; then
+    echo ""
+    echo "❌ Eshu Gateway requires curl 7.55 or newer, and curl was not found."
+    echo "   Install curl (Debian/Ubuntu: apt-get install curl) and re-run."
+    echo "   Nothing on this host has been changed."
+    echo ""
+    return 1
+  fi
+  if [ "$major" -lt 7 ] || { [ "$major" -eq 7 ] && [ "$minor" -lt 55 ]; }; then
+    echo ""
+    echo "❌ Eshu Gateway requires curl 7.55 or newer; this host has curl $ver."
+    echo "   The gateway reads its token header from stdin (curl -H @-), which"
+    echo "   older curl accepts but silently drops: every call would get 401."
+    echo "   Upgrade curl (Debian/Ubuntu: apt-get update && apt-get install curl)"
+    echo "   and re-run. Nothing on this host has been changed."
+    echo ""
+    return 1
+  fi
+  return 0
+}
+
+if [ "$UNINSTALL" != "yes" ]; then
+  if ! check_curl_version; then exit 1; fi
+fi
+
 # Handle --uninstall immediately before any other logic
 if [ "$UNINSTALL" = "yes" ]; then
   # Extract DASHBOARD_URL from existing gateway script if not provided
@@ -126,10 +166,11 @@ if [ "$UNINSTALL" = "yes" ]; then
     local step="$1"
     local message="${2:-}"
     if [ -n "$DASHBOARD_URL" ]; then
-      curl -m 3 -s -X POST "$DASHBOARD_URL/api/uninstall-progress" \
+      { printf 'X-Gateway-Token: %s\n' "${GATEWAY_TOKEN:-}" \
+          | curl -m 3 -s -X POST "$DASHBOARD_URL/api/uninstall-progress" \
+        -H @- \
         -H "Content-Type: application/json" \
-        -H "X-Gateway-Token: ${GATEWAY_TOKEN:-}" \
-        -d "{\"ip\":\"$TARGET_IP\",\"step\":\"$step\",\"message\":\"$message\"}" >/dev/null 2>&1 || true
+        -d "{\"ip\":\"$TARGET_IP\",\"step\":\"$step\",\"message\":\"$message\"}" ; } >/dev/null 2>&1 || true
     fi
   }
   
@@ -476,10 +517,11 @@ fi
 # REGISTER_STATUS (the HTTP code, 000 when unreachable) and REGISTER_RESPONSE.
 register_gateway() {   # $1 = the X-Gateway-Token to present ('' for none)
   local out
-  out=$(curl --connect-timeout 3 -m 15 -s -w '\n%{http_code}' -X POST "$DASHBOARD_URL/api/register" \
+  out=$({ printf 'X-Gateway-Token: %s\n' "${1:-}"
+           printf 'X-Enrollment-Token: %s\n' "${ESHU_ENROLL_TOKEN:-}" ; } \
+         | curl --connect-timeout 3 -m 15 -s -w '\n%{http_code}' -X POST "$DASHBOARD_URL/api/register" \
+       -H @- \
        -H "Content-Type: application/json" \
-       -H "X-Gateway-Token: ${1:-}" \
-       -H "X-Enrollment-Token: ${ESHU_ENROLL_TOKEN:-}" \
        -d '{"ip":"'"$TARGET_IP"'","hostname":"'"$HOST_NAME"'","version":"'"$GATEWAY_VERSION"'",'"$SSH_REG_CAPS"'}' 2>/dev/null) \
     || out=""
   case "$out" in

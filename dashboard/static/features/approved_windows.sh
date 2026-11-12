@@ -29,7 +29,7 @@ if [ -n "${ESHU_WINDOW_TOKEN:-}" ] && [ -f /etc/eshu-windows.txt ] && [ -s /etc/
 
     # Check expiry
     if [ "${win_xpires:-0}" != "0" ] && [ "${win_xpires:-0}" != "" ] && [ "$now_ts" -ge "${win_xpires:-0}" ]; then
-      logger -t eshu-gateway "WINDOW EXPIRED: token=$ESHU_WINDOW_TOKEN expired at ${win_xpires}"
+      logger -t eshu-gateway "WINDOW EXPIRED: token=${ESHU_WINDOW_TOKEN:0:8} expired at ${win_xpires}"
       _window_reject "window expired"
     fi
 
@@ -95,10 +95,17 @@ if [ -n "${ESHU_WINDOW_TOKEN:-}" ] && [ -f /etc/eshu-windows.txt ] && [ -s /etc/
       #   404  -> token consumed, disabled, expired, or exhausted -> fail closed
       #   network error (000) -> dashboard unreachable -> fail OPEN on the
       #   local cache so windows still work during a dashboard outage.
+      # BJ2: the gateway token stays off curl's argv (header from a process
+      # substitution) and the window token travels in the body, not the URL,
+      # so neither is readable in /proc. The path-token endpoint remains for
+      # gateways that have not taken this installer yet.
       WINDOW_CLAIM_EXIT=0
-      WINDOW_CLAIM_HTTP=$(curl -m 3 -s -o /dev/null -w "%{http_code}" \
-        -X POST "$DASHBOARD_URL/api/approved-windows/execute/$ESHU_WINDOW_TOKEN" \
-        -H "X-Gateway-Token: ${GATEWAY_TOKEN:-}" 2>/dev/null) || WINDOW_CLAIM_EXIT=$?
+      WINDOW_CLAIM_BODY='{"window_token":"'"$ESHU_WINDOW_TOKEN"'"}'
+      WINDOW_CLAIM_HTTP=$(printf '%s' "$WINDOW_CLAIM_BODY" | curl -m 3 -s -o /dev/null -w "%{http_code}" \
+        -X POST "$DASHBOARD_URL/api/approved-windows/execute" \
+        -H @<(printf 'X-Gateway-Token: %s\n' "${GATEWAY_TOKEN:-}") \
+        -H "Content-Type: application/json" \
+        --data-binary @- 2>/dev/null) || WINDOW_CLAIM_EXIT=$?
       # Fail open ONLY when curl itself failed (network down). Any HTTP answer
       # other than 200 — 401/403/404/429/500 — is a refusal.
       if [ "$WINDOW_CLAIM_EXIT" -ne 0 ]; then
@@ -106,13 +113,13 @@ if [ -n "${ESHU_WINDOW_TOKEN:-}" ] && [ -f /etc/eshu-windows.txt ] && [ -s /etc/
       fi
       case "$WINDOW_CLAIM_HTTP" in
         200) ;;
-        000) logger -t eshu-gateway "APPROVED WINDOW CLAIM UNREACHABLE: token=$ESHU_WINDOW_TOKEN — failing open on local cache" ;;
+        000) logger -t eshu-gateway "APPROVED WINDOW CLAIM UNREACHABLE: token=${ESHU_WINDOW_TOKEN:0:8} — failing open on local cache" ;;
         *)
-          logger -t eshu-gateway "APPROVED WINDOW REJECTED: token=$ESHU_WINDOW_TOKEN claim=$WINDOW_CLAIM_HTTP"
+          logger -t eshu-gateway "APPROVED WINDOW REJECTED: token=${ESHU_WINDOW_TOKEN:0:8} claim=$WINDOW_CLAIM_HTTP"
           _window_reject "window claim failed (HTTP $WINDOW_CLAIM_HTTP)"
           ;;
       esac
-      logger -t eshu-gateway "APPROVED WINDOW MATCH: token=$ESHU_WINDOW_TOKEN cmd=$cmd mtype=$win_mtype claim=$WINDOW_CLAIM_HTTP"
+      logger -t eshu-gateway "APPROVED WINDOW MATCH: token=${ESHU_WINDOW_TOKEN:0:8} cmd=$cmd mtype=$win_mtype claim=$WINDOW_CLAIM_HTTP"
       RESULT_PATH="window"
       run_sanitized bash -c "$cmd"
     else

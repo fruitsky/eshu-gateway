@@ -76,6 +76,7 @@ class PollerSandbox:
         self.poll_file = self.root / "poll.json"
         self.feature_file = self.root / "feature.sh"
         self.curl_log = self.root / "curl.log"
+        self.curl_argv_log = self.root / "curl-argv.log"
         self.logger_log = self.root / "logger.log"
         self.python_log = self.root / "python.log"
         self.systemd_log = self.root / "systemd-run.log"
@@ -96,6 +97,8 @@ class PollerSandbox:
     def _write_stubs(self):
         curl = '''#!/bin/bash
 LOG="__LOG__"
+ARGLOG="__ARGLOG__"
+printf '%s\\n' "$*" >> "$ARGLOG"
 POLICY="__POLICY__"
 POLL="__POLL__"
 FEATURE="__FEATURE__"
@@ -105,7 +108,10 @@ while [ $# -gt 0 ]; do
   case "$1" in
     -o) out="$2"; shift 2 ;;
     -w) fmt="$2"; shift 2 ;;
-    -X|-d|-H|-m) shift 2 ;;
+    -H)
+      case "$2" in @-) cat >/dev/null ;; esac
+      shift 2 ;;
+    -X|-d|-m) shift 2 ;;
     --connect-timeout) shift 2 ;;
     -s) shift ;;
     -*) shift ;;
@@ -145,6 +151,7 @@ else
 fi
 '''
         curl = (curl.replace("__LOG__", str(self.curl_log))
+                    .replace("__ARGLOG__", str(self.curl_argv_log))
                     .replace("__POLICY__", str(self.policy_file))
                     .replace("__POLL__", str(self.poll_file))
                     .replace("__FEATURE__", str(self.feature_file))
@@ -269,6 +276,12 @@ exit 0
         if not self.systemd_log.exists():
             return []
         return [line for line in self.systemd_log.read_text().splitlines() if line]
+
+    def argv_calls(self):
+        """Every curl invocation's argv, one line per call (BE3)."""
+        if not self.curl_argv_log.exists():
+            return []
+        return self.curl_argv_log.read_text().splitlines()
 
     def curl_out_pairs(self):
         if not self.curl_log.exists():
@@ -429,6 +442,21 @@ def test_malformed_json_does_not_advance_the_stamp(poller):
     assert poller.read("eshu-freeze").strip() == "1"
 
 
+def test_bj2_the_fleet_unit_args_never_carry_the_token(poller):
+    """BJ2: `systemctl show` exposes a transient unit's ExecStart to any user."""
+    poller.policy(policy_body(pending_fleet_cmd_id=7,
+                              pending_fleet_cmd="echo fleet"))
+    poller.run()
+    args = [a for a in poller.systemd_args() if "eshu-fleet-7" in a]
+    assert args, poller.systemd_args()
+    joined = " ".join(args)
+    assert "test-token" not in joined
+    # The runner still gets the IP, id, timeout, command file and output file.
+    assert "10.0.0.1" in joined
+    assert "eshu-fleet-7.sh" in joined
+    assert "eshu-fleet-out-7.txt" in joined
+
+
 # ── JIT tickets ─────────────────────────────────────────────────────────────
 def test_null_ticket_starts_no_python(poller):
     poller.policy(policy_body())
@@ -569,3 +597,27 @@ def test_ticket_poll_counts_windows(poller):
     poller.run()
     polls = [u for u, _ in poller.curl_out_pairs() if "/api/poll/" in u]
     assert polls and polls[-1].endswith("wc=2")
+
+
+def test_be3_the_poller_token_is_never_in_curl_argv(tmp_path):
+    """BE3: the policy and ticket polls keep the token off curl's argv."""
+    sandbox = PollerSandbox(tmp_path)
+    sandbox.run()
+    args = sandbox.argv_calls()
+    assert args, "no curl call recorded"
+    assert any("/api/policy/" in line for line in args)
+    assert any("/api/poll/" in line for line in args)
+    for line in args:
+        assert "test-token" not in line, line
+        assert "X-Gateway-Token" not in line, line
+        assert "X-Enrollment-Token" not in line, line
+
+
+def test_be3_no_script_puts_a_token_header_in_curl_argv():
+    """The rule as a text check, so a new call site cannot slip in."""
+    for path in ("dashboard/eshu-gateway.sh", "dashboard/eshu-poller.sh",
+                 "dashboard/eshu-logger.sh",
+                 "dashboard/eshu-installer-template.sh"):
+        text = (Path(__file__).resolve().parent.parent / path).read_text()
+        for needle in ('-H "X-Gateway-Token', "-H \"X-Enrollment-Token"):
+            assert needle not in text, (path, needle)

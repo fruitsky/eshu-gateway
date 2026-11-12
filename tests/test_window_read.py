@@ -167,6 +167,39 @@ class TestAtomicWindowConsumption:
         # The old fire-and-forget notify must be gone.
         assert '>/dev/null 2>&1 || true' not in src.split('WINDOW_CLAIM_HTTP')[0]
 
+    def test_bj2_the_window_token_can_claim_from_the_body(self, auth_client, gateway_headers):
+        """BJ2: new gateways POST the token in the body, not the URL path."""
+        import time
+        now = int(time.time())
+        r = auth_client.post("/api/approved-windows", json={
+            "target_ip": "10.0.0.1", "command": "uptime", "match_type": "exact",
+            "window_start": now - 10, "window_end": now + 3600, "max_executions": 1
+        })
+        token = r.json()["token"]
+        claimed = auth_client.post("/api/approved-windows/execute",
+                                   json={"window_token": token},
+                                   headers=gateway_headers)
+        assert claimed.status_code == 200, claimed.text
+        again = auth_client.post("/api/approved-windows/execute",
+                                 json={"window_token": token},
+                                 headers=gateway_headers)
+        assert again.status_code == 404
+        # The path-token form still works for gateways installed before BJ2.
+        r2 = auth_client.post("/api/approved-windows", json={
+            "target_ip": "10.0.0.1", "command": "date", "match_type": "exact",
+            "window_start": now - 10, "window_end": now + 3600, "max_executions": 1
+        })
+        token2 = r2.json()["token"]
+        assert auth_client.post(f"/api/approved-windows/execute/{token2}",
+                                headers=gateway_headers).status_code == 200
+
+    def test_bj2_the_script_keeps_the_tokens_out_of_the_url_and_argv(self):
+        src = _read_feature()
+        assert "/execute/$ESHU_WINDOW_TOKEN" not in src
+        assert "-H @<(printf" in src
+        assert "--data-binary @-" in src
+        assert "window_token" in src
+
     def test_single_use_execute_rejects_second_claim(self, client, auth_client, gateway_headers):
         # Server-side atomicity: the second /execute call for a max_executions=1
         # window must fail (404) so a gateway that checks the response fails

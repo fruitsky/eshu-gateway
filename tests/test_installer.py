@@ -302,7 +302,14 @@ def _run_register(tmp_path, responses, script_token=None, env_token="",
     log = tmp_path / "calls"
     _stub(bindir, "curl", r"""
 n=$(ls "%(log)s".* 2>/dev/null | wc -l)
+_stdin=""
+for a in "$@"; do
+  case "$a" in @-) _stdin=$(cat) ;; esac
+done
 for a in "$@"; do printf '%%s\n' "$a"; done > "%(log)s.$n"
+if [ -n "$_stdin" ]; then
+  printf '@stdin@%%s\n' "$(printf '%%s' "$_stdin" | base64 -w0)" >> "%(log)s.$n"
+fi
 [ -s "%(replies)s/$n" ] || exit 7
 cat "%(replies)s/$n"
 """ % {"log": log, "replies": replies})
@@ -336,7 +343,16 @@ NEW = "b" * 64
 
 
 def _header(call, name):
-    return [a for a in call if a.startswith(name + ":")]
+    """Header lines the stub received on stdin (BE3 moved them off argv)."""
+    import base64
+    found = []
+    for arg in call:
+        if not arg.startswith("@stdin@"):
+            continue
+        text = base64.b64decode(arg[len("@stdin@"):]).decode()
+        found.extend(line for line in text.splitlines()
+                     if line.lower().startswith(name.lower() + ":"))
+    return found
 
 
 def test_rr1_update_presents_the_installed_token(tmp_path):
@@ -462,6 +478,21 @@ DASHBOARD_SSH_PUB="%s"
     proc = subprocess.run(["bash", str(harness)], capture_output=True,
                           text=True, env=env, timeout=60, stdin=subprocess.DEVNULL)
     return proc, original, ak.read_text()
+
+
+def test_be3_the_register_token_is_never_in_curl_argv(tmp_path):
+    """BE3: the installer's register call keeps both tokens off argv."""
+    token = "tok-secret-value"
+    proc, calls, _ = _run_register(
+        tmp_path, ['{"status":"ok"}\n200'], script_token=token,
+        enroll="enroll-secret")
+    assert calls, "no curl call recorded"
+    for argv in calls:
+        joined = " ".join(a for a in argv if not a.startswith("@stdin@"))
+        assert token not in joined, joined
+        assert "enroll-secret" not in joined, joined
+        assert "X-Gateway-Token:" not in joined, joined
+        assert "X-Enrollment-Token:" not in joined, joined
 
 
 def test_be1_failed_registration_leaves_authorized_keys_untouched(tmp_path):
@@ -760,3 +791,113 @@ def test_be4_safe_replace_refuses_a_symlinked_target(tmp_path):
                    timeout=30, stdin=subprocess.DEVNULL)
     assert target.read_text() == "new\n"
     assert oct(target.stat().st_mode & 0o777) == "0o600"
+# ── BG1: curl 7.55 for `-H @-` ─────────────────────────────────────────────
+
+def _run_curl_check(tmp_path, version, with_curl=True):
+    """Run the real preflight function with a stub `curl --version`."""
+    src = _read("dashboard/eshu-installer-template.sh")
+    body = _function(src, "check_curl_version")
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    if with_curl:
+        _stub(bindir, "curl",
+              'if [ "$1" = "--version" ]; then printf "curl %s (x86_64-pc-linux-gnu) libcurl/%s\n" "%s" "%s"; fi'
+              % (version, version, version, version))
+        path = "%s:%s" % (bindir, os.environ.get("PATH", "/usr/bin:/bin"))
+    else:
+        # Only the two text tools the check uses, and no curl at all.
+        for tool in ("bash", "head", "grep"):
+            (bindir / tool).symlink_to(shutil.which(tool))
+        path = str(bindir)
+    harness = tmp_path / "harness.sh"
+    harness.write_text(body + "\ncheck_curl_version\n")
+    env = {"PATH": path}
+    return subprocess.run(["bash", str(harness)], capture_output=True,
+                          text=True, env=env, timeout=60)
+
+
+def test_bg1_curl_755_passes(tmp_path):
+    proc = _run_curl_check(tmp_path, "7.55.0")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_bg1_a_newer_curl_passes(tmp_path):
+    proc = _run_curl_check(tmp_path, "8.5.0")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_bg1_curl_752_is_refused_with_the_version_and_a_reason(tmp_path):
+    """BG1: older curl silently drops a `-H @-` header, so every call 401s.
+
+    The installer must stop before touching the host, and say what it found.
+    """
+    proc = _run_curl_check(tmp_path, "7.52.0")
+    assert proc.returncode == 1, proc.stdout
+    assert "requires curl 7.55 or newer" in proc.stdout
+    assert "7.52.0" in proc.stdout
+    assert "Nothing on this host has been changed" in proc.stdout
+
+
+def test_bg1_curl_750_is_refused(tmp_path):
+    proc = _run_curl_check(tmp_path, "7.50.1")
+    assert proc.returncode == 1
+    assert "7.50.1" in proc.stdout
+
+
+def test_bg1_curl_754_is_refused(tmp_path):
+    """The security reviewer's exact case: 7.54 gets a clear refusal."""
+    proc = _run_curl_check(tmp_path, "7.54.0")
+    assert proc.returncode == 1, proc.stdout
+    assert "7.54.0" in proc.stdout
+
+
+def test_bg1_no_write_can_run_before_the_check():
+    """The check runs before anything on the host can change.
+
+    Security's condition was that a 7.54 host leaves every installed file
+    byte-identical. This proves the stronger property: the script has no
+    top-level write before the check, so reaching it is the only way past
+    it. Function definitions are skipped, because defining
+    `eshu_safe_replace`/`write_gateway` writes nothing.
+    """
+    src = _read("dashboard/eshu-installer-template.sh")
+    idx = src.index("if ! check_curl_version; then exit 1; fi")
+    depth = 0
+    for line in src[:idx].splitlines():
+        stripped = line.strip()
+        if depth == 0:
+            if stripped.startswith("#"):
+                continue
+            if re.match(r"^[A-Za-z_][A-Za-z0-9_]*\(\)\s*\{", stripped):
+                depth = max(0, stripped.count("{") - stripped.count("}"))
+                continue
+            for primitive in ("mkdir ", "useradd ", "chown ", "chmod ", "rm ",
+                              "mv ", "cp ", "install -", "systemctl enable",
+                              "systemctl start", "systemctl daemon-reload",
+                              "eshu_safe_replace ", "write_gateway;", "cat >"):
+                assert primitive not in line, (primitive, line)
+        else:
+            depth = max(0, depth + stripped.count("{") - stripped.count("}"))
+
+
+def test_bg1_a_missing_curl_is_refused(tmp_path):
+    proc = _run_curl_check(tmp_path, "", with_curl=False)
+    assert proc.returncode == 1
+    assert "curl was not found" in proc.stdout
+
+
+def test_bg1_the_check_runs_in_install_reinstall_and_update_before_changes():
+    """The version check sits in the preflight, exempting only --uninstall."""
+    src = _read("dashboard/eshu-installer-template.sh")
+    check = 'if [ "$UNINSTALL" != "yes" ]; then\n  if ! check_curl_version; then exit 1; fi\nfi'
+    assert check in src
+    # Before the uninstall branch (the first thing that could change a host
+    # is after both), and before any write.
+    assert src.index("check_curl_version; then exit 1") < src.index(
+        "# Handle --uninstall immediately before any other logic")
+    assert src.index("check_curl_version; then exit 1") < src.index(
+        "useradd -m -s /bin/bash")
+    # The mode flags are parsed above it, so install, reinstall, update and
+    # migrate all pass through it.
+    assert src.index('if [[ "${1:-}" == "--update" ]]') < src.index(
+        "check_curl_version; then exit 1")

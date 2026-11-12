@@ -21,6 +21,9 @@ INTERVAL=30
 HTTP_TIMEOUT="${ESHU_HTTP_TIMEOUT:-10}"
 HTTP_CONNECT_TIMEOUT="${ESHU_HTTP_CONNECT_TIMEOUT:-3}"
 
+# BE3: the token header goes on stdin, never in curl's argv.
+gateway_header() { printf 'X-Gateway-Token: %s\n' "${GATEWAY_TOKEN:-}"; }
+
 while true; do
     POLLER_OK=0; GATEWAY_OK=0; CAN_REACH=0
 
@@ -33,10 +36,10 @@ while true; do
 
     logger -t eshu-logger "Heartbeat: poller=$POLLER_OK gw=$GATEWAY_OK reach=$CAN_REACH"
 
-    curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -X POST "$DASHBOARD_URL/api/gateway-heartbeat" \
+    { gateway_header | curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -X POST "$DASHBOARD_URL/api/gateway-heartbeat" \
+        -H @- \
         -H "Content-Type: application/json" \
-        -H "X-Gateway-Token: ${GATEWAY_TOKEN:-}" \
-        -d "{\"ip\":\"$TARGET_IP\",\"hostname\":\"$HOST_NAME\",\"poller_ok\":$POLLER_OK,\"gateway_ok\":$GATEWAY_OK,\"can_reach\":$CAN_REACH}" \
+        -d "{\"ip\":\"$TARGET_IP\",\"hostname\":\"$HOST_NAME\",\"poller_ok\":$POLLER_OK,\"gateway_ok\":$GATEWAY_OK,\"can_reach\":$CAN_REACH}" ; } \
         >/dev/null 2>&1 || true
 
     sleep "$INTERVAL"
