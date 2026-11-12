@@ -10985,6 +10985,75 @@ The feature reviewer walks both screens with the operator before the design is w
 
 ---
 
+## Chunk X4 — Agents page; Controls becomes Command policy · slug `agents-page` · dashboard UI · no semantics change
+
+### Goal
+
+Everything about one agent sits in one place. Today it is spread over
+Settings (tokens and the policy modal), Controls (the web-fetch allowlist)
+and, since `fix/agent-ssh-hosts`, the modal's SSH tab. Integrations keeps
+onboarding and tool configuration only.
+
+### Scope
+
+* **Agents** in the main navigation (next to Inventory and Runbooks).
+* **List:** one row per token. It shows the name, active/revoked, last used,
+  and a summary: tools (all or N), rate limit, SSH (off, N gateways or any, plus
+  the mode), and web fetch (on or off).
+* **Detail**, with sections that save through the **existing** endpoints:
+  * Token: create, revoke and delete, moved from Settings, which keeps a link.
+  * Tools, Rules (argument rules, approval and rate limit), SSH and Advanced:
+    the current modal's tabs.
+  * Web: the per-agent web-fetch allowlist, moved from Controls through the
+    same endpoint, so `_sync_web_fetch_access` still runs.
+  * Activity (read-only): the last 20 requests and integration calls, and
+    the agent's open sessions, linked to History.
+* **Controls → Command policy.** Rename the navigation item and the page
+  title. After the web-fetch move, the page holds only the fleet-wide SSH
+  command rules: the exact and regex allowlists, the blocklist and the tester.
+  "SSH allowlist" would undersell the blocklist. Leave a one-line pointer
+  where the web section was. The view id may stay `controls`; deep links
+  keep working.
+* **Save isolation:** saving one section never resets another. There is a
+  test both ways (Tools ↔ SSH, Tools ↔ Web).
+* **Layout:** no horizontal scroll at phone width or at 100% zoom on a
+  1440 px viewport.
+
+**Out of scope:** what any setting means, new permissions, gateway scripts.
+X3 (what each approval choice really does) builds on this page once F27 is
+signed off; X4 does not change approval wording.
+
+---
+
+## Chunk X5 — UI fixes from the Release 1.2 test round · slug `ui-test-round` · dashboard UI
+
+Found by the operator on 2026-11-12. These are small, independent fixes:
+
+1. **Session modal:** a long conclusion overflows the modal. The body must
+   scroll inside the card, and the footer (Confirm/Edit/Reject, the id)
+   stays in the card.
+2. **Plans on the Approvals view:** pending plans render **above** the
+   starfield. They belong in the JIT list area, with the other pending items.
+3. **Session modal "How approved" chips:** the zero-count chips (fleet lane,
+   session override, host override, window, fleet run) are unreadable: dark
+   text on dark fill. Use the muted text token for zero, and keep contrast at
+   4.5:1 or above for every chip in both themes.
+4. **Runbook modal:** too little contrast and separation. Give each step a
+   clear card or rule with spacing, show the host as a readable label rather
+   than faint grey, and make the outcome line visibly distinct from the
+   command.
+5. **Per-gateway freeze:** the operator could not find how to freeze one
+   gateway and froze the fleet. Either add a Freeze control on the gateway row
+   or details, if the engine supports a per-gateway freeze, or say in
+   the freeze dialog that it is fleet-wide and where the per-gateway
+   alternative is.
+6. **Gateways table at 100% zoom** (Surface Laptop 7): the Modes and Actions
+   columns are clipped. The table must fit, or scroll inside its own
+   container, with Changes/Remove always reachable. Collapse the read-lane
+   and capture selects into the details view if needed.
+
+---
+
 ## Gateway hardening (AF3, tee capture) · branch `fix/gateway-hardening` · gateway bash · **security reviewer sign-off**
 
 Two items left over from earlier sign-offs: AF3 (F19 sign-off, `67bec51`) and
@@ -11461,6 +11530,8 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 18a | X2 | runbooks-page | dashboard UI | **Merged** 2026-11-11 | `feat/x2-runbooks-page` | F13 | |
 | 18b | F27 | allowances | dashboard + MCP | Design first (from live use: P2 caught HA call_service) | `feat/f27-allowances` | F10 (P2), Chunk H, F18 | + security sign-off; next design after F21/F22 code |
 | 18c | X3 | integrations-ui | dashboard UI | Requested 2026-11-12; design after F27 is signed off | `feat/x3-integrations-ui` | F27, F10 (P2) | operator walk-through first |
+| 18d | X4 | agents-page | dashboard UI | Requested 2026-11-12; ready for code | `feat/x4-agents-page` | `fix/agent-ssh-hosts` | rename Controls → Command policy |
+| 18e | X5 | ui-test-round | dashboard UI | Found in the 1.2 test round 2026-11-12; ready for code | `fix/x5-ui-test-round` | — | six small fixes |
 | 19 | F22 | change-checks | dashboard + MCP | After F19 merges | `feat/f22-change-checks` | F3, F5, F12, F19 | + security sign-off (the unattended check; AG1's origin rule does not cover it) |
 | 20 | F16 | recipes | dashboard + MCP | Design complete (security Round 4; feature reviewer Round 5 with AA1/AA2); code next after F22 | `feat/f16-recipes` | F3, F12, F13, F19 | main line; steps claim by request id; code comes back to security; auto_run comes back to security |
 | 21 | F24 | content-tripwire | dashboard | Design first | `feat/f24-content-tripwire` | F12, F14 | + security sign-off (retention) |
