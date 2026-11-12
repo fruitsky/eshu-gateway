@@ -15,8 +15,9 @@ set -u
 DASHBOARD_URL="$1"
 # Older pollers passed the token as $2. Accept that shape for the one update
 # cycle before the installer replaces them, but never use the argument: an IP
-# contains a dot, a token cannot, so the two shapes are distinguishable.
-if [ -n "${2:-}" ] && [ "${2#*.}" != "$2" ]; then
+# contains a dot or a colon (IPv4/IPv6), a token has neither, so the two
+# shapes are distinguishable.
+if [ -n "${2:-}" ] && [ "${2#*[.:]}" != "$2" ]; then
   TARGET_IP="$2"
   CMD_ID="$3"
   TIMEOUT="${4:-180}"

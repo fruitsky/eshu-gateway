@@ -11579,6 +11579,19 @@ element.
 fix; the poller test file keeps both sides: the `WC`/whitespace-stub tests and
 the BE3 argv tests).
 
+**Nit — IPv6 in the old-shape check (2026-11-13).** The fleet runner tells the
+new poller's argv from the old one by whether `$2` looks like an address: the
+old shape put the token there, the new shape puts `TARGET_IP`. The test was
+`${2#*.} != $2`, so an IPv6 target (`2001:db8::5`, no dot) was read as an old
+token and the runner shifted every later argument. It now treats `:` like `.`
+(`${2#*[.:]}`); a token contains neither. Tests:
+`tests/test_bj2_fleet_argv.py::test_bj2_an_ipv6_target_is_an_address_not_a_token`
+(the address and command id reach python) alongside the old-shape test. The
+runner is served statically, so the four installers do not change; they were
+regenerated to confirm it.
+
+`bash scripts/verify.sh`: GATE_COUNT_NIT
+
 **BG1 — the curl floor.** `-H @-` (and `-H @file`) needs curl 7.55. Older
 curl accepts the argument shape and silently sends no header, so the token
 never leaves the host and every registration or poll 401s with no clue. The
