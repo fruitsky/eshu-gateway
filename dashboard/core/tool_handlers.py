@@ -1154,6 +1154,14 @@ def _h_ha_whoami(integration, tool, args, ctx=None):
     return run_whoami(integration, ctx or {})
 
 
+def _register_ha_config():
+    """F11 handlers live in their own module; register them late so the
+    import cannot cycle (they only need `core.ha_config_ssh`)."""
+    from core.ha_config_handlers import HANDLERS as H, PREFLIGHTS as P
+    HANDLERS.update(H)
+    PREFLIGHT.update(P)
+
+
 HANDLERS = {
     'pihole_local_dns_records': _h_pihole_local_dns_records,
     'ha_supervisor_read': _h_ha_supervisor_read,
@@ -1290,6 +1298,9 @@ PREFLIGHT = {
     'ha_lovelace_delete_dashboard': _preflight_delete_dashboard,
     'arr_quality_definition_update': _preflight_quality_definition_update,
 }
+
+
+_register_ha_config()
 
 
 def _ctx(agent, session_id, execution_id, reason='', approval='', decided_at=0,

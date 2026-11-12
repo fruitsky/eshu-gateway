@@ -10142,6 +10142,97 @@ can read the rule that matters before the transport exists.
 `bash scripts/verify.sh`: `2890 passed, 26 skipped, 8 warnings in 584.01s
 (0:09:44)`.
 
+### Code round, part 2 — the transport, tools and tests (implementer notes)
+
+Built on the same branch, rebased onto the merge stack (`bc62d54`, F22's tip).
+
+* **`core/ssh_client.py`** is the one hardening path for F12 and F11:
+  `-F /dev/null`, `BatchMode=yes`, `IdentitiesOnly=yes`,
+  `StrictHostKeyChecking=yes`, `UserKnownHostsFile=<pin>`,
+  `GlobalKnownHostsFile=/dev/null`, `ConnectTimeout=10`,
+  `ServerAliveInterval=15`, `LogLevel=ERROR`, a private key file, no local
+  shell, and the process-group kill on timeout. `core/ssh_exec.build_argv` /
+  `run_ssh` now delegate to it (F12's tests unchanged); F11 adds the login
+  user and the port.
+* **`core/ha_config_ssh.py`**:
+  * `target()` reads `base_url` (`host` or `host:port`) and
+    `config_json.ssh_user`/`ssh_port`; the private key is the integration's
+    `secret` and is written to a `0600` file in `ssh_keys.ensure_key_dir()`
+    (`0700`) for the call, then removed in `finally`.
+  * **TOFU**: with no pin, the first connection runs `accept-new`, records
+    the host key line and its `SHA256:` fingerprint in `config_json`, and
+    audits `ha_config_pin`. A later mismatch is `ssh_host_key_changed` and
+    audited. A write or restore with no pin refuses **before connecting**
+    (`ssh_host_unpinned`), so trust is only ever established by a read.
+  * **path policy**: `check_read_path` mirrors the part-1 write rules
+    (`/config` and `/config/packages`, `.yaml`/`.yml`, no dot/empty/`..`
+    segments, no `.storage`/`.ssh`/`deps`/`tts`, no `*.db*`); the read runs
+    a remote `realpath` + `stat` first and refuses when the resolved path is
+    not the expected root path or the target is not a regular file (W4:
+    relative to `/homeassistant`, because `/config` is a symlink).
+  * **one script per write** (H2/U1–U4/W1–W4): `WRITE_SCRIPT` keeps the
+    path, expected hash, backup name and temp name as positional arguments,
+    checks every one of them, verifies the directory is
+    `/homeassistant`/`packages/…`, requires the basename to be unchanged,
+    hashes before the backup, writes the content from **stdin**, copies
+    mode/owner with BusyBox `stat`/`chmod`, `mv`s into place, then
+    `timeout 100 ha core check`; a failed check restores the backup and
+    exits 18. Exit codes 10–19 are mapped to stable tool errors; an exit
+    outside that range (or a client timeout) leaves the backup and enters
+    `config_state_unknown`.
+  * **restore** uses the same preamble and a second temp copy: copy the
+    current file to the temp, copy the backup in, check, and on a failed
+    check copy the temp back.
+  * **the unresolved state**: a timeout or unknown exit records
+    `{path, old_sha, new_sha, backup}` in `ha_config_state_<integration>`;
+    writes and restores are refused (`config_state_unknown` naming the
+    backup) until a `ha_config_read` of that path shows the old or new hash
+    and clears it.
+  * **one in-flight write** per integration (a non-blocking lock;
+    `config_busy` for a second call).
+  * **H5**: a write clears `ha_check_config_<integration>` before it
+    connects; only the post-write check (or `ha_config_check`) may write
+    `valid` again. The F10 restart guard reads the same key, and the tests
+    exercise it.
+  * every call records an integration-call row (template name as `path`,
+    scrubbed 8 KiB tail, bytes, exit code) and the audit events
+    `ha_config_write` / `ha_config_restore` / `ha_config_check` /
+    `ha_config_rollback` / `ha_config_state_unknown`; content never enters
+    an audit row.
+* **`core/ha_ssh_seed.py`** is the `ha_ssh` catalog (list, read, write,
+  restore, check) and `core/ha_config_handlers.py` the handlers; write and
+  restore are `always_gate`, their preflights run the dry-run read and return
+  the card's `_summary` (path, hashes, risky keys, diff), and a stale hash
+  refuses at preflight so a doomed write is never queued. `ha_ssh` is in
+  `NO_GENERIC_KINDS`, so no generic HTTP passthrough is seeded.
+* **Setup doc** `docs/HA_CONFIG_SSH.md`; the integration form has an
+  `ha_ssh` profile. The key is a PEM, so the doc shows creating the
+  integration through the API (the form's single-line secret field is not
+  suitable for a PEM).
+* **Tests** `tests/test_f11_ha_config_ssh.py` (24): read path acceptance and
+  refusals; TOFU pin + fingerprint; write without a pin refuses with no SSH
+  call; changed host key refuses and audits; the configured user/port/pin in
+  the runner; read/hash; `secrets.yaml` masking (the real hash is still
+  returned); a symlinked path refused; dry-run diff with no write; a stale
+  hash refuses before the script; a successful write (backup, stdin, 120 s,
+  audit); exit 18 rolls back and audits; a client timeout enters unknown
+  state and a second write is refused; an unknown exit is unknown state; a
+  frozen fleet refuses writes while reads work; restore name validation and
+  success; a passing check makes F10's restart guard fresh and a failing one
+  does not; a write clears the earlier check; the two gated tools and their
+  handlers; the preflight summary/diff and its stale-hash refusal; the
+  scripts' BusyBox-safe shape (no `find /config `, `timeout 100 ha core
+  check`, no `rm -rf`); path quoting.
+
+Known limits, deliberate and listed for the next round: no CI step that runs
+the scripts under BusyBox (the scripts are asserted textually); no re-pin UI
+(the pin is updated through the integration's config); no backup-retention
+pruning (nothing deletes a `.eshu-*.bak`); the pending-state is reported in
+refusals and audit, not yet shown on the integration page.
+
+`bash scripts/verify.sh`: `3023 passed, 26 skipped, 7 warnings in 630.05s
+(0:10:30)`.
+
 ---
 
 ## Chunk F12 — SSH through Eshu over MCP (`ssh_exec`) · slug `ssh-exec` · dashboard (+ small gateway change)
@@ -17046,7 +17137,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 10 | F8 | test-traffic | dashboard | Merged | `feat/f8-test-traffic` | — | low priority |
 | 11 | F9 | ha-supervisor-read | dashboard | Merged | `feat/f9-ha-supervisor-read` | — | token is now a dedicated `eshu` HA admin user |
 | 12 | F10 | ha-supervisor-actions | dashboard | Ready (after F9) | `feat/f10-ha-supervisor-actions` | F9, F3, Chunk H | reviewer pass + security reviewer sign-off |
-| 13 | F11 | ha-config-files | dashboard | Code round **part 1**: the preflight and path policy (AT1, BC1, the include/`env_var`/tag refusals, H4 risky keys) — on the rebased branch; the transport, six scripts, tools and live tests are next | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | security reads the preflight; part 2 (transport/tools) follows |
+| 13 | F11 | ha-config-files | dashboard | Code round: preflight/path policy (AT1, BC1, H4) + transport (shared hardened ssh client, TOFU pin, key temp), the fixed write/restore scripts with automatic rollback, list/read/write/restore/check tools, F10 check-key coupling, tests and setup doc | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | security reads the transport/scripts |
 | 14 | F14 | inventory | dashboard + MCP | Merged | `feat/f14-inventory` | Chunk H | |
 | 15 | F19 | unattended-limits | gateway + dashboard | **Merged** 2026-11-11 (security sign-off `67bec51`; AF1/AF2 checked) | `feat/f19-unattended-limits` | F4, F5, F12 | AF3 goes on the next gateway branch |
 | 16 | F15 | probes | dashboard + MCP | **Merged** 2026-11-11 (AG1 security decision `eca8982`; AI1 fix merged) | `feat/f15-probes` | F4, F12, F14 | |

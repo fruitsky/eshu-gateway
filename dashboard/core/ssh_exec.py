@@ -167,23 +167,13 @@ def capability_problem(gateway: dict) -> str:
 
 def build_argv(gateway: dict, command_line: str, known_hosts: str,
                key_path: str) -> list:
-    """The fixed ssh argv. The IP, never a hostname (no DNS at call time)."""
-    return [
-        'ssh',
-        '-F', '/dev/null',
-        '-i', key_path,
-        '-l', 'eshu-gateway',
-        '-o', 'BatchMode=yes',
-        '-o', 'IdentitiesOnly=yes',
-        '-o', 'StrictHostKeyChecking=yes',
-        '-o', f'UserKnownHostsFile={known_hosts}',
-        '-o', 'GlobalKnownHostsFile=/dev/null',
-        '-o', 'ConnectTimeout=10',
-        '-o', 'ServerAliveInterval=15',
-        '-o', 'LogLevel=ERROR',
-        gateway.get('ip') or '',
-        command_line,
-    ]
+    """The fixed ssh argv. The IP, never a hostname (no DNS at call time).
+
+    The argv itself lives in `core/ssh_client` so F11's HA config tools use
+    exactly the same hardening.
+    """
+    from core.ssh_client import build_argv as _build
+    return _build(gateway, command_line, known_hosts, key_path)
 
 
 def run_ssh(gateway: dict, command_line: str, known_hosts: str,
@@ -194,31 +184,8 @@ def run_ssh(gateway: dict, command_line: str, known_hosts: str,
     agent waits; it does **not** stop the remote command (F19 is the real
     bound), which the design states explicitly.
     """
-    argv = build_argv(gateway, command_line, known_hosts, key_path)
-    env = {'PATH': os.environ.get('PATH', '/usr/bin:/bin'), 'LANG': 'C',
-           'HOME': ssh_keys.key_dir()}
-    try:
-        proc = subprocess.Popen(
-            argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, text=True, errors='replace',
-            start_new_session=True, env=env)
-    except OSError as exc:
-        return {'rc': 127, 'stdout': '', 'stderr': str(exc), 'timed_out': False}
-    try:
-        out, err = proc.communicate(timeout=timeout)
-        return {'rc': proc.returncode, 'stdout': out or '',
-                'stderr': err or '', 'timed_out': False}
-    except subprocess.TimeoutExpired:
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except OSError:
-            pass
-        try:
-            out, err = proc.communicate(timeout=5)
-        except subprocess.TimeoutExpired:
-            out, err = '', ''
-        return {'rc': 124, 'stdout': out or '', 'stderr': err or '',
-                'timed_out': True}
+    from core.ssh_client import run_ssh as _run
+    return _run(gateway, command_line, known_hosts, key_path, timeout)
 
 
 # ── the envelope (§8) ───────────────────────────────────────────────────
