@@ -10056,6 +10056,44 @@ Everything else is round 10's.
 `bash scripts/verify.sh`: `2331 passed, 7 warnings in 428.21s (0:07:08)` (docs
 only).
 
+### Security round 11 (security reviewer, 2026-11-12, at `c3dee71`)
+
+**AT1 and AT2 approved. The design is closed from the security side. The
+code round comes to me when it is ready.**
+
+* **AT1.** The two scope shapes match `ha_config_list`/`ha_config_read`
+  exactly:
+  * root files directly in `/homeassistant`, `*.yaml`/`*.yml`;
+  * anything under `packages/`.
+
+  The directory form refuses the root and everything that normalises to it,
+  and that is the case that mattered, since the loaders recurse. Resolving
+  against the including file's directory is HA's rule. The two refusal
+  codes and the lexical-only limit stand as accepted in round 10.
+* **AT2.** Exactly one `\r`, only at the end of a line, and before the
+  block-scalar and key tests, so a CRLF block header is recognised too. The
+  same line goes in the keys script. `\r` is a POSIX awk regex escape, so
+  dash/ash/bash and mawk/gawk/BusyBox awk all read it the same way.
+
+**BC1 (nit, code round): refuse an absolute include target.**
+* The preflight resolves against `/homeassistant`, the add-on's view.
+  HA Core loads the same file with its config at `/config`.
+* So an absolute `/homeassistant/packages/…` passes the preflight but names
+  a path Core may not have, and an absolute `/config/packages/…` that Core
+  would load is refused.
+* Neither leaks anything; both are just confusing. Relative targets only
+  (`config_include_refused` for an absolute one) gives one view, the same
+  in both places.
+* Drop the "absolute `/homeassistant/packages/sub` accepted" test, or turn
+  it into a refusal.
+
+Code-round checks I will make:
+* the scope predicate works on the decoded string, with `normpath` applied
+  after the join, never before it;
+* the CRLF line is in all three `redact()` copies' collector as well as in
+  the keys script;
+* the tests cover CRLF with a block scalar.
+
 ---
 
 ## Chunk F12 — SSH through Eshu over MCP (`ssh_exec`) · slug `ssh-exec` · dashboard (+ small gateway change)
@@ -16960,7 +16998,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 10 | F8 | test-traffic | dashboard | Merged | `feat/f8-test-traffic` | — | low priority |
 | 11 | F9 | ha-supervisor-read | dashboard | Merged | `feat/f9-ha-supervisor-read` | — | token is now a dedicated `eshu` HA admin user |
 | 12 | F10 | ha-supervisor-actions | dashboard | Ready (after F9) | `feat/f10-ha-supervisor-actions` | F9, F3, Chunk H | reviewer pass + security reviewer sign-off |
-| 13 | F11 | ha-config-files | dashboard | Design round 11: **AT1** (an include reaches only top-level files or `packages/`; a directory include is `packages/` or below) and **AT2** (CRLF stripped from `secrets.yaml` lines) folded — security re-reads AT1/AT2, then the design is closed from their side | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | security re-reads AT1/AT2; then the code round |
+| 13 | F11 | ha-config-files | dashboard | Security round 11 (`c3dee71`): **AT1 and AT2 approved; the design is closed from security's side** (BC1 nit for the code round: relative include targets only) | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | code round; security reviews it |
 | 14 | F14 | inventory | dashboard + MCP | Merged | `feat/f14-inventory` | Chunk H | |
 | 15 | F19 | unattended-limits | gateway + dashboard | **Merged** 2026-11-11 (security sign-off `67bec51`; AF1/AF2 checked) | `feat/f19-unattended-limits` | F4, F5, F12 | AF3 goes on the next gateway branch |
 | 16 | F15 | probes | dashboard + MCP | **Merged** 2026-11-11 (AG1 security decision `eca8982`; AI1 fix merged) | `feat/f15-probes` | F4, F12, F14 | |
