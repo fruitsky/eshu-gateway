@@ -10672,6 +10672,11 @@ review once BS3 is decided.
   is told those secrets don't exist.
 * Paste the Round 9 awk, and add those three rows to the BusyBox test.
 
+**Rebase onto master `800efe3` (2026-11-14).** Rebased onto the X7 merge;
+nothing else changed. F11 is dashboard-only, so there is no installer
+regeneration and no new gateway code. `bash scripts/verify.sh`: `3156
+passed, 26 skipped, 8 warnings in 673.57s (0:11:13)`.
+
 ## Chunk F12 — SSH through Eshu over MCP (`ssh_exec`) · slug `ssh-exec` · dashboard (+ small gateway change)
 
 > **Design first** (push a design note only, wait for approval). Needs the
