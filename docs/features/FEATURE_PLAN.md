@@ -13686,6 +13686,62 @@ on `feat/x8-gateway-installer-version` and its gateway half ships here.
 `bash scripts/verify.sh`: `3043 passed, 26 skipped, 7 warnings in 699.64s
 (0:11:39)` (the gateway stack: BH2/BQ2, BQ4, F19 and the X8 gateway side).
 
+## Release 1.4 gateway · branch `release/1.4-gw` · gateway stack · security read
+
+**Security review (2026-11-14, at `de39db6`): approved once BS1 is in.**
+
+Checked on the stack:
+* **BQ4.**
+  * No script carries `GATEWAY_TOKEN="..."` any more, and the installer
+    substitutes no token.
+  * The gateway, poller and logger read `/etc/eshu-token` at the point of
+    use (`head | tr` in a pipe, never argv), and the fleet runner already
+    did.
+  * `write_token_file` checks the format with `printf | grep`, writes
+    through a `umask 077` temp, `chown root:root`, `chmod 600` and `mv`,
+    and logs a refusal without the value.
+  * The poller's four `sed -i` lines are gone.
+  * A 1.3 install that updates finds the file first, then the old line.
+    The uninstaller does the same.
+* **BH2 and BQ2.** Root no longer runs `mkdir`, `chmod` or `chown` on
+  `.ssh` or `authorized_keys`. The user-side script creates `.ssh` as 700
+  and the file as 600, and a home not owned by the user refuses.
+* **F19 and X8** are as approved on their branches.
+* The three installer copies are identical.
+  * This branch sits on master `14e19fc`, before X7. Once X7 merges,
+    rebase and regenerate Build only, so no static copy comes back.
+
+**BS1 (must): the approved-windows script still reads `$GATEWAY_TOKEN`.**
+* `static/features/approved_windows.sh` sends its claim with
+  `-H @<(printf 'X-Gateway-Token: %s\n' "${GATEWAY_TOKEN:-}")`.
+* The script is sourced by the gateway, and since BQ4 the 1.4 gateway no
+  longer sets `GATEWAY_TOKEN`. So every window claim from a 1.4 gateway
+  sends an empty token, gets a 401, and the window is refused. That fails
+  closed, but it breaks every approved window on 1.4.
+* The script is served from the checkout and not gated by a channel
+  (BP2), so one copy must work on both 1.3 and 1.4 gateways.
+* Fix: take the token as
+  `${GATEWAY_TOKEN:-$(head -n1 /etc/eshu-token 2>/dev/null | tr -d '[:space:]')}`
+  inside the process substitution, or call `gateway_header` when it is
+  defined.
+* Test: source the feature script under the 1.4 gateway and under a 1.3
+  fixture. Both send a non-empty token, and neither puts it in argv.
+* Grep every other file a gateway sources or downloads for
+  `GATEWAY_TOKEN`.
+
+**BS2 (should, same premise as BH2): root still reads `authorized_keys`
+before the user-side write.**
+* On install, `grep -v ... "$AK_FILE"` runs as root.
+* On update, `grep -v ' eshu-dashboard$'`, `ak_from` and the BJ1 every-line
+  check also run as root.
+* The symlink checks run first, but a swap after them makes root read the
+  link's target, and that text is then written into the user's own
+  `authorized_keys`. That is a root read of any file for someone who can
+  run code as the gateway user.
+* Fix: read the file once, as the user (`ak_as_user cat -- "$AK_FILE"`),
+  into a variable. Run the BJ1 check, `ak_from` and the filter on that
+  copy.
+
 ## 7. Backlog (not planned in detail)
 
 * Deny with a reason, shown to the agent (cheap; low value given the data).
