@@ -13333,13 +13333,18 @@ merge).**
 ### Known flaky tests (reviewer list)
 
 Tests that can fail on their own, recorded here so a red run is not chased as
-a new regression. They are not weakened to make them pass; each is fixed in
-a test-only change.
+a new regression. They are not weakened to make them pass.
 
-* `tests/test_f19_limits.py::test_the_time_limit_stops_the_command` — fails
-  about 1 run in 5 on its own (added 2026-11-12). The timeout behaviour under
-  test is in `dashboard/eshu-gateway.sh`; the test's own timing bound is
-  `elapsed < 12` for a 5-second limit.
+* ~~`tests/test_f19_limits.py::test_the_time_limit_stops_the_command`~~ —
+  fixed on `fix/flaky-f19-time-limit`. The race was the *marker*, not the
+  test: `dashboard/eshu-gateway.sh` measured "how long did it run" from two
+  `date +%s%N` (CLOCK_REALTIME) stamps, so an NTP/manual step between them
+  made a real `timeout` stop look early — rc 124, `messages: []`, the exact
+  "expected 'stopped after 5 s', got empty output". The measurement is
+  monotonic now (`/proc/uptime`, 10 ms, `date` only as the fallback), pinned
+  by `test_the_time_limit_marker_does_not_ride_on_the_wall_clock`, which
+  moves the second stamp 3 s back. 50/50 consecutive passes alone, 10/10 in
+  parallel.
 * (The npm 401 retry and the audit-ordering flakes were made deterministic on
   `fix/flaky-tests`, approved and pending merge.)
 
