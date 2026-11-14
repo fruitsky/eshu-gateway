@@ -24,6 +24,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import shutil
 import subprocess
 import threading
@@ -308,7 +309,6 @@ exec "__REAL__" "$@"
             ("__TARGET_IP__", self.target_ip),
             ("__DASHBOARD_URL__", "http://dashboard.test"),
             ("__GATEWAY_VERSION__", "v-test"),
-            ("__GATEWAY_TOKEN__", "test-token"),
         ):
             text = swap(token, value, 1)
 
@@ -570,9 +570,12 @@ def gw(tmp_path):
 # ── the shipped script's install contract ───────────────────────────────────
 def test_repo_script_keeps_placeholders_and_expected_paths():
     text = SCRIPT.read_text()
-    for token in ("__TARGET_IP__", "__DASHBOARD_URL__",
-                  "__GATEWAY_VERSION__", "__GATEWAY_TOKEN__"):
+    for token in ("__TARGET_IP__", "__DASHBOARD_URL__", "__GATEWAY_VERSION__"):
         assert token in text
+    # BQ4: no baked token; it reads the one file.
+    assert "__GATEWAY_TOKEN__" not in text
+    assert not re.search(r'^GATEWAY_TOKEN=', text, re.M)
+    assert "/etc/eshu-token" in text
     for path in ("/etc/eshu-freeze", "/etc/eshu-zero-trust",
                  "/etc/eshu-rblack.txt", "/etc/eshu-exact.txt",
                  "/etc/eshu-rwhite.txt", "/etc/eshu/features.d",

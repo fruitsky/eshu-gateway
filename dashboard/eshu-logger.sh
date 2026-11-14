@@ -27,8 +27,8 @@ gateway_header() { printf 'X-Gateway-Token: %s\n' "${GATEWAY_TOKEN:-}"; }
 while true; do
     POLLER_OK=0; GATEWAY_OK=0; CAN_REACH=0
 
-    # Read the current gateway API token each cycle (tracks self-heal/updates).
-    GATEWAY_TOKEN=$(grep -oP '^GATEWAY_TOKEN="\K[^"]+' /usr/local/bin/eshu-gateway.sh 2>/dev/null || true)
+    # BQ4: the token lives in one file, read at the point of use.
+    GATEWAY_TOKEN=$(head -n1 /etc/eshu-token 2>/dev/null | tr -d '[:space:]' || true)
 
     systemctl is-active --quiet eshu-poller.service 2>/dev/null && POLLER_OK=1
     [ -f /usr/local/bin/eshu-gateway.sh ] && bash -n /usr/local/bin/eshu-gateway.sh >/dev/null 2>&1 && GATEWAY_OK=1

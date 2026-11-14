@@ -135,8 +135,11 @@ if [ "$UNINSTALL" = "yes" ]; then
     DASHBOARD_URL=$(grep -oP 'DASHBOARD_URL="\K[^"]+' /usr/local/bin/eshu-gateway.sh 2>/dev/null || true)
   fi
   # Extract the gateway API token so the uninstall progress reports authenticate.
-  # The gateway script is removed later in this branch, so read it now.
-  GATEWAY_TOKEN=$(grep -oP '^GATEWAY_TOKEN="\K[^"]+' /usr/local/bin/eshu-gateway.sh 2>/dev/null || true)
+  # BQ4: it lives in /etc/eshu-token; an old baked script is the fallback.
+  GATEWAY_TOKEN=$(head -n1 /etc/eshu-token 2>/dev/null | tr -d '[:space:]' || true)
+  if [ -z "$GATEWAY_TOKEN" ]; then
+    GATEWAY_TOKEN=$(grep -oP '^GATEWAY_TOKEN="\K[^"]+' /usr/local/bin/eshu-gateway.sh 2>/dev/null || true)
+  fi
   TARGET_IP=$(hostname -I | awk '{print $1}')
   
   echo "🗑 Eshu Gateway Uninstaller"
@@ -492,21 +495,23 @@ fi
 # dashboard already knows must present its own X-Gateway-Token to
 # re-register; the old order sent an empty one, got 401 on every update and
 # reinstall, and so never reported its host-key pin or run_limits (ssh_exec
-# then refused it as ssh_host_unpinned). Same source as before (the installed
-# gateway script), then /etc/eshu-token. "None" is the v15.0 migration bug and
-# "__GATEWAY_TOKEN__" an unsubstituted template; neither is a token.
+# then refused it as ssh_host_unpinned). BQ4: the one source is
+# /etc/eshu-token; an old baked script is the fallback for a gateway whose
+# file was lost. "None" is the v15.0 migration bug; it is not a token.
 _valid_token() {
   case "${1:-}" in ""|None|__GATEWAY_TOKEN__) return 1 ;; esac
   printf '%s' "$1" | grep -qE '^[A-Za-z0-9_-]{16,128}$'
 }
 if ! _valid_token "${GATEWAY_TOKEN:-}"; then
   GATEWAY_TOKEN=""
-  if [ -f "$GATEWAY" ]; then
-    EXISTING_TOKEN=$(grep -oP '^GATEWAY_TOKEN="\K[^"]+' "$GATEWAY" 2>/dev/null | head -n1 || true)
+  if [ -f /etc/eshu-token ]; then
+    EXISTING_TOKEN=$(head -n1 /etc/eshu-token 2>/dev/null | tr -d '[:space:]' || true)
     if _valid_token "$EXISTING_TOKEN"; then GATEWAY_TOKEN="$EXISTING_TOKEN"; fi
   fi
-  if [ -z "$GATEWAY_TOKEN" ] && [ -f /etc/eshu-token ]; then
-    EXISTING_TOKEN=$(head -n1 /etc/eshu-token 2>/dev/null | tr -d '[:space:]' || true)
+  # Compatibility: a gateway installed before BQ4 has no token file only if
+  # something removed it; its baked script still names the token.
+  if [ -z "$GATEWAY_TOKEN" ] && [ -f "$GATEWAY" ]; then
+    EXISTING_TOKEN=$(grep -oP '^GATEWAY_TOKEN="\K[^"]+' "$GATEWAY" 2>/dev/null | head -n1 || true)
     if _valid_token "$EXISTING_TOKEN"; then GATEWAY_TOKEN="$EXISTING_TOKEN"; fi
   fi
   EXISTING_TOKEN=""
@@ -562,9 +567,10 @@ if [ -n "$DASHBOARD_URL" ]; then
 fi
 
 write_gateway() {
-  # R1: the script carries GATEWAY_TOKEN, which is also the MAC key material.
-  # Create it (and its temporary backup) root-only from the first byte, and
-  # finish 0700 root:root in every mode — install, reinstall and update.
+  # BQ4: the script carries no token; /etc/eshu-token does. The script is
+  # still root-only (0700) because it is root-executed code. Create it (and
+  # its temporary backup) root-only from the first byte, and finish
+  # 0700 root:root in every mode — install, reinstall and update.
   (
     umask 077
     cp -f "$GATEWAY" "${GATEWAY}.bak" 2>/dev/null || true
@@ -576,9 +582,7 @@ GWEOF
   sed -i "s|__TARGET_IP__|$TARGET_IP|g" "$GATEWAY"
   sed -i "s|__DASHBOARD_URL__|$DASHBOARD_URL|g" "$GATEWAY"
   sed -i "s|__GATEWAY_VERSION__|$GATEWAY_VERSION|g" "$GATEWAY"
-  # Scope the token replacement to the header assignment ONLY — an unanchored or
-  # global replace could corrupt other lines that reference GATEWAY_TOKEN.
-  sed -i "s|^GATEWAY_TOKEN=\"__GATEWAY_TOKEN__\"|GATEWAY_TOKEN=\"${GATEWAY_TOKEN:-}\"|" "$GATEWAY"
+  # BQ4: no token substitution. The script reads /etc/eshu-token.
 
   # Validate syntax before deploying — prevent broken templates from reaching
   # gateways. mktemp (not a fixed /tmp name) so another local user cannot
@@ -614,9 +618,7 @@ POLLEREOF
   sed -i "s|__DASHBOARD_URL__|$DASHBOARD_URL|g" "$POLLER_SCRIPT"
   sed -i "s|__TARGET_IP__|$TARGET_IP|g" "$POLLER_SCRIPT"
   sed -i "s|__HOST_NAME__|$HOST_NAME|g" "$POLLER_SCRIPT"
-  # Scope the token replacement to the header assignment ONLY — an unanchored or
-  # global replace could corrupt other lines that reference GATEWAY_TOKEN.
-  sed -i "s|^GATEWAY_TOKEN=\"__GATEWAY_TOKEN__\"|GATEWAY_TOKEN=\"${GATEWAY_TOKEN:-}\"|" "$POLLER_SCRIPT"
+  # BQ4: no token substitution. The poller reads /etc/eshu-token.
   chmod 700 "$POLLER_SCRIPT"
 
   cat > /etc/systemd/system/eshu-poller.service <<POLLERUNIT
