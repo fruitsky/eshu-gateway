@@ -14024,9 +14024,11 @@ only `;`. `test_a_multiline_command_is_refused_with_the_one_line_rule` asserts
 
 ## Release 1.4 — gateway stack · branch `release/1.4-gw` · from master `14e19fc`
 
-One stack of gateway-side changes, regenerating the installer (three copies)
-after each step. No dashboard change in this branch: X8's dashboard half stays
-on `feat/x8-gateway-installer-version` and its gateway half ships here.
+One stack, rebased onto master `800efe3` (X7): the gateway-side changes plus
+X8's dashboard half, so 1.4 is the whole X8 feature. The installer is Build
+only (`dashboard/eshu-gateway-install.sh`); Edge and Fleet are X7's runtime
+channels, and the pre-X7 static copies do not come back. With X7, the operator
+rolls the installer out as **Seed Edge → dev gateways → Deploy to Fleet**.
 
 ### What changes on a gateway
 
@@ -14037,7 +14039,7 @@ on `feat/x8-gateway-installer-version` and its gateway half ships here.
 | run-limit timing | duration from two `date +%s%N` (wall clock) | F19: `/proc/uptime` monotonic, `date` fallback |
 | installer identity | not reported | X8: first 12 hex of the installer's sha256 in `/api/register`, written to `/etc/eshu-installer-hash` (0644 root:root), re-sent by the poller's re-register and every logger heartbeat |
 | fleet runner | reads `/etc/eshu-token` (BJ2) | unchanged |
-| installer files | `dashboard/eshu-gateway-install.sh`, `static/`, `static/dev/` | same three copies (X7's channel split is not in this release) |
+| installer files | `dashboard/eshu-gateway-install.sh` and the committed `static/` and `static/dev/` copies (pre-X7) | Build only (`dashboard/eshu-gateway-install.sh`, generated); Edge and Fleet are runtime channel files (`installer-channels/`) promoted by Seed Edge and Deploy to Fleet; the static copies are deleted (X7) |
 
 ### Compatibility, both ways
 
@@ -14059,6 +14061,11 @@ on `feat/x8-gateway-installer-version` and its gateway half ships here.
   file-based install (an empty value cannot mean "clear" for old gateways).
 * **No token in argv, sed or log.** The poller's new writer never puts the
   token in a command line or a log message; headers still travel on stdin.
+* **X7 channels.** A 1.4 gateway installs whatever the Fleet (or, for a dev
+  gateway, Edge) channel holds. The installer hash it reports is compared
+  with the channel files, so the Gateways table says Fleet, Edge, Build,
+  outdated or unknown, and `/api/dev/status` counts all five. A dashboard
+  deploy changes Build only; the fleet sees it after Deploy to Fleet.
 
 `bash scripts/verify.sh`: `3043 passed, 26 skipped, 7 warnings in 699.64s
 (0:11:39)` (the gateway stack: BH2/BQ2, BQ4, F19 and the X8 gateway side).
@@ -14142,6 +14149,18 @@ before the user-side write.**
 `bash scripts/verify.sh`: `3045 passed, 26 skipped, 7 warnings in 646.10s
 (0:10:46)` (the BS1/BS2 tests).
 
+**Rebase onto X7 and the X8 dashboard half (2026-11-14).** The branch is
+rebased onto master `800efe3` (X7). `gen_installer.py` writes Build only, and
+`test_x7_only_build_is_committed` passes; the pre-X7 `static/` copies stay
+deleted. X8's dashboard commit (`installer_channel`, the five counts and the
+badge) and BR1 (`on_build`, the warning colour, "reported by the gateway")
+are on the branch as their own commits, with the X8 security note. So 1.4 is
+the whole X8 feature, gateway and dashboard.
+
+`bash scripts/verify.sh`: `3066 passed, 26 skipped, 8 warnings in 673.97s
+(0:11:13)` (the rebased stack: BH2/BQ2, BQ4, F19, X8 gateway and dashboard,
+BS1/BS2, X7 channels).
+
 ## 7. Backlog (not planned in detail)
 
 * Deny with a reason, shown to the agent (cheap; low value given the data).
@@ -14187,7 +14206,7 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 10 | F8 | test-traffic | dashboard | Merged | `feat/f8-test-traffic` | — | low priority |
 | 11 | F9 | ha-supervisor-read | dashboard | Merged | `feat/f9-ha-supervisor-read` | — | token is now a dedicated `eshu` HA admin user |
 | 12 | F10 | ha-supervisor-actions | dashboard | Merged (security sign-off `f9e2c22`) | `feat/f10-ha-supervisor-actions` | F9, F3, Chunk H | security re-reads the P1–P3 diff only |
-| 13 | F11 | ha-config-files | dashboard | Security round 7 (`9e75cad`): Z3/Z5 approved; **AH1–AH4 must** (descriptor-based reads, wider redaction, modes, refuse `!include secrets.yaml`), then security re-reads the changes | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | then code |
+| 13 | F11 | ha-config-files | dashboard | **Ready for merge** 2026-11-14: BQ1 (Round 9 reads, keys-only `secrets.yaml`, metadata-only records) and BS3 (awk key extractor); approved | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | merge review |
 | 14 | F14 | inventory | dashboard + MCP | Merged | `feat/f14-inventory` | Chunk H | |
 | 15 | F19 | unattended-limits | gateway + dashboard | **Merged** 2026-11-11 (security sign-off `67bec51`; AF1/AF2 checked) | `feat/f19-unattended-limits` | F4, F5, F12 | AF3 goes on the next gateway branch |
 | 16 | F15 | probes | dashboard + MCP | **Merged** 2026-11-11 (AG1 security decision `eca8982`; AI1 fix merged) | `feat/f15-probes` | F4, F12, F14 | |
@@ -14227,10 +14246,12 @@ this merge.
 | 18a | X2 | runbooks-page | dashboard UI | **Merged** 2026-11-11 | `feat/x2-runbooks-page` | F13 | |
 | 18b | F27 | allowances | dashboard + MCP | Design first (from live use: P2 caught HA call_service) | `feat/f27-allowances` | F10 (P2), Chunk H, F18 | + security sign-off; next design after F21/F22 code |
 | 18c | X3 | integrations-ui | dashboard UI | Requested 2026-11-12; design after F27 is signed off | `feat/x3-integrations-ui` | F27, F10 (P2) | operator walk-through first |
-| 18d | X4 | agents-page | dashboard UI | **Implemented** 2026-11-12: one Agents page (tokens, policy sections, web fetch, activity); Controls renamed Command policy; absent policy fields now keep their stored value | `feat/x4-agents-page` | `fix/agent-ssh-hosts` | rename Controls → Command policy |
-| 18e | X5 | ui-test-round | dashboard UI | **Implemented** 2026-11-12: six test-round fixes plus the X5-r plan-card regression fix | `fix/x5-ui-test-round`, `fix/plans-widget-visible` | — | six small fixes |
-| 18f | X6 | agent-api-round | dashboard | **Code round**: D3/D4, D6, D7, D8 (test), D9, D10, D11, D12, D14, D15, D16a/b, D18a/b, BK5 | `fix/x6-agent-api-round` | — | 12 items; D1 fixed separately |
-| 18g | X7 | installer-channels | dashboard | **Implemented** 2026-11-14 by the feature reviewer: Build/Edge/Fleet are real channels; a deploy changes Build only | `fix/x7-installer-channels` | — | security sign-off (what gateways download) |
+| 18d | X4 | agents-page | dashboard UI | **Merged** 2026-11-12 (into 1.3; on master 2026-11-14): one Agents page (tokens, policy sections, web fetch, activity); Controls renamed Command policy; absent policy fields keep their stored value | `feat/x4-agents-page` | `fix/agent-ssh-hosts` | rename Controls → Command policy |
+| 18e | X5 | ui-test-round | dashboard UI | **Merged** 2026-11-12 (into 1.3; on master 2026-11-14): six test-round fixes plus the X5-r plan-card regression fix | `fix/x5-ui-test-round`, `fix/plans-widget-visible` | — | six small fixes |
+| 18f | X6 | agent-api-round | dashboard | **Merged** 2026-11-12 (into 1.3; on master 2026-11-14): D3/D4, D6, D7, D8 (test), D9, D10, D11, D12, D14, D15, D16a/b, D18a/b, BK5 | `fix/x6-agent-api-round` | — | 12 items; D1 fixed separately |
+| 18g | X7 | installer-channels | dashboard | **Merged** 2026-11-14 (`a0a57ce`; master `800efe3`): real Build/Edge/Fleet channels; Seed Edge → Deploy to Fleet → Rollback; Build only in git, channels outside the checkout; BP1 (no `fleet.prev` on migration) | `fix/x7-installer-channels` | — | security re-read `45a59c3`: BP1 approved; BP2 → X9 |
+| 18h | UI passes | ui-pass-1 / ui-pass-2 | dashboard UI | **Merged** 2026-11-14 with `release/dash-x7`: `3c9dd55` (BS1: the strip reviews, it does not decide), `c22c5ff` polish, `608f676` audit fixes | `fix/ui-pass-1` | X5, `docs/ui-audit` | BS1 approved; plan approved only where its commands are visible |
+| 18i | 1.3 | core | dashboard + gateway | **Merged** 2026-11-14 (master `14e19fc`); dashboard deploy candidate `release/dash-x7` | `release/1.3-core` | — | security approved `ac41a70`; BM1/BM2/BO1 in |
 | 19 | F22 | change-checks | dashboard + MCP | Code round 3: rebased onto the 1.3 stack (lockbox, BE3/BE4, X6, BF2), all four installer files regenerated (the test rebuilds the generator's output) | `feat/f22-change-checks` | F3, F5, F12, F19 | security reviews the gateway hunk and the code |
 | 20 | F16 | recipes | dashboard + MCP | Design complete (security Round 4; feature reviewer Round 5 with AA1/AA2); code next after F22 | `feat/f16-recipes` | F3, F12, F13, F19 | main line; steps claim by request id; code comes back to security; auto_run comes back to security |
 | 21 | F24 | content-tripwire | dashboard | Design first | `feat/f24-content-tripwire` | F12, F14 | + security sign-off (retention) |
@@ -14238,13 +14259,16 @@ this merge.
 | 23 | F26 | agent-shadow | dashboard + MCP | Ready after F16 | `feat/f26-agent-shadow` | F1, F12, F16, F18 | security reads the enforcement points |
 | 24 | F20 | local-agent-pass | docs | Parked | `docs/local-agent-pass` (local, unpushed) | — | experiment; last |
 | 25 | F17 | local-agent | dashboard + docs | After F20; pre-implementation notes A1–A6 | `feat/f17-local-agent` | F12–F16, F26 | experiment; last |
+| 26 | 1.4 | — | gateway stack | **Ready for review** 2026-11-14: BH2/BQ2, BQ4, F19, X8 (gateway + dashboard), BS1/BS2; rebased onto X7, Build only | `release/1.4-gw` | X7, F19, RR1 | security reads the stack as a whole; rollout Seed Edge → dev gateways → Deploy to Fleet |
+| 27 | X8 | gateway-installer-version | dashboard + gateway | **Code complete** 2026-11-14: on `release/1.4-gw` (BR1 folded; the hash is display-only) | `feat/x8-gateway-installer-version` | X7 | security approved; five buckets sum to the gateway count |
+| 28 | X9 | gated-gateway-files | dashboard + gateway | **Design note** 2026-11-14 (BP2): installer-carried vs authenticated channel files; recommends (b) | `feat/x9-gated-gateway-files` | X7, 1.4 | security sign-off before code |
 | — | CI fix | ci-environment | gateway + tests | Merged (`f2746ef`); CI pinned to ubuntu-24.04 (`6d58006`) | `fix/ci-environment` | F5 | |
 | — | Buffering | stream-unbuffered | gateway | Merged (`d8d70c2`); S1 tee fix done in Gateway hardening | `fix/stream-unbuffered` | F5 | |
 | — | Gateway hardening | gateway-hardening | gateway | **Merged** 2026-11-12 (AF3 + S1 tee capture; security `c15664e`; AX1/AX2 residuals; BA1 for the next F5/F19 change) | `fix/gateway-hardening` | F19, Buffering | |
 | — | Installer hotfix | installer-reregister | installer | **Merged and deployed** 2026-11-12 (`d6a38bb`; security `d6a38bb`): re-register presents the existing token; keys only after a 200 | `fix/installer-reregister` | F12 | |
 | — | BE3 | secret-headers | gateway + installer + poller | **Implemented**: every token header goes on stdin (`-H @-`), the result post uses a private header file, and argv is asserted token-free in all three stub harnesses | `fix/secret-headers` | RR1 | security sign-off |
 | — | BE4 | update-dashboard-key | installer | **Implemented**: `--update` refreshes only the `eshu-dashboard` line after a 200, copies its `from=`, refuses symlinks, uses `mktemp`; the fixed `.tmp` name is gone everywhere | `fix/update-dashboard-key` | RR1 | security sign-off |
-| — | GT1 | gateway-token-rotation | dashboard + poller | Design first | `feat/gateway-token-rotation` | RR1 | + security sign-off |
+| — | GT1 | gateway-token-rotation | dashboard + poller | Design round 2 2026-11-14 (BS4/BS5 folded): routine poll rotation vs compromise SSH push, 24 h gateway-enforced mtime, Revoke token | `feat/gt1-token-rotation` | RR1 | + security sign-off; code after 1.4 |
 
 Chunks are done **in the order column**; each new chunk branches from the
 updated `feature-roadmap` after the previous one is merged. A design-first
