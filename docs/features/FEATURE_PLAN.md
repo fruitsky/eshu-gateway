@@ -11898,6 +11898,81 @@ compromise to the attacker.**
    * `.prev` alone never authenticates a request to the dashboard; it is
      only for the MAC check.
 
+#### Security re-read of GT1 round 2 (security reviewer, 2026-11-14, at `3ada36a`)
+
+**BQ3 and BQ4 are folded correctly. One new must (BS4) and one should
+(BS5), then the three answers.**
+
+What is right:
+* Routine and compromise are separate operations.
+* The compromise path:
+  * is never delivered on a poll;
+  * pushes over the dashboard key to a fixed `rotate-token` subcommand,
+    with the pinned host key and the token on stdin;
+  * writes no `.prev` and deletes an existing one;
+  * commits only on success.
+* Restore recovery uses the same push.
+* `.prev` age is enforced on the gateway by its mtime.
+* `gateway_auth_failed` is rate-limited.
+* Tokens live in the file only.
+
+**BS4 (must): a compromise rotation must override a pending routine
+rotation.**
+* "A second request while one is pending is refused (`rotation_pending`)"
+  also blocks the case that matters most. A routine rotation was started,
+  and then a leak is suspected. A routine token that was already delivered
+  may be in the attacker's hands, since it went to whoever polled with
+  the old token, and after delivery the routine rotation cannot be
+  cancelled.
+* Rule: **Rotate for compromise** is allowed while a routine rotation is
+  pending, delivered or not. A successful push:
+  * writes a fresh token;
+  * in one transaction, revokes `api_token` **and** drops `api_token_next`,
+    and with them K_old and K_next;
+  * leaves no `.prev`, so a delivered-but-uncommitted routine `.prev` dies
+    as well.
+* Test: start a routine rotation, deliver it, then push for compromise.
+  The old token, the routine token and both of their keys must all 401 or
+  fail the MAC.
+
+**BS5 (should): give the "re-enrol only" gateways a way to cut off the
+old token now.**
+* For a gateway with no usable dashboard key, the design leaves the
+  compromised token valid until someone re-enrols it.
+* Offer **Revoke token**:
+  * `api_token` is nulled at once;
+  * the gateway goes dark (it fails closed: no commands, no tickets) until
+    it is re-enrolled;
+  * the confirm text says exactly that.
+* An operator under attack should be able to choose "dark now" over "open
+  until I reach the box".
+* Also: a push that fails on a **host key mismatch** is not a transient
+  error. Audit it as `ssh_host_key_changed`, show it as a possible
+  impersonation, and don't offer a one-click retry until the pin has been
+  dealt with.
+
+**Answers:**
+1. **The `ssh_dashboard_key` capability.** The self-report is fine as a
+   hint.
+   * A false 1 only makes a push fail, which is safe, and a false 0 hides
+     the option, which is also safe.
+   * It must come only from an IP-bound, authenticated register (as X8
+     does).
+   * Don't infer it from the pin alone, since that can't see a removed
+     line.
+   * The push's own result is the real proof, so record the last push
+     result next to the capability.
+2. **Compromise ordering.** Push first, then revoke on success, is right.
+   * Revoking first turns every failed push into an outage, and the
+     attacker loses nothing extra.
+   * BS5's **Revoke token** is the explicit fail-closed choice for an
+     operator who prefers it.
+   * Commit the instant the push returns 0. The old token's last window is
+     then the length of one SSH call.
+3. **`.prev` on compromise.** Confirmed: `.prev` only for a routine
+   rotation. A compromise writes none and deletes any it finds, including
+   one left by a pending routine rotation (BS4).
+
 ## Fix — agent SSH hosts and mode (F12 follow-up) · branch `fix/agent-ssh-hosts` · dashboard · security read
 
 ### Reviewer notes (security reviewer, 2026-11-12, at `67a0b75`)
