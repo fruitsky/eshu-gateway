@@ -199,12 +199,124 @@ reviewer. Never paste live IPs, hostnames or output into this file.
 6. **H+O.** Deny a probe's card. **Expect:** `probe_result` says `refused`.
 
 ### T-LIM — limits for unattended runs (F19)
-Nothing to click yet: limits apply only to runs with nobody watching, and
-none are switched on (the read lane's `on` is still locked).
+Limits apply only to runs with nobody watching; since 1.3 that is a plan
+check (T-CHK).
 1. **O, after P-3.** The test gateway's details (or the reviewer, read-only)
    show it reports the `run_limits: v1` capability. On a gateway whose
    `timeout` is not GNU (BusyBox, or Ubuntu 26's uutils), it does **not**
-   report it.
+   report it, and a check there is `not_run` (T-CHK step 4).
+
+## Release 1.3 (2026-11-14) — lockbox, plan checks, agent/UI round
+
+1.3 changes **how an approval reaches a gateway** (the lockbox) and adds a
+**check that runs after a plan item**. Both need P-3. The rest is the
+dashboard/UI round.
+
+### T-LBX — one approval, one run (lockbox)
+1. **H+O.** On the test gateway, `ssh_exec` `uptime`. **Expect:** `pending`,
+   a card naming the gateway; approve it.
+2. **H.** `check_request(request_id, session_id="<yours>")` again.
+   **Expect:** `approved`, then `consumed` (the poller deposited the ticket),
+   and only then the result. Never `ran` while the ticket is still in
+   flight, and never a second run from the same approval.
+3. **H.** Re-run the same `ssh_exec` call after it ran. **Expect:** a **new**
+   request id with a new card; the old approval is not reused.
+4. **O (late approval).** Leave a card unapproved past its TTL (90 s).
+   **Expect:** the row ends `expired`; pressing Approve then is refused
+   (`not_pending`); nothing ran. Hermes's next call is a new card.
+5. **O.** Press Approve twice on one card. **Expect:** one run; the second
+   press is refused, never a second ticket.
+
+### T-ONE — a command is one line
+1. **H.** `ssh_exec` (or a plan item) whose command contains a newline.
+   **Expect:** refused before a card exists, with `multiline_command` and the
+   advice to join the steps with `;` (not a newline, not a base64 pipe).
+2. **O.** The queue has no card for it, and History has no `pending` row.
+3. **H.** The same command with `;` instead of the newline. **Expect:** it is
+   taken normally (a card, or the policy verdict) - the rule is the line
+   break, not the step count.
+
+### T-PLAN-V — the plan card is where the pending items are
+1. **O.** With no pending JIT requests, have Hermes propose a two-item plan.
+   **Expect:** the plan card is visible in the queue area immediately, not
+   behind the starfield or below the fold.
+2. **O.** Add a pending JIT request, then propose another plan. **Expect:**
+   both are visible at once in the same area; neither hides the other.
+3. **H.** Propose a second plan that replaces the first, then
+   `check_plan(<old id>)`. **Expect:** `superseded` with the new plan id, not
+   `not_found`; the old card is gone from the queue.
+
+### T-PRB3 — probes end to end (re-run of T-PRB on 1.3) — needs P-2, P-3, P-5
+1. **H+O.** `diagnose_service` for a real unit on the test gateway.
+   **Expect:** one card marked as a probe, its three commands listed;
+   `probe_result` says `pending` before approval, then returns the state, the
+   de-duplicated warnings/errors and the listening ports.
+2. **H+O.** `diagnose_container` with a numeric vmid. **Expect:** the guest's
+   status and restart count, no environment variables; the card names the
+   vmid.
+3. **H+O.** `diagnose_container` with a Docker name. **Expect:** the same
+   shape for the container.
+4. **H+O.** `disk_pressure`. **Expect:** filesystems ordered by use, the
+   fullest first.
+5. **H.** `probe_result` again for the plan in step 1. **Expect:** the same
+   digest, and **no new requests** in History for that plan (nothing re-ran).
+6. **H (needs P-5).** `dns_check` for a name in Pi-hole's local DNS.
+   **Expect:** the record at once, with no card.
+
+### T-X6 — the agent/API fixes from the test round
+1. **H.** `check_request(<id>)` from a transport with no bound session.
+   **Expect:** `session_id_required` naming the id, not `not_found`; with the
+   right `session_id` the call works.
+2. **H+O.** Confirm a conclusion, then have Hermes call `session_conclude`
+   for the same session again. **Expect:** a **new** draft for the operator;
+   the confirmed one stays confirmed and visible; no `already_confirmed`
+   refusal.
+3. **H+O.** `session_conclude` with a `title`. **Expect:** the title is shown
+   on the conclusion, and a runbook promoted from it uses the title instead
+   of the cut summary.
+4. **H (needs P-4).** `ha_addons` and `ha_backups`. **Expect:** the real
+   lists, not `{}`, matching what the HA UI shows.
+5. **H+O.** `pct exec <vmid> -- uptime` (or a Docker exec). **Expect:** the
+   card shows the inner target chip, and `check_request` returns
+   `inner_target` for the row; History shows the same target after it runs.
+
+### T-X4 — the Agents page
+1. **O.** **Agents** is in the navigation (next to Inventory and Runbooks).
+   Open an agent. **Expect:** the token (Revoke/Delete), Tools, Rules, SSH,
+   Advanced, Web, and the Activity list, all on the page; no policy modal.
+2. **O.** Open the SSH tab. **Expect:** one checkbox per gateway. Tick
+   **any gateway**: the confirmation says it also covers every gateway
+   enrolled later, and cancelling leaves the box unchecked.
+3. **O.** With a stored hostname entry (an older row, or set through the
+   API), reopen the SSH tab. **Expect:** the entry is **not** ticked, but a
+   line says hostname entries are not matched, with `name -> ip` and a
+   **Convert hostnames to IPs** button. Convert, press **Save SSH**, and
+   reopen: the IP is ticked and the line is gone.
+4. **O.** Save Tools, then Save SSH. **Expect:** the tools stay saved and the
+   SSH hosts stay as set (each Save sends one section; neither resets the
+   other). Repeat the other way round, and with Web.
+
+### T-POL — the page is called Command policy
+1. **O.** The navigation item and the page title say **Command policy**, not
+   Controls; the `#controls` deep link still opens the page.
+2. **O.** The page holds the exact and regex allowlists, the blocklist and the
+   policy tester; the web-fetch widget is gone, with a one-line pointer to
+   the agent's Web tab on Agents.
+
+### T-CHK — a change carries its check (F22) — needs P-3
+1. **H+O.** Have Hermes propose a plan whose item is `true` and whose check
+   is the ssh check `true` (expect exit 0). **Expect:** the plan card shows
+   the check under the command, with its wait/retries, **before** approval.
+2. **O.** Approve. **Expect:** the item runs once with no second card; after
+   exit 0 the check runs with no card and the item line reads
+   `check: true - passed`; the plan continues.
+3. **H.** Propose an item `true` with the check `false`. **Expect:** the item
+   runs, the check `failed`, the plan **stops**, and `session_plan` carries
+   the state and the reason.
+4. **H+O (not-yet-updated gateway).** Repeat step 2 on a gateway still on the
+   old script (no `run_limits: v1`). **Expect:** the item runs, the check
+   reads `not run` with `check_no_limits`, and the plan stops. No check
+   command reaches the gateway.
 
 ## Gateway update (every release that changes the gateway script)
 
@@ -213,11 +325,64 @@ none are switched on (the read lane's `on` is still locked).
    * An allowlisted command runs without asking.
    * A JIT command asks, and runs after approval.
    * A blocked command is refused.
-2. **O.** Freeze the gateway. **Expect:** every command is refused. Then
-   unfreeze it.
+2. **O.** Freeze the fleet (the freeze is fleet-wide, not per gateway).
+   **Expect:** every command is refused. Unfreeze it.
 3. **O.** The Gateways table shows the new version, and heartbeats arrive.
 
 ---
+
+## Fleet rollout checklist (gateway updates, one at a time)
+
+Do one gateway per update. Old and new scripts run side by side, and a
+half-updated fleet is expected while this runs.
+
+### Before the update, on that gateway
+* `curl --version` is **7.55 or newer** (the installer refuses older: the
+  token header is read from stdin, which old curl accepts and drops).
+* `command -v flock` finds util-linux `flock`. Without it the poller refuses
+  lockbox writes and the gateway refuses the by-id claim, so approvals never
+  run: fix that first.
+* `timeout --version` says GNU coreutils. Without GNU `timeout` the
+  unattended limit (a plan check, a future read lane) is refused, not
+  half-applied; only those paths are affected.
+* `/etc/eshu-token` is present, and `/etc/eshu-session-key` plus
+  `.prev` exist. Record `sha256sum` of all of them; the update must keep
+  them byte-identical.
+* The Gateways table shows a recent heartbeat, and no request is pending on
+  that gateway.
+
+### After the update, on that gateway
+* `grep -c 'eshu.tickets.lock' /usr/local/bin/eshu-gateway.sh /usr/local/bin/eshu-poller.sh`
+  returns at least 1 for each (the lock path is in the scripts; the file is
+  created at runtime under `/run/eshu`).
+* `grep -n -- '-H @-' /usr/local/bin/eshu-gateway.sh /usr/local/bin/eshu-poller.sh`
+  shows the token headers on stdin (and `@<(gateway_header)` for a POST
+  body), never a named token file on disk.
+* The keys recorded before are unchanged (compare `sha256sum` output), and
+  `/etc/eshu-token` is still `0600 root:root`.
+* Polls arrive: the Gateways table's last-seen moves within a minute, and
+  `journalctl -t eshu-poller -n 30` shows the tick. `systemctl status
+  eshu-poller` is `active`, and `journalctl -t eshu-gateway -n 30` has no
+  `LOCKED`/`FATAL` line.
+* Run **T-GW** on that gateway: an allowlisted command runs, a JIT asks and
+  runs after approval, a blocked one is refused.
+* Only after all of that, mark the gateway updated in the rollout table.
+
+### If one gateway fails
+* Stop. Do not re-run the installer in a loop, do not hand-edit the
+  installed scripts, and do not copy a script from another gateway.
+* Stop approvals to that gateway: denylist its pending cards, and use its
+  **Zero-Trust** control (the fleet freeze is fleet-wide, not a per-gateway
+  substitute).
+* Capture: `journalctl -t eshu-gateway -t eshu-poller -n 100`, the installer
+  output, `bash -n` on both installed scripts, `curl --version`,
+  `command -v flock timeout`, and `ls -l /etc/eshu-token
+  /etc/eshu-session-key*`.
+* If the old script is still installed, the gateway keeps using the old
+  path. The dashboard cannot tell the two scripts apart, so leave it out of
+  the rollout table and say so.
+* Report the installer output and the journal to the reviewer (outside the
+  repo; no live IPs, hostnames or output in this file).
 
 ## Results
 
