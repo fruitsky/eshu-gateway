@@ -60,33 +60,44 @@ def build_argv(target: dict, command_line: str, known_hosts: str,
 
 def run_ssh(target: dict, command_line: str, known_hosts: str, key_path: str,
             timeout: int, stdin: str = None,
-            strict_host_key: bool = True) -> dict:
+            strict_host_key: bool = True, binary: bool = False) -> dict:
     """Run one ssh call without a shell.
 
     `stdin` is written to the remote command's stdin (F11's write path) and
     never appears in argv. `strict_host_key=False` is only for the first
     connection of a new integration (TOFU): it lets ssh record the host key it
     sees, which the caller then pins.
+
+    `binary=True` returns `stdout`/`stderr` as bytes and sends `stdin` as
+    UTF-8 bytes. F11's read path uses it: text mode would translate CRLF and
+    replace invalid UTF-8, so the hash of a file would not be the hash of the
+    bytes `sha256sum` sees on the add-on. F12 keeps the text default.
     """
     argv = build_argv(target, command_line, known_hosts, key_path,
                       strict_host_key=strict_host_key)
     env = {'PATH': os.environ.get('PATH', '/usr/bin:/bin'), 'LANG': 'C',
            'HOME': ssh_keys.key_dir()}
+    empty = b'' if binary else ''
+    popen = {'stdin': subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
+             'stdout': subprocess.PIPE, 'stderr': subprocess.PIPE,
+             'start_new_session': True, 'env': env}
+    if not binary:
+        popen.update(text=True, errors='replace')
     try:
-        proc = subprocess.Popen(
-            argv,
-            stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-            errors='replace', start_new_session=True, env=env)
+        proc = subprocess.Popen(argv, **popen)
     except OSError as exc:
-        return {'rc': 127, 'stdout': '', 'stderr': str(exc), 'timed_out': False}
+        return {'rc': 127, 'stdout': empty,
+                'stderr': str(exc) if not binary else str(exc).encode('utf-8'),
+                'timed_out': False}
+    if binary and stdin is not None and not isinstance(stdin, (bytes, bytearray)):
+        stdin = str(stdin).encode('utf-8')
     try:
         if stdin is None:
             out, err = proc.communicate(timeout=timeout)
         else:
             out, err = proc.communicate(input=stdin, timeout=timeout)
-        return {'rc': proc.returncode, 'stdout': out or '',
-                'stderr': err or '', 'timed_out': False}
+        return {'rc': proc.returncode, 'stdout': out or empty,
+                'stderr': err or empty, 'timed_out': False}
     except subprocess.TimeoutExpired:
         try:
             os.killpg(proc.pid, signal.SIGKILL)
@@ -95,6 +106,6 @@ def run_ssh(target: dict, command_line: str, known_hosts: str, key_path: str,
         try:
             out, err = proc.communicate(timeout=5)
         except subprocess.TimeoutExpired:
-            out, err = '', ''
-        return {'rc': 124, 'stdout': out or '', 'stderr': err or '',
+            out, err = empty, empty
+        return {'rc': 124, 'stdout': out or empty, 'stderr': err or empty,
                 'timed_out': True}

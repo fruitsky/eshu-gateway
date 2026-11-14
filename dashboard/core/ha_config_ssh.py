@@ -306,7 +306,14 @@ def _mask_secrets(content):
 # ── the transport ──────────────────────────────────────────────────────
 
 def _record(integration, template, ctx, res, elapsed_ms):
-    tail = scrub_string((res.get('stdout') or '') + (res.get('stderr') or ''))
+    out = res.get('stdout') or ''
+    err = res.get('stderr') or ''
+    # BL1: a binary read returns bytes; the audit summary is text.
+    if isinstance(out, bytes):
+        out = out.decode('utf-8', 'replace')
+    if isinstance(err, bytes):
+        err = err.decode('utf-8', 'replace')
+    tail = scrub_string(out + err)
     tail = tail[-8192:]
     try:
         record_integration_call(
@@ -333,8 +340,11 @@ def _record(integration, template, ctx, res, elapsed_ms):
 
 
 def run(integration, template, command, ctx=None, stdin=None,
-        timeout=TIMEOUT_SHORT, require_pin=False):
+        timeout=TIMEOUT_SHORT, require_pin=False, binary=False):
     """Run one fixed command over SSH; returns {rc, stdout, stderr, timed_out}.
+
+    `binary=True` (BL1) keeps stdout as bytes; F11's read hashes those bytes
+    and only decodes them for display.
 
     TOFU: with no pin, the call runs with `accept-new`, records the host key
     it saw and returns; `require_pin=True` refuses before connecting (writes
@@ -366,7 +376,7 @@ def run(integration, template, command, ctx=None, stdin=None,
     try:
         res = ssh_client.run_ssh(target_, command, known_hosts, key_path,
                                  timeout, stdin=stdin,
-                                 strict_host_key=bool(pin))
+                                 strict_host_key=bool(pin), binary=binary)
         if not pin and res.get('rc') == 0:
             try:
                 line = open(known_hosts).read().splitlines()[0]
@@ -389,6 +399,8 @@ def run(integration, template, command, ctx=None, stdin=None,
                 pass
     _record(integration, template, ctx, res, int((time.time() - started) * 1000))
     err = (res.get('stderr') or '')
+    if isinstance(err, bytes):
+        err = err.decode('utf-8', 'replace')
     if res.get('rc') != 0:
         if 'Host key verification failed' in err or \
                 'REMOTE HOST IDENTIFICATION HAS CHANGED' in err:
@@ -410,10 +422,17 @@ def _shell_cmd(script, *args):
                               ' '.join(shlex.quote(str(a)) for a in args))
 
 
+def _text(value):
+    """Decode a binary step's output for a message (BL1)."""
+    if isinstance(value, (bytes, bytearray)):
+        return value.decode('utf-8', 'replace')
+    return value or ''
+
+
 def _run_checked(integration, template, command, ctx=None, stdin=None,
-                 timeout=TIMEOUT_SHORT, require_pin=False):
+                 timeout=TIMEOUT_SHORT, require_pin=False, binary=False):
     res = run(integration, template, command, ctx=ctx, stdin=stdin,
-              timeout=timeout, require_pin=require_pin)
+              timeout=timeout, require_pin=require_pin, binary=binary)
     if res.get('timed_out'):
         raise HaConfigError('config_timeout', 'the add-on did not answer in time')
     return res
@@ -463,20 +482,30 @@ def verify_path(integration, root_path, ctx=None):
 
 
 def read_config(integration, path, ctx=None):
-    """`{content, sha256, size, secrets_masked}`; secrets.yaml is masked."""
+    """`{content, sha256, size, secrets_masked}`; secrets.yaml is masked.
+
+    BL1: the hash and the size are the remote file's **raw bytes**. The read
+    runs with `binary=True`, so CRLF and invalid UTF-8 are not rewritten on
+    the way here; only `content` is decoded, with replacement, for display.
+    The write script compares `sha256sum` on the add-on, so this is the same
+    number.
+    """
     root_path = check_read_path(path)
     verify_path(integration, root_path, ctx=ctx)
     cmd = 'head -c %d -- %s' % (MAX_CONTENT + 1, shlex.quote(root_path))
-    res = _run_checked(integration, 'read', cmd, ctx=ctx)
+    res = _run_checked(integration, 'read', cmd, ctx=ctx, binary=True)
     if res.get('rc') != 0:
         raise HaConfigError('config_read_failed', 'could not read the file')
-    raw = res.get('stdout') or ''
-    size = len(raw.encode('utf-8'))
+    raw = res.get('stdout') or b''
+    if isinstance(raw, str):        # a stub that has not been taught bytes
+        raw = raw.encode('utf-8')
+    size = len(raw)
     if size > MAX_CONTENT:
         raise HaConfigError('config_too_large',
                             'the file is over %d bytes' % MAX_CONTENT)
     import hashlib
-    sha = hashlib.sha256(raw.encode('utf-8')).hexdigest()
+    sha = hashlib.sha256(raw).hexdigest()
+    text = raw.decode('utf-8', errors='replace')
     masked = root_path.endswith('/' + SECRETS)
     pending = pending_state(integration)
     if pending and pending.get('path') == root_path:
@@ -486,7 +515,7 @@ def read_config(integration, path, ctx=None):
         elif sha == pending.get('new_sha'):
             _clear_pending(integration)
     return {'path': _display_path(root_path),
-            'content': _mask_secrets(raw) if masked else raw,
+            'content': _mask_secrets(text) if masked else text,
             'sha256': sha, 'size': size, 'secrets_masked': masked}
 
 
@@ -536,7 +565,8 @@ def write_config(integration, path, content, expect_hash, ctx=None,
     try:
         res = run(integration, 'write',
                   _shell_cmd(WRITE_SCRIPT, root_path, expect_hash, backup, tmp),
-                  ctx=ctx, stdin=text, timeout=TIMEOUT_LONG, require_pin=True)
+                  ctx=ctx, stdin=text, timeout=TIMEOUT_LONG, require_pin=True,
+                  binary=True)
     finally:
         lock.release()
     if res.get('timed_out'):
@@ -547,7 +577,7 @@ def write_config(integration, path, content, expect_hash, ctx=None,
             % backup)
     rc = int(res.get('rc') or 0)
     if rc == 0:
-        check = (res.get('stdout') or '').strip()
+        check = _text(res.get('stdout')).strip()
         _record_check(integration, True)
         record_audit_event(
             'ha_config_write', target(integration)['ip'],
@@ -558,7 +588,7 @@ def write_config(integration, path, content, expect_hash, ctx=None,
         return {'ok': True, 'path': _display_path(root_path),
                 'backup': backup, 'sha256': info['sha256'],
                 'check': 'valid', 'check_output': check}
-    output = ((res.get('stdout') or '') + (res.get('stderr') or '')).strip()
+    output = (_text(res.get('stdout')) + _text(res.get('stderr'))).strip()
     if rc == 18:
         record_audit_event(
             'ha_config_rollback', target(integration)['ip'],
@@ -602,7 +632,7 @@ def restore_config(integration, path, backup, ctx=None):
     try:
         res = run(integration, 'restore',
                   _shell_cmd(RESTORE_SCRIPT, root_path, name, tmp),
-                  ctx=ctx, timeout=TIMEOUT_LONG, require_pin=True)
+                  ctx=ctx, timeout=TIMEOUT_LONG, require_pin=True, binary=True)
     finally:
         lock.release()
     if res.get('timed_out'):
@@ -620,13 +650,13 @@ def restore_config(integration, path, backup, ctx=None):
             actor=(ctx or {}).get('agent', ''))
         return {'ok': True, 'path': _display_path(root_path),
                 'backup': name, 'check': 'valid',
-                'check_output': (res.get('stdout') or '').strip()}
+                'check_output': _text(res.get('stdout')).strip()}
     if rc == 18:
         raise HaConfigError(
             'config_check_failed',
             'ha core check failed after the restore; the previous content was '
-            'put back. %s' % ((res.get('stdout') or '') +
-                              (res.get('stderr') or ''))[-4000:])
+            'put back. %s' % (_text(res.get('stdout')) +
+                              _text(res.get('stderr')))[-4000:])
     if rc in (12, 19):
         raise HaConfigError('config_backup_refused',
                             'the backup does not exist or is not valid')

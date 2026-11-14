@@ -76,11 +76,11 @@ class BusyBox:
     def ha(self, code):
         self.ha_exit.write_text(str(code))
 
-    def run(self, script, *args, stdin=None, rewrite=True):
+    def run(self, script, *args, stdin=None, rewrite=True, text=True):
         if rewrite:
             script = script.replace("/homeassistant", str(self.root))
         cmd = [BUSYBOX, "sh", "-c", script, "_"] + [str(a) for a in args]
-        return subprocess.run(cmd, input=stdin, capture_output=True, text=True,
+        return subprocess.run(cmd, input=stdin, capture_output=True, text=text,
                               env=self.env, timeout=60)
 
     def file(self, name, content, mode=0o640):
@@ -189,6 +189,21 @@ def test_the_write_script_refuses_a_symlinked_directory(box):
     proc = box.run(ha.WRITE_SCRIPT, *args, stdin="y: 2\n")
     assert proc.returncode == 11
     assert (outside / "y.yaml").read_text() == "y: 1\n"
+
+
+def test_the_write_script_accepts_the_raw_hash_of_a_crlf_non_utf8_file(box):
+    """BL1: `read_config` now returns the hash of the raw bytes, which is
+    exactly what the script's own sha256sum computes — including 0xFF."""
+    raw = b"a: 1\r\nb: \xff\r\n"
+    path = box.file("automations.yaml", raw, mode=0o640)
+    expect = subprocess.run([BUSYBOX, "sha256sum", str(path)],
+                            capture_output=True, text=True).stdout.split()[0]
+    assert expect == sha(raw)
+    args, backup, tmp = box.write_args(path, raw)
+    proc = box.run(ha.WRITE_SCRIPT, *args, stdin=b"a: 2\r\n\xff", text=False)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert path.read_bytes() == b"a: 2\r\n\xff"
+    assert not os.path.exists(tmp)
 
 
 def test_the_write_script_writes_crlf_bytes_from_stdin(box):
