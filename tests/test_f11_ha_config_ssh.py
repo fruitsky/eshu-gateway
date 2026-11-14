@@ -82,7 +82,7 @@ class FakeSSH:
                         'timed_out': False}
             return {'rc': 0, 'stdout': path + '\nregular file\n',
                     'stderr': '', 'timed_out': False}
-        if command.startswith('sh -c') and 'exec 3<' in command:
+        if '# READ_SCRIPT' in command:
             # BN3: the read is one script that opens the path on a descriptor.
             path = command.rsplit(' _ ', 1)[-1].strip().strip("'")
             content = self.files.get(path, '')
@@ -93,9 +93,7 @@ class FakeSSH:
             rc = 0 if path in self.files else 12
             return {'rc': rc, 'stdout': out, 'stderr': b'' if binary else '',
                     'timed_out': False}
-        if command.startswith("sh -c") and (
-                'cat > "$tmp"' in command
-                or 'cp -p "$backup" "$real"' in command):
+        if '# WRITE_SCRIPT' in command or '# RESTORE_SCRIPT' in command:
             # The write and restore scripts both end with `ok <sha>`.
             stdout = self.write_stdout
             if stdout is None:
@@ -110,7 +108,7 @@ class FakeSSH:
         if 'sha256sum "$f"' in command:
             return {'rc': 0, 'stdout': 'b' * 64 + '\n', 'stderr': '',
                     'timed_out': False}
-        if 'timeout 100 ha core check' in command and 'redact()' in command:
+        if '# CHECK_SCRIPT' in command:
             # BN1: the check runs in a fixed, redacting script.
             out = self.check_output
             return {'rc': self.check_rc, 'stdout': out.encode() if binary else out,
@@ -130,13 +128,12 @@ def fake(monkeypatch):
 
 def _write_calls(fake):
     return [c for c in fake.calls
-            if c['command'].startswith('sh -c') and 'cat > "$tmp"' in c['command']]
+            if '# WRITE_SCRIPT' in c['command']]
 
 
 def _restore_calls(fake):
     return [c for c in fake.calls
-            if c['command'].startswith('sh -c')
-            and 'cp -p "$backup" "$real"' in c['command']]
+            if '# RESTORE_SCRIPT' in c['command']]
 
 
 def _sha(text):
@@ -231,8 +228,7 @@ def test_bl1_read_hashes_a_non_utf8_byte(pinned, fake):
 def test_bl1_the_read_uses_the_binary_transport(pinned, fake):
     from core.ha_config_ssh import read_config
     read_config(pinned, '/config/configuration.yaml')
-    read = [c for c in fake.calls
-            if c['command'].startswith('sh -c') and 'exec 3<' in c['command']]
+    read = [c for c in fake.calls if 'exec 3< \"$real\"' in c['command']]
     assert read and read[-1]['binary'] is True
 
 
@@ -365,11 +361,11 @@ def test_a_client_timeout_becomes_unknown_state_and_keeps_the_backup(pinned, mon
 
     def timed_out(target, command, known_hosts, key_path, timeout,
                   stdin=None, strict_host_key=True, binary=False):
-        if command.startswith('sh -c') and 'exec 3<' in command:
+        if '# READ_SCRIPT' in command:
             # The read succeeds, so the write is reached and times out.
             return {'rc': 0, 'stdout': b'a: 1\n', 'stderr': b'',
                     'timed_out': False}
-        if command.startswith('sh -c'):
+        if '# WRITE_SCRIPT' in command or '# RESTORE_SCRIPT' in command:
             return {'rc': 124, 'stdout': b'', 'stderr': b'',
                     'timed_out': True}
         return {'rc': 0, 'stdout': '', 'stderr': '', 'timed_out': False}
@@ -426,7 +422,8 @@ def test_a_restore_success_runs_one_script_and_checks(pinned, fake):
     out = restore_config(pinned, '/config/configuration.yaml', name)
     assert out['ok'] and out['check'] == 'valid'
     call = _restore_calls(fake)[0]
-    assert 'RESTORE' not in call['command']
+    assert '# RESTORE_SCRIPT' in call['command']
+    assert '# WRITE_SCRIPT' not in call['command']
 
 
 # ── BN2: the read mask ───────────────────────────────────────────────────
@@ -499,13 +496,13 @@ def test_a_restore_timeout_records_the_current_and_backup_hashes(pinned, monkeyp
 
     def stub(target, command, known_hosts, key_path, timeout,
              stdin=None, strict_host_key=True, binary=False):
-        if command.startswith('sh -c') and 'exec 3<' in command:
+        if '# READ_SCRIPT' in command:
             return {'rc': 0, 'stdout': current, 'stderr': b'',
                     'timed_out': False}
         if 'sha256sum "$f"' in command:
             return {'rc': 0, 'stdout': 'b' * 64, 'stderr': '',
                     'timed_out': False}
-        if command.startswith('sh -c'):
+        if '# WRITE_SCRIPT' in command or '# RESTORE_SCRIPT' in command:
             return {'rc': 124, 'stdout': b'', 'stderr': b'',
                     'timed_out': True}
         return {'rc': 0, 'stdout': '', 'stderr': '', 'timed_out': False}
