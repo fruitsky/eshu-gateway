@@ -13439,6 +13439,69 @@ four follow-ups are the ones above.
 `bash scripts/verify.sh`: `2886 passed, 26 skipped, 8 warnings in 604.20s
 (0:10:04)`.
 
+## Release 1.3 core · branch `release/1.3-core` · deploy candidate · security read
+
+**Security review (2026-11-14, at `ac41a70`): approved for the dashboard
+deploy and the gateway-by-gateway fleet rollout. No musts.**
+
+Checked on the integrated tree:
+* **BK1.** One expiry rule. `get_ticket_by_request_id` needs
+  `expires_at > now`. The sweep and `check_request` no longer allow the
+  extra 60 seconds, and `find_live_request` uses the same boundary.
+* **BK2.** `ssh_exec` refuses `multiline_command` before signing.
+  `/api/request` returns 400 before any policy, plan, override or row. The
+  gateway shows the 400's reason instead of "unreachable".
+  * The 27 consumed multi-line JITs in history show why the up-front
+    refusal is right. Since F12 they were approved and consumed without
+    running.
+* **BK3.** `remove_claimed_ticket` is gone.
+* **BK4.** Both scripts close fd 9 in `tickets_unlock` and when the lock
+  fails.
+* **BK5.** Reuse requires a non-empty agent and a non-empty session. It
+  runs after the refusals and right before a new pending row is created.
+* **BE3.** The fleet runner's shape check uses `[.:]`. No gateway token is
+  left in curl argv in the gateway, poller, window script or fleet runner.
+  The poll line keeps the digits-only `WC` and `-H @-`.
+* **BE4.** BJ1's every-line `from=` check is present.
+* The three generated installer copies are byte-identical.
+* **The `create_plan` merge.**
+  * `superseded` keeps the row and sets `superseded_by`.
+  * Check plans never supersede and are never superseded.
+  * A superseded plan can't be decided (`_DECIDABLE_FROM`) or claimed
+    (claims need `approved`).
+  * `_end_child_plans` still ends a parent's check plans.
+
+**BM1 (should): make both plan transitions conditional.**
+* `create_plan` selects the `proposed` rows, then runs
+  `UPDATE ... SET status='superseded' WHERE id = ?`.
+* `decide_plan` reads the status, checks `_DECIDABLE_FROM`, then runs
+  `UPDATE ... WHERE id = ?`.
+* Neither UPDATE repeats the status it read. A new proposal racing an
+  operator's press can turn a just-approved plan into `superseded`, or
+  turn a just-superseded plan into `approved` with `superseded_by` still
+  set.
+* Either way the operator approved the card they saw, so this is not a
+  bypass. But the state can contradict itself.
+* Fix: add `AND status = 'proposed'` to the supersede, and
+  `AND status = <the status read>` to the decide. Refuse with `bad_state`
+  when `rowcount != 1`.
+
+**BM2 (should, BH3 left over): the check token is still in curl argv.**
+* F22's `/api/request` call builds its JSON with `-d '...'`, including
+  `"check_token"`. BH3 asked for this body to go on stdin after the rebase.
+* It is not exploitable as it stands. A local reader would also need the
+  root-only gateway token to send a claim, and the token is single-use and
+  tied to one host and one command.
+* Still, finish the sweep:
+  `printf '%s' "$body" | curl ... -H @<(gateway_header) --data-binary @-`,
+  as `log_window_reject` does.
+
+The fleet-change table is accepted:
+* an F22 check plan on a gateway that hasn't updated ends `not_run`
+  (fails closed);
+* a gateway without `flock` loses the lockbox fast path and falls back to
+  JIT.
+
 ## 7. Backlog (not planned in detail)
 
 * Deny with a reason, shown to the agent (cheap; low value given the data).
