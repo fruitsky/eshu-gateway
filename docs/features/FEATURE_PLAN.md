@@ -17228,6 +17228,285 @@ the five buckets add up to the gateway count.
 (0:11:00)` (4 more: the five-bucket sum, the warning colour, the tooltip and
 the display-only scan).
 
+## Chunk X9 — gated gateway files · slug `gated-gateway-files` · dashboard + gateway · **security sign-off** (changes root-run code on every gateway)
+
+### Problem
+
+Two files that gateways execute as **root** are still served from the
+checkout by the unauthenticated `/static` mount:
+
+* `dashboard/static/features/approved_windows.sh` is downloaded by the
+  poller on every healthy cycle into `/etc/eshu/features.d/`, syntax-checked
+  and atomically replaced, then sourced by `eshu-gateway.sh` on every
+  non-JIT command (it registers the window handler).
+* `dashboard/static/fleet-runner.sh` is downloaded when a Fleet command
+  arrives and launched with `systemd-run` as root for that command.
+
+X7 gated the installer (Build → Seed Edge → Deploy to Fleet, with Rollback),
+but left these two behind (BP2 in X7's security review). So:
+
+* a dashboard deploy changes root-run code on every gateway **without** Seed
+  Edge and without Deploy to Fleet;
+* `/static` is unauthenticated, so the dashboard cannot tell a dev gateway
+  from a production one, and both get the same bytes;
+* the only check on the path is the poller's `bash -n`, which is a syntax
+  check, not a review gate.
+
+This note compares two ways to gate them. It does not implement either.
+
+### What has to stay true
+
+1. **1.3 gateways keep working mid-rollout.** A 1.3 poller sends no
+   gateway token on these downloads and has no new code. It still downloads
+   `/static/features/approved_windows.sh` and
+   `/static/fleet-runner.sh` on its own schedule, and those URLs must keep
+   answering with bytes a 1.3 gateway can run. (`/etc/eshu-token` exists on
+   1.3 too, but the 1.3 poller and window script read only the baked
+   variable.)
+2. **A fix can reach production without a full installer rollout**, or the
+   design has to say plainly that it cannot and why that is acceptable.
+3. **The server decides which copy a gateway gets.** A gateway must not be
+   able to ask for the Edge copy, the Fleet copy, or the previous copy by
+   naming it in the request.
+4. **Fail closed.** A missing or unreadable copy must not fall back to
+   another channel, to Build, or to the last copy silently.
+5. **No token in argv.** The poller and the runner already keep token
+   headers on stdin (BE3); a new download must do the same.
+
+### Design (a) — the installer carries both files
+
+`gen_installer.py` embeds `approved_windows.sh` and `fleet-runner.sh` in
+Build (quoted heredocs, byte-for-byte). The installer writes both on install,
+reinstall, update and dev update, `root:root 0644` (runner `0755`), to fixed
+paths. The poller stops downloading the window script; it runs the installed
+copy (or refuses window claims if it is missing or fails `bash -n`). The
+poller runs the installed fleet runner instead of downloading one.
+
+* A change to either file is a change to the installer: regenerate Build,
+  commit, deploy (Build only), Seed Edge, dev gateway update, soak, Deploy to
+  Fleet. Each gateway runs the installer on its update cycle, which also
+  restarts the gateway components — the fix rides a full installer rollout.
+* Build, Edge and Fleet installer channels then carry the scripts, so the
+  existing promote/rollback gate covers them with no new route, no new auth
+  and no new file format.
+* 1.3 gateways do not have the files, so the `/static` copies must stay. They
+  have to be **frozen** at the last 1.3-compatible bytes; otherwise editing
+  the source for the 1.4 installer changes what 1.3 gateways download (see
+  the BS1 lesson below).
+* A fresh install has both files immediately; the running gateway never
+  fetches root-run code over the network after install.
+* The cost: a one-line window-script fix re-runs every gateway's installer
+  and restarts the gateway stack, on the fleet's schedule. It also couples
+  the script's review to the installer's, and grows Build.
+
+### Design (b) — channel files behind an authenticated, mode-aware route
+
+Extend `core/installer_channels.py` to hold the two files per channel
+(`edge/approved_windows.sh`, `fleet/approved_windows.sh`,
+`edge/fleet-runner.sh`, `fleet/fleet-runner.sh`, plus `fleet.prev/` copies
+for Rollback). Seed Edge copies the current files from Build's source
+(`dashboard/gateway-files/`), Deploy to Fleet copies Edge's, Rollback
+restores the previous Fleet copies. Build still carries only the installer,
+but the installer writes a **seed** copy of each file so a fresh gateway can
+run a window claim before its first poll.
+
+New route, registered before `app.mount("/static")`:
+
+```
+GET /api/gateway/files/approved_windows.sh
+GET /api/gateway/files/fleet-runner.sh
+    X-Gateway-Token: <the gateway's token>
+```
+
+The route resolves the token to its IP (the same `_resolve_gateway_token`
+path register and heartbeat use), looks up the gateway's row, and serves
+`edge` when the operator has set the gateway to `dev`, `fleet` otherwise. The
+gateway does not send a channel, and there is no query parameter for one.
+`Cache-Control: no-store`, plus a `sha256` response header the poller can
+check. A missing channel file is 503, never Build and never the other
+channel. A token from another IP is 403; no token is 401.
+
+The 1.3 `/static/features/approved_windows.sh` and
+`/static/fleet-runner.sh` stay, but they are served from a frozen
+`dashboard/gateway-files/legacy-1.3/` tree by explicit routes (outside the
+static mount), so a deploy changes them only when a commit does. They are
+deleted with the rest of the 1.3 support.
+
+The poller (1.4+) fetches the window script from the authenticated route
+with `printf … | curl -H @-`, keeps the previous copy on 401/403/503, checks
+the syntax and the `sha256`, and atomically replaces it. It does **not** fall
+back to `/static` when the authenticated route fails: falling back would turn
+a dashboard misconfiguration into an unauthenticated code download. The
+fleet runner is fetched the same way per command, so a fix applies to the
+next command without a restart and a bad copy simply fails to launch.
+
+### Comparison
+
+| | (a) installer carries | (b) channel files + auth route |
+|---|---|---|
+| Gate | Seed Edge / Deploy to Fleet (via installer) | Seed Edge / Deploy to Fleet (files) |
+| Fix latency | one installer rollout per gateway, with restart | next poll (~30 s) per gateway, no restart |
+| Canary | a dev gateway must run the new installer | a dev gateway pulls Edge automatically |
+| Rollback | Rollback reverts the whole installer | Rollback reverts the files; installer untouched |
+| Auth | none needed (no download) | token bound to IP, mode chosen server-side |
+| 1.3 mid-rollout | frozen `/static` copy; two copies to test | frozen `/static` copy; two copies to test |
+| Deploy effect | Build only (as X7) | Build + source files; channels change only on Seed/Deploy |
+| New code | installer heredocs, poller fallback path | channel file store, two routes, poller fetch |
+| Failure mode | missing file refuses windows until reinstall | 503/401 keeps the last copy and logs |
+| Review | with the installer, one artefact | per-file, promoted separately |
+
+Neither design makes the files *secret*: the bytes are already public in git
+and the route only serves the caller's own mode. The gate is integrity and
+release discipline, not confidentiality.
+
+### Compatibility with 1.3 and 1.4 gateways mid-rollout
+
+A mixed fleet is the normal state for a week after a gateway release. Both
+designs end up with two copies of the same logic running at once:
+
+* 1.3: `/static/features/approved_windows.sh` from the frozen
+  `legacy-1.3` tree (baked `GATEWAY_TOKEN`; `/etc/eshu-token` exists but the
+  1.3 script does not read it), and `/static/fleet-runner.sh`.
+* 1.4: the installer copy (a) or the authenticated channel copy (b), with
+  `_window_token_header` reading `/etc/eshu-token`.
+
+Rules that follow:
+
+* The frozen 1.3 bytes change only for a security fix, in their own commit,
+  with the 1.3 fixture.
+* The 1.4 copy keeps working against the dashboard as it behaves while 1.3 is
+  still supported. A dashboard change that breaks the old contract (a header,
+  an endpoint shape) must be rolled out with a script change, or wait for 1.3
+  to retire.
+* `/static` is never the source for 1.4 gateways; a 1.4 poller that falls
+  back to it would be running 1.3 code on a 1.4 gateway.
+* The legacy routes are deleted once no 1.3 gateway has polled for N days;
+  the status page counts 1.3 gateways so the operator can see when.
+
+### How a fix to the windows script reaches the fleet
+
+**(a)** Edit `dashboard/static/features/approved_windows.sh`, regenerate
+Build, commit, deploy. Build changes; Edge/Fleet do not. Press Seed Edge; the
+dev gateway's update cycle downloads the Edge installer and re-runs it, which
+writes the new script and restarts the gateway. After the soak, Deploy to
+Fleet; every gateway runs the Fleet installer on its update cycle, writes the
+script and restarts. Until then, gateways keep running the old script, so the
+window-claim behaviour is versioned with the installer.
+
+**(b)** Edit `dashboard/gateway-files/approved_windows.sh`, commit, deploy.
+Seed Edge copies it into `edge/`; the dev gateway fetches it on its next poll
+and runs it. After the soak, Deploy to Fleet copies Edge into `fleet/`; every
+production gateway fetches it on its next poll. No installer run, no restart.
+Rollback returns `fleet/` to the previous bytes on the next poll. Old copies
+stay in `fleet.prev/` so the rollback is real.
+
+Both are gated by Seed Edge and Deploy to Fleet. (b) is bounded by the poll
+interval; (a) is bounded by the fleet's update schedule and pays a restart.
+
+### The BS1 lesson: one copy runs on mixed gateway versions
+
+BS1 on `release/1.4-gw` was exactly this shape: the downloaded
+`approved_windows.sh` used `${GATEWAY_TOKEN:-}`, which is empty on 1.4 after
+BQ4, so every claim was refused. The fix (`_window_token_header`) had to
+work when the same bytes run on 1.3 (baked `GATEWAY_TOKEN`, no file) and on
+1.4 (`/etc/eshu-token`). One file, two token models, one test that runs the
+same bytes against both fixtures.
+
+X9 must not undo that:
+
+* If a single downloadable copy still serves both versions, keep the BS1
+  harness: run the same bytes with a 1.3 fixture and a 1.4 fixture, and fail
+  the test when either token path is empty.
+* If the copies split (as in both designs), test **both** copies against the
+  same fake dashboard, and test the frozen 1.3 bytes on their own. A change
+  that only passes on 1.4 is a 1.3 outage.
+* A design that downloads from the authenticated route must also prove the
+  header is not in argv, because BS1's first version put it there.
+
+### Recommendation
+
+**(b), with the Build seed.** Reasons:
+
+* These files are gateway behaviour, not installer provenance. A window-script
+  fix is the kind of change that needs an Edge canary and a fast Fleet
+  rollout; making it ride a full installer update and restart for a one-line
+  fix is the wrong blast radius.
+* X7 already built the channel state, the atomic writes, the 503 discipline,
+  the audit and the Seed/Deploy/Rollback gate. (b) extends that machinery;
+  (a) reuses it only by proxy through the installer.
+* The authenticated route is the only one of the two that can tell a dev
+  gateway from a production one, which is the actual defect in the current
+  `/static` path. (a) avoids the question by removing the download, but then
+  a dev gateway cannot test a window-script change ahead of the fleet at all
+  — it needs the same full installer path.
+* Rollback of a bad windows script should not force a gateway rollback. (b)
+  can revert the file without touching the installer.
+
+The Build seed keeps the first-boot case honest: a fresh gateway has a
+working copy before it has a token, and the channel copy replaces it on the
+first successful authenticated poll. The seed is not design (a) because the
+poller still fetches, and the channel file (not Build) is authoritative once
+the gateway has registered.
+
+### Tests
+
+* **Channel files:** Seed Edge copies all four; Deploy to Fleet copies Edge's;
+  Rollback restores the previous Fleet copies; a Build-only change moves no
+  served file; the channel dir stays 0700 and files 0644/0755 as designed;
+  a failed write leaves the old file and no temp.
+* **The route:** no token 401; a token bound to another IP 403; a dev-mode
+  gateway gets Edge bytes and a prod gateway gets Fleet bytes for the same
+  request; no client-supplied channel (query, header or path) changes the
+  result; a missing channel is 503, never Build or the other channel;
+  `no-store`; the route wins over a stray file in `static/`; a symlink or
+  `..` in the path is refused.
+* **The poller:** the header is on stdin, not argv; 401/403/503 keeps the
+  previous copy and logs; a bad `sha256` is refused; the replacement is
+  atomic and 0644 root-owned; a 304 (or equal hash) does not rewrite the
+  file; no fallback to `/static` on any failure.
+* **The fleet runner:** fetched with the token on stdin; a failed fetch
+  launches nothing and does not mark the command done; the runner path is
+  root-owned and not writable by the gateway user.
+* **Mixed fleet:** the same harness runs the 1.4 bytes with both the 1.3 and
+  1.4 token fixtures (the BS1 test); the frozen 1.3 bytes pass the 1.3
+  fixture; a text check that no 1.4 code path reads
+  `static/features/approved_windows.sh` or `static/fleet-runner.sh`.
+* **Deploy:** a real git remote where a deploy changes Build and
+  `dashboard/gateway-files/`, and the served Edge/Fleet bytes do not change
+  until Seed/Deploy.
+
+### Open questions for security
+
+1. **Mode or reported channel?** The route would pick Edge for a gateway the
+   operator marked `dev`, Fleet otherwise — the installer hash is a
+   self-report and must not choose the file. Is that the rule you want,
+   including for a dev-marked gateway that reports a Fleet installer?
+2. **Freezing 1.3.** Is the frozen `legacy-1.3` tree served by explicit
+   routes acceptable, or do you want `/static` to keep serving the checkout
+   copy (and accept that a deploy still changes 1.3 root-run code) until 1.3
+   retires?
+3. **Seed copy.** Is a Build seed for a fresh install acceptable, or should a
+   gateway have no copy until its first authenticated fetch (and refuse
+   window claims until then)?
+4. **Integrity.** Is the token-authenticated TLS response plus a `sha256`
+   header enough for root-run code, or do you want the hash pinned in the
+   policy (so a dashboard that serves an unexpected file is a refusal, not
+   just a log line)?
+5. **Staleness.** If the authenticated fetch fails for a long time, should
+   the poller keep the last copy indefinitely, or refuse window claims after
+   N cycles and say why on the gateway?
+6. **Rollback semantics.** Should Rollback of the Fleet installer also revert
+   the two files to their previous Fleet copies (recommended), or only the
+   installer?
+7. **Audit.** Should each gateway report the hash of the file it runs (like
+   X8's installer hash — self-report, display only), or is the channel hash
+   in `/api/dev/status` enough?
+8. **Retirement.** What is the rule for deleting the 1.3 legacy routes — no
+   1.3 gateway seen for 7 days, or a manual switch?
+
+`bash scripts/verify.sh`: `3033 passed, 26 skipped, 8 warnings in 667.64s
+(0:11:07)` (docs only).
+
 ## Chunk X6 — agent API fixes from the Release 1.2 test round · slug `agent-api-round` · dashboard
 
 From the agent's test report of 2026-11-12, triaged by the feature reviewer.
