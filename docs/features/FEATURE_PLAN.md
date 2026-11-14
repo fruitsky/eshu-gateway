@@ -10642,6 +10642,14 @@ are stored in the call log.**
 (0:10:51)` (the BQ1 tests: keys-only response and call row, BusyBox exit 19
 and the keys output).
 
+**BS3 (should).** The keys script now uses Round 9's awk extractor instead
+of the `sed`, so `hyphen-key`, `dotted.key` and `"quoted key"` (W5 rows) are
+reported; it still prints keys only. Tests at both levels: the Python read
+returns the four key shapes and no values, and BusyBox's keys script prints
+the same four lines.
+`bash scripts/verify.sh`: `3063 passed, 26 skipped, 7 warnings in 686.70s
+(0:11:26)` (the BS3 rows).
+
 ### Security re-read of BQ1 (security reviewer, 2026-11-14, at `6e5f2b1`)
 
 **BQ1 approved.** From the security side, F11 is ready for the merge

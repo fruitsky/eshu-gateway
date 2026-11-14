@@ -9,6 +9,7 @@ connection per write).
 import base64
 import hashlib
 import json
+import re
 import time
 
 import pytest
@@ -86,9 +87,10 @@ class FakeSSH:
             # BQ1: the one script that may open secrets.yaml, keys only.
             path = command.rsplit(' _ ', 1)[-1].strip().strip("'")
             content = self.files.get(path, '')
-            keys = [line.split(':', 1)[0] for line in content.splitlines()
-                    if line and not line[0].isspace() and ':' in line
-                    and line.split(':', 1)[0].replace('_', 'a').isalnum()]
+            keys = []
+            for line in content.splitlines():
+                if re.match(r'^[^ \t#][^:]*:[ \t]', line):
+                    keys.append(line.split(':', 1)[0].strip('"\''))
             out = '\n'.join(keys) + ('\n' if keys else '')
             return {'rc': 0 if path in self.files else 12,
                     'stdout': out.encode() if binary else out,
@@ -651,3 +653,17 @@ def test_bq1_a_normal_read_stores_no_content_in_the_call_row(pinned, fake):
     assert 'bytes' in row['response_summary']
     assert 'sha256' in row['response_summary']
     assert 'exit 0' in row['response_summary']
+
+
+def test_bs3_the_keys_script_keeps_hyphen_dotted_and_quoted_keys(pinned, fake):
+    """BS3: Round 9's extractor keeps every top-level key shape."""
+    fake.files['/homeassistant/secrets.yaml'] = (
+        'hyphen-key: v1\n'
+        'dotted.key: v2\n'
+        '"quoted key": v3\n'
+        'normal: v4\n')
+    from core.ha_config_ssh import read_config
+    out = read_config(pinned, '/config/secrets.yaml')
+    assert out['content'] == 'hyphen-key\ndotted.key\nquoted key\nnormal\n'
+    for value in ('v1', 'v2', 'v3', 'v4'):
+        assert value not in out['content']

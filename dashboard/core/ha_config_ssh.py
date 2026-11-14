@@ -132,7 +132,10 @@ fd3=/proc/$me/fd/3
 [ "$(readlink "$fd3")" = "$real" ] || exit 13
 [ -f "$fd3" ] || exit 12
 [ "$(stat -L -c %h "$fd3")" = 1 ] || exit 21
-sed -n "s/^\([A-Za-z0-9_][A-Za-z0-9_]*\):.*/\1/p" "$fd3"
+awk '{ if (match($0, /^[^ \t#][^:]*:[ \t]/)) {
+         k = substr($0, 1, RLENGTH - 2)
+         sub(/^[\047"]/, "", k); sub(/[\047"]$/, "", k)
+         print k } }' "$fd3"
 """
 
 # The backup's hash, for the pending record a timed-out restore leaves behind
