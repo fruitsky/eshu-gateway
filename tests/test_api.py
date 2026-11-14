@@ -14,7 +14,9 @@ class TestJitLifecycle:
                 "encoded_command": b64(raw),
             }, headers=gateway_headers)
             assert r.status_code == 400
-            assert "multiline_command" in r.json()["detail"]
+            detail = r.json()["detail"]
+            assert "multiline_command" in detail
+            assert "one line per command" in detail
         assert auth_client.get("/api/requests").json() == []
 
     def test_submit_jit_request(self, auth_client, gateway_headers):

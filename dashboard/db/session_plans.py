@@ -432,10 +432,17 @@ def create_plan(session_id: str, items, note: str = '', origin: str = 'agent',
             old = [row['id'] for row in cur.execute(
                 "SELECT id FROM session_plans WHERE session_id = ? AND status = 'proposed'",
                 (sid,)).fetchall()]
+            superseded = []
             for old_id in old:
+                # BM1: the update repeats the status it read, so a plan the
+                # operator approved in the meantime is not turned back into
+                # `superseded` (and then linked as replaced).
                 cur.execute(
-                    "UPDATE session_plans SET status = 'superseded' WHERE id = ?",
-                    (old_id,))
+                    "UPDATE session_plans SET status = 'superseded' "
+                    "WHERE id = ? AND status = 'proposed'", (old_id,))
+                if cur.rowcount == 1:
+                    superseded.append(old_id)
+            old = superseded
         cur.execute('''
             INSERT INTO session_plans (session_id, status, created_at, note,
                                        origin, decided_at, decided_by, until,
@@ -569,6 +576,12 @@ def approve_plan(plan_id: int, ttl_minutes: int = DEFAULT_TTL_MINUTES,
             SET status = 'approved', decided_at = ?, decided_by = ?, until = ?
             WHERE id = ? AND status = 'proposed'
         ''', (now, (decided_by or 'operator')[:64], now + ttl_minutes * 60, plan_id))
+        if cur.rowcount != 1:
+            # BM1: another writer moved it (a new proposal superseded it, or a
+            # decision landed) between the read and this update.
+            conn.rollback()
+            raise PlanError('bad_state',
+                            'the plan changed while it was being approved')
         conn.commit()
     return get_plan(plan_id)
 
@@ -604,8 +617,14 @@ def _decide(plan_id: int, status: str, decided_by: str) -> dict:
                             f"cannot {status} a plan that is {plan['status']}")
         cur.execute('''
             UPDATE session_plans SET status = ?, decided_at = ?, decided_by = ?
-            WHERE id = ?
-        ''', (status, now, (decided_by or 'operator')[:64], plan_id))
+            WHERE id = ? AND status = ?
+        ''', (status, now, (decided_by or 'operator')[:64], plan_id,
+              plan['status']))
+        if cur.rowcount != 1:
+            # BM1: the status changed between the read and the write.
+            conn.rollback()
+            raise PlanError('bad_state',
+                            'the plan changed while it was being decided')
         # AN2: a check plan ends with the plan whose approval it borrowed, in
         # the same transaction, so a dispatched check claims nothing.
         _end_child_plans(cur, plan_id, now)

@@ -845,8 +845,9 @@ def receive_request(payload: GatewayPayload, request: Request):
     if '\n' in cmd or '\r' in cmd:
         raise HTTPException(
             status_code=400,
-            detail='multiline_command: the command contains a line break; '
-                   'send it as a single line.')
+            detail='one line per command (multiline_command): the command '
+                   'contains a line break; join steps with ";" instead of a '
+                   'newline.')
 
     # F12: an MCP command is attributed to the agent that asked for it, and a
     # forced JIT may only *add* gating. The value is validated here even though

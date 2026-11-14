@@ -357,6 +357,14 @@ def ssh_exec(host: str, command: str, session_id: str = '', timeout=None,
     problem = command_problem(command)
     if problem:
         _audit(problem)
+        if problem == 'multiline_command':
+            return refused(
+                problem,
+                message=('one line per command: the command contains a line '
+                         'break. Join steps with ";" (the card shows every '
+                         'byte), or send a base64 script as '
+                         "printf '%s' <base64> | base64 -d | sh — the card "
+                         'shows the base64, not the script.'))
         return refused(problem)
 
     gateway = resolve_gateway(host)

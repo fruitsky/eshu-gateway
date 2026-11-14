@@ -133,6 +133,23 @@ class TestCommandBytes:
         assert sx.command_problem('x' * (sx.MAX_COMMAND + 1)) == 'command-too-long'
 
 
+class TestOneLineRule:
+    """The manual's rule is in the refusal and in the tool description."""
+
+    def test_a_multiline_command_is_refused_with_the_one_line_rule(self):
+        out = sx.ssh_exec(IP, 'systemctl restart nginx\nreboot', agent=AGENT)
+        assert out['status'] == 'refused'
+        assert out['reason'] == 'multiline_command'
+        assert 'one line per command' in out['message'].lower()
+        assert ';' in out['message']
+        assert 'base64' in out['message']
+
+    def test_the_ssh_exec_tool_description_names_the_rule(self):
+        from core import mcp_server
+        assert 'one line' in mcp_server.SSH_EXEC_DESC.lower()
+        assert 'multiline_command' in mcp_server.SSH_EXEC_DESC
+
+
 class TestHostAndPolicy:
     def test_unknown_host(self, stub):
         _gateway()

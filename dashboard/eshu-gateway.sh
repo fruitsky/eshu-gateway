@@ -1275,10 +1275,14 @@ enc_req=$(echo -n "$cmd" | base64 -w 0)
 # Safe concatenation: TARGET_IP and the ESHU_* prefix values are validated
 # (startup/prefix checks), and enc_req is base64. Any new field must be
 # validated to a safe charset or JSON-escaped before it is added here.
-RESPONSE=$(gateway_header | curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -w "\n%{http_code}" -X POST "$DASHBOARD_URL/api/request" \
-     -H @- \
+# BM2: the body carries the signed check token, so it goes on stdin, never in
+# argv (BH3's rule for every credential). The header uses a process
+# substitution for the same reason.
+REQ_BODY='{"target_ip":"'"$TARGET_IP"'","encoded_command":"'"$enc_req"'","session_id":"'"${ESHU_SESSION_ID:-}"'","execution_id":"'"${ESHU_EXECUTION_ID:-}"'","agent":"'"${ESHU_VERIFIED_AGENT:-}"'","force_jit":'"$([ "$ESHU_FORCE_JIT" = "1" ] && echo true || echo false)"',"run_limits":"'"$RUN_LIMITS_CAP"'","check_token":"'"${ESHU_CHECK_TOKEN_VERIFIED:-}"'"}'
+RESPONSE=$(printf '%s' "$REQ_BODY" | curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -w "\n%{http_code}" -X POST "$DASHBOARD_URL/api/request" \
+     -H @<(gateway_header) \
      -H "Content-Type: application/json" \
-     -d '{"target_ip":"'"$TARGET_IP"'","encoded_command":"'"$enc_req"'","session_id":"'"${ESHU_SESSION_ID:-}"'","execution_id":"'"${ESHU_EXECUTION_ID:-}"'","agent":"'"${ESHU_VERIFIED_AGENT:-}"'","force_jit":'"$([ "$ESHU_FORCE_JIT" = "1" ] && echo true || echo false)"',"run_limits":"'"$RUN_LIMITS_CAP"'","check_token":"'"${ESHU_CHECK_TOKEN_VERIFIED:-}"'"}' 2>&1 || echo "CURL_FAILED")
+     --data-binary @- 2>&1 || echo "CURL_FAILED")
 
 HTTP_STATUS=$(echo "$RESPONSE" | tail -n1)
 if [ "${HTTP_STATUS:-}" = "429" ]; then

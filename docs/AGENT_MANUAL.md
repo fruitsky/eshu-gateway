@@ -27,7 +27,7 @@ The script runs the command through a multi-stage policy pipeline:
 1. **Blocklist** — matches against hardcoded + synced blocked patterns
 2. **Approval-only gates** — commands that can never auto-run, whatever the
    allowlist says: shell chaining/redirection (`;` `&` `|` `` ` `` `$(` `>` `<`
-   `\` or a newline), encoded/eval wrappers, and broad self-protection matches
+   `\`), encoded/eval wrappers, and broad self-protection matches
    (any `.ssh/authorized_keys`, or a wildcard next to an `esh…` path). These go
    to JIT (stage 5) so a human sees them.
 3. **Whitelist** — exact/regex match → auto-approved
@@ -38,6 +38,25 @@ The script runs the command through a multi-stage policy pipeline:
 If a command passes a stage, it executes immediately. The pipeline stops on first match.
 A JIT-approved command runs only if it is byte-for-byte the command the
 operator approved.
+
+### One line per command
+
+Eshu runs a command with `bash -c`, so it must be **one line**. A CR or LF is
+refused with `multiline_command` before anything is signed or sent — on the
+JIT path (the dashboard refuses it before a card exists) and in `ssh_exec`.
+Do not send a multi-line script: a second line could run something the
+operator never saw whole on the card.
+
+Use one of these two forms:
+
+* **Several commands separated by `;`** — preferred, because the card shows
+  every byte exactly as it will run:
+  `systemctl is-active nginx; nginx -t`
+* **A base64-encoded script**, only when you genuinely need a script:
+  `printf '%s' <base64> | base64 -d | sh`. The card shows the **base64**, not
+  the decoded script, so the operator cannot see what will run without
+  decoding it. Prefer the `;` form; use this only when the operator asks for
+  it.
 
 ### Session & execution IDs (grouping)
 
@@ -371,6 +390,9 @@ truncated, reason}`. `output` is the end of the output, up to 64 KiB.
   In both cases, tell the operator and use normal SSH there.
 - `host` is a gateway IP or hostname Eshu knows, never `user@host`, a port
   or an `-o` option.
+- `command` must be one line: a CR or LF is refused with `multiline_command`
+  (see **One line per command**). Join steps with `;`; a base64 script is
+  shown as base64 on the card.
 
 #### Exit codes and output
 

@@ -98,6 +98,35 @@ def _audit_events(kind):
     return [event for event in get_audit_log() if event['event_type'] == kind]
 
 
+class TestPlanTransitions:
+    """BM1: the supersede and decide updates repeat the status they read."""
+
+    def test_bm1_a_new_proposal_does_not_touch_an_approved_plan(self):
+        sid = 'bm1-approved'
+        first = _plan(sid, [{'host': '*', 'command': 'uptime'}])
+        approve_plan(first, 60)
+        second = _plan(sid, [{'host': '*', 'command': 'free -h'}])
+        assert get_plan(first)['status'] == 'approved'
+        assert get_plan(second)['status'] == 'proposed'
+        assert get_plan(second)['session_id'] == sid
+
+    def test_bm1_a_superseded_plan_cannot_be_decided(self):
+        from db.session_plans import PlanError, deny_plan
+        sid = 'bm1-superseded'
+        first = _plan(sid, [{'host': '*', 'command': 'uptime'}])
+        second = _plan(sid, [{'host': '*', 'command': 'free -h'}])
+        assert get_plan(first)['status'] == 'superseded'
+        assert second != first
+        with pytest.raises(PlanError) as denied:
+            deny_plan(first)
+        assert denied.value.code == 'bad_state'
+        with pytest.raises(PlanError) as approved:
+            approve_plan(first, 60)
+        assert approved.value.code in ('not_proposed', 'bad_state')
+        # The new proposal is untouched by either attempt.
+        assert get_plan(second)['status'] == 'proposed'
+
+
 class TestApproval:
 
     def test_f3_plan_approves_once_then_pends(self, gateways):

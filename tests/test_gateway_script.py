@@ -809,6 +809,21 @@ def test_bk2_a_refused_request_shows_the_dashboard_reason(gw):
     assert proc.returncode == 1
 
 
+def test_bm2_the_check_token_body_is_not_in_curl_argv(gw):
+    """BM2: the /api/request body, which carries the signed check token, goes
+    on stdin; only a local reader could see argv, but argv is the rule."""
+    token = "a" * 32
+    gw.jit_status("denied")
+    gw.run(gw.sign("echo check-body", force_jit="1", check_token=token))
+    args = gw.argv_calls()
+    assert args, "no curl call recorded"
+    for line in args:
+        assert token not in line, line
+    req = [c for c in gw.curl_calls()
+           if c["url"].endswith("/api/request")]
+    assert req and req[0]["data"].get("check_token") == token
+
+
 def test_failed_claim_does_not_execute(gw):
     # A failed /api/ticket claim must not run the command: the dashboard would
     # keep the request "approved" with no jit_consumed audit (bug #2393).

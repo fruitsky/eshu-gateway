@@ -13502,6 +13502,41 @@ The fleet-change table is accepted:
 * a gateway without `flock` loses the lockbox fast path and falls back to
   JIT.
 
+**BM1, BM2 and the one-line rule (2026-11-14).**
+
+* **BM1 — conditional transitions.** `create_plan`'s supersede is
+  `... SET status='superseded' WHERE id=? AND status='proposed'`; only a row
+  the update actually changed is linked with `superseded_by`.
+  `approve_plan` and `_decide` repeat the status they read
+  (`AND status='proposed'` / `AND status=<read>`), roll back and raise
+  `bad_state` when `rowcount != 1`. Tests:
+  `test_bm1_a_new_proposal_does_not_touch_an_approved_plan` and
+  `test_bm1_a_superseded_plan_cannot_be_decided` (deny → `bad_state`,
+  approve → `not_proposed`, the new proposal untouched).
+* **BM2 — the check-token body off argv.** The `/api/request` body, which
+  carries the signed `check_token`, is built once and piped:
+  `printf '%s' "$REQ_BODY" | curl ... -H @<(gateway_header) --data-binary @-`.
+  `test_bm2_the_check_token_body_is_not_in_curl_argv` signs a request with a
+  token, asserts it is in no recorded argv, and that the dashboard received
+  it in the body. Installers regenerated (the gateway is embedded).
+* **One line per command.** `docs/AGENT_MANUAL.md` gains the section under
+  SSH: one line, refused with `multiline_command` on both paths, the
+  preferred `;` form, and the base64 form with the plain warning that the
+  card shows the base64. The `ssh_exec` tool description, the `ssh_exec`
+  refusal (`message`) and `/api/request`'s 400 detail all name the rule.
+  Tests: `test_a_multiline_command_is_refused_with_the_one_line_rule`,
+  `test_the_ssh_exec_tool_description_names_the_rule`, and the BK2 API test
+  now asserts `one line per command` in the detail. The manual's pipeline
+  note no longer lists a newline as a JIT gate: it is refused before the
+  pipeline.
+* **Cache-busting.** `ab5572b` (app.js `ui22`, style.css `ui14`) is in the
+  tree, so a browser that cached the previous `app.js` loads the plan-card
+  fix.
+
+`bash scripts/verify.sh`: `3028 passed, 27 skipped, 7 warnings in 637.44s
+(0:10:37)` (the browser render skips here without playwright on PATH; run
+it with `ESHU_PLAYWRIGHT_MODULES` to include it).
+
 ## 7. Backlog (not planned in detail)
 
 * Deny with a reason, shown to the agent (cheap; low value given the data).
