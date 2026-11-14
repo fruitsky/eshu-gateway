@@ -12531,6 +12531,109 @@ beyond BD1's token matching.
 Next: DeepSeek folds the label shape, AZ1–AZ5 and BD1–BD5 into the note,
 then security re-reads §2–§5 and the label section.
 
+### Security input for design round 3: the operator-editable `only` ceiling (security reviewer, 2026-11-14)
+
+The operator's decisions are fine. The defaults are light, switch, fan,
+input_boolean and media_player, with cover and climate off, and
+`restart` (AZ6) becomes a destructive word. An editable ceiling is
+acceptable if it keeps the property BD1 bought: **nothing outside a
+shipped allowlist can ever be allowed, and an agent can never move the
+ceiling.** Round 3 should design the following.
+
+**BT1 (must): the ceiling is operator-only, with no agent or MCP path.**
+* The ceiling endpoints take a dashboard session, CSRF and a confirm, and
+  nothing else.
+* No MCP tool, agent proposal, profile, plan, F21 internal tool or
+  integration call can read-modify-write it.
+* A profile or proposal that names an action outside the ceiling is
+  refused at save and at apply, as today. It never offers "add to
+  ceiling".
+* Test: an AST or route check that the only writers of the ceiling table
+  are the session-authenticated routes.
+
+**BT2 (must): the catalogue is code, and the DB is a selection from it.**
+* The catalogue of `(domain, service)` rows, each with its risk text, is
+  one shipped constant.
+* The DB stores only which catalogue rows are enabled, by catalogue id.
+* At save, apply **and match**, a stored row is honoured only if it is
+  still in the catalogue. That also covers an old DB that names a row a
+  newer release removed, a hand-edited DB, or a bad restore. Anything else
+  is ignored, and the allowance does not match.
+* `never` (domains, services and the `_<value>` suffix rule) is applied
+  **after** the ceiling, every time.
+* A test asserts that no catalogue row is caught by `never`, so a bad
+  catalogue edit fails CI instead of being silently dropped.
+* New catalogue rows in a later release ship **disabled**. Only the
+  first-run seed enables the defaults, guarded by a marker (as X7 does).
+* An empty ceiling means nothing is allowable. It is never quietly
+  re-seeded.
+
+**BT3 (must): destructive words cap allowances too, and adding one
+suspends.**
+* An allowance is checked before the gate (§5 step 7). As written, an
+  allowance therefore skips the `destructive` verb gate for a service the
+  word list calls destructive.
+* "Destructive" should mean "a human sees it" whichever path is taken. So
+  a catalogue row whose service matches a destructive word, built-in or
+  operator-added, cannot be enabled in the ceiling and never matches an
+  allowance.
+* An operator-added word then takes the same route as a removal:
+  * a confirm that lists the allowances it will suspend;
+  * suspension;
+  * an audit row.
+* Operator-added words:
+  * a charset of `[a-z0-9_]`, 3 to 32 characters;
+  * matched with the BD1 tokenisation, where `_` separates words, not
+    `\b`;
+  * removable, but a removal never un-suspends anything (BT4).
+* Built-in words are read-only.
+
+**BT4 (must): widening never re-activates anything silently.**
+* Re-enabling a ceiling row, or removing an operator-added destructive
+  word, does **not** resume the allowances that an earlier narrowing
+  suspended. The operator resumes each one, as § "Editing a profile
+  never changes agents silently" already requires.
+* Narrowing is still enforced at match even if the suspend step fails
+  half way. The ceiling read at match is the control, and the suspension
+  is the record.
+
+**BT5 (should): make widening visible outside the dashboard.**
+* Any change that widens the ceiling (enabling a row) sends an F-notify
+  message ("ceiling widened: cover.open_cover by \<operator\>") as well as
+  the audit row.
+* A stolen session can both widen the ceiling and create an allowance.
+  A second channel is the cheapest way for the real operator to notice.
+* No password re-prompt: that keeps the bar the same as creating an
+  allowance.
+
+**BT6 (should): scope and risk detail.**
+* The ceiling is **per HA integration**, not global, so a second HA
+  instance does not inherit the first one's widening.
+* Risky catalogue rows carry their risk text in the catalogue, and the
+  confirm shows it word for word:
+  * `cover.open_cover`, which can be a garage door, gate or door;
+  * `climate`;
+  * `media_player` on a device that plays to a room.
+* At allowance creation, an entity whose `device_class` is garage, gate,
+  door or lock-like shows that risk again, per entity.
+* `switch` is a default, and a switch can power anything (a heater, a
+  pump, a server, a siren). The allowance UI should show the entity's
+  friendly name and device class before the operator saves, not just its
+  id.
+* The audit row stores each change's before and after (catalogue ids,
+  words) and the actor. The page shows the ceiling's history.
+
+**Tests to add in round 3:**
+* An agent or MCP path cannot change the ceiling.
+* A DB row naming a non-catalogue service never matches.
+* A catalogue row under `never` fails CI.
+* Enabling a row that a destructive word catches is refused.
+* Adding a word suspends its dependents and lists them in the confirm.
+* Re-widening resumes nothing.
+* An empty ceiling allows nothing and is not re-seeded.
+* A second HA integration has its own ceiling.
+* Widening sends the notify message.
+
 ---
 
 ## Chunk X3 — Integrations page and agent policy modal pass · slug `integrations-ui` · dashboard UI · after F27
