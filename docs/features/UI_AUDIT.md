@@ -63,9 +63,10 @@ queue. Also the recent-sessions table and the needs-attention line.
   is visible but the items and Approve are not. With one pending item the
   card is fully visible. Fixed on `fix/ui-pass-2`: when the first proposed
   plan's own Approve is off-screen, a fixed strip at the bottom names the
-  plan and offers Review, Approve plan and Deny, calling the card's own
-  `decidePlan` (same confirmation and TTL). It is Home-only and disappears
-  as soon as the card's Approve is in view.
+  plan and offers **Review plan**, which scrolls the card's own Approve into
+  view and focuses it. BS1: the strip never decides; a plan is approved only
+  where its commands are visible. It is Home-only and disappears as soon as
+  the card's Approve is in view.
 * **Polish — the HUD subtitle starts with a stray `·` when it wraps** at
   390 (`· WHO MAY CROSS…` on its own line). Fixed on `fix/ui-pass-2`: the dot
   is a `::before` pseudo-element, hidden at ≤640 px, so a wrapped subtitle
@@ -252,15 +253,22 @@ The polish items tagged `ui-pass`, plus the plan-card question:
 
 | Item | Before | After |
 |---|---|---|
-| Plan card with 2+ pending | card at y=725; its Approve below 900 | fixed strip (`.plan-cta`) at the bottom: "Plan #1 · ops-agent · 2 changes waiting · Review · Approve plan · Deny", Home only, hidden when the card's own Approve is in view |
+| Plan card with 2+ pending | card at y=725; its Approve below 900 | fixed strip (`.plan-cta`) at the bottom: "Plan #1 · ops-agent · 2 changes waiting · Review plan", Home only, hidden when the card's own Approve is in view; BS1: the strip has no approve/deny control |
 | HUD subtitle at 390 | wrapped line began with `·` | dot is `::before`, hidden at ≤640 |
 | Command policy buttons at 390 | wrapped inside themselves, different heights | `nowrap`; each full width in one row, equal height |
 | Runbook step note | dashed rule read as an empty input | solid `--rule-weak` separator |
 
 The browser check (`tests/ui/ui_views.cjs`) asserts that when the plan card's
-Approve is outside the viewport, the strip is visible, names the plan and its
-Approve is a real in-viewport button. Re-measured at 1440×900 and 390×844; no
-new horizontal scroll and no text below AA.
+Approve is outside the viewport, the strip is visible, names the plan, has no
+approve/deny control and one **Review plan** button, and that clicking it
+brings the card's own Approve into the viewport and focuses it. Re-measured at
+1440×900 and 390×844; no new horizontal scroll and no text below AA.
+
+**BS1 (must, review round):** the first version of the strip carried Approve
+and Deny. Removed: the strip now only reviews. `app.js` ui25.
 
 `bash scripts/verify.sh` on `fix/ui-pass-1` (with this pass): `3030 passed,
 26 skipped, 7 warnings in 678.59s (0:11:18)`.
+
+`bash scripts/verify.sh` on `fix/ui-pass-1` (BS1): `3030 passed, 26 skipped,
+7 warnings in 672.92s (0:11:12)`.

@@ -3960,10 +3960,11 @@ function planCardHtml(plan) {
     '</div></div>';
 }
 
-/* UI pass 2: when the first proposed plan's own Approve is below the fold
-   (two or more pending JITs push the card down), a fixed strip keeps that
-   same action reachable. It calls the card's own decidePlan, so the
-   confirmation rules and TTL are identical. */
+/* UI pass 2 / BS1: when the first proposed plan's own Approve is below the
+   fold (two or more pending JITs push the card down), a fixed strip names the
+   plan and offers one action, Review plan. The strip never decides; it scrolls
+   to the card and focuses the card's own Approve, where the commands are
+   visible. */
 var _planCtaId = 0;
 var _planCtaRaf = 0;
 
@@ -4008,11 +4009,6 @@ function renderPlanCta() {
       (plan.agent || 'unknown agent') + ' \u00b7 ' + items.length +
       (items.length === 1 ? ' change' : ' changes') + ' waiting';
   }
-  var approve = document.getElementById('plan-cta-approve');
-  if (approve) {
-    approve.textContent = _planConfirm[Number(plan.id)]
-      ? 'Press again to approve' : 'Approve plan';
-  }
   cta.classList.remove('hidden');
 }
 
@@ -4024,10 +4020,20 @@ function schedulePlanCta() {
   });
 }
 
-function scrollToPlanCard() {
+/* BS1: the strip never approves or denies. It brings the plan card's own
+   Approve button into view and focuses it, so the decision is made where the
+   commands are visible. */
+function reviewPlanCard() {
   var card = document.querySelector('#plans-widget .plan-card[data-plan-card="' +
     Number(_planCtaId) + '"]');
-  if (card && card.scrollIntoView) card.scrollIntoView({ block: 'center' });
+  var approve = card && card.querySelector('.btn-approve');
+  if (!approve) {
+    var widget = document.getElementById('plans-widget');
+    if (widget && widget.scrollIntoView) widget.scrollIntoView({ block: 'center' });
+    return;
+  }
+  if (approve.scrollIntoView) approve.scrollIntoView({ block: 'center' });
+  if (approve.focus) approve.focus({ preventScroll: true });
 }
 
 window.addEventListener('scroll', schedulePlanCta, { passive: true });

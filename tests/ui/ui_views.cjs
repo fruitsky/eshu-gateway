@@ -137,9 +137,9 @@ const REQUIRED = {
       }
     }
 
-    // The plan card is below the fold with two pending JITs; its Approve must
-    // still be reachable through the fixed strip (and be a real in-viewport
-    // button, not just text).
+    // The plan card is below the fold with two pending JITs. BS1: the strip
+    // must not decide anything; its one button brings the card's own Approve
+    // into the viewport and focuses it.
     await page.evaluate(() => switchView('home'));
     await page.waitForTimeout(500);
     const cta = await page.evaluate(() => {
@@ -148,18 +148,37 @@ const REQUIRED = {
       if (!strip || !cardBtn) return null;
       const cr = cardBtn.getBoundingClientRect();
       const cardInView = cr.width > 0 && cr.top >= 0 && cr.bottom <= innerHeight;
-      const btn = strip.querySelector('.btn-approve');
-      const r = btn.getBoundingClientRect();
-      return { hidden: strip.classList.contains('hidden'), cardInView,
-        ctaInView: r.width > 0 && r.top >= 0 && r.bottom <= innerHeight,
-        text: (document.getElementById('plan-cta-text') || {}).textContent || '' };
+      const buttons = Array.from(strip.querySelectorAll('button'));
+      return {
+        hidden: strip.classList.contains('hidden'), cardInView,
+        buttons: buttons.map((b) => b.textContent.trim()),
+        decides: !!strip.querySelector('.btn-approve, .btn-deny'),
+        text: (document.getElementById('plan-cta-text') || {}).textContent || '',
+      };
     });
     if (!cta) failures.push(`home/${w}: no plan card or plan strip`);
-    else if (!cta.cardInView && (cta.hidden || !cta.ctaInView)) {
-      failures.push(`home/${w}: plan Approve is below the fold and the strip is not usable (${JSON.stringify(cta)})`);
+    else if (!cta.cardInView) {
+      if (cta.hidden) failures.push(`home/${w}: plan Approve is below the fold and the strip is hidden`);
+      if (cta.decides) failures.push(`home/${w}: the plan strip has an approve/deny control (BS1)`);
+      if (cta.buttons.length !== 1 || cta.buttons[0] !== 'Review plan') {
+        failures.push(`home/${w}: the plan strip has ${JSON.stringify(cta.buttons)} instead of one Review plan (BS1)`);
+      }
+      if (!/Plan #\d+/.test(cta.text)) {
+        failures.push(`home/${w}: plan strip does not name the plan (${JSON.stringify(cta.text)})`);
+      }
+      await page.evaluate(() => document.getElementById('plan-cta-review').click());
+      await page.waitForTimeout(700);
+      const after = await page.evaluate(() => {
+        const b = document.querySelector('#plans-widget .plan-card .btn-approve');
+        const r = b.getBoundingClientRect();
+        return { inView: r.width > 0 && r.top >= 0 && r.bottom <= innerHeight,
+          focused: document.activeElement === b };
+      });
+      if (!after.inView) failures.push(`home/${w}: Review did not bring the card's Approve into view`);
+      if (!after.focused) failures.push(`home/${w}: Review did not focus the card's Approve`);
     }
-    if (cta && !cta.cardInView && !/Plan #\d+/.test(cta.text)) {
-      failures.push(`home/${w}: plan strip does not name the plan (${JSON.stringify(cta.text)})`);
+    if (cta && cta.cardInView && cta.decides) {
+      failures.push(`home/${w}: the plan strip has an approve/deny control (BS1)`);
     }
 
     // The gateways table must fit its wrapper at 1440 (the sticky Actions

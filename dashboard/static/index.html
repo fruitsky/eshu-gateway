@@ -39,9 +39,10 @@
      the plan card itself is below the fold (two or more pending JITs). -->
 <div id="plan-cta" class="plan-cta hidden" role="region" aria-label="Plan waiting">
   <span class="plan-cta-text" id="plan-cta-text"></span>
-  <button type="button" class="btn btn-muted btn-xs" onclick="scrollToPlanCard()">Review</button>
-  <button type="button" class="btn btn-approve btn-xs" id="plan-cta-approve" onclick="decidePlan(_planCtaId, 'approve')">Approve plan</button>
-  <button type="button" class="btn btn-deny btn-xs" onclick="decidePlan(_planCtaId, 'deny')">Deny</button>
+  <!-- BS1: the strip never decides. A plan is approved only where its
+       commands are visible; this only brings the card's own Approve into
+       view and focuses it. -->
+  <button type="button" class="btn btn-muted btn-xs" id="plan-cta-review" onclick="reviewPlanCard()">Review plan</button>
 </div>
 <div id="toast" role="status" aria-live="polite" class="hidden fixed top-4 left-1/2 transform -translate-x-1/2 z-50 px-6 py-3 rounded-lg text-sm font-medium shadow-lg toast"></div>
 
@@ -1228,7 +1229,7 @@
 </main>
 
 <script src="/static/state.js?v=ui3"></script>
-<script src="/static/app.js?v=ui24"></script>
+<script src="/static/app.js?v=ui25"></script>
 
 <!-- Create / Edit Approved Window Modal -->
 <div id="create-window-modal" class="modal-overlay hidden">
