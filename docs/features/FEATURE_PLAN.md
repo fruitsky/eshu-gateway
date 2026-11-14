@@ -12301,6 +12301,101 @@ follow Build.**
 * Until then, the X7 note and DEV_GUIDE should say that these two are not
   gated by Deploy to Fleet.
 
+## Chunk X8 — which installer each gateway runs · slug `gateway-installer-version` · dashboard + gateway · **security sign-off (gateway-side change)**
+
+### Problem
+
+Every gateway reports the *dashboard* version (`v0.1.0`), so the Gateways
+table cannot say who runs Fleet, who runs Edge, who is on a Build and who is
+behind. After X7 the three channels are real: Build changes on a deploy,
+Edge on Seed Edge, Fleet on Deploy to Fleet. The fleet view should show that.
+
+### Design
+
+**1. The installer hashes itself.** At the start of install, reinstall and
+update, the installer computes `sha256sum "$0"` and keeps the first 12 hex.
+In every official flow the file is downloaded to a private temp and run as a
+file (`bash "$T/eshu-install.sh"`), so `$0` is it. A manual `curl | bash`
+install has no file to hash: the value stays empty and the badge reads
+`unknown` (never a guess). The value is re-validated as lowercase 12-hex
+before it is used.
+
+**2. Reporting.**
+* The installer writes `/etc/eshu-installer-hash` (root:root, 0644 — it is a
+  hash of a public file, not a secret) so the logger can re-send it without
+  the installer.
+* Its `/api/register` body carries `installer_hash`.
+* The poller re-registers after an update/rollback/dev update; it reads the
+  file and includes the hash, so a successful update is visible immediately.
+* `eshu-logger` reads the file each heartbeat and includes it, so a lost
+  registration is repaired within 30 s and a changed file is noticed.
+
+**3. Store.** `gateways.installer_hash` (TEXT, `''` when never reported) and
+`gateways.installer_hash_changed_at` (INTEGER, 0), both additive migrations.
+An unchanged value does not move the timestamp; a change does. Invalid input
+is ignored and never clears a stored value (an old installer sends nothing;
+an unknown future format must not make the badge lie).
+
+**4. Channel, computed server-side.** `/api/gateways` returns
+`installer_channel` for each row: `fleet` when the hash equals Fleet, else
+`edge`, else `build`, else `outdated` when non-empty, else `unknown`. Fleet
+wins over Edge (they are equal until the first promote), Edge over Build.
+The comparison lives in one function so the table and the status agree.
+
+`/api/dev/status` adds four counts: `on_fleet`, `on_edge`, `outdated`,
+`unknown`. A gateway whose hash is exactly Build is not in any of the four
+(the badge says `Build`); the sum can therefore be smaller than
+`gateway_count`, and that is honest.
+
+**5. UI.** The Gateways table shows the badge in the gateway's version line
+(`v6.0.0 · Fleet`), not a new column. `outdated` shows the first six hex of
+the gateway's hash (the full 12 are in the title, with when it changed), so
+the row still fits at 100% zoom. The four-dot health legend already hides
+below 1600 for the same reason.
+
+**6. Compatibility.**
+* An old gateway sends no `installer_hash`: register and heartbeat accept the
+  field as optional, the stored value (or `''`) stays, and the badge is
+  `unknown`.
+* The register payload validates `^[0-9a-f]{12}$`; anything else is ignored.
+* No endpoint, token or permission changes. The hash is display metadata: it
+  is a self-report and is never consulted by a policy, approval or run
+  decision.
+
+**7. Security notes for the reviewer.**
+* The file is a hash of a public installer, so 0644 is deliberate; it is
+  root-owned and not writable by the gateway user.
+* The installer never reads the file back to make a decision; the dashboard
+  never trusts the hash for anything but the badge/count.
+* `$0` is only hashed when it is a readable regular file; a piped install
+  reports nothing rather than hashing stdin.
+* The gateway can lie about its hash. It is the same self-report as
+  `version`, and it is display-only; say if you want it signed/attested
+  instead (that would be a larger change).
+* No new download, execution or channel write. The installer still installs
+  the bytes it was run from.
+
+**8. Tests.**
+* `tests/test_x8_installer_hash.py`: store/validate/change timestamp; register
+  with a valid hash, an old installer, and an invalid value; heartbeat
+  updates; `/api/dev/status` counts for fleet/edge/build/outdated/unknown;
+  the installer, poller and logger text (hash, file, register body).
+* A UI assertion that the badge renders and the table still fits at 1440.
+* The four installed copies: X7 generates Build only; after this change
+  `gen_installer.py` writes Build, and Seed/Deploy copy it.
+
+**9. Open questions for security.**
+1. Is a self-reported hash acceptable for display only, or do you want the
+   dashboard to refuse a hash that does not match a known channel (it would
+   make `outdated` unrepresentable)?
+2. Should the hash travel signed (the gateway token already authenticates the
+   register/heartbeat), or is the token the only integrity you need?
+3. Is 0644 on `/etc/eshu-installer-hash` fine, or should it be 0640
+   root:eshu-gateway like the session key?
+4. Should the four counts include the Build hash under `on_edge` (a Build
+   gateway is not on Edge), or stay as designed with Build uncounted?
+
+
 ## Chunk X6 — agent API fixes from the Release 1.2 test round · slug `agent-api-round` · dashboard
 
 From the agent's test report of 2026-11-12, triaged by the feature reviewer.

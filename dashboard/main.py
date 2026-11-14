@@ -57,6 +57,7 @@ from database import (
     get_gateway_ssh_mode, set_gateway_ssh_mode, get_gateway_ssh_host_key,
     set_gateway_ssh_host_key, get_gateway_ssh_capabilities,
     set_gateway_ssh_capabilities, set_gateway_run_limits, get_gateway_run_limits,
+    set_gateway_installer_hash,
     set_override, clear_override, get_override_active,
     create_approved_window, get_approved_windows, get_active_approved_windows,
     delete_approved_window, toggle_approved_window,
@@ -608,6 +609,10 @@ class RegisterPayload(BaseModel):
     # None means "not reported" (an older installer or the poller), which keeps
     # the stored value instead of clearing it.
     run_limits: Optional[str] = None
+    # X8: the first 12 hex of the installer's sha256. Optional: an old
+    # installer sends nothing, which keeps the stored value ("unknown" if
+    # there is none).
+    installer_hash: str = ""
 
 class PolicyPayload(BaseModel):
     type: str
@@ -684,6 +689,31 @@ def _validate_gateway_identity(ip: str, hostname: str) -> None:
 
 SSH_AGENT_FORMATS = ('eshu-ssh-agent-v1',)
 SSH_TICKET_FORMATS = ('v2',)
+
+
+def _installer_channel(value, build_h, edge_h, fleet_h) -> str:
+    """X8: which channel a gateway's installer hash matches.
+
+    Fleet wins over Edge (they are equal before the first promote), Edge over
+    Build, then anything else non-empty is outdated; empty is unknown. The
+    hashes are None when a channel file is missing, which never matches.
+    """
+    h = (value or '').strip().lower()
+    if not h:
+        return 'unknown'
+    if fleet_h and h == fleet_h:
+        return 'fleet'
+    if edge_h and h == edge_h:
+        return 'edge'
+    if build_h and h == build_h:
+        return 'build'
+    return 'outdated'
+
+
+def _clean_installer_hash(value) -> str:
+    """X8: 12 lowercase hex, or '' (ignore anything else, never store it)."""
+    v = (value or '').strip().lower()
+    return v if re.fullmatch(r'[0-9a-f]{12}', v) else ''
 
 
 def _clean_ssh_capability(value, allowed) -> str:
@@ -778,6 +808,11 @@ def register(payload: RegisterPayload, request: Request):
     if payload.run_limits is not None:
         set_gateway_run_limits(payload.ip,
                                _clean_ssh_capability(payload.run_limits, {'v1'}))
+    # X8: store the installer identity the gateway reports. An invalid value is
+    # ignored (the old row, if any, stays), never treated as "unknown".
+    if payload.installer_hash:
+        set_gateway_installer_hash(payload.ip,
+                                   _clean_installer_hash(payload.installer_hash))
     # Clear any stale uninstall trigger — re-enrollment cancels pending uninstalls
     clear_trigger_uninstall(payload.ip)
     
@@ -1280,6 +1315,8 @@ class HeartbeatPayload(BaseModel):
     gateway_ok: int = 0
     can_reach: int = 0
     ssh_host_key: str = ""
+    # X8: re-sent every cycle; the installer's own registration can be lost.
+    installer_hash: str = ""
 
 @app.post("/api/gateway-heartbeat")
 def receive_heartbeat(payload: HeartbeatPayload, request: Request):
@@ -1290,6 +1327,9 @@ def receive_heartbeat(payload: HeartbeatPayload, request: Request):
     update_gateway_last_seen(payload.ip)
     update_gateway_heartbeat(payload.ip, payload.hostname,
                              payload.poller_ok, payload.gateway_ok, payload.can_reach)
+    if payload.installer_hash:
+        set_gateway_installer_hash(payload.ip,
+                                   _clean_installer_hash(payload.installer_hash))
     # F12: a heartbeat can report a new host key, but it never moves the pin —
     # only an explicit, audited operator action does (design §4, R6).
     if (payload.ssh_host_key or '').strip():
@@ -1653,6 +1693,11 @@ def list_gateways(request: Request):
         except (TypeError, ValueError):
             return 0
     read_lane_unlocked = read_lane_on_enabled()
+    # X8: the channel badge is computed here, once, so the UI never compares
+    # hashes itself and every caller agrees.
+    build_h = installer_channels.build_hash()
+    edge_h = installer_channels.channel_hash(installer_channels.EDGE)
+    fleet_h = installer_channels.channel_hash(installer_channels.FLEET)
     update_ts = max(_as_int(get_trigger_update_version()), _as_int(get_trigger_dev_update()))
     update_recent = update_ts > 0 and (now - update_ts) <= UPDATE_ACTIVE_WINDOW
     for g in gateways:
@@ -1669,6 +1714,8 @@ def list_gateways(request: Request):
         g['read_lane'] = g.get('read_lane') or 'off'
         g['read_lane_ready'] = read_lane_ready(g['ip'], now)
         g['read_lane_on_enabled'] = read_lane_unlocked
+        g['installer_channel'] = _installer_channel(
+            g.get('installer_hash'), build_h, edge_h, fleet_h)
     return gateways
 
 @app.get("/api/gateways/{ip}/inner-targets")
@@ -2222,7 +2269,22 @@ def dev_status(request: Request):
         except (TypeError, ValueError):
             return None
 
+    installer_counts = {"on_fleet": 0, "on_edge": 0, "outdated": 0, "unknown": 0}
+    for g in gateways:
+        ch = _installer_channel(g.get('installer_hash'), build_hash, edge_hash, fleet_hash)
+        if ch == 'fleet':
+            installer_counts['on_fleet'] += 1
+        elif ch == 'edge':
+            installer_counts['on_edge'] += 1
+        elif ch == 'unknown':
+            installer_counts['unknown'] += 1
+        elif ch == 'outdated':
+            installer_counts['outdated'] += 1
     return {
+        "on_fleet": installer_counts['on_fleet'],
+        "on_edge": installer_counts['on_edge'],
+        "outdated": installer_counts['outdated'],
+        "unknown": installer_counts['unknown'],
         "dashboard_version": DASHBOARD_VERSION,
         "edge_exists": edge_hash is not None,
         "backup_exists": installer_channels.has_previous(),

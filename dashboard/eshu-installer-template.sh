@@ -19,6 +19,19 @@ GATEWAY_PUB_KEY=""
 DASHBOARD_URL=""
 GATEWAY_SSH_MODE="direct+mcp"
 
+# X8: which installer this is, so the dashboard can say Fleet / Edge / Build.
+# The official install, reinstall and update flows all download the file to a
+# private temp and run it as a file, so "$0" is it. A `curl | bash` install has
+# no file to hash: the value stays empty and the dashboard says "unknown".
+INSTALLER_HASH=""
+if [ -f "$0" ] && [ -r "$0" ]; then
+  INSTALLER_HASH=$(sha256sum -- "$0" 2>/dev/null | cut -c1-12 || true)
+fi
+case "$INSTALLER_HASH" in
+  [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+  *) INSTALLER_HASH="" ;;
+esac
+
 # BE4: replace a file through a private temp in its own directory, refusing a
 # planted symlink at the file. stdin is the new content; the owner and mode of
 # an existing file are kept, and a new file takes the directory's owner.
@@ -522,7 +535,7 @@ register_gateway() {   # $1 = the X-Gateway-Token to present ('' for none)
          | curl --connect-timeout 3 -m 15 -s -w '\n%{http_code}' -X POST "$DASHBOARD_URL/api/register" \
        -H @- \
        -H "Content-Type: application/json" \
-       -d '{"ip":"'"$TARGET_IP"'","hostname":"'"$HOST_NAME"'","version":"'"$GATEWAY_VERSION"'",'"$SSH_REG_CAPS"'}' 2>/dev/null) \
+       -d '{"ip":"'"$TARGET_IP"'","hostname":"'"$HOST_NAME"'","version":"'"$GATEWAY_VERSION"'",'"$SSH_REG_CAPS"',"installer_hash":"'"$INSTALLER_HASH"'"}' 2>/dev/null) \
     || out=""
   case "$out" in
     *$'\n'[0-9][0-9][0-9]) REGISTER_STATUS="${out##*$'\n'}"; REGISTER_RESPONSE="${out%$'\n'*}" ;;
@@ -671,6 +684,16 @@ if [ -n "${GATEWAY_TOKEN:-}" ] && [ "$GATEWAY_TOKEN" != "None" ]; then
   chmod 600 /etc/eshu-token.tmp
   chown root:root /etc/eshu-token.tmp
   mv -f /etc/eshu-token.tmp /etc/eshu-token
+fi
+
+# X8: the installer hash the dashboard reports (and the logger re-sends). It is
+# a hash of a public file, so 0644 root:root is fine: not secret, just not
+# writable by the gateway user.
+if [ -n "$INSTALLER_HASH" ]; then
+  ( umask 022; printf '%s\n' "$INSTALLER_HASH" > /etc/eshu-installer-hash.tmp )
+  chmod 644 /etc/eshu-installer-hash.tmp
+  chown root:root /etc/eshu-installer-hash.tmp
+  mv -f /etc/eshu-installer-hash.tmp /etc/eshu-installer-hash
 fi
 
 write_gateway; write_logger; write_sudoers; write_poller
