@@ -10443,6 +10443,82 @@ and the raw-hash write.
 `bash scripts/verify.sh`: `3050 passed, 26 skipped, 7 warnings in 632.51s
 (0:10:32)` (9 more: BN1 x3, BN2 x2, BN3 x1, BL1 x3).
 
+### Security re-read of F11 code round 2 (security reviewer, 2026-11-14, at `7b446d4`)
+
+**BL1, BN1, BN2 and the nits are approved. BN3 is approved in shape. One
+new must, BO2: the write and restore scripts are not the approved Round 9
+scripts.**
+
+Approved:
+* **BL1.**
+  * The read runs `binary=True`, and the hash and size come from the raw
+    bytes.
+  * A file that isn't valid UTF-8 is `editable: false` with
+    `config_not_utf8`, and the write refuses it.
+  * The write's stdin is bytes.
+  * The `ok <sha>` line must equal the hash of the bytes sent; any other
+    value is `config_state_unknown`.
+  * F12 keeps text mode.
+* **BN1.**
+  * `redact()` matches the Round 10 text line for line. Only comments
+    differ.
+  * It is in the write and restore scripts and in a fixed `CHECK_SCRIPT`.
+  * Only `redact | head -c 65536` leaves the add-on, and `scrub_string`
+    still runs on the call row.
+* **BN2.** Only column-0 keys and column-0 comments survive. Indented
+  lines, `-` items and block or folded bodies are dropped, and CR is
+  stripped.
+* **Nits.** The write and restore start with `umask 077`. A timed-out
+  restore records the current and backup hashes (`HASH_SCRIPT`), so a read
+  can clear it.
+
+**BO2 (must): use the approved Round 9 write and restore scripts,
+unchanged, with Round 10's `redact()`.**
+
+Round 10 changed only `redact()`; everything else stayed Round 9's. The
+code's write and restore are the earlier shape. They miss what rounds 8
+and 9 added and the W5 matrix checked:
+
+* **AL1/AL6, create through a checked descriptor.**
+  * The code runs `[ ! -e "$backup" ]` and then `cp -p`, then
+    `[ ! -e "$tmp" ]` and then `cat > "$tmp"`, and restores with `cp -p`.
+  * Round 9 opens each new file on a descriptor (`exec 5>` and `exec 6>`)
+    and checks it with `fd_ok` before writing. It writes through the
+    descriptor and runs `chown` on the descriptor.
+  * Without that, a FIFO or link planted at the backup, temp or rollback
+    name after the check receives the file's bytes or the agent's
+    content. Those are the W5 rows "reader gets nothing" and "15/16/1".
+* **Hard links.** Round 9 refuses a target or backup whose link count is
+  not 1 (`stat -L -c %h ... = 1`, exit 21). The code has no check.
+  * The code's `READ_SCRIPT` needs it too. Masking is decided by name, and
+    `realpath` cannot see a hard link. So `packages/x.yaml` hard-linked to
+    `secrets.yaml` is read unmasked.
+  * Add the link-count check on fd 3 to the read script. That finishes
+    BN3.
+* **AL5.** The restore takes the backup's expected hash as `$4` and checks
+  it before installing (exit 14). The code installs whatever is at the
+  backup name. `restore_config` must also pass the hash it recorded.
+* **W7/W8.** Round 9 sets `PATH` and `set -f`, and reads `SUPERVISOR_TOKEN`
+  from `/run/s6/container_environment/SUPERVISOR_TOKEN` (exit 20 when it
+  can't be read). It then passes the token only to `ha`.
+  * The code's scripts, including `CHECK_SCRIPT`, run a bare `ha core check`.
+  * W7 found that `ha` over SSH needs that token. The BusyBox tests stub
+    `ha`, so they can't show this. On a real add-on, every check would
+    fail, and every write would then roll back with exit 18.
+
+Fix:
+* paste Round 9's `WRITE_SCRIPT` and `RESTORE_SCRIPT` and Round 9's
+  `CHECK_SCRIPT` preamble, with Round 10's `redact()` in place;
+* add the read script's link-count check;
+* update the exit-code map for 20 and 21;
+* port the W5 matrix rows (FIFO at backup, temp and rollback; a planted
+  link; a hard link; a swap between `realpath` and the open; AL5's changed
+  backup) to `tests/test_f11_ha_busybox.py`, with a reader attached to the
+  FIFO;
+* test that a missing token file gives exit 20 and runs nothing.
+
+I'll diff the scripts against Round 9 and Round 10 text on the next read.
+
 ## Chunk F12 — SSH through Eshu over MCP (`ssh_exec`) · slug `ssh-exec` · dashboard (+ small gateway change)
 
 > **Design first** (push a design note only, wait for approval). Needs the
