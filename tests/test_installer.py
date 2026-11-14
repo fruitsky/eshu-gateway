@@ -215,7 +215,7 @@ write_gateway
 """ % target)
     bindir = tmp_path / "bin"
     bindir.mkdir()
-    _stub(bindir, "chown", "exit 0")     # root-only chown is not ours to run
+    _stub(bindir, "chown", "exit 0")
     env = {"PATH": "%s:%s" % (bindir, os.environ.get("PATH", "/usr/bin:/bin"))}
     proc = subprocess.run(["bash", str(harness)], capture_output=True,
                           text=True, env=env, timeout=60)
@@ -451,7 +451,8 @@ def _key_block(template, home):
 
 
 def _run_keys(tmp_path, register_ok, ssh_mode, mode="reinstall",
-              dash_pub="ssh-ed25519 AAAAdash", original=None):
+              dash_pub="ssh-ed25519 AAAAdash", original=None,
+              runuser_body=None):
     template = _read("dashboard/eshu-installer-template.sh")
     home = tmp_path / "home"
     (home / ".ssh").mkdir(parents=True)
@@ -464,6 +465,9 @@ def _run_keys(tmp_path, register_ok, ssh_mode, mode="reinstall",
     bindir = tmp_path / "bin"
     bindir.mkdir()
     _stub(bindir, "chown", "exit 0")
+    # BH2: the write runs through `runuser -u $USER --`; as a non-root test,
+    # execute the command directly (the temp home is the test user's).
+    _stub(bindir, "runuser", runuser_body or 'shift 3\nexec "$@"')
     harness = tmp_path / "keys.sh"
     harness.write_text("""
 USER="eshu-gateway"; mode="%s"
@@ -478,6 +482,40 @@ DASHBOARD_SSH_PUB="%s"
     proc = subprocess.run(["bash", str(harness)], capture_output=True,
                           text=True, env=env, timeout=60, stdin=subprocess.DEVNULL)
     return proc, original, ak.read_text()
+
+
+def test_bh2_the_keys_write_runs_as_the_user(tmp_path):
+    """BH2: mktemp/cat/mv/chmod are the user's, not root's."""
+    log = tmp_path / "runuser.log"
+    body = ('printf "%%s\\n" "$*" >> "%s"\n'
+            'shift 3\nexec "$@"') % log
+    proc, _original, after = _run_keys(tmp_path, "1", "direct+mcp",
+                                       mode="update", runuser_body=body)
+    assert proc.returncode == 0, proc.stderr
+    line = log.read_text()
+    assert "-u eshu-gateway --" in line
+    assert "authorized_keys" in line          # the inner script ran
+    assert "eshu-dashboard" in after
+
+
+def test_bh2_a_failed_user_write_changes_nothing(tmp_path):
+    proc, original, after = _run_keys(tmp_path, "1", "direct+mcp",
+                                      mode="update",
+                                      runuser_body='cat >/dev/null; exit 1')
+    assert proc.returncode == 0, proc.stderr
+    assert after == original
+    assert "REFUSED" in proc.stdout
+
+
+def test_bh2_the_fallback_and_the_inner_checks_are_present():
+    src = _read("dashboard/eshu-installer-template.sh")
+    assert "runuser -u \"$USER\" --" in src
+    assert "setpriv --reuid=" in src and "--init-groups" in src
+    # The user-side script refuses a swap it can see, and never writes through
+    # a symlink.
+    assert '[ ! -L "$dir" ]' in src
+    assert '[ ! -L "$dir/authorized_keys" ]' in src
+    assert "mv -f \"$tmp\" \"$dir/authorized_keys\"" in src
 
 
 def test_be3_the_register_token_is_never_in_curl_argv(tmp_path):
@@ -613,6 +651,7 @@ def _block_harness(tmp_path, block):
     bindir = tmp_path / "bin"
     bindir.mkdir(exist_ok=True)
     _stub(bindir, "chown", "exit 0")
+    _stub(bindir, "runuser", 'shift 3\nexec "$@"')
     harness = tmp_path / "block.sh"
     harness.write_text('USER="eshu-gateway"\n' + block + "\n")
     env = {"PATH": "%s:%s" % (bindir, os.environ.get("PATH", "/usr/bin:/bin"))}
@@ -761,7 +800,7 @@ def test_be4_the_install_path_does_not_use_a_planted_tmp_symlink(tmp_path):
 def test_be4_no_fixed_authorized_keys_tmp_name_remains():
     src = _read("dashboard/eshu-installer-template.sh")
     assert "authorized_keys.tmp" not in src
-    assert "mktemp \"$ak_dir/.authorized_keys" in src
+    assert "mktemp \"$dir/.authorized_keys" in src
     assert "eshu_safe_replace" in src
 
 
