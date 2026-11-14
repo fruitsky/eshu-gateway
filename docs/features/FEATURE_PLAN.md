@@ -13964,6 +13964,29 @@ before the user-side write.**
   into a variable. Run the BJ1 check, `ak_from` and the filter on that
   copy.
 
+**BS1/BS2 round (implementer notes, 2026-11-14).**
+
+* **BS1 (must).** `static/features/approved_windows.sh` now sends the claim
+  header through `_window_token_header`: when the script is sourced by the
+  gateway (1.3 or 1.4) it calls the gateway's `gateway_header`, which reads
+  `/etc/eshu-token` on 1.4 and the baked value on 1.3; if it is sourced
+  elsewhere it reads `/etc/eshu-token` itself, then the old variable. The
+  token stays on stdin. Tests: the claim's header is non-empty on 1.4 and
+  the token is not in argv; the helper resolves on both a 1.3 fixture
+  (variable) and a 1.4 fixture (file).
+* **BS2 (should).** Root no longer reads `authorized_keys`. `ak_read` runs
+  `cat` as the user once; the BJ1 every-line check, `ak_from` and the
+  filters parse that copy, and the readability check runs as the user. Test:
+  the `runuser` stub's log shows the `cat`, and no root `grep`/`ak_from`
+  reads the path.
+* A grep of every file a gateway sources or downloads
+  (`eshu-gateway.sh`, `eshu-poller.sh`, `eshu-logger.sh`,
+  `static/fleet-runner.sh`, `static/features/*.sh`) finds no other use of a
+  baked `GATEWAY_TOKEN`: the logger and fleet runner read the file, and the
+  window script's variable use is only its last-resort fallback.
+`bash scripts/verify.sh`: `3045 passed, 26 skipped, 7 warnings in 646.10s
+(0:10:46)` (the BS1/BS2 tests).
+
 ## 7. Backlog (not planned in detail)
 
 * Deny with a reason, shown to the agent (cheap; low value given the data).

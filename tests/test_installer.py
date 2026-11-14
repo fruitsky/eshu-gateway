@@ -1027,3 +1027,21 @@ def test_bg1_the_check_runs_in_install_reinstall_and_update_before_changes():
     # migrate all pass through it.
     assert src.index('if [[ "${1:-}" == "--update" ]]') < src.index(
         "check_curl_version; then exit 1")
+
+
+def test_bs2_the_keys_read_runs_as_the_user(tmp_path):
+    """BS2: root never reads authorized_keys; the checks parse the user's copy."""
+    log = tmp_path / "runuser.log"
+    body = ('printf "%%s\\n" "$*" >> "%s"\n' 'shift 3\nexec "$@"') % log
+    proc, _original, after = _run_keys(tmp_path, "1", "direct+mcp",
+                                       mode="update", runuser_body=body)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    text = log.read_text()
+    assert "cat --" in text and "authorized_keys" in text
+    assert "eshu-dashboard" in after
+    src = _read("dashboard/eshu-installer-template.sh")
+    # No root grep of the file, and no ak_from on a path any more.
+    assert 'grep -m1 \'/usr/local/bin/eshu-gateway.sh\' "$AK_FILE"' not in src
+    assert 'grep -v \' eshu-dashboard$\' "$AK_FILE"' not in src
+    assert 'ak_from "$AK_FILE"' not in src
+    assert 'ak_as_user cat -- "$1"' in src

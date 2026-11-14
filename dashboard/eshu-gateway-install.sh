@@ -2722,10 +2722,16 @@ write_gateway; write_logger; write_sudoers; write_poller
 
 # BE4: the `from=` of the existing Eshu lines, so a refreshed dashboard line
 # keeps the restriction the operator set. Empty when there is none.
-ak_from() {   # $1 = file  $2 = comment
+# BS2: read the file as the user. Root must not read a path the user could
+# swap after the symlink check; the checks and filters below run on this copy.
+ak_read() {   # $1 = file
+  ak_as_user cat -- "$1" 2>/dev/null || true
+}
+
+ak_from() {   # $1 = comment; stdin = the authorized_keys text
   # `|| true`: with `set -o pipefail`, sed can see SIGPIPE when head stops
   # after the first match; that must not abort the installer.
-  sed -n "s/^from=\"\([^\"]*\)\".* $2\$/\1/p" "$1" 2>/dev/null | head -n 1 || true
+  sed -n "s/^from=\"\([^\"]*\)\".* $1\$/\1/p" 2>/dev/null | head -n 1 || true
 }
 
 # BH2: run the user-side write as the gateway user. The checks above are the
@@ -2794,7 +2800,7 @@ if [ "$mode" = "update" ] && [ "${REGISTER_OK:-}" = "1" ]; then
     AK_FILE="$AK_DIR/authorized_keys"
     if [ -L "$AK_DIR" ] || { [ -e "$AK_FILE" ] && [ -L "$AK_FILE" ]; }; then
       echo "   REFUSED: $AK_DIR or $AK_FILE is a symlink; authorized_keys not changed."
-    elif [ -e "$AK_FILE" ] && [ ! -r "$AK_FILE" ]; then
+    elif [ -e "$AK_FILE" ] && ! ak_as_user test -r "$AK_FILE"; then
       echo "   REFUSED: $AK_FILE is not readable; authorized_keys not changed."
     else
       # BH1: an unreadable `from=` must not silently become an unrestricted
@@ -2805,10 +2811,13 @@ if [ "$mode" = "update" ] && [ "${REGISTER_OK:-}" = "1" ]; then
       AK_ESH_LINE=""
       AK_DASH_FROM=""
       AK_BAD_FROM=""
+      AK_TEXT=""
       if [ -f "$AK_FILE" ]; then
-        AK_ESH_LINE=$(grep -m1 '/usr/local/bin/eshu-gateway.sh' "$AK_FILE" 2>/dev/null || true)
-        AK_DASH_FROM=$(ak_from "$AK_FILE" eshu-dashboard)
-        [ -n "$AK_DASH_FROM" ] || AK_DASH_FROM=$(ak_from "$AK_FILE" eshu-gateway-key)
+        # BS2: one read, as the user; everything below parses this copy.
+        AK_TEXT=$(ak_read "$AK_FILE")
+        AK_ESH_LINE=$(printf '%s\n' "$AK_TEXT" | grep -m1 '/usr/local/bin/eshu-gateway.sh' 2>/dev/null || true)
+        AK_DASH_FROM=$(printf '%s\n' "$AK_TEXT" | ak_from eshu-dashboard)
+        [ -n "$AK_DASH_FROM" ] || AK_DASH_FROM=$(printf '%s\n' "$AK_TEXT" | ak_from eshu-gateway-key)
         # BJ1: look at every Eshu line, not only the first. One line whose
         # from= is not in the leading `from="...,` form means we cannot know
         # the operator's intent (for example, the gateway line is unrestricted
@@ -2816,7 +2825,8 @@ if [ "$mode" = "update" ] && [ "${REGISTER_OK:-}" = "1" ]; then
         # written. `grep -q` is avoided on purpose: under `set -o pipefail` an
         # early exit gives the upstream grep SIGPIPE and the pipeline fails
         # even when the pattern matched.
-        AK_BAD_LINES=$(grep '/usr/local/bin/eshu-gateway.sh' "$AK_FILE" 2>/dev/null \
+        AK_BAD_LINES=$(printf '%s\n' "$AK_TEXT" \
+                       | grep '/usr/local/bin/eshu-gateway.sh' 2>/dev/null \
                        | grep -v '^from="[^"]*",' || true)
         case "$AK_BAD_LINES" in
           *from=*) AK_BAD_FROM="1" ;;
@@ -2832,8 +2842,8 @@ if [ "$mode" = "update" ] && [ "${REGISTER_OK:-}" = "1" ]; then
         AK_DASH='command="/usr/bin/sudo /usr/local/bin/eshu-gateway.sh --dashboard-key",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty,restrict'
         if [ -n "$AK_DASH_FROM" ]; then AK_DASH='from="'"$AK_DASH_FROM"'",'"$AK_DASH"; fi
         {
-          if [ -f "$AK_FILE" ]; then
-            grep -v ' eshu-dashboard$' "$AK_FILE" || true
+          if [ -n "$AK_TEXT" ]; then
+            printf '%s\n' "$AK_TEXT" | grep -v ' eshu-dashboard$' || true
           fi
           printf '%s %s eshu-dashboard\n' "$AK_DASH" "$DASHBOARD_SSH_PUB"
         } | ak_replace
@@ -2874,7 +2884,8 @@ if { [ "$mode" = "install" ] || [ "$mode" = "reinstall" ]; } && [ "${REGISTER_OK
     # Keep keys this installer does not own; drop every Eshu gateway line,
     # including a pre-F12 one without a comment, then write ours back.
     if [ -f "$AK_FILE" ]; then
-      grep -v 'command="/usr/bin/sudo /usr/local/bin/eshu-gateway.sh' "$AK_FILE" || true
+      # BS2: the filter reads the user's copy, not the file as root.
+      printf '%s\n' "$(ak_read "$AK_FILE")" | grep -v 'command="/usr/bin/sudo /usr/local/bin/eshu-gateway.sh' || true
     fi
     if [ "${GATEWAY_SSH_MODE:-direct+mcp}" != "mcp_only" ]; then
       printf '%s %s eshu-gateway-key\n' "$AK" "$GATEWAY_PUB_KEY"
