@@ -307,7 +307,7 @@ button::-moz-focus-inner { border: 0; padding: 0; }
   .btn-approve:hover { background: rgba(74,222,128,0.24); border-color: var(--state-approved); }
   .btn-danger { background: transparent; color: var(--danger); border: 1px solid var(--danger); }
   .btn-danger:hover { background: rgba(230, 57, 70, 0.08); border-color: var(--danger-hover); color: var(--danger-hover); }
-  .btn-deny { background: transparent; border: 1px solid rgba(248,113,113,0.35); color: var(--state-denied); }
+  .btn-deny { background: transparent; border: 1px solid rgba(248,113,113,0.35); color: #fca5a5; }
   .btn-deny:hover { background: rgba(248,113,113,0.12); border-color: var(--state-denied); color: var(--danger-hover); }
   .btn-muted { background: transparent; border: 1px solid var(--rule); color: var(--text-dim); }
   .btn-muted:hover { border-color: var(--text-muted); color: var(--text-main); background: transparent; }
@@ -374,7 +374,9 @@ button::-moz-focus-inner { border: 0; padding: 0; }
   /* ── Table cell helpers ─────────────────────────────────── */
   .cell-id { font-family: monospace; font-size: 12px; color: var(--text-muted); }
   .cell-id-warn { font-family: monospace; font-size: 12px; color: var(--status-warning); font-weight: 700; }
-  .cell-cmd { max-width: 300px; }
+  .cell-cmd { max-width: 360px; }
+  .cell-cmd > .flex { flex-wrap: wrap; }
+  .cell-cmd .cmd-code { flex: 1 1 200px; min-width: 120px; }
   .cmd-code {
     flex: 1; padding: 4px 8px; border-radius: var(--radius-sm);
     font-family: "Cascadia Code", "JetBrains Mono", Consolas, monospace;
@@ -585,6 +587,29 @@ button::-moz-focus-inner { border: 0; padding: 0; }
     box-shadow: -10px 0 14px -12px rgba(0, 0, 0, 0.9);
   }
   #view-gateways table tbody tr:hover td:last-child { background: var(--bg-hover); }
+  @media (max-width: 1599px) {
+    /* The four-dot legend made the Health column 137 px wider than its
+       dots; the dots keep their aria-labels and the th keeps a title. */
+    #view-gateways .th-key { display: none; }
+  }
+  #host-changes-modal .widget-header { flex-wrap: nowrap; align-items: flex-start; }
+  #host-changes-modal .widget-header .modal-close { flex: 0 0 auto; }
+  .host-changes-range { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  #host-changes-days { width: auto; flex: 0 0 auto; }
+  #host-changes-count { margin-left: auto; }
+  @media (max-width: 1023px) {
+    #view-gateways table th:last-child,
+    #view-gateways table td:last-child {
+      position: static;
+      box-shadow: none;
+    }
+  }
+  .inv-interval { display: inline-flex; align-items: center; gap: 6px; margin-left: auto; }
+  #inv-interval { width: 56px; flex: 0 0 56px; }
+  @media (max-width: 640px) {
+    .pol-tab-n { display: none; }
+    .pol-tab.active { background: var(--accent-wash); }
+  }
   .gateway-freeze-hint { margin: -4px 0 10px; }
   .gw-modes-extra > summary { list-style: none; }
   .gw-modes-extra > summary::-webkit-details-marker { display: none; }
@@ -2148,6 +2173,16 @@ textarea { font-family: 'JetBrains Mono', monospace; }
   .ccq-host, .ccq-ttl { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .ccq-acts { display: flex; gap: 6px; }
   .ccq-empty { padding: 14px; color: var(--text-muted); font-size: 12px; }
+  @media (max-width: 768px) {
+    .ccq-row {
+      display: flex; flex-wrap: wrap; align-items: center;
+      column-gap: 10px; row-gap: 2px;
+    }
+    .ccq-main { flex: 1 1 100%; order: 1; }
+    .ccq-acts { order: 2; margin-left: auto; }
+    .ccq-host, .ccq-ttl { order: 3; }
+    .ccq-human, .ccq-cmd, .ccq-bd { white-space: normal; overflow-wrap: anywhere; }
+  }
 
   /* borderless empty-state — integrate radar into the page background */
   .widget.flat { background: transparent; border: none; box-shadow: none; padding: 0; margin-bottom: 0; }
@@ -2322,7 +2357,15 @@ textarea { font-family: 'JetBrains Mono', monospace; }
     display: flex;
     align-items: center;
     justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 6px 8px;
     margin-bottom: 8px;
+  }
+  .session-modal-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+  .session-modal-title-row .modal-close { margin-left: auto; }
+  @media (max-width: 640px) {
+    .session-modal-title-row .modal-close { order: 1; }
+    .session-modal-actions { order: 2; flex-basis: 100%; gap: 5px; }
   }
   .session-modal-label {
     font-family: 'JetBrains Mono', monospace;
@@ -4116,6 +4159,11 @@ input::placeholder, textarea::placeholder { color: var(--text-muted); }
 /* Status and health keep their colour; only the chrome goes quiet. */
 #view-gateways .btn-deny, #view-gateways .chip-btn { border-radius: 2px; }
 #view-history .cmd-code { color: var(--text-main); }
+#history-session-label, #history-inner-label {
+  display: inline-block; max-width: min(34ch, 28vw);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  vertical-align: bottom;
+}
 /* On a phone the five states go two-up again; the desktop gap of 26px would
    push each card to full width and make the row 500px tall. */
 @media (max-width: 768px) {

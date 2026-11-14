@@ -400,7 +400,7 @@
         <div class="widget-header">Active Gateways</div>
         <p class="text-xs text-muted gateway-freeze-hint">Freeze is fleet-wide (sidebar). To stop one gateway, use its Zero-Trust or Remove control below.</p>
         <div class="table-wrap"><table>
-          <thead><tr><th>Status</th><th>Gateway</th><th>IP</th><th>Enrolled</th><th>Policy</th><th>Health<span class="th-key">poller · gateway · reach · token</span></th><th>24h</th><th>Modes</th><th class="text-right">Actions</th></tr></thead>
+          <thead><tr><th>Status</th><th>Gateway</th><th>IP</th><th title="poller · gateway · reach · token">Health<span class="th-key">poller · gateway · reach · token</span></th><th>24h</th><th>Modes</th><th class="text-right">Actions</th></tr></thead>
           <tbody id="gateways-table-body"><tr><td colspan="9" class="px-4 py-3 text-muted">Loading...</td></tr></tbody>
         </table></div>
       </div>
@@ -539,10 +539,12 @@
           <span>Inventory</span>
           <span class="chip" id="inv-refreshed">never refreshed</span>
           <div class="flex-1"></div>
-          <label class="text-xs text-muted" for="inv-interval">refresh every</label>
-          <input type="number" id="inv-interval" min="5" max="120" step="5" class="w-16 text-xs" value="15" oninput="this.dataset.dirty='1'">
-          <span class="text-xs text-muted">min</span>
-          <button class="btn btn-muted btn-xs" onclick="saveInventoryInterval()">Save</button>
+          <span class="inv-interval">
+            <label class="text-xs text-muted" for="inv-interval">refresh every</label>
+            <input type="number" id="inv-interval" min="5" max="120" step="5" class="w-16 text-xs" value="15" oninput="this.dataset.dirty='1'">
+            <span class="text-xs text-muted">min</span>
+            <button class="btn btn-muted btn-xs" onclick="saveInventoryInterval()">Save</button>
+          </span>
           <button class="btn btn-sm" id="inv-refresh-btn" onclick="refreshInventoryNow()" data-od-id="inventory-refresh">Refresh now</button>
         </div>
         <input type="text" id="inv-search" placeholder="Where is…? name, IP, FQDN, vmid, MAC" class="w-full text-sm mb-3" oninput="debouncedInventorySearch()" data-od-id="inventory-search">
@@ -1432,7 +1434,7 @@
       <span id="host-changes-title">Changes</span>
       <button onclick="closeHostChanges()" class="modal-close" aria-label="Close">&times;</button>
     </div>
-    <div class="flex items-center gap-2 mb-2">
+    <div class="host-changes-range mb-2">
       <label class="text-xs text-muted" for="host-changes-days">Range</label>
       <select id="host-changes-days" class="text-xs" onchange="reloadHostChanges()">
         <option value="7" selected>7 days</option>
@@ -1639,9 +1641,11 @@
     <div class="session-modal-header">
       <div class="session-modal-title-row">
         <span class="session-modal-label">Session</span>
-        <button onclick="openSessionOverrideModal()" class="btn btn-muted btn-xs" title="Auto-approve this session's JIT commands for a bounded window">Override session</button>
-        <button onclick="excludeActiveSession()" class="btn btn-muted btn-xs" title="Exclude this session's requests from statistics and learning">Exclude</button>
-        <button onclick="filterHistoryToSession()" class="btn btn-muted btn-xs" title="Show this session's commands in History">Filter history</button>
+        <div class="session-modal-actions">
+          <button onclick="openSessionOverrideModal()" class="btn btn-muted btn-xs" title="Auto-approve this session's JIT commands for a bounded window">Override session</button>
+          <button onclick="excludeActiveSession()" class="btn btn-muted btn-xs" title="Exclude this session's requests from statistics and learning">Exclude</button>
+          <button onclick="filterHistoryToSession()" class="btn btn-muted btn-xs" title="Show this session's commands in History">Filter history</button>
+        </div>
         <button onclick="closeModal('session-modal')" class="modal-close" aria-label="Close">&times;</button>
       </div>
       <div class="session-modal-name" id="sm-name" contenteditable="true" spellcheck="false" data-placeholder="Session name"></div>

@@ -3323,6 +3323,7 @@ function setHistorySession(sid, skipFetch) {
     label.textContent = _historySession
       ? (meta.name || summary.goal || _historySession.substring(0, 12))
       : '';
+    label.title = label.textContent;
     chip.classList.toggle('hidden', !_historySession);
   }
   if (_historySession) {
@@ -5206,7 +5207,7 @@ async function fetchGateways() {
   });
   const tbody = document.getElementById('gateways-table-body');
   if (!tbody) return;
-  if (data.length === 0) { tbody.innerHTML = '<tr><td colspan="9" class="px-4 py-3 text-muted">No gateways registered.</td></tr>'; return; }
+  if (data.length === 0) { tbody.innerHTML = '<tr><td colspan="7" class="px-4 py-3 text-muted">No gateways registered.</td></tr>'; return; }
   const now = Math.floor(Date.now() / 1000);
   tbody.innerHTML = data.map(function(g) {
     const diff = now - g.last_seen, isOnline = gwIsOnline(g);
@@ -5219,9 +5220,6 @@ async function fetchGateways() {
       : (updating ? '<span class="text-warning text-xs">Updating\u2026</span>'
                   : '<span class="text-muted text-xs">Offline \u00b7 ' + formatLastSeen(diff) + '</span>'));
     const pua = g.policy_updated_at || 0;
-    const syncCell = isOnline
-      ? (pua > 0 ? '<span class="text-muted text-xs">✓ synced ' + formatAgo(now - pua) + '</span>' : '<span class="text-muted text-xs">—</span>')
-      : (updating ? '<span class="text-muted text-xs">updating…</span>' : '<span class="text-muted text-xs">unknown</span>');
     /* Health used to be four identical dots distinguished only by colour.
        Filled vs hollow reads without colour, and each dot carries a label. */
     const hbDot = function(ok, title) {
@@ -5298,10 +5296,12 @@ async function fetchGateways() {
     }
     return '<tr>' +
       '<td class="px-4 py-2 whitespace-nowrap">' + statusCell + '</td>' +
-      '<td class="px-4 py-2 whitespace-nowrap">' + gwPill(g.hostname) + ' ' + escapeHtml(g.hostname) + devBadge(g) + ztBadge + '</td>' +
+      '<td class="px-4 py-2 whitespace-nowrap">' + gwPill(g.hostname) + ' ' + escapeHtml(g.hostname) + devBadge(g) + ztBadge +
+        '<div class="gw-sub text-xs text-muted">' +
+          'enrolled ' + (g.first_seen ? formatAgo(now - g.first_seen) : '—') +
+          ' \u00b7 policy ' + (isOnline ? (pua > 0 ? 'synced ' + formatAgo(now - pua) : '\u2014') : 'unknown') +
+        '</div></td>' +
       '<td class="px-4 py-2 whitespace-nowrap text-muted">' + escapeHtml(g.ip) + '</td>' +
-      '<td class="px-4 py-2 whitespace-nowrap text-muted">' + (g.first_seen ? formatAgo(now - g.first_seen) : '—') + '</td>' +
-      '<td class="px-4 py-2">' + syncCell + '</td>' +
       '<td class="px-4 py-2">' + healthCell + '</td>' +
       '<td class="px-4 py-2 gw-spark-cell">' + spark + '</td>' +
       '<td class="px-4 py-2">' + overrideCell + '</td>' +
