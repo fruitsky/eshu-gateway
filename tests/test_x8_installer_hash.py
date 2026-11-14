@@ -136,8 +136,14 @@ def test_dev_status_counts_every_channel(auth_client):
         if h:
             assert set_gateway_installer_hash(ip, h) is True
     body = auth_client.get("/api/dev/status").json()
-    assert (body["on_fleet"], body["on_edge"], body["outdated"],
-            body["unknown"]) == (1, 1, 1, 1)
+    # BR1: five buckets, and they add up to the fleet.
+    assert (body["on_fleet"], body["on_edge"], body["on_build"],
+            body["outdated"], body["unknown"]) == (1, 1, 1, 1, 1)
+    assert (body["on_fleet"] + body["on_edge"] + body["on_build"] +
+            body["outdated"] + body["unknown"]) == body["gateway_count"] == 5
+    assert body["installer_counts"] == {
+        "on_fleet": 1, "on_edge": 1, "on_build": 1,
+        "outdated": 1, "unknown": 1}
     assert body["build_hash"] == build
     assert body["edge_hash"] == edge
     assert body["fleet_hash"] == fleet
@@ -190,3 +196,27 @@ def test_the_badge_is_in_the_gateway_cell_not_a_new_column():
     assert head.count("<th>") + head.count("<th ") == 7
     assert ".gw-ch-fleet" in css and ".gw-ch-outdated" in css
     assert ".gw-ch-unknown" in css
+
+
+def test_br1_the_badge_says_the_hash_is_reported_and_build_warns():
+    js = (REPO / "dashboard" / "static" / "app.js").read_text()
+    start = js.index("function gwChannelBadge(g)")
+    body = js[start:start + 1600]
+    assert "reported by the gateway" in body
+    assert "on Build, not seeded or reviewed" in body
+    css = (REPO / "dashboard" / "static" / "style.css").read_text()
+    rule = css[css.index(".gw-ch-build {"):]
+    rule = rule[:rule.index("}")]
+    assert "--status-warning" in rule
+
+
+def test_br1_installer_hash_is_never_a_policy_or_gate_input():
+    """BR1: a compromised gateway can report any hash; it is display only."""
+    root = REPO / "dashboard"
+    allowed = {"main.py", "db/gateways.py", "database.py"}
+    hits = set()
+    for path in root.rglob("*.py"):
+        if "installer_hash" in path.read_text(encoding="utf-8", errors="ignore"):
+            hits.add(str(path.relative_to(root)).replace("\\", "/"))
+    assert hits <= allowed, hits
+    assert not any(h.startswith("core/") for h in hits), hits

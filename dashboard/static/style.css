@@ -600,7 +600,7 @@ button::-moz-focus-inner { border: 0; padding: 0; }
   }
   .gw-ch-fleet { color: var(--state-approved); border-color: rgba(74,222,128,0.4); }
   .gw-ch-edge { color: var(--accent); border-color: var(--accent-glow); }
-  .gw-ch-build { color: var(--text-main); border-color: var(--text-quiet); }
+  .gw-ch-build { color: var(--status-warning); border-color: rgba(251,146,60,0.45); }
   .gw-ch-outdated { color: #fca5a5; border-color: rgba(248,113,113,0.4); }
   .gw-ch-unknown { color: var(--text-muted); }
   @media (max-width: 1599px) {

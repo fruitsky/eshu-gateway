@@ -12439,6 +12439,25 @@ below 1600 for the same reason.
 and give Build-but-not-Edge its own warning colour in the badge. Test that
 the five buckets add up to the gateway count.
 
+**BR1 round (implementer notes, 2026-11-14).** Taken:
+* `installer_counts` and `/api/dev/status` now carry `on_build` (Build but
+  not Edge, i.e. an installer nobody seeded or reviewed through the channel
+  flow), with its own warning colour in the badge. The five buckets always
+  add up: the test seeds one gateway per bucket and asserts the sum equals
+  `gateway_count`.
+* The badge title says the value is **reported by the gateway**, and a
+  Build badge adds "on Build, not seeded or reviewed through the channels".
+* `tests/test_x8_installer_hash.py` scans `dashboard/**/*.py`: `installer_hash`
+  may appear only in `main.py`, `db/gateways.py` and the `database.py`
+  re-export; nothing under `core/` (policy, gating, checks, tickets,
+  channels) reads it. A compromised gateway can report any value, and the
+  badge is the only consumer.
+* The dashboard branch is rebased onto X7's BP1 (`b0c8688`; the branch tip
+  `45a59c34` adds only the re-read notes).
+`bash scripts/verify.sh`: `3048 passed, 26 skipped, 7 warnings in 660.28s
+(0:11:00)` (4 more: the five-bucket sum, the warning colour, the tooltip and
+the display-only scan).
+
 ## Chunk X6 — agent API fixes from the Release 1.2 test round · slug `agent-api-round` · dashboard
 
 From the agent's test report of 2026-11-12, triaged by the feature reviewer.
