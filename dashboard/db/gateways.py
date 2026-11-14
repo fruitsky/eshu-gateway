@@ -89,6 +89,16 @@ def init_gateways_tables(cursor):
             cursor.execute(f"ALTER TABLE gateways ADD COLUMN {col} TEXT DEFAULT {default}")
         except Exception:
             pass
+    # X8: the installer the gateway last ran (the first 12 hex of its sha256)
+    # and when that value last changed. Additive; empty for an old installer,
+    # which the UI reports as "unknown".
+    for col, default in [('installer_hash', "''"),
+                         ('installer_hash_changed_at', '0')]:
+        kind = 'INTEGER' if col.endswith('_at') else 'TEXT'
+        try:
+            cursor.execute(f"ALTER TABLE gateways ADD COLUMN {col} {kind} DEFAULT {default}")
+        except Exception:
+            pass
     _backfill_ssh_key_derived(cursor)
 
 
@@ -525,6 +535,34 @@ def set_gateway_ssh_capabilities(ip: str, agent_format: str, ticket_format: str)
             'UPDATE gateways SET ssh_agent_format = ?, ssh_ticket_format = ? WHERE ip = ?',
             (agent_format or '', ticket_format or '', ip))
         conn.commit()
+
+
+def set_gateway_installer_hash(ip: str, value: str, now: int = None) -> bool:
+    """Record the installer hash a gateway reported; True when it is valid.
+
+    A value is 12 lowercase hex. An unchanged value does not touch the
+    changed-at timestamp; a change (or the first report) does. Invalid input is
+    ignored, never stored: an old installer sends nothing and an unknown
+    future format must not make the badge lie.
+    """
+    v = (value or '').strip().lower()
+    if len(v) != 12 or any(c not in '0123456789abcdef' for c in v):
+        return False
+    with db_conn() as conn:
+        cursor = conn.cursor()
+        row = cursor.execute('SELECT installer_hash FROM gateways WHERE ip = ?',
+                             (ip,)).fetchone()
+        if not row:
+            return False
+        if (row['installer_hash'] or '') == v:
+            cursor.execute('UPDATE gateways SET installer_hash = ? WHERE ip = ?',
+                           (v, ip))
+        else:
+            cursor.execute("UPDATE gateways SET installer_hash = ?, "
+                           "installer_hash_changed_at = ? WHERE ip = ?",
+                           (v, int(now or time.time()), ip))
+        conn.commit()
+    return True
 
 
 def set_gateway_run_limits(ip: str, capability: str):

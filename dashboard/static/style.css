@@ -567,6 +567,12 @@ button::-moz-focus-inner { border: 0; padding: 0; }
   /* X5: the gateways table is the widest one. The right-edge fade hid the
      Actions buttons at 100% zoom, so this table drops it and keeps the
      Actions column pinned to the right edge while the rest scrolls. */
+  /* X8: 16px cells were 7px wider than the panel once the version line was
+     added; 12px still separates the columns and keeps the row at 100%. */
+  #view-gateways table th,
+  #view-gateways table td { padding-left: 12px; padding-right: 12px; }
+  /* X8: the Modes disclosure wraps at 190px instead of widening the row. */
+  #view-gateways td:nth-child(6) > .flex { flex-wrap: wrap; max-width: 190px; }
   #view-gateways .table-wrap {
     -webkit-mask-image: none;
     mask-image: none;
@@ -579,6 +585,29 @@ button::-moz-focus-inner { border: 0; padding: 0; }
     box-shadow: -10px 0 14px -12px rgba(0, 0, 0, 0.9);
   }
   #view-gateways table tbody tr:hover td:last-child { background: var(--bg-hover); }
+  @media (max-width: 1023px) {
+    #view-gateways table th:last-child,
+    #view-gateways table td:last-child {
+      position: static;
+      box-shadow: none;
+    }
+  }
+  /* X8: the installer channel, in the gateway's version line. */
+  .gw-ch {
+    display: inline-block; padding: 0 4px; border-radius: 3px;
+    border: 1px solid var(--rule-weak); font-family: 'JetBrains Mono', monospace;
+    font-size: 11px; letter-spacing: .3px; color: var(--text-main);
+  }
+  .gw-ch-fleet { color: var(--state-approved); border-color: rgba(74,222,128,0.4); }
+  .gw-ch-edge { color: var(--accent); border-color: var(--accent-glow); }
+  .gw-ch-build { color: var(--text-main); border-color: var(--text-quiet); }
+  .gw-ch-outdated { color: #fca5a5; border-color: rgba(248,113,113,0.4); }
+  .gw-ch-unknown { color: var(--text-muted); }
+  @media (max-width: 1599px) {
+    /* The four-dot legend made the Health column 137 px wider than its dots;
+       the dots keep their aria-labels and the th keeps a title. */
+    #view-gateways .th-key { display: none; }
+  }
   .gateway-freeze-hint { margin: -4px 0 10px; }
   .gw-modes-extra > summary { list-style: none; }
   .gw-modes-extra > summary::-webkit-details-marker { display: none; }

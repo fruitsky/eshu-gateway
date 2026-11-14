@@ -8,6 +8,15 @@ GATEWAY_TOKEN="__GATEWAY_TOKEN__"
 # BE3: token headers never go into curl's argv (readable in /proc by any
 # local user). printf is a builtin and curl reads the header lines from stdin.
 gateway_header() { printf 'X-Gateway-Token: %s\n' "${GATEWAY_TOKEN:-}"; }
+# X8: the installer hash the last install/update wrote, if it is a valid one.
+read_installer_hash() {
+  local h
+  h=$(head -n1 "/etc/eshu-installer-hash" 2>/dev/null | tr -d '[:space:]' || true)
+  case "$h" in
+    [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) printf '%s' "$h" ;;
+  esac
+}
+
 register_headers() {
   printf 'X-Gateway-Token: %s\n' "${GATEWAY_TOKEN:-}"
   printf 'X-Enrollment-Token: %s\n' "${ESHU_ENROLL_TOKEN:-}"
@@ -343,7 +352,7 @@ with open('/etc/eshu-windows.txt.tmp', 'w') as f:
         REG_RESP=$(register_headers | curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -X POST "$DASHBOARD_URL/api/register" \
              -H @- \
              -H "Content-Type: application/json" \
-             -d '{"ip":"'"$TARGET_IP"'","hostname":"'"$HOST_NAME"'","version":"'"$NEW_VER"'"}' 2>/dev/null || echo "")
+             -d '{"ip":"'"$TARGET_IP"'","hostname":"'"$HOST_NAME"'","version":"'"$NEW_VER"'","installer_hash":"'"$(read_installer_hash)"'"}' 2>/dev/null || echo "")
         NEW_TOKEN=$(echo "$REG_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('gateway_token',''))" 2>/dev/null || echo "")
         if [ -n "$NEW_TOKEN" ] && [ "$NEW_TOKEN" != "None" ]; then
           sed -i "s|^GATEWAY_TOKEN=.*|GATEWAY_TOKEN=\"$NEW_TOKEN\"|" /usr/local/bin/eshu-poller.sh
@@ -397,7 +406,7 @@ with open('/etc/eshu-windows.txt.tmp', 'w') as f:
         REG_RESP=$(register_headers | curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -X POST "$DASHBOARD_URL/api/register" \
              -H @- \
              -H "Content-Type: application/json" \
-             -d '{"ip":"'"$TARGET_IP"'","hostname":"'"$HOST_NAME"'","version":"'"$NEW_VER"'"}' 2>/dev/null || echo "")
+             -d '{"ip":"'"$TARGET_IP"'","hostname":"'"$HOST_NAME"'","version":"'"$NEW_VER"'","installer_hash":"'"$(read_installer_hash)"'"}' 2>/dev/null || echo "")
         NEW_TOKEN=$(echo "$REG_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('gateway_token',''))" 2>/dev/null || echo "")
         if [ -n "$NEW_TOKEN" ] && [ "$NEW_TOKEN" != "None" ]; then
           sed -i "s|^GATEWAY_TOKEN=.*|GATEWAY_TOKEN=\"$NEW_TOKEN\"|" /usr/local/bin/eshu-poller.sh
