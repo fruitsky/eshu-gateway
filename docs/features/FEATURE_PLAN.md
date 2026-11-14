@@ -12303,6 +12303,32 @@ follow Build.**
 * Until then, the X7 note and DEV_GUIDE should say that these two are not
   gated by Deploy to Fleet.
 
+#### Security re-read (2026-11-14, at `b0c8688`): BP1 approved; X7 can merge
+
+* Edge and Fleet are created from Build only. The pre-X7 copies are never
+  read.
+* There is no `fleet.prev` on migration. `has_previous()` is false and
+  `/api/dev/rollback` returns 404 until the first Deploy to Fleet; the
+  test covers both.
+* The three pre-X7 files and the empty `static/dev/` are deleted, and the
+  audit row lists what was removed. So the static mount no longer serves
+  an old installer.
+* The channel dir is forced to `0700` on every start. DEV_GUIDE documents
+  that the channels are backed up with `eshu.db`, the recovery path, and
+  BP2 as not yet gated.
+
+**Nits:**
+* **A failed delete is never retried.** If a pre-X7 file can't be deleted,
+  only the audit row says so. The marker is set, the delete is never tried
+  again, and the static mount goes on serving the file. Either retry the
+  delete on each start, or put explicit 404 routes in front of those three
+  paths. The routes are cheaper, and they cover a stray copy that comes
+  back later.
+* **One audit note is now inaccurate.** "Fleet differs from the last
+  recorded promote (…); it is the installer gateways were actually being
+  served" no longer holds, because Fleet now comes from Build. Reword it
+  to "Fleet set to Build; the last recorded promote was …".
+
 ## Chunk X6 — agent API fixes from the Release 1.2 test round · slug `agent-api-round` · dashboard
 
 From the agent's test report of 2026-11-12, triaged by the feature reviewer.
