@@ -13345,6 +13345,16 @@ a new regression. They are not weakened to make them pass.
   by `test_the_time_limit_marker_does_not_ride_on_the_wall_clock`, which
   moves the second stamp 3 s back. 50/50 consecutive passes alone, 10/10 in
   parallel.
+  **Security read (2026-11-14, at `e29db7a`): approved, no findings.**
+  * `monotonic_ms` reads `/proc/uptime` with builtins. It refuses a
+    malformed value and falls back to `date` only when `/proc` is absent.
+    Both stamps come from the same source, so they can't disagree.
+  * The duration is clamped at 0. The limit marker keeps its 200 ms slack,
+    so the 10 ms granularity cannot flip it.
+  * The posted `duration_ms` is the only other consumer, and it is display
+    only.
+  * The installer copies are identical. When this is stacked on X7, only
+    Build will remain.
 * (The npm 401 retry and the audit-ordering flakes were made deterministic on
   `fix/flaky-tests`, approved and pending merge.)
 
