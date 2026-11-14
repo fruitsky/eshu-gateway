@@ -433,3 +433,29 @@ def test_the_check_command_runs_under_busybox(box):
     box.ha(1)
     proc = box.run(ha.CHECK_SCRIPT)
     assert proc.returncode == 18
+
+
+# ── BQ1: secrets.yaml through the keys-only script ───────────────────────
+
+def test_bq1_round_9_read_script_refuses_secrets_yaml(box):
+    path = box.file("secrets.yaml", "api_key: hunter2\n")
+    proc = box.run(ha.READ_SCRIPT, path, text=False)
+    assert proc.returncode == 19
+    assert proc.stdout == b""
+    nested = box.file("packages/secrets.yaml", "api_key: hunter2\n")
+    proc = box.run(ha.READ_SCRIPT, nested, text=False)
+    assert proc.returncode == 19
+    assert proc.stdout == b""
+
+
+def test_bq1_the_keys_script_prints_keys_and_no_value(box):
+    path = box.file("secrets.yaml",
+                    "api_key: hunter2\n"
+                    "block: |\n"
+                    "  -----BEGIN PRIVATE KEY-----\n"
+                    "  MIIEowIBAAKCAQEA\n")
+    proc = box.run(ha.SECRETS_KEYS_SCRIPT, path)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == "api_key\nblock\n"
+    for value in ("hunter2", "PRIVATE KEY", "MIIEowIBAAKCAQEA"):
+        assert value not in proc.stdout

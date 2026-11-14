@@ -10611,6 +10611,37 @@ are stored in the call log.**
   * Round 9's `READ_SCRIPT` returns exit 19 on `secrets.yaml`, under
     BusyBox.
 
+### BQ1 round (implementer notes, 2026-11-14)
+
+* **The read script is Round 9's.** `READ_SCRIPT` is now §9511 line for line
+  (`set -f`, fixed `PATH`, `me=$$`, the two `secrets.yaml` refusals by
+  requested and resolved basename, the `[ -d "$dir" ]` check, the
+  descriptor/link checks). Only the last line differs, keeping this code's
+  `head -c MAX_CONTENT+1` cap as the review allowed.
+* **secrets.yaml goes through the keys-only script.** `SECRETS_KEYS_SCRIPT`
+  is Round 9's text (same preamble without the two refusals, ending in the
+  top-level-key `sed`). `read_config` picks it for a `secrets.yaml` path and
+  calls it with the `read-keys` template, so the response is the key list
+  (`api_key`, `block`, ...), never a value, and the file is not editable
+  (`keys_only: true`, `editable: false`); the write script already refused
+  that path.
+* **The call row stores metadata only.** `_record` special-cases `read` and
+  `read-keys`: `response_summary` is `"<template>: N bytes, sha256 <hash>,
+  exit N"` (plus a bounded, scrubbed stderr tail on failure);
+  `response_bytes` is the stdout length and `truncated` is 0. No stdout byte
+  is stored. The write, restore and check rows keep their redacted tail.
+* **Tests.** `tests/test_f11_ha_config_ssh.py`: a secrets read returns keys
+  only and its call row (`tool == "read-keys"`) holds no value, including a
+  block scalar and a private-key body; a normal read's distinctive line is
+  in the response but not in the call row (`tool == "read"`, byte count,
+  hash, exit). `tests/test_f11_ha_busybox.py`: Round 9's `READ_SCRIPT`
+  exits 19 on `secrets.yaml` at the root and in `packages/` under BusyBox,
+  and the keys script prints `api_key`/`block` only, never the values.
+
+`bash scripts/verify.sh`: `3061 passed, 26 skipped, 8 warnings in 651.43s
+(0:10:51)` (the BQ1 tests: keys-only response and call row, BusyBox exit 19
+and the keys output).
+
 ## Chunk F12 — SSH through Eshu over MCP (`ssh_exec`) · slug `ssh-exec` · dashboard (+ small gateway change)
 
 > **Design first** (push a design note only, wait for approval). Needs the
