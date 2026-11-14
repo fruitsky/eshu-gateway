@@ -60,11 +60,11 @@ class FakeSSH:
         self.check_rc = 0
 
     def __call__(self, target, command, known_hosts, key_path, timeout,
-                 stdin=None, strict_host_key=True):
+                 stdin=None, strict_host_key=True, binary=False):
         self.calls.append({'target': dict(target), 'command': command,
                            'stdin': stdin, 'timeout': timeout,
                            'known_hosts': known_hosts,
-                           'strict': strict_host_key})
+                           'strict': strict_host_key, 'binary': binary})
         if not strict_host_key and self.pin:
             with open(known_hosts, 'w') as fh:
                 fh.write('%s %s\n' % (target['ip'], _pub()))
@@ -83,14 +83,21 @@ class FakeSSH:
                     'stderr': '', 'timed_out': False}
         if command.startswith('head -c'):
             path = command.split('-- ', 1)[1].strip().strip("'")
-            return {'rc': 0, 'stdout': self.files.get(path, ''),
-                    'stderr': '', 'timed_out': False}
+            content = self.files.get(path, '')
+            if isinstance(content, str):
+                content = content.encode('utf-8')
+            # BL1: the real transport returns bytes in binary mode.
+            out = content if binary else content.decode('utf-8', 'replace')
+            return {'rc': 0, 'stdout': out, 'stderr': b'' if binary else '',
+                    'timed_out': False}
         if command.startswith('timeout 100 ha core check'):
             return {'rc': self.check_rc, 'stdout': '',
                     'stderr': 'check output', 'timed_out': False}
         if command.startswith("sh -c"):
-            return {'rc': self.write_rc, 'stdout': self.write_stdout,
-                    'stderr': 'script error', 'timed_out': False}
+            out = self.write_stdout.encode() if binary else self.write_stdout
+            return {'rc': self.write_rc, 'stdout': out,
+                    'stderr': b'script error' if binary else 'script error',
+                    'timed_out': False}
         return {'rc': 3, 'stdout': '', 'stderr': 'unexpected command',
                 'timed_out': False}
 
@@ -144,6 +151,74 @@ def test_a_write_without_a_pin_refuses_before_any_ssh_call(integration, fake):
     assert fake.calls == []
 
 
+def test_bl1_run_ssh_binary_mode_keeps_bytes_and_crlf(monkeypatch, tmp_path):
+    """The transport itself, not just the stub: text mode would return
+    'a\ufffdb' and strip the CRLF."""
+    import os
+    from core import ssh_client
+    bin_dir = tmp_path / 'bin'
+    bin_dir.mkdir()
+    seen = tmp_path / 'stdin'
+    stub = bin_dir / 'ssh'
+    stub.write_text('#!/bin/sh\ncat > "%s"\nprintf \'a\\377b\'\n' % seen)
+    stub.chmod(0o755)
+    monkeypatch.setenv('PATH', str(bin_dir) + ':' +
+                       os.environ.get('PATH', '/usr/bin:/bin'))
+    out = ssh_client.run_ssh({'ip': '192.0.2.10'}, 'true', '/dev/null',
+                             '/dev/null', 5, stdin='x\r\n', binary=True)
+    assert out['stdout'] == b'a\xffb'
+    assert seen.read_bytes() == b'x\r\n'
+    text = ssh_client.run_ssh({'ip': '192.0.2.10'}, 'true', '/dev/null',
+                              '/dev/null', 5, stdin='x\r\n')
+    assert text['stdout'] == 'a\ufffdb'
+
+
+def test_bl1_read_hashes_the_raw_bytes_of_a_crlf_file(pinned, fake):
+    """BL1: text mode translated CRLF before hashing, so the write always
+    looked stale and the agent saw altered bytes."""
+    from core.ha_config_ssh import read_config
+    raw = b'a: 1\r\nb: 2\r\n'
+    fake.files['/homeassistant/configuration.yaml'] = raw
+    out = read_config(pinned, '/config/configuration.yaml')
+    assert out['sha256'] == hashlib.sha256(raw).hexdigest()
+    assert out['size'] == len(raw)
+    assert out['content'] == raw.decode('utf-8')
+    assert '\r\n' in out['content']
+
+
+def test_bl1_read_hashes_a_non_utf8_byte(pinned, fake):
+    from core.ha_config_ssh import read_config
+    raw = b'\xff\xfea: 1\n'
+    fake.files['/homeassistant/configuration.yaml'] = raw
+    out = read_config(pinned, '/config/configuration.yaml')
+    assert out['sha256'] == hashlib.sha256(raw).hexdigest()
+    assert out['size'] == len(raw)
+    # The display copy is decoded with replacement, after the hash.
+    assert out['content'] == raw.decode('utf-8', errors='replace')
+    assert '\ufffd' in out['content']
+
+
+def test_bl1_the_read_uses_the_binary_transport(pinned, fake):
+    from core.ha_config_ssh import read_config
+    read_config(pinned, '/config/configuration.yaml')
+    read = [c for c in fake.calls if c['command'].startswith('head -c')]
+    assert read and read[-1]['binary'] is True
+
+
+def test_bl1_a_write_with_the_raw_hash_passes_the_stale_check(pinned, fake):
+    from core.ha_config_ssh import read_config, write_config
+    raw = b'a: 1\r\n'
+    fake.files['/homeassistant/configuration.yaml'] = raw
+    old = read_config(pinned, '/config/configuration.yaml')
+    out = write_config(pinned, '/config/configuration.yaml', 'b: 2\r\n',
+                       old['sha256'])
+    assert out['ok'] is True
+    assert out['sha256'] == hashlib.sha256(b'b: 2\r\n').hexdigest()
+    write = [c for c in fake.calls if c['command'].startswith('sh -c')]
+    assert write and write[-1]['stdin'] == 'b: 2\r\n'
+    assert write[-1]['binary'] is True
+
+
 def test_a_changed_host_key_refuses_and_audits(pinned, monkeypatch):
     from core.ha_config_ssh import HaConfigError, list_configs
     from db.audit import get_audit_log
@@ -193,7 +268,7 @@ def test_a_symlinked_path_is_refused_before_reading(pinned, fake):
     from core.ha_config_ssh import HaConfigError, read_config
 
     def realpath_elsewhere(target, command, known_hosts, key_path, timeout,
-                           stdin=None, strict_host_key=True):
+                           stdin=None, strict_host_key=True, binary=False):
         return {'rc': 0, 'stdout': '/etc/passwd\nregular file\n',
                 'stderr': '', 'timed_out': False}
 
@@ -257,7 +332,7 @@ def test_a_client_timeout_becomes_unknown_state_and_keeps_the_backup(pinned, mon
     from core.ha_config_ssh import HaConfigError, pending_state, write_config
 
     def timed_out(target, command, known_hosts, key_path, timeout,
-                  stdin=None, strict_host_key=True):
+                  stdin=None, strict_host_key=True, binary=False):
         if command.startswith('sh -c'):
             return {'rc': 124, 'stdout': '', 'stderr': '', 'timed_out': True}
         if command.startswith('realpath'):

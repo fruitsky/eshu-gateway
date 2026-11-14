@@ -10259,6 +10259,35 @@ under ash where it is (apt install busybox)". No design change.
 `bash scripts/verify.sh`: `3035 passed, 26 skipped, 8 warnings in 629.23s
 (0:10:29)` (12 more than part 2: the BusyBox module ran here).
 
+**BL1 (must) — hash the remote bytes, not the decoded text (2026-11-14).**
+`ssh_client.run_ssh` opened the pipe with `text=True, errors='replace'`, so
+the read path saw CRLF as LF and any invalid UTF-8 as U+FFFD. `read_config`
+hashed that text, while the write script compares `sha256sum` on the add-on:
+a CRLF or non-UTF-8 file was always "stale", and the agent was shown altered
+content. Fixed:
+
+* `run_ssh(..., binary=False)` — `binary=True` keeps `stdout`/`stderr` as
+  bytes and encodes `stdin` as UTF-8. The default is unchanged, so F12's text
+  path is byte-for-byte the same.
+* `ha_config_ssh.run`/`_run_checked` forward it; the read call and both write
+  steps (write, restore) use it. `_record` and the error messages decode with
+  `errors='replace'` only for display.
+* `read_config` hashes `len(raw)` bytes and `sha256(raw)`, then decodes once
+  for `content` (with replacement). `size` is a byte count. The hash is
+  exactly the `sha256sum` the script computes, so a CRLF/non-UTF-8 file can
+  be written with the hash the card showed.
+* Tests: `test_bl1_run_ssh_binary_mode_keeps_bytes_and_crlf` (the real
+  transport with a stub `ssh`: `a\xffb` and `x\r\n` survive; text mode gives
+  `a\ufffdb`), `test_bl1_read_hashes_the_raw_bytes_of_a_crlf_file`,
+  `test_bl1_read_hashes_a_non_utf8_byte`, `test_bl1_a_write_with_the_raw_hash_passes_the_stale_check`,
+  `test_bl1_the_read_uses_the_binary_transport`, and the BusyBox
+  `test_the_write_script_accepts_the_raw_hash_of_a_crlf_non_utf8_file`
+  (the script's own `sha256sum` of a `0xFF`/CRLF file is the expect hash, and
+  the write succeeds with raw bytes on stdin).
+
+`bash scripts/verify.sh`: `3041 passed, 26 skipped, 8 warnings in 630.12s
+(0:10:30)` (6 more: the five BL1 tests and the BusyBox raw-hash case).
+
 ---
 
 ### Security review of the F11 code round (security reviewer, 2026-11-14, at `0219180`)
