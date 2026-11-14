@@ -13101,6 +13101,43 @@ not in 1.3).**
 `bash scripts/verify.sh`: `3031 passed, 27 skipped, 8 warnings in 639.10s
 (0:10:39)` (3 more: the BH2 tests).
 
+#### Security review of BH2 (security reviewer, 2026-11-14, at `414781b`)
+
+**Changes requested: one must, BQ2.** The direction is right:
+* the create, write, `chmod` and `mv` now run as `$USER` (`runuser -u`,
+  with a `setpriv` fallback, otherwise refuse);
+* root keeps the outer symlink checks;
+* a failed user-side write changes nothing.
+
+**BQ2 (must): a fresh install now fails to write the keys, and root still
+touches the file afterwards.**
+* The install path runs `mkdir -p "/home/$USER/.ssh"; chmod 700` **as
+  root** just before `| ak_replace`.
+* On a fresh install (`useradd -m`, no `.ssh` yet), that makes a
+  root-owned `0700` `.ssh`. The user-side `mktemp` then fails, so the
+  installer prints REFUSED and the gateway ends up with no keys at all.
+* The tests can't see this. Their `runuser` stub `exec`s the command as
+  the test's own user, so no permission boundary is exercised.
+* After the write, the install path also runs `chown -R` and
+  `chmod 600 "$AK_FILE"` as root.
+  * `chmod` follows a symlink, so a user who swaps `authorized_keys` for a
+    link in that moment gets root to `chmod 600` any file. That is the
+    same TOCTOU that BH2 removes.
+  * `chown -R` does not follow links, but it is no longer needed.
+* **Fix:**
+  * drop root's `mkdir` and `chmod` of `.ssh` on the install path; the
+    user-side script already creates the dir and sets `700`;
+  * drop the trailing `chown -R` and `chmod 600`; the user-side script
+    sets `600`, and the files are the user's own;
+  * if `/home/$USER` itself is not owned by `$USER`, refuse with a clear
+    message.
+* **Tests:**
+  * a text check that the install path has no root `mkdir`, `chmod` or
+    `chown` on `.ssh` or `authorized_keys`;
+  * a stub `runuser` that refuses to write into a root-owned dir (or, on
+    CI, a real unprivileged user if one is available). It must show that a
+    fresh install with no `.ssh` succeeds.
+
 ### GT1 — gateway token rotation · branch `feat/gateway-token-rotation` · design first
 
 The dashboard has no rotate action today; the only way to rotate a token is to remove and re-enrol the gateway. Design:
