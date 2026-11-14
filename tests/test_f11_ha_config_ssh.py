@@ -56,8 +56,9 @@ class FakeSSH:
         self.calls = []
         self.pin = pin
         self.write_rc = 0
-        self.write_stdout = 'ok %s' % ('0' * 64)
+        self.write_stdout = None   # 'ok <sha of stdin>' unless set
         self.check_rc = 0
+        self.check_output = ''
 
     def __call__(self, target, command, known_hosts, key_path, timeout,
                  stdin=None, strict_host_key=True, binary=False):
@@ -81,22 +82,39 @@ class FakeSSH:
                         'timed_out': False}
             return {'rc': 0, 'stdout': path + '\nregular file\n',
                     'stderr': '', 'timed_out': False}
-        if command.startswith('head -c'):
-            path = command.split('-- ', 1)[1].strip().strip("'")
+        if command.startswith('sh -c') and 'exec 3<' in command:
+            # BN3: the read is one script that opens the path on a descriptor.
+            path = command.rsplit(' _ ', 1)[-1].strip().strip("'")
             content = self.files.get(path, '')
             if isinstance(content, str):
                 content = content.encode('utf-8')
             # BL1: the real transport returns bytes in binary mode.
             out = content if binary else content.decode('utf-8', 'replace')
-            return {'rc': 0, 'stdout': out, 'stderr': b'' if binary else '',
+            rc = 0 if path in self.files else 12
+            return {'rc': rc, 'stdout': out, 'stderr': b'' if binary else '',
                     'timed_out': False}
-        if command.startswith('timeout 100 ha core check'):
-            return {'rc': self.check_rc, 'stdout': '',
-                    'stderr': 'check output', 'timed_out': False}
-        if command.startswith("sh -c"):
-            out = self.write_stdout.encode() if binary else self.write_stdout
+        if command.startswith("sh -c") and (
+                'cat > "$tmp"' in command
+                or 'cp -p "$backup" "$real"' in command):
+            # The write and restore scripts both end with `ok <sha>`.
+            stdout = self.write_stdout
+            if stdout is None:
+                data = stdin if stdin is not None else b''
+                if isinstance(data, str):
+                    data = data.encode('utf-8')
+                stdout = 'ok ' + hashlib.sha256(data).hexdigest()
+            out = stdout.encode() if binary else stdout
             return {'rc': self.write_rc, 'stdout': out,
                     'stderr': b'script error' if binary else 'script error',
+                    'timed_out': False}
+        if 'sha256sum "$f"' in command:
+            return {'rc': 0, 'stdout': 'b' * 64 + '\n', 'stderr': '',
+                    'timed_out': False}
+        if 'timeout 100 ha core check' in command and 'redact()' in command:
+            # BN1: the check runs in a fixed, redacting script.
+            out = self.check_output
+            return {'rc': self.check_rc, 'stdout': out.encode() if binary else out,
+                    'stderr': b'check output' if binary else 'check output',
                     'timed_out': False}
         return {'rc': 3, 'stdout': '', 'stderr': 'unexpected command',
                 'timed_out': False}
@@ -107,6 +125,18 @@ def fake(monkeypatch):
     stub = FakeSSH({'/homeassistant/configuration.yaml': 'a: 1\n'})
     monkeypatch.setattr('core.ssh_client.run_ssh', stub)
     return stub
+
+
+
+def _write_calls(fake):
+    return [c for c in fake.calls
+            if c['command'].startswith('sh -c') and 'cat > "$tmp"' in c['command']]
+
+
+def _restore_calls(fake):
+    return [c for c in fake.calls
+            if c['command'].startswith('sh -c')
+            and 'cp -p "$backup" "$real"' in c['command']]
 
 
 def _sha(text):
@@ -201,7 +231,8 @@ def test_bl1_read_hashes_a_non_utf8_byte(pinned, fake):
 def test_bl1_the_read_uses_the_binary_transport(pinned, fake):
     from core.ha_config_ssh import read_config
     read_config(pinned, '/config/configuration.yaml')
-    read = [c for c in fake.calls if c['command'].startswith('head -c')]
+    read = [c for c in fake.calls
+            if c['command'].startswith('sh -c') and 'exec 3<' in c['command']]
     assert read and read[-1]['binary'] is True
 
 
@@ -214,7 +245,7 @@ def test_bl1_a_write_with_the_raw_hash_passes_the_stale_check(pinned, fake):
                        old['sha256'])
     assert out['ok'] is True
     assert out['sha256'] == hashlib.sha256(b'b: 2\r\n').hexdigest()
-    write = [c for c in fake.calls if c['command'].startswith('sh -c')]
+    write = _write_calls(fake)
     assert write and write[-1]['stdin'] == 'b: 2\r\n'
     assert write[-1]['binary'] is True
 
@@ -269,8 +300,9 @@ def test_a_symlinked_path_is_refused_before_reading(pinned, fake):
 
     def realpath_elsewhere(target, command, known_hosts, key_path, timeout,
                            stdin=None, strict_host_key=True, binary=False):
-        return {'rc': 0, 'stdout': '/etc/passwd\nregular file\n',
-                'stderr': '', 'timed_out': False}
+        # BN3: the one read script refuses when the opened descriptor resolves
+        # elsewhere (exit 13) and prints nothing.
+        return {'rc': 13, 'stdout': b'', 'stderr': b'', 'timed_out': False}
 
     monkeypatched = realpath_elsewhere
     import core.ssh_client
@@ -291,7 +323,7 @@ def test_dry_run_returns_a_diff_and_writes_nothing(pinned, fake):
                        _sha('a: 1\n'), dry_run=True)
     assert out['dry_run'] is True
     assert '+a: 2' in out['diff']
-    assert not any(c['command'].startswith('sh -c') for c in fake.calls)
+    assert not _write_calls(fake) and not _restore_calls(fake)
 
 
 def test_a_stale_hash_refuses_before_the_write(pinned, fake):
@@ -300,7 +332,7 @@ def test_a_stale_hash_refuses_before_the_write(pinned, fake):
         write_config(pinned, '/config/configuration.yaml', 'a: 2\n',
                      _sha('old\n'))
     assert exc.value.code == 'config_hash_changed'
-    assert not any(c['command'].startswith('sh -c') for c in fake.calls)
+    assert not _write_calls(fake) and not _restore_calls(fake)
 
 
 def test_a_successful_write_records_backup_check_and_audit(pinned, fake):
@@ -310,7 +342,7 @@ def test_a_successful_write_records_backup_check_and_audit(pinned, fake):
                        _sha('a: 1\n'))
     assert out['ok'] and out['check'] == 'valid'
     assert out['backup'].endswith('.bak') and '.eshu-' in out['backup']
-    call = [c for c in fake.calls if c['command'].startswith('sh -c')][0]
+    call = _write_calls(fake)[0]
     assert call['stdin'] == 'a: 2\n'
     assert call['timeout'] == 120
     assert any(r['event_type'] == 'ha_config_write' for r in get_audit_log())
@@ -333,15 +365,13 @@ def test_a_client_timeout_becomes_unknown_state_and_keeps_the_backup(pinned, mon
 
     def timed_out(target, command, known_hosts, key_path, timeout,
                   stdin=None, strict_host_key=True, binary=False):
-        if command.startswith('sh -c'):
-            return {'rc': 124, 'stdout': '', 'stderr': '', 'timed_out': True}
-        if command.startswith('realpath'):
-            path = command.split()[1].strip("'")
-            return {'rc': 0, 'stdout': path + '\nregular file\n',
-                    'stderr': '', 'timed_out': False}
-        if command.startswith('head -c'):
-            return {'rc': 0, 'stdout': 'a: 1\n', 'stderr': '',
+        if command.startswith('sh -c') and 'exec 3<' in command:
+            # The read succeeds, so the write is reached and times out.
+            return {'rc': 0, 'stdout': b'a: 1\n', 'stderr': b'',
                     'timed_out': False}
+        if command.startswith('sh -c'):
+            return {'rc': 124, 'stdout': b'', 'stderr': b'',
+                    'timed_out': True}
         return {'rc': 0, 'stdout': '', 'stderr': '', 'timed_out': False}
 
     monkeypatch.setattr('core.ssh_client.run_ssh', timed_out)
@@ -395,8 +425,99 @@ def test_a_restore_success_runs_one_script_and_checks(pinned, fake):
     fake.files[name] = 'a: 1\n'
     out = restore_config(pinned, '/config/configuration.yaml', name)
     assert out['ok'] and out['check'] == 'valid'
-    call = [c for c in fake.calls if c['command'].startswith('sh -c')][0]
+    call = _restore_calls(fake)[0]
     assert 'RESTORE' not in call['command']
+
+
+# ── BN2: the read mask ───────────────────────────────────────────────────
+
+def test_bn2_mask_secrets_hides_block_scalars_and_bodies():
+    from core.ha_config_ssh import _mask_secrets
+    text = (
+        "key: |\n"
+        "  -----BEGIN PRIVATE KEY-----\n"
+        "  MIIEowIBAAKCAQEA\n"
+        "  -----END PRIVATE KEY-----\n"
+        "folded: >\n"
+        "  first line\n"
+        "  second line\n"
+        'quoted: "one\n'
+        '  two"\n'
+        "items:\n"
+        "  - alpha\n"
+        "  - beta\n"
+        "plain: first\n"
+        "  continuation\n"
+        "# a real comment\n"
+    )
+    out = _mask_secrets(text)
+    for secret in ("PRIVATE KEY", "MIIEowIBAAKCAQEA", "first line",
+                   "second line", "two", "alpha", "beta", "continuation"):
+        assert secret not in out
+    assert 'key: "***"' in out and 'folded: "***"' in out
+    assert 'items: "***"' in out and 'plain: "***"' in out
+    assert "# a real comment" in out
+
+
+def test_bn2_mask_secrets_handles_crlf_like_lf():
+    from core.ha_config_ssh import _mask_secrets
+    lf = "key: |\n  body\nname: x\n"
+    crlf = "key: |\r\n  body\r\nname: x\r\n"
+    assert _mask_secrets(crlf) == _mask_secrets(lf)
+    assert "body" not in _mask_secrets(crlf)
+
+
+
+def test_bl1_a_non_utf8_file_is_not_editable_and_write_refuses(pinned, fake):
+    from core.ha_config_ssh import HaConfigError, read_config, write_config
+    raw = b'a: \xff\n'
+    fake.files['/homeassistant/configuration.yaml'] = raw
+    out = read_config(pinned, '/config/configuration.yaml')
+    assert out['editable'] is False
+    assert out['reason'] == 'config_not_utf8'
+    assert out['sha256'] == hashlib.sha256(raw).hexdigest()
+    with pytest.raises(HaConfigError) as exc:
+        write_config(pinned, '/config/configuration.yaml', 'b: 2\n',
+                     out['sha256'])
+    assert exc.value.code == 'config_not_utf8'
+    assert not _write_calls(fake)
+
+
+def test_bl1_an_ok_line_for_other_bytes_is_state_unknown(pinned, fake):
+    from core.ha_config_ssh import HaConfigError, pending_state, write_config
+    fake.write_stdout = 'ok ' + '0' * 64
+    with pytest.raises(HaConfigError) as exc:
+        write_config(pinned, '/config/configuration.yaml', 'a: 2\n',
+                     _sha('a: 1\n'))
+    assert exc.value.code == 'config_state_unknown'
+    assert pending_state(pinned)
+
+
+def test_a_restore_timeout_records_the_current_and_backup_hashes(pinned, monkeypatch):
+    from core.ha_config_ssh import HaConfigError, pending_state, restore_config
+    current = b'a: 1\n'
+
+    def stub(target, command, known_hosts, key_path, timeout,
+             stdin=None, strict_host_key=True, binary=False):
+        if command.startswith('sh -c') and 'exec 3<' in command:
+            return {'rc': 0, 'stdout': current, 'stderr': b'',
+                    'timed_out': False}
+        if 'sha256sum "$f"' in command:
+            return {'rc': 0, 'stdout': 'b' * 64, 'stderr': '',
+                    'timed_out': False}
+        if command.startswith('sh -c'):
+            return {'rc': 124, 'stdout': b'', 'stderr': b'',
+                    'timed_out': True}
+        return {'rc': 0, 'stdout': '', 'stderr': '', 'timed_out': False}
+
+    monkeypatch.setattr('core.ssh_client.run_ssh', stub)
+    name = '/homeassistant/configuration.yaml.eshu-1762000000.bak'
+    with pytest.raises(HaConfigError) as exc:
+        restore_config(pinned, '/config/configuration.yaml', name)
+    assert exc.value.code == 'config_state_unknown'
+    state = pending_state(pinned)
+    assert state['old_sha'] == hashlib.sha256(current).hexdigest()
+    assert state['new_sha'] == 'b' * 64
 
 
 # ── check and the F10 coupling ────────────────────────────────────────────

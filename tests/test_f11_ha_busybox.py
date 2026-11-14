@@ -58,12 +58,15 @@ class BusyBox:
         self.ha_exit = tmp_path / "ha-exit"
         self.ha_exit.write_text("0")
         self.ha_log = tmp_path / "ha.log"
+        self.ha_output = tmp_path / "ha-out"
         stub = self.bindir / "ha"
         stub.write_text(
             "#!/bin/sh\n"
             "printf '%s\\n' \"$*\" >> \"__LOG__\"\n"
+            "[ -f \"__OUT__\" ] && cat \"__OUT__\"\n"
             "exit \"$(cat \"__EXIT__\")\"\n"
             .replace("__LOG__", str(self.ha_log))
+            .replace("__OUT__", str(self.ha_output))
             .replace("__EXIT__", str(self.ha_exit)))
         stub.chmod(0o755)
         self.env = {
@@ -138,7 +141,7 @@ def test_the_write_script_succeeds_and_keeps_mode_and_owner(box):
     assert (after.st_uid, after.st_gid) == (before.st_uid, before.st_gid)
     assert open(backup, "rb").read() == b"old: 1\n"
     assert not os.path.exists(tmp)
-    assert proc.stdout.startswith("ok " + sha("new: 2\n"))
+    assert proc.stdout.strip().splitlines()[-1] == "ok " + sha("new: 2\n")
     assert box.ha_log.read_text().strip().endswith("core check")
 
 
@@ -214,7 +217,66 @@ def test_the_write_script_writes_crlf_bytes_from_stdin(box):
     proc = box.run(ha.WRITE_SCRIPT, *args, stdin=payload)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert path.read_bytes() == payload.encode()
-    assert proc.stdout.strip() == "ok " + sha(payload)
+    assert proc.stdout.strip().splitlines()[-1] == "ok " + sha(payload)
+
+
+# ── BN3: verify and read on one descriptor ───────────────────────────────
+
+def test_bn3_the_read_script_reads_through_the_checked_descriptor(box):
+    path = box.file("configuration.yaml", b"a: 1\r\n")
+    proc = box.run(ha.READ_SCRIPT, path, text=False)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == b"a: 1\r\n"      # bytes, CRLF kept
+    link = box.root / "link.yaml"
+    link.symlink_to(path)
+    proc = box.run(ha.READ_SCRIPT, link, text=False)
+    assert proc.returncode == 13
+    assert proc.stdout == b""
+
+
+# ── BN1: the check output is redacted on the add-on ──────────────────────
+
+def test_bn1_a_secret_in_the_check_output_is_redacted_on_all_three_paths(box):
+    box.file("secrets.yaml", "api_key: hunter2\n", mode=0o600)
+    box.ha_output.write_text("Validation failed: api_key=hunter2\n")
+    box.ha(1)
+
+    path = box.file("configuration.yaml", "a: 1\n")
+    args, _backup, _tmp = box.write_args(path, "a: 1\n")
+    write = box.run(ha.WRITE_SCRIPT, *args, stdin="a: 2\n")
+    assert write.returncode == 18
+    assert "hunter2" not in write.stdout and "***" in write.stdout
+
+    backup = box.backup(path, "a: 1\n")
+    tmp = "%s.eshu-tmp-0123456789abcdef" % path
+    restore = box.run(ha.RESTORE_SCRIPT, path, backup, tmp)
+    assert restore.returncode == 18
+    assert "hunter2" not in restore.stdout and "***" in restore.stdout
+
+    check = box.run(ha.CHECK_SCRIPT)
+    assert check.returncode == 1
+    assert "hunter2" not in check.stdout and "***" in check.stdout
+
+
+def test_bn1_an_unreadable_secrets_yaml_withholds_the_output(box):
+    if os.geteuid() == 0:
+        pytest.skip("root can read a 000 file; the refusal needs a non-root uid")
+    secrets = box.file("secrets.yaml", "api_key: hunter2\n", mode=0o600)
+    os.chmod(secrets, 0o000)
+    box.ha_output.write_text("api_key=hunter2\n")
+    box.ha(1)
+    proc = box.run(ha.CHECK_SCRIPT)
+    assert "hunter2" not in proc.stdout
+    assert "check output withheld" in proc.stdout
+
+
+def test_bn1_an_oversized_secrets_yaml_withholds_the_output(box):
+    box.file("secrets.yaml", "api_key: " + "x" * 70000 + "\n", mode=0o600)
+    box.ha_output.write_text("nothing secret\n")
+    box.ha(0)
+    proc = box.run(ha.CHECK_SCRIPT)
+    assert "check output withheld" in proc.stdout
+    assert "nothing secret" not in proc.stdout
 
 
 # ── the restore script ────────────────────────────────────────────────────

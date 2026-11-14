@@ -61,8 +61,165 @@ LIST_SCRIPT = (
 )
 
 # H2/U1-U4/W1-W4: one script, one connection, one exit code per step.
-WRITE_SCRIPT = r'''
+# BN3/Z1: verify and read in **one** connection, on one descriptor. The old
+# read ran `realpath`/`stat` and then `head` in two calls, so a file swapped
+# between them (a symlink to ../secrets.yaml or .storage) was read unmasked:
+# the masking decision came from the requested name. Here the descriptor is
+# opened once and its own target is checked before any byte is read.
+READ_SCRIPT = r"""
 set -eu
+path=$1
+case "$path" in /*) ;; *) exit 19 ;; esac
+real=$(realpath "$path") || exit 12
+[ -f "$real" ] || exit 12
+[ ! -L "$real" ] || exit 13
+dir=$(dirname "$real")
+case "$dir" in
+  /homeassistant|/homeassistant/packages|/homeassistant/packages/*) ;;
+  *) exit 11 ;;
+esac
+[ "$(realpath "$(dirname "$path")")" = "$dir" ] || exit 13
+[ "$(basename "$real")" = "$(basename "$path")" ] || exit 13
+exec 3< "$real" || exit 12
+[ "$(realpath /proc/self/fd/3)" = "$real" ] || exit 13
+[ -f /proc/self/fd/3 ] || exit 12
+head -c __MAX__ <&3
+""".replace("__MAX__", str(MAX_CONTENT + 1))
+
+# The backup's hash, for the pending record a timed-out restore leaves behind
+# (nit): the backup is not a config path, so it needs its own tiny script.
+HASH_SCRIPT = r"""
+set -eu
+f=$1
+case "$f" in /*) ;; *) exit 19 ;; esac
+[ -f "$f" ] || exit 12
+[ ! -L "$f" ] || exit 13
+case "$f" in *.eshu-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9].bak) ;;
+  *) exit 19 ;;
+esac
+sha256sum "$f" | cut -d" " -f1
+"""
+
+_REDACT = r"""
+# Z2/AB1/AC1/AC2/AL2/AL3/AQ1: replace each literal secret value (len >= 4)
+# that HA's !secret can resolve. Reads the check output on **stdin** and writes
+# it on stdout — there is no file and no path argument to get wrong.
+#
+# Fail closed: a find that failed, a candidate that cannot be read, or more
+# than 64 KiB of secrets prints one fixed withheld line and no check output.
+# The bytes are read through a descriptor in the subshell that checked it, so a
+# swap after the check cannot redirect the read. Values live inside awk and
+# the environment, never argv, so they do not appear in the process list.
+redact() {
+  set -f
+  WITHHELD='[ESHU check output withheld: redaction unavailable]'
+  rc=0
+  list=$(find /homeassistant -xdev -name secrets.yaml \( -type f -o -type l \) 2>/dev/null) || rc=$?
+  if [ "$rc" -ne 0 ]; then printf "%s\n" "$WITHHELD"; return 0; fi
+  text=''
+  bytes=0
+  oldifs=$IFS
+  IFS='
+'
+  for f in $list; do
+    [ -n "$f" ] || continue
+    # The name test only avoids a blocking open() on a FIFO; the descriptor
+    # check and the read below are what qualify the file.
+    if [ ! -f "$f" ]; then printf "%s\n" "$WITHHELD"; return 0; fi
+    # A subshell, because a failed exec redirection ends a non-interactive
+    # shell (dash 2, ash 1) — and the read uses fd 9, not the name.
+    if ! body=$( ( exec 9< "$f" 2>/dev/null || exit 1
+                   [ -f /proc/self/fd/9 ] || exit 1
+                   cat /proc/self/fd/9 ) ); then
+      printf "%s\n" "$WITHHELD"
+      return 0
+    fi
+    n=$(printf "%s" "$body" | wc -c) || { printf "%s\n" "$WITHHELD"; return 0; }
+    bytes=$((bytes + n))
+    if [ "$bytes" -gt 65536 ]; then printf "%s\n" "$WITHHELD"; return 0; fi
+    text="$text$body
+"
+  done
+  IFS=$oldifs
+  in=$(cat)
+  printf "%s\n" "$in" | ESHU_SECRETS_TEXT="$text" awk -v withheld="$WITHHELD" '
+    function hx(c) { return index("0123456789abcdef", tolower(c)) - 1 }
+    function hex2(ss) { return hx(substr(ss, 1, 1)) * 16 + hx(substr(ss, 2, 1)) }
+    function decode(v,   out, i, c, d) {
+      out = ""
+      for (i = 1; i <= length(v); i++) {
+        c = substr(v, i, 1)
+        if (c != "\\") { out = out c; continue }
+        d = substr(v, i + 1, 1); i++
+        if (d == "n") out = out "\n"
+        else if (d == "t") out = out "\t"
+        else if (d == "/") out = out "/"
+        else if (d == "x" && substr(v, i + 1, 2) ~ /^[0-9A-Fa-f][0-9A-Fa-f]$/) {
+          out = out sprintf("%c", hex2(substr(v, i + 1, 2))); i += 2
+        } else out = out d
+      }
+      return out
+    }
+    function add1(v) {
+      sub(/^[ \t]+/, "", v); sub(/[ \t]+$/, "", v)
+      if (length(v) >= 4 && !(v in seen)) { seen[v] = 1; s[++n] = v }
+    }
+    function add(v,   q, i, c, out, closed) {
+      sub(/^[ \t]+/, "", v)
+      if (v == "") return
+      q = substr(v, 1, 1)
+      if (q == "\"" || q == "\047") {
+        out = ""; closed = 0
+        for (i = 2; i <= length(v); i++) {
+          c = substr(v, i, 1)
+          if (q == "\"") {
+            if (c == "\\") { out = out c substr(v, i + 1, 1); i++; continue }
+            if (c == "\"") { closed = 1; break }
+          } else {
+            if (c == "\047") {
+              if (substr(v, i + 1, 1) == "\047") { out = out "\047"; i++; continue }
+              closed = 1; break
+            }
+          }
+          out = out c
+        }
+        add1(v)
+        add1(out)
+        if (closed) add1(decode(out))
+        return
+      }
+      add1(v)
+      p = index(v, " #"); q = index(v, "\t#")
+      if (q > 0 && (p == 0 || q < p)) p = q
+      if (p > 0) add1(substr(v, 1, p - 1))
+    }
+    BEGIN {
+      nf = split(ENVIRON["ESHU_SECRETS_TEXT"], L, "\n")
+      inblock = 0
+      for (fi = 1; fi <= nf; fi++) {
+        l = L[fi]
+        if (l ~ /^[^ \t#][^:]*:[ \t]*[|>][-+]?[ \t]*$/) { inblock = 1; continue }
+        if (inblock) {
+          if (l ~ /^[ \t]+[^ \t]/) { add(l); continue }
+          inblock = 0
+        }
+        if (match(l, /^[^ \t#][^:]*:[ \t]/)) add(substr(l, RLENGTH + 1))
+      }
+      for (i = 1; i <= n; i++)
+        for (j = i + 1; j <= n; j++)
+          if (length(s[j]) > length(s[i])) { t = s[i]; s[i] = s[j]; s[j] = t }
+    }
+    { for (i = 1; i <= n; i++)
+        while ((p = index($0, s[i])) > 0)
+          $0 = substr($0, 1, p - 1) "***" substr($0, p + length(s[i]))
+      print }'
+}
+"""
+
+# H2/U1-U4/W1-W4: one script, one connection, one exit code per step.
+WRITE_SCRIPT = r"""
+set -eu
+umask 077
 path=$1; expect=$2; backup=$3; tmp=$4
 case "$path"   in /*) ;; *) exit 19 ;; esac
 case "$backup" in /*) ;; *) exit 19 ;; esac
@@ -94,12 +251,22 @@ cat > "$tmp" || { rm -f "$tmp"; exit 16; }
 chmod "$(stat -c %a "$real")" "$tmp" || exit 16
 chown "$(stat -c %u:%g "$real")" "$tmp" 2>/dev/null || true
 mv -f "$tmp" "$real" || exit 17
-timeout 100 ha core check 2>&1 || { cp -p "$backup" "$real" || exit 1; exit 18; }
+""" + _REDACT + r"""
+# Z2/Z9/AE1: only the redacted (and capped, after redaction) text leaves the
+# add-on; a failed check rolls the backup back in.
+crc=0
+out=$(timeout 100 ha core check 2>&1) || crc=$?
+printf '%s\n' "$out" | redact | head -c 65536
+if [ "$crc" -ne 0 ]; then
+  cp -p "$backup" "$real" || exit 1
+  exit 18
+fi
 printf "ok %s\n" "$(sha256sum "$real" | cut -d" " -f1)"
-'''
+"""
 
-RESTORE_SCRIPT = r'''
+RESTORE_SCRIPT = r"""
 set -eu
+umask 077
 path=$1; backup=$2; tmp=$3
 case "$path"   in /*) ;; *) exit 19 ;; esac
 case "$backup" in /*) ;; *) exit 19 ;; esac
@@ -127,10 +294,28 @@ esac
 [ ! -e "$tmp" ] || exit 19
 cp -p "$real" "$tmp" || exit 20
 cp -p "$backup" "$real" || { rm -f "$tmp"; exit 21; }
-timeout 100 ha core check 2>&1 || { cp -p "$tmp" "$real" || exit 1; rm -f "$tmp"; exit 18; }
+""" + _REDACT + r"""
+crc=0
+out=$(timeout 100 ha core check 2>&1) || crc=$?
+printf '%s\n' "$out" | redact | head -c 65536
+if [ "$crc" -ne 0 ]; then
+  cp -p "$tmp" "$real" || exit 1
+  rm -f "$tmp"
+  exit 18
+fi
 rm -f "$tmp"
 printf "ok %s\n" "$(sha256sum "$real" | cut -d" " -f1)"
-'''
+"""
+
+CHECK_SCRIPT = r"""
+set -eu
+dir=/homeassistant
+""" + _REDACT + r"""
+crc=0
+out=$(timeout 100 ha core check 2>&1) || crc=$?
+printf '%s\n' "$out" | redact | head -c 65536
+exit "$crc"
+"""
 
 
 class HaConfigError(ValueError):
@@ -291,16 +476,29 @@ def _display_path(root_path):
 
 
 def _mask_secrets(content):
-    """Keys only, values replaced. Comments and structure are kept."""
+    """BN2: every top-level key's value is masked, body included.
+
+    Only a top-level key (column 0, not a comment) and a real comment at
+    column 0 survive. Everything else — indented lines, list items, a block
+    scalar's body, a folded or multi-line quoted value — belongs to the value
+    above it, so it is dropped. The old rule masked only lines containing a
+    colon and printed block-scalar lines (a PEM key, a token) in clear.
+    """
     out = []
-    for line in str(content or '').splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith('#') or ':' not in line:
+    for raw in str(content or '').splitlines():
+        line = raw.rstrip('\r')
+        if not line:
+            continue
+        if line.startswith('#'):
             out.append(line)
             continue
-        key, _sep, _value = line.partition(':')
-        out.append(key + ': "***"')
-    return '\n'.join(out) + ('\n' if str(content or '').endswith('\n') else '')
+        if line[0] in ' \t-':
+            continue                      # body of the key above it
+        key, sep, _value = line.partition(':')
+        if sep and key:
+            out.append(key + ': "***"')
+        # A column-0 line with no key is not printable YAML; drop it.
+    return '\n'.join(out) + ('\n' if out else '')
 
 
 # ── the transport ──────────────────────────────────────────────────────
@@ -462,25 +660,6 @@ def list_configs(integration, ctx=None):
     return out
 
 
-def verify_path(integration, root_path, ctx=None):
-    """Remote verification before a read: realpath equals the expected root
-    path and the target is a regular file (a symlink elsewhere is refused)."""
-    cmd = ("realpath %s && stat -c '%%F' -- %s"
-           % (shlex.quote(root_path), shlex.quote(root_path)))
-    res = _run_checked(integration, 'verify', cmd, ctx=ctx)
-    if res.get('rc') != 0:
-        raise HaConfigError('config_not_found',
-                            'the file does not exist on the add-on')
-    lines = [l for l in (res.get('stdout') or '').splitlines() if l.strip()]
-    if len(lines) < 2:
-        raise HaConfigError('config_not_found', 'the file is not readable')
-    if lines[0] != root_path:
-        raise HaConfigError('config_path_refused',
-                            'the path resolves outside the config tree')
-    if 'regular file' not in lines[1].lower():
-        raise HaConfigError('config_path_refused', 'not a regular file')
-
-
 def read_config(integration, path, ctx=None):
     """`{content, sha256, size, secrets_masked}`; secrets.yaml is masked.
 
@@ -491,10 +670,18 @@ def read_config(integration, path, ctx=None):
     number.
     """
     root_path = check_read_path(path)
-    verify_path(integration, root_path, ctx=ctx)
-    cmd = 'head -c %d -- %s' % (MAX_CONTENT + 1, shlex.quote(root_path))
-    res = _run_checked(integration, 'read', cmd, ctx=ctx, binary=True)
-    if res.get('rc') != 0:
+    res = _run_checked(integration, 'read',
+                       _shell_cmd(READ_SCRIPT, root_path), ctx=ctx, binary=True)
+    rc = int(res.get('rc') or 0)
+    if rc != 0:
+        if rc == 12:
+            raise HaConfigError('config_not_found',
+                                'the file does not exist on the add-on')
+        if rc in (11, 13, 19):
+            raise HaConfigError(
+                'config_path_refused',
+                'the path resolves outside the config tree or changed while '
+                'it was opened')
         raise HaConfigError('config_read_failed', 'could not read the file')
     raw = res.get('stdout') or b''
     if isinstance(raw, str):        # a stub that has not been taught bytes
@@ -505,7 +692,15 @@ def read_config(integration, path, ctx=None):
                             'the file is over %d bytes' % MAX_CONTENT)
     import hashlib
     sha = hashlib.sha256(raw).hexdigest()
-    text = raw.decode('utf-8', errors='replace')
+    try:
+        text = raw.decode('utf-8')
+        editable = True
+    except UnicodeDecodeError:
+        # BL1: a file that is not valid UTF-8 would come back with U+FFFD, and
+        # a write built from that text would replace bytes the agent never
+        # saw. Read it for display, but say it is not editable.
+        text = raw.decode('utf-8', errors='replace')
+        editable = False
     masked = root_path.endswith('/' + SECRETS)
     pending = pending_state(integration)
     if pending and pending.get('path') == root_path:
@@ -514,9 +709,13 @@ def read_config(integration, path, ctx=None):
             _clear_pending(integration)
         elif sha == pending.get('new_sha'):
             _clear_pending(integration)
-    return {'path': _display_path(root_path),
-            'content': _mask_secrets(text) if masked else text,
-            'sha256': sha, 'size': size, 'secrets_masked': masked}
+    out = {'path': _display_path(root_path),
+           'content': _mask_secrets(text) if masked else text,
+           'sha256': sha, 'size': size, 'secrets_masked': masked,
+           'editable': editable}
+    if not editable:
+        out['reason'] = 'config_not_utf8'
+    return out
 
 
 def write_config(integration, path, content, expect_hash, ctx=None,
@@ -539,6 +738,11 @@ def write_config(integration, path, content, expect_hash, ctx=None,
         raise HaConfigError('config_hash_required',
                             'pass expect_hash from ha_config_read')
     old = read_config(integration, path, ctx=ctx)
+    if not old.get('editable', True):
+        raise HaConfigError(
+            'config_not_utf8',
+            'the file is not valid UTF-8, so a write would replace bytes you '
+            'never saw; edit it on the add-on')
     if old['sha256'] != expect_hash:
         # Also in a dry run: the diff the card shows must be against the bytes
         # the write will replace, or the operator approves a stale diff.
@@ -577,7 +781,21 @@ def write_config(integration, path, content, expect_hash, ctx=None,
             % backup)
     rc = int(res.get('rc') or 0)
     if rc == 0:
-        check = _text(res.get('stdout')).strip()
+        # BL1: the script's last line is `ok <sha>` for the bytes now on the
+        # add-on. If it is not the hash of what we sent, the file is not what
+        # the card approved; treat the state as unknown rather than report ok.
+        text = _text(res.get('stdout'))
+        lines = text.strip().splitlines()
+        ok_line = lines[-1] if lines else ''
+        if ok_line != 'ok ' + info['sha256']:
+            _mark_unknown(integration, root_path, expect_hash,
+                          info['sha256'], backup)
+            raise HaConfigError(
+                'config_state_unknown',
+                'the write ended with an unexpected hash (%s); the backup is '
+                '%s — read the path to resolve' %
+                (scrub_string(ok_line)[:80] or 'empty', backup))
+        check = scrub_string('\n'.join(lines[:-1])).strip()
         _record_check(integration, True)
         record_audit_event(
             'ha_config_write', target(integration)['ip'],
@@ -597,7 +815,8 @@ def write_config(integration, path, content, expect_hash, ctx=None,
             actor=(ctx or {}).get('agent', ''))
         raise HaConfigError(
             'config_check_failed',
-            'ha core check failed; the backup was restored. %s' % output[-4000:])
+            'ha core check failed; the backup was restored. %s' %
+            scrub_string(output)[-4000:])
     if 10 <= rc <= 17 or rc == 19:
         raise _write_error(rc)
     _mark_unknown(integration, root_path, expect_hash, info['sha256'], backup)
@@ -628,6 +847,17 @@ def restore_config(integration, path, backup, ctx=None):
             'read the path to resolve it' % (pending.get('backup') or '?'))
     tmp = root_path + '.eshu-tmp-' + secrets.token_hex(8)
     _invalidate_check(integration)
+    # The two contents a timed-out restore could leave: what is there now,
+    # and the backup. A read of the path then resolves the unknown state.
+    old_sha = read_config(integration, path, ctx=ctx).get('sha256') or ''
+    backup_sha = ''
+    try:
+        hs = _run_checked(integration, 'hash', _shell_cmd(HASH_SCRIPT, name),
+                          ctx=ctx)
+        if hs.get('rc') == 0:
+            backup_sha = (_text(hs.get('stdout')) or '').strip()
+    except HaConfigError:
+        backup_sha = ''
     lock = _integration_lock(integration)
     try:
         res = run(integration, 'restore',
@@ -636,7 +866,7 @@ def restore_config(integration, path, backup, ctx=None):
     finally:
         lock.release()
     if res.get('timed_out'):
-        _mark_unknown(integration, root_path, '', '', name)
+        _mark_unknown(integration, root_path, old_sha, backup_sha, name)
         raise HaConfigError(
             'config_state_unknown',
             'the restore timed out; the backup is %s — read the path to '
@@ -650,17 +880,17 @@ def restore_config(integration, path, backup, ctx=None):
             actor=(ctx or {}).get('agent', ''))
         return {'ok': True, 'path': _display_path(root_path),
                 'backup': name, 'check': 'valid',
-                'check_output': _text(res.get('stdout')).strip()}
+                'check_output': scrub_string(_text(res.get('stdout'))).strip()}
     if rc == 18:
         raise HaConfigError(
             'config_check_failed',
             'ha core check failed after the restore; the previous content was '
-            'put back. %s' % (_text(res.get('stdout')) +
-                              _text(res.get('stderr')))[-4000:])
+            'put back. %s' % scrub_string(_text(res.get('stdout')) +
+                                          _text(res.get('stderr')))[-4000:])
     if rc in (12, 19):
         raise HaConfigError('config_backup_refused',
                             'the backup does not exist or is not valid')
-    _mark_unknown(integration, root_path, '', '', name)
+    _mark_unknown(integration, root_path, old_sha, backup_sha, name)
     raise HaConfigError(
         'config_state_unknown',
         'the restore ended with an unknown status (%s); the backup is %s' %
@@ -668,10 +898,16 @@ def restore_config(integration, path, backup, ctx=None):
 
 
 def check_config(integration, ctx=None):
-    """Run `ha core check`; a valid result is recorded for F10's restart."""
-    res = _run_checked(integration, 'check', 'timeout 100 ha core check 2>&1',
+    """Run `ha core check`; a valid result is recorded for F10's restart.
+
+    BN1: the check runs in a fixed script whose output is redacted against the
+    add-on's `secrets.yaml` before it is printed, and capped after redaction.
+    `scrub_string` runs again here as the second check.
+    """
+    res = _run_checked(integration, 'check', _shell_cmd(CHECK_SCRIPT),
                        ctx=ctx, timeout=TIMEOUT_LONG)
-    output = ((res.get('stdout') or '') + (res.get('stderr') or '')).strip()
+    output = scrub_string(_text(res.get('stdout')) +
+                          _text(res.get('stderr'))).strip()
     valid = res.get('rc') == 0
     _record_check(integration, valid)
     record_audit_event(
