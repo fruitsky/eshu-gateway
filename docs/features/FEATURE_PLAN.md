@@ -12217,6 +12217,90 @@ and the generator writes Build only.
 
 ---
 
+### Security review (security reviewer, 2026-11-14, at `4d5f013`)
+
+**Approved once BP1 is in.** The design is right. A dashboard deploy now
+changes only Build. Edge changes only on Seed Edge, and Fleet only on
+Deploy to Fleet or Rollback. Nothing writes the checkout.
+
+Checked:
+* **The routes.**
+  * `/static/eshu-gateway-install.sh`, `/api/gateway-script` and
+    `/api/gateway-script-rollback` serve Fleet.
+  * `/static/dev/eshu-gateway-install.sh` serves Edge.
+  * All four are registered before `app.mount("/static")`, with
+    `no-store`.
+  * A missing channel is 503 and never falls back to another channel.
+  * The dev update URL from the policy resolves to the Edge route.
+* **Writes.**
+  * `mkstemp` in the channel dir, then `fsync`, then `os.replace`. A
+    gateway never downloads half a file.
+  * The files are `0644` in a `0700` dir.
+  * Promote copies Fleet to `fleet.prev` before it replaces Fleet.
+* **Seed, Promote and Rollback** keep their session check and audit rows,
+  and the audit rows now carry the hashes.
+* **`gen_installer.py`** writes Build only. The pre-commit check and the
+  deploy helper no longer touch `static/`.
+
+**BP1 (must): the migration must not make the old `.bak` the Rollback
+target.**
+* `ensure_initialised` copies `static/eshu-gateway-install.sh.bak` into
+  `fleet.prev`.
+* That file is whatever was golden before the last pre-X7 promote. Every
+  deploy changed the fleet installer back then, so it is an installer of
+  unknown age. It can be older than RR1, BE3, BE4 and the lockbox fixes.
+* After the migration, the first Rollback would push it to every gateway
+  as "the previous installer". It would silently downgrade the fleet's
+  security fixes.
+* Fix:
+  * create no `fleet.prev` on migration, so Rollback stays unavailable
+    until the first Deploy to Fleet;
+  * then delete the legacy files (`static/eshu-gateway-install.sh.bak`, and
+    any leftover `static/eshu-gateway-install.sh` or `static/dev/`) and
+    record that in the same audit row.
+* Test: a migration with a `.bak` on disk leaves `has_previous()` false and
+  deletes the file.
+
+**Answers to the open questions:**
+1. **Where the channel dir lives:** `dashboard/` is fine, because
+   `eshu.db` is there too.
+   * The init marker is in the database and the channels are files, so
+     they must be backed up and restored together. Say that in DEV_GUIDE.
+     A restore of one without the other leaves the marker set and the
+     channels missing, which is 503 everywhere. That fails closed.
+   * Recovery today is Seed Edge, then Deploy to Fleet, and Deploy to
+     Fleet also triggers a fleet-wide update. That is acceptable, but
+     document it as the recovery path.
+   * Also enforce `0700` when the dir already exists. `makedirs` sets the
+     mode only when it creates the dir.
+2. **The `.bak`:** yes, the static mount served it publicly before X7.
+   After X7 it is ignored by git, but it is still on disk inside `static/`,
+   and there is no route in front of it. So `/static/eshu-gateway-install.sh.bak`
+   is still served until the file is deleted. BP1's cleanup closes this.
+   The content has no secrets (the token is a placeholder), but an old
+   installer should not stay downloadable.
+3. **The migration source:** always start from Build.
+   * The committed copies were byte-identical to Build (pre-commit
+     enforced that).
+   * On a real deploy, `git pull` deletes them before the restart, so the
+     "pre-X7 copy" branch only ever picks up a copy that had been changed
+     at runtime. That is exactly the unreviewed file to avoid.
+   * Fleet := Build is also what `/api/gateway-script` already served, so
+     the fleet sees no change at the deploy.
+
+**BP2 (should, follow-up chunk): two more gateway-executed files still
+follow Build.**
+* `static/features/approved_windows.sh` is downloaded every poll cycle and
+  run by the gateway as root.
+* `static/fleet-runner.sh` is downloaded for every fleet command.
+* Both are still served from the checkout, so a dashboard deploy still
+  changes root-run code on every gateway without a promote.
+* Either put them in the Edge and Fleet channels too (dev gateways get
+  Edge's copy), or have the installer carry them so they change only with
+  Fleet.
+* Until then, the X7 note and DEV_GUIDE should say that these two are not
+  gated by Deploy to Fleet.
+
 ## Chunk X6 — agent API fixes from the Release 1.2 test round · slug `agent-api-round` · dashboard
 
 From the agent's test report of 2026-11-12, triaged by the feature reviewer.
