@@ -2638,34 +2638,58 @@ ak_from() {   # $1 = file  $2 = comment
   sed -n "s/^from=\"\([^\"]*\)\".* $2\$/\1/p" "$1" 2>/dev/null | head -n 1 || true
 }
 
+# BH2: run the user-side write as the gateway user. The checks above are the
+# first line, but a symlink swapped in between the check and the write used to
+# be followed by root: `mktemp`, `mv` and `chmod` could reach root's
+# authorized_keys or a system directory. As the user, a swap can only reach
+# what that user could already write.
+ak_as_user() {   # $@ = command, run as $USER
+  if command -v runuser >/dev/null 2>&1; then
+    runuser -u "$USER" -- "$@"
+  elif command -v setpriv >/dev/null 2>&1; then
+    setpriv --reuid="$(id -u "$USER")" --regid="$(id -g "$USER")"             --init-groups "$@"
+  else
+    echo "   REFUSED: neither runuser nor setpriv is available; authorized_keys not changed."
+    return 1
+  fi
+}
+
 # BE4: replace authorized_keys through a private temp in the same directory.
 # A planted symlink at the directory or the file is refused; the fixed
-# `.tmp` name an attacker could pre-create is gone.
+# `.tmp` name an attacker could pre-create is gone. BH2: the create and the
+# rename happen as $USER, never as root.
 ak_replace() {   # stdin = the new file
-  local ak_home ak_dir ak_file ak_tmp
+  local ak_home ak_dir ak_file ak_owner
   ak_home="/home/$USER"; ak_dir="$ak_home/.ssh"; ak_file="$ak_dir/authorized_keys"
+  # BQ2: if the home itself is not the user's, the user-side create cannot be
+  # trusted (and root must not "fix" it). Refuse and change nothing.
+  ak_owner=$(stat -c '%u' "$ak_home" 2>/dev/null || echo "")
+  if [ "$ak_owner" != "$(id -u "$USER" 2>/dev/null)" ]; then
+    echo "   REFUSED: $ak_home is not owned by $USER; authorized_keys not changed."
+    cat >/dev/null
+    return 1
+  fi
   if [ -L "$ak_dir" ] || { [ -e "$ak_file" ] && [ -L "$ak_file" ]; }; then
     echo "   REFUSED: $ak_dir or $ak_file is a symlink; authorized_keys not changed."
     cat >/dev/null
     return 1
   fi
-  mkdir -p "$ak_dir" 2>/dev/null || true
-  if [ -L "$ak_dir" ]; then
-    echo "   REFUSED: $ak_dir is a symlink; authorized_keys not changed."
+  if ! ak_as_user sh -c '
+      set -eu
+      dir=$1
+      mkdir -p "$dir" 2>/dev/null || exit 1
+      [ ! -L "$dir" ] || exit 2
+      [ ! -L "$dir/authorized_keys" ] || exit 2
+      tmp=$(mktemp "$dir/.authorized_keys.XXXXXX") || exit 3
+      cat > "$tmp" || { rm -f "$tmp"; exit 4; }
+      chmod 600 "$tmp" || { rm -f "$tmp"; exit 5; }
+      mv -f "$tmp" "$dir/authorized_keys" || { rm -f "$tmp"; exit 6; }
+      chmod 700 "$dir" || exit 7
+    ' sh "$ak_dir"; then
     cat >/dev/null
+    echo "   REFUSED: could not replace $ak_file as $USER; it was not changed."
     return 1
   fi
-  ak_tmp=$(mktemp "$ak_dir/.authorized_keys.XXXXXX") || { cat >/dev/null; return 1; }
-  cat > "$ak_tmp"
-  chown "$USER:$USER" "$ak_tmp" 2>/dev/null || true
-  chmod 600 "$ak_tmp"
-  if ! mv -f "$ak_tmp" "$ak_file"; then
-    rm -f "$ak_tmp"
-    echo "   REFUSED: could not replace $ak_file; it was not changed."
-    return 1
-  fi
-  chown "$USER:$USER" "$ak_dir" 2>/dev/null || true
-  chmod 700 "$ak_dir"
 }
 
 if [ "$mode" = "update" ] && [ "${REGISTER_OK:-}" = "1" ]; then
@@ -2745,7 +2769,8 @@ if { [ "$mode" = "install" ] || [ "$mode" = "reinstall" ]; } && [ "${REGISTER_OK
   if [ -L "/home/$USER/.ssh" ]; then
     echo "   REFUSED: /home/$USER/.ssh is a symlink; authorized_keys not changed."
   else
-  mkdir -p "/home/$USER/.ssh"; chmod 700 "/home/$USER/.ssh"
+  # BQ2: no root mkdir/chmod here. The user-side script in ak_replace creates
+  # .ssh and sets 700, so a fresh install gets a user-owned directory.
   # F12: two lines, each with its own comment (eshu-gateway-key, eshu-dashboard),
   # so a re-run replaces them by comment instead of appending duplicates. The
   # dashboard line's forced command carries the one fixed --dashboard-key
@@ -2768,8 +2793,6 @@ if { [ "$mode" = "install" ] || [ "$mode" = "reinstall" ]; } && [ "${REGISTER_OK
       printf '%s %s eshu-dashboard\n' "$AK_DASH" "$DASHBOARD_SSH_PUB"
     fi
   } | ak_replace
-  chown -R "$USER":"$USER" "/home/$USER/.ssh" 2>/dev/null || true
-  chmod 600 "$AK_FILE" 2>/dev/null || true
   fi
 fi
 

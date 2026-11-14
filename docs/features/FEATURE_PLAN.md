@@ -13073,6 +13073,45 @@ still pass. Installers regenerated.
 * Leaving out `grep -q` is the right call under `pipefail`.
 * BE4 can merge. BH2 (write as the user) is still a should, for later.
 
+**BH2 implemented (2026-11-14, `fix/bh2-ak-user-write`, from `release/1.3-core`;
+not in 1.3).**
+
+* `ak_as_user` runs one command as `$USER`: `runuser -u "$USER" --` when
+  util-linux provides it, otherwise `setpriv --reuid/--regid/--init-groups`,
+  otherwise it refuses with a message and the file is left alone.
+* `ak_replace` now does the whole user-side write inside that helper: `mkdir
+  -p .ssh`, a `mktemp` in `.ssh`, `cat` of the new file from stdin, `chmod
+  600`, `mv` onto `authorized_keys`, `chmod 700` on `.ssh`. Root only checks
+  for a symlinked `.ssh`/`authorized_keys` first (the existing messages) and
+  then drains stdin on failure. The inner script re-checks both symlinks, so
+  a swap root could not see is at worst the user writing where the user
+  could already write — the BH2 point.
+* BQ2: the install path no longer runs `mkdir`, `chmod` or `chown` on
+  `.ssh`/`authorized_keys` as root. The user-side script creates `.ssh` at
+  700 and the file at 600, so a fresh install works (there is no root-owned
+  `0700` directory any more) and no root `chmod` follows a swapped link.
+  `ak_replace` refuses when `/home/$USER` itself is not owned by `$USER`;
+  a home the user cannot write fails with REFUSED and nothing is changed.
+* Tests (`tests/test_installer.py`): a `runuser` stub logs the call, and the
+  update runs through `-u eshu-gateway --` and replaces the dashboard line; a
+  failing user-side command leaves the file byte-identical and prints
+  REFUSED; a source check pins the runuser form, the setpriv fallback and
+  the inner symlink checks. The BE4/BH1/BJ1 suites run through the same
+  `runuser` stub and still pass (64 in the file). All four installers were
+  regenerated and are byte-identical.
+
+`bash scripts/verify.sh`: `3031 passed, 27 skipped, 8 warnings in 639.10s
+(0:10:39)` (3 more: the BH2 tests).
+
+**BQ2 tests (2026-11-14).** A fresh install with no `.ssh` succeeds and the
+directory is 700, owned by the user (the user-side `mkdir`). The install
+block is checked for the absence of root `mkdir -p "/home/$USER/.ssh"`,
+`chmod 700 "/home/$USER/.ssh"`, `chown -R` and `chmod 600 "$AK_FILE"`, while
+the user-side `mkdir -p "$dir"`, `chmod 600 "$tmp"` and `chmod 700 "$dir"`
+remain. A home the user cannot write (mode 0555, the same EACCES a root-owned
+0700 home gives) refuses: no `.ssh`, nothing written, REFUSED, and the
+install fails rather than falling back to root.
+
 ### GT1 — gateway token rotation · branch `feat/gateway-token-rotation` · design first
 
 The dashboard has no rotate action today; the only way to rotate a token is to remove and re-enrol the gateway. Design:
