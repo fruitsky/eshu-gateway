@@ -11602,9 +11602,12 @@ obtain the new one.
   `token_rotation_started_at`, an empty `token_rotation_delivered_at` and the
   method (`poll` or `ssh`). The current `api_token` is untouched. The response
   is `{status: "pending", method}`; the token is never in a response, audit
-  row, log line or template. A second request while one is pending is refused
-  (`rotation_pending`). The method is chosen at mint time: routine uses the
-  poll, compromise uses the SSH push below.
+  row, log line or template. The method is chosen at mint time: routine uses
+  the poll, compromise uses the SSH push below. A second **routine** request
+  while one is pending is refused (`rotation_pending`). A **compromise**
+  request is allowed even while a routine rotation is pending (BS4): a routine
+  token may already be in the attacker's hands, so the compromise path must be
+  able to override it.
 * **Authentication during the overlap (routine).** `_resolve_gateway_token`
   accepts `api_token` or `api_token_next`. A request that matches
   `api_token_next` is the **commit**: in one transaction,
@@ -11645,6 +11648,12 @@ obtain the new one.
   retry or re-enrol. The gateway reads the file on its next call, so no
   process restart is needed and the first new-token request confirms the new
   credential.
+* **Compromise overrides a pending routine rotation (BS4).** A successful
+  compromise push writes a fresh token and, in one transaction, revokes
+  `api_token` **and** drops `api_token_next`, so K_old and K_next both die;
+  it leaves no `.prev`, so a routine `.prev` (delivered or not) dies too. The
+  old token, the routine token and both keys must then fail. Nothing of the
+  routine rotation survives to be committed.
 * **Which gateways can use the SSH path.** A gateway needs (a) a pinned host
   key and (b) the shared dashboard key line in `authorized_keys`. The installer
   reports whether it wrote that line (`ssh_dashboard_key: 1` in
@@ -11685,7 +11694,8 @@ obtain the new one.
   gateway may have applied the token, and dropping it would strand the
   gateway. The only outcomes then are commit (first new poll), the SSH push
   (compromise), or an operator re-enrolment. A failed SSH push leaves the row
-  pending and cancellable, since nothing was applied.
+  pending and cancellable, since nothing was applied. A successful compromise
+  push ends any pending routine rotation in the same transaction (BS4).
 
 **Failure modes.**
 
@@ -11729,6 +11739,7 @@ obtain the new one.
 `gateway_token_rotation_push_failed` (ip, short reason),
 `gateway_token_rotated` (ip, old revoked — the commit; method),
 `gateway_token_rotation_cancelled` (actor, ip),
+`gateway_token_revoked` (actor, ip, BS5),
 `gateway_token_rotation_expired` (ip), `gateway_token_rotation_failed`
 (ip, short reason from the poller), and `gateway_auth_failed` (ip, at most one
 row a minute per IP, for repeated 401s). Details never include either token.
@@ -11736,7 +11747,15 @@ row a minute per IP, for repeated 401s). Details never include either token.
 **UI.** Gateways table, row menu: **Rotate token** and, when the gateway
 reports `ssh_dashboard_key=1` and has a pinned host key, **Rotate for
 compromise**. Without the key/pin the second entry is replaced by a
-non-clickable **"re-enrol only"** note that names why. The routine confirm
+non-clickable **"re-enrol only"** note that names why, plus a **Revoke
+token** action (BS5): it nulls `api_token` at once, the gateway goes dark (it
+fails closed: no commands, no tickets) until it is re-enrolled, and the confirm
+says exactly that. An operator under attack can choose "dark now" over "open
+until I reach the box". A push that fails on a **host key mismatch** is not a
+transient error: it is audited as `ssh_host_key_changed`, shown as a possible
+impersonation, and is not offered as a one-click retry until the pin has been
+dealt with. The row records the last push result beside `ssh_dashboard_key`,
+because the push's own result is the real proof of the capability. The routine confirm
 says: the gateway gets a new token on its next poll (within 30 s); both tokens
 work until the first poll with the new one; then the old one stops; if the
 gateway is offline it keeps working with the old one until it returns; the
@@ -11762,7 +11781,12 @@ fleet is frozen: rotation changes a credential, not a command.
   old + K_old, audits `gateway_token_rotation_pushed`; a failed push changes
   nothing and can be cancelled; cancel works only before delivery; 24 h expiry
   drops the pending token; the token never appears in any response, audit row
-  or log capture; `ssh_dashboard_key=0`/absent offers re-enrol only.
+  or log capture; `ssh_dashboard_key=0`/absent offers re-enrol only and
+  **Revoke token**; a compromise rotation started while a routine one is
+  pending commits, and the old token, the routine token, K_old and K_next all
+  fail afterwards (BS4); a host-key mismatch push is audited as
+  `ssh_host_key_changed` and is not retryable in one click (BS5); Revoke
+  nulls the token and the gateway's next call is 401 (BS5).
 * Poller sandbox (`tests/test_poller.py`): a poll response with `rotate_token`
   writes `.prev` and the new `/etc/eshu-token` (0600), uses the new token on
   the next poll, and removes `.prev` after `rotation_complete`; a write failure
@@ -11782,18 +11806,20 @@ fleet is frozen: rotation changes a credential, not a command.
   and the token is absent from the rendered HTML; "re-enrol only" for a
   gateway without the key.
 
-**Open questions for security (round 2).**
+**Round-2 questions, answered by security (2026-11-14, at `3ada36a`) and
+folded in.**
 
-1. **The `ssh_dashboard_key` capability.** The installer would report it after
-   writing the line; old gateways send nothing and read as "re-enrol only".
-   Is that shape acceptable, or should the dashboard infer it from the pinned
-   key alone (which cannot see a removed `authorized_keys` line)?
-2. **Compromise ordering.** The design pushes first and revokes on success, so
-   a failed push leaves the old token valid (and the compromise unfixed) rather
-   than stranding a gateway. Is that the right trade, or should the old token
-   be revoked before the push (fail closed, re-enrol on failure)?
-3. **`.prev` on compromise.** The design refuses to write one (K_old dies with
-   the token). Confirm that the routine-only `.prev` is the intended split.
+1. **`ssh_dashboard_key`.** The self-report is fine as a hint: a false 1 only
+   makes a push fail (safe), a false 0 hides the option (safe). It must come
+   only from the IP-bound authenticated register, never be inferred from the
+   pin alone, and the row records the last push result beside it.
+2. **Compromise ordering.** Push first, revoke on success, and commit the
+   instant the push returns 0; the old token's last window is one SSH call.
+   Revoking first would turn every failed push into an outage. BS5's Revoke
+   token is the explicit fail-closed choice.
+3. **`.prev` on compromise.** Confirmed: routine only. A compromise writes
+   none and deletes any it finds, including one left by a pending routine
+   rotation (BS4).
 
 `bash scripts/verify.sh`: `2859 passed, 26 skipped, 8 warnings in 634.69s
 (0:10:34)` (docs only; the same suite as the round-1 note).
@@ -11897,6 +11923,13 @@ compromise to the attacker.**
    * Fail closed when `/etc/eshu-token` is missing, as today.
    * `.prev` alone never authenticates a request to the dashboard; it is
      only for the MAC check.
+
+**Round 3 (2026-11-14).** BS4 and BS5 are folded in: a compromise rotation
+overrides a pending routine one (the routine token and both keys die), and
+the UI offers **Revoke token** for gateways that cannot take the push, with the
+host-key-mismatch push treated as impersonation rather than a retryable error.
+`bash scripts/verify.sh`: `2859 passed, 26 skipped, 8 warnings in 641.20s
+(0:10:41)` (docs only; the same suite).
 
 #### Security re-read of GT1 round 2 (security reviewer, 2026-11-14, at `3ada36a`)
 
