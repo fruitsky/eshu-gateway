@@ -82,9 +82,23 @@ class FakeSSH:
                         'timed_out': False}
             return {'rc': 0, 'stdout': path + '\nregular file\n',
                     'stderr': '', 'timed_out': False}
-        if '# READ_SCRIPT' in command:
-            # BN3: the read is one script that opens the path on a descriptor.
+        if '# SECRETS_KEYS_SCRIPT' in command:
+            # BQ1: the one script that may open secrets.yaml, keys only.
             path = command.rsplit(' _ ', 1)[-1].strip().strip("'")
+            content = self.files.get(path, '')
+            keys = [line.split(':', 1)[0] for line in content.splitlines()
+                    if line and not line[0].isspace() and ':' in line
+                    and line.split(':', 1)[0].replace('_', 'a').isalnum()]
+            out = '\n'.join(keys) + ('\n' if keys else '')
+            return {'rc': 0 if path in self.files else 12,
+                    'stdout': out.encode() if binary else out,
+                    'stderr': b'' if binary else '', 'timed_out': False}
+        if '# READ_SCRIPT' in command:
+            # BN3/BQ1: one descriptor, and secrets.yaml is refused (exit 19).
+            path = command.rsplit(' _ ', 1)[-1].strip().strip("'")
+            if path.rsplit('/', 1)[-1] == 'secrets.yaml':
+                return {'rc': 19, 'stdout': b'' if binary else '',
+                        'stderr': b'' if binary else '', 'timed_out': False}
             content = self.files.get(path, '')
             if isinstance(content, str):
                 content = content.encode('utf-8')
@@ -281,14 +295,20 @@ def test_read_returns_content_and_hash(pinned, fake):
     assert out['secrets_masked'] is False
 
 
-def test_secrets_yaml_is_masked_but_hashed(pinned, fake):
-    fake.files['/homeassistant/secrets.yaml'] = 'api_key: hunter2\nname: x\n'
+def test_secrets_yaml_is_keys_only_and_never_a_value(pinned, fake):
+    fake.files['/homeassistant/secrets.yaml'] = (
+        'api_key: hunter2\n'
+        'block: |\n'
+        '  -----BEGIN PRIVATE KEY-----\n'
+        '  MIIEowIBAAKCAQEA\n')
     from core.ha_config_ssh import read_config
     out = read_config(pinned, '/config/secrets.yaml')
     assert out['secrets_masked'] is True
-    assert 'hunter2' not in out['content']
-    assert 'api_key: "***"' in out['content']
-    assert out['sha256'] == _sha('api_key: hunter2\nname: x\n')
+    assert out['keys_only'] is True
+    assert out['editable'] is False
+    assert out['content'] == 'api_key\nblock\n'
+    for value in ('hunter2', 'PRIVATE KEY', 'MIIEowIBAAKCAQEA'):
+        assert value not in out['content']
 
 
 def test_a_symlinked_path_is_refused_before_reading(pinned, fake):
@@ -593,3 +613,41 @@ def test_the_command_wrapper_quotes_the_paths():
     from core.ha_config_ssh import _shell_cmd
     cmd = _shell_cmd("echo ok", "/homeassistant/x y.yaml")
     assert "'/homeassistant/x y.yaml'" in cmd
+
+
+# ── BQ1: the call row never carries file content ─────────────────────────
+
+def _last_call():
+    from db.integrations import get_integration_calls
+    return get_integration_calls(limit=5)['rows'][0]
+
+
+def test_bq1_a_secrets_read_stores_no_value_in_the_call_row(pinned, fake):
+    fake.files['/homeassistant/secrets.yaml'] = (
+        'api_key: hunter2\n'
+        'block: |\n'
+        '  -----BEGIN PRIVATE KEY-----\n'
+        '  MIIEowIBAAKCAQEA\n')
+    from core.ha_config_ssh import read_config
+    read_config(pinned, '/config/secrets.yaml')
+    row = _last_call()
+    assert row['tool'] == 'read-keys'
+    for value in ('hunter2', 'PRIVATE KEY', 'MIIEowIBAAKCAQEA', 'api_key:'):
+        assert value not in row['response_summary']
+    assert 'bytes' in row['response_summary']
+    assert 'sha256' in row['response_summary']
+    assert 'exit 0' in row['response_summary']
+
+
+def test_bq1_a_normal_read_stores_no_content_in_the_call_row(pinned, fake):
+    fake.files['/homeassistant/configuration.yaml'] = (
+        'distinctive: swordfish-please-do-not-log\n')
+    from core.ha_config_ssh import read_config
+    out = read_config(pinned, '/config/configuration.yaml')
+    assert 'swordfish' in out['content']      # the caller still gets it
+    row = _last_call()
+    assert row['tool'] == 'read'
+    assert 'swordfish' not in row['response_summary']
+    assert 'bytes' in row['response_summary']
+    assert 'sha256' in row['response_summary']
+    assert 'exit 0' in row['response_summary']

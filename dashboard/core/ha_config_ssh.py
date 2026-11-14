@@ -18,6 +18,7 @@ Two invariants shape the write path:
   `config_state_unknown`; the integration then refuses writes until a
   `ha_config_read` of the same path shows which content is in place.
 """
+import hashlib
 import os
 import re
 import secrets
@@ -67,28 +68,72 @@ LIST_SCRIPT = (
 # the masking decision came from the requested name. Here the descriptor is
 # opened once and its own target is checked before any byte is read.
 READ_SCRIPT = r"""
-# READ_SCRIPT — one descriptor, one read (BN3).
+# READ_SCRIPT — the body of the single sh -c. Exit codes: 11/12/13/19/21;
+# the bytes go to stdout unchanged. Round 9 as approved (BQ1).
 set -eu
+set -f
+PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH
+me=$$
 path=$1
+
 case "$path" in /*) ;; *) exit 19 ;; esac
+case "$path" in *.yaml|*.yml) ;; *) exit 19 ;; esac
+[ "$(basename "$path")" != secrets.yaml ] || exit 19
+
 real=$(realpath "$path") || exit 12
 [ -f "$real" ] || exit 12
-[ ! -L "$real" ] || exit 13
 dir=$(dirname "$real")
+[ -d "$dir" ] || exit 11
 case "$dir" in
   /homeassistant|/homeassistant/packages|/homeassistant/packages/*) ;;
   *) exit 11 ;;
 esac
 [ "$(realpath "$(dirname "$path")")" = "$dir" ] || exit 13
 [ "$(basename "$real")" = "$(basename "$path")" ] || exit 13
-exec 3< "$real" || exit 12
-[ "$(realpath /proc/self/fd/3)" = "$real" ] || exit 13
-[ -f /proc/self/fd/3 ] || exit 12
-# BO2/BN3: a hard link to secrets.yaml has the same name elsewhere; masking is
-# decided by name, so a link count other than one is refused (exit 21).
-[ "$(stat -L -c %h /proc/self/fd/3)" = 1 ] || exit 21
+[ "$(basename "$real")" != secrets.yaml ] || exit 19
+
+exec 3< "$real"
+fd3=/proc/$me/fd/3
+[ "$(readlink "$fd3")" = "$real" ] || exit 13
+[ -f "$fd3" ] || exit 12
+[ "$(stat -L -c %h "$fd3")" = 1 ] || exit 21
 head -c __MAX__ <&3
 """.replace("__MAX__", str(MAX_CONTENT + 1))
+
+# BQ1: secrets.yaml is the one file READ_SCRIPT refuses. This is the Round 9
+# keys-only script: same descriptor checks, but it prints top-level key names
+# and never a value, so no secret leaves the add-on.
+SECRETS_KEYS_SCRIPT = r"""
+# SECRETS_KEYS_SCRIPT — READ_SCRIPT with the last line replaced and with the two
+# `secrets.yaml` refusals removed: it is the one script that must open that
+# file (H1), and it prints key names only.
+set -eu
+set -f
+PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH
+me=$$
+path=$1
+
+case "$path" in /*) ;; *) exit 19 ;; esac
+case "$path" in *.yaml|*.yml) ;; *) exit 19 ;; esac
+
+real=$(realpath "$path") || exit 12
+[ -f "$real" ] || exit 12
+dir=$(dirname "$real")
+[ -d "$dir" ] || exit 11
+case "$dir" in
+  /homeassistant|/homeassistant/packages|/homeassistant/packages/*) ;;
+  *) exit 11 ;;
+esac
+[ "$(realpath "$(dirname "$path")")" = "$dir" ] || exit 13
+[ "$(basename "$real")" = "$(basename "$path")" ] || exit 13
+
+exec 3< "$real"
+fd3=/proc/$me/fd/3
+[ "$(readlink "$fd3")" = "$real" ] || exit 13
+[ -f "$fd3" ] || exit 12
+[ "$(stat -L -c %h "$fd3")" = 1 ] || exit 21
+sed -n "s/^\([A-Za-z0-9_][A-Za-z0-9_]*\):.*/\1/p" "$fd3"
+"""
 
 # The backup's hash, for the pending record a timed-out restore leaves behind
 # (nit): the backup is not a config path, so it needs its own tiny script.
@@ -872,15 +917,38 @@ def _mask_secrets(content):
 # ── the transport ──────────────────────────────────────────────────────
 
 def _record(integration, template, ctx, res, elapsed_ms):
+    """One integration_calls row. A read never stores file content (BQ1).
+
+    For `read` and `read-keys`, the summary is the template name, the byte
+    count, the sha256 and the exit code; stdout is not stored at all. The
+    write/restore/check templates keep the redacted tail they already had.
+    """
+    rc = int(res.get('rc') or 0)
     out = res.get('stdout') or ''
     err = res.get('stderr') or ''
-    # BL1: a binary read returns bytes; the audit summary is text.
     if isinstance(out, bytes):
-        out = out.decode('utf-8', 'replace')
+        out = out
+    else:
+        out = str(out).encode('utf-8')
     if isinstance(err, bytes):
         err = err.decode('utf-8', 'replace')
-    tail = scrub_string(out + err)
-    tail = tail[-8192:]
+    if template in ('read', 'read-keys'):
+        digest = hashlib.sha256(out).hexdigest() if out else ''
+        summary = '%s: %d bytes' % (template, len(out))
+        if digest:
+            summary += ', sha256 ' + digest
+        summary += ', exit %d' % rc
+        if rc and err:
+            # Error text (a path, a shell error), never stdout; bounded.
+            summary += ' — ' + scrub_string(err)[-500:]
+        nbytes = len(out)
+        truncated = 0
+    else:
+        tail = scrub_string(out.decode('utf-8', 'replace') + err)
+        tail = tail[-8192:]
+        summary = tail
+        nbytes = len(tail.encode('utf-8'))
+        truncated = 1 if len(tail) >= 8192 else 0
     try:
         record_integration_call(
             integration=(integration or {}).get('name') or '',
@@ -888,12 +956,12 @@ def _record(integration, template, ctx, res, elapsed_ms):
             agent=(ctx or {}).get('agent', ''),
             method='SSH',
             path=template,
-            status_code=200 if res.get('rc') == 0 else 500,
+            status_code=200 if rc == 0 else 500,
             latency_ms=elapsed_ms,
-            response_summary=tail,
-            response_bytes=len(tail.encode('utf-8')),
-            truncated=1 if len(tail) >= 8192 else 0,
-            outcome='ok' if res.get('rc') == 0 else 'error',
+            response_summary=summary,
+            response_bytes=nbytes,
+            truncated=truncated,
+            outcome='ok' if rc == 0 else 'error',
             session_id=(ctx or {}).get('session_id', ''),
             execution_id=(ctx or {}).get('execution_id', ''),
             reason=(ctx or {}).get('reason', ''),
@@ -1038,8 +1106,13 @@ def read_config(integration, path, ctx=None):
     number.
     """
     root_path = check_read_path(path)
-    res = _run_checked(integration, 'read',
-                       _shell_cmd(READ_SCRIPT, root_path), ctx=ctx, binary=True)
+    # BQ1: secrets.yaml is read through the keys-only script, never through
+    # READ_SCRIPT (which refuses it) and never in full.
+    is_secrets = root_path.endswith('/' + SECRETS)
+    script = SECRETS_KEYS_SCRIPT if is_secrets else READ_SCRIPT
+    template = 'read-keys' if is_secrets else 'read'
+    res = _run_checked(integration, template,
+                       _shell_cmd(script, root_path), ctx=ctx, binary=True)
     rc = int(res.get('rc') or 0)
     if rc != 0:
         if rc == 12:
@@ -1061,8 +1134,14 @@ def read_config(integration, path, ctx=None):
     if size > MAX_CONTENT:
         raise HaConfigError('config_too_large',
                             'the file is over %d bytes' % MAX_CONTENT)
-    import hashlib
     sha = hashlib.sha256(raw).hexdigest()
+    if is_secrets:
+        # Only top-level key names came over. There is nothing to edit or
+        # hash against here: the write script refuses secrets.yaml anyway.
+        return {'path': _display_path(root_path),
+                'content': raw.decode('utf-8', 'replace'),
+                'sha256': sha, 'size': size, 'secrets_masked': True,
+                'keys_only': True, 'editable': False}
     try:
         text = raw.decode('utf-8')
         editable = True
@@ -1072,7 +1151,7 @@ def read_config(integration, path, ctx=None):
         # saw. Read it for display, but say it is not editable.
         text = raw.decode('utf-8', errors='replace')
         editable = False
-    masked = root_path.endswith('/' + SECRETS)
+    masked = False
     pending = pending_state(integration)
     if pending and pending.get('path') == root_path:
         # U1: a read of the path resolves an unknown state.
