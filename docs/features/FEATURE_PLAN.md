@@ -10261,6 +10261,114 @@ under ash where it is (apt install busybox)". No design change.
 
 ---
 
+### Security review of the F11 code round (security reviewer, 2026-11-14, at `0219180`)
+
+**Changes requested: BN1 and BN2 are musts. BL1 is agreed, with one more
+condition.**
+
+Sound as built:
+* the shared `ssh_client`:
+  * F12's argv is unchanged;
+  * `-l` takes the user as a value;
+  * `target()` refuses a host that starts with `-`;
+* every remote argument goes through `shlex.quote`, and the scripts are
+  fixed text;
+* the key file is `0600`, in the `0700` key dir, and removed in
+  `finally`;
+* a fresh known-hosts file is made per call;
+* the TOFU pin is set only by a call that doesn't require one, and a write
+  or restore with no pin refuses before connecting;
+* the write script:
+  * checks every positional argument and the directory, basename,
+    backup and temp names;
+  * hashes before it backs up;
+  * restores on exit 18;
+  * maps unknown exits to `config_state_unknown`;
+* freeze refuses writes and restores;
+* H5 invalidates the earlier check before connecting;
+* the include preflight matches AT1, and BC1 (relative targets only) is
+  in.
+
+**BN1 (must): the approved redaction of `ha core check` output is
+missing.**
+* Rounds 7–10 (AC1, AE1, AL3, AQ1) put a `redact()` into the write,
+  restore and check scripts. It reads `secrets.yaml` through the checked
+  descriptor, replaces each value in the check output, caps the result,
+  and withholds the output when anything fails.
+* The code runs a bare `timeout 100 ha core check 2>&1` in all three
+  places.
+* The raw output reaches the agent in `check_config()['output']`, in the
+  write and restore `check_output`, and in the `config_check_failed`
+  message.
+* Only the call row goes through `scrub_string`, and that only catches
+  values that look like secrets. `ha core check` can quote any config
+  value, including ones that came from `!secret`. That is why the design
+  redacts on the add-on, where the values are known.
+* Fix:
+  * use the Round 10 `redact()` exactly, in the same three places;
+  * only the redacted or withheld text leaves the add-on;
+  * run `scrub_string` as well, as a second check.
+* Tests, under BusyBox:
+  * a stubbed `ha` that prints a value from `secrets.yaml` returns it
+    redacted, on all three paths;
+  * an unreadable or oversized `secrets.yaml` returns the withheld line.
+
+**BN2 (must): `_mask_secrets` leaves block-scalar and continuation values
+in clear.**
+* It masks only lines that contain `:`, and prints every other line as it
+  is.
+* So a `key: |` or `key: >` value comes back in clear: the indented lines
+  of a PEM key, a multi-line token, or any wrapped value. So does a
+  continuation line of a multi-line plain or quoted scalar.
+* An indented `#` line inside a block scalar is content, not a comment,
+  and is passed through too.
+* That is the case AB2 handled for redaction.
+* Fix: keep only top-level keys (column 0, not `#`) and real comments at
+  column 0. Mask everything else as one value per top-level key: indented
+  lines, `- ` items, and lines with no colon. In other words, show
+  `key: "***"` for each top-level key and drop the body.
+* Tests:
+  * a block scalar, a folded scalar, a multi-line quoted value and a list
+    value are all masked;
+  * CRLF input (AT2) masks the same as LF.
+
+**BL1 (must, agreed): read bytes.** The feature reviewer's finding stands:
+read, hash and size the bytes, and decode only for display. One more
+condition:
+* With `errors='replace'`, a file that isn't valid UTF-8 comes back with
+  U+FFFD in place of the bad bytes.
+* Once the hash is fixed, a write built from that text would pass the
+  stale check and write U+FFFD over bytes the agent never touched.
+* So `ha_config_read` reports the file as not editable
+  (`config_not_utf8`), and `ha_config_write` refuses it.
+* Also:
+  * compare the `ok <sha>` the script prints with the hash of the bytes
+    sent, and mark the state unknown if they differ;
+  * keep the stdin write in bytes, so CRLF still lands exactly (AT2).
+
+**BN3 (should): verify and read are two connections.**
+* `verify_path` runs `realpath` and `stat` in one call, and `head -c` reads
+  the name in a second one.
+* A swap between them, such as `packages/x.yaml` pointed at
+  `../secrets.yaml` or at `.storage/...`, is read unmasked. The masking
+  decision is made from the requested name.
+* It needs something on the add-on that can write a symlink into
+  `/homeassistant` (another add-on, or a `shell_command`). So it is not a
+  direct agent path, but the write path already closed this class.
+* Fix: one read script that opens the file on a descriptor, checks
+  `realpath /proc/self/fd/N` against the expected path and `[ -f ]`, then
+  reads through that same descriptor, as AQ1 does.
+
+**Nits:**
+* A restore that times out records `old_sha=''` and `new_sha=''`, so no
+  read can ever clear it. Record the current and backup hashes, or give
+  the operator a way to clear the state.
+* `cat > "$tmp"` creates the temp with the add-on's umask before `chmod`.
+  Put a `umask 077` at the top of the write script.
+
+Next: a code round with BN1, BN2 and BL1, plus BN3 if it is small. I'll
+re-read the scripts against Round 10's text.
+
 ## Chunk F12 — SSH through Eshu over MCP (`ssh_exec`) · slug `ssh-exec` · dashboard (+ small gateway change)
 
 > **Design first** (push a design note only, wait for approval). Needs the
