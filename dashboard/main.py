@@ -4835,6 +4835,13 @@ def serve_edge_installer():
     return _serve_channel(installer_channels.EDGE)
 
 
+@app.get("/static/eshu-gateway-install.sh.bak")
+def no_pre_x7_backup():
+    """X7 nit: the pre-X7 backup is never served, even if the first-start
+    delete failed or a stray copy comes back (the static mount would serve it)."""
+    raise HTTPException(status_code=404, detail="Not found")
+
+
 app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
 # MCP surface — agents (Hermes) connect to http://<dashboard>:8000/mcp with a

@@ -98,7 +98,7 @@ class TestFirstStart:
         set_deployed_golden_hash("aaaaaaaaaaaa")
         _status(auth_client)
         row = [r for r in get_audit_log(50) if r["event_type"] == "installer_channels_initialised"][0]
-        assert "differs from the last recorded promote" in row["details"]
+        assert "Fleet set to Build; the last recorded promote was aaaaaaaaaaaa" in row["details"]
 
 
 class TestDeployChangesOnlyBuild:
@@ -214,6 +214,22 @@ class TestServing:
         try:
             r = auth_client.get("/static/eshu-gateway-install.sh")
             assert b"build-1" in r.content and b"stray" not in r.content
+        finally:
+            if created:
+                os.remove(static)
+
+
+    def test_the_pre_x7_backup_path_is_never_served(self, auth_client, build):
+        static = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "..", "dashboard", "static", "eshu-gateway-install.sh.bak")
+        created = not os.path.exists(static)
+        if created:
+            with open(static, "w") as f:
+                f.write("stray old installer\n")
+        try:
+            r = auth_client.get("/static/eshu-gateway-install.sh.bak")
+            assert r.status_code == 404
+            assert b"stray" not in r.content
         finally:
             if created:
                 os.remove(static)

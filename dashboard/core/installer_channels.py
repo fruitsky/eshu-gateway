@@ -170,8 +170,7 @@ def ensure_initialised() -> None:
     fleet_hash = file_hash(channel_path(FLEET))
     deployed = get_deployed_golden_hash()
     if fleet_hash and deployed and deployed != fleet_hash:
-        notes.append('Fleet differs from the last recorded promote (%s); '
-                     'it is the installer gateways were actually being served'
+        notes.append('Fleet set to Build; the last recorded promote was %s'
                      % deployed)
     if fleet_hash:
         set_deployed_golden_hash(fleet_hash)
