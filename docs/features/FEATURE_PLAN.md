@@ -11748,6 +11748,106 @@ a command (open question 7).
 ---
 
 
+#### Security answers on the GT1 design (security reviewer, 2026-11-14, at `e5182e5`)
+
+**Changes requested before the feature review: two musts (BQ3, BQ4), then
+the nine answers.**
+
+**BQ3 (must): say what rotation can and cannot do, and don't hand a
+compromise to the attacker.**
+* The new token is delivered in the `/api/poll` response to whoever
+  authenticates with the old token.
+* If the old token has leaked, which is the main reason to rotate, the
+  holder of the leak polls, receives the new token and commits it. The
+  rotation then hands them the next credential.
+* Delivery in the same channel as the old token cannot evict someone who
+  already holds it. It only limits a leak that happens later.
+* Required:
+  * the design note and the confirm modal say this plainly: "Rotate"
+    is routine hygiene. On a suspected leak, use the compromise path;
+  * the compromise path must not deliver in band. It delivers over the
+    dashboard's own SSH connection to the gateway. That connection uses
+    the F12 dashboard key, a fixed forced-command subcommand such as
+    `--dashboard-key rotate-token`, the new token on stdin, and the pinned
+    host key, so the old bearer token plays no part.
+  * gateways without a usable dashboard key line (old installs, and the
+    BE4 "no Eshu line" case) get only "re-enrol". The UI names them.
+* The SSH path also answers question 5: with a restored DB, the dashboard
+  can push a fresh token to a gateway it still has a pinned host key for,
+  with no shell access needed.
+
+**BQ4 (must): no token in argv, and stop baking it into scripts.**
+* Step 3 rewrites the baked `GATEWAY_TOKEN="..."` lines with
+  `sed -i "s|...|GATEWAY_TOKEN=\"$NEW_TOKEN\"|"`, so the new token is in
+  `sed`'s argv.
+* The poller's existing re-register path does exactly this today (lines
+  349, 350, 403 and 404 of `eshu-poller.sh` on the release tree). BE3's
+  sweep missed it.
+* Fix this once, for both paths:
+  * the gateway, poller and logger read `/etc/eshu-token` at the point of
+    use (`gateway_header` reads the file);
+  * the baked copies go away, and the installer stops substituting
+    `__GATEWAY_TOKEN__`;
+  * rotation then writes a single file, by temp file and rename.
+* This also removes the in-flight problem behind question 3. A gateway
+  process started before the rotation reads the new file on its next
+  call, instead of holding the old token in memory for its 90-second JIT
+  wait.
+* Until that lands, the re-register `sed` needs the same fix: write
+  through `python3 -I`, with the token on stdin.
+* Also validate the delivered token on the gateway as `^[0-9a-f]{64}$`
+  before it is written anywhere.
+
+**Answers:**
+1. **Which endpoints accept the new token?** Every gateway-facing
+   endpoint. The commit is the first successful use on any of them.
+   Limiting the new token to `/api/poll` buys nothing: the pending token
+   is never exposed anywhere except to the delivery channel.
+2. **The SSH signing key.** Keep K derived from the token. A separate
+   long-lived key would mean rotation never rotates the signing secret,
+   which defeats the purpose.
+   * The gateway accepts K_prev only while `/etc/eshu-token.prev` exists
+     and is younger than its cap (see 9).
+   * The dashboard signs with K_new from the commit on.
+3. **First use or a grace?** Revoke on first use. Once BQ4 is in, an
+   in-flight gateway call picks up the new file, so there is no race worth
+   a grace.
+   * If a grace is kept anyway, it should be at most 120 seconds and apply
+     only to `/api/request_status` and `/api/ticket`, never to `/api/poll`.
+4. **Cancel and delivery.** Agreed: cancel only before the first poll
+   served after `started_at`. Once delivered, the outcomes are commit, the
+   SSH push (BQ3) or re-enrol. Offering cancel with a warning would
+   strand gateways.
+5. **Recovery after a restore.** "A restore rolls back rotations" is
+   acceptable, provided the SSH push from BQ3 is the recovery path for any
+   gateway with a pinned host key, and re-enrol is the recovery for the
+   rest.
+6. **Hashing the pending token.** The poll has to re-send the pending
+   token in plaintext until it is used, so `api_token_next` stays
+   plaintext only while a rotation is pending (at most 24 hours) and is
+   nulled at the commit.
+   * The current token follows Chunk 7, and gets hashed when Chunk 7 lands.
+   * K must be stored either way, so hashing the token alone does not
+     remove the dashboard's secret.
+7. **Who may rotate.** A session, CSRF and the confirm modal are enough;
+   no password prompt. A freeze does not block it: it is credential
+   hygiene, and during an incident it is exactly what you want.
+8. **Rate limits and alerts.**
+   * There is no need for a per-operator rate limit.
+   * Do add an audit event for repeated 401s from a known gateway IP,
+     for example `gateway_auth_failed` at most once a minute per IP. It
+     covers the restore case and is worth having for any leaked or stale
+     token.
+   * A fleet-wide "rotate all" is a later change, staggered.
+9. **The `.prev` cap.**
+   * Delete `.prev` when the poll response carries `rotation_complete`.
+   * The 24-hour cap must be **enforced by the gateway**, not only by the
+     cleanup: refuse K_prev when the `.prev` file is older than 24 hours
+     by its mtime, because a poller that is down never runs the cleanup.
+   * Fail closed when `/etc/eshu-token` is missing, as today.
+   * `.prev` alone never authenticates a request to the dashboard; it is
+     only for the MAC check.
+
 ## Fix — agent SSH hosts and mode (F12 follow-up) · branch `fix/agent-ssh-hosts` · dashboard · security read
 
 ### Reviewer notes (security reviewer, 2026-11-12, at `67a0b75`)
