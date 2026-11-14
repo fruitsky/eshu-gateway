@@ -13537,6 +13537,35 @@ The fleet-change table is accepted:
 (0:10:37)` (the browser render skips here without playwright on PATH; run
 it with `ESHU_PLAYWRIGHT_MODULES` to include it).
 
+#### Security delta read (2026-11-14, `ac41a70..bd1ba91`): approved for deploy
+
+* **BM2.** The `/api/request` body is built once and sent with
+  `--data-binary @-`, and the header comes from `-H @<(gateway_header)`.
+  The body has no newline, so `-d` and `--data-binary` send the same bytes.
+  The three installer copies are identical.
+* **BM1.**
+  * The supersede repeats `status='proposed'` and links only the rows it
+    changed.
+  * `approve_plan` and `_decide` repeat the status they read, and roll back
+    with `bad_state` when `rowcount != 1`.
+  * `_end_child_plans` stays inside the same transaction.
+* The cache-busting bump changes version strings only.
+
+**BO1 (should, text only, before or right after deploy): don't recommend
+`base64 -d | sh`.**
+* The new `multiline_command` message in `ssh_exec`, the agent manual and
+  the `ssh_exec` description offer `printf '%s' <base64> | base64 -d | sh`
+  as the way to send a script.
+* `cmd_codec` treats decode-to-exec as high risk. It forces JIT, scans the
+  decoded text and shows a decoded preview on the card, but that preview is
+  best-effort and bounded.
+* So the text is also wrong: the card shows a decoded preview, not "the
+  base64". Teaching agents the very shape the design flags trains them
+  into the cards operators can least check.
+* Keep `;` and `&&` as the only advice. For a real script, tell the agent
+  to ask the operator for a window, or for a file deployed another way.
+* Nothing runs without JIT either way, so this does not block the deploy.
+
 ## 7. Backlog (not planned in detail)
 
 * Deny with a reason, shown to the agent (cheap; low value given the data).
