@@ -12396,6 +12396,47 @@ below 1600 for the same reason.
    gateway is not on Edge), or stay as designed with Build uncounted?
 
 
+### Security review (security reviewer, 2026-11-14, at `7ff6a3e`)
+
+**Approved. No musts. One should (BR1).**
+
+* **The hash is a display-only self-report, and stays that way.**
+  * Register and heartbeat both bind `payload.ip` to the token's IP
+    (`_resolve_gateway_token` and `_require_gateway`) before storing, so a
+    gateway can only label itself.
+  * Anything that isn't 12 hex is ignored, on both the installer and the
+    dashboard side, and never clears a stored value.
+  * No policy, gate or promote decision reads `installer_hash`. Keep it
+    that way: a compromised gateway can report any value. Put a text
+    check on that rule, for example that the column appears only in
+    `db/gateways.py` and the two display paths.
+* **The installer side.**
+  * `$0` is hashed only when it is a readable file, and the value is
+    checked against 12 hex.
+  * `/etc/eshu-installer-hash` is written by temp file and `mv` as root,
+    and the logger re-checks the charset before it sends.
+  * The register and heartbeat bodies gain only that hex value, and no
+    secret joins the `-d` body.
+
+**Answers:**
+1. **Sign the hash?** No. Any key the gateway could sign with lives on the
+   gateway, so a compromised gateway signs whatever it likes. A signature
+   would add only the appearance of proof. Keep the badge's tooltip honest:
+   "reported by the gateway".
+2. **0640?** 0644 is fine. It is the hash of a file the dashboard serves
+   to anyone, so it is not secret. What matters is that the gateway user
+   can't write it (root:root), and that's already the case.
+3. **Build under `on_edge`?** No. Count it on its own as `on_build`.
+   * A gateway on Build-but-not-Edge is running an installer nobody seeded
+     or reviewed through the channel flow, and that's the one an operator
+     most needs to see.
+   * Today `dev_status` drops `build` into no bucket at all, so the counts
+     don't add up to the fleet.
+
+**BR1 (should):** add `on_build` to `installer_counts` and `/api/dev/status`,
+and give Build-but-not-Edge its own warning colour in the badge. Test that
+the five buckets add up to the gateway count.
+
 ## Chunk X6 — agent API fixes from the Release 1.2 test round · slug `agent-api-round` · dashboard
 
 From the agent's test report of 2026-11-12, triaged by the feature reviewer.
