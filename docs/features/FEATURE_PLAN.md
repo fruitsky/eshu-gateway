@@ -13645,6 +13645,47 @@ only `;`. `test_a_multiline_command_is_refused_with_the_one_line_rule` asserts
 `bash scripts/verify.sh`: `3028 passed, 27 skipped, 8 warnings in 638.44s
 (0:10:38)`.
 
+## Release 1.4 — gateway stack · branch `release/1.4-gw` · from master `14e19fc`
+
+One stack of gateway-side changes, regenerating the installer (three copies)
+after each step. No dashboard change in this branch: X8's dashboard half stays
+on `feat/x8-gateway-installer-version` and its gateway half ships here.
+
+### What changes on a gateway
+
+| Area | 1.3 gateway | 1.4 gateway |
+|---|---|---|
+| authorized_keys write | root creates `.ssh` (0700), writes through `runuser`, then `chown -R`/`chmod 600` as root (BH2) | BQ2: no root `mkdir`/`chmod`/`chown` on `.ssh`/`authorized_keys`; the user-side script creates `.ssh` at 700 and the file at 600; a home not owned by the user refuses |
+| token storage | `GATEWAY_TOKEN="..."` baked into `eshu-gateway.sh` and `eshu-poller.sh`; the poller `sed -i` rewrites both after re-register | BQ4: no baked token. Gateway, poller, logger and fleet runner read `/etc/eshu-token` at the point of use; the poller writes that one file (validated, `umask 077`, 0600, rename) |
+| run-limit timing | duration from two `date +%s%N` (wall clock) | F19: `/proc/uptime` monotonic, `date` fallback |
+| installer identity | not reported | X8: first 12 hex of the installer's sha256 in `/api/register`, written to `/etc/eshu-installer-hash` (0644 root:root), re-sent by the poller's re-register and every logger heartbeat |
+| fleet runner | reads `/etc/eshu-token` (BJ2) | unchanged |
+| installer files | `dashboard/eshu-gateway-install.sh`, `static/`, `static/dev/` | same three copies (X7's channel split is not in this release) |
+
+### Compatibility, both ways
+
+* **1.3 → 1.4 (update).** `/etc/eshu-token` already exists on every installed
+  gateway; the installer reads it first, writes it back unchanged, and the new
+  scripts read it at use. An old baked script is the fallback if the file was
+  lost. Existing `.ssh` is user-owned (the old installer chowned it); the
+  user-side write replaces only the dashboard line and needs no root chown.
+* **1.4 → 1.3 (rollback).** The 1.3 installer loads the token from
+  `/etc/eshu-token` (or the old script) and bakes it back into both scripts,
+  restoring the old behaviour; the token file stays. `/etc/eshu-installer-hash`
+  is left behind and ignored by a 1.3 dashboard.
+* **1.4 gateway + 1.3 dashboard.** `installer_hash` is an extra JSON field on
+  register/heartbeat; the 1.3 Pydantic payloads ignore unknown fields.
+* **1.3 gateway + 1.4 dashboard.** No field: X8 reports `unknown` for that
+  gateway (and the channel badge says so).
+* **`curl | bash` (no file to hash).** Reports nothing, so the dashboard says
+  `unknown`; a gateway that previously reported a hash keeps it until a
+  file-based install (an empty value cannot mean "clear" for old gateways).
+* **No token in argv, sed or log.** The poller's new writer never puts the
+  token in a command line or a log message; headers still travel on stdin.
+
+`bash scripts/verify.sh`: `3043 passed, 26 skipped, 7 warnings in 699.64s
+(0:11:39)` (the gateway stack: BH2/BQ2, BQ4, F19 and the X8 gateway side).
+
 ## 7. Backlog (not planned in detail)
 
 * Deny with a reason, shown to the agent (cheap; low value given the data).
