@@ -217,3 +217,28 @@ Captured: the 14-day view with the rhythm chart and the KPI grid.
   CSS fix in this pass.
 * No wording changes to permissions or policy text; the hyphen/en-dash notes
   are recorded, not changed.
+
+## Fix status (fix/ui-pass-1)
+
+Every `blocker` and `should` tagged `ui-pass` is fixed; #10 waits for X3.
+Re-measured with the same script, same seed, both widths. "Before" is the
+number in the top-10 table.
+
+| # | Before | After | Commit |
+|---|---|---|---|
+| 1 | table 1393 px in a 1156 px wrapper at 1440; Modes under Actions; host `we` at 390 | table 1156 px in 1156 px (fits, all columns, Actions visible); host `web01.example.test` at 390 | `608f676` |
+| 2 | 5-column grid at 390; actions on the command | wrapping flex row; command full width, actions under it | `608f676` |
+| 3 | faint 3.39:1, link 2.06:1, Log Out 1.93:1, deny 3.86:1, toast 4.25:1 | no text below 4.5:1 (3:1 large) in any of the 17 states at either width | `ff57c31` |
+| 4 | `.cmd-code` 16 px for 58 px of text; chips on the command | command on its own line, chips wrap under it; only a genuinely long command ellipsises | `608f676` |
+| 5 | input 370 px / 1440 px wide, Save floating | one inline group: 56 px input + `min` + Save (+ Refresh now) | `608f676` |
+| 6 | actions edge-to-edge on the title row at 390 | actions on their own row (5 px gap); × stays on the title row | `608f676` |
+| 7 | label 162 px for 374 px, cut mid-word | ellipsis + `title` with the full goal | `608f676` |
+| 8 | toast at y=12–56, over the HUD / Freeze | toast at y=76, below the top chrome | `ff57c31` |
+| 9 | × under the title; range select full width | × on the title row; select 97×38 with the counts beside it | `608f676` |
+| 10 | link 2.06:1, truncated gate-mode wording | not changed (X3/F27) | — |
+
+The browser regression is `tests/ui/ui_views.cjs`, run by
+`tests/test_ui_views.py` (no horizontal scroll, the view renders, AA
+contrast, plus the gateways/inventory/session checks). On the pre-fix tree it
+reports the old failures, including `gateways/1440: table 1344px wider than
+its 1156px wrapper` and `contrast 3.39:1 ... div.brand-sub`.
