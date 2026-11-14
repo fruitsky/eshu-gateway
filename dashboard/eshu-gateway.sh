@@ -98,6 +98,31 @@ if printf '%s' "$TIMEOUT_VERSION" | grep -q 'GNU coreutils'; then
   RUN_LIMITS_CAP="v1"
 fi
 
+# F19: `timeout` fires on a monotonic timer, so the "how long did it run"
+# measurement that decides the time marker must not ride on the wall clock.
+# `date +%s%N` is CLOCK_REALTIME: an NTP/manual step between the two stamps
+# made a real stop look early (rc 124, no "stopped after" marker — the
+# 1-in-5 flake) or a command's own 124 look late. /proc/uptime is monotonic
+# and 10 ms precise; `date` stays only as the fallback when /proc is absent.
+monotonic_ms() {
+  local up="" secs cs
+  if [ -r /proc/uptime ]; then
+    # Shell builtins only: this runs twice per call, on the hot path.
+    { IFS=' ' read -r up _ < /proc/uptime; } 2>/dev/null || up=""
+  fi
+  case "$up" in
+    ''|.*|*.|*..*|*.*.*|*[!0-9.]*) up="" ;;
+  esac
+  if [ -n "$up" ]; then
+    secs="${up%.*}"
+    cs="${up#*.}"
+    cs="${cs}00"
+    printf '%s' $(( secs * 1000 + 10#${cs:0:2} * 10 ))
+  else
+    date +%s%N | awk '{ printf "%d", $1 / 1000000 }'
+  fi
+}
+
 # W1: one directory check for every file this script creates under /run.
 # Deliberately not a `mkdir`: the poller owns the directory's creation.
 run_dir_safe() {
@@ -503,7 +528,7 @@ post_exec_result() {   # $1=rc  $2=duration_ms  $3=mode  $4=path
 }
 
 run_sanitized() {
-  local rc=0 mode start_ns end_ns duration_ms path mcp_mode="0"
+  local rc=0 mode start_ms end_ms duration_ms path mcp_mode="0"
   local -a run_argv=("$@")
   mode=$(capture_mode)
   path="${RESULT_PATH:-allowlist}"
@@ -600,7 +625,7 @@ run_sanitized() {
           if [ -n "$ESHU_CAP_DIR" ]; then rm -rf -- "$ESHU_CAP_DIR" 2>/dev/null || true; fi' EXIT
   fi
 
-  start_ns=$(date +%s%N)
+  start_ms=$(monotonic_ms)
   # C1: the command's status is the first pipeline element's, never the
   # filter's. `set -o pipefail` is right for a plain pipeline but wrong here:
   # under it an unwritable capture file (awk exits 2) turned rc 0 into 2 and
@@ -631,8 +656,11 @@ run_sanitized() {
   fi
   rc=${PIPESTATUS[0]}
   set -e
-  end_ns=$(date +%s%N)
-  duration_ms=$(( (end_ns - start_ns) / 1000000 ))
+  end_ms=$(monotonic_ms)
+  duration_ms=$(( end_ms - start_ms ))
+  # A clock source that went backwards must not make a real run look instant;
+  # the marker decision below is the only consumer that would misread it.
+  [ "$duration_ms" -ge 0 ] || duration_ms=0
 
   # S1: bounded wait for the tee copy. On timeout the result is posted with
   # no output (as for CAPTURE FAILED); rc, the sentinel and the stream are
