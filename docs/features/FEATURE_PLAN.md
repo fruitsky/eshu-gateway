@@ -10555,6 +10555,62 @@ refusal are what close it, and the symlink test exercises the refusal path.
 `bash scripts/verify.sh`: `3057 passed, 26 skipped, 8 warnings in 629.33s
 (0:10:29)` (7 more: the BO2 matrix).
 
+### Security re-read of F11 code round 3 (security reviewer, 2026-11-14, at `4de289d`)
+
+**BO2 is approved for write, restore and check. One new must, BQ1, on the
+read path.**
+
+* **BO2.**
+  * Comments aside, `WRITE_SCRIPT`, `RESTORE_SCRIPT` and `CHECK_SCRIPT`
+    are now line for line the Round 9 text (§ 9065, § 9289, § 9581), with
+    Round 10's `redact()` inside.
+  * The restore passes the recorded backup hash as `$4`.
+  * Exits 20, 21 and 22 are mapped.
+  * The BusyBox matrix covers the FIFO plants, the symlink plant, the hard
+    link, the changed backup, the missing token and the noclobber
+    rollback.
+* **The race note.** The design accepts that the `realpath` → open race is
+  covered by the descriptor check and the link-count check. After the open,
+  the descriptor names the inode. A link that points elsewhere fails the
+  `readlink` comparison, and a hard link fails `%h = 1`.
+
+**BQ1 (must): `secrets.yaml` and other file contents leave the add-on and
+are stored in the call log.**
+* **The read script is not Round 9's.** Round 9's `READ_SCRIPT` (§ 9511)
+  refuses `secrets.yaml` (exit 19, by both the requested and the resolved
+  basename). Its keys come from `SECRETS_KEYS_SCRIPT`, which prints only
+  the keys and runs on the add-on.
+* The code's `READ_SCRIPT` reads `secrets.yaml` in full. It sends the
+  bytes to the dashboard, and `_mask_secrets` drops the values there. So
+  every secret value crosses the wire and sits in dashboard memory.
+* **The call log stores it.** `_record()` stores the last 8 KiB of every
+  call's stdout in `integration_calls.response_summary`, and the read is
+  no exception. Only `scrub_string` runs on it, and that catches values
+  that look like tokens, not arbitrary ones.
+  * So a read of `secrets.yaml` (usually under 8 KiB) puts the unmasked
+    file into the call row. The row is shown in the integration's call
+    history.
+  * Every other config read stores the end of the file, inline
+    credentials included. The implementer notes promise "content never
+    enters an audit row".
+* **Fix:**
+  * use Round 9's `READ_SCRIPT` as written, including `set -f`, `PATH`,
+    `[ -d "$dir" ]` and the two `secrets.yaml` refusals. Keep the code's
+    `head -c` cap, which is fine;
+  * for a `secrets.yaml` read, call `SECRETS_KEYS_SCRIPT`, so that only
+    keys ever leave the add-on;
+  * never store file content in a call row. For the read and the keys
+    script, `_record` stores the template name, the byte count, the hash
+    and the exit code, and nothing from stdout. The write, restore and
+    check rows keep the redacted check tail.
+* **Tests:**
+  * a `secrets.yaml` read runs the keys script, and no value appears in
+    the response or in `integration_calls`;
+  * a read of a file with a distinctive line leaves no part of that line
+    in `integration_calls`;
+  * Round 9's `READ_SCRIPT` returns exit 19 on `secrets.yaml`, under
+    BusyBox.
+
 ## Chunk F12 — SSH through Eshu over MCP (`ssh_exec`) · slug `ssh-exec` · dashboard (+ small gateway change)
 
 > **Design first** (push a design note only, wait for approval). Needs the
