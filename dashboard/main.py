@@ -124,6 +124,8 @@ from core.agent_context import (
     reset_current_session_source, set_current_session_source,
 )
 from core.rate_limit import _check_rate_limit
+from core import installer_channels
+from db.policies import get_meta, set_meta
 from core.agent_policy import evaluate_call, safe_ident
 from core.session_guard import (
     require_sessions_enabled, require_sessions_for_gateway, session_problem,
@@ -362,12 +364,13 @@ def on_startup():
     # Start background MCP audit/approval retention cleanup
     integration_cleanup_thread = threading.Thread(target=_integration_cleanup_loop, daemon=True)
     integration_cleanup_thread.start()
-    # Initialize deployed golden hash on first run
-    golden_path = os.path.join(static_dir, "eshu-gateway-install.sh")
-    if os.path.exists(golden_path) and not get_deployed_golden_hash():
-        gh = _file_hash(golden_path)
-        if gh:
-            set_deployed_golden_hash(gh)
+    # X7: create the Edge and Fleet installer channels once (from the pre-X7
+    # copies when present). Lazy access does the same; doing it here makes
+    # the audit row appear at deploy time.
+    try:
+        installer_channels.ensure_initialised()
+    except Exception as exc:  # never block startup; the endpoints answer 503
+        print(f"installer channels: initialisation failed: {exc}")
     # Start background gateway transition watcher (offline detection)
     watch_thread = threading.Thread(target=_gateway_watch_loop, daemon=True)
     watch_thread.start()
@@ -2118,131 +2121,122 @@ def mark_learning_gaps_seen(request: Request):
     mark_all_seen()
     return {"status": "ok"}
 
+def _channel_error(exc):
+    return HTTPException(status_code=503,
+                         detail=f"Installer channel unavailable: {exc}")
+
+
 @app.post("/api/dev/seed")
 def seed_edge(request: Request):
-    """Copy current golden installer to dev (Edge) directory."""
+    """X7: Edge := Build (the installer this dashboard was deployed with)."""
     _check_session(request)
-    src = os.path.join(static_dir, "eshu-gateway-install.sh")
-    dst = os.path.join(static_dir, "dev", "eshu-gateway-install.sh")
-    if not os.path.exists(src):
-        raise HTTPException(status_code=404, detail="No golden installer found.")
-    import shutil
-    # Clear stale dev-update trigger and dev-push flag when starting a new Edge
     dh = get_deployed_golden_hash()
-    gh = _file_hash(src)
     td = get_trigger_dev_update()
-    if td and dh and gh != dh:
+    try:
+        edge_hash = installer_channels.seed_edge()
+    except installer_channels.ChannelMissing as exc:
+        raise _channel_error(exc)
+    set_meta('installer_edge_seeded_at', str(int(time.time())))
+    clear_dev_push_initiated()
+    if td and dh and edge_hash != dh:
         clear_trigger_dev_update()
-        clear_dev_push_initiated()
-        record_audit_event("edge_seeded", details=f"Edge seeded from golden ({DASHBOARD_VERSION}) — previous dev cycle cleared")
+        record_audit_event("edge_seeded", details=f"Edge seeded from Build ({edge_hash}) — previous dev cycle cleared")
     else:
-        clear_dev_push_initiated()
-        record_audit_event("edge_seeded", details=f"Edge seeded from golden ({DASHBOARD_VERSION})")
-    shutil.copy(src, dst)
-    return {"status": "ok", "version": DASHBOARD_VERSION}
+        record_audit_event("edge_seeded", details=f"Edge seeded from Build ({edge_hash})")
+    return {"status": "ok", "version": DASHBOARD_VERSION, "edge_hash": edge_hash}
 
 
 @app.post("/api/dev/promote")
 def promote_edge(request: Request):
-    """Copy Edge installer to golden, backup previous golden, deploy fleet."""
+    """X7: Fleet := Edge (the previous Fleet is kept for Rollback), then
+    trigger the fleet update. Nothing in the git checkout is written."""
     _check_session(request)
-    golden_path = os.path.join(static_dir, "eshu-gateway-install.sh")
-    edge_path = os.path.join(static_dir, "dev", "eshu-gateway-install.sh")
-    if not os.path.exists(edge_path):
+    try:
+        fleet_hash = installer_channels.promote_edge()
+    except installer_channels.ChannelMissing:
         raise HTTPException(status_code=404, detail="No Edge installer found. Seed Edge first.")
-    import shutil
-    # Backup current golden
-    bak_path = os.path.join(static_dir, "eshu-gateway-install.sh.bak")
-    if os.path.exists(golden_path):
-        shutil.copy(golden_path, bak_path)
-    # Promote Edge to Golden
-    shutil.copy(edge_path, golden_path)
-    # Also update source file so it can be committed
-    src_path = os.path.join(os.path.dirname(__file__), "eshu-gateway-install.sh")
-    shutil.copy(edge_path, src_path)
-    # Track deployed golden hash
+    set_meta('installer_fleet_promoted_at', str(int(time.time())))
     clear_dev_push_initiated()
     clear_trigger_dev_update()
-    gh = _file_hash(golden_path)
-    if gh:
-        set_deployed_golden_hash(gh)
-    # Deploy fleet
+    set_deployed_golden_hash(fleet_hash)
     trigger_id = str(int(time.time()))
     clear_trigger_rollback()
     set_trigger_update_version(trigger_id)
     gateways = get_gateways()
-    record_audit_event("promote_to_golden", details=f"Deployed {DASHBOARD_VERSION} to fleet — {len(gateways)} gateway(s)")
-    return {"status": "ok", "version": DASHBOARD_VERSION, "gateway_count": len(gateways)}
+    record_audit_event("promote_to_golden", details=f"Deployed Edge ({fleet_hash}) to fleet — {len(gateways)} gateway(s)")
+    return {"status": "ok", "version": DASHBOARD_VERSION, "gateway_count": len(gateways),
+            "fleet_hash": fleet_hash}
 
 
 @app.post("/api/dev/rollback")
 def rollback_golden(request: Request):
-    """Restore previous golden installer from backup and deploy fleet."""
+    """X7: Fleet := the previous Fleet copy, then trigger the fleet update."""
     _check_session(request)
-    golden_path = os.path.join(static_dir, "eshu-gateway-install.sh")
-    bak_path = os.path.join(static_dir, "eshu-gateway-install.sh.bak")
-    if not os.path.exists(bak_path):
-        raise HTTPException(status_code=404, detail="No golden backup available. Promote to golden first.")
-    import shutil
-    shutil.copy(bak_path, golden_path)
-    # Also update source
-    src_path = os.path.join(os.path.dirname(__file__), "eshu-gateway-install.sh")
-    shutil.copy(bak_path, src_path)
+    try:
+        fleet_hash = installer_channels.rollback_fleet()
+    except installer_channels.ChannelMissing:
+        raise HTTPException(status_code=404, detail="No previous Fleet installer available. Deploy to Fleet first.")
+    set_meta('installer_fleet_promoted_at', str(int(time.time())))
     clear_dev_push_initiated()
     clear_trigger_dev_update()
-    gh = _file_hash(golden_path)
-    if gh:
-        set_deployed_golden_hash(gh)
+    set_deployed_golden_hash(fleet_hash)
     trigger_id = str(int(time.time()))
     clear_trigger_rollback()
     set_trigger_update_version(trigger_id)
     gateways = get_gateways()
-    record_audit_event("golden_rollback", details=f"Golden rolled back to previous installer for {len(gateways)} gateway(s)")
+    record_audit_event("golden_rollback", details=f"Fleet rolled back to the previous installer ({fleet_hash}) for {len(gateways)} gateway(s)")
     return {"status": "ok", "version": DASHBOARD_VERSION, "gateway_count": len(gateways)}
 
 
 @app.get("/api/dev/status")
 def dev_status(request: Request):
-    """Return Build/Edge/Fleet pipeline deployment state (hash + trigger based)."""
-    _check_session(request)
-    golden_path = os.path.join(static_dir, "eshu-gateway-install.sh")
-    edge_path = os.path.join(static_dir, "dev", "eshu-gateway-install.sh")
-    source_path = os.path.join(os.path.dirname(__file__), "eshu-gateway-install.sh")
-    bak_path = os.path.join(static_dir, "eshu-gateway-install.sh.bak")
+    """X7: the Build/Edge/Fleet pipeline, from the three channels' hashes.
 
-    golden_hash = _file_hash(golden_path)
-    edge_hash   = _file_hash(edge_path)
-    source_hash = _file_hash(source_path)
-    dh = get_deployed_golden_hash()
+    build  — the installer this dashboard was deployed with;
+    edge   — what dev gateways install (changes on Seed Edge);
+    fleet  — what every other gateway installs (changes on Deploy/Rollback).
+    """
+    _check_session(request)
+    build_hash = installer_channels.build_hash()
+    edge_hash = installer_channels.channel_hash(installer_channels.EDGE)
+    fleet_hash = installer_channels.channel_hash(installer_channels.FLEET)
     td = get_trigger_dev_update()
 
-    if golden_hash != edge_hash:
+    if build_hash != edge_hash:
         pipeline_state = "needs_seed"
-    elif td and (dh is None or golden_hash != dh):
-        pipeline_state = "dev_in_progress"
-    elif get_dev_push_initiated() and dh and golden_hash != dh:
-        pipeline_state = "ready_for_promote"
-    elif dh and golden_hash != dh:
-        pipeline_state = "ready_for_dev"
-    else:
+    elif edge_hash == fleet_hash:
         pipeline_state = "clear"
+    elif td:
+        pipeline_state = "dev_in_progress"
+    elif get_dev_push_initiated():
+        pipeline_state = "ready_for_promote"
+    else:
+        pipeline_state = "ready_for_dev"
 
     gateways = get_gateways()
     dev_gws = get_dev_gateways()
 
+    def _ts(key):
+        try:
+            return int(get_meta(key) or 0) or None
+        except (TypeError, ValueError):
+            return None
+
     return {
         "dashboard_version": DASHBOARD_VERSION,
         "edge_exists": edge_hash is not None,
-        "backup_exists": os.path.exists(bak_path),
+        "backup_exists": installer_channels.has_previous(),
         "dev_gateway_count": len(dev_gws),
         "dev_gateways": [{"ip": d["ip"], "hostname": d.get("hostname", "")} for d in dev_gws],
         "gateway_count": len(gateways),
         "pipeline_state": pipeline_state,
-        "golden_hash": golden_hash,
+        "build_hash": build_hash,
         "edge_hash": edge_hash,
-        "edge_matches_golden": golden_hash == edge_hash,
-        "source_hash": source_hash,
-        "deployed_hash": dh,
+        "fleet_hash": fleet_hash,
+        "edge_matches_build": build_hash == edge_hash,
+        "edge_seeded_at": _ts('installer_edge_seeded_at'),
+        "fleet_promoted_at": _ts('installer_fleet_promoted_at'),
+        "deployed_hash": get_deployed_golden_hash(),
     }
 
 
@@ -2250,23 +2244,29 @@ def dev_status(request: Request):
 def get_rollback_status(request: Request):
     """Return info about available golden backup for the UI."""
     _check_session(request)
-    bak_path = os.path.join(static_dir, "eshu-gateway-install.sh.bak")
     return {
         "dashboard_version": DASHBOARD_VERSION,
-        "backup_available": os.path.exists(bak_path),
+        "backup_available": installer_channels.has_previous(),
         "trigger_rollback": get_trigger_rollback(),
     }
 
 
-@app.get("/api/gateway-script-rollback", response_class=PlainTextResponse)
+def _serve_channel(channel):
+    """X7: one installer channel as text/plain, or 503 when it is missing.
+    Never falls back to another channel."""
+    try:
+        data = installer_channels.read(channel)
+    except installer_channels.ChannelMissing as exc:
+        raise _channel_error(exc)
+    return Response(content=data, media_type="text/plain; charset=utf-8",
+                    headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/gateway-script-rollback")
 def serve_rollback_script():
-    """Serve the golden installer for gateway rollback."""
-    golden_path = os.path.join(static_dir, "eshu-gateway-install.sh")
-    if not os.path.exists(golden_path):
-        raise HTTPException(status_code=404, detail="No golden installer available.")
-    with open(golden_path, "r", encoding="utf-8") as f:
-        content = f.read()
-    return PlainTextResponse(content=content, media_type="text/plain; charset=utf-8")
+    """The Fleet installer, for a gateway rollback (Rollback already made the
+    previous installer the Fleet channel)."""
+    return _serve_channel(installer_channels.FLEET)
 
 # --- Gateway Uninstall ---
 class UninstallProgressPayload(BaseModel):
@@ -2351,16 +2351,12 @@ def remove_gateway(ip: str, request: Request):
     raise HTTPException(status_code=404, detail="Gateway not found")
 
 # --- Gateway Script Download ---
-@app.get("/api/gateway-script", response_class=PlainTextResponse)
+@app.get("/api/gateway-script")
 def serve_gateway_script():
-    """Serve the raw gateway installer script with explicit UTF-8 encoding.
-    Bypasses static file serving to avoid encoding corruption during HTTP transfer."""
-    install_src = os.path.join(os.path.dirname(__file__), "eshu-gateway-install.sh")
-    if os.path.exists(install_src):
-        with open(install_src, "r", encoding="utf-8") as f:
-            content = f.read()
-        return PlainTextResponse(content=content, media_type="text/plain; charset=utf-8")
-    raise HTTPException(status_code=404, detail="Installer script not found")
+    """X7: the Fleet installer (fleet updates and uninstall download this).
+    Before X7 this served Build, so a dashboard deploy changed what the fleet
+    installed without a promote."""
+    return _serve_channel(installer_channels.FLEET)
 
 @app.get("/api/docs/agent-windows", response_class=PlainTextResponse)
 def serve_agent_window_docs():
@@ -4824,19 +4820,20 @@ static_dir = os.path.join(os.path.dirname(__file__), "static")
 if not os.path.exists(static_dir):
     os.makedirs(static_dir)
 
-dev_dir = os.path.join(static_dir, "dev")
-os.makedirs(dev_dir, exist_ok=True)
+# X7: the two installer URLs are channels, not static files. These routes are
+# registered before the static mount so they win over any stray file left in
+# static/ by a pre-X7 checkout.
+@app.get("/static/eshu-gateway-install.sh")
+def serve_fleet_installer():
+    """Enrollment and reinstalls download the Fleet installer."""
+    return _serve_channel(installer_channels.FLEET)
 
-# Only create golden on first-ever startup; never overwrite
-install_script_src = os.path.join(os.path.dirname(__file__), "eshu-gateway-install.sh")
-if os.path.exists(install_script_src):
-    import shutil
-    golden_path = os.path.join(static_dir, "eshu-gateway-install.sh")
-    if not os.path.exists(golden_path):
-        shutil.copy(install_script_src, golden_path)
-    dev_path = os.path.join(dev_dir, "eshu-gateway-install.sh")
-    if not os.path.exists(dev_path):
-        shutil.copy(install_script_src, dev_path)
+
+@app.get("/static/dev/eshu-gateway-install.sh")
+def serve_edge_installer():
+    """Dev-mode gateways download the Edge installer."""
+    return _serve_channel(installer_channels.EDGE)
+
 
 app.mount("/static", StaticFiles(directory=static_dir), name="static")
 

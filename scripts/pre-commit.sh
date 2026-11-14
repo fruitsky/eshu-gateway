@@ -37,8 +37,7 @@ check "logger.sh"      bash -n dashboard/eshu-logger.sh
 check "fleet-runner"   bash -n dashboard/static/fleet-runner.sh
 check "features"      bash -n dashboard/static/features/*.sh
 check "template"       bash -n dashboard/eshu-installer-template.sh
-check "prod-install"   bash -n dashboard/eshu-gateway-install.sh
-check "dev-install"    bash -n dashboard/static/dev/eshu-gateway-install.sh
+check "installer"      bash -n dashboard/eshu-gateway-install.sh
 check "main.py"        python3 -m py_compile dashboard/main.py
 check "database.py"    python3 -m py_compile dashboard/database.py
 

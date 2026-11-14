@@ -1284,9 +1284,7 @@ def test_f22_installers_embed_the_gateway_byte_for_byte():
     generated = generated.replace("__LOGGER_CONTENT__",
                                   read("eshu-logger.sh").rstrip("\n"))
     assert "ESHU_CHECK_TOKEN" in generated
-    for rel in ("dashboard/eshu-gateway-install.sh",
-                "dashboard/static/eshu-gateway-install.sh",
-                "dashboard/static/dev/eshu-gateway-install.sh"):
+    for rel in ("dashboard/eshu-gateway-install.sh",):  # X7: only Build is committed
         text = (repo / rel).read_text(encoding="utf-8")
         assert text == generated, "%s is not the generated installer" % rel
 

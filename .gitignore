@@ -36,3 +36,9 @@ Thumbs.db
 # SQLite write-ahead log sidecars (runtime data)
 *.db-shm
 *.db-wal
+
+# X7: installer channels are runtime state owned by the dashboard
+dashboard/installer-channels/
+dashboard/static/eshu-gateway-install.sh
+dashboard/static/eshu-gateway-install.sh.bak
+dashboard/static/dev/
