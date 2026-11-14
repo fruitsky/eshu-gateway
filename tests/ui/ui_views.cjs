@@ -137,6 +137,31 @@ const REQUIRED = {
       }
     }
 
+    // The plan card is below the fold with two pending JITs; its Approve must
+    // still be reachable through the fixed strip (and be a real in-viewport
+    // button, not just text).
+    await page.evaluate(() => switchView('home'));
+    await page.waitForTimeout(500);
+    const cta = await page.evaluate(() => {
+      const strip = document.getElementById('plan-cta');
+      const cardBtn = document.querySelector('#plans-widget .plan-card .btn-approve');
+      if (!strip || !cardBtn) return null;
+      const cr = cardBtn.getBoundingClientRect();
+      const cardInView = cr.width > 0 && cr.top >= 0 && cr.bottom <= innerHeight;
+      const btn = strip.querySelector('.btn-approve');
+      const r = btn.getBoundingClientRect();
+      return { hidden: strip.classList.contains('hidden'), cardInView,
+        ctaInView: r.width > 0 && r.top >= 0 && r.bottom <= innerHeight,
+        text: (document.getElementById('plan-cta-text') || {}).textContent || '' };
+    });
+    if (!cta) failures.push(`home/${w}: no plan card or plan strip`);
+    else if (!cta.cardInView && (cta.hidden || !cta.ctaInView)) {
+      failures.push(`home/${w}: plan Approve is below the fold and the strip is not usable (${JSON.stringify(cta)})`);
+    }
+    if (cta && !cta.cardInView && !/Plan #\d+/.test(cta.text)) {
+      failures.push(`home/${w}: plan strip does not name the plan (${JSON.stringify(cta.text)})`);
+    }
+
     // The gateways table must fit its wrapper at 1440 (the sticky Actions
     // column used to paint over Modes), and the first paint at 390 must show
     // the host name.

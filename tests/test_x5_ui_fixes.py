@@ -104,7 +104,8 @@ def test_x5_runbook_steps_are_cards_with_a_readable_host_and_outcome():
     assert "var(--text-faint)" not in host
     note = css[css.index(".rb-step-note {"):]
     note = note[:note.index("}")]
-    assert "border-top: 1px dashed var(--rule)" in note
+    # UI pass 2: a solid rule; the dashed one read as an empty input.
+    assert "border-top: 1px solid var(--rule-weak)" in note
     assert "color: var(--text-dim)" in note
 
 

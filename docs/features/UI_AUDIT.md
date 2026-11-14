@@ -61,12 +61,15 @@ queue. Also the recent-sessions table and the needs-attention line.
 * **Polish — the plan card starts below the fold with two pending items.**
   At 1440 the plan section begins at y=725 in a 900 px viewport; its header
   is visible but the items and Approve are not. With one pending item the
-  card is fully visible. A cap on the queue would hide a pending card or add
-  a nested scroll, so this is left as a design question for the next pass.
+  card is fully visible. Fixed on `fix/ui-pass-2`: when the first proposed
+  plan's own Approve is off-screen, a fixed strip at the bottom names the
+  plan and offers Review, Approve plan and Deny, calling the card's own
+  `decidePlan` (same confirmation and TTL). It is Home-only and disappears
+  as soon as the card's Approve is in view.
 * **Polish — the HUD subtitle starts with a stray `·` when it wraps** at
-  390 (`· WHO MAY CROSS…` on its own line). Fix: render the separator with
-  `::before` only when it shares the line (or hide it under 640 px).
-  `ui-pass`.
+  390 (`· WHO MAY CROSS…` on its own line). Fixed on `fix/ui-pass-2`: the dot
+  is a `::before` pseudo-element, hidden at ≤640 px, so a wrapped subtitle
+  never starts with it. `ui-pass`.
 * **Polish — `0/3 gateways online` and `3 DISCONNECTED` are two statements of
   the same fact** in the idle state, one under the other. Not wrong, but the
   second adds nothing. Leave for the design pass.
@@ -111,8 +114,8 @@ Captured: the list and the runbook modal (steps + dead ends).
   at phone width; steps show the host chip, the command, the note and the
   dead end.
 * The step note and `created …` meta are `--text-muted` (3.39:1) — top-10 #3.
-* The `Steps (2)` rule inside each step is a dashed line under the command;
-  it reads as an empty input in a screenshot. Drop it or make it a solid
+* The `Steps (2)` rule inside each step was a dashed line under the command;
+  it read as an empty input. Fixed on `fix/ui-pass-2`: a solid `--rule-weak`
   separator. `polish`, `ui-pass`.
 
 ## Inventory
@@ -148,9 +151,9 @@ and the SSH tab.
 Captured: the page with the tester, exact and regex allowlists.
 
 * `View Policy Changes` and `Save & Push Policies` wrap to two lines inside
-  their buttons at 390. They still fit, but the two buttons then have
-  different heights; make them `white-space: nowrap` at ≥390 with a smaller
-  label, or stack them full width. `ui-pass`, polish.
+  their buttons at 390. Fixed on `fix/ui-pass-2`: both are `nowrap`, and at
+  ≤480 px they share one full-width row each (equal height). `ui-pass`,
+  polish.
 * The HUD subtitle wraps to two lines at 390; same stray-dot issue as Home.
 * The `Open Agents` pointer link is 2.06:1 — the raw `<a>` problem in
   top-10 #3; that is the same fix.
@@ -242,3 +245,22 @@ The browser regression is `tests/ui/ui_views.cjs`, run by
 contrast, plus the gateways/inventory/session checks). On the pre-fix tree it
 reports the old failures, including `gateways/1440: table 1344px wider than
 its 1156px wrapper` and `contrast 3.39:1 ... div.brand-sub`.
+
+## Fix status (fix/ui-pass-2)
+
+The polish items tagged `ui-pass`, plus the plan-card question:
+
+| Item | Before | After |
+|---|---|---|
+| Plan card with 2+ pending | card at y=725; its Approve below 900 | fixed strip (`.plan-cta`) at the bottom: "Plan #1 · ops-agent · 2 changes waiting · Review · Approve plan · Deny", Home only, hidden when the card's own Approve is in view |
+| HUD subtitle at 390 | wrapped line began with `·` | dot is `::before`, hidden at ≤640 |
+| Command policy buttons at 390 | wrapped inside themselves, different heights | `nowrap`; each full width in one row, equal height |
+| Runbook step note | dashed rule read as an empty input | solid `--rule-weak` separator |
+
+The browser check (`tests/ui/ui_views.cjs`) asserts that when the plan card's
+Approve is outside the viewport, the strip is visible, names the plan and its
+Approve is a real in-viewport button. Re-measured at 1440×900 and 390×844; no
+new horizontal scroll and no text below AA.
+
+`bash scripts/verify.sh` on `fix/ui-pass-1` (with this pass): `3030 passed,
+26 skipped, 7 warnings in 678.59s (0:11:18)`.
