@@ -10398,6 +10398,51 @@ condition:
 Next: a code round with BN1, BN2 and BL1, plus BN3 if it is small. I'll
 re-read the scripts against Round 10's text.
 
+**BN1–BN3, BL1 follow-up, nits (2026-11-14).**
+
+* **BN1 — redaction.** The Round 10 `redact()` (AQ1) is inlined verbatim in
+  `WRITE_SCRIPT`, `RESTORE_SCRIPT` and the new fixed `CHECK_SCRIPT`. The check
+  output goes into a variable, is piped through `redact | head -c 65536`
+  (cap after redaction), and only that leaves the add-on. `redact` collects
+  every `secrets.yaml` under `/homeassistant` (`-type f -o -type l`), reads
+  each through fd 9 in the subshell that checked it, sorts values longest
+  first, and replaces them with `***`. A failed `find`, an unreadable
+  candidate, or more than 64 KiB of secrets prints
+  `[ESHU check output withheld: redaction unavailable]` and no check output.
+  `scrub_string` runs again in the dashboard on the check output and on the
+  `config_check_failed` messages. The write's `ok <sha>` line is compared with
+  the hash of the bytes sent; a mismatch marks the state unknown.
+* **BN2 — the read mask.** `_mask_secrets` keeps only top-level keys (column
+  0, not `#`) and real comments at column 0, printing `key: "***"` and
+  dropping every body line: block scalars (PEM keys, tokens), folded scalars,
+  multi-line quoted values, list items and continuations. CRLF is normalised
+  for the display copy.
+* **BN3 — one descriptor.** `verify_path` is gone. `READ_SCRIPT` resolves the
+  path, refuses a symlink, checks the accepted directory and the basename,
+  opens the file on fd 3, checks `realpath /proc/self/fd/3` equals the
+  resolved path and `-f` on the descriptor, then `head -c` from fd 3. A swap
+  after the check cannot redirect the read. Exit 11/12/13/19 map to
+  `config_path_refused`/`config_not_found`.
+* **BL1 follow-up.** A file that is not valid UTF-8 is returned with
+  `editable: false` and `reason: config_not_utf8`; `write_config` refuses it
+  with `config_not_utf8` before the stale check. The read/write stdin stays
+  bytes.
+* **Nits.** `umask 077` at the top of the write and restore scripts. A
+  restore that times out now records the current file's hash as `old_sha` and
+  the backup's `sha256sum` as `new_sha` (a small validated `HASH_SCRIPT`), so
+  a later read of the path resolves the state.
+
+Tests: `test_f11_ha_config_ssh.py` — BN2 block/folded/quoted/list/CRLF masks,
+BL1 non-UTF-8 not editable + write refusal, an `ok` line for other bytes as
+state unknown, and the restore-timeout two hashes; `test_f11_ha_busybox.py` —
+BN1 redaction on all three scripts with a `secrets.yaml` value in the stub
+`ha` output, the withheld line for an unreadable and an oversized
+`secrets.yaml`, BN3's descriptor read (bytes and CRLF kept, symlink exit 13),
+and the raw-hash write.
+
+`bash scripts/verify.sh`: `3050 passed, 26 skipped, 7 warnings in 632.51s
+(0:10:32)` (9 more: BN1 x3, BN2 x2, BN3 x1, BL1 x3).
+
 ## Chunk F12 — SSH through Eshu over MCP (`ssh_exec`) · slug `ssh-exec` · dashboard (+ small gateway change)
 
 > **Design first** (push a design note only, wait for approval). Needs the
