@@ -59,6 +59,9 @@ class BusyBox:
         self.ha_exit.write_text("0")
         self.ha_log = tmp_path / "ha.log"
         self.ha_output = tmp_path / "ha-out"
+        # BO2/W7: the scripts read the Supervisor token from this path.
+        self.token_file = tmp_path / "supervisor-token"
+        self.token_file.write_text("tok-f11\n")
         stub = self.bindir / "ha"
         stub.write_text(
             "#!/bin/sh\n"
@@ -82,6 +85,12 @@ class BusyBox:
     def run(self, script, *args, stdin=None, rewrite=True, text=True):
         if rewrite:
             script = script.replace("/homeassistant", str(self.root))
+        script = script.replace("/run/s6/container_environment/SUPERVISOR_TOKEN",
+                                str(self.token_file))
+        # The Round 9 scripts set PATH themselves; the `ha` stub is in bindir.
+        script = script.replace(
+            "PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH",
+            "PATH=%s:/usr/bin:/bin:/usr/sbin:/sbin; export PATH" % self.bindir)
         cmd = [BUSYBOX, "sh", "-c", script, "_"] + [str(a) for a in args]
         return subprocess.run(cmd, input=stdin, capture_output=True, text=text,
                               env=self.env, timeout=60)
@@ -234,6 +243,98 @@ def test_bn3_the_read_script_reads_through_the_checked_descriptor(box):
     assert proc.stdout == b""
 
 
+# ── BO2: Round 9's create/qualify and link checks ────────────────────────
+
+def test_bo2_a_fifo_at_the_backup_name_is_refused_and_gets_nothing(box):
+    """A reader is attached; the script must never open the FIFO."""
+    path = box.file("configuration.yaml", "a: 1\n")
+    args, backup, _tmp = box.write_args(path, "a: 1\n")
+    os.mkfifo(backup)
+    fd = os.open(backup, os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        proc = box.run(ha.WRITE_SCRIPT, *args, stdin="a: 2\n")
+        assert proc.returncode == 19
+        try:
+            assert os.read(fd, 4096) == b""
+        except BlockingIOError:
+            pass                       # no writer ever opened it
+    finally:
+        os.close(fd)
+        os.unlink(backup)
+    assert path.read_text() == "a: 1\n"
+
+
+def test_bo2_a_planted_symlink_at_the_backup_name_is_refused(box):
+    path = box.file("configuration.yaml", "a: 1\n")
+    args, backup, _tmp = box.write_args(path, "a: 1\n")
+    victim = box.tmp_path / "victim"
+    victim.write_text("do not touch\n")
+    os.symlink(victim, backup)
+    proc = box.run(ha.WRITE_SCRIPT, *args, stdin="a: 2\n")
+    assert proc.returncode == 19
+    assert victim.read_text() == "do not touch\n"
+    os.unlink(backup)
+
+
+def test_bo2_a_fifo_or_link_at_the_temp_name_is_refused(box):
+    path = box.file("configuration.yaml", "a: 1\n")
+    args, _backup, tmp = box.write_args(path, "a: 1\n")
+    os.mkfifo(tmp)
+    proc = box.run(ha.WRITE_SCRIPT, *args, stdin="a: 2\n")
+    assert proc.returncode == 19
+    os.unlink(tmp)
+    assert path.read_text() == "a: 1\n"
+
+
+def test_bo2_a_hard_linked_target_is_refused(box):
+    path = box.file("configuration.yaml", "a: 1\n")
+    link = box.root / "also.yaml"
+    os.link(path, link)
+    try:
+        assert box.run(ha.READ_SCRIPT, path, text=False).returncode == 21
+        args, _backup, _tmp = box.write_args(path, "a: 1\n")
+        proc = box.run(ha.WRITE_SCRIPT, *args, stdin="a: 2\n")
+        assert proc.returncode == 21
+        assert path.read_text() == "a: 1\n"
+    finally:
+        os.unlink(link)
+
+
+def test_bo2_the_rollback_file_is_noclobber_and_pid_named(box):
+    """The rollback name carries $$, so it cannot be pre-planted; the create
+    is noclobber and qualified on the descriptor before anything is written."""
+    from core import ha_config_ssh as ha
+    for script in (ha.WRITE_SCRIPT, ha.RESTORE_SCRIPT):
+        assert 'rb="$real.eshu-tmp-rb-$me"' in script
+        assert 'exec 6> "$rb"' in script
+        assert 'fd_ok "$fd6" "$rb"' in script
+        assert 'set -C' in script
+
+
+def test_bo2_a_changed_backup_is_refused_before_it_is_installed(box):
+    path = box.file("configuration.yaml", "current\n")
+    backup = box.backup(path, "old\n")   # the recorded hash is of "old\n"
+    tmp = "%s.eshu-tmp-0123456789abcdef" % path
+    # AL5: the caller passes the hash it recorded; the file changed since.
+    with open(backup, "w") as fh:
+        fh.write("tampered\n")
+    proc = box.run(ha.RESTORE_SCRIPT, path, backup, tmp, sha("old\n"))
+    assert proc.returncode == 14
+    assert path.read_text() == "current\n"
+
+
+def test_bo2_a_missing_supervisor_token_runs_nothing(box):
+    path = box.file("configuration.yaml", "a: 1\n")
+    box.token_file.unlink()
+    args, _backup, _tmp = box.write_args(path, "a: 1\n")
+    proc = box.run(ha.WRITE_SCRIPT, *args, stdin="a: 2\n")
+    assert proc.returncode == 20
+    assert path.read_text() == "a: 1\n"
+    check = box.run(ha.CHECK_SCRIPT)
+    assert check.returncode == 20
+    assert box.ha_log.exists() is False or box.ha_log.read_text() == ""
+
+
 # ── BN1: the check output is redacted on the add-on ──────────────────────
 
 def test_bn1_a_secret_in_the_check_output_is_redacted_on_all_three_paths(box):
@@ -249,12 +350,12 @@ def test_bn1_a_secret_in_the_check_output_is_redacted_on_all_three_paths(box):
 
     backup = box.backup(path, "a: 1\n")
     tmp = "%s.eshu-tmp-0123456789abcdef" % path
-    restore = box.run(ha.RESTORE_SCRIPT, path, backup, tmp)
+    restore = box.run(ha.RESTORE_SCRIPT, path, backup, tmp, sha("a: 1\n"))
     assert restore.returncode == 18
     assert "hunter2" not in restore.stdout and "***" in restore.stdout
 
     check = box.run(ha.CHECK_SCRIPT)
-    assert check.returncode == 1
+    assert check.returncode == 18      # Round 9: an invalid check exits 18
     assert "hunter2" not in check.stdout and "***" in check.stdout
 
 
@@ -285,7 +386,7 @@ def test_the_restore_script_puts_the_backup_back_and_rechecks(box):
     path = box.file("configuration.yaml", "new: 2\n", mode=0o640)
     backup = box.backup(path, "old: 1\n")
     tmp = "%s.eshu-tmp-0123456789abcdef" % path
-    proc = box.run(ha.RESTORE_SCRIPT, path, backup, tmp)
+    proc = box.run(ha.RESTORE_SCRIPT, path, backup, tmp, sha("old: 1\n"))
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert path.read_text() == "old: 1\n"
     assert stat.S_IMODE(os.stat(path).st_mode) == 0o640
@@ -298,7 +399,7 @@ def test_the_restore_script_puts_the_current_bytes_back_on_a_failed_check(box):
     backup = box.backup(path, "old: 1\n")
     box.ha(1)
     tmp = "%s.eshu-tmp-0123456789abcdef" % path
-    proc = box.run(ha.RESTORE_SCRIPT, path, backup, tmp)
+    proc = box.run(ha.RESTORE_SCRIPT, path, backup, tmp, sha("old: 1\n"))
     assert proc.returncode == 18, proc.stdout + proc.stderr
     assert path.read_text() == "current: 2\n"
     assert not os.path.exists(tmp)
@@ -327,8 +428,8 @@ def test_the_read_command_runs_under_busybox(box):
 
 
 def test_the_check_command_runs_under_busybox(box):
-    proc = box.run("timeout 100 ha core check 2>&1")
+    proc = box.run(ha.CHECK_SCRIPT)
     assert proc.returncode == 0
     box.ha(1)
-    proc = box.run("timeout 100 ha core check 2>&1")
-    assert proc.returncode == 1
+    proc = box.run(ha.CHECK_SCRIPT)
+    assert proc.returncode == 18

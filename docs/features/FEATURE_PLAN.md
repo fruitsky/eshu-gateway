@@ -10519,6 +10519,42 @@ Fix:
 
 I'll diff the scripts against Round 9 and Round 10 text on the next read.
 
+**BO2 implemented (2026-11-14).** The write and restore scripts are the
+approved Round 9 text again, with Round 10's `redact()` in place, pasted from
+the plan's "The scripts, final" block:
+
+* `WRITE_SCRIPT` opens the target on fd 3 (link count 1, exit 21), the backup
+  on fd 4 and the new content on fd 5 through `set -C` and `fd_ok` before any
+  write, writes through the descriptors, and rolls back through fd 6 with the
+  same qualification. It refuses a `!include` of a secrets file (22).
+* `RESTORE_SCRIPT` takes the backup's expected hash as `$4` (AL5), checks it
+  (exit 14) before installing, and keeps the pre-restore copy on fd 5 and the
+  rollback on fd 6.
+* Both set `PATH` and `set -f`, and read
+  `/run/s6/container_environment/SUPERVISOR_TOKEN` (exit 20 when absent),
+  passing it only to `ha`. `CHECK_SCRIPT` has the same preamble and tree
+  checks.
+* `READ_SCRIPT` gained the descriptor link-count check (21), so a hard link to
+  `secrets.yaml` cannot be read unmasked.
+* `restore_config` passes the hash it recorded (via the existing
+  `HASH_SCRIPT`, which also refuses a hard link) and refuses before the call
+  if it cannot be read. The exit-code map gained 20 (`config_ha_token_missing`),
+  21 (`config_path_refused` / `config_backup_refused`, hard link) and 22
+  (`config_includes_secrets`).
+
+Tests: the BusyBox matrix now covers a FIFO at the backup and at the temp
+name (a reader is attached and gets nothing), a planted symlink at the backup,
+a hard link (read and write exit 21), a changed backup (AL5, exit 14), a
+missing Supervisor token (write and check exit 20, nothing runs), and the
+rollback file's pid-named, noclobber, descriptor-qualified create. The
+existing write/restore/redaction/CRLF/raw-hash tests still pass on the Round 9
+scripts. The only W5 row not runnable as a race is a swap between `realpath`
+and the open: the script's `realpath /proc/self/fd/N` check and the hard-link
+refusal are what close it, and the symlink test exercises the refusal path.
+
+`bash scripts/verify.sh`: `3057 passed, 26 skipped, 8 warnings in 629.33s
+(0:10:29)` (7 more: the BO2 matrix).
+
 ## Chunk F12 — SSH through Eshu over MCP (`ssh_exec`) · slug `ssh-exec` · dashboard (+ small gateway change)
 
 > **Design first** (push a design note only, wait for approval). Needs the
