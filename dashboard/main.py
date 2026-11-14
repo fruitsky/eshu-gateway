@@ -2269,13 +2269,19 @@ def dev_status(request: Request):
         except (TypeError, ValueError):
             return None
 
-    installer_counts = {"on_fleet": 0, "on_edge": 0, "outdated": 0, "unknown": 0}
+    installer_counts = {"on_fleet": 0, "on_edge": 0, "on_build": 0,
+                        "outdated": 0, "unknown": 0}
     for g in gateways:
         ch = _installer_channel(g.get('installer_hash'), build_hash, edge_hash, fleet_hash)
         if ch == 'fleet':
             installer_counts['on_fleet'] += 1
         elif ch == 'edge':
             installer_counts['on_edge'] += 1
+        elif ch == 'build':
+            # BR1: Build-but-not-Edge is an installer nobody seeded or
+            # reviewed through the channel flow; its own bucket, so the five
+            # buckets always add up to the fleet.
+            installer_counts['on_build'] += 1
         elif ch == 'unknown':
             installer_counts['unknown'] += 1
         elif ch == 'outdated':
@@ -2283,8 +2289,10 @@ def dev_status(request: Request):
     return {
         "on_fleet": installer_counts['on_fleet'],
         "on_edge": installer_counts['on_edge'],
+        "on_build": installer_counts['on_build'],
         "outdated": installer_counts['outdated'],
         "unknown": installer_counts['unknown'],
+        "installer_counts": installer_counts,
         "dashboard_version": DASHBOARD_VERSION,
         "edge_exists": edge_hash is not None,
         "backup_exists": installer_channels.has_previous(),

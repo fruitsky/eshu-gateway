@@ -5285,7 +5285,10 @@ function gwChannelBadge(g) {
   var changed = g.installer_hash_changed_at
     ? ' \u00b7 changed ' + formatAgo(Math.max(0, Math.floor(Date.now() / 1000) - g.installer_hash_changed_at))
     : '';
-  var title = 'Installer ' + (hash || 'not reported') + changed;
+  // BR1: the hash is what the gateway says about itself, not a verified fact.
+  var title = 'Installer ' + (hash || 'not reported') +
+    ' reported by the gateway' + changed;
+  if (ch === 'build') title += ' \u00b7 on Build, not seeded or reviewed through the channels';
   return '<span class="gw-ch gw-ch-' + esc(ch) + '" title="' + esc(title) + '">' +
     esc(label) + '</span>';
 }
