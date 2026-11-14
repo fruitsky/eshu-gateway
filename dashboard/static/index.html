@@ -1149,7 +1149,7 @@
           <div class="widget hidden" id="dev-deployment-widget">
             <div class="widget-header">Development & Deployment</div>
             <div class="panel">
-              <p class="text-xs mb-3 text-muted">Build is the latest installer. Edge is the development channel for dev-mode gateways. Fleet is what production gateways are running.</p>
+              <p class="text-xs mb-3 text-muted">Build is the installer this dashboard was deployed with. Edge is what dev-mode gateways install; it changes only when you Seed Edge. Fleet is what every other gateway installs (updates, enrolment, reinstalls); it changes only when you Deploy to Fleet or Roll back.</p>
 
               <!-- Gateway Management -->
               <div class="text-xs mb-2 text-muted">
@@ -1218,7 +1218,7 @@
 </main>
 
 <script src="/static/state.js?v=ui3"></script>
-<script src="/static/app.js?v=ui22"></script>
+<script src="/static/app.js?v=ui23"></script>
 
 <!-- Create / Edit Approved Window Modal -->
 <div id="create-window-modal" class="modal-overlay hidden">

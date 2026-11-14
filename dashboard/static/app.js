@@ -6779,7 +6779,7 @@ async function pushToDev() {
 }
 
 async function promoteToGolden() {
-  if (!(await customConfirm('All connected gateways will update within ~3 seconds. A backup of the current Build will be saved.', { title: 'Deploy Edge to the fleet?', confirmLabel: 'Deploy' }))) return;
+  if (!(await customConfirm('All connected gateways will update within ~3 seconds. The current Fleet installer is kept so you can roll back.', { title: 'Deploy Edge to the fleet?', confirmLabel: 'Deploy' }))) return;
   const btn = document.getElementById('promote-golden-btn'); btn.disabled = true; btn.textContent = 'Deploying...';
   try {
     const res = await authFetch('/api/dev/promote', { method: 'POST' });
@@ -6821,9 +6821,20 @@ async function fetchDevStatus() {
     const promoteBtn = document.getElementById('promote-golden-btn');
     const rollbackBtn = document.getElementById('rollback-golden-btn');
 
-    if (goldenLabel) goldenLabel.innerHTML = escapeHtml(data.dashboard_version || 'unset') + (data.golden_hash ? ' <span class="hash-tag">(' + escapeHtml(data.golden_hash) + ')</span>' : '');
-    if (edgeLabel) edgeLabel.innerHTML = escapeHtml(data.edge_exists ? (data.dashboard_version || 'staged') : 'not staged') + (data.edge_hash ? ' <span class="hash-tag">(' + escapeHtml(data.edge_hash) + ')</span>' : '');
-    if (fleetLabel) fleetLabel.innerHTML = escapeHtml(data.dashboard_version || 'unset') + (data.deployed_hash ? ' <span class="hash-tag">(' + escapeHtml(data.deployed_hash) + ')</span>' : '');
+    /* X7: each channel has its own hash. Build changes on a dashboard deploy,
+       Edge on Seed Edge, Fleet on Deploy to Fleet / Rollback. */
+    function _hashTag(h) { return h ? ' <span class="hash-tag">(' + escapeHtml(h) + ')</span>' : ''; }
+    function _when(ts, verb) {
+      if (!ts) return '';
+      return ' <span class="text-muted">' + verb + ' ' + escapeHtml(formatAgo(Math.floor(Date.now() / 1000) - ts)) + '</span>';
+    }
+    if (goldenLabel) goldenLabel.innerHTML = escapeHtml(data.dashboard_version || 'unset') + _hashTag(data.build_hash);
+    if (edgeLabel) edgeLabel.innerHTML = data.edge_exists
+      ? _hashTag(data.edge_hash).trim() + _when(data.edge_seeded_at, 'seeded')
+      : 'not staged';
+    if (fleetLabel) fleetLabel.innerHTML = data.fleet_hash
+      ? _hashTag(data.fleet_hash).trim() + _when(data.fleet_promoted_at, 'deployed')
+      : 'missing';
 
     // Button states
     if (seedBtn) seedBtn.disabled = false;

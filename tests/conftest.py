@@ -36,6 +36,21 @@ def temp_db():
         pass
 
 
+@pytest.fixture(autouse=True)
+def installer_channels_dir(tmp_path, monkeypatch):
+    """X7: each test gets its own Edge/Fleet channel directory, so no test
+    writes into dashboard/installer-channels/ in the checkout."""
+    path = tmp_path / "installer-channels"
+    monkeypatch.setenv("ESHU_INSTALLER_CHANNELS", str(path))
+    # Pre-X7 copies in the checkout must never seed a test's channels.
+    from core import installer_channels
+    missing = str(tmp_path / "no-legacy")
+    monkeypatch.setattr(installer_channels, "_legacy_paths", lambda: {
+        installer_channels.FLEET: missing, installer_channels.EDGE: missing,
+        installer_channels.FLEET_PREV: missing})
+    return path
+
+
 @pytest.fixture
 def client(temp_db):
     from db.auth import set_password_hash

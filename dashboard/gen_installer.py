@@ -39,11 +39,12 @@ def main():
     installer = installer.replace("__POLLER_CONTENT__", poller.rstrip("\n"))
     installer = installer.replace("__LOGGER_CONTENT__", logger.rstrip("\n"))
 
+    # X7: only Build is generated and committed. Edge and Fleet are runtime
+    # copies the dashboard makes on Seed Edge / Deploy to Fleet.
     write("eshu-gateway-install.sh", installer)
-    write("static/eshu-gateway-install.sh", installer)
 
-    print("Generated eshu-gateway-install.sh (source + static/)")
-    print("Run `push to dev gateways` in the UI to deploy Edge to dev gateways.")
+    print("Generated eshu-gateway-install.sh (Build)")
+    print("After deploying, use Seed Edge, Push to Dev Gateways, then Deploy to Fleet.")
     print("Verify with: bash -n dashboard/eshu-gateway-install.sh")
 
 if __name__ == "__main__":

@@ -104,14 +104,26 @@ def test_schema_has_no_approver_field():
 
 # ── F12: the dashboard key, the host-key pin and the ssh_mode line ──────────
 def _installers():
-    return (_read("dashboard/eshu-gateway-install.sh"),
-            _read("dashboard/static/eshu-gateway-install.sh"))
+    # X7: only Build is committed; Edge and Fleet are runtime copies the
+    # dashboard makes from it, so there is one installer to check.
+    src = _read("dashboard/eshu-gateway-install.sh")
+    return src, src
 
 
-def test_f12_both_installers_are_regenerated_identically():
-    src, static = _installers()
-    assert src == static
-    assert "--dashboard-key" in src
+def test_x7_only_build_is_committed():
+    import subprocess
+    tracked = subprocess.run(
+        ["git", "ls-files", "dashboard/static"], cwd=ROOT, capture_output=True,
+        text=True, check=True).stdout.split()
+    assert not [t for t in tracked if t.endswith("eshu-gateway-install.sh")]
+    ignore = _read(".gitignore")
+    for entry in ("dashboard/installer-channels/",
+                  "dashboard/static/eshu-gateway-install.sh",
+                  "dashboard/static/dev/"):
+        assert entry in ignore
+    gen = _read("dashboard/gen_installer.py")
+    assert 'write("static/' not in gen
+    assert "--dashboard-key" in _installers()[0]
 
 
 def test_f12_dashboard_key_line_and_marker():
@@ -532,12 +544,11 @@ def test_be1_a_failed_registration_does_not_set_ssh_mode(tmp_path):
     assert "GATEWAY_SSH_MODE=" not in failure.split("\n  fi\n")[0]
 
 
-def test_be2_dev_installer_carries_the_fix():
-    """BE2: the deploy resets static/dev to the committed copy and a promote
-    copies it over the fleet installer, so it must never lag behind."""
-    dev = _read("dashboard/static/dev/eshu-gateway-install.sh")
-    assert dev == _read("dashboard/eshu-gateway-install.sh")
-    assert "# RR1: the existing token is loaded BEFORE registering." in dev
+def test_be2_build_carries_the_fix():
+    """BE2, after X7: Edge is a byte copy of Build made by Seed Edge (see
+    tests/test_golden.py), so the fix only has to be in Build."""
+    build = _read("dashboard/eshu-gateway-install.sh")
+    assert "# RR1: the existing token is loaded BEFORE registering." in build
 
 
 # ── BE4: refresh only the eshu-dashboard line on update ────────────────────

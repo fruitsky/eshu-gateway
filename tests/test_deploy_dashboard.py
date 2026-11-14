@@ -1,12 +1,13 @@
-"""The dashboard deploy helper must not be stopped by the generated dev tree.
+"""The dashboard deploy helper and the installer channels (X7).
 
-RELEASE_1.md precondition 2: the running dashboard rewrites
-`dashboard/static/dev/eshu-gateway-install.sh` (its dev-push path), so a live
-checkout is dirty and `git pull --ff-only` refuses — the deploy would stop
-before restarting anything. The helper now resets that tree *before* the pull.
+Before X7 the running dashboard rewrote a committed file
+(`dashboard/static/dev/eshu-gateway-install.sh`), so a live checkout was dirty
+and the helper had to reset it before `git pull`. Since X7 the Edge and Fleet
+channels live in `dashboard/installer-channels/`, which git ignores: a deploy
+must pull cleanly and must leave both channels exactly as they were, even
+when the release changes Build.
 
-This is a behavioural test with a real local git remote: the clone's dev file
-is dirty, and an upstream commit changes the same file. The helper's
+This is a behavioural test with a real local git remote. The helper's
 systemd/port/sudo calls are stubbed, so nothing real is touched.
 """
 
@@ -18,7 +19,8 @@ import pytest
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(REPO, 'scripts', 'deploy-dashboard.sh')
-DEV_FILE = 'dashboard/static/dev/eshu-gateway-install.sh'
+BUILD_FILE = 'dashboard/eshu-gateway-install.sh'
+CHANNELS = 'dashboard/installer-channels'
 
 _GIT_ENV = {
     'GIT_AUTHOR_NAME': 'test', 'GIT_AUTHOR_EMAIL': 'test@example.test',
@@ -56,8 +58,10 @@ def repo(tmp_path):
     (work / 'scripts').mkdir()
     (work / 'scripts' / 'deploy-dashboard.sh').write_text(
         open(SCRIPT, encoding='utf-8').read())
-    (work / DEV_FILE).parent.mkdir(parents=True)
-    (work / DEV_FILE).write_text('version 1\n')
+    (work / BUILD_FILE).parent.mkdir(parents=True)
+    (work / BUILD_FILE).write_text('build 1\n')
+    (work / '.gitignore').write_text(open(os.path.join(REPO, '.gitignore'),
+                                          encoding='utf-8').read())
     _git(work, 'add', '-A')
     _git(work, 'commit', '-m', 'initial')
     _git(work, 'remote', 'add', 'origin', str(remote))
@@ -66,9 +70,11 @@ def repo(tmp_path):
     subprocess.run(['git', 'clone', str(remote), str(clone)],
                    check=True, capture_output=True)
 
-    # The host rewrote the dev installer, and the release changes it too.
-    (clone / DEV_FILE).write_text('version 1 (written on the host)\n')
-    (work / DEV_FILE).write_text('version 2\n')
+    # The host has its runtime channels; the release changes Build.
+    (clone / CHANNELS).mkdir(parents=True)
+    (clone / CHANNELS / 'edge.sh').write_text('edge on the host\n')
+    (clone / CHANNELS / 'fleet.sh').write_text('fleet on the host\n')
+    (work / BUILD_FILE).write_text('build 2\n')
     (work / 'RELEASE').write_text('release 1\n')
     _git(work, 'add', '-A')
     _git(work, 'commit', '-m', 'release')
@@ -89,7 +95,7 @@ def repo(tmp_path):
     return {'clone': clone, 'work': work, 'bindir': bindir}
 
 
-def test_the_pull_is_not_blocked_by_the_generated_dev_tree(repo):
+def test_a_deploy_pulls_and_leaves_the_channels_alone(repo):
     clone = repo['clone']
     env = {
         'PATH': '%s:%s' % (repo['bindir'], os.environ.get('PATH', '/usr/bin:/bin')),
@@ -103,15 +109,20 @@ def test_the_pull_is_not_blocked_by_the_generated_dev_tree(repo):
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert '== git pull --ff-only ==' in proc.stdout
-    # The pull applied the release commit instead of refusing on the dirty file.
     assert (clone / 'RELEASE').read_text() == 'release 1\n'
-    assert (clone / DEV_FILE).read_text() == 'version 2\n'
+    assert (clone / BUILD_FILE).read_text() == 'build 2\n'
+    # X7: a deploy changes Build only; Edge and Fleet are untouched.
+    assert (clone / CHANNELS / 'edge.sh').read_text() == 'edge on the host\n'
+    assert (clone / CHANNELS / 'fleet.sh').read_text() == 'fleet on the host\n'
+    status = _git(clone, 'status', '--porcelain').stdout
+    assert 'installer-channels' not in status
     assert '✅ eshu-dashboard is active' in proc.stdout
 
 
-def test_the_reset_happens_before_the_pull():
-    """A source-level guard: the runtime test above only fails on a dirty clone."""
+def test_the_helper_no_longer_resets_static():
+    """X7: nothing the dashboard writes is tracked, so the helper must not
+    reset the dev tree before the pull (that reset existed only for the
+    pre-X7 committed copy)."""
     source = open(SCRIPT, encoding='utf-8').read()
-    reset = source.index('git checkout -- dashboard/static/dev/')
-    pull = source.index('\n  git pull --ff-only\n')   # the command, not the echo
-    assert reset < pull
+    assert 'git checkout -- dashboard/static/dev/' not in source
+    assert 'installer-channels' not in source.replace('dashboard/installer-channels/, outside git', '')
