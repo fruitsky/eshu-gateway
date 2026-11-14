@@ -11565,188 +11565,238 @@ The dashboard has no rotate action today: the only way to rotate a token is to
 remove and re-enrol the gateway, which drops its state, its history linkage and
 any pending work. This note designs an operator action instead. No code.
 
+**Round 2** folds the security review's nine answers and its two musts: BQ3
+(two different operations — routine hygiene vs a suspected compromise — and the
+compromise one must not use the bearer channel) and BQ4 (no token is baked into
+a script; the gateway, poller and logger read `/etc/eshu-token` at the point of
+use, so rotation writes one file and removal of the baked copies happens in
+`release/1.4-gw`, not here). The design below builds on file-only tokens.
+
 **Goal.** An operator with a dashboard session can rotate one gateway's bearer
-token with one confirmed action. The gateway keeps working across the change,
-the operator never sees the token, and every step is audited.
+token with one confirmed action. The gateway keeps working across a routine
+rotation, the operator never sees the token, and every step is audited.
+
+**Two operations, stated plainly.** "Rotate token" is **routine hygiene**: it
+limits the value of a leak that has not happened yet. It cannot evict someone
+who already holds the old token — the new token is delivered to whoever polls
+with the old one, so a holder of a leaked token would receive it. When the old
+token is suspected leaked, the operator must use **"Rotate for compromise"**,
+which delivers the new token over the dashboard's own SSH connection and takes
+the old bearer credential out of the loop. The confirm modal says this in one
+sentence, and the gateways that cannot use the SSH path are named.
 
 **Threat / why.** A gateway token is a bearer credential for `/api/poll`,
-`/api/policy`, `/api/ticket`, `/api/request` and the result posts. Today it
-lives in `/etc/eshu-token` (0600), in two baked copies
-(`/usr/local/bin/eshu-gateway.sh`, `/usr/local/bin/eshu-poller.sh`, both 0600)
-and in the dashboard's `gateways.api_token` column (plaintext until Chunk 7).
-Rotation limits the value of a leak, but only if the transition has no window
-where the gateway cannot authenticate and no window where the old token is
-still accepted after the new one is in use.
+`/api/policy`, `/api/ticket`, `/api/request` and the result posts. After BQ4 it
+lives only in `/etc/eshu-token` (0600, root:root) and in the dashboard's
+`gateways.api_token` column (plaintext until Chunk 7). Rotation limits the
+value of a leak only if the transition has no window where the gateway cannot
+authenticate and no window where the old token is accepted after the new one is
+in use — and, for a compromise, no window where the holder of the old token can
+obtain the new one.
 
 **Design.**
 
 * **Mint and store.** `POST /api/gateways/{ip}/rotate-token` (session cookie +
   CSRF, like every other write) generates `secrets.token_hex(32)` — the same
-  shape `/api/register` uses — and stores it as `api_token_next` with
-  `token_rotation_started_at` and an empty `token_rotation_delivered_at`.
-  The current `api_token` is untouched. The response is `{status: "pending"}`;
-  the token is never in a response, audit row, log line or template.
-  A second request while one is pending is refused (`rotation_pending`).
-* **Authentication during the overlap.** `_resolve_gateway_token` accepts
-  `api_token` or `api_token_next`. A request that matches `api_token_next`
-  is the **commit**: in one transaction, `api_token := api_token_next`,
-  `api_token_next := NULL`, `ssh_key_derived := derive_key(new)`,
-  `token_rotation_*` cleared, audit `gateway_token_rotated` (old token
-  revoked), and the response carries `rotation_complete: true`. The old
-  token stops authenticating at that instant. Both tokens are therefore
-  valid only until the first successful use of the new one, which is the
-  overlap the operator is told about.
-* **Delivery.** The existing authenticated poll (`GET /api/poll/{ip}`) gains
-  an optional `rotate_token` object: `{token, started_at, confirm_id}`. It is
-  returned only to a request authenticated with the **old** token, and only
-  while the rotation is pending. The poller applies it and its next poll uses
-  the new token; that poll is the commit above. The field is absent for every
-  other gateway and as soon as the rotation is settled. The policy fetch
-  (`/api/policy`) is not a delivery channel: it is cached by hash and must
-  stay byte-stable.
-* **What the gateway writes**, in this order, all as root (`eshu-poller` is a
-  root service; the paths are root-owned, the files 0600):
+  shape `/api/register` uses, 64 hex — and stores it as `api_token_next` with
+  `token_rotation_started_at`, an empty `token_rotation_delivered_at` and the
+  method (`poll` or `ssh`). The current `api_token` is untouched. The response
+  is `{status: "pending", method}`; the token is never in a response, audit
+  row, log line or template. A second request while one is pending is refused
+  (`rotation_pending`). The method is chosen at mint time: routine uses the
+  poll, compromise uses the SSH push below.
+* **Authentication during the overlap (routine).** `_resolve_gateway_token`
+  accepts `api_token` or `api_token_next`. A request that matches
+  `api_token_next` is the **commit**: in one transaction,
+  `api_token := api_token_next`, `api_token_next := NULL`,
+  `ssh_key_derived := derive_key(new)`, `token_rotation_*` cleared, audit
+  `gateway_token_rotated` (old token revoked), and the response carries
+  `rotation_complete: true`. The old token stops authenticating at that
+  instant. Both tokens are therefore valid only until the first successful use
+  of the new one. The commit is a conditional UPDATE (`WHERE api_token_next =
+  ?`) so two requests cannot commit twice.
+* **Delivery over the poll (routine only).** The existing authenticated poll
+  (`GET /api/poll/{ip}`) gains an optional `rotate_token` object:
+  `{token, started_at, confirm_id}`. It is returned only to a request
+  authenticated with the **old** token, and only while a poll-method rotation
+  is pending. The poller applies it and its next poll uses the new token; that
+  poll is the commit above. The field is absent for every other gateway and as
+  soon as the rotation is settled. The policy fetch (`/api/policy`) is not a
+  delivery channel: it is cached by hash and must stay byte-stable. A
+  compromise-method rotation is **never** delivered here, even to an
+  old-token poll.
+* **Delivery over SSH (compromise, and restore recovery).** The dashboard opens
+  the F12 SSH connection to the gateway with the dashboard's own key (not the
+  gateway token), to the fixed forced command
+  `--dashboard-key rotate-token`, with the pinned host key. The new token
+  arrives on **stdin**, never as an argument. The forced command:
+  1. validates the delivered value as `^[0-9a-f]{64}$` (the BQ4 format);
+  2. writes `/etc/eshu-token` through a `umask 077` temp and `mv` (0600,
+     root:root);
+  3. **does not write `.prev`** and removes an existing `.prev`: on a
+     compromise the old signing key must die with the old token, because
+     whoever holds the old token can derive K_old. (Routine rotation keeps
+     `.prev` for the overlap.)
+  The dashboard commits the rotation only after the command returns success:
+  old token and K_old are revoked in one transaction, `ssh_key_derived` becomes
+  K_new, and the audit row is `gateway_token_rotated` with method `ssh`, plus
+  `gateway_token_rotation_pushed`. If the push fails, nothing changes — the
+  old token keeps working, the row says the push failed, and the operator can
+  retry or re-enrol. The gateway reads the file on its next call, so no
+  process restart is needed and the first new-token request confirms the new
+  credential.
+* **Which gateways can use the SSH path.** A gateway needs (a) a pinned host
+  key and (b) the shared dashboard key line in `authorized_keys`. The installer
+  reports whether it wrote that line (`ssh_dashboard_key: 1` in
+  `/api/register`; 0 or absent otherwise), and the dashboard stores it. Old
+  installs and the BE4 "no Eshu line" case report 0/absent: the UI shows
+  **"re-enrol only"** for them and does not offer the compromise action. The
+  same capability decides whether the restore-recovery push is offered.
+* **What the gateway writes (routine), in this order, all as root** (the poller
+  is a root service and the paths are root-owned, 0600):
   1. `/etc/eshu-token.prev` = the old token (`umask 077`, temp + `mv`);
   2. `/etc/eshu-token` = the new token (`umask 077`, temp + `mv`);
-  3. the `GATEWAY_TOKEN="..."` line in `/usr/local/bin/eshu-gateway.sh` and
-     `/usr/local/bin/eshu-poller.sh` (`sed -i` on that one anchored line — the
-     same edit the update/re-register path already makes);
-  4. `GATEWAY_TOKEN=<new>` in the poller's memory, so the next poll uses it.
-  The logger reads the token from the gateway script at runtime and needs no
-  separate write. If any step fails, the poller keeps the old token, sends
-  `rotation_failed` with a short reason on its next poll, and the dashboard
-  keeps the rotation pending (old still valid). It never half-applies: steps
-  1–2 are atomic renames, and steps 3–4 only run after both succeeded.
-* **The SSH signing key.** F12 derives K = HMAC-SHA256(token) and the gateway
-  re-derives it from `/etc/eshu-token` per request, so a new token means a new
-  K. During the overlap the gateway's MAC check must accept **both**: current
-  K first, then the key from `/etc/eshu-token.prev` (the same current/prev
-  pattern the session key already uses). The dashboard signs with the key of
-  the token it currently considers current; after the commit it signs with
-  K_new. The old key file is deleted when the gateway receives
-  `rotation_complete` on a poll (or after 24 h, whichever first), so a stale
-  `.prev` cannot linger.
+  3. nothing else: there are no baked copies after BQ4, and the logger,
+     gateway and poller read `/etc/eshu-token` at the point of use, so the next
+     call uses the new value even in a process started before the rotation.
+  If either write fails, the poller keeps the old token (step 1 may have
+  written `.prev`, which is harmless), sends `rotation_failed` with a short
+  reason on its next poll, and the dashboard keeps the rotation pending (old
+  still valid). The writes are atomic renames; a half-written file cannot be
+  read.
+* **The SSH signing key.** F12 derives K = HMAC-SHA256(token, label) and the
+  gateway re-derives it from `/etc/eshu-token` per request, so a new token
+  means a new K. For a routine rotation the gateway's MAC check accepts
+  **both**: current K first, then K_prev derived from `/etc/eshu-token.prev`.
+  The `.prev` age is enforced **on the gateway**, by the file's mtime (older
+  than 24 h is refused), not only by the dashboard cleanup, because a poller
+  that is down never runs a cleanup. `.prev` alone never authenticates a
+  request to the dashboard; it is only for the MAC check. The dashboard signs
+  with K_new from the commit on. The gateway deletes `.prev` when a poll
+  response carries `rotation_complete`, and refuses K_prev after 24 h
+  regardless. For a compromise rotation there is no `.prev` at all and K_old
+  is dead at the push.
 * **Settling and expiry.** A rotation that has never been delivered — no poll
-  from the gateway after `started_at` — is cancelled by the operator, or
-  expires after 24 h: `api_token_next` is dropped, audit
-  `gateway_token_rotation_expired`, old token unchanged. Once a poll has been
-  served after `started_at`, the dashboard records `delivered_at` and cancel
-  is no longer offered: the gateway may have applied the token, and dropping
-  it would strand the gateway. The only outcomes then are commit (first new
-  poll) or an operator re-enrolment.
+  from the gateway after `started_at` (routine), or no successful SSH push
+  (compromise) — is cancelled by the operator, or expires after 24 h:
+  `api_token_next` is dropped, audit `gateway_token_rotation_expired`, old
+  token unchanged. Once a poll has been served after `started_at` (routine),
+  the dashboard records `delivered_at` and cancel is no longer offered: the
+  gateway may have applied the token, and dropping it would strand the
+  gateway. The only outcomes then are commit (first new poll), the SSH push
+  (compromise), or an operator re-enrolment. A failed SSH push leaves the row
+  pending and cancellable, since nothing was applied.
 
 **Failure modes.**
 
-* **Gateway offline mid-rotation.** Nothing has been delivered. The old token
-  keeps working, the row shows "waiting for the gateway", the poll response
-  re-sends the new token whenever the gateway returns. Cancel is allowed
-  while no poll was served after `started_at`; after 24 h the rotation
+* **Gateway offline mid-rotation (routine).** Nothing has been delivered. The
+  old token keeps working, the row shows "waiting for the gateway", the poll
+  response re-sends the new token whenever the gateway returns. Cancel is
+  allowed while no poll was served after `started_at`; after 24 h the rotation
   expires on its own. No command, ticket or policy is affected.
 * **Gateway came back, applied the token, then went offline again.** The
   rotation is delivered but not committed; both tokens stay valid on the
-  dashboard (the gateway's polls use the new one; when one lands, it
-  commits). Nothing expires, because the gateway holds a token the dashboard
-  must accept.
+  dashboard (the gateway's polls use the new one; when one lands, it commits).
+  Nothing expires, because the gateway holds a token the dashboard must accept.
+* **Compromise push fails.** Nothing changed: the old token remains valid, the
+  row says `push failed` with a bounded reason, and the operator can retry the
+  push or re-enrol. The compromise is not made worse, but it is not fixed
+  either; the UI says so.
 * **Dashboard restored from a backup.** The backup predates the rotation: it
   has the old token and no pending row, while the gateway may hold the new
-  token. Its polls then 401 ("Invalid gateway token. Re-enrol this gateway.").
-  This is the documented recovery: re-enrol that gateway (the installer's
-  register path; an operator with shell access can also run it). The audit
-  trail explains it: `gateway_token_rotation_started` in the old DB is gone,
-  and the 401s are logged by the gateway. The design accepts this: a restore
-  rolls back every rotation made after it. Operators should finish pending
-  rotations before taking a backup; the UI says so in the confirm.
+  token. Its polls then 401. Recovery is the **SSH push** for any gateway with
+  a pinned host key and `ssh_dashboard_key=1` (no shell access needed: the
+  dashboard can send a fresh token over its own key). For the rest, re-enrol.
+  A restore rolls back the rotation rows; the 401s are audited
+  (`gateway_auth_failed`, at most one row a minute per IP) and the audit trail
+  explains it. Operators should finish pending rotations before taking a
+  backup; the UI says so in the confirm.
 * **Two dashboards / a proxy.** Out of scope; one dashboard owns a gateway's
   row. A load-balanced pair with a shared DB would need the commit to be a
   single conditional UPDATE (`WHERE api_token_next = ?`), which the design
   already uses.
 * **Rotation during an update.** The installer reads the token from
-  `/etc/eshu-token` and re-registers; it would get the token the dashboard
+  `/etc/eshu-token` and re-registers; it gets the token the dashboard
   currently considers current (`api_token` or, after a commit, the new one).
-  A rotation delivered between the installer's read and its register is safe
-  because both tokens authenticate. The update is not a second rotation.
+  The update does not rewrite the file unless the dashboard returns a new
+  token, so a rotation delivered between the installer's read and its register
+  is safe because both tokens authenticate. The update is not a second
+  rotation.
 
-**Audit rows.** `gateway_token_rotation_started` (actor, ip),
-`gateway_token_rotation_delivered` (ip, when a poll carried it),
-`gateway_token_rotated` (ip, old revoked — the commit),
+**Audit rows.** `gateway_token_rotation_started` (actor, ip, method),
+`gateway_token_rotation_delivered` (routine, when a poll carried it),
+`gateway_token_rotation_pushed` (compromise, after a successful SSH write),
+`gateway_token_rotation_push_failed` (ip, short reason),
+`gateway_token_rotated` (ip, old revoked — the commit; method),
 `gateway_token_rotation_cancelled` (actor, ip),
 `gateway_token_rotation_expired` (ip), `gateway_token_rotation_failed`
-(ip, short reason from the poller). Details never include either token.
+(ip, short reason from the poller), and `gateway_auth_failed` (ip, at most one
+row a minute per IP, for repeated 401s). Details never include either token.
 
-**UI.** Gateways table, row menu: **Rotate token**. The confirm modal says, in
-plain words: the gateway gets a new token on its next poll (within 30 s); both
-tokens work until the first poll with the new one; then the old one stops; if
-the gateway is offline it keeps working with the old one until it returns; the
-token is never shown; finish pending rotations before restoring a backup.
-While pending, the row shows a `rotating` badge (started 5 min ago) instead of
-the usual online dot detail; `Cancel` is offered only before delivery. No
-token appears in the DOM, a toast, a log line or an audit row. The action
-stays available while the fleet is frozen: rotation changes a credential, not
-a command (open question 7).
+**UI.** Gateways table, row menu: **Rotate token** and, when the gateway
+reports `ssh_dashboard_key=1` and has a pinned host key, **Rotate for
+compromise**. Without the key/pin the second entry is replaced by a
+non-clickable **"re-enrol only"** note that names why. The routine confirm
+says: the gateway gets a new token on its next poll (within 30 s); both tokens
+work until the first poll with the new one; then the old one stops; if the
+gateway is offline it keeps working with the old one until it returns; the
+token is never shown; this **cannot** evict someone who already holds the old
+token — use "Rotate for compromise" for a suspected leak; finish pending
+rotations before restoring a backup. The compromise confirm says: the new
+token is delivered over the dashboard's SSH key, never over the token channel;
+the old token stops working when the push succeeds; if the push fails, nothing
+changes and you can retry or re-enrol; it needs the pinned host key and the
+dashboard key line. While pending, the row shows a `rotating` badge (started 5
+min ago); `Cancel` is offered only before delivery. No token appears in the
+DOM, a toast, a log line or an audit row. The action stays available while the
+fleet is frozen: rotation changes a credential, not a command.
 
 **Tests.**
 
-* Dashboard: mint sets `api_token_next` and audits; a poll with the old token
-  returns `rotate_token`; a poll with the new token commits (old → 401,
-  `ssh_key_derived` is K_new, `rotation_complete` on the response, audit
-  `gateway_token_rotated`); a second rotate while pending is
-  `rotation_pending`; cancel works only before delivery; 24 h expiry drops
-  the pending token; the token never appears in any response, audit row or
-  log capture.
+* Dashboard: mint sets `api_token_next`/method and audits; a routine poll with
+  the old token returns `rotate_token`; a poll with the new token commits (old
+  → 401, `ssh_key_derived` is K_new, `rotation_complete` on the response, audit
+  `gateway_token_rotated`); a second rotate while pending is `rotation_pending`;
+  a compromise rotation is **not** delivered on any poll (old-token poll
+  returns no `rotate_token`); the SSH push commits only on success, revokes
+  old + K_old, audits `gateway_token_rotation_pushed`; a failed push changes
+  nothing and can be cancelled; cancel works only before delivery; 24 h expiry
+  drops the pending token; the token never appears in any response, audit row
+  or log capture; `ssh_dashboard_key=0`/absent offers re-enrol only.
 * Poller sandbox (`tests/test_poller.py`): a poll response with `rotate_token`
-  writes `.prev` and the new `/etc/eshu-token` (0600), rewrites only the
-  anchored `GATEWAY_TOKEN=` lines in the two scripts, uses the new token on
-  the next poll, and removes `.prev` after `rotation_complete`; a write
-  failure keeps the old token and reports `rotation_failed`; no token in
-  argv, the logger or the policy file.
+  writes `.prev` and the new `/etc/eshu-token` (0600), uses the new token on
+  the next poll, and removes `.prev` after `rotation_complete`; a write failure
+  keeps the old token and reports `rotation_failed`; no token in argv, the
+  logger or the policy file; no script is rewritten (BQ4).
 * Gateway sandbox (`tests/test_gateway_script.py`): the agent-prefix MAC
-  verifies with K_new and, while `.prev` exists, with K_old; an unrelated key
-  fails; after the complete signal `.prev` is refused.
-* Installer: the baked copies carry the anchored line the `sed` matches, and a
-  fresh install writes no `.prev`.
-* UI: the confirm text names the overlap and the backup caveat (a string
-  test); the row badge appears from a pending row and the token is absent
-  from the rendered HTML.
+  verifies with K_new and, while a fresh `.prev` exists, with K_old; an
+  unrelated key fails; `.prev` older than 24 h is refused; after the complete
+  signal `.prev` is refused; the dashboard-key `rotate-token` subcommand
+  validates 64-hex, writes `/etc/eshu-token` atomically, writes no `.prev`, and
+  removes an existing one.
+* Installer: no `GATEWAY_TOKEN=` substitution anywhere (BQ4); a fresh install
+  writes no `.prev`; the register reports `ssh_dashboard_key` only after the
+  dashboard key line is written.
+* UI: the confirm texts name the routine/compromise difference, the overlap and
+  the backup caveat (a string test); the row badge appears from a pending row
+  and the token is absent from the rendered HTML; "re-enrol only" for a
+  gateway without the key.
 
-**Open questions for security.**
+**Open questions for security (round 2).**
 
-1. **Overlap on every endpoint, or only the poll/register?** The design
-   accepts both tokens on every gateway-facing endpoint until the commit; the
-   alternative is to accept the new one only on `/api/poll` so a leaked
-   pending token cannot claim tickets. Which do you want?
-2. **The SSH signing key.** Rotating K with the token and accepting K_prev on
-   the gateway is the smallest change but extends the old credential's life
-   to the overlap. Should K instead be derived from a separate long-lived
-   key that rotation does not touch? That is a bigger change (key storage,
-   installer) and needs its own note.
-3. **Revoke on first use, or after a grace?** Committing at the first
-   new-token request is simple but a request already in flight with the old
-   token can land just after it and 401. A 60 s grace after the first new use
-   (keeping both, then revoking) removes that race at the cost of a wider
-   window. Which is the better trade?
-4. **Cancel and delivery.** The dashboard only knows a poll was *served*,
-   not that the gateway applied the token. Is "cancel only before any poll
-   after `started_at`" acceptable, or should cancel always be offered with a
-   "re-enrol may be needed" warning?
-5. **Restore.** Is "a restore rolls back rotations; re-enrol the gateway"
-   acceptable, or do you want a recovery path that does not need shell
-   access (for example a one-time enrollment token that also rotates)?
-6. **Token storage.** Chunk 7 will stop storing the token in plaintext. Does
-   rotation store `api_token_next` hashed from day one, so the plaintext
-   exists only in the poll response, or wait for Chunk 7 and keep both
-   plaintext until then?
-7. **Who may rotate.** Session + CSRF only, or a fresh password confirmation
-   (the action is one click from locking a gateway out)? Should a frozen
-   fleet block it?
-8. **Rate and abuse.** One rotation at a time per gateway is required; should
-   there also be a per-operator rate limit and an alert on repeated 401s from
-   a gateway that a rotation just left behind (the restore case)?
-9. **The `.prev` file.** 0600 root:root, deleted on complete or after 24 h.
-   Is a fixed 24 h acceptable, and should the gateway refuse to start if both
-   keys are absent (fail closed, as today with no `/etc/eshu-token`)?
+1. **The `ssh_dashboard_key` capability.** The installer would report it after
+   writing the line; old gateways send nothing and read as "re-enrol only".
+   Is that shape acceptable, or should the dashboard infer it from the pinned
+   key alone (which cannot see a removed `authorized_keys` line)?
+2. **Compromise ordering.** The design pushes first and revokes on success, so
+   a failed push leaves the old token valid (and the compromise unfixed) rather
+   than stranding a gateway. Is that the right trade, or should the old token
+   be revoked before the push (fail closed, re-enrol on failure)?
+3. **`.prev` on compromise.** The design refuses to write one (K_old dies with
+   the token). Confirm that the routine-only `.prev` is the intended split.
 
----
-
+`bash scripts/verify.sh`: `2859 passed, 26 skipped, 8 warnings in 634.69s
+(0:10:34)` (docs only; the same suite as the round-1 note).
 
 #### Security answers on the GT1 design (security reviewer, 2026-11-14, at `e5182e5`)
 
