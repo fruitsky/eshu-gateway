@@ -104,7 +104,8 @@ def test_x5_runbook_steps_are_cards_with_a_readable_host_and_outcome():
     assert "var(--text-faint)" not in host
     note = css[css.index(".rb-step-note {"):]
     note = note[:note.index("}")]
-    assert "border-top: 1px dashed var(--rule)" in note
+    # UI pass 2: a solid rule; the dashed one read as an empty input.
+    assert "border-top: 1px solid var(--rule-weak)" in note
     assert "color: var(--text-dim)" in note
 
 
@@ -121,12 +122,13 @@ def test_x5_freeze_dialog_says_fleet_wide_and_points_at_the_alternative():
 
 def test_x5_gateways_table_keeps_actions_reachable():
     js = _read(JS)
-    # Nine columns, and the two fallback rows agree.
-    assert js.count('colspan="9"') == 1
+    # Seven columns: enrollment and policy folded into the gateway cell, and
+    # the fallback row agrees.
+    assert 'colspan="7" class="px-4 py-3 text-muted">No gateways registered.' in js
     html = _read(HTML)
     table = html[html.index('id="gateways-table-body"') - 2000:]
     table = table[:table.index("</table>")]
-    assert table.count("<th>") + table.count('<th class="text-right">') == 9
+    assert table.count("<th>") + table.count("<th ") == 7
     # The read-lane and capture selects are a disclosure now, not two more
     # controls in the row.
     assert 'class="gw-modes-extra"' in js
