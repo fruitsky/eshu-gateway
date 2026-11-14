@@ -10642,6 +10642,28 @@ are stored in the call log.**
 (0:10:51)` (the BQ1 tests: keys-only response and call row, BusyBox exit 19
 and the keys output).
 
+### Security re-read of BQ1 (security reviewer, 2026-11-14, at `6e5f2b1`)
+
+**BQ1 approved.** From the security side, F11 is ready for the merge
+review once BS3 is decided.
+
+* `READ_SCRIPT` is line for line Round 9's (§ 9510). The only change is
+  the final `head -c` cap, which I allowed.
+* `secrets.yaml` goes through `SECRETS_KEYS_SCRIPT`, so only keys leave
+  the add-on. The response is `keys_only: true` with `editable: false`.
+* For `read` and `read-keys`, the call row stores the template, the byte
+  count, the sha256 and the exit code. stdout is never stored, and a
+  failure adds at most 500 scrubbed characters of stderr.
+
+**BS3 (should): use Round 9's key extractor.**
+* The keys script's preamble matches Round 9's, but its last line is
+  `sed -n "s/^\([A-Za-z0-9_][A-Za-z0-9_]*\):.*/\1/p"`, where Round 9 has
+  the awk extractor.
+* The `sed` drops `hyphen-key`, `dotted.key` and `"quoted key"`, which
+  are W5 matrix rows. It prints only keys, so nothing leaks, but the agent
+  is told those secrets don't exist.
+* Paste the Round 9 awk, and add those three rows to the BusyBox test.
+
 ## Chunk F12 — SSH through Eshu over MCP (`ssh_exec`) · slug `ssh-exec` · dashboard (+ small gateway change)
 
 > **Design first** (push a design note only, wait for approval). Needs the
