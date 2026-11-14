@@ -283,6 +283,38 @@ button::-moz-focus-inner { border: 0; padding: 0; }
   a { color: var(--accent); }
   a:hover { text-decoration: underline; }
 
+  /* UI pass 2: the HUD separator is a pseudo-element, so a wrapped subtitle
+     does not start a line with a stray dot on a phone. */
+  .hud-sub::before { content: '\00b7 '; }
+  @media (max-width: 640px) { .hud-sub::before { content: ''; } }
+
+  /* The two policy buttons keep one line each; at a narrow width they share
+     one full-width row instead of wrapping inside themselves. */
+  .pol-actions .btn { white-space: nowrap; }
+  @media (max-width: 480px) {
+    .pol-actions { width: 100%; flex-wrap: wrap; }
+    .pol-actions .btn { flex: 1 1 auto; }
+  }
+
+  /* The first proposed plan's Approve stays reachable when the plan card is
+     below the fold (two or more pending JITs). */
+  .plan-cta {
+    position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%);
+    z-index: 60; display: flex; align-items: center; gap: 8px;
+    max-width: min(94vw, 640px); padding: 8px 10px;
+    background: var(--bg-surface); border: 1px solid var(--accent-glow);
+    border-radius: 6px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  }
+  .plan-cta.hidden { display: none; }
+  .plan-cta-text {
+    font-size: 12px; color: var(--text-main); min-width: 0;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  @media (max-width: 480px) {
+    .plan-cta { left: 10px; right: 10px; transform: none; max-width: none; flex-wrap: wrap; }
+    .plan-cta-text { flex: 1 1 100%; white-space: normal; }
+  }
+
   /* ── JIT Ticket ─────────────────────────────────────────── */
   .jit-ticket {
     display: flex; align-items: center; justify-content: space-between; gap: 16px;
@@ -5746,7 +5778,8 @@ body.pol-open .mobile-menu-btn, body.pol-open .mobile-freeze { display: none; }
   font-size: 12px;
   margin-top: 7px;
   padding-top: 6px;
-  border-top: 1px dashed var(--rule);
+  /* UI pass 2: a solid rule; the dashed one read as an empty input. */
+  border-top: 1px solid var(--rule-weak);
   font-style: italic;
   overflow-wrap: anywhere;
 }

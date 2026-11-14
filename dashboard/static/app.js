@@ -688,6 +688,7 @@ async function switchView(target) {
   });
   syncNavAria();
   closeMobileSidebar();
+  if (typeof renderPlanCta === 'function') renderPlanCta();
   if (target === 'gateways') { fetchGateways(); fetchEnrollData(); fetchGatewayHourly(); }
   if (target === 'history') { fetchRequests(); fetchIntegrationCalls(); }
   if (target === 'windows') { fetchWindowsTable(); }
@@ -3959,6 +3960,79 @@ function planCardHtml(plan) {
     '</div></div>';
 }
 
+/* UI pass 2: when the first proposed plan's own Approve is below the fold
+   (two or more pending JITs push the card down), a fixed strip keeps that
+   same action reachable. It calls the card's own decidePlan, so the
+   confirmation rules and TTL are identical. */
+var _planCtaId = 0;
+var _planCtaRaf = 0;
+
+function planCardApproveButton(planId) {
+  return document.querySelector('#plans-widget .plan-card[data-plan-card="' +
+    Number(planId) + '"] .btn-approve');
+}
+
+function renderPlanCta() {
+  var cta = document.getElementById('plan-cta');
+  if (!cta) return;
+  // The plan card lives on Home only; the strip must not follow the operator
+  // to another view (where its buttons would refer to something off-screen).
+  var home = document.getElementById('view-home');
+  if (!home || home.classList.contains('hidden')) {
+    cta.classList.add('hidden');
+    _planCtaId = 0;
+    return;
+  }
+  var plans = _sessionPlans || [];
+  var plan = plans.filter(function (p) {
+    return (p.status || 'proposed') === 'proposed';
+  })[0];
+  var cardBtn = plan ? planCardApproveButton(plan.id) : null;
+  if (!plan || !cardBtn) {
+    cta.classList.add('hidden');
+    _planCtaId = 0;
+    return;
+  }
+  var r = cardBtn.getBoundingClientRect();
+  var inView = r.width > 0 && r.top >= 0 && r.bottom <= window.innerHeight;
+  if (inView) {
+    cta.classList.add('hidden');
+    _planCtaId = 0;
+    return;
+  }
+  _planCtaId = Number(plan.id);
+  var items = (plan.items || []).filter(function (i) { return !i.removed; });
+  var text = document.getElementById('plan-cta-text');
+  if (text) {
+    text.textContent = 'Plan #' + Number(plan.id) + ' \u00b7 ' +
+      (plan.agent || 'unknown agent') + ' \u00b7 ' + items.length +
+      (items.length === 1 ? ' change' : ' changes') + ' waiting';
+  }
+  var approve = document.getElementById('plan-cta-approve');
+  if (approve) {
+    approve.textContent = _planConfirm[Number(plan.id)]
+      ? 'Press again to approve' : 'Approve plan';
+  }
+  cta.classList.remove('hidden');
+}
+
+function schedulePlanCta() {
+  if (_planCtaRaf) return;
+  _planCtaRaf = window.requestAnimationFrame(function () {
+    _planCtaRaf = 0;
+    renderPlanCta();
+  });
+}
+
+function scrollToPlanCard() {
+  var card = document.querySelector('#plans-widget .plan-card[data-plan-card="' +
+    Number(_planCtaId) + '"]');
+  if (card && card.scrollIntoView) card.scrollIntoView({ block: 'center' });
+}
+
+window.addEventListener('scroll', schedulePlanCta, { passive: true });
+window.addEventListener('resize', schedulePlanCta);
+
 function renderPlans() {
   var widget = document.getElementById('plans-widget');
   var list = document.getElementById('plans-list');
@@ -3975,6 +4049,7 @@ function renderPlans() {
     list.innerHTML = '';
     if (count) count.textContent = '';
     _planDisplayed = {};
+    renderPlanCta();
     return;
   }
   /* R3: if a session's proposal id changed while its card was on screen, the
@@ -3992,6 +4067,7 @@ function renderPlans() {
   if (slot) slot.classList.remove('hidden');
   if (count) count.textContent = plans.length + ' waiting';
   list.innerHTML = plans.map(planCardHtml).join('');
+  renderPlanCta();
 }
 
 async function decidePlan(planId, action) {

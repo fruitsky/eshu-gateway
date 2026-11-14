@@ -23,7 +23,7 @@
 <link rel="preload" href="/static/fonts/instrument-serif-regular-latin.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="preload" href="/static/fonts/jetbrains-mono-var-latin.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="/static/fonts.css?v=2">
-<link rel="stylesheet" href="/static/style.css?v=ui15">
+<link rel="stylesheet" href="/static/style.css?v=ui16">
 
 </head>
 <body>
@@ -35,6 +35,14 @@
 <div class="glitch" id="glitch"></div>
 
 <!-- Toast -->
+<!-- X5-r/UI pass 2: the first proposed plan's Approve stays reachable when
+     the plan card itself is below the fold (two or more pending JITs). -->
+<div id="plan-cta" class="plan-cta hidden" role="region" aria-label="Plan waiting">
+  <span class="plan-cta-text" id="plan-cta-text"></span>
+  <button type="button" class="btn btn-muted btn-xs" onclick="scrollToPlanCard()">Review</button>
+  <button type="button" class="btn btn-approve btn-xs" id="plan-cta-approve" onclick="decidePlan(_planCtaId, 'approve')">Approve plan</button>
+  <button type="button" class="btn btn-deny btn-xs" onclick="decidePlan(_planCtaId, 'deny')">Deny</button>
+</div>
 <div id="toast" role="status" aria-live="polite" class="hidden fixed top-4 left-1/2 transform -translate-x-1/2 z-50 px-6 py-3 rounded-lg text-sm font-medium shadow-lg toast"></div>
 
 <!-- First-Run Setup Overlay -->
@@ -247,7 +255,7 @@
     <!-- HISTORY VIEW — SSH Commands + Proxied Calls -->
     <div id="view-history" class="hidden w-full" data-ink="section">
       <div class="hud" data-od-id="history-hud">
-        <div class="hud-txt"><b>The ledger</b><span class="hud-sub">&middot; every crossing kept</span></div>
+        <div class="hud-txt"><b>The ledger</b><span class="hud-sub">every crossing kept</span></div>
         <div class="hud-right"><span class="hud-sum" id="history-hud-sum"><span><span class="n">&mdash;</span> crossings this week</span></span></div>
       </div>
       <div class="history-tabs" data-od-id="history-tabs">
@@ -365,7 +373,7 @@
     <!-- GATEWAYS VIEW — Enrollment + unified gateway table -->
     <div id="view-gateways" class="hidden w-full" data-ink="section">
       <div class="hud" data-od-id="gateways-hud">
-        <div class="hud-txt"><b>The nodes</b><span class="hud-sub">&middot; each keeps the threshold</span></div>
+        <div class="hud-txt"><b>The nodes</b><span class="hud-sub">each keeps the threshold</span></div>
         <div class="hud-right"><span class="hud-sum" id="gateways-hud-sum"><span><span class="n">&mdash;</span> online</span></span></div>
       </div>
       <details class="widget enroll-panel" data-od-id="gateway-enrollment">
@@ -409,7 +417,7 @@
     <!-- APPROVED WINDOWS VIEW -->
     <div id="view-windows" class="hidden w-full" data-ink="section">
       <div class="hud" data-od-id="windows-hud">
-        <div class="hud-txt"><b>The agreed hours</b><span class="hud-sub">&middot; pre-opened thresholds</span></div>
+        <div class="hud-txt"><b>The agreed hours</b><span class="hud-sub">pre-opened thresholds</span></div>
         <div class="hud-right"><span class="hud-sum" id="windows-hud-sum"><span><span class="n">&mdash;</span> open</span></span></div>
       </div>
       <div class="widget" data-od-id="windows-table">
@@ -429,7 +437,7 @@
     <!-- STATISTICS VIEW -->
     <div id="view-stats" class="hidden w-full" data-ink="section">
       <div class="hud" data-od-id="stats-hud">
-        <div class="hud-txt"><b>The tally</b><span class="hud-sub">&middot; patterns of the fleet</span></div>
+        <div class="hud-txt"><b>The tally</b><span class="hud-sub">patterns of the fleet</span></div>
         <div class="hud-right">
           <select id="stats-days" onchange="fetchStatistics()" class="text-xs stats-days">
             <option value="7">7 days</option>
@@ -532,7 +540,7 @@
     <!-- INVENTORY VIEW — where is X? (F14) -->
     <div id="view-inventory" class="hidden w-full" data-ink="section">
       <div class="hud" data-od-id="inventory-hud">
-        <div class="hud-txt"><b>The map</b><span class="hud-sub">&middot; every name, one address</span></div>
+        <div class="hud-txt"><b>The map</b><span class="hud-sub">every name, one address</span></div>
       </div>
       <div class="widget" data-od-id="inventory-panel">
         <div class="widget-header">
@@ -556,7 +564,7 @@
     <!-- X2: the runbooks page -->
     <div id="view-runbooks" class="hidden w-full" data-ink="section">
       <div class="hud" data-od-id="runbooks-hud">
-        <div class="hud-txt"><b>The field notes</b><span class="hud-sub">&middot; what worked, in order</span></div>
+        <div class="hud-txt"><b>The field notes</b><span class="hud-sub">what worked, in order</span></div>
       </div>
       <div class="widget" data-od-id="runbooks-panel">
         <div class="widget-header">
@@ -577,7 +585,7 @@
     <!-- AGENTS VIEW — one place per agent (X4) -->
     <div id="view-agents" class="hidden w-full" data-ink="section">
       <div class="hud" data-od-id="agents-hud">
-        <div class="hud-txt"><b>The agents</b><span class="hud-sub">&middot; who may cross, and what they may carry</span></div>
+        <div class="hud-txt"><b>The agents</b><span class="hud-sub">who may cross, and what they may carry</span></div>
         <div class="hud-right"><span class="hud-sum" id="agents-hud-sum"><span><span class="n">&mdash;</span> tokens</span></span></div>
       </div>
 
@@ -796,14 +804,14 @@
     <!-- CONTROLS VIEW — Policy -->
     <div id="view-controls" class="hidden w-full" data-ink="panel">
       <div class="hud" data-od-id="policies-hud">
-        <div class="hud-txt"><b>Command policy</b><span class="hud-sub">&middot; the fleet-wide SSH rules: what crosses without a word</span></div>
+        <div class="hud-txt"><b>Command policy</b><span class="hud-sub">the fleet-wide SSH rules: what crosses without a word</span></div>
       </div>
       <!-- Global Central Policy -->
       <div class="widget" data-od-id="policy-editor">
         <div class="widget-header">
           Global Central Policy
           <span class="text-xs text-muted">Policy version: <span id="policy-version-label" class="font-mono">-</span></span>
-          <div class="flex items-center gap-2">
+          <div class="flex items-center gap-2 pol-actions">
             <button onclick="openModal('policy-changes-modal')" class="btn btn-muted btn-xs">View Policy Changes</button>
             <button onclick="savePolicies()" id="save-policies-btn" class="btn btn-sm" data-od-id="policy-save">Save & Push Policies</button>
           </div>
@@ -880,7 +888,7 @@
     <!-- FLEET RUN VIEW — solar broadcast console -->
     <div id="view-fleet" class="hidden w-full">
       <div class="hud" data-od-id="fleet-hud">
-        <div class="hud-txt"><b>The broadcast</b><span class="hud-sub">&middot; compose, queue, then dispatch to every ear</span></div>
+        <div class="hud-txt"><b>The broadcast</b><span class="hud-sub">compose, queue, then dispatch to every ear</span></div>
         <div class="hud-right">
           <span class="hud-sum"><span><span class="n" id="fleet-node-count">0</span> nodes</span><span><span class="n" id="fleet-on-count">0</span> listening</span><span><span class="n" id="fleet-sel-count">0</span> ears</span></span>
         </div>
@@ -962,7 +970,7 @@
     <!-- INTEGRATIONS VIEW — agent API gateway (MCP) -->
     <div id="view-integrations" class="hidden w-full" data-ink="section">
       <div class="hud" data-od-id="integrations-hud">
-        <div class="hud-txt"><b>The outer sky</b><span class="hud-sub">&middot; fainter stars, farther gates</span></div>
+        <div class="hud-txt"><b>The outer sky</b><span class="hud-sub">fainter stars, farther gates</span></div>
       </div>
       <div class="grid grid-cols-1 lg:grid-cols-2 gap-5">
         <div class="flex flex-col gap-5">
@@ -1062,7 +1070,7 @@
     <!-- SETTINGS VIEW — Preferences (notifications, password, webhook) -->
     <div id="view-settings" class="hidden w-full" data-ink="panel">
       <div class="hud" data-od-id="settings-hud">
-        <div class="hud-txt"><b>The guardian's preferences</b><span class="hud-sub">&middot; how the threshold speaks</span></div>
+        <div class="hud-txt"><b>The guardian's preferences</b><span class="hud-sub">how the threshold speaks</span></div>
       </div>
       <div class="grid grid-cols-1 lg:grid-cols-2 gap-5">
         <div class="flex flex-col gap-5">
@@ -1195,7 +1203,7 @@
     <!-- LOGS VIEW — Audit Log -->
     <div id="view-logs" class="hidden w-full" data-ink="section">
       <div class="hud" data-od-id="logs-hud">
-        <div class="hud-txt"><b>The record</b><span class="hud-sub">&middot; every event, kept in order</span></div>
+        <div class="hud-txt"><b>The record</b><span class="hud-sub">every event, kept in order</span></div>
       </div>
       <div class="widget" data-od-id="audit-log-table">
         <div class="widget-header">
@@ -1220,7 +1228,7 @@
 </main>
 
 <script src="/static/state.js?v=ui3"></script>
-<script src="/static/app.js?v=ui23"></script>
+<script src="/static/app.js?v=ui24"></script>
 
 <!-- Create / Edit Approved Window Modal -->
 <div id="create-window-modal" class="modal-overlay hidden">
