@@ -36,10 +36,18 @@ while true; do
 
     logger -t eshu-logger "Heartbeat: poller=$POLLER_OK gw=$GATEWAY_OK reach=$CAN_REACH"
 
+    # X8: which installer this gateway is running, re-sent every cycle so a
+    # hash change is visible even if the installer's own registration was lost.
+    INSTALLER_HASH=$(head -n1 "/etc/eshu-installer-hash" 2>/dev/null | tr -d '[:space:]' || true)
+    case "$INSTALLER_HASH" in
+        [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+        *) INSTALLER_HASH="" ;;
+    esac
+
     { gateway_header | curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -X POST "$DASHBOARD_URL/api/gateway-heartbeat" \
         -H @- \
         -H "Content-Type: application/json" \
-        -d "{\"ip\":\"$TARGET_IP\",\"hostname\":\"$HOST_NAME\",\"poller_ok\":$POLLER_OK,\"gateway_ok\":$GATEWAY_OK,\"can_reach\":$CAN_REACH}" ; } \
+        -d "{\"ip\":\"$TARGET_IP\",\"hostname\":\"$HOST_NAME\",\"poller_ok\":$POLLER_OK,\"gateway_ok\":$GATEWAY_OK,\"can_reach\":$CAN_REACH,\"installer_hash\":\"$INSTALLER_HASH\"}" ; } \
         >/dev/null 2>&1 || true
 
     sleep "$INTERVAL"
