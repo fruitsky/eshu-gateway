@@ -13,7 +13,12 @@ done
 TARGET_IP="__TARGET_IP__"
 DASHBOARD_URL="__DASHBOARD_URL__"
 GATEWAY_VERSION="__GATEWAY_VERSION__"
-GATEWAY_TOKEN="__GATEWAY_TOKEN__"
+# BQ4: no baked token. /etc/eshu-token (root:root 0600) is read at the point
+# of use, so a rotation takes effect on the next request, including in a
+# process that started before it.
+eshu_token() {
+  head -n1 /etc/eshu-token 2>/dev/null | tr -d '[:space:]' || true
+}
 TICKETS_FILE="/var/run/eshu.tickets"
 
 # Runtime config. The installer bakes a URL, but /etc/eshu/dashboard_url wins so
@@ -67,7 +72,7 @@ ESHU_MCP_CAP=""
 # can read /proc/<pid>/cmdline while the call runs. The header travels on
 # stdin; printf is a shell builtin, so the value never leaves this shell.
 gateway_header() {
-  printf 'X-Gateway-Token: %s\n' "${GATEWAY_TOKEN:-}"
+  printf 'X-Gateway-Token: %s\n' "$(eshu_token)"
 }
 ESHU_VERIFIED_AGENT=""
 SIG_STATE="none"

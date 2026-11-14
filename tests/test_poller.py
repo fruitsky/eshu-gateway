@@ -18,7 +18,9 @@ No root, no network, no real /etc.
 """
 import hashlib
 import os
+import re
 import shutil
+import stat
 import subprocess
 import time
 from pathlib import Path
@@ -72,6 +74,8 @@ class PollerSandbox:
             directory.mkdir(parents=True, exist_ok=True)
         self.work.mkdir(mode=0o700, exist_ok=True)
 
+        # BQ4: the poller reads the token from the one file.
+        (self.etc / "eshu-token").write_text("test-token\n")
         self.policy_file = self.root / "policy.json"
         self.poll_file = self.root / "poll.json"
         self.feature_file = self.root / "feature.sh"
@@ -227,7 +231,6 @@ exit 0
             ("__DASHBOARD_URL__", "http://dashboard.test"),
             ("__TARGET_IP__", "10.0.0.1"),
             ("__HOST_NAME__", "test-gw"),
-            ("__GATEWAY_TOKEN__", "test-token"),
         ):
             text = swap(token, value)
 
@@ -326,9 +329,12 @@ def poller(tmp_path):
 # ── install contract ────────────────────────────────────────────────────────
 def test_repo_script_keeps_placeholders_and_hashing():
     text = POLLER.read_text()
-    for token in ("__DASHBOARD_URL__", "__TARGET_IP__",
-                  "__HOST_NAME__", "__GATEWAY_TOKEN__"):
+    for token in ("__DASHBOARD_URL__", "__TARGET_IP__", "__HOST_NAME__"):
         assert token in text
+    # BQ4: no baked token; it reads the one file.
+    assert "__GATEWAY_TOKEN__" not in text
+    assert not re.search(r'^GATEWAY_TOKEN=', text, re.M)
+    assert "/etc/eshu-token" in text
     assert "POLICY_STAMP=" in text
     assert "sha256sum" in text
     assert '[[:space:]]' in text  # the whitespace-tolerant ticket guard
@@ -621,3 +627,49 @@ def test_be3_no_script_puts_a_token_header_in_curl_argv():
         text = (Path(__file__).resolve().parent.parent / path).read_text()
         for needle in ('-H "X-Gateway-Token', "-H \"X-Enrollment-Token"):
             assert needle not in text, (path, needle)
+
+
+# ── BQ4: the one token file ────────────────────────────────────────────────
+
+def _poller_function(name):
+    text = POLLER.read_text()
+    start = text.index(name + "() {")
+    end = text.index("\n}\n", start) + len("\n}\n")
+    return text[start:end]
+
+
+def test_bq4_the_poller_writes_a_validated_token_atomically(tmp_path):
+    from test_installer import _stub
+    target = tmp_path / "eshu-token"
+    log = tmp_path / "logger.log"
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    _stub(bindir, "chown", "exit 0")
+    _stub(bindir, "logger", 'printf "%s\\n" "$*" >> "' + str(log) + '"')
+    body = _poller_function("write_token_file").replace(
+        "/etc/eshu-token", str(target))
+    env = {"PATH": "%s:%s" % (bindir, os.environ.get("PATH", "/usr/bin:/bin"))}
+    token = "a" * 64
+
+    proc = subprocess.run(["bash", "-c", body + '\nwrite_token_file "$1"', "x",
+                           token], capture_output=True, text=True, env=env)
+    assert proc.returncode == 0, proc.stderr
+    assert target.read_text() == token + "\n"
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+    assert not (tmp_path / "eshu-token.tmp").exists()
+
+    # An invalid value changes nothing, writes no temp and is never logged.
+    proc = subprocess.run(["bash", "-c", body + '\nwrite_token_file "$1"', "x",
+                           "short"], capture_output=True, text=True, env=env)
+    assert proc.returncode != 0
+    assert target.read_text() == token + "\n"
+    assert not (tmp_path / "eshu-token.tmp").exists()
+    assert "short" not in log.read_text()
+    assert "REFUSED" in log.read_text()
+
+
+def test_bq4_no_sed_and_no_baked_token_in_the_poller():
+    text = POLLER.read_text()
+    assert "sed -i" not in text
+    assert not re.search(r'^GATEWAY_TOKEN=', text, re.M)
+    assert text.count("write_token_file \"$NEW_TOKEN\"") == 2

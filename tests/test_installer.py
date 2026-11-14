@@ -1,9 +1,10 @@
 """Regression tests for the gateway installer template.
 
-The write_poller/write_gateway `__GATEWAY_TOKEN__` substitution must be scoped to
-the header assignment ONLY (the poller/gateway headers each carry exactly one
-placeholder). Token self-heal was removed from the poller — recovery from a lost
-token is now re-enrollment — so nothing else depends on the placeholder.
+BQ4: no script carries a baked token. The gateway, poller and logger read
+/etc/eshu-token at the point of use; the installer writes that one file (0600,
+root:root) and substitutes nothing into the scripts. An update from an old
+baked-token install still finds its token (file first, old script as the
+fallback).
 """
 import os
 import re
@@ -19,31 +20,31 @@ def _read(path):
         return f.read()
 
 
-def test_write_poller_sed_is_scoped_to_header_assignment():
+def test_no_script_carries_a_baked_token():
+    for path in ("dashboard/eshu-gateway.sh", "dashboard/eshu-poller.sh",
+                 "dashboard/eshu-logger.sh"):
+        text = _read(path)
+        assert "__GATEWAY_TOKEN__" not in text
+        assert not re.search(r'^GATEWAY_TOKEN=', text, re.M)
+        assert "/etc/eshu-token" in text
     poller = _read("dashboard/eshu-poller.sh")
-    # Apply the exact (fixed) write_poller sed: header assignment line only.
-    fixed = re.sub(r'^GATEWAY_TOKEN="__GATEWAY_TOKEN__"',
-                   'GATEWAY_TOKEN="tok123"', poller, flags=re.M)
-    # Header replaced with the token, and the placeholder is fully consumed.
-    assert 'GATEWAY_TOKEN="tok123"' in fixed
-    assert "__GATEWAY_TOKEN__" not in fixed
-    # The dead self-heal block is gone (recovery is re-enrollment now).
+    assert "sed -i" not in poller or "GATEWAY_TOKEN" not in poller
     assert "self_heal" not in poller
-    assert 'GATEWAY_TOKEN" = "__GATEWAY_TOKEN__"' not in poller
 
 
 def test_logger_heartbeat_sends_gateway_token():
     logger = _read("dashboard/eshu-logger.sh")
-    # The heartbeat authenticates with the gateway token, read at runtime from
-    # the gateway script (never templated into the logger).
+    # BQ4: read from the one file at the point of use, never templated in.
     assert "X-Gateway-Token" in logger
-    assert "eshu-gateway.sh" in logger
+    assert "/etc/eshu-token" in logger
+    assert "grep -oP '^GATEWAY_TOKEN" not in logger
     assert "__GATEWAY_TOKEN__" not in logger
 
 
 def test_uninstall_report_sends_gateway_token():
     template = _read("dashboard/eshu-installer-template.sh")
-    # Token is read from the existing gateway script before it is removed.
+    # BQ4: read the token file first, with the old baked script as fallback.
+    assert 'head -n1 /etc/eshu-token' in template
     assert "grep -oP '^GATEWAY_TOKEN=\"\\K[^\"]+'" in template
     # The uninstall _report() authenticates its progress posts.
     m = re.search(r'# Helper: report progress to dashboard\n\s*_report\(\) \{(.*?)\n  \}',
@@ -52,10 +53,14 @@ def test_uninstall_report_sends_gateway_token():
     assert "X-Gateway-Token" in m.group(1)
 
 
-def test_template_has_no_global_token_sed():
+def test_template_substitutes_no_token_into_any_script():
     template = _read("dashboard/eshu-installer-template.sh")
-    # The old global token substitution must be gone from write_gateway/write_poller.
     assert 's|__GATEWAY_TOKEN__|${GATEWAY_TOKEN:-}|g' not in template
+    assert 'GATEWAY_TOKEN=\"${GATEWAY_TOKEN' not in template
+    # No token is written into the gateway or poller heredocs.
+    assert "__GATEWAY_TOKEN__" not in template.replace(
+        '# "__GATEWAY_TOKEN__" an unsubstituted template; neither is a token.',
+        '').replace('|None|__GATEWAY_TOKEN__)', '|None)')
 
 
 def test_uninstall_completes_before_deregistering():
@@ -200,9 +205,7 @@ def test_f12_write_gateway_is_root_only_in_every_mode(tmp_path):
     """
     template = _read("dashboard/eshu-installer-template.sh")
     body = _function(template, "write_gateway")
-    body = body.replace(
-        "__GATEWAY_CONTENT__",
-        '#!/bin/bash\nGATEWAY_TOKEN="__GATEWAY_TOKEN__"\n')
+    body = body.replace("__GATEWAY_CONTENT__", "#!/bin/bash\n")
     target = tmp_path / "eshu-gateway.sh"
     harness = tmp_path / "harness.sh"
     harness.write_text(body + """
@@ -221,7 +224,9 @@ write_gateway
                           text=True, env=env, timeout=60)
     assert proc.returncode == 0, proc.stderr
     assert stat.S_IMODE(target.stat().st_mode) == 0o700
-    assert "tok-123" in target.read_text()
+    # BQ4: the token is not written into the script any more.
+    assert "tok-123" not in target.read_text()
+    assert "GATEWAY_TOKEN=" not in target.read_text()
     # The temporary backup held the old token too; it must not be left behind.
     assert not (tmp_path / "eshu-gateway.sh.bak").exists()
 
@@ -264,11 +269,13 @@ def test_f12_token_file_is_created_0600_under_a_permissive_umask(tmp_path):
 
 
 def test_f12_poller_token_rotation_uses_umask_077():
-    """R1: both rotation paths create the temp token file root-only."""
+    """R1/BQ4: one writer, root-only from the first byte, used by both paths."""
     poller = _read("dashboard/eshu-poller.sh")
-    write = ("( umask 077; printf '%s\\n' \"$NEW_TOKEN\" > "
-             "/etc/eshu-token.tmp )")
-    assert poller.count(write) == 2
+    assert poller.count("umask 077; printf '%s\\n' \"$candidate\" > "
+                        "/etc/eshu-token.tmp") == 1
+    assert "chmod 600 /etc/eshu-token.tmp" in poller
+    assert poller.count('write_token_file "$NEW_TOKEN"') == 2
+    assert "sed -i" not in poller
 
 
 # ── RR1: re-registration presents the existing token ─────────────────────
@@ -375,10 +382,19 @@ def test_rr1_reinstall_presents_the_installed_token(tmp_path):
     assert final == TOK
 
 
-def test_rr1_token_file_is_the_fallback(tmp_path):
+def test_rr1_the_token_file_wins_over_an_old_baked_script(tmp_path):
     proc, calls, final = _run_register(
         tmp_path, ['{"status":"ok","gateway_token":"%s"}\n200' % TOK],
-        script_token="__GATEWAY_TOKEN__", file_token=TOK)
+        script_token=NEW, file_token=TOK)
+    assert _header(calls[0], "X-Gateway-Token") == ["X-Gateway-Token: " + TOK]
+    assert final == TOK
+
+
+def test_rr1_an_old_baked_script_is_the_compatibility_fallback(tmp_path):
+    """BQ4: an update from a baked-token install keeps working."""
+    proc, calls, final = _run_register(
+        tmp_path, ['{"status":"ok","gateway_token":"%s"}\n200' % TOK],
+        script_token=TOK)
     assert _header(calls[0], "X-Gateway-Token") == ["X-Gateway-Token: " + TOK]
     assert final == TOK
 

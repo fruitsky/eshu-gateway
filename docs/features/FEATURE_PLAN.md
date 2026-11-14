@@ -13103,6 +13103,27 @@ not in 1.3).**
 `bash scripts/verify.sh`: `3031 passed, 27 skipped, 8 warnings in 639.10s
 (0:10:39)` (3 more: the BH2 tests).
 
+**BQ4 (2026-11-14, in the 1.4 gateway stack).** No script carries a baked
+token any more:
+* `eshu-gateway.sh`, `eshu-poller.sh` and `eshu-logger.sh` read
+  `/etc/eshu-token` at the point of use (`eshu_token()`); the fleet runner
+  already did (BJ2). A rotation therefore applies to the next call, even in
+  a process that started before it.
+* The installer substitutes no token into either script; it still writes
+  `/etc/eshu-token` (0600 root:root) as the one copy.
+* The poller's four `sed -i` rewrites are gone. Both re-register paths call
+  one `write_token_file`: the candidate must match
+  `^[A-Za-z0-9_-]{16,128}$`, then it is written through a `umask 077` temp
+  with `chmod 600` and renamed; anything else leaves the old file and logs
+  a refusal without the value.
+* Compatibility: an update from an old baked-token install reads the file
+  first and the old script's line as the fallback (the file exists on every
+  installed gateway); the uninstaller reads the file too, with the same
+  fallback. Tests: the file wins over a baked script, an old baked script
+  still registers, the writer accepts a valid token and refuses an invalid
+  one without a temp file or a log entry, and neither script has
+  `GATEWAY_TOKEN=` or a token sed.
+
 **BQ2 tests (2026-11-14).** A fresh install with no `.ssh` succeeds and the
 directory is 700, owned by the user (the user-side `mkdir`). The install
 block is checked for the absence of root `mkdir -p "/home/$USER/.ssh"`,

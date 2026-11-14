@@ -3,14 +3,35 @@ TRIGGER_FILE="/var/run/eshu.last_trigger"
 DASHBOARD_URL="__DASHBOARD_URL__"
 TARGET_IP="__TARGET_IP__"
 HOST_NAME="__HOST_NAME__"
-GATEWAY_TOKEN="__GATEWAY_TOKEN__"
+# BQ4: no baked token. Read /etc/eshu-token at the point of use, so a
+# rotation applies to the next call without rewriting this script.
+eshu_token() {
+  head -n1 /etc/eshu-token 2>/dev/null | tr -d '[:space:]' || true
+}
 
 # BE3: token headers never go into curl's argv (readable in /proc by any
 # local user). printf is a builtin and curl reads the header lines from stdin.
-gateway_header() { printf 'X-Gateway-Token: %s\n' "${GATEWAY_TOKEN:-}"; }
+gateway_header() { printf 'X-Gateway-Token: %s\n' "$(eshu_token)"; }
 register_headers() {
-  printf 'X-Gateway-Token: %s\n' "${GATEWAY_TOKEN:-}"
+  printf 'X-Gateway-Token: %s\n' "$(eshu_token)"
   printf 'X-Enrollment-Token: %s\n' "${ESHU_ENROLL_TOKEN:-}"
+}
+
+# BQ4: one way to store a new token. Validate the delivered format first, then
+# write through a root-only temp and rename; never sed a script, never argv.
+# Returns non-zero (and leaves the file alone) on anything else.
+write_token_file() {   # $1 = the candidate
+  local candidate="$1"
+  if printf '%s' "$candidate" | grep -qE '^[A-Za-z0-9_-]{16,128}$'; then
+    ( umask 077; printf '%s\n' "$candidate" > /etc/eshu-token.tmp ) \
+      && chown root:root /etc/eshu-token.tmp \
+      && chmod 600 /etc/eshu-token.tmp \
+      && mv -f /etc/eshu-token.tmp /etc/eshu-token 2>/dev/null
+    return $?
+  fi
+  rm -f /etc/eshu-token.tmp 2>/dev/null || true
+  logger -t eshu-poller "REFUSED: the dashboard returned an invalid token; /etc/eshu-token unchanged"
+  return 1
 }
 POLL_INTERVAL=30
 
@@ -346,12 +367,9 @@ with open('/etc/eshu-windows.txt.tmp', 'w') as f:
              -d '{"ip":"'"$TARGET_IP"'","hostname":"'"$HOST_NAME"'","version":"'"$NEW_VER"'"}' 2>/dev/null || echo "")
         NEW_TOKEN=$(echo "$REG_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('gateway_token',''))" 2>/dev/null || echo "")
         if [ -n "$NEW_TOKEN" ] && [ "$NEW_TOKEN" != "None" ]; then
-          sed -i "s|^GATEWAY_TOKEN=.*|GATEWAY_TOKEN=\"$NEW_TOKEN\"|" /usr/local/bin/eshu-poller.sh
-          sed -i "s|^GATEWAY_TOKEN=.*|GATEWAY_TOKEN=\"$NEW_TOKEN\"|" /usr/local/bin/eshu-gateway.sh
-          # F12: the MAC helper reads the token from here, not from argv.
-          # R1: umask 077 so the temp file is never readable before chmod.
-          ( umask 077; printf '%s\n' "$NEW_TOKEN" > /etc/eshu-token.tmp ) && chmod 600 /etc/eshu-token.tmp && mv -f /etc/eshu-token.tmp /etc/eshu-token 2>/dev/null || true
-          GATEWAY_TOKEN="$NEW_TOKEN"
+          # BQ4: validate, then write the one file atomically. No sed, no
+          # argv, no second copy in the scripts.
+          write_token_file "$NEW_TOKEN" || true
         fi
         logger -t eshu-poller "Update to $NEW_VER completed (trigger $TRIGGER_ID)."
         rm -f "$UPDATE_FILE"
@@ -400,12 +418,9 @@ with open('/etc/eshu-windows.txt.tmp', 'w') as f:
              -d '{"ip":"'"$TARGET_IP"'","hostname":"'"$HOST_NAME"'","version":"'"$NEW_VER"'"}' 2>/dev/null || echo "")
         NEW_TOKEN=$(echo "$REG_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('gateway_token',''))" 2>/dev/null || echo "")
         if [ -n "$NEW_TOKEN" ] && [ "$NEW_TOKEN" != "None" ]; then
-          sed -i "s|^GATEWAY_TOKEN=.*|GATEWAY_TOKEN=\"$NEW_TOKEN\"|" /usr/local/bin/eshu-poller.sh
-          sed -i "s|^GATEWAY_TOKEN=.*|GATEWAY_TOKEN=\"$NEW_TOKEN\"|" /usr/local/bin/eshu-gateway.sh
-          # F12: the MAC helper reads the token from here, not from argv.
-          # R1: umask 077 so the temp file is never readable before chmod.
-          ( umask 077; printf '%s\n' "$NEW_TOKEN" > /etc/eshu-token.tmp ) && chmod 600 /etc/eshu-token.tmp && mv -f /etc/eshu-token.tmp /etc/eshu-token 2>/dev/null || true
-          GATEWAY_TOKEN="$NEW_TOKEN"
+          # BQ4: validate, then write the one file atomically. No sed, no
+          # argv, no second copy in the scripts.
+          write_token_file "$NEW_TOKEN" || true
         fi
       else
         logger -t eshu-poller "Dev update failed: could not download script from $FULL_DEV_URL"
