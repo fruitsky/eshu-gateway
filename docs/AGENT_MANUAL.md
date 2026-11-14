@@ -52,11 +52,11 @@ Use one of these two forms:
 * **Several commands separated by `;`** — preferred, because the card shows
   every byte exactly as it will run:
   `systemctl is-active nginx; nginx -t`
-* **A base64-encoded script**, only when you genuinely need a script:
-  `printf '%s' <base64> | base64 -d | sh`. The card shows the **base64**, not
-  the decoded script, so the operator cannot see what will run without
-  decoding it. Prefer the `;` form; use this only when the operator asks for
-  it.
+* **A real script** is not something to smuggle through this rule. If you
+  need one, ask the operator for a window or for a file deployed another way;
+  do not encode it to get past the refusal. `base64 -d | sh` is treated as
+  an encoded payload: it forces JIT and the card shows only a bounded decoded
+  preview, so it is the shape an operator can check least.
 
 ### Session & execution IDs (grouping)
 
@@ -391,8 +391,8 @@ truncated, reason}`. `output` is the end of the output, up to 64 KiB.
 - `host` is a gateway IP or hostname Eshu knows, never `user@host`, a port
   or an `-o` option.
 - `command` must be one line: a CR or LF is refused with `multiline_command`
-  (see **One line per command**). Join steps with `;`; a base64 script is
-  shown as base64 on the card.
+  (see **One line per command**). Join steps with `;` or `&&`; for a real
+  script, ask the operator for a window.
 
 #### Exit codes and output
 

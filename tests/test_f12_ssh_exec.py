@@ -142,7 +142,9 @@ class TestOneLineRule:
         assert out['reason'] == 'multiline_command'
         assert 'one line per command' in out['message'].lower()
         assert ';' in out['message']
-        assert 'base64' in out['message']
+        assert 'window' in out['message']
+        # BO1: the refusal must not teach the decode-to-exec shape.
+        assert 'base64' not in out['message']
 
     def test_the_ssh_exec_tool_description_names_the_rule(self):
         from core import mcp_server

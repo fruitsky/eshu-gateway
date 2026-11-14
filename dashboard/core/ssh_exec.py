@@ -361,10 +361,9 @@ def ssh_exec(host: str, command: str, session_id: str = '', timeout=None,
             return refused(
                 problem,
                 message=('one line per command: the command contains a line '
-                         'break. Join steps with ";" (the card shows every '
-                         'byte), or send a base64 script as '
-                         "printf '%s' <base64> | base64 -d | sh — the card "
-                         'shows the base64, not the script.'))
+                         'break. Join steps with ";" or "&&" (the card shows '
+                         'every byte). For a real script, ask the operator for '
+                         'a window; do not encode it to get past this rule.'))
         return refused(problem)
 
     gateway = resolve_gateway(host)

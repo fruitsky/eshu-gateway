@@ -13566,6 +13566,20 @@ it with `ESHU_PLAYWRIGHT_MODULES` to include it).
   to ask the operator for a window, or for a file deployed another way.
 * Nothing runs without JIT either way, so this does not block the deploy.
 
+**BO1 implemented (2026-11-14).** The refused-multiline text no longer offers
+`printf '%s' <base64> | base64 -d | sh`. The agent manual's *One line per
+command* section now says a real script is not to be smuggled through the
+rule: ask the operator for a window or for a file deployed another way; it
+also says why, because `base64 -d | sh` is classified as an encoded payload,
+forces JIT and gets only a bounded decoded preview on the card. The `ssh_exec`
+description, the `ssh_exec` refusal message and the manual's `ssh_exec` bullet
+now recommend `;` or `&&` and point at a window. The API detail already named
+only `;`. `test_a_multiline_command_is_refused_with_the_one_line_rule` asserts
+`window` is named and `base64` is not.
+
+`bash scripts/verify.sh`: `3028 passed, 27 skipped, 8 warnings in 638.44s
+(0:10:38)`.
+
 ## 7. Backlog (not planned in detail)
 
 * Deny with a reason, shown to the agent (cheap; low value given the data).
