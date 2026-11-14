@@ -9,11 +9,11 @@
     /* Was #7a6d5e — 3.86:1 on the base, below the 4.5:1 floor for body text.
        #9c8e7a measures 5.5:1 and keeps the warm, quiet register. */
     --text-muted: #9c8e7a;
-    /* Decorative only: separators, disabled glyphs, empty-state watermarks.
-       Never use for text that has to be read. */
-    --text-faint: #6f6555;
+    /* Quiet ink for section labels, table keys and meta. Readable on the
+       panels (AA, >= 4.5:1); separators use --rule-weak, not this. */
+    --text-faint: #9d8f7b;
     /* Quiet ink: hairline borders, placeholders, page footnotes. */
-    --text-quiet: #8a7d6c;
+    --text-quiet: #a29480;
     /* The soft dark hairline used on filled surfaces. */
     --border-soft: rgba(45, 41, 34, 0.6);
     --star: #cdd8e6;
@@ -168,7 +168,7 @@ button::-moz-focus-inner { border: 0; padding: 0; }
     margin-bottom:6px;
   }
   .sidebar-status-text{font-size:12px;color:var(--text-muted);font-weight:500}
-  .nav-item.nav-logout{color:rgba(220,38,38,0.55)}
+  .nav-item.nav-logout{color:#fca5a5}
   .nav-item.nav-logout:hover{color:var(--danger);background:rgba(220,38,38,0.08)}
   .nav-item.nav-logout svg{color:inherit}
 
@@ -276,6 +276,12 @@ button::-moz-focus-inner { border: 0; padding: 0; }
     color: var(--accent); border-bottom-color: var(--accent);
 
   }
+
+  /* A bare <a> inherited the browser's blue (#0000EE), 2.06:1 on the
+     panels. Links use the signal colour; underline only on hover so a
+     link inside a sentence still reads as one. */
+  a { color: var(--accent); }
+  a:hover { text-decoration: underline; }
 
   /* ── JIT Ticket ─────────────────────────────────────────── */
   .jit-ticket {
@@ -647,6 +653,7 @@ button::-moz-focus-inner { border: 0; padding: 0; }
 
   /* ── Toast ──────────────────────────────────────────────── */
   .toast { animation: slideDown 0.3s ease, fadeOut 0.5s ease 2.5s forwards; }
+  #toast { top: 76px; max-width: min(92vw, 520px); }
   .toast-success { background: #059669; color: white; }
   .toast-error { background: #e11d48; color: white; }
   .toast-info { background: #334155; color: #e2e8f0; }
@@ -1824,8 +1831,8 @@ textarea { font-family: 'JetBrains Mono', monospace; }
 /* Login */
 
 /* Toast */
-.toast-success { background: #92400e; color: var(--state-pending); }
-.toast-error { background: #7f1d1d; color: var(--danger-hover); }
+.toast-success { background: #92400e; color: #fff7ed; }
+.toast-error { background: #7f1d1d; color: #fee2e2; }
 
 /* Dropdown */
 .dropdown-menu, .widget.dropdown-menu { background: var(--bg-surface); border: 1px solid var(--border-color); border-radius: 6px; }
@@ -2666,7 +2673,7 @@ tbody tr:hover .text-muted, tbody tr:hover .cell-id, tbody tr:hover .log-time, t
 .btn:hover { box-shadow: none; }
 .btn-approve { background: rgba(74,222,128,0.14); color: var(--state-approved); }
 .btn-approve:hover { background: rgba(74,222,128,0.24); box-shadow: 0 0 14px rgba(74,222,128,0.22); }
-.btn-deny { background: transparent; border: 1px solid var(--text-quiet); color: rgba(122,109,94,0.85); }
+.btn-deny { background: transparent; border: 1px solid var(--text-quiet); color: #fca5a5; }
 .btn-deny:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-wash); }
 .btn-danger { border-color: rgba(220,38,38,0.55); }
 .btn-danger:hover { background: rgba(220,38,38,0.12); border-color: var(--danger); color: var(--danger-hover); box-shadow: 0 0 14px rgba(220,38,38,0.25); }
