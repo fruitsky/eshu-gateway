@@ -55,7 +55,8 @@ def channel_path(channel: str) -> str:
 
 
 def _legacy_paths() -> dict:
-    """Where the pre-X7 copies lived (inside the static mount)."""
+    """Where the pre-X7 copies lived (inside the static mount). The first
+    start deletes them; their contents are never used."""
     static = os.path.join(_DASHBOARD_DIR, 'static')
     return {
         FLEET: os.path.join(static, 'eshu-gateway-install.sh'),
@@ -73,8 +74,17 @@ def file_hash(path: str):
         return None
 
 
+def _ensure_dir() -> str:
+    """The channel directory, 0700 even when it already existed (makedirs
+    applies the mode only when it creates the directory)."""
+    path = channel_dir()
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    os.chmod(path, 0o700)
+    return path
+
+
 def _atomic_write(dst: str, data: bytes) -> None:
-    os.makedirs(os.path.dirname(dst), mode=0o700, exist_ok=True)
+    _ensure_dir()
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(dst),
                                prefix='.' + os.path.basename(dst) + '.')
     try:
@@ -106,36 +116,57 @@ def _initialised() -> bool:
 
 
 def ensure_initialised() -> None:
-    """Create Edge and Fleet once, preferring the pre-X7 copies.
+    """Create Edge and Fleet once, from Build, and remove the pre-X7 copies.
 
-    Runs at startup and lazily before any channel access. Fleet takes the
-    installer gateways were being served before X7 (the old static copy if it
-    is still on disk, otherwise Build, which is what /api/gateway-script
-    served). The audit row records where each channel came from, and notes
-    when Fleet differs from the last recorded promote.
+    Runs at startup and lazily before any channel access. Both channels start
+    as Build: the committed copies were byte-identical to it, and Build is
+    what /api/gateway-script served before X7, so the fleet sees no change.
+    A pre-X7 copy still on disk could only be one changed at runtime, so it is
+    never used (security, X7 question 3).
+
+    BP1: no previous-Fleet copy is created. The old `.bak` was an installer of
+    unknown age, possibly older than this week's security fixes; making it the
+    Rollback target would let the first Rollback downgrade the fleet. Rollback
+    stays unavailable until the first Deploy to Fleet. The pre-X7 files are
+    deleted, because the static mount would otherwise keep serving them.
     """
     if _initialised():
         return
     from db.audit import record_audit_event
     from db.misc import get_deployed_golden_hash, set_deployed_golden_hash
     from db.policies import set_meta
-    legacy = _legacy_paths()
+    _ensure_dir()
     build = _read_bytes(build_path())
     notes = []
-    for channel, fallback in ((FLEET, build), (EDGE, build), (FLEET_PREV, None)):
+    for channel in (FLEET, EDGE):
         dst = channel_path(channel)
         if os.path.exists(dst):
             notes.append('%s kept' % channel)
             continue
-        data = _read_bytes(legacy[channel])
-        source = 'pre-X7 copy'
-        if data is None:
-            data, source = fallback, 'Build'
-        if data is None:
+        if build is None:
+            notes.append('%s not created (no Build)' % channel)
             continue
-        _atomic_write(dst, data)
-        notes.append('%s from %s (%s)' % (channel, source,
-                                          file_hash(dst)))
+        _atomic_write(dst, build)
+        notes.append('%s from Build (%s)' % (channel, file_hash(dst)))
+    removed = []
+    for path in _legacy_paths().values():
+        try:
+            os.remove(path)
+            removed.append(os.path.basename(os.path.dirname(path)) + '/'
+                           + os.path.basename(path))
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            notes.append('could not remove %s: %s' % (os.path.basename(path), exc))
+    dev_dir = os.path.dirname(_legacy_paths()[EDGE])
+    try:
+        os.rmdir(dev_dir)
+    except OSError:
+        pass
+    if removed:
+        notes.append('removed pre-X7 copies: ' + ', '.join(removed))
+    notes.append('no previous Fleet: Rollback is available after the first '
+                 'Deploy to Fleet')
     fleet_hash = file_hash(channel_path(FLEET))
     deployed = get_deployed_golden_hash()
     if fleet_hash and deployed and deployed != fleet_hash:

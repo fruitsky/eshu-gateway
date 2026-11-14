@@ -48,17 +48,42 @@ class TestFirstStart:
         assert data["pipeline_state"] == "clear"
         assert data["deployed_hash"] == data["fleet_hash"]
 
-    def test_prefers_the_pre_x7_copies(self, auth_client, build, tmp_path,
-                                       monkeypatch):
-        legacy = {ic.FLEET: tmp_path / "old-fleet.sh", ic.EDGE: tmp_path / "old-edge.sh",
-                  ic.FLEET_PREV: tmp_path / "old-bak.sh"}
-        legacy[ic.FLEET].write_bytes(b"old fleet")
-        legacy[ic.EDGE].write_bytes(b"old edge")
-        legacy[ic.FLEET_PREV].write_bytes(b"old bak")
+    def test_migration_starts_from_build_and_removes_the_old_copies(
+            self, auth_client, build, tmp_path, monkeypatch):
+        """Security BP1 and question 3: the pre-X7 copies are never used,
+        there is no Rollback target until the first Deploy to Fleet, and the
+        old files are deleted (the static mount served them publicly)."""
+        dev = tmp_path / "static" / "dev"
+        dev.mkdir(parents=True)
+        legacy = {ic.FLEET: tmp_path / "static" / "old-fleet.sh",
+                  ic.EDGE: dev / "old-edge.sh",
+                  ic.FLEET_PREV: tmp_path / "static" / "old.bak"}
+        for path in legacy.values():
+            path.write_bytes(b"an installer of unknown age")
         monkeypatch.setattr(ic, "_legacy_paths", lambda: {k: str(v) for k, v in legacy.items()})
-        assert auth_client.get("/api/gateway-script").content == b"old fleet"
-        assert auth_client.get("/static/dev/eshu-gateway-install.sh").content == b"old edge"
+        assert auth_client.get("/api/gateway-script").content == build.read_bytes()
+        assert auth_client.get("/static/dev/eshu-gateway-install.sh").content == build.read_bytes()
+        assert ic.has_previous() is False
+        assert _status(auth_client)["backup_exists"] is False
+        assert auth_client.post("/api/dev/rollback").status_code == 404
+        assert not any(p.exists() for p in legacy.values())
+        assert not dev.exists()
+        from db.audit import get_audit_log
+        row = [r for r in get_audit_log(50) if r["event_type"] == "installer_channels_initialised"][0]
+        assert "removed pre-X7 copies" in row["details"]
+        assert "Rollback is available after the first Deploy to Fleet" in row["details"]
+
+    def test_rollback_becomes_available_after_the_first_promote(self, auth_client, build):
+        assert _status(auth_client)["backup_exists"] is False
+        auth_client.post("/api/dev/seed")
+        auth_client.post("/api/dev/promote")
         assert _status(auth_client)["backup_exists"] is True
+
+    def test_existing_channel_dir_is_forced_to_0700(self, auth_client, build):
+        os.makedirs(ic.channel_dir(), mode=0o755, exist_ok=True)
+        os.chmod(ic.channel_dir(), 0o755)
+        _status(auth_client)
+        assert os.stat(ic.channel_dir()).st_mode & 0o777 == 0o700
 
     def test_records_an_audit_row_once(self, auth_client, build):
         from db.audit import get_audit_log

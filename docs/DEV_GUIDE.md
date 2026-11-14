@@ -121,10 +121,26 @@ overrides the directory):
 
 So a deploy never changes what the fleet installs: the operator seeds Edge,
 pushes it to the dev gateways, checks them, then deploys to the fleet. Writes
-are atomic, and a missing channel is served as 503, never as Build. The first
-start after X7 creates the channels from the pre-X7 copies if they are still on
-disk, otherwise from Build, and records an `installer_channels_initialised`
-audit row.
+are atomic, and a missing channel is served as 503, never as Build.
+
+The first start after X7 creates Edge and Fleet from Build (what the fleet was
+already being served), deletes the pre-X7 copies in `static/`, and records an
+`installer_channels_initialised` audit row. It creates no previous-Fleet copy,
+so **Rollback is unavailable until the first Deploy to Fleet**.
+
+**Backups:** the channels and `eshu.db` belong together. The database holds
+the marker that says the channels exist, so back up and restore
+`dashboard/installer-channels/` with the database. Restoring one without the
+other leaves the marker set and the channels missing: every installer URL then
+answers 503 (it fails closed). **Recovery:** Seed Edge, then Deploy to Fleet.
+Deploy to Fleet also triggers a fleet-wide update, so do it when that is
+acceptable.
+
+**Not yet gated (BP2):** two other files the gateways run as root,
+`static/features/approved_windows.sh` (downloaded every poll cycle) and
+`static/fleet-runner.sh` (downloaded for every fleet command), are still served
+from the checkout. A dashboard deploy changes them for every gateway without a
+Deploy to Fleet. Moving them into the channels is a follow-up.
 
 ### Installer privilege checks
 

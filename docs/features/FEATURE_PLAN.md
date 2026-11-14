@@ -12163,14 +12163,16 @@ uninstall download, served the committed source file. So:
   served as **503**, never as Build or as another channel. Installer
   responses carry `Cache-Control: no-store`.
 * **First start (migration):** the channels are created once, recorded by
-  the meta marker `installer_channels_v1`. Each channel takes its pre-X7 copy
-  if it is still on disk, otherwise Build. The pull that brings X7 deletes the
-  committed copies, so in practice Fleet and Edge start as Build, which is
-  exactly what `/api/gateway-script` served before X7. The leftover untracked
-  `.bak` becomes `fleet.prev.sh`. An `installer_channels_initialised` audit
-  row records each source and hash, and notes if Fleet differs from the last
-  recorded promote hash. `deployed_golden_hash` is set to the Fleet hash.
-  After the marker, nothing is ever re-created.
+  the meta marker `installer_channels_v1`. Fleet and Edge start as Build,
+  which is exactly what `/api/gateway-script` served before X7. Pre-X7 copies
+  are never used (security answer 3). There is no `fleet.prev.sh`, so Rollback
+  is unavailable until the first Deploy to Fleet (BP1). The pre-X7 files in
+  `static/` (the `.bak` included) are deleted, since the static mount still
+  served them. An `installer_channels_initialised` audit row records the
+  hashes and the removals, and notes if Fleet differs from the last recorded
+  promote hash. `deployed_golden_hash` is set to the Fleet hash. After the
+  marker, nothing is ever re-created. The channel directory is forced to
+  `0700` even if it already existed.
 * **Promote and Rollback write nothing in the checkout.** Seed Edge and
   Deploy to Fleet record their times (`installer_edge_seeded_at`,
   `installer_fleet_promoted_at`).
@@ -12456,6 +12458,22 @@ tests in `tests/test_f15_probes.py` and the updated F3 boundary test.
 `bash scripts/verify.sh`: `2854 passed, 26 skipped, 7 warnings in 581.01s
 (0:09:41)`.
 
+
+### BP1 and the answers, done (feature reviewer, 2026-11-14)
+
+* **BP1:** the migration creates no `fleet.prev`, and `has_previous()` is
+  false until the first promote, so Rollback is 404. It deletes
+  `static/eshu-gateway-install.sh`, `static/eshu-gateway-install.sh.bak` and
+  `static/dev/eshu-gateway-install.sh` (and the empty `static/dev/`), and the
+  audit row lists them. Test:
+  `test_migration_starts_from_build_and_removes_the_old_copies`.
+* **Answer 3:** Fleet and Edge always start from Build. Pre-X7 copies are
+  never read.
+* **Answer 1:** the directory mode is enforced on every start
+  (`test_existing_channel_dir_is_forced_to_0700`). DEV_GUIDE says to back up
+  and restore the channels with `eshu.db`, and gives the recovery path (Seed
+  Edge, then Deploy to Fleet, which updates the fleet).
+* **BP2:** documented in DEV_GUIDE as not yet gated; a follow-up chunk.
 ---
 
 #### Security ruling on D6 (2026-11-12, at `72f2598`)
