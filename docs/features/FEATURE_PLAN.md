@@ -18007,6 +18007,136 @@ live under `.scratch/f27-shots/` outside git): `allowances-empty-1440.png`,
 `bash scripts/verify.sh`: `3222 passed, 26 skipped, 7 warnings in 695.57s
 (0:11:35)`.
 
+### Security review of the code round at `7da5350` (2026-11-15)
+
+**Verdict: changes requested. Two musts (BX1, BX2) and four shoulds
+(BX3–BX6).** The rest of the round is what the design asked for:
+* every route checks the session, and no MCP or agent path writes
+  allowances;
+* the UI escapes every field it renders;
+* the claim and the rate count are one `BEGIN IMMEDIATE` transaction;
+* `_parse_call` refuses `target`, extra `data` keys, a string `data`,
+  `all`/`none` and any non-plain id, so all of those get a card;
+* the ceiling, the never lists and the destructive words are re-checked at
+  match time;
+* `gated` beats an allowance (BD2);
+* an ambiguous match gets a card;
+* the agent line is generic (answer 8);
+* turning the `ceiling` event off is audited and sends one final notice
+  (answer 7);
+* agent ids come from an AUTOINCREMENT key, so a deleted agent's id is never
+  reused and its allowances cannot pass to a new agent.
+
+**BX1 (must): the label refresh and accept-join change a list that matching
+never reads.**
+* `_matches` reads `conditions_json['data.entity_id']['in']`, which is
+  written once, at insert. `refresh_labels` and `accept_join` update only
+  `entities_json` (the pins).
+* As a result:
+  * An entity that **leaves** the label keeps matching. "Drops out at once"
+    does not happen, and the operator usually removes a label precisely to
+    stop the agent touching that entity.
+  * An **accepted** joiner never matches. That is fail-safe, but the button
+    does nothing.
+  * AZ2's scan and resume's pin check read `entities_json`. A config write
+    that names the leaver therefore no longer suspends an allowance that
+    still matches it.
+* `test_a_label_leaver_drops_and_a_joiner_waits` asserts on the stored
+  column, not on a match, so it passes.
+* **Fix:**
+  * Keep one source of truth. Either match on the pins' entity ids, or
+    rewrite the condition list in the same UPDATE as the pins, in refresh
+    and in accept-join.
+  * Test with `match_and_claim`: a leaver gets `None` and an accepted
+    joiner matches.
+
+**BX2 (must): the registry-pin check runs only for label allowances.**
+* `refresh_labels` skips every row without `source_label_id`. BD5 asked
+  the same job to re-read the pins of **every** allowance. This is the
+  entity-id reuse case: delete a plug, rename a new device to the same
+  `switch.heater`, and a hand-made allowance keeps matching with no limit.
+* The plain-entity half of `test_a_changed_registry_id_suspends` is
+  switched off (`a.refresh_labels() if False else None`). The test then
+  proves only the label case.
+* **Fix:**
+  * Check the pins of every live HA allowance on each refresh. A missing or
+    changed registry id suspends the allowance with `registry_changed`.
+  * Re-enable the plain-entity test.
+* **Should, same item:** BD5's widening, to suspend after an approved
+  write that redefines an entity through the registry or a config entry,
+  is not in the code. An approved entity-registry rename is exactly how an
+  entity id gets a new meaning. The minimum fix is to run the pin check
+  straight after any approved HA write to `config/entity_registry/*` or
+  `config/config_entries/*`, not up to five minutes later.
+
+**BX3 (should): AZ2 has three gaps.**
+* `ha_config_restore` is not hooked. A restore replaces a file just as a
+  write does, and the handler cannot see the content it restores. Treat
+  every approved restore as unmapped and suspend every HA allowance
+  (`config_write_unmapped`).
+* The hook in `_h_ha_config_write` is `except Exception: pass`, so a failed
+  scan fails open. On an exception, suspend every HA allowance and write an
+  audit row. If that also fails, write one `allowance_config_write_failed`
+  row.
+* `_YAML_DOMAIN_BLOCK` does not match the modern `template:` form
+  (`template:` then `- switch:` with a dash), where the entity id comes
+  from `name`/`unique_id` and never appears in the text. Add `template` to
+  the block list and allow an optional `-\s*` before the domain key.
+
+**BX4 (should): re-applying a profile revokes before it validates.**
+* `apply_profile` revokes the agent's old rows from that profile and then
+  calls `create_allowance` per template. That call can still fail: a
+  missing risk ack, an HA read error (503), or an entity HA does not know.
+* The UI's first Apply always sends `risk_ack: false`. For any risky
+  template, the old rows are revoked and nothing is created. If the
+  operator then cancels the confirm, the agent is left with no allowances.
+* The design says "a failure refuses the apply before anything is
+  revoked".
+* **Fix:** run every check first (ceiling, entities, risk, registry pins),
+  then revoke and insert in one transaction.
+* Also bind Apply to the version the preview showed: send
+  `profile_version`, and return 409 if the profile changed since the
+  preview.
+
+**BX5 (should): accept-join is a widening with no risk ack.**
+* A joiner whose `device_class` is a garage, gate, door or lock-like class
+  is added without answer 6's second confirm. Neither the 64-entity cap nor
+  the ceiling is checked.
+* **Fix:** run `_risk_for` on the joiners, return `risk_ack_required` as
+  the save path does, and apply the cap.
+
+**BV2 left open, now BX6 (should): the stale-form check is optional.**
+* `apply_ceiling` skips the `set_hash` compare when the field is empty, and
+  `CeilingPayload.set_hash` defaults to `""`. Any client that leaves it out
+  bypasses BV2. The UI sends it, but the check belongs to the server.
+* **Fix:**
+  * Refuse a PUT without `set_hash` (400).
+  * Compare and write inside one `BEGIN IMMEDIATE`, so two saves cannot
+    both pass the compare.
+
+**Nits.**
+* `add_word('stop')` is refused as built-in, so answer 1's "an operator who
+  adds `stop` gets both rows switched off" cannot happen. Either correct
+  the sentence (the operator unticks the two rows) or allow it. Also,
+  `add_word`'s `w not in row['exempt_words']` contradicts `is_destructive`'s
+  rule that an operator word is never exempt. It is harmless today, but
+  make the two agree.
+* `integration_proxy.DESTRUCTIVE_VERBS` now includes `stop`, `restart`,
+  `reboot`, `shutdown`, `disable`, `unlock` and `disarm`. The comment above
+  it still says they are excluded. Under the `destructive` gate mode,
+  generic writes with those words now get a card. That is the safe
+  direction, but it is a behaviour change: fix the comment and state it in
+  the release notes.
+* The refresh thread's comment says "once a minute", but it sleeps 300
+  seconds.
+* The design's "an invalid stored condition writes one audit row per
+  allowance per hour" is not implemented. Low priority.
+
+Re-read scope once BX1–BX6 are in: the refresh/accept path and its match
+tests, the all-rows pin check, the AZ2 hook (restore, fail-closed,
+`template:`), `apply_profile` ordering and transaction, accept-join's ack,
+and the PUT ceiling.
+
 ## Chunk X3 — Integrations page and agent policy modal pass · slug `integrations-ui` · dashboard UI · after F27
 
 ### Goal
