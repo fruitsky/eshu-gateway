@@ -14161,6 +14161,27 @@ the whole X8 feature, gateway and dashboard.
 (0:11:13)` (the rebased stack: BH2/BQ2, BQ4, F19, X8 gateway and dashboard,
 BS1/BS2, X7 channels).
 
+#### Security re-read (2026-11-15, at `315fd06`): approved for the Seed Edge → dev → Fleet rollout
+
+* **BS1.** `_window_token_header` uses the gateway's `gateway_header`
+  when it is defined. That reads the file on 1.4 and the baked value on
+  1.3. Otherwise it falls back to `$GATEWAY_TOKEN`, then the file. The
+  header comes from a process substitution, and there is a test for both
+  fixtures.
+* **BS2.** `authorized_keys` is read once, as the user (`ak_read`). The
+  readability check runs as the user, and the BJ1 check, `ak_from` and
+  both filters parse that copy, so root reads nothing the user could swap.
+* **X7 rebase.** Only Build is committed (`test_x7_only_build_is_committed`).
+  X8 is whole, BR1's `on_build` bucket is in, and the badge compares
+  against the live channels.
+* Nothing outside `db/gateways.py` and the display paths reads
+  `installer_hash`.
+
+**Nit:** on the install path, a failed `ak_read` (the user cannot read
+their own file) yields empty text. The rewrite then drops any non-Eshu
+keys the user had. Refuse instead when the file exists and `ak_read`
+fails, as the update path does.
+
 ## 7. Backlog (not planned in detail)
 
 * Deny with a reason, shown to the agent (cheap; low value given the data).
