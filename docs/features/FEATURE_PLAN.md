@@ -18939,6 +18939,169 @@ check. Build regenerated; Build only.
 `bash scripts/verify.sh`: `3067 passed, 26 skipped, 7 warnings in 672.26s
 (0:11:12)`.
 
+## Chunk E2E-2 — Staging stack for the smoke suite · slug `e2e-staging` · test tooling
+
+Status: **design only**, 2026-11-15 · Branch: `feat/e2e-staging` from
+`master@e6b42d8` (the commit the request names; the local `master` ref is older
+at `51a58f6`) · **Cannot be run on this machine**; see the evidence below before
+building anything.
+
+### Goal
+
+One command brings up a throwaway dashboard and one or two systemd-capable
+gateway containers, enrols each gateway with the real installer, runs E2E-1
+against it, and tears everything down — no live data, no deploy, no host
+leftovers.
+
+E2E-2 exists so the smoke suite has a real gateway: the gateway script, poller,
+installer, systemd units, SSH forced command and `/etc/eshu-*` files are the
+product's, not the test sandbox's.
+
+### What this machine supports (checked 2026-11-15, before design)
+
+| Probe | Result |
+|---|---|
+| `docker`, `podman`, `nerdctl`, `systemd-nspawn`, `lxc`, `incus`, `debootstrap`, `qemu-system-x86_64` | **none installed** |
+| `docker info` / `/var/run/docker.sock` | no docker; no socket |
+| User / capabilities | `uid=999(dsh)`, groups `dsh`; no `sudo` ("no new privileges"), no root |
+| Sandbox | PID 1 is `bwrap`; the session runs in a bubblewrap sandbox |
+| `unshare -Ur -m true` | succeeds (user + mount namespaces) |
+| `unshare -m true` as-is | `Operation not permitted` |
+| `unshare -p -f true` | `Operation not permitted` |
+| `systemctl is-system-running` | `running` (the host's systemd is visible) |
+| `systemd-run --user` | `Failed to connect to bus: No medium found`; no `/run/user/999` |
+| Resources | 2 vCPU, 31 GiB RAM (1.7 GiB free + 14 GiB cache), 24 GiB free on `/` |
+| Outbound HTTPS | works (`registry-1.docker.io` answered 401, i.e. reachable) |
+
+**Conclusion: a systemd gateway container cannot be started here.** Docker or
+Podman is absent, there is no root, mount namespaces are denied outside a user
+namespace, PID namespaces are denied, and there is no user systemd bus. A
+systemd PID 1 needs at least a container runtime with cgroup delegation (or a
+privileged container), neither of which this host can provide. A user-namespace
+sandbox with a fake `/etc` could run the gateway *script*, but that is exactly
+`tests/test_gateway_script.py`'s `GatewaySandbox`; it is not an enrolment, not
+systemd, and not the real installer. It would not add E2E-2's value, so this
+note does **not** propose a fake stack as a substitute.
+
+What this machine *can* still do: run the dashboard with a throwaway SQLite DB
+on loopback, run the E2E-1 unit tests, and capture the design. What it cannot
+do: `up`, enrolment, or a real E2E-1 run.
+
+### Stack shape (for a host that can run it)
+
+A Python driver, `scripts/e2e/staging.py`, with `up`, `run`, `down`, `status`:
+
+1. **Network + dashboard.** One private Docker network; dashboard built from
+   the checkout (or a pinned Python 3.12 image + the repo mounted read-only and
+   a writable named volume for `eshu.db`), listening on a random loopback port
+   (e.g. `127.0.0.1:8790`). Set a random 32-character password through the
+   documented first-run/loopback path; write it to a `0700` temp dir outside the
+   repo.
+2. **Gateways.** One container by default (`--gateways 2` for a pair), from a
+   pinned systemd image (e.g. an Ubuntu 24.04 systemd image by digest), with
+   systemd as PID 1 (`--privileged` or the minimum `CAP_SYS_ADMIN` +
+   cgroup-namespace settings), `/run` and `/run/lock` tmpfs, and the cgroup
+   filesystem mounted read-only as systemd expects. Hostnames `e2e-gw1`,
+   `e2e-gw2`; no host port published.
+3. **Enrolment.** Generate a one-time enrollment token through the dashboard,
+   then run the **real** `dashboard/eshu-gateway-install.sh` inside the gateway
+   container with `--url http://dashboard:8000`, the token, and the container's
+   own identity. Wait until `GET /api/gateways` shows the gateway online, its
+   SSH host key is pinned and the F12 capabilities are present. The gateway's
+   poller and logger run as the installer's systemd units; the installer's own
+   checks are the test.
+4. **Test identity.** Mint one agent token (`e2e-smoke`), write it to a `0600`
+   file outside the repo, and set its policy through the audited API:
+   `ssh_hosts_allow=[gw1]` (one IP, never `*` or a hostname), `ssh_mode=normal`
+   (needed for the allowlist case), and the exact allowlist line for C1. Add
+   the E2E suite's public key to `eshu-gateway@` on the gateway for the
+   window-token case (C11), using the same forced-command shape the installer
+   writes; never install a shell.
+5. **Run.** `staging.py run` writes the four E2E-1 env files/values (token,
+   password, base URL, gateway, SSH key) into the temp dir, invokes
+   `scripts/e2e/run.py`, forwards its table and exit code, and leaves the stack
+   up on `--keep` (the default is teardown even after a failure).
+6. **Down.** `docker compose down -v` (or the equivalent), remove the temp
+   credentials, the network and any named volume, and verify no containers or
+   files under the repo remain. Nothing is deployed to the dashboard LXC or a
+   real gateway.
+
+`--with-ha` and `--with-pihole` are deliberately **not** in v1. The smoke suite
+skips C12–C13/C15 when those integrations are absent; faking HA's entity
+registry for F27's pins is a project of its own, and a real HA test instance
+should be a separate, explicitly named target. The design keeps the hooks in
+E2E-1, not a fake in E2E-2.
+
+### Host requirements
+
+* Linux with Docker Engine 24+ (or Podman 4+ with the compose provider) and
+  the ability to run privileged/systemd containers; `systemd` in the container
+  image, cgroup v2, `/sys/fs/cgroup` available.
+* 4 vCPU, 8 GiB RAM, 20 GiB free disk, outbound HTTPS to the image registry.
+* A disposable host: the stack is throwaway and its containers run systemd as
+  root. A CI runner without nested virtualization/Docker cannot host it; a
+  Proxmox VM or LXC with Docker can.
+* No live database, config, keys or `.env` mounted. The dashboard starts empty.
+
+### Why not "run the gateway under the existing sandbox"
+
+The existing sandbox copies the script, relocates `/etc`, and stubs
+`curl`/`logger`; it never runs the installer, systemd, the poller, the SSH
+forced command or a real enrollment. Those are precisely the parts that break
+in the field (RR1, BE3/BE4, X8/X9). A green sandbox is not an E2E pass; using it
+here would hide the failures E2E-2 is for.
+
+### Security and privacy
+
+* Throwaway DB, synthetic gateway names, no live hosts or data; nothing is
+  copied from the operator's dashboard.
+* Credentials are random per stack, written `0600` in a temp dir outside the
+  repo, passed to E2E-1 by env, and deleted on teardown; the driver never
+  prints them.
+* Dashboard port on loopback only; gateway containers publish no ports; no
+  host network; no shared volumes with the host beyond the read-only checkout
+  and the throwaway DB volume.
+* Images pinned by digest; `docker compose pull` is explicit; no `latest`.
+* The stack is *not* a deploy: it never touches the dashboard LXC, the fleet,
+  or an enrolled production gateway. `staging.py` refuses to start if
+  `ESHU_E2E_ALLOW_REMOTE=1` is set for a live-looking base URL? (See open
+  questions; the stack itself always uses loopback.)
+
+### Open questions for security / operations
+
+1. **Privileged containers.** Systemd in a container usually needs
+   `--privileged` (or a careful cgroup/`CAP_SYS_ADMIN` set). Is that acceptable
+   on the operator's Docker host for a throwaway stack, or should E2E-2 require
+   a disposable VM/LXC instead?
+2. **Image supply.** Which systemd image and registry, pinned how? A
+   community image by digest is a supply-chain dependency; a locally built
+   image is more code but fewer third parties.
+3. **Agent policy seeding.** E2E-2 must create the test agent with
+   `ssh_mode=normal` and one allowlist line. That is a deliberate weakening of
+   the default on the test agent; should the driver print it as a warning and
+   require a confirm flag, or is the throwaway stack enough?
+4. **Window SSH key.** The key for C11 is added to `eshu-gateway@` inside the
+   container. Confirm the forced-command line must stay identical to the
+   installer's, and that teardown removes it (the container is destroyed, but
+   the image is not).
+5. **HA/Pi-hole.** Leave them out (skips in E2E-1), or add a real test instance
+   as an optional, separately configured target? Faking the HA registry for F27
+   is not worth it.
+6. **CI.** Should E2E-2 ever run in CI (needs a Docker-capable runner), or only
+   by hand before a release? The E2E-1 unit tests remain the CI coverage.
+7. **Leftovers.** On a failed `up`, what must be cleaned before the driver
+   returns (containers, network, volumes, temp creds)? The design says all of
+   them; confirm the operator wants an explicit `--keep` for debugging.
+
+### Implementer notes (to fill in when code starts)
+
+No code in this commit. This machine cannot run the stack (evidence above), so
+building `staging.py` here would be unverifiable. The next step is an operator
+decision on a Docker/systemd-capable host (or a disposable VM) and answers to
+the image/privilege questions; then the driver and its `up`/`run`/`down` test
+are written and exercised there. Until then, E2E-1's own unit tests keep CI
+green.
+
 ## 7. Backlog (not planned in detail)
 
 * Deny with a reason, shown to the agent (cheap; low value given the data).
@@ -19048,6 +19211,7 @@ this merge.
 | — | BE3 | secret-headers | gateway + installer + poller | **Implemented**: every token header goes on stdin (`-H @-`), the result post uses a private header file, and argv is asserted token-free in all three stub harnesses | `fix/secret-headers` | RR1 | security sign-off |
 | — | BE4 | update-dashboard-key | installer | **Implemented**: `--update` refreshes only the `eshu-dashboard` line after a 200, copies its `from=`, refuses symlinks, uses `mktemp`; the fixed `.tmp` name is gone everywhere | `fix/update-dashboard-key` | RR1 | security sign-off |
 | — | GT1 | gateway-token-rotation | dashboard + poller | Design round 2 2026-11-14 (BS4/BS5 folded): routine poll rotation vs compromise SSH push, 24 h gateway-enforced mtime, Revoke token | `feat/gt1-token-rotation` | RR1 | + security sign-off; code after 1.4 |
+| 30 | E2E-2 | e2e-staging | test tooling | **Design only** 2026-11-15: no Docker/systemd/root on this machine; code waits for a capable host | `feat/e2e-staging` | E2E-1, Docker 24+/systemd containers | image/privilege questions (see open questions) |
 
 Chunks are done **in the order column**; each new chunk branches from the
 updated `feature-roadmap` after the previous one is merged. A design-first
