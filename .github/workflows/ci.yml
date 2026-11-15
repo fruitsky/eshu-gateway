@@ -40,5 +40,50 @@ jobs:
           cache: pip
       - name: Install dependencies
         run: pip install -r requirements-dev.txt
+      # F11's fixed HA scripts run under the HA add-on's shell (BusyBox ash).
+      # The tests skip with a reason when BusyBox is absent, so install it and
+      # let them run here.
+      - name: Install BusyBox
+        run: sudo apt-get update && sudo apt-get install -y busybox-static
       - name: Run test suite
         run: python3 -m pytest tests/ -q
+
+  browser:
+    name: UI browser test (headless Chromium)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      # X5's browser half needs Playwright's Chromium. The test skips without
+      # it; install the module and the browser so CI measures the real card.
+      # The browser download (~170 MB) is the slow part, so cache it; the key
+      # carries the Playwright version because it pins the Chromium build.
+      - name: Cache Playwright's Chromium
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-1.65.0
+      - name: Install Playwright and Chromium
+        run: |
+          npm install --no-save --no-package-lock --prefix "$RUNNER_TEMP/pw" playwright@1.65.0
+          "$RUNNER_TEMP/pw/node_modules/.bin/playwright" install --with-deps chromium
+      - name: Run the browser test
+        env:
+          ESHU_PLAYWRIGHT_MODULES: ${{ runner.temp }}/pw/node_modules
+          NODE_PATH: ${{ runner.temp }}/pw/node_modules
+        run: |
+          python3 -m pytest tests/test_x5_plans_visible.py -q
+          # The per-view check (tests/test_ui_views.py) lands with the UI
+          # pass; run it too once it is on the branch, so the browser is not
+          # installed for one file only.
+          if [ -f tests/test_ui_views.py ]; then
+            python3 -m pytest tests/test_ui_views.py -q
+          fi
