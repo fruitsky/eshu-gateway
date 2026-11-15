@@ -2303,41 +2303,53 @@ def rollback_golden(request: Request):
 def retire_legacy_routes(request: Request):
     """X9: retire the frozen 1.3 routes (manual, after 7 quiet days)."""
     _check_session(request)
-    status = _legacy_1_3_status()
+    status = _legacy_pre_x9_status()
     if status['retired']:
         return {'status': 'ok', 'already_retired': True}
     if not status['retire_available']:
         raise HTTPException(
             status_code=409,
-            detail='The 1.3 routes can be retired once no 1.3 gateway has polled for 7 days.')
-    set_meta('legacy_1_3_retired', '1')
-    record_audit_event('legacy_1_3_retired',
-                       details='The frozen 1.3 gateway-file routes now answer 410.')
+            detail='The pre-X9 routes can be retired once every gateway has migrated and neither route has been hit for 7 days.')
+    set_meta('legacy_pre_x9_retired', '1')
+    record_audit_event('legacy_pre_x9_retired',
+                       details='The frozen pre-X9 gateway-file routes now answer 410.')
     return {'status': 'ok', 'retired': True}
 
 
-def _legacy_1_3_status() -> dict:
-    """X9: the frozen 1.3 routes and the manual retirement switch.
+def _legacy_pre_x9_status() -> dict:
+    """X9: the frozen pre-X9 routes and the manual retirement switch.
 
-    A gateway with no installer_hash predates X8 (1.3 or older) and can only
-    use the frozen /static copies. The switch is offered once none has been
-    seen for seven days; it is manual on purpose (a switched-off 1.3 gateway
-    must not come back to a 404 without the operator knowing).
+    A gateway is migrated only once it has reported X9's own fields
+    (`dashboard_scheme`, `windows_hash`, `runner_hash`). A 1.4 gateway with an
+    installer hash but no X9 fields still fetches from /static, so the old
+    "no installer_hash means 1.3" rule would retire the routes underneath it
+    (BW1). The switch is offered only when every registered gateway has
+    migrated and neither route has been hit for seven days.
     """
-    retired = get_meta('legacy_1_3_retired') == '1'
+    retired = get_meta('legacy_pre_x9_retired') == '1'
     gateways = get_gateways()
-    old = [g for g in gateways if not (g.get('installer_hash') or '').strip()]
+    legacy = [g for g in gateways
+              if not (g.get('windows_hash') and g.get('runner_hash')
+                      and g.get('dashboard_scheme'))]
     now = int(time.time())
-    last_seen = max([int(g.get('last_seen') or 0) for g in old] or [0])
-    try:
-        since = int(get_meta('legacy_1_3_since') or 0)
-    except (TypeError, ValueError):
-        since = 0
-    cutoff = max(last_seen, since)
-    available = (not retired) and bool(cutoff) and (now - cutoff) >= 7 * 86400
+
+    def _ts(key):
+        try:
+            return int(get_meta(key) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    since = _ts('legacy_pre_x9_since')
+    last_hit = _ts('legacy_pre_x9_last_hit_at')
+    last_seen = max([int(g.get('last_seen') or 0) for g in legacy] or [0])
+    cutoff = max(since, last_hit, last_seen)
+    available = ((not retired) and bool(cutoff) and not legacy
+                 and (now - cutoff) >= 7 * 86400)
     return {
         'retired': retired,
-        'gateway_count': len(old),
+        'gateway_count': len(legacy),
+        'last_hit_at': last_hit or None,
+        'last_hit_ip': get_meta('legacy_pre_x9_last_hit_ip') or '',
         'last_seen': last_seen or None,
         'since': since or None,
         'retire_available': available,
@@ -2424,7 +2436,7 @@ def dev_status(request: Request):
         },
         "edge_files": edge_info,
         "fleet_files": fleet_info,
-        "legacy_1_3": _legacy_1_3_status(),
+        "legacy_pre_x9": _legacy_pre_x9_status(),
         "edge_matches_build": build_hash == edge_hash,
         "edge_seeded_at": _ts('installer_edge_seeded_at'),
         "fleet_promoted_at": _ts('installer_fleet_promoted_at'),
@@ -5064,23 +5076,31 @@ def serve_gateway_file(name: str, request: Request):
                              "X-Eshu-Channel": channel})
 
 
-_LEGACY_1_3_DIR = os.path.join(os.path.dirname(__file__), 'gateway-files',
-                               'legacy-1.3')
+_LEGACY_PRE_X9_DIR = os.path.join(os.path.dirname(__file__), 'gateway-files',
+                                  'legacy-pre-x9')
 
 
-def _serve_legacy_file(name: str):
-    """X9: the frozen 1.3 files, only for a 1.3 poller still on /static.
+def _serve_legacy_file(name: str, request: Request):
+    """X9: the frozen pre-X9 files, for a poller still on /static.
 
-    These bytes never change with a deploy (a test pins their sha256). After
-    the manual retirement switch they answer 410 with the reason.
+    These bytes never change with a deploy (a test pins their sha256). Each
+    hit records its source IP and time, because a pre-X9 1.4 gateway still
+    depends on these routes even though it reports an installer hash (BW1).
+    After the manual retirement switch they answer 410 with the reason.
     """
-    if get_meta('legacy_1_3_retired') == '1':
+    if get_meta('legacy_pre_x9_retired') == '1':
         raise HTTPException(
             status_code=410,
-            detail='The 1.3 gateway-file routes were retired; re-enroll or '
-                   'update this gateway to 1.4.')
+            detail='The pre-X9 gateway-file routes were retired; update this '
+                   'gateway to 1.4 with the X9 installer.')
     try:
-        with open(os.path.join(_LEGACY_1_3_DIR, name), 'rb') as f:
+        set_meta('legacy_pre_x9_last_hit_at', str(int(time.time())))
+        set_meta('legacy_pre_x9_last_hit_ip',
+                 (request.client.host if request.client else '') or '')
+    except Exception:
+        pass
+    try:
+        with open(os.path.join(_LEGACY_PRE_X9_DIR, name), 'rb') as f:
             data = f.read()
     except OSError:
         raise HTTPException(status_code=404, detail="Not found")
@@ -5089,13 +5109,13 @@ def _serve_legacy_file(name: str):
 
 
 @app.get("/static/features/approved_windows.sh")
-def serve_legacy_windows():
-    return _serve_legacy_file('approved_windows.sh')
+def serve_legacy_windows(request: Request):
+    return _serve_legacy_file('approved_windows.sh', request)
 
 
 @app.get("/static/fleet-runner.sh")
-def serve_legacy_runner():
-    return _serve_legacy_file('fleet-runner.sh')
+def serve_legacy_runner(request: Request):
+    return _serve_legacy_file('fleet-runner.sh', request)
 
 
 @app.get("/static/eshu-gateway-install.sh.bak")

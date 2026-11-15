@@ -20,6 +20,6 @@ def test_an_http_dashboard_is_flagged():
 
 
 def test_the_legacy_switch_is_offered_from_the_dev_panel():
-    assert "legacy-1-3-row" in HTML
+    assert "legacy-pre-x9-row" in HTML
     assert "retireLegacyRoutes" in JS
     assert "/api/dev/legacy-retire" in JS

@@ -141,7 +141,7 @@ class TestGenerations:
 class TestLegacyRoutes:
 
     def test_the_legacy_bytes_are_frozen(self, client):
-        base = os.path.join(ic.gateway_files_dir(), 'legacy-1.3')
+        base = os.path.join(ic.gateway_files_dir(), 'legacy-pre-x9')
         pins = {
             'approved_windows.sh': '5ae4a36d5aa76a50bb6fef3c38939e177992f12d92198e9cbdb375c7f5474383',
             'fleet-runner.sh': '6633c6a9827adc291ea7a6b2652522ff686a2ecad7d7853e75d69081edf852b5',
@@ -157,16 +157,44 @@ class TestLegacyRoutes:
 
     def test_retirement_needs_seven_quiet_days_and_then_410(self, auth_client):
         from db.policies import set_meta
-        set_meta('legacy_1_3_since', '1')
+        set_meta('legacy_pre_x9_since', '1')
         r = auth_client.post('/api/dev/legacy-retire')
         assert r.status_code == 200
         assert auth_client.get('/static/features/approved_windows.sh').status_code == 410
 
-    def test_retirement_is_refused_while_a_1_3_gateway_polls(self, auth_client):
+    def test_retirement_is_refused_while_a_pre_x9_gateway_polls(self, auth_client):
         from db.gateways import register_gateway, update_gateway_last_seen
         register_gateway('10.0.0.50', 'old-gw', 'v6.0')
         update_gateway_last_seen('10.0.0.50')
         assert auth_client.post('/api/dev/legacy-retire').status_code == 409
+
+    def test_bw1_a_1_4_gateway_without_x9_fields_still_blocks(self, auth_client):
+        """A 1.4 gateway reports installer_hash but still uses /static."""
+        from db.gateways import register_gateway, set_gateway_installer_hash
+        from db.policies import set_meta
+        set_meta('legacy_pre_x9_since', '1')
+        register_gateway('10.0.0.51', 'x8-gw', 'v6.0')
+        set_gateway_installer_hash('10.0.0.51', 'abcdefabcdef')
+        r = auth_client.post('/api/dev/legacy-retire')
+        assert r.status_code == 409
+        status = auth_client.get('/api/dev/status').json()['legacy_pre_x9']
+        assert status['gateway_count'] == 1
+        assert status['retire_available'] is False
+
+    def test_a_recent_legacy_hit_blocks_the_switch(self, auth_client):
+        from db.policies import set_meta
+        set_meta('legacy_pre_x9_since', '1')
+        assert auth_client.get('/static/features/approved_windows.sh').status_code == 200
+        assert auth_client.post('/api/dev/legacy-retire').status_code == 409
+
+    def test_bw2_a_stale_installer_refuses_the_seed(self, auth_client, build):
+        import base64
+        base = ic.read_generation(ic.channel_generation(ic.FLEET))
+        build.write_bytes(
+            b"#!/bin/bash\ninstall_seed_files() { :; }\n"
+            + b"printf '%s' '" + base64.b64encode(b'wrong windows') + b"'\n")
+        r = auth_client.post('/api/dev/seed')
+        assert r.status_code == 503
 
 
 class TestGatewayFileReport:

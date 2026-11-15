@@ -53,7 +53,7 @@ source change. Edge and Fleet are runtime channels (X7), not files to edit.
 `dashboard/gateway-files/approved_windows.sh` and
 `dashboard/gateway-files/fleet-runner.sh` are part of the X9 generation:
 edit the source, regenerate Build, then Seed Edge → Deploy to Fleet. Their
-frozen 1.3 copies are in `gateway-files/legacy-1.3/`.
+frozen 1.3 copies are in `gateway-files/legacy-pre-x9/`.
 
 ### 0.3 Compatibility rule (critical for rollout)
 

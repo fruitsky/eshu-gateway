@@ -6950,16 +6950,16 @@ async function fetchDevStatus() {
       : 'missing';
 
     // X9: the frozen 1.3 routes and their manual retirement switch.
-    const legacyRow = document.getElementById('legacy-1-3-row');
-    if (legacyRow && data.legacy_1_3) {
-      const l = data.legacy_1_3;
+    const legacyRow = document.getElementById('legacy-pre-x9-row');
+    if (legacyRow && data.legacy_pre_x9) {
+      const l = data.legacy_pre_x9;
       if (l.retired) {
-        legacyRow.innerHTML = '1.3 file routes: <span class="text-muted">retired (410)</span>';
+        legacyRow.innerHTML = 'pre-X9 file routes: <span class="text-muted">retired (410)</span>';
       } else if (l.retire_available) {
-        legacyRow.innerHTML = '1.3 file routes: <button onclick="retireLegacyRoutes()" class="btn btn-xs btn-danger">Retire 1.3 routes</button>';
+        legacyRow.innerHTML = 'pre-X9 file routes: <button onclick="retireLegacyRoutes()" class="btn btn-xs btn-danger">Retire pre-X9 routes</button>';
       } else {
-        legacyRow.innerHTML = '1.3 file routes: <span class="text-muted">frozen; retire after 7 quiet days' +
-          (l.gateway_count ? ' (' + l.gateway_count + ' 1.3 gateway' + (l.gateway_count !== 1 ? 's' : '') + ')' : '') + '</span>';
+        legacyRow.innerHTML = 'pre-X9 file routes: <span class="text-muted">frozen; retire after 7 quiet days' +
+          (l.gateway_count ? ' (' + l.gateway_count + ' gateway' + (l.gateway_count !== 1 ? 's' : '') + ' not migrated)' : '') + '</span>';
       }
     }
 
@@ -6994,7 +6994,7 @@ async function fetchDevStatus() {
 }
 
 async function retireLegacyRoutes() {
-  if (!confirm('Retire the frozen 1.3 file routes? 1.3 gateways will get 410 until they update.')) return;
+  if (!confirm('Retire the frozen pre-X9 file routes? Any gateway not on the X9 installer will get 410 until it updates.')) return;
   const res = await fetch('/api/dev/legacy-retire', { method: 'POST', headers: { 'X-Eshu-CSRF': '1' } });
   if (!res.ok) { alert('Could not retire: ' + (await res.text())); return; }
   fetchDevStatus();

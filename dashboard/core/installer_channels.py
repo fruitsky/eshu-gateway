@@ -196,12 +196,27 @@ def _gateway_file(name: str):
 
 
 def build_generation() -> dict:
-    """The Build files, or ChannelMissing when any of them is absent."""
+    """The Build files, or ChannelMissing when any of them is absent.
+
+    BW2: a generated Build embeds the base64 of both gateway files. If those
+    bytes are not in the installer, someone edited a gateway file without
+    regenerating Build; seeding it would pair an installer that writes one
+    set with a channel that serves another. Refuse the seed instead. A test
+    stub without the `install_seed_files` marker is not a generated Build and
+    is left alone (the tests need small installers).
+    """
+    import base64
     installer = _read_bytes(build_path())
     windows = _gateway_file(WINDOWS)
     runner = _gateway_file(RUNNER)
     if installer is None or windows is None or runner is None:
         raise ChannelMissing('build')
+    if b'install_seed_files' in installer:
+        text = installer.decode('utf-8', 'replace')
+        for name, data in ((WINDOWS, windows), (RUNNER, runner)):
+            encoded = base64.b64encode(data).decode()
+            if encoded not in text:
+                raise ChannelMissing('build_inconsistent')
     return {INSTALLER: installer, WINDOWS: windows, RUNNER: runner}
 
 
@@ -305,8 +320,8 @@ def ensure_initialised() -> None:
                      % deployed)
     if fleet_hash:
         set_deployed_golden_hash(fleet_hash)
-    if not get_meta('legacy_1_3_since'):
-        set_meta('legacy_1_3_since', str(int(time.time())))
+    if not get_meta('legacy_pre_x9_since'):
+        set_meta('legacy_pre_x9_since', str(int(time.time())))
     set_meta(INIT_MARKER, str(int(time.time())))
     record_audit_event('installer_channels_initialised',
                        details='Installer channels created: ' + '; '.join(notes))

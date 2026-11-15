@@ -212,6 +212,7 @@ sync_feature_scripts() {
   tmp=$(mktemp -p "$ESHU_WORK" windows.XXXXXX)
   hdr=$(mktemp -p "$ESHU_WORK" windows-hdr.XXXXXX)
   gateway_header | curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s \
+       --proto '=https' \
        -D "$hdr" -o "$tmp" -H @- \
        "$DASHBOARD_URL/api/gateway/files/approved_windows.sh" 2>/dev/null || true
   want=$(awk 'tolower($1)=="x-eshu-file-sha256:"{print $2}' "$hdr" 2>/dev/null | tr -d '\r' | head -n1)
@@ -363,6 +364,7 @@ while true; do
         FLEET_RUNNER_TMP=$(mktemp -p "$ESHU_WORK" fleet-runner.XXXXXX)
         FLEET_RUNNER_HDR=$(mktemp -p "$ESHU_WORK" fleet-runner-hdr.XXXXXX)
         gateway_header | curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m 60 -s \
+             --proto '=https' \
              -D "$FLEET_RUNNER_HDR" -o "$FLEET_RUNNER_TMP" -H @- \
              "$DASHBOARD_URL/api/gateway/files/fleet-runner.sh" 2>/dev/null || true
         WANT=$(awk 'tolower($1)=="x-eshu-file-sha256:"{print $2}' "$FLEET_RUNNER_HDR" 2>/dev/null | tr -d '\r' | head -n1)

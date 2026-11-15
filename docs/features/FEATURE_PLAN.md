@@ -17625,7 +17625,7 @@ master `e6b42d8`; security's BU1/BU2 and the eight answers are folded.
   `/etc/eshu/fleet-runner.sh` (0755) through a temp file and `mv`, so the
   same generation is on disk before the first fetch. A refused
   `authorized_keys` write still aborts the install.
-* **1.3.** The old bytes are frozen in `dashboard/gateway-files/legacy-1.3/`
+* **Pre-X9.** The old bytes are frozen in `dashboard/gateway-files/legacy-pre-x9/`
   and served at the old `/static/features/approved_windows.sh` and
   `/static/fleet-runner.sh` paths, before the static mount. Their sha256
   pins are in `tests/test_x9_gateway_files.py`. `/api/dev/legacy-retire` is
@@ -17637,7 +17637,7 @@ master `e6b42d8`; security's BU1/BU2 and the eight answers are folded.
   returns `files_channel` (fleet/edge/mixed/outdated/unknown),
   `files_mixed` and `dashboard_scheme`; the badge adds a "mixed files" and
   an "http" warning chip with the reason in the title. `/api/dev/status` adds
-  `build_files`, `edge_files`, `fleet_files` and `legacy_1_3`.
+  `build_files`, `edge_files`, `fleet_files` and `legacy_pre_x9`.
 * **UI.** Chips only; no layout change. `tests/test_x9_ui.py` pins the
   warnings and the switch; `app.js` is `ui29`, `style.css` `ui19`.
 * **Tests.** `tests/test_x9_gateway_files.py` (route auth, dev/Fleet channel,
@@ -17645,6 +17645,20 @@ master `e6b42d8`; security's BU1/BU2 and the eight answers are folded.
   `tests/test_poller.py` (authenticated route, http refusal, bad hash keeps
   the copy); `tests/test_installer.py` (the seed); `tests/lib` golden suite
   still passes over generations.
+**Security's code-round notes (BW1, BW2) are in.** BW1: a gateway counts as
+migrated only after it has reported X9's own fields (`dashboard_scheme`,
+`windows_hash`, `runner_hash`), so a 1.4 gateway with an installer hash but
+no X9 fields still blocks the switch; each hit on a frozen route records its
+source IP and time, and the switch needs seven quiet days plus every gateway
+migrated. The tree and the UI now say **pre-X9**, not 1.3. BW2: Seed Edge
+refuses a Build whose embedded base64 does not match the current gateway
+files (`build_inconsistent`), so an edited file without a regenerated
+installer cannot create a mixed generation. The two fetches add
+`--proto '=https'` (and no redirects).
+
+`bash scripts/verify.sh`: `3217 passed, 26 skipped, 7 warnings in 689.19s
+(0:11:29)`.
+
 * **Not in X9:** the existing installer-update download over `http://` (BU2's
   separate item, backlog above).
 
