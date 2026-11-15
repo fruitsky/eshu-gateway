@@ -17788,6 +17788,19 @@ writes the audit row; a recent hit is not rewritten and an old one is.
     the safe direction, but a write per anonymous request is cheap to
     avoid.
 
+**Security re-read of the nits at `fb156f2` (2026-11-15): confirmed.**
+* **Rollback after retirement.** Deploy to Fleet and Rollback both call
+  `_clear_pre_x9_retirement_if_needed` on the Fleet installer that is now
+  current. An installer without `install_seed_files` clears
+  `legacy_pre_x9_retired` and writes `legacy_pre_x9_retirement_cleared`.
+  This is the un-retire option. The seven-quiet-day rule then runs again
+  before the switch can be offered.
+* **Throttle.** A legacy hit writes the two meta rows only when the stored
+  hit is at least 60 seconds old. An anonymous caller can no longer force a
+  write per request.
+* No new findings. X9 is approved as it stands, to merge after the 1.4
+  fleet rollout.
+
 ## Chunk X6 — agent API fixes from the Release 1.2 test round · slug `agent-api-round` · dashboard
 
 From the agent's test report of 2026-11-12, triaged by the feature reviewer.
