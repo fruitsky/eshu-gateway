@@ -17651,6 +17651,83 @@ master `e6b42d8`; security's BU1/BU2 and the eight answers are folded.
 `bash scripts/verify.sh`: `3214 passed, 26 skipped, 7 warnings in 691.62s
 (0:11:31)`.
 
+### Security review of the X9 code round (security reviewer, 2026-11-15, at `2db7482`)
+
+**Approved once BW1 is in.** BU1 and BU2 are done as designed.
+
+* **BU1.**
+  * A generation is `gen-<id>/{installer.sh, approved_windows.sh,
+    fleet-runner.sh}`. The id is a content hash over the three files in a
+    fixed order.
+  * It is written to a temp dir with each file fsynced, then renamed.
+  * The pointers move only to a complete generation.
+  * Seed, Deploy and Rollback move whole sets, with the generation and all
+    three hashes in the audit row.
+  * A partial or missing set is 503 and never falls back.
+  * The X7 migration creates no `fleet.prev` (BP1 still holds).
+* **The route.**
+  * `/api/gateway/files/<name>` needs a gateway token.
+  * The channel comes only from the operator's `dev` mark, server-side.
+  * There are only two names (anything else is 404), and the response is
+    `no-store`.
+  * The legacy `/static` routes are registered before the mount and
+    serve the frozen bytes.
+* **BU2 on the gateway.** Both fetches send the token on stdin. They
+  check `bash -n` and the sha256 header (described as a transfer check,
+  not integrity), replace the file atomically, and keep the old copy on
+  any failure.
+  * With a non-`https://` URL, nothing is fetched and the runner launches
+    nothing. The command is not marked done, and one log line is written
+    per hour.
+  * The scheme and both file hashes are reported for display, and
+    invalid values are ignored.
+* **Seeds.** The installer writes both seeds (base64 from the same Build)
+  through `mktemp` and `mv` in root's `/etc/eshu`.
+* **The frozen legacy files** are byte-identical to master's BS1-compatible
+  `/static` copies, so they work on 1.3 and on pre-X9 1.4 pollers, and a
+  test pins their hashes.
+
+**BW1 (must): the retirement rule misses pre-X9 1.4 gateways.**
+* `_legacy_1_3_status` counts a gateway as a legacy-route user when it
+  has no `installer_hash`.
+* But 1.4 already reports `installer_hash` (X8), and a 1.4 gateway that
+  hasn't taken the X9 installer still downloads
+  `/static/features/approved_windows.sh` and `/static/fleet-runner.sh`.
+* So once the last 1.3 gateway is gone, the switch is offered while 1.4
+  gateways still depend on those routes. Retiring then answers them 410:
+  * their window script is frozen at its last copy;
+  * every fleet command fails runner validation and never runs.
+* Fix:
+  * A gateway counts as **migrated** only when it has reported X9's own
+    fields (`dashboard_scheme`, or the two file hashes) at least once.
+    Every other gateway is a legacy-route user.
+  * Also record the source IP and time of hits on the two legacy routes,
+    and offer the switch only when nothing has hit them for 7 days **and**
+    every registered gateway has reported X9's fields.
+  * Rename the tree and status from "1.3" to "pre-X9", so the UI doesn't
+    tell the operator it only matters for 1.3.
+* Test: a gateway that has an `installer_hash` but no X9 fields blocks the
+  switch, and a recent legacy-route hit blocks it.
+
+**BW2 (should): Seed Edge checks that the installer and the files are one
+build.**
+* A generation pairs Build's installer with `gateway-files/` as they are
+  on disk. If someone edits a gateway file and doesn't regenerate the
+  installer, the generation's installer seeds different bytes from the
+  files it is served with.
+* That is a quiet BU1 mix, and it lasts until the first fetch.
+* Fix: in `build_generation`, require that the installer contains the
+  base64 of both current files, and otherwise refuse Seed Edge
+  (`build_inconsistent`).
+* Test: an edited gateway file with a stale installer refuses the seed.
+
+**Nits:**
+* Add `--proto '=https'` (and no `-L`) to the two file fetches, so the
+  scheme rule holds even if a later edit adds redirects.
+* BU2's sibling is still open: the installer update, dev update, rollback
+  and uninstall downloads are still fetched and run as root over an
+  `http://` URL. Keep it on the list as its own item.
+
 ## Chunk X6 — agent API fixes from the Release 1.2 test round · slug `agent-api-round` · dashboard
 
 From the agent's test report of 2026-11-12, triaged by the feature reviewer.
