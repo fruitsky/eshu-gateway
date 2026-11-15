@@ -10677,6 +10677,19 @@ nothing else changed. F11 is dashboard-only, so there is no installer
 regeneration and no new gateway code. `bash scripts/verify.sh`: `3156
 passed, 26 skipped, 8 warnings in 673.57s (0:11:13)`.
 
+### Security confirm of BS3 and the merge tip (security reviewer, 2026-11-15, at `6ee0907`)
+
+**Approved to merge.** On the rebased tip, all five fixed scripts match the
+Round 9 text, comments aside:
+* `SECRETS_KEYS_SCRIPT` now ends with Round 9's awk extractor (BS3), and
+  the Python and BusyBox tests cover hyphenated, dotted and quoted keys;
+* `READ_SCRIPT` matches, apart from the allowed `head -c` cap;
+* `WRITE_SCRIPT`, `RESTORE_SCRIPT` and `CHECK_SCRIPT` match exactly.
+
+F11 stays dormant until an `ha_ssh` integration exists. The first
+connection must be a read (TOFU), and the operator should compare the
+pinned fingerprint against the add-on's own before the first write.
+
 ## Chunk F12 — SSH through Eshu over MCP (`ssh_exec`) · slug `ssh-exec` · dashboard (+ small gateway change)
 
 > **Design first** (push a design note only, wait for approval). Needs the
