@@ -15,7 +15,7 @@
 const BASE = (process.env.ESHU_UI_URL || 'http://127.0.0.1:8790/').replace(/\/?$/, '/');
 const PASSWORD = process.env.ESHU_UI_PASSWORD || '';
 const VIEWS = ['home', 'history', 'gateways', 'stats', 'controls',
-               'integrations', 'inventory', 'runbooks', 'agents', 'settings'];
+               'integrations', 'inventory', 'runbooks', 'agents', 'allowances', 'settings'];
 
 let chromium;
 try {
@@ -99,6 +99,7 @@ const REQUIRED = {
   inventory: '#view-inventory',
   runbooks: '#view-runbooks',
   agents: '#view-agents',
+  allowances: '#view-allowances',
   settings: '#view-settings',
 };
 

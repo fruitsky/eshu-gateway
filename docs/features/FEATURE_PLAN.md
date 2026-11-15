@@ -17902,15 +17902,44 @@ BV1/BV2 are folded as follows.
   `ceiling_changed`, so a second tab cannot re-enable a row the first tab
   just disabled.
 
-**Code round so far.** The catalogue, the seeded DB ceiling, the
-never/destructive checks (with the `stop` exemption), the operator words,
-and `GET/PUT /api/allowances/ceiling` with session + CSRF + `risk_ack` +
-`set_hash` + audit + notify. The allowance engine (conditions, matching,
-profiles) and the page are the next slice; `ceiling_allows()` is the one
-function they will call at save, apply and match.
+**Code round (2026-11-15).** Two slices on `feat/f27-allowances-code`, both
+gated.
 
-`bash scripts/verify.sh`: `3202 passed, 26 skipped, 8 warnings in 684.83s
-(0:11:24)`.
+* **The ceiling slice.** The catalogue, the seeded DB ceiling, the
+  never/destructive checks (with the `stop` exemption), the operator words,
+  and `GET/PUT /api/allowances/ceiling` with session + CSRF + `risk_ack` +
+  `set_hash` + audit + notify. Answer 7 is in: the `ceiling` event is on by
+  default, and turning it off is audited and sends one final notification.
+* **The engine slice.** `core/allowances.py` now stores allowances, uses,
+  profiles and templates. Conditions are exact and walked at match time:
+  plain entity ids only (an expanding target is a card), every list element
+  in the set, no extra `data` keys, and the ceiling must still allow the
+  type and action. A miss, an ambiguous match, a rate/window/expiry/
+  suspension hit is the ordinary card. The use and the rate count are one
+  `BEGIN IMMEDIATE` transaction. Matching never reads HA: the registry pin
+  is made at save (and re-checked at resume/apply). `run_tool` consults it
+  after every refusal and before the plan/gate; a `gated` agent never does.
+  Profiles are named and versioned; a re-apply revokes the agent's old
+  allowances from that profile first, and a label template resolves to an
+  entity list at apply time. Answer 6's second ack is server-checked for a
+  risky row or a garage/gate/door/lock-like device class (read from HA at
+  save).
+* **The page.** Allowances is a nav item and a view: the shared paragraph,
+  the ceiling rows with plain labels, risk text and a confirm, the read-only
+  never lists, the destructive-word chips and add/remove, the allowance
+  list with Revoke/Resume, the create form (agent, type, action, entities,
+  rate, window), and a profile builder/list with Apply. `app.js` `ui32`,
+  `state.js` `ui4`.
+* **The harness.** `tests/ui/ui_views.cjs` now includes `allowances` and
+  measures it at 1440 and 390 (overflow + AA contrast); the seeded server
+  renders the view. `tests/test_f27_ui.py` pins the nav, copy, controls and
+  the harness entry.
+* **Tests.** `tests/test_f27_allowances.py` (match, every miss, rate,
+  window, ambiguity, disabled ceiling, second ack, profiles/label) and the
+  ceiling suite; the harness run is green at both widths.
+
+`bash scripts/verify.sh`: `3215 passed, 26 skipped, 7 warnings in 690.05s
+(0:11:30)`.
 
 ## Chunk X3 — Integrations page and agent policy modal pass · slug `integrations-ui` · dashboard UI · after F27
 
@@ -20288,7 +20317,7 @@ off argv (BE3's BH3): `--data-binary @-` for the body and
 `-H @<(gateway_header)` for the header. That is a should, not a blocker for
 this merge.
 | 18a | X2 | runbooks-page | dashboard UI | **Merged** 2026-11-11 | `feat/x2-runbooks-page` | F13 | |
-| 18b | F27 | allowances | dashboard + MCP | **Code round started** 2026-11-15 (ceiling foundation: catalogue, seeded DB, checks, API; engine and page next). **Design round 3** (BT1–BT6 folded): the operator's default ceiling, AZ6 `restart`, and the configurable ceiling UI (catalogue in code, a DB selection validated at save/apply/match, destructive words cap the ceiling too, risk confirms, suspend-not-delete, never lists read-only, operator words, notify on a widen); one open collision: `stop_cover`/`media_stop` vs the built-in `stop` word. **Design round 2**: the label shape (resolve at apply time, refresh with accept-to-join, registry-id pins, filtered `never`), AZ1 (plain entity ids only), AZ2 (suspend on a redefining write), AZ3 (v1 is HA only), AZ4 (local time and DST), AZ5 (revoked token stops matching), BD1 (`only` allowlist + `never` suffix rule + `_` as a separator), BD2 (`gated` beats an allowance), BD3 (the verified token), BD4 (value validation), BD5 (registry pins) folded | `feat/f27-allowances` | F10 (P2), Chunk H, F18 | security re-reads §2–§5 and the label section; AZ6 (`restart`) is with the operator |
+| 18b | F27 | allowances | dashboard + MCP | **Code round** 2026-11-15: ceiling, engine (conditions/matching/rate/window/profiles) and the Allowances page; harness at 1440/390. **Design round 3** (BT1–BT6 folded): the operator's default ceiling, AZ6 `restart`, and the configurable ceiling UI (catalogue in code, a DB selection validated at save/apply/match, destructive words cap the ceiling too, risk confirms, suspend-not-delete, never lists read-only, operator words, notify on a widen); one open collision: `stop_cover`/`media_stop` vs the built-in `stop` word. **Design round 2**: the label shape (resolve at apply time, refresh with accept-to-join, registry-id pins, filtered `never`), AZ1 (plain entity ids only), AZ2 (suspend on a redefining write), AZ3 (v1 is HA only), AZ4 (local time and DST), AZ5 (revoked token stops matching), BD1 (`only` allowlist + `never` suffix rule + `_` as a separator), BD2 (`gated` beats an allowance), BD3 (the verified token), BD4 (value validation), BD5 (registry pins) folded | `feat/f27-allowances` | F10 (P2), Chunk H, F18 | security re-reads §2–§5 and the label section; AZ6 (`restart`) is with the operator |
 | 18c | X3 | integrations-ui | dashboard UI | Requested 2026-11-12; design after F27 is signed off | `feat/x3-integrations-ui` | F27, F10 (P2) | operator walk-through first |
 | 18d | X4 | agents-page | dashboard UI | **Merged** 2026-11-12 (into 1.3; on master 2026-11-14): one Agents page (tokens, policy sections, web fetch, activity); Controls renamed Command policy; absent policy fields keep their stored value | `feat/x4-agents-page` | `fix/agent-ssh-hosts` | rename Controls → Command policy |
 | 18e | X5 | ui-test-round | dashboard UI | **Merged** 2026-11-12 (into 1.3; on master 2026-11-14): six test-round fixes plus the X5-r plan-card regression fix | `fix/x5-ui-test-round`, `fix/plans-widget-visible` | — | six small fixes |

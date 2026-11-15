@@ -699,6 +699,7 @@ async function switchView(target) {
   if (target === 'inventory') { fetchInventory(); }
   if (target === 'runbooks') { fetchRunbooks(); }
   if (target === 'agents') { fetchAgentTokens(); }
+  if (target === 'allowances') { fetchAllowances(); }
   if (target === 'settings') {
     refreshPasswordUI();
     fetchNotifyConfig();
@@ -7308,6 +7309,7 @@ async function fetchNotifyConfig() {
     const events = (c.events || '').split(',').map(function(e){return e.trim();});
     document.getElementById('notify-event-jit').checked = events.indexOf('jit') !== -1;
     document.getElementById('notify-event-window').checked = events.indexOf('window') !== -1;
+    document.getElementById('notify-event-ceiling').checked = events.indexOf('ceiling') !== -1;
     document.getElementById('notify-event-blocked').checked = events.indexOf('blocked') !== -1;
     document.getElementById('notify-event-offline').checked = events.indexOf('offline') !== -1;
     document.getElementById('notify-event-online').checked = events.indexOf('online') !== -1;
@@ -7322,6 +7324,7 @@ async function saveNotifyConfig() {
   var events = [];
   if (document.getElementById('notify-event-jit').checked) events.push('jit');
   if (document.getElementById('notify-event-window').checked) events.push('window');
+  if (document.getElementById('notify-event-ceiling').checked) events.push('ceiling');
   if (document.getElementById('notify-event-blocked').checked) events.push('blocked');
   if (document.getElementById('notify-event-offline').checked) events.push('offline');
   if (document.getElementById('notify-event-online').checked) events.push('online');
@@ -10546,4 +10549,308 @@ function onbIntegrationCard(c) {
 function onbOpenIntegrations() {
   closeOnboarding();
   switchView('integrations');
+}
+
+
+// ── F27: Allowances ────────────────────────────────────────────────────────
+var _ceiling = null;
+
+function _allowanceConditions(row) {
+  try {
+    var c = JSON.parse(row.conditions_json || '{}');
+    var d = (c.domain && c.domain['in'] && c.domain['in'][0]) || '?';
+    var s = (c.service && c.service['in'] && c.service['in'][0]) || '?';
+    var ents = (c['data.entity_id'] && c['data.entity_id']['in']) || [];
+    return d + '.' + s + ' on ' + ents.length + ' entit' + (ents.length === 1 ? 'y' : 'ies');
+  } catch (e) { return '—'; }
+}
+
+async function fetchAllowances() {
+  try {
+    const [c, a, p, ag] = await Promise.all([
+      authFetch('/api/allowances/ceiling').then(r => r.json()),
+      authFetch('/api/allowances').then(r => r.json()),
+      authFetch('/api/allowances/profiles').then(r => r.json()),
+      authFetch('/api/agents').then(r => r.json())
+    ]);
+    _ceiling = c;
+    renderCeiling(c);
+    renderAllowances(a);
+    renderProfiles(p);
+    if (document.getElementById('profile-template-rows') &&
+        !document.querySelector('.profile-template-row')) addProfileTemplate();
+    const sel = document.getElementById('allowance-agent');
+    if (sel) {
+      sel.innerHTML = (ag || []).map(function(x) {
+        var id = x.id !== undefined ? x.id : x.agent_id;
+        return '<option value="' + esc(String(id)) + '">' + esc(x.name || ('agent ' + id)) + '</option>';
+      }).join('');
+    }
+    const dom = document.getElementById('allowance-domain');
+    if (dom && c && c.catalogue) {
+      dom.innerHTML = c.catalogue.map(function(t) {
+        return '<option value="' + esc(t.domain) + '">' + esc(t.label) + '</option>';
+      }).join('');
+      fillAllowanceServices();
+    }
+    const sum = document.getElementById('allowances-hud-sum');
+    if (sum) sum.innerHTML = '<span><span class="n">' + (a || []).length + '</span> live</span>';
+  } catch (e) { /* the page keeps its last render */ }
+}
+
+function renderCeiling(c) {
+  const box = document.getElementById('ceiling-types');
+  if (!box) return;
+  box.innerHTML = (c.catalogue || []).map(function(t) {
+    var acts = t.actions.map(function(act) {
+      return '<label class="flex items-center gap-1 text-xs mr-3"><input type="checkbox" data-cid="' +
+        esc(act.id) + '"' + (act.enabled ? ' checked' : '') + '> ' + esc(act.label) + '</label>';
+    }).join('');
+    return '<div class="p-2 rounded border" style="border-color:var(--border-color)">' +
+      '<div class="flex flex-wrap items-center gap-2 mb-1"><b class="text-sm">' + esc(t.label) + '</b>' +
+      (t.default ? '<span class="text-xs text-muted">on by default</span>' : '<span class="text-xs text-muted">off by default</span>') +
+      '</div>' +
+      (t.risk ? '<p class="text-xs mb-1" style="color:var(--status-warning)">' + esc(t.risk) + '</p>' : '') +
+      '<div class="flex flex-wrap gap-1">' + acts + '</div></div>';
+  }).join('');
+  document.getElementById('ceiling-never').innerHTML =
+    '<div><b class="text-xs">Never allowable</b>' +
+    (c.never.domains || []).map(function(d) {
+      return '<div class="text-xs text-muted"><code>' + esc(d.value) + '</code> — ' + esc(d.reason) + '</div>';
+    }).join('') + '</div>' +
+    '<div><b class="text-xs">Never service words</b>' +
+    (c.never.services || []).map(function(d) {
+      return '<div class="text-xs text-muted"><code>' + esc(d.value) + '</code> — ' + esc(d.reason) + '</div>';
+    }).join('') + '</div>';
+  const words = document.getElementById('ceiling-words');
+  words.innerHTML = (c.words.builtin || []).map(function(w) {
+    return '<span class="chip" title="built-in, read-only">' + esc(w) + '</span>';
+  }).join('') + ' ' + (c.words.operator || []).map(function(w) {
+    return '<span class="chip">' + esc(w) + ' <button class="link-btn" onclick="removeCeilingWord(\'' +
+      escJs(w) + '\')" aria-label="Remove ' + esc(w) + '">×</button></span>';
+  }).join('');
+}
+
+async function saveCeiling(riskAck) {
+  if (!_ceiling) return;
+  const ids = Array.prototype.slice.call(document.querySelectorAll('#ceiling-types input[data-cid]'))
+    .filter(function(x) { return x.checked; }).map(function(x) { return x.getAttribute('data-cid'); });
+  const risky = (ids || []).filter(function(cid) {
+    return (_ceiling.catalogue || []).some(function(t) {
+      return t.risk && t.actions.some(function(a) { return a.id === cid; });
+    });
+  });
+  if (!riskAck && risky.length) {
+    const riskText = (_ceiling.catalogue || []).filter(function(t) {
+      return t.actions.some(function(a) { return risky.indexOf(a.id) !== -1; });
+    }).map(function(t) { return t.risk; }).join(' ');
+    if (!confirm(riskText + '\n\nEnable these rows?')) return;
+    riskAck = true;
+  }
+  const st = document.getElementById('ceiling-status');
+  const r = await authFetch('/api/allowances/ceiling', {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled: ids, risk_ack: !!riskAck, confirm: true, set_hash: _ceiling.set_hash })
+  });
+  if (!r.ok) {
+    const d = await r.json().catch(function() { return {}; });
+    if (st) st.textContent = (d.detail && (d.detail.message || d.detail)) || 'Save failed';
+    if (d.detail && d.detail.code === 'ceiling_changed') fetchAllowances();
+    return;
+  }
+  if (st) st.textContent = 'Saved';
+  fetchAllowances();
+}
+
+async function addCeilingWord() {
+  const el = document.getElementById('ceiling-word-input');
+  const word = (el.value || '').trim();
+  if (!word) return;
+  const r = await authFetch('/api/allowances/words', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ word: word })
+  });
+  if (!r.ok) { alert('Could not add: ' + ((await r.json()).detail || 'refused')); return; }
+  const body = await r.json();
+  if (body.disabled && body.disabled.length) {
+    alert('Added. These rows were switched off: ' + body.disabled.join(', '));
+  }
+  el.value = '';
+  fetchAllowances();
+}
+
+async function removeCeilingWord(word) {
+  if (!confirm('Remove the word "' + word + '"? This widens the ceiling; it does not resume anything.')) return;
+  const r = await authFetch('/api/allowances/words/' + encodeURIComponent(word), { method: 'DELETE' });
+  if (!r.ok) { alert('Could not remove: ' + ((await r.json()).detail || 'refused')); return; }
+  fetchAllowances();
+}
+
+function fillAllowanceServices() {
+  const dom = document.getElementById('allowance-domain');
+  const sel = document.getElementById('allowance-service');
+  if (!dom || !sel || !_ceiling) return;
+  const t = (_ceiling.catalogue || []).filter(function(x) { return x.domain === dom.value; })[0];
+  sel.innerHTML = t ? t.actions.map(function(a) {
+    return '<option value="' + esc(a.service) + '">' + esc(a.label) + '</option>';
+  }).join('') : '';
+}
+
+function renderAllowances(rows) {
+  const box = document.getElementById('allowance-list');
+  if (!box) return;
+  if (!rows || !rows.length) { box.innerHTML = '<p class="text-muted text-xs">No live allowances. Every matching call asks for approval.</p>'; return; }
+  box.innerHTML = rows.map(function(r) {
+    return '<div class="flex flex-wrap items-center gap-2 p-2 rounded border" style="border-color:var(--border-color)">' +
+      '<b class="text-sm">' + esc(r.name) + '</b>' +
+      '<span class="text-xs text-muted">' + esc(r.agent_name || ('agent #' + r.agent_id)) + ' · ' +
+      esc(_allowanceConditions(r)) +
+      (r.rate_per_hour ? ' · max ' + r.rate_per_hour + '/h' : '') +
+      (r.window ? ' · ' + esc(r.window) : '') + '</span>' +
+      (r.suspended_at ? '<span class="chip" style="color:var(--status-warning)">suspended: ' + esc(r.suspended_reason) + '</span>' : '') +
+      '<span class="flex-1"></span>' +
+      (r.suspended_at ? '<button class="btn btn-xs" onclick="resumeAllowance(' + r.id + ')">Resume</button>' : '') +
+      '<button class="btn btn-deny btn-xs" onclick="revokeAllowance(' + r.id + ')">Revoke</button>' +
+      '</div>';
+  }).join('');
+}
+
+async function createAllowance(riskAck) {
+  const body = {
+    agent_id: parseInt((document.getElementById('allowance-agent') || {}).value || '0', 10),
+    name: (document.getElementById('allowance-name') || {}).value || '',
+    domain: (document.getElementById('allowance-domain') || {}).value || '',
+    service: (document.getElementById('allowance-service') || {}).value || '',
+    entities: ((document.getElementById('allowance-entities') || {}).value || '')
+      .split(',').map(function(x) { return x.trim(); }).filter(Boolean),
+    rate_per_hour: parseInt((document.getElementById('allowance-rate') || {}).value || '0', 10),
+    window: (document.getElementById('allowance-window') || {}).value || '',
+    risk_ack: !!riskAck
+  };
+  const st = document.getElementById('allowance-status');
+  const r = await authFetch('/api/allowances', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+  if (!r.ok) {
+    const d = await r.json().catch(function() { return {}; });
+    if (!riskAck && d.detail && d.detail.code === 'risk_ack_required') {
+      const risky = (d.detail.risky_entities || []).map(function(e) {
+        return e.entity_id + ' (' + e.device_class + ')';
+      }).join(', ');
+      if (confirm('This allowance is risky: ' + (d.detail.message || '') +
+                  (risky ? '\n' + risky : '') + '\n\nSave it?')) return createAllowance(true);
+      return;
+    }
+    if (st) st.textContent = (d.detail && (d.detail.message || d.detail)) || 'Could not save';
+    return;
+  }
+  if (st) st.textContent = 'Saved';
+  fetchAllowances();
+}
+
+async function revokeAllowance(id) {
+  if (!confirm('Revoke allowance #' + id + '? History keeps it.')) return;
+  await authFetch('/api/allowances/' + id + '/revoke', { method: 'POST' });
+  fetchAllowances();
+}
+
+async function resumeAllowance(id) {
+  if (!confirm('Resume allowance #' + id + '? It is checked against the ceiling again.')) return;
+  const r = await authFetch('/api/allowances/' + id + '/resume', { method: 'POST' });
+  if (!r.ok) alert('Could not resume: ' + ((await r.json()).detail || 'refused'));
+  fetchAllowances();
+}
+
+function renderProfiles(rows) {
+  const box = document.getElementById('allowance-profiles');
+  if (!box) return;
+  if (!rows || !rows.length) { box.innerHTML = '<p class="text-muted text-xs">No profiles.</p>'; return; }
+  box.innerHTML = rows.map(function(p) {
+    return '<div class="p-2 rounded border" style="border-color:var(--border-color)">' +
+      '<b class="text-sm">' + esc(p.name) + '</b> <span class="text-xs text-muted">v' + p.version + ' · ' +
+      (p.templates || []).length + ' template(s)</span>' +
+      '<div class="text-xs text-muted">' + (p.templates || []).map(function(t) {
+        return esc(t.domain + '.' + t.service + (t.label_id ? ' (label)' : ' ' + (t.entities || []).length + ' entities'));
+      }).join(' · ') + '</div>' +
+      '<button class="btn btn-xs mt-1" onclick="applyProfile(' + p.id + ')">Apply to agent</button></div>';
+  }).join('');
+}
+
+async function applyProfile(pid) {
+  const sel = document.getElementById('allowance-agent');
+  if (!sel || !sel.value) { alert('Pick an agent first.'); return; }
+  const r = await authFetch('/api/allowances/profiles/' + pid + '/apply', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ agent_id: parseInt(sel.value, 10), risk_ack: false })
+  });
+  if (!r.ok) {
+    const d = await r.json().catch(function() { return {}; });
+    if (d.detail && d.detail.code === 'risk_ack_required') {
+      if (confirm((d.detail.message || 'Risky rows') + '\n\nApply anyway?')) {
+        const r2 = await authFetch('/api/allowances/profiles/' + pid + '/apply', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ agent_id: parseInt(sel.value, 10), risk_ack: true })
+        });
+        if (r2.ok) { fetchAllowances(); return; }
+      }
+    }
+    alert('Could not apply: ' + ((d.detail && (d.detail.message || d.detail)) || 'refused'));
+    return;
+  }
+  fetchAllowances();
+}
+
+
+function addProfileTemplate() {
+  const box = document.getElementById('profile-template-rows');
+  if (!box) return;
+  const row = document.createElement('div');
+  row.className = 'flex flex-wrap gap-2 items-center text-xs profile-template-row';
+  const types = (_ceiling && _ceiling.catalogue || []).map(function(t) {
+    return '<option value="' + esc(t.domain) + '">' + esc(t.label) + '</option>';
+  }).join('');
+  row.innerHTML = '<select class="profile-domain" onchange="fillProfileServices(this)">' + types + '</select>' +
+    '<select class="profile-service"></select>' +
+    '<input type="text" class="profile-entities flex-1" placeholder="entities, comma separated (or leave blank for a label)" style="min-width:12rem">' +
+    '<input type="text" class="profile-label" placeholder="label id (optional)" style="width:10rem">' +
+    '<button class="btn btn-deny btn-xs" onclick="this.parentElement.remove()">Remove</button>';
+  box.appendChild(row);
+  fillProfileServices(row.querySelector('.profile-domain'));
+}
+
+function fillProfileServices(sel) {
+  const row = sel.closest('.profile-template-row');
+  const svc = row.querySelector('.profile-service');
+  const t = (_ceiling && _ceiling.catalogue || []).filter(function(x) { return x.domain === sel.value; })[0];
+  svc.innerHTML = t ? t.actions.map(function(a) {
+    return '<option value="' + esc(a.service) + '">' + esc(a.label) + '</option>';
+  }).join('') : '';
+}
+
+async function saveProfile() {
+  const name = (document.getElementById('profile-name') || {}).value || '';
+  const desc = (document.getElementById('profile-description') || {}).value || '';
+  const rows = Array.prototype.slice.call(document.querySelectorAll('.profile-template-row'));
+  const templates = rows.map(function(row) {
+    const ents = (row.querySelector('.profile-entities').value || '')
+      .split(',').map(function(x) { return x.trim(); }).filter(Boolean);
+    return {
+      domain: row.querySelector('.profile-domain').value,
+      service: row.querySelector('.profile-service').value,
+      entities: ents,
+      label_id: (row.querySelector('.profile-label').value || '').trim()
+    };
+  });
+  const st = document.getElementById('profile-status');
+  if (!templates.length) { if (st) st.textContent = 'Add at least one template.'; return; }
+  const r = await authFetch('/api/allowances/profiles', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: name, description: desc, templates: templates })
+  });
+  if (!r.ok) { const d = await r.json().catch(function() { return {}; });
+    if (st) st.textContent = (d.detail && (d.detail.message || d.detail)) || 'Could not save'; return; }
+  if (st) st.textContent = 'Saved';
+  document.getElementById('profile-template-rows').innerHTML = '';
+  fetchAllowances();
 }
