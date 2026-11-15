@@ -1294,8 +1294,19 @@
   </div>
 </main>
 
+<div id="profile-diff-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center" style="background:rgba(0,0,0,0.6)">
+  <div class="widget" style="max-width:44rem;width:92%">
+    <div class="widget-header">Update agents <span class="text-xs text-muted">nothing changes until you confirm</span></div>
+    <div id="profile-diff-body" class="text-xs space-y-2"></div>
+    <div class="flex gap-2 mt-3">
+      <button onclick="applyPreviewedProfile()" class="btn btn-sm">Apply update</button>
+      <button onclick="closeProfileDiff()" class="btn btn-muted btn-sm">Cancel</button>
+    </div>
+  </div>
+</div>
+
 <script src="/static/state.js?v=ui4"></script>
-<script src="/static/app.js?v=ui33"></script>
+<script src="/static/app.js?v=ui34"></script>
 
 <!-- Create / Edit Approved Window Modal -->
 <div id="create-window-modal" class="modal-overlay hidden">

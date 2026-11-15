@@ -5059,6 +5059,15 @@ def save_profile_endpoint(payload: ProfilePayload, request: Request):
         raise HTTPException(status_code=exc.status, detail=exc.detail)
 
 
+@app.get("/api/allowances/profiles/{pid}/diff")
+def profile_diff_endpoint(pid: int, agent_id: int, request: Request):
+    _check_session(request)
+    try:
+        return allowances.profile_diff(pid, agent_id)
+    except allowances.AllowanceError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.detail)
+
+
 @app.post("/api/allowances/profiles/{pid}/apply")
 def apply_profile_endpoint(pid: int, payload: ApplyProfilePayload, request: Request):
     _check_session(request)

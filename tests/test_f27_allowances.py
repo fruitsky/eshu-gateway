@@ -212,3 +212,30 @@ def test_a_changed_registry_id_suspends(auth_client, agent_id, ha):
     ha['cover.blind']['id'] = 'reg-changed'
     a.refresh_labels()
     assert a.get_allowance(aid)['suspended_reason'] == 'registry_changed'
+
+
+def test_the_update_agents_diff_shows_revoke_and_add(auth_client, agent_id, ha):
+    _open_cover(auth_client)
+    r = auth_client.post('/api/allowances/profiles', json={
+        'name': 'P', 'templates': [{'domain': 'cover',
+                                    'service': 'open_cover',
+                                    'entities': ['cover.garage']}]})
+    pid = r.json()['id']
+    auth_client.post('/api/allowances/profiles/%d/apply' % pid,
+                     json={'agent_id': agent_id, 'risk_ack': True})
+    r = auth_client.post('/api/allowances/profiles', json={
+        'name': 'P', 'profile_id': pid,
+        'templates': [{'domain': 'cover', 'service': 'open_cover',
+                       'entities': ['cover.garage']},
+                      {'domain': 'cover', 'service': 'close_cover',
+                       'entities': ['cover.garage']}]})
+    assert r.status_code == 200, r.text
+    d = auth_client.get('/api/allowances/profiles/%d/diff?agent_id=%d' % (pid, agent_id)).json()
+    assert len(d['revoke']) == 1 and len(d['add']) == 2
+    assert d['up_to_date'] is False
+    # Nothing changed until apply.
+    assert len(a.list_allowances()) == 1
+    r = auth_client.post('/api/allowances/profiles/%d/apply' % pid,
+                         json={'agent_id': agent_id, 'risk_ack': True})
+    assert len(r.json()['created']) == 2
+    assert len(a.list_allowances()) == 2

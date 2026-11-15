@@ -10778,7 +10778,7 @@ function renderProfiles(rows) {
       '<div class="text-xs text-muted">' + (p.templates || []).map(function(t) {
         return esc(t.domain + '.' + t.service + (t.label_id ? ' (label)' : ' ' + (t.entities || []).length + ' entities'));
       }).join(' · ') + '</div>' +
-      '<button class="btn btn-xs mt-1" onclick="applyProfile(' + p.id + ')">Apply to agent</button></div>';
+      '<button class="btn btn-xs mt-1" onclick="previewProfile(' + p.id + ')">Update agents</button></div>';
   }).join('');
 }
 
@@ -10865,5 +10865,60 @@ async function acceptJoin(id) {
   if (!confirm('Accept the entities this label gained? They become part of the allowance.')) return;
   const r = await authFetch('/api/allowances/' + id + '/accept-join', { method: 'POST' });
   if (!r.ok) alert('Could not accept: ' + ((await r.json()).detail || 'refused'));
+  fetchAllowances();
+}
+
+
+var _profilePreview = null;
+
+async function previewProfile(pid) {
+  const sel = document.getElementById('allowance-agent');
+  if (!sel || !sel.value) { alert('Pick an agent first.'); return; }
+  const agentId = parseInt(sel.value, 10);
+  const r = await authFetch('/api/allowances/profiles/' + pid + '/diff?agent_id=' + agentId);
+  if (!r.ok) { alert('Could not preview: ' + ((await r.json()).detail || 'refused')); return; }
+  const d = await r.json();
+  _profilePreview = d;
+  const body = document.getElementById('profile-diff-body');
+  const revoke = (d.revoke || []).map(function(x) {
+    return '<div>Revoke <b>' + esc(x.name) + '</b> (' + esc(x.domain + '.' + x.service) + ', v' + x.version + ')</div>';
+  }).join('') || '<div class="text-muted">Nothing to revoke.</div>';
+  const add = (d.add || []).map(function(x) {
+    return '<div>Add <b>' + esc(x.name) + '</b> (' + esc(x.domain + '.' + x.service) + ', ' +
+      x.entities.length + ' entities' + (x.label_id ? ', from a label' : '') + ')</div>';
+  }).join('') || '<div class="text-muted">Nothing to add.</div>';
+  body.innerHTML = (d.up_to_date ? '<p class="text-muted">This agent is already on the current version; applying would still replace the rows below.</p>' : '') +
+    '<div><b>Revoke</b></div>' + revoke + '<div class="mt-2"><b>Add</b></div>' + add;
+  document.getElementById('profile-diff-modal').classList.remove('hidden');
+}
+
+function closeProfileDiff() {
+  document.getElementById('profile-diff-modal').classList.add('hidden');
+  _profilePreview = null;
+}
+
+async function applyPreviewedProfile() {
+  if (!_profilePreview) return;
+  const sel = document.getElementById('allowance-agent');
+  const r = await authFetch('/api/allowances/profiles/' + _profilePreview.profile_id + '/apply', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ agent_id: parseInt(sel.value, 10), risk_ack: false })
+  });
+  if (!r.ok) {
+    const d = await r.json().catch(function() { return {}; });
+    if (d.detail && d.detail.code === 'risk_ack_required') {
+      if (confirm((d.detail.message || 'Risky rows') + '\n\nApply anyway?')) {
+        const r2 = await authFetch('/api/allowances/profiles/' + _profilePreview.profile_id + '/apply', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ agent_id: parseInt(sel.value, 10), risk_ack: true })
+        });
+        if (r2.ok) { closeProfileDiff(); fetchAllowances(); }
+        return;
+      }
+    }
+    alert('Could not apply: ' + ((d.detail && (d.detail.message || d.detail)) || 'refused'));
+    return;
+  }
+  closeProfileDiff();
   fetchAllowances();
 }

@@ -1152,3 +1152,35 @@ def accept_join(actor, aid):
                        details='allowance #%d accepted %s' %
                                (aid, ','.join(p['entity_id'] for p in now_ok)))
     return {'accepted': [p['entity_id'] for p in now_ok]}
+
+
+def profile_diff(pid, agent_id):
+    """What a profile re-apply would revoke and add, without changing anything."""
+    profile = get_profile(pid)
+    if not profile:
+        raise AllowanceError(404, 'No such profile.')
+    existing = [r for r in list_allowances()
+                if r['agent_id'] == int(agent_id) and r['profile_id'] == pid]
+    add = []
+    for t in profile['templates']:
+        domain = (t.get('domain') or '').strip().lower()
+        service = (t.get('service') or '').strip().lower()
+        entities = list(t.get('entities') or [])
+        if t.get('label_id'):
+            try:
+                entities = _resolve_label(t['label_id'], domain)
+            except AllowanceError:
+                raise
+        add.append({'name': t.get('name') or profile['name'],
+                    'domain': domain, 'service': service,
+                    'entities': entities, 'label_id': t.get('label_id') or ''})
+    up_to_date = bool(existing) and all(
+        r['version'] == profile['version'] for r in existing) and \
+        len(existing) == len(add)
+    return {'profile_id': pid, 'profile_version': profile['version'],
+            'agent_id': int(agent_id),
+            'revoke': [{'id': r['id'], 'name': r['name'],
+                        'domain': (__import__('json').loads(r['conditions_json'])['domain']['in'][0]),
+                        'service': (__import__('json').loads(r['conditions_json'])['service']['in'][0]),
+                        'version': r['version']} for r in existing],
+            'add': add, 'up_to_date': up_to_date}
