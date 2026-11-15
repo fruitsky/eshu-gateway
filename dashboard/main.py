@@ -2840,6 +2840,19 @@ def get_statistics(request: Request, days: int = 14, gateway_ip: str = None, gat
         day = approval_by_day.setdefault(row['date'], {})
         day[bucket] = day.get(bucket, 0) + count
         approval_totals[bucket] += count
+    # F27: allowance runs are MCP calls, not requests; count them in the
+    # same breakdown so the statistics series and the session card agree.
+    cursor.execute(f'''
+        SELECT DATE(created_at, 'unixepoch') AS date, COUNT(*) AS n
+        FROM integration_calls
+        WHERE created_at >= ? AND approval LIKE 'allowance:%'
+        GROUP BY date
+    ''', (cutoff,))
+    for row in cursor.fetchall():
+        count = int(row['n'] or 0)
+        approval_totals['allowance'] += count
+        day = approval_by_day.setdefault(row['date'], {})
+        day['allowance'] = day.get('allowance', 0) + count
     approved_total = sum(approval_totals.values())
     override_total = sum(approval_totals[key] for key in OVERRIDE_BUCKETS)
     approval_breakdown = {

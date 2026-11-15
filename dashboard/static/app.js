@@ -2850,7 +2850,8 @@ async function saveSessionNames() {
 var APPROVAL_BUCKETS = [
   ['allowlist', 'allowlist'], ['human', 'human'], ['plan', 'plan'],
   ['read-lane', 'read lane'], ['session-override', 'session override'],
-  ['host-override', 'host override'], ['window', 'window'], ['fleet', 'fleet run']
+  ['host-override', 'host override'], ['window', 'window'],
+  ['fleet', 'fleet run'], ['allowance', 'allowance']
 ];
 
 function fmtDuration(seconds) {
@@ -2874,7 +2875,11 @@ function approvalChipHtml(key, label, count) {
 }
 
 function sessionSummaryHtml(sum) {
-  if (!sum || !sum.commands) return '';
+  if (!sum) return '';
+  var anyBucket = APPROVAL_BUCKETS.some(function (b) {
+    return ((sum.by_approval || {})[b[0]] || 0) > 0;
+  });
+  if (!sum.commands && !anyBucket) return '';
   var buckets = sum.by_approval || {};
   var chips = APPROVAL_BUCKETS.map(function (b) {
     return approvalChipHtml(b[0], b[1], buckets[b[0]]);
