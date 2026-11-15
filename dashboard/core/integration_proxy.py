@@ -146,8 +146,14 @@ def generic_write_envelope(res: dict, method: str, path: str, data=None,
 # Hard-to-undo mutations. Disruptive-but-reversible verbs (restart, reboot,
 # stop, toggle) are deliberately excluded so routine writes auto-run under the
 # 'destructive' gate mode. A single constant — trivial to tune per installation.
-DESTRUCTIVE_VERBS = ('delete', 'remove', 'purge', 'format', 'reset')
-_DESTRUCTIVE_RE = re.compile(r'\b(?:' + '|'.join(DESTRUCTIVE_VERBS) + r')\b', re.IGNORECASE)
+# BD1 + AZ6: `_` separates words, so `alarm_disarm` and `lock.open` are
+# marked; `open` itself is not here (F27 BV1: it would cap open_cover).
+DESTRUCTIVE_VERBS = ('delete', 'remove', 'purge', 'format', 'reset', 'stop',
+                     'shutdown', 'reboot', 'disable', 'unlock', 'disarm',
+                     'restart')
+_DESTRUCTIVE_RE = re.compile(
+    r'(?<![A-Za-z0-9])(?:' + '|'.join(DESTRUCTIVE_VERBS) + r')(?![A-Za-z0-9])',
+    re.IGNORECASE)
 
 
 def is_destructive(method: str, path: str) -> bool:

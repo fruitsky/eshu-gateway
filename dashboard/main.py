@@ -126,6 +126,7 @@ from core.agent_context import (
 )
 from core.rate_limit import _check_rate_limit
 from core import installer_channels
+from core import allowances
 from db.policies import get_meta, set_meta
 from core.agent_policy import evaluate_call, safe_ident
 from core.session_guard import (
@@ -372,6 +373,10 @@ def on_startup():
         installer_channels.ensure_initialised()
     except Exception as exc:  # never block startup; the endpoints answer 503
         print(f"installer channels: initialisation failed: {exc}")
+    try:
+        allowances.ensure_initialised()
+    except Exception as exc:  # the ceiling endpoints fail closed without it
+        print(f"allowance ceiling: initialisation failed: {exc}")
     # Start background gateway transition watcher (offline detection)
     watch_thread = threading.Thread(target=_gateway_watch_loop, daemon=True)
     watch_thread.start()
@@ -613,6 +618,18 @@ class RegisterPayload(BaseModel):
     # installer sends nothing, which keeps the stored value ("unknown" if
     # there is none).
     installer_hash: str = ""
+
+class CeilingPayload(BaseModel):
+    integration: str = 'ha'
+    enabled: list[str] = []
+    risk_ack: bool = False
+    confirm: bool = False
+    set_hash: str = ""
+
+
+class WordPayload(BaseModel):
+    word: str = ""
+
 
 class PolicyPayload(BaseModel):
     type: str
@@ -4882,6 +4899,46 @@ def set_session_names_endpoint(payload: SessionNamesPayload, request: Request):
     _check_session(request)
     set_session_names(payload.names or {})
     return {"status": "ok"}
+
+
+# ── Allowances: the ceiling (F27) ───────────────────────────────────────
+
+@app.get("/api/allowances/ceiling")
+def get_allowance_ceiling(request: Request, integration: str = "ha"):
+    _check_session(request)
+    return allowances.state(integration)
+
+
+@app.put("/api/allowances/ceiling")
+def put_allowance_ceiling(payload: CeilingPayload, request: Request):
+    _check_session(request)
+    try:
+        return allowances.apply_ceiling(
+            'operator', payload.integration, payload.enabled,
+            risk_ack=payload.risk_ack, expected_hash=payload.set_hash)
+    except allowances.CeilingError as exc:
+        detail = exc.detail
+        if exc.extra:
+            detail = {'message': exc.detail, **exc.extra}
+        raise HTTPException(status_code=exc.status, detail=detail)
+
+
+@app.post("/api/allowances/words")
+def add_allowance_word(payload: WordPayload, request: Request):
+    _check_session(request)
+    try:
+        return allowances.add_word('operator', payload.word)
+    except allowances.CeilingError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.detail)
+
+
+@app.delete("/api/allowances/words/{word}")
+def remove_allowance_word(word: str, request: Request):
+    _check_session(request)
+    try:
+        return allowances.remove_word('operator', word)
+    except allowances.CeilingError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.detail)
 
 
 # ── Static Files ────────────────────────────────────────────────────────

@@ -17862,6 +17862,56 @@ direction, and it is not a service anyone allows).
 
 ---
 
+### Round 4 — the security answers, folded (2026-11-15)
+
+**Status: code round started on `feat/f27-allowances-code` (from master
+`e6b42d8`; the design branch's commits are on it).** The nine answers and
+BV1/BV2 are folded as follows.
+
+* **The `stop` exemption (answer 1).** A catalogue row carries
+  `exempt_words: ["stop"]` naming the **built-in** word it is exempt from.
+  Only `cover.stop_cover` and `media_player.media_stop` set it (a test pins
+  that pair). Every other built-in word and **every operator-added word**
+  still caps the row, so an operator who adds `stop` gets both rows
+  switched off. `stop` stays destructive everywhere else.
+* **A pending card is not re-checked (answer 2).** The ceiling bounds
+  pre-approvals; the approval path is unchanged. "The ceiling does not
+  gate" keeps its meaning.
+* **One role (answer 3).** No admin role in F27; BT5's notify is the
+  control. When roles arrive, widening becomes admin-only.
+* **Words are global (answer 4).** Over-marking is the safe direction.
+* **Resume one at a time (answer 5).**
+* **Risk acks (answer 6).** The ceiling's `risk_ack` covers the type. A
+  second server-enforced `risk_ack` on allowance save covers a risky row or
+  an entity whose `device_class` is a garage, gate, door or lock-like.
+* **The `ceiling` notify (answer 7).** One event per change, on by default;
+  the payload carries the integration, catalogue ids, before/after and the
+  actor, never entity lists. Turning the event off is audited and sends one
+  final notification.
+* **The agent line stays generic (answer 8).**
+* **Audit (answer 9).** Full before/after plus a sha256 of the enabled set;
+  move to diff + hash when the catalogue passes about 100 rows.
+* **BV1 — the `open` lists.** `open` joins `never.service` (whole value or
+  `_open` suffix), so `lock.open` and `valve.open` are refused wherever
+  they appear. `open` is **not** a destructive word (BT3 would cap
+  `cover.open_cover`), and the "open_cover is also marked" sentence in
+  round 2 §10 is corrected.
+* **BV2 — the widening paths.** Removing an operator word is a widening:
+  it sends the BT5 notify and resumes nothing. `PUT /api/allowances/ceiling`
+  carries the `set_hash` the form loaded; a stale save is 409
+  `ceiling_changed`, so a second tab cannot re-enable a row the first tab
+  just disabled.
+
+**Code round so far.** The catalogue, the seeded DB ceiling, the
+never/destructive checks (with the `stop` exemption), the operator words,
+and `GET/PUT /api/allowances/ceiling` with session + CSRF + `risk_ack` +
+`set_hash` + audit + notify. The allowance engine (conditions, matching,
+profiles) and the page are the next slice; `ceiling_allows()` is the one
+function they will call at save, apply and match.
+
+`bash scripts/verify.sh`: `3202 passed, 26 skipped, 8 warnings in 684.83s
+(0:11:24)`.
+
 ## Chunk X3 — Integrations page and agent policy modal pass · slug `integrations-ui` · dashboard UI · after F27
 
 ### Goal
@@ -20238,7 +20288,7 @@ off argv (BE3's BH3): `--data-binary @-` for the body and
 `-H @<(gateway_header)` for the header. That is a should, not a blocker for
 this merge.
 | 18a | X2 | runbooks-page | dashboard UI | **Merged** 2026-11-11 | `feat/x2-runbooks-page` | F13 | |
-| 18b | F27 | allowances | dashboard + MCP | **Design round 3** (2026-11-15, BT1–BT6 folded): the operator's default ceiling, AZ6 `restart`, and the configurable ceiling UI (catalogue in code, a DB selection validated at save/apply/match, destructive words cap the ceiling too, risk confirms, suspend-not-delete, never lists read-only, operator words, notify on a widen); one open collision: `stop_cover`/`media_stop` vs the built-in `stop` word. **Design round 2**: the label shape (resolve at apply time, refresh with accept-to-join, registry-id pins, filtered `never`), AZ1 (plain entity ids only), AZ2 (suspend on a redefining write), AZ3 (v1 is HA only), AZ4 (local time and DST), AZ5 (revoked token stops matching), BD1 (`only` allowlist + `never` suffix rule + `_` as a separator), BD2 (`gated` beats an allowance), BD3 (the verified token), BD4 (value validation), BD5 (registry pins) folded | `feat/f27-allowances` | F10 (P2), Chunk H, F18 | security re-reads §2–§5 and the label section; AZ6 (`restart`) is with the operator |
+| 18b | F27 | allowances | dashboard + MCP | **Code round started** 2026-11-15 (ceiling foundation: catalogue, seeded DB, checks, API; engine and page next). **Design round 3** (BT1–BT6 folded): the operator's default ceiling, AZ6 `restart`, and the configurable ceiling UI (catalogue in code, a DB selection validated at save/apply/match, destructive words cap the ceiling too, risk confirms, suspend-not-delete, never lists read-only, operator words, notify on a widen); one open collision: `stop_cover`/`media_stop` vs the built-in `stop` word. **Design round 2**: the label shape (resolve at apply time, refresh with accept-to-join, registry-id pins, filtered `never`), AZ1 (plain entity ids only), AZ2 (suspend on a redefining write), AZ3 (v1 is HA only), AZ4 (local time and DST), AZ5 (revoked token stops matching), BD1 (`only` allowlist + `never` suffix rule + `_` as a separator), BD2 (`gated` beats an allowance), BD3 (the verified token), BD4 (value validation), BD5 (registry pins) folded | `feat/f27-allowances` | F10 (P2), Chunk H, F18 | security re-reads §2–§5 and the label section; AZ6 (`restart`) is with the operator |
 | 18c | X3 | integrations-ui | dashboard UI | Requested 2026-11-12; design after F27 is signed off | `feat/x3-integrations-ui` | F27, F10 (P2) | operator walk-through first |
 | 18d | X4 | agents-page | dashboard UI | **Merged** 2026-11-12 (into 1.3; on master 2026-11-14): one Agents page (tokens, policy sections, web fetch, activity); Controls renamed Command policy; absent policy fields keep their stored value | `feat/x4-agents-page` | `fix/agent-ssh-hosts` | rename Controls → Command policy |
 | 18e | X5 | ui-test-round | dashboard UI | **Merged** 2026-11-12 (into 1.3; on master 2026-11-14): six test-round fixes plus the X5-r plan-card regression fix | `fix/x5-ui-test-round`, `fix/plans-widget-visible` | — | six small fixes |
