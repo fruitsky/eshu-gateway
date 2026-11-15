@@ -14195,6 +14195,16 @@ check. Build regenerated; Build only.
 `bash scripts/verify.sh`: `3067 passed, 26 skipped, 7 warnings in 672.26s
 (0:11:12)`.
 
+#### Security confirm of the post-approval nit (2026-11-15, master `e6b42d8`, fix `116f5ef`)
+
+**Fine for the rollout.**
+* On the install path, an existing `authorized_keys` that the user cannot
+  read (`ak_as_user test -r` fails) is now refused, and the file is left
+  as it was, matching the update path.
+* The rest of the block sits inside the `else`, so nothing is rewritten.
+  The test pins it.
+* The change only adds a refusal.
+
 ## 7. Backlog (not planned in detail)
 
 * Deny with a reason, shown to the agent (cheap; low value given the data).
