@@ -5274,6 +5274,25 @@ async function fetchGatewayHourly() {
   } catch (e) {}
 }
 
+/* X8: which installer this gateway runs, as a badge in the version line.
+   The dashboard computes the channel (fleet/edge/build/outdated/unknown); the
+   UI never compares hashes itself. An old installer reports nothing. */
+function gwChannelBadge(g) {
+  var ch = String(g.installer_channel || 'unknown');
+  var hash = String(g.installer_hash || '');
+  var label = ch.charAt(0).toUpperCase() + ch.slice(1);
+  if (ch === 'outdated') label = 'outdated ' + hash.slice(0, 6);
+  var changed = g.installer_hash_changed_at
+    ? ' \u00b7 changed ' + formatAgo(Math.max(0, Math.floor(Date.now() / 1000) - g.installer_hash_changed_at))
+    : '';
+  // BR1: the hash is what the gateway says about itself, not a verified fact.
+  var title = 'Installer ' + (hash || 'not reported') +
+    ' reported by the gateway' + changed;
+  if (ch === 'build') title += ' \u00b7 on Build, not seeded or reviewed through the channels';
+  return '<span class="gw-ch gw-ch-' + esc(ch) + '" title="' + esc(title) + '">' +
+    esc(label) + '</span>';
+}
+
 async function fetchGateways() {
   const res = await fetch('/api/gateways'); const data = await res.json();
   _gatewaysData = data;
@@ -5379,10 +5398,10 @@ async function fetchGateways() {
     return '<tr>' +
       '<td class="px-4 py-2 whitespace-nowrap">' + statusCell + '</td>' +
       '<td class="px-4 py-2 whitespace-nowrap">' + gwPill(g.hostname) + ' ' + escapeHtml(g.hostname) + devBadge(g) + ztBadge +
-        '<div class="gw-sub text-xs text-muted">' +
-          'enrolled ' + (g.first_seen ? formatAgo(now - g.first_seen) : '—') +
-          ' \u00b7 policy ' + (isOnline ? (pua > 0 ? 'synced ' + formatAgo(now - pua) : '\u2014') : 'unknown') +
-        '</div></td>' +
+        '<div class="gw-sub text-xs text-muted">v' + esc(String(g.version || '?').replace(/^v/, '')) + ' \u00b7 ' +
+          gwChannelBadge(g) + ' \u00b7 policy ' +
+          (isOnline ? (pua > 0 ? 'synced' : '\u2014') : 'unknown') +
+        '</div>' + '</td>' +
       '<td class="px-4 py-2 whitespace-nowrap text-muted">' + escapeHtml(g.ip) + '</td>' +
       '<td class="px-4 py-2">' + healthCell + '</td>' +
       '<td class="px-4 py-2 gw-spark-cell">' + spark + '</td>' +

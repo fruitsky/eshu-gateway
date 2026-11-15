@@ -4,6 +4,22 @@
 # lands in order), tell the agent why, then exit HARD. A rejected window must
 # NOT fall through to JIT — doing so created duplicate window-rejected + JIT
 # tickets per attempt (async tickets interleaving with later ones).
+
+# BS1: the claim's gateway-token header. This script is sourced by the gateway,
+# so `gateway_header` (which reads /etc/eshu-token on 1.4 and the baked value
+# on 1.3) is normally there. If the script is sourced elsewhere, fall back to
+# the file, then to the old baked variable.
+_window_token_header() {
+  if [ "$(type -t gateway_header 2>/dev/null)" = "function" ]; then
+    gateway_header
+    return 0
+  fi
+  local _tok="${GATEWAY_TOKEN:-}"
+  if [ -z "$_tok" ]; then
+    _tok=$(head -n1 /etc/eshu-token 2>/dev/null | tr -d '[:space:]' || true)
+  fi
+  printf 'X-Gateway-Token: %s\n' "$_tok"
+}
 _window_reject() {
   local _reason="$1"
   log_window_reject "$cmd" "$_reason"
@@ -103,7 +119,7 @@ if [ -n "${ESHU_WINDOW_TOKEN:-}" ] && [ -f /etc/eshu-windows.txt ] && [ -s /etc/
       WINDOW_CLAIM_BODY='{"window_token":"'"$ESHU_WINDOW_TOKEN"'"}'
       WINDOW_CLAIM_HTTP=$(printf '%s' "$WINDOW_CLAIM_BODY" | curl -m 3 -s -o /dev/null -w "%{http_code}" \
         -X POST "$DASHBOARD_URL/api/approved-windows/execute" \
-        -H @<(printf 'X-Gateway-Token: %s\n' "${GATEWAY_TOKEN:-}") \
+        -H @<(_window_token_header) \
         -H "Content-Type: application/json" \
         --data-binary @- 2>/dev/null) || WINDOW_CLAIM_EXIT=$?
       # Fail open ONLY when curl itself failed (network down). Any HTTP answer

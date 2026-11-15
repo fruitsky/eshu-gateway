@@ -24,6 +24,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import shutil
 import subprocess
 import threading
@@ -308,7 +309,6 @@ exec "__REAL__" "$@"
             ("__TARGET_IP__", self.target_ip),
             ("__DASHBOARD_URL__", "http://dashboard.test"),
             ("__GATEWAY_VERSION__", "v-test"),
-            ("__GATEWAY_TOKEN__", "test-token"),
         ):
             text = swap(token, value, 1)
 
@@ -570,9 +570,12 @@ def gw(tmp_path):
 # ── the shipped script's install contract ───────────────────────────────────
 def test_repo_script_keeps_placeholders_and_expected_paths():
     text = SCRIPT.read_text()
-    for token in ("__TARGET_IP__", "__DASHBOARD_URL__",
-                  "__GATEWAY_VERSION__", "__GATEWAY_TOKEN__"):
+    for token in ("__TARGET_IP__", "__DASHBOARD_URL__", "__GATEWAY_VERSION__"):
         assert token in text
+    # BQ4: no baked token; it reads the one file.
+    assert "__GATEWAY_TOKEN__" not in text
+    assert not re.search(r'^GATEWAY_TOKEN=', text, re.M)
+    assert "/etc/eshu-token" in text
     for path in ("/etc/eshu-freeze", "/etc/eshu-zero-trust",
                  "/etc/eshu-rblack.txt", "/etc/eshu-exact.txt",
                  "/etc/eshu-rwhite.txt", "/etc/eshu/features.d",
@@ -1482,6 +1485,10 @@ def test_bj2_the_window_claim_keeps_both_tokens_off_argv(gw):
              if c["url"].endswith("/api/approved-windows/execute")][0]
     assert claim["data"].get("window_token") == "wintok"
     assert "X-Gateway-Token: test-token" in gw.header_text()
+    # BS1: on 1.4 there is no GATEWAY_TOKEN variable; the claim must still
+    # carry the file's token, so no header may be empty.
+    assert "X-Gateway-Token: \n" not in gw.header_text()
+    assert gw.header_text().count("X-Gateway-Token: test-token") >= 2
 
 
 def test_bj3_the_window_token_is_not_logged_in_full(gw):
@@ -1580,3 +1587,28 @@ def test_sec_R_authorized_keys_is_jit(gw):
     assert proc.returncode == 1
     assert gw.wait_for(lambda calls: any(
         c["url"].endswith("/api/request") for c in calls))
+
+
+def test_bs1_the_window_header_resolves_on_13_and_14(tmp_path):
+    """BS1: the sourced feature works with the 1.3 variable and the 1.4 file."""
+    feature = (REPO / "dashboard" / "static" / "features"
+               / "approved_windows.sh").read_text()
+    start = feature.index("_window_token_header() {")
+    end = feature.index("\n}\n", start) + len("\n}\n")
+    token_file = tmp_path / "eshu-token"
+    token_file.write_text("file-token\n")
+    fn = feature[start:end].replace("/etc/eshu-token", str(token_file))
+
+    # 1.4: the gateway defines gateway_header; it reads the file.
+    script_14 = ('gateway_header() { printf "X-Gateway-Token: %%s\\n" '
+                 '"$(head -n1 %s)"; }\n' % token_file) + fn + \
+        "\n_window_token_header\n"
+    proc = subprocess.run(["bash", "-c", script_14], capture_output=True,
+                          text=True, timeout=30)
+    assert proc.stdout.strip() == "X-Gateway-Token: file-token", proc.stdout
+
+    # 1.3: no gateway_header; the baked variable is still used.
+    script_13 = "GATEWAY_TOKEN=old-token\n" + fn + "\n_window_token_header\n"
+    proc = subprocess.run(["bash", "-c", script_13], capture_output=True,
+                          text=True, timeout=30)
+    assert proc.stdout.strip() == "X-Gateway-Token: old-token", proc.stdout

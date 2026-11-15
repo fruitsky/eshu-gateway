@@ -351,6 +351,37 @@ def test_the_time_limit_stops_the_command(tmp_path):
     assert posted and posted[-1]['limit'] == 'time'
 
 
+def test_the_time_limit_marker_does_not_ride_on_the_wall_clock(tmp_path):
+    """The flake: the "stopped after" marker compared two CLOCK_REALTIME
+    stamps, so an NTP step between them dropped the marker although `timeout`
+    had fired (rc 124). The measurement is monotonic now; this pins it by
+    moving the script's second `date +%s%N` call three seconds back."""
+    import shutil
+    real_date = shutil.which('date')
+    if real_date is None:  # pragma: no cover - Linux runners always have it
+        pytest.skip('no date binary to wrap')
+    gw = _gateway(tmp_path)
+    counter = tmp_path / 'date.calls'
+    wrapper = gw.bin / 'date'
+    wrapper.write_text(
+        '#!/bin/bash\n'
+        'if [ "$1" = "+%s%N" ]; then\n'
+        '  n=$(cat "' + str(counter) + '" 2>/dev/null || echo 0)\n'
+        '  printf "%s\\n" $((n + 1)) > "' + str(counter) + '"\n'
+        '  if [ "$n" -ge 1 ]; then exec "' + real_date + '" -d "-3 seconds" +%s%N; fi\n'
+        'fi\n'
+        'exec "' + real_date + '" "$@"\n')
+    wrapper.chmod(0o755)
+
+    gw.unattended({'seconds': 5, 'bytes': 65536})
+    cmd = gw.command_script('slow', 'sleep 10\n')
+    proc = gw.run(gw.sign(cmd))
+    env = _envelope(proc)
+    assert env['exit_code'] == 124, env
+    assert 'stopped after 5 s' in ' '.join(env['messages']), env
+    assert _result_bodies(gw)[-1]['limit'] == 'time'
+
+
 def test_a_human_approved_run_has_no_limit(tmp_path):
     gw = _gateway(tmp_path)
     cmd = gw.command_script('slowish', 'sleep 2\n')

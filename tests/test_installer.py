@@ -1,9 +1,10 @@
 """Regression tests for the gateway installer template.
 
-The write_poller/write_gateway `__GATEWAY_TOKEN__` substitution must be scoped to
-the header assignment ONLY (the poller/gateway headers each carry exactly one
-placeholder). Token self-heal was removed from the poller — recovery from a lost
-token is now re-enrollment — so nothing else depends on the placeholder.
+BQ4: no script carries a baked token. The gateway, poller and logger read
+/etc/eshu-token at the point of use; the installer writes that one file (0600,
+root:root) and substitutes nothing into the scripts. An update from an old
+baked-token install still finds its token (file first, old script as the
+fallback).
 """
 import os
 import re
@@ -19,31 +20,31 @@ def _read(path):
         return f.read()
 
 
-def test_write_poller_sed_is_scoped_to_header_assignment():
+def test_no_script_carries_a_baked_token():
+    for path in ("dashboard/eshu-gateway.sh", "dashboard/eshu-poller.sh",
+                 "dashboard/eshu-logger.sh"):
+        text = _read(path)
+        assert "__GATEWAY_TOKEN__" not in text
+        assert not re.search(r'^GATEWAY_TOKEN=', text, re.M)
+        assert "/etc/eshu-token" in text
     poller = _read("dashboard/eshu-poller.sh")
-    # Apply the exact (fixed) write_poller sed: header assignment line only.
-    fixed = re.sub(r'^GATEWAY_TOKEN="__GATEWAY_TOKEN__"',
-                   'GATEWAY_TOKEN="tok123"', poller, flags=re.M)
-    # Header replaced with the token, and the placeholder is fully consumed.
-    assert 'GATEWAY_TOKEN="tok123"' in fixed
-    assert "__GATEWAY_TOKEN__" not in fixed
-    # The dead self-heal block is gone (recovery is re-enrollment now).
+    assert "sed -i" not in poller or "GATEWAY_TOKEN" not in poller
     assert "self_heal" not in poller
-    assert 'GATEWAY_TOKEN" = "__GATEWAY_TOKEN__"' not in poller
 
 
 def test_logger_heartbeat_sends_gateway_token():
     logger = _read("dashboard/eshu-logger.sh")
-    # The heartbeat authenticates with the gateway token, read at runtime from
-    # the gateway script (never templated into the logger).
+    # BQ4: read from the one file at the point of use, never templated in.
     assert "X-Gateway-Token" in logger
-    assert "eshu-gateway.sh" in logger
+    assert "/etc/eshu-token" in logger
+    assert "grep -oP '^GATEWAY_TOKEN" not in logger
     assert "__GATEWAY_TOKEN__" not in logger
 
 
 def test_uninstall_report_sends_gateway_token():
     template = _read("dashboard/eshu-installer-template.sh")
-    # Token is read from the existing gateway script before it is removed.
+    # BQ4: read the token file first, with the old baked script as fallback.
+    assert 'head -n1 /etc/eshu-token' in template
     assert "grep -oP '^GATEWAY_TOKEN=\"\\K[^\"]+'" in template
     # The uninstall _report() authenticates its progress posts.
     m = re.search(r'# Helper: report progress to dashboard\n\s*_report\(\) \{(.*?)\n  \}',
@@ -52,10 +53,14 @@ def test_uninstall_report_sends_gateway_token():
     assert "X-Gateway-Token" in m.group(1)
 
 
-def test_template_has_no_global_token_sed():
+def test_template_substitutes_no_token_into_any_script():
     template = _read("dashboard/eshu-installer-template.sh")
-    # The old global token substitution must be gone from write_gateway/write_poller.
     assert 's|__GATEWAY_TOKEN__|${GATEWAY_TOKEN:-}|g' not in template
+    assert 'GATEWAY_TOKEN=\"${GATEWAY_TOKEN' not in template
+    # No token is written into the gateway or poller heredocs.
+    assert "__GATEWAY_TOKEN__" not in template.replace(
+        '# "__GATEWAY_TOKEN__" an unsubstituted template; neither is a token.',
+        '').replace('|None|__GATEWAY_TOKEN__)', '|None)')
 
 
 def test_uninstall_completes_before_deregistering():
@@ -212,9 +217,7 @@ def test_f12_write_gateway_is_root_only_in_every_mode(tmp_path):
     """
     template = _read("dashboard/eshu-installer-template.sh")
     body = _function(template, "write_gateway")
-    body = body.replace(
-        "__GATEWAY_CONTENT__",
-        '#!/bin/bash\nGATEWAY_TOKEN="__GATEWAY_TOKEN__"\n')
+    body = body.replace("__GATEWAY_CONTENT__", "#!/bin/bash\n")
     target = tmp_path / "eshu-gateway.sh"
     harness = tmp_path / "harness.sh"
     harness.write_text(body + """
@@ -227,13 +230,15 @@ write_gateway
 """ % target)
     bindir = tmp_path / "bin"
     bindir.mkdir()
-    _stub(bindir, "chown", "exit 0")     # root-only chown is not ours to run
+    _stub(bindir, "chown", "exit 0")
     env = {"PATH": "%s:%s" % (bindir, os.environ.get("PATH", "/usr/bin:/bin"))}
     proc = subprocess.run(["bash", str(harness)], capture_output=True,
                           text=True, env=env, timeout=60)
     assert proc.returncode == 0, proc.stderr
     assert stat.S_IMODE(target.stat().st_mode) == 0o700
-    assert "tok-123" in target.read_text()
+    # BQ4: the token is not written into the script any more.
+    assert "tok-123" not in target.read_text()
+    assert "GATEWAY_TOKEN=" not in target.read_text()
     # The temporary backup held the old token too; it must not be left behind.
     assert not (tmp_path / "eshu-gateway.sh.bak").exists()
 
@@ -276,11 +281,13 @@ def test_f12_token_file_is_created_0600_under_a_permissive_umask(tmp_path):
 
 
 def test_f12_poller_token_rotation_uses_umask_077():
-    """R1: both rotation paths create the temp token file root-only."""
+    """R1/BQ4: one writer, root-only from the first byte, used by both paths."""
     poller = _read("dashboard/eshu-poller.sh")
-    write = ("( umask 077; printf '%s\\n' \"$NEW_TOKEN\" > "
-             "/etc/eshu-token.tmp )")
-    assert poller.count(write) == 2
+    assert poller.count("umask 077; printf '%s\\n' \"$candidate\" > "
+                        "/etc/eshu-token.tmp") == 1
+    assert "chmod 600 /etc/eshu-token.tmp" in poller
+    assert poller.count('write_token_file "$NEW_TOKEN"') == 2
+    assert "sed -i" not in poller
 
 
 # ── RR1: re-registration presents the existing token ─────────────────────
@@ -387,10 +394,19 @@ def test_rr1_reinstall_presents_the_installed_token(tmp_path):
     assert final == TOK
 
 
-def test_rr1_token_file_is_the_fallback(tmp_path):
+def test_rr1_the_token_file_wins_over_an_old_baked_script(tmp_path):
     proc, calls, final = _run_register(
         tmp_path, ['{"status":"ok","gateway_token":"%s"}\n200' % TOK],
-        script_token="__GATEWAY_TOKEN__", file_token=TOK)
+        script_token=NEW, file_token=TOK)
+    assert _header(calls[0], "X-Gateway-Token") == ["X-Gateway-Token: " + TOK]
+    assert final == TOK
+
+
+def test_rr1_an_old_baked_script_is_the_compatibility_fallback(tmp_path):
+    """BQ4: an update from a baked-token install keeps working."""
+    proc, calls, final = _run_register(
+        tmp_path, ['{"status":"ok","gateway_token":"%s"}\n200' % TOK],
+        script_token=TOK)
     assert _header(calls[0], "X-Gateway-Token") == ["X-Gateway-Token: " + TOK]
     assert final == TOK
 
@@ -463,19 +479,35 @@ def _key_block(template, home):
 
 
 def _run_keys(tmp_path, register_ok, ssh_mode, mode="reinstall",
-              dash_pub="ssh-ed25519 AAAAdash", original=None):
+              dash_pub="ssh-ed25519 AAAAdash", original=None,
+              runuser_body=None, fresh=False, home_mode=None):
     template = _read("dashboard/eshu-installer-template.sh")
     home = tmp_path / "home"
-    (home / ".ssh").mkdir(parents=True)
+    home.mkdir(parents=True)
+    if not fresh:
+        # BQ2: a fresh install has no .ssh; the user-side script creates it.
+        (home / ".ssh").mkdir()
     ak = home / ".ssh" / "authorized_keys"
     if original is None:
         original = ("ssh-ed25519 AAAAother operator-key\n"
                     'command="/usr/bin/sudo /usr/local/bin/eshu-gateway.sh",restrict '
                     "ssh-ed25519 AAAAold eshu-gateway-key\n")
-    ak.write_text(original)
+    if not fresh:
+        ak.write_text(original)
+    if home_mode is not None:
+        os.chmod(home, home_mode)
     bindir = tmp_path / "bin"
     bindir.mkdir()
     _stub(bindir, "chown", "exit 0")
+    # BQ2: the home check resolves $USER; the test has no eshu-gateway
+    # account, so `id` maps any -u/-g lookup to the test's own ids.
+    _stub(bindir, "id",
+          'if [ "$1" = "-u" ]; then exec /usr/bin/id -u; fi\n'
+          'if [ "$1" = "-g" ]; then exec /usr/bin/id -g; fi\n'
+          'exec /usr/bin/id "$@"')
+    # BH2: the write runs through `runuser -u $USER --`; as a non-root test,
+    # execute the command directly (the temp home is the test user's).
+    _stub(bindir, "runuser", runuser_body or 'shift 3\nexec "$@"')
     harness = tmp_path / "keys.sh"
     harness.write_text("""
 USER="eshu-gateway"; mode="%s"
@@ -489,7 +521,85 @@ DASHBOARD_SSH_PUB="%s"
     env = {"PATH": "%s:%s" % (bindir, os.environ.get("PATH", "/usr/bin:/bin"))}
     proc = subprocess.run(["bash", str(harness)], capture_output=True,
                           text=True, env=env, timeout=60, stdin=subprocess.DEVNULL)
-    return proc, original, ak.read_text()
+    return proc, original, (ak.read_text() if ak.exists() else None)
+
+
+def test_bh2_the_keys_write_runs_as_the_user(tmp_path):
+    """BH2: mktemp/cat/mv/chmod are the user's, not root's."""
+    log = tmp_path / "runuser.log"
+    body = ('printf "%%s\\n" "$*" >> "%s"\n'
+            'shift 3\nexec "$@"') % log
+    proc, _original, after = _run_keys(tmp_path, "1", "direct+mcp",
+                                       mode="update", runuser_body=body)
+    assert proc.returncode == 0, proc.stderr
+    line = log.read_text()
+    assert "-u eshu-gateway --" in line
+    assert "authorized_keys" in line          # the inner script ran
+    assert "eshu-dashboard" in after
+
+
+def test_bh2_a_failed_user_write_changes_nothing(tmp_path):
+    proc, original, after = _run_keys(tmp_path, "1", "direct+mcp",
+                                      mode="update",
+                                      runuser_body='cat >/dev/null; exit 1')
+    assert proc.returncode == 0, proc.stderr
+    assert after == original
+    assert "REFUSED" in proc.stdout
+
+
+def test_bq2_a_fresh_install_creates_a_user_owned_ssh_dir(tmp_path):
+    """BQ2: root no longer mkdirs .ssh; the user-side script does, at 700."""
+    proc, _original, after = _run_keys(tmp_path, "1", "direct+mcp",
+                                       mode="reinstall", fresh=True)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    d = tmp_path / "home" / ".ssh"
+    assert d.is_dir()
+    assert stat.S_IMODE(d.stat().st_mode) == 0o700
+    assert after and "eshu-gateway-key" in after and "eshu-dashboard" in after
+
+
+def test_bq2_root_does_not_touch_ssh_in_the_install_path():
+    src = _read("dashboard/eshu-installer-template.sh")
+    start = src.index("# SSH key setup only for install/reinstall")
+    end = src.index('\necho ""\necho "✅ Gateway', start)
+    block = src[start:end]
+    # No root create, mode or owner operation on the .ssh directory or file.
+    assert 'mkdir -p "/home/$USER/.ssh"' not in block
+    assert 'chmod 700 "/home/$USER/.ssh"' not in block
+    assert "chown -R" not in block
+    assert 'chmod 600 "$AK_FILE"' not in block
+    # The user-side script still does all of it, and the home check is there.
+    assert 'mkdir -p "$dir"' in src
+    assert 'chmod 600 "$tmp"' in src
+    assert 'chmod 700 "$dir"' in src
+    assert "is not owned by $USER" in src
+
+
+def test_bq2_a_home_the_user_cannot_write_is_refused(tmp_path):
+    """Simulate the ownership boundary: a home the gateway user cannot write.
+
+    A root-owned 0700 /home/USER gives the same EACCES as this 0555 home; the
+    user-side mkdir fails and nothing is written, with no root fallback.
+    """
+    proc, _original, after = _run_keys(tmp_path, "1", "direct+mcp",
+                                       mode="reinstall", fresh=True,
+                                       home_mode=0o555)
+    # A refused key write fails the install (the gateway would have no keys).
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert after is None
+    assert not (tmp_path / "home" / ".ssh").exists()
+    assert "REFUSED" in proc.stdout
+
+
+def test_bh2_the_fallback_and_the_inner_checks_are_present():
+    src = _read("dashboard/eshu-installer-template.sh")
+    assert "runuser -u \"$USER\" --" in src
+    assert "setpriv --reuid=" in src and "--init-groups" in src
+    # The user-side script refuses a swap it can see, and never writes through
+    # a symlink.
+    assert '[ ! -L "$dir" ]' in src
+    assert '[ ! -L "$dir/authorized_keys" ]' in src
+    assert "mv -f \"$tmp\" \"$dir/authorized_keys\"" in src
 
 
 def test_be3_the_register_token_is_never_in_curl_argv(tmp_path):
@@ -624,6 +734,11 @@ def _block_harness(tmp_path, block):
     bindir = tmp_path / "bin"
     bindir.mkdir(exist_ok=True)
     _stub(bindir, "chown", "exit 0")
+    _stub(bindir, "id",
+          'if [ "$1" = "-u" ]; then exec /usr/bin/id -u; fi\n'
+          'if [ "$1" = "-g" ]; then exec /usr/bin/id -g; fi\n'
+          'exec /usr/bin/id "$@"')
+    _stub(bindir, "runuser", 'shift 3\nexec "$@"')
     harness = tmp_path / "block.sh"
     harness.write_text('USER="eshu-gateway"\n' + block + "\n")
     env = {"PATH": "%s:%s" % (bindir, os.environ.get("PATH", "/usr/bin:/bin"))}
@@ -772,7 +887,7 @@ def test_be4_the_install_path_does_not_use_a_planted_tmp_symlink(tmp_path):
 def test_be4_no_fixed_authorized_keys_tmp_name_remains():
     src = _read("dashboard/eshu-installer-template.sh")
     assert "authorized_keys.tmp" not in src
-    assert "mktemp \"$ak_dir/.authorized_keys" in src
+    assert "mktemp \"$dir/.authorized_keys" in src
     assert "eshu_safe_replace" in src
 
 
@@ -912,3 +1027,42 @@ def test_bg1_the_check_runs_in_install_reinstall_and_update_before_changes():
     # migrate all pass through it.
     assert src.index('if [[ "${1:-}" == "--update" ]]') < src.index(
         "check_curl_version; then exit 1")
+
+
+def test_bs2_an_unreadable_file_is_not_rewritten_on_install(tmp_path):
+    """BS2 nit: an install must not replace an unreadable file with our lines.
+
+    The update path refused already. The install path built its copy from
+    `ak_read`, which returns empty on failure, so it would have dropped every
+    non-Eshu key. It now refuses before it builds the replacement.
+    """
+    body = ('case "$*" in *" test -r "*) exit 1 ;; esac\n'
+            'shift 3\nexec "$@"')
+    proc, original, after = _run_keys(tmp_path, "1", "direct+mcp",
+                                      mode="reinstall", runuser_body=body)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert after == original
+    assert "REFUSED" in proc.stdout
+    assert "not readable" in proc.stdout
+    src = _read("dashboard/eshu-installer-template.sh")
+    # Both paths carry the check; the update path did, the install path now
+    # does too.
+    assert src.count('ak_as_user test -r "$AK_FILE"') >= 2
+
+
+def test_bs2_the_keys_read_runs_as_the_user(tmp_path):
+    """BS2: root never reads authorized_keys; the checks parse the user's copy."""
+    log = tmp_path / "runuser.log"
+    body = ('printf "%%s\\n" "$*" >> "%s"\n' 'shift 3\nexec "$@"') % log
+    proc, _original, after = _run_keys(tmp_path, "1", "direct+mcp",
+                                       mode="update", runuser_body=body)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    text = log.read_text()
+    assert "cat --" in text and "authorized_keys" in text
+    assert "eshu-dashboard" in after
+    src = _read("dashboard/eshu-installer-template.sh")
+    # No root grep of the file, and no ak_from on a path any more.
+    assert 'grep -m1 \'/usr/local/bin/eshu-gateway.sh\' "$AK_FILE"' not in src
+    assert 'grep -v \' eshu-dashboard$\' "$AK_FILE"' not in src
+    assert 'ak_from "$AK_FILE"' not in src
+    assert 'ak_as_user cat -- "$1"' in src

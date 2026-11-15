@@ -19,6 +19,19 @@ GATEWAY_PUB_KEY=""
 DASHBOARD_URL=""
 GATEWAY_SSH_MODE="direct+mcp"
 
+# X8: which installer this is, so the dashboard can say Fleet / Edge / Build.
+# The official install, reinstall and update flows all download the file to a
+# private temp and run it as a file, so "$0" is it. A `curl | bash` install has
+# no file to hash: the value stays empty and the dashboard says "unknown".
+INSTALLER_HASH=""
+if [ -f "$0" ] && [ -r "$0" ]; then
+  INSTALLER_HASH=$(sha256sum -- "$0" 2>/dev/null | cut -c1-12 || true)
+fi
+case "$INSTALLER_HASH" in
+  [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+  *) INSTALLER_HASH="" ;;
+esac
+
 # BE4: replace a file through a private temp in its own directory, refusing a
 # planted symlink at the file. stdin is the new content; the owner and mode of
 # an existing file are kept, and a new file takes the directory's owner.
@@ -135,8 +148,11 @@ if [ "$UNINSTALL" = "yes" ]; then
     DASHBOARD_URL=$(grep -oP 'DASHBOARD_URL="\K[^"]+' /usr/local/bin/eshu-gateway.sh 2>/dev/null || true)
   fi
   # Extract the gateway API token so the uninstall progress reports authenticate.
-  # The gateway script is removed later in this branch, so read it now.
-  GATEWAY_TOKEN=$(grep -oP '^GATEWAY_TOKEN="\K[^"]+' /usr/local/bin/eshu-gateway.sh 2>/dev/null || true)
+  # BQ4: it lives in /etc/eshu-token; an old baked script is the fallback.
+  GATEWAY_TOKEN=$(head -n1 /etc/eshu-token 2>/dev/null | tr -d '[:space:]' || true)
+  if [ -z "$GATEWAY_TOKEN" ]; then
+    GATEWAY_TOKEN=$(grep -oP '^GATEWAY_TOKEN="\K[^"]+' /usr/local/bin/eshu-gateway.sh 2>/dev/null || true)
+  fi
   TARGET_IP=$(hostname -I | awk '{print $1}')
   
   echo "🗑 Eshu Gateway Uninstaller"
@@ -492,21 +508,23 @@ fi
 # dashboard already knows must present its own X-Gateway-Token to
 # re-register; the old order sent an empty one, got 401 on every update and
 # reinstall, and so never reported its host-key pin or run_limits (ssh_exec
-# then refused it as ssh_host_unpinned). Same source as before (the installed
-# gateway script), then /etc/eshu-token. "None" is the v15.0 migration bug and
-# "__GATEWAY_TOKEN__" an unsubstituted template; neither is a token.
+# then refused it as ssh_host_unpinned). BQ4: the one source is
+# /etc/eshu-token; an old baked script is the fallback for a gateway whose
+# file was lost. "None" is the v15.0 migration bug; it is not a token.
 _valid_token() {
   case "${1:-}" in ""|None|__GATEWAY_TOKEN__) return 1 ;; esac
   printf '%s' "$1" | grep -qE '^[A-Za-z0-9_-]{16,128}$'
 }
 if ! _valid_token "${GATEWAY_TOKEN:-}"; then
   GATEWAY_TOKEN=""
-  if [ -f "$GATEWAY" ]; then
-    EXISTING_TOKEN=$(grep -oP '^GATEWAY_TOKEN="\K[^"]+' "$GATEWAY" 2>/dev/null | head -n1 || true)
+  if [ -f /etc/eshu-token ]; then
+    EXISTING_TOKEN=$(head -n1 /etc/eshu-token 2>/dev/null | tr -d '[:space:]' || true)
     if _valid_token "$EXISTING_TOKEN"; then GATEWAY_TOKEN="$EXISTING_TOKEN"; fi
   fi
-  if [ -z "$GATEWAY_TOKEN" ] && [ -f /etc/eshu-token ]; then
-    EXISTING_TOKEN=$(head -n1 /etc/eshu-token 2>/dev/null | tr -d '[:space:]' || true)
+  # Compatibility: a gateway installed before BQ4 has no token file only if
+  # something removed it; its baked script still names the token.
+  if [ -z "$GATEWAY_TOKEN" ] && [ -f "$GATEWAY" ]; then
+    EXISTING_TOKEN=$(grep -oP '^GATEWAY_TOKEN="\K[^"]+' "$GATEWAY" 2>/dev/null | head -n1 || true)
     if _valid_token "$EXISTING_TOKEN"; then GATEWAY_TOKEN="$EXISTING_TOKEN"; fi
   fi
   EXISTING_TOKEN=""
@@ -522,7 +540,7 @@ register_gateway() {   # $1 = the X-Gateway-Token to present ('' for none)
          | curl --connect-timeout 3 -m 15 -s -w '\n%{http_code}' -X POST "$DASHBOARD_URL/api/register" \
        -H @- \
        -H "Content-Type: application/json" \
-       -d '{"ip":"'"$TARGET_IP"'","hostname":"'"$HOST_NAME"'","version":"'"$GATEWAY_VERSION"'",'"$SSH_REG_CAPS"'}' 2>/dev/null) \
+       -d '{"ip":"'"$TARGET_IP"'","hostname":"'"$HOST_NAME"'","version":"'"$GATEWAY_VERSION"'",'"$SSH_REG_CAPS"',"installer_hash":"'"$INSTALLER_HASH"'"}' 2>/dev/null) \
     || out=""
   case "$out" in
     *$'\n'[0-9][0-9][0-9]) REGISTER_STATUS="${out##*$'\n'}"; REGISTER_RESPONSE="${out%$'\n'*}" ;;
@@ -562,9 +580,10 @@ if [ -n "$DASHBOARD_URL" ]; then
 fi
 
 write_gateway() {
-  # R1: the script carries GATEWAY_TOKEN, which is also the MAC key material.
-  # Create it (and its temporary backup) root-only from the first byte, and
-  # finish 0700 root:root in every mode — install, reinstall and update.
+  # BQ4: the script carries no token; /etc/eshu-token does. The script is
+  # still root-only (0700) because it is root-executed code. Create it (and
+  # its temporary backup) root-only from the first byte, and finish
+  # 0700 root:root in every mode — install, reinstall and update.
   (
     umask 077
     cp -f "$GATEWAY" "${GATEWAY}.bak" 2>/dev/null || true
@@ -576,9 +595,7 @@ GWEOF
   sed -i "s|__TARGET_IP__|$TARGET_IP|g" "$GATEWAY"
   sed -i "s|__DASHBOARD_URL__|$DASHBOARD_URL|g" "$GATEWAY"
   sed -i "s|__GATEWAY_VERSION__|$GATEWAY_VERSION|g" "$GATEWAY"
-  # Scope the token replacement to the header assignment ONLY — an unanchored or
-  # global replace could corrupt other lines that reference GATEWAY_TOKEN.
-  sed -i "s|^GATEWAY_TOKEN=\"__GATEWAY_TOKEN__\"|GATEWAY_TOKEN=\"${GATEWAY_TOKEN:-}\"|" "$GATEWAY"
+  # BQ4: no token substitution. The script reads /etc/eshu-token.
 
   # Validate syntax before deploying — prevent broken templates from reaching
   # gateways. mktemp (not a fixed /tmp name) so another local user cannot
@@ -614,9 +631,7 @@ POLLEREOF
   sed -i "s|__DASHBOARD_URL__|$DASHBOARD_URL|g" "$POLLER_SCRIPT"
   sed -i "s|__TARGET_IP__|$TARGET_IP|g" "$POLLER_SCRIPT"
   sed -i "s|__HOST_NAME__|$HOST_NAME|g" "$POLLER_SCRIPT"
-  # Scope the token replacement to the header assignment ONLY — an unanchored or
-  # global replace could corrupt other lines that reference GATEWAY_TOKEN.
-  sed -i "s|^GATEWAY_TOKEN=\"__GATEWAY_TOKEN__\"|GATEWAY_TOKEN=\"${GATEWAY_TOKEN:-}\"|" "$POLLER_SCRIPT"
+  # BQ4: no token substitution. The poller reads /etc/eshu-token.
   chmod 700 "$POLLER_SCRIPT"
 
   cat > /etc/systemd/system/eshu-poller.service <<POLLERUNIT
@@ -673,6 +688,16 @@ if [ -n "${GATEWAY_TOKEN:-}" ] && [ "$GATEWAY_TOKEN" != "None" ]; then
   mv -f /etc/eshu-token.tmp /etc/eshu-token
 fi
 
+# X8: the installer hash the dashboard reports (and the logger re-sends). It is
+# a hash of a public file, so 0644 root:root is fine: not secret, just not
+# writable by the gateway user.
+if [ -n "$INSTALLER_HASH" ]; then
+  ( umask 022; printf '%s\n' "$INSTALLER_HASH" > /etc/eshu-installer-hash.tmp )
+  chmod 644 /etc/eshu-installer-hash.tmp
+  chown root:root /etc/eshu-installer-hash.tmp
+  mv -f /etc/eshu-installer-hash.tmp /etc/eshu-installer-hash
+fi
+
 write_gateway; write_logger; write_sudoers; write_poller
 
 # SSH key setup only for install/reinstall (skip on update).
@@ -687,40 +712,70 @@ write_gateway; write_logger; write_sudoers; write_poller
 
 # BE4: the `from=` of the existing Eshu lines, so a refreshed dashboard line
 # keeps the restriction the operator set. Empty when there is none.
-ak_from() {   # $1 = file  $2 = comment
+# BS2: read the file as the user. Root must not read a path the user could
+# swap after the symlink check; the checks and filters below run on this copy.
+ak_read() {   # $1 = file
+  ak_as_user cat -- "$1" 2>/dev/null || true
+}
+
+ak_from() {   # $1 = comment; stdin = the authorized_keys text
   # `|| true`: with `set -o pipefail`, sed can see SIGPIPE when head stops
   # after the first match; that must not abort the installer.
-  sed -n "s/^from=\"\([^\"]*\)\".* $2\$/\1/p" "$1" 2>/dev/null | head -n 1 || true
+  sed -n "s/^from=\"\([^\"]*\)\".* $1\$/\1/p" 2>/dev/null | head -n 1 || true
+}
+
+# BH2: run the user-side write as the gateway user. The checks above are the
+# first line, but a symlink swapped in between the check and the write used to
+# be followed by root: `mktemp`, `mv` and `chmod` could reach root's
+# authorized_keys or a system directory. As the user, a swap can only reach
+# what that user could already write.
+ak_as_user() {   # $@ = command, run as $USER
+  if command -v runuser >/dev/null 2>&1; then
+    runuser -u "$USER" -- "$@"
+  elif command -v setpriv >/dev/null 2>&1; then
+    setpriv --reuid="$(id -u "$USER")" --regid="$(id -g "$USER")"             --init-groups "$@"
+  else
+    echo "   REFUSED: neither runuser nor setpriv is available; authorized_keys not changed."
+    return 1
+  fi
 }
 
 # BE4: replace authorized_keys through a private temp in the same directory.
 # A planted symlink at the directory or the file is refused; the fixed
-# `.tmp` name an attacker could pre-create is gone.
+# `.tmp` name an attacker could pre-create is gone. BH2: the create and the
+# rename happen as $USER, never as root.
 ak_replace() {   # stdin = the new file
-  local ak_home ak_dir ak_file ak_tmp
+  local ak_home ak_dir ak_file ak_owner
   ak_home="/home/$USER"; ak_dir="$ak_home/.ssh"; ak_file="$ak_dir/authorized_keys"
+  # BQ2: if the home itself is not the user's, the user-side create cannot be
+  # trusted (and root must not "fix" it). Refuse and change nothing.
+  ak_owner=$(stat -c '%u' "$ak_home" 2>/dev/null || echo "")
+  if [ "$ak_owner" != "$(id -u "$USER" 2>/dev/null)" ]; then
+    echo "   REFUSED: $ak_home is not owned by $USER; authorized_keys not changed."
+    cat >/dev/null
+    return 1
+  fi
   if [ -L "$ak_dir" ] || { [ -e "$ak_file" ] && [ -L "$ak_file" ]; }; then
     echo "   REFUSED: $ak_dir or $ak_file is a symlink; authorized_keys not changed."
     cat >/dev/null
     return 1
   fi
-  mkdir -p "$ak_dir" 2>/dev/null || true
-  if [ -L "$ak_dir" ]; then
-    echo "   REFUSED: $ak_dir is a symlink; authorized_keys not changed."
+  if ! ak_as_user sh -c '
+      set -eu
+      dir=$1
+      mkdir -p "$dir" 2>/dev/null || exit 1
+      [ ! -L "$dir" ] || exit 2
+      [ ! -L "$dir/authorized_keys" ] || exit 2
+      tmp=$(mktemp "$dir/.authorized_keys.XXXXXX") || exit 3
+      cat > "$tmp" || { rm -f "$tmp"; exit 4; }
+      chmod 600 "$tmp" || { rm -f "$tmp"; exit 5; }
+      mv -f "$tmp" "$dir/authorized_keys" || { rm -f "$tmp"; exit 6; }
+      chmod 700 "$dir" || exit 7
+    ' sh "$ak_dir"; then
     cat >/dev/null
+    echo "   REFUSED: could not replace $ak_file as $USER; it was not changed."
     return 1
   fi
-  ak_tmp=$(mktemp "$ak_dir/.authorized_keys.XXXXXX") || { cat >/dev/null; return 1; }
-  cat > "$ak_tmp"
-  chown "$USER:$USER" "$ak_tmp" 2>/dev/null || true
-  chmod 600 "$ak_tmp"
-  if ! mv -f "$ak_tmp" "$ak_file"; then
-    rm -f "$ak_tmp"
-    echo "   REFUSED: could not replace $ak_file; it was not changed."
-    return 1
-  fi
-  chown "$USER:$USER" "$ak_dir" 2>/dev/null || true
-  chmod 700 "$ak_dir"
 }
 
 if [ "$mode" = "update" ] && [ "${REGISTER_OK:-}" = "1" ]; then
@@ -735,7 +790,7 @@ if [ "$mode" = "update" ] && [ "${REGISTER_OK:-}" = "1" ]; then
     AK_FILE="$AK_DIR/authorized_keys"
     if [ -L "$AK_DIR" ] || { [ -e "$AK_FILE" ] && [ -L "$AK_FILE" ]; }; then
       echo "   REFUSED: $AK_DIR or $AK_FILE is a symlink; authorized_keys not changed."
-    elif [ -e "$AK_FILE" ] && [ ! -r "$AK_FILE" ]; then
+    elif [ -e "$AK_FILE" ] && ! ak_as_user test -r "$AK_FILE"; then
       echo "   REFUSED: $AK_FILE is not readable; authorized_keys not changed."
     else
       # BH1: an unreadable `from=` must not silently become an unrestricted
@@ -746,10 +801,13 @@ if [ "$mode" = "update" ] && [ "${REGISTER_OK:-}" = "1" ]; then
       AK_ESH_LINE=""
       AK_DASH_FROM=""
       AK_BAD_FROM=""
+      AK_TEXT=""
       if [ -f "$AK_FILE" ]; then
-        AK_ESH_LINE=$(grep -m1 '/usr/local/bin/eshu-gateway.sh' "$AK_FILE" 2>/dev/null || true)
-        AK_DASH_FROM=$(ak_from "$AK_FILE" eshu-dashboard)
-        [ -n "$AK_DASH_FROM" ] || AK_DASH_FROM=$(ak_from "$AK_FILE" eshu-gateway-key)
+        # BS2: one read, as the user; everything below parses this copy.
+        AK_TEXT=$(ak_read "$AK_FILE")
+        AK_ESH_LINE=$(printf '%s\n' "$AK_TEXT" | grep -m1 '/usr/local/bin/eshu-gateway.sh' 2>/dev/null || true)
+        AK_DASH_FROM=$(printf '%s\n' "$AK_TEXT" | ak_from eshu-dashboard)
+        [ -n "$AK_DASH_FROM" ] || AK_DASH_FROM=$(printf '%s\n' "$AK_TEXT" | ak_from eshu-gateway-key)
         # BJ1: look at every Eshu line, not only the first. One line whose
         # from= is not in the leading `from="...,` form means we cannot know
         # the operator's intent (for example, the gateway line is unrestricted
@@ -757,7 +815,8 @@ if [ "$mode" = "update" ] && [ "${REGISTER_OK:-}" = "1" ]; then
         # written. `grep -q` is avoided on purpose: under `set -o pipefail` an
         # early exit gives the upstream grep SIGPIPE and the pipeline fails
         # even when the pattern matched.
-        AK_BAD_LINES=$(grep '/usr/local/bin/eshu-gateway.sh' "$AK_FILE" 2>/dev/null \
+        AK_BAD_LINES=$(printf '%s\n' "$AK_TEXT" \
+                       | grep '/usr/local/bin/eshu-gateway.sh' 2>/dev/null \
                        | grep -v '^from="[^"]*",' || true)
         case "$AK_BAD_LINES" in
           *from=*) AK_BAD_FROM="1" ;;
@@ -773,8 +832,8 @@ if [ "$mode" = "update" ] && [ "${REGISTER_OK:-}" = "1" ]; then
         AK_DASH='command="/usr/bin/sudo /usr/local/bin/eshu-gateway.sh --dashboard-key",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty,restrict'
         if [ -n "$AK_DASH_FROM" ]; then AK_DASH='from="'"$AK_DASH_FROM"'",'"$AK_DASH"; fi
         {
-          if [ -f "$AK_FILE" ]; then
-            grep -v ' eshu-dashboard$' "$AK_FILE" || true
+          if [ -n "$AK_TEXT" ]; then
+            printf '%s\n' "$AK_TEXT" | grep -v ' eshu-dashboard$' || true
           fi
           printf '%s %s eshu-dashboard\n' "$AK_DASH" "$DASHBOARD_SSH_PUB"
         } | ak_replace
@@ -800,7 +859,8 @@ if { [ "$mode" = "install" ] || [ "$mode" = "reinstall" ]; } && [ "${REGISTER_OK
   if [ -L "/home/$USER/.ssh" ]; then
     echo "   REFUSED: /home/$USER/.ssh is a symlink; authorized_keys not changed."
   else
-  mkdir -p "/home/$USER/.ssh"; chmod 700 "/home/$USER/.ssh"
+  # BQ2: no root mkdir/chmod here. The user-side script in ak_replace creates
+  # .ssh and sets 700, so a fresh install gets a user-owned directory.
   # F12: two lines, each with its own comment (eshu-gateway-key, eshu-dashboard),
   # so a re-run replaces them by comment instead of appending duplicates. The
   # dashboard line's forced command carries the one fixed --dashboard-key
@@ -810,11 +870,18 @@ if { [ "$mode" = "install" ] || [ "$mode" = "reinstall" ]; } && [ "${REGISTER_OK
   AK_DASH='command="/usr/bin/sudo /usr/local/bin/eshu-gateway.sh --dashboard-key",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty,restrict'
   if [ -n "$ALLOWED_SSH_FROM" ]; then AK_DASH='from="'"$ALLOWED_SSH_FROM"'",'"$AK_DASH"; fi
   AK_FILE="/home/$USER/.ssh/authorized_keys"
+  if [ -e "$AK_FILE" ] && ! ak_as_user test -r "$AK_FILE"; then
+    # BS2 nit: replacing an unreadable file with an empty copy plus our lines
+    # would drop every non-Eshu key the user had. Refuse instead of silently
+    # rewriting it, as the update path already does.
+    echo "   REFUSED: $AK_FILE is not readable; authorized_keys not changed."
+  else
   {
     # Keep keys this installer does not own; drop every Eshu gateway line,
     # including a pre-F12 one without a comment, then write ours back.
     if [ -f "$AK_FILE" ]; then
-      grep -v 'command="/usr/bin/sudo /usr/local/bin/eshu-gateway.sh' "$AK_FILE" || true
+      # BS2: the filter reads the user's copy, not the file as root.
+      printf '%s\n' "$(ak_read "$AK_FILE")" | grep -v 'command="/usr/bin/sudo /usr/local/bin/eshu-gateway.sh' || true
     fi
     if [ "${GATEWAY_SSH_MODE:-direct+mcp}" != "mcp_only" ]; then
       printf '%s %s eshu-gateway-key\n' "$AK" "$GATEWAY_PUB_KEY"
@@ -823,8 +890,7 @@ if { [ "$mode" = "install" ] || [ "$mode" = "reinstall" ]; } && [ "${REGISTER_OK
       printf '%s %s eshu-dashboard\n' "$AK_DASH" "$DASHBOARD_SSH_PUB"
     fi
   } | ak_replace
-  chown -R "$USER":"$USER" "/home/$USER/.ssh" 2>/dev/null || true
-  chmod 600 "$AK_FILE" 2>/dev/null || true
+  fi
   fi
 fi
 

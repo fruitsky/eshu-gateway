@@ -17073,6 +17073,161 @@ follow Build.**
   served" no longer holds, because Fleet now comes from Build. Reword it
   to "Fleet set to Build; the last recorded promote was …".
 
+## Chunk X8 — which installer each gateway runs · slug `gateway-installer-version` · dashboard + gateway · **security sign-off (gateway-side change)**
+
+### Problem
+
+Every gateway reports the *dashboard* version (`v0.1.0`), so the Gateways
+table cannot say who runs Fleet, who runs Edge, who is on a Build and who is
+behind. After X7 the three channels are real: Build changes on a deploy,
+Edge on Seed Edge, Fleet on Deploy to Fleet. The fleet view should show that.
+
+### Design
+
+**1. The installer hashes itself.** At the start of install, reinstall and
+update, the installer computes `sha256sum "$0"` and keeps the first 12 hex.
+In every official flow the file is downloaded to a private temp and run as a
+file (`bash "$T/eshu-install.sh"`), so `$0` is it. A manual `curl | bash`
+install has no file to hash: the value stays empty and the badge reads
+`unknown` (never a guess). The value is re-validated as lowercase 12-hex
+before it is used.
+
+**2. Reporting.**
+* The installer writes `/etc/eshu-installer-hash` (root:root, 0644 — it is a
+  hash of a public file, not a secret) so the logger can re-send it without
+  the installer.
+* Its `/api/register` body carries `installer_hash`.
+* The poller re-registers after an update/rollback/dev update; it reads the
+  file and includes the hash, so a successful update is visible immediately.
+* `eshu-logger` reads the file each heartbeat and includes it, so a lost
+  registration is repaired within 30 s and a changed file is noticed.
+
+**3. Store.** `gateways.installer_hash` (TEXT, `''` when never reported) and
+`gateways.installer_hash_changed_at` (INTEGER, 0), both additive migrations.
+An unchanged value does not move the timestamp; a change does. Invalid input
+is ignored and never clears a stored value (an old installer sends nothing;
+an unknown future format must not make the badge lie).
+
+**4. Channel, computed server-side.** `/api/gateways` returns
+`installer_channel` for each row: `fleet` when the hash equals Fleet, else
+`edge`, else `build`, else `outdated` when non-empty, else `unknown`. Fleet
+wins over Edge (they are equal until the first promote), Edge over Build.
+The comparison lives in one function so the table and the status agree.
+
+`/api/dev/status` adds four counts: `on_fleet`, `on_edge`, `outdated`,
+`unknown`. A gateway whose hash is exactly Build is not in any of the four
+(the badge says `Build`); the sum can therefore be smaller than
+`gateway_count`, and that is honest.
+
+**5. UI.** The Gateways table shows the badge in the gateway's version line
+(`v6.0.0 · Fleet`), not a new column. `outdated` shows the first six hex of
+the gateway's hash (the full 12 are in the title, with when it changed), so
+the row still fits at 100% zoom. The four-dot health legend already hides
+below 1600 for the same reason.
+
+**6. Compatibility.**
+* An old gateway sends no `installer_hash`: register and heartbeat accept the
+  field as optional, the stored value (or `''`) stays, and the badge is
+  `unknown`.
+* The register payload validates `^[0-9a-f]{12}$`; anything else is ignored.
+* No endpoint, token or permission changes. The hash is display metadata: it
+  is a self-report and is never consulted by a policy, approval or run
+  decision.
+
+**7. Security notes for the reviewer.**
+* The file is a hash of a public installer, so 0644 is deliberate; it is
+  root-owned and not writable by the gateway user.
+* The installer never reads the file back to make a decision; the dashboard
+  never trusts the hash for anything but the badge/count.
+* `$0` is only hashed when it is a readable regular file; a piped install
+  reports nothing rather than hashing stdin.
+* The gateway can lie about its hash. It is the same self-report as
+  `version`, and it is display-only; say if you want it signed/attested
+  instead (that would be a larger change).
+* No new download, execution or channel write. The installer still installs
+  the bytes it was run from.
+
+**8. Tests.**
+* `tests/test_x8_installer_hash.py`: store/validate/change timestamp; register
+  with a valid hash, an old installer, and an invalid value; heartbeat
+  updates; `/api/dev/status` counts for fleet/edge/build/outdated/unknown;
+  the installer, poller and logger text (hash, file, register body).
+* A UI assertion that the badge renders and the table still fits at 1440.
+* The four installed copies: X7 generates Build only; after this change
+  `gen_installer.py` writes Build, and Seed/Deploy copy it.
+
+**9. Open questions for security.**
+1. Is a self-reported hash acceptable for display only, or do you want the
+   dashboard to refuse a hash that does not match a known channel (it would
+   make `outdated` unrepresentable)?
+2. Should the hash travel signed (the gateway token already authenticates the
+   register/heartbeat), or is the token the only integrity you need?
+3. Is 0644 on `/etc/eshu-installer-hash` fine, or should it be 0640
+   root:eshu-gateway like the session key?
+4. Should the four counts include the Build hash under `on_edge` (a Build
+   gateway is not on Edge), or stay as designed with Build uncounted?
+
+
+### Security review (security reviewer, 2026-11-14, at `7ff6a3e`)
+
+**Approved. No musts. One should (BR1).**
+
+* **The hash is a display-only self-report, and stays that way.**
+  * Register and heartbeat both bind `payload.ip` to the token's IP
+    (`_resolve_gateway_token` and `_require_gateway`) before storing, so a
+    gateway can only label itself.
+  * Anything that isn't 12 hex is ignored, on both the installer and the
+    dashboard side, and never clears a stored value.
+  * No policy, gate or promote decision reads `installer_hash`. Keep it
+    that way: a compromised gateway can report any value. Put a text
+    check on that rule, for example that the column appears only in
+    `db/gateways.py` and the two display paths.
+* **The installer side.**
+  * `$0` is hashed only when it is a readable file, and the value is
+    checked against 12 hex.
+  * `/etc/eshu-installer-hash` is written by temp file and `mv` as root,
+    and the logger re-checks the charset before it sends.
+  * The register and heartbeat bodies gain only that hex value, and no
+    secret joins the `-d` body.
+
+**Answers:**
+1. **Sign the hash?** No. Any key the gateway could sign with lives on the
+   gateway, so a compromised gateway signs whatever it likes. A signature
+   would add only the appearance of proof. Keep the badge's tooltip honest:
+   "reported by the gateway".
+2. **0640?** 0644 is fine. It is the hash of a file the dashboard serves
+   to anyone, so it is not secret. What matters is that the gateway user
+   can't write it (root:root), and that's already the case.
+3. **Build under `on_edge`?** No. Count it on its own as `on_build`.
+   * A gateway on Build-but-not-Edge is running an installer nobody seeded
+     or reviewed through the channel flow, and that's the one an operator
+     most needs to see.
+   * Today `dev_status` drops `build` into no bucket at all, so the counts
+     don't add up to the fleet.
+
+**BR1 (should):** add `on_build` to `installer_counts` and `/api/dev/status`,
+and give Build-but-not-Edge its own warning colour in the badge. Test that
+the five buckets add up to the gateway count.
+
+**BR1 round (implementer notes, 2026-11-14).** Taken:
+* `installer_counts` and `/api/dev/status` now carry `on_build` (Build but
+  not Edge, i.e. an installer nobody seeded or reviewed through the channel
+  flow), with its own warning colour in the badge. The five buckets always
+  add up: the test seeds one gateway per bucket and asserts the sum equals
+  `gateway_count`.
+* The badge title says the value is **reported by the gateway**, and a
+  Build badge adds "on Build, not seeded or reviewed through the channels".
+* `tests/test_x8_installer_hash.py` scans `dashboard/**/*.py`: `installer_hash`
+  may appear only in `main.py`, `db/gateways.py` and the `database.py`
+  re-export; nothing under `core/` (policy, gating, checks, tickets,
+  channels) reads it. A compromised gateway can report any value, and the
+  badge is the only consumer.
+* The dashboard branch is rebased onto X7's BP1 (`b0c8688`; the branch tip
+  `45a59c34` adds only the re-read notes).
+`bash scripts/verify.sh`: `3048 passed, 26 skipped, 7 warnings in 660.28s
+(0:11:00)` (4 more: the five-bucket sum, the warning colour, the tooltip and
+the display-only scan).
+
 ## Chunk X6 — agent API fixes from the Release 1.2 test round · slug `agent-api-round` · dashboard
 
 From the agent's test report of 2026-11-12, triaged by the feature reviewer.
@@ -18039,6 +18194,66 @@ still pass. Installers regenerated.
 * Leaving out `grep -q` is the right call under `pipefail`.
 * BE4 can merge. BH2 (write as the user) is still a should, for later.
 
+**BH2 implemented (2026-11-14, `fix/bh2-ak-user-write`, from `release/1.3-core`;
+not in 1.3).**
+
+* `ak_as_user` runs one command as `$USER`: `runuser -u "$USER" --` when
+  util-linux provides it, otherwise `setpriv --reuid/--regid/--init-groups`,
+  otherwise it refuses with a message and the file is left alone.
+* `ak_replace` now does the whole user-side write inside that helper: `mkdir
+  -p .ssh`, a `mktemp` in `.ssh`, `cat` of the new file from stdin, `chmod
+  600`, `mv` onto `authorized_keys`, `chmod 700` on `.ssh`. Root only checks
+  for a symlinked `.ssh`/`authorized_keys` first (the existing messages) and
+  then drains stdin on failure. The inner script re-checks both symlinks, so
+  a swap root could not see is at worst the user writing where the user
+  could already write — the BH2 point.
+* BQ2: the install path no longer runs `mkdir`, `chmod` or `chown` on
+  `.ssh`/`authorized_keys` as root. The user-side script creates `.ssh` at
+  700 and the file at 600, so a fresh install works (there is no root-owned
+  `0700` directory any more) and no root `chmod` follows a swapped link.
+  `ak_replace` refuses when `/home/$USER` itself is not owned by `$USER`;
+  a home the user cannot write fails with REFUSED and nothing is changed.
+* Tests (`tests/test_installer.py`): a `runuser` stub logs the call, and the
+  update runs through `-u eshu-gateway --` and replaces the dashboard line; a
+  failing user-side command leaves the file byte-identical and prints
+  REFUSED; a source check pins the runuser form, the setpriv fallback and
+  the inner symlink checks. The BE4/BH1/BJ1 suites run through the same
+  `runuser` stub and still pass (64 in the file). All four installers were
+  regenerated and are byte-identical.
+
+`bash scripts/verify.sh`: `3031 passed, 27 skipped, 8 warnings in 639.10s
+(0:10:39)` (3 more: the BH2 tests).
+
+**BQ4 (2026-11-14, in the 1.4 gateway stack).** No script carries a baked
+token any more:
+* `eshu-gateway.sh`, `eshu-poller.sh` and `eshu-logger.sh` read
+  `/etc/eshu-token` at the point of use (`eshu_token()`); the fleet runner
+  already did (BJ2). A rotation therefore applies to the next call, even in
+  a process that started before it.
+* The installer substitutes no token into either script; it still writes
+  `/etc/eshu-token` (0600 root:root) as the one copy.
+* The poller's four `sed -i` rewrites are gone. Both re-register paths call
+  one `write_token_file`: the candidate must match
+  `^[A-Za-z0-9_-]{16,128}$`, then it is written through a `umask 077` temp
+  with `chmod 600` and renamed; anything else leaves the old file and logs
+  a refusal without the value.
+* Compatibility: an update from an old baked-token install reads the file
+  first and the old script's line as the fallback (the file exists on every
+  installed gateway); the uninstaller reads the file too, with the same
+  fallback. Tests: the file wins over a baked script, an old baked script
+  still registers, the writer accepts a valid token and refuses an invalid
+  one without a temp file or a log entry, and neither script has
+  `GATEWAY_TOKEN=` or a token sed.
+
+**BQ2 tests (2026-11-14).** A fresh install with no `.ssh` succeeds and the
+directory is 700, owned by the user (the user-side `mkdir`). The install
+block is checked for the absence of root `mkdir -p "/home/$USER/.ssh"`,
+`chmod 700 "/home/$USER/.ssh"`, `chown -R` and `chmod 600 "$AK_FILE"`, while
+the user-side `mkdir -p "$dir"`, `chmod 600 "$tmp"` and `chmod 700 "$dir"`
+remain. A home the user cannot write (mode 0555, the same EACCES a root-owned
+0700 home gives) refuses: no `.ssh`, nothing written, REFUSED, and the
+install fails rather than falling back to root.
+
 ### GT1 — gateway token rotation · branch `feat/gateway-token-rotation` · design first
 
 The dashboard has no rotate action today; the only way to rotate a token is to remove and re-enrol the gateway. Design:
@@ -18299,13 +18514,18 @@ merge).**
 ### Known flaky tests (reviewer list)
 
 Tests that can fail on their own, recorded here so a red run is not chased as
-a new regression. They are not weakened to make them pass; each is fixed in
-a test-only change.
+a new regression. They are not weakened to make them pass.
 
-* `tests/test_f19_limits.py::test_the_time_limit_stops_the_command` — fails
-  about 1 run in 5 on its own (added 2026-11-12). The timeout behaviour under
-  test is in `dashboard/eshu-gateway.sh`; the test's own timing bound is
-  `elapsed < 12` for a 5-second limit.
+* ~~`tests/test_f19_limits.py::test_the_time_limit_stops_the_command`~~ —
+  fixed on `fix/flaky-f19-time-limit`. The race was the *marker*, not the
+  test: `dashboard/eshu-gateway.sh` measured "how long did it run" from two
+  `date +%s%N` (CLOCK_REALTIME) stamps, so an NTP/manual step between them
+  made a real `timeout` stop look early — rc 124, `messages: []`, the exact
+  "expected 'stopped after 5 s', got empty output". The measurement is
+  monotonic now (`/proc/uptime`, 10 ms, `date` only as the fallback), pinned
+  by `test_the_time_limit_marker_does_not_ride_on_the_wall_clock`, which
+  moves the second stamp 3 s back. 50/50 consecutive passes alone, 10/10 in
+  parallel.
 * (The npm 401 retry and the audit-ordering flakes were made deterministic on
   `fix/flaky-tests`, approved and pending merge.)
 
@@ -18405,7 +18625,7 @@ four follow-ups are the ones above.
 `bash scripts/verify.sh`: `2886 passed, 26 skipped, 8 warnings in 604.20s
 (0:10:04)`.
 
-## Release 1.3 core · branch `release/1.3-core` · deploy candidate · security read
+## Release 1.3 core · branch `release/1.3-core` · **deployed 2026-11-14** at master `f0af7e7` · security read
 
 **Security review (2026-11-14, at `ac41a70`): approved for the dashboard
 deploy and the gateway-by-gateway fleet rollout. No musts.**
@@ -18546,6 +18766,179 @@ only `;`. `test_a_multiline_command_is_refused_with_the_one_line_rule` asserts
 `bash scripts/verify.sh`: `3028 passed, 27 skipped, 8 warnings in 638.44s
 (0:10:38)`.
 
+## Release 1.4 — gateway stack · branch `release/1.4-gw` · from master `800efe3` (X7)
+
+One stack, rebased onto master `800efe3` (X7): the gateway-side changes plus
+X8's dashboard half, so 1.4 is the whole X8 feature. The installer is Build
+only (`dashboard/eshu-gateway-install.sh`); Edge and Fleet are X7's runtime
+channels, and the pre-X7 static copies do not come back. With X7, the operator
+rolls the installer out as **Seed Edge → dev gateways → Deploy to Fleet**.
+
+### What changes on a gateway
+
+| Area | 1.3 gateway | 1.4 gateway |
+|---|---|---|
+| authorized_keys write | root creates `.ssh` (0700), writes through `runuser`, then `chown -R`/`chmod 600` as root (BH2) | BQ2: no root `mkdir`/`chmod`/`chown` on `.ssh`/`authorized_keys`; the user-side script creates `.ssh` at 700 and the file at 600; a home not owned by the user refuses |
+| token storage | `GATEWAY_TOKEN="..."` baked into `eshu-gateway.sh` and `eshu-poller.sh`; the poller `sed -i` rewrites both after re-register | BQ4: no baked token. Gateway, poller, logger and fleet runner read `/etc/eshu-token` at the point of use; the poller writes that one file (validated, `umask 077`, 0600, rename) |
+| run-limit timing | duration from two `date +%s%N` (wall clock) | F19: `/proc/uptime` monotonic, `date` fallback |
+| installer identity | not reported | X8: first 12 hex of the installer's sha256 in `/api/register`, written to `/etc/eshu-installer-hash` (0644 root:root), re-sent by the poller's re-register and every logger heartbeat |
+| fleet runner | reads `/etc/eshu-token` (BJ2) | unchanged |
+| installer files | `dashboard/eshu-gateway-install.sh` and the committed `static/` and `static/dev/` copies (pre-X7) | Build only (`dashboard/eshu-gateway-install.sh`, generated); Edge and Fleet are runtime channel files (`installer-channels/`) promoted by Seed Edge and Deploy to Fleet; the static copies are deleted (X7) |
+
+### Compatibility, both ways
+
+* **1.3 → 1.4 (update).** `/etc/eshu-token` already exists on every installed
+  gateway; the installer reads it first, writes it back unchanged, and the new
+  scripts read it at use. An old baked script is the fallback if the file was
+  lost. Existing `.ssh` is user-owned (the old installer chowned it); the
+  user-side write replaces only the dashboard line and needs no root chown.
+* **1.4 → 1.3 (rollback).** The 1.3 installer loads the token from
+  `/etc/eshu-token` (or the old script) and bakes it back into both scripts,
+  restoring the old behaviour; the token file stays. `/etc/eshu-installer-hash`
+  is left behind and ignored by a 1.3 dashboard.
+* **1.4 gateway + 1.3 dashboard.** `installer_hash` is an extra JSON field on
+  register/heartbeat; the 1.3 Pydantic payloads ignore unknown fields.
+* **1.3 gateway + 1.4 dashboard.** No field: X8 reports `unknown` for that
+  gateway (and the channel badge says so).
+* **`curl | bash` (no file to hash).** Reports nothing, so the dashboard says
+  `unknown`; a gateway that previously reported a hash keeps it until a
+  file-based install (an empty value cannot mean "clear" for old gateways).
+* **No token in argv, sed or log.** The poller's new writer never puts the
+  token in a command line or a log message; headers still travel on stdin.
+* **X7 channels.** A 1.4 gateway installs whatever the Fleet (or, for a dev
+  gateway, Edge) channel holds. The installer hash it reports is compared
+  with the channel files, so the Gateways table says Fleet, Edge, Build,
+  outdated or unknown, and `/api/dev/status` counts all five. A dashboard
+  deploy changes Build only; the fleet sees it after Deploy to Fleet.
+
+`bash scripts/verify.sh`: `3043 passed, 26 skipped, 7 warnings in 699.64s
+(0:11:39)` (the gateway stack: BH2/BQ2, BQ4, F19 and the X8 gateway side).
+
+## Release 1.4 gateway · branch `release/1.4-gw` · gateway stack · security read
+
+**Security review (2026-11-14, at `de39db6`): approved once BS1 is in.**
+
+Checked on the stack:
+* **BQ4.**
+  * No script carries `GATEWAY_TOKEN="..."` any more, and the installer
+    substitutes no token.
+  * The gateway, poller and logger read `/etc/eshu-token` at the point of
+    use (`head | tr` in a pipe, never argv), and the fleet runner already
+    did.
+  * `write_token_file` checks the format with `printf | grep`, writes
+    through a `umask 077` temp, `chown root:root`, `chmod 600` and `mv`,
+    and logs a refusal without the value.
+  * The poller's four `sed -i` lines are gone.
+  * A 1.3 install that updates finds the file first, then the old line.
+    The uninstaller does the same.
+* **BH2 and BQ2.** Root no longer runs `mkdir`, `chmod` or `chown` on
+  `.ssh` or `authorized_keys`. The user-side script creates `.ssh` as 700
+  and the file as 600, and a home not owned by the user refuses.
+* **F19 and X8** are as approved on their branches.
+* The three installer copies are identical.
+  * This branch sits on master `14e19fc`, before X7. Once X7 merges,
+    rebase and regenerate Build only, so no static copy comes back.
+
+**BS1 (must): the approved-windows script still reads `$GATEWAY_TOKEN`.**
+* `static/features/approved_windows.sh` sends its claim with
+  `-H @<(printf 'X-Gateway-Token: %s\n' "${GATEWAY_TOKEN:-}")`.
+* The script is sourced by the gateway, and since BQ4 the 1.4 gateway no
+  longer sets `GATEWAY_TOKEN`. So every window claim from a 1.4 gateway
+  sends an empty token, gets a 401, and the window is refused. That fails
+  closed, but it breaks every approved window on 1.4.
+* The script is served from the checkout and not gated by a channel
+  (BP2), so one copy must work on both 1.3 and 1.4 gateways.
+* Fix: take the token as
+  `${GATEWAY_TOKEN:-$(head -n1 /etc/eshu-token 2>/dev/null | tr -d '[:space:]')}`
+  inside the process substitution, or call `gateway_header` when it is
+  defined.
+* Test: source the feature script under the 1.4 gateway and under a 1.3
+  fixture. Both send a non-empty token, and neither puts it in argv.
+* Grep every other file a gateway sources or downloads for
+  `GATEWAY_TOKEN`.
+
+**BS2 (should, same premise as BH2): root still reads `authorized_keys`
+before the user-side write.**
+* On install, `grep -v ... "$AK_FILE"` runs as root.
+* On update, `grep -v ' eshu-dashboard$'`, `ak_from` and the BJ1 every-line
+  check also run as root.
+* The symlink checks run first, but a swap after them makes root read the
+  link's target, and that text is then written into the user's own
+  `authorized_keys`. That is a root read of any file for someone who can
+  run code as the gateway user.
+* Fix: read the file once, as the user (`ak_as_user cat -- "$AK_FILE"`),
+  into a variable. Run the BJ1 check, `ak_from` and the filter on that
+  copy.
+
+**BS1/BS2 round (implementer notes, 2026-11-14).**
+
+* **BS1 (must).** `static/features/approved_windows.sh` now sends the claim
+  header through `_window_token_header`: when the script is sourced by the
+  gateway (1.3 or 1.4) it calls the gateway's `gateway_header`, which reads
+  `/etc/eshu-token` on 1.4 and the baked value on 1.3; if it is sourced
+  elsewhere it reads `/etc/eshu-token` itself, then the old variable. The
+  token stays on stdin. Tests: the claim's header is non-empty on 1.4 and
+  the token is not in argv; the helper resolves on both a 1.3 fixture
+  (variable) and a 1.4 fixture (file).
+* **BS2 (should).** Root no longer reads `authorized_keys`. `ak_read` runs
+  `cat` as the user once; the BJ1 every-line check, `ak_from` and the
+  filters parse that copy, and the readability check runs as the user. Test:
+  the `runuser` stub's log shows the `cat`, and no root `grep`/`ak_from`
+  reads the path.
+* A grep of every file a gateway sources or downloads
+  (`eshu-gateway.sh`, `eshu-poller.sh`, `eshu-logger.sh`,
+  `static/fleet-runner.sh`, `static/features/*.sh`) finds no other use of a
+  baked `GATEWAY_TOKEN`: the logger and fleet runner read the file, and the
+  window script's variable use is only its last-resort fallback.
+`bash scripts/verify.sh`: `3045 passed, 26 skipped, 7 warnings in 646.10s
+(0:10:46)` (the BS1/BS2 tests).
+
+**Rebase onto X7 and the X8 dashboard half (2026-11-14).** The branch is
+rebased onto master `800efe3` (X7). `gen_installer.py` writes Build only, and
+`test_x7_only_build_is_committed` passes; the pre-X7 `static/` copies stay
+deleted. X8's dashboard commit (`installer_channel`, the five counts and the
+badge) and BR1 (`on_build`, the warning colour, "reported by the gateway")
+are on the branch as their own commits, with the X8 security note. So 1.4 is
+the whole X8 feature, gateway and dashboard.
+
+`bash scripts/verify.sh`: `3066 passed, 26 skipped, 8 warnings in 673.97s
+(0:11:13)` (the rebased stack: BH2/BQ2, BQ4, F19, X8 gateway and dashboard,
+BS1/BS2, X7 channels).
+
+#### Security re-read (2026-11-15, at `315fd06`): approved for the Seed Edge → dev → Fleet rollout
+
+* **BS1.** `_window_token_header` uses the gateway's `gateway_header`
+  when it is defined. That reads the file on 1.4 and the baked value on
+  1.3. Otherwise it falls back to `$GATEWAY_TOKEN`, then the file. The
+  header comes from a process substitution, and there is a test for both
+  fixtures.
+* **BS2.** `authorized_keys` is read once, as the user (`ak_read`). The
+  readability check runs as the user, and the BJ1 check, `ak_from` and
+  both filters parse that copy, so root reads nothing the user could swap.
+* **X7 rebase.** Only Build is committed (`test_x7_only_build_is_committed`).
+  X8 is whole, BR1's `on_build` bucket is in, and the badge compares
+  against the live channels.
+* Nothing outside `db/gateways.py` and the display paths reads
+  `installer_hash`.
+
+**Nit:** on the install path, a failed `ak_read` (the user cannot read
+their own file) yields empty text. The rewrite then drops any non-Eshu
+keys the user had. Refuse instead when the file exists and `ak_read`
+fails, as the update path does.
+
+**BS2 nit implemented (2026-11-15).** Both paths now check
+`ak_as_user test -r "$AK_FILE"` before they build the replacement; an
+unreadable file is refused and left exactly as it was, so an install can no
+longer drop the user's other keys. `ak_read` still returns empty on a
+failure, but it is not reached when the check fails.
+`test_bs2_an_unreadable_file_is_not_rewritten_on_install` makes the
+`runuser` stub fail `test -r`, asserts the file is byte-identical and the
+installer says REFUSED, and the source test asserts both paths carry the
+check. Build regenerated; Build only.
+
+`bash scripts/verify.sh`: `3067 passed, 26 skipped, 7 warnings in 672.26s
+(0:11:12)`.
+
 ## 7. Backlog (not planned in detail)
 
 * Deny with a reason, shown to the agent (cheap; low value given the data).
@@ -18590,8 +18983,8 @@ The implementer never deploys. The reviewer runs this gate (same shape as `docs/
 | 9 | F13 | session-conclusions | dashboard + MCP | Merged | `feat/f13-session-conclusions` | F5, F6 | |
 | 10 | F8 | test-traffic | dashboard | Merged | `feat/f8-test-traffic` | — | low priority |
 | 11 | F9 | ha-supervisor-read | dashboard | Merged | `feat/f9-ha-supervisor-read` | — | token is now a dedicated `eshu` HA admin user |
-| 12 | F10 | ha-supervisor-actions | dashboard | Ready (after F9) | `feat/f10-ha-supervisor-actions` | F9, F3, Chunk H | reviewer pass + security reviewer sign-off |
-| 13 | F11 | ha-config-files | dashboard | Code round: preflight/path policy (AT1, BC1, H4) + transport (shared hardened ssh client, TOFU pin, key temp), the fixed write/restore scripts with automatic rollback, list/read/write/restore/check tools, F10 check-key coupling, tests and setup doc | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | security reads the transport/scripts |
+| 12 | F10 | ha-supervisor-actions | dashboard | Merged (security sign-off `f9e2c22`) | `feat/f10-ha-supervisor-actions` | F9, F3, Chunk H | security re-reads the P1–P3 diff only |
+| 13 | F11 | ha-config-files | dashboard | **Merged** 2026-11-15 (security `57d3243`; dormant until an ha_ssh integration is added). Was ready for merge 2026-11-14: BQ1 (Round 9 reads, keys-only `secrets.yaml`, metadata-only records) and BS3 (awk key extractor); approved | `feat/f11-ha-config-files` | F10, F2, F5, F12 (runner) | merge review |
 | 14 | F14 | inventory | dashboard + MCP | Merged | `feat/f14-inventory` | Chunk H | |
 | 15 | F19 | unattended-limits | gateway + dashboard | **Merged** 2026-11-11 (security sign-off `67bec51`; AF1/AF2 checked) | `feat/f19-unattended-limits` | F4, F5, F12 | AF3 goes on the next gateway branch |
 | 16 | F15 | probes | dashboard + MCP | **Merged** 2026-11-11 (AG1 security decision `eca8982`; AI1 fix merged) | `feat/f15-probes` | F4, F12, F14 | |
@@ -18631,10 +19024,13 @@ this merge.
 | 18a | X2 | runbooks-page | dashboard UI | **Merged** 2026-11-11 | `feat/x2-runbooks-page` | F13 | |
 | 18b | F27 | allowances | dashboard + MCP | Design first (from live use: P2 caught HA call_service) | `feat/f27-allowances` | F10 (P2), Chunk H, F18 | + security sign-off; next design after F21/F22 code |
 | 18c | X3 | integrations-ui | dashboard UI | Requested 2026-11-12; design after F27 is signed off | `feat/x3-integrations-ui` | F27, F10 (P2) | operator walk-through first |
-| 18d | X4 | agents-page | dashboard UI | **Implemented** 2026-11-12: one Agents page (tokens, policy sections, web fetch, activity); Controls renamed Command policy; absent policy fields now keep their stored value | `feat/x4-agents-page` | `fix/agent-ssh-hosts` | rename Controls → Command policy |
-| 18e | X5 | ui-test-round | dashboard UI | **Implemented** 2026-11-12: six test-round fixes plus the X5-r plan-card regression fix | `fix/x5-ui-test-round`, `fix/plans-widget-visible` | — | six small fixes |
-| 18f | X6 | agent-api-round | dashboard | **Code round**: D3/D4, D6, D7, D8 (test), D9, D10, D11, D12, D14, D15, D16a/b, D18a/b, BK5 | `fix/x6-agent-api-round` | — | 12 items; D1 fixed separately |
-| 18g | X7 | installer-channels | dashboard | **Implemented** 2026-11-14 by the feature reviewer: Build/Edge/Fleet are real channels; a deploy changes Build only | `fix/x7-installer-channels` | — | security sign-off (what gateways download) |
+| 18d | X4 | agents-page | dashboard UI | **Merged** 2026-11-12 (into 1.3; on master 2026-11-14): one Agents page (tokens, policy sections, web fetch, activity); Controls renamed Command policy; absent policy fields keep their stored value | `feat/x4-agents-page` | `fix/agent-ssh-hosts` | rename Controls → Command policy |
+| 18e | X5 | ui-test-round | dashboard UI | **Merged** 2026-11-12 (into 1.3; on master 2026-11-14): six test-round fixes plus the X5-r plan-card regression fix | `fix/x5-ui-test-round`, `fix/plans-widget-visible` | — | six small fixes |
+| 18f | X6 | agent-api-round | dashboard | **Merged** 2026-11-12 (into 1.3; on master 2026-11-14): D3/D4, D6, D7, D8 (test), D9, D10, D11, D12, D14, D15, D16a/b, D18a/b, BK5 | `fix/x6-agent-api-round` | — | 12 items; D1 fixed separately |
+| 18g | X7 | installer-channels | dashboard | **Merged and deployed** 2026-11-14 (`a0a57ce`; deployed at master `800efe3`): real Build/Edge/Fleet channels; Seed Edge → Deploy to Fleet → Rollback; Build only in git, channels outside the checkout; BP1 (no `fleet.prev` on migration) | `fix/x7-installer-channels` | — | security re-read `45a59c3`: BP1 approved; BP2 → X9 |
+| 18h | UI passes | ui-pass-1 / ui-pass-2 | dashboard UI | **Merged and deployed** 2026-11-14 (`800efe3`): `3c9dd55` (BS1: the strip reviews, it does not decide), `c22c5ff` polish, `608f676` audit fixes; live and approved by the operator (the "wash" they saw was a browser extension) | `fix/ui-pass-1` | X5, `docs/ui-audit` | BS1 approved; plan approved only where its commands are visible |
+| 18i | 1.3 | core | dashboard + gateway | **Merged and deployed** 2026-11-14 (deployed at master `f0af7e7`; BO1 with `800efe3`) | `release/1.3-core` | — | security approved `ac41a70` |
+| 18j | Release tests | release-tests-1.3 | docs | **Merged and deployed** 2026-11-14 (`800efe3`): Release 1.3 checks and the fleet rollout checklist | `docs/release-tests-1.3` | 1.3 | operator walk-through |
 | 19 | F22 | change-checks | dashboard + MCP | Code round 3: rebased onto the 1.3 stack (lockbox, BE3/BE4, X6, BF2), all four installer files regenerated (the test rebuilds the generator's output) | `feat/f22-change-checks` | F3, F5, F12, F19 | security reviews the gateway hunk and the code |
 | 20 | F16 | recipes | dashboard + MCP | Design complete (security Round 4; feature reviewer Round 5 with AA1/AA2); code next after F22 | `feat/f16-recipes` | F3, F12, F13, F19 | main line; steps claim by request id; code comes back to security; auto_run comes back to security |
 | 21 | F24 | content-tripwire | dashboard | Design first | `feat/f24-content-tripwire` | F12, F14 | + security sign-off (retention) |
@@ -18642,13 +19038,16 @@ this merge.
 | 23 | F26 | agent-shadow | dashboard + MCP | Ready after F16 | `feat/f26-agent-shadow` | F1, F12, F16, F18 | security reads the enforcement points |
 | 24 | F20 | local-agent-pass | docs | Parked | `docs/local-agent-pass` (local, unpushed) | — | experiment; last |
 | 25 | F17 | local-agent | dashboard + docs | After F20; pre-implementation notes A1–A6 | `feat/f17-local-agent` | F12–F16, F26 | experiment; last |
+| 26 | 1.4 | — | gateway stack | **Approved for rollout** 2026-11-15 (security `838d77d`): BH2/BQ2, BQ4, F19, X8 (gateway + dashboard), BS1/BS2; rebased onto X7, Build only; the BS2 install-read nit is fixed | `release/1.4-gw` | X7, F19, RR1 | security approved the whole stack; rollout Seed Edge → dev gateways → Deploy to Fleet |
+| 27 | X8 | gateway-installer-version | dashboard + gateway | **Code complete** 2026-11-14: on `release/1.4-gw` (BR1 folded; the hash is display-only) | `feat/x8-gateway-installer-version` | X7 | security approved; five buckets sum to the gateway count |
+| 28 | X9 | gated-gateway-files | dashboard + gateway | **Design note** 2026-11-14 (BP2): installer-carried vs authenticated channel files; recommends (b) | `feat/x9-gated-gateway-files` | X7, 1.4 | security sign-off before code |
 | — | CI fix | ci-environment | gateway + tests | Merged (`f2746ef`); CI pinned to ubuntu-24.04 (`6d58006`) | `fix/ci-environment` | F5 | |
 | — | Buffering | stream-unbuffered | gateway | Merged (`d8d70c2`); S1 tee fix done in Gateway hardening | `fix/stream-unbuffered` | F5 | |
 | — | Gateway hardening | gateway-hardening | gateway | **Merged** 2026-11-12 (AF3 + S1 tee capture; security `c15664e`; AX1/AX2 residuals; BA1 for the next F5/F19 change) | `fix/gateway-hardening` | F19, Buffering | |
 | — | Installer hotfix | installer-reregister | installer | **Merged and deployed** 2026-11-12 (`d6a38bb`; security `d6a38bb`): re-register presents the existing token; keys only after a 200 | `fix/installer-reregister` | F12 | |
 | — | BE3 | secret-headers | gateway + installer + poller | **Implemented**: every token header goes on stdin (`-H @-`), the result post uses a private header file, and argv is asserted token-free in all three stub harnesses | `fix/secret-headers` | RR1 | security sign-off |
 | — | BE4 | update-dashboard-key | installer | **Implemented**: `--update` refreshes only the `eshu-dashboard` line after a 200, copies its `from=`, refuses symlinks, uses `mktemp`; the fixed `.tmp` name is gone everywhere | `fix/update-dashboard-key` | RR1 | security sign-off |
-| — | GT1 | gateway-token-rotation | dashboard + poller | Design first | `feat/gateway-token-rotation` | RR1 | + security sign-off |
+| — | GT1 | gateway-token-rotation | dashboard + poller | Design round 2 2026-11-14 (BS4/BS5 folded): routine poll rotation vs compromise SSH push, 24 h gateway-enforced mtime, Revoke token | `feat/gt1-token-rotation` | RR1 | + security sign-off; code after 1.4 |
 
 Chunks are done **in the order column**; each new chunk branches from the
 updated `feature-roadmap` after the previous one is merged. A design-first

@@ -196,7 +196,9 @@ class TestAtomicWindowConsumption:
     def test_bj2_the_script_keeps_the_tokens_out_of_the_url_and_argv(self):
         src = _read_feature()
         assert "/execute/$ESHU_WINDOW_TOKEN" not in src
-        assert "-H @<(printf" in src
+        # BS1: the claim header comes from the helper (gateway_header on a
+        # sourced gateway, the file otherwise), never the token in argv.
+        assert "-H @<(_window_token_header)" in src
         assert "--data-binary @-" in src
         assert "window_token" in src
 
