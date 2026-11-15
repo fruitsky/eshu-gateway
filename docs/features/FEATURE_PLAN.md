@@ -17742,6 +17742,45 @@ build.**
   and uninstall downloads are still fetched and run as root over an
   `http://` URL. Keep it on the list as its own item.
 
+#### Security re-read (2026-11-15, at `7f7b86f`): BW1 and BW2 approved; X9 can merge
+
+* **BW1.**
+  * A gateway counts as migrated only once it has reported all three X9
+    fields.
+  * Every hit on a legacy route records its time and source IP.
+  * The switch needs every registered gateway migrated **and** seven
+    quiet days, measured from the latest of the first start, the last
+    legacy hit and the last time a legacy gateway was seen.
+  * "pre-X9" is used throughout, and the dev panel shows how many
+    gateways are not yet migrated.
+  * The hit check also covers a gateway whose stored X9 fields are stale.
+    Such a gateway still hits the routes, and that blocks the switch.
+* **BW2.**
+  * `build_generation` refuses (`build_inconsistent`, 503) a generated
+    Build whose installer does not embed the base64 of both current
+    gateway files.
+  * The marker check skips only test stubs.
+* **Nits.** Both fetches now use `--proto '=https'` and do not follow
+  redirects.
+
+**Nits for the next touch (none block the merge):**
+* **Rollback after retirement.**
+  * The first post-X9 Fleet generation is the X7 Fleet installer, which is
+    pre-X9, paired with the files.
+  * If the operator retires the routes and later rolls back to a
+    generation whose installer is pre-X9, the gateways reinstall a pre-X9
+    poller and get 410.
+  * When Deploy or Rollback makes a pre-X9 installer (no
+    `install_seed_files`) current, clear `legacy_pre_x9_retired` and
+    audit it. Or refuse, with that reason.
+* **Throttle the hit record.**
+  * The legacy routes are unauthenticated, and every hit writes two meta
+    rows.
+  * Write only when the stored hit is more than about 60 seconds old.
+  * A stranger who keeps hitting them can only delay retirement, which is
+    the safe direction, but a write per anonymous request is cheap to
+    avoid.
+
 ## Chunk X6 — agent API fixes from the Release 1.2 test round · slug `agent-api-round` · dashboard
 
 From the agent's test report of 2026-11-12, triaged by the feature reviewer.
