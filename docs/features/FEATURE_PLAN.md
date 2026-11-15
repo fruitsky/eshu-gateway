@@ -17378,6 +17378,400 @@ suspends.**
 * A second HA integration has its own ceiling.
 * Widening sends the notify message.
 
+### Round 3 — the ceiling is the operator's, and it is configurable (2026-11-15)
+
+**Status: design note only — no code.** The operator answered the three open
+points and security sent BT1–BT6 for this round; all are folded here.
+
+* **(a) the default ceiling.** Lights, smart plugs and switches, fans and HA
+  helpers may be allowed, with on/off/toggle; media players with on/off/play/
+  pause/stop. **Covers and climate are off by default.**
+* **(b) AZ6.** `restart` joins the destructive words.
+* **(c) the ceiling is configurable in the UI, and it must be intuitive.**
+
+This round replaces §3's seed `only` map (the map now ships as the catalogue,
+and the effective ceiling is in the database) and answers AZ6. Everything
+else in rounds 1 and 2 stands. The security conditions BT1–BT6 are folded in
+§§2–6 and 8; §9 lists what is still open.
+
+#### 1. Three words: ceiling, allowance, match
+
+**Ceiling** — the outer limit. Per integration, which device types and which
+actions an agent could ever be allowed to take without a card. It never
+approves anything by itself.
+
+**Allowance** — one narrow pre-approval *inside* the ceiling: this agent,
+this tool, these exact entities and these exact actions, with its own rate,
+window and expiry.
+
+**Match** — a call runs without a card only when it matches a live allowance
+**and** the ceiling still allows its type and action. Anything else asks.
+Turning a type on in the ceiling creates no allowance; it only stops the
+ceiling from being the reason a save is refused.
+
+The paragraph at the top of the section, shared with X3's explanation:
+
+> The ceiling is the outer limit: it lists, per integration and device type,
+> the actions an agent may ever be allowed to take without a card. An
+> allowance is one narrow pre-approval inside that ceiling — this agent,
+> these exact entities and these exact actions, with its own rate, window and
+> expiry. A call runs without a card only when it matches a live allowance
+> and the ceiling still allows its type and action; everything else asks.
+> The ceiling never approves anything by itself.
+
+X3's shared explanation keeps its own sentence about gate mode, always-gate
+and the agent override; both texts use these three words with these
+meanings, and a text test asserts the paragraph is the same constant.
+
+#### 2. The catalogue ships with the code
+
+One module constant, `ALLOWANCE_CATALOGUE`, is the only source of device
+types, actions, plain names, risk text and defaults (BT2). The API accepts
+only a catalogue id it knows; there is no free-text service and no way to add
+a type from the UI. The database stores a **selection from the catalogue**,
+by catalogue id — never a name the catalogue does not contain.
+
+| Integration | Catalogue id | Row name | Actions (service → label) | Default | Risk |
+|---|---|---|---|---|---|
+| `ha` | `light` | Lights | `turn_on` → Turn on; `turn_off` → Turn off; `toggle` → Toggle | **on** | — |
+| `ha` | `switch` | Smart plugs and switches | `turn_on` → Turn on; `turn_off` → Turn off; `toggle` → Toggle | **on** | — |
+| `ha` | `fan` | Fans | `turn_on` → Turn on; `turn_off` → Turn off; `toggle` → Toggle | **on** | — |
+| `ha` | `input_boolean` | HA helpers | `turn_on` → Turn on; `turn_off` → Turn off; `toggle` → Toggle | **on** | — |
+| `ha` | `media_player` | Media players | `turn_on` → Turn on; `turn_off` → Turn off; `media_play` → Play; `media_pause` → Pause; `media_stop` → Stop | **on** | — |
+| `ha` | `cover` | Covers: blinds, garage doors, gates | `open_cover` → Open; `close_cover` → Close; `stop_cover` → Stop | **off** | **Physical security and safety.** Opening a garage door or gate is a physical access event; a closing blind or door can trap a person or an animal. |
+| `ha` | `climate` | Heating and climate | `turn_on` → Turn on; `turn_off` → Turn off | **off** | **Cost and comfort.** Heating or cooling runs for as long as the device decides; a stuck call costs money and can be unsafe. |
+
+* **Fans is its own row** because the operator's default turns it on; folding
+  it into switches would hide it.
+* **Cover and climate are the two risky rows in v1.** Their risk text lives
+  in the catalogue and the confirm shows it word for word (BT6). At
+  allowance creation, an entity whose `device_class` is a garage door, gate,
+  door or lock-like shows the same warning per entity; a `switch` shows its
+  friendly name and device class before the operator saves (a switch can
+  power a heater, a pump, a server or a siren).
+* **Anything that opens or unlocks is risky by definition.** `lock`, `valve`,
+  `script`, `automation` and the other `never` domains are not in the
+  catalogue, so they cannot be allowed at all. A later type that can open or
+  unlock ships with `risk` set, and cannot be enabled without the ack.
+* **A destructive word caps the catalogue (BT3).** A catalogue row whose
+  service matches a built-in or operator-added destructive word can never be
+  enabled and never matches an allowance. This collides with the operator's
+  list: `cover.stop_cover` and `media_player.media_stop` contain the built-in
+  word `stop` under BD1's tokenisation. As written, BT3 makes both
+  unavailable; the design takes BT3 as the control and does **not** quietly
+  exempt them. §9 question 1 asks security for the narrow exemption.
+* **`only` moves out of the seed field (BT2).** `integration_tools.allowance_json`
+  keeps `constrainable` and `required`; the effective ceiling is the database
+  selection. A tool is allowable when the integration has at least one
+  enabled catalogue row.
+
+#### 3. Storage: a selection seeded once, never re-seeded (BT2)
+
+```
+allowance_ceiling(
+  integration   TEXT NOT NULL,             -- 'ha'; a second HA instance gets its own rows (BT6)
+  catalogue_id  TEXT NOT NULL,             -- e.g. 'cover.open_cover'; must exist in ALLOWANCE_CATALOGUE
+  enabled       INTEGER NOT NULL DEFAULT 0,
+  updated_by    TEXT,                      -- the session user, '' for the seed
+  updated_at    INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (integration, catalogue_id)
+)
+allowance_never_words(
+  word      TEXT PRIMARY KEY,              -- ^[a-z0-9_]{3,32}$
+  added_by  TEXT NOT NULL,
+  added_at  INTEGER NOT NULL
+)
+```
+
+* **Seeded once** from `ALLOWANCE_CATALOGUE` by the meta marker
+  `allowance_ceiling_v1`, with each row's default and an
+  `allowance_ceiling_seeded` audit row. `INSERT OR IGNORE` makes a restart
+  idempotent and never overwrites an operator's flag.
+* **New catalogue rows in a later release ship disabled.** The first-run
+  seed is the only thing that applies a catalogue default; a later version
+  adds its new rows with `enabled = 0` and the page marks them "new — off"
+  (BT2). There is no "apply defaults again" path.
+* **An empty ceiling means nothing is allowable.** It is never quietly
+  re-seeded from the catalogue: a missing row, a hand-edited DB or a bad
+  restore fails closed (BT2).
+* **A stored row is honoured only while it is still in the catalogue.** At
+  save, apply and match the id is looked up in `ALLOWANCE_CATALOGUE`; a row
+  an older DB has and a newer release removed is ignored, and the allowance
+  does not match (BT2). Nothing is deleted from the DB, so the audit trail
+  keeps the id.
+* **`never` stays code constants**, not rows: the domains (`script`,
+  `automation`, `shell_command`, `hassio`, `homeassistant`, `python_script`,
+  `rest_command`, `notify`, `update`, `recorder`, `pyscript`) and the service
+  words (`disarm`, `unlock`, `install`, `purge`, `delete`, `reset`). They are
+  shown read-only with a reason, applied **after** the ceiling every time,
+  and no ceiling row can override them. A CI test asserts that no catalogue
+  row is caught by `never` (BT2).
+* **Destructive words** are the built-ins (`delete`, `remove`, `purge`,
+  `format`, `reset`, `stop`, `shutdown`, `reboot`, `disable`, `unlock`,
+  `disarm`, and now `restart`) plus the operator's words. Built-ins are
+  read-only; only an operator-added word can be removed, and only by the
+  operator who added it. They are matched with BD1's tokenisation (`_`
+  separates). They apply to catalogue services too (BT3, §2).
+
+#### 4. Where the ceiling is enforced (BT1–BT4)
+
+Checked at **save**, at **apply** and at **match**. A ceiling change takes
+effect for the next call; nothing is cached across calls.
+
+1. **Save** (an allowance or a profile template). The catalogue id must be
+   enabled for the integration, in addition to the `constrainable`/
+   `required`/`never` checks of round 2, and the service must not match a
+   destructive word. The refusal names the type and action:
+   `ceiling_disabled: cover.open_cover`.
+2. **Apply** ("Update agents"). The ceiling is re-read in the same
+   transaction; a template the ceiling no longer allows refuses the whole
+   apply before anything is revoked or created. A template never offers "add
+   to ceiling".
+3. **Match.** The allowance's domain and service are looked up in the
+   catalogue and in the DB. A disabled row, a row that is no longer in the
+   catalogue, a destructive-word match, or a DB read error means **no
+   match** — the ordinary card, never a denial. A read error also writes at
+   most one `allowance_ceiling_unreadable` audit row per hour.
+
+**Order of the checks:** the `never` lists and destructive words after the
+ceiling, then the allowance. BD2 still short-circuits first: an agent set to
+ask for this tool never consults the allowance, so it never consults the
+ceiling either. Freeze, the tripwire freeze and the existing refusals keep
+their places. **The ceiling does not gate:** a call that matches no allowance
+goes to the ordinary gate exactly as today.
+
+**BT4 — narrowing is the control, suspension is the record.** Re-enabling a
+row, or removing an operator-added word, never resumes an allowance. The
+ceiling read at match still refuses even if the suspend step half-failed;
+the rows and the suspensions are written in one transaction, and a failed
+transaction leaves both unchanged.
+
+**BT1 — operator-only.** The ceiling is written only by the session-
+authenticated routes in §6: a dashboard session, CSRF and a confirm. No MCP
+tool, agent proposal, profile, plan, F21 internal tool or integration call
+can read, modify or write it. `run_tool` reads it; it never writes it. An
+AST/route test asserts that the only writers of `allowance_ceiling` and
+`allowance_never_words` are those routes.
+
+#### 5. Changing it in the UI
+
+**Where.** The Allowances page, above the list: one section, **"What agents
+may ever be allowed to do"**, per integration. HA in v1; a second HA
+integration has its own section (BT6). Another integration shows "This
+integration has no ceiling yet — every write asks"; the Integrations page
+(X3) links here.
+
+**The section.**
+
+* The shared paragraph from §1 at the top, in plain words.
+* One row per device type. The row shows the plain name, a short state line
+  ("on by default", "off by default", "changed 2026-11-15 by operator"), and
+  the risk text in place when the type is risky. A type whose service matches
+  a destructive word shows "unavailable: destructive word `stop`" and its
+  checkboxes are disabled (BT3).
+* The actions are checkboxes with plain labels from the catalogue ("Turn
+  on", "Open", "Play"). No text input for a service anywhere.
+* **Risky rows:** turning the type on or ticking an action on a risky row
+  opens a confirm that shows the catalogue's risk text word for word ("Covers
+  can open a garage door or gate. Enabling this lets an allowance open it
+  without a card."). The confirm carries `risk_ack: true`; the server refuses
+  the request without it, so the browser is not the control.
+* **At allowance creation** the entity's friendly name and `device_class` are
+  shown before saving; a garage, gate, door or lock-like class repeats the
+  risk (BT6).
+* **Save** is one button per integration and sends the whole enabled set.
+  The server computes before/after, validates the catalogue, applies the
+  words, writes the rows and the audit row in one transaction, and answers
+  409 with `affected` when the change disables something existing allowances
+  use.
+* **Disabling a type or action in use:** the confirm lists every affected
+  allowance **by name** — agent, allowance name, the entities it covers —
+  and says "they will be suspended, not deleted". Confirming (`confirm:
+  true`) suspends each with `suspended_reason='ceiling_removed'` and audits
+  every suspension plus the ceiling change. Nothing is deleted; History
+  keeps the ids.
+* **Re-enabling never reactivates.** A suspended allowance stays suspended;
+  the page lists each with **Resume**, which re-validates the ceiling, the
+  registry pins and `never` before it resumes, and audits
+  `allowance_resumed`. There is no "resume all" in v1 (question 4).
+* **Adding a destructive word** (BT3) takes the removal route: the confirm
+  lists the enabled catalogue rows it will switch off and the allowances it
+  will suspend; confirming disables those rows, suspends those allowances and
+  audits both. Removing the word later never resumes anything (BT4).
+* **Widening is announced (BT5).** Any change that enables a row sends the
+  existing notify webhook (`send_notify('ceiling', …)`, a new event type in
+  Settings → Notifications, on by default) as well as the audit row. A stolen
+  session can widen the ceiling and create an allowance; the second channel
+  is how the real operator notices. No password re-prompt: the bar stays the
+  same as creating an allowance.
+* **The never lists** are two read-only blocks, one line of reason each:
+
+  | Domain | Why it can never be allowed |
+  |---|---|
+  | `script` | runs a script someone else wrote |
+  | `automation` | changes what HA does on its own |
+  | `shell_command` | runs a shell command on the HA host |
+  | `hassio` | manages the Supervisor and add-ons |
+  | `homeassistant` | restarts or stops HA itself |
+  | `python_script` | runs Python inside HA |
+  | `rest_command` | calls an arbitrary URL |
+  | `notify` | sends messages outside the house |
+  | `update` | installs firmware or software |
+  | `recorder` | deletes HA's own history |
+  | `pyscript` | runs custom Python |
+
+  The service words (`disarm`, `unlock`, `install`, `purge`, `delete`,
+  `reset`) are the same block with one line each. They cannot be edited.
+* **Destructive words** below them: the built-ins as locked chips, the
+  operator's words as removable chips, and one input to add a word. The
+  server accepts `^[a-z0-9_]{3,32}$` (lowercase letters, digits, `_`), lower
+  cases nothing, refuses a built-in or a duplicate, and audits the add or
+  remove with before/after. The operator can remove only their own words.
+* **History** on the page shows the ceiling's changes with the actor and the
+  before/after sets (BT6).
+* **Layout.** At 1440 the section is a full-width card; each type is one row
+  with the name and risk on the left and the action checkboxes on the right,
+  wrapping inside the row. At 390 the name, risk and checkboxes stack, the
+  never tables become definition lists, and there is no horizontal scroll.
+  The `tests/ui/ui_views.cjs` harness measures both widths (overflow and
+  contrast) and the section is added to its view list.
+
+**Empty and error states.** With no database rows yet (a failed seed) the
+section says "The ceiling is not loaded — nothing can be allowed" and the API
+fails closed. A save failure keeps the form's staged values and shows why;
+it never claims success.
+
+#### 6. API, audit and the actor
+
+* `GET /api/allowances/ceiling?integration=ha` — the catalogue with each
+  row's `enabled`, defaults, risk text, the never lists with reasons, the
+  destructive words with `builtin: true|false`, the affected suspended
+  allowances, and `updated_at`/`updated_by` per type.
+* `PUT /api/allowances/ceiling` — `{integration, enabled: [catalogue_id, …],
+  risk_ack, confirm}`. Route-level session check plus the CSRF middleware
+  (`X-Eshu-CSRF`); the actor is the session's user, stored on each changed
+  row and in the audit row. It refuses an id not in the catalogue and an id
+  a destructive word catches.
+* `POST /api/allowances/never-words` / `DELETE /api/allowances/never-words/{word}`
+  — add and remove an operator word; the add answers 409 with the rows and
+  allowances it will suspend, and takes `confirm: true`.
+* `POST /api/allowances/{id}/resume` — resume one suspended allowance.
+* **No other writer.** These four routes are the only code that writes the
+  two tables (BT1, asserted by the AST/route test).
+* **Audit rows:** `allowance_ceiling_seeded`, `allowance_ceiling_changed`
+  (`integration`, the before/after catalogue-id sets, the affected ids, the
+  actor), `allowance_never_word_added` / `_removed` (word, actor, the rows
+  it disabled), `allowance_suspended` (existing, with `ceiling_removed` or
+  `destructive_word`), `allowance_resumed`, and the hourly
+  `allowance_ceiling_unreadable`.
+* **History** keeps showing `allowance #N (name)` for a run. Ceiling changes
+  appear as their own events, with a link to the allowances they suspended.
+
+#### 7. AZ6 — `restart` joins the destructive words
+
+`DESTRUCTIVE_VERBS` gains `restart`. `_DESTRUCTIVE_RE` already treats `_` as
+a separator (BD1), so Jellyfin's `/System/Restart` is marked and asks under
+`destructive` mode; `homeassistant.restart` is inside a never domain either
+way, and any later restart path is marked too. The operator's own words use
+the same matcher.
+
+Tests: `restart`, `/System/Restart`, `restart_container` and
+`homeassistant.restart` are marked; `restart_count` is marked too (the safe
+direction, and it is not a service anyone allows).
+
+#### 8. Tests this round adds
+
+* **Seed (BT2):** first start writes every catalogue row with its default
+  (light/switch/fan/input_boolean/media_player on; cover/climate off), one
+  audit row; a second start does not duplicate or overwrite an operator's
+  flag; a new catalogue version adds its rows **disabled**; an empty ceiling
+  allows nothing and is not re-seeded.
+* **Catalogue membership (BT2):** a stored `catalogue_id` that is not in the
+  catalogue never matches; a hand-edited row is ignored; a CI test asserts no
+  catalogue row is caught by `never`.
+* **Defaults:** a `cover.open_cover` allowance is refused at save until the
+  row is enabled; `climate` likewise; lights work with no change.
+* **Enforcement:** the ceiling refuses at save, at apply (nothing revoked)
+  and at match (a disabled row mid-flight stops matching, the call gets a
+  card); a DB read failure gets a card and one audit row per hour, not a
+  denial.
+* **Destructive words (BT3):** an id a built-in word catches cannot be
+  enabled (the `stop` collision is pinned by a test until question 1 is
+  answered); adding an operator word disables the rows it catches, suspends
+  the affected allowances and lists them in the 409; removing the word does
+  not resume anything; a word cannot be added from an MCP path (BT1).
+* **Never wins:** enabling cannot make `script.script` or `lock.unlock`
+  allowable, and the never lists have no edit path.
+* **Disable in use:** the 409 lists the affected allowances by name;
+  `confirm: true` suspends them, deletes nothing, and audits each; without
+  `confirm` nothing changes. A half-failed transaction changes neither the
+  rows nor the suspensions (BT4).
+* **Re-enable (BT4):** stays suspended; Resume re-validates and audits;
+  Resume is refused when the ceiling or a pin no longer allows it.
+* **Risk (BT6):** enabling cover/climate or an action on it without
+  `risk_ack` is 400; with `risk_ack` it is saved and audited. Enabling a
+  non-risky row needs no ack. An entity with a garage/gate/door class shows
+  the warning at allowance creation; a switch shows its friendly name and
+  class.
+* **API (BT1):** no session 401, no CSRF 403, `confirm` required only where a
+  disable is in use; every change has an `allowance_ceiling_changed` row with
+  before and after; the actor is the session user; an AST/route test proves
+  the four routes are the only writers.
+* **Widening (BT5):** enabling a row calls `send_notify('ceiling', …)` once,
+  with the row and the actor; narrowing does not notify.
+* **Second integration (BT6):** a second HA integration's ceiling is
+  independent; enabling a row there does not enable it in the first.
+* **UI (`tests/test_ui_views.py` + `tests/ui/ui_views.cjs`):** the section
+  renders at 1440 and 390 with the plain names and no free-text service
+  input; the risk confirm shows the catalogue text and blocks the save until
+  acknowledged; the disable confirm lists the affected allowance names; the
+  never lists are read-only; a word can be added and an own word removed;
+  no horizontal overflow and the contrast check passes at both widths.
+* **Copy:** the §1 paragraph is one constant shared with X3; a text test
+  asserts both render it and none of them calls the ceiling a gate.
+
+#### 9. New questions for security
+
+1. **BT3 against the safe `stop` actions.** BD1's tokenisation makes
+   `cover.stop_cover` and `media_player.media_stop` match the built-in word
+   `stop`, so BT3 makes both unavailable — but the operator's default media
+   list includes `media_stop`, and Stop is the safe way to halt a cover.
+   Exempt exactly those two catalogue rows (`destructive_exempt`, with a test
+   that no other row sets it), or drop Stop from the catalogue? Until
+   answered, both are unavailable.
+2. **A card pending when the ceiling narrows.** Match happens when the
+   request is made. If an operator approves a pending card after the type was
+   disabled, the approved call still runs. Re-check the ceiling and the
+   `never` lists at **approval** and at **ticket claim**, refusing with "the
+   ceiling changed"? That is fail-closed, but it adds two reads to the
+   approval path.
+3. **Who may widen.** Any dashboard session can today. Widening is the
+   dangerous direction; does it need a separate admin role or the operator's
+   session, while narrowing stays open to any session?
+4. **Scope of an operator word.** Global, as the built-ins are (a word added
+   for one integration caps every catalogue row whose service contains it),
+   or per integration? Global over-marks, which is the safe direction.
+5. **Resume.** One allowance at a time, or a bulk resume with one confirm
+   listing every allowance? Bulk is convenient after a wide enable and is
+   the one action that can reactivate many pre-approvals at once.
+6. **Strength of the risk confirm.** A checkbox, or type the row's name for
+   cover/climate? And should an allowance that *uses* a risky type need its
+   own confirm on save, on top of the ceiling ack?
+7. **The notify event (BT5).** Is a new `ceiling` event type, on by default,
+   enough, and should a widen by anyone other than the last operator page
+   twice? Is the webhook allowed to carry the catalogue id (not the entity
+   list)?
+8. **The agent-facing line.** Should the agent's tool description say which
+   types are currently ceiling-enabled, or stay at "calls matching an
+   allowance run without approval"? The list is the operator's setup, but the
+   agent already sees its own allowances.
+9. **Audit size.** The before/after sets are small today (seven types, 18
+   actions). Keep the full lists in the audit row, or store the diff plus a
+   hash of the set for a large catalogue later?
+
+`bash scripts/verify.sh`: `3033 passed, 26 skipped, 7 warnings in 665.93s
+(0:11:05)` (docs only).
+
 ---
 
 ## Chunk X3 — Integrations page and agent policy modal pass · slug `integrations-ui` · dashboard UI · after F27
@@ -19756,7 +20150,7 @@ off argv (BE3's BH3): `--data-binary @-` for the body and
 `-H @<(gateway_header)` for the header. That is a should, not a blocker for
 this merge.
 | 18a | X2 | runbooks-page | dashboard UI | **Merged** 2026-11-11 | `feat/x2-runbooks-page` | F13 | |
-| 18b | F27 | allowances | dashboard + MCP | **Design round 2**: the label shape (resolve at apply time, refresh with accept-to-join, registry-id pins, filtered `never`), AZ1 (plain entity ids only), AZ2 (suspend on a redefining write), AZ3 (v1 is HA only), AZ4 (local time and DST), AZ5 (revoked token stops matching), BD1 (`only` allowlist + `never` suffix rule + `_` as a separator), BD2 (`gated` beats an allowance), BD3 (the verified token), BD4 (value validation), BD5 (registry pins) folded | `feat/f27-allowances` | F10 (P2), Chunk H, F18 | security re-reads §2–§5 and the label section; AZ6 (`restart`) is with the operator |
+| 18b | F27 | allowances | dashboard + MCP | **Design round 3** (2026-11-15, BT1–BT6 folded): the operator's default ceiling, AZ6 `restart`, and the configurable ceiling UI (catalogue in code, a DB selection validated at save/apply/match, destructive words cap the ceiling too, risk confirms, suspend-not-delete, never lists read-only, operator words, notify on a widen); one open collision: `stop_cover`/`media_stop` vs the built-in `stop` word. **Design round 2**: the label shape (resolve at apply time, refresh with accept-to-join, registry-id pins, filtered `never`), AZ1 (plain entity ids only), AZ2 (suspend on a redefining write), AZ3 (v1 is HA only), AZ4 (local time and DST), AZ5 (revoked token stops matching), BD1 (`only` allowlist + `never` suffix rule + `_` as a separator), BD2 (`gated` beats an allowance), BD3 (the verified token), BD4 (value validation), BD5 (registry pins) folded | `feat/f27-allowances` | F10 (P2), Chunk H, F18 | security re-reads §2–§5 and the label section; AZ6 (`restart`) is with the operator |
 | 18c | X3 | integrations-ui | dashboard UI | Requested 2026-11-12; design after F27 is signed off | `feat/x3-integrations-ui` | F27, F10 (P2) | operator walk-through first |
 | 18d | X4 | agents-page | dashboard UI | **Merged** 2026-11-12 (into 1.3; on master 2026-11-14): one Agents page (tokens, policy sections, web fetch, activity); Controls renamed Command policy; absent policy fields keep their stored value | `feat/x4-agents-page` | `fix/agent-ssh-hosts` | rename Controls → Command policy |
 | 18e | X5 | ui-test-round | dashboard UI | **Merged** 2026-11-12 (into 1.3; on master 2026-11-14): six test-round fixes plus the X5-r plan-card regression fix | `fix/x5-ui-test-round`, `fix/plans-widget-visible` | — | six small fixes |
