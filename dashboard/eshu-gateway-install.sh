@@ -2880,6 +2880,12 @@ if { [ "$mode" = "install" ] || [ "$mode" = "reinstall" ]; } && [ "${REGISTER_OK
   AK_DASH='command="/usr/bin/sudo /usr/local/bin/eshu-gateway.sh --dashboard-key",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty,restrict'
   if [ -n "$ALLOWED_SSH_FROM" ]; then AK_DASH='from="'"$ALLOWED_SSH_FROM"'",'"$AK_DASH"; fi
   AK_FILE="/home/$USER/.ssh/authorized_keys"
+  if [ -e "$AK_FILE" ] && ! ak_as_user test -r "$AK_FILE"; then
+    # BS2 nit: replacing an unreadable file with an empty copy plus our lines
+    # would drop every non-Eshu key the user had. Refuse instead of silently
+    # rewriting it, as the update path already does.
+    echo "   REFUSED: $AK_FILE is not readable; authorized_keys not changed."
+  else
   {
     # Keep keys this installer does not own; drop every Eshu gateway line,
     # including a pre-F12 one without a comment, then write ours back.
@@ -2894,6 +2900,7 @@ if { [ "$mode" = "install" ] || [ "$mode" = "reinstall" ]; } && [ "${REGISTER_OK
       printf '%s %s eshu-dashboard\n' "$AK_DASH" "$DASHBOARD_SSH_PUB"
     fi
   } | ak_replace
+  fi
   fi
 fi
 

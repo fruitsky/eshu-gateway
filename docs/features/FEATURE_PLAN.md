@@ -14022,7 +14022,7 @@ only `;`. `test_a_multiline_command_is_refused_with_the_one_line_rule` asserts
 `bash scripts/verify.sh`: `3028 passed, 27 skipped, 8 warnings in 638.44s
 (0:10:38)`.
 
-## Release 1.4 — gateway stack · branch `release/1.4-gw` · from master `14e19fc`
+## Release 1.4 — gateway stack · branch `release/1.4-gw` · from master `800efe3` (X7)
 
 One stack, rebased onto master `800efe3` (X7): the gateway-side changes plus
 X8's dashboard half, so 1.4 is the whole X8 feature. The installer is Build
@@ -14182,6 +14182,19 @@ their own file) yields empty text. The rewrite then drops any non-Eshu
 keys the user had. Refuse instead when the file exists and `ak_read`
 fails, as the update path does.
 
+**BS2 nit implemented (2026-11-15).** Both paths now check
+`ak_as_user test -r "$AK_FILE"` before they build the replacement; an
+unreadable file is refused and left exactly as it was, so an install can no
+longer drop the user's other keys. `ak_read` still returns empty on a
+failure, but it is not reached when the check fails.
+`test_bs2_an_unreadable_file_is_not_rewritten_on_install` makes the
+`runuser` stub fail `test -r`, asserts the file is byte-identical and the
+installer says REFUSED, and the source test asserts both paths carry the
+check. Build regenerated; Build only.
+
+`bash scripts/verify.sh`: `3067 passed, 26 skipped, 7 warnings in 672.26s
+(0:11:12)`.
+
 ## 7. Backlog (not planned in detail)
 
 * Deny with a reason, shown to the agent (cheap; low value given the data).
@@ -14281,7 +14294,7 @@ this merge.
 | 23 | F26 | agent-shadow | dashboard + MCP | Ready after F16 | `feat/f26-agent-shadow` | F1, F12, F16, F18 | security reads the enforcement points |
 | 24 | F20 | local-agent-pass | docs | Parked | `docs/local-agent-pass` (local, unpushed) | — | experiment; last |
 | 25 | F17 | local-agent | dashboard + docs | After F20; pre-implementation notes A1–A6 | `feat/f17-local-agent` | F12–F16, F26 | experiment; last |
-| 26 | 1.4 | — | gateway stack | **Ready for review** 2026-11-14: BH2/BQ2, BQ4, F19, X8 (gateway + dashboard), BS1/BS2; rebased onto X7, Build only | `release/1.4-gw` | X7, F19, RR1 | security reads the stack as a whole; rollout Seed Edge → dev gateways → Deploy to Fleet |
+| 26 | 1.4 | — | gateway stack | **Approved for rollout** 2026-11-15 (security `838d77d`): BH2/BQ2, BQ4, F19, X8 (gateway + dashboard), BS1/BS2; rebased onto X7, Build only; the BS2 install-read nit is fixed | `release/1.4-gw` | X7, F19, RR1 | security approved the whole stack; rollout Seed Edge → dev gateways → Deploy to Fleet |
 | 27 | X8 | gateway-installer-version | dashboard + gateway | **Code complete** 2026-11-14: on `release/1.4-gw` (BR1 folded; the hash is display-only) | `feat/x8-gateway-installer-version` | X7 | security approved; five buckets sum to the gateway count |
 | 28 | X9 | gated-gateway-files | dashboard + gateway | **Design note** 2026-11-14 (BP2): installer-carried vs authenticated channel files; recommends (b) | `feat/x9-gated-gateway-files` | X7, 1.4 | security sign-off before code |
 | — | CI fix | ci-environment | gateway + tests | Merged (`f2746ef`); CI pinned to ubuntu-24.04 (`6d58006`) | `fix/ci-environment` | F5 | |

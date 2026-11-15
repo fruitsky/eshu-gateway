@@ -1029,6 +1029,27 @@ def test_bg1_the_check_runs_in_install_reinstall_and_update_before_changes():
         "check_curl_version; then exit 1")
 
 
+def test_bs2_an_unreadable_file_is_not_rewritten_on_install(tmp_path):
+    """BS2 nit: an install must not replace an unreadable file with our lines.
+
+    The update path refused already. The install path built its copy from
+    `ak_read`, which returns empty on failure, so it would have dropped every
+    non-Eshu key. It now refuses before it builds the replacement.
+    """
+    body = ('case "$*" in *" test -r "*) exit 1 ;; esac\n'
+            'shift 3\nexec "$@"')
+    proc, original, after = _run_keys(tmp_path, "1", "direct+mcp",
+                                      mode="reinstall", runuser_body=body)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert after == original
+    assert "REFUSED" in proc.stdout
+    assert "not readable" in proc.stdout
+    src = _read("dashboard/eshu-installer-template.sh")
+    # Both paths carry the check; the update path did, the install path now
+    # does too.
+    assert src.count('ak_as_user test -r "$AK_FILE"') >= 2
+
+
 def test_bs2_the_keys_read_runs_as_the_user(tmp_path):
     """BS2: root never reads authorized_keys; the checks parse the user's copy."""
     log = tmp_path / "runuser.log"
