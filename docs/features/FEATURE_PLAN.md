@@ -13030,6 +13030,94 @@ direction, and it is not a service anyone allows).
 
 ---
 
+### Security review of design rounds 2 and 3 (security reviewer, 2026-11-15, at `221eecc`)
+
+**Approved for the code round, with the rulings below. No musts.**
+
+* BT1–BT6 are folded as asked.
+* Round 2 had not had its own security read until now. Its §§1–13 (the
+  object, exact conditions, AZ1, BD4/BD5 pins, the decision point, atomic
+  rate, profiles and labels, AZ2, the BD1 regex) hold up. The AZ2 "suspend
+  everything when the mapping is incomplete" fallback is accepted.
+
+**Answers:**
+1. **The `stop` collision.** Grant the narrow exemption, shaped like
+   this:
+   * the catalogue row carries `exempt_words: ["stop"]`, naming the
+     **built-in** word it is exempt from, not a boolean;
+   * only `cover.stop_cover` and `media_player.media_stop` set it, and a
+     test asserts that exact pair;
+   * the exemption covers that one built-in word only. Any other built-in
+     word, and **every** operator-added word, still caps the row, so an
+     operator who adds `stop` themselves gets both rows switched off.
+   * `stop` stays destructive everywhere else (Proxmox `stop_vm`, Jellyfin
+     `stop_task`).
+   * Halting a cover or a player is the safe direction. Dropping Stop
+     would leave an allowed Open with no allowed Stop.
+2. **A card pending when the ceiling narrows.** Don't re-check it. A card
+   is a human approval of the call it shows, and the ceiling bounds
+   **pre**-approvals only ("the ceiling does not gate"). Re-checking at
+   approval would mix the two meanings and teach operators that the
+   ceiling gates. Keep the approval path as it is.
+3. **Who may widen.** v1 has one operator role, so no new role in F27.
+   BT5's notify is the control. If roles arrive later, widening (enabling
+   a row or removing a word) should be admin-only, and narrowing open to
+   any session.
+4. **Scope of an operator word.** Global. Over-marking is the safe
+   direction, and a per-integration word is one more thing to get wrong.
+5. **Resume.** One at a time in v1. Each resume reactivates a
+   pre-approval, and each deserves its own look. Bulk resume can come
+   later with a confirm that lists every row.
+6. **The risk confirm.** A server-enforced `risk_ack`, with the catalogue
+   text shown word for word, is enough. Typing the name is theatre.
+   * **Yes** to a second ack at allowance save, for an allowance that uses
+     a risky row or an entity with a garage, gate, door or lock-like
+     `device_class`. It is also server-enforced (`risk_ack` on the
+     allowance save), because the ceiling ack was about the type and this
+     one is about these entities.
+7. **The notify event.** A `ceiling` event, on by default, once per change,
+   is enough; don't page twice.
+   * The payload may carry the integration, the catalogue ids, the
+     before/after and the actor. It must not carry entity lists.
+   * Turning the `ceiling` notify event **off** is itself audited, and
+     sends one final notification.
+8. **The agent-facing line.** Keep it generic. The agent sees its own
+   allowances, and the ceiling is the operator's setup. Listing it only
+   tells an agent what to ask for.
+9. **Audit size.** Full before and after sets now, plus a sha256 of the
+   enabled set. Move to "diff plus hash" when the catalogue passes about
+   100 rows.
+
+**BV1 (should): the `open` lists don't agree.**
+* Round 2 says `lock.open` "is the whole value `open` and is refused", and
+  that `open_cover` is marked because `open` is a token. But `open` is in
+  neither `never.service` nor `DESTRUCTIVE_VERBS`.
+* `lock` is outside the catalogue, so this cannot be exploited today. Fix
+  the text and the constant all the same:
+  * add `open` to `never.service`, matched only as the whole value or the
+    `_open` suffix rule, so `lock.open` and `valve.open` are refused
+    wherever they appear;
+  * do **not** make `open` a destructive word, because BT3 would then cap
+    `cover.open_cover`, which the operator means to allow with the risk
+    ack;
+  * correct the "open_cover is also marked" sentence.
+* Test: `lock.open` is refused, `cover.open_cover` passes `never`, and
+  `open_cover` is not destructive.
+
+**BV2 (should): the other widening paths.**
+* **Removing an operator word is a widening**: it lets rows be enabled
+  again. It sends the BT5 notify, like enabling a row, and still resumes
+  nothing (BT4).
+* **`PUT /api/allowances/ceiling` sends the whole enabled set.** A stale
+  second tab could save an old set over a newer one and re-enable a row
+  that was just disabled.
+  * Send the `updated_at` (or a set hash) the form was loaded with, and
+    answer 409 `ceiling_changed` when it no longer matches.
+  * The server already computes before and after. This just makes "after"
+    mean what the operator saw.
+
+---
+
 ## Chunk X3 — Integrations page and agent policy modal pass · slug `integrations-ui` · dashboard UI · after F27
 
 ### Goal
