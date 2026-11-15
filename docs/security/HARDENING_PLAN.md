@@ -47,11 +47,13 @@ git diff --stat   # both generated installers must change identically
 ```
 
 Commit the regenerated `dashboard/eshu-gateway-install.sh` and
-`dashboard/static/eshu-gateway-install.sh` **in the same commit** as the source
-change. Do not touch `dashboard/static/dev/`.
+`dashboard/eshu-gateway-install.sh` (Build) **in the same commit** as the
+source change. Edge and Fleet are runtime channels (X7), not files to edit.
 
-`dashboard/static/features/approved_windows.sh` and
-`dashboard/static/fleet-runner.sh` are served directly — edit them in place.
+`dashboard/gateway-files/approved_windows.sh` and
+`dashboard/gateway-files/fleet-runner.sh` are part of the X9 generation:
+edit the source, regenerate Build, then Seed Edge → Deploy to Fleet. Their
+frozen 1.3 copies are in `gateway-files/legacy-1.3/`.
 
 ### 0.3 Compatibility rule (critical for rollout)
 

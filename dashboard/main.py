@@ -57,7 +57,7 @@ from database import (
     get_gateway_ssh_mode, set_gateway_ssh_mode, get_gateway_ssh_host_key,
     set_gateway_ssh_host_key, get_gateway_ssh_capabilities,
     set_gateway_ssh_capabilities, set_gateway_run_limits, get_gateway_run_limits,
-    set_gateway_installer_hash,
+    set_gateway_installer_hash, set_gateway_files,
     set_override, clear_override, get_override_active,
     create_approved_window, get_approved_windows, get_active_approved_windows,
     delete_approved_window, toggle_approved_window,
@@ -613,6 +613,11 @@ class RegisterPayload(BaseModel):
     # installer sends nothing, which keeps the stored value ("unknown" if
     # there is none).
     installer_hash: str = ""
+    # X9: the two gated files the poller has, and the dashboard URL scheme it
+    # is using. Optional, display only.
+    windows_hash: str = ""
+    runner_hash: str = ""
+    dashboard_scheme: str = ""
 
 class PolicyPayload(BaseModel):
     type: str
@@ -710,10 +715,43 @@ def _installer_channel(value, build_h, edge_h, fleet_h) -> str:
     return 'outdated'
 
 
+def _files_channel(windows_hash, runner_hash, edge_info, fleet_info) -> str:
+    """X9: which channel a gateway's two gated files match.
+
+    Both must match the same channel; one file from each is 'mixed'. Empty is
+    unknown, anything else is outdated. Display only (a self-report).
+    """
+    w = _clean_installer_hash(windows_hash)
+    r = _clean_installer_hash(runner_hash)
+    if not w or not r:
+        return 'unknown'
+    for name, info in (('fleet', fleet_info), ('edge', edge_info)):
+        if info and w == info['windows'] and r == info['runner']:
+            return name
+    if ((fleet_info and w == fleet_info['windows'])
+            or (edge_info and w == edge_info['windows'])
+            or (fleet_info and r == fleet_info['runner'])
+            or (edge_info and r == edge_info['runner'])):
+        return 'mixed'
+    return 'outdated'
+
+
 def _clean_installer_hash(value) -> str:
     """X8: 12 lowercase hex, or '' (ignore anything else, never store it)."""
     v = (value or '').strip().lower()
     return v if re.fullmatch(r'[0-9a-f]{12}', v) else ''
+
+
+def _store_gateway_files(payload) -> None:
+    """X9: store the gated-file hashes and the dashboard scheme a gateway
+    reports. Invalid values are ignored, never a clear."""
+    windows = _clean_installer_hash(getattr(payload, 'windows_hash', ''))
+    runner = _clean_installer_hash(getattr(payload, 'runner_hash', ''))
+    scheme = (getattr(payload, 'dashboard_scheme', '') or '').strip().lower()
+    if scheme not in ('http', 'https'):
+        scheme = ''
+    if windows or runner or scheme:
+        set_gateway_files(payload.ip, windows, runner, scheme)
 
 
 def _clean_ssh_capability(value, allowed) -> str:
@@ -813,6 +851,7 @@ def register(payload: RegisterPayload, request: Request):
     if payload.installer_hash:
         set_gateway_installer_hash(payload.ip,
                                    _clean_installer_hash(payload.installer_hash))
+    _store_gateway_files(payload)
     # Clear any stale uninstall trigger — re-enrollment cancels pending uninstalls
     clear_trigger_uninstall(payload.ip)
     
@@ -1317,6 +1356,10 @@ class HeartbeatPayload(BaseModel):
     ssh_host_key: str = ""
     # X8: re-sent every cycle; the installer's own registration can be lost.
     installer_hash: str = ""
+    # X9: the files the poller has, and the dashboard URL scheme.
+    windows_hash: str = ""
+    runner_hash: str = ""
+    dashboard_scheme: str = ""
 
 @app.post("/api/gateway-heartbeat")
 def receive_heartbeat(payload: HeartbeatPayload, request: Request):
@@ -1330,6 +1373,7 @@ def receive_heartbeat(payload: HeartbeatPayload, request: Request):
     if payload.installer_hash:
         set_gateway_installer_hash(payload.ip,
                                    _clean_installer_hash(payload.installer_hash))
+    _store_gateway_files(payload)
     # F12: a heartbeat can report a new host key, but it never moves the pin —
     # only an explicit, audited operator action does (design §4, R6).
     if (payload.ssh_host_key or '').strip():
@@ -1696,8 +1740,10 @@ def list_gateways(request: Request):
     # X8: the channel badge is computed here, once, so the UI never compares
     # hashes itself and every caller agrees.
     build_h = installer_channels.build_hash()
-    edge_h = installer_channels.channel_hash(installer_channels.EDGE)
-    fleet_h = installer_channels.channel_hash(installer_channels.FLEET)
+    edge_info = installer_channels.channel_info(installer_channels.EDGE)
+    fleet_info = installer_channels.channel_info(installer_channels.FLEET)
+    edge_h = edge_info['installer'] if edge_info else None
+    fleet_h = fleet_info['installer'] if fleet_info else None
     update_ts = max(_as_int(get_trigger_update_version()), _as_int(get_trigger_dev_update()))
     update_recent = update_ts > 0 and (now - update_ts) <= UPDATE_ACTIVE_WINDOW
     for g in gateways:
@@ -1716,6 +1762,15 @@ def list_gateways(request: Request):
         g['read_lane_on_enabled'] = read_lane_unlocked
         g['installer_channel'] = _installer_channel(
             g.get('installer_hash'), build_h, edge_h, fleet_h)
+        # X9: the two fetched files are a channel of their own. A gateway whose
+        # installer and files disagree is not running one generation; the UI
+        # warns rather than blocking (BU1).
+        g['files_channel'] = _files_channel(
+            g.get('windows_hash'), g.get('runner_hash'), edge_info, fleet_info)
+        g['files_mixed'] = (g['installer_channel'] in ('fleet', 'edge', 'build')
+                            and g['files_channel'] != 'unknown'
+                            and g['files_channel'] != g['installer_channel'])
+        g['dashboard_scheme'] = (g.get('dashboard_scheme') or '')
     return gateways
 
 @app.get("/api/gateways/{ip}/inner-targets")
@@ -2180,17 +2235,21 @@ def seed_edge(request: Request):
     dh = get_deployed_golden_hash()
     td = get_trigger_dev_update()
     try:
-        edge_hash = installer_channels.seed_edge()
+        edge = installer_channels.seed_edge()
     except installer_channels.ChannelMissing as exc:
         raise _channel_error(exc)
+    edge_hash = edge['installer']
     set_meta('installer_edge_seeded_at', str(int(time.time())))
     clear_dev_push_initiated()
+    detail = (f"Edge seeded from Build ({edge_hash}, generation {edge['generation']}: "
+              f"files {edge['windows']}/{edge['runner']})")
     if td and dh and edge_hash != dh:
         clear_trigger_dev_update()
-        record_audit_event("edge_seeded", details=f"Edge seeded from Build ({edge_hash}) — previous dev cycle cleared")
+        record_audit_event("edge_seeded", details=detail + " — previous dev cycle cleared")
     else:
-        record_audit_event("edge_seeded", details=f"Edge seeded from Build ({edge_hash})")
-    return {"status": "ok", "version": DASHBOARD_VERSION, "edge_hash": edge_hash}
+        record_audit_event("edge_seeded", details=detail)
+    return {"status": "ok", "version": DASHBOARD_VERSION, "edge_hash": edge_hash,
+            "edge_generation": edge['generation'], "edge_files": edge}
 
 
 @app.post("/api/dev/promote")
@@ -2199,9 +2258,10 @@ def promote_edge(request: Request):
     trigger the fleet update. Nothing in the git checkout is written."""
     _check_session(request)
     try:
-        fleet_hash = installer_channels.promote_edge()
+        fleet = installer_channels.promote_edge()
     except installer_channels.ChannelMissing:
         raise HTTPException(status_code=404, detail="No Edge installer found. Seed Edge first.")
+    fleet_hash = fleet['installer']
     set_meta('installer_fleet_promoted_at', str(int(time.time())))
     clear_dev_push_initiated()
     clear_trigger_dev_update()
@@ -2210,9 +2270,10 @@ def promote_edge(request: Request):
     clear_trigger_rollback()
     set_trigger_update_version(trigger_id)
     gateways = get_gateways()
-    record_audit_event("promote_to_golden", details=f"Deployed Edge ({fleet_hash}) to fleet — {len(gateways)} gateway(s)")
+    record_audit_event("promote_to_golden", details=f"Deployed Edge ({fleet_hash}, generation {fleet['generation']}: files {fleet['windows']}/{fleet['runner']}) to fleet — {len(gateways)} gateway(s)")
     return {"status": "ok", "version": DASHBOARD_VERSION, "gateway_count": len(gateways),
-            "fleet_hash": fleet_hash}
+            "fleet_hash": fleet_hash, "fleet_generation": fleet['generation'],
+            "fleet_files": fleet}
 
 
 @app.post("/api/dev/rollback")
@@ -2220,9 +2281,10 @@ def rollback_golden(request: Request):
     """X7: Fleet := the previous Fleet copy, then trigger the fleet update."""
     _check_session(request)
     try:
-        fleet_hash = installer_channels.rollback_fleet()
+        fleet = installer_channels.rollback_fleet()
     except installer_channels.ChannelMissing:
         raise HTTPException(status_code=404, detail="No previous Fleet installer available. Deploy to Fleet first.")
+    fleet_hash = fleet['installer']
     set_meta('installer_fleet_promoted_at', str(int(time.time())))
     clear_dev_push_initiated()
     clear_trigger_dev_update()
@@ -2231,8 +2293,55 @@ def rollback_golden(request: Request):
     clear_trigger_rollback()
     set_trigger_update_version(trigger_id)
     gateways = get_gateways()
-    record_audit_event("golden_rollback", details=f"Fleet rolled back to the previous installer ({fleet_hash}) for {len(gateways)} gateway(s)")
-    return {"status": "ok", "version": DASHBOARD_VERSION, "gateway_count": len(gateways)}
+    record_audit_event("golden_rollback", details=f"Fleet rolled back to the previous generation ({fleet_hash}, {fleet['generation']}: files {fleet['windows']}/{fleet['runner']}) for {len(gateways)} gateway(s)")
+    return {"status": "ok", "version": DASHBOARD_VERSION, "gateway_count": len(gateways),
+            "fleet_hash": fleet_hash, "fleet_generation": fleet['generation'],
+            "fleet_files": fleet}
+
+
+@app.post("/api/dev/legacy-retire")
+def retire_legacy_routes(request: Request):
+    """X9: retire the frozen 1.3 routes (manual, after 7 quiet days)."""
+    _check_session(request)
+    status = _legacy_1_3_status()
+    if status['retired']:
+        return {'status': 'ok', 'already_retired': True}
+    if not status['retire_available']:
+        raise HTTPException(
+            status_code=409,
+            detail='The 1.3 routes can be retired once no 1.3 gateway has polled for 7 days.')
+    set_meta('legacy_1_3_retired', '1')
+    record_audit_event('legacy_1_3_retired',
+                       details='The frozen 1.3 gateway-file routes now answer 410.')
+    return {'status': 'ok', 'retired': True}
+
+
+def _legacy_1_3_status() -> dict:
+    """X9: the frozen 1.3 routes and the manual retirement switch.
+
+    A gateway with no installer_hash predates X8 (1.3 or older) and can only
+    use the frozen /static copies. The switch is offered once none has been
+    seen for seven days; it is manual on purpose (a switched-off 1.3 gateway
+    must not come back to a 404 without the operator knowing).
+    """
+    retired = get_meta('legacy_1_3_retired') == '1'
+    gateways = get_gateways()
+    old = [g for g in gateways if not (g.get('installer_hash') or '').strip()]
+    now = int(time.time())
+    last_seen = max([int(g.get('last_seen') or 0) for g in old] or [0])
+    try:
+        since = int(get_meta('legacy_1_3_since') or 0)
+    except (TypeError, ValueError):
+        since = 0
+    cutoff = max(last_seen, since)
+    available = (not retired) and bool(cutoff) and (now - cutoff) >= 7 * 86400
+    return {
+        'retired': retired,
+        'gateway_count': len(old),
+        'last_seen': last_seen or None,
+        'since': since or None,
+        'retire_available': available,
+    }
 
 
 @app.get("/api/dev/status")
@@ -2245,8 +2354,10 @@ def dev_status(request: Request):
     """
     _check_session(request)
     build_hash = installer_channels.build_hash()
-    edge_hash = installer_channels.channel_hash(installer_channels.EDGE)
-    fleet_hash = installer_channels.channel_hash(installer_channels.FLEET)
+    edge_info = installer_channels.channel_info(installer_channels.EDGE)
+    fleet_info = installer_channels.channel_info(installer_channels.FLEET)
+    edge_hash = edge_info['installer'] if edge_info else None
+    fleet_hash = fleet_info['installer'] if fleet_info else None
     td = get_trigger_dev_update()
 
     if build_hash != edge_hash:
@@ -2303,6 +2414,17 @@ def dev_status(request: Request):
         "build_hash": build_hash,
         "edge_hash": edge_hash,
         "fleet_hash": fleet_hash,
+        "build_files": {
+            "windows": installer_channels.file_hash(
+                os.path.join(installer_channels.gateway_files_dir(),
+                             installer_channels.WINDOWS)),
+            "runner": installer_channels.file_hash(
+                os.path.join(installer_channels.gateway_files_dir(),
+                             installer_channels.RUNNER)),
+        },
+        "edge_files": edge_info,
+        "fleet_files": fleet_info,
+        "legacy_1_3": _legacy_1_3_status(),
         "edge_matches_build": build_hash == edge_hash,
         "edge_seeded_at": _ts('installer_edge_seeded_at'),
         "fleet_promoted_at": _ts('installer_fleet_promoted_at'),
@@ -4903,6 +5025,77 @@ def serve_fleet_installer():
 def serve_edge_installer():
     """Dev-mode gateways download the Edge installer."""
     return _serve_channel(installer_channels.EDGE)
+
+
+_GATEWAY_FILE_URL_NAMES = {
+    'approved_windows.sh': installer_channels.WINDOWS,
+    'fleet-runner.sh': installer_channels.RUNNER,
+}
+
+
+@app.get("/api/gateway/files/{name}")
+def serve_gateway_file(name: str, request: Request):
+    """X9: the two root-run files, for the gateway's own channel.
+
+    The channel is the operator's `dev` mark, server-side; nothing the
+    gateway reports chooses it. A gateway token bound to the IP is required.
+    The response is not cached and carries the generation and file hash so
+    the poller can check the transfer (not integrity — a hostile dashboard
+    could send both).
+    """
+    internal = _GATEWAY_FILE_URL_NAMES.get(name)
+    if internal is None:
+        raise HTTPException(status_code=404, detail="Unknown gateway file")
+    token_ip, _ = _resolve_gateway_token(request)
+    if not token_ip:
+        raise HTTPException(status_code=401, detail="Gateway token required")
+    channel = (installer_channels.EDGE if get_gateway_mode(token_ip) == 'dev'
+               else installer_channels.FLEET)
+    try:
+        data = installer_channels.read_file(channel, internal)
+    except installer_channels.ChannelMissing as exc:
+        raise _channel_error(exc)
+    info = installer_channels.channel_info(channel)
+    return Response(content=data, media_type="text/plain; charset=utf-8",
+                    headers={"Cache-Control": "no-store",
+                             "X-Eshu-File-Sha256": installer_channels.channel_file_hash(
+                                 channel, internal),
+                             "X-Eshu-Generation": info['generation'],
+                             "X-Eshu-Channel": channel})
+
+
+_LEGACY_1_3_DIR = os.path.join(os.path.dirname(__file__), 'gateway-files',
+                               'legacy-1.3')
+
+
+def _serve_legacy_file(name: str):
+    """X9: the frozen 1.3 files, only for a 1.3 poller still on /static.
+
+    These bytes never change with a deploy (a test pins their sha256). After
+    the manual retirement switch they answer 410 with the reason.
+    """
+    if get_meta('legacy_1_3_retired') == '1':
+        raise HTTPException(
+            status_code=410,
+            detail='The 1.3 gateway-file routes were retired; re-enroll or '
+                   'update this gateway to 1.4.')
+    try:
+        with open(os.path.join(_LEGACY_1_3_DIR, name), 'rb') as f:
+            data = f.read()
+    except OSError:
+        raise HTTPException(status_code=404, detail="Not found")
+    return Response(content=data, media_type="text/plain; charset=utf-8",
+                    headers={"Cache-Control": "no-store"})
+
+
+@app.get("/static/features/approved_windows.sh")
+def serve_legacy_windows():
+    return _serve_legacy_file('approved_windows.sh')
+
+
+@app.get("/static/fleet-runner.sh")
+def serve_legacy_runner():
+    return _serve_legacy_file('fleet-runner.sh')
 
 
 @app.get("/static/eshu-gateway-install.sh.bak")

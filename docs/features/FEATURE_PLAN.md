@@ -17592,6 +17592,65 @@ then the eight answers.**
 * The frozen legacy hashes are pinned.
 * A dev-mark change is session-only and audited.
 
+### Implementer notes — X9 code round (2026-11-15)
+
+**Status: code round.** Branch `feat/x9-gated-gateway-files`, rebased onto
+master `e6b42d8`; security's BU1/BU2 and the eight answers are folded.
+
+* **BU1 — one generation.** `core/installer_channels.py` now stores
+  `gen-<id>/{installer.sh,approved_windows.sh,fleet-runner.sh}` and three
+  pointer files (`edge`, `fleet`, `fleet.prev`). The id is the first 12 hex
+  of sha256 over the three names, lengths and bytes. A generation is written
+  to `gen-<id>.tmp-<pid>`, fsynced, then renamed; the pointer is replaced
+  last, so a partial set is never served (503, never a fallback). Seed Edge,
+  Deploy to Fleet and Rollback move the whole set; `channel_info` returns the
+  generation plus the installer, window and runner hashes, and the audit row
+  names all four. X7's flat files are migrated into a generation (paired with
+  the current gateway files, which is what the fleet was already downloading)
+  and deleted; no `fleet.prev` is created on migration (BP1).
+* **The route.** `GET /api/gateway/files/{approved_windows.sh,fleet-runner.sh}`
+  requires a gateway token bound to the IP (401 otherwise), chooses Edge for
+  a gateway the operator marked `dev` and Fleet otherwise, and never takes a
+  channel from the request. `no-store`, `X-Eshu-File-Sha256` (a transfer
+  check only), `X-Eshu-Generation` and `X-Eshu-Channel`; unknown name 404,
+  missing/incomplete generation 503.
+* **The poller.** Both files come from that route with the token on stdin;
+  the poller checks `bash -n` and the sha256 header, replaces atomically and
+  keeps the previous copy on any failure. The fleet runner is fetched per
+  command into `/etc/eshu/fleet-runner.sh` and launched from there. **BU2:**
+  a non-`https://` dashboard URL fetches neither, the runner launches nothing
+  and the command is not marked done; one log line per hour.
+* **The installer** embeds both files as base64 at Build time and seeds
+  `/etc/eshu/features.d/approved_windows.sh` (0644) and
+  `/etc/eshu/fleet-runner.sh` (0755) through a temp file and `mv`, so the
+  same generation is on disk before the first fetch. A refused
+  `authorized_keys` write still aborts the install.
+* **1.3.** The old bytes are frozen in `dashboard/gateway-files/legacy-1.3/`
+  and served at the old `/static/features/approved_windows.sh` and
+  `/static/fleet-runner.sh` paths, before the static mount. Their sha256
+  pins are in `tests/test_x9_gateway_files.py`. `/api/dev/legacy-retire` is
+  session- and CSRF-guarded, is offered only after seven days with no
+  gateway that has an empty `installer_hash` (1.3 or older), and makes both
+  routes answer 410 with the reason. The dev panel shows the switch.
+* **Display.** Register and heartbeat accept `windows_hash`, `runner_hash`
+  and `dashboard_scheme` (12 hex / http|https, display only). `/api/gateways`
+  returns `files_channel` (fleet/edge/mixed/outdated/unknown),
+  `files_mixed` and `dashboard_scheme`; the badge adds a "mixed files" and
+  an "http" warning chip with the reason in the title. `/api/dev/status` adds
+  `build_files`, `edge_files`, `fleet_files` and `legacy_1_3`.
+* **UI.** Chips only; no layout change. `tests/test_x9_ui.py` pins the
+  warnings and the switch; `app.js` is `ui29`, `style.css` `ui19`.
+* **Tests.** `tests/test_x9_gateway_files.py` (route auth, dev/Fleet channel,
+  hashes, 503, generation moves, partial set, legacy pins/410, report);
+  `tests/test_poller.py` (authenticated route, http refusal, bad hash keeps
+  the copy); `tests/test_installer.py` (the seed); `tests/lib` golden suite
+  still passes over generations.
+* **Not in X9:** the existing installer-update download over `http://` (BU2's
+  separate item, backlog above).
+
+`bash scripts/verify.sh`: `3214 passed, 26 skipped, 7 warnings in 691.62s
+(0:11:31)`.
+
 ## Chunk X6 — agent API fixes from the Release 1.2 test round · slug `agent-api-round` · dashboard
 
 From the agent's test report of 2026-11-12, triaged by the feature reviewer.
@@ -19312,6 +19371,7 @@ check. Build regenerated; Build only.
   needs a security design for authenticating the notification action.
 * Config export/import (policies, agent policies, windows, integration definitions without secrets).
 * Split `main.py` into FastAPI routers; build installers in CI instead of committing copies.
+* **X9 BU2 follow-up:** the installer update/rollback download (`/api/gateway-script`) is still fetched over the gateway's `http://` dashboard URL. Refuse it over http, or pin it from the HTTPS registration; X9 did not change that path.
 * Agent-facing read-only "would this auto-run?" tool (lower value: commands rarely repeat).
 * **UI design pass, after the features are done, in a fresh chat** (start from `docs/features/UI_INVENTORY.md`). Review the layout as a whole: what lives in the queue, the sidebar, the session modal and Statistics; what to merge or move; consistency across F2/F3/F5/F7/F18 additions.
 
@@ -19404,7 +19464,7 @@ this merge.
 | 25 | F17 | local-agent | dashboard + docs | After F20; pre-implementation notes A1–A6 | `feat/f17-local-agent` | F12–F16, F26 | experiment; last |
 | 26 | 1.4 | — | gateway stack | **Approved for rollout** 2026-11-15 (security `838d77d`): BH2/BQ2, BQ4, F19, X8 (gateway + dashboard), BS1/BS2; rebased onto X7, Build only; the BS2 install-read nit is fixed | `release/1.4-gw` | X7, F19, RR1 | security approved the whole stack; rollout Seed Edge → dev gateways → Deploy to Fleet |
 | 27 | X8 | gateway-installer-version | dashboard + gateway | **Code complete** 2026-11-14: on `release/1.4-gw` (BR1 folded; the hash is display-only) | `feat/x8-gateway-installer-version` | X7 | security approved; five buckets sum to the gateway count |
-| 28 | X9 | gated-gateway-files | dashboard + gateway | **Design note** 2026-11-14 (BP2): installer-carried vs authenticated channel files; recommends (b) | `feat/x9-gated-gateway-files` | X7, 1.4 | security sign-off before code |
+| 28 | X9 | gated-gateway-files | dashboard + gateway | **Code round** 2026-11-15 (BU1/BU2 and the eight answers): generations of installer + the two files, authenticated route, https-only fetch, frozen 1.3 routes, display-only file hashes | `feat/x9-gated-gateway-files` | X7, 1.4 | security reads the code round |
 | — | CI fix | ci-environment | gateway + tests | Merged (`f2746ef`); CI pinned to ubuntu-24.04 (`6d58006`) | `fix/ci-environment` | F5 | |
 | — | Buffering | stream-unbuffered | gateway | Merged (`d8d70c2`); S1 tee fix done in Gateway hardening | `fix/stream-unbuffered` | F5 | |
 | — | Gateway hardening | gateway-hardening | gateway | **Merged** 2026-11-12 (AF3 + S1 tee capture; security `c15664e`; AX1/AX2 residuals; BA1 for the next F5/F19 change) | `fix/gateway-hardening` | F19, Buffering | |

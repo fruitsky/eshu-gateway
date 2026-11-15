@@ -23,10 +23,13 @@ def write(path, content):
         f.write(content)
 
 def main():
+    import base64
     template  = read("eshu-installer-template.sh")
     gateway   = read("eshu-gateway.sh")
     poller    = read("eshu-poller.sh")
     logger    = read("eshu-logger.sh")
+    windows   = read("gateway-files/approved_windows.sh")
+    runner    = read("gateway-files/fleet-runner.sh")
 
     if "__GATEWAY_CONTENT__" not in template:
         sys.exit("ERROR: __GATEWAY_CONTENT__ not found in template")
@@ -34,10 +37,18 @@ def main():
         sys.exit("ERROR: __POLLER_CONTENT__ not found in template")
     if "__LOGGER_CONTENT__" not in template:
         sys.exit("ERROR: __LOGGER_CONTENT__ not found in template")
+    for token in ("__WINDOWS_B64__", "__RUNNER_B64__"):
+        if token not in template:
+            sys.exit("ERROR: %s not found in template" % token)
 
     installer = template.replace("__GATEWAY_CONTENT__", gateway.rstrip("\n"))
     installer = installer.replace("__POLLER_CONTENT__", poller.rstrip("\n"))
     installer = installer.replace("__LOGGER_CONTENT__", logger.rstrip("\n"))
+    # X9: the two gated files travel in the same generation as the installer.
+    installer = installer.replace("__WINDOWS_B64__",
+                                  base64.b64encode(windows.encode()).decode())
+    installer = installer.replace("__RUNNER_B64__",
+                                  base64.b64encode(runner.encode()).decode())
 
     # X7: only Build is generated and committed. Edge and Fleet are runtime
     # copies the dashboard makes on Seed Edge / Deploy to Fleet.

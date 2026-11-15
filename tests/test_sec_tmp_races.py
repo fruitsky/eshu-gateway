@@ -69,7 +69,7 @@ def test_sec_chunk3_umask_is_restrictive():
 # ── no fixed world-writable paths ──────────────────────────────────────────
 @pytest.mark.parametrize("rel", [
     "dashboard/eshu-poller.sh",
-    "dashboard/static/fleet-runner.sh",
+    "dashboard/gateway-files/fleet-runner.sh",
     "dashboard/eshu-installer-template.sh",
 ])
 def test_sec_chunk3_no_fixed_tmp_paths(rel):

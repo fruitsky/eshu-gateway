@@ -5289,8 +5289,20 @@ function gwChannelBadge(g) {
   var title = 'Installer ' + (hash || 'not reported') +
     ' reported by the gateway' + changed;
   if (ch === 'build') title += ' \u00b7 on Build, not seeded or reviewed through the channels';
-  return '<span class="gw-ch gw-ch-' + esc(ch) + '" title="' + esc(title) + '">' +
+  var out = '<span class="gw-ch gw-ch-' + esc(ch) + '" title="' + esc(title) + '">' +
     esc(label) + '</span>';
+  // X9/BU1: the installer and the two fetched files must be one generation.
+  // A mismatch is a warning, not a block: the next fetch or deploy fixes it.
+  if (g.files_mixed) {
+    out += ' <span class="gw-ch gw-ch-warn" title="Installer is on ' + esc(ch) +
+      ' but the window/runner files match ' + esc(String(g.files_channel || 'unknown')) +
+      ' \u2014 the gateway is not running one generation">mixed files</span>';
+  }
+  // X9/BU2: a LAN http:// dashboard URL lets the path rewrite root-run code.
+  if (String(g.dashboard_scheme || '') === 'http') {
+    out += ' <span class="gw-ch gw-ch-warn" title="Dashboard URL is http:// \u2014 the token and the fetched code can be rewritten in transit. Use https://.">http</span>';
+  }
+  return out;
 }
 
 async function fetchGateways() {
@@ -6937,6 +6949,20 @@ async function fetchDevStatus() {
       ? _hashTag(data.fleet_hash).trim() + _when(data.fleet_promoted_at, 'deployed')
       : 'missing';
 
+    // X9: the frozen 1.3 routes and their manual retirement switch.
+    const legacyRow = document.getElementById('legacy-1-3-row');
+    if (legacyRow && data.legacy_1_3) {
+      const l = data.legacy_1_3;
+      if (l.retired) {
+        legacyRow.innerHTML = '1.3 file routes: <span class="text-muted">retired (410)</span>';
+      } else if (l.retire_available) {
+        legacyRow.innerHTML = '1.3 file routes: <button onclick="retireLegacyRoutes()" class="btn btn-xs btn-danger">Retire 1.3 routes</button>';
+      } else {
+        legacyRow.innerHTML = '1.3 file routes: <span class="text-muted">frozen; retire after 7 quiet days' +
+          (l.gateway_count ? ' (' + l.gateway_count + ' 1.3 gateway' + (l.gateway_count !== 1 ? 's' : '') + ')' : '') + '</span>';
+      }
+    }
+
     // Button states
     if (seedBtn) seedBtn.disabled = false;
     if (pushBtn) pushBtn.disabled = !data.edge_exists || data.dev_gateway_count === 0;
@@ -6965,6 +6991,13 @@ async function fetchDevStatus() {
       }
     }
   } catch(e) {}
+}
+
+async function retireLegacyRoutes() {
+  if (!confirm('Retire the frozen 1.3 file routes? 1.3 gateways will get 410 until they update.')) return;
+  const res = await fetch('/api/dev/legacy-retire', { method: 'POST', headers: { 'X-Eshu-CSRF': '1' } });
+  if (!res.ok) { alert('Could not retire: ' + (await res.text())); return; }
+  fetchDevStatus();
 }
 
 function generateRegex() {

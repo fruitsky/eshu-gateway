@@ -653,6 +653,7 @@ button::-moz-focus-inner { border: 0; padding: 0; }
   .gw-ch-build { color: var(--status-warning); border-color: rgba(251,146,60,0.45); }
   .gw-ch-outdated { color: #fca5a5; border-color: rgba(248,113,113,0.4); }
   .gw-ch-unknown { color: var(--text-muted); }
+  .gw-ch-warn { color: var(--status-warning); border-color: rgba(251,146,60,0.45); }
   .inv-interval { display: inline-flex; align-items: center; gap: 6px; margin-left: auto; }
   #inv-interval { width: 56px; flex: 0 0 56px; }
   @media (max-width: 640px) {

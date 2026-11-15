@@ -26,7 +26,13 @@ Features are delivered to gateways through a **flag → script → sync** pipeli
 
 ### Adding a new feature
 
-1. **Create a feature script** in `dashboard/static/features/my_feature.sh`
+**X9:** the two root-run files (`approved_windows.sh`, `fleet-runner.sh`) are
+no longer served from `/static`; they are part of the installer/channel
+generation. A new root-run file must be added to the generation
+(`GEN_FILES`, `dashboard/gateway-files/`, the authenticated route and the
+poller), not dropped into `static/`.
+
+1. **Create a feature script** in `dashboard/gateway-files/my_feature.sh`
    - Must be valid bash (check with `bash -n`)
    - Runs inline at Stage 4.5 — has access to `$cmd`, `$ESHU_WINDOW_TOKEN`,
      `$DASHBOARD_URL`, `$TARGET_IP`, `$GATEWAY_TOKEN`, and helpers
@@ -47,9 +53,9 @@ Features are delivered to gateways through a **flag → script → sync** pipeli
 
 4. **Update the poller** (`dashboard/eshu-poller.sh`, policy-sync section):
    - Add logic to download the feature script when the flag is on
-   - Must use atomic tmpfile + `bash -n` validation before deploying:
+   - Must use the authenticated route, https and a transfer hash, not `/static`:
      ```bash
-     curl -s -o "$FEATURES_DIR/my_feature.sh.tmp" "$DASHBOARD_URL/static/features/my_feature.sh"
+     curl -s -o "$FEATURES_DIR/my_feature.sh.tmp" "$DASHBOARD_URL/api/gateway/files/my_feature.sh"
      if [ -s "$FEATURES_DIR/my_feature.sh.tmp" ] && bash -n "$FEATURES_DIR/my_feature.sh.tmp"; then
        mv "$FEATURES_DIR/my_feature.sh.tmp" "$FEATURES_DIR/my_feature.sh"
      else
@@ -136,11 +142,17 @@ answers 503 (it fails closed). **Recovery:** Seed Edge, then Deploy to Fleet.
 Deploy to Fleet also triggers a fleet-wide update, so do it when that is
 acceptable.
 
-**Not yet gated (BP2):** two other files the gateways run as root,
-`static/features/approved_windows.sh` (downloaded every poll cycle) and
-`static/fleet-runner.sh` (downloaded for every fleet command), are still served
-from the checkout. A dashboard deploy changes them for every gateway without a
-Deploy to Fleet. Moving them into the channels is a follow-up.
+**X9: a channel is a generation.** `dashboard/installer-channels/gen-<id>/`
+holds the installer and the two gated files
+(`approved_windows.sh`, `fleet-runner.sh`); the `edge`, `fleet` and
+`fleet.prev` pointer files name a generation. Seed Edge, Deploy to Fleet and
+Rollback move all three files together (BU1). The 1.4 poller fetches them from
+`/api/gateway/files/…` with its gateway token; the channel comes from the
+operator's dev mark. **https is required** (BU2): over `http://` the poller
+keeps its copy and the fleet runner launches nothing, with one log line an
+hour. The frozen 1.3 copies are served at the old `/static` paths and are
+retired by hand after seven quiet days (then 410). A new root-run file must
+join `GEN_FILES` and the route, never the checkout.
 
 ### Installer privilege checks
 
@@ -253,7 +265,7 @@ dashboard/database.py             # re-exports the db/ modules (single import su
 dashboard/core/                    # shared logic: session/auth, notify, risk, cmd_blocklist, cmd_profiles, policy_eval, utils
 dashboard/db/                      # data layer: one module per domain (requests, gateways, windows, fleet, ...)
 dashboard/static/                  # dashboard UI (index.html, app.js, style.css)
-dashboard/static/features/         # feature script files (served to gateways)
+dashboard/gateway-files/           # the two gated root-run files (+ frozen 1.3)
 scripts/pre-commit.sh              # syntax checks
 scripts/setup-git-hooks.sh         # one-time hook installer
 ```

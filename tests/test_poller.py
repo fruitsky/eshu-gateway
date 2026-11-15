@@ -62,8 +62,9 @@ def policy_body(**overrides) -> str:
 class PollerSandbox:
     """A throwaway installation of the real poller script."""
 
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, dashboard_url="https://dashboard.test"):
         self.root = Path(root)
+        self.dashboard_url = dashboard_url
         self.etc = self.root / "etc"
         self.run_dir = self.root / "run"
         self.tmp = self.root / "tmp"
@@ -87,6 +88,7 @@ class PollerSandbox:
         self.work_stat_file = self.root / "work-stat"
         self.work_stat_file.write_text("0 700")
         self.fleet_runner_file = self.root / "fleet-runner.sh"
+        self.bad_hash_file = self.root / "bad-hash"
         self.fleet_runner_file.write_text("#!/bin/bash\nexit 0\n")
 
         self.feature_file.write_text("#!/bin/bash\n# test feature\n")
@@ -107,10 +109,12 @@ POLICY="__POLICY__"
 POLL="__POLL__"
 FEATURE="__FEATURE__"
 RUNNER="__RUNNER__"
-out=""; fmt=""; url=""
+BAD="__BAD__"
+out=""; fmt=""; url=""; hdr=""
 while [ $# -gt 0 ]; do
   case "$1" in
     -o) out="$2"; shift 2 ;;
+    -D) hdr="$2"; shift 2 ;;
     -w) fmt="$2"; shift 2 ;;
     -H)
       case "$2" in @-) cat >/dev/null ;; esac
@@ -145,11 +149,22 @@ case "$url" in
   */static/fleet-runner.sh)
     body=$(cat "$RUNNER" 2>/dev/null)
     ;;
+  */api/gateway/files/approved_windows.sh)
+    if [ -f "$FEATURE" ]; then body=$(cat "$FEATURE"); else code="404"; fi
+    ;;
+  */api/gateway/files/fleet-runner.sh)
+    body=$(cat "$RUNNER" 2>/dev/null)
+    ;;
   *) code="404" ;;
 esac
 if [ -n "$out" ]; then
   printf '%s' "$body" > "$out"
   [ "$fmt" = "%{http_code}" ] && printf '%s' "$code"
+  if [ -n "$hdr" ]; then
+    sha=$(printf '%s' "$body" | sha256sum | cut -c1-12)
+    if [ -f "$BAD" ]; then sha="000000000000"; fi
+    printf 'X-Eshu-File-Sha256: %s\n' "$sha" > "$hdr"
+  fi
 else
   printf '%s' "$body"
 fi
@@ -159,7 +174,8 @@ fi
                     .replace("__POLICY__", str(self.policy_file))
                     .replace("__POLL__", str(self.poll_file))
                     .replace("__FEATURE__", str(self.feature_file))
-                    .replace("__RUNNER__", str(self.fleet_runner_file)))
+                    .replace("__RUNNER__", str(self.fleet_runner_file))
+                    .replace("__BAD__", str(self.bad_hash_file)))
         self._executable(self.bin / "curl", curl)
 
         logger = '''#!/bin/bash
@@ -228,7 +244,7 @@ exit 0
         text = text.replace("/var/run/", str(self.run_dir) + "/")
         text = text.replace("/etc/", str(self.etc) + "/")
         for token, value in (
-            ("__DASHBOARD_URL__", "http://dashboard.test"),
+            ("__DASHBOARD_URL__", self.dashboard_url),
             ("__TARGET_IP__", "10.0.0.1"),
             ("__HOST_NAME__", "test-gw"),
         ):
@@ -673,3 +689,34 @@ def test_bq4_no_sed_and_no_baked_token_in_the_poller():
     assert "sed -i" not in text
     assert not re.search(r'^GATEWAY_TOKEN=', text, re.M)
     assert text.count("write_token_file \"$NEW_TOKEN\"") == 2
+
+
+# ── X9: gated files over the authenticated route (BU2) ──────────────────────
+def test_x9_the_window_script_uses_the_authenticated_route(poller):
+    poller.policy(policy_body())
+    poller.run()
+    urls = [u for u, _ in poller.curl_out_pairs()]
+    assert any("/api/gateway/files/approved_windows.sh" in u for u in urls)
+    assert not any("/static/features/" in u for u in urls)
+
+
+def test_x9_an_http_dashboard_refuses_both_fetches(tmp_path):
+    sandbox = PollerSandbox(tmp_path, dashboard_url="http://dashboard.test")
+    sandbox.policy(policy_body(pending_fleet_cmd_id=9,
+                               pending_fleet_cmd="echo fleet"))
+    sandbox.run()
+    urls = [u for u, _ in sandbox.curl_out_pairs()]
+    assert not any("/api/gateway/files/" in u for u in urls)
+    assert sandbox.systemd_args() == []
+    assert "not https" in sandbox.logger_text()
+    seed = sandbox.etc / "eshu" / "features.d" / "approved_windows.sh"
+    assert not seed.exists()
+
+
+def test_x9_a_bad_transfer_hash_keeps_the_previous_copy(poller):
+    seed = poller.etc / "eshu" / "features.d" / "approved_windows.sh"
+    seed.write_text("#!/bin/bash\n# old copy\n")
+    poller.bad_hash_file.write_text("bad")
+    poller.policy(policy_body())
+    poller.run()
+    assert "old copy" in seed.read_text()

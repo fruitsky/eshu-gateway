@@ -99,6 +99,16 @@ def init_gateways_tables(cursor):
             cursor.execute(f"ALTER TABLE gateways ADD COLUMN {col} {kind} DEFAULT {default}")
         except Exception:
             pass
+    # X9: the two gated files the gateway last fetched (first 12 hex of their
+    # sha256), and the dashboard URL scheme it uses (http/https). Display
+    # only: a self-report, like installer_hash. Empty means "not reported",
+    # which an old gateway sends; it never clears a stored value.
+    for col, default in [('windows_hash', "''"), ('runner_hash', "''"),
+                         ('dashboard_scheme', "''")]:
+        try:
+            cursor.execute(f"ALTER TABLE gateways ADD COLUMN {col} TEXT DEFAULT {default}")
+        except Exception:
+            pass
     _backfill_ssh_key_derived(cursor)
 
 
@@ -563,6 +573,26 @@ def set_gateway_installer_hash(ip: str, value: str, now: int = None) -> bool:
                            (v, int(now or time.time()), ip))
         conn.commit()
     return True
+
+
+def set_gateway_files(ip: str, windows_hash: str, runner_hash: str,
+                      dashboard_scheme: str = '') -> None:
+    """X9: the gated files a gateway reports, and its dashboard URL scheme.
+
+    Display only, like installer_hash. An empty field means "not reported" and
+    keeps the stored value, so an old poller cannot clear it.
+    """
+    with db_conn() as conn:
+        if windows_hash:
+            conn.execute('UPDATE gateways SET windows_hash = ? WHERE ip = ?',
+                         (windows_hash, ip))
+        if runner_hash:
+            conn.execute('UPDATE gateways SET runner_hash = ? WHERE ip = ?',
+                         (runner_hash, ip))
+        if dashboard_scheme in ('http', 'https'):
+            conn.execute('UPDATE gateways SET dashboard_scheme = ? WHERE ip = ?',
+                         (dashboard_scheme, ip))
+        conn.commit()
 
 
 def set_gateway_run_limits(ip: str, capability: str):

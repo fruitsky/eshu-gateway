@@ -69,7 +69,7 @@ from db.gateways import (
     get_gateway_ssh_capabilities,
     set_gateway_ssh_capabilities,
     set_gateway_run_limits,
-    set_gateway_installer_hash,
+    set_gateway_installer_hash, set_gateway_files,
     get_gateway_run_limits,
     get_gateway_ssh_key_derived,
     get_dev_gateways,

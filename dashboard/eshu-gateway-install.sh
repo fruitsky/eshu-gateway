@@ -2114,6 +2114,49 @@ eshu_token() {
 # BE3: token headers never go into curl's argv (readable in /proc by any
 # local user). printf is a builtin and curl reads the header lines from stdin.
 gateway_header() { printf 'X-Gateway-Token: %s\n' "$(eshu_token)"; }
+# X9: the two gated files live here. The installer seeds them; the poller
+# replaces them from the authenticated route, so the fleet runner has one
+# stable path to hash and launch.
+WINDOWS_FILE="/etc/eshu/features.d/approved_windows.sh"
+RUNNER_FILE="/etc/eshu/fleet-runner.sh"
+
+# BU2: a LAN http:// dashboard URL would let anyone on the path rewrite
+# root-run code (and the token/hash headers with it). No fetch happens over
+# http; the installed copy stays. One line per hour, not per cycle.
+dashboard_is_https() {
+  case "$DASHBOARD_URL" in
+    https://*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+dashboard_scheme() {
+  case "$DASHBOARD_URL" in
+    https://*) printf 'https' ;;
+    *) printf 'http' ;;
+  esac
+}
+
+http_warn() {   # $1 = what was skipped
+  local stamp="/var/run/eshu.http-warn" now last
+  now=$(date +%s)
+  last=$(cat "$stamp" 2>/dev/null || echo 0)
+  case "$last" in ''|*[!0-9]*) last=0 ;; esac
+  if [ $((now - last)) -ge 3600 ]; then
+    logger -t eshu-poller "Dashboard URL is not https:// — $1 not fetched (the installed copy stays). Fix /etc/eshu/dashboard_url."
+    printf '%s' "$now" > "$stamp" 2>/dev/null || true
+  fi
+}
+
+# The first 12 hex of a file's sha256, or '' when it is missing.
+read_file_hash() {
+  local h
+  h=$(sha256sum "$1" 2>/dev/null | cut -c1-12)
+  case "$h" in
+    [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) printf '%s' "$h" ;;
+  esac
+}
+
 # X8: the installer hash the last install/update wrote, if it is a valid one.
 read_installer_hash() {
   local h
@@ -2255,21 +2298,37 @@ policy_stamp_matches() {
 # (DASHBOARD_VERSION is a static string), so a stale window handler must not
 # linger. The download is bounded and syntax-checked before replacing the live
 # file. Runs only when the dashboard answered, matching the previous behavior.
+# X9: the window handler comes from the authenticated gateway-file route, not
+# the unauthenticated /static mount. The channel (Edge for a dev gateway,
+# Fleet otherwise) is chosen server-side. The download is bounded, syntax
+# checked and its sha256 header checked before it replaces the live file;
+# any failure keeps the previous copy. A 1.3 gateway still uses /static until
+# it updates, which is why those routes are frozen, not deleted.
 sync_feature_scripts() {
-  local features_dir="/etc/eshu/features.d"
-  mkdir -p "$features_dir"
-  curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -o "$features_dir/approved_windows.sh.tmp" \
-       "$DASHBOARD_URL/static/features/approved_windows.sh" 2>/dev/null || true
-  if [ -s "$features_dir/approved_windows.sh.tmp" ] && bash -n "$features_dir/approved_windows.sh.tmp" 2>/dev/null; then
-    if cmp -s "$features_dir/approved_windows.sh.tmp" "$features_dir/approved_windows.sh"; then
-      rm -f "$features_dir/approved_windows.sh.tmp"
+  local dir="/etc/eshu/features.d" tmp hdr want got
+  mkdir -p "$dir"
+  if ! dashboard_is_https; then
+    http_warn "the window script"
+    return 0
+  fi
+  tmp=$(mktemp -p "$ESHU_WORK" windows.XXXXXX)
+  hdr=$(mktemp -p "$ESHU_WORK" windows-hdr.XXXXXX)
+  gateway_header | curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s \
+       -D "$hdr" -o "$tmp" -H @- \
+       "$DASHBOARD_URL/api/gateway/files/approved_windows.sh" 2>/dev/null || true
+  want=$(awk 'tolower($1)=="x-eshu-file-sha256:"{print $2}' "$hdr" 2>/dev/null | tr -d '\r' | head -n1)
+  got=$(sha256sum "$tmp" 2>/dev/null | cut -c1-12)
+  if [ -s "$tmp" ] && bash -n "$tmp" 2>/dev/null && [ -n "$want" ] && [ "$want" = "$got" ]; then
+    if cmp -s "$tmp" "$WINDOWS_FILE"; then
+      rm -f "$tmp"
     else
-      mv -f "$features_dir/approved_windows.sh.tmp" "$features_dir/approved_windows.sh"
+      chmod 0644 "$tmp" && mv -f "$tmp" "$WINDOWS_FILE"
     fi
   else
-    logger -t eshu-poller "Feature script download/validation failed — keeping previous version"
-    rm -f "$features_dir/approved_windows.sh.tmp"
+    logger -t eshu-poller "Window script fetch/validation failed — keeping previous version"
+    rm -f "$tmp"
   fi
+  rm -f "$hdr"
 }
 
 # Persist last processed trigger ID across restarts
@@ -2393,31 +2452,45 @@ while true; do
     esac
     LAST_FLEET_CMD_ID=$(cat /var/run/eshu.last_fleet_cmd 2>/dev/null || echo "0")
     if [ -n "$FLEET_CMD_ID" ] && [ "$FLEET_CMD_ID" != "0" ] && [ "$FLEET_CMD_ID" != "$LAST_FLEET_CMD_ID" ] && [ -n "$FLEET_CMD" ]; then
-      logger -t eshu-poller "Fleet command #$FLEET_CMD_ID received. Downloading runner..."
-      FLEET_RUNNER_TMP=$(mktemp -p "$ESHU_WORK" fleet-runner.XXXXXX)
-      FLEET_RUNNER="$ESHU_WORK/eshu-fleet-runner.sh"
+      FLEET_RUNNER="$RUNNER_FILE"
       FLEET_CMD_FILE="$ESHU_WORK/eshu-fleet-$FLEET_CMD_ID.sh"
       FLEET_OUT_FILE="$ESHU_WORK/eshu-fleet-out-$FLEET_CMD_ID.txt"
-      curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m 60 -s -o "$FLEET_RUNNER_TMP" "$DASHBOARD_URL/static/fleet-runner.sh" 2>/dev/null || true
-      if [ -s "$FLEET_RUNNER_TMP" ] && bash -n "$FLEET_RUNNER_TMP" 2>/dev/null; then
-        chmod +x "$FLEET_RUNNER_TMP"
-        mv -f "$FLEET_RUNNER_TMP" "$FLEET_RUNNER"
-        { echo "#!/bin/bash"; printf '%s\n' "$FLEET_CMD"; } > "$FLEET_CMD_FILE" 2>/dev/null
-        # Persist the ID only on a successful launch. The runner pings 'running'
-        # immediately, which stops the dashboard re-injecting — so a crash before
-        # this echo can never cause a double execution.
-        # BJ2: no token in the unit's ExecStart (world-readable through
-        # `systemctl show`); the runner reads /etc/eshu-token as root.
-        if systemd-run --unit="eshu-fleet-$FLEET_CMD_ID" --collect \
-            bash "$FLEET_RUNNER" "$DASHBOARD_URL" "$TARGET_IP" "$FLEET_CMD_ID" "$FLEET_CMD_TIMEOUT" "$FLEET_CMD_FILE" "$FLEET_OUT_FILE" >/dev/null 2>&1; then
-          echo "$FLEET_CMD_ID" > /var/run/eshu.last_fleet_cmd
-        else
-          logger -t eshu-poller "Fleet command #$FLEET_CMD_ID launch failed — will retry"
-          rm -f "$FLEET_CMD_FILE"
-        fi
+      if ! dashboard_is_https; then
+        # BU2: a runner fetched over http would be root code anyone on the
+        # path could rewrite. Launch nothing; the command is not marked done,
+        # so it is retried once the URL is fixed.
+        http_warn "the fleet runner (command #$FLEET_CMD_ID not run)"
       else
-        logger -t eshu-poller "Fleet runner download/validation failed"
-        rm -f "$FLEET_RUNNER_TMP"
+        logger -t eshu-poller "Fleet command #$FLEET_CMD_ID received. Fetching runner..."
+        FLEET_RUNNER_TMP=$(mktemp -p "$ESHU_WORK" fleet-runner.XXXXXX)
+        FLEET_RUNNER_HDR=$(mktemp -p "$ESHU_WORK" fleet-runner-hdr.XXXXXX)
+        gateway_header | curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m 60 -s \
+             -D "$FLEET_RUNNER_HDR" -o "$FLEET_RUNNER_TMP" -H @- \
+             "$DASHBOARD_URL/api/gateway/files/fleet-runner.sh" 2>/dev/null || true
+        WANT=$(awk 'tolower($1)=="x-eshu-file-sha256:"{print $2}' "$FLEET_RUNNER_HDR" 2>/dev/null | tr -d '\r' | head -n1)
+        GOT=$(sha256sum "$FLEET_RUNNER_TMP" 2>/dev/null | cut -c1-12)
+        if [ -s "$FLEET_RUNNER_TMP" ] && bash -n "$FLEET_RUNNER_TMP" 2>/dev/null \
+             && [ -n "$WANT" ] && [ "$WANT" = "$GOT" ]; then
+          chmod 0755 "$FLEET_RUNNER_TMP"
+          mv -f "$FLEET_RUNNER_TMP" "$FLEET_RUNNER"
+          { echo "#!/bin/bash"; printf '%s\n' "$FLEET_CMD"; } > "$FLEET_CMD_FILE" 2>/dev/null
+          # Persist the ID only on a successful launch. The runner pings
+          # 'running' immediately, which stops the dashboard re-injecting —
+          # so a crash before this echo can never cause a double execution.
+          # BJ2: no token in the unit's ExecStart (world-readable through
+          # `systemctl show`); the runner reads /etc/eshu-token as root.
+          if systemd-run --unit="eshu-fleet-$FLEET_CMD_ID" --collect \
+              bash "$FLEET_RUNNER" "$DASHBOARD_URL" "$TARGET_IP" "$FLEET_CMD_ID" "$FLEET_CMD_TIMEOUT" "$FLEET_CMD_FILE" "$FLEET_OUT_FILE" >/dev/null 2>&1; then
+            echo "$FLEET_CMD_ID" > /var/run/eshu.last_fleet_cmd
+          else
+            logger -t eshu-poller "Fleet command #$FLEET_CMD_ID launch failed — will retry"
+            rm -f "$FLEET_CMD_FILE"
+          fi
+        else
+          logger -t eshu-poller "Fleet runner fetch/validation failed"
+          rm -f "$FLEET_RUNNER_TMP"
+        fi
+        rm -f "$FLEET_RUNNER_HDR"
       fi
     fi
 
@@ -2475,7 +2548,7 @@ with open('/etc/eshu-windows.txt.tmp', 'w') as f:
         REG_RESP=$(register_headers | curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -X POST "$DASHBOARD_URL/api/register" \
              -H @- \
              -H "Content-Type: application/json" \
-             -d '{"ip":"'"$TARGET_IP"'","hostname":"'"$HOST_NAME"'","version":"'"$NEW_VER"'","installer_hash":"'"$(read_installer_hash)"'"}' 2>/dev/null || echo "")
+             -d '{"ip":"'"$TARGET_IP"'","hostname":"'"$HOST_NAME"'","version":"'"$NEW_VER"'","installer_hash":"'"$(read_installer_hash)"'","windows_hash":"'"$(read_file_hash "$WINDOWS_FILE")"'","runner_hash":"'"$(read_file_hash "$RUNNER_FILE")"'","dashboard_scheme":"'"$(dashboard_scheme)"'"}' 2>/dev/null || echo "")
         NEW_TOKEN=$(echo "$REG_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('gateway_token',''))" 2>/dev/null || echo "")
         if [ -n "$NEW_TOKEN" ] && [ "$NEW_TOKEN" != "None" ]; then
           # BQ4: validate, then write the one file atomically. No sed, no
@@ -2526,7 +2599,7 @@ with open('/etc/eshu-windows.txt.tmp', 'w') as f:
         REG_RESP=$(register_headers | curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -X POST "$DASHBOARD_URL/api/register" \
              -H @- \
              -H "Content-Type: application/json" \
-             -d '{"ip":"'"$TARGET_IP"'","hostname":"'"$HOST_NAME"'","version":"'"$NEW_VER"'","installer_hash":"'"$(read_installer_hash)"'"}' 2>/dev/null || echo "")
+             -d '{"ip":"'"$TARGET_IP"'","hostname":"'"$HOST_NAME"'","version":"'"$NEW_VER"'","installer_hash":"'"$(read_installer_hash)"'","windows_hash":"'"$(read_file_hash "$WINDOWS_FILE")"'","runner_hash":"'"$(read_file_hash "$RUNNER_FILE")"'","dashboard_scheme":"'"$(dashboard_scheme)"'"}' 2>/dev/null || echo "")
         NEW_TOKEN=$(echo "$REG_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('gateway_token',''))" 2>/dev/null || echo "")
         if [ -n "$NEW_TOKEN" ] && [ "$NEW_TOKEN" != "None" ]; then
           # BQ4: validate, then write the one file atomically. No sed, no
@@ -2657,10 +2730,18 @@ while true; do
         *) INSTALLER_HASH="" ;;
     esac
 
+    # X9: the two fetched files, and whether the dashboard URL is https. The
+    # hashes are display-only self-reports (like the installer hash).
+    WINDOWS_HASH=$(sha256sum /etc/eshu/features.d/approved_windows.sh 2>/dev/null | cut -c1-12)
+    RUNNER_HASH=$(sha256sum /etc/eshu/fleet-runner.sh 2>/dev/null | cut -c1-12)
+    case "$WINDOWS_HASH" in [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;; *) WINDOWS_HASH="" ;; esac
+    case "$RUNNER_HASH" in [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;; *) RUNNER_HASH="" ;; esac
+    case "$DASHBOARD_URL" in https://*) SCHEME="https" ;; *) SCHEME="http" ;; esac
+
     { gateway_header | curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -X POST "$DASHBOARD_URL/api/gateway-heartbeat" \
         -H @- \
         -H "Content-Type: application/json" \
-        -d "{\"ip\":\"$TARGET_IP\",\"hostname\":\"$HOST_NAME\",\"poller_ok\":$POLLER_OK,\"gateway_ok\":$GATEWAY_OK,\"can_reach\":$CAN_REACH,\"installer_hash\":\"$INSTALLER_HASH\"}" ; } \
+        -d "{\"ip\":\"$TARGET_IP\",\"hostname\":\"$HOST_NAME\",\"poller_ok\":$POLLER_OK,\"gateway_ok\":$GATEWAY_OK,\"can_reach\":$CAN_REACH,\"installer_hash\":\"$INSTALLER_HASH\",\"windows_hash\":\"$WINDOWS_HASH\",\"runner_hash\":\"$RUNNER_HASH\",\"dashboard_scheme\":\"$SCHEME\"}" ; } \
         >/dev/null 2>&1 || true
 
     sleep "$INTERVAL"
@@ -2886,7 +2967,7 @@ if { [ "$mode" = "install" ] || [ "$mode" = "reinstall" ]; } && [ "${REGISTER_OK
     # rewriting it, as the update path already does.
     echo "   REFUSED: $AK_FILE is not readable; authorized_keys not changed."
   else
-  {
+  if ! {
     # Keep keys this installer does not own; drop every Eshu gateway line,
     # including a pre-F12 one without a comment, then write ours back.
     if [ -f "$AK_FILE" ]; then
@@ -2899,9 +2980,44 @@ if { [ "$mode" = "install" ] || [ "$mode" = "reinstall" ]; } && [ "${REGISTER_OK
     if [ -n "$DASHBOARD_SSH_PUB" ]; then
       printf '%s %s eshu-dashboard\n' "$AK_DASH" "$DASHBOARD_SSH_PUB"
     fi
-  } | ak_replace
+  } | ak_replace; then
+    # No keys means no SSH access: fail the install rather than report a
+    # gateway that cannot be reached.
+    echo "ERROR: authorized_keys was not changed. Aborting."
+    exit 1
   fi
   fi
+  fi
+fi
+
+# X9: seed the two gated files the poller will keep current. They come from
+# the same Build generation as this installer (BU1), so a fresh gateway can
+# run a window claim before its first authenticated fetch, and the fleet
+# runner has one stable path. A failed seed is a warning: the poller fetches
+# the files once the gateway is registered.
+install_seed_files() {
+  local tmp
+  mkdir -p /etc/eshu/features.d
+  tmp=$(mktemp /etc/eshu/.windows.XXXXXX) || return 1
+  if printf '%s' 'IyA0LjUgQVBQUk9WRUQgV0lORE9XIFRPS0VOIENIRUNLICh2MTUuMyDigJQgcmVjdXJyaW5nICsgcHJlZml4ICsgZXhwaXJ5KQojID09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PQojIFJlamVjdCBhIHdpbmRvdy10b2tlbiBjb21tYW5kOiBsb2cgaXQgKHdhaXRpbmcgc28gdGhlIHdpbmRvdy1yZWplY3RlZCB0aWNrZXQKIyBsYW5kcyBpbiBvcmRlciksIHRlbGwgdGhlIGFnZW50IHdoeSwgdGhlbiBleGl0IEhBUkQuIEEgcmVqZWN0ZWQgd2luZG93IG11c3QKIyBOT1QgZmFsbCB0aHJvdWdoIHRvIEpJVCDigJQgZG9pbmcgc28gY3JlYXRlZCBkdXBsaWNhdGUgd2luZG93LXJlamVjdGVkICsgSklUCiMgdGlja2V0cyBwZXIgYXR0ZW1wdCAoYXN5bmMgdGlja2V0cyBpbnRlcmxlYXZpbmcgd2l0aCBsYXRlciBvbmVzKS4KCiMgQlMxOiB0aGUgY2xhaW0ncyBnYXRld2F5LXRva2VuIGhlYWRlci4gVGhpcyBzY3JpcHQgaXMgc291cmNlZCBieSB0aGUgZ2F0ZXdheSwKIyBzbyBgZ2F0ZXdheV9oZWFkZXJgICh3aGljaCByZWFkcyAvZXRjL2VzaHUtdG9rZW4gb24gMS40IGFuZCB0aGUgYmFrZWQgdmFsdWUKIyBvbiAxLjMpIGlzIG5vcm1hbGx5IHRoZXJlLiBJZiB0aGUgc2NyaXB0IGlzIHNvdXJjZWQgZWxzZXdoZXJlLCBmYWxsIGJhY2sgdG8KIyB0aGUgZmlsZSwgdGhlbiB0byB0aGUgb2xkIGJha2VkIHZhcmlhYmxlLgpfd2luZG93X3Rva2VuX2hlYWRlcigpIHsKICBpZiBbICIkKHR5cGUgLXQgZ2F0ZXdheV9oZWFkZXIgMj4vZGV2L251bGwpIiA9ICJmdW5jdGlvbiIgXTsgdGhlbgogICAgZ2F0ZXdheV9oZWFkZXIKICAgIHJldHVybiAwCiAgZmkKICBsb2NhbCBfdG9rPSIke0dBVEVXQVlfVE9LRU46LX0iCiAgaWYgWyAteiAiJF90b2siIF07IHRoZW4KICAgIF90b2s9JChoZWFkIC1uMSAvZXRjL2VzaHUtdG9rZW4gMj4vZGV2L251bGwgfCB0ciAtZCAnWzpzcGFjZTpdJyB8fCB0cnVlKQogIGZpCiAgcHJpbnRmICdYLUdhdGV3YXktVG9rZW46ICVzXG4nICIkX3RvayIKfQpfd2luZG93X3JlamVjdCgpIHsKICBsb2NhbCBfcmVhc29uPSIkMSIKICBsb2dfd2luZG93X3JlamVjdCAiJGNtZCIgIiRfcmVhc29uIgogIHdhaXQgfHwgdHJ1ZQogIGVjaG8gIltMT0NLRURdIFdpbmRvdyByZWplY3RlZDogJF9yZWFzb24g4oCUIHVzZSBhIHZhbGlkIHdpbmRvdyB0b2tlbiwgb3IgcmVxdWVzdCBKSVQgYXBwcm92YWwgd2l0aG91dCBhIHRva2VuLiIKICBleGl0IDEKfQoKaWYgWyAtbiAiJHtFU0hVX1dJTkRPV19UT0tFTjotfSIgXSAmJiBbIC1mIC9ldGMvZXNodS13aW5kb3dzLnR4dCBdICYmIFsgLXMgL2V0Yy9lc2h1LXdpbmRvd3MudHh0IF07IHRoZW4KICBub3dfdHM9JChkYXRlICslcykKICAjIEdldCBVVEMgZGF5LW9mLXdlZWs6IDE9TW9uLi43PVN1biwgYXMgYml0bWFzayAxPU1vbi4uNjQ9U3VuCiAgZG93X251bT0kKGRhdGUgLXUgKyV1KSAgIyAxPU1vbi4uNz1TdW4KICBkb3dfYml0PSQoKCAxIDw8IChkb3dfbnVtIC0gMSkgKSkKICAjIEdldCBtaW51dGVzIHNpbmNlIG1pZG5pZ2h0IFVUQwogIG5vd19taW5zPSQoKCAxMCMkKGRhdGUgLXUgKyVIKSAqIDYwICsgMTAjJChkYXRlIC11ICslTSkgKSkKICBXSU5ET1dfVE9MRVJBTkNFX01JTj0yICAjIMKxMiBtaW51dGVzIHRvbGVyYW5jZQogIHdpbl90b2tlbl9mb3VuZD0wCgogIHdoaWxlIElGUz0nfCcgcmVhZCAtciB3aW5fdG9rZW4gd2luX2NtZCB3aW5fc3RhcnQgd2luX2VuZCB3aW5fZG93cyB3aW5feHRpbWUgd2luX3hwaXJlcyB3aW5fbXR5cGUgfHwgWyAtbiAiJHt3aW5fdG9rZW46LX0iIF07IGRvCiAgICAjIFRva2VuIG11c3QgbWF0Y2gKICAgIFsgIiR7d2luX3Rva2VuOi19IiA9ICIkRVNIVV9XSU5ET1dfVE9LRU4iIF0gfHwgY29udGludWUKICAgIHdpbl90b2tlbl9mb3VuZD0xCgogICAgIyBDaGVjayBleHBpcnkKICAgIGlmIFsgIiR7d2luX3hwaXJlczotMH0iICE9ICIwIiBdICYmIFsgIiR7d2luX3hwaXJlczotMH0iICE9ICIiIF0gJiYgWyAiJG5vd190cyIgLWdlICIke3dpbl94cGlyZXM6LTB9IiBdOyB0aGVuCiAgICAgIGxvZ2dlciAtdCBlc2h1LWdhdGV3YXkgIldJTkRPVyBFWFBJUkVEOiB0b2tlbj0ke0VTSFVfV0lORE9XX1RPS0VOOjA6OH0gZXhwaXJlZCBhdCAke3dpbl94cGlyZXN9IgogICAgICBfd2luZG93X3JlamVjdCAid2luZG93IGV4cGlyZWQiCiAgICBmaQoKICAgICMgQ2hlY2sgbGVnYWN5IHRpbWUtd2luZG93ICh3aW5kb3dfc3RhcnQvd2luZG93X2VuZCkgT1IgcmVjdXJyaW5nIHNjaGVkdWxlCiAgICB3aW5fc3RhcnQ9JHt3aW5fc3RhcnQ6LTB9OyB3aW5fZW5kPSR7d2luX2VuZDotMH0KICAgIHdpbl9kb3dzPSR7d2luX2Rvd3M6LTB9OyB3aW5feHRpbWU9JHt3aW5feHRpbWU6LTB9OyB3aW5fbXR5cGU9JHt3aW5fbXR5cGU6LWV4YWN0fQoKICAgIGlmIFsgIiR3aW5fc3RhcnQiICE9ICIwIiBdICYmIFsgIiR3aW5fZW5kIiAhPSAiMCIgXTsgdGhlbgogICAgICAjIExlZ2FjeSB0aW1lLXdpbmRvdyBtb2RlCiAgICAgIGlmIFsgIiRub3dfdHMiIC1sdCAiJHdpbl9zdGFydCIgXTsgdGhlbgogICAgICAgIF93aW5kb3dfcmVqZWN0ICJiZWZvcmUgd2luZG93IHN0YXJ0IgogICAgICBmaQogICAgICBpZiBbICIkbm93X3RzIiAtZ3QgIiR3aW5fZW5kIiBdOyB0aGVuCiAgICAgICAgX3dpbmRvd19yZWplY3QgIndpbmRvdyBlbmRlZCIKICAgICAgZmkKICAgIGVsaWYgWyAiJHdpbl94dGltZSIgIT0gIjAiIF07IHRoZW4KICAgICAgIyBSZWN1cnJpbmcgc2NoZWR1bGUgbW9kZQogICAgICAjIENoZWNrIGRheS1vZi13ZWVrIGJpdG1hc2sgKDAgPSBldmVyeSBkYXkpCiAgICAgIGlmIFsgIiR3aW5fZG93cyIgIT0gIjAiIF0gJiYgWyAkKCggd2luX2Rvd3MgJiBkb3dfYml0ICkpIC1lcSAwIF07IHRoZW4KICAgICAgICBfd2luZG93X3JlamVjdCAid3JvbmcgZGF5IgogICAgICBmaQogICAgICAjIENoZWNrIGV4ZWN1dGlvbiB0aW1lIHdpdGggdG9sZXJhbmNlCiAgICAgIHRpbWVfZGlmZj0kKCggbm93X21pbnMgLSB3aW5feHRpbWUgKSkKICAgICAgaWYgWyAiJHt0aW1lX2RpZmYjLX0iIC1ndCAiJFdJTkRPV19UT0xFUkFOQ0VfTUlOIiBdOyB0aGVuCiAgICAgICAgX3dpbmRvd19yZWplY3QgIm91dHNpZGUgdGltZSB3aW5kb3ciCiAgICAgIGZpCiAgICBmaQoKICAgICMgQ29tbWFuZCBtYXRjaGluZwogICAgbWF0Y2hfb2s9MAogICAgaWYgWyAiJHdpbl9tdHlwZSIgPSAicHJlZml4IiBdOyB0aGVuCiAgICAgICMgUHJlZml4IG1hdGNoOiBjb21tYW5kIHN0YXJ0cyB3aXRoIHdpbl9jbWQuIEEgbWV0YWNoYXJhY3RlciBjb21tYW5kIG11c3QKICAgICAgIyBuZXZlciBiZSBhcHByb3ZlZCBieSBhIHByZWZpeCB3aW5kb3cgKGNodW5rIDJhKSDigJQgaXQgZmFsbHMgdGhyb3VnaCB0bwogICAgICAjIHRoZSByZWplY3QgYmVsb3cuIEV4YWN0IHdpbmRvd3Mgc3RpbGwgcmVxdWlyZSBieXRlIGVxdWFsaXR5IGFuZCBtYXkgcnVuLgogICAgICBpZiBbICIke0hBU19NRVRBOi0wfSIgPSAiMSIgXTsgdGhlbgogICAgICAgIG1hdGNoX29rPTAKICAgICAgZWxzZQogICAgICAgIGNhc2UgIiRjbWQiIGluCiAgICAgICAgICAiJHt3aW5fY21kfSIqKSBtYXRjaF9vaz0xIDs7CiAgICAgICAgZXNhYwogICAgICBmaQogICAgZWxpZiBbICIkd2luX210eXBlIiA9ICJleGFjdCIgXTsgdGhlbgogICAgICAjIEV4YWN0IG1hdGNoIChhbHNvIHRyeSBtdWx0aS1jb21tYW5kIEpTT04gYXJyYXkpCiAgICAgIGlmIFsgIiRjbWQiID0gIiR3aW5fY21kIiBdOyB0aGVuCiAgICAgICAgbWF0Y2hfb2s9MQogICAgICBlbGlmIFsgIiR7d2luX2NtZDowOjF9IiA9ICJbIiBdOyB0aGVuCiAgICAgICAgIyBQYXJzZSBKU09OIGFycmF5IG9mIGNvbW1hbmRzCiAgICAgICAgSUZTPScsJyByZWFkIC1yYSBBUlIgPDw8ICIkKGVjaG8gIiR3aW5fY21kIiB8IHNlZCAncy9eXFsvLztzL1xdJC8vJykiCiAgICAgICAgZm9yIGVsIGluICIke0FSUltAXX0iOyBkbwogICAgICAgICAgY2xlYW5lZD0kKGVjaG8gIiRlbCIgfCBzZWQgJ3MvXltbOnNwYWNlOl1dKiIvLzsgcy8iW1s6c3BhY2U6XV0qJC8vJykKICAgICAgICAgIGlmIFsgIiRjbWQiID0gIiRjbGVhbmVkIiBdOyB0aGVuIG1hdGNoX29rPTE7IGJyZWFrOyBmaQogICAgICAgIGRvbmUKICAgICAgZmkKICAgIGZpCgogICAgaWYgWyAiJG1hdGNoX29rIiA9ICIxIiBdOyB0aGVuCiAgICAgICMgQXRvbWljIGNsYWltLWFuZC1idXJuOiBhc2sgdGhlIGRhc2hib2FyZCB0byBpbmNyZW1lbnQgdGhlIGV4ZWN1dGlvbgogICAgICAjIGNvdW50ZXIgRklSU1QgYW5kIGdhdGUgdGhlIHJ1biBvbiBpdHMgYW5zd2VyLiBUaGUgc2VydmVyJ3MgY291bnRlciBpcwogICAgICAjIGF1dGhvcml0YXRpdmUsIHNvIGEgc2luZ2xlLXVzZSB0b2tlbiBjYW5ub3QgYmUgcmVwbGF5ZWQgaW5zaWRlIHRoZQogICAgICAjIH4zMHMgbG9jYWwtY2FjaGUgc3luYyBsYWcgKGEgc2Vjb25kIHVzZSBnZXRzIDQwNCBvbmNlIGF0IGNhcCkuCiAgICAgICMgICAyMDAgIC0+IHNlcnZlciBjbGFpbWVkIGl0IChleGVjdXRpb25fY291bnQgaW5jcmVtZW50ZWQpIC0+IHJ1bgogICAgICAjICAgNDAzICAtPiBnYXRld2F5IElQIG1pc21hdGNoIC8gbm90IGF1dGhvcml6ZWQgLT4gZmFpbCBjbG9zZWQKICAgICAgIyAgIDQwNCAgLT4gdG9rZW4gY29uc3VtZWQsIGRpc2FibGVkLCBleHBpcmVkLCBvciBleGhhdXN0ZWQgLT4gZmFpbCBjbG9zZWQKICAgICAgIyAgIG5ldHdvcmsgZXJyb3IgKDAwMCkgLT4gZGFzaGJvYXJkIHVucmVhY2hhYmxlIC0+IGZhaWwgT1BFTiBvbiB0aGUKICAgICAgIyAgIGxvY2FsIGNhY2hlIHNvIHdpbmRvd3Mgc3RpbGwgd29yayBkdXJpbmcgYSBkYXNoYm9hcmQgb3V0YWdlLgogICAgICAjIEJKMjogdGhlIGdhdGV3YXkgdG9rZW4gc3RheXMgb2ZmIGN1cmwncyBhcmd2IChoZWFkZXIgZnJvbSBhIHByb2Nlc3MKICAgICAgIyBzdWJzdGl0dXRpb24pIGFuZCB0aGUgd2luZG93IHRva2VuIHRyYXZlbHMgaW4gdGhlIGJvZHksIG5vdCB0aGUgVVJMLAogICAgICAjIHNvIG5laXRoZXIgaXMgcmVhZGFibGUgaW4gL3Byb2MuIFRoZSBwYXRoLXRva2VuIGVuZHBvaW50IHJlbWFpbnMgZm9yCiAgICAgICMgZ2F0ZXdheXMgdGhhdCBoYXZlIG5vdCB0YWtlbiB0aGlzIGluc3RhbGxlciB5ZXQuCiAgICAgIFdJTkRPV19DTEFJTV9FWElUPTAKICAgICAgV0lORE9XX0NMQUlNX0JPRFk9J3sid2luZG93X3Rva2VuIjoiJyIkRVNIVV9XSU5ET1dfVE9LRU4iJyJ9JwogICAgICBXSU5ET1dfQ0xBSU1fSFRUUD0kKHByaW50ZiAnJXMnICIkV0lORE9XX0NMQUlNX0JPRFkiIHwgY3VybCAtbSAzIC1zIC1vIC9kZXYvbnVsbCAtdyAiJXtodHRwX2NvZGV9IiBcCiAgICAgICAgLVggUE9TVCAiJERBU0hCT0FSRF9VUkwvYXBpL2FwcHJvdmVkLXdpbmRvd3MvZXhlY3V0ZSIgXAogICAgICAgIC1IIEA8KF93aW5kb3dfdG9rZW5faGVhZGVyKSBcCiAgICAgICAgLUggIkNvbnRlbnQtVHlwZTogYXBwbGljYXRpb24vanNvbiIgXAogICAgICAgIC0tZGF0YS1iaW5hcnkgQC0gMj4vZGV2L251bGwpIHx8IFdJTkRPV19DTEFJTV9FWElUPSQ/CiAgICAgICMgRmFpbCBvcGVuIE9OTFkgd2hlbiBjdXJsIGl0c2VsZiBmYWlsZWQgKG5ldHdvcmsgZG93bikuIEFueSBIVFRQIGFuc3dlcgogICAgICAjIG90aGVyIHRoYW4gMjAwIOKAlCA0MDEvNDAzLzQwNC80MjkvNTAwIOKAlCBpcyBhIHJlZnVzYWwuCiAgICAgIGlmIFsgIiRXSU5ET1dfQ0xBSU1fRVhJVCIgLW5lIDAgXTsgdGhlbgogICAgICAgIFdJTkRPV19DTEFJTV9IVFRQPSIwMDAiCiAgICAgIGZpCiAgICAgIGNhc2UgIiRXSU5ET1dfQ0xBSU1fSFRUUCIgaW4KICAgICAgICAyMDApIDs7CiAgICAgICAgMDAwKSBsb2dnZXIgLXQgZXNodS1nYXRld2F5ICJBUFBST1ZFRCBXSU5ET1cgQ0xBSU0gVU5SRUFDSEFCTEU6IHRva2VuPSR7RVNIVV9XSU5ET1dfVE9LRU46MDo4fSDigJQgZmFpbGluZyBvcGVuIG9uIGxvY2FsIGNhY2hlIiA7OwogICAgICAgICopCiAgICAgICAgICBsb2dnZXIgLXQgZXNodS1nYXRld2F5ICJBUFBST1ZFRCBXSU5ET1cgUkVKRUNURUQ6IHRva2VuPSR7RVNIVV9XSU5ET1dfVE9LRU46MDo4fSBjbGFpbT0kV0lORE9XX0NMQUlNX0hUVFAiCiAgICAgICAgICBfd2luZG93X3JlamVjdCAid2luZG93IGNsYWltIGZhaWxlZCAoSFRUUCAkV0lORE9XX0NMQUlNX0hUVFApIgogICAgICAgICAgOzsKICAgICAgZXNhYwogICAgICBsb2dnZXIgLXQgZXNodS1nYXRld2F5ICJBUFBST1ZFRCBXSU5ET1cgTUFUQ0g6IHRva2VuPSR7RVNIVV9XSU5ET1dfVE9LRU46MDo4fSBjbWQ9JGNtZCBtdHlwZT0kd2luX210eXBlIGNsYWltPSRXSU5ET1dfQ0xBSU1fSFRUUCIKICAgICAgUkVTVUxUX1BBVEg9IndpbmRvdyIKICAgICAgcnVuX3Nhbml0aXplZCBiYXNoIC1jICIkY21kIgogICAgZWxzZQogICAgICBfd2luZG93X3JlamVjdCAiY29tbWFuZCBtaXNtYXRjaCIKICAgIGZpCiAgZG9uZSA8IC9ldGMvZXNodS13aW5kb3dzLnR4dAogICMgVG9rZW4gd2FzIHByZXNlbnRlZCBidXQgbm8gbWF0Y2hpbmcgbGluZSBmb3VuZAogIGlmIFsgIiR3aW5fdG9rZW5fZm91bmQiID0gIjAiIF0gJiYgWyAtbiAiJEVTSFVfV0lORE9XX1RPS0VOIiBdOyB0aGVuCiAgICBfd2luZG93X3JlamVjdCAidW5rbm93biB0b2tlbiIKICBmaQpmaQoKIyBUb2tlbiB3YXMgcHJlc2VudGVkIGJ1dCBubyB3aW5kb3dzIGFyZSBjb25maWd1cmVkIG9uIHRoaXMgZ2F0ZXdheSDigJQgaGFyZCByZWplY3QKIyAobm8gSklUIGZhbGxiYWNrKS4KaWYgWyAtbiAiJHtFU0hVX1dJTkRPV19UT0tFTjotfSIgXTsgdGhlbgogIF93aW5kb3dfcmVqZWN0ICJubyB3aW5kb3dzIGNvbmZpZ3VyZWQgb24gdGhpcyBnYXRld2F5IgpmaQoKIyA9PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT0K' | base64 -d > "$tmp" 2>/dev/null \
+       && chmod 0644 "$tmp" && mv -f "$tmp" /etc/eshu/features.d/approved_windows.sh; then
+    :
+  else
+    rm -f "$tmp"
+    return 1
+  fi
+  tmp=$(mktemp /etc/eshu/.runner.XXXXXX) || return 1
+  if printf '%s' 'IyEvYmluL2Jhc2gKIyBlc2h1LWZsZWV0LXJ1bm5lci5zaCDigJQgZXhlY3V0ZWQgb24gdGhlIGdhdGV3YXkgYnkgdGhlIHBvbGxlciB2aWEgc3lzdGVtZC1ydW4KIyBmb3IgRmxlZXQgUnVuIChQMWIpLiBSdW5zIGEgZmxlZXQgY29tbWFuZCBhcyByb290IHdpdGggYSB0aW1lb3V0LCB0aGVuIHBvc3RzCiMgdGhlIHJlc3VsdCBiYWNrIHRvIHRoZSBkYXNoYm9hcmQuCiMKIyBBcmdzOiBEQVNIQk9BUkRfVVJMIFRBUkdFVF9JUCBDTURfSUQgVElNRU9VVCBDTURfRklMRSBbT1VUX0ZJTEVdCiMKIyBCSjI6IHRoZSBnYXRld2F5IHRva2VuIGlzIE5PVCBhbiBhcmd1bWVudC4gVGhlIHJ1bm5lciBydW5zIGFzIHJvb3QsIHNvIGl0CiMgcmVhZHMgdGhlIHRva2VuIGZyb20gL2V0Yy9lc2h1LXRva2VuICgwNjAwKSBpbnN0ZWFkOiBhIHRyYW5zaWVudCB1bml0J3MKIyBFeGVjU3RhcnQgY2FuIGJlIHJlYWQgYnkgYW55IGxvY2FsIHVzZXIgdGhyb3VnaCBgc3lzdGVtY3RsIHNob3dgIGZvciBhcwojIGxvbmcgYXMgdGhlIHVuaXQgZXhpc3RzLCBhbmQgcHl0aG9uIGFyZ3YgaXMgcmVhZGFibGUgaW4gL3Byb2MuIFRoZSB0b2tlbgojIHJlYWNoZXMgcHl0aG9uIHRocm91Z2ggdGhlIGVudmlyb25tZW50LCB3aGljaCBvbmx5IHJvb3QgY2FuIHJlYWQuCnNldCAtdQoKREFTSEJPQVJEX1VSTD0iJDEiCiMgT2xkZXIgcG9sbGVycyBwYXNzZWQgdGhlIHRva2VuIGFzICQyLiBBY2NlcHQgdGhhdCBzaGFwZSBmb3IgdGhlIG9uZSB1cGRhdGUKIyBjeWNsZSBiZWZvcmUgdGhlIGluc3RhbGxlciByZXBsYWNlcyB0aGVtLCBidXQgbmV2ZXIgdXNlIHRoZSBhcmd1bWVudDogYW4gSVAKIyBjb250YWlucyBhIGRvdCBvciBhIGNvbG9uIChJUHY0L0lQdjYpLCBhIHRva2VuIGhhcyBuZWl0aGVyLCBzbyB0aGUgdHdvCiMgc2hhcGVzIGFyZSBkaXN0aW5ndWlzaGFibGUuCmlmIFsgLW4gIiR7MjotfSIgXSAmJiBbICIkezIjKlsuOl19IiAhPSAiJDIiIF07IHRoZW4KICBUQVJHRVRfSVA9IiQyIgogIENNRF9JRD0iJDMiCiAgVElNRU9VVD0iJHs0Oi0xODB9IgogIENNRF9GSUxFPSIkNSIKICBPVVRfRklMRT0iJHs2Oi19IgplbHNlCiAgVEFSR0VUX0lQPSIkMyIKICBDTURfSUQ9IiQ0IgogIFRJTUVPVVQ9IiR7NTotMTgwfSIKICBDTURfRklMRT0iJDYiCiAgT1VUX0ZJTEU9IiR7NzotfSIKZmkKR0FURVdBWV9UT0tFTj0kKGhlYWQgLW4xIC9ldGMvZXNodS10b2tlbiAyPi9kZXYvbnVsbCB8IHRyIC1kICdbOnNwYWNlOl0nKQppZiBbIC16ICIkR0FURVdBWV9UT0tFTiIgXTsgdGhlbgogIGVjaG8gIk5vIC9ldGMvZXNodS10b2tlbiBvbiB0aGlzIGdhdGV3YXk7IHJlZnVzaW5nIHRvIHJ1biB0aGUgZmxlZXQgY29tbWFuZC4iID4mMgogIGV4aXQgMQpmaQppZiBbIC16ICIkT1VUX0ZJTEUiIF07IHRoZW4KICAjIE9sZGVyIHBvbGxlciAoc2l4IGFyZ3MpIGNvbXBhdGliaWxpdHk6IGEgcmFuZG9tIHNpYmxpbmcgb2YgdGhlIGNvbW1hbmQKICAjIGZpbGUsIG5ldmVyIGEgZml4ZWQgcGF0aCBpbiBhIHdvcmxkLXdyaXRhYmxlIGRpcmVjdG9yeS4KICBPVVRfRklMRT0kKG1rdGVtcCAiJHtDTURfRklMRX0ub3V0LlhYWFhYWCIpIHx8IE9VVF9GSUxFPSIvZGV2L251bGwiCmZpCgpwb3N0X3Jlc3VsdCgpIHsKICBsb2NhbCBzdGF0dXM9IiQxIiBleGl0X2NvZGU9IiQyIiBvdXRfZmlsZT0iJDMiCiAgIyBUaGUgaGVyZWRvYyBiZWxvdyBpcyBweXRob24ncyBwcm9ncmFtIChweXRob24zIC0gcmVhZHMgc3RkaW4gYXMgdGhlIHNjcmlwdCksCiAgIyBzbyB0aGUgY29tbWFuZCBvdXRwdXQgaXMgcGFzc2VkIGFzIGEgRklMRSBBUkcg4oCUIHN0ZGluIGNhbm5vdCBjYXJyeSBpdC4KICAjIEJKMjogdGhlIHRva2VuIGlzIGluIHRoZSBlbnZpcm9ubWVudCwgbm90IGFyZ3YuIC9wcm9jLzxwaWQ+L2Vudmlyb24gaXMKICAjIHJvb3Qtb25seTsgYXJndiBpcyB3b3JsZC1yZWFkYWJsZSB3aGlsZSB0aGUgY2FsbCBydW5zLgogIEVTSFVfRkxFRVRfVE9LRU49IiRHQVRFV0FZX1RPS0VOIiBweXRob24zIC0gIiREQVNIQk9BUkRfVVJMIiAiJFRBUkdFVF9JUCIgIiRDTURfSUQiICIkc3RhdHVzIiAiJGV4aXRfY29kZSIgIiRvdXRfZmlsZSIgPDwnUFlFT0YnCmltcG9ydCBvcywgc3lzLCBqc29uLCB1cmxsaWIucmVxdWVzdAp1cmwsIGlwLCBjaWQsIHN0YXR1cywgZXhpdF9jb2RlLCBvdXRfZmlsZSA9IHN5cy5hcmd2WzE6N10KdG9rID0gb3MuZW52aXJvbi5nZXQoIkVTSFVfRkxFRVRfVE9LRU4iLCAiIikKb3V0cHV0ID0gIiIKdHJ1bmNhdGVkID0gRmFsc2UKdHJ5OgogICAgc2l6ZSA9IG9zLnBhdGguZ2V0c2l6ZShvdXRfZmlsZSkKICAgIGlmIHNpemUgPiAxMDQ4NTc2OgogICAgICAgIHRydW5jYXRlZCA9IFRydWUKICAgIHdpdGggb3BlbihvdXRfZmlsZSwgInJiIikgYXMgZjoKICAgICAgICBvdXRwdXQgPSBmLnJlYWQoMTA0ODU3NikuZGVjb2RlKCJ1dGYtOCIsICJyZXBsYWNlIikKICAgIGlmIHRydW5jYXRlZDoKICAgICAgICBvdXRwdXQgKz0gIlxu4oCmIFtvdXRwdXQgdHJ1bmNhdGVkIHRvIDFNQl0iCmV4Y2VwdCBFeGNlcHRpb246CiAgICBwYXNzCnRyeToKICAgIGNvZGUgPSBpbnQoZXhpdF9jb2RlKQpleGNlcHQgKFZhbHVlRXJyb3IsIFR5cGVFcnJvcik6CiAgICBjb2RlID0gTm9uZQpwYXlsb2FkID0ganNvbi5kdW1wcyh7CiAgICAiZ2F0ZXdheV9pcCI6IGlwLAogICAgInN0YXR1cyI6IHN0YXR1cywKICAgICJleGl0X2NvZGUiOiBjb2RlLAogICAgIm91dHB1dCI6IG91dHB1dCwKfSkuZW5jb2RlKCkKcmVxID0gdXJsbGliLnJlcXVlc3QuUmVxdWVzdCgKICAgIGYie3VybH0vYXBpL2ZsZWV0L2NvbW1hbmRzL3tjaWR9L3Jlc3VsdCIsCiAgICBkYXRhPXBheWxvYWQsCiAgICBoZWFkZXJzPXsiQ29udGVudC1UeXBlIjogImFwcGxpY2F0aW9uL2pzb24iLCAiWC1HYXRld2F5LVRva2VuIjogdG9rfSwKICAgIG1ldGhvZD0iUE9TVCIsCikKdHJ5OgogICAgdXJsbGliLnJlcXVlc3QudXJsb3BlbihyZXEsIHRpbWVvdXQ9NSkKZXhjZXB0IEV4Y2VwdGlvbjoKICAgIHBhc3MKUFlFT0YKfQoKIyAxLiBNYXJrIGFzIHJ1bm5pbmcKcG9zdF9yZXN1bHQgInJ1bm5pbmciICIiICIvZGV2L251bGwiCgojIDIuIEZyZWV6ZSBndWFyZCDigJQgYSBmbGVldCBhcHByb3ZlZCBiZWZvcmUgYSBmcmVlemUgbXVzdCBub3QgZXhlY3V0ZQppZiBbIC1mIC9ldGMvZXNodS1mcmVlemUgXSAmJiBbICIkKGNhdCAvZXRjL2VzaHUtZnJlZXplIDI+L2Rldi9udWxsIHx8IGVjaG8gJycpIiA9ICIxIiBdOyB0aGVuCiAgZWNobyAiRmxlZXQgaXMgRlJPWkVOIOKAlCBjb21tYW5kIG5vdCBleGVjdXRlZC4iID4gIiRPVVRfRklMRSIKICBwb3N0X3Jlc3VsdCAiZmFpbGVkIiAxICIkT1VUX0ZJTEUiCiAgcm0gLWYgIiRDTURfRklMRSIgIiRPVVRfRklMRSIKICBleGl0IDAKZmkKCiMgMy4gRXhlY3V0ZSB3aXRoIHRpbWVvdXQgKHJ1bnMgYXMgcm9vdCDigJQgdGhlIHNhbWUgcHJpdmlsZWdlIGFzIGdhdGV3YXkgc2NyaXB0cykuCiMgLS1raWxsLWFmdGVyIGVzY2FsYXRlcyBTSUdURVJNIHRvIFNJR0tJTEwgNXMgbGF0ZXIsIHNvIGEgc2lnbmFsLWlnbm9yaW5nCiMgcHJvY2VzcyBjYW4ndCBydW4gcGFzdCB0aGUgdGltZW91dCBhbmQgd2VkZ2UgdGhlIHBlci1nYXRld2F5IHF1ZXVlLgo6ID4gIiRPVVRfRklMRSIKdGltZW91dCAtLWtpbGwtYWZ0ZXI9NSAiJFRJTUVPVVQiIGJhc2ggIiRDTURfRklMRSIgPiAiJE9VVF9GSUxFIiAyPiYxClJDPSQ/CgojIDQuIFJlcG9ydCByZXN1bHQg4oCUIDEyNCA9IHRpbWVkIG91dCAoU0lHVEVSTSksIDEzNyA9IFNJR0tJTEwgYWZ0ZXIga2lsbC1hZnRlcgppZiBbICIkUkMiID0gIjEyNCIgXSB8fCBbICIkUkMiID0gIjEzNyIgXTsgdGhlbgogIFNUQVRVUz0idGltZW91dCIKZWxpZiBbICIkUkMiID0gIjAiIF07IHRoZW4KICBTVEFUVVM9InN1Y2Nlc3MiCmVsc2UKICBTVEFUVVM9ImZhaWxlZCIKZmkKcG9zdF9yZXN1bHQgIiRTVEFUVVMiICIkUkMiICIkT1VUX0ZJTEUiCnJtIC1mICIkQ01EX0ZJTEUiICIkT1VUX0ZJTEUiCmV4aXQgMAo=' | base64 -d > "$tmp" 2>/dev/null \
+       && chmod 0755 "$tmp" && mv -f "$tmp" /etc/eshu/fleet-runner.sh; then
+    :
+  else
+    rm -f "$tmp"
+    return 1
+  fi
+}
+
+if ! install_seed_files; then
+  echo "   WARNING: could not write the gateway file seeds; the poller will fetch them once registered."
 fi
 
 echo ""

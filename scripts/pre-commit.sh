@@ -34,8 +34,9 @@ fi
 check "gateway.sh"     bash -n dashboard/eshu-gateway.sh
 check "poller.sh"      bash -n dashboard/eshu-poller.sh
 check "logger.sh"      bash -n dashboard/eshu-logger.sh
-check "fleet-runner"   bash -n dashboard/static/fleet-runner.sh
-check "features"      bash -n dashboard/static/features/*.sh
+check "fleet-runner"   bash -n dashboard/gateway-files/fleet-runner.sh
+check "legacy-files"  bash -n dashboard/gateway-files/legacy-1.3/*.sh
+check "features"      bash -n dashboard/gateway-files/approved_windows.sh
 check "template"       bash -n dashboard/eshu-installer-template.sh
 check "installer"      bash -n dashboard/eshu-gateway-install.sh
 check "main.py"        python3 -m py_compile dashboard/main.py

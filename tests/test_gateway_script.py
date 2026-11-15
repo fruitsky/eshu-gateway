@@ -446,7 +446,7 @@ exec "__REAL__" "$@"
     def approved_windows(self, *lines: str):
         """Install the real feature script with /etc/eshu-windows.txt relocated."""
         self._write(self.etc / "eshu-windows.txt", *lines)
-        source = (REPO / "dashboard" / "static" / "features"
+        source = (REPO / "dashboard" / "gateway-files"
                   / "approved_windows.sh").read_text()
         source = source.replace("/etc/eshu-windows.txt",
                                 str(self.etc / "eshu-windows.txt"))
@@ -1286,6 +1286,12 @@ def test_f22_installers_embed_the_gateway_byte_for_byte():
                                   read("eshu-poller.sh").rstrip("\n"))
     generated = generated.replace("__LOGGER_CONTENT__",
                                   read("eshu-logger.sh").rstrip("\n"))
+    # X9: the two gated files travel with the installer as base64.
+    import base64
+    for token, rel in (("__WINDOWS_B64__", "gateway-files/approved_windows.sh"),
+                       ("__RUNNER_B64__", "gateway-files/fleet-runner.sh")):
+        generated = generated.replace(
+            token, base64.b64encode(read(rel).encode()).decode())
     assert "ESHU_CHECK_TOKEN" in generated
     for rel in ("dashboard/eshu-gateway-install.sh",):  # X7: only Build is committed
         text = (repo / rel).read_text(encoding="utf-8")
@@ -1492,7 +1498,7 @@ def test_bj2_the_window_claim_keeps_both_tokens_off_argv(gw):
 
 
 def test_bj3_the_window_token_is_not_logged_in_full(gw):
-    src = (REPO / "dashboard" / "static" / "features" / "approved_windows.sh").read_text()
+    src = (REPO / "dashboard" / "gateway-files" / "approved_windows.sh").read_text()
     assert "token=$ESHU_WINDOW_TOKEN" not in src
     assert "${ESHU_WINDOW_TOKEN:0:8}" in src
 
@@ -1591,7 +1597,7 @@ def test_sec_R_authorized_keys_is_jit(gw):
 
 def test_bs1_the_window_header_resolves_on_13_and_14(tmp_path):
     """BS1: the sourced feature works with the 1.3 variable and the 1.4 file."""
-    feature = (REPO / "dashboard" / "static" / "features"
+    feature = (REPO / "dashboard" / "gateway-files"
                / "approved_windows.sh").read_text()
     start = feature.index("_window_token_header() {")
     end = feature.index("\n}\n", start) + len("\n}\n")

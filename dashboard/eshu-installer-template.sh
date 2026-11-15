@@ -876,7 +876,7 @@ if { [ "$mode" = "install" ] || [ "$mode" = "reinstall" ]; } && [ "${REGISTER_OK
     # rewriting it, as the update path already does.
     echo "   REFUSED: $AK_FILE is not readable; authorized_keys not changed."
   else
-  {
+  if ! {
     # Keep keys this installer does not own; drop every Eshu gateway line,
     # including a pre-F12 one without a comment, then write ours back.
     if [ -f "$AK_FILE" ]; then
@@ -889,9 +889,44 @@ if { [ "$mode" = "install" ] || [ "$mode" = "reinstall" ]; } && [ "${REGISTER_OK
     if [ -n "$DASHBOARD_SSH_PUB" ]; then
       printf '%s %s eshu-dashboard\n' "$AK_DASH" "$DASHBOARD_SSH_PUB"
     fi
-  } | ak_replace
+  } | ak_replace; then
+    # No keys means no SSH access: fail the install rather than report a
+    # gateway that cannot be reached.
+    echo "ERROR: authorized_keys was not changed. Aborting."
+    exit 1
   fi
   fi
+  fi
+fi
+
+# X9: seed the two gated files the poller will keep current. They come from
+# the same Build generation as this installer (BU1), so a fresh gateway can
+# run a window claim before its first authenticated fetch, and the fleet
+# runner has one stable path. A failed seed is a warning: the poller fetches
+# the files once the gateway is registered.
+install_seed_files() {
+  local tmp
+  mkdir -p /etc/eshu/features.d
+  tmp=$(mktemp /etc/eshu/.windows.XXXXXX) || return 1
+  if printf '%s' '__WINDOWS_B64__' | base64 -d > "$tmp" 2>/dev/null \
+       && chmod 0644 "$tmp" && mv -f "$tmp" /etc/eshu/features.d/approved_windows.sh; then
+    :
+  else
+    rm -f "$tmp"
+    return 1
+  fi
+  tmp=$(mktemp /etc/eshu/.runner.XXXXXX) || return 1
+  if printf '%s' '__RUNNER_B64__' | base64 -d > "$tmp" 2>/dev/null \
+       && chmod 0755 "$tmp" && mv -f "$tmp" /etc/eshu/fleet-runner.sh; then
+    :
+  else
+    rm -f "$tmp"
+    return 1
+  fi
+}
+
+if ! install_seed_files; then
+  echo "   WARNING: could not write the gateway file seeds; the poller will fetch them once registered."
 fi
 
 echo ""

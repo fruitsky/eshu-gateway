@@ -1,68 +1,75 @@
-"""X7: the three installer channels — Build, Edge and Fleet.
+"""X9: gateway release generations — installer + the two gated scripts.
 
-* **Build** is `dashboard/eshu-gateway-install.sh`, the generated file that is
-  committed to the repo. A dashboard deploy changes it, and nothing else.
-* **Edge** is what dev-mode gateways install. It changes only when the
-  operator presses Seed Edge (a byte copy of Build).
-* **Fleet** is what every other gateway installs: enrollment, updates,
-  uninstall and rollback all download it. It changes only on Deploy to Fleet
-  (a byte copy of Edge) or Rollback (the previous Fleet copy).
+X7 made the installer a real channel (Build → Edge → Fleet). X9 extends a
+channel from one file to a **generation**: the installer *and* the two files
+that gateways run as root (`approved_windows.sh`, `fleet-runner.sh`), moved
+and rolled back as one set.
 
-Edge and Fleet are runtime state owned by the dashboard, kept outside the
-static mount and outside git (`dashboard/installer-channels/`, ignored; the
-`ESHU_INSTALLER_CHANNELS` environment variable overrides the directory, which
-is how the tests isolate it). Before X7 both were committed copies, so every
-deploy overwrote them: Build always equalled Edge, and the fleet installer
-changed on a deploy without anyone promoting it.
+* **Build** is the committed, generated installer plus
+  `dashboard/gateway-files/`. A dashboard deploy changes it.
+* **Edge** is what dev-mode gateways install and fetch. It changes only on
+  Seed Edge, which copies Build's three files into one generation.
+* **Fleet** is what every other gateway installs and fetches. It changes only
+  on Deploy to Fleet (the whole Edge generation) or Rollback (the previous
+  Fleet generation).
 
-Every write is atomic (a temp file in the same directory, fsync, rename), so a
-gateway never downloads a half-written installer. A channel that is missing
-after initialisation is reported as missing (the endpoints answer 503); it is
-never silently rebuilt from Build, because that would bypass the promote gate.
+Layout under `dashboard/installer-channels/` (gitignored;
+`ESHU_INSTALLER_CHANNELS` overrides it, which is how the tests isolate it):
+
+    edge, fleet, fleet.prev        pointer files: a generation id
+    gen-<id>/installer.sh
+    gen-<id>/approved_windows.sh
+    gen-<id>/fleet-runner.sh
+
+A generation directory is written to a temporary name and renamed into place,
+so a partial copy is never visible. A pointer is replaced with an atomic
+rename only after all three files exist. A channel whose generation is
+incomplete is reported missing (503); it never falls back to Build or to the
+other channel. This is BU1: the installer and the files cannot be mixed
+across generations.
 """
 import hashlib
 import os
+import shutil
 import tempfile
 import time
 
 EDGE = 'edge'
 FLEET = 'fleet'
 FLEET_PREV = 'fleet.prev'
-_FILES = {EDGE: 'edge.sh', FLEET: 'fleet.sh', FLEET_PREV: 'fleet.prev.sh'}
 
-# Set once, in the meta table, when the channels were first created. After
-# that a missing channel file is an error, not something to re-create.
-INIT_MARKER = 'installer_channels_v1'
+# The three files of one generation, in a fixed order. The first is the
+# installer; the other two are fetched by the 1.4 poller.
+INSTALLER = 'installer.sh'
+WINDOWS = 'approved_windows.sh'
+RUNNER = 'fleet-runner.sh'
+GEN_FILES = (INSTALLER, WINDOWS, RUNNER)
+
+# X7 flat files: a deployment upgrading from X7 migrates them into a
+# generation; they are deleted afterwards.
+_LEGACY_FLAT = {EDGE: 'edge.sh', FLEET: 'fleet.sh', FLEET_PREV: 'fleet.prev.sh'}
+
+INIT_MARKER = 'installer_generations_v1'
 
 _DASHBOARD_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 class ChannelMissing(Exception):
-    """A channel file is absent after initialisation (serve 503)."""
+    """A channel generation is absent or incomplete (serve 503)."""
 
 
 def build_path() -> str:
     return os.path.join(_DASHBOARD_DIR, 'eshu-gateway-install.sh')
 
 
+def gateway_files_dir() -> str:
+    """The Build copies of the two root-run scripts (moved out of /static)."""
+    return os.path.join(_DASHBOARD_DIR, 'gateway-files')
+
+
 def channel_dir() -> str:
     return (os.environ.get('ESHU_INSTALLER_CHANNELS')
             or os.path.join(_DASHBOARD_DIR, 'installer-channels'))
-
-
-def channel_path(channel: str) -> str:
-    return os.path.join(channel_dir(), _FILES[channel])
-
-
-def _legacy_paths() -> dict:
-    """Where the pre-X7 copies lived (inside the static mount). The first
-    start deletes them; their contents are never used."""
-    static = os.path.join(_DASHBOARD_DIR, 'static')
-    return {
-        FLEET: os.path.join(static, 'eshu-gateway-install.sh'),
-        EDGE: os.path.join(static, 'dev', 'eshu-gateway-install.sh'),
-        FLEET_PREV: os.path.join(static, 'eshu-gateway-install.sh.bak'),
-    }
 
 
 def file_hash(path: str):
@@ -74,9 +81,11 @@ def file_hash(path: str):
         return None
 
 
+def _hash_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()[:12]
+
+
 def _ensure_dir() -> str:
-    """The channel directory, 0700 even when it already existed (makedirs
-    applies the mode only when it creates the directory)."""
     path = channel_dir()
     os.makedirs(path, mode=0o700, exist_ok=True)
     os.chmod(path, 0o700)
@@ -110,46 +119,166 @@ def _read_bytes(path: str):
         return None
 
 
+def _read_pointer(channel: str):
+    data = _read_bytes(os.path.join(channel_dir(), channel))
+    if not data:
+        return None
+    gen = data.decode('ascii', 'replace').strip()
+    return gen if _valid_gen(gen) else None
+
+
+def _valid_gen(gen: str) -> bool:
+    return bool(gen) and all(c in '0123456789abcdef' for c in gen) and len(gen) == 12
+
+
+def _write_pointer(channel: str, gen: str) -> None:
+    _atomic_write(os.path.join(channel_dir(), channel), (gen + '\n').encode())
+
+
+def _gen_dir(gen: str) -> str:
+    return os.path.join(channel_dir(), 'gen-' + gen)
+
+
+def _gen_hashes(gen: str):
+    """The three file hashes, or None when any file is missing."""
+    hashes = {}
+    for name in GEN_FILES:
+        h = file_hash(os.path.join(_gen_dir(gen), name))
+        if h is None:
+            return None
+        hashes[name] = h
+    return hashes
+
+
+def generation_id(files: dict) -> str:
+    """One id for a set of three files, from their bytes (order fixed)."""
+    h = hashlib.sha256()
+    for name in GEN_FILES:
+        data = files[name]
+        h.update(name.encode('ascii') + b'\0')
+        h.update(str(len(data)).encode('ascii') + b'\0')
+        h.update(data)
+    return h.hexdigest()[:12]
+
+
+def _write_generation(files: dict) -> str:
+    """Write a generation atomically; return its id. Idempotent."""
+    gen = generation_id(files)
+    _ensure_dir()
+    dst = _gen_dir(gen)
+    if _gen_hashes(gen):
+        return gen
+    tmp = dst + '.tmp-%d' % os.getpid()
+    shutil.rmtree(tmp, ignore_errors=True)
+    os.makedirs(tmp, mode=0o700)
+    try:
+        for name in GEN_FILES:
+            with open(os.path.join(tmp, name), 'wb') as f:
+                f.write(files[name])
+                f.flush()
+                os.fsync(f.fileno())
+            os.chmod(os.path.join(tmp, name), 0o644)
+        try:
+            os.replace(tmp, dst)
+        except OSError:
+            # Another writer won the race; its generation is identical.
+            if not _gen_hashes(gen):
+                raise
+            shutil.rmtree(tmp, ignore_errors=True)
+    except BaseException:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise
+    return gen
+
+
+def _gateway_file(name: str):
+    return _read_bytes(os.path.join(gateway_files_dir(), name))
+
+
+def build_generation() -> dict:
+    """The Build files, or ChannelMissing when any of them is absent."""
+    installer = _read_bytes(build_path())
+    windows = _gateway_file(WINDOWS)
+    runner = _gateway_file(RUNNER)
+    if installer is None or windows is None or runner is None:
+        raise ChannelMissing('build')
+    return {INSTALLER: installer, WINDOWS: windows, RUNNER: runner}
+
+
+def _legacy_paths() -> dict:
+    """Where the pre-X7 copies lived (inside the static mount). The first
+    start deletes them; their contents are never used."""
+    static = os.path.join(_DASHBOARD_DIR, 'static')
+    return {
+        FLEET: os.path.join(static, 'eshu-gateway-install.sh'),
+        EDGE: os.path.join(static, 'dev', 'eshu-gateway-install.sh'),
+        FLEET_PREV: os.path.join(static, 'eshu-gateway-install.sh.bak'),
+    }
+
+
+def _migrate_flat() -> dict:
+    """X7 flat channel files, if any. Read before they are deleted."""
+    out = {}
+    for channel, name in _LEGACY_FLAT.items():
+        data = _read_bytes(os.path.join(channel_dir(), name))
+        if data is not None:
+            out[channel] = data
+    return out
+
+
 def _initialised() -> bool:
     from db.policies import get_meta
     return bool(get_meta(INIT_MARKER))
 
 
 def ensure_initialised() -> None:
-    """Create Edge and Fleet once, from Build, and remove the pre-X7 copies.
+    """Create Edge and Fleet once, from Build or from the X7 flat copies.
 
-    Runs at startup and lazily before any channel access. Both channels start
-    as Build: the committed copies were byte-identical to it, and Build is
-    what /api/gateway-script served before X7, so the fleet sees no change.
-    A pre-X7 copy still on disk could only be one changed at runtime, so it is
-    never used (security, X7 question 3).
-
-    BP1: no previous-Fleet copy is created. The old `.bak` was an installer of
-    unknown age, possibly older than this week's security fixes; making it the
-    Rollback target would let the first Rollback downgrade the fleet. Rollback
-    stays unavailable until the first Deploy to Fleet. The pre-X7 files are
-    deleted, because the static mount would otherwise keep serving them.
+    BP1 still holds: no previous-Fleet generation is created on migration, so
+    Rollback is unavailable until the first Deploy to Fleet. Pre-X7 files are
+    deleted because the static mount would otherwise keep serving them. The
+    X7 flat installers are paired with the current gateway files — those are
+    the files the fleet was already downloading from `/static` — and then
+    removed. Every generated channel is one complete generation.
     """
     if _initialised():
         return
     from db.audit import record_audit_event
     from db.misc import get_deployed_golden_hash, set_deployed_golden_hash
-    from db.policies import set_meta
+    from db.policies import get_meta, set_meta
     _ensure_dir()
-    build = _read_bytes(build_path())
     notes = []
-    for channel in (FLEET, EDGE):
-        dst = channel_path(channel)
-        if os.path.exists(dst):
-            notes.append('%s kept' % channel)
-            continue
+    try:
+        build = build_generation()
+    except ChannelMissing:
+        build = None
+    flat = _migrate_flat()
+
+    def _make(channel):
+        if channel in flat:
+            gen = _write_generation({INSTALLER: flat[channel],
+                                     WINDOWS: build[WINDOWS],
+                                     RUNNER: build[RUNNER]}) if build else None
+            if gen:
+                notes.append('%s migrated from the X7 %s (%s)'
+                             % (channel, _LEGACY_FLAT[channel], gen))
+                return gen
         if build is None:
-            notes.append('%s not created (no Build)' % channel)
-            continue
-        _atomic_write(dst, build)
-        notes.append('%s from Build (%s)' % (channel, file_hash(dst)))
+            return None
+        gen = _write_generation(build)
+        notes.append('%s from Build (%s)' % (channel, gen))
+        return gen
+
+    edge_gen = _make(EDGE)
+    fleet_gen = _make(FLEET)
+    if edge_gen:
+        _write_pointer(EDGE, edge_gen)
+    if fleet_gen:
+        _write_pointer(FLEET, fleet_gen)
+
     removed = []
-    for path in _legacy_paths().values():
+    for path in list(_legacy_paths().values()) + [
+            os.path.join(channel_dir(), name) for name in _LEGACY_FLAT.values()]:
         try:
             os.remove(path)
             removed.append(os.path.basename(os.path.dirname(path)) + '/'
@@ -167,63 +296,134 @@ def ensure_initialised() -> None:
         notes.append('removed pre-X7 copies: ' + ', '.join(removed))
     notes.append('no previous Fleet: Rollback is available after the first '
                  'Deploy to Fleet')
-    fleet_hash = file_hash(channel_path(FLEET))
+    fleet_gen = _read_pointer(FLEET)
+    fleet_hashes = _gen_hashes(fleet_gen) if fleet_gen else None
+    fleet_hash = fleet_hashes[INSTALLER] if fleet_hashes else None
     deployed = get_deployed_golden_hash()
     if fleet_hash and deployed and deployed != fleet_hash:
         notes.append('Fleet set to Build; the last recorded promote was %s'
                      % deployed)
     if fleet_hash:
         set_deployed_golden_hash(fleet_hash)
+    if not get_meta('legacy_1_3_since'):
+        set_meta('legacy_1_3_since', str(int(time.time())))
     set_meta(INIT_MARKER, str(int(time.time())))
     record_audit_event('installer_channels_initialised',
                        details='Installer channels created: ' + '; '.join(notes))
 
 
-def read(channel: str) -> bytes:
-    """The channel's bytes; raises ChannelMissing when absent."""
+def channel_generation(channel: str):
+    """The generation id a channel points at, or None (missing/incomplete)."""
     ensure_initialised()
-    data = _read_bytes(channel_path(channel))
-    if data is None:
+    gen = _read_pointer(channel)
+    if not gen or not _gen_hashes(gen):
+        return None
+    return gen
+
+
+def channel_path(channel: str) -> str:
+    """The installer path of the channel's current generation."""
+    gen = channel_generation(channel)
+    if not gen:
         raise ChannelMissing(channel)
-    return data
+    return os.path.join(_gen_dir(gen), INSTALLER)
+
+
+def channel_info(channel: str):
+    """{generation, installer, windows, runner} hashes, or None."""
+    gen = channel_generation(channel)
+    if not gen:
+        return None
+    hashes = _gen_hashes(gen)
+    if not hashes:
+        return None
+    return {'generation': gen, 'installer': hashes[INSTALLER],
+            'windows': hashes[WINDOWS], 'runner': hashes[RUNNER]}
+
+
+def channel_file_hash(channel: str, name: str):
+    info = channel_info(channel)
+    if not info:
+        return None
+    return info[{INSTALLER: 'installer', WINDOWS: 'windows',
+                 RUNNER: 'runner'}[name]]
 
 
 def channel_hash(channel: str):
-    ensure_initialised()
-    return file_hash(channel_path(channel))
+    """The installer hash of the channel (the X7 API)."""
+    return channel_file_hash(channel, INSTALLER)
 
 
 def build_hash():
     return file_hash(build_path())
 
 
-def seed_edge() -> str:
-    """Edge := Build. Returns the new Edge hash."""
-    ensure_initialised()
-    data = _read_bytes(build_path())
+def read_generation(gen: str) -> dict:
+    files = {}
+    for name in GEN_FILES:
+        data = _read_bytes(os.path.join(_gen_dir(gen), name))
+        if data is None:
+            raise ChannelMissing(gen)
+        files[name] = data
+    return files
+
+
+def read(channel: str) -> bytes:
+    """The channel's installer bytes; raises ChannelMissing when absent."""
+    gen = channel_generation(channel)
+    if not gen:
+        raise ChannelMissing(channel)
+    data = _read_bytes(os.path.join(_gen_dir(gen), INSTALLER))
     if data is None:
-        raise ChannelMissing('build')
-    _atomic_write(channel_path(EDGE), data)
-    return file_hash(channel_path(EDGE))
+        raise ChannelMissing(channel)
+    return data
 
 
-def promote_edge() -> str:
-    """Fleet.prev := Fleet, then Fleet := Edge. Returns the new Fleet hash."""
-    edge = read(EDGE)
-    current = _read_bytes(channel_path(FLEET))
-    if current is not None:
-        _atomic_write(channel_path(FLEET_PREV), current)
-    _atomic_write(channel_path(FLEET), edge)
-    return file_hash(channel_path(FLEET))
+def read_file(channel: str, name: str) -> bytes:
+    """One of the channel's gated files; raises ChannelMissing when absent."""
+    if name not in (WINDOWS, RUNNER):
+        raise ChannelMissing(name)
+    gen = channel_generation(channel)
+    if not gen:
+        raise ChannelMissing(channel)
+    data = _read_bytes(os.path.join(_gen_dir(gen), name))
+    if data is None:
+        raise ChannelMissing(channel)
+    return data
 
 
-def rollback_fleet() -> str:
-    """Fleet := Fleet.prev. Returns the new Fleet hash."""
-    prev = read(FLEET_PREV)
-    _atomic_write(channel_path(FLEET), prev)
-    return file_hash(channel_path(FLEET))
+def seed_edge() -> dict:
+    """Edge := Build's whole generation. Returns its hashes."""
+    ensure_initialised()
+    gen = _write_generation(build_generation())
+    _write_pointer(EDGE, gen)
+    return channel_info(EDGE)
+
+
+def promote_edge() -> dict:
+    """Fleet.prev := Fleet; Fleet := Edge (whole generations)."""
+    ensure_initialised()
+    edge = channel_generation(EDGE)
+    if not edge:
+        raise ChannelMissing(EDGE)
+    current = channel_generation(FLEET)
+    if current:
+        _write_pointer(FLEET_PREV, current)
+    _write_pointer(FLEET, edge)
+    return channel_info(FLEET)
+
+
+def rollback_fleet() -> dict:
+    """Fleet := the generation Fleet.prev points at (whole set)."""
+    ensure_initialised()
+    prev = _read_pointer(FLEET_PREV)
+    if not prev or not _gen_hashes(prev):
+        raise ChannelMissing(FLEET_PREV)
+    _write_pointer(FLEET, prev)
+    return channel_info(FLEET)
 
 
 def has_previous() -> bool:
     ensure_initialised()
-    return os.path.exists(channel_path(FLEET_PREV))
+    prev = _read_pointer(FLEET_PREV)
+    return bool(prev and _gen_hashes(prev))

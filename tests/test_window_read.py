@@ -4,7 +4,7 @@ import pytest
 from fastapi.testclient import TestClient
 from main import app
 
-_FEATURE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "dashboard", "static", "features", "approved_windows.sh")
+_FEATURE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "dashboard", "gateway-files", "approved_windows.sh")
 
 
 def _read_feature():

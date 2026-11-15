@@ -122,8 +122,15 @@ def test_a_heartbeat_can_report_a_new_hash(client, auth_client):
 def test_dev_status_counts_every_channel(auth_client):
     from core import installer_channels as ic
     ic.ensure_initialised()
-    ic._atomic_write(ic.channel_path(ic.EDGE), b"#!/bin/bash\n# edge\n")
-    ic._atomic_write(ic.channel_path(ic.FLEET), b"#!/bin/bash\n# fleet\n")
+    # X9: channels are whole generations, so a distinct installer is a new
+    # generation, not a write into the shared Build generation.
+    base = ic.read_generation(ic.channel_generation(ic.EDGE))
+    edge_files = dict(base)
+    edge_files[ic.INSTALLER] = b"#!/bin/bash\n# edge\n"
+    ic._write_pointer(ic.EDGE, ic._write_generation(edge_files))
+    fleet_files = dict(ic.read_generation(ic.channel_generation(ic.FLEET)))
+    fleet_files[ic.INSTALLER] = b"#!/bin/bash\n# fleet\n"
+    ic._write_pointer(ic.FLEET, ic._write_generation(fleet_files))
     build = ic.build_hash()
     edge = ic.channel_hash(ic.EDGE)
     fleet = ic.channel_hash(ic.FLEET)

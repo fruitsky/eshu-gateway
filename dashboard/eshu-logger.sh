@@ -44,10 +44,18 @@ while true; do
         *) INSTALLER_HASH="" ;;
     esac
 
+    # X9: the two fetched files, and whether the dashboard URL is https. The
+    # hashes are display-only self-reports (like the installer hash).
+    WINDOWS_HASH=$(sha256sum /etc/eshu/features.d/approved_windows.sh 2>/dev/null | cut -c1-12)
+    RUNNER_HASH=$(sha256sum /etc/eshu/fleet-runner.sh 2>/dev/null | cut -c1-12)
+    case "$WINDOWS_HASH" in [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;; *) WINDOWS_HASH="" ;; esac
+    case "$RUNNER_HASH" in [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;; *) RUNNER_HASH="" ;; esac
+    case "$DASHBOARD_URL" in https://*) SCHEME="https" ;; *) SCHEME="http" ;; esac
+
     { gateway_header | curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -X POST "$DASHBOARD_URL/api/gateway-heartbeat" \
         -H @- \
         -H "Content-Type: application/json" \
-        -d "{\"ip\":\"$TARGET_IP\",\"hostname\":\"$HOST_NAME\",\"poller_ok\":$POLLER_OK,\"gateway_ok\":$GATEWAY_OK,\"can_reach\":$CAN_REACH,\"installer_hash\":\"$INSTALLER_HASH\"}" ; } \
+        -d "{\"ip\":\"$TARGET_IP\",\"hostname\":\"$HOST_NAME\",\"poller_ok\":$POLLER_OK,\"gateway_ok\":$GATEWAY_OK,\"can_reach\":$CAN_REACH,\"installer_hash\":\"$INSTALLER_HASH\",\"windows_hash\":\"$WINDOWS_HASH\",\"runner_hash\":\"$RUNNER_HASH\",\"dashboard_scheme\":\"$SCHEME\"}" ; } \
         >/dev/null 2>&1 || true
 
     sleep "$INTERVAL"

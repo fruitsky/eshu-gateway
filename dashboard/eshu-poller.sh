@@ -12,6 +12,49 @@ eshu_token() {
 # BE3: token headers never go into curl's argv (readable in /proc by any
 # local user). printf is a builtin and curl reads the header lines from stdin.
 gateway_header() { printf 'X-Gateway-Token: %s\n' "$(eshu_token)"; }
+# X9: the two gated files live here. The installer seeds them; the poller
+# replaces them from the authenticated route, so the fleet runner has one
+# stable path to hash and launch.
+WINDOWS_FILE="/etc/eshu/features.d/approved_windows.sh"
+RUNNER_FILE="/etc/eshu/fleet-runner.sh"
+
+# BU2: a LAN http:// dashboard URL would let anyone on the path rewrite
+# root-run code (and the token/hash headers with it). No fetch happens over
+# http; the installed copy stays. One line per hour, not per cycle.
+dashboard_is_https() {
+  case "$DASHBOARD_URL" in
+    https://*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+dashboard_scheme() {
+  case "$DASHBOARD_URL" in
+    https://*) printf 'https' ;;
+    *) printf 'http' ;;
+  esac
+}
+
+http_warn() {   # $1 = what was skipped
+  local stamp="/var/run/eshu.http-warn" now last
+  now=$(date +%s)
+  last=$(cat "$stamp" 2>/dev/null || echo 0)
+  case "$last" in ''|*[!0-9]*) last=0 ;; esac
+  if [ $((now - last)) -ge 3600 ]; then
+    logger -t eshu-poller "Dashboard URL is not https:// — $1 not fetched (the installed copy stays). Fix /etc/eshu/dashboard_url."
+    printf '%s' "$now" > "$stamp" 2>/dev/null || true
+  fi
+}
+
+# The first 12 hex of a file's sha256, or '' when it is missing.
+read_file_hash() {
+  local h
+  h=$(sha256sum "$1" 2>/dev/null | cut -c1-12)
+  case "$h" in
+    [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) printf '%s' "$h" ;;
+  esac
+}
+
 # X8: the installer hash the last install/update wrote, if it is a valid one.
 read_installer_hash() {
   local h
@@ -153,21 +196,37 @@ policy_stamp_matches() {
 # (DASHBOARD_VERSION is a static string), so a stale window handler must not
 # linger. The download is bounded and syntax-checked before replacing the live
 # file. Runs only when the dashboard answered, matching the previous behavior.
+# X9: the window handler comes from the authenticated gateway-file route, not
+# the unauthenticated /static mount. The channel (Edge for a dev gateway,
+# Fleet otherwise) is chosen server-side. The download is bounded, syntax
+# checked and its sha256 header checked before it replaces the live file;
+# any failure keeps the previous copy. A 1.3 gateway still uses /static until
+# it updates, which is why those routes are frozen, not deleted.
 sync_feature_scripts() {
-  local features_dir="/etc/eshu/features.d"
-  mkdir -p "$features_dir"
-  curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -o "$features_dir/approved_windows.sh.tmp" \
-       "$DASHBOARD_URL/static/features/approved_windows.sh" 2>/dev/null || true
-  if [ -s "$features_dir/approved_windows.sh.tmp" ] && bash -n "$features_dir/approved_windows.sh.tmp" 2>/dev/null; then
-    if cmp -s "$features_dir/approved_windows.sh.tmp" "$features_dir/approved_windows.sh"; then
-      rm -f "$features_dir/approved_windows.sh.tmp"
+  local dir="/etc/eshu/features.d" tmp hdr want got
+  mkdir -p "$dir"
+  if ! dashboard_is_https; then
+    http_warn "the window script"
+    return 0
+  fi
+  tmp=$(mktemp -p "$ESHU_WORK" windows.XXXXXX)
+  hdr=$(mktemp -p "$ESHU_WORK" windows-hdr.XXXXXX)
+  gateway_header | curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s \
+       -D "$hdr" -o "$tmp" -H @- \
+       "$DASHBOARD_URL/api/gateway/files/approved_windows.sh" 2>/dev/null || true
+  want=$(awk 'tolower($1)=="x-eshu-file-sha256:"{print $2}' "$hdr" 2>/dev/null | tr -d '\r' | head -n1)
+  got=$(sha256sum "$tmp" 2>/dev/null | cut -c1-12)
+  if [ -s "$tmp" ] && bash -n "$tmp" 2>/dev/null && [ -n "$want" ] && [ "$want" = "$got" ]; then
+    if cmp -s "$tmp" "$WINDOWS_FILE"; then
+      rm -f "$tmp"
     else
-      mv -f "$features_dir/approved_windows.sh.tmp" "$features_dir/approved_windows.sh"
+      chmod 0644 "$tmp" && mv -f "$tmp" "$WINDOWS_FILE"
     fi
   else
-    logger -t eshu-poller "Feature script download/validation failed — keeping previous version"
-    rm -f "$features_dir/approved_windows.sh.tmp"
+    logger -t eshu-poller "Window script fetch/validation failed — keeping previous version"
+    rm -f "$tmp"
   fi
+  rm -f "$hdr"
 }
 
 # Persist last processed trigger ID across restarts
@@ -291,31 +350,45 @@ while true; do
     esac
     LAST_FLEET_CMD_ID=$(cat /var/run/eshu.last_fleet_cmd 2>/dev/null || echo "0")
     if [ -n "$FLEET_CMD_ID" ] && [ "$FLEET_CMD_ID" != "0" ] && [ "$FLEET_CMD_ID" != "$LAST_FLEET_CMD_ID" ] && [ -n "$FLEET_CMD" ]; then
-      logger -t eshu-poller "Fleet command #$FLEET_CMD_ID received. Downloading runner..."
-      FLEET_RUNNER_TMP=$(mktemp -p "$ESHU_WORK" fleet-runner.XXXXXX)
-      FLEET_RUNNER="$ESHU_WORK/eshu-fleet-runner.sh"
+      FLEET_RUNNER="$RUNNER_FILE"
       FLEET_CMD_FILE="$ESHU_WORK/eshu-fleet-$FLEET_CMD_ID.sh"
       FLEET_OUT_FILE="$ESHU_WORK/eshu-fleet-out-$FLEET_CMD_ID.txt"
-      curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m 60 -s -o "$FLEET_RUNNER_TMP" "$DASHBOARD_URL/static/fleet-runner.sh" 2>/dev/null || true
-      if [ -s "$FLEET_RUNNER_TMP" ] && bash -n "$FLEET_RUNNER_TMP" 2>/dev/null; then
-        chmod +x "$FLEET_RUNNER_TMP"
-        mv -f "$FLEET_RUNNER_TMP" "$FLEET_RUNNER"
-        { echo "#!/bin/bash"; printf '%s\n' "$FLEET_CMD"; } > "$FLEET_CMD_FILE" 2>/dev/null
-        # Persist the ID only on a successful launch. The runner pings 'running'
-        # immediately, which stops the dashboard re-injecting — so a crash before
-        # this echo can never cause a double execution.
-        # BJ2: no token in the unit's ExecStart (world-readable through
-        # `systemctl show`); the runner reads /etc/eshu-token as root.
-        if systemd-run --unit="eshu-fleet-$FLEET_CMD_ID" --collect \
-            bash "$FLEET_RUNNER" "$DASHBOARD_URL" "$TARGET_IP" "$FLEET_CMD_ID" "$FLEET_CMD_TIMEOUT" "$FLEET_CMD_FILE" "$FLEET_OUT_FILE" >/dev/null 2>&1; then
-          echo "$FLEET_CMD_ID" > /var/run/eshu.last_fleet_cmd
-        else
-          logger -t eshu-poller "Fleet command #$FLEET_CMD_ID launch failed — will retry"
-          rm -f "$FLEET_CMD_FILE"
-        fi
+      if ! dashboard_is_https; then
+        # BU2: a runner fetched over http would be root code anyone on the
+        # path could rewrite. Launch nothing; the command is not marked done,
+        # so it is retried once the URL is fixed.
+        http_warn "the fleet runner (command #$FLEET_CMD_ID not run)"
       else
-        logger -t eshu-poller "Fleet runner download/validation failed"
-        rm -f "$FLEET_RUNNER_TMP"
+        logger -t eshu-poller "Fleet command #$FLEET_CMD_ID received. Fetching runner..."
+        FLEET_RUNNER_TMP=$(mktemp -p "$ESHU_WORK" fleet-runner.XXXXXX)
+        FLEET_RUNNER_HDR=$(mktemp -p "$ESHU_WORK" fleet-runner-hdr.XXXXXX)
+        gateway_header | curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m 60 -s \
+             -D "$FLEET_RUNNER_HDR" -o "$FLEET_RUNNER_TMP" -H @- \
+             "$DASHBOARD_URL/api/gateway/files/fleet-runner.sh" 2>/dev/null || true
+        WANT=$(awk 'tolower($1)=="x-eshu-file-sha256:"{print $2}' "$FLEET_RUNNER_HDR" 2>/dev/null | tr -d '\r' | head -n1)
+        GOT=$(sha256sum "$FLEET_RUNNER_TMP" 2>/dev/null | cut -c1-12)
+        if [ -s "$FLEET_RUNNER_TMP" ] && bash -n "$FLEET_RUNNER_TMP" 2>/dev/null \
+             && [ -n "$WANT" ] && [ "$WANT" = "$GOT" ]; then
+          chmod 0755 "$FLEET_RUNNER_TMP"
+          mv -f "$FLEET_RUNNER_TMP" "$FLEET_RUNNER"
+          { echo "#!/bin/bash"; printf '%s\n' "$FLEET_CMD"; } > "$FLEET_CMD_FILE" 2>/dev/null
+          # Persist the ID only on a successful launch. The runner pings
+          # 'running' immediately, which stops the dashboard re-injecting —
+          # so a crash before this echo can never cause a double execution.
+          # BJ2: no token in the unit's ExecStart (world-readable through
+          # `systemctl show`); the runner reads /etc/eshu-token as root.
+          if systemd-run --unit="eshu-fleet-$FLEET_CMD_ID" --collect \
+              bash "$FLEET_RUNNER" "$DASHBOARD_URL" "$TARGET_IP" "$FLEET_CMD_ID" "$FLEET_CMD_TIMEOUT" "$FLEET_CMD_FILE" "$FLEET_OUT_FILE" >/dev/null 2>&1; then
+            echo "$FLEET_CMD_ID" > /var/run/eshu.last_fleet_cmd
+          else
+            logger -t eshu-poller "Fleet command #$FLEET_CMD_ID launch failed — will retry"
+            rm -f "$FLEET_CMD_FILE"
+          fi
+        else
+          logger -t eshu-poller "Fleet runner fetch/validation failed"
+          rm -f "$FLEET_RUNNER_TMP"
+        fi
+        rm -f "$FLEET_RUNNER_HDR"
       fi
     fi
 
@@ -373,7 +446,7 @@ with open('/etc/eshu-windows.txt.tmp', 'w') as f:
         REG_RESP=$(register_headers | curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -X POST "$DASHBOARD_URL/api/register" \
              -H @- \
              -H "Content-Type: application/json" \
-             -d '{"ip":"'"$TARGET_IP"'","hostname":"'"$HOST_NAME"'","version":"'"$NEW_VER"'","installer_hash":"'"$(read_installer_hash)"'"}' 2>/dev/null || echo "")
+             -d '{"ip":"'"$TARGET_IP"'","hostname":"'"$HOST_NAME"'","version":"'"$NEW_VER"'","installer_hash":"'"$(read_installer_hash)"'","windows_hash":"'"$(read_file_hash "$WINDOWS_FILE")"'","runner_hash":"'"$(read_file_hash "$RUNNER_FILE")"'","dashboard_scheme":"'"$(dashboard_scheme)"'"}' 2>/dev/null || echo "")
         NEW_TOKEN=$(echo "$REG_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('gateway_token',''))" 2>/dev/null || echo "")
         if [ -n "$NEW_TOKEN" ] && [ "$NEW_TOKEN" != "None" ]; then
           # BQ4: validate, then write the one file atomically. No sed, no
@@ -424,7 +497,7 @@ with open('/etc/eshu-windows.txt.tmp', 'w') as f:
         REG_RESP=$(register_headers | curl --connect-timeout "$HTTP_CONNECT_TIMEOUT" -m "$HTTP_TIMEOUT" -s -X POST "$DASHBOARD_URL/api/register" \
              -H @- \
              -H "Content-Type: application/json" \
-             -d '{"ip":"'"$TARGET_IP"'","hostname":"'"$HOST_NAME"'","version":"'"$NEW_VER"'","installer_hash":"'"$(read_installer_hash)"'"}' 2>/dev/null || echo "")
+             -d '{"ip":"'"$TARGET_IP"'","hostname":"'"$HOST_NAME"'","version":"'"$NEW_VER"'","installer_hash":"'"$(read_installer_hash)"'","windows_hash":"'"$(read_file_hash "$WINDOWS_FILE")"'","runner_hash":"'"$(read_file_hash "$RUNNER_FILE")"'","dashboard_scheme":"'"$(dashboard_scheme)"'"}' 2>/dev/null || echo "")
         NEW_TOKEN=$(echo "$REG_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('gateway_token',''))" 2>/dev/null || echo "")
         if [ -n "$NEW_TOKEN" ] && [ "$NEW_TOKEN" != "None" ]; then
           # BQ4: validate, then write the one file atomically. No sed, no

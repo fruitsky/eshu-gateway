@@ -3,7 +3,7 @@
 ## Feature-flag delivery system
 
 The flag → script → sync pipeline decouples feature delivery from core script updates.
-Feature scripts are served from `dashboard/static/features/` and synced to
+Root-run feature files are part of the gateway generation (`dashboard/gateway-files/`, X9) and synced to
 `/etc/eshu/features.d/` by the poller when the flag is enabled.
 
 Each row below evaluates whether the feature fits this system.

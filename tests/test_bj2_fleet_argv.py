@@ -10,7 +10,7 @@ import subprocess
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
-RUNNER = REPO / "dashboard" / "static" / "fleet-runner.sh"
+RUNNER = REPO / "dashboard" / "gateway-files" / "fleet-runner.sh"
 
 
 def _harness(tmp_path, token="tok-abc123"):

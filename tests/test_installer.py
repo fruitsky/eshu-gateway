@@ -1066,3 +1066,18 @@ def test_bs2_the_keys_read_runs_as_the_user(tmp_path):
     assert 'grep -v \' eshu-dashboard$\' "$AK_FILE"' not in src
     assert 'ak_from "$AK_FILE"' not in src
     assert 'ak_as_user cat -- "$1"' in src
+
+
+def test_x9_the_installer_carries_and_seeds_the_gated_files():
+    """BU1: the installer and the two files travel as one generation."""
+    import base64
+    from pathlib import Path
+    repo = Path(__file__).resolve().parents[1]
+    files = repo / "dashboard" / "gateway-files"
+    text = (repo / "dashboard" / "eshu-gateway-install.sh").read_text(encoding="utf-8")
+    for name in ("approved_windows.sh", "fleet-runner.sh"):
+        encoded = base64.b64encode((files / name).read_bytes()).decode()
+        assert encoded in text, name
+    assert "install_seed_files" in text
+    assert "/etc/eshu/features.d/approved_windows.sh" in text
+    assert "/etc/eshu/fleet-runner.sh" in text
