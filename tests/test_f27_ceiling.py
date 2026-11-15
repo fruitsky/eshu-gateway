@@ -107,3 +107,12 @@ def test_the_api_needs_a_session(client):
     assert client.get('/api/allowances/ceiling').status_code == 401
     assert client.put('/api/allowances/ceiling',
                       json={'enabled': []}).status_code == 401
+
+
+def test_turning_the_ceiling_notify_off_is_audited(auth_client):
+    from db.audit import get_audit_log
+    from db.misc import set_notify_config
+    set_notify_config('', 'jit,ceiling')
+    r = auth_client.put('/api/notify-config', json={'url': '', 'events': 'jit'})
+    assert r.status_code == 200
+    assert 'notify_ceiling_off' in [x['event_type'] for x in get_audit_log(50)]

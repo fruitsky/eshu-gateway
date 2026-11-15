@@ -633,6 +633,21 @@ def _run_tool(integration_name: str, tool_name: str, args: dict, reason: str = '
     if _dry_run_exempt(handler, args):
         should_gate = False
 
+    # F27: a live allowance is a pre-approval inside the ceiling. BD2: an
+    # agent set to ask for this tool never consults it. The check runs after
+    # every refusal and before the plan/gate; a miss changes nothing.
+    if should_gate and tool_name == 'call_service' and agent:
+        mode = approval_mode(agent, integration['name'], tool_name)
+        if mode != 'gated':
+            from core import allowances as _allowances
+            hit = _allowances.match_and_claim(
+                agent, integration['name'], tool_name, args,
+                call_ref=(session_id or ''))
+            if hit:
+                should_gate = False
+                approval_label = 'allowance:%d' % hit[0]
+                exec_reason = reason
+
     # F10/F3: an approved Session plan can cover an MCP call. Matching is by
     # integration + tool + the exact argument hash, one use per claim — the
     # same rule as SSH plan items, never a pattern.

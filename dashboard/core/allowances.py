@@ -417,3 +417,572 @@ def remove_word(actor, word):
     send_notify('ceiling', 'Allowance ceiling widened',
                 'Word removed: %s (by %s)' % (w, actor))
     return {'word': w, 'set_hash': set_hash(INTEGRATION)}
+
+
+# ── F27: allowances (the engine) ───────────────────────────────────────────
+#
+# One allowance is bound to one agent token, one integration and one tool,
+# with exact conditions and a stored entity list. Matching never calls HA:
+# the entity ids, and (when available) the registry pins, were resolved when
+# the allowance was saved. Every miss is an ordinary card, never a denial.
+
+ALLOWANCE_TOOL = 'call_service'
+_ENTITY_RE = re.compile(r'^[a-z0-9_]+\.[a-z0-9_]+$')
+_SERVICE_RE = re.compile(r'^[a-z0-9_]+$')
+
+
+class AllowanceError(ValueError):
+    def __init__(self, status, detail, extra=None):
+        super().__init__(detail)
+        self.status = status
+        self.detail = detail
+        self.extra = extra or {}
+
+
+_TABLES_READY = set()
+
+
+def _init_allowance_tables():
+    from db.core import DB_PATH, db_conn
+    key = DB_PATH
+    if key in _TABLES_READY:
+        return
+    with db_conn() as conn:
+        conn.execute('''CREATE TABLE IF NOT EXISTS allowances (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            agent_id INTEGER NOT NULL,
+            integration TEXT NOT NULL,
+            tool TEXT NOT NULL,
+            name TEXT NOT NULL,
+            conditions_json TEXT NOT NULL,
+            entities_json TEXT NOT NULL DEFAULT '[]',
+            source_label_id TEXT NOT NULL DEFAULT '',
+            suspended_at INTEGER NOT NULL DEFAULT 0,
+            suspended_reason TEXT NOT NULL DEFAULT '',
+            rate_per_hour INTEGER NOT NULL DEFAULT 0,
+            window TEXT NOT NULL DEFAULT '',
+            expires_at INTEGER NOT NULL DEFAULT 0,
+            version INTEGER NOT NULL DEFAULT 1,
+            created_by TEXT NOT NULL DEFAULT '',
+            created_at INTEGER NOT NULL DEFAULT 0,
+            revoked_at INTEGER NOT NULL DEFAULT 0,
+            profile_id INTEGER NOT NULL DEFAULT 0,
+            profile_version INTEGER NOT NULL DEFAULT 0)''')
+        conn.execute('''CREATE TABLE IF NOT EXISTS allowance_uses (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            allowance_id INTEGER NOT NULL,
+            used_at INTEGER NOT NULL,
+            call_ref TEXT NOT NULL DEFAULT '')''')
+        conn.execute('''CREATE TABLE IF NOT EXISTS allowance_profiles (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            description TEXT NOT NULL DEFAULT '',
+            version INTEGER NOT NULL DEFAULT 1,
+            created_by TEXT NOT NULL DEFAULT '',
+            created_at INTEGER NOT NULL DEFAULT 0,
+            updated_at INTEGER NOT NULL DEFAULT 0,
+            deleted_at INTEGER NOT NULL DEFAULT 0)''')
+        conn.execute('''CREATE TABLE IF NOT EXISTS allowance_profile_templates (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            profile_id INTEGER NOT NULL,
+            profile_version INTEGER NOT NULL,
+            integration TEXT NOT NULL,
+            tool TEXT NOT NULL,
+            name TEXT NOT NULL DEFAULT '',
+            domain TEXT NOT NULL,
+            service TEXT NOT NULL,
+            entities_json TEXT NOT NULL DEFAULT '[]',
+            label_id TEXT NOT NULL DEFAULT '',
+            rate_per_hour INTEGER NOT NULL DEFAULT 0,
+            window TEXT NOT NULL DEFAULT '',
+            expires_at INTEGER NOT NULL DEFAULT 0)''')
+        conn.commit()
+    _TABLES_READY.add(key)
+
+
+def _now():
+    return int(time.time())
+
+
+def _tool_constraints():
+    """v1: the only allowable tool, and its three required paths."""
+    return {'constrainable': ['domain', 'service', 'data.entity_id'],
+            'required': ['domain', 'service', 'data.entity_id']}
+
+
+def _condition_in(value):
+    return {'in': [value]}
+
+
+def validate_entity_set(domain, entities):
+    if not isinstance(entities, list) or not entities:
+        raise AllowanceError(400, 'Pick at least one entity.')
+    if len(entities) > 64:
+        raise AllowanceError(400, 'At most 64 entities per allowance.')
+    seen = []
+    for ent in entities:
+        e = str(ent or '').strip().lower()
+        if not _ENTITY_RE.fullmatch(e):
+            raise AllowanceError(400, 'Not a plain entity id: %r' % ent)
+        if not e.startswith(domain + '.'):
+            raise AllowanceError(400, 'Entity %s is not a %s.' % (e, domain))
+        if e not in seen:
+            seen.append(e)
+    return seen
+
+
+def _ha_integration():
+    from db.integrations import get_integration
+    return get_integration(INTEGRATION)
+
+
+def _ha_registry():
+    """Read the entity registry once (save/apply only; matching never does)."""
+    from core.ha_ws import ha_ws_request
+    integration = _ha_integration()
+    if not integration:
+        raise AllowanceError(503, 'Home Assistant is not configured.')
+    try:
+        rows = ha_ws_request(integration, 'config/entity_registry/list', {})
+    except Exception as exc:
+        raise AllowanceError(503, 'Could not read the HA entity registry: %s' % exc)
+    return {r.get('entity_id'): r for r in (rows or []) if r.get('entity_id')}
+
+
+def _risky_classes(entities):
+    """Garage/gate/door/lock-like device classes, read at save/apply."""
+    from core.ha_ws import ha_ws_request
+    integration = _ha_integration()
+    if not integration:
+        return []
+    try:
+        states = ha_ws_request(integration, 'get_states', {})
+    except Exception as exc:
+        raise AllowanceError(503, 'Could not read HA states: %s' % exc)
+    wanted = set(entities)
+    classes = []
+    for st in states or []:
+        if st.get('entity_id') not in wanted:
+            continue
+        attrs = st.get('attributes') or {}
+        dc = str(attrs.get('device_class') or '').lower()
+        if dc in ('garage', 'garage_door', 'gate', 'door', 'lock'):
+            classes.append({'entity_id': st.get('entity_id'), 'device_class': dc})
+    return classes
+
+
+def _risk_for(domain, entities):
+    """Answer 6: a risky catalogue row OR a garage/gate/door/lock entity."""
+    rows = [catalogue_row(INTEGRATION, f'{domain}.{service}')
+            for service in CATALOGUE_BY_DOMAIN.get(domain, {}).get('actions', {})]
+    risky_row = any(r and r['risk'] for r in rows)
+    return risky_row, _risky_classes(entities)
+
+
+CATALOGUE_BY_DOMAIN = {e['domain']: e for e in CATALOGUE}
+
+
+def create_allowance(actor, agent_id, name, domain, service, entities,
+                     rate_per_hour=0, window='', expires_at=0,
+                     risk_ack=False, profile_id=0, profile_version=0,
+                     source_label_id=''):
+    """Validate and insert one allowance (save path)."""
+    from db.core import db_conn
+    from db.audit import record_audit_event
+    _init_allowance_tables()
+    ensure_initialised()
+    domain = (domain or '').strip().lower()
+    service = (service or '').strip().lower()
+    if not _SERVICE_RE.fullmatch(domain) or not _SERVICE_RE.fullmatch(service):
+        raise AllowanceError(400, 'A domain and a service are required.')
+    row = catalogue_row(INTEGRATION, f'{domain}.{service}')
+    if row is None:
+        raise AllowanceError(400, 'That type and action are not in the catalogue.')
+    if not ceiling_allows(INTEGRATION, domain, service):
+        raise AllowanceError(400, 'The ceiling does not allow %s.%s.' %
+                             (domain, service))
+    entities = validate_entity_set(domain, entities)
+    risky_row, risky_entities = _risk_for(domain, entities)
+    if (risky_row or risky_entities) and not risk_ack:
+        raise AllowanceError(
+            400, 'This allowance needs a second risk confirmation.',
+            {'code': 'risk_ack_required', 'risky_row': risky_row,
+             'risky_entities': risky_entities})
+    if window:
+        _check_window(window)
+    if rate_per_hour and not (0 <= int(rate_per_hour) <= 1000):
+        raise AllowanceError(400, 'The rate cap is out of range.')
+    # BD5: pin the registry entry now; a missing entity refuses the save.
+    registry = _ha_registry()
+    pins = []
+    for ent in entities:
+        reg = registry.get(ent)
+        if not reg:
+            raise AllowanceError(400, 'HA does not know the entity %s.' % ent)
+        pins.append({'entity_id': ent, 'registry_id': reg.get('id') or ''})
+    conditions = {'domain': _condition_in(domain),
+                  'service': _condition_in(service),
+                  'data.entity_id': {'in': entities}}
+    now = _now()
+    with db_conn() as conn:
+        cur = conn.execute(
+            'INSERT INTO allowances (agent_id, integration, tool, name, '
+            'conditions_json, entities_json, source_label_id, rate_per_hour, '
+            'window, expires_at, version, created_by, created_at, '
+            'profile_id, profile_version) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+            (int(agent_id), INTEGRATION, ALLOWANCE_TOOL, (name or 'Allowance')[:80],
+             __import__('json').dumps(conditions, sort_keys=True),
+             __import__('json').dumps(pins), source_label_id or '',
+             int(rate_per_hour or 0), window or '', int(expires_at or 0), 1,
+             actor, now, int(profile_id or 0), int(profile_version or 0)))
+        aid = cur.lastrowid
+        conn.commit()
+    record_audit_event('allowance_created',
+                       details='allowance #%d by %s: %s %s.%s on %d entities%s'
+                               % (aid, actor, name, domain, service, len(entities),
+                                  ' (risky confirmed)' if risk_ack else ''))
+    return get_allowance(aid)
+
+
+def _check_window(window):
+    import re as _re
+    m = _re.fullmatch(r'([01]\d|2[0-3]):([0-5]\d)-([01]\d|2[0-3]):([0-5]\d)', window or '')
+    if not m or (m.group(1), m.group(2)) == (m.group(3), m.group(4)):
+        raise AllowanceError(400, 'The window must be HH:MM-HH:MM and not empty.')
+
+
+def _in_window(window, now_ts=None):
+    if not window:
+        return True
+    from datetime import datetime
+    lt = datetime.fromtimestamp(now_ts or _now()).astimezone()
+    minutes = lt.hour * 60 + lt.minute
+    a, b = window.split('-')
+    start = int(a[:2]) * 60 + int(a[3:])
+    end = int(b[:2]) * 60 + int(b[3:])
+    if start < end:
+        return start <= minutes < end
+    return minutes >= start or minutes < end
+
+
+def get_allowance(aid):
+    from db.core import db_conn
+    with db_conn() as conn:
+        row = conn.execute('SELECT * FROM allowances WHERE id = ?', (aid,)).fetchone()
+    return dict(row) if row else None
+
+
+def list_allowances(include_revoked=False):
+    from db.core import db_conn
+    _init_allowance_tables()
+    with db_conn() as conn:
+        sql = 'SELECT * FROM allowances'
+        if not include_revoked:
+            sql += ' WHERE revoked_at = 0'
+        rows = conn.execute(sql + ' ORDER BY id DESC').fetchall()
+    return [dict(r) for r in rows]
+
+
+def _matches(row, domain, service, entities):
+    import json as _json
+    try:
+        cond = _json.loads(row['conditions_json'] or '{}')
+    except ValueError:
+        return False
+    if cond.get('domain', {}).get('in') != [domain]:
+        return False
+    if cond.get('service', {}).get('in') != [service]:
+        return False
+    allowed = set(cond.get('data.entity_id', {}).get('in') or [])
+    return bool(entities) and set(entities) <= allowed
+
+
+def _parse_call(args):
+    """Only plain entity ids; any expanding target gets a card."""
+    domain = str((args or {}).get('domain') or '').strip().lower()
+    service = str((args or {}).get('service') or '').strip().lower()
+    if not _SERVICE_RE.fullmatch(domain) or not _SERVICE_RE.fullmatch(service):
+        return None
+    data = (args or {}).get('data')
+    target = (args or {}).get('target')
+    if target not in (None, {}, ''):
+        return None
+    if data in (None, ''):
+        entities = []
+    elif not isinstance(data, dict):
+        return None
+    else:
+        for key in data:
+            if key != 'entity_id':
+                return None
+        raw = data.get('entity_id')
+        if isinstance(raw, str):
+            entities = [raw.strip().lower()]
+        elif isinstance(raw, list) and raw:
+            entities = [str(x).strip().lower() for x in raw]
+        else:
+            return None
+    if not entities or 'all' in entities or 'none' in entities:
+        return None
+    if not all(_ENTITY_RE.fullmatch(e) for e in entities):
+        return None
+    return domain, service, entities
+
+
+def match_and_claim(agent, integration, tool, args, call_ref=''):
+    """Return (id, name) when one live allowance matches; count the use.
+
+    The rate check and the insert are one BEGIN IMMEDIATE transaction. Any
+    failure (no match, ambiguous, over rate, window, expired, suspended) gives
+    None, which the caller turns into the ordinary card.
+    """
+    from db.core import db_conn, get_db
+    from db.audit import record_audit_event
+    if integration != INTEGRATION or tool != ALLOWANCE_TOOL:
+        return None
+    agent_id = (agent or {}).get('id')
+    if not agent_id:
+        return None
+    parsed = _parse_call(args)
+    if not parsed:
+        return None
+    domain, service, entities = parsed
+    if not ceiling_allows(INTEGRATION, domain, service):
+        return None
+    now = _now()
+    rows = [r for r in list_allowances() if r['agent_id'] == int(agent_id)
+            and r['integration'] == INTEGRATION and r['tool'] == ALLOWANCE_TOOL]
+    hits = [r for r in rows if _matches(r, domain, service, entities)]
+    if len(hits) > 1:
+        record_audit_event('allowance_ambiguous',
+                           details='%d allowances match %s.%s; card shown'
+                                   % (len(hits), domain, service))
+        return None
+    if not hits:
+        return None
+    row = hits[0]
+    if row['suspended_at']:
+        return None
+    if row['expires_at'] and row['expires_at'] <= now:
+        return None
+    if not _in_window(row['window'], now):
+        return None
+    conn = get_db()
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        live = conn.execute('SELECT * FROM allowances WHERE id = ? AND revoked_at = 0 '
+                            'AND suspended_at = 0', (row['id'],)).fetchone()
+        if not live:
+            conn.rollback()
+            return None
+        if live['rate_per_hour']:
+            used = conn.execute('SELECT COUNT(*) AS n FROM allowance_uses '
+                                'WHERE allowance_id = ? AND used_at >= ?',
+                                (row['id'], now - 3600)).fetchone()['n']
+            if used >= live['rate_per_hour']:
+                conn.rollback()
+                return None
+        conn.execute('INSERT INTO allowance_uses (allowance_id, used_at, call_ref) '
+                     'VALUES (?, ?, ?)', (row['id'], now, call_ref or ''))
+        conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return None
+    finally:
+        conn.close()
+    record_audit_event('allowance_used',
+                       details='allowance #%d ran %s.%s on %d entities'
+                               % (row['id'], domain, service, len(entities)))
+    return row['id'], row['name']
+
+
+def revoke_allowance(actor, aid):
+    from db.core import db_conn
+    from db.audit import record_audit_event
+    with db_conn() as conn:
+        conn.execute('UPDATE allowances SET revoked_at = ? WHERE id = ? AND revoked_at = 0',
+                     (_now(), aid))
+        conn.commit()
+    record_audit_event('allowance_revoked', details='allowance #%d revoked by %s' % (aid, actor))
+
+
+def suspend_allowance(actor, aid, reason):
+    from db.core import db_conn
+    from db.audit import record_audit_event
+    with db_conn() as conn:
+        conn.execute('UPDATE allowances SET suspended_at = ?, suspended_reason = ? '
+                     'WHERE id = ?', (_now(), reason, aid))
+        conn.commit()
+    record_audit_event('allowance_suspended',
+                       details='allowance #%d suspended by %s: %s' % (aid, actor, reason))
+
+
+def resume_allowance(actor, aid):
+    from db.core import db_conn
+    from db.audit import record_audit_event
+    row = get_allowance(aid)
+    if not row:
+        raise AllowanceError(404, 'No such allowance.')
+    import json as _json
+    cond = _json.loads(row['conditions_json'] or '{}')
+    domain = (cond.get('domain', {}).get('in') or [''])[0]
+    service = (cond.get('service', {}).get('in') or [''])[0]
+    if not ceiling_allows(INTEGRATION, domain, service):
+        raise AllowanceError(400, 'The ceiling no longer allows this allowance.')
+    import json as _json2
+    pins = _json2.loads(row['entities_json'] or '[]')
+    registry = _ha_registry()
+    for pin in pins:
+        reg = registry.get(pin.get('entity_id'))
+        if not reg or (pin.get('registry_id') and reg.get('id') and
+                       reg.get('id') != pin.get('registry_id')):
+            raise AllowanceError(400, 'The entity %s changed; re-confirm the '
+                                 'allowance explicitly.' % pin.get('entity_id'))
+    with db_conn() as conn:
+        conn.execute('UPDATE allowances SET suspended_at = 0, suspended_reason = \'\' '
+                     'WHERE id = ?', (aid,))
+        conn.commit()
+    record_audit_event('allowance_resumed', details='allowance #%d resumed by %s' % (aid, actor))
+
+
+# ── Profiles (a named set of allowance templates) ──────────────────────────
+
+def _resolve_label(label_id, domain):
+    """Resolve a label to entity ids at apply time (never at match)."""
+    registry = _ha_registry()
+    out = []
+    for ent, reg in registry.items():
+        labels = reg.get('labels') or []
+        if label_id in labels and ent.startswith(domain + '.'):
+            out.append(ent)
+    return sorted(out)
+
+
+def create_profile(actor, name, description='', templates=None,
+                   version=None, profile_id=None):
+    from db.core import db_conn
+    from db.audit import record_audit_event
+    import json as _json
+    _init_allowance_tables()
+    templates = templates or []
+    if not templates:
+        raise AllowanceError(400, 'A profile needs at least one template.')
+    name = (name or '').strip()
+    if not name:
+        raise AllowanceError(400, 'A profile needs a name.')
+    now = _now()
+    with db_conn() as conn:
+        if profile_id:
+            row = conn.execute('SELECT * FROM allowance_profiles WHERE id = ?',
+                               (profile_id,)).fetchone()
+            if not row:
+                raise AllowanceError(404, 'No such profile.')
+            ver = int(row['version']) + 1
+            conn.execute('UPDATE allowance_profiles SET name = ?, description = ?, '
+                         'version = ?, updated_at = ? WHERE id = ?',
+                         (name, description or '', ver, now, profile_id))
+            pid = profile_id
+        else:
+            ver = 1
+            cur = conn.execute('INSERT INTO allowance_profiles (name, description, '
+                               'version, created_by, created_at, updated_at) '
+                               'VALUES (?,?,?,?,?,?)',
+                               (name, description or '', ver, actor, now, now))
+            pid = cur.lastrowid
+        for t in templates:
+            _domain = (t.get('domain') or '').strip().lower()
+            _service = (t.get('service') or '').strip().lower()
+            if catalogue_row(INTEGRATION, f'{_domain}.{_service}') is None:
+                raise AllowanceError(400, 'Not in the catalogue: %s.%s' %
+                                     (_domain, _service))
+            if not ceiling_allows(INTEGRATION, _domain, _service):
+                raise AllowanceError(400, 'The ceiling does not allow %s.%s.' %
+                                     (_domain, _service))
+            if not t.get('label_id'):
+                validate_entity_set(_domain, t.get('entities') or [])
+            conn.execute('INSERT INTO allowance_profile_templates '
+                         '(profile_id, profile_version, integration, tool, name, '
+                         'domain, service, entities_json, label_id, rate_per_hour, '
+                         'window, expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+                         (pid, ver, INTEGRATION, ALLOWANCE_TOOL, t.get('name', ''),
+                          t.get('domain', ''), t.get('service', ''),
+                          _json.dumps(t.get('entities') or []),
+                          t.get('label_id', ''), int(t.get('rate_per_hour') or 0),
+                          t.get('window', ''), int(t.get('expires_at') or 0)))
+        conn.commit()
+    record_audit_event('allowance_profile_saved',
+                       details='profile #%d %r version %d by %s' % (pid, name, ver, actor))
+    return get_profile(pid)
+
+
+def get_profile(pid):
+    from db.core import db_conn
+    import json as _json
+    with db_conn() as conn:
+        p = conn.execute('SELECT * FROM allowance_profiles WHERE id = ?', (pid,)).fetchone()
+        if not p:
+            return None
+        tpls = conn.execute('SELECT * FROM allowance_profile_templates '
+                            'WHERE profile_id = ? AND profile_version = ? ORDER BY id',
+                            (pid, p['version'])).fetchall()
+    out = dict(p)
+    out['templates'] = []
+    for t in tpls:
+        d = dict(t)
+        d['entities'] = _json.loads(d.pop('entities_json') or '[]')
+        out['templates'].append(d)
+    return out
+
+
+def list_profiles():
+    from db.core import db_conn
+    _init_allowance_tables()
+    with db_conn() as conn:
+        rows = conn.execute('SELECT id FROM allowance_profiles WHERE deleted_at = 0 '
+                            'ORDER BY id DESC').fetchall()
+    return [get_profile(r['id']) for r in rows]
+
+
+def apply_profile(actor, pid, agent_id, risk_ack=False):
+    """Create one allowance per template (all validated first)."""
+    profile = get_profile(pid)
+    if not profile:
+        raise AllowanceError(404, 'No such profile.')
+    prepared = []
+    for t in profile['templates']:
+        domain = (t.get('domain') or '').strip().lower()
+        service = (t.get('service') or '').strip().lower()
+        entities = list(t.get('entities') or [])
+        if t.get('label_id'):
+            entities = _resolve_label(t['label_id'], domain)
+            if not entities:
+                raise AllowanceError(400, 'Label %r has no %s entities.' %
+                                     (t['label_id'], domain))
+        prepared.append((t, domain, service, entities))
+    from db.core import db_conn
+    # "Update agents": a re-apply replaces this agent's allowances from the
+    # same profile. Revoke (never delete) the old ones so two versions cannot
+    # both match and turn every call into an ambiguous card.
+    with db_conn() as conn:
+        old_rows = conn.execute(
+            'SELECT id FROM allowances WHERE agent_id = ? AND profile_id = ? '
+            'AND revoked_at = 0', (int(agent_id), pid)).fetchall()
+    for old_row in old_rows:
+        revoke_allowance(actor, old_row['id'])
+    for t, domain, service, entities in prepared:
+        if not ceiling_allows(INTEGRATION, domain, service):
+            raise AllowanceError(400, 'The ceiling does not allow %s.%s.' %
+                                 (domain, service))
+        validate_entity_set(domain, entities)
+    created = []
+    for t, domain, service, entities in prepared:
+        created.append(create_allowance(
+            actor, agent_id, t.get('name') or profile['name'], domain, service,
+            entities, rate_per_hour=t.get('rate_per_hour') or 0,
+            window=t.get('window') or '', expires_at=t.get('expires_at') or 0,
+            risk_ack=risk_ack, profile_id=pid,
+            profile_version=profile['version'], source_label_id=t.get('label_id') or ''))
+    return {'profile_id': pid, 'version': profile['version'], 'created': created}

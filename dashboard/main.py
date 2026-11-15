@@ -375,6 +375,7 @@ def on_startup():
         print(f"installer channels: initialisation failed: {exc}")
     try:
         allowances.ensure_initialised()
+        allowances._init_allowance_tables()
     except Exception as exc:  # the ceiling endpoints fail closed without it
         print(f"allowance ceiling: initialisation failed: {exc}")
     # Start background gateway transition watcher (offline detection)
@@ -629,6 +630,30 @@ class CeilingPayload(BaseModel):
 
 class WordPayload(BaseModel):
     word: str = ""
+
+
+class ProfilePayload(BaseModel):
+    name: str
+    description: str = ''
+    templates: list[dict] = []
+    profile_id: int = 0
+
+
+class ApplyProfilePayload(BaseModel):
+    agent_id: int
+    risk_ack: bool = False
+
+
+class AllowancePayload(BaseModel):
+    agent_id: int
+    name: str = ''
+    domain: str
+    service: str
+    entities: list[str] = []
+    rate_per_hour: int = 0
+    window: str = ''
+    expires_at: int = 0
+    risk_ack: bool = False
 
 
 class PolicyPayload(BaseModel):
@@ -3617,6 +3642,18 @@ def get_notify_config_endpoint(request: Request):
 @app.put("/api/notify-config")
 def set_notify_config_endpoint(payload: NotifyConfigPayload, request: Request):
     _check_session(request)
+    before = get_notify_config()
+    had_ceiling = 'ceiling' in [e.strip() for e in (before.get('events') or '').split(',')]
+    has_ceiling = 'ceiling' in [e.strip() for e in (payload.events or '').split(',')]
+    if had_ceiling and not has_ceiling:
+        # F27 answer 7: turning the ceiling event off is itself audited and
+        # sends one last notification (sent before the new config lands, while
+        # the event is still subscribed).
+        record_audit_event('notify_ceiling_off', 'dashboard',
+                           details='Ceiling notifications turned off by the operator')
+        from core.notify import send_notify
+        send_notify('ceiling', 'Allowance ceiling notifications off',
+                    'The ceiling event was turned off; this is the last one.')
     set_notify_config(payload.url, payload.events, payload.dashboard_url)
     record_audit_event("notify_config_updated", "dashboard",
                        details=f"Webhook URL {'set' if payload.url else 'cleared'}, events: {payload.events}")
@@ -4939,6 +4976,80 @@ def remove_allowance_word(word: str, request: Request):
         return allowances.remove_word('operator', word)
     except allowances.CeilingError as exc:
         raise HTTPException(status_code=exc.status, detail=exc.detail)
+
+
+@app.get("/api/allowances")
+def list_allowances_endpoint(request: Request):
+    _check_session(request)
+    rows = allowances.list_allowances()
+    from db.agent_tokens import get_agent_tokens
+    names = {t['id']: t['name'] for t in get_agent_tokens()}
+    for row in rows:
+        row['agent_name'] = names.get(row['agent_id'], 'agent #%d' % row['agent_id'])
+    return rows
+
+
+@app.post("/api/allowances")
+def create_allowance_endpoint(payload: AllowancePayload, request: Request):
+    _check_session(request)
+    try:
+        return allowances.create_allowance(
+            'operator', payload.agent_id, payload.name, payload.domain,
+            payload.service, payload.entities, rate_per_hour=payload.rate_per_hour,
+            window=payload.window, expires_at=payload.expires_at,
+            risk_ack=payload.risk_ack)
+    except allowances.AllowanceError as exc:
+        detail = exc.detail
+        if exc.extra:
+            detail = {'message': exc.detail, **exc.extra}
+        raise HTTPException(status_code=exc.status, detail=detail)
+
+
+@app.post("/api/allowances/{aid}/revoke")
+def revoke_allowance_endpoint(aid: int, request: Request):
+    _check_session(request)
+    allowances.revoke_allowance('operator', aid)
+    return {"status": "ok"}
+
+
+@app.post("/api/allowances/{aid}/resume")
+def resume_allowance_endpoint(aid: int, request: Request):
+    _check_session(request)
+    try:
+        allowances.resume_allowance('operator', aid)
+    except allowances.AllowanceError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.detail)
+    return {"status": "ok"}
+
+
+@app.get("/api/allowances/profiles")
+def list_profiles_endpoint(request: Request):
+    _check_session(request)
+    return allowances.list_profiles()
+
+
+@app.post("/api/allowances/profiles")
+def save_profile_endpoint(payload: ProfilePayload, request: Request):
+    _check_session(request)
+    try:
+        return allowances.create_profile(
+            'operator', payload.name, payload.description, payload.templates,
+            profile_id=payload.profile_id or None)
+    except allowances.AllowanceError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.detail)
+
+
+@app.post("/api/allowances/profiles/{pid}/apply")
+def apply_profile_endpoint(pid: int, payload: ApplyProfilePayload, request: Request):
+    _check_session(request)
+    try:
+        return allowances.apply_profile('operator', pid, payload.agent_id,
+                                        risk_ack=payload.risk_ack)
+    except allowances.AllowanceError as exc:
+        detail = exc.detail
+        if exc.extra:
+            detail = {'message': exc.detail, **exc.extra}
+        raise HTTPException(status_code=exc.status, detail=detail)
 
 
 # ── Static Files ────────────────────────────────────────────────────────
