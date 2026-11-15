@@ -13881,7 +13881,7 @@ four follow-ups are the ones above.
 `bash scripts/verify.sh`: `2886 passed, 26 skipped, 8 warnings in 604.20s
 (0:10:04)`.
 
-## Release 1.3 core · branch `release/1.3-core` · deploy candidate · security read
+## Release 1.3 core · branch `release/1.3-core` · **deployed 2026-11-14** at master `f0af7e7` · security read
 
 **Security review (2026-11-14, at `ac41a70`): approved for the dashboard
 deploy and the gateway-by-gateway fleet rollout. No musts.**
@@ -14270,9 +14270,10 @@ this merge.
 | 18d | X4 | agents-page | dashboard UI | **Merged** 2026-11-12 (into 1.3; on master 2026-11-14): one Agents page (tokens, policy sections, web fetch, activity); Controls renamed Command policy; absent policy fields keep their stored value | `feat/x4-agents-page` | `fix/agent-ssh-hosts` | rename Controls → Command policy |
 | 18e | X5 | ui-test-round | dashboard UI | **Merged** 2026-11-12 (into 1.3; on master 2026-11-14): six test-round fixes plus the X5-r plan-card regression fix | `fix/x5-ui-test-round`, `fix/plans-widget-visible` | — | six small fixes |
 | 18f | X6 | agent-api-round | dashboard | **Merged** 2026-11-12 (into 1.3; on master 2026-11-14): D3/D4, D6, D7, D8 (test), D9, D10, D11, D12, D14, D15, D16a/b, D18a/b, BK5 | `fix/x6-agent-api-round` | — | 12 items; D1 fixed separately |
-| 18g | X7 | installer-channels | dashboard | **Merged** 2026-11-14 (`a0a57ce`; master `800efe3`): real Build/Edge/Fleet channels; Seed Edge → Deploy to Fleet → Rollback; Build only in git, channels outside the checkout; BP1 (no `fleet.prev` on migration) | `fix/x7-installer-channels` | — | security re-read `45a59c3`: BP1 approved; BP2 → X9 |
-| 18h | UI passes | ui-pass-1 / ui-pass-2 | dashboard UI | **Merged** 2026-11-14 with `release/dash-x7`: `3c9dd55` (BS1: the strip reviews, it does not decide), `c22c5ff` polish, `608f676` audit fixes | `fix/ui-pass-1` | X5, `docs/ui-audit` | BS1 approved; plan approved only where its commands are visible |
-| 18i | 1.3 | core | dashboard + gateway | **Merged** 2026-11-14 (master `14e19fc`); dashboard deploy candidate `release/dash-x7` | `release/1.3-core` | — | security approved `ac41a70`; BM1/BM2/BO1 in |
+| 18g | X7 | installer-channels | dashboard | **Merged and deployed** 2026-11-14 (`a0a57ce`; deployed at master `800efe3`): real Build/Edge/Fleet channels; Seed Edge → Deploy to Fleet → Rollback; Build only in git, channels outside the checkout; BP1 (no `fleet.prev` on migration) | `fix/x7-installer-channels` | — | security re-read `45a59c3`: BP1 approved; BP2 → X9 |
+| 18h | UI passes | ui-pass-1 / ui-pass-2 | dashboard UI | **Merged and deployed** 2026-11-14 (`800efe3`): `3c9dd55` (BS1: the strip reviews, it does not decide), `c22c5ff` polish, `608f676` audit fixes; live and approved by the operator (the "wash" they saw was a browser extension) | `fix/ui-pass-1` | X5, `docs/ui-audit` | BS1 approved; plan approved only where its commands are visible |
+| 18i | 1.3 | core | dashboard + gateway | **Merged and deployed** 2026-11-14 (deployed at master `f0af7e7`; BO1 with `800efe3`) | `release/1.3-core` | — | security approved `ac41a70` |
+| 18j | Release tests | release-tests-1.3 | docs | **Merged and deployed** 2026-11-14 (`800efe3`): Release 1.3 checks and the fleet rollout checklist | `docs/release-tests-1.3` | 1.3 | operator walk-through |
 | 19 | F22 | change-checks | dashboard + MCP | Code round 3: rebased onto the 1.3 stack (lockbox, BE3/BE4, X6, BF2), all four installer files regenerated (the test rebuilds the generator's output) | `feat/f22-change-checks` | F3, F5, F12, F19 | security reviews the gateway hunk and the code |
 | 20 | F16 | recipes | dashboard + MCP | Design complete (security Round 4; feature reviewer Round 5 with AA1/AA2); code next after F22 | `feat/f16-recipes` | F3, F12, F13, F19 | main line; steps claim by request id; code comes back to security; auto_run comes back to security |
 | 21 | F24 | content-tripwire | dashboard | Design first | `feat/f24-content-tripwire` | F12, F14 | + security sign-off (retention) |
