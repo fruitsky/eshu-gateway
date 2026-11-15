@@ -1184,3 +1184,14 @@ def profile_diff(pid, agent_id):
                         'service': (__import__('json').loads(r['conditions_json'])['service']['in'][0]),
                         'version': r['version']} for r in existing],
             'add': add, 'up_to_date': up_to_date}
+
+
+def agent_allowance_line(agent_id):
+    """Answer 8: one generic line, never the operator's ceiling list."""
+    if not agent_id:
+        return ''
+    live = [r for r in list_allowances() if r['agent_id'] == int(agent_id)]
+    if not live:
+        return ''
+    return ('Calls matching one of your allowances run without approval. '
+            'The window, rate and expiry still apply.')

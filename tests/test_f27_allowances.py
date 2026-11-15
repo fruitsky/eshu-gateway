@@ -239,3 +239,4 @@ def test_the_update_agents_diff_shows_revoke_and_add(auth_client, agent_id, ha):
                          json={'agent_id': agent_id, 'risk_ack': True})
     assert len(r.json()['created']) == 2
     assert len(a.list_allowances()) == 2
+
