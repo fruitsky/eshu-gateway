@@ -2223,6 +2223,27 @@ def mark_learning_gaps_seen(request: Request):
     mark_all_seen()
     return {"status": "ok"}
 
+def _clear_pre_x9_retirement_if_needed(channel):
+    """N4: a pre-X9 installer must not inherit a retired route set."""
+    info = installer_channels.channel_info(channel)
+    if not info:
+        return False
+    try:
+        data = installer_channels.read(channel)
+    except installer_channels.ChannelMissing:
+        return False
+    if b'install_seed_files' in data:
+        return False
+    if get_meta('legacy_pre_x9_retired') == '1':
+        set_meta('legacy_pre_x9_retired', '0')
+        record_audit_event(
+            'legacy_pre_x9_retirement_cleared',
+            details='A pre-X9 installer became current; the frozen routes '
+                    'are served again instead of 410.')
+        return True
+    return False
+
+
 def _channel_error(exc):
     return HTTPException(status_code=503,
                          detail=f"Installer channel unavailable: {exc}")
@@ -2262,6 +2283,7 @@ def promote_edge(request: Request):
     except installer_channels.ChannelMissing:
         raise HTTPException(status_code=404, detail="No Edge installer found. Seed Edge first.")
     fleet_hash = fleet['installer']
+    _clear_pre_x9_retirement_if_needed(installer_channels.FLEET)
     set_meta('installer_fleet_promoted_at', str(int(time.time())))
     clear_dev_push_initiated()
     clear_trigger_dev_update()
@@ -2285,6 +2307,7 @@ def rollback_golden(request: Request):
     except installer_channels.ChannelMissing:
         raise HTTPException(status_code=404, detail="No previous Fleet installer available. Deploy to Fleet first.")
     fleet_hash = fleet['installer']
+    _clear_pre_x9_retirement_if_needed(installer_channels.FLEET)
     set_meta('installer_fleet_promoted_at', str(int(time.time())))
     clear_dev_push_initiated()
     clear_trigger_dev_update()
@@ -5094,9 +5117,17 @@ def _serve_legacy_file(name: str, request: Request):
             detail='The pre-X9 gateway-file routes were retired; update this '
                    'gateway to 1.4 with the X9 installer.')
     try:
-        set_meta('legacy_pre_x9_last_hit_at', str(int(time.time())))
-        set_meta('legacy_pre_x9_last_hit_ip',
-                 (request.client.host if request.client else '') or '')
+        # N4 nit: the routes are unauthenticated. Record at most one hit a
+        # minute, so an anonymous caller cannot force a write per request.
+        now = int(time.time())
+        try:
+            last = int(get_meta('legacy_pre_x9_last_hit_at') or 0)
+        except (TypeError, ValueError):
+            last = 0
+        if now - last >= 60:
+            set_meta('legacy_pre_x9_last_hit_at', str(now))
+            set_meta('legacy_pre_x9_last_hit_ip',
+                     (request.client.host if request.client else '') or '')
     except Exception:
         pass
     try:

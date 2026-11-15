@@ -181,6 +181,28 @@ class TestLegacyRoutes:
         assert status['gateway_count'] == 1
         assert status['retire_available'] is False
 
+    def test_the_hit_record_is_throttled(self, auth_client):
+        from db.policies import get_meta, set_meta
+        now = int(__import__('time').time())
+        set_meta('legacy_pre_x9_last_hit_at', str(now))
+        set_meta('legacy_pre_x9_last_hit_ip', '192.0.2.1')
+        assert auth_client.get('/static/features/approved_windows.sh').status_code == 200
+        assert get_meta('legacy_pre_x9_last_hit_at') == str(now)
+        set_meta('legacy_pre_x9_last_hit_at', str(now - 120))
+        auth_client.get('/static/features/approved_windows.sh')
+        assert int(get_meta('legacy_pre_x9_last_hit_at')) >= now
+
+    def test_a_pre_x9_installer_clears_retirement(self, auth_client, build):
+        from db.audit import get_audit_log
+        from db.policies import get_meta, set_meta
+        set_meta('legacy_pre_x9_retired', '1')
+        auth_client.post('/api/dev/seed')
+        r = auth_client.post('/api/dev/promote')
+        assert r.status_code == 200
+        assert get_meta('legacy_pre_x9_retired') == '0'
+        assert 'legacy_pre_x9_retirement_cleared' in [
+            x['event_type'] for x in get_audit_log(50)]
+
     def test_a_recent_legacy_hit_blocks_the_switch(self, auth_client):
         from db.policies import set_meta
         set_meta('legacy_pre_x9_since', '1')

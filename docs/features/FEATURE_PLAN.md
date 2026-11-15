@@ -17656,8 +17656,8 @@ files (`build_inconsistent`), so an edited file without a regenerated
 installer cannot create a mixed generation. The two fetches add
 `--proto '=https'` (and no redirects).
 
-`bash scripts/verify.sh`: `3217 passed, 26 skipped, 7 warnings in 689.19s
-(0:11:29)`.
+`bash scripts/verify.sh`: `3219 passed, 26 skipped, 7 warnings in 688.38s
+(0:11:28)`.
 
 * **Not in X9:** the existing installer-update download over `http://` (BU2's
   separate item, backlog above).
@@ -17762,6 +17762,13 @@ build.**
   * The marker check skips only test stubs.
 * **Nits.** Both fetches now use `--proto '=https'` and do not follow
   redirects.
+
+**N4 nits implemented (2026-11-15).** If Deploy to Fleet or Rollback makes
+a pre-X9 installer current, the retirement flag is cleared and audited, so a
+rollback cannot leave gateways on a retired route set. The frozen-route hit
+record is written at most once a minute, so an anonymous caller cannot force
+two meta writes per request. Tests: a pre-X9 promotion clears retirement and
+writes the audit row; a recent hit is not rewritten and an old one is.
 
 **Nits for the next touch (none block the merge):**
 * **Rollback after retirement.**
