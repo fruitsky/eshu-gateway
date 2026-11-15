@@ -17941,6 +17941,72 @@ gated.
 `bash scripts/verify.sh`: `3215 passed, 26 skipped, 7 warnings in 690.05s
 (0:11:30)`.
 
+### Round 5 — the remaining F27 slices (2026-11-15)
+
+**AZ2.** An approved `ha_config_write` now calls
+`allowances.on_config_write()` after the write succeeds. A plain entity id
+in the written text suspends the allowances that name it
+(`suspended_reason='config_write'`); an `!include`, `packages:`, or a
+type-level block (`light:` …) means the mapping is incomplete and every HA
+allowance is suspended (`config_write_unmapped`), as security accepted.
+Suspension is audited and never deletes; a dry run does not trigger it.
+
+**The label refresh.** A background job (every five minutes) re-resolves
+label-sourced allowances. A leaver drops out of the stored entity list at
+once; a joiner is held in `pending_json` and shown as "N new" with an
+Accept button; a changed registry id suspends the allowance
+(`registry_changed`); a failed registry read changes nothing. Resume and
+apply re-check the pins.
+
+**Update agents.** A profile card opens a preview: the live allowances the
+re-apply would revoke, the templates it would add, and whether the agent is
+already on the current version. Nothing is written until the separate
+Apply update; the server computes the same lists the modal shows.
+
+**The F6 bucket.** An allowance run is an MCP integration call with
+`approval='allowance:<id>'`. It is now its own bucket in the session
+wrap-up (an allowance-only session still shows the card), in the statistics
+totals/series, and in the chip legend with its own dot colour.
+
+**The agent line.** When the calling agent has a live allowance, its
+visible MCP tools carry one generic line: calls matching an allowance run
+without approval, and the window/rate/expiry still apply. It names no type
+or entity (answer 8).
+
+**Endpoints.** All below take a dashboard session; every non-GET also needs
+the CSRF middleware's `X-Eshu-CSRF` (the gateway-token routes of X9 are the
+exception, and they are token-bound).
+
+| Method | Path | Auth |
+|---|---|---|
+| GET | `/api/allowances/ceiling` | session |
+| PUT | `/api/allowances/ceiling` | session + CSRF |
+| POST | `/api/allowances/words` | session + CSRF |
+| DELETE | `/api/allowances/words/{word}` | session + CSRF |
+| GET | `/api/allowances` | session |
+| POST | `/api/allowances` | session + CSRF |
+| POST | `/api/allowances/{id}/revoke` | session + CSRF |
+| POST | `/api/allowances/{id}/resume` | session + CSRF |
+| POST | `/api/allowances/{id}/accept-join` | session + CSRF |
+| GET | `/api/allowances/profiles` | session |
+| POST | `/api/allowances/profiles` | session + CSRF |
+| GET | `/api/allowances/profiles/{pid}/diff?agent_id=` | session |
+| POST | `/api/allowances/profiles/{pid}/apply` | session + CSRF |
+
+**Tables.** `allowance_ceiling` and `allowance_never_words` (the ceiling);
+`allowances`, `allowance_uses`, `allowance_profiles`,
+`allowance_profile_templates` (the engine). `integration_calls.approval`
+carries `allowance:<id>` for the F6 bucket. No existing column changed.
+
+**Screenshots** (not committed; the host only allows the workspace, so they
+live under `.scratch/f27-shots/` outside git): `allowances-empty-1440.png`,
+`allowances-empty-390.png`, `allowances-seeded-1440.png`,
+`allowances-seeded-390.png` — the page empty and with three allowances
+(active, suspended, pending join) and a profile, at both widths.
+
+`bash scripts/verify.sh`: `3222 passed, 26 skipped, 7 warnings in 695.57s
+(0:11:35)`.
+
 ## Chunk X3 — Integrations page and agent policy modal pass · slug `integrations-ui` · dashboard UI · after F27
 
 ### Goal
