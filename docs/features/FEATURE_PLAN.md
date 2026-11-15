@@ -17507,6 +17507,91 @@ the gateway has registered.
 `bash scripts/verify.sh`: `3033 passed, 26 skipped, 8 warnings in 667.64s
 (0:11:07)` (docs only).
 
+### Security review of the X9 design (security reviewer, 2026-11-15, at `432467b`)
+
+**Design (b) is the right one. Two musts (BU1, BU2) for the code round,
+then the eight answers.**
+
+**BU1 (must): one release generation, promoted and rolled back as a set.**
+* The installer and the two files must never be mixed across generations.
+  BS1 showed why: a 1.4 installer with a pre-BS1 window script refuses
+  every window.
+* Seed Edge copies Build's installer **and** `gateway-files/` together
+  into Edge, as one generation with one id and the three hashes.
+* Deploy to Fleet moves that generation, and Rollback restores the
+  previous generation **whole**. That answers question 6: yes, always
+  together.
+* The installer's seed copies come from the same generation. The route
+  serves the files of the generation the gateway's channel holds.
+* The audit row names the generation id and all three hashes.
+
+**BU2 (must): no root-run file over plain HTTP.**
+* `/etc/eshu/dashboard_url` allows a LAN `http://` URL (for slow ARM
+  gateways). Over HTTP, the token header, the sha256 header and the bytes
+  can all be rewritten in transit, which gives code execution as root on
+  that gateway.
+* The new authenticated fetch must refuse when the URL is not
+  `https://`. It keeps the installed copy and logs one line per hour.
+  The fleet runner must likewise not be fetched over HTTP: the command
+  fails, and the command is not marked done.
+* The status page flags gateways on an `http://` dashboard URL.
+* The same exposure already exists for the installer update path and for
+  `/static` today. Record it as a separate item (for example, refuse
+  `--update` downloads over HTTP, or pin by hash from the HTTPS
+  registration). X9 must not add a new path with it.
+
+**Answers:**
+1. **Mode or reported channel?** The operator's `dev` mark decides,
+   server-side, and nothing the gateway reports does.
+   * A dev-marked gateway reporting a Fleet installer still gets Edge
+     files.
+   * Under BU1 that pairing is visible: the X8 badge, plus the file hash
+     from answer 7. Show "installer and files on different channels" as a
+     warning, not a block.
+   * Changing the `dev` mark is a session-only, audited operator action
+     that no agent or MCP path can reach. Assert that with a route test.
+2. **Freezing 1.3.** Yes: a frozen `legacy-1.3/` tree behind explicit
+   routes. The checkout copy must not stay live.
+   * Pin the frozen files' sha256 in a test, so changing them needs a
+     deliberate edit of the pin in the same commit (the "security fix
+     only" rule, enforced).
+   * The legacy routes serve only those two paths, read-only, `no-store`.
+3. **The seed copy.** Acceptable. The seed is inside the installer's
+   bytes, so it is already gated by the channel the installer came from.
+   With BU1 it is the same generation as the channel's files. The first
+   authenticated fetch replaces it.
+4. **Integrity.** TLS, a token bound to the IP, atomic replacement and
+   `bash -n` are enough against everything except a hostile dashboard.
+   * A `sha256` header from the same response, or a hash pinned in the
+     policy from the same server, adds nothing against that threat. Both
+     come from the dashboard. They only catch truncation or a broken
+     proxy.
+   * Keep the header for that, but don't describe it as more than that.
+   * A real defence against a compromised dashboard needs an offline
+     signing key. That is a separate chunk, not X9.
+5. **Staleness.** Keep the last good copy indefinitely. It was reviewed
+   when it was promoted, and refusing claims would turn a dashboard
+   outage into a window outage. Surface staleness through answer 7.
+6. **Rollback.** Always together; see BU1.
+7. **Per-gateway file hash.** Yes. Report the hashes of the window script
+   and the fleet runner the same way as X8's installer hash: a
+   self-report, IP-bound, 12 hex, display only. It is the only way an
+   operator can see a gateway stuck on an old copy (answers 1 and 5).
+8. **Retiring 1.3.** A manual switch, offered once no 1.3 gateway has
+   polled for 7 days. Never automatic: a 1.3 gateway that was switched off
+   would otherwise come back to a 404 and fail without anyone noticing.
+   After the switch, the legacy routes answer 410 with a reason, and the
+   status page names any 1.3 gateway that still polls.
+
+**Tests to add:**
+* A generation moves as one set through Seed, Deploy and Rollback. A
+  partial copy fails and leaves the previous generation served.
+* A rollback restores all three hashes.
+* An `http://` dashboard URL makes the 1.4 poller keep its copy and fetch
+  nothing, and makes the fleet runner launch nothing.
+* The frozen legacy hashes are pinned.
+* A dev-mark change is session-only and audited.
+
 ## Chunk X6 — agent API fixes from the Release 1.2 test round · slug `agent-api-round` · dashboard
 
 From the agent's test report of 2026-11-12, triaged by the feature reviewer.
