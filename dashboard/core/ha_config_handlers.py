@@ -41,6 +41,15 @@ def _h_ha_config_write(integration, tool, args, ctx=None):
             args.get('expect_hash'), ctx=ctx, dry_run=bool(args.get('dry_run')))
     except ha_config_ssh.HaConfigError as exc:
         return _err(exc.code, exc.message)
+    if not args.get('dry_run'):
+        # F27 AZ2: an approved write can turn an allowed entity into a
+        # template/shell command. Suspend what the file can redefine.
+        try:
+            from core import allowances
+            allowances.on_config_write('config-write', args.get('path'),
+                                       args.get('content'))
+        except Exception:
+            pass
     return json.dumps(out)
 
 

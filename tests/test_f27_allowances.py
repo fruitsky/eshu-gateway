@@ -152,3 +152,63 @@ def test_profiles_create_allowances_and_resolve_a_label(auth_client, agent_id, h
         'domain': 'cover', 'service': 'open_cover',
         'data': {'entity_id': 'cover.blind'}})
     assert hit and hit[1] == 'Blind'
+
+
+def test_az2_an_approved_write_suspends_by_entity(auth_client, agent_id, ha):
+    _open_cover(auth_client)
+    _make(auth_client, agent_id)
+    out = a.on_config_write('operator', '/config/switches.yaml',
+                            'switch:\n  - name: Garage\n    command: x\n')
+    assert out['suspended'] == 1
+    assert a.list_allowances()[0]['suspended_at']
+
+
+def test_az2_an_incomplete_mapping_suspends_all(auth_client, agent_id, ha):
+    _open_cover(auth_client)
+    _make(auth_client, agent_id)
+    out = a.on_config_write('operator', '/config/packages/x.yaml',
+                            '!include_dir_named integrations\n')
+    assert out['reason'] == 'config_write_unmapped'
+    assert out['suspended'] == 1
+
+
+def test_a_label_leaver_drops_and_a_joiner_waits(auth_client, agent_id, ha):
+    _open_cover(auth_client)
+    r = auth_client.post('/api/allowances/profiles', json={
+        'name': 'Blinds',
+        'templates': [{'domain': 'cover', 'service': 'open_cover',
+                       'label_id': 'lbl-1'}]})
+    pid = r.json()['id']
+    r = auth_client.post('/api/allowances/profiles/%d/apply' % pid,
+                         json={'agent_id': agent_id, 'risk_ack': True})
+    assert r.status_code == 200, r.text
+    aid = r.json()['created'][0]['id']
+    ha['cover.blind']['labels'] = []          # left the label
+    a.refresh_labels()
+    row = a.get_allowance(aid)
+    assert json.loads(row['entities_json']) == []
+    ha['cover.blind']['labels'] = ['lbl-1']    # joined again
+    ha['cover.garage']['labels'] = ['lbl-1']   # a new member
+    a.refresh_labels()
+    row = a.get_allowance(aid)
+    pending = json.loads(row['pending_json'])
+    assert {p['entity_id'] for p in pending} == {'cover.blind', 'cover.garage'}
+    out = a.accept_join('operator', aid)
+    assert set(out['accepted']) == {'cover.blind', 'cover.garage'}
+
+
+def test_a_changed_registry_id_suspends(auth_client, agent_id, ha):
+    _open_cover(auth_client)
+    r = _make(auth_client, agent_id)
+    ha['cover.garage']['id'] = 'reg-changed'
+    a.refresh_labels() if False else None
+    # Direct pin change via the refresh path: rebuild as a label allowance.
+    r = auth_client.post('/api/allowances/profiles', json={
+        'name': 'P', 'templates': [{'domain': 'cover',
+                                    'service': 'open_cover',
+                                    'label_id': 'lbl-1'}]})
+    aid = auth_client.post('/api/allowances/profiles/%d/apply' % r.json()['id'],
+                           json={'agent_id': agent_id, 'risk_ack': True}).json()['created'][0]['id']
+    ha['cover.blind']['id'] = 'reg-changed'
+    a.refresh_labels()
+    assert a.get_allowance(aid)['suspended_reason'] == 'registry_changed'

@@ -467,7 +467,8 @@ def _init_allowance_tables():
             created_at INTEGER NOT NULL DEFAULT 0,
             revoked_at INTEGER NOT NULL DEFAULT 0,
             profile_id INTEGER NOT NULL DEFAULT 0,
-            profile_version INTEGER NOT NULL DEFAULT 0)''')
+            profile_version INTEGER NOT NULL DEFAULT 0,
+            pending_json TEXT NOT NULL DEFAULT '[]')''')
         conn.execute('''CREATE TABLE IF NOT EXISTS allowance_uses (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             allowance_id INTEGER NOT NULL,
@@ -496,6 +497,11 @@ def _init_allowance_tables():
             rate_per_hour INTEGER NOT NULL DEFAULT 0,
             window TEXT NOT NULL DEFAULT '',
             expires_at INTEGER NOT NULL DEFAULT 0)''')
+        try:
+            conn.execute("ALTER TABLE allowances ADD COLUMN pending_json "
+                         "TEXT NOT NULL DEFAULT '[]'")
+        except Exception:
+            pass
         conn.commit()
     _TABLES_READY.add(key)
 
@@ -986,3 +992,163 @@ def apply_profile(actor, pid, agent_id, risk_ack=False):
             risk_ack=risk_ack, profile_id=pid,
             profile_version=profile['version'], source_label_id=t.get('label_id') or ''))
     return {'profile_id': pid, 'version': profile['version'], 'created': created}
+
+
+# ── AZ2: an approved config write suspends what it can redefine ────────────
+
+_ENTITY_SCAN = re.compile(r'\b([a-z_]+)\.([a-z0-9_]+)\b')
+_YAML_DOMAIN_BLOCK = re.compile(
+    r'^\s*(light|switch|cover|climate|fan|media_player|input_boolean)\s*:',
+    re.MULTILINE)
+
+
+def _live_ha_allowances():
+    return [r for r in list_allowances() if r['integration'] == INTEGRATION]
+
+
+def _suspend_all(actor, reason, detail):
+    from db.audit import record_audit_event
+    count = 0
+    for row in _live_ha_allowances():
+        if not row['suspended_at']:
+            suspend_allowance(actor, row['id'], reason)
+            count += 1
+    if count:
+        record_audit_event('allowance_config_write_suspended',
+                           details='%s: %d allowance(s)' % (detail, count))
+    return count
+
+
+def on_config_write(actor, path, content):
+    """AZ2: suspend allowances an approved HA config write could redefine.
+
+    A file that includes others, or defines entities without a plain entity
+    id, cannot be mapped: suspend every HA allowance (the conservative branch
+    security accepted). Otherwise suspend the allowances whose stored entity
+    ids appear in the text. Suspension, never deletion.
+    """
+    from db.audit import record_audit_event
+    text = content or ''
+    if ('!include' in text or 'packages:' in text
+            or _YAML_DOMAIN_BLOCK.search(text)):
+        n = _suspend_all(actor, 'config_write_unmapped',
+                         'config write %s' % path)
+        record_audit_event('allowance_config_write_scanned',
+                           details='%s: mapping incomplete, suspended all (%d)' %
+                                   (path, n))
+        return {'suspended': n, 'reason': 'config_write_unmapped'}
+    found = set(m.group(0) for m in _ENTITY_SCAN.finditer(text))
+    count = 0
+    for row in _live_ha_allowances():
+        if row['suspended_at']:
+            continue
+        import json as _json
+        pins = _json.loads(row['entities_json'] or '[]')
+        ids = {p.get('entity_id') for p in pins}
+        if ids & found:
+            suspend_allowance(actor, row['id'], 'config_write')
+            count += 1
+    record_audit_event('allowance_config_write_scanned',
+                       details='%s: %d entity id(s), suspended %d allowance(s)'
+                               % (path, len(found), count))
+    return {'suspended': count, 'entities': sorted(found)}
+
+
+# ── The label and registry refresh (accept-to-join) ───────────────────────
+
+def _resolve_label_pins(label_id, domain):
+    registry = _ha_registry()
+    out = []
+    for ent, reg in registry.items():
+        if label_id in (reg.get('labels') or []) and ent.startswith(domain + '.'):
+            out.append({'entity_id': ent, 'registry_id': reg.get('id') or ''})
+    return sorted(out, key=lambda p: p['entity_id'])
+
+
+def refresh_labels(actor='refresh'):
+    """Re-resolve label-sourced allowances: leavers drop, joiners wait.
+
+    A failed registry read changes nothing. A changed registry id suspends
+    the allowance until the operator resumes it (BD5).
+    """
+    from db.core import db_conn
+    from db.audit import record_audit_event
+    import json as _json
+    try:
+        registry = _ha_registry()
+    except AllowanceError as exc:
+        try:
+            from db.policies import set_meta
+            set_meta('allowance_refresh_error', str(exc))
+        except Exception:
+            pass
+        return {'checked': 0, 'error': str(exc)}
+    changed = 0
+    for row in _live_ha_allowances():
+        label = row.get('source_label_id') or ''
+        if not label or row['suspended_at']:
+            continue
+        cond = _json.loads(row['conditions_json'] or '{}')
+        domain = (cond.get('domain', {}).get('in') or [''])[0]
+        stored = {p['entity_id']: p for p in _json.loads(row['entities_json'] or '[]')}
+        current = {p['entity_id']: p for p in _resolve_label_pins(label, domain)}
+        left = set(stored) - set(current)
+        joined = set(current) - set(stored)
+        bad = [e for e, p in stored.items()
+               if e in current and p.get('registry_id')
+               and current[e].get('registry_id')
+               and p['registry_id'] != current[e]['registry_id']]
+        if bad:
+            suspend_allowance(actor, row['id'], 'registry_changed')
+            continue
+        if not left and not joined:
+            continue
+        pins = [stored[e] for e in stored if e not in left]
+        pending = _json.loads(row.get('pending_json') or '[]')
+        have = {p['entity_id'] for p in pending}
+        for e in sorted(joined):
+            if e not in have:
+                pending.append(current[e])
+        with db_conn() as conn:
+            conn.execute('UPDATE allowances SET entities_json = ?, '
+                         'pending_json = ? WHERE id = ?',
+                         (_json.dumps(pins), _json.dumps(pending), row['id']))
+            conn.commit()
+        record_audit_event(
+            'allowance_label_refresh',
+            details='allowance #%d: dropped %s; held %s'
+                    % (row['id'], ','.join(sorted(left)) or 'none',
+                       ','.join(sorted(joined)) or 'none'))
+        changed += 1
+    return {'checked': changed, 'error': ''}
+
+
+def accept_join(actor, aid):
+    """Accept the entities a label gained since the allowance was saved."""
+    from db.core import db_conn
+    from db.audit import record_audit_event
+    import json as _json
+    row = get_allowance(aid)
+    if not row:
+        raise AllowanceError(404, 'No such allowance.')
+    pending = _json.loads(row.get('pending_json') or '[]')
+    if not pending:
+        raise AllowanceError(400, 'Nothing to accept.')
+    registry = _ha_registry()
+    now_ok = []
+    for p in pending:
+        reg = registry.get(p.get('entity_id'))
+        if reg and (not p.get('registry_id') or reg.get('id') == p.get('registry_id')):
+            now_ok.append({'entity_id': p['entity_id'],
+                           'registry_id': reg.get('id') or ''})
+    if not now_ok:
+        raise AllowanceError(400, 'The entities changed again; refresh first.')
+    pins = _json.loads(row['entities_json'] or '[]') + now_ok
+    with db_conn() as conn:
+        conn.execute('UPDATE allowances SET entities_json = ?, pending_json = ? '
+                     'WHERE id = ?', (_json.dumps(pins), '[]', aid))
+        conn.commit()
+    record_audit_event('allowance_joined_accepted',
+                       details='allowance #%d accepted %s' %
+                               (aid, ','.join(p['entity_id'] for p in now_ok)))
+    return {'accepted': [p['entity_id'] for p in now_ok]}

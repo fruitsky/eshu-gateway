@@ -357,6 +357,17 @@ def on_startup():
         print("=" * 60 + "\n")
     else:
         print(f"Eshu Gateway Dashboard {DASHBOARD_VERSION} started (password-protected)")
+    # F27: re-resolve label-sourced allowances (accept-to-join) once a
+    # minute. A failed registry read changes nothing.
+    def _allowance_refresh_loop():
+        while True:
+            time.sleep(300)
+            try:
+                allowances.refresh_labels()
+            except Exception:
+                pass
+
+    threading.Thread(target=_allowance_refresh_loop, daemon=True).start()
     # Start background stale gateway cleanup
     cleanup_thread = threading.Thread(target=_stale_gateway_cleanup_loop, daemon=True)
     cleanup_thread.start()
@@ -5010,6 +5021,15 @@ def revoke_allowance_endpoint(aid: int, request: Request):
     _check_session(request)
     allowances.revoke_allowance('operator', aid)
     return {"status": "ok"}
+
+
+@app.post("/api/allowances/{aid}/accept-join")
+def accept_allowance_join_endpoint(aid: int, request: Request):
+    _check_session(request)
+    try:
+        return allowances.accept_join('operator', aid)
+    except allowances.AllowanceError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.detail)
 
 
 @app.post("/api/allowances/{aid}/resume")

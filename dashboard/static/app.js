@@ -10708,7 +10708,12 @@ function renderAllowances(rows) {
       (r.rate_per_hour ? ' · max ' + r.rate_per_hour + '/h' : '') +
       (r.window ? ' · ' + esc(r.window) : '') + '</span>' +
       (r.suspended_at ? '<span class="chip" style="color:var(--status-warning)">suspended: ' + esc(r.suspended_reason) + '</span>' : '') +
+      ((JSON.parse(r.pending_json || '[]') || []).length ?
+        '<span class="chip" title="The label gained entities; accept them to allow them">' +
+        (JSON.parse(r.pending_json || '[]') || []).length + ' new</span>' : '') +
       '<span class="flex-1"></span>' +
+      ((JSON.parse(r.pending_json || '[]') || []).length ?
+        '<button class="btn btn-xs" onclick="acceptJoin(' + r.id + ')">Accept new</button>' : '') +
       (r.suspended_at ? '<button class="btn btn-xs" onclick="resumeAllowance(' + r.id + ')">Resume</button>' : '') +
       '<button class="btn btn-deny btn-xs" onclick="revokeAllowance(' + r.id + ')">Revoke</button>' +
       '</div>';
@@ -10852,5 +10857,13 @@ async function saveProfile() {
     if (st) st.textContent = (d.detail && (d.detail.message || d.detail)) || 'Could not save'; return; }
   if (st) st.textContent = 'Saved';
   document.getElementById('profile-template-rows').innerHTML = '';
+  fetchAllowances();
+}
+
+
+async function acceptJoin(id) {
+  if (!confirm('Accept the entities this label gained? They become part of the allowance.')) return;
+  const r = await authFetch('/api/allowances/' + id + '/accept-join', { method: 'POST' });
+  if (!r.ok) alert('Could not accept: ' + ((await r.json()).detail || 'refused'));
   fetchAllowances();
 }
