@@ -18223,6 +18223,59 @@ BX5 cap/ceiling/risk, the operator-word nit) and `tests/test_f27_ceiling.py`
 code and failed; the suite is green after the fix.
 
 
+### Security re-read of the fix round at `721503d` (2026-11-17)
+
+**Verdict: approved to merge. BX1–BX6 are fixed.**
+* **BX1.** Matching reads the pins (`_stored_entities`). Refresh and
+  accept-join rewrite the pins and the copy in `conditions_json` in one
+  UPDATE (`_write_entity_list`). The tests now call `match_and_claim`: a
+  leaver gets `None`, and an accepted joiner matches.
+* **BX2.** The refresh re-reads the pins of every live HA allowance, both
+  hand-made and label-based. A missing or changed registry id suspends the
+  allowance with `registry_changed`. The plain-entity test is back on.
+  `refresh_pins` also runs straight after an approved registry write:
+  through `ha_config_write`, on the ungated or allowance path of `_execute`,
+  and in `approve_integration_call`.
+* **BX3.** A restore suspends every HA allowance. A scan that raises fails
+  closed, and only a second failure writes
+  `allowance_config_write_failed`. `template:` and the dashed
+  `- switch:` form count as unmapped.
+* **BX4.** All checks run first, including one registry read. Then the
+  revoke and the inserts run in one `BEGIN IMMEDIATE`, which re-checks the
+  version. Apply requires `profile_version`, and a stale value is a 409. The
+  rollback test covers an insert that fails.
+* **BX5.** Accept-join checks the ceiling, the 64-entity cap and the second
+  risk confirmation. It refuses a revoked row, and it writes under
+  `BEGIN IMMEDIATE`.
+* **BX6.** `set_hash` is required (`set_hash_required`), and the compare
+  and the write share one `BEGIN IMMEDIATE`.
+* **Nits are done.** An operator word is never exempt. The destructive-verb
+  comment and the CHANGELOG state the behaviour change. The refresh comment
+  says five minutes.
+
+**BZ3 (should, follow-up; does not block the merge): a config-entry write
+needs its own rule.** My BX2 minimum, a pin check after the write, does not
+work for config entries:
+* An options-flow or config-entry write, such as editing a template
+  helper's template, changes what an entity does without changing its
+  registry id. `refresh_pins` therefore finds nothing.
+* `is_registry_write_path` matches `config/config_entries/` (REST), but
+  HA's WebSocket commands for config entries are `config_entries/...`, with
+  no `config/` prefix, so they are not matched at all.
+* **Fix:**
+  * After an approved write to REST `config/config_entries/*` or WS
+    `config_entries/*`, suspend the allowances whose entities carry that
+    `config_entry_id` in the registry.
+  * If the entry id cannot be read from the write, suspend every HA
+    allowance. This is AZ2's conservative branch.
+  * Add the WS prefix to the matcher.
+* An entity-registry rename, the reuse case, is covered now.
+
+**Merge note.** E2E-1's CA5 adds `integration_calls.excluded`. Whichever
+branch merges second must add `COALESCE(excluded, 0) = 0` to F27's two
+`allowance:%` queries (the statistics series and the session card).
+Otherwise excluded test calls still count in the allowance bucket.
+
 ## Chunk X3 — Integrations page and agent policy modal pass · slug `integrations-ui` · dashboard UI · after F27
 
 ### Goal
