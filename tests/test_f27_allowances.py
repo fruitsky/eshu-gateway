@@ -23,7 +23,16 @@ def ha(monkeypatch):
     }
     monkeypatch.setattr(a, '_ha_registry', lambda: ents)
     monkeypatch.setattr(a, '_risky_classes', lambda entities: [])
+    # A real install names the integration; allowances find it by kind.
+    from db.integrations import create_integration
+    create_integration('Home Assistant', 'http://192.0.2.50:8123/api', 'none',
+                       '', kind='ha')
     return ents
+
+
+def _ha_row():
+    from db.integrations import get_integration
+    return get_integration('Home Assistant')
 
 
 def _open_cover(auth_client):
@@ -61,7 +70,7 @@ def test_an_exact_match_runs_and_counts_one_use(auth_client, agent_id, ha):
     r = _make(auth_client, agent_id)
     assert r.status_code == 200, r.text
     aid = r.json()['id']
-    hit = a.match_and_claim({'id': agent_id}, 'ha', 'call_service',
+    hit = a.match_and_claim({'id': agent_id}, _ha_row(), 'call_service',
                             {'domain': 'cover', 'service': 'open_cover',
                              'data': {'entity_id': 'cover.garage'}})
     assert hit == (aid, 'Garage')
@@ -77,22 +86,22 @@ def test_every_miss_is_a_card_not_a_denial(auth_client, agent_id, ha):
     agent = {'id': agent_id}
     base = {'domain': 'cover', 'service': 'open_cover',
             'data': {'entity_id': 'cover.garage'}}
-    assert a.match_and_claim(agent, 'ha', 'call_service', base)
+    assert a.match_and_claim(agent, _ha_row(), 'call_service', base)
     # An extra data key, an unlisted entity and a list with one stranger.
-    assert a.match_and_claim(agent, 'ha', 'call_service', {
+    assert a.match_and_claim(agent, _ha_row(), 'call_service', {
         'domain': 'cover', 'service': 'open_cover',
         'data': {'entity_id': 'cover.garage', 'brightness': 2}}) is None
-    assert a.match_and_claim(agent, 'ha', 'call_service', {
+    assert a.match_and_claim(agent, _ha_row(), 'call_service', {
         'domain': 'cover', 'service': 'open_cover',
         'data': {'entity_id': 'cover.blind'}}) is None
-    assert a.match_and_claim(agent, 'ha', 'call_service', {
+    assert a.match_and_claim(agent, _ha_row(), 'call_service', {
         'domain': 'cover', 'service': 'open_cover',
         'data': {'entity_id': ['cover.garage', 'cover.blind']}}) is None
     # AZ1: an expanding target is a card.
-    assert a.match_and_claim(agent, 'ha', 'call_service', {
+    assert a.match_and_claim(agent, _ha_row(), 'call_service', {
         'domain': 'cover', 'service': 'open_cover',
         'data': {'entity_id': 'all'}}) is None
-    assert a.match_and_claim(agent, 'ha', 'call_service', {
+    assert a.match_and_claim(agent, _ha_row(), 'call_service', {
         'domain': 'cover', 'service': 'open_cover',
         'data': {'entity_id': 'cover.garage'},
         'target': {'area_id': 'kitchen'}}) is None
@@ -104,9 +113,9 @@ def test_rate_and_expiry(auth_client, agent_id, ha):
     assert r.status_code == 200, r.text
     args = {'domain': 'cover', 'service': 'open_cover',
             'data': {'entity_id': 'cover.garage'}}
-    assert a.match_and_claim({'id': agent_id}, 'ha', 'call_service', args)
-    assert a.match_and_claim({'id': agent_id}, 'ha', 'call_service', args)
-    assert a.match_and_claim({'id': agent_id}, 'ha', 'call_service', args) is None
+    assert a.match_and_claim({'id': agent_id}, _ha_row(), 'call_service', args)
+    assert a.match_and_claim({'id': agent_id}, _ha_row(), 'call_service', args)
+    assert a.match_and_claim({'id': agent_id}, _ha_row(), 'call_service', args) is None
 
 
 def test_window_is_wall_clock(auth_client, agent_id, ha):
@@ -118,14 +127,14 @@ def test_window_is_wall_clock(auth_client, agent_id, ha):
     assert a._in_window('11:00-13:00', noon) is True
     args = {'domain': 'cover', 'service': 'open_cover',
             'data': {'entity_id': 'cover.garage'}}
-    assert a.match_and_claim({'id': agent_id}, 'ha', 'call_service', args) is None
+    assert a.match_and_claim({'id': agent_id}, _ha_row(), 'call_service', args) is None
 
 
 def test_two_matches_get_a_card(auth_client, agent_id, ha):
     _open_cover(auth_client)
     _make(auth_client, agent_id)
     _make(auth_client, agent_id)
-    assert a.match_and_claim({'id': agent_id}, 'ha', 'call_service', {
+    assert a.match_and_claim({'id': agent_id}, _ha_row(), 'call_service', {
         'domain': 'cover', 'service': 'open_cover',
         'data': {'entity_id': 'cover.garage'}}) is None
 
@@ -138,7 +147,7 @@ def test_a_disabled_ceiling_stops_the_match(auth_client, agent_id, ha):
     r = auth_client.put('/api/allowances/ceiling', json={
         'enabled': ids, 'confirm': True, 'set_hash': a.set_hash()})
     assert r.status_code == 200, r.text
-    assert a.match_and_claim({'id': agent_id}, 'ha', 'call_service', {
+    assert a.match_and_claim({'id': agent_id}, _ha_row(), 'call_service', {
         'domain': 'cover', 'service': 'open_cover',
         'data': {'entity_id': 'cover.garage'}}) is None
 
@@ -161,7 +170,7 @@ def test_profiles_create_allowances_and_resolve_a_label(auth_client, agent_id, h
     r = _apply(auth_client, pid, agent_id)
     assert r.status_code == 200, r.text
     assert r.json()['created'][0]['name'] == 'Blind'
-    hit = a.match_and_claim({'id': agent_id}, 'ha', 'call_service', {
+    hit = a.match_and_claim({'id': agent_id}, _ha_row(), 'call_service', {
         'domain': 'cover', 'service': 'open_cover',
         'data': {'entity_id': 'cover.blind'}})
     assert hit and hit[1] == 'Blind'
@@ -197,13 +206,13 @@ def test_a_label_leaver_drops_and_a_joiner_waits(auth_client, agent_id, ha):
     aid = r.json()['created'][0]['id']
     args = {'domain': 'cover', 'service': 'open_cover',
             'data': {'entity_id': 'cover.blind'}}
-    assert a.match_and_claim({'id': agent_id}, 'ha', 'call_service', args)
+    assert a.match_and_claim({'id': agent_id}, _ha_row(), 'call_service', args)
     ha['cover.blind']['labels'] = []          # left the label
     a.refresh_labels()
     row = a.get_allowance(aid)
     assert json.loads(row['entities_json']) == []
     # BX1: the leaver is gone from the *match*, not only from the column.
-    assert a.match_and_claim({'id': agent_id}, 'ha', 'call_service', args) is None
+    assert a.match_and_claim({'id': agent_id}, _ha_row(), 'call_service', args) is None
     ha['cover.blind']['labels'] = ['lbl-1']    # joined again
     ha['cover.garage']['labels'] = ['lbl-1']   # a new member
     a.refresh_labels()
@@ -211,7 +220,7 @@ def test_a_label_leaver_drops_and_a_joiner_waits(auth_client, agent_id, ha):
     pending = json.loads(row['pending_json'])
     assert {p['entity_id'] for p in pending} == {'cover.blind', 'cover.garage'}
     # A held joiner does not match until accepted.
-    assert a.match_and_claim({'id': agent_id}, 'ha', 'call_service', {
+    assert a.match_and_claim({'id': agent_id}, _ha_row(), 'call_service', {
         'domain': 'cover', 'service': 'open_cover',
         'data': {'entity_id': 'cover.garage'}}) is None
     # BX5: the risky cover row needs the second confirmation for joiners.
@@ -220,7 +229,7 @@ def test_a_label_leaver_drops_and_a_joiner_waits(auth_client, agent_id, ha):
     assert exc.value.extra['code'] == 'risk_ack_required'
     out = a.accept_join('operator', aid, risk_ack=True)
     assert set(out['accepted']) == {'cover.blind', 'cover.garage'}
-    assert a.match_and_claim({'id': agent_id}, 'ha', 'call_service', {
+    assert a.match_and_claim({'id': agent_id}, _ha_row(), 'call_service', {
         'domain': 'cover', 'service': 'open_cover',
         'data': {'entity_id': 'cover.garage'}})
 

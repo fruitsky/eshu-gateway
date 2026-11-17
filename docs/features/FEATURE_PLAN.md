@@ -18314,6 +18314,54 @@ branch merges second must add `COALESCE(excluded, 0) = 0` to F27's two
 `allowance:%` queries (the statistics series and the session card).
 Otherwise excluded test calls still count in the allowance bucket.
 
+### Security review — HA-by-kind fix (`fix/f27-ha-by-kind` @ c38d5ed)
+
+**Approved to merge.** Design and code text read only; nothing was run.
+* `_ha_integration()` now returns the single enabled integration of kind
+  `ha`. With none, or with more than one, it returns nothing. Saves then
+  refuse with 503, and so do the registry and state reads. Nothing matches.
+  This fails closed: an entity id means nothing until we know which HA it
+  belongs to.
+* `match_and_claim` takes the integration row and matches by id, not by
+  name. A non-HA integration that happens to be named `ha`, and the bare
+  string `'ha'`, both miss. Both cases are tested.
+* The runner passes the row it is about to call, and the tests now go
+  through `run_tool` with an integration named "Home Assistant". The
+  earlier tests passed only because the fixture named it `ha`.
+* `note_ha_registry_write` already checks the kind, so it needed no
+  change.
+
+**CB1 (should, follow-up): bind the allowances to *which* HA they were
+made on.**
+* Allowances are stored under the kind string `ha`, not under an
+  integration id. "The one enabled HA" can therefore become a different
+  Home Assistant while the allowances stay live:
+  * the operator edits the integration's base URL or token;
+  * the operator disables integration A and enables B;
+  * a second integration is enabled (nothing matches), then the first is
+    disabled.
+* An allowance for `switch.kettle` would then run against whatever is
+  called `switch.kettle` on the new instance.
+* The registry-id pins catch this, but only on the five-minute refresh.
+  Matching does not read the live registry. So there is a window of up to
+  five minutes.
+* The name lookup had the same gap for a base-URL edit. The kind lookup
+  adds the other two cases.
+* **Fix:**
+  * Record the HA integration's id and a fingerprint of its base URL
+    whenever an allowance is saved or applied.
+  * In `_ha_integration()`, treat a different id or fingerprint as "no
+    HA", and suspend every live HA allowance with the reason
+    `ha_changed`, in the same way as AZ2's restore branch.
+  * Alternatively, call that suspension from `update_integration`,
+    `create_integration` and `delete_integration` whenever a kind-`ha` row
+    changes its base URL, secret, enabled flag or kind.
+  * Either way, the operator resumes the allowances after checking them.
+
+**Nit.** `_ha_integration()` lists every integration on each
+`call_service` call. That is fine at this scale. If it shows up in a
+profile, cache the result per request.
+
 ## Chunk X3 — Integrations page and agent policy modal pass · slug `integrations-ui` · dashboard UI · after F27
 
 ### Goal

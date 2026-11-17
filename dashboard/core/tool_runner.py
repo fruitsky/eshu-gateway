@@ -663,7 +663,7 @@ def _run_tool(integration_name: str, tool_name: str, args: dict, reason: str = '
         if mode != 'gated':
             from core import allowances as _allowances
             hit = _allowances.match_and_claim(
-                agent, integration['name'], tool_name, args,
+                agent, integration, tool_name, args,
                 call_ref=(session_id or ''))
             if hit:
                 should_gate = False
