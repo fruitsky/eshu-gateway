@@ -12943,6 +12943,16 @@ Omada `siteId` + clients yield a `client` row and prove `site-1` reached
 `list_known_clients`. All addresses are `192.0.2.x` and all names
 `*.example.test`. Each test fails on the pre-fix code.
 
+**Review (2026-11-17): approved and merged.** Both causes match what the
+live system showed. The Pi-hole sources failed with no recorded call, and
+Omada called `list_sites` on every refresh but never `list_known_clients`.
+The fix is small and the tests drive the real call path. A source's
+`last_error` now carries upstream text. I checked that this text is already
+secret-scrubbed and capped at 300 characters before it is stored, and that
+the Inventory page escapes it. Full suite: 3189 passed, 33 skipped. The fix
+reaches the live system with the next dashboard deploy. After that,
+`whereis` should show DNS records and Omada clients.
+
 ---
 
 ## Chunk F15 — Diagnostic probes · slug `probes` · dashboard + MCP
@@ -19103,6 +19113,17 @@ UTC conversion under `TZ=Europe/London` and `TZ=America/New_York`; it also
 pins the preview sentences. `tests/test_x10_windows.py` runs the harness (and
 skips when Node is absent). Screenshots with synthetic data at 1440 and 390.
 
+**Review (2026-11-17): approved and merged.**
+* The only backend change: an `expires_at` of 0 now clears a daily
+  window's expiry (stored as NULL), never a 0 that would disable the
+  window.
+* Every new string reaches the page escaped or through `textContent`.
+* The screenshots read well at both widths.
+* A typed Once time that has already passed rolls to tomorrow (the code
+  says so), but no test covers it. Add one on the next touch.
+
+Full suite: 3193 passed, 33 skipped.
+
 ---
 
 | 18a | X2 | runbooks-page | dashboard UI | **Merged** 2026-11-11 | `feat/x2-runbooks-page` | F13 | |
@@ -19125,7 +19146,7 @@ skips when Node is absent). Screenshots with synthetic data at 1440 and 390.
 | 26 | 1.4 | — | gateway stack | **Approved for rollout** 2026-11-15 (security `838d77d`): BH2/BQ2, BQ4, F19, X8 (gateway + dashboard), BS1/BS2; rebased onto X7, Build only; the BS2 install-read nit is fixed | `release/1.4-gw` | X7, F19, RR1 | security approved the whole stack; rollout Seed Edge → dev gateways → Deploy to Fleet |
 | 27 | X8 | gateway-installer-version | dashboard + gateway | **Code complete** 2026-11-14: on `release/1.4-gw` (BR1 folded; the hash is display-only) | `feat/x8-gateway-installer-version` | X7 | security approved; five buckets sum to the gateway count |
 | 28 | X9 | gated-gateway-files | dashboard + gateway | **Design note** 2026-11-14 (BP2): installer-carried vs authenticated channel files; recommends (b) | `feat/x9-gated-gateway-files` | X7, 1.4 | security sign-off before code |
-| 29 | X10 | approved-windows-modal | dashboard UI | **Design note + code** 2026-11-17: presets, Once default, typed local HH:MM + duration, live plain-words preview; agent requests use the same preview | `feat/x10-windows-modal` | — | UI only; no schema or window-meaning change |
+| 29 | X10 | approved-windows-modal | dashboard UI | **Merged** 2026-11-17: presets, Once default, typed local HH:MM + duration, live plain-words preview; agent requests use the same preview; not yet deployed | `feat/x10-windows-modal` | — | UI only; no schema or window-meaning change |
 | — | CI fix | ci-environment | gateway + tests | Merged (`f2746ef`); CI pinned to ubuntu-24.04 (`6d58006`) | `fix/ci-environment` | F5 | |
 | — | Buffering | stream-unbuffered | gateway | Merged (`d8d70c2`); S1 tee fix done in Gateway hardening | `fix/stream-unbuffered` | F5 | |
 | — | Gateway hardening | gateway-hardening | gateway | **Merged** 2026-11-12 (AF3 + S1 tee capture; security `c15664e`; AX1/AX2 residuals; BA1 for the next F5/F19 change) | `fix/gateway-hardening` | F19, Buffering | |
