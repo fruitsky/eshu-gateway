@@ -89,7 +89,7 @@ PIHOLE_SEED_TOOLS = [
     },
     {
         "name": "local_dns_records",
-        "description": "List this Pi-hole's local DNS records: host records (name -> IPs) and CNAME records (name -> target). Reads the Pi-hole v6 config API (config/dns/hosts and config/dns/cnameRecords), so it needs a v6 integration whose base URL ends in /api; on a v5 (/admin/api.php) integration it returns local_dns_records_failed. Read-only.",
+        "description": "List this Pi-hole's local DNS records: host records (name -> IPs) and CNAME records (name -> target). Supports v6 (base URL ends /api; config/dns/hosts and config/dns/cnameRecords) and v5 (base URL ends /admin; api.php?customdns and api.php?customcname). Read-only.",
         "method": "GET",
         "path_template": "",
         "handler": "pihole_local_dns_records",

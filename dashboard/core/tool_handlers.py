@@ -1042,18 +1042,92 @@ def _pihole_dns_rows(data, kind, config_key=None):
     return out
 
 
-def _h_pihole_local_dns_records(integration, tool, args, ctx=None):
-    """F14: read a Pi-hole v6 instance's local DNS host + CNAME records.
+def _pihole_v5_rows(data, kind):
+    """Parse a Pi-hole v5 customdns/customcname response, or None.
 
-    Two fixed GETs (`config/dns/hosts`, `config/dns/cnameRecords`), never an
+    v5 answers `{"data": [{"domain": ..., "ip": ...}]}` (CNAMEs use
+    `target`). An empty `data` list is a valid empty answer; a missing or
+    non-list `data` is an unknown shape, not an empty one.
+    """
+    rows = data.get('data') if isinstance(data, dict) else data
+    if not isinstance(rows, list):
+        return None
+    out = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get('domain') or row.get('name') or '').strip()
+        if not name:
+            continue
+        if kind == 'hosts':
+            ip = row.get('ip')
+            if isinstance(ip, (list, tuple)):
+                ips = [str(x) for x in ip if x]
+            else:
+                ips = [str(ip)] if ip else []
+            if ips:
+                out.append({'name': name, 'ips': ips})
+        else:
+            target = str(row.get('target') or row.get('cname') or '').strip()
+            if target:
+                out.append({'name': name, 'target': target})
+    return out
+
+
+def _pihole_v6_has(data, kind, config_key):
+    if not isinstance(data, dict):
+        return False
+    config = data.get('config')
+    dns = config.get('dns') if isinstance(config, dict) else None
+    if isinstance(dns, dict) and config_key in dns:
+        return True
+    return config_key in data
+
+
+def _pihole_v5(integration, agent):
+    """True for a v5 integration (base URL ends /admin), or by the version probe.
+
+    A v6 integration ends /api and is never probed. Any other base gets one
+    `/admin/api.php?version` read; a JSON `apiVersion` means v5. The probe is
+    a read and its failures simply leave the v6 path to report the real error.
+    """
+    base = str((integration or {}).get('base_url') or '').rstrip('/').lower()
+    if base.endswith('/admin'):
+        return True
+    if base.endswith('/api'):
+        return False
+    probe = {'name': 'local_dns_records:version', 'enabled': True,
+             'method': 'GET', 'path_template': 'admin/api.php?version',
+             'params': [], 'transport': 'http', 'read_only': True}
+    try:
+        res = execute_integration_call(integration, probe, {}, agent=agent)
+        data = json.loads(res.get('body') or 'null')
+    except (ProxyError, ValueError, TypeError):
+        return False
+    return isinstance(data, dict) and 'apiVersion' in data
+
+
+def _h_pihole_local_dns_records(integration, tool, args, ctx=None):
+    """F14: read local DNS host + CNAME records from Pi-hole v5 or v6.
+
+    v5 (`/admin` base) uses the fixed `api.php?customdns&action=get` and
+    `api.php?customcname&action=get` reads. v6 (`/api` base) uses
+    `config/dns/hosts` and `config/dns/cnameRecords`. Never an
     agent-supplied path. Both are reads; the inventory gates this handler
-    through `core/read_policy.is_read_integration_call` first.
+    through `core/read_policy.is_read_integration_call` first. The token is
+    added by the existing `query_token` auth path and never logged here.
     """
     agent = (ctx or {}).get('agent', '')
+    v5 = _pihole_v5(integration, agent)
+    base = str((integration or {}).get('base_url') or '').rstrip('/').lower()
+    prefix = '' if base.endswith('/admin') else 'admin/'
     out = {'hosts': [], 'cnames': []}
-    for kind, config_key, path in (
-            ('hosts', 'hosts', 'config/dns/hosts'),
-            ('cnames', 'cnameRecords', 'config/dns/cnameRecords')):
+    for kind, config_key, v6_path, v5_path in (
+            ('hosts', 'hosts', 'config/dns/hosts',
+             prefix + 'api.php?customdns&action=get'),
+            ('cnames', 'cnameRecords', 'config/dns/cnameRecords',
+             prefix + 'api.php?customcname&action=get')):
+        path = v5_path if v5 else v6_path
         # The probe is a synthetic tool dict: execute_integration_call refuses
         # a tool without `enabled`, which used to fail before any request was
         # sent (and left no integration_calls row). Name it for the audit row.
@@ -1074,7 +1148,18 @@ def _h_pihole_local_dns_records(integration, tool, args, ctx=None):
             data = json.loads(res.get('body') or 'null')
         except ValueError:
             data = None
-        out[kind] = _pihole_dns_rows(data, kind, config_key)
+        if v5:
+            rows = _pihole_v5_rows(data, kind)
+        elif _pihole_v6_has(data, kind, config_key):
+            rows = _pihole_dns_rows(data, kind, config_key)
+        else:
+            rows = None
+        if rows is None:
+            return json.dumps({
+                'error': 'local_dns_records_failed',
+                'message': 'needs Pi-hole v5 or v6 API',
+                'status_code': 502})
+        out[kind] = rows
     return json.dumps(out)
 
 
