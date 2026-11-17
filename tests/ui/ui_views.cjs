@@ -14,7 +14,7 @@
 
 const BASE = (process.env.ESHU_UI_URL || 'http://127.0.0.1:8790/').replace(/\/?$/, '/');
 const PASSWORD = process.env.ESHU_UI_PASSWORD || '';
-const VIEWS = ['home', 'history', 'gateways', 'stats', 'controls',
+const VIEWS = ['home', 'history', 'gateways', 'windows', 'stats', 'controls',
                'integrations', 'inventory', 'runbooks', 'agents', 'settings'];
 
 let chromium;
@@ -93,6 +93,7 @@ const REQUIRED = {
   home: '.cc-empty-headline',
   history: '#view-history table',
   gateways: '#gateways-table-body tr',
+  windows: '#windows-table-body',
   stats: '#view-stats',
   controls: '#view-controls',
   integrations: '#view-integrations',

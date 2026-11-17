@@ -19021,6 +19021,7 @@ consumes it.
 off argv (BE3's BH3): `--data-binary @-` for the body and
 `-H @<(gateway_header)` for the header. That is a should, not a blocker for
 this merge.
+
 ## Chunk X10 — Approved Windows modal redesign · slug `approved-windows-modal` · dashboard UI · after 1.3
 
 ### Design note (2026-11-17)

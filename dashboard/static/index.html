@@ -1239,18 +1239,31 @@
     <!-- Inline error -->
     <div id="win-save-error" class="hidden win-error"></div>
 
-    <!-- 1. Type — always selectable -->
+    <!-- X10: quick presets first. These fill a Once window; they never
+         create a daily one by accident. -->
     <div class="win-section">
-      <div class="win-section-label">1. Window Type</div>
+      <div class="win-section-label">Quick start</div>
+      <div class="win-preset-row" id="win-preset-row">
+        <button type="button" class="win-preset-btn" id="win-preset-now15" onclick="applyWinPreset('now15')">Now for 15 min</button>
+        <button type="button" class="win-preset-btn" id="win-preset-now60" onclick="applyWinPreset('now60')">Now for 1 hour</button>
+        <button type="button" class="win-preset-btn" id="win-preset-endoftoday" onclick="applyWinPreset('end_of_today')">Until end of today</button>
+        <button type="button" class="win-preset-btn" id="win-preset-custom" onclick="applyWinPreset('custom')">Custom</button>
+      </div>
+      <p class="win-hint">Presets start a Once window from now. Custom lets you type the time.</p>
+    </div>
+
+    <!-- X10: Once is the default; Every day is an explicit choice. -->
+    <div class="win-section">
+      <div class="win-section-label">Runs</div>
       <div class="win-radio-group">
-        <button class="win-radio-btn selected" id="win-type-recurring" onclick="setWinType('recurring')">Recurring</button>
-        <button class="win-radio-btn" id="win-type-single" onclick="setWinType('single')">Single Use</button>
+        <button type="button" class="win-radio-btn selected" id="win-type-once" onclick="setWinType('once')">Once</button>
+        <button type="button" class="win-radio-btn" id="win-type-daily" onclick="setWinType('daily')">Every day</button>
       </div>
     </div>
 
-    <!-- 2. Gateway — custom pill dropdown -->
+    <!-- Target Gateway — custom pill dropdown -->
     <div class="win-section">
-      <div class="win-section-label">2. Target Gateway</div>
+      <div class="win-section-label">Target Gateway</div>
       <div class="gw-dropdown" id="gw-dropdown">
         <div class="gw-dropdown-trigger" id="gw-dropdown-trigger" onclick="toggleGwDropdown()">
           <div id="gw-dropdown-display" class="text-sm text-muted">Select a gateway…</div>
@@ -1261,9 +1274,9 @@
       <input type="hidden" id="win-gateway" value="" onchange="onWinGatewayChange()">
     </div>
 
-    <!-- 3. Command (gateway-dependent) -->
+    <!-- Command (gateway-dependent) -->
     <div id="win-src-section" class="win-section win-fade win-disabled">
-      <div class="win-section-label">3. Command</div>
+      <div class="win-section-label">Command</div>
       <div class="win-radio-group">
         <button class="win-radio-btn selected" id="win-src-new" onclick="setWinSource('new')">Command</button>
         <button class="win-radio-btn" id="win-src-jit" onclick="setWinSource('jit')">Recent JIT</button>
@@ -1287,75 +1300,48 @@
       </div>
     </div>
 
-    <!-- 4a. Recurring schedule fields -->
-    <div id="win-recurring-fields" class="win-fade">
-      <div class="win-section-label mb-2">4. Schedule</div>
-      <div class="flex flex-wrap gap-5">
-        <div class="win-section flex-1" style="min-width:200px;">
-          <div class="win-section-label">Execution Time (UTC)</div>
-          <div class="time-scroll-container">
-            <div class="time-scroll-wrap">
-              <div class="time-scroll-arrow" onclick="shiftTimeScroll('hours', -1)">▲</div>
-              <div class="time-scroll" id="time-scroll-hours" onscroll="onTimeScroll('hours')"></div>
-              <div class="time-scroll-arrow" onclick="shiftTimeScroll('hours', 1)">▼</div>
-            </div>
-            <span class="time-colon">:</span>
-            <div class="time-scroll-wrap">
-              <div class="time-scroll-arrow" onclick="shiftTimeScroll('mins', -1)">▲</div>
-              <div class="time-scroll" id="time-scroll-mins" onscroll="onTimeScroll('mins')"></div>
-              <div class="time-scroll-arrow" onclick="shiftTimeScroll('mins', 1)">▼</div>
-            </div>
-          </div>
-          <p id="win-next-run" class="text-xs mt-2 text-info" style="min-height:1.25em;"></p>
-        </div>
-        <div class="flex-1" style="min-width:200px;">
-          <div class="win-section">
-            <div class="win-section-label">Days of Week <span class="text-xs text-muted font-normal">(none = every day)</span></div>
-            <div class="day-circles" id="day-circles-container"></div>
-          </div>
-          <div class="win-section">
-            <div class="win-section-label">Expiration</div>
-            <label class="flex items-center gap-2 cursor-pointer select-none mb-2">
-              <input type="checkbox" id="win-never-expire" checked onchange="onWinNeverExpireChange()">
-              <span class="text-xs">Never expire</span>
-            </label>
-            <input type="date" id="win-expiry-date" class="flex-1" style="display:none;" onchange="updateWinSummary()">
-          </div>
-          <div class="win-section">
-            <div class="win-section-label">Max Executions <span class="text-xs text-muted font-normal">(1–5, per window)</span></div>
-            <input type="number" id="win-max-exec" value="1" min="1" max="5" class="w-24" oninput="onMaxExecInput();updateWinSummary()">
-          </div>
-        </div>
+    <!-- X10: one typed local time and a duration; no hour/minute scrolls. -->
+    <div class="win-section">
+      <div class="win-section-label">When <span class="text-xs text-muted font-normal">(your local time)</span></div>
+      <div class="win-time-row">
+        <label class="win-field" for="win-time">Time <span class="text-xs text-muted font-normal">(HH:MM)</span>
+          <input type="text" id="win-time" inputmode="numeric" autocomplete="off" maxlength="5" placeholder="HH:MM" oninput="onWinTimeInput()">
+        </label>
+        <label class="win-field" id="win-duration-wrap" for="win-duration">Duration <span class="text-xs text-muted font-normal">(minutes)</span>
+          <input type="number" id="win-duration" min="1" max="1440" value="15" inputmode="numeric" oninput="onWinDurationInput()">
+        </label>
+      </div>
+      <p class="win-hint" id="win-time-hint">24-hour, in this browser's time zone.</p>
+    </div>
+
+    <!-- Every day: optional day mask and expiry. Once uses its duration. -->
+    <div id="win-daily-fields" class="win-fade hidden-section">
+      <div class="win-section">
+        <details class="win-days-details">
+          <summary>Only on some days (optional)</summary>
+          <div class="day-circles" id="day-circles-container"></div>
+          <p class="win-hint">No day picked means every day. The gateway fires within ±2 minutes of the time.</p>
+        </details>
+      </div>
+      <div class="win-section">
+        <div class="win-section-label">Expiration</div>
+        <label class="flex items-center gap-2 cursor-pointer select-none mb-2">
+          <input type="checkbox" id="win-never-expire" checked onchange="onWinNeverExpireChange()">
+          <span class="text-xs">Never expire</span>
+        </label>
+        <input type="date" id="win-expiry-date" class="flex-1" style="display:none;" onchange="updateWinSummary()">
       </div>
     </div>
 
-    <!-- 4b. Single-use fields -->
-    <div id="win-single-fields" class="win-fade hidden-section">
-      <div class="win-section-label">4. Schedule</div>
-      <div class="win-section">
-        <div class="win-section-label">Starts At (required) <span class="text-xs text-muted font-normal">(window becomes active at this time)</span></div>
-        <div class="flex gap-2 flex-wrap">
-          <input type="date" id="win-single-start-date" class="flex-1" style="min-width:140px;" onchange="updateWinSummary()">
-          <input type="time" id="win-single-start-time" class="flex-1" style="min-width:100px;" onchange="updateWinSummary()">
-        </div>
-        <p class="win-hint" id="win-single-start-hint">Times are local to your browser</p>
-      </div>
-      <div class="win-section">
-        <div class="win-section-label">Max Executions <span class="text-xs text-muted font-normal">(1–5, auto-disables when exhausted)</span></div>
-        <input type="number" id="win-max-exec-single" value="1" min="1" max="5" class="w-24" oninput="onMaxExecInput();updateWinSummary()">
-      </div>
-      <div class="win-section">
-        <div class="win-section-label">Expires At (optional) <span class="text-xs text-muted font-normal">(window closes at this time if unexpired)</span></div>
-        <div class="flex gap-2 flex-wrap">
-          <input type="date" id="win-single-expiry-date" class="flex-1" style="min-width:140px;" onchange="updateWinSummary()">
-          <input type="time" id="win-single-expiry-time" class="flex-1" style="min-width:100px;" onchange="updateWinSummary()">
-        </div>
-      </div>
+    <!-- Max executions is shared by both modes. -->
+    <div class="win-section">
+      <div class="win-section-label">Max executions <span class="text-xs text-muted font-normal">(1–5)</span></div>
+      <input type="number" id="win-max-exec" value="1" min="1" max="5" class="w-24" oninput="onMaxExecInput()">
     </div>
 
-    <!-- 5. Label -->
+    <!-- Label -->
     <div id="win-label-section" class="win-section win-fade win-disabled">
-      <div class="win-section-label">5. Label</div>
+      <div class="win-section-label">Label</div>
       <input type="text" id="win-label" placeholder="e.g. Nightly apt update" oninput="updateWinSummary()" disabled>
       <p class="win-hint" id="win-label-hint">Select a gateway and type a command first</p>
     </div>
