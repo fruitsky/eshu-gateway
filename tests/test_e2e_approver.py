@@ -3,6 +3,7 @@
 Synthetic data only. The approver is exercised through the real FastAPI app
 with its bearer token; no network and no real gateway.
 """
+import base64
 import json
 import time
 
@@ -13,7 +14,9 @@ from db.agent_policies import get_agent_policy, set_agent_policy
 from db.approver_tokens import (
     create_approver_token, get_approver_token, list_approver_tokens,
 )
-from db.gateways import register_gateway, set_gateway_installer_hash
+from db.gateways import (
+    register_gateway, set_gateway_installer_hash, set_gateway_token,
+)
 from db.integrations import (
     create_integration, create_pending_call, create_tool, get_integration,
     get_pending_call, record_integration_call,
@@ -56,6 +59,7 @@ def _test_agent(name='e2e-agent', test_agent=True, hosts=None,
 def setup():
     register_gateway(GATEWAY, 'web01.example.test', 'v6.0.0')
     register_gateway(OTHER_GATEWAY, 'web02.example.test', 'v6.0.0')
+    set_gateway_token(GATEWAY, 'e2e-gateway-token')
     _ha()
     agent_raw, aid = _test_agent()
     approver_raw, token_id = create_approver_token(aid, COMMANDS, GATEWAY)
@@ -66,6 +70,7 @@ def setup():
         'approver_raw': approver_raw, 'token_id': token_id,
         'session': 'e2e-session',
         'headers': {'Authorization': 'Bearer ' + approver_raw},
+        'gateway_headers': {'X-Gateway-Token': 'e2e-gateway-token'},
     }
 
 
@@ -164,6 +169,82 @@ class TestBy1:
                 if r['event_type'] == 'e2e_approver_decision']
         assert rows and rows[0]['actor'] == 'e2e-approver'
         assert 'token #%d' % setup['token_id'] in rows[0]['details']
+
+
+class TestBz1:
+    def _post(self, client, setup, agent='', command='hostname'):
+        payload = {
+            'target_ip': GATEWAY,
+            'encoded_command': base64.b64encode(command.encode()).decode(),
+            'session_id': 'e2e-session',
+        }
+        if agent:
+            payload['agent'] = agent
+        return client.post('/api/request', json=payload,
+                           headers=setup['gateway_headers'])
+
+    def test_a_verified_agent_matching_the_session_records_its_id(
+            self, setup, client):
+        r = self._post(client, setup, agent='e2e-agent',
+                       command='hostname')
+        assert r.status_code == 200, r.text
+        row = next(r for r in get_session_requests('e2e-session')
+                   if r['command'] == 'hostname')
+        assert row['agent_id'] == setup['agent_id']
+
+    @pytest.mark.parametrize('agent', ['', None])
+    def test_a_session_signature_alone_records_zero_and_is_refused(
+            self, setup, client, agent):
+        r = self._post(client, setup, agent=agent, command='id -un')
+        assert r.status_code == 200, r.text
+        row = next(r for r in get_session_requests('e2e-session')
+                   if r['command'] == 'id -un')
+        assert row['agent_id'] == 0
+        r = client.post('/api/approve/%d' % row['id'], headers=setup['headers'])
+        assert r.status_code == 403
+        assert get_request_row(row['id'])['status'] == 'pending'
+
+    def test_an_agent_that_does_not_match_the_session_records_zero(
+            self, setup, client):
+        _raw, _other = _test_agent('other-agent')
+        r = self._post(client, setup, agent='other-agent',
+                       command='cat /etc/hostname')
+        assert r.status_code == 200, r.text
+        row = next(r for r in get_session_requests('e2e-session')
+                   if r['command'] == 'cat /etc/hostname')
+        assert row['agent_id'] == 0
+
+
+class TestBz2:
+    def _bad(self, client):
+        return client.get('/api/requests',
+                          headers={'Authorization': 'Bearer e2e_nope'})
+
+    def _refused(self):
+        from db.audit import get_audit_log
+        return [r for r in get_audit_log(100)
+                if r['event_type'] == 'e2e_approver_refused']
+
+    def test_a_bad_token_writes_at_most_one_audit_row_a_minute(
+            self, setup, client):
+        import main as app_main
+        app_main._invalid_approver_audit.clear()
+        assert self._bad(client).status_code == 401
+        assert self._bad(client).status_code == 401
+        assert len(self._refused()) == 1
+        # Age the suppression without waiting a real minute.
+        for key in app_main._invalid_approver_audit:
+            app_main._invalid_approver_audit[key] -= 61
+        assert self._bad(client).status_code == 401
+        assert len(self._refused()) == 2
+
+    def test_a_bad_token_is_rate_limited_by_ip(self, setup, client):
+        from core import rate_limit
+        assert self._bad(client).status_code == 401
+        key = next(k for k in rate_limit._rate_limit_buckets
+                   if k[0] == 'approver')
+        rate_limit._rate_limit_buckets[key] = [time.time()] * 120
+        assert self._bad(client).status_code == 429
 
 
 class TestBy2:
@@ -359,6 +440,31 @@ class TestCleanup:
                           headers=setup['headers'])
         assert r.status_code == 403
 
+    def test_an_allowance_revoke_is_own_agent_only(self, setup, client,
+                                                   monkeypatch):
+        from core import allowances
+        from db.agent_tokens import create_agent_token
+        monkeypatch.setattr(
+            allowances, '_ha_registry',
+            lambda: {'light.lamp': {'id': 'reg-lamp'}})
+        monkeypatch.setattr(allowances, '_risky_classes', lambda entities: [])
+        own = allowances.create_allowance(
+            'operator', setup['agent_id'], 'Lamp', 'light', 'turn_on',
+            ['light.lamp'])
+        r = client.post('/api/allowances/%d/revoke' % own['id'],
+                        headers=setup['headers'])
+        assert r.status_code == 200, r.text
+        assert allowances.get_allowance(own['id'])['revoked_at'] > 0
+
+        _raw, other_aid = create_agent_token('allowance-other')
+        foreign = allowances.create_allowance(
+            'operator', other_aid, 'Other lamp', 'light', 'turn_on',
+            ['light.lamp'])
+        r = client.post('/api/allowances/%d/revoke' % foreign['id'],
+                        headers=setup['headers'])
+        assert r.status_code == 403
+        assert allowances.get_allowance(foreign['id'])['revoked_at'] == 0
+
 
 class TestUiEscaping:
     def test_approver_token_row_escapes_every_field(self):
@@ -507,6 +613,10 @@ class TestTestAgent:
         assert r.status_code == 200, r.text
         assert r.json()['token'].startswith('e2e_')
         assert sent
+        bad = auth_client.post('/api/approver-tokens', json={
+            'agent_id': setup['agent_id'], 'commands': ['hostname'],
+            'gateway_ip': OTHER_GATEWAY, 'days': 30})
+        assert bad.status_code == 400
         listed = auth_client.get('/api/approver-tokens?agent_id=%d'
                                  % setup['agent_id']).json()
         assert all('token' not in row for row in listed)

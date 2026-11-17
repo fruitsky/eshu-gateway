@@ -21246,6 +21246,62 @@ columns/checks, the fixed command list, every BY3 refusal test, the
 (`scripts/e2e/run.py`, `tests/test_e2e_smoke.py`) and starts only after
 Security approves round 1.
 
+### How to run (code round 2)
+
+The suite is run by the main reviewer from a machine that reaches the
+dashboard through an SSH tunnel, so the URL is loopback:
+
+```
+ssh -L 8000:127.0.0.1:8000 <dashboard-host>
+export ESHU_E2E_BASE_URL=http://127.0.0.1:8000
+python3 scripts/e2e/run.py --list       # cases, no connection
+python3 scripts/e2e/run.py              # all cases
+python3 scripts/e2e/run.py --case C2    # one case
+python3 scripts/e2e/run.py --json       # the same rows as JSON
+```
+
+The two token files must be regular files, non-empty and `0600`. The
+approver token is minted in Settings → Agents for the one `test_agent=1`
+agent, with these exact commands, one per line (BY2):
+
+```
+hostname
+id -un
+printf e2e-deny
+cat /etc/hostname
+printf e2e-plan
+printf e2e-plan-a
+printf e2e-plan-b
+printf e2e-wait
+printf e2e-window
+```
+
+Probe plans (`diagnose_service` with `unit=ssh`, `disk_pressure`) are allowed
+by template, not by this list. The test agent must use `ssh_mode=normal`,
+`tools_mode=allowlist`, and exactly one IP in `ssh_hosts_allow`; the suite
+refuses anything wider before it runs a case. C15 uses a standing,
+operator-made allowance: no allowance is created or revoked by the suite.
+
+| Variable | Required | Meaning |
+|---|---|---|
+| `ESHU_E2E_AGENT_TOKEN_FILE` | yes | Agent bearer token, mode `0600`. |
+| `ESHU_E2E_APPROVER_TOKEN_FILE` | yes | `e2e_` approver token, mode `0600`. Never a password. |
+| `ESHU_E2E_GATEWAY` | yes | The one test gateway, as an IP. |
+| `ESHU_E2E_BASE_URL` | no | Default `http://127.0.0.1:8000`. A non-loopback URL **must** be `https://` and also needs `ESHU_E2E_ALLOW_REMOTE=1`; plain `http://` to a remote host is refused. |
+| `ESHU_E2E_GATEWAY_SSH_KEY` | for C11 | Key for `eshu-gateway@<gateway>`, mode `0600`; C11 skips without it. |
+| `ESHU_E2E_GATEWAY_SSH_USER` | no | Default `eshu-gateway`. |
+| `ESHU_E2E_DNS_NAME` | for C12 | The seeded Pi-hole name; C12 skips without it. |
+| `ESHU_E2E_ALLOWANCE_ENTITY` | for C15 | The entity the standing allowance covers. |
+| `ESHU_E2E_ALLOWANCE_OTHER_ENTITY` | for C15 | A second entity the allowance does **not** cover. |
+| `ESHU_E2E_CASE` | no | Run one case by id. |
+| `ESHU_E2E_KEEP` | no | `1` skips cleanup. |
+
+The table prints case ids, request/plan/window ids and a short reason. It
+never prints command output, the goal text, entity ids, hostnames, tokens or
+key paths. The same suite applies BY1/BY2 in the `wait=true` watcher; the
+server is still the boundary.
+
+
 ### Implementer notes — code round 1 (2026-11-17)
 
 **Status: round 1 server + UI + tests are in on `feat/e2e-smoke`; this stops
@@ -21254,9 +21310,10 @@ for Security's read. Round 2 (the suite) is not started.**
 **BY1 — agent-id provenance.** Additive `agent_id` columns on `requests`,
 `session_plans`, `integration_calls`, `pending_integration_calls`,
 `approved_windows` and `sessions` (old rows 0). Agent-token rows take the id
-from the verified current agent; gateway-created SSH rows take it from the
-server-side session record named by the signed session id; plans/calls/windows
-take it from the verified token/context. A row with `agent_id=0` is always
+from the verified current agent; gateway-created SSH rows take it only when
+the forwarded verified agent name matches the session's agent id (BZ1), so a
+session id alone records 0. Plans/calls/windows take it from the verified
+token/context. A row with `agent_id=0` is always
 refused by the approver. The approver check is row `agent_id` = token agent,
 row `session_id` = a session with that same `agent_id`, that agent is
 `test_agent=1`, and the goal starts `E2E:` (the extra check, not the boundary).
@@ -21432,6 +21489,62 @@ not from a verified agent.**
 Re-read scope for code round 2: the suite's preflight refusals (file modes
 on every target, `https://` for a non-loopback URL, `test_agent=1`, one IP),
 the redaction tests, and clean-up ordering.
+
+### Implementer notes — code round 2 (2026-11-17)
+
+**Status: BZ1, BZ2, the two nits, the merge-order filter and the suite are in
+on `feat/e2e-smoke`. This stops for Security's read of BZ1, BZ2 and round 2.**
+
+**Merge.** `origin/master` at `974faef` (F27, X10 and the inventory fix) is
+merged in. F27's two `allowance:%` queries now carry
+`COALESCE(excluded, 0) = 0`: the statistics series in `main.py` and the
+session card in `db/sessions.py`. `tests/test_f27_f6.py` proves an excluded
+allowance run counts zero in both.
+
+**BZ1 — verified agent provenance.** A gateway-posted row records `agent_id`
+only when the forwarded `agent` is non-empty, resolves to a live agent, and
+that agent is the `agent_id` of the session the row names. A session
+signature alone, no session key on the gateway yet, an unknown/revoked agent,
+or a mismatched agent all record 0. The rule is applied in `/api/request`
+(including the encoded-block, check, plan, session-override, read-lane, host
+override and pending paths) and in `/api/log`; `approve_unattended` takes the
+verified id. Tests in `TestBz1` cover the matching name, an empty/absent
+`agent` (both refused by the approver) and a mismatched agent.
+
+**BZ2 — invalid-token throttle.** The `approver` IP bucket is checked before
+the token lookup. An invalid `e2e_` value writes at most one
+`e2e_approver_refused` row per client IP per minute; over the bucket returns
+429 with no audit write. `tests/test_e2e_approver.py::TestBz2` covers both.
+
+**Nits.** The allowance revoke route now uses `_decision_auth`: the approver
+may revoke only an allowance whose `agent_id` is its own, never create or
+edit, and a refusal is audited. The operator session path is unchanged.
+Minting refuses a `gateway_ip` that is not the test agent's one
+`ssh_hosts_allow` entry. Tests cover both.
+
+**Round 2 — `scripts/e2e/run.py`.** Configuration is env + files only; no
+password. The operator is the `e2e_` approver token. `Config` refuses
+missing/empty/symlink/group-or-world-readable token files, a non-loopback
+`http://` URL, a remote URL without `ESHU_E2E_ALLOW_REMOTE=1`, a gateway that
+is not one IP, and an SSH key that is readable by the group/world. Preflight
+requires exactly one `test_agent=1` agent, `ssh_mode=normal`,
+`tools_mode=allowlist`, exactly the one gateway IP, a readable session and
+the C16 read. The suite covers C1–C11, C12 (SKIP without a DNS name), C13
+(SKIP without HA), C15 (SKIP without the standing allowance entities) and
+C16; C14 stays dropped. `wait=true` runs a watcher that uses the same
+`Approver` object and the same approve route (BY1/BY2). The table and JSON
+print ids and fixed reasons only; `redact()` is a second boundary for
+tokens, hosts, commands and entity ids. Clean-up denies pending
+requests/plans/calls, concludes, rejects its draft, excludes the session and
+deletes its window; it stops at the first BY refusal and revokes no
+allowance.
+
+**Unit tests.** `tests/test_e2e_smoke.py` covers the config refusals, the
+test-agent guard, the pure approver (own/foreign/zero/command/window), the
+redaction, the clean-up order and its stop-on-refusal, the watcher's
+own-row-only behaviour, and the real `Operator` path against `TestClient`
+(only the own row moves). No socket, no uvicorn, no real gateway.
+
 
 ## 7. Backlog (not planned in detail)
 

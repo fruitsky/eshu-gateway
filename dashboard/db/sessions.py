@@ -203,6 +203,7 @@ def get_session_summary(session_id: str) -> dict:
         cur.execute('''
             SELECT COUNT(*) AS n FROM integration_calls
             WHERE session_id = ? AND approval LIKE 'allowance:%'
+              AND COALESCE(excluded, 0) = 0
         ''', (sid,))
         n = int(cur.fetchone()['n'] or 0)
         if n:
