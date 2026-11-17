@@ -21103,6 +21103,85 @@ minutes.
 2. S1–S4 with tests. **Security reads.**
 3. The UI. Main-reviewer review with the harness screenshots.
 
+### Design note — the look (2026-11-17)
+
+**Scope: this is the Stage 1 mock, not app code.** It is a static page at
+`docs/mockups/x11/index.html`, built with the app's own `fonts.css`,
+`style.css` and shell colours. Every device, agent, site and timestamp is
+synthetic. `scripts/x11_mock_shots.cjs` renders the six states at 1440 and
+390; the operator approves the look before Stage 2 starts.
+
+**What the mock is trying to make obvious.** The pages answer one question —
+what can this agent do on its own, and how do I change it? — and every
+permission is one of three outcomes: *Runs without asking*, *Asks you first*,
+*Never*. The vocabulary table is applied throughout; `ceiling`, `profile` and
+`template` do not appear in the content.
+
+**Agents list.** A card grid, three across at 1440 and one at 390. A card is
+name, status, last used, then four plain rows: runs without asking, asks you
+first, SSH, Websites. No chips and no raw counts alone. “New agent” is a
+card-shaped button at the start, so it is in the same place as the thing it
+creates. The empty space in the old full-width rows is gone.
+
+**Agent page.** Two columns at desktop, one at mobile. The left column is
+sticky: agent name, status, token menu and a section list (Overview, Home
+Assistant, Other tools, SSH, Websites, Activity). These are anchors, not
+tabs; every section is on the same page. The right column is the content. The
+save bar sits at the bottom and only appears with changes; the mock shows the
+“3 changes” state on the preview screen.
+
+**Home Assistant section.** Header is the sentence “Runs without asking”, not
+a caps eyebrow. The device grid is the memorable element: grouped by area,
+name first, area and type in muted mono underneath, current state, then one
+checkbox per action. Settings and diagnostic entities are hidden behind
+“Show settings entities”. Two protected devices show a lock and “Protected”
+in place of the action toggles. The label alternative and the rate/window
+limits sit in the editor, not in the reading view. A ninth device is just
+another row.
+
+**Editor.** Opens inline in the section, not in a modal. Search, type filter
+chips, “Follow a Home Assistant label”, the same device grid, the per-
+permission limit sentence (“At most 30 times an hour, only between 07:00 and
+23:00”), and one “Preview changes” action. Protected rows stay locked.
+
+**Save preview.** Saving first shows a plain sentence — “household-agent will
+be able to turn off 6 plugs and turn on 5. Removed: Office heater (turn
+on).” — and the resulting grid. Nothing has changed yet. The bar says
+“3 changes”, then Discard and Save changes.
+
+**“Runs without asking” overview.** Suspended permissions come first, with
+the reason in words and Review. Then one block per agent, each permission
+written as “Turn off: <names> (7)” with Edit and Revoke. “Limits for all
+agents” and “Never allowed” are collapsed at the bottom, followed by the
+protected-devices section. This puts the live permissions above the
+reference material, which is the opposite of the current page.
+
+**Copy and shell.** Page titles keep the app's Instrument Serif; body and
+controls keep Space Grotesk and JetBrains Mono where the app already uses
+them. The starfield, amber chrome and dark surfaces are unchanged. Section
+headings are sentence case; the only caps left are the existing sidebar
+group labels, which belong to the shell. Websites use neutral examples
+(`docs.example.com`, `example.org`, `status.example.net`); the real
+placeholder in `index.html` is changed to the same examples, so no public
+repo page carries the operator's context.
+
+**Screenshots.** Six states at 1440 and 390:
+
+* `docs/screenshots/x11/agents-1440.png` / `agents-390.png`
+* `docs/screenshots/x11/agent-1440.png` / `agent-390.png`
+* `docs/screenshots/x11/agent-home-assistant-1440.png` / `agent-home-assistant-390.png`
+* `docs/screenshots/x11/agent-editor-1440.png` / `agent-editor-390.png`
+* `docs/screenshots/x11/agent-save-preview-1440.png` / `agent-save-preview-390.png`
+* `docs/screenshots/x11/runs-without-asking-1440.png` / `runs-without-asking-390.png`
+
+**Look questions for the operator.** (1) Is the agent card’s four-row summary
+enough, or should the Home Assistant row name the two or three busiest
+devices? (2) Is the save preview better as the inline card shown, or as a
+confirmation dialog? (3) Should protected devices stay on the overview page
+or move behind “Limits for all agents”? The mock keeps them visible because
+protection is a promise, not a limit. Nothing moves to code until the look
+is approved.
+
 ### Implementer notes
 
 ### Reviewer notes
@@ -21130,7 +21209,7 @@ minutes.
 | 27 | X8 | gateway-installer-version | dashboard + gateway | **Code complete** 2026-11-14: on `release/1.4-gw` (BR1 folded; the hash is display-only) | `feat/x8-gateway-installer-version` | X7 | security approved; five buckets sum to the gateway count |
 | 28 | X9 | gated-gateway-files | dashboard + gateway | **Design note** 2026-11-14 (BP2): installer-carried vs authenticated channel files; recommends (b) | `feat/x9-gated-gateway-files` | X7, 1.4 | security sign-off before code |
 | 29 | X10 | approved-windows-modal | dashboard UI | **Merged** 2026-11-17: presets, Once default, typed local HH:MM + duration, live plain-words preview; agent requests use the same preview; not yet deployed | `feat/x10-windows-modal` | — | UI only; no schema or window-meaning change |
-| 31 | X11 | agents-allowances-redesign | dashboard UI + small API | **Planned** 2026-11-17: agent-centred permissions (Runs without asking / Asks you first / Never), device grid by friendly name, protected devices, one save bar; Allowances page becomes an overview | `feat/x11-agents-allowances` | F27, X4, fix/f27-ha-by-kind | operator approves the mock; security reads S1–S4 (device list, one-go permissions, protected devices, CB1) |
+| 31 | X11 | agents-allowances-redesign | dashboard UI + small API | **Design** 2026-11-17: static mock and 12 screenshots at 1440/390; operator approval of the look pending | `feat/x11-agents-allowances` | F27, X4, fix/f27-ha-by-kind | operator approves the mock; security reads S1–S4 (device list, one-go permissions, protected devices, CB1) |
 | — | CI fix | ci-environment | gateway + tests | Merged (`f2746ef`); CI pinned to ubuntu-24.04 (`6d58006`) | `fix/ci-environment` | F5 | |
 | — | Buffering | stream-unbuffered | gateway | Merged (`d8d70c2`); S1 tee fix done in Gateway hardening | `fix/stream-unbuffered` | F5 | |
 | — | Gateway hardening | gateway-hardening | gateway | **Merged** 2026-11-12 (AF3 + S1 tee capture; security `c15664e`; AX1/AX2 residuals; BA1 for the next F5/F19 change) | `fix/gateway-hardening` | F19, Buffering | |
