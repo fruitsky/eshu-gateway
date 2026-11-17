@@ -10,6 +10,7 @@ import json
 import os
 import shutil
 import subprocess
+import urllib.parse
 from contextlib import contextmanager
 
 import pytest
@@ -454,3 +455,109 @@ class TestWhereisAgentPolicy:
              'name': 'web\x01\x1b01', 'ips': ['192.0.2.40'], 'extra': {}}])
         entity = whereis('web')['entities'][0]
         assert entity['name'] == 'web01'
+
+
+class TestRealSourcePath:
+    """I1/I2: exercise `_call_tool` and the handlers, not a stubbed adapter.
+
+    The transport is faked at `_http_roundtrip`, so the real integration-call
+    path (read policy, handler resolution, synthetic probe, response shaping)
+    runs. Every host is 192.0.2.x and every name is *.example.test.
+    """
+
+    def test_pihole_v6_records_through_the_real_handler(self, monkeypatch):
+        from core.pihole_seed import seed_pihole_tools
+        from core.inventory import _pihole_source
+        from core import integration_proxy as proxy
+
+        create_integration('pihole-v6', 'http://192.0.2.70/api',
+                           'query_token', 'tok', kind='pihole')
+        integration = get_integration('pihole-v6')
+        seed_pihole_tools(integration['id'])
+
+        def fake_roundtrip(integration, url, body_bytes, headers, method,
+                           max_bytes=0, timeout=None):
+            if 'config/dns/hosts' in url:
+                body = {'config': {'dns': {'hosts': [
+                    '192.0.2.10 web01.example.test']}}}
+            else:
+                body = {'config': {'dns': {'cnameRecords': [
+                    'app.example.test,web01.example.test']}}}
+            return (200, json.dumps(body), 0, None, 1, 'ok', None)
+
+        monkeypatch.setattr(proxy, '_http_roundtrip', fake_roundtrip)
+        groups, failures = _pihole_source()
+        assert failures == []
+        items = groups[0][2]
+        assert {item['name'] for item in items} == {
+            'web01.example.test', 'app.example.test'}
+        hosts = [item for item in items if item['key'].startswith('host:')][0]
+        assert hosts['ips'] == ['192.0.2.10']
+        # The failed probe used to leave no integration_calls row at all.
+        from db.integrations import get_integration_calls
+        tools = {row['tool'] for row in get_integration_calls()['rows']}
+        assert 'local_dns_records:hosts' in tools
+        assert 'local_dns_records:cnames' in tools
+
+    def test_pihole_failure_records_the_real_reason(self, monkeypatch):
+        from core.pihole_seed import seed_pihole_tools
+        from core import integration_proxy as proxy
+
+        create_integration('pihole-v6', 'http://192.0.2.71/api',
+                           'query_token', 'tok', kind='pihole')
+        seed_pihole_tools(get_integration('pihole-v6')['id'])
+
+        def fake_roundtrip(integration, url, body_bytes, headers, method,
+                           max_bytes=0, timeout=None):
+            return (404, '{"error":"records endpoint not found"}', 0,
+                    'records endpoint not found', 1, 'error', None)
+
+        monkeypatch.setattr(proxy, '_http_roundtrip', fake_roundtrip)
+        refresh_inventory()
+        error = stale_sources()['pihole-v6']['error']
+        assert 'local_dns_records_failed' in error
+        # Not the bare generic code: the handler's message survives.
+        assert 'records endpoint not found' in error
+
+    def test_omada_sites_with_siteId_reach_list_known_clients(self, monkeypatch):
+        from core.omada_seed import seed_omada_tools
+        from core.inventory import _omada_source
+        from core import integration_proxy as proxy
+        import core.omada_utils as omada
+
+        create_integration('omada-real',
+                           'https://192.0.2.80:8043/openapi/v1/acct',
+                           'oauth2', 'tok', kind='omada')
+        seed_omada_tools(get_integration('omada-real')['id'])
+        monkeypatch.setattr(proxy, '_auth_headers', lambda *a, **k: {})
+        seen = []
+
+        def fake_roundtrip(integration, url, body_bytes, headers, method,
+                           max_bytes=0, timeout=None):
+            if urllib.parse.urlparse(url).path.rstrip('/').endswith('/sites'):
+                body = {'errorCode': 0, 'result': {'data': [
+                    {'siteId': 'site-1', 'name': 'Home',
+                     'region': 'Europe', 'timeZone': 'UTC',
+                     'scenario': 'Home', 'type': 0}]}}
+            else:
+                body = {'errorCode': 0, 'result': {'data': []}}
+            return (200, json.dumps(body), 0, None, 1, 'ok', None)
+
+        def fake_clients(integration, site_id, **kwargs):
+            seen.append((site_id, kwargs.get('page_size')))
+            return {'collectionRows': 1, 'totalMatched': 1, 'returned': 1,
+                    'truncated': False,
+                    'rows': [{'mac': 'AA:BB:CC:DD:EE:01',
+                              'name': 'web01.example.test',
+                              'ip': '192.0.2.10', 'active': True,
+                              'lastSeen': 1700000000}]}
+
+        monkeypatch.setattr(proxy, '_http_roundtrip', fake_roundtrip)
+        monkeypatch.setattr(omada, 'list_known_clients', fake_clients)
+        groups, failures = _omada_source()
+        assert failures == []
+        assert seen and seen[0][0] == 'site-1'
+        items = groups[0][2]
+        assert len(items) == 1
+        assert items[0]['name'] == 'web01.example.test'
+        assert items[0]['ips'] == ['192.0.2.10']

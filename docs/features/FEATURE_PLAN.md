@@ -12915,6 +12915,34 @@ note.
 
 **Round 2 (2026-11-09, main feature reviewer): approved and merged.** R1 is right: `whereis` is gated by agent policy, sources are filtered before the join, and each call is audited. Note: a caller with no agent identity (a legacy MCP token) gets the unfiltered join and no audit row, the same as for the integration tools themselves. Tighten this in the UI/hardening pass if legacy tokens are retired.
 
+
+### F20-pass I1/I2 — the live inventory sources (2026-11-17)
+
+**I1 — Pi-hole failed before its first request.** The seeded
+`local_dns_records` row is right (`handler=pihole_local_dns_records`, X6
+D18b), and the read policy passes it. The handler's two synthetic probes did
+not carry `enabled`, so `execute_integration_call` refused them with
+"Tool not found or disabled" before `_http_roundtrip` ran: no
+`integration_calls` row, and the handler returned the generic
+`local_dns_records_failed`. The probes now carry `name`, `enabled`,
+`transport` and `read_only`; both GETs run and are recorded. `_call_tool`
+also keeps a handler's `message` in its `SourceError`, so a real refusal or
+upstream error is recorded as `code: message`, not the bare code.
+
+**I2 — Omada never called `list_known_clients`.** `list_sites` returns
+`siteId`, but the adapter tested `site.get('id')`, so every site was
+skipped and the source recorded success with zero items. The adapter now
+accepts `siteId`, `id` or `site_id` before the per-site call.
+
+**Tests.** `TestRealSourcePath` fakes `_http_roundtrip` (not `_call_tool`),
+so the real adapter, read policy, handler/probe and response transform run:
+synthetic Pi-hole v6 host/CNAME payloads yield `host:*` / `cname:*` rows and
+record both integration calls; a 404 records
+`local_dns_records_failed: <upstream message>` in `last_error`; synthetic
+Omada `siteId` + clients yield a `client` row and prove `site-1` reached
+`list_known_clients`. All addresses are `192.0.2.x` and all names
+`*.example.test`. Each test fails on the pre-fix code.
+
 ---
 
 ## Chunk F15 — Diagnostic probes · slug `probes` · dashboard + MCP
