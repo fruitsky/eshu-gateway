@@ -587,8 +587,30 @@ def validate_entity_set(domain, entities):
 
 
 def _ha_integration():
-    from db.integrations import get_integration
-    return get_integration(INTEGRATION)
+    """The one enabled Home Assistant integration, found by its kind.
+
+    Allowances are stored under the kind `ha`. The operator names the
+    integration ("Home Assistant"), so a lookup by name never found it on a
+    real install. With no HA integration, or more than one enabled, this is
+    None: saves refuse and nothing matches, because an entity id means
+    nothing without knowing which HA it belongs to.
+    """
+    from db.integrations import get_integration, get_integrations
+    rows = [r for r in get_integrations()
+            if (r.get('kind') or '').lower() == INTEGRATION and r.get('enabled')]
+    if len(rows) != 1:
+        return None
+    return get_integration(rows[0]['name'])
+
+
+def _is_the_ha_integration(integration):
+    """True only for the single enabled HA integration (by id, not name)."""
+    if not isinstance(integration, dict):
+        return False
+    if (integration.get('kind') or '').lower() != INTEGRATION:
+        return False
+    ha = _ha_integration()
+    return bool(ha) and ha.get('id') == integration.get('id')
 
 
 def _ha_registry():
@@ -596,7 +618,8 @@ def _ha_registry():
     from core.ha_ws import ha_ws_request
     integration = _ha_integration()
     if not integration:
-        raise AllowanceError(503, 'Home Assistant is not configured.')
+        raise AllowanceError(503, 'Allowances need exactly one enabled Home '
+                                  'Assistant integration.')
     try:
         rows = ha_ws_request(integration, 'config/entity_registry/list', {})
     except Exception as exc:
@@ -843,7 +866,9 @@ def match_and_claim(agent, integration, tool, args, call_ref=''):
     """
     from db.core import db_conn, get_db
     from db.audit import record_audit_event
-    if integration != INTEGRATION or tool != ALLOWANCE_TOOL:
+    # `integration` is the integration row the call runs against. Only the
+    # one enabled HA integration can match; its name is irrelevant.
+    if not _is_the_ha_integration(integration) or tool != ALLOWANCE_TOOL:
         return None
     agent_id = (agent or {}).get('id')
     if not agent_id:
