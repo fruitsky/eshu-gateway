@@ -20804,9 +20804,314 @@ Full suite: 3193 passed, 33 skipped.
 
 ---
 
+## Chunk X11 — Agents and allowances, redesigned around the agent · slug `agents-allowances-redesign` · dashboard UI + small API · **security reads the API part (S1–S4)**
+
+Requested 2026-11-17 by the operator: "that Allowances page is awful. I can't
+even use it to configure it", and the Agents UI has "a lot of empty space, a
+complicated modal". It supersedes the agent-policy half of X3. The main
+reviewer wrote this plan from screenshots of the current pages, taken with the
+headless harness on synthetic data.
+
+### What the operator was trying to do
+
+Let the household agent switch eight named plugs without asking, never touch
+the two server plugs, and add a ninth plug later. The current UI could not do
+this without the reviewer's help. The operator needed to type entity ids and
+an HA label id, choose the agent in one form so that another form would use
+it, build a "profile" of "templates", and press "Update agents".
+
+### What is wrong today (from the screenshots)
+
+**Allowances page**
+* **It is ordered by system concept, not by the task.** It opens with the
+  ceiling, a wall of 25 checkboxes the operator rarely changes. Then come two
+  reference lists (never-allowable domains, never-words) and the destructive
+  words. The live allowances start more than a screen down, and the create
+  form comes after them.
+* **There are three ways to make the same thing.** The "New allowance" form,
+  a profile template with entities, and a profile template with a label each
+  need different fields. The profile's apply uses the agent chosen in the
+  other form, a hidden coupling.
+* **The operator types HA internals:** comma-separated entity ids, and a
+  label *id*. Nothing shows a device's name, its area, its current state, or
+  whether it is protected.
+* **An allowance row hides what it allows.** It reads "switch.turn_off on 6
+  entities", but which six? There is no Edit button: the only way to change
+  one is to revoke it and recreate it.
+* **The jargon is the code's vocabulary:** ceiling, template, profile,
+  join, label id, "Update agents".
+* The profile form has no rate field, so a label-based allowance has no cap.
+
+**Agents list**
+* Each full-width row holds a name, "last used", and four cryptic chips
+  (`tools 1`, `0/min`, `SSH off`, `web off`). At 1440 px more than half the
+  view is empty. Nothing says what an agent can actually do.
+
+**Agent page**
+* **It is one long page with four tabs** (Tools, Rules, SSH, Advanced),
+  followed by a separate Web fetch section and an Activity section.
+  * **Four separate Save buttons**, each with a sentence explaining what it
+    does not save.
+  * **"Back to agents" three times.**
+  * The Web fetch section has its own agent dropdown, although the page is
+    already about one agent.
+* **Tools are 46 chips with raw names** (`home_assistant_ha_addon_action`).
+* **Rules are comma-separated text boxes** for domains and services.
+* **The "Ungated" switch is misleading.** It says "Ungated runs without a
+  JIT row", which is false for a tool Eshu always gates (`call_service`). That
+  is exactly why the household agent's light calls kept asking. The operator
+  has no way to see this.
+* **The agent's allowances are not shown on its own page.**
+* Caps-tracked eyebrows over every block ("AGENT POLICY", "TOOLS 1 / 46",
+  "LIMITS", "RATE LIMIT") add noise without adding information.
+
+### Design direction
+
+Eshu is a gate between AI agents and one person's house and homelab. The
+operator comes to these pages with one question: **"what can this agent do
+on its own, and how do I change that?"** So the agent is the unit, and every
+permission is described in plain words as one of three outcomes:
+
+* **Runs without asking**
+* **Asks you first**
+* **Never**
+
+Keep the app's existing shell, colours, type and starfield; this is not a
+re-skin. Within these two pages:
+* Use sentence-case section headings in place of tracked caps eyebrows.
+* Use friendly names first and ids second (in muted mono, on hover or under
+  the name).
+* Give one obvious primary action per view.
+* Let the memorable element be the **device grid** under "Runs without
+  asking". Everything around it stays quiet.
+
+Vocabulary (use it everywhere: buttons, toasts, audit text shown to the
+operator):
+
+| Code / today | UI word |
+|---|---|
+| allowance | "Runs without asking" (section); a single row is "a permission" |
+| ceiling | "Limits for all agents" |
+| never lists | "Never allowed" |
+| profile | **dropped from the main UI** (see "Copy from") |
+| label template | "Follow a Home Assistant label" |
+| accept-join | "Review new devices" |
+| ungated / inherit / always approve | "Runs without asking" / "Default" / "Always asks" |
+
+### Layout
+
+**Agents list.** A grid of agent cards: 2-3 per row at 1440 px, 1 at
+390 px. Each card answers the question in plain words, with no chips:
+
+```
+┌───────────────────────────────────────────┐
+│ household-agent                 Active    │
+│ Last used 4 minutes ago                   │
+│                                           │
+│ Runs without asking  8 devices in HA      │
+│ Asks you first       other HA services    │
+│ SSH                  none                 │
+│ Websites             5 sites              │
+│                                [ Open ]   │
+└───────────────────────────────────────────┘
+```
+
+"New agent" is a card-shaped button at the start of the grid. It opens a
+short dialog (name, then the token shown once, with the client hint).
+
+**Agent page.** A two-column page at desktop width, one column on mobile:
+
+* **Left, sticky:** the agent's name, status, token actions (Revoke, Delete,
+  in a "Token" menu), and a section list: Overview, Home Assistant, Other
+  tools, SSH, Websites, Activity. These are anchors, not tabs, and every
+  section is on the page.
+* **Right:** the sections, in that order.
+* **One sticky save bar** appears only when something has changed: "3
+  changes · Discard · Save changes". It sends only the changed sections, so
+  the X4 rule (absent fields keep their stored value) still holds.
+
+```
+┌──────────────┬───────────────────────────────────────────────┐
+│ household-   │ Overview                                      │
+│ agent        │ Runs without asking: 8 plugs (turn on/off)    │
+│ Active       │ Asks you first: everything else in HA         │
+│ Token ▾      │ Never: SSH · scripts and automations          │
+│              │                                               │
+│ Overview     │ Home Assistant                                │
+│ Home Assist. │  Runs without asking            [ Edit ]      │
+│ Other tools  │  ┌ Plugs ──────────────────────────────────┐  │
+│ SSH          │  │ Bedroom Plug 1     on    ✓ off  ✓ on    │  │
+│ Websites     │  │ Christmas Tree     off   ✓ off  ✓ on    │  │
+│ Activity     │  │ Office Heater      on    ✓ off  – on    │  │
+│              │  │ Homelab plug       on    Protected      │  │
+│              │  └─────────────────────────────────────────┘  │
+│              │  Asks you first: every other service call     │
+│              │  Limits for all agents ▸   Never allowed ▸    │
+└──────────────┴───────────────────────────────────────────────┘
+                          [ 3 changes · Discard · Save changes ]
+```
+
+**"Runs without asking" editor** (opened by Edit, inline in the section):
+
+* **Rows are devices**, read live from HA by friendly name and grouped by
+  area, then type. Each row shows: name, area, current state, and a toggle
+  per action the limits allow (Turn off, Turn on; Open/Close only when covers
+  are enabled).
+  * Search by name.
+  * Filter chips: "Only devices with permissions", or by type.
+  * Config and diagnostic entities (child lock, LED, auto-off,
+    `entity_category` set) and disabled entities are hidden by default, behind
+    "Show settings entities". The operator never sees 55 "switches" when 14
+    are plugs.
+* **Protected devices** (S3) show a lock and "Protected: no agent can be
+  given this". They cannot be toggled. A device whose class is risky
+  (garage, gate, door, lock) needs the existing second confirmation (answer
+  6) in a plain sentence.
+* **"Follow a Home Assistant label"** is an alternative per action. Pick the
+  label by its *name*. The grid then shows that label's devices, greyed and
+  read-only, with the note "Add or remove the label in Home Assistant; new
+  devices wait for your review here". Pending joiners show as a banner,
+  "2 new devices have this label · Review", which opens the same rows with
+  Allow / Skip.
+* **Limits per permission:** "At most [30] times an hour" and "Only between
+  [07:00] and [23:00]". The defaults are 30 per hour and any time.
+* Saving shows a **preview** in plain words before anything changes:
+  "household-agent will be able to turn off 7 plugs and turn on 5. Removed:
+  Garage plug (turn on)." This reuses the profile diff.
+* **"Copy from another agent…"** fills the grid from another agent's
+  permissions, for review before saving. This replaces profiles in the UI.
+  The profile API stays and is no longer linked.
+
+**Allowances page.** It becomes **"Runs without asking"**, an overview across
+agents:
+* One block per agent with its permissions in plain words ("Turn off:
+  Bedroom Plug 1, Christmas Tree, … (7)"), each with Edit (going to the
+  agent's section) and Revoke.
+* Suspended permissions on top, with their reason in words and Resume.
+* **"Limits for all agents"** (the ceiling) and **"Never allowed"** (the two
+  never lists plus the destructive words) move to collapsed sections at the
+  bottom.
+  * Limits keep their risk sentences and their save confirmation.
+  * Never allowed is read-only reference, except for adding a word.
+* **Protected devices** has its own short section here: a device picker with
+  the same rows and a Protect toggle.
+
+**Other tools.** Group by integration, with friendly names generated from
+the tool name and its description (`ha_addon_action` → "Add-on action";
+show the description under it). Each tool shows its outcome for this agent:
+* Runs without asking (read);
+* Asks you first (write);
+* **"Always asks — Eshu requires approval for this tool"** (always-gated).
+
+Per integration, quick presets: "Read only", "Everything", "None". Replace
+the "Ungated" switch with the three outcome words. Next to an always-gated
+tool, the "Runs without asking" choice is disabled and links to the
+Home Assistant section: "Use Runs without asking for specific devices".
+
+**Rules (argument rules).** Replace the comma text boxes with token inputs
+(type, Enter, ×) and a one-line explanation each. Move them under the Home
+Assistant section as "Advanced: which service domains this agent may call".
+
+**SSH and Websites.** Same content, plain headings, inside the one page. The
+Websites dropdown for "Agent token" is removed.
+The Websites placeholder currently lists real local sites (a council and
+supermarkets). Replace it with neutral examples (`docs.example.com`,
+`example.org`): the repo is public, and placeholders are not the place for
+the operator's own context.
+
+**Activity.** It stays last. A "Show all in History" link filters History to
+this agent.
+
+### API changes (security reads these; each with tests)
+
+* **S1 — device list for the picker.** `GET /api/ha/devices` (operator
+  session only). From the one HA integration (found by kind), read:
+  * the entity registry: name, entity_category, disabled_by, labels,
+    area_id, device_id;
+  * states: friendly_name, state, device_class;
+  * the area and label registries.
+
+  Return per entity: id, name, area, domain, state, device_class,
+  labels (names and ids), `settings_entity` (entity_category set), disabled,
+  `risky` (the answer 6 classes) and `protected` (S3). Cache it for 60 s,
+  scrub it, and never expose it to agents. The labels endpoint is
+  `GET /api/ha/labels`.
+* **S2 — set an agent's HA permissions in one go.**
+  `PUT /api/agents/{id}/ha-permissions` takes the desired state:
+  `[{domain, service, entities[] | label_id, rate_per_hour, window}]`, plus
+  `preview: true|false`, `risk_ack` and the `version` the editor loaded.
+  * It reuses `apply_profile`'s machinery: validate everything first, then
+    revoke and insert in one `BEGIN IMMEDIATE`, with a 409 on a stale
+    version.
+  * The preview returns the plain-words diff.
+  * Unchanged permissions keep their id and use counts. Only changed ones
+    get a new version (revoke and create, as today).
+* **S3 — protected devices.** An operator-held list of entity ids
+  (`allowance_protected`, audited on change, and a notification when one is
+  removed).
+  * A save that includes a protected entity is refused.
+  * `match_and_claim` refuses a call that names one, as defence in depth.
+  * A label refresh never adds one (it is dropped, with an audit row).
+  * The picker shows a lock.
+* **S4 — CB1 (security follow-up from 2573632).** Record the HA
+  integration's id and a base-URL fingerprint on each permission. If either
+  changes, suspend every HA permission with `ha_changed`, shown in words
+  with Resume.
+* No change to matching rules, the ceiling, the never lists or P2.
+
+### Tests to add
+
+* S1: the operator only (an agent bearer gets 401/403); settings and
+  disabled entities are flagged; risky classes and protected flags are set;
+  no secrets; the cache works.
+* S2: preview vs apply; atomicity (a failing item leaves everything as it
+  was); a stale version gives 409; unchanged rows keep their id and count;
+  risk_ack is enforced; a label entry follows the joiner rules.
+* S3: protected refusal on save, on match, and on label refresh; audit
+  rows; the notification.
+* S4: changing the base URL or swapping the integration suspends; Resume
+  works.
+* UI (node harness and the 1440/390 view harness):
+  * the vocabulary table (no "ceiling", "profile" or "template" in the
+    visible text of the two pages);
+  * every string escaped;
+  * the save bar sends only changed sections;
+  * the device grid hides settings entities by default;
+  * the protected lock;
+  * the always-gated tool disables "Runs without asking".
+* Screenshots with synthetic data at 1440 and 390: the agents grid, the
+  agent page (overview, HA section, editor open, preview), and the
+  overview page.
+
+### Acceptance
+
+The operator can do this without typing an id:
+1. Give an agent "turn off" on seven plugs and "turn on" on five, by name.
+2. Protect two plugs.
+3. Follow a label for another agent.
+4. Review a new device that gained the label.
+5. Edit a permission's rate.
+
+The household-agent case in this note's first paragraph takes under two
+minutes.
+
+### Order
+
+1. Design note with the wireframes at real size (a screenshot of a static
+   mock with synthetic data is fine). The **operator** approves the look
+   before code.
+2. S1–S4 with tests. **Security reads.**
+3. The UI. Main-reviewer review with the harness screenshots.
+
+### Implementer notes
+
+### Reviewer notes
+
+---
+
 | 18a | X2 | runbooks-page | dashboard UI | **Merged** 2026-11-11 | `feat/x2-runbooks-page` | F13 | |
 | 18b | F27 | allowances | dashboard + MCP | **Merged** 2026-11-17 (security `17b8db6`, BX1–BX6 confirmed); not yet deployed. Follow-up BZ3 (config-entry edits suspend allowances). Whichever of F27/E2E-1 merges second adds `excluded` to the two allowance statistics queries: that is E2E-1 | `feat/f27-allowances` | F10 (P2), Chunk H, F18 | security re-reads §2–§5 and the label section; AZ6 (`restart`) is with the operator |
-| 18c | X3 | integrations-ui | dashboard UI | Requested 2026-11-12; design after F27 is signed off | `feat/x3-integrations-ui` | F27, F10 (P2) | operator walk-through first |
+| 18c | X3 | integrations-ui | dashboard UI | Requested 2026-11-12; the agent-policy half is superseded by X11 (2026-11-17); the Integrations page half remains | `feat/x3-integrations-ui` | F27, F10 (P2) | operator walk-through first |
 | 18d | X4 | agents-page | dashboard UI | **Merged** 2026-11-12 (into 1.3; on master 2026-11-14): one Agents page (tokens, policy sections, web fetch, activity); Controls renamed Command policy; absent policy fields keep their stored value | `feat/x4-agents-page` | `fix/agent-ssh-hosts` | rename Controls → Command policy |
 | 18e | X5 | ui-test-round | dashboard UI | **Merged** 2026-11-12 (into 1.3; on master 2026-11-14): six test-round fixes plus the X5-r plan-card regression fix | `fix/x5-ui-test-round`, `fix/plans-widget-visible` | — | six small fixes |
 | 18f | X6 | agent-api-round | dashboard | **Merged** 2026-11-12 (into 1.3; on master 2026-11-14): D3/D4, D6, D7, D8 (test), D9, D10, D11, D12, D14, D15, D16a/b, D18a/b, BK5 | `fix/x6-agent-api-round` | — | 12 items; D1 fixed separately |
@@ -20825,6 +21130,7 @@ Full suite: 3193 passed, 33 skipped.
 | 27 | X8 | gateway-installer-version | dashboard + gateway | **Code complete** 2026-11-14: on `release/1.4-gw` (BR1 folded; the hash is display-only) | `feat/x8-gateway-installer-version` | X7 | security approved; five buckets sum to the gateway count |
 | 28 | X9 | gated-gateway-files | dashboard + gateway | **Design note** 2026-11-14 (BP2): installer-carried vs authenticated channel files; recommends (b) | `feat/x9-gated-gateway-files` | X7, 1.4 | security sign-off before code |
 | 29 | X10 | approved-windows-modal | dashboard UI | **Merged** 2026-11-17: presets, Once default, typed local HH:MM + duration, live plain-words preview; agent requests use the same preview; not yet deployed | `feat/x10-windows-modal` | — | UI only; no schema or window-meaning change |
+| 31 | X11 | agents-allowances-redesign | dashboard UI + small API | **Planned** 2026-11-17: agent-centred permissions (Runs without asking / Asks you first / Never), device grid by friendly name, protected devices, one save bar; Allowances page becomes an overview | `feat/x11-agents-allowances` | F27, X4, fix/f27-ha-by-kind | operator approves the mock; security reads S1–S4 (device list, one-go permissions, protected devices, CB1) |
 | — | CI fix | ci-environment | gateway + tests | Merged (`f2746ef`); CI pinned to ubuntu-24.04 (`6d58006`) | `fix/ci-environment` | F5 | |
 | — | Buffering | stream-unbuffered | gateway | Merged (`d8d70c2`); S1 tee fix done in Gateway hardening | `fix/stream-unbuffered` | F5 | |
 | — | Gateway hardening | gateway-hardening | gateway | **Merged** 2026-11-12 (AF3 + S1 tee capture; security `c15664e`; AX1/AX2 residuals; BA1 for the next F5/F19 change) | `fix/gateway-hardening` | F19, Buffering | |
