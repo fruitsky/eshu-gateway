@@ -18327,6 +18327,62 @@ branch merges second must add `COALESCE(excluded, 0) = 0` to F27's two
 `allowance:%` queries (the statistics series and the session card).
 Otherwise excluded test calls still count in the allowance bucket.
 
+### Security review of the BZ3 fix (`fix/f27-config-entry-suspend` @ d7d82e7)
+
+**Approved to merge once CB3 is in.** Code text read only; nothing was run.
+
+**What holds:**
+* The matcher now takes the WebSocket form `config_entries/*` as well as
+  REST `config/config_entries/*`.
+* An approved config-entry write calls `on_config_entry_write`:
+  * The entry id is read only from the path's `entry/<id>`, the query and
+    the `entry_id`/`config_entry_id` keys, and reserved words are
+    rejected.
+  * The write then suspends every live allowance that holds an entity of
+    that entry.
+  * When there is no single id, or the registry cannot be read, every HA
+    allowance is suspended. That is AZ2's conservative branch.
+* An options flow's later steps carry only a flow id, so they fall into
+  "not identifiable" and suspend everything. That is the safe direction.
+* Entity-registry writes still re-check the pins.
+
+**CB3 (should, before merge): a read must not suspend everything.**
+* In `_run_tool`, the WS branch calls `note_ha_registry_write` for every
+  WS call, reads included. The generic branch checks `mutating`; the WS
+  branch does not.
+* The WS reads `config_entries/get`, `config_entries/subscribe` and
+  `config_entries/flow/progress` match the new prefix and name no entry.
+  Any agent read of the config entries, including an inventory pass
+  through a WS read tool, therefore suspends every HA allowance with
+  `config_entry_changed`.
+* That fails closed, but any read-only agent can then turn allowances off
+  at will, and the audit log fills with suspensions.
+* **Fix:**
+  * Call the hook in the WS branch only when the call is `mutating`.
+  * In `is_config_entry_write_path`, also exclude the read commands
+    `get`, `get_single`, `subscribe`, `flow/progress`,
+    `flow_handlers` and `subentries/list`.
+  * Add a test: a read-only `config_entries/get` leaves a live allowance
+    live.
+
+**CB4 (should): an error in the hook must fail closed.**
+* `note_ha_registry_write` wraps the work in `except Exception: pass`. If
+  `on_config_entry_write` or `_suspend_all` raises, for example on a
+  locked database or a registry row of an unexpected shape, the allowances
+  stay live after a config-entry write.
+* **Fix:** in the `except`, call `allowances.on_config_write_failed(actor,
+  value, exc)`, the AZ2 fail-closed path. If that raises as well, log it.
+
+**Nits:**
+* **The generic branch's payload.** It passes `data or params`, so an
+  entry id in `params` is ignored whenever `data` is present. Pass both,
+  for example `{'data': ..., 'params': ...}`. A write naming two different
+  ids then becomes "ambiguous", which suspends everything.
+* **Timing.** Suspension runs after the write returns, so a claim already
+  in flight can run on the redefined entity in that gap of milliseconds.
+  That is acceptable for an operator-approved write. If it is ever cheap,
+  suspend before the write; a failed write then costs only a resume.
+
 ## Chunk X3 — Integrations page and agent policy modal pass · slug `integrations-ui` · dashboard UI · after F27
 
 ### Goal
