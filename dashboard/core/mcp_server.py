@@ -22,6 +22,7 @@ from db.integrations import (
 from db.requests import get_request_row
 from db.web_fetch import get_web_fetch_policy
 from core.agent_context import (
+    current_agent_id,
     current_agent_name,
     current_session_id,
     get_current_agent,
@@ -695,6 +696,7 @@ def session_begin_fn():
             })
         sid = adopted or new_session_id()
         row = upsert_session(sid, agent=current_agent_name(),
+                             agent_id=current_agent_id(),
                              goal=goal, source='agent')
         signature = sign_session(sid)
         # Make a following session_summary() (no arguments) describe this one.

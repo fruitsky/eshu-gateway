@@ -58,7 +58,9 @@ def client(temp_db):
     set_password_hash(_hash_password("test"))
     os.makedirs(os.path.join(_dashboard_dir, "static"), exist_ok=True)
     from main import app
+    import main as app_main
     from fastapi.testclient import TestClient
+    app_main._invalid_approver_audit.clear()
     return TestClient(app)
 
 

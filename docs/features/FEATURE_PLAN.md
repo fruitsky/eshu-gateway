@@ -18383,6 +18383,54 @@ Otherwise excluded test calls still count in the allowance bucket.
   That is acceptable for an operator-approved write. If it is ever cheap,
   suspend before the write; a failed write then costs only a resume.
 
+### Security review — HA-by-kind fix (`fix/f27-ha-by-kind` @ c38d5ed)
+
+**Approved to merge.** Design and code text read only; nothing was run.
+* `_ha_integration()` now returns the single enabled integration of kind
+  `ha`. With none, or with more than one, it returns nothing. Saves then
+  refuse with 503, and so do the registry and state reads. Nothing matches.
+  This fails closed: an entity id means nothing until we know which HA it
+  belongs to.
+* `match_and_claim` takes the integration row and matches by id, not by
+  name. A non-HA integration that happens to be named `ha`, and the bare
+  string `'ha'`, both miss. Both cases are tested.
+* The runner passes the row it is about to call, and the tests now go
+  through `run_tool` with an integration named "Home Assistant". The
+  earlier tests passed only because the fixture named it `ha`.
+* `note_ha_registry_write` already checks the kind, so it needed no
+  change.
+
+**CB1 (should, follow-up): bind the allowances to *which* HA they were
+made on.**
+* Allowances are stored under the kind string `ha`, not under an
+  integration id. "The one enabled HA" can therefore become a different
+  Home Assistant while the allowances stay live:
+  * the operator edits the integration's base URL or token;
+  * the operator disables integration A and enables B;
+  * a second integration is enabled (nothing matches), then the first is
+    disabled.
+* An allowance for `switch.kettle` would then run against whatever is
+  called `switch.kettle` on the new instance.
+* The registry-id pins catch this, but only on the five-minute refresh.
+  Matching does not read the live registry. So there is a window of up to
+  five minutes.
+* The name lookup had the same gap for a base-URL edit. The kind lookup
+  adds the other two cases.
+* **Fix:**
+  * Record the HA integration's id and a fingerprint of its base URL
+    whenever an allowance is saved or applied.
+  * In `_ha_integration()`, treat a different id or fingerprint as "no
+    HA", and suspend every live HA allowance with the reason
+    `ha_changed`, in the same way as AZ2's restore branch.
+  * Alternatively, call that suspension from `update_integration`,
+    `create_integration` and `delete_integration` whenever a kind-`ha` row
+    changes its base URL, secret, enabled flag or kind.
+  * Either way, the operator resumes the allowances after checking them.
+
+**Nit.** `_ha_integration()` lists every integration on each
+`call_service` call. That is fine at this scale. If it shows up in a
+profile, cache the result per request.
+
 ## Chunk X3 — Integrations page and agent policy modal pass · slug `integrations-ui` · dashboard UI · after F27
 
 ### Goal
@@ -20676,6 +20724,1044 @@ check. Build regenerated; Build only.
 `bash scripts/verify.sh`: `3067 passed, 26 skipped, 7 warnings in 672.26s
 (0:11:12)`.
 
+## Chunk E2E-1 — End-to-end smoke suite · slug `e2e-smoke` · test tooling · **security reviewer reads the design before code**
+
+Status: **design**, 2026-11-15 · Branch: `feat/e2e-smoke` from
+`master@e6b42d8` (the commit the request names; in this checkout that commit is
+the 1.4 candidate merge, while the local `master` ref is older at `51a58f6`) ·
+No product change: one script, its tests, and this note.
+
+### Goal
+
+One command proves that a real dashboard + real gateway still does the whole
+loop: an agent opens a session, runs an allowlisted command with no card, asks
+for JIT, gets approved or denied, waits for the ticket, runs a plan, probes a
+host, uses a window token, reads HA and DNS, dispatches a fleet command, and
+uses an F27 allowance. The suite plays **both** the agent and the operator,
+because the point is to test the product without a human.
+
+It is deliberately not a unit test and not a replacement for the existing
+gateway sandbox. It runs against a running dashboard and a real enrolled
+gateway; `tests/` continues to cover the same paths hermetically.
+
+### Roles and hard limits
+
+**Agent.** An MCP client using `Authorization: Bearer <token>` on `/mcp`
+(streamable HTTP), token read from `ESHU_E2E_AGENT_TOKEN_FILE`. It calls only
+MCP tools, plus `POST /api/window-requests` (the documented agent-only window
+request, which has no MCP tool). It opens exactly one session with a goal that
+starts `E2E:` and uses that session id on every tool that accepts one.
+
+**Operator.** A dashboard session created with the password in
+`ESHU_E2E_PASSWORD_FILE`. It reads only what it needs (policy, pending rows,
+session detail) and may **approve or deny only**:
+
+* SSH requests whose `session_id` is the suite's session and whose session goal
+  starts `E2E:`;
+* session plans with that same session id and goal;
+* the one window request the suite itself created, identified by the numeric id
+  returned to the agent (see the attribution finding below);
+* pending **integration calls** carrying the suite's session id — it may
+  **deny** those (the F27 non-matching case) and never approve them.
+
+It may also do suite-owned setup/cleanup that is not a decision on anyone
+else's work: exclude the suite's session, delete the window it created, revoke
+the allowance it created, reject the conclusion draft it created, and dispatch
+one fleet command whose target list is exactly `[test gateway]`. Every one of
+those is audited by the product.
+
+It never touches: any other pending row, any policy, gateway, agent, integration,
+freeze, override, or setting; it never approves an integration call; it never
+dispatches a fleet command to more than the test gateway.
+
+The self-imposed filter is a promise, not an enforcement boundary: the dashboard
+password can approve anything. A dedicated, scoped approver credential is the
+first open question below.
+
+### Configuration
+
+All configuration is env + files outside the repo. No credentials, URLs, host
+names or run data are written into the checkout.
+
+| Variable | Required | Meaning |
+|---|---|---|
+| `ESHU_E2E_AGENT_TOKEN_FILE` | yes | File containing the agent's bearer token. Refuse if world/group-readable or empty; never print it. |
+| `ESHU_E2E_PASSWORD_FILE` | yes | File containing the dashboard password. Same rules. |
+| `ESHU_E2E_GATEWAY` | yes | The one test gateway: an IP in this dashboard (the agent policy matches only the IP, never a hostname — BF2). |
+| `ESHU_E2E_BASE_URL` | no | Default `http://127.0.0.1:8000`. A non-loopback URL also needs `ESHU_E2E_ALLOW_REMOTE=1`; that flag is the human's "this is a throwaway stack" assertion. |
+| `ESHU_E2E_GATEWAY_SSH_KEY` | for the window case | Path to a key for `eshu-gateway@<gateway>`; the window token is only accepted on the direct SSH path (finding 2). |
+| `ESHU_E2E_CASE` | no | Run one case by id. |
+| `ESHU_E2E_KEEP` | no | Skip cleanup, for debugging a failed stack. Cleanup is otherwise always attempted. |
+
+The password and token are read once into memory, used only in headers, and
+never included in the table, exception text, audit output, or the JSON result.
+The window token is treated the same way: it is held in a local variable, passed
+to the gateway command on stdin/argv per the documented window syntax, and
+printed only as `<redacted>`.
+
+### Preflight (refusals, before any command)
+
+1. Both files exist, are non-empty, and are not group/world-readable (warn on
+   this host but refuse on a remote base URL).
+2. `POST /api/auth/login` succeeds; the session cookie and the
+   `X-Eshu-CSRF: 1` header work for a harmless read.
+3. `ESHU_E2E_GATEWAY` is a registered gateway, online, and reports the F12
+   agent/ticket formats. The suite refuses to guess.
+4. The agent calls `session_begin(goal="E2E:<run-id>: smoke")`. The operator
+   maps the session to its agent (read `/api/agents`, then each agent's
+   `/api/agents/{id}/activity` until the suite's session id appears; no new API)
+   and reads that agent's policy.
+5. **SSH-host guard.** The agent's `ssh_hosts_allow` must be exactly
+   `[ESHU_E2E_GATEWAY]` — not `*`, not two entries, not a hostname, not empty.
+   Anything else is exit 2 before a single SSH call. This is the guard the
+   request asks for; it is checked from the dashboard's policy, not inferred
+   from a trial command.
+6. The same policy must be `ssh_mode=normal` and the exact allowlist must
+   contain the allowlist case's command (`GET /api/policies`,
+   `exact_whitelist`). With the default `approval` mode, `ssh_exec` always sends
+   `ESHU_FORCE_JIT=1` and the gateway's allowlist cannot fire (finding 1), so the
+   operator must have prepared the test agent this way. This is a setup
+   refusal, not a skip.
+7. The session goal starts with `E2E:`; if it does not, exit 2 (the approver
+   would refuse every card and the run would be meaningless).
+
+The preflight prints the target (base URL, gateway, agent name, session id) and
+the fact that a throwaway stack is required. It never prints a credential.
+
+### Cases
+
+Each case records: id, what the suite did, the explicit expectation, the
+observed value, and the request/plan/window/call ids in play. A case is PASS
+only when every clause of its expectation holds. `SKIP` is only for a missing
+optional environment (Pi-hole, HA, F27 code) and is shown with the reason.
+
+| # | Case | Action | Expectation |
+|---|---|---|---|
+| C1 | `allowlist-no-card` | Agent `ssh_exec(host=G, command=ALLOWLISTED)` (policy `normal`, exact line present) | `status=ran`; output is the gateway's synthetic hostname marker; a request row exists with `status=auto-approved`; **zero pending** rows for the session. |
+| C2 | `jit-approve` | `ssh_exec` a non-allowlisted command | `status=pending` + request id; operator approves only after checking session + goal; `check_request` reaches `consumed`; re-run returns `status=ran`; the row ends `consumed`. |
+| C3 | `jit-deny` | `ssh_exec` a second non-allowlisted command; operator denies | `check_request` says `denied`; no exec result row; re-running the same bytes produces a **new** pending request (a denial is not cached). |
+| C4 | `pending-consumed-ran` | `ssh_exec` a third command; observe `check_request` before and after approval | States go `pending` → `approved` (delivery) → `consumed` (claimable) → re-run `ran`; request id is stable; no duplicate row for the re-run. |
+| C5 | `wait-true` | `ssh_exec(..., wait=True)` in a thread; operator approves while it waits | The call itself returns `ran` within 60 s (no re-run from the suite); exactly one request row; `wait` did not race the poller into a second JIT row. |
+| C6 | `multiline-before-card` | `ssh_exec` with `"echo one\necho two"` | `status=refused`, `reason=multiline_command`; **no** request row and no card; the gateway was never contacted. |
+| C7 | `plan-cover-then-exhaust` | `session_plan` one item `{host: G, command: PLAN_CMD, max_uses: 1}`; operator approves; run `PLAN_CMD` twice | First run `ran` with no card (plan claim; request row shows the plan approval); second run `pending` (a JIT card) because the item is exhausted; `check_plan` reports 0 remaining. |
+| C8 | `plan-superseded` | Propose plan A, then plan B for the same session | `check_plan(A)` is `status=superseded` and names B as `superseded_by`; B is `proposed`; no request was created by either proposal. |
+| C9 | `probe-service` | `diagnose_service({host: G, unit: "ssh"})` → operator approves plan → `probe_result(plan_id)` (poll while pending) | Digest has `probe=diagnose_service`, a non-empty `state`, and scrubbed output; a second `probe_result` is byte-identical and creates **no** new request ids. |
+| C10 | `probe-disk` | `disk_pressure({host: G})` → approve → `probe_result` | Digest has `filesystems` (and `inodes`/`log_dirs` when present); repeat is cached and adds no request ids. |
+| C11 | `window-token` | Agent `POST /api/window-requests` for `WINDOW_CMD`, `window_start=now-5`, `expires_at=now+600`, `max_executions=1`, label `E2E:<run-id>`; operator approves only that id; agent runs the command over the direct gateway path with `ESHU_WINDOW_TOKEN`; then runs it again | First run succeeds and the output is the command's; the window's `execution_count` becomes 1; **no pending card**; second run is rejected as exhausted (no JIT fallback, no second execution). |
+| C12 | `dns-check` | `dns_check({name: DNS_NAME})` | `status=ran`, `digest.record` is a dict with the seeded name/IP; no request rows. **SKIP** when no Pi-hole integration is configured. |
+| C13 | `ha-read` | Discover the namespaced HA read tool (`*_list_entities`) and call it with `limit=1` | A non-empty entity list / no error; no approval card. **SKIP** when HA is not configured. |
+| C14 | `fleet-one-gateway` | Operator dispatches `hostname` to `[G]` via `POST /api/fleet/commands`; poll the command's results | Exactly one target and one result row for G with `status=success`; no other gateway has a result; the History row is `fleet-run`. |
+| C15 | `allowance` | Operator creates an allowance for the agent (`light.turn_on`, entity `E2E_ENTITY`, rate 2, no window) → agent calls `call_service` for `E2E_ENTITY` → agent calls it for `E2E_OTHER_ENTITY` | First call succeeds with no pending card (`approval` starts `allowance:`); second call creates a pending integration call; operator **denies** it; no HA state change is claimed. **SKIP** when HA or the F27 endpoints are absent (F27 is still with security). |
+
+Case constants are synthetic (`G` is the env gateway; commands are `hostname`,
+`id -un`, `printf e2e-...`, `cat /etc/hostname`; entity ids are seeded by
+E2E-2). No live hostnames, tokens or data are in the repo.
+
+### Harness shape
+
+`scripts/e2e/run.py` (Python, stdlib + the already-required `mcp` client):
+
+```
+config.py?        no — one file, small classes
+JsonEndpoint      urllib.request + http.cookiejar; sync; returns (status, json)
+Operator          login, get/post, claim check, approve_only(...), cleanup(...)
+McpAgent          mcp.client.streamable_http + ClientSession; call(tool, **args)
+Approver          a pure policy object: given a pending row, may_decide() -> reason
+Case              id, title, run(agent, operator) -> Observation
+Runner            preflight, cases, cleanup, table, exit code
+```
+
+The key split is `Approver` (pure, unit-tested) from `Operator` (HTTP). The
+approver never decides by id alone: it looks the row up in
+`GET /api/requests?session=<sid>` (or the plan/window list), compares the
+session id, re-reads the session goal from
+`GET /api/sessions/<sid>/detail` (cached), and refuses with a reason. A
+background watcher thread handles `wait=true`: it watches for the suite's
+pending SSH rows and approves one, while the agent call blocks. Every action is
+logged as `PASS/FAIL/SKIP` with ids, never values.
+
+`--list` prints the case table without a connection. `--json` emits the same
+rows as JSON for CI. `--case` runs one. The default run is sequential (cases
+share the session and the gateway) and stops creating new work after a FAIL,
+then still cleans up.
+
+### Unit tests (CI, no network)
+
+`tests/test_e2e_smoke.py` imports the script (via `scripts/e2e/__init__.py` and
+`sys.path`) and covers the logic against the in-process FastAPI
+`TestClient`/`auth_client` fixtures and a fake agent:
+
+* `Approver`: own session + `E2E:` goal → allow; another session → deny with
+  reason; own session but another goal → deny; window id mismatch → deny;
+  integration call → deny-only; no id-based bypass.
+* `preflight`: token/password file mode/empty; non-loopback without
+  `ESHU_E2E_ALLOW_REMOTE`; `ssh_hosts_allow` of `*`, two hosts, empty, hostname,
+  wrong IP → `UnsafeConfig` (exit 2); exactly one IP + `normal` → pass.
+* The operator's real path against `TestClient`: seed two pending requests (one
+  own session, one other), run the approver, assert only the own row moved, the
+  other stayed `pending`, and the audit/CSRF headers were used.
+* Table/exit codes: pass/pass/skip → 0; any fail → 1; refusal → 2; a failing
+  cleanup is reported but does not mask the case result.
+* Cleanup is attempted on failure: fake agent records `session_conclude`, fake
+  operator records reject/exclude/deny/delete/revoke in order, idempotent on a
+  second call.
+* Redaction: a fake token, window token, and password in exception text never
+  appear in the rendered table or JSON; request ids do.
+* Fake gateway: a `FakeMCP` returns scripted envelopes (`ran`, `pending`,
+  `refused`) and records call order; the `wait=true` case is tested with a
+  thread and a fake approval, no sockets.
+
+No test starts uvicorn, opens a socket, or imports the real gateway. The existing
+`temp_db` fixture supplies a throwaway SQLite database.
+
+### Cleanup (always attempted, in this order)
+
+1. Deny any still-pending request/plan/integration call that carries the suite's
+   session (own rows only), so a failed case leaves no live card.
+2. Agent `session_conclude(outcome=..., summary=...)` → the draft.
+3. Operator rejects that draft (`POST /api/conclusions/{id}/reject`), found from
+   the session detail.
+4. `POST /api/requests/exclude {session_id: sid}` — F8 hides the SSH rows from
+   statistics. **Gap:** integration calls have no `excluded` column, so the F27 /
+   HA calls still count; see finding 5.
+5. Delete the window (`DELETE /api/approved-windows/{id}`), if created.
+6. **Revoke** the allowance (`POST /api/allowances/{id}/revoke`), if created.
+   F27 has no hard-delete endpoint, and the audit trail should keep the row; this
+   is the "delete" the request means, made explicit.
+7. Verify no pending own rows remain and print a one-line cleanup result. Rows,
+   audit events and the conclusion stay (rejected) for review; nothing is
+   silently erased.
+
+### Findings that need a decision before code
+
+1. **Allowlist vs the default SSH mode.** `ssh_exec` sets `ESHU_FORCE_JIT=1`
+   whenever the agent's `ssh_mode` is `approval` (the default), and the gateway
+   skips every allowlist/window stage for a forced-JIT command. The
+   `allowlist-no-card` case therefore only works with the test agent in
+   `normal` mode. The preflight refuses otherwise; E2E-2 must provision that
+   policy. This is real product behaviour, not a test hack.
+2. **The window token cannot travel through `ssh_exec`.** The gateway refuses a
+   signed agent prefix that also carries `ESHU_WINDOW_TOKEN` (S1), and the
+   documented use is direct SSH as `eshu-gateway@host
+   "ESHU_WINDOW_TOKEN=<token> <cmd>"`. The suite therefore needs a direct
+   gateway channel for C11 (`ESHU_E2E_GATEWAY_SSH_KEY`). E2E-2 can install that
+   key for the `eshu-gateway` user; a production dashboard does not need one. Do
+   not add a signature-carrying window path just for the test.
+3. **Window requests have no session/agent attribution.** `approved_windows` has
+   `origin='ai'` and a label, but no `session_id`/agent column, and
+   `POST /api/window-requests` only takes an agent or gateway token. The
+   operator's "session_id is the suite's own" rule cannot be applied to a window
+   request as written. The suite approves only the numeric id it created (and
+   checks the label prefix); adding attribution is a product change and an open
+   question.
+4. **The dedicated agent must be identifiable.** Mapping session → agent via
+   `/api/agents/{id}/activity` works with existing endpoints, but nothing
+   prevents an operator pointing the suite at a real agent token. Requiring the
+   agent name to start `e2e-` (or an explicit `ESHU_E2E_AGENT_NAME` that must
+   match) would make a misconfiguration fail closed; that is a policy decision.
+5. **F8 exclusion does not cover integration calls.** `requests.excluded` is
+   the only exclusion flag, so the allowance/HA MCP calls remain in statistics
+   and the F6 `allowance` bucket. On a throwaway dashboard this is harmless; on
+   a shared staging dashboard it is real test pollution. Options: extend F8 to
+   `integration_calls`, delete the rows (no endpoint today), or require a
+   throwaway DB for E2E-1. The last is the smallest and matches E2E-2.
+
+### Open questions for security (an automated approver is sensitive)
+
+1. **Credential.** Should E2E-1 use the dashboard password file at all, or a
+   dedicated "test approver" credential scoped to the suite's own session with
+   approve/deny/exclude/delete-window/revoke-allowance rights and an audit actor
+   of `e2e-approver`? The password can approve anything, so today the filter is
+   only self-imposed. If yes, what is the minting/rotation/expiry model?
+2. **Proving "own session".** Is reading the session goal via
+   `/api/sessions/<sid>/detail` (operator session) acceptable, or should the
+   approver be server-enforced (e.g. an `X-Eshu-E2E-Session` header that scopes
+   the approve endpoints)? The latter is a product change; the former is the
+   minimum.
+3. **The window case.** Is a suite-owned SSH key for `eshu-gateway@` on the
+   throwaway gateway acceptable, or should C11 be skipped until a safer
+   transport is designed? The S1 refusal of a signed prefix with a window token
+   must not be relaxed.
+4. **Window attribution.** Add `session_id`/`requested_by_agent` to
+   `approved_windows` so the approver can use the same rule for windows? That is
+   an additive migration, but it changes the agent-facing request and the audit
+   row; no code should do it without a decision.
+5. **Allowlist mode.** Accept `ssh_mode=normal` on the dedicated test agent
+   (needed for C1), with the host list exactly one IP? Or is a forced-JIT
+   allowlist test impossible by design and C1 should be dropped?
+6. **Fleet.** Is it acceptable for the operator role to dispatch one fleet
+   command to the one test gateway (origin `operator`, audited), or should fleet
+   be exercised by E2E-2's host-side script instead? It is the only way to prove
+   the fleet path end to end from the suite.
+7. **Remote target.** Non-loopback requires `ESHU_E2E_ALLOW_REMOTE=1` and a
+   printed banner; is that enough to stop an accidental run against the live
+   dashboard? Should the suite also require a dashboard marker (a meta key such
+   as `e2e_stack=1`) set by E2E-2?
+8. **Retention.** Cleanup rejects the conclusion and revokes the allowance but
+   leaves requests, integration calls, audit rows and the window deletion audit.
+   Is that the wanted evidence trail, or should a test-only purge exist?
+9. **Rate limits / lockout.** The operator logs in once; repeated runs could hit
+   the login rate limit. Is a dedicated credential with its own limit the
+   answer, or should E2E-1 reuse one cookie for the whole run (it does)?
+10. **Output.** The table prints request/plan/window ids and agent name. Are ids
+    acceptable in CI logs, or should `--json` be the only machine-readable form
+    and the table redact ids too?
+
+### Implementer notes (to fill in when code starts)
+
+Not written yet: this chunk waits for security's read of this design, as the
+request requires. Planned commits, each gated on `bash scripts/verify.sh`:
+
+1. `test(e2e): add the smoke-suite harness and unit tests` — `scripts/e2e/`,
+   `tests/test_e2e_smoke.py`, no docs.
+2. `docs(e2e): record the suite's first staging run` — only after E2E-2 exists;
+   the case table and gate line.
+
+### Reviewer notes
+
+**Main reviewer, 2026-11-17: a good design. Changes before code, and these
+answers go to security together with the open questions.**
+
+The aim is that the operator stops being the tester. The main reviewer runs
+the suite after each deploy, from a machine that can reach the dashboard.
+DeepSeek writes the suite and its unit tests. Its sandbox cannot reach the
+dashboard, so it never runs the suite itself.
+
+* **CA1 (must): the target is the real dashboard and its dev gateway. E2E-2
+  is parked.**
+  * No Docker host exists, and the operator's dev gateways are already the
+    test bed for every release.
+  * The suite runs against the live dashboard and one dev gateway: a
+    gateway on the Edge channel, never a Fleet-only one.
+  * It uses the dedicated test agent, which already exists with SSH to
+    exactly one host.
+  * So `ESHU_E2E_ALLOW_REMOTE` is not "a throwaway stack". It means "the
+    operator approved this target", and the suite also checks the next
+    point.
+* **CA2 (must): the approver is enforced by the server, not self-imposed.**
+  * Do not use the dashboard password. Add a scoped **test approver token**,
+    minted by the operator in Settings and shown once, with an expiry of at
+    most 30 days, revocable, and audited as `e2e-approver`.
+  * Every approve or deny it makes must pass a server check: the row's
+    session belongs to an agent marked `test_agent=1` (a new policy flag,
+    set only by the operator), and the session goal starts `E2E:`.
+  * Its other permissions: read that agent's rows, exclude that agent's
+    sessions, reject that agent's conclusion drafts, delete window requests
+    that agent made, and revoke allowances on that agent.
+  * It can do nothing else: no policy, gateway, settings, fleet or freeze
+    route. A test proves each refusal.
+  * This answers security's questions 1, 2, 7 and 9, and it is the one
+    product change the suite needs.
+* **CA3 (must): the test agent fails closed.**
+  * The preflight requires `test_agent=1` on the token's agent (finding 4).
+  * The preflight requires the existing guard: exactly one IP in
+    `ssh_hosts_allow`.
+  * A `test_agent` can never be shown more than one SSH host. The policy
+    save refuses `*` or a second entry when the flag is set.
+* **CA4 (should): window requests record who asked (finding 3).** Add
+  `session_id` and `agent_id` to `approved_windows` (an additive
+  migration), filled from the agent token on `POST /api/window-requests`.
+  The approver rule then works the same way as for requests.
+* **CA5 (should): exclusion covers integration calls (finding 5).** Add
+  `excluded` to `integration_calls` and extend F8's exclude endpoint and
+  the statistics queries. Test traffic must not skew the live statistics
+  or F6's allowance bucket.
+* **CA6: cases.**
+  * **Drop C14 (fleet)** for v1. A fleet command is an operator action
+    outside a session, and CA2's token cannot dispatch one. Fleet is
+    covered when the operator does Deploy to Fleet.
+  * **Keep C1 with `ssh_mode=normal`** (finding 1) on the test agent, with
+    one allowlisted read command. The operator sets that.
+  * **C11 (window)** needs a key for `eshu-gateway@` on the dev gateway
+    (finding 2). Make it opt-in (`ESHU_E2E_GATEWAY_SSH_KEY`), SKIP without
+    it, and wait for security's answer to question 3.
+  * **Add C16, `installer-hash`.** The test gateway's reported installer
+    hash equals the Edge channel's hash (`/api/dev/status`). That is the
+    check the operator now does by eye.
+* **CA7: ids in output are fine** (question 10). They are not secrets, and
+  the suite's output stays on the reviewer's machine. Never print values,
+  outputs or hostnames.
+* **Order.** Security answers the open questions and CA2–CA5. Then:
+  1. Code round 1: CA2–CA5, with server tests.
+  2. Code round 2: the suite (`scripts/e2e/run.py`) and its unit tests,
+     against `TestClient`.
+  3. A first real run by the main reviewer, on the operator's go-ahead.
+
+### Security review of the design (2026-11-17)
+
+**Verdict: approved for code round 1 once BY1–BY4 are folded into the
+design.** CA1–CA7 are agreed, with the changes below. CA2 is the right
+shape: a scoped, server-checked credential instead of the dashboard
+password.
+
+**What the suite is, stated plainly.** The test agent's token and the test
+approver token sit on the same machine and are used by the same process.
+Together they let that process run commands on the dev gateway without a
+human seeing them. The dev gateway is a real host on the operator's
+network, and the gateway runs approved commands as root. The boundary must
+therefore make "no human" mean "these few read-only commands on this one
+host". It must not mean "anything the test agent asks for".
+
+**BY1 (must): bind each decision to the agent that made the row, not to
+the session id or the goal.**
+* `requests` has no agent column: it carries the `session_id` the agent
+  passed. `sessions.agent` is a name. Names can be renamed and can repeat.
+* Record `agent_id` on every new `requests`, `session_plans`,
+  `integration_calls` and (CA4) `approved_windows` row, taken from the
+  verified token when the row is created. This is additive, and old rows
+  get 0.
+* The approver token may decide a row only when all of these hold:
+  * the row's `agent_id` is the token's own agent;
+  * the row's `session_id` is a session that was opened by that same agent
+    id;
+  * that agent is `test_agent=1`.
+* A row with `agent_id=0` is always refused. The `E2E:` goal is an extra
+  check, not the boundary, because the agent writes the goal itself.
+* **Mint the token for one agent id,** not for "any `test_agent=1` agent".
+  Setting `test_agent=1` on a second agent must not widen a token that
+  already exists.
+
+**BY2 (must): the approver approves a fixed list of commands, never "any
+command from the test agent".**
+* When the operator mints the token, they also store the suite's command
+  list, as exact bytes (the case constants: `hostname`, `id -un`,
+  `printf e2e-…`, `cat /etc/hostname`, the plan and window commands).
+* Approving an SSH request, a plan item or a window is refused unless the
+  command matches a list entry byte for byte and the host is the test
+  gateway's IP.
+* Probe plans are allowed only for the named probe templates
+  (`diagnose_service` with `unit=ssh`, `disk_pressure`).
+* With the list, a leaked pair of tokens gets read-only commands on one
+  host. Without it, the pair gets root on a LAN host.
+* A deny needs no list: the token may deny any row that passes BY1.
+
+**BY3 (must): the token's reach, besides the BY1 and BY2 checks.**
+* **Allowed:**
+  * plain approve or deny on the SSH request, session plan and
+    window-request routes;
+  * deny only on integration calls;
+  * read-only access to its own agent's rows, sessions and plans;
+  * the five clean-up actions CA2 names, each limited to its own agent's
+    rows;
+  * one read for C16: the Edge channel's installer hash and the test
+    gateway's reported hash. Give C16 its own narrow read route; do not
+    grant `/api/dev/status`.
+* **Refused** (with a test for each refusal):
+  * every approve variant except the plain one: approve plus allowlist or
+    learn, edit-then-approve, a host override, a longer TTL than the
+    default, or removing plan items (`removed_item_ids` must be empty);
+  * approving an integration call;
+  * creating, editing or toggling a window (`/api/approved-windows*`). It
+    may approve only a pending agent request, and that request must name
+    exactly the test gateway, use `match_type=exact`, set
+    `max_executions=1`, and expire within 15 minutes;
+  * any decision while the fleet is frozen, or while a session guard or
+    kill switch is on. It does not override the operator's stop;
+  * every route outside the list above: policy, agents, tokens, gateways,
+    integrations, settings, notify, fleet, freeze, installer channels,
+    statistics writes, F27 ceiling and allowance creation, and
+    conclusions other than rejecting its own agent's draft;
+  * `/mcp`, the gateway routes, and `POST /api/window-requests`. It is not
+    an agent or a gateway credential, and an agent token is not accepted
+    in its place;
+  * minting, rotating or revoking approver tokens.
+* **The token itself:**
+  * it has its own prefix;
+  * only its hash is stored;
+  * it is shown once and accepted only as `Authorization: Bearer` on the
+    listed routes. A cookie never carries it, so CSRF does not apply. A
+    browser session never gains its powers;
+  * it expires after at most 30 days;
+  * it has its own rate limit, and failed attempts are rate-limited and
+    audited;
+  * every decision is audited as `e2e-approver` with the token id.
+* **Notify the operator** when a token is minted, and when `test_agent=1`
+  is set on any agent. Those are the two widening events.
+
+**BY4 (must): `test_agent=1` is the operator's switch, and it narrows.**
+* CA3 is agreed: when the flag is set, the policy save refuses `*`,
+  anything but one IP, or a hostname.
+* Also, with the flag set, the save refuses:
+  * `ungated` approval modes;
+  * any integration other than HA reads plus `call_service` on the
+    allowance case;
+  * an agent that was not created as a test agent (no flipping a working
+    agent's flag).
+* Clearing the flag revokes that agent's approver tokens.
+
+**Answers to the ten questions.**
+1. **Credential:** CA2's scoped token with BY1–BY3. Do not use the
+   dashboard password. Minting is in Settings, the token is shown once, it
+   expires after at most 30 days, rotation means minting a new token and
+   revoking the old one, revocation takes effect at once, and both events
+   are audited and notified.
+2. **Own session:** enforced by the server, by agent id on the row (BY1).
+   Reading the goal is not enough, because the agent writes the goal. No
+   `X-Eshu-E2E-Session` header is needed: the token's agent id is the
+   scope.
+3. **Window case (C11):** acceptable as opt-in. It SKIPs without the key,
+   and it needs CA4.
+   * The key goes only into the dev gateway's `eshu-gateway`
+     `authorized_keys`, with `restrict` and a `from=` limited to the
+     reviewer's address.
+   * The key file on the reviewer's machine is 0600.
+   * Revoking it is one documented line.
+   * S1 is not relaxed, and no signed window path is added.
+   * The window limits in BY3 apply.
+   * If CA4 is not in, skip C11.
+4. **Window attribution (CA4):** yes. It is a must whenever C11 runs.
+   Record `agent_id` (BY1) and `session_id` from the verified token. The
+   agent-facing request keeps its shape: the server fills both fields, and
+   values the client sends are ignored.
+5. **`ssh_mode=normal`:** acceptable for the test agent with exactly one
+   IP. It means the global allowlist runs without a card on that one host,
+   which is what every normal-mode agent already gets. C1 stays.
+6. **Fleet:** dropping C14 is agreed (CA6). The token cannot dispatch fleet
+   commands, and that refusal has a test.
+7. **Remote target:** CA1 makes the live dashboard the target, so a
+   "throwaway" marker means nothing. The protection is the token's scope.
+   Two requirements remain:
+   * a non-loopback base URL must be `https://` (refuse `http://`: two
+     bearer tokens would cross the network in clear);
+   * `ESHU_E2E_ALLOW_REMOTE=1` and the printed banner stay.
+8. **Retention:** keep the evidence and do not add a purge. A test-only
+   delete of audit or request rows is a tool for erasing history. CA5's
+   `excluded` keeps the statistics clean, and the rejected conclusion and
+   the revoked allowance stay as the record.
+9. **Rate limits:** there is no login. The token has its own limit, and
+   failed attempts are limited and audited. The suite uses one token per
+   run.
+10. **Output:** ids are fine (CA7). Never print command output, the
+    session goal text, the entity ids, hostnames, or any token or key
+    path.
+
+**Smaller points for the design.**
+* **Token files:** refuse a group- or world-readable file on every target,
+  not just warn on loopback. It is the live dashboard now.
+* **C15 (allowance):** creating an allowance is outside the token's reach
+  (BY3). The operator creates the test agent's allowance once, by hand,
+  and the suite only uses it. Revoking it in clean-up is then also an
+  operator step. Alternatively, drop clean-up step 6 and leave a
+  standing, rate-limited allowance on the test agent's one entity. I
+  prefer the standing allowance, because the suite then never widens
+  anything.
+* **The watcher thread for `wait=true`** must apply the same BY1 and BY2
+  checks on the server. It is the same token, so this only needs saying in
+  the unit tests: the watcher's approve goes through the same route.
+* **Clean-up order:** revoke nothing the suite did not create, and stop
+  clean-up at the first BY refusal rather than retrying with anything
+  wider.
+
+Re-read scope for code round 1: the token table and the auth path, the BY1
+columns and checks, the command-list match, every refusal test in BY3, the
+`test_agent` save rules, CA4 and CA5.
+
+### Design fold for code round 1 (2026-11-17)
+
+**Security's note at `b8fe0ce` wins over the earlier design where they
+differ. This section folds BY1–BY4 and the ten answers; it is the design code
+round 1 implements.**
+
+**The approver token (CA2 + BY1–BY3).** A new, separate credential, not the
+dashboard password and not an agent token.
+* Minted by the operator in Settings/Agents for **one agent id**; it is
+  shown once, stored only as a SHA-256 hash, prefixed `e2e_`, accepted only as
+  `Authorization: Bearer`, never via a cookie, and expires after at most 30
+  days. Revocation takes effect at once.
+* It carries an exact command list (bytes) and the one test gateway's IP,
+  stored at minting time.
+* Its own rate limit; failed attempts are rate-limited and audited. Every
+  decision is audited as `e2e-approver` with the token id.
+* Minting a token and setting `test_agent=1` both notify the operator.
+* Clearing `test_agent` revokes that agent's approver tokens.
+
+**BY1 — decisions bind to the agent id, not the session id or goal.**
+`requests`, `session_plans`, `integration_calls`, `pending_integration_calls`
+and `approved_windows` gain `agent_id` (additive; old rows 0), written from the
+verified token/context when the row is created. `sessions` also records the
+opening `agent_id`. The approver may decide a row only when:
+* the row's `agent_id` is the token's agent;
+* the row's `session_id` names a session with that same `agent_id`;
+* that agent is `test_agent=1`;
+* the `E2E:` goal check also passes (an extra check, not the boundary).
+A row with `agent_id=0` is refused. The token is minted for one agent, so
+marking a second agent `test_agent` cannot widen it.
+
+**BY2 — a fixed command list, byte-exact, on one gateway.**
+* Minting stores the suite's exact commands (`hostname`, `id -un`,
+  `printf e2e-…`, `cat /etc/hostname`, the plan and window commands).
+* An SSH request, plan item or window is approved only when its command is
+  byte-identical to an entry **and** its host is the stored test gateway.
+* Probe plans are allowed only for `diagnose_service` with `unit=ssh` and
+  `disk_pressure`; other probes/plans are refused.
+* A deny needs no list: the token may deny any row that passes BY1.
+
+**BY3 — the token's reach.**
+* **Allowed:** plain approve/deny on SSH requests; plain approve/deny on
+  session plans (default TTL, no `removed_item_ids`); approve/deny on a
+  pending agent window request; deny only on integration calls; read-only
+  access to the token agent's own rows, sessions, plans and calls; exclude its
+  own sessions; reject its own agent's conclusion draft; delete window
+  requests that agent made; revoke allowances on that agent; and one narrow
+  read route for C16 returning the Edge hash and that gateway's reported hash.
+* **Window approval is narrow:** the row is that agent's own pending request,
+  names exactly the test gateway, uses `match_type=exact`,
+  `max_executions=1`, and expires within 15 minutes. The command must be in
+  the list. The window token is stored hashed, shown once, accepted only as a
+  bearer header, has its own rate limit, and failed uses are rate-limited and
+  audited.
+* **Refused, each with a test:** every other approve variant (allowlist/learn,
+  edit-then-approve, host override, non-default TTL, non-empty
+  `removed_item_ids`); approving an integration call; creating, editing or
+  toggling windows; any decision while frozen or while a session guard/kill
+  switch is on; policy, agents, tokens, gateways, integrations, settings,
+  notify, fleet, freeze, installer channels, statistics writes, F27 ceiling/
+  allowance creation, conclusions other than rejecting its own draft; `/mcp`;
+  gateway routes; `POST /api/window-requests`; and minting/revoking approver
+  tokens themselves.
+
+**BY4 — `test_agent=1` is operator-only and narrows.**
+* Set only on an agent with no recorded session, request or call. When set,
+  the policy save refuses `*`, more than one host, any hostname, `ungated`
+  approval modes, and any tool except HA reads plus `call_service`; the agent
+  must be an allowlist agent. `ssh_mode=normal` with exactly one IP is
+  allowed (C1). Clearing the flag revokes that agent's approver tokens and is
+  audited/notified.
+
+**Folded answers.**
+1. Credential is CA2's scoped token; mint/rotate/revoke in Settings, max 30
+   days, audited and notified.
+2. Own session is server-enforced by agent id; no extra session header.
+3. C11 is opt-in: it SKIPs without `ESHU_E2E_GATEWAY_SSH_KEY` or without
+   CA4. The key is limited to `eshu-gateway@` on the dev gateway with
+   `restrict`/`from=`, 0600 on the reviewer's machine, revoked with one line;
+   S1 is not relaxed.
+4. CA4: yes — `approved_windows` gains `session_id` and `agent_id`, filled by
+   the server from the verified token/session; client-sent ids are ignored.
+5. `ssh_mode=normal` is accepted for the one-IP test agent.
+6. C14 (fleet) is dropped; the token cannot dispatch fleet commands.
+7. A non-loopback base URL must be `https://`; `http://` is refused.
+8. Keep the evidence; no purge. CA5's `excluded` keeps statistics clean.
+9. No login; one token per run, own rate limit, failed attempts limited and
+   audited.
+10. Ids are fine in output; never print command output, goal text, entity
+    ids, hostnames, tokens or key paths.
+
+**Smaller points folded.**
+* Token files are refused when group/world-readable on **every** target, not
+  warned on loopback.
+* C15 uses an operator-made standing allowance on the test agent's one
+  entity; the suite only uses it. Clean-up revokes nothing the suite did not
+  create and stops at the first BY refusal.
+* The `wait=true` watcher uses the same approver route and therefore the same
+  BY1/BY2 checks; its unit test asserts that.
+* C16 gets its own narrow read route, not `/api/dev/status`.
+
+**Round split.** Round 1 is the server: the token table/auth path, the BY1
+columns/checks, the fixed command list, every BY3 refusal test, the
+`test_agent` save rules, CA4/CA5 and the UI. Round 2 is the suite
+(`scripts/e2e/run.py`, `tests/test_e2e_smoke.py`) and starts only after
+Security approves round 1.
+
+### How to run (code round 2)
+
+The suite is run by the main reviewer from a machine that reaches the
+dashboard through an SSH tunnel, so the URL is loopback:
+
+```
+ssh -L 8000:127.0.0.1:8000 <dashboard-host>
+export ESHU_E2E_BASE_URL=http://127.0.0.1:8000
+python3 scripts/e2e/run.py --list       # cases, no connection
+python3 scripts/e2e/run.py              # all cases
+python3 scripts/e2e/run.py --case C2    # one case
+python3 scripts/e2e/run.py --json       # the same rows as JSON
+```
+
+The two token files must be regular files, non-empty and `0600`. The
+approver token is minted in Settings → Agents for the one `test_agent=1`
+agent, with these exact commands, one per line (BY2):
+
+```
+hostname
+id -un
+printf e2e-deny
+cat /etc/hostname
+printf e2e-plan
+printf e2e-plan-a
+printf e2e-plan-b
+printf e2e-wait
+printf e2e-window
+```
+
+Probe plans (`diagnose_service` with `unit=ssh`, `disk_pressure`) are allowed
+by template, not by this list. The test agent must use `ssh_mode=normal`,
+`tools_mode=allowlist`, and exactly one IP in `ssh_hosts_allow`; the suite
+refuses anything wider before it runs a case. C15 uses a standing,
+operator-made allowance: no allowance is created or revoked by the suite.
+
+| Variable | Required | Meaning |
+|---|---|---|
+| `ESHU_E2E_AGENT_TOKEN_FILE` | yes | Agent bearer token, mode `0600`. |
+| `ESHU_E2E_APPROVER_TOKEN_FILE` | yes | `e2e_` approver token, mode `0600`. Never a password. |
+| `ESHU_E2E_GATEWAY` | yes | The one test gateway, as an IP. |
+| `ESHU_E2E_BASE_URL` | no | Default `http://127.0.0.1:8000`. A non-loopback URL **must** be `https://` and also needs `ESHU_E2E_ALLOW_REMOTE=1`; plain `http://` to a remote host is refused. |
+| `ESHU_E2E_GATEWAY_SSH_KEY` | for C11 | Key for `eshu-gateway@<gateway>`, mode `0600`; C11 skips without it. |
+| `ESHU_E2E_GATEWAY_SSH_USER` | no | Default `eshu-gateway`. |
+| `ESHU_E2E_DNS_NAME` | for C12 | The seeded Pi-hole name; C12 skips without it. |
+| `ESHU_E2E_ALLOWANCE_ENTITY` | for C15 | The entity the standing allowance covers. |
+| `ESHU_E2E_ALLOWANCE_OTHER_ENTITY` | for C15 | A second entity the allowance does **not** cover. |
+| `ESHU_E2E_CASE` | no | Run one case by id. |
+| `ESHU_E2E_KEEP` | no | `1` skips cleanup. |
+
+The table prints case ids, request/plan/window ids and a short reason. It
+never prints command output, the goal text, entity ids, hostnames, tokens or
+key paths. The same suite applies BY1/BY2 in the `wait=true` watcher; the
+server is still the boundary.
+
+
+### Implementer notes — code round 1 (2026-11-17)
+
+**Status: round 1 server + UI + tests are in on `feat/e2e-smoke`; this stops
+for Security's read. Round 2 (the suite) is not started.**
+
+**BY1 — agent-id provenance.** Additive `agent_id` columns on `requests`,
+`session_plans`, `integration_calls`, `pending_integration_calls`,
+`approved_windows` and `sessions` (old rows 0). Agent-token rows take the id
+from the verified current agent; gateway-created SSH rows take it only when
+the forwarded verified agent name matches the session's agent id (BZ1), so a
+session id alone records 0. Plans/calls/windows take it from the verified
+token/context. A row with `agent_id=0` is always
+refused by the approver. The approver check is row `agent_id` = token agent,
+row `session_id` = a session with that same `agent_id`, that agent is
+`test_agent=1`, and the goal starts `E2E:` (the extra check, not the boundary).
+Minting binds one agent id; a second test agent cannot widen an existing token.
+
+**BY2 — the fixed list and gateway.** `approver_tokens` stores the exact
+command bytes and the one test gateway at mint time. SSH request approve,
+plan approve and window approve all require a byte-exact command and that
+gateway; a deny requires neither. Agent plan items must be SSH items on the
+gateway with a listed command. Probe plans are allowed only for
+`diagnose_service(unit=ssh)` and `disk_pressure`. Other approve variants
+(a body on approve/deny, `removed_item_ids`, or a non-default plan TTL) are
+refused for the approver.
+
+**BY3 — the token and its reach.** The approver token is `e2e_` + 64 hex,
+only its SHA-256 hash is stored, it is shown once, accepted only as
+`Authorization: Bearer`, and expires after at most 30 days. The window token
+is not changed: it is the existing gateway-distributed credential
+(`/etc/eshu-windows.txt`, env/argv on the direct SSH path), not a bearer
+header; hashing it would break that distribution. The BY3 "stored hashed,
+shown once, bearer header" sentence applies to the approver token. A middleware
+allows only the listed route set and refuses everything else before the
+handler (including `/mcp`, gateway routes, policy/agents/tokens/gateways/
+settings/notifications/fleet/freeze/installer/dev/F27/statistics writes and
+approver-token minting/revoking). Every refusal is audited as
+`e2e-approver` with the token id; valid requests have their own 120/min
+bucket. Decisions are audited with the token id and actor `e2e-approver`.
+* Window approve is narrow: the agent's own pending request, exact match,
+  one execution, expiry within 15 minutes, listed command, test gateway.
+* Cleanup is limited to its own agent: exclude its session (CA5 also marks
+  proxied calls), reject its draft, delete its window request. The operator
+  creates the standing C15 allowance; this branch has no F27 allowance route
+  (`feat/e2e-smoke` predates it), so the revoke-allowance action is not
+  present here and C15 will run only after F27 merges.
+* C16 has its own read route (`GET /api/e2e/installer-hash`): the Edge hash
+  and that test gateway's reported hash, no `/api/dev/status`.
+
+**BY4 — `test_agent`.** Operator-only `POST /api/agents/{id}/test-agent`.
+It cannot be set on an agent with any recorded session, request or call.
+When set, the policy save refuses `*`, more than one host, a hostname,
+`ungated` approval, `tools_mode=all`, and any tool other than HA reads plus
+`call_service`. Clearing it revokes the agent's approver tokens. Minting a
+token and enabling the flag both notify the operator.
+
+**CA4/CA5.** `approved_windows` gains `session_id`/`agent_id`; the agent
+window request takes both from the verified token/session (the client cannot
+set `agent_id`). `integration_calls` gains `excluded`; the F8 exclude
+endpoint now marks the session's requests and calls, and the health, session
+summary, coverage and web-fetch statistics skip excluded calls. History still
+shows the rows.
+
+**UI.** The agent detail page gains a Test agent switch and an Approver
+tokens card (exact commands one per line, test gateway, days, mint, shown
+once, list with revoke). All fields go through `esc()`; a Node check asserts
+the row escapes `<img>`/`<script>` in the gateway and commands.
+
+**Tests.** `tests/test_e2e_approver.py` (53 tests) covers the token/hash/
+expiry, BY1 ownership and refusals, the command/gateway list, plan and probe
+variants, integration-call approve-refused/deny-allowed, the narrow window,
+create/edit/toggle refusals, cleanup, route refusals, freeze, test-agent
+narrowing/activity/revocation/notify, CA4/CA5 and C16. Each is against the
+real FastAPI app; no network.
+
+### Security re-read of code round 1 at `d213974` (2026-11-17)
+
+**Verdict: approved. Code round 2 (the suite) can start.** BY1–BY4, CA4 and
+CA5 are in. Two shoulds (BZ1, BZ2) and two nits follow.
+
+**What holds.**
+* **The token.**
+  * It has the `e2e_` prefix, only its SHA-256 hash is stored, and it is
+    shown once.
+  * It expires after 1–30 days, is revocable, and is minted only for an
+    agent that already has `test_agent=1`, on a registered gateway, with an
+    exact one-line command list.
+  * The middleware resolves it before any handler and refuses every route
+    outside `_ALLOWED` (403, audited). An invalid or expired token gets a
+    401.
+  * It has its own `approver` rate-limit bucket.
+  * A cookie never carries it. When a cookie and the token arrive together,
+    the token's narrower scope wins.
+  * `/mcp` and the gateway routes are refused, and there are tests for
+    both.
+* **BY1.** `agent_id` is recorded on sessions (from the verified token at
+  `session_begin`), on plans, on pending and finished integration calls,
+  and on window requests. A window's `session_id` is checked against the
+  agent that sent it. Every decision route checks three things: the row's
+  agent id equals the token's, the session was opened by that agent id
+  with an `E2E:` goal, and the agent is still live and a test agent. A row
+  with agent id 0 is refused.
+* **BY2.**
+  * Approve needs an exact command match and the token's gateway.
+  * Plan approval refuses: removed items, a TTL other than the default,
+    any item off the gateway, non-SSH items, unlisted commands, and probes
+    other than `diagnose_service(unit=ssh)` and `disk_pressure` on the
+    gateway.
+  * Deny needs only the ownership check.
+* **BY3.**
+  * A body on approve or deny is refused.
+  * Integration calls are deny only.
+  * Window approval needs `exact`, a single execution, an expiry within 15
+    minutes, the gateway, a listed command and its own session.
+    Create, edit and toggle are refused.
+  * Every decision is refused while the fleet is frozen.
+  * The reads are scoped: requests, calls, plans and session detail need
+    the token's own session. `/api/agents` returns only its agent.
+    `/api/agents/{id}/activity` serves only that agent. The pending calls
+    are filtered.
+  * C16 has its own route, pinned to the token's gateway.
+  * Exclude takes a session only, never an id list. Reject-conclusion
+    checks the session and the agent. Window delete checks the agent.
+* **BY4.**
+  * The flag forces one IP, no `ungated` mode, and an allowlist of HA
+    reads plus `call_service`.
+  * The flag can be set only on an agent with no activity, and a missing
+    column counts as activity.
+  * The general policy save keeps these checks, because they live in
+    `set_agent_policy`.
+  * Clearing the flag revokes the agent's tokens.
+  * Setting the flag and minting a token both notify.
+* **CA5.** `integration_calls.excluded` is set by the session exclude and
+  honoured by the session summary, the coverage figures and the statistics
+  queries.
+
+**BZ1 (should): an SSH row's agent id comes from the forwarded session id,
+not from a verified agent.**
+* `/api/request` runs with no agent context, so `_request_agent_id` falls
+  back to `sessions.agent_id` for the `session_id` the gateway forwarded.
+* The gateway accepts that id in two ways:
+  * with a session signature alone, with no agent signature
+    (`ESHU_VERIFIED_AGENT` is empty);
+  * with nothing at all while it has no session key yet ("SESSION KEY
+    MISSING: allowing").
+* Anyone who can SSH to the test gateway as `eshu-gateway`, holding the
+  E2E session's prefix (or with no session key on the gateway yet), can
+  therefore create a row that the approver treats as the test agent's.
+* BY2 limits the damage to listed commands on that one gateway, and the
+  C11 key is held by the same principal. That is why this is a should.
+  Still, it puts the session id back as the boundary, which is what BY1
+  removed.
+* **Fix:**
+  * On a gateway-posted row, set `agent_id` only when the forwarded
+    `agent` (the gateway's `ESHU_VERIFIED_AGENT`) is non-empty and resolves
+    to the same id as the session's `agent_id`. Otherwise record 0, which
+    the approver refuses.
+  * Test it: a row with the E2E session id and an empty `agent` is refused.
+
+**BZ2 (should): limit invalid-token attempts.**
+* A bearer value with the `e2e_` prefix that does not resolve writes an
+  audit row on every request, with no rate limit. BY3 asked for both.
+  This is the same pattern as the X9 hit throttle: an anonymous caller can
+  force a write per request.
+* **Fix:**
+  * Run `_check_rate_limit(client_ip, kind='approver')` before the lookup.
+  * Write at most one `e2e_approver_refused` row a minute per client IP.
+
+**Nits.**
+* **The `/api/allowances/\d+/revoke` route.** It is in `_ALLOWED`, but this
+  branch has no such handler, and F27's handler uses `_check_session`. It
+  fails closed today. When F27 and E2E-1 meet, either drop the route (my
+  answer prefers a standing, operator-made allowance) or give it
+  `_decision_auth` with the agent-id check. Do not leave it to
+  `_check_session`.
+* **The minted gateway.** The minted `gateway_ip` is not compared with the
+  test agent's one `ssh_hosts_allow` entry. A mismatch fails closed
+  (nothing can be approved), but refusing it at mint time gives a clearer
+  error.
+* **Pre-existing, outside this chunk.** `window_request_approved` and
+  `window_deleted` write the window token into the audit details
+  (`token=...`). Audit rows are not the place for a live credential. This
+  belongs on the backlog.
+
+Re-read scope for code round 2: the suite's preflight refusals (file modes
+on every target, `https://` for a non-loopback URL, `test_agent=1`, one IP),
+the redaction tests, and clean-up ordering.
+
+### Implementer notes — code round 2 (2026-11-17)
+
+**Status: BZ1, BZ2, the two nits, the merge-order filter and the suite are in
+on `feat/e2e-smoke`. This stops for Security's read of BZ1, BZ2 and round 2.**
+
+**Merge.** `origin/master` at `974faef` (F27, X10 and the inventory fix) is
+merged in. F27's two `allowance:%` queries now carry
+`COALESCE(excluded, 0) = 0`: the statistics series in `main.py` and the
+session card in `db/sessions.py`. `tests/test_f27_f6.py` proves an excluded
+allowance run counts zero in both.
+
+**BZ1 — verified agent provenance.** A gateway-posted row records `agent_id`
+only when the forwarded `agent` is non-empty, resolves to a live agent, and
+that agent is the `agent_id` of the session the row names. A session
+signature alone, no session key on the gateway yet, an unknown/revoked agent,
+or a mismatched agent all record 0. The rule is applied in `/api/request`
+(including the encoded-block, check, plan, session-override, read-lane, host
+override and pending paths) and in `/api/log`; `approve_unattended` takes the
+verified id. Tests in `TestBz1` cover the matching name, an empty/absent
+`agent` (both refused by the approver) and a mismatched agent.
+
+**BZ2 — invalid-token throttle.** The `approver` IP bucket is checked before
+the token lookup. An invalid `e2e_` value writes at most one
+`e2e_approver_refused` row per client IP per minute; over the bucket returns
+429 with no audit write. `tests/test_e2e_approver.py::TestBz2` covers both.
+
+**Nits.** The allowance revoke route now uses `_decision_auth`: the approver
+may revoke only an allowance whose `agent_id` is its own, never create or
+edit, and a refusal is audited. The operator session path is unchanged.
+Minting refuses a `gateway_ip` that is not the test agent's one
+`ssh_hosts_allow` entry. Tests cover both.
+
+**Round 2 — `scripts/e2e/run.py`.** Configuration is env + files only; no
+password. The operator is the `e2e_` approver token. `Config` refuses
+missing/empty/symlink/group-or-world-readable token files, a non-loopback
+`http://` URL, a remote URL without `ESHU_E2E_ALLOW_REMOTE=1`, a gateway that
+is not one IP, and an SSH key that is readable by the group/world. Preflight
+requires exactly one `test_agent=1` agent, `ssh_mode=normal`,
+`tools_mode=allowlist`, exactly the one gateway IP, a readable session and
+the C16 read. The suite covers C1–C11, C12 (SKIP without a DNS name), C13
+(SKIP without HA), C15 (SKIP without the standing allowance entities) and
+C16; C14 stays dropped. `wait=true` runs a watcher that uses the same
+`Approver` object and the same approve route (BY1/BY2). The table and JSON
+print ids and fixed reasons only; `redact()` is a second boundary for
+tokens, hosts, commands and entity ids. Clean-up denies pending
+requests/plans/calls, concludes, rejects its draft, excludes the session and
+deletes its window; it stops at the first BY refusal and revokes no
+allowance.
+
+**Unit tests.** `tests/test_e2e_smoke.py` covers the config refusals, the
+test-agent guard, the pure approver (own/foreign/zero/command/window), the
+redaction, the clean-up order and its stop-on-refusal, the watcher's
+own-row-only behaviour, and the real `Operator` path against `TestClient`
+(only the own row moves). No socket, no uvicorn, no real gateway.
+
+
+### Security review of BZ1, BZ2 and code round 2 (security reviewer, 2026-11-17, at `cec1186`)
+
+**Approved. The suite can be run.** Code text read only; nothing was run.
+The one should below fixes the clean-up order and is small.
+
+**BZ1 is confirmed.**
+* A gateway row now gets an agent id only from `_verified_gateway_agent_id`.
+  The gateway fills `agent` from `ESHU_VERIFIED_AGENT`. The gateway sets
+  that variable only after the v1/v2 MAC passes, and the MAC covers both
+  the agent name and the session id.
+* The dashboard then requires a live, unrevoked agent of that name, and
+  requires that agent to be the one that opened the signed session.
+* A session signature alone, or a gateway without its session key, gives
+  an empty name, so the row records 0 and the approver refuses it.
+* Every `create_request` path in `receive_request` passes the id, and so
+  does `receive_log`. The three cases are tested.
+
+**BZ2 is confirmed.**
+* The per-IP `approver` bucket (120 a minute) runs before the token
+  lookup.
+* An invalid token writes at most one refusal row per IP per minute.
+* Both behaviours are tested.
+
+**The round-1 nits are done.**
+* The allowance-revoke route now accepts the approver only for its own
+  test agent's allowance, and audits a refusal.
+* Minting refuses a gateway that is not the agent's one `ssh_hosts_allow`
+  entry.
+* Both of F27's `allowance:%` queries filter out excluded calls. This
+  settles the merge note.
+
+**The suite holds the round-2 checks.**
+* **Preflight.**
+  * Each token file and the SSH key must be a regular file, not a
+    symlink, and must not be readable by group or others.
+  * A non-loopback URL needs both `https` and `ESHU_E2E_ALLOW_REMOTE=1`.
+  * The URL cannot carry credentials, a query or a fragment.
+  * The gateway must be a single IP.
+  * The approver token must resolve to exactly one agent with
+    `test_agent=1`, `ssh_mode=normal`, an allowlist and exactly that one
+    host.
+  * The session goal must start with `E2E:`.
+* **The client mirror.** The suite's own `Approver` mirror of BY1/BY2
+  never approves a row it would refuse, and the waiter skips foreign rows.
+  The server is still the boundary.
+* **Redaction.** `redact` strips the tokens, the key path, the gateway,
+  the DNS name, the entity ids and the suite commands, plus any
+  `token|password|key=` pair. The table carries only ids.
+* **Clean-up.**
+  * The order is: deny pending, deny proposed plans, deny pending calls,
+    conclude and reject, exclude, delete the window, check that nothing
+    remains.
+  * It stops at the first BY refusal and never falls back to a wider
+    credential.
+
+**CB2 (should): revoke the live window first, and always.**
+* The C11 window is a live credential from its approval until it is
+  deleted or spent.
+* `cleanup()` deletes it last, and returns before reaching that step when
+  any deny is refused. `--keep` skips clean-up entirely. A run that fails
+  between "approve window" and its first use therefore leaves an approved
+  window for up to ten minutes.
+* That window covers a harmless constant, but the clean-up order should
+  not depend on that.
+* **Fix:**
+  * Delete the window before the deny loop, in its own `try`.
+  * Do it even under `--keep`: keep the rows for debugging, not the
+    credential.
+  * When preflight fails after `session_begin`, run the same short
+    clean-up (exclude the session), so a refused run does not leave an
+    `E2E:` session counting in the statistics.
+
+**Nits:**
+* **The token-file prefix.** Refuse to start unless the approver token
+  matches `^e2e_`, and unless it differs from the agent token. A wrong
+  file then fails at preflight with a clear message, not part-way through.
+* **The window token in a URL.** C11 reads `/api/window-by-token/<token>`.
+  The token is spent by then, but the path lands in the access log. Read
+  `execution_count` through the approver's own window route instead.
+  Alternatively, accept the token in a POST body, as BJ2 does for the
+  claim.
+* **Host-key checking.** `WindowRunner` uses
+  `StrictHostKeyChecking=accept-new`, so the first run trusts any host
+  key. Take a known-hosts file from the environment, held to the same
+  file-mode rules, and use `StrictHostKeyChecking=yes` and
+  `IdentitiesOnly=yes`. The window token also sits in the local `ssh`
+  argv for the length of the call. That is acceptable on a single-user
+  machine; say so in the how-to.
+* **Gateway script check.** Run C16 (installer hash equals Edge) as part
+  of preflight, not last. BZ1 relies on the gateway forwarding only a
+  verified name. The approver should decide nothing on a test gateway
+  running an older script.
+* **BZ2 details.**
+  * The IP bucket also counts valid approver traffic. C5's waiter polls
+    twice a second, which on its own is close to 120 a minute. Raise the
+    IP bucket above the per-token one, or count only invalid tokens in it.
+  * `_invalid_approver_audit` is never pruned. Drop entries older than
+    the window when an entry is written.
+
 ## 7. Backlog (not planned in detail)
 
 * Deny with a reason, shown to the agent (cheap; low value given the data).
@@ -20823,6 +21909,46 @@ skips when Node is absent). Screenshots with synthetic data at 1440 and 390.
 
 Full suite: 3193 passed, 33 skipped.
 
+### Follow-up: the window token in the audit log (2026-11-17)
+
+**Problem.** Four audit rows wrote the live window token into `details`:
+`window_created`, `window_claimed`, `window_request_approved` and
+`window_deleted`. The token is the credential that authorises a window
+execution, so a copy in the audit log outlives the operator's screen and can
+be read by anyone who can read audit history.
+
+**Fix.** A window token in an audit detail is replaced by `token_fp=<8 hex>`,
+the first eight hex characters of its SHA-256. The fingerprint is enough to
+tell two windows apart and cannot be used to claim one. The four rows now
+carry `token_fp`; `window_claimed` used to interpolate the token as
+`Token <raw> claimed` and now uses the same `token_fp` label. The database
+still stores the token in `approved_windows` and `window_executions`; that is
+the live credential, not an audit copy. Gateway-side window logs were already
+limited to the first eight characters (`BJ3`), and notifications never carried
+the token, so no other surface needed a change.
+
+**Tests.** `tests/test_window_token_audit.py` creates, claims, approves and
+deletes a window, then asserts that no row of those four event types contains
+either token and that each row carries the matching fingerprint.
+
+**Migration proposal (design only; not written).** I recommend a one-time
+masking migration, **after Security answers**. Existing audit rows can hold
+tokens for windows that are still active, so leaving them until they age out
+keeps a usable credential in the database. The migration would be narrow and
+idempotent:
+
+* only the four event types above;
+* rewrite `token=<value>` (and `Token <value> claimed`) to
+  `token_fp=<sha256(value)[:8]>`;
+* leave every other character of `details` untouched;
+* run in one transaction, record the number of rows changed, and write no
+  token into the migration's own audit row;
+* be reversible only from a database backup, which the operator takes first.
+
+The alternative, no migration, is simpler but leaves live tokens readable.
+I would not delete the old rows: they are the evidence of who created and
+approved each window. The migration masks one field, not the history.
+
 ---
 
 | 18a | X2 | runbooks-page | dashboard UI | **Merged** 2026-11-11 | `feat/x2-runbooks-page` | F13 | |
@@ -20853,8 +21979,53 @@ Full suite: 3193 passed, 33 skipped.
 | — | BE3 | secret-headers | gateway + installer + poller | **Implemented**: every token header goes on stdin (`-H @-`), the result post uses a private header file, and argv is asserted token-free in all three stub harnesses | `fix/secret-headers` | RR1 | security sign-off |
 | — | BE4 | update-dashboard-key | installer | **Implemented**: `--update` refreshes only the `eshu-dashboard` line after a 200, copies its `from=`, refuses symlinks, uses `mktemp`; the fixed `.tmp` name is gone everywhere | `fix/update-dashboard-key` | RR1 | security sign-off |
 | — | GT1 | gateway-token-rotation | dashboard + poller | Design round 2 2026-11-14 (BS4/BS5 folded): routine poll rotation vs compromise SSH push, 24 h gateway-enforced mtime, Revoke token | `feat/gt1-token-rotation` | RR1 | + security sign-off; code after 1.4 |
+| 29 | E2E-1 | e2e-smoke | test tooling | **Design** 2026-11-15; main reviewer notes CA1–CA7 (2026-11-17: live dashboard + one dev gateway, scoped approver token); security reads before code | `feat/e2e-smoke` | F3, F12, F15, F27 (when merged), 1.4 | an automated approver: dedicated credential, window attribution, allowlist mode (see open questions) |
 
 Chunks are done **in the order column**; each new chunk branches from the
 updated `feature-roadmap` after the previous one is merged. A design-first
 chunk's design note may be written while the chunk before it is with a
 reviewer; its code still waits for its turn.
+
+### Security review of the window-token audit fix (`fix/window-token-audit` @ 91cdf82)
+
+**Approved to merge.** Code text read only; nothing was run.
+* All four rows now carry `token_fp`, the first eight hex characters of
+  the token's SHA-256: `window_created`, `window_claimed`,
+  `window_request_approved` and `window_deleted`.
+* Window tokens are 24 characters from `[A-Za-z0-9]`, about 143 bits, so
+  an 8-hex fingerprint gives nothing usable to someone who could only
+  read the audit log.
+* No other `record_audit_event` call in `main.py` interpolates a window
+  token. The test covers all four event types.
+
+**The migration: yes, write it.**
+* Old rows can hold the tokens of windows that are still active, and
+  `audit_log` is plain rows with no hash chain. A narrow rewrite therefore
+  breaks no integrity property. Your conditions are right: only the four
+  event types, only the token field, one transaction, a count and no
+  token in its own audit row.
+* Add the following:
+  * **Match tightly.** Match `token=([A-Za-z0-9]{1,64})` and
+    `Token ([A-Za-z0-9]{1,64}) claimed`, the same charset the gateway
+    enforces. Replace the match with `token_fp=<sha256[:8]>`.
+  * **Make it idempotent with a settings flag.** Mark it run once it
+    commits, and skip rows that already carry `token_fp=`.
+  * **Leave placeholders alone.** If a row's value is `?`, or empty, as
+    in the old `window_deleted` path, leave it.
+  * **Tell the operator what remains.** Copies made before the migration,
+    such as backups, CSV or JSON audit exports and support bundles, still
+    hold the tokens. The CHANGELOG should say: "if you shared an audit
+    export, delete and re-create your active windows".
+    Offer nothing automatic for those copies.
+* Keep the rows themselves, as you propose. They are the record of who
+  created and approved each window.
+
+**Backlog (not this branch).**
+* Two public routes still carry a window token in the URL path, which
+  lands in the access log:
+  * `POST /api/approved-windows/execute/{token}`, the pre-BJ2 claim route
+    kept for old gateways;
+  * `GET /api/window-by-token/{token}`.
+* Retire the first once the fleet is past BJ2, for example in the X9
+  legacy retirement.
+* Give the second a body or header form, and move E2E-1's C11 onto it.

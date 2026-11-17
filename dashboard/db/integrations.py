@@ -270,6 +270,19 @@ def init_integrations_tables(cursor):
             cursor.execute(f"ALTER TABLE integration_calls ADD COLUMN {col} {ddl}")
         except Exception:
             pass
+    # BY1: the numeric agent that made the row. 0 = no agent token.
+    for tbl in ('integration_calls', 'pending_integration_calls'):
+        try:
+            cursor.execute(
+                f"ALTER TABLE {tbl} ADD COLUMN agent_id INTEGER NOT NULL DEFAULT 0")
+        except Exception:
+            pass
+    # F8/CA5: test traffic is kept in History but left out of statistics.
+    try:
+        cursor.execute(
+            "ALTER TABLE integration_calls ADD COLUMN excluded INTEGER NOT NULL DEFAULT 0")
+    except Exception:
+        pass
 
 
 # ── Integrations ────────────────────────────────────────────────────────
@@ -618,27 +631,38 @@ def record_integration_call(integration: str, tool: str, agent: str, method: str
                             approval: str = '', decided_at: int = 0,
                             decided_by: str = '', host: str = '',
                             resolved_ips: str = '', reason_code: str = '',
-                            final_url: str = '', session_source: str = None):
+                            final_url: str = '', session_source: str = None,
+                            agent_id: int = None):
     # Default the provenance from the request context so every executor
     # (proxy, WS, handler, denial) records it without threading a parameter.
     if session_source is None:
         session_source = current_session_source('')
+    if agent_id is None:
+        try:
+            from core.agent_context import current_agent_id
+            agent_id = current_agent_id(0)
+        except Exception:
+            agent_id = 0
+    try:
+        agent_id = int(agent_id or 0)
+    except (TypeError, ValueError):
+        agent_id = 0
     with db_conn() as conn:
         cursor = conn.cursor()
         now = int(time.time())
         cursor.execute('''
             INSERT INTO integration_calls
-                (integration, tool, agent, method, path, status_code, latency_ms,
-                 response_summary, response_bytes, truncated, outcome, session_id,
-                 execution_id, reason, request_summary, approval, decided_at,
-                 decided_by, host, resolved_ips, reason_code, final_url,
-                 session_source, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (integration, tool, agent, method, path, status_code, latency_ms,
-              response_summary, response_bytes, truncated, outcome, session_id,
-              execution_id, reason, request_summary, approval, decided_at or 0,
-              decided_by, host or '', resolved_ips or '', reason_code or '',
-              final_url or '', session_source or '', now))
+                (integration, tool, agent, agent_id, method, path, status_code,
+                 latency_ms, response_summary, response_bytes, truncated, outcome,
+                 session_id, execution_id, reason, request_summary, approval,
+                 decided_at, decided_by, host, resolved_ips, reason_code,
+                 final_url, session_source, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (integration, tool, agent, agent_id, method, path, status_code,
+              latency_ms, response_summary, response_bytes, truncated, outcome,
+              session_id, execution_id, reason, request_summary, approval,
+              decided_at or 0, decided_by, host or '', resolved_ips or '',
+              reason_code or '', final_url or '', session_source or '', now))
         conn.commit()
         return cursor.lastrowid
 
@@ -664,8 +688,10 @@ def get_integration_health(window_seconds: int = 86400):
                             THEN c.latency_ms END) AS avg_latency_ms,
                    (SELECT outcome FROM integration_calls c2
                      WHERE c2.integration = c.integration
+                       AND COALESCE(c2.excluded, 0) = 0
                      ORDER BY c2.created_at DESC LIMIT 1) AS last_outcome
             FROM integration_calls c
+            WHERE COALESCE(c.excluded, 0) = 0
             GROUP BY c.integration
             """,
             (cutoff, cutoff, cutoff),
@@ -680,6 +706,21 @@ def get_integration_health(window_seconds: int = 86400):
                 'avg_latency_ms': round(avg, 0) if avg is not None else None,
             }
     return out
+
+
+def mark_integration_calls_excluded(session_id: str) -> int:
+    """CA5: F8 exclusion covers this session's proxied calls too."""
+    sid = (session_id or '').strip()[:64]
+    if not sid:
+        return 0
+    with db_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE integration_calls SET excluded = 1 "
+            "WHERE session_id = ? AND COALESCE(excluded, 0) = 0", (sid,))
+        count = cursor.rowcount
+        conn.commit()
+    return count
 
 
 def get_integration_calls(search: str = None, start: int = None, end: int = None,
@@ -792,17 +833,28 @@ def list_recent_session_summaries(limit: int = 24):
 def create_pending_call(integration: str, tool: str, payload: dict, reason: str = '',
                         session_id: str = '', execution_id: str = '',
                         agent: str = '', session_source: str = '',
-                        summary: str = '') -> int:
+                        summary: str = '', agent_id: int = None) -> int:
+    if agent_id is None:
+        try:
+            from core.agent_context import current_agent_id
+            agent_id = current_agent_id(0)
+        except Exception:
+            agent_id = 0
+    try:
+        agent_id = int(agent_id or 0)
+    except (TypeError, ValueError):
+        agent_id = 0
     with db_conn() as conn:
         cursor = conn.cursor()
         now = int(time.time())
         cursor.execute('''
             INSERT INTO pending_integration_calls
                 (integration, tool, payload, reason, status, session_id,
-                 execution_id, agent, session_source, created_at, summary)
-            VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)
+                 execution_id, agent, agent_id, session_source, created_at, summary)
+            VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)
         ''', (integration, tool, json.dumps(payload or {}), reason, session_id,
-              execution_id, agent, session_source or '', now, (summary or '')[:300]))
+              execution_id, agent, agent_id, session_source or '', now,
+              (summary or '')[:300]))
         conn.commit()
         return cursor.lastrowid
 

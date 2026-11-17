@@ -90,6 +90,14 @@ def init_requests_tables(cursor):
                 "ALTER TABLE requests ADD COLUMN run_limit TEXT NOT NULL DEFAULT ''")
         except Exception:
             pass
+    # BY1: the numeric agent that made this row. 0 = no agent token (a
+    # gateway/direct row); names are never the boundary.
+    if 'agent_id' not in existing:
+        try:
+            cursor.execute(
+                "ALTER TABLE requests ADD COLUMN agent_id INTEGER NOT NULL DEFAULT 0")
+        except Exception:
+            pass
 
 TICKET_FORMAT_V2 = 'v2'
 
@@ -166,7 +174,37 @@ def _refuse_agent_ticket(req_id, target_ip: str) -> None:
         pass
 
 
-def create_request(target_ip: str, command: str, status: str = 'pending', ttl: int = 90, reason: str = '', session_id: str = '', execution_id: str = '', inner_target: str = '', agent: str = '', unattended: bool = False, run_limit: str = '', plan_item_id=None):
+def _request_agent_id(agent_id, session_id):
+    """BY1: the agent id for a new row, from the verified context/session.
+
+    A gateway-created SSH row has no agent token, but the signed session id
+    points at the server-side session row that *was* opened by an agent token;
+    that recorded id is the safe source. A row with neither is 0 and the
+    approver always refuses it.
+    """
+    if agent_id is not None:
+        try:
+            return int(agent_id)
+        except (TypeError, ValueError):
+            return 0
+    try:
+        from core.agent_context import current_agent_id
+        current = current_agent_id(0)
+        if current:
+            return int(current)
+    except Exception:
+        pass
+    sid = (session_id or '').strip()[:64]
+    if sid:
+        try:
+            from db.sessions import get_session
+            return int((get_session(sid) or {}).get('agent_id') or 0)
+        except Exception:
+            return 0
+    return 0
+
+
+def create_request(target_ip: str, command: str, status: str = 'pending', ttl: int = 90, reason: str = '', session_id: str = '', execution_id: str = '', inner_target: str = '', agent: str = '', unattended: bool = False, run_limit: str = '', plan_item_id=None, agent_id=None):
     # F18: compute both fingerprints for every new row (no extra call site).
     try:
         from core.fingerprint import fingerprints
@@ -183,10 +221,11 @@ def create_request(target_ip: str, command: str, status: str = 'pending', ttl: i
         # `decided_at = now` on an unclaimed row and invent the whole TTL as
         # waiting time.
         decided_at = created_at if status != 'pending' else None
+        resolved_agent_id = _request_agent_id(agent_id, session_id)
         cursor.execute('''
-            INSERT INTO requests (target_ip, command, status, created_at, expires_at, reason, session_id, execution_id, inner_target, command_sha, shape_sha, decided_at, agent, unattended, run_limit, plan_item_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (target_ip, command, status, created_at, expires_at, reason, session_id, execution_id, inner_target or '', cmd_sha, shape_sha, decided_at, (agent or '')[:64], 1 if unattended else 0, (run_limit or '')[:2000], int(plan_item_id) if plan_item_id else None))
+            INSERT INTO requests (target_ip, command, status, created_at, expires_at, reason, session_id, execution_id, inner_target, command_sha, shape_sha, decided_at, agent, unattended, run_limit, plan_item_id, agent_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (target_ip, command, status, created_at, expires_at, reason, session_id, execution_id, inner_target or '', cmd_sha, shape_sha, decided_at, (agent or '')[:64], 1 if unattended else 0, (run_limit or '')[:2000], int(plan_item_id) if plan_item_id else None, resolved_agent_id))
         conn.commit()
         return cursor.lastrowid
 

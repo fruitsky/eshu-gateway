@@ -61,6 +61,7 @@ from database import (
     set_override, clear_override, get_override_active,
     create_approved_window, get_approved_windows, get_active_approved_windows,
     delete_approved_window, toggle_approved_window,
+    token_fingerprint as window_token_fingerprint,
     increment_window_execution, get_recent_jit_approved,
     get_trigger_dev_update, set_trigger_dev_update, clear_trigger_dev_update,
     update_approved_window,
@@ -84,7 +85,12 @@ from database import (
     revoke_agent_token, delete_agent_token,
 )
 from db.agent_policies import (
-    DEFAULT_SSH_MODE, get_agent_policy, set_agent_policy, get_agent_policies_map,
+    DEFAULT_SSH_MODE, agent_has_activity, get_agent_policy, set_agent_policy,
+    get_agent_policies_map,
+)
+from db.approver_tokens import (
+    create_approver_token, get_approver_token, list_approver_tokens,
+    revoke_approver_token, revoke_agent_tokens,
 )
 from db.misc import (get_meta_json, set_meta_json, get_run_limit_settings,
                          set_run_limit_settings, run_limit_problem)
@@ -153,6 +159,7 @@ from core.gateway_watch import (
 from core.utils import DASHBOARD_VERSION, decode_cmd, _resolve_gateway_token, _hash_password, _verify_password, valid_gateway_metadata
 from core.body_guard import NoDuplicateJSONKeysRoute
 from core.integration_auth import resolve_agent, resolve_agent_optional, extract_agent_token
+from core import approver_auth
 from core.secret_scrub import scrub_body, scrub_payload, scrub_string
 from core.integration_proxy import execute_integration_call, execute_generic_call, generic_write_envelope, ProxyError, merge_response_hint, ALLOWED_AUTH_TYPES, PREVIEW_CHARS, safe_request_summary
 from core.ha_ws import execute_ws_call
@@ -167,6 +174,134 @@ from core.mcp_server import (
 from core.seeds import seed_for_kind, reseed_all_integrations, seed_tool_names
 from core.train_seed import ensure_train_integration
 from core.commute_seed import ensure_commute_integration
+
+
+def _decision_auth(request: Request):
+    """The operator session, or a scoped approver token (BY1–BY3)."""
+    approver = getattr(request.state, 'approver', None)
+    if approver:
+        return approver
+    _check_session(request)
+    return None
+
+
+def _approver_session(approver, session_id, action='read'):
+    if not approver:
+        return None
+    agent, _policy = approver_auth.require_test_agent(approver)
+    session = approver_auth.session_owned_by_approver(approver, session_id)
+    if not session:
+        approver_auth.audit(
+            approver, 'e2e_approver_refused',
+            '%s refused: session is not this agent\'s E2E session' % action)
+        raise HTTPException(status_code=403,
+                            detail="Row is outside the approver token's scope")
+    return session
+
+
+def _approver_row(approver, row, action='read', require_session=True):
+    if not approver:
+        return
+    if not approver_auth.row_owned_by_approver(
+            approver, row, require_session=require_session):
+        approver_auth.audit(
+            approver, 'e2e_approver_refused',
+            '%s refused: row agent/session does not match the token' % action)
+        raise HTTPException(status_code=403,
+                            detail="Row is outside the approver token's scope")
+    approver_auth.require_test_agent(approver)
+
+
+def _approver_command(approver, command, action='approve'):
+    if not approver:
+        return
+    if not approver_auth.command_allowed(approver, command):
+        approver_auth.audit(
+            approver, 'e2e_approver_refused',
+            '%s refused: command is not in the minted list' % action)
+        raise HTTPException(status_code=403,
+                            detail="Command is outside the approver token's list")
+
+
+def _approver_gateway(approver, gateway_ip, action='approve'):
+    if not approver:
+        return
+    if not approver_auth.gateway_allowed(approver, gateway_ip):
+        approver_auth.audit(
+            approver, 'e2e_approver_refused',
+            "%s refused: gateway is not the token's test gateway" % action)
+        raise HTTPException(status_code=403,
+                            detail="Gateway is outside the approver token's scope")
+
+
+def _approver_plan_items(approver, plan):
+    """BY2: a plan's kept items are fixed bytes on the one gateway.
+
+    Agent plans must be SSH items whose command is in the minted list. Probe
+    plans are allowed only for `diagnose_service(unit=ssh)` and
+    `disk_pressure`; their generated commands are not in the list.
+    """
+    if not approver:
+        return
+    items = [item for item in (plan.get('items') or [])
+             if not item.get('removed')]
+    if not items:
+        raise HTTPException(status_code=403, detail="No plan items to approve")
+    probe_meta = {}
+    if (plan.get('origin') or '') == 'probe':
+        probe_meta = get_meta_json('probe_plan_%s' % plan.get('id'), {}) or {}
+        probe = probe_meta.get('probe') or ''
+        params = probe_meta.get('params') or {}
+        if probe not in ('diagnose_service', 'disk_pressure'):
+            approver_auth.audit(
+                approver, 'e2e_approver_refused',
+                'plan #%s refused: probe %r is not allowed' % (plan.get('id'), probe))
+            raise HTTPException(
+                status_code=403,
+                detail="Only the two named probe templates are allowed")
+        if str(params.get('host') or '') != str(approver.get('gateway_ip') or ''):
+            raise HTTPException(status_code=403,
+                                detail="Probe is not on the test gateway")
+        if probe == 'diagnose_service' and str(params.get('unit') or '') != 'ssh':
+            raise HTTPException(status_code=403,
+                                detail="diagnose_service must target unit=ssh")
+    for item in items:
+        if str(item.get('host') or '') != str(approver.get('gateway_ip') or ''):
+            approver_auth.audit(
+                approver, 'e2e_approver_refused',
+                'plan #%s refused: item host is not the test gateway'
+                % plan.get('id'))
+            raise HTTPException(status_code=403,
+                                detail="Plan item is not on the test gateway")
+        if (plan.get('origin') or '') != 'probe':
+            if (item.get('kind') or 'ssh') != 'ssh':
+                raise HTTPException(status_code=403,
+                                    detail="Only SSH plan items are allowed")
+            if not approver_auth.command_allowed(approver, item.get('command')):
+                approver_auth.audit(
+                    approver, 'e2e_approver_refused',
+                    'plan #%s refused: a command is not in the minted list'
+                    % plan.get('id'))
+                raise HTTPException(
+                    status_code=403,
+                    detail="Plan command is outside the approver token's list")
+
+
+def _approver_audit_decision(approver, kind, row_id, session_id=''):
+    if not approver:
+        return
+    approver_auth.audit(
+        approver, 'e2e_approver_decision',
+        '%s #%s in session %s' % (kind, row_id, session_id or '-'))
+
+
+def _approver_frozen(approver, action='decision'):
+    if approver and get_trigger_freeze():
+        approver_auth.audit(
+            approver, 'e2e_approver_refused',
+            '%s refused: the fleet is frozen' % action)
+        raise HTTPException(status_code=403,
+                            detail="The fleet is frozen; the approver cannot decide")
 
 
 def _get_gateway_hostname(ip: str) -> str:
@@ -229,6 +364,9 @@ app = FastAPI(
 # Key: "ip:version", Value: timestamp of last logged enrollment
 _last_enroll_log = {}
 _ENROLL_DEDUP_WINDOW = 5  # seconds
+# BZ2: at most one invalid-approver audit row per client IP per minute.
+_invalid_approver_audit = {}
+_INVALID_APPROVER_WINDOW = 60
 _app = app  # keep reference for router includes
 # First-run setup token: printed at startup when no password is set, and
 # accepted via X-Eshu-Setup-Token from a non-loopback browser.
@@ -252,6 +390,55 @@ async def mcp_agent_auth_middleware(request: Request, call_next):
         if agent is None:
             return JSONResponse(status_code=401, content={"detail": "Invalid or missing agent token"})
         request.state.agent = agent
+    return await call_next(request)
+
+
+@app.middleware("http")
+async def approver_token_middleware(request: Request, call_next):
+    """BY1–BY3: a carried approver token is accepted only on its routes.
+
+    A token without the `e2e_` prefix is left alone (agent/gateway/browser
+    auth). A valid approver token on any other route is refused before the
+    handler can run; a failed use is audited and rate-limited.
+    """
+    raw = approver_auth.extract_approver_token(request)
+    if not raw:
+        return await call_next(request)
+    client_ip = request.client.host if request.client else '127.0.0.1'
+    # BZ2: the IP bucket runs before the lookup, so a bad `e2e_` value cannot
+    # force one audit write per request.
+    try:
+        _check_rate_limit(client_ip, kind='approver')
+    except HTTPException:
+        return JSONResponse(status_code=429,
+                            content={"detail": "Approver token rate limit"})
+    approver = approver_auth.resolve_approver_optional(request)
+    if not approver:
+        now = int(time.time())
+        if now - _invalid_approver_audit.get(client_ip, 0) >= _INVALID_APPROVER_WINDOW:
+            _invalid_approver_audit[client_ip] = now
+            record_audit_event(
+                'e2e_approver_refused',
+                details='invalid or expired approver token',
+                actor='e2e-approver')
+        return JSONResponse(status_code=401,
+                            content={"detail": "Invalid or expired approver token"})
+    path = request.url.path
+    if not approver_auth.route_allowed(request.method, path):
+        approver_auth.audit(
+            approver, 'e2e_approver_refused',
+            '%s %s is outside the token scope' % (request.method, path))
+        return JSONResponse(
+            status_code=403,
+            content={"detail": "This route is outside the approver token's scope"})
+    try:
+        _check_rate_limit('approver:%d' % int(approver['id']), kind='approver')
+    except HTTPException:
+        approver_auth.audit(approver, 'e2e_approver_rate_limited',
+                            '%s %s' % (request.method, path))
+        return JSONResponse(status_code=429,
+                            content={"detail": "Approver token rate limit"})
+    request.state.approver = approver
     return await call_next(request)
 
 
@@ -890,9 +1077,36 @@ def register(payload: RegisterPayload, request: Request):
             "ssh_mode": get_gateway_ssh_mode(payload.ip)}
 
 
+def _verified_gateway_agent_id(agent_name, session_id):
+    """BZ1: the agent id a gateway-posted row may claim, or 0.
+
+    The gateway forwards the name it verified (`ESHU_VERIFIED_AGENT`). A row
+    gets an agent id only when that name resolves to a live agent and the
+    signed session was opened by that same agent. A session signature alone,
+    or a gateway with no session key yet, therefore records 0 and the
+    approver refuses the row.
+    """
+    name = (agent_name or '').strip()
+    sid = (session_id or '').strip()[:64]
+    if not name or not sid:
+        return 0
+    try:
+        agent = get_agent_by_name(name)
+        if not agent or agent.get('revoked'):
+            return 0
+        session = get_session(sid)
+        if not session:
+            return 0
+        if int(session.get('agent_id') or 0) != int(agent.get('id') or 0):
+            return 0
+        return int(agent.get('id') or 0)
+    except Exception:
+        return 0
+
+
 def approve_unattended(target_ip: str, cmd: str, reason: str, sid: str,
                        eid: str, inner_target: str, agent: str,
-                       capability: str) -> dict:
+                       capability: str, agent_id=None) -> dict:
     """F19: the one way a row is approved without a human deciding on it.
 
     Such a row always carries a run limit, and it is created approved only when
@@ -904,7 +1118,7 @@ def approve_unattended(target_ip: str, cmd: str, reason: str, sid: str,
         req_id = create_request(target_ip, cmd, status="pending",
                                 reason=reason + "-no-limits", session_id=sid,
                                 execution_id=eid, inner_target=inner_target,
-                                agent=agent)
+                                agent=agent, agent_id=agent_id)
         record_audit_event(
             "read_lane_no_limits", target_ip,
             details=("JIT #%d would auto-run (%s) but the gateway does not "
@@ -914,7 +1128,7 @@ def approve_unattended(target_ip: str, cmd: str, reason: str, sid: str,
     req_id = create_request(target_ip, cmd, status="approved", reason=reason,
                             session_id=sid, execution_id=eid,
                             inner_target=inner_target, agent=agent,
-                            unattended=True,
+                            agent_id=agent_id, unattended=True,
                             run_limit=json.dumps(limit, separators=(",", ":")))
     record_audit_event(
         "jit_unattended_approved", target_ip,
@@ -974,6 +1188,9 @@ def receive_request(payload: GatewayPayload, request: Request):
     now = int(time.time())
     sid = (payload.session_id or '')[:64]
     eid = (payload.execution_id or '')[:64]
+    # BZ1: a gateway row may claim an agent only when its verified agent name
+    # matches the session's opener. Empty/none is 0 and the approver refuses.
+    verified_agent_id = _verified_gateway_agent_id(agent, sid)
     # Freeze is absolute: the gateway rejects every command, so an override
     # must not record an "approved" ticket that can never run.
     frozen = get_trigger_freeze() is not None
@@ -991,7 +1208,8 @@ def receive_request(payload: GatewayPayload, request: Request):
                 create_request(target_ip, cmd, status="blocked",
                                reason="encoded-payload:%s" % match[:40],
                                session_id=sid, execution_id=eid,
-                               inner_target=_inner_target_for(cmd), agent=agent)
+                               inner_target=_inner_target_for(cmd), agent=agent,
+                               agent_id=verified_agent_id)
                 update_gateway_last_seen(target_ip)
                 record_audit_event(
                     'encoded_payload_blocked', target_ip,
@@ -1033,8 +1251,8 @@ def receive_request(payload: GatewayPayload, request: Request):
                     reason='plan-check:%d:%d' % (check_plan_id, check_item_id),
                     session_id=sid, execution_id=eid,
                     inner_target=_inner_target_for(cmd), agent=agent,
-                    unattended=True, run_limit=limit_text,
-                    plan_item_id=parent_item_id)
+                    agent_id=verified_agent_id, unattended=True,
+                    run_limit=limit_text, plan_item_id=parent_item_id)
                 update_gateway_last_seen(target_ip)
                 record_audit_event(
                     'jit_check_approved', target_ip,
@@ -1070,6 +1288,7 @@ def receive_request(payload: GatewayPayload, request: Request):
                                         reason=f"session-plan:{plan_id}:{item_id}:{origin}",
                                         session_id=sid, execution_id=eid,
                                         inner_target=_inner_target_for(cmd), agent=agent,
+                                        agent_id=verified_agent_id,
                                         plan_item_id=item_id)
                 update_gateway_last_seen(target_ip)
                 record_audit_event(
@@ -1088,7 +1307,8 @@ def receive_request(payload: GatewayPayload, request: Request):
             req_id = create_request(target_ip, cmd, status="approved",
                                     reason="session-override:%d" % ov["id"],
                                     session_id=sid, execution_id=eid,
-                                    inner_target=_inner_target_for(cmd), agent=agent)
+                                    inner_target=_inner_target_for(cmd), agent=agent,
+                                    agent_id=verified_agent_id)
             update_gateway_last_seen(target_ip)
             scope = ov["target_ip"] or "any host"
             record_audit_event(
@@ -1124,7 +1344,8 @@ def receive_request(payload: GatewayPayload, request: Request):
                 # limit (or stays pending on a gateway too old to enforce one).
                 result = approve_unattended(
                     target_ip, cmd, 'read-lane', sid, eid,
-                    _inner_target_for(cmd), agent, payload.run_limits)
+                    _inner_target_for(cmd), agent, payload.run_limits,
+                    verified_agent_id)
                 update_gateway_last_seen(target_ip)
                 if result.get('approved'):
                     record_audit_event(
@@ -1146,7 +1367,8 @@ def receive_request(payload: GatewayPayload, request: Request):
             and not frozen and not force_jit and not get_gateway_zero_trust(target_ip):
         req_id = create_request(target_ip, cmd, status="approved", reason="override",
                                 session_id=sid, execution_id=eid,
-                                inner_target=_inner_target_for(cmd), agent=agent)
+                                inner_target=_inner_target_for(cmd), agent=agent,
+                                agent_id=verified_agent_id)
         update_gateway_last_seen(target_ip)
         record_audit_event('jit_override_approved', target_ip, details=f'Override auto-approved JIT #{req_id}: {cmd[:80]} (reason: {row["override_reason"][:60]})')
         return {"status": "ok", "id": f"{req_id:06d}", "request_id": req_id, "override": True,
@@ -1164,7 +1386,8 @@ def receive_request(payload: GatewayPayload, request: Request):
     req_id = create_request(target_ip, cmd, status="pending", session_id=sid,
                             execution_id=eid,
                             reason=('force-jit' if force_jit else read_lane_reason),
-                            inner_target=_inner_target_for(cmd), agent=agent)
+                            inner_target=_inner_target_for(cmd), agent=agent,
+                            agent_id=verified_agent_id)
     # F22/AR2: in `approval` mode the check is linked when the card is made,
     # by server code only — the session, one exact host, the whole command and
     # an item that carries a check. Nothing the agent sends can make the link.
@@ -1210,10 +1433,12 @@ def receive_log(payload: GatewayPayload, request: Request):
     log_agent = (payload.agent or '').strip()[:64]
     if log_agent and not re.fullmatch(r'[A-Za-z0-9_.:-]{1,64}', log_agent):
         raise HTTPException(status_code=400, detail="Invalid agent")
+    log_sid = (payload.session_id or '')[:64]
     req_id = create_request(target_ip, cmd, status=payload.status, ttl=0, reason=reason,
-                            session_id=(payload.session_id or '')[:64],
+                            session_id=log_sid,
                             execution_id=(payload.execution_id or '')[:64],
-                            inner_target=_inner_target_for(cmd), agent=log_agent)
+                            inner_target=_inner_target_for(cmd), agent=log_agent,
+                            agent_id=_verified_gateway_agent_id(log_agent, log_sid))
     # F5: an exec result can arrive before this row exists (both are background
     # curls). Attach the waiting orphan now.
     if payload.status in ('auto-approved', 'window-approved'):
@@ -1539,8 +1764,13 @@ def claim_ticket_by_id(req_id: int, request: Request):
 @app.get("/api/requests")
 def list_requests(request: Request, search: str = None, session: str = None,
                   inner_target: str = None):
-    _check_session(request)
+    approver = _decision_auth(request)
     session = (session or '')[:64] or None
+    if approver:
+        if not session:
+            raise HTTPException(status_code=403,
+                                detail="session is required for the approver")
+        _approver_session(approver, session, 'read requests')
     inner_target = (inner_target or '')[:64] or None
     if search:
         reqs = search_requests(search, session_id=session, inner_target=inner_target)
@@ -1578,16 +1808,28 @@ def exclude_requests(payload: ExcludeRequestsPayload, request: Request):
     reports 0 newly excluded. This is the only way rows become excluded: no
     migration or rule flags live data on its own.
     """
-    _check_session(request)
+    approver = _decision_auth(request)
     ids = [int(i) for i in (payload.ids or [])][:1000]
     sid = (payload.session_id or '').strip()[:64]
+    if approver:
+        # BY3: the approver may exclude only its own agent's session, not an
+        # arbitrary id list. CA5 extends the same exclusion to proxied calls.
+        if not sid:
+            raise HTTPException(status_code=403,
+                                detail="session_id is required for the approver")
+        _approver_session(approver, sid, 'exclude')
+        ids = []
     if not ids and not sid:
         raise HTTPException(status_code=400, detail="ids or session_id required")
     count = mark_requests_excluded(ids=ids, session_id=sid)
+    from db.integrations import mark_integration_calls_excluded
+    calls = mark_integration_calls_excluded(sid) if sid else 0
     scope = ('session %s' % sid) if sid else '%d id(s)' % len(ids)
     record_audit_event('requests_excluded',
-                       details=f'Excluded {count} request(s) from statistics ({scope})')
-    return {'status': 'ok', 'excluded': count, 'session_id': sid}
+                       details=f'Excluded {count} request(s)/{calls} call(s) from statistics ({scope})',
+                       actor='e2e-approver' if approver else '')
+    return {'status': 'ok', 'excluded': count, 'calls_excluded': calls,
+            'session_id': sid}
 
 
 @app.get("/api/requests/{req_id}/breakdown")
@@ -1613,23 +1855,48 @@ def request_decoded(req_id: int, request: Request):
 @app.post("/api/approve/{req_id}")
 def approve_request(req_id: int, request: Request):
     """X1: only a `pending` row can be approved; anything else is 409."""
-    _check_session(request)
+    approver = _decision_auth(request)
+    _approver_frozen(approver)
+    if approver and request.headers.get('content-length') not in (None, '', '0'):
+        approver_auth.audit(
+            approver, 'e2e_approver_refused',
+            'request #%s refused: an approve variant carried a body' % req_id)
+        raise HTTPException(status_code=403,
+                            detail="The approver only accepts the plain approve")
     row = get_request_row(req_id)
     if not row:
         raise HTTPException(status_code=404, detail="Request not found")
+    if approver:
+        _approver_row(approver, row, 'approve')
+        _approver_command(approver, row.get('command'))
+        _approver_gateway(approver, row.get('target_ip'))
     if not update_request_status_if_pending(req_id, "approved"):
         raise HTTPException(status_code=409, detail="not_pending")
-    record_audit_event('jit_approved', details=f'JIT #{req_id} approved')
+    if approver:
+        _approver_audit_decision(approver, 'request', req_id,
+                                 row.get('session_id'))
+    record_audit_event('jit_approved', details=f'JIT #{req_id} approved',
+                       actor='e2e-approver' if approver else '')
     return {"status": "ok"}
 
 
 @app.post("/api/deny/{req_id}")
 def deny_request(req_id: int, request: Request):
     """X1: only a `pending` row can be denied; anything else is 409."""
-    _check_session(request)
+    approver = _decision_auth(request)
+    _approver_frozen(approver)
+    if approver and request.headers.get('content-length') not in (None, '', '0'):
+        approver_auth.audit(
+            approver, 'e2e_approver_refused',
+            'request #%s refused: a deny variant carried a body' % req_id)
+        raise HTTPException(status_code=403,
+                            detail="The approver only accepts the plain deny")
     row = get_request_row(req_id)
     if not row:
         raise HTTPException(status_code=404, detail="Request not found")
+    if approver:
+        # BY2: a deny needs no command list, only the BY1 ownership check.
+        _approver_row(approver, row, 'deny')
     command = row.get('command') or ''
     if not update_request_status_if_pending(req_id, "denied"):
         raise HTTPException(status_code=409, detail="not_pending")
@@ -1641,7 +1908,11 @@ def deny_request(req_id: int, request: Request):
             release_check_link(row['plan_item_id'])
     except Exception:
         pass
-    record_audit_event('jit_denied', details=f'JIT #{req_id} denied')
+    if approver:
+        _approver_audit_decision(approver, 'request', req_id,
+                                 row.get('session_id'))
+    record_audit_event('jit_denied', details=f'JIT #{req_id} denied',
+                       actor='e2e-approver' if approver else '')
     deny_count = count_denied(command) if command else 0
     return {"status": "ok", "deny_count": deny_count, "command": command}
 
@@ -2854,6 +3125,7 @@ def get_statistics(request: Request, days: int = 14, gateway_ip: str = None, gat
         SELECT DATE(created_at, 'unixepoch') AS date, COUNT(*) AS n
         FROM integration_calls
         WHERE created_at >= ? AND approval LIKE 'allowance:%'
+          AND COALESCE(excluded, 0) = 0
         GROUP BY date
     ''', (cutoff,))
     for row in cursor.fetchall():
@@ -3386,7 +3658,7 @@ def create_window(payload: ApprovedWindowPayload, request: Request):
         payload.expires_at, payload.match_type
     )
     record_audit_event("window_created", payload.target_ip,
-                       details=f"Window '{payload.label or 'unnamed'}' token={result.get('token','')} cmd={payload.command[:80]}")
+                       details=f"Window '{payload.label or 'unnamed'}' token_fp={window_token_fingerprint(result.get('token'))} cmd={payload.command[:80]}")
     return result
 
 @app.put("/api/approved-windows/{window_id}")
@@ -3437,13 +3709,27 @@ def list_windows(request: Request, ip: str = None):
 
 @app.delete("/api/approved-windows/{window_id}")
 def delete_window(window_id: int, request: Request):
-    _check_session(request)
+    approver = _decision_auth(request)
+    _approver_frozen(approver)
     wins = get_approved_windows()
     target = next((w for w in wins if w['id'] == window_id), None)
+    if approver:
+        if not target:
+            raise HTTPException(status_code=404, detail="Window not found")
+        if int(target.get('agent_id') or 0) != int(approver.get('agent_id') or 0):
+            approver_auth.audit(
+                approver, 'e2e_approver_refused',
+                'window #%s refused: not this agent\'s request' % window_id)
+            raise HTTPException(
+                status_code=403,
+                detail="Window is outside the approver token's scope")
+        approver_auth.require_test_agent(approver)
     tk = target.get('token', '?') if target else '?'
     gw = target.get('target_ip', '?') if target else '?'
     delete_approved_window(window_id)
-    record_audit_event("window_deleted", gw, details=f"Window #{window_id} token={tk} deleted")
+    record_audit_event("window_deleted", gw,
+                       details=f"Window #{window_id} token_fp={window_token_fingerprint(tk)} deleted",
+                       actor='e2e-approver' if approver else '')
     return {"status": "ok"}
 
 @app.post("/api/approved-windows/{window_id}/toggle")
@@ -3509,7 +3795,7 @@ def _window_execute(token: str, request: Request):
                        status='window-approved', ttl=0,
                        inner_target=_inner_target_for(target['command']))
         record_audit_event("window_claimed", target['target_ip'],
-                           details=f"Token {token} claimed for '{target['command'][:60]}'")
+                           details=f"Token token_fp={window_token_fingerprint(token)} claimed for '{target['command'][:60]}'")
         record_window_execution(target['id'], token, target['target_ip'], target['command'])
     return {"status": "ok", "token": token}
 
@@ -3563,6 +3849,7 @@ class WindowRequestPayload(BaseModel):
     max_executions: int = 0
     label: str = ""
     window_start: int = 0
+    session_id: str = ""
 
 @app.post("/api/window-requests")
 def submit_window_request(payload: WindowRequestPayload, request: Request):
@@ -3582,12 +3869,24 @@ def submit_window_request(payload: WindowRequestPayload, request: Request):
     et_req = payload.execution_time or 0
     if dow_req == 0 and et_req == 0 and not payload.window_start:
         raise HTTPException(status_code=400, detail="Single-use windows require a start time (window_start). For an immediate one-off command, use standard JIT approval instead.")
+    req_session = (payload.session_id or '').strip()[:64]
+    req_agent_id = 0
+    if agent:
+        req_agent_id = int(agent.get('id') or 0)
+        if req_session:
+            from db.sessions import get_session as _get_session
+            session = _get_session(req_session)
+            if not session or int(session.get('agent_id') or 0) != req_agent_id:
+                raise HTTPException(
+                    status_code=403,
+                    detail="session_id does not belong to this agent")
     result = create_window_request(
         payload.gateway_ip, payload.command,
         payload.days_of_week, payload.execution_time,
         payload.expires_at, payload.match_type,
         payload.max_executions, payload.label,
-        payload.window_start
+        payload.window_start, session_id=req_session,
+        agent_id=req_agent_id
     )
     record_audit_event("window_requested", payload.gateway_ip,
                        details=f"AI requested window for '{payload.command[:60]}'")
@@ -3636,30 +3935,61 @@ def check_window_request(request_id: str, request: Request):
     return {"status": "pending_review"}
 @app.post("/api/window-requests/{request_id}/approve")
 def approve_window(request_id: int, request: Request):
-    _check_session(request)
+    approver = _decision_auth(request)
+    _approver_frozen(approver)
     wr = get_window_request(request_id)
     if not wr:
         raise HTTPException(status_code=404, detail="Window request not found or already handled")
+    if approver:
+        _approver_row(approver, wr, 'window approve')
+        _approver_command(approver, wr.get('command'))
+        _approver_gateway(approver, wr.get('target_ip'))
+        now = int(time.time())
+        exp = int(wr.get('expires_at') or 0)
+        if (wr.get('match_type') or 'exact') != 'exact':
+            raise HTTPException(status_code=403,
+                                detail="The approver only allows exact window matches")
+        if int(wr.get('max_executions') or 0) != 1:
+            raise HTTPException(status_code=403,
+                                detail="The approver only allows one execution")
+        if exp <= now or exp > now + 15 * 60:
+            approver_auth.audit(
+                approver, 'e2e_approver_refused',
+                'window #%s refused: expiry is not within 15 minutes' % request_id)
+            raise HTTPException(
+                status_code=403,
+                detail="The window must expire within 15 minutes")
     result = approve_window_request(request_id)
     if not result:
         raise HTTPException(status_code=500, detail="Failed to approve window request")
+    if approver:
+        _approver_audit_decision(approver, 'window', request_id,
+                                 wr.get('session_id'))
     record_audit_event("window_request_approved", wr.get("target_ip"),
-                       details=f"AI window request #{request_id} approved, token={result.get('token','')}")
+                       details=f"AI window request #{request_id} approved, token_fp={window_token_fingerprint(result.get('token'))}",
+                       actor='e2e-approver' if approver else '')
     return {"status": "approved", "token": result.get("token", "")}
 
 @app.post("/api/window-requests/{request_id}/deny")
 def deny_window_request(request_id: int, request: Request):
-    _check_session(request)
+    approver = _decision_auth(request)
+    _approver_frozen(approver)
     wr = get_window_request(request_id)
     if not wr:
         raise HTTPException(status_code=404, detail="Window request not found or already handled")
+    if approver:
+        _approver_row(approver, wr, 'window deny')
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute("UPDATE approved_windows SET status = 'denied' WHERE id = ?", (request_id,))
     conn.commit()
     conn.close()
+    if approver:
+        _approver_audit_decision(approver, 'window', request_id,
+                                 wr.get('session_id'))
     record_audit_event("window_request_denied", wr.get("target_ip"),
-                       details=f"AI window request #{request_id} denied")
+                       details=f"AI window request #{request_id} denied",
+                       actor='e2e-approver' if approver else '')
     return {"status": "ok"}
 
 
@@ -3872,8 +4202,12 @@ def create_agent(payload: AgentTokenPayload, request: Request):
 
 @app.get("/api/agents")
 def list_agents(request: Request):
-    _check_session(request)
+    approver = _decision_auth(request)
     agents = get_agent_tokens()
+    if approver:
+        approver_auth.require_test_agent(approver)
+        aid = int(approver.get('agent_id') or 0)
+        agents = [a for a in agents if int(a.get('id') or 0) == aid]
     policies = get_agent_policies_map()
     for agent in agents:
         agent['policy'] = policies.get(agent['id']) or get_agent_policy(agent['id'])
@@ -3996,7 +4330,12 @@ def agent_activity_endpoint(agent_id: int, request: Request):
     agent opened (`sessions.agent`); integration calls also carry the agent
     name directly. Nothing here writes, and the rows are the same ones
     History shows."""
-    _check_session(request)
+    approver = _decision_auth(request)
+    if approver:
+        approver_auth.require_test_agent(approver)
+        if int(agent_id) != int(approver.get('agent_id') or 0):
+            raise HTTPException(status_code=403,
+                                detail="Agent is outside the approver token's scope")
     agent = get_agent(agent_id)
     if not agent:
         raise HTTPException(status_code=404, detail="Agent token not found")
@@ -4179,6 +4518,137 @@ def web_fetch_stats_endpoint(request: Request, principal: str = None):
     """Audit-derived counters for the mediated fetch (optionally per principal)."""
     _check_session(request)
     return get_web_fetch_stats(principal)
+
+
+class TestAgentPayload(BaseModel):
+    enabled: bool = False
+
+
+class ApproverTokenPayload(BaseModel):
+    agent_id: int
+    commands: list[str] = []
+    gateway_ip: str = ''
+    days: int = 30
+
+
+@app.post("/api/agents/{agent_id}/test-agent")
+def set_test_agent_endpoint(agent_id: int, payload: TestAgentPayload,
+                            request: Request):
+    """BY4: the operator's test-agent switch. It only narrows."""
+    _check_session(request)
+    agent = get_agent(agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent token not found")
+    before = get_agent_policy(agent_id)
+    try:
+        policy = set_agent_policy(agent_id, test_agent=bool(payload.enabled))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if payload.enabled and not before.get('test_agent'):
+        record_audit_event(
+            'agent_test_mode_enabled',
+            details=f"Agent '{agent['name']}' marked test_agent=1")
+        try:
+            send_notify('jit', 'Test agent enabled',
+                        f"Agent '{agent['name']}' is now a test agent. "
+                        f"Approver tokens for it can decide only its E2E rows.")
+        except Exception:
+            pass
+    if not payload.enabled and before.get('test_agent'):
+        revoked = revoke_agent_tokens(agent_id)
+        record_audit_event(
+            'agent_test_mode_disabled',
+            details=f"Agent '{agent['name']}' cleared test_agent; "
+                    f"{revoked} approver token(s) revoked")
+        try:
+            send_notify('jit', 'Test agent disabled',
+                        f"Agent '{agent['name']}' is no longer a test agent; "
+                        f"{revoked} approver token(s) revoked.")
+        except Exception:
+            pass
+    return policy
+
+
+@app.post("/api/approver-tokens")
+def mint_approver_token_endpoint(payload: ApproverTokenPayload,
+                                 request: Request):
+    """BY1–BY3: mint one scoped approver token for one test agent."""
+    _check_session(request)
+    agent = get_agent(payload.agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent token not found")
+    policy = get_agent_policy(payload.agent_id)
+    if not policy.get('test_agent'):
+        raise HTTPException(status_code=400,
+                            detail="The agent must be a test agent first")
+    if not payload.gateway_ip or not get_gateway(payload.gateway_ip):
+        raise HTTPException(status_code=400,
+                            detail="gateway_ip must be a registered gateway")
+    hosts = policy.get('ssh_hosts_allow') or []
+    if hosts != [payload.gateway_ip]:
+        raise HTTPException(
+            status_code=400,
+            detail="gateway_ip must be the test agent's one ssh_hosts_allow entry")
+    try:
+        raw, token_id = create_approver_token(
+            payload.agent_id, payload.commands, payload.gateway_ip,
+            payload.days, actor='operator')
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    record_audit_event(
+        'e2e_approver_token_minted',
+        details=f"Approver token #{token_id} minted for agent "
+                f"'{agent['name']}' on {payload.gateway_ip}")
+    try:
+        send_notify('jit', 'Approver token minted',
+                    f"An E2E approver token (#{token_id}) was minted for "
+                    f"agent '{agent['name']}' on {payload.gateway_ip}.")
+    except Exception:
+        pass
+    return {'status': 'ok', 'id': token_id, 'token': raw,
+            'agent_id': payload.agent_id,
+            'gateway_ip': payload.gateway_ip,
+            'days': max(1, min(30, int(payload.days or 30)))}
+
+
+@app.get("/api/approver-tokens")
+def list_approver_tokens_endpoint(request: Request, agent_id: int = None):
+    _check_session(request)
+    return list_approver_tokens(agent_id=agent_id)
+
+
+@app.post("/api/approver-tokens/{token_id}/revoke")
+def revoke_approver_token_endpoint(token_id: int, request: Request):
+    _check_session(request)
+    row = get_approver_token(token_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Approver token not found")
+    revoke_approver_token(token_id)
+    record_audit_event(
+        'e2e_approver_token_revoked',
+        details=f"Approver token #{token_id} revoked")
+    return {'status': 'ok', 'id': token_id}
+
+
+@app.get("/api/e2e/installer-hash")
+def e2e_installer_hash_endpoint(request: Request, gateway_ip: str = None):
+    """C16: the narrow read. The Edge hash and one gateway's reported hash."""
+    approver = _decision_auth(request)
+    if approver:
+        approver_auth.require_test_agent(approver)
+        gateway_ip = approver.get('gateway_ip') or ''
+    gateway_ip = (gateway_ip or '').strip()
+    if not gateway_ip:
+        raise HTTPException(status_code=400, detail="gateway_ip is required")
+    gateway = get_gateway(gateway_ip)
+    if not gateway:
+        raise HTTPException(status_code=404, detail="Gateway not found")
+    edge_hash = installer_channels.channel_hash(installer_channels.EDGE)
+    gateway_hash = gateway.get('installer_hash') or ''
+    return {'gateway_ip': gateway_ip,
+            'gateway_hash': gateway_hash,
+            'edge_hash': edge_hash,
+            'matches': bool(edge_hash and gateway_hash == edge_hash)}
 
 
 @app.post("/api/agents/{agent_id}/revoke")
@@ -4394,7 +4864,13 @@ def seed_integration_endpoint(name: str, request: Request):
 def list_integration_calls(request: Request, search: str = None, start: int = None,
                            end: int = None, limit: int = 50, offset: int = 0,
                            session: str = None, approval: str = None):
-    _check_session(request)
+    approver = _decision_auth(request)
+    if approver:
+        session = (session or '').strip()[:64]
+        if not session:
+            raise HTTPException(status_code=403,
+                                detail="session is required for the approver")
+        _approver_session(approver, session, 'read calls')
     return get_integration_calls(search=search, start=start, end=end,
                                  limit=limit, offset=offset, session=session,
                                  approval=approval)
@@ -4440,9 +4916,14 @@ def _plan_payload(plan: dict) -> dict:
 @app.get("/api/session-plans")
 def list_session_plans(request: Request, status: str = None, session_id: str = None):
     """Session plans (F3), newest first, filtered by status and/or session."""
-    _check_session(request)
+    approver = _decision_auth(request)
     status = (status or '')[:32] or None
     session_id = (session_id or '')[:64] or None
+    if approver:
+        if not session_id:
+            raise HTTPException(status_code=403,
+                                detail="session_id is required for the approver")
+        _approver_session(approver, session_id, 'read plans')
     return [_plan_payload(plan) for plan in
             list_plans(status=status, session_id=session_id)]
 
@@ -4452,16 +4933,38 @@ def approve_session_plan(plan_id: int, payload: SessionPlanApprovePayload,
                          request: Request):
     """Approve a proposed plan (a subset, with a TTL). The approved bytes are
     the only ones the plan can ever authorise."""
-    _check_session(request)
+    approver = _decision_auth(request)
+    _approver_frozen(approver)
+    if approver:
+        plan = get_plan(plan_id)
+        if not plan:
+            raise HTTPException(status_code=404, detail="Plan not found")
+        _approver_row(approver, plan, 'approve')
+        if payload.removed_item_ids:
+            approver_auth.audit(approver, 'e2e_approver_refused',
+                                'plan #%s refused: removed_item_ids is not empty'
+                                % plan_id)
+            raise HTTPException(
+                status_code=403,
+                detail="The approver cannot remove plan items")
+        if int(payload.ttl_minutes or 0) != 60:
+            approver_auth.audit(approver, 'e2e_approver_refused',
+                                'plan #%s refused: non-default TTL' % plan_id)
+            raise HTTPException(
+                status_code=403,
+                detail="The approver must use the default plan TTL")
+        _approver_plan_items(approver, plan)
     try:
         plan = approve_plan(plan_id, payload.ttl_minutes, payload.removed_item_ids,
-                            decided_by='operator')
+                            decided_by='e2e-approver' if approver else 'operator')
     except PlanError as exc:
         raise HTTPException(status_code=400, detail=exc.message)
+    if approver:
+        _approver_audit_decision(approver, 'plan', plan_id, plan.get('session_id'))
     plan = _plan_payload(plan)
     kept = [item['id'] for item in plan['items'] if not item.get('removed')]
     record_audit_event(
-        'plan_approved', actor='operator',
+        'plan_approved', actor='e2e-approver' if approver else 'operator',
         details=f"Session plan #{plan_id} for session {plan['session_id']} approved: "
                 f"{len(kept)} item(s) {kept}, ttl {payload.ttl_minutes} min")
     return plan
@@ -4469,12 +4972,20 @@ def approve_session_plan(plan_id: int, payload: SessionPlanApprovePayload,
 
 @app.post("/api/session-plans/{plan_id}/deny")
 def deny_session_plan(plan_id: int, request: Request):
-    _check_session(request)
+    approver = _decision_auth(request)
+    _approver_frozen(approver)
+    if approver:
+        plan = get_plan(plan_id)
+        if not plan:
+            raise HTTPException(status_code=404, detail="Plan not found")
+        _approver_row(approver, plan, 'deny')
     try:
-        plan = deny_plan(plan_id, decided_by='operator')
+        plan = deny_plan(plan_id, decided_by='e2e-approver' if approver else 'operator')
     except PlanError as exc:
         raise HTTPException(status_code=400, detail=exc.message)
-    record_audit_event('plan_denied', actor='operator',
+    if approver:
+        _approver_audit_decision(approver, 'plan', plan_id, plan.get('session_id'))
+    record_audit_event('plan_denied', actor='e2e-approver' if approver else 'operator',
                        details=f"Session plan #{plan_id} for session "
                                f"{plan['session_id']} denied")
     return _plan_payload(plan)
@@ -4499,8 +5010,10 @@ def session_detail_endpoint(sid: str, request: Request):
     """One-stop detail for a session: SSH commands + proxied API calls, each with
     the AI's reason, masked request args, response summary, and the approval
     decision. Backs the session modal."""
-    _check_session(request)
+    approver = _decision_auth(request)
     sid = (sid or '')[:64]
+    if approver:
+        _approver_session(approver, sid, 'read session detail')
     ssh = get_session_requests(sid)
     for row in ssh:
         row.update(_encoded_fields(row.get('command', '')))
@@ -4573,20 +5086,31 @@ def confirm_conclusion_endpoint(conclusion_id: int,
 def reject_conclusion_endpoint(conclusion_id: int,
                                payload: ConclusionReviewPayload,
                                request: Request):
-    _check_session(request)
+    approver = _decision_auth(request)
     from core.secret_scrub import scrub_string
-    from db.conclusions import ConclusionError, reject_conclusion
+    from db.conclusions import ConclusionError, get_conclusion, reject_conclusion
+    if approver:
+        existing = get_conclusion(conclusion_id)
+        if not existing:
+            raise HTTPException(status_code=404, detail='not_found')
+        _approver_session(approver, existing.get('session_id') or '',
+                          'reject conclusion')
+        if (existing.get('agent') or '') != (
+                get_agent(int(approver.get('agent_id') or 0)) or {}).get('name'):
+            raise HTTPException(status_code=403,
+                                detail="Draft is outside the approver token's scope")
     try:
         row = reject_conclusion(conclusion_id,
                                 note=scrub_string(payload.note or '')[:2000],
-                                by='operator')
+                                by='e2e-approver' if approver else 'operator')
     except ConclusionError as exc:
         raise HTTPException(status_code=409 if exc.code == 'bad_state' else 404,
                             detail=exc.code)
     record_audit_event(
         'conclusion_rejected',
         details=f'Conclusion #{conclusion_id} (session {row["session_id"]}) '
-                f'rejected by the operator')
+                f'rejected by {"the e2e approver" if approver else "the operator"}',
+        actor='e2e-approver' if approver else '')
     return {'status': 'ok', 'conclusion': row}
 
 
@@ -4710,8 +5234,20 @@ def session_recent_endpoint(request: Request, limit: int = 24):
 
 @app.get("/api/integration-calls/pending")
 def list_pending_integration_calls(request: Request):
-    _check_session(request)
+    approver = _decision_auth(request)
     calls = get_pending_calls()
+    if approver:
+        approver_auth.require_test_agent(approver)
+        aid = int(approver.get('agent_id') or 0)
+        owned = []
+        for call in calls:
+            if int(call.get('agent_id') or 0) != aid:
+                continue
+            if not approver_auth.session_owned_by_approver(
+                    approver, call.get('session_id') or ''):
+                continue
+            owned.append(call)
+        calls = owned
     # Mask `redact`-flagged args (e.g. Pulse node passwords/tokens) so they
     # never appear in the UI; the stored payload stays intact for execution.
     for call in calls:
@@ -4930,16 +5466,23 @@ def approve_integration_call(call_id: int, request: Request):
 
 @app.post("/api/integration-calls/{call_id}/deny")
 def deny_integration_call(call_id: int, request: Request):
-    _check_session(request)
+    approver = _decision_auth(request)
+    _approver_frozen(approver)
     call = get_pending_call(call_id)
     if not call or call['status'] != 'pending':
         raise HTTPException(status_code=404, detail="Pending call not found")
+    if approver:
+        # BY3: deny only, and only a row owned by this token's agent/session.
+        _approver_row(approver, call, 'deny integration call')
     set_pending_call_status(call_id, 'denied', '')
     _record_integration_denied(call)
+    if approver:
+        _approver_audit_decision(approver, 'integration call', call_id,
+                                 call.get('session_id'))
     record_audit_event(
         "integration_call_denied",
         details=f"Integration call #{call_id} ({call['integration']}.{call['tool']}) denied",
-        actor='operator')
+        actor='e2e-approver' if approver else 'operator')
     return {"status": "ok", "id": call_id}
 
 
@@ -5052,7 +5595,20 @@ def create_allowance_endpoint(payload: AllowancePayload, request: Request):
 
 @app.post("/api/allowances/{aid}/revoke")
 def revoke_allowance_endpoint(aid: int, request: Request):
-    _check_session(request)
+    approver = _decision_auth(request)
+    if approver:
+        approver_auth.require_test_agent(approver)
+        row = allowances.get_allowance(aid)
+        if (not row or int(row.get('agent_id') or 0)
+                != int(approver.get('agent_id') or 0)):
+            approver_auth.audit(
+                approver, 'e2e_approver_refused',
+                'allowance #%s refused: not this agent\'s allowance' % aid)
+            raise HTTPException(
+                status_code=403,
+                detail="Allowance is outside the approver token's scope")
+        allowances.revoke_allowance('e2e-approver', aid)
+        return {"status": "ok"}
     allowances.revoke_allowance('operator', aid)
     return {"status": "ok"}
 

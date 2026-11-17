@@ -39,6 +39,16 @@ def current_agent_name(default=''):
     return agent.get('name') or default
 
 
+def current_agent_id(default=0):
+    agent = get_current_agent()
+    if not agent:
+        return default
+    try:
+        return int(agent.get('id') or default)
+    except (TypeError, ValueError):
+        return default
+
+
 def set_current_session(session_id):
     return _current_session.set(session_id or '')
 
