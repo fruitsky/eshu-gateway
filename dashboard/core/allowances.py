@@ -475,8 +475,8 @@ def _normalise_registry_path(value):
 
 
 _CONFIG_ENTRY_READS = {
-    'get', 'get_single', 'subscribe', 'flow/progress', 'flow_handlers',
-    'subentries/list',
+    'get', 'get_single', 'list', 'subscribe', 'flow/progress',
+    'flow_handlers', 'subentries/list',
 }
 
 

@@ -98,6 +98,7 @@ def test_a_config_entry_read_is_not_a_write(ha):
     _raw, aid = create_agent_token('household')
     ids = _ids(aid, ha)
     for read in ('config_entries/get', 'config_entries/get_single',
+                 'config_entries/list',
                  'config_entries/subscribe',
                  'config_entries/flow/progress/flow-1',
                  'config_entries/flow_handlers',
