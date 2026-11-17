@@ -135,6 +135,7 @@ from db.misc import (
 )
 
 from db.windows import (
+    token_fingerprint,
     create_approved_window,
     update_approved_window,
     get_approved_windows,

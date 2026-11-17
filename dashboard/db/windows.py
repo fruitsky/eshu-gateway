@@ -1,8 +1,19 @@
+import hashlib
 import time
 import string
 import secrets
 import sqlite3
 from db.core import db_conn
+
+def token_fingerprint(token) -> str:
+    """A short, non-reversible id for a window token in audit details.
+
+    Eight hex characters of SHA-256 are enough to tell two windows apart and
+    useless for claiming one. Never put the token itself in an audit row.
+    """
+    text = str(token or '')
+    return hashlib.sha256(text.encode('utf-8')).hexdigest()[:8] if text else ''
+
 
 def _make_retrieval_key():
     return secrets.token_urlsafe(24)
