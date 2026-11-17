@@ -415,6 +415,11 @@ async def approver_token_middleware(request: Request, call_next):
     approver = approver_auth.resolve_approver_optional(request)
     if not approver:
         now = int(time.time())
+        # Prune only when a refusal is considered, so the map cannot grow
+        # without bound on a busy or hostile host.
+        for ip in list(_invalid_approver_audit):
+            if now - _invalid_approver_audit[ip] >= _INVALID_APPROVER_WINDOW:
+                del _invalid_approver_audit[ip]
         if now - _invalid_approver_audit.get(client_ip, 0) >= _INVALID_APPROVER_WINDOW:
             _invalid_approver_audit[client_ip] = now
             record_audit_event(
@@ -3706,6 +3711,35 @@ def list_windows(request: Request, ip: str = None):
             w.pop('retrieval_key', None)
             w.pop('token', None)
     return wins
+
+@app.get("/api/e2e/windows/{window_id}")
+def e2e_window_status(window_id: int, request: Request):
+    """CB2: the approver reads only its own window's execution count.
+
+    The window token never appears in this URL; the route returns no token.
+    """
+    approver = getattr(request.state, 'approver', None)
+    if not approver:
+        raise HTTPException(status_code=403, detail="Approver token required")
+    approver_auth.require_test_agent(approver)
+    row = next((w for w in get_approved_windows() if w['id'] == window_id), None)
+    if not row:
+        raise HTTPException(status_code=404, detail="Window not found")
+    if int(row.get('agent_id') or 0) != int(approver.get('agent_id') or 0):
+        approver_auth.audit(
+            approver, 'e2e_approver_refused',
+            'window #%s status refused: not this agent\'s request' % window_id)
+        raise HTTPException(
+            status_code=403,
+            detail="Window is outside the approver token's scope")
+    return {'id': row['id'], 'status': row.get('status') or '',
+            'target_ip': row.get('target_ip') or '',
+            'command': row.get('command') or '',
+            'match_type': row.get('match_type') or 'exact',
+            'max_executions': int(row.get('max_executions') or 0),
+            'execution_count': int(row.get('execution_count') or 0),
+            'expires_at': row.get('expires_at') or 0}
+
 
 @app.delete("/api/approved-windows/{window_id}")
 def delete_window(window_id: int, request: Request):

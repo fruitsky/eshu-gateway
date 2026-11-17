@@ -21337,6 +21337,7 @@ operator-made allowance: no allowance is created or revoked by the suite.
 | `ESHU_E2E_GATEWAY` | yes | The one test gateway, as an IP. |
 | `ESHU_E2E_BASE_URL` | no | Default `http://127.0.0.1:8000`. A non-loopback URL **must** be `https://` and also needs `ESHU_E2E_ALLOW_REMOTE=1`; plain `http://` to a remote host is refused. |
 | `ESHU_E2E_GATEWAY_SSH_KEY` | for C11 | Key for `eshu-gateway@<gateway>`, mode `0600`; C11 skips without it. |
+| `ESHU_E2E_KNOWN_HOSTS` | with C11 | Known-hosts file, mode `0600`; C11 refuses without it and uses `StrictHostKeyChecking=yes`. |
 | `ESHU_E2E_GATEWAY_SSH_USER` | no | Default `eshu-gateway`. |
 | `ESHU_E2E_DNS_NAME` | for C12 | The seeded Pi-hole name; C12 skips without it. |
 | `ESHU_E2E_ALLOWANCE_ENTITY` | for C15 | The entity the standing allowance covers. |
@@ -21692,6 +21693,41 @@ The one should below fixes the clean-up order and is small.
     IP bucket above the per-token one, or count only invalid tokens in it.
   * `_invalid_approver_audit` is never pruned. Drop entries older than
     the window when an entry is written.
+
+### Implementer notes — CB2 and the round-2 nits (2026-11-17)
+
+**CB2 — the window goes first.** `cleanup()` deletes the C11 window in its
+own step before any deny, and `run()` calls it even under `--keep` (keep
+means keep the rows, not the live credential). A refused deny therefore
+cannot leave the window behind. If `session_begin` has succeeded and a later
+preflight step refuses, `_exclude_after_failed_startup()` excludes that
+session so it does not count in statistics.
+
+**Nits.**
+* **Token files:** the approver file must start `e2e_`, and the approver and
+  agent tokens must differ. Both are preflight refusals.
+* **C11 URL:** the suite reads `execution_count` through
+  `GET /api/e2e/windows/{id}`, a new approver-only route that returns no
+  token and checks the row is the token agent's. It no longer calls
+  `/api/window-by-token/<token>`, so the spent token never enters a path.
+* **Known hosts:** C11 needs `ESHU_E2E_KNOWN_HOSTS`, held to the same
+  regular-file/`0600` rules. The direct SSH call uses
+  `StrictHostKeyChecking=yes`, `UserKnownHostsFile=...` and
+  `IdentitiesOnly=yes`; there is no trust-on-first-use. The window token is
+  still in the local `ssh` argv for the call, which is acceptable on the
+  reviewer's single-user machine.
+* **Gateway script:** preflight runs the C16 installer-hash read and refuses
+  unless the gateway hash matches Edge. The suite no longer decides
+  anything on an old gateway script.
+* **C5 polling:** the waiter polls every 2 s (30/min), not 0.5 s, keeping its
+  own reads under the per-IP approver bucket while the approve calls fit.
+* **BZ2 map:** entries older than the one-minute window are pruned when a
+  refusal is considered.
+
+**Tests:** `tests/test_e2e_smoke.py` adds the token-prefix/difference and
+known-hosts refusals, window-first cleanup (including `--keep` and a
+refused deny), the failed-startup exclusion, and the poll interval;
+`tests/test_e2e_approver.py` covers the own/foreign window-status route.
 
 ## 7. Backlog (not planned in detail)
 

@@ -122,6 +122,7 @@ class Config:
     agent_token: str = field(repr=False)
     approver_token: str = field(repr=False)
     gateway_ssh_key: str = field(default='', repr=False)
+    gateway_known_hosts: str = field(default='', repr=False)
     gateway_ssh_user: str = 'eshu-gateway'
     case: str = ''
     keep: bool = False
@@ -155,8 +156,16 @@ class Config:
             raise UnsafeConfig('ESHU_E2E_GATEWAY must be one IP, never a hostname')
         agent_token = _read_secret_file('ESHU_E2E_AGENT_TOKEN_FILE', env)
         approver_token = _read_secret_file('ESHU_E2E_APPROVER_TOKEN_FILE', env)
+        if not approver_token.startswith('e2e_'):
+            raise UnsafeConfig('the approver token file must contain an e2e_ token')
+        if approver_token == agent_token:
+            raise UnsafeConfig('the approver and agent token files must differ')
         key = (env.get('ESHU_E2E_GATEWAY_SSH_KEY') or '').strip()
+        known_hosts = (env.get('ESHU_E2E_KNOWN_HOSTS') or '').strip()
         if key:
+            if not known_hosts:
+                raise UnsafeConfig(
+                    'ESHU_E2E_KNOWN_HOSTS is required when C11 is enabled')
             try:
                 info = os.stat(key)
             except OSError:
@@ -166,12 +175,22 @@ class Config:
             if info.st_mode & 0o077:
                 raise UnsafeConfig('ESHU_E2E_GATEWAY_SSH_KEY must not be '
                                    'group/world-readable')
+            try:
+                kinfo = os.stat(known_hosts)
+            except OSError:
+                raise UnsafeConfig('ESHU_E2E_KNOWN_HOSTS cannot be read')
+            if not stat.S_ISREG(kinfo.st_mode) or os.path.islink(known_hosts):
+                raise UnsafeConfig('ESHU_E2E_KNOWN_HOSTS must be a regular file')
+            if kinfo.st_mode & 0o077:
+                raise UnsafeConfig('ESHU_E2E_KNOWN_HOSTS must not be '
+                                   'group/world-readable')
         return cls(
             base_url=base.rstrip('/'),
             gateway=gateway,
             agent_token=agent_token,
             approver_token=approver_token,
             gateway_ssh_key=key,
+            gateway_known_hosts=known_hosts,
             gateway_ssh_user=(env.get('ESHU_E2E_GATEWAY_SSH_USER')
                               or 'eshu-gateway').strip() or 'eshu-gateway',
             case=(env.get('ESHU_E2E_CASE') or '').strip(),
@@ -222,8 +241,6 @@ class Operator:
 
     def __init__(self, http):
         self.http = http
-        base = getattr(http, 'base_url', '')
-        self.public_http = Http(base, '') if base else http
 
     def get(self, path):
         return self.http.request('GET', path)
@@ -332,6 +349,11 @@ class Operator:
         self._ok(status, '/api/approved-windows')
         return body
 
+    def window_status(self, window_id):
+        status, body = self.get('/api/e2e/windows/%d' % int(window_id))
+        self._ok(status, '/api/e2e/windows')
+        return status, body
+
     def exclude(self, session_id):
         status, body = self.post('/api/requests/exclude',
                                  {'session_id': session_id})
@@ -348,10 +370,6 @@ class Operator:
         status, body = self.get('/api/e2e/installer-hash')
         self._ok(status, '/api/e2e/installer-hash')
         return body
-
-    def public_get(self, path):
-        # The token is not sent to a route outside the approver allowlist.
-        return self.public_http.request('GET', path)
 
 
 class Approver:
@@ -472,7 +490,10 @@ class WindowRunner:
         # The command is a suite constant; only the token needs quoting.
         remote = 'ESHU_WINDOW_TOKEN=%s %s' % (shlex.quote(token), command)
         argv = ['ssh', '-i', self.cfg.gateway_ssh_key,
-                '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=accept-new',
+                '-o', 'BatchMode=yes',
+                '-o', 'StrictHostKeyChecking=yes',
+                '-o', 'UserKnownHostsFile=' + self.cfg.gateway_known_hosts,
+                '-o', 'IdentitiesOnly=yes',
                 '-o', 'ConnectTimeout=10', target, remote]
         try:
             proc = subprocess.run(argv, capture_output=True, timeout=timeout,
@@ -485,13 +506,14 @@ class WindowRunner:
 class Waiter(threading.Thread):
     """Approve one command when it appears, through the same BY1/BY2 rules."""
 
-    def __init__(self, operator, approver, session_id, command):
+    def __init__(self, operator, approver, session_id, command, interval=2.0):
         super().__init__(daemon=True)
         self.operator = operator
         self.approver = approver
         self.session_id = session_id
         self.command = command
         self.stop_event = threading.Event()
+        self.interval = interval
         self.error = ''
         self.approved = 0
         self._seen = set()
@@ -519,7 +541,9 @@ class Waiter(threading.Thread):
             except Failure as exc:
                 self.error = str(exc)
                 return
-            self.stop_event.wait(0.5)
+            # 30 polls/min, not 120: the per-IP approver bucket also counts
+            # this traffic. A short approve burst still fits.
+            self.stop_event.wait(self.interval)
 
 
 @dataclass
@@ -584,6 +608,8 @@ class Runner:
         hash_read = self.operator.installer_hash()
         expect(hash_read.get('gateway_ip') == self.cfg.gateway,
                'the C16 read did not resolve the test gateway')
+        expect(hash_read.get('matches') is True,
+               'the gateway installer hash does not match the Edge channel')
 
         started = self.agent.call('session_begin',
                                   goal='E2E:%s: smoke' % self.cfg.run_id)
@@ -853,8 +879,7 @@ class Runner:
         expect(code == 0, 'the first window run failed')
         code2, _out2, _err2 = self.window_runner.run(token, WINDOW_COMMAND)
         expect(code2 != 0, 'the exhausted window ran a second time')
-        status, lookup = self.operator.public_get(
-            '/api/window-by-token/%s' % urllib.parse.quote(token))
+        status, lookup = self.operator.window_status(self.window_id)
         expect(status == 200, 'the window lookup failed')
         expect(int(lookup.get('execution_count') or 0) == 1,
                'the window did not record exactly one execution')
@@ -951,9 +976,17 @@ class Runner:
                       r'\1=<redacted>', text)
         return text[:240]
 
-    def cleanup(self):
-        """Stop at the first BY refusal; never widen the credential."""
+    def cleanup(self, keep=False):
+        """Delete the window first, then stop at the first BY refusal."""
         errors = []
+        if self.window_id:
+            try:
+                self.operator.delete_window(self.window_id)
+                self.window_id = 0
+            except Failure as exc:
+                errors.append('window: ' + self.redact(str(exc)))
+        if keep:
+            return errors
         try:
             for row in list(self._pending()):
                 self.operator.deny_request(row['id'], self.approver,
@@ -980,11 +1013,6 @@ class Runner:
             self.operator.exclude(self.session_id)
         except Failure as exc:
             errors.append('exclude: ' + self.redact(str(exc)))
-        if self.window_id:
-            try:
-                self.operator.delete_window(self.window_id)
-            except Failure as exc:
-                errors.append('window: ' + self.redact(str(exc)))
         try:
             if self._pending():
                 errors.append('cleanup: pending rows remain')
@@ -992,13 +1020,23 @@ class Runner:
             errors.append('cleanup check: ' + self.redact(str(exc)))
         return errors
 
+    def _exclude_after_failed_startup(self):
+        if not self.session_id:
+            return
+        try:
+            self.operator.exclude(self.session_id)
+        except Failure:
+            pass
+
     def run(self):
         try:
             self.preflight()
         except UnsafeConfig as exc:
+            self._exclude_after_failed_startup()
             print('REFUSED: %s' % exc)
             return 2
         except Failure as exc:
+            self._exclude_after_failed_startup()
             print('REFUSED: %s' % self.redact(str(exc)))
             return 2
         results = []
@@ -1008,7 +1046,7 @@ class Runner:
             results.append(self._result_for(case))
             if results[-1].status == 'FAIL':
                 break
-        cleanup_errors = [] if self.cfg.keep else self.cleanup()
+        cleanup_errors = self.cleanup(keep=self.cfg.keep)
         self.report(results, cleanup_errors)
         return 1 if any(r.status == 'FAIL' for r in results) else 0
 

@@ -80,6 +80,32 @@ class TestConfig:
         with pytest.raises(run.UnsafeConfig):
             run.Config.from_env(_env(tmp_path, gateway='gateway.example.test'))
 
+    def test_the_approver_token_must_start_with_e2e(self, tmp_path):
+        env = _env(tmp_path)
+        _secret(tmp_path / 'approver.token', 'not-an-e2e-token')
+        with pytest.raises(run.UnsafeConfig):
+            run.Config.from_env(env)
+
+    def test_the_two_token_files_must_differ(self, tmp_path):
+        env = _env(tmp_path)
+        _secret(tmp_path / 'agent.token', 'e2e_same', 0o600)
+        _secret(tmp_path / 'approver.token', 'e2e_same', 0o600)
+        with pytest.raises(run.UnsafeConfig):
+            run.Config.from_env(env)
+
+    def test_c11_needs_a_mode_600_known_hosts_file(self, tmp_path):
+        key = _secret(tmp_path / 'id_e2e', 'KEY', 0o600)
+        env = _env(tmp_path, extra={'ESHU_E2E_GATEWAY_SSH_KEY': key})
+        with pytest.raises(run.UnsafeConfig):
+            run.Config.from_env(env)
+        known = _secret(tmp_path / 'known_hosts', 'gw ssh-ed25519 KEY', 0o644)
+        env['ESHU_E2E_KNOWN_HOSTS'] = known
+        with pytest.raises(run.UnsafeConfig):
+            run.Config.from_env(env)
+        os.chmod(known, 0o600)
+        cfg = run.Config.from_env(env)
+        assert cfg.gateway_known_hosts == known
+
 
 class TestTestAgentGuard:
     def _cfg(self):
@@ -217,8 +243,8 @@ class TestCleanup:
         op = FakeOperator()
         runner = self._runner(op)
         assert runner.cleanup() == []
-        assert op.actions == ['deny_request', 'deny_plan', 'deny_call',
-                              'reject', 'exclude', 'delete_window']
+        assert op.actions == ['delete_window', 'deny_request', 'deny_plan',
+                              'deny_call', 'reject', 'exclude']
         assert runner.agent.actions == ['session_conclude']
 
     def test_the_first_by_refusal_stops_cleanup(self):
@@ -226,8 +252,22 @@ class TestCleanup:
         runner = self._runner(op)
         errors = runner.cleanup()
         assert errors and 'deny' in errors[0]
-        assert op.actions == []
+        assert op.actions == ['delete_window']
         assert runner.agent.actions == []
+
+
+    def test_keep_still_deletes_the_window_first(self):
+        op = FakeOperator()
+        runner = self._runner(op)
+        assert runner.cleanup(keep=True) == []
+        assert op.actions == ['delete_window']
+        assert runner.window_id == 0
+
+    def test_a_failed_startup_excludes_the_opened_session(self):
+        op = FakeOperator()
+        runner = self._runner(op)
+        runner._exclude_after_failed_startup()
+        assert op.actions == ['exclude']
 
 
 class WatchOperator:
@@ -260,6 +300,13 @@ class TestWatcher:
         waiter.join(timeout=3)
         assert op.approved == [1]
         assert not waiter.error
+
+    def test_the_wait_poll_is_under_the_ip_bucket(self):
+        op = WatchOperator()
+        approver = run.Approver(7, 'e2e-session', GATEWAY)
+        waiter = run.Waiter(op, approver, 'e2e-session', run.WAIT_COMMAND)
+        assert waiter.interval >= 2.0
+        assert 60 / waiter.interval <= 60
 
 
 class TestOperatorRealPath:
