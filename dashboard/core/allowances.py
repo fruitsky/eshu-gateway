@@ -474,17 +474,33 @@ def _normalise_registry_path(value):
     return text
 
 
+_CONFIG_ENTRY_READS = {
+    'get', 'get_single', 'subscribe', 'flow/progress', 'flow_handlers',
+    'subentries/list',
+}
+
+
 def is_config_entry_write_path(value):
     """True for a config-entry write, REST or WebSocket.
 
     HA's websocket command is `config_entries/...` with no `config/` prefix;
     REST is `config/config_entries/...` (optionally under `/api/`). BZ3: the
     WS form must match too, or an options-flow edit never suspends anything.
+    CB3: reads (`get`, `get_single`, `subscribe`, `flow/progress`,
+    `flow_handlers`, `subentries/list`) are not writes and must not suspend.
     """
-    text = _normalise_registry_path(value)
-    return (text == 'config_entries'
-            or text.startswith('config_entries/')
-            or text.startswith('config/config_entries/'))
+    text = _normalise_registry_path(value).split('?', 1)[0]
+    if text.startswith('config/config_entries/'):
+        rest = text[len('config/config_entries/'):]
+    elif text.startswith('config_entries/'):
+        rest = text[len('config_entries/'):]
+    else:
+        return False
+    rest = rest.strip('/')
+    if not rest or rest in _CONFIG_ENTRY_READS:
+        return False
+    return not any(rest == read or rest.startswith(read + '/')
+                   for read in _CONFIG_ENTRY_READS)
 
 
 def is_registry_write_path(value):

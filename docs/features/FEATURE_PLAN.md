@@ -18322,6 +18322,17 @@ matcher, the template-helper options edit, an unidentifiable write (suspend
 all), an unrelated entry (leave live) and the real
 `note_ha_registry_write` hook.
 
+**CB3/CB4 implementation (2026-11-17).** The WS branch now calls
+`note_ha_registry_write` only when the call is mutating, and
+`is_config_entry_write_path` excludes the read forms `get`, `get_single`,
+`subscribe`, `flow/progress`, `flow_handlers` and `subentries/list`, so a
+read cannot suspend allowances. If the hook itself raises, it calls
+`on_config_write_failed`, which suspends every HA allowance and writes the
+failure row. The generic and approved-execution paths pass both `data` and
+`params`; two different entry ids are therefore ambiguous and fail closed.
+Tests cover the read commands, a read leaving both allowances live, both
+payload keys, and a raising hook suspending everything.
+
 **Merge note.** E2E-1's CA5 adds `integration_calls.excluded`. Whichever
 branch merges second must add `COALESCE(excluded, 0) = 0` to F27's two
 `allowance:%` queries (the statistics series and the session card).

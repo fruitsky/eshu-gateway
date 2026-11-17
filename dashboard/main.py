@@ -5416,8 +5416,9 @@ def approve_integration_call(call_id: int, request: Request):
                                           approval='approved', decided_at=decided_at,
                                           decided_by='operator')
             from core.tool_runner import note_ha_registry_write
-            note_ha_registry_write(integration, path,
-                                   payload.get('data') or payload.get('params'))
+            note_ha_registry_write(
+                integration, path,
+                {'data': payload.get('data'), 'params': payload.get('params')})
             if not result.get('error'):
                 verified = None
                 vpath = payload.get('verify_path')

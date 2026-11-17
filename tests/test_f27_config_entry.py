@@ -92,3 +92,44 @@ def test_the_approved_ws_write_hook_uses_the_config_entry_rule(ha):
     assert a.get_allowance(ids['helper']['id'])['suspended_reason'] == \
         'config_entry_changed'
     assert a.get_allowance(ids['other']['id'])['suspended_at'] == 0
+
+
+def test_a_config_entry_read_is_not_a_write(ha):
+    _raw, aid = create_agent_token('household')
+    ids = _ids(aid, ha)
+    for read in ('config_entries/get', 'config_entries/get_single',
+                 'config_entries/subscribe',
+                 'config_entries/flow/progress/flow-1',
+                 'config_entries/flow_handlers',
+                 'config_entries/subentries/list',
+                 'config/config_entries/get'):
+        assert not a.is_config_entry_write_path(read), read
+    note_ha_registry_write({'kind': 'ha'}, 'config_entries/get', {})
+    assert a.get_allowance(ids['helper']['id'])['suspended_at'] == 0
+    assert a.get_allowance(ids['other']['id'])['suspended_at'] == 0
+
+
+def test_both_data_and_params_are_seen(ha):
+    one = a.config_entry_id_from_write(
+        'config_entries/options/flow',
+        {'data': {'entry_id': 'ce1'}, 'params': {'entry_id': 'ce1'}})
+    assert one == 'ce1'
+    two = a.config_entry_id_from_write(
+        'config_entries/options/flow',
+        {'data': {'entry_id': 'ce1'}, 'params': {'entry_id': 'ce2'}})
+    assert two == ''
+
+
+def test_a_hook_error_suspends_every_allowance(ha, monkeypatch):
+    _raw, aid = create_agent_token('household')
+    ids = _ids(aid, ha)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError('locked')
+
+    monkeypatch.setattr(a, 'on_config_entry_write', boom)
+    note_ha_registry_write({'kind': 'ha'}, 'config_entries/options/flow',
+                           {'entry_id': 'ce1'})
+    for key in ('helper', 'other'):
+        assert a.get_allowance(ids[key]['id'])['suspended_reason'] == \
+            'config_write_unmapped'
