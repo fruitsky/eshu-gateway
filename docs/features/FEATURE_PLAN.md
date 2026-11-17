@@ -19652,6 +19652,119 @@ create/edit/toggle refusals, cleanup, route refusals, freeze, test-agent
 narrowing/activity/revocation/notify, CA4/CA5 and C16. Each is against the
 real FastAPI app; no network.
 
+### Security re-read of code round 1 at `d213974` (2026-11-17)
+
+**Verdict: approved. Code round 2 (the suite) can start.** BY1–BY4, CA4 and
+CA5 are in. Two shoulds (BZ1, BZ2) and two nits follow.
+
+**What holds.**
+* **The token.**
+  * It has the `e2e_` prefix, only its SHA-256 hash is stored, and it is
+    shown once.
+  * It expires after 1–30 days, is revocable, and is minted only for an
+    agent that already has `test_agent=1`, on a registered gateway, with an
+    exact one-line command list.
+  * The middleware resolves it before any handler and refuses every route
+    outside `_ALLOWED` (403, audited). An invalid or expired token gets a
+    401.
+  * It has its own `approver` rate-limit bucket.
+  * A cookie never carries it. When a cookie and the token arrive together,
+    the token's narrower scope wins.
+  * `/mcp` and the gateway routes are refused, and there are tests for
+    both.
+* **BY1.** `agent_id` is recorded on sessions (from the verified token at
+  `session_begin`), on plans, on pending and finished integration calls,
+  and on window requests. A window's `session_id` is checked against the
+  agent that sent it. Every decision route checks three things: the row's
+  agent id equals the token's, the session was opened by that agent id
+  with an `E2E:` goal, and the agent is still live and a test agent. A row
+  with agent id 0 is refused.
+* **BY2.**
+  * Approve needs an exact command match and the token's gateway.
+  * Plan approval refuses: removed items, a TTL other than the default,
+    any item off the gateway, non-SSH items, unlisted commands, and probes
+    other than `diagnose_service(unit=ssh)` and `disk_pressure` on the
+    gateway.
+  * Deny needs only the ownership check.
+* **BY3.**
+  * A body on approve or deny is refused.
+  * Integration calls are deny only.
+  * Window approval needs `exact`, a single execution, an expiry within 15
+    minutes, the gateway, a listed command and its own session.
+    Create, edit and toggle are refused.
+  * Every decision is refused while the fleet is frozen.
+  * The reads are scoped: requests, calls, plans and session detail need
+    the token's own session. `/api/agents` returns only its agent.
+    `/api/agents/{id}/activity` serves only that agent. The pending calls
+    are filtered.
+  * C16 has its own route, pinned to the token's gateway.
+  * Exclude takes a session only, never an id list. Reject-conclusion
+    checks the session and the agent. Window delete checks the agent.
+* **BY4.**
+  * The flag forces one IP, no `ungated` mode, and an allowlist of HA
+    reads plus `call_service`.
+  * The flag can be set only on an agent with no activity, and a missing
+    column counts as activity.
+  * The general policy save keeps these checks, because they live in
+    `set_agent_policy`.
+  * Clearing the flag revokes the agent's tokens.
+  * Setting the flag and minting a token both notify.
+* **CA5.** `integration_calls.excluded` is set by the session exclude and
+  honoured by the session summary, the coverage figures and the statistics
+  queries.
+
+**BZ1 (should): an SSH row's agent id comes from the forwarded session id,
+not from a verified agent.**
+* `/api/request` runs with no agent context, so `_request_agent_id` falls
+  back to `sessions.agent_id` for the `session_id` the gateway forwarded.
+* The gateway accepts that id in two ways:
+  * with a session signature alone, with no agent signature
+    (`ESHU_VERIFIED_AGENT` is empty);
+  * with nothing at all while it has no session key yet ("SESSION KEY
+    MISSING: allowing").
+* Anyone who can SSH to the test gateway as `eshu-gateway`, holding the
+  E2E session's prefix (or with no session key on the gateway yet), can
+  therefore create a row that the approver treats as the test agent's.
+* BY2 limits the damage to listed commands on that one gateway, and the
+  C11 key is held by the same principal. That is why this is a should.
+  Still, it puts the session id back as the boundary, which is what BY1
+  removed.
+* **Fix:**
+  * On a gateway-posted row, set `agent_id` only when the forwarded
+    `agent` (the gateway's `ESHU_VERIFIED_AGENT`) is non-empty and resolves
+    to the same id as the session's `agent_id`. Otherwise record 0, which
+    the approver refuses.
+  * Test it: a row with the E2E session id and an empty `agent` is refused.
+
+**BZ2 (should): limit invalid-token attempts.**
+* A bearer value with the `e2e_` prefix that does not resolve writes an
+  audit row on every request, with no rate limit. BY3 asked for both.
+  This is the same pattern as the X9 hit throttle: an anonymous caller can
+  force a write per request.
+* **Fix:**
+  * Run `_check_rate_limit(client_ip, kind='approver')` before the lookup.
+  * Write at most one `e2e_approver_refused` row a minute per client IP.
+
+**Nits.**
+* **The `/api/allowances/\d+/revoke` route.** It is in `_ALLOWED`, but this
+  branch has no such handler, and F27's handler uses `_check_session`. It
+  fails closed today. When F27 and E2E-1 meet, either drop the route (my
+  answer prefers a standing, operator-made allowance) or give it
+  `_decision_auth` with the agent-id check. Do not leave it to
+  `_check_session`.
+* **The minted gateway.** The minted `gateway_ip` is not compared with the
+  test agent's one `ssh_hosts_allow` entry. A mismatch fails closed
+  (nothing can be approved), but refusing it at mint time gives a clearer
+  error.
+* **Pre-existing, outside this chunk.** `window_request_approved` and
+  `window_deleted` write the window token into the audit details
+  (`token=...`). Audit rows are not the place for a live credential. This
+  belongs on the backlog.
+
+Re-read scope for code round 2: the suite's preflight refusals (file modes
+on every target, `https://` for a non-loopback URL, `test_agent=1`, one IP),
+the redaction tests, and clean-up ordering.
+
 ## 7. Backlog (not planned in detail)
 
 * Deny with a reason, shown to the agent (cheap; low value given the data).
