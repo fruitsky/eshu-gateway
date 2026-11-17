@@ -21546,6 +21546,105 @@ own-row-only behaviour, and the real `Operator` path against `TestClient`
 (only the own row moves). No socket, no uvicorn, no real gateway.
 
 
+### Security review of BZ1, BZ2 and code round 2 (security reviewer, 2026-11-17, at `cec1186`)
+
+**Approved. The suite can be run.** Code text read only; nothing was run.
+The one should below fixes the clean-up order and is small.
+
+**BZ1 is confirmed.**
+* A gateway row now gets an agent id only from `_verified_gateway_agent_id`.
+  The gateway fills `agent` from `ESHU_VERIFIED_AGENT`. The gateway sets
+  that variable only after the v1/v2 MAC passes, and the MAC covers both
+  the agent name and the session id.
+* The dashboard then requires a live, unrevoked agent of that name, and
+  requires that agent to be the one that opened the signed session.
+* A session signature alone, or a gateway without its session key, gives
+  an empty name, so the row records 0 and the approver refuses it.
+* Every `create_request` path in `receive_request` passes the id, and so
+  does `receive_log`. The three cases are tested.
+
+**BZ2 is confirmed.**
+* The per-IP `approver` bucket (120 a minute) runs before the token
+  lookup.
+* An invalid token writes at most one refusal row per IP per minute.
+* Both behaviours are tested.
+
+**The round-1 nits are done.**
+* The allowance-revoke route now accepts the approver only for its own
+  test agent's allowance, and audits a refusal.
+* Minting refuses a gateway that is not the agent's one `ssh_hosts_allow`
+  entry.
+* Both of F27's `allowance:%` queries filter out excluded calls. This
+  settles the merge note.
+
+**The suite holds the round-2 checks.**
+* **Preflight.**
+  * Each token file and the SSH key must be a regular file, not a
+    symlink, and must not be readable by group or others.
+  * A non-loopback URL needs both `https` and `ESHU_E2E_ALLOW_REMOTE=1`.
+  * The URL cannot carry credentials, a query or a fragment.
+  * The gateway must be a single IP.
+  * The approver token must resolve to exactly one agent with
+    `test_agent=1`, `ssh_mode=normal`, an allowlist and exactly that one
+    host.
+  * The session goal must start with `E2E:`.
+* **The client mirror.** The suite's own `Approver` mirror of BY1/BY2
+  never approves a row it would refuse, and the waiter skips foreign rows.
+  The server is still the boundary.
+* **Redaction.** `redact` strips the tokens, the key path, the gateway,
+  the DNS name, the entity ids and the suite commands, plus any
+  `token|password|key=` pair. The table carries only ids.
+* **Clean-up.**
+  * The order is: deny pending, deny proposed plans, deny pending calls,
+    conclude and reject, exclude, delete the window, check that nothing
+    remains.
+  * It stops at the first BY refusal and never falls back to a wider
+    credential.
+
+**CB2 (should): revoke the live window first, and always.**
+* The C11 window is a live credential from its approval until it is
+  deleted or spent.
+* `cleanup()` deletes it last, and returns before reaching that step when
+  any deny is refused. `--keep` skips clean-up entirely. A run that fails
+  between "approve window" and its first use therefore leaves an approved
+  window for up to ten minutes.
+* That window covers a harmless constant, but the clean-up order should
+  not depend on that.
+* **Fix:**
+  * Delete the window before the deny loop, in its own `try`.
+  * Do it even under `--keep`: keep the rows for debugging, not the
+    credential.
+  * When preflight fails after `session_begin`, run the same short
+    clean-up (exclude the session), so a refused run does not leave an
+    `E2E:` session counting in the statistics.
+
+**Nits:**
+* **The token-file prefix.** Refuse to start unless the approver token
+  matches `^e2e_`, and unless it differs from the agent token. A wrong
+  file then fails at preflight with a clear message, not part-way through.
+* **The window token in a URL.** C11 reads `/api/window-by-token/<token>`.
+  The token is spent by then, but the path lands in the access log. Read
+  `execution_count` through the approver's own window route instead.
+  Alternatively, accept the token in a POST body, as BJ2 does for the
+  claim.
+* **Host-key checking.** `WindowRunner` uses
+  `StrictHostKeyChecking=accept-new`, so the first run trusts any host
+  key. Take a known-hosts file from the environment, held to the same
+  file-mode rules, and use `StrictHostKeyChecking=yes` and
+  `IdentitiesOnly=yes`. The window token also sits in the local `ssh`
+  argv for the length of the call. That is acceptable on a single-user
+  machine; say so in the how-to.
+* **Gateway script check.** Run C16 (installer hash equals Edge) as part
+  of preflight, not last. BZ1 relies on the gateway forwarding only a
+  verified name. The approver should decide nothing on a test gateway
+  running an older script.
+* **BZ2 details.**
+  * The IP bucket also counts valid approver traffic. C5's waiter polls
+    twice a second, which on its own is close to 120 a minute. Raise the
+    IP bucket above the per-token one, or count only invalid tokens in it.
+  * `_invalid_approver_audit` is never pruned. Drop entries older than
+    the window when an entry is written.
+
 ## 7. Backlog (not planned in detail)
 
 * Deny with a reason, shown to the agent (cheap; low value given the data).
