@@ -61,6 +61,7 @@ from database import (
     set_override, clear_override, get_override_active,
     create_approved_window, get_approved_windows, get_active_approved_windows,
     delete_approved_window, toggle_approved_window,
+    token_fingerprint as window_token_fingerprint,
     increment_window_execution, get_recent_jit_approved,
     get_trigger_dev_update, set_trigger_dev_update, clear_trigger_dev_update,
     update_approved_window,
@@ -3386,7 +3387,7 @@ def create_window(payload: ApprovedWindowPayload, request: Request):
         payload.expires_at, payload.match_type
     )
     record_audit_event("window_created", payload.target_ip,
-                       details=f"Window '{payload.label or 'unnamed'}' token={result.get('token','')} cmd={payload.command[:80]}")
+                       details=f"Window '{payload.label or 'unnamed'}' token_fp={window_token_fingerprint(result.get('token'))} cmd={payload.command[:80]}")
     return result
 
 @app.put("/api/approved-windows/{window_id}")
@@ -3443,7 +3444,7 @@ def delete_window(window_id: int, request: Request):
     tk = target.get('token', '?') if target else '?'
     gw = target.get('target_ip', '?') if target else '?'
     delete_approved_window(window_id)
-    record_audit_event("window_deleted", gw, details=f"Window #{window_id} token={tk} deleted")
+    record_audit_event("window_deleted", gw, details=f"Window #{window_id} token_fp={window_token_fingerprint(tk)} deleted")
     return {"status": "ok"}
 
 @app.post("/api/approved-windows/{window_id}/toggle")
@@ -3509,7 +3510,7 @@ def _window_execute(token: str, request: Request):
                        status='window-approved', ttl=0,
                        inner_target=_inner_target_for(target['command']))
         record_audit_event("window_claimed", target['target_ip'],
-                           details=f"Token {token} claimed for '{target['command'][:60]}'")
+                           details=f"Token token_fp={window_token_fingerprint(token)} claimed for '{target['command'][:60]}'")
         record_window_execution(target['id'], token, target['target_ip'], target['command'])
     return {"status": "ok", "token": token}
 
@@ -3644,7 +3645,7 @@ def approve_window(request_id: int, request: Request):
     if not result:
         raise HTTPException(status_code=500, detail="Failed to approve window request")
     record_audit_event("window_request_approved", wr.get("target_ip"),
-                       details=f"AI window request #{request_id} approved, token={result.get('token','')}")
+                       details=f"AI window request #{request_id} approved, token_fp={window_token_fingerprint(result.get('token'))}")
     return {"status": "approved", "token": result.get("token", "")}
 
 @app.post("/api/window-requests/{request_id}/deny")

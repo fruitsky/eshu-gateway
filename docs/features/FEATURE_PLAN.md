@@ -20754,6 +20754,46 @@ skips when Node is absent). Screenshots with synthetic data at 1440 and 390.
 
 Full suite: 3193 passed, 33 skipped.
 
+### Follow-up: the window token in the audit log (2026-11-17)
+
+**Problem.** Four audit rows wrote the live window token into `details`:
+`window_created`, `window_claimed`, `window_request_approved` and
+`window_deleted`. The token is the credential that authorises a window
+execution, so a copy in the audit log outlives the operator's screen and can
+be read by anyone who can read audit history.
+
+**Fix.** A window token in an audit detail is replaced by `token_fp=<8 hex>`,
+the first eight hex characters of its SHA-256. The fingerprint is enough to
+tell two windows apart and cannot be used to claim one. The four rows now
+carry `token_fp`; `window_claimed` used to interpolate the token as
+`Token <raw> claimed` and now uses the same `token_fp` label. The database
+still stores the token in `approved_windows` and `window_executions`; that is
+the live credential, not an audit copy. Gateway-side window logs were already
+limited to the first eight characters (`BJ3`), and notifications never carried
+the token, so no other surface needed a change.
+
+**Tests.** `tests/test_window_token_audit.py` creates, claims, approves and
+deletes a window, then asserts that no row of those four event types contains
+either token and that each row carries the matching fingerprint.
+
+**Migration proposal (design only; not written).** I recommend a one-time
+masking migration, **after Security answers**. Existing audit rows can hold
+tokens for windows that are still active, so leaving them until they age out
+keeps a usable credential in the database. The migration would be narrow and
+idempotent:
+
+* only the four event types above;
+* rewrite `token=<value>` (and `Token <value> claimed`) to
+  `token_fp=<sha256(value)[:8]>`;
+* leave every other character of `details` untouched;
+* run in one transaction, record the number of rows changed, and write no
+  token into the migration's own audit row;
+* be reversible only from a database backup, which the operator takes first.
+
+The alternative, no migration, is simpler but leaves live tokens readable.
+I would not delete the old rows: they are the evidence of who created and
+approved each window. The migration masks one field, not the history.
+
 ---
 
 | 18a | X2 | runbooks-page | dashboard UI | **Merged** 2026-11-11 | `feat/x2-runbooks-page` | F13 | |
