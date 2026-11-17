@@ -3323,6 +3323,10 @@ def edit_window(window_id: int, payload: WindowUpdatePayload, request: Request):
     if not target:
         raise HTTPException(status_code=404, detail="Window not found")
     updates = {k: v for k, v in payload.dict().items() if v is not None}
+    # X10: the modal clears a daily expiry with 0; store NULL, never a 0 that
+    # would make the window permanently inactive.
+    if payload.expires_at == 0:
+        updates['expires_at'] = None
     if not updates:
         raise HTTPException(status_code=400, detail="No fields to update")
     # Merge with target row and enforce: single-use windows require a start time

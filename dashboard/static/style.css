@@ -5832,3 +5832,68 @@ body.pol-open .mobile-menu-btn, body.pol-open .mobile-freeze { display: none; }
 .plan-check-bad { color: var(--danger); }
 .plan-check-open { color: var(--accent); }
 .plan-check-why { color: var(--danger); }
+
+/* ── X10: Approved Windows modal — presets, typed time, live preview ───── */
+.win-preset-row { display: flex; flex-wrap: wrap; gap: 6px; }
+.win-preset-btn {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 9px 11px;
+  border: 1px solid var(--rule-weak);
+  border-radius: 2px;
+  background: transparent;
+  color: var(--text-muted);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+.win-preset-btn:hover { border-color: var(--text-muted); color: var(--text-main); }
+.win-preset-btn.selected {
+  border-color: var(--accent-ring);
+  color: var(--text-main);
+  box-shadow: inset 0 -1px 0 var(--accent);
+}
+.win-time-row { display: flex; flex-wrap: wrap; gap: 10px; }
+.win-time-row .win-field {
+  flex: 1 1 150px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.win-time-row .win-field input {
+  width: 100%;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 15px;
+  letter-spacing: 1px;
+  min-height: 40px;
+}
+.win-days-details summary {
+  cursor: pointer;
+  font-size: 11px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.win-days-details summary:hover { color: var(--text-main); }
+@media (max-width: 520px) {
+  .win-preset-btn { flex: 1 1 45%; }
+  .win-time-row .win-field { flex-basis: 100%; }
+}
+
+/* X10 mobile: the command input and its two buttons share one row; give the
+   input a real shrink floor so the buttons never hang off a 390 px viewport. */
+#create-window-modal #win-cmd-input-wrap > .flex { flex-wrap: wrap; }
+#create-window-modal #win-command { min-width: 0; }
+#create-window-modal #win-cmd-input-wrap > .flex > .btn { flex: 0 0 auto; }
+@media (max-width: 768px) {
+  /* X10: the window editor must sit above the fixed hamburger/Freeze chrome. */
+  #create-window-modal { z-index: 130; }
+}
+#win-duration-wrap.hidden-section { display: none; }
