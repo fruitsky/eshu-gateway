@@ -19232,6 +19232,76 @@ request requires. Planned commits, each gated on `bash scripts/verify.sh`:
 2. `docs(e2e): record the suite's first staging run` — only after E2E-2 exists;
    the case table and gate line.
 
+### Reviewer notes
+
+**Main reviewer, 2026-11-17: a good design. Changes before code, and these
+answers go to security together with the open questions.**
+
+The aim is that the operator stops being the tester. The main reviewer runs
+the suite after each deploy, from a machine that can reach the dashboard.
+DeepSeek writes the suite and its unit tests. Its sandbox cannot reach the
+dashboard, so it never runs the suite itself.
+
+* **CA1 (must): the target is the real dashboard and its dev gateway. E2E-2
+  is parked.**
+  * No Docker host exists, and the operator's dev gateways are already the
+    test bed for every release.
+  * The suite runs against the live dashboard and one dev gateway: a
+    gateway on the Edge channel, never a Fleet-only one.
+  * It uses the dedicated test agent, which already exists with SSH to
+    exactly one host.
+  * So `ESHU_E2E_ALLOW_REMOTE` is not "a throwaway stack". It means "the
+    operator approved this target", and the suite also checks the next
+    point.
+* **CA2 (must): the approver is enforced by the server, not self-imposed.**
+  * Do not use the dashboard password. Add a scoped **test approver token**,
+    minted by the operator in Settings and shown once, with an expiry of at
+    most 30 days, revocable, and audited as `e2e-approver`.
+  * Every approve or deny it makes must pass a server check: the row's
+    session belongs to an agent marked `test_agent=1` (a new policy flag,
+    set only by the operator), and the session goal starts `E2E:`.
+  * Its other permissions: read that agent's rows, exclude that agent's
+    sessions, reject that agent's conclusion drafts, delete window requests
+    that agent made, and revoke allowances on that agent.
+  * It can do nothing else: no policy, gateway, settings, fleet or freeze
+    route. A test proves each refusal.
+  * This answers security's questions 1, 2, 7 and 9, and it is the one
+    product change the suite needs.
+* **CA3 (must): the test agent fails closed.**
+  * The preflight requires `test_agent=1` on the token's agent (finding 4).
+  * The preflight requires the existing guard: exactly one IP in
+    `ssh_hosts_allow`.
+  * A `test_agent` can never be shown more than one SSH host. The policy
+    save refuses `*` or a second entry when the flag is set.
+* **CA4 (should): window requests record who asked (finding 3).** Add
+  `session_id` and `agent_id` to `approved_windows` (an additive
+  migration), filled from the agent token on `POST /api/window-requests`.
+  The approver rule then works the same way as for requests.
+* **CA5 (should): exclusion covers integration calls (finding 5).** Add
+  `excluded` to `integration_calls` and extend F8's exclude endpoint and
+  the statistics queries. Test traffic must not skew the live statistics
+  or F6's allowance bucket.
+* **CA6: cases.**
+  * **Drop C14 (fleet)** for v1. A fleet command is an operator action
+    outside a session, and CA2's token cannot dispatch one. Fleet is
+    covered when the operator does Deploy to Fleet.
+  * **Keep C1 with `ssh_mode=normal`** (finding 1) on the test agent, with
+    one allowlisted read command. The operator sets that.
+  * **C11 (window)** needs a key for `eshu-gateway@` on the dev gateway
+    (finding 2). Make it opt-in (`ESHU_E2E_GATEWAY_SSH_KEY`), SKIP without
+    it, and wait for security's answer to question 3.
+  * **Add C16, `installer-hash`.** The test gateway's reported installer
+    hash equals the Edge channel's hash (`/api/dev/status`). That is the
+    check the operator now does by eye.
+* **CA7: ids in output are fine** (question 10). They are not secrets, and
+  the suite's output stays on the reviewer's machine. Never print values,
+  outputs or hostnames.
+* **Order.** Security answers the open questions and CA2–CA5. Then:
+  1. Code round 1: CA2–CA5, with server tests.
+  2. Code round 2: the suite (`scripts/e2e/run.py`) and its unit tests,
+     against `TestClient`.
+  3. A first real run by the main reviewer, on the operator's go-ahead.
+
 ## 7. Backlog (not planned in detail)
 
 * Deny with a reason, shown to the agent (cheap; low value given the data).
@@ -19341,7 +19411,7 @@ this merge.
 | — | BE3 | secret-headers | gateway + installer + poller | **Implemented**: every token header goes on stdin (`-H @-`), the result post uses a private header file, and argv is asserted token-free in all three stub harnesses | `fix/secret-headers` | RR1 | security sign-off |
 | — | BE4 | update-dashboard-key | installer | **Implemented**: `--update` refreshes only the `eshu-dashboard` line after a 200, copies its `from=`, refuses symlinks, uses `mktemp`; the fixed `.tmp` name is gone everywhere | `fix/update-dashboard-key` | RR1 | security sign-off |
 | — | GT1 | gateway-token-rotation | dashboard + poller | Design round 2 2026-11-14 (BS4/BS5 folded): routine poll rotation vs compromise SSH push, 24 h gateway-enforced mtime, Revoke token | `feat/gt1-token-rotation` | RR1 | + security sign-off; code after 1.4 |
-| 29 | E2E-1 | e2e-smoke | test tooling | **Design** 2026-11-15; security reads this note before code | `feat/e2e-smoke` | F3, F12, F15, F27 (when merged), 1.4 | an automated approver: dedicated credential, window attribution, allowlist mode (see open questions) |
+| 29 | E2E-1 | e2e-smoke | test tooling | **Design** 2026-11-15; main reviewer notes CA1–CA7 (2026-11-17: live dashboard + one dev gateway, scoped approver token); security reads before code | `feat/e2e-smoke` | F3, F12, F15, F27 (when merged), 1.4 | an automated approver: dedicated credential, window attribution, allowlist mode (see open questions) |
 
 Chunks are done **in the order column**; each new chunk branches from the
 updated `feature-roadmap` after the previous one is merged. A design-first
