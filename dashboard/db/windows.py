@@ -25,7 +25,9 @@ def init_windows_tables(cursor):
             days_of_week INTEGER DEFAULT 0,
             execution_time INTEGER DEFAULT 0,
             expires_at INTEGER DEFAULT NULL,
-            match_type TEXT DEFAULT 'exact'
+            match_type TEXT DEFAULT 'exact',
+            session_id TEXT NOT NULL DEFAULT '',
+            agent_id INTEGER NOT NULL DEFAULT 0
         )
     ''')
     for col, defval in [('days_of_week', '0'), ('execution_time', '0'), ('expires_at', 'NULL'), ('match_type', "'exact'"), ('status', "'active'")]:
@@ -35,11 +37,17 @@ def init_windows_tables(cursor):
             pass
     cursor.execute("UPDATE approved_windows SET status = 'disabled' WHERE enabled = 0 AND status IS NULL")
     cursor.execute("UPDATE approved_windows SET status = 'active' WHERE enabled = 1 AND status IS NULL")
-    for col, defval in [('origin', "'human'")]:
+    for col, defval in [('origin', "'human'"), ('session_id', "''")]:
         try:
             cursor.execute(f"ALTER TABLE approved_windows ADD COLUMN {col} TEXT DEFAULT {defval}")
         except sqlite3.OperationalError:
             pass
+    # BY1/CA4: the agent and session that asked, filled by the server.
+    try:
+        cursor.execute(
+            "ALTER TABLE approved_windows ADD COLUMN agent_id INTEGER NOT NULL DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
     # v15.x migration: opaque retrieval key for public window/request reads —
     # kills numeric-id enumeration (sequential AUTOINCREMENT). Backfill existing rows.
     try:
@@ -101,6 +109,14 @@ def init_windows_tables(cursor):
         for (wid,) in cursor.fetchall():
             cursor.execute("UPDATE approved_windows SET retrieval_key = ? WHERE id = ?", (_make_retrieval_key(), wid))
         cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_win_retrieval_key ON approved_windows(retrieval_key)")
+    # The TEXT->INTEGER rebuild above copies only the old column set; add the
+    # BY1/CA4 attribution again if that path ran.
+    for col, ddl in (('session_id', "TEXT NOT NULL DEFAULT ''"),
+                     ('agent_id', "INTEGER NOT NULL DEFAULT 0")):
+        try:
+            cursor.execute(f"ALTER TABLE approved_windows ADD COLUMN {col} {ddl}")
+        except sqlite3.OperationalError:
+            pass
     # Window execution history
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS window_executions (
@@ -280,7 +296,8 @@ def get_recent_jit_approved(hours: int = 6, limit: int = 50, ip: str = None) -> 
 def create_window_request(target_ip: str, command: str, days_of_week: int = 0,
                           execution_time: int = 0, expires_at: int = None,
                           match_type: str = 'exact', max_executions: int = 0,
-                          label: str = '', window_start: int = 0) -> dict:
+                          label: str = '', window_start: int = 0,
+                          session_id: str = '', agent_id: int = 0) -> dict:
     # Unique placeholder token — the column is UNIQUE, and an empty string would
     # collide with any other pending/denied agent request (500 IntegrityError).
     # approve_window_request() replaces it with the real token on approval.
@@ -296,11 +313,13 @@ def create_window_request(target_ip: str, command: str, days_of_week: int = 0,
             INSERT INTO approved_windows
             (token, target_ip, command, window_start, window_end,
              max_executions, label, created_at, enabled,
-             days_of_week, execution_time, expires_at, match_type, status, origin, retrieval_key)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, 'pending_review', 'ai', ?)
+             days_of_week, execution_time, expires_at, match_type, status, origin,
+             retrieval_key, session_id, agent_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, 'pending_review', 'ai', ?, ?, ?)
         ''', (token, target_ip, command, window_start, window_end,
               max_executions, label, now,
-              days_of_week, execution_time, expires_at, match_type, retrieval_key))
+              days_of_week, execution_time, expires_at, match_type,
+              retrieval_key, (session_id or '')[:64], int(agent_id or 0)))
         conn.commit()
         wid = cursor.lastrowid
         cursor.execute('SELECT * FROM approved_windows WHERE id = ?', (wid,))

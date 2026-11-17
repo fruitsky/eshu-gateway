@@ -8882,6 +8882,7 @@ async function openAgentDetail(id) {
     var wf = document.getElementById('wf-principal');
     if (wf) { wf.value = agent.name; loadWebFetchPolicy(); }
     renderAgentActivity(agent);
+    renderAgentApprover(agent);
   } catch(e) { showToast('Failed: ' + e.message, 'error'); }
 }
 
@@ -8905,6 +8906,129 @@ function renderAgentDetailHeader(agent) {
         '<button onclick="revokeAgentToken(this, ' + idJs(agent.id) + ')" class="btn btn-sm btn-muted">Revoke token</button>') +
       '<button onclick="deleteAgentToken(this, ' + idJs(agent.id) + ')" class="btn btn-sm btn-deny">Delete token</button>';
   }
+}
+
+/* BY1–BY4: the operator-only Test agent switch and the scoped approver
+   token card. Every value below is agent or operator text, so it goes
+   through esc() before innerHTML. */
+async function renderAgentApprover(agent) {
+  var toggle = document.getElementById('agent-test-toggle');
+  var hint = document.getElementById('agent-test-hint');
+  var p = _agentPolicy || {};
+  if (toggle) toggle.checked = !!p.test_agent;
+  if (hint) {
+    hint.textContent = p.test_agent
+      ? 'On: HA reads and call_service only, exactly one SSH IP. Clearing this revokes the agent\'s approver tokens.'
+      : 'Off: enabling is refused once the agent has any session, request or call.';
+  }
+  var box = document.getElementById('approver-token-list');
+  if (!box) return;
+  box.innerHTML = '<p class="text-xs text-muted">Loading\u2026</p>';
+  try {
+    var r = await authFetch('/api/approver-tokens?agent_id=' + encodeURIComponent(agent.id));
+    if (!r.ok) { box.innerHTML = '<p class="text-xs text-muted">Could not load approver tokens.</p>'; return; }
+    renderApproverTokenList(await r.json());
+  } catch(e) { box.innerHTML = '<p class="text-xs text-muted">Could not load approver tokens.</p>'; }
+}
+
+function approverTokenRow(t) {
+  var state = t.revoked ? 'revoked' : (t.expired ? 'expired' : 'live');
+  return '<div class="p-2 rounded text-xs" style="border:1px solid var(--rule-weak);">' +
+    '<div class="flex items-center gap-2 flex-wrap">' +
+      '<b>#' + esc(String(t.id)) + '</b>' +
+      '<span class="text-muted">' + esc(state) + '</span>' +
+      '<span class="text-muted">gateway ' + esc(t.gateway_ip || '—') + '</span>' +
+      '<span class="text-muted">' + esc(String((t.commands || []).length)) + ' command(s)</span>' +
+      '<span class="text-muted">expires ' + esc(t.expires_at ? new Date(t.expires_at * 1000).toLocaleString() : '—') + '</span>' +
+      '<span class="flex-1"></span>' +
+      (state === 'live'
+        ? '<button class="btn btn-deny btn-xs" onclick="revokeApproverToken(' + Number(t.id) + ')">Revoke</button>'
+        : '') +
+    '</div>' +
+    '<div class="text-muted" style="margin-top:2px;white-space:pre-wrap;">' +
+      esc((t.commands || []).join('\n')) + '</div>' +
+  '</div>';
+}
+
+function renderApproverTokenList(rows) {
+  var box = document.getElementById('approver-token-list');
+  if (!box) return;
+  if (!rows || !rows.length) {
+    box.innerHTML = '<p class="text-xs text-muted">No approver tokens.</p>';
+    return;
+  }
+  box.innerHTML = rows.map(approverTokenRow).join('');
+}
+
+async function toggleTestAgent() {
+  var el = document.getElementById('agent-test-toggle');
+  if (!el || !_agentDetailId) return;
+  var wanted = !!el.checked;
+  el.disabled = true;
+  try {
+    var r = await authFetch('/api/agents/' + _agentDetailId + '/test-agent', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({enabled: wanted})
+    });
+    var d = await r.json().catch(function(){ return {}; });
+    if (!r.ok) {
+      el.checked = !wanted;
+      showToast(typeof d.detail === 'string' ? d.detail : 'Could not change test agent', 'error');
+      return;
+    }
+    _agentPolicy = d;
+    var agent = (_agentsData || []).find(function(a) { return a.id === _agentDetailId; });
+    if (agent) agent.policy = d;
+    showToast(wanted ? 'Test agent enabled' : 'Test agent disabled', 'success');
+    renderAgentApprover(agent || {id: _agentDetailId});
+    fetchAgentTokens();
+  } catch(e) {
+    el.checked = !wanted;
+    showToast('Could not change test agent', 'error');
+  } finally {
+    el.disabled = false;
+  }
+}
+
+async function mintApproverToken() {
+  if (!_agentDetailId) return;
+  var raw = (document.getElementById('approver-commands') || {}).value || '';
+  var commands = raw.split('\n').map(function(line) { return line.replace(/\r$/, ''); })
+    .filter(function(line) { return line.length > 0; });
+  var gateway = ((document.getElementById('approver-gateway') || {}).value || '').trim();
+  var days = parseInt((document.getElementById('approver-days') || {}).value || '30', 10);
+  var out = document.getElementById('approver-token-result');
+  if (!commands.length) { showToast('Add at least one exact command', 'error'); return; }
+  if (!gateway) { showToast('Set the test gateway IP', 'error'); return; }
+  try {
+    var r = await authFetch('/api/approver-tokens', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({agent_id: _agentDetailId, commands: commands,
+                            gateway_ip: gateway, days: days})
+    });
+    var d = await r.json().catch(function(){ return {}; });
+    if (!r.ok) {
+      showToast(typeof d.detail === 'string' ? d.detail : 'Could not mint token', 'error');
+      return;
+    }
+    if (out) {
+      out.classList.remove('hidden');
+      out.textContent = 'Token #' + d.id + ' (shown once): ' + d.token;
+    }
+    document.getElementById('approver-commands').value = '';
+    renderAgentApprover({id: _agentDetailId});
+    showToast('Approver token minted', 'success');
+  } catch(e) { showToast('Could not mint token', 'error'); }
+}
+
+async function revokeApproverToken(id) {
+  if (!confirm('Revoke approver token #' + id + '? It stops working at once.')) return;
+  try {
+    var r = await authFetch('/api/approver-tokens/' + id + '/revoke', {method: 'POST'});
+    if (!r.ok) { showToast('Could not revoke token', 'error'); return; }
+    showToast('Approver token revoked', 'success');
+    renderAgentApprover({id: _agentDetailId});
+  } catch(e) { showToast('Could not revoke token', 'error'); }
 }
 
 function closeAgentPolicyModal() {

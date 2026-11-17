@@ -19578,6 +19578,80 @@ columns/checks, the fixed command list, every BY3 refusal test, the
 (`scripts/e2e/run.py`, `tests/test_e2e_smoke.py`) and starts only after
 Security approves round 1.
 
+### Implementer notes — code round 1 (2026-11-17)
+
+**Status: round 1 server + UI + tests are in on `feat/e2e-smoke`; this stops
+for Security's read. Round 2 (the suite) is not started.**
+
+**BY1 — agent-id provenance.** Additive `agent_id` columns on `requests`,
+`session_plans`, `integration_calls`, `pending_integration_calls`,
+`approved_windows` and `sessions` (old rows 0). Agent-token rows take the id
+from the verified current agent; gateway-created SSH rows take it from the
+server-side session record named by the signed session id; plans/calls/windows
+take it from the verified token/context. A row with `agent_id=0` is always
+refused by the approver. The approver check is row `agent_id` = token agent,
+row `session_id` = a session with that same `agent_id`, that agent is
+`test_agent=1`, and the goal starts `E2E:` (the extra check, not the boundary).
+Minting binds one agent id; a second test agent cannot widen an existing token.
+
+**BY2 — the fixed list and gateway.** `approver_tokens` stores the exact
+command bytes and the one test gateway at mint time. SSH request approve,
+plan approve and window approve all require a byte-exact command and that
+gateway; a deny requires neither. Agent plan items must be SSH items on the
+gateway with a listed command. Probe plans are allowed only for
+`diagnose_service(unit=ssh)` and `disk_pressure`. Other approve variants
+(a body on approve/deny, `removed_item_ids`, or a non-default plan TTL) are
+refused for the approver.
+
+**BY3 — the token and its reach.** The approver token is `e2e_` + 64 hex,
+only its SHA-256 hash is stored, it is shown once, accepted only as
+`Authorization: Bearer`, and expires after at most 30 days. The window token
+is not changed: it is the existing gateway-distributed credential
+(`/etc/eshu-windows.txt`, env/argv on the direct SSH path), not a bearer
+header; hashing it would break that distribution. The BY3 "stored hashed,
+shown once, bearer header" sentence applies to the approver token. A middleware
+allows only the listed route set and refuses everything else before the
+handler (including `/mcp`, gateway routes, policy/agents/tokens/gateways/
+settings/notifications/fleet/freeze/installer/dev/F27/statistics writes and
+approver-token minting/revoking). Every refusal is audited as
+`e2e-approver` with the token id; valid requests have their own 120/min
+bucket. Decisions are audited with the token id and actor `e2e-approver`.
+* Window approve is narrow: the agent's own pending request, exact match,
+  one execution, expiry within 15 minutes, listed command, test gateway.
+* Cleanup is limited to its own agent: exclude its session (CA5 also marks
+  proxied calls), reject its draft, delete its window request. The operator
+  creates the standing C15 allowance; this branch has no F27 allowance route
+  (`feat/e2e-smoke` predates it), so the revoke-allowance action is not
+  present here and C15 will run only after F27 merges.
+* C16 has its own read route (`GET /api/e2e/installer-hash`): the Edge hash
+  and that test gateway's reported hash, no `/api/dev/status`.
+
+**BY4 — `test_agent`.** Operator-only `POST /api/agents/{id}/test-agent`.
+It cannot be set on an agent with any recorded session, request or call.
+When set, the policy save refuses `*`, more than one host, a hostname,
+`ungated` approval, `tools_mode=all`, and any tool other than HA reads plus
+`call_service`. Clearing it revokes the agent's approver tokens. Minting a
+token and enabling the flag both notify the operator.
+
+**CA4/CA5.** `approved_windows` gains `session_id`/`agent_id`; the agent
+window request takes both from the verified token/session (the client cannot
+set `agent_id`). `integration_calls` gains `excluded`; the F8 exclude
+endpoint now marks the session's requests and calls, and the health, session
+summary, coverage and web-fetch statistics skip excluded calls. History still
+shows the rows.
+
+**UI.** The agent detail page gains a Test agent switch and an Approver
+tokens card (exact commands one per line, test gateway, days, mint, shown
+once, list with revoke). All fields go through `esc()`; a Node check asserts
+the row escapes `<img>`/`<script>` in the gateway and commands.
+
+**Tests.** `tests/test_e2e_approver.py` (53 tests) covers the token/hash/
+expiry, BY1 ownership and refusals, the command/gateway list, plan and probe
+variants, integration-call approve-refused/deny-allowed, the narrow window,
+create/edit/toggle refusals, cleanup, route refusals, freeze, test-agent
+narrowing/activity/revocation/notify, CA4/CA5 and C16. Each is against the
+real FastAPI app; no network.
+
 ## 7. Backlog (not planned in detail)
 
 * Deny with a reason, shown to the agent (cheap; low value given the data).

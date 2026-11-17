@@ -119,11 +119,11 @@ def get_web_fetch_stats(principal: str = None) -> dict:
         cursor = conn.cursor()
         cursor.execute(
             f'SELECT reason_code, COUNT(*) AS n FROM integration_calls '
-            f'WHERE {where} GROUP BY reason_code', params)
+            f'WHERE {where} AND COALESCE(excluded, 0) = 0 GROUP BY reason_code', params)
         rows = [dict(r) for r in cursor.fetchall()]
         cursor.execute(
             f'SELECT COUNT(*) AS total, COALESCE(SUM(response_bytes), 0) AS bytes '
-            f'FROM integration_calls WHERE {where}', params)
+            f'FROM integration_calls WHERE {where} AND COALESCE(excluded, 0) = 0', params)
         totals = dict(cursor.fetchone())
 
     counters = {

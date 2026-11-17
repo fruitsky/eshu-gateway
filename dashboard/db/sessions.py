@@ -24,6 +24,7 @@ def init_sessions_tables(cursor):
         CREATE TABLE IF NOT EXISTS sessions (
             id TEXT PRIMARY KEY,
             agent TEXT NOT NULL DEFAULT '',
+            agent_id INTEGER NOT NULL DEFAULT 0,
             goal TEXT NOT NULL DEFAULT '',
             source TEXT NOT NULL DEFAULT 'agent',
             started_at INTEGER NOT NULL,
@@ -32,6 +33,10 @@ def init_sessions_tables(cursor):
         )
     ''')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_sessions_last_seen ON sessions(last_seen)')
+    try:
+        cursor.execute("ALTER TABLE sessions ADD COLUMN agent_id INTEGER NOT NULL DEFAULT 0")
+    except Exception:
+        pass
 
 
 def new_session_id() -> str:
@@ -40,7 +45,8 @@ def new_session_id() -> str:
 
 
 def upsert_session(session_id: str, agent: str = '', goal: str = None,
-                   source: str = 'agent', seen_at: int = None) -> dict:
+                   source: str = 'agent', seen_at: int = None,
+                   agent_id: int = 0) -> dict:
     """Create the row on first sight, touch it afterwards.
 
     `goal=None` leaves an existing goal alone (touching a session must not
@@ -53,13 +59,15 @@ def upsert_session(session_id: str, agent: str = '', goal: str = None,
     with db_conn() as conn:
         cur = conn.cursor()
         cur.execute('''
-            INSERT INTO sessions (id, agent, goal, source, started_at, last_seen)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO sessions (id, agent, agent_id, goal, source, started_at, last_seen)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 last_seen = excluded.last_seen,
                 agent = CASE WHEN sessions.agent = '' THEN excluded.agent ELSE sessions.agent END,
+                agent_id = CASE WHEN sessions.agent_id = 0 THEN excluded.agent_id ELSE sessions.agent_id END,
                 goal = CASE WHEN excluded.goal != '' THEN excluded.goal ELSE sessions.goal END
-        ''', (sid, (agent or '')[:64], (goal or '')[:160], source, now, now))
+        ''', (sid, (agent or '')[:64], int(agent_id or 0),
+              (goal or '')[:160], source, now, now))
         conn.commit()
         cur.execute('SELECT * FROM sessions WHERE id = ?', (sid,))
         row = cur.fetchone()
@@ -199,7 +207,8 @@ def get_session_summary(session_id: str) -> dict:
         waited = cur.fetchone()
         out['waited_seconds'] = int(waited['waited'] or 0)
         out['decided'] = int(waited['decided'] or 0)
-        cur.execute('SELECT COUNT(*) AS n FROM integration_calls WHERE session_id = ?', (sid,))
+        cur.execute('SELECT COUNT(*) AS n FROM integration_calls '
+                    'WHERE session_id = ? AND COALESCE(excluded, 0) = 0', (sid,))
         out['mcp_calls'] = int(cur.fetchone()['n'] or 0)
         cur.execute('SELECT COUNT(*) AS n FROM pending_integration_calls WHERE session_id = ?', (sid,))
         out['mcp_pending'] = int(cur.fetchone()['n'] or 0)
@@ -234,6 +243,7 @@ def get_session_coverage(days: int = 7) -> dict:
                    SUM(CASE WHEN session_source IN ('inherited', 'transport')
                              OR session_id LIKE 'mcp-%' THEN 1 ELSE 0 END) AS auto
             FROM integration_calls WHERE created_at >= ?
+              AND COALESCE(excluded, 0) = 0
         ''', (since,))
         mcp = dict(cur.fetchone())
     out = {'days': days}

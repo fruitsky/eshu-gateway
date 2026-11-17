@@ -96,6 +96,8 @@ class WindowRequestPayload(BaseModel):
     max_executions: int = 0
     label: str = ""
     window_start: int = 0
+    # BY1/CA4: the agent's session; the server records it with the row.
+    session_id: str = ""
 
 class ExcludeRequestsPayload(BaseModel):
     """F8: exclude by explicit ids and/or a whole session."""

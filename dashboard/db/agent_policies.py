@@ -31,6 +31,7 @@ def init_agent_policies_tables(cursor):
             arg_policy_json TEXT NOT NULL DEFAULT '{}',
             approval_json TEXT NOT NULL DEFAULT '{}',
             rate_limit_per_min INTEGER NOT NULL DEFAULT 0,
+            test_agent INTEGER NOT NULL DEFAULT 0,
             updated_at INTEGER NOT NULL DEFAULT 0
         )
     ''')
@@ -41,6 +42,11 @@ def init_agent_policies_tables(cursor):
             cursor.execute(f"ALTER TABLE agent_policies ADD COLUMN {col} TEXT DEFAULT {default}")
         except Exception:
             pass
+    try:
+        cursor.execute(
+            "ALTER TABLE agent_policies ADD COLUMN test_agent INTEGER NOT NULL DEFAULT 0")
+    except Exception:
+        pass
 
 
 def default_policy(agent_id=None):
@@ -53,6 +59,7 @@ def default_policy(agent_id=None):
         'rate_limit_per_min': DEFAULT_RATE_LIMIT,
         'ssh_hosts_allow': [],
         'ssh_mode': DEFAULT_SSH_MODE,
+        'test_agent': False,
         'updated_at': 0,
     }
 
@@ -153,6 +160,7 @@ def _row_to_policy(row):
     item['ssh_hosts_allow'] = [str(h) for h in hosts if str(h).strip()]
     mode = item.get('ssh_mode') or DEFAULT_SSH_MODE
     item['ssh_mode'] = mode if mode in SSH_MODES else DEFAULT_SSH_MODE
+    item['test_agent'] = str(item.get('test_agent') or '').lower() in ('1', 'true')
     return item
 
 
@@ -173,7 +181,7 @@ def get_agent_policies_map():
 
 def set_agent_policy(agent_id, tools_mode=None, tools=None, arg_policy=None,
                      approval=None, rate_limit_per_min=None, ssh_hosts_allow=None,
-                     ssh_mode=None):
+                     ssh_mode=None, test_agent=None):
     """Update one agent's policy; a `None` field keeps its stored value.
 
     X4: the Agents page saves one section at a time, so each call must be
@@ -198,22 +206,104 @@ def set_agent_policy(agent_id, tools_mode=None, tools=None, arg_policy=None,
         ssh_hosts_allow = current['ssh_hosts_allow']
     if ssh_mode is None:
         ssh_mode = current['ssh_mode']
+    if test_agent is None:
+        test_agent = current['test_agent']
     clean = validate_policy(tools_mode, tools, arg_policy, approval,
                             rate_limit_per_min, ssh_hosts_allow, ssh_mode)
+    clean['test_agent'] = bool(test_agent)
+    if clean['test_agent']:
+        _validate_test_agent_policy(clean)
+        if not current.get('test_agent'):
+            activity = agent_has_activity(agent_id)
+            if activity:
+                raise ValueError(
+                    'a test agent must be newly created: this agent already has '
+                    'a session, request or call')
     with db_conn() as conn:
         cursor = conn.cursor()
         cursor.execute('''
             INSERT OR REPLACE INTO agent_policies
                 (agent_id, tools_mode, tools_json, arg_policy_json,
                  approval_json, rate_limit_per_min, updated_at,
-                 ssh_hosts_allow_json, ssh_mode)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 ssh_hosts_allow_json, ssh_mode, test_agent)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (agent_id, clean['tools_mode'], json.dumps(clean['tools']),
               json.dumps(clean['arg_policy']), json.dumps(clean['approval']),
               clean['rate_limit_per_min'], int(time.time()),
-              json.dumps(clean['ssh_hosts_allow']), clean['ssh_mode']))
+              json.dumps(clean['ssh_hosts_allow']), clean['ssh_mode'],
+              1 if clean['test_agent'] else 0))
         conn.commit()
     return get_agent_policy(agent_id)
+
+
+def _is_one_ip(host: str) -> bool:
+    try:
+        import ipaddress
+        ipaddress.ip_address(str(host or ''))
+        return True
+    except ValueError:
+        return False
+
+
+def _validate_test_agent_policy(clean):
+    """BY4: the flag narrows. Called only when the final policy has it set."""
+    hosts = clean.get('ssh_hosts_allow') or []
+    if len(hosts) != 1 or not _is_one_ip(hosts[0]):
+        raise ValueError('a test agent must allow exactly one IP')
+    if any(mode == 'ungated' for mode in (clean.get('approval') or {}).values()):
+        raise ValueError('a test agent cannot use ungated approval')
+    if clean.get('tools_mode') != 'allowlist':
+        raise ValueError('a test agent must use an allowlist')
+    allowed = _test_agent_tool_keys()
+    bad = [t for t in (clean.get('tools') or []) if t not in allowed]
+    if bad:
+        raise ValueError(
+            'a test agent may only use HA reads and call_service; not: '
+            + ', '.join(bad[:5]))
+
+
+def _test_agent_tool_keys():
+    """The policy keys a test agent may hold: HA read tools + call_service."""
+    from core.agent_policy import tool_key
+    from db.integrations import get_integrations, get_tools
+    out = set()
+    for integration in get_integrations():
+        if (integration.get('kind') or '').lower() != 'ha':
+            continue
+        for tool in get_tools(integration['id']):
+            if not tool.get('enabled'):
+                continue
+            if tool.get('read_only') or tool.get('name') == 'call_service':
+                out.add(tool_key(integration['name'], tool['name']))
+    # The seeded HA integration is the one the suite uses; if it is not
+    # configured, still allow the canonical call_service key so the operator
+    # can prepare the policy before adding the integration.
+    out.add('home_assistant_call_service')
+    return out
+
+
+def agent_has_activity(agent_id: int) -> bool:
+    """True when the agent already has a session, request or call (BY4)."""
+    try:
+        aid = int(agent_id)
+    except (TypeError, ValueError):
+        return True
+    with db_conn() as conn:
+        cur = conn.cursor()
+        for sql in (
+                'SELECT 1 FROM sessions WHERE agent_id = ? LIMIT 1',
+                'SELECT 1 FROM requests WHERE agent_id = ? LIMIT 1',
+                'SELECT 1 FROM integration_calls WHERE agent_id = ? LIMIT 1',
+                'SELECT 1 FROM pending_integration_calls WHERE agent_id = ? LIMIT 1',
+                'SELECT 1 FROM approved_windows WHERE agent_id = ? LIMIT 1'):
+            try:
+                if cur.execute(sql, (aid,)).fetchone():
+                    return True
+            except Exception:
+                # An older/mid-migration database without the column cannot
+                # prove the agent is fresh, so fail closed.
+                continue
+    return False
 
 
 def delete_agent_policy(agent_id):
