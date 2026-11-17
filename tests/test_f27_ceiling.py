@@ -5,8 +5,10 @@ from core import allowances as a
 
 
 def _enable_risky(c, ids):
+    # BX6: the server now requires the hash the form was loaded with.
     return c.put('/api/allowances/ceiling', json={
-        'enabled': ids, 'risk_ack': True, 'confirm': True})
+        'enabled': ids, 'risk_ack': True, 'confirm': True,
+        'set_hash': a.set_hash()})
 
 
 def test_the_seed_has_the_operator_defaults(auth_client):
@@ -30,7 +32,8 @@ def test_ceiling_allows_only_enabled_catalogue_rows(auth_client):
 
 def test_a_risky_row_needs_the_ack(auth_client):
     r = auth_client.put('/api/allowances/ceiling', json={
-        'enabled': a.enabled_ids() + ['cover.open_cover']})
+        'enabled': a.enabled_ids() + ['cover.open_cover'],
+        'set_hash': a.set_hash()})
     assert r.status_code == 400
     assert 'risk' in r.text.lower()
     assert a.ceiling_allows('ha', 'cover', 'open_cover') is False
@@ -73,7 +76,7 @@ def test_a_stale_set_hash_is_409(auth_client):
     old = a.set_hash()
     _enable_risky(auth_client, a.enabled_ids() + ['cover.open_cover'])
     r = auth_client.put('/api/allowances/ceiling', json={
-        'enabled': a.enabled_ids(), 'set_hash': old})
+        'enabled': a.enabled_ids(), 'set_hash': old, 'risk_ack': True})
     assert r.status_code == 409
     assert r.json()['detail']['code'] == 'ceiling_changed'
 
@@ -116,3 +119,32 @@ def test_turning_the_ceiling_notify_off_is_audited(auth_client):
     r = auth_client.put('/api/notify-config', json={'url': '', 'events': 'jit'})
     assert r.status_code == 200
     assert 'notify_ceiling_off' in [x['event_type'] for x in get_audit_log(50)]
+
+
+def test_a_put_without_set_hash_is_a_400(auth_client):
+    """BX6: the stale-form check belongs to the server, not the UI."""
+    r = auth_client.put('/api/allowances/ceiling',
+                        json={'enabled': a.enabled_ids()})
+    assert r.status_code == 400
+    assert 'set_hash' in r.text
+    # The checked write still needed no risk ack: nothing was enabled.
+    assert r.json()['detail']['code'] == 'set_hash_required'
+
+
+def test_two_saves_cannot_both_pass_the_compare(auth_client):
+    """BX6: compare and write are one BEGIN IMMEDIATE.
+
+    The second save presents the hash the first one started from; it must see
+    the new set and get a 409 instead of overwriting it.
+    """
+    first = a.set_hash()
+    ids = a.enabled_ids() + ['cover.open_cover']
+    r = auth_client.put('/api/allowances/ceiling', json={
+        'enabled': ids, 'risk_ack': True, 'set_hash': first})
+    assert r.status_code == 200, r.text
+    r = auth_client.put('/api/allowances/ceiling', json={
+        'enabled': ids + ['cover.close_cover'], 'risk_ack': True,
+        'set_hash': first})
+    assert r.status_code == 409
+    assert r.json()['detail']['code'] == 'ceiling_changed'
+    assert 'cover.close_cover' not in a.enabled_ids()

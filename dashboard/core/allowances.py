@@ -226,12 +226,100 @@ def enabled_ids(integration=INTEGRATION):
                   if row['enabled'] and catalogue_row(integration, cid))
 
 
-def set_hash(integration=INTEGRATION):
-    """A stable hash of the enabled set, for the stale-form check (BV2)."""
+def _enabled_hash(ids):
     h = hashlib.sha256()
-    for cid in enabled_ids(integration):
+    for cid in sorted(ids):
         h.update(cid.encode() + b'\0')
     return h.hexdigest()[:16]
+
+
+def set_hash(integration=INTEGRATION):
+    """A stable hash of the enabled set, for the stale-form check (BV2)."""
+    return _enabled_hash(enabled_ids(integration))
+
+
+def apply_ceiling(actor, integration, wanted, risk_ack=False,
+                  expected_hash=''):
+    """Replace the enabled set; validate, audit and notify a widening.
+
+    BX6: `set_hash` is required, and the compare plus the write share one
+    `BEGIN IMMEDIATE`, so two saves cannot both pass the compare.
+    """
+    from db.core import db_conn
+    from db.audit import record_audit_event
+    from core.notify import send_notify
+    ensure_initialised()
+    if integration != INTEGRATION:
+        raise CeilingError(400, 'This integration has no ceiling yet.')
+    if not expected_hash:
+        raise CeilingError(
+            400, 'set_hash is required: reload the ceiling before saving.',
+            {'code': 'set_hash_required'})
+    wanted = sorted(set(wanted or []))
+    unknown = [cid for cid in wanted if catalogue_row(integration, cid) is None]
+    if unknown:
+        raise CeilingError(400, 'Unknown catalogue id: ' + ', '.join(unknown))
+    for cid in wanted:
+        row = catalogue_row(integration, cid)
+        if never_reason(row['domain'], row['service']):
+            raise CeilingError(400, 'Never allowable: ' + cid)
+        if is_destructive(row['service'], row['exempt_words']):
+            raise CeilingError(400, 'A destructive word caps: ' + cid)
+
+    before = set()
+    enabling = []
+    disabling = []
+    risky = []
+    now = _now()
+    with db_conn() as conn:
+        try:
+            conn.execute('BEGIN IMMEDIATE')
+            rows = conn.execute(
+                'SELECT catalogue_id FROM allowance_ceiling '
+                'WHERE integration = ? AND enabled = 1', (integration,)
+            ).fetchall()
+            before = {r['catalogue_id'] for r in rows
+                      if catalogue_row(integration, r['catalogue_id'])}
+            current_hash = _enabled_hash(before)
+            if expected_hash != current_hash:
+                conn.rollback()
+                raise CeilingError(
+                    409, 'The ceiling changed since this form was loaded.',
+                    {'code': 'ceiling_changed', 'set_hash': current_hash})
+            after = set(wanted)
+            enabling = sorted(after - before)
+            disabling = sorted(before - after)
+            risky = [cid for cid in enabling if is_risky(cid)]
+            if risky and not risk_ack:
+                conn.rollback()
+                raise CeilingError(
+                    400, 'This change needs a risk confirmation.',
+                    {'code': 'risk_ack_required', 'risky': risky})
+            for cid, _domain, _service, _label, _entry in _rows():
+                conn.execute(
+                    'UPDATE allowance_ceiling SET enabled = ?, updated_by = ?, '
+                    'updated_at = ? WHERE integration = ? AND catalogue_id = ?',
+                    (1 if cid in after else 0, actor, now, integration, cid))
+            conn.commit()
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            raise
+    record_audit_event(
+        'allowance_ceiling_changed',
+        details='%s ceiling: enabled [%s] -> [%s]; set %s; risky %s'
+                % (integration, ','.join(sorted(before)), ','.join(sorted(after)),
+                   set_hash(integration), ','.join(risky) or 'none'))
+    if enabling:
+        # BT5: a widening goes out on the existing notify channel. No entity
+        # lists, just the verdict.
+        send_notify('ceiling', 'Allowance ceiling widened',
+                    'Enabled: %s (by %s)' % (', '.join(enabling), actor))
+    return {'before': sorted(before), 'after': sorted(after),
+            'enabling': enabling, 'disabling': disabling,
+            'set_hash': set_hash(integration), 'risky': risky}
 
 
 def ceiling_allows(integration, domain, service):
@@ -308,62 +396,6 @@ def _now():
     return int(time.time())
 
 
-def apply_ceiling(actor, integration, wanted, risk_ack=False,
-                  expected_hash=''):
-    """Replace the enabled set; validate, audit and notify a widening."""
-    from db.core import db_conn
-    from db.audit import record_audit_event
-    from core.notify import send_notify
-    ensure_initialised()
-    if integration != INTEGRATION:
-        raise CeilingError(400, 'This integration has no ceiling yet.')
-    wanted = sorted(set(wanted or []))
-    unknown = [cid for cid in wanted if catalogue_row(integration, cid) is None]
-    if unknown:
-        raise CeilingError(400, 'Unknown catalogue id: ' + ', '.join(unknown))
-    for cid in wanted:
-        row = catalogue_row(integration, cid)
-        if never_reason(row['domain'], row['service']):
-            raise CeilingError(400, 'Never allowable: ' + cid)
-        if is_destructive(row['service'], row['exempt_words']):
-            raise CeilingError(400, 'A destructive word caps: ' + cid)
-
-    before = set(enabled_ids(integration))
-    if expected_hash and expected_hash != set_hash(integration):
-        raise CeilingError(409, 'The ceiling changed since this form was loaded.',
-                           {'code': 'ceiling_changed',
-                            'set_hash': set_hash(integration)})
-    after = set(wanted)
-    enabling = sorted(after - before)
-    disabling = sorted(before - after)
-    risky = [cid for cid in enabling if is_risky(cid)]
-    if risky and not risk_ack:
-        raise CeilingError(400, 'This change needs a risk confirmation.',
-                           {'code': 'risk_ack_required', 'risky': risky})
-
-    now = _now()
-    with db_conn() as conn:
-        for cid, _domain, _service, _label, _entry in _rows():
-            conn.execute(
-                'UPDATE allowance_ceiling SET enabled = ?, updated_by = ?, '
-                'updated_at = ? WHERE integration = ? AND catalogue_id = ?',
-                (1 if cid in after else 0, actor, now, integration, cid))
-        conn.commit()
-    record_audit_event(
-        'allowance_ceiling_changed',
-        details='%s ceiling: enabled [%s] -> [%s]; set %s; risky %s'
-                % (integration, ','.join(sorted(before)), ','.join(sorted(after)),
-                   set_hash(integration), ','.join(risky) or 'none'))
-    if enabling:
-        # BT5: a widening goes out on the existing notify channel. No entity
-        # lists, just the verdict.
-        send_notify('ceiling', 'Allowance ceiling widened',
-                    'Enabled: %s (by %s)' % (', '.join(enabling), actor))
-    return {'before': sorted(before), 'after': sorted(after),
-            'enabling': enabling, 'disabling': disabling,
-            'set_hash': set_hash(integration), 'risky': risky}
-
-
 def add_word(actor, word):
     """Add an operator word; disable the rows it now caps (BT3)."""
     from db.core import db_conn
@@ -383,7 +415,9 @@ def add_word(actor, word):
                      'VALUES (?, ?, ?)', (w, actor, now))
         for cid in enabled_ids(INTEGRATION):
             row = catalogue_row(INTEGRATION, cid)
-            if w in _tokens(row['service']) and w not in row['exempt_words']:
+            # is_destructive() subtracts the operator words from the exemption,
+            # so an operator word is never exempt: the same rule here.
+            if w in _tokens(row['service']):
                 conn.execute(
                     'UPDATE allowance_ceiling SET enabled = 0, updated_by = ?, '
                     'updated_at = ? WHERE integration = ? AND catalogue_id = ?',
@@ -429,6 +463,21 @@ def remove_word(actor, word):
 ALLOWANCE_TOOL = 'call_service'
 _ENTITY_RE = re.compile(r'^[a-z0-9_]+\.[a-z0-9_]+$')
 _SERVICE_RE = re.compile(r'^[a-z0-9_]+$')
+
+
+def is_registry_write_path(value):
+    """True for an HA entity-registry or config-entry write (BD5/BX2).
+
+    Accepts a WS command (`config/entity_registry/update`), a REST path
+    (`/api/config/entity_registry/...`), or a `/config/...` path.
+    """
+    text = str(value or '').strip().lower().replace('\\', '/').lstrip('/')
+    if text.startswith('api/'):
+        text = text[4:]
+    if text.startswith('homeassistant/'):
+        text = text[len('homeassistant/'):]
+    return (text.startswith('config/entity_registry/')
+            or text.startswith('config/config_entries/'))
 
 
 class AllowanceError(ValueError):
@@ -588,15 +637,13 @@ def _risk_for(domain, entities):
 CATALOGUE_BY_DOMAIN = {e['domain']: e for e in CATALOGUE}
 
 
-def create_allowance(actor, agent_id, name, domain, service, entities,
-                     rate_per_hour=0, window='', expires_at=0,
-                     risk_ack=False, profile_id=0, profile_version=0,
-                     source_label_id=''):
-    """Validate and insert one allowance (save path)."""
-    from db.core import db_conn
-    from db.audit import record_audit_event
-    _init_allowance_tables()
-    ensure_initialised()
+def _validate_allowance(domain, service, entities, rate_per_hour=0, window='',
+                        risk_ack=False, registry=None):
+    """Every save/apply check, in one place, without writing anything.
+
+    Returns `(entities, pins)`. Raises before the caller revokes or inserts,
+    which is what makes apply atomic (BX4).
+    """
     domain = (domain or '').strip().lower()
     service = (service or '').strip().lower()
     if not _SERVICE_RE.fullmatch(domain) or not _SERVICE_RE.fullmatch(service):
@@ -619,29 +666,62 @@ def create_allowance(actor, agent_id, name, domain, service, entities,
     if rate_per_hour and not (0 <= int(rate_per_hour) <= 1000):
         raise AllowanceError(400, 'The rate cap is out of range.')
     # BD5: pin the registry entry now; a missing entity refuses the save.
-    registry = _ha_registry()
+    if registry is None:
+        registry = _ha_registry()
     pins = []
     for ent in entities:
         reg = registry.get(ent)
         if not reg:
             raise AllowanceError(400, 'HA does not know the entity %s.' % ent)
         pins.append({'entity_id': ent, 'registry_id': reg.get('id') or ''})
+    return entities, pins
+
+
+def _insert_allowance(conn, agent_id, name, domain, service, entities, pins,
+                      rate_per_hour=0, window='', expires_at=0, version=1,
+                      actor='', now=None, profile_id=0, profile_version=0,
+                      source_label_id=''):
+    """Insert one row on an existing connection (no commit, no audit)."""
+    import json as _json
     conditions = {'domain': _condition_in(domain),
                   'service': _condition_in(service),
                   'data.entity_id': {'in': entities}}
+    cur = conn.execute(
+        'INSERT INTO allowances (agent_id, integration, tool, name, '
+        'conditions_json, entities_json, source_label_id, rate_per_hour, '
+        'window, expires_at, version, created_by, created_at, '
+        'profile_id, profile_version) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+        (int(agent_id), INTEGRATION, ALLOWANCE_TOOL, (name or 'Allowance')[:80],
+         _json.dumps(conditions, sort_keys=True),
+         _json.dumps(pins), source_label_id or '',
+         int(rate_per_hour or 0), window or '', int(expires_at or 0), int(version),
+         actor, now if now is not None else _now(), int(profile_id or 0),
+         int(profile_version or 0)))
+    return cur.lastrowid
+
+
+def create_allowance(actor, agent_id, name, domain, service, entities,
+                     rate_per_hour=0, window='', expires_at=0,
+                     risk_ack=False, profile_id=0, profile_version=0,
+                     source_label_id=''):
+    """Validate and insert one allowance (save path)."""
+    from db.core import db_conn
+    from db.audit import record_audit_event
+    _init_allowance_tables()
+    ensure_initialised()
+    domain = (domain or '').strip().lower()
+    service = (service or '').strip().lower()
+    entities, pins = _validate_allowance(
+        domain, service, entities, rate_per_hour=rate_per_hour,
+        window=window, risk_ack=risk_ack)
     now = _now()
     with db_conn() as conn:
-        cur = conn.execute(
-            'INSERT INTO allowances (agent_id, integration, tool, name, '
-            'conditions_json, entities_json, source_label_id, rate_per_hour, '
-            'window, expires_at, version, created_by, created_at, '
-            'profile_id, profile_version) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
-            (int(agent_id), INTEGRATION, ALLOWANCE_TOOL, (name or 'Allowance')[:80],
-             __import__('json').dumps(conditions, sort_keys=True),
-             __import__('json').dumps(pins), source_label_id or '',
-             int(rate_per_hour or 0), window or '', int(expires_at or 0), 1,
-             actor, now, int(profile_id or 0), int(profile_version or 0)))
-        aid = cur.lastrowid
+        aid = _insert_allowance(
+            conn, agent_id, name, domain, service, entities, pins,
+            rate_per_hour=rate_per_hour, window=window,
+            expires_at=expires_at, actor=actor, now=now,
+            profile_id=profile_id, profile_version=profile_version,
+            source_label_id=source_label_id)
         conn.commit()
     record_audit_event('allowance_created',
                        details='allowance #%d by %s: %s %s.%s on %d entities%s'
@@ -689,6 +769,25 @@ def list_allowances(include_revoked=False):
     return [dict(r) for r in rows]
 
 
+def _stored_entities(row):
+    """The pins are the entity list matching reads (BX1).
+
+    `entities_json` is the one source of truth. `conditions_json` carries the
+    same list only so the page and older readers can show it; refresh and
+    accept-join rewrite both in one UPDATE, and a row whose pins are empty
+    matches nothing.
+    """
+    import json as _json
+    try:
+        pins = _json.loads(row['entities_json'] or '[]')
+    except ValueError:
+        return set()
+    if not isinstance(pins, list):
+        return set()
+    return {p.get('entity_id') for p in pins
+            if isinstance(p, dict) and p.get('entity_id')}
+
+
 def _matches(row, domain, service, entities):
     import json as _json
     try:
@@ -699,7 +798,7 @@ def _matches(row, domain, service, entities):
         return False
     if cond.get('service', {}).get('in') != [service]:
         return False
-    allowed = set(cond.get('data.entity_id', {}).get('in') or [])
+    allowed = _stored_entities(row)
     return bool(entities) and set(entities) <= allowed
 
 
@@ -856,9 +955,9 @@ def resume_allowance(actor, aid):
 
 # ── Profiles (a named set of allowance templates) ──────────────────────────
 
-def _resolve_label(label_id, domain):
+def _resolve_label(label_id, domain, registry=None):
     """Resolve a label to entity ids at apply time (never at match)."""
-    registry = _ha_registry()
+    registry = registry if registry is not None else _ha_registry()
     out = []
     for ent, reg in registry.items():
         labels = reg.get('labels') or []
@@ -952,53 +1051,131 @@ def list_profiles():
     return [get_profile(r['id']) for r in rows]
 
 
-def apply_profile(actor, pid, agent_id, risk_ack=False):
-    """Create one allowance per template (all validated first)."""
+def apply_profile(actor, pid, agent_id, risk_ack=False, profile_version=0):
+    """Validate every template, then revoke and insert in one transaction.
+
+    A stale `profile_version` is a 409 before any HA read. The transaction
+    re-checks the version, so two applies cannot both pass the compare. If a
+    template fails any check, nothing is revoked (BX4).
+    """
+    from db.core import db_conn
+    from db.audit import record_audit_event
+    import json as _json
+    _init_allowance_tables()
+    ensure_initialised()
     profile = get_profile(pid)
     if not profile:
         raise AllowanceError(404, 'No such profile.')
+    try:
+        wanted_version = int(profile_version or 0)
+    except (TypeError, ValueError):
+        raise AllowanceError(400, 'profile_version must be an integer.')
+    if wanted_version <= 0:
+        raise AllowanceError(
+            400, 'profile_version is required: reload the preview.',
+            {'code': 'profile_version_required'})
+    if wanted_version != int(profile['version']):
+        raise AllowanceError(
+            409, 'The profile changed since the preview; reload it.',
+            {'code': 'profile_changed',
+             'profile_version': int(profile['version'])})
+    # One registry read for every template. A failed read refuses the apply
+    # before anything is revoked.
+    registry = _ha_registry()
     prepared = []
     for t in profile['templates']:
         domain = (t.get('domain') or '').strip().lower()
         service = (t.get('service') or '').strip().lower()
         entities = list(t.get('entities') or [])
         if t.get('label_id'):
-            entities = _resolve_label(t['label_id'], domain)
+            entities = _resolve_label(t['label_id'], domain, registry)
             if not entities:
                 raise AllowanceError(400, 'Label %r has no %s entities.' %
                                      (t['label_id'], domain))
-        prepared.append((t, domain, service, entities))
-    from db.core import db_conn
+        entities, pins = _validate_allowance(
+            domain, service, entities,
+            rate_per_hour=t.get('rate_per_hour') or 0,
+            window=t.get('window') or '', risk_ack=risk_ack,
+            registry=registry)
+        prepared.append((t, domain, service, entities, pins))
     # "Update agents": a re-apply replaces this agent's allowances from the
-    # same profile. Revoke (never delete) the old ones so two versions cannot
-    # both match and turn every call into an ambiguous card.
+    # same profile. The revoke and every insert share one BEGIN IMMEDIATE, so
+    # a failure leaves the agent's old rows exactly as they were.
+    now = _now()
+    created_ids = []
+    revoked_ids = []
     with db_conn() as conn:
-        old_rows = conn.execute(
-            'SELECT id FROM allowances WHERE agent_id = ? AND profile_id = ? '
-            'AND revoked_at = 0', (int(agent_id), pid)).fetchall()
-    for old_row in old_rows:
-        revoke_allowance(actor, old_row['id'])
-    for t, domain, service, entities in prepared:
-        if not ceiling_allows(INTEGRATION, domain, service):
-            raise AllowanceError(400, 'The ceiling does not allow %s.%s.' %
-                                 (domain, service))
-        validate_entity_set(domain, entities)
+        try:
+            conn.execute('BEGIN IMMEDIATE')
+            current = conn.execute(
+                'SELECT version FROM allowance_profiles WHERE id = ?',
+                (pid,)).fetchone()
+            if not current or int(current['version']) != wanted_version:
+                conn.rollback()
+                live = get_profile(pid)
+                raise AllowanceError(
+                    409, 'The profile changed since the preview; reload it.',
+                    {'code': 'profile_changed',
+                     'profile_version': int((live or profile)['version'])})
+            old_rows = conn.execute(
+                'SELECT id FROM allowances WHERE agent_id = ? AND profile_id = ? '
+                'AND revoked_at = 0', (int(agent_id), pid)).fetchall()
+            for old_row in old_rows:
+                conn.execute(
+                    'UPDATE allowances SET revoked_at = ? WHERE id = ? '
+                    'AND revoked_at = 0', (now, old_row['id']))
+                revoked_ids.append(old_row['id'])
+            for t, domain, service, entities, pins in prepared:
+                created_ids.append(_insert_allowance(
+                    conn, agent_id, t.get('name') or profile['name'], domain,
+                    service, entities, pins,
+                    rate_per_hour=t.get('rate_per_hour') or 0,
+                    window=t.get('window') or '',
+                    expires_at=t.get('expires_at') or 0, actor=actor,
+                    now=now, profile_id=pid, profile_version=wanted_version,
+                    source_label_id=t.get('label_id') or ''))
+            conn.commit()
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            raise
+    for old_id in revoked_ids:
+        record_audit_event(
+            'allowance_revoked',
+            details='allowance #%d revoked by %s (profile update)' %
+                    (old_id, actor))
     created = []
-    for t, domain, service, entities in prepared:
-        created.append(create_allowance(
-            actor, agent_id, t.get('name') or profile['name'], domain, service,
-            entities, rate_per_hour=t.get('rate_per_hour') or 0,
-            window=t.get('window') or '', expires_at=t.get('expires_at') or 0,
-            risk_ack=risk_ack, profile_id=pid,
-            profile_version=profile['version'], source_label_id=t.get('label_id') or ''))
-    return {'profile_id': pid, 'version': profile['version'], 'created': created}
+    for i, aid in enumerate(created_ids):
+        _t, domain, service, entities, _pins = prepared[i]
+        created.append(get_allowance(aid))
+        record_audit_event(
+            'allowance_created',
+            details='allowance #%d by %s: %s %s.%s on %d entities '
+                    '(profile #%d v%d)%s'
+                    % (aid, actor, prepared[i][0].get('name') or profile['name'],
+                       domain, service, len(entities), pid, wanted_version,
+                       ' (risky confirmed)' if risk_ack else ''))
+    record_audit_event(
+        'allowance_profile_applied',
+        details='profile #%d %r version %d applied to agent #%s by %s: '
+                'revoked %s, created %s'
+                % (pid, profile['name'], wanted_version, agent_id, actor,
+                   ','.join(map(str, revoked_ids)) or 'none',
+                   ','.join(map(str, created_ids)) or 'none'))
+    return {'profile_id': pid, 'version': wanted_version, 'created': created}
 
 
 # ── AZ2: an approved config write suspends what it can redefine ────────────
 
 _ENTITY_SCAN = re.compile(r'\b([a-z_]+)\.([a-z0-9_]+)\b')
+# BX3: the modern `template:` form puts the domain key behind a list dash and
+# derives the entity id from `name`/`unique_id`, so it never appears as a
+# plain `domain.entity` token. Both `template:` and `- switch:` are unmapped.
 _YAML_DOMAIN_BLOCK = re.compile(
-    r'^\s*(light|switch|cover|climate|fan|media_player|input_boolean)\s*:',
+    r'^\s*(?:-\s*)?(light|switch|cover|climate|fan|media_player|'
+    r'input_boolean|template)\s*:',
     re.MULTILINE)
 
 
@@ -1054,10 +1231,53 @@ def on_config_write(actor, path, content):
     return {'suspended': count, 'entities': sorted(found)}
 
 
+def on_config_restore(actor, path):
+    """AZ2: a restore replaces an unseen file, so treat it as unmapped.
+
+    The handler cannot see the restored content, so every live HA allowance is
+    suspended with `config_write_unmapped` and the operator re-confirms.
+    """
+    from db.audit import record_audit_event
+    n = _suspend_all(actor, 'config_write_unmapped',
+                     'config restore %s' % path)
+    record_audit_event(
+        'allowance_config_write_scanned',
+        details='%s: restore content unmapped, suspended all (%d)' % (path, n))
+    return {'suspended': n, 'reason': 'config_write_unmapped'}
+
+
+def on_config_write_failed(actor, path, exc):
+    """AZ2 fail-closed path: a scan that raised suspends every HA allowance.
+
+    If the suspension itself fails, one `allowance_config_write_failed` row is
+    written instead (and never a traceback in the tool result).
+    """
+    from db.audit import record_audit_event
+    why = str(exc)[:200] or exc.__class__.__name__
+    try:
+        n = _suspend_all(actor, 'config_write_unmapped',
+                         'config write %s (scan failed: %s)' % (path, why))
+        record_audit_event(
+            'allowance_config_write_scanned',
+            details='%s: scan failed (%s), suspended all (%d)' % (path, why, n))
+        return {'suspended': n, 'reason': 'config_write_unmapped',
+                'error': why}
+    except Exception:
+        try:
+            record_audit_event(
+                'allowance_config_write_failed',
+                details='%s: scan failed (%s) and the fail-closed suspension '
+                        'also failed' % (path, why))
+        except Exception:
+            pass
+        return {'suspended': 0, 'reason': 'config_write_unmapped',
+                'error': why}
+
+
 # ── The label and registry refresh (accept-to-join) ───────────────────────
 
-def _resolve_label_pins(label_id, domain):
-    registry = _ha_registry()
+def _resolve_label_pins(label_id, domain, registry=None):
+    registry = registry if registry is not None else _ha_registry()
     out = []
     for ent, reg in registry.items():
         if label_id in (reg.get('labels') or []) and ent.startswith(domain + '.'):
@@ -1065,11 +1285,71 @@ def _resolve_label_pins(label_id, domain):
     return sorted(out, key=lambda p: p['entity_id'])
 
 
-def refresh_labels(actor='refresh'):
-    """Re-resolve label-sourced allowances: leavers drop, joiners wait.
+def _pin_changed(registry, pin):
+    """A pin is bad when its entity is gone or its registry id moved."""
+    ent = (pin or {}).get('entity_id')
+    reg = registry.get(ent)
+    if not reg:
+        return True
+    old = (pin or {}).get('registry_id')
+    new = reg.get('id')
+    return bool(old and new and old != new)
 
-    A failed registry read changes nothing. A changed registry id suspends
-    the allowance until the operator resumes it (BD5).
+
+def _write_entity_list(conn, row, pins, pending):
+    """Rewrite the pins and the duplicate conditions list in one UPDATE.
+
+    Matching reads the pins; the conditions copy keeps the page and any older
+    reader consistent. BX1: both columns move together or neither does.
+    """
+    import json as _json
+    cond = _json.loads(row['conditions_json'] or '{}')
+    cond = dict(cond)
+    cond['data.entity_id'] = {'in': [p['entity_id'] for p in pins]}
+    conn.execute(
+        'UPDATE allowances SET conditions_json = ?, entities_json = ?, '
+        'pending_json = ? WHERE id = ?',
+        (_json.dumps(cond, sort_keys=True), _json.dumps(pins),
+         _json.dumps(pending), row['id']))
+
+
+def refresh_pins(actor='config-write'):
+    """Re-read every live HA allowance's registry pins (BD5/BX2).
+
+    Runs on the periodic refresh and straight after an approved registry or
+    config-entry write. A missing or changed registry id suspends the
+    allowance with `registry_changed`; it never deletes it.
+    """
+    from db.audit import record_audit_event
+    import json as _json
+    try:
+        registry = _ha_registry()
+    except AllowanceError as exc:
+        return {'checked': 0, 'error': str(exc)}
+    suspended = []
+    for row in _live_ha_allowances():
+        if row['suspended_at']:
+            continue
+        pins = _json.loads(row['entities_json'] or '[]')
+        if any(_pin_changed(registry, p) for p in pins):
+            suspend_allowance(actor, row['id'], 'registry_changed')
+            suspended.append(row['id'])
+    if suspended:
+        record_audit_event(
+            'allowance_registry_refresh',
+            details='registry pins changed: suspended %s'
+                    % ','.join(map(str, suspended)))
+    return {'checked': len(suspended), 'suspended': suspended, 'error': ''}
+
+
+def refresh_labels(actor='refresh'):
+    """Re-resolve every live HA allowance's pins and labels (BD5/BX2).
+
+    * every row, label-sourced or hand-made, has its registry pins re-read; a
+      missing or changed id suspends it (`registry_changed`);
+    * a label entity that **left** drops out of the pins at once;
+    * a label entity that **joined** waits in `pending_json` until accepted.
+    A failed registry read changes nothing.
     """
     from db.core import db_conn
     from db.audit import record_audit_event
@@ -1085,34 +1365,41 @@ def refresh_labels(actor='refresh'):
         return {'checked': 0, 'error': str(exc)}
     changed = 0
     for row in _live_ha_allowances():
-        label = row.get('source_label_id') or ''
-        if not label or row['suspended_at']:
+        if row['suspended_at']:
             continue
+        label = row.get('source_label_id') or ''
         cond = _json.loads(row['conditions_json'] or '{}')
         domain = (cond.get('domain', {}).get('in') or [''])[0]
-        stored = {p['entity_id']: p for p in _json.loads(row['entities_json'] or '[]')}
-        current = {p['entity_id']: p for p in _resolve_label_pins(label, domain)}
+        stored_list = _json.loads(row['entities_json'] or '[]')
+        stored = {p['entity_id']: p for p in stored_list}
+        if not label:
+            # BX2: a hand-made allowance is pinned too. Entity-id reuse is the
+            # exact case: delete a plug, rename a new one to the same id.
+            if any(_pin_changed(registry, p) for p in stored.values()):
+                suspend_allowance(actor, row['id'], 'registry_changed')
+                changed += 1
+            continue
+        current = {p['entity_id']: p
+                   for p in _resolve_label_pins(label, domain, registry)}
         left = set(stored) - set(current)
         joined = set(current) - set(stored)
         bad = [e for e, p in stored.items()
-               if e in current and p.get('registry_id')
-               and current[e].get('registry_id')
-               and p['registry_id'] != current[e]['registry_id']]
+               if e in current and _pin_changed(registry, p)]
         if bad:
             suspend_allowance(actor, row['id'], 'registry_changed')
+            changed += 1
             continue
         if not left and not joined:
             continue
         pins = [stored[e] for e in stored if e not in left]
-        pending = _json.loads(row.get('pending_json') or '[]')
+        pending = [p for p in _json.loads(row.get('pending_json') or '[]')
+                   if p.get('entity_id') not in left]
         have = {p['entity_id'] for p in pending}
         for e in sorted(joined):
             if e not in have:
                 pending.append(current[e])
         with db_conn() as conn:
-            conn.execute('UPDATE allowances SET entities_json = ?, '
-                         'pending_json = ? WHERE id = ?',
-                         (_json.dumps(pins), _json.dumps(pending), row['id']))
+            _write_entity_list(conn, row, pins, pending)
             conn.commit()
         record_audit_event(
             'allowance_label_refresh',
@@ -1123,17 +1410,27 @@ def refresh_labels(actor='refresh'):
     return {'checked': changed, 'error': ''}
 
 
-def accept_join(actor, aid):
-    """Accept the entities a label gained since the allowance was saved."""
+def accept_join(actor, aid, risk_ack=False):
+    """Accept the entities a label gained, after the save path's checks.
+
+    BX5: joiners go through the ceiling, the 64-entity cap and the same
+    second risk confirmation as a new allowance, before anything is pinned.
+    """
     from db.core import db_conn
     from db.audit import record_audit_event
     import json as _json
     row = get_allowance(aid)
-    if not row:
+    if not row or row.get('revoked_at'):
         raise AllowanceError(404, 'No such allowance.')
     pending = _json.loads(row.get('pending_json') or '[]')
     if not pending:
         raise AllowanceError(400, 'Nothing to accept.')
+    cond = _json.loads(row['conditions_json'] or '{}')
+    domain = (cond.get('domain', {}).get('in') or [''])[0]
+    service = (cond.get('service', {}).get('in') or [''])[0]
+    if not ceiling_allows(INTEGRATION, domain, service):
+        raise AllowanceError(400, 'The ceiling no longer allows %s.%s.' %
+                             (domain, service))
     registry = _ha_registry()
     now_ok = []
     for p in pending:
@@ -1144,14 +1441,37 @@ def accept_join(actor, aid):
     if not now_ok:
         raise AllowanceError(400, 'The entities changed again; refresh first.')
     pins = _json.loads(row['entities_json'] or '[]') + now_ok
+    if len({p['entity_id'] for p in pins}) > 64:
+        raise AllowanceError(400, 'At most 64 entities per allowance.')
+    accepted = [p['entity_id'] for p in now_ok]
+    risky_row, risky_entities = _risk_for(domain, accepted)
+    if (risky_row or risky_entities) and not risk_ack:
+        raise AllowanceError(
+            400, 'Accepting these entities needs a second risk confirmation.',
+            {'code': 'risk_ack_required', 'risky_row': risky_row,
+             'risky_entities': risky_entities})
+    rest = [p for p in pending if p.get('entity_id') not in set(accepted)]
     with db_conn() as conn:
-        conn.execute('UPDATE allowances SET entities_json = ?, pending_json = ? '
-                     'WHERE id = ?', (_json.dumps(pins), '[]', aid))
-        conn.commit()
+        try:
+            conn.execute('BEGIN IMMEDIATE')
+            live = conn.execute(
+                'SELECT * FROM allowances WHERE id = ? AND revoked_at = 0',
+                (aid,)).fetchone()
+            if not live:
+                conn.rollback()
+                raise AllowanceError(404, 'No such allowance.')
+            _write_entity_list(conn, dict(live), pins, rest)
+            conn.commit()
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            raise
     record_audit_event('allowance_joined_accepted',
                        details='allowance #%d accepted %s' %
-                               (aid, ','.join(p['entity_id'] for p in now_ok)))
-    return {'accepted': [p['entity_id'] for p in now_ok]}
+                               (aid, ','.join(accepted)))
+    return {'accepted': accepted}
 
 
 def profile_diff(pid, agent_id):

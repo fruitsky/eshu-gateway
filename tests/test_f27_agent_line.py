@@ -23,7 +23,8 @@ def test_the_agent_line_is_generic(auth_client, agent_id, ha):
     assert a.agent_allowance_line(agent_id) == ''
     ids = a.enabled_ids() + ['cover.open_cover']
     auth_client.put('/api/allowances/ceiling', json={
-        'enabled': ids, 'risk_ack': True, 'confirm': True})
+        'enabled': ids, 'risk_ack': True, 'confirm': True,
+        'set_hash': a.set_hash()})
     auth_client.post('/api/allowances', json={
         'agent_id': agent_id, 'name': 'Garage', 'domain': 'cover',
         'service': 'open_cover', 'entities': ['cover.garage'],

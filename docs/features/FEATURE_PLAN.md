@@ -17792,8 +17792,10 @@ direction, and it is not a service anyone allows).
    * only `cover.stop_cover` and `media_player.media_stop` set it, and a
      test asserts that exact pair;
    * the exemption covers that one built-in word only. Any other built-in
-     word, and **every** operator-added word, still caps the row, so an
-     operator who adds `stop` themselves gets both rows switched off.
+     word, and **every** operator-added word, still caps the row. `stop`
+     is built in, so `add_word('stop')` is refused: an operator who wants
+     it to cap both rows unticks `cover.stop_cover` and
+     `media_player.media_stop` themselves.
    * `stop` stays destructive everywhere else (Proxmox `stop_vm`, Jellyfin
      `stop_task`).
    * Halting a cover or a player is the safe direction. Dropping Stop
@@ -17872,8 +17874,10 @@ BV1/BV2 are folded as follows.
   `exempt_words: ["stop"]` naming the **built-in** word it is exempt from.
   Only `cover.stop_cover` and `media_player.media_stop` set it (a test pins
   that pair). Every other built-in word and **every operator-added word**
-  still caps the row, so an operator who adds `stop` gets both rows
-  switched off. `stop` stays destructive everywhere else.
+  still caps the row. `stop` is built in, so `add_word('stop')` is
+  refused; an operator who wants it to cap both rows unticks
+  `cover.stop_cover` and `media_player.media_stop` themselves. `stop`
+  stays destructive everywhere else.
 * **A pending card is not re-checked (answer 2).** The ceiling bounds
   pre-approvals; the approval path is unchanged. "The ceiling does not
   gate" keeps its meaning.
@@ -18136,6 +18140,88 @@ Re-read scope once BX1–BX6 are in: the refresh/accept path and its match
 tests, the all-rows pin check, the AZ2 hook (restore, fail-closed,
 `template:`), `apply_profile` ordering and transaction, accept-join's ack,
 and the PUT ceiling.
+
+
+### Round 6 — implementer notes for the BX fixes (2026-11-17)
+
+**Status: BX1–BX6 and the four named nits are in on
+`feat/f27-allowances-code`; this round stops for the Security re-read.**
+
+**BX1 — one entity list.** `entities_json` (the pins) is now what `_matches`
+reads; `conditions_json['data.entity_id']` is written only as a display copy.
+`refresh_labels` and `accept_join` rewrite **both** columns in one UPDATE
+(`_write_entity_list`), and refresh/accepted changes are visible to
+`match_and_claim` on the next call. The label test now asserts through
+`match_and_claim`: the leaver gets `None`, the held joiner gets `None`, and
+the accepted joiner matches.
+
+**BX2 — every live HA allowance is pinned.** `refresh_labels` no longer
+skips rows without `source_label_id`: every live HA row has
+`_pin_changed()` run over its pins, and a missing or changed registry id
+suspends with `registry_changed`. The plain-entity half of the test is
+re-enabled (no more `if False`). `refresh_pins()` is the pin-only pass used
+straight after an approved write; `tool_runner.note_ha_registry_write()`
+runs it after an approved/immediate HA `ws_write` or generic write whose
+command/path is `config/entity_registry/*` or `config/config_entries/*`, and
+the approval executor calls it on the same turn. The F11 handler also runs
+it if a write ever targets one of those paths.
+
+**BX3 — AZ2 gaps.** `ha_config_restore` now calls
+`allowances.on_config_restore()`, which suspends every live HA allowance with
+`config_write_unmapped`. The write hook's `except Exception: pass` is gone:
+a scan that raises calls `on_config_write_failed()`, which suspends every HA
+allowance and writes `allowance_config_write_scanned`; if that suspension
+also fails, one `allowance_config_write_failed` row is written instead.
+`_YAML_DOMAIN_BLOCK` now includes `template` and accepts an optional `-`
+before the domain key, so `template:` / `- switch:` are unmapped.
+
+**BX4 — apply validates first.** `apply_profile` resolves labels, then runs
+ceiling, entity, risk and registry-pin checks for every template with one
+registry read, and only then starts one `BEGIN IMMEDIATE` transaction that
+revokes the old rows and inserts the new ones. The transaction re-reads the
+profile version; a failure rolls the revoke back. The request carries
+`profile_version` (required; a missing/zero value is a 400
+`profile_version_required`), and a stale value is a 409 `profile_changed`.
+The UI sends the version the preview showed.
+
+**BX5 — accept-join is a widening.** `accept_join` re-checks the ceiling,
+refuses a total above 64 entities, and runs `_risk_for` on the joiners: a
+risky catalogue row or a garage/gate/door/lock-like joiner returns
+`risk_ack_required` until the operator confirms. The route accepts an
+optional `risk_ack` body (a body-less call is treated as `false`); the UI
+shows the same second confirmation as the save path. Both columns are
+rewritten in one transaction.
+
+**BX6 — the stale-form check is the server's.** `apply_ceiling` refuses a
+PUT with an empty `set_hash` (400 `set_hash_required`). The current set and
+its hash are read, compared and written inside one `BEGIN IMMEDIATE`; the
+risk-ack check and the enabling/disabling set are computed from that same
+read, so two saves cannot both pass the compare. The UI already sent the
+hash.
+
+**Nits.**
+* The design's answer-1 sentence now says the truth: `stop` is built in, so
+  `add_word('stop')` is refused; an operator who wants it to cap both rows
+  unticks them. The code's `add_word` no longer applies the built-in
+  `exempt_words` filter to an operator word, so it agrees with
+  `is_destructive` (an operator word is never exempt); a test simulates
+  `stop` as an operator word and asserts both rows are switched off.
+* `integration_proxy.DESTRUCTIVE_VERBS`'s comment now describes the widened
+  list and names the behaviour change; `CHANGELOG.md` [Unreleased] records
+  that generic writes carrying those verbs now get a card under
+  `destructive`.
+* The refresh-thread comment now says five minutes (matching
+  `time.sleep(300)`).
+* The low-priority "one audit row per allowance per hour" nit is not in
+  this round (it is not in the operator's list).
+
+**Tests added/updated.** `tests/test_f27_allowances.py` (BX1 match through
+the engine, BX2 plain pin + post-write pin pass, BX3 restore/fail-closed/
+`template:`/dash form, BX4 validate-before-revoke + version binding + rollback,
+BX5 cap/ceiling/risk, the operator-word nit) and `tests/test_f27_ceiling.py`
+(BX6 required hash + stale hash). Each new test was run against the pre-fix
+code and failed; the suite is green after the fix.
+
 
 ## Chunk X3 — Integrations page and agent policy modal pass · slug `integrations-ui` · dashboard UI · after F27
 

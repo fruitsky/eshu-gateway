@@ -143,9 +143,13 @@ def generic_write_envelope(res: dict, method: str, path: str, data=None,
     return json.dumps(env)
 
 
-# Hard-to-undo mutations. Disruptive-but-reversible verbs (restart, reboot,
-# stop, toggle) are deliberately excluded so routine writes auto-run under the
-# 'destructive' gate mode. A single constant — trivial to tune per installation.
+# Hard-to-undo mutations, plus the disruptive-but-reversible verbs the
+# operator chose to add (F27 answer 6: stop, restart, reboot, shutdown,
+# disable, unlock, disarm). Under gate mode 'destructive' a generic write whose
+# path/command carries any of them now gets a card — a deliberate behaviour
+# change (see CHANGELOG [Unreleased]). `toggle` and `open` stay out: `open` is
+# covered by the never-service list, and `open_cover` is the safe direction.
+# A single constant — trivial to tune per installation.
 # BD1 + AZ6: `_` separates words, so `alarm_disarm` and `lock.open` are
 # marked; `open` itself is not here (F27 BV1: it would cap open_cover).
 DESTRUCTIVE_VERBS = ('delete', 'remove', 'purge', 'format', 'reset', 'stop',

@@ -10565,7 +10565,8 @@ function _allowanceConditions(row) {
     var c = JSON.parse(row.conditions_json || '{}');
     var d = (c.domain && c.domain['in'] && c.domain['in'][0]) || '?';
     var s = (c.service && c.service['in'] && c.service['in'][0]) || '?';
-    var ents = (c['data.entity_id'] && c['data.entity_id']['in']) || [];
+    // BX1: the pins are the one entity list; conditions_json is a display copy.
+    var ents = JSON.parse(row.entities_json || '[]') || [];
     return d + '.' + s + ' on ' + ents.length + ' entit' + (ents.length === 1 ? 'y' : 'ies');
   } catch (e) { return '—'; }
 }
@@ -10787,20 +10788,24 @@ function renderProfiles(rows) {
   }).join('');
 }
 
-async function applyProfile(pid) {
+async function applyProfile(pid, version) {
   const sel = document.getElementById('allowance-agent');
   if (!sel || !sel.value) { alert('Pick an agent first.'); return; }
+  if (!version) { alert('Reload the preview before applying: the profile version is missing.'); return; }
   const r = await authFetch('/api/allowances/profiles/' + pid + '/apply', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ agent_id: parseInt(sel.value, 10), risk_ack: false })
+    body: JSON.stringify({ agent_id: parseInt(sel.value, 10), risk_ack: false,
+                           profile_version: version })
   });
   if (!r.ok) {
     const d = await r.json().catch(function() { return {}; });
+    if (d.detail && d.detail.code === 'profile_changed') { alert('The profile changed. Reload the preview.'); return; }
     if (d.detail && d.detail.code === 'risk_ack_required') {
       if (confirm((d.detail.message || 'Risky rows') + '\n\nApply anyway?')) {
         const r2 = await authFetch('/api/allowances/profiles/' + pid + '/apply', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ agent_id: parseInt(sel.value, 10), risk_ack: true })
+          body: JSON.stringify({ agent_id: parseInt(sel.value, 10), risk_ack: true,
+                                 profile_version: version })
         });
         if (r2.ok) { fetchAllowances(); return; }
       }
@@ -10866,10 +10871,25 @@ async function saveProfile() {
 }
 
 
-async function acceptJoin(id) {
-  if (!confirm('Accept the entities this label gained? They become part of the allowance.')) return;
-  const r = await authFetch('/api/allowances/' + id + '/accept-join', { method: 'POST' });
-  if (!r.ok) alert('Could not accept: ' + ((await r.json()).detail || 'refused'));
+async function acceptJoin(id, riskAck) {
+  if (!riskAck && !confirm('Accept the entities this label gained? They become part of the allowance.')) return;
+  const r = await authFetch('/api/allowances/' + id + '/accept-join', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ risk_ack: !!riskAck })
+  });
+  if (!r.ok) {
+    const d = await r.json().catch(function() { return {}; });
+    if (!riskAck && d.detail && d.detail.code === 'risk_ack_required') {
+      const risky = (d.detail.risky_entities || []).map(function(e) {
+        return e.entity_id + ' (' + e.device_class + ')';
+      }).join(', ');
+      if (confirm((d.detail.message || 'Risky entities') + (risky ? '\n' + risky : '') +
+                  '\n\nAccept them?')) return acceptJoin(id, true);
+      return;
+    }
+    alert('Could not accept: ' + ((d.detail && (d.detail.message || d.detail)) || 'refused'));
+    return;
+  }
   fetchAllowances();
 }
 
@@ -10905,17 +10925,24 @@ function closeProfileDiff() {
 async function applyPreviewedProfile() {
   if (!_profilePreview) return;
   const sel = document.getElementById('allowance-agent');
+  const version = _profilePreview.profile_version;
   const r = await authFetch('/api/allowances/profiles/' + _profilePreview.profile_id + '/apply', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ agent_id: parseInt(sel.value, 10), risk_ack: false })
+    body: JSON.stringify({ agent_id: parseInt(sel.value, 10), risk_ack: false,
+                           profile_version: version })
   });
   if (!r.ok) {
     const d = await r.json().catch(function() { return {}; });
+    if (d.detail && d.detail.code === 'profile_changed') {
+      alert('The profile changed since this preview. Close it and reload the preview.');
+      return;
+    }
     if (d.detail && d.detail.code === 'risk_ack_required') {
       if (confirm((d.detail.message || 'Risky rows') + '\n\nApply anyway?')) {
         const r2 = await authFetch('/api/allowances/profiles/' + _profilePreview.profile_id + '/apply', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ agent_id: parseInt(sel.value, 10), risk_ack: true })
+          body: JSON.stringify({ agent_id: parseInt(sel.value, 10), risk_ack: true,
+                                 profile_version: version })
         });
         if (r2.ok) { closeProfileDiff(); fetchAllowances(); }
         return;

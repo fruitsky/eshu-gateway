@@ -357,8 +357,8 @@ def on_startup():
         print("=" * 60 + "\n")
     else:
         print(f"Eshu Gateway Dashboard {DASHBOARD_VERSION} started (password-protected)")
-    # F27: re-resolve label-sourced allowances (accept-to-join) once a
-    # minute. A failed registry read changes nothing.
+    # F27: re-resolve every live allowance's label and registry pins (BX2)
+    # every five minutes. A failed registry read changes nothing.
     def _allowance_refresh_loop():
         while True:
             time.sleep(300)
@@ -652,6 +652,14 @@ class ProfilePayload(BaseModel):
 
 class ApplyProfilePayload(BaseModel):
     agent_id: int
+    risk_ack: bool = False
+    # BX4: the version the preview showed; a stale value is a 409.
+    profile_version: int = 0
+
+
+class AcceptJoinPayload(BaseModel):
+    # BX5: joiners may be garage/gate/door/lock-like, so the second risk
+    # confirmation is server-checked like the save path.
     risk_ack: bool = False
 
 
@@ -4850,6 +4858,11 @@ def approve_integration_call(call_id: int, request: Request):
                 execution_id=call.get('execution_id') or '',
                 reason=call.get('reason') or '', approval='approved',
                 decided_at=decided_at, decided_by='operator')
+            # BD5/BX2: an approved registry or config-entry write can rename
+            # an entity; re-read the pins before this approval returns.
+            from core.tool_runner import note_ha_registry_write
+            note_ha_registry_write(
+                integration, payload.get('command') or tool.get('path_template'))
         elif tool.get('generic'):
             method = payload.get('method') or 'POST'
             path = payload.get('path') or ''
@@ -4861,6 +4874,8 @@ def approve_integration_call(call_id: int, request: Request):
                                           reason=call.get('reason') or '',
                                           approval='approved', decided_at=decided_at,
                                           decided_by='operator')
+            from core.tool_runner import note_ha_registry_write
+            note_ha_registry_write(integration, path)
             if not result.get('error'):
                 verified = None
                 vpath = payload.get('verify_path')
@@ -5037,12 +5052,17 @@ def revoke_allowance_endpoint(aid: int, request: Request):
 
 
 @app.post("/api/allowances/{aid}/accept-join")
-def accept_allowance_join_endpoint(aid: int, request: Request):
+def accept_allowance_join_endpoint(aid: int, request: Request,
+                                   payload: AcceptJoinPayload = AcceptJoinPayload()):
     _check_session(request)
     try:
-        return allowances.accept_join('operator', aid)
+        return allowances.accept_join('operator', aid,
+                                      risk_ack=payload.risk_ack)
     except allowances.AllowanceError as exc:
-        raise HTTPException(status_code=exc.status, detail=exc.detail)
+        detail = exc.detail
+        if exc.extra:
+            detail = {'message': exc.detail, **exc.extra}
+        raise HTTPException(status_code=exc.status, detail=detail)
 
 
 @app.post("/api/allowances/{aid}/resume")
@@ -5086,7 +5106,8 @@ def apply_profile_endpoint(pid: int, payload: ApplyProfilePayload, request: Requ
     _check_session(request)
     try:
         return allowances.apply_profile('operator', pid, payload.agent_id,
-                                        risk_ack=payload.risk_ack)
+                                        risk_ack=payload.risk_ack,
+                                        profile_version=payload.profile_version)
     except allowances.AllowanceError as exc:
         detail = exc.detail
         if exc.extra:
