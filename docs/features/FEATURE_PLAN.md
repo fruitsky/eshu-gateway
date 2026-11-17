@@ -18309,6 +18309,19 @@ work for config entries:
   * Add the WS prefix to the matcher.
 * An entity-registry rename, the reuse case, is covered now.
 
+**BZ3 implementation (2026-11-17).** `config_entries/*` (WS) is now a
+registry-write path as well as `config/config_entries/*` (REST). An approved
+config-entry write calls `allowances.on_config_entry_write` instead of a pin
+refresh: it reads `entry_id`/`config_entry_id` from the path, query or
+body, then suspends every live allowance whose stored entities belong to that
+entry in the current registry, with reason `config_entry_changed`. If no
+single entry id can be read, or the registry cannot be read, every HA
+allowance is suspended with the same reason. The entity-registry path still
+does `refresh_pins`. Tests in `tests/test_f27_config_entry.py` cover the WS
+matcher, the template-helper options edit, an unidentifiable write (suspend
+all), an unrelated entry (leave live) and the real
+`note_ha_registry_write` hook.
+
 **Merge note.** E2E-1's CA5 adds `integration_calls.excluded`. Whichever
 branch merges second must add `COALESCE(excluded, 0) = 0` to F27's two
 `allowance:%` queries (the statistics series and the session card).
