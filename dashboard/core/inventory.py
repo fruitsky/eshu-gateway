@@ -108,7 +108,12 @@ def _call_tool(integration, tool_name, args):
             except ValueError:
                 raise SourceError('bad_json')
             if isinstance(data, dict) and data.get('error'):
-                raise SourceError(str(data.get('error')))
+                # Keep the handler's message: the generic code alone hid the
+                # real reason (I1/I2). e.g. `local_dns_records_failed:
+                # Tool not found or disabled`.
+                code = str(data.get('error') or '').strip()
+                message = str(data.get('message') or '').strip()
+                raise SourceError('%s: %s' % (code, message) if message else code)
             return data
         if transport == 'ws':
             res = execute_ws_call(
@@ -318,11 +323,18 @@ def _omada_source():
             continue
         items = []
         for site in sites[:10]:
-            if not isinstance(site, dict) or not site.get('id'):
+            if not isinstance(site, dict):
+                continue
+            # Omada's list_sites row uses `siteId`; older/hand-written fakes
+            # used `id`. Accept both (and site_id) instead of silently
+            # skipping every site, which left list_known_clients uncalled.
+            site_id = (site.get('siteId') or site.get('id')
+                       or site.get('site_id') or '')
+            if not site_id:
                 continue
             try:
                 data = _call_tool(integration, 'list_known_clients',
-                                  {'siteId': site['id'], 'pageSize': 500})
+                                  {'siteId': site_id, 'pageSize': 500})
             except SourceError as exc:
                 failures.append((integration['name'], 'omada', str(exc)))
                 continue
