@@ -2581,10 +2581,28 @@ function renderEmptyState(total) {
    expires soonest, then the oldest. Same order for the hero and the list. */
 var _queueCursor = 0;
 
+/* An integration call's arguments as the operator reads them on a card.
+   A nested value (an HA `data` or `payload` object, a list) is shown as
+   JSON, never as "[object Object]": the operator must see what they
+   approve. Plain strings stay unquoted, as before. */
+function formatCallArgs(payload) {
+  var p = payload || {};
+  return Object.keys(p).map(function (k) {
+    var v = p[k];
+    var text;
+    if (typeof v === 'string') text = v;
+    else {
+      try { text = JSON.stringify(v); } catch (e) { text = String(v); }
+      if (text === undefined) text = String(v);
+    }
+    return k + '=' + text;
+  }).join(', ');
+}
+
 function queueModel(item) {
   var d = item.data;
   if (item.type === 'integration') {
-    var args = Object.keys(d.payload || {}).map(function(k){ return k + '=' + d.payload[k]; }).join(', ');
+    var args = formatCallArgs(d.payload);
     return {
       domId: 'int-' + Number(d.id), ttl: Infinity, createdAt: d.created_at || 0, urgent: false,
       human: d.integration + ' / ' + d.tool,
@@ -3396,7 +3414,8 @@ async function openSessionModal(sid) {
   var items = [];
   ssh.forEach(function (r) { items.push({ ts: r.created_at || 0, html: smSshDetailCard(r) }); });
   mcp.forEach(function (c) { items.push({ ts: c.created_at || 0, html: smMcpDetailCard(c) }); });
-  items.sort(function (a, b) { return a.ts - b.ts; });
+  // Newest first: the operator opens a session to see what just happened.
+  items.sort(function (a, b) { return b.ts - a.ts; });
   cmdsEl.innerHTML = items.length
     ? items.map(function (i) { return i.html; }).join('')
     : '<div class="sm-mcp-none">No activity recorded for this session.</div>';
@@ -4272,7 +4291,7 @@ async function loadSessionPlanIntoModal(sid) {
 function renderJitItem(item) {
   if (item.type === 'integration') {
       var c = item.data;
-      var args = Object.keys(c.payload || {}).map(function(k) { return k + '=' + c.payload[k]; }).join(', ');
+      var args = formatCallArgs(c.payload);
       var cDom = 'int-' + Number(c.id);
       return '<div class="jit-ticket" data-id="' + esc(cDom) + '" onclick="openContextPanel(' + escJs(cDom) + ')">' +
         '<button type="button" class="' + ccCheckClass(cDom) + '" role="checkbox" aria-checked="' + ccCheckAria(cDom) + '" aria-label="Select request" onclick="event.stopPropagation();toggleBulkSelect(' + escJs(cDom) + ',event)"></button>' +
