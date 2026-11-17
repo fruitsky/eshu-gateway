@@ -20829,3 +20829,47 @@ Chunks are done **in the order column**; each new chunk branches from the
 updated `feature-roadmap` after the previous one is merged. A design-first
 chunk's design note may be written while the chunk before it is with a
 reviewer; its code still waits for its turn.
+
+### Security review of the window-token audit fix (`fix/window-token-audit` @ 91cdf82)
+
+**Approved to merge.** Code text read only; nothing was run.
+* All four rows now carry `token_fp`, the first eight hex characters of
+  the token's SHA-256: `window_created`, `window_claimed`,
+  `window_request_approved` and `window_deleted`.
+* Window tokens are 24 characters from `[A-Za-z0-9]`, about 143 bits, so
+  an 8-hex fingerprint gives nothing usable to someone who could only
+  read the audit log.
+* No other `record_audit_event` call in `main.py` interpolates a window
+  token. The test covers all four event types.
+
+**The migration: yes, write it.**
+* Old rows can hold the tokens of windows that are still active, and
+  `audit_log` is plain rows with no hash chain. A narrow rewrite therefore
+  breaks no integrity property. Your conditions are right: only the four
+  event types, only the token field, one transaction, a count and no
+  token in its own audit row.
+* Add the following:
+  * **Match tightly.** Match `token=([A-Za-z0-9]{1,64})` and
+    `Token ([A-Za-z0-9]{1,64}) claimed`, the same charset the gateway
+    enforces. Replace the match with `token_fp=<sha256[:8]>`.
+  * **Make it idempotent with a settings flag.** Mark it run once it
+    commits, and skip rows that already carry `token_fp=`.
+  * **Leave placeholders alone.** If a row's value is `?`, or empty, as
+    in the old `window_deleted` path, leave it.
+  * **Tell the operator what remains.** Copies made before the migration,
+    such as backups, CSV or JSON audit exports and support bundles, still
+    hold the tokens. The CHANGELOG should say: "if you shared an audit
+    export, delete and re-create your active windows".
+    Offer nothing automatic for those copies.
+* Keep the rows themselves, as you propose. They are the record of who
+  created and approved each window.
+
+**Backlog (not this branch).**
+* Two public routes still carry a window token in the URL path, which
+  lands in the access log:
+  * `POST /api/approved-windows/execute/{token}`, the pre-BJ2 claim route
+    kept for old gateways;
+  * `GET /api/window-by-token/{token}`.
+* Retire the first once the fleet is past BJ2, for example in the X9
+  legacy retirement.
+* Give the second a body or header form, and move E2E-1's C11 onto it.
