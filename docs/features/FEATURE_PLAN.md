@@ -19021,6 +19021,61 @@ consumes it.
 off argv (BE3's BH3): `--data-binary @-` for the body and
 `-H @<(gateway_header)` for the header. That is a should, not a blocker for
 this merge.
+## Chunk X10 — Approved Windows modal redesign · slug `approved-windows-modal` · dashboard UI · after 1.3
+
+### Design note (2026-11-17)
+
+**Problem.** The modal makes the operator choose an hour and a minute from two
+scroll columns, then hides the real schedule in a summary. "Recurring" is the
+default, so the common "now, once" case is easy to create as a daily window by
+mistake. A window saved with the daily schedule is stored as **UTC minutes**
+with a fixed **±2 minute** gateway tolerance, so a 22:50 local choice can read
+back as 21:50 or 23:50 depending on the season — the operator who reported this
+had to reason about UTC to see why it fired when it did.
+
+**Shape of the redesign (UI only; the window still means what it means).**
+
+* **Quick presets at the top:** `Now for 15 min`, `Now for 1 hour`, `Until end
+  of today`, `Custom`. The first three fill a Once window; Custom keeps the
+  typed time/duration. Presets never create a daily window.
+* **Once / Every day chosen explicitly, Once the default.** The old
+  Recurring/Single labels are gone.
+* **One typing field, local time.** `HH:MM` (24-hour, the browser's own zone)
+  plus a duration in minutes for Once. The hour/minute scroll columns are
+  removed. Every day has no duration: the gateway's fixed ±2 minute tolerance
+  is the width, and it is said in words rather than left as a UTC footnote.
+* **Stored shape is unchanged.**
+  * Once: `window_start` = the chosen local time as an epoch, `window_end` =
+    start + duration (crossing midnight is just the next epoch), `days_of_week
+    = execution_time = 0`, `expires_at = window_end`.
+  * Every day: `days_of_week = 0` (or the optional day mask), `execution_time`
+    = the chosen local `HH:MM` converted to **UTC minutes**, `window_start =
+    window_end = 0`. The preview shows the local time **and** the stored UTC
+    time so the conversion is visible.
+* **A live one-line preview**, the same text in the modal, the table and an
+  agent request's approval card:
+  `Runs once, today 22:50-23:05 your time, at most 1 execution, on <gateway>.`
+  A daily window says `Runs every day at 22:50 your time (22:50 UTC), within
+  ±2 minutes, at most 1 execution, on <gateway>.` A range that crosses
+  midnight says `today 23:50 to tomorrow 00:20`. All values are operator or
+  gateway text and are escaped at the DOM boundary; the preview function
+  returns plain text.
+* **Agent requests use the same preview.** The queue card and the approval
+  confirmation call the preview function with the request's stored fields; the
+  operator sees the same sentence before approving.
+* **Mobile and desktop.** The preset row wraps, the time/duration pair stacks
+  under ~520 px, and the preview wraps without horizontal scroll. The existing
+  1440/390 harness stays the gate.
+
+**Tests.** `tests/ui/windows_modal.cjs` (Node, loading the shipped `app.js`
+through `tests/fixtures/appjs_loader.js`) checks the preset maths:
+15 min/1 hour/end-of-day, a Once start that crosses midnight, and the local →
+UTC conversion under `TZ=Europe/London` and `TZ=America/New_York`; it also
+pins the preview sentences. `tests/test_x10_windows.py` runs the harness (and
+skips when Node is absent). Screenshots with synthetic data at 1440 and 390.
+
+---
+
 | 18a | X2 | runbooks-page | dashboard UI | **Merged** 2026-11-11 | `feat/x2-runbooks-page` | F13 | |
 | 18b | F27 | allowances | dashboard + MCP | Design first (from live use: P2 caught HA call_service) | `feat/f27-allowances` | F10 (P2), Chunk H, F18 | + security sign-off; next design after F21/F22 code |
 | 18c | X3 | integrations-ui | dashboard UI | Requested 2026-11-12; design after F27 is signed off | `feat/x3-integrations-ui` | F27, F10 (P2) | operator walk-through first |
@@ -19041,6 +19096,7 @@ this merge.
 | 26 | 1.4 | — | gateway stack | **Approved for rollout** 2026-11-15 (security `838d77d`): BH2/BQ2, BQ4, F19, X8 (gateway + dashboard), BS1/BS2; rebased onto X7, Build only; the BS2 install-read nit is fixed | `release/1.4-gw` | X7, F19, RR1 | security approved the whole stack; rollout Seed Edge → dev gateways → Deploy to Fleet |
 | 27 | X8 | gateway-installer-version | dashboard + gateway | **Code complete** 2026-11-14: on `release/1.4-gw` (BR1 folded; the hash is display-only) | `feat/x8-gateway-installer-version` | X7 | security approved; five buckets sum to the gateway count |
 | 28 | X9 | gated-gateway-files | dashboard + gateway | **Design note** 2026-11-14 (BP2): installer-carried vs authenticated channel files; recommends (b) | `feat/x9-gated-gateway-files` | X7, 1.4 | security sign-off before code |
+| 29 | X10 | approved-windows-modal | dashboard UI | **Design note + code** 2026-11-17: presets, Once default, typed local HH:MM + duration, live plain-words preview; agent requests use the same preview | `feat/x10-windows-modal` | — | UI only; no schema or window-meaning change |
 | — | CI fix | ci-environment | gateway + tests | Merged (`f2746ef`); CI pinned to ubuntu-24.04 (`6d58006`) | `fix/ci-environment` | F5 | |
 | — | Buffering | stream-unbuffered | gateway | Merged (`d8d70c2`); S1 tee fix done in Gateway hardening | `fix/stream-unbuffered` | F5 | |
 | — | Gateway hardening | gateway-hardening | gateway | **Merged** 2026-11-12 (AF3 + S1 tee capture; security `c15664e`; AX1/AX2 residuals; BA1 for the next F5/F19 change) | `fix/gateway-hardening` | F19, Buffering | |
