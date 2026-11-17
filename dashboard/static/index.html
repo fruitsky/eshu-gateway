@@ -113,6 +113,7 @@
     <button class="nav-item" id="nav-inventory" onclick="switchView('inventory')"><span>Inventory</span></button>
     <button class="nav-item" id="nav-runbooks" onclick="switchView('runbooks')"><span>Runbooks</span></button>
     <button class="nav-item" id="nav-agents" onclick="switchView('agents')"><span>Agents</span></button>
+    <button class="nav-item" id="nav-allowances" onclick="switchView('allowances')"><span>Allowances</span></button>
     <button class="nav-item" id="nav-controls" onclick="switchView('controls')"><span>Command policy</span></button>
     <button class="nav-item" id="nav-settings" onclick="switchView('settings')"><span>Settings</span></button>
     <button class="nav-item" id="nav-logs" onclick="switchView('logs')"><span>Logs</span></button>
@@ -1169,6 +1170,7 @@
             <div class="flex flex-wrap gap-3 mb-3">
               <label class="flex items-center gap-2 cursor-pointer select-none text-xs"><input type="checkbox" id="notify-event-jit" checked onchange="onNotifyConfigChange()"> JIT requests</label>
               <label class="flex items-center gap-2 cursor-pointer select-none text-xs"><input type="checkbox" id="notify-event-window" checked onchange="onNotifyConfigChange()"> Window requests</label>
+              <label class="flex items-center gap-2 cursor-pointer select-none text-xs"><input type="checkbox" id="notify-event-ceiling" checked onchange="onNotifyConfigChange()"> Allowance ceiling</label>
               <label class="flex items-center gap-2 cursor-pointer select-none text-xs"><input type="checkbox" id="notify-event-blocked" onchange="onNotifyConfigChange()"> Blocked commands</label>
               <label class="flex items-center gap-2 cursor-pointer select-none text-xs"><input type="checkbox" id="notify-event-offline" onchange="onNotifyConfigChange()"> Gateway offline</label>
               <label class="flex items-center gap-2 cursor-pointer select-none text-xs"><input type="checkbox" id="notify-event-online" onchange="onNotifyConfigChange()"> Gateway online</label>
@@ -1232,6 +1234,70 @@
       </div>
     </div>
 
+
+    <div id="view-allowances" class="hidden w-full" data-ink="section">
+      <div class="hud" data-od-id="allowances-hud">
+        <div class="hud-txt"><b>The allowances</b><span class="hud-sub">pre-approvals inside the ceiling, and nothing else</span></div>
+        <div class="hud-right"><span class="hud-sum" id="allowances-hud-sum"><span><span class="n">&mdash;</span> live</span></span></div>
+      </div>
+
+      <div class="widget" data-od-id="ceiling-widget">
+        <div class="widget-header">What agents may ever be allowed to do <span class="text-xs text-muted">the ceiling</span></div>
+        <p class="text-xs mb-3 text-muted" id="allowances-copy">The ceiling is the outer limit: it lists, per integration and device type, the actions an agent may ever be allowed to take without a card. An allowance is one narrow pre-approval inside that ceiling — this agent, these exact entities and these exact actions, with its own rate, window and expiry. A call runs without a card only when it matches a live allowance and the ceiling still allows its type and action; everything else asks. The ceiling never approves anything by itself.</p>
+        <div id="ceiling-types" class="space-y-3"><p class="text-muted text-xs">Loading...</p></div>
+        <div class="flex flex-wrap gap-2 mt-3">
+          <button onclick="saveCeiling()" class="btn btn-sm">Save ceiling</button>
+          <span class="text-xs text-muted" id="ceiling-status"></span>
+        </div>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4" id="ceiling-never"></div>
+        <div class="mt-4">
+          <label class="text-xs block mb-1 text-muted">Destructive words (built-ins are read-only; yours can be removed)</label>
+          <div id="ceiling-words" class="flex flex-wrap gap-1 mb-2"></div>
+          <div class="flex gap-2">
+            <input type="text" id="ceiling-word-input" placeholder="word (a-z0-9_, 3-32)" class="text-xs" style="width:16rem" maxlength="32">
+            <button onclick="addCeilingWord()" class="btn btn-xs">Add word</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="widget" data-od-id="allowance-list">
+        <div class="widget-header">Allowances <span class="text-xs text-muted">exact pre-approvals</span></div>
+        <div id="allowance-list" class="space-y-2"><p class="text-muted text-xs">Loading...</p></div>
+      </div>
+
+      <div class="widget" data-od-id="allowance-new">
+        <div class="widget-header">New allowance</div>
+        <p class="text-xs text-muted mb-2">An allowance names one type, one action and the exact entities. Calls to anything else still ask.</p>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-2 text-xs">
+          <label>Agent <select id="allowance-agent" class="w-full"></select></label>
+          <label>Name <input type="text" id="allowance-name" placeholder="Living-room lamp" class="w-full"></label>
+          <label>Device type <select id="allowance-domain" class="w-full" onchange="fillAllowanceServices()"></select></label>
+          <label>Action <select id="allowance-service" class="w-full"></select></label>
+          <label class="md:col-span-2">Entities (comma separated) <input type="text" id="allowance-entities" placeholder="light.living_room, light.kitchen" class="w-full"></label>
+          <label>Rate per hour (0 = no cap) <input type="number" id="allowance-rate" value="0" min="0" max="1000" class="w-full"></label>
+          <label>Window (HH:MM-HH:MM, optional) <input type="text" id="allowance-window" placeholder="07:00-23:00" class="w-full"></label>
+        </div>
+        <div class="flex gap-2 mt-2"><button onclick="createAllowance()" class="btn btn-sm">Create allowance</button><span class="text-xs text-muted" id="allowance-status"></span></div>
+      </div>
+
+      <div class="widget" data-od-id="allowance-profiles">
+        <div class="widget-header">Profiles <span class="text-xs text-muted">reusable sets of templates</span></div>
+        <div id="allowance-profiles" class="space-y-2 mb-4"><p class="text-muted text-xs">Loading...</p></div>
+        <div class="divider-top mb-3"></div>
+        <label class="text-xs block mb-1 text-muted">New profile</label>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-2 text-xs mb-2">
+          <input type="text" id="profile-name" placeholder="Name (e.g. Household lights)" class="w-full">
+          <input type="text" id="profile-description" placeholder="Description (optional)" class="w-full">
+        </div>
+        <div id="profile-template-rows" class="space-y-2 mb-2"></div>
+        <div class="flex gap-2">
+          <button onclick="addProfileTemplate()" class="btn btn-muted btn-xs">Add template</button>
+          <button onclick="saveProfile()" class="btn btn-sm">Save profile</button>
+          <span class="text-xs text-muted" id="profile-status"></span>
+        </div>
+      </div>
+    </div>
+
     <!-- LOGS VIEW — Audit Log -->
     <div id="view-logs" class="hidden w-full" data-ink="section">
       <div class="hud" data-od-id="logs-hud">
@@ -1259,8 +1325,19 @@
   </div>
 </main>
 
-<script src="/static/state.js?v=ui3"></script>
-<script src="/static/app.js?v=ui28"></script>
+<div id="profile-diff-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center" style="background:rgba(0,0,0,0.6)">
+  <div class="widget" style="max-width:44rem;width:92%">
+    <div class="widget-header">Update agents <span class="text-xs text-muted">nothing changes until you confirm</span></div>
+    <div id="profile-diff-body" class="text-xs space-y-2"></div>
+    <div class="flex gap-2 mt-3">
+      <button onclick="applyPreviewedProfile()" class="btn btn-sm">Apply update</button>
+      <button onclick="closeProfileDiff()" class="btn btn-muted btn-sm">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<script src="/static/state.js?v=ui4"></script>
+<script src="/static/app.js?v=ui34"></script>
 
 <!-- Create / Edit Approved Window Modal -->
 <div id="create-window-modal" class="modal-overlay hidden">
@@ -1270,18 +1347,31 @@
     <!-- Inline error -->
     <div id="win-save-error" class="hidden win-error"></div>
 
-    <!-- 1. Type — always selectable -->
+    <!-- X10: quick presets first. These fill a Once window; they never
+         create a daily one by accident. -->
     <div class="win-section">
-      <div class="win-section-label">1. Window Type</div>
+      <div class="win-section-label">Quick start</div>
+      <div class="win-preset-row" id="win-preset-row">
+        <button type="button" class="win-preset-btn" id="win-preset-now15" onclick="applyWinPreset('now15')">Now for 15 min</button>
+        <button type="button" class="win-preset-btn" id="win-preset-now60" onclick="applyWinPreset('now60')">Now for 1 hour</button>
+        <button type="button" class="win-preset-btn" id="win-preset-endoftoday" onclick="applyWinPreset('end_of_today')">Until end of today</button>
+        <button type="button" class="win-preset-btn" id="win-preset-custom" onclick="applyWinPreset('custom')">Custom</button>
+      </div>
+      <p class="win-hint">Presets start a Once window from now. Custom lets you type the time.</p>
+    </div>
+
+    <!-- X10: Once is the default; Every day is an explicit choice. -->
+    <div class="win-section">
+      <div class="win-section-label">Runs</div>
       <div class="win-radio-group">
-        <button class="win-radio-btn selected" id="win-type-recurring" onclick="setWinType('recurring')">Recurring</button>
-        <button class="win-radio-btn" id="win-type-single" onclick="setWinType('single')">Single Use</button>
+        <button type="button" class="win-radio-btn selected" id="win-type-once" onclick="setWinType('once')">Once</button>
+        <button type="button" class="win-radio-btn" id="win-type-daily" onclick="setWinType('daily')">Every day</button>
       </div>
     </div>
 
-    <!-- 2. Gateway — custom pill dropdown -->
+    <!-- Target Gateway — custom pill dropdown -->
     <div class="win-section">
-      <div class="win-section-label">2. Target Gateway</div>
+      <div class="win-section-label">Target Gateway</div>
       <div class="gw-dropdown" id="gw-dropdown">
         <div class="gw-dropdown-trigger" id="gw-dropdown-trigger" onclick="toggleGwDropdown()">
           <div id="gw-dropdown-display" class="text-sm text-muted">Select a gateway…</div>
@@ -1292,9 +1382,9 @@
       <input type="hidden" id="win-gateway" value="" onchange="onWinGatewayChange()">
     </div>
 
-    <!-- 3. Command (gateway-dependent) -->
+    <!-- Command (gateway-dependent) -->
     <div id="win-src-section" class="win-section win-fade win-disabled">
-      <div class="win-section-label">3. Command</div>
+      <div class="win-section-label">Command</div>
       <div class="win-radio-group">
         <button class="win-radio-btn selected" id="win-src-new" onclick="setWinSource('new')">Command</button>
         <button class="win-radio-btn" id="win-src-jit" onclick="setWinSource('jit')">Recent JIT</button>
@@ -1318,75 +1408,48 @@
       </div>
     </div>
 
-    <!-- 4a. Recurring schedule fields -->
-    <div id="win-recurring-fields" class="win-fade">
-      <div class="win-section-label mb-2">4. Schedule</div>
-      <div class="flex flex-wrap gap-5">
-        <div class="win-section flex-1" style="min-width:200px;">
-          <div class="win-section-label">Execution Time (UTC)</div>
-          <div class="time-scroll-container">
-            <div class="time-scroll-wrap">
-              <div class="time-scroll-arrow" onclick="shiftTimeScroll('hours', -1)">▲</div>
-              <div class="time-scroll" id="time-scroll-hours" onscroll="onTimeScroll('hours')"></div>
-              <div class="time-scroll-arrow" onclick="shiftTimeScroll('hours', 1)">▼</div>
-            </div>
-            <span class="time-colon">:</span>
-            <div class="time-scroll-wrap">
-              <div class="time-scroll-arrow" onclick="shiftTimeScroll('mins', -1)">▲</div>
-              <div class="time-scroll" id="time-scroll-mins" onscroll="onTimeScroll('mins')"></div>
-              <div class="time-scroll-arrow" onclick="shiftTimeScroll('mins', 1)">▼</div>
-            </div>
-          </div>
-          <p id="win-next-run" class="text-xs mt-2 text-info" style="min-height:1.25em;"></p>
-        </div>
-        <div class="flex-1" style="min-width:200px;">
-          <div class="win-section">
-            <div class="win-section-label">Days of Week <span class="text-xs text-muted font-normal">(none = every day)</span></div>
-            <div class="day-circles" id="day-circles-container"></div>
-          </div>
-          <div class="win-section">
-            <div class="win-section-label">Expiration</div>
-            <label class="flex items-center gap-2 cursor-pointer select-none mb-2">
-              <input type="checkbox" id="win-never-expire" checked onchange="onWinNeverExpireChange()">
-              <span class="text-xs">Never expire</span>
-            </label>
-            <input type="date" id="win-expiry-date" class="flex-1" style="display:none;" onchange="updateWinSummary()">
-          </div>
-          <div class="win-section">
-            <div class="win-section-label">Max Executions <span class="text-xs text-muted font-normal">(1–5, per window)</span></div>
-            <input type="number" id="win-max-exec" value="1" min="1" max="5" class="w-24" oninput="onMaxExecInput();updateWinSummary()">
-          </div>
-        </div>
+    <!-- X10: one typed local time and a duration; no hour/minute scrolls. -->
+    <div class="win-section">
+      <div class="win-section-label">When <span class="text-xs text-muted font-normal">(your local time)</span></div>
+      <div class="win-time-row">
+        <label class="win-field" for="win-time">Time <span class="text-xs text-muted font-normal">(HH:MM)</span>
+          <input type="text" id="win-time" inputmode="numeric" autocomplete="off" maxlength="5" placeholder="HH:MM" oninput="onWinTimeInput()">
+        </label>
+        <label class="win-field" id="win-duration-wrap" for="win-duration">Duration <span class="text-xs text-muted font-normal">(minutes)</span>
+          <input type="number" id="win-duration" min="1" max="1440" value="15" inputmode="numeric" oninput="onWinDurationInput()">
+        </label>
+      </div>
+      <p class="win-hint" id="win-time-hint">24-hour, in this browser's time zone.</p>
+    </div>
+
+    <!-- Every day: optional day mask and expiry. Once uses its duration. -->
+    <div id="win-daily-fields" class="win-fade hidden-section">
+      <div class="win-section">
+        <details class="win-days-details">
+          <summary>Only on some days (optional)</summary>
+          <div class="day-circles" id="day-circles-container"></div>
+          <p class="win-hint">No day picked means every day. The gateway fires within ±2 minutes of the time.</p>
+        </details>
+      </div>
+      <div class="win-section">
+        <div class="win-section-label">Expiration</div>
+        <label class="flex items-center gap-2 cursor-pointer select-none mb-2">
+          <input type="checkbox" id="win-never-expire" checked onchange="onWinNeverExpireChange()">
+          <span class="text-xs">Never expire</span>
+        </label>
+        <input type="date" id="win-expiry-date" class="flex-1" style="display:none;" onchange="updateWinSummary()">
       </div>
     </div>
 
-    <!-- 4b. Single-use fields -->
-    <div id="win-single-fields" class="win-fade hidden-section">
-      <div class="win-section-label">4. Schedule</div>
-      <div class="win-section">
-        <div class="win-section-label">Starts At (required) <span class="text-xs text-muted font-normal">(window becomes active at this time)</span></div>
-        <div class="flex gap-2 flex-wrap">
-          <input type="date" id="win-single-start-date" class="flex-1" style="min-width:140px;" onchange="updateWinSummary()">
-          <input type="time" id="win-single-start-time" class="flex-1" style="min-width:100px;" onchange="updateWinSummary()">
-        </div>
-        <p class="win-hint" id="win-single-start-hint">Times are local to your browser</p>
-      </div>
-      <div class="win-section">
-        <div class="win-section-label">Max Executions <span class="text-xs text-muted font-normal">(1–5, auto-disables when exhausted)</span></div>
-        <input type="number" id="win-max-exec-single" value="1" min="1" max="5" class="w-24" oninput="onMaxExecInput();updateWinSummary()">
-      </div>
-      <div class="win-section">
-        <div class="win-section-label">Expires At (optional) <span class="text-xs text-muted font-normal">(window closes at this time if unexpired)</span></div>
-        <div class="flex gap-2 flex-wrap">
-          <input type="date" id="win-single-expiry-date" class="flex-1" style="min-width:140px;" onchange="updateWinSummary()">
-          <input type="time" id="win-single-expiry-time" class="flex-1" style="min-width:100px;" onchange="updateWinSummary()">
-        </div>
-      </div>
+    <!-- Max executions is shared by both modes. -->
+    <div class="win-section">
+      <div class="win-section-label">Max executions <span class="text-xs text-muted font-normal">(1–5)</span></div>
+      <input type="number" id="win-max-exec" value="1" min="1" max="5" class="w-24" oninput="onMaxExecInput()">
     </div>
 
-    <!-- 5. Label -->
+    <!-- Label -->
     <div id="win-label-section" class="win-section win-fade win-disabled">
-      <div class="win-section-label">5. Label</div>
+      <div class="win-section-label">Label</div>
       <input type="text" id="win-label" placeholder="e.g. Nightly apt update" oninput="updateWinSummary()" disabled>
       <p class="win-hint" id="win-label-hint">Select a gateway and type a command first</p>
     </div>

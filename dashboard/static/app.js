@@ -699,6 +699,7 @@ async function switchView(target) {
   if (target === 'inventory') { fetchInventory(); }
   if (target === 'runbooks') { fetchRunbooks(); }
   if (target === 'agents') { fetchAgentTokens(); }
+  if (target === 'allowances') { fetchAllowances(); }
   if (target === 'settings') {
     refreshPasswordUI();
     fetchNotifyConfig();
@@ -930,6 +931,197 @@ document.addEventListener('click', function(e) {
 const DAY_NAMES = ['Mo','Tu','We','Th','Fr','Sa','Su'];
 const DAY_BITS  = [1, 2, 4, 8, 16, 32, 64];
 
+/* X10: pure preset and preview maths. These are deliberately DOM-free so the
+   Node harness can call them with a fixed clock and a chosen TZ. */
+var WIN_TOLERANCE_MIN = 2;
+var WIN_MAX_DURATION_MIN = 1440;
+
+function winPad2(n) { return String(n).padStart(2, '0'); }
+
+function winHHMM(date) {
+  return winPad2(date.getHours()) + ':' + winPad2(date.getMinutes());
+}
+
+function winParseHHMM(text) {
+  var m = String(text || '').trim().match(/^([01]\d|2[0-3]):([0-5]\d)$/);
+  if (!m) return null;
+  return Number(m[1]) * 60 + Number(m[2]);
+}
+
+function winFormatHHMM(minutes) {
+  var m = Math.max(0, Math.min(1439, Number(minutes) || 0));
+  return winPad2(Math.floor(m / 60)) + ':' + winPad2(m % 60);
+}
+
+function winFloorMinute(ms) {
+  var d = new Date(ms);
+  d.setSeconds(0, 0);
+  return d.getTime();
+}
+
+function winEndOfLocalDay(ms) {
+  var d = new Date(ms);
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1, 0, 0, 0, 0).getTime() - 1000;
+}
+
+function winDayLabel(ms, nowMs) {
+  var a = new Date(ms), b = new Date(nowMs);
+  var da = new Date(a.getFullYear(), a.getMonth(), a.getDate()).getTime();
+  var db = new Date(b.getFullYear(), b.getMonth(), b.getDate()).getTime();
+  var diff = Math.round((da - db) / 86400000);
+  if (diff === 0) return 'today';
+  if (diff === 1) return 'tomorrow';
+  if (diff === -1) return 'yesterday';
+  return a.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' });
+}
+
+function winRangeText(startMs, endMs, nowMs) {
+  var s = new Date(startMs), e = new Date(endMs);
+  var sameDay = s.getFullYear() === e.getFullYear() && s.getMonth() === e.getMonth()
+    && s.getDate() === e.getDate();
+  var st = winDayLabel(startMs, nowMs) + ' ' + winHHMM(s);
+  if (sameDay) return st + '-' + winHHMM(e);
+  return st + ' to ' + winDayLabel(endMs, nowMs) + ' ' + winHHMM(e);
+}
+
+function winOnceRange(hhmm, durationMin, nowMs) {
+  var minutes = winParseHHMM(hhmm);
+  if (minutes === null) return null;
+  var now = new Date(nowMs);
+  var hh = Math.floor(minutes / 60), mm = minutes % 60;
+  var start = new Date(now.getFullYear(), now.getMonth(), now.getDate(), hh, mm, 0, 0).getTime();
+  // A typed time that has already passed means tomorrow, never a window that
+  // starts in the past. The presets always use the current minute.
+  if (start < nowMs - 60000) {
+    start = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, hh, mm, 0, 0).getTime();
+  }
+  var duration = Math.max(1, Math.min(WIN_MAX_DURATION_MIN,
+    parseInt(durationMin, 10) || 15));
+  return { start: Math.floor(start / 1000),
+           end: Math.floor(start / 1000) + duration * 60,
+           duration_minutes: duration };
+}
+
+function winPreset(kind, nowMs) {
+  nowMs = Number(nowMs) || Date.now();
+  if (kind === 'now15' || kind === 'now60') {
+    var range = winOnceRange(winHHMM(new Date(nowMs)),
+                             kind === 'now15' ? 15 : 60, nowMs);
+    range.preset = kind;
+    return range;
+  }
+  if (kind === 'end_of_today') {
+    var start = winFloorMinute(nowMs);
+    var end = winEndOfLocalDay(nowMs);
+    // Round down so the last whole minute still lands inside today.
+    var mins = Math.max(1, Math.floor((end - start) / 60000));
+    return { start: Math.floor(start / 1000),
+             end: Math.floor(start / 1000) + mins * 60,
+             duration_minutes: Math.min(WIN_MAX_DURATION_MIN, mins),
+             preset: kind };
+  }
+  return { start: 0, end: 0, duration_minutes: 15, preset: 'custom' };
+}
+
+function winDailySchedule(hhmm, days, nowMs) {
+  var minutes = winParseHHMM(hhmm);
+  if (minutes === null) return null;
+  var now = new Date(nowMs);
+  var local = new Date(now.getFullYear(), now.getMonth(), now.getDate(),
+                       Math.floor(minutes / 60), minutes % 60, 0, 0);
+  // The backend stores UTC minutes since midnight, so the local HH:MM is
+  // converted on the day the operator is looking at.
+  return { days_of_week: Number(days) || 0,
+           execution_time: local.getUTCHours() * 60 + local.getUTCMinutes() };
+}
+
+function winUtcMinutesToLocal(utcMinutes, nowMs) {
+  var now = new Date(nowMs);
+  var utc = new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate(),
+                              Math.floor(utcMinutes / 60), utcMinutes % 60, 0, 0));
+  return winHHMM(utc);
+}
+
+function winDayNames(days) {
+  var out = [];
+  for (var i = 0; i < 7; i++) { if (Number(days) & DAY_BITS[i]) out.push(DAY_NAMES[i]); }
+  return out;
+}
+
+function winEffectiveEnd(ws, we, exp) {
+  // 4102444800 is the old "open ended" sentinel create_window_request used
+  // when no expiry was given; an agent request can still carry it.
+  if (we && we > ws && we < 4102444800 && (we - ws) <= 7 * 86400) return we;
+  if (exp && exp > ws) return exp;
+  return 0;
+}
+
+/* The one sentence the modal, the table and an agent approval all show. */
+function winPreviewText(w, opts) {
+  opts = opts || {};
+  var nowMs = Number(opts.nowMs) || Date.now();
+  var gateway = String(opts.gateway || '').trim();
+  w = w || {};
+  var maxExec = Number(w.max_executions) || 0;
+  var dow = Number(w.days_of_week) || 0;
+  var et = Number(w.execution_time) || 0;
+  var ws = Number(w.window_start) || 0;
+  var we = Number(w.window_end) || 0;
+  var exp = Number(w.expires_at) || 0;
+  var parts = [];
+  var once = !dow && !et;
+  if (once) {
+    if (ws) {
+      var end = winEffectiveEnd(ws, we, exp);
+      if (end) {
+        parts.push('Runs once, ' +
+          winRangeText(ws * 1000, end * 1000, nowMs) + ' your time');
+      } else {
+        parts.push('Runs once, from ' + winDayLabel(ws * 1000, nowMs) + ' ' +
+          winHHMM(new Date(ws * 1000)) + ' your time');
+      }
+    } else {
+      parts.push('Runs once');
+    }
+  } else {
+    var dayText = dow ? 'every ' + winDayNames(dow).join(', ') : 'every day';
+    var local = winUtcMinutesToLocal(et, nowMs);
+    parts.push('Runs ' + dayText + ' at ' + local + ' your time (' +
+      winFormatHHMM(et) + ' UTC), within \u00b1' + WIN_TOLERANCE_MIN + ' minutes');
+  }
+  parts.push(maxExec > 0
+    ? 'at most ' + maxExec + ' execution' + (maxExec === 1 ? '' : 's')
+    : 'with no execution cap');
+  parts.push(gateway ? 'on ' + gateway : 'on the selected gateway');
+  if (exp && !(once && we && exp === we)) {
+    parts.push('expires ' + winDayLabel(exp * 1000, nowMs) + ' ' +
+      winHHMM(new Date(exp * 1000)));
+  }
+  return parts.join(', ') + '.';
+}
+
+/* A shorter form for the table's schedule column. */
+function winScheduleWords(w, nowMs) {
+  nowMs = Number(nowMs) || Date.now();
+  var dow = Number((w || {}).days_of_week) || 0;
+  var et = Number((w || {}).execution_time) || 0;
+  var ws = Number((w || {}).window_start) || 0;
+  var we = Number((w || {}).window_end) || 0;
+  if (dow || et) {
+    var days = dow ? 'Every ' + winDayNames(dow).join(', ') : 'Every day';
+    return days + ' ' + winUtcMinutesToLocal(et, nowMs) + ' local (' +
+      winFormatHHMM(et) + ' UTC \u00b1' + WIN_TOLERANCE_MIN + 'm)';
+  }
+  if (ws) {
+    var end = winEffectiveEnd(ws, we, Number((w || {}).expires_at) || 0);
+    return end
+      ? 'Once ' + winRangeText(ws * 1000, end * 1000, nowMs)
+      : 'Once from ' + winDayLabel(ws * 1000, nowMs) + ' ' +
+        winHHMM(new Date(ws * 1000));
+  }
+  return 'Once';
+}
+
 function winError(msg) {
   var el = document.getElementById('win-save-error');
   el.textContent = msg; el.classList.remove('hidden');
@@ -939,19 +1131,20 @@ function winClearError() {
   document.getElementById('win-save-error').classList.add('hidden');
 }
 
+function winNowHHMM() {
+  return winHHMM(new Date());
+}
+
 function resetWinForm() {
-  _winEditId = null; _winSource = 'new'; _winType = 'recurring'; _winDays = 0;
-  _winNeverExpire = true; _winHour = 0; _winMin = 0; _winMatchType = 'exact'; _selectedJIT = [];
+  _winEditId = null; _winSource = 'new'; _winType = 'once'; _winDays = 0;
+  _winNeverExpire = true; _winDuration = 15; _winMatchType = 'exact'; _selectedJIT = [];
   document.getElementById('win-modal-title').textContent = 'Create Approved Window';
   document.getElementById('save-window-btn').textContent = 'Create Window';
   document.getElementById('win-command').value = '';
   document.getElementById('win-label').value = '';
   document.getElementById('win-max-exec').value = '1';
-  document.getElementById('win-max-exec-single').value = '1';
-  document.getElementById('win-single-start-date').value = '';
-  document.getElementById('win-single-start-time').value = '';
-  document.getElementById('win-single-expiry-date').value = '';
-  document.getElementById('win-single-expiry-time').value = '';
+  document.getElementById('win-time').value = winNowHHMM();
+  document.getElementById('win-duration').value = '15';
   document.getElementById('win-expiry-date').value = '';
   document.getElementById('win-expiry-date').style.display = 'none';
   document.getElementById('win-never-expire').checked = true;
@@ -964,18 +1157,14 @@ function resetWinForm() {
   document.getElementById('win-label-section').classList.add('win-disabled');
   var lh = document.getElementById('win-label-hint'); if(lh) lh.textContent = 'Select a gateway and type a command first';
   var li = document.getElementById('win-label'); if(li) li.disabled = true;
-  // Show recurring, hide single-use fields
-  document.getElementById('win-recurring-fields').classList.remove('hidden-section');
-  document.getElementById('win-single-fields').classList.add('hidden-section');
   // Command source: New Command is default, JIT hidden until gateway selected
   document.getElementById('win-src-new').classList.add('selected');
   document.getElementById('win-src-jit').classList.remove('selected');
   document.getElementById('win-cmd-input-wrap').classList.remove('hidden-section');
   document.getElementById('win-jit-list-wrap').classList.add('hidden-section');
-  // Type: Recurring default
-  document.getElementById('win-type-recurring').classList.add('selected');
-  document.getElementById('win-type-single').classList.remove('selected');
+  setWinType('once');
   setWinMatch('exact');
+  setWinPresetActive('');
   // Reset hidden gateway value
   document.getElementById('win-gateway').value = '';
   var dd = document.getElementById('gw-dropdown-display');
@@ -983,76 +1172,119 @@ function resetWinForm() {
   dd.classList.remove('text-main');
   dd.classList.add('text-muted');
   renderDayCircles();
-  buildTimeScrolls();
+  updateWinSummary();
 }
 
-function readSingleUseSchedule() {
-  var d = document.getElementById('win-single-start-date').value;
-  var t = document.getElementById('win-single-start-time').value;
-  if (!d || !t) throw new Error('Set a start date and time for the single-use window');
-  return { start: Math.floor(new Date(d + 'T' + t).getTime() / 1000), end: 4102444800 };
+function setWinPresetActive(kind) {
+  ['now15', 'now60', 'end_of_today', 'custom'].forEach(function (k) {
+    var el = document.getElementById('win-preset-' + k.replace(/_/g, ''));
+    if (el) el.classList.toggle('selected', k === kind);
+  });
+}
+
+function applyWinPreset(kind) {
+  if (kind === 'custom') {
+    _winType = 'once';
+    setWinType('once');
+    setWinPresetActive('custom');
+    var el = document.getElementById('win-time');
+    if (el) { el.focus(); el.select && el.select(); }
+    updateWinSummary();
+    return;
+  }
+  var preset = winPreset(kind, Date.now());
+  _winType = 'once';
+  _winDuration = preset.duration_minutes;
+  _winDays = 0;
+  setWinType('once');
+  document.getElementById('win-time').value = winHHMM(new Date(preset.start * 1000));
+  document.getElementById('win-duration').value = String(preset.duration_minutes);
+  setWinPresetActive(kind);
+  updateWinSummary();
+}
+
+function winReadTime() {
+  var raw = (document.getElementById('win-time') || {}).value || '';
+  var minutes = winParseHHMM(raw);
+  return { raw: raw, minutes: minutes };
+}
+
+function onWinTimeInput() {
+  var t = winReadTime();
+  var hint = document.getElementById('win-time-hint');
+  if (hint) {
+    hint.textContent = t.minutes === null
+      ? 'Type a 24-hour time as HH:MM (for example 22:50).'
+      : '24-hour, in this browser\'s time zone.';
+    hint.style.color = t.minutes === null ? 'var(--status-warning)' : '';
+  }
+  setWinPresetActive('');
+  updateWinSummary();
+}
+
+function onWinDurationInput() {
+  var el = document.getElementById('win-duration');
+  var v = parseInt((el || {}).value, 10) || 15;
+  v = Math.max(1, Math.min(WIN_MAX_DURATION_MIN, v));
+  if (el) el.value = String(v);
+  _winDuration = v;
+  setWinPresetActive('');
+  updateWinSummary();
+}
+
+function readOnceSchedule() {
+  var t = winReadTime();
+  if (t.minutes === null) throw new Error('Type the time as HH:MM (for example 22:50)');
+  var range = winOnceRange(t.raw, document.getElementById('win-duration').value, Date.now());
+  if (!range) throw new Error('Type the time as HH:MM (for example 22:50)');
+  return range;
+}
+
+function readDailySchedule() {
+  var t = winReadTime();
+  if (t.minutes === null) throw new Error('Type the time as HH:MM (for example 22:50)');
+  return winDailySchedule(t.raw, _winDays, Date.now());
+}
+
+function winDraft() {
+  var gw = document.getElementById('win-gateway').value;
+  var maxExec = parseInt((document.getElementById('win-max-exec') || {}).value, 10) || 1;
+  maxExec = Math.max(1, Math.min(5, maxExec));
+  var draft = { max_executions: maxExec, expires_at: null };
+  if (_winType === 'daily') {
+    var daily = readDailySchedule();
+    draft.days_of_week = daily.days_of_week;
+    draft.execution_time = daily.execution_time;
+    draft.window_start = 0;
+    draft.window_end = 0;
+    if (!_winNeverExpire) {
+      var dateStr = (document.getElementById('win-expiry-date') || {}).value || '';
+      draft.expires_at = dateStr
+        ? Math.floor(new Date(dateStr + 'T00:00:00Z').getTime() / 1000) : null;
+    }
+  } else {
+    var once = readOnceSchedule();
+    draft.window_start = once.start;
+    draft.window_end = once.end;
+    draft.days_of_week = 0;
+    draft.execution_time = 0;
+    draft.expires_at = once.end;
+  }
+  draft.target_ip = gw;
+  draft.command = (document.getElementById('win-command').value || '').trim();
+  return draft;
 }
 
 // ── Windows Table (redesigned) ────────────────────────────────────────
 
 function formatWinSchedule(w) {
-  // Coerce because legacy migrations may have created these columns as TEXT.
-  var dow = Number(w.days_of_week) || 0;
-  var et = Number(w.execution_time) || 0;
-  var ws = Number(w.window_start) || 0;
-  var exp = w.expires_at ? Number(w.expires_at) : 0;
-  var sched;
-  if (!dow && !et) {
-    if (ws) {
-      var d = new Date(ws * 1000);
-      sched = 'Once: ' + d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false });
-    } else {
-      sched = 'N/A';
-    }
-  } else {
-    var dayNames = [];
-    for (var i = 0; i < 7; i++) { if (dow & DAY_BITS[i]) dayNames.push(DAY_NAMES[i]); }
-    var days = dayNames.length ? dayNames.join(',') : 'Every day';
-    var h = String(Math.floor(et / 60)).padStart(2,'0');
-    var m = String(et % 60).padStart(2,'0');
-    sched = days + ' ' + h + ':' + m + ' UTC';
-  }
-  if (exp) {
-    var ed = new Date(exp * 1000);
-    var expStr = ed.toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false });
-    var past = Math.floor(Date.now() / 1000) > exp;
-    var color = past ? 'var(--state-denied)' : 'var(--state-pending)';
-    sched += '<br><span class="win-expiry" style="color:' + color + ';">Expires: ' + expStr + (past ? ' (expired)' : '') + '</span>';
-  }
-  return sched;
-}
-
-function winDowStrip(dow) {
-  var html = '<span class="dow-strip">';
-  for (var i = 0; i < 7; i++) {
-    html += '<span class="dow-day' + ((dow & DAY_BITS[i]) ? ' on' : '') + '" title="' + DAY_NAMES[i] + '">' + DAY_NAMES[i] + '</span>';
-  }
-  return html + '</span>';
+  // One sentence, the same one the modal previews (X10). This is the agent
+  // request card's schedule line, so escape at the call site.
+  return escapeHtml(winPreviewText(w, { nowMs: Date.now() }));
 }
 
 function winScheduleCell(w) {
-  var dow = Number(w.days_of_week) || 0;
-  var et = Number(w.execution_time) || 0;
-  var ws = Number(w.window_start) || 0;
-  var html = '';
-  if (dow || et) {
-    html += winDowStrip(dow);
-    if (et) {
-      var h = String(Math.floor(et / 60)).padStart(2,'0');
-      var m = String(et % 60).padStart(2,'0');
-      html += '<br><span class="text-muted">' + h + ':' + m + ' UTC</span>';
-    }
-  } else if (ws) {
-    var d = new Date(ws * 1000);
-    html += 'Once: ' + d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false });
-  } else {
-    html += 'N/A';
-  }
+  var html = escapeHtml(winScheduleWords(w, Date.now()));
   var exp = w.expires_at ? Number(w.expires_at) : 0;
   if (exp) {
     var ed = new Date(exp * 1000);
@@ -1265,9 +1497,10 @@ async function openEditWindowModal(id) {
     var weNum = Number(w.window_end) || 0;
     var expNum = w.expires_at ? Number(w.expires_at) : 0;
 
-    // Determine type: if it has schedule data it's recurring, otherwise single-use
-    var isRecurring = !!(dowNum || etNum);
-    _winType = isRecurring ? 'recurring' : 'single';
+    // X10: daily rows carry days_of_week/execution_time; a Once row carries
+    // window_start/window_end. Once is the default for a new window.
+    var isDaily = !!(dowNum || etNum);
+    _winType = isDaily ? 'daily' : 'once';
     setWinType(_winType);
 
     // Set the gateway
@@ -1288,38 +1521,29 @@ async function openEditWindowModal(id) {
     var li2 = document.getElementById('win-label'); if(li2) li2.disabled = false;
 
     _winDays = dowNum;
-    _winHour = Math.floor(etNum / 60);
-    _winMin = etNum % 60;
-
-    var maxExec = Math.min(Math.max(w.max_executions || 1, 1), 5);
-    document.getElementById('win-max-exec').value = maxExec;
-    document.getElementById('win-max-exec-single').value = maxExec;
-
-    // Single-use start date/time
-    if (wsNum) {
-      var sd = new Date(wsNum * 1000);
-      document.getElementById('win-single-start-date').value =
-        sd.getFullYear() + '-' + String(sd.getMonth()+1).padStart(2,'0') + '-' + String(sd.getDate()).padStart(2,'0');
-      document.getElementById('win-single-start-time').value =
-        String(sd.getHours()).padStart(2,'0') + ':' + String(sd.getMinutes()).padStart(2,'0');
+    if (isDaily) {
+      document.getElementById('win-time').value = winUtcMinutesToLocal(etNum, Date.now());
+      document.getElementById('win-duration').value = '15';
     } else {
-      document.getElementById('win-single-start-date').value = '';
-      document.getElementById('win-single-start-time').value = '';
+      var sd = new Date(wsNum * 1000);
+      document.getElementById('win-time').value = winHHMM(sd);
+      // Legacy single-use rows stored window_end = 4102444800 and relied on
+      // expires_at; treat that as the 15-minute default when editing.
+      var duration = (weNum > wsNum && weNum < 4102444800)
+        ? Math.max(1, Math.min(WIN_MAX_DURATION_MIN, Math.round((weNum - wsNum) / 60)))
+        : 15;
+      document.getElementById('win-duration').value = String(duration);
     }
 
-    if (expNum) {
+    var maxExec = Math.min(Math.max(w.max_executions || 1, 1), 5);
+    document.getElementById('win-max-exec').value = String(maxExec);
+
+    if (isDaily && expNum) {
       _winNeverExpire = false;
       document.getElementById('win-never-expire').checked = false;
       document.getElementById('win-expiry-date').style.display = 'block';
       var ed = new Date(expNum * 1000).toISOString().slice(0, 10);
       document.getElementById('win-expiry-date').value = ed;
-      if (!isRecurring) {
-        var edt = new Date(expNum * 1000);
-        document.getElementById('win-single-expiry-date').value =
-          edt.getFullYear() + '-' + String(edt.getMonth()+1).padStart(2,'0') + '-' + String(edt.getDate()).padStart(2,'0');
-        document.getElementById('win-single-expiry-time').value =
-          String(edt.getHours()).padStart(2,'0') + ':' + String(edt.getMinutes()).padStart(2,'0');
-      }
     } else {
       _winNeverExpire = true;
       document.getElementById('win-never-expire').checked = true;
@@ -1328,8 +1552,7 @@ async function openEditWindowModal(id) {
     }
 
     renderDayCircles();
-    buildTimeScrolls();
-    setTimeScroll(_winHour, _winMin);
+    setWinPresetActive('');
     updateWinSummary();
     document.getElementById('win-summary-bar').classList.remove('hidden-section');
   } catch(e) { winError('Failed to load window'); }
@@ -1385,12 +1608,11 @@ function setWinMatch(type) {
 // ── Type toggle ──────────────────────────────────────────────────────
 
 function setWinType(type) {
-  _winType = type;
-  document.getElementById('win-type-recurring').classList.toggle('selected', type === 'recurring');
-  document.getElementById('win-type-single').classList.toggle('selected', type === 'single');
-  // Recurring shows schedule+expiry, single-use shows only max exec
-  document.getElementById('win-recurring-fields').classList.toggle('hidden-section', type !== 'recurring');
-  document.getElementById('win-single-fields').classList.toggle('hidden-section', type !== 'single');
+  _winType = type === 'daily' ? 'daily' : 'once';
+  document.getElementById('win-type-once').classList.toggle('selected', _winType === 'once');
+  document.getElementById('win-type-daily').classList.toggle('selected', _winType === 'daily');
+  document.getElementById('win-duration-wrap').classList.toggle('hidden-section', _winType === 'daily');
+  document.getElementById('win-daily-fields').classList.toggle('hidden-section', _winType !== 'daily');
   updateWinSummary();
 }
 
@@ -1449,48 +1671,6 @@ async function testWinCommand() {
 
 // ── Time scroll picker ───────────────────────────────────────────────
 
-function buildTimeScrolls() {
-  var hEl = document.getElementById('time-scroll-hours');
-  var mEl = document.getElementById('time-scroll-mins');
-  var hHtml = '', mHtml = '';
-  for (var i = 0; i < 24; i++) {
-    var v = String(i).padStart(2,'0');
-    hHtml += '<div class="time-digit' + (i === _winHour ? ' active' : '') + '" onclick="setTimeScroll(' + i + ',' + _winMin + ')">' + v + '</div>';
-  }
-  for (var i = 0; i < 60; i++) {
-    var v = String(i).padStart(2,'0');
-    mHtml += '<div class="time-digit' + (i === _winMin ? ' active' : '') + '" onclick="setTimeScroll(' + _winHour + ',' + i + ')">' + v + '</div>';
-  }
-  hEl.innerHTML = hHtml; mEl.innerHTML = mHtml;
-  hEl.scrollTop = _winHour * 40 - 30;
-  mEl.scrollTop = _winMin * 40 - 30;
-}
-
-function setTimeScroll(h, m) {
-  _winHour = h; _winMin = m;
-  buildTimeScrolls();
-  updateWinSummary();
-}
-
-function shiftTimeScroll(which, dir) {
-  if (which === 'hours') {
-    _winHour = (_winHour + dir + 24) % 24;
-  } else {
-    _winMin = (_winMin + dir + 60) % 60;
-  }
-  buildTimeScrolls();
-  updateWinSummary();
-}
-
-function onTimeScroll(which) {
-  var el = document.getElementById('time-scroll-' + which);
-  var idx = Math.round((el.scrollTop + 20) / 40);
-  if (which === 'hours') { _winHour = Math.max(0, Math.min(23, idx)); }
-  else { _winMin = Math.max(0, Math.min(59, idx)); }
-  buildTimeScrolls();
-  updateWinSummary();
-}
-
 // ── Day circles ──────────────────────────────────────────────────────
 
 function renderDayCircles() {
@@ -1527,18 +1707,12 @@ function onWinNeverExpireChange() {
 // ── Max exec clamping ───────────────────────────────────────────
 
 function onMaxExecInput() {
-  var elR = document.getElementById('win-max-exec');
-  var elS = document.getElementById('win-max-exec-single');
-  if (elR) {
-    var v = parseInt(elR.value) || 1;
-    if (v < 1) elR.value = 1;
-    if (v > 5) elR.value = 5;
-  }
-  if (elS) {
-    var v2 = parseInt(elS.value) || 1;
-    if (v2 < 1) elS.value = 1;
-    if (v2 > 5) elS.value = 5;
-  }
+  var el = document.getElementById('win-max-exec');
+  if (!el) return;
+  var v = parseInt(el.value, 10) || 1;
+  if (v < 1) el.value = '1';
+  if (v > 5) el.value = '5';
+  updateWinSummary();
 }
 
 // ── Summary bar ──────────────────────────────────────────────────────
@@ -1547,55 +1721,16 @@ function updateWinSummary() {
   var ip = document.getElementById('win-gateway').value;
   var display = document.getElementById('gw-dropdown-display');
   var gwName = display ? display.textContent.trim() : '';
-  var cmd = document.getElementById('win-command').value.trim();
   var summaryEl = document.getElementById('win-summary-bar');
   var textEl = document.getElementById('win-summary-text');
-
   if (!ip) { summaryEl.classList.add('hidden-section'); return; }
   summaryEl.classList.remove('hidden-section');
-
-  var parts = [];
-  var nextRunEl = document.getElementById('win-next-run');
-  if (_winType === 'single') {
-    var maxExec = parseInt(document.getElementById('win-max-exec-single').value) || 1;
-    parts.push('Single-use');
-    parts.push(maxExec + ' execution' + (maxExec !== 1 ? 's' : ''));
-    parts.push('auto-disables when exhausted');
-    if (nextRunEl) nextRunEl.textContent = '';
-    try {
-      var sched = readSingleUseSchedule();
-      if (sched.start) {
-        var sdate = new Date(sched.start * 1000);
-        var sstr = sdate.toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false });
-        parts.push('starts ' + sstr);
-        if (sched.start * 1000 > Date.now()) {
-          var countdown = formatNextRun(sdate);
-          if (countdown) parts.push(countdown);
-        }
-      }
-    } catch(e) { /* partial date/time typed; ignore for summary */ }
-    // Read optional expiry (date + time, local)
-    var seDateVal = document.getElementById('win-single-expiry-date').value;
-    var seTimeVal = document.getElementById('win-single-expiry-time').value;
-    if (seDateVal) {
-      var expLocal = new Date(seDateVal + (seTimeVal ? 'T' + seTimeVal : 'T00:00'));
-      parts.push('expires ' + expLocal.toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false }));
-    }
-  } else {
-    var hh = String(_winHour).padStart(2,'0');
-    var mm = String(_winMin).padStart(2,'0');
-    var dayList = [];
-    for (var i = 0; i < 7; i++) { if (_winDays & DAY_BITS[i]) dayList.push(DAY_NAMES[i]); }
-    var dayStr = dayList.length ? dayList.join(', ') : 'Every day';
-    parts.push(' ' + dayStr + ' at ' + hh + ':' + mm + ' UTC');
-    parts.push(_winNeverExpire ? 'never expires' : (document.getElementById('win-expiry-date').value || 'expiry set'));
-    var maxExecR = parseInt(document.getElementById('win-max-exec').value) || 1;
-    parts.push(maxExecR + ' max exec' + (maxExecR !== 1 ? 's' : ''));
-    if (nextRunEl) nextRunEl.textContent = formatNextRun(computeNextRun(_winDays, _winHour * 60 + _winMin));
+  try {
+    var draft = winDraft();
+    textEl.textContent = winPreviewText(draft, { nowMs: Date.now(), gateway: gwName });
+  } catch (e) {
+    textEl.textContent = 'Choose a time as HH:MM to see the preview.';
   }
-  if (gwName) parts.push('on ' + gwName.replace(/\s+\([^)]+\)$/, ''));
-
-  textEl.textContent = parts.filter(Boolean).join(' · ');
 }
 
 // ── Save (create or edit) ────────────────────────────────────────────
@@ -1606,64 +1741,43 @@ async function saveWindow() {
   var cmd = document.getElementById('win-command').value.trim();
   if (!gw) { winError('Select a target gateway'); return; }
   if (!cmd) { winError('Enter or select a command'); return; }
-
-  if (_winType === 'recurring' && !_winNeverExpire && !document.getElementById('win-expiry-date').value) {
-    winError('Set an expiration date or uncheck Never expire'); return;
+  if (_winType === 'daily' && !_winNeverExpire &&
+      !document.getElementById('win-expiry-date').value) {
+    winError('Set an expiration date or check Never expire'); return;
   }
-
+  var draft;
+  try {
+    draft = winDraft();
+  } catch (e) {
+    winError(e.message);
+    return;
+  }
   var label = document.getElementById('win-label').value.trim();
-  var body = { target_ip: gw, command: cmd, label: label, match_type: _winMatchType, window_start: 0, window_end: 0 };
-
-  // max_executions: use the appropriate field per type
-  if (_winType === 'single') {
-    var sched = readSingleUseSchedule();
-    body.window_start = sched.start;
-    body.window_end = sched.end;
-    var maxExecSingle = parseInt(document.getElementById('win-max-exec-single').value) || 1;
-    body.max_executions = Math.min(Math.max(maxExecSingle, 1), 5);
-    body.days_of_week = 0;
-    body.execution_time = 0;
-    var seDate = document.getElementById('win-single-expiry-date').value;
-    var seTime = document.getElementById('win-single-expiry-time').value;
-    body.expires_at = seDate ? Math.floor(new Date(seDate + (seTime ? 'T' + seTime : 'T00:00')).getTime() / 1000) : null;
-  } else {
-    var maxExecRecur = parseInt(document.getElementById('win-max-exec').value) || 1;
-    body.max_executions = Math.min(Math.max(maxExecRecur, 1), 5);
-    body.days_of_week = _winDays;
-    body.execution_time = _winHour * 60 + _winMin;
-    if (_winNeverExpire) {
-      body.expires_at = null;
-    } else {
-      var dateStr = document.getElementById('win-expiry-date').value;
-      body.expires_at = dateStr ? Math.floor(new Date(dateStr + 'T00:00:00Z').getTime() / 1000) : null;
-    }
-  }
-
+  var body = {
+    target_ip: gw, command: cmd, label: label,
+    match_type: _winMatchType,
+    window_start: draft.window_start,
+    window_end: draft.window_end,
+    max_executions: draft.max_executions,
+    days_of_week: draft.days_of_week,
+    execution_time: draft.execution_time,
+    expires_at: draft.expires_at
+  };
   var isEdit = _winEditId !== null;
   var url = isEdit ? '/api/approved-windows/' + _winEditId : '/api/approved-windows';
   var method = isEdit ? 'PUT' : 'POST';
   if (isEdit) {
-    body = { command: cmd, label: label, match_type: _winMatchType };
-    if (_winType === 'single') {
-      var sched2 = readSingleUseSchedule();
-      body.window_start = sched2.start;
-      body.window_end = sched2.end;
-      var msEdit = parseInt(document.getElementById('win-max-exec-single').value) || 1;
-      body.max_executions = Math.min(Math.max(msEdit, 1), 5);
-      body.days_of_week = 0;
-      body.execution_time = 0;
-      var se2Date = document.getElementById('win-single-expiry-date').value;
-      var se2Time = document.getElementById('win-single-expiry-time').value;
-      body.expires_at = se2Date ? Math.floor(new Date(se2Date + (se2Time ? 'T' + se2Time : 'T00:00')).getTime() / 1000) : null;
-    } else {
-      var mrEdit = parseInt(document.getElementById('win-max-exec').value) || 1;
-      body.max_executions = Math.min(Math.max(mrEdit, 1), 5);
-      body.days_of_week = _winDays;
-      body.execution_time = _winHour * 60 + _winMin;
-      body.expires_at = _winNeverExpire ? null : (document.getElementById('win-expiry-date').value ? Math.floor(new Date(document.getElementById('win-expiry-date').value + 'T00:00:00Z').getTime() / 1000) : null);
-    }
+    // The PUT payload is a subset; keep the same schedule fields. A daily
+    // "Never expire" sends 0 so the route can clear a previous expiry
+    // (NULL, not 0, which would make the window inactive).
+    body = {
+      command: cmd, label: label, match_type: _winMatchType,
+      window_start: draft.window_start, window_end: draft.window_end,
+      max_executions: draft.max_executions, days_of_week: draft.days_of_week,
+      execution_time: draft.execution_time,
+      expires_at: (_winType === 'daily' && _winNeverExpire) ? 0 : draft.expires_at
+    };
   }
-
   try {
     var r = await authFetch(url, { method: method, headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
     if (!r.ok) { var d = await r.json().catch(function(){return{};}); var msg = typeof d.detail === 'string' ? d.detail : (typeof d.detail === 'object' ? JSON.stringify(d.detail) : 'Save failed'); throw new Error(msg); }
@@ -2849,7 +2963,8 @@ async function saveSessionNames() {
 var APPROVAL_BUCKETS = [
   ['allowlist', 'allowlist'], ['human', 'human'], ['plan', 'plan'],
   ['read-lane', 'read lane'], ['session-override', 'session override'],
-  ['host-override', 'host override'], ['window', 'window'], ['fleet', 'fleet run']
+  ['host-override', 'host override'], ['window', 'window'],
+  ['fleet', 'fleet run'], ['allowance', 'allowance']
 ];
 
 function fmtDuration(seconds) {
@@ -2873,7 +2988,11 @@ function approvalChipHtml(key, label, count) {
 }
 
 function sessionSummaryHtml(sum) {
-  if (!sum || !sum.commands) return '';
+  if (!sum) return '';
+  var anyBucket = APPROVAL_BUCKETS.some(function (b) {
+    return ((sum.by_approval || {})[b[0]] || 0) > 0;
+  });
+  if (!sum.commands && !anyBucket) return '';
   var buckets = sum.by_approval || {};
   var chips = APPROVAL_BUCKETS.map(function (b) {
     return approvalChipHtml(b[0], b[1], buckets[b[0]]);
@@ -4187,7 +4306,7 @@ function renderJitItem(item) {
             '<span class="jit-meta-item">#' + esc(String(Number(w.id)).padStart(6,'0')) + '</span>' +
             '<span class="jit-meta-item">' + escapeHtml(w.target_ip) + '</span>' +
             (w.label ? '<span class="jit-meta-item">' + escapeHtml(w.label) + '</span>' : '') +
-            '<span class="jit-meta-item">' + formatWinSchedule(w) + '</span>' +
+            '<span class="jit-meta-item">' + escapeHtml(winPreviewText(w, { nowMs: Date.now(), gateway: (w.hostname || w.target_ip || '') })) + '</span>' +
           '</div>' +
         '</div>' +
         '<div class="jit-actions">' +
@@ -4270,6 +4389,21 @@ function toggleSession(el) {
   if (sess) sess.classList.toggle('open');
 }
 async function approveWindowReq(id) {
+  // X10: the agent's request is approved against the same one-line preview
+  // the operator just read in the modal.
+  var w = (_pendingWinReqs || []).find(function(x) { return String(x.id) === String(id); });
+  if (!w) {
+    try {
+      var lookup = await fetch('/api/window-requests/' + id);
+      if (lookup.ok) w = await lookup.json();
+    } catch (e) { w = null; }
+  }
+  if (w) {
+    var ok = await customConfirm(
+      winPreviewText(w, { nowMs: Date.now(), gateway: (w.hostname || w.target_ip || '') }),
+      { title: 'Approve this window?', confirmLabel: 'Approve', danger: false });
+    if (!ok) return;
+  }
   playApprovalPulse();
   try {
     const r = await authFetch('/api/window-requests/' + id + '/approve', { method: 'POST' });
@@ -7308,6 +7442,7 @@ async function fetchNotifyConfig() {
     const events = (c.events || '').split(',').map(function(e){return e.trim();});
     document.getElementById('notify-event-jit').checked = events.indexOf('jit') !== -1;
     document.getElementById('notify-event-window').checked = events.indexOf('window') !== -1;
+    document.getElementById('notify-event-ceiling').checked = events.indexOf('ceiling') !== -1;
     document.getElementById('notify-event-blocked').checked = events.indexOf('blocked') !== -1;
     document.getElementById('notify-event-offline').checked = events.indexOf('offline') !== -1;
     document.getElementById('notify-event-online').checked = events.indexOf('online') !== -1;
@@ -7322,6 +7457,7 @@ async function saveNotifyConfig() {
   var events = [];
   if (document.getElementById('notify-event-jit').checked) events.push('jit');
   if (document.getElementById('notify-event-window').checked) events.push('window');
+  if (document.getElementById('notify-event-ceiling').checked) events.push('ceiling');
   if (document.getElementById('notify-event-blocked').checked) events.push('blocked');
   if (document.getElementById('notify-event-offline').checked) events.push('offline');
   if (document.getElementById('notify-event-online').checked) events.push('online');
@@ -10670,4 +10806,403 @@ function onbIntegrationCard(c) {
 function onbOpenIntegrations() {
   closeOnboarding();
   switchView('integrations');
+}
+
+
+// ── F27: Allowances ────────────────────────────────────────────────────────
+var _ceiling = null;
+
+function _allowanceConditions(row) {
+  try {
+    var c = JSON.parse(row.conditions_json || '{}');
+    var d = (c.domain && c.domain['in'] && c.domain['in'][0]) || '?';
+    var s = (c.service && c.service['in'] && c.service['in'][0]) || '?';
+    // BX1: the pins are the one entity list; conditions_json is a display copy.
+    var ents = JSON.parse(row.entities_json || '[]') || [];
+    return d + '.' + s + ' on ' + ents.length + ' entit' + (ents.length === 1 ? 'y' : 'ies');
+  } catch (e) { return '—'; }
+}
+
+async function fetchAllowances() {
+  try {
+    const [c, a, p, ag] = await Promise.all([
+      authFetch('/api/allowances/ceiling').then(r => r.json()),
+      authFetch('/api/allowances').then(r => r.json()),
+      authFetch('/api/allowances/profiles').then(r => r.json()),
+      authFetch('/api/agents').then(r => r.json())
+    ]);
+    _ceiling = c;
+    renderCeiling(c);
+    renderAllowances(a);
+    renderProfiles(p);
+    if (document.getElementById('profile-template-rows') &&
+        !document.querySelector('.profile-template-row')) addProfileTemplate();
+    const sel = document.getElementById('allowance-agent');
+    if (sel) {
+      sel.innerHTML = (ag || []).map(function(x) {
+        var id = x.id !== undefined ? x.id : x.agent_id;
+        return '<option value="' + esc(String(id)) + '">' + esc(x.name || ('agent ' + id)) + '</option>';
+      }).join('');
+    }
+    const dom = document.getElementById('allowance-domain');
+    if (dom && c && c.catalogue) {
+      dom.innerHTML = c.catalogue.map(function(t) {
+        return '<option value="' + esc(t.domain) + '">' + esc(t.label) + '</option>';
+      }).join('');
+      fillAllowanceServices();
+    }
+    const sum = document.getElementById('allowances-hud-sum');
+    if (sum) sum.innerHTML = '<span><span class="n">' + (a || []).length + '</span> live</span>';
+  } catch (e) { /* the page keeps its last render */ }
+}
+
+function renderCeiling(c) {
+  const box = document.getElementById('ceiling-types');
+  if (!box) return;
+  box.innerHTML = (c.catalogue || []).map(function(t) {
+    var acts = t.actions.map(function(act) {
+      return '<label class="flex items-center gap-1 text-xs mr-3"><input type="checkbox" data-cid="' +
+        esc(act.id) + '"' + (act.enabled ? ' checked' : '') + '> ' + esc(act.label) + '</label>';
+    }).join('');
+    return '<div class="p-2 rounded border" style="border-color:var(--border-color)">' +
+      '<div class="flex flex-wrap items-center gap-2 mb-1"><b class="text-sm">' + esc(t.label) + '</b>' +
+      (t.default ? '<span class="text-xs text-muted">on by default</span>' : '<span class="text-xs text-muted">off by default</span>') +
+      '</div>' +
+      (t.risk ? '<p class="text-xs mb-1" style="color:var(--status-warning)">' + esc(t.risk) + '</p>' : '') +
+      '<div class="flex flex-wrap gap-1">' + acts + '</div></div>';
+  }).join('');
+  document.getElementById('ceiling-never').innerHTML =
+    '<div><b class="text-xs">Never allowable</b>' +
+    (c.never.domains || []).map(function(d) {
+      return '<div class="text-xs text-muted"><code>' + esc(d.value) + '</code> — ' + esc(d.reason) + '</div>';
+    }).join('') + '</div>' +
+    '<div><b class="text-xs">Never service words</b>' +
+    (c.never.services || []).map(function(d) {
+      return '<div class="text-xs text-muted"><code>' + esc(d.value) + '</code> — ' + esc(d.reason) + '</div>';
+    }).join('') + '</div>';
+  const words = document.getElementById('ceiling-words');
+  words.innerHTML = (c.words.builtin || []).map(function(w) {
+    return '<span class="chip" title="built-in, read-only">' + esc(w) + '</span>';
+  }).join('') + ' ' + (c.words.operator || []).map(function(w) {
+    return '<span class="chip">' + esc(w) + ' <button class="link-btn" onclick="removeCeilingWord(\'' +
+      escJs(w) + '\')" aria-label="Remove ' + esc(w) + '">×</button></span>';
+  }).join('');
+}
+
+async function saveCeiling(riskAck) {
+  if (!_ceiling) return;
+  const ids = Array.prototype.slice.call(document.querySelectorAll('#ceiling-types input[data-cid]'))
+    .filter(function(x) { return x.checked; }).map(function(x) { return x.getAttribute('data-cid'); });
+  const risky = (ids || []).filter(function(cid) {
+    return (_ceiling.catalogue || []).some(function(t) {
+      return t.risk && t.actions.some(function(a) { return a.id === cid; });
+    });
+  });
+  if (!riskAck && risky.length) {
+    const riskText = (_ceiling.catalogue || []).filter(function(t) {
+      return t.actions.some(function(a) { return risky.indexOf(a.id) !== -1; });
+    }).map(function(t) { return t.risk; }).join(' ');
+    if (!confirm(riskText + '\n\nEnable these rows?')) return;
+    riskAck = true;
+  }
+  const st = document.getElementById('ceiling-status');
+  const r = await authFetch('/api/allowances/ceiling', {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled: ids, risk_ack: !!riskAck, confirm: true, set_hash: _ceiling.set_hash })
+  });
+  if (!r.ok) {
+    const d = await r.json().catch(function() { return {}; });
+    if (st) st.textContent = (d.detail && (d.detail.message || d.detail)) || 'Save failed';
+    if (d.detail && d.detail.code === 'ceiling_changed') fetchAllowances();
+    return;
+  }
+  if (st) st.textContent = 'Saved';
+  fetchAllowances();
+}
+
+async function addCeilingWord() {
+  const el = document.getElementById('ceiling-word-input');
+  const word = (el.value || '').trim();
+  if (!word) return;
+  const r = await authFetch('/api/allowances/words', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ word: word })
+  });
+  if (!r.ok) { alert('Could not add: ' + ((await r.json()).detail || 'refused')); return; }
+  const body = await r.json();
+  if (body.disabled && body.disabled.length) {
+    alert('Added. These rows were switched off: ' + body.disabled.join(', '));
+  }
+  el.value = '';
+  fetchAllowances();
+}
+
+async function removeCeilingWord(word) {
+  if (!confirm('Remove the word "' + word + '"? This widens the ceiling; it does not resume anything.')) return;
+  const r = await authFetch('/api/allowances/words/' + encodeURIComponent(word), { method: 'DELETE' });
+  if (!r.ok) { alert('Could not remove: ' + ((await r.json()).detail || 'refused')); return; }
+  fetchAllowances();
+}
+
+function fillAllowanceServices() {
+  const dom = document.getElementById('allowance-domain');
+  const sel = document.getElementById('allowance-service');
+  if (!dom || !sel || !_ceiling) return;
+  const t = (_ceiling.catalogue || []).filter(function(x) { return x.domain === dom.value; })[0];
+  sel.innerHTML = t ? t.actions.map(function(a) {
+    return '<option value="' + esc(a.service) + '">' + esc(a.label) + '</option>';
+  }).join('') : '';
+}
+
+function renderAllowances(rows) {
+  const box = document.getElementById('allowance-list');
+  if (!box) return;
+  if (!rows || !rows.length) { box.innerHTML = '<p class="text-muted text-xs">No live allowances. Every matching call asks for approval.</p>'; return; }
+  box.innerHTML = rows.map(function(r) {
+    return '<div class="flex flex-wrap items-center gap-2 p-2 rounded border" style="border-color:var(--border-color)">' +
+      '<b class="text-sm">' + esc(r.name) + '</b>' +
+      '<span class="text-xs text-muted">' + esc(r.agent_name || ('agent #' + r.agent_id)) + ' · ' +
+      esc(_allowanceConditions(r)) +
+      (r.rate_per_hour ? ' · max ' + r.rate_per_hour + '/h' : '') +
+      (r.window ? ' · ' + esc(r.window) : '') + '</span>' +
+      (r.suspended_at ? '<span class="chip" style="color:var(--status-warning)">suspended: ' + esc(r.suspended_reason) + '</span>' : '') +
+      ((JSON.parse(r.pending_json || '[]') || []).length ?
+        '<span class="chip" title="The label gained entities; accept them to allow them">' +
+        (JSON.parse(r.pending_json || '[]') || []).length + ' new</span>' : '') +
+      '<span class="flex-1"></span>' +
+      ((JSON.parse(r.pending_json || '[]') || []).length ?
+        '<button class="btn btn-xs" onclick="acceptJoin(' + r.id + ')">Accept new</button>' : '') +
+      (r.suspended_at ? '<button class="btn btn-xs" onclick="resumeAllowance(' + r.id + ')">Resume</button>' : '') +
+      '<button class="btn btn-deny btn-xs" onclick="revokeAllowance(' + r.id + ')">Revoke</button>' +
+      '</div>';
+  }).join('');
+}
+
+async function createAllowance(riskAck) {
+  const body = {
+    agent_id: parseInt((document.getElementById('allowance-agent') || {}).value || '0', 10),
+    name: (document.getElementById('allowance-name') || {}).value || '',
+    domain: (document.getElementById('allowance-domain') || {}).value || '',
+    service: (document.getElementById('allowance-service') || {}).value || '',
+    entities: ((document.getElementById('allowance-entities') || {}).value || '')
+      .split(',').map(function(x) { return x.trim(); }).filter(Boolean),
+    rate_per_hour: parseInt((document.getElementById('allowance-rate') || {}).value || '0', 10),
+    window: (document.getElementById('allowance-window') || {}).value || '',
+    risk_ack: !!riskAck
+  };
+  const st = document.getElementById('allowance-status');
+  const r = await authFetch('/api/allowances', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+  if (!r.ok) {
+    const d = await r.json().catch(function() { return {}; });
+    if (!riskAck && d.detail && d.detail.code === 'risk_ack_required') {
+      const risky = (d.detail.risky_entities || []).map(function(e) {
+        return e.entity_id + ' (' + e.device_class + ')';
+      }).join(', ');
+      if (confirm('This allowance is risky: ' + (d.detail.message || '') +
+                  (risky ? '\n' + risky : '') + '\n\nSave it?')) return createAllowance(true);
+      return;
+    }
+    if (st) st.textContent = (d.detail && (d.detail.message || d.detail)) || 'Could not save';
+    return;
+  }
+  if (st) st.textContent = 'Saved';
+  fetchAllowances();
+}
+
+async function revokeAllowance(id) {
+  if (!confirm('Revoke allowance #' + id + '? History keeps it.')) return;
+  await authFetch('/api/allowances/' + id + '/revoke', { method: 'POST' });
+  fetchAllowances();
+}
+
+async function resumeAllowance(id) {
+  if (!confirm('Resume allowance #' + id + '? It is checked against the ceiling again.')) return;
+  const r = await authFetch('/api/allowances/' + id + '/resume', { method: 'POST' });
+  if (!r.ok) alert('Could not resume: ' + ((await r.json()).detail || 'refused'));
+  fetchAllowances();
+}
+
+function renderProfiles(rows) {
+  const box = document.getElementById('allowance-profiles');
+  if (!box) return;
+  if (!rows || !rows.length) { box.innerHTML = '<p class="text-muted text-xs">No profiles.</p>'; return; }
+  box.innerHTML = rows.map(function(p) {
+    return '<div class="p-2 rounded border" style="border-color:var(--border-color)">' +
+      '<b class="text-sm">' + esc(p.name) + '</b> <span class="text-xs text-muted">v' + p.version + ' · ' +
+      (p.templates || []).length + ' template(s)</span>' +
+      '<div class="text-xs text-muted">' + (p.templates || []).map(function(t) {
+        return esc(t.domain + '.' + t.service + (t.label_id ? ' (label)' : ' ' + (t.entities || []).length + ' entities'));
+      }).join(' · ') + '</div>' +
+      '<button class="btn btn-xs mt-1" onclick="previewProfile(' + p.id + ')">Update agents</button></div>';
+  }).join('');
+}
+
+async function applyProfile(pid, version) {
+  const sel = document.getElementById('allowance-agent');
+  if (!sel || !sel.value) { alert('Pick an agent first.'); return; }
+  if (!version) { alert('Reload the preview before applying: the profile version is missing.'); return; }
+  const r = await authFetch('/api/allowances/profiles/' + pid + '/apply', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ agent_id: parseInt(sel.value, 10), risk_ack: false,
+                           profile_version: version })
+  });
+  if (!r.ok) {
+    const d = await r.json().catch(function() { return {}; });
+    if (d.detail && d.detail.code === 'profile_changed') { alert('The profile changed. Reload the preview.'); return; }
+    if (d.detail && d.detail.code === 'risk_ack_required') {
+      if (confirm((d.detail.message || 'Risky rows') + '\n\nApply anyway?')) {
+        const r2 = await authFetch('/api/allowances/profiles/' + pid + '/apply', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ agent_id: parseInt(sel.value, 10), risk_ack: true,
+                                 profile_version: version })
+        });
+        if (r2.ok) { fetchAllowances(); return; }
+      }
+    }
+    alert('Could not apply: ' + ((d.detail && (d.detail.message || d.detail)) || 'refused'));
+    return;
+  }
+  fetchAllowances();
+}
+
+
+function addProfileTemplate() {
+  const box = document.getElementById('profile-template-rows');
+  if (!box) return;
+  const row = document.createElement('div');
+  row.className = 'flex flex-wrap gap-2 items-center text-xs profile-template-row';
+  const types = (_ceiling && _ceiling.catalogue || []).map(function(t) {
+    return '<option value="' + esc(t.domain) + '">' + esc(t.label) + '</option>';
+  }).join('');
+  row.innerHTML = '<select class="profile-domain" onchange="fillProfileServices(this)">' + types + '</select>' +
+    '<select class="profile-service"></select>' +
+    '<input type="text" class="profile-entities flex-1" placeholder="entities, comma separated (or leave blank for a label)" style="min-width:12rem">' +
+    '<input type="text" class="profile-label" placeholder="label id (optional)" style="width:10rem">' +
+    '<button class="btn btn-deny btn-xs" onclick="this.parentElement.remove()">Remove</button>';
+  box.appendChild(row);
+  fillProfileServices(row.querySelector('.profile-domain'));
+}
+
+function fillProfileServices(sel) {
+  const row = sel.closest('.profile-template-row');
+  const svc = row.querySelector('.profile-service');
+  const t = (_ceiling && _ceiling.catalogue || []).filter(function(x) { return x.domain === sel.value; })[0];
+  svc.innerHTML = t ? t.actions.map(function(a) {
+    return '<option value="' + esc(a.service) + '">' + esc(a.label) + '</option>';
+  }).join('') : '';
+}
+
+async function saveProfile() {
+  const name = (document.getElementById('profile-name') || {}).value || '';
+  const desc = (document.getElementById('profile-description') || {}).value || '';
+  const rows = Array.prototype.slice.call(document.querySelectorAll('.profile-template-row'));
+  const templates = rows.map(function(row) {
+    const ents = (row.querySelector('.profile-entities').value || '')
+      .split(',').map(function(x) { return x.trim(); }).filter(Boolean);
+    return {
+      domain: row.querySelector('.profile-domain').value,
+      service: row.querySelector('.profile-service').value,
+      entities: ents,
+      label_id: (row.querySelector('.profile-label').value || '').trim()
+    };
+  });
+  const st = document.getElementById('profile-status');
+  if (!templates.length) { if (st) st.textContent = 'Add at least one template.'; return; }
+  const r = await authFetch('/api/allowances/profiles', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: name, description: desc, templates: templates })
+  });
+  if (!r.ok) { const d = await r.json().catch(function() { return {}; });
+    if (st) st.textContent = (d.detail && (d.detail.message || d.detail)) || 'Could not save'; return; }
+  if (st) st.textContent = 'Saved';
+  document.getElementById('profile-template-rows').innerHTML = '';
+  fetchAllowances();
+}
+
+
+async function acceptJoin(id, riskAck) {
+  if (!riskAck && !confirm('Accept the entities this label gained? They become part of the allowance.')) return;
+  const r = await authFetch('/api/allowances/' + id + '/accept-join', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ risk_ack: !!riskAck })
+  });
+  if (!r.ok) {
+    const d = await r.json().catch(function() { return {}; });
+    if (!riskAck && d.detail && d.detail.code === 'risk_ack_required') {
+      const risky = (d.detail.risky_entities || []).map(function(e) {
+        return e.entity_id + ' (' + e.device_class + ')';
+      }).join(', ');
+      if (confirm((d.detail.message || 'Risky entities') + (risky ? '\n' + risky : '') +
+                  '\n\nAccept them?')) return acceptJoin(id, true);
+      return;
+    }
+    alert('Could not accept: ' + ((d.detail && (d.detail.message || d.detail)) || 'refused'));
+    return;
+  }
+  fetchAllowances();
+}
+
+
+var _profilePreview = null;
+
+async function previewProfile(pid) {
+  const sel = document.getElementById('allowance-agent');
+  if (!sel || !sel.value) { alert('Pick an agent first.'); return; }
+  const agentId = parseInt(sel.value, 10);
+  const r = await authFetch('/api/allowances/profiles/' + pid + '/diff?agent_id=' + agentId);
+  if (!r.ok) { alert('Could not preview: ' + ((await r.json()).detail || 'refused')); return; }
+  const d = await r.json();
+  _profilePreview = d;
+  const body = document.getElementById('profile-diff-body');
+  const revoke = (d.revoke || []).map(function(x) {
+    return '<div>Revoke <b>' + esc(x.name) + '</b> (' + esc(x.domain + '.' + x.service) + ', v' + x.version + ')</div>';
+  }).join('') || '<div class="text-muted">Nothing to revoke.</div>';
+  const add = (d.add || []).map(function(x) {
+    return '<div>Add <b>' + esc(x.name) + '</b> (' + esc(x.domain + '.' + x.service) + ', ' +
+      x.entities.length + ' entities' + (x.label_id ? ', from a label' : '') + ')</div>';
+  }).join('') || '<div class="text-muted">Nothing to add.</div>';
+  body.innerHTML = (d.up_to_date ? '<p class="text-muted">This agent is already on the current version; applying would still replace the rows below.</p>' : '') +
+    '<div><b>Revoke</b></div>' + revoke + '<div class="mt-2"><b>Add</b></div>' + add;
+  document.getElementById('profile-diff-modal').classList.remove('hidden');
+}
+
+function closeProfileDiff() {
+  document.getElementById('profile-diff-modal').classList.add('hidden');
+  _profilePreview = null;
+}
+
+async function applyPreviewedProfile() {
+  if (!_profilePreview) return;
+  const sel = document.getElementById('allowance-agent');
+  const version = _profilePreview.profile_version;
+  const r = await authFetch('/api/allowances/profiles/' + _profilePreview.profile_id + '/apply', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ agent_id: parseInt(sel.value, 10), risk_ack: false,
+                           profile_version: version })
+  });
+  if (!r.ok) {
+    const d = await r.json().catch(function() { return {}; });
+    if (d.detail && d.detail.code === 'profile_changed') {
+      alert('The profile changed since this preview. Close it and reload the preview.');
+      return;
+    }
+    if (d.detail && d.detail.code === 'risk_ack_required') {
+      if (confirm((d.detail.message || 'Risky rows') + '\n\nApply anyway?')) {
+        const r2 = await authFetch('/api/allowances/profiles/' + _profilePreview.profile_id + '/apply', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ agent_id: parseInt(sel.value, 10), risk_ack: true,
+                                 profile_version: version })
+        });
+        if (r2.ok) { closeProfileDiff(); fetchAllowances(); }
+        return;
+      }
+    }
+    alert('Could not apply: ' + ((d.detail && (d.detail.message || d.detail)) || 'refused'));
+    return;
+  }
+  closeProfileDiff();
+  fetchAllowances();
 }

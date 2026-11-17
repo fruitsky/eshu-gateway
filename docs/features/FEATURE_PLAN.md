@@ -12915,6 +12915,44 @@ note.
 
 **Round 2 (2026-11-09, main feature reviewer): approved and merged.** R1 is right: `whereis` is gated by agent policy, sources are filtered before the join, and each call is audited. Note: a caller with no agent identity (a legacy MCP token) gets the unfiltered join and no audit row, the same as for the integration tools themselves. Tighten this in the UI/hardening pass if legacy tokens are retired.
 
+
+### F20-pass I1/I2 — the live inventory sources (2026-11-17)
+
+**I1 — Pi-hole failed before its first request.** The seeded
+`local_dns_records` row is right (`handler=pihole_local_dns_records`, X6
+D18b), and the read policy passes it. The handler's two synthetic probes did
+not carry `enabled`, so `execute_integration_call` refused them with
+"Tool not found or disabled" before `_http_roundtrip` ran: no
+`integration_calls` row, and the handler returned the generic
+`local_dns_records_failed`. The probes now carry `name`, `enabled`,
+`transport` and `read_only`; both GETs run and are recorded. `_call_tool`
+also keeps a handler's `message` in its `SourceError`, so a real refusal or
+upstream error is recorded as `code: message`, not the bare code.
+
+**I2 — Omada never called `list_known_clients`.** `list_sites` returns
+`siteId`, but the adapter tested `site.get('id')`, so every site was
+skipped and the source recorded success with zero items. The adapter now
+accepts `siteId`, `id` or `site_id` before the per-site call.
+
+**Tests.** `TestRealSourcePath` fakes `_http_roundtrip` (not `_call_tool`),
+so the real adapter, read policy, handler/probe and response transform run:
+synthetic Pi-hole v6 host/CNAME payloads yield `host:*` / `cname:*` rows and
+record both integration calls; a 404 records
+`local_dns_records_failed: <upstream message>` in `last_error`; synthetic
+Omada `siteId` + clients yield a `client` row and prove `site-1` reached
+`list_known_clients`. All addresses are `192.0.2.x` and all names
+`*.example.test`. Each test fails on the pre-fix code.
+
+**Review (2026-11-17): approved and merged.** Both causes match what the
+live system showed. The Pi-hole sources failed with no recorded call, and
+Omada called `list_sites` on every refresh but never `list_known_clients`.
+The fix is small and the tests drive the real call path. A source's
+`last_error` now carries upstream text. I checked that this text is already
+secret-scrubbed and capped at 300 characters before it is stored, and that
+the Inventory page escapes it. Full suite: 3189 passed, 33 skipped. The fix
+reaches the live system with the next dashboard deploy. After that,
+`whereis` should show DNS records and Omada clients.
+
 ---
 
 ## Chunk F15 — Diagnostic probes · slug `probes` · dashboard + MCP
@@ -16636,15 +16674,1645 @@ an allowance would replace one.
   switches runs `light.turn_off` and `switch.turn_off` on those entities
   with no card. Any other entity, domain or service still asks.
 
-### Implementer notes
+### Implementer notes — design note, round 2 (for the security reviewer)
 
-_(implementer)_
+**Status: design note only — no code.** Round 2 folds the security reviewer's
+label shape ("resolve at apply time") and BD1–BD5, and the feature
+reviewer's AZ1–AZ5. AZ6 (`restart`) is left open for the operator. §12 lists
+the two things still open for this reviewer's confirmation.
 
-### Reviewer notes
+#### 1. The object
 
-_(reviewer)_
+```
+allowances
+  id                INTEGER PK
+  agent_id          INTEGER        -- agent_tokens.id, never a name
+  integration       TEXT           -- the integration name (as tools use it)
+  tool              TEXT
+  name              TEXT           -- operator-facing, e.g. "Living-room lamp"
+  conditions_json   TEXT           -- the exact conditions (§2), resolved
+  entities_json     TEXT           -- [{entity_id, registry_id}] (AZ1/BD5)
+  source_label_id   TEXT           -- the label a template named, or ''
+  suspended_at      INTEGER        -- AZ2/BD5: 0 = live
+  suspended_reason  TEXT           -- 'config_write', 'registry_changed', ...
+  rate_per_hour     INTEGER        -- 0 = no cap (uses are still recorded)
+  window            TEXT           -- '' or 'HH:MM-HH:MM', host local time
+  expires_at        INTEGER        -- 0 = never
+  version           INTEGER        -- starts at 1
+  created_by        TEXT
+  created_at        INTEGER
+  revoked_at        INTEGER        -- 0 = live; the only way a version dies
+  profile_id        INTEGER        -- 0 for a hand-made allowance
+  profile_version   INTEGER        -- 0 for a hand-made allowance
+```
+
+* **Edit = new version.** Saving an edit inserts `version + 1` and sets
+  `revoked_at` on the old row, in one transaction; only `revoked_at = 0`
+  matches, so the old version stops matching at once.
+* **Revoke** sets `revoked_at`; never deletes, so History keeps the id.
+* **Audited:** `allowance_created`, `allowance_edited`, `allowance_revoked`,
+  `allowance_suspended`, `allowance_resumed`, `allowance_label_refresh`,
+  each with the version.
+* Uses are a separate table (`allowance_uses(id, allowance_id, used_at,
+  call_ref)`), never a counter.
+
+#### 2. Conditions are exact, and they are the only control
+
+`conditions_json` is a JSON object; keys are parameter paths: a declared
+parameter name, or one dotted path into a `json` parameter
+(`data.entity_id`). Only paths the seed declares `constrainable` may appear.
+
+Two forms, and only these two:
+
+* `{"in": [v1, v2, ...]}` — a non-empty list of at most 64 JSON scalars
+  (string, integer, number, boolean). **Type-strict**: `1` never matches
+  `"1"`, `true` never matches `1`; a number matches a number numerically
+  (`1` matches `1.0`), a string byte-identically (no trimming, no case
+  folding).
+* `{"range": [lo, hi]}` — two numbers, `lo <= hi`, inclusive, only for a
+  parameter the seed declares `integer` or `number`; a boolean is never a
+  number.
+
+Nothing else: no `not`, `prefix`, `contains`, `regex`, `gt`, `lt`, and no
+object or array as a set member. `in` and `range` together is refused.
+
+**Matching one call.**
+
+1. Decode the argument value from the call's `args`.
+2. A **list** matches only when every element matches and the list is
+   non-empty; one unlisted element fails.
+3. A scalar matches when it is in the set.
+4. A condition key absent from the call fails the match.
+
+**Absent or default, for everything not mentioned.** Every declared
+parameter no condition names must be omitted or equal to its declared
+`default` (type-strict). For a `json` parameter a condition reaches into
+(`data.entity_id`), the object may hold **only** the keys the conditions name
+and the keys the seed declares defaults for. `call_service` declares no
+`data` defaults, so v1 `data` holds only `entity_id` (a string or a list of
+strings); `brightness`, `temperature` and the rest get a card. Stated as a
+limit, not a bug.
+
+**AZ1 — the target must be plain entity ids.** `call_service` also accepts
+`area_id`, `device_id` and `label_id`, and `entity_id` may be the literal
+`all` or `none`; HA expands all five when the call runs. The allowance
+matches **only** when the call's target is a plain entity-id string or a list
+of them, each in the stored list. Any of `area_id`, `device_id`, `label_id`,
+`entity_id: all` / `none` — **in `data` and in a top-level `target`** — gets a
+card. The check walks both `args.data` and `args.target` (and `args` itself,
+for a tool that takes them top-level); an expanding key anywhere refuses the
+match.
+
+**BD4 — validate the values themselves.** At save and at apply:
+`domain` and `service` must match `^[a-z0-9_]+$` (they are rendered into the
+URL path); each entity id must match `^[a-z0-9_]+\.[a-z0-9_]+$` and its
+domain prefix must be one of the allowance's `domain` values. That refuses
+HA's comma-separated string form, `all`, `none`, and a `light.` condition
+with a `switch.x` entity.
+
+**BD5 — pin each entity's registry entry.** When an allowance is saved (and
+when a label is resolved), each entity id is stored with the entity
+registry's `id` (`entities_json`). Calls still match on the entity id with no
+HA read. The refresh job (§7) suspends an entity whose registry entry
+changed or disappeared, until the operator accepts it again. An entity ID
+can be reused: delete a plug and rename a new device to the same
+`switch.heater`, and the pin is what notices.
+
+**Validation points.** Conditions are validated when an allowance or a
+profile template is saved, again when a profile is applied, and re-checked
+against the current seed at match time. A stored condition that is no longer
+valid (a parameter no longer constrainable, a value now under `never`, a
+suspended entity, a changed registry pin) makes the allowance **not match**
+(a card) and writes one audit row per allowance per hour. Fail closed.
+
+#### 3. The seed field: `only` is the allowlist, `never` the second check
+
+`integration_tools` gains `allowance_json`, set from the seed. `call_service`
+is the only tool with it in v1:
+
+```json
+"allowance": {
+  "constrainable": ["domain", "service", "data.entity_id"],
+  "required": ["domain", "service", "data.entity_id"],
+  "only": {
+    "light":         ["turn_on", "turn_off", "toggle"],
+    "switch":        ["turn_on", "turn_off", "toggle"],
+    "fan":           ["turn_on", "turn_off", "toggle"],
+    "input_boolean": ["turn_on", "turn_off", "toggle"],
+    "cover":         ["open_cover", "close_cover", "stop_cover"],
+    "media_player":  ["turn_on", "turn_off", "media_play",
+                      "media_pause", "media_stop"],
+    "climate":       ["turn_on", "turn_off"]
+  },
+  "never": {
+    "domain": ["script", "automation", "shell_command", "hassio",
+               "homeassistant", "python_script", "rest_command", "notify",
+               "update", "recorder", "pyscript"],
+    "service": ["disarm", "unlock", "install", "purge", "delete", "reset"]
+  }
+}
+```
+
+* **`only` is the control (BD1).** A domain outside `only`, or a service
+  outside that domain's list, is refused at save, at apply and at match.
+  The list above is the household starting point; the operator's seven
+  decisions say it is the operator's, so the seed list is shipped as the
+  proposal and lives in one constant. `update.install`, `recorder.purge`,
+  `zha`/`zwave_js` management services and any custom integration's services
+  are outside `only` and cannot be reached — a denylist would never keep up,
+  which is why it is an allowlist.
+* **`never` stays as the second check**, on top of `only`.
+  * A domain is refused when it **is** a `never.domain` value.
+  * A service is refused when it **is** a `never.service` value or **ends
+    with `_<value>`**: `alarm_disarm` ends with `_disarm` and is refused;
+    `lock.open` is the whole value `open` and is refused; `open_cover` ends
+    with `_cover`, not `_open`, so it is not. This is the rule the reviewer
+    asked for, stated so that `alarm_disarm` cannot slip through.
+  * `never` service values are matched after `.strip().lower()`.
+* `constrainable` / `required`: as before. `domain`, `service` and
+  `data.entity_id` are all required, so **a whole-domain allowance is
+  refused**; the unit is one allowance = one entity set × one service set
+  ("heater: off only" is a second allowance).
+* **A tool with a `handler` is not allowable in v1.** That leaves NPM,
+  Pi-hole, Proxmox, Omada, the Arr tools and the media apps without an
+  allowable tool. **AZ3: v1 is HA only.** One row per integration:
+
+| integration | allowable in v1? | why |
+|---|---|---|
+| HA (`call_service`) | yes, with `only` | the seed field above |
+| NPM | no | handler tools; every write asks |
+| Pi-hole | no | handler tools (the DNS records); every write asks |
+| Proxmox | no | no seed field; every write asks |
+| Omada | no | no seed field; every write asks |
+| Sonarr / Radarr / Prowlarr / Bazarr | no | `always_gate` tools, verb-mode gate; every write asks |
+| Seerr | no | `request_create` only; not a gate to relax |
+| Pulse | no | no seed field |
+| Commute / Train / web fetch | no | no writes, or no seed field |
+
+The operator sees this on the Allowances page ("profiles not yet available
+for this integration"). A later chunk can give each seed its own `only` map.
+* Missing `allowance_json`, an empty `only`, or `required` not a subset of
+  `constrainable` → the tool cannot be allowed.
+
+#### 4. Never allowable, whatever a seed says
+
+Checked at save, at apply and at match:
+
+1. the F10 Supervisor actions by name (`ha_addon_action`,
+   `ha_addon_update`, `ha_core_update`, `ha_backup_create`,
+   `ha_core_restart`, `ha_host_reboot`) and any tool whose handler is
+   `ha_supervisor_action`;
+2. an HA admin config write (`config/automation`, `config/script`,
+   `config/scene`);
+3. F21's internal tools (`integration_tools.internal = 1`);
+4. the generic `write` and `ws_write` tools;
+5. any tool with a `handler` (§3);
+6. any `always_gate` tool with no seed `allowance` field;
+7. anything the security reviewer adds — one module constant, one test.
+
+#### 5. Where it is decided
+
+In `_run_tool`, **after every existing refusal and before the gate**:
+
+1. integration and tool resolved, `enabled` checked;
+2. `evaluate_call` (the agent's tool allowlist, `principal_allow`,
+   `arg_policy`) — unchanged;
+3. `not_implemented`;
+4. the F9 freeze refusal (reads pass, writes refuse);
+5. the hassio-domain refusal, the read-only-passthrough refusal, the
+   Supervisor WS/REST refusals, the HA path guard;
+6. **BD2 — an "always ask" agent beats the allowance.** Read the agent's
+   approval mode for this tool (`approval_mode`, F3/F12) *before* the
+   allowance: `gated` (or any mode that forces a card, including an agent
+   in `approval` mode for this tool) means the allowance is **not
+   consulted**, nothing is counted, nothing is audited as a use, and the
+   call goes on to step 7's gate — the ordinary card. `ungated` does not
+   weaken anything: `always_gate` still wins (P2, §9);
+7. **the allowance check** (new): the call is mutating; the agent is the
+   verified token (BD3); the tool is allowable; the arguments satisfy §2–§3;
+   exactly one live allowance matches; no suspension applies; the window,
+   the rate and the expiry allow it. Then the call runs with
+   `approval='allowance:<id>'`;
+8. otherwise the existing gate: `destructive` / `all` / `always_gate` /
+   the agent's `gated`|`ungated` override, the plan claim, then the card.
+
+**BD3 / AZ5 — identity is the verified token, every call.** The agent is the
+`agent_tokens` row `_run_tool` authenticated for this call
+(`get_current_agent`'s row, looked up by `id`), and the allowance matches
+only `agent_id` equal to it with `revoked = 0` **re-read on every call**
+(never a cached copy, as F16 AW2 does). No agent name, session id, header or
+argument from the call can stand in for it. A call with no agent identity
+never matches. A token revoked or deleted between the proposal and the call
+stops matching at once — the suspended/revoked check is part of the same
+conditional read that matches the allowance, so there is no window.
+
+**The winners, precisely.**
+
+* **A freeze** has already refused the write at step 4.
+* **The tripwire freeze** (F24) is read in the same place; the allowance
+  check never runs while it is set.
+* **Zero-Trust** is a gateway property; a tool call names an integration,
+  not a gateway, so there is no Zero-Trust decision in its path — and v1 has
+  no SSH allowances. If a later chunk gives a tool call a gateway context,
+  the allowance reads it first and refuses.
+* **A gated agent** (BD2) short-circuits the allowance before it is read.
+* **No match, ambiguous match, rate hit, window miss, expired, revoked,
+  suspended entity, changed registry pin → the ordinary card.** Never a
+  denial; an allowance is a pre-approval.
+
+**Two smaller decisions (agreed):** more than one live match gets a card and
+`allowance_ambiguous`; an allowance is not consulted for a call that would
+not have been gated.
+
+#### 6. Rate counting is atomic; the window is the dashboard's local time
+
+* Rate = uses in the last hour from `allowance_uses`, plus the window,
+  `expires_at` and any suspension.
+* Check and record are **one transaction** on one connection with
+  `BEGIN IMMEDIATE`: read the count, compare, insert the use. SQLite
+  serialises the writers; the loser re-reads and gets a card (the plan-claim
+  rule).
+* The use is recorded **before** the upstream call; a call that then fails
+  still counts.
+* `rate_per_hour = 0` = no cap, uses still recorded.
+* **Window: the dashboard host's local time (AZ4).** `HH:MM-HH:MM`, start
+  inclusive, end exclusive, `start > end` crossing midnight. The Allowances
+  page shows the zone (`Europe/London` here) beside the window, and the
+  audit/History line carries the same zone. **DST:** the times are wall-clock
+  in that zone; the comparison converts `now` and the two endpoints with the
+  host's `zoneinfo`, so a window across a spring-forward or fall-back is
+  evaluated against the local clock, not a fixed UTC offset. A window whose
+  start equals its end is refused at save. Two windows are not in v1.
+* **Expiry** is an epoch; `0` = never; an expired allowance stops matching
+  (the page shows it as expired; the operator decides).
+* **AZ4 tests:** across midnight, across a DST change (both directions), and
+  a window with start == end refused.
+
+#### 7. Profiles and labels: "resolve at apply time"
+
+A **profile** is a named, versioned set of allowance templates. The operator
+builds profiles and applies them to an agent instead of redefining the same
+allowances.
+
+* **The object.** `allowance_profiles(id, name UNIQUE, description, version,
+  created_by, created_at, updated_at, deleted_at)`; templates carry
+  `integration, tool, conditions, rate_per_hour, window, expires_at, name`
+  (no agent).
+* **A template may name a label.** The relayed shape, and the only label
+  form in v1:
+  * a template's `data.entity_id` condition may be
+    `{"label_id": "<registry label id>"}` (the UI picks by display name; the
+    **id** is stored). `area_id` and `device_id` are never template values.
+  * **At apply time** ("Update agents") the label is resolved through HA's
+    label registry to an entity list, and the resulting allowance stores the
+    **entity list and each entity's registry id**, never the label. Matching
+    is against the stored list (§2), so a call never needs HA and a label
+    rename changes nothing.
+  * A label's template states **services per domain** (`light: turn_on,
+    turn_off`); each pair must be inside the seed's `only` map, never beyond
+    it.
+  * After resolution the `never` domains and values are filtered out: a
+    `script.*` or `automation.*` entity carrying the label is **excluded and
+    shown as excluded** on the apply card, not silently allowed.
+  * A **failed registry read at apply** refuses the apply with the failing
+    template named; nothing is revoked or created.
+* **Refresh (the label and pin job).** A periodic job (and the same job that
+  re-reads registry pins, BD5) re-resolves each label-sourced allowance:
+  * an entity that has **left** the label drops out at once (the stored list
+    shrinks, audited);
+  * an entity that has **joined** is **held**: it is not added to the
+    matching list until the operator accepts it in one click ("label X now
+    also includes Y"); until then a call to it gets a card;
+  * a **registry id that changed or disappeared** suspends that entity (and
+    a line on the page says why) until the operator accepts it;
+  * a failed registry read during refresh changes nothing and leaves calls
+    matching the stored list; the page shows "label check failed" instead.
+* **Applying** a profile creates one allowance per template with
+  `profile_id`/`profile_version`; **saving an edit** creates a new profile
+  version and leaves every agent alone until **Update agents** is pressed
+  (for all listed agents or one), which revokes the old profile allowances
+  and creates the new ones, audited.
+* **Re-validation at apply time:** every template goes through §2–§4 again,
+  because a seed can tighten between save and apply; a failure refuses the
+  apply before anything is revoked.
+* **Removing a profile** from an agent revokes the allowances it created
+  (hand-made allowances are untouched). **Deleting a profile is refused
+  while an agent is on it.**
+
+#### 8. AZ2 — an approved config write cannot redefine an allowed entity
+
+An approved F11 `ha_config_write` can turn `switch.x` into a template or
+`command_line` switch backed by a script or a shell command. **Preference:
+suspend, do not silently keep.** After any approved F11 write:
+
+* the written file's text (after decoding its `!include`s, which F11 already
+  parses) is scanned for entity ids — an `entity_id:` key, a
+  `<domain>:` block with a `name`, a `template:` block's `unique_id`;
+* an allowance entity whose id appears is **suspended** (`suspended_at`,
+  `suspended_reason='config_write'`), audited, and the page says "re-confirm
+  after a config change"; calls to it get a card until the operator
+  re-confirms;
+* **if the mapping is incomplete** — the written file defines entities but
+  the scan cannot attribute them (a `packages/` file with template blocks,
+  a `!include_dir_*`), every allowance for that integration is suspended
+  instead. Conservative by construction: an entity defined in YAML inside
+  F11's write scope is never silently allowed on the strength of a file
+  scan.
+* **BD5's widening:** the same suspension applies to any approved write that
+  redefines the entity through its config entry — an options-flow or
+  config-entry write for the entity's `config_entry_id` from the registry
+  (a template helper created in the UI), not only an F11 YAML write. The
+  registry gives the `config_entry_id`; the integration's write tools are
+  the trigger.
+* If the scan cannot map at all (the registry is unreadable), **suspend all
+  HA allowances for that integration** and say so; re-confirm re-validates
+  the entity and its pin.
+
+#### 9. What the operator and the agent see; P2 does not change
+
+* **Allowances page:** one row per live allowance — agent, tool, conditions
+  in plain words, the label it came from (if any), rate, window **and its
+  zone**, expiry, uses in the last 24 h, version, Revoke/Re-confirm. A
+  suspended allowance is red with the reason; an "expired/revoked/suspended"
+  filter shows the rest. One line at the top states the accepted residual:
+  **an allowed call changes an entity's state, and HA automations triggered
+  by that state run as HA decides — the allowance cannot see them.**
+* **The agent's page** lists its allowances, the profile that made them, and
+  Revoke.
+* **History and the call log** show `allowance #N (name)` in the approval
+  column (version in the details), so a call that ran without a card is
+  never blank.
+* **F6/F18** count it as its own approval bucket, `allowance`, alongside
+  `manual`, `plan`, `unattended` and `auto`; Statistics shows it.
+* **The agent's tool description** gets one line: "Calls matching one of
+  your allowances run without approval." It does not list values — the
+  entity list is the operator's object.
+* **P2 is unchanged:** `always_gate` still beats `ungated`, including
+  `call_service`, the Supervisor actions and admin config writes. An
+  allowance is the one sanctioned pre-approval, and only for a seed-declared
+  tool. No seed flag is removed to make F27 work.
+
+#### 10. The widened destructive word list, and `_` as a separator
+
+`DESTRUCTIVE_VERBS` keeps `delete`, `remove`, `purge`, `format`, `reset` and
+gains `stop`, `shutdown`, `reboot`, `disable`, `unlock`, `disarm`.
+
+**BD1's bug:** `_DESTRUCTIVE_RE` uses `\b`, and `_` is a word character, so
+`\bdisarm\b` does not match `alarm_disarm`. The regex changes to treat `_` as
+a separator as well —
+
+```python
+_DESTRUCTIVE_RE = re.compile(
+    r'(?<![A-Za-z0-9])(?:' + '|'.join(DESTRUCTIVE_VERBS) + r')(?![A-Za-z0-9])',
+    re.IGNORECASE)
+```
+
+— so `alarm_disarm`, `lock.unlock` and `lock.open` are marked. `open_cover`
+is also marked (the token `open` is followed by `_`); that over-labels a
+cover card, which is the safe direction. Tests use the real service names
+(`alarm_disarm`, `lock.unlock`, `lock.open`), not a made-up path.
+
+Effect per seeded integration, as before: Proxmox `stop_vm`,
+`stop_container`, `shutdown_vm`, `reboot_vm` now ask; Pi-hole
+`disable_blocking` asks; Jellyfin `stop_task`/`stop_transcodes` ask; HA
+`call_service` paths for those services are marked (already always-gated);
+NPM, Omada, Pulse, Seerr, the Arr tools and the read-only integrations are
+unchanged. Decision 1 (`gate_mode='all'` for HA/NPM/Pi-hole/Proxmox/Omada)
+remains the separate change.
+
+**AZ6, open for the operator:** Jellyfin's `/System/Restart` still auto-runs
+under `destructive`; `restart` is not in the agreed list. Whether to add it
+(also marking HA `homeassistant.restart`, a never domain, and any later
+restart path) is the operator's answer; no code depends on it.
+
+#### 11. Phase 2, named and not designed
+
+The **wattage rule** ("only if the plug's power sensor reads below X W") is a
+phase-2 read precondition on F22's typed `expect` plus a reliable
+plug-to-sensor mapping; no field for it is added here. SSH allowances stay
+out of scope (gateway allowlists, the read lane, Zero-Trust).
+
+#### 12. What is still open for the security reviewer
+
+1. **The `only` list itself** (§3): the household proposal above is mine,
+   not the operator's. Confirm the shape (per-domain allowlist) and say if
+   you want `cover`/`media_player`/`climate` in or out of the first list.
+2. **AZ2's mapping** (§8): I chose "suspend on a config write, with the
+   file scan and the suspend-all fallback". Confirm that the fallback is
+   acceptable where the mapping is incomplete, or say if you would rather
+   refuse YAML-defined entities outright.
+
+AZ6 (restart) is with the operator.
+
+#### 13. Tests this design adds
+
+* **Conditions:** a matching call runs with `allowance:<id>`, one use, the
+  audit row and the History label; a list whose every element is listed; a
+  number in range.
+* **Every miss is a card, not a denial:** a value outside the set; an extra
+  argument; a list with one unlisted element; a number out of range;
+  `"1"` vs `1`; `true` vs `1`; a case-mismatched string; a missing required
+  path; `data` with a second key; outside the window (midnight and both DST
+  directions); over the rate; expired; revoked; suspended; a changed
+  registry pin.
+* **AZ1:** each of `area_id`, `device_id`, `label_id`, `entity_id: all`,
+  `entity_id: none` — in `data` and in `target` — gets a card; a plain
+  entity list that is a subset matches; one extra entity does not.
+* **BD4:** a bad domain/service charset, a bad entity id, and an entity id
+  whose domain is not in the allowance's `domain` values are refused at
+  save.
+* **Only/never:** each `never` domain refused; `alarm_disarm`, `lock.open`,
+  `unlock`, `install`, `purge`, `delete`, `reset` refused on the suffix
+  rule; `cover.open_cover` and `cover.stop_cover` allowed by `only` and not
+  caught by the suffix rule; a service outside `only` refused at save, at
+  apply and at match.
+* **BD2:** a `gated` agent with a matching allowance gets a card and no use
+  is counted; an `ungated` agent on an `always_gate` tool still gets a card
+  (P2).
+* **BD3/AZ5:** a call with no agent identity gets a card; a revoked or
+  deleted token stops matching at once; a different agent id never matches,
+  even with the same name in the arguments.
+* **The decision point:** freeze refuses before the check; a non-empty
+  tripwire key does too; an allowance does not run a call that would not
+  have been gated, and does not count it.
+* **Atomicity:** concurrent calls at the rate limit produce exactly the
+  allowed number of `allowance_uses` rows (threads, one SQLite file).
+* **Versioning:** an edit stops the old version matching at once; revoke
+  stops matching and leaves the History rows.
+* **Profiles and labels:** apply resolves a label to entities and stores the
+  list + registry ids; an edit leaves agents alone until Update agents;
+  Update agents revokes and recreates; a re-validation failure refuses the
+  apply and revokes nothing; a label join is held until accepted, a leave
+  drops at once; a changed registry id suspends; a failed registry read at
+  apply refuses and at refresh changes nothing; removing a profile revokes
+  its allowances; deleting a profile in use is refused.
+* **AZ2/BD5:** after an approved config write that defines an allowed
+  entity, that allowance is suspended and its calls card until re-confirmed;
+  an incomplete mapping suspends all HA allowances; a config-entry write for
+  the entity's `config_entry_id` suspends the same way.
+* **The destructive list:** real names (`alarm_disarm`, `lock.unlock`,
+  `lock.open`) marked; `open_cover` marked too; `enable_blocking` and
+  `/status/start` not marked.
+* **AZ3:** every seeded integration without the seed field reports "not
+  allowable" in the Allowances page data.
+
+`bash scripts/verify.sh`: `2800 passed, 22 skipped, 8 warnings in 571.03s
+(0:09:31)`.
+
+### Reviewer notes (main feature reviewer, 2026-11-12, design round 1)
+
+A clear note, and it follows the seven decisions. I agree with both of the smaller decisions: an ambiguous match gets a card plus `allowance_ambiguous`, and an allowance is not consulted when the call would not be gated. The security reviewer has already answered the label question in chat (relayed below, to be confirmed in their review), so the next round can fold it in.
+
+**The security reviewer's answer on labels (relayed 2026-11-12): neither A nor B as written; "resolve at apply time".**
+* A label may be used to *write* a template.
+* When the template is applied ("Update agents"), the label is resolved to an entity list. That list is stored on the allowance and shown, and calls match the stored list, never the label.
+* A periodic refresh re-resolves the label:
+  * an entity that has left the label drops out at once;
+  * an entity that has joined is held until the operator accepts it in one click ("label X now also includes Y"); until then a call to it gets a card.
+* The never domains and values are filtered after resolution. A `script.*` or `automation.*` entity carrying the label is excluded and shown as excluded.
+* Services are stated per domain in a label template.
+* The match is on the label **ID**, not its display name. A failed registry read means a card.
+
+This keeps §2's "two forms" for *matching*. The label exists only in the template and in the refresh.
+
+**AZ1 (must, from the security reviewer): the call's target must be plain entity ids.** `call_service` also accepts `area_id`, `device_id` and `label_id`, which HA expands when the call runs. The allowance matches only when the target is a plain entity-id string or list that is a subset of the stored list, and any expanding key gets a card. §2 already allows only `entity_id` in `data`. State it as a named rule with a test for each expanding key, in `data` and in a top-level `target`.
+
+**AZ2 (must, from the security reviewer): F11 can redefine an allowed entity.** An approved config write can turn `switch.x` into a template switch backed by a script or a `shell_command`. Either:
+* an F11 write to a file that defines an allowed entity suspends that allowance until it is re-confirmed (preferred, if entities can be mapped to their defining files), or
+* entities defined in YAML inside F11's write scope cannot be allowed at all.
+
+Say which, and how the mapping is done.
+
+**AZ3 (should): say plainly that v1 is HA only.** Only `call_service` carries the seed field, and handler tools are not allowable (§3), so the NPM and Pi-hole handlers are out. Under decision 1 the other four integrations then have no allowable tool in v1: every write asks. Add one sentence and one row per integration to the status line, so the operator is not surprised. A later chunk can give each seed its own field.
+
+**AZ4 (should): local time.** The window is the dashboard host's local time. State that, show the zone on the page, and test across midnight and a DST change (§6 already covers the midnight case).
+
+**AZ5 (should): a revoked or deleted agent token stops matching at once.** The token-deleted case is covered; add revoked, as F16 AW2 did.
+
+**AZ6 (operator question, asked by the reviewer): `restart`.** Jellyfin's `/System/Restart` still auto-runs under `destructive`. Adding `restart` to the list would also mark HA `homeassistant.restart` (already a never domain) and any later restart path. Waiting for the operator's answer.
+
+Next: DeepSeek folds the label shape, AZ1–AZ5 (and AZ6 once answered) into the note; then the security reviewer reviews the note.
+
+### Reviewer notes (security reviewer, 2026-11-12, design round 1 at `ae67874`)
+
+**The relayed label shape is what I meant.** One addition to it: BD5's
+registry-ID pin applies to label-resolved entities too. AZ1 and AZ2 stand
+as relayed, with the additions below.
+
+The rest of the core is right and I accept it:
+* two exact condition forms;
+* absent-or-default for everything not named;
+* `data` limited to `entity_id`;
+* handler tools out;
+* the decision point after every refusal;
+* the rate check and the insert in one `BEGIN IMMEDIATE`;
+* a use counted before the call;
+* an edit is a new version;
+* every miss is a card, not a denial;
+* ambiguous matches get a card;
+* P2 is unchanged.
+
+Five items need folding before the code round.
+
+**BD1 (must): the `never` lists miss real HA services. Make `call_service`'s
+domains and services an allowlist.**
+* HA's service is `alarm_control_panel.alarm_disarm`, not `disarm`. The
+  `never.service` check compares whole values, so `alarm_disarm` is not
+  refused.
+* `DESTRUCTIVE_VERBS` misses it too. `_DESTRUCTIVE_RE` uses `\b`, and `_`
+  is a word character, so `\bdisarm\b` does not match inside `alarm_disarm`.
+  The §13 test uses a path HA does not have, which is why it passes.
+* `lock.open` unlatches a door just as `unlock` does, and it is not listed.
+* The domain denylist cannot keep up with HA's surface. The following are
+  all callable with a `data` that holds only `entity_id`, or with none at
+  all:
+  * `update.install`, which installs firmware or a Core update;
+  * `recorder.purge` / `purge_entities`, which delete HA's own history;
+  * the integration-management services of `zha` / `zwave_js`;
+  * `pyscript.*`, and other custom integrations' services, which run code
+    that is defined elsewhere.
+
+  A new custom integration adds services that a denylist written today has
+  never heard of.
+* **The shape I would accept:**
+  * The seed field carries `only`: a map from entity domain to its allowed
+    services. For example: `light`, `switch`, `fan` and `input_boolean`
+    with `turn_on`/`turn_off`/`toggle`; `cover` with open/close/stop;
+    `media_player`; `climate` with its non-data services. The exact list is
+    the operator's.
+  * A domain or service outside `only` is refused at save, at apply and at
+    match.
+  * `never` stays as a second check, matched on `_`-separated tokens, so
+    `alarm_disarm` contains `disarm`. `lock.open` and the domains `update`
+    and `recorder` are added to it.
+  * A label template's "services per domain" then picks from `only`, never
+    beyond it.
+* Also fix `_DESTRUCTIVE_RE` so `_` counts as a separator, and test it with
+  real service names: `alarm_disarm`, `lock.unlock`, `lock.open`. This is
+  card labelling only, since `call_service` is always gated, but the
+  label should be right.
+
+**BD2 (must): an "always ask" setting on the agent beats the allowance.**
+* §5 reads the allowance at step 6, but the agent's `gated` override at
+  step 7. So an operator who sets an agent to `gated` because they want to
+  see everything it does still gets allowance auto-runs.
+* That contradicts the rule F12 and F22 already use: `force_jit` / approval
+  mode skips every auto path (the read lane, the plan claim, overrides).
+* Read the agent's `gated` override, and any approval mode that applies to
+  tool calls, before the allowance. When either is set, the allowance is not
+  consulted, and nothing is counted or audited as a use.
+* Test: a `gated` agent with a matching allowance gets a card.
+
+**BD3 (must, with AZ5): the agent is the verified token, read for every
+call.**
+* An allowance matches only when the call's agent is the MCP token
+  `_run_tool` authenticated, looked up by `agent_tokens.id` with
+  `revoked = 0` on every call (never a cached copy).
+* No agent name, session or header from the call's arguments counts.
+* A call with no agent identity never matches. That is F16's AW5 shape: a
+  caller with no agent must not be read as anyone, least of all the
+  operator.
+* Test: a call with no identity gets a card, and so does a revoked token.
+
+**BD4 (should): validate the values themselves at save.**
+* `domain` and `service` are rendered into the URL path, so each listed
+  value must match `^[a-z0-9_]+$`.
+* Each `entity_id` must match `^[a-z0-9_]+\.[a-z0-9_]+$`, and its domain
+  prefix must be one of the allowance's `domain` values. That also refuses
+  HA's comma-separated string form and `all` / `none`.
+* AZ1's rule must name `entity_id: all` and `none` explicitly beside
+  `area_id`, `device_id` and `label_id`. All five expand when the call runs.
+
+**BD5 (should): pin each entity to its registry entry, and widen AZ2.**
+* An entity ID can be reused: delete a plug, and a new device can be renamed
+  to the same `switch.heater`.
+* Store the entity registry's `id` beside each entity ID when the
+  allowance is saved, and again when a label is resolved. Calls still match
+  on the entity ID with no HA read. The refresh (the same job as the label
+  refresh) suspends an entity whose registry entry changed or disappeared,
+  until the operator accepts it again.
+* AZ2's suspension should cover any approved write that redefines the
+  entity, not only an F11 YAML write: for example an options-flow or
+  config-entry write for the entity's `config_entry_id` (a template helper
+  created in the UI). The registry gives the mapping for those.
+* For YAML-defined entities: if F11 cannot map an entity to its file
+  reliably, take AZ2's second branch and make entities defined in YAML
+  inside F11's write scope not allowable.
+
+**Accepted residual, to state in the note:** an allowed call changes an
+entity's state, and HA automations triggered by that state run as HA
+decides. "Turn on `light.x`" can start an automation that does anything.
+The allowance cannot see that, and the operator owns their automations. Say
+so on the Allowances page in one line.
+
+The two smaller decisions are agreed: an ambiguous match gets a card, and an
+allowance is not consulted for a call that would not be gated. AZ3, AZ4 and
+AZ6 are the feature side's; I have no security view on AZ6's `restart`
+beyond BD1's token matching.
+
+Next: DeepSeek folds the label shape, AZ1–AZ5 and BD1–BD5 into the note,
+then security re-reads §2–§5 and the label section.
+
+### Security input for design round 3: the operator-editable `only` ceiling (security reviewer, 2026-11-14)
+
+The operator's decisions are fine. The defaults are light, switch, fan,
+input_boolean and media_player, with cover and climate off, and
+`restart` (AZ6) becomes a destructive word. An editable ceiling is
+acceptable if it keeps the property BD1 bought: **nothing outside a
+shipped allowlist can ever be allowed, and an agent can never move the
+ceiling.** Round 3 should design the following.
+
+**BT1 (must): the ceiling is operator-only, with no agent or MCP path.**
+* The ceiling endpoints take a dashboard session, CSRF and a confirm, and
+  nothing else.
+* No MCP tool, agent proposal, profile, plan, F21 internal tool or
+  integration call can read-modify-write it.
+* A profile or proposal that names an action outside the ceiling is
+  refused at save and at apply, as today. It never offers "add to
+  ceiling".
+* Test: an AST or route check that the only writers of the ceiling table
+  are the session-authenticated routes.
+
+**BT2 (must): the catalogue is code, and the DB is a selection from it.**
+* The catalogue of `(domain, service)` rows, each with its risk text, is
+  one shipped constant.
+* The DB stores only which catalogue rows are enabled, by catalogue id.
+* At save, apply **and match**, a stored row is honoured only if it is
+  still in the catalogue. That also covers an old DB that names a row a
+  newer release removed, a hand-edited DB, or a bad restore. Anything else
+  is ignored, and the allowance does not match.
+* `never` (domains, services and the `_<value>` suffix rule) is applied
+  **after** the ceiling, every time.
+* A test asserts that no catalogue row is caught by `never`, so a bad
+  catalogue edit fails CI instead of being silently dropped.
+* New catalogue rows in a later release ship **disabled**. Only the
+  first-run seed enables the defaults, guarded by a marker (as X7 does).
+* An empty ceiling means nothing is allowable. It is never quietly
+  re-seeded.
+
+**BT3 (must): destructive words cap allowances too, and adding one
+suspends.**
+* An allowance is checked before the gate (§5 step 7). As written, an
+  allowance therefore skips the `destructive` verb gate for a service the
+  word list calls destructive.
+* "Destructive" should mean "a human sees it" whichever path is taken. So
+  a catalogue row whose service matches a destructive word, built-in or
+  operator-added, cannot be enabled in the ceiling and never matches an
+  allowance.
+* An operator-added word then takes the same route as a removal:
+  * a confirm that lists the allowances it will suspend;
+  * suspension;
+  * an audit row.
+* Operator-added words:
+  * a charset of `[a-z0-9_]`, 3 to 32 characters;
+  * matched with the BD1 tokenisation, where `_` separates words, not
+    `\b`;
+  * removable, but a removal never un-suspends anything (BT4).
+* Built-in words are read-only.
+
+**BT4 (must): widening never re-activates anything silently.**
+* Re-enabling a ceiling row, or removing an operator-added destructive
+  word, does **not** resume the allowances that an earlier narrowing
+  suspended. The operator resumes each one, as § "Editing a profile
+  never changes agents silently" already requires.
+* Narrowing is still enforced at match even if the suspend step fails
+  half way. The ceiling read at match is the control, and the suspension
+  is the record.
+
+**BT5 (should): make widening visible outside the dashboard.**
+* Any change that widens the ceiling (enabling a row) sends an F-notify
+  message ("ceiling widened: cover.open_cover by \<operator\>") as well as
+  the audit row.
+* A stolen session can both widen the ceiling and create an allowance.
+  A second channel is the cheapest way for the real operator to notice.
+* No password re-prompt: that keeps the bar the same as creating an
+  allowance.
+
+**BT6 (should): scope and risk detail.**
+* The ceiling is **per HA integration**, not global, so a second HA
+  instance does not inherit the first one's widening.
+* Risky catalogue rows carry their risk text in the catalogue, and the
+  confirm shows it word for word:
+  * `cover.open_cover`, which can be a garage door, gate or door;
+  * `climate`;
+  * `media_player` on a device that plays to a room.
+* At allowance creation, an entity whose `device_class` is garage, gate,
+  door or lock-like shows that risk again, per entity.
+* `switch` is a default, and a switch can power anything (a heater, a
+  pump, a server, a siren). The allowance UI should show the entity's
+  friendly name and device class before the operator saves, not just its
+  id.
+* The audit row stores each change's before and after (catalogue ids,
+  words) and the actor. The page shows the ceiling's history.
+
+**Tests to add in round 3:**
+* An agent or MCP path cannot change the ceiling.
+* A DB row naming a non-catalogue service never matches.
+* A catalogue row under `never` fails CI.
+* Enabling a row that a destructive word catches is refused.
+* Adding a word suspends its dependents and lists them in the confirm.
+* Re-widening resumes nothing.
+* An empty ceiling allows nothing and is not re-seeded.
+* A second HA integration has its own ceiling.
+* Widening sends the notify message.
+
+### Round 3 — the ceiling is the operator's, and it is configurable (2026-11-15)
+
+**Status: design note only — no code.** The operator answered the three open
+points and security sent BT1–BT6 for this round; all are folded here.
+
+* **(a) the default ceiling.** Lights, smart plugs and switches, fans and HA
+  helpers may be allowed, with on/off/toggle; media players with on/off/play/
+  pause/stop. **Covers and climate are off by default.**
+* **(b) AZ6.** `restart` joins the destructive words.
+* **(c) the ceiling is configurable in the UI, and it must be intuitive.**
+
+This round replaces §3's seed `only` map (the map now ships as the catalogue,
+and the effective ceiling is in the database) and answers AZ6. Everything
+else in rounds 1 and 2 stands. The security conditions BT1–BT6 are folded in
+§§2–6 and 8; §9 lists what is still open.
+
+#### 1. Three words: ceiling, allowance, match
+
+**Ceiling** — the outer limit. Per integration, which device types and which
+actions an agent could ever be allowed to take without a card. It never
+approves anything by itself.
+
+**Allowance** — one narrow pre-approval *inside* the ceiling: this agent,
+this tool, these exact entities and these exact actions, with its own rate,
+window and expiry.
+
+**Match** — a call runs without a card only when it matches a live allowance
+**and** the ceiling still allows its type and action. Anything else asks.
+Turning a type on in the ceiling creates no allowance; it only stops the
+ceiling from being the reason a save is refused.
+
+The paragraph at the top of the section, shared with X3's explanation:
+
+> The ceiling is the outer limit: it lists, per integration and device type,
+> the actions an agent may ever be allowed to take without a card. An
+> allowance is one narrow pre-approval inside that ceiling — this agent,
+> these exact entities and these exact actions, with its own rate, window and
+> expiry. A call runs without a card only when it matches a live allowance
+> and the ceiling still allows its type and action; everything else asks.
+> The ceiling never approves anything by itself.
+
+X3's shared explanation keeps its own sentence about gate mode, always-gate
+and the agent override; both texts use these three words with these
+meanings, and a text test asserts the paragraph is the same constant.
+
+#### 2. The catalogue ships with the code
+
+One module constant, `ALLOWANCE_CATALOGUE`, is the only source of device
+types, actions, plain names, risk text and defaults (BT2). The API accepts
+only a catalogue id it knows; there is no free-text service and no way to add
+a type from the UI. The database stores a **selection from the catalogue**,
+by catalogue id — never a name the catalogue does not contain.
+
+| Integration | Catalogue id | Row name | Actions (service → label) | Default | Risk |
+|---|---|---|---|---|---|
+| `ha` | `light` | Lights | `turn_on` → Turn on; `turn_off` → Turn off; `toggle` → Toggle | **on** | — |
+| `ha` | `switch` | Smart plugs and switches | `turn_on` → Turn on; `turn_off` → Turn off; `toggle` → Toggle | **on** | — |
+| `ha` | `fan` | Fans | `turn_on` → Turn on; `turn_off` → Turn off; `toggle` → Toggle | **on** | — |
+| `ha` | `input_boolean` | HA helpers | `turn_on` → Turn on; `turn_off` → Turn off; `toggle` → Toggle | **on** | — |
+| `ha` | `media_player` | Media players | `turn_on` → Turn on; `turn_off` → Turn off; `media_play` → Play; `media_pause` → Pause; `media_stop` → Stop | **on** | — |
+| `ha` | `cover` | Covers: blinds, garage doors, gates | `open_cover` → Open; `close_cover` → Close; `stop_cover` → Stop | **off** | **Physical security and safety.** Opening a garage door or gate is a physical access event; a closing blind or door can trap a person or an animal. |
+| `ha` | `climate` | Heating and climate | `turn_on` → Turn on; `turn_off` → Turn off | **off** | **Cost and comfort.** Heating or cooling runs for as long as the device decides; a stuck call costs money and can be unsafe. |
+
+* **Fans is its own row** because the operator's default turns it on; folding
+  it into switches would hide it.
+* **Cover and climate are the two risky rows in v1.** Their risk text lives
+  in the catalogue and the confirm shows it word for word (BT6). At
+  allowance creation, an entity whose `device_class` is a garage door, gate,
+  door or lock-like shows the same warning per entity; a `switch` shows its
+  friendly name and device class before the operator saves (a switch can
+  power a heater, a pump, a server or a siren).
+* **Anything that opens or unlocks is risky by definition.** `lock`, `valve`,
+  `script`, `automation` and the other `never` domains are not in the
+  catalogue, so they cannot be allowed at all. A later type that can open or
+  unlock ships with `risk` set, and cannot be enabled without the ack.
+* **A destructive word caps the catalogue (BT3).** A catalogue row whose
+  service matches a built-in or operator-added destructive word can never be
+  enabled and never matches an allowance. This collides with the operator's
+  list: `cover.stop_cover` and `media_player.media_stop` contain the built-in
+  word `stop` under BD1's tokenisation. As written, BT3 makes both
+  unavailable; the design takes BT3 as the control and does **not** quietly
+  exempt them. §9 question 1 asks security for the narrow exemption.
+* **`only` moves out of the seed field (BT2).** `integration_tools.allowance_json`
+  keeps `constrainable` and `required`; the effective ceiling is the database
+  selection. A tool is allowable when the integration has at least one
+  enabled catalogue row.
+
+#### 3. Storage: a selection seeded once, never re-seeded (BT2)
+
+```
+allowance_ceiling(
+  integration   TEXT NOT NULL,             -- 'ha'; a second HA instance gets its own rows (BT6)
+  catalogue_id  TEXT NOT NULL,             -- e.g. 'cover.open_cover'; must exist in ALLOWANCE_CATALOGUE
+  enabled       INTEGER NOT NULL DEFAULT 0,
+  updated_by    TEXT,                      -- the session user, '' for the seed
+  updated_at    INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (integration, catalogue_id)
+)
+allowance_never_words(
+  word      TEXT PRIMARY KEY,              -- ^[a-z0-9_]{3,32}$
+  added_by  TEXT NOT NULL,
+  added_at  INTEGER NOT NULL
+)
+```
+
+* **Seeded once** from `ALLOWANCE_CATALOGUE` by the meta marker
+  `allowance_ceiling_v1`, with each row's default and an
+  `allowance_ceiling_seeded` audit row. `INSERT OR IGNORE` makes a restart
+  idempotent and never overwrites an operator's flag.
+* **New catalogue rows in a later release ship disabled.** The first-run
+  seed is the only thing that applies a catalogue default; a later version
+  adds its new rows with `enabled = 0` and the page marks them "new — off"
+  (BT2). There is no "apply defaults again" path.
+* **An empty ceiling means nothing is allowable.** It is never quietly
+  re-seeded from the catalogue: a missing row, a hand-edited DB or a bad
+  restore fails closed (BT2).
+* **A stored row is honoured only while it is still in the catalogue.** At
+  save, apply and match the id is looked up in `ALLOWANCE_CATALOGUE`; a row
+  an older DB has and a newer release removed is ignored, and the allowance
+  does not match (BT2). Nothing is deleted from the DB, so the audit trail
+  keeps the id.
+* **`never` stays code constants**, not rows: the domains (`script`,
+  `automation`, `shell_command`, `hassio`, `homeassistant`, `python_script`,
+  `rest_command`, `notify`, `update`, `recorder`, `pyscript`) and the service
+  words (`disarm`, `unlock`, `install`, `purge`, `delete`, `reset`). They are
+  shown read-only with a reason, applied **after** the ceiling every time,
+  and no ceiling row can override them. A CI test asserts that no catalogue
+  row is caught by `never` (BT2).
+* **Destructive words** are the built-ins (`delete`, `remove`, `purge`,
+  `format`, `reset`, `stop`, `shutdown`, `reboot`, `disable`, `unlock`,
+  `disarm`, and now `restart`) plus the operator's words. Built-ins are
+  read-only; only an operator-added word can be removed, and only by the
+  operator who added it. They are matched with BD1's tokenisation (`_`
+  separates). They apply to catalogue services too (BT3, §2).
+
+#### 4. Where the ceiling is enforced (BT1–BT4)
+
+Checked at **save**, at **apply** and at **match**. A ceiling change takes
+effect for the next call; nothing is cached across calls.
+
+1. **Save** (an allowance or a profile template). The catalogue id must be
+   enabled for the integration, in addition to the `constrainable`/
+   `required`/`never` checks of round 2, and the service must not match a
+   destructive word. The refusal names the type and action:
+   `ceiling_disabled: cover.open_cover`.
+2. **Apply** ("Update agents"). The ceiling is re-read in the same
+   transaction; a template the ceiling no longer allows refuses the whole
+   apply before anything is revoked or created. A template never offers "add
+   to ceiling".
+3. **Match.** The allowance's domain and service are looked up in the
+   catalogue and in the DB. A disabled row, a row that is no longer in the
+   catalogue, a destructive-word match, or a DB read error means **no
+   match** — the ordinary card, never a denial. A read error also writes at
+   most one `allowance_ceiling_unreadable` audit row per hour.
+
+**Order of the checks:** the `never` lists and destructive words after the
+ceiling, then the allowance. BD2 still short-circuits first: an agent set to
+ask for this tool never consults the allowance, so it never consults the
+ceiling either. Freeze, the tripwire freeze and the existing refusals keep
+their places. **The ceiling does not gate:** a call that matches no allowance
+goes to the ordinary gate exactly as today.
+
+**BT4 — narrowing is the control, suspension is the record.** Re-enabling a
+row, or removing an operator-added word, never resumes an allowance. The
+ceiling read at match still refuses even if the suspend step half-failed;
+the rows and the suspensions are written in one transaction, and a failed
+transaction leaves both unchanged.
+
+**BT1 — operator-only.** The ceiling is written only by the session-
+authenticated routes in §6: a dashboard session, CSRF and a confirm. No MCP
+tool, agent proposal, profile, plan, F21 internal tool or integration call
+can read, modify or write it. `run_tool` reads it; it never writes it. An
+AST/route test asserts that the only writers of `allowance_ceiling` and
+`allowance_never_words` are those routes.
+
+#### 5. Changing it in the UI
+
+**Where.** The Allowances page, above the list: one section, **"What agents
+may ever be allowed to do"**, per integration. HA in v1; a second HA
+integration has its own section (BT6). Another integration shows "This
+integration has no ceiling yet — every write asks"; the Integrations page
+(X3) links here.
+
+**The section.**
+
+* The shared paragraph from §1 at the top, in plain words.
+* One row per device type. The row shows the plain name, a short state line
+  ("on by default", "off by default", "changed 2026-11-15 by operator"), and
+  the risk text in place when the type is risky. A type whose service matches
+  a destructive word shows "unavailable: destructive word `stop`" and its
+  checkboxes are disabled (BT3).
+* The actions are checkboxes with plain labels from the catalogue ("Turn
+  on", "Open", "Play"). No text input for a service anywhere.
+* **Risky rows:** turning the type on or ticking an action on a risky row
+  opens a confirm that shows the catalogue's risk text word for word ("Covers
+  can open a garage door or gate. Enabling this lets an allowance open it
+  without a card."). The confirm carries `risk_ack: true`; the server refuses
+  the request without it, so the browser is not the control.
+* **At allowance creation** the entity's friendly name and `device_class` are
+  shown before saving; a garage, gate, door or lock-like class repeats the
+  risk (BT6).
+* **Save** is one button per integration and sends the whole enabled set.
+  The server computes before/after, validates the catalogue, applies the
+  words, writes the rows and the audit row in one transaction, and answers
+  409 with `affected` when the change disables something existing allowances
+  use.
+* **Disabling a type or action in use:** the confirm lists every affected
+  allowance **by name** — agent, allowance name, the entities it covers —
+  and says "they will be suspended, not deleted". Confirming (`confirm:
+  true`) suspends each with `suspended_reason='ceiling_removed'` and audits
+  every suspension plus the ceiling change. Nothing is deleted; History
+  keeps the ids.
+* **Re-enabling never reactivates.** A suspended allowance stays suspended;
+  the page lists each with **Resume**, which re-validates the ceiling, the
+  registry pins and `never` before it resumes, and audits
+  `allowance_resumed`. There is no "resume all" in v1 (question 4).
+* **Adding a destructive word** (BT3) takes the removal route: the confirm
+  lists the enabled catalogue rows it will switch off and the allowances it
+  will suspend; confirming disables those rows, suspends those allowances and
+  audits both. Removing the word later never resumes anything (BT4).
+* **Widening is announced (BT5).** Any change that enables a row sends the
+  existing notify webhook (`send_notify('ceiling', …)`, a new event type in
+  Settings → Notifications, on by default) as well as the audit row. A stolen
+  session can widen the ceiling and create an allowance; the second channel
+  is how the real operator notices. No password re-prompt: the bar stays the
+  same as creating an allowance.
+* **The never lists** are two read-only blocks, one line of reason each:
+
+  | Domain | Why it can never be allowed |
+  |---|---|
+  | `script` | runs a script someone else wrote |
+  | `automation` | changes what HA does on its own |
+  | `shell_command` | runs a shell command on the HA host |
+  | `hassio` | manages the Supervisor and add-ons |
+  | `homeassistant` | restarts or stops HA itself |
+  | `python_script` | runs Python inside HA |
+  | `rest_command` | calls an arbitrary URL |
+  | `notify` | sends messages outside the house |
+  | `update` | installs firmware or software |
+  | `recorder` | deletes HA's own history |
+  | `pyscript` | runs custom Python |
+
+  The service words (`disarm`, `unlock`, `install`, `purge`, `delete`,
+  `reset`) are the same block with one line each. They cannot be edited.
+* **Destructive words** below them: the built-ins as locked chips, the
+  operator's words as removable chips, and one input to add a word. The
+  server accepts `^[a-z0-9_]{3,32}$` (lowercase letters, digits, `_`), lower
+  cases nothing, refuses a built-in or a duplicate, and audits the add or
+  remove with before/after. The operator can remove only their own words.
+* **History** on the page shows the ceiling's changes with the actor and the
+  before/after sets (BT6).
+* **Layout.** At 1440 the section is a full-width card; each type is one row
+  with the name and risk on the left and the action checkboxes on the right,
+  wrapping inside the row. At 390 the name, risk and checkboxes stack, the
+  never tables become definition lists, and there is no horizontal scroll.
+  The `tests/ui/ui_views.cjs` harness measures both widths (overflow and
+  contrast) and the section is added to its view list.
+
+**Empty and error states.** With no database rows yet (a failed seed) the
+section says "The ceiling is not loaded — nothing can be allowed" and the API
+fails closed. A save failure keeps the form's staged values and shows why;
+it never claims success.
+
+#### 6. API, audit and the actor
+
+* `GET /api/allowances/ceiling?integration=ha` — the catalogue with each
+  row's `enabled`, defaults, risk text, the never lists with reasons, the
+  destructive words with `builtin: true|false`, the affected suspended
+  allowances, and `updated_at`/`updated_by` per type.
+* `PUT /api/allowances/ceiling` — `{integration, enabled: [catalogue_id, …],
+  risk_ack, confirm}`. Route-level session check plus the CSRF middleware
+  (`X-Eshu-CSRF`); the actor is the session's user, stored on each changed
+  row and in the audit row. It refuses an id not in the catalogue and an id
+  a destructive word catches.
+* `POST /api/allowances/never-words` / `DELETE /api/allowances/never-words/{word}`
+  — add and remove an operator word; the add answers 409 with the rows and
+  allowances it will suspend, and takes `confirm: true`.
+* `POST /api/allowances/{id}/resume` — resume one suspended allowance.
+* **No other writer.** These four routes are the only code that writes the
+  two tables (BT1, asserted by the AST/route test).
+* **Audit rows:** `allowance_ceiling_seeded`, `allowance_ceiling_changed`
+  (`integration`, the before/after catalogue-id sets, the affected ids, the
+  actor), `allowance_never_word_added` / `_removed` (word, actor, the rows
+  it disabled), `allowance_suspended` (existing, with `ceiling_removed` or
+  `destructive_word`), `allowance_resumed`, and the hourly
+  `allowance_ceiling_unreadable`.
+* **History** keeps showing `allowance #N (name)` for a run. Ceiling changes
+  appear as their own events, with a link to the allowances they suspended.
+
+#### 7. AZ6 — `restart` joins the destructive words
+
+`DESTRUCTIVE_VERBS` gains `restart`. `_DESTRUCTIVE_RE` already treats `_` as
+a separator (BD1), so Jellyfin's `/System/Restart` is marked and asks under
+`destructive` mode; `homeassistant.restart` is inside a never domain either
+way, and any later restart path is marked too. The operator's own words use
+the same matcher.
+
+Tests: `restart`, `/System/Restart`, `restart_container` and
+`homeassistant.restart` are marked; `restart_count` is marked too (the safe
+direction, and it is not a service anyone allows).
+
+#### 8. Tests this round adds
+
+* **Seed (BT2):** first start writes every catalogue row with its default
+  (light/switch/fan/input_boolean/media_player on; cover/climate off), one
+  audit row; a second start does not duplicate or overwrite an operator's
+  flag; a new catalogue version adds its rows **disabled**; an empty ceiling
+  allows nothing and is not re-seeded.
+* **Catalogue membership (BT2):** a stored `catalogue_id` that is not in the
+  catalogue never matches; a hand-edited row is ignored; a CI test asserts no
+  catalogue row is caught by `never`.
+* **Defaults:** a `cover.open_cover` allowance is refused at save until the
+  row is enabled; `climate` likewise; lights work with no change.
+* **Enforcement:** the ceiling refuses at save, at apply (nothing revoked)
+  and at match (a disabled row mid-flight stops matching, the call gets a
+  card); a DB read failure gets a card and one audit row per hour, not a
+  denial.
+* **Destructive words (BT3):** an id a built-in word catches cannot be
+  enabled (the `stop` collision is pinned by a test until question 1 is
+  answered); adding an operator word disables the rows it catches, suspends
+  the affected allowances and lists them in the 409; removing the word does
+  not resume anything; a word cannot be added from an MCP path (BT1).
+* **Never wins:** enabling cannot make `script.script` or `lock.unlock`
+  allowable, and the never lists have no edit path.
+* **Disable in use:** the 409 lists the affected allowances by name;
+  `confirm: true` suspends them, deletes nothing, and audits each; without
+  `confirm` nothing changes. A half-failed transaction changes neither the
+  rows nor the suspensions (BT4).
+* **Re-enable (BT4):** stays suspended; Resume re-validates and audits;
+  Resume is refused when the ceiling or a pin no longer allows it.
+* **Risk (BT6):** enabling cover/climate or an action on it without
+  `risk_ack` is 400; with `risk_ack` it is saved and audited. Enabling a
+  non-risky row needs no ack. An entity with a garage/gate/door class shows
+  the warning at allowance creation; a switch shows its friendly name and
+  class.
+* **API (BT1):** no session 401, no CSRF 403, `confirm` required only where a
+  disable is in use; every change has an `allowance_ceiling_changed` row with
+  before and after; the actor is the session user; an AST/route test proves
+  the four routes are the only writers.
+* **Widening (BT5):** enabling a row calls `send_notify('ceiling', …)` once,
+  with the row and the actor; narrowing does not notify.
+* **Second integration (BT6):** a second HA integration's ceiling is
+  independent; enabling a row there does not enable it in the first.
+* **UI (`tests/test_ui_views.py` + `tests/ui/ui_views.cjs`):** the section
+  renders at 1440 and 390 with the plain names and no free-text service
+  input; the risk confirm shows the catalogue text and blocks the save until
+  acknowledged; the disable confirm lists the affected allowance names; the
+  never lists are read-only; a word can be added and an own word removed;
+  no horizontal overflow and the contrast check passes at both widths.
+* **Copy:** the §1 paragraph is one constant shared with X3; a text test
+  asserts both render it and none of them calls the ceiling a gate.
+
+#### 9. New questions for security
+
+1. **BT3 against the safe `stop` actions.** BD1's tokenisation makes
+   `cover.stop_cover` and `media_player.media_stop` match the built-in word
+   `stop`, so BT3 makes both unavailable — but the operator's default media
+   list includes `media_stop`, and Stop is the safe way to halt a cover.
+   Exempt exactly those two catalogue rows (`destructive_exempt`, with a test
+   that no other row sets it), or drop Stop from the catalogue? Until
+   answered, both are unavailable.
+2. **A card pending when the ceiling narrows.** Match happens when the
+   request is made. If an operator approves a pending card after the type was
+   disabled, the approved call still runs. Re-check the ceiling and the
+   `never` lists at **approval** and at **ticket claim**, refusing with "the
+   ceiling changed"? That is fail-closed, but it adds two reads to the
+   approval path.
+3. **Who may widen.** Any dashboard session can today. Widening is the
+   dangerous direction; does it need a separate admin role or the operator's
+   session, while narrowing stays open to any session?
+4. **Scope of an operator word.** Global, as the built-ins are (a word added
+   for one integration caps every catalogue row whose service contains it),
+   or per integration? Global over-marks, which is the safe direction.
+5. **Resume.** One allowance at a time, or a bulk resume with one confirm
+   listing every allowance? Bulk is convenient after a wide enable and is
+   the one action that can reactivate many pre-approvals at once.
+6. **Strength of the risk confirm.** A checkbox, or type the row's name for
+   cover/climate? And should an allowance that *uses* a risky type need its
+   own confirm on save, on top of the ceiling ack?
+7. **The notify event (BT5).** Is a new `ceiling` event type, on by default,
+   enough, and should a widen by anyone other than the last operator page
+   twice? Is the webhook allowed to carry the catalogue id (not the entity
+   list)?
+8. **The agent-facing line.** Should the agent's tool description say which
+   types are currently ceiling-enabled, or stay at "calls matching an
+   allowance run without approval"? The list is the operator's setup, but the
+   agent already sees its own allowances.
+9. **Audit size.** The before/after sets are small today (seven types, 18
+   actions). Keep the full lists in the audit row, or store the diff plus a
+   hash of the set for a large catalogue later?
+
+`bash scripts/verify.sh`: `3033 passed, 26 skipped, 7 warnings in 665.93s
+(0:11:05)` (docs only).
 
 ---
+
+### Security review of design rounds 2 and 3 (security reviewer, 2026-11-15, at `221eecc`)
+
+**Approved for the code round, with the rulings below. No musts.**
+
+* BT1–BT6 are folded as asked.
+* Round 2 had not had its own security read until now. Its §§1–13 (the
+  object, exact conditions, AZ1, BD4/BD5 pins, the decision point, atomic
+  rate, profiles and labels, AZ2, the BD1 regex) hold up. The AZ2 "suspend
+  everything when the mapping is incomplete" fallback is accepted.
+
+**Answers:**
+1. **The `stop` collision.** Grant the narrow exemption, shaped like
+   this:
+   * the catalogue row carries `exempt_words: ["stop"]`, naming the
+     **built-in** word it is exempt from, not a boolean;
+   * only `cover.stop_cover` and `media_player.media_stop` set it, and a
+     test asserts that exact pair;
+   * the exemption covers that one built-in word only. Any other built-in
+     word, and **every** operator-added word, still caps the row. `stop`
+     is built in, so `add_word('stop')` is refused: an operator who wants
+     it to cap both rows unticks `cover.stop_cover` and
+     `media_player.media_stop` themselves.
+   * `stop` stays destructive everywhere else (Proxmox `stop_vm`, Jellyfin
+     `stop_task`).
+   * Halting a cover or a player is the safe direction. Dropping Stop
+     would leave an allowed Open with no allowed Stop.
+2. **A card pending when the ceiling narrows.** Don't re-check it. A card
+   is a human approval of the call it shows, and the ceiling bounds
+   **pre**-approvals only ("the ceiling does not gate"). Re-checking at
+   approval would mix the two meanings and teach operators that the
+   ceiling gates. Keep the approval path as it is.
+3. **Who may widen.** v1 has one operator role, so no new role in F27.
+   BT5's notify is the control. If roles arrive later, widening (enabling
+   a row or removing a word) should be admin-only, and narrowing open to
+   any session.
+4. **Scope of an operator word.** Global. Over-marking is the safe
+   direction, and a per-integration word is one more thing to get wrong.
+5. **Resume.** One at a time in v1. Each resume reactivates a
+   pre-approval, and each deserves its own look. Bulk resume can come
+   later with a confirm that lists every row.
+6. **The risk confirm.** A server-enforced `risk_ack`, with the catalogue
+   text shown word for word, is enough. Typing the name is theatre.
+   * **Yes** to a second ack at allowance save, for an allowance that uses
+     a risky row or an entity with a garage, gate, door or lock-like
+     `device_class`. It is also server-enforced (`risk_ack` on the
+     allowance save), because the ceiling ack was about the type and this
+     one is about these entities.
+7. **The notify event.** A `ceiling` event, on by default, once per change,
+   is enough; don't page twice.
+   * The payload may carry the integration, the catalogue ids, the
+     before/after and the actor. It must not carry entity lists.
+   * Turning the `ceiling` notify event **off** is itself audited, and
+     sends one final notification.
+8. **The agent-facing line.** Keep it generic. The agent sees its own
+   allowances, and the ceiling is the operator's setup. Listing it only
+   tells an agent what to ask for.
+9. **Audit size.** Full before and after sets now, plus a sha256 of the
+   enabled set. Move to "diff plus hash" when the catalogue passes about
+   100 rows.
+
+**BV1 (should): the `open` lists don't agree.**
+* Round 2 says `lock.open` "is the whole value `open` and is refused", and
+  that `open_cover` is marked because `open` is a token. But `open` is in
+  neither `never.service` nor `DESTRUCTIVE_VERBS`.
+* `lock` is outside the catalogue, so this cannot be exploited today. Fix
+  the text and the constant all the same:
+  * add `open` to `never.service`, matched only as the whole value or the
+    `_open` suffix rule, so `lock.open` and `valve.open` are refused
+    wherever they appear;
+  * do **not** make `open` a destructive word, because BT3 would then cap
+    `cover.open_cover`, which the operator means to allow with the risk
+    ack;
+  * correct the "open_cover is also marked" sentence.
+* Test: `lock.open` is refused, `cover.open_cover` passes `never`, and
+  `open_cover` is not destructive.
+
+**BV2 (should): the other widening paths.**
+* **Removing an operator word is a widening**: it lets rows be enabled
+  again. It sends the BT5 notify, like enabling a row, and still resumes
+  nothing (BT4).
+* **`PUT /api/allowances/ceiling` sends the whole enabled set.** A stale
+  second tab could save an old set over a newer one and re-enable a row
+  that was just disabled.
+  * Send the `updated_at` (or a set hash) the form was loaded with, and
+    answer 409 `ceiling_changed` when it no longer matches.
+  * The server already computes before and after. This just makes "after"
+    mean what the operator saw.
+
+---
+
+### Round 4 — the security answers, folded (2026-11-15)
+
+**Status: code round started on `feat/f27-allowances-code` (from master
+`e6b42d8`; the design branch's commits are on it).** The nine answers and
+BV1/BV2 are folded as follows.
+
+* **The `stop` exemption (answer 1).** A catalogue row carries
+  `exempt_words: ["stop"]` naming the **built-in** word it is exempt from.
+  Only `cover.stop_cover` and `media_player.media_stop` set it (a test pins
+  that pair). Every other built-in word and **every operator-added word**
+  still caps the row. `stop` is built in, so `add_word('stop')` is
+  refused; an operator who wants it to cap both rows unticks
+  `cover.stop_cover` and `media_player.media_stop` themselves. `stop`
+  stays destructive everywhere else.
+* **A pending card is not re-checked (answer 2).** The ceiling bounds
+  pre-approvals; the approval path is unchanged. "The ceiling does not
+  gate" keeps its meaning.
+* **One role (answer 3).** No admin role in F27; BT5's notify is the
+  control. When roles arrive, widening becomes admin-only.
+* **Words are global (answer 4).** Over-marking is the safe direction.
+* **Resume one at a time (answer 5).**
+* **Risk acks (answer 6).** The ceiling's `risk_ack` covers the type. A
+  second server-enforced `risk_ack` on allowance save covers a risky row or
+  an entity whose `device_class` is a garage, gate, door or lock-like.
+* **The `ceiling` notify (answer 7).** One event per change, on by default;
+  the payload carries the integration, catalogue ids, before/after and the
+  actor, never entity lists. Turning the event off is audited and sends one
+  final notification.
+* **The agent line stays generic (answer 8).**
+* **Audit (answer 9).** Full before/after plus a sha256 of the enabled set;
+  move to diff + hash when the catalogue passes about 100 rows.
+* **BV1 — the `open` lists.** `open` joins `never.service` (whole value or
+  `_open` suffix), so `lock.open` and `valve.open` are refused wherever
+  they appear. `open` is **not** a destructive word (BT3 would cap
+  `cover.open_cover`), and the "open_cover is also marked" sentence in
+  round 2 §10 is corrected.
+* **BV2 — the widening paths.** Removing an operator word is a widening:
+  it sends the BT5 notify and resumes nothing. `PUT /api/allowances/ceiling`
+  carries the `set_hash` the form loaded; a stale save is 409
+  `ceiling_changed`, so a second tab cannot re-enable a row the first tab
+  just disabled.
+
+**Code round (2026-11-15).** Two slices on `feat/f27-allowances-code`, both
+gated.
+
+* **The ceiling slice.** The catalogue, the seeded DB ceiling, the
+  never/destructive checks (with the `stop` exemption), the operator words,
+  and `GET/PUT /api/allowances/ceiling` with session + CSRF + `risk_ack` +
+  `set_hash` + audit + notify. Answer 7 is in: the `ceiling` event is on by
+  default, and turning it off is audited and sends one final notification.
+* **The engine slice.** `core/allowances.py` now stores allowances, uses,
+  profiles and templates. Conditions are exact and walked at match time:
+  plain entity ids only (an expanding target is a card), every list element
+  in the set, no extra `data` keys, and the ceiling must still allow the
+  type and action. A miss, an ambiguous match, a rate/window/expiry/
+  suspension hit is the ordinary card. The use and the rate count are one
+  `BEGIN IMMEDIATE` transaction. Matching never reads HA: the registry pin
+  is made at save (and re-checked at resume/apply). `run_tool` consults it
+  after every refusal and before the plan/gate; a `gated` agent never does.
+  Profiles are named and versioned; a re-apply revokes the agent's old
+  allowances from that profile first, and a label template resolves to an
+  entity list at apply time. Answer 6's second ack is server-checked for a
+  risky row or a garage/gate/door/lock-like device class (read from HA at
+  save).
+* **The page.** Allowances is a nav item and a view: the shared paragraph,
+  the ceiling rows with plain labels, risk text and a confirm, the read-only
+  never lists, the destructive-word chips and add/remove, the allowance
+  list with Revoke/Resume, the create form (agent, type, action, entities,
+  rate, window), and a profile builder/list with Apply. `app.js` `ui32`,
+  `state.js` `ui4`.
+* **The harness.** `tests/ui/ui_views.cjs` now includes `allowances` and
+  measures it at 1440 and 390 (overflow + AA contrast); the seeded server
+  renders the view. `tests/test_f27_ui.py` pins the nav, copy, controls and
+  the harness entry.
+* **Tests.** `tests/test_f27_allowances.py` (match, every miss, rate,
+  window, ambiguity, disabled ceiling, second ack, profiles/label) and the
+  ceiling suite; the harness run is green at both widths.
+
+`bash scripts/verify.sh`: `3215 passed, 26 skipped, 7 warnings in 690.05s
+(0:11:30)`.
+
+### Round 5 — the remaining F27 slices (2026-11-15)
+
+**AZ2.** An approved `ha_config_write` now calls
+`allowances.on_config_write()` after the write succeeds. A plain entity id
+in the written text suspends the allowances that name it
+(`suspended_reason='config_write'`); an `!include`, `packages:`, or a
+type-level block (`light:` …) means the mapping is incomplete and every HA
+allowance is suspended (`config_write_unmapped`), as security accepted.
+Suspension is audited and never deletes; a dry run does not trigger it.
+
+**The label refresh.** A background job (every five minutes) re-resolves
+label-sourced allowances. A leaver drops out of the stored entity list at
+once; a joiner is held in `pending_json` and shown as "N new" with an
+Accept button; a changed registry id suspends the allowance
+(`registry_changed`); a failed registry read changes nothing. Resume and
+apply re-check the pins.
+
+**Update agents.** A profile card opens a preview: the live allowances the
+re-apply would revoke, the templates it would add, and whether the agent is
+already on the current version. Nothing is written until the separate
+Apply update; the server computes the same lists the modal shows.
+
+**The F6 bucket.** An allowance run is an MCP integration call with
+`approval='allowance:<id>'`. It is now its own bucket in the session
+wrap-up (an allowance-only session still shows the card), in the statistics
+totals/series, and in the chip legend with its own dot colour.
+
+**The agent line.** When the calling agent has a live allowance, its
+visible MCP tools carry one generic line: calls matching an allowance run
+without approval, and the window/rate/expiry still apply. It names no type
+or entity (answer 8).
+
+**Endpoints.** All below take a dashboard session; every non-GET also needs
+the CSRF middleware's `X-Eshu-CSRF` (the gateway-token routes of X9 are the
+exception, and they are token-bound).
+
+| Method | Path | Auth |
+|---|---|---|
+| GET | `/api/allowances/ceiling` | session |
+| PUT | `/api/allowances/ceiling` | session + CSRF |
+| POST | `/api/allowances/words` | session + CSRF |
+| DELETE | `/api/allowances/words/{word}` | session + CSRF |
+| GET | `/api/allowances` | session |
+| POST | `/api/allowances` | session + CSRF |
+| POST | `/api/allowances/{id}/revoke` | session + CSRF |
+| POST | `/api/allowances/{id}/resume` | session + CSRF |
+| POST | `/api/allowances/{id}/accept-join` | session + CSRF |
+| GET | `/api/allowances/profiles` | session |
+| POST | `/api/allowances/profiles` | session + CSRF |
+| GET | `/api/allowances/profiles/{pid}/diff?agent_id=` | session |
+| POST | `/api/allowances/profiles/{pid}/apply` | session + CSRF |
+
+**Tables.** `allowance_ceiling` and `allowance_never_words` (the ceiling);
+`allowances`, `allowance_uses`, `allowance_profiles`,
+`allowance_profile_templates` (the engine). `integration_calls.approval`
+carries `allowance:<id>` for the F6 bucket. No existing column changed.
+
+**Screenshots** (not committed; the host only allows the workspace, so they
+live under `.scratch/f27-shots/` outside git): `allowances-empty-1440.png`,
+`allowances-empty-390.png`, `allowances-seeded-1440.png`,
+`allowances-seeded-390.png` — the page empty and with three allowances
+(active, suspended, pending join) and a profile, at both widths.
+
+`bash scripts/verify.sh`: `3222 passed, 26 skipped, 7 warnings in 695.57s
+(0:11:35)`.
+
+### Security review of the code round at `7da5350` (2026-11-15)
+
+**Verdict: changes requested. Two musts (BX1, BX2) and four shoulds
+(BX3–BX6).** The rest of the round is what the design asked for:
+* every route checks the session, and no MCP or agent path writes
+  allowances;
+* the UI escapes every field it renders;
+* the claim and the rate count are one `BEGIN IMMEDIATE` transaction;
+* `_parse_call` refuses `target`, extra `data` keys, a string `data`,
+  `all`/`none` and any non-plain id, so all of those get a card;
+* the ceiling, the never lists and the destructive words are re-checked at
+  match time;
+* `gated` beats an allowance (BD2);
+* an ambiguous match gets a card;
+* the agent line is generic (answer 8);
+* turning the `ceiling` event off is audited and sends one final notice
+  (answer 7);
+* agent ids come from an AUTOINCREMENT key, so a deleted agent's id is never
+  reused and its allowances cannot pass to a new agent.
+
+**BX1 (must): the label refresh and accept-join change a list that matching
+never reads.**
+* `_matches` reads `conditions_json['data.entity_id']['in']`, which is
+  written once, at insert. `refresh_labels` and `accept_join` update only
+  `entities_json` (the pins).
+* As a result:
+  * An entity that **leaves** the label keeps matching. "Drops out at once"
+    does not happen, and the operator usually removes a label precisely to
+    stop the agent touching that entity.
+  * An **accepted** joiner never matches. That is fail-safe, but the button
+    does nothing.
+  * AZ2's scan and resume's pin check read `entities_json`. A config write
+    that names the leaver therefore no longer suspends an allowance that
+    still matches it.
+* `test_a_label_leaver_drops_and_a_joiner_waits` asserts on the stored
+  column, not on a match, so it passes.
+* **Fix:**
+  * Keep one source of truth. Either match on the pins' entity ids, or
+    rewrite the condition list in the same UPDATE as the pins, in refresh
+    and in accept-join.
+  * Test with `match_and_claim`: a leaver gets `None` and an accepted
+    joiner matches.
+
+**BX2 (must): the registry-pin check runs only for label allowances.**
+* `refresh_labels` skips every row without `source_label_id`. BD5 asked
+  the same job to re-read the pins of **every** allowance. This is the
+  entity-id reuse case: delete a plug, rename a new device to the same
+  `switch.heater`, and a hand-made allowance keeps matching with no limit.
+* The plain-entity half of `test_a_changed_registry_id_suspends` is
+  switched off (`a.refresh_labels() if False else None`). The test then
+  proves only the label case.
+* **Fix:**
+  * Check the pins of every live HA allowance on each refresh. A missing or
+    changed registry id suspends the allowance with `registry_changed`.
+  * Re-enable the plain-entity test.
+* **Should, same item:** BD5's widening, to suspend after an approved
+  write that redefines an entity through the registry or a config entry,
+  is not in the code. An approved entity-registry rename is exactly how an
+  entity id gets a new meaning. The minimum fix is to run the pin check
+  straight after any approved HA write to `config/entity_registry/*` or
+  `config/config_entries/*`, not up to five minutes later.
+
+**BX3 (should): AZ2 has three gaps.**
+* `ha_config_restore` is not hooked. A restore replaces a file just as a
+  write does, and the handler cannot see the content it restores. Treat
+  every approved restore as unmapped and suspend every HA allowance
+  (`config_write_unmapped`).
+* The hook in `_h_ha_config_write` is `except Exception: pass`, so a failed
+  scan fails open. On an exception, suspend every HA allowance and write an
+  audit row. If that also fails, write one `allowance_config_write_failed`
+  row.
+* `_YAML_DOMAIN_BLOCK` does not match the modern `template:` form
+  (`template:` then `- switch:` with a dash), where the entity id comes
+  from `name`/`unique_id` and never appears in the text. Add `template` to
+  the block list and allow an optional `-\s*` before the domain key.
+
+**BX4 (should): re-applying a profile revokes before it validates.**
+* `apply_profile` revokes the agent's old rows from that profile and then
+  calls `create_allowance` per template. That call can still fail: a
+  missing risk ack, an HA read error (503), or an entity HA does not know.
+* The UI's first Apply always sends `risk_ack: false`. For any risky
+  template, the old rows are revoked and nothing is created. If the
+  operator then cancels the confirm, the agent is left with no allowances.
+* The design says "a failure refuses the apply before anything is
+  revoked".
+* **Fix:** run every check first (ceiling, entities, risk, registry pins),
+  then revoke and insert in one transaction.
+* Also bind Apply to the version the preview showed: send
+  `profile_version`, and return 409 if the profile changed since the
+  preview.
+
+**BX5 (should): accept-join is a widening with no risk ack.**
+* A joiner whose `device_class` is a garage, gate, door or lock-like class
+  is added without answer 6's second confirm. Neither the 64-entity cap nor
+  the ceiling is checked.
+* **Fix:** run `_risk_for` on the joiners, return `risk_ack_required` as
+  the save path does, and apply the cap.
+
+**BV2 left open, now BX6 (should): the stale-form check is optional.**
+* `apply_ceiling` skips the `set_hash` compare when the field is empty, and
+  `CeilingPayload.set_hash` defaults to `""`. Any client that leaves it out
+  bypasses BV2. The UI sends it, but the check belongs to the server.
+* **Fix:**
+  * Refuse a PUT without `set_hash` (400).
+  * Compare and write inside one `BEGIN IMMEDIATE`, so two saves cannot
+    both pass the compare.
+
+**Nits.**
+* `add_word('stop')` is refused as built-in, so answer 1's "an operator who
+  adds `stop` gets both rows switched off" cannot happen. Either correct
+  the sentence (the operator unticks the two rows) or allow it. Also,
+  `add_word`'s `w not in row['exempt_words']` contradicts `is_destructive`'s
+  rule that an operator word is never exempt. It is harmless today, but
+  make the two agree.
+* `integration_proxy.DESTRUCTIVE_VERBS` now includes `stop`, `restart`,
+  `reboot`, `shutdown`, `disable`, `unlock` and `disarm`. The comment above
+  it still says they are excluded. Under the `destructive` gate mode,
+  generic writes with those words now get a card. That is the safe
+  direction, but it is a behaviour change: fix the comment and state it in
+  the release notes.
+* The refresh thread's comment says "once a minute", but it sleeps 300
+  seconds.
+* The design's "an invalid stored condition writes one audit row per
+  allowance per hour" is not implemented. Low priority.
+
+Re-read scope once BX1–BX6 are in: the refresh/accept path and its match
+tests, the all-rows pin check, the AZ2 hook (restore, fail-closed,
+`template:`), `apply_profile` ordering and transaction, accept-join's ack,
+and the PUT ceiling.
+
+
+### Round 6 — implementer notes for the BX fixes (2026-11-17)
+
+**Status: BX1–BX6 and the four named nits are in on
+`feat/f27-allowances-code`; this round stops for the Security re-read.**
+
+**BX1 — one entity list.** `entities_json` (the pins) is now what `_matches`
+reads; `conditions_json['data.entity_id']` is written only as a display copy.
+`refresh_labels` and `accept_join` rewrite **both** columns in one UPDATE
+(`_write_entity_list`), and refresh/accepted changes are visible to
+`match_and_claim` on the next call. The label test now asserts through
+`match_and_claim`: the leaver gets `None`, the held joiner gets `None`, and
+the accepted joiner matches.
+
+**BX2 — every live HA allowance is pinned.** `refresh_labels` no longer
+skips rows without `source_label_id`: every live HA row has
+`_pin_changed()` run over its pins, and a missing or changed registry id
+suspends with `registry_changed`. The plain-entity half of the test is
+re-enabled (no more `if False`). `refresh_pins()` is the pin-only pass used
+straight after an approved write; `tool_runner.note_ha_registry_write()`
+runs it after an approved/immediate HA `ws_write` or generic write whose
+command/path is `config/entity_registry/*` or `config/config_entries/*`, and
+the approval executor calls it on the same turn. The F11 handler also runs
+it if a write ever targets one of those paths.
+
+**BX3 — AZ2 gaps.** `ha_config_restore` now calls
+`allowances.on_config_restore()`, which suspends every live HA allowance with
+`config_write_unmapped`. The write hook's `except Exception: pass` is gone:
+a scan that raises calls `on_config_write_failed()`, which suspends every HA
+allowance and writes `allowance_config_write_scanned`; if that suspension
+also fails, one `allowance_config_write_failed` row is written instead.
+`_YAML_DOMAIN_BLOCK` now includes `template` and accepts an optional `-`
+before the domain key, so `template:` / `- switch:` are unmapped.
+
+**BX4 — apply validates first.** `apply_profile` resolves labels, then runs
+ceiling, entity, risk and registry-pin checks for every template with one
+registry read, and only then starts one `BEGIN IMMEDIATE` transaction that
+revokes the old rows and inserts the new ones. The transaction re-reads the
+profile version; a failure rolls the revoke back. The request carries
+`profile_version` (required; a missing/zero value is a 400
+`profile_version_required`), and a stale value is a 409 `profile_changed`.
+The UI sends the version the preview showed.
+
+**BX5 — accept-join is a widening.** `accept_join` re-checks the ceiling,
+refuses a total above 64 entities, and runs `_risk_for` on the joiners: a
+risky catalogue row or a garage/gate/door/lock-like joiner returns
+`risk_ack_required` until the operator confirms. The route accepts an
+optional `risk_ack` body (a body-less call is treated as `false`); the UI
+shows the same second confirmation as the save path. Both columns are
+rewritten in one transaction.
+
+**BX6 — the stale-form check is the server's.** `apply_ceiling` refuses a
+PUT with an empty `set_hash` (400 `set_hash_required`). The current set and
+its hash are read, compared and written inside one `BEGIN IMMEDIATE`; the
+risk-ack check and the enabling/disabling set are computed from that same
+read, so two saves cannot both pass the compare. The UI already sent the
+hash.
+
+**Nits.**
+* The design's answer-1 sentence now says the truth: `stop` is built in, so
+  `add_word('stop')` is refused; an operator who wants it to cap both rows
+  unticks them. The code's `add_word` no longer applies the built-in
+  `exempt_words` filter to an operator word, so it agrees with
+  `is_destructive` (an operator word is never exempt); a test simulates
+  `stop` as an operator word and asserts both rows are switched off.
+* `integration_proxy.DESTRUCTIVE_VERBS`'s comment now describes the widened
+  list and names the behaviour change; `CHANGELOG.md` [Unreleased] records
+  that generic writes carrying those verbs now get a card under
+  `destructive`.
+* The refresh-thread comment now says five minutes (matching
+  `time.sleep(300)`).
+* The low-priority "one audit row per allowance per hour" nit is not in
+  this round (it is not in the operator's list).
+
+**Tests added/updated.** `tests/test_f27_allowances.py` (BX1 match through
+the engine, BX2 plain pin + post-write pin pass, BX3 restore/fail-closed/
+`template:`/dash form, BX4 validate-before-revoke + version binding + rollback,
+BX5 cap/ceiling/risk, the operator-word nit) and `tests/test_f27_ceiling.py`
+(BX6 required hash + stale hash). Each new test was run against the pre-fix
+code and failed; the suite is green after the fix.
+
+
+### Security re-read of the fix round at `721503d` (2026-11-17)
+
+**Verdict: approved to merge. BX1–BX6 are fixed.**
+* **BX1.** Matching reads the pins (`_stored_entities`). Refresh and
+  accept-join rewrite the pins and the copy in `conditions_json` in one
+  UPDATE (`_write_entity_list`). The tests now call `match_and_claim`: a
+  leaver gets `None`, and an accepted joiner matches.
+* **BX2.** The refresh re-reads the pins of every live HA allowance, both
+  hand-made and label-based. A missing or changed registry id suspends the
+  allowance with `registry_changed`. The plain-entity test is back on.
+  `refresh_pins` also runs straight after an approved registry write:
+  through `ha_config_write`, on the ungated or allowance path of `_execute`,
+  and in `approve_integration_call`.
+* **BX3.** A restore suspends every HA allowance. A scan that raises fails
+  closed, and only a second failure writes
+  `allowance_config_write_failed`. `template:` and the dashed
+  `- switch:` form count as unmapped.
+* **BX4.** All checks run first, including one registry read. Then the
+  revoke and the inserts run in one `BEGIN IMMEDIATE`, which re-checks the
+  version. Apply requires `profile_version`, and a stale value is a 409. The
+  rollback test covers an insert that fails.
+* **BX5.** Accept-join checks the ceiling, the 64-entity cap and the second
+  risk confirmation. It refuses a revoked row, and it writes under
+  `BEGIN IMMEDIATE`.
+* **BX6.** `set_hash` is required (`set_hash_required`), and the compare
+  and the write share one `BEGIN IMMEDIATE`.
+* **Nits are done.** An operator word is never exempt. The destructive-verb
+  comment and the CHANGELOG state the behaviour change. The refresh comment
+  says five minutes.
+
+**BZ3 (should, follow-up; does not block the merge): a config-entry write
+needs its own rule.** My BX2 minimum, a pin check after the write, does not
+work for config entries:
+* An options-flow or config-entry write, such as editing a template
+  helper's template, changes what an entity does without changing its
+  registry id. `refresh_pins` therefore finds nothing.
+* `is_registry_write_path` matches `config/config_entries/` (REST), but
+  HA's WebSocket commands for config entries are `config_entries/...`, with
+  no `config/` prefix, so they are not matched at all.
+* **Fix:**
+  * After an approved write to REST `config/config_entries/*` or WS
+    `config_entries/*`, suspend the allowances whose entities carry that
+    `config_entry_id` in the registry.
+  * If the entry id cannot be read from the write, suspend every HA
+    allowance. This is AZ2's conservative branch.
+  * Add the WS prefix to the matcher.
+* An entity-registry rename, the reuse case, is covered now.
+
+**Merge note.** E2E-1's CA5 adds `integration_calls.excluded`. Whichever
+branch merges second must add `COALESCE(excluded, 0) = 0` to F27's two
+`allowance:%` queries (the statistics series and the session card).
+Otherwise excluded test calls still count in the allowance bucket.
 
 ## Chunk X3 — Integrations page and agent policy modal pass · slug `integrations-ui` · dashboard UI · after F27
 
@@ -19847,8 +21515,75 @@ consumes it.
 off argv (BE3's BH3): `--data-binary @-` for the body and
 `-H @<(gateway_header)` for the header. That is a should, not a blocker for
 this merge.
+
+## Chunk X10 — Approved Windows modal redesign · slug `approved-windows-modal` · dashboard UI · after 1.3
+
+### Design note (2026-11-17)
+
+**Problem.** The modal makes the operator choose an hour and a minute from two
+scroll columns, then hides the real schedule in a summary. "Recurring" is the
+default, so the common "now, once" case is easy to create as a daily window by
+mistake. A window saved with the daily schedule is stored as **UTC minutes**
+with a fixed **±2 minute** gateway tolerance, so a 22:50 local choice can read
+back as 21:50 or 23:50 depending on the season — the operator who reported this
+had to reason about UTC to see why it fired when it did.
+
+**Shape of the redesign (UI only; the window still means what it means).**
+
+* **Quick presets at the top:** `Now for 15 min`, `Now for 1 hour`, `Until end
+  of today`, `Custom`. The first three fill a Once window; Custom keeps the
+  typed time/duration. Presets never create a daily window.
+* **Once / Every day chosen explicitly, Once the default.** The old
+  Recurring/Single labels are gone.
+* **One typing field, local time.** `HH:MM` (24-hour, the browser's own zone)
+  plus a duration in minutes for Once. The hour/minute scroll columns are
+  removed. Every day has no duration: the gateway's fixed ±2 minute tolerance
+  is the width, and it is said in words rather than left as a UTC footnote.
+* **Stored shape is unchanged.**
+  * Once: `window_start` = the chosen local time as an epoch, `window_end` =
+    start + duration (crossing midnight is just the next epoch), `days_of_week
+    = execution_time = 0`, `expires_at = window_end`.
+  * Every day: `days_of_week = 0` (or the optional day mask), `execution_time`
+    = the chosen local `HH:MM` converted to **UTC minutes**, `window_start =
+    window_end = 0`. The preview shows the local time **and** the stored UTC
+    time so the conversion is visible.
+* **A live one-line preview**, the same text in the modal, the table and an
+  agent request's approval card:
+  `Runs once, today 22:50-23:05 your time, at most 1 execution, on <gateway>.`
+  A daily window says `Runs every day at 22:50 your time (22:50 UTC), within
+  ±2 minutes, at most 1 execution, on <gateway>.` A range that crosses
+  midnight says `today 23:50 to tomorrow 00:20`. All values are operator or
+  gateway text and are escaped at the DOM boundary; the preview function
+  returns plain text.
+* **Agent requests use the same preview.** The queue card and the approval
+  confirmation call the preview function with the request's stored fields; the
+  operator sees the same sentence before approving.
+* **Mobile and desktop.** The preset row wraps, the time/duration pair stacks
+  under ~520 px, and the preview wraps without horizontal scroll. The existing
+  1440/390 harness stays the gate.
+
+**Tests.** `tests/ui/windows_modal.cjs` (Node, loading the shipped `app.js`
+through `tests/fixtures/appjs_loader.js`) checks the preset maths:
+15 min/1 hour/end-of-day, a Once start that crosses midnight, and the local →
+UTC conversion under `TZ=Europe/London` and `TZ=America/New_York`; it also
+pins the preview sentences. `tests/test_x10_windows.py` runs the harness (and
+skips when Node is absent). Screenshots with synthetic data at 1440 and 390.
+
+**Review (2026-11-17): approved and merged.**
+* The only backend change: an `expires_at` of 0 now clears a daily
+  window's expiry (stored as NULL), never a 0 that would disable the
+  window.
+* Every new string reaches the page escaped or through `textContent`.
+* The screenshots read well at both widths.
+* A typed Once time that has already passed rolls to tomorrow (the code
+  says so), but no test covers it. Add one on the next touch.
+
+Full suite: 3193 passed, 33 skipped.
+
+---
+
 | 18a | X2 | runbooks-page | dashboard UI | **Merged** 2026-11-11 | `feat/x2-runbooks-page` | F13 | |
-| 18b | F27 | allowances | dashboard + MCP | Design first (from live use: P2 caught HA call_service) | `feat/f27-allowances` | F10 (P2), Chunk H, F18 | + security sign-off; next design after F21/F22 code |
+| 18b | F27 | allowances | dashboard + MCP | **Merged** 2026-11-17 (security `17b8db6`, BX1–BX6 confirmed); not yet deployed. Follow-up BZ3 (config-entry edits suspend allowances). Whichever of F27/E2E-1 merges second adds `excluded` to the two allowance statistics queries: that is E2E-1 | `feat/f27-allowances` | F10 (P2), Chunk H, F18 | security re-reads §2–§5 and the label section; AZ6 (`restart`) is with the operator |
 | 18c | X3 | integrations-ui | dashboard UI | Requested 2026-11-12; design after F27 is signed off | `feat/x3-integrations-ui` | F27, F10 (P2) | operator walk-through first |
 | 18d | X4 | agents-page | dashboard UI | **Merged** 2026-11-12 (into 1.3; on master 2026-11-14): one Agents page (tokens, policy sections, web fetch, activity); Controls renamed Command policy; absent policy fields keep their stored value | `feat/x4-agents-page` | `fix/agent-ssh-hosts` | rename Controls → Command policy |
 | 18e | X5 | ui-test-round | dashboard UI | **Merged** 2026-11-12 (into 1.3; on master 2026-11-14): six test-round fixes plus the X5-r plan-card regression fix | `fix/x5-ui-test-round`, `fix/plans-widget-visible` | — | six small fixes |
@@ -19867,6 +21602,7 @@ this merge.
 | 26 | 1.4 | — | gateway stack | **Approved for rollout** 2026-11-15 (security `838d77d`): BH2/BQ2, BQ4, F19, X8 (gateway + dashboard), BS1/BS2; rebased onto X7, Build only; the BS2 install-read nit is fixed | `release/1.4-gw` | X7, F19, RR1 | security approved the whole stack; rollout Seed Edge → dev gateways → Deploy to Fleet |
 | 27 | X8 | gateway-installer-version | dashboard + gateway | **Code complete** 2026-11-14: on `release/1.4-gw` (BR1 folded; the hash is display-only) | `feat/x8-gateway-installer-version` | X7 | security approved; five buckets sum to the gateway count |
 | 28 | X9 | gated-gateway-files | dashboard + gateway | **Design note** 2026-11-14 (BP2): installer-carried vs authenticated channel files; recommends (b) | `feat/x9-gated-gateway-files` | X7, 1.4 | security sign-off before code |
+| 29 | X10 | approved-windows-modal | dashboard UI | **Merged** 2026-11-17: presets, Once default, typed local HH:MM + duration, live plain-words preview; agent requests use the same preview; not yet deployed | `feat/x10-windows-modal` | — | UI only; no schema or window-meaning change |
 | — | CI fix | ci-environment | gateway + tests | Merged (`f2746ef`); CI pinned to ubuntu-24.04 (`6d58006`) | `fix/ci-environment` | F5 | |
 | — | Buffering | stream-unbuffered | gateway | Merged (`d8d70c2`); S1 tee fix done in Gateway hardening | `fix/stream-unbuffered` | F5 | |
 | — | Gateway hardening | gateway-hardening | gateway | **Merged** 2026-11-12 (AF3 + S1 tee capture; security `c15664e`; AX1/AX2 residuals; BA1 for the next F5/F19 change) | `fix/gateway-hardening` | F19, Buffering | |

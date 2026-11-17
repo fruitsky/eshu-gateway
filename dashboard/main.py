@@ -131,6 +131,7 @@ from core.agent_context import (
 )
 from core.rate_limit import _check_rate_limit
 from core import installer_channels
+from core import allowances
 from db.policies import get_meta, set_meta
 from core.agent_policy import evaluate_call, safe_ident
 from core.session_guard import (
@@ -527,6 +528,17 @@ def on_startup():
         print("=" * 60 + "\n")
     else:
         print(f"Eshu Gateway Dashboard {DASHBOARD_VERSION} started (password-protected)")
+    # F27: re-resolve every live allowance's label and registry pins (BX2)
+    # every five minutes. A failed registry read changes nothing.
+    def _allowance_refresh_loop():
+        while True:
+            time.sleep(300)
+            try:
+                allowances.refresh_labels()
+            except Exception:
+                pass
+
+    threading.Thread(target=_allowance_refresh_loop, daemon=True).start()
     # Start background stale gateway cleanup
     cleanup_thread = threading.Thread(target=_stale_gateway_cleanup_loop, daemon=True)
     cleanup_thread.start()
@@ -543,6 +555,11 @@ def on_startup():
         installer_channels.ensure_initialised()
     except Exception as exc:  # never block startup; the endpoints answer 503
         print(f"installer channels: initialisation failed: {exc}")
+    try:
+        allowances.ensure_initialised()
+        allowances._init_allowance_tables()
+    except Exception as exc:  # the ceiling endpoints fail closed without it
+        print(f"allowance ceiling: initialisation failed: {exc}")
     # Start background gateway transition watcher (offline detection)
     watch_thread = threading.Thread(target=_gateway_watch_loop, daemon=True)
     watch_thread.start()
@@ -784,6 +801,50 @@ class RegisterPayload(BaseModel):
     # installer sends nothing, which keeps the stored value ("unknown" if
     # there is none).
     installer_hash: str = ""
+
+class CeilingPayload(BaseModel):
+    integration: str = 'ha'
+    enabled: list[str] = []
+    risk_ack: bool = False
+    confirm: bool = False
+    set_hash: str = ""
+
+
+class WordPayload(BaseModel):
+    word: str = ""
+
+
+class ProfilePayload(BaseModel):
+    name: str
+    description: str = ''
+    templates: list[dict] = []
+    profile_id: int = 0
+
+
+class ApplyProfilePayload(BaseModel):
+    agent_id: int
+    risk_ack: bool = False
+    # BX4: the version the preview showed; a stale value is a 409.
+    profile_version: int = 0
+
+
+class AcceptJoinPayload(BaseModel):
+    # BX5: joiners may be garage/gate/door/lock-like, so the second risk
+    # confirmation is server-checked like the save path.
+    risk_ack: bool = False
+
+
+class AllowancePayload(BaseModel):
+    agent_id: int
+    name: str = ''
+    domain: str
+    service: str
+    entities: list[str] = []
+    rate_per_hour: int = 0
+    window: str = ''
+    expires_at: int = 0
+    risk_ack: bool = False
+
 
 class PolicyPayload(BaseModel):
     type: str
@@ -3004,6 +3065,19 @@ def get_statistics(request: Request, days: int = 14, gateway_ip: str = None, gat
         day = approval_by_day.setdefault(row['date'], {})
         day[bucket] = day.get(bucket, 0) + count
         approval_totals[bucket] += count
+    # F27: allowance runs are MCP calls, not requests; count them in the
+    # same breakdown so the statistics series and the session card agree.
+    cursor.execute(f'''
+        SELECT DATE(created_at, 'unixepoch') AS date, COUNT(*) AS n
+        FROM integration_calls
+        WHERE created_at >= ? AND approval LIKE 'allowance:%'
+        GROUP BY date
+    ''', (cutoff,))
+    for row in cursor.fetchall():
+        count = int(row['n'] or 0)
+        approval_totals['allowance'] += count
+        day = approval_by_day.setdefault(row['date'], {})
+        day['allowance'] = day.get('allowance', 0) + count
     approved_total = sum(approval_totals.values())
     override_total = sum(approval_totals[key] for key in OVERRIDE_BUCKETS)
     approval_breakdown = {
@@ -3540,6 +3614,10 @@ def edit_window(window_id: int, payload: WindowUpdatePayload, request: Request):
     if not target:
         raise HTTPException(status_code=404, detail="Window not found")
     updates = {k: v for k, v in payload.dict().items() if v is not None}
+    # X10: the modal clears a daily expiry with 0; store NULL, never a 0 that
+    # would make the window permanently inactive.
+    if payload.expires_at == 0:
+        updates['expires_at'] = None
     if not updates:
         raise HTTPException(status_code=400, detail="No fields to update")
     # Merge with target row and enforce: single-use windows require a start time
@@ -3875,6 +3953,18 @@ def get_notify_config_endpoint(request: Request):
 @app.put("/api/notify-config")
 def set_notify_config_endpoint(payload: NotifyConfigPayload, request: Request):
     _check_session(request)
+    before = get_notify_config()
+    had_ceiling = 'ceiling' in [e.strip() for e in (before.get('events') or '').split(',')]
+    has_ceiling = 'ceiling' in [e.strip() for e in (payload.events or '').split(',')]
+    if had_ceiling and not has_ceiling:
+        # F27 answer 7: turning the ceiling event off is itself audited and
+        # sends one last notification (sent before the new config lands, while
+        # the event is still subscribed).
+        record_audit_event('notify_ceiling_off', 'dashboard',
+                           details='Ceiling notifications turned off by the operator')
+        from core.notify import send_notify
+        send_notify('ceiling', 'Allowance ceiling notifications off',
+                    'The ceiling event was turned off; this is the last one.')
     set_notify_config(payload.url, payload.events, payload.dashboard_url)
     record_audit_event("notify_config_updated", "dashboard",
                        details=f"Webhook URL {'set' if payload.url else 'cleared'}, events: {payload.events}")
@@ -5248,6 +5338,11 @@ def approve_integration_call(call_id: int, request: Request):
                 execution_id=call.get('execution_id') or '',
                 reason=call.get('reason') or '', approval='approved',
                 decided_at=decided_at, decided_by='operator')
+            # BD5/BX2: an approved registry or config-entry write can rename
+            # an entity; re-read the pins before this approval returns.
+            from core.tool_runner import note_ha_registry_write
+            note_ha_registry_write(
+                integration, payload.get('command') or tool.get('path_template'))
         elif tool.get('generic'):
             method = payload.get('method') or 'POST'
             path = payload.get('path') or ''
@@ -5259,6 +5354,8 @@ def approve_integration_call(call_id: int, request: Request):
                                           reason=call.get('reason') or '',
                                           approval='approved', decided_at=decided_at,
                                           decided_by='operator')
+            from core.tool_runner import note_ha_registry_write
+            note_ha_registry_write(integration, path)
             if not result.get('error'):
                 verified = None
                 vpath = payload.get('verify_path')
@@ -5365,6 +5462,144 @@ def set_session_names_endpoint(payload: SessionNamesPayload, request: Request):
     _check_session(request)
     set_session_names(payload.names or {})
     return {"status": "ok"}
+
+
+# ── Allowances: the ceiling (F27) ───────────────────────────────────────
+
+@app.get("/api/allowances/ceiling")
+def get_allowance_ceiling(request: Request, integration: str = "ha"):
+    _check_session(request)
+    return allowances.state(integration)
+
+
+@app.put("/api/allowances/ceiling")
+def put_allowance_ceiling(payload: CeilingPayload, request: Request):
+    _check_session(request)
+    try:
+        return allowances.apply_ceiling(
+            'operator', payload.integration, payload.enabled,
+            risk_ack=payload.risk_ack, expected_hash=payload.set_hash)
+    except allowances.CeilingError as exc:
+        detail = exc.detail
+        if exc.extra:
+            detail = {'message': exc.detail, **exc.extra}
+        raise HTTPException(status_code=exc.status, detail=detail)
+
+
+@app.post("/api/allowances/words")
+def add_allowance_word(payload: WordPayload, request: Request):
+    _check_session(request)
+    try:
+        return allowances.add_word('operator', payload.word)
+    except allowances.CeilingError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.detail)
+
+
+@app.delete("/api/allowances/words/{word}")
+def remove_allowance_word(word: str, request: Request):
+    _check_session(request)
+    try:
+        return allowances.remove_word('operator', word)
+    except allowances.CeilingError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.detail)
+
+
+@app.get("/api/allowances")
+def list_allowances_endpoint(request: Request):
+    _check_session(request)
+    rows = allowances.list_allowances()
+    from db.agent_tokens import get_agent_tokens
+    names = {t['id']: t['name'] for t in get_agent_tokens()}
+    for row in rows:
+        row['agent_name'] = names.get(row['agent_id'], 'agent #%d' % row['agent_id'])
+    return rows
+
+
+@app.post("/api/allowances")
+def create_allowance_endpoint(payload: AllowancePayload, request: Request):
+    _check_session(request)
+    try:
+        return allowances.create_allowance(
+            'operator', payload.agent_id, payload.name, payload.domain,
+            payload.service, payload.entities, rate_per_hour=payload.rate_per_hour,
+            window=payload.window, expires_at=payload.expires_at,
+            risk_ack=payload.risk_ack)
+    except allowances.AllowanceError as exc:
+        detail = exc.detail
+        if exc.extra:
+            detail = {'message': exc.detail, **exc.extra}
+        raise HTTPException(status_code=exc.status, detail=detail)
+
+
+@app.post("/api/allowances/{aid}/revoke")
+def revoke_allowance_endpoint(aid: int, request: Request):
+    _check_session(request)
+    allowances.revoke_allowance('operator', aid)
+    return {"status": "ok"}
+
+
+@app.post("/api/allowances/{aid}/accept-join")
+def accept_allowance_join_endpoint(aid: int, request: Request,
+                                   payload: AcceptJoinPayload = AcceptJoinPayload()):
+    _check_session(request)
+    try:
+        return allowances.accept_join('operator', aid,
+                                      risk_ack=payload.risk_ack)
+    except allowances.AllowanceError as exc:
+        detail = exc.detail
+        if exc.extra:
+            detail = {'message': exc.detail, **exc.extra}
+        raise HTTPException(status_code=exc.status, detail=detail)
+
+
+@app.post("/api/allowances/{aid}/resume")
+def resume_allowance_endpoint(aid: int, request: Request):
+    _check_session(request)
+    try:
+        allowances.resume_allowance('operator', aid)
+    except allowances.AllowanceError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.detail)
+    return {"status": "ok"}
+
+
+@app.get("/api/allowances/profiles")
+def list_profiles_endpoint(request: Request):
+    _check_session(request)
+    return allowances.list_profiles()
+
+
+@app.post("/api/allowances/profiles")
+def save_profile_endpoint(payload: ProfilePayload, request: Request):
+    _check_session(request)
+    try:
+        return allowances.create_profile(
+            'operator', payload.name, payload.description, payload.templates,
+            profile_id=payload.profile_id or None)
+    except allowances.AllowanceError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.detail)
+
+
+@app.get("/api/allowances/profiles/{pid}/diff")
+def profile_diff_endpoint(pid: int, agent_id: int, request: Request):
+    _check_session(request)
+    try:
+        return allowances.profile_diff(pid, agent_id)
+    except allowances.AllowanceError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.detail)
+
+
+@app.post("/api/allowances/profiles/{pid}/apply")
+def apply_profile_endpoint(pid: int, payload: ApplyProfilePayload, request: Request):
+    _check_session(request)
+    try:
+        return allowances.apply_profile('operator', pid, payload.agent_id,
+                                        risk_ack=payload.risk_ack,
+                                        profile_version=payload.profile_version)
+    except allowances.AllowanceError as exc:
+        detail = exc.detail
+        if exc.extra:
+            detail = {'message': exc.detail, **exc.extra}
+        raise HTTPException(status_code=exc.status, detail=detail)
 
 
 # ── Static Files ────────────────────────────────────────────────────────

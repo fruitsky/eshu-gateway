@@ -197,6 +197,16 @@ def get_session_summary(session_id: str) -> dict:
             bucket = bucket_for(row['status'], row['reason'])
             if bucket:
                 by_approval[bucket] += int(row['n'] or 0)
+        # F27: an allowance run is an MCP integration call with
+        # approval='allowance:<id>'; count it in the same card as the SSH
+        # buckets so the operator sees what ran without a card.
+        cur.execute('''
+            SELECT COUNT(*) AS n FROM integration_calls
+            WHERE session_id = ? AND approval LIKE 'allowance:%'
+        ''', (sid,))
+        n = int(cur.fetchone()['n'] or 0)
+        if n:
+            by_approval['allowance'] += n
         out['by_approval'] = by_approval
         cur.execute('''
             SELECT COALESCE(SUM(decided_at - created_at), 0) AS waited,

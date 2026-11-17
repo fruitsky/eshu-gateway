@@ -1054,8 +1054,12 @@ def _h_pihole_local_dns_records(integration, tool, args, ctx=None):
     for kind, config_key, path in (
             ('hosts', 'hosts', 'config/dns/hosts'),
             ('cnames', 'cnameRecords', 'config/dns/cnameRecords')):
-        probe = {'method': 'GET', 'path_template': path, 'params': [],
-                 'read_only': True}
+        # The probe is a synthetic tool dict: execute_integration_call refuses
+        # a tool without `enabled`, which used to fail before any request was
+        # sent (and left no integration_calls row). Name it for the audit row.
+        probe = {'name': 'local_dns_records:%s' % kind, 'enabled': True,
+                 'method': 'GET', 'path_template': path, 'params': [],
+                 'transport': 'http', 'read_only': True}
         try:
             res = execute_integration_call(integration, probe, {}, agent=agent)
         except ProxyError as exc:

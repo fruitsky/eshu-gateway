@@ -388,6 +388,23 @@ def resolve_session(explicit: str = ''):
     return transport, ('transport' if transport else '')
 
 
+def note_ha_registry_write(integration, value):
+    """BX2: re-read every pin straight after an approved registry write.
+
+    An entity-registry rename (or a config-entry write) can give `switch.x` a
+    new meaning. The periodic refresh would catch it up to five minutes later;
+    this runs it on the approval's own turn.
+    """
+    if not integration or (integration.get('kind') or '').lower() != 'ha':
+        return
+    try:
+        from core import allowances
+        if allowances.is_registry_write_path(value):
+            allowances.refresh_pins('config-write')
+    except Exception:
+        pass
+
+
 def run_tool(integration_name: str, tool_name: str, args: dict, reason: str = '') -> str:
     """Run one tool call, and tell the model which session it landed in.
 
@@ -561,18 +578,23 @@ def _run_tool(integration_name: str, tool_name: str, args: dict, reason: str = '
             # command from path_template / the command arg.
             command = tool.get('path_template') or args.get('command') or ''
             payload = args.get('payload')
-            return execute_ws_call(integration, command, payload,
-                                   agent=agent_name, tool_name=tool_name,
-                                   session_id=session_id, execution_id=execution_id,
-                                   reason=exec_reason, approval=approval_label)
+            out = execute_ws_call(integration, command, payload,
+                                  agent=agent_name, tool_name=tool_name,
+                                  session_id=session_id, execution_id=execution_id,
+                                  reason=exec_reason, approval=approval_label)
+            note_ha_registry_write(integration, command)
+            return out
         if generic:
-            return execute_generic_call(
+            out = execute_generic_call(
                 integration, args.get('method'), args.get('path'),
                 args.get('params'), args.get('data'),
                 agent=agent_name, tool_name=tool_name, root=bool(args.get('root')),
                 session_id=session_id, execution_id=execution_id,
                 reason=exec_reason, approval=approval_label,
                 read_only=not mutating)
+            if mutating:
+                note_ha_registry_write(integration, args.get('path'))
+            return out
         return execute_integration_call(integration, tool, args, agent=agent_name,
                                         session_id=session_id, execution_id=execution_id,
                                         reason=exec_reason, approval=approval_label)
@@ -632,6 +654,21 @@ def _run_tool(integration_name: str, tool_name: str, args: dict, reason: str = '
     # implements `dry_run` counts (the same set as the freeze check above).
     if _dry_run_exempt(handler, args):
         should_gate = False
+
+    # F27: a live allowance is a pre-approval inside the ceiling. BD2: an
+    # agent set to ask for this tool never consults it. The check runs after
+    # every refusal and before the plan/gate; a miss changes nothing.
+    if should_gate and tool_name == 'call_service' and agent:
+        mode = approval_mode(agent, integration['name'], tool_name)
+        if mode != 'gated':
+            from core import allowances as _allowances
+            hit = _allowances.match_and_claim(
+                agent, integration['name'], tool_name, args,
+                call_ref=(session_id or ''))
+            if hit:
+                should_gate = False
+                approval_label = 'allowance:%d' % hit[0]
+                exec_reason = reason
 
     # F10/F3: an approved Session plan can cover an MCP call. Matching is by
     # integration + tool + the exact argument hash, one use per claim — the
