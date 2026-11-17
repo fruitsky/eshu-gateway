@@ -21862,23 +21862,24 @@ the token, so no other surface needed a change.
 deletes a window, then asserts that no row of those four event types contains
 either token and that each row carries the matching fingerprint.
 
-**Migration proposal (design only; not written).** I recommend a one-time
-masking migration, **after Security answers**. Existing audit rows can hold
-tokens for windows that are still active, so leaving them until they age out
-keeps a usable credential in the database. The migration would be narrow and
-idempotent:
+**Migration (implemented).** Security approved a one-time mask of existing
+rows (`79da792`). `db.audit.migrate_window_token_details` runs from `init_db`:
 
 * only the four event types above;
-* rewrite `token=<value>` (and `Token <value> claimed`) to
+* one transaction; `token=<value>` and `Token <value> claimed` become
   `token_fp=<sha256(value)[:8]>`;
-* leave every other character of `details` untouched;
-* run in one transaction, record the number of rows changed, and write no
-  token into the migration's own audit row;
-* be reversible only from a database backup, which the operator takes first.
+* the token format is the gateway's `[A-Za-z0-9]{1,64}`; `?`/empty
+  placeholders and rows already carrying `token_fp=` are left alone;
+* a `meta` flag is written in the same transaction, so it never runs twice;
+* the migration's own audit row carries a count, never a token.
 
-The alternative, no migration, is simpler but leaves live tokens readable.
-I would not delete the old rows: they are the evidence of who created and
-approved each window. The migration masks one field, not the history.
+Copies made before the migration (backups, CSV/JSON exports, support
+bundles) still hold the tokens. The CHANGELOG tells operators who shared an
+export to delete and re-create their active windows. The rows themselves
+stay: the migration masks one field, not the record of who created or
+approved a window. Tests: `tests/test_window_token_migration.py` covers the
+four events, placeholders, already-fingerprinted rows, a non-window event,
+idempotence and the meta flag.
 
 ---
 

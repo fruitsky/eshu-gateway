@@ -86,3 +86,5 @@ def init_db():
 
     conn.commit()
     conn.close()
+    from db.audit import migrate_window_token_details
+    migrate_window_token_details()
