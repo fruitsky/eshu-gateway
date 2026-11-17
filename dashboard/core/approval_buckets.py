@@ -28,6 +28,7 @@ BUCKETS = (
     ('host-override', 'host override'),
     ('window', 'window'),
     ('fleet', 'fleet run'),
+    ('allowance', 'allowance'),
 )
 
 BUCKET_KEYS = tuple(key for key, _label in BUCKETS)

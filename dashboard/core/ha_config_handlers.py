@@ -41,6 +41,25 @@ def _h_ha_config_write(integration, tool, args, ctx=None):
             args.get('expect_hash'), ctx=ctx, dry_run=bool(args.get('dry_run')))
     except ha_config_ssh.HaConfigError as exc:
         return _err(exc.code, exc.message)
+    if not args.get('dry_run'):
+        # F27 AZ2: an approved write can turn an allowed entity into a
+        # template/shell command. Suspend what the file can redefine. BX3:
+        # a scan that raises fails closed (suspend every HA allowance), and
+        # only a second failure writes one `allowance_config_write_failed`
+        # row instead of surfacing a traceback.
+        try:
+            from core import allowances
+            allowances.on_config_write('config-write', args.get('path'),
+                                       args.get('content'))
+            if allowances.is_registry_write_path(args.get('path')):
+                allowances.refresh_pins('config-write')
+        except Exception as exc:
+            try:
+                from core import allowances
+                allowances.on_config_write_failed(
+                    'config-write', args.get('path'), exc)
+            except Exception:
+                pass
     return json.dumps(out)
 
 
@@ -55,6 +74,17 @@ def _h_ha_config_restore(integration, tool, args, ctx=None):
         out = ha_config_ssh.restore_config(integration, path, backup, ctx=ctx)
     except ha_config_ssh.HaConfigError as exc:
         return _err(exc.code, exc.message)
+    # F27 AZ2/BX3: a restore replaces a file the handler never sees, so treat
+    # every restore as unmapped and suspend every HA allowance.
+    try:
+        from core import allowances
+        allowances.on_config_restore('config-write', path)
+    except Exception as exc:
+        try:
+            from core import allowances
+            allowances.on_config_write_failed('config-write', path, exc)
+        except Exception:
+            pass
     return json.dumps(out)
 
 

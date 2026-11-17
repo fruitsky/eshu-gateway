@@ -120,14 +120,15 @@ class TestIsDestructive:
         assert is_destructive('POST', '/config/device_registry/remove')
         assert is_destructive('POST', '/nodes/{vmid}/reset')
         assert is_destructive('POST', '/things/purge')
+        # F27 decision 6 + AZ6: stop/restart ask in destructive mode.
+        assert is_destructive('POST', '/nodes/pve/qemu/100/status/restart')
+        assert is_destructive('POST', '/nodes/pve/qemu/100/status/stop')
 
     def test_benign_post_not_destructive(self):
         assert not is_destructive('POST', '/services/light/turn_on')
         assert not is_destructive('POST', '/nodes/pve/qemu/100/status/start')
         assert not is_destructive('POST', '/config/entity_registry/list')
-        # disruptive-but-reversible verbs are deliberately not gated
-        assert not is_destructive('POST', '/nodes/pve/qemu/100/status/restart')
-        assert not is_destructive('POST', '/nodes/pve/qemu/100/status/stop')
+        # F27 widened the list; restart/stop are in the destructive tests.
 
     def test_get_not_destructive(self):
         assert not is_destructive('GET', '/sites')

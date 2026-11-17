@@ -134,7 +134,20 @@ def get_notify_config() -> dict:
         url = row['value'] if row else ''
         cursor.execute("SELECT value FROM meta WHERE key = 'notify_webhook_events'")
         row = cursor.fetchone()
-        events = row['value'] if row else 'jit,window'
+        events = row['value'] if row else 'jit,window,ceiling'
+        # F27 answer 7: the ceiling event is on by default. Existing configs
+        # get it once, not on every read; turning it off later sticks.
+        cursor.execute("SELECT value FROM meta WHERE key = 'notify_ceiling_defaulted'")
+        if not cursor.fetchone():
+            names = [e.strip() for e in (events or '').split(',') if e.strip()]
+            if 'ceiling' not in names:
+                names.append('ceiling')
+                events = ','.join(names)
+                cursor.execute("INSERT OR REPLACE INTO meta (key, value) "
+                               "VALUES ('notify_webhook_events', ?)", (events,))
+            cursor.execute("INSERT OR REPLACE INTO meta (key, value) "
+                           "VALUES ('notify_ceiling_defaulted', '1')")
+            conn.commit()
         cursor.execute("SELECT value FROM meta WHERE key = 'notify_dashboard_url'")
         row = cursor.fetchone()
         dash_url = row['value'] if row else ''

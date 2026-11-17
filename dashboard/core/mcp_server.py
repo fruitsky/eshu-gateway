@@ -137,6 +137,17 @@ class EshuFastMCP(FastMCP):
                 continue
             if not visible_tool_allowed(agent, self._effective_name(tool.name)):
                 continue
+            # F27 answer 8: one generic line when this agent has any live
+            # allowance; the operator's ceiling stays private.
+            try:
+                from core import allowances as _allowances
+                line = _allowances.agent_allowance_line((agent or {}).get('id'))
+            except Exception:
+                line = ''
+            if line and line not in (tool.description or ''):
+                tool = tool.model_copy(
+                    update={'description': (tool.description or '').rstrip()
+                            + '\n\n' + line})
             if tool.name in web_fetch_tools:
                 # The allowlist is per agent and can change; generate the
                 # description from the same live policy the handler enforces.

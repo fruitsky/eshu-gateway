@@ -122,7 +122,8 @@ class TestBucketMapping:
         for reason in ('session-plan:1:1', 'session-override:1', 'override',
                        'read-lane'):
             seen.add(bucket_for('approved', reason))
-        assert set(BUCKET_KEYS) <= seen
+        # `allowance` comes from MCP integration calls, not request rows.
+        assert set(BUCKET_KEYS) - {'allowance'} <= seen
 
     def test_f6_empty_buckets_has_every_key_at_zero(self):
         buckets = empty_buckets()
@@ -174,6 +175,7 @@ class TestSessionSummary:
         assert summary['by_approval'] == {
             'allowlist': 1, 'human': 1, 'plan': 1, 'read-lane': 1,
             'session-override': 1, 'host-override': 1, 'window': 1, 'fleet': 1,
+            'allowance': 0,
         }
 
     def test_f6_summary_is_empty_for_a_blank_session(self):
@@ -382,6 +384,7 @@ class TestStatisticsApprovals:
         assert block['totals'] == {
             'allowlist': 1, 'human': 1, 'plan': 1, 'read-lane': 1,
             'session-override': 1, 'host-override': 1, 'window': 1, 'fleet': 1,
+            'allowance': 0,
         }
         assert block['approved'] == 8
         assert block['override_share'] == 25.0

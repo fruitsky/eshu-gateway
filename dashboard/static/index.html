@@ -113,6 +113,7 @@
     <button class="nav-item" id="nav-inventory" onclick="switchView('inventory')"><span>Inventory</span></button>
     <button class="nav-item" id="nav-runbooks" onclick="switchView('runbooks')"><span>Runbooks</span></button>
     <button class="nav-item" id="nav-agents" onclick="switchView('agents')"><span>Agents</span></button>
+    <button class="nav-item" id="nav-allowances" onclick="switchView('allowances')"><span>Allowances</span></button>
     <button class="nav-item" id="nav-controls" onclick="switchView('controls')"><span>Command policy</span></button>
     <button class="nav-item" id="nav-settings" onclick="switchView('settings')"><span>Settings</span></button>
     <button class="nav-item" id="nav-logs" onclick="switchView('logs')"><span>Logs</span></button>
@@ -1138,6 +1139,7 @@
             <div class="flex flex-wrap gap-3 mb-3">
               <label class="flex items-center gap-2 cursor-pointer select-none text-xs"><input type="checkbox" id="notify-event-jit" checked onchange="onNotifyConfigChange()"> JIT requests</label>
               <label class="flex items-center gap-2 cursor-pointer select-none text-xs"><input type="checkbox" id="notify-event-window" checked onchange="onNotifyConfigChange()"> Window requests</label>
+              <label class="flex items-center gap-2 cursor-pointer select-none text-xs"><input type="checkbox" id="notify-event-ceiling" checked onchange="onNotifyConfigChange()"> Allowance ceiling</label>
               <label class="flex items-center gap-2 cursor-pointer select-none text-xs"><input type="checkbox" id="notify-event-blocked" onchange="onNotifyConfigChange()"> Blocked commands</label>
               <label class="flex items-center gap-2 cursor-pointer select-none text-xs"><input type="checkbox" id="notify-event-offline" onchange="onNotifyConfigChange()"> Gateway offline</label>
               <label class="flex items-center gap-2 cursor-pointer select-none text-xs"><input type="checkbox" id="notify-event-online" onchange="onNotifyConfigChange()"> Gateway online</label>
@@ -1201,6 +1203,70 @@
       </div>
     </div>
 
+
+    <div id="view-allowances" class="hidden w-full" data-ink="section">
+      <div class="hud" data-od-id="allowances-hud">
+        <div class="hud-txt"><b>The allowances</b><span class="hud-sub">pre-approvals inside the ceiling, and nothing else</span></div>
+        <div class="hud-right"><span class="hud-sum" id="allowances-hud-sum"><span><span class="n">&mdash;</span> live</span></span></div>
+      </div>
+
+      <div class="widget" data-od-id="ceiling-widget">
+        <div class="widget-header">What agents may ever be allowed to do <span class="text-xs text-muted">the ceiling</span></div>
+        <p class="text-xs mb-3 text-muted" id="allowances-copy">The ceiling is the outer limit: it lists, per integration and device type, the actions an agent may ever be allowed to take without a card. An allowance is one narrow pre-approval inside that ceiling — this agent, these exact entities and these exact actions, with its own rate, window and expiry. A call runs without a card only when it matches a live allowance and the ceiling still allows its type and action; everything else asks. The ceiling never approves anything by itself.</p>
+        <div id="ceiling-types" class="space-y-3"><p class="text-muted text-xs">Loading...</p></div>
+        <div class="flex flex-wrap gap-2 mt-3">
+          <button onclick="saveCeiling()" class="btn btn-sm">Save ceiling</button>
+          <span class="text-xs text-muted" id="ceiling-status"></span>
+        </div>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4" id="ceiling-never"></div>
+        <div class="mt-4">
+          <label class="text-xs block mb-1 text-muted">Destructive words (built-ins are read-only; yours can be removed)</label>
+          <div id="ceiling-words" class="flex flex-wrap gap-1 mb-2"></div>
+          <div class="flex gap-2">
+            <input type="text" id="ceiling-word-input" placeholder="word (a-z0-9_, 3-32)" class="text-xs" style="width:16rem" maxlength="32">
+            <button onclick="addCeilingWord()" class="btn btn-xs">Add word</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="widget" data-od-id="allowance-list">
+        <div class="widget-header">Allowances <span class="text-xs text-muted">exact pre-approvals</span></div>
+        <div id="allowance-list" class="space-y-2"><p class="text-muted text-xs">Loading...</p></div>
+      </div>
+
+      <div class="widget" data-od-id="allowance-new">
+        <div class="widget-header">New allowance</div>
+        <p class="text-xs text-muted mb-2">An allowance names one type, one action and the exact entities. Calls to anything else still ask.</p>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-2 text-xs">
+          <label>Agent <select id="allowance-agent" class="w-full"></select></label>
+          <label>Name <input type="text" id="allowance-name" placeholder="Living-room lamp" class="w-full"></label>
+          <label>Device type <select id="allowance-domain" class="w-full" onchange="fillAllowanceServices()"></select></label>
+          <label>Action <select id="allowance-service" class="w-full"></select></label>
+          <label class="md:col-span-2">Entities (comma separated) <input type="text" id="allowance-entities" placeholder="light.living_room, light.kitchen" class="w-full"></label>
+          <label>Rate per hour (0 = no cap) <input type="number" id="allowance-rate" value="0" min="0" max="1000" class="w-full"></label>
+          <label>Window (HH:MM-HH:MM, optional) <input type="text" id="allowance-window" placeholder="07:00-23:00" class="w-full"></label>
+        </div>
+        <div class="flex gap-2 mt-2"><button onclick="createAllowance()" class="btn btn-sm">Create allowance</button><span class="text-xs text-muted" id="allowance-status"></span></div>
+      </div>
+
+      <div class="widget" data-od-id="allowance-profiles">
+        <div class="widget-header">Profiles <span class="text-xs text-muted">reusable sets of templates</span></div>
+        <div id="allowance-profiles" class="space-y-2 mb-4"><p class="text-muted text-xs">Loading...</p></div>
+        <div class="divider-top mb-3"></div>
+        <label class="text-xs block mb-1 text-muted">New profile</label>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-2 text-xs mb-2">
+          <input type="text" id="profile-name" placeholder="Name (e.g. Household lights)" class="w-full">
+          <input type="text" id="profile-description" placeholder="Description (optional)" class="w-full">
+        </div>
+        <div id="profile-template-rows" class="space-y-2 mb-2"></div>
+        <div class="flex gap-2">
+          <button onclick="addProfileTemplate()" class="btn btn-muted btn-xs">Add template</button>
+          <button onclick="saveProfile()" class="btn btn-sm">Save profile</button>
+          <span class="text-xs text-muted" id="profile-status"></span>
+        </div>
+      </div>
+    </div>
+
     <!-- LOGS VIEW — Audit Log -->
     <div id="view-logs" class="hidden w-full" data-ink="section">
       <div class="hud" data-od-id="logs-hud">
@@ -1228,8 +1294,19 @@
   </div>
 </main>
 
-<script src="/static/state.js?v=ui3"></script>
-<script src="/static/app.js?v=ui28"></script>
+<div id="profile-diff-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center" style="background:rgba(0,0,0,0.6)">
+  <div class="widget" style="max-width:44rem;width:92%">
+    <div class="widget-header">Update agents <span class="text-xs text-muted">nothing changes until you confirm</span></div>
+    <div id="profile-diff-body" class="text-xs space-y-2"></div>
+    <div class="flex gap-2 mt-3">
+      <button onclick="applyPreviewedProfile()" class="btn btn-sm">Apply update</button>
+      <button onclick="closeProfileDiff()" class="btn btn-muted btn-sm">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<script src="/static/state.js?v=ui4"></script>
+<script src="/static/app.js?v=ui34"></script>
 
 <!-- Create / Edit Approved Window Modal -->
 <div id="create-window-modal" class="modal-overlay hidden">

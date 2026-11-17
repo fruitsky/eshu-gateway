@@ -65,6 +65,7 @@
     --appr-host-override: var(--state-denied);
     --appr-window: #c4b5fd;
     --appr-fleet: #94a3b8;
+    --appr-allowance: #f0abfc;
     --danger: #f87171;
     --danger-strong: #dc2626;
     --danger-hover: #fca5a5;
@@ -5411,6 +5412,7 @@ body.pol-open .mobile-menu-btn, body.pol-open .mobile-freeze { display: none; }
   .appr-host-override { background: var(--appr-host-override); }
   .appr-window { background: var(--appr-window); }
   .appr-fleet { background: var(--appr-fleet); }
+  .appr-allowance { background: var(--appr-allowance); }
 
   .appr-chip {
     display: inline-flex;
