@@ -20,6 +20,7 @@
     draft: null,
     tools: [],
     activity: null,
+    policy: null,
     allowances: [],
     gateways: [],
     devices: [],
@@ -499,6 +500,7 @@
       api('/api/ha/devices').catch(function (e) { return { devices: [], error: errText(e) }; }),
       api('/api/ha/labels').catch(function () { return { labels: [] }; }),
       api('/api/allowances/ceiling').catch(function () { return null; }),
+      api('/api/agents/' + Number(id) + '/policy').catch(function () { return null; }),
     ]).then(function (out) {
       S.config = out[0];
       S.draft = docOf(out[0]);
@@ -511,12 +513,14 @@
       S.devicesError = out[5].error || '';
       S.labels = out[6].labels || [];
       S.ceiling = out[7] && !out[7].error ? out[7] : null;
+      S.policy = out[8] || {};
       S.jsonText = JSON.stringify(S.draft, null, 2);
       S.jsonError = '';
       S.lastPreview = null;
       if (!keepNotice) S.notice = null;
       window.scrollTo(0, 0);
       renderEditor();
+      x11LoadApproverTokens();
       if (S.section !== 'overview') scrollToSection(S.section);
     }).catch(function (e) {
       S.screen = 'agents';
@@ -608,7 +612,93 @@
     if (!perms.length) permHtml = '<p class="x11-plain">Nothing runs without asking yet. Choose a tool action under Tools, then pick devices.</p>';
     return '<section class="x11-section" id="x11-sec-overview" data-x11-section="overview">' +
       head('Overview', 'What this agent can do on its own, in plain words.', 'overview') +
-      lines.join('') + '<div class="x11-perm-list">' + permHtml + '</div>' + jsonBlock('overview') + '</section>';
+      lines.join('') + '<div class="x11-perm-list">' + permHtml + '</div>' +
+      '<details class="x11-e2e"><summary>Test agent and E2E approver tokens</summary>' +
+      '<p class="x11-section-sub">A test agent may only use HA reads and call service, with exactly one SSH host. An approver token can decide only its E2E rows.</p>' +
+      '<label class="x11-plain"><input type="checkbox" id="agent-test-toggle" onchange="x11ToggleTestAgent(this)"' +
+      ((S.policy && S.policy.test_agent) ? ' checked' : '') + '> This agent is a test agent</label>' +
+      '<p class="x11-section-sub" id="agent-test-hint">' +
+      esc((S.policy && S.policy.test_agent)
+        ? "On: HA reads and call service only, exactly one SSH host. Clearing this revokes the agent's approver tokens."
+        : 'Off: enabling is refused once the agent has any session, request or call.') + '</p>' +
+      '<div class="x11-tool-group"><h3>Approver tokens</h3>' +
+      '<label class="x11-plain" for="approver-commands">Exact commands (one per line)</label>' +
+      '<textarea id="approver-commands" class="w-full text-xs" rows="3" placeholder="hostname&#10;id -un"></textarea>' +
+      '<div class="x11-btn-row"><label class="x11-plain">Test gateway IP <input id="approver-gateway" placeholder="192.0.2.10"></label>' +
+      '<label class="x11-plain">Days <input id="approver-days" type="number" min="1" max="30" value="30"></label>' +
+      '<button type="button" class="btn btn-sm" onclick="x11MintApproverToken()">Mint approver token</button></div>' +
+      '<div id="approver-token-result" class="x11-token-once" hidden></div>' +
+      '<div id="approver-token-list" class="x11-perm-list"><p class="x11-muted">Loading\u2026</p></div></div>' +
+      '</details>' + jsonBlock('overview') + '</section>';
+  }
+
+  function x11LoadApproverTokens() {
+    var box = el('approver-token-list');
+    if (!box || !S.agent) return;
+    api('/api/approver-tokens?agent_id=' + Number(S.agent.id)).then(function (rows) {
+      if (!el('approver-token-list')) return;
+      if (!rows || !rows.length) { box.innerHTML = '<p class="x11-muted">No approver tokens.</p>'; return; }
+      box.innerHTML = rows.map(function (t) {
+        var state = t.revoked ? 'revoked' : (t.expired ? 'expired' : 'live');
+        return '<div class="x11-perm"><div class="x11-perm-line"><b>#' + esc(t.id) + '</b> ' +
+          '<span>' + esc(state) + '</span><span>gateway ' + esc(t.gateway_ip || '\u2014') + '</span>' +
+          '<span>' + esc(String((t.commands || []).length)) + ' command(s)</span>' +
+          '<span>expires ' + esc(t.expires_at ? when(t.expires_at) : '\u2014') + '</span></div>' +
+          '<div class="x11-mono">' + esc((t.commands || []).join('\n')) + '</div>' +
+          (state === 'live' ? '<button type="button" class="btn btn-deny btn-xs" onclick="x11RevokeApproverToken(' +
+            Number(t.id) + ')">Revoke</button>' : '') + '</div>';
+      }).join('');
+    }).catch(function () {
+      if (box) box.innerHTML = '<p class="x11-muted">Could not load approver tokens.</p>';
+    });
+  }
+
+  function x11ToggleTestAgent(cb) {
+    if (!S.agent) return;
+    var wanted = !!cb.checked;
+    cb.disabled = true;
+    api('/api/agents/' + Number(S.agent.id) + '/test-agent', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: wanted }),
+    }).then(function (policy) {
+      S.policy = policy || {};
+      toast(wanted ? 'Test agent enabled' : 'Test agent disabled', 'success');
+      x11LoadApproverTokens();
+    }).catch(function (e) {
+      cb.checked = !wanted;
+      setNotice(errText(e), 'error');
+    }).then(function () { cb.disabled = false; });
+  }
+
+  function x11MintApproverToken() {
+    if (!S.agent) return;
+    var raw = (el('approver-commands') || {}).value || '';
+    var commands = raw.split('\n').map(function (x) { return x.replace(/\r$/, ''); }).filter(Boolean);
+    var gateway = ((el('approver-gateway') || {}).value || '').trim();
+    var days = parseInt((el('approver-days') || {}).value || '30', 10);
+    if (!commands.length) { toast('Add at least one exact command', 'error'); return; }
+    if (!gateway) { toast('Set the test gateway IP', 'error'); return; }
+    api('/api/approver-tokens', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ agent_id: Number(S.agent.id), commands: commands,
+        gateway_ip: gateway, days: days }),
+    }).then(function (body) {
+      var out = el('approver-token-result');
+      if (out) {
+        out.hidden = false;
+        out.textContent = 'Token #' + body.id + ' (shown once): ' + body.token;
+      }
+      var input = el('approver-commands'); if (input) input.value = '';
+      x11LoadApproverTokens();
+      toast('Approver token minted', 'success');
+    }).catch(function (e) { setNotice(errText(e), 'error'); });
+  }
+
+  function x11RevokeApproverToken(id) {
+    if (!window.confirm('Revoke approver token #' + id + '? It stops working at once.')) return;
+    api('/api/approver-tokens/' + Number(id) + '/revoke', { method: 'POST' })
+      .then(function () { toast('Approver token revoked', 'success'); x11LoadApproverTokens(); })
+      .catch(function (e) { setNotice(errText(e), 'error'); });
   }
 
   function sectionTools() {
@@ -920,7 +1010,7 @@
   function x11ToggleAnyHost(cb) {
     var hosts = (S.draft.ssh.hosts || []).filter(function (x) { return x !== '*'; });
     if (cb.checked) {
-      if (!window.confirm('Allow this agent on every gateway, including ones enrolled later?')) { cb.checked = false; return; }
+      if (!window.confirm('Allow this agent on every gateway, including every gateway enrolled later?')) { cb.checked = false; return; }
       hosts.push('*');
     }
     S.draft.ssh.hosts = hosts;
@@ -1258,6 +1348,10 @@
   window.x11CreateAgent = x11CreateAgent;
   window.x11CloseNew = x11CloseNew;
   window.x11Back = x11Back;
+  window.x11LoadApproverTokens = x11LoadApproverTokens;
+  window.x11ToggleTestAgent = x11ToggleTestAgent;
+  window.x11MintApproverToken = x11MintApproverToken;
+  window.x11RevokeApproverToken = x11RevokeApproverToken;
   window.x11SaveProtected = x11SaveProtected;
   window.x11SaveCeiling = x11SaveCeiling;
   window.x11AddWord = x11AddWord;

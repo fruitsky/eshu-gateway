@@ -489,20 +489,20 @@ class TestUiSurface:
         root = os.path.join(os.path.dirname(__file__), '..')
         html = open(os.path.join(root, 'dashboard', 'static', 'index.html'),
                     encoding='utf-8').read()
-        js = open(os.path.join(root, 'dashboard', 'static', 'app.js'),
+        js = open(os.path.join(root, 'dashboard', 'static', 'x11.js'),
                   encoding='utf-8').read()
         for needle in ('agent-test-toggle', 'approver-commands',
                        'approver-gateway', 'approver-token-list'):
-            assert needle in html
-        for needle in ('toggleTestAgent', 'mintApproverToken',
-                       'revokeApproverToken', 'approverTokenRow'):
             assert needle in js
-        # The row helper is the one that must escape values.
-        start = js.index('function approverTokenRow')
-        end = js.index('function renderApproverTokenList')
+        for needle in ('x11ToggleTestAgent', 'x11MintApproverToken',
+                       'x11RevokeApproverToken'):
+            assert needle in js
+        # The row renderer is the one that must escape values.
+        start = js.index('function x11LoadApproverTokens')
+        end = js.index('function x11ToggleTestAgent')
         body = js[start:end]
         assert 'esc(t.gateway_ip' in body
-        assert "esc((t.commands" in body
+        assert 'esc((t.commands' in body
 
 
 class TestRefusals:
