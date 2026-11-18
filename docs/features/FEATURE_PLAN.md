@@ -22439,6 +22439,134 @@ updated `feature-roadmap` after the previous one is merged. A design-first
 chunk's design note may be written while the chunk before it is with a
 reviewer; its code still waits for its turn.
 
+### Security review of Stage 2 (security reviewer, 2026-11-18, at `0d13e73`)
+
+**Approved to merge once CB5–CB7 are in.** Code text read only; nothing
+was run. Each of the three is small.
+
+**What holds:**
+* **Scope.** Every new route needs `_check_session`, and none is on the
+  approver allowlist.
+* **S1, the device list.** It returns chosen fields only, so no
+  `entity_picture` or `access_token` attribute can leak. It also goes
+  through `scrub_payload`, and the cache key includes the HA id and base
+  URL.
+* **One validator.**
+  * S2 and S5 send every permission through `_validate_allowance`, which
+    now also checks never-allowed, protected and the expiry.
+  * The tools and SSH sections go through `validate_policy`, plus the
+    test-agent rule.
+  * The `test_agent` flag is kept and cannot be set from the document.
+  * Websites go through `validate_web_policy`.
+  * Unknown keys are refused at every level.
+* **Atomic writes.** Every section is written in one `BEGIN IMMEDIATE`,
+  and the version is checked again inside the transaction.
+* **The version counter.**
+  * Every core writer bumps it inside its own transaction: suspend,
+    revoke, resume, `accept_join`, profiles, label and pin refresh,
+    protection, website policy and `set_agent_policy`.
+  * A document loaded before any of those writes is therefore a 409,
+    including after a background refresh or an approver revoke.
+* **S4 matching.** A pinned row on another HA or base URL is refused at
+  match time, not only on the next refresh.
+
+**CB5 (should): adding protection must disarm existing grants.**
+* `set_protected_entities` only bumps versions. A live hand-made
+  permission that already holds the entity keeps it.
+* Match time refuses the call, so nothing runs today. But if the
+  protection is removed later, the old grant is live again at once.
+* The removal notice says "an agent may now be granted it". In fact some
+  agents already are.
+* Label rows drop the entity on the next refresh; device rows never do.
+* **Fix:** in the same transaction as the insert, suspend every live
+  allowance that holds a newly protected entity, with reason `protected`.
+  Resume or edit then re-validates and refuses while the entity is still
+  protected. List the affected agents in the audit row.
+
+**CB6 (should): bind the apply to what the preview showed. This answers
+question (2).**
+* A label permission resolves the label's members at apply time, and
+  `risk_ack` is a bare boolean.
+* Version bumps do not cover a change to HA label membership between
+  preview and apply, because nothing is written until a refresh runs.
+  So the ack given for the preview can cover a risky device the operator
+  never saw.
+* Editing only the rate of a label permission also pulls in every member
+  held in `pending_json`, and nothing calls them out.
+* The checks match `accept_join`'s (ceiling, protected, the 64 cap, risk),
+  so this is about visibility, not a missing gate.
+* **Fix:**
+  * Return a `preview_hash` over each permission's resolved entity set
+    plus the risk list. Require it on apply and answer 409 when it
+    differs, the same pattern as the ceiling's `set_hash`.
+  * Have the preview list the joiners separately, for example "also
+    accepts 2 devices waiting to join: …".
+
+**CB7 (should): editing a suspended permission is a resume, and must say
+so. This answers question (3).**
+* A changed row is a revoke plus a fresh, unsuspended insert, pinned to
+  the current HA. Re-validation catches `registry_changed`, since the
+  pins are re-read.
+* It cannot catch `config_entry_changed`: the registry id is unchanged,
+  and that suspension exists precisely because validation cannot see the
+  change.
+* It also silently re-blesses an `ha_changed` row on the new instance.
+* The S5 document does not carry `suspended_at`. A JSON round-trip that
+  touches the rate therefore resumes the row, and the operator is never
+  told why it was suspended.
+* **Fix:**
+  * In the preview, mark each change whose old row is suspended:
+    "resumes: suspended because <reason>".
+  * Require `resume_ack` on apply when there is one, and record the
+    reason in the audit row.
+  * A suspended row that is left out of the document is removed, which
+    is fine.
+
+**Answers to the other questions:**
+1. **S5 as a single write path.** Acceptable. It cannot do anything the
+   GUI refuses: the validators, the test-agent rule and the transaction
+   are all shared. One gap: the audit row lists only the section names.
+   The legacy policy save records `tools_mode`, the rate, and the SSH mode
+   and hosts. Record the before and after of `ssh.mode`, `ssh.hosts`,
+   `tools.mode`, any `approval` value that becomes `ungated`, and
+   `websites.enabled`/`allow`, so a JSON widening is as visible as a GUI
+   one.
+2. **Legacy rows before backfill.** Acceptable: they match exactly as
+   before X11, so nothing widens. Two improvements:
+   * Run the backfill once at startup, after the first successful registry
+     read, instead of waiting for the five-minute loop.
+   * Backfill a row only after its registry pins verify. Today the HA pin
+     is written before the pin check, so if HA changed before the upgrade,
+     the row is first stamped with the new HA and then suspended. The pin
+     check saves it, but the stamp is wrong.
+3. **Protection is keyed by entity id.** Should, fold it into CB5:
+   * Store the registry id when an entity is protected, and refuse on
+     either the entity id or the registry id.
+   * Every permission already pins registry ids, so the match-time check
+     can compare `pins[].registry_id` against the protected registry ids
+     without reading HA.
+   * A renamed protected entity then stays protected, and an allowance
+     for its new name is refused.
+
+**Nits:**
+* **Protection between save paths.** S2/S5 refuse a label permission
+  whose label contains a protected entity, while refresh drops such a
+  member. Refusing is safe; say "remove the label from the device, or
+  unprotect it" in the error.
+* **Ceiling changes.** Applying a ceiling change bumps only the agents
+  whose rows it touches. A save validated just before a ceiling change
+  can still insert a row the ceiling now forbids. Match time refuses it,
+  but re-check the ceiling and protection inside the apply transaction.
+  It costs little.
+* **Clearing an expiry.** `expires_at=new.get('expires_at') or
+  old.get(...)` means an explicit `0` cannot clear an expiry on edit. That
+  is conservative; use `'expires_at' in provided`.
+* **Audit volume.** The match-time `allowance_protected_refused` row is
+  written for every call that names a protected entity, even when no
+  allowance would have matched. Write it only when a hit was refused.
+* **Dead code.** `row = allowances.get_allowance(aid)` is unused in the
+  revoke and resume endpoints.
+
 ### Security review of the window-token audit fix (`fix/window-token-audit` @ 91cdf82)
 
 **Approved to merge.** Code text read only; nothing was run.
