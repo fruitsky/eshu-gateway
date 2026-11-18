@@ -26,6 +26,11 @@ READ_COMMANDS = frozenset({
     # `zha/devices` lists Zigbee devices — a read with no read-style last
     # segment, so it is named explicitly (live agent traffic uses it).
     'zha/devices',
+    # Labels are read-only metadata and the permissions picker needs their
+    # names. Name it explicitly so the decision is reviewed rather than
+    # inferred from the generic `list` suffix; no other config/*_registry
+    # command is widened by this entry.
+    'config/label_registry/list',
 })
 
 # Last path segment of a read command: `config/entity_registry/list`,
