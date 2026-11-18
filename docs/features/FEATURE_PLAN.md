@@ -22457,7 +22457,7 @@ sections above absorb those answers.
 | 27 | X8 | gateway-installer-version | dashboard + gateway | **Code complete** 2026-11-14: on `release/1.4-gw` (BR1 folded; the hash is display-only) | `feat/x8-gateway-installer-version` | X7 | security approved; five buckets sum to the gateway count |
 | 28 | X9 | gated-gateway-files | dashboard + gateway | **Design note** 2026-11-14 (BP2): installer-carried vs authenticated channel files; recommends (b) | `feat/x9-gated-gateway-files` | X7, 1.4 | security sign-off before code |
 | 29 | X10 | approved-windows-modal | dashboard UI | **Merged** 2026-11-17: presets, Once default, typed local HH:MM + duration, live plain-words preview; agent requests use the same preview; not yet deployed | `feat/x10-windows-modal` | — | UI only; no schema or window-meaning change |
-| 31 | X11 | agents-allowances-redesign | dashboard UI + small API | **Stage 2 security fixes** 2026-11-18: CB5–CB7, before/after audit, check-first legacy pin, and the nits; full gate pending | `feat/x11-agents-allowances` | F27, X4, fix/f27-ha-by-kind | security re-reads CB5–CB7 before merge; Stage 3 applies section C |
+| 31 | X11 | agents-allowances-redesign | dashboard UI + small API | **Stage 3 in review** 2026-11-18: the Agents and Rules screens replace the Allowances page; section C fixes; one ceiling rule; protection while HA is down; S5 preview binds tools/SSH/websites. Stage 2 approved to merge (`852270d`). | `feat/x11-ui` | F27, X4, fix/f27-ha-by-kind | Security reads Part 1; operator reviews Part 2; not deployed |
 | — | CI fix | ci-environment | gateway + tests | Merged (`f2746ef`); CI pinned to ubuntu-24.04 (`6d58006`) | `fix/ci-environment` | F5 | |
 | — | Buffering | stream-unbuffered | gateway | Merged (`d8d70c2`); S1 tee fix done in Gateway hardening | `fix/stream-unbuffered` | F5 | |
 | — | Gateway hardening | gateway-hardening | gateway | **Merged** 2026-11-12 (AF3 + S1 tee capture; security `c15664e`; AX1/AX2 residuals; BA1 for the next F5/F19 change) | `fix/gateway-hardening` | F19, Buffering | |
@@ -22713,3 +22713,34 @@ what was applied" literal for the whole document.
 * Retire the first once the fleet is past BJ2, for example in the X9
   legacy retirement.
 * Give the second a body or header form, and move E2E-1's C11 onto it.
+
+
+**Stage 3 (2026-11-18).** Code is on `feat/x11-ui`, branched from
+`852270d`. The real dashboard shell now has two Agents tabs; the old
+Allowances page and its JavaScript are gone, while the API endpoints stay.
+
+* **Part 1 — Security follow-ups.**
+  * `ceiling_allows(..., conn=None)` is now the one ceiling check;
+    `_ceiling_allows_conn` is a thin compatibility wrapper. The destructive
+    word rule lives in `_ceiling_denied`, once, and both call styles are
+    tested.
+  * Protection while HA is unreachable is accepted with an empty registry
+    id, suspends by entity id in the same transaction, and backfills the
+    registry id on the next successful refresh with
+    `allowance_protected_registry_filled`. A rename after the backfill is
+    still refused by the stored registry id.
+  * The S5 `preview_hash` now also hashes the tools, SSH and websites
+    sections as they will be written. A document whose SSH hosts differ
+    from the previewed one is a 409.
+* **Part 2 — the UI.** `dashboard/static/x11.js` and `x11.css` render the
+  two tabs, the card grid, the six agent sections, the area-grouped device
+  grid, the Check preview and the JSON editor. `tests/ui/x11_check.cjs`
+  drives the real page for the tabs, card counts, grid, hash/ack bodies,
+  409 reload wording, expiry removal, JSON server errors, Resume and the
+  390 px layout. `scripts/x11_ui_shots.cjs` renders the seven states at
+  1440 and 390 into `docs/screenshots/x11/` against
+  `tests/ui/seed_ui.py` (synthetic `192.0.2.x` / `*.example.test` data).
+  The old mock screenshots were removed.
+* **Still open for review.** The operator review covers the look and the
+  six Stage 3 fixes; Security reads the three server items. Nothing is
+  merged into master or deployed.
