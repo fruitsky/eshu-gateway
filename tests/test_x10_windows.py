@@ -5,11 +5,13 @@ other UI tests use), so the assertions are against the shipped helpers, not a
 reimplementation. Run the harness under two zones: London (GMT in November)
 and New York (EST), which makes the local -> UTC conversion visible.
 """
+import datetime
 import json
 import os
 import shutil
 import subprocess
 import unittest
+from zoneinfo import ZoneInfo
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 HARNESS = os.path.join(HERE, 'ui', 'windows_modal.cjs')
@@ -57,6 +59,17 @@ class TestWindowsModalMaths(unittest.TestCase):
             self.london['previews']['once'],
             'Runs once, today 23:50 to tomorrow 00:20 your time, '
             'at most 1 execution, on gateway-one.')
+
+    def test_a_typed_once_time_that_has_passed_rolls_to_tomorrow(self):
+        for run in (self.london, self.new_york):
+            p = run['past_once']
+            local = datetime.datetime.fromtimestamp(
+                p['start'], ZoneInfo(run['tz']))
+            self.assertEqual(
+                (local.year, local.month, local.day, local.hour, local.minute),
+                (2026, 11, 18, 14, 30), run['tz'])
+            self.assertGreater(p['start'], run['now1500'] // 1000)
+            self.assertEqual(p['end'] - p['start'], 15 * 60)
 
     def test_the_once_preview_is_the_requested_sentence(self):
         self.assertEqual(

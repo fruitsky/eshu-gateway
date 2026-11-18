@@ -36,6 +36,7 @@ const preset15 = call('winPreset', 'now15', now2250);
 const preset60 = call('winPreset', 'now60', now2250);
 const endOfDay = call('winPreset', 'end_of_today', now1500);
 const crossing = call('winOnceRange', '23:50', 30, now2350);
+const pastOnce = call('winOnceRange', '14:30', 15, now1500);
 const daily = call('winDailySchedule', '22:50', 0, now2250);
 const dailyWeekdays = call('winDailySchedule', '07:05', 31, now2250);
 
@@ -68,10 +69,12 @@ const weeklyPreview = call('winPreviewText', {
 console.log(JSON.stringify({
   tz: process.env.TZ || '',
   now2250,
+  now1500,
   preset15,
   preset60,
   endOfDay,
   crossing,
+  past_once: pastOnce,
   daily,
   dailyWeekdays,
   previews: {
