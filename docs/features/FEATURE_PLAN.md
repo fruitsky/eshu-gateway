@@ -21978,6 +21978,10 @@ operator):
 
 ### Layout
 
+The 2026-11-18 operator decision in the design note supersedes the page names
+and navigation in this early sketch (there is no separate Allowances page; the
+agent page's sections are Overview, Tools, SSH, Websites, Activity and JSON).
+
 **Agents list.** A grid of agent cards: 2-3 per row at 1440 px, 1 at
 390 px. Each card answers the question in plain words, with no chips:
 
@@ -22102,6 +22106,9 @@ this agent.
 
 ### API changes (security reads these; each with tests)
 
+The operator's 2026-11-18 decision adds **S5**. S1–S4 are unchanged in meaning;
+S5 is the per-agent JSON document.
+
 * **S1 — device list for the picker.** `GET /api/ha/devices` (operator
   session only). From the one HA integration (found by kind), read:
   * the entity registry: name, entity_category, disabled_by, labels,
@@ -22135,6 +22142,22 @@ this agent.
   integration's id and a base-URL fingerprint on each permission. If either
   changes, suspend every HA permission with `ha_changed`, shown in words
   with Resume.
+* **S5 — one JSON document per agent.**
+  `GET /api/agents/{id}/config` returns `{schema_version, version, agent,
+  tools, ssh, websites, home_assistant}`. `tools` holds the mode, allowlist,
+  approval modes, argument rules and rate limit; `ssh` the mode and hosts;
+  `websites` the enabled flag and allow/deny lists; `home_assistant` the
+  permissions in the S2 shape. `agent` is read-only metadata (id, name,
+  revoked). The document never holds the agent token or an integration secret.
+  `PUT /api/agents/{id}/config` takes `{document, preview, version, risk_ack}`.
+  `preview: true` returns the same plain-words changes the GUI shows, the
+  risky items and whether `risk_ack` is needed; it writes nothing. Apply is
+  one `BEGIN IMMEDIATE`: tools/SSH, websites and HA permissions move together
+  or not at all. A stale `version` is 409. JSON passes the same protected,
+  ceiling, never-allowed and risk checks as the GUI, and absent fields keep
+  their stored values (X4). Reusing another agent's document is the copy
+  feature; the preview names the target agent. The config version is bumped by
+  every config write, including the legacy policy and website endpoints.
 * No change to matching rules, the ceiling, the never lists or P2.
 
 ### Tests to add
@@ -22149,6 +22172,11 @@ this agent.
   rows; the notification.
 * S4: changing the base URL or swapping the integration suspends; Resume
   works.
+* S5: a GET then an unchanged PUT changes nothing; each validation refusal
+  (protected device, ceiling, never allowed, risk ack, bad schema, unknown
+  field, stale version); atomicity when one HA item is invalid after a tools
+  change; no token or secret in the document; JSON cannot do anything the GUI
+  refuses; copy-preview names the target agent.
 * UI (node harness and the 1440/390 view harness):
   * the vocabulary table (no "ceiling", "profile" or "template" in the
     visible text of the two pages);
@@ -22177,73 +22205,139 @@ minutes.
 
 1. Design note with the wireframes at real size (a screenshot of a static
    mock with synthetic data is fine). The **operator** approves the look
-   before code.
-2. S1–S4 with tests. **Security reads.**
-3. The UI. Main-reviewer review with the harness screenshots.
+   before code. *Approved with changes 2026-11-18; no new mock.*
+2. S1–S5 with tests. **Security reads.**
+3. The UI, including the six Stage 3 fixes in section C. Main-reviewer review
+   with the harness screenshots.
 
-### Design note — the look (2026-11-17)
+### Design note — the look (2026-11-17; operator decision 2026-11-18)
 
-**Scope: this is the Stage 1 mock, not app code.** It is a static page at
+**Status: approved with changes.** The operator likes the direction and finds
+it more legible. They approved it with the information-architecture and JSON
+decisions below; no new mock is needed. Stage 2 is S1–S5, and Stage 3 applies
+the six review fixes in section C. Every device, agent, site and timestamp in
+the Stage 1 mock is synthetic.
+
+**Scope of the Stage 1 mock.** It is a static page at
 `docs/mockups/x11/index.html`, built with the app's own `fonts.css`,
-`style.css` and shell colours. Every device, agent, site and timestamp is
-synthetic. `scripts/x11_mock_shots.cjs` renders the six states at 1440 and
-390; the operator approves the look before Stage 2 starts.
+`style.css` and shell colours. `scripts/x11_mock_shots.cjs` renders the six
+states at 1440 and 390. It remains the record of the approved look; the
+changes below are the operator's edits to it, not a request to rebuild it.
 
-**What the mock is trying to make obvious.** The pages answer one question —
-what can this agent do on its own, and how do I change it? — and every
-permission is one of three outcomes: *Runs without asking*, *Asks you first*,
-*Never*. The vocabulary table is applied throughout; `ceiling`, `profile` and
-`template` do not appear in the content.
+**The question every page answers.** What can this agent do on its own, and how
+do I change it? Every permission is one of three outcomes: *Runs without
+asking*, *Asks you first*, *Never*. The vocabulary table applies throughout;
+`ceiling`, `profile` and `template` do not appear in the content.
 
-**Agents list.** A card grid, three across at 1440 and one at 390. A card is
+### A. Information architecture (operator's decision)
+
+* **The sidebar has no “Runs without asking” or “Allowances” item.** Everything
+  lives under **Agents**. The old Allowances page and its sidebar entry are
+  removed.
+* **Agents has exactly two tabs.**
+  * **Agents** — the agent-card grid, plus a banner when any permission is
+    paused: “1 paused · Review”, which opens the suspended permission in the
+    agent that owns it.
+  * **Rules for all agents** — protected devices, limits for all agents, and
+    never allowed. These are the only settings not tied to one agent.
+* **Edit agent → sections:** Overview, Tools, SSH, Websites, Activity, JSON.
+  The sections are anchors on one page, not tabs.
+* **Tools is grouped by integration.** Each tool shows its outcome for this
+  agent: *none*, *asks you first*, or *runs without asking*. Allowances live
+  under their tool: Home Assistant → `call_service` → “Runs without asking”
+  opens the device grid. Protected devices are locked in the grid and link to
+  **Rules for all agents**.
+* **The old Allowances overview becomes two places.** Its per-agent permission
+  blocks become each agent's Overview. Its cross-agent material — paused
+  permissions, limits, never allowed and protected devices — becomes the
+  Agents-tab banner and the **Rules for all agents** tab. Nothing is lost; the
+  operator no longer has a separate page that duplicates one agent's page.
+
+**Agents tab.** A card grid, three across at 1440 and one at 390. A card is
 name, status, last used, then four plain rows: runs without asking, asks you
-first, SSH, Websites. No chips and no raw counts alone. “New agent” is a
-card-shaped button at the start, so it is in the same place as the thing it
-creates. The empty space in the old full-width rows is gone.
+first, SSH, Websites. No chips and no raw counts alone. “New agent” is a normal
+button at the start of the grid. The paused banner sits above the grid and
+appears only when something is suspended, with the reason in words.
+
+**Rules for all agents tab.** Three collapsed sections, in this order:
+protected devices (the device picker with a Protect toggle and the lock already
+seen in the grid), limits for all agents (the existing risk sentences and save
+confirmation), and never allowed (read-only reference, except adding a word).
+This is the destination for the banner and for the grid's protected links.
 
 **Agent page.** Two columns at desktop, one at mobile. The left column is
-sticky: agent name, status, token menu and a section list (Overview, Home
-Assistant, Other tools, SSH, Websites, Activity). These are anchors, not
-tabs; every section is on the same page. The right column is the content. The
-save bar sits at the bottom and only appears with changes; the mock shows the
-“3 changes” state on the preview screen.
+sticky: agent name, status, token menu and the section anchors above. The right
+column is the content. One save bar sits at the bottom and only appears with
+changes. The old four Save buttons, the “Back to agents” repeats and the Web
+fetch agent dropdown are gone.
 
-**Home Assistant section.** Header is the sentence “Runs without asking”, not
-a caps eyebrow. The device grid is the memorable element: grouped by area,
-name first, area and type in muted mono underneath, current state, then one
-checkbox per action. Settings and diagnostic entities are hidden behind
-“Show settings entities”. Two protected devices show a lock and “Protected”
-in place of the action toggles. The label alternative and the rate/window
-limits sit in the editor, not in the reading view. A ninth device is just
-another row.
+**Home Assistant in Tools.** The `call_service` row says “Asks you first” by
+default. Choosing “Runs without asking” opens the editor inline in that row.
+The device grid is the memorable element: grouped by real HA area (not by the
+mock's invented grouping), name first, area and type in muted mono underneath,
+current state, then one checkbox per action. Settings and diagnostic entities
+are hidden behind “Show settings entities”. Protected rows show a lock,
+“Protected: no agent can be given this”, and a link to Rules for all agents.
+The label alternative and the rate/window limits sit in the editor. This is
+where a ninth device is just another row.
 
-**Editor.** Opens inline in the section, not in a modal. Search, type filter
-chips, “Follow a Home Assistant label”, the same device grid, the per-
-permission limit sentence (“At most 30 times an hour, only between 07:00 and
-23:00”), and one “Preview changes” action. Protected rows stay locked.
+**Editor.** Search, type filter chips, and a per-action choice — **Pick
+devices** or **Follow a Home Assistant label**. Picking devices leaves the
+device column editable. Following a label makes that column read-only, shows
+the label's devices greyed, and says “Add or remove the label in Home
+Assistant; new devices wait for your review here”. The per-permission limits
+are “At most [30] times an hour” and “Only between [07:00] and [23:00]”; both
+default to 30 per hour and any time. One counting rule feeds the section, the
+preview and the Overview. The legend dot is fixed and “New agent” is a normal
+button, not a card-shaped control.
 
 **Save preview.** Saving first shows a plain sentence — “household-agent will
-be able to turn off 6 plugs and turn on 5. Removed: Office heater (turn
-on).” — and the resulting grid. Nothing has changed yet. The bar says
-“3 changes”, then Discard and Save changes.
+be able to turn off 7 plugs and turn on 5. Removed: Garage plug (turn on).” —
+and the resulting grid. Nothing has changed yet. The bar says “3 changes”,
+then Discard and Save changes. The same words are returned by the API preview
+used below.
 
-**“Runs without asking” overview.** Suspended permissions come first, with
-the reason in words and Review. Then one block per agent, each permission
-written as “Turn off: <names> (7)” with Edit and Revoke. “Limits for all
-agents” and “Never allowed” are collapsed at the bottom, followed by the
-protected-devices section. This puts the live permissions above the
-reference material, which is the opposite of the current page.
+**Copy from another agent.** Pasting one agent's JSON into another is the
+replacement for profile templates. The preview names the target agent and the
+devices, tools, SSH hosts and websites that will change for it.
 
-**Copy and shell.** Page titles keep the app's Instrument Serif; body and
-controls keep Space Grotesk and JetBrains Mono where the app already uses
-them. The starfield, amber chrome and dark surfaces are unchanged. Section
-headings are sentence case; the only caps left are the existing sidebar
-group labels, which belong to the shell. Websites use neutral examples
-(`docs.example.com`, `example.org`, `status.example.net`); the real
-placeholder in `index.html` is changed to the same examples, so no public
-repo page carries the operator's context.
+### B. JSON for everything, per agent
 
-**Screenshots.** Six states at 1440 and 390:
+* **One document holds the whole agent configuration:** tools, argument rules,
+  approval modes, rate limit, SSH, websites, and the agent's Home Assistant
+  permissions (allowances, including label-followed ones, their rate and
+  window). It never contains the agent token, an integration secret or any
+  other secret.
+* **Every section has a “Show JSON” toggle** showing that part's current JSON.
+  The **JSON** section shows and edits the whole document. It carries a
+  `schema_version` field.
+* **Check and Apply.** Check returns exactly the plain-words preview the GUI
+  shows. Apply saves. It is all-or-nothing in one transaction. A stale
+  `version` (the agent changed since the document was loaded) is refused with
+  **409**.
+* **The same validation as the GUI.** JSON is checked against protected
+  devices, the limits, never-allowed, the risk confirmation (the preview lists
+  the risky items and Apply needs an explicit `risk_ack`), and the X4 rule: a
+  field absent from a partial document keeps its stored value.
+* **Pasting one agent's JSON into another is “copy from another agent”.** The
+  preview names the target agent and what will change for it.
+
+### C. The six review fixes (Stage 3)
+
+These are Stage 3 work; they are recorded here so the approved look and the
+final UI cannot drift.
+
+1. **The real shell and look** — starfield, navy header, serif titles, the full
+   sidebar and device names in the body font. The mock is a guide, not a
+   replacement shell.
+2. **Rows grouped by their real area**, from the live HA registries.
+3. **Per action, a clear choice:** “Pick devices” or “Follow a Home Assistant
+   label”; choosing a label makes that column read-only.
+4. **Defaults:** time window “any time”; rate 30 per hour.
+5. **One counting rule everywhere**, so the section, preview and Overview agree.
+6. **Fix the legend dot**, and make “New agent” a normal button.
+
+**Screenshots.** Six states at 1440 and 390, unchanged in name:
 
 * `docs/screenshots/x11/agents-1440.png` / `agents-390.png`
 * `docs/screenshots/x11/agent-1440.png` / `agent-390.png`
@@ -22252,13 +22346,12 @@ repo page carries the operator's context.
 * `docs/screenshots/x11/agent-save-preview-1440.png` / `agent-save-preview-390.png`
 * `docs/screenshots/x11/runs-without-asking-1440.png` / `runs-without-asking-390.png`
 
-**Look questions for the operator.** (1) Is the agent card’s four-row summary
-enough, or should the Home Assistant row name the two or three busiest
-devices? (2) Is the save preview better as the inline card shown, or as a
-confirmation dialog? (3) Should protected devices stay on the overview page
-or move behind “Limits for all agents”? The mock keeps them visible because
-protection is a promise, not a limit. Nothing moves to code until the look
-is approved.
+The last pair is relabelled **Rules for all agents** in the Stage 3 shell; it
+keeps its filename so the Stage 1 record stays comparable.
+
+**Look questions — answered.** The operator approved the card summary, the
+inline save preview, and protected devices staying visible in the grid; the
+sections above absorb those answers.
 
 ### Implementer notes
 
@@ -22287,7 +22380,7 @@ is approved.
 | 27 | X8 | gateway-installer-version | dashboard + gateway | **Code complete** 2026-11-14: on `release/1.4-gw` (BR1 folded; the hash is display-only) | `feat/x8-gateway-installer-version` | X7 | security approved; five buckets sum to the gateway count |
 | 28 | X9 | gated-gateway-files | dashboard + gateway | **Design note** 2026-11-14 (BP2): installer-carried vs authenticated channel files; recommends (b) | `feat/x9-gated-gateway-files` | X7, 1.4 | security sign-off before code |
 | 29 | X10 | approved-windows-modal | dashboard UI | **Merged** 2026-11-17: presets, Once default, typed local HH:MM + duration, live plain-words preview; agent requests use the same preview; not yet deployed | `feat/x10-windows-modal` | — | UI only; no schema or window-meaning change |
-| 31 | X11 | agents-allowances-redesign | dashboard UI + small API | **Design** 2026-11-17: static mock and 12 screenshots at 1440/390; operator approval of the look pending | `feat/x11-agents-allowances` | F27, X4, fix/f27-ha-by-kind | operator approves the mock; security reads S1–S4 (device list, one-go permissions, protected devices, CB1) |
+| 31 | X11 | agents-allowances-redesign | dashboard UI + small API | **Stage 2** 2026-11-18: operator approved the look with the Agents-tab IA and per-agent JSON (S5); design note updated, S1–S5 next | `feat/x11-agents-allowances` | F27, X4, fix/f27-ha-by-kind | security reads S1–S5 (device list, one-go permissions, protected devices, CB1, JSON config); Stage 3 applies section C |
 | — | CI fix | ci-environment | gateway + tests | Merged (`f2746ef`); CI pinned to ubuntu-24.04 (`6d58006`) | `fix/ci-environment` | F5 | |
 | — | Buffering | stream-unbuffered | gateway | Merged (`d8d70c2`); S1 tee fix done in Gateway hardening | `fix/stream-unbuffered` | F5 | |
 | — | Gateway hardening | gateway-hardening | gateway | **Merged** 2026-11-12 (AF3 + S1 tee capture; security `c15664e`; AX1/AX2 residuals; BA1 for the next F5/F19 change) | `fix/gateway-hardening` | F19, Buffering | |
