@@ -48,7 +48,7 @@ def _check_keys(value, allowed, where):
     extra = sorted(set(value) - set(allowed))
     if extra:
         _error(400, '%s has an unknown field: %s' % (where, ', '.join(extra)),
-               'unknown_field', fields=extra)
+               'unknown_field', fields=extra, field=where)
 
 
 def _version_row(conn, agent_id):
@@ -745,12 +745,21 @@ def _summary_sections(agent_name, policy_info, web_info, ha_diff,
         ssh = policy_info['ssh']
         bits = []
         if tools.get('changed'):
-            bits.append('tools %s with %d allowed'
-                        % (tools['mode'], len(tools['allow'])))
+            if tools['mode'] == 'all':
+                bits.append('all tools')
+            else:
+                bits.append('%d chosen tool%s'
+                            % (len(tools['allow']),
+                               '' if len(tools['allow']) == 1 else 's'))
         if ssh.get('changed'):
             hosts = len(ssh['hosts'])
-            bits.append('SSH %s on %d host%s'
-                        % (ssh['mode'], hosts, '' if hosts == 1 else 's'))
+            if not hosts:
+                bits.append('SSH off')
+            elif '*' in ssh['hosts']:
+                bits.append('SSH on any gateway')
+            else:
+                bits.append('SSH on %d host%s'
+                            % (hosts, '' if hosts == 1 else 's'))
         if bits:
             changed.append({'section': 'tools', 'summary': '; '.join(bits)})
     if web_info and web_info.get('changed'):

@@ -24,6 +24,7 @@
 <link rel="preload" href="/static/fonts/jetbrains-mono-var-latin.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="/static/fonts.css?v=2">
 <link rel="stylesheet" href="/static/style.css?v=ui18">
+<link rel="stylesheet" href="/static/x11.css?v=1">
 
 </head>
 <body>
@@ -113,7 +114,6 @@
     <button class="nav-item" id="nav-inventory" onclick="switchView('inventory')"><span>Inventory</span></button>
     <button class="nav-item" id="nav-runbooks" onclick="switchView('runbooks')"><span>Runbooks</span></button>
     <button class="nav-item" id="nav-agents" onclick="switchView('agents')"><span>Agents</span></button>
-    <button class="nav-item" id="nav-allowances" onclick="switchView('allowances')"><span>Allowances</span></button>
     <button class="nav-item" id="nav-controls" onclick="switchView('controls')"><span>Command policy</span></button>
     <button class="nav-item" id="nav-settings" onclick="switchView('settings')"><span>Settings</span></button>
     <button class="nav-item" id="nav-logs" onclick="switchView('logs')"><span>Logs</span></button>
@@ -586,252 +586,7 @@
 
     <!-- AGENTS VIEW — one place per agent (X4) -->
     <div id="view-agents" class="hidden w-full" data-ink="section">
-      <div class="hud" data-od-id="agents-hud">
-        <div class="hud-txt"><b>The agents</b><span class="hud-sub">who may cross, and what they may carry</span></div>
-        <div class="hud-right"><span class="hud-sum" id="agents-hud-sum"><span><span class="n">&mdash;</span> tokens</span></span></div>
-      </div>
-
-      <div id="agents-list-view">
-        <div class="widget" data-od-id="agent-tokens">
-          <div class="widget-header">Agent tokens <span class="text-xs text-muted">one row per token</span></div>
-          <p class="text-xs mb-3 text-muted">Long-lived bearer tokens your agents present to the MCP endpoint (<code>/mcp</code>). Shown once on creation; only the hash is stored. One row per token: open it for tools, rules, SSH, web fetch and activity.</p>
-          <div class="flex gap-2 mb-1">
-            <input type="text" id="agent-token-name" placeholder="Agent name (e.g. hermes)" class="flex-1 text-xs" onkeydown="if(event.key==='Enter')createAgentToken()">
-            <button onclick="createAgentToken()" class="btn btn-sm">Create Token</button>
-          </div>
-          <p class="text-xs text-muted mb-3">When configuring your client, paste the <strong>raw token</strong> — clients like Hermes add the <code>Bearer </code> prefix themselves (adding it yourself causes 401s).</p>
-          <div id="agent-token-result" class="hidden mb-3 p-2 rounded bg-green-900/20 border border-green-700/40 text-xs break-all"></div>
-          <div id="agent-token-list" class="space-y-2"><p class="text-muted">Loading...</p></div>
-        </div>
-      </div>
-
-      <div id="agent-detail" class="hidden">
-        <div class="widget" data-od-id="agent-summary">
-          <div class="widget-header">
-            <span>Agent <span class="text-main" id="agent-detail-name">&mdash;</span></span>
-            <button onclick="backToAgents()" class="btn btn-muted btn-xs">Back to agents</button>
-          </div>
-          <div class="text-xs text-muted" id="agent-detail-meta"></div>
-          <div class="flex flex-wrap gap-2 mt-3" id="agent-detail-actions"></div>
-        </div>
-
-        <div class="widget" data-od-id="agent-test-agent">
-          <div class="widget-header">Test agent <span class="text-xs text-muted">operator-only switch</span></div>
-          <p class="text-xs mb-2 text-muted">A test agent may only use HA reads and <code>call_service</code>, with exactly one SSH IP. Approver tokens can decide only its <code>E2E:</code> rows.</p>
-          <label class="flex items-center gap-2 cursor-pointer select-none text-xs">
-            <input type="checkbox" id="agent-test-toggle" onchange="toggleTestAgent()">
-            <span>This agent is a test agent</span>
-          </label>
-          <p class="text-xs mt-1 text-muted" id="agent-test-hint"></p>
-        </div>
-
-        <div class="widget" data-od-id="agent-approver-tokens">
-          <div class="widget-header">Approver tokens <span class="text-xs text-muted">E2E only</span></div>
-          <p class="text-xs mb-2 text-muted">Mint one scoped token for the E2E suite. It is shown once, stored hashed, expires after at most 30 days, and may approve only the exact commands you list on the gateway below.</p>
-          <div class="grid gap-2" style="grid-template-columns: minmax(0, 1fr);">
-            <label class="text-xs text-muted">Exact commands (one per line)
-              <textarea id="approver-commands" class="w-full mt-1" rows="4" placeholder="hostname&#10;id -un&#10;cat /etc/hostname"></textarea>
-            </label>
-            <div class="flex gap-2 flex-wrap">
-              <label class="text-xs text-muted flex-1" style="min-width:150px;">Test gateway IP
-                <input id="approver-gateway" class="w-full mt-1" placeholder="192.0.2.10">
-              </label>
-              <label class="text-xs text-muted" style="width:7rem;">Days
-                <input id="approver-days" type="number" min="1" max="30" value="30" class="w-full mt-1">
-              </label>
-            </div>
-            <button onclick="mintApproverToken()" class="btn btn-sm w-full">Mint approver token</button>
-          </div>
-          <div id="approver-token-result" class="hidden mt-2 p-2 rounded text-xs break-all" style="background:var(--bg-surface);border:1px solid var(--rule-weak);"></div>
-          <div id="approver-token-list" class="mt-3 space-y-2"><p class="text-xs text-muted">Loading&hellip;</p></div>
-        </div>
-
-        <div class="widget" data-od-id="agent-policy-editor">
-  <div class="pol-card pol-card-paged" role="region" aria-labelledby="agent-policy-title" tabindex="-1">
-    <div class="pol-head">
-      <div class="pol-heading">
-        <div class="pol-kicker">Agent policy</div>
-        <h2 class="pol-title" id="agent-policy-title">Agent</h2>
-        <p class="pol-lede">What this token may call. Deny is the default, and every refusal is recorded.</p>
-      </div>
-    </div>
-
-    <div class="pol-rail" role="tablist" aria-label="Policy sections">
-      <button class="pol-tab active" id="pol-tab-tools" role="tab" aria-selected="true" onclick="setAgentPolicyTab('tools')">
-        <span class="pol-tab-l">Tools</span><span class="pol-tab-n" id="pol-tab-tools-n">&mdash;</span>
-      </button>
-      <button class="pol-tab" id="pol-tab-rules" role="tab" aria-selected="false" onclick="setAgentPolicyTab('rules')">
-        <span class="pol-tab-l">Rules</span><span class="pol-tab-n">Arguments</span>
-      </button>
-      <button class="pol-tab" id="pol-tab-ssh" role="tab" aria-selected="false" onclick="setAgentPolicyTab('ssh')">
-        <span class="pol-tab-l">SSH</span><span class="pol-tab-n" id="pol-tab-ssh-n">&mdash;</span>
-      </button>
-      <button class="pol-tab" id="pol-tab-advanced" role="tab" aria-selected="false" onclick="setAgentPolicyTab('advanced')">
-        <span class="pol-tab-l">Advanced</span><span class="pol-tab-n">JSON</span>
-      </button>
-    </div>
-
-    <div class="pol-body">
-      <section class="pol-pane" id="pol-pane-tools" role="tabpanel" aria-labelledby="pol-tab-tools">
-        <div class="pol-modes">
-          <button class="pol-mode" data-mode="all" onclick="setAgentToolsMode('all')" aria-pressed="false">
-            <span class="pol-mode-dot"></span>
-            <span class="pol-mode-name">All tools</span>
-            <span class="pol-mode-sub" id="pol-mode-all-sub">Everything the enabled integrations expose.</span>
-          </button>
-          <button class="pol-mode" data-mode="allowlist" onclick="setAgentToolsMode('allowlist')" aria-pressed="false">
-            <span class="pol-mode-dot"></span>
-            <span class="pol-mode-name">Allowlist</span>
-            <span class="pol-mode-sub">Only the tools you pick below.</span>
-          </button>
-        </div>
-
-        <p class="pol-note hidden" id="pol-all-note">Nothing to pick — this token can call every tool. Choose <b>Allowlist</b> to narrow it.</p>
-        <div class="pol-catalog hidden" id="pol-catalog"></div>
-
-        <div id="pol-tools-pane">
-          <div class="pol-tools-head">
-            <span class="pol-count" id="pol-tools-count">&mdash;</span>
-            <div class="pol-tools-actions">
-              <button onclick="agentPolicySelectAll(true)" class="pol-mini" id="pol-select-all-btn">Select all</button>
-              <button onclick="agentPolicySelectAll(false)" class="pol-mini" id="pol-clear-btn">Clear</button>
-            </div>
-          </div>
-          <input id="pol-tool-filter" class="pol-input pol-filter" placeholder="Filter tools&hellip;" oninput="agentPolicyFilter(this.value)" autocomplete="off" spellcheck="false">
-          <div class="pol-legend">
-            <span class="pol-lgroup"><span class="pol-rdot"></span> read, runs immediately</span>
-            <span class="pol-lgroup"><span class="pol-wdot"></span> write, waits for approval</span>
-          </div>
-          <div id="agent-policy-tools" class="pol-groups"><p class="pol-hint">Loading&hellip;</p></div>
-        </div>
-        <div class="pol-save-row">
-          <span class="pol-hint">Saves the tool selection only.</span>
-          <button onclick="saveAgentSection('tools')" class="btn btn-sm">Save tools</button>
-        </div>
-      </section>
-
-      <section class="pol-pane hidden" id="pol-pane-rules" role="tabpanel" aria-labelledby="pol-tab-rules">
-        <div class="pol-group-label">Home Assistant &middot; <code>call_service</code></div>
-        <div class="pol-grid">
-          <label class="pol-field">
-            <span class="pol-field-l">Allowed domains</span>
-            <input id="agent-ha-domain-allow" class="pol-input" placeholder="light, switch, climate, scene" spellcheck="false">
-          </label>
-          <label class="pol-field">
-            <span class="pol-field-l">Denied domains</span>
-            <input id="agent-ha-domain-deny" class="pol-input" placeholder="homeassistant, hassio, shell_command" spellcheck="false">
-            <span class="pol-hint">A denied domain always wins.</span>
-          </label>
-          <label class="pol-field">
-            <span class="pol-field-l">Denied services</span>
-            <input id="agent-ha-service-deny" class="pol-input" placeholder="reload, restart, stop" spellcheck="false">
-          </label>
-          <div class="pol-field">
-            <span class="pol-field-l">Approval for <code>call_service</code></span>
-            <div class="pol-seg" id="agent-ha-approval-seg">
-              <button type="button" data-val="inherit" onclick="setAgentHaApproval('inherit')">Inherit</button>
-              <button type="button" data-val="ungated" onclick="setAgentHaApproval('ungated')">Ungated</button>
-              <button type="button" data-val="gated" onclick="setAgentHaApproval('gated')">Always approve</button>
-            </div>
-            <input type="hidden" id="agent-ha-approval" value="inherit">
-            <span class="pol-hint">Ungated runs without a JIT row; the argument rules above still apply.</span>
-          </div>
-        </div>
-
-        <div class="pol-group-label">Limits</div>
-        <label class="pol-field pol-field-sm">
-          <span class="pol-field-l">Rate limit</span>
-          <span class="pol-inline">
-            <input id="agent-rate-limit" type="number" min="0" class="pol-input" value="0">
-            <span class="pol-unit">calls per minute</span>
-          </span>
-          <span class="pol-hint">0 means unlimited. Refusals are audited either way.</span>
-        </label>
-        <div class="pol-save-row">
-          <span class="pol-hint">Saves the argument rules, approval and rate limit only.</span>
-          <button onclick="saveAgentSection('rules')" class="btn btn-sm">Save rules</button>
-        </div>
-      </section>
-
-      <section class="pol-pane hidden" id="pol-pane-ssh" role="tabpanel" aria-labelledby="pol-tab-ssh">
-        <div class="pol-group-label">SSH through Eshu &middot; <code>ssh_exec</code> and probes</div>
-        <p class="pol-hint">Which gateways this agent may run commands on with <code>ssh_exec</code> and the health-check probes. None ticked means no SSH through Eshu at all. The gateway's own policy (freeze, blocklist, allowlist, JIT) still applies on top. The agent's own SSH key, if it has one, is not affected by this.</p>
-        <div class="pol-field">
-          <span class="pol-field-l">Mode</span>
-          <div class="pol-seg" id="agent-ssh-mode-seg">
-            <button type="button" data-val="read_only" onclick="setAgentSshMode('read_only')">Read only</button>
-            <button type="button" data-val="approval" onclick="setAgentSshMode('approval')">Always approve</button>
-            <button type="button" data-val="normal" onclick="setAgentSshMode('normal')">Gateway policy</button>
-          </div>
-          <span class="pol-hint" id="agent-ssh-mode-hint"></span>
-        </div>
-        <div class="pol-group-label">Gateways</div>
-        <label class="pol-check pol-check-any">
-          <input type="checkbox" id="agent-ssh-any" onchange="toggleAgentSshAny(this.checked)">
-          <span>Any registered gateway <code>*</code></span>
-        </label>
-        <div id="agent-ssh-any-confirm" class="pol-confirm hidden" role="alertdialog" aria-labelledby="agent-ssh-any-q">
-          <p id="agent-ssh-any-q"><strong>Allow this agent on any gateway?</strong> <code>*</code> is not just the gateways listed here: it also covers every gateway enrolled later. In <em>Gateway policy</em> mode, allowlisted commands then run on all of them without a card.</p>
-          <span class="pol-inline">
-            <button type="button" class="btn btn-sm btn-deny" onclick="confirmAgentSshAny(true)">Allow any gateway</button>
-            <button type="button" class="btn btn-sm btn-muted" onclick="confirmAgentSshAny(false)">Cancel</button>
-          </span>
-        </div>
-        <div id="agent-ssh-hosts" class="pol-checks"></div>
-        <div id="agent-ssh-extra" class="pol-hint"></div>
-        <div class="pol-save-row">
-          <span class="pol-hint">Saves the SSH hosts and mode only.</span>
-          <button onclick="saveAgentSection('ssh')" class="btn btn-sm">Save SSH</button>
-        </div>
-      </section>
-
-      <section class="pol-pane hidden" id="pol-pane-advanced" role="tabpanel" aria-labelledby="pol-tab-advanced">
-        <div class="pol-group-label">Argument policy &amp; approval, per tool</div>
-        <textarea id="agent-policy-json" class="pol-code" rows="14" spellcheck="false"></textarea>
-        <p class="pol-hint">Keys are namespaced MCP tool names, for example <code>home_assistant_call_service</code>. The Rules tab rewrites that entry on save; everything else is kept as written here.</p>
-        <div class="pol-save-row">
-          <span class="pol-hint">Saves the argument policy and approval JSON only.</span>
-          <button onclick="saveAgentSection('advanced')" class="btn btn-sm">Save advanced</button>
-        </div>
-      </section>
-    </div>
-
-    <div class="pol-foot">
-      <span class="pol-foot-note" id="pol-foot-note">Changes apply to new calls only.</span>
-      <span class="pol-spacer"></span>
-      <span class="text-xs text-muted">Each section saves on its own; the others are left exactly as they are.</span>
-      <button onclick="backToAgents()" class="btn btn-muted btn-sm">Back to agents</button>
-    </div>
-  </div>
-        </div>
-
-      <div class="widget mt-5" id="wf-policy-widget">
-        <div class="widget-header">Web Fetch Allowlist</div>
-        <p class="text-xs mb-3 text-muted">Per-agent allowlist for <code>web_fetch_url</code>. <strong>Everything not listed is blocked</strong>; an empty allowlist denies every fetch. Domains only — no wildcards, paths, ports, userinfo, or IP literals. Saving an enabled policy also grants <code>web_fetch_url</code> to this agent.</p>
-        <div class="flex flex-wrap gap-2 mb-2 items-center">
-          <label class="text-xs text-muted">Agent token:</label>
-          <select id="wf-principal" class="flex-1 text-xs" onchange="loadWebFetchPolicy()"></select>
-          <button onclick="loadWebFetchPolicy()" class="btn btn-sm btn-muted">Reload</button>
-        </div>
-        <label class="flex items-center gap-2 cursor-pointer select-none text-xs text-muted mb-2">
-          <input type="checkbox" id="wf-enabled"> Enabled
-        </label>
-        <label class="block text-xs text-muted mb-1">Allowed domains (one per line)</label>
-        <textarea id="wf-allow" rows="5" class="w-full text-xs" placeholder="docs.example.com&#10;example.org&#10;status.example.net"></textarea>
-        <div class="flex flex-wrap items-center gap-2 mt-2">
-          <button onclick="saveWebFetchPolicy()" class="btn btn-sm">Save Policy</button>
-          <button onclick="deleteWebFetchPolicy(this)" class="btn btn-sm btn-muted">Delete</button>
-          <span id="wf-policy-status" class="text-xs text-muted"></span>
-        </div>
-        <div id="wf-stats" class="text-xs text-muted mt-2"></div>
-        <p class="text-xs text-muted mt-2">This is separate from the SSH command policy above; Save Policy applies immediately to MCP, not to gateway policy sync.</p>
-      </div>
-
-        <div class="widget" data-od-id="agent-activity">
-          <div class="widget-header">Activity <span class="text-xs text-muted">last 20 commands and calls</span></div>
-          <div id="agent-activity-body" class="text-xs"><p class="text-muted">Open an agent to see its activity.</p></div>
-        </div>
-      </div>
+      <div id="x11-root" aria-live="polite"></div>
     </div>
 
     <!-- CONTROLS VIEW — Policy -->
@@ -1235,69 +990,6 @@
     </div>
 
 
-    <div id="view-allowances" class="hidden w-full" data-ink="section">
-      <div class="hud" data-od-id="allowances-hud">
-        <div class="hud-txt"><b>The allowances</b><span class="hud-sub">pre-approvals inside the ceiling, and nothing else</span></div>
-        <div class="hud-right"><span class="hud-sum" id="allowances-hud-sum"><span><span class="n">&mdash;</span> live</span></span></div>
-      </div>
-
-      <div class="widget" data-od-id="ceiling-widget">
-        <div class="widget-header">What agents may ever be allowed to do <span class="text-xs text-muted">the ceiling</span></div>
-        <p class="text-xs mb-3 text-muted" id="allowances-copy">The ceiling is the outer limit: it lists, per integration and device type, the actions an agent may ever be allowed to take without a card. An allowance is one narrow pre-approval inside that ceiling — this agent, these exact entities and these exact actions, with its own rate, window and expiry. A call runs without a card only when it matches a live allowance and the ceiling still allows its type and action; everything else asks. The ceiling never approves anything by itself.</p>
-        <div id="ceiling-types" class="space-y-3"><p class="text-muted text-xs">Loading...</p></div>
-        <div class="flex flex-wrap gap-2 mt-3">
-          <button onclick="saveCeiling()" class="btn btn-sm">Save ceiling</button>
-          <span class="text-xs text-muted" id="ceiling-status"></span>
-        </div>
-        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4" id="ceiling-never"></div>
-        <div class="mt-4">
-          <label class="text-xs block mb-1 text-muted">Destructive words (built-ins are read-only; yours can be removed)</label>
-          <div id="ceiling-words" class="flex flex-wrap gap-1 mb-2"></div>
-          <div class="flex gap-2">
-            <input type="text" id="ceiling-word-input" placeholder="word (a-z0-9_, 3-32)" class="text-xs" style="width:16rem" maxlength="32">
-            <button onclick="addCeilingWord()" class="btn btn-xs">Add word</button>
-          </div>
-        </div>
-      </div>
-
-      <div class="widget" data-od-id="allowance-list">
-        <div class="widget-header">Allowances <span class="text-xs text-muted">exact pre-approvals</span></div>
-        <div id="allowance-list" class="space-y-2"><p class="text-muted text-xs">Loading...</p></div>
-      </div>
-
-      <div class="widget" data-od-id="allowance-new">
-        <div class="widget-header">New allowance</div>
-        <p class="text-xs text-muted mb-2">An allowance names one type, one action and the exact entities. Calls to anything else still ask.</p>
-        <div class="grid grid-cols-1 md:grid-cols-2 gap-2 text-xs">
-          <label>Agent <select id="allowance-agent" class="w-full"></select></label>
-          <label>Name <input type="text" id="allowance-name" placeholder="Living-room lamp" class="w-full"></label>
-          <label>Device type <select id="allowance-domain" class="w-full" onchange="fillAllowanceServices()"></select></label>
-          <label>Action <select id="allowance-service" class="w-full"></select></label>
-          <label class="md:col-span-2">Entities (comma separated) <input type="text" id="allowance-entities" placeholder="light.living_room, light.kitchen" class="w-full"></label>
-          <label>Rate per hour (0 = no cap) <input type="number" id="allowance-rate" value="0" min="0" max="1000" class="w-full"></label>
-          <label>Window (HH:MM-HH:MM, optional) <input type="text" id="allowance-window" placeholder="07:00-23:00" class="w-full"></label>
-        </div>
-        <div class="flex gap-2 mt-2"><button onclick="createAllowance()" class="btn btn-sm">Create allowance</button><span class="text-xs text-muted" id="allowance-status"></span></div>
-      </div>
-
-      <div class="widget" data-od-id="allowance-profiles">
-        <div class="widget-header">Profiles <span class="text-xs text-muted">reusable sets of templates</span></div>
-        <div id="allowance-profiles" class="space-y-2 mb-4"><p class="text-muted text-xs">Loading...</p></div>
-        <div class="divider-top mb-3"></div>
-        <label class="text-xs block mb-1 text-muted">New profile</label>
-        <div class="grid grid-cols-1 md:grid-cols-2 gap-2 text-xs mb-2">
-          <input type="text" id="profile-name" placeholder="Name (e.g. Household lights)" class="w-full">
-          <input type="text" id="profile-description" placeholder="Description (optional)" class="w-full">
-        </div>
-        <div id="profile-template-rows" class="space-y-2 mb-2"></div>
-        <div class="flex gap-2">
-          <button onclick="addProfileTemplate()" class="btn btn-muted btn-xs">Add template</button>
-          <button onclick="saveProfile()" class="btn btn-sm">Save profile</button>
-          <span class="text-xs text-muted" id="profile-status"></span>
-        </div>
-      </div>
-    </div>
-
     <!-- LOGS VIEW — Audit Log -->
     <div id="view-logs" class="hidden w-full" data-ink="section">
       <div class="hud" data-od-id="logs-hud">
@@ -1325,19 +1017,9 @@
   </div>
 </main>
 
-<div id="profile-diff-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center" style="background:rgba(0,0,0,0.6)">
-  <div class="widget" style="max-width:44rem;width:92%">
-    <div class="widget-header">Update agents <span class="text-xs text-muted">nothing changes until you confirm</span></div>
-    <div id="profile-diff-body" class="text-xs space-y-2"></div>
-    <div class="flex gap-2 mt-3">
-      <button onclick="applyPreviewedProfile()" class="btn btn-sm">Apply update</button>
-      <button onclick="closeProfileDiff()" class="btn btn-muted btn-sm">Cancel</button>
-    </div>
-  </div>
-</div>
-
 <script src="/static/state.js?v=ui4"></script>
 <script src="/static/app.js?v=ui34"></script>
+<script src="/static/x11.js?v=1"></script>
 
 <!-- Create / Edit Approved Window Modal -->
 <div id="create-window-modal" class="modal-overlay hidden">
