@@ -853,8 +853,8 @@ class Runner:
         expect(code == 0, 'the first window run failed')
         code2, _out2, _err2 = self.window_runner.run(token, WINDOW_COMMAND)
         expect(code2 != 0, 'the exhausted window ran a second time')
-        status, lookup = self.operator.public_get(
-            '/api/window-by-token/%s' % urllib.parse.quote(token))
+        status, lookup = self.operator.public_http.request(
+            'POST', '/api/window-by-token', {'token': token})
         expect(status == 200, 'the window lookup failed')
         expect(int(lookup.get('execution_count') or 0) == 1,
                'the window did not record exactly one execution')

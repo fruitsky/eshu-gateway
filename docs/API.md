@@ -26,7 +26,8 @@ only the dashboard UI after login.
 | `GET` | `/api/request_status/{id}` | Check JIT request status | Gateway |
 | `GET` | `/api/gateway-script` | Raw golden installer (UTF-8) | Public |
 | `GET` | `/api/gateway-script-rollback` | Previous golden installer (for rollback) | Public |
-| `POST` | `/api/approved-windows/execute/{token}` | Increment usage on a valid window token (called by gateway) | Gateway |
+| `POST` | `/api/approved-windows/execute` | Increment usage on a valid window token in the JSON body (`{"window_token": "..."}`; called by gateway) | Gateway |
+| `POST` | `/api/window-by-token` | Full window parameters for an existing token in the JSON body (`{"token": "..."}`); the token is not echoed | Public |
 | `POST` | `/api/uninstall-started/{ip}` | Poller confirmation that the transient uninstall service launched (clears the re-spawn trigger) | Gateway |
 | `POST` | `/api/uninstall-progress` | Progress updates from the uninstall service | Gateway |
 | `GET` | `/api/docs/agent-windows` | Alias for the AI agent manual | Public |
@@ -49,7 +50,8 @@ only the dashboard UI after login.
 | `PUT` | `/api/approved-windows/{id}` | Update a window | Session |
 | `DELETE` | `/api/approved-windows/{id}` | Delete a window | Session |
 | `POST` | `/api/approved-windows/{id}/toggle` | Enable/disable a window | Session |
-| `GET` | `/api/window-by-token/{token}` | Full window parameters for an existing token (for scheduling) | Token-in-path |
+| `GET` | `/api/window-by-token/{token}` | **Retired** — 410 Gone; use `POST /api/window-by-token` | — |
+| `POST` | `/api/approved-windows/execute/{token}` | **Retired** — 410 Gone; use the body form | — |
 
 ## Dashboard Endpoints (authentication required)
 

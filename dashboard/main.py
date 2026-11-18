@@ -3,6 +3,7 @@ import hashlib
 import hmac
 import ipaddress
 import json
+import logging
 import os
 import re
 import secrets
@@ -351,6 +352,54 @@ def _is_dev_mode() -> bool:
     except Exception:
         pass
     return False
+
+
+# ── Access-log masking for retired window-token routes ──────────────────
+#
+# The token used to be part of the path. Uvicorn's access log formats the
+# request line before a handler runs, so a 410 can still leave the token in
+# the log. This filter masks the token (and a token query value) before the
+# line is formatted; the handler audit rows carry only its fingerprint.
+_ACCESS_TOKEN_PATH_RE = re.compile(
+    r'(/api/(?:window-by-token|approved-windows/execute))/[^/?#\s]+')
+_ACCESS_TOKEN_QUERY_RE = re.compile(
+    r'(?i)([?&](?:token|window_token)=)[^&\s]+')
+
+
+def _mask_window_token_path(path):
+    """Mask a window token in a path or request line, keeping the route."""
+    if not isinstance(path, str):
+        return path
+    path = _ACCESS_TOKEN_PATH_RE.sub(r'\1/<redacted>', path)
+    return _ACCESS_TOKEN_QUERY_RE.sub(r'\1<redacted>', path)
+
+
+class _WindowTokenAccessFilter(logging.Filter):
+    def filter(self, record):
+        args = record.args
+        if isinstance(args, tuple) and len(args) >= 3:
+            args = list(args)
+            args[2] = _mask_window_token_path(args[2])
+            record.args = tuple(args)
+        elif isinstance(args, dict):
+            for key in ('path', 'request_line'):
+                if key in args:
+                    args[key] = _mask_window_token_path(args[key])
+        return True
+
+
+_ACCESS_FILTER_INSTALLED = False
+
+
+def _install_access_log_mask():
+    global _ACCESS_FILTER_INSTALLED
+    if _ACCESS_FILTER_INSTALLED:
+        return
+    logging.getLogger('uvicorn.access').addFilter(_WindowTokenAccessFilter())
+    _ACCESS_FILTER_INSTALLED = True
+
+
+_install_access_log_mask()
 
 
 app = FastAPI(
@@ -3753,6 +3802,10 @@ class WindowClaimPayload(BaseModel):
     window_token: str = ''
 
 
+class WindowLookupPayload(BaseModel):
+    token: str = ''
+
+
 @app.post("/api/approved-windows/execute")
 def window_execute_body(payload: WindowClaimPayload, request: Request):
     """Window claim with the token in the body (BJ2). Same rules as below."""
@@ -3760,13 +3813,18 @@ def window_execute_body(payload: WindowClaimPayload, request: Request):
 
 
 @app.post("/api/approved-windows/execute/{token}")
-def window_execute(token: str, request: Request):
-    """Called by the gateway to increment execution count when a window token is used.
-    Returns 200 if the token is valid and within its window, 404 otherwise.
-    Logs the claim as a request row for visibility in the main queue.
-
-    Kept for gateways installed before BJ2's body-token change."""
-    return _window_execute(token, request)
+def window_execute_retired(token: str, request: Request):
+    """410 for the pre-BJ2 path form. It is not a silent alias."""
+    record_audit_event(
+        "window_token_route_retired", None,
+        details=("POST /api/approved-windows/execute/<token> refused; "
+                 "token_fp=%s; use POST /api/approved-windows/execute "
+                 "with a JSON body" % window_token_fingerprint(token)))
+    raise HTTPException(
+        status_code=410,
+        detail=("The window token is no longer accepted in the URL path. "
+                "Use POST /api/approved-windows/execute with "
+                '{"window_token": "<token>"} in the JSON body.'))
 
 
 def _window_execute(token: str, request: Request):
@@ -3795,23 +3853,35 @@ def _window_execute(token: str, request: Request):
                        status='window-approved', ttl=0,
                        inner_target=_inner_target_for(target['command']))
         record_audit_event("window_claimed", target['target_ip'],
-                           details=f"Token token_fp={window_token_fingerprint(token)} claimed for '{target['command'][:60]}'")
+                           details=("Window claimed token_fp=%s for '%s'"
+                                    % (window_token_fingerprint(token),
+                                       target['command'][:60])))
         record_window_execution(target['id'], token, target['target_ip'], target['command'])
-    return {"status": "ok", "token": token}
+    return {"status": "ok"}
 
-@app.get("/api/approved-windows/recent-jit")
-def recent_jit(request: Request, hours: int = 6, ip: str = None):
-    _check_session(request)
-    """Get recently JIT-approved commands for the window creation wizard.
-    Optional ?ip= filter to show only commands for a specific gateway."""
-    return get_recent_jit_approved(hours, ip=ip)
+
+@app.post("/api/window-by-token")
+def lookup_window_by_token_body(payload: WindowLookupPayload, request: Request):
+    """Public read with the token in the body; no token is echoed back."""
+    return _lookup_window_by_token(payload.token, request)
 
 
 @app.get("/api/window-by-token/{token}")
-def lookup_window_by_token(token: str, request: Request):
-    """Public — token is the auth. Returns full window parameters for
-    operator-created windows so the AI agent can configure cron/scheduling
-    without having to be told the parameters separately."""
+def lookup_window_by_token_retired(token: str, request: Request):
+    """410 for the old GET path. The token never enters the response."""
+    record_audit_event(
+        "window_lookup_route_retired", None,
+        details=("GET /api/window-by-token/<token> refused; token_fp=%s; "
+                 "use POST /api/window-by-token with a JSON body"
+                 % window_token_fingerprint(token)))
+    raise HTTPException(
+        status_code=410,
+        detail=("The window token is no longer accepted in the URL path. "
+                "Use POST /api/window-by-token with "
+                '{"token": "<token>"} in the JSON body.'))
+
+
+def _lookup_window_by_token(token: str, request: Request):
     client_ip = request.client.host if request.client else "127.0.0.1"
     _check_rate_limit(client_ip)
     wins = get_approved_windows()
@@ -3819,7 +3889,6 @@ def lookup_window_by_token(token: str, request: Request):
     if not target:
         raise HTTPException(status_code=404, detail="Invalid window token")
     return {
-        "token": token,
         "command": target['command'],
         "target_ip": target['target_ip'],
         "match_type": target.get('match_type', 'exact'),
@@ -3835,6 +3904,14 @@ def lookup_window_by_token(token: str, request: Request):
         "status": target.get('status', 'active'),
         "created_at": target.get('created_at', 0),
     }
+
+
+@app.get("/api/approved-windows/recent-jit")
+def recent_jit(request: Request, hours: int = 6, ip: str = None):
+    _check_session(request)
+    """Get recently JIT-approved commands for the window creation wizard.
+    Optional ?ip= filter to show only commands for a specific gateway."""
+    return get_recent_jit_approved(hours, ip=ip)
 
 
 # ── AI-Initiated Window Requests ────────────────────────────────────────
@@ -4102,11 +4179,22 @@ def list_window_executions(window_id: str, request: Request):
     _check_rate_limit(request.client.host if request.client else "127.0.0.1")
     authed = _check_session_optional(request)
     if window_id.isdigit() and authed:
-        return get_window_executions(int(window_id), limit=50)
+        return _public_window_executions(get_window_executions(int(window_id), limit=50))
     win = get_approved_window_by_key(window_id)
     if not win:
         raise HTTPException(status_code=404, detail="Window not found")
-    return get_window_executions(win['id'], limit=50)
+    return _public_window_executions(get_window_executions(win['id'], limit=50))
+
+
+def _public_window_executions(rows):
+    """No window secret in a response: replace the stored token with its fp."""
+    out = []
+    for row in rows or []:
+        row = dict(row)
+        token = row.pop('token', '')
+        row['token_fp'] = window_token_fingerprint(token)
+        out.append(row)
+    return out
 
 # ── Integrations & MCP (agent API gateway) ─────────────────────────────
 

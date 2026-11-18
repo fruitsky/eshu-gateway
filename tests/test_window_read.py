@@ -184,14 +184,17 @@ class TestAtomicWindowConsumption:
                                  json={"window_token": token},
                                  headers=gateway_headers)
         assert again.status_code == 404
-        # The path-token form still works for gateways installed before BJ2.
+        # The path-token form is retired with a 410 that names the body route.
         r2 = auth_client.post("/api/approved-windows", json={
             "target_ip": "10.0.0.1", "command": "date", "match_type": "exact",
             "window_start": now - 10, "window_end": now + 3600, "max_executions": 1
         })
         token2 = r2.json()["token"]
-        assert auth_client.post(f"/api/approved-windows/execute/{token2}",
-                                headers=gateway_headers).status_code == 200
+        old = auth_client.post(f"/api/approved-windows/execute/{token2}",
+                               headers=gateway_headers)
+        assert old.status_code == 410
+        assert token2 not in old.text
+        assert "/api/approved-windows/execute" in old.json()["detail"]
 
     def test_bj2_the_script_keeps_the_tokens_out_of_the_url_and_argv(self):
         src = _read_feature()
@@ -213,7 +216,9 @@ class TestAtomicWindowConsumption:
             "window_start": now - 10, "window_end": now + 3600, "max_executions": 1
         })
         token = r.json()["token"]
-        first = auth_client.post(f"/api/approved-windows/execute/{token}", headers=gateway_headers)
-        second = auth_client.post(f"/api/approved-windows/execute/{token}", headers=gateway_headers)
+        first = auth_client.post("/api/approved-windows/execute",
+                                 json={"window_token": token}, headers=gateway_headers)
+        second = auth_client.post("/api/approved-windows/execute",
+                                  json={"window_token": token}, headers=gateway_headers)
         assert first.status_code == 200
         assert second.status_code == 404
