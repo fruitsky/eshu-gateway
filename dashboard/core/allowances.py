@@ -488,6 +488,236 @@ class AllowanceError(ValueError):
         self.extra = extra or {}
 
 
+# ── S3: protected devices (operator-held, no agent may be granted one) ──────
+
+def _init_protected_table():
+    _init_allowance_tables()
+
+
+def protected_records(conn=None):
+    """The protected rows: entity id plus the registry id captured at protect."""
+    from db.core import db_conn
+    _init_protected_table()
+    sql = ('SELECT entity_id, registry_id, added_by, added_at '
+           'FROM allowance_protected ORDER BY entity_id')
+    if conn is None:
+        with db_conn() as own:
+            rows = own.execute(sql).fetchall()
+    else:
+        rows = conn.execute(sql).fetchall()
+    return [dict(r) for r in rows]
+
+
+def protected_entities():
+    """The entity ids the operator has protected, lower-case."""
+    return {str(r['entity_id']).lower() for r in protected_records()}
+
+
+def protected_rows():
+    return protected_records()
+
+
+def _protected_hits(pins=None, entities=None, conn=None):
+    """Protected rows matched by entity id or by the stored registry id.
+
+    A permission's `pins` carry the registry id read when it was saved, so a
+    match can refuse a renamed protected entity without reading HA.
+    """
+    rows = protected_records(conn=conn)
+    by_entity = {str(r['entity_id']).lower(): r for r in rows}
+    by_registry = {str(r.get('registry_id')): r for r in rows
+                   if r.get('registry_id')}
+    hits = []
+    seen = set()
+    for ent in entities or []:
+        e = str(ent or '').lower()
+        if e in by_entity and e not in seen:
+            hits.append(by_entity[e])
+            seen.add(e)
+    for pin in pins or []:
+        if not isinstance(pin, dict):
+            continue
+        e = str(pin.get('entity_id') or '').lower()
+        rid = str(pin.get('registry_id') or '')
+        row = by_entity.get(e) or (by_registry.get(rid) if rid else None)
+        if row and row['entity_id'] not in seen:
+            hits.append(row)
+            seen.add(row['entity_id'])
+    return hits
+
+
+def set_protected_entities(actor, entities):
+    """Replace the protected list; audit every add/remove.
+
+    Adding a device also suspends every live permission that already holds it
+    (reason `protected`) in the same transaction, because protection is a
+    promise and an old grant must not come back when protection is removed.
+    Removal never resumes anything; Resume is an explicit operator action.
+    """
+    from db.core import db_conn
+    from db.audit import record_audit_event
+    from core.notify import send_notify
+    _init_protected_table()
+    if not isinstance(entities, (list, tuple)):
+        raise AllowanceError(400, 'Protected devices must be a list.')
+    wanted = []
+    for ent in entities:
+        e = str(ent or '').strip().lower()
+        if not _ENTITY_RE.fullmatch(e):
+            raise AllowanceError(400, 'Not a plain entity id: %r' % ent)
+        if e not in wanted:
+            wanted.append(e)
+    if len(wanted) > 256:
+        raise AllowanceError(400, 'At most 256 protected devices.')
+    before_rows = protected_records()
+    before = {r['entity_id'] for r in before_rows}
+    after = set(wanted)
+    added = sorted(after - before)
+    removed = sorted(before - after)
+    added_registry = {}
+    if added:
+        registry = _ha_registry()
+        for e in added:
+            reg = registry.get(e)
+            if not reg:
+                raise AllowanceError(
+                    400, 'HA does not know the protected entity %s.' % e)
+            added_registry[e] = reg.get('id') or ''
+    now = _now()
+    suspended = []
+    if added or removed:
+        # A cached device list would otherwise show a stale lock for 60 s.
+        try:
+            from core import ha_devices as _ha_devices
+            _ha_devices.clear_cache()
+        except Exception:
+            pass
+        import json as _json
+        affected = set()
+        new_registry = set(v for v in added_registry.values() if v)
+        added_set = set(added)
+        with db_conn() as conn:
+            try:
+                conn.execute('BEGIN IMMEDIATE')
+                rows = conn.execute(
+                    'SELECT id, agent_id, suspended_at, entities_json '
+                    'FROM allowances WHERE revoked_at = 0').fetchall()
+                for row in rows:
+                    try:
+                        pins = _json.loads(row['entities_json'] or '[]')
+                    except (TypeError, ValueError):
+                        pins = []
+                    held = [p for p in pins
+                            if isinstance(p, dict)
+                            and (str(p.get('entity_id') or '').lower()
+                                 in added_set
+                                 or (p.get('registry_id')
+                                     and p.get('registry_id') in new_registry))]
+                    if not held:
+                        continue
+                    affected.add(int(row['agent_id']))
+                    if not row['suspended_at']:
+                        conn.execute(
+                            'UPDATE allowances SET suspended_at = ?, '
+                            'suspended_reason = ? WHERE id = ?',
+                            (now, 'protected', row['id']))
+                        suspended.append((row['id'], row['agent_id']))
+                for e in removed:
+                    conn.execute(
+                        'DELETE FROM allowance_protected WHERE entity_id = ?', (e,))
+                for e in added:
+                    conn.execute(
+                        'INSERT OR IGNORE INTO allowance_protected '
+                        '(entity_id, registry_id, added_by, added_at) '
+                        'VALUES (?, ?, ?, ?)',
+                        (e, added_registry.get(e) or '', actor, now))
+                for aid in sorted(affected):
+                    _bump_config(conn, aid)
+                conn.commit()
+            except Exception:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                raise
+        for e in added:
+            record_audit_event(
+                'allowance_protected_added',
+                details='%s protected by %s (registry %s)'
+                        % (e, actor, added_registry.get(e) or '-'))
+        for e in removed:
+            record_audit_event(
+                'allowance_protected_removed',
+                details='%s unprotected by %s' % (e, actor))
+            try:
+                send_notify('ceiling', 'Protected device removed',
+                            '%s is no longer protected. Existing permissions '
+                            'stay suspended; Resume each one explicitly.' % e)
+            except Exception:
+                pass
+        for aid, agent_id in suspended:
+            record_audit_event(
+                'allowance_suspended',
+                details='allowance #%d suspended by %s: protected '
+                        '(agent #%d)' % (aid, actor, int(agent_id)))
+    return {'entities': sorted(after), 'added': added, 'removed': removed,
+            'suspended': [aid for aid, _agent in suspended]}
+
+
+
+def is_protected(entity_id):
+    return str(entity_id or '').strip().lower() in protected_entities()
+
+
+# ── S4/CB1: the HA integration pin on each permission ──────────────────────
+
+def _ha_base_fp(base_url):
+    value = str(base_url or '').strip().rstrip('/')
+    return hashlib.sha256(value.encode('utf-8')).hexdigest()[:16]
+
+
+def _ha_pin():
+    """(integration id, base-URL fingerprint) for the one enabled HA."""
+    integration = _ha_integration()
+    if not integration:
+        return 0, ''
+    return (int(integration.get('id') or 0),
+            _ha_base_fp(integration.get('base_url')))
+
+
+def _pin_mismatch(row, pin=None):
+    """True only when a pinned permission no longer points at this HA.
+
+    An unpinned legacy row is not a mismatch; `refresh_labels` backfills it.
+    """
+    iid, fp = pin if pin is not None else _ha_pin()
+    if not iid:
+        return False
+    old_iid = int((row or {}).get('ha_integration_id') or 0)
+    old_fp = (row or {}).get('ha_base_url_fp') or ''
+    if not old_iid and not old_fp:
+        return False
+    return old_iid != iid or old_fp != fp
+
+
+def _write_ha_pin(conn, aid, iid, fp):
+    conn.execute(
+        'UPDATE allowances SET ha_integration_id = ?, ha_base_url_fp = ? '
+        'WHERE id = ?', (int(iid or 0), fp or '', int(aid)))
+
+
+def _bump_config(conn, agent_id):
+    """Move the agent's config version inside this write's transaction.
+
+    Every allowance write changes what GET /api/agents/{id}/config returns,
+    so a document loaded before it must be a 409. Keeping this in the core
+    writer (not the HTTP endpoint) covers the approver path and background
+    refreshes too.
+    """
+    from db.agent_policies import bump_agent_config_version
+    return bump_agent_config_version(agent_id, conn)
+
+
 _TABLES_READY = set()
 
 
@@ -523,6 +753,11 @@ def _init_allowance_tables():
             allowance_id INTEGER NOT NULL,
             used_at INTEGER NOT NULL,
             call_ref TEXT NOT NULL DEFAULT '')''')
+        conn.execute('''CREATE TABLE IF NOT EXISTS allowance_protected (
+            entity_id TEXT PRIMARY KEY,
+            registry_id TEXT NOT NULL DEFAULT '',
+            added_by TEXT NOT NULL DEFAULT '',
+            added_at INTEGER NOT NULL DEFAULT 0)''')
         conn.execute('''CREATE TABLE IF NOT EXISTS allowance_profiles (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL UNIQUE,
@@ -551,6 +786,18 @@ def _init_allowance_tables():
                          "TEXT NOT NULL DEFAULT '[]'")
         except Exception:
             pass
+        try:
+            conn.execute("ALTER TABLE allowance_protected ADD COLUMN "
+                         "registry_id TEXT NOT NULL DEFAULT ''")
+        except Exception:
+            pass
+        # S4/CB1: pin the HA integration and its base URL on every permission.
+        for col, decl in (('ha_integration_id', 'INTEGER NOT NULL DEFAULT 0'),
+                          ('ha_base_url_fp', "TEXT NOT NULL DEFAULT ''")):
+            try:
+                conn.execute(f"ALTER TABLE allowances ADD COLUMN {col} {decl}")
+            except Exception:
+                pass
         conn.commit()
     _TABLES_READY.add(key)
 
@@ -661,16 +908,23 @@ CATALOGUE_BY_DOMAIN = {e['domain']: e for e in CATALOGUE}
 
 
 def _validate_allowance(domain, service, entities, rate_per_hour=0, window='',
-                        risk_ack=False, registry=None):
+                        expires_at=0, risk_ack=False, registry=None,
+                        return_risk=False, source_label=''):
     """Every save/apply check, in one place, without writing anything.
 
-    Returns `(entities, pins)`. Raises before the caller revokes or inserts,
-    which is what makes apply atomic (BX4).
+    Returns `(entities, pins)`, or `(entities, pins, risk)` when
+    `return_risk` is set. Raises before the caller revokes or inserts, which
+    is what makes apply atomic (BX4).
     """
     domain = (domain or '').strip().lower()
     service = (service or '').strip().lower()
     if not _SERVICE_RE.fullmatch(domain) or not _SERVICE_RE.fullmatch(service):
         raise AllowanceError(400, 'A domain and a service are required.')
+    reason = never_reason(domain, service)
+    if reason:
+        raise AllowanceError(
+            400, 'Never allowed: %s.%s — %s.' % (domain, service, reason),
+            {'code': 'never_allowed'})
     row = catalogue_row(INTEGRATION, f'{domain}.{service}')
     if row is None:
         raise AllowanceError(400, 'That type and action are not in the catalogue.')
@@ -678,16 +932,11 @@ def _validate_allowance(domain, service, entities, rate_per_hour=0, window='',
         raise AllowanceError(400, 'The ceiling does not allow %s.%s.' %
                              (domain, service))
     entities = validate_entity_set(domain, entities)
-    risky_row, risky_entities = _risk_for(domain, entities)
-    if (risky_row or risky_entities) and not risk_ack:
-        raise AllowanceError(
-            400, 'This allowance needs a second risk confirmation.',
-            {'code': 'risk_ack_required', 'risky_row': risky_row,
-             'risky_entities': risky_entities})
     if window:
         _check_window(window)
     if rate_per_hour and not (0 <= int(rate_per_hour) <= 1000):
         raise AllowanceError(400, 'The rate cap is out of range.')
+    _check_expiry(expires_at)
     # BD5: pin the registry entry now; a missing entity refuses the save.
     if registry is None:
         registry = _ha_registry()
@@ -697,13 +946,87 @@ def _validate_allowance(domain, service, entities, rate_per_hour=0, window='',
         if not reg:
             raise AllowanceError(400, 'HA does not know the entity %s.' % ent)
         pins.append({'entity_id': ent, 'registry_id': reg.get('id') or ''})
+    # S3/CB5: refuse on the entity id or the registry id captured at protect
+    # time, so a renamed protected entity cannot be granted under its new name.
+    hits = _protected_hits(pins=pins, entities=entities)
+    if hits:
+        first = hits[0]['entity_id']
+        if source_label:
+            message = ('Protected: %s is in label %s. Unprotect it, or pick '
+                       'devices instead of the label.' % (first, source_label))
+        else:
+            message = ('Protected: no agent can be given %s. Unprotect it '
+                       'first.' % first)
+        raise AllowanceError(
+            400, message,
+            {'code': 'protected_device',
+             'entities': [r['entity_id'] for r in hits]})
+    risky_row, risky_entities = _risk_for(domain, entities)
+    risk = {'risky_row': risky_row, 'risky_entities': risky_entities}
+    if (risky_row or risky_entities) and not risk_ack:
+        raise AllowanceError(
+            400, 'This allowance needs a second risk confirmation.',
+            {'code': 'risk_ack_required', 'risky_row': risky_row,
+             'risky_entities': risky_entities})
+    if return_risk:
+        return entities, pins, risk
     return entities, pins
+
+
+def _ceiling_allows_conn(conn, domain, service):
+    """The ceiling check on a caller's transaction, without a second DB read."""
+    row = catalogue_row(INTEGRATION, f'{domain}.{service}')
+    if row is None or never_reason(domain, service):
+        return False
+    operator = {r['word'] for r in conn.execute(
+        'SELECT word FROM allowance_never_words').fetchall()}
+    words = set(DESTRUCTIVE_WORDS) | operator
+    allowed = set(row.get('exempt_words') or ()) - operator
+    for token in _tokens(service):
+        if token in words and token not in allowed:
+            return False
+    info = conn.execute(
+        'SELECT enabled FROM allowance_ceiling WHERE integration = ? '
+        'AND catalogue_id = ?', (INTEGRATION, f'{domain}.{service}')).fetchone()
+    return bool(info and info['enabled'])
+
+
+def _recheck_conn(conn, prepared):
+    """Re-check the ceiling and protection inside an apply transaction.
+
+    A ceiling or protection write that landed after validation must not let
+    an already-validated row through.
+    """
+    for item in prepared:
+        domain = item['domain']
+        service = item['service']
+        pins = item.get('pins') or []
+        if not _ceiling_allows_conn(conn, domain, service):
+            raise AllowanceError(
+                400, 'The ceiling no longer allows %s.%s; reload and retry.'
+                     % (domain, service), {'code': 'ceiling_changed'})
+        hits = _protected_hits(pins=pins, conn=conn)
+        if hits:
+            first = hits[0]['entity_id']
+            label = item.get('label_id') or item.get('source_label') or ''
+            if label:
+                message = ('Protected: %s is in label %s. Unprotect it, or '
+                           'pick devices instead of the label.'
+                           % (first, label))
+            else:
+                message = ('Protected: no agent can be given %s. Unprotect it '
+                           'first.' % first)
+            raise AllowanceError(
+                400, message,
+                {'code': 'protected_device',
+                 'entities': [r['entity_id'] for r in hits]})
 
 
 def _insert_allowance(conn, agent_id, name, domain, service, entities, pins,
                       rate_per_hour=0, window='', expires_at=0, version=1,
                       actor='', now=None, profile_id=0, profile_version=0,
-                      source_label_id=''):
+                      source_label_id='', ha_integration_id=0,
+                      ha_base_url_fp=''):
     """Insert one row on an existing connection (no commit, no audit)."""
     import json as _json
     conditions = {'domain': _condition_in(domain),
@@ -713,13 +1036,15 @@ def _insert_allowance(conn, agent_id, name, domain, service, entities, pins,
         'INSERT INTO allowances (agent_id, integration, tool, name, '
         'conditions_json, entities_json, source_label_id, rate_per_hour, '
         'window, expires_at, version, created_by, created_at, '
-        'profile_id, profile_version) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+        'profile_id, profile_version, ha_integration_id, ha_base_url_fp) '
+        'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
         (int(agent_id), INTEGRATION, ALLOWANCE_TOOL, (name or 'Allowance')[:80],
          _json.dumps(conditions, sort_keys=True),
          _json.dumps(pins), source_label_id or '',
          int(rate_per_hour or 0), window or '', int(expires_at or 0), int(version),
          actor, now if now is not None else _now(), int(profile_id or 0),
-         int(profile_version or 0)))
+         int(profile_version or 0), int(ha_integration_id or 0),
+         ha_base_url_fp or ''))
     return cur.lastrowid
 
 
@@ -736,15 +1061,23 @@ def create_allowance(actor, agent_id, name, domain, service, entities,
     service = (service or '').strip().lower()
     entities, pins = _validate_allowance(
         domain, service, entities, rate_per_hour=rate_per_hour,
-        window=window, risk_ack=risk_ack)
+        window=window, expires_at=expires_at, risk_ack=risk_ack)
+    ha_id, ha_fp = _ha_pin()
     now = _now()
     with db_conn() as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        _recheck_conn(conn, [{
+            'domain': domain, 'service': service, 'pins': pins,
+            'label_id': source_label_id or '',
+        }])
         aid = _insert_allowance(
             conn, agent_id, name, domain, service, entities, pins,
             rate_per_hour=rate_per_hour, window=window,
             expires_at=expires_at, actor=actor, now=now,
             profile_id=profile_id, profile_version=profile_version,
-            source_label_id=source_label_id)
+            source_label_id=source_label_id, ha_integration_id=ha_id,
+            ha_base_url_fp=ha_fp)
+        _bump_config(conn, agent_id)
         conn.commit()
     record_audit_event('allowance_created',
                        details='allowance #%d by %s: %s %s.%s on %d entities%s'
@@ -758,6 +1091,19 @@ def _check_window(window):
     m = _re.fullmatch(r'([01]\d|2[0-3]):([0-5]\d)-([01]\d|2[0-3]):([0-5]\d)', window or '')
     if not m or (m.group(1), m.group(2)) == (m.group(3), m.group(4)):
         raise AllowanceError(400, 'The window must be HH:MM-HH:MM and not empty.')
+
+
+def _check_expiry(expires_at):
+    """A Unix second, 0/None for never; never a negative or non-integer."""
+    if expires_at in (None, ''):
+        return 0
+    try:
+        value = int(expires_at)
+    except (TypeError, ValueError):
+        raise AllowanceError(400, 'expires_at must be a Unix timestamp or 0.')
+    if value < 0:
+        raise AllowanceError(400, 'expires_at must be a Unix timestamp or 0.')
+    return value
 
 
 def _in_window(window, now_ts=None):
@@ -891,11 +1237,35 @@ def match_and_claim(agent, integration, tool, args, call_ref=''):
     if not hits:
         return None
     row = hits[0]
+    # S4: a permission pinned to another HA (or another base URL) never runs,
+    # even before the periodic refresh has suspended it.
+    if _pin_mismatch(row):
+        record_audit_event(
+            'allowance_ha_changed',
+            details='allowance #%d not run: the HA integration or base URL '
+                    'changed' % row['id'])
+        return None
     if row['suspended_at']:
         return None
     if row['expires_at'] and row['expires_at'] <= now:
         return None
     if not _in_window(row['window'], now):
+        return None
+    # S3/CB5: refuse on the registry ids already stored in the permission's
+    # pins, so a renamed protected entity needs no HA read. Only audit when a
+    # hit would otherwise have run; a stray protected id in a non-matching
+    # call is not an event.
+    import json as _json
+    try:
+        hit_pins = _json.loads(row['entities_json'] or '[]')
+    except (TypeError, ValueError):
+        hit_pins = []
+    protected = _protected_hits(pins=hit_pins)
+    if protected:
+        record_audit_event(
+            'allowance_protected_refused',
+            details='allowance #%d refused: protected %s'
+                    % (row['id'], ','.join(r['entity_id'] for r in protected)))
         return None
     conn = get_db()
     try:
@@ -933,8 +1303,13 @@ def revoke_allowance(actor, aid):
     from db.core import db_conn
     from db.audit import record_audit_event
     with db_conn() as conn:
-        conn.execute('UPDATE allowances SET revoked_at = ? WHERE id = ? AND revoked_at = 0',
-                     (_now(), aid))
+        conn.execute('BEGIN IMMEDIATE')
+        row = conn.execute('SELECT agent_id, revoked_at FROM allowances '
+                           'WHERE id = ?', (aid,)).fetchone()
+        if row and not row['revoked_at']:
+            conn.execute('UPDATE allowances SET revoked_at = ? WHERE id = ? '
+                         'AND revoked_at = 0', (_now(), aid))
+            _bump_config(conn, row['agent_id'])
         conn.commit()
     record_audit_event('allowance_revoked', details='allowance #%d revoked by %s' % (aid, actor))
 
@@ -943,8 +1318,14 @@ def suspend_allowance(actor, aid, reason):
     from db.core import db_conn
     from db.audit import record_audit_event
     with db_conn() as conn:
-        conn.execute('UPDATE allowances SET suspended_at = ?, suspended_reason = ? '
-                     'WHERE id = ?', (_now(), reason, aid))
+        conn.execute('BEGIN IMMEDIATE')
+        row = conn.execute('SELECT agent_id, suspended_at FROM allowances '
+                           'WHERE id = ?', (aid,)).fetchone()
+        if row and not row['suspended_at']:
+            conn.execute('UPDATE allowances SET suspended_at = ?, '
+                         'suspended_reason = ? WHERE id = ?',
+                         (_now(), reason, aid))
+            _bump_config(conn, row['agent_id'])
         conn.commit()
     record_audit_event('allowance_suspended',
                        details='allowance #%d suspended by %s: %s' % (aid, actor, reason))
@@ -971,9 +1352,40 @@ def resume_allowance(actor, aid):
                        reg.get('id') != pin.get('registry_id')):
             raise AllowanceError(400, 'The entity %s changed; re-confirm the '
                                  'allowance explicitly.' % pin.get('entity_id'))
+    protected = _protected_hits(pins=pins)
+    if protected:
+        first = protected[0]['entity_id']
+        raise AllowanceError(
+            400, 'Protected: %s is still protected. Unprotect it before '
+                 'resuming this permission.' % first,
+            {'code': 'protected_device',
+             'entities': [r['entity_id'] for r in protected]})
+    ha_id, ha_fp = _ha_pin()
     with db_conn() as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        current = conn.execute('SELECT agent_id, suspended_at FROM allowances '
+                               'WHERE id = ?', (aid,)).fetchone()
+        if not current:
+            conn.rollback()
+            raise AllowanceError(404, 'No such allowance.')
+        if not _ceiling_allows_conn(conn, domain, service):
+            raise AllowanceError(
+                400, 'The ceiling no longer allows this allowance.',
+                {'code': 'ceiling_changed'})
+        hits = _protected_hits(pins=pins, conn=conn)
+        if hits:
+            raise AllowanceError(
+                400, 'Protected: %s is still protected. Unprotect it before '
+                     'resuming this permission.' % hits[0]['entity_id'],
+                {'code': 'protected_device',
+                 'entities': [r['entity_id'] for r in hits]})
         conn.execute('UPDATE allowances SET suspended_at = 0, suspended_reason = \'\' '
                      'WHERE id = ?', (aid,))
+        # S4: an explicit Resume is the operator re-confirming the current HA.
+        if ha_id:
+            _write_ha_pin(conn, aid, ha_id, ha_fp)
+        if current['suspended_at']:
+            _bump_config(conn, current['agent_id'])
         conn.commit()
     record_audit_event('allowance_resumed', details='allowance #%d resumed by %s' % (aid, actor))
 
@@ -1107,6 +1519,7 @@ def apply_profile(actor, pid, agent_id, risk_ack=False, profile_version=0):
     # One registry read for every template. A failed read refuses the apply
     # before anything is revoked.
     registry = _ha_registry()
+    ha_id, ha_fp = _ha_pin()
     prepared = []
     for t in profile['templates']:
         domain = (t.get('domain') or '').strip().lower()
@@ -1120,8 +1533,9 @@ def apply_profile(actor, pid, agent_id, risk_ack=False, profile_version=0):
         entities, pins = _validate_allowance(
             domain, service, entities,
             rate_per_hour=t.get('rate_per_hour') or 0,
-            window=t.get('window') or '', risk_ack=risk_ack,
-            registry=registry)
+            window=t.get('window') or '',
+            expires_at=t.get('expires_at') or 0, risk_ack=risk_ack,
+            registry=registry, source_label=t.get('label_id') or '')
         prepared.append((t, domain, service, entities, pins))
     # "Update agents": a re-apply replaces this agent's allowances from the
     # same profile. The revoke and every insert share one BEGIN IMMEDIATE, so
@@ -1142,6 +1556,10 @@ def apply_profile(actor, pid, agent_id, risk_ack=False, profile_version=0):
                     409, 'The profile changed since the preview; reload it.',
                     {'code': 'profile_changed',
                      'profile_version': int((live or profile)['version'])})
+            _recheck_conn(conn, [{
+                'domain': domain, 'service': service, 'pins': pins,
+                'label_id': t.get('label_id') or '',
+            } for t, domain, service, _entities, pins in prepared])
             old_rows = conn.execute(
                 'SELECT id FROM allowances WHERE agent_id = ? AND profile_id = ? '
                 'AND revoked_at = 0', (int(agent_id), pid)).fetchall()
@@ -1158,7 +1576,9 @@ def apply_profile(actor, pid, agent_id, risk_ack=False, profile_version=0):
                     window=t.get('window') or '',
                     expires_at=t.get('expires_at') or 0, actor=actor,
                     now=now, profile_id=pid, profile_version=wanted_version,
-                    source_label_id=t.get('label_id') or ''))
+                    source_label_id=t.get('label_id') or '',
+                    ha_integration_id=ha_id, ha_base_url_fp=ha_fp))
+            _bump_config(conn, agent_id)
             conn.commit()
         except Exception:
             try:
@@ -1343,7 +1763,8 @@ def refresh_pins(actor='config-write'):
 
     Runs on the periodic refresh and straight after an approved registry or
     config-entry write. A missing or changed registry id suspends the
-    allowance with `registry_changed`; it never deletes it.
+    allowance with `registry_changed`; it never deletes it. A changed HA
+    integration or base URL suspends with `ha_changed` (S4).
     """
     from db.audit import record_audit_event
     import json as _json
@@ -1351,9 +1772,14 @@ def refresh_pins(actor='config-write'):
         registry = _ha_registry()
     except AllowanceError as exc:
         return {'checked': 0, 'error': str(exc)}
+    pin = _ha_pin()
     suspended = []
     for row in _live_ha_allowances():
         if row['suspended_at']:
+            continue
+        if _pin_mismatch(row, pin):
+            suspend_allowance(actor, row['id'], 'ha_changed')
+            suspended.append(row['id'])
             continue
         pins = _json.loads(row['entities_json'] or '[]')
         if any(_pin_changed(registry, p) for p in pins):
@@ -1362,7 +1788,7 @@ def refresh_pins(actor='config-write'):
     if suspended:
         record_audit_event(
             'allowance_registry_refresh',
-            details='registry pins changed: suspended %s'
+            details='registry or HA pin changed: suspended %s'
                     % ','.join(map(str, suspended)))
     return {'checked': len(suspended), 'suspended': suspended, 'error': ''}
 
@@ -1370,10 +1796,13 @@ def refresh_pins(actor='config-write'):
 def refresh_labels(actor='refresh'):
     """Re-resolve every live HA allowance's pins and labels (BD5/BX2).
 
-    * every row, label-sourced or hand-made, has its registry pins re-read; a
-      missing or changed id suspends it (`registry_changed`);
+    * every row, label-sourced or hand-made, has its HA integration pin
+      checked; a changed integration or base URL suspends it (`ha_changed`);
+    * every row's registry pins are re-read; a missing or changed id suspends
+      it (`registry_changed`);
     * a label entity that **left** drops out of the pins at once;
-    * a label entity that **joined** waits in `pending_json` until accepted.
+    * a label entity that **joined** waits in `pending_json` until accepted;
+    * a protected entity never enters, including through a label (S3).
     A failed registry read changes nothing.
     """
     from db.core import db_conn
@@ -1388,24 +1817,56 @@ def refresh_labels(actor='refresh'):
         except Exception:
             pass
         return {'checked': 0, 'error': str(exc)}
+    pin = _ha_pin()
+    protected = protected_records()
+    prot_entity = {r['entity_id']: r for r in protected}
+    prot_reg = {r['registry_id']: r for r in protected if r.get('registry_id')}
     changed = 0
     for row in _live_ha_allowances():
         if row['suspended_at']:
+            continue
+        if _pin_mismatch(row, pin):
+            suspend_allowance(actor, row['id'], 'ha_changed')
+            record_audit_event(
+                'allowance_ha_changed',
+                details='allowance #%d suspended: the HA integration or base '
+                        'URL changed' % row['id'])
+            changed += 1
             continue
         label = row.get('source_label_id') or ''
         cond = _json.loads(row['conditions_json'] or '{}')
         domain = (cond.get('domain', {}).get('in') or [''])[0]
         stored_list = _json.loads(row['entities_json'] or '[]')
         stored = {p['entity_id']: p for p in stored_list}
+        pin_needed = bool(pin[0] and not row.get('ha_integration_id')
+                          and not row.get('ha_base_url_fp'))
         if not label:
             # BX2: a hand-made allowance is pinned too. Entity-id reuse is the
             # exact case: delete a plug, rename a new one to the same id.
             if any(_pin_changed(registry, p) for p in stored.values()):
                 suspend_allowance(actor, row['id'], 'registry_changed')
                 changed += 1
+                continue
+            # Security answer (4): pin only after the registry check passed.
+            if pin_needed:
+                with db_conn() as conn:
+                    conn.execute('BEGIN IMMEDIATE')
+                    _write_ha_pin(conn, row['id'], pin[0], pin[1])
+                    _bump_config(conn, row['agent_id'])
+                    conn.commit()
+                changed += 1
             continue
-        current = {p['entity_id']: p
-                   for p in _resolve_label_pins(label, domain, registry)}
+        current_all = {p['entity_id']: p
+                       for p in _resolve_label_pins(label, domain, registry)}
+        # S3/CB5: protected devices are dropped before they can join, by
+        # entity id or by the registry id captured when protection was set.
+        def _protected_pin(p):
+            return bool(p.get('entity_id') in prot_entity
+                        or (p.get('registry_id') and p.get('registry_id') in prot_reg))
+        skipped = sorted(e for e, p in current_all.items()
+                         if _protected_pin(p) and e not in stored)
+        current = {e: p for e, p in current_all.items()
+                   if not _protected_pin(p)}
         left = set(stored) - set(current)
         joined = set(current) - set(stored)
         bad = [e for e, p in stored.items()
@@ -1414,7 +1875,12 @@ def refresh_labels(actor='refresh'):
             suspend_allowance(actor, row['id'], 'registry_changed')
             changed += 1
             continue
-        if not left and not joined:
+        if skipped:
+            record_audit_event(
+                'allowance_protected_label_skipped',
+                details='allowance #%d: label %s offered protected %s; dropped'
+                        % (row['id'], label, ','.join(skipped)))
+        if not left and not joined and not pin_needed:
             continue
         pins = [stored[e] for e in stored if e not in left]
         pending = [p for p in _json.loads(row.get('pending_json') or '[]')
@@ -1424,13 +1890,20 @@ def refresh_labels(actor='refresh'):
             if e not in have:
                 pending.append(current[e])
         with db_conn() as conn:
-            _write_entity_list(conn, row, pins, pending)
+            conn.execute('BEGIN IMMEDIATE')
+            if pin_needed:
+                _write_ha_pin(conn, row['id'], pin[0], pin[1])
+            if left or joined:
+                _write_entity_list(conn, row, pins, pending)
+            _bump_config(conn, row['agent_id'])
             conn.commit()
-        record_audit_event(
-            'allowance_label_refresh',
-            details='allowance #%d: dropped %s; held %s'
-                    % (row['id'], ','.join(sorted(left)) or 'none',
-                       ','.join(sorted(joined)) or 'none'))
+        if left or joined:
+            record_audit_event(
+                'allowance_label_refresh',
+                details='allowance #%d: dropped %s; held %s; protected-skipped %s'
+                        % (row['id'], ','.join(sorted(left)) or 'none',
+                           ','.join(sorted(joined)) or 'none',
+                           ','.join(skipped) or 'none'))
         changed += 1
     return {'checked': changed, 'error': ''}
 
@@ -1465,6 +1938,14 @@ def accept_join(actor, aid, risk_ack=False):
                            'registry_id': reg.get('id') or ''})
     if not now_ok:
         raise AllowanceError(400, 'The entities changed again; refresh first.')
+    protected = _protected_hits(pins=now_ok)
+    if protected:
+        first = protected[0]['entity_id']
+        raise AllowanceError(
+            400, 'Protected: %s is in this label. Unprotect it, or pick '
+                 'devices instead of the label.' % first,
+            {'code': 'protected_device',
+             'entities': [r['entity_id'] for r in protected]})
     pins = _json.loads(row['entities_json'] or '[]') + now_ok
     if len({p['entity_id'] for p in pins}) > 64:
         raise AllowanceError(400, 'At most 64 entities per allowance.')
@@ -1485,7 +1966,20 @@ def accept_join(actor, aid, risk_ack=False):
             if not live:
                 conn.rollback()
                 raise AllowanceError(404, 'No such allowance.')
+            if not _ceiling_allows_conn(conn, domain, service):
+                raise AllowanceError(
+                    400, 'The ceiling no longer allows %s.%s; reload and retry.'
+                         % (domain, service), {'code': 'ceiling_changed'})
+            hits = _protected_hits(pins=pins, conn=conn)
+            if hits:
+                raise AllowanceError(
+                    400, 'Protected: %s is in this label. Unprotect it, or '
+                         'pick devices instead of the label.'
+                         % hits[0]['entity_id'],
+                    {'code': 'protected_device',
+                     'entities': [r['entity_id'] for r in hits]})
             _write_entity_list(conn, dict(live), pins, rest)
+            _bump_config(conn, live['agent_id'])
             conn.commit()
         except Exception:
             try:
