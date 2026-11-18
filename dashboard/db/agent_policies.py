@@ -9,7 +9,7 @@ import json
 import re
 import time
 
-from db.core import db_conn
+from db.core import db_conn, get_db
 
 TOOLS_MODES = ('all', 'allowlist')
 APPROVAL_MODES = ('inherit', 'gated', 'ungated')
@@ -47,6 +47,62 @@ def init_agent_policies_tables(cursor):
             "ALTER TABLE agent_policies ADD COLUMN test_agent INTEGER NOT NULL DEFAULT 0")
     except Exception:
         pass
+    # X11/S5: one monotonic version for the whole per-agent configuration.
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS agent_config_state (
+            agent_id INTEGER PRIMARY KEY,
+            version INTEGER NOT NULL DEFAULT 1,
+            updated_at INTEGER NOT NULL DEFAULT 0
+        )
+    ''')
+
+
+def get_agent_config_version(agent_id):
+    """The version a config editor loaded. Absent row means version 1."""
+    with db_conn() as conn:
+        row = conn.execute(
+            'SELECT version FROM agent_config_state WHERE agent_id = ?',
+            (int(agent_id),)).fetchone()
+    return int(row['version']) if row else 1
+
+
+def bump_agent_config_version(agent_id, conn=None):
+    """Increment and return the version, optionally inside a caller's tx."""
+    own = conn is None
+    if own:
+        conn = get_db()
+    try:
+        row = conn.execute(
+            'SELECT version FROM agent_config_state WHERE agent_id = ?',
+            (int(agent_id),)).fetchone()
+        current = int(row['version']) if row else 1
+        new = current + 1
+        conn.execute(
+            'INSERT INTO agent_config_state (agent_id, version, updated_at) '
+            'VALUES (?, ?, ?) ON CONFLICT(agent_id) DO UPDATE SET '
+            'version = excluded.version, updated_at = excluded.updated_at',
+            (int(agent_id), new, int(time.time())))
+        if own:
+            conn.commit()
+        return new
+    finally:
+        if own:
+            conn.close()
+
+
+def write_policy_row(conn, agent_id, clean):
+    """Write a validated policy on an existing transaction (no commit)."""
+    conn.execute('''
+        INSERT OR REPLACE INTO agent_policies
+            (agent_id, tools_mode, tools_json, arg_policy_json,
+             approval_json, rate_limit_per_min, updated_at,
+             ssh_hosts_allow_json, ssh_mode, test_agent)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (int(agent_id), clean['tools_mode'], json.dumps(clean['tools']),
+          json.dumps(clean['arg_policy']), json.dumps(clean['approval']),
+          clean['rate_limit_per_min'], int(time.time()),
+          json.dumps(clean['ssh_hosts_allow']), clean['ssh_mode'],
+          1 if clean.get('test_agent') else 0))
 
 
 def default_policy(agent_id=None):
@@ -220,18 +276,9 @@ def set_agent_policy(agent_id, tools_mode=None, tools=None, arg_policy=None,
                     'a test agent must be newly created: this agent already has '
                     'a session, request or call')
     with db_conn() as conn:
-        cursor = conn.cursor()
-        cursor.execute('''
-            INSERT OR REPLACE INTO agent_policies
-                (agent_id, tools_mode, tools_json, arg_policy_json,
-                 approval_json, rate_limit_per_min, updated_at,
-                 ssh_hosts_allow_json, ssh_mode, test_agent)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (agent_id, clean['tools_mode'], json.dumps(clean['tools']),
-              json.dumps(clean['arg_policy']), json.dumps(clean['approval']),
-              clean['rate_limit_per_min'], int(time.time()),
-              json.dumps(clean['ssh_hosts_allow']), clean['ssh_mode'],
-              1 if clean['test_agent'] else 0))
+        conn.execute('BEGIN IMMEDIATE')
+        write_policy_row(conn, agent_id, clean)
+        bump_agent_config_version(agent_id, conn)
         conn.commit()
     return get_agent_policy(agent_id)
 

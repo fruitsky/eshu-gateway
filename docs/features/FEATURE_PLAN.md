@@ -22355,6 +22355,38 @@ sections above absorb those answers.
 
 ### Implementer notes
 
+**Stage 2 (2026-11-18).** Code is on `feat/x11-agents-allowances`.
+
+* **S1** — `core/ha_devices.py`, `GET /api/ha/devices`,
+  `GET /api/ha/labels`. One HA by kind; entity, device, area, label and state
+  reads; friendly name first, real area, current state, labels, settings and
+  disabled flags, risky classes, protected flag; scrubbed; 60 s cache keyed by
+  database and integration.
+* **S2** — `core/agent_config.py`, `GET`/`PUT
+  /api/agents/{id}/ha-permissions`. All items validate before one
+  `BEGIN IMMEDIATE`; preview is plain words and the risky list; a stale
+  `version` is 409; unchanged rows keep id and uses; a changed row gets the
+  old version + 1; a label wins over its round-tripped entity list; duplicate
+  or overlapping permissions are refused because they would make a match
+  ambiguous.
+* **S3** — `allowance_protected`, `GET`/`PUT /api/allowances/protected`.
+  Saves, match and label-accepts refuse a protected entity; a label refresh
+  drops one with `allowance_protected_label_skipped`; add/remove are audited;
+  removal notifies.
+* **S4** — `allowances.ha_integration_id` and `ha_base_url_fp` on every new
+  row. A changed id or base URL suspends with `ha_changed` (or refuses the
+  match before the refresh); Resume re-pins the current HA. Legacy rows are
+  backfilled on the first refresh, not suspended.
+* **S5** — `GET`/`PUT /api/agents/{id}/config`. The document is
+  `schema_version`, `agent` (read-only), `tools`, `ssh`, `websites`,
+  `home_assistant`; it never carries a token or integration secret. A partial
+  document keeps every absent field (X4). `preview: true` is Check; apply is
+  one transaction across policy, websites and HA permissions; a stale version
+  is 409; the same protected/ceiling/never/risk checks run. The website
+  section also runs the legacy fetch-access sync after the commit.
+* Config version: `agent_config_state.version`, bumped by S2/S5 and by the
+  legacy policy, website and allowance endpoints.
+
 ### Reviewer notes
 
 ---
@@ -22380,7 +22412,7 @@ sections above absorb those answers.
 | 27 | X8 | gateway-installer-version | dashboard + gateway | **Code complete** 2026-11-14: on `release/1.4-gw` (BR1 folded; the hash is display-only) | `feat/x8-gateway-installer-version` | X7 | security approved; five buckets sum to the gateway count |
 | 28 | X9 | gated-gateway-files | dashboard + gateway | **Design note** 2026-11-14 (BP2): installer-carried vs authenticated channel files; recommends (b) | `feat/x9-gated-gateway-files` | X7, 1.4 | security sign-off before code |
 | 29 | X10 | approved-windows-modal | dashboard UI | **Merged** 2026-11-17: presets, Once default, typed local HH:MM + duration, live plain-words preview; agent requests use the same preview; not yet deployed | `feat/x10-windows-modal` | — | UI only; no schema or window-meaning change |
-| 31 | X11 | agents-allowances-redesign | dashboard UI + small API | **Stage 2** 2026-11-18: operator approved the look with the Agents-tab IA and per-agent JSON (S5); design note updated, S1–S5 next | `feat/x11-agents-allowances` | F27, X4, fix/f27-ha-by-kind | security reads S1–S5 (device list, one-go permissions, protected devices, CB1, JSON config); Stage 3 applies section C |
+| 31 | X11 | agents-allowances-redesign | dashboard UI + small API | **Stage 2 code complete** 2026-11-18: S1–S5 with tests; operator approved the look with the Agents-tab IA and per-agent JSON | `feat/x11-agents-allowances` | F27, X4, fix/f27-ha-by-kind | security reads S1–S5 (device list, one-go permissions, protected devices, CB1, JSON config); Stage 3 applies section C |
 | — | CI fix | ci-environment | gateway + tests | Merged (`f2746ef`); CI pinned to ubuntu-24.04 (`6d58006`) | `fix/ci-environment` | F5 | |
 | — | Buffering | stream-unbuffered | gateway | Merged (`d8d70c2`); S1 tee fix done in Gateway hardening | `fix/stream-unbuffered` | F5 | |
 | — | Gateway hardening | gateway-hardening | gateway | **Merged** 2026-11-12 (AF3 + S1 tee capture; security `c15664e`; AX1/AX2 residuals; BA1 for the next F5/F19 change) | `fix/gateway-hardening` | F19, Buffering | |

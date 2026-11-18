@@ -85,7 +85,8 @@ from database import (
     revoke_agent_token, delete_agent_token,
 )
 from db.agent_policies import (
-    DEFAULT_SSH_MODE, agent_has_activity, get_agent_policy, set_agent_policy,
+    DEFAULT_SSH_MODE, agent_has_activity, bump_agent_config_version,
+    get_agent_config_version, get_agent_policy, set_agent_policy,
     get_agent_policies_map,
 )
 from db.approver_tokens import (
@@ -133,6 +134,8 @@ from core.agent_context import (
 from core.rate_limit import _check_rate_limit
 from core import installer_channels
 from core import allowances
+from core import agent_config
+from core import ha_devices
 from db.policies import get_meta, set_meta
 from core.agent_policy import evaluate_call, safe_ident
 from core.session_guard import (
@@ -860,6 +863,24 @@ class AllowancePayload(BaseModel):
     window: str = ''
     expires_at: int = 0
     risk_ack: bool = False
+
+
+class HAPermissionsPayload(BaseModel):
+    permissions: list[dict] = []
+    preview: bool = False
+    risk_ack: bool = False
+    version: int | None = None
+
+
+class AgentConfigPayload(BaseModel):
+    document: dict
+    preview: bool = False
+    risk_ack: bool = False
+    version: int | None = None
+
+
+class ProtectedPayload(BaseModel):
+    entities: list[str] = []
 
 
 class PolicyPayload(BaseModel):
@@ -4465,6 +4486,73 @@ def available_agent_tools(agent_id: int, request: Request):
     return {'integrations': out}
 
 
+@app.get("/api/agents/{agent_id}/ha-permissions")
+def agent_ha_permissions_endpoint(agent_id: int, request: Request):
+    """S2: the current one-go HA permissions and the version to send back."""
+    _check_session(request)
+    try:
+        return agent_config.get_ha_permissions(agent_id)
+    except allowances.AllowanceError as exc:
+        detail = {'message': exc.detail, **exc.extra}
+        raise HTTPException(status_code=exc.status, detail=detail)
+
+
+@app.put("/api/agents/{agent_id}/ha-permissions")
+def set_agent_ha_permissions_endpoint(agent_id: int,
+                                      payload: HAPermissionsPayload,
+                                      request: Request):
+    """S2: preview or apply the desired HA permissions in one go."""
+    _check_session(request)
+    try:
+        return agent_config.apply_ha_permissions(
+            'operator', agent_id, payload.permissions,
+            preview=payload.preview, risk_ack=payload.risk_ack,
+            version=payload.version)
+    except allowances.AllowanceError as exc:
+        detail = {'message': exc.detail, **exc.extra}
+        raise HTTPException(status_code=exc.status, detail=detail)
+
+
+@app.get("/api/agents/{agent_id}/config")
+def get_agent_config_endpoint(agent_id: int, request: Request):
+    """S5: the whole agent configuration as one JSON document."""
+    _check_session(request)
+    try:
+        return agent_config.get_agent_config(agent_id)
+    except allowances.AllowanceError as exc:
+        detail = {'message': exc.detail, **exc.extra}
+        raise HTTPException(status_code=exc.status, detail=detail)
+
+
+@app.put("/api/agents/{agent_id}/config")
+def put_agent_config_endpoint(agent_id: int, payload: AgentConfigPayload,
+                              request: Request):
+    """S5: check (preview) or apply the document atomically."""
+    _check_session(request)
+    try:
+        result = agent_config.check_or_apply_config(
+            'operator', agent_id, payload.document,
+            preview=payload.preview, risk_ack=payload.risk_ack,
+            version=payload.version)
+    except allowances.AllowanceError as exc:
+        detail = {'message': exc.detail, **exc.extra}
+        raise HTTPException(status_code=exc.status, detail=detail)
+    # Enabling or disabling websites also moves the fetch tool's caller gate,
+    # exactly as the legacy website endpoint does. The document itself is
+    # already committed; this is the same derived sync the old path performs.
+    if (not result.get('preview') and result.get('changed')
+            and any(c.get('section') == 'websites'
+                    for c in result.get('sections') or [])):
+        try:
+            _sync_web_fetch_access()
+            fresh = agent_config.get_agent_config(agent_id)
+            result['version'] = fresh['version']
+            result['document'] = fresh
+        except Exception as exc:  # noqa: BLE001 - never hide the saved config
+            print(f"[agent config] website sync failed: {exc}", flush=True)
+    return result
+
+
 @app.get("/api/web-fetch-policies")
 def list_web_fetch_policies_endpoint(request: Request):
     """Per-principal URL allowlists for the mediated web fetch tool."""
@@ -4498,6 +4586,9 @@ def set_web_fetch_policy_endpoint(principal: str, payload: WebFetchPolicyPayload
         details=(f"Web fetch policy for '{principal}' updated "
                  f"(enabled={policy['enabled']}, allow={len(policy['allow'])}, "
                  f"deny={len(policy['deny'])})"))
+    owner = get_agent_by_name(principal)
+    if owner:
+        bump_agent_config_version(owner['id'])
     _sync_web_fetch_access()
     return policy
 
@@ -4509,6 +4600,9 @@ def delete_web_fetch_policy_endpoint(principal: str, request: Request):
         raise HTTPException(status_code=404, detail="Web fetch policy not found")
     record_audit_event("web_fetch_policy_deleted",
                        details=f"Web fetch policy for '{principal}' deleted")
+    owner = get_agent_by_name(principal)
+    if owner:
+        bump_agent_config_version(owner['id'])
     _sync_web_fetch_access()
     return {"status": "ok"}
 
@@ -5526,6 +5620,43 @@ def set_session_names_endpoint(payload: SessionNamesPayload, request: Request):
 
 # ── Allowances: the ceiling (F27) ───────────────────────────────────────
 
+@app.get("/api/ha/devices")
+def ha_devices_endpoint(request: Request):
+    """S1: the operator-only device inventory for the permissions picker."""
+    _check_session(request)
+    try:
+        return {"devices": ha_devices.devices()}
+    except allowances.AllowanceError as exc:
+        detail = {'message': exc.detail, **exc.extra}
+        raise HTTPException(status_code=exc.status, detail=detail)
+
+
+@app.get("/api/ha/labels")
+def ha_labels_endpoint(request: Request):
+    _check_session(request)
+    try:
+        return {"labels": ha_devices.labels()}
+    except allowances.AllowanceError as exc:
+        detail = {'message': exc.detail, **exc.extra}
+        raise HTTPException(status_code=exc.status, detail=detail)
+
+
+@app.get("/api/allowances/protected")
+def list_protected_endpoint(request: Request):
+    _check_session(request)
+    return {"entities": allowances.protected_rows()}
+
+
+@app.put("/api/allowances/protected")
+def set_protected_endpoint(payload: ProtectedPayload, request: Request):
+    _check_session(request)
+    try:
+        return allowances.set_protected_entities('operator', payload.entities)
+    except allowances.AllowanceError as exc:
+        detail = {'message': exc.detail, **exc.extra}
+        raise HTTPException(status_code=exc.status, detail=detail)
+
+
 @app.get("/api/allowances/ceiling")
 def get_allowance_ceiling(request: Request, integration: str = "ha"):
     _check_session(request)
@@ -5579,11 +5710,13 @@ def list_allowances_endpoint(request: Request):
 def create_allowance_endpoint(payload: AllowancePayload, request: Request):
     _check_session(request)
     try:
-        return allowances.create_allowance(
+        row = allowances.create_allowance(
             'operator', payload.agent_id, payload.name, payload.domain,
             payload.service, payload.entities, rate_per_hour=payload.rate_per_hour,
             window=payload.window, expires_at=payload.expires_at,
             risk_ack=payload.risk_ack)
+        bump_agent_config_version(payload.agent_id)
+        return row
     except allowances.AllowanceError as exc:
         detail = exc.detail
         if exc.extra:
@@ -5607,7 +5740,10 @@ def revoke_allowance_endpoint(aid: int, request: Request):
                 detail="Allowance is outside the approver token's scope")
         allowances.revoke_allowance('e2e-approver', aid)
         return {"status": "ok"}
+    row = allowances.get_allowance(aid)
     allowances.revoke_allowance('operator', aid)
+    if row:
+        bump_agent_config_version(row['agent_id'])
     return {"status": "ok"}
 
 
@@ -5616,8 +5752,12 @@ def accept_allowance_join_endpoint(aid: int, request: Request,
                                    payload: AcceptJoinPayload = AcceptJoinPayload()):
     _check_session(request)
     try:
-        return allowances.accept_join('operator', aid,
-                                      risk_ack=payload.risk_ack)
+        row = allowances.accept_join('operator', aid,
+                                     risk_ack=payload.risk_ack)
+        live = allowances.get_allowance(aid)
+        if live:
+            bump_agent_config_version(live['agent_id'])
+        return row
     except allowances.AllowanceError as exc:
         detail = exc.detail
         if exc.extra:
@@ -5629,7 +5769,10 @@ def accept_allowance_join_endpoint(aid: int, request: Request,
 def resume_allowance_endpoint(aid: int, request: Request):
     _check_session(request)
     try:
+        row = allowances.get_allowance(aid)
         allowances.resume_allowance('operator', aid)
+        if row:
+            bump_agent_config_version(row['agent_id'])
     except allowances.AllowanceError as exc:
         raise HTTPException(status_code=exc.status, detail=exc.detail)
     return {"status": "ok"}
@@ -5665,9 +5808,11 @@ def profile_diff_endpoint(pid: int, agent_id: int, request: Request):
 def apply_profile_endpoint(pid: int, payload: ApplyProfilePayload, request: Request):
     _check_session(request)
     try:
-        return allowances.apply_profile('operator', pid, payload.agent_id,
-                                        risk_ack=payload.risk_ack,
-                                        profile_version=payload.profile_version)
+        row = allowances.apply_profile('operator', pid, payload.agent_id,
+                                       risk_ack=payload.risk_ack,
+                                       profile_version=payload.profile_version)
+        bump_agent_config_version(payload.agent_id)
+        return row
     except allowances.AllowanceError as exc:
         detail = exc.detail
         if exc.extra:
