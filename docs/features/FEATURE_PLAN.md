@@ -22600,6 +22600,76 @@ so. This answers question (3).**
 * **Dead code.** `row = allowances.get_allowance(aid)` is unused in the
   revoke and resume endpoints.
 
+### Security re-read of the Stage 2 fixes (security reviewer, 2026-11-18, at `76b54f9`)
+
+**CB5–CB7 hold. Stage 2 is approved to merge.** Code text read only;
+nothing was run. Holding the deploy until Stage 3 is right.
+
+**CB5 is confirmed.**
+* Protecting a device now stores the registry id. In the same
+  transaction, it suspends every live permission that holds the device,
+  by entity id or registry id, and bumps each affected agent's version.
+* Removing protection resumes nothing, and the notice now says so.
+* Resume refuses while any of the permission's devices is protected. It
+  checks this both before and inside its transaction.
+* One check, `_protected_hits`, now covers save, `accept_join`, label
+  refresh and the in-transaction re-check.
+* Match time uses the hit's stored pins, so a renamed protected device is
+  refused without reading HA. The rename case is tested.
+
+**CB6 is confirmed.**
+* `preview_hash` covers the version, each permission's resolved
+  (entity, registry id) pairs, the risk list, the resumes and the waiting
+  joiners.
+* Apply requires the hash, recomputes it from a fresh registry read, and
+  recomputes it again inside the transaction against the rows read there.
+  Either mismatch is a 409.
+* `risk_ack` is still required on top.
+* Joiners are listed separately, and a rate-only label edit names them.
+* A member added after the preview, and a risky device that appears after
+  it, are both tested as 409s.
+
+**CB7 is confirmed.**
+* Suspension (reason and since) is shown in both GETs.
+* A changed suspended row is listed under `resumes`, with `ha_changed`
+  marked as re-pinning. It needs `resume_ack`, which is checked again
+  inside the transaction, and the resume is audited with its reason.
+* Unchanged suspended rows stay suspended, and a protected row still
+  refuses.
+
+**The answers and nits are done.**
+* `agent_config_updated` now records before and after for `tools.mode`,
+  each newly ungated approval, the SSH mode and hosts, and the website
+  settings.
+* The startup pass checks the registry first and stamps a row only when
+  the check passes.
+* Ceiling and protection are re-checked inside every apply transaction.
+* An explicit `expires_at: 0` now clears the expiry.
+* The protected-refusal audit fires only on a hit that would have run.
+* **A fix worth recording.** This round also fixes the argument order of
+  `validate_policy` in S5. At `0d13e73` it passed `approval` and
+  `argument_rules` swapped, and my round-1 note missed it. The ungated
+  round-trip test (`tests/test_x11_agent_config.py`) now covers it.
+
+**Your two questions:**
+* **(a) Protecting while HA is unreachable.** Refusing is safe, but it
+  blocks a *tightening* because HA is down. Follow-up, not a blocker:
+  * Accept the protection with `registry_id = ''`, and suspend by entity
+    id at once.
+  * Backfill the registry id on the next successful refresh, and audit
+    the backfill.
+  * Protection should never wait on HA being available.
+* **(b) The two ceiling checks.** Fold them into one helper that takes a
+  connection, and have `ceiling_allows` call it with its own. Two copies
+  of a deny rule drift apart. Do it before Stage 3 touches the ceiling
+  again; it is not a blocker for this merge.
+
+**Nit.** In S5, `preview_hash` binds the HA part only. The tools, SSH and
+website sections are deterministic from the resent document, so this is
+not a gap the operator can be surprised by. Adding a hash of the
+normalised policy and web sections would make "what was previewed is
+what was applied" literal for the whole document.
+
 ### Security review of the window-token audit fix (`fix/window-token-audit` @ 91cdf82)
 
 **Approved to merge.** Code text read only; nothing was run.
