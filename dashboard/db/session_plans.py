@@ -50,6 +50,7 @@ def init_session_plans_tables(cursor):
         CREATE TABLE IF NOT EXISTS session_plans (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             session_id TEXT NOT NULL,
+            agent_id INTEGER NOT NULL DEFAULT 0,
             status TEXT NOT NULL DEFAULT 'proposed',
             created_at INTEGER NOT NULL,
             decided_at INTEGER NOT NULL DEFAULT 0,
@@ -81,6 +82,11 @@ def init_session_plans_tables(cursor):
                 "ALTER TABLE session_plans ADD COLUMN superseded_by INTEGER NOT NULL DEFAULT 0")
         except Exception:
             pass
+    try:
+        cursor.execute(
+            "ALTER TABLE session_plans ADD COLUMN agent_id INTEGER NOT NULL DEFAULT 0")
+    except Exception:
+        pass
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS session_plan_items (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -376,7 +382,7 @@ def _items_for(conn, plan_id):
 
 
 def create_plan(session_id: str, items, note: str = '', origin: str = 'agent',
-                internal=None, parent=None) -> dict:
+                internal=None, parent=None, agent_id=None) -> dict:
     """Store a new plan. Every origin but `check` starts `proposed`.
 
     F22/AN2: `origin='check'` is the one-item plan a check borrows; it is
@@ -408,6 +414,16 @@ def create_plan(session_id: str, items, note: str = '', origin: str = 'agent',
                     'invalid_host',
                     'a plan created by %s must name a specific host' % origin)
     note = (note or '')[:MAX_NOTE]
+    if agent_id is None:
+        try:
+            from core.agent_context import current_agent_id
+            agent_id = current_agent_id(0)
+        except Exception:
+            agent_id = 0
+    try:
+        agent_id = int(agent_id or 0)
+    except (TypeError, ValueError):
+        agent_id = 0
     now = int(time.time())
     if origin == 'check':
         # AN2: never approved by a human, never outlives the plan it borrows.
@@ -444,12 +460,12 @@ def create_plan(session_id: str, items, note: str = '', origin: str = 'agent',
                     superseded.append(old_id)
             old = superseded
         cur.execute('''
-            INSERT INTO session_plans (session_id, status, created_at, note,
-                                       origin, decided_at, decided_by, until,
-                                       parent_plan_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (sid, status, now, note, origin, decided_at, decided_by, until,
-              parent_plan_id))
+            INSERT INTO session_plans (session_id, agent_id, status, created_at,
+                                       note, origin, decided_at, decided_by,
+                                       until, parent_plan_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (sid, agent_id, status, now, note, origin, decided_at, decided_by,
+              until, parent_plan_id))
         plan_id = cur.lastrowid
         for old_id in old:
             cur.execute(

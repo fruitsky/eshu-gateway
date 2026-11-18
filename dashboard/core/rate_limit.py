@@ -15,6 +15,9 @@ _LOGIN_RATE_LIMIT_WINDOW = 60
 _LIMITS = {
     "general": (_RATE_LIMIT_MAX, _RATE_LIMIT_WINDOW),
     "login": (_LOGIN_RATE_LIMIT_MAX, _LOGIN_RATE_LIMIT_WINDOW),
+    # BY3: the approver token has its own bucket, separate from the browser
+    # and the gateway rate limits.
+    "approver": (120, 60),
 }
 
 _last_sweep = 0.0

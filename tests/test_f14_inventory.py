@@ -499,6 +499,98 @@ class TestRealSourcePath:
         assert 'local_dns_records:hosts' in tools
         assert 'local_dns_records:cnames' in tools
 
+    def test_pihole_v5_records_through_the_real_handler(self, monkeypatch):
+        from core.pihole_seed import seed_pihole_tools
+        from core.inventory import _pihole_source
+        from core import integration_proxy as proxy
+
+        create_integration('pihole-v5', 'http://192.0.2.72/admin',
+                           'query_token', 'tok', kind='pihole')
+        integration = get_integration('pihole-v5')
+        seed_pihole_tools(integration['id'])
+        seen = []
+
+        def fake_roundtrip(integration, url, body_bytes, headers, method,
+                           max_bytes=0, timeout=None):
+            seen.append(url)
+            if 'customdns' in url:
+                body = {'data': [
+                    {'domain': 'web01.example.test', 'ip': '192.0.2.10'},
+                    {'domain': 'app.example.test', 'ip': '192.0.2.11'}]}
+            elif 'customcname' in url:
+                body = {'data': [
+                    {'domain': 'alias.example.test',
+                     'target': 'web01.example.test'}]}
+            else:
+                body = {'data': []}
+            return (200, json.dumps(body), 0, None, 1, 'ok', None)
+
+        monkeypatch.setattr(proxy, '_http_roundtrip', fake_roundtrip)
+        groups, failures = _pihole_source()
+        assert failures == []
+        items = groups[0][2]
+        assert {item['name'] for item in items} == {
+            'web01.example.test', 'app.example.test',
+            'alias.example.test'}
+        hosts = [item for item in items if item['key'] == 'host:web01.example.test'][0]
+        assert hosts['ips'] == ['192.0.2.10']
+        cname = [item for item in items if item['key'].startswith('cname:')][0]
+        assert cname['extra']['target'] == 'web01.example.test'
+        assert any('customdns' in url and 'auth=tok' in url for url in seen)
+        assert any('customcname' in url and 'auth=tok' in url for url in seen)
+        # The query token is sent to Pi-hole but never stored in the call log.
+        from db.integrations import get_integration_calls
+        assert 'auth=tok' not in json.dumps(get_integration_calls())
+
+    def test_pihole_v5_is_detected_by_the_version_probe(self, monkeypatch):
+        from core.pihole_seed import seed_pihole_tools
+        from core.inventory import _pihole_source
+        from core import integration_proxy as proxy
+
+        create_integration('pihole-v5-root', 'http://192.0.2.73',
+                           'query_token', 'tok', kind='pihole')
+        seed_pihole_tools(get_integration('pihole-v5-root')['id'])
+        seen = []
+
+        def fake_roundtrip(integration, url, body_bytes, headers, method,
+                           max_bytes=0, timeout=None):
+            seen.append(url)
+            if 'api.php?version' in url:
+                body = {'apiVersion': 3}
+            elif 'customdns' in url:
+                body = {'data': [{'domain': 'web01.example.test',
+                                  'ip': '192.0.2.10'}]}
+            else:
+                body = {'data': []}
+            return (200, json.dumps(body), 0, None, 1, 'ok', None)
+
+        monkeypatch.setattr(proxy, '_http_roundtrip', fake_roundtrip)
+        groups, failures = _pihole_source()
+        assert failures == []
+        assert [item['name'] for item in groups[0][2]] == ['web01.example.test']
+        assert any('/admin/api.php?version' in url for url in seen)
+
+    def test_pihole_unknown_shape_is_not_the_raw_body(self, monkeypatch):
+        from core.pihole_seed import seed_pihole_tools
+        from core.inventory import _pihole_source
+        from core import integration_proxy as proxy
+
+        create_integration('pihole-html', 'http://192.0.2.74/admin',
+                           'query_token', 'tok', kind='pihole')
+        seed_pihole_tools(get_integration('pihole-html')['id'])
+
+        def fake_roundtrip(integration, url, body_bytes, headers, method,
+                           max_bytes=0, timeout=None):
+            return (200, '<html><body>not the API</body></html>', 0,
+                    None, 1, 'ok', None)
+
+        monkeypatch.setattr(proxy, '_http_roundtrip', fake_roundtrip)
+        groups, failures = _pihole_source()
+        assert groups == []
+        reason = failures[0][2]
+        assert 'needs Pi-hole v5 or v6 API' in reason
+        assert '<html>' not in reason
+
     def test_pihole_failure_records_the_real_reason(self, monkeypatch):
         from core.pihole_seed import seed_pihole_tools
         from core import integration_proxy as proxy
