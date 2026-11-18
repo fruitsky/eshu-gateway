@@ -1,4 +1,6 @@
 """X11/S2: set an agent's HA permissions in one go."""
+import time
+
 import pytest
 
 from core import allowances as a
@@ -188,3 +190,50 @@ def test_duplicate_and_overlapping_permissions_are_refused(
     assert r.status_code == 400
     assert r.json()['detail']['code'] == 'overlapping_permission'
     assert _get(auth_client, agent_id)['permissions'] == []
+
+
+def test_editing_a_permission_keeps_its_expiry(auth_client, agent_id, ha):
+    expires = int(time.time()) + 3600
+    perm = _perm(['switch.kettle'], expires_at=expires)
+    assert _put(auth_client, agent_id, [perm], version=1).status_code == 200
+    before = _get(auth_client, agent_id)['permissions'][0]
+    assert before['expires_at'] == expires
+    changed = _perm(['switch.kettle'], rate_per_hour=60)
+    r = _put(auth_client, agent_id, [changed], version=2)
+    assert r.status_code == 200, r.text
+    after = _get(auth_client, agent_id)['permissions'][0]
+    assert after['id'] != before['id']
+    assert after['rate_per_hour'] == 60
+    assert after['expires_at'] == expires
+
+
+def test_a_new_permission_gets_the_defaults_and_a_changed_one_keeps_fields(
+        auth_client, agent_id, ha):
+    expires = int(time.time()) + 7200
+    new = _put(auth_client, agent_id, [_perm(['switch.kettle'])], version=1)
+    assert new.status_code == 200, new.text
+    created = _get(auth_client, agent_id)['permissions'][0]
+    assert (created['rate_per_hour'], created['window'],
+            created['expires_at']) == (30, '', 0)
+
+    seeded = _perm(['switch.kettle', 'switch.lamp'], rate_per_hour=5,
+                   window='07:00-23:00', expires_at=expires)
+    assert _put(auth_client, agent_id, [seeded], version=2).status_code == 200
+    before = _get(auth_client, agent_id)['permissions'][0]
+    # Only entities are named; rate, window and expiry are absent and must
+    # keep their stored values rather than fall back to the new defaults.
+    changed = _perm(['switch.kettle', 'switch.lamp', 'switch.other'])
+    r = _put(auth_client, agent_id, [changed], version=3)
+    assert r.status_code == 200, r.text
+    after = _get(auth_client, agent_id)['permissions'][0]
+    assert after['id'] != before['id']
+    assert after['rate_per_hour'] == 5
+    assert after['window'] == '07:00-23:00'
+    assert after['expires_at'] == expires
+
+
+def test_an_invalid_expiry_is_refused(auth_client, agent_id, ha):
+    r = _put(auth_client, agent_id,
+             [_perm(['switch.kettle'], expires_at=-1)], version=1)
+    assert r.status_code == 400
+    assert 'expires_at' in r.text

@@ -22384,8 +22384,20 @@ sections above absorb those answers.
   one transaction across policy, websites and HA permissions; a stale version
   is 409; the same protected/ceiling/never/risk checks run. The website
   section also runs the legacy fetch-access sync after the commit.
-* Config version: `agent_config_state.version`, bumped by S2/S5 and by the
-  legacy policy, website and allowance endpoints.
+* Config version: `agent_config_state.version`. It is bumped inside the
+  core write's transaction — create/revoke/suspend/resume an allowance,
+  accept-join, apply a profile, a label drop or pin refresh, a protection
+  change for every agent holding an affected permission, and a website-policy
+  write — so the approver revoke path and background refreshes invalidate a
+  loaded document too. The endpoint-level bumps were removed.
+* Expiry: `expires_at` is part of the S2/S5 permission and is carried over
+  when a changed permission omits it. A new permission defaults to 0
+  (never), 30/h and any time; a changed permission that omits rate, window or
+  expiry keeps the stored values. An expiry is a non-negative Unix second or
+  0/None.
+* The `/config` follow-up calls `_sync_web_fetch_access()` after a tools or
+  SSH change, not only after a websites change, so the MCP tool list and the
+  fetch caller gate match PUT /api/agents/{id}/policy.
 
 ### Reviewer notes
 
@@ -22412,7 +22424,7 @@ sections above absorb those answers.
 | 27 | X8 | gateway-installer-version | dashboard + gateway | **Code complete** 2026-11-14: on `release/1.4-gw` (BR1 folded; the hash is display-only) | `feat/x8-gateway-installer-version` | X7 | security approved; five buckets sum to the gateway count |
 | 28 | X9 | gated-gateway-files | dashboard + gateway | **Design note** 2026-11-14 (BP2): installer-carried vs authenticated channel files; recommends (b) | `feat/x9-gated-gateway-files` | X7, 1.4 | security sign-off before code |
 | 29 | X10 | approved-windows-modal | dashboard UI | **Merged** 2026-11-17: presets, Once default, typed local HH:MM + duration, live plain-words preview; agent requests use the same preview; not yet deployed | `feat/x10-windows-modal` | — | UI only; no schema or window-meaning change |
-| 31 | X11 | agents-allowances-redesign | dashboard UI + small API | **Stage 2 code complete** 2026-11-18: S1–S5 with tests; operator approved the look with the Agents-tab IA and per-agent JSON | `feat/x11-agents-allowances` | F27, X4, fix/f27-ha-by-kind | security reads S1–S5 (device list, one-go permissions, protected devices, CB1, JSON config); Stage 3 applies section C |
+| 31 | X11 | agents-allowances-redesign | dashboard UI + small API | **Stage 2 review fixes** 2026-11-18: expiry and X4 on edit, core-side config version bumps, tools/SSH web sync; S1–S5 with tests | `feat/x11-agents-allowances` | F27, X4, fix/f27-ha-by-kind | security reads S1–S5 and the four review fixes; Stage 3 applies section C |
 | — | CI fix | ci-environment | gateway + tests | Merged (`f2746ef`); CI pinned to ubuntu-24.04 (`6d58006`) | `fix/ci-environment` | F5 | |
 | — | Buffering | stream-unbuffered | gateway | Merged (`d8d70c2`); S1 tee fix done in Gateway hardening | `fix/stream-unbuffered` | F5 | |
 | — | Gateway hardening | gateway-hardening | gateway | **Merged** 2026-11-12 (AF3 + S1 tee capture; security `c15664e`; AX1/AX2 residuals; BA1 for the next F5/F19 change) | `fix/gateway-hardening` | F19, Buffering | |

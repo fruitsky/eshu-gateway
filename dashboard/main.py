@@ -85,8 +85,7 @@ from database import (
     revoke_agent_token, delete_agent_token,
 )
 from db.agent_policies import (
-    DEFAULT_SSH_MODE, agent_has_activity, bump_agent_config_version,
-    get_agent_config_version, get_agent_policy, set_agent_policy,
+    DEFAULT_SSH_MODE, agent_has_activity, get_agent_policy, set_agent_policy,
     get_agent_policies_map,
 )
 from db.approver_tokens import (
@@ -4541,7 +4540,7 @@ def put_agent_config_endpoint(agent_id: int, payload: AgentConfigPayload,
     # exactly as the legacy website endpoint does. The document itself is
     # already committed; this is the same derived sync the old path performs.
     if (not result.get('preview') and result.get('changed')
-            and any(c.get('section') == 'websites'
+            and any(c.get('section') in ('tools', 'websites')
                     for c in result.get('sections') or [])):
         try:
             _sync_web_fetch_access()
@@ -4586,9 +4585,6 @@ def set_web_fetch_policy_endpoint(principal: str, payload: WebFetchPolicyPayload
         details=(f"Web fetch policy for '{principal}' updated "
                  f"(enabled={policy['enabled']}, allow={len(policy['allow'])}, "
                  f"deny={len(policy['deny'])})"))
-    owner = get_agent_by_name(principal)
-    if owner:
-        bump_agent_config_version(owner['id'])
     _sync_web_fetch_access()
     return policy
 
@@ -4600,9 +4596,6 @@ def delete_web_fetch_policy_endpoint(principal: str, request: Request):
         raise HTTPException(status_code=404, detail="Web fetch policy not found")
     record_audit_event("web_fetch_policy_deleted",
                        details=f"Web fetch policy for '{principal}' deleted")
-    owner = get_agent_by_name(principal)
-    if owner:
-        bump_agent_config_version(owner['id'])
     _sync_web_fetch_access()
     return {"status": "ok"}
 
@@ -5715,7 +5708,6 @@ def create_allowance_endpoint(payload: AllowancePayload, request: Request):
             payload.service, payload.entities, rate_per_hour=payload.rate_per_hour,
             window=payload.window, expires_at=payload.expires_at,
             risk_ack=payload.risk_ack)
-        bump_agent_config_version(payload.agent_id)
         return row
     except allowances.AllowanceError as exc:
         detail = exc.detail
@@ -5742,8 +5734,6 @@ def revoke_allowance_endpoint(aid: int, request: Request):
         return {"status": "ok"}
     row = allowances.get_allowance(aid)
     allowances.revoke_allowance('operator', aid)
-    if row:
-        bump_agent_config_version(row['agent_id'])
     return {"status": "ok"}
 
 
@@ -5754,9 +5744,6 @@ def accept_allowance_join_endpoint(aid: int, request: Request,
     try:
         row = allowances.accept_join('operator', aid,
                                      risk_ack=payload.risk_ack)
-        live = allowances.get_allowance(aid)
-        if live:
-            bump_agent_config_version(live['agent_id'])
         return row
     except allowances.AllowanceError as exc:
         detail = exc.detail
@@ -5771,8 +5758,6 @@ def resume_allowance_endpoint(aid: int, request: Request):
     try:
         row = allowances.get_allowance(aid)
         allowances.resume_allowance('operator', aid)
-        if row:
-            bump_agent_config_version(row['agent_id'])
     except allowances.AllowanceError as exc:
         raise HTTPException(status_code=exc.status, detail=exc.detail)
     return {"status": "ok"}
@@ -5811,7 +5796,6 @@ def apply_profile_endpoint(pid: int, payload: ApplyProfilePayload, request: Requ
         row = allowances.apply_profile('operator', pid, payload.agent_id,
                                        risk_ack=payload.risk_ack,
                                        profile_version=payload.profile_version)
-        bump_agent_config_version(payload.agent_id)
         return row
     except allowances.AllowanceError as exc:
         detail = exc.detail

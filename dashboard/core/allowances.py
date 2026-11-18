@@ -547,9 +547,24 @@ def set_protected_entities(actor, entities):
             _ha_devices.clear_cache()
         except Exception:
             pass
+        import json as _json
+        affected = set()
         with db_conn() as conn:
             try:
                 conn.execute('BEGIN IMMEDIATE')
+                changed = set(added) | set(removed)
+                rows = conn.execute(
+                    'SELECT agent_id, entities_json FROM allowances '
+                    'WHERE revoked_at = 0').fetchall()
+                for row in rows:
+                    try:
+                        pins = _json.loads(row['entities_json'] or '[]')
+                    except (TypeError, ValueError):
+                        pins = []
+                    held = {p.get('entity_id') for p in pins
+                            if isinstance(p, dict) and p.get('entity_id')}
+                    if held & changed:
+                        affected.add(int(row['agent_id']))
                 for e in removed:
                     conn.execute(
                         'DELETE FROM allowance_protected WHERE entity_id = ?', (e,))
@@ -558,6 +573,8 @@ def set_protected_entities(actor, entities):
                         'INSERT OR IGNORE INTO allowance_protected '
                         '(entity_id, added_by, added_at) VALUES (?, ?, ?)',
                         (e, actor, now))
+                for aid in sorted(affected):
+                    _bump_config(conn, aid)
                 conn.commit()
             except Exception:
                 try:
@@ -621,6 +638,18 @@ def _write_ha_pin(conn, aid, iid, fp):
     conn.execute(
         'UPDATE allowances SET ha_integration_id = ?, ha_base_url_fp = ? '
         'WHERE id = ?', (int(iid or 0), fp or '', int(aid)))
+
+
+def _bump_config(conn, agent_id):
+    """Move the agent's config version inside this write's transaction.
+
+    Every allowance write changes what GET /api/agents/{id}/config returns,
+    so a document loaded before it must be a 409. Keeping this in the core
+    writer (not the HTTP endpoint) covers the approver path and background
+    refreshes too.
+    """
+    from db.agent_policies import bump_agent_config_version
+    return bump_agent_config_version(agent_id, conn)
 
 
 _TABLES_READY = set()
@@ -807,7 +836,8 @@ CATALOGUE_BY_DOMAIN = {e['domain']: e for e in CATALOGUE}
 
 
 def _validate_allowance(domain, service, entities, rate_per_hour=0, window='',
-                        risk_ack=False, registry=None, return_risk=False):
+                        expires_at=0, risk_ack=False, registry=None,
+                        return_risk=False):
     """Every save/apply check, in one place, without writing anything.
 
     Returns `(entities, pins)`, or `(entities, pins, risk)` when
@@ -849,6 +879,7 @@ def _validate_allowance(domain, service, entities, rate_per_hour=0, window='',
         _check_window(window)
     if rate_per_hour and not (0 <= int(rate_per_hour) <= 1000):
         raise AllowanceError(400, 'The rate cap is out of range.')
+    _check_expiry(expires_at)
     # BD5: pin the registry entry now; a missing entity refuses the save.
     if registry is None:
         registry = _ha_registry()
@@ -902,7 +933,7 @@ def create_allowance(actor, agent_id, name, domain, service, entities,
     service = (service or '').strip().lower()
     entities, pins = _validate_allowance(
         domain, service, entities, rate_per_hour=rate_per_hour,
-        window=window, risk_ack=risk_ack)
+        window=window, expires_at=expires_at, risk_ack=risk_ack)
     ha_id, ha_fp = _ha_pin()
     now = _now()
     with db_conn() as conn:
@@ -913,6 +944,7 @@ def create_allowance(actor, agent_id, name, domain, service, entities,
             profile_id=profile_id, profile_version=profile_version,
             source_label_id=source_label_id, ha_integration_id=ha_id,
             ha_base_url_fp=ha_fp)
+        _bump_config(conn, agent_id)
         conn.commit()
     record_audit_event('allowance_created',
                        details='allowance #%d by %s: %s %s.%s on %d entities%s'
@@ -926,6 +958,19 @@ def _check_window(window):
     m = _re.fullmatch(r'([01]\d|2[0-3]):([0-5]\d)-([01]\d|2[0-3]):([0-5]\d)', window or '')
     if not m or (m.group(1), m.group(2)) == (m.group(3), m.group(4)):
         raise AllowanceError(400, 'The window must be HH:MM-HH:MM and not empty.')
+
+
+def _check_expiry(expires_at):
+    """A Unix second, 0/None for never; never a negative or non-integer."""
+    if expires_at in (None, ''):
+        return 0
+    try:
+        value = int(expires_at)
+    except (TypeError, ValueError):
+        raise AllowanceError(400, 'expires_at must be a Unix timestamp or 0.')
+    if value < 0:
+        raise AllowanceError(400, 'expires_at must be a Unix timestamp or 0.')
+    return value
 
 
 def _in_window(window, now_ts=None):
@@ -1117,8 +1162,13 @@ def revoke_allowance(actor, aid):
     from db.core import db_conn
     from db.audit import record_audit_event
     with db_conn() as conn:
-        conn.execute('UPDATE allowances SET revoked_at = ? WHERE id = ? AND revoked_at = 0',
-                     (_now(), aid))
+        conn.execute('BEGIN IMMEDIATE')
+        row = conn.execute('SELECT agent_id, revoked_at FROM allowances '
+                           'WHERE id = ?', (aid,)).fetchone()
+        if row and not row['revoked_at']:
+            conn.execute('UPDATE allowances SET revoked_at = ? WHERE id = ? '
+                         'AND revoked_at = 0', (_now(), aid))
+            _bump_config(conn, row['agent_id'])
         conn.commit()
     record_audit_event('allowance_revoked', details='allowance #%d revoked by %s' % (aid, actor))
 
@@ -1127,8 +1177,14 @@ def suspend_allowance(actor, aid, reason):
     from db.core import db_conn
     from db.audit import record_audit_event
     with db_conn() as conn:
-        conn.execute('UPDATE allowances SET suspended_at = ?, suspended_reason = ? '
-                     'WHERE id = ?', (_now(), reason, aid))
+        conn.execute('BEGIN IMMEDIATE')
+        row = conn.execute('SELECT agent_id, suspended_at FROM allowances '
+                           'WHERE id = ?', (aid,)).fetchone()
+        if row and not row['suspended_at']:
+            conn.execute('UPDATE allowances SET suspended_at = ?, '
+                         'suspended_reason = ? WHERE id = ?',
+                         (_now(), reason, aid))
+            _bump_config(conn, row['agent_id'])
         conn.commit()
     record_audit_event('allowance_suspended',
                        details='allowance #%d suspended by %s: %s' % (aid, actor, reason))
@@ -1157,11 +1213,19 @@ def resume_allowance(actor, aid):
                                  'allowance explicitly.' % pin.get('entity_id'))
     ha_id, ha_fp = _ha_pin()
     with db_conn() as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        current = conn.execute('SELECT agent_id, suspended_at FROM allowances '
+                               'WHERE id = ?', (aid,)).fetchone()
+        if not current:
+            conn.rollback()
+            raise AllowanceError(404, 'No such allowance.')
         conn.execute('UPDATE allowances SET suspended_at = 0, suspended_reason = \'\' '
                      'WHERE id = ?', (aid,))
         # S4: an explicit Resume is the operator re-confirming the current HA.
         if ha_id:
             _write_ha_pin(conn, aid, ha_id, ha_fp)
+        if current['suspended_at']:
+            _bump_config(conn, current['agent_id'])
         conn.commit()
     record_audit_event('allowance_resumed', details='allowance #%d resumed by %s' % (aid, actor))
 
@@ -1309,7 +1373,8 @@ def apply_profile(actor, pid, agent_id, risk_ack=False, profile_version=0):
         entities, pins = _validate_allowance(
             domain, service, entities,
             rate_per_hour=t.get('rate_per_hour') or 0,
-            window=t.get('window') or '', risk_ack=risk_ack,
+            window=t.get('window') or '',
+            expires_at=t.get('expires_at') or 0, risk_ack=risk_ack,
             registry=registry)
         prepared.append((t, domain, service, entities, pins))
     # "Update agents": a re-apply replaces this agent's allowances from the
@@ -1349,6 +1414,7 @@ def apply_profile(actor, pid, agent_id, risk_ack=False, profile_version=0):
                     now=now, profile_id=pid, profile_version=wanted_version,
                     source_label_id=t.get('label_id') or '',
                     ha_integration_id=ha_id, ha_base_url_fp=ha_fp))
+            _bump_config(conn, agent_id)
             conn.commit()
         except Exception:
             try:
@@ -1603,7 +1669,9 @@ def refresh_labels(actor='refresh'):
             continue
         if pin[0] and not row.get('ha_integration_id') and not row.get('ha_base_url_fp'):
             with db_conn() as conn:
+                conn.execute('BEGIN IMMEDIATE')
                 _write_ha_pin(conn, row['id'], pin[0], pin[1])
+                _bump_config(conn, row['agent_id'])
                 conn.commit()
         label = row.get('source_label_id') or ''
         cond = _json.loads(row['conditions_json'] or '{}')
@@ -1647,7 +1715,9 @@ def refresh_labels(actor='refresh'):
             if e not in have:
                 pending.append(current[e])
         with db_conn() as conn:
+            conn.execute('BEGIN IMMEDIATE')
             _write_entity_list(conn, row, pins, pending)
+            _bump_config(conn, row['agent_id'])
             conn.commit()
         record_audit_event(
             'allowance_label_refresh',
@@ -1715,6 +1785,7 @@ def accept_join(actor, aid, risk_ack=False):
                 conn.rollback()
                 raise AllowanceError(404, 'No such allowance.')
             _write_entity_list(conn, dict(live), pins, rest)
+            _bump_config(conn, live['agent_id'])
             conn.commit()
         except Exception:
             try:

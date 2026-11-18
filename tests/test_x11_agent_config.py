@@ -1,11 +1,15 @@
 """X11/S5: one JSON document per agent, checked like the GUI and atomic."""
+import time
+
 import pytest
 
 from core import allowances as a
 from db.agent_tokens import create_agent_token
 from db.agent_policies import get_agent_policy, set_agent_policy
-from db.integrations import create_integration
-from db.web_fetch import get_web_fetch_policy
+from db.approver_tokens import create_approver_token
+from db.gateways import register_gateway
+from db.integrations import create_integration, update_integration
+from db.web_fetch import get_web_fetch_policy, set_web_fetch_policy
 
 
 ENTITIES = {
@@ -263,3 +267,107 @@ def test_the_plain_words_name_the_target_only_once(auth_client, agent, ha):
     summary = r.json()['summary']
     assert summary.startswith('household will be able to turn off 1 device.')
     assert summary.count('household') == 1
+
+
+def test_config_edits_keep_an_expiry_and_show_it(auth_client, agent, ha):
+    expires = int(time.time()) + 3600
+    got = _get(auth_client, agent['id'])
+    document = {'schema_version': 1, 'home_assistant': {'permissions': [
+        _perm(expires_at=expires)]}}
+    r = _put(auth_client, agent['id'], document, got['version'])
+    assert r.status_code == 200, r.text
+    first = _get(auth_client, agent['id'])
+    assert first['home_assistant']['permissions'][0]['expires_at'] == expires
+    document = {'schema_version': 1, 'home_assistant': {'permissions': [
+        _perm(rate_per_hour=60)]}}
+    r = _put(auth_client, agent['id'], document, first['version'])
+    assert r.status_code == 200, r.text
+    after = _get(auth_client, agent['id'])
+    permission = after['home_assistant']['permissions'][0]
+    assert permission['rate_per_hour'] == 60
+    assert permission['expires_at'] == expires
+
+
+def test_an_approver_revoke_invalidates_a_loaded_document(
+        auth_client, agent, ha):
+    register_gateway('192.0.2.10', 'web01.example.test', 'v6.0.0')
+    set_agent_policy(agent['id'], tools_mode='allowlist',
+                     tools=['home_assistant_call_service'],
+                     ssh_hosts_allow=['192.0.2.10'], ssh_mode='normal',
+                     test_agent=True)
+    approver, _token_id = create_approver_token(
+        agent['id'], ['hostname'], '192.0.2.10')
+    row = a.create_allowance('operator', agent['id'], 'Plugs', 'switch',
+                             'turn_off', ['switch.kettle'])
+    got = _get(auth_client, agent['id'])
+    before_version = got['version']
+    r = auth_client.post('/api/allowances/%d/revoke' % row['id'],
+                         headers={'Authorization': 'Bearer ' + approver})
+    assert r.status_code == 200, r.text
+    assert a.get_allowance(row['id'])['revoked_at'] > 0
+    assert _get(auth_client, agent['id'])['version'] == before_version + 1
+    r = _put(auth_client, agent['id'], _document(got), before_version)
+    assert r.status_code == 409
+    assert not [x for x in a.list_allowances()
+                if x['agent_id'] == agent['id'] and not x['revoked_at']]
+
+
+def test_a_refresh_suspend_invalidates_a_loaded_document(
+        auth_client, agent, ha):
+    row = a.create_allowance('operator', agent['id'], 'Plugs', 'switch',
+                             'turn_off', ['switch.kettle'])
+    got = _get(auth_client, agent['id'])
+    before_version = got['version']
+    update_integration('Home Assistant',
+                       base_url='http://192.0.2.51:8123/api')
+    a.refresh_labels()
+    assert a.get_allowance(row['id'])['suspended_reason'] == 'ha_changed'
+    assert _get(auth_client, agent['id'])['version'] == before_version + 1
+    r = _put(auth_client, agent['id'], _document(got), before_version)
+    assert r.status_code == 409
+    live = [x for x in a.list_allowances()
+            if x['agent_id'] == agent['id'] and not x['revoked_at']]
+    assert [x['id'] for x in live] == [row['id']]
+
+
+def test_a_label_drop_invalidates_a_loaded_document(
+        auth_client, agent, ha):
+    ha['switch.kettle']['labels'] = ['lbl-x']
+    ha['switch.lamp']['labels'] = ['lbl-x']
+    row = a.create_allowance('operator', agent['id'], 'Label', 'switch',
+                             'turn_off', ['switch.kettle', 'switch.lamp'],
+                             source_label_id='lbl-x')
+    got = _get(auth_client, agent['id'])
+    before_version = got['version']
+    ha['switch.lamp']['labels'] = []
+    a.refresh_labels()
+    live = a.get_allowance(row['id'])
+    assert [p['entity_id'] for p in __import__('json').loads(
+        live['entities_json'])] == ['switch.kettle']
+    assert _get(auth_client, agent['id'])['version'] == before_version + 1
+    r = _put(auth_client, agent['id'], _document(got), before_version)
+    assert r.status_code == 409
+    assert [p['entity_id'] for p in __import__('json').loads(
+        a.get_allowance(row['id'])['entities_json'])] == ['switch.kettle']
+
+
+def test_a_tools_change_runs_the_same_web_sync_as_the_legacy_endpoint(
+        auth_client, agent, ha):
+    set_agent_policy(agent['id'], tools_mode='allowlist',
+                     tools=['home_assistant_call_service', 'web_fetch_url'])
+    set_web_fetch_policy('household', enabled=True,
+                         allow=['example.org'], deny=[])
+    got = _get(auth_client, agent['id'])
+    assert 'web_fetch_url' in got['tools']['allow']
+    document = {'schema_version': 1, 'tools': {
+        'mode': 'allowlist', 'allow': ['home_assistant_call_service']}}
+    r = _put(auth_client, agent['id'], document, got['version'])
+    assert r.status_code == 200, r.text
+    after_config = _get(auth_client, agent['id'])
+    assert 'web_fetch_url' in after_config['tools']['allow']
+    r = auth_client.put('/api/agents/%d/policy' % agent['id'], json={
+        'tools_mode': 'allowlist',
+        'tools': ['home_assistant_call_service']})
+    assert r.status_code == 200, r.text
+    after_legacy = _get(auth_client, agent['id'])
+    assert after_legacy['tools'] == after_config['tools']

@@ -80,6 +80,7 @@ def set_web_fetch_policy(principal: str, enabled: bool = False, allow=None,
             VALUES (?, ?, ?, ?, ?)
         ''', (principal, 1 if enabled else 0, json.dumps(clean_allow),
               json.dumps(clean_deny), int(time.time())))
+        _bump_owner(conn, principal)
         conn.commit()
     return get_web_fetch_policy(principal)
 
@@ -89,8 +90,20 @@ def delete_web_fetch_policy(principal: str) -> bool:
         cursor = conn.cursor()
         cursor.execute('DELETE FROM web_fetch_policies WHERE principal = ?',
                        (principal or '',))
+        changed = cursor.rowcount > 0
+        if changed:
+            _bump_owner(conn, principal)
         conn.commit()
-        return cursor.rowcount > 0
+        return changed
+
+
+def _bump_owner(conn, principal: str):
+    """The policy is part of the agent's JSON config; invalidate it here."""
+    from db.agent_tokens import get_agent_by_name
+    from db.agent_policies import bump_agent_config_version
+    owner = get_agent_by_name(principal)
+    if owner:
+        bump_agent_config_version(owner['id'], conn)
 
 
 def _counter_for(code: str) -> str:

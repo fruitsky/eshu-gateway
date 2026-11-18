@@ -26,7 +26,7 @@ SCHEMA_VERSION = 1
 DEFAULT_RATE_PER_HOUR = 30
 
 _PERMISSION_KEYS = {'name', 'domain', 'service', 'entities', 'label_id',
-                    'rate_per_hour', 'window'}
+                    'rate_per_hour', 'window', 'expires_at'}
 _TOOL_KEYS = {'mode', 'allow', 'approval', 'argument_rules',
               'rate_limit_per_min'}
 _SSH_KEYS = {'mode', 'hosts'}
@@ -94,6 +94,7 @@ def _row_from_db(row):
         'label_id': row.get('source_label_id') or '',
         'rate_per_hour': int(row.get('rate_per_hour') or 0),
         'window': row.get('window') or '',
+        'expires_at': int(row.get('expires_at') or 0),
         'suspended_at': int(row.get('suspended_at') or 0),
         'suspended_reason': row.get('suspended_reason') or '',
         'revoked_at': int(row.get('revoked_at') or 0),
@@ -116,8 +117,8 @@ def _current_ha_rows(agent_id, conn=None):
 def _public_permission(item):
     return {k: item[k] for k in
             ('id', 'version', 'name', 'domain', 'service', 'entities',
-             'label_id', 'rate_per_hour', 'window', 'suspended_at',
-             'suspended_reason')}
+             'label_id', 'rate_per_hour', 'window', 'expires_at',
+             'suspended_at', 'suspended_reason')}
 
 
 def get_ha_permissions(agent_id):
@@ -134,10 +135,12 @@ def _permission_signature(item):
     label = (item.get('label_id') or '').strip()
     if label:
         return ('label', item['domain'], item['service'], label,
-                int(item['rate_per_hour']), item['window'] or '')
+                int(item['rate_per_hour']), item['window'] or '',
+                int(item.get('expires_at') or 0))
     return ('devices', item['domain'], item['service'],
             tuple(sorted(item.get('entities') or [])),
-            int(item['rate_per_hour']), item['window'] or '')
+            int(item['rate_per_hour']), item['window'] or '',
+            int(item.get('expires_at') or 0))
 
 
 def _permission_from_row(row):
@@ -155,6 +158,8 @@ def _normalise_permission(raw, index, registry):
         _error(400, '%s needs a domain and a service.' % where,
                'invalid_permission')
     label = str(raw.get('label_id') or '').strip()
+    provided = {k for k in ('rate_per_hour', 'window', 'expires_at')
+                if k in raw and raw.get(k) is not None}
     rate = raw.get('rate_per_hour', DEFAULT_RATE_PER_HOUR)
     try:
         rate = int(rate)
@@ -162,6 +167,12 @@ def _normalise_permission(raw, index, registry):
         _error(400, '%s.rate_per_hour must be an integer.' % where,
                'invalid_permission')
     window = str(raw.get('window') or '').strip()
+    expires_at = raw.get('expires_at', 0)
+    try:
+        expires_at = int(expires_at or 0)
+    except (TypeError, ValueError):
+        _error(400, '%s.expires_at must be an integer.' % where,
+               'invalid_permission')
     if label:
         # The label is the source of truth; entities may be present in a
         # round-tripped document, but they are not trusted.
@@ -177,7 +188,8 @@ def _normalise_permission(raw, index, registry):
                    'invalid_permission')
     entities, pins, risk = _allowances._validate_allowance(
         domain, service, entities, rate_per_hour=rate, window=window,
-        risk_ack=True, registry=registry, return_risk=True)
+        expires_at=expires_at, risk_ack=True, registry=registry,
+        return_risk=True)
     item = {
         'name': str(raw.get('name') or '')[:80],
         'domain': domain,
@@ -186,6 +198,8 @@ def _normalise_permission(raw, index, registry):
         'label_id': label,
         'rate_per_hour': rate,
         'window': window,
+        'expires_at': expires_at,
+        '_provided': provided,
         'pins': pins,
         'risk': risk,
     }
@@ -247,7 +261,21 @@ def _diff_permissions(current, prepared):
         if candidates:
             old = candidates[0]
             used.add(old['id'])
-            changed.append((old, item))
+            # X4 for list items: a field absent from a changed permission
+            # keeps the stored value. The 30/h and any-time defaults are for
+            # a new permission only.
+            provided = item.get('_provided') or set()
+            if 'rate_per_hour' not in provided:
+                item['rate_per_hour'] = old['rate_per_hour']
+            if 'window' not in provided:
+                item['window'] = old['window']
+            if 'expires_at' not in provided:
+                item['expires_at'] = old.get('expires_at') or 0
+            item['signature'] = _permission_signature(item)
+            if item['signature'] == _permission_from_row(old):
+                keep.append((old, item))
+            else:
+                changed.append((old, item))
             continue
         added.append(item)
     changed_ids = {old['id'] for old, _new in changed}
@@ -299,6 +327,7 @@ def _display_permission(item, names=None):
         'count': len(item.get('entities') or []),
         'rate_per_hour': int(item.get('rate_per_hour') or 0),
         'window': item.get('window') or '',
+        'expires_at': int(item.get('expires_at') or 0),
     }
 
 
@@ -389,6 +418,7 @@ def _write_ha_diff(conn, agent_id, diff, actor, now):
             conn, agent_id, new.get('name'), new['domain'], new['service'],
             new['entities'], new['pins'],
             rate_per_hour=new['rate_per_hour'], window=new['window'],
+            expires_at=new.get('expires_at') or old.get('expires_at') or 0,
             version=int(old.get('version') or 1) + 1, actor=actor, now=now,
             source_label_id=new.get('label_id') or '',
             ha_integration_id=ha_id, ha_base_url_fp=ha_fp))
@@ -401,6 +431,7 @@ def _write_ha_diff(conn, agent_id, diff, actor, now):
             conn, agent_id, new.get('name'), new['domain'], new['service'],
             new['entities'], new['pins'],
             rate_per_hour=new['rate_per_hour'], window=new['window'],
+            expires_at=new.get('expires_at') or 0,
             version=1, actor=actor, now=now,
             source_label_id=new.get('label_id') or '',
             ha_integration_id=ha_id, ha_base_url_fp=ha_fp))
@@ -505,6 +536,7 @@ def _slim_permission(row):
         'service': row['service'],
         'rate_per_hour': int(row.get('rate_per_hour') or 0),
         'window': row.get('window') or '',
+        'expires_at': int(row.get('expires_at') or 0),
     }
     if row.get('label_id'):
         item['label_id'] = row['label_id']

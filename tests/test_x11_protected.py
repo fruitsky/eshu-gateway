@@ -111,3 +111,15 @@ def test_protected_routes_are_operator_only(client):
     assert client.get('/api/allowances/protected').status_code == 401
     assert client.put('/api/allowances/protected',
                       json={'entities': []}).status_code == 401
+
+
+def test_protection_bumps_only_agents_holding_an_affected_permission(
+        auth_client, agent_id, ha):
+    from db.agent_policies import get_agent_config_version
+    a.create_allowance('operator', agent_id, 'Plugs', 'switch',
+                       'turn_off', ['switch.plug'])
+    before = get_agent_config_version(agent_id)
+    a.set_protected_entities('operator', ['switch.other'])
+    assert get_agent_config_version(agent_id) == before
+    a.set_protected_entities('operator', ['switch.plug', 'switch.other'])
+    assert get_agent_config_version(agent_id) == before + 1
