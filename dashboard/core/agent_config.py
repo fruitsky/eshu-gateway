@@ -410,7 +410,21 @@ def _waiting_view(waiting, names):
     } for row in waiting]
 
 
-def _preview_hash(version, prepared, risks, resumes, waiting):
+def _section_fingerprint(state):
+    """The tools, SSH and websites sections exactly as this write will store
+    them, so an S5 preview also binds what the document says outside HA."""
+    payload = {
+        'tools': _policy_doc(state['policy']),
+        'ssh': {'mode': state['policy'].get('ssh_mode') or 'approval',
+                'hosts': list(state['policy'].get('ssh_hosts_allow') or [])},
+        'websites': dict(state['web']),
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(',', ':')).encode('utf-8')
+    ).hexdigest()
+
+
+def _preview_hash(version, prepared, risks, resumes, waiting, sections=None):
     permissions = []
     for item in prepared or []:
         pins = sorted((p.get('entity_id') or '', p.get('registry_id') or '')
@@ -434,6 +448,8 @@ def _preview_hash(version, prepared, risks, resumes, waiting):
         'waiting': sorted(waiting or [],
                           key=lambda d: json.dumps(d, sort_keys=True)),
     }
+    if sections is not None:
+        payload['sections'] = sections
     raw = json.dumps(payload, sort_keys=True, separators=(',', ':'))
     return hashlib.sha256(raw.encode('utf-8')).hexdigest()
 
@@ -939,8 +955,9 @@ def check_or_apply_config(actor, agent_id, document, preview=False,
     changed_sections, summary = _summary_sections(
         agent.get('name') or 'agent', policy_info, web_info, ha_diff, waiting)
     changed = bool(changed_sections)
+    sections = _section_fingerprint(state)
     computed = _preview_hash(current_version, prepared or [], risks,
-                             resumes, waiting)
+                             resumes, waiting, sections=sections)
     result = {
         'agent': {'id': int(agent_id), 'name': agent.get('name') or ''},
         'version': current_version,
@@ -993,7 +1010,8 @@ def check_or_apply_config(actor, agent_id, document, preview=False,
                 tx_resumes = _resumes(tx_diff)
                 tx_waiting = _waiting(tx_diff)
             tx_hash = _preview_hash(tx_version, prepared or [], risks,
-                                    tx_resumes, tx_waiting)
+                                    tx_resumes, tx_waiting,
+                                    sections=sections)
             if preview_hash != tx_hash:
                 conn.rollback()
                 _error(409, 'The preview changed; reload it.',

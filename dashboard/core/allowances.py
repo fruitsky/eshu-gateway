@@ -322,8 +322,29 @@ def apply_ceiling(actor, integration, wanted, risk_ack=False,
             'set_hash': set_hash(integration), 'risky': risky}
 
 
-def ceiling_allows(integration, domain, service):
-    """The one check used at save, apply and match."""
+def _ceiling_denied(service, exempt_words, operator):
+    """The one destructive-word rule, shared by both call styles.
+
+    Built-in words and operator words both cap an action, except for a
+    catalogue row's explicit exemption (cover stop is the safe direction).
+    An operator word always wins, even over an exemption.
+    """
+    words = set(DESTRUCTIVE_WORDS) | set(operator)
+    allowed = set(exempt_words or ()) - set(operator)
+    for token in _tokens(service):
+        if token in words and token not in allowed:
+            return True
+    return False
+
+
+def ceiling_allows(integration, domain, service, conn=None):
+    """The one check used at save, apply and match.
+
+    ``conn`` is optional. When supplied, the ceiling and operator-word rows
+    are read on that transaction so an apply can re-check without a second
+    connection; otherwise the normal cached/read helper is used. The deny
+    rule itself lives in ``_ceiling_denied`` above, once.
+    """
     ensure_initialised()
     if integration != INTEGRATION:
         return False
@@ -333,9 +354,19 @@ def ceiling_allows(integration, domain, service):
         return False
     if never_reason(domain, service):
         return False
-    if is_destructive(service, row['exempt_words']):
+    if conn is None:
+        operator = set(operator_words())
+        if _ceiling_denied(service, row.get('exempt_words'), operator):
+            return False
+        info = _enabled_map(integration).get(catalogue_id)
+        return bool(info and info['enabled'])
+    operator = {r['word'] for r in conn.execute(
+        'SELECT word FROM allowance_never_words').fetchall()}
+    if _ceiling_denied(service, row.get('exempt_words'), operator):
         return False
-    info = _enabled_map(integration).get(catalogue_id)
+    info = conn.execute(
+        'SELECT enabled FROM allowance_ceiling WHERE integration = ? '
+        'AND catalogue_id = ?', (INTEGRATION, catalogue_id)).fetchone()
     return bool(info and info['enabled'])
 
 
@@ -575,14 +606,29 @@ def set_protected_entities(actor, entities):
     added = sorted(after - before)
     removed = sorted(before - after)
     added_registry = {}
+    registry_unreachable = False
     if added:
-        registry = _ha_registry()
-        for e in added:
-            reg = registry.get(e)
-            if not reg:
-                raise AllowanceError(
-                    400, 'HA does not know the protected entity %s.' % e)
-            added_registry[e] = reg.get('id') or ''
+        try:
+            registry = _ha_registry()
+        except AllowanceError as exc:
+            # Security answer (a): protection is a tightening, so it must not
+            # wait for HA. A 503 means the registry could not be read; accept
+            # the entity id now and backfill the registry id on the next
+            # successful refresh. A reachable HA that does not know the id is
+            # still a 400 below.
+            if getattr(exc, 'status', None) != 503:
+                raise
+            registry = None
+            registry_unreachable = True
+        if registry is not None:
+            for e in added:
+                reg = registry.get(e)
+                if not reg:
+                    raise AllowanceError(
+                        400, 'HA does not know the protected entity %s.' % e)
+                added_registry[e] = reg.get('id') or ''
+        else:
+            added_registry = {e: '' for e in added}
     now = _now()
     suspended = []
     if added or removed:
@@ -641,10 +687,12 @@ def set_protected_entities(actor, entities):
                     pass
                 raise
         for e in added:
+            note = ('registry id pending: HA was unreachable'
+                    if registry_unreachable
+                    else 'registry %s' % (added_registry.get(e) or '-'))
             record_audit_event(
                 'allowance_protected_added',
-                details='%s protected by %s (registry %s)'
-                        % (e, actor, added_registry.get(e) or '-'))
+                details='%s protected by %s (%s)' % (e, actor, note))
         for e in removed:
             record_audit_event(
                 'allowance_protected_removed',
@@ -974,21 +1022,12 @@ def _validate_allowance(domain, service, entities, rate_per_hour=0, window='',
 
 
 def _ceiling_allows_conn(conn, domain, service):
-    """The ceiling check on a caller's transaction, without a second DB read."""
-    row = catalogue_row(INTEGRATION, f'{domain}.{service}')
-    if row is None or never_reason(domain, service):
-        return False
-    operator = {r['word'] for r in conn.execute(
-        'SELECT word FROM allowance_never_words').fetchall()}
-    words = set(DESTRUCTIVE_WORDS) | operator
-    allowed = set(row.get('exempt_words') or ()) - operator
-    for token in _tokens(service):
-        if token in words and token not in allowed:
-            return False
-    info = conn.execute(
-        'SELECT enabled FROM allowance_ceiling WHERE integration = ? '
-        'AND catalogue_id = ?', (INTEGRATION, f'{domain}.{service}')).fetchone()
-    return bool(info and info['enabled'])
+    """Compatibility wrapper: the same rule on a caller's transaction.
+
+    Kept so tests and existing call sites can keep injecting this name; the
+    decision itself is ``ceiling_allows(..., conn=conn)``.
+    """
+    return ceiling_allows(INTEGRATION, domain, service, conn=conn)
 
 
 def _recheck_conn(conn, prepared):
@@ -1758,6 +1797,38 @@ def _write_entity_list(conn, row, pins, pending):
          _json.dumps(pending), row['id']))
 
 
+def _backfill_protected_registry(registry):
+    """Fill registry ids captured while HA was unreachable, and audit each.
+
+    Only an empty id is filled, and only when HA now knows the entity. The
+    entity id is never changed, so a permission already suspended by entity
+    id stays suspended; the stored id is what catches a later rename.
+    """
+    from db.core import db_conn
+    from db.audit import record_audit_event
+    filled = []
+    for row in protected_records():
+        if row.get('registry_id'):
+            continue
+        reg = registry.get(row['entity_id'])
+        rid = (reg or {}).get('id') or ''
+        if not rid:
+            continue
+        with db_conn() as conn:
+            conn.execute(
+                'UPDATE allowance_protected SET registry_id = ? '
+                'WHERE entity_id = ? AND registry_id = \'\'',
+                (rid, row['entity_id']))
+            conn.commit()
+        filled.append((row['entity_id'], rid))
+    for entity_id, rid in filled:
+        record_audit_event(
+            'allowance_protected_registry_filled',
+            details='%s registry id filled as %s after a successful refresh'
+                    % (entity_id, rid))
+    return filled
+
+
 def refresh_pins(actor='config-write'):
     """Re-read every live HA allowance's registry pins (BD5/BX2).
 
@@ -1772,6 +1843,7 @@ def refresh_pins(actor='config-write'):
         registry = _ha_registry()
     except AllowanceError as exc:
         return {'checked': 0, 'error': str(exc)}
+    _backfill_protected_registry(registry)
     pin = _ha_pin()
     suspended = []
     for row in _live_ha_allowances():
@@ -1817,6 +1889,7 @@ def refresh_labels(actor='refresh'):
         except Exception:
             pass
         return {'checked': 0, 'error': str(exc)}
+    _backfill_protected_registry(registry)
     pin = _ha_pin()
     protected = protected_records()
     prot_entity = {r['entity_id']: r for r in protected}

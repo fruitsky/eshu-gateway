@@ -468,3 +468,20 @@ def test_agent_config_audit_records_before_and_after(auth_client, agent, ha):
             'websites.allow []->["docs.example.com"]',
             'websites.deny []->["deny.example.com"]'):
         assert expected in details, (expected, details)
+
+
+def test_s5_preview_hash_binds_the_ssh_section(auth_client, agent, ha):
+    got = _get(auth_client, agent['id'])
+    document = _document(got)
+    document['ssh'] = {'mode': 'normal', 'hosts': ['192.0.2.10']}
+    preview = _put(auth_client, agent['id'], document, got['version'],
+                   preview=True)
+    assert preview.status_code == 200, preview.text
+    preview_hash = preview.json()['preview_hash']
+
+    changed = copy.deepcopy(document)
+    changed['ssh']['hosts'] = ['192.0.2.11']
+    r = _put(auth_client, agent['id'], changed, got['version'],
+             preview_hash=preview_hash)
+    assert r.status_code == 409, r.text
+    assert r.json()['detail']['code'] == 'preview_changed'

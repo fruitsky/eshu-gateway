@@ -247,3 +247,42 @@ def test_accept_join_refuses_a_protected_joiner(auth_client, agent_id, ha):
         a.accept_join('operator', aid)
     assert exc.value.extra['code'] == 'protected_device'
     assert 'switch.other' in exc.value.detail
+
+
+def test_protection_with_ha_down_is_accepted_then_backfilled(
+        auth_client, agent_id, ha):
+    """Security answer (a): a tightening must not wait on HA being up."""
+    from db.audit import get_audit_log
+    a.create_allowance('operator', agent_id, 'Plugs', 'switch',
+                       'turn_off', ['switch.plug'])
+    down = a.AllowanceError(503, 'Could not read the HA entity registry')
+    original = a._ha_registry
+    try:
+        a._ha_registry = lambda: (_ for _ in ()).throw(down)
+        result = a.set_protected_entities('operator', ['switch.plug'])
+    finally:
+        a._ha_registry = original
+    assert result['added'] == ['switch.plug']
+    rows = {r['entity_id']: r for r in a.protected_records()}
+    assert rows['switch.plug']['registry_id'] == ''
+    assert a.get_allowance(a.list_allowances()[0]['id'])['suspended_reason'] == 'protected'
+    details = [r['details'] for r in get_audit_log(20)
+               if r['event_type'] == 'allowance_protected_added']
+    assert any('pending' in d and 'unreachable' in d for d in details)
+
+    # The next successful refresh fills the registry id and audits it.
+    a.refresh_labels()
+    rows = {r['entity_id']: r for r in a.protected_records()}
+    assert rows['switch.plug']['registry_id'] == 'reg-plug'
+    events = [r for r in get_audit_log(20)
+              if r['event_type'] == 'allowance_protected_registry_filled']
+    assert events and 'reg-plug' in events[0]['details']
+
+    # A rename after the backfill is still caught by the stored registry id.
+    ha['switch.renamed'] = {'id': 'reg-plug', 'labels': []}
+    del ha['switch.plug']
+    r = auth_client.post('/api/allowances', json={
+        'agent_id': agent_id, 'name': 'Renamed', 'domain': 'switch',
+        'service': 'turn_off', 'entities': ['switch.renamed']})
+    assert r.status_code == 400
+    assert r.json()['detail']['code'] == 'protected_device'

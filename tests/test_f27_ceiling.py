@@ -148,3 +148,32 @@ def test_two_saves_cannot_both_pass_the_compare(auth_client):
     assert r.status_code == 409
     assert r.json()['detail']['code'] == 'ceiling_changed'
     assert 'cover.close_cover' not in a.enabled_ids()
+
+
+def test_the_same_ceiling_rule_serves_both_call_styles(auth_client, monkeypatch):
+    """One deny rule, whether the caller supplies a transaction or not."""
+    from db.core import db_conn
+    import core.allowances as mod
+
+    a.ensure_initialised()
+    extra = {'domain': 'selftest', 'label': 'Self-test', 'default': False,
+             'risk': '', 'actions': {'stop_now': 'Stop now'}}
+    monkeypatch.setattr(mod, 'CATALOGUE', list(mod.CATALOGUE) + [extra])
+    with db_conn() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO allowance_ceiling "
+            "(integration, catalogue_id, enabled, updated_by, updated_at) "
+            "VALUES ('ha', 'selftest.stop_now', 1, 'test', 0)")
+        conn.commit()
+        # A built-in destructive word (`stop`) is refused by both styles.
+        assert a.ceiling_allows('ha', 'selftest', 'stop_now') is False
+        assert a.ceiling_allows('ha', 'selftest', 'stop_now', conn=conn) is False
+
+        # An operator never-word also wins over the built-in stop exemption.
+        conn.execute(
+            "INSERT OR REPLACE INTO allowance_never_words "
+            "(word, added_by, added_at) VALUES ('stop', 'test', 0)")
+        conn.commit()
+        assert a.ceiling_allows('ha', 'media_player', 'media_stop') is False
+        assert a.ceiling_allows('ha', 'media_player', 'media_stop',
+                                conn=conn) is False
