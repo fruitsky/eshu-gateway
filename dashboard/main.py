@@ -368,6 +368,7 @@ _last_enroll_log = {}
 _ENROLL_DEDUP_WINDOW = 5  # seconds
 # BZ2: at most one invalid-approver audit row per client IP per minute.
 _invalid_approver_audit = {}
+_ALLOWANCE_STARTUP_REFRESHED = False
 _INVALID_APPROVER_WINDOW = 60
 _app = app  # keep reference for router includes
 # First-run setup token: printed at startup when no password is set, and
@@ -548,7 +549,16 @@ def on_startup():
         print(f"Eshu Gateway Dashboard {DASHBOARD_VERSION} started (password-protected)")
     # F27: re-resolve every live allowance's label and registry pins (BX2)
     # every five minutes. A failed registry read changes nothing.
+    # Security answer (4): one startup pass backfills unpinned legacy rows
+    # after their registry check, without waiting five minutes.
     def _allowance_refresh_loop():
+        global _ALLOWANCE_STARTUP_REFRESHED
+        if not _ALLOWANCE_STARTUP_REFRESHED:
+            _ALLOWANCE_STARTUP_REFRESHED = True
+            try:
+                allowances.refresh_labels('startup')
+            except Exception:
+                pass
         while True:
             time.sleep(300)
             try:
@@ -869,6 +879,8 @@ class HAPermissionsPayload(BaseModel):
     preview: bool = False
     risk_ack: bool = False
     version: int | None = None
+    preview_hash: str = ''
+    resume_ack: bool = False
 
 
 class AgentConfigPayload(BaseModel):
@@ -876,6 +888,8 @@ class AgentConfigPayload(BaseModel):
     preview: bool = False
     risk_ack: bool = False
     version: int | None = None
+    preview_hash: str = ''
+    resume_ack: bool = False
 
 
 class ProtectedPayload(BaseModel):
@@ -4506,7 +4520,8 @@ def set_agent_ha_permissions_endpoint(agent_id: int,
         return agent_config.apply_ha_permissions(
             'operator', agent_id, payload.permissions,
             preview=payload.preview, risk_ack=payload.risk_ack,
-            version=payload.version)
+            version=payload.version, preview_hash=payload.preview_hash,
+            resume_ack=payload.resume_ack)
     except allowances.AllowanceError as exc:
         detail = {'message': exc.detail, **exc.extra}
         raise HTTPException(status_code=exc.status, detail=detail)
@@ -4532,7 +4547,8 @@ def put_agent_config_endpoint(agent_id: int, payload: AgentConfigPayload,
         result = agent_config.check_or_apply_config(
             'operator', agent_id, payload.document,
             preview=payload.preview, risk_ack=payload.risk_ack,
-            version=payload.version)
+            version=payload.version, preview_hash=payload.preview_hash,
+            resume_ack=payload.resume_ack)
     except allowances.AllowanceError as exc:
         detail = {'message': exc.detail, **exc.extra}
         raise HTTPException(status_code=exc.status, detail=detail)
@@ -5732,7 +5748,6 @@ def revoke_allowance_endpoint(aid: int, request: Request):
                 detail="Allowance is outside the approver token's scope")
         allowances.revoke_allowance('e2e-approver', aid)
         return {"status": "ok"}
-    row = allowances.get_allowance(aid)
     allowances.revoke_allowance('operator', aid)
     return {"status": "ok"}
 
@@ -5756,7 +5771,6 @@ def accept_allowance_join_endpoint(aid: int, request: Request,
 def resume_allowance_endpoint(aid: int, request: Request):
     _check_session(request)
     try:
-        row = allowances.get_allowance(aid)
         allowances.resume_allowance('operator', aid)
     except allowances.AllowanceError as exc:
         raise HTTPException(status_code=exc.status, detail=exc.detail)

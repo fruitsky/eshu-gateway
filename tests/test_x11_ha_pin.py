@@ -92,3 +92,19 @@ def test_an_unpinned_legacy_row_is_backfilled_not_suspended(agent_id, ha):
     live = _row(row['id'])
     assert live['suspended_at'] == 0
     assert live['ha_integration_id'] == get_integration('Home Assistant')['id']
+
+
+def test_a_failed_registry_check_suspends_without_stamping_the_new_ha(
+        agent_id, ha):
+    from db.core import db_conn
+    row = _make(agent_id)
+    with db_conn() as conn:
+        conn.execute('UPDATE allowances SET ha_integration_id = 0, '
+                     'ha_base_url_fp = \'\' WHERE id = ?', (row['id'],))
+        conn.commit()
+    ha['switch.plug']['id'] = 'reg-renamed'
+    a.refresh_labels()
+    live = _row(row['id'])
+    assert live['suspended_reason'] == 'registry_changed'
+    assert live['ha_integration_id'] == 0
+    assert live['ha_base_url_fp'] == ''

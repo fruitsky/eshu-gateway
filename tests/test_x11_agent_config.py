@@ -1,4 +1,5 @@
 """X11/S5: one JSON document per agent, checked like the GUI and atomic."""
+import copy
 import time
 
 import pytest
@@ -29,13 +30,14 @@ def agent():
 def ha(monkeypatch):
     create_integration('Home Assistant', 'http://192.0.2.50:8123/api',
                        'none', 'topsecret', kind='ha')
-    monkeypatch.setattr(a, '_ha_registry', lambda: ENTITIES)
+    ents = copy.deepcopy(ENTITIES)
+    monkeypatch.setattr(a, '_ha_registry', lambda: ents)
     monkeypatch.setattr(
         a, '_risky_classes',
         lambda entities: ([{'entity_id': 'cover.garage',
                             'device_class': 'garage'}]
                           if 'cover.garage' in entities else []))
-    return ENTITIES
+    return ents
 
 
 def _get(c, aid):
@@ -48,10 +50,17 @@ def _document(got):
     return {k: v for k, v in got.items() if k != 'version'}
 
 
-def _put(c, aid, document, version, preview=False, risk_ack=False):
+def _put(c, aid, document, version, preview=False, risk_ack=False,
+         preview_hash=None, resume_ack=False):
+    if not preview and preview_hash is None:
+        previewed = _put(c, aid, document, version, preview=True,
+                         risk_ack=risk_ack)
+        if previewed.status_code == 200:
+            preview_hash = previewed.json().get('preview_hash') or ''
     return c.put('/api/agents/%d/config' % aid, json={
         'document': document, 'version': version,
-        'preview': preview, 'risk_ack': risk_ack})
+        'preview': preview, 'risk_ack': risk_ack,
+        'preview_hash': preview_hash or '', 'resume_ack': resume_ack})
 
 
 def _perm(**kw):
@@ -371,3 +380,91 @@ def test_a_tools_change_runs_the_same_web_sync_as_the_legacy_endpoint(
     assert r.status_code == 200, r.text
     after_legacy = _get(auth_client, agent['id'])
     assert after_legacy['tools'] == after_config['tools']
+
+
+def test_an_apply_without_a_preview_hash_is_refused(auth_client, agent, ha):
+    got = _get(auth_client, agent['id'])
+    r = auth_client.put('/api/agents/%d/config' % agent['id'], json={
+        'document': {'schema_version': 1}, 'version': got['version']})
+    assert r.status_code == 400
+    assert r.json()['detail']['code'] == 'preview_hash_required'
+
+
+def test_the_document_shows_suspension_and_a_changed_edit_needs_resume_ack(
+        auth_client, agent, ha):
+    got = _get(auth_client, agent['id'])
+    perm = _perm(rate_per_hour=5)
+    assert _put(auth_client, agent['id'],
+                {'schema_version': 1, 'home_assistant': {
+                    'permissions': [perm]}}, got['version']).status_code == 200
+    ha['switch.kettle']['id'] = 'reg-kettle-new'
+    a.refresh_labels()
+    suspended = _get(auth_client, agent['id'])
+    row = suspended['home_assistant']['permissions'][0]
+    assert row['suspended_reason'] == 'registry_changed'
+    assert row['suspended_at'] > 0
+    # Leaving it unchanged keeps it suspended.
+    same = _put(auth_client, agent['id'], _document(suspended),
+                suspended['version'])
+    assert same.status_code == 200, same.text
+    assert same.json()['changed'] is False
+    still = _get(auth_client, agent['id'])['home_assistant']['permissions'][0]
+    assert still['suspended_reason'] == 'registry_changed'
+    edit = dict(row)
+    edit['rate_per_hour'] = 60
+    preview = _put(auth_client, agent['id'], {
+        'schema_version': 1,
+        'home_assistant': {'permissions': [edit]},
+    }, suspended['version'], preview=True)
+    assert preview.status_code == 200, preview.text
+    body = preview.json()
+    assert body['resume_ack_required'] is True
+    assert body['resumes'][0]['reason'] == 'registry_changed'
+    refused = _put(auth_client, agent['id'], {
+        'schema_version': 1,
+        'home_assistant': {'permissions': [edit]},
+    }, suspended['version'], preview_hash=body['preview_hash'])
+    assert refused.status_code == 400
+    assert refused.json()['detail']['code'] == 'resume_ack_required'
+    accepted = _put(auth_client, agent['id'], {
+        'schema_version': 1,
+        'home_assistant': {'permissions': [edit]},
+    }, suspended['version'], preview_hash=body['preview_hash'],
+        resume_ack=True)
+    assert accepted.status_code == 200, accepted.text
+    after = _get(auth_client, agent['id'])
+    assert after['home_assistant']['permissions'][0]['suspended_at'] == 0
+    assert after['home_assistant']['permissions'][0]['rate_per_hour'] == 60
+
+
+def test_agent_config_audit_records_before_and_after(auth_client, agent, ha):
+    from db.audit import get_audit_log
+    got = _get(auth_client, agent['id'])
+    document = {
+        'schema_version': 1,
+        'tools': {
+            'mode': 'allowlist',
+            'allow': ['home_assistant_call_service', 'web_fetch_url'],
+            'approval': {'home_assistant_call_service': 'ungated'},
+            'argument_rules': {},
+            'rate_limit_per_min': 30,
+        },
+        'ssh': {'mode': 'normal', 'hosts': ['192.0.2.10']},
+        'websites': {'enabled': True, 'allow': ['docs.example.com'],
+                     'deny': ['deny.example.com']},
+    }
+    r = _put(auth_client, agent['id'], document, got['version'])
+    assert r.status_code == 200, r.text
+    rows = [x for x in get_audit_log(50)
+            if x['event_type'] == 'agent_config_updated']
+    assert rows
+    details = rows[0]['details']
+    for expected in (
+            'tools.mode all->allowlist',
+            'approval[home_assistant_call_service] inherit->ungated',
+            'ssh.mode approval->normal',
+            'ssh.hosts []->["192.0.2.10"]',
+            'websites.enabled False->True',
+            'websites.allow []->["docs.example.com"]',
+            'websites.deny []->["deny.example.com"]'):
+        assert expected in details, (expected, details)

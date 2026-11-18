@@ -22399,6 +22399,39 @@ sections above absorb those answers.
   SSH change, not only after a websites change, so the MCP tool list and the
   fetch caller gate match PUT /api/agents/{id}/policy.
 
+**Security review fixes (2026-11-18, at `1bfa385`).**
+
+* **CB5 — protection disarms.** `allowance_protected` stores the registry id
+  read when the device is protected. In the protect transaction, every live
+  permission holding the entity id or registry id is suspended with reason
+  `protected`; one audit row per permission and one version bump per affected
+  agent. Removing protection resumes nothing, and Resume refuses while any
+  device is still protected. Save, accept-join, label refresh and match all
+  compare both ids; match uses `entities_json` pins and does no HA read.
+* **CB6 — preview binding.** S2 and S5 previews return `preview_hash`, a
+  SHA-256 over the resolved `(entity_id, registry_id)` pairs per permission,
+  the risk list, the resume list, the waiting joiners and the config version.
+  Apply requires it and recomputes it inside the transaction; a mismatch is
+  409 `preview_changed`. Label joiners are listed separately as
+  “will also add, waiting to join”, including for a rate-only edit.
+* **CB7 — suspended edits are resumes.** S2 GET and the S5 document carry
+  `suspended_at` and `suspended_reason`. A changed suspended row appears under
+  `resumes` with its reason; `ha_changed` is marked as re-pinning to the
+  current HA. Apply needs `resume_ack` as well as the preview hash, and an
+  unchanged suspended row stays suspended.
+* **Audit.** `agent_config_updated` records before → after for
+  `tools.mode`, each newly `ungated` approval, `ssh.mode`, `ssh.hosts`,
+  `websites.enabled`, `websites.allow` and `websites.deny`.
+* **Legacy pins.** Startup runs one `refresh_labels('startup')` pass. An
+  unpinned row is stamped only after its registry pins verify; a failed check
+  suspends with `registry_changed` and leaves the HA pin unstamped.
+* **Nits.** A label protected refusal names the device and says to unprotect
+  it or pick devices instead of the label. The ceiling and protected list are
+  rechecked inside the create, S2/S5, profile-apply and accept-join
+  transactions. An explicit `expires_at: 0` clears an expiry; an absent field
+  keeps it. The match-time protected audit row is written only for a runnable
+  hit. The unused allowance lookups in the revoke/resume endpoints are gone.
+
 ### Reviewer notes
 
 ---
@@ -22424,7 +22457,7 @@ sections above absorb those answers.
 | 27 | X8 | gateway-installer-version | dashboard + gateway | **Code complete** 2026-11-14: on `release/1.4-gw` (BR1 folded; the hash is display-only) | `feat/x8-gateway-installer-version` | X7 | security approved; five buckets sum to the gateway count |
 | 28 | X9 | gated-gateway-files | dashboard + gateway | **Design note** 2026-11-14 (BP2): installer-carried vs authenticated channel files; recommends (b) | `feat/x9-gated-gateway-files` | X7, 1.4 | security sign-off before code |
 | 29 | X10 | approved-windows-modal | dashboard UI | **Merged** 2026-11-17: presets, Once default, typed local HH:MM + duration, live plain-words preview; agent requests use the same preview; not yet deployed | `feat/x10-windows-modal` | — | UI only; no schema or window-meaning change |
-| 31 | X11 | agents-allowances-redesign | dashboard UI + small API | **Stage 2 review fixes** 2026-11-18: expiry and X4 on edit, core-side config version bumps, tools/SSH web sync; S1–S5 with tests | `feat/x11-agents-allowances` | F27, X4, fix/f27-ha-by-kind | security reads S1–S5 and the four review fixes; Stage 3 applies section C |
+| 31 | X11 | agents-allowances-redesign | dashboard UI + small API | **Stage 2 security fixes** 2026-11-18: CB5–CB7, before/after audit, check-first legacy pin, and the nits; full gate pending | `feat/x11-agents-allowances` | F27, X4, fix/f27-ha-by-kind | security re-reads CB5–CB7 before merge; Stage 3 applies section C |
 | — | CI fix | ci-environment | gateway + tests | Merged (`f2746ef`); CI pinned to ubuntu-24.04 (`6d58006`) | `fix/ci-environment` | F5 | |
 | — | Buffering | stream-unbuffered | gateway | Merged (`d8d70c2`); S1 tee fix done in Gateway hardening | `fix/stream-unbuffered` | F5 | |
 | — | Gateway hardening | gateway-hardening | gateway | **Merged** 2026-11-12 (AF3 + S1 tee capture; security `c15664e`; AX1/AX2 residuals; BA1 for the next F5/F19 change) | `fix/gateway-hardening` | F19, Buffering | |

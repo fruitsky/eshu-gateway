@@ -9,6 +9,7 @@ The config version is one monotonic counter per agent
 save and by the website-policy endpoints, so an editor opened before any of
 those writes cannot later overwrite them.
 """
+import hashlib
 import json
 import time
 
@@ -26,7 +27,8 @@ SCHEMA_VERSION = 1
 DEFAULT_RATE_PER_HOUR = 30
 
 _PERMISSION_KEYS = {'name', 'domain', 'service', 'entities', 'label_id',
-                    'rate_per_hour', 'window', 'expires_at'}
+                    'rate_per_hour', 'window', 'expires_at',
+                    'suspended_at', 'suspended_reason'}
 _TOOL_KEYS = {'mode', 'allow', 'approval', 'argument_rules',
               'rate_limit_per_min'}
 _SSH_KEYS = {'mode', 'hosts'}
@@ -97,6 +99,7 @@ def _row_from_db(row):
         'expires_at': int(row.get('expires_at') or 0),
         'suspended_at': int(row.get('suspended_at') or 0),
         'suspended_reason': row.get('suspended_reason') or '',
+        'pending': json.loads(row.get('pending_json') or '[]'),
         'revoked_at': int(row.get('revoked_at') or 0),
     }
 
@@ -189,7 +192,7 @@ def _normalise_permission(raw, index, registry):
     entities, pins, risk = _allowances._validate_allowance(
         domain, service, entities, rate_per_hour=rate, window=window,
         expires_at=expires_at, risk_ack=True, registry=registry,
-        return_risk=True)
+        return_risk=True, source_label=label)
     item = {
         'name': str(raw.get('name') or '')[:80],
         'domain': domain,
@@ -351,7 +354,101 @@ def _risk_items(prepared):
     return out
 
 
-def _permission_summary(agent_name, diff):
+def _resumes(diff):
+    out = []
+    for old, new in diff['changed']:
+        if not old.get('suspended_at'):
+            continue
+        reason = old.get('suspended_reason') or 'suspended'
+        out.append({
+            'id': old['id'],
+            'name': new.get('name') or old.get('name') or '',
+            'domain': new['domain'],
+            'service': new['service'],
+            'reason': reason,
+            'suspended_at': int(old.get('suspended_at') or 0),
+            'will_pin_to_current_ha': reason == 'ha_changed',
+        })
+    return out
+
+
+def _waiting(diff):
+    """Label members already held in pending_json, plus members new since."""
+    out = []
+    for old, new in diff['changed']:
+        if not (old.get('label_id') or new.get('label_id')):
+            continue
+        stored = {str(e) for e in old.get('entities') or []
+                  if isinstance(e, str)}
+        current = {p.get('entity_id'): p for p in new.get('pins') or []}
+        waiting = {}
+        for p in old.get('pending') or []:
+            e = p.get('entity_id')
+            if e in current:
+                waiting[e] = {'entity_id': e,
+                              'registry_id': current[e].get('registry_id') or ''}
+        for e, p in current.items():
+            if e not in stored and e not in waiting:
+                waiting[e] = {'entity_id': e,
+                              'registry_id': p.get('registry_id') or ''}
+        if waiting:
+            out.append({
+                'permission_id': old['id'],
+                'name': new.get('name') or old.get('name') or '',
+                'entities': [waiting[e] for e in sorted(waiting)],
+            })
+    return out
+
+
+def _waiting_view(waiting, names):
+    return [{
+        'permission_id': row['permission_id'],
+        'name': row['name'],
+        'entities': [{'entity_id': p['entity_id'],
+                      'name': names.get(p['entity_id'], p['entity_id'])}
+                     for p in row['entities']],
+    } for row in waiting]
+
+
+def _preview_hash(version, prepared, risks, resumes, waiting):
+    permissions = []
+    for item in prepared or []:
+        pins = sorted((p.get('entity_id') or '', p.get('registry_id') or '')
+                      for p in item.get('pins') or [])
+        permissions.append({
+            'domain': item['domain'],
+            'service': item['service'],
+            'label_id': item.get('label_id') or '',
+            'rate_per_hour': int(item.get('rate_per_hour') or 0),
+            'window': item.get('window') or '',
+            'expires_at': int(item.get('expires_at') or 0),
+            'devices': [list(p) for p in pins],
+        })
+    payload = {
+        'version': int(version),
+        'permissions': permissions,
+        'risky': sorted(risks or [],
+                        key=lambda d: json.dumps(d, sort_keys=True)),
+        'resumes': sorted(resumes or [],
+                          key=lambda d: json.dumps(d, sort_keys=True)),
+        'waiting': sorted(waiting or [],
+                          key=lambda d: json.dumps(d, sort_keys=True)),
+    }
+    raw = json.dumps(payload, sort_keys=True, separators=(',', ':'))
+    return hashlib.sha256(raw.encode('utf-8')).hexdigest()
+
+
+def _waiting_text(waiting, names):
+    if not waiting:
+        return ''
+    parts = []
+    for row in waiting:
+        for p in row['entities']:
+            parts.append(names.get(p['entity_id'], p['entity_id']))
+    return ' Will also add, waiting to join: %s.' % ', '.join(parts)
+
+
+def _permission_summary(agent_name, diff, waiting=None):
     added = diff['added']
     changed = diff['changed']
     removed = diff['removed']
@@ -391,6 +488,7 @@ def _permission_summary(agent_name, diff):
         text += ' Added: %s.' % ', '.join(labels)
     if keep := diff['keep']:
         text += ' Unchanged: %d.' % len(keep)
+    text += _waiting_text(waiting or [], names)
     return text
 
 
@@ -406,7 +504,8 @@ def _permission_view(diff, names):
     }
 
 
-def _write_ha_diff(conn, agent_id, diff, actor, now):
+def _write_ha_diff(conn, agent_id, diff, actor, now, prepared=None):
+    _allowances._recheck_conn(conn, prepared or [])
     ha_id, ha_fp = _allowances._ha_pin()
     revoked = []
     created = []
@@ -418,7 +517,7 @@ def _write_ha_diff(conn, agent_id, diff, actor, now):
             conn, agent_id, new.get('name'), new['domain'], new['service'],
             new['entities'], new['pins'],
             rate_per_hour=new['rate_per_hour'], window=new['window'],
-            expires_at=new.get('expires_at') or old.get('expires_at') or 0,
+            expires_at=int(new.get('expires_at') or 0),
             version=int(old.get('version') or 1) + 1, actor=actor, now=now,
             source_label_id=new.get('label_id') or '',
             ha_integration_id=ha_id, ha_base_url_fp=ha_fp))
@@ -438,45 +537,65 @@ def _write_ha_diff(conn, agent_id, diff, actor, now):
     return revoked, created
 
 
-def _audit_ha(actor, agent_id, revoked, created):
+def _audit_ha(actor, agent_id, revoked, created, resumes=None):
     from db.audit import record_audit_event
-    if not revoked and not created:
+    if not revoked and not created and not resumes:
         return
+    resumed = ', '.join(
+        '#%s:%s' % (r.get('id'), r.get('reason') or 'suspended')
+        for r in resumes or []) or 'none'
     record_audit_event(
         'allowance_ha_permissions_applied',
-        details='agent #%d HA permissions by %s: revoked %s, created %s'
+        details='agent #%d HA permissions by %s: revoked %s, created %s, '
+                'resumed %s'
                 % (int(agent_id), actor,
                    ','.join(map(str, revoked)) or 'none',
-                   ','.join(map(str, created)) or 'none'))
+                   ','.join(map(str, created)) or 'none', resumed))
 
 
 def apply_ha_permissions(actor, agent_id, permissions, preview=False,
-                         risk_ack=False, version=None):
+                         risk_ack=False, version=None, preview_hash=None,
+                         resume_ack=False):
     agent = _agent_or_404(agent_id)
-    _check_version(agent_id, version)
+    current_version = _check_version(agent_id, version)
     registry = _allowances._ha_registry()
     prepared = prepare_permissions(permissions, registry=registry)
     current = _current_ha_rows(agent_id)
     diff = _diff_permissions(current, prepared)
     names = _name_map(prepared + current)
     risks = _risk_items(prepared)
+    resumes = _resumes(diff)
+    waiting = _waiting(diff)
     changed = bool(diff['added'] or diff['changed'] or diff['removed'])
-    summary = _permission_summary(agent.get('name') or 'agent', diff)
+    summary = _permission_summary(agent.get('name') or 'agent', diff, waiting)
+    computed = _preview_hash(current_version, prepared, risks, resumes, waiting)
     if preview:
         return {
             'preview': True, 'agent': {'id': int(agent_id),
                                        'name': agent.get('name') or ''},
-            'version': get_agent_config_version(agent_id),
+            'version': current_version,
             'changed': changed, 'summary': summary,
             'permissions': _permission_view(diff, names),
             'risky': risks, 'risk_ack_required': bool(risks),
+            'resumes': resumes, 'resume_ack_required': bool(resumes),
+            'waiting': _waiting_view(waiting, names),
+            'preview_hash': computed,
         }
+    if not preview_hash:
+        _error(400, 'preview_hash is required: reload the preview.',
+               'preview_hash_required')
+    if preview_hash != computed:
+        _error(409, 'The preview changed; reload it.', 'preview_changed')
     if risks and not risk_ack:
         _error(400, 'This change needs an explicit risk confirmation.',
                'risk_ack_required', risky=risks)
+    if resumes and not resume_ack:
+        _error(400, 'This change resumes a suspended permission; confirm it.',
+               'resume_ack_required', resumes=resumes)
     if not changed:
-        return {'status': 'ok', 'version': get_agent_config_version(agent_id),
+        return {'status': 'ok', 'version': current_version,
                 'changed': False, 'summary': summary,
+                'preview_hash': computed,
                 'permissions': [_public_permission(r)
                                 for r in _current_ha_rows(agent_id)]}
     import db.core as _core
@@ -484,15 +603,28 @@ def apply_ha_permissions(actor, agent_id, permissions, preview=False,
     with _core.db_conn() as conn:
         try:
             conn.execute('BEGIN IMMEDIATE')
-            current_version = _version_row(conn, agent_id)
-            if int(version) != current_version:
+            tx_version = _version_row(conn, agent_id)
+            if int(version) != tx_version:
                 conn.rollback()
                 _error(409, 'The agent config changed since it was loaded; '
-                       'reload it.', 'config_changed', version=current_version)
+                       'reload it.', 'config_changed', version=tx_version)
             tx_current = _current_ha_rows(agent_id, conn=conn)
             tx_diff = _diff_permissions(tx_current, prepared)
+            tx_resumes = _resumes(tx_diff)
+            tx_waiting = _waiting(tx_diff)
+            tx_hash = _preview_hash(tx_version, prepared, risks,
+                                    tx_resumes, tx_waiting)
+            if preview_hash != tx_hash:
+                conn.rollback()
+                _error(409, 'The preview changed; reload it.',
+                       'preview_changed')
+            if tx_resumes and not resume_ack:
+                conn.rollback()
+                _error(400, 'This change resumes a suspended permission; '
+                       'confirm it.', 'resume_ack_required',
+                       resumes=tx_resumes)
             revoked, created = _write_ha_diff(
-                conn, agent_id, tx_diff, actor, now)
+                conn, agent_id, tx_diff, actor, now, prepared=prepared)
             new_version = bump_agent_config_version(agent_id, conn)
             conn.commit()
         except Exception:
@@ -501,9 +633,9 @@ def apply_ha_permissions(actor, agent_id, permissions, preview=False,
             except Exception:
                 pass
             raise
-    _audit_ha(actor, agent_id, revoked, created)
+    _audit_ha(actor, agent_id, revoked, created, resumes=resumes)
     return {'status': 'ok', 'version': new_version, 'changed': True,
-            'summary': summary,
+            'summary': summary, 'preview_hash': computed,
             'permissions': [_public_permission(r)
                             for r in _current_ha_rows(agent_id)]}
 
@@ -537,6 +669,8 @@ def _slim_permission(row):
         'rate_per_hour': int(row.get('rate_per_hour') or 0),
         'window': row.get('window') or '',
         'expires_at': int(row.get('expires_at') or 0),
+        'suspended_at': int(row.get('suspended_at') or 0),
+        'suspended_reason': row.get('suspended_reason') or '',
     }
     if row.get('label_id'):
         item['label_id'] = row['label_id']
@@ -587,7 +721,8 @@ def _write_web(conn, principal, web):
          int(time.time())))
 
 
-def _summary_sections(agent_name, policy_info, web_info, ha_diff):
+def _summary_sections(agent_name, policy_info, web_info, ha_diff,
+                      waiting=None):
     changed = []
     if policy_info:
         tools = policy_info['tools']
@@ -612,7 +747,7 @@ def _summary_sections(agent_name, policy_info, web_info, ha_diff):
         })
     ha_summary = ''
     if ha_diff is not None:
-        ha_summary = _permission_summary(agent_name, ha_diff)
+        ha_summary = _permission_summary(agent_name, ha_diff, waiting)
         if (ha_diff['added'] or ha_diff['changed'] or ha_diff['removed']):
             changed.append({'section': 'home_assistant',
                             'summary': ha_summary})
@@ -658,7 +793,7 @@ def _validate_config(agent_id, document, version):
         ssh_mode = ssh.get('mode', current_policy['ssh_mode'])
         hosts = ssh.get('hosts', current_policy['ssh_hosts_allow'])
         try:
-            clean = validate_policy(mode, allow, approval, rules, rate,
+            clean = validate_policy(mode, allow, rules, approval, rate,
                                     hosts, ssh_mode)
         except ValueError as exc:
             _error(400, str(exc), 'invalid_config')
@@ -705,6 +840,7 @@ def _validate_config(agent_id, document, version):
         'policy_touched': policy_touched,
         'policy_changed': policy_touched and _policy_changed(current_policy, clean),
         'web': web,
+        'current_web': current_web,
         'web_touched': web_touched,
         'web_changed': web_touched and _web_changed(current_web, web),
         'ha_touched': ha_touched,
@@ -717,8 +853,50 @@ def _ha_risk(prepared):
     return _risk_items(prepared or [])
 
 
+def _audit_changes(current_policy, policy, policy_touched, current_web, state):
+    """Before → after for the widening fields Security asked for."""
+    import json as _json
+    parts = []
+    if policy_touched:
+        if policy['tools_mode'] != current_policy.get('tools_mode'):
+            parts.append('tools.mode %s->%s'
+                         % (current_policy.get('tools_mode'),
+                            policy['tools_mode']))
+        if policy['ssh_mode'] != current_policy.get('ssh_mode'):
+            parts.append('ssh.mode %s->%s'
+                         % (current_policy.get('ssh_mode'),
+                            policy['ssh_mode']))
+        old_hosts = list(current_policy.get('ssh_hosts_allow') or [])
+        new_hosts = list(policy.get('ssh_hosts_allow') or [])
+        if old_hosts != new_hosts:
+            parts.append('ssh.hosts %s->%s'
+                         % (_json.dumps(old_hosts),
+                            _json.dumps(new_hosts)))
+        old_approval = current_policy.get('approval') or {}
+        for key, value in (policy.get('approval') or {}).items():
+            if value == 'ungated' and old_approval.get(key) != 'ungated':
+                parts.append('approval[%s] %s->ungated'
+                             % (key, old_approval.get(key) or 'inherit'))
+    if state['web_changed']:
+        old = _web_doc(current_web)
+        new = state['web']
+        if old['enabled'] != new['enabled']:
+            parts.append('websites.enabled %s->%s'
+                         % (old['enabled'], new['enabled']))
+        if old['allow'] != new['allow']:
+            parts.append('websites.allow %s->%s'
+                         % (_json.dumps(old['allow']),
+                            _json.dumps(new['allow'])))
+        if old['deny'] != new['deny']:
+            parts.append('websites.deny %s->%s'
+                         % (_json.dumps(old['deny']),
+                            _json.dumps(new['deny'])))
+    return '; '.join(parts)
+
+
 def check_or_apply_config(actor, agent_id, document, preview=False,
-                          risk_ack=False, version=None):
+                          risk_ack=False, version=None, preview_hash=None,
+                          resume_ack=False):
     state = _validate_config(agent_id, document, version)
     agent = state['agent']
     policy = state['policy']
@@ -751,30 +929,47 @@ def check_or_apply_config(actor, agent_id, document, preview=False,
         web_info = dict(state['web'])
         web_info['changed'] = state['web_changed']
     ha_diff = state['ha_diff']
-    names = _name_map((state['prepared'] or []) +
-                      _current_ha_rows(agent_id))
+    prepared = state['prepared']
+    names = _name_map((prepared or []) + _current_ha_rows(agent_id))
     ha_view = (_permission_view(ha_diff, names) if ha_diff is not None else None)
-    risks = _ha_risk(state['prepared'])
+    risks = _ha_risk(prepared)
+    resumes = _resumes(ha_diff) if ha_diff is not None else []
+    waiting = _waiting(ha_diff) if ha_diff is not None else []
+    current_version = get_agent_config_version(agent_id)
     changed_sections, summary = _summary_sections(
-        agent.get('name') or 'agent', policy_info, web_info, ha_diff)
+        agent.get('name') or 'agent', policy_info, web_info, ha_diff, waiting)
     changed = bool(changed_sections)
+    computed = _preview_hash(current_version, prepared or [], risks,
+                             resumes, waiting)
     result = {
         'agent': {'id': int(agent_id), 'name': agent.get('name') or ''},
-        'version': get_agent_config_version(agent_id),
+        'version': current_version,
         'preview': bool(preview),
         'changed': changed,
         'summary': summary,
         'sections': changed_sections,
         'risky': risks,
         'risk_ack_required': bool(risks),
+        'resumes': resumes,
+        'resume_ack_required': bool(resumes),
+        'waiting': _waiting_view(waiting, names),
+        'preview_hash': computed,
     }
     if ha_view is not None:
         result['home_assistant'] = ha_view
     if preview:
         return result
+    if not preview_hash:
+        _error(400, 'preview_hash is required: reload the preview.',
+               'preview_hash_required')
+    if preview_hash != computed:
+        _error(409, 'The preview changed; reload it.', 'preview_changed')
     if risks and not risk_ack:
         _error(400, 'This change needs an explicit risk confirmation.',
                'risk_ack_required', risky=risks)
+    if resumes and not resume_ack:
+        _error(400, 'This change resumes a suspended permission; confirm it.',
+               'resume_ack_required', resumes=resumes)
     if not changed:
         result['status'] = 'ok'
         result['document'] = get_agent_config(agent_id)
@@ -784,22 +979,39 @@ def check_or_apply_config(actor, agent_id, document, preview=False,
     with _core.db_conn() as conn:
         try:
             conn.execute('BEGIN IMMEDIATE')
-            current_version = _version_row(conn, agent_id)
-            if int(version) != current_version:
+            tx_version = _version_row(conn, agent_id)
+            if int(version) != tx_version:
                 conn.rollback()
                 _error(409, 'The agent config changed since it was loaded; '
-                       'reload it.', 'config_changed', version=current_version)
+                       'reload it.', 'config_changed', version=tx_version)
+            tx_diff = None
+            tx_resumes = []
+            tx_waiting = []
+            if state['ha_touched'] and prepared is not None:
+                tx_current = _current_ha_rows(agent_id, conn=conn)
+                tx_diff = _diff_permissions(tx_current, prepared)
+                tx_resumes = _resumes(tx_diff)
+                tx_waiting = _waiting(tx_diff)
+            tx_hash = _preview_hash(tx_version, prepared or [], risks,
+                                    tx_resumes, tx_waiting)
+            if preview_hash != tx_hash:
+                conn.rollback()
+                _error(409, 'The preview changed; reload it.',
+                       'preview_changed')
+            if tx_resumes and not resume_ack:
+                conn.rollback()
+                _error(400, 'This change resumes a suspended permission; '
+                       'confirm it.', 'resume_ack_required',
+                       resumes=tx_resumes)
             revoked = []
             created = []
             if state['policy_changed']:
                 write_policy_row(conn, agent_id, policy)
             if state['web_changed']:
                 _write_web(conn, agent.get('name') or '', state['web'])
-            if state['ha_touched'] and state['prepared'] is not None:
-                tx_current = _current_ha_rows(agent_id, conn=conn)
-                tx_diff = _diff_permissions(tx_current, state['prepared'])
+            if state['ha_touched'] and prepared is not None:
                 revoked, created = _write_ha_diff(
-                    conn, agent_id, tx_diff, actor, now)
+                    conn, agent_id, tx_diff, actor, now, prepared=prepared)
             new_version = bump_agent_config_version(agent_id, conn)
             conn.commit()
         except Exception:
@@ -809,13 +1021,16 @@ def check_or_apply_config(actor, agent_id, document, preview=False,
                 pass
             raise
     from db.audit import record_audit_event
-    if revoked or created:
-        _audit_ha(actor, agent_id, revoked, created)
+    if revoked or created or resumes:
+        _audit_ha(actor, agent_id, revoked, created, resumes=resumes)
+    changes = _audit_changes(current_policy, policy, state['policy_touched'],
+                             state['current_web'], state)
     record_audit_event(
         'agent_config_updated',
-        details='agent #%d config by %s: %s'
+        details='agent #%d config by %s: %s; changes: %s'
                 % (int(agent_id), actor,
-                   '; '.join(c['section'] for c in changed_sections) or 'none'))
+                   '; '.join(c['section'] for c in changed_sections) or 'none',
+                   changes or 'none'))
     result['status'] = 'ok'
     result['version'] = new_version
     result['document'] = get_agent_config(agent_id)
