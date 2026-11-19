@@ -21961,3 +21961,29 @@ reviewer; its code still waits for its turn.
 * Retire the first once the fleet is past BJ2, for example in the X9
   legacy retirement.
 * Give the second a body or header form, and move E2E-1's C11 onto it.
+
+### Security review of the audit migration (`fix/window-token-audit-migration` @ b3e3316)
+
+**Approved to merge.** Code text read only; nothing was run. It follows
+the migration answer at `79da792` point by point.
+* **Scope.** Only the four window event types are touched. Rows that
+  already carry `token_fp=` are skipped.
+* **Matching.**
+  * `token=([A-Za-z0-9]{1,64})` (not followed by another token character)
+    and `Token <t> claimed` match only the gateway's token charset.
+  * `?` and empty placeholders do not match, so they stay as they are.
+  * Any text around the token is left untouched.
+* **Run once.**
+  * The rewrite and the `meta` flag are written in one `BEGIN IMMEDIATE`.
+  * A second process that starts at the same time waits on the lock,
+    finds every row already fingerprinted, and changes nothing.
+  * The migration's own audit row carries only a count.
+* **CHANGELOG.** It carries the "delete and re-create your active windows
+  if you shared an export" line.
+
+**Nit.** `init_db()` calls the migration without a guard, so any error in
+it, such as a locked database at start-up, stops the dashboard from
+starting.
+* Catch the exception, log it, and continue. The flag is not set on
+  failure, so the next start retries.
+* The masking matters, but it is not worth an outage.
