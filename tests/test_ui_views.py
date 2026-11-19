@@ -21,6 +21,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 HARNESS = ROOT / "tests" / "ui" / "ui_views.cjs"
+X11_HARNESS = ROOT / "tests" / "ui" / "x11_check.cjs"
 PASSWORD = "synthetic-ui-pass"
 
 
@@ -38,6 +39,7 @@ def ui_server(tmp_path):
     env = dict(os.environ)
     env["ESHU_UI_DB"] = str(tmp_path / "ui.db")
     env["PYTHONPATH"] = str(ROOT / "dashboard")
+    env["ESHU_UI_SYNTHETIC_HA"] = "1"
     seeded = subprocess.run([sys.executable, str(ROOT / "tests" / "ui" / "seed_ui.py")],
                             env=env, capture_output=True, text=True, timeout=120)
     assert seeded.returncode == 0, seeded.stderr[-2000:]
@@ -79,3 +81,15 @@ def test_every_view_fits_and_meets_aa(ui_server):
         pytest.skip("headless Chromium not available: " + proc.stderr.strip()[:200])
     assert proc.returncode == 0, proc.stderr[-4000:]
     assert "ui_views: ok" in proc.stdout
+
+
+def test_x11_agents_ui(ui_server):
+    env = dict(os.environ)
+    env["ESHU_UI_URL"] = ui_server
+    env["ESHU_UI_PASSWORD"] = PASSWORD
+    proc = subprocess.run([shutil.which("node"), str(X11_HARNESS)], env=env,
+                          capture_output=True, text=True, timeout=240)
+    if proc.returncode == 2:
+        pytest.skip("headless Chromium not available: " + proc.stderr.strip()[:200])
+    assert proc.returncode == 0, proc.stderr[-6000:]
+    assert "x11_check: ok" in proc.stdout

@@ -22,7 +22,16 @@ from db import (agent_policies, agent_tokens, conclusions, gateways,  # noqa: E4
                 sessions, web_fetch)
 from db import auth as db_auth  # noqa: E402
 from core.utils import _hash_password  # noqa: E402
+from core import allowances as allowance_core  # noqa: E402
+from core import ha_devices  # noqa: E402
 from db.core import db_conn  # noqa: E402
+
+sys.path.insert(0, os.path.join(ROOT, "tests", "ui"))
+import synthetic_ha  # noqa: E402
+
+ha_devices.clear_cache()
+allowance_core._ha_registry = synthetic_ha.registry
+allowance_core._risky_classes = synthetic_ha.risky_classes
 
 now = int(time.time())
 db_auth.set_password_hash(_hash_password("synthetic-ui-pass"))
@@ -98,6 +107,31 @@ integrations.create_tool(ha, "ha_backup_create", "Create a backup", "POST",
                          "/api/services/backup/create", [], "{}", read_only=False)
 integrations.create_integration("Pi-hole", "http://192.0.2.31", "bearer",
                                 "synthetic", kind="pihole")
+
+# X11: synthetic permissions for the real Agents view. One pick permission,
+# one label-followed permission, a normal light permission, and one paused
+# permission so the banner and Resume path are both visible.
+allowance_core.ensure_initialised()
+allowance_core.apply_ceiling(
+    "seed-ui", allowance_core.INTEGRATION,
+    allowance_core.enabled_ids() + ["cover.open_cover", "cover.close_cover"],
+    risk_ack=True, expected_hash=allowance_core.set_hash())
+allowance_core.set_protected_entities("seed-ui", ["switch.plug"])
+allowance_core.create_allowance(
+    "seed-ui", agents["ops-agent"], "Living room plugs", "switch",
+    "turn_off", ["switch.lamp", "switch.kettle"], rate_per_hour=30)
+allowance_core.create_allowance(
+    "seed-ui", agents["ops-agent"], "Living room lights", "switch",
+    "turn_on", ["switch.lamp"], source_label_id="lbl-lights",
+    rate_per_hour=30)
+allowance_core.create_allowance(
+    "seed-ui", agents["ops-agent"], "Ceiling light", "light",
+    "turn_off", ["light.ceiling"], expires_at=now + 86400,
+    rate_per_hour=30)
+paused = allowance_core.create_allowance(
+    "seed-ui", agents["ops-agent"], "Office heater", "switch",
+    "toggle", ["switch.office_heater"], rate_per_hour=30)
+allowance_core.suspend_allowance("seed-ui", paused["id"], "registry_changed")
 
 policies.update_policy("exact_whitelist", "uptime\ndf -h /\nfree -m")
 policies.update_policy("regex_whitelist", r"^systemctl status [a-z0-9_.@-]+$")

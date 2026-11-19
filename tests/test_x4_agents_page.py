@@ -132,19 +132,18 @@ def test_x4_nav_has_agents_and_controls_is_renamed():
     assert 'id="view-controls"' in html
 
 
-def test_x4_one_agents_view_holds_tokens_the_policy_the_web_panel_and_activity():
+def test_x4_one_agents_view_holds_the_agent_work():
     html = _read(HTML)
     view = html[html.index('id="view-agents"'):]
     view = view[:view.index('<!-- CONTROLS VIEW')]
-    for needed in ('id="agent-token-list"', 'id="agent-token-name"',
-                   'id="agent-detail"', 'id="pol-pane-tools"', 'id="pol-pane-rules"',
-                   'id="pol-pane-ssh"', 'id="pol-pane-advanced"',
-                   'id="wf-policy-widget"', 'id="agent-activity-body"'):
-        assert needed in view, needed
-    # The policy editor is not a modal any more, and Settings/Integrations only
-    # point at the page.
+    assert 'id="x11-root"' in view
+    # The shell mounts one view; the tabs, editor and cards live in x11.js.
+    js = _read('dashboard/static/x11.js')
+    for needed in ('x11-sec-overview', 'x11-sec-tools', 'x11-sec-ssh',
+                   'x11-sec-websites', 'x11-sec-activity', 'x11-sec-json',
+                   'agent-test-toggle', 'approver-token-list'):
+        assert needed in js, needed
     assert 'agent-policy-modal' not in html
-    assert 'class="pol-card pol-card-paged"' in html
     integrations = html[html.index('id="view-integrations"'):]
     integrations = integrations[:integrations.index('id="view-settings"')]
     assert 'agent-token-list' not in integrations
@@ -155,20 +154,17 @@ def test_x4_one_agents_view_holds_tokens_the_policy_the_web_panel_and_activity()
     assert "switchView('agents')" in controls
 
 
-def test_x4_each_section_saves_only_its_own_keys():
-    js = _read(JS)
-    block = js[js.index('function agentSectionPayload(kind)'):]
-    block = block[:block.index('async function saveAgentSection')]
-    assert "if (kind === 'tools') return { tools_mode: all.tools_mode, tools: all.tools };" in block
-    assert "if (kind === 'ssh') return { ssh_hosts_allow: all.ssh_hosts_allow, ssh_mode: all.ssh_mode };" in block
-    assert "if (kind === 'rules') return {" in block
-    assert "rate_limit_per_min: all.rate_limit_per_min" in block
-    # Advanced saves the JSON only, without rewriting it from the Rules tab.
-    adv = block[block.index("if (kind === 'advanced')"):block.index('const all')]
-    assert "return { arg_policy: doc.arg_policy || {}, approval: doc.approval || {} }" in adv
+def test_x4_absent_fields_still_keep_their_stored_value():
+    js = _read('dashboard/static/x11.js')
+    # X11 sends the whole document through S5, whose merge keeps every absent
+    # field. The preview hash binds what was checked to what is applied.
+    assert 'function docOf(cfg)' in js
+    assert "preview: true" in js
+    assert 'preview_hash' in js
+    assert 'risk_ack' in js and 'resume_ack' in js
+    assert 'home_assistant' in js and 'websites' in js and 'ssh' in js
     html = _read(HTML)
-    for kind in ('tools', 'rules', 'ssh', 'advanced'):
-        assert "saveAgentSection('%s')" % kind in html
+    assert 'x11.js' in html
 
 
 def test_x4_the_details_are_reachable_from_every_entry_point():

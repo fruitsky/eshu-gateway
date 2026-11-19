@@ -22457,7 +22457,7 @@ sections above absorb those answers.
 | 27 | X8 | gateway-installer-version | dashboard + gateway | **Code complete** 2026-11-14: on `release/1.4-gw` (BR1 folded; the hash is display-only) | `feat/x8-gateway-installer-version` | X7 | security approved; five buckets sum to the gateway count |
 | 28 | X9 | gated-gateway-files | dashboard + gateway | **Design note** 2026-11-14 (BP2): installer-carried vs authenticated channel files; recommends (b) | `feat/x9-gated-gateway-files` | X7, 1.4 | security sign-off before code |
 | 29 | X10 | approved-windows-modal | dashboard UI | **Merged** 2026-11-17: presets, Once default, typed local HH:MM + duration, live plain-words preview; agent requests use the same preview; not yet deployed | `feat/x10-windows-modal` | — | UI only; no schema or window-meaning change |
-| 31 | X11 | agents-allowances-redesign | dashboard UI + small API | **Stage 2 security fixes** 2026-11-18: CB5–CB7, before/after audit, check-first legacy pin, and the nits; full gate pending | `feat/x11-agents-allowances` | F27, X4, fix/f27-ha-by-kind | security re-reads CB5–CB7 before merge; Stage 3 applies section C |
+| 31 | X11 | agents-allowances-redesign | dashboard UI + small API | **Operator polish in review** 2026-11-19: one-section editor with `#agent/<id>/<section>` deep links, danger zone, collapsible tools, grouped two-row device grid and phone cards, the two risky groups, Check-gated JSON. Stage 2 merged (`24a043a`); Stage 3 Part 1 approved (`2879f80`). | `feat/x11-ui` | F27, X4, fix/f27-ha-by-kind | operator reviews Part A/C; not deployed |
 | — | CI fix | ci-environment | gateway + tests | Merged (`f2746ef`); CI pinned to ubuntu-24.04 (`6d58006`) | `fix/ci-environment` | F5 | |
 | — | Buffering | stream-unbuffered | gateway | Merged (`d8d70c2`); S1 tee fix done in Gateway hardening | `fix/stream-unbuffered` | F5 | |
 | — | Gateway hardening | gateway-hardening | gateway | **Merged** 2026-11-12 (AF3 + S1 tee capture; security `c15664e`; AX1/AX2 residuals; BA1 for the next F5/F19 change) | `fix/gateway-hardening` | F19, Buffering | |
@@ -22670,6 +22670,81 @@ not a gap the operator can be surprised by. Adding a hash of the
 normalised policy and web sections would make "what was previewed is
 what was applied" literal for the whole document.
 
+### Security review of Stage 3 Part 1 (security reviewer, 2026-11-19, at `978bcef`)
+
+**Approved, for the Part 1 commit only.** Code text read only; nothing was
+run. The UI commits on this branch are for a later read.
+
+**The ceiling rule now lives in one place.**
+* `ceiling_allows(..., conn=None)` and its transaction form both call
+  `_ceiling_denied`. With a connection, the operator words and the
+  enabled flag are read on that transaction.
+* `_ceiling_allows_conn` is now a thin wrapper.
+* The behaviour is the same as `is_destructive`: the built-in words plus
+  the operator words, and a catalogue exemption never covers an operator
+  word.
+* **Nit.** `is_destructive` itself still has its own copy of the loop,
+  used by `apply_ceiling`. Make it call `_ceiling_denied`, so there is
+  truly one rule.
+
+**Protection now works while HA is unreachable.**
+* Only a 503 from the registry read takes the new path. The entity id is
+  stored with an empty registry id, and matching permissions are suspended
+  by entity id in the same transaction.
+* A reachable HA that does not know the entity is still a 400.
+* Both refreshes call `_backfill_protected_registry`, which fills only
+  empty ids, only for entities HA now knows, and audits each fill.
+* **Nit.** The backfill reads the registry id under the *current* entity
+  id. If the device was renamed during the outage, the id stays empty;
+  if another device took the name, it captures the wrong device. Both
+  leave the protection no weaker than entity-id-only, and the audit row
+  shows what was filled.
+  * After a fill, sweep live permissions by the filled registry id and
+    suspend any that hold it under another entity id, the same as the
+    add path.
+
+**The S5 preview hash covers every section.**
+* `_section_fingerprint` hashes the tools, SSH and websites sections as
+  they will be written, after validation and after absent fields are
+  merged from the stored policy.
+* The same value goes into the hash inside the transaction. A change to
+  the SSH hosts after the preview is a 409, and that is tested.
+
+**Risk confirmation on a whole-document apply: keep it as you propose.**
+* An apply re-states every permission, so requiring the confirmation for
+  an already-allowed risky item is consistent with "the document is what
+  gets written".
+* The hash already binds the risk list, so the confirmation is tied to
+  what was shown.
+* The UI should list risky items in two groups, "new or changed" and
+  "already allowed, confirm again". A reflexive click is the failure
+  mode, and a separate group keeps the new items visible.
+* Do not scope the ack to added or changed items only. A resumed or
+  re-pinned item is "changed" in ways an operator may not read as new
+  risk.
+
+### Security re-read of Part C (security reviewer, 2026-11-19, at `c7458cc`)
+
+**Confirmed. The API side of `feat/x11-ui` has no open security items.**
+Code text read only; nothing was run. This covers the
+`allowances.py`/`main.py` hunks of `c7458cc`; the UI changes are for the
+operator review.
+* **One rule.** `is_destructive` now returns `_ceiling_denied(service,
+  exempt, operator_words())`, so the destructive-word loop exists once,
+  and a test checks that both paths agree.
+* **The backfill sweep.**
+  * Filling a registry id that was captured while HA was down now
+    suspends, as `protected` and in the same `BEGIN IMMEDIATE`, every live
+    permission that holds that registry id under another entity id.
+  * It bumps each affected agent's version and writes an audit row per
+    suspension.
+  * The rename-during-outage test covers it.
+  * Permissions on the protected entity id itself were already suspended
+    when protection was added, so the two paths together cover both
+    names.
+* **`available_agent_tools` adds `always_gate`.** It is an
+  operator-session read of an existing flag; no concern.
+
 ### Security review of the window-token audit fix (`fix/window-token-audit` @ 91cdf82)
 
 **Approved to merge.** Code text read only; nothing was run.
@@ -22728,3 +22803,67 @@ what was applied" literal for the whole document.
   entity registry list, which is already a read.
 * A label write still runs only as a gated WS call. Deleting a label only
   removes members from label-following allowances, on the next refresh.
+
+**Stage 3 (2026-11-18).** Code is on `feat/x11-ui`, branched from
+`852270d`. The real dashboard shell now has two Agents tabs; the old
+Allowances page and its JavaScript are gone, while the API endpoints stay.
+
+* **Part 1 — Security follow-ups.**
+  * `ceiling_allows(..., conn=None)` is now the one ceiling check;
+    `_ceiling_allows_conn` is a thin compatibility wrapper. The destructive
+    word rule lives in `_ceiling_denied`, once, and both call styles are
+    tested.
+  * Protection while HA is unreachable is accepted with an empty registry
+    id, suspends by entity id in the same transaction, and backfills the
+    registry id on the next successful refresh with
+    `allowance_protected_registry_filled`. A rename after the backfill is
+    still refused by the stored registry id.
+  * The S5 `preview_hash` now also hashes the tools, SSH and websites
+    sections as they will be written. A document whose SSH hosts differ
+    from the previewed one is a 409.
+* **Part 2 — the UI.** `dashboard/static/x11.js` and `x11.css` render the
+  two tabs, the card grid, the six agent sections, the area-grouped device
+  grid, the Check preview and the JSON editor. `tests/ui/x11_check.cjs`
+  drives the real page for the tabs, card counts, grid, hash/ack bodies,
+  409 reload wording, expiry removal, JSON server errors, Resume and the
+  390 px layout. `scripts/x11_ui_shots.cjs` renders the seven states at
+  1440 and 390 into `docs/screenshots/x11/` against
+  `tests/ui/seed_ui.py` (synthetic `192.0.2.x` / `*.example.test` data).
+  The old mock screenshots were removed.
+* **Still open for review.** The operator review covers the look and the
+  six Stage 3 fixes; Security reads the three server items. Nothing is
+  merged into master or deployed.
+
+
+**Stage 3 polish (2026-11-19).** Operator review round on `feat/x11-ui`,
+plus Security's two server nits.
+
+* **Agents.** "New agent" is a button beside the title. The card summary is
+  in words (tools, one device line, SSH); an empty agent says "No tools
+  yet".
+* **Editor.** One section at a time with `#agent/<id>/<section>` deep
+  links. Revoke/Delete moved to a Danger zone at the bottom of Overview,
+  each behind its own confirmation.
+* **Tools.** Integrations collapse with a "tools · ask first" summary,
+  search and "Only allowed" filters, first-sentence descriptions with
+  "more", and no ALL-CAPS instruction text. Always-gate tools (HA
+  `call_service`) disable "Runs without asking" and link to the device
+  picker instead.
+* **Grid.** Two-row headers grouped by device type (Lights / Plugs and
+  switches / Covers), device names in the body font and entity ids in
+  mono, app-styled search/checkbox/date controls, full label names under
+  the picker, a one-line protected row, and bottom padding equal to the
+  floating save bar. At 390 px each device is a card with its own toggles,
+  grouped by room; the pick/label choice sits in a per-type settings row.
+* **Preview.** Only the sections that changed are listed, once each. The
+  sentence is "will be able to open 1 more device: Garage door."; risky
+  lines use the action and device name, split into "New or changed" and
+  "Already allowed, confirm again". Apply stays disabled until the boxes
+  are ticked and reads "Allow and save" when a risk confirmation applies.
+* **JSON and Rules.** JSON Apply is disabled until Check passes and after
+  any edit. Protected devices start as "Protected: TV plug" with Change;
+  settings entities stay behind Show settings entities.
+* **Security nits.** `is_destructive` now calls `_ceiling_denied`, so the
+  word loop exists once. A registry-id backfill also suspends live
+  permissions that hold that id under another entity id, in the same
+  transaction and with an audit row.

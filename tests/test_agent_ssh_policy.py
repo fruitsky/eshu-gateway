@@ -80,11 +80,10 @@ def test_any_gateway_asks_first_in_the_ui():
     covers gateways enrolled later; only the confirm button stores it."""
     import pathlib
     static = pathlib.Path(__file__).resolve().parent.parent / 'dashboard' / 'static'
-    html = (static / 'index.html').read_text()
-    js = (static / 'app.js').read_text()
-    assert 'every gateway enrolled later' in html
-    assert 'confirmAgentSshAny(true)' in html
-    toggle = js.split('function toggleAgentSshAny(on) {', 1)[1].split('\n}', 1)[0]
-    first_push = toggle.find("_agentSshHosts.push('*')")
-    assert toggle.find('classList.remove(\'hidden\')') < first_push
-    assert 'agent-ssh-any' in js.split('function fetchAgentTokens', 1)[-1] or 'agent-ssh-any' in js
+    js = (static / 'x11.js').read_text()
+    assert 'every gateway enrolled later' in js
+    toggle = js.split('function x11ToggleAnyHost(cb) {', 1)[1].split('\n  }', 1)[0]
+    first_push = toggle.find("hosts.push('*')")
+    assert first_push != -1
+    assert toggle.find('window.confirm(') < first_push
+    assert 'data-ssh-any' in js

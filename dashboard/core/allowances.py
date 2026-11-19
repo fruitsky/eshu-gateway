@@ -148,16 +148,10 @@ def destructive_words():
 def is_destructive(service, exempt=()):
     """BD1 matching: `_` separates words; one *built-in* word may be exempt.
 
-    An operator word is never exempt, even when it spells the same word: the
-    catalogue exemption names a built-in (`stop`), not a boolean.
+    This is the same decision as the ceiling's deny rule; keep it in
+    `_ceiling_denied` so there is exactly one copy of the loop.
     """
-    words = set(destructive_words())
-    operator = set(operator_words())
-    allowed = set(exempt or ()) - operator
-    for token in _tokens(service):
-        if token in words and token not in allowed:
-            return True
-    return False
+    return _ceiling_denied(service, exempt, operator_words())
 
 
 def never_reason(domain, service):
@@ -322,8 +316,29 @@ def apply_ceiling(actor, integration, wanted, risk_ack=False,
             'set_hash': set_hash(integration), 'risky': risky}
 
 
-def ceiling_allows(integration, domain, service):
-    """The one check used at save, apply and match."""
+def _ceiling_denied(service, exempt_words, operator):
+    """The one destructive-word rule, shared by both call styles.
+
+    Built-in words and operator words both cap an action, except for a
+    catalogue row's explicit exemption (cover stop is the safe direction).
+    An operator word always wins, even over an exemption.
+    """
+    words = set(DESTRUCTIVE_WORDS) | set(operator)
+    allowed = set(exempt_words or ()) - set(operator)
+    for token in _tokens(service):
+        if token in words and token not in allowed:
+            return True
+    return False
+
+
+def ceiling_allows(integration, domain, service, conn=None):
+    """The one check used at save, apply and match.
+
+    ``conn`` is optional. When supplied, the ceiling and operator-word rows
+    are read on that transaction so an apply can re-check without a second
+    connection; otherwise the normal cached/read helper is used. The deny
+    rule itself lives in ``_ceiling_denied`` above, once.
+    """
     ensure_initialised()
     if integration != INTEGRATION:
         return False
@@ -333,9 +348,19 @@ def ceiling_allows(integration, domain, service):
         return False
     if never_reason(domain, service):
         return False
-    if is_destructive(service, row['exempt_words']):
+    if conn is None:
+        operator = set(operator_words())
+        if _ceiling_denied(service, row.get('exempt_words'), operator):
+            return False
+        info = _enabled_map(integration).get(catalogue_id)
+        return bool(info and info['enabled'])
+    operator = {r['word'] for r in conn.execute(
+        'SELECT word FROM allowance_never_words').fetchall()}
+    if _ceiling_denied(service, row.get('exempt_words'), operator):
         return False
-    info = _enabled_map(integration).get(catalogue_id)
+    info = conn.execute(
+        'SELECT enabled FROM allowance_ceiling WHERE integration = ? '
+        'AND catalogue_id = ?', (INTEGRATION, catalogue_id)).fetchone()
     return bool(info and info['enabled'])
 
 
@@ -575,14 +600,29 @@ def set_protected_entities(actor, entities):
     added = sorted(after - before)
     removed = sorted(before - after)
     added_registry = {}
+    registry_unreachable = False
     if added:
-        registry = _ha_registry()
-        for e in added:
-            reg = registry.get(e)
-            if not reg:
-                raise AllowanceError(
-                    400, 'HA does not know the protected entity %s.' % e)
-            added_registry[e] = reg.get('id') or ''
+        try:
+            registry = _ha_registry()
+        except AllowanceError as exc:
+            # Security answer (a): protection is a tightening, so it must not
+            # wait for HA. A 503 means the registry could not be read; accept
+            # the entity id now and backfill the registry id on the next
+            # successful refresh. A reachable HA that does not know the id is
+            # still a 400 below.
+            if getattr(exc, 'status', None) != 503:
+                raise
+            registry = None
+            registry_unreachable = True
+        if registry is not None:
+            for e in added:
+                reg = registry.get(e)
+                if not reg:
+                    raise AllowanceError(
+                        400, 'HA does not know the protected entity %s.' % e)
+                added_registry[e] = reg.get('id') or ''
+        else:
+            added_registry = {e: '' for e in added}
     now = _now()
     suspended = []
     if added or removed:
@@ -641,10 +681,12 @@ def set_protected_entities(actor, entities):
                     pass
                 raise
         for e in added:
+            note = ('registry id pending: HA was unreachable'
+                    if registry_unreachable
+                    else 'registry %s' % (added_registry.get(e) or '-'))
             record_audit_event(
                 'allowance_protected_added',
-                details='%s protected by %s (registry %s)'
-                        % (e, actor, added_registry.get(e) or '-'))
+                details='%s protected by %s (%s)' % (e, actor, note))
         for e in removed:
             record_audit_event(
                 'allowance_protected_removed',
@@ -974,21 +1016,12 @@ def _validate_allowance(domain, service, entities, rate_per_hour=0, window='',
 
 
 def _ceiling_allows_conn(conn, domain, service):
-    """The ceiling check on a caller's transaction, without a second DB read."""
-    row = catalogue_row(INTEGRATION, f'{domain}.{service}')
-    if row is None or never_reason(domain, service):
-        return False
-    operator = {r['word'] for r in conn.execute(
-        'SELECT word FROM allowance_never_words').fetchall()}
-    words = set(DESTRUCTIVE_WORDS) | operator
-    allowed = set(row.get('exempt_words') or ()) - operator
-    for token in _tokens(service):
-        if token in words and token not in allowed:
-            return False
-    info = conn.execute(
-        'SELECT enabled FROM allowance_ceiling WHERE integration = ? '
-        'AND catalogue_id = ?', (INTEGRATION, f'{domain}.{service}')).fetchone()
-    return bool(info and info['enabled'])
+    """Compatibility wrapper: the same rule on a caller's transaction.
+
+    Kept so tests and existing call sites can keep injecting this name; the
+    decision itself is ``ceiling_allows(..., conn=conn)``.
+    """
+    return ceiling_allows(INTEGRATION, domain, service, conn=conn)
 
 
 def _recheck_conn(conn, prepared):
@@ -1758,6 +1791,77 @@ def _write_entity_list(conn, row, pins, pending):
          _json.dumps(pending), row['id']))
 
 
+def _backfill_protected_registry(registry):
+    """Fill registry ids captured while HA was unreachable, and audit each.
+
+    Only an empty id is filled, and only when HA now knows the entity. In the
+    same transaction as the fill, every live permission that holds that
+    registry id under a different entity id is suspended as `protected`:
+    the rename may have happened during the outage, and the new name must
+    not inherit the old grant.
+    """
+    from db.core import db_conn
+    from db.audit import record_audit_event
+    import json as _json
+    filled = []
+    suspended = []
+    for row in protected_records():
+        if row.get('registry_id'):
+            continue
+        entity_id = row['entity_id']
+        reg = registry.get(entity_id)
+        rid = (reg or {}).get('id') or ''
+        if not rid:
+            continue
+        with db_conn() as conn:
+            try:
+                conn.execute('BEGIN IMMEDIATE')
+                conn.execute(
+                    'UPDATE allowance_protected SET registry_id = ? '
+                    'WHERE entity_id = ? AND registry_id = \'\'',
+                    (rid, entity_id))
+                for live in conn.execute(
+                        'SELECT id, agent_id, entities_json FROM allowances '
+                        'WHERE revoked_at = 0 AND suspended_at = 0').fetchall():
+                    try:
+                        pins = _json.loads(live['entities_json'] or '[]')
+                    except (TypeError, ValueError):
+                        pins = []
+                    if not any(isinstance(p, dict)
+                               and p.get('registry_id') == rid
+                               and str(p.get('entity_id') or '').lower()
+                               != entity_id
+                               for p in pins):
+                        continue
+                    conn.execute(
+                        'UPDATE allowances SET suspended_at = ?, '
+                        'suspended_reason = ? WHERE id = ?',
+                        (_now(), 'protected', live['id']))
+                    _bump_config(conn, live['agent_id'])
+                    suspended.append((live['id'], live['agent_id'],
+                                      entity_id))
+                conn.commit()
+            except Exception:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                raise
+        filled.append((entity_id, rid))
+    for entity_id, rid in filled:
+        record_audit_event(
+            'allowance_protected_registry_filled',
+            details='%s registry id filled as %s after a successful refresh'
+                    % (entity_id, rid))
+    for aid, agent_id, entity_id in suspended:
+        record_audit_event(
+            'allowance_suspended',
+            details='allowance #%d suspended by refresh: protected '
+                    '(registry id filled for %s; agent #%d)'
+                    % (aid, entity_id, int(agent_id)))
+    return filled
+
+
 def refresh_pins(actor='config-write'):
     """Re-read every live HA allowance's registry pins (BD5/BX2).
 
@@ -1772,6 +1876,7 @@ def refresh_pins(actor='config-write'):
         registry = _ha_registry()
     except AllowanceError as exc:
         return {'checked': 0, 'error': str(exc)}
+    _backfill_protected_registry(registry)
     pin = _ha_pin()
     suspended = []
     for row in _live_ha_allowances():
@@ -1817,6 +1922,7 @@ def refresh_labels(actor='refresh'):
         except Exception:
             pass
         return {'checked': 0, 'error': str(exc)}
+    _backfill_protected_registry(registry)
     pin = _ha_pin()
     protected = protected_records()
     prot_entity = {r['entity_id']: r for r in protected}

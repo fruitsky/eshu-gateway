@@ -1,31 +1,39 @@
-"""F27 UI: the Allowances page and its harness view."""
+"""F27/X11 UI: the Allowances page is gone; Agents carries the two tabs."""
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 HTML = (REPO / "dashboard" / "static" / "index.html").read_text(encoding="utf-8")
 JS = (REPO / "dashboard" / "static" / "app.js").read_text(encoding="utf-8")
+X11 = (REPO / "dashboard" / "static" / "x11.js").read_text(encoding="utf-8")
+STATE = (REPO / "dashboard" / "static" / "state.js").read_text(encoding="utf-8")
 HARNESS = (REPO / "tests" / "ui" / "ui_views.cjs").read_text(encoding="utf-8")
 
 
-def test_the_page_is_a_nav_item_and_a_view():
-    assert 'id="nav-allowances"' in HTML
-    assert 'id="view-allowances"' in HTML
-    assert "'allowances'" in (REPO / "dashboard" / "static" / "state.js").read_text(encoding="utf-8")
+def test_the_old_allowances_page_and_nav_item_are_removed():
+    assert 'id="nav-allowances"' not in HTML
+    assert 'id="view-allowances"' not in HTML
+    assert "'allowances'" not in STATE
+    assert "// ── F27: Allowances" not in JS
 
 
-def test_the_ceiling_copy_and_controls_are_there():
-    assert "The ceiling is the outer limit" in HTML
-    assert "What agents may ever be allowed to do" in HTML
-    assert "Destructive words" in HTML and "Never allowable" in JS
+def test_agents_is_the_one_place_with_two_tabs():
+    assert 'id="x11-root"' in HTML
+    for word in ("Agents", "Rules for all agents", "Protected devices",
+                 "Limits for all agents", "Never allowed"):
+        assert word in X11
+    assert "/api/agents/" in X11
+    assert "/api/allowances/protected" in X11
+    assert "/api/allowances/ceiling" in X11
 
 
-def test_the_page_calls_the_engine_and_confirms_risk():
-    for path in ("/api/allowances/ceiling", "/api/allowances", "/api/allowances/profiles"):
-        assert path in JS
-    assert "risk_ack_required" in JS
-    assert "Resume" in JS and "Revoke" in JS
+def test_saves_are_check_preview_apply_with_the_hash_and_acks():
+    assert "preview_hash" in X11
+    assert "risk_ack" in X11 and "resume_ack" in X11
+    assert "preview_changed" in X11 and "config_changed" in X11
+    assert "changed since you opened it" in X11
+    assert "changed since the preview" in X11
 
 
-def test_the_harness_measures_the_page_at_both_widths():
-    assert "'allowances'" in HARNESS
-    assert "allowances: '#view-allowances'" in HARNESS
+def test_the_harness_measures_agents_not_allowances():
+    assert "'allowances'" not in HARNESS
+    assert "agents: '#view-agents'" in HARNESS
