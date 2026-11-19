@@ -449,25 +449,28 @@ def test_bq1_round_9_read_script_refuses_secrets_yaml(box):
 
 
 def test_bq1_the_keys_script_prints_keys_and_no_value(box):
-    path = box.file("secrets.yaml",
-                    "api_key: hunter2\n"
-                    "block: |\n"
-                    "  -----BEGIN PRIVATE KEY-----\n"
-                    "  MIIEowIBAAKCAQEA\n")
+    text = ("api_key: hunter2\n"
+            "block: |\n"
+            "  -----BEGIN PRIVATE KEY-----\n"
+            "  MIIEowIBAAKCAQEA\n")
+    path = box.file("secrets.yaml", text)
     proc = box.run(ha.SECRETS_KEYS_SCRIPT, path)
     assert proc.returncode == 0, proc.stderr
-    assert proc.stdout == "api_key\nblock\n"
+    lines = proc.stdout.splitlines()
+    assert lines[0] == "eshu-keys %d" % len(text.encode())
+    assert lines[1:] == ["api_key", "block"]
     for value in ("hunter2", "PRIVATE KEY", "MIIEowIBAAKCAQEA"):
         assert value not in proc.stdout
 
 
 def test_bs3_the_keys_script_keeps_hyphen_dotted_and_quoted_keys(box):
-    path = box.file("secrets.yaml",
-                    'hyphen-key: v1\n'
-                    'dotted.key: v2\n'
-                    '"quoted key": v3\n'
-                    'normal: v4\n')
+    text = ('hyphen-key: v1\n'
+            'dotted.key: v2\n'
+            '"quoted key": v3\n'
+            'normal: v4\n')
+    path = box.file("secrets.yaml", text)
     proc = box.run(ha.SECRETS_KEYS_SCRIPT, path)
     assert proc.returncode == 0, proc.stderr
-    assert proc.stdout.splitlines() == [
-        "hyphen-key", "dotted.key", "quoted key", "normal"]
+    lines = proc.stdout.splitlines()
+    assert lines[0] == "eshu-keys %d" % len(text.encode())
+    assert lines[1:] == ["hyphen-key", "dotted.key", "quoted key", "normal"]

@@ -40,9 +40,9 @@ session cookie you already use for the dashboard, or import it from a script.
 
 ## 3. Pin the host key (TOFU)
 
-Run `ha_config_list` once. That first connection records the add-on's host key
-and shows its `SHA256:…` fingerprint in the integration card. Compare it with
-the add-on:
+Run `ha_config_list` once. That first connection records the add-on's host key;
+the same response includes the pinned `host_fingerprint`, and the integration
+card shows it too. Compare it with the add-on:
 
 ```bash
 ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
@@ -57,7 +57,7 @@ a write can never establish trust.
 | tool | gated | notes |
 |---|---|---|
 | `ha_config_list()` | no | YAML under `/config` and `/config/packages`, with size and mtime |
-| `ha_config_read(path)` | no | content, sha256, size; `secrets.yaml` returns key names with values masked |
+| `ha_config_read(path)` | no | content, sha256, size; `secrets.yaml` returns key names only with `masked: true`, the real file's size, and `sha256: null` (the keys-only view is not the file) |
 | `ha_config_write(path, content, expect_hash, dry_run)` | **yes** | `dry_run` returns the diff; a real write backs up, writes atomically, copies mode/owner, runs `ha core check`, and restores the backup automatically if the check fails |
 | `ha_config_restore(path, backup)` | **yes** | restores one `.eshu-<timestamp>.bak`, then checks; a failed check puts the previous content back |
 | `ha_config_check()` | no | runs `ha core check` and records a valid result for `ha_core_restart` (10-minute window) |

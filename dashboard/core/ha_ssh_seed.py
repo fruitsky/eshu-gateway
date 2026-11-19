@@ -12,25 +12,25 @@ HA_SSH_SEED_TOOLS = [
         'description': (
             'List the YAML files under /config and /config/packages on the '
             'Home Assistant SSH add-on, with size and mtime. Read-only. The '
-            'first call also pins the add-on\'s host key (TOFU); compare the '
-            'fingerprint in the integration card with the add-on before '
+            'first call also pins the add-on\'s host key (TOFU) and returns '
+            'the pinned host_fingerprint; compare it with the add-on before '
             'writing.'),
         'method': 'GET',
         'path_template': '',
         'handler': 'ha_config_list',
         'params': [],
         'fields': [],
-        'example': '{"files": [{"path": "/config/configuration.yaml", "size": 812, "mtime": 1762000000}]}',
+        'example': '{"files": [{"path": "/config/configuration.yaml", "size": 812, "mtime": 1762000000}], "count": 1, "host_fingerprint": "SHA256:…"}',
         'read_only': True,
     },
     {
         'name': 'ha_config_read',
         'description': (
             'Read one YAML file under /config or /config/packages: content, '
-            'sha256 and size. secrets.yaml returns key names with values '
-            'masked (secrets_masked: true). Pass the sha256 as expect_hash to '
-            'ha_config_write so the write refuses if the file changed. '
-            'Read-only.'),
+            'sha256 and size. secrets.yaml returns key names only with '
+            'masked: true; size is the real file\'s size and sha256 is null '
+            '(the keys-only view is not the file). Pass the sha256 of a '
+            'normal read as expect_hash to ha_config_write. Read-only.'),
         'method': 'GET',
         'path_template': '',
         'handler': 'ha_config_read',

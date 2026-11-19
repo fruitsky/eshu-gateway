@@ -18,6 +18,7 @@ import difflib
 import hashlib
 import posixpath
 import re
+from collections import Counter
 
 # The add-on's view (W4: /config is a symlink to it).
 ROOT = '/homeassistant'
@@ -169,7 +170,14 @@ def _first_colon(line):
 
 
 def _tag_args(line):
-    """(kind, raw argument) for every HA tag on a line, outside quotes."""
+    """(kind, raw argument, exact tag) for every HA tag on a line, outside
+    quotes.
+
+    The exact tag is kept because an unchanged include is exempted by
+    `(tag, resolved target)`; `include_dir_named` and
+    `include_dir_merge_named` are different tags even when they name the same
+    directory.
+    """
     found = []
     quote = None
     i = 0
@@ -195,7 +203,7 @@ def _tag_args(line):
             if argument is not None:
                 found.append(('file' if kind == 'include'
                               else 'dir' if kind in DIR_TAGS
-                              else kind, argument))
+                              else kind, argument, kind))
             i = match.end() + consumed
             continue
         i += 1
@@ -321,8 +329,44 @@ def _risky_keys(keys):
     return found
 
 
-def validate_write(path, content):
+def _resolve_include_target(target, including_path):
+    """Resolve an include lexically, without applying the allowlist.
+
+    This is the comparison key for the current/proposed pair. It is
+    deliberately lenient: a current file may already contain an include that
+    today's rule refuses (`themes` outside `packages/`), and that existing
+    pair must still be recognised.
+    """
+    target = str(target or '').strip()
+    if not target:
+        return ''
+    if posixpath.isabs(target):
+        return posixpath.normpath(target)
+    return posixpath.normpath(
+        posixpath.join(posixpath.dirname(including_path), target))
+
+
+def _include_pairs(content, including_path):
+    """Count parsed `(exact tag, resolved target)` pairs in a file."""
+    counts = Counter()
+    _keys, tags, _tab, _auth = scan(content)
+    for kind, argument, tag in tags:
+        if kind in ('secret', 'input', 'env_var'):
+            continue
+        resolved = _resolve_include_target(argument, including_path)
+        if resolved:
+            counts[(tag, resolved)] += 1
+    return counts
+
+
+def validate_write(path, content, current=None):
     """The preflight for one proposed write; raises ConfigError.
+
+    `current` is the file content read under the same `expect_hash`. An
+    include whose exact `(tag, resolved target)` pair already appears there is
+    left alone; only an added or changed include is subject to the allowlist.
+    A duplicate of an existing pair is an addition (the pair count is the
+    comparison), so it is checked like any other new include.
 
     Returns {'path', 'sha256', 'size', 'risky', 'includes'}.
     """
@@ -339,14 +383,21 @@ def validate_write(path, content):
     if tab_indent:
         raise ConfigError('config_yaml_invalid',
                           'YAML indentation cannot be a tab')
-    if any(kind == 'env_var' for kind, _arg in tags):
+    if any(kind == 'env_var' for kind, _arg, _tag in tags):
         raise ConfigError('config_env_var_refused',
                           '!env_var is not allowed in config files')
+    existing = (_include_pairs(current, target)
+                if current is not None else Counter())
     includes = []
-    for kind, argument in tags:
+    for kind, argument, tag in tags:
         if kind in ('secret', 'input', 'env_var'):
             continue
-        resolved = _check_target(kind, argument, target)
+        resolved = _resolve_include_target(argument, target)
+        key = (tag, resolved)
+        if resolved and existing[key] > 0:
+            existing[key] -= 1
+        else:
+            resolved = _check_target(kind, argument, target)
         includes.append({'kind': kind, 'target': argument,
                          'resolved': resolved})
     risky = _risky_keys(keys)

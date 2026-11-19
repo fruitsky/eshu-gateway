@@ -10690,6 +10690,24 @@ F11 stays dormant until an `ha_ssh` integration exists. The first
 connection must be a read (TOFU), and the operator should compare the
 pinned fingerprint against the add-on's own before the first write.
 
+### Follow-up from the first real use (`fix/ha-config-includes`)
+
+Three findings from the operator's own HA, reached through Hermes.
+
+* **Includes already in the file (Security proposal, not merged).** The
+  allowlist now applies only to an include the write **adds or changes**, by
+  parsed `(exact tag, resolved target)` pair. A pair already present in the
+  current content, read under the same `expect_hash`, passes unchanged; an
+  addition or a duplicate is still checked, and `packages/` keeps its rule.
+  If the current content cannot be read, the write is refused. This is
+  waiting for Security's answer, so the branch stays unmerged.
+* `ha_config_list` returns the pinned `host_fingerprint` on the same call
+  that establishes the pin (and on later calls too).
+* `ha_config_read` of `secrets.yaml` reports the real file's size, returns
+  `sha256: null` (the keys-only view is not the file), and labels the view
+  `masked: true`. The call row's keys-only digest is called
+  `masked_sha256`.
+
 ## Chunk F12 — SSH through Eshu over MCP (`ssh_exec`) · slug `ssh-exec` · dashboard (+ small gateway change)
 
 > **Design first** (push a design note only, wait for approval). Needs the

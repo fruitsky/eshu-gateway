@@ -87,11 +87,15 @@ class FakeSSH:
             # BQ1: the one script that may open secrets.yaml, keys only.
             path = command.rsplit(' _ ', 1)[-1].strip().strip("'")
             content = self.files.get(path, '')
+            text = content.decode('utf-8', 'replace') \
+                if isinstance(content, bytes) else str(content)
+            raw = text.encode('utf-8')
             keys = []
-            for line in content.splitlines():
+            for line in text.splitlines():
                 if re.match(r'^[^ \t#][^:]*:[ \t]', line):
                     keys.append(line.split(':', 1)[0].strip('"\''))
-            out = '\n'.join(keys) + ('\n' if keys else '')
+            out = ('eshu-keys %d\n' % len(raw) + '\n'.join(keys)
+                   + ('\n' if keys else ''))
             return {'rc': 0 if path in self.files else 12,
                     'stdout': out.encode() if binary else out,
                     'stderr': b'' if binary else '', 'timed_out': False}
@@ -183,6 +187,19 @@ def test_list_pins_the_host_key_on_first_use(integration, fake):
     assert cfg['host_key'].startswith('ssh-ed25519 ')
     assert cfg['host_fingerprint'].startswith('SHA256:')
     assert fake.calls[0]['strict'] is False
+
+
+def test_list_returns_the_fingerprint_pinned_by_the_first_call(integration, fake):
+    from core.ha_config_handlers import _h_ha_config_list
+    out = json.loads(_h_ha_config_list(integration, 'ha_config_list', {}))
+    assert out['host_fingerprint'].startswith('SHA256:')
+    assert out['count'] == 1
+
+
+def test_list_returns_an_existing_pin(pinned, fake):
+    from core.ha_config_handlers import _h_ha_config_list
+    out = json.loads(_h_ha_config_list(pinned, 'ha_config_list', {}))
+    assert out['host_fingerprint'] == 'SHA256:x'
 
 
 def test_a_write_without_a_pin_refuses_before_any_ssh_call(integration, fake):
@@ -298,17 +315,23 @@ def test_read_returns_content_and_hash(pinned, fake):
 
 
 def test_secrets_yaml_is_keys_only_and_never_a_value(pinned, fake):
-    fake.files['/homeassistant/secrets.yaml'] = (
+    raw = (
         'api_key: hunter2\n'
         'block: |\n'
         '  -----BEGIN PRIVATE KEY-----\n'
-        '  MIIEowIBAAKCAQEA\n')
+        '  MIIEowIBAAKCAQEA\n').encode()
+    fake.files['/homeassistant/secrets.yaml'] = raw
     from core.ha_config_ssh import read_config
     out = read_config(pinned, '/config/secrets.yaml')
+    assert out['masked'] is True
     assert out['secrets_masked'] is True
     assert out['keys_only'] is True
     assert out['editable'] is False
     assert out['content'] == 'api_key\nblock\n'
+    # The size is the file's, not the keys-only view's; there is no file hash
+    # to mistake for the hash of the masked text.
+    assert out['size'] == len(raw)
+    assert out['sha256'] is None
     for value in ('hunter2', 'PRIVATE KEY', 'MIIEowIBAAKCAQEA'):
         assert value not in out['content']
 
@@ -351,6 +374,83 @@ def test_a_stale_hash_refuses_before_the_write(pinned, fake):
                      _sha('old\n'))
     assert exc.value.code == 'config_hash_changed'
     assert not _write_calls(fake) and not _restore_calls(fake)
+
+
+def test_an_unchanged_directory_include_outside_packages_is_allowed(pinned, fake):
+    """The real HA config has `themes: !include_dir_merge_named themes`; a
+    write that leaves that line alone must not be blocked by the include
+    allowlist."""
+    from core.ha_config_ssh import write_config
+    old = ('themes: !include_dir_merge_named themes\n'
+           'default_config:\n')
+    fake.files['/homeassistant/configuration.yaml'] = old
+    out = write_config(pinned, '/config/configuration.yaml',
+                       old + 'light:\n', _sha(old))
+    assert out['ok'] is True
+
+
+def test_an_unchanged_include_may_move_without_refusal(pinned, fake):
+    from core.ha_config_ssh import write_config
+    old = ('themes: !include_dir_merge_named themes\n'
+           'a: 1\n')
+    new = ('a: 1\n'
+           'themes: !include_dir_merge_named themes\n')
+    fake.files['/homeassistant/configuration.yaml'] = old
+    assert write_config(pinned, '/config/configuration.yaml', new,
+                        _sha(old))['ok'] is True
+
+
+def test_adding_a_themes_directory_include_is_refused(pinned, fake):
+    from core.ha_config_ssh import HaConfigError, write_config
+    old = 'a: 1\n'
+    fake.files['/homeassistant/configuration.yaml'] = old
+    with pytest.raises(HaConfigError) as exc:
+        write_config(pinned, '/config/configuration.yaml',
+                     'themes: !include_dir_merge_named themes\n' + old,
+                     _sha(old))
+    assert exc.value.code == 'config_include_refused'
+    assert not _write_calls(fake)
+
+
+def test_changing_an_existing_include_target_is_refused(pinned, fake):
+    from core.ha_config_ssh import HaConfigError, write_config
+    old = 'themes: !include_dir_merge_named themes\n'
+    fake.files['/homeassistant/configuration.yaml'] = old
+    with pytest.raises(HaConfigError) as exc:
+        write_config(pinned, '/config/configuration.yaml',
+                     'themes: !include_dir_merge_named .storage\n', _sha(old))
+    assert exc.value.code == 'config_include_refused'
+    assert not _write_calls(fake)
+
+
+def test_duplicating_an_existing_themes_include_is_refused(pinned, fake):
+    from core.ha_config_ssh import HaConfigError, write_config
+    line = 'themes: !include_dir_merge_named themes\n'
+    old = line
+    fake.files['/homeassistant/configuration.yaml'] = old
+    with pytest.raises(HaConfigError) as exc:
+        write_config(pinned, '/config/configuration.yaml', line + line,
+                     _sha(old))
+    assert exc.value.code == 'config_include_refused'
+    assert not _write_calls(fake)
+
+
+def test_a_failed_current_content_read_refuses_the_write(pinned, monkeypatch):
+    from core.ha_config_ssh import HaConfigError, write_config
+
+    def failing_read(target, command, known_hosts, key_path, timeout,
+                     stdin=None, strict_host_key=True, binary=False):
+        if '# READ_SCRIPT' in command:
+            return {'rc': 1, 'stdout': b'', 'stderr': b'read failed',
+                    'timed_out': False}
+        return {'rc': 0, 'stdout': b'', 'stderr': b'', 'timed_out': False}
+
+    monkeypatch.setattr('core.ssh_client.run_ssh', failing_read)
+    with pytest.raises(HaConfigError) as exc:
+        write_config(pinned, '/config/configuration.yaml',
+                     'themes: !include_dir_merge_named themes\n',
+                     _sha('a: 1\n'))
+    assert exc.value.code == 'config_read_failed'
 
 
 def test_a_successful_write_records_backup_check_and_audit(pinned, fake):
@@ -636,8 +736,8 @@ def test_bq1_a_secrets_read_stores_no_value_in_the_call_row(pinned, fake):
     assert row['tool'] == 'read-keys'
     for value in ('hunter2', 'PRIVATE KEY', 'MIIEowIBAAKCAQEA', 'api_key:'):
         assert value not in row['response_summary']
-    assert 'bytes' in row['response_summary']
-    assert 'sha256' in row['response_summary']
+    assert 'masked bytes' in row['response_summary']
+    assert 'masked_sha256' in row['response_summary']
     assert 'exit 0' in row['response_summary']
 
 

@@ -21,7 +21,13 @@ def _h_ha_config_list(integration, tool, args, ctx=None):
         files = ha_config_ssh.list_configs(integration, ctx=ctx)
     except ha_config_ssh.HaConfigError as exc:
         return _err(exc.code, exc.message)
-    return json.dumps({'files': files, 'count': len(files)})
+    out = {'files': files, 'count': len(files)}
+    # F11 follow-up: the first call establishes the pin; report it so the
+    # agent can show the fingerprint without a second call.
+    fingerprint = ha_config_ssh.pinned_fingerprint(integration)
+    if fingerprint:
+        out['host_fingerprint'] = fingerprint
+    return json.dumps(out)
 
 
 def _h_ha_config_read(integration, tool, args, ctx=None):

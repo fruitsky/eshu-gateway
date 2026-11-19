@@ -132,6 +132,10 @@ fd3=/proc/$me/fd/3
 [ "$(readlink "$fd3")" = "$real" ] || exit 13
 [ -f "$fd3" ] || exit 12
 [ "$(stat -L -c %h "$fd3")" = 1 ] || exit 21
+# The dashboard reports the real file's size, not the size of this keys-only
+# view. The header is fixed and is the first line; the key names follow.
+size=$(stat -L -c %s "$fd3") || exit 12
+printf 'eshu-keys %s\n' "$size"
 awk '{ if (match($0, /^[^ \t#][^:]*:[ \t]/)) {
          k = substr($0, 1, RLENGTH - 2)
          sub(/^[\047"]/, "", k); sub(/[\047"]$/, "", k)
@@ -793,6 +797,17 @@ def _pin_state(integration):
     return str(cfg.get('host_key') or ''), str(cfg.get('host_fingerprint') or '')
 
 
+def pinned_fingerprint(integration):
+    """The fingerprint of the pinned host key, or '' before the first pin.
+
+    The caller's row may predate the pin (the first list call saves it), so
+    read the current row rather than trusting `config_json` on the object.
+    """
+    from db.integrations import get_integration_by_id
+    fresh = get_integration_by_id(int((integration or {}).get('id') or 0))
+    return _pin_state(fresh or integration)[1]
+
+
 def _save_pin(integration, key_part):
     fingerprint = ssh_keys.fingerprint(key_part)
     set_integration_config(integration, {'host_key': key_part,
@@ -937,9 +952,17 @@ def _record(integration, template, ctx, res, elapsed_ms):
         err = err.decode('utf-8', 'replace')
     if template in ('read', 'read-keys'):
         digest = hashlib.sha256(out).hexdigest() if out else ''
-        summary = '%s: %d bytes' % (template, len(out))
-        if digest:
-            summary += ', sha256 ' + digest
+        if template == 'read-keys':
+            # This is the hash of the keys-only view, never the file's. Label
+            # it so an audit reader cannot mistake it for `ha_config_read`'s
+            # (absent) file hash.
+            summary = '%s: %d masked bytes' % (template, len(out))
+            if digest:
+                summary += ', masked_sha256 ' + digest
+        else:
+            summary = '%s: %d bytes' % (template, len(out))
+            if digest:
+                summary += ', sha256 ' + digest
         summary += ', exit %d' % rc
         if rc and err:
             # Error text (a path, a shell error), never stdout; bounded.
@@ -1100,13 +1123,18 @@ def list_configs(integration, ctx=None):
 
 
 def read_config(integration, path, ctx=None):
-    """`{content, sha256, size, secrets_masked}`; secrets.yaml is masked.
+    """`{content, sha256, size, masked, secrets_masked}`.
 
-    BL1: the hash and the size are the remote file's **raw bytes**. The read
-    runs with `binary=True`, so CRLF and invalid UTF-8 are not rewritten on
-    the way here; only `content` is decoded, with replacement, for display.
-    The write script compares `sha256sum` on the add-on, so this is the same
-    number.
+    For `secrets.yaml` only top-level key names are returned, `masked` and
+    `secrets_masked` are true, `size` is the real file's size from the add-on,
+    and `sha256` is None: the keys-only view is not the file, so its hash must
+    never be presented as the file's hash.
+
+    BL1: for a normal file the hash and the size are the remote file's **raw
+    bytes**. The read runs with `binary=True`, so CRLF and invalid UTF-8 are
+    not rewritten on the way here; only `content` is decoded, with
+    replacement, for display. The write script compares `sha256sum` on the
+    add-on, so this is the same number.
     """
     root_path = check_read_path(path)
     # BQ1: secrets.yaml is read through the keys-only script, never through
@@ -1133,18 +1161,28 @@ def read_config(integration, path, ctx=None):
     raw = res.get('stdout') or b''
     if isinstance(raw, str):        # a stub that has not been taught bytes
         raw = raw.encode('utf-8')
+    if is_secrets:
+        # The keys script starts with the real file's size. The rest is key
+        # names only; do not hash that view as if it were the file.
+        header, sep, body = raw.partition(b'\n')
+        match = re.fullmatch(rb'eshu-keys ([0-9]+)', header)
+        if not sep or not match:
+            raise HaConfigError('config_read_failed',
+                                'the keys-only read returned no size header')
+        size = int(match.group(1))
+        if size > MAX_CONTENT:
+            raise HaConfigError('config_too_large',
+                                'the file is over %d bytes' % MAX_CONTENT)
+        return {'path': _display_path(root_path),
+                'content': body.decode('utf-8', 'replace'),
+                'sha256': None, 'size': size, 'masked': True,
+                'secrets_masked': True,
+                'keys_only': True, 'editable': False}
     size = len(raw)
     if size > MAX_CONTENT:
         raise HaConfigError('config_too_large',
                             'the file is over %d bytes' % MAX_CONTENT)
     sha = hashlib.sha256(raw).hexdigest()
-    if is_secrets:
-        # Only top-level key names came over. There is nothing to edit or
-        # hash against here: the write script refuses secrets.yaml anyway.
-        return {'path': _display_path(root_path),
-                'content': raw.decode('utf-8', 'replace'),
-                'sha256': sha, 'size': size, 'secrets_masked': True,
-                'keys_only': True, 'editable': False}
     try:
         text = raw.decode('utf-8')
         editable = True
@@ -1164,7 +1202,8 @@ def read_config(integration, path, ctx=None):
             _clear_pending(integration)
     out = {'path': _display_path(root_path),
            'content': _mask_secrets(text) if masked else text,
-           'sha256': sha, 'size': size, 'secrets_masked': masked,
+           'sha256': sha, 'size': size, 'masked': masked,
+           'secrets_masked': masked,
            'editable': editable}
     if not editable:
         out['reason'] = 'config_not_utf8'
@@ -1173,8 +1212,9 @@ def read_config(integration, path, ctx=None):
 
 def write_config(integration, path, content, expect_hash, ctx=None,
                  dry_run=False):
-    """Validate, then (unless dry_run) one remote script: back up, write,
-    check, and restore automatically on a failed check."""
+    """Read the current file under `expect_hash`, validate the write against
+    it, then (unless dry_run) one remote script: back up, write, check, and
+    restore automatically on a failed check."""
     if _frozen():
         raise HaConfigError('frozen', 'the fleet is frozen; writes are refused')
     if not _pin_state(integration)[0]:
@@ -1184,8 +1224,10 @@ def write_config(integration, path, content, expect_hash, ctx=None,
             'ssh_host_unpinned',
             'run ha_config_list once to pin this add-on\'s host key before '
             'writing')
-    info = validate_write(path, content)
-    root_path = info['path']
+    try:
+        root_path = check_write_path(path)
+    except ConfigError as exc:
+        raise HaConfigError(exc.code, exc.message)
     text = content if isinstance(content, str) else str(content or '')
     if not re.fullmatch(r'[0-9a-f]{64}', str(expect_hash or '')):
         raise HaConfigError('config_hash_required',
@@ -1201,6 +1243,14 @@ def write_config(integration, path, content, expect_hash, ctx=None,
         # the write will replace, or the operator approves a stale diff.
         raise HaConfigError('config_hash_changed',
                             'the file changed since it was read; read it again')
+    try:
+        # F11 follow-up: an include that already exists in the content just
+        # read under `expect_hash` is left alone. Only a new or changed
+        # include is subject to the allowlist.
+        info = validate_write(path, content, current=old['content'])
+    except ConfigError as exc:
+        raise HaConfigError(exc.code, exc.message)
+    root_path = info['path']
     diff = unified_diff(info['path'], old['content'], text)
     if dry_run:
         return {'dry_run': True, 'path': _display_path(root_path),

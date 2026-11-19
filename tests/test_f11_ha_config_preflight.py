@@ -121,6 +121,58 @@ class TestIncludes:
                              'x: !include b.yaml\n')
         assert out['includes'][0]['resolved'] == '/homeassistant/packages/b.yaml'
 
+    def test_an_unchanged_themes_include_is_allowed(self):
+        current = ('themes: !include_dir_merge_named themes\n'
+                   'default_config:\n')
+        proposed = current + 'light:\n'
+        out = validate_write('/config/configuration.yaml', proposed,
+                             current=current)
+        assert out['includes'][0]['resolved'] == '/homeassistant/themes'
+
+    def test_moving_an_unchanged_themes_include_is_allowed(self):
+        current = ('themes: !include_dir_merge_named themes\n'
+                   'a: 1\n')
+        proposed = ('a: 1\n'
+                    'themes: !include_dir_merge_named themes\n')
+        assert validate_write('/config/configuration.yaml', proposed,
+                              current=current)['includes']
+
+    def test_adding_a_new_themes_include_is_refused(self):
+        assert _code(validate_write, '/config/configuration.yaml',
+                     'themes: !include_dir_merge_named themes\n',
+                     'a: 1\n') == 'config_include_refused'
+
+    def test_changing_themes_to_a_dot_directory_is_refused(self):
+        current = 'themes: !include_dir_merge_named themes\n'
+        assert _code(validate_write, '/config/configuration.yaml',
+                     'themes: !include_dir_merge_named .storage\n',
+                     current) == 'config_include_refused'
+
+    def test_changing_the_include_tag_is_refused(self):
+        current = 'themes: !include_dir_merge_named themes\n'
+        assert _code(validate_write, '/config/configuration.yaml',
+                     'themes: !include_dir_named themes\n',
+                     current) == 'config_include_refused'
+
+    def test_duplicating_an_unchanged_themes_include_is_refused(self):
+        line = 'themes: !include_dir_merge_named themes\n'
+        assert _code(validate_write, '/config/configuration.yaml', line + line,
+                     line) == 'config_include_refused'
+
+    def test_the_packages_rule_still_applies_to_new_includes(self):
+        current = ('homeassistant:\n'
+                   '  packages: !include_dir_named packages\n')
+        proposed = current + 'x: !include_dir_named esphome\n'
+        assert _code(validate_write, '/config/configuration.yaml', proposed,
+                     current) == 'config_include_refused'
+
+    def test_an_unchanged_packages_include_is_still_allowed(self):
+        current = ('homeassistant:\n'
+                   '  packages: !include_dir_named packages\n')
+        out = validate_write('/config/configuration.yaml', current,
+                             current=current)
+        assert out['includes'][0]['resolved'] == '/homeassistant/packages'
+
 
 # ── tags, env vars, invalid YAML ──────────────────────────────────────
 
