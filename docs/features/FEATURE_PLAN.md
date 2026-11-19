@@ -23086,3 +23086,19 @@ Nits, none blocking:
    `mcp` as agent names at creation. Otherwise an agent with one of
    those names reads as the operator Test in the call log, and
    `_caller_agent` would resolve rows to it.
+
+### `fix/ha-files-nits` (2026-11-19)
+
+Security's three non-blocking nits on the merged `feat/ha-files-ui` server
+part.
+
+* **Quiet dismissed refresh.** `refresh_labels` now writes the row, bumps the
+  config version and records `allowance_label_refresh` only when the stored
+  pins, pending list or dismissed list actually changed. A dismissed joiner
+  still in the label is not rewritten on every five-minute refresh.
+* **Empty dismissed registry ids expire.** A dismissal saved with no
+  `registry_id` is dropped once the entity leaves the label or the registry
+  supplies an id; a known id is still compared normally.
+* **Reserved agent names.** `operator-test`, `operator` and `mcp` are refused
+  case-insensitively when an agent is created or renamed. `PATCH
+  /api/agents/{id}` renames one token and audits `agent_token_renamed`.

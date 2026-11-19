@@ -199,6 +199,7 @@ from db.integrations import (
 
 from db.agent_tokens import (
     create_agent_token,
+    rename_agent_token,
     get_agent_tokens,
     get_agent,
     get_agent_by_token,

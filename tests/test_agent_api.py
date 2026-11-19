@@ -88,3 +88,28 @@ class TestAgentApi:
                         follow_redirects=False)
         agent = get_agent_by_token(created['token'])
         assert agent['last_used_at'] > 0
+
+
+class TestReservedAgentNames:
+    def test_reserved_names_are_refused_on_create_case_insensitively(self, auth_client):
+        for name in ('operator-test', 'Operator', 'MCP'):
+            r = auth_client.post('/api/agents', json={'name': name})
+            assert r.status_code == 400, (name, r.text)
+
+    def test_reserved_names_are_refused_on_rename(self, auth_client):
+        agent_id = _create(auth_client, 'household')['id']
+        for name in ('operator-test', 'OPERATOR', 'mcp'):
+            r = auth_client.patch('/api/agents/%d' % agent_id,
+                                  json={'name': name})
+            assert r.status_code == 400, (name, r.text)
+
+    def test_a_normal_rename_succeeds(self, auth_client):
+        agent_id = _create(auth_client, 'household')['id']
+        r = auth_client.patch('/api/agents/%d' % agent_id,
+                              json={'name': 'household-2'})
+        assert r.status_code == 200, r.text
+        assert r.json()['old_name'] == 'household'
+        assert r.json()['name'] == 'household-2'
+        listed = auth_client.get('/api/agents').json()
+        assert any(a['id'] == agent_id and a['name'] == 'household-2'
+                   for a in listed)

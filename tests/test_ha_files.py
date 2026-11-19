@@ -362,3 +362,51 @@ def test_a_dismissal_clears_when_the_device_leaves_the_label(
 
 def test_reoffer_join_is_operator_only(client):
     assert client.post('/api/allowances/1/reoffer-join').status_code == 401
+
+
+def _label_with_joiner(monkeypatch, registry_id='reg-joiner'):
+    from core import allowances as a
+    from db.agent_tokens import create_agent_token
+    entities = {'switch.lamp': {'id': 'reg-lamp', 'labels': ['lbl-lights']}}
+    monkeypatch.setattr(a, '_ha_registry', lambda: entities)
+    monkeypatch.setattr(a, '_risky_classes', lambda rows: [])
+    _raw, aid = create_agent_token('household')
+    a.ensure_initialised()
+    row = a.create_allowance('operator', aid, 'Lights', 'switch', 'turn_on',
+                             ['switch.lamp'], source_label_id='lbl-lights')
+    entities['switch.joiner'] = {'id': registry_id,
+                                 'labels': ['lbl-lights']}
+    a.refresh_labels()
+    return a, aid, row['id'], entities
+
+
+def test_two_refreshes_with_the_same_dismissed_joiner_write_nothing(
+        auth_client, monkeypatch):
+    from db.agent_policies import get_agent_config_version
+    from db.audit import get_audit_log
+    a, _aid, allowance_id, _entities = _label_with_joiner(monkeypatch)
+    assert auth_client.post('/api/allowances/%d/dismiss-join'
+                            % allowance_id).status_code == 200
+    before_version = get_agent_config_version(_aid)
+    before_audit = len([r for r in get_audit_log(50)
+                        if r['event_type'] == 'allowance_label_refresh'])
+    a.refresh_labels()
+    a.refresh_labels()
+    assert get_agent_config_version(_aid) == before_version
+    after_audit = len([r for r in get_audit_log(50)
+                       if r['event_type'] == 'allowance_label_refresh'])
+    assert after_audit == before_audit
+
+
+def test_an_empty_registry_dismissal_expires_when_the_id_becomes_known(
+        auth_client, monkeypatch):
+    a, _aid, allowance_id, entities = _label_with_joiner(monkeypatch,
+                                                         registry_id='')
+    assert auth_client.post('/api/allowances/%d/dismiss-join'
+                            % allowance_id).status_code == 200
+    entities['switch.joiner']['id'] = 'reg-known'
+    a.refresh_labels()
+    row = a.get_allowance(allowance_id)
+    assert json.loads(row['dismissed_json']) == []
+    assert {p['entity_id'] for p in json.loads(row['pending_json'])} == {
+        'switch.joiner'}

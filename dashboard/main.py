@@ -83,7 +83,7 @@ from database import (
     create_pending_call, get_pending_calls, get_pending_call, set_pending_call_status,
     mask_sensitive_args, strip_resolved_payloads,
     create_agent_token, get_agent_tokens, get_agent, get_agent_by_name,
-    revoke_agent_token, delete_agent_token,
+    rename_agent_token, revoke_agent_token, delete_agent_token,
 )
 from db.agent_policies import (
     DEFAULT_SSH_MODE, agent_has_activity, get_agent_policy, set_agent_policy,
@@ -4203,6 +4203,10 @@ class AgentTokenPayload(BaseModel):
     name: str
 
 
+class AgentRenamePayload(BaseModel):
+    name: str
+
+
 class AgentPolicyPayload(BaseModel):
     # X4: every field is optional and None keeps the stored value, so a page
     # that saves one section cannot reset another. Pass [] / {} to clear.
@@ -4243,6 +4247,22 @@ def create_agent(payload: AgentTokenPayload, request: Request):
     record_audit_event("agent_token_created",
                        details=f"Agent token '{name}' created (id {agent_id})")
     return {"status": "ok", "id": agent_id, "name": name, "token": token}
+
+
+@app.patch("/api/agents/{agent_id}")
+def rename_agent(agent_id: int, payload: AgentRenamePayload, request: Request):
+    _check_session(request)
+    try:
+        out = rename_agent_token(agent_id, payload.name)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not out:
+        raise HTTPException(status_code=404, detail="Agent token not found")
+    record_audit_event(
+        "agent_token_renamed",
+        details="Agent token '%s' renamed to '%s' (id %d)"
+                % (out['old_name'], out['name'], agent_id))
+    return out
 
 
 @app.get("/api/agents")

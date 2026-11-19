@@ -309,7 +309,7 @@ class TestCallServiceLoophole:
 
     def test_an_explicit_policy_allows_it(self, ha, monkeypatch):
         from test_agent_policy import _agent  # reuse the policy fixture shape
-        agent = _agent('operator')
+        agent = _agent('operator-policy')
         agent['policy']['arg_policy'] = {
             'ha_call_service': {'domain_allow': ['hassio']}}
         from core.agent_context import set_current_agent
