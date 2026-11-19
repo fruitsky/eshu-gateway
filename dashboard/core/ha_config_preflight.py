@@ -279,7 +279,7 @@ def scan(content):
 
 # ── includes ───────────────────────────────────────────────────────────
 
-def _check_target(kind, target, including_path):
+def _check_target(kind, target, including_path, scope=True):
     target = str(target or '').strip()
     if not target:
         raise ConfigError('config_include_refused', 'an empty include target')
@@ -305,8 +305,8 @@ def _check_target(kind, target, including_path):
             raise ConfigError('config_secret_include_refused',
                               'secrets.yaml cannot be included')
         parent = posixpath.dirname(resolved)
-        if not (parent == ROOT or parent == ROOT + '/packages'
-                or parent.startswith(ROOT + '/packages/')):
+        if scope and not (parent == ROOT or parent == ROOT + '/packages'
+                          or parent.startswith(ROOT + '/packages/')):
             raise ConfigError('config_include_refused',
                               'an include may reach only top-level files or '
                               'packages/')
@@ -314,8 +314,8 @@ def _check_target(kind, target, including_path):
         if resolved == ROOT:
             raise ConfigError('config_include_refused',
                               'a directory include cannot be the config root')
-        if not (resolved == ROOT + '/packages'
-                or resolved.startswith(ROOT + '/packages/')):
+        if scope and not (resolved == ROOT + '/packages'
+                          or resolved.startswith(ROOT + '/packages/')):
             raise ConfigError('config_include_refused',
                               'a directory include must be packages/ or below')
     return resolved
@@ -329,33 +329,107 @@ def _risky_keys(keys):
     return found
 
 
-def _resolve_include_target(target, including_path):
-    """Resolve an include lexically, without applying the allowlist.
+def _include_occurrences(content, including_path):
+    """Include lines with their whole text and top-level key.
 
-    This is the comparison key for the current/proposed pair. It is
-    deliberately lenient: a current file may already contain an include that
-    today's rule refuses (`themes` outside `packages/`), and that existing
-    pair must still be recognised.
+    Security's stricter rule is line identity, not tag+target: the line must
+    carry its indentation and its own key, sit under the same top-level key,
+    and match the current content byte for byte after comments are stripped.
     """
-    target = str(target or '').strip()
-    if not target:
-        return ''
-    if posixpath.isabs(target):
-        return posixpath.normpath(target)
-    return posixpath.normpath(
-        posixpath.join(posixpath.dirname(including_path), target))
-
-
-def _include_pairs(content, including_path):
-    """Count parsed `(exact tag, resolved target)` pairs in a file."""
-    counts = Counter()
-    _keys, tags, _tab, _auth = scan(content)
-    for kind, argument, tag in tags:
-        if kind in ('secret', 'input', 'env_var'):
+    found = []
+    top_key = ''
+    in_block = False
+    block_indent = None
+    for raw in str(content or '').splitlines():
+        line = _strip_comment(raw)
+        if not line.strip():
             continue
-        resolved = _resolve_include_target(argument, including_path)
-        if resolved:
-            counts[(tag, resolved)] += 1
+        indent = len(line) - len(line.lstrip(' '))
+        if in_block:
+            if indent > block_indent:
+                continue
+            in_block = False
+        stripped = line.lstrip(' ')
+        if stripped.startswith('---') or stripped.startswith('...'):
+            top_key = ''
+            continue
+        colon = _first_colon(line)
+        if indent == 0 and colon >= 0:
+            key = _decode_scalar(line[:colon])
+            if key:
+                top_key = key
+            value = line[colon + 1:].strip()
+            if value.startswith('|') or value.startswith('>'):
+                in_block = True
+                block_indent = indent
+                continue
+        includes = [item for item in _tag_args(line)
+                    if item[0] in ('file', 'dir')]
+        if includes:
+            found.append({'line': line, 'key': top_key, 'indent': indent,
+                          'includes': includes})
+    return found
+
+
+def _anchor_tokens_line(line):
+    """The YAML anchor/alias/merge tokens on one uncommented line."""
+    found = []
+    quote = None
+    i = 0
+    while i < len(line):
+        ch = line[i]
+        if quote:
+            if ch == '\\' and quote == '"' and i + 1 < len(line):
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch in '"\'':
+            quote = ch
+            i += 1
+            continue
+        if line.startswith('<<:', i):
+            found.append(('merge', ''))
+            i += 3
+            continue
+        if ch in '&*' and (i == 0 or line[i - 1] in ' \t:-[{,?'):
+            match = re.match(r'[A-Za-z0-9_.-]+', line[i + 1:])
+            if match:
+                found.append(('anchor' if ch == '&' else 'alias',
+                              match.group(0)))
+                i += 1 + match.end()
+                continue
+        i += 1
+    return found
+
+
+def _anchor_tokens(content):
+    """Count anchor/alias/merge tokens outside comments and block scalars."""
+    counts = Counter()
+    in_block = False
+    block_indent = None
+    for raw in str(content or '').splitlines():
+        line = _strip_comment(raw)
+        if not line.strip():
+            continue
+        indent = len(line) - len(line.lstrip(' '))
+        if in_block:
+            if indent > block_indent:
+                continue
+            in_block = False
+        stripped = line.lstrip(' ')
+        if stripped.startswith('---') or stripped.startswith('...'):
+            continue
+        colon = _first_colon(line)
+        if indent == 0 and colon >= 0:
+            value = line[colon + 1:].strip()
+            if value.startswith('|') or value.startswith('>'):
+                in_block = True
+                block_indent = indent
+                continue
+        counts.update(_anchor_tokens_line(line))
     return counts
 
 
@@ -363,12 +437,15 @@ def validate_write(path, content, current=None):
     """The preflight for one proposed write; raises ConfigError.
 
     `current` is the file content read under the same `expect_hash`. An
-    include whose exact `(tag, resolved target)` pair already appears there is
-    left alone; only an added or changed include is subject to the allowlist.
-    A duplicate of an existing pair is an addition (the pair count is the
-    comparison), so it is checked like any other new include.
+    include is grandfathered only when its whole line (indentation and its own
+    key) is byte-identical to a line under the same top-level key in that
+    current content. Occurrences are counted, so a grandfathered line cannot
+    be duplicated. Absolute, dot-segment, `secrets.yaml` and `!env_var`
+    refusals still apply to an unchanged include. A file containing a
+    grandfathered include may not add an anchor, alias or `<<:` merge key.
 
-    Returns {'path', 'sha256', 'size', 'risky', 'includes'}.
+    Returns {'path', 'sha256', 'size', 'risky', 'includes',
+             'grandfathered'}.
     """
     target = check_write_path(path)
     text = content if isinstance(content, str) else str(content or '')
@@ -386,20 +463,56 @@ def validate_write(path, content, current=None):
     if any(kind == 'env_var' for kind, _arg, _tag in tags):
         raise ConfigError('config_env_var_refused',
                           '!env_var is not allowed in config files')
-    existing = (_include_pairs(current, target)
-                if current is not None else Counter())
+    current_occurrences = (_include_occurrences(current, target)
+                           if current is not None else [])
+    available = Counter((item['key'], item['line'])
+                        for item in current_occurrences)
     includes = []
-    for kind, argument, tag in tags:
-        if kind in ('secret', 'input', 'env_var'):
-            continue
-        resolved = _resolve_include_target(argument, target)
-        key = (tag, resolved)
-        if resolved and existing[key] > 0:
-            existing[key] -= 1
-        else:
-            resolved = _check_target(kind, argument, target)
-        includes.append({'kind': kind, 'target': argument,
-                         'resolved': resolved})
+    grandfathered = []
+    for occurrence in _include_occurrences(text, target):
+        if any(kind == 'anchor' for kind, _name in
+               _anchor_tokens_line(occurrence['line'])):
+            raise ConfigError(
+                'config_anchor_refused',
+                'a line carrying an include tag cannot also carry a YAML '
+                'anchor')
+        line_key = (occurrence['key'], occurrence['line'])
+        matched = available[line_key] > 0
+        if matched:
+            available[line_key] -= 1
+        for kind, argument, tag in occurrence['includes']:
+            if matched:
+                # Baseline shape/secret checks stay; only the packages/
+                # scope rule is relaxed for this unchanged line.
+                resolved = _check_target(kind, argument, target, scope=False)
+                try:
+                    _check_target(kind, argument, target)
+                except ConfigError:
+                    outside = True
+                else:
+                    outside = False
+            else:
+                resolved = _check_target(kind, argument, target)
+                outside = False
+            includes.append({'kind': kind, 'target': argument,
+                             'resolved': resolved})
+            if matched and outside:
+                grandfathered.append({
+                    'kind': kind, 'target': argument, 'resolved': resolved,
+                    'line': occurrence['line'], 'key': occurrence['key'],
+                })
+    if grandfathered:
+        current_anchors = _anchor_tokens(current or '')
+        for token, count in _anchor_tokens(text).items():
+            if count > current_anchors.get(token, 0):
+                kind, name = token
+                shown = '<<:' if kind == 'merge' else (
+                    ('&' if kind == 'anchor' else '*') + name)
+                raise ConfigError(
+                    'config_anchor_refused',
+                    'a new YAML anchor, alias or merge key is not allowed in '
+                    'a file with an unchanged include outside packages/: %s'
+                    % shown)
     risky = _risky_keys(keys)
     if home_auth:
         risky.append('homeassistant.' + RISKY_HOMEASSISTANT)
@@ -407,7 +520,8 @@ def validate_write(path, content, current=None):
             'sha256': hashlib.sha256(text.encode('utf-8')).hexdigest(),
             'size': size,
             'risky': risky,
-            'includes': includes}
+            'includes': includes,
+            'grandfathered': grandfathered}
 
 
 def unified_diff(path, old, new):

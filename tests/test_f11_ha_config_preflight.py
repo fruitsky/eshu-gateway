@@ -250,3 +250,104 @@ class TestSizeAndRiskyKeys:
     def test_the_diff_names_only_the_path(self):
         diff = unified_diff('/config/x.yaml', 'a: 1\n', 'a: 2\n')
         assert '-a: 1' in diff and '+a: 2' in diff
+
+
+class TestGrandfatheredLines:
+    def test_the_operator_shape_passes_and_is_reported(self):
+        current = ('frontend:\n'
+                   '  themes: !include_dir_merge_named themes\n')
+        out = validate_write('/config/configuration.yaml',
+                             current + '\n# appended comment\n',
+                             current=current)
+        assert out['includes'][0]['resolved'] == '/homeassistant/themes'
+        assert out['grandfathered'] == [{
+            'kind': 'dir', 'target': 'themes',
+            'resolved': '/homeassistant/themes',
+            'line': '  themes: !include_dir_merge_named themes',
+            'key': 'frontend',
+        }]
+
+    def test_a_normal_packages_include_is_not_called_grandfathered(self):
+        current = ('homeassistant:\n'
+                   '  packages: !include_dir_named packages\n')
+        out = validate_write('/config/configuration.yaml', current,
+                             current=current)
+        assert out['grandfathered'] == []
+
+    def test_reindenting_the_same_include_is_refused(self):
+        current = ('frontend:\n'
+                   '  themes: !include_dir_merge_named themes\n')
+        proposed = ('frontend:\n'
+                    '    themes: !include_dir_merge_named themes\n')
+        assert _code(validate_write, '/config/configuration.yaml', proposed,
+                     current) == 'config_include_refused'
+
+    def test_moving_the_same_line_under_another_key_is_refused(self):
+        line = '  themes: !include_dir_merge_named themes\n'
+        assert _code(validate_write, '/config/configuration.yaml',
+                     'other:\n' + line,
+                     'frontend:\n' + line) == 'config_include_refused'
+
+    def test_duplicating_the_grandfathered_line_is_refused(self):
+        line = '  themes: !include_dir_merge_named themes\n'
+        current = 'frontend:\n' + line
+        assert _code(validate_write, '/config/configuration.yaml',
+                     current + line, current) == 'config_include_refused'
+
+    def test_a_new_anchor_in_the_file_is_refused(self):
+        current = ('frontend:\n'
+                   '  themes: !include_dir_merge_named themes\n')
+        proposed = current + 'base: &t 1\n'
+        assert _code(validate_write, '/config/configuration.yaml', proposed,
+                     current) == 'config_anchor_refused'
+
+    def test_a_new_alias_is_refused(self):
+        current = ('frontend:\n'
+                   '  themes: !include_dir_merge_named themes\n'
+                   'base: &t 1\n')
+        proposed = current + 'other: *t\n'
+        assert _code(validate_write, '/config/configuration.yaml', proposed,
+                     current) == 'config_anchor_refused'
+
+    def test_a_new_merge_key_is_refused(self):
+        current = ('frontend:\n'
+                   '  themes: !include_dir_merge_named themes\n')
+        proposed = current + 'other:\n  <<: {a: 1}\n'
+        assert _code(validate_write, '/config/configuration.yaml', proposed,
+                     current) == 'config_anchor_refused'
+
+    def test_existing_anchors_and_aliases_are_counted_not_refused(self):
+        current = ('frontend:\n'
+                   '  themes: !include_dir_merge_named themes\n'
+                   'base: &t 1\nother: *t\n')
+        assert validate_write('/config/configuration.yaml',
+                              current + '# still here\n',
+                              current=current)['grandfathered']
+
+    def test_an_unchanged_secrets_include_is_still_refused(self):
+        current = 'x: !include secrets.yaml\n'
+        assert _code(validate_write, '/config/configuration.yaml', current,
+                     current) == 'config_secret_include_refused'
+
+    def test_an_unchanged_absolute_include_is_still_refused(self):
+        current = 'x: !include /homeassistant/x.yaml\n'
+        assert _code(validate_write, '/config/configuration.yaml', current,
+                     current) == 'config_include_refused'
+
+    def test_an_unchanged_dot_segment_include_is_still_refused(self):
+        current = 'x: !include .storage/x.yaml\n'
+        assert _code(validate_write, '/config/configuration.yaml', current,
+                     current) == 'config_include_refused'
+
+    def test_a_new_file_has_no_grandfathered_include(self):
+        assert _code(validate_write, '/config/configuration.yaml',
+                     'frontend:\n'
+                     '  themes: !include_dir_merge_named themes\n',
+                     '') == 'config_include_refused'
+
+
+def test_an_unchanged_anchored_include_is_refused():
+    current = ('frontend:\n'
+               '  themes: &t !include_dir_merge_named themes\n')
+    assert _code(validate_write, '/config/configuration.yaml', current,
+                 current) == 'config_anchor_refused'

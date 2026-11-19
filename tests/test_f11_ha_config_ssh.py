@@ -767,3 +767,25 @@ def test_bs3_the_keys_script_keeps_hyphen_dotted_and_quoted_keys(pinned, fake):
     assert out['content'] == 'hyphen-key\ndotted.key\nquoted key\nnormal\n'
     for value in ('v1', 'v2', 'v3', 'v4'):
         assert value not in out['content']
+
+
+def test_a_grandfathered_include_is_named_on_the_card_and_audit(pinned, fake):
+    from core.ha_config_handlers import _preflight_ha_config_write
+    from core.ha_config_ssh import write_config
+    from db.audit import get_audit_log
+    current = ('frontend:\n'
+               '  themes: !include_dir_merge_named themes\n')
+    fake.files['/homeassistant/configuration.yaml'] = current
+    proposal = current + '\n# operator note\n'
+    pre = _preflight_ha_config_write(
+        pinned, {}, {'path': '/config/configuration.yaml',
+                     'content': proposal, 'expect_hash': _sha(current)}, {})
+    assert '_summary' in pre
+    assert 'unchanged includes outside packages/: themes' in pre['_summary']
+    out = write_config(pinned, '/config/configuration.yaml', proposal,
+                       _sha(current))
+    assert out['ok'] is True
+    assert out['grandfathered'][0]['target'] == 'themes'
+    event = [r for r in get_audit_log(30)
+             if r['event_type'] == 'ha_config_write'][0]
+    assert 'unchanged includes outside packages/: themes' in event['details']

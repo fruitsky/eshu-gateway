@@ -1256,8 +1256,9 @@ def write_config(integration, path, content, expect_hash, ctx=None,
         return {'dry_run': True, 'path': _display_path(root_path),
                 'expect_hash': expect_hash, 'sha256': info['sha256'],
                 'size': info['size'], 'risky': info['risky'],
-                'includes': info['includes'], 'diff': diff,
-                'backup': _backup_name(root_path)}
+                'includes': info['includes'],
+                'grandfathered': info.get('grandfathered') or [],
+                'diff': diff, 'backup': _backup_name(root_path)}
     pending = pending_state(integration)
     if pending:
         raise HaConfigError(
@@ -1300,15 +1301,22 @@ def write_config(integration, path, content, expect_hash, ctx=None,
                 (scrub_string(ok_line)[:80] or 'empty', backup))
         check = scrub_string('\n'.join(lines[:-1])).strip()
         _record_check(integration, True)
+        outside = [g.get('target') or ''
+                   for g in (info.get('grandfathered') or [])]
+        details = ('Wrote %s (%s -> %s), backup %s' %
+                   (_display_path(root_path), expect_hash[:12],
+                    info['sha256'][:12], backup))
+        if outside:
+            details += ('; unchanged includes outside packages/: ' +
+                        ', '.join(outside))
         record_audit_event(
             'ha_config_write', target(integration)['ip'],
-            details=('Wrote %s (%s -> %s), backup %s' %
-                     (_display_path(root_path), expect_hash[:12],
-                      info['sha256'][:12], backup)),
+            details=details,
             actor=(ctx or {}).get('agent', ''))
         return {'ok': True, 'path': _display_path(root_path),
                 'backup': backup, 'sha256': info['sha256'],
-                'check': 'valid', 'check_output': check}
+                'check': 'valid', 'check_output': check,
+                'grandfathered': info.get('grandfathered') or []}
     output = (_text(res.get('stdout')) + _text(res.get('stderr'))).strip()
     if rc == 18:
         record_audit_event(

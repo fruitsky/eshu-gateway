@@ -10694,13 +10694,17 @@ pinned fingerprint against the add-on's own before the first write.
 
 Three findings from the operator's own HA, reached through Hermes.
 
-* **Includes already in the file (Security proposal, not merged).** The
-  allowlist now applies only to an include the write **adds or changes**, by
-  parsed `(exact tag, resolved target)` pair. A pair already present in the
-  current content, read under the same `expect_hash`, passes unchanged; an
-  addition or a duplicate is still checked, and `packages/` keeps its rule.
-  If the current content cannot be read, the write is refused. This is
-  waiting for Security's answer, so the branch stays unmerged.
+* **Includes already in the file (Security's stricter answer).** An include
+  outside the normal `packages/` rule is grandfathered only when its whole
+  line, including indentation and its own key, is byte-identical to a line
+  under the same top-level key in the content read under `expect_hash` for
+  that same file. Occurrences are counted, so the line cannot be duplicated;
+  re-indenting it or moving it under another key makes it new and refused.
+  Absolute, dot-segment, `secrets.yaml` and `!env_var` refusals still apply.
+  A file with a grandfathered include may not add an anchor, alias or `<<:`
+  merge key. The grandfathered includes outside `packages/` are named on the
+  approval card and in the write's audit row. If the current content cannot
+  be read, the write is refused.
 * `ha_config_list` returns the pinned `host_fingerprint` on the same call
   that establishes the pin (and on later calls too).
 * `ha_config_read` of `secrets.yaml` reports the real file's size, returns

@@ -117,6 +117,8 @@ def _preflight_ha_config_write(integration, tool, args, ctx=None):
     except ha_config_ssh.HaConfigError as exc:
         return _err(exc.code, exc.message)
     risky = ', '.join(out.get('risky') or []) or 'none'
+    outside = ', '.join(g.get('target') or ''
+                        for g in (out.get('grandfathered') or []))
     diff = (out.get('diff') or '')[:4000]
     summary = (
         'Write %s (%s -> %s)\nrisky keys: %s\nbackup: %s, then ha core '
@@ -124,6 +126,8 @@ def _preflight_ha_config_write(integration, tool, args, ctx=None):
         % (out['path'], (out.get('expect_hash') or '')[:12],
            (out.get('sha256') or '')[:12], risky, out.get('backup') or '',
            diff))
+    if outside:
+        summary += ('\nunchanged includes outside packages/: ' + outside)
     return {'_summary': summary}
 
 
