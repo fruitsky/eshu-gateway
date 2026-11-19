@@ -169,6 +169,77 @@ def _first_colon(line):
     return -1
 
 
+def _is_list_item(stripped):
+    return stripped == '-' or stripped.startswith('- ')
+
+
+def _path_key(line):
+    text = str(line or '').lstrip(' ')
+    while text.startswith('- '):
+        text = text[2:].lstrip()
+    colon = _first_colon(text)
+    if colon < 0:
+        return ''
+    return _decode_scalar(text[:colon]).strip()
+
+
+def _opens_block_scalar(line, indent):
+    """Only a column-0 plain mapping key may open a block scalar.
+
+    A `- key: |` or `? key: |` line is not treated as an opener: scanning its
+    deeper lines normally is stricter. If this is wrong about YAML, it can
+    only check more, never fewer, lines.
+    """
+    if indent != 0:
+        return False
+    stripped = line.lstrip(' ')
+    if stripped.startswith('-') or stripped.startswith('?'):
+        return False
+    colon = _first_colon(line)
+    if colon < 0:
+        return False
+    return line[colon + 1:].strip().startswith(('|', '>'))
+
+
+def _walk_lines(content):
+    """One structural line walk for scan(), include lines and anchor lines.
+
+    Yields dicts with the comment-stripped line, its indentation, the full
+    parent path (exact ancestor key/list-item lines) and the block-scalar
+    state. A block scalar skips only after a column-0 plain mapping key.
+    """
+    path = []
+    in_block = False
+    block_indent = None
+    for raw in str(content or '').splitlines():
+        line = _strip_comment(raw)
+        if not line.strip():
+            continue
+        indent = len(line) - len(line.lstrip(' '))
+        if in_block:
+            if indent > block_indent:
+                continue
+            in_block = False
+        stripped = line.lstrip(' ')
+        if stripped.startswith('---') or stripped.startswith('...'):
+            path = []
+            continue
+        while path and path[-1][0] >= indent:
+            path.pop()
+        parent = tuple(item[1] for item in path)
+        colon = _first_colon(line)
+        key = _decode_scalar(line[:colon]).strip() if colon >= 0 else ''
+        block = _opens_block_scalar(line, indent)
+        yield {'line': line, 'indent': indent, 'parent': parent,
+               'key': key, 'block_scalar': block}
+        if block:
+            in_block = True
+            block_indent = indent
+            continue
+        if _is_list_item(stripped) or colon >= 0:
+            path.append((indent, line))
+
+
 def _tag_args(line):
     """(kind, raw argument, exact tag) for every HA tag on a line, outside
     quotes.
@@ -236,42 +307,21 @@ def _read_argument(rest):
 def scan(content):
     """(top-level keys, tags, has a tab indent, homeassistant.auth_providers).
 
-    The scan tracks indentation only far enough to skip a block scalar and to
-    see the `auth_providers` key inside a top-level `homeassistant:` block.
+    The shared `_walk_lines` scan tracks indentation only far enough to skip a
+    real block scalar and to see `auth_providers` under a top-level
+    `homeassistant:` block.
     """
     keys = []
     tags = []
     home_auth = False
-    home_indent = None
-    in_block = False
-    block_indent = None
-    for raw in str(content or '').splitlines():
-        line = _strip_comment(raw)
-        if not line.strip():
-            continue
-        indent = len(line) - len(line.lstrip(' '))
-        if in_block:
-            if indent > block_indent:
-                continue
-            in_block = False
-        stripped = line.lstrip(' ')
-        if stripped.startswith('---') or stripped.startswith('...'):
-            continue
-        colon = _first_colon(line)
-        if indent == 0:
-            if colon >= 0:
-                key = _decode_scalar(line[:colon])
-                if key:
-                    keys.append(key)
-                value = line[colon + 1:].strip()
-                home_indent = indent if key == 'homeassistant' else None
-                if value.startswith('|') or value.startswith('>'):
-                    in_block = True
-                    block_indent = indent
-                    continue
-        elif home_indent is not None and colon >= 0:
-            if _decode_scalar(line[:colon]).strip() == RISKY_HOMEASSISTANT:
-                home_auth = True
+    for item in _walk_lines(content):
+        line = item['line']
+        if item['indent'] == 0 and item['key']:
+            keys.append(item['key'])
+        if (item['indent'] > 0 and item['parent']
+                and _path_key(item['parent'][0]) == 'homeassistant'
+                and item['key'] == RISKY_HOMEASSISTANT):
+            home_auth = True
         tags.extend(_tag_args(line))
     return (keys, tags, bool(_TAB_INDENT.search(str(content or ''))),
             home_auth)
@@ -330,44 +380,20 @@ def _risky_keys(keys):
 
 
 def _include_occurrences(content, including_path):
-    """Include lines with their whole text and top-level key.
+    """Include lines with their full parent path and whole line text.
 
     Security's stricter rule is line identity, not tag+target: the line must
-    carry its indentation and its own key, sit under the same top-level key,
-    and match the current content byte for byte after comments are stripped.
+    carry its indentation and its own key, sit under the same full parent
+    path, and match the current content byte for byte after comments are
+    stripped.
     """
     found = []
-    top_key = ''
-    in_block = False
-    block_indent = None
-    for raw in str(content or '').splitlines():
-        line = _strip_comment(raw)
-        if not line.strip():
-            continue
-        indent = len(line) - len(line.lstrip(' '))
-        if in_block:
-            if indent > block_indent:
-                continue
-            in_block = False
-        stripped = line.lstrip(' ')
-        if stripped.startswith('---') or stripped.startswith('...'):
-            top_key = ''
-            continue
-        colon = _first_colon(line)
-        if indent == 0 and colon >= 0:
-            key = _decode_scalar(line[:colon])
-            if key:
-                top_key = key
-            value = line[colon + 1:].strip()
-            if value.startswith('|') or value.startswith('>'):
-                in_block = True
-                block_indent = indent
-                continue
-        includes = [item for item in _tag_args(line)
-                    if item[0] in ('file', 'dir')]
+    for item in _walk_lines(content):
+        includes = [entry for entry in _tag_args(item['line'])
+                    if entry[0] in ('file', 'dir')]
         if includes:
-            found.append({'line': line, 'key': top_key, 'indent': indent,
-                          'includes': includes})
+            found.append({'line': item['line'], 'parent': item['parent'],
+                          'indent': item['indent'], 'includes': includes})
     return found
 
 
@@ -405,32 +431,15 @@ def _anchor_tokens_line(line):
     return found
 
 
-def _anchor_tokens(content):
-    """Count anchor/alias/merge tokens outside comments and block scalars."""
-    counts = Counter()
-    in_block = False
-    block_indent = None
-    for raw in str(content or '').splitlines():
-        line = _strip_comment(raw)
-        if not line.strip():
-            continue
-        indent = len(line) - len(line.lstrip(' '))
-        if in_block:
-            if indent > block_indent:
-                continue
-            in_block = False
-        stripped = line.lstrip(' ')
-        if stripped.startswith('---') or stripped.startswith('...'):
-            continue
-        colon = _first_colon(line)
-        if indent == 0 and colon >= 0:
-            value = line[colon + 1:].strip()
-            if value.startswith('|') or value.startswith('>'):
-                in_block = True
-                block_indent = indent
-                continue
-        counts.update(_anchor_tokens_line(line))
-    return counts
+def _anchor_occurrences(content):
+    """Lines carrying an anchor, alias or merge key, with their parent path."""
+    found = []
+    for item in _walk_lines(content):
+        tokens = _anchor_tokens_line(item['line'])
+        if tokens:
+            found.append({'line': item['line'], 'parent': item['parent'],
+                          'tokens': tokens})
+    return found
 
 
 def validate_write(path, content, current=None):
@@ -465,7 +474,7 @@ def validate_write(path, content, current=None):
                           '!env_var is not allowed in config files')
     current_occurrences = (_include_occurrences(current, target)
                            if current is not None else [])
-    available = Counter((item['key'], item['line'])
+    available = Counter((item['parent'], item['line'])
                         for item in current_occurrences)
     includes = []
     grandfathered = []
@@ -476,7 +485,7 @@ def validate_write(path, content, current=None):
                 'config_anchor_refused',
                 'a line carrying an include tag cannot also carry a YAML '
                 'anchor')
-        line_key = (occurrence['key'], occurrence['line'])
+        line_key = (occurrence['parent'], occurrence['line'])
         matched = available[line_key] > 0
         if matched:
             available[line_key] -= 1
@@ -499,20 +508,28 @@ def validate_write(path, content, current=None):
             if matched and outside:
                 grandfathered.append({
                     'kind': kind, 'target': argument, 'resolved': resolved,
-                    'line': occurrence['line'], 'key': occurrence['key'],
+                    'line': occurrence['line'],
+                    'parent': occurrence['parent'],
                 })
     if grandfathered:
-        current_anchors = _anchor_tokens(current or '')
-        for token, count in _anchor_tokens(text).items():
-            if count > current_anchors.get(token, 0):
-                kind, name = token
-                shown = '<<:' if kind == 'merge' else (
-                    ('&' if kind == 'anchor' else '*') + name)
-                raise ConfigError(
-                    'config_anchor_refused',
-                    'a new YAML anchor, alias or merge key is not allowed in '
-                    'a file with an unchanged include outside packages/: %s'
-                    % shown)
+        # CB11: an anchor/alias/merge line obeys the same line and parent-path
+        # rule as an include line. A moved or new one is refused.
+        current_anchors = Counter(
+            (item['parent'], item['line'])
+            for item in _anchor_occurrences(current or ''))
+        for anchor in _anchor_occurrences(text):
+            key = (anchor['parent'], anchor['line'])
+            if current_anchors[key] > 0:
+                current_anchors[key] -= 1
+                continue
+            kind, name = anchor['tokens'][0]
+            shown = '<<:' if kind == 'merge' else (
+                ('&' if kind == 'anchor' else '*') + name)
+            raise ConfigError(
+                'config_anchor_refused',
+                'a new or moved YAML anchor, alias or merge key is not '
+                'allowed in a file with an unchanged include outside '
+                'packages/: %s' % shown)
     risky = _risky_keys(keys)
     if home_auth:
         risky.append('homeassistant.' + RISKY_HOMEASSISTANT)

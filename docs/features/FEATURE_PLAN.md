@@ -10697,14 +10697,16 @@ Three findings from the operator's own HA, reached through Hermes.
 * **Includes already in the file (Security's stricter answer).** An include
   outside the normal `packages/` rule is grandfathered only when its whole
   line, including indentation and its own key, is byte-identical to a line
-  under the same top-level key in the content read under `expect_hash` for
-  that same file. Occurrences are counted, so the line cannot be duplicated;
-  re-indenting it or moving it under another key makes it new and refused.
+  under the same full parent path in the content read under `expect_hash` for
+  that same file. The parent path is the exact ancestor key/list-item lines,
+  so renaming a parent or moving the line to another parent makes it new and
+  refused. Occurrences are counted, so the line cannot be duplicated.
   Absolute, dot-segment, `secrets.yaml` and `!env_var` refusals still apply.
-  A file with a grandfathered include may not add an anchor, alias or `<<:`
-  merge key. The grandfathered includes outside `packages/` are named on the
-  approval card and in the write's audit row. If the current content cannot
-  be read, the write is refused.
+  A file with a grandfathered include may not add or move an anchor, alias or
+  `<<:` merge key, and an include line carrying an anchor is refused. The
+  grandfathered includes outside `packages/` are named on the approval card
+  and in the write's audit row. One shared line scanner covers list-shaped
+  files. If the current content cannot be read, the write is refused.
 * `ha_config_list` returns the pinned `host_fingerprint` on the same call
   that establishes the pin (and on later calls too).
 * `ha_config_read` of `secrets.yaml` reports the real file's size, returns

@@ -264,7 +264,7 @@ class TestGrandfatheredLines:
             'kind': 'dir', 'target': 'themes',
             'resolved': '/homeassistant/themes',
             'line': '  themes: !include_dir_merge_named themes',
-            'key': 'frontend',
+            'parent': ('frontend:',),
         }]
 
     def test_a_normal_packages_include_is_not_called_grandfathered(self):
@@ -350,4 +350,55 @@ def test_an_unchanged_anchored_include_is_refused():
     current = ('frontend:\n'
                '  themes: &t !include_dir_merge_named themes\n')
     assert _code(validate_write, '/config/configuration.yaml', current,
+                 current) == 'config_anchor_refused'
+
+
+class TestListShapedFiles:
+    def test_an_include_on_a_line_after_a_list_block_is_checked(self):
+        body = ('- action: |\n'
+                '  trigger: !include .storage/x.yaml\n')
+        assert _code(validate_write, '/config/automations.yaml', body) == \
+            'config_include_refused'
+
+    def test_an_env_var_on_a_line_after_a_list_block_is_checked(self):
+        body = ('- action: |\n'
+                '  trigger: !env_var SECRET\n')
+        assert _code(validate_write, '/config/automations.yaml', body) == \
+            'config_env_var_refused'
+
+    def test_a_secrets_include_after_a_list_block_is_checked(self):
+        body = ('- action: |\n'
+                '  trigger: !include secrets.yaml\n')
+        assert _code(validate_write, '/config/automations.yaml', body) == \
+            'config_secret_include_refused'
+
+
+def test_a_nested_include_moved_to_another_parent_is_refused():
+    line = '    themes: !include_dir_merge_named themes\n'
+    current = ('frontend:\n'
+               '  one:\n' + line)
+    proposed = ('frontend:\n'
+                '  two:\n' + line)
+    assert _code(validate_write, '/config/configuration.yaml', proposed,
+                 current) == 'config_include_refused'
+
+
+def test_renaming_an_include_parent_is_refused():
+    line = '    themes: !include_dir_merge_named themes\n'
+    current = ('frontend:\n'
+               '  one:\n' + line)
+    proposed = ('frontend:\n'
+                '  renamed:\n' + line)
+    assert _code(validate_write, '/config/configuration.yaml', proposed,
+                 current) == 'config_include_refused'
+
+
+def test_moving_an_existing_anchor_onto_an_include_parent_is_refused():
+    current = ('base: &t 1\n'
+               'frontend:\n'
+               '  themes: !include_dir_merge_named themes\n')
+    proposed = ('frontend:\n'
+                '  base: &t 1\n'
+                '  themes: !include_dir_merge_named themes\n')
+    assert _code(validate_write, '/config/configuration.yaml', proposed,
                  current) == 'config_anchor_refused'

@@ -67,9 +67,10 @@ between, nothing is written (`config_hash_changed`). Freeze blocks writes and
 restores; reads keep working.
 
 An include outside `packages/` that already exists is left alone only when
-its whole line is unchanged under the same top-level key; the approval card
-and audit row name it. Re-indenting or moving it, or adding a YAML anchor,
-alias or merge key to a file that relies on one, is refused.
+its whole line is unchanged under the same full parent path; the approval
+card and audit row name it. Re-indenting it or moving it to another parent,
+adding a YAML anchor, alias or merge key, or putting an anchor on an include
+line, is refused.
 
 ## 5. What Eshu does not do
 
