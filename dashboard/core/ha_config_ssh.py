@@ -1426,6 +1426,7 @@ def validate_private_key(text):
     detected by asking ssh-keygen to decrypt with an empty one.
     """
     import os
+    import shutil
     import subprocess
     import tempfile
     value = str(text or '').strip()
@@ -1434,9 +1435,10 @@ def validate_private_key(text):
         raise HaConfigError('config_key_invalid',
                             'The private key must be an OpenSSH private key '
                             'without a passphrase.')
-    fd, path = tempfile.mkstemp(prefix='ha-key-check-')
+    tmpdir = tempfile.mkdtemp(prefix='ha-key-check-')  # mkdtemp is 0700
+    path = os.path.join(tmpdir, 'key')
     try:
-        os.fchmod(fd, 0o600)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, 'w') as handle:
             handle.write(value + '\n')
         try:
@@ -1451,7 +1453,4 @@ def validate_private_key(text):
                                 'The private key must be an OpenSSH private key '
                                 'without a passphrase.')
     finally:
-        try:
-            os.unlink(path)
-        except OSError:
-            pass
+        shutil.rmtree(tmpdir, ignore_errors=True)

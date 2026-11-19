@@ -448,9 +448,27 @@ def run_tool_for_operator_test(integration_name: str, tool_name: str,
     There is no MCP connection or agent session here, so the strict
     session-mode check that `run_tool` applies to agents is not used. Freeze,
     policy, gating, handler dispatch and the integration-call row still run.
+
+    CB9: this helper refuses anything but an implemented read-only tool on its
+    own, so a future caller cannot turn it into an ungated write. The actor is
+    `operator-test`, not the no-agent `mcp` label.
     """
+    integration = get_integration(integration_name)
+    if not integration or not integration.get('enabled'):
+        return _error("Integration not found or disabled", 404)
+    tool = get_tool(integration_name, tool_name)
+    if not tool or not tool.get('enabled'):
+        return _error("Tool not found or disabled", 404)
+    if not tool.get('read_only') or tool.get('not_implemented'):
+        return json.dumps({
+            'error': 'operator_test_read_only',
+            'message': 'The Test button only runs an implemented read-only '
+                       'tool.',
+            'status_code': 403,
+        })
     return _run_tool(integration_name, tool_name, args or {},
-                     session_id='', session_source='operator-test')
+                     session_id='', session_source='operator-test',
+                     actor='operator-test')
 
 
 def _annotate_session(result: str, session_id: str,
@@ -469,7 +487,8 @@ def _annotate_session(result: str, session_id: str,
 
 
 def _run_tool(integration_name: str, tool_name: str, args: dict, reason: str = '',
-              session_id: str = None, session_source: str = '') -> str:
+              session_id: str = None, session_source: str = '',
+              actor: str = '') -> str:
     """Execute (or gate) one MCP tool call and return the JSON string for the model."""
     integration = get_integration(integration_name)
     if not integration or not integration.get('enabled'):
@@ -488,7 +507,9 @@ def _run_tool(integration_name: str, tool_name: str, args: dict, reason: str = '
     execution_id = (args.pop('execution_id', '') or '')[:64]
 
     agent = get_current_agent()
-    agent_name = (agent or {}).get('name') or AGENT_LABEL
+    # CB9: an explicit actor (the operator Test) is a label for the call row
+    # and audit only; policy still sees no agent.
+    agent_name = actor or (agent or {}).get('name') or AGENT_LABEL
 
     # Agent policy is the first gate: deny-by-default tool allowlist followed by
     # argument constraints (e.g. HA service domains). A denial is explicit and

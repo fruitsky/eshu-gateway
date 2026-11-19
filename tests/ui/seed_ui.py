@@ -118,6 +118,21 @@ integrations.update_integration(
     "ha-files",
     secret="-----BEGIN OPENSSH PRIVATE KEY-----\nsynthetic\n"
            "-----END OPENSSH PRIVATE KEY-----")
+# A Files row whose saved HA parent is now disabled: it must stay editable
+# and show the broken link, rather than vanish or refuse every edit.
+integrations.create_integration("Home Assistant (old)",
+                                "http://192.0.2.33:8123", "bearer", "",
+                                kind="ha")
+integrations.update_integration("Home Assistant (old)", enabled=False)
+old_files = integrations.create_integration(
+    "ha-files-old", "192.0.2.34", "none", "", kind="ha_ssh")
+seed_ha_ssh_tools(old_files)
+set_integration_config(integrations.get_integration("ha-files-old"), {
+    "ha_integration": "Home Assistant (old)", "ssh_user": "root", "ssh_port": 22})
+integrations.update_integration(
+    "ha-files-old",
+    secret="-----BEGIN OPENSSH PRIVATE KEY-----\nsynthetic\n"
+           "-----END OPENSSH PRIVATE KEY-----")
 
 # X11: synthetic permissions for the real Agents view. One pick permission,
 # one label-followed permission, a normal light permission, and one paused

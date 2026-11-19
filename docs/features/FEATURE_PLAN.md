@@ -23009,3 +23009,28 @@ allowlist.**
 
 The property still holds for anything the agent introduces. What it
 cannot introduce, it can only leave where the operator put it.
+
+### CB9 and the nits implemented (`feat/ha-files-ui`)
+
+* **CB9.** `run_tool_for_operator_test` now fetches the tool itself and
+  refuses anything that is not `read_only` and implemented, before
+  `_run_tool`; the endpoint's selection is no longer the guard. The helper
+  passes `actor='operator-test'` into `_run_tool`, which labels the call row
+  and the handler's audit actor while policy still sees no agent.
+* **Edit key.** The update path no longer calls `validate_private_key`
+  outside the `try`; `_validate_ssh_fields` is the one check, so a bad key is
+  a 400. Changing a row's kind to `ha_ssh` validates the stored secret (or
+  requires a new one).
+* **Disabled HA link.** A saved `ha_integration` is authoritative: if that HA
+  is later disabled the row keeps the link, stays editable, and shows
+  "linked HA disabled" instead of re-homing under another enabled HA. Only a
+  link the edit actually changes is re-validated.
+* **Key temp file.** `validate_private_key` uses a private `mkdtemp()`
+  directory (0700) and removes it in a `finally`.
+* **Dismissed joiners.** `allowances.dismissed_json` keeps the
+  `(entity_id, registry_id)` pairs. `refresh_labels` does not re-offer them
+  while that registry entry stays in the label, and clears the record when it
+  leaves or is replaced. The waiting list shows `dismissed (n)` with
+  Re-offer and Accept all; Accept all is `include_dismissed=true`, still
+  bound to the current label. `POST /api/allowances/{id}/reoffer-join` puts
+  them back in the waiting list and audits the change.

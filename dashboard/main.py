@@ -862,6 +862,9 @@ class AcceptJoinPayload(BaseModel):
     # BX5: joiners may be garage/gate/door/lock-like, so the second risk
     # confirmation is server-checked like the save path.
     risk_ack: bool = False
+    # An explicit Accept-all may include joiners dismissed earlier while
+    # they are still in the label.
+    include_dismissed: bool = False
 
 
 class AllowancePayload(BaseModel):
@@ -4882,19 +4885,34 @@ def update_integration_endpoint(name: str, payload: IntegrationUpdatePayload, re
     ssh_user = data.pop('ssh_user', None)
     ssh_port = data.pop('ssh_port', None)
     ha_link = data.pop('ha_integration', None)
-    kind = data.get('kind', current.get('kind') or 'custom')
+    current_kind = current.get('kind') or 'custom'
+    kind = data.get('kind', current_kind)
     if kind == 'ha_ssh':
         cfg = get_integration_config(current)
         secret = data.get('secret')
-        if secret is not None:
-            validate_private_key(secret)
+        # CB nit: changing an existing row to ha_ssh must validate the secret
+        # it already has, not only a newly supplied one.
+        if current_kind != 'ha_ssh' and not str(secret or '').strip():
+            secret = current.get('secret') or ''
+            if not str(secret).strip():
+                raise HTTPException(
+                    status_code=400,
+                    detail='A private key is required when changing kind to ha_ssh')
         login, port = _validate_ssh_fields(
-            data.get('secret') or '',
+            secret or '',
             ssh_user or cfg.get('ssh_user') or 'root',
             ssh_port if ssh_port is not None else cfg.get('ssh_port') or 22)
-        link = ha_link if ha_link is not None else cfg.get('ha_integration') or ''
+        saved_link = cfg.get('ha_integration') or ''
+        # CB nit: a stored link that has since been disabled is kept and
+        # shown as broken; only a link this edit changes is re-validated.
+        if ha_link is None:
+            link = saved_link or _resolve_ha_link('')
+        elif (ha_link or '') == saved_link:
+            link = saved_link
+        else:
+            link = _resolve_ha_link(ha_link)
         ssh_config = {'ssh_user': login, 'ssh_port': port,
-                      'ha_integration': _resolve_ha_link(link)}
+                      'ha_integration': link}
     update_integration(name, **data)
     if ssh_config is not None:
         set_integration_config(get_integration(name), ssh_config)
@@ -5888,8 +5906,9 @@ def accept_allowance_join_endpoint(aid: int, request: Request,
                                    payload: AcceptJoinPayload = AcceptJoinPayload()):
     _check_session(request)
     try:
-        row = allowances.accept_join('operator', aid,
-                                     risk_ack=payload.risk_ack)
+        row = allowances.accept_join(
+            'operator', aid, risk_ack=payload.risk_ack,
+            include_dismissed=payload.include_dismissed)
         return row
     except allowances.AllowanceError as exc:
         detail = exc.detail
@@ -5903,6 +5922,18 @@ def dismiss_allowance_join_endpoint(aid: int, request: Request):
     _check_session(request)
     try:
         return allowances.dismiss_join('operator', aid)
+    except allowances.AllowanceError as exc:
+        detail = exc.detail
+        if exc.extra:
+            detail = {'message': exc.detail, **exc.extra}
+        raise HTTPException(status_code=exc.status, detail=detail)
+
+
+@app.post("/api/allowances/{aid}/reoffer-join")
+def reoffer_allowance_join_endpoint(aid: int, request: Request):
+    _check_session(request)
+    try:
+        return allowances.reoffer_join('operator', aid)
     except allowances.AllowanceError as exc:
         detail = exc.detail
         if exc.extra:

@@ -328,6 +328,10 @@
 #x11-root .x11-waiting-row:first-of-type { border-top: 0; }
 #x11-root .x11-waiting-grid { margin-top: 12px; }
 #x11-root .x11-card-waiting { margin-top: 4px; color: var(--accent); font-size: var(--text-xs); }
+#x11-root .x11-dismissed-line {
+  flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 6px;
+  align-items: center; color: var(--text-muted); font-size: var(--text-xs);
+}
 
 #x11-root .x11-perm-help {
   border: 1px solid var(--rule-weak); border-radius: var(--radius);

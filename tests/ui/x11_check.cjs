@@ -323,8 +323,22 @@ async function openGroup(page, name) {
      'waiting: Accept did not remove the first joiner');
   await page.locator('#x11-sec-overview [data-dismiss-join]').first().click();
   await page.waitForTimeout(1400);
+  ok(await page.locator('#x11-sec-overview [data-waiting-row]').count() === 1,
+     'waiting: Dismiss removed the row instead of keeping it visible');
+  const dismissed = page.locator('#x11-sec-overview [data-dismissed-line]');
+  ok(await dismissed.count() === 1 && /dismissed \(1\)/.test(await dismissed.textContent()),
+     'waiting: dismissed count is missing');
+  await page.locator('#x11-sec-overview [data-reoffer-join]').click();
+  await page.waitForTimeout(1400);
+  ok(await page.locator('#x11-sec-overview [data-dismissed-line]').count() === 0 &&
+     await page.locator('#x11-sec-overview [data-accept-join]').count() === 1,
+     'waiting: Re-offer did not return the joiner to the waiting list');
+  await page.locator('#x11-sec-overview [data-dismiss-join]').click();
+  await page.waitForTimeout(1400);
+  await page.locator('#x11-sec-overview [data-accept-all-join]').click();
+  await page.waitForTimeout(1400);
   ok(await page.locator('#x11-sec-overview [data-waiting-row]').count() === 0,
-     'waiting: Dismiss did not remove the second joiner');
+     'waiting: Accept all did not include the dismissed joiner');
 
   // 12d. Integrations: the Files sub-card and the SSH key form.
   await page.evaluate(() => switchView('integrations'));
@@ -332,6 +346,9 @@ async function openGroup(page, name) {
   ok(await page.locator('.i-subcard').count() === 1 &&
      /Files \(SSH add-on\)/.test(await page.locator('.i-subcard').textContent()),
      'integrations: Files is not a sub-card of Home Assistant');
+  ok(await page.locator('[data-ha-link-disabled]').count() === 1 &&
+     /linked HA disabled/.test(await page.locator('[data-ha-link-disabled]').textContent()),
+     'integrations: a disabled HA link is not shown as broken');
   await page.selectOption('#int-kind', 'ha_ssh');
   await page.waitForTimeout(200);
   ok(await page.locator('#int-ssh-fields').isVisible(), 'integrations: SSH key fields are hidden');

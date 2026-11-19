@@ -161,10 +161,16 @@
       return Array.isArray(list) ? list : [];
     } catch (e) { return []; }
   }
+  function dismissedOf(row) {
+    try {
+      var list = JSON.parse((row && row.dismissed_json) || '[]');
+      return Array.isArray(list) ? list : [];
+    } catch (e) { return []; }
+  }
   function waitingRows(agentId) {
     return (S.allowances || []).filter(function (r) {
       return Number(r.agent_id) === Number(agentId) && !Number(r.revoked_at) &&
-        pendingOf(r).length;
+        (pendingOf(r).length || dismissedOf(r).length);
     });
   }
   function waitingCount(agentId) {
@@ -175,6 +181,9 @@
   function waitingNames(row) {
     return pendingOf(row).map(function (p) { return deviceName(p.entity_id); });
   }
+  function dismissedNames(row) {
+    return dismissedOf(row).map(function (p) { return deviceName(p.entity_id); });
+  }
   function labelForRow(row) {
     try {
       var src = JSON.parse(row.conditions_json || '{}');
@@ -182,6 +191,39 @@
       var s = (src.service && src.service['in'] && src.service['in'][0]) || '';
       return actionWords(d, s);
     } catch (e) { return 'Permission'; }
+  }
+  function waitingRowHtml(r) {
+    var pend = pendingOf(r);
+    var dis = dismissedOf(r);
+    var id = Number(r.id);
+    var head;
+    if (pend.length) {
+      head = '<b>' + pend.length + ' new device' + (pend.length === 1 ? '' : 's') +
+        '</b> for ' + esc(labelForRow(r)) + ': ' + esc(waitingNames(r).join(', '));
+    } else {
+      head = '<b>Dismissed</b> for ' + esc(labelForRow(r)) + ': ' +
+        esc(dismissedNames(r).join(', '));
+    }
+    var buttons = '';
+    if (pend.length) {
+      buttons += '<button type="button" class="btn btn-xs" data-accept-join="' + id +
+        '" onclick="x11AcceptJoin(this)">Accept</button>' +
+        '<button type="button" class="btn btn-muted btn-xs" data-dismiss-join="' + id +
+        '" onclick="x11DismissJoin(this)">Dismiss</button>';
+    }
+    var dismissedLine = '';
+    if (dis.length) {
+      dismissedLine = '<div class="x11-dismissed-line" data-dismissed-line>' +
+        '<span>dismissed (' + dis.length + ')</span>' +
+        '<button type="button" class="btn btn-muted btn-xs" data-reoffer-join="' + id +
+        '" onclick="x11ReofferJoin(this)">Re-offer</button>' +
+        '<button type="button" class="btn btn-xs" data-accept-all-join="' + id +
+        '" onclick="x11AcceptAllJoin(this)">Accept all</button></div>';
+    }
+    return '<div class="x11-waiting-row" data-waiting-row data-allowance-id="' + id + '">' +
+      '<div>' + head + '</div>' +
+      dismissedLine +
+      '<div class="x11-btn-row">' + buttons + '</div></div>';
   }
   function sshText(cfg) {
     var hosts = ((cfg || S.draft || {}).ssh || {}).hosts || [];
@@ -763,15 +805,7 @@
     var waitHtml = '';
     if (waits.length) {
       waitHtml = '<div class="x11-waiting-list" data-waiting-list><h3>Waiting to join</h3>' +
-        waits.map(function (r) {
-          return '<div class="x11-waiting-row" data-waiting-row data-allowance-id="' + Number(r.id) + '">' +
-            '<div><b>' + pendingOf(r).length + ' new device' + (pendingOf(r).length === 1 ? '' : 's') + '</b> ' +
-            'for ' + esc(labelForRow(r)) + ': ' + esc(waitingNames(r).join(', ')) + '</div>' +
-            '<div class="x11-btn-row"><button type="button" class="btn btn-xs" data-accept-join="' +
-            Number(r.id) + '" onclick="x11AcceptJoin(this)">Accept</button>' +
-            '<button type="button" class="btn btn-muted btn-xs" data-dismiss-join="' +
-            Number(r.id) + '" onclick="x11DismissJoin(this)">Dismiss</button></div></div>';
-        }).join('') + '</div>';
+        waits.map(waitingRowHtml).join('') + '</div>';
     }
     return '<section class="x11-section" id="x11-sec-overview" data-x11-section="overview">' +
       head('Overview', 'What this agent can do on its own, in plain words.', 'overview') +
@@ -1244,34 +1278,34 @@
     var waits = waitingRows(S.agent && S.agent.id);
     if (!waits.length) return '';
     return '<div class="x11-waiting-list x11-waiting-grid" data-waiting-grid>' +
-      waits.map(function (r) {
-        return '<div class="x11-waiting-row" data-waiting-row data-allowance-id="' + Number(r.id) + '">' +
-          '<div><b>' + pendingOf(r).length + ' new device' + (pendingOf(r).length === 1 ? '' : 's') +
-          '</b> have the label: ' + esc(waitingNames(r).join(', ')) + '</div>' +
-          '<div class="x11-btn-row"><button type="button" class="btn btn-xs" data-accept-join="' +
-          Number(r.id) + '" onclick="x11AcceptJoin(this)">Accept</button>' +
-          '<button type="button" class="btn btn-muted btn-xs" data-dismiss-join="' +
-          Number(r.id) + '" onclick="x11DismissJoin(this)">Dismiss</button></div></div>';
-      }).join('') + '</div>';
+      waits.map(waitingRowHtml).join('') + '</div>';
   }
 
   function x11AcceptJoin(btn) {
-    var id = Number(btn.getAttribute('data-accept-join'));
+    acceptJoin(Number(btn.getAttribute('data-accept-join')), false);
+  }
+
+  function x11AcceptAllJoin(btn) {
+    acceptJoin(Number(btn.getAttribute('data-accept-all-join')), true);
+  }
+
+  function acceptJoin(id, includeDismissed) {
     if (!id) return;
     var row = (S.allowances || []).filter(function (r) {
       return Number(r.id) === id;
     })[0];
     if (row) {
-      var n = pendingOf(row).length;
-      if (!window.confirm('Accept ' + n + ' new device' + (n === 1 ? '' : 's') +
-          ' for ' + labelForRow(row) + ': ' + waitingNames(row).join(', ') + '?')) return;
+      var names = waitingNames(row).concat(includeDismissed ? dismissedNames(row) : []);
+      if (!window.confirm('Accept ' + names.length + ' device' + (names.length === 1 ? '' : 's') +
+          ' for ' + labelForRow(row) + ': ' + names.join(', ') + '?')) return;
     }
     var call = function (risk) {
       api('/api/allowances/' + id + '/accept-join', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ risk_ack: !!risk }),
+        body: JSON.stringify({ risk_ack: !!risk,
+                               include_dismissed: !!includeDismissed }),
       }).then(function () {
-        toast('Devices accepted', 'success');
+        toast(includeDismissed ? 'All devices accepted' : 'Devices accepted', 'success');
         var section = S.section;
         x11OpenAgent(S.agent.id, section);
       }).catch(function (e) {
@@ -1295,10 +1329,21 @@
   function x11DismissJoin(btn) {
     var id = Number(btn.getAttribute('data-dismiss-join'));
     if (!id) return;
-    if (!window.confirm('Dismiss these waiting devices? They stay in Home Assistant and wait for the next label change.')) return;
+    if (!window.confirm('Dismiss these waiting devices? They stay in Home Assistant; this permission will not offer them again while the label keeps them.')) return;
     api('/api/allowances/' + id + '/dismiss-join', { method: 'POST' })
       .then(function () {
         toast('Waiting devices dismissed', 'success');
+        var section = S.section;
+        x11OpenAgent(S.agent.id, section);
+      }).catch(function (e) { setNotice(errText(e), 'error'); });
+  }
+
+  function x11ReofferJoin(btn) {
+    var id = Number(btn.getAttribute('data-reoffer-join'));
+    if (!id) return;
+    api('/api/allowances/' + id + '/reoffer-join', { method: 'POST' })
+      .then(function () {
+        toast('Dismissed devices offered again', 'success');
         var section = S.section;
         x11OpenAgent(S.agent.id, section);
       }).catch(function (e) { setNotice(errText(e), 'error'); });
@@ -1887,7 +1932,9 @@
   window.x11ReviewPaused = x11ReviewPaused;
   window.x11ReviewWaiting = x11ReviewWaiting;
   window.x11AcceptJoin = x11AcceptJoin;
+  window.x11AcceptAllJoin = x11AcceptAllJoin;
   window.x11DismissJoin = x11DismissJoin;
+  window.x11ReofferJoin = x11ReofferJoin;
   window.x11Nav = x11Nav;
   window.x11ToolChoice = x11ToolChoice;
   window.x11SetDevice = x11SetDevice;

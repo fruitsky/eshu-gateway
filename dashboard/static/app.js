@@ -9800,7 +9800,10 @@ function haFilesParent(i) {
     var named = _integrationsData.find(function (x) {
       return x.name === cfg.ha_integration && x.kind === 'ha' && x.enabled;
     });
-    if (named) return named.name;
+    // A stored link is authoritative. If its HA is disabled, the row stays a
+    // standalone Files card with the broken-link note; it must not silently
+    // re-home under a different enabled HA.
+    return named ? named.name : '';
   }
   var has = _integrationsData.filter(function (x) {
     return x.kind === 'ha' && x.enabled;
@@ -9839,6 +9842,18 @@ function renderIntegrationList() {
     var gateLabel = profile.no_gate ? 'n/a' : (i.gate_mode || 'destructive');
     var keyLine = i.kind === 'ha_ssh'
       ? '<span>key ' + (i.secret_set ? 'set' : 'missing') + '</span>' : '';
+    var linkLine = '';
+    if (i.kind === 'ha_ssh') {
+      var linkCfg = integrationConfig(i);
+      if (linkCfg.ha_integration) {
+        var linkRow = _integrationsData.find(function (x) {
+          return x.name === linkCfg.ha_integration && x.kind === 'ha';
+        });
+        if (!linkRow || !linkRow.enabled) {
+          linkLine = '<span class="text-danger" data-ha-link-disabled>linked HA disabled</span>';
+        }
+      }
+    }
     return '<div class="item-card selectable' + (selected ? ' selected' : '') + (sub ? ' i-subcard' : '') +
       '" onclick="selectIntegration(' + escJs(i.name) + ')">' +
       '<div class="flex items-center justify-between gap-2">' +
@@ -9846,7 +9861,8 @@ function renderIntegrationList() {
       '<span class="i-kind">' + esc(label) + '</span></div>' +
       '<div class="i-url">' + esc(urlLabel) + '</div>' +
       '<div class="i-meta">auth: ' + esc(i.auth_type) + ' &middot; gate: ' + esc(gateLabel) +
-      ' &middot; mcp: ' + esc(i.mcp_mode || 'joined') + (keyLine ? ' &middot; ' + keyLine : '') + '</div>' +
+      ' &middot; mcp: ' + esc(i.mcp_mode || 'joined') + (keyLine ? ' &middot; ' + keyLine : '') +
+      (linkLine ? ' &middot; ' + linkLine : '') + '</div>' +
       integrationHealthLine(i.name) +
       '<div class="flex flex-wrap gap-1 mt-2" onclick="event.stopPropagation()">' +
       actions(i) + '</div></div>';
