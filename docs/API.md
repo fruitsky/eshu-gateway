@@ -51,7 +51,7 @@ only the dashboard UI after login.
 | `DELETE` | `/api/approved-windows/{id}` | Delete a window | Session |
 | `POST` | `/api/approved-windows/{id}/toggle` | Enable/disable a window | Session |
 | `GET` | `/api/window-by-token/{token}` | **Retired** — 410 Gone; use `POST /api/window-by-token` | — |
-| `POST` | `/api/approved-windows/execute/{token}` | **Retired** — 410 Gone; use the body form | — |
+| `POST` | `/api/approved-windows/execute/{token}` | Legacy path claim for pre-BJ2 gateways; accepted until the X9 cut-over and audited with token_fp only. Prefer the body form. | Gateway |
 
 ## Dashboard Endpoints (authentication required)
 

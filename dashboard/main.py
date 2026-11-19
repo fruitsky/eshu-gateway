@@ -416,6 +416,9 @@ _ENROLL_DEDUP_WINDOW = 5  # seconds
 # BZ2: at most one invalid-approver audit row per client IP per minute.
 _invalid_approver_audit = {}
 _INVALID_APPROVER_WINDOW = 60
+# W2: the retired public lookup writes at most one row per IP per minute.
+_retired_lookup_audit = {}
+_RETIRED_LOOKUP_WINDOW = 60
 _app = app  # keep reference for router includes
 # First-run setup token: printed at startup when no password is set, and
 # accepted via X-Eshu-Setup-Token from a non-loopback browser.
@@ -3813,21 +3816,12 @@ def window_execute_body(payload: WindowClaimPayload, request: Request):
 
 
 @app.post("/api/approved-windows/execute/{token}")
-def window_execute_retired(token: str, request: Request):
-    """410 for the pre-BJ2 path form. It is not a silent alias."""
-    record_audit_event(
-        "window_token_route_retired", None,
-        details=("POST /api/approved-windows/execute/<token> refused; "
-                 "token_fp=%s; use POST /api/approved-windows/execute "
-                 "with a JSON body" % window_token_fingerprint(token)))
-    raise HTTPException(
-        status_code=410,
-        detail=("The window token is no longer accepted in the URL path. "
-                "Use POST /api/approved-windows/execute with "
-                '{"window_token": "<token>"} in the JSON body.'))
+def window_execute_legacy(token: str, request: Request):
+    """Pre-BJ2 gateways still claim through the path; keep it until X9."""
+    return _window_execute(token, request, legacy_path=True)
 
 
-def _window_execute(token: str, request: Request):
+def _window_execute(token: str, request: Request, legacy_path=False):
     token_ip, _ = _resolve_gateway_token(request)
     if not token_ip:
         raise HTTPException(status_code=401, detail="Gateway token required for window execution")
@@ -3837,6 +3831,12 @@ def _window_execute(token: str, request: Request):
         raise HTTPException(status_code=404, detail="Invalid or expired window token")
     if token_ip != target['target_ip']:
         raise HTTPException(status_code=403, detail="Gateway IP does not match window target")
+    if legacy_path:
+        # W1: only after both gateway checks pass, and only token_fp.
+        record_audit_event(
+            "window_legacy_path_claim_used", target['target_ip'],
+            details=("legacy path claim used token_fp=%s gateway=%s"
+                     % (window_token_fingerprint(token), token_ip)))
     ok = increment_window_execution(token)
     if not ok:
         # Log the rejection server-side (token exists but window disabled/exhausted/expired)
@@ -3868,12 +3868,17 @@ def lookup_window_by_token_body(payload: WindowLookupPayload, request: Request):
 
 @app.get("/api/window-by-token/{token}")
 def lookup_window_by_token_retired(token: str, request: Request):
-    """410 for the old GET path. The token never enters the response."""
-    record_audit_event(
-        "window_lookup_route_retired", None,
-        details=("GET /api/window-by-token/<token> refused; token_fp=%s; "
-                 "use POST /api/window-by-token with a JSON body"
-                 % window_token_fingerprint(token)))
+    """410 for the old GET path. Rate-limit first; audit at most once a minute."""
+    client_ip = request.client.host if request.client else '127.0.0.1'
+    _check_rate_limit(client_ip)
+    now = int(time.time())
+    if now - _retired_lookup_audit.get(client_ip, 0) >= _RETIRED_LOOKUP_WINDOW:
+        _retired_lookup_audit[client_ip] = now
+        record_audit_event(
+            "window_lookup_route_retired", None,
+            details=("GET /api/window-by-token/<token> refused; token_fp=%s; "
+                     "client=%s; use POST /api/window-by-token with a JSON body"
+                     % (window_token_fingerprint(token), client_ip)))
     raise HTTPException(
         status_code=410,
         detail=("The window token is no longer accepted in the URL path. "
@@ -4169,7 +4174,7 @@ def get_single_window(window_id: str, request: Request):
         win = get_approved_window_by_key(window_id)
     if not win:
         raise HTTPException(status_code=404, detail="Window not found")
-    return win
+    return _public_window(win)
 
 @app.get("/api/approved-windows/{window_id}/executions")
 def list_window_executions(window_id: str, request: Request):
@@ -4192,9 +4197,17 @@ def _public_window_executions(rows):
     for row in rows or []:
         row = dict(row)
         token = row.pop('token', '')
-        row['token_fp'] = window_token_fingerprint(token)
+        row['token_fp'] = row.get('token_fp') or window_token_fingerprint(token)
         out.append(row)
     return out
+
+
+def _public_window(row):
+    """The retrieval-key read may show the window, never its raw token."""
+    row = dict(row or {})
+    token = row.pop('token', '')
+    row['token_fp'] = row.get('token_fp') or window_token_fingerprint(token)
+    return row
 
 # ── Integrations & MCP (agent API gateway) ─────────────────────────────
 

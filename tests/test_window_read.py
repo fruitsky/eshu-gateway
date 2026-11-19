@@ -60,7 +60,8 @@ class TestWindowReadOpen:
         # Anonymous callers must use the opaque retrieval_key, not the numeric id.
         r = anon.get(f"/api/approved-windows/{w['retrieval_key']}")
         assert r.status_code == 200
-        assert "token" in r.json()
+        assert "token" not in r.json()
+        assert r.json()["token_fp"]
         assert r.json()["command"] == "uptime"
 
     def test_single_window_numeric_id_requires_session(self, client, auth_client):
@@ -184,17 +185,16 @@ class TestAtomicWindowConsumption:
                                  json={"window_token": token},
                                  headers=gateway_headers)
         assert again.status_code == 404
-        # The path-token form is retired with a 410 that names the body route.
+        # Pre-BJ2 gateways still claim through the path until X9.
         r2 = auth_client.post("/api/approved-windows", json={
             "target_ip": "10.0.0.1", "command": "date", "match_type": "exact",
             "window_start": now - 10, "window_end": now + 3600, "max_executions": 1
         })
         token2 = r2.json()["token"]
-        old = auth_client.post(f"/api/approved-windows/execute/{token2}",
-                               headers=gateway_headers)
-        assert old.status_code == 410
-        assert token2 not in old.text
-        assert "/api/approved-windows/execute" in old.json()["detail"]
+        legacy = auth_client.post(f"/api/approved-windows/execute/{token2}",
+                                  headers=gateway_headers)
+        assert legacy.status_code == 200, legacy.text
+        assert token2 not in legacy.text
 
     def test_bj2_the_script_keeps_the_tokens_out_of_the_url_and_argv(self):
         src = _read_feature()

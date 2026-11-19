@@ -21902,6 +21902,17 @@ approved each window. The migration masks one field, not the history.
 | 26 | 1.4 | — | gateway stack | **Approved for rollout** 2026-11-15 (security `838d77d`): BH2/BQ2, BQ4, F19, X8 (gateway + dashboard), BS1/BS2; rebased onto X7, Build only; the BS2 install-read nit is fixed | `release/1.4-gw` | X7, F19, RR1 | security approved the whole stack; rollout Seed Edge → dev gateways → Deploy to Fleet |
 | 27 | X8 | gateway-installer-version | dashboard + gateway | **Code complete** 2026-11-14: on `release/1.4-gw` (BR1 folded; the hash is display-only) | `feat/x8-gateway-installer-version` | X7 | security approved; five buckets sum to the gateway count |
 | 28 | X9 | gated-gateway-files | dashboard + gateway | **Design note** 2026-11-14 (BP2): installer-carried vs authenticated channel files; recommends (b) | `feat/x9-gated-gateway-files` | X7, 1.4 | security sign-off before code |
+
+**X9 legacy cut-over — retire the window path claim.** The pre-BJ2
+`POST /api/approved-windows/execute/{token}` route stays accepted in 1.4
+and writes a `window_legacy_path_claim_used` audit row (token_fp and
+gateway only). Retire it at the X9 legacy cut-over. Check first: no
+`legacy path claim used` row for 7 days.
+
+**Gateway follow-up.** `approved_windows.sh` logs
+`${ESHU_WINDOW_TOKEN:0:8}` in its own lines. Move those to the same
+SHA-256 fingerprint the dashboard uses in the next gateway release; do
+not change the gateway in 1.4.
 | 29 | X10 | approved-windows-modal | dashboard UI | **Merged** 2026-11-17: presets, Once default, typed local HH:MM + duration, live plain-words preview; agent requests use the same preview; not yet deployed | `feat/x10-windows-modal` | — | UI only; no schema or window-meaning change |
 | — | CI fix | ci-environment | gateway + tests | Merged (`f2746ef`); CI pinned to ubuntu-24.04 (`6d58006`) | `fix/ci-environment` | F5 | |
 | — | Buffering | stream-unbuffered | gateway | Merged (`d8d70c2`); S1 tee fix done in Gateway hardening | `fix/stream-unbuffered` | F5 | |

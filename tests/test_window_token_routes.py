@@ -43,28 +43,97 @@ def test_the_old_lookup_path_is_gone_not_an_alias(client, auth_client):
     assert token_fingerprint(token) in row['details']
 
 
-def test_the_old_claim_path_is_gone_and_the_body_claim_still_works(
+def test_the_legacy_claim_path_still_works_and_is_audited_once(
         auth_client, gateway_headers):
     token, _id = _window(auth_client)
-    old = auth_client.post('/api/approved-windows/execute/' + token,
-                           headers=gateway_headers)
-    assert old.status_code == 410
-    assert token not in old.text
-    assert '/api/approved-windows/execute' in old.json()['detail']
-    row = [x for x in get_audit_log(50)
-           if x['event_type'] == 'window_token_route_retired'][0]
-    assert token not in row['details']
-    assert token_fingerprint(token) in row['details']
+    legacy = auth_client.post('/api/approved-windows/execute/' + token,
+                              headers=gateway_headers)
+    assert legacy.status_code == 200, legacy.text
+    assert token not in legacy.text
+    rows = [x for x in get_audit_log(50)
+            if x['event_type'] == 'window_legacy_path_claim_used']
+    assert len(rows) == 1
+    assert token not in rows[0]['details']
+    assert token_fingerprint(token) in rows[0]['details']
+    assert '10.0.0.1' in rows[0]['details']
 
-    claim = auth_client.post('/api/approved-windows/execute',
-                             json={'window_token': token},
-                             headers=gateway_headers)
-    assert claim.status_code == 200, claim.text
-    assert token not in claim.text
-    claimed = [x for x in get_audit_log(50)
-               if x['event_type'] == 'window_claimed'][0]
-    assert token not in claimed['details']
-    assert token_fingerprint(token) in claimed['details']
+
+def test_a_bad_gateway_token_or_ip_does_not_audit_a_legacy_use(
+        auth_client, gateway_headers):
+    from db.gateways import register_gateway, set_gateway_token
+    token, _id = _window(auth_client)
+    bad = auth_client.post('/api/approved-windows/execute/' + token,
+                           headers={'X-Gateway-Token': 'wrong'})
+    assert bad.status_code == 401
+    register_gateway('10.0.0.2', 'other', 'v15.3')
+    set_gateway_token('10.0.0.2', 'token-10-0-0-2')
+    wrong_ip = auth_client.post('/api/approved-windows/execute/' + token,
+                                headers={'X-Gateway-Token': 'token-10-0-0-2'})
+    assert wrong_ip.status_code == 403
+    rows = [x for x in get_audit_log(50)
+            if x['event_type'] == 'window_legacy_path_claim_used']
+    assert rows == []
+
+
+def test_the_retired_lookup_is_rate_limited_and_audits_once(
+        client, auth_client):
+    import main as app_main
+    token, _id = _window(auth_client)
+    app_main._retired_lookup_audit.clear()
+    first = client.get('/api/window-by-token/' + token)
+    second = client.get('/api/window-by-token/' + token)
+    assert first.status_code == 410 and second.status_code == 410
+    rows = [x for x in get_audit_log(50)
+            if x['event_type'] == 'window_lookup_route_retired']
+    assert len(rows) == 1
+    assert token not in rows[0]['details']
+    assert token_fingerprint(token) in rows[0]['details']
+
+
+def test_the_retrieval_key_read_returns_no_raw_token(client, auth_client):
+    token, _id = _window(auth_client)
+    with __import__('db.core', fromlist=['db_conn']).db_conn() as conn:
+        key = conn.execute('SELECT retrieval_key FROM approved_windows '
+                           'WHERE token = ?', (token,)).fetchone()['retrieval_key']
+    r = client.get('/api/approved-windows/' + key)
+    assert r.status_code == 200
+    assert token not in r.text
+    assert 'token' not in r.json()
+    assert r.json()['token_fp'] == token_fingerprint(token)
+
+
+def test_new_execution_rows_store_only_a_fingerprint(auth_client,
+                                                     gateway_headers):
+    from db.core import db_conn
+    token, window_id = _window(auth_client)
+    r = auth_client.post('/api/approved-windows/execute',
+                         json={'window_token': token},
+                         headers=gateway_headers)
+    assert r.status_code == 200
+    with db_conn() as conn:
+        row = conn.execute(
+            'SELECT token, token_fp FROM window_executions '
+            'WHERE window_id = ? ORDER BY id DESC LIMIT 1', (window_id,)).fetchone()
+    assert row['token'] == ''
+    assert row['token_fp'] == token_fingerprint(token)
+
+
+def test_existing_execution_tokens_are_migrated_on_start(auth_client):
+    from db.core import db_conn, init_db
+    raw = 'aB3dEfGhIjKlMnOpQrStUvWx'
+    with db_conn() as conn:
+        cur = conn.execute(
+            'INSERT INTO window_executions '
+            '(window_id, token, target_ip, command, executed_at, success, reason, token_fp) '
+            "VALUES (1, ?, '10.0.0.1', 'uptime', 1, 1, '', '')", (raw,))
+        row_id = cur.lastrowid
+        conn.commit()
+    init_db()
+    with db_conn() as conn:
+        row = conn.execute('SELECT token, token_fp FROM window_executions '
+                           'WHERE id = ?', (row_id,)).fetchone()
+    assert row['token'] == ''
+    assert row['token_fp'] == token_fingerprint(raw)
 
 
 def test_execution_history_only_carries_a_fingerprint(auth_client,
