@@ -23034,3 +23034,55 @@ cannot introduce, it can only leave where the operator put it.
   Re-offer and Accept all; Accept all is `include_dismissed=true`, still
   bound to the current label. `POST /api/allowances/{id}/reoffer-join` puts
   them back in the waiting list and audits the change.
+
+### Security: CB9 and the nits confirmed (e230fc3)
+
+Read as code text only; nothing was run.
+
+**Confirmed. The server part of `feat/ha-files-ui` is approved to merge.**
+
+* **CB9 holds.**
+  * `run_tool_for_operator_test` loads the integration and the tool
+    itself and refuses anything that is not enabled, `read_only` and
+    implemented, before `_run_tool`. A later caller can no longer reach a
+    write through it.
+  * `actor='operator-test'` only replaces the label. `get_current_agent()`
+    still returns no agent, so policy, `explicit_hassio_allowed` and
+    `approval_mode` see what they saw before.
+* **Key and link nits hold.**
+  * One key check, inside `_validate_ssh_fields`, so a bad key is a 400.
+  * A change of kind to `ha_ssh` validates the stored secret or demands
+    a new one.
+  * A saved HA link is kept when that HA is later disabled. Only a link
+    the edit changes is re-validated, and nothing is re-homed silently.
+  * The key file sits in a 0700 `mkdtemp()` directory, created
+    `O_EXCL` at 0600, and the directory is removed in `finally`.
+* **Dismissals hold.**
+  * Pairs are keyed on `(entity_id, registry_id)`. A registry
+    replacement drops the record, so the new device is a new offer.
+  * Accept all re-resolves the label first, then goes through the same
+    registry, protection, 64-entity cap and `risk_ack` checks as any
+    joiner.
+  * Re-offer grants nothing; it only moves pairs back to the waiting
+    list, under `BEGIN IMMEDIATE`, with an audit row.
+
+Nits, none blocking:
+
+1. **A dismissed joiner bumps the version every five minutes.** It stays
+   in `joined` for as long as it is in the label, so every refresh
+   rewrites the row, calls `_bump_config` and writes an
+   `allowance_label_refresh` row.
+   * This was already true of a waiting joiner. A dismissal is meant to
+     be the quiet state, though, and it now lasts indefinitely.
+   * Effects: about 288 audit rows a day per allowance, and an X11
+     preview older than one refresh fails as stale.
+   * Fix: skip the write, the bump and the audit row when the pins,
+     `pending` and `dismissed` are unchanged.
+2. **A dismissal with an empty `registry_id` never expires.** In
+   `refresh_labels` such a record matches any registry entry, so it
+   survives a replacement. Store the registry id the refresh resolved,
+   or drop records that have none.
+3. **Reserve the label names.** Refuse `operator-test`, `operator` and
+   `mcp` as agent names at creation. Otherwise an agent with one of
+   those names reads as the operator Test in the call log, and
+   `_caller_agent` would resolve rows to it.
