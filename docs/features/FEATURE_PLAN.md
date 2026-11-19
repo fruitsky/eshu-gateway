@@ -22723,6 +22723,28 @@ run. The UI commits on this branch are for a later read.
   re-pinned item is "changed" in ways an operator may not read as new
   risk.
 
+### Security re-read of Part C (security reviewer, 2026-11-19, at `c7458cc`)
+
+**Confirmed. The API side of `feat/x11-ui` has no open security items.**
+Code text read only; nothing was run. This covers the
+`allowances.py`/`main.py` hunks of `c7458cc`; the UI changes are for the
+operator review.
+* **One rule.** `is_destructive` now returns `_ceiling_denied(service,
+  exempt, operator_words())`, so the destructive-word loop exists once,
+  and a test checks that both paths agree.
+* **The backfill sweep.**
+  * Filling a registry id that was captured while HA was down now
+    suspends, as `protected` and in the same `BEGIN IMMEDIATE`, every live
+    permission that holds that registry id under another entity id.
+  * It bumps each affected agent's version and writes an audit row per
+    suspension.
+  * The rename-during-outage test covers it.
+  * Permissions on the protected entity id itself were already suspended
+    when protection was added, so the two paths together cover both
+    names.
+* **`available_agent_tools` adds `always_gate`.** It is an
+  operator-session read of an existing flag; no concern.
+
 ### Security review of the window-token audit fix (`fix/window-token-audit` @ 91cdf82)
 
 **Approved to merge.** Code text read only; nothing was run.
