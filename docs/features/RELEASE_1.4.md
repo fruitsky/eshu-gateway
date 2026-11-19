@@ -20,14 +20,27 @@ which now has two tabs:
 * **Rules for all agents** — protected devices, the limits every agent
   shares, and what is never allowed.
 
-Opening an agent gives one page with **Overview, Tools, SSH, Websites,
-Activity and JSON**. Home Assistant device permissions are edited by picking
-friendly device names in a grid grouped by area; protected devices are
-locked; a column can follow a Home Assistant label instead of individual
-devices. Every save is **Check → preview → Apply**, and the preview shows the
-risky devices, resumed permissions and waiting label members before anything
-changes. A stale screen is refused and reloaded instead of overwriting a
-newer change.
+Opening an agent gives **Overview, Tools, SSH, Websites, Activity and
+JSON**, one section at a time from the left menu. Deep links such as
+`#agent/3/tools` open the same section. Revoke and Delete sit in a **Danger
+zone** at the bottom of Overview, each behind its own confirmation.
+
+Tools are grouped by integration and collapse to a "tools · ask first"
+summary, with search and an "Only allowed" filter. A tool that always asks
+(for example Home Assistant `call_service`) disables "Runs without asking"
+and points at the device picker instead. Home Assistant device permissions
+are edited by friendly name in a grid grouped by device type and real area;
+protected devices show one **Protected** line, and a column can follow a
+Home Assistant label instead of individual devices. At phone width each
+device becomes a card with its own toggles, grouped by room.
+
+Every save is **Check → preview → Apply**. The preview lists only the
+sections that changed, uses device and action names, and separates **New or
+changed** risky items from **Already allowed, confirm again**. Apply stays
+disabled until the required boxes are ticked and reads **Allow and save**
+when a risk confirmation is part of it. A stale screen is refused and
+reloaded instead of overwriting a newer change. The JSON section's Apply is
+disabled until Check passes and again after any edit.
 
 **What the operator needs to do:** nothing to migrate. Existing permissions
 keep working and appear under Overview. Open **Agents** after the upgrade and
@@ -53,21 +66,28 @@ and use the approval-gated `ws_write` tool.
 
 **What the operator needs to do:** none.
 
-### Window tokens no longer travel in URLs (pending Security)
+### Window lookup leaves the URL; the legacy claim is kept and audited
+(pending Security)
 
-The two old URL forms — the pre-BJ2 claim route and the public
-`/api/window-by-token/<token>` lookup — are retired with **410 Gone**. The
-token now goes in a JSON body:
+The public `/api/window-by-token/<token>` lookup is retired with **410
+Gone**; use `POST /api/window-by-token` with `{"token": "..."}`. The old
+response never echoes the token.
 
-* `POST /api/approved-windows/execute` with `{"window_token": "..."}`
-* `POST /api/window-by-token` with `{"token": "..."}`
+The pre-BJ2 **claim** path
+`POST /api/approved-windows/execute/{token}` is **not** retired in 1.4. It
+still works for older gateways, uses the same gateway-token and target-IP
+checks as the body form, and writes one audit row per use with only the
+token fingerprint and gateway IP. It will be retired at the X9 legacy
+cut-over, once no such audit row has appeared for 7 days.
 
-The old routes name the replacement, never echo the token, and the access
-log masks the old path. Window execution history returns only a fingerprint.
+Window execution history now stores only a token fingerprint; existing rows
+are migrated on start and the old raw column is blanked. The retrieval-key
+read returns `token_fp`, not the raw token.
 
-**What the operator needs to do:** gateways must be on the BJ2 body-token
-form before this dashboard change. The 1.4 gateway stack already uses it. A
-script that still calls the old lookup URL must be changed to the POST form.
+**What the operator needs to do:** change any local script or cron job that
+still calls the lookup URL to the POST form. Older gateways can keep
+claiming through the path until they are upgraded; their use is counted in
+the audit log.
 
 ### Allowances find the Home Assistant integration by kind (F27)
 
@@ -125,9 +145,17 @@ the upgrade shows its last known hash until the next heartbeat.
 * **The Allowances page is replaced by the X11 Agents screens.** The API
   endpoints stay. The sidebar entry and the old page are removed; any in-app
   link that used to open Allowances now belongs under **Agents**.
-* **Window tokens.** The old URL routes return 410. Update any local script
-  or cron job that still uses the lookup URL. The gateway claim path used by
-  1.4 gateways is already the body form.
+* **Window tokens.** The old lookup URL returns 410; update any local script
+  or cron job. The pre-BJ2 claim path still works and is audited, so older
+  gateways do not lose their windows during the fleet upgrade.
+* **Proxy logs.** If a reverse proxy fronts the dashboard, it will still log
+  a path token from an older gateway until that gateway is upgraded. The
+  dashboard's own access log masks it, but the proxy's log is outside its
+  control. Retire the path claim at the X9 cut-over.
+* **Gateway logs.** An older gateway still prints the first 8 characters of
+  the token in its own log lines. The next gateway release moves those lines
+  to the same fingerprint the dashboard uses; this release does not change
+  gateway code.
 * **Screenshots and docs.** The Stage 3 screenshots in
   `docs/screenshots/x11/` are synthetic (`192.0.2.x`, `*.example.test`) and
   contain no live data.
@@ -139,8 +167,9 @@ Tick these off in order. Stop and roll back if any fails.
 - [ ] **Agents tab** — every existing agent appears, the paused banner (if
       any) has the right count, and **Review** opens the owning agent.
 - [ ] **Device grid** — open an agent → Tools → Home Assistant `call service`
-      → **Runs without asking**. Rows are grouped by the real HA area,
-      protected devices are locked, and a label column is read-only.
+      → **Runs without asking → pick devices**. Rows are grouped by device
+      type and real HA area, protected devices show one Protected line, and
+      a label column is read-only.
 - [ ] **Check and Apply** — make one small change, press **Save changes**,
       read the preview, tick any required risk/resume box, and apply. The
       change appears after reload; Cancel changes nothing.
@@ -149,7 +178,8 @@ Tick these off in order. Stop and roll back if any fails.
       shown next to the document.
 - [ ] **Window approval** — create a window from a preset, approve an agent
       request, and claim one window from a gateway. The old lookup URL must
-      answer 410.
+      answer 410; a claim through the legacy path must still succeed and
+      appear once in the audit log.
 - [ ] **Inventory sources** — Pi-hole and Omada each list their expected
       hosts; no source is silently empty.
 - [ ] **E2E suite** — run it against the dev dashboard and the one dev
@@ -164,6 +194,6 @@ These sections can change before the fleet release:
 
 * **X11 Agents and Rules screens** — operator review of the look and the six
   Stage 3 fixes; Security review of the three server follow-ups.
-* **Window tokens out of URLs** — Security review of the new POST routes, the
-  410s and the access-log mask.
+* **Window tokens out of URLs** — Security review of the new POST route, the
+  retired lookup, the kept-and-audited claim path and the access-log mask.
 * **HA label registry read** — Security review of the single read command.
