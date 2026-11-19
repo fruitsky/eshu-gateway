@@ -182,3 +182,18 @@ def test_the_approver_allowlist_is_unchanged():
         'GET', '/api/window-by-token/abc')
     # The old allowed set still works.
     assert approver_auth.route_allowed('POST', '/api/approve/1')
+
+
+def test_the_retired_lookup_rate_limits_before_it_audits(client, auth_client, monkeypatch):
+    from fastapi import HTTPException
+    import main as app_main
+    token, _id = _window(auth_client)
+    app_main._retired_lookup_audit.clear()
+    monkeypatch.setattr(app_main, '_check_rate_limit',
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            HTTPException(status_code=429, detail='slow down')))
+    r = client.get('/api/window-by-token/' + token)
+    assert r.status_code == 429
+    rows = [x for x in get_audit_log(50)
+            if x['event_type'] == 'window_lookup_route_retired']
+    assert rows == []
