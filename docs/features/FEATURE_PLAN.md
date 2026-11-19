@@ -22867,3 +22867,31 @@ plus Security's two server nits.
   word loop exists once. A registry-id backfill also suspends live
   permissions that hold that id under another entity id, in the same
   transaction and with an audit row.
+
+### F11 operator feedback (2026-11-19)
+
+**Test.** For an integration whose tools use handlers, Test runs the
+designated read through the tool core instead of the HTTP proxy. `ha_ssh`
+runs `ha_config_list`; the result shows the pinned host fingerprint and the
+`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` comparison line. A
+handler refusal (for example "not root") is returned as its plain message.
+HTTP integrations keep the existing proxy Test.
+
+**Create form.** `ha_ssh` uses a multi-line private-key field, user (default
+root) and port. The key is never echoed; the list shows `key set`/`key
+missing`. The server refuses anything but an unencrypted OpenSSH private
+key, and validates the user and port.
+
+**Files under Home Assistant.** A seeded `ha_ssh` row with
+`config_json.ha_integration` set to its HA integration renders as a "Files
+(SSH add-on)" sub-card under that Home Assistant card. Its tools are merged
+into the Home Assistant group in the agent Tools screen under a "Files"
+subheading, while remaining a separate integration with its own key and pin.
+When the link is unset and exactly one HA is enabled, that HA is used.
+
+**Permissions in plain words.** The device editor explains "Pick devices"
+and "Follow a Home Assistant label"; label joiners appear in Overview, the
+device grid and the Agents-tab banner ("N waiting · Review"). Accept calls
+`accept_join` (with the risk confirmation the endpoint requires); Dismiss
+clears `pending_json` through the new audited `dismiss-join` endpoint. The
+Rules tab carries a short "How permissions work" panel.

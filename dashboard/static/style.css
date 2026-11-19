@@ -5899,3 +5899,15 @@ body.pol-open .mobile-menu-btn, body.pol-open .mobile-freeze { display: none; }
   #create-window-modal { z-index: 130; }
 }
 #win-duration-wrap.hidden-section { display: none; }
+
+/* F11: the Files integration sits underneath its Home Assistant row. */
+.i-family { min-width: 0; }
+.i-subcards { margin-top: 8px; display: grid; gap: 8px; }
+.i-subcards .i-subcard {
+  margin-left: 14px;
+  padding: 9px 11px;
+  border-left: 2px solid var(--accent-line);
+  background: var(--bg-base);
+  opacity: 0.96;
+}
+.i-subcards .i-subcard .item-card { padding: 9px 11px; }

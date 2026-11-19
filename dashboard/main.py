@@ -78,6 +78,7 @@ from database import (
     create_integration, get_integrations, get_integration, get_integration_by_id,
     update_integration, delete_integration,
     create_tool, get_tools, get_tool, set_tool_enabled, set_all_tools_enabled, delete_tool,
+    get_integration_config, set_integration_config,
     record_integration_call, get_integration_calls, list_recent_session_summaries,
     create_pending_call, get_pending_calls, get_pending_call, set_pending_call_status,
     mask_sensitive_args, strip_resolved_payloads,
@@ -165,6 +166,7 @@ from core import approver_auth
 from core.secret_scrub import scrub_body, scrub_payload, scrub_string
 from core.integration_proxy import execute_integration_call, execute_generic_call, generic_write_envelope, ProxyError, merge_response_hint, ALLOWED_AUTH_TYPES, PREVIEW_CHARS, safe_request_summary
 from core.ha_ws import execute_ws_call
+from core.ha_config_ssh import HaConfigError, validate_private_key
 from core.mcp_server import (
     mcp as eshu_mcp,
     refresh_mcp_tools,
@@ -4159,6 +4161,9 @@ class IntegrationPayload(BaseModel):
     kind: str = 'custom'
     mcp_mode: str = 'joined'
     retention_days: int = 30
+    ssh_user: str = 'root'
+    ssh_port: int = 22
+    ha_integration: str = ''
 
 class IntegrationUpdatePayload(BaseModel):
     base_url: str = None
@@ -4174,6 +4179,9 @@ class IntegrationUpdatePayload(BaseModel):
     kind: str = None
     mcp_mode: str = None
     retention_days: int = None
+    ssh_user: str = None
+    ssh_port: int = None
+    ha_integration: str = None
 
 class ToolPayload(BaseModel):
     name: str
@@ -4774,6 +4782,45 @@ def delete_agent(agent_id: int, request: Request):
     return {"status": "ok"}
 
 
+def _ha_integration_names():
+    return [i['name'] for i in get_integrations()
+            if (i.get('kind') or 'custom') == 'ha' and i.get('enabled')]
+
+
+def _resolve_ha_link(requested):
+    """A ha_ssh row may name one enabled HA integration; empty means auto."""
+    wanted = str(requested or '').strip()
+    if wanted:
+        row = get_integration(wanted)
+        if not row or (row.get('kind') or '') != 'ha' or not row.get('enabled'):
+            raise HTTPException(
+                status_code=400,
+                detail='Home Assistant link must name an enabled Home Assistant integration')
+        return wanted
+    names = _ha_integration_names()
+    return names[0] if len(names) == 1 else ''
+
+
+def _validate_ssh_fields(secret, user, port):
+    import re as _re
+    value = str(secret or '')
+    if value.strip():
+        try:
+            validate_private_key(value)
+        except HaConfigError as exc:
+            raise HTTPException(status_code=400, detail=exc.message or exc.code)
+    login = str(user or 'root').strip()
+    if not _re.fullmatch(r'[a-z_][a-z0-9_-]{0,31}', login):
+        raise HTTPException(status_code=400, detail='Invalid SSH user')
+    try:
+        number = int(port if port is not None else 22)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail='Invalid SSH port')
+    if not 1 <= number <= 65535:
+        raise HTTPException(status_code=400, detail='Invalid SSH port')
+    return login, number
+
+
 @app.post("/api/integrations")
 def create_integration_endpoint(payload: IntegrationPayload, request: Request):
     _check_session(request)
@@ -4786,11 +4833,21 @@ def create_integration_endpoint(payload: IntegrationPayload, request: Request):
         raise HTTPException(status_code=400, detail="Invalid auth_type")
     if payload.mcp_mode not in MCP_MODES:
         raise HTTPException(status_code=400, detail="Invalid mcp_mode")
+    ssh_config = None
+    if payload.kind == 'ha_ssh':
+        if not str(payload.secret or '').strip():
+            raise HTTPException(status_code=400, detail='A private key is required')
+        login, port = _validate_ssh_fields(payload.secret, payload.ssh_user,
+                                           payload.ssh_port)
+        ssh_config = {'ssh_user': login, 'ssh_port': port,
+                      'ha_integration': _resolve_ha_link(payload.ha_integration)}
     create_integration(name, payload.base_url.strip(), payload.auth_type, payload.secret,
                        payload.auth_header_name, payload.enabled, payload.kind,
                        payload.client_id, payload.client_secret, payload.token_url,
                        payload.verify_tls, payload.gate_mode, payload.mcp_mode,
                        payload.retention_days)
+    if ssh_config is not None:
+        set_integration_config(get_integration(name), ssh_config)
     refresh_mcp_tools()
     record_audit_event("integration_created", details=f"Integration '{name}' created (kind {payload.kind})")
     return {"status": "ok", "name": name}
@@ -4820,7 +4877,27 @@ def update_integration_endpoint(name: str, payload: IntegrationUpdatePayload, re
         raise HTTPException(status_code=400, detail="Invalid auth_type")
     if 'mcp_mode' in data and data['mcp_mode'] not in MCP_MODES:
         raise HTTPException(status_code=400, detail="Invalid mcp_mode")
+    current = get_integration(name)
+    ssh_config = None
+    ssh_user = data.pop('ssh_user', None)
+    ssh_port = data.pop('ssh_port', None)
+    ha_link = data.pop('ha_integration', None)
+    kind = data.get('kind', current.get('kind') or 'custom')
+    if kind == 'ha_ssh':
+        cfg = get_integration_config(current)
+        secret = data.get('secret')
+        if secret is not None:
+            validate_private_key(secret)
+        login, port = _validate_ssh_fields(
+            data.get('secret') or '',
+            ssh_user or cfg.get('ssh_user') or 'root',
+            ssh_port if ssh_port is not None else cfg.get('ssh_port') or 22)
+        link = ha_link if ha_link is not None else cfg.get('ha_integration') or ''
+        ssh_config = {'ssh_user': login, 'ssh_port': port,
+                      'ha_integration': _resolve_ha_link(link)}
     update_integration(name, **data)
+    if ssh_config is not None:
+        set_integration_config(get_integration(name), ssh_config)
     refresh_mcp_tools()
     record_audit_event("integration_updated", details=f"Integration '{name}' updated")
     return {"status": "ok"}
@@ -4829,24 +4906,77 @@ def update_integration_endpoint(name: str, payload: IntegrationUpdatePayload, re
 @app.post("/api/integrations/{name}/test")
 def test_integration_endpoint(name: str, request: Request):
     """Test a connection: run the first enabled read-only tool with no required
-    params and return status + a response preview. Surfaces wrong base URLs,
-    bad secrets, and TLS issues without involving the agent."""
+    params and return status + a response preview. Handler-based kinds run the
+    handler through the tool runner, with its normal checks and audit; HTTP
+    kinds keep the proxy path."""
     _check_session(request)
     integration = get_integration(name)
     if not integration:
         raise HTTPException(status_code=404, detail="Integration not found")
+    tools = get_tools(integration['id'])
     candidate = None
-    for tool in get_tools(integration['id']):
-        # Skip not_implemented (v6 stub) tools — they only register so agents
-        # see the roadmap; their placeholder paths don't exist upstream.
+    handler_candidate = None
+    for tool in tools:
         if not tool.get('enabled') or not tool.get('read_only') or tool.get('not_implemented'):
             continue
-        if not any(p.get('required') for p in (tool.get('params') or [])):
+        if any(p.get('required') for p in (tool.get('params') or [])):
+            continue
+        if not candidate:
             candidate = tool
-            break
+        if tool.get('handler') and not handler_candidate:
+            handler_candidate = tool
+    preferred = {'ha_ssh': 'ha_config_list'}.get(integration.get('kind') or '')
+    preferred_tool = None
+    if preferred:
+        for tool in tools:
+            if (tool.get('name') == preferred and tool.get('enabled')
+                    and tool.get('read_only')):
+                preferred_tool = tool
+                break
+    if preferred_tool:
+        candidate = preferred_tool
+    elif handler_candidate:
+        candidate = handler_candidate
     if not candidate:
         raise HTTPException(status_code=400,
                             detail="No enabled read-only tool with zero required params — seed the integration first")
+    if candidate.get('handler'):
+        from core.tool_runner import run_tool_for_operator_test
+        try:
+            raw = run_tool_for_operator_test(integration['name'], candidate['name'], {})
+        except Exception as exc:  # noqa: BLE001 - show the reason, never a traceback
+            return {'status_code': 500, 'error': str(exc),
+                    'tool': candidate['name'], 'preview': '', 'truncated': 0}
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            parsed = {'raw': raw}
+        err = ''
+        if isinstance(parsed, dict) and (parsed.get('error') or parsed.get('message')):
+            err = str(parsed.get('message') or parsed.get('error'))
+        status = 200
+        if isinstance(parsed, dict) and parsed.get('status_code'):
+            try:
+                status = int(parsed['status_code'])
+            except (TypeError, ValueError):
+                status = 500
+        elif err:
+            status = 500
+        result = {
+            'status_code': status,
+            'error': err,
+            'tool': candidate['name'],
+            'preview': (raw or '')[:500],
+            'truncated': max(0, len(raw or '') - 500),
+        }
+        if (integration.get('kind') or '') == 'ha_ssh':
+            fingerprint = str(get_integration_config(get_integration(name)).get('host_fingerprint') or '')
+            if fingerprint:
+                result['fingerprint'] = fingerprint
+                result['fingerprint_hint'] = (
+                    'Compare this with the add-on: ssh-keygen -lf '
+                    '/etc/ssh/ssh_host_ed25519_key.pub')
+        return result
     try:
         result = execute_integration_call(integration, candidate, {}, agent='test')
     except ProxyError as e:
@@ -5761,6 +5891,18 @@ def accept_allowance_join_endpoint(aid: int, request: Request,
         row = allowances.accept_join('operator', aid,
                                      risk_ack=payload.risk_ack)
         return row
+    except allowances.AllowanceError as exc:
+        detail = exc.detail
+        if exc.extra:
+            detail = {'message': exc.detail, **exc.extra}
+        raise HTTPException(status_code=exc.status, detail=detail)
+
+
+@app.post("/api/allowances/{aid}/dismiss-join")
+def dismiss_allowance_join_endpoint(aid: int, request: Request):
+    _check_session(request)
+    try:
+        return allowances.dismiss_join('operator', aid)
     except allowances.AllowanceError as exc:
         detail = exc.detail
         if exc.extra:

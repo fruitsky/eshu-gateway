@@ -2099,6 +2099,43 @@ def accept_join(actor, aid, risk_ack=False):
     return {'accepted': accepted}
 
 
+def dismiss_join(actor, aid):
+    """Discard label joiners without granting anything; audited."""
+    from db.core import db_conn
+    from db.audit import record_audit_event
+    import json as _json
+    row = get_allowance(aid)
+    if not row or row.get('revoked_at'):
+        raise AllowanceError(404, 'No such allowance.')
+    with db_conn() as conn:
+        try:
+            conn.execute('BEGIN IMMEDIATE')
+            live = conn.execute(
+                'SELECT * FROM allowances WHERE id = ? AND revoked_at = 0',
+                (aid,)).fetchone()
+            if not live:
+                conn.rollback()
+                raise AllowanceError(404, 'No such allowance.')
+            pending = _json.loads(live['pending_json'] or '[]')
+            conn.execute(
+                'UPDATE allowances SET pending_json = ? WHERE id = ?',
+                ('[]', aid))
+            _bump_config(conn, live['agent_id'])
+            conn.commit()
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            raise
+    dismissed = [p.get('entity_id') for p in pending]
+    record_audit_event(
+        'allowance_join_dismissed',
+        details='allowance #%d dismissed %s by %s'
+                % (aid, ','.join(dismissed) or 'nothing', actor))
+    return {'dismissed': dismissed}
+
+
 def profile_diff(pid, agent_id):
     """What a profile re-apply would revoke and add, without changing anything."""
     profile = get_profile(pid)

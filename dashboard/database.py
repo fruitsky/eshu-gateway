@@ -174,6 +174,8 @@ from db.integrations import (
     get_integrations,
     get_integration,
     get_integration_by_id,
+    get_integration_config,
+    set_integration_config,
     update_integration,
     delete_integration,
     create_tool,

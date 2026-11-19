@@ -441,6 +441,18 @@ def run_tool(integration_name: str, tool_name: str, args: dict, reason: str = ''
     return _annotate_session(result, sid, source) if sid else result
 
 
+def run_tool_for_operator_test(integration_name: str, tool_name: str,
+                                args: dict = None) -> str:
+    """The operator's **Test** button, through the normal tool core.
+
+    There is no MCP connection or agent session here, so the strict
+    session-mode check that `run_tool` applies to agents is not used. Freeze,
+    policy, gating, handler dispatch and the integration-call row still run.
+    """
+    return _run_tool(integration_name, tool_name, args or {},
+                     session_id='', session_source='operator-test')
+
+
 def _annotate_session(result: str, session_id: str,
                       source: str = 'transport') -> str:
     """Add `_eshu.session_id` to a JSON object result. Never mutates arrays or

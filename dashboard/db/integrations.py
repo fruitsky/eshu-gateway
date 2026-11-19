@@ -328,7 +328,12 @@ def get_integrations(include_secret: bool = False):
         for row in rows:
             item = dict(row)
             if not include_secret:
-                item['secret_suffix'] = _suffix(item.get('secret'))
+                if (item.get('kind') or '') == 'ha_ssh':
+                    # A private key must never come back, not even its tail.
+                    item['secret_set'] = bool(item.get('secret'))
+                    item['secret_suffix'] = ''
+                else:
+                    item['secret_suffix'] = _suffix(item.get('secret'))
                 item['client_secret_suffix'] = _suffix(item.get('client_secret'))
                 item.pop('secret', None)
                 item.pop('client_secret', None)

@@ -1417,3 +1417,41 @@ def _write_error(rc):
     }
     code, message = mapping.get(rc, ('config_write_failed', 'the write failed'))
     return HaConfigError(code, '%s (remote exit %s)' % (message, rc))
+
+def validate_private_key(text):
+    """Refuse anything but an unencrypted OpenSSH private key.
+
+    The UI hides the key after save, so a bad paste must fail before it is
+    stored. SSH needs the real key material to answer `-y`; a passphrase is
+    detected by asking ssh-keygen to decrypt with an empty one.
+    """
+    import os
+    import subprocess
+    import tempfile
+    value = str(text or '').strip()
+    if (not value.startswith('-----BEGIN OPENSSH PRIVATE KEY-----')
+            or not value.endswith('-----END OPENSSH PRIVATE KEY-----')):
+        raise HaConfigError('config_key_invalid',
+                            'The private key must be an OpenSSH private key '
+                            'without a passphrase.')
+    fd, path = tempfile.mkstemp(prefix='ha-key-check-')
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, 'w') as handle:
+            handle.write(value + '\n')
+        try:
+            proc = subprocess.run(
+                ['ssh-keygen', '-y', '-P', '', '-f', path],
+                capture_output=True, text=True, timeout=10)
+        except (OSError, subprocess.SubprocessError):
+            raise HaConfigError('config_key_invalid',
+                                'Could not validate the private key.')
+        if proc.returncode != 0:
+            raise HaConfigError('config_key_invalid',
+                                'The private key must be an OpenSSH private key '
+                                'without a passphrase.')
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass

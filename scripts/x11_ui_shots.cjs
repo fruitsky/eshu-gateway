@@ -52,6 +52,16 @@ async function firstEditor(page) {
       await page.waitForTimeout(400);
       await page.evaluate(() => { document.querySelector('.main-body').scrollTop = 0; });
     },
+    'agent-files': async (page) => {
+      await agents(page); await firstEditor(page);
+      await page.locator('[data-x11-nav="tools"]').click();
+      await page.waitForTimeout(400);
+      const group = page.locator('details[data-tool-group="Home Assistant"]');
+      if (!(await group.evaluate((e) => e.open))) await group.locator('summary').click();
+      await page.waitForTimeout(300);
+      await page.locator('.x11-subhead').scrollIntoViewIfNeeded();
+      await page.waitForTimeout(300);
+    },
     'agent-devices': async (page) => {
       await agents(page); await firstEditor(page);
       await page.locator('[data-x11-nav="tools"]').click();
@@ -86,6 +96,12 @@ async function firstEditor(page) {
       await page.locator('[data-x11-nav="json"]').click();
       await page.waitForTimeout(500);
       await page.locator('#x11-sec-json').scrollIntoViewIfNeeded();
+    },
+    integrations: async (page) => {
+      await page.evaluate(() => switchView('integrations'));
+      await page.waitForTimeout(900);
+      await page.locator('#integration-list').scrollIntoViewIfNeeded();
+      await page.waitForTimeout(300);
     },
   };
 

@@ -793,6 +793,19 @@
                 <input type="text" id="int-token-url" placeholder="Token URL (e.g. https://omada:8043/openapi/authorize/token)" class="w-full text-xs">
               </div>
               <input type="password" id="int-secret" placeholder="Secret / token" class="w-full text-xs">
+              <div id="int-ssh-fields" class="hidden space-y-2">
+                <textarea id="int-ssh-key" rows="4" spellcheck="false" autocomplete="off"
+                          placeholder="Paste the OpenSSH private key (no passphrase)" class="w-full text-xs font-mono"></textarea>
+                <p id="int-ssh-key-status" class="text-xs text-muted"></p>
+                <div class="flex gap-2">
+                  <label class="block text-xs text-muted flex-1">SSH user
+                    <input type="text" id="int-ssh-user" value="root" class="w-full text-xs">
+                  </label>
+                  <label class="block text-xs text-muted" style="width:7rem;">Port
+                    <input type="number" id="int-ssh-port" value="22" min="1" max="65535" class="w-full text-xs">
+                  </label>
+                </div>
+              </div>
               <label class="flex items-center gap-2 cursor-pointer select-none text-xs text-muted">
                 <input type="checkbox" id="int-verify-tls">
                 Skip TLS certificate verification (self-signed cert on the controller)
