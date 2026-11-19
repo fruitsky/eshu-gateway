@@ -22,6 +22,126 @@ _RISKY_CLASSES = {'garage', 'garage_door', 'gate', 'door', 'lock'}
 _CACHE = {}
 _LOCK = threading.Lock()
 
+# X11 Stage 4: the useful-device filter. These constants are deliberately in
+# one place: the S1 response labels every entity, so the agent page, the
+# operator picker and the summary sentence cannot disagree about what counts.
+CATEGORY_BY_DOMAIN = {
+    'switch': 'switch',
+    'input_boolean': 'switch',
+    'light': 'light',
+    'cover': 'cover',
+    'climate': 'climate',
+    'fan': 'fan',
+    'media_player': 'media',
+    'sensor': 'sensor',
+    'binary_sensor': 'sensor',
+}
+
+# Add-on and system integrations whose entities are plumbing, not devices the
+# household agent should be offered. Kept as a constant (with this comment)
+# because HA adds new platform names over time; update the list when a new
+# system platform shows up in the registry.
+SYSTEM_PLATFORMS = {
+    'analytics', 'browser_mod', 'cloud', 'default_config', 'hacs', 'hassio',
+    'lovelace', 'supervisor', 'system_health', 'update',
+}
+
+# Helper entities are the operator's own scaffolding (input_boolean, counters,
+# timers) rather than a physical device.
+HELPER_DOMAINS = {
+    'counter', 'input_boolean', 'input_datetime', 'input_number',
+    'input_select', 'input_text', 'schedule', 'timer',
+}
+
+# Fallback only: entity_category is the first test. Some integrations do not
+# set a category on a device's sub-setting switches, so these suffixes catch
+# the common ones (child lock, LED, auto-off, auto-update).
+SWITCH_SETTING_SUFFIXES = (
+    'child_lock', 'led', 'auto_off', 'auto_update', 'indicator',
+    'night_light', 'backlight', 'power_on_behavior', 'startup_mode',
+    'switch_mode',
+)
+
+SENSOR_KIND_BY_CLASS = {
+    'temperature': 'temperature',
+    'humidity': 'humidity',
+    'absolute_humidity': 'humidity',
+    'moisture': 'humidity',
+    'motion': 'motion',
+    'occupancy': 'motion',
+    'presence': 'motion',
+    'moving': 'motion',
+    'door': 'door',
+    'window': 'door',
+    'opening': 'door',
+    'garage_door': 'door',
+    'power': 'power',
+    'energy': 'power',
+    'current': 'power',
+    'voltage': 'power',
+    'battery': 'battery',
+}
+
+
+def _sensor_kind(reg, attrs):
+    """Temperature, humidity, motion, door, power, battery or other."""
+    device_class = str((attrs or {}).get('device_class') or '').lower()
+    if device_class in SENSOR_KIND_BY_CLASS:
+        return SENSOR_KIND_BY_CLASS[device_class]
+    unit = str((attrs or {}).get('unit_of_measurement') or '').lower()
+    if unit in ('°c', '°f', 'c', 'f', 'kelvin'):
+        return 'temperature'
+    if unit in ('w', 'kw', 'wh', 'kwh', 'va', 'kva'):
+        return 'power'
+    return 'other'
+
+
+def _hidden_reason(entity_id, reg, platform):
+    """Why an entity is not useful, in the order the operator would expect.
+
+    `entity_category` wins over the suffix fallback, because a badly named
+    diagnostic switch is still a diagnostic switch.
+    """
+    entity_id = str(entity_id or '').lower()
+    reg = reg or {}
+    if str(reg.get('entity_category') or '').lower() in ('config', 'diagnostic'):
+        return 'settings'
+    if reg.get('disabled_by') or reg.get('hidden_by'):
+        return 'disabled'
+    if str(platform or '').lower() in SYSTEM_PLATFORMS:
+        return 'system'
+    domain = entity_id.split('.', 1)[0]
+    if domain in HELPER_DOMAINS:
+        return 'helper'
+    if domain in ('switch', 'input_boolean'):
+        name = (str(reg.get('name') or '') + ' ' +
+                str(reg.get('original_name') or '') + ' ' + entity_id).lower()
+        for suffix in SWITCH_SETTING_SUFFIXES:
+            if suffix in name:
+                return 'sub_setting'
+    return ''
+
+
+def classify_entity(entity_id, reg=None, attrs=None, platform=''):
+    """X11 Stage 4: category, sensor kind and the useful-device flag.
+
+    Pure and exportable so the synthetic registry tests can exercise every
+    hidden reason without a Home Assistant instance.
+    """
+    entity_id = str(entity_id or '').lower()
+    reg = reg or {}
+    attrs = attrs or {}
+    domain = entity_id.split('.', 1)[0]
+    category = CATEGORY_BY_DOMAIN.get(domain, '')
+    sensor_kind = _sensor_kind(reg, attrs) if category == 'sensor' else ''
+    reason = _hidden_reason(entity_id, reg, platform)
+    useful = bool(category) and not reason
+    return {
+        'category': category,
+        'sensor_kind': sensor_kind,
+        'useful': useful,
+    }
+
 
 def _cache_key(integration):
     from db.core import DB_PATH
@@ -81,6 +201,8 @@ def _build(integration):
             lid = str(lid or '')
             if lid and lid not in label_ids:
                 label_ids.append(lid)
+        platform = str(reg.get('platform') or '')
+        classified = classify_entity(ent, reg, attrs, platform)
         out.append({
             'id': ent,
             'name': _entity_name(reg, state),
@@ -88,9 +210,13 @@ def _build(integration):
             'area_id': area_id,
             'domain': domain,
             'state': str(state.get('state') or 'unknown'),
+            'unit': str(attrs.get('unit_of_measurement') or ''),
             'device_class': str(attrs.get('device_class') or '').lower(),
             'labels': [{'id': lid, 'name': labels.get(lid, lid)}
                        for lid in label_ids],
+            'category': classified['category'],
+            'sensor_kind': classified['sensor_kind'],
+            'useful': classified['useful'],
             'settings_entity': bool(reg.get('entity_category')),
             'disabled': bool(reg.get('disabled_by')),
             'risky': str(attrs.get('device_class') or '').lower()
