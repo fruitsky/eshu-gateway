@@ -43,8 +43,8 @@ only the dashboard UI after login.
 | `POST` | `/api/window-requests/{id}/approve` | Approve a request and reveal its token | Session |
 | `POST` | `/api/window-requests/{id}/deny` | Deny a request | Session |
 | `GET` | `/api/approved-windows` | List windows (`?ip=` filter) — `token` + `retrieval_key` omitted for unauthenticated callers | Public (read) |
-| `GET` | `/api/approved-windows/{retrieval_key}` | Single window (incl. token) by opaque key; numeric `id` only for session-authed callers | Public (read) |
-| `GET` | `/api/approved-windows/{retrieval_key}/executions` | Usage history for a window (opaque key; numeric `id` session-only) | Public (read) |
+| `GET` | `/api/approved-windows/{retrieval_key}` | Single window (no raw token; `token_fp` only) by opaque key; numeric `id` only for session-authed callers | Public (read) |
+| `GET` | `/api/approved-windows/{retrieval_key}/executions` | Usage history for a window (token_fp only; opaque key, numeric `id` session-only) | Public (read) |
 | `GET` | `/api/approved-windows/recent-jit` | Recent JIT approvals for the window-creation wizard | Session |
 | `POST` | `/api/approved-windows` | Create a window | Session |
 | `PUT` | `/api/approved-windows/{id}` | Update a window | Session |

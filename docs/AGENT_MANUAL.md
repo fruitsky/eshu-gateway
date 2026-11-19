@@ -840,7 +840,7 @@ Wait a few seconds and retry with exponential backoff.
 | `/api/window-requests` | POST | Submit window request | Agent or gateway token |
 | `/api/window-requests/{retrieval_key}` | GET | Poll window request status + token (read-only) | Public |
 | `/api/approved-windows` | GET | List windows (full status; token omitted for non-session callers; a gateway token sees only its own) | Agent/gateway token or session |
-| `/api/approved-windows/{retrieval_key}` | GET | Single window details + token (read-only) | Public (read) |
+| `/api/approved-windows/{retrieval_key}` | GET | Single window details, `token_fp` only (read-only) | Public (read) |
 | `/api/window-by-token` | POST | Parameters for an existing token in the JSON body (token is the auth; not echoed) | Public |
 | `/api/docs/agent-windows` | GET | Alias for this manual (full guide incl. Approved Windows) | Public |
 | `/api/docs/agent-manual` | GET | This manual | Public |
