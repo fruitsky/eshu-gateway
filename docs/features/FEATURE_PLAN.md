@@ -21960,3 +21960,59 @@ reviewer; its code still waits for its turn.
 * Retire the first once the fleet is past BJ2, for example in the X9
   legacy retirement.
 * Give the second a body or header form, and move E2E-1's C11 onto it.
+
+### Security review of the window-token routes (`fix/window-token-routes` @ 1a6d28f)
+
+**Approved once W1 is in; W2 should go in with it.** Code text read only;
+nothing was run.
+
+**What holds:**
+* The lookup moves to `POST /api/window-by-token` with the token in the
+  body. It is still rate-limited, and the token is no longer echoed back.
+* The old GET returns 410, and its body and audit row carry only
+  `token_fp`.
+* The body claim no longer returns the token.
+* Window execution history, including the public retrieval-key read, now
+  returns `token_fp` in place of the stored token.
+* The uvicorn access-log filter masks the token segment of both retired
+  path forms, plus a `token=`/`window_token=` query value.
+* E2E-1's C11 uses the body lookup now, which settles my earlier nit.
+
+**W1 (must, as you already asked): keep the path claim working until the
+fleet runs BJ2.**
+* At this commit, `POST /api/approved-windows/execute/{token}` returns
+  410. A pre-BJ2 gateway treats any non-200 answer as a refusal (see
+  `approved_windows.sh`), so every window on an old gateway stops working
+  the moment this deploys.
+* That fails closed, but it is an outage.
+* Route it through `_window_execute` again. That keeps the gateway-token
+  and target-IP checks, which run before anything else.
+* Add one audit row per use, with `token_fp` and the gateway IP, so the
+  BJ2 retirement can count the remaining users.
+* Retire it with the X9 legacy cut-over, not before.
+
+**W2 (should): don't let the public retired GET write an unlimited stream
+of audit rows.**
+* `GET /api/window-by-token/{token}` is unauthenticated, and it writes an
+  audit row on every request, before any rate limit.
+* Call `_check_rate_limit` first, then write at most one
+  `window_lookup_route_retired` row per client IP per minute, the BZ2
+  pattern.
+* The kept path claim is gateway-authenticated, so its per-use row is
+  bounded. Audit after `_resolve_gateway_token` passes, so an
+  unauthenticated caller writes nothing.
+
+**Nits:**
+* **Proxy logs.** The access-log filter covers uvicorn only. If a reverse
+  proxy fronts the dashboard, its log still records the path token from
+  pre-BJ2 gateways until W1's route is retired. Say so in the release
+  note.
+* **Gateway logs.** The gateway's own log lines keep
+  `${ESHU_WINDOW_TOKEN:0:8}`, the first 8 characters of the token itself.
+  Moving them to the same SHA-256 fingerprint the dashboard uses would
+  let an operator correlate the two logs. That can wait for the next
+  `approved_windows.sh` touch.
+* **Out of scope, agreed.** The stored token in `window_executions` and
+  the retrieval key in the path of `GET /api/approved-windows/{key}` can
+  wait for the proposal. For the first, store only the fingerprint: the
+  claim already looks windows up through `approved_windows`.
