@@ -27,6 +27,7 @@
     labels: [],
     ceiling: null,
     protected: [],
+    integrations: [],
     section: 'overview',
     notice: null,
     lastPreview: null,
@@ -153,6 +154,76 @@
   }
   function pausedCount(cfg) {
     return permissions(cfg).filter(function (p) { return p.suspended_at; }).length;
+  }
+  function pendingOf(row) {
+    try {
+      var list = JSON.parse((row && row.pending_json) || '[]');
+      return Array.isArray(list) ? list : [];
+    } catch (e) { return []; }
+  }
+  function dismissedOf(row) {
+    try {
+      var list = JSON.parse((row && row.dismissed_json) || '[]');
+      return Array.isArray(list) ? list : [];
+    } catch (e) { return []; }
+  }
+  function waitingRows(agentId) {
+    return (S.allowances || []).filter(function (r) {
+      return Number(r.agent_id) === Number(agentId) && !Number(r.revoked_at) &&
+        (pendingOf(r).length || dismissedOf(r).length);
+    });
+  }
+  function waitingCount(agentId) {
+    return waitingRows(agentId).reduce(function (n, r) {
+      return n + pendingOf(r).length;
+    }, 0);
+  }
+  function waitingNames(row) {
+    return pendingOf(row).map(function (p) { return deviceName(p.entity_id); });
+  }
+  function dismissedNames(row) {
+    return dismissedOf(row).map(function (p) { return deviceName(p.entity_id); });
+  }
+  function labelForRow(row) {
+    try {
+      var src = JSON.parse(row.conditions_json || '{}');
+      var d = (src.domain && src.domain['in'] && src.domain['in'][0]) || '';
+      var s = (src.service && src.service['in'] && src.service['in'][0]) || '';
+      return actionWords(d, s);
+    } catch (e) { return 'Permission'; }
+  }
+  function waitingRowHtml(r) {
+    var pend = pendingOf(r);
+    var dis = dismissedOf(r);
+    var id = Number(r.id);
+    var head;
+    if (pend.length) {
+      head = '<b>' + pend.length + ' new device' + (pend.length === 1 ? '' : 's') +
+        '</b> for ' + esc(labelForRow(r)) + ': ' + esc(waitingNames(r).join(', '));
+    } else {
+      head = '<b>Dismissed</b> for ' + esc(labelForRow(r)) + ': ' +
+        esc(dismissedNames(r).join(', '));
+    }
+    var buttons = '';
+    if (pend.length) {
+      buttons += '<button type="button" class="btn btn-xs" data-accept-join="' + id +
+        '" onclick="x11AcceptJoin(this)">Accept</button>' +
+        '<button type="button" class="btn btn-muted btn-xs" data-dismiss-join="' + id +
+        '" onclick="x11DismissJoin(this)">Dismiss</button>';
+    }
+    var dismissedLine = '';
+    if (dis.length) {
+      dismissedLine = '<div class="x11-dismissed-line" data-dismissed-line>' +
+        '<span>dismissed (' + dis.length + ')</span>' +
+        '<button type="button" class="btn btn-muted btn-xs" data-reoffer-join="' + id +
+        '" onclick="x11ReofferJoin(this)">Re-offer</button>' +
+        '<button type="button" class="btn btn-xs" data-accept-all-join="' + id +
+        '" onclick="x11AcceptAllJoin(this)">Accept all</button></div>';
+    }
+    return '<div class="x11-waiting-row" data-waiting-row data-allowance-id="' + id + '">' +
+      '<div>' + head + '</div>' +
+      dismissedLine +
+      '<div class="x11-btn-row">' + buttons + '</div></div>';
   }
   function sshText(cfg) {
     var hosts = ((cfg || S.draft || {}).ssh || {}).hosts || [];
@@ -322,10 +393,12 @@
       api('/api/agents'),
       api('/api/ha/devices').catch(function () { return { devices: S.devices || [] }; }),
       api('/api/ha/labels').catch(function () { return { labels: S.labels || [] }; }),
+      api('/api/allowances').catch(function () { return []; }),
     ]).then(function (first) {
       var agents = first[0] || [];
       S.devices = first[1].devices || S.devices || [];
       S.labels = first[2].labels || S.labels || [];
+      S.allowances = first[3] || S.allowances || [];
       return Promise.all(agents.map(function (a) {
         return Promise.all([
           api('/api/agents/' + a.id + '/config').catch(function () { return null; }),
@@ -359,6 +432,15 @@
     var banner = paused ? '<div class="x11-paused-banner"><strong>' + paused +
       ' paused</strong><span>' + (paused === 1 ? 'One permission is waiting.' : 'Some permissions are waiting.') +
       '</span><button type="button" class="btn btn-muted btn-sm" data-paused-review onclick="x11ReviewPaused()">Review</button></div>' : '';
+    var waiting = 0;
+    S.agents.forEach(function (a) { waiting += waitingCount(a.agent.id); });
+    if (waiting) {
+      banner += '<div class="x11-paused-banner x11-waiting-banner" data-waiting-banner>' +
+        '<strong>' + waiting + ' waiting</strong><span>' +
+        (waiting === 1 ? 'A new device has the label.' : 'New devices have the label.') +
+        '</span> \u00b7 <button type="button" class="btn btn-muted btn-sm" data-waiting-review ' +
+        'onclick="x11ReviewWaiting()">Review</button></div>';
+    }
     var cards = S.agents.map(function (entry) {
       var a = entry.agent, cfg = entry.config;
       var n = pausedCount(cfg);
@@ -372,6 +454,8 @@
         '<p class="x11-card-summary">' + esc(summaryFor(cfg, entry.integrations)) + '</p>' +
         '<p class="x11-card-meta">Last active ' + esc(ago(a.last_used_at)) + '</p>' +
         '<p class="x11-card-paused"' + (n ? '' : ' hidden') + '>' + n + ' paused</p>' +
+        '<p class="x11-card-waiting"' + (waitingCount(a.id) ? '' : ' hidden') + '>' +
+        waitingCount(a.id) + ' waiting to join</p>' +
         '<div class="x11-btn-row"><button type="button" class="btn btn-muted btn-xs" ' +
         'onclick="event.stopPropagation();x11OpenAgent(this.closest(\'[data-agent-id]\').dataset.agentId)">Edit agent</button></div>' +
         '</article>';
@@ -392,6 +476,15 @@
     }
   }
 
+  function x11ReviewWaiting() {
+    for (var i = 0; i < S.agents.length; i += 1) {
+      if (waitingCount(S.agents[i].agent.id)) {
+        x11OpenAgent(S.agents[i].agent.id, 'overview');
+        return;
+      }
+    }
+  }
+
   function x11ReviewPaused() {
     for (var i = 0; i < S.agents.length; i += 1) {
       if (pausedCount(S.agents[i].config)) { x11OpenAgent(S.agents[i].agent.id, 'overview'); return; }
@@ -406,7 +499,12 @@
       '<p class="x11-lede">Protected devices, the limits every agent shares, and what is never allowed.</p></div></div>' +
       tabsHtml() + '<div id="x11-notice" class="x11-notice"' + (S.notice ? '' : ' hidden') + ' data-kind="' +
       esc((S.notice && S.notice.kind) || '') + '">' + esc((S.notice && S.notice.text) || '') + '</div>' +
-      '<div class="x11-rules">' +
+      '<div class="x11-rules" data-rules-panel>' +
+      '<div class="x11-rules-help" data-permissions-help>' +
+      '<h2>How permissions work</h2>' +
+      '<p>Limits decide which kinds of action can ever be allowed. Protected devices can never be ' +
+      'given to an agent. Each agent then picks devices or follows Home Assistant labels, within those limits.</p>' +
+      '</div>' +
       '<details data-rules="protected"' + (S.protectedEditing ? ' open' : '') + '><summary>Protected devices</summary><div class="x11-rules-body" id="x11-protected-body">' +
       '<p class="x11-section-sub">No agent can be given a protected device. Existing permissions that hold one are paused; unprotecting does not resume them.</p>' +
       '<div id="x11-protected-list">' + protectedSummaryHtml() + '</div></div></details>' +
@@ -586,11 +684,13 @@
       api('/api/allowances/ceiling').catch(function () { return null; }),
       api('/api/agents/' + Number(id) + '/policy').catch(function () { return null; }),
       api('/api/allowances/protected').catch(function () { return { entities: [] }; }),
+      api('/api/integrations').catch(function () { return []; }),
     ]).then(function (out) {
       S.config = out[0];
       S.draft = docOf(out[0]);
       S.agent = out[0].agent;
-      S.tools = (out[1].integrations) || [];
+      S.integrations = out[10] || [];
+      S.tools = mergeHATools((out[1].integrations) || [], S.integrations);
       S.activity = out[2] || {};
       S.allowances = (out[3] || []).filter(function (r) { return !Number(r.revoked_at); });
       S.gateways = out[4] || [];
@@ -600,6 +700,7 @@
       S.ceiling = out[7] && !out[7].error ? out[7] : null;
       S.policy = out[8] || {};
       S.protected = (out[9].entities || []).map(function (r) { return r.entity_id; });
+      S.integrations = out[10] || [];
       S.jsonText = JSON.stringify(S.draft, null, 2);
       S.jsonError = '';
       S.lastPreview = null;
@@ -700,9 +801,15 @@
           '</div>' : '') + '</div>';
     }).join('');
     if (!perms.length) permHtml = '<p class="x11-plain">Nothing runs without asking yet. Choose a tool action under Tools, then pick devices.</p>';
+    var waits = waitingRows(S.agent && S.agent.id);
+    var waitHtml = '';
+    if (waits.length) {
+      waitHtml = '<div class="x11-waiting-list" data-waiting-list><h3>Waiting to join</h3>' +
+        waits.map(waitingRowHtml).join('') + '</div>';
+    }
     return '<section class="x11-section" id="x11-sec-overview" data-x11-section="overview">' +
       head('Overview', 'What this agent can do on its own, in plain words.', 'overview') +
-      lines.join('') + '<div class="x11-perm-list">' + permHtml + '</div>' +
+      lines.join('') + waitHtml + '<div class="x11-perm-list">' + permHtml + '</div>' +
       '<details class="x11-e2e"><summary>Test agent and E2E approver tokens</summary>' +
       '<p class="x11-section-sub">A test agent may only use HA reads and call service, with exactly one SSH host. An approver token can decide only its E2E rows.</p>' +
       '<label class="x11-plain"><input type="checkbox" id="agent-test-toggle" onchange="x11ToggleTestAgent(this)"' +
@@ -847,6 +954,42 @@
     var grid = el('x11-device-grid');
     if (grid) grid.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
+  function integrationConfig(row) {
+    try {
+      var cfg = JSON.parse((row && row.config_json) || '{}');
+      return cfg && typeof cfg === 'object' ? cfg : {};
+    } catch (e) { return {}; }
+  }
+  function mergeHATools(groups, integrations) {
+    var has = (integrations || []).filter(function (i) {
+      return i.kind === 'ha' && i.enabled;
+    });
+    var children = [];
+    (integrations || []).forEach(function (i) {
+      if (i.kind !== 'ha_ssh' || !i.enabled) return;
+      var cfg = integrationConfig(i);
+      var parent = cfg.ha_integration;
+      if (!parent) parent = has.length === 1 ? has[0].name : '';
+      if (has.some(function (h) { return h.name === parent; })) {
+        children.push({ name: i.name, parent: parent });
+      }
+    });
+    if (!children.length) return groups;
+    var byName = {};
+    groups.forEach(function (g) { byName[g.integration] = g; });
+    children.forEach(function (c) {
+      var group = byName[c.name];
+      var parent = byName[c.parent];
+      if (!group || !parent) return;
+      (group.tools || []).forEach(function (tool) {
+        parent.tools.push(Object.assign({}, tool, { files: true }));
+      });
+    });
+    return groups.filter(function (g) {
+      return !children.some(function (c) { return c.name === g.integration; });
+    });
+  }
+
   function sectionTools() {
     var filter = S.toolFilter.toLowerCase();
     var filtering = !!filter || S.toolOnlyAllowed;
@@ -863,7 +1006,7 @@
       var summary = esc(g.integration) + ' \u00b7 ' + all.length + ' tool' +
         (all.length === 1 ? '' : 's') + ' \u00b7 ' + ask + ' ask first';
       var open = filtering || !!S.toolOpen[g.integration];
-      var rows = shown.map(function (tool) {
+      var renderRows = function (list) { return list.map(function (tool) {
         var outcome = outcomeFor(tool.name, tool);
         function choice(value, label) {
           return '<button type="button" data-tool-name="' + attr(tool.name) + '" data-choice="' + value +
@@ -883,7 +1026,11 @@
               '<button type="button" class="link-btn" onclick="x11OpenDevices()">Runs without asking \u2192 pick devices</button>.</div>'
             : '<div class="x11-always-line" data-always-line>Always asks you: Eshu requires your approval for this tool.</div>') : '') +
           '</div>';
-      }).join('');
+      }).join(''); };
+      var normal = shown.filter(function (t) { return !t.files; });
+      var files = shown.filter(function (t) { return t.files; });
+      var rows = renderRows(normal) +
+        (files.length ? '<h4 class="x11-subhead">Files</h4>' + renderRows(files) : '');
       return '<details class="x11-int-group" data-tool-group="' + attr(g.integration) + '"' +
         (open ? ' open' : '') + ' ontoggle="x11ToolGroupToggle(this)">' +
         '<summary><span>' + summary + '</span></summary>' +
@@ -1111,13 +1258,95 @@
       return p && p.label_id;
     });
     var perms = permissions().map(function (p, i) { return permEditor(p, i); }).join('');
-    return '<div id="x11-device-grid" data-device-grid>' + deviceToolsHtml() +
+    var help = '<div class="x11-perm-help" data-perm-help>' +
+      '<p><b>Pick devices</b> Only the devices you tick. No labels needed.</p>' +
+      '<p><b>Follow a Home Assistant label</b> The devices come from Home Assistant. ' +
+      'Remove the label there and the agent loses the device at once. Add the label to a new ' +
+      'device and it waits here for your one-click Accept, so a change in Home Assistant alone ' +
+      'never gives an agent a new device.</p></div>';
+    return '<div id="x11-device-grid" data-device-grid>' + deviceToolsHtml() + help +
       '<div class="x11-mobile-grid" data-mobile-grid>' + mobile + '</div>' +
       '<div class="x11-device-wrap"><table class="x11-devices"><thead>' +
       '<tr><th scope="col" rowspan="2">Device</th>' + groupHeads + '</tr>' +
       '<tr>' + actionHeads + '</tr></thead><tbody>' + body + '</tbody></table></div>' +
       (labelModeAny ? '<p class="x11-label-hint">Add or remove the label in Home Assistant; new devices wait for your review here.</p>' : '') +
+      waitingGridHtml() +
       '<div class="x11-perm-list">' + (perms || '<p class="x11-plain">No device permissions yet.</p>') + '</div></div>';
+  }
+
+  function waitingGridHtml() {
+    var waits = waitingRows(S.agent && S.agent.id);
+    if (!waits.length) return '';
+    return '<div class="x11-waiting-list x11-waiting-grid" data-waiting-grid>' +
+      waits.map(waitingRowHtml).join('') + '</div>';
+  }
+
+  function x11AcceptJoin(btn) {
+    acceptJoin(Number(btn.getAttribute('data-accept-join')), false);
+  }
+
+  function x11AcceptAllJoin(btn) {
+    acceptJoin(Number(btn.getAttribute('data-accept-all-join')), true);
+  }
+
+  function acceptJoin(id, includeDismissed) {
+    if (!id) return;
+    var row = (S.allowances || []).filter(function (r) {
+      return Number(r.id) === id;
+    })[0];
+    if (row) {
+      var names = waitingNames(row).concat(includeDismissed ? dismissedNames(row) : []);
+      if (!window.confirm('Accept ' + names.length + ' device' + (names.length === 1 ? '' : 's') +
+          ' for ' + labelForRow(row) + ': ' + names.join(', ') + '?')) return;
+    }
+    var call = function (risk) {
+      api('/api/allowances/' + id + '/accept-join', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ risk_ack: !!risk,
+                               include_dismissed: !!includeDismissed }),
+      }).then(function () {
+        toast(includeDismissed ? 'All devices accepted' : 'Devices accepted', 'success');
+        var section = S.section;
+        x11OpenAgent(S.agent.id, section);
+      }).catch(function (e) {
+        var d = e.detail || {};
+        if (e.status === 400 && d.code === 'risk_ack_required') {
+          var risky = (d.risky_entities || []).map(function (x) {
+            return x.entity_id || x;
+          }).join(', ');
+          if (window.confirm('Accepting these devices needs a risk confirmation' +
+              (risky ? ': ' + risky : '') + '. Accept anyway?')) {
+            call(true);
+            return;
+          }
+        }
+        setNotice(errText(e), 'error');
+      });
+    };
+    call(false);
+  }
+
+  function x11DismissJoin(btn) {
+    var id = Number(btn.getAttribute('data-dismiss-join'));
+    if (!id) return;
+    if (!window.confirm('Dismiss these waiting devices? They stay in Home Assistant; this permission will not offer them again while the label keeps them.')) return;
+    api('/api/allowances/' + id + '/dismiss-join', { method: 'POST' })
+      .then(function () {
+        toast('Waiting devices dismissed', 'success');
+        var section = S.section;
+        x11OpenAgent(S.agent.id, section);
+      }).catch(function (e) { setNotice(errText(e), 'error'); });
+  }
+
+  function x11ReofferJoin(btn) {
+    var id = Number(btn.getAttribute('data-reoffer-join'));
+    if (!id) return;
+    api('/api/allowances/' + id + '/reoffer-join', { method: 'POST' })
+      .then(function () {
+        toast('Dismissed devices offered again', 'success');
+        var section = S.section;
+        x11OpenAgent(S.agent.id, section);
+      }).catch(function (e) { setNotice(errText(e), 'error'); });
   }
 
   function permEditor(p, i) {
@@ -1701,6 +1930,11 @@
   window.x11ShowAgents = x11ShowAgents;
   window.x11SetTab = x11SetTab;
   window.x11ReviewPaused = x11ReviewPaused;
+  window.x11ReviewWaiting = x11ReviewWaiting;
+  window.x11AcceptJoin = x11AcceptJoin;
+  window.x11AcceptAllJoin = x11AcceptAllJoin;
+  window.x11DismissJoin = x11DismissJoin;
+  window.x11ReofferJoin = x11ReofferJoin;
   window.x11Nav = x11Nav;
   window.x11ToolChoice = x11ToolChoice;
   window.x11SetDevice = x11SetDevice;

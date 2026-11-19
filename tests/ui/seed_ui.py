@@ -107,6 +107,32 @@ integrations.create_tool(ha, "ha_backup_create", "Create a backup", "POST",
                          "/api/services/backup/create", [], "{}", read_only=False)
 integrations.create_integration("Pi-hole", "http://192.0.2.31", "bearer",
                                 "synthetic", kind="pihole")
+files = integrations.create_integration(
+    "ha-files", "192.0.2.32", "none", "", kind="ha_ssh")
+from core.ha_ssh_seed import seed_ha_ssh_tools  # noqa: E402
+from db.integrations import set_integration_config  # noqa: E402
+seed_ha_ssh_tools(files)
+set_integration_config(integrations.get_integration("ha-files"), {
+    "ha_integration": "Home Assistant", "ssh_user": "root", "ssh_port": 22})
+integrations.update_integration(
+    "ha-files",
+    secret="-----BEGIN OPENSSH PRIVATE KEY-----\nsynthetic\n"
+           "-----END OPENSSH PRIVATE KEY-----")
+# A Files row whose saved HA parent is now disabled: it must stay editable
+# and show the broken link, rather than vanish or refuse every edit.
+integrations.create_integration("Home Assistant (old)",
+                                "http://192.0.2.33:8123", "bearer", "",
+                                kind="ha")
+integrations.update_integration("Home Assistant (old)", enabled=False)
+old_files = integrations.create_integration(
+    "ha-files-old", "192.0.2.34", "none", "", kind="ha_ssh")
+seed_ha_ssh_tools(old_files)
+set_integration_config(integrations.get_integration("ha-files-old"), {
+    "ha_integration": "Home Assistant (old)", "ssh_user": "root", "ssh_port": 22})
+integrations.update_integration(
+    "ha-files-old",
+    secret="-----BEGIN OPENSSH PRIVATE KEY-----\nsynthetic\n"
+           "-----END OPENSSH PRIVATE KEY-----")
 
 # X11: synthetic permissions for the real Agents view. One pick permission,
 # one label-followed permission, a normal light permission, and one paused
@@ -128,10 +154,15 @@ allowance_core.create_allowance(
     "seed-ui", agents["ops-agent"], "Ceiling light", "light",
     "turn_off", ["light.ceiling"], expires_at=now + 86400,
     rate_per_hour=30)
+allowance_core.create_allowance(
+    "seed-ui", agents["ops-agent"], "Living room lights on", "light",
+    "turn_on", ["light.ceiling"], source_label_id="lbl-lights",
+    rate_per_hour=30)
 paused = allowance_core.create_allowance(
     "seed-ui", agents["ops-agent"], "Office heater", "switch",
     "toggle", ["switch.office_heater"], rate_per_hour=30)
 allowance_core.suspend_allowance("seed-ui", paused["id"], "registry_changed")
+allowance_core.refresh_labels("seed-ui")
 
 policies.update_policy("exact_whitelist", "uptime\ndf -h /\nfree -m")
 policies.update_policy("regex_whitelist", r"^systemctl status [a-z0-9_.@-]+$")

@@ -22867,3 +22867,222 @@ plus Security's two server nits.
   word loop exists once. A registry-id backfill also suspends live
   permissions that hold that id under another entity id, in the same
   transaction and with an audit row.
+
+### F11 operator feedback (2026-11-19)
+
+**Test.** For an integration whose tools use handlers, Test runs the
+designated read through the tool core instead of the HTTP proxy. `ha_ssh`
+runs `ha_config_list`; the result shows the pinned host fingerprint and the
+`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` comparison line. A
+handler refusal (for example "not root") is returned as its plain message.
+HTTP integrations keep the existing proxy Test.
+
+**Create form.** `ha_ssh` uses a multi-line private-key field, user (default
+root) and port. The key is never echoed; the list shows `key set`/`key
+missing`. The server refuses anything but an unencrypted OpenSSH private
+key, and validates the user and port.
+
+**Files under Home Assistant.** A seeded `ha_ssh` row with
+`config_json.ha_integration` set to its HA integration renders as a "Files
+(SSH add-on)" sub-card under that Home Assistant card. Its tools are merged
+into the Home Assistant group in the agent Tools screen under a "Files"
+subheading, while remaining a separate integration with its own key and pin.
+When the link is unset and exactly one HA is enabled, that HA is used.
+
+**Permissions in plain words.** The device editor explains "Pick devices"
+and "Follow a Home Assistant label"; label joiners appear in Overview, the
+device grid and the Agents-tab banner ("N waiting · Review"). Accept calls
+`accept_join` (with the risk confirmation the endpoint requires); Dismiss
+clears `pending_json` through the new audited `dismiss-join` endpoint. The
+Rules tab carries a short "How permissions work" panel.
+
+### Security review of the server part (security reviewer, 2026-11-19, `feat/ha-files-ui` @ a2bfb3d)
+
+**Approved once CB9 is in. It is small.** Code text read only; nothing was
+run. The UI is for the operator review.
+
+**The Test boundary: confirmed, with CB9.**
+* Skipping only the agent MCP-session requirement is right for an
+  operator click.
+* The test needs `_check_session`. It picks only an enabled `read_only`
+  tool with no required parameters, and runs it through `_run_tool` with
+  an explicit `session_id=''`, so it never inherits or lands in an agent's
+  session.
+* The freeze, `evaluate_call`, the gate, the handler and the call row all
+  run.
+
+**CB9 (should): name the operator, and make the helper refuse writes on
+its own.**
+* With no agent in context, `_run_tool` records the call as `mcp`
+  (`AGENT_LABEL`), the same label as a legacy unauthenticated MCP call.
+  `evaluate_call(None, ...)` also takes the no-agent path.
+* So an operator Test is indistinguishable from agent traffic in History
+  and the audit log.
+* **Fix:**
+  * Pass an explicit actor such as `operator-test` through to the call
+    row and the audit.
+  * Have `run_tool_for_operator_test` itself refuse a tool that is not
+    `read_only` (or that is `not_implemented`). The endpoint's selection
+    is then not the only thing standing between a future caller and an
+    ungated write under no agent.
+
+**The `ha_ssh` form holds.**
+* The key must be an unencrypted OpenSSH key. `ssh-keygen -y -P ''` fails
+  on a passphrase, and on anything that is not real key material.
+* The key is never echoed: the list returns `secret_set` and an empty
+  `secret_suffix`, so not even the tail comes back.
+* The user is checked against `[a-z_][a-z0-9_-]{0,31}`, and the port
+  against 1–65535.
+* The HA link must name an enabled `ha` integration, or it auto-links
+  when there is exactly one.
+
+**`dismiss-join` holds.** It is operator-only, clears `pending_json` in
+one `BEGIN IMMEDIATE`, bumps the version, audits the dismissed entities,
+and grants nothing.
+
+**Nits:**
+* **An uncaught error on edit.** The update path calls
+  `validate_private_key(secret)` outside the `try`, so a bad key on edit
+  is an uncaught `HaConfigError` (a 500) instead of a 400. It is also
+  validated twice. Drop the bare call; `_validate_ssh_fields` already
+  does it.
+* **A kind change.** Changing a row's kind to `ha_ssh` keeps whatever
+  secret it had without validating it. Require a key when the kind
+  becomes `ha_ssh`.
+* **A disabled HA link.** A saved link to an HA integration that is later
+  disabled makes every edit of the `ha_ssh` row a 400. Allow the edit and
+  show the link as broken.
+* **The key on disk.** `validate_private_key` writes the key to a 0600
+  file in the temp directory for the check. That is acceptable. Prefer a
+  private directory (`tempfile.mkdtemp()`, 0700), or
+  `ssh-keygen -y -f /dev/stdin` where the build supports it.
+* **Dismiss does not last.** The dismissed members are still in the
+  label, so the next refresh offers them again. If "dismiss" should mean
+  "stop asking", store the dismissed registry ids on the row and skip
+  them, until they leave and rejoin.
+
+### Answer: include rule for pre-existing includes (2026-11-19)
+
+**Yes to the proposal, with four conditions. Not the operator
+allowlist.**
+* An allowlist would widen what an agent can *add* (for example a new
+  `!include_dir_named themes` under another key).
+* Grandfathering widens nothing, provided "already present" cannot be
+  laundered.
+* The preflight is a structural scan, not a YAML parser, so the
+  conditions are stated in terms it can check.
+
+1. **Identity is the whole line, not the (tag, target) pair.**
+   * An include occurrence is grandfathered only when its line, after
+     the comment is stripped and including its indentation and its own
+     key text, is byte-identical to a line in the current content of the
+     **same file**, under the same top-level key.
+   * Count occurrences as a multiset, so a grandfathered line cannot be
+     duplicated.
+   * A pair that moves to another key, or deeper or shallower in the
+     file, is a new include and gets the packages/ rule.
+   * The tag and target alone are not enough: `!include_dir_merge_named
+     themes` placed under another integration changes what that
+     directory's YAML *means* to HA.
+2. **No laundering through anchors.**
+   * Refuse a write in which a line carrying an include tag also carries
+     an `&anchor`.
+   * Refuse a write that adds a `*alias` or `<<:` merge key referring to
+     such an anchor.
+   * The simplest form: in a file that contains a grandfathered include,
+     refuse any new `&`, `*` or `<<:` token.
+   * Otherwise `themes: &t !include_dir_merge_named themes` keeps its
+     pair, and `other: *t` re-homes the directory without a new tag.
+3. **The base is exactly the bytes the write is bound to.**
+   * Compare against the content whose sha256 equals the request's
+     `expect_hash`, read for this write, and compare per file. A
+     different file's includes never count.
+   * A new file has an empty base, so every include in it is new.
+   * The remote side still refuses when the file no longer has that hash.
+4. **Make it visible.**
+   * When a write passes because of grandfathered includes, list them on
+     the approval card ("unchanged includes outside packages/: themes")
+     and in the audit row.
+   * `secrets.yaml`, `!secret`, `!env_var` and the other refusals are
+     unchanged: grandfathering applies only to the
+     `!include`/`!include_dir_*` target rule.
+
+The property still holds for anything the agent introduces. What it
+cannot introduce, it can only leave where the operator put it.
+
+### CB9 and the nits implemented (`feat/ha-files-ui`)
+
+* **CB9.** `run_tool_for_operator_test` now fetches the tool itself and
+  refuses anything that is not `read_only` and implemented, before
+  `_run_tool`; the endpoint's selection is no longer the guard. The helper
+  passes `actor='operator-test'` into `_run_tool`, which labels the call row
+  and the handler's audit actor while policy still sees no agent.
+* **Edit key.** The update path no longer calls `validate_private_key`
+  outside the `try`; `_validate_ssh_fields` is the one check, so a bad key is
+  a 400. Changing a row's kind to `ha_ssh` validates the stored secret (or
+  requires a new one).
+* **Disabled HA link.** A saved `ha_integration` is authoritative: if that HA
+  is later disabled the row keeps the link, stays editable, and shows
+  "linked HA disabled" instead of re-homing under another enabled HA. Only a
+  link the edit actually changes is re-validated.
+* **Key temp file.** `validate_private_key` uses a private `mkdtemp()`
+  directory (0700) and removes it in a `finally`.
+* **Dismissed joiners.** `allowances.dismissed_json` keeps the
+  `(entity_id, registry_id)` pairs. `refresh_labels` does not re-offer them
+  while that registry entry stays in the label, and clears the record when it
+  leaves or is replaced. The waiting list shows `dismissed (n)` with
+  Re-offer and Accept all; Accept all is `include_dismissed=true`, still
+  bound to the current label. `POST /api/allowances/{id}/reoffer-join` puts
+  them back in the waiting list and audits the change.
+
+### Security: CB9 and the nits confirmed (e230fc3)
+
+Read as code text only; nothing was run.
+
+**Confirmed. The server part of `feat/ha-files-ui` is approved to merge.**
+
+* **CB9 holds.**
+  * `run_tool_for_operator_test` loads the integration and the tool
+    itself and refuses anything that is not enabled, `read_only` and
+    implemented, before `_run_tool`. A later caller can no longer reach a
+    write through it.
+  * `actor='operator-test'` only replaces the label. `get_current_agent()`
+    still returns no agent, so policy, `explicit_hassio_allowed` and
+    `approval_mode` see what they saw before.
+* **Key and link nits hold.**
+  * One key check, inside `_validate_ssh_fields`, so a bad key is a 400.
+  * A change of kind to `ha_ssh` validates the stored secret or demands
+    a new one.
+  * A saved HA link is kept when that HA is later disabled. Only a link
+    the edit changes is re-validated, and nothing is re-homed silently.
+  * The key file sits in a 0700 `mkdtemp()` directory, created
+    `O_EXCL` at 0600, and the directory is removed in `finally`.
+* **Dismissals hold.**
+  * Pairs are keyed on `(entity_id, registry_id)`. A registry
+    replacement drops the record, so the new device is a new offer.
+  * Accept all re-resolves the label first, then goes through the same
+    registry, protection, 64-entity cap and `risk_ack` checks as any
+    joiner.
+  * Re-offer grants nothing; it only moves pairs back to the waiting
+    list, under `BEGIN IMMEDIATE`, with an audit row.
+
+Nits, none blocking:
+
+1. **A dismissed joiner bumps the version every five minutes.** It stays
+   in `joined` for as long as it is in the label, so every refresh
+   rewrites the row, calls `_bump_config` and writes an
+   `allowance_label_refresh` row.
+   * This was already true of a waiting joiner. A dismissal is meant to
+     be the quiet state, though, and it now lasts indefinitely.
+   * Effects: about 288 audit rows a day per allowance, and an X11
+     preview older than one refresh fails as stale.
+   * Fix: skip the write, the bump and the audit row when the pins,
+     `pending` and `dismissed` are unchanged.
+2. **A dismissal with an empty `registry_id` never expires.** In
+   `refresh_labels` such a record matches any registry entry, so it
+   survives a replacement. Store the registry id the refresh resolved,
+   or drop records that have none.
+3. **Reserve the label names.** Refuse `operator-test`, `operator` and
+   `mcp` as agent names at creation. Otherwise an agent with one of
+   those names reads as the operator Test in the call log, and
+   `_caller_agent` would resolve rows to it.

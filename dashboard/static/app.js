@@ -8716,6 +8716,11 @@ function onIntKindChange() {
   const authType = document.getElementById('int-auth-type');
   const authHeader = document.getElementById('int-auth-header');
   const secret = document.getElementById('int-secret');
+  const sshFields = document.getElementById('int-ssh-fields');
+  const sshKey = document.getElementById('int-ssh-key');
+  const isSsh = kind === 'ha_ssh';
+  if (sshFields) sshFields.classList.toggle('hidden', !isSsh);
+  if (sshKey) sshKey.required = isSsh;
   const verifyTls = document.getElementById('int-verify-tls');
   const verifyRow = verifyTls ? verifyTls.closest('label') : null;
   const gateMode = document.getElementById('int-gate-mode');
@@ -8738,7 +8743,7 @@ function onIntKindChange() {
   if (profile.name_hint && !_editingIntegration && nameInput && !nameInput.value.trim()) {
     nameInput.value = profile.name_hint;
   }
-  if (secret) secret.classList.toggle('hidden', isOAuth2 || !!profile.no_secret);
+  if (secret) secret.classList.toggle('hidden', isOAuth2 || !!profile.no_secret || isSsh);
   if (verifyRow) verifyRow.classList.toggle('hidden', !!profile.no_tls_toggle);
   if (gateRow) gateRow.classList.toggle('hidden', !!profile.no_gate);
   if (verifyTls && !_editingIntegration) verifyTls.checked = !!profile.insecure_tls;
@@ -9788,37 +9793,85 @@ async function deleteAgentToken(btn, id) {
   } catch(e) { showToast('Failed: ' + e.message, 'error'); }
 }
 
+function haFilesParent(i) {
+  if (!i || i.kind !== 'ha_ssh') return '';
+  var cfg = integrationConfig(i);
+  if (cfg.ha_integration) {
+    var named = _integrationsData.find(function (x) {
+      return x.name === cfg.ha_integration && x.kind === 'ha' && x.enabled;
+    });
+    // A stored link is authoritative. If its HA is disabled, the row stays a
+    // standalone Files card with the broken-link note; it must not silently
+    // re-home under a different enabled HA.
+    return named ? named.name : '';
+  }
+  var has = _integrationsData.filter(function (x) {
+    return x.kind === 'ha' && x.enabled;
+  });
+  return has.length === 1 ? has[0].name : '';
+}
+
 function renderIntegrationList() {
   const el = document.getElementById('integration-list');
   if (!el) return;
   if (!_integrationsData.length) { el.innerHTML = '<p class="text-muted">No integrations yet.</p>'; return; }
-  el.innerHTML = _integrationsData.map(function(i) {
+  var children = {};
+  var top = [];
+  _integrationsData.forEach(function (i) {
+    var parent = haFilesParent(i);
+    if (parent) (children[parent] = children[parent] || []).push(i);
+    else top.push(i);
+  });
+  function actions(i) {
+    var profile = INTEGRATION_PROFILES[i.kind] || {};
+    var testBtn = profile.no_test ? ''
+      : '<button onclick="testIntegration(' + escJs(i.name) + ')" class="btn btn-xs btn-muted" title="Run a read call to verify the connection">Test</button>';
+    var seedBtn = profile.seedable
+      ? '<button onclick="seedTools(' + escJs(i.name) + ')" class="btn btn-xs btn-muted" title="Seed the catalog for this integration">Seed</button>'
+      : '';
+    return '<button onclick="editIntegration(' + escJs(i.name) + ')" class="btn btn-xs btn-muted" title="Edit base URL / secret">Edit</button>' +
+      testBtn + seedBtn +
+      '<button onclick="deleteIntegration(this, ' + escJs(i.name) + ')" class="btn btn-xs btn-muted">Delete</button>';
+  }
+  function card(i, sub) {
     var selected = _selectedIntegration === i.name;
     var active = i.enabled ? 'text-success' : 'text-muted';
     var profile = INTEGRATION_PROFILES[i.kind] || {};
-    var seedable = !!profile.seedable;
-    var seedBtn = seedable
-      ? '<button onclick="seedTools(' + escJs(i.name) + ')" class="btn btn-xs btn-muted" title="Seed the seed catalog for this integration">Seed</button>'
-      : '';
-    var label = profile.label || i.kind || 'custom';
+    var label = sub ? 'Files (SSH add-on)' : (profile.label || i.kind || 'custom');
     var urlLabel = profile.no_base_url ? 'mediated fetch (no base URL)' : i.base_url;
-    var testBtn = profile.no_test
-      ? ''
-      : '<button onclick="testIntegration(' + escJs(i.name) + ')" class="btn btn-xs btn-muted" title="Run a read call to verify the connection">Test</button>';
     var gateLabel = profile.no_gate ? 'n/a' : (i.gate_mode || 'destructive');
-    return '<div class="item-card selectable' + (selected ? ' selected' : '') + '" onclick="selectIntegration(' + escJs(i.name) + ')">' +
+    var keyLine = i.kind === 'ha_ssh'
+      ? '<span>key ' + (i.secret_set ? 'set' : 'missing') + '</span>' : '';
+    var linkLine = '';
+    if (i.kind === 'ha_ssh') {
+      var linkCfg = integrationConfig(i);
+      if (linkCfg.ha_integration) {
+        var linkRow = _integrationsData.find(function (x) {
+          return x.name === linkCfg.ha_integration && x.kind === 'ha';
+        });
+        if (!linkRow || !linkRow.enabled) {
+          linkLine = '<span class="text-danger" data-ha-link-disabled>linked HA disabled</span>';
+        }
+      }
+    }
+    return '<div class="item-card selectable' + (selected ? ' selected' : '') + (sub ? ' i-subcard' : '') +
+      '" onclick="selectIntegration(' + escJs(i.name) + ')">' +
       '<div class="flex items-center justify-between gap-2">' +
       '<span class="text-sm font-semibold ' + active + '"><span class="i-star' + (i.enabled ? '' : ' off') + '"></span> ' + esc(i.name) + '</span>' +
       '<span class="i-kind">' + esc(label) + '</span></div>' +
       '<div class="i-url">' + esc(urlLabel) + '</div>' +
-      '<div class="i-meta">auth: ' + esc(i.auth_type) + ' &middot; gate: ' + esc(gateLabel) + ' &middot; mcp: ' + esc(i.mcp_mode || 'joined') + '</div>' +
+      '<div class="i-meta">auth: ' + esc(i.auth_type) + ' &middot; gate: ' + esc(gateLabel) +
+      ' &middot; mcp: ' + esc(i.mcp_mode || 'joined') + (keyLine ? ' &middot; ' + keyLine : '') +
+      (linkLine ? ' &middot; ' + linkLine : '') + '</div>' +
       integrationHealthLine(i.name) +
       '<div class="flex flex-wrap gap-1 mt-2" onclick="event.stopPropagation()">' +
-      '<button onclick="editIntegration(' + escJs(i.name) + ')" class="btn btn-xs btn-muted" title="Edit base URL / secret">Edit</button>' +
-      testBtn +
-      seedBtn +
-      '<button onclick="deleteIntegration(this, ' + escJs(i.name) + ')" class="btn btn-xs btn-muted">Delete</button>' +
-      '</div></div>';
+      actions(i) + '</div></div>';
+  }
+  el.innerHTML = top.map(function (i) {
+    var kids = children[i.name] || [];
+    return '<div class="i-family">' + card(i, false) + (kids.length
+      ? '<div class="i-subcards">' + kids.map(function (k) { return card(k, true); }).join('') + '</div>'
+      : '') + '</div>';
   }).join('');
 }
 
@@ -9855,6 +9908,11 @@ function integrationHealthLine(name) {
   '</div>';
 }
 
+function integrationConfig(i) {
+  try { return JSON.parse((i && i.config_json) || '{}') || {}; }
+  catch (e) { return {}; }
+}
+
 function resetIntegrationForm() {
   _editingIntegration = null;
   document.getElementById('int-name').disabled = false;
@@ -9862,6 +9920,14 @@ function resetIntegrationForm() {
   document.getElementById('int-base-url').value = '';
   document.getElementById('int-kind').value = 'proxmox';
   document.getElementById('int-secret').value = '';
+  var sshKey = document.getElementById('int-ssh-key');
+  if (sshKey) sshKey.value = '';
+  var sshUser = document.getElementById('int-ssh-user');
+  if (sshUser) sshUser.value = 'root';
+  var sshPort = document.getElementById('int-ssh-port');
+  if (sshPort) sshPort.value = '22';
+  var sshStatus = document.getElementById('int-ssh-key-status');
+  if (sshStatus) sshStatus.textContent = '';
   document.getElementById('int-client-id').value = '';
   document.getElementById('int-client-secret').value = '';
   document.getElementById('int-token-url').value = '';
@@ -9891,6 +9957,17 @@ function editIntegration(name) {
   document.getElementById('int-base-url').value = i.base_url || '';
   document.getElementById('int-kind').value = kind;
   document.getElementById('int-secret').value = '';
+  var sshKey = document.getElementById('int-ssh-key');
+  if (sshKey) sshKey.value = '';
+  var cfg = integrationConfig(i);
+  var sshUser = document.getElementById('int-ssh-user');
+  if (sshUser) sshUser.value = cfg.ssh_user || 'root';
+  var sshPort = document.getElementById('int-ssh-port');
+  if (sshPort) sshPort.value = cfg.ssh_port || 22;
+  var sshStatus = document.getElementById('int-ssh-key-status');
+  if (sshStatus) sshStatus.textContent = i.secret_set
+    ? 'Key set. Leave the key blank to keep it, or paste a new one to replace it.'
+    : '';
   onIntKindChange();
   // For profiles without a fixed auth, reflect the stored auth values.
   if (!INTEGRATION_PROFILES[kind].auth_type) {
@@ -9954,7 +10031,25 @@ async function createIntegration() {
       : document.getElementById('int-auth-header').value.trim(),
   };
   if (kind === 'webfetch') payload.retention_days = 90;
-  const secret = document.getElementById('int-secret').value;
+  var secret = document.getElementById('int-secret').value;
+  if (kind === 'ha_ssh') {
+    secret = (document.getElementById('int-ssh-key').value || '').trim();
+    if (!secret && !_editingIntegration) {
+      showToast('Paste the OpenSSH private key', 'error');
+      return;
+    }
+    if (secret && (!/^-----BEGIN OPENSSH PRIVATE KEY-----/.test(secret) ||
+                   !/-----END OPENSSH PRIVATE KEY-----$/.test(secret))) {
+      showToast('The key must be an OpenSSH private key without a passphrase', 'error');
+      return;
+    }
+    payload.ssh_user = (document.getElementById('int-ssh-user').value || 'root').trim();
+    payload.ssh_port = parseInt(document.getElementById('int-ssh-port').value || '22', 10);
+    if (!payload.ssh_user || !(payload.ssh_port >= 1 && payload.ssh_port <= 65535)) {
+      showToast('SSH user and port are required', 'error');
+      return;
+    }
+  }
   if (secret && !profile.no_secret) payload.secret = secret;
   const clientId = document.getElementById('int-client-id').value;
   const clientSecret = document.getElementById('int-client-secret').value;
@@ -10006,9 +10101,15 @@ async function testIntegration(name) {
     var body = '';
     if (data.error) {
       body = '<span class="text-danger">Error: ' + esc(data.error) + '</span>';
+      if (data.tool) body += ' <span class="text-xs text-muted">via ' + esc(data.tool) + '</span>';
     } else {
       body = 'HTTP ' + data.status_code + ' via ' + esc(data.tool) +
         (data.truncated ? ' (truncated)' : '') + ' — <code>' + esc(data.preview) + '</code>';
+    }
+    if (data.fingerprint) {
+      body += '<div class="mt-2"><strong>Pinned host key ' + esc(data.fingerprint) + '</strong>' +
+        (data.fingerprint_hint ? '<div class="text-xs text-muted">' + esc(data.fingerprint_hint) + '</div>' : '') +
+        '</div>';
     }
     box.innerHTML = line(body);
   } catch(e) { box.innerHTML = line('<span class="text-danger">Test failed: ' + esc(e.message) + '</span>'); }

@@ -789,7 +789,8 @@ def _init_allowance_tables():
             revoked_at INTEGER NOT NULL DEFAULT 0,
             profile_id INTEGER NOT NULL DEFAULT 0,
             profile_version INTEGER NOT NULL DEFAULT 0,
-            pending_json TEXT NOT NULL DEFAULT '[]')''')
+            pending_json TEXT NOT NULL DEFAULT '[]',
+            dismissed_json TEXT NOT NULL DEFAULT '[]')''')
         conn.execute('''CREATE TABLE IF NOT EXISTS allowance_uses (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             allowance_id INTEGER NOT NULL,
@@ -825,6 +826,11 @@ def _init_allowance_tables():
             expires_at INTEGER NOT NULL DEFAULT 0)''')
         try:
             conn.execute("ALTER TABLE allowances ADD COLUMN pending_json "
+                         "TEXT NOT NULL DEFAULT '[]'")
+        except Exception:
+            pass
+        try:
+            conn.execute("ALTER TABLE allowances ADD COLUMN dismissed_json "
                          "TEXT NOT NULL DEFAULT '[]'")
         except Exception:
             pass
@@ -1155,6 +1161,7 @@ def _in_window(window, now_ts=None):
 
 def get_allowance(aid):
     from db.core import db_conn
+    _init_allowance_tables()
     with db_conn() as conn:
         row = conn.execute('SELECT * FROM allowances WHERE id = ?', (aid,)).fetchone()
     return dict(row) if row else None
@@ -1774,21 +1781,29 @@ def _pin_changed(registry, pin):
     return bool(old and new and old != new)
 
 
-def _write_entity_list(conn, row, pins, pending):
+def _write_entity_list(conn, row, pins, pending, dismissed=None):
     """Rewrite the pins and the duplicate conditions list in one UPDATE.
 
     Matching reads the pins; the conditions copy keeps the page and any older
     reader consistent. BX1: both columns move together or neither does.
+    `dismissed` is left untouched unless the caller passes it.
     """
     import json as _json
     cond = _json.loads(row['conditions_json'] or '{}')
     cond = dict(cond)
     cond['data.entity_id'] = {'in': [p['entity_id'] for p in pins]}
-    conn.execute(
-        'UPDATE allowances SET conditions_json = ?, entities_json = ?, '
-        'pending_json = ? WHERE id = ?',
-        (_json.dumps(cond, sort_keys=True), _json.dumps(pins),
-         _json.dumps(pending), row['id']))
+    if dismissed is None:
+        conn.execute(
+            'UPDATE allowances SET conditions_json = ?, entities_json = ?, '
+            'pending_json = ? WHERE id = ?',
+            (_json.dumps(cond, sort_keys=True), _json.dumps(pins),
+             _json.dumps(pending), row['id']))
+    else:
+        conn.execute(
+            'UPDATE allowances SET conditions_json = ?, entities_json = ?, '
+            'pending_json = ?, dismissed_json = ? WHERE id = ?',
+            (_json.dumps(cond, sort_keys=True), _json.dumps(pins),
+             _json.dumps(pending), _json.dumps(dismissed), row['id']))
 
 
 def _backfill_protected_registry(registry):
@@ -1986,39 +2001,56 @@ def refresh_labels(actor='refresh'):
                 'allowance_protected_label_skipped',
                 details='allowance #%d: label %s offered protected %s; dropped'
                         % (row['id'], label, ','.join(skipped)))
-        if not left and not joined and not pin_needed:
+        # Dismissed joiners stay dismissed while the same registry entry is
+        # still in the label. Leaving (or being replaced) clears the record so
+        # a later rejoin is offered again.
+        dismissed = [d for d in _json.loads(row.get('dismissed_json') or '[]')
+                     if isinstance(d, dict) and d.get('entity_id')]
+        kept_dismissed = [
+            d for d in dismissed
+            if d['entity_id'] in current and
+            (not d.get('registry_id') or
+             d.get('registry_id') == (current[d['entity_id']].get('registry_id') or ''))]
+        dismissed_ids = {d['entity_id'] for d in kept_dismissed}
+        offered = [e for e in sorted(joined) if e not in dismissed_ids]
+        dismissed_changed = kept_dismissed != dismissed
+        if not left and not joined and not pin_needed and not dismissed_changed:
             continue
         pins = [stored[e] for e in stored if e not in left]
         pending = [p for p in _json.loads(row.get('pending_json') or '[]')
                    if p.get('entity_id') not in left]
         have = {p['entity_id'] for p in pending}
-        for e in sorted(joined):
+        for e in offered:
             if e not in have:
                 pending.append(current[e])
         with db_conn() as conn:
             conn.execute('BEGIN IMMEDIATE')
             if pin_needed:
                 _write_ha_pin(conn, row['id'], pin[0], pin[1])
-            if left or joined:
-                _write_entity_list(conn, row, pins, pending)
+            if left or joined or dismissed_changed:
+                _write_entity_list(conn, row, pins, pending, kept_dismissed)
             _bump_config(conn, row['agent_id'])
             conn.commit()
-        if left or joined:
+        if left or joined or dismissed_changed:
             record_audit_event(
                 'allowance_label_refresh',
-                details='allowance #%d: dropped %s; held %s; protected-skipped %s'
+                details='allowance #%d: dropped %s; held %s; dismissed-kept %s; '
+                        'protected-skipped %s'
                         % (row['id'], ','.join(sorted(left)) or 'none',
-                           ','.join(sorted(joined)) or 'none',
+                           ','.join(offered) or 'none',
+                           ','.join(sorted(dismissed_ids)) or 'none',
                            ','.join(skipped) or 'none'))
         changed += 1
     return {'checked': changed, 'error': ''}
 
 
-def accept_join(actor, aid, risk_ack=False):
+def accept_join(actor, aid, risk_ack=False, include_dismissed=False):
     """Accept the entities a label gained, after the save path's checks.
 
     BX5: joiners go through the ceiling, the 64-entity cap and the same
     second risk confirmation as a new allowance, before anything is pinned.
+    `include_dismissed` is the explicit Accept-all path: dismissed joiners
+    can be accepted while they are still in the label.
     """
     from db.core import db_conn
     from db.audit import record_audit_event
@@ -2027,7 +2059,9 @@ def accept_join(actor, aid, risk_ack=False):
     if not row or row.get('revoked_at'):
         raise AllowanceError(404, 'No such allowance.')
     pending = _json.loads(row.get('pending_json') or '[]')
-    if not pending:
+    dismissed = [d for d in _json.loads(row.get('dismissed_json') or '[]')
+                 if isinstance(d, dict) and d.get('entity_id')]
+    if not pending and not (include_dismissed and dismissed):
         raise AllowanceError(400, 'Nothing to accept.')
     cond = _json.loads(row['conditions_json'] or '{}')
     domain = (cond.get('domain', {}).get('in') or [''])[0]
@@ -2036,6 +2070,19 @@ def accept_join(actor, aid, risk_ack=False):
         raise AllowanceError(400, 'The ceiling no longer allows %s.%s.' %
                              (domain, service))
     registry = _ha_registry()
+    if include_dismissed and dismissed:
+        # Accept-all is still bound to the label: a dismissal whose device
+        # has left (before the next refresh) is not accepted.
+        label = row.get('source_label_id') or ''
+        if label:
+            live = {p['entity_id']
+                    for p in _resolve_label_pins(label, domain, registry)}
+            dismissed = [d for d in dismissed if d['entity_id'] in live]
+        have = {p.get('entity_id') for p in pending}
+        pending = pending + [d for d in dismissed
+                             if d.get('entity_id') not in have]
+    if not pending:
+        raise AllowanceError(400, 'Nothing to accept.')
     now_ok = []
     for p in pending:
         reg = registry.get(p.get('entity_id'))
@@ -2062,7 +2109,10 @@ def accept_join(actor, aid, risk_ack=False):
             400, 'Accepting these entities needs a second risk confirmation.',
             {'code': 'risk_ack_required', 'risky_row': risky_row,
              'risky_entities': risky_entities})
-    rest = [p for p in pending if p.get('entity_id') not in set(accepted)]
+    accepted_set = set(accepted)
+    rest = [p for p in pending if p.get('entity_id') not in accepted_set]
+    dismissed_rest = [d for d in dismissed
+                      if d.get('entity_id') not in accepted_set]
     with db_conn() as conn:
         try:
             conn.execute('BEGIN IMMEDIATE')
@@ -2084,7 +2134,7 @@ def accept_join(actor, aid, risk_ack=False):
                          % hits[0]['entity_id'],
                     {'code': 'protected_device',
                      'entities': [r['entity_id'] for r in hits]})
-            _write_entity_list(conn, dict(live), pins, rest)
+            _write_entity_list(conn, dict(live), pins, rest, dismissed_rest)
             _bump_config(conn, live['agent_id'])
             conn.commit()
         except Exception:
@@ -2097,6 +2147,112 @@ def accept_join(actor, aid, risk_ack=False):
                        details='allowance #%d accepted %s' %
                                (aid, ','.join(accepted)))
     return {'accepted': accepted}
+
+
+def dismiss_join(actor, aid):
+    """Dismiss label joiners without granting anything; audited.
+
+    The `(entity_id, registry_id)` pairs stay on the row so a label refresh
+    does not offer them again while that registry entry is still in the
+    label. A rejoin with a new registry id is a new offer.
+    """
+    from db.core import db_conn
+    from db.audit import record_audit_event
+    import json as _json
+    row = get_allowance(aid)
+    if not row or row.get('revoked_at'):
+        raise AllowanceError(404, 'No such allowance.')
+    with db_conn() as conn:
+        try:
+            conn.execute('BEGIN IMMEDIATE')
+            live = conn.execute(
+                'SELECT * FROM allowances WHERE id = ? AND revoked_at = 0',
+                (aid,)).fetchone()
+            if not live:
+                conn.rollback()
+                raise AllowanceError(404, 'No such allowance.')
+            pending = _json.loads(live['pending_json'] or '[]')
+            if not pending:
+                raise AllowanceError(400, 'Nothing to dismiss.')
+            previous = [d for d in _json.loads(
+                live['dismissed_json'] or '[]')
+                if isinstance(d, dict) and d.get('entity_id')]
+            seen = {(d.get('entity_id'), d.get('registry_id') or '')
+                    for d in previous}
+            for p in pending:
+                key = (p.get('entity_id'), p.get('registry_id') or '')
+                if key not in seen:
+                    previous.append({'entity_id': p.get('entity_id'),
+                                     'registry_id': p.get('registry_id') or ''})
+                    seen.add(key)
+            conn.execute(
+                'UPDATE allowances SET pending_json = ?, dismissed_json = ? '
+                'WHERE id = ?', ('[]', _json.dumps(previous), aid))
+            _bump_config(conn, live['agent_id'])
+            conn.commit()
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            raise
+    dismissed = [p.get('entity_id') for p in pending]
+    record_audit_event(
+        'allowance_join_dismissed',
+        details='allowance #%d dismissed %s by %s'
+                % (aid, ','.join(
+                    '%s(%s)' % (p.get('entity_id'), p.get('registry_id') or '?')
+                    for p in pending) or 'nothing', actor))
+    return {'dismissed': dismissed, 'dismissed_count': len(previous)}
+
+
+def reoffer_join(actor, aid):
+    """Put dismissed joiners back in the waiting list, without granting."""
+    from db.core import db_conn
+    from db.audit import record_audit_event
+    import json as _json
+    row = get_allowance(aid)
+    if not row or row.get('revoked_at'):
+        raise AllowanceError(404, 'No such allowance.')
+    with db_conn() as conn:
+        try:
+            conn.execute('BEGIN IMMEDIATE')
+            live = conn.execute(
+                'SELECT * FROM allowances WHERE id = ? AND revoked_at = 0',
+                (aid,)).fetchone()
+            if not live:
+                conn.rollback()
+                raise AllowanceError(404, 'No such allowance.')
+            dismissed = [d for d in _json.loads(
+                live['dismissed_json'] or '[]')
+                if isinstance(d, dict) and d.get('entity_id')]
+            if not dismissed:
+                raise AllowanceError(400, 'Nothing to re-offer.')
+            pending = [p for p in _json.loads(live['pending_json'] or '[]')
+                       if p.get('entity_id')]
+            have = {p.get('entity_id') for p in pending}
+            readded = []
+            for d in dismissed:
+                if d.get('entity_id') not in have:
+                    pending.append(d)
+                    readded.append(d.get('entity_id'))
+                    have.add(d.get('entity_id'))
+            conn.execute(
+                'UPDATE allowances SET pending_json = ?, dismissed_json = ? '
+                'WHERE id = ?', (_json.dumps(pending), '[]', aid))
+            _bump_config(conn, live['agent_id'])
+            conn.commit()
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            raise
+    record_audit_event(
+        'allowance_join_reoffered',
+        details='allowance #%d re-offered %s by %s'
+                % (aid, ','.join(readded) or 'nothing', actor))
+    return {'reoffered': readded}
 
 
 def profile_diff(pid, agent_id):

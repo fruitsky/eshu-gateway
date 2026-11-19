@@ -77,7 +77,7 @@ async function openGroup(page, name) {
      /on its own/.test(summary) && /SSH/.test(summary),
      'agents: card summary is not in words: ' + summary);
   ok(summaries.some((x) => /No tools yet/.test(x)), 'agents: an empty agent does not say No tools yet');
-  const banner = page.locator('.x11-paused-banner');
+  const banner = page.locator('.x11-paused-banner', { hasText: 'paused' });
   ok(await banner.count() === 1 && /\d+ paused/.test(await banner.textContent()),
      'agents: paused banner missing');
 
@@ -140,6 +140,15 @@ async function openGroup(page, name) {
 
   // 6. Grid: grouped headers, protected line, label full name, styling.
   ok(await page.locator('#x11-device-grid').count() === 1, 'grid: not present in Tools');
+  const help = (await page.locator('[data-perm-help]').textContent()) || '';
+  ok(/Only the devices you tick. No labels needed/.test(help), 'grid: Pick devices help missing');
+  ok(/The devices come from Home Assistant/.test(help) && /waits here for your one-click Accept/.test(help),
+     'grid: label help missing');
+  ok(await page.locator('.x11-subhead').count() === 1 &&
+     /Files/.test(await page.locator('.x11-subhead').textContent()),
+     'tools: Files subheading missing');
+  ok(await page.locator('[data-tool-row="ha_files_ha_config_list"]').count() === 1,
+     'tools: Files tool is not under Home Assistant');
   const groupHeads = (await page.locator('table.x11-devices thead tr:first-child th').allTextContents()).join('|');
   ok(/Lights: on \/ off/.test(groupHeads) && /Plugs and switches: on \/ off/.test(groupHeads) &&
      /Covers: open \/ close/.test(groupHeads),
@@ -279,6 +288,9 @@ async function openGroup(page, name) {
   await page.waitForTimeout(300);
   ok(/Protected: TV plug/.test(await page.locator('[data-protected-summary]').textContent()),
      'rules: protected devices are not a short list');
+  ok(/Limits decide which kinds of action can ever be allowed/.test(
+       await page.locator('[data-permissions-help]').textContent()),
+     'rules: How permissions work panel missing');
   await page.locator('[data-protect-change]').click();
   await page.waitForTimeout(300);
   ok(await page.locator('[data-protect-settings]').count() === 1, 'rules: settings toggle missing');
@@ -289,6 +301,65 @@ async function openGroup(page, name) {
   ok(await page.locator('[data-protect="switch.lamp_child_lock"]').count() === 1,
      'rules: Show settings entities did not reveal the settings row');
   await page.locator('[data-rules="protected"] button', { hasText: 'Cancel' }).click();
+
+  // 12c. Label joiners: banner, Overview, grid, Accept and Dismiss.
+  await page.evaluate(() => x11Back());
+  await page.waitForTimeout(800);
+  ok(/2 waiting/.test(await page.locator('[data-waiting-banner]').textContent()),
+     'waiting: Agents banner does not show 2 waiting');
+  await page.locator('[data-waiting-review]').click();
+  await page.waitForTimeout(1000);
+  ok(await page.locator('#x11-sec-overview [data-waiting-row]').count() === 2,
+     'waiting: Overview does not list both joiners');
+  await page.locator('[data-x11-nav="tools"]').click();
+  await page.waitForTimeout(500);
+  ok(await page.locator('[data-waiting-grid] [data-waiting-row]').count() === 2,
+     'waiting: device grid does not list the joiners');
+  await page.locator('[data-x11-nav="overview"]').click();
+  await page.waitForTimeout(500);
+  await page.locator('#x11-sec-overview [data-accept-join]').first().click();
+  await page.waitForTimeout(1400);
+  ok(await page.locator('#x11-sec-overview [data-waiting-row]').count() === 1,
+     'waiting: Accept did not remove the first joiner');
+  await page.locator('#x11-sec-overview [data-dismiss-join]').first().click();
+  await page.waitForTimeout(1400);
+  ok(await page.locator('#x11-sec-overview [data-waiting-row]').count() === 1,
+     'waiting: Dismiss removed the row instead of keeping it visible');
+  const dismissed = page.locator('#x11-sec-overview [data-dismissed-line]');
+  ok(await dismissed.count() === 1 && /dismissed \(1\)/.test(await dismissed.textContent()),
+     'waiting: dismissed count is missing');
+  await page.locator('#x11-sec-overview [data-reoffer-join]').click();
+  await page.waitForTimeout(1400);
+  ok(await page.locator('#x11-sec-overview [data-dismissed-line]').count() === 0 &&
+     await page.locator('#x11-sec-overview [data-accept-join]').count() === 1,
+     'waiting: Re-offer did not return the joiner to the waiting list');
+  await page.locator('#x11-sec-overview [data-dismiss-join]').click();
+  await page.waitForTimeout(1400);
+  await page.locator('#x11-sec-overview [data-accept-all-join]').click();
+  await page.waitForTimeout(1400);
+  ok(await page.locator('#x11-sec-overview [data-waiting-row]').count() === 0,
+     'waiting: Accept all did not include the dismissed joiner');
+
+  // 12d. Integrations: the Files sub-card and the SSH key form.
+  await page.evaluate(() => switchView('integrations'));
+  await page.waitForTimeout(1000);
+  ok(await page.locator('.i-subcard').count() === 1 &&
+     /Files \(SSH add-on\)/.test(await page.locator('.i-subcard').textContent()),
+     'integrations: Files is not a sub-card of Home Assistant');
+  ok(await page.locator('[data-ha-link-disabled]').count() === 1 &&
+     /linked HA disabled/.test(await page.locator('[data-ha-link-disabled]').textContent()),
+     'integrations: a disabled HA link is not shown as broken');
+  await page.selectOption('#int-kind', 'ha_ssh');
+  await page.waitForTimeout(200);
+  ok(await page.locator('#int-ssh-fields').isVisible(), 'integrations: SSH key fields are hidden');
+  ok(await page.locator('#int-secret').isHidden(), 'integrations: the single-line secret is still shown');
+  await page.locator('#int-name').fill('bad-files');
+  await page.locator('#int-base-url').fill('192.0.2.60');
+  await page.locator('#int-ssh-key').fill('not a private key');
+  await page.locator('#int-submit-btn').click();
+  await page.waitForTimeout(300);
+  ok(/OpenSSH private key/.test(await page.locator('#toast').textContent()),
+     'integrations: a bad key is not refused in the form');
 
   ok(errors.length === 0, 'browser errors: ' + errors.slice(0, 4).join(' | '));
 
