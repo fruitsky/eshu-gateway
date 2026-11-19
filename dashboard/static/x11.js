@@ -878,8 +878,10 @@
           '<div class="x11-seg" role="group" aria-label="' + attr(tool.name) + ' outcome">' +
           choice('none', 'None') + choice('ask', 'Asks you first') + choice('run', 'Runs without asking') +
           '</div>' +
-          (tool.always_gate ? '<div class="x11-always-line" data-always-line>Always asks you. To let it run for some devices, use ' +
-            '<button type="button" class="link-btn" onclick="x11OpenDevices()">Runs without asking \u2192 pick devices</button>.</div>' : '') +
+          (tool.always_gate ? (g.kind === 'ha' && tool.tool === 'call_service'
+            ? '<div class="x11-always-line" data-always-line>Always asks you. To let it run for some devices, use ' +
+              '<button type="button" class="link-btn" onclick="x11OpenDevices()">Runs without asking \u2192 pick devices</button>.</div>'
+            : '<div class="x11-always-line" data-always-line>Always asks you: Eshu requires your approval for this tool.</div>') : '') +
           '</div>';
       }).join('');
       return '<details class="x11-int-group" data-tool-group="' + attr(g.integration) + '"' +

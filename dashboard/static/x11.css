@@ -3,6 +3,7 @@
    lays out the two tabs and the agent editor. */
 
 #x11-root { max-width: 1280px; margin: 0 auto; padding: 4px 0 110px; }
+#x11-mobile-header-bg { display: none; }
 #x11-root .x11-hud {
   display: flex; align-items: flex-end; justify-content: space-between;
   gap: 16px; flex-wrap: wrap; padding: 0 2px 14px;
@@ -183,7 +184,7 @@
 #x11-root table.x11-devices tr.x11-area-row td { background: var(--bg-base); color: var(--accent); font-size: var(--text-xs); letter-spacing: 0.04em; padding-top: 12px; padding-bottom: 6px; }
 #x11-root table.x11-devices tr.x11-device-row:hover td { background: var(--bg-hover); }
 #x11-root table.x11-devices tr.x11-locked td { background: rgba(245, 158, 11, 0.04); }
-#x11-root .x11-device-name { font-weight: 600; overflow-wrap: anywhere; }
+#x11-root .x11-device-name { font-family: 'Space Grotesk', -apple-system, BlinkMacSystemFont, sans-serif; font-weight: 600; overflow-wrap: anywhere; }
 #x11-root .x11-device-id { color: var(--text-muted); font-family: 'JetBrains Mono', monospace; font-size: var(--text-micro); overflow-wrap: anywhere; }
 #x11-root .x11-device-meta { color: var(--text-muted); font-size: var(--text-xs); }
 #x11-root .x11-device-state { color: var(--text-muted); font-size: var(--text-xs); }
@@ -277,6 +278,12 @@
   #x11-root .x11-editor-content { min-width: 0; max-width: 100%; }
   #x11-root .x11-editor-nav nav button { white-space: nowrap; }
   #x11-root .x11-title { font-size: 32px; }
+  #view-agents.block #x11-mobile-header-bg {
+    display: block; position: fixed; top: 0; left: 0; right: 0; height: 60px;
+    z-index: 119; background: var(--bg-base);
+    border-bottom: 1px solid var(--rule-weak);
+    box-shadow: 0 8px 18px rgba(0, 0, 0, 0.35);
+  }
   #x11-root .x11-device-wrap { display: none; }
   #x11-root .x11-mobile-grid { display: block; }
   #x11-root .x11-device-tools,

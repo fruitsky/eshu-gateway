@@ -124,6 +124,12 @@ async function openGroup(page, name) {
      'tools: always-ask tool still offers Runs without asking');
   ok(/Always asks you/.test(await page.locator('[data-always-line]').first().textContent()),
      'tools: always-ask explanation missing');
+  ok(await page.locator('[data-tool-row="home_assistant_call_service"] [data-always-line] .link-btn').count() === 1,
+     'tools: call_service does not link to the device picker');
+  ok(await page.locator('[data-tool-row="home_assistant_ha_addon_action"] [data-always-line] .link-btn').count() === 0 &&
+     /Eshu requires your approval for this tool/.test(
+       await page.locator('[data-tool-row="home_assistant_ha_addon_action"] [data-always-line]').textContent()),
+     'tools: a non-device always-gate tool has the device link or the wrong text');
   ok(!/REQUIRES OPERATOR APPROVAL/.test(await page.locator('[data-tool-row="home_assistant_call_service"]').textContent()),
      'tools: an ALL-CAPS AI instruction is visible');
   const desc = page.locator('[data-tool-row="home_assistant_call_service"] .x11-tool-desc');
@@ -150,6 +156,12 @@ async function openGroup(page, name) {
   const searchBg = await page.locator('.x11-device-tools input[type="search"]').evaluate(
     (e) => getComputedStyle(e).backgroundColor);
   ok(!/255, 255, 255/.test(searchBg), 'grid: search box is still browser-white');
+  const nameFont = await page.locator('[data-device-row="switch.lamp"] .x11-device-name:visible').evaluate(
+    (e) => getComputedStyle(e).fontFamily);
+  const idFont = await page.locator('[data-device-row="switch.lamp"] .x11-device-id:visible').evaluate(
+    (e) => getComputedStyle(e).fontFamily);
+  ok(/Space Grotesk/.test(nameFont), 'grid: device name is not in the body font: ' + nameFont);
+  ok(/JetBrains Mono/.test(idFont), 'grid: entity id is not in mono: ' + idFont);
   const checkAppearance = await page.locator('[data-device="switch.lamp"][data-action="switch.turn_off"]:visible').evaluate(
     (e) => getComputedStyle(e).appearance);
   ok(checkAppearance === 'none', 'grid: checkbox is still the browser default');
@@ -293,6 +305,29 @@ async function openGroup(page, name) {
      '390: device cards have no toggles');
   ok(await phone.locator('.x11-mobile-area').count() > 0,
      '390: device cards are not grouped by room');
+  await phone.evaluate(() => {
+    const m = document.querySelector('.main-body');
+    const g = document.getElementById('x11-device-grid');
+    if (m && g) m.scrollTop += g.getBoundingClientRect().top - 78;
+  });
+  await phone.waitForTimeout(300);
+  const headerBg = await phone.evaluate(() => {
+    const el = document.getElementById('x11-mobile-header-bg');
+    const cs = el ? getComputedStyle(el) : null;
+    const hit = document.elementFromPoint(innerWidth / 2, 30);
+    return { display: cs && cs.display, bg: cs && cs.backgroundColor,
+      hit: hit && (hit.id || hit.className || hit.tagName) };
+  });
+  ok(headerBg.display === 'block' && headerBg.bg !== 'rgba(0, 0, 0, 0)' &&
+     /x11-mobile-header-bg/.test(headerBg.hit || ''),
+     '390: the fixed header is not opaque over scrolled content ' + JSON.stringify(headerBg));
+  const barBox = await box(phone.locator('#x11-mobile-header-bg'));
+  const scrolledSearch = await box(phone.locator('.x11-device-tools input[type="search"]'));
+  const scrolledFilters = await box(phone.locator('.x11-device-tools label').first());
+  ok(barBox && scrolledSearch && scrolledFilters &&
+     scrolledSearch.y >= barBox.y + barBox.height - 1 &&
+     scrolledFilters.y >= barBox.y + barBox.height - 1,
+     '390: scrolled search or filters sit under the fixed header');
   let m = await phone.evaluate(() => [document.documentElement.scrollWidth, innerWidth]);
   ok(m[0] <= m[1] + 1, '390: horizontal scroll (' + m[0] + ' > ' + m[1] + ')');
   await scrollMain(phone, false);
