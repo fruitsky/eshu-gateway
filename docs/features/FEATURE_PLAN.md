@@ -22432,6 +22432,43 @@ sections above absorb those answers.
   keeps it. The match-time protected audit row is written only for a runnable
   hit. The unused allowance lookups in the revoke/resume endpoints are gone.
 
+**Stage 4 (2026-11-19).** The operator approved the integration-first Tools
+structure from their mockups; this is the last X11 part, not a new feature.
+
+* **S1 classification.** The device inventory now carries `category`
+  (`switch|light|cover|climate|fan|media|sensor`), `sensor_kind`
+  (`temperature|humidity|motion|door|power|battery|other`) and `useful`.
+  The rules are pure functions in `core/ha_devices.py`: entity_category
+  config/diagnostic, disabled/hidden, add-on/system platforms (a constant),
+  helper domains and the child-lock/LED/auto-off/auto-update suffix fallback.
+  Tests cover every hidden reason, category and sensor kind on a synthetic
+  registry.
+* **One counting rule.** `core/agent_tools_summary.py` and
+  `GET /api/agents/{id}/tools-summary` (operator session only) produce the
+  summary sentence and the per-integration tiles from the same outcome rule
+  the tool rows use. A test asserts the sentence totals equal the tile sums.
+  The endpoint is read-only and carries no secret or agent token.
+* **Seed labels.** Curated catalogs carry an optional `label`; `seed_label()`
+  exposes it through `available-tools`, with a humanised fallback in the UI.
+  No schema change to `integration_tools`.
+* **UI.** Horizontal section tabs under the agent name; `#agent/<id>/<section>`
+  and `#agent/<id>/tools/<integration>[/<tab>]` deep links; integration tiles
+  with the three-segment access bar and legend; Reading/Changing groups with
+  the three-way control; Home Assistant Tools/Devices/Runs on its own/Files;
+  the device rail with counts and the hidden-entity line; sensor readings and
+  Can read; the Runs cards, waiting Accept/Dismiss, and the Files fingerprint;
+  an even Overview ledger; and the 390 px cards, chips and large pill buttons.
+  Every save still goes through the existing S2/S5 Check → preview → Apply
+  with the same `preview_hash`, `risk_ack` and `resume_ack` rules.
+* **Tests.** `tests/test_x11_stage4_classify.py`,
+  `tests/test_x11_stage4_tools_summary.py`, the rewritten
+  `tests/ui/x11_check.cjs`, and the expanded `tests/ui/synthetic_ha.py`
+  (five rooms, 43 useful devices, 58 settings/diagnostic/helper/add-on rows).
+  Screenshots: `docs/screenshots/x11/stage4/` (1440 and 390), rendered by
+  `scripts/x11_stage4_shots.cjs`.
+* **Not changed.** No new write path, no change to allowance matching, the
+  ceiling, protection, the never lists or P2.
+
 ### Reviewer notes
 
 ---
@@ -22457,7 +22494,7 @@ sections above absorb those answers.
 | 27 | X8 | gateway-installer-version | dashboard + gateway | **Code complete** 2026-11-14: on `release/1.4-gw` (BR1 folded; the hash is display-only) | `feat/x8-gateway-installer-version` | X7 | security approved; five buckets sum to the gateway count |
 | 28 | X9 | gated-gateway-files | dashboard + gateway | **Design note** 2026-11-14 (BP2): installer-carried vs authenticated channel files; recommends (b) | `feat/x9-gated-gateway-files` | X7, 1.4 | security sign-off before code |
 | 29 | X10 | approved-windows-modal | dashboard UI | **Merged** 2026-11-17: presets, Once default, typed local HH:MM + duration, live plain-words preview; agent requests use the same preview; not yet deployed | `feat/x10-windows-modal` | — | UI only; no schema or window-meaning change |
-| 31 | X11 | agents-allowances-redesign | dashboard UI + small API | **Operator polish in review** 2026-11-19: one-section editor with `#agent/<id>/<section>` deep links, danger zone, collapsible tools, grouped two-row device grid and phone cards, the two risky groups, Check-gated JSON. Stage 2 merged (`24a043a`); Stage 3 Part 1 approved (`2879f80`). | `feat/x11-ui` | F27, X4, fix/f27-ha-by-kind | operator reviews Part A/C; not deployed |
+| 31 | X11 | agents-allowances-redesign | dashboard UI + small API | **Stage 4 code complete** 2026-11-19 on `feat/x11-stage4`: integration tiles with the access bar, per-integration Reading/Changing pages, HA Tools/Devices/Runs/Files, the useful-device classification, the Overview ledger and the 390 px layout. Stage 2 merged (`24a043a`); Stage 3 Part 1 approved (`2879f80`); not merged or deployed. | `feat/x11-stage4` | F27, X4, fix/f27-ha-by-kind | operator and reviewer test tomorrow; server fields go to Security |
 | — | CI fix | ci-environment | gateway + tests | Merged (`f2746ef`); CI pinned to ubuntu-24.04 (`6d58006`) | `fix/ci-environment` | F5 | |
 | — | Buffering | stream-unbuffered | gateway | Merged (`d8d70c2`); S1 tee fix done in Gateway hardening | `fix/stream-unbuffered` | F5 | |
 | — | Gateway hardening | gateway-hardening | gateway | **Merged** 2026-11-12 (AF3 + S1 tee capture; security `c15664e`; AX1/AX2 residuals; BA1 for the next F5/F19 change) | `fix/gateway-hardening` | F19, Buffering | |

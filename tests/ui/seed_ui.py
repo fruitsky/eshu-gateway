@@ -52,8 +52,10 @@ agents = {}
 for name in ("ops-agent", "db-agent"):
     _raw, aid = agent_tokens.create_agent_token(name)
     agents[name] = aid
-agent_policies.set_agent_policy(agents["ops-agent"], rate_limit_per_min=30,
-                                ssh_hosts_allow=["192.0.2.10", "192.0.2.12"])
+agent_policies.set_agent_policy(
+    agents["ops-agent"], rate_limit_per_min=30,
+    arg_policy={"sonarr_series": {"status": ["continuing", "ended"]}},
+    ssh_hosts_allow=["192.0.2.10", "192.0.2.12"])
 agent_policies.set_agent_policy(agents["db-agent"], tools_mode="allowlist",
                                 tools=["whereis"], ssh_hosts_allow=["*"])
 
@@ -99,21 +101,37 @@ conclusions.create_runbook(confirmed["id"], "Rotate the TLS certificate",
                            [{"note": "restart drops connections", "ref": "#12"}],
                            tags=["tls"], by="operator")
 
-ha = integrations.create_integration("Home Assistant", "http://192.0.2.30:8123",
-                                     "bearer", "synthetic", kind="ha")
-integrations.create_tool(ha, "ha_check_config", "Validate the config", "POST",
-                         "/api/config/core/check_config", [], "{}")
-integrations.create_tool(ha, "ha_backup_create", "Create a backup", "POST",
-                         "/api/services/backup/create", [], "{}", read_only=False)
-integrations.create_integration("Pi-hole", "http://192.0.2.31", "bearer",
-                                "synthetic", kind="pihole")
+from core.seeds import seed_for_kind  # noqa: E402
+from db.integrations import set_integration_config  # noqa: E402
+
+INTEGRATIONS = [
+    ("Home Assistant", "http://192.0.2.30:8123", "bearer", "ha"),
+    ("Pi-hole", "http://192.0.2.31", "bearer", "pihole"),
+    ("Sonarr", "http://192.0.2.40:8989", "header", "sonarr"),
+    ("Radarr", "http://192.0.2.41:7878", "header", "radarr"),
+    ("Prowlarr", "http://192.0.2.42:9696", "header", "prowlarr"),
+    ("Bazarr", "http://192.0.2.43:6767", "header", "bazarr"),
+    ("Jellyfin", "http://192.0.2.44:8096", "header", "jellyfin"),
+    ("Seerr", "http://192.0.2.45:5055", "header", "seerr"),
+    ("Proxmox", "http://192.0.2.46:8006", "header", "proxmox"),
+    ("Omada", "http://192.0.2.47:8043", "header", "omada"),
+    ("Nginx Proxy Manager", "http://192.0.2.48:81", "header", "npm"),
+    ("Pulse", "http://192.0.2.49:7655", "bearer", "pulse"),
+    ("Web fetch", "http://192.0.2.52", "none", "webfetch"),
+]
+for name, url, auth, kind in INTEGRATIONS:
+    integrations.create_integration(name, url, auth, "synthetic", kind=kind)
+for name, _url, _auth, _kind in INTEGRATIONS:
+    seed_for_kind(integrations.get_integration(name))
+
+# Files (SSH add-on) is an integration of its own, merged under Home Assistant
+# in the agent view. Its tools carry the write-always-asks promise.
 files = integrations.create_integration(
     "ha-files", "192.0.2.32", "none", "", kind="ha_ssh")
-from core.ha_ssh_seed import seed_ha_ssh_tools  # noqa: E402
-from db.integrations import set_integration_config  # noqa: E402
-seed_ha_ssh_tools(files)
+seed_for_kind(integrations.get_integration("ha-files"))
 set_integration_config(integrations.get_integration("ha-files"), {
-    "ha_integration": "Home Assistant", "ssh_user": "root", "ssh_port": 22})
+    "ha_integration": "Home Assistant", "ssh_user": "root", "ssh_port": 22,
+    "host_fingerprint": "SHA256:synthetic-stage4-fingerprint"})
 integrations.update_integration(
     "ha-files",
     secret="-----BEGIN OPENSSH PRIVATE KEY-----\nsynthetic\n"
@@ -126,13 +144,15 @@ integrations.create_integration("Home Assistant (old)",
 integrations.update_integration("Home Assistant (old)", enabled=False)
 old_files = integrations.create_integration(
     "ha-files-old", "192.0.2.34", "none", "", kind="ha_ssh")
-seed_ha_ssh_tools(old_files)
+seed_for_kind(integrations.get_integration("ha-files-old"))
 set_integration_config(integrations.get_integration("ha-files-old"), {
     "ha_integration": "Home Assistant (old)", "ssh_user": "root", "ssh_port": 22})
 integrations.update_integration(
     "ha-files-old",
     secret="-----BEGIN OPENSSH PRIVATE KEY-----\nsynthetic\n"
            "-----END OPENSSH PRIVATE KEY-----")
+integrations.update_integration("ha-files-old", enabled=False)
+
 
 # X11: synthetic permissions for the real Agents view. One pick permission,
 # one label-followed permission, a normal light permission, and one paused
@@ -144,8 +164,11 @@ allowance_core.apply_ceiling(
     risk_ack=True, expected_hash=allowance_core.set_hash())
 allowance_core.set_protected_entities("seed-ui", ["switch.plug"])
 allowance_core.create_allowance(
-    "seed-ui", agents["ops-agent"], "Living room plugs", "switch",
-    "turn_off", ["switch.lamp", "switch.kettle"], rate_per_hour=30)
+    "seed-ui", agents["ops-agent"], "Eight plugs", "switch",
+    "turn_off", ["switch.lamp", "switch.kettle",
+                 "switch.coffee", "switch.electric_blanket",
+                 "switch.office_monitor", "switch.garage_freezer",
+                 "switch.joiner", "switch.office_heater"], rate_per_hour=30)
 allowance_core.create_allowance(
     "seed-ui", agents["ops-agent"], "Living room lights", "switch",
     "turn_on", ["switch.lamp"], source_label_id="lbl-lights",

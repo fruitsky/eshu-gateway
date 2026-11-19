@@ -194,6 +194,10 @@ endpoint. Agents authenticate to the MCP surface with a bearer **agent token**.
 | `POST` | `/api/agents` | Mint a new agent token (body `{"name": ...}`; the raw token is returned **once**, only its hash is stored) | Session |
 | `GET` | `/api/agents` | List agent tokens (no raw token) | Session |
 | `DELETE` | `/api/agents/{id}` | Revoke + delete an agent token | Session |
+| `GET` | `/api/agents/{id}/available-tools` | Enabled tools by integration, with `label` and `params` for the per-agent editor | Session |
+| `GET` | `/api/agents/{id}/tools-summary` | X11 Stage 4 read-only summary: the sentence, per-integration tile counts and outcomes. **Operator session only**; no approver or agent token | Session |
+| `GET` | `/api/agents/{id}/config` | The whole per-agent JSON document (tools, SSH, websites and HA permissions) | Session |
+| `GET` | `/api/ha/devices` | The read-only HA inventory. X11 adds `category`, `sensor_kind`, `useful` and `unit`; never exposes it to agents | Session |
 
 ### Sessions & conclusions (F13, dashboard authentication required)
 

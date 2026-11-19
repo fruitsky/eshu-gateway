@@ -160,6 +160,18 @@ def test_ha_files_are_counted_under_ha_not_as_a_tile(monkeypatch):
     assert 'Home Assistant' in names
 
 
+def test_integration_with_no_tools_is_not_connected(monkeypatch):
+    agent_id = _agent()
+    integrations.create_integration(
+        'Empty shelf', 'http://192.0.2.70', 'none', '', kind='custom')
+    monkeypatch.setattr('core.ha_devices.devices', lambda: [])
+    payload = summary.build(agent_id)
+    empty = [t for t in payload['tiles'] if t['name'] == 'Empty shelf'][0]
+    assert empty['total'] == 0 and empty['in_use'] is False
+    assert payload['totals']['in_use'] == 0
+    assert 'has no tools switched on yet' in payload['summary']
+
+
 def test_unlinked_files_row_is_its_own_tile(monkeypatch):
     agent_id = _agent()
     files = integrations.create_integration(
@@ -187,6 +199,12 @@ def test_endpoint_is_operator_only(auth_client, client):
     bearer = fresh.get('/api/agents/%d/tools-summary' % agent_id,
                        headers={'Authorization': 'Bearer ' + raw})
     assert bearer.status_code in (401, 403)
+    from db.approver_tokens import create_approver_token
+    approver_raw, _tid = create_approver_token(
+        agent_id, ['hostname'], '192.0.2.10', 1, actor='test')
+    approver = fresh.get('/api/agents/%d/tools-summary' % agent_id,
+                         headers={'Authorization': 'Bearer ' + approver_raw})
+    assert approver.status_code in (401, 403)
 
 
 def test_seed_labels_reach_available_tools(auth_client):
