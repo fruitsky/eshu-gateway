@@ -22027,3 +22027,45 @@ of audit rows.**
   the retrieval key in the path of `GET /api/approved-windows/{key}` can
   wait for the proposal. For the first, store only the fingerprint: the
   claim already looks windows up through `approved_windows`.
+
+### Security re-read of the window-token routes (security reviewer, 2026-11-19, at `e3ea1ec`)
+
+**Approved to merge.** Code text read only; nothing was run.
+* **W1 is confirmed.**
+  * The path claim goes through `_window_execute` again, with
+    `legacy_path=True`.
+  * `window_legacy_path_claim_used` is written only after both the
+    gateway token and the target IP check pass. It carries `token_fp` and
+    the gateway IP, so an unauthenticated or mismatched caller writes
+    nothing.
+  * The X9 retirement rule and its 7-day check are recorded.
+* **W2 is confirmed.** The retired GET calls `_check_rate_limit` first,
+  then writes at most one row per client IP per minute, and still never
+  echoes the token.
+* **The stored token is gone.**
+  * New `window_executions` rows store only `token_fp`.
+  * The start-up migration fingerprints and blanks every non-empty token.
+    It skips rows that are already blank, so it is idempotent.
+  * The execution read selects named columns.
+  * The single-window read, by retrieval key or by the operator's numeric
+    id, returns `token_fp` in place of the token.
+  * Agents still get their token where the manual says they get it: in
+    the approval response and in the `window-requests/{retrieval_key}`
+    poll.
+* **What remains documented.** Proxy logs during the 1.4 overlap, and the
+  gateway's own 8-character log lines, are recorded as follow-ups.
+
+**Nits:**
+* **A stale manual line.** `docs/AGENT_MANUAL.md` (around line 708) still
+  says `GET /api/approved-windows/$RETRIEVAL_KEY` returns
+  "full record + token by opaque key". The `get_single_window` docstring
+  says "includes the token" too. Fix both, so no agent is told to read a
+  token there.
+* **A split table.** The new "X9 legacy cut-over" and "Gateway
+  follow-up" paragraphs landed between rows 28 and 29 of the status
+  table, which breaks it into two. Move them below the table.
+* **Old copies.** Backups taken before the migration still hold raw
+  tokens in `window_executions`. Add one CHANGELOG line, as for the audit
+  migration.
+* **Pruning.** `_retired_lookup_audit` is never pruned. Drop entries
+  older than the window when an entry is written, as for BZ2's dictionary.
