@@ -327,8 +327,9 @@ cannot write.
 - **`ws_read`** (generic Home Assistant WebSocket) runs only reviewed read
   commands: `list`, `get`, `get_single`, `info`, `browse_media`,
   `statistics_during_period`, and `config` reads such as `automation/config`,
-  plus `render_template`, `get_states`, `get_config`, `get_services` and
-  `zha/devices`. Everything else — `call_service`, `execute_script`,
+  plus `render_template`, `get_states`, `get_config`, `get_services`,
+  `zha/devices` and `config/label_registry/list` (labels are read-only
+  metadata). Everything else — `call_service`, `execute_script`,
   `supervisor/*`, `hassio/*`, `auth/*`, `backup/*`, `repairs/*`, any registry
   `create`/`update`/`remove`, `subscribe_*`/`unsubscribe_*` and unknown
   commands — is refused before any WebSocket is opened:

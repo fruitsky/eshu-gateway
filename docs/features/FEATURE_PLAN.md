@@ -22713,3 +22713,18 @@ what was applied" literal for the whole document.
 * Retire the first once the fleet is past BJ2, for example in the X9
   legacy retirement.
 * Give the second a body or header form, and move E2E-1's C11 onto it.
+
+### Security review of the label registry read (`fix/ha-label-registry-read` @ 50337b3)
+
+**Approved.** Code text read only; nothing was run.
+* `config/label_registry/list` is named in `READ_COMMANDS`. It was
+  already a read through the generic `list` suffix, so this records a
+  reviewed decision and changes no behaviour.
+* `create`, `update` and `delete` stay non-reads, and are refused before
+  a WebSocket opens.
+* An agent without HA read access is still refused by its allowlist.
+* The other registries' commands are unchanged.
+* Label names are operator metadata and no more sensitive than the
+  entity registry list, which is already a read.
+* A label write still runs only as a gated WS call. Deleting a label only
+  removes members from label-following allowances, on the next refresh.

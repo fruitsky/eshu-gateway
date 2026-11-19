@@ -445,3 +445,11 @@ no tool-name conflicts, no cross-talk.
 - **Behind a reverse proxy**: ensure it forwards the `Authorization` header, e.g.
   NPM Advanced config `proxy_set_header Authorization $http_authorization;` —
   otherwise HA returns 401 and the **Test** button will surface it.
+
+
+The generic `ws_read` tool may list labels with
+`config/label_registry/list`. Labels are read-only metadata (names and
+ids used by the permissions picker), so this one command is an explicit
+reviewed read. Label create/update/delete and every other
+`config/*_registry` write stay refused; use the approval-gated
+`ws_write` tool for those.
