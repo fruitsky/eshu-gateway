@@ -21729,6 +21729,47 @@ known-hosts refusals, window-first cleanup (including `--keep` and a
 refused deny), the failed-startup exclusion, and the poll interval;
 `tests/test_e2e_approver.py` covers the own/foreign window-status route.
 
+### Security review of the clean-up fix (security reviewer, 2026-11-19, `fix/e2e-cleanup` @ ec7da55)
+
+**Approved to merge. One should, small.** Code text read only; nothing
+was run.
+
+**This commit also changes the server, despite "script-side only".**
+* It adds `GET /api/e2e/windows/{id}` and puts it on the approver
+  allowlist, and it prunes BZ2's map.
+* The route holds up:
+  * it needs `request.state.approver`, so an operator session gets a 403;
+  * it requires a test agent, and the window's `agent_id` must equal the
+    token's agent, with any refusal audited;
+  * it returns the count and the window's shape, never a token.
+* **The prune.** Expired entries are dropped whenever a refusal is
+  considered. That runs behind the per-IP rate limit, so the map stays
+  bounded.
+
+**CB2 is confirmed on the table path.**
+* `cleanup(keep)` deletes the C11 window first, in its own `try`, even
+  under `--keep` and even when a later deny is refused.
+* A preflight failure after `session_begin` excludes the session.
+
+**The round-2 nits are done.**
+* The approver token must start with `e2e_` and differ from the agent
+  token.
+* C11 reads the execution count through the approver route, never a
+  token URL.
+* C11 needs a known-hosts file, held to the same mode rules as the key,
+  and SSH runs with `StrictHostKeyChecking=yes` and `IdentitiesOnly=yes`.
+* Preflight refuses a gateway whose installer hash does not match Edge.
+* The waiter polls every 2 s.
+
+**CB8 (should): the `--json` path skipped both fixes.**
+* `main()` still runs `cleanup = [] if cfg.keep else runner.cleanup()`,
+  so `--json --keep` leaves the C11 window approved.
+* A JSON preflight refusal does not exclude the session either.
+* **Fix:** call `runner.cleanup(keep=cfg.keep)` and
+  `runner._exclude_after_failed_startup()` there too. Better, have both
+  output modes share one `Runner.run()` that returns rows, so the next fix
+  cannot miss one of them.
+
 ## 7. Backlog (not planned in detail)
 
 * Deny with a reason, shown to the agent (cheap; low value given the data).
