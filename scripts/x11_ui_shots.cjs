@@ -47,20 +47,36 @@ async function firstEditor(page) {
       await agents(page); await firstEditor(page);
       await page.locator('[data-x11-nav="tools"]').click();
       await page.waitForTimeout(500);
-      await page.locator('#x11-sec-tools').scrollIntoViewIfNeeded();
+      const group = page.locator('details[data-tool-group="Home Assistant"]');
+      if (!(await group.evaluate((e) => e.open))) await group.locator('summary').click();
+      await page.waitForTimeout(400);
+      await page.evaluate(() => { document.querySelector('.main-body').scrollTop = 0; });
     },
     'agent-devices': async (page) => {
       await agents(page); await firstEditor(page);
-      await page.locator('[data-tool-row="home_assistant_call_service"] [data-choice="run"]').click();
-      await page.waitForTimeout(600);
-      await page.locator('#x11-device-grid').scrollIntoViewIfNeeded();
+      await page.locator('[data-x11-nav="tools"]').click();
+      await page.waitForTimeout(400);
+      const group = page.locator('details[data-tool-group="Home Assistant"]');
+      if (!(await group.evaluate((e) => e.open))) await group.locator('summary').click();
+      await page.waitForTimeout(300);
+      await page.locator('[data-always-line] .link-btn:visible').first().click();
+      await page.waitForTimeout(500);
+      if (page.viewportSize().width <= 760) {
+        await page.evaluate(() => {
+          const m = document.querySelector('.main-body');
+          const g = document.getElementById('x11-device-grid');
+          if (m && g) m.scrollTop += g.getBoundingClientRect().top - 78;
+        });
+      } else {
+        await page.locator('#x11-device-grid').scrollIntoViewIfNeeded();
+      }
       await page.waitForTimeout(300);
     },
     'agent-save-preview': async (page) => {
       await agents(page); await firstEditor(page);
-      await page.locator('[data-tool-row="home_assistant_call_service"] [data-choice="run"]').click();
-      await page.waitForTimeout(500);
-      await page.locator('[data-device="cover.garage"][data-action="cover.open_cover"]').check();
+      await page.locator('[data-x11-nav="tools"]').click();
+      await page.waitForTimeout(400);
+      await page.locator('[data-device="cover.garage"][data-action="cover.open_cover"]:visible').check();
       await page.waitForTimeout(300);
       await page.locator('#x11-save-changes').click();
       await page.waitForTimeout(800);

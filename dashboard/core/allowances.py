@@ -148,16 +148,10 @@ def destructive_words():
 def is_destructive(service, exempt=()):
     """BD1 matching: `_` separates words; one *built-in* word may be exempt.
 
-    An operator word is never exempt, even when it spells the same word: the
-    catalogue exemption names a built-in (`stop`), not a boolean.
+    This is the same decision as the ceiling's deny rule; keep it in
+    `_ceiling_denied` so there is exactly one copy of the loop.
     """
-    words = set(destructive_words())
-    operator = set(operator_words())
-    allowed = set(exempt or ()) - operator
-    for token in _tokens(service):
-        if token in words and token not in allowed:
-            return True
-    return False
+    return _ceiling_denied(service, exempt, operator_words())
 
 
 def never_reason(domain, service):
@@ -1800,32 +1794,71 @@ def _write_entity_list(conn, row, pins, pending):
 def _backfill_protected_registry(registry):
     """Fill registry ids captured while HA was unreachable, and audit each.
 
-    Only an empty id is filled, and only when HA now knows the entity. The
-    entity id is never changed, so a permission already suspended by entity
-    id stays suspended; the stored id is what catches a later rename.
+    Only an empty id is filled, and only when HA now knows the entity. In the
+    same transaction as the fill, every live permission that holds that
+    registry id under a different entity id is suspended as `protected`:
+    the rename may have happened during the outage, and the new name must
+    not inherit the old grant.
     """
     from db.core import db_conn
     from db.audit import record_audit_event
+    import json as _json
     filled = []
+    suspended = []
     for row in protected_records():
         if row.get('registry_id'):
             continue
-        reg = registry.get(row['entity_id'])
+        entity_id = row['entity_id']
+        reg = registry.get(entity_id)
         rid = (reg or {}).get('id') or ''
         if not rid:
             continue
         with db_conn() as conn:
-            conn.execute(
-                'UPDATE allowance_protected SET registry_id = ? '
-                'WHERE entity_id = ? AND registry_id = \'\'',
-                (rid, row['entity_id']))
-            conn.commit()
-        filled.append((row['entity_id'], rid))
+            try:
+                conn.execute('BEGIN IMMEDIATE')
+                conn.execute(
+                    'UPDATE allowance_protected SET registry_id = ? '
+                    'WHERE entity_id = ? AND registry_id = \'\'',
+                    (rid, entity_id))
+                for live in conn.execute(
+                        'SELECT id, agent_id, entities_json FROM allowances '
+                        'WHERE revoked_at = 0 AND suspended_at = 0').fetchall():
+                    try:
+                        pins = _json.loads(live['entities_json'] or '[]')
+                    except (TypeError, ValueError):
+                        pins = []
+                    if not any(isinstance(p, dict)
+                               and p.get('registry_id') == rid
+                               and str(p.get('entity_id') or '').lower()
+                               != entity_id
+                               for p in pins):
+                        continue
+                    conn.execute(
+                        'UPDATE allowances SET suspended_at = ?, '
+                        'suspended_reason = ? WHERE id = ?',
+                        (_now(), 'protected', live['id']))
+                    _bump_config(conn, live['agent_id'])
+                    suspended.append((live['id'], live['agent_id'],
+                                      entity_id))
+                conn.commit()
+            except Exception:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                raise
+        filled.append((entity_id, rid))
     for entity_id, rid in filled:
         record_audit_event(
             'allowance_protected_registry_filled',
             details='%s registry id filled as %s after a successful refresh'
                     % (entity_id, rid))
+    for aid, agent_id, entity_id in suspended:
+        record_audit_event(
+            'allowance_suspended',
+            details='allowance #%d suspended by refresh: protected '
+                    '(registry id filled for %s; agent #%d)'
+                    % (aid, entity_id, int(agent_id)))
     return filled
 
 

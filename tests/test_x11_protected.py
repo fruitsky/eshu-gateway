@@ -286,3 +286,31 @@ def test_protection_with_ha_down_is_accepted_then_backfilled(
         'service': 'turn_off', 'entities': ['switch.renamed']})
     assert r.status_code == 400
     assert r.json()['detail']['code'] == 'protected_device'
+
+
+def test_a_registry_backfill_suspends_the_new_entity_id_holding_it(
+        auth_client, agent_id, ha):
+    """The device was renamed while HA was down: the fill must catch it."""
+    from db.audit import get_audit_log
+    ha.clear()
+    ha['switch.old'] = {'id': 'reg-plug', 'labels': []}
+    row = a.create_allowance('operator', agent_id, 'Renamed plug', 'switch',
+                             'turn_off', ['switch.old'])
+    original = a._ha_registry
+
+    def _down():
+        raise a.AllowanceError(503, 'HA is down')
+
+    try:
+        a._ha_registry = _down
+        a.set_protected_entities('operator', ['switch.plug'])
+    finally:
+        a._ha_registry = original
+
+    ha.clear()
+    ha['switch.plug'] = {'id': 'reg-plug', 'labels': []}
+    a.refresh_labels()
+    assert a.get_allowance(row['id'])['suspended_reason'] == 'protected'
+    events = [x for x in get_audit_log(30)
+              if x['event_type'] == 'allowance_suspended']
+    assert any('registry id filled' in x['details'] for x in events)

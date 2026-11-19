@@ -22457,7 +22457,7 @@ sections above absorb those answers.
 | 27 | X8 | gateway-installer-version | dashboard + gateway | **Code complete** 2026-11-14: on `release/1.4-gw` (BR1 folded; the hash is display-only) | `feat/x8-gateway-installer-version` | X7 | security approved; five buckets sum to the gateway count |
 | 28 | X9 | gated-gateway-files | dashboard + gateway | **Design note** 2026-11-14 (BP2): installer-carried vs authenticated channel files; recommends (b) | `feat/x9-gated-gateway-files` | X7, 1.4 | security sign-off before code |
 | 29 | X10 | approved-windows-modal | dashboard UI | **Merged** 2026-11-17: presets, Once default, typed local HH:MM + duration, live plain-words preview; agent requests use the same preview; not yet deployed | `feat/x10-windows-modal` | — | UI only; no schema or window-meaning change |
-| 31 | X11 | agents-allowances-redesign | dashboard UI + small API | **Stage 3 in review** 2026-11-18: the Agents and Rules screens replace the Allowances page; section C fixes; one ceiling rule; protection while HA is down; S5 preview binds tools/SSH/websites. Stage 2 approved to merge (`852270d`). | `feat/x11-ui` | F27, X4, fix/f27-ha-by-kind | Security reads Part 1; operator reviews Part 2; not deployed |
+| 31 | X11 | agents-allowances-redesign | dashboard UI + small API | **Operator polish in review** 2026-11-19: one-section editor with `#agent/<id>/<section>` deep links, danger zone, collapsible tools, grouped two-row device grid and phone cards, the two risky groups, Check-gated JSON. Stage 2 merged (`24a043a`); Stage 3 Part 1 approved (`2879f80`). | `feat/x11-ui` | F27, X4, fix/f27-ha-by-kind | operator reviews Part A/C; not deployed |
 | — | CI fix | ci-environment | gateway + tests | Merged (`f2746ef`); CI pinned to ubuntu-24.04 (`6d58006`) | `fix/ci-environment` | F5 | |
 | — | Buffering | stream-unbuffered | gateway | Merged (`d8d70c2`); S1 tee fix done in Gateway hardening | `fix/stream-unbuffered` | F5 | |
 | — | Gateway hardening | gateway-hardening | gateway | **Merged** 2026-11-12 (AF3 + S1 tee capture; security `c15664e`; AX1/AX2 residuals; BA1 for the next F5/F19 change) | `fix/gateway-hardening` | F19, Buffering | |
@@ -22797,3 +22797,37 @@ Allowances page and its JavaScript are gone, while the API endpoints stay.
 * **Still open for review.** The operator review covers the look and the
   six Stage 3 fixes; Security reads the three server items. Nothing is
   merged into master or deployed.
+
+
+**Stage 3 polish (2026-11-19).** Operator review round on `feat/x11-ui`,
+plus Security's two server nits.
+
+* **Agents.** "New agent" is a button beside the title. The card summary is
+  in words (tools, one device line, SSH); an empty agent says "No tools
+  yet".
+* **Editor.** One section at a time with `#agent/<id>/<section>` deep
+  links. Revoke/Delete moved to a Danger zone at the bottom of Overview,
+  each behind its own confirmation.
+* **Tools.** Integrations collapse with a "tools · ask first" summary,
+  search and "Only allowed" filters, first-sentence descriptions with
+  "more", and no ALL-CAPS instruction text. Always-gate tools (HA
+  `call_service`) disable "Runs without asking" and link to the device
+  picker instead.
+* **Grid.** Two-row headers grouped by device type (Lights / Plugs and
+  switches / Covers), device names in the body font and entity ids in
+  mono, app-styled search/checkbox/date controls, full label names under
+  the picker, a one-line protected row, and bottom padding equal to the
+  floating save bar. At 390 px each device is a card with its own toggles,
+  grouped by room; the pick/label choice sits in a per-type settings row.
+* **Preview.** Only the sections that changed are listed, once each. The
+  sentence is "will be able to open 1 more device: Garage door."; risky
+  lines use the action and device name, split into "New or changed" and
+  "Already allowed, confirm again". Apply stays disabled until the boxes
+  are ticked and reads "Allow and save" when a risk confirmation applies.
+* **JSON and Rules.** JSON Apply is disabled until Check passes and after
+  any edit. Protected devices start as "Protected: TV plug" with Change;
+  settings entities stay behind Show settings entities.
+* **Security nits.** `is_destructive` now calls `_ceiling_denied`, so the
+  word loop exists once. A registry-id backfill also suspends live
+  permissions that hold that id under another entity id, in the same
+  transaction and with an audit row.

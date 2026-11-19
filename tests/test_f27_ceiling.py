@@ -177,3 +177,18 @@ def test_the_same_ceiling_rule_serves_both_call_styles(auth_client, monkeypatch)
         assert a.ceiling_allows('ha', 'media_player', 'media_stop') is False
         assert a.ceiling_allows('ha', 'media_player', 'media_stop',
                                 conn=conn) is False
+
+
+def test_is_destructive_and_the_ceiling_rule_agree(auth_client):
+    from db.core import db_conn
+    a.ensure_initialised()
+    with db_conn() as conn:
+        operator = {r['word'] for r in conn.execute(
+            'SELECT word FROM allowance_never_words').fetchall()}
+    for service, exempt in (('stop_cover', ('stop',)),
+                            ('media_stop', ('stop',)),
+                            ('turn_off', ()),
+                            ('restart_container', ()),
+                            ('open_cover', ())):
+        assert a.is_destructive(service, exempt) == a._ceiling_denied(
+            service, exempt, operator), service

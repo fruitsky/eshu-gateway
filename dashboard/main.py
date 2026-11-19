@@ -4489,6 +4489,7 @@ def available_agent_tools(agent_id: int, request: Request):
                 'description': tool.get('description') or '',
                 'read_only': bool(tool.get('read_only')),
                 'enabled': bool(tool.get('enabled')),
+                'always_gate': bool(tool.get('always_gate')),
                 'principal_allow': tool.get('principal_allow') or [],
             })
         out.append({

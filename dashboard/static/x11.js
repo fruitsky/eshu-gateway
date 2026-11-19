@@ -38,6 +38,12 @@
     deviceSearch: '',
     deviceSettings: false,
     deviceOnlyPerm: false,
+    toolFilter: '',
+    toolOnlyAllowed: false,
+    toolOpen: {},
+    protectedEditing: false,
+    protectedSettings: false,
+    jsonChecked: false,
   };
   window.x11State = S;
 
@@ -160,10 +166,36 @@
     var n = (w.allow || []).length;
     return n + ' site' + (n === 1 ? '' : 's');
   }
+  function verbPhrase(action) {
+    var words = String(action || '').toLowerCase().split(/\s+/);
+    if (!words.length) return 'uses';
+    if (!/s$/.test(words[0])) words[0] += 's';
+    return words.join(' ');
+  }
+  function deviceSummaryFor(cfg) {
+    var groups = {};
+    permissions(cfg).filter(function (p) { return !p.suspended_at; }).forEach(function (p) {
+      var n = p.label_id ? labelMembers(p.label_id, p.domain).length
+        : (p.entities || []).length;
+      if (!n) return;
+      var verb = verbPhrase(actionWords(p.domain, p.service));
+      groups[verb] = (groups[verb] || 0) + n;
+    });
+    var verbs = Object.keys(groups).sort(function (a, b) {
+      return groups[b] - groups[a];
+    });
+    if (!verbs.length) return [];
+    var verb = verbs[0];
+    var n = groups[verb];
+    return [verb + ' ' + n + ' device' + (n === 1 ? '' : 's') + ' on its own'];
+  }
   function summaryFor(cfg, integrations) {
     var c = countsFor(cfg, integrations);
-    return c.total + ' tools \u00b7 asks first for ' + c.ask +
-      ' \u00b7 runs ' + c.run + ' without asking \u00b7 SSH ' + sshText(cfg);
+    if (!c.total) return 'No tools yet';
+    var parts = [c.run + ' tools run without asking', c.ask + ' ask first'];
+    parts = parts.concat(deviceSummaryFor(cfg));
+    parts.push('SSH ' + sshText(cfg));
+    return parts.join(' \u00b7 ');
   }
 
   function reasonWords(reason) {
@@ -256,8 +288,29 @@
   }
 
   // ── Agents tab ────────────────────────────────────────────────────────
+  var SECTIONS = ['overview', 'tools', 'ssh', 'websites', 'activity', 'json'];
+  function parseAgentHash() {
+    var m = /^#agent\/(\d+)\/([a-z]+)$/.exec(window.location.hash || '');
+    if (!m) return null;
+    return { id: Number(m[1]), section: SECTIONS.indexOf(m[2]) === -1 ? 'overview' : m[2] };
+  }
+  function setAgentHash(id, section) {
+    var next = '#agent/' + Number(id) + '/' + (section || 'overview');
+    if (window.location.hash !== next) window.history.replaceState(null, '', next);
+  }
+  function clearAgentHash() {
+    if (/^#agent\//.test(window.location.hash || '')) {
+      window.history.replaceState(null, '', window.location.pathname + window.location.search);
+    }
+  }
   function x11ShowAgents() {
     if (!root()) return;
+    var target = parseAgentHash();
+    if (target) {
+      if (!S.agent || Number(S.agent.id) !== target.id) { x11OpenAgent(target.id, target.section); return; }
+      if (S.section !== target.section) { S.section = target.section; renderEditor(); }
+      return;
+    }
     if (S.screen === 'editor' && S.agent) { renderEditor(); return; }
     S.screen = 'agents'; S.tab = S.tab === 'rules' ? 'rules' : 'agents';
     renderAgents();
@@ -265,8 +318,15 @@
   }
 
   function loadAgents() {
-    api('/api/agents').then(function (agents) {
-      return Promise.all((agents || []).map(function (a) {
+    Promise.all([
+      api('/api/agents'),
+      api('/api/ha/devices').catch(function () { return { devices: S.devices || [] }; }),
+      api('/api/ha/labels').catch(function () { return { labels: S.labels || [] }; }),
+    ]).then(function (first) {
+      var agents = first[0] || [];
+      S.devices = first[1].devices || S.devices || [];
+      S.labels = first[2].labels || S.labels || [];
+      return Promise.all(agents.map(function (a) {
         return Promise.all([
           api('/api/agents/' + a.id + '/config').catch(function () { return null; }),
           api('/api/agents/' + a.id + '/available-tools').catch(function () { return { integrations: [] }; }),
@@ -318,16 +378,15 @@
     }).join('');
     var empty = S.agentsReady && !S.agents.length
       ? '<p class="x11-plain">No agent tokens yet. Create one to give an agent a name and a token.</p>' : '';
-    r.innerHTML = '<div class="x11-hud"><div><h1 class="x11-title">Agents</h1>' +
+    r.innerHTML = '<div class="x11-hud"><div><div class="x11-title-row"><h1 class="x11-title">Agents</h1>' +
+      '<button type="button" class="btn btn-sm" data-new-agent onclick="x11NewAgent()">New agent</button></div>' +
       '<p class="x11-lede">What each agent can do on its own, and how to change it.</p></div>' +
       '<div class="x11-hud-right" id="x11-hud-count">' + S.agents.length + ' agent' + (S.agents.length === 1 ? '' : 's') + '</div></div>' +
       tabsHtml() +
       '<div id="x11-notice" class="x11-notice"' + (message || S.notice ? '' : ' hidden') + ' data-kind="' +
       esc((S.notice && S.notice.kind) || (message ? 'error' : '')) + '">' +
       esc(message || (S.notice && S.notice.text) || '') + '</div>' + banner +
-      '<div class="x11-cards">' +
-      '<div class="x11-new-card"><button type="button" class="btn btn-sm" data-new-agent onclick="x11NewAgent()">New agent</button></div>' +
-      cards + '</div>' + empty + previewModalHtml() + newAgentModalHtml();
+      '<div class="x11-cards">' + cards + '</div>' + empty + previewModalHtml() + newAgentModalHtml();
     if (!S.agentsReady) {
       r.querySelector('.x11-cards').insertAdjacentHTML('afterend', '<p class="x11-plain">Loading agents\u2026</p>');
     }
@@ -348,10 +407,9 @@
       tabsHtml() + '<div id="x11-notice" class="x11-notice"' + (S.notice ? '' : ' hidden') + ' data-kind="' +
       esc((S.notice && S.notice.kind) || '') + '">' + esc((S.notice && S.notice.text) || '') + '</div>' +
       '<div class="x11-rules">' +
-      '<details data-rules="protected"><summary>Protected devices</summary><div class="x11-rules-body" id="x11-protected-body">' +
+      '<details data-rules="protected"' + (S.protectedEditing ? ' open' : '') + '><summary>Protected devices</summary><div class="x11-rules-body" id="x11-protected-body">' +
       '<p class="x11-section-sub">No agent can be given a protected device. Existing permissions that hold one are paused; unprotecting does not resume them.</p>' +
-      '<div id="x11-protected-list">' + (S.devices.length ? protectedListHtml() : '<p class="x11-muted">Loading devices\u2026</p>') + '</div>' +
-      '<div class="x11-btn-row"><button type="button" class="btn btn-sm" onclick="x11SaveProtected()">Save protected devices</button></div></div></details>' +
+      '<div id="x11-protected-list">' + protectedSummaryHtml() + '</div></div></details>' +
       '<details data-rules="limits"><summary>Limits for all agents</summary><div class="x11-rules-body" id="x11-limits-body">' +
       '<p class="x11-section-sub">The outer limit. An agent can only be given an action that is enabled here.</p>' +
       '<div id="x11-ceiling-list">' + (S.ceiling ? ceilingListHtml() : '<p class="x11-muted">Loading limits\u2026</p>') + '</div>' +
@@ -379,9 +437,30 @@
     });
   }
 
+  function protectedSummaryHtml() {
+    if (!S.devices.length) return '<p class="x11-muted">Loading devices\u2026</p>';
+    if (!S.protectedEditing) {
+      var names = (S.protected || []).map(function (id) {
+        var d = deviceMap()[id];
+        return d ? d.name : id;
+      });
+      return '<p class="x11-plain" data-protected-summary>' +
+        (names.length ? 'Protected: ' + esc(names.join(', ')) : 'Nothing is protected yet.') + '</p>' +
+        '<div class="x11-btn-row"><button type="button" class="btn btn-sm" data-protect-change onclick="x11StartProtect()">' +
+        (names.length ? 'Change' : 'Choose devices') + '</button></div>';
+    }
+    return protectedListHtml() +
+      '<label class="x11-plain"><input type="checkbox" data-protect-settings onchange="x11ProtectedSettings(this.checked)"' +
+      (S.protectedSettings ? ' checked' : '') + '> Show settings entities</label>' +
+      '<div class="x11-btn-row"><button type="button" class="btn btn-sm" onclick="x11SaveProtected()">Save protected devices</button>' +
+      '<button type="button" class="btn btn-muted btn-sm" onclick="x11CancelProtect()">Cancel</button></div>';
+  }
   function protectedListHtml() {
-    var map = deviceMap();
-    var rows = (S.devices || []).filter(function (d) { return !d.disabled; });
+    var rows = (S.devices || []).filter(function (d) {
+      if (d.disabled) return false;
+      if (d.settings_entity && !S.protectedSettings) return false;
+      return true;
+    });
     var groups = {};
     rows.forEach(function (d) {
       var area = d.area || 'No area';
@@ -390,12 +469,15 @@
     return Object.keys(groups).sort().map(function (area) {
       return '<div><div class="x11-mono">' + esc(area) + '</div><div class="x11-protected-list">' +
         groups[area].map(function (d) {
-          var checked = S.protected.indexOf(d.id) !== -1 || d.protected;
+          var checked = (S.protected || []).indexOf(d.id) !== -1 || d.protected;
           return '<label><input type="checkbox" data-protect="' + attr(d.id) + '"' + (checked ? ' checked' : '') +
             '> <span>' + esc(d.name) + '</span> <span class="x11-dev-id">' + esc(d.id) + '</span></label>';
         }).join('') + '</div></div>';
     }).join('') || '<p class="x11-muted">No devices from Home Assistant.</p>';
   }
+  function x11StartProtect() { S.protectedEditing = true; renderRules(); }
+  function x11CancelProtect() { S.protectedEditing = false; renderRules(); }
+  function x11ProtectedSettings(v) { S.protectedSettings = !!v; renderRules(); }
 
   function ceilingListHtml() {
     if (!S.ceiling || !S.ceiling.catalogue) return '<p class="x11-muted">Limits are unavailable.</p>';
@@ -439,6 +521,7 @@
     }).then(function () {
       toast('Protected devices saved', 'success');
       S.protected = ids;
+      S.protectedEditing = false;
       S.devices = [];
       S.ceiling = null;
       S.agentsReady = false;
@@ -490,7 +573,8 @@
   // ── Agent editor ──────────────────────────────────────────────────────
   function x11OpenAgent(id, section, keepNotice) {
     S.screen = 'editor';
-    S.section = section || 'overview';
+    S.section = SECTIONS.indexOf(section) === -1 ? 'overview' : (section || 'overview');
+    setAgentHash(id, S.section);
     Promise.all([
       api('/api/agents/' + Number(id) + '/config'),
       api('/api/agents/' + Number(id) + '/available-tools').catch(function () { return { integrations: [] }; }),
@@ -501,6 +585,7 @@
       api('/api/ha/labels').catch(function () { return { labels: [] }; }),
       api('/api/allowances/ceiling').catch(function () { return null; }),
       api('/api/agents/' + Number(id) + '/policy').catch(function () { return null; }),
+      api('/api/allowances/protected').catch(function () { return { entities: [] }; }),
     ]).then(function (out) {
       S.config = out[0];
       S.draft = docOf(out[0]);
@@ -514,14 +599,13 @@
       S.labels = out[6].labels || [];
       S.ceiling = out[7] && !out[7].error ? out[7] : null;
       S.policy = out[8] || {};
+      S.protected = (out[9].entities || []).map(function (r) { return r.entity_id; });
       S.jsonText = JSON.stringify(S.draft, null, 2);
       S.jsonError = '';
       S.lastPreview = null;
       if (!keepNotice) S.notice = null;
       window.scrollTo(0, 0);
       renderEditor();
-      x11LoadApproverTokens();
-      if (S.section !== 'overview') scrollToSection(S.section);
     }).catch(function (e) {
       S.screen = 'agents';
       renderAgents('Could not open that agent: ' + errText(e));
@@ -554,37 +638,43 @@
       return '<button type="button" data-x11-nav="' + x[0] + '" aria-current="' +
         (S.section === x[0]) + '" onclick="x11Nav(\'' + x[0] + '\')">' + x[1] + '</button>';
     }).join('');
+    var sectionFn = { overview: sectionOverview, tools: sectionTools, ssh: sectionSsh,
+      websites: sectionWebsites, activity: sectionActivity, json: sectionJson };
+    var content = (sectionFn[S.section] || sectionOverview)();
     r.innerHTML = '<div class="x11-editor">' +
       '<aside class="x11-editor-nav"><div class="x11-editor-name">' + esc(a.name || 'Agent') + '</div>' +
       '<div class="x11-editor-status">' + (a.revoked ? 'Revoked' : 'Active') + ' \u00b7 last active ' + esc(ago(a.last_used_at)) + '</div>' +
       '<nav aria-label="Agent sections">' + navHtml + '</nav>' +
       '<div class="x11-token-actions">' +
-      '<button type="button" class="btn btn-muted btn-xs" onclick="x11Back()">All agents</button>' +
-      '<button type="button" class="btn btn-muted btn-xs" onclick="x11RevokeAgent()">Revoke token</button>' +
-      '<button type="button" class="btn btn-deny btn-xs" onclick="x11DeleteAgent()">Delete agent</button></div></aside>' +
+      '<button type="button" class="btn btn-muted btn-xs" onclick="x11Back()">All agents</button></div></aside>' +
       '<div class="x11-editor-content">' +
       '<div id="x11-notice" class="x11-notice"' + (S.notice ? '' : ' hidden') + ' data-kind="' +
       esc((S.notice && S.notice.kind) || '') + '">' + esc((S.notice && S.notice.text) || '') + '</div>' +
-      sectionOverview() + sectionTools() + sectionSsh() + sectionWebsites() +
-      sectionActivity() + sectionJson() +
-      '</div></div>' +
+      content + '</div></div>' +
       '<div class="x11-savebar" id="x11-savebar"' + (n ? '' : ' hidden') + '>' +
       '<span class="x11-change-count" id="x11-change-count">' + n + ' change' + (n === 1 ? '' : 's') + '</span>' +
       '<button type="button" class="btn btn-muted btn-sm" onclick="x11Discard()">Discard</button>' +
       '<button type="button" class="btn btn-sm" id="x11-save-changes" onclick="x11Check()">Save changes</button></div>' +
       previewModalHtml() + newAgentModalHtml();
+    syncSavebarSpace();
+    syncJsonApplyButton();
+    if (S.section === 'overview') x11LoadApproverTokens();
   }
 
   function x11Nav(section) {
-    S.section = section;
-    Array.prototype.forEach.call(document.querySelectorAll('[data-x11-nav]'), function (b) {
-      b.setAttribute('aria-current', String(b.getAttribute('data-x11-nav') === section));
-    });
-    scrollToSection(section);
+    S.section = SECTIONS.indexOf(section) === -1 ? 'overview' : section;
+    setAgentHash(S.agent.id, S.section);
+    window.scrollTo(0, 0);
+    renderEditor();
   }
   function scrollToSection(section) {
     var target = el('x11-sec-' + section);
     if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+  function syncSavebarSpace() {
+    var bar = el('x11-savebar');
+    var space = bar && !bar.hidden ? Math.ceil(bar.getBoundingClientRect().height) + 28 : 0;
+    if (root()) root().style.paddingBottom = space ? space + 'px' : '';
   }
 
   function sectionOverview() {
@@ -629,7 +719,13 @@
       '<button type="button" class="btn btn-sm" onclick="x11MintApproverToken()">Mint approver token</button></div>' +
       '<div id="approver-token-result" class="x11-token-once" hidden></div>' +
       '<div id="approver-token-list" class="x11-perm-list"><p class="x11-muted">Loading\u2026</p></div></div>' +
-      '</details>' + jsonBlock('overview') + '</section>';
+      '</details>' +
+      '<div class="x11-danger" data-danger-zone><h3>Danger zone</h3>' +
+      '<p class="x11-section-sub">These actions affect the token this agent uses to connect. They cannot be undone.</p>' +
+      '<div class="x11-btn-row">' +
+      '<button type="button" class="btn btn-muted btn-sm" data-danger-revoke onclick="x11RevokeAgent()">Revoke token</button>' +
+      '<button type="button" class="btn btn-deny btn-sm" data-danger-delete onclick="x11DeleteAgent()">Delete agent</button>' +
+      '</div></div>' + jsonBlock('overview') + '</section>';
   }
 
   function x11LoadApproverTokens() {
@@ -701,36 +797,115 @@
       .catch(function (e) { setNotice(errText(e), 'error'); });
   }
 
+  function plainDescription(text) {
+    return String(text || '')
+      .replace(/REQUIRES OPERATOR APPROVAL/g, 'Requires operator approval')
+      .replace(/REQUIRES APPROVAL/g, 'Requires approval')
+      .replace(/\bALWAYS\b/g, 'Always')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+  function firstSentence(text) {
+    var plain = plainDescription(text);
+    for (var i = 0; i < plain.length; i += 1) {
+      if ('.!?'.indexOf(plain.charAt(i)) === -1) continue;
+      if (i + 1 < plain.length && !/\s/.test(plain.charAt(i + 1))) continue;
+      var before = plain.slice(0, i);
+      if (/\b(e\.g|i\.e|etc|vs|Mr|Dr|St)$/i.test(before)) continue;
+      return { first: plain.slice(0, i + 1), rest: plain.slice(i + 1).trim() };
+    }
+    return { first: plain, rest: '' };
+  }
+  function toolDescription(tool) {
+    var parts = firstSentence(tool.description);
+    if (!parts.first) return '';
+    return '<div class="x11-tool-desc"><span>' + esc(parts.first) + '</span>' +
+      (parts.rest ? '<span class="x11-desc-rest" hidden> ' + esc(parts.rest) + '</span> ' +
+        '<button type="button" class="x11-more" aria-expanded="false" onclick="x11More(this)">more</button>' : '') +
+      '</div>';
+  }
+  function x11More(btn) {
+    var rest = btn.parentElement.querySelector('.x11-desc-rest');
+    if (!rest) return;
+    var open = rest.hidden;
+    rest.hidden = !open;
+    btn.setAttribute('aria-expanded', String(open));
+    btn.textContent = open ? 'less' : 'more';
+  }
+  function x11ToolFilter(v) {
+    S.toolFilter = v;
+    renderEditor();
+    var input = el('x11-tool-search');
+    if (input) { input.focus(); input.setSelectionRange(input.value.length, input.value.length); }
+  }
+  function x11ToolOnlyAllowed(v) { S.toolOnlyAllowed = !!v; renderEditor(); }
+  function x11ToolGroupToggle(details) {
+    var key = details.getAttribute('data-tool-group');
+    S.toolOpen[key] = !!details.open;
+  }
+  function x11OpenDevices() {
+    var grid = el('x11-device-grid');
+    if (grid) grid.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
   function sectionTools() {
+    var filter = S.toolFilter.toLowerCase();
+    var filtering = !!filter || S.toolOnlyAllowed;
     var groups = (S.tools || []).map(function (g) {
-      var rows = (g.tools || []).map(function (tool) {
+      var all = g.tools || [];
+      var shown = all.filter(function (tool) {
+        var outcome = outcomeFor(tool.name, tool);
+        if (S.toolOnlyAllowed && outcome === 'none') return false;
+        if (!filter) return true;
+        return ((tool.name || '') + ' ' + (tool.tool || '') + ' ' +
+          (tool.description || '')).toLowerCase().indexOf(filter) !== -1;
+      });
+      var ask = all.filter(function (t) { return outcomeFor(t.name, t) === 'ask'; }).length;
+      var summary = esc(g.integration) + ' \u00b7 ' + all.length + ' tool' +
+        (all.length === 1 ? '' : 's') + ' \u00b7 ' + ask + ' ask first';
+      var open = filtering || !!S.toolOpen[g.integration];
+      var rows = shown.map(function (tool) {
         var outcome = outcomeFor(tool.name, tool);
         function choice(value, label) {
           return '<button type="button" data-tool-name="' + attr(tool.name) + '" data-choice="' + value +
-            '" aria-pressed="' + (outcome === value) + '" onclick="x11ToolChoice(this)">' + label + '</button>';
+            '" aria-pressed="' + (outcome === value) + '"' +
+            (value === 'run' && tool.always_gate ? ' disabled title="Always asks; use device permissions"' : '') +
+            ' onclick="x11ToolChoice(this)">' + label + '</button>';
         }
-        return '<div class="x11-tool-row" data-tool-row="' + attr(tool.name) + '">' +
+        return '<div class="x11-tool-row" data-tool-row="' + attr(tool.name) + '"' +
+          (tool.always_gate ? ' data-always-gate="1"' : '') + '>' +
           '<div><div class="x11-tool-name">' + esc((tool.tool || tool.name).replace(/_/g, ' ')) + '</div>' +
-          (tool.description ? '<div class="x11-tool-desc">' + esc(tool.description) + '</div>' : '') + '</div>' +
+          toolDescription(tool) + '</div>' +
           '<div class="x11-seg" role="group" aria-label="' + attr(tool.name) + ' outcome">' +
           choice('none', 'None') + choice('ask', 'Asks you first') + choice('run', 'Runs without asking') +
-          '</div></div>';
+          '</div>' +
+          (tool.always_gate ? '<div class="x11-always-line" data-always-line>Always asks you. To let it run for some devices, use ' +
+            '<button type="button" class="link-btn" onclick="x11OpenDevices()">Runs without asking \u2192 pick devices</button>.</div>' : '') +
+          '</div>';
       }).join('');
-      return '<div class="x11-tool-group"><h3>' + esc(g.integration) + '</h3>' +
+      return '<details class="x11-int-group" data-tool-group="' + attr(g.integration) + '"' +
+        (open ? ' open' : '') + ' ontoggle="x11ToolGroupToggle(this)">' +
+        '<summary><span>' + summary + '</span></summary>' +
         (g.kind === 'ha' ? '<p class="x11-int-note">Home Assistant calls. Device permissions live under call service.</p>' : '') +
-        rows + '</div>';
+        (rows || '<p class="x11-muted">No tools match.</p>') + '</details>';
     }).join('');
     var ha = toolList().filter(function (t) { return t.kind === 'ha' && t.tool === 'call_service'; })[0];
-    var showGrid = ha && outcomeFor(ha.name, ha) === 'run';
     return '<section class="x11-section" id="x11-sec-tools" data-x11-section="tools">' +
       head('Tools', 'Choose an outcome per tool. A device permission belongs to Home Assistant call service.', 'tools') +
-      groups + (showGrid ? deviceGridHtml() : '') + jsonBlock('tools') + '</section>';
+      '<div class="x11-tool-tools"><input id="x11-tool-search" type="search" placeholder="Search tools" aria-label="Search tools" value="' +
+      attr(S.toolFilter) + '" oninput="x11ToolFilter(this.value)">' +
+      '<label class="x11-plain"><input type="checkbox" onchange="x11ToolOnlyAllowed(this.checked)"' +
+      (S.toolOnlyAllowed ? ' checked' : '') + '> Only allowed</label></div>' +
+      groups + (ha ? deviceGridHtml() : '') + jsonBlock('tools') + '</section>';
   }
 
   function x11ToolChoice(btn) {
     var name = btn.getAttribute('data-tool-name');
     var choice = btn.getAttribute('data-choice');
     var tool = toolList().filter(function (t) { return t.name === name; })[0] || {};
+    if (choice === 'run' && tool.always_gate) {
+      setNotice('This tool always asks. Use Runs without asking with device permissions for Home Assistant.', 'warn');
+      return;
+    }
     var tools = S.draft.tools;
     if (choice === 'none') {
       if ((tools.mode || 'all') === 'all') {
@@ -750,10 +925,6 @@
     }
     S.section = 'tools';
     renderEditor();
-    if (choice === 'run' && tool.kind === 'ha' && tool.tool === 'call_service') {
-      var grid = el('x11-device-grid');
-      if (grid) grid.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    }
     markDirty();
   }
 
@@ -778,6 +949,82 @@
     return out;
   }
 
+  function actionShort(service) {
+    return ({ turn_on: 'on', turn_off: 'off', open_cover: 'open',
+      close_cover: 'close', media_play: 'play', media_pause: 'pause' })[service] || service;
+  }
+  function typeLabel(domain) {
+    return ({ light: 'Lights', switch: 'Plugs and switches', cover: 'Covers',
+      fan: 'Fans', climate: 'Heating', media_player: 'Media players',
+      input_boolean: 'Helpers' })[domain] || domain;
+  }
+  function actionTypes(actions) {
+    var by = {};
+    actions.forEach(function (a) {
+      if (!by[a.domain]) by[a.domain] = { domain: a.domain, label: typeLabel(a.domain), actions: [] };
+      by[a.domain].actions.push(a);
+    });
+    return Object.keys(by).map(function (k) { return by[k]; });
+  }
+  function labelSelectHtml(a, p) {
+    if (!p || !p.label_id) return '';
+    return '<select data-action-label="' + attr(a.id) + '" title="' + attr(labelName(p.label_id)) +
+      '" aria-label="Home Assistant label for ' + attr(a.label) + '" onchange="x11SetLabel(this)">' +
+      '<option value="">Pick a label</option>' + (S.labels || []).map(function (l) {
+        return '<option value="' + attr(l.id) + '"' + (p.label_id === l.id ? ' selected' : '') + '>' +
+          esc(l.name) + '</option>';
+      }).join('') + '</select>';
+  }
+  function modeSelectHtml(a, p) {
+    var mode = p && p.label_id ? 'label' : 'pick';
+    return '<select data-action-mode="' + attr(a.id) + '" aria-label="Devices or label for ' +
+      attr(a.label) + '" onchange="x11SetActionMode(this)">' +
+      '<option value="pick"' + (mode === 'pick' ? ' selected' : '') + '>Pick devices</option>' +
+      '<option value="label"' + (mode === 'label' ? ' selected' : '') + '>Follow label</option></select>';
+  }
+  function actionHeadHtml(a) {
+    var p = permissionFor(a.domain, a.service);
+    var label = p && p.label_id ? '<div class="x11-label-full" title="' + attr(labelName(p.label_id)) + '">Label: ' +
+      esc(labelName(p.label_id)) + '</div>' : '';
+    return '<div class="x11-action-head" data-action-head="' + attr(a.id) + '">' +
+      modeSelectHtml(a, p) + labelSelectHtml(a, p) + label + '</div>';
+  }
+  function protectedLine() {
+    return '<div class="x11-protected-line"><span aria-hidden="true">\u25a0</span> <b>Protected</b> ' +
+      '<a href="#" onclick="x11GoRules();return false;">Rules for all agents</a></div>';
+  }
+  function deviceToolsHtml() {
+    return '<div class="x11-device-tools">' +
+      '<input type="search" placeholder="Search devices" aria-label="Search devices" value="' + attr(S.deviceSearch) +
+      '" oninput="x11DeviceSearch(this.value)">' +
+      '<label class="x11-plain"><input type="checkbox" onchange="x11DeviceOnlyPerm(this.checked)"' +
+      (S.deviceOnlyPerm ? ' checked' : '') + '> Only devices with permissions</label>' +
+      '<label class="x11-plain"><input type="checkbox" onchange="x11DeviceSettings(this.checked)"' +
+      (S.deviceSettings ? ' checked' : '') + '> Show settings entities</label></div>';
+  }
+  function deviceStateLine(d) {
+    return esc([d.area, d.state].filter(Boolean).join(' \u00b7 '));
+  }
+  function mobileDeviceHtml(d, actions) {
+    var toggles = actions.filter(function (a) { return a.domain === d.domain; }).map(function (a) {
+      var p = permissionFor(a.domain, a.service);
+      if (p && p.label_id) {
+        var member = (d.labels || []).some(function (l) { return l.id === p.label_id; });
+        return '<span class="x11-mobile-readonly">' + esc(a.label) + ': ' + (member ? '\u2713 in label' : '\u2014') + '</span>';
+      }
+      var checked = p && (p.entities || []).indexOf(d.id) !== -1;
+      return '<label class="x11-mobile-toggle"><input type="checkbox" data-device="' + attr(d.id) +
+        '" data-action="' + attr(a.id) + '"' + (checked ? ' checked' : '') +
+        ' aria-label="' + attr(a.label + ' for ' + d.name) + '" onchange="x11SetDevice(this)"> ' +
+        esc(actionShort(a.service)) + '</label>';
+    }).join('');
+    return '<div class="x11-mobile-device' + (d.protected ? ' x11-locked' : '') + '" data-device-row="' + attr(d.id) + '">' +
+      '<div class="x11-device-name">' + esc(d.name) + '</div>' +
+      '<div class="x11-device-id">' + esc(d.id) + '</div>' +
+      '<div class="x11-device-state">' + deviceStateLine(d) + '</div>' +
+      (d.risky ? '<div class="x11-risky">Risky: ' + esc(d.device_class || 'device') + '</div>' : '') +
+      (d.protected ? protectedLine() : '<div class="x11-mobile-toggles">' + toggles + '</div>') + '</div>';
+  }
   function deviceGridHtml() {
     if (S.devicesError) {
       return '<div class="x11-device-wrap" id="x11-device-grid"><p class="x11-plain">The device list is unavailable: ' +
@@ -804,30 +1051,21 @@
       var area = d.area || 'No area';
       (groups[area] = groups[area] || []).push(d);
     });
-    var heads = actions.map(function (a) {
-      var p = permissionFor(a.domain, a.service);
-      var mode = p && p.label_id ? 'label' : 'pick';
-      return '<th scope="col"><div class="x11-action-head"><span>' + esc(a.label) + '</span>' +
-        '<select data-action-mode="' + attr(a.id) + '" aria-label="Devices or label for ' + attr(a.label) + '" onchange="x11SetActionMode(this)">' +
-        '<option value="pick"' + (mode === 'pick' ? ' selected' : '') + '>Pick devices</option>' +
-        '<option value="label"' + (mode === 'label' ? ' selected' : '') + '>Follow label</option></select>' +
-        (mode === 'label' ? '<select data-action-label="' + attr(a.id) + '" aria-label="Home Assistant label for ' + attr(a.label) + '" onchange="x11SetLabel(this)">' +
-          '<option value="">Pick a label</option>' + (S.labels || []).map(function (l) {
-            return '<option value="' + attr(l.id) + '"' + (p && p.label_id === l.id ? ' selected' : '') + '>' + esc(l.name) + '</option>';
-          }).join('') + '</select>' : '') +
-        '</div></th>';
+    var types = actionTypes(actions);
+    var groupHeads = types.map(function (t) {
+      return '<th scope="colgroup" colspan="' + t.actions.length + '">' + esc(t.label) + ': ' +
+        t.actions.map(function (a) { return esc(actionShort(a.service)); }).join(' / ') + '</th>';
+    }).join('');
+    var actionHeads = actions.map(function (a) {
+      return '<th scope="col">' + actionHeadHtml(a) + '</th>';
     }).join('');
     var body = Object.keys(groups).sort().map(function (area) {
       var rows = groups[area].map(function (d) {
         var cells = actions.map(function (a) {
           if (d.domain !== a.domain) return '<td class="x11-action-cell" data-cell-label="' + attr(a.label) + '">\u2014</td>';
+          if (d.protected) return '<td class="x11-action-cell" data-cell-label="' + attr(a.label) + '">\u2014</td>';
           var p = permissionFor(a.domain, a.service);
-          var labelMode = !!(p && p.label_id);
-          if (d.protected) {
-            return '<td class="x11-action-cell" data-cell-label="' + attr(a.label) +
-              '"><span class="x11-lock" aria-label="Locked, protected device">\u25a0 Locked</span></td>';
-          }
-          if (labelMode) {
+          if (p && p.label_id) {
             var member = (d.labels || []).some(function (l) { return l.id === p.label_id; });
             return '<td class="x11-action-cell" data-cell-label="' + attr(a.label) +
               '"><span aria-label="' + (member ? 'In the label' : 'Not in the label') + '">' +
@@ -838,42 +1076,44 @@
             '"><input type="checkbox" data-device="' + attr(d.id) + '" data-action="' + attr(a.id) + '"' +
             (checked ? ' checked' : '') + ' aria-label="' + attr(a.label + ' for ' + d.name) + '" onchange="x11SetDevice(this)"></td>';
         }).join('');
-        var meta = [d.area, d.domain].filter(Boolean).join(' \u00b7 ');
         return '<tr class="x11-device-row' + (d.protected ? ' x11-locked' : '') + '" data-device-row="' + attr(d.id) + '">' +
-          '<td><div class="x11-device-name">' + esc(d.name) + '</div><div class="x11-device-meta">' +
-          esc(meta) + '</div><div class="x11-device-state">' + esc(d.state || '') + '</div>' +
+          '<td><div class="x11-device-name">' + esc(d.name) + '</div>' +
+          '<div class="x11-device-id">' + esc(d.id) + '</div>' +
+          '<div class="x11-device-state">' + deviceStateLine(d) + '</div>' +
           (d.risky ? '<div class="x11-risky">Risky: ' + esc(d.device_class || 'device') + '</div>' : '') +
-          (d.protected ? '<div class="x11-lock" aria-label="Locked, protected device">\u25a0 Locked \u00b7 <a href="#" onclick="x11GoRules();return false;">Rules for all agents</a></div>' : '') +
-          '</td>' + cells + '</tr>';
+          (d.protected ? protectedLine() : '') + '</td>' + cells + '</tr>';
       }).join('');
       return '<tr class="x11-area-row"><td colspan="' + (actions.length + 1) + '">' + esc(area) + '</td></tr>' + rows;
+    }).join('');
+    var mobile = types.map(function (t) {
+      var typeDevices = {};
+      devices.filter(function (d) { return d.domain === t.domain; }).forEach(function (d) {
+        var area = d.area || 'No area';
+        (typeDevices[area] = typeDevices[area] || []).push(d);
+      });
+      var settings = t.actions.map(function (a) {
+        var p = permissionFor(a.domain, a.service);
+        return '<div class="x11-mobile-type-setting"><span>' + esc(a.label) + '</span>' +
+          modeSelectHtml(a, p) + labelSelectHtml(a, p) + '</div>';
+      }).join('');
+      var cards = Object.keys(typeDevices).sort().map(function (area) {
+        return '<div class="x11-mobile-area">' + esc(area) + '</div>' +
+          typeDevices[area].map(function (d) { return mobileDeviceHtml(d, actions); }).join('');
+      }).join('');
+      return '<section class="x11-mobile-type" data-mobile-type="' + attr(t.domain) + '">' +
+        '<h4>' + esc(t.label) + '</h4><div class="x11-mobile-type-settings">' + settings + '</div>' +
+        cards + '</section>';
     }).join('');
     var labelModeAny = actions.some(function (a) {
       var p = permissionFor(a.domain, a.service);
       return p && p.label_id;
     });
     var perms = permissions().map(function (p, i) { return permEditor(p, i); }).join('');
-    return '<div id="x11-device-grid" data-device-grid>' +
-      '<div class="x11-device-tools">' +
-      '<input type="search" placeholder="Search devices" aria-label="Search devices" value="' + attr(S.deviceSearch) +
-      '" oninput="x11DeviceSearch(this.value)">' +
-      '<label class="x11-plain"><input type="checkbox" onchange="x11DeviceOnlyPerm(this.checked)"' + (S.deviceOnlyPerm ? ' checked' : '') + '> Only devices with permissions</label>' +
-      '<label class="x11-plain"><input type="checkbox" onchange="x11DeviceSettings(this.checked)"' + (S.deviceSettings ? ' checked' : '') + '> Show settings entities</label>' +
-      '</div>' +
-      '<div class="x11-mobile-modes">' + actions.map(function (a) {
-        var p = permissionFor(a.domain, a.service);
-        var mode = p && p.label_id ? 'label' : 'pick';
-        return '<div class="x11-mobile-mode"><span>' + esc(a.label) + '</span>' +
-          '<select data-action-mode="' + attr(a.id) + '" aria-label="Devices or label for ' + attr(a.label) + '" onchange="x11SetActionMode(this)">' +
-          '<option value="pick"' + (mode === 'pick' ? ' selected' : '') + '>Pick devices</option>' +
-          '<option value="label"' + (mode === 'label' ? ' selected' : '') + '>Follow label</option></select>' +
-          (mode === 'label' ? '<select data-action-label="' + attr(a.id) + '" aria-label="Home Assistant label for ' + attr(a.label) + '" onchange="x11SetLabel(this)">' +
-            '<option value="">Pick a label</option>' + (S.labels || []).map(function (l) {
-              return '<option value="' + attr(l.id) + '"' + (p && p.label_id === l.id ? ' selected' : '') + '>' + esc(l.name) + '</option>';
-            }).join('') + '</select>' : '') + '</div>';
-      }).join('') + '</div>' +
-      '<div class="x11-device-wrap"><table class="x11-devices"><thead><tr><th scope="col">Device</th>' +
-      heads + '</tr></thead><tbody>' + body + '</tbody></table></div>' +
+    return '<div id="x11-device-grid" data-device-grid>' + deviceToolsHtml() +
+      '<div class="x11-mobile-grid" data-mobile-grid>' + mobile + '</div>' +
+      '<div class="x11-device-wrap"><table class="x11-devices"><thead>' +
+      '<tr><th scope="col" rowspan="2">Device</th>' + groupHeads + '</tr>' +
+      '<tr>' + actionHeads + '</tr></thead><tbody>' + body + '</tbody></table></div>' +
       (labelModeAny ? '<p class="x11-label-hint">Add or remove the label in Home Assistant; new devices wait for your review here.</p>' : '') +
       '<div class="x11-perm-list">' + (perms || '<p class="x11-plain">No device permissions yet.</p>') + '</div></div>';
   }
@@ -1073,13 +1313,22 @@
       'oninput="x11JsonInput(this.value)">' + esc(S.jsonText) + '</textarea>' +
       '<div class="x11-json-error" id="x11-json-error" role="alert">' + esc(S.jsonError) + '</div>' +
       '<div class="x11-btn-row"><button type="button" class="btn btn-sm" id="x11-json-check" onclick="x11JsonCheck()">Check</button>' +
-      '<button type="button" class="btn btn-muted btn-sm" id="x11-json-apply" onclick="x11JsonApply()">Apply</button>' +
+      '<button type="button" class="btn btn-muted btn-sm" id="x11-json-apply" onclick="x11JsonApply()"' +
+      (S.jsonChecked ? '' : ' disabled') + '>Apply</button>' +
       '<button type="button" class="btn btn-muted btn-sm" onclick="x11JsonCopy()">Copy</button>' +
       '<button type="button" class="btn btn-muted btn-sm" onclick="x11JsonReset()">Reset</button></div>' +
       '<p class="x11-section-sub">Pasting another agent\u2019s document is the copy feature; the preview names the target agent.</p></section>';
   }
 
-  function x11JsonInput(v) { S.jsonText = v; S.jsonError = ''; var e = el('x11-json-error'); if (e) e.textContent = ''; }
+  function x11JsonInput(v) {
+    S.jsonText = v; S.jsonError = ''; S.jsonChecked = false;
+    var e = el('x11-json-error'); if (e) e.textContent = '';
+    syncJsonApplyButton();
+  }
+  function syncJsonApplyButton() {
+    var btn = el('x11-json-apply');
+    if (btn) btn.disabled = !S.jsonChecked;
+  }
   function x11JsonCopy() {
     var text = S.jsonText;
     if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -1091,7 +1340,8 @@
   }
   function x11JsonReset() {
     S.jsonText = JSON.stringify(docOf(S.config), null, 2);
-    S.jsonError = ''; renderEditor(); toast('JSON reset to the saved document', 'success');
+    S.jsonError = ''; S.jsonChecked = false;
+    renderEditor(); toast('JSON reset to the saved document', 'success');
   }
   function parseJsonDoc() {
     try { return JSON.parse(S.jsonText); }
@@ -1099,8 +1349,9 @@
   }
   function x11JsonCheck() {
     var doc = parseJsonDoc();
-    if (!doc) return;
+    if (!doc) { S.jsonChecked = false; syncJsonApplyButton(); return; }
     S.jsonSource = doc;
+    S.jsonChecked = false;
     checkDocument(doc, 'json');
   }
   function x11JsonApply() {
@@ -1129,9 +1380,11 @@
       S.pending = { document: document, version: S.config.version, hash: body.preview_hash, source: source };
       S.lastPreview = { body: body, source: source };
       S.jsonError = '';
+      if (source === 'json') { S.jsonChecked = true; syncJsonApplyButton(); }
       showPreview();
     }).catch(function (e) {
       if (source === 'json') {
+        S.jsonChecked = false; syncJsonApplyButton();
         S.jsonError = errText(e);
         var box = el('x11-json-error'); if (box) box.textContent = S.jsonError;
       } else {
@@ -1155,6 +1408,73 @@
       '<div id="x11-new-result"></div></div></div>';
   }
 
+  function previewItems(p) {
+    var ha = p.home_assistant || {};
+    return { add: ha.add || [], change: ha.change || [], remove: ha.remove || [] };
+  }
+  function itemKey(item) {
+    return (item.domain || '') + '|' + (item.service || '');
+  }
+  function changedItems(p) {
+    var items = previewItems(p);
+    return items.add.concat(items.change.map(function (c) { return c.after || {}; }));
+  }
+  function groupSentence(items) {
+    var groups = {};
+    items.forEach(function (item) {
+      var action = String(item.action || item.service || 'change').toLowerCase();
+      var names = (item.entities || []).map(deviceName);
+      if (item.label_id) names = [labelName(item.label_id)];
+      if (!names.length) names = (item.entity_names || []).slice();
+      groups[action] = (groups[action] || []).concat(names);
+    });
+    return Object.keys(groups).map(function (action) {
+      var names = groups[action];
+      var n = names.length;
+      return action + ' ' + n + ' more device' + (n === 1 ? '' : 's') + ': ' + names.join(', ');
+    }).join(' and ');
+  }
+  function previewSentence(p) {
+    var name = (p.agent || {}).name || (S.agent && S.agent.name) || 'This agent';
+    var items = previewItems(p);
+    if (!items.add.length && !items.change.length && !items.remove.length) {
+      return p.summary || name + ' is unchanged.';
+    }
+    var text = name;
+    if (items.add.length) text += ' will be able to ' + groupSentence(items.add);
+    else text += ' will change';
+    if (items.change.length) text += '. Changed: ' + groupSentence(items.change);
+    if (items.remove.length) {
+      text += '. Removed: ' + items.remove.map(function (r) {
+        return (r.name || r.action || r.service) + ' (' + String(r.action || r.service).toLowerCase() + ')';
+      }).join(', ');
+    }
+    return text + '.';
+  }
+  function deviceRiskReason(kind) {
+    return ({ garage: 'garage doors always need this confirmation',
+      garage_door: 'garage doors always need this confirmation',
+      gate: 'gates always need this confirmation',
+      door: 'doors always need this confirmation',
+      lock: 'locks always need this confirmation' })[kind] ||
+      'this device always needs this confirmation';
+  }
+  function riskLine(r, p) {
+    if (r.kind === 'category') {
+      var action = String(r.service || '').replace(/_/g, ' ');
+      return action + ' \u00b7 every device \u2014 ' + (r.reason || 'this action is risky');
+    }
+    var hit = changedItems(p).filter(function (item) {
+      return (item.entities || []).indexOf(r.entity_id) !== -1;
+    })[0];
+    var name = r.entity_id ? deviceName(r.entity_id) : '';
+    if (!name && hit && hit.label_id) name = labelName(hit.label_id);
+    if (!name) name = (hit && (hit.entity_names || [])[(hit.entities || []).indexOf(r.entity_id)]) || '';
+    var action = hit ? String(hit.action || '').toLowerCase() : 'This action';
+    return (action ? action.charAt(0).toUpperCase() + action.slice(1) : 'This action') +
+      ' \u00b7 ' + (name || r.entity_id || 'this device') + ' \u2014 ' +
+      deviceRiskReason(r.device_class || '');
+  }
   function showPreview() {
     var p = S.lastPreview && S.lastPreview.body;
     var modal = el('x11-preview-modal');
@@ -1162,13 +1482,56 @@
     var risks = p.risky || [];
     var resumes = p.resumes || [];
     var waiting = p.waiting || [];
+    var changedKeys = {};
+    changedItems(p).forEach(function (item) { changedKeys[itemKey(item)] = true; });
+    (resumes || []).forEach(function (r) { changedKeys[(r.domain || '') + '|' + (r.service || '')] = true; });
+    var newRisks = [], oldRisks = [];
+    risks.forEach(function (r) {
+      var key = r.kind === 'device'
+        ? (changedItems(p).filter(function (item) { return (item.entities || []).indexOf(r.entity_id) !== -1; })[0] || {})
+        : r;
+      var isNew = r.kind === 'device'
+        ? !!(key && changedKeys[itemKey(key)])
+        : !!changedKeys[(r.domain || '') + '|' + (r.service || '')];
+      (isNew ? newRisks : oldRisks).push(r);
+    });
+    function withoutDuplicatedCategory(rows) {
+      return rows.filter(function (r) {
+        if (r.kind !== 'category') return true;
+        var key = (r.domain || '') + '|' + (r.service || '');
+        var entities = [];
+        changedItems(p).forEach(function (item) {
+          if (itemKey(item) === key) entities = entities.concat(item.entities || []);
+        });
+        return !risks.some(function (other) {
+          return other.kind === 'device' && entities.indexOf(other.entity_id) !== -1;
+        });
+      });
+    }
+    newRisks = withoutDuplicatedCategory(newRisks);
+    oldRisks = withoutDuplicatedCategory(oldRisks);
+    var sectionLines = [];
+    var seen = {};
+    (p.sections || []).forEach(function (s) {
+      if (s.section === 'home_assistant' || seen[s.section]) return;
+      seen[s.section] = true;
+      sectionLines.push('<div>' + esc(s.section) + ': ' + esc(s.summary) + '</div>');
+    });
+    var riskHtml = '';
+    if (risks.length) {
+      function block(title, rows) {
+        if (!rows.length) return '';
+        return '<div class="x11-risk-group"><h3>' + title + '</h3>' +
+          rows.map(function (r) { return '<p class="x11-preview-line">' + esc(riskLine(r, p)) + '</p>'; }).join('') + '</div>';
+      }
+      riskHtml = '<div class="x11-preview-warn"><p class="x11-preview-line"><strong>Risky items</strong></p>' +
+        block('New or changed', newRisks) + block('Already allowed, confirm again', oldRisks) +
+        '<label class="x11-ack"><input type="checkbox" data-x11-ack="risk" onchange="x11PreviewAck()"> I understand these are risky.</label></div>';
+    }
     var body = '<div class="x11-preview-target">Applying to <strong>' + esc((p.agent || {}).name || S.agent.name) + '</strong></div>' +
-      '<p class="x11-preview-line">' + esc(p.summary || 'No visible changes.') + '</p>' +
-      (p.sections && p.sections.length ? '<div class="x11-preview-line x11-muted">' +
-        p.sections.map(function (s) { return '<div>' + esc(s.section) + ': ' + esc(s.summary) + '</div>'; }).join('') + '</div>' : '') +
-      (risks.length ? '<div class="x11-preview-warn"><p class="x11-preview-line"><strong>Risky items</strong></p>' +
-        risks.map(function (r) { return '<p class="x11-preview-line">' + esc(r.entity_id || (r.domain + '.' + r.service)) + ' \u2014 ' + esc(r.reason) + '</p>'; }).join('') +
-        '<label class="x11-ack"><input type="checkbox" data-x11-ack="risk" onchange="x11PreviewAck()"> I understand these are risky.</label></div>' : '') +
+      '<p class="x11-preview-line">' + esc(previewSentence(p)) + '</p>' +
+      (sectionLines.length ? '<div class="x11-preview-line x11-muted">' + sectionLines.join('') + '</div>' : '') +
+      riskHtml +
       (resumes.length ? '<div class="x11-preview-warn"><p class="x11-preview-line"><strong>Will resume</strong></p>' +
         resumes.map(function (r) { return '<p class="x11-preview-line">' + esc(r.name || (r.domain + '.' + r.service)) + ' \u2014 ' + esc(reasonWords(r.reason)) + (r.will_pin_to_current_ha ? ' (re-pins to the current Home Assistant)' : '') + '</p>'; }).join('') +
         '<label class="x11-ack"><input type="checkbox" data-x11-ack="resume" onchange="x11PreviewAck()"> Resume these paused permissions.</label></div>' : '') +
@@ -1177,7 +1540,8 @@
       '<p class="x11-preview-line x11-muted">Nothing has changed yet.</p>' +
       '<div class="x11-preview-actions"><button type="button" class="btn btn-muted btn-sm" onclick="x11ClosePreview()">Cancel</button>' +
       '<button type="button" class="btn btn-sm" id="x11-preview-apply" onclick="x11ApplyPreview()"' +
-      ((p.risk_ack_required || p.resume_ack_required) ? ' disabled' : '') + '>Apply</button></div>';
+      ((p.risk_ack_required || p.resume_ack_required) ? ' disabled' : '') + '>' +
+      (p.risk_ack_required ? 'Allow and save' : 'Apply') + '</button></div>';
     el('x11-preview-body').innerHTML = body;
     modal.classList.remove('hidden');
     var first = modal.querySelector('input[type="checkbox"], button');
@@ -1236,6 +1600,7 @@
     var count = el('x11-change-count');
     if (count) count.textContent = n + ' change' + (n === 1 ? '' : 's');
     if (bar) bar.hidden = !n;
+    syncSavebarSpace();
   }
   function x11Discard() {
     S.draft = docOf(S.config);
@@ -1243,7 +1608,12 @@
     renderEditor();
     toast('Changes discarded', 'success');
   }
-  function x11Back() { S.screen = 'agents'; S.agent = null; S.draft = null; S.config = null; S.tab = 'agents'; renderAgents(); loadAgents(); }
+  function x11Back() {
+    clearAgentHash();
+    S.screen = 'agents'; S.agent = null; S.draft = null; S.config = null;
+    if (root()) root().style.paddingBottom = '';
+    S.tab = 'agents'; renderAgents(); loadAgents();
+  }
 
   function x11ToggleJson(btn) {
     var key = btn.getAttribute('data-json-toggle');
@@ -1308,6 +1678,23 @@
       .catch(function (e) { toast(errText(e), 'error'); });
   }
 
+  window.setTimeout(function () {
+    if (parseAgentHash() && window.switchView) {
+      window.switchView('agents');
+    }
+  }, 600);
+
+  window.addEventListener('hashchange', function () {
+    if (!root()) return;
+    var target = parseAgentHash();
+    if (target) {
+      if (!S.agent || Number(S.agent.id) !== target.id) x11OpenAgent(target.id, target.section);
+      else if (S.section !== target.section) { S.section = target.section; renderEditor(); }
+    } else {
+      x11ShowAgents();
+    }
+  });
+
   // Public entry points used by switchView and inline handlers.
   window.x11ShowAgents = x11ShowAgents;
   window.x11SetTab = x11SetTab;
@@ -1348,6 +1735,14 @@
   window.x11CreateAgent = x11CreateAgent;
   window.x11CloseNew = x11CloseNew;
   window.x11Back = x11Back;
+  window.x11More = x11More;
+  window.x11ToolFilter = x11ToolFilter;
+  window.x11ToolOnlyAllowed = x11ToolOnlyAllowed;
+  window.x11ToolGroupToggle = x11ToolGroupToggle;
+  window.x11OpenDevices = x11OpenDevices;
+  window.x11StartProtect = x11StartProtect;
+  window.x11CancelProtect = x11CancelProtect;
+  window.x11ProtectedSettings = x11ProtectedSettings;
   window.x11LoadApproverTokens = x11LoadApproverTokens;
   window.x11ToggleTestAgent = x11ToggleTestAgent;
   window.x11MintApproverToken = x11MintApproverToken;
