@@ -22895,3 +22895,117 @@ device grid and the Agents-tab banner ("N waiting · Review"). Accept calls
 `accept_join` (with the risk confirmation the endpoint requires); Dismiss
 clears `pending_json` through the new audited `dismiss-join` endpoint. The
 Rules tab carries a short "How permissions work" panel.
+
+### Security review of the server part (security reviewer, 2026-11-19, `feat/ha-files-ui` @ a2bfb3d)
+
+**Approved once CB9 is in. It is small.** Code text read only; nothing was
+run. The UI is for the operator review.
+
+**The Test boundary: confirmed, with CB9.**
+* Skipping only the agent MCP-session requirement is right for an
+  operator click.
+* The test needs `_check_session`. It picks only an enabled `read_only`
+  tool with no required parameters, and runs it through `_run_tool` with
+  an explicit `session_id=''`, so it never inherits or lands in an agent's
+  session.
+* The freeze, `evaluate_call`, the gate, the handler and the call row all
+  run.
+
+**CB9 (should): name the operator, and make the helper refuse writes on
+its own.**
+* With no agent in context, `_run_tool` records the call as `mcp`
+  (`AGENT_LABEL`), the same label as a legacy unauthenticated MCP call.
+  `evaluate_call(None, ...)` also takes the no-agent path.
+* So an operator Test is indistinguishable from agent traffic in History
+  and the audit log.
+* **Fix:**
+  * Pass an explicit actor such as `operator-test` through to the call
+    row and the audit.
+  * Have `run_tool_for_operator_test` itself refuse a tool that is not
+    `read_only` (or that is `not_implemented`). The endpoint's selection
+    is then not the only thing standing between a future caller and an
+    ungated write under no agent.
+
+**The `ha_ssh` form holds.**
+* The key must be an unencrypted OpenSSH key. `ssh-keygen -y -P ''` fails
+  on a passphrase, and on anything that is not real key material.
+* The key is never echoed: the list returns `secret_set` and an empty
+  `secret_suffix`, so not even the tail comes back.
+* The user is checked against `[a-z_][a-z0-9_-]{0,31}`, and the port
+  against 1–65535.
+* The HA link must name an enabled `ha` integration, or it auto-links
+  when there is exactly one.
+
+**`dismiss-join` holds.** It is operator-only, clears `pending_json` in
+one `BEGIN IMMEDIATE`, bumps the version, audits the dismissed entities,
+and grants nothing.
+
+**Nits:**
+* **An uncaught error on edit.** The update path calls
+  `validate_private_key(secret)` outside the `try`, so a bad key on edit
+  is an uncaught `HaConfigError` (a 500) instead of a 400. It is also
+  validated twice. Drop the bare call; `_validate_ssh_fields` already
+  does it.
+* **A kind change.** Changing a row's kind to `ha_ssh` keeps whatever
+  secret it had without validating it. Require a key when the kind
+  becomes `ha_ssh`.
+* **A disabled HA link.** A saved link to an HA integration that is later
+  disabled makes every edit of the `ha_ssh` row a 400. Allow the edit and
+  show the link as broken.
+* **The key on disk.** `validate_private_key` writes the key to a 0600
+  file in the temp directory for the check. That is acceptable. Prefer a
+  private directory (`tempfile.mkdtemp()`, 0700), or
+  `ssh-keygen -y -f /dev/stdin` where the build supports it.
+* **Dismiss does not last.** The dismissed members are still in the
+  label, so the next refresh offers them again. If "dismiss" should mean
+  "stop asking", store the dismissed registry ids on the row and skip
+  them, until they leave and rejoin.
+
+### Answer: include rule for pre-existing includes (2026-11-19)
+
+**Yes to the proposal, with four conditions. Not the operator
+allowlist.**
+* An allowlist would widen what an agent can *add* (for example a new
+  `!include_dir_named themes` under another key).
+* Grandfathering widens nothing, provided "already present" cannot be
+  laundered.
+* The preflight is a structural scan, not a YAML parser, so the
+  conditions are stated in terms it can check.
+
+1. **Identity is the whole line, not the (tag, target) pair.**
+   * An include occurrence is grandfathered only when its line, after
+     the comment is stripped and including its indentation and its own
+     key text, is byte-identical to a line in the current content of the
+     **same file**, under the same top-level key.
+   * Count occurrences as a multiset, so a grandfathered line cannot be
+     duplicated.
+   * A pair that moves to another key, or deeper or shallower in the
+     file, is a new include and gets the packages/ rule.
+   * The tag and target alone are not enough: `!include_dir_merge_named
+     themes` placed under another integration changes what that
+     directory's YAML *means* to HA.
+2. **No laundering through anchors.**
+   * Refuse a write in which a line carrying an include tag also carries
+     an `&anchor`.
+   * Refuse a write that adds a `*alias` or `<<:` merge key referring to
+     such an anchor.
+   * The simplest form: in a file that contains a grandfathered include,
+     refuse any new `&`, `*` or `<<:` token.
+   * Otherwise `themes: &t !include_dir_merge_named themes` keeps its
+     pair, and `other: *t` re-homes the directory without a new tag.
+3. **The base is exactly the bytes the write is bound to.**
+   * Compare against the content whose sha256 equals the request's
+     `expect_hash`, read for this write, and compare per file. A
+     different file's includes never count.
+   * A new file has an empty base, so every include in it is new.
+   * The remote side still refuses when the file no longer has that hash.
+4. **Make it visible.**
+   * When a write passes because of grandfathered includes, list them on
+     the approval card ("unchanged includes outside packages/: themes")
+     and in the audit row.
+   * `secrets.yaml`, `!secret`, `!env_var` and the other refusals are
+     unchanged: grandfathering applies only to the
+     `!include`/`!include_dir_*` target rule.
+
+The property still holds for anything the agent introduces. What it
+cannot introduce, it can only leave where the operator put it.
