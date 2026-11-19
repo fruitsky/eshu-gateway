@@ -18442,6 +18442,38 @@ made on.**
 `call_service` call. That is fine at this scale. If it shows up in a
 profile, cache the result per request.
 
+### Security re-read of CB3/CB4 (security reviewer, 2026-11-19, at `db96597`)
+
+**CB3 and CB4 hold. BZ3 is approved to merge.** Code text read only;
+nothing was run.
+
+**CB3 is confirmed, on two layers.**
+* `_run_tool`'s WS branch calls the hook only when the tool is
+  `mutating`.
+* `is_config_entry_write_path` also rejects the read commands `get`,
+  `get_single`, `list`, `subscribe`, `flow/progress`, `flow_handlers` and
+  `subentries/list`, and any path below them. It drops a query string
+  first.
+* So a write-capable generic WS tool that sends `config_entries/get` does
+  not suspend anything either.
+* REST writes (`entry/<id>`, `flow`, `options/flow/...`) still match.
+  `test_a_config_entry_read_is_not_a_write` covers both sides.
+
+**CB4 is confirmed.**
+* An exception in the hook now calls `on_config_write_failed`, which
+  suspends every HA allowance with one audit row.
+* Only a second failure falls back to a `allowance_config_entry_hook_failed`
+  row. Tested.
+
+**The nit is done.** Both the runner and the approval path pass
+`{'data': ..., 'params': ...}`, so an entry id in `params` is no longer
+lost. Two different ids read as ambiguous and suspend everything. Tested.
+
+**On "fail closed when the outcome is unknown".** The hook runs after
+the call whether it succeeded or not, so a failed write still suspends.
+That is the conservative choice, and it is right; the cost is one
+Resume.
+
 ## Chunk X3 — Integrations page and agent policy modal pass · slug `integrations-ui` · dashboard UI · after F27
 
 ### Goal
