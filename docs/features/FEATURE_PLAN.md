@@ -22670,6 +22670,59 @@ not a gap the operator can be surprised by. Adding a hash of the
 normalised policy and web sections would make "what was previewed is
 what was applied" literal for the whole document.
 
+### Security review of Stage 3 Part 1 (security reviewer, 2026-11-19, at `978bcef`)
+
+**Approved, for the Part 1 commit only.** Code text read only; nothing was
+run. The UI commits on this branch are for a later read.
+
+**The ceiling rule now lives in one place.**
+* `ceiling_allows(..., conn=None)` and its transaction form both call
+  `_ceiling_denied`. With a connection, the operator words and the
+  enabled flag are read on that transaction.
+* `_ceiling_allows_conn` is now a thin wrapper.
+* The behaviour is the same as `is_destructive`: the built-in words plus
+  the operator words, and a catalogue exemption never covers an operator
+  word.
+* **Nit.** `is_destructive` itself still has its own copy of the loop,
+  used by `apply_ceiling`. Make it call `_ceiling_denied`, so there is
+  truly one rule.
+
+**Protection now works while HA is unreachable.**
+* Only a 503 from the registry read takes the new path. The entity id is
+  stored with an empty registry id, and matching permissions are suspended
+  by entity id in the same transaction.
+* A reachable HA that does not know the entity is still a 400.
+* Both refreshes call `_backfill_protected_registry`, which fills only
+  empty ids, only for entities HA now knows, and audits each fill.
+* **Nit.** The backfill reads the registry id under the *current* entity
+  id. If the device was renamed during the outage, the id stays empty;
+  if another device took the name, it captures the wrong device. Both
+  leave the protection no weaker than entity-id-only, and the audit row
+  shows what was filled.
+  * After a fill, sweep live permissions by the filled registry id and
+    suspend any that hold it under another entity id, the same as the
+    add path.
+
+**The S5 preview hash covers every section.**
+* `_section_fingerprint` hashes the tools, SSH and websites sections as
+  they will be written, after validation and after absent fields are
+  merged from the stored policy.
+* The same value goes into the hash inside the transaction. A change to
+  the SSH hosts after the preview is a 409, and that is tested.
+
+**Risk confirmation on a whole-document apply: keep it as you propose.**
+* An apply re-states every permission, so requiring the confirmation for
+  an already-allowed risky item is consistent with "the document is what
+  gets written".
+* The hash already binds the risk list, so the confirmation is tied to
+  what was shown.
+* The UI should list risky items in two groups, "new or changed" and
+  "already allowed, confirm again". A reflexive click is the failure
+  mode, and a separate group keeps the new items visible.
+* Do not scope the ack to added or changed items only. A resumed or
+  re-pinned item is "changed" in ways an operator may not read as new
+  risk.
+
 ### Security review of the window-token audit fix (`fix/window-token-audit` @ 91cdf82)
 
 **Approved to merge.** Code text read only; nothing was run.
