@@ -10712,6 +10712,87 @@ Three findings from the operator's own HA, reached through Hermes.
   `masked: true`. The call row's keys-only digest is called
   `masked_sha256`.
 
+### Security: includes follow-up review (0a06f72)
+
+Read as code text only; nothing was run.
+
+**Approved once CB10 is fixed. CB11 and the parent path are should-fixes
+and can come in the same commit.**
+
+**What holds.**
+
+* The base is the content `write_config` reads and hash-checks against
+  `expect_hash`, before the preflight. A failed read refuses the write.
+* A new file has an empty base.
+* The match key is `(top-level key, comment-stripped line)`, counted with
+  a `Counter`, so a line cannot be duplicated.
+* `_check_target(scope=False)` relaxes only the `packages/` rule. Absolute,
+  dot-segment and `secrets.yaml` targets still raise first.
+* The approval card and the audit row both name the grandfathered
+  targets.
+* The pin fingerprint in `ha_config_list` and the `secrets.yaml` read
+  metadata (`sha256: null`, the real size, `masked_sha256` in the call
+  row) are fine.
+
+**CB10 (must). The block-scalar skip ends on the wrong indentation.**
+
+This is in `scan()` and is copied into `_include_occurrences` and
+`_anchor_tokens`.
+
+* All three walkers treat any column-0 line whose value starts with `|`
+  or `>` as a block-scalar opener. They then skip every deeper line.
+* That is right for a top-level `key: |`.
+* It is wrong when the column-0 line is a sequence entry (`- key: |`).
+  YAML measures that scalar's content from the entry's key, not from
+  column 0. Lines that the walkers skip can be ordinary keys of the same
+  entry.
+* Any tag on those lines is never checked: include targets, `!env_var`
+  and `secrets.yaml`.
+* `automations.yaml` and `scenes.yaml` have a top-level sequence and are
+  writable.
+* This is older than this branch. I missed it when I reviewed F11.
+
+Fix:
+
+* Only open a block scalar for a column-0 line that is a plain mapping
+  key, not one starting with `-` or `?`. Otherwise scan the following
+  lines as normal. That only makes the check stricter.
+* Better still, have one walker shared by `scan()`, `_include_occurrences`
+  and `_anchor_tokens`, so their skips cannot drift apart.
+* Add a regression test for a top-level sequence file. Keep its fixture
+  out of this public plan.
+
+**CB11 (should). Lines carrying anchors may not move.**
+
+`_anchor_tokens` compares counts per token, so moving an existing `&name`
+to another line keeps the count and passes.
+
+* In a file that already holds an anchor and an alias, the anchor can be
+  moved onto the parent of a grandfathered include. The existing alias
+  then copies that include to wherever the alias sits.
+* Fix: in a file with a grandfathered include, give anchor, alias and
+  `<<:` lines the same treatment as include lines. Each must be
+  byte-identical to a line under the same key in the base, counted.
+* This is my condition 2 applied to lines, not to token counts.
+
+**Answer: use the full parent path.**
+
+Match on `(parent path, line)`, where the parent path is the chain of
+ancestor key lines from the top-level key down.
+
+* `(top-level key, line)` lets a line nested two or more levels deep move
+  between parents at the same indentation.
+* That changes what HA does with the include, for example from one
+  integration's sub-block to another, inside the same top-level key.
+* The walker already tracks indentation, so keeping a stack of
+  `(indent, key line)` is cheap.
+* Key the path on the exact comment-stripped ancestor lines, so a renamed
+  parent counts as a move.
+* Treat a sequence entry (`- `) as a path element, so an include cannot
+  move between list items.
+* Nested block scalars that are scanned as ordinary lines stay as they
+  are, because that only makes the check stricter.
+
 ## Chunk F12 — SSH through Eshu over MCP (`ssh_exec`) · slug `ssh-exec` · dashboard (+ small gateway change)
 
 > **Design first** (push a design note only, wait for approval). Needs the
