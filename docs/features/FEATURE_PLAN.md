@@ -23097,6 +23097,13 @@ device grid and the Agents-tab banner ("N waiting · Review"). Accept calls
 clears `pending_json` through the new audited `dismiss-join` endpoint. The
 Rules tab carries a short "How permissions work" panel.
 
+**Deferred after the major release.** Agent-token rename is not part of this
+branch. Names are still live lookup keys (sessions, the pre-check, pending
+calls, the gateway SSH request's approval decision, web_fetch principals and
+`principal_allow`), so its own chunk must first move those lookups to agent id,
+or refuse any name that ever existed. Creation still refuses reserved names,
+and startup audits any agent that already carries one.
+
 ### Security review of the server part (security reviewer, 2026-11-19, `feat/ha-files-ui` @ a2bfb3d)
 
 **Approved once CB9 is in. It is small.** Code text read only; nothing was
@@ -23411,3 +23418,73 @@ of audit rows.**
   migration.
 * **Pruning.** `_retired_lookup_audit` is never pruned. Drop entries
   older than the window when an entry is written, as for BZ2's dictionary.
+
+### `fix/ha-files-nits` (2026-11-19)
+
+Security's three non-blocking nits on the merged `feat/ha-files-ui` server
+part.
+
+* **Quiet dismissed refresh.** `refresh_labels` now writes the row, bumps the
+  config version and records `allowance_label_refresh` only when the stored
+  pins, pending list or dismissed list actually changed. A dismissed joiner
+  still in the label is not rewritten on every five-minute refresh.
+* **Empty dismissed registry ids expire.** A dismissal saved with no
+  `registry_id` is dropped once the entity leaves the label or the registry
+  supplies an id; a known id is still compared normally.
+* **Reserved agent names.** `operator-test`, `operator` and `mcp` are refused
+  case-insensitively when an agent is created or renamed. `PATCH
+  /api/agents/{id}` renames one token and audits `agent_token_renamed`.
+
+### Security: `fix/ha-files-nits` review (548fb9d)
+
+Read as code text only; nothing was run.
+
+**Approved once CB14 is fixed.**
+
+**What holds.**
+
+* **Refresh.** The refresh now writes, bumps the version and audits only
+  when the pins, `pending`, the dismissals or the HA pin changed. A
+  waiting joiner that leaves the label, or becomes protected, is dropped
+  from `pending`.
+* **Dismissal expiry.** A dismissal with an empty registry id expires
+  when the entity leaves the label or the registry supplies an id. A
+  known id expires when it differs.
+* **Reserved names.** `validate_agent_name` refuses `operator-test`,
+  `operator` and `mcp`, in any case, at creation.
+
+**CB14 (must). The new rename endpoint changes what an agent name points
+to.** `PATCH /api/agents/{id}` is new; the nit asked only for a check at
+creation. Agent names are still a live lookup key in several places:
+
+* sessions and `_agent_standing` in `core/checks.py`;
+* pending calls, through `_caller_agent`;
+* the gateway SSH request's `agent` field, which sets `force_jit`;
+* web_fetch principals and each tool's `principal_allow`;
+* every audit and call row.
+
+Renaming breaks those links in both directions:
+
+* An agent renamed to a deleted agent's old name inherits that agent's
+  open sessions, pending calls and principal allowlist entries.
+* The renamed agent's own existing references become "unknown".
+
+Fix: drop rename from this branch. If rename is wanted, give it its own
+chunk, and first move those lookups from name to id, or refuse any name
+that ever existed.
+
+Nit: an agent created before this change can already carry a reserved
+name. List any such agent once at startup in an audit row, so the
+operator can replace it with a new agent.
+
+### Security: CB14 confirmed (e4c2165)
+
+Read as code text only; nothing was run. **Approved to merge.**
+
+* The rename endpoint, its payload model and `rename_agent_token` are
+  gone; a test checks that `PATCH` returns 405.
+* At startup, `list_reserved_agent_names` matches names case-insensitively
+  with bound parameters. One `agent_reserved_name_present` audit row
+  names any match; nothing is renamed.
+* The reserved-name check at creation and the quiet refresh from 548fb9d
+  are unchanged.

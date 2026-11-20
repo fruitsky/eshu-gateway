@@ -88,3 +88,49 @@ class TestAgentApi:
                         follow_redirects=False)
         agent = get_agent_by_token(created['token'])
         assert agent['last_used_at'] > 0
+
+
+class TestReservedAgentNames:
+    def test_reserved_names_are_refused_on_create_case_insensitively(self, auth_client):
+        for name in ('operator-test', 'Operator', 'MCP'):
+            r = auth_client.post('/api/agents', json={'name': name})
+            assert r.status_code == 400, (name, r.text)
+
+    def test_the_rename_endpoint_is_gone(self, auth_client):
+        agent_id = _create(auth_client, 'household')['id']
+        r = auth_client.patch('/api/agents/%d' % agent_id,
+                              json={'name': 'household-2'})
+        assert r.status_code == 405
+
+
+
+class TestReservedNameStartupAudit:
+    def test_existing_reserved_names_get_one_audit_row(self, temp_db):
+        from db.core import db_conn
+        from db.audit import get_audit_log
+        import main
+
+        with db_conn() as conn:
+            conn.execute(
+                "INSERT INTO agent_tokens (name, token_hash, created_at) "
+                "VALUES ('Operator', 'h1', 0), ('mcp', 'h2', 0), "
+                "('household', 'h3', 0)")
+            conn.commit()
+        names = main._audit_reserved_agent_names()
+        assert names == ['Operator', 'mcp']
+        rows = [row for row in get_audit_log()
+                if row['event_type'] == 'agent_reserved_name_present']
+        assert len(rows) == 1
+        assert 'Operator' in rows[0]['details']
+        assert 'mcp' in rows[0]['details']
+        assert 'household' not in rows[0]['details']
+
+    def test_no_reserved_names_writes_no_audit_row(self, temp_db):
+        from db.audit import get_audit_log
+        import main
+        from db.agent_tokens import create_agent_token
+
+        create_agent_token('household')
+        assert main._audit_reserved_agent_names() == []
+        assert not [row for row in get_audit_log()
+                    if row['event_type'] == 'agent_reserved_name_present']

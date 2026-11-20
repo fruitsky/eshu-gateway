@@ -2154,32 +2154,44 @@ def refresh_labels(actor='refresh'):
         # a later rejoin is offered again.
         dismissed = [d for d in _json.loads(row.get('dismissed_json') or '[]')
                      if isinstance(d, dict) and d.get('entity_id')]
-        kept_dismissed = [
-            d for d in dismissed
-            if d['entity_id'] in current and
-            (not d.get('registry_id') or
-             d.get('registry_id') == (current[d['entity_id']].get('registry_id') or ''))]
+        def _keep_dismissed(d):
+            entity = d['entity_id']
+            if entity not in current:
+                return False
+            old_reg = d.get('registry_id') or ''
+            now_reg = current[entity].get('registry_id') or ''
+            # An empty stored id expires as soon as the registry can supply
+            # one. A known id expires when it differs.
+            if not old_reg:
+                return not now_reg
+            return (not now_reg) or old_reg == now_reg
+        kept_dismissed = [d for d in dismissed if _keep_dismissed(d)]
         dismissed_ids = {d['entity_id'] for d in kept_dismissed}
         offered = [e for e in sorted(joined) if e not in dismissed_ids]
         dismissed_changed = kept_dismissed != dismissed
-        if not left and not joined and not pin_needed and not dismissed_changed:
-            continue
+        old_pending = _json.loads(row.get('pending_json') or '[]')
         pins = [stored[e] for e in stored if e not in left]
-        pending = [p for p in _json.loads(row.get('pending_json') or '[]')
-                   if p.get('entity_id') not in left]
+        pending = [p for p in old_pending
+                   if p.get('entity_id') not in left
+                   and p.get('entity_id') in current]
         have = {p['entity_id'] for p in pending}
         for e in offered:
             if e not in have:
                 pending.append(current[e])
+        pending_changed = pending != old_pending
+        if not (left or pending_changed or pin_needed or dismissed_changed):
+            # A dismissed joiner is still in `joined`, but nothing changed.
+            # Do not rewrite the row, bump the config version or audit.
+            continue
         with db_conn() as conn:
             conn.execute('BEGIN IMMEDIATE')
             if pin_needed:
                 _write_ha_pin(conn, row['id'], pin[0], pin[1])
-            if left or joined or dismissed_changed:
+            if left or pending_changed or dismissed_changed:
                 _write_entity_list(conn, row, pins, pending, kept_dismissed)
             _bump_config(conn, row['agent_id'])
             conn.commit()
-        if left or joined or dismissed_changed:
+        if left or pending_changed or dismissed_changed:
             record_audit_event(
                 'allowance_label_refresh',
                 details='allowance #%d: dropped %s; held %s; dismissed-kept %s; '

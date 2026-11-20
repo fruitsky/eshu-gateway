@@ -3,6 +3,24 @@ import secrets
 import time
 from db.core import db_conn
 
+RESERVED_AGENT_NAMES = frozenset({'operator-test', 'operator', 'mcp'})
+
+
+def validate_agent_name(name: str) -> str:
+    """Return the trimmed name, refusing the operator/reserved labels.
+
+    These labels appear in call rows and audit rows, so an agent token with
+    one of them would be indistinguishable from the operator Test or a legacy
+    unauthenticated MCP call.
+    """
+    value = str(name or '').strip()
+    if not value:
+        raise ValueError('Name is required')
+    if value.lower() in RESERVED_AGENT_NAMES:
+        raise ValueError(
+            "The agent name '%s' is reserved for operator calls" % value)
+    return value
+
 
 def init_agent_tokens_tables(cursor):
     cursor.execute('''
@@ -24,6 +42,7 @@ def _hash_token(raw_token: str) -> str:
 def create_agent_token(name: str):
     """Mint a new agent token. The raw token is returned exactly once; only its
     SHA-256 hash is persisted. Names are unique so audit rows are unambiguous."""
+    name = validate_agent_name(name)
     raw = secrets.token_hex(32)
     with db_conn() as conn:
         cursor = conn.cursor()
@@ -55,6 +74,21 @@ def get_agent_by_token(raw_token: str):
         cursor.execute('SELECT * FROM agent_tokens WHERE token_hash = ?', (_hash_token(raw_token),))
         row = cursor.fetchone()
         return dict(row) if row else None
+
+
+def list_reserved_agent_names():
+    """Existing agents whose names are reserved for operator labels.
+
+    Creation refuses these names, but an agent made before that check can
+    still carry one. The caller audits the list; nothing is renamed.
+    """
+    with db_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            'SELECT name FROM agent_tokens WHERE lower(name) IN (%s) '
+            'ORDER BY id ASC' % ','.join('?' * len(RESERVED_AGENT_NAMES)),
+            tuple(sorted(RESERVED_AGENT_NAMES)))
+        return [row['name'] for row in cursor.fetchall()]
 
 
 def get_agent_by_name(name: str):

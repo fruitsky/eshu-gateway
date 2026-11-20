@@ -84,7 +84,7 @@ from database import (
     create_pending_call, get_pending_calls, get_pending_call, set_pending_call_status,
     mask_sensitive_args, strip_resolved_payloads,
     create_agent_token, get_agent_tokens, get_agent, get_agent_by_name,
-    revoke_agent_token, delete_agent_token,
+    list_reserved_agent_names, revoke_agent_token, delete_agent_token,
 )
 from db.agent_policies import (
     DEFAULT_SSH_MODE, agent_has_activity, get_agent_policy, set_agent_policy,
@@ -573,11 +573,23 @@ async def security_headers_middleware(request: Request, call_next):
         response.headers.setdefault("X-Frame-Options", "DENY")
     return response
 
+def _audit_reserved_agent_names():
+    """One audit row for agents created before reserved names were refused."""
+    names = list_reserved_agent_names()
+    if names:
+        record_audit_event(
+            "agent_reserved_name_present",
+            details="Reserved agent names still exist; replace these agents: %s"
+                    % ", ".join(names))
+    return names
+
+
 @app.on_event("startup")
 def on_startup():
     # Migrate old Hermes database if present (MUST run before init_db, which creates eshu.db)
     _migrate_legacy_db()
     init_db()
+    _audit_reserved_agent_names()
     # Fail-closed config check: an enabled web-fetch policy with no allow
     # entries denies everything, so say so loudly at startup.
     for _wf in get_web_fetch_policies():
