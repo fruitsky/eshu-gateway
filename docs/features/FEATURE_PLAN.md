@@ -23232,3 +23232,54 @@ Nits:
   allowed, the Devices tab shows one line linking to Tools.
 * The browser check and 18 screenshots cover these states, including the
   no-call-service line.
+
+### Security: CB15 confirmed (4d89569)
+
+Read as code text only; nothing was run. The UI was not reviewed beyond
+the endpoints it calls. **The server part is approved to merge.**
+
+**The old and new `should_gate` in `_run_tool` agree.** I checked every
+case for a mutating tool. `admin_config_write` is folded into `always`
+in the old code.
+
+| Case | Old | New |
+|---|---|---|
+| `always_gate`, any approval | gate | gate (`always`) |
+| agent `gated` | gate | gate |
+| agent `ungated`, not always, no admin write | no gate | no gate |
+| agent `ungated` with an admin config write | gate | gate (`admin_config_write` forces it) |
+| inherit, `gate_mode: all` | gate | gate |
+| inherit, `destructive` | `destructive` | `None`, then `destructive` |
+| inherit, any other mode | gate only for an admin write | the same |
+| no agent | `approval_mode` gives `inherit` | the same |
+
+* The ignored-ungated audit row still fires when `ungated` meets
+  `always` or an admin write.
+* The F27 allowance branch reads the same approval value as before.
+* Reads still return before the gate, so `outcome: run` with
+  `should_gate: False` matches them.
+* `evaluate_call` (`principal_allow`, then the pattern allowlist) still
+  runs before the decision is used, so the decision's `none` outcome
+  never reaches the gate.
+* The summary builds the agent with its policy and calls the same
+  function, so wildcard allow and approval rows count correctly.
+* Locks, valves, buttons, scenes, scripts and vacuums are now
+  categorised, and a risky entity is always `useful`.
+
+**On the freeze wording.** The property test covers the decision, and
+that holds: the decision is identical whether or not the dashboard is
+frozen. At run time, `_dry_run_exempt` still sets `should_gate = False`
+for a handler dry-run after the decision, frozen or not. That is
+unchanged from before and correct, because a dry-run writes nothing.
+The test name should not suggest that a dry-run is gated under the
+freeze.
+
+Nits:
+
+1. **Return `should_gate: True` for `none`.** `static_tool_decision`
+   returns `should_gate: False` for that outcome, which is harmless only
+   because `evaluate_call` refuses first. Return `True` instead, or have
+   `_run_tool` refuse when `decision['allowed']` is false, so a future
+   reorder fails closed.
+2. **`risky` depends on `device_class`.** Treat the `lock` domain as
+   risky in its own right, since most locks carry no device class.
