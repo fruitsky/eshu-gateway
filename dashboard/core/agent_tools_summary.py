@@ -185,13 +185,32 @@ def _files_parent(integration, enabled_ha):
     return ''
 
 
+DISPLAY_BY_KIND = {
+    'commute': 'Commute',
+    'trains': 'TfL',
+    'webfetch': 'Web fetch',
+}
+
+
+def _display_name(name, kind):
+    """A curated integration display name, else the name with a capital."""
+    known = DISPLAY_BY_KIND.get((kind or '').lower())
+    if known:
+        return known
+    text = str(name or '')
+    return text[:1].upper() + text[1:] if text else text
+
+
 def _tile(name, kind, total=0, run=0, ask=0, depends=0, frozen=0,
-          waiting=0, extra='', in_use=None, virtual=False):
-    none = max(0, total - run - ask - depends - frozen)
+          waiting=0, extra='', in_use=None, virtual=False, display=None):
+    # `frozen` is a state, not an outcome: a frozen write is still counted in
+    # its run/ask/depends bucket so the frozen and unfrozen decisions match.
+    none = max(0, total - run - ask - depends)
     usable = total - none
     return {
         'key': name,
         'name': name,
+        'display': display or _display_name(name, kind),
         'kind': kind,
         'kind_words': _kind_words(kind),
         'mark': _mark(name, kind),
@@ -240,34 +259,40 @@ def build(agent_id):
 
     tiles = []
     tool_outcomes = {}
+    frozen_tools = {}
 
     def _count(owner, tools):
         outcomes = []
+        frozen_count = 0
         for tool in tools:
             namespaced = '%s_%s' % (
                 safe_ident(owner['name']).lower(), tool['name'])
             decision = static_tool_decision(
                 agent, owner, tool['name'], tool, frozen=frozen)
             tool_outcomes[namespaced] = decision['outcome']
+            frozen_tools[namespaced] = bool(decision['frozen'])
+            if decision['frozen']:
+                frozen_count += 1
             outcomes.append(decision['outcome'])
-        return outcomes
+        return outcomes, frozen_count
 
     for integration in integrations:
         kind = (integration.get('kind') or 'custom').lower()
         if kind == 'ha_ssh' and integration not in standalone_files:
             continue
         tools = [t for t in get_tools(integration['id']) if t.get('enabled')]
-        outcomes = _count(integration, tools)
+        outcomes, frozen_count = _count(integration, tools)
         if kind == 'ha':
             for child in files_by_parent.get(integration['name'], []):
                 child_tools = [t for t in get_tools(child['id'])
                                if t.get('enabled')]
-                outcomes.extend(_count(child, child_tools))
+                child_outcomes, child_frozen = _count(child, child_tools)
+                outcomes.extend(child_outcomes)
+                frozen_count += child_frozen
         total = len(outcomes)
         run = outcomes.count('run')
         ask = outcomes.count('ask')
         depends = outcomes.count('depends')
-        frozen_count = outcomes.count('frozen')
         extra = ''
         in_use = None
         waiting_count = 0
@@ -286,11 +311,11 @@ def build(agent_id):
     # Unlinked Files rows are integrations too; their tools still count.
     for integration in standalone_files:
         tools = [t for t in get_tools(integration['id']) if t.get('enabled')]
-        outcomes = _count(integration, tools)
+        outcomes, frozen_count = _count(integration, tools)
         tiles.append(_tile(
             integration['name'], 'ha_ssh', len(outcomes),
             outcomes.count('run'), outcomes.count('ask'),
-            outcomes.count('depends'), outcomes.count('frozen')))
+            outcomes.count('depends'), frozen_count))
 
     ssh = (config.get('ssh') or {})
     hosts = ssh.get('hosts') or []
@@ -360,6 +385,7 @@ def build(agent_id):
         'summary': summary,
         'frozen': frozen,
         'tool_outcomes': tool_outcomes,
+        'frozen_tools': frozen_tools,
         'totals': {
             'tools': tools_total,
             'run': run_total,

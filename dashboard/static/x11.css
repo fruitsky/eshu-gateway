@@ -653,3 +653,8 @@
     min-height: 44px;
   }
 }
+
+#x11-root .x11-remove-access {
+  display: flex; justify-content: flex-end; margin-top: 22px;
+  padding-top: 12px; border-top: 1px solid var(--rule-weak);
+}

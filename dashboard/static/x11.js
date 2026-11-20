@@ -163,7 +163,6 @@
       }
     }
     if (tool && tool.read_only) return 'run';
-    if (S.summary && S.summary.frozen) return 'frozen';
     var approval = approvalFor(name, tool, tools.approval);
     if (tool && tool.always_gate) return 'ask';
     if (approval === 'gated') return 'ask';
@@ -172,6 +171,9 @@
     if (gate === 'all') return 'ask';
     if (gate === 'destructive') return 'depends';
     return 'run';
+  }
+  function isFrozen(tool) {
+    return !!(S.summary && S.summary.frozen && tool && !tool.read_only);
   }
 
   function countsFor(cfg, integrations) {
@@ -185,7 +187,7 @@
       if (o === 'ask') ask += 1;
       else if (o === 'run') run += 1;
       else if (o === 'depends') depends += 1;
-      else if (o === 'frozen') frozen += 1;
+      if (isFrozen(t)) frozen += 1;
     });
     return { total: total, ask: ask, run: run, depends: depends,
       frozen: frozen };
@@ -345,6 +347,21 @@
   function actionWords(domain, service) {
     var text = (service || '').replace(/_/g, ' ');
     return text.charAt(0).toUpperCase() + text.slice(1);
+  }
+  function deviceTypeWords(domain) {
+    return ({ switch: 'plugs and switches', light: 'lights',
+      cover: 'covers', climate: 'heating and climate', fan: 'fans',
+      media_player: 'media players', lock: 'locks', valve: 'valves',
+      button: 'buttons', scene: 'scenes', script: 'scripts',
+      vacuum: 'vacuums', sensor: 'sensors' })[domain] ||
+      String(domain || 'devices').replace(/_/g, ' ') + 's';
+  }
+  function permissionTitle(p) {
+    var action = actionWords(p.domain, p.service);
+    var type = deviceTypeWords(p.domain);
+    // `open_cover` names the noun too; the card should say "Open covers".
+    action = action.replace(/ (cover|valve)$/i, '');
+    return action + ' ' + type;
   }
   function pinnedIdsFor(p) {
     if (p.label_id) {
@@ -970,27 +987,6 @@
     if (!tool) return false;
     return outcomeFor(tool.name, tool, S.draft) !== 'none';
   }
-  function ensureCallServiceAllowed() {
-    var tool = callServiceTool();
-    if (!tool) return;
-    var tools = S.draft.tools;
-    if ((tools.mode || 'all') === 'allowlist' && (tools.allow || []).indexOf(tool.name) === -1) {
-      tools.allow = (tools.allow || []).concat([tool.name]);
-    }
-  }
-  function removeCallService() {
-    var tool = callServiceTool();
-    if (!tool) return;
-    var tools = S.draft.tools;
-    if ((tools.mode || 'all') === 'all') {
-      tools.mode = 'allowlist';
-      tools.allow = toolList().map(function (t) { return t.name; })
-        .filter(function (n) { return n !== tool.name; });
-    } else {
-      tools.allow = (tools.allow || []).filter(function (n) { return n !== tool.name; });
-    }
-    delete (tools.approval || {})[tool.name];
-  }
   function permissionCovers(p, entity) {
     if (!livePermission(p)) return false;
     if (p.label_id) {
@@ -1188,6 +1184,14 @@
     }).join('');
   }
   function devicesTabHtml(group) {
+    if (!callServiceAllowed()) {
+      var who = (S.agent && S.agent.name) || 'This agent';
+      return '<div class="x11-devices-tab" data-devices-tab data-no-call-service>' +
+        '<p class="x11-int-sentence">' + esc(who) +
+        ' can\u2019t control Home Assistant devices. ' +
+        '<a href="#" class="link-btn" onclick="x11IntegrationTab(\'tools\');return false;">' +
+        'Allow call service on the Tools tab</a>.</p></div>';
+    }
     var all = usefulDevices();
     var hidden = (S.devices || []).filter(function (d) { return !d.useful; });
     var rows = all.filter(function (d) { return filterMatches(d, S.deviceFilter); });
@@ -1216,7 +1220,7 @@
       (S.deviceHidden ? 'Hide them' : 'Show them') + '</button></div>';
     return '<div class="x11-devices-tab" data-devices-tab>' +
       '<p class="x11-int-sentence">Every device Home Assistant knows about, grouped by room. ' +
-      'Tap a pill to cycle not allowed \u2192 asks you \u2192 runs on its own.</p>' +
+      'Tap a pill to switch between asks you and runs on its own.</p>' +
       '<div class="x11-device-layout"><aside class="x11-device-rail" data-device-rail aria-label="Device filters">' +
       deviceRailHtml() + '</aside><div class="x11-device-main">' +
       '<div class="x11-device-chips" data-device-chips role="group" aria-label="Device filters">' + deviceFilterChips() + '</div>' +
@@ -1245,17 +1249,11 @@
       setNotice('The limits for all agents do not allow ' + domain + '.' + service + '.', 'warn');
       return;
     }
-    var state;
-    if (!callServiceAllowed()) state = 'none';
-    else if (hasAllowance(domain, service, entity)) state = 'run';
-    else state = 'ask';
-    if (state === 'none') {
-      ensureCallServiceAllowed();
-    } else if (state === 'ask') {
+    var state = hasAllowance(domain, service, entity) ? 'run' : 'ask';
+    if (state === 'ask') {
       if (!addAllowanceEntity(domain, service, entity)) return;
     } else {
       if (!removeAllowanceEntity(domain, service, entity)) return;
-      if (!permissions().filter(livePermission).length) removeCallService();
     }
     renderEditor();
     markDirty();
@@ -1283,7 +1281,7 @@
     var paused = p.suspended_at;
     return '<article class="x11-perm-card' + (paused ? ' x11-perm-paused' : '') +
       '" data-permission-card="' + i + '"><div class="x11-perm-card-head">' +
-      '<div><h3>' + esc(actionWords(p.domain, p.service)) + '</h3>' +
+      '<div><h3>' + esc(permissionTitle(p)) + '</h3>' +
       '<p class="x11-perm-source">' + esc(permissionSource(p)) + '</p></div>' +
       '<button type="button" class="btn btn-muted btn-xs" data-edit-permission="' + i +
       '" onclick="x11EditPermission(' + i + ')">Edit</button></div>' +
@@ -1296,7 +1294,7 @@
           '<span class="x11-muted">Resume from Tools after the next refresh.</span>') + '</div>' : '') +
       (S.editingPermission === i ? '<div class="x11-perm-edit">' +
         actionHeadHtml({ id: p.domain + '.' + p.service, domain: p.domain,
-          service: p.service, label: actionWords(p.domain, p.service) }) +
+          service: p.service, label: permissionTitle(p) }) +
         permEditor(p, i) + '</div>' : '') + '</article>';
   }
   function runsTabHtml(group) {
@@ -1360,7 +1358,7 @@
     var ledger = tiles.map(function (t) {
       return '<a class="x11-ledger-row" href="' + attr(tileHref(t)) + '" data-ledger="' + attr(t.name) + '">' +
         '<span class="x11-ledger-name"><span class="x11-tile-mark" aria-hidden="true">' + esc(t.mark) + '</span>' +
-        '<span><b>' + esc(t.name) + '</b><span class="x11-ledger-kind">' + esc(t.kind_words) + '</span></span></span>' +
+        '<span><b>' + esc(t.display || t.name) + '</b><span class="x11-ledger-kind">' + esc(t.kind_words) + '</span></span></span>' +
         '<span class="x11-ledger-bar">' + accessBar(t.run, t.ask, t.none, tileBarLabel(t), t.depends, t.frozen) + '</span>' +
         '<span class="x11-ledger-count">' + t.run + ' run \u00b7 ' + t.ask + ' ask' +
         (t.depends ? ' \u00b7 ' + t.depends +
@@ -1544,6 +1542,7 @@
   function decorateToolGroups(groups) {
     (groups || []).forEach(function (g) {
       var ns = String(g.integration || '').replace(/[^A-Za-z0-9_]/g, '_').toLowerCase();
+      g.display = displayNameFor(g);
       (g.tools || []).forEach(function (t) {
         t.gate_mode = g.gate_mode || 'destructive';
         t.namespace = ns;
@@ -1654,7 +1653,7 @@
         if (o === 'run') run += 1;
         else if (o === 'ask') ask += 1;
         else if (o === 'depends') depends += 1;
-        else if (o === 'frozen') frozen += 1;
+        if (isFrozen(tool)) frozen += 1;
       });
       var extra = '';
       var inUse = run + ask + depends + frozen > 0;
@@ -1669,8 +1668,9 @@
         kind_words: kindWords(g.kind), mark: markFor(g.integration, g.kind),
         total: tools.length, run: run, ask: ask,
         depends: depends, frozen: frozen,
-        none: Math.max(0, tools.length - run - ask - depends - frozen),
-        usable: tools.length - Math.max(0, tools.length - run - ask - depends - frozen),
+        display: displayNameFor(g),
+        none: Math.max(0, tools.length - run - ask - depends),
+        usable: tools.length - Math.max(0, tools.length - run - ask - depends),
         in_use: inUse, extra: extra, virtual: false,
       });
     });
@@ -1680,7 +1680,7 @@
     var sshAsk = hosts.length && ssh.mode !== 'normal' ? 1 : 0;
     out.push({ key: 'SSH', name: 'SSH', kind: 'ssh', kind_words: 'SSH',
       mark: 'SS', total: 1, run: sshRun, ask: sshAsk, depends: 0, frozen: 0,
-      none: 1 - sshRun - sshAsk, usable: sshRun + sshAsk,
+      display: 'SSH', none: 1 - sshRun - sshAsk, usable: sshRun + sshAsk,
       in_use: !!hosts.length, virtual: true,
       extra: hosts.length === 1 && hosts[0] === '*' ? 'Any gateway'
         : (hosts.length ? hosts.length + ' hosts' : 'No hosts yet') });
@@ -1689,7 +1689,7 @@
     out.push({ key: 'Websites', name: 'Websites', kind: 'websites',
       kind_words: 'Web', mark: 'WB', total: 1,
       run: web.enabled && sites ? 1 : 0, ask: 0, depends: 0, frozen: 0,
-      none: web.enabled && sites ? 0 : 1,
+      display: 'Websites', none: web.enabled && sites ? 0 : 1,
       usable: web.enabled && sites ? 1 : 0, in_use: !!web.enabled,
       virtual: true,
       extra: sites ? sites + ' sites allowed' : 'No sites allowed' });
@@ -1730,6 +1730,16 @@
       pulse: 'Health', webfetch: 'Web', commute: 'Commute', ha_ssh: 'Files',
       custom: 'Other', ssh: 'SSH', websites: 'Web' })[kind] || kind || 'Other';
   }
+  function displayNameFor(x) {
+    var known = { commute: 'Commute', trains: 'TfL', webfetch: 'Web fetch' };
+    var kind = String((x && x.kind) || '').toLowerCase();
+    if (known[kind]) return known[kind];
+    var name = String((x && (x.display || x.integration || x.name)) || '').trim();
+    return name ? name.charAt(0).toUpperCase() + name.slice(1) : name;
+  }
+  function displayOf(group) {
+    return displayNameFor(group || {});
+  }
   function markFor(name, kind) {
     var known = { 'Home Assistant': 'HA', 'Sonarr': 'SO', 'Radarr': 'RA',
       'Prowlarr': 'PR', 'Bazarr': 'BA', 'Jellyfin': 'JE', 'Seerr': 'SE',
@@ -1755,7 +1765,7 @@
       '</span>';
   }
   function tileBarLabel(t) {
-    if (!t.total) return t.name + ': no tools';
+    if (!t.total) return (t.display || t.name) + ': no tools';
     var label = t.run + ' of ' + t.total + ' tools run on their own, ' + t.ask +
       ' ask you first';
     if (t.depends) label += ', ' + t.depends + ' depend on the call';
@@ -1771,7 +1781,7 @@
       '" data-integration-tile="' + attr(t.name) + '" href="' + attr(tileHref(t)) + '">' +
       '<span class="x11-tile-top"><span class="x11-tile-mark" aria-hidden="true">' +
       esc(t.mark) + '</span><span class="x11-tile-kind">' + esc(t.kind_words) + '</span></span>' +
-      '<span class="x11-tile-name">' + esc(t.name) + '</span>' +
+      '<span class="x11-tile-name">' + esc(t.display || t.name) + '</span>' +
       '<span class="x11-tile-counts"><b>' + t.usable + '</b> of <b>' + t.total + '</b> tools</span>' +
       '<span class="x11-tile-outcomes">' + t.run + ' run \u00b7 ' + t.ask + ' ask' +
       (t.depends ? ' \u00b7 ' + t.depends +
@@ -1800,7 +1810,7 @@
     var filtered = tiles.filter(function (t) {
       if (S.tileFilter === 'in_use' && !t.in_use) return false;
       if (S.tileFilter === 'not_connected' && t.in_use) return false;
-      if (q && (t.name + ' ' + t.kind_words + ' ' + t.kind).toLowerCase().indexOf(q) === -1) return false;
+      if (q && ((t.display || t.name) + ' ' + t.name + ' ' + t.kind_words + ' ' + t.kind).toLowerCase().indexOf(q) === -1) return false;
       return true;
     });
     var chips = [
@@ -1867,20 +1877,21 @@
     }).length;
     var changing = tools.filter(function (t) { return !t.read_only; });
     var text = used + ' of ' + total + ' tool' + (total === 1 ? '' : 's');
-    if (!total) return 'No tools are available in ' + group.integration + ' yet.';
+    if (!total) return 'No tools are available in ' + displayOf(group) + ' yet.';
     if (!changing.length) return text + ', all reading.';
     var changingRun = changing.filter(function (t) {
       return outcomeFor(t.name, t, S.draft) === 'run';
     }).length;
     text += '.';
-    if (!changingRun) return text + ' Changes in ' + group.integration + ' always ask you.';
+    if (!changingRun) return text + ' Changes in ' + displayOf(group) + ' always ask you.';
     if (changingRun === changing.length) {
-      return text + ' Changes in ' + group.integration + ' run on their own.';
+      return text + ' Changes in ' + displayOf(group) + ' run on their own.';
     }
-    return text + ' Some changes in ' + group.integration + ' run on their own; the rest ask you first.';
+    return text + ' Some changes in ' + displayOf(group) + ' run on their own; the rest ask you first.';
   }
   function toolRowHtml(tool, group) {
     var outcome = outcomeFor(tool.name, tool, S.draft);
+    var frozen = isFrozen(tool);
     function choice(value) {
       var always = value === 'run' && tool.always_gate;
       return '<button type="button" data-tool-name="' + attr(tool.name) +
@@ -1904,11 +1915,12 @@
     if (outcome === 'depends') {
       note += '<div class="x11-depends-line">Depends on the call. Eshu checks the method and path when the agent calls it.</div>';
     }
-    if (outcome === 'frozen') {
+    if (frozen) {
       note += '<div class="x11-frozen-line">Frozen. Emergency Freeze pauses writes; reads still run.</div>';
     }
     return '<div class="x11-tool-row" data-tool-row="' + attr(tool.name) + '"' +
       ' data-tool-outcome="' + attr(outcome) + '"' +
+      ' data-tool-frozen="' + (frozen ? '1' : '0') + '"' +
       (tool.always_gate ? ' data-always-gate="1"' : '') + '>' +
       '<div><div class="x11-tool-name">' + esc(toolTitle(tool)) + '</div>' +
       toolDescription(tool) + note + '</div>' +
@@ -1926,7 +1938,7 @@
     }
     if (changing.length) {
       html += '<div class="x11-tool-block" data-tool-block="changing"><h3>Changing</h3>' +
-        '<p class="x11-tool-hint">Changes ' + esc(group.integration) + '.</p>' +
+        '<p class="x11-tool-hint">Changes ' + esc(displayOf(group)) + '.</p>' +
         changing.map(function (t) { return toolRowHtml(t, group); }).join('') + '</div>';
     }
     return html || '<p class="x11-plain">No tools are enabled for this integration.</p>';
@@ -2012,6 +2024,11 @@
         : '') +
       '</aside>';
   }
+  function removeAccessHtml(group) {
+    return '<div class="x11-remove-access" data-remove-access-wrap>' +
+      '<button type="button" class="btn btn-muted btn-xs" data-remove-access ' +
+      'onclick="x11RemoveIntegrationAccess()">Remove all access</button></div>';
+  }
   function sectionIntegration() {
     var group = toolGroup(S.integration);
     if (!group) {
@@ -2028,14 +2045,14 @@
         '<nav class="x11-breadcrumb" aria-label="Breadcrumb"><a href="#" onclick="x11Back();return false;">Agents</a>' +
         ' <span aria-hidden="true">/</span> <a href="#agent/' + Number(S.agent.id) + '/overview">' +
         esc(S.agent.name) + '</a> <span aria-hidden="true">/</span> <a href="#agent/' +
-        Number(S.agent.id) + '/tools" onclick="x11ToolsBack();return false;">Tools</a></nav>' +
-        '<div class="x11-int-head"><div><h2 class="x11-section-title">' + esc(group.integration) + '</h2></div>' +
+        Number(S.agent.id) + '/tools" onclick="x11ToolsBack();return false;">Tools</a>' +
+        ' <span aria-hidden="true">/</span> <span>' + esc(displayOf(group)) + '</span></nav>' +
+        '<div class="x11-int-head"><div><h2 class="x11-section-title">' + esc(displayOf(group)) + '</h2></div>' +
         '<div class="x11-int-actions"><button type="button" class="btn btn-muted btn-xs" data-int-json ' +
         'onclick="x11ShowIntJson()">' + (S.intJsonOpen ? 'Hide JSON' : 'Show JSON') + '</button>' +
-        '<button type="button" class="btn btn-deny btn-xs" data-remove-access onclick="x11RemoveIntegrationAccess()">' +
-        'Remove all access</button></div></div>' +
+        '</div></div>' +
         '<div class="x11-int-layout"><div class="x11-int-main">' + virtualBody + '</div>' +
-        limitsHtml(group, []) + '</div>' +
+        limitsHtml(group, []) + '</div>' + removeAccessHtml(group) +
         jsonBlockData('int', integrationJsonSlice(group, ''), S.intJsonOpen) + '</section>';
     }
     var isHA = group.kind === 'ha';
@@ -2078,16 +2095,17 @@
       '<nav class="x11-breadcrumb" aria-label="Breadcrumb"><a href="#" onclick="x11Back();return false;">Agents</a>' +
       ' <span aria-hidden="true">/</span> <a href="#agent/' + Number(S.agent.id) + '/overview">' +
       esc(S.agent.name) + '</a> <span aria-hidden="true">/</span> <a href="#agent/' +
-      Number(S.agent.id) + '/tools" onclick="x11ToolsBack();return false;">Tools</a></nav>' +
-      '<div class="x11-int-head"><div><h2 class="x11-section-title">' + esc(group.integration) + '</h2></div>' +
+      Number(S.agent.id) + '/tools" onclick="x11ToolsBack();return false;">Tools</a>' +
+      ' <span aria-hidden="true">/</span> <span>' + esc(displayOf(group)) + '</span></nav>' +
+      '<div class="x11-int-head"><div><h2 class="x11-section-title">' + esc(displayOf(group)) + '</h2></div>' +
       '<div class="x11-int-actions"><button type="button" class="btn btn-muted btn-xs" data-int-json ' +
       'onclick="x11ShowIntJson()">' + (S.intJsonOpen ? 'Hide JSON' : 'Show JSON') + '</button>' +
-      '<button type="button" class="btn btn-deny btn-xs" data-remove-access onclick="x11RemoveIntegrationAccess()">' +
-      'Remove all access</button></div></div>' + tabs +
+      '</div></div>' + tabs +
       (tab === 'tools' || !isHA
         ? '<div class="x11-int-layout"><div class="x11-int-main">' + body +
           '</div>' + limits + '</div>'
         : body) +
+      removeAccessHtml(group) +
       jsonBlockData(showJsonKey, integrationJsonSlice(group, tab), S.intJsonOpen) +
       '</section>';
   }
@@ -2143,7 +2161,7 @@
   function x11RemoveIntegrationAccess() {
     var group = toolGroup(S.integration);
     if (!group) return;
-    if (!window.confirm('Remove all of this agent\u2019s access to ' + group.integration +
+    if (!window.confirm('Remove all of this agent\u2019s access to ' + displayOf(group) +
         '? You will see a Check preview before anything changes.')) return;
     if (group.kind === 'ssh') {
       S.draft.ssh.hosts = [];

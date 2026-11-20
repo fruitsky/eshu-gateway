@@ -39,6 +39,15 @@ const STATES = {
     await page.waitForTimeout(400);
     await page.evaluate(() => { const m = document.querySelector('.main-body'); if (m) m.scrollTop = 0; });
   },
+  'ha-devices-no-call-service': async (page, aid) => {
+    await page.goto(BASE + '#agent/' + aid + '/tools/Home%20Assistant/tools',
+      { waitUntil: 'networkidle' });
+    await page.waitForTimeout(1000);
+    await page.locator('[data-tool-row="home_assistant_call_service"] [data-choice="none"]').click();
+    await page.waitForTimeout(300);
+    await page.locator('[data-int-tab="devices"]').click();
+    await page.waitForTimeout(700);
+  },
   'ha-devices-sensors': async (page, aid) => {
     await page.goto(BASE + '#agent/' + aid + '/tools/Home%20Assistant/devices',
       { waitUntil: 'networkidle' });

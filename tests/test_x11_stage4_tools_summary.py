@@ -132,9 +132,11 @@ def test_freeze_is_shown_and_reads_still_run(monkeypatch):
     payload = summary.build(agent_id)
     assert payload['frozen'] is True
     assert payload['tool_outcomes']['custom_look'] == 'run'
-    assert payload['tool_outcomes']['custom_change'] == 'frozen'
+    assert payload['tool_outcomes']['custom_change'] == 'depends'
+    assert payload['frozen_tools']['custom_change'] is True
     assert payload['totals']['frozen'] == 1
     assert payload['totals']['run'] == 1
+    assert payload['totals']['depends'] == 1
     assert 'Emergency Freeze is on' in payload['summary']
 
 
@@ -305,9 +307,13 @@ def test_every_seeded_tool_matches_the_shared_decision(monkeypatch):
         owner = owners[key]
         tool_name = name[len(key) + 1:]
         tool = integrations.get_tool(owner['name'], tool_name)
-        expected = static_tool_decision(
-            agent, owner, tool_name, tool)['outcome']
-        assert outcome == expected, (name, outcome, expected)
+        unfrozen = static_tool_decision(agent, owner, tool_name, tool)
+        frozen = static_tool_decision(
+            agent, owner, tool_name, tool, frozen=True)
+        assert outcome == unfrozen['outcome']
+        assert frozen['outcome'] == unfrozen['outcome']
+        assert frozen['should_gate'] == unfrozen['should_gate'], name
+        assert frozen['frozen'] == bool(unfrozen['allowed'] and not tool.get('read_only')), name
 
 
 def test_label_scope_counts_pins_and_waiting_separately(monkeypatch):
@@ -354,3 +360,21 @@ def test_a_non_useful_pinned_device_still_counts(monkeypatch):
     payload = summary.build(agent_id)
     # `useful` is a picker default, never the permission's scope.
     assert payload['totals']['devices'] == 1
+
+
+def test_tiles_carry_curated_display_names(monkeypatch):
+    agent_id = _agent()
+    integrations.create_integration(
+        'commute', 'http://192.0.2.91', 'none', '', kind='commute')
+    integrations.create_integration(
+        'tfl', 'http://192.0.2.92', 'none', '', kind='trains')
+    integrations.create_integration(
+        'webfetch', 'http://192.0.2.93', 'none', '', kind='webfetch')
+    integrations.create_integration(
+        'lower case', 'http://192.0.2.94', 'none', '', kind='custom')
+    monkeypatch.setattr('core.ha_devices.devices', lambda: [])
+    rows = {t['name']: t for t in summary.build(agent_id)['tiles']}
+    assert rows['commute']['display'] == 'Commute'
+    assert rows['tfl']['display'] == 'TfL'
+    assert rows['webfetch']['display'] == 'Web fetch'
+    assert rows['lower case']['display'] == 'Lower case'

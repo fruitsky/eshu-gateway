@@ -124,6 +124,9 @@ async function scrollMain(page, bottom) {
      'tools: In use is not the default chip');
   const tileCount = await page.locator('[data-integration-tile]').count();
   ok(tileCount >= 10, 'tools: expected the integration tiles, found ' + tileCount);
+  ok(/TfL/.test(await page.locator('[data-integration-tile="tfl"] .x11-tile-name').textContent()) &&
+     /Commute/.test(await page.locator('[data-integration-tile="commute"] .x11-tile-name').textContent()),
+     'tools: curated display names are missing');
   const bars = page.locator('[data-integration-tile] .x11-accessbar[role="img"]');
   ok(await bars.count() === tileCount, 'tools: a tile is missing its access bar');
   const barLabel = (await bars.first().getAttribute('aria-label')) || '';
@@ -194,6 +197,12 @@ async function scrollMain(page, bottom) {
      'integration: always-ask tool still offers Runs on its own');
   ok(/Always asks you/.test(await page.locator('[data-tool-row="sonarr_add_series"] .x11-always-line').textContent()),
      'integration: always-ask reason missing');
+  ok(await page.locator('.x11-int-head [data-remove-access]').count() === 0,
+     'integration: Remove all access is still in the header');
+  const removeBox = await box(page.locator('[data-remove-access]'));
+  const limitsBox = await box(page.locator('[data-limits]'));
+  ok(removeBox && limitsBox && removeBox.y > limitsBox.y,
+     'integration: Remove all access is not below Limits');
   ok(await page.locator('#x11-json-tools').count() === 0, 'integration: tools JSON leaked from the overview');
   await page.locator('[data-int-json]').click();
   await page.waitForTimeout(300);
@@ -304,6 +313,12 @@ async function scrollMain(page, bottom) {
   await page.waitForTimeout(400);
   ok(await page.locator('[data-device="switch.coffee"][data-device-action="switch.turn_on"]').getAttribute('data-state') === 'run',
      'devices: pill did not cycle ask -> run');
+  await page.locator('[data-device="switch.coffee"][data-device-action="switch.turn_on"]').click();
+  await page.waitForTimeout(300);
+  ok(await page.locator('[data-device="switch.coffee"][data-device-action="switch.turn_on"]').getAttribute('data-state') === 'ask',
+     'devices: pill did not cycle run -> ask');
+  await page.locator('[data-device="switch.coffee"][data-device-action="switch.turn_on"]').click();
+  await page.waitForTimeout(300);
   await page.locator('#x11-save-changes').click();
   await page.waitForTimeout(800);
   const cyclePreview = (await page.locator('#x11-preview-body').textContent()) || '';
@@ -356,6 +371,27 @@ async function scrollMain(page, bottom) {
   await page.locator('[data-int-json]').click();
   await page.waitForTimeout(200);
 
+  // 12b. With call service not allowed, Devices shows one line, not pills.
+  await page.locator('[data-int-tab="tools"]').click();
+  await page.waitForTimeout(500);
+  await page.locator('[data-tool-row="home_assistant_call_service"] [data-choice="none"]').click();
+  await page.waitForTimeout(300);
+  await page.locator('[data-int-tab="devices"]').click();
+  await page.waitForTimeout(500);
+  const noCall = page.locator('[data-no-call-service]');
+  ok(await noCall.count() === 1 &&
+     /can.t control Home Assistant devices/.test(await noCall.textContent()) &&
+     /Allow call service on the Tools tab/.test(await noCall.textContent()),
+     'devices: no-call-service line is missing');
+  await noCall.locator('a').click();
+  await page.waitForTimeout(500);
+  ok(await page.locator('[data-int-tab="tools"][aria-selected="true"]').count() === 1,
+     'devices: the call-service link did not open Tools');
+  await page.evaluate(() => x11Discard());
+  await page.waitForTimeout(300);
+  await page.locator('[data-int-tab="tools"]').click();
+  await page.waitForTimeout(300);
+
   // 13. Runs on its own: cards, limits, paused Resume, waiting Accept/Dismiss.
   await page.locator('[data-int-tab="runs"]').click();
   await page.waitForTimeout(600);
@@ -363,6 +399,9 @@ async function scrollMain(page, bottom) {
      'runs: permission cards are missing');
   ok(/At most \d+ an hour/.test(await page.locator('[data-permission-card]').first().textContent()),
      'runs: limits are not in words');
+  ok(/Turn (off|on) (plugs and switches|lights|covers)/.test(
+       await page.locator('[data-permission-card]').first().textContent()),
+     'runs: a permission card does not name the device type');
   ok(/Follows the label/.test(await page.locator('[data-permission-card]').nth(1).textContent()),
      'runs: label source is not in words');
   ok(await page.locator('[data-permission-card].x11-perm-paused [data-resume-id]').count() === 1,
@@ -456,9 +495,11 @@ async function scrollMain(page, bottom) {
      'freeze: the legend has no Frozen state');
   await gotoHash(page, '#agent/' + aid + '/tools/Generic%20lab');
   await page.waitForTimeout(600);
-  ok(await page.locator('[data-tool-row="generic_lab_write"][data-tool-outcome="frozen"]').count() === 1 &&
-     /Frozen/.test(await page.locator('[data-tool-row="generic_lab_write"] .x11-frozen-line').textContent()),
-     'freeze: a write row does not show Frozen');
+  const frozenWrite = page.locator('[data-tool-row="generic_lab_write"]');
+  ok(await frozenWrite.getAttribute('data-tool-outcome') === 'depends' &&
+     await frozenWrite.getAttribute('data-tool-frozen') === '1' &&
+     /Frozen/.test(await frozenWrite.locator('.x11-frozen-line').textContent()),
+     'freeze: a write row does not keep Depends and show Frozen');
   await page.evaluate(async () => {
     await fetch('/api/unfreeze', { method: 'POST',
       headers: { 'X-Eshu-CSRF': '1' } });

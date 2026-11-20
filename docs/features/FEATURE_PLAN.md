@@ -23212,3 +23212,23 @@ Nits:
   fallback, all three gate modes, `principal_allow`, freeze, and every seeded
   tool against the shared decision. The browser check covers a destructive
   generic write, the Locks filter and the freeze state.
+
+### Frozen gate and Stage 4 review round (`feat/x11-stage4`)
+
+* **Frozen is a state, not an outcome.** `static_tool_decision` computes the
+  run/ask/depends decision exactly as if unfrozen, returns the same
+  `should_gate`, and carries `frozen` separately. A handler dry-run that
+  passes the freeze therefore keeps the gate it would have had without it.
+  The summary counts the normal outcome and shows the frozen state.
+* **A1.** Permission cards name the device type: "Turn off plugs and
+  switches", "Turn on lights", "Open covers".
+* **A2.** "Remove all access" is a quiet button at the bottom of the
+  integration page, below Limits, with the existing confirmation.
+* **A3.** Integration display names are curated (`Commute`, `TfL`,
+  `Web fetch`) or the integration name with a capital first letter, on tiles,
+  the ledger and integration breadcrumbs/titles.
+* **Pill answer.** Device pills switch only asks-you to runs-on-its-own.
+  Protected devices remain the per-device "never". When call service is not
+  allowed, the Devices tab shows one line linking to Tools.
+* The browser check and 18 screenshots cover these states, including the
+  no-call-service line.

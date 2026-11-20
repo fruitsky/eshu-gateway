@@ -271,10 +271,11 @@ def static_tool_decision(agent, integration, tool_name, tool, frozen=False):
     integration's `gate_mode` and the freeze.
 
     Returns a dict:
-      outcome: 'none' | 'run' | 'ask' | 'depends' | 'frozen'
+      outcome: 'none' | 'run' | 'ask' | 'depends'
       allowed, reason, frozen, gate_mode, approval, always, should_gate.
     A `depends` outcome means the request (for example a destructive path)
-    decides whether the call asks; it is neither a run nor an ask.
+    decides whether the call asks; it is neither a run nor an ask. `frozen`
+    is a separate flag: the gate decision is the same as without the freeze.
     """
     integration = integration or {}
     tool = tool or {}
@@ -301,15 +302,17 @@ def static_tool_decision(agent, integration, tool_name, tool, frozen=False):
         # `_run_tool` executes reads before the gate, so no approval override
         # or gate_mode applies to them.
         return {**base, 'outcome': 'run', 'should_gate': False}
-    if frozen:
-        return {**base, 'outcome': 'frozen', 'frozen': True,
-                'should_gate': None}
+    # Compute the gate exactly as if it were not frozen. The freeze is a
+    # separate refusal in `_run_tool`; a handler dry-run passes it and must
+    # then meet the same gate it would have met without the freeze.
     if always or approval == 'gated':
-        return {**base, 'outcome': 'ask', 'should_gate': True}
-    if approval == 'ungated':
-        return {**base, 'outcome': 'run', 'should_gate': False}
-    if gate_mode == 'all':
-        return {**base, 'outcome': 'ask', 'should_gate': True}
-    if gate_mode == 'destructive':
-        return {**base, 'outcome': 'depends', 'should_gate': None}
-    return {**base, 'outcome': 'run', 'should_gate': False}
+        answer = {'outcome': 'ask', 'should_gate': True}
+    elif approval == 'ungated':
+        answer = {'outcome': 'run', 'should_gate': False}
+    elif gate_mode == 'all':
+        answer = {'outcome': 'ask', 'should_gate': True}
+    elif gate_mode == 'destructive':
+        answer = {'outcome': 'depends', 'should_gate': None}
+    else:
+        answer = {'outcome': 'run', 'should_gate': False}
+    return {**base, **answer, 'frozen': bool(frozen)}

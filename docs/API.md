@@ -195,7 +195,7 @@ endpoint. Agents authenticate to the MCP surface with a bearer **agent token**.
 | `GET` | `/api/agents` | List agent tokens (no raw token) | Session |
 | `DELETE` | `/api/agents/{id}` | Revoke + delete an agent token | Session |
 | `GET` | `/api/agents/{id}/available-tools` | Enabled tools by integration, with `label`, `params`, `principal_allow` and the integration's `gate_mode` for the per-agent editor | Session |
-| `GET` | `/api/agents/{id}/tools-summary` | X11 Stage 4 read-only summary: the sentence, per-integration `run`/`ask`/`depends`/`frozen` counts, pinned-device and waiting counts, and `tool_outcomes` from the shared gate decision. **Operator session only**; no approver or agent token | Session |
+| `GET` | `/api/agents/{id}/tools-summary` | X11 Stage 4 read-only summary: the sentence, per-integration display name and `run`/`ask`/`depends`/`frozen` counts, pinned-device and waiting counts, and `tool_outcomes`/`frozen_tools` from the shared gate decision. **Operator session only**; no approver or agent token | Session |
 | `GET` | `/api/agents/{id}/config` | The whole per-agent JSON document (tools, SSH, websites and HA permissions) | Session |
 | `GET` | `/api/ha/devices` | The read-only HA inventory. X11 adds `category`, `sensor_kind`, `useful` and `unit`; risky devices are always useful. Never exposes it to agents | Session |
 
